@@ -184,10 +184,17 @@ describe('sensitive-tool taxonomy coverage', () => {
     registerAllTools(registry, makeConnection(), db);
     db.raw.close();
 
+    // Non-vacuity floor: an empty offenders list only proves coverage if the
+    // interceptor saw registrations AND the guarded class actually exists.
+    expect(captured.length).toBeGreaterThan(0);
+    const guardedClass = captured.filter(
+      (t) => t.scope === 'global' && t.targetMode === 'caller-supplied',
+    );
+    expect(guardedClass.length).toBeGreaterThan(0);
+
     // Collect offenders: global + caller-supplied tools without sensitive:true
     // that are NOT in the reviewed allowlist.
-    const offenders = captured
-      .filter((t) => t.scope === 'global' && t.targetMode === 'caller-supplied')
+    const offenders = guardedClass
       .filter((t) => !t.sensitive && !REVIEWED_GRANDFATHERED.includes(t.name))
       .map((t) => t.name)
       .sort();
