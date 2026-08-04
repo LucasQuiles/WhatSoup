@@ -32,7 +32,10 @@ const currentDesignRegressionBlockingChecks = findDesignRegressionBlockingChecks
 const currentSoupKitchenLabelCount = findSoupKitchenLabelCount(repoRoot);
 const currentUseThemeTestCount = findTestFileTestCount(repoRoot, 'tests/console/use-theme.test.tsx');
 
-describe('doc drift check', () => {
+// spawnSync repo scans + fixture dirs can exceed the 10s default (observed as
+// pure timeouts with every assertion green); 30s keeps the local workflow fast
+// while accommodating the subprocess and filesystem overhead.
+describe('doc drift check', { timeout: 30_000 }, () => {
   afterEach(() => {
     vi.restoreAllMocks();
     process.exitCode = undefined;
