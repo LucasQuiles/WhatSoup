@@ -41,7 +41,7 @@ function fakeInstance(configPath: string, overrides: Partial<DiscoveredInstance>
 }
 
 function depsFor(instance: DiscoveredInstance): OpsDeps {
-  return makeDeps({ discovery: { getInstance: vi.fn(() => instance) } as any });
+  return makeDeps({ discovery: { getInstance: vi.fn(() => instance) } });
 }
 
 /** Build a real, writable agent cwd under $HOME so the route-level
