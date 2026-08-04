@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { spawn } from 'node:child_process';
 import { createConnection, type Server, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -6,6 +7,8 @@ import { existsSync, lstatSync, writeFileSync, unlinkSync } from 'node:fs';
 import { z } from 'zod';
 import {
   SocketCleanupError,
+  SocketPathTooLongError,
+  SocketCollisionError,
   WhatSoupSocketServer,
 } from '../../src/mcp/socket-server.ts';
 import { ToolRegistry } from '../../src/mcp/registry.ts';
@@ -456,6 +459,81 @@ describe('WhatSoupSocketServer', () => {
     }) as { result: { protocolVersion: string } };
 
     expect(response.result.protocolVersion).toBe('2024-11-05');
+  });
+
+  // --- M2: path-length guard (SocketPathTooLongError) ---
+
+  it('rejects a socket path longer than SUN_PATH_LIMIT with SocketPathTooLongError', async () => {
+    const limit = process.platform === 'darwin' ? 104 : 108;
+    const longPath = join(tmpdir(), 'x'.repeat(limit));
+
+    server = new WhatSoupSocketServer(longPath, registry, session);
+    await expect(server.startAndWait()).rejects.toThrow('SocketPathTooLongError');
+  });
+
+  it('permits a socket path exactly at SUN_PATH_LIMIT', async () => {
+    const limit = process.platform === 'darwin' ? 104 : 108;
+    const exactPath = join(tmpdir(), 'x'.repeat(Math.max(0, limit - tmpdir().length - 1)));
+
+    server = new WhatSoupSocketServer(exactPath, registry, session);
+    await server.startAndWait();
+    expect(existsSync(exactPath)).toBe(true);
+    server.stop({ unlinkSocket: false });
+  });
+
+  // --- L2: unlinkStaleSocket / socket collision ---
+
+  it('detects a live server at the same path and throws SocketCollisionError', async () => {
+    // First server — owns the socket
+    server = new WhatSoupSocketServer(socketPath, registry, session);
+    await server.startAndWait();
+
+    // Second server at same path — should detect collision
+    const second = new WhatSoupSocketServer(socketPath, registry, makeSession());
+    await expect(second.startAndWait()).rejects.toThrow('SocketCollisionError');
+
+    // First server must still be functional
+    const response = await sendJsonRpc(socketPath, {
+      jsonrpc: '2.0', id: 1, method: 'initialize',
+    }) as { result: { protocolVersion: string } };
+    expect(response.result.protocolVersion).toBe('2024-11-05');
+  });
+
+  it('unlinks a dead socket (process killed with SIGKILL) and starts successfully', async () => {
+    const deadPath = join(tmpdir(), `dead-socket-${Date.now()}.sock`);
+
+    // Spawn a process that creates a socket server, then kill it
+    const child = spawn(process.execPath, [
+      '-e', `
+        const { createServer } = require('node:net');
+        const s = createServer(() => {});
+        s.listen('${deadPath}', () => {
+          process.send && process.send('ready');
+        });
+      `,
+    ], { stdio: ['pipe', 'pipe', 'pipe', 'ipc'] });
+
+    await new Promise<void>((resolve) => {
+      const onMsg = (msg: string) => {
+        if (msg === 'ready') resolve();
+      };
+      child.on('message', onMsg);
+      setTimeout(() => resolve(), 2000);
+    });
+    expect(existsSync(deadPath)).toBe(true);
+    child.kill('SIGKILL');
+    // Give OS time to acknowledge the kill
+    await new Promise((r) => setTimeout(r, 200));
+
+    // Now start our server at the same path — should unlink the dead socket
+    const deadServer = new WhatSoupSocketServer(deadPath, registry, session);
+    await deadServer.startAndWait();
+
+    const response = await sendJsonRpc(deadPath, {
+      jsonrpc: '2.0', id: 2, method: 'initialize',
+    }) as { result: { protocolVersion: string } };
+    expect(response.result.protocolVersion).toBe('2024-11-05');
+    deadServer.stop();
   });
 
   // --- updateDeliveryJid ---
