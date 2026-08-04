@@ -6,6 +6,7 @@ import { PassThrough } from 'node:stream';
 import type { ServerResponse } from 'node:http';
 import { lookupCredential } from '../../src/lib/keyring.ts';
 import { handleCreateLine } from '../../src/fleet/routes/ops.ts';
+import { makeDeps } from '../helpers/http-mocks.ts';
 import type { OpsDeps } from '../../src/fleet/routes/ops.ts';
 
 vi.mock('../../src/lib/keyring.ts', () => ({
@@ -20,23 +21,8 @@ function fileMode(filePath: string): number {
   return fs.statSync(filePath).mode & 0o777;
 }
 
-function makeDeps(): OpsDeps {
-  return {
-    discovery: {
-      getInstance: vi.fn(() => undefined),
-      getInstances: vi.fn(() => new Map()),
-      scan: vi.fn(),
-    } as any,
-    realtime: { publish: vi.fn() },
-    serviceManager: {
-      enable: vi.fn().mockResolvedValue(undefined),
-      disable: vi.fn().mockResolvedValue(undefined),
-      start: vi.fn().mockResolvedValue(undefined),
-      stop: vi.fn().mockResolvedValue(undefined),
-      restart: vi.fn().mockResolvedValue(undefined),
-      startFire: vi.fn(),
-    },
-  };
+function depsFor(): OpsDeps {
+  return makeDeps();
 }
 
 describe('fleet ops health token service', () => {
