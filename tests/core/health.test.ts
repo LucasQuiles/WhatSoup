@@ -3021,6 +3021,106 @@ describe('GET /health', () => {
     db2.close();
   });
 
+  it('RED 1: auth-required + FRESH usable probe (newer than error) → healthy (probe supersedes stale class)', async () => {
+    db.close();
+    const db2 = makeDb();
+    const now = Date.now();
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: {
+        getHealthSnapshot: vi.fn().mockReturnValue({
+          status: 'healthy',
+          details: {
+            turnCapability: {
+              modelUsable: true,
+              modelUsabilityStatus: 'usable',
+              modelUsableCheckedAt: now,                                // probe AFTER error
+              modelUsableStale: false,
+              lastSuccessfulTurnAt: null,                               // idle: no user turn
+              lastTurnErrorClass: 'auth-required',
+              lastTurnErrorAt: now - 60_000,                            // error 1 min ago
+            },
+          },
+        }),
+      } as any,
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await healthReq(port);
+    const json = JSON.parse(body);
+    expect(status).toBe(200);
+    expect(json.status).toBe('healthy');
+    expect(json.turn_capability.last_turn_error_class).toBe('auth-required');
+    db2.close();
+  });
+
+  it('RED 2: auth-required + STALE probe (OLDER than error) → degraded (no supersession)', async () => {
+    db.close();
+    const db2 = makeDb();
+    const now = Date.now();
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: {
+        getHealthSnapshot: vi.fn().mockReturnValue({
+          status: 'healthy',
+          details: {
+            turnCapability: {
+              modelUsable: true,
+              modelUsabilityStatus: 'usable',
+              modelUsableCheckedAt: now - 120_000,                      // probe BEFORE error
+              modelUsableStale: false,
+              lastSuccessfulTurnAt: null,
+              lastTurnErrorClass: 'auth-required',
+              lastTurnErrorAt: now - 60_000,                            // error after probe
+            },
+          },
+        }),
+      } as any,
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await healthReq(port);
+    const json = JSON.parse(body);
+    expect(status).toBe(200);
+    expect(json.status).toBe('degraded');
+    db2.close();
+  });
+
+  it('RED 3: auth-required + STALE probe flag (model_usable_stale=true) → degraded', async () => {
+    db.close();
+    const db2 = makeDb();
+    const now = Date.now();
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: {
+        getHealthSnapshot: vi.fn().mockReturnValue({
+          status: 'healthy',
+          details: {
+            turnCapability: {
+              modelUsable: true,
+              modelUsabilityStatus: 'usable',
+              modelUsableCheckedAt: now,                                // nominally fresh
+              modelUsableStale: true,                                   // but flagged stale
+              lastSuccessfulTurnAt: null,
+              lastTurnErrorClass: 'auth-required',
+              lastTurnErrorAt: now - 60_000,
+            },
+          },
+        }),
+      } as any,
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await healthReq(port);
+    const json = JSON.parse(body);
+    expect(status).toBe(200);
+    expect(json.status).toBe('degraded');
+    db2.close();
+  });
+
   it('sanitizes agent turn capability strings before exposing them in health', async () => {
     db.close();
     const db2 = makeDb();

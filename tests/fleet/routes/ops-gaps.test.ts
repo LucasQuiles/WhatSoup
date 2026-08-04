@@ -52,7 +52,7 @@ import {
   handleAuth,
 } from '../../../src/fleet/routes/ops.ts';
 import type { DiscoveredInstance } from '../../../src/fleet/discovery.ts';
-import { makeDeps, mockReq, mockRes } from '../../helpers/http-mocks.ts';
+import { makeDeps, mockReq, mockRes, mockSseRes } from '../../helpers/http-mocks.ts';
 
 // ---------------------------------------------------------------------------
 // Mocks
@@ -79,26 +79,6 @@ import { spawn } from 'node:child_process';
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function mockSseRes() {
-  const res = {
-    _status: 0,
-    _headers: {} as Record<string, string>,
-    _chunks: [] as string[],
-    _ended: false,
-    writeHead(status: number, headers?: Record<string, string>) {
-      res._status = status;
-      if (headers) Object.assign(res._headers, headers);
-    },
-    write(chunk: string) { res._chunks.push(chunk); return true; },
-    end(data?: string) {
-      if (data) res._chunks.push(data);
-      res._ended = true;
-    },
-    on() { return res; },
-  };
-  return res as any;
-}
 
 function fakeInstance(overrides: Partial<DiscoveredInstance> = {}): DiscoveredInstance {
   return {

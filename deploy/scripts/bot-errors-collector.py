@@ -37,6 +37,13 @@ from lib.durable_json import (
     publish_state_json,
     require_advance,
 )
+from lib.controller_state import (
+    STATE_RECOVERY_REQUIRED_EXIT,
+    ControllerStateRequired,
+    emit_state_recovery_fallback,
+    open_controller_state,
+    state_diagnostic_details,
+)
 
 
 TAILSCALE_STATUS_CACHE: dict[str, Any] | None = None
@@ -1607,15 +1614,7 @@ def state_path() -> Path:
     return state_root() / "collector-state.json"
 
 
-def load_state() -> dict[str, Any]:
-    path = state_path()
-    if not path.exists():
-        return {"remotes": {}}
-    try:
-        loaded = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {"remotes": {}}
-    return loaded if isinstance(loaded, dict) else {"remotes": {}}
+STATE_LOCK_TIMEOUT_SECONDS = 30.0
 
 
 def save_state(state: dict[str, Any]) -> None:
@@ -1639,6 +1638,102 @@ def save_state(state: dict[str, Any]) -> None:
         generation=generation,
     )
     require_advance(publication)
+
+
+def collector_bootstrap_state() -> dict[str, Any]:
+    return {"remotes": {}}
+
+
+def validate_collector_state(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("collector state root must be an object")
+    sanitized = {
+        key: value
+        for key, value in payload.items()
+        if key != "_controllerState"
+    }
+    if not isinstance(sanitized.setdefault("remotes", {}), dict):
+        raise ValueError("collector state remotes must be an object")
+    return json.loads(json.dumps(sanitized))
+
+
+def reconcile_recovered_collector_state(
+    payload: Any,
+) -> tuple[dict[str, Any], str]:
+    # Candidate evidence (remote configuration, claimed entries,
+    # acknowledgements, probe fixtures) is not a complete local ledger and
+    # must not change recovered membership, clocks, cooldowns, backoff,
+    # retry budgets, suppression, or counters.
+    return validate_collector_state(payload), "validated_previous_only"
+
+
+def open_collector_state_session():
+    anchor = state_path()
+    ensure_private_dir(anchor.parent)
+    # macOS state/tmp roots commonly traverse OS path aliases (/var and /tmp
+    # are symlinks to /private/...). Anchor the store at the resolved
+    # directory so the library's no-follow identity checks guard the store
+    # artifacts themselves rather than rejecting the alias, which would
+    # fail-stop every cycle with unsafe_file on a healthy store.
+    resolved = anchor.parent.resolve(strict=True) / anchor.name
+    return open_controller_state(
+        resolved,
+        component="collector",
+        bootstrap=collector_bootstrap_state,
+        validate_payload=validate_collector_state,
+        lock_timeout_seconds=STATE_LOCK_TIMEOUT_SECONDS,
+    )
+
+
+def save_collector_state(session: Any, state: dict[str, Any], capability: Any):
+    return session.save(redacted_collector_payload(state), capability)
+
+
+def project_collector_state_mode(diagnostic: Any) -> str:
+    # schemaVersion is a reserved controller-log record field; the record
+    # envelope owns it, the closed diagnostic details must not shadow it.
+    details = metadata_only_controller_details(
+        {
+            key: value
+            for key, value in state_diagnostic_details(diagnostic).items()
+            if key != "schemaVersion"
+        }
+    )
+    failed = diagnostic.mode == "recovery_required"
+    log_path = state_root() / "logs" / "collector.jsonl"
+    return write_controller_log(
+        context=CONTROLLER_LOG_CONTEXT,
+        record_kind="controller_state_mode",
+        level="error" if failed else "info",
+        outcome="failed" if failed else "observed",
+        durability_class="diagnostic_best_effort",
+        details=details,
+        append_record=lambda record: append_private_jsonl(log_path, record),
+        persist_health=persist_controller_log_health,
+        emit_fallback=lambda _line: emit_state_recovery_fallback(diagnostic),
+    )
+
+
+def _load_collector_state_for_cycle(session: Any) -> tuple[dict[str, Any], Any]:
+    result = session.load()
+    project_collector_state_mode(result.diagnostic)
+    if result.mode == "recovery_required":
+        raise ControllerStateRequired(result.diagnostic)
+    if result.mode == "recovered":
+        recovered_payload, outcome = reconcile_recovered_collector_state(
+            result.payload
+        )
+        committed = session.complete_reconciliation(
+            recovered_payload,
+            result.capability,
+            outcome=outcome,
+        )
+        project_collector_state_mode(committed.diagnostic)
+        result = session.reload()
+        project_collector_state_mode(result.diagnostic)
+    if result.mode not in {"bootstrap", "valid", "reconciled"}:
+        raise ControllerStateRequired(result.diagnostic)
+    return result.payload, result.capability
 
 
 def alert_key(remote: str, source: str) -> str:
@@ -3184,8 +3279,46 @@ def run_once(
     alert_cooldown: int,
     recovery_successes: int,
 ) -> dict[str, Any]:
+    # The state session opens before any remote/probe/claim/ack/outbox
+    # effect; recovery_required must escape with zero domain side effects.
+    try:
+        session = open_collector_state_session()
+    except ControllerStateRequired as exc:
+        project_collector_state_mode(exc.diagnostic)
+        raise
+    try:
+        state, capability = _load_collector_state_for_cycle(session)
+        return _run_once_with_state(
+            session,
+            state,
+            capability,
+            remotes,
+            best_effort_remotes,
+            max_events,
+            timeout,
+            lease_seconds,
+            remote_sla,
+            alert_cooldown,
+            recovery_successes,
+        )
+    finally:
+        session.close()
+
+
+def _run_once_with_state(
+    session: Any,
+    state: dict[str, Any],
+    capability: Any,
+    remotes: list[str],
+    best_effort_remotes: set[str],
+    max_events: int,
+    timeout: int,
+    lease_seconds: int,
+    remote_sla: int,
+    alert_cooldown: int,
+    recovery_successes: int,
+) -> dict[str, Any]:
     reset_tailscale_cache()
-    state = load_state()
     state["configuredRemotes"] = list(remotes)
     state["configuredRemoteHosts"] = configured_remote_hosts(remotes)
     state["configuredBestEffortRemotes"] = sorted(best_effort_remotes)
@@ -3752,7 +3885,7 @@ def run_once(
                 state,
                 alert_cooldown,
             )
-    save_state(state)
+    save_collector_state(session, state, capability)
     return {
         "processed": processed,
         "writefailHarvested": writefail_harvested,
@@ -3824,29 +3957,36 @@ def main() -> int:
         return 64
     best_effort_remotes = set(args.best_effort_remote or [])
     recovery_successes = max(1, int(args.recovery_successes))
-    if args.daemon:
-        run_daemon(
+    try:
+        if args.daemon:
+            run_daemon(
+                remotes,
+                best_effort_remotes,
+                args.max_events,
+                args.interval,
+                args.timeout,
+                args.lease_seconds,
+                args.remote_sla,
+                args.alert_cooldown,
+                recovery_successes,
+            )
+            return 0
+        result = run_once(
             remotes,
             best_effort_remotes,
             args.max_events,
-            args.interval,
             args.timeout,
             args.lease_seconds,
             args.remote_sla,
             args.alert_cooldown,
             recovery_successes,
         )
-        return 0
-    result = run_once(
-        remotes,
-        best_effort_remotes,
-        args.max_events,
-        args.timeout,
-        args.lease_seconds,
-        args.remote_sla,
-        args.alert_cooldown,
-        recovery_successes,
-    )
+    except ControllerStateRequired as exc:
+        # Process boundary: one-shot returns 78; daemon mode exits 78 so the
+        # service manager's restart throttle owns retries. The once-per-process
+        # fallback line is the only stderr output and carries no state content.
+        emit_state_recovery_fallback(exc.diagnostic)
+        return STATE_RECOVERY_REQUIRED_EXIT
     print(json.dumps(result, sort_keys=True))
     return exit_code_for_result(result)
 

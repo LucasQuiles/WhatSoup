@@ -1,6 +1,7 @@
-import { createServer } from 'node:net';
+import { createServer, connect } from 'node:net';
 import type { Server, Socket } from 'node:net';
 import { lstatSync, mkdtempSync, renameSync, rmdirSync, unlinkSync } from 'node:fs';
+import { lstat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { createChildLogger } from '../logger.ts';
 import { toConversationKey } from '../core/conversation-key.ts';
@@ -15,6 +16,22 @@ export class SocketCleanupError extends Error {
 
   constructor() {
     super('MCP socket cleanup failed');
+  }
+}
+
+export class SocketPathTooLongError extends Error {
+  override readonly name = 'SocketPathTooLongError';
+
+  constructor(path: string, limit: number) {
+    super(`Socket path (${Buffer.byteLength(path)} bytes) exceeds ${limit}-byte limit`);
+  }
+}
+
+export class SocketCollisionError extends Error {
+  override readonly name = 'SocketCollisionError';
+
+  constructor(path: string) {
+    super(`Socket path collision: ${path} is in use by a live server`);
   }
 }
 
@@ -93,18 +110,23 @@ export class WhatSoupSocketServer {
   }
 
   start(): void {
-    void this.startAndWait().catch((err) => {
-      log.error({ code: (err as NodeJS.ErrnoException).code }, 'server failed to start');
+    void this.startAndWait().catch((err: unknown) => {
+      log.error({
+        code: (err as NodeJS.ErrnoException).code,
+        name: (err as Error).name,
+        message: (err as Error).message,
+      }, 'server failed to start');
     });
   }
 
   async startAndWait(options: { unlinkExisting?: boolean } = {}): Promise<void> {
+    const SUN_PATH_LIMIT = process.platform === 'darwin' ? 104 : 108;
+    if (Buffer.byteLength(this.socketPath) > SUN_PATH_LIMIT) {
+      throw new SocketPathTooLongError(this.socketPath, SUN_PATH_LIMIT);
+    }
+
     if (options.unlinkExisting !== false) {
-      try {
-        unlinkSync(this.socketPath);
-      } catch {
-        // File didn't exist — that's fine
-      }
+      await WhatSoupSocketServer.unlinkStaleSocket(this.socketPath);
     }
 
     const MAX_BUF = 1_024 * 1_024; // 1 MB — prevent memory DoS from no-newline streams
@@ -386,6 +408,50 @@ export class WhatSoupSocketServer {
     install(this.baseSession);
     for (const session of this.connectionSessions.values()) {
       install(session);
+    }
+  }
+
+  /**
+   * Removes a stale socket file via liveness probe. Socket files are probed
+   * with a connect() attempt: ECONNREFUSED/ENOENT means the server is dead
+   * (safe to unlink); a successful connect means a live server owns it
+   * (SocketCollisionError). Non-socket stale files are unlinked unconditionally
+   * (preserving crash-recovery behavior from :440 in socket-server.test.ts).
+   *
+   * Double-stat dev/ino re-check prevents TOCTOU between the probe and unlink:
+   * if the inode changed, the old socket was already replaced — skip the unlink.
+   */
+  static async unlinkStaleSocket(socketPath: string): Promise<void> {
+    try {
+      const stats = await lstat(socketPath);
+      if (stats.isSocket()) {
+        await new Promise<void>((resolve, reject) => {
+          const client = connect(socketPath, () => {
+            client.destroy();
+            reject(new SocketCollisionError(socketPath));
+          });
+          client.on('error', (err: NodeJS.ErrnoException) => {
+            client.destroy();
+            if (err.code === 'ECONNREFUSED' || err.code === 'ENOENT') {
+              resolve();
+            } else {
+              reject(new SocketCollisionError(socketPath));
+            }
+          });
+        });
+        // Re-stat to detect replacement: if inode changed, a new server already
+        // claimed the path — do NOT unlink it.
+        const newStats = await lstat(socketPath);
+        if (newStats.dev !== stats.dev || newStats.ino !== stats.ino) {
+          return;
+        }
+      }
+      unlinkSync(socketPath);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        return;
+      }
+      throw err;
     }
   }
 

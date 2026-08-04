@@ -69,7 +69,6 @@
   "src/lib/process-lock.ts::adc3dfc6d380d6656048e2c49a955fbf6370b4ed70fe380f4fac494fc805fdcd",
   "src/lib/process-lock.ts::bf432cc7f2bf2607ef8a143ece93d1e75910f4835b594963e568f0d17bdae318",
   "src/lib/provider-errors.ts::9c8281d5e3d882a5346e6270d6776bcb45b59491bbcaaeb21568d00a46337b2f",
-  "src/mcp/socket-server.ts::fa8377d9ea032b56bee9282be44880e642dce3210e8bc0240c17cf3fc3771d59",
   "src/mcp/tools/media.ts::3bbea2d746c0a37903eaca83ea49c9c3bc865e5436bd0ab03bc70f86b0e169fb",
   "src/mcp/tools/media.ts::4de73752e769820b4f3f8691cda78e7bcb2547beb7b721bec5e1e369762e832f",
   "src/mcp/tools/media.ts::5606d386f7db0a201ec17098132d41c9d4d47cc111c7c039ebf764cff624b24f",

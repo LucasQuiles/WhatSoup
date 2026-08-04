@@ -11,7 +11,7 @@ import { spawn, type SpawnOptionsWithoutStdio } from 'node:child_process';
 import { SIGNAL } from '../../../lib/signals.ts';
 
 export interface BinaryPreflightResult {
-  status: 'present' | 'missing' | 'unknown';
+  status: 'present' | 'missing' | 'unknown' | 'incompatible';
   /** First line of stdout from `binary --version` when present, else null. */
   version: string | null;
 }
@@ -39,6 +39,7 @@ export async function probeFallbackBinary(
   return new Promise<BinaryPreflightResult>((resolve) => {
     let settled = false;
     let stdoutBuffer = '';
+    let stderrBuffer = '';
     // Declare killTimer before settle() captures it in a closure so there is no
     // TDZ hazard when spawnImpl throws synchronously (settle would be called
     // before the `const killTimer = …` assignment is reached).
@@ -54,7 +55,7 @@ export async function probeFallbackBinary(
     let child: ReturnType<typeof spawnImpl>;
     try {
       child = spawnImpl(binary, ['--version'], {
-        stdio: ['ignore', 'pipe', 'ignore'],
+        stdio: ['ignore', 'pipe', 'pipe'] as const,
         env,
       } as SpawnOptionsWithoutStdio);
     } catch (err) {
@@ -77,6 +78,9 @@ export async function probeFallbackBinary(
     child.stdout?.on('data', (chunk: Buffer) => {
       stdoutBuffer += chunk.toString('utf8');
     });
+    child.stderr?.on('data', (chunk: Buffer) => {
+      stderrBuffer += chunk.toString('utf8');
+    });
 
     child.on('error', (err: NodeJS.ErrnoException) => {
       if (err.code === 'ENOENT') {
@@ -88,6 +92,21 @@ export async function probeFallbackBinary(
 
     child.on('close', () => {
       if (settled) return;
+
+      // Incompatible architecture binary — stderr contains a recognized
+      // exec-format error signal from the OS-level loader. Empty stdout is
+      // an additional gate to avoid false-positives on CLIs that exit
+      // non-zero for unrelated reasons (missing auth, first-run setup).
+      const stderr = stderrBuffer.trim();
+      if (
+        !stdoutBuffer.trim()
+        && stderr
+        && /^(Exec format error|Bad CPU type|cannot execute binary file)/.test(stderr)
+      ) {
+        settle({ status: 'incompatible', version: null });
+        return;
+      }
+
       // Binary executed (even if it exited non-zero) — presence is confirmed.
       const firstLine = stdoutBuffer.split('\n')[0]?.trim() ?? null;
       settle({ status: 'present', version: firstLine || null });

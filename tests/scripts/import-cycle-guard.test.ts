@@ -140,7 +140,10 @@ describe('import-cycle guard — the red proof', () => {
   });
 });
 
-describe('import-cycle guard — this repo', () => {
+// Walking the full 433-module runtime import graph can exceed the 10s default
+// on slow hosts (observed as pure timeouts with every assertion green); 30s
+// keeps the local workflow fast while accommodating the graph-scan overhead.
+describe('import-cycle guard — this repo', { timeout: 30_000 }, () => {
   it('reports no runtime import cycles in src/, over a non-vacuous graph', () => {
     // Green on arrival: measured 433 modules / 1176 runtime edges / 0 cycles when written.
     // The counts are asserted too — a pass over an empty graph would otherwise look

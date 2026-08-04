@@ -2342,6 +2342,52 @@ def dry_disk_usage() -> tuple[int, int] | None:
     return free_bytes, total_bytes
 
 
+def instance_db_inventory() -> list[str]:
+    """Scan WhatSoup instance roots for 0-byte .db files (decoy DB tripwire).
+
+    EXCLUDES recovery-backups/ subtrees and *-wal/*-shm sidecars (benign
+    snapshot artifacts). Alert text names the found path and points at
+    docs/configuration.md's XDG table.
+    """
+    instances_root = Path.home() / ".local/share/whatsoup/instances"
+    lines: list[str] = []
+    if not instances_root.is_dir():
+        return lines
+    for entry in sorted(instances_root.iterdir()):
+        if not entry.is_dir():
+            continue
+        instance_name = entry.name
+        _scan_instance_db_dir(entry, instance_name, lines)
+    return lines
+
+
+def _scan_instance_db_dir(root: Path, instance_name: str, lines: list[str]) -> None:
+    """Recurse into root, appending FAIL lines for 0-byte .db files.
+
+    Skips recovery-backups/ subtrees and *-wal/*-shm sidecars.
+    """
+    try:
+        entries = sorted(root.iterdir())
+    except PermissionError:
+        lines.append(f"WARN instance_db {instance_name}: permission_denied scanning {root}")
+        return
+
+    for child in entries:
+        if child.is_dir():
+            if child.name == "recovery-backups":
+                continue
+            _scan_instance_db_dir(child, instance_name, lines)
+            continue
+        name = child.name
+        if name.endswith("-wal") or name.endswith("-shm"):
+            continue
+        if name.endswith(".db") and child.stat().st_size == 0:
+            lines.append(
+                f"FAIL instance_db {instance_name}: zero_byte_db path={child} — "
+                "see docs/configuration.md XDG table for expected layout"
+            )
+
+
 def disk_inventory() -> list[str]:
     root = state_root()
     paths = [
@@ -6112,6 +6158,7 @@ def daily() -> int:
         *required_credential_inventory(profile),
         *credential_metadata(profile),
         *disk_inventory(),
+        *instance_db_inventory(),
         *clock_inventory(),
         *tool_lines,
     ]

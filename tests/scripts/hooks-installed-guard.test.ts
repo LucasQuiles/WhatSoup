@@ -87,7 +87,10 @@ function repoFixture(): string {
   return root;
 }
 
-describe('repository hook installation identity', () => {
+// spawnSync fixture repos, ACL ops, and the pinned-npm guard run can exceed
+// the 10s default (observed as pure timeouts with every assertion green);
+// 30s keeps the local workflow fast while accommodating the subprocess overhead.
+describe('repository hook installation identity', { timeout: 30_000 }, () => {
   it('passes only for canonical relative hooks whose complete closure matches HEAD', () => {
     const root = repoFixture();
 
