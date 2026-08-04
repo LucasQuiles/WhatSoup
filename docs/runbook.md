@@ -1344,19 +1344,34 @@ fingerprints and bounded taxonomy into the existing recovery ledger; it never st
 destination, manifest, or evidence values. Repeating the command is idempotent. Its JSON output
 contains only audit counts plus created/existing/unresolved/ambiguous ledger counts.
 
-After recording, `/health` remains `degraded` with `continuity_gap_open` and a content-free
-`continuity` block:
+After recording, `/health` reports `status: "healthy"` with a `recovery_debt` field (#2973
+Option A — continuity gaps no longer flip the top-level status). The `continuity` block and
+`continuity_gap_open`/`continuity_gap_unreadable` in `degradation_causes` are both preserved:
 
 ```json
 {
-  "readable": true,
-  "open": 3,
-  "unresolved": 2,
-  "ambiguous": 1
+  "status": "healthy",
+  "recovery_debt": {
+    "open": true,
+    "reason": "continuity_gap_open",
+    "continuity": {
+      "readable": true,
+      "open": 3,
+      "unresolved": 2,
+      "ambiguous": 1
+    }
+  },
+  "continuity": {
+    "readable": true,
+    "open": 3,
+    "unresolved": 2,
+    "ambiguous": 1
+  }
 }
 ```
 
-If the ledger cannot be parsed exactly, health fails closed with `continuity_gap_unreadable`.
+If the ledger cannot be parsed exactly, health reports `recovery_debt.reason: "continuity_gap_unreadable"`
+with `degradation_causes` still containing `continuity_gap_unreadable`.
 Recording does not send, replay, synthesize an inbound, or close a gap. Do not edit the recovery
 rows to force green health; controlled catch-up and terminal closure require a later proof-bound
 mechanism.

@@ -798,9 +798,10 @@ work that requires provenance-labeled operator catch-up and emits no identifiers
 After that dry run, `record-continuity-manifest --confirm-record` can persist only the
 `absent`, `observed_not_admitted`, and `ambiguous` classifications in the existing recovery
 ledger. Durable identities and evidence are SHA-256 fingerprints; no raw receipt, destination,
-manifest, or evidence value is written. Repeated recording is idempotent. `/health` exposes only
-open/unresolved/ambiguous counts and remains degraded with `continuity_gap_open`; malformed or
-unreadable ledger evidence degrades with `continuity_gap_unreadable`. The recorder does not send,
+manifest, or evidence value is written. Repeated recording is idempotent. `/health` exposes open/unresolved/ambiguous counts in a `continuity`
+block and a `recovery_debt` field (status stays `"healthy"` when only continuity gaps are present —
+see `docs/runbook.md` §7.6 or issue #2973); `degradation_causes` still includes `continuity_gap_open`
+or `continuity_gap_unreadable` for diagnostic consumers. The recorder does not send,
 replay, admit, or close work. A later proof-bound catch-up lane must close these rows only after an
 exact provenance link and terminal delivery proof exist.
 Admission blocks only `pending` or `claimed` jobs plus orphan transfers, and only on the affected

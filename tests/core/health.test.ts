@@ -2198,7 +2198,7 @@ describe('GET /health', () => {
     expect(json.sqlite.pending_polls_readable).toBe(true);
   });
 
-  it('keeps health degraded while external-history continuity gaps remain open', async () => {
+  it('reports recovery_debt (healthy status) while external-history continuity gaps remain open', async () => {
     recordContinuityGaps(db.raw, [
       {
         ordinal: 1,
@@ -2221,8 +2221,19 @@ describe('GET /health', () => {
     const { status, body } = await healthReq(port);
     const json = JSON.parse(body);
     expect(status).toBe(200);
-    expect(json.status).toBe('degraded');
+    // Continuity gaps alone no longer flip status to degraded (#2973 Option A)
+    expect(json.status).toBe('healthy');
     expect(json.degradation_causes).toContain('continuity_gap_open');
+    expect(json.recovery_debt).toEqual({
+      open: true,
+      reason: 'continuity_gap_open',
+      continuity: {
+        readable: true,
+        open: 2,
+        unresolved: 1,
+        ambiguous: 1,
+      },
+    });
     expect(json.continuity).toEqual({
       readable: true,
       open: 2,
@@ -2233,7 +2244,7 @@ describe('GET /health', () => {
     expect(body).not.toContain('a'.repeat(64));
   });
 
-  it('fails health closed when reserved continuity state has a foreign owner', async () => {
+  it('reports recovery_debt (continuity_gap_unreadable) when reserved continuity state has a foreign owner', async () => {
     db.raw.prepare(`
       INSERT INTO recovery_plans (plan_id, origin, actor, summary)
       VALUES ('foreign-continuity-state', 'operator', 'other_recovery_owner',
@@ -2247,8 +2258,13 @@ describe('GET /health', () => {
     const { status, body } = await healthReq(port);
     const json = JSON.parse(body);
     expect(status).toBe(200);
-    expect(json.status).toBe('degraded');
+    // Unreadable continuity alone no longer flips status (#2973 Option A)
+    expect(json.status).toBe('healthy');
     expect(json.degradation_causes).toContain('continuity_gap_unreadable');
+    expect(json.recovery_debt).toMatchObject({
+      open: true,
+      reason: 'continuity_gap_unreadable',
+    });
     expect(json.continuity).toEqual({
       readable: false,
       open: 0,
@@ -2257,6 +2273,178 @@ describe('GET /health', () => {
     });
     expect(body).not.toContain('foreign-continuity-state');
     expect(body).not.toContain('other_recovery_owner');
+  });
+
+  // #2973 Option A — discriminating recovery_debt cases
+  it('(a) reports healthy status with recovery_debt for continuity-gap-only degraded scenario', async () => {
+    recordContinuityGaps(db.raw, [
+      {
+        ordinal: 1,
+        classification: 'absent',
+        receiptFingerprint: 'a'.repeat(64),
+        destinationFingerprint: 'b'.repeat(64),
+        manifestFingerprint: 'c'.repeat(64),
+        evidenceFingerprint: 'd'.repeat(64),
+      },
+    ]);
+
+    const { status, body } = await healthReq(port);
+    const json = JSON.parse(body);
+    expect(status).toBe(200);
+    // Authenticated + connected + model usable + continuity gap open only
+    expect(json.status).toBe('healthy');
+    expect(json.recovery_debt.open).toBe(true);
+    expect(json.recovery_debt.reason).toBe('continuity_gap_open');
+    // degradation_causes still includes continuity strings (variant a)
+    expect(json.degradation_causes).toContain('continuity_gap_open');
+  });
+
+  it('(b) reports degraded status without recovery_debt for provider-unusable scenario', async () => {
+    // Real provider-unusable injection: restorable local auth corruption
+    // (degraded-class auth failure) with zero continuity gaps recorded.
+    const db2 = makeDb();
+    const connectionManager = {
+      botJid: '15550199000@s.whatsapp.net',
+      botLid: null,
+      sendMessage: vi.fn().mockResolvedValue({ waMessageId: null }),
+      sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      getConnectionState: vi.fn().mockReturnValue({
+        state: 'connected',
+        connected: true,
+        reconnectAttempts: 0,
+        reconnectPhase: null,
+        stateChangedAt: '2026-06-09T12:00:00.000Z',
+        firstFailureAt: null,
+        lastPingAt: null,
+        lastPongAt: null,
+        lastDisconnectReason: null,
+        lastStatusCode: null,
+        authBond: makeAuthBond({ status: 'invalid', issues: ['creds_json_invalid_json'] }),
+      }),
+    };
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(makeDeps(db2, { connectionManager } as any)));
+
+    const { status, body } = await healthReq(port);
+    const json = JSON.parse(body);
+    expect(status).toBe(200);
+    expect(json).toMatchObject({
+      status: 'degraded',
+      whatsapp: { connection: { auth_failure_class: 'local_corruption_restorable' } },
+    });
+    // Provider-unusable alone carries NO recovery debt
+    expect(json.recovery_debt).toMatchObject({ open: false, reason: null });
+    db2.close();
+  });
+
+  it('(c) reports degraded status AND recovery_debt when both provider-unusable and continuity gaps exist', async () => {
+    // Both signals injected for real: degraded-class auth corruption AND an
+    // open continuity gap — the provider cause drives status, the gap rides
+    // in recovery_debt (and stays visible in degradation_causes, variant a).
+    const db2 = makeDb();
+    recordContinuityGaps(db2.raw, [
+      {
+        ordinal: 1,
+        classification: 'absent',
+        receiptFingerprint: 'a'.repeat(64),
+        destinationFingerprint: 'b'.repeat(64),
+        manifestFingerprint: 'c'.repeat(64),
+        evidenceFingerprint: 'd'.repeat(64),
+      },
+    ]);
+    const connectionManager = {
+      botJid: '15550199000@s.whatsapp.net',
+      botLid: null,
+      sendMessage: vi.fn().mockResolvedValue({ waMessageId: null }),
+      sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      getConnectionState: vi.fn().mockReturnValue({
+        state: 'connected',
+        connected: true,
+        reconnectAttempts: 0,
+        reconnectPhase: null,
+        stateChangedAt: '2026-06-09T12:00:00.000Z',
+        firstFailureAt: null,
+        lastPingAt: null,
+        lastPongAt: null,
+        lastDisconnectReason: null,
+        lastStatusCode: null,
+        authBond: makeAuthBond({ status: 'invalid', issues: ['creds_json_invalid_json'] }),
+      }),
+    };
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(makeDeps(db2, { connectionManager } as any)));
+
+    const { status, body } = await healthReq(port);
+    const json = JSON.parse(body);
+    expect(status).toBe(200);
+    expect(json).toMatchObject({
+      status: 'degraded',
+      whatsapp: { connection: { auth_failure_class: 'local_corruption_restorable' } },
+    });
+    expect(json.recovery_debt).toMatchObject({ open: true, reason: 'continuity_gap_open' });
+    expect(json.degradation_causes).toContain('continuity_gap_open');
+    db2.close();
+  });
+
+  it('surfaces turn_recovery_degraded and provider_execution_pressure causes from runtime counters', async () => {
+    const db2 = makeDb();
+    let outstanding = 1;
+    let exhausted = 0;
+    let pressureActive = false;
+    const fakeAgentRuntime = {
+      getHealthSnapshot: () => ({
+        status: 'degraded',
+        details: {
+          recentCrashes: 0,
+          autoCompactActiveBackoffScopes: 0,
+          turnFinalizationRetainedRetries: 0,
+          turnFinalizationDegradedScopes: 0,
+          turnRecoveryOutstanding: outstanding,
+          turnRecoveryExhausted: exhausted,
+          turnRecoveryOpenRecoveries: 0,
+          turnRecoveryCorruptLinks: 0,
+          turnRecoveryEchoConflicts: 0,
+          providerExecution: { pressureActive },
+          turnCapability: {
+            modelUsable: false,
+            modelUsableStale: false,
+            modelUsabilityStatus: 'provider-unavailable',
+            lastSuccessfulTurnAt: Date.now() - 1_000,
+            lastTurnErrorClass: null,
+            lastTurnErrorAt: null,
+          },
+        },
+      }),
+    };
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: fakeAgentRuntime as unknown as HealthDeps['runtime'],
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    // Leg 1: outstanding recoveries flag the recovery cause.
+    let json = JSON.parse((await healthReq(port)).body);
+    expect(json.degradation_causes).toContain('turn_recovery_degraded');
+    expect(json.degradation_causes).not.toContain('provider_execution_pressure');
+
+    // Leg 2: a different positive counter (exhausted) flags the same cause.
+    outstanding = 0;
+    exhausted = 1;
+    json = JSON.parse((await healthReq(port)).body);
+    expect(json.degradation_causes).toContain('turn_recovery_degraded');
+
+    // Leg 3: counters clear, provider execution pressure flags its own cause.
+    exhausted = 0;
+    pressureActive = true;
+    json = JSON.parse((await healthReq(port)).body);
+    expect(json.degradation_causes).not.toContain('turn_recovery_degraded');
+    expect(json.degradation_causes).toContain('provider_execution_pressure');
+    db2.close();
   });
 
   it('degrades health when the applied migration version is behind the code-required schema', async () => {
