@@ -43,7 +43,7 @@ const mockedLookupCredential = vi.mocked(lookupCredential);
 import { makeDeps, mockReq, mockRes } from '../helpers/http-mocks.ts';
 
 function depsFor(): OpsDeps {
-  return makeDeps();
+  return makeDeps<any>({});
 }
 
 describe('ops handleCreateLine spawn-token warn', () => {

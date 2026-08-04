@@ -22,7 +22,7 @@ function fileMode(filePath: string): number {
 }
 
 function depsFor(): OpsDeps {
-  return makeDeps();
+  return makeDeps<any>({});
 }
 
 describe('fleet ops health token service', () => {
@@ -75,7 +75,7 @@ describe('fleet ops health token service', () => {
         adminPhones: ['15551234567'],
       }), method: 'POST', url: '/api/lines' }),
       res,
-      makeDeps(),
+      makeDeps<any>({}),
     );
 
     expect(res._status).toBe(201);
@@ -103,7 +103,7 @@ describe('fleet ops health token service', () => {
         adminPhones: ['15551234567'],
       }), method: 'POST', url: '/api/lines' }),
       res,
-      makeDeps(),
+      makeDeps<any>({}),
     );
 
     expect(res._status).toBe(201);
@@ -133,7 +133,7 @@ describe('fleet ops health token service', () => {
         adminPhones: ['15551234567'],
       }), method: 'POST', url: '/api/lines' }),
       res,
-      makeDeps(),
+      makeDeps<any>({}),
     );
 
     expect(res._status).toBe(201);

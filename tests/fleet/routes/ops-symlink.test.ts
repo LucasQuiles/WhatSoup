@@ -68,7 +68,7 @@ function makeInstance(configPath: string): DiscoveredInstance {
 
 function depsFor(instance: DiscoveredInstance): OpsDeps {
   const map = new Map<string, DiscoveredInstance>([[instance.name, instance]]);
-  return makeDeps({ discovery: { getInstance: (name: string) => map.get(name), getInstances: () => map } });
+  return makeDeps<any>({ discovery: { getInstance: (name: string) => map.get(name), getInstances: () => map } });
 }
 
 function writeConfig(configPath: string, contents: Record<string, unknown>): void {

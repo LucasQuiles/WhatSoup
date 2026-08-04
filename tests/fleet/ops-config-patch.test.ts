@@ -52,7 +52,7 @@ function fakeInstance(configPath: string, overrides: Partial<DiscoveredInstance>
 }
 
 function depsFor(instance: DiscoveredInstance): OpsDeps {
-  return makeDeps({ discovery: { getInstance: vi.fn(() => instance) } });
+  return makeDeps<any>({ discovery: { getInstance: vi.fn(() => instance) } });
 }
 
 // ---------------------------------------------------------------------------

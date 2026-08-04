@@ -48,7 +48,7 @@ import type { OpsDeps } from '../../../src/fleet/routes/ops.ts';
 import { makeDeps, mockReq, mockRes } from '../../helpers/http-mocks.ts';
 
 function succeedingDeps(): OpsDeps {
-  return makeDeps();
+  return makeDeps<any>({});
 }
 
 describe('handleCreateLine — keyring failure during health-token copy', () => {

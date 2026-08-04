@@ -76,7 +76,7 @@ function depsFor(configPath: string, name: string): OpsDeps {
     dbPath: '/tmp/bot.db', stateRoot: '/tmp/state', logDir: '/tmp/logs',
     healthToken: 'tok', configPath, socketPath: null,
   };
-  return makeDeps({ discovery: { getInstance: vi.fn(() => instance) } });
+  return makeDeps<any>({ discovery: { getInstance: vi.fn(() => instance) } });
 }
 
 describe('handleConfigUpdate — cwd-defaulting invariant (agentOptions.cwd absent/empty/whitespace)', () => {
