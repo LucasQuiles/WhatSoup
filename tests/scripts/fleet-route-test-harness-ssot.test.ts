@@ -28,8 +28,7 @@ const OPSDEPS_BUILDER_BUDGET = 0;
 // Files excluded by design — see header or the tracking issue for rationale.
 // ops.test.ts: Wave 4 builder, held per gate sequencing.
 const EXCLUDED = new Set<string>([
-  // Builder 15 (179 call sites) — held per gate sequencing (#2240 Wave 4).
-  'tests/fleet/routes/ops.test.ts',
+  // No files excluded — all 15 builders are migrated to shared makeDeps.
 ]);
 
 // Match local OpsDeps builder function or const declarations.
