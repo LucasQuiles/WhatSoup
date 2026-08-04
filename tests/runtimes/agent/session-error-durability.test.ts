@@ -519,6 +519,41 @@ describe('SessionManager durable error lifecycle', () => {
     expect(sm.getDbRowId()).toBe(rowId);
   });
 
+  it('force-kills a managed provider whose shutdown hangs and completes teardown', async () => {
+    // Opposite of the rejection case above: on a shutdown TIMEOUT the session
+    // fail-opens — kill() escalates and teardown proceeds (handle nulled),
+    // whereas a shutdown rejection retains the handle and rethrows.
+    vi.useFakeTimers();
+    try {
+      vi.spyOn(OpenAIApiProvider.prototype, 'initialize').mockImplementation(async (opts) => {
+        opts.onEvent({ type: 'init', sessionId: 'managed-shutdown-hang' });
+      });
+      vi.spyOn(OpenAIApiProvider.prototype, 'shutdown')
+        .mockImplementation(() => new Promise<never>(() => {}));
+      const killSpy = vi.spyOn(OpenAIApiProvider.prototype, 'kill').mockImplementation(() => {});
+      const sm = new SessionManager({
+        db,
+        messenger: makeMessenger(),
+        chatJid: CHAT_JID,
+        onEvent: vi.fn(),
+        provider: 'openai-api',
+      });
+      sm.setDurability(durability);
+      await sm.spawnSession();
+
+      const shutdownPromise = sm.shutdown(true);
+      await vi.advanceTimersByTimeAsync(5_001);
+      await expect(shutdownPromise).resolves.toBeUndefined();
+
+      expect(killSpy).toHaveBeenCalledTimes(1);
+      expect((sm as unknown as { managedProviderSession: unknown }).managedProviderSession)
+        .toBeNull();
+      expect(sm.getStatus()).toMatchObject({ active: false });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('wires a supplied OpenCode resume ID into the first spawned turn', async () => {
     const rowId = lifecycleRow(
       db,
