@@ -45,6 +45,7 @@ vi.mock('node:child_process', () => ({
 }));
 
 import { handleConfigUpdate } from '../../../src/fleet/routes/ops.ts';
+import { makeDeps } from '../../helpers/http-mocks.ts';
 import type { OpsDeps } from '../../../src/fleet/routes/ops.ts';
 import type { DiscoveredInstance } from '../../../src/fleet/discovery.ts';
 
@@ -65,16 +66,9 @@ function makeInstance(configPath: string): DiscoveredInstance {
   } as DiscoveredInstance;
 }
 
-function makeDeps(instance: DiscoveredInstance): OpsDeps {
+function depsFor(instance: DiscoveredInstance): OpsDeps {
   const map = new Map<string, DiscoveredInstance>([[instance.name, instance]]);
-  return {
-    discovery: {
-      getInstance: (name: string) => map.get(name),
-      getInstances: () => map,
-      refresh: vi.fn(),
-    },
-    realtime: { publish: vi.fn() },
-  } as unknown as OpsDeps;
+  return makeDeps({ discovery: { getInstance: (name: string) => map.get(name), getInstances: () => map } });
 }
 
 function writeConfig(configPath: string, contents: Record<string, unknown>): void {
@@ -120,7 +114,7 @@ describe('handleConfigUpdate symlink-escape defense (regression)', () => {
 
     const req = mockReq({ body: JSON.stringify({ agentOptions: { cwd: homeAlias, sessionScope: 'per_chat' } }), method: 'PATCH' });
     const res = mockRes();
-    await handleConfigUpdate(req, res, makeDeps(makeInstance(configPath)), { name: 'sym-test' });
+    await handleConfigUpdate(req, res, depsFor(makeInstance(configPath)), { name: 'sym-test' });
 
     expect(res._status).toBe(400);
     expect(res._body).toContain('agentOptions.cwd');
@@ -141,7 +135,7 @@ describe('handleConfigUpdate symlink-escape defense (regression)', () => {
 
     const req = mockReq({ body: JSON.stringify({ agentOptions: { cwd: file, sessionScope: 'per_chat' } }), method: 'PATCH' });
     const res = mockRes();
-    await handleConfigUpdate(req, res, makeDeps(makeInstance(configPath)), { name: 'sym-test' });
+    await handleConfigUpdate(req, res, depsFor(makeInstance(configPath)), { name: 'sym-test' });
 
     expect(res._status).toBe(400);
     expect(res._body).toContain('agentOptions.cwd');
@@ -158,7 +152,7 @@ describe('handleConfigUpdate symlink-escape defense (regression)', () => {
 
     const req = mockReq({ body: JSON.stringify({ agentOptions: { cwd: workspaceAlias, sessionScope: 'per_chat' } }), method: 'PATCH' });
     const res = mockRes();
-    await handleConfigUpdate(req, res, makeDeps(makeInstance(configPath)), { name: 'sym-test' });
+    await handleConfigUpdate(req, res, depsFor(makeInstance(configPath)), { name: 'sym-test' });
 
     expect(res._status).toBe(200);
     expectPersistedConfig(configPath, {
@@ -174,7 +168,7 @@ describe('handleConfigUpdate symlink-escape defense (regression)', () => {
 
     const req = mockReq({ body: JSON.stringify({ agentOptions: { cwd: newWorkspace, sessionScope: 'per_chat' } }), method: 'PATCH' });
     const res = mockRes();
-    await handleConfigUpdate(req, res, makeDeps(makeInstance(configPath)), { name: 'sym-test' });
+    await handleConfigUpdate(req, res, depsFor(makeInstance(configPath)), { name: 'sym-test' });
 
     expect(res._status).toBe(200);
     expectPersistedConfig(configPath, {
@@ -194,7 +188,7 @@ describe('handleConfigUpdate symlink-escape defense (regression)', () => {
 
     const req = mockReq({ body: JSON.stringify({ agentOptions: { cwd: escapeLink, sessionScope: 'per_chat' } }), method: 'PATCH' });
     const res = mockRes();
-    await handleConfigUpdate(req, res, makeDeps(makeInstance(configPath)), { name: 'sym-test' });
+    await handleConfigUpdate(req, res, depsFor(makeInstance(configPath)), { name: 'sym-test' });
 
     expect(res._status).toBe(400);
     expect(res._body).toContain('agentOptions.cwd');
@@ -213,7 +207,7 @@ describe('handleConfigUpdate symlink-escape defense (regression)', () => {
         agentOptions: { cwd: path.join(escapeLink, 'sub'), sessionScope: 'per_chat' },
       }), method: 'PATCH' });
     const res = mockRes();
-    await handleConfigUpdate(req, res, makeDeps(makeInstance(configPath)), { name: 'sym-test' });
+    await handleConfigUpdate(req, res, depsFor(makeInstance(configPath)), { name: 'sym-test' });
 
     expect(res._status).toBe(400);
     expect(res._body).toContain('agentOptions.cwd');
@@ -241,7 +235,7 @@ describe('handleConfigUpdate symlink-escape defense (regression)', () => {
         },
       }), method: 'PATCH' });
     const res = mockRes();
-    await handleConfigUpdate(req, res, makeDeps(makeInstance(configPath)), { name: 'sym-test' });
+    await handleConfigUpdate(req, res, depsFor(makeInstance(configPath)), { name: 'sym-test' });
 
     expect(res._status).toBe(400);
     expect(res._body).toContain('pluginDirs');
@@ -254,7 +248,7 @@ describe('handleConfigUpdate symlink-escape defense (regression)', () => {
 
     const req = mockReq({ body: JSON.stringify({ agentOptions: { cwd: OUTSIDE_ROOT, sessionScope: 'per_chat' } }), method: 'PATCH' });
     const res = mockRes();
-    await handleConfigUpdate(req, res, makeDeps(makeInstance(configPath)), { name: 'sym-test' });
+    await handleConfigUpdate(req, res, depsFor(makeInstance(configPath)), { name: 'sym-test' });
 
     expect(res._status).toBe(400);
     expect(res._body).toContain('agentOptions.cwd');
