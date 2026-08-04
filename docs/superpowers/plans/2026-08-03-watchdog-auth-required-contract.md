@@ -1,8 +1,8 @@
 # Watchdog Auth-Required Contract — TDD Implementation Plan
 
-**Status:** Active — source implementation and publication hardening are complete locally;
-final merge-gate verification and PR publication remain in progress. Host canary, rollout,
-and installed-state mutation remain owner-gated and unperformed.
+**Status:** Active — source implementation and publication hardening are complete; PR #2953 is
+open for the merge gate. Host canary, rollout, and installed-state mutation remain owner-gated
+and unperformed.
 
 > **For agentic workers:** use `superpowers:subagent-driven-development` or
 > `superpowers:executing-plans` task-by-task. Keep the checkboxes current.
@@ -527,7 +527,7 @@ under the worktree writer lease; OpenCode strategy lanes stay read-only and advi
 - [x] Reject reserved template-placeholder substrings in renderer identity values so sequential
   replacement cannot silently corrupt `--home` while reporting a clean artifact.
 - [x] Reconcile the design, runbook, execution checklist, and work index, then rerun final gates.
-- [ ] Publish the reviewed branch and open the PR against `main`.
+- [x] Publish the reviewed branch and open PR #2953 against `main`.
 
 ## Remaining objectives after source merge
 
