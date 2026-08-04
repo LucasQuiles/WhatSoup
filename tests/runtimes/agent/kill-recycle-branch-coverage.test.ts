@@ -1,11 +1,15 @@
 /**
  * Branch-coverage tests for uncovered branches in the kill-recycle-protocol,
- * socket-manager, and canary-admission paths.
+ * socket-manager, canary-admission, and model-pin preference paths.
  *
  * Each test is named for the specific branch it exercises. No existing test
  * files are modified — coverage-gap branches are driven from here.
  */
 
+import { randomBytes } from 'node:crypto';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, type Stats } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, it, expect, vi } from 'vitest';
 import type { SessionManager } from '../../../src/runtimes/agent/session.ts';
 
@@ -354,3 +358,211 @@ describe('session.ts canary-admission — sha mismatch (line 2359) — DIRECT', 
 // runtime.ts 11040 (route-based sessionProvider): one-sided like the other
 // runtime spawn-path branches above — the untaken side needs a live child
 // process; no placeholder test is kept for it.
+
+// ---------------------------------------------------------------------------
+// model-pin.ts handleBareKeep — 'superseded' keep outcome (line 202 switch)
+// ---------------------------------------------------------------------------
+
+describe('model-pin — bare keep superseded by a concurrent write (line 202)', () => {
+  it('reports "nothing was promoted" when the sticky CAS loses its race', async () => {
+    const { tryHandleBareKeep } = await import('../../../src/runtimes/agent/model-pin.ts');
+    const { Database } = await import('../../../src/core/database.ts');
+    const prefMod = await import('../../../src/runtimes/agent/chat-preference-db.ts');
+    const keysMod = await import('../../../src/runtimes/agent/preference-keys.ts');
+    const dbPath = join(tmpdir(), `cov-keep-${randomBytes(4).toString('hex')}.db`);
+    const db = new Database(dbPath);
+    try {
+      prefMod.ensureChatPreferenceSchema(db);
+      const chatJid = '111222333@g.us';
+      const senderJid = '15550000001@s.whatsapp.net';
+      const { chatKey, senderKey } = keysMod.preferenceKeys(db, chatJid, senderJid);
+      const now = Date.now();
+      prefMod.setPreference(db, {
+        chatJid: chatKey,
+        senderJid: senderKey,
+        intent: 'provider_specific',
+        requestedProvider: 'opencode-cli',
+        scope: 'this_thread',
+        pinStrict: true,
+        fallbackPermitted: false,
+        updatedAt: now,
+        expiresAt: now + 24 * 60 * 60 * 1000,
+        requestedModel: 'kimi/kimi-k3',
+        validatedProvider: 'opencode-cli',
+        modelPinVerified: true,
+      });
+      // Simulate the concurrent writer the CAS guards against: the promotion
+      // UPDATE matches zero rows while every read still sees the seeded pin.
+      const raw = db.raw as unknown as { prepare: (sql: string) => unknown };
+      const origPrepare = raw.prepare.bind(db.raw);
+      raw.prepare = (sql: string) =>
+        sql.includes('UPDATE chat_model_preference')
+          ? { run: () => ({ changes: 0 }) }
+          : origPrepare(sql);
+      const port = {
+        db,
+        instanceName: 'cov-test',
+        sendDirect: vi.fn(),
+        completeLocalInbound: vi.fn(),
+        emitRouteEventChecked: vi.fn(),
+      };
+      const handled = tryHandleBareKeep(
+        port as never,
+        { type: 'message', text: 'keep' } as never,
+        chatJid,
+        { senderJid, timestamp: Math.floor(now / 1000), inboundSeq: 7 } as never,
+      );
+      raw.prepare = origPrepare;
+      expect(handled).toBe(true);
+      expect(port.sendDirect).toHaveBeenCalledWith(
+        chatJid,
+        expect.stringContaining('nothing was promoted'),
+      );
+      expect(port.completeLocalInbound).toHaveBeenCalledWith(7);
+    } finally {
+      db.close();
+      rmSync(dbPath, { force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// model-pin.ts recordRouteModelPin — dedup-identity expiry check (line 273)
+// ---------------------------------------------------------------------------
+
+describe('model-pin — recordRouteModelPin dedup identity (line 273 both sides)', () => {
+  it('refreshes a matching temporary pin and keeps a matching sticky pin', async () => {
+    const { recordRouteModelPin } = await import('../../../src/runtimes/agent/model-pin.ts');
+    const { Database } = await import('../../../src/core/database.ts');
+    const prefMod = await import('../../../src/runtimes/agent/chat-preference-db.ts');
+    const dbPath = join(tmpdir(), `cov-record-${randomBytes(4).toString('hex')}.db`);
+    const db = new Database(dbPath);
+    try {
+      prefMod.ensureChatPreferenceSchema(db);
+      const port = { db };
+      const now = Date.now();
+      const base = {
+        senderJid: '15550000001@s.whatsapp.net',
+        intent: 'provider_specific',
+        requestedProvider: 'opencode-cli',
+        pinStrict: true,
+        fallbackPermitted: false,
+        updatedAt: now,
+        requestedModel: 'kimi/kimi-k3',
+        validatedProvider: 'opencode-cli',
+        modelPinVerified: true,
+      } as const;
+      prefMod.setPreference(db, {
+        ...base,
+        chatJid: 'temp-chat@g.us',
+        scope: 'this_thread',
+        expiresAt: now + 60_000,
+      });
+      expect(
+        recordRouteModelPin(
+          port as never, 'temp-chat@g.us', 'temp-chat@g.us',
+          '15550000001@s.whatsapp.net', 'opencode-cli', 'kimi/kimi-k3',
+        ),
+      ).toBe('refreshed');
+      prefMod.setPreference(db, {
+        ...base,
+        chatJid: 'sticky-chat@g.us',
+        scope: 'sticky',
+        expiresAt: null,
+      });
+      expect(
+        recordRouteModelPin(
+          port as never, 'sticky-chat@g.us', 'sticky-chat@g.us',
+          '15550000001@s.whatsapp.net', 'opencode-cli', 'kimi/kimi-k3',
+        ),
+      ).toBe('sticky_kept');
+    } finally {
+      db.close();
+      rmSync(dbPath, { force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// model-pin.ts applyRouteChangeAndRecycle — per-chat scope-key ?? (line 407)
+// ---------------------------------------------------------------------------
+
+describe('model-pin — applyRouteChangeAndRecycle scope-key resolution (line 407)', () => {
+  it('resolves the map key when none is supplied and no-ops without a live session', async () => {
+    const { applyRouteChangeAndRecycle } = await import('../../../src/runtimes/agent/model-pin.ts');
+    const port = {
+      sessionScope: 'per_chat',
+      chatSessions: new Map(),
+      resolvePerChatMapKey: vi.fn(() => 'resolved-key'),
+    };
+    await expect(
+      applyRouteChangeAndRecycle(port as never, 'chat@g.us', 'sender@s.whatsapp.net', undefined),
+    ).resolves.toBe('noop');
+    expect(port.resolvePerChatMapKey).toHaveBeenCalledWith('chat@g.us');
+  });
+
+  it('uses a supplied map key without consulting the resolver', async () => {
+    const { applyRouteChangeAndRecycle } = await import('../../../src/runtimes/agent/model-pin.ts');
+    const port = {
+      sessionScope: 'per_chat',
+      chatSessions: new Map(),
+      resolvePerChatMapKey: vi.fn(() => 'resolved-key'),
+    };
+    await expect(
+      applyRouteChangeAndRecycle(port as never, 'chat@g.us', 'sender@s.whatsapp.net', 'explicit-key'),
+    ).resolves.toBe('noop');
+    expect(port.resolvePerChatMapKey).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// per-chat-mcp-socket-manager.ts — uid probe without process.getuid (line 39)
+// ---------------------------------------------------------------------------
+
+describe('socket-manager — uid probe without process.getuid (lines 39/46)', () => {
+  it('accepts an owned socket stat when the platform exposes no getuid', async () => {
+    const { assertSafeOwnedSocket } =
+      await import('../../../src/runtimes/agent/per-chat-mcp-socket-manager.ts');
+    const original = process.getuid;
+    try {
+      (process as { getuid?: unknown }).getuid = undefined;
+      const stat = {
+        isSymbolicLink: () => false,
+        isSocket: () => true,
+        uid: 424242,
+      } as unknown as Stats;
+      expect(() => assertSafeOwnedSocket(stat)).not.toThrow();
+    } finally {
+      (process as { getuid?: unknown }).getuid = original;
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// per-chat-mcp-socket-manager.ts — mcp state-directory symlink (line 99)
+// ---------------------------------------------------------------------------
+
+describe('socket-manager — mcp directory symlink collision (line 99)', () => {
+  it('rejects acquire when the mcp state directory is a symlink', async () => {
+    const { PerChatMcpSocketManager } =
+      await import('../../../src/runtimes/agent/per-chat-mcp-socket-manager.ts');
+    const { ToolRegistry } = await import('../../../src/mcp/registry.ts');
+    const root = mkdtempSync(join(tmpdir(), 'cov-mcp-dir-'));
+    try {
+      const target = join(root, 'real-mcp');
+      mkdirSync(target);
+      symlinkSync(target, join(root, 'mcp'));
+      const manager = new PerChatMcpSocketManager({
+        stateRoot: root,
+        registry: new ToolRegistry(),
+        allowedRoot: root,
+        conversationBound: true,
+        resolveActor: () => undefined,
+      });
+      expect(() => manager.acquire('cov@s.whatsapp.net', 'cov@s.whatsapp.net'))
+        .toThrow(/directory collision/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
