@@ -141,6 +141,13 @@ def _run_with_state(
 ) -> tuple[str, bool, int, int | None]:
     home = tmp_path / "home"
     home.mkdir()
+    token_file = home / ".config" / "whatsoup" / "instances" / bot_name / "tokens.env"
+    token_file.parent.mkdir(parents=True)
+    token_file.write_text(
+        f"WHATSOUP_HEALTH_TOKEN={'a' * 64}\n",
+        encoding="utf-8",
+    )
+    token_file.chmod(0o600)
     script = _render(home, bot_name)
     calls = _make_stubs(home, bot_body, bot_http)
     marker = home / "Library" / "Logs" / "whatsoup" / f"{bot_name}-credential-dead.marker"

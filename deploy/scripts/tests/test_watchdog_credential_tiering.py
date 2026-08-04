@@ -40,6 +40,7 @@ import pytest
 pytestmark = pytest.mark.skipif(shutil.which("zsh") is None, reason="zsh not available")
 
 _TEMPLATE = Path(__file__).resolve().parents[2] / "templates" / "watchdog-script.sh"
+_VALID_TOKEN = "a" * 64
 
 
 def _iso_now() -> str:
@@ -112,9 +113,16 @@ class Harness:
         self.log_dir.mkdir(parents=True)
         self.log = self.log_dir / f"{bot_name}-watchdog.log"
         self.marker = self.log_dir / f"{bot_name}-credential-dead.marker"
+        self.token_file = (
+            self.home / ".config" / "whatsoup" / "instances" / bot_name / "tokens.env"
+        )
+        self.token_file.parent.mkdir(parents=True)
+        self.write_token_file()
         binroot = self.home / ".local" / "bin"
         binroot.mkdir(parents=True)
         self.calls = binroot / "launchctl.calls"
+        self.curl_argv = binroot / "curl.argv"
+        self.curl_config = binroot / "curl.config"
 
         rendered = (
             _TEMPLATE.read_text(encoding="utf-8")
@@ -130,14 +138,36 @@ class Harness:
         self.write_curl_stub(bot_body, fleet_ok)
         self.write_launchctl_stub()
 
-    def write_launchctl_stub(self, kickstart_rc: int = 0, print_body: str = ""):
+    def write_token_file(self, contents: str | None = None, mode: int = 0o600):
+        self.token_file.write_text(
+            contents if contents is not None else f"WHATSOUP_HEALTH_TOKEN={_VALID_TOKEN}\n",
+            encoding="utf-8",
+        )
+        self.token_file.chmod(mode)
+
+    def write_launchctl_stub(
+        self,
+        kickstart_rc: int = 0,
+        print_body: str = "",
+        print_rc: int = 0,
+        bootstrap_rc: int = 0,
+        make_log_readonly_on_print: bool = False,
+    ):
         """Record every call; `print` emits print_body, `kickstart` exits kickstart_rc."""
         lc = self.home / ".local" / "bin" / "launchctl"
+        readonly_line = (
+            f"  chmod 400 '{self.log}'\n" if make_log_readonly_on_print else ""
+        )
         lc.write_text(
             "#!/bin/sh\n"
             f"echo \"$@\" >> '{self.calls}'\n"
             'if [ "$1" = print ]; then\n'
             f"  printf '%s\\n' '{print_body}'\n"
+            f"{readonly_line}"
+            f"  exit {print_rc}\n"
+            "fi\n"
+            'if [ "$1" = bootstrap ]; then\n'
+            f"  exit {bootstrap_rc}\n"
             "fi\n"
             'if [ "$1" = kickstart ]; then\n'
             f"  exit {kickstart_rc}\n"
@@ -153,6 +183,14 @@ class Harness:
         curl = self.home / ".local" / "bin" / "curl"
         curl.write_text(
             "#!/bin/sh\n"
+            f"printf '%s\\n' \"$@\" >> '{self.curl_argv}'\n"
+            "read_config=0\n"
+            "previous=''\n"
+            'for a in "$@"; do\n'
+            '  [ "$previous" = "--config" ] && [ "$a" = "-" ] && read_config=1\n'
+            '  previous="$a"\n'
+            "done\n"
+            f"[ \"$read_config\" -eq 1 ] && cat >> '{self.curl_config}'\n"
             'for a in "$@"; do case "$a" in\n'
             f"  *9999/health) {bot_line};;\n"
             f"  *9998/*) {fleet_line};;\n"
@@ -470,6 +508,260 @@ def test_lock_without_pid_ages_out_and_is_reclaimed(tmp_path):
     assert proc.returncode == 0, proc.stderr
     assert "reclaiming stale" in h.log.read_text(encoding="utf-8")
     assert h.final_log_state() == "ok"
+
+
+@pytest.mark.parametrize(
+    ("bot_body", "bot_name"),
+    [
+        ("", "tier-empty-body-bot"),
+        ("not-json", "tier-malformed-json-bot"),
+        (json.dumps(["healthy"]), "tier-array-body-bot"),
+        (
+            json.dumps({"status": "healthy", "whatsapp": []}),
+            "tier-whatsapp-array-bot",
+        ),
+        (
+            json.dumps(
+                {
+                    "status": "healthy",
+                    "whatsapp": {"connected": True, "connection": []},
+                }
+            ),
+            "tier-connection-array-bot",
+        ),
+        (
+            json.dumps({"status": "healthy", "whatsapp": {"connected": True}}),
+            "tier-missing-connection-bot",
+        ),
+    ],
+)
+def test_untrusted_health_shapes_are_health_unknown_without_restart(
+    tmp_path, bot_body, bot_name
+):
+    h = Harness(tmp_path, bot_name, bot_body)
+    h.marker.touch()
+    proc = h.run()
+    assert proc.returncode == 2
+    assert h.final_log_state() == "HEALTH-UNKNOWN"
+    assert "kickstart" not in h.launchctl_calls()
+    assert h.marker.exists(), "untrusted health evidence must retain the prior marker"
+
+
+def test_duplicate_turn_capability_is_health_unknown_and_retains_marker(tmp_path):
+    bot_body = (
+        '{"status":"healthy","whatsapp":{"connected":true,"connection":'
+        '{"state":"connected","auth_failure_class":"none"}},'
+        '"instance":{"fallbackReason":null},'
+        '"turn_capability":{"model_usability_status":"credential-unavailable"},'
+        '"turn_capability":{"model_usable":true,"model_usable_stale":false,'
+        '"model_usability_status":"usable"}}'
+    )
+    h = Harness(tmp_path, "tier-duplicate-body-bot", bot_body)
+    h.marker.touch()
+    proc = h.run()
+    assert proc.returncode == 2
+    assert h.final_log_state() == "HEALTH-UNKNOWN"
+    assert "kickstart" not in h.launchctl_calls()
+    assert h.marker.exists()
+
+
+def test_oversized_health_body_is_health_unknown_before_python(tmp_path):
+    h = Harness(
+        tmp_path,
+        "tier-oversized-body-bot",
+        _liveness_ok(padding="x" * 65536),
+    )
+    proc = h.run()
+    assert proc.returncode == 2
+    assert h.final_log_state() == "HEALTH-UNKNOWN"
+    assert "kickstart" not in h.launchctl_calls()
+
+
+def test_future_success_cannot_supersede_current_auth_error(tmp_path):
+    body = json.loads(_recovered_body())
+    body["turn_capability"].update(
+        {
+            "last_successful_turn_at": "2100-01-01T00:00:00Z",
+            "last_turn_error_at": _iso_now(),
+            "last_turn_error_class": "auth-required",
+        }
+    )
+    h = Harness(tmp_path, "tier-future-success-bot", json.dumps(body))
+    h.marker.touch()
+    proc = h.run()
+    assert proc.returncode == 2
+    assert h.final_log_state() == "HEALTH-UNKNOWN"
+    assert "kickstart" not in h.launchctl_calls()
+    assert h.marker.exists()
+
+
+def test_future_pong_is_health_unknown_not_fresh_recovery(tmp_path):
+    body = json.loads(_recovered_body())
+    body["whatsapp"] = {
+        "connected": False,
+        "connection": {
+            "state": "reconnecting",
+            "last_pong_at": "2100-01-01T00:00:00Z",
+            "auth_failure_class": "none",
+        },
+    }
+    h = Harness(tmp_path, "tier-future-pong-bot", json.dumps(body))
+    proc = h.run()
+    assert proc.returncode == 2
+    assert h.final_log_state() == "HEALTH-UNKNOWN"
+    assert "kickstart" not in h.launchctl_calls()
+
+
+@pytest.mark.parametrize(
+    "token_contents",
+    [
+        None,
+        f'WHATSOUP_HEALTH_TOKEN="{_VALID_TOKEN}"\n',
+        (
+            f"WHATSOUP_HEALTH_TOKEN={_VALID_TOKEN}\n"
+            f"WHATSOUP_HEALTH_TOKEN={'b' * 64}\n"
+        ),
+    ],
+)
+def test_missing_or_malformed_token_is_health_unknown_without_bot_curl(
+    tmp_path, token_contents
+):
+    h = Harness(tmp_path, "tier-invalid-token-bot", _recovered_body())
+    if token_contents is None:
+        h.token_file.unlink()
+    else:
+        h.write_token_file(token_contents)
+    h.marker.touch()
+    proc = h.run()
+    assert proc.returncode == 2
+    assert h.final_log_state() == "HEALTH-UNKNOWN"
+    argv_text = h.curl_argv.read_text(encoding="utf-8")
+    assert "9999/health" not in argv_text
+    assert "--config" not in argv_text
+    assert "kickstart" not in h.launchctl_calls()
+    assert h.marker.exists()
+
+
+def test_non_private_token_file_is_health_unknown(tmp_path):
+    h = Harness(tmp_path, "tier-token-mode-bot", _recovered_body())
+    h.write_token_file(mode=0o644)
+    proc = h.run()
+    assert proc.returncode == 2
+    assert h.final_log_state() == "HEALTH-UNKNOWN"
+    assert "9999/health" not in h.curl_argv.read_text(encoding="utf-8")
+
+
+def test_symlink_token_file_is_health_unknown_without_bot_curl(tmp_path):
+    h = Harness(tmp_path, "tier-token-symlink-bot", _recovered_body())
+    target = h.token_file.with_name("real-token.env")
+    target.write_text(f"WHATSOUP_HEALTH_TOKEN={_VALID_TOKEN}\n", encoding="utf-8")
+    target.chmod(0o600)
+    h.token_file.unlink()
+    h.token_file.symlink_to(target)
+    proc = h.run()
+    assert proc.returncode == 2
+    assert h.final_log_state() == "HEALTH-UNKNOWN"
+    argv_text = h.curl_argv.read_text(encoding="utf-8")
+    assert "9999/health" not in argv_text
+    assert "--config" not in argv_text
+
+
+def test_group_writable_token_directory_is_health_unknown(tmp_path):
+    h = Harness(tmp_path, "tier-token-parent-mode-bot", _recovered_body())
+    h.token_file.parent.chmod(0o770)
+    try:
+        proc = h.run()
+    finally:
+        h.token_file.parent.chmod(0o700)
+    assert proc.returncode == 2
+    assert h.final_log_state() == "HEALTH-UNKNOWN"
+    argv_text = h.curl_argv.read_text(encoding="utf-8")
+    assert "9999/health" not in argv_text
+    assert "--config" not in argv_text
+
+
+def test_valid_token_uses_curl_config_stdin_without_argv_or_environment_leak(tmp_path):
+    h = Harness(tmp_path, "tier-token-transport-bot", _recovered_body())
+    proc = h.run()
+    assert proc.returncode == 0, proc.stderr
+    argv_text = h.curl_argv.read_text(encoding="utf-8")
+    assert "--config" in argv_text
+    assert _VALID_TOKEN not in argv_text
+    assert "Authorization" not in argv_text
+    assert "-H" not in argv_text.splitlines()
+    assert f"Authorization: Bearer {_VALID_TOKEN}" in h.curl_config.read_text(
+        encoding="utf-8"
+    )
+
+
+def test_future_cooldown_stamp_does_not_suppress_restart_and_exits_nonzero(tmp_path):
+    h = Harness(tmp_path, "tier-future-stamp-bot", _unknown_body())
+    h.write_curl_stub("", bot_unreachable=True)
+    stamp = h.log_dir / "com.whatsoup.tier-future-stamp-bot.last-restart"
+    stamp.write_text("4102444800\n", encoding="utf-8")
+    proc = h.run()
+    assert proc.returncode != 0
+    assert "kickstart -k" in h.launchctl_calls()
+    assert h.final_log_state() == "RESTARTED"
+    assert int(stamp.read_text(encoding="utf-8")) < 4102444800
+
+
+def test_future_cooldown_with_failed_kickstart_is_restart_failed(tmp_path):
+    h = Harness(tmp_path, "tier-future-stamp-kickfail-bot", _unknown_body())
+    h.write_curl_stub("", bot_unreachable=True)
+    h.write_launchctl_stub(kickstart_rc=1)
+    stamp = h.log_dir / "com.whatsoup.tier-future-stamp-kickfail-bot.last-restart"
+    stamp.write_text("4102444800\n", encoding="utf-8")
+    proc = h.run()
+    assert proc.returncode != 0
+    assert "kickstart -k" in h.launchctl_calls()
+    assert h.final_log_state() == "RESTART-FAILED"
+    assert stamp.read_text(encoding="utf-8") == "4102444800\n"
+
+
+def test_bootstrap_failure_is_nonzero_and_not_final_ok(tmp_path):
+    h = Harness(tmp_path, "tier-bootstrap-fail-bot", _recovered_body())
+    h.write_launchctl_stub(print_rc=1, bootstrap_rc=1)
+    proc = h.run()
+    assert proc.returncode != 0
+    assert h.final_log_state() == "ERROR"
+    assert "bootstrap" in h.launchctl_calls()
+
+
+def test_log_rotation_failure_is_nonzero_and_observable(tmp_path):
+    h = Harness(tmp_path, "tier-rotation-fail-bot", _recovered_body())
+    h.log.write_text("x" * 1048600, encoding="utf-8")
+    tail = h.home / ".local" / "bin" / "tail"
+    tail.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    tail.chmod(0o755)
+    proc = h.run()
+    assert proc.returncode != 0
+    assert "rotation" in h.log.read_text(encoding="utf-8").lower()
+    assert h.final_log_state() == "ERROR"
+
+
+def test_post_preflight_log_append_failure_is_nonzero_and_visible_on_stderr(tmp_path):
+    if os.geteuid() == 0:
+        pytest.skip("root can append despite the permission fixture")
+    h = Harness(tmp_path, "tier-log-append-fail-bot", _recovered_body())
+    h.write_launchctl_stub(make_log_readonly_on_print=True)
+    try:
+        proc = h.run()
+    finally:
+        h.log.chmod(0o600)
+    assert proc.returncode != 0
+    assert "failed to append to log" in proc.stderr
+
+
+def test_fleet_kickstart_failure_is_restart_failed_without_cooldown(tmp_path):
+    h = Harness(tmp_path, "tier-fleet-kickfail-bot", _recovered_body(), fleet_ok=False)
+    h.write_launchctl_stub(kickstart_rc=1)
+    proc = h.run()
+    assert proc.returncode != 0
+    assert h.final_log_state() == "RESTART-FAILED"
+    assert "com.whatsoup.whatsoup-fleet" in h.launchctl_calls()
+    stamp = h.log_dir / "com.whatsoup.whatsoup-fleet.last-restart"
+    assert not stamp.exists()
 
 
 if __name__ == "__main__":

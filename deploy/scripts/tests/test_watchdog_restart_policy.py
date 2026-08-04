@@ -193,7 +193,6 @@ class TestDatabaseCompatibilityDrainNoRestart:
     def test_malformed_inspection_body_is_restart_worthy(self):
         cases = [
             (("status",), "degraded"),
-            (("generated_at",), "not-a-date"),
             (("instance", "pid"), 0),
             (("instance", "mode"), "runtime"),
             (("service_mode",), "database_compatibility_drain"),
@@ -226,6 +225,11 @@ class TestDatabaseCompatibilityDrainNoRestart:
                 f"malformed field must fail closed: path={path!r} value={value!r}"
             )
 
+    def test_malformed_inspection_timestamp_is_health_unknown(self):
+        body = self._body()
+        body["generated_at"] = "not-a-date"
+        assert _run_decision(body, 503) == 6
+
     def test_partial_inspection_body_is_restart_worthy(self):
         cases = [
             ("startup_block",),
@@ -237,7 +241,6 @@ class TestDatabaseCompatibilityDrainNoRestart:
             ("admission", "provider_turns"),
             ("admission", "synthetic_turns"),
             ("runtime", "agent"),
-            ("whatsapp", "connection"),
             ("durability",),
         ]
         for path in cases:
@@ -249,6 +252,11 @@ class TestDatabaseCompatibilityDrainNoRestart:
             assert _run_decision(body, 503) == 1, (
                 f"missing field must fail closed: path={path!r}"
             )
+
+    def test_missing_connection_object_is_health_unknown(self):
+        body = self._body()
+        del body["whatsapp"]["connection"]
+        assert _run_decision(body, 503) == 6
 
 
 def _run_rendered_unreachable_watchdog(
@@ -262,6 +270,13 @@ def _run_rendered_unreachable_watchdog(
     binroot = home / ".local" / "bin"
     binroot.mkdir(parents=True)
     calls = binroot / "launchctl.calls"
+    token_file = home / ".config" / "whatsoup" / "instances" / bot_name / "tokens.env"
+    token_file.parent.mkdir(parents=True)
+    token_file.write_text(
+        f"WHATSOUP_HEALTH_TOKEN={'a' * 64}\n",
+        encoding="utf-8",
+    )
+    token_file.chmod(0o600)
 
     rendered = (
         _TEMPLATE.read_text(encoding="utf-8")
@@ -488,8 +503,8 @@ class TestRestartOnLivenessFailure:
         }
         assert _run_decision(body) == 1
 
-    def test_unparseable_pong_fails_closed_and_restarts(self):
-        # A malformed pong timestamp must not silently pass; it fails closed.
+    def test_unparseable_pong_is_health_unknown(self):
+        # A malformed timestamp is not trustworthy restart evidence.
         body = {
             "status": "degraded",
             "whatsapp": {
@@ -497,7 +512,18 @@ class TestRestartOnLivenessFailure:
                 "connection": {"state": "reconnecting", "last_pong_at": "not-a-date"},
             },
         }
-        assert _run_decision(body) == 1
+        assert _run_decision(body) == 6
+
+    @pytest.mark.parametrize("last_pong", ["2026-08-03T12:00:00", float("nan")])
+    def test_naive_or_nonfinite_pong_is_health_unknown(self, last_pong):
+        body = {
+            "status": "degraded",
+            "whatsapp": {
+                "connected": False,
+                "connection": {"state": "reconnecting", "last_pong_at": last_pong},
+            },
+        }
+        assert _run_decision(body) == 6
 
 
 class TestRecoveringConnectionNoRestart:

@@ -63,7 +63,13 @@ if ! : >> "$LOG" 2>/dev/null; then
 fi
 
 ts() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
-log() { print -- "$(ts) $*" >> "$LOG"; }
+log() {
+  if ! print -- "$(ts) $*" >> "$LOG"; then
+    WD_EXIT=1
+    print -u2 -- "watchdog: failed to append to log"
+    return 1
+  fi
+}
 
 # mkdir-based mutex with pid-stamp + age staleness. Held only while the
 # stamped pid is alive AND the lock is younger than stale_after seconds; a
@@ -108,18 +114,6 @@ acquire_mutex() {
   return 1
 }
 
-# #2515: the diagnostic health body is auth-gated; unauthenticated reads get
-# the minimal public liveness envelope, whose missing whatsapp/turn_capability
-# fields would read as restart-worthy (connected=false/state=None) and starve
-# the CREDENTIAL-DEAD branch of turn_capability entirely. Send the instance
-# bearer from tokens.env when one resolves; the token reaches curl argv only,
-# never the log.
-BOT_TOKENS_ENV="$HOME_DIR/.config/whatsoup/instances/BOT_NAME/tokens.env"
-WHATSOUP_HEALTH_TOKEN=""
-[ -r "$BOT_TOKENS_ENV" ] && WHATSOUP_HEALTH_TOKEN="$(sed -n 's/^WHATSOUP_HEALTH_TOKEN=//p' "$BOT_TOKENS_ENV" | head -1)"
-AUTH_ARGS=()
-[ -n "$WHATSOUP_HEALTH_TOKEN" ] && AUTH_ARGS=(-H "Authorization: Bearer $WHATSOUP_HEALTH_TOKEN")
-
 # Single-instance lock: if another watchdog invocation is still running, exit
 # — but say so in the log, and reclaim stale locks (a SIGKILLed prior run must
 # not disable the watchdog forever).
@@ -129,14 +123,6 @@ if ! acquire_mutex "$LOCK" 600; then
 fi
 trap 'rm -rf "$LOCK" 2>/dev/null || true' EXIT
 
-# Rotate log if it exceeds 1 MB.
-if [ -f "$LOG" ]; then
-  size=$(wc -c < "$LOG" 2>/dev/null || echo 0)
-  if [ "${size:-0}" -gt 1048576 ]; then
-    tail -n 500 "$LOG" > "$LOG.tmp" 2>/dev/null && mv "$LOG.tmp" "$LOG"
-  fi
-fi
-
 # Final-log state ladder (upgrade-only). The last log line of each run is the
 # single machine-readable outcome; a higher-priority state must not be
 # overwritten by a later, lower-priority one (the fleet check runs after the
@@ -145,8 +131,10 @@ fi
 # outranks a fleet one within the tier.
 wd_rank() {
   case "$1" in
-    CREDENTIAL-DEAD) print 4 ;;
-    RESTARTED|RESTART-SUPPRESSED|RESTART-FAILED) print 3 ;;
+    CREDENTIAL-DEAD) print 6 ;;
+    HEALTH-UNKNOWN) print 5 ;;
+    RESTARTED|RESTART-SUPPRESSED|RESTART-FAILED) print 4 ;;
+    ERROR) print 3 ;;
     CREDENTIAL-UNKNOWN) print 2 ;;
     *) print 1 ;;
   esac
@@ -156,6 +144,25 @@ wd_note() {
     WD_FINAL="$1"
   fi
 }
+health_unknown() {
+  log "HEALTH-UNKNOWN: $1"
+  wd_note HEALTH-UNKNOWN
+  WD_EXIT=2
+}
+
+# Rotate log if it exceeds 1 MB. This runs after the state ladder is available
+# so a rotation error participates in the same upgrade-only final outcome.
+if [ -f "$LOG" ]; then
+  size=$(wc -c < "$LOG" 2>/dev/null || echo 0)
+  if [ "${size:-0}" -gt 1048576 ]; then
+    if ! tail -n 500 "$LOG" > "$LOG.tmp" 2>/dev/null || ! mv "$LOG.tmp" "$LOG" 2>/dev/null; then
+      wd_note ERROR
+      WD_EXIT=1
+      rm -f "$LOG.tmp" 2>/dev/null || true
+      log "ERROR: log rotation failed"
+    fi
+  fi
+fi
 
 domain="gui/$(id -u)"
 
@@ -164,7 +171,12 @@ ensure_loaded() {
   local job_label="$1" plist="$2"
   if ! launchctl print "$domain/$job_label" >/dev/null 2>&1; then
     log "$job_label not loaded; bootstrapping"
-    launchctl bootstrap "$domain" "$plist" >> "$LOG" 2>&1 || true
+    if ! launchctl bootstrap "$domain" "$plist" >> "$LOG" 2>&1; then
+      log "ERROR: bootstrap failed for $job_label"
+      wd_note ERROR
+      WD_EXIT=1
+      return 1
+    fi
   fi
 }
 
@@ -221,6 +233,12 @@ restart_label() {
       last=0
       ;;
   esac
+  if [ "$last" -gt $((now + 5)) ]; then
+    log "ERROR: restart cooldown stamp is in the future for $job_label; ignoring invalid state"
+    wd_note ERROR
+    WD_EXIT=1
+    last=0
+  fi
   if [ $((now - last)) -lt 300 ]; then
     log "$job_label unhealthy but restart suppressed by cooldown: $reason"
     wd_note RESTART-SUPPRESSED
@@ -248,6 +266,105 @@ ensure_loaded "$BOT_LABEL" "$BOT_PLIST"
 ensure_loaded "$FLEET_LABEL" "$FLEET_PLIST"
 
 # --- Bot health check ---
+# The diagnostic body is auth-gated. Read the transitional token file through
+# a verified descriptor using the same contract as src/fleet/health-token-file.ts.
+# The validated token remains in an unexported shell variable and is sent to
+# curl through config stdin, never argv, the environment, a new file, or logs.
+BOT_TOKENS_ENV="$HOME_DIR/.config/whatsoup/instances/BOT_NAME/tokens.env"
+read_health_token() {
+  python3 - "$BOT_TOKENS_ENV" <<'PY'
+import os
+import re
+import stat
+import sys
+
+PREFIX = b"WHATSOUP_HEALTH_TOKEN="
+MAX_BYTES = len(PREFIX) + 64 + 1
+TOKEN_RE = re.compile(r"[0-9a-f]{64}\Z")
+
+
+def reject():
+    print("watchdog: diagnostic health token file rejected", file=sys.stderr)
+    raise SystemExit(1)
+
+
+path = sys.argv[1]
+parent = os.path.dirname(path)
+uid = os.geteuid()
+fd = None
+try:
+    directory_before = os.lstat(parent)
+    if (
+        stat.S_ISLNK(directory_before.st_mode)
+        or not stat.S_ISDIR(directory_before.st_mode)
+        or directory_before.st_uid != uid
+        or directory_before.st_mode & 0o022
+    ):
+        reject()
+
+    file_before = os.lstat(path)
+    if (
+        stat.S_ISLNK(file_before.st_mode)
+        or not stat.S_ISREG(file_before.st_mode)
+        or file_before.st_uid != uid
+        or stat.S_IMODE(file_before.st_mode) != 0o600
+    ):
+        reject()
+
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    fd = os.open(path, flags)
+    opened = os.fstat(fd)
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or opened.st_uid != uid
+        or stat.S_IMODE(opened.st_mode) != 0o600
+        or (file_before.st_dev, file_before.st_ino) != (opened.st_dev, opened.st_ino)
+    ):
+        reject()
+
+    directory_after = os.lstat(parent)
+    if (
+        stat.S_ISLNK(directory_after.st_mode)
+        or not stat.S_ISDIR(directory_after.st_mode)
+        or directory_after.st_uid != uid
+        or directory_after.st_mode & 0o022
+        or (directory_before.st_dev, directory_before.st_ino)
+        != (directory_after.st_dev, directory_after.st_ino)
+    ):
+        reject()
+
+    if opened.st_size > MAX_BYTES:
+        reject()
+    chunks = []
+    remaining = MAX_BYTES + 1
+    while remaining:
+        chunk = os.read(fd, remaining)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    contents = b"".join(chunks)
+    if len(contents) > MAX_BYTES:
+        reject()
+    try:
+        text = contents.decode("utf-8")
+    except UnicodeDecodeError:
+        reject()
+    line = text[:-1] if text.endswith("\n") else text
+    if "\n" in line or not line.startswith(PREFIX.decode("ascii")):
+        reject()
+    token = line[len(PREFIX):]
+    if TOKEN_RE.fullmatch(token) is None:
+        reject()
+    print(token)
+except (OSError, ValueError):
+    reject()
+finally:
+    if fd is not None:
+        os.close(fd)
+PY
+}
+
 # Capture the body EVEN on an HTTP error status. A logged-out / terminally
 # auth-failed bot returns HTTP 503 *with* a body carrying
 # whatsapp.connection.auth_failure_class — `curl --fail` would discard that body
@@ -255,22 +372,75 @@ ensure_loaded "$FLEET_LABEL" "$FLEET_PLIST"
 # restart cannot fix. So: no --fail; capture body + code; treat only a real
 # TRANSPORT failure (no HTTP response at all) as unreachable, and let the
 # decision block below act on the body (incl. the terminal-no-restart branch).
-bot_resp="$(curl --silent --show-error --max-time 8 "${AUTH_ARGS[@]}" -w $'\n%{http_code}' "$BOT_HEALTH" 2>>"$LOG")"
-curl_rc=$?
-bot_code="${bot_resp##*$'\n'}"
-bot_json="${bot_resp%$'\n'*}"
-if [ "$curl_rc" -ne 0 ] || [ -z "$bot_code" ]; then
-  restart_label "$BOT_LABEL" "health endpoint unreachable"
-elif [ -z "$bot_json" ]; then
-  restart_label "$BOT_LABEL" "empty health body (http=$bot_code)"
-else
-  BOT_JSON="$bot_json" BOT_CODE="$bot_code" python3 - <<'PY' 2>>"$LOG"
+HEALTH_TOKEN=""
+if HEALTH_TOKEN="$(read_health_token 2>>"$LOG")"; then
+  bot_resp="$(print -r -- "header = \"Authorization: Bearer $HEALTH_TOKEN\"" | curl --config - --silent --show-error --max-time 8 -w $'\n%{http_code}' "$BOT_HEALTH" 2>>"$LOG")"
+  curl_rc=$?
+  HEALTH_TOKEN=""
+  bot_code="${bot_resp##*$'\n'}"
+  bot_json="${bot_resp%$'\n'*}"
+  if [ "$curl_rc" -ne 0 ] || [ -z "$bot_code" ]; then
+    restart_label "$BOT_LABEL" "health endpoint unreachable"
+  elif [ -z "$bot_json" ]; then
+    health_unknown "empty diagnostic health body"
+  elif [ "$(LC_ALL=C print -rn -- "$bot_json" | wc -c)" -gt 65536 ]; then
+    health_unknown "diagnostic health body exceeds 65536 bytes"
+  else
+    BOT_JSON="$bot_json" BOT_CODE="$bot_code" python3 - <<'PY' 2>>"$LOG"
 import datetime as dt
 import json
+import math
 import os
 import sys
 
-data = json.loads(os.environ["BOT_JSON"])
+
+class DuplicateKeyError(ValueError):
+    pass
+
+
+def reject_duplicate_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise DuplicateKeyError("duplicate JSON key")
+        result[key] = value
+    return result
+
+
+try:
+    data = json.loads(os.environ["BOT_JSON"], object_pairs_hook=reject_duplicate_keys)
+except (DuplicateKeyError, json.JSONDecodeError, TypeError, ValueError):
+    print("untrusted diagnostic health JSON", file=sys.stderr)
+    sys.exit(6)
+if not isinstance(data, dict):
+    print("untrusted diagnostic health object shape", file=sys.stderr)
+    sys.exit(6)
+now_timestamp = dt.datetime.now(dt.timezone.utc).timestamp()
+
+
+def evidence_timestamp(value, label):
+    if value is None:
+        return None
+    parsed = None
+    if isinstance(value, bool):
+        pass
+    elif isinstance(value, (int, float)):
+        candidate = float(value)
+        if math.isfinite(candidate):
+            parsed = candidate
+    elif isinstance(value, str):
+        try:
+            candidate = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if candidate.tzinfo is not None:
+                parsed = candidate.timestamp()
+        except (OSError, OverflowError, ValueError):
+            pass
+    if parsed is None or not math.isfinite(parsed) or parsed > now_timestamp + 5:
+        print(f"untrusted {label} timestamp", file=sys.stderr)
+        sys.exit(6)
+    return parsed
+
+
 http_code = os.environ.get("BOT_CODE")
 expected_instance_name = "BOT_NAME"
 status = data.get("status")
@@ -282,18 +452,26 @@ generated_at = data.get("generated_at")
 instance_raw = data.get("instance")
 instance = instance_raw if isinstance(instance_raw, dict) else {}
 instance_shape_valid = instance_raw is None or isinstance(instance_raw, dict)
-whatsapp = data.get("whatsapp") or {}
-conn = whatsapp.get("connection") or {}
+whatsapp_raw = data.get("whatsapp")
+if not isinstance(whatsapp_raw, dict):
+    print("untrusted whatsapp health object shape", file=sys.stderr)
+    sys.exit(6)
+whatsapp = whatsapp_raw
+conn_raw = whatsapp.get("connection")
+if not isinstance(conn_raw, dict):
+    print("untrusted connection health object shape", file=sys.stderr)
+    sys.exit(6)
+conn = conn_raw or {}
+if not instance_shape_valid:
+    print("untrusted instance health object shape", file=sys.stderr)
+    sys.exit(6)
 connected = whatsapp.get("connected") is True
 state = conn.get("state")
 last_pong = conn.get("last_pong_at")
 auth_failure_class = conn.get("auth_failure_class")
-try:
-    generated_time = dt.datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
-    generated_age = (dt.datetime.now(dt.timezone.utc) - generated_time).total_seconds()
-    generated_is_fresh = -5 <= generated_age <= 60
-except (AttributeError, TypeError, ValueError):
-    generated_is_fresh = False
+generated_timestamp = evidence_timestamp(generated_at, "diagnostic generation")
+generated_age = None if generated_timestamp is None else now_timestamp - generated_timestamp
+generated_is_fresh = generated_age is not None and -5 <= generated_age <= 60
 
 # A compatibility drain is a deliberate, health-visible stop before transport,
 # recovery, providers, or timers exist. Restarting cannot make an older binary
@@ -393,16 +571,10 @@ if auth_failure_class in TERMINAL_AUTH_FAILURES:
 STALE_PONG_SECONDS = 360
 RECOVERING_STATES = ("connecting", "reconnecting", "cooldown")
 
-# Parse the pong age once. `None` means absent; `pong_parse_failed` means a
-# value was present but unparseable (fail closed — never silently pass).
-pong_age = None
-pong_parse_failed = False
-if last_pong:
-    try:
-        parsed = dt.datetime.fromisoformat(str(last_pong).replace("Z", "+00:00"))
-        pong_age = (dt.datetime.now(dt.timezone.utc) - parsed).total_seconds()
-    except (ValueError, TypeError):
-        pong_parse_failed = True
+# Parse the pong age once. Invalid, offset-naive, non-finite, and future
+# evidence is HEALTH-UNKNOWN rather than restart evidence.
+pong_timestamp = evidence_timestamp(last_pong, "whatsapp pong")
+pong_age = None if pong_timestamp is None else now_timestamp - pong_timestamp
 
 # A bot that is disconnected but actively *recovering* (connecting/reconnecting/
 # cooldown) with FRESH liveness (a recent pong) is making progress on its own.
@@ -414,7 +586,6 @@ recovering_with_fresh_pong = (
     not connected
     and state in RECOVERING_STATES
     and pong_age is not None
-    and not pong_parse_failed
     and pong_age <= STALE_PONG_SECONDS
 )
 
@@ -431,11 +602,9 @@ if not recovering_with_fresh_pong:
     if state != "connected":
         reasons.append(f"state={state!r}")
 # A stale pong is an authoritative liveness failure regardless of state; a
-# malformed pong fails closed and is treated as restart-worthy.
+# invalid pong evidence has already exited HEALTH-UNKNOWN above.
 if pong_age is not None and pong_age > STALE_PONG_SECONDS:
     reasons.append(f"last_pong_age={pong_age:.0f}s")
-elif pong_parse_failed:
-    reasons.append("last_pong_unparseable")
 
 if reasons:
     print("; ".join(reasons), file=sys.stderr)
@@ -455,6 +624,9 @@ if reasons:
 # Exits 4/5 never restart and never touch the marker; the shell ORs exit 5
 # with marker presence to pick the CREDENTIAL-UNKNOWN final log state.
 turn_capability_raw = data.get("turn_capability")
+if turn_capability_raw is not None and not isinstance(turn_capability_raw, dict):
+    print("untrusted turn capability object shape", file=sys.stderr)
+    sys.exit(6)
 turn_capability = turn_capability_raw if isinstance(turn_capability_raw, dict) else {}
 model_status = turn_capability.get("model_usability_status")
 model_usable = turn_capability.get("model_usable")
@@ -465,21 +637,8 @@ last_error = turn_capability.get("last_turn_error_at")
 fallback_reason = instance.get("fallbackReason")
 
 
-def comparable_time(value):
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str):
-        try:
-            return dt.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
-        except ValueError:
-            return None
-    return None
-
-
-success_time = comparable_time(last_success)
-error_time = comparable_time(last_error)
+success_time = evidence_timestamp(last_success, "last successful turn")
+error_time = evidence_timestamp(last_error, "last turn error")
 auth_error_superseded = (
     last_error_class == "auth-required"
     and success_time is not None
@@ -542,6 +701,8 @@ PY
     if [ "$py_rc" -eq 5 ] || [ -e "$CRED_MARKER" ]; then
       wd_note CREDENTIAL-UNKNOWN
     fi
+  elif [ "$py_rc" -eq 6 ]; then
+    health_unknown "untrusted diagnostic health evidence"
   elif [ "$py_rc" -ne 0 ]; then
     restart_label "$BOT_LABEL" "unhealthy JSON response"
   else
@@ -554,6 +715,10 @@ PY
       fi
     fi
   fi
+  fi
+else
+  HEALTH_TOKEN=""
+  health_unknown "diagnostic health token unavailable"
 fi
 
 # --- Fleet console health check ---
