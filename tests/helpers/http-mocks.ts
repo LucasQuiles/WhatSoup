@@ -92,6 +92,42 @@ export function mockRes(): MockRes {
   return res as unknown as MockRes;
 }
 
+export type MockSseRes = ServerResponse & { _status: number; _chunks: string[]; _ended: boolean };
+
+export function mockSseRes(): MockSseRes {
+  const res = {
+    _status: 0,
+    _headers: {} as Record<string, string>,
+    _chunks: [] as string[],
+    _ended: false,
+    writeHead(status: number, headers?: Record<string, string>) {
+      res._status = status;
+      if (headers) Object.assign(res._headers, headers);
+      return res;
+    },
+    setHeader(name: string, value: string | number | readonly string[]) {
+      res._headers[name] = Array.isArray(value) ? value.join(', ') : String(value);
+      return res;
+    },
+    write(chunk: string) {
+      res._chunks.push(chunk);
+      return true;
+    },
+    end(data?: string) {
+      if (data) res._chunks.push(data);
+      res._ended = true;
+      return res;
+    },
+    // ServerResponse is an EventEmitter; createSSEWriter (src/fleet/sse-helpers.ts)
+    // attaches an 'error' listener (#2292 L7), so a fake without `on` is an
+    // incomplete fake for any consumer that constructs an SSE writer around it.
+    on() {
+      return res;
+    },
+  };
+  return res as unknown as MockSseRes;
+}
+
 function mockServiceManager() {
   return {
     enable: vi.fn().mockResolvedValue(undefined),

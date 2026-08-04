@@ -8,8 +8,6 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import type { ServerResponse } from 'node:http';
-
 const { mockLogWarn } = vi.hoisted(() => ({ mockLogWarn: vi.fn() }));
 
 vi.mock('../../../src/logger.ts', () => ({
@@ -37,34 +35,7 @@ import type { DiscoveredInstance } from '../../../src/fleet/discovery.ts';
 import { privateConfigLockPath } from '../../../src/core/private-config-file.ts';
 import { acquireProcessLock, releaseProcessLock } from '../../../src/lib/process-lock.ts';
 import { spawn } from 'node:child_process';
-import { mockReq } from '../../helpers/http-mocks.ts';
-
-function mockSseRes(): ServerResponse & { _chunks: string[]; _ended: boolean } {
-  const res = {
-    _status: 0,
-    _headers: {} as Record<string, string>,
-    _chunks: [] as string[],
-    _ended: false,
-    writeHead(status: number, headers?: Record<string, string>) {
-      res._status = status;
-      if (headers) Object.assign(res._headers, headers);
-    },
-    write(chunk: string) {
-      res._chunks.push(chunk);
-      return true;
-    },
-    end(data?: string) {
-      if (data) res._chunks.push(data);
-      res._ended = true;
-    },
-    // ServerResponse is an EventEmitter; createSSEWriter attaches an 'error'
-    // listener (#2292 L7), so a fake without `on` is an incomplete fake.
-    on() {
-      return res;
-    },
-  };
-  return res as unknown as ServerResponse & { _chunks: string[]; _ended: boolean };
-}
+import { mockReq, mockSseRes } from '../../helpers/http-mocks.ts';
 
 function fakeInstance(overrides: Partial<DiscoveredInstance> = {}): DiscoveredInstance {
   return {
