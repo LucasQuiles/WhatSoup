@@ -40,7 +40,7 @@ vi.mock('../../src/lib/keyring.ts', () => ({
 
 const mockedLookupCredential = vi.mocked(lookupCredential);
 
-import { mockReq, mockRes } from '../helpers/http-mocks.ts';
+import { makeDeps, mockReq, mockRes } from '../helpers/http-mocks.ts';
 
 function makeDeps(): OpsDeps {
   return {
