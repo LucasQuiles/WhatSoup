@@ -159,6 +159,24 @@ export class WhatSoupSocketServer {
       socket.setEncoding('utf8');
       let buf = '';
 
+      // L1: backpressure-aware write — if the internal buffer is full (write returns
+      // false), pause reads and resume on 'drain'. Each call site preserves its own
+      // distinct error-log message for debugging.
+      const writeResponse = (response: JsonRpcResponse, errorMsg: string): boolean => {
+        try {
+          const raw = JSON.stringify(response) + '\n';
+          if (!socket.write(raw)) {
+            log.warn({ clientId, errorMsg }, 'socket write buffer full — applying backpressure');
+            socket.pause();
+            socket.once('drain', () => socket.resume());
+          }
+          return true;
+        } catch (err) {
+          log.error({ err }, errorMsg);
+          return false;
+        }
+      };
+
       socket.on('close', () => {
         abortController.abort(); // Signal all pending tool calls for this client
         this.connectionSessions.delete(clientId);
@@ -194,11 +212,7 @@ export class WhatSoupSocketServer {
               id: null,
               error: { code: -32700, message: 'Parse error' },
             };
-            try {
-              socket.write(JSON.stringify(response) + '\n');
-            } catch (err) {
-              log.error({ err }, 'failed to write parse error response');
-            }
+            writeResponse(response, 'failed to write parse error response');
             continue;
           }
 
@@ -222,11 +236,7 @@ export class WhatSoupSocketServer {
           if (this.actorResolver) requestSession.actorJid = this.actorResolver();
           void this.handleRequest(req, requestSession).then((response) => {
             if (response !== null) {
-              try {
-                socket.write(JSON.stringify(response) + '\n');
-              } catch (err) {
-                log.error({ err }, 'failed to write response');
-              }
+              writeResponse(response, 'failed to write response');
             }
           }).catch(err => log.error({ err }, 'request handler failed'));
         }
