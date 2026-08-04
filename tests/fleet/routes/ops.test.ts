@@ -7,7 +7,6 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { PassThrough } from 'node:stream';
 import { EventEmitter } from 'node:events';
-import type { ServerResponse } from 'node:http';
 import {
   handleSend,
   handleAccessUpdate,
@@ -60,18 +59,17 @@ import { mcpCall } from '../../../src/fleet/mcp-client.ts';
 import { proxyToInstance } from '../../../src/fleet/http-proxy.ts';
 import { execFile, spawn } from 'node:child_process';
 import { lookupCredential } from '../../../src/lib/keyring.ts';
-import { mockReq, mockRes } from '../../helpers/http-mocks.ts';
+import { mockReq, mockRes, mockSseRes } from '../../helpers/http-mocks.ts';
 
 // ---------------------------------------------------------------------------
 // Mock helpers
 // ---------------------------------------------------------------------------
 //
-// mockReq/mockRes migrated onto the shared helper (#2240 umbrella). mockSseRes,
+// mockReq/mockRes/mockSseRes migrated onto the shared helper (#2240/#2923 umbrella).
 // fakeInstance, fakeChildProcess, mockServiceManager, and makeDeps below stay
-// local — mockSseRes because tests/helpers/http-mocks.ts does not export an
-// SSE response fake (same choice ops-gaps.test.ts made); the rest because of
-// two behavioral divergences from the shared makeDeps/mockServiceManager that
-// this file's handleAuth coverage genuinely depends on:
+// local because of two behavioral divergences from the shared
+// makeDeps/mockServiceManager that this file's handleAuth coverage genuinely
+// depends on:
 //   1. The shared mockServiceManager's `startFire` is a bare `vi.fn()`.
 //      handleAuth (src/fleet/routes/ops.ts:1415, :1331) calls
 //      `startFire(name, onComplete)` and only calls `endOnce()` /
@@ -88,36 +86,6 @@ import { mockReq, mockRes } from '../../helpers/http-mocks.ts';
 //      spread instead, so `makeDeps({ discovery: { getInstance, scan } })`
 //      produces a discovery with exactly those two keys — several tests here
 //      assert against a discovery mock with a deliberately narrow surface.
-
-function mockSseRes(): ServerResponse & {
-  _status: number;
-  _headers: Record<string, string>;
-  _chunks: string[];
-  _ended: boolean;
-} {
-  const res = {
-    _status: 0,
-    _headers: {} as Record<string, string>,
-    _chunks: [] as string[],
-    _ended: false,
-    writeHead(status: number, headers?: Record<string, string>) {
-      res._status = status;
-      if (headers) Object.assign(res._headers, headers);
-    },
-    write(chunk: string) {
-      res._chunks.push(chunk);
-      return true;
-    },
-    end(data?: string) {
-      if (data) res._chunks.push(data);
-      res._ended = true;
-    },
-    on() {
-      return res;
-    },
-  };
-  return res as any;
-}
 
 function fileMode(filePath: string): number {
   return fs.statSync(filePath).mode & 0o777;
