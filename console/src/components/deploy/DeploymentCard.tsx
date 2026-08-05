@@ -31,7 +31,7 @@ const STATE_CLASS: Record<string, string> = {
   crit: 'deploy-st--crit',
 }
 
-export function DeploymentCard({ lines }: { lines: LineInstance[] }) {
+export function DeploymentCard({ lines, queryError }: { lines: LineInstance[]; queryError?: boolean }) {
   const navigate = useNavigate()
   const { data: version } = useQuery({
     queryKey: ['version'],
@@ -45,7 +45,7 @@ export function DeploymentCard({ lines }: { lines: LineInstance[] }) {
     retry: false,
   })
 
-  const state = deploymentStateOf(lines)
+  const state = deploymentStateOf(lines, queryError)
   const online = countOnline(lines)
   const channelCounts = channelCountsOf(lines)
   const agents = agentLinesOf(lines)

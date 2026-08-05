@@ -25,8 +25,13 @@ export const DEPLOYMENT_STATE_LABEL: Record<DeploymentState, string> = {
 
 /** Worst-of line statuses. unreachable/config_error escalate to crit;
  *  degraded/unknown/logged_out read as warn; an empty fleet is healthy by
- *  definition (nothing is wrong yet — honest zero). */
-export function deploymentStateOf(lines: readonly LineInstance[]): DeploymentState {
+ *  definition (nothing is wrong yet — honest zero). A failed deployments
+ *  query is crit: the fleet state is unknown, not healthy. */
+export function deploymentStateOf(
+  lines: readonly LineInstance[],
+  queryError?: boolean,
+): DeploymentState {
+  if (queryError) return 'crit'
   let sawWarn = false
   for (const line of lines) {
     if (line.status === 'unreachable' || line.status === 'config_error') return 'crit'
