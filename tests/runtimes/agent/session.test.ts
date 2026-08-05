@@ -1062,7 +1062,7 @@ describe('SessionManager', () => {
     const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: (event) => events.push(event) });
     await sm.spawnSession();
 
-    const state = sm as unknown as { stdoutChunks?: Buffer[]; stdoutBufferStr?: string };
+    const state = sm as unknown as { stdoutChunks?: string[]; stdoutBufferStr?: string };
 
     mockChild.stdout.emit('data', Buffer.from('{"type":"system","subtype":"init",'));
 
@@ -2107,6 +2107,79 @@ describe('SessionManager', () => {
     // Advance past toolB's grace — second assessment fires
     await vi.advanceTimersByTimeAsync(STALLED_OP_KILL_GRACE_MS + 1);
     expect(treeLivenessAssessor).toHaveBeenCalledTimes(2);
+
+    vi.useRealTimers();
+  });
+
+  it('stalled-op rearm does not overwrite a newer timer armed during assessment (#2235)', async () => {
+    vi.useFakeTimers();
+
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    let resolveFirstAssessment!: (verdict: {
+      alive: boolean; cpuDeltaMs: number; pidChurn: number; pidCount: number;
+    }) => void;
+    const treeLivenessAssessor = vi.fn(() => new Promise<{
+      alive: boolean; cpuDeltaMs: number; pidChurn: number; pidCount: number;
+    }>((resolve) => { resolveFirstAssessment = resolve; }));
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(), treeLivenessAssessor,
+    });
+    await sm.spawnSession();
+    await sm.sendTurn('long tool');
+
+    // Arm the first stalled-op kill.
+    sm.recoverStalledOperation('toolu_race', 'Bash');
+    await vi.advanceTimersByTimeAsync(STALLED_OP_KILL_GRACE_MS + 1);
+    expect(treeLivenessAssessor).toHaveBeenCalledOnce();
+
+    // While the first assessment is pending, provider progress + a new stall fire.
+    // tickWatchdog increments livenessProgressEpoch and clears the stalled-op kill.
+    sm.tickWatchdog();
+    // The old rearm closure captured fireEpoch; it must see the epoch changed.
+    resolveFirstAssessment({ alive: true, cpuDeltaMs: 1_000, pidChurn: 0, pidCount: 3 });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // The old rearm must NOT have set a timer (epoch changed → compare-and-swap guard).
+    // If it did, the timer handle would be non-null but tracking the wrong (old) closure.
+    // The old kill must not fire.
+    expect((sm as unknown as { stalledOpKill: unknown }).stalledOpKill).toBeNull();
+
+    vi.useRealTimers();
+  });
+
+  it('managed session appearing during assessment invalidates the stale child-based kill (#2235)', async () => {
+    vi.useFakeTimers();
+
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    let resolveAssessment!: (verdict: {
+      alive: boolean; cpuDeltaMs: number; pidChurn: number; pidCount: number;
+    }) => void;
+    const treeLivenessAssessor = vi.fn(() => new Promise<{
+      alive: boolean; cpuDeltaMs: number; pidChurn: number; pidCount: number;
+    }>((resolve) => { resolveAssessment = resolve; }));
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(), treeLivenessAssessor,
+    });
+    await sm.spawnSession();
+    await sm.sendTurn('long tool');
+
+    sm.recoverStalledOperation('toolu_managed_switch', 'Bash');
+    await vi.advanceTimersByTimeAsync(STALLED_OP_KILL_GRACE_MS + 1);
+    expect(treeLivenessAssessor).toHaveBeenCalledOnce();
+
+    // While assessment is pending, a managed provider session appears (session
+    // model switched from child-process to managed). The child-based assessment
+    // is now stale — it must not kill, notify, or rearm.
+    (sm as unknown as { managedProviderSession: unknown }).managedProviderSession = {};
+    resolveAssessment({ alive: false, cpuDeltaMs: 0, pidChurn: 0, pidCount: 2 });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
+    expect((sm as unknown as { stalledOpKill: unknown }).stalledOpKill).toBeNull();
 
     vi.useRealTimers();
   });

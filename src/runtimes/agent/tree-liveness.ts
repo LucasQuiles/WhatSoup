@@ -24,6 +24,7 @@
 // launchd and systemd fleet hosts.
 
 import { execFile } from 'node:child_process';
+import { isNonEmptyString } from '../../lib/type-guards.ts';
 import { createChildLogger } from '../../logger.ts';
 import { bfsFromRoot, buildChildrenIndex, parsePsLines } from './process-tree-parse.ts';
 
@@ -56,8 +57,15 @@ export const TREE_LIVENESS_MIN_CPU_DELTA_MS = 200;
 
 function execPs(args: string[]): Promise<string | null> {
   return new Promise((resolve) => {
-    execFile('ps', args, { timeout: 4_000 }, (err, stdout) => {
-      resolve(err ? null : stdout);
+    // Capture stderr: a clean `ps` invocation produces no stderr output. When
+    // `ps` writes warnings or errors to stderr (even with exit 0), the stdout
+    // may be a partial census — treat it as unreliable and fail closed (#2235).
+    execFile('ps', args, { timeout: 4_000 }, (err, stdout, stderr) => {
+      if (err !== null || isNonEmptyString(stderr)) {
+        resolve(null);
+        return;
+      }
+      resolve(stdout);
     });
   });
 }
