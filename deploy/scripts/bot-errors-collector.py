@@ -243,7 +243,10 @@ for source in sources:
         try:
             os.replace(path, claim)
             payload = claim.read_text(encoding="utf-8")
-        except FileNotFoundError:
+        except FileNotFoundError as exc:
+            # Claim race: another collector took this file first. Log it
+            # so operators can detect frequent collisions (#2441).
+            print(f"[bot-errors-collector] claim lost for {path.name}: {type(exc).__name__}: {exc}", file=sys.stderr)
             continue
         durability, durability_reason = source_durability(source)
         print(json.dumps({
