@@ -338,6 +338,18 @@ def log_hints(args: argparse.Namespace) -> list[str]:
     return list(dict.fromkeys(redact(hint) for hint in hints if hint))[:10]
 
 
+def correlate_tail(text: str, source: str) -> str:
+    """Keep only lines matching the alert source (#2136).
+
+    A fresh alert can carry stale, unrelated stdout/stderr lines as evidence
+    when the runner reuses a shared capture buffer. Filtering to source-matching
+    lines prevents generic log tails from diluting the signal.
+    """
+    if not text:
+        return text
+    return "\n".join(line for line in text.split("\n") if source in line)
+
+
 def build_evidence(
     args: argparse.Namespace,
     command: list[str],
@@ -365,10 +377,10 @@ def build_evidence(
         parts.extend(f"  {item}" for item in args.diagnostic)
     if stdout:
         parts.append("stdout_tail:")
-        parts.append(truncate(stdout, limit))
+        parts.append(truncate(correlate_tail(stdout, args.source), limit))
     if stderr:
         parts.append("stderr_tail:")
-        parts.append(truncate(stderr, limit))
+        parts.append(truncate(correlate_tail(stderr, args.source), limit))
     return redact("\n".join(parts))
 
 
