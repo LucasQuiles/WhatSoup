@@ -401,6 +401,38 @@ def controller_log_fallback(line: str) -> None:
     print(line, file=sys.stderr, flush=True)
 
 
+MAX_HEARTBEAT_JSONL_BYTES = positive_env_int("BOT_ERRORS_HEARTBEAT_JSONL_MAX_BYTES", 50 * 1024 * 1024)
+
+
+def _trim_jsonl(path: Path, max_bytes: int) -> None:
+    """Trim oldest records from a JSONL file when it exceeds max_bytes."""
+    if not path.exists():
+        return
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return
+    if size <= max_bytes:
+        return
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    except Exception:
+        return
+    kept: list[str] = []
+    total = 0
+    for line in reversed(lines):
+        encoded = line.encode("utf-8")
+        total += len(encoded)
+        kept.append(line)
+        if total > max_bytes:
+            if len(kept) > 1:
+                kept.pop()
+            break
+    kept.reverse()
+    if len(kept) < len(lines):
+        path.write_text("".join(kept), encoding="utf-8")
+
+
 def append_log(
     kind: str,
     payload: dict[str, Any],
@@ -409,7 +441,7 @@ def append_log(
     outcome: str = "observed",
 ) -> str:
     path = state_root() / "logs" / "heartbeat-watchdog.jsonl"
-    return write_controller_log(
+    result = write_controller_log(
         context=CONTROLLER_LOG_CONTEXT,
         record_kind=kind,
         level=level,
@@ -420,6 +452,8 @@ def append_log(
         persist_health=persist_controller_log_health,
         emit_fallback=controller_log_fallback,
     )
+    _trim_jsonl(path, MAX_HEARTBEAT_JSONL_BYTES)
+    return result
 
 
 def critical_file_problem(path: Path) -> str | None:
