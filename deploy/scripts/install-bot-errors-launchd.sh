@@ -115,13 +115,27 @@ for required in "$DISPATCHER_SCRIPT" "$HEALTH_SCRIPT" "$RUNNER_SCRIPT" "$WATCHDO
   fi
 done
 
+BOOTSTRAP_FAILED_RC=0
+BOOTSTRAP_FAILED_LABELS=""
+
 write_plist(){
   local label="$1" path="$2" body="$3"
   printf "%s\n" "$body" > "$path"
   chmod 644 "$path"
   plutil -lint "$path" >/dev/null
   launchctl bootout "gui/$UID_VALUE" "$path" >/dev/null 2>&1 || true
-  launchctl bootstrap "gui/$UID_VALUE" "$path"
+  local rc=0
+  launchctl bootstrap "gui/$UID_VALUE" "$path" 2>/dev/null || rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    # bootstrap may fail when the service is not running or the binary path
+    # is stale. Fall back to load so remaining services still install (#2436),
+    # but record the failure: a rejected bootstrap must fail the install
+    # overall (fail-closed contract) even when the load fallback works.
+    if [[ "$BOOTSTRAP_FAILED_RC" -eq 0 ]]; then BOOTSTRAP_FAILED_RC=$rc; fi
+    BOOTSTRAP_FAILED_LABELS="$BOOTSTRAP_FAILED_LABELS $label"
+    echo "warning: bootstrap failed for $label (rc=$rc), trying load..." >&2
+    launchctl load "$path" 2>/dev/null || echo "warning: load also failed for $label — check binary path" >&2
+  fi
   launchctl enable "gui/$UID_VALUE/$label" >/dev/null 2>&1 || true
 }
 
@@ -295,4 +309,8 @@ PLIST
 launchctl kickstart -k "gui/$UID_VALUE/$dispatcher_label" >/dev/null 2>&1 || true
 launchctl kickstart -k "gui/$UID_VALUE/$deadman_label" >/dev/null 2>&1 || true
 
+if [[ "$BOOTSTRAP_FAILED_RC" -ne 0 ]]; then
+  echo "completed with bootstrap failures:$BOOTSTRAP_FAILED_LABELS (load fallback attempted; services may run via legacy load)" >&2
+  exit "$BOOTSTRAP_FAILED_RC"
+fi
 echo "installed $dispatcher_label $deadman_label $health_label $watchdog_label"
