@@ -57,6 +57,7 @@ export interface AuthBondBackupSnapshot {
   lastRestoreAt: string | null;
   lastRestoreSource: string | null;
   lastRestoreError: string | null;
+  lastSweepError: string | null;
 }
 
 export interface AuthBondSnapshot {
@@ -556,6 +557,7 @@ export class AuthBondGuard {
   private lastRestoreAt: string | null = null;
   private lastRestoreSource: string | null = null;
   private lastRestoreError: string | null = null;
+  private lastSweepError: string | null = null;
 
   constructor(options: AuthBondGuardOptions) {
     this.authDir = options.authDir;
@@ -903,6 +905,7 @@ export class AuthBondGuard {
       lastRestoreAt: this.lastRestoreAt,
       lastRestoreSource: this.lastRestoreSource,
       lastRestoreError: this.lastRestoreError,
+      lastSweepError: this.lastSweepError,
     };
   }
 
@@ -971,9 +974,15 @@ export class AuthBondGuard {
     let entries: string[];
     try {
       entries = readdirSync(this.stagingRoot);
-    } catch {
-      return; // best-effort; never block a capture on cleanup
+    } catch (err) {
+      // Record the sweep failure so it surfaces in the backup snapshot /
+      // health status instead of silently abandoning staging cleanup (#2289 M4).
+      // Every subsequent capture deposits another credential-tree copy under
+      // staging/ if the sweep never runs, so this must be visible to operators.
+      this.lastSweepError = `staging sweep failed: ${err instanceof Error ? err.message : String(err)}`;
+      return;
     }
+    this.lastSweepError = null;
     const ownSuffix = `.tmp-${process.pid}`;
     for (const name of entries) {
       if (!isHistoryStagingDirName(name) || name.endsWith(ownSuffix)) continue;
