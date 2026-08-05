@@ -185,6 +185,51 @@ def is_stale(boot_epoch: int | None, newest_src_epoch: int | None) -> bool:
     return newest_src_epoch > boot_epoch
 
 
+_STALENESS_STATE_FILE = "runtime-staleness-state.json"
+
+
+def staleness_state_path() -> str:
+    return os.path.join(os.environ.get("BOT_ERRORS_STATE_DIR", "/var/tmp"), _STALENESS_STATE_FILE)
+
+
+def load_staleness_state() -> dict:
+    try:
+        with open(staleness_state_path(), "r", encoding="utf-8") as f:
+            state = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+    return state if isinstance(state, dict) else {}
+
+
+def update_staleness_mark(instance: str, boot_epoch: int | None, src_epoch: int) -> int:
+    """Persist and return the high-water src epoch for (instance, boot cycle).
+
+    The mark is scoped to both the instance and its boot epoch: once the
+    process restarts it runs the code currently on disk, so only deletions
+    within the same boot can hide staleness — a mark recorded under a
+    different boot cycle is void. An unscoped shared mark would let one
+    stale instance flip every other instance's verdict.
+    """
+    state = load_staleness_state()
+    instances = state.get("instances")
+    if not isinstance(instances, dict):
+        instances = {}
+    entry = instances.get(instance)
+    if isinstance(entry, dict) and entry.get("bootEpoch") == boot_epoch:
+        mark = max(int(entry.get("maxSrcEpoch", 0)), src_epoch)
+    else:
+        mark = src_epoch
+    instances[instance] = {"bootEpoch": boot_epoch, "maxSrcEpoch": mark}
+    state["instances"] = instances
+    path = staleness_state_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(state, f)
+    os.replace(tmp_path, path)
+    return mark
+
+
 def is_critical_stale(
     boot_epoch: int | None,
     newest_src_epoch: int | None,
@@ -399,11 +444,15 @@ def probe_instance(instance: str) -> dict:
     if src_epoch is None:
         raise ProbeError("missing" if not find_out.strip() else "malformed")
 
-    stale = is_stale(boot_epoch, src_epoch)
+    # #2505: persist a per-(instance, boot-cycle) high-water mark for the
+    # newest observed src epoch so that deleting a post-boot source file
+    # cannot silently flip the verdict back to fresh within the same boot.
+    effective_epoch = update_staleness_mark(instance, boot_epoch, src_epoch)
+    stale = is_stale(boot_epoch, effective_epoch)
     critical = is_critical_stale(boot_epoch, src_epoch, repo_root)
     lag = (
-        (src_epoch - boot_epoch)
-        if (stale and src_epoch is not None and boot_epoch is not None)
+        (effective_epoch - boot_epoch)
+        if (stale and effective_epoch is not None and boot_epoch is not None)
         else None
     )
 
