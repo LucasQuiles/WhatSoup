@@ -31,6 +31,14 @@ export interface ProcessLockHandle {
    * optional so callers can build a handle (e.g. for releaseProcessLock) without it.
    */
   reclaimedPreviousBoot?: boolean;
+  /**
+   * True when acquisition reclaimed a dead same-boot holder under the explicit
+   * `reclaimDeadSameBoot` opt-in. Distinct from `reclaimedPreviousBoot` so boot
+   * logs can tell a reboot self-heal from an in-boot crash recovery (the latter
+   * is the signal that a supervisor restart hit a lock its dead predecessor
+   * left behind — see the mini10 ad-bot incident, 2026-08-05).
+   */
+  reclaimedDeadSameBoot?: boolean;
 }
 
 export interface AcquireProcessLockOptions {
@@ -41,8 +49,14 @@ export interface AcquireProcessLockOptions {
   isProcessAlive?: (pid: number) => boolean;
   /**
    * Allow reclaiming a dead holder from the current, known boot. Keep false for
-   * split-brain-sensitive singleton services. Use only for short, retry-safe
-   * coordination lanes whose crashed owner cannot retain external ownership.
+   * split-brain-sensitive singleton services that run WITHOUT a process
+   * supervisor. Safe (and operationally necessary) for supervisor-managed
+   * singletons — launchd/systemd kill the whole process group, so a dead main
+   * PID cannot leave live children holding external ownership, while a
+   * SIGKILLed holder otherwise leaves a same-boot lock that turns every
+   * supervised respawn into `stale` → exit 1, a crash loop only manual lock
+   * removal can break. Also fine for short, retry-safe coordination lanes.
+   * Live holders are never evicted in any mode.
    */
   reclaimDeadSameBoot?: boolean;
   /**
@@ -214,10 +228,11 @@ export function acquireProcessLock(lockPath: string, options: AcquireProcessLock
     // (active/stale) rather than stealing a freshly-acquired lock.
     let reclaimed = false;
     let reclaimedPreviousBoot = false;
+    let reclaimedDeadSameBoot = false;
     for (;;) {
       try {
         linkSync(tempPath, lockPath);
-        return { path: lockPath, pid: payload.pid, token: payload.token, reclaimedPreviousBoot };
+        return { path: lockPath, pid: payload.pid, token: payload.token, reclaimedPreviousBoot, reclaimedDeadSameBoot };
       } catch (err) {
         const nodeErr = err as NodeJS.ErrnoException;
         if (nodeErr.code !== 'EEXIST') throw err;
@@ -266,6 +281,7 @@ export function acquireProcessLock(lockPath: string, options: AcquireProcessLock
           try {
             unlinkSync(lockPath);
             reclaimedPreviousBoot = fromPreviousBoot;
+            reclaimedDeadSameBoot = !fromPreviousBoot;
           } catch (unlinkErr) {
             if ((unlinkErr as NodeJS.ErrnoException).code !== 'ENOENT') throw unlinkErr;
           }

@@ -112,9 +112,18 @@ let durability: DurabilityEngine;
 
 function acquireLock(): void {
   try {
-    lockHandle = acquireProcessLock(config.lockPath);
+    // reclaimDeadSameBoot: this process runs as a supervisor-managed singleton
+    // (launchd/systemd kill the whole process group), so a dead holder PID from
+    // the current boot cannot leave live children owning the port or database.
+    // Without the opt-in, a SIGKILLed predecessor's lock turns every supervised
+    // respawn into `stale` → exit 1 — an unbreakable crash loop (mini10 ad-bot,
+    // 2026-08-05). Live holders are never evicted regardless of this option.
+    lockHandle = acquireProcessLock(config.lockPath, { reclaimDeadSameBoot: true });
     if (lockHandle.reclaimedPreviousBoot) {
       log.warn({ path: config.lockPath }, 'reclaimed a stale lock left by a previous boot');
+    }
+    if (lockHandle.reclaimedDeadSameBoot) {
+      log.warn({ path: config.lockPath }, 'reclaimed a stale lock left by a dead same-boot predecessor');
     }
     log.info({ path: config.lockPath }, 'lock acquired');
   } catch (err: unknown) {
