@@ -411,15 +411,18 @@ def prune_action_outbox(config: SentinelConfig) -> int:
                 if entry.is_file() and entry.name != ".durable-json.lock"
             ]
     except FileNotFoundError:
+        print(f"[bot-errors-sentinel] action outbox {outbox} does not exist", file=sys.stderr)
         return 0
-    except OSError:
+    except OSError as exc:
+        print(f"[bot-errors-sentinel] action outbox scan failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 0
     # Sort newest-first so the kept slice is the freshest by mtime; the path
     # name breaks ties deterministically.
     def sort_key(entry: Path) -> tuple:
         try:
             mtime = entry.stat().st_mtime
-        except OSError:
+        except OSError as exc:
+            print(f"[bot-errors-sentinel] action outbox file stat failed for {entry}: {type(exc).__name__}: {exc}", file=sys.stderr)
             mtime = 0.0
         return (mtime, entry.name)
 
