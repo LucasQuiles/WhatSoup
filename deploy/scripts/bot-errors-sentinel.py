@@ -557,6 +557,8 @@ def save_central_heartbeat(config: SentinelConfig, result: dict) -> str:
     payload = {
         "schemaVersion": 1,
         "kind": "bot-errors-sentinel-heartbeat",
+        "sweepStartedAt": result.get("sweepStartedAt"),
+        "sweepDurationSeconds": result.get("sweepDurationSeconds"),
         "checkedAt": result.get("checkedAt"),
         "controllerHost": result.get("controllerHost"),
         "healthy": healthy,
@@ -1800,10 +1802,16 @@ def run_once(config: SentinelConfig, deps: Optional[SentinelDeps] = None) -> dic
     # Bound the outbox at cycle end: it has no consumer, so prune to the newest
     # N files and surface the resulting depth for observability.
     action_outbox_depth = prune_action_outbox(config)
+    sweep_started_at = now_iso(now)
+    sweep_ended_epoch = deps.now_epoch()
+    sweep_duration = max(0, int(sweep_ended_epoch - now))
+    sweep_checked_at = now_iso(sweep_ended_epoch)
     try:
         result = {
             "schemaVersion": 1,
-            "checkedAt": now_iso(now),
+            "sweepStartedAt": sweep_started_at,
+            "sweepDurationSeconds": sweep_duration,
+            "checkedAt": sweep_checked_at,
             "controllerHost": controller_host,
             "fleetAction": fleet_action,
             "reachabilityOracle": oracle,

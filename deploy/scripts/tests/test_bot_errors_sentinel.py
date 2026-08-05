@@ -284,6 +284,8 @@ def test_healthy_host_writes_ack_and_resets_open_state(tmp_path: Path):
         "schemaVersion": 1,
         "kind": "bot-errors-sentinel-heartbeat",
         "checkedAt": result["checkedAt"],
+        "sweepStartedAt": result["sweepStartedAt"],
+        "sweepDurationSeconds": result["sweepDurationSeconds"],
         "controllerHost": "central-test",
         "healthy": True,
         "fleetAction": "none",

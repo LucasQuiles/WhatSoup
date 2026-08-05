@@ -648,6 +648,14 @@ def fleet_sentinel_age(path: Path) -> tuple[int | None, str]:
     checked_at = parse_iso_epoch(data.get("checkedAt"))
     if checked_at is None:
         return None, f"missing parseable checkedAt in {path}"
+    sweep_duration = data.get("sweepDurationSeconds")
+    if isinstance(sweep_duration, int) and not isinstance(sweep_duration, bool):
+        max_sweep = positive_env_int("BOT_ERRORS_SENTINEL_SWEEP_MAX_DURATION", 600)
+        if sweep_duration > max_sweep:
+            return None, (
+                f"excessive sentinel sweep duration in {path}: "
+                f"sweepDurationSeconds={sweep_duration} max={max_sweep}"
+            )
     current = now_epoch()
     if checked_at > current:
         return None, (
