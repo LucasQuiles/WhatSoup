@@ -626,6 +626,7 @@ export const fitnessRules = [
         'deploy/scripts/bot-errors-health-check.py',
         'deploy/scripts/bot-errors-heartbeat-watchdog.py',
         'deploy/scripts/bot-errors-runtime-staleness.py',
+        'deploy/scripts/bot-errors-sentinel.py',
         'deploy/scripts/tests/',
       ],
     },
