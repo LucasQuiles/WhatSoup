@@ -307,22 +307,35 @@ export function reconcileStaleHealReports(
   // signal (see handleHealComplete). Setting resolved_at here made stale-expired
   // rows indistinguishable from genuine resolutions to anything reading
   // resolved_at without also checking state.
+  // #2390: skip rows whose error class depends on contributor-owned recovery
+  // proof rather than fresh source events to stay open. Without this, incidents
+  // like fallback_recovery_stalled auto-close when no new source events arrive,
+  // even though the underlying condition has not resolved.
+  const RECOVERY_PENDING_CLASSES = new Set([
+    'fallback_recovery_stalled',
+    'provider_fallback_activated',
+    'instance_unreachable',
+  ]);
+  const filtered = rows.filter(r => !RECOVERY_PENDING_CLASSES.has(r.error_class));
+
   const update = db.raw.prepare(`
     UPDATE heal_reports
     SET state = 'stale_expired'
     WHERE report_id = ?
   `);
-  for (const row of rows) update.run(row.report_id);
+  for (const row of filtered) update.run(row.report_id);
 
-  log.warn({
-    count: rows.length,
-    reportIds: rows.map(row => row.report_id),
-    states: rows.map(row => row.state),
-    staleMs,
-    cutoff,
-  }, 'expired stale active heal reports');
+  if (filtered.length > 0) {
+    log.warn({
+      count: filtered.length,
+      reportIds: filtered.map(row => row.report_id),
+      states: filtered.map(row => row.state),
+      staleMs,
+      cutoff,
+    }, 'expired stale active heal reports');
+  }
 
-  return { expiredReportIds: rows.map(row => row.report_id), cutoff, staleMs };
+  return { expiredReportIds: filtered.map(row => row.report_id), cutoff, staleMs };
 }
 
 /**
