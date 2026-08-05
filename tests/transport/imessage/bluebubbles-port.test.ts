@@ -281,6 +281,23 @@ describe('BlueBubblesPort — listInboundSince', () => {
     expect(page.records.map((m) => m.guid)).toEqual(['g-null-body', 'g-ok']);
     expect(page.records[0]).toMatchObject({ body: null, kind: 'other' });
   });
+
+  it('maps outbound dateRead and drops inbound or non-finite values', async () => {
+    const { port, mock } = makePort();
+    serveSnapshot(mock, [
+      bbMsg({ originalROWID: 2, guid: 'g-out-read', isFromMe: true, dateCreated: 2000, dateRead: 5000 }),
+      bbMsg({ originalROWID: 3, guid: 'g-out-nan', isFromMe: true, dateCreated: 3000, dateRead: Number.NaN }),
+      // Inbound dateRead is the LOCAL user's own read state, not a remote
+      // transition — it must not surface as dateRead.
+      bbMsg({ originalROWID: 4, guid: 'g-in-localread', dateCreated: 4000, dateRead: 6000 }),
+    ]);
+    const page = await port.listInboundSince(new Date(0), 10, null);
+
+    const byGuid = new Map(page.records.map((record) => [record.guid, record]));
+    expect(byGuid.get('g-out-read')?.dateRead).toBe(5000);
+    expect(byGuid.get('g-out-nan')?.dateRead).toBeUndefined();
+    expect(byGuid.get('g-in-localread')?.dateRead).toBeUndefined();
+  });
 });
 
 describe('BlueBubblesPort — sendReaction', () => {

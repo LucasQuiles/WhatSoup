@@ -11,7 +11,8 @@ import {
   makeImessageConfig,
 } from './mock-port.ts';
 import type { ReadEvent } from '../../../src/transport/contract/events.ts';
-import type { InboundImessage } from '../../../src/transport/imessage/port.ts';
+import type { InboundImessage, InboundImessagePage } from '../../../src/transport/imessage/port.ts';
+import { TransientProviderError } from '../../../src/transport/contract/errors.ts';
 
 function makeAdapter(port: MockImessagePort = new MockImessagePort()) {
   const adapter = new ImessageAdapter(makeImessageConfig({ pollIntervalMs: 0 }), port);
@@ -289,6 +290,219 @@ describe('ImessageAdapter — inbound read receipts (#2189)', () => {
       expect(readEvents).toHaveLength(1);
       expect(messageEvents).toHaveLength(1);
       expect(messageEvents[0].text).toBe('sent text');
+      await adapter.disconnect();
+    });
+  });
+
+  // ── Guard paths ────────────────────────────────────────────────────────
+
+  describe('guard paths', () => {
+    it('returns false and emits nothing when not connected', async () => {
+      const { adapter } = makeAdapter();
+      const received: ReadEvent[] = [];
+      adapter.on('read', (e) => received.push(e));
+
+      const before = adapter.handleInboundRecord(outboundEnvelope({
+        guid: 'out-preconnect',
+        dateRead: Date.now() + 10_000,
+      }));
+      expect(before).toBe(false);
+
+      await adapter.connect();
+      await adapter.disconnect();
+
+      const after = adapter.handleInboundRecord(outboundEnvelope({
+        guid: 'out-postdispose',
+        dateRead: Date.now() + 10_000,
+      }));
+      expect(after).toBe(false);
+      expect(received).toHaveLength(0);
+    });
+
+    it('ignores a non-numeric dateRead from a malformed provider record', async () => {
+      const { adapter } = makeAdapter();
+      await adapter.connect();
+      const received: ReadEvent[] = [];
+      adapter.on('read', (e) => received.push(e));
+
+      adapter.handleInboundRecord(outboundEnvelope({
+        guid: 'out-string-dateread',
+        dateRead: String(Date.now() + 10_000) as unknown as number,
+      }));
+
+      expect(received).toHaveLength(0);
+      await adapter.disconnect();
+    });
+
+    it('does not emit when the reader identity cannot be canonicalized', async () => {
+      const { adapter } = makeAdapter();
+      await adapter.connect();
+      const received: ReadEvent[] = [];
+      adapter.on('read', (e) => received.push(e));
+
+      // Not E.164, not an AppleID email, not a group GUID → identity nulls out.
+      adapter.handleInboundRecord(outboundEnvelope({
+        guid: 'out-bad-reader',
+        to: 'garbage-identity',
+        dateRead: Date.now() + 10_000,
+      }));
+
+      expect(received).toHaveLength(0);
+      await adapter.disconnect();
+    });
+  });
+
+  // ── Poll-loop record processing ────────────────────────────────────────
+
+  describe('poll loop', () => {
+    class QueuedPort extends MockImessagePort {
+      readonly sinceCalls: Date[] = [];
+      private readonly queue: (readonly InboundImessage[])[] = [];
+      enqueue(records: readonly InboundImessage[]): void {
+        this.queue.push(records);
+      }
+      override async listInboundSince(since: Date): Promise<InboundImessagePage> {
+        this.sinceCalls.push(since);
+        return { records: this.queue.shift() ?? [], cursor: 'mock:idle', hasMore: false };
+      }
+    }
+
+    function inboundEnvelope(guid: string, timestamp: number): InboundImessage {
+      return {
+        guid,
+        from: 'peer@users.noreply.github.com',
+        to: 'bot@example.com',
+        body: `msg ${guid}`,
+        fromMe: false,
+        kind: 'text',
+        timestamp,
+      };
+    }
+
+    it('advances the poll high-water mark to the max timestamp, not the last record', async () => {
+      const port = new QueuedPort();
+      const { adapter } = makeAdapter(port);
+      await adapter.connect();
+
+      // Out-of-order page: the newer record arrives first. The high-water
+      // mark must land on the max (5000), not the last-seen (3000).
+      port.enqueue([inboundEnvelope('in-newer', 5000), inboundEnvelope('in-older', 3000)]);
+      await adapter.pollOnce();
+      await adapter.pollOnce();
+
+      const lastSince = port.sinceCalls.at(-1);
+      expect(lastSince?.getTime()).toBe(5000);
+      await adapter.disconnect();
+    });
+
+    it('wraps a non-Error record-handler throw and keeps the poll alive', async () => {
+      const port = new QueuedPort();
+      const { adapter } = makeAdapter(port);
+      await adapter.connect();
+      const errors: unknown[] = [];
+      adapter.on('error', (e) => errors.push(e));
+      const received: ReadEvent[] = [];
+      adapter.on('read', (e) => received.push(e));
+
+      (adapter as unknown as { handleInboundRecord: () => boolean }).handleInboundRecord = () => {
+        throw 'string-throw from handler';
+      };
+      port.enqueue([inboundEnvelope('in-boom', 7000)]);
+      await adapter.pollOnce();
+
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toBeInstanceOf(TransientProviderError);
+      expect((errors[0] as TransientProviderError).message).toContain('string-throw from handler');
+      expect(received).toHaveLength(0);
+
+      // The loop survives the throw: a later poll still reaches the port.
+      port.enqueue([]);
+      await adapter.pollOnce();
+      expect(port.sinceCalls.length).toBeGreaterThanOrEqual(2);
+      await adapter.disconnect();
+    });
+
+    it('stops processing records once the adapter is disposed mid-poll', async () => {
+      const port = new QueuedPort();
+      const { adapter } = makeAdapter(port);
+      await adapter.connect();
+      const messages: unknown[] = [];
+      adapter.on('message', (m) => {
+        messages.push(m);
+        void adapter.disconnect();
+      });
+
+      port.enqueue([inboundEnvelope('in-first', 1000), inboundEnvelope('in-second', 2000)]);
+      await adapter.pollOnce();
+
+      expect(messages).toHaveLength(1);
+    });
+  });
+
+  // ── Dedup-set bounds ───────────────────────────────────────────────────
+
+  describe('dedup-set bounds', () => {
+    it('evicts the oldest read-receipt guid past the cap, allowing re-emission on redelivery', async () => {
+      const { adapter } = makeAdapter();
+      await adapter.connect();
+      const received: ReadEvent[] = [];
+      adapter.on('read', (e) => received.push(e));
+      const dateRead = Date.now() + 10_000;
+
+      // DEDUPE_CAP = INBOUND_PAGE_SIZE (500) × MAX_INBOUND_PAGES_PER_POLL (10).
+      const cap = 5000;
+      for (let i = 0; i <= cap; i += 1) {
+        adapter.handleInboundRecord(outboundEnvelope({ guid: `out-${i}`, dateRead }));
+      }
+      expect(received).toHaveLength(cap + 1);
+
+      // out-0 was evicted from the bounded set when out-5000 pushed the size
+      // past the cap, so a redelivery of the same transition emits again.
+      adapter.handleInboundRecord(outboundEnvelope({ guid: 'out-0', dateRead }));
+      expect(received).toHaveLength(cap + 2);
+      expect(received.at(-1)?.target.id).toBe('out-0');
+      await adapter.disconnect();
+    });
+  });
+
+  // ── Malformed reaction envelopes ───────────────────────────────────────
+
+  describe('malformed reaction envelopes', () => {
+    it('rejects reactions with empty or missing tapback fields and stays retryable', async () => {
+      const { adapter } = makeAdapter();
+      await adapter.connect();
+      const reactions: unknown[] = [];
+      adapter.on('reaction', (r) => reactions.push(r));
+
+      const emptyTarget = adapter.handleInboundRecord(outboundEnvelope({
+        guid: 'react-empty-target',
+        fromMe: false,
+        kind: 'reaction',
+        reactionTargetGuid: '',
+        reactionEmoji: '👍',
+        reactionRemove: false,
+      }));
+      const emptyEmoji = adapter.handleInboundRecord(outboundEnvelope({
+        guid: 'react-empty-emoji',
+        fromMe: false,
+        kind: 'reaction',
+        reactionTargetGuid: 'target-1',
+        reactionEmoji: '',
+        reactionRemove: false,
+      }));
+      const missingRemove = adapter.handleInboundRecord(outboundEnvelope({
+        guid: 'react-missing-remove',
+        fromMe: false,
+        kind: 'reaction',
+        reactionTargetGuid: 'target-1',
+        reactionEmoji: '👍',
+        reactionRemove: undefined,
+      }));
+
+      expect(emptyTarget).toBe(false);
+      expect(emptyEmoji).toBe(false);
+      expect(missingRemove).toBe(false);
+      expect(reactions).toHaveLength(0);
       await adapter.disconnect();
     });
   });
