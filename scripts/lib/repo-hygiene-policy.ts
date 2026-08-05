@@ -195,6 +195,10 @@ export const srcConsoleAllowedFiles = new Set([
   'src/config.ts',
   'src/fleet/standalone.ts',
   'src/transport/auth.ts',
+  // #2513: the logger module cannot report its own transport-construction
+  // failure or transport error events through itself — console is the only
+  // remaining surface for logger-internal fault reporting.
+  'src/logger.ts',
   // T5 b-12: the perf meter is itself the diagnostics surface (19-§2
   // runtime instrumentation); its sampled notes go to the dev console by
   // design, and the structured logger is server-side only.
