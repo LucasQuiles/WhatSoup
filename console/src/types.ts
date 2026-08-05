@@ -40,7 +40,9 @@ export interface LineInstance {
   messagesTotal: number;
   health: {
     status: string;
-    degradation_causes: string[];
+    // Optional: the backend reads this defensively (health-poller falls back
+    // to 'unknown' when absent), so older lines may omit it entirely.
+    degradation_causes?: string[];
     uptime_seconds: number;
     messages_total: number;
     // Matches the ONE /health emitter (src/core/health.ts): connection state
