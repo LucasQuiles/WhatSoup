@@ -87,7 +87,7 @@ function makeHandlerChild(pid = 12345) {
   const child = {
     pid,
     stdin,
-    stdout: new EventEmitter(),
+    stdout: Object.assign(new EventEmitter(), { setEncoding: vi.fn() }),
     stderr: new EventEmitter(),
     kill: vi.fn(),
     _errorCb: null as ((err: NodeJS.ErrnoException) => void) | null,

@@ -58,6 +58,7 @@ function makeChild(pid: number) {
     end: vi.fn(),
   });
   child.stdout = new EventEmitter();
+  (child.stdout as unknown as { setEncoding: (enc: string) => void }).setEncoding = vi.fn();
   child.stderr = new EventEmitter();
   child.kill = vi.fn(() => true);
   child.exitCode = null;
