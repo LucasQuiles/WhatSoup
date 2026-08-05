@@ -12,8 +12,8 @@ import {
   deploymentStateOf,
 } from '../../lib/deployments'
 
-export function SummaryStrip({ lines }: { lines: LineInstance[] }) {
-  const state = deploymentStateOf(lines)
+export function SummaryStrip({ lines, queryError }: { lines: LineInstance[]; queryError?: boolean }) {
+  const state = deploymentStateOf(lines, queryError)
   const online = countOnline(lines)
   const channelCount = channelCountsOf(lines).size
   const agents = agentLinesOf(lines)
