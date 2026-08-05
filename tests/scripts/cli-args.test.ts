@@ -254,20 +254,26 @@ describe('hand-rolled parseArgs ratchet', () => {
     return parsers.length > 0 && parsers.some((parser) => !callsSharedBinding(parser));
   };
 
+  // The repo-wide scan reads every scripts/*.ts synchronously; on a cold CI
+  // runner that has exceeded vitest's 10s default twice in one day. Memoize
+  // it so the two consumers share one I/O pass, and give those tests an
+  // explicit 30s budget (#2353-style override) — the scan's cost is runner
+  // speed, not correctness.
+  let scanned: string[] | undefined;
   const scriptsDefiningHandRolledParsers = (): string[] =>
-    execFileSync('git', ['ls-files', '--', 'scripts/*.ts'], {
+    (scanned ??= execFileSync('git', ['ls-files', '--', 'scripts/*.ts'], {
       cwd: repoRoot,
       encoding: 'utf8',
       maxBuffer: 16 * 1024 * 1024,
     })
       .split('\n')
       .filter(Boolean)
-      .filter((path) => isHandRolledParser(readFileSync(resolve(repoRoot, path), 'utf8')));
+      .filter((path) => isHandRolledParser(readFileSync(resolve(repoRoot, path), 'utf8'))));
 
   it('the scan is not vacuous — it really finds hand-rolled parsers', () => {
     // Without this, a git-grep that returned nothing would make the ratchet pass trivially.
     expect(scriptsDefiningHandRolledParsers().length).toBeGreaterThan(10);
-  });
+  }, 30_000);
 
   it('the number of hand-rolled parsers does not grow', () => {
     const found = scriptsDefiningHandRolledParsers();
@@ -280,7 +286,7 @@ describe('hand-rolled parseArgs ratchet', () => {
         : `Baseline is stale: ${found.length} found, baseline ${HAND_ROLLED_PARSEARGS_BASELINE}. ` +
           `Scripts migrated — LOWER HAND_ROLLED_PARSEARGS_BASELINE to ${found.length} to lock in the gain.`,
     ).toBe(HAND_ROLLED_PARSEARGS_BASELINE);
-  });
+  }, 30_000);
 
   it('does not let a renamed parser evade the shared-primitive requirement', () => {
     expect(isHandRolledParser('export function parseCommand(argv: string[]) { return argv[1]; }'))
