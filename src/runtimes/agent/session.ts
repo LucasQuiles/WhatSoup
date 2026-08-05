@@ -647,7 +647,9 @@ export class SessionManager {
   private dbRowId: number | null = null;
   private sessionId: string | null = null;
   private active = false;
-  private stdoutChunks: Buffer[] = [];
+  // #2290 M10: chunks arrive as pre-decoded strings (setEncoding('utf8') on the
+  // spawn stdout) so multibyte chars split across pipe reads aren't corrupted.
+  private stdoutChunks: string[] = [];
   private stdoutBufferStr = '';
   private startedAt: string | null = null;
   private messageCount: number = 0;
@@ -1064,10 +1066,11 @@ export class SessionManager {
 
   private materializeStdoutChunks(): void {
     if (this.stdoutChunks.length === 0) return;
-    const bufferedChunk = this.stdoutChunks.length === 1
-      ? this.stdoutChunks[0]
-      : Buffer.concat(this.stdoutChunks);
-    this.stdoutBufferStr += bufferedChunk.toString('utf8');
+    // #2290 M10: chunks are already correctly UTF-8 decoded by the stream's
+    // StringDecoder (setEncoding('utf8')), so a plain join preserves multibyte
+    // chars that span chunk boundaries — unlike the prior Buffer.toString('utf8')
+    // per-chunk decode which emitted U+FFFD on split sequences.
+    this.stdoutBufferStr += this.stdoutChunks.join('');
     this.stdoutChunks = [];
   }
 
@@ -1084,7 +1087,7 @@ export class SessionManager {
     return lines;
   }
 
-  private appendStdoutChunk(chunk: Buffer): string[] {
+  private appendStdoutChunk(chunk: string): string[] {
     this.stdoutChunks.push(chunk);
     return this.extractCompleteStdoutLines();
   }
@@ -2522,9 +2525,14 @@ export class SessionManager {
       });
     });
 
+    // #2290 M10: set UTF-8 encoding so Node's StringDecoder buffers incomplete
+    // trailing multibyte sequences — prevents silent U+FFFD corruption when a
+    // multibyte char (emoji, CJK) is split across two pipe reads. Mirrors
+    // media-bridge.ts:121 and providers/sse.ts:52.
+    child.stdout.setEncoding('utf8');
     // Pipe stdout through line parser — use provider-specific parser
     const parse = this.getParser();
-    child.stdout.on('data', (chunk: Buffer) => {
+    child.stdout.on('data', (chunk: string) => {
       if (!this.isCurrentPersistentChild(child, childGeneration)) {
         log.debug({
           chatJid: this.chatJid,
@@ -2922,6 +2930,11 @@ export class SessionManager {
       // recycled, a newer kill armed). Only act if this child is still the live one.
       if (!this.active || this.child !== args.child) return;
       if (this.livenessProgressEpoch !== assessmentEpoch) return;
+      // Gap 3 (#2235): if a managed provider session appeared during the assessment
+      // (session model switched from child-process to managed), this child-based
+      // assessment is stale and must not act — the managed-session path has its
+      // own lifecycle and should not inherit a child-process liveness verdict.
+      if (this.managedProviderSession !== null) return;
       const decisionAt = Date.now();
       const decisionElapsed = decisionAt - gateStartedAt;
       if (decisionElapsed >= LONG_OP_CEILING_MS) {
@@ -2998,7 +3011,14 @@ export class SessionManager {
     managedProviderSession = this.managedProviderSession,
     managedProviderGeneration = this.managedProviderGeneration,
     delayMs = watchdogHardMsForProvider(this.provider),
+    // When set, only arm if this.watchdogHard === expectedSlot. Used by the
+    // hard-watchdog rearm closure to avoid overwriting a newer timer that was
+    // armed during an async liveness assessment (#2235).
+    expectedSlot: ReturnType<typeof setTimeout> | 'only-if-null' | undefined = undefined,
   ): void {
+    // Compare-and-swap guard: skip if the slot is already occupied by a
+    // different timer than expected (a newer arm won the race).
+    if (expectedSlot === 'only-if-null' && this.watchdogHard !== null) return;
     // Only the hard backstop remains — soft/warn probes are replaced by the operation tracker.
     // The timeout honors the provider's descriptor (API providers: 10 min; CLI providers: 30 min)
     // instead of a single hardcoded constant (L1-F1).
@@ -3046,6 +3066,8 @@ export class SessionManager {
         managedProviderSession,
         managedProviderGeneration,
         Math.min(watchdogHardMsForProvider(this.provider), maxDelayMs),
+        // Only arm if no newer watchdog was set during the assessment (#2235).
+        'only-if-null',
       ),
       kill: () => {
         log.warn({ sessionId: this.sessionId, pid: child.pid, reason: 'turn_watchdog' }, 'turn watchdog fired — killing stalled Claude process');
@@ -3476,7 +3498,9 @@ export class SessionManager {
         });
       });
 
-      child.stdout.on('data', (chunk: Buffer) => {
+      // #2290 M10: see first spawn site — setEncoding prevents multibyte corruption.
+      child.stdout.setEncoding('utf8');
+      child.stdout.on('data', (chunk: string) => {
         if (!this.isCurrentPersistentChild(child, childGeneration)) return;
         if (this.activeProviderTurnToken !== providerTurnToken) return;
         const lines = this.appendStdoutChunk(chunk);

@@ -300,6 +300,87 @@ export function rejectProposal(db: DatabaseSync, id: number, args: TransitionArg
   transition(db, id, 'cancelled', args, args.reason ? { rejection_reason: args.reason } : {}, ['proposed']);
 }
 
+/**
+ * System actor used by the overdue-proposal expiry sweep (#2384).
+ * Stable string so bead_events rows are filterable by actor without
+ * depending on a host, user, or instance identity.
+ */
+export const SYSTEM_ACTOR_OVERDUE_SWEEP = 'system:overdue-sweep';
+
+/**
+ * Bounded reason code recorded in the bead_events payload when the
+ * overdue-proposal sweep transitions a stale proposal to cancelled (#2384).
+ * Bounded so fleet aggregation and alerting can classify without parsing
+ * free-form text. Proposal content (body, title) is retained on the row;
+ * only the status changes.
+ */
+export const OVERDUE_EXPIRY_REASON = 'proposal_overdue';
+
+export interface ExpireOverdueResult {
+  /** Number of proposals transitioned to 'cancelled' by this call. */
+  expired: number;
+  /** Number of proposals that were eligible by deadline but skipped
+   *  because they were no longer 'proposed' (a concurrent manual
+   *  approve/reject won the race). Useful for observability. */
+  skipped: number;
+}
+
+/**
+ * #2384 — bounded terminal lifecycle for overdue bead proposals.
+ *
+ * Proposals with `status='proposed'` and `review_by_at` past `now - graceSeconds`
+ * are transitioned to 'cancelled' with actor `system:overdue-sweep` and a bounded
+ * reason code. The sweep is bounded (`limit` rows per call), batched, and
+ * restartable — calling it again picks up where the last call left off because
+ * all state lives in SQLite (no in-memory latch).
+ *
+ * Race-safe: each row is individually guarded by the `transition()` function's
+ * `allowedFrom=['proposed']` check — if a concurrent `approveProposal()` or
+ * `rejectProposal()` changed the status first, the transition throws and the
+ * row is counted as `skipped`, not `expired`. The per-row try/catch means one
+ * race-loss does not abort the batch.
+ *
+ * Proposal content (body, title, metadata) is retained on the row; only the
+ * status changes. No proposal body, chat identity, or private topology enters
+ * the bead_events payload — only the bounded reason code and from/to status.
+ *
+ * @param db        open database handle
+ * @param now       unix-seconds cutoff (typically nowUnixSec())
+ * @param graceSeconds  additional grace past review_by_at before expiry (default 86400 = 24h)
+ * @param limit     max rows to expire per call (default 100 — bounded, batched)
+ * @returns         { expired, skipped } counts for observability
+ */
+export function expireOverdueProposals(
+  db: DatabaseSync,
+  now: number,
+  graceSeconds: number = 86400,
+  limit: number = 100,
+): ExpireOverdueResult {
+  const cutoff = now - graceSeconds;
+  const rows = db.prepare(
+    `SELECT id FROM beads WHERE ${OVERDUE_PROPOSAL_WHERE} AND review_by_at < ? ORDER BY review_by_at ASC LIMIT ?`,
+  ).all(now, cutoff, limit) as Array<{ id: number }>;
+
+  let expired = 0;
+  let skipped = 0;
+  for (const row of rows) {
+    try {
+      transition(db, row.id, 'cancelled', {
+        actor: SYSTEM_ACTOR_OVERDUE_SWEEP,
+        reason: OVERDUE_EXPIRY_REASON,
+        at: now,
+      }, {}, ['proposed']);
+      expired++;
+    } catch {
+      // Race-loss: a concurrent approve/reject changed status first.
+      // The transition() guard (allowedFrom=['proposed']) threw — this
+      // is expected and safe; the manual disposition wins.
+      skipped++;
+    }
+  }
+  return { expired, skipped };
+}
+
 export interface ActivityFeedFilter { ownerJid?: string; since?: number; limit?: number; }
 
 export function activityFeed(db: DatabaseSync, f: ActivityFeedFilter = {}): ActivityFeedRow[] {
