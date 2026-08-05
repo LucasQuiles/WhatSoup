@@ -194,7 +194,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-runner.py",
-      "sha256": "4cd2d4cd748c9ca874964ac19a306b15fed46cb07f1e49b47ac05a3c5aa37ef9",
+      "sha256": "366755056eee66f70f334b84c2a6dbb13c26074cfb813ffa3a0e4225726167d6",
       "mustContain": [
         "publish_event_json",
         "refusing to use private directory through symlink",
