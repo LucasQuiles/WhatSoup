@@ -570,7 +570,7 @@ describe('main bootstrap', () => {
   it('boots the default chat runtime and wires recovery, health, timers, and connection handlers', async () => {
     const h = await importMainWithMocks();
 
-    expect(h.acquireProcessLock).toHaveBeenCalledWith('/tmp/whatsoup-main.lock');
+    expect(h.acquireProcessLock).toHaveBeenCalledWith('/tmp/whatsoup-main.lock', { reclaimDeadSameBoot: true });
     expect(h.db.open).toHaveBeenCalledOnce();
     expect(h.seedChatAliases).toHaveBeenCalledWith(h.db.raw, h.config.chatAliases);
     expect(h.insertAllowed).toHaveBeenCalledWith(h.db, 'phone', '15551230000');
