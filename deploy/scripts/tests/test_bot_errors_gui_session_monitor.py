@@ -1355,7 +1355,7 @@ def test_config_check_fails_closed_on_unreadable_invalid_json(mod, tmp_path, mon
 
     assert mod.config_check() == 2
     captured = capsys.readouterr()
-    assert "not readable JSON" in captured.err
+    assert "not valid JSON" in captured.err
 
 
 def test_config_check_fails_closed_on_non_dict_json_payload(mod, tmp_path, monkeypatch, capsys):
@@ -2206,8 +2206,12 @@ def test_run_once_private_override_error_returns_two(mod, monkeypatch, tmp_path,
     assert "config error" in capsys.readouterr().err
 
 
-def test_run_once_empty_targets_returns_zero(mod, monkeypatch, tmp_path):
-    """An empty target list (no GUI bots) is valid — returns 0, writes empty state."""
+def test_run_once_empty_targets_fails_closed(mod, monkeypatch, tmp_path, capsys):
+    """An implicit-empty fleet (no targets, no not_applicable) must fail closed (#2467).
+
+    Previously run_once silently returned 0 with zero targets — erasing all
+    coverage. Now it exits 2 and preserves prior state without overwriting it.
+    """
     fleet_file = tmp_path / "fleet.json"
     fleet_file.write_text('{"hosts":[]}', encoding="utf-8")
     monkeypatch.setattr(mod, "fleet_path", lambda: fleet_file)
@@ -2217,8 +2221,10 @@ def test_run_once_empty_targets_returns_zero(mod, monkeypatch, tmp_path):
     monkeypatch.setattr(mod, "save_state", lambda s: saved.update(s))
 
     rc = mod.run_once(dry_run=False)
-    assert rc == 0
-    assert saved == {}
+    assert rc == 2
+    assert saved == {}  # prior state NOT overwritten
+    captured = capsys.readouterr()
+    assert "no GUI-session monitor targets" in captured.err
 
 
 # ---------------------------------------------------------------------------
@@ -2418,3 +2424,88 @@ def test_gui_targets_follow_repaired_declaration(mod, tmp_path: Path, monkeypatc
 
     post_targets = {t["instance"] for t in mod.gui_targets_from_fleet(mod.load_fleet())}
     assert instance_name in post_targets
+
+
+# ---------------------------------------------------------------------------
+# Guard-branch coverage for malformed fleet shapes and the not_applicable
+# scope (#2749 S8 gate: these defensive legs previously ran uncovered).
+# ---------------------------------------------------------------------------
+
+
+class TestMalformedFleetGuardBranches:
+    def test_unknown_policy_values_guards_every_malformed_shape(self, mod):
+        # hosts not a list -> empty, no crash
+        assert mod.unknown_policy_values({"hosts": "nope"}) == []
+        # non-dict host entries skipped; non-list/non-dict instances skipped
+        fleet = {
+            "hosts": [
+                42,
+                {"host": "h1", "guiSessionExpected": "bogus-policy", "instances": "nope"},
+                {"host": "h2", "instances": [7, {"name": "i1", "guiSessionExpected": "also-bogus"}]},
+            ]
+        }
+        offenders = mod.unknown_policy_values(fleet)
+        assert {(o["host"], o["instance"], o["value"]) for o in offenders} == {
+            ("h1", None, "bogus-policy"),
+            ("h2", "i1", "also-bogus"),
+        }
+
+    def test_fleet_declares_not_applicable_guards_and_positive(self, mod):
+        assert mod._fleet_declares_not_applicable({"hosts": None}) is False
+        assert mod._fleet_declares_not_applicable({"hosts": [1]}) is False
+        assert mod._fleet_declares_not_applicable(
+            {"hosts": [{"host": "h", "instances": "x"}]}) is False
+        assert mod._fleet_declares_not_applicable(
+            {"hosts": [{"host": "h", "instances": [3]}]}) is False
+        assert mod._fleet_declares_not_applicable(
+            {"hosts": [{"host": "h", "instances": [
+                {"name": "i", "guiSessionExpected": "not_applicable"}]}]}) is True
+
+
+class TestInventoryErrorAndNotApplicablePaths:
+    def _na_fleet(self, tmp_path):
+        path = tmp_path / "fleet.json"
+        path.write_text(json.dumps({"hosts": [{"host": "h", "instances": [
+            {"name": "i", "guiSessionExpected": "not_applicable"}]}]}), encoding="utf-8")
+        return path
+
+    def test_validate_inventory_missing_file(self, mod, tmp_path, monkeypatch):
+        monkeypatch.setattr(mod, "fleet_path", lambda: tmp_path / "absent.json")
+        result = mod.validate_inventory()
+        assert result.status == mod.INVENTORY_MISSING
+
+    def test_validate_inventory_unreadable_path(self, mod, tmp_path, monkeypatch):
+        # A directory where a file is expected raises OSError on open/read.
+        monkeypatch.setattr(mod, "fleet_path", lambda: tmp_path)
+        result = mod.validate_inventory()
+        assert result.status == mod.INVENTORY_UNREADABLE
+
+    def test_validate_inventory_not_applicable(self, mod, tmp_path, monkeypatch):
+        monkeypatch.setattr(mod, "fleet_path", lambda p=self._na_fleet(tmp_path): p)
+        result = mod.validate_inventory()
+        assert result.status == mod.INVENTORY_NOT_APPLICABLE
+        assert result.targets == []
+
+    def test_config_check_not_applicable_is_ok(self, mod, tmp_path, monkeypatch, capsys):
+        monkeypatch.setattr(mod, "fleet_path", lambda p=self._na_fleet(tmp_path): p)
+        assert mod.config_check() == 0
+        assert "not_applicable" in capsys.readouterr().out
+
+    def test_run_once_not_applicable_no_state_mutation(self, mod, tmp_path, monkeypatch):
+        monkeypatch.setattr(mod, "fleet_path", lambda p=self._na_fleet(tmp_path): p)
+        saved = []
+        monkeypatch.setattr(mod, "load_state", lambda: {})
+        monkeypatch.setattr(mod, "save_state", lambda s: saved.append(s))
+        assert mod.run_once(dry_run=False) == 0
+        assert saved == []
+
+
+class TestSaveStateRootRefusal:
+    def test_save_state_refuses_symlinked_parent(self, mod, tmp_path, monkeypatch):
+        real_dir = tmp_path / "real"
+        real_dir.mkdir()
+        link = tmp_path / "link"
+        link.symlink_to(real_dir)
+        monkeypatch.setattr(mod, "state_path", lambda: link / "state.json")
+        with pytest.raises(RuntimeError, match="non-directory GUI monitor state root"):
+            mod.save_state({"k": "v"})

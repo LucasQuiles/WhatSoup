@@ -27,6 +27,7 @@ from lib.bot_errors_daily_health import daily_health_host_from_payload, normaliz
 from lib.bot_errors_envelope import new_event_fields
 from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
 from lib.bot_errors_roster import RosterError, load_roster  # noqa: E402
+from lib.queue_age import parse_queue_threshold, scan_directory, threshold_met
 from lib.controller_log import (
     ControllerLogContext,
     controller_cycle,
@@ -45,6 +46,24 @@ from lib.durable_json import (
 
 
 DEFAULT_CHECKS = "q_loop,dispatcher,collector,daily_health,queue_backlog,local_services,local_instance_health,browser_debug"
+
+# Canonical registry of all recognized watchdog check identifiers (#2465).
+# Every name here MUST have a corresponding branch in collect_problems() AND
+# an entry in active_reconcile_prefixes(). The drift-guard test enforces this
+# alignment so a future check added to only one location fails CI.
+KNOWN_WATCHDOG_CHECKS: frozenset[str] = frozenset({
+    "q_loop",
+    "dispatcher",
+    "collector",
+    "daily_health",
+    "queue_backlog",
+    "local_services",
+    "local_instance_health",
+    "fleet_sentinel",
+    "collector_roster",
+    "browser_debug",
+})
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TERMINAL_AUTH_FAILURE_CLASSES = {"pairing_required", "serverside_logout_irreversible"}
 CONTROLLER_LOG_CONTEXT = ControllerLogContext("heartbeat_watchdog")
@@ -200,6 +219,27 @@ def validate_thresholds() -> None:
     browser_debug_min_age_seconds()
     browser_debug_min_rss_mb()
     watchdog_flap_rearm_seconds()
+    validate_queue_thresholds()
+
+
+def validate_queue_thresholds() -> None:
+    """Validate queue backlog thresholds at startup (fail-closed).  See #2460.
+
+    Invalid thresholds (negative, non-finite, non-integral) raise ValueError
+    so the script exits with a clear diagnostic instead of silently weakening
+    monitoring.
+    """
+    pairs = [
+        ("BOT_ERRORS_WATCHDOG_OUTBOX_CRITICAL_COUNT", "BOT_ERRORS_OUTBOX_CRITICAL_COUNT"),
+        ("BOT_ERRORS_WATCHDOG_OUTBOX_CRITICAL_OLDEST_SECONDS", "BOT_ERRORS_OUTBOX_CRITICAL_OLDEST_SECONDS"),
+        ("BOT_ERRORS_WATCHDOG_PROCESSING_CRITICAL_COUNT", "BOT_ERRORS_PROCESSING_CRITICAL_COUNT"),
+        ("BOT_ERRORS_WATCHDOG_PROCESSING_CRITICAL_OLDEST_SECONDS", "BOT_ERRORS_PROCESSING_CRITICAL_OLDEST_SECONDS"),
+        ("BOT_ERRORS_WATCHDOG_WRITEFAIL_CRITICAL_COUNT", "BOT_ERRORS_WRITEFAIL_CRITICAL_COUNT"),
+        ("BOT_ERRORS_WATCHDOG_WRITEFAIL_CRITICAL_OLDEST_SECONDS", "BOT_ERRORS_WRITEFAIL_CRITICAL_OLDEST_SECONDS"),
+    ]
+    for primary, fallback in pairs:
+        parse_queue_threshold(fallback, 0)
+        parse_queue_threshold(primary, 0)
 
 
 def now_epoch() -> int:
@@ -676,16 +716,16 @@ def env_int(name: str, default: int) -> int:
 
 
 def directory_stats(path: Path, pattern: str) -> tuple[int, int]:
+    """Delegate to the shared SSOT scanner (lib.queue_age).  See #2460.
+
+    Uses createdAt for *.json entries (same clock as daily health-check) so
+    that dispatcher retries (which refresh mtime without changing createdAt)
+    cannot make an old event appear brand-new to the watchdog.
+    """
     try:
-        if not path.exists():
-            return 0, 0
-        files = [item for item in path.glob(pattern) if item.is_file()]
-        if not files:
-            return 0, 0
-        oldest = max(0, now_epoch() - min(int(item.stat().st_mtime) for item in files))
+        return scan_directory(path, pattern, float(now_epoch()))
     except OSError as exc:
         raise QueueDirectoryError(f"path={path} pattern={pattern} error={type(exc).__name__}: {exc}") from exc
-    return len(files), oldest
 
 
 def queue_backlog_problem(
@@ -704,8 +744,8 @@ def queue_backlog_problem(
             return f"{label} backlog scan failed: {exc}"
         total_count += count
         oldest_seconds = max(oldest_seconds, oldest)
-    over_count = max_count > 0 and total_count >= max_count
-    over_age = max_oldest_seconds > 0 and oldest_seconds >= max_oldest_seconds
+    over_count = threshold_met(total_count, max_count)
+    over_age = threshold_met(oldest_seconds, max_oldest_seconds)
     if not over_count and not over_age:
         return None
     return (
@@ -723,10 +763,10 @@ def queue_backlog_problems() -> dict[str, str]:
             "outbox",
             [Path(os.environ.get("BOT_ERRORS_OUTBOX_DIR", root / "outbox"))],
             "*.json",
-            env_int("BOT_ERRORS_WATCHDOG_OUTBOX_CRITICAL_COUNT", env_int("BOT_ERRORS_OUTBOX_CRITICAL_COUNT", 100)),
-            env_int(
+            parse_queue_threshold("BOT_ERRORS_WATCHDOG_OUTBOX_CRITICAL_COUNT", parse_queue_threshold("BOT_ERRORS_OUTBOX_CRITICAL_COUNT", 100)),
+            parse_queue_threshold(
                 "BOT_ERRORS_WATCHDOG_OUTBOX_CRITICAL_OLDEST_SECONDS",
-                env_int("BOT_ERRORS_OUTBOX_CRITICAL_OLDEST_SECONDS", 3600),
+                parse_queue_threshold("BOT_ERRORS_OUTBOX_CRITICAL_OLDEST_SECONDS", 3600),
             ),
         ),
         (
@@ -734,13 +774,13 @@ def queue_backlog_problems() -> dict[str, str]:
             "processing",
             [root / "processing"],
             "*",
-            env_int(
+            parse_queue_threshold(
                 "BOT_ERRORS_WATCHDOG_PROCESSING_CRITICAL_COUNT",
-                env_int("BOT_ERRORS_PROCESSING_CRITICAL_COUNT", 10),
+                parse_queue_threshold("BOT_ERRORS_PROCESSING_CRITICAL_COUNT", 10),
             ),
-            env_int(
+            parse_queue_threshold(
                 "BOT_ERRORS_WATCHDOG_PROCESSING_CRITICAL_OLDEST_SECONDS",
-                env_int("BOT_ERRORS_PROCESSING_CRITICAL_OLDEST_SECONDS", 300),
+                parse_queue_threshold("BOT_ERRORS_PROCESSING_CRITICAL_OLDEST_SECONDS", 300),
             ),
         ),
         (
@@ -752,13 +792,13 @@ def queue_backlog_problems() -> dict[str, str]:
                 Path.home() / ".bot-errors-writefail",
             ],
             "*.writefail",
-            env_int(
+            parse_queue_threshold(
                 "BOT_ERRORS_WATCHDOG_WRITEFAIL_CRITICAL_COUNT",
-                env_int("BOT_ERRORS_WRITEFAIL_CRITICAL_COUNT", 10),
+                parse_queue_threshold("BOT_ERRORS_WRITEFAIL_CRITICAL_COUNT", 10),
             ),
-            env_int(
+            parse_queue_threshold(
                 "BOT_ERRORS_WATCHDOG_WRITEFAIL_CRITICAL_OLDEST_SECONDS",
-                env_int("BOT_ERRORS_WRITEFAIL_CRITICAL_OLDEST_SECONDS", 600),
+                parse_queue_threshold("BOT_ERRORS_WRITEFAIL_CRITICAL_OLDEST_SECONDS", 600),
             ),
         ),
     ]
@@ -1834,8 +1874,31 @@ def browser_debug_problems() -> dict[str, str]:
 
 
 def configured_checks() -> set[str]:
+    """Parse and validate BOT_ERRORS_WATCHDOG_CHECKS against the canonical registry.
+
+    Fail-closed (#2465): an empty, whitespace-only, or unknown-token selector
+    raises ValueError rather than silently producing a zero-check green result.
+    A mixed valid+unknown selector is also rejected in full -- partial execution
+    of a misconfigured selector would mask the typo.
+    """
     raw = os.environ.get("BOT_ERRORS_WATCHDOG_CHECKS", DEFAULT_CHECKS)
-    return {part.strip() for part in raw.split(",") if part.strip()}
+    tokens = {part.strip() for part in raw.split(",") if part.strip()}
+    if not tokens:
+        raise ValueError(
+            "BOT_ERRORS_WATCHDOG_CHECKS is empty or whitespace-only; "
+            "an empty check set cannot produce a meaningful watchdog verdict "
+            "(every observer would be silently disabled). "
+            "Set it to a comma-separated subset of: "
+            + ",".join(sorted(KNOWN_WATCHDOG_CHECKS))
+        )
+    unknown = tokens - KNOWN_WATCHDOG_CHECKS
+    if unknown:
+        raise ValueError(
+            "BOT_ERRORS_WATCHDOG_CHECKS contains unknown token(s): "
+            + ",".join(sorted(unknown))
+            + ". Valid checks: " + ",".join(sorted(KNOWN_WATCHDOG_CHECKS))
+        )
+    return tokens
 
 
 def active_reconcile_prefixes(checks: set[str]) -> list[str]:
@@ -2295,7 +2358,15 @@ def reconcile(problems: dict[str, str], active_prefixes: list[str]) -> list[Path
 )
 def run_once(args: argparse.Namespace) -> int:
     validate_thresholds()
-    checks = configured_checks()
+    try:
+        checks = configured_checks()
+    except ValueError as exc:
+        # Configuration error: fail closed (#2465). Do NOT reconcile, refresh
+        # state, or print a green-looking result. Exit nonzero with a bounded
+        # diagnostic so supervisors see a configuration failure, not success.
+        print(f"configuration_error: {exc}", file=sys.stderr)
+        print(json.dumps({"time": now_iso(), "verdict": "configuration_error", "error": str(exc)}, sort_keys=True))
+        return 2
     problems = collect_problems(args, checks)
     written = reconcile(problems, active_reconcile_prefixes(checks))
     print(json.dumps({

@@ -57,8 +57,17 @@
       ]
     },
     {
+      "path": "deploy/scripts/lib/queue_age.py",
+      "sha256": "cc96f2b9738a27a570f03415129360df86e88ac8ef4f7456164958713b30631a",
+      "mustContain": [
+        "event_file_age_seconds",
+        "scan_directory",
+        "parse_queue_threshold"
+      ]
+    },
+    {
       "path": "deploy/scripts/bot-errors-gui-session-monitor.py",
-      "sha256": "f88ea9c360d1c1e0b44287bf3176d5fb30aac1a0bee7ceadfec1739a2f6e0bef",
+      "sha256": "200cceefa71e54e2768664c10248fc4bd3e3346ce6dcdc1eaa96c1e11a587d36",
       "mustContain": [
         "classify_gui_session",
         "gui_targets_from_fleet",
@@ -148,7 +157,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
-      "sha256": "6020f862b1e5797009b3e3eddb541c108046756dec5090d91441700b227817e1",
+      "sha256": "2bac557d6b6ad55b9c7906f95237cc745a14a10b45614059a3e84b78d5dd6503",
       "mustContain": [
         "BOT_ERRORS_Q_LOOP_STATE_DIR",
         "BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT",
