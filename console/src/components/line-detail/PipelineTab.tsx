@@ -88,7 +88,10 @@ function getNodeDetails(
     case 'Inbound':
       details.push({ label: 'Status', value: line.status })
       if (line.messagesToday != null) details.push({ label: 'Messages today', value: String(line.messagesToday) })
-      if (line.messageStats) {
+      if (line.metricAvailability?.messageStats === 'unavailable') {
+        details.push({ label: 'Received', value: '-' })
+        details.push({ label: 'Sent', value: '-' })
+      } else if (line.messageStats) {
         details.push({ label: 'Received', value: String(line.messageStats.received) })
         details.push({ label: 'Sent', value: String(line.messageStats.sent) })
       }

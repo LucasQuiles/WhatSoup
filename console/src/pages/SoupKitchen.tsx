@@ -226,31 +226,31 @@ const FleetDrawer: FC<FleetDrawerProps> = ({
               <div className="soup-drawer-kv__row">
                 <dt className="soup-drawer-kv__key">Chats</dt>
                 <dd className="soup-drawer-kv__val">
-                  {line.chatCounts?.chats ?? <EM_DASH />}
+                  {line.metricAvailability?.chatCounts === 'unavailable' ? '-' : line.chatCounts?.chats ?? <EM_DASH />}
                 </dd>
               </div>
               <div className="soup-drawer-kv__row">
                 <dt className="soup-drawer-kv__key">Groups</dt>
                 <dd className="soup-drawer-kv__val">
-                  {line.chatCounts?.groups ?? <EM_DASH />}
+                  {line.metricAvailability?.chatCounts === 'unavailable' ? '-' : line.chatCounts?.groups ?? <EM_DASH />}
                 </dd>
               </div>
               <div className="soup-drawer-kv__row">
                 <dt className="soup-drawer-kv__key">Unread</dt>
                 <dd className="soup-drawer-kv__val">
-                  {line.unread ?? <EM_DASH />}
+                  {line.metricAvailability?.chatCounts === 'unavailable' ? '-' : line.unread ?? <EM_DASH />}
                 </dd>
               </div>
               <div className="soup-drawer-kv__row">
                 <dt className="soup-drawer-kv__key">Sent</dt>
                 <dd className="soup-drawer-kv__val">
-                  {line.messageStats?.sent ?? <EM_DASH />}
+                  {line.metricAvailability?.messageStats === 'unavailable' ? '-' : line.messageStats?.sent ?? <EM_DASH />}
                 </dd>
               </div>
               <div className="soup-drawer-kv__row">
                 <dt className="soup-drawer-kv__key">Received</dt>
                 <dd className="soup-drawer-kv__val">
-                  {line.messageStats?.received ?? <EM_DASH />}
+                  {line.metricAvailability?.messageStats === 'unavailable' ? '-' : line.messageStats?.received ?? <EM_DASH />}
                 </dd>
               </div>
               <div className="soup-drawer-kv__row">
