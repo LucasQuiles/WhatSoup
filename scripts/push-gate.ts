@@ -82,6 +82,7 @@ export const CURATED_TEST_PATHS = [
   'tests/scripts/check-service-units.test.ts',
   'tests/scripts/check-insecure-tempfile.test.ts',
   'tests/scripts/check-zero-byte-tracked.test.ts',
+  'tests/scripts/check-provenance-references.test.ts',
   'tests/scripts/no-destructive-git-guard.test.ts',
   'tests/scripts/nonempty-string-ratchet.test.ts',
   'tests/scripts/nonempty-string-trim-length-ratchet.test.ts',
