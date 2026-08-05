@@ -6215,9 +6215,18 @@ def deadman(max_state_age: int, restart_grace: int, cooldown_seconds: int) -> in
     state = root / "dispatcher-state.json"
     problems: list[str] = []
     state_age = None
+    cycle_completed_at = None
     now_epoch = current_epoch()
     if state.exists():
         state_age = max(0, int(now_epoch - state.stat().st_mtime))
+        try:
+            state_data = json.loads(state.read_text(encoding="utf-8"))
+            cycle_completed = state_data.get("cycleCompletedAt")
+            if isinstance(cycle_completed, str):
+                completed_epoch = parse_iso_epoch(cycle_completed)
+                cycle_completed_at = max(0, int(now_epoch - completed_epoch))
+        except Exception:
+            pass
     service_status = service_is_active(DISPATCHER_SERVICE)
     service_uptime, service_state_change_age = service_restart_ages(DISPATCHER_SERVICE)
     grace_reason = None
@@ -6231,9 +6240,15 @@ def deadman(max_state_age: int, restart_grace: int, cooldown_seconds: int) -> in
     if not state.exists():
         if not grace_reason:
             problems.append(f"dispatcher state missing: {state}")
-    elif state_age is not None and state_age > max_state_age:
+    elif cycle_completed_at is None:
+        # State exists but has no cycleCompletedAt — the last cycle did not
+        # complete (crash between start and end). Treat as stale unless the
+        # state file was just written by the crash handler (within grace).
+        if state_age is not None and state_age > restart_grace and not grace_reason:
+            problems.append("dispatcher state stale: last cycle did not complete")
+    elif cycle_completed_at > max_state_age:
         if not grace_reason:
-            problems.append(f"dispatcher state stale: age_seconds={state_age}")
+            problems.append(f"dispatcher state stale: cycle age_seconds={cycle_completed_at}")
     if not SOCKET_PATH or not Path(SOCKET_PATH).exists():
         problems.append(f"personal socket missing: {SOCKET_PATH or '<unset>'}")
 
