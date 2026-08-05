@@ -2981,6 +2981,19 @@ def relay_writefail(remote_host: str, remote_root: str, record: dict[str, Any]) 
         return path, "poison"
     event_id = str(event["id"])
     if local_event_exists(event_id, str(event.get("createdAt") or "")):
+        # Before writing to writefail-recovered, check if another collector
+        # already holds a claim on this event. If so, skip the recovery to
+        # prevent duplicate deliveries (#2440).
+        claims_dir = state_root() / "relay-writefail-processing"
+        if claims_dir.exists():
+            for f in claims_dir.glob("*.relay-writefail"):
+                if event_id in f.name:
+                    append_log({
+                        "type": "writefail_duplicate_already_claimed",
+                        "remote": remote_host,
+                        "eventId": event_id,
+                    })
+                    return state_root() / "writefail-recovered" / f"existing-{safe_segment(event_id)}", "skipped_already_claimed"
         append_log({
             "type": "writefail_duplicate_already_local",
             "remote": remote_host,
