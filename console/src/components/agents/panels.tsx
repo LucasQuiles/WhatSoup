@@ -276,14 +276,17 @@ const rowState = (s: LiveSession): 'live' | 'paused' | 'dead' => {
 export const InstancesPanel: FC<{
   sessions: LiveSession[] | undefined;
   probeError?: boolean;
-}> = ({ sessions, probeError }) => {
+  readError?: boolean;
+}> = ({ sessions, probeError, readError }) => {
   const [expanded, setExpanded] = useState(false);
   const list = sessions ?? [];
   const visible = expanded ? list : list.slice(0, 4);
 
   return (
     <AgentsPanel title="Instances" tag={`${list.length} per-chat`}>
-      {probeError ? (
+      {readError ? (
+        <div className="agents-empty">Session read failed — storage unavailable. Showing nothing rather than a fake calm state.</div>
+      ) : probeError ? (
         <div className="agents-empty">Session probe failed — liveness unknown, showing nothing rather than a fake calm state.</div>
       ) : list.length === 0 ? (
         <div className="agents-empty">No live sessions.</div>
