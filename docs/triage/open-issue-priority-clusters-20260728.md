@@ -3,8 +3,8 @@
 > Generated from the sealed open-issue registry. This projection contains only issue numbers, aggregate counts, and reviewed cluster identifiers.
 
 - Source registry artifact commit: `a18b17553c8cfcbaa07f1a57e7df1844171be955`
-- Source registry revision: `59166b78357e129ab8140b145e304b5426bcb209`
-- Source registry SHA-256: `8723a28a46976cc174a5c86abd266159e00089047952b6daeb1f2032ff8ccbe0`
+- Source registry revision: `f0ece2d18883a66f04892a46669b3547e5bdf2b1`
+- Source registry SHA-256: `d07ea3ad9b50fc767482f31f3ecc43098459252fdd805c67ec88698d9d916923`
 - Source registry captured at: 2026-07-28T22:33:25.021Z
 
 | P0 | P1 | Total | In progress | Patch ready | Conflict | Unclaimed | Clusters |
