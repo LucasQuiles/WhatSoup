@@ -1237,11 +1237,16 @@ def main(argv: list[str]) -> int:
     deps = default_deps(config)
     try:
         status = run_selfcheck(config, deps, heal_enabled=not args.no_heal)
+        # #2469: if run_selfcheck returned unhealthy (config unreadable, disk
+        # full, etc.), re-push the heartbeat with the fatal status so the
+        # central monitor sees the unhealthy verdict immediately.  The heartbeat
+        # pushed inside finalize_status may carry a stale healthy signal if a
+        # deploy script ran a separate selfcheck that succeeded before this
+        # selfcheck detected its own fatal condition.
+        if not status.get("healthy", True):
+            publish_heartbeat(config, deps, status)
     except Exception as exc:
         status = {"schemaVersion": 1, "checkedAt": now_iso(), "healthy": False, "class": "selfcheck_error", "problems": [str(exc)]}
-        # Issue #2469: the fatal verdict must reach the heartbeat channel, or
-        # the prior healthy heartbeat stays authoritative centrally until it
-        # ages into generic staleness.
         try:
             publish_heartbeat(config, deps, status)
         except Exception as publish_exc:  # noqa: BLE001 - crash handler must not crash.
