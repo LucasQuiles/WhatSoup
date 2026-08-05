@@ -40,6 +40,12 @@ HEAL_WINDOW_SECONDS = 6 * 60 * 60
 MAX_HEALS_PER_WINDOW = 2
 DEFAULT_CENTRAL_DOWN_ALERT_SECONDS = 2 * 60 * 60
 DEFAULT_HEAL_MIN_FREE_BYTES = 64 * 1024 * 1024
+_HEALED_SERVICES: list[str] = [
+    "whatsoup-bot-errors-heartbeat-watchdog",
+    "whatsoup-bot-errors-dispatcher",
+    "whatsoup-bot-errors-runner",
+    "whatsoup-bot-errors-selfcheck",
+]
 
 
 @dataclass(frozen=True)
@@ -74,6 +80,30 @@ class SelfcheckDeps:
 
 class SelfcheckError(RuntimeError):
     pass
+
+
+def prove_loaded_generation(root: Path, deps: SelfcheckDeps) -> tuple[bool, str]:
+    """Verify each affected service's loaded generation matches the deployed root.
+
+    Returns (True, "ok") if all services have active (running) generation or
+    no generation check. Returns (False, reason) if a service's loaded
+    generation is not active — the process still runs pre-heal code and a
+    restart is needed.
+
+    Service status vocabulary matches the platform service manager:
+      - "active" (systemd) / running = loaded generation is live (OK)
+      - "loaded" (launchctl plist present but NOT running) = stale
+      - "inactive" / "rc=N" = stale (not running)
+      - "unknown" = no service-status hook available (skip)
+    """
+    for unit in _HEALED_SERVICES:
+        gen = deps.service_status(unit)
+        if gen == "unknown":
+            continue
+        if gen == "active":
+            continue
+        return False, f"generation_mismatch:{unit}={gen}"
+    return True, "ok"
 
 
 def now_iso(epoch: Optional[float] = None) -> str:
@@ -1177,7 +1207,12 @@ def run_selfcheck(config: SelfcheckConfig, deps: Optional[SelfcheckDeps] = None,
                                     status["deployerOutput"] = output[-1000:]
                                     if rc == 0:
                                         record_heal(memory, now)
-                                        status["action"] = "healed"
+                                        generation_ok, reason = prove_loaded_generation(config.root, deps)
+                                        if generation_ok:
+                                            status["action"] = "healed"
+                                        else:
+                                            status["action"] = "healed_unloaded"
+                                            status["problems"].append(reason)
                                     else:
                                         status["action"] = "heal_failed"
                                         status["problems"].append(f"deployer_rc={rc}")
