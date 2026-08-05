@@ -131,7 +131,9 @@
         "provider_execution_pressure",
         "agent_runtime_degraded_unclassified",
         "agent_runtime_unhealthy",
-        "unclassified"
+        "unclassified",
+        "chat_runtime_degraded",
+        "passive_runtime_degraded"
       ],
       "owner": "src/core/health.ts",
       "test": "tests/core/failure-taxonomy-cross-contract.test.ts"
