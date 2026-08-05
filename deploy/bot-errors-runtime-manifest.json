@@ -185,7 +185,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-release-proof-run.sh",
-      "sha256": "d52598ac7204805f5f5f3e4eb6b77ebe2e9693b756e55aba248d5b7b00375fac",
+      "sha256": "c11f5a33b85c85143281e73aef09f77e23c38a2f0f09efaabc241fea66b976dc",
       "mustContain": [
         "BOT_ERRORS_RELEASE_PROOF_MODE",
         "exit 75",

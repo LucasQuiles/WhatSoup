@@ -21,7 +21,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: bot-errors-release-proof-run.sh tree|runtime-staleness" >&2
+  echo "usage: bot-errors-release-proof-run.sh tree|runtime-staleness|health-invariants" >&2
 }
 
 if [ "$#" -ne 1 ]; then
@@ -30,7 +30,7 @@ if [ "$#" -ne 1 ]; then
 fi
 COMPONENT="$1"
 case "$COMPONENT" in
-  tree|runtime-staleness) ;;
+  tree|runtime-staleness|health-invariants) ;;
   *)
     usage
     exit 2
@@ -76,6 +76,31 @@ case "$COMPONENT" in
       ARGS=(--dry-run --once)
     else
       ARGS=(--once)
+    fi
+    ;;
+  health-invariants)
+    # Verify the running generation includes merged health invariants (#2446).
+    # Reads the runtime's health endpoint and checks for required invariant
+    # fields. Falls back to git provenance check if the health endpoint is
+    # unreachable. Does not run a detector subprocess.
+    HEALTH_PORT="${BOT_ERRORS_HEALTH_PORT:-9090}"
+    health=$(curl -sf "http://localhost:${HEALTH_PORT}/health" 2>/dev/null || echo "")
+    if echo "$health" | grep -q '"turnCapabilityEvidence":"affirmative"'; then
+      echo "release-proof: OK: runtime health invariants satisfied"
+      exit 0
+    elif [ -n "$health" ]; then
+      echo "release-proof: FAIL: runtime health invariants not satisfied — generation lacks #2446 fix"
+      exit 1
+    else
+      # Fallback: git provenance check
+      INVARIANTS_MERGE="${BOT_ERRORS_HEALTH_INVARIANTS_MERGE:-}"
+      APP_REPO="${BOT_ERRORS_RELEASE_PROOF_APP_REPO:-$HOME/LAB/WhatSoup}"
+      if [ -n "$INVARIANTS_MERGE" ] && git -C "$APP_REPO" merge-base --is-ancestor "$INVARIANTS_MERGE" HEAD 2>/dev/null; then
+        echo "release-proof: OK: runtime generation includes health invariants merge"
+        exit 0
+      fi
+      echo "release-proof: FAIL: runtime health invariants not satisfied — health endpoint unreachable and merge not verified"
+      exit 2
     fi
     ;;
 esac
