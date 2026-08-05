@@ -4,6 +4,8 @@ import {
   asRecord,
   isNonEmptyString,
   isRecord,
+  nonEmptyString,
+  nonEmptyStringRaw,
   requireArrayOfRecords,
   requireBoolean,
   requireEnum,
@@ -537,5 +539,39 @@ describe('requireArrayOfRecords', () => {
 
   it('throws with the index embedded for a non-record element', () => {
     expect(() => requireArrayOfRecords([{}, 'nope'], 'X')).toThrow('X[1] must be an object');
+  });
+});
+
+/**
+ * Contract-lock tests for the branded non-empty-string coercers (#2211).
+ *
+ * Contract: nonEmptyString returns the TRIMMED value (branded) or null;
+ * nonEmptyStringRaw preserves the original spelling (un-trimmed) or null.
+ * Both reject non-strings, empty strings, and whitespace-only strings.
+ */
+describe('nonEmptyString', () => {
+  it('returns the trimmed value for strings with content', () => {
+    expect(nonEmptyString('abc')).toBe('abc');
+    expect(nonEmptyString('  abc  ')).toBe('abc');
+  });
+
+  it('returns null for empty, whitespace-only, and non-string values', () => {
+    expect(nonEmptyString('')).toBeNull();
+    expect(nonEmptyString('   ')).toBeNull();
+    expect(nonEmptyString(undefined)).toBeNull();
+    expect(nonEmptyString(42)).toBeNull();
+  });
+});
+
+describe('nonEmptyStringRaw', () => {
+  it('preserves the un-trimmed spelling for strings with content', () => {
+    expect(nonEmptyStringRaw('  abc  ')).toBe('  abc  ');
+  });
+
+  it('returns null for empty, whitespace-only, and non-string values', () => {
+    expect(nonEmptyStringRaw('')).toBeNull();
+    expect(nonEmptyStringRaw(' \t\n ')).toBeNull();
+    expect(nonEmptyStringRaw(null)).toBeNull();
+    expect(nonEmptyStringRaw([])).toBeNull();
   });
 });

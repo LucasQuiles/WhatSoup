@@ -199,3 +199,32 @@ export function requireArrayOfRecords(value: unknown, label: string): Record<str
   if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
   return value.map((entry, index) => requireRecord(entry, `${label}[${index}]`));
 }
+
+// ---------------------------------------------------------------------------
+// Non-empty-string type guards (#2211)
+// ---------------------------------------------------------------------------
+
+/**
+ * Branded non-empty string type. Constructable only through {@link nonEmptyString},
+ * which guarantees the value is a string with non-whitespace content (trimmed).
+ * Assignable to `string` (transparent brand) but cannot be constructed by accident.
+ */
+export type NonEmptyString = string & { readonly __nonEmpty: unique symbol };
+
+/**
+ * Narrow `unknown` to a trimmed non-empty string, else `null`.
+ */
+export function nonEmptyString(value: unknown): NonEmptyString | null {
+  return typeof value === 'string' && value.trim() !== ''
+    ? (value.trim() as NonEmptyString)
+    : null;
+}
+
+/**
+ * Narrow `unknown` to a non-empty (but **un-trimmed**) string, else `null`.
+ */
+export function nonEmptyStringRaw(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() !== ''
+    ? value
+    : null;
+}
