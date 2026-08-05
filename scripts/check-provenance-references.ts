@@ -18,6 +18,7 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync, statSync } from 'node:fs';
 import { env, exit } from 'node:process';
+import { pathToFileURL } from 'node:url';
 
 const repo = env.GITHUB_REPOSITORY ?? 'LucasQuiles/WhatSoup';
 const token = env.GH_TOKEN ?? env.GITHUB_TOKEN ?? '';
@@ -33,7 +34,7 @@ function isProbablePrRef(token: string): boolean {
   return !isNaN(n) && n > 0 && n < PHANTOM_THRESHOLD;
 }
 
-function checkRefs(text: string): string[] {
+export function checkRefs(text: string): string[] {
   const errors: string[] = [];
 
   // Check oc-re/ references outside triage-narrative quotes
@@ -78,31 +79,33 @@ function checkRefs(text: string): string[] {
   return errors;
 }
 
-// Main
-const target = process.argv[2] ?? '--staged';
-let content: string;
+// Main — guarded so the module is import-safe for tests.
+if (import.meta.url === pathToFileURL(process.argv[1]!).href) {
+  const target = process.argv[2] ?? '--staged';
+  let content: string;
 
-if (target && target !== '--staged' && target !== '--all') {
-  content = readFileSync(target, 'utf8');
-} else if (target === '--all') {
-  content = readFileSync('/dev/stdin', 'utf8');
-} else {
-  try {
-    content = execFileSync('git', ['diff', '--cached', '--', '*.ts', '*.md', '*.json'], {
-      encoding: 'utf8',
-      maxBuffer: 10 * 1024 * 1024,
-    });
-  } catch {
-    content = '';
+  if (target && target !== '--staged' && target !== '--all') {
+    content = readFileSync(target, 'utf8');
+  } else if (target === '--all') {
+    content = readFileSync('/dev/stdin', 'utf8');
+  } else {
+    try {
+      content = execFileSync('git', ['diff', '--cached', '--', '*.ts', '*.md', '*.json'], {
+        encoding: 'utf8',
+        maxBuffer: 10 * 1024 * 1024,
+      });
+    } catch {
+      content = '';
+    }
   }
-}
 
-const errors = checkRefs(content);
-if (errors.length > 0) {
-  console.error('PROVENANCE GUARD FAILED:');
-  for (const err of errors) console.error(`  - ${err}`);
-  exit(1);
-}
+  const errors = checkRefs(content);
+  if (errors.length > 0) {
+    console.error('PROVENANCE GUARD FAILED:');
+    for (const err of errors) console.error(`  - ${err}`);
+    exit(1);
+  }
 
-console.log('provenance references: OK');
-exit(0);
+  console.log('provenance references: OK');
+  exit(0);
+}

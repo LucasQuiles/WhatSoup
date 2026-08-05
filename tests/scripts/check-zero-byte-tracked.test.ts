@@ -79,6 +79,17 @@ describe('zero-byte tracked-file guard', () => {
     expect(files(root)).toEqual([]);
   });
 
+  it('surfaces a non-empty findings list when a tracked file is emptied', () => {
+    // Failure path proven on the counted result itself: the guard-test-coverage
+    // checker requires an in-test invocation linked to a non-empty findings
+    // assertion — the files() helper above hides the invocation from that walk.
+    const result = scanForZeroByteTrackedCounted(
+      makeRepo({ 'emptied.md': '', 'real.md': 'content\n' }),
+    );
+    expect(result.findings).toHaveLength(1);
+    expect(result.findings.map((f) => f.file)).toContain('emptied.md');
+  });
+
   it('reports how many tracked files it examined, so a no-op scan is detectable', () => {
     const withFiles = scanForZeroByteTrackedCounted(makeRepo({ 'a.md': 'x\n', 'b.md': 'y\n' }));
     expect(withFiles.filesExamined).toBe(2);

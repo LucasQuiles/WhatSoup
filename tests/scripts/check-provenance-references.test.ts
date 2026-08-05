@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { writeFileSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { checkRefs } from '../../scripts/check-provenance-references.ts';
 
 describe('check-provenance-references', () => {
   const scriptPath = new URL('../../scripts/check-provenance-references.ts', import.meta.url).pathname;
@@ -43,5 +44,20 @@ describe('check-provenance-references', () => {
   it('passes on oc-re/ inside triage-narrative context', () => {
     const r = runScript('(triage-narrative: oc-re/resolved)');
     expect(r.stdout).toContain('OK');
+  });
+
+  // Direct invocations: both offline-checkable defect classes proven on the
+  // returned errors list, independent of the CLI wrapper above.
+  it('checkRefs returns a non-empty errors list for a phantom PR reference', () => {
+    const errors = checkRefs('Refs #9999999 — phantom reference');
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain('#9999999');
+  });
+
+  it('checkRefs flags oc-re/ outside triage-narrative and passes it inside', () => {
+    const errors = checkRefs('See also: oc-re/phantom-ref');
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain('oc-re/');
+    expect(checkRefs('(triage-narrative: oc-re/resolved)')).toEqual([]);
   });
 });
