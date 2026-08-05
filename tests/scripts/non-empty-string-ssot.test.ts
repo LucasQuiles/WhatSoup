@@ -36,12 +36,13 @@ const PATTERN = /typeof\s+\w+\s*===\s*['"]string['"]\s*&&\s*\w+\.trim\(\)\s*!==\
  *        && v.trim() !== ''` sites in src/. Remaining #2849 scope uses other
  *        variant patterns (.length, truthy, cast) not matched by this ratchet,
  *        plus console/src sites (this ratchet scans src/ only).
+ *  - 1:  #2749-S9c migrated health-poller.ts ×4 to nonEmptyString/nonEmptyStringRaw.
  *  - 5:  recounted at #2749-S10a landing — post-draft main evolution
  *        reintroduced sites (health-poller.ts ×4, providers/codex-parser.ts ×1).
  *        Migrating them belongs to the health-poller follow-on and #2871 lanes;
  *        this ratchet holds the line at 5 until then.
  */
-const EXPECTED_BASELINE = 5;
+const EXPECTED_BASELINE = 1;
 
 function countOpenCodedSites(): { total: number; perFile: Record<string, number> } {
   const perFile: Record<string, number> = {};
