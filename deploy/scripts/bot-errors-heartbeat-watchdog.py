@@ -1334,14 +1334,21 @@ def format_health_failure(
     )
 
 
-def local_instance_health_problems() -> dict[str, str]:
+def local_instance_health_problems(
+    evaluated_out: set[str] | None = None,
+) -> dict[str, str]:
+    """Returns the problems dict (the long-standing contract). When
+    evaluated_out is provided, the names of locally-evaluated instances are
+    added to it so reconcile() can scope its clear path (#2431)."""
     profile = health_profile_path()
     problems: dict[str, str] = {}
+    evaluated: set[str] = set()
     for item in expected_local_instances():
         port = item.get("healthPort")
         if isinstance(port, bool) or not isinstance(port, int):
             continue
         name = str(item["name"])
+        evaluated.add(name)
         status, body, url = local_health_http_response(name, port)
         key = f"local_health:{name}"
         # Parse the telemetry REGARDLESS of status code. A server-side logout
@@ -1381,6 +1388,8 @@ def local_instance_health_problems() -> dict[str, str]:
         if not reasons:
             continue
         problems[key] = format_health_failure(name, port, url, status, reasons, ctx, profile)
+    if evaluated_out is not None:
+        evaluated_out.update(evaluated)
     return problems
 
 
@@ -1930,7 +1939,7 @@ def key_in_active_scope(key: str, prefixes: list[str]) -> bool:
     return any(key == prefix or key.startswith(prefix) for prefix in prefixes)
 
 
-def collect_problems(args: argparse.Namespace, checks: set[str] | None = None) -> dict[str, str]:
+def collect_problems(args: argparse.Namespace, checks: set[str] | None = None, evaluated_instances: set[str] | None = None) -> dict[str, str]:
     checks = checks if checks is not None else configured_checks()
     problems: dict[str, str] = {}
     if "q_loop" in checks:
@@ -2026,7 +2035,7 @@ def collect_problems(args: argparse.Namespace, checks: set[str] | None = None) -
     if "local_services" in checks:
         problems.update(local_service_problems())
     if "local_instance_health" in checks:
-        problems.update(local_instance_health_problems())
+        problems.update(local_instance_health_problems(evaluated_instances))
     if "browser_debug" in checks:
         problems.update(browser_debug_problems())
     return problems
@@ -2088,7 +2097,7 @@ def deferred_recovery_event(key: str, record: dict[str, Any]) -> Path:
     )
 
 
-def reconcile(problems: dict[str, str], active_prefixes: list[str]) -> list[Path]:
+def reconcile(problems: dict[str, str], active_prefixes: list[str], evaluated_instances: set[str] | None = None) -> list[Path]:
     state = load_state()
     open_incidents: dict[str, Any] = state["open"]
     written: list[Path] = []
@@ -2263,6 +2272,13 @@ def reconcile(problems: dict[str, str], active_prefixes: list[str]) -> list[Path
     for key in sorted(set(open_incidents) - set(problems)):
         if not key_in_active_scope(key, active_prefixes):
             continue
+        # #2431: constrain incident-clear to the evaluated instance set only.
+        # An incident for a non-evaluated instance must survive the sweep so
+        # that a removed/renamed instance does not silently lose its incident.
+        if evaluated_instances is not None and key.startswith("local_health:"):
+            instance_name = key.removeprefix("local_health:")
+            if instance_name not in evaluated_instances:
+                continue
         incident = open_incidents[key]
         if not isinstance(incident, dict):
             incident = replacement_incident(current)
@@ -2367,8 +2383,9 @@ def run_once(args: argparse.Namespace) -> int:
         print(f"configuration_error: {exc}", file=sys.stderr)
         print(json.dumps({"time": now_iso(), "verdict": "configuration_error", "error": str(exc)}, sort_keys=True))
         return 2
-    problems = collect_problems(args, checks)
-    written = reconcile(problems, active_reconcile_prefixes(checks))
+    evaluated_instances: set[str] = set()
+    problems = collect_problems(args, checks, evaluated_instances)
+    written = reconcile(problems, active_reconcile_prefixes(checks), evaluated_instances)
     print(json.dumps({
         "time": now_iso(),
         "problems": sorted(problems),
