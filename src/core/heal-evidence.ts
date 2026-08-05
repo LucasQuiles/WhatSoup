@@ -256,6 +256,7 @@ function crashEvidence(input: AutomaticHealReportInput): HealEvidenceV1 {
     counts: { occurrences: 1 },
     action: actionForCrashCause(cause),
     correlation: `heal:v1:crash:${cause}`,
+    ...(input.provider ? { provider: input.provider } : {}),
   };
 }
 
