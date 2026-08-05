@@ -145,6 +145,7 @@ class ProviderHarness {
 
   spawn(binary: string, args: string[], options: Record<string, unknown>): MockChild {
     const stdout = new EventEmitter();
+    (stdout as unknown as { setEncoding: (enc: string) => void }).setEncoding = vi.fn();
     const stderr = new EventEmitter();
     const stdin = new EventEmitter() as MockChild['stdin'];
     const child = new EventEmitter() as MockChild;

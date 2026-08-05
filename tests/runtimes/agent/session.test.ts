@@ -48,6 +48,10 @@ function makeMockChild(pid = 12345) {
   (stdin as unknown as { end: ReturnType<typeof vi.fn> }).end = vi.fn();
 
   const stdout = new EventEmitter();
+  // Real ChildProcess stdout is a Readable; session.ts calls setEncoding('utf8')
+  // on it at spawn (#2290 M10). A no-op keeps the mock a bare emitter — tests
+  // emit Buffers/strings directly, so no decoding behavior is simulated here.
+  (stdout as unknown as { setEncoding: (enc: string) => void }).setEncoding = vi.fn();
   const stderr = new EventEmitter();
 
   const killFn = vi.fn();

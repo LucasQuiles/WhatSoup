@@ -55,6 +55,7 @@ function makeMockChild(pid = 12345) {
   );
 
   const stdout = new EventEmitter();
+  (stdout as unknown as { setEncoding: (enc: string) => void }).setEncoding = vi.fn();
   const stderr = new EventEmitter();
 
   const killFn = vi.fn();
