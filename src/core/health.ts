@@ -227,6 +227,18 @@ function noteProbeSuccess(warnMsg: string): void {
   }
 }
 
+/** #2280: add degradation_silence_unproven when no active degradation reasons
+ * exist but the instance was recently degraded. */
+export function addDegradationSilenceProof(
+  statusReasons: string[],
+  recentlyDegraded: Set<string>,
+  instanceName: string,
+): void {
+  if (statusReasons.length === 0 && recentlyDegraded.has(instanceName)) {
+    statusReasons.push('degradation_silence_unproven');
+  }
+}
+
 function safeDbQuery<T>(fn: () => T, fallback: T, warnMsg: string): T {
   const start = Date.now();
   try {
@@ -508,6 +520,10 @@ function agentRuntimeDetailsForHealth(
 
 export const ENRICHMENT_STALE_MS = 10 * MS_PER_MINUTE; // 10 minutes
 const RECENT_DISCONNECT_DEGRADED_THRESHOLD = 3;
+// #2280: tracks instances that have recently been in STATUS_DEGRADED, so status
+// updates that see empty statusReasons (silence) can keep the instance degraded
+// until explicit recovery proof arrives.
+const RECENTLY_DEGRADED = new Set<string>();
 // #1433 / B21-D — a post-first-turn error in one of these TRANSIENT, self-clearing
 // classes is benign-by-default: `empty-output` (the model returned one empty turn
 // and typically recovers on the next) plus the W1-T6-backfilled `transient-network`
@@ -1661,6 +1677,11 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         if (turnCapabilityIsDegraded) statusReasons.push('turn_capability_degraded');
         if (loopLag.locallyStarved) statusReasons.push('event_loop_starvation');
         if (durabilityDebtIsDegraded) statusReasons.push('durability_delivery_debt');
+        // #2280: silence from child processes is not proof of recovery.
+        // If statusReasons is empty but the instance was recently degraded,
+        // keep it degraded until explicit recovery evidence is observed.
+        addDegradationSilenceProof(statusReasons, RECENTLY_DEGRADED, deps.instanceName);
+        if (statusReasons.length > 0) RECENTLY_DEGRADED.add(deps.instanceName);
         status = statusReasons.length > 0 ? 'degraded' : 'healthy';
       }
 
