@@ -89,6 +89,7 @@ function writeFakeBotErrorsRepo(repoRoot: string): void {
     'bot-errors-dispatcher.py',
     'bot-errors-health-check.py',
     'bot-errors-runner.py',
+    'bot-errors-heartbeat-watchdog.py',
   ]) {
     writeFileSync(path.join(repoRoot, 'deploy', 'scripts', script), '#!/usr/bin/env python3\n', 'utf8');
   }
