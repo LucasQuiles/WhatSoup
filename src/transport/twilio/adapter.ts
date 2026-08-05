@@ -472,12 +472,25 @@ export class TwilioSmsAdapter implements TransportAdapter, VoiceCapableTransport
     let maxSentAt: Date | null = null;
 
     for (const record of records) {
-      // Track maximum sentAt to advance the cursor after this batch.
-      if (maxSentAt === null || record.sentAt > maxSentAt) {
-        maxSentAt = record.sentAt;
+      try {
+        // Track maximum sentAt to advance the cursor after this batch.
+        if (maxSentAt === null || record.sentAt > maxSentAt) {
+          maxSentAt = record.sentAt;
+        }
+        // Delegate dedupe + emit + trim to shared seam
+        this.handleInboundRecord(record);
+      } catch (err) {
+        // A malformed provider record must not crash the poll loop or the
+        // process (#2289 M2). Log and continue with the next record.
+        this.safeEmit(this.listeners.error, new TransientProviderError({
+          channelId: this.channelId,
+          operation: 'pollInbound:handleRecord',
+          correlationId: this.nextCorrelationId(),
+          message: `malformed inbound record: ${err instanceof Error ? err.message : String(err)}`,
+          scope: 'channel',
+          phase: 'provider_call_started',
+        }));
       }
-      // Delegate dedupe + emit + trim to shared seam
-      this.handleInboundRecord(record);
     }
 
     // Advance cursor to max sentAt seen (not Date.now()) to avoid clock-skew

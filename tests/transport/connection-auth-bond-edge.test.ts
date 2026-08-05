@@ -143,6 +143,7 @@ function makeSnapshot(overrides: AuthBondSnapshotOverrides = {}): AuthBondSnapsh
       lastRestoreAt: null,
       lastRestoreSource: null,
       lastRestoreError: null,
+      lastSweepError: null,
     },
     issues: [],
   };
