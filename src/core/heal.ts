@@ -430,3 +430,18 @@ function formatHealReport(payload: {
   lines.push(`\nRepair attempt ${payload.attempt}. Repeat occurrences of this error before resolution increment the attempt count but do not trigger a further notification or scheduled retry.`);
   return lines.join('\n');
 }
+
+// #2399: fallback prerequisite alert sources that require contributor-aware
+// recovery lifecycle — the incident must survive until the prerequisite is
+// observed satisfied, not auto-close on age.
+const FALLBACK_PREREQUISITE_SOURCES = new Set([
+  'fallback_credential_missing',
+  'fallback_binary_missing',
+  'fallback_model_unknown',
+  'fallback_persist_failed',
+  'provider_auth_required_no_fallback',
+]);
+
+export function isFallbackPrerequisite(source: string): boolean {
+  return FALLBACK_PREREQUISITE_SOURCES.has(source);
+}
