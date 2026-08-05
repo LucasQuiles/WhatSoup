@@ -574,6 +574,11 @@ def save_central_heartbeat(config: SentinelConfig, result: dict) -> str:
         "unknownInstanceCount": unknown_instance_count,
         "metrics": result.get("metrics") if isinstance(result.get("metrics"), dict) else None,
     }
+    # #2432: signal non-green aggregate when fleetAction is "none" so the
+    # watchdog can create a durable problem (otherwise aggregate health
+    # false + fleetAction=none passes the watchdog silently).
+    if not healthy and result.get("fleetAction") == "none":
+        payload["nonGreenReason"] = f"aggregate_health_false roster_bound={roster_bound}"
     path = heartbeat_path(config)
     target = _durable_target(path)
     observation = observe_json(target)

@@ -2008,6 +2008,16 @@ def collect_problems(args: argparse.Namespace, checks: set[str] | None = None, e
         roster_problem = fleet_sentinel_roster_problem(sentinel_path)
         if roster_problem is not None:
             problems["fleet_sentinel:roster"] = roster_problem
+        # #2432: non-green aggregate detection — a fresh, roster-bound
+        # aggregate with healthy=false and nonGreenReason must alert.
+        sentinel_data = _readable_fleet_sentinel_heartbeat(sentinel_path)
+        if sentinel_data is not None and sentinel_data.get("nonGreenReason"):
+            problems["fleet_sentinel:non_green"] = (
+                f"fleet sentinel aggregate non-green: "
+                f"nonGreenReason={sentinel_data['nonGreenReason']} "
+                f"fleetAction={sentinel_data.get('fleetAction')} "
+                f"healthy={sentinel_data.get('healthy')}"
+            )
     if "collector_roster" in checks:
         drift = collector_roster_drift_problem()
         if drift is not None:
