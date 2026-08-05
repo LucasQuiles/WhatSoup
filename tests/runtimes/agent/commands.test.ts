@@ -316,3 +316,92 @@ describe('structured /model grammar (C1 — agent-assisted design)', () => {
     expect(classifyInput('/model the best kimi').type).toBe('forwarded'); // flag off
   });
 });
+
+// #2357 shadow classification: detect compound command+body (slash command
+// followed by a nonblank multi-line remainder). Detection-only — runtime
+// behavior is unchanged. The body is preserved byte-for-byte.
+describe('classifyInput compound body shadow detection (#2357)', () => {
+  // The `message` union member never carries compoundBody, so property access
+  // on an un-narrowed CommandResult is TS2339; the cast widens for assertion
+  // only — runtime shapes are unchanged.
+  const shadow = (r: ReturnType<typeof classifyInput>) =>
+    r as { type: string; command?: string; args?: string; compoundBody?: string };
+
+  it('detects compound body on a local command', () => {
+    const result = classifyInput('/status\ndo the task');
+    expect(result.type).toBe('local');
+    expect(shadow(result).command).toBe('status');
+    expect(shadow(result).compoundBody).toBe('do the task');
+  });
+
+  it('detects compound body on a forwarded command', () => {
+    const result = classifyInput('/plugin:workflow\nrun the thing');
+    expect(result.type).toBe('forwarded');
+    expect(shadow(result).compoundBody).toBe('run the thing');
+  });
+
+  it('preserves body byte-for-byte including line endings and leading whitespace', () => {
+    const body = '  indented line\nsecond line\n';
+    const result = classifyInput(`/status\n${body}`);
+    expect(shadow(result).compoundBody).toBe(body);
+  });
+
+  it('preserves CRLF in the body', () => {
+    const result = classifyInput('/status\r\nbody line');
+    // The body after the first \n is 'body line' — the \r stays on the command line
+    expect(shadow(result).compoundBody).toBe('body line');
+  });
+
+  it('preserves CRLF line endings within the body', () => {
+    const result = classifyInput('/status\nline1\r\nline2');
+    expect(shadow(result).compoundBody).toBe('line1\r\nline2');
+  });
+
+  it('returns no compoundBody for single-line command', () => {
+    expect(shadow(classifyInput('/status')).compoundBody).toBeUndefined();
+    expect(shadow(classifyInput('/status arg')).compoundBody).toBeUndefined();
+  });
+
+  it('returns no compoundBody when remainder is blank', () => {
+    expect(shadow(classifyInput('/status\n')).compoundBody).toBeUndefined();
+    expect(shadow(classifyInput('/status\n   ')).compoundBody).toBeUndefined();
+    expect(shadow(classifyInput('/status\n\n\n')).compoundBody).toBeUndefined();
+  });
+
+  it('returns no compoundBody for non-slash messages', () => {
+    const result = classifyInput('hello\nworld');
+    expect(result.type).toBe('message');
+    expect(shadow(result).compoundBody).toBeUndefined();
+  });
+
+  it('returns no compoundBody for bare slash (help)', () => {
+    expect(shadow(classifyInput('/')).compoundBody).toBeUndefined();
+    expect(shadow(classifyInput('/\n')).compoundBody).toBeUndefined();
+    // Note: '/\nbody' is NOT a bare slash — after stripping '/', "body" becomes
+    // an unknown command name → forwarded, with compoundBody='body'.
+  });
+
+  it('does not change args behavior (shadow: args still includes body tokens)', () => {
+    // Shadow phase: args are unchanged — the body tokens still appear in args.
+    // Promotion to dual-phase will separate them.
+    const result = classifyInput('/status arg\ndo task');
+    expect(result.type).toBe('local');
+    expect(shadow(result).args).toBe('arg do task');
+    expect(shadow(result).compoundBody).toBe('do task');
+  });
+
+  it('detects compound body with routing aliases enabled', () => {
+    // Bare /model (parts.length===1) stays local even with a body line:
+    const result = classifyInput('/model\nswitch to kimi', { routingAliases: true });
+    // NOTE: the body tokens inflate parts.length, so this forwards (structured
+    // grammar fails for multi-line content). This is CORRECT shadow behavior —
+    // the body is preserved in compoundBody regardless of local/forwarded.
+    expect(shadow(result).compoundBody).toBe('switch to kimi');
+  });
+
+  it('detects compound body on unknown forwarded command', () => {
+    const result = classifyInput('/unknown\ntask body');
+    expect(result.type).toBe('forwarded');
+    expect(shadow(result).compoundBody).toBe('task body');
+  });
+});
