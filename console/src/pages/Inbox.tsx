@@ -70,7 +70,7 @@ function applyMarkReadOutcome(
 }
 
 export default function Inbox() {
-  const { data: lines } = useLines()
+  const { data: lines, error: linesError } = useLines()
   const toast = useToast()
   const queryClient = useQueryClient()
 
@@ -134,7 +134,7 @@ export default function Inbox() {
     [conversations, selected, selectedId],
   )
 
-  const { data: messages } = useMessages(selected?.line ?? '', selected?.key ?? '')
+  const { data: messages, error: messagesError } = useMessages(selected?.line ?? '', selected?.key ?? '')
   useEffect(() => {
     setHasMore(true)
   }, [selectedId])
@@ -220,6 +220,7 @@ export default function Inbox() {
         ))}
       </div>
 
+      {linesError && <div className="inbox-wrap__error">Failed to load lines: {(linesError as Error).message}</div>}
       <div className="inbox-wrap">
         <ConversationList
           conversations={visible}
@@ -230,7 +231,14 @@ export default function Inbox() {
           onSelect={(c) => setSelected({ line: c.line, key: c.conversationKey })}
         />
 
-        {selectedConversation ? (
+        {messagesError && selectedConversation && (
+          <section className="inbox-thread" aria-label="Conversation thread">
+            <div className="inbox-thread__empty">
+              <div className="inbox-wrap__error">Failed to load messages</div>
+            </div>
+          </section>
+        )}
+        {selectedConversation && !messagesError ? (
           <ThreadPane
             conversation={selectedConversation}
             messages={messages ?? []}
