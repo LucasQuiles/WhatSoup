@@ -43,7 +43,7 @@ describe('process lock ownership', () => {
       bootId: 'boot-current',
     });
 
-    expect(handle).toEqual({ path: lockPath, pid: 11111, token: 'owned-token', reclaimedPreviousBoot: false });
+    expect(handle).toEqual({ path: lockPath, pid: 11111, token: 'owned-token', reclaimedPreviousBoot: false, reclaimedDeadSameBoot: false });
     expect(readProcessLockPayload(lockPath)).toEqual({
       pid: 11111,
       token: 'owned-token',
@@ -172,6 +172,7 @@ describe('process lock ownership', () => {
       pid: 44444,
       token: 'new-token',
       reclaimedPreviousBoot: false,
+      reclaimedDeadSameBoot: true,
     });
     expect(readProcessLockPayload(lockPath)).toMatchObject({
       pid: 44444,
@@ -215,7 +216,7 @@ describe('process lock boot-id reclaim', () => {
       isProcessAlive: () => false,
     });
 
-    expect(handle).toEqual({ path: lockPath, pid: 44444, token: 'new-token', reclaimedPreviousBoot: true });
+    expect(handle).toEqual({ path: lockPath, pid: 44444, token: 'new-token', reclaimedPreviousBoot: true, reclaimedDeadSameBoot: false });
     expect(readProcessLockPayload(lockPath)).toEqual({
       pid: 44444,
       token: 'new-token',
@@ -279,6 +280,7 @@ describe('process lock boot-id reclaim', () => {
       pid: innerId.pid,
       token: innerId.token,
       reclaimedPreviousBoot: true,
+      reclaimedDeadSameBoot: false,
     });
 
     // The other attempt failed closed — no second live writer was spawned and
