@@ -4065,26 +4065,103 @@ def collapse_storm_group(
         existing_manifest, manifest_path = existing
         bucket_start = int(existing_manifest.get("windowStartEpoch") or requested_start)
         bucket_end = int(existing_manifest.get("windowEndEpoch") or (bucket_start + window))
-        manifest = existing_manifest
     else:
         bucket_start = requested_start
         bucket_end = bucket_start + window
         manifest_path = paths["storm_manifests"] / f"{bucket_start}.{fingerprint_hash}.json"
-        manifest = {}
     digest_id = f"storm-{fingerprint_hash}-{bucket_start}"
     events = [event for _, event in records]
     additions = [manifest_entry(path, event) for path, event in records]
+
+    # #2282: check for existing digest BEFORE mutating any manifest
+    known_digest_path = find_event_path_by_id(
+        digest_id,
+        paths,
+        ("outbox", "processing", "sent", "suppressed", "quarantine"),
+    )
+    if known_digest_path is not None:
+        # A digest already exists — create a superseding revision instead of
+        # mutating the existing manifest. The original manifest stays untouched.
+        version = 2
+        while find_event_path_by_id(
+            f"storm-{fingerprint_hash}-{bucket_start}-v{version}",
+            paths,
+            ("outbox", "processing", "sent", "suppressed", "quarantine"),
+        ) is not None:
+            version += 1
+        superseding_digest_id = f"storm-{fingerprint_hash}-{bucket_start}-v{version}"
+        new_manifest_path = paths["storm_manifests"] / f"{bucket_start}.{fingerprint_hash}.v{version}.json"
+        merged_hosts = sorted(set(sorted_unique_hosts(events)), key=lambda value: value.lower())
+        new_manifest = {
+            "schemaVersion": 1,
+            "kind": "bot_errors_storm_collapse",
+            "createdAt": now_iso(),
+            "updatedAt": now_iso(),
+            "digestId": superseding_digest_id,
+            "fingerprint": fingerprint_hash,
+            "windowStartEpoch": bucket_start,
+            "windowEndEpoch": bucket_end,
+            "affectedHosts": len(merged_hosts),
+            "hosts": merged_hosts,
+            "entries": additions,
+            "supersedesDigest": digest_id,
+        }
+        superseding_manifest_target = _durable_target(new_manifest_path)
+        superseding_manifest_observation = observe_json(superseding_manifest_target)
+        superseding_manifest_generation = (superseding_manifest_observation.version.generation or 0) + 1
+        superseding_manifest_operation = operation_id(
+            superseding_manifest_target, new_manifest,
+            component="dispatcher.storm_manifest_superseding",
+            predecessor=superseding_manifest_observation.version,
+        )
+        superseding_manifest_publication = publish_state_json(
+            superseding_manifest_target, new_manifest,
+            component="dispatcher.storm_manifest_superseding",
+            operation_id=superseding_manifest_operation,
+            expected=superseding_manifest_observation.version,
+            generation=superseding_manifest_generation,
+        )
+        require_all_advance([superseding_manifest_publication])
+        superseding_digest = storm_digest_event(
+            paths, fingerprint, fingerprint_hash, bucket_start, bucket_end, events, new_manifest_path
+        )
+        superseding_digest["supersedesId"] = digest_id
+        superseding_digest["storm"]["supersedesDigest"] = digest_id
+        superseding_digest_path = storm_digest_outbox_path(paths, superseding_digest_id, str(superseding_digest.get("source")), bucket_start)
+        superseding_digest_target = _durable_target(superseding_digest_path)
+        superseding_absent = JsonVersion(False, None, None, None)
+        superseding_digest_operation = operation_id(
+            superseding_digest_target, superseding_digest,
+            component="dispatcher.storm_digest_superseding",
+            predecessor=superseding_absent,
+        )
+        superseding_digest_publication = publish_event_json(
+            superseding_digest_target, superseding_digest,
+            component="dispatcher.storm_digest_superseding",
+            operation_id=superseding_digest_operation,
+        )
+        require_all_advance([superseding_digest_publication])
+        append_dispatch_log(paths, {
+            "type": "storm_digest_superseded",
+            "supersedingDigestId": superseding_digest_id,
+            "supersededDigestId": digest_id,
+            "supersedingDigestPath": str(superseding_digest_path),
+            "fingerprint": fingerprint_hash,
+            "affectedHosts": len(merged_hosts),
+            "newCollapsedEvents": len(events),
+            "manifest": str(new_manifest_path),
+        })
+        return len(records)
+
+    # No existing digest — this is the first batch for this storm window.
+    # Create fresh manifest + digest (original pre-#2282 behavior).
+    manifest = existing_manifest if existing else {}
     if not manifest and manifest_path.exists():
         try:
             manifest = read_json(manifest_path)
         except Exception:
             manifest = {}
     existing_entries = manifest.get("entries") if isinstance(manifest.get("entries"), list) else []
-    existing_collapsed = (
-        manifest.get("entriesCollapsed")
-        if isinstance(manifest.get("entriesCollapsed"), list)
-        else []
-    )
     existing_hosts = manifest.get("hosts") if isinstance(manifest.get("hosts"), list) else []
     merged_hosts = sorted(
         {str(host) for host in existing_hosts if str(host)} | set(sorted_unique_hosts(events)),
@@ -4108,14 +4185,12 @@ def collapse_storm_group(
     manifest_observation = observe_json(manifest_target)
     manifest_generation = (manifest_observation.version.generation or 0) + 1
     manifest_operation = operation_id(
-        manifest_target,
-        manifest,
+        manifest_target, manifest,
         component="dispatcher.storm_manifest_initial",
         predecessor=manifest_observation.version,
     )
     initial_manifest_publication = publish_state_json(
-        manifest_target,
-        manifest,
+        manifest_target, manifest,
         component="dispatcher.storm_manifest_initial",
         operation_id=manifest_operation,
         expected=manifest_observation.version,
@@ -4124,49 +4199,35 @@ def collapse_storm_group(
     require_all_advance([initial_manifest_publication])
     publications.append(initial_manifest_publication)
 
-    known_digest_path = find_event_path_by_id(
-        digest_id,
-        paths,
-        ("outbox", "processing", "sent", "suppressed", "quarantine"),
-    )
     digest = storm_digest_event(
         paths, fingerprint, fingerprint_hash, bucket_start, bucket_end, events, manifest_path
     )
-    digest_path = known_digest_path or storm_digest_outbox_path(paths, digest_id, str(digest.get("source")), bucket_start)
-    if known_digest_path is None:
-        digest_target = _durable_target(digest_path)
-        absent = JsonVersion(False, None, None, None)
-        digest_operation = operation_id(
-            digest_target,
-            digest,
-            component="dispatcher.storm_digest",
-            predecessor=absent,
-        )
-        digest_publication = publish_event_json(
-            digest_target,
-            digest,
-            component="dispatcher.storm_digest",
-            operation_id=digest_operation,
-        )
-        require_all_advance([digest_publication])
-        publications.append(digest_publication)
-        append_dispatch_log(paths, {
-            "type": "storm_digest_queued",
-            "digestId": digest.get("id"),
-            "digestPath": str(digest_path),
-            "fingerprint": fingerprint_hash,
-            "affectedHosts": len(sorted_unique_hosts(events)),
-            "collapsedEvents": len(events),
-            "manifest": str(manifest_path),
-        })
-    else:
-        append_dispatch_log(paths, {
-            "type": "storm_digest_reused",
-            "digestId": digest_id,
-            "digestPath": str(digest_path),
-            "fingerprint": fingerprint_hash,
-            "manifest": str(manifest_path),
-        })
+    digest_path = storm_digest_outbox_path(paths, digest_id, str(digest.get("source")), bucket_start)
+    digest_target = _durable_target(digest_path)
+    absent = JsonVersion(False, None, None, None)
+    digest_operation = operation_id(
+        digest_target,
+        digest,
+        component="dispatcher.storm_digest",
+        predecessor=absent,
+    )
+    digest_publication = publish_event_json(
+        digest_target,
+        digest,
+        component="dispatcher.storm_digest",
+        operation_id=digest_operation,
+    )
+    require_all_advance([digest_publication])
+    publications.append(digest_publication)
+    append_dispatch_log(paths, {
+        "type": "storm_digest_queued",
+        "digestId": digest.get("id"),
+        "digestPath": str(digest_path),
+        "fingerprint": fingerprint_hash,
+        "affectedHosts": len(sorted_unique_hosts(events)),
+        "collapsedEvents": len(events),
+        "manifest": str(manifest_path),
+    })
     manifest["digestOutboxPath"] = str(digest_path)
 
     # Absorb the whole batch in memory, persist the absorbed
@@ -4242,6 +4303,8 @@ def collapse_storm_group(
             "collapsedPath": str(target),
             "manifest": str(manifest_path),
         })
+
+    return len(records)
 
     manifest["entriesCollapsed"] = merge_manifest_entries(existing_collapsed, collapsed_entries)
     final_observation = observe_json(manifest_target)
