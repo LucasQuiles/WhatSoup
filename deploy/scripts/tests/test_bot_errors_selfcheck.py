@@ -2047,3 +2047,49 @@ def test_central_telemetry_rejects_unknown_fields():
     assert "deployerOutput" not in serialized
     assert "healDiskPreflight" not in serialized
     assert "leaked-data" not in serialized
+
+
+def test_prove_loaded_generation_vocabulary_paths(tmp_path: Path):
+    """#2476: unknown → skip, active → skip, loaded/inactive → stale mismatch."""
+    config, deps, _calls, _head = _fixture(tmp_path)
+
+    ok, reason = _mod.prove_loaded_generation(config.root, deps)
+    assert ok is True and reason == "ok", "active generation must prove ok"
+
+    def _with_status(status_fn):
+        return _mod.SelfcheckDeps(
+            commit_exists=deps.commit_exists,
+            deploy=deps.deploy,
+            runtime_verify=deps.runtime_verify,
+            push_heartbeat=deps.push_heartbeat,
+            now_epoch=deps.now_epoch,
+            hostname=deps.hostname,
+            service_status=status_fn,
+        )
+
+    ok, reason = _mod.prove_loaded_generation(config.root, _with_status(lambda _unit: "unknown"))
+    assert ok is True and reason == "ok", "unknown status hook must skip, not fail"
+
+    ok, reason = _mod.prove_loaded_generation(config.root, _with_status(lambda _unit: "loaded"))
+    assert ok is False
+    assert reason.startswith("generation_mismatch:") and reason.endswith("=loaded")
+
+
+def test_heal_with_stale_generation_reports_healed_unloaded(tmp_path: Path):
+    """#2476: deploy rc=0 but generation not active → healed_unloaded + problem."""
+    config, deps, calls, _head = _fixture(tmp_path, root_data=b"wrong\n")
+    stale_deps = _mod.SelfcheckDeps(
+        commit_exists=deps.commit_exists,
+        deploy=deps.deploy,
+        runtime_verify=deps.runtime_verify,
+        push_heartbeat=deps.push_heartbeat,
+        now_epoch=deps.now_epoch,
+        hostname=deps.hostname,
+        service_status=lambda _unit: "loaded",
+    )
+    first = _mod.run_selfcheck(config, stale_deps)
+    assert first["action"] == "hysteresis_wait"
+    second = _mod.run_selfcheck(config, stale_deps)
+    assert second["action"] == "healed_unloaded"
+    assert any(p.startswith("generation_mismatch:") for p in second["problems"])
+    assert len(calls) == 1, "heal deploy must still have run exactly once"
