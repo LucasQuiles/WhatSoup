@@ -176,9 +176,11 @@ class TestRetryRewrite:
         now1 = time.time()
         age_before = event_file_age_seconds(path, now1)
 
-        # Simulate retry: rewrite file with same createdAt, new mtime
-        time.sleep(0.05)
+        # Simulate retry: rewrite file with same createdAt, then force a
+        # strictly newer mtime explicitly (deterministic — no sleep).
         _write_event(path, created_at=old_created)
+        bump = time.time() + 5
+        os.utime(path, (bump, bump))
 
         now2 = time.time()
         age_after = event_file_age_seconds(path, now2)
@@ -199,9 +201,10 @@ class TestRetryRewrite:
         _write_event(path, created_at=old_created)
 
         ages = []
-        for _ in range(3):
-            time.sleep(0.02)
+        for attempt in range(3):
             _write_event(path, created_at=old_created)
+            bump = time.time() + (attempt + 1) * 5
+            os.utime(path, (bump, bump))
             ages.append(event_file_age_seconds(path, time.time()))
 
         # Each age should be >= 3500 (within tolerance of 3600)

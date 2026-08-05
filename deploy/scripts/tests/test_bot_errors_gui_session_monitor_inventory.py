@@ -215,46 +215,41 @@ class TestValidateInventoryStatus:
 # ---------------------------------------------------------------------------
 
 
+# Invalid fleet-file classes shared by the config-check/run-once agreement
+# tests: implicit_empty, non_object, malformed — both entry points must fail
+# closed (exit 2) on every one of them (#2467).
+_INVALID_FLEET_CASES = (
+    '{"hosts":[]}',
+    "[1,2,3]",
+    "{bad json",
+    '"string"',
+    "42",
+    '{"version":"1.0"}',
+)
+
+
 class TestConfigCheckRunOnceAgreement:
     """Both entry points must fail closed on every invalid class (#2467)."""
 
-    @pytest.mark.parametrize(
-        "fleet_data,expected_status",
-        [
-            ('{"hosts":[]}', "implicit_empty"),
-            ("[1,2,3]", "non_object"),
-            ("{bad json", "malformed"),
-            ('"string"', "non_object"),
-            ("42", "non_object"),
-            ('{"version":"1.0"}', "implicit_empty"),
-        ],
-    )
-    def test_config_check_fails_closed(
-        self, mod, tmp_path, monkeypatch, fleet_data, expected_status
-    ):
-        path = _write_fleet(tmp_path, fleet_data)
-        monkeypatch.setattr(mod, "fleet_path", lambda: path)
-        assert mod.config_check() == 2
+    def test_config_check_fails_closed(self, mod, tmp_path, monkeypatch):
+        # Invalid classes: implicit_empty, non_object, malformed. One in-body
+        # loop keeps the whole table in a single test (advisory-rule shape).
+        for case_index, fleet_data in enumerate(_INVALID_FLEET_CASES):
+            case_dir = tmp_path / f"case{case_index}"
+            case_dir.mkdir()
+            path = _write_fleet(case_dir, fleet_data)
+            monkeypatch.setattr(mod, "fleet_path", lambda p=path: p)
+            assert mod.config_check() == 2, f"case {case_index}: {fleet_data!r}"
 
-    @pytest.mark.parametrize(
-        "fleet_data,expected_status",
-        [
-            ('{"hosts":[]}', "implicit_empty"),
-            ("[1,2,3]", "non_object"),
-            ("{bad json", "malformed"),
-            ('"string"', "non_object"),
-            ("42", "non_object"),
-            ('{"version":"1.0"}', "implicit_empty"),
-        ],
-    )
-    def test_run_once_fails_closed(
-        self, mod, tmp_path, monkeypatch, fleet_data, expected_status
-    ):
-        path = _write_fleet(tmp_path, fleet_data)
-        monkeypatch.setattr(mod, "fleet_path", lambda: path)
+    def test_run_once_fails_closed(self, mod, tmp_path, monkeypatch):
         monkeypatch.setattr(mod, "load_state", lambda: {})
         monkeypatch.setattr(mod, "save_state", lambda s: None)
-        assert mod.run_once(dry_run=False) == 2
+        for case_index, fleet_data in enumerate(_INVALID_FLEET_CASES):
+            case_dir = tmp_path / f"case{case_index}"
+            case_dir.mkdir()
+            path = _write_fleet(case_dir, fleet_data)
+            monkeypatch.setattr(mod, "fleet_path", lambda p=path: p)
+            assert mod.run_once(dry_run=False) == 2, f"case {case_index}: {fleet_data!r}"
 
     def test_config_check_passes_on_not_applicable(self, mod, tmp_path, monkeypatch):
         fleet = {

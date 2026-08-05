@@ -11,6 +11,8 @@
  * the installers and tests.
  */
 
+import { systemClock } from '../lib/clock.ts';
+
 // ---------------------------------------------------------------------------
 // Watchdog check registry
 // ---------------------------------------------------------------------------
@@ -190,13 +192,13 @@ export const WATCHDOG_RECEIPT_MAX_AGE_MS = 600_000; // 10 minutes
  *
  * @param receipt - Parsed JSON contents of the state file.
  * @param expectedChecks - The check set the job should have run (role-dependent).
- * @param now - Current time (epoch ms); defaults to Date.now() for production,
+ * @param now - Current time (epoch ms); defaults to systemClock for production,
  *   injectable for deterministic tests.
  */
 export function verifyWatchdogReceipt(
   receipt: unknown,
   expectedChecks: readonly string[],
-  now: number = Date.now(),
+  now: number = systemClock.now(),
 ): WatchdogReceiptVerdict {
   const reasons: string[] = [];
 

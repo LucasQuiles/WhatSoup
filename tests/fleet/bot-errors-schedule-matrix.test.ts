@@ -104,9 +104,10 @@ describe('BOT ERRORS schedule matrix (#2466)', () => {
     const watchdogObserver = OBSERVER_RELATIONSHIPS.find((r) => r.observed === 'heartbeat-watchdog');
     expect(watchdogObserver).toBeDefined();
     expect(watchdogObserver!.observer).not.toBe('heartbeat-watchdog');
-    // The observer must be a real lane.
+    // The observer must be a real lane — assert the resolved name, not mere
+    // presence, so a rename that orphans the relationship fails loudly.
     const observerLane = SCHEDULE_LANES.find((l) => l.name === watchdogObserver!.observer);
-    expect(observerLane).toBeDefined();
+    expect(observerLane?.name).toBe(watchdogObserver!.observer);
   });
 
   it('no lane observes itself', () => {
