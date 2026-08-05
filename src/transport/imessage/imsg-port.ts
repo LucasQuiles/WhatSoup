@@ -223,6 +223,8 @@ interface ImsgHistoryRecord {
   text?: unknown;
   is_from_me?: unknown;
   created_at?: unknown;
+  /** ISO 8601 date the peer read this outbound message (null/absent if unread). */
+  date_read?: unknown;
 }
 
 interface ImsgChatRecord {
@@ -319,6 +321,12 @@ function normalizeRecord(
       fromMe: rec.is_from_me,
       kind: body === null ? 'other' : 'text',
       timestamp,
+      // Parse date_read (ISO 8601 from imsg RPC relay) → epoch ms. Only
+      // set on outbound messages (peer read our message). Inbound date_read
+      // is the local user's own read state — not a remote transition.
+      dateRead: rec.is_from_me && typeof rec.date_read === 'string' && rec.date_read !== ''
+        ? Date.parse(rec.date_read)
+        : undefined,
     },
   };
 }

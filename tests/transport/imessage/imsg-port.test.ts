@@ -347,6 +347,37 @@ describe('ImsgPort — listInboundSince', () => {
     await expect(port.listInboundSince(new Date(0), 0)).rejects.toThrow(RangeError);
     await expect(port.listInboundSince(new Date(0), 1001)).rejects.toThrow(RangeError);
   });
+
+  it('parses outbound date_read to epoch ms and ignores inbound or empty values', async () => {
+    const { port, mock } = makePort();
+    bootstrap(mock, [
+      rec({
+        id: 2,
+        guid: 'g-out-read',
+        is_from_me: true,
+        date_read: '2026-07-22T12:30:00.000Z',
+      }),
+      rec({
+        id: 3,
+        guid: 'g-out-unread',
+        is_from_me: true,
+        date_read: '',
+      }),
+      // Inbound date_read is the LOCAL user's own read state, not a remote
+      // transition — it must not surface as dateRead.
+      rec({
+        id: 4,
+        guid: 'g-in-localread',
+        date_read: '2026-07-22T12:31:00.000Z',
+      }),
+    ]);
+    const page = await port.listInboundSince(new Date('2026-07-22T12:00:00.000Z'));
+
+    const byGuid = new Map(page.records.map((record) => [record.guid, record]));
+    expect(byGuid.get('g-out-read')?.dateRead).toBe(Date.parse('2026-07-22T12:30:00.000Z'));
+    expect(byGuid.get('g-out-unread')?.dateRead).toBeUndefined();
+    expect(byGuid.get('g-in-localread')?.dateRead).toBeUndefined();
+  });
 });
 
 describe('ImsgPort — tapback / read / typing bridge methods', () => {
