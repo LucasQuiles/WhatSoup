@@ -315,6 +315,8 @@ export type HealthDegradationCause =
   | 'provider_execution_pressure'
   | 'agent_runtime_degraded_unclassified'
   | 'agent_runtime_unhealthy'
+  | 'chat_runtime_degraded'
+  | 'passive_runtime_degraded'
   | 'unclassified';
 
 const HEALTH_DEGRADATION_CAUSE_PRESENCE: Readonly<Record<HealthDegradationCause, true>> = {
@@ -352,6 +354,8 @@ const HEALTH_DEGRADATION_CAUSE_PRESENCE: Readonly<Record<HealthDegradationCause,
   provider_execution_pressure: true,
   agent_runtime_degraded_unclassified: true,
   agent_runtime_unhealthy: true,
+  chat_runtime_degraded: true,
+  passive_runtime_degraded: true,
   unclassified: true,
 };
 
@@ -1924,6 +1928,10 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         addDegradationCause('agent_runtime_degraded_unclassified');
       } else if (agentRuntimeStatus === 'unhealthy') {
         addDegradationCause('agent_runtime_unhealthy');
+      }
+      // #2538: chat/passive runtime degradation gets mode-specific causes.
+      if (deps.instanceType !== 'agent' && runtimeSnapshot?.status !== undefined && runtimeSnapshot.status !== 'healthy') {
+        addDegradationCause(deps.instanceType === 'chat' ? 'chat_runtime_degraded' : 'passive_runtime_degraded');
       }
       if (status !== 'healthy' && degradationCauses.length === 0) {
         addDegradationCause('unclassified');
