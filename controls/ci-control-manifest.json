@@ -437,7 +437,13 @@
       "dependencies": ["ci.exact-revision-classifier"],
       "evidence": {
         "schemaVersion": 1,
-        "paths": ["scripts/drift-classify.ts", "scripts/lib/cli-args.ts", "scripts/lib/ci-control/classification-admission.ts", "scripts/lib/ci-control/preconditions.ts", "scripts/lib/drift-classifier.ts", "scripts/lib/guard-core.ts", "scripts/lib/ci-control/classifier.ts", "scripts/lib/ci-control/git-input-core.ts", "scripts/lib/ci-control/git-input.ts", "scripts/lib/ci-control/manifest.ts", "scripts/lib/ci-control/reasons.ts", "scripts/lib/ci-control/ref-policy.ts", "scripts/lib/verification/boundary-run/contracts.ts", "scripts/lib/verification/boundary-run/model.ts", "scripts/lib/verification/boundary-run/schema.ts", "scripts/lib/verification/boundary-run/shared.ts", "scripts/lib/verification/boundary-run/worktree.ts", "src/lib/git-env.ts", "src/lib/type-guards.ts"],
+        "paths": [
+          "scripts/drift-classify.ts",
+          "scripts/lib/cli-args.ts",
+          "scripts/lib/drift-classifier.ts",
+          "scripts/lib/guard-core.ts",
+          "src/lib/git-env.ts"
+        ],
         "digestBinding": "exact",
         "freshness": "same-process"
       },
@@ -483,7 +489,13 @@
       "dependencies": ["ci.exact-revision-classifier"],
       "evidence": {
         "schemaVersion": 1,
-        "paths": ["scripts/drift-classify.ts", "scripts/lib/cli-args.ts", "scripts/lib/ci-control/classification-admission.ts", "scripts/lib/ci-control/preconditions.ts", "scripts/lib/drift-classifier.ts", "scripts/lib/guard-core.ts", "scripts/lib/ci-control/classifier.ts", "scripts/lib/ci-control/git-input-core.ts", "scripts/lib/ci-control/git-input.ts", "scripts/lib/ci-control/manifest.ts", "scripts/lib/ci-control/reasons.ts", "scripts/lib/ci-control/ref-policy.ts", "scripts/lib/verification/boundary-run/contracts.ts", "scripts/lib/verification/boundary-run/model.ts", "scripts/lib/verification/boundary-run/schema.ts", "scripts/lib/verification/boundary-run/shared.ts", "scripts/lib/verification/boundary-run/worktree.ts", "src/lib/git-env.ts", "src/lib/type-guards.ts"],
+        "paths": [
+          "scripts/drift-classify.ts",
+          "scripts/lib/cli-args.ts",
+          "scripts/lib/drift-classifier.ts",
+          "scripts/lib/guard-core.ts",
+          "src/lib/git-env.ts"
+        ],
         "digestBinding": "exact",
         "freshness": "same-process"
       },
