@@ -64,7 +64,7 @@ function soulOf(config: Record<string, unknown> | undefined): string | null {
 
 const Agents: FC = () => {
   const navigate = useNavigate();
-  const { data: lines = [] } = useLines();
+  const { data: lines = [], error: linesError } = useLines();
   const [selectedName, setSelectedName] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [hatchOpen, setHatchOpen] = useState(false);
@@ -94,9 +94,9 @@ const Agents: FC = () => {
     return agents[0] ?? null;
   }, [agents, selectedName]);
 
-  const { data: detail } = useLine(selected?.name ?? "");
+  const { data: detail, error: detailError } = useLine(selected?.name ?? "");
   const { data: providerStatus } = useProviderStatus(selected?.name ?? "");
-  const { data: liveSessions } = useLiveSessions(selected?.name ?? "");
+  const { data: liveSessions, error: liveError } = useLiveSessions(selected?.name ?? "");
 
   const config = useMemo(() => {
     const c = (detail as { config?: unknown } | undefined)?.config;
@@ -191,7 +191,10 @@ const Agents: FC = () => {
           </Button>
         </aside>
 
+        {linesError && <div className="agents-detail__error">Failed to load agent roster.</div>}
         <section className="agents-detail" aria-label={selectedDisplay ? `agent detail: ${selectedDisplay}` : "agent detail"}>
+          {detailError && <div className="agents-detail__error">Failed to load agent detail.</div>}
+          {liveError && <div className="agents-detail__error">Failed to load live sessions.</div>}
           {selected && selectedDisplay ? (
             <>
               <div className="agents-dhead">
