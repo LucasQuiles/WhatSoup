@@ -121,7 +121,7 @@ export function emitHealReport(
   activeControlReportId?: string | null,
 ): string | null {
   const evidence = projectAutomaticHealEvidence(data);
-  const errorClass = errorClassForHealEvidence(evidence);
+  const errorClass = errorClassForHealEvidence(evidence, data.provider);
   reconcileStaleHealReports(db);
 
   // Check for active report with same error class (single-flight)

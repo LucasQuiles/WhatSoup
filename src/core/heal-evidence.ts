@@ -93,6 +93,10 @@ const HealEvidenceV1FieldsSchema = z.object({
   counts: healEvidenceCountsSchema,
   action: z.enum(HEAL_EVIDENCE_ACTIONS),
   correlation: healEvidenceCorrelationSchema,
+  // #2410: provider-specific single-flight key — present on crash reports
+  // from provider sessions so different provider routes with the same crash
+  // class produce distinct error class keys.
+  provider: z.string().optional(),
 }).strict();
 
 export const HealEvidenceV1Schema = HealEvidenceV1FieldsSchema.superRefine((evidence, ctx) => {
@@ -116,6 +120,10 @@ export interface AutomaticHealReportInput {
   termination?: 'exit_or_signal';
   totalFailures?: number;
   affectedScopeCount?: number;
+  // #2410: provider-specific single-flight separation — crashes from
+  // different provider routes produce distinct error class keys even
+  // when the crash class is the same (e.g. fallback provider B -> A).
+  provider?: string;
 }
 
 const ALLOWED_CRASH_CAUSES = new Set<string>(CRASH_CAUSES);
@@ -317,5 +325,9 @@ export function parseStoredHealEvidence(raw: string | null): HealEvidenceV1 {
 }
 
 export function errorClassForHealEvidence(evidence: HealEvidenceV1): string {
-  return `${evidence.type}__${evidence.cause}`;
+  const base = `${evidence.type}__${evidence.cause}`;
+  // #2410: add provider to the error class so different provider routes with
+  // the same crash class produce distinct single-flight keys (preventing
+  // fallback provider B's crash from being conflated into provider A's report).
+  return evidence.provider ? `${base}__${evidence.provider}` : base;
 }
