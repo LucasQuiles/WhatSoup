@@ -239,16 +239,18 @@ export function addDegradationSilenceProof(
   }
 }
 
-function safeDbQuery<T>(fn: () => T, fallback: T, warnMsg: string): T {
+function safeDbQuery<T>(fn: () => T, fallback: T, warnMsg: string, availabilityTracker?: Record<string, boolean>, probeName?: string): T {
   const start = Date.now();
   try {
     const result = fn();
     const elapsed = Date.now() - start;
     if (elapsed > 2 * MS_PER_SECOND) log.warn({ elapsed }, warnMsg + ' (slow query)');
     noteProbeSuccess(warnMsg);
+    if (availabilityTracker && probeName) availabilityTracker[probeName] = true;
     return result;
   } catch (err) {
     logProbeFailure(warnMsg, err);
+    if (availabilityTracker && probeName) availabilityTracker[probeName] = false;
     return fallback;
   }
 }
@@ -1699,28 +1701,36 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         status = statusReasons.length > 0 ? 'degraded' : 'healthy';
       }
 
+      // #2514: track per-probe availability so consumers can distinguish
+      // failed probes (availability=false) from successful empty results.
+      const probeAvailability: Record<string, boolean> = {};
+
       const messagesTotal = safeDbQuery(
         () => getMessageCount(deps.db),
         0,
         'failed to count messages',
+        probeAvailability, 'messages',
       );
 
       const pendingCount = safeDbQuery(
         () => getPendingCount(deps.db),
         0,
         'failed to count pending access-list entries',
+        probeAvailability, 'pending_access_list',
       );
 
       const outboundSends = safeDbQuery(
         () => readOutboundSendHealth(deps.db),
         unreadableOutboundSendHealth(),
         'failed to read outbound send health',
+        probeAvailability, 'outbound_sends',
       );
       const toolWriteLosses = deps.runtime?.getToolDurabilityTelemetrySnapshot?.() ?? null;
       const toolDurability = safeDbQuery(
         () => readToolDurabilityHealth(deps.db, toolWriteLosses),
         unreadableToolDurabilityHealth(toolWriteLosses),
         'failed to read tool durability health',
+        probeAvailability, 'tool_durability',
       );
       let databaseRetention: DatabaseRetentionHealth | null = null;
       if (deps.getDatabaseRetentionHealth) {
@@ -1759,6 +1769,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         },
         0,
         'failed to read sqlite schema_version',
+        probeAvailability, 'schema_version',
       );
 
       const schemaMigrationLatest = safeDbQuery(
@@ -2069,6 +2080,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           pending_polls_total: pendingPollsTotal,
           pending_polls_readable: pendingPollsReadable,
           past_due_triggers: pastDueTriggers,
+          probe_availability: probeAvailability,
         },
         access_control: {
           pending_count: pendingCount,

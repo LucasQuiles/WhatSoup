@@ -4770,6 +4770,45 @@ describe('GET /health — branch coverage: empty-body safeDbQuery fallbacks and 
     expect(JSON.parse(body).sqlite.messages_total).toBe(0);
   });
 
+  it('sets probeAvailability.messages=false when messages query fails (#2514)', async () => {
+    db.raw.exec('DROP TABLE messages');
+    ({ server, port } = await buildTestServer(makeDeps(db)));
+
+    const { status, body } = await healthReq(port);
+    expect(status).toBe(200);
+    const json = JSON.parse(body);
+
+    // Failing probe → availability=false, value is fallback (distinguishable from empty)
+    expect(json.sqlite.probe_availability.messages).toBe(false);
+    expect(json.sqlite.messages_total).toBe(0);
+  });
+
+  it('sets probeAvailability.messages=true when messages query succeeds (#2514)', async () => {
+    // Intact db — empty messages table succeeds
+    ({ server, port } = await buildTestServer(makeDeps(db)));
+
+    const { status, body } = await healthReq(port);
+    expect(status).toBe(200);
+    const json = JSON.parse(body);
+
+    // Successful probe → availability=true, value is measured zero
+    expect(json.sqlite.probe_availability.messages).toBe(true);
+    expect(json.sqlite.messages_total).toBe(0);
+  });
+
+  it('schema_not_ready path is unchanged (#2514 no-regression)', async () => {
+    ({ server, port } = await buildTestServer(makeDeps(db)));
+
+    const { status, body } = await healthReq(port);
+    expect(status).toBe(200);
+    const json = JSON.parse(body);
+
+    // schema_ready and schema_not_ready must still be present
+    expect(json.sqlite).toHaveProperty('schema_ready');
+    expect(json.sqlite).toHaveProperty('schema_migration_required');
+    expect(json.sqlite).toHaveProperty('probe_availability');
+  });
+
   it('classifies "cooldown" connection state as recovering (degraded not unhealthy)', async () => {
     db.close();
     const db2 = makeDb();
