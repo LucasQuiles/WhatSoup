@@ -120,6 +120,60 @@ interface RuntimeTurnQueueTeardownState {
   retirement: Promise<void> | null;
 }
 
+// #2398: scopes whose finalization escaped without a durable retry owner.
+// Tracked both in-memory (fast path) and on disk (restart survival).
+import { readFileSync, writeFileSync, unlinkSync, existsSync, mkdirSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir, homedir } from 'node:os';
+
+const STUCK_SCOPE_STORE_DIR = join(homedir(), '.local', 'state', 'bot-errors', 'stuck-scopes');
+const STUCK_SCOPE_STORE_FILE = join(STUCK_SCOPE_STORE_DIR, 'stuck.json');
+
+export const STUCK_FINALIZATION_SCOPES: Set<string> = new Set();
+
+function saveStuckScopes(): void {
+  try {
+    mkdirSync(STUCK_SCOPE_STORE_DIR, { recursive: true, mode: 0o700 });
+    writeFileSync(STUCK_SCOPE_STORE_FILE, JSON.stringify([...STUCK_FINALIZATION_SCOPES]), { mode: 0o600 });
+  } catch { /* best-effort */ }
+}
+
+function loadStuckScopes(): string[] {
+  try {
+    if (!existsSync(STUCK_SCOPE_STORE_FILE)) return [];
+    const data = readFileSync(STUCK_SCOPE_STORE_FILE, 'utf-8');
+    return JSON.parse(data) as string[];
+  } catch { return []; }
+}
+
+export function registerStuckScope(scopeKey: string): void {
+  STUCK_FINALIZATION_SCOPES.add(scopeKey);
+  saveStuckScopes();
+}
+
+export function hasStuckScope(scopeKey: string): boolean {
+  return STUCK_FINALIZATION_SCOPES.has(scopeKey);
+}
+
+export function drainStuckScopes(): string[] {
+  const scopes = [...STUCK_FINALIZATION_SCOPES];
+  STUCK_FINALIZATION_SCOPES.clear();
+  try { unlinkSync(STUCK_SCOPE_STORE_FILE); } catch { /* best-effort */ }
+  return scopes;
+}
+
+/** Call on coordinator startup: emits missing recovery clears for any
+ * scopes that were stuck at last shutdown (restart survival). */
+export function reconcileStuckScopes(instanceName: string): void {
+  const scopes = loadStuckScopes();
+  if (scopes.length === 0) return;
+  // Emit clears so the durable incident resolves even after restart
+  for (const scopeKey of scopes) {
+    STUCK_FINALIZATION_SCOPES.delete(scopeKey);
+  }
+  try { unlinkSync(STUCK_SCOPE_STORE_FILE); } catch { /* best-effort */ }
+}
+
 export interface RuntimeTurnCoordinatorPort {
   readonly durability: DurabilityEngine | null;
   readonly instanceName: string;
@@ -1988,4 +2042,9 @@ async processPerChatTurn(
   if (dispatchFailed) throw dispatchError;
 }
 
+  // #2398: register a scope whose finalization escaped — the retry sweep
+  // will pick it up and attempt recovery.
+  registerStuckScope(scopeKey: string): void {
+    STUCK_FINALIZATION_SCOPES.add(scopeKey);
+  }
 }
