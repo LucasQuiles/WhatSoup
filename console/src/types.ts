@@ -40,6 +40,7 @@ export interface LineInstance {
   messagesTotal: number;
   health: {
     status: string;
+    degradation_causes: string[];
     uptime_seconds: number;
     messages_total: number;
     // Matches the ONE /health emitter (src/core/health.ts): connection state
