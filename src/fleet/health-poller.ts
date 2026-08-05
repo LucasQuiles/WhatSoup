@@ -9,7 +9,7 @@ import {
 import type { BotErrorsCriticalAssetDiagnostic } from '../lib/bot-errors-outbox.ts';
 // Aliased to keep this module's call sites unchanged (asRecord returns
 // `undefined` for non-records; the one null-typed seam adapts with `?? null`).
-import { asRecord } from '../lib/type-guards.ts';
+import { asRecord, nonEmptyString, nonEmptyStringRaw } from '../lib/type-guards.ts';
 import { sqliteUtcToEpochMs } from '../lib/sqlite-time.ts';
 import { ALERT_THROTTLE_INTERVAL_MS, loadAlertThrottleDetailed, recordAlertThrottle } from './alert-throttle-store.ts';
 import * as silenceManager from './silence-manager.ts';
@@ -204,7 +204,7 @@ interface RecoveryClearWithholdingEpisode {
 // latent bug is an open question the issue itself flags as needing a human
 // call, not a mechanical refactor — left untouched pending that decision.
 function stringValue(value: unknown): string | null {
-  return typeof value === 'string' && value.trim() !== '' ? value : null;
+  return nonEmptyStringRaw(value);
 }
 
 function nonNegativeIntegerValue(value: unknown): number | null {
@@ -322,7 +322,7 @@ function classifyHealthSnapshot(
 
   const healthStatus = stringValue(health.status);
   const generatedAtRaw = health.generated_at;
-  const generatedAtMs = typeof generatedAtRaw === 'string' && generatedAtRaw.trim() !== ''
+  const generatedAtMs = nonEmptyStringRaw(generatedAtRaw) !== null && typeof generatedAtRaw === 'string'
     ? Date.parse(generatedAtRaw)
     : Number.NaN;
   const whatsapp = asRecord(health.whatsapp);
@@ -1486,8 +1486,9 @@ export class HealthPoller {
 
   private readNumber(value: unknown): number | null {
     if (typeof value === 'number' && Number.isFinite(value)) return value;
-    if (typeof value === 'string' && value.trim() !== '') {
-      const parsed = Number(value);
+    const strValue = nonEmptyStringRaw(value);
+    if (strValue !== null) {
+      const parsed = Number(strValue);
       if (Number.isFinite(parsed)) return parsed;
     }
     return null;
@@ -1510,8 +1511,7 @@ export class HealthPoller {
     const effectiveProvider = instance?.['effectiveProvider'];
     return whatsapp?.['connected'] === true
       && connection?.['state'] === 'connected'
-      && typeof effectiveProvider === 'string'
-      && effectiveProvider.trim() !== ''
+      && nonEmptyString(effectiveProvider) !== null
       && this.readNumber(instance?.['fallbackActiveUntil']) !== null
       && ['usage-limit', 'rate-limit', 'session-limit'].includes(String(fallbackReason ?? ''))
       && (this.readNumber(instance?.['fallbackTurnsServed']) ?? 0) > 0

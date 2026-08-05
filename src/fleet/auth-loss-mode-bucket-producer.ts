@@ -1,5 +1,5 @@
 import type { AuthLossModeEventInput } from './auth-loss-mode-bucket-contract.ts';
-import { isNonEmptyString } from '../lib/type-guards.ts';
+import { nonEmptyString } from '../lib/type-guards.ts';
 
 type RegistrationFailureKind =
   | 'registration_rejected'
@@ -114,5 +114,5 @@ function isLoggedOutReason(reason: string | undefined): boolean {
 }
 
 function hasProof(value: string | undefined): boolean {
-  return isNonEmptyString(value);
+  return nonEmptyString(value) !== null;
 }

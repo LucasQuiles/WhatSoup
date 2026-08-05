@@ -1,4 +1,4 @@
-import { asNonEmptyString } from '../lib/type-guards.ts';
+import { nonEmptyString } from '../lib/type-guards.ts';
 
 export const TERMINAL_AUTH_FAILURE_CLASSES = [
   'pairing_required',
@@ -16,7 +16,7 @@ export interface ExplicitAuthLossSignalInput {
 }
 
 function normalizedText(value: unknown): string | null {
-  return asNonEmptyString(value) ?? null;
+  return nonEmptyString(value);
 }
 
 function normalizedSignalKey(value: unknown): string | null {
