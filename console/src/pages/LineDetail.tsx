@@ -211,6 +211,27 @@ export default function LineDetail() {
           </div>
         </div>
 
+        {/* Degradation causes */}
+        {line.health?.degradation_causes && line.health.degradation_causes.length > 0 && (
+          <div className="flex flex-wrap gap-1 items-center">
+            {line.health.degradation_causes.map((cause) => (
+              <span key={cause} className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-surface-warn text-text-1" title={cause}>
+                {cause}
+              </span>
+            ))}
+          </div>
+        )}
+
+        {/* Status evidence detail */}
+        {line.statusEvidence && line.statusEvidence.length > 0 && (
+          <details className="text-xs text-text-2 mt-1">
+            <summary className="cursor-pointer">Status evidence ({line.statusEvidence.length})</summary>
+            <ul className="list-disc pl-4 mt-1">
+              {line.statusEvidence.map((e, i) => <li key={i}>{e}</li>)}
+            </ul>
+          </details>
+        )}
+
         {/* Meta */}
         <div className="hidden lg:flex gap-4 font-mono text-text-2 text-sm">
           <span>uptime: {line.uptime ?? '—'}</span>
