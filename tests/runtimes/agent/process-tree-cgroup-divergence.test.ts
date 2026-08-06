@@ -11,12 +11,23 @@
  * never throw into, or otherwise affect, the termination path).
  */
 
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   computeCgroupDivergence,
   emitCgroupDivergence,
+  killSessionTree,
   type CgroupDivergenceInfo,
 } from '../../../src/runtimes/agent/process-tree.ts';
+
+// #1869: mock node:child_process for killSessionTree integration tests so the
+// ps census is fully controlled. Pure-function tests that don't call execFileSync
+// are unaffected.
+const { execFileSyncMock } = vi.hoisted(() => ({
+  execFileSyncMock: vi.fn(),
+}));
+vi.mock('node:child_process', () => ({
+  execFileSync: execFileSyncMock,
+}));
 
 describe('computeCgroupDivergence (pure)', () => {
   it('counts cgroup members not in the PPID-owned set, excluding the provider root', () => {
@@ -107,5 +118,98 @@ describe('emitCgroupDivergence (best-effort isolation)', () => {
         readCgroupMemberPids: () => [100, 200],
       }),
     ).not.toThrow();
+  });
+});
+
+describe('#1869 killSessionTree cgroup extension (mock ps)', () => {
+  const ROOT_PID = 51_001;
+  const CHILD_PID = 51_002;
+  const DAEMON_PID = 99_999;
+  const START = 'Fri Jul 10 08:00:00 2026';
+
+  let killSpy: ReturnType<typeof vi.spyOn>;
+
+  function census(rows: Array<{ pid: number; ppid: number; pgid: number; command: string }>): string {
+    return [
+      'PID PPID PGID STARTED COMMAND',
+      ...rows.map((row) =>
+        `${row.pid} ${row.ppid} ${row.pgid} ${START} ${row.command}`,
+      ),
+    ].join('\n');
+  }
+
+  beforeEach(() => {
+    execFileSyncMock.mockReset();
+    killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true);
+  });
+
+  afterEach(() => {
+    killSpy.mockRestore();
+  });
+
+  it('adds a reparented (PPID=1) daemon to the owned set and fires divergence', async () => {
+    const withDaemon = census([
+      { pid: process.pid, ppid: 1, pgid: process.pid, command: 'test-runner' },
+      { pid: ROOT_PID, ppid: process.pid, pgid: ROOT_PID, command: 'provider-root' },
+      { pid: CHILD_PID, ppid: ROOT_PID, pgid: ROOT_PID, command: 'provider-child' },
+      // A process that reparented to PID 1 — NOT reachable via PPID descent from root
+      { pid: DAEMON_PID, ppid: 1, pgid: DAEMON_PID, command: 'reparented-daemon' },
+    ]);
+    const selfOnly = census([
+      { pid: process.pid, ppid: 1, pgid: process.pid, command: 'test-runner' },
+    ]);
+
+    execFileSyncMock
+      .mockReturnValueOnce(withDaemon) // entry: build owned + cgroup extension
+      .mockReturnValueOnce(withDaemon) // pre-signal resolution
+      .mockReturnValueOnce(selfOnly);  // final: all owned processes exited
+
+    const divergenceSink = vi.fn();
+
+    await expect(killSessionTree(ROOT_PID, 'SIGKILL', {
+      generationMarker: 'test-catch-daemon',
+      killGraceMs: 0,
+      onCgroupDivergence: divergenceSink,
+      readCgroupMemberPids: () => [ROOT_PID, CHILD_PID, DAEMON_PID],
+    })).resolves.toBeUndefined();
+
+    // The divergence sink reports the off-tree PID that the PPID walk missed
+    expect(divergenceSink).toHaveBeenCalledTimes(1);
+    expect(divergenceSink).toHaveBeenCalledWith<[CgroupDivergenceInfo]>({
+      cgroupMemberCount: 3,
+      ownedCount: 2,
+      offTreeCount: 1,
+    });
+
+    // The reparented daemon was added to the owned set and signaled
+    expect(killSpy).toHaveBeenCalledWith(DAEMON_PID, 'SIGKILL');
+  });
+
+  it('does NOT fire divergence when every cgroup member is already in the PPID tree', async () => {
+    const normal = census([
+      { pid: process.pid, ppid: 1, pgid: process.pid, command: 'test-runner' },
+      { pid: ROOT_PID, ppid: process.pid, pgid: ROOT_PID, command: 'provider-root' },
+      { pid: CHILD_PID, ppid: ROOT_PID, pgid: ROOT_PID, command: 'provider-child' },
+    ]);
+    const selfOnly = census([
+      { pid: process.pid, ppid: 1, pgid: process.pid, command: 'test-runner' },
+    ]);
+
+    execFileSyncMock
+      .mockReturnValueOnce(normal) // entry
+      .mockReturnValueOnce(normal) // pre-signal
+      .mockReturnValueOnce(selfOnly); // final
+
+    const divergenceSink = vi.fn();
+
+    await expect(killSessionTree(ROOT_PID, 'SIGKILL', {
+      generationMarker: 'test-no-divergence',
+      killGraceMs: 0,
+      onCgroupDivergence: divergenceSink,
+      readCgroupMemberPids: () => [ROOT_PID, CHILD_PID],
+    })).resolves.toBeUndefined();
+
+    // All cgroup members are already in the PPID-owned set — silence is correct
+    expect(divergenceSink).not.toHaveBeenCalled();
   });
 });

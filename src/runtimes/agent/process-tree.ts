@@ -2,7 +2,10 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { SIGNAL } from '../../lib/signals.ts';
+import { createChildLogger } from '../../logger.ts';
 import { bfsFromRoot, buildChildrenIndex, parsePsLines } from './process-tree-parse.ts';
+
+const log = createChildLogger('process-tree');
 
 export interface ProcessTreeTarget {
   readonly pid?: number;
@@ -473,6 +476,12 @@ function readServiceCgroupMemberPids(): readonly number[] | null {
     if (!v2) return null;
     const rel = v2.slice('0::'.length);
     if (!rel.startsWith('/')) return null;
+    // Only trust cgroup membership when this process actually runs inside a
+    // whatsoup service unit. In any shared cgroup — CI runners, dev shells,
+    // user session scopes — the membership list is every process on the box,
+    // and treating it as owned would hand the reaper the harness running us
+    // (observed: GitHub runners killed mid-suite by their own test process).
+    if (!/whatsoup/i.test(rel)) return null;
     const base = join('/sys/fs/cgroup', rel);
     if (!existsSync(base)) return null;
     const pids = new Set<number>();
@@ -545,14 +554,50 @@ export function killSessionTree(
   let owned: OwnedProcessIdentity[];
   let preCensusAvailable = false;
   try {
-    owned = snapshotOwnedTree(readProcessCensus(), rootPid, options.generationMarker);
+    const rows = readProcessCensus();
+    owned = snapshotOwnedTree(rows, rootPid, options.generationMarker);
     preCensusAvailable = true;
+
+    // #1869: extend ownership with cgroup-based membership — catch processes that
+    // reparented off the PPID tree (e.g. double-forked workload daemons) and would
+    // otherwise be invisible to the PPID walk. Cross-reference the instance cgroup
+    // membership and add cgroup-only PIDs to the owned set.
+    const cgroupPids = (options.readCgroupMemberPids ?? readServiceCgroupMemberPids)();
+    if (cgroupPids !== null) {
+      // Compute divergence against the PRE-extension owned set so the telemetry
+      // captures the original gap (before reparented PIDs are absorbed).
+      const divergence = computeCgroupDivergence(cgroupPids, owned, rootPid);
+
+      const ownedPids = new Set<number>(owned.map((o) => o.pid));
+      ownedPids.add(rootPid);
+      let addedCount = 0;
+      for (const cpid of cgroupPids) {
+        if (cpid === rootPid || cpid === process.pid) continue;
+        if (!ownedPids.has(cpid)) {
+          const row = uniqueRowForPid(rows, cpid);
+          if (row) {
+            owned.push({ ...row, depth: -1, generationMarker: options.generationMarker });
+            ownedPids.add(cpid);
+            addedCount += 1;
+          }
+        }
+      }
+
+      // #1869: surface the raw divergence count whenever the cgroup caught at
+      // least one reparented PID the PPID walk missed.
+      if (addedCount > 0) {
+        try {
+          options.onCgroupDivergence?.(divergence);
+        } catch (err) {
+          // Best-effort telemetry: a throwing sink must never affect
+          // termination, but its failure is surfaced rather than swallowed.
+          log.warn({ err }, 'cgroup divergence telemetry sink threw');
+        }
+      }
+    }
   } catch (error) {
     owned = [];
   }
-
-  // #1869: best-effort divergence telemetry; fully isolated, never affects termination.
-  emitCgroupDivergence(owned, rootPid, options);
 
   let context: TerminationContext;
   const promise = runTermination(target, rootPid, owned, preCensusAvailable, signal, options)
