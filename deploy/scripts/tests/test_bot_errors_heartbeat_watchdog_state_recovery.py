@@ -68,7 +68,9 @@ def _make_corrupt_state() -> bytes:
 @pytest.fixture
 def tmp_state_dir():
     with tempfile.TemporaryDirectory() as d:
-        yield Path(d)
+        # resolve(): macOS tempdirs live under the /var symlink, which the
+        # controller-state O_NOFOLLOW directory walk correctly refuses.
+        yield Path(d).resolve()
 
 
 # ─── Discriminating test pair: corrupt primary, no previous ──────────────────
@@ -156,5 +158,5 @@ class TestSymlinkAnchor:
         # real directory with the original leaf name.
         anchor = state_path
         resolved = anchor.parent.resolve(strict=True) / anchor.name
-        expected = real_parent / "state.json"
+        expected = real_parent.resolve(strict=True) / "state.json"
         assert resolved == expected, f"expected {expected}, got {resolved}"

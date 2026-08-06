@@ -15,7 +15,7 @@ import socket
 import subprocess
 import sys
 import time
-from typing import Any
+from typing import Any, Mapping
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -2204,9 +2204,9 @@ def deferred_recovery_event(key: str, record: dict[str, Any]) -> Path:
 def reconcile(
     problems: dict[str, str],
     active_prefixes: list[str],
-    state: dict[str, Any],
-    session: Any,
-    capability: Any,
+    state: dict[str, Any] | None = None,
+    session: Any = None,
+    capability: Any = None,
     evaluated_instances: set[str] | None = None,
 ) -> list[Path]:
     """Reconcile problems against open incidents and write outbox events.
@@ -2215,7 +2215,24 @@ def reconcile(
     caller from the session).  ``session`` and ``capability`` are the open
     ControllerStateSession and its current write capability; the function
     persists through ``session.save()`` instead of the old ``save_state()``.
+
+    Compatibility: external callers (the TS behavioral harness, operator
+    tooling) invoke the historical two-argument form.  When ``session`` is
+    None the function opens its own session for the duration of the call.
     """
+    if session is None:
+        with open_watchdog_state_session() as _compat_session:
+            _load = _compat_session.load()
+            _payload = _load.payload if isinstance(_load.payload, dict) else {"version": 1, "open": {}}
+            return reconcile(
+                problems,
+                active_prefixes,
+                _payload,
+                _compat_session,
+                _load.capability,
+                evaluated_instances,
+            )
+    assert state is not None and capability is not None
     open_incidents: dict[str, Any] = state.setdefault("open", {})
     state.setdefault("pendingStale", {})
     state.setdefault("recentlyRecovered", {})
@@ -2493,7 +2510,7 @@ def reconcile(
 )
 def open_watchdog_state_session():
     """#2723 R4.2: open controller state session."""
-    state_path = state_root() / "watchdog-state.json"
+    state_path = watchdog_state_path()
     return open_controller_state(
         state_path,
         component="heartbeat-watchdog",
@@ -2501,6 +2518,35 @@ def open_watchdog_state_session():
         validate_payload=lambda p: p if isinstance(p, dict) and "version" in p else {"version": 1, "open": {}},
         lock_timeout_seconds=5,
     )
+
+
+def load_state() -> dict[str, Any]:
+    """#2723 compatibility surface. External consumers — the TS behavioral
+    harness, operator tooling — read watchdog state through this name; the
+    implementation is the controller-state read path, not the retired
+    durable-json loader."""
+    state_path = watchdog_state_path()
+    if not state_path.exists():
+        return {"version": 1, "open": {}}
+    try:
+        result = read_controller_state(
+            state_path,
+            component="heartbeat-watchdog",
+            validate_payload=lambda p: p if isinstance(p, dict) and "version" in p else {"version": 1, "open": {}},
+            lock_timeout_seconds=5,
+        )
+    except (OSError, json.JSONDecodeError):
+        return {"version": 1, "open": {}}
+    payload = result.payload
+    return payload if isinstance(payload, dict) else {"version": 1, "open": {}}
+
+
+def save_state(state: Mapping[str, Any]) -> None:
+    """#2723 compatibility surface: durable publication through the
+    controller-state session (redacted payload, session-managed locking)."""
+    with open_watchdog_state_session() as session:
+        result = session.load()
+        session.save(redacted_watchdog_payload(state), result.capability)
 
 
 def reconcile_recovered_watchdog_state(session: Any) -> None:

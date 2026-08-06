@@ -49,11 +49,14 @@ m.os.environ["BOT_ERRORS_STATE_DIR"] = ${JSON.stringify(tmpRoot)}
 m.os.environ["BOT_ERRORS_DRY_NOW"] = "1000"
 m.save_state({"version": 1, "open": {}})
 target = m.watchdog_state_path()
+# #2723 Task 4: durability moved from durable-json to the controller-state
+# session. The on-disk file is an integrity envelope, so the payload is read
+# through the public load_state() API; the lock artifact is <name>.lock.
 print(json.dumps({
     "exists": target.exists(),
-    "version": json.loads(target.read_text())["version"],
+    "version": m.load_state()["version"],
     "mode": target.stat().st_mode & 0o777,
-    "lockMode": (target.parent / ".durable-json.lock").stat().st_mode & 0o777,
+    "lockMode": (target.parent / (target.name + ".lock")).stat().st_mode & 0o777,
 }))
 `], {
       cwd: process.cwd(),
