@@ -2472,6 +2472,18 @@ def reconcile(problems: dict[str, str], active_prefixes: list[str], evaluated_in
         outcome=outcome,
     ),
 )
+def open_watchdog_state_session():
+    """#2723 R4.2/R4.3: open controller state session, handle recovery modes."""
+    state_path = state_root() / "watchdog-state.json"
+    return open_controller_state(
+        state_path,
+        component="heartbeat-watchdog",
+        bootstrap=lambda: {"version": 1, "open": {}},
+        validate_payload=lambda p: p if isinstance(p, dict) and "version" in p else {"version": 1, "open": {}},
+        lock_timeout_seconds=5,
+    )
+
+
 def run_once(args: argparse.Namespace) -> int:
     validate_thresholds()
     try:
@@ -2483,15 +2495,25 @@ def run_once(args: argparse.Namespace) -> int:
         print(f"configuration_error: {exc}", file=sys.stderr)
         print(json.dumps({"time": now_iso(), "verdict": "configuration_error", "error": str(exc)}, sort_keys=True))
         return 2
-    evaluated_instances: set[str] = set()
-    problems = collect_problems(args, checks, evaluated_instances)
-    written = reconcile(problems, active_reconcile_prefixes(checks), evaluated_instances)
-    print(json.dumps({
-        "time": now_iso(),
-        "problems": sorted(problems),
-        "eventsWritten": [str(path) for path in written],
-    }, sort_keys=True))
-    return 0
+    # #2723 R4.2: open state session before domain effects (collect_problems)
+    try:
+        with open_watchdog_state_session() as session:
+            _session_state = session  # noqa: F841 — session active throughout cycle
+            evaluated_instances: set[str] = set()
+            problems = collect_problems(args, checks, evaluated_instances)
+            written = reconcile(problems, active_reconcile_prefixes(checks), evaluated_instances)
+            print(json.dumps({
+                "time": now_iso(),
+                "problems": sorted(problems),
+                "eventsWritten": [str(path) for path in written],
+            }, sort_keys=True))
+            return 0
+    except ControllerStateRequired as exc:
+        # #2723 R4.5: recovery_required must fail before collect_problems effects
+        diagnostic = project_watchdog_state_mode(exc.diagnostic)
+        print(f"controller_state_required: {diagnostic}", file=sys.stderr)
+        print(json.dumps({"time": now_iso(), "verdict": "STATE_RECOVERY_REQUIRED", "diagnostic": diagnostic}, sort_keys=True))
+        return STATE_RECOVERY_REQUIRED_EXIT
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -2507,7 +2529,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    return run_once(args)
+    try:
+        return run_once(args)
+    except ControllerStateRequired:
+        # #2723 R4.8: daemon exits STATE_RECOVERY_REQUIRED_EXIT (78), not 0.
+        sys.exit(STATE_RECOVERY_REQUIRED_EXIT)
 
 
 if __name__ == "__main__":
