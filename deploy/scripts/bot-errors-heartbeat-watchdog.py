@@ -401,7 +401,7 @@ def read_collector_state_snapshot() -> StateReadResult | None:
         return read_controller_state(
             coll_path,
             component="collector",
-            validate_payload=lambda p: p if isinstance(p, dict) and "open" in p else {},
+            validate_payload=lambda p: p if isinstance(p, dict) else {},
             lock_timeout_seconds=5,
         )
     except (OSError, json.JSONDecodeError):
