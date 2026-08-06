@@ -193,6 +193,8 @@ def test_capacity_new_incident_event_is_warning_not_critical(tmp_path, monkeypat
     monkeypatch.setenv("BOT_ERRORS_OUTBOX_DIR", str(outbox))
 
     state_file = state / "q-loop" / "state.json"
+    # Bootstrap the q-loop state file so the session load succeeds.
+    _write_private_json(state_file, {"version": 1, "open": {}})
     written = _reconcile_with_session(
         mod,
         {CAPACITY_KEY: "q-loop at usage-window capacity; self-recovers when window resets reason=session_limit"},
@@ -237,6 +239,8 @@ def test_capacity_incident_never_escalates_to_critical(tmp_path, monkeypatch):
     )
 
     state_file = state / "q-loop" / "state.json"
+    # Bootstrap the q-loop state file so the session load succeeds.
+    _write_private_json(state_file, {"version": 1, "open": {}})
     written = _reconcile_with_session(
         mod,
         {CAPACITY_KEY: "q-loop at usage-window capacity; self-recovers when window resets reason=session_limit"},
@@ -285,6 +289,8 @@ def test_genuine_supervisor_new_incident_is_critical(tmp_path, monkeypatch):
     monkeypatch.setenv("BOT_ERRORS_OUTBOX_DIR", str(outbox))
 
     state_file = state / "q-loop" / "state.json"
+    # Bootstrap the q-loop state file so the session load succeeds.
+    _write_private_json(state_file, {"version": 1, "open": {}})
     written = _reconcile_with_session(
         mod,
         {SUPERVISOR_KEY: "q-loop supervisor unavailable: phase=q_unavailable_socket_timeout"},
@@ -304,9 +310,12 @@ def test_genuine_supervisor_escalates_to_critical_on_renotify(tmp_path, monkeypa
     monkeypatch.setenv("BOT_ERRORS_OUTBOX_DIR", str(outbox))
     monkeypatch.setenv("BOT_ERRORS_WATCHDOG_RENOTIFY_SECONDS", "1")
     monkeypatch.setenv("BOT_ERRORS_WATCHDOG_ESCALATE_SECONDS", "1")
+
+    state_file = state / "q-loop" / "state.json"
     _write_private_json(
-        mod.watchdog_state_path(),
+        state_file,
         {
+            "version": 1,
             "open": {
                 SUPERVISOR_KEY: {
                     "firstSeenAt": "1970-01-01T00:00:10Z",
@@ -320,9 +329,11 @@ def test_genuine_supervisor_escalates_to_critical_on_renotify(tmp_path, monkeypa
         },
     )
 
-    written = mod.reconcile(
+    written = _reconcile_with_session(
+        mod,
         {SUPERVISOR_KEY: "q-loop supervisor unavailable: phase=q_unavailable_socket_timeout"},
         ["q_loop"],
+        state_file,
     )
 
     events = _events(outbox)
