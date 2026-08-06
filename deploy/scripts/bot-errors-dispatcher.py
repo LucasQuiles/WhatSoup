@@ -168,14 +168,12 @@ STALE_RENOTIFY_SUPPRESS_SOURCES = {
 }
 # Recovery / no-op source signatures: definitionally non-actionable once stale.
 STALE_RENOTIFY_SUPPRESS_SUFFIXES = ("_restored", "_recovered", "_reverted", "_unknown", "_cleared")
-# runtime-tool-error:* — an agent's own tool call failed and was self-corrected
-# inline. These are point-in-time, auto-recovered events, NOT a persistent open
-# condition: if the agent were genuinely stuck the SAME call would re-emit FRESH
-# events (which renotify normally and trip flap-storm). Once a runtime-tool-error
-# incident goes stale (no fresh occurrence), it is definitionally non-actionable
-# → Pattern A suppresses the renotify and auto-closes it. flap_storm stays exempt
-# (handled above), so a truly stuck agent still escalates on intensity.
-STALE_RENOTIFY_SUPPRESS_PREFIXES = ("provider_fallback_", "runtime-tool-error:")
+# runtime-tool-error:* — the producer explicitly emits only for operator-actionable
+# blocked or infrastructure failures (#2407). Stale incidents must NOT be auto-closed
+# without recovery proof. Previously suppressed as "self-corrected" — contradiction
+# with producer contract fixed by removing the prefix from stale suppression.
+# flap_storm stays exempt (handled above).
+STALE_RENOTIFY_SUPPRESS_PREFIXES = ("provider_fallback_",)
 # Pattern A (open variant) — suppress the periodic still-open renotify/age-escalation
 # for sources that are never operator-actionable even while live. A runtime-tool-error:*
 # incident is a collapsed bucket of self-corrected tool failures; the 6h "still open"
