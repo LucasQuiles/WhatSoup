@@ -5035,6 +5035,9 @@ def suppress_alerts_recovered_before_delivery(paths: dict[str, Path], incident: 
 
         alert_ids: list[str] = []
         for alert_path, alert_event, _alert_epoch, _alert_order in pending_alerts:
+            # #2430: preserve freshness before terminal move.
+            if str(alert_event.get("source") or "").startswith("daily-health"):
+                absorb_daily_health_signal(alert_event, incident_state)
             move_suppressed_event(
                 alert_path,
                 paths,
@@ -5056,6 +5059,9 @@ def suppress_alerts_recovered_before_delivery(paths: dict[str, Path], incident: 
                 "recovered_before_delivery_clear_suppressed",
             )
             suppressed += 1
+        # #2430: absorb daily-health clear signals into freshness too.
+        if str(clear_event.get("source") or "").startswith("daily-health"):
+            absorb_daily_health_signal(clear_event, incident_state)
         append_dispatch_log(paths, {
             "type": "recovered_before_delivery",
             "incidentKey": key,
