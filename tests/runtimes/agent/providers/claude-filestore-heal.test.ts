@@ -100,7 +100,7 @@ describe('ensureClaudeFileStoreCredential', () => {
       readFileStore: () => JSON.stringify({ claudeAiOauth: oauth(NOW + 90_000, 'fresher') }),
       writeFileStore,
     }));
-    expect(r.outcome).toBe('skipped-file-store-current');
+    expect(r.outcome).toBe('shadow-detected'); // #2784: file fresher than keychain → shadow
     expect(writeFileStore).not.toHaveBeenCalled();
   });
 

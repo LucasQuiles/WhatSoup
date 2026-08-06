@@ -91,7 +91,9 @@ describe('ensureClaudeFileStoreCredential — real filesystem', () => {
     writeFileSync(path, fresh, { mode: 0o600 });
     const before = readFileSync(path);
     const r = run(() => kc(NOW + 30_000, 'kc-older'));
-    expect(r.outcome).toBe('skipped-file-store-current');
+    // #2784: a fresher on-disk token with an older keychain item IS the shadow
+    // condition — reported as shadow-detected, still a strict on-disk no-op.
+    expect(r.outcome).toBe('shadow-detected');
     expect(readFileSync(path).equals(before)).toBe(true);
   });
 
