@@ -176,6 +176,21 @@ describe('portable host capability doctor', () => {
     expect(result.receipt?.outcome).toBe('inconclusive');
   });
 
+  it('is inconclusive when the Darwin arm64 capability probe is unexpected', () => {
+    const result = runDoctor(
+      fixture({
+        FAKE_ARM64_CAPABLE: 'unexpected',
+        FAKE_MACHINE: 'x86_64',
+        FAKE_NODE_ARCH: 'x64',
+      }),
+      ['--profile', 'runtime', '--json'],
+    );
+
+    expect(result.status).toBe(2);
+    expect(record(result.receipt, 'node')?.status).toBe('inconclusive');
+    expect(result.receipt?.outcome).toBe('inconclusive');
+  });
+
   it('reports a service-root-only executable as PATH-hidden', () => {
     const fx = fixture();
     unlinkSync(join(fx.bin, 'rg'));

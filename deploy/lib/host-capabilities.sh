@@ -27,6 +27,8 @@ whatsoup_native_arch() {
     if [ "$arm64_capable" = "1" ]; then
       printf '%s\n' arm64
       return 0
+    elif [ "$arm64_capable" != "0" ]; then
+      return 2
     fi
   fi
   whatsoup_normalize_arch "$machine"
