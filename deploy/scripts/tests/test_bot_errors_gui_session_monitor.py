@@ -1581,8 +1581,6 @@ def test_path_is_under_oserror_returns_false(mod, monkeypatch):
     from pathlib import Path as _Path
 
     class BrokenPath(_Path):
-        _flavour = _Path(".")._flavour
-
         def resolve(self):
             raise OSError("simulated resolve failure")
 
