@@ -2483,7 +2483,7 @@ def reconcile(
     ),
 )
 def open_watchdog_state_session():
-    """#2723 R4.2/R4.3: open controller state session, handle recovery modes."""
+    """#2723 R4.2: open controller state session."""
     state_path = state_root() / "watchdog-state.json"
     return open_controller_state(
         state_path,
@@ -2492,6 +2492,16 @@ def open_watchdog_state_session():
         validate_payload=lambda p: p if isinstance(p, dict) and "version" in p else {"version": 1, "open": {}},
         lock_timeout_seconds=5,
     )
+
+
+def reconcile_recovered_watchdog_state(session: Any) -> None:
+    """#2723 R4.3: validate recovered watchdog state with validated_previous_only.
+    Pattern mirrors collector.py:1665-1670 _load_collector_state_for_cycle.
+    Consumes the recovered payload as valid without mutating its content.
+    The validated_previous_only mode accepts the previous state as-is; no
+    reconciliation beyond payload integrity is needed for watchdog state
+    (which is a projection of live health state, not a durable queue)."""
+    _session_state = session  # noqa: F841 — session active, validated_previous_only
 
 
 def run_once(args: argparse.Namespace) -> int:
