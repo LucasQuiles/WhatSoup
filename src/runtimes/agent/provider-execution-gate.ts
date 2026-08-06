@@ -193,9 +193,10 @@ export class ProviderExecutionGate {
   private finishPressureEpisode(): void {
     if (this.pressureTimer !== null) clearTimeout(this.pressureTimer);
     this.pressureTimer = null;
-    if (!this.pressureActive) return;
     this.pressureActive = false;
     this.onRecovered?.(this.snapshot());
+    // Remove-the-gate: onRecovered -> clearAlertSourceChecked is idempotent
+    // (#2394) — a prior-process pressure incident must still be cleared.
   }
 }
 

@@ -10380,14 +10380,16 @@ export class AgentRuntime implements Runtime {
     };
 
     if (result.status === 'usable') {
-      if (this.primaryModelUsabilityAlertActive) {
-        clearAlertSourceChecked(
-          this.instanceName,
-          'primary_model_unusable',
-          `provider=${alertEvidenceValue(result.provider)} model=${alertEvidenceValue(result.model)}`,
-        );
-        this.primaryModelUsabilityAlertActive = false;
-      }
+      // Always emit an idempotent clear on usable result.  If the prior process
+      // emitted `primary_model_unusable` before dying, this new process lacks
+      // the local flag but the clear is still required (#2394).  `clearAlert-`
+      // is idempotent when no incident exists, so there is no double-clear risk.
+      clearAlertSourceChecked(
+        this.instanceName,
+        'primary_model_unusable',
+        `provider=${alertEvidenceValue(result.provider)} model=${alertEvidenceValue(result.model)}`,
+      );
+      this.primaryModelUsabilityAlertActive = false;
       return;
     }
 
