@@ -27,6 +27,45 @@
 
 ---
 
+## Host Readiness and Setup
+
+Use the same capability contract on Linux and macOS. Start read-only, opt into
+host mutation explicitly, and finish with the profile required by the work:
+
+```bash
+bash deploy/scripts/whatsoup-host-doctor.sh --profile runtime
+bash deploy/setup.sh --profile runtime --install-host-dependencies
+bash deploy/scripts/whatsoup-host-doctor.sh --profile quality
+```
+
+The first command changes nothing. Setup prints the exact package plan and
+accepts only `y` or `yes`; automation must additionally pass `--yes`. Without
+`--install-host-dependencies`, setup remains plan-only for host packages.
+
+| Profile | Required capabilities |
+|---|---|
+| `runtime` | Exact `.nvmrc` Node and npm, Git, and the platform service manager |
+| `quality` | Runtime plus Python 3.12+, ripgrep, zsh, and ShellCheck |
+| `release` | Quality plus GNU timeout and, on Linux, external `flock` |
+
+Host readiness requires Node `24.15.0` and matching native/process
+architectures. The Node 25 CI lane deliberately emits `compatibility_only`; it
+tests the package engine range but does not make a host ready. `path_hidden`
+means a tool was found in the canonical service roots but not the invoking
+shell's `PATH`; fix the caller environment rather than installing a duplicate.
+
+Quality and release setup create a private managed interpreter at
+`${WHATSOUP_QUALITY_VENV:-${XDG_DATA_HOME:-$HOME/.local/share}/whatsoup/quality-venv}`
+and install `pytest`, `pytest-cov`, Hypothesis, and pinned Ruff there. WhatSoup's
+JavaScript release-proof tests supply a hermetic `flock` fixture on macOS, where
+external `flock` is not a host requirement. Linux release operations still
+require the real `util-linux` implementation.
+
+Setup bootstraps and proves Node before its first npm command, so a fresh host
+does not need a separate `npm ci` beforehand.
+
+---
+
 ## 1. Instances Quick Reference
 
 | Instance | Type | Access Mode | Health Port | Description |

@@ -18,15 +18,15 @@ The **Inconsistencies** section lists missing or stale index entries compared wi
 scoped markdown files currently on disk.
 
 **Repo:** `WhatSoup`
-**Total entries:** 113
+**Total entries:** 114
 
 ## Totals
 
 | Dimension | Breakdown |
 |---|---|
-| Kind | handoff=8, plan=56, review=4, spec=44, state=1 |
-| Status | active=29, closed=4, completed=35, deferred=7, pending=15, unknown=23 |
-| Status source | body-marker=98, fallback=14, state-md-status=1 |
+| Kind | handoff=8, plan=57, review=4, spec=44, state=1 |
+| Status | active=29, closed=4, completed=35, deferred=7, pending=15, unknown=24 |
+| Status source | body-marker=98, fallback=15, state-md-status=1 |
 
 ## Inconsistencies
 
@@ -68,7 +68,7 @@ scoped markdown files currently on disk.
 | `docs/superpowers/specs/provider-event-lifecycle/requirements.md` | spec | requirements | body-marker |
 | `docs/superpowers/specs/provider-event-lifecycle/tasks.md` | spec | tasks | body-marker |
 
-### Unknown-status — triage needed (23)
+### Unknown-status — triage needed (24)
 
 | Path | Kind | Topic | Last Mod |
 |------|------|-------|----------|
@@ -84,6 +84,7 @@ scoped markdown files currently on disk.
 | `docs/superpowers/plans/2026-07-29-maybe-sent-ambiguity-episode.md` | plan | maybe-sent-ambiguity-episode | 2026-07-30 |
 | `docs/superpowers/plans/2026-07-29-portable-startup-notification-protocol.md` | plan | portable-startup-notification-protocol | 2026-07-30 |
 | `docs/superpowers/plans/2026-07-29-pr-metadata-guard.md` | plan | pr-metadata-guard | 2026-07-31 |
+| `docs/superpowers/plans/2026-08-06-host-setup-portability.md` | plan | host-setup-portability | 2026-08-06 |
 | `docs/superpowers/specs/2026-07-11-turn-lifecycle-fitness-extraction-design.md` | spec | turn-lifecycle-fitness-extraction-design | 2026-07-11 |
 | `docs/superpowers/specs/2026-07-17-macos-credential-durability-design.md` | spec | macos-credential-durability-design | 2026-07-17 |
 | `docs/superpowers/specs/2026-07-23-agent-reliability-remediation-design.md` | spec | agent-reliability-remediation-design | 2026-07-27 |
@@ -149,7 +150,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/handoffs/2026-07-16-boundary-core-history-mining.md` | handoff | pending | body-marker | boundary-core-history-mining | 2026-07-16 |  |
 | `docs/superpowers/handoffs/2026-07-28-incident-control-plane-finder-report.md` | handoff | unknown | fallback | incident-control-plane-finder-report | 2026-07-28 |  |
 
-### docs/superpowers/plans  _(56 entries)_
+### docs/superpowers/plans  _(57 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
@@ -209,6 +210,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/plans/2026-07-29-portable-startup-notification-protocol.md` | plan | unknown | fallback | portable-startup-notification-protocol | 2026-07-30 |  |
 | `docs/superpowers/plans/2026-07-29-pr-metadata-guard.md` | plan | unknown | fallback | pr-metadata-guard | 2026-07-31 |  |
 | `docs/superpowers/plans/2026-08-03-watchdog-auth-required-contract.md` | plan | active | body-marker | watchdog-auth-required-contract | 2026-08-04 |  |
+| `docs/superpowers/plans/2026-08-06-host-setup-portability.md` | plan | unknown | fallback | host-setup-portability | 2026-08-06 |  |
 
 ### docs/superpowers/reviews  _(4 entries)_
 
@@ -281,4 +283,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-08-06T05:48:08Z from commit `a6ed2e359c6cd063bd7fb8e8c6cc4466136c7444`
+- Generated at 2026-08-06T06:32:22Z from commit `3d0298de877922ab619d8a153a7bf772b53f5140`
