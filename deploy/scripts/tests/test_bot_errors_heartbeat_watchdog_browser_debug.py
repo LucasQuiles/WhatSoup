@@ -91,8 +91,13 @@ class BrowserDebugSnapshotTests(unittest.TestCase):
         self.assertIsNone(rows[0]["controllerConnections"])
         with patch.object(WATCHDOG, "browser_debug_snapshot", return_value=(rows, error)):
             problems = WATCHDOG.browser_debug_problems()
-        self.assertEqual(list(problems), [WATCHDOG.BROWSER_DEBUG_PROBE_KEY])
+        # #2426: per-profile keys are included so reconciliation doesn't treat
+        # unknown-visibility sessions as recovered.
+        self.assertIn(WATCHDOG.BROWSER_DEBUG_PROBE_KEY, problems)
         self.assertNotIn("session unattended", problems[WATCHDOG.BROWSER_DEBUG_PROBE_KEY])
+        per_profile_keys = [k for k in problems if k != WATCHDOG.BROWSER_DEBUG_PROBE_KEY]
+        self.assertEqual(len(per_profile_keys), 1)
+        self.assertEqual(per_profile_keys[0], "browser_debug:b03a110b01d1")
 
     def test_process_inventory_failure_is_visible_without_claiming_an_orphan(self) -> None:
         error = "browser process inventory unavailable"
