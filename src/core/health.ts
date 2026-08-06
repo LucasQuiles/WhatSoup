@@ -227,16 +227,30 @@ function noteProbeSuccess(warnMsg: string): void {
   }
 }
 
-function safeDbQuery<T>(fn: () => T, fallback: T, warnMsg: string): T {
+/** #2280: add degradation_silence_unproven when no active degradation reasons
+ * exist but the instance was recently degraded. */
+export function addDegradationSilenceProof(
+  statusReasons: string[],
+  recentlyDegraded: Set<string>,
+  instanceName: string,
+): void {
+  if (statusReasons.length === 0 && recentlyDegraded.has(instanceName)) {
+    statusReasons.push('degradation_silence_unproven');
+  }
+}
+
+function safeDbQuery<T>(fn: () => T, fallback: T, warnMsg: string, availabilityTracker?: Record<string, boolean>, probeName?: string): T {
   const start = Date.now();
   try {
     const result = fn();
     const elapsed = Date.now() - start;
     if (elapsed > 2 * MS_PER_SECOND) log.warn({ elapsed }, warnMsg + ' (slow query)');
     noteProbeSuccess(warnMsg);
+    if (availabilityTracker && probeName) availabilityTracker[probeName] = true;
     return result;
   } catch (err) {
     logProbeFailure(warnMsg, err);
+    if (availabilityTracker && probeName) availabilityTracker[probeName] = false;
     return fallback;
   }
 }
@@ -771,6 +785,12 @@ function sendRequestErrorMessage(err: unknown): string {
 }
 
 export function startHealthServer(deps: HealthDeps): ReturnType<typeof createServer> {
+  // #2280: tracks instances that have recently been in STATUS_DEGRADED, so
+  // status updates that see empty statusReasons (silence) can keep the
+  // instance degraded until explicit recovery proof arrives. Scoped to the
+  // server instance: module scope would leak degradation across server
+  // lifetimes that share an instance name (observed as cross-test pollution).
+  const recentlyDegraded = new Set<string>();
   const chatResolver = createChatResolver({ db: deps.db.raw });
   const sendPipeline = createSendPipeline({
     resolver: chatResolver,
@@ -1164,13 +1184,27 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           .run(reportId, errorClass, JSON.stringify(data));
 
         // Dispatch to runtime
+        let dispatchAccepted = true;
         if (deps.runtime?.handleControlTurn) {
           const payload = JSON.stringify({ ...data, reportId, errorClass });
           try {
             await deps.runtime.handleControlTurn(reportId, payload);
           } catch (err) {
             log.error({ err, reportId }, '/heal: handleControlTurn failed');
+            dispatchAccepted = false;
           }
+        } else {
+          dispatchAccepted = false;
+        }
+
+        if (!dispatchAccepted) {
+          // Roll back — no dispatch means the pending row would be orphaned (#2549)
+          deps.db.raw
+            .prepare('DELETE FROM pending_heal_reports WHERE report_id = ?')
+            .run(reportId);
+          res.writeHead(502, jsonHeaders);
+          res.end(JSON.stringify({ error: 'dispatch_rejected', reportId }));
+          return;
         }
 
         res.writeHead(202, jsonHeaders);
@@ -1661,31 +1695,44 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         if (turnCapabilityIsDegraded) statusReasons.push('turn_capability_degraded');
         if (loopLag.locallyStarved) statusReasons.push('event_loop_starvation');
         if (durabilityDebtIsDegraded) statusReasons.push('durability_delivery_debt');
+        // #2280: silence from child processes is not proof of recovery.
+        // If statusReasons is empty but the instance was recently degraded,
+        // keep it degraded until explicit recovery evidence is observed.
+        addDegradationSilenceProof(statusReasons, recentlyDegraded, deps.instanceName);
+        if (statusReasons.length > 0) recentlyDegraded.add(deps.instanceName);
         status = statusReasons.length > 0 ? 'degraded' : 'healthy';
       }
+
+      // #2514: track per-probe availability so consumers can distinguish
+      // failed probes (availability=false) from successful empty results.
+      const probeAvailability: Record<string, boolean> = {};
 
       const messagesTotal = safeDbQuery(
         () => getMessageCount(deps.db),
         0,
         'failed to count messages',
+        probeAvailability, 'messages',
       );
 
       const pendingCount = safeDbQuery(
         () => getPendingCount(deps.db),
         0,
         'failed to count pending access-list entries',
+        probeAvailability, 'pending_access_list',
       );
 
       const outboundSends = safeDbQuery(
         () => readOutboundSendHealth(deps.db),
         unreadableOutboundSendHealth(),
         'failed to read outbound send health',
+        probeAvailability, 'outbound_sends',
       );
       const toolWriteLosses = deps.runtime?.getToolDurabilityTelemetrySnapshot?.() ?? null;
       const toolDurability = safeDbQuery(
         () => readToolDurabilityHealth(deps.db, toolWriteLosses),
         unreadableToolDurabilityHealth(toolWriteLosses),
         'failed to read tool durability health',
+        probeAvailability, 'tool_durability',
       );
       let databaseRetention: DatabaseRetentionHealth | null = null;
       if (deps.getDatabaseRetentionHealth) {
@@ -1724,6 +1771,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         },
         0,
         'failed to read sqlite schema_version',
+        probeAvailability, 'schema_version',
       );
 
       const schemaMigrationLatest = safeDbQuery(
@@ -2034,6 +2082,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           pending_polls_total: pendingPollsTotal,
           pending_polls_readable: pendingPollsReadable,
           past_due_triggers: pastDueTriggers,
+          probe_availability: probeAvailability,
         },
         access_control: {
           pending_count: pendingCount,
