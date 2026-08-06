@@ -1051,7 +1051,8 @@ print(Path(found).name if found else "NONE")
       env: collectorEnv({ BOT_ERRORS_STATE_DIR: tmpRoot, BOT_ERRORS_DRY_SEND_CAPTURE: capturePath }),
       encoding: 'utf8',
     }).status).toBe(0);
-    expect(readdirSync(join(tmpRoot, 'sent')).filter((file) => file.endsWith('.sent'))).toHaveLength(2);
+    // One extra sent event: the writefail ack recovery observation (#2405).
+    expect(readdirSync(join(tmpRoot, 'sent')).filter((file) => file.endsWith('.sent'))).toHaveLength(3);
     expect((readFileSync(capturePath, 'utf8').match(/remote writefail critical/g) ?? [])).toHaveLength(1);
   });
 
