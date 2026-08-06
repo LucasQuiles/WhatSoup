@@ -795,6 +795,8 @@ export class AgentRuntime implements Runtime {
   private readonly db: Database;
   private readonly messenger: Messenger;
   private readonly instanceName: string;
+  /** #2397: mapKeys that have exhausted auto-respawn and are not yet recovered. */
+  private readonly exhaustedRespawnOwners = new Set<string>();
   private readonly shared: boolean;
   private readonly sessionScope: SessionScope;
   private readonly cwd: string | undefined;
@@ -11620,6 +11622,7 @@ export class AgentRuntime implements Runtime {
         clearTimeout(timer);
       }
     } else if (exhausted) {
+      this.exhaustedRespawnOwners.add(currentMapKey);
       log.error({ mapKey: currentMapKey, crashes: crashCount }, 'auto-respawn exhausted — emitting alert');
       emitAlertChecked(
         this.instanceName,
@@ -11716,6 +11719,15 @@ export class AgentRuntime implements Runtime {
       const publishRespawnRecovery = (): void => {
         if (respawnRecoveryPublished) return;
         respawnRecoveryPublished = true;
+        // Remove this conversation from the exhausted set (#2397).
+        this.exhaustedRespawnOwners.delete(mapKey);
+        if (this.exhaustedRespawnOwners.size > 0) {
+          log.info(
+            { remaining: [...this.exhaustedRespawnOwners].length },
+            'respawn recovery: not clearing — other conversations still exhausted',
+          );
+          return;
+        }
         clearAlertSourceChecked(this.instanceName, 'agent_respawn_failed');
       };
       let contextLease: SystemTurnLeaseToken | null = null;
