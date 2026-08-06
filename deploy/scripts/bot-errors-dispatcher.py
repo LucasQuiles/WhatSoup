@@ -3514,18 +3514,21 @@ def flap_resolve_event(key: str, entry: dict[str, Any], now: int) -> dict[str, A
     }
 
 
-def flap_scan_outbox(paths: dict[str, Path]) -> int:
+def flap_scan_outbox(paths: dict[str, Path], incident: IncidentStateCycle | None = None) -> int:
     """Pre-collapse pass (§10 C1): record ONE flap trip per raw incident-alert
     event currently in the outbox, keyed by incident_key, and emit consolidated
     flap_storm alerts when a key crosses threshold / promotes. Runs BEFORE
     collapse_ready_storms so trips count raw input, not post-collapse survivors.
     Member events are suppressed later in should_suppress_send via flapState.
     Returns the number of storm alerts emitted. Fail-open throughout.
+
+    When *incident* is provided, uses its ``.payload`` and ``.commit()``
+    instead of ``load_incident_state``/``save_incident_state``.
     """
     if not FLAP_DETECTION:
         return 0
     try:
-        incident_state = load_incident_state(paths)
+        incident_state = (incident.payload if incident else load_incident_state(paths))
     except Exception:  # noqa: BLE001 - never block dispatch on a flap read
         return 0
     flap_state = incident_state.setdefault("flapState", {})
@@ -3563,16 +3566,20 @@ def flap_scan_outbox(paths: dict[str, Path]) -> int:
             append_dispatch_log(paths, {"type": "flap_scan_error", "incidentKey": key, "error": str(exc)})
             continue
     if changed:
-        save_incident_state(paths, incident_state)
+        if incident:
+            incident.commit()
+        else:
+            save_incident_state(paths, incident_state)
     return emitted
 
 
-def sweep_flap_storms(paths: dict[str, Path]) -> tuple[int, int]:
+def sweep_flap_storms(paths: dict[str, Path], incident: IncidentStateCycle | None = None) -> tuple[int, int]:
     """Sweep open flap storms for resolution. Returns (resolved, errors).
-    Called from run_once after per-event processing. Fail-open per entry."""
+    Called from run_once after per-event processing. Fail-open per entry.
+    When *incident* is provided, uses its .payload and .commit()."""
     if not FLAP_DETECTION:
         return 0, 0
-    incident_state = load_incident_state(paths)
+    incident_state = (incident.payload if incident else load_incident_state(paths))
     flap_state = incident_state.get("flapState")
     if not isinstance(flap_state, dict) or not flap_state:
         return 0, 0
@@ -3599,7 +3606,10 @@ def sweep_flap_storms(paths: dict[str, Path]) -> tuple[int, int]:
             errors += 1
             append_dispatch_log(paths, {"type": "flap_resolve_error", "incidentKey": key, "error": str(exc)})
     if changed:
-        save_incident_state(paths, incident_state)
+        if incident:
+            incident.commit()
+        else:
+            save_incident_state(paths, incident_state)
     return resolved, errors
 
 
