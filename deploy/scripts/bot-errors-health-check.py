@@ -1812,6 +1812,7 @@ def outbox_event(
     severity: str = "critical",
     source: str = "daily-health",
     event_type: str = "alert",
+    asset: str | None = None,
     alert_source: str | None = None,
     force_notify: bool = False,
 ) -> Path:
@@ -1850,6 +1851,8 @@ def outbox_event(
             event["instance"] = instance
     if alert_source is not None:
         event["alertSource"] = alert_source
+    if asset is not None:
+        event["asset"] = {"kind": "health_target", "name": asset}
     else:
         derived_alert_source = alert_source_from_health_evidence(str(event["evidence"]))
         if not derived_alert_source:
@@ -2005,6 +2008,7 @@ def emit_per_instance_health_failures(failures: list[str]) -> list[Path]:
             severity="critical",
             source="daily-health-fail",
             event_type="alert",
+            asset=instance,
             alert_source=instance,
             force_notify=True,
         )
