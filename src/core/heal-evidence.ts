@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { FAULT_TAXONOMY_REGISTRY } from '../lib/fault-classifier.ts';
+import { isProviderId, PROVIDER_IDS } from '../lib/provider-ids.ts';
 
 export const HEAL_REPORT_TYPES = ['crash', 'degraded', 'service_crash'] as const;
 export type HealReportType = (typeof HEAL_REPORT_TYPES)[number];
@@ -95,8 +96,10 @@ const HealEvidenceV1FieldsSchema = z.object({
   correlation: healEvidenceCorrelationSchema,
   // #2410: provider-specific single-flight key — present on crash reports
   // from provider sessions so different provider routes with the same crash
-  // class produce distinct error class keys.
-  provider: z.string().optional(),
+  // class produce distinct error class keys. Bounded to the registered
+  // provider taxonomy: this envelope is closed and content-free, so a raw
+  // provider string from diagnostics must never pass through verbatim.
+  provider: z.enum(PROVIDER_IDS).optional(),
 }).strict();
 
 export const HealEvidenceV1Schema = HealEvidenceV1FieldsSchema.superRefine((evidence, ctx) => {
@@ -256,7 +259,9 @@ function crashEvidence(input: AutomaticHealReportInput): HealEvidenceV1 {
     counts: { occurrences: 1 },
     action: actionForCrashCause(cause),
     correlation: `heal:v1:crash:${cause}`,
-    ...(input.provider ? { provider: input.provider } : {}),
+    // Unregistered provider strings drop the field entirely: the single-flight
+    // key falls back to the base class and the envelope stays content-free.
+    ...(input.provider && isProviderId(input.provider) ? { provider: input.provider } : {}),
   };
 }
 

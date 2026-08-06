@@ -5,8 +5,8 @@
  *
  * fails-before:  Two providers (A, B) crash with same class → error class is
  *                "crash__provider_auth_required" for both → B's crash conflated into A's report.
- * passes-after:  Provider in error class → A's key "crash__provider_auth_required__providerA",
- *                B's key "crash__provider_auth_required__providerB" → distinct single-flight slots.
+ * passes-after:  Provider in error class → A's key "crash__provider_auth_required__claude-cli",
+ *                B's key "crash__provider_auth_required__codex-cli" → distinct single-flight slots.
  * no-regression: No provider → key is "crash__provider_auth_required" (existing behavior).
  */
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
@@ -98,14 +98,14 @@ describe('provider key in heal report error class (#2410)', () => {
     const reportId = emitHealReport(db, messenger, null, {
       type: 'crash',
       crashClass: 'provider_auth_required',
-      provider: 'openai',
+      provider: 'openai-api',
     });
     expect(reportId).not.toBeNull();
     const row = db.raw.prepare(
       'SELECT error_class FROM heal_reports WHERE report_id = ?',
     ).get(reportId!) as { error_class: string };
     expect(row).toBeDefined();
-    expect(row.error_class).toBe('crash__provider_auth_required__openai');
+    expect(row.error_class).toBe('crash__provider_auth_required__openai-api');
   });
 
   it('excludes provider from error class when absent', () => {
@@ -121,16 +121,30 @@ describe('provider key in heal report error class (#2410)', () => {
     expect(row.error_class).toBe('crash__provider_auth_required');
   });
 
+  it('drops an unregistered provider string: base error class, content-free envelope', () => {
+    const reportId = emitHealReport(db, messenger, null, {
+      type: 'crash',
+      crashClass: 'provider_auth_required',
+      provider: 'RAW_DIAGNOSTIC_CANARY_DO_NOT_LEAK',
+    });
+    expect(reportId).not.toBeNull();
+    const row = db.raw.prepare(
+      'SELECT error_class, context FROM heal_reports WHERE report_id = ?',
+    ).get(reportId!) as { error_class: string; context: string | null };
+    expect(row.error_class).toBe('crash__provider_auth_required');
+    expect(row.context ?? '').not.toContain('RAW_DIAGNOSTIC_CANARY_DO_NOT_LEAK');
+  });
+
   it('different providers produce different error classes', () => {
     const idA = emitHealReport(db, messenger, null, {
       type: 'crash',
       crashClass: 'provider_auth_required',
-      provider: 'providerA',
+      provider: 'claude-cli',
     });
     const idB = emitHealReport(db, messenger, null, {
       type: 'crash',
       crashClass: 'provider_auth_required',
-      provider: 'providerB',
+      provider: 'codex-cli',
     });
     expect(idA).not.toBeNull();
     expect(idB).not.toBeNull();
@@ -147,20 +161,24 @@ describe('provider key in heal report error class (#2410)', () => {
     const id1 = emitHealReport(db, messenger, null, {
       type: 'crash',
       crashClass: 'provider_auth_required',
-      provider: 'openai',
+      provider: 'openai-api',
     });
     expect(id1).not.toBeNull();
     const row1 = db.raw.prepare(
       'SELECT error_class FROM heal_reports WHERE report_id = ?',
     ).get(id1!) as { error_class: string };
-    expect(row1.error_class).toBe('crash__provider_auth_required__openai');
+    expect(row1.error_class).toBe('crash__provider_auth_required__openai-api');
 
     // Second call with same params: single-flight should suppress → null return
     const id2 = emitHealReport(db, messenger, null, {
       type: 'crash',
       crashClass: 'provider_auth_required',
-      provider: 'openai',
+      provider: 'openai-api',
     });
     expect(id2).toBeNull();
+    const count = db.raw.prepare(
+      "SELECT COUNT(*) AS n FROM heal_reports WHERE error_class = 'crash__provider_auth_required__openai-api'",
+    ).get() as { n: number };
+    expect(count.n).toBe(1);
   });
 });
