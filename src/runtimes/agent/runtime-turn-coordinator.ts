@@ -135,7 +135,11 @@ function saveStuckScopes(): void {
   try {
     mkdirSync(STUCK_SCOPE_STORE_DIR, { recursive: true, mode: 0o700 });
     writeFileSync(STUCK_SCOPE_STORE_FILE, JSON.stringify([...STUCK_FINALIZATION_SCOPES]), { mode: 0o600 });
-  } catch { /* best-effort */ }
+  } catch (err) {
+    // A lost write silently defeats the durable registration this store
+    // exists for — surface it even though the turn itself must proceed.
+    log.warn({ err }, 'stuck-scope store write failed; escape registration not durable');
+  }
 }
 
 function loadStuckScopes(): string[] {
@@ -158,7 +162,11 @@ export function hasStuckScope(scopeKey: string): boolean {
 export function drainStuckScopes(): string[] {
   const scopes = [...STUCK_FINALIZATION_SCOPES];
   STUCK_FINALIZATION_SCOPES.clear();
-  try { unlinkSync(STUCK_SCOPE_STORE_FILE); } catch { /* best-effort */ }
+  try {
+    unlinkSync(STUCK_SCOPE_STORE_FILE);
+  } catch (err) {
+    log.warn({ err }, 'stuck-scope store unlink failed after drain; stale file may resurrect scopes on restart');
+  }
   return scopes;
 }
 
@@ -171,7 +179,11 @@ export function reconcileStuckScopes(instanceName: string): void {
   for (const scopeKey of scopes) {
     STUCK_FINALIZATION_SCOPES.delete(scopeKey);
   }
-  try { unlinkSync(STUCK_SCOPE_STORE_FILE); } catch { /* best-effort */ }
+  try {
+    unlinkSync(STUCK_SCOPE_STORE_FILE);
+  } catch (err) {
+    log.warn({ err }, 'stuck-scope store unlink failed after reconcile; stale file may resurrect scopes on restart');
+  }
 }
 
 export interface RuntimeTurnCoordinatorPort {
