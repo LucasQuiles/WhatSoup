@@ -247,12 +247,16 @@ describe('DurabilityEngine edge coverage', () => {
 
     engine.postConnectRecovery();
 
+    // #2510: gate alerts demand durable delivery — strict=true so a
+    // capture-only sink can never silently satisfy them.
     expect(emitAlert).toHaveBeenCalledWith(
       'Loops',
       'auth_terminal',
       expect.any(String),
       expect.stringContaining('auth evidence'),
       'critical',
+      undefined,
+      true,
     );
     expect(emitAlert).toHaveBeenCalledWith(
       'Loops',
@@ -260,6 +264,8 @@ describe('DurabilityEngine edge coverage', () => {
       expect.any(String),
       expect.stringContaining('gate evidence; clear_suppressed=true'),
       'warning',
+      undefined,
+      true,
     );
     expectQuarantineClear('outbound_quarantined');
   });

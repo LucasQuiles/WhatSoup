@@ -1782,7 +1782,7 @@ describe('WHATSOUP_ALERT_SINK dry-run capture', () => {
         // reflects the sink path; status reflects the durable outbox write.
         expect(result.ok).toBe(true);
         expect(result.channel).toBe('sink');
-        expect(result.status).toBe('durably_queued');
+        expect(result.status).toBe('captured'); // #2510: capture returns captured, not durably_queued
 
         // Still must not page: a construction failure is not a licence to fall
         // through to the outbox ladder any more than a write failure is.
