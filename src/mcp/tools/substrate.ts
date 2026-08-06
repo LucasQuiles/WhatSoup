@@ -19,6 +19,7 @@ import {
 import {
   createTrigger, listTriggers, pauseTrigger, extendTrigger, prepareTrigger,
 } from '../../core/substrate/triggers.ts';
+import { clearAlertSourceChecked } from '../../lib/emit-alert.ts';
 import {
   captureObservation, forgetObservation, mergeEntities,
   getProfile, listEntities, addAlias, resolveEntityRef,
@@ -573,7 +574,10 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
     handler: async (raw, session) => {
       assertAdmin(deps, session);
       const p = raw as { id: number; until: number };
+      // #2417: extend_trigger also reactivates paused triggers and emits
+      // idempotent recovery clear.
       extendTrigger(deps.db, p.id, { until: p.until, maxTtlHours: deps.memory.watchTtl.maxHours, actor: 'user' });
+      clearAlertSourceChecked(deps.instanceName, 'trigger_forbidden_target');
       return { ok: true };
     },
   });

@@ -259,13 +259,18 @@ export function pauseTrigger(db: DatabaseSync, id: number, args: { actor: string
 export function extendTrigger(db: DatabaseSync, id: number, args: { until: number; maxTtlHours: number; actor: string }): void {
   const now = nowUnixSec();
   if (args.until <= now) throw new Error(`extendTrigger: until must be in the future`);
-  const t = db.prepare(`SELECT bead_id FROM bead_triggers WHERE id = ?`).get(id) as { bead_id: number } | undefined;
+  const t = db.prepare(`SELECT bead_id, status FROM bead_triggers WHERE id = ?`).get(id) as { bead_id: number; status?: string } | undefined;
   if (!t) throw new Error(`trigger ${id} not found`);
   const clamped = clampTtl(now, args.until, args.maxTtlHours);
   db.exec('BEGIN');
   try {
     db.prepare(`UPDATE bead_triggers SET terminal_at=?, updated_at=? WHERE id=?`).run(clamped, now, id);
-    writeBeadEvent(db, { beadId: t.bead_id, eventType: 'trigger_extended', actor: args.actor, payload: { trigger_id: id, terminal_at: clamped }, at: now });
+    // #2417: if the trigger was paused (e.g. trigger_forbidden_target retirement),
+    // reactivate it so the user's extend command also serves as a resume gesture.
+    if (t.status === 'paused') {
+      db.prepare(`UPDATE bead_triggers SET status='active', next_fire_at=?, crash_count=0, updated_at=? WHERE id=?`).run(now, now, id);
+    }
+    writeBeadEvent(db, { beadId: t.bead_id, eventType: 'trigger_extended', actor: args.actor, payload: { trigger_id: id, terminal_at: clamped, was_paused: t.status === 'paused' }, at: now });
     db.exec('COMMIT');
   } catch (err) { try { db.exec('ROLLBACK'); } catch { /* best effort */ } throw err; }
 }
