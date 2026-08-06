@@ -2178,9 +2178,9 @@ def deferred_recovery_event(key: str, record: dict[str, Any]) -> Path:
 def reconcile(
     problems: dict[str, str],
     active_prefixes: list[str],
-    state: dict[str, Any] | None = None,
-    session: Any = None,
-    capability: Any = None,
+    state: dict[str, Any],
+    session: Any,
+    capability: Any,
     evaluated_instances: set[str] | None = None,
 ) -> list[Path]:
     """Reconcile problems against open incidents and write outbox events.
@@ -2189,27 +2189,8 @@ def reconcile(
     caller from the session).  ``session`` and ``capability`` are the open
     ControllerStateSession and its current write capability; the function
     persists through ``session.save()`` instead of the old ``save_state()``.
-
-    Compatibility: external callers (the TS behavioral harness, operator
-    tooling) invoke the historical two-argument form.  When ``session`` is
-    None the function opens its own session for the duration of the call.
     """
-    if session is None:
-        with open_watchdog_state_session() as _compat_session:
-            _load = _compat_session.load()
-            _payload = _load.payload if isinstance(_load.payload, dict) else {"version": 1, "open": {}}
-            return reconcile(
-                problems,
-                active_prefixes,
-                _payload,
-                _compat_session,
-                _load.capability,
-                evaluated_instances,
-            )
-    assert state is not None and capability is not None
     open_incidents: dict[str, Any] = state.setdefault("open", {})
-    state.setdefault("pendingStale", {})
-    state.setdefault("recentlyRecovered", {})
     written: list[Path] = []
     current = now_epoch()
     for key, evidence in sorted(problems.items()):
