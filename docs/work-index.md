@@ -18,15 +18,15 @@ The **Inconsistencies** section lists missing or stale index entries compared wi
 scoped markdown files currently on disk.
 
 **Repo:** `WhatSoup`
-**Total entries:** 112
+**Total entries:** 113
 
 ## Totals
 
 | Dimension | Breakdown |
 |---|---|
-| Kind | handoff=8, plan=56, review=4, spec=43, state=1 |
-| Status | active=29, closed=4, completed=35, deferred=7, pending=15, unknown=22 |
-| Status source | body-marker=97, fallback=14, state-md-status=1 |
+| Kind | handoff=8, plan=56, review=4, spec=44, state=1 |
+| Status | active=29, closed=4, completed=35, deferred=7, pending=15, unknown=23 |
+| Status source | body-marker=98, fallback=14, state-md-status=1 |
 
 ## Inconsistencies
 
@@ -68,7 +68,7 @@ scoped markdown files currently on disk.
 | `docs/superpowers/specs/provider-event-lifecycle/requirements.md` | spec | requirements | body-marker |
 | `docs/superpowers/specs/provider-event-lifecycle/tasks.md` | spec | tasks | body-marker |
 
-### Unknown-status — triage needed (22)
+### Unknown-status — triage needed (23)
 
 | Path | Kind | Topic | Last Mod |
 |------|------|-------|----------|
@@ -94,6 +94,7 @@ scoped markdown files currently on disk.
 | `docs/superpowers/specs/2026-07-29-incident-evaluator-core-design.md` | spec | incident-evaluator-core-design | 2026-07-31 |
 | `docs/superpowers/specs/2026-07-29-maybe-sent-ambiguity-episode-design.md` | spec | maybe-sent-ambiguity-episode-design | 2026-07-30 |
 | `docs/superpowers/specs/2026-07-29-portable-startup-notification-protocol-design.md` | spec | portable-startup-notification-protocol-design | 2026-07-30 |
+| `docs/superpowers/specs/2026-08-06-host-setup-portability-and-macos-reconciliation-design.md` | spec | host-setup-portability-and-macos-reconciliation-design | 2026-08-06 |
 
 ### Cross-tree topic clusters (4)
 
@@ -218,7 +219,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/reviews/2026-07-09-wall-to-wall-audit-pr-briefs.md` | review | completed | body-marker | wall-to-wall-audit-pr-briefs | 2026-07-10 |  |
 | `docs/superpowers/reviews/2026-07-24-r13-r15-tech-debt-review-map.md` | review | completed | body-marker | r13-r15-tech-debt-review-map | 2026-07-24 |  |
 
-### docs/superpowers/specs  _(37 entries)_
+### docs/superpowers/specs  _(38 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
@@ -259,6 +260,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/specs/2026-07-29-maybe-sent-ambiguity-episode-design.md` | spec | unknown | fallback | maybe-sent-ambiguity-episode-design | 2026-07-30 |  |
 | `docs/superpowers/specs/2026-07-29-portable-startup-notification-protocol-design.md` | spec | unknown | body-marker | portable-startup-notification-protocol-design | 2026-07-30 |  |
 | `docs/superpowers/specs/2026-08-03-watchdog-auth-required-contract-design.md` | spec | active | body-marker | watchdog-auth-required-contract-design | 2026-08-04 |  |
+| `docs/superpowers/specs/2026-08-06-host-setup-portability-and-macos-reconciliation-design.md` | spec | unknown | body-marker | host-setup-portability-and-macos-reconciliation-design | 2026-08-06 |  |
 
 ### docs/superpowers/specs/kill-session-transactional-cancellation  _(3 entries)_
 
@@ -279,4 +281,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-08-04T05:27:23Z from commit `610957d0fd058b3a03a46975b4cd381e86c11f86`
+- Generated at 2026-08-06T05:48:08Z from commit `a6ed2e359c6cd063bd7fb8e8c6cc4466136c7444`
