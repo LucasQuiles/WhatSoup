@@ -387,33 +387,9 @@ def redacted_watchdog_payload(value: Any) -> Any:
     return redact_shared_json_value(value, redact_watchdog_text)
 
 
-def project_watchdog_state_mode(diagnostic: Any) -> str:
-    """#2723 R4.6: project diagnostic details, stripping schemaVersion.
-
-    Uses ``state_diagnostic_details`` (not ``_asdict`` — ``StateDiagnostic``
-    is a frozen dataclass so ``_asdict`` is not a namedtuple method).
-    Follows the same pattern as collector.py:1695-1717 and dispatcher.py:945.
-    """
-    details = metadata_only_controller_details(
-        {
-            key: value
-            for key, value in state_diagnostic_details(diagnostic).items()
-            if key != "schemaVersion"
-        }
-    )
-    failed = getattr(diagnostic, "mode", None) == "recovery_required"
-    log_path = state_root() / "logs" / "watchdog.jsonl"
-    return write_controller_log(
-        context=CONTROLLER_LOG_CONTEXT,
-        record_kind="controller_state_mode",
-        level="error" if failed else "info",
-        outcome="failed" if failed else "observed",
-        durability_class="diagnostic_best_effort",
-        details=details,
-        append_record=lambda record: append_private_jsonl(log_path, record),
-        persist_health=persist_controller_log_health,
-        emit_fallback=lambda _line: emit_state_recovery_fallback(diagnostic),
-    )
+def project_watchdog_state_mode(diagnostic: Any) -> dict[str, Any]:
+    """#2723 R4.6: project diagnostic details, stripping schemaVersion."""
+    return {k: v for k, v in diagnostic._asdict().items() if k != "schemaVersion"}
 
 
 def read_collector_state_snapshot() -> StateReadResult | None:
@@ -425,7 +401,7 @@ def read_collector_state_snapshot() -> StateReadResult | None:
         return read_controller_state(
             coll_path,
             component="collector",
-            validate_payload=lambda p: p if isinstance(p, dict) else {},
+            validate_payload=lambda p: p if isinstance(p, dict) and "open" in p else {},
             lock_timeout_seconds=5,
         )
     except (OSError, json.JSONDecodeError):
