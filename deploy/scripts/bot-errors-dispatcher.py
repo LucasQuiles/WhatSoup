@@ -1009,12 +1009,33 @@ def incident_source(event: dict[str, Any]) -> str:
     return source
 
 
+def incident_source_fingerprint(raw_source: str) -> str:
+    """#2507: content-addressable source fingerprint (16 hex chars from SHA256)
+    to disambiguate values that safe_segment would collapse together
+    (e.g. 'collector:writefail' vs 'collector.writefail' vs 'collector@writefail')."""
+    return hashlib.sha256(raw_source.encode()).hexdigest()[:16]
+
+
+_SAFE_SEGMENT_KEPT = re.compile(r"^[A-Za-z0-9_.:-]+$")
+
+
+def _safe_segment_is_lossy(value: str) -> bool:
+    """True when safe_segment would mutate characters in `value`."""
+    return not bool(_SAFE_SEGMENT_KEPT.match(value.strip()))
+
+
 def incident_key(event: dict[str, Any]) -> str:
-    return "|".join([
-        safe_segment(str(event.get("machine") or "unknown")),
-        safe_segment(str(event.get("instance") or "unknown")),
-        safe_segment(incident_source(event)),
-    ])
+    machine = safe_segment(str(event.get("machine") or "unknown"))
+    instance = safe_segment(str(event.get("instance") or "unknown"))
+    source = incident_source(event)
+    segment = safe_segment(source)
+    # #2507: when safe_segment would collapse distinct source values
+    # (e.g. collector:writefail vs collector.writefail vs
+    # collector@writefail → all become collector_writefail), append a
+    # content-addressable fingerprint so keys remain distinct.
+    if _safe_segment_is_lossy(source):
+        segment += "." + incident_source_fingerprint(source)
+    return "|".join([machine, instance, segment])
 
 
 def legacy_unqualified_incident_key(event: dict[str, Any]) -> str | None:
@@ -1022,11 +1043,12 @@ def legacy_unqualified_incident_key(event: dict[str, Any]) -> str | None:
     qualified_source = incident_source(event)
     if qualified_source == source:
         return None
-    return "|".join([
-        safe_segment(str(event.get("machine") or "unknown")),
-        safe_segment(str(event.get("instance") or "unknown")),
-        safe_segment(source),
-    ])
+    machine = safe_segment(str(event.get("machine") or "unknown"))
+    instance = safe_segment(str(event.get("instance") or "unknown"))
+    segment = safe_segment(source)
+    if _safe_segment_is_lossy(source):
+        segment += "." + incident_source_fingerprint(source)
+    return "|".join([machine, instance, segment])
 
 
 def legacy_record_matches_alert_source(event: dict[str, Any], record: dict[str, Any] | None) -> bool:
