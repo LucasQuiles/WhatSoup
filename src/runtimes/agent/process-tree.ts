@@ -545,14 +545,46 @@ export function killSessionTree(
   let owned: OwnedProcessIdentity[];
   let preCensusAvailable = false;
   try {
-    owned = snapshotOwnedTree(readProcessCensus(), rootPid, options.generationMarker);
+    const rows = readProcessCensus();
+    owned = snapshotOwnedTree(rows, rootPid, options.generationMarker);
     preCensusAvailable = true;
+
+    // #1869: extend ownership with cgroup-based membership — catch processes that
+    // reparented off the PPID tree (e.g. double-forked workload daemons) and would
+    // otherwise be invisible to the PPID walk. Cross-reference the instance cgroup
+    // membership and add cgroup-only PIDs to the owned set.
+    const cgroupPids = (options.readCgroupMemberPids ?? readServiceCgroupMemberPids)();
+    if (cgroupPids !== null) {
+      // Compute divergence against the PRE-extension owned set so the telemetry
+      // captures the original gap (before reparented PIDs are absorbed).
+      const divergence = computeCgroupDivergence(cgroupPids, owned, rootPid);
+
+      const ownedPids = new Set<number>(owned.map((o) => o.pid));
+      ownedPids.add(rootPid);
+      let addedCount = 0;
+      for (const cpid of cgroupPids) {
+        if (cpid === rootPid || cpid === process.pid) continue;
+        if (!ownedPids.has(cpid)) {
+          const row = uniqueRowForPid(rows, cpid);
+          if (row) {
+            owned.push({ ...row, depth: -1, generationMarker: options.generationMarker });
+            ownedPids.add(cpid);
+            addedCount += 1;
+          }
+        }
+      }
+
+      // #1869: surface the raw divergence count whenever the cgroup caught at
+      // least one reparented PID the PPID walk missed.
+      if (addedCount > 0) {
+        try {
+          options.onCgroupDivergence?.(divergence);
+        } catch { /* best-effort telemetry; never affects termination */ }
+      }
+    }
   } catch (error) {
     owned = [];
   }
-
-  // #1869: best-effort divergence telemetry; fully isolated, never affects termination.
-  emitCgroupDivergence(owned, rootPid, options);
 
   let context: TerminationContext;
   const promise = runTermination(target, rootPid, owned, preCensusAvailable, signal, options)
