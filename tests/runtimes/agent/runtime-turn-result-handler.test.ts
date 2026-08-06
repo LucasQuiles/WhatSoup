@@ -132,6 +132,8 @@ function makeHarness(options: {
     return undefined;
   });
   const runtimeTurnCoordinator = {
+    // #2398: escape paths register the stuck scope on the coordinator.
+    registerStuckScope: vi.fn(),
     runtimeTurnContext: vi.fn(() => runtimeContext),
     attemptOutcomeForResult: vi.fn((event: { text: string | null }) => ({
       kind: 'failed' as const,

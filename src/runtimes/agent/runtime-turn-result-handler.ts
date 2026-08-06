@@ -705,6 +705,8 @@ if (wasSilentCompact) host.clearSilentCompact(mapKey);
         `mapKey=${mapKey} scope=${scopeKey} err=${err instanceof Error ? err.message : String(err)}`,
         'warning',
       );
+      // #2398: register the scope for retry sweep so it has a durable owner.
+      host.runtimeTurnCoordinator.registerStuckScope(scopeKey);
     });
   } else if (isSystemResult || inboundSeq === undefined || host.durability === null) {
     if (!isSystemResult && mapKey !== undefined && clearReplayOnSuccess) {
@@ -1248,6 +1250,8 @@ if (wasSilentCompact) host.clearSilentCompact(GLOBAL_TOOL_SCOPE_KEY);
         `scope=${scopeKey} err=${err instanceof Error ? err.message : String(err)}`,
         'warning',
       );
+      // #2398: register the scope for retry sweep so it has a durable owner.
+      host.runtimeTurnCoordinator.registerStuckScope(scopeKey);
     });
   } else if (isSystemResult || host.currentInboundSeq === undefined || host.durability === null) {
     host.runtimeTurnCoordinator.flushUnownedRuntimeResult(queue, voice);

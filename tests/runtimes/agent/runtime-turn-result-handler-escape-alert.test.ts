@@ -53,6 +53,9 @@ function makeHost(overrides: { mapKey?: string } = {}) {
     getDbRowId: vi.fn(() => 5),
   };
   const runtimeTurnCoordinator = {
+    // #2398: the escape path registers the stuck scope on the coordinator
+    // after alerting; the mock must expose it or the async catch rejects.
+    registerStuckScope: vi.fn(),
     runtimeTurnContext: vi.fn(() => context),
     attemptOutcomeForResult: vi.fn(() => ({ kind: 'completed' as const })),
     consumeRuntimeTurnContinuationDeferral: vi.fn(() => false),

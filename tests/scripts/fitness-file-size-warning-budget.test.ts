@@ -91,6 +91,12 @@ const EXPECTED_FILE_SIZE_WARNING_FILES = [
   // existing evidence-gathering responsibility; grandfathered per the project
   // norm for large core files (cf. database.ts/durability.ts above).
   'src/fleet/health-poller.ts',
+  // #2398's durable stuck-scope escape store (file-backed registration,
+  // startup reconcile, logged failure paths) took this file just over the
+  // 2000-line arch.file-size warn budget. The store is cohesive with the
+  // coordinator's existing finalization-escape responsibility; grandfathered
+  // per the project norm for large core files (cf. database.ts above).
+  'src/runtimes/agent/runtime-turn-coordinator.ts',
   'src/runtimes/agent/runtime.ts',
   'src/runtimes/agent/session.ts',
   'src/transport/connection.ts',

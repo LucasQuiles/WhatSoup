@@ -61,7 +61,7 @@ export function resetDeliveryUnavailableLatch(): void {
 
 export interface HealReportData extends AutomaticHealReportInput {}
 
-interface HealReportRow {
+export interface HealReportRow {
   report_id: string;
   error_class: string;
   error_type: string;
@@ -307,22 +307,35 @@ export function reconcileStaleHealReports(
   // signal (see handleHealComplete). Setting resolved_at here made stale-expired
   // rows indistinguishable from genuine resolutions to anything reading
   // resolved_at without also checking state.
+  // #2390: skip rows whose error class depends on contributor-owned recovery
+  // proof rather than fresh source events to stay open. Without this, incidents
+  // like fallback_recovery_stalled auto-close when no new source events arrive,
+  // even though the underlying condition has not resolved.
+  const RECOVERY_PENDING_CLASSES = new Set([
+    'fallback_recovery_stalled',
+    'provider_fallback_activated',
+    'instance_unreachable',
+  ]);
+  const filtered = rows.filter(r => !RECOVERY_PENDING_CLASSES.has(r.error_class));
+
   const update = db.raw.prepare(`
     UPDATE heal_reports
     SET state = 'stale_expired'
     WHERE report_id = ?
   `);
-  for (const row of rows) update.run(row.report_id);
+  for (const row of filtered) update.run(row.report_id);
 
-  log.warn({
-    count: rows.length,
-    reportIds: rows.map(row => row.report_id),
-    states: rows.map(row => row.state),
-    staleMs,
-    cutoff,
-  }, 'expired stale active heal reports');
+  if (filtered.length > 0) {
+    log.warn({
+      count: filtered.length,
+      reportIds: filtered.map(row => row.report_id),
+      states: filtered.map(row => row.state),
+      staleMs,
+      cutoff,
+    }, 'expired stale active heal reports');
+  }
 
-  return { expiredReportIds: rows.map(row => row.report_id), cutoff, staleMs };
+  return { expiredReportIds: filtered.map(row => row.report_id), cutoff, staleMs };
 }
 
 /**
@@ -429,4 +442,19 @@ function formatHealReport(payload: {
   // increment in emitHealReport's single-flight suppression path for what really happens).
   lines.push(`\nRepair attempt ${payload.attempt}. Repeat occurrences of this error before resolution increment the attempt count but do not trigger a further notification or scheduled retry.`);
   return lines.join('\n');
+}
+
+// #2399: fallback prerequisite alert sources that require contributor-aware
+// recovery lifecycle — the incident must survive until the prerequisite is
+// observed satisfied, not auto-close on age.
+const FALLBACK_PREREQUISITE_SOURCES = new Set([
+  'fallback_credential_missing',
+  'fallback_binary_missing',
+  'fallback_model_unknown',
+  'fallback_persist_failed',
+  'provider_auth_required_no_fallback',
+]);
+
+export function isFallbackPrerequisite(source: string): boolean {
+  return FALLBACK_PREREQUISITE_SOURCES.has(source);
 }

@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { FAULT_TAXONOMY_REGISTRY } from '../lib/fault-classifier.ts';
+import { isProviderId, PROVIDER_IDS } from '../lib/provider-ids.ts';
 
 export const HEAL_REPORT_TYPES = ['crash', 'degraded', 'service_crash'] as const;
 export type HealReportType = (typeof HEAL_REPORT_TYPES)[number];
@@ -93,6 +94,12 @@ const HealEvidenceV1FieldsSchema = z.object({
   counts: healEvidenceCountsSchema,
   action: z.enum(HEAL_EVIDENCE_ACTIONS),
   correlation: healEvidenceCorrelationSchema,
+  // #2410: provider-specific single-flight key — present on crash reports
+  // from provider sessions so different provider routes with the same crash
+  // class produce distinct error class keys. Bounded to the registered
+  // provider taxonomy: this envelope is closed and content-free, so a raw
+  // provider string from diagnostics must never pass through verbatim.
+  provider: z.enum(PROVIDER_IDS).optional(),
 }).strict();
 
 export const HealEvidenceV1Schema = HealEvidenceV1FieldsSchema.superRefine((evidence, ctx) => {
@@ -116,6 +123,10 @@ export interface AutomaticHealReportInput {
   termination?: 'exit_or_signal';
   totalFailures?: number;
   affectedScopeCount?: number;
+  // #2410: provider-specific single-flight separation — crashes from
+  // different provider routes produce distinct error class keys even
+  // when the crash class is the same (e.g. fallback provider B -> A).
+  provider?: string;
 }
 
 const ALLOWED_CRASH_CAUSES = new Set<string>(CRASH_CAUSES);
@@ -248,6 +259,9 @@ function crashEvidence(input: AutomaticHealReportInput): HealEvidenceV1 {
     counts: { occurrences: 1 },
     action: actionForCrashCause(cause),
     correlation: `heal:v1:crash:${cause}`,
+    // Unregistered provider strings drop the field entirely: the single-flight
+    // key falls back to the base class and the envelope stays content-free.
+    ...(input.provider && isProviderId(input.provider) ? { provider: input.provider } : {}),
   };
 }
 
@@ -317,5 +331,9 @@ export function parseStoredHealEvidence(raw: string | null): HealEvidenceV1 {
 }
 
 export function errorClassForHealEvidence(evidence: HealEvidenceV1): string {
-  return `${evidence.type}__${evidence.cause}`;
+  const base = `${evidence.type}__${evidence.cause}`;
+  // #2410: add provider to the error class so different provider routes with
+  // the same crash class produce distinct single-flight keys (preventing
+  // fallback provider B's crash from being conflated into provider A's report).
+  return evidence.provider ? `${base}__${evidence.provider}` : base;
 }

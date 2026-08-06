@@ -9063,6 +9063,14 @@ export class AgentRuntime implements Runtime {
           'Fallback provider key not found in keyring',
           `entry=${i} service=${service} provider=${entry.provider} model=${entry.model ?? ''}`,
         );
+      } else {
+        // #2399: prerequisite now satisfied — emit recovery clear so the
+        // incident does not remain open until stale timeout.
+        clearAlertSourceChecked(
+          this.instanceName,
+          'fallback_credential_missing',
+          `recoveryProof=credential_valid entry=${i} provider=${entry.provider}`,
+        );
       }
     }
     this.fallbackChain.chainState = state;
