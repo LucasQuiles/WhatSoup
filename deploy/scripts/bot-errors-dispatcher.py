@@ -38,6 +38,13 @@ from lib.controller_log import (
     metadata_only_controller_details,
     write_controller_log,
 )
+from lib.controller_state import (
+    STATE_RECOVERY_REQUIRED_EXIT,
+    ControllerStateRequired,
+    emit_state_recovery_fallback,
+    open_controller_state,
+    state_diagnostic_details,
+)
 from lib.durable_json import (
     JsonVersion,
     PublicationResult,
@@ -864,86 +871,166 @@ def quarantine_untrusted_entry(path: Path, quarantine_dir: Path, reason: str) ->
     return dest
 
 
-def load_incident_state(paths: dict[str, Path]) -> dict[str, Any]:
-    path = paths["incident_state"]
-    if not path.exists():
-        return {"version": 1, "openIncidents": {}, "lastSentAt": {}}
-    try:
-        loaded = read_json(path)
-    except Exception as exc:  # noqa: BLE001 - dispatcher must recover from corrupt state.
-        backup = path.with_suffix(f".corrupt.{int(time.time())}.{os.getpid()}.json")
-        try:
-            path.replace(backup)
-        except Exception:
-            pass
-        append_dispatch_log(paths, {"type": "incident_state_corrupt", "path": str(path), "error": str(exc)})
-        return {"version": 1, "openIncidents": {}, "lastSentAt": {}}
-    state = {"version": 1, "openIncidents": {}, "lastSentAt": {}}
-    if isinstance(loaded.get("openIncidents"), dict):
-        state["openIncidents"] = loaded["openIncidents"]
-    if isinstance(loaded.get("lastSentAt"), dict):
-        state["lastSentAt"] = loaded["lastSentAt"]
-    # Persist the per-UTC-date test-leak daily marker across runs; without this the
-    # whitelist would drop it and the once-per-day summary would re-fire every run.
-    if isinstance(loaded.get("testLeakDaily"), dict):
-        state["testLeakDaily"] = loaded["testLeakDaily"]
-    # Pattern F (§10 C0): flap-storm trip state must survive across dispatcher
-    # invocations (each run loads → processes → saves → exits), else an in-memory
-    # sliding-window counter resets every run and a sustained burst never
-    # accumulates. Keyed by incident_key.
-    if isinstance(loaded.get("flapState"), dict):
-        state["flapState"] = loaded["flapState"]
-    # Pattern D — transient tiering bookkeeping must survive across invocations
-    # for the same reason as flapState: the promote window (transientSince anchor)
-    # spans multiple one-shot runs. Without this load, every run resets the anchor
-    # and a sustained soft-fault is held silently forever and never promotes.
-    if isinstance(loaded.get("transientState"), dict):
-        state["transientState"] = loaded["transientState"]
-    # Pattern A (digest coalescing): the auto-close digest accumulator (pending
-    # closed-key batch + lastDigestAt) must survive across one-shot runs, else the
-    # cross-run coalescing window resets every invocation and every sweep re-emits.
-    if isinstance(loaded.get("staleAutocloseDigest"), dict):
-        state["staleAutocloseDigest"] = loaded["staleAutocloseDigest"]
-    if isinstance(loaded.get("staleAutocloseHistory"), dict):
-        state["staleAutocloseHistory"] = loaded["staleAutocloseHistory"]
-    if isinstance(loaded.get("promotionSafety"), dict):
-        state["promotionSafety"] = loaded["promotionSafety"]
-    # Per-host daily-health freshness ledger — the heartbeat-watchdog's authoritative
-    # liveness source. Must survive across one-shot runs; without this preserve the
-    # ledger would reset every invocation and the watchdog would fall back to scanning
-    # the FIFO-pruned archive (the false-positive root cause this ledger fixes).
-    if isinstance(loaded.get("dailyHealthFreshness"), dict):
-        state["dailyHealthFreshness"] = loaded["dailyHealthFreshness"]
-    # #2281: episode-state gate — current episode identity must survive reload.
-    if isinstance(loaded.get("currentEpisodeId"), str):
-        state["currentEpisodeId"] = loaded["currentEpisodeId"]
-    return state
+def redact_dispatcher_text(value: Any) -> str:
+    return redact_bot_errors_text(value)
 
 
-def save_incident_state(
-    paths: dict[str, Path],
-    state: dict[str, Any],
-) -> PublicationResult:
-    state["updatedAt"] = now_iso()
-    target = _durable_target(paths["incident_state"])
-    observation = observe_json(target)
-    generation = (observation.version.generation or 0) + 1
-    publication_operation = operation_id(
-        target,
-        state,
-        component="dispatcher.incident_state",
-        predecessor=observation.version,
+# ---------------------------------------------------------------------------
+# #2723 R5.1/R5.2 — Controller-state session adoption + IncidentStateCycle
+# ---------------------------------------------------------------------------
+# Replaces corrupt-file-archive load_incident_state and path-based
+# save_incident_state with ControllerStateSession and the IncidenStateCycle
+# adapter.  Schema: bootstrap/validate/reconcile/project/open follow the
+# established collector.py/watchdog.py pattern.
+
+DISPATCHER_STATE_LOCK_TIMEOUT_SECONDS = 30.0
+
+
+def dispatcher_bootstrap_state() -> dict[str, Any]:
+    """#2723 R5.1: bootstrap an empty incident-state payload."""
+    return {
+        "version": 1,
+        "openIncidents": {},
+        "lastSentAt": {},
+    }
+
+
+def validate_dispatcher_state(payload: Any) -> dict[str, Any]:
+    """#2723 R5.1: validate and sanitise incident-state payload.
+
+    Strips internal ``_controllerState`` key, preserves all incident-state
+    sections as-is (openIncidents, lastSentAt, flapState, transientState,
+    staleAutocloseDigest, staleAutocloseHistory, promotionSafety,
+    dailyHealthFreshness, currentEpisodeId, testLeakDaily).  Fails hard on
+    non-dict root.
+    """
+    if not isinstance(payload, dict):
+        raise ValueError("dispatcher incident state root must be an object")
+    sanitized: dict[str, Any] = {
+        key: value
+        for key, value in payload.items()
+        if key != "_controllerState"
+    }
+    # Ensure the two core sections exist as dicts (callers write into them).
+    if not isinstance(sanitized.setdefault("openIncidents", {}), dict):
+        raise ValueError("dispatcher state openIncidents must be an object")
+    if not isinstance(sanitized.setdefault("lastSentAt", {}), dict):
+        raise ValueError("dispatcher state lastSentAt must be an object")
+    return json.loads(json.dumps(sanitized))
+
+
+def redacted_dispatcher_payload(value: Any) -> Any:
+    """#2723 R5.1: redact dispatcher incident-state payload.
+
+    Dispatcher state carries no per-event credential paths (these live in
+    the queue events, not in aggregated incident state).  Currently a
+    pass-through; inject shared-json redaction if future state sections
+    embed credential-bearing text.
+    """
+    return redact_shared_json_value(value, redact_dispatcher_text)
+
+
+def reconcile_recovered_dispatcher_state(
+    payload: Any,
+) -> tuple[dict[str, Any], str]:
+    """#2723 R5.2: reconcile a recovered incident-state payload.
+
+    Validated-previous-only: accept the recovered payload as-is after
+    validation.  No mutation of membership, counters, clocks, or
+    bookkeeping beyond what validate_dispatcher_state enforces.
+    """
+    return validate_dispatcher_state(payload), "validated_previous_only"
+
+
+def project_dispatcher_state_mode(diagnostic: Any) -> str:
+    """#2723 R5.7: project diagnostic details, stripping schemaVersion.
+
+    schemaVersion is a reserved controller-log record field; the record
+    envelope owns it, the closed diagnostic details must not shadow it.
+    Follows the same pattern as collector.py:1695-1717.
+    """
+    details = metadata_only_controller_details(
+        {
+            key: value
+            for key, value in state_diagnostic_details(diagnostic).items()
+            if key != "schemaVersion"
+        }
     )
-    publication = publish_state_json(
-        target,
-        state,
-        component="dispatcher.incident_state",
-        operation_id=publication_operation,
-        expected=observation.version,
-        generation=generation,
+    failed = getattr(diagnostic, "mode", None) == "recovery_required"
+    log_path = state_root() / "logs" / "dispatcher.jsonl"
+    return write_controller_log(
+        context=CONTROLLER_LOG_CONTEXT,
+        record_kind="controller_state_mode",
+        level="error" if failed else "info",
+        outcome="failed" if failed else "observed",
+        durability_class="diagnostic_best_effort",
+        details=details,
+        append_record=lambda record: append_private_jsonl(log_path, record),
+        persist_health=lambda record: persist_controller_log_health(
+            state_paths(), record
+        ),
+        emit_fallback=lambda _line: emit_state_recovery_fallback(diagnostic),
     )
-    require_advance(publication)
-    return publication
+
+
+def open_dispatcher_state_session():
+    """#2723 R5.1/R5.3: open controller state session for incident state.
+
+    Returns the session (context-manager) or propagates
+    ControllerStateRequired if the state directory/file is unsafe, locked,
+    or corrupt beyond recovery.
+    """
+    anchor = state_root() / "incident-state.json"
+    return open_controller_state(
+        anchor,
+        component="dispatcher-incident",
+        bootstrap=dispatcher_bootstrap_state,
+        validate_payload=validate_dispatcher_state,
+        lock_timeout_seconds=DISPATCHER_STATE_LOCK_TIMEOUT_SECONDS,
+    )
+
+
+class IncidentStateCycle:
+    """#2723 R5.2: session adapter bridging incident-state access to
+    ControllerStateSession.
+
+    Wraps a loaded session with a mutable ``payload`` dict and a
+    ``commit()`` method that sets ``updatedAt``, redacts, persists via
+    ``session.save()``, consumes the capability, and installs the next one.
+
+    Construction is intentionally simple — the payload starts from the
+    session's loaded payload after reconciliation; callers mutate
+    ``.payload`` directly (as they did with the raw dict from
+    ``load_incident_state``), then call ``.commit()`` at each semantic
+    save barrier.
+
+    ``commit()`` returns the ``PublicationResult`` so callers that batch
+    publication results (e.g. ``collapse_storm_group`` with
+    ``require_all_advance``) can still collect it.
+    """
+
+    def __init__(self, session: Any, payload: dict[str, Any], capability: Any):
+        self._session = session
+        self._payload = payload
+        self._capability = capability
+
+    @property
+    def payload(self) -> dict[str, Any]:
+        """The mutable incident-state dict that downstream functions write into."""
+        return self._payload
+
+    def commit(self) -> Any:
+        """Set ``updatedAt``, redact, persist, and advance the capability.
+
+        Returns the ``PublicationResult`` from ``session.save()``.
+        """
+        self._payload["updatedAt"] = now_iso()
+        result = self._session.save(
+            redacted_dispatcher_payload(self._payload),
+            self._capability,
+        )
+        self._capability = result.capability
+        return result
 
 
 def record_daily_health_freshness(event: dict[str, Any], incident_state: dict[str, Any]) -> str | None:
