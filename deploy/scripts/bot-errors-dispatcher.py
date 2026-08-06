@@ -1041,34 +1041,25 @@ class IncidentStateCycle:
 
 
 def load_incident_state(paths: dict[str, Path]) -> dict[str, Any]:
-    """Session-backed compat wrapper restoring the deleted function.
+    """RESTORE-COMPAT compat wrapper — reads state file directly.
 
-    Opens a controller-state session at the incident-state file, loads
-    and validates the payload, and returns the state dict.  Falls back to
-    ``dispatcher_bootstrap_state()`` when the file is missing, corrupt,
-    or the session reports ``recovery_required``.
+    Uses ``validate_dispatcher_state`` (the session's validator) to
+    sanitise the loaded payload, and falls back to bootstrap on missing
+    or corrupt files.  Avoids the session lock overhead so callers that
+    load→mutate→save in sequence don't contending on the same file lock.
 
-    Uses ``paths["incident_state"]`` (the canonical ``state_paths()``
-    path) rather than a hardcoded ``state_root() / "incident-state.json"``
-    — preventing silent-rename drift of the same class as Task-4's
-    watchdog-state.json vs heartbeat-watchdog-state.json trap.
+    Uses ``paths["incident_state"]`` (canonical ``state_paths()`` path).
     """
     incident_path = paths.get("incident_state")
     if incident_path is None or not incident_path.exists():
         return dispatcher_bootstrap_state()
     try:
-        with open_controller_state(
-            incident_path,
-            component="dispatcher-incident",
-            bootstrap=dispatcher_bootstrap_state,
-            validate_payload=validate_dispatcher_state,
-            lock_timeout_seconds=DISPATCHER_STATE_LOCK_TIMEOUT_SECONDS,
-        ) as session:
-            load_result = session.load()
-            if load_result.mode == "recovery_required":
-                return dispatcher_bootstrap_state()
-            return load_result.payload
-    except ControllerStateRequired:
+        loaded = read_json(incident_path)
+    except Exception:  # noqa: BLE001 - never fail on corrupt state
+        return dispatcher_bootstrap_state()
+    try:
+        return validate_dispatcher_state(loaded)
+    except (ValueError, TypeError):
         return dispatcher_bootstrap_state()
 
 
@@ -1092,35 +1083,40 @@ class _CompatPublication:
 def save_incident_state(
     paths: dict[str, Path],
     state: dict[str, Any],
-) -> _CompatPublication:
-    """Session-backed compat wrapper restoring the deleted function.
+) -> PublicationResult:
+    """RESTORE-COMPAT compat wrapper — uses ``publish_state_json`` directly.
 
-    Opens a controller-state session, loads to obtain the write
-    capability, sets ``updatedAt``, redacts via
-    ``redacted_dispatcher_payload``, persists via ``session.save()``,
+    Sets ``updatedAt``, redacts via ``redacted_dispatcher_payload``,
+    persists via ``publish_state_json`` (the original mechanism),
     and returns a ``PublicationResult`` compatible with
     ``require_all_advance``.
 
-    Uses the canonical ``paths["incident_state"]`` path.
+    Avoids the session lock overhead so callers that load→mutate→save
+    in sequence don't contend on the same file lock.
     """
     incident_path = paths.get("incident_state")
     if incident_path is None:
         raise ValueError("save_incident_state: paths missing incident_state key")
-    state.setdefault("updatedAt", now_iso())
-    with open_controller_state(
-        incident_path,
-        component="dispatcher-incident",
-        bootstrap=dispatcher_bootstrap_state,
-        validate_payload=validate_dispatcher_state,
-        lock_timeout_seconds=DISPATCHER_STATE_LOCK_TIMEOUT_SECONDS,
-    ) as session:
-        load_result = session.load()
-        state["updatedAt"] = now_iso()
-        commit = session.save(
-            redacted_dispatcher_payload(state),
-            load_result.capability,
-        )
-        return _CompatPublication(commit)
+    state["updatedAt"] = now_iso()
+    target = _durable_target(incident_path)
+    observation = observe_json(target)
+    generation = (observation.version.generation or 0) + 1
+    publication_operation = operation_id(
+        target,
+        redacted_dispatcher_payload(state),
+        component="dispatcher.incident_state",
+        predecessor=observation.version,
+    )
+    publication = publish_state_json(
+        target,
+        redacted_dispatcher_payload(state),
+        component="dispatcher.incident_state",
+        operation_id=publication_operation,
+        expected=observation.version,
+        generation=generation,
+    )
+    require_advance(publication)
+    return publication
 
 
 def record_daily_health_freshness(event: dict[str, Any], incident_state: dict[str, Any]) -> str | None:
@@ -4430,9 +4426,6 @@ def collapse_storm_group(
                 prepared.append((path, target, event))
             if state_changed:
                 if incident:
-                    incident.commit()
-                else:
-                    if incident:
                     incident.commit()
                 else:
                     publications.append(save_incident_state(paths, incident_state))
