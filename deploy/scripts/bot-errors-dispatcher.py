@@ -2648,6 +2648,20 @@ def queue_dead_letter_meta_alert(paths: dict[str, Path], now: int) -> int:
         return 0
     dl_files = [f for f in dl_dir.glob("*.json") if safe_is_regular_entry(f)]
     if not dl_files:
+        # #2421: queue empty — emit idempotent clear for the standing incident.
+        clear_event = dead_letter_meta_event(paths, 0, "")
+        clear_event["eventType"] = "clear"
+        clear_event["severity"] = "info"
+        clear_path = outbox_path_for_event(clear_event, paths)
+        clear_target = _durable_target(clear_path)
+        empty_observation = JsonVersion(False, None, None, None)
+        clear_publication = publish_event_json(
+            clear_target,
+            clear_event,
+            component="dispatcher.dead_letter_meta_clear",
+            operation_id=operation_id(clear_target, clear_event, component="dispatcher.dead_letter_meta_clear", predecessor=empty_observation),
+        )
+        require_advance(clear_publication)
         return 0
 
     state = read_meta_state(paths)

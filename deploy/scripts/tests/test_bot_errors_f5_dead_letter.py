@@ -471,7 +471,9 @@ class TestDeadLetterMetaAlert:
             count = mod.queue_dead_letter_meta_alert(paths, int(time.time()))
 
         assert count == 0, f"Expected no meta-alert for empty dead-letter dir, got {count}"
-        assert self._queued_meta_alerts(paths) == []
+        cleared = self._queued_meta_alerts(paths)
+        assert len(cleared) == 1, f"Expected one clear event, got {len(cleared)}"
+        assert cleared[0]["eventType"] == "clear"
 
     def test_meta_alert_source_not_in_test_leak_patterns(self):
         mod = _load_module()
