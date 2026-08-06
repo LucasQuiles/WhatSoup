@@ -2,7 +2,10 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { SIGNAL } from '../../lib/signals.ts';
+import { createChildLogger } from '../../logger.ts';
 import { bfsFromRoot, buildChildrenIndex, parsePsLines } from './process-tree-parse.ts';
+
+const log = createChildLogger('process-tree');
 
 export interface ProcessTreeTarget {
   readonly pid?: number;
@@ -579,7 +582,11 @@ export function killSessionTree(
       if (addedCount > 0) {
         try {
           options.onCgroupDivergence?.(divergence);
-        } catch { /* best-effort telemetry; never affects termination */ }
+        } catch (err) {
+          // Best-effort telemetry: a throwing sink must never affect
+          // termination, but its failure is surfaced rather than swallowed.
+          log.warn({ err }, 'cgroup divergence telemetry sink threw');
+        }
       }
     }
   } catch (error) {
