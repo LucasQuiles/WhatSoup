@@ -2217,6 +2217,8 @@ def reconcile(
     persists through ``session.save()`` instead of the old ``save_state()``.
     """
     open_incidents: dict[str, Any] = state.setdefault("open", {})
+    state.setdefault("pendingStale", {})
+    state.setdefault("recentlyRecovered", {})
     written: list[Path] = []
     current = now_epoch()
     for key, evidence in sorted(problems.items()):

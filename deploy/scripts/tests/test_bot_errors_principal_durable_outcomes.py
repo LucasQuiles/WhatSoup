@@ -118,23 +118,33 @@ def test_watchdog_state_rejects_unproven_publication(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """#2723 R4.2: session-backed reconcile must propagate write failures.
+
+    Migrated from ``save_state(publish_state_json=unproven)`` to the
+    session path. A read-only state file (OSError on write) must raise
+    ControllerStateRequired (publication_ambiguous), which is equivalent
+    to the old DurableWriteError semantic — an unproven durable write
+    stops the cycle.
+    """
     monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(tmp_path))
     module = _load("bot-errors-heartbeat-watchdog.py")
-    monkeypatch.setattr(
-        module,
-        "publish_state_json",
-        lambda *_args, **_kwargs: _unproven(
-            "heartbeat_watchdog.state",
-            generation=1,
-        ),
-        raising=False,
-    )
 
-    with pytest.raises(RuntimeError) as raised:
-        module.save_state({"version": 1, "open": {}})
+    # Write a minimal bootstrap state file, then make the directory
+    # read-only so the session's atomic write (temp+rename) triggers an
+    # OSError.
+    state_file = module.watchdog_state_path()
+    state_file.write_text(json.dumps({"version": 1, "open": {}}), encoding="utf-8")
+    state_file.parent.chmod(0o555)  # read-only + execute for dir access
 
-    assert type(raised.value).__name__ == "DurableWriteError"
-    assert not module.watchdog_state_path().exists()
+    with pytest.raises(module.ControllerStateRequired) as raised:
+        with module.open_watchdog_state_session() as session:
+            load_result = session.load()
+            state = load_result.payload
+            state.setdefault("pendingStale", {})
+            state.setdefault("recentlyRecovered", {})
+            session.save(state, load_result.capability)
+
+    assert raised.value.diagnostic.mode == "recovery_required"
 
 
 def test_q_loop_state_rejects_unproven_publication(
