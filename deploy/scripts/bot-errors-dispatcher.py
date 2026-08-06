@@ -5899,6 +5899,7 @@ def run_once(max_events: int) -> dict[str, Any]:
         record_state(
             paths,
             lastRunAt=now_iso(),
+            cycleCompletedAt=now_iso(),
             processed=processed,
             sent=sent,
             suppressed=suppressed,
