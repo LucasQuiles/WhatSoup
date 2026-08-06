@@ -28,6 +28,7 @@ interface Fixture {
 interface PlanReceipt {
   schemaVersion: number;
   profile: string;
+  nodePolicy: string;
   platform: string;
   manager: string;
   mode: string;
@@ -61,7 +62,7 @@ function fixture(platform: 'Darwin' | 'Linux' = 'Darwin'): Fixture {
   executable(join(bin, 'sysctl'), 'printf "%s\\n" "${FAKE_ARM64_CAPABLE:-1}"');
   executable(join(bin, 'node'), [
     'case "${1:-}" in',
-    "  -v|--version) printf '%s\\n' 'v24.15.0' ;;",
+    '  -v|--version) printf "v%s\\n" "${FAKE_NODE_VERSION:-24.15.0}" ;;',
     '  -p) printf "%s\\n" "${FAKE_NODE_ARCH:-arm64}" ;;',
     'esac',
   ].join('\n'));
@@ -155,6 +156,7 @@ describe('explicit host dependency installer', () => {
     expect(receipt(result)).toMatchObject({
       schemaVersion: 1,
       profile: 'quality',
+      nodePolicy: 'exact',
       platform: 'darwin',
       manager: 'brew',
       mode: 'plan',
@@ -240,6 +242,24 @@ describe('explicit host dependency installer', () => {
       'python -m pip install pytest pytest-cov hypothesis ruff==0.15.10',
     ]);
     expect(statSync(join(fx.home, 'quality-venv')).mode & 0o777).toBe(0o700);
+  });
+
+  it('allows the compatibility lane to install and prove a supported Node 25 runtime', () => {
+    const fx = fixture();
+    fx.env.FAKE_NODE_VERSION = '25.4.0';
+    const result = runInstaller(fx, [
+      '--profile',
+      'quality',
+      '--node-policy',
+      'compatibility',
+      '--manager',
+      'brew',
+      '--apply',
+      '--yes',
+    ]);
+
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.stderr).toContain('"outcome":"compatibility_only"');
   });
 
   it('fails when the post-install doctor does not pass', () => {

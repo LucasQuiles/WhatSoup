@@ -1303,9 +1303,9 @@ describe('quality workflow composition', () => {
     expect(qualityWorkflow).toContain("WHATSOUP_REQUIRE_TEST_INTEGRITY: '1'");
   });
 
-  it('sets up Python 3.12 with pytest-cov before Python-backed gates run', () => {
+  it('uses the shared quality installer before Python-backed gates run', () => {
     const setupPythonIndex = qualityWorkflow.indexOf('name: Setup Python 3.12');
-    const pythonDepsIndex = qualityWorkflow.indexOf('name: Install Python and Linux quality prerequisites');
+    const pythonDepsIndex = qualityWorkflow.indexOf('name: Host dependency profile (strict)');
     const testIntegrityIndex = qualityWorkflow.indexOf('name: Test integrity baseline check');
 
     expect(setupPythonIndex).toBeGreaterThanOrEqual(0);
@@ -1313,9 +1313,9 @@ describe('quality workflow composition', () => {
     expect(testIntegrityIndex).toBeGreaterThan(pythonDepsIndex);
     expect(qualityWorkflow).toMatch(/uses: actions\/setup-python@[0-9a-f]{40}/);
     expect(qualityWorkflow).toContain("python-version: '3.12'");
-    expect(qualityWorkflow).toContain('python3 -m pip install --user pytest pytest-cov hypothesis ruff==0.15.10');
-    expect(qualityWorkflow.match(/sudo apt-get update/g)).toHaveLength(2);
-    expect(qualityWorkflow).toContain('sudo apt-get install -y shellcheck ripgrep');
+    expect(qualityWorkflow).toContain('install-host-dependencies.sh --profile quality --apply --yes --json');
+    expect(qualityWorkflow).not.toContain('Install Python and Linux quality prerequisites');
+    expect(qualityWorkflow).not.toContain('sudo apt-get install -y shellcheck ripgrep');
   });
 
   it('preserves exact required contexts while isolating Node 25 compatibility work', () => {
@@ -1324,6 +1324,7 @@ describe('quality workflow composition', () => {
     const compatibility = qualityWorkflow.slice(compatibilityStart, nextJob);
 
     expect(qualityWorkflow).toContain('name: quality (24.x)');
+    expect(qualityWorkflow).toContain("node-version-file: '.nvmrc'");
     expect(compatibility).toContain('name: quality (25.x)');
     expect(qualityWorkflow).not.toContain('matrix:');
     expect(compatibility).toContain("node-version: '25.x'");
@@ -1335,6 +1336,16 @@ describe('quality workflow composition', () => {
     expect(compatibility).not.toContain('Setup Python');
     expect(compatibility).not.toContain('test-integrity');
     expect(compatibility).not.toContain('ci-disk-reclaim');
+  });
+
+  it('requires strict and compatibility doctor receipts in the protected contexts', () => {
+    expect(qualityWorkflow.match(/name: Host dependency profile \(strict\)/g)).toHaveLength(1);
+    expect(qualityWorkflow.match(/name: Validate strict doctor receipt/g)).toHaveLength(1);
+    expect(qualityWorkflow).toContain('set -o pipefail');
+    expect(qualityWorkflow).toContain('whatsoup-doctor-quality.json');
+    expect(qualityWorkflow.match(/name: Host dependency profile \(compatibility-only\)/g)).toHaveLength(1);
+    expect(qualityWorkflow).toContain('--node-policy compatibility --json');
+    expect(qualityWorkflow).toContain('whatsoup-doctor-compatibility.json');
   });
 
   it('runs measured disk enforcement only in the Node 24 authority job', () => {

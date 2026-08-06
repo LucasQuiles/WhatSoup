@@ -10,11 +10,13 @@ export WHATSOUP_CAPABILITY_ROOT
 
 usage() {
   cat >&2 <<'USAGE'
-Usage: deploy/scripts/install-host-dependencies.sh --profile <runtime|quality|release> [--manager <brew|apt|pacman>] [--apply] [--yes] [--json]
+Usage: deploy/scripts/install-host-dependencies.sh --profile <runtime|quality|release> [--node-policy <exact|compatibility>] [--manager <brew|apt|pacman>] [--apply] [--yes] [--json]
 USAGE
 }
 
 profile=""
+node_policy=exact
+seen_node_policy=0
 manager=""
 apply=0
 yes=0
@@ -30,6 +32,12 @@ while [ "$#" -gt 0 ]; do
     --manager)
       [ -z "$manager" ] && [ "$#" -ge 2 ] || { usage; exit 2; }
       manager="$2"
+      shift 2
+      ;;
+    --node-policy)
+      [ "$seen_node_policy" -eq 0 ] && [ "$#" -ge 2 ] || { usage; exit 2; }
+      node_policy="$2"
+      seen_node_policy=1
       shift 2
       ;;
     --apply)
@@ -66,6 +74,10 @@ case "$manager" in
   ""|brew|apt|pacman) ;;
   *) usage; exit 2 ;;
 esac
+case "$node_policy" in
+  exact|compatibility) ;;
+  *) usage; exit 2 ;;
+esac
 
 platform="$(whatsoup_normalize_platform "$(uname -s 2>/dev/null)" 2>/dev/null || true)"
 [ -n "$platform" ] || { echo "host dependency installer: unsupported platform" >&2; exit 2; }
@@ -91,7 +103,7 @@ case "$platform:$manager" in
     ;;
 esac
 
-packages="$(whatsoup_packages_for_manager "$profile" "$platform" "$manager")" || {
+packages="$(whatsoup_packages_for_manager "$profile" "$platform" "$manager" "$node_policy")" || {
   echo "host dependency installer: could not build package plan" >&2
   exit 2
 }
@@ -111,15 +123,16 @@ else
 fi
 
 if [ "$json" -eq 1 ]; then
-  printf '{"schemaVersion":1,"profile":"%s","platform":"%s","manager":"%s","mode":"%s","packages":[%s]}\n' \
+  printf '{"schemaVersion":1,"profile":"%s","nodePolicy":"%s","platform":"%s","manager":"%s","mode":"%s","packages":[%s]}\n' \
     "$(whatsoup_json_escape "$profile")" \
+    "$(whatsoup_json_escape "$node_policy")" \
     "$(whatsoup_json_escape "$platform")" \
     "$(whatsoup_json_escape "$manager")" \
     "$mode" \
     "$json_packages"
 else
-  printf 'WhatSoup host dependency plan: profile=%s platform=%s manager=%s mode=%s\n' \
-    "$profile" "$platform" "$manager" "$mode"
+  printf 'WhatSoup host dependency plan: profile=%s node-policy=%s platform=%s manager=%s mode=%s\n' \
+    "$profile" "$node_policy" "$platform" "$manager" "$mode"
   for package_name in $packages; do
     printf '  %s\n' "$package_name"
   done
@@ -186,7 +199,7 @@ fi
 
 if ! PATH="$(whatsoup_quality_venv_root)/bin:$PATH" \
   "$WHATSOUP_CAPABILITY_ROOT/deploy/scripts/whatsoup-host-doctor.sh" \
-  --profile "$profile" --json >&2; then
+  --profile "$profile" --node-policy "$node_policy" --json >&2; then
   echo "host dependency installer: post-install doctor did not pass" >&2
   exit 1
 fi

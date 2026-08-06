@@ -932,6 +932,10 @@ function qualityCiLanePartitionFailures(text: string): string[] {
   const { root, failures: parseFailures } = parseWorkflow(text, 'quality workflow');
   if (!root) return parseFailures;
   const failures: string[] = [];
+  const triggers = asRecord(root.on);
+  if (!triggers || !hasOwn(triggers, 'merge_group')) {
+    failures.push('quality workflow must declare the merge_group trigger');
+  }
   const jobs = asRecord(root.jobs);
   const quality = asRecord(jobs?.quality);
   const compatibility = asRecord(jobs?.compatibility);
@@ -976,9 +980,10 @@ function qualityCiLanePartitionFailures(text: string): string[] {
   if (
     setup24.length !== 1
     || setup24[0]?.uses !== 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020'
-    || !collectStringValues(setup24[0]).includes('24.x')
+    || asRecord(setup24[0]?.with)?.['node-version-file'] !== '.nvmrc'
+    || hasOwn(asRecord(setup24[0]?.with) ?? {}, 'node-version')
   ) {
-    failures.push('quality (24.x) must contain one Setup Node 24 step pinned to 24.x');
+    failures.push('quality (24.x) Setup Node 24 must use node-version-file: .nvmrc');
   }
   if (
     setup25.length !== 1
@@ -986,6 +991,56 @@ function qualityCiLanePartitionFailures(text: string): string[] {
     || !collectStringValues(setup25[0]).includes('25.x')
   ) {
     failures.push('quality (25.x) must contain one Setup Node 25 step pinned to 25.x');
+  }
+
+  const requireNamedStep = (
+    steps: Record<string, unknown>[],
+    name: string,
+    lane: string,
+    requiredRunFragments: string[],
+  ): void => {
+    const matches = steps.filter((step) => step.name === name);
+    if (matches.length !== 1) {
+      failures.push(`${lane} must contain exactly one ${name} step`);
+      return;
+    }
+    const step = matches[0]!;
+    if (hasOwn(step, 'if') || hasOwn(step, 'continue-on-error')) {
+      failures.push(`${lane} ${name} step must be unconditional and blocking`);
+    }
+    const run = typeof step.run === 'string' ? step.run : '';
+    for (const fragment of requiredRunFragments) {
+      if (!run.includes(fragment)) failures.push(`${lane} ${name} step is missing ${fragment}`);
+    }
+  };
+
+  requireNamedStep(authority, 'Host dependency profile (strict)', 'quality (24.x)', [
+    'bash deploy/scripts/install-host-dependencies.sh --profile quality --apply --yes --json',
+    '$RUNNER_TEMP/whatsoup-doctor-quality.json',
+    '>> "$GITHUB_PATH"',
+  ]);
+  requireNamedStep(authority, 'Validate strict doctor receipt', 'quality (24.x)', [
+    'set -o pipefail',
+    'bash deploy/scripts/whatsoup-host-doctor.sh --profile quality --json',
+    'tee "$RUNNER_TEMP/whatsoup-doctor-quality.json"',
+    'r.outcome !== "pass"',
+  ]);
+  requireNamedStep(compat, 'Install compatibility host dependencies', 'quality (25.x)', [
+    'bash deploy/scripts/install-host-dependencies.sh --profile quality --node-policy compatibility --apply --yes --json',
+    '>> "$GITHUB_PATH"',
+  ]);
+  requireNamedStep(compat, 'Host dependency profile (compatibility-only)', 'quality (25.x)', [
+    'set -o pipefail',
+    'bash deploy/scripts/whatsoup-host-doctor.sh --profile quality --node-policy compatibility --json',
+    'tee "$RUNNER_TEMP/whatsoup-doctor-compatibility.json"',
+    'r.outcome !== "compatibility_only"',
+  ]);
+
+  const macos = asRecord(jobs?.['bot-errors-health-macos']);
+  const macosSteps = Array.isArray(macos?.steps) ? macos.steps.map(asRecord).filter(Boolean) as Record<string, unknown>[] : [];
+  const macosPortableRun = 'npm test -- tests/helpers/python-interpreter.test.ts tests/scripts/bot-errors-python-atomic-write-guard.test.ts tests/scripts/bot-errors-release-proof-installer.test.ts tests/scripts/bot-errors-release-proof-run.test.ts --pool=forks --maxWorkers=1';
+  if (exactRunCount(macosSteps, macosPortableRun) !== 1) {
+    failures.push('bot-errors-health-macos must run the portable Python and release-proof prerequisite suites exactly once');
   }
   for (const run of [
     'npm run coverage:check -- --pool=forks',

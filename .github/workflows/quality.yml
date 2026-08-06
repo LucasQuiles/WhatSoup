@@ -51,7 +51,7 @@ jobs:
       - name: Setup Node 24
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
         with:
-          node-version: '24.x'
+          node-version-file: '.nvmrc'
           cache: npm
           # Include the console sub-package lockfile in the cache key so the warm
           # npm cache also covers `npm --prefix console ci` (the default key hashes
@@ -64,6 +64,17 @@ jobs:
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         with:
           python-version: '3.12'
+
+      - name: Host dependency profile (strict)
+        run: |
+          bash deploy/scripts/install-host-dependencies.sh --profile quality --apply --yes --json > "$RUNNER_TEMP/whatsoup-doctor-quality.json"
+          echo "$HOME/.local/share/whatsoup/quality-venv/bin" >> "$GITHUB_PATH"
+
+      - name: Validate strict doctor receipt
+        run: |
+          set -o pipefail
+          bash deploy/scripts/whatsoup-host-doctor.sh --profile quality --json | tee "$RUNNER_TEMP/whatsoup-doctor-quality.json"
+          node -e 'const fs=require("fs"); const r=JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP + "/whatsoup-doctor-quality.json", "utf8")); if (r.profile !== "quality" || r.nodePolicy !== "exact" || r.outcome !== "pass") process.exit(1)'
 
       - name: Install dependencies
         run: npm ci
@@ -91,17 +102,6 @@ jobs:
           fi
           npm run guard:semantic-quality -- --mode shadow --base "$base" --receipt "$SEMANTIC_RECEIPT"
           node -e 'const fs=require("fs"); const r=JSON.parse(fs.readFileSync(process.env.SEMANTIC_RECEIPT,"utf8")); process.stdout.write(`### Semantic quality (shadow)\n\nDecision: **${r.decision}**\n\nFindings: ${r.findings.length}\n`)' >> "$GITHUB_STEP_SUMMARY"
-
-      # qSesh Python lane (tools/qsesh): pinned Ruff + ShellCheck, then the
-      # lint/test package scripts. Requires the Setup Python 3.12 step above.
-      # ripgrep is also a hard requirement of the console design-regression gate.
-      # zsh runs the rendered-watchdog whole-script suites in the BOT ERRORS
-      # full-suite step (otherwise skipif-skipped).
-      - name: Install Python and Linux quality prerequisites
-        run: |
-          python3 -m pip install --user pytest pytest-cov hypothesis ruff==0.15.10
-          sudo apt-get update
-          sudo apt-get install -y shellcheck ripgrep zsh
 
       - name: qSesh lint
         run: npm run lint:qsesh
@@ -460,16 +460,22 @@ jobs:
             package-lock.json
             console/package-lock.json
 
+      - name: Install compatibility host dependencies
+        run: |
+          bash deploy/scripts/install-host-dependencies.sh --profile quality --node-policy compatibility --apply --yes --json > "$RUNNER_TEMP/whatsoup-host-install-compatibility.json"
+          echo "$HOME/.local/share/whatsoup/quality-venv/bin" >> "$GITHUB_PATH"
+
+      - name: Host dependency profile (compatibility-only)
+        run: |
+          set -o pipefail
+          bash deploy/scripts/whatsoup-host-doctor.sh --profile quality --node-policy compatibility --json | tee "$RUNNER_TEMP/whatsoup-doctor-compatibility.json"
+          node -e 'const fs=require("fs"); const r=JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP + "/whatsoup-doctor-compatibility.json", "utf8")); if (r.profile !== "quality" || r.nodePolicy !== "compatibility" || r.outcome !== "compatibility_only") process.exit(1)'
+
       - name: Install dependencies
         run: npm ci
 
       - name: Install console dependencies
         run: npm --prefix console ci
-
-      - name: Install compatibility test prerequisites
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ripgrep
 
       - name: Full compatibility test suite
         run: npm test -- --pool=forks
@@ -500,6 +506,9 @@ jobs:
 
       - name: BOT ERRORS macOS health hermeticity
         run: npm run test:bot-errors-health:hermeticity
+
+      - name: Portable Python and release-proof prerequisites (real macOS)
+        run: npm test -- tests/helpers/python-interpreter.test.ts tests/scripts/bot-errors-python-atomic-write-guard.test.ts tests/scripts/bot-errors-release-proof-installer.test.ts tests/scripts/bot-errors-release-proof-run.test.ts --pool=forks --maxWorkers=1
 
       # The credential-probe boundedness suite runs on BOTH legs on purpose. The
       # Linux leg exercises it with timeout(1) present and with PATH stripped to
