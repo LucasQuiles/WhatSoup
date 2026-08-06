@@ -47,10 +47,16 @@ function unboundedProbes(file: string): string[] {
     const code = line.replace(/^\s*#.*$/, '');
     const match = COMMAND_POSITION.exec(code);
     if (!match) return;
-    // A match sitting inside a double-quoted string is help text, not a call.
+    // A match sitting inside a quoted string is data/help text, not a call.
     // Continuation lines of a multi-line message read as an odd quote count.
-    const quotesBefore = (code.slice(0, match.index).match(/"/g) ?? []).length;
-    if (quotesBefore % 2 === 1 || code.trimStart().startsWith('"')) return;
+    const prefix = code.slice(0, match.index);
+    const doubleQuotesBefore = (prefix.match(/"/g) ?? []).length;
+    const singleQuotesBefore = (prefix.match(/'/g) ?? []).length;
+    if (
+      doubleQuotesBefore % 2 === 1
+      || singleQuotesBefore % 2 === 1
+      || /^["']/.test(code.trimStart())
+    ) return;
     // `command -v security` only asks whether the binary exists; it cannot block.
     if (/command\s+-v\s+(security|secret-tool)\b/.test(code)) return;
     if (code.includes('whatsoup_run_bounded')) return;
@@ -81,6 +87,21 @@ function argvSecretLeaks(file: string): string[] {
 }
 
 describe('credential-store probes are bounded on every platform', () => {
+  it('ignores credential command names inside single-quoted data records', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'credential-probe-scan-'));
+    const fixture = path.join(tmpDir, 'records.sh');
+    fs.writeFileSync(
+      fixture,
+      "printf 'credential_store|optional|security|structural||||security is supplied by macOS.\\n'\n",
+    );
+
+    try {
+      expect(unboundedProbes(fixture)).toEqual([]);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it('no tracked shell script invokes security/secret-tool unbounded', () => {
     const findings = trackedShellFiles()
       .filter((f) => f !== BOUNDED_LIB)
