@@ -1410,6 +1410,11 @@ def controller_log_fallback(line: str) -> None:
     print(line, file=sys.stderr, flush=True)
 
 
+def _deadman_delivery_level(delivery_status: str) -> str:
+    """Return 'warning' for failed/rejected_unconfirmed deliveries, 'info' otherwise (#2425)."""
+    return "warning" if delivery_status in ("failed", "rejected_unconfirmed") else "info"
+
+
 def append_deadman_log(
     payload: dict[str, Any],
     *,
@@ -6114,6 +6119,20 @@ def tree_provenance_inventory(profile: dict[str, Any]) -> list[str]:
         return [f"WARN tree_provenance: inventory_error {str(exc)[:160]}"]
 
 
+def record_daily_health_receipt(event_path: Path, severity: str) -> None:
+    """Write a durable receipt after queuing a daily-health event."""
+    root = state_root()
+    receipt_path = root / "daily-health-receipt.json"
+    receipt = {
+        "eventId": event_path.stem,
+        "severity": severity,
+        "emittedAt": now_iso(),
+        "eventPath": str(event_path),
+    }
+    ensure_private_dir(root)
+    receipt_path.write_text(json.dumps(receipt, indent=2), encoding="utf-8")
+
+
 def daily() -> int:
     profile = load_health_profile()
     tool_lines, missing_required_tools = tool_inventory(profile)
@@ -6186,6 +6205,7 @@ def daily() -> int:
         summary = "BOT ERRORS daily health retained source-update shadow observation"
         event_type = "observation"
     path = outbox_event(summary, evidence, severity=severity, source="daily-health", event_type=event_type)
+    record_daily_health_receipt(path, severity)
     print(path)
     emit_per_instance_health_failures(failures)
     source_update_signal = enforced_source_update_signal(lines)
@@ -6300,6 +6320,7 @@ def deadman(max_state_age: int, restart_grace: int, cooldown_seconds: int) -> in
             record["resolvedAt"] = epoch_to_iso(record["resolvedAtEpoch"])
             record["lastRecoveryStatus"] = outcome
             recovery_outcomes.append(dict(outcome))
+            deadman_state["lastRecoveryResult"] = "success" if outcome.get("direct_whatsapp") == "sent" else "failed"
         if open_incidents:
             save_deadman_state(deadman_state)
             for outcome in recovery_outcomes:
@@ -6395,8 +6416,12 @@ def deadman(max_state_age: int, restart_grace: int, cooldown_seconds: int) -> in
     record["lastSendStatus"] = outcome
     record["sentCount"] = (int_or_none(record.get("sentCount")) or 0) + 1
     record["suppressed"] = 0
+    if outcome.get("direct_whatsapp") in ("failed", "rejected_unconfirmed"):
+        deadman_state["lastRejectedCount"] = (int(deadman_state.get("lastRejectedCount") or 0)) + 1
     save_deadman_state(deadman_state)
-    append_deadman_log(outcome)
+    delivery_status = outcome.get("direct_whatsapp", "")
+    log_level = "warning" if delivery_status in ("failed", "rejected_unconfirmed") else "info"
+    append_deadman_log(outcome, level=log_level)
     print(text)
     return 2
 
