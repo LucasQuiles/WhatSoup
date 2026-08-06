@@ -193,8 +193,6 @@ def test_capacity_new_incident_event_is_warning_not_critical(tmp_path, monkeypat
     monkeypatch.setenv("BOT_ERRORS_OUTBOX_DIR", str(outbox))
 
     state_file = state / "q-loop" / "state.json"
-    # Bootstrap the q-loop state file so the session load succeeds.
-    _write_private_json(state_file, {"version": 1, "open": {}})
     written = _reconcile_with_session(
         mod,
         {CAPACITY_KEY: "q-loop at usage-window capacity; self-recovers when window resets reason=session_limit"},
@@ -239,8 +237,6 @@ def test_capacity_incident_never_escalates_to_critical(tmp_path, monkeypatch):
     )
 
     state_file = state / "q-loop" / "state.json"
-    # Bootstrap the q-loop state file so the session load succeeds.
-    _write_private_json(state_file, {"version": 1, "open": {}})
     written = _reconcile_with_session(
         mod,
         {CAPACITY_KEY: "q-loop at usage-window capacity; self-recovers when window resets reason=session_limit"},
@@ -289,8 +285,6 @@ def test_genuine_supervisor_new_incident_is_critical(tmp_path, monkeypatch):
     monkeypatch.setenv("BOT_ERRORS_OUTBOX_DIR", str(outbox))
 
     state_file = state / "q-loop" / "state.json"
-    # Bootstrap the q-loop state file so the session load succeeds.
-    _write_private_json(state_file, {"version": 1, "open": {}})
     written = _reconcile_with_session(
         mod,
         {SUPERVISOR_KEY: "q-loop supervisor unavailable: phase=q_unavailable_socket_timeout"},
