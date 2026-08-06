@@ -481,7 +481,9 @@ export function notifyModelAdvisories(
     .join('|');
 
   if (advisories.length === 0) {
-    clearAlertSourceChecked(instance, ALERT_SOURCE);
+    if (lastNotifiedKey !== null && lastNotifiedKey !== '') {
+      clearAlertSourceChecked(instance, ALERT_SOURCE);
+    }
     lastNotifiedKey = '';
     if (options.logAllCurrent !== false) {
       log.info({}, 'model currency check: all configured models current');
@@ -509,7 +511,9 @@ export function notifyModelLiveScanStatus(instance: string, liveScan: LiveModelS
   cachedLiveScan = liveScan;
 
   if (liveScan.degradedVendors.length === 0) {
-    clearAlertSourceChecked(instance, LIVE_SCAN_ALERT_SOURCE);
+    if (lastLiveScanFailureKey !== null && lastLiveScanFailureKey !== '') {
+      clearAlertSourceChecked(instance, LIVE_SCAN_ALERT_SOURCE);
+    }
     lastLiveScanFailureKey = '';
     return;
   }
