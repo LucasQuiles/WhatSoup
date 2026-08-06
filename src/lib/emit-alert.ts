@@ -76,7 +76,7 @@ interface LegacyAlertResult {
   error?: string;
 }
 
-export type AlertEmissionStatus = 'durably_queued' | 'legacy_accepted_unconfirmed' | 'failed';
+export type AlertEmissionStatus = 'durably_queued' | 'captured' | 'legacy_accepted_unconfirmed' | 'failed';
 
 export interface AlertEmissionResult {
   ok: boolean;
@@ -195,6 +195,16 @@ function alertSinkPath(): string | null {
   return raw && raw.length > 0 ? raw : null;
 }
 
+// #2510: warn when capture-only sink is configured outside test/verifier context
+if (!process.env['VITEST'] && alertSinkPath()) {
+  log.warn(
+    { alertSink: alertSinkPath() },
+    '#2510: WHATSOUP_ALERT_SINK is set outside test/verifier — '
+    + 'alert emissions captured to file, will NOT reach operators. '
+    + 'Remove the env var for production alerting.',
+  );
+}
+
 function captureToAlertSink(
   sink: string,
   input: {
@@ -241,7 +251,7 @@ function captureToAlertSink(
     log.warn({ instance: input.instance, source: input.source, err: reason }, 'alert sink capture failed');
     return { ok: false, channel: 'sink', status: 'failed', outboxError: reason };
   }
-  return { ok: true, channel: 'sink', status: 'durably_queued' };
+  return { ok: true, channel: 'sink', status: 'captured' };
 }
 
 /**
@@ -369,7 +379,11 @@ function clearAlertSourceDurablyQueued(
   }
 }
 
-export function observeAlertEmission(result: AlertEmissionResult, context: AlertEmissionContext): boolean {
+export function observeAlertEmission(
+  result: AlertEmissionResult,
+  context: AlertEmissionContext,
+  strict?: boolean,
+): boolean {
   if (!result.ok) {
     log.warn(
       {
@@ -381,6 +395,20 @@ export function observeAlertEmission(result: AlertEmissionResult, context: Alert
         legacyError: result.legacy?.error,
       },
       'bot-errors alert emission failed in every channel',
+    );
+    return false;
+  }
+
+  // #2510: when strict, treat `captured` (capture-only sink, not durably queued)
+  // as a failure so callers that need durable delivery do not proceed silently.
+  if (strict && result.status === 'captured') {
+    log.warn(
+      {
+        ...context,
+        channel: result.channel,
+        status: result.status,
+      },
+      'bot-errors alert captured to file but not durably queued; strict caller treating as failure',
     );
     return false;
   }
@@ -407,10 +435,12 @@ export function emitAlertChecked(
   evidence: string,
   severity: BotErrorsSeverity = 'critical',
   criticalAsset?: BotErrorsCriticalAssetDiagnostic,
+  strict?: boolean,
 ): boolean {
   return observeAlertEmission(
     emitAlert(instance, source, summary, evidence, severity, criticalAsset),
     { instance, source, operation: 'alert' },
+    strict,
   );
 }
 
