@@ -68,7 +68,7 @@ type AdmissionResult =
 
 interface DisplacementIncidentResult {
   accepted: boolean;
-  status: 'durably_queued' | 'legacy_accepted_unconfirmed' | 'failed' | 'rate_limited' | 'threw';
+  status: 'durably_queued' | 'captured' | 'legacy_accepted_unconfirmed' | 'failed' | 'rate_limited' | 'threw';
 }
 
 interface StoredIncomingMessage {

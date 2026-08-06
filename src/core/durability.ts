@@ -2491,6 +2491,8 @@ export class DurabilityEngine {
             `whatsoup@${config.botName} authentication appears unresolved — repair lane cannot restore it`,
             `HUMAN_REQUIRED ${evidence}`,
             'critical',
+            undefined,
+            true, // #2510: strict — captured != durably queued
           );
           if (!queued) {
             throw new Error(
@@ -2505,6 +2507,8 @@ export class DurabilityEngine {
             `whatsoup@${config.botName} verify gate failed — quarantine clear suppressed`,
             `FLEET_HEALTH_VERIFY_GATE failure: ${evidence}; clear_suppressed=true`,
             'warning',
+            undefined,
+            true, // #2510: strict — captured != durably queued
           );
           if (!queued) {
             throw new Error(
