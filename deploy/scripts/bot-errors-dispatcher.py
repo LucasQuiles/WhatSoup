@@ -5320,6 +5320,45 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
             delivery["emailFallback"] = email_status
             if email_status != "not_attempted":
                 delivery["emailFallbackAt"] = now_iso()
+        if email_status == "accepted_unconfirmed":
+            # Email fallback accepted — the event is delivered via email.
+            # Terminal: persist incident state, publish the durable sent
+            # record, and archive out of processing/ exactly like the
+            # primary-channel sent path. Returning without the archive
+            # move would leak the claimed file into processing/, where
+            # reclaim_processing would resurrect and re-send it (#2435).
+            if isinstance(delivery, dict):
+                delivery["nextAttemptAtEpoch"] = 0
+                delivery["status"] = "email_delivered"
+                delivery["lastError"] = None
+            incident_publication = save_incident_state(paths, incident_state)
+            email_target = _durable_target(claimed)
+            email_observation = observe_json(email_target)
+            email_generation = (email_observation.version.generation or 0) + 1
+            email_operation = operation_id(
+                email_target,
+                event,
+                component="dispatcher.process_sent_state",
+                predecessor=email_observation.version,
+            )
+            email_publication = publish_state_json(
+                email_target,
+                event,
+                component="dispatcher.process_sent_state",
+                operation_id=email_operation,
+                expected=email_observation.version,
+                generation=email_generation,
+            )
+            require_all_advance([incident_publication, email_publication])
+            email_sent_path = archive_path(paths["sent"], path.name, "sent", event)
+            os.replace(claimed, email_sent_path)
+            append_dispatch_log(paths, {
+                "type": "email_delivered",
+                "eventId": event.get("id"),
+                "path": str(email_sent_path),
+                "attempts": delivery.get("attempts") if isinstance(delivery, dict) else None,
+            })
+            return True, "email_delivered"
 
         # --- F5: dead-letter if attempt cap exhausted ---
         if next_backoff(attempts) is None:

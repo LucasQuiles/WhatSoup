@@ -370,10 +370,16 @@ class TestEmailFallbackUnavailableRecorded:
              patch.object(mod, "EMAIL_FALLBACK", str(fallback)):
             ok, detail = mod.process_one(event_path, paths)
 
-        outbox_files = list(paths["outbox"].glob("*.json"))
-        assert outbox_files, "Event should remain in outbox"
-        requeued = json.loads(outbox_files[0].read_text())
-        delivery = requeued.get("delivery", {})
+        # #2435 contract: an accepted email fallback is terminal — the event is
+        # archived to sent/ (not requeued, not left in processing/).
+        assert ok and detail == "email_delivered"
+        assert not list(paths["outbox"].glob("*.json")), "accepted fallback must not requeue to outbox"
+        assert not list(paths["processing"].glob("*.json")), "accepted fallback must not leak into processing/"
+        sent_files = list(paths["sent"].glob("*.sent"))
+        assert sent_files, "accepted fallback must archive the event to sent/"
+        archived = json.loads(sent_files[0].read_text())
+        delivery = archived.get("delivery", {})
+        assert delivery.get("status") == "email_delivered"
         # email_fallback_unavailable should NOT be set (or should be False/absent)
         assert not delivery.get("email_fallback_unavailable"), (
             f"email_fallback_unavailable should not be set when fallback is available, got: {delivery}"
