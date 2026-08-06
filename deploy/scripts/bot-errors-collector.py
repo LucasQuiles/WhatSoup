@@ -3642,13 +3642,6 @@ def _run_once_with_state(
                     [remote_root, str(max_events), str(lease_seconds)],
                     timeout,
                 )
-                enqueue_meta_recovery(
-                    remote,
-                    "remote-writefail-harvest-failed",
-                    f"BOT ERRORS collector remote writefail harvest recovered: {remote}",
-                    f"remote={remote}\nremote_root={remote_root}\nharvest_status=success",
-                    state,
-                )
             except Exception as exc:  # noqa: BLE001 - outbox relay must not be blocked by B6 harvest.
                 failed += 1
                 if is_best_effort:
@@ -3901,6 +3894,17 @@ def _run_once_with_state(
                     state,
                     alert_cooldown,
                 )
+        # #2420: recovery is here (AFTER the writefail records loop), not in
+        # the claim try block — a successful claim cannot clear a still-leased
+        # record that failed harvest in a prior cycle.
+        if writefail_harvested > 0:
+            enqueue_meta_recovery(
+                remote,
+                "remote-writefail-harvest-failed",
+                f"BOT ERRORS collector remote writefail harvest recovered: {remote}",
+                f"remote={remote}\nremote_root={remote_root}\nharvest_status=success",
+                state,
+            )
         if outbox_claim_failed:
             continue
         drain_record = remote_state.get(remote, {})

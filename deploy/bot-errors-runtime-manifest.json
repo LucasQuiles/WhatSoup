@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-08-07T10:09:10.817Z",
+  "generatedAt": "2026-08-07T10:09:11.443Z",
   "scope": "bot-errors-runtime-scripts",
   "expectedHeadShaPolicy": "populated at deploy time by deploy step; absent here so committed state is observability-only",
   "files": [
     {
       "path": "deploy/scripts/bot-errors-collector.py",
-      "sha256": "5eafc4e53ead19dfd56b155b50adb0ea446986979e7fea7e0b5246fbb96348b9",
+      "sha256": "c79b36dec295bf3673a449e052c9675997ccb6b45a8b618297e2dff571192238",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
