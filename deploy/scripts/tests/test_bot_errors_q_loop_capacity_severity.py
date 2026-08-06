@@ -88,6 +88,56 @@ def _events(outbox: Path) -> list[dict]:
     return [json.loads(p.read_text(encoding="utf-8")) for p in sorted(outbox.glob("*.json"))]
 
 
+def _make_state_load_result(state: dict[str, Any], mode: str = "valid") -> SimpleNamespace:
+    return SimpleNamespace(
+        mode=mode,
+        payload=state,
+        capability=SimpleNamespace(version=SimpleNamespace(generation=1, operation_epoch=0)),
+        diagnostic=SimpleNamespace(reason=None),
+    )
+
+
+def _make_session_mock(state_file: Path) -> SimpleNamespace:
+    def _load():
+        payload = json.loads(state_file.read_text(encoding="utf-8"))
+        return _make_state_load_result(payload)
+
+    def _save(payload: Any, capability: Any) -> SimpleNamespace:
+        state_file.write_text(json.dumps(payload, default=str), encoding="utf-8")
+        state_file.chmod(0o600)
+        return SimpleNamespace(
+            capability=SimpleNamespace(
+                version=SimpleNamespace(generation=2, operation_epoch=1),
+            ),
+        )
+
+    return SimpleNamespace(
+        __enter__=lambda self: self,
+        __exit__=lambda self, *args: None,
+        load=_load,
+        save=_save,
+    )
+
+
+def _reconcile_with_session(
+    mod: Any,
+    problems: dict[str, str],
+    active_prefixes: list[str],
+    state_file: Path,
+    evaluated_instances: set[str] | None = None,
+) -> list[Any]:
+    session = _make_session_mock(state_file)
+    result = session.load()
+    return mod.reconcile(
+        problems,
+        active_prefixes,
+        result.payload,
+        session,
+        result.capability,
+        evaluated_instances=evaluated_instances,
+    )
+
+
 # ---------------------------------------------------------------------------
 # (a) capacity classification at detection time
 # ---------------------------------------------------------------------------
@@ -142,9 +192,12 @@ def test_capacity_new_incident_event_is_warning_not_critical(tmp_path, monkeypat
     outbox = tmp_path / "outbox"
     monkeypatch.setenv("BOT_ERRORS_OUTBOX_DIR", str(outbox))
 
-    written = mod.reconcile(
+    state_file = state / "q-loop" / "state.json"
+    written = _reconcile_with_session(
+        mod,
         {CAPACITY_KEY: "q-loop at usage-window capacity; self-recovers when window resets reason=session_limit"},
         ["q_loop"],
+        state_file,
     )
 
     assert len(written) == 1
@@ -183,9 +236,12 @@ def test_capacity_incident_never_escalates_to_critical(tmp_path, monkeypatch):
         },
     )
 
-    written = mod.reconcile(
+    state_file = state / "q-loop" / "state.json"
+    written = _reconcile_with_session(
+        mod,
         {CAPACITY_KEY: "q-loop at usage-window capacity; self-recovers when window resets reason=session_limit"},
         ["q_loop"],
+        state_file,
     )
 
     assert len(written) == 1
@@ -228,9 +284,12 @@ def test_genuine_supervisor_new_incident_is_critical(tmp_path, monkeypatch):
     outbox = tmp_path / "outbox"
     monkeypatch.setenv("BOT_ERRORS_OUTBOX_DIR", str(outbox))
 
-    written = mod.reconcile(
+    state_file = state / "q-loop" / "state.json"
+    written = _reconcile_with_session(
+        mod,
         {SUPERVISOR_KEY: "q-loop supervisor unavailable: phase=q_unavailable_socket_timeout"},
         ["q_loop"],
+        state_file,
     )
 
     events = _events(outbox)
