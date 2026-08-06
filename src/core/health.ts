@@ -522,10 +522,6 @@ function agentRuntimeDetailsForHealth(
 
 export const ENRICHMENT_STALE_MS = 10 * MS_PER_MINUTE; // 10 minutes
 const RECENT_DISCONNECT_DEGRADED_THRESHOLD = 3;
-// #2280: tracks instances that have recently been in STATUS_DEGRADED, so status
-// updates that see empty statusReasons (silence) can keep the instance degraded
-// until explicit recovery proof arrives.
-const RECENTLY_DEGRADED = new Set<string>();
 // #1433 / B21-D — a post-first-turn error in one of these TRANSIENT, self-clearing
 // classes is benign-by-default: `empty-output` (the model returned one empty turn
 // and typically recovers on the next) plus the W1-T6-backfilled `transient-network`
@@ -789,6 +785,12 @@ function sendRequestErrorMessage(err: unknown): string {
 }
 
 export function startHealthServer(deps: HealthDeps): ReturnType<typeof createServer> {
+  // #2280: tracks instances that have recently been in STATUS_DEGRADED, so
+  // status updates that see empty statusReasons (silence) can keep the
+  // instance degraded until explicit recovery proof arrives. Scoped to the
+  // server instance: module scope would leak degradation across server
+  // lifetimes that share an instance name (observed as cross-test pollution).
+  const recentlyDegraded = new Set<string>();
   const chatResolver = createChatResolver({ db: deps.db.raw });
   const sendPipeline = createSendPipeline({
     resolver: chatResolver,
@@ -1696,8 +1698,8 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         // #2280: silence from child processes is not proof of recovery.
         // If statusReasons is empty but the instance was recently degraded,
         // keep it degraded until explicit recovery evidence is observed.
-        addDegradationSilenceProof(statusReasons, RECENTLY_DEGRADED, deps.instanceName);
-        if (statusReasons.length > 0) RECENTLY_DEGRADED.add(deps.instanceName);
+        addDegradationSilenceProof(statusReasons, recentlyDegraded, deps.instanceName);
+        if (statusReasons.length > 0) recentlyDegraded.add(deps.instanceName);
         status = statusReasons.length > 0 ? 'degraded' : 'healthy';
       }
 
