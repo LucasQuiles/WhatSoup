@@ -383,6 +383,43 @@ def redacted_watchdog_payload(value: Any) -> Any:
     return redact_shared_json_value(value, redact_watchdog_text)
 
 
+def project_watchdog_state_mode(diagnostic: Any) -> dict[str, Any]:
+    """#2723 R4.6: project diagnostic details, stripping schemaVersion."""
+    return {k: v for k, v in diagnostic._asdict().items() if k != "schemaVersion"}
+
+
+def read_collector_state_snapshot() -> StateReadResult | None:
+    """#2723 R4.4: cross-reader wrapper — read collector state via controller state."""
+    coll_path = state_root() / "collector-state.json"
+    if not coll_path.exists():
+        return None
+    try:
+        return read_controller_state(
+            coll_path,
+            component="collector",
+            validate_payload=lambda p: p if isinstance(p, dict) and "open" in p else {},
+            lock_timeout_seconds=5,
+        )
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def read_dispatcher_incident_snapshot() -> StateReadResult | None:
+    """#2723 R4.4: cross-reader wrapper for dispatcher state."""
+    disp_path = state_root() / "dispatcher-state.json"
+    if not disp_path.exists():
+        return None
+    try:
+        return read_controller_state(
+            disp_path,
+            component="dispatcher-incident",
+            validate_payload=lambda p: p if isinstance(p, dict) and "incidents" in p else {},
+            lock_timeout_seconds=5,
+        )
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
 def persist_controller_log_health(record: dict[str, Any]) -> None:
     target = _durable_target(
         state_root() / "controller-log-health" / "heartbeat-watchdog.json"
@@ -1454,9 +1491,10 @@ def parse_remote_host(value: Any) -> str | None:
 
 
 def collector_configured_hosts() -> list[str]:
-    data = load_json(state_root() / "collector-state.json", require_private=True)
-    if not data:
+    snap = read_collector_state_snapshot()
+    if snap is None or snap.mode not in ("valid", "legacy_valid"):
         return []
+    data = snap.payload if snap.payload else {}
     raw_hosts = data.get("configuredRemoteHosts")
     if isinstance(raw_hosts, list):
         return unique_hosts([host for host in (parse_remote_host(value) for value in raw_hosts) if host])
@@ -1470,9 +1508,10 @@ def collector_configured_hosts() -> list[str]:
 
 
 def collector_best_effort_hosts() -> list[str]:
-    data = load_json(state_root() / "collector-state.json", require_private=True)
-    if not data:
+    snap = read_collector_state_snapshot()
+    if snap is None or snap.mode not in ("valid", "legacy_valid"):
         return []
+    data = snap.payload if snap.payload else {}
     raw_hosts = data.get("configuredBestEffortRemoteHosts")
     if isinstance(raw_hosts, list):
         return unique_hosts([host for host in (parse_remote_host(value) for value in raw_hosts) if host])
