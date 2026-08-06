@@ -3662,8 +3662,8 @@ def daily_health_monitoring_stale(machine: str, open_incidents: dict[str, Any]) 
     return False
 
 
-def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = None) -> tuple[int, int, str | None]:
-    incident_state = load_incident_state(paths)
+def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = None, incident: IncidentStateCycle | None = None) -> tuple[int, int, str | None]:
+    incident_state = (incident.payload if incident else load_incident_state(paths))
     open_incidents = incident_state.setdefault("openIncidents", {})
     current = int(time.time())
     sent = 0
@@ -3935,7 +3935,10 @@ def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = N
     if suppressed:
         append_dispatch_log(paths, {"type": "stale_renotify_suppressed_total", "suppressed": suppressed})
     if changed:
-        save_incident_state(paths, incident_state)
+        if incident:
+            incident.commit()
+        else:
+            save_incident_state(paths, incident_state)
     return sent, failed, last_error
 
 
@@ -4782,7 +4785,7 @@ def collapse_storm_group(
     return collapsed
 
 
-def collapse_ready_storms(paths: dict[str, Path]) -> int:
+def collapse_ready_storms(paths: dict[str, Path], incident: IncidentStateCycle | None = None) -> int:
     threshold = storm_threshold()
     if threshold < 2:
         return 0
@@ -4812,7 +4815,7 @@ def collapse_ready_storms(paths: dict[str, Path]) -> int:
     # needed (or wanted — an outer save-once-at-the-end is exactly the
     # ordering that let a crash mid-batch lose an already-moved member's
     # stamp; see collapse_storm_group's docstring/comments for the fix).
-    incident_state = load_incident_state(paths)
+    incident_state = (incident.payload if incident else load_incident_state(paths))
     collapsed = 0
     for fingerprint, records in groups.items():
         remaining = sorted(records, key=lambda record: (record[2], str(record[0])))
@@ -4902,7 +4905,7 @@ def queued_alert_precedes_recovery(
     return alert_epoch <= clear_epoch
 
 
-def suppress_alerts_recovered_before_delivery(paths: dict[str, Path]) -> int:
+def suppress_alerts_recovered_before_delivery(paths: dict[str, Path], incident: IncidentStateCycle | None = None) -> int:
     """Retire queued alerts when a later clear proves recovery before delivery.
 
     This closes the retry-ordering hole where a temporarily undeliverable alert
@@ -4910,7 +4913,7 @@ def suppress_alerts_recovered_before_delivery(paths: dict[str, Path]) -> int:
     after service recovery. When an incident is already recorded as open, only
     the undelivered duplicate alert is retired; its clear remains visible.
     """
-    incident_state = load_incident_state(paths)
+    incident_state = (incident.payload if incident else load_incident_state(paths))
     open_incidents = incident_state.get("openIncidents")
     if not isinstance(open_incidents, dict):
         open_incidents = {}
@@ -4986,7 +4989,7 @@ def suppress_alerts_recovered_before_delivery(paths: dict[str, Path]) -> int:
     return suppressed
 
 
-def suppress_ready_recovery_duplicates(paths: dict[str, Path]) -> int:
+def suppress_ready_recovery_duplicates(paths: dict[str, Path], incident: IncidentStateCycle | None = None) -> int:
     window = recovery_dedupe_window_seconds()
     groups: dict[str, list[tuple[Path, dict[str, Any], int]]] = {}
     for path in sorted(paths["outbox"].glob("*.json")):
@@ -5049,14 +5052,17 @@ def suppress_ready_recovery_duplicates(paths: dict[str, Path]) -> int:
     # of non-daily-health duplicates never touches incident_state (no
     # wasted read/write/fsync). Loaded lazily (only once a duplicate is
     # actually found) for the same reason.
-    incident_state = load_incident_state(paths)
+    incident_state = (incident.payload if incident else load_incident_state(paths))
     state_changed = False
     for _path, event in duplicates:
         absorb_daily_health_signal(event, incident_state)
         if str(event.get("source") or "").startswith("daily-health"):
             state_changed = True
     if state_changed:
-        save_incident_state(paths, incident_state)
+        if incident:
+            incident.commit()
+        else:
+            save_incident_state(paths, incident_state)
 
     # Finally, the terminal moves, only now that any absorbed state is durable.
     suppressed = 0
@@ -5651,7 +5657,7 @@ def record_state(paths: dict[str, Path], **updates: Any) -> None:
     require_advance(publication)
 
 
-def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
+def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle | None = None) -> tuple[bool, str]:
     # #2484: ready() already verified the leaf is regular and readable, but
     # claim() renames it — re-verify the claimed path before parsing.
     try:
@@ -5731,7 +5737,7 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
         generation=attempt_generation,
     )
     require_all_advance([attempt_publication])
-    incident_state = load_incident_state(paths)
+    incident_state = (incident.payload if incident else load_incident_state(paths))
 
     # Stamp daily-health liveness into the durable freshness ledger before any
     # suppress/send branch — all three downstream paths that persist incident_state
