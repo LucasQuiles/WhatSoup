@@ -61,7 +61,7 @@ export function resetDeliveryUnavailableLatch(): void {
 
 export interface HealReportData extends AutomaticHealReportInput {}
 
-interface HealReportRow {
+export interface HealReportRow {
   report_id: string;
   error_class: string;
   error_type: string;
