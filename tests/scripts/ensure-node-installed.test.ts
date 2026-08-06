@@ -24,6 +24,17 @@ function makeTmpDir(): string {
   return tmp.make('');
 }
 
+function installExactNode(version: string, message = ''): string {
+  return [
+    `local node_path="$NVM_DIR/versions/node/v${version}/bin/node"`,
+    'mkdir -p "$(dirname "$node_path")"',
+    `printf '%s\\n' '#!/usr/bin/env sh' 'printf "v${version}\\\\n"' > "$node_path"`,
+    'chmod 755 "$node_path"',
+    message,
+    'return 0',
+  ].filter(Boolean).join('; ');
+}
+
 /**
  * Creates a minimal REPO_ROOT fixture with an optional .nvmrc file.
  * When nvmrcContent is undefined, no .nvmrc file is written (missing case).
@@ -113,7 +124,7 @@ describe('ensure-node-installed.sh', () => {
   // ── Test 2 ─────────────────────────────────────────────────────────────────
   it('exits 0 idempotently when nvm is present and the version is already installed', () => {
     const { home, nvmDir } = makeHomeWithFakeNvm(
-      'echo "already installed" >&2; return 0',
+      installExactNode('24.15.0', 'echo "already installed" >&2'),
     );
     const repo = makeRepoFixture('24.15.0\n');
 
@@ -134,7 +145,7 @@ describe('ensure-node-installed.sh', () => {
     const repo = makeRepoFixture('24.15.0\n');
     const localNode = join(nvmDir, 'versions/node/v24.15.0/bin/node');
     mkdirSync(dirname(localNode), { recursive: true });
-    writeFileSync(localNode, '#!/usr/bin/env sh\nexit 0\n', 'utf8');
+    writeFileSync(localNode, '#!/usr/bin/env sh\nprintf "v24.15.0\\n"\n', 'utf8');
     chmodSync(localNode, 0o755);
 
     const { exitCode, stderr } = runScript({
@@ -146,6 +157,21 @@ describe('ensure-node-installed.sh', () => {
     expect(exitCode, 'should exit 0 without calling nvm install').toBe(0);
     expect(stderr).toMatch(/already present/i);
     expect(stderr).not.toContain('nvm install should not run');
+  });
+
+  it('rejects a binary at the pinned path when it reports a different version', () => {
+    const home = makeTmpDir();
+    const nvmDir = join(home, '.nvm');
+    const repo = makeRepoFixture('24.15.0\n');
+    const localNode = join(nvmDir, 'versions/node/v24.15.0/bin/node');
+    mkdirSync(dirname(localNode), { recursive: true });
+    writeFileSync(localNode, '#!/usr/bin/env sh\nprintf "v24.15.1\\n"\n', 'utf8');
+    chmodSync(localNode, 0o755);
+
+    const { exitCode, stderr } = runScript({ HOME: home, NVM_DIR: nvmDir, REPO_ROOT: repo });
+
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain('expected v24.15.0');
   });
 
   // ── Test 3 ─────────────────────────────────────────────────────────────────
@@ -164,6 +190,10 @@ describe('ensure-node-installed.sh', () => {
       '  case "$subcmd" in',
       '    install)',
       `      echo "install:$*" > "${markerPath}"`,
+      '      node_path="$NVM_DIR/versions/node/v24.15.0/bin/node"',
+      '      mkdir -p "$(dirname "$node_path")"',
+      '      printf \'%s\\n\' \'#!/usr/bin/env sh\' \'printf "v24.15.0\\\\n"\' > "$node_path"',
+      '      chmod 755 "$node_path"',
       '      return 0',
       '      ;;',
       '    *)',
