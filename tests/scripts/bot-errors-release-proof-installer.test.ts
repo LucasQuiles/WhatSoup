@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import {
-  chmodSync, existsSync, lstatSync, mkdirSync,
+  accessSync, chmodSync, constants, existsSync, lstatSync, mkdirSync,
   readFileSync, readdirSync, readlinkSync, rmSync, symlinkSync, writeFileSync,
 } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -40,6 +40,37 @@ interface Fixture {
 
 function sha256(text: string): string {
   return createHash('sha256').update(text).digest('hex');
+}
+
+function resolveHostTool(name: string): string {
+  for (const dir of (process.env.PATH ?? '').split(':')) {
+    if (!dir) continue;
+    const candidate = join(dir, name);
+    try {
+      accessSync(candidate, constants.X_OK);
+      return candidate;
+    } catch {
+      // Continue through the host PATH; the fixture fails during construction if absent.
+    }
+  }
+  throw new Error(`host test prerequisite missing: ${name}`);
+}
+
+function installFixtureToolbox(bin: string): void {
+  for (const name of [
+    'awk', 'basename', 'bash', 'cat', 'chmod', 'cmp', 'cp', 'cut', 'date',
+    'dirname', 'find', 'git', 'grep', 'head', 'id', 'ln', 'mkdir', 'mktemp',
+    'mv', 'python3', 'readlink', 'rm', 'sed', 'sort', 'tail', 'tr',
+  ]) {
+    symlinkSync(resolveHostTool(name), join(bin, name));
+  }
+  for (const alternative of ['shasum', 'sha256sum']) {
+    try {
+      symlinkSync(resolveHostTool(alternative), join(bin, alternative));
+    } catch {
+      // The installer accepts either hashing implementation.
+    }
+  }
 }
 
 /**
@@ -133,6 +164,7 @@ function makeFixture(): Fixture {
   mkdirSync(home, { recursive: true });
   mkdirSync(systemd, { recursive: true });
   mkdirSync(bin, { recursive: true });
+  installFixtureToolbox(bin);
 
   const entries: Array<{ path: string; sha256: string; mustContain: string[] }> = [];
   for (const rel of BUNDLE_FILES) {
@@ -197,7 +229,8 @@ function makeFixture(): Fixture {
   writeFileSync(join(bin, 'systemctl'), fakeSystemctl);
   writeFileSync(join(bin, 'systemd-analyze'), `#!/usr/bin/env bash\necho "systemd-analyze $*" >> "${ledger}"\nexit 0\n`);
   writeFileSync(join(bin, 'hostname'), `#!/usr/bin/env bash\necho "${SYNTH_HOST}"\n`);
-  for (const f of ['systemctl', 'systemd-analyze', 'hostname']) chmodSync(join(bin, f), 0o755);
+  writeFileSync(join(bin, 'flock'), '#!/usr/bin/env bash\nexit 0\n');
+  for (const f of ['systemctl', 'systemd-analyze', 'hostname', 'flock']) chmodSync(join(bin, f), 0o755);
 
   fixtureGit(source, ['init', '--initial-branch=main']);
   fixtureGit(source, ['add', '.']);
@@ -213,13 +246,13 @@ function makeFixture(): Fixture {
 }
 
 function runInstaller(fx: Fixture, args: string[], extraEnv: Record<string, string> = {}) {
-  const result = spawnSync('bash', [INSTALLER, ...args], {
+  const result = spawnSync('/bin/bash', [INSTALLER, ...args], {
     encoding: 'utf8',
     timeout: CHILD_TIMEOUT_MS,
     env: {
       ...process.env,
       HOME: fx.home,
-      PATH: `${fx.bin}:${process.env.PATH}`,
+      PATH: fx.bin,
       RELEASE_PROOF_HOME: fx.home,
       RELEASE_PROOF_SOURCE_ROOT: fx.source,
       RELEASE_PROOF_SYSTEMD_DIR: fx.systemd,
@@ -271,6 +304,21 @@ function installOk(fx: Fixture) {
 }
 
 describe('installer preflight and dry-run', () => {
+  it('fails before filesystem or command mutation when flock is unavailable', () => {
+    const fx = makeFixture();
+    rmSync(join(fx.bin, 'flock'));
+    const before = snapshotDir(fx.home);
+
+    const res = runInstaller(fx, [
+      'install', '--host', SYNTH_HOST, '--mode', 'observe', '--bundle-sha', fx.sha,
+    ]);
+
+    expect(res.status).toBe(2);
+    expect(res.stderr).toContain('missing dependency: flock');
+    expect(snapshotDir(fx.home)).toEqual(before);
+    expect(ledgerLines(fx)).toHaveLength(0);
+  });
+
   it('dry-run prints the plan and produces zero filesystem and command delta', () => {
     const fx = makeFixture();
     const before = { home: snapshotDir(fx.home), systemd: snapshotDir(fx.systemd) };

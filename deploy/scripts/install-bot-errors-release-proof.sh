@@ -181,15 +181,12 @@ PY
 }
 
 require_lock() {
+  command -v flock >/dev/null 2>&1 || fail "missing dependency: flock"
   require_managed_roots
   mkdir -p "$INSTALL_STATE_DIR"
   chmod 0700 "$INSTALL_STATE_DIR"
   exec 8>"$INSTALL_LOCK"
-  if command -v flock >/dev/null 2>&1; then
-    flock -n 8 || fail "installer lock held: $INSTALL_LOCK"
-  else
-    fail "missing dependency: flock"
-  fi
+  flock -n 8 || fail "installer lock held: $INSTALL_LOCK"
 }
 
 sctl() { systemctl --user "$@"; }

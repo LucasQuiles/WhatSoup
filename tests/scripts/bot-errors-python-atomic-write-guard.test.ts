@@ -4,9 +4,11 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
+import { resolveTestPython } from '../helpers/python-interpreter.ts';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const durableWriterGuard = join(repoRoot, 'deploy/scripts/check-bot-errors-durable-writers.py');
+const testPython = resolveTestPython();
 const fixtureDirs: string[] = [];
 
 function pythonFixture(source: string): string {
@@ -73,7 +75,7 @@ function embeddedFixture(source: string, resultPolicy = 'require_advance'): stri
 
 function runDurableWriterGuard(root: string): { status: number | null; code: string | null; stderr: string } {
   const result = spawnSync(
-    'python3.12',
+    testPython,
     [
       durableWriterGuard,
       '--root',
