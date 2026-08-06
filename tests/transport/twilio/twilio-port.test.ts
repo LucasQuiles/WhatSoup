@@ -850,4 +850,24 @@ describe('SdkTwilioSmsPort phase classification (GAP 1)', () => {
       },
     });
   });
+
+  describe('rate limiter timeout (#2555)', () => {
+    const CONSTRAINED_CONFIG: TwilioSmsConfig = {
+      ...BASE_CONFIG,
+      rateLimit: { smsPerMinute: 1 },
+    };
+
+    it('expired bounded-acquire releases slot and throws TransientProviderError', async () => {
+      const lookup = vi.fn().mockReturnValue(TOKEN);
+      const factory = vi.fn().mockReturnValue(makeMockClient({ messagesCreate: vi.fn().mockResolvedValue({ sid: 'SM-test' }) }));
+      const port = new SdkTwilioSmsPort(CONSTRAINED_CONFIG, { credentialLookup: lookup, clientFactory: factory });
+      const adapter = new TwilioSmsAdapter(CONSTRAINED_CONFIG, port);
+      const ch = makeChannelId('sms', BASE_CONFIG.account);
+
+      // Exhaust the single-slot window
+      await adapter.sendText({ channel: ch, id: '+15550001111' }, 'hello');
+      await expect(adapter.sendText({ channel: ch, id: '+15550001111' }, 'world'))
+        .rejects.toThrow(/rate limit wait exceeded/);
+    });
+  });
 });
