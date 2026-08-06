@@ -7,7 +7,27 @@ import { mkdtempSync, writeFileSync, existsSync, readFileSync, rmSync } from 'no
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
+// Hoisted vi.mock: spy on the module-level log.warn.
+// The store imports createChildLogger from ../logger.ts (src/logger.ts).
+const warnSpy = vi.hoisted(() => vi.fn());
+vi.mock('../../src/logger.ts', () => ({
+  createChildLogger: () => ({
+    info: vi.fn(),
+    warn: warnSpy,
+    error: vi.fn(),
+    debug: vi.fn(),
+    fatal: vi.fn(),
+    child: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(), fatal: vi.fn(), level: 'error' }),
+  }),
+}));
+
 let tmpRoot: string;
+
+beforeEach(() => {
+  tmpRoot = mkdtempSync(join(tmpdir(), 'recovery-auth-test-'));
+  process.env['BOT_ERRORS_STATE_DIR'] = tmpRoot;
+  warnSpy.mockClear();
+});
 
 beforeEach(() => {
   tmpRoot = mkdtempSync(join(tmpdir(), 'recovery-auth-test-'));
@@ -24,13 +44,14 @@ afterEach(() => {
 //         returning an empty set instead of crashing, and preserves the file.
 // ---------------------------------------------------------------------------
 describe('loadRecoveryMarkers', () => {
-  it('handles corrupt file without crashing and preserves the file', async () => {
+  it('logs warning for corrupt file, returns empty set, preserves file', async () => {
     const markerPath = join(tmpRoot, 'recovery-authority.json');
     writeFileSync(markerPath, '{invalid}', 'utf-8');
 
     const { loadRecoveryMarkers } = await import('../../src/lib/recovery-authority-store.ts');
     const markers = loadRecoveryMarkers();
 
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('corrupt'));
     expect(markers).toBeInstanceOf(Set);
     expect(markers.size).toBe(0);
     // File is preserved after corrupt read (not deleted by the handler).
