@@ -476,6 +476,12 @@ function readServiceCgroupMemberPids(): readonly number[] | null {
     if (!v2) return null;
     const rel = v2.slice('0::'.length);
     if (!rel.startsWith('/')) return null;
+    // Only trust cgroup membership when this process actually runs inside a
+    // whatsoup service unit. In any shared cgroup — CI runners, dev shells,
+    // user session scopes — the membership list is every process on the box,
+    // and treating it as owned would hand the reaper the harness running us
+    // (observed: GitHub runners killed mid-suite by their own test process).
+    if (!/whatsoup/i.test(rel)) return null;
     const base = join('/sys/fs/cgroup', rel);
     if (!existsSync(base)) return null;
     const pids = new Set<number>();
