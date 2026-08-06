@@ -546,39 +546,6 @@ def load_json(path: Path, *, require_private: bool = False) -> dict[str, Any] | 
     return data if isinstance(data, dict) else None
 
 
-def load_state() -> dict[str, Any]:
-    path = watchdog_state_path()
-    data = load_json(path, require_private=True)
-    if data is None:
-        data = {"version": 1, "open": {}}
-    for section in ("open", "pendingStale", "recentlyRecovered"):
-        if not isinstance(data.get(section), dict):
-            data[section] = {}
-    return data
-
-
-def save_state(state: dict[str, Any]) -> None:
-    redacted_state = redacted_watchdog_payload(state)
-    redacted_state["updatedAt"] = now_iso()
-    target = _durable_target(watchdog_state_path())
-    observation = observe_json(target)
-    publication_operation = operation_id(
-        target,
-        redacted_state,
-        component="heartbeat_watchdog.state",
-        predecessor=observation.version,
-    )
-    publication = publish_state_json(
-        target,
-        redacted_state,
-        component="heartbeat_watchdog.state",
-        operation_id=publication_operation,
-        expected=observation.version,
-        generation=(observation.version.generation or 0) + 1,
-    )
-    require_advance(publication)
-
-
 def outbox_event(
     summary: str,
     evidence: str,
@@ -2201,9 +2168,22 @@ def deferred_recovery_event(key: str, record: dict[str, Any]) -> Path:
     )
 
 
-def reconcile(problems: dict[str, str], active_prefixes: list[str], evaluated_instances: set[str] | None = None) -> list[Path]:
-    state = load_state()
-    open_incidents: dict[str, Any] = state["open"]
+def reconcile(
+    problems: dict[str, str],
+    active_prefixes: list[str],
+    state: dict[str, Any],
+    session: Any,
+    capability: Any,
+    evaluated_instances: set[str] | None = None,
+) -> list[Path]:
+    """Reconcile problems against open incidents and write outbox events.
+
+    ``state`` is the current controller-state payload (already loaded by the
+    caller from the session).  ``session`` and ``capability`` are the open
+    ControllerStateSession and its current write capability; the function
+    persists through ``session.save()`` instead of the old ``save_state()``.
+    """
+    open_incidents: dict[str, Any] = state.setdefault("open", {})
     written: list[Path] = []
     current = now_epoch()
     for key, evidence in sorted(problems.items()):
@@ -2463,7 +2443,7 @@ def reconcile(problems: dict[str, str], active_prefixes: list[str], evaluated_in
                     "recovery_notice_flushed",
                     {"source": key, "flapCount": int_or_zero(record.get("flapCount"))},
                 )
-    save_state(state)
+    session.save(redacted_watchdog_payload(state), capability)
     return written
 
 
