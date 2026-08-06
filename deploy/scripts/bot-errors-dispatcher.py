@@ -6190,6 +6190,8 @@ def run_daemon(interval: int, max_events: int) -> None:
         except BlockingIOError:
             print(json.dumps({"time": now_iso(), "skipped": "locked"}), flush=True)
         except ControllerStateRequired as exc:
+            project_dispatcher_state_mode(exc.diagnostic)
+            emit_state_recovery_fallback(exc.diagnostic)
             print(json.dumps({
                 "time": now_iso(),
                 "error": f"incident state recovery required: {exc.diagnostic}",
@@ -6223,6 +6225,8 @@ def main() -> int:
     try:
         result = run_once(args.max_events)
     except ControllerStateRequired as exc:
+        project_dispatcher_state_mode(exc.diagnostic)
+        emit_state_recovery_fallback(exc.diagnostic)
         print(json.dumps({
             "time": now_iso(),
             "error": f"incident state recovery required: {exc.diagnostic}",
