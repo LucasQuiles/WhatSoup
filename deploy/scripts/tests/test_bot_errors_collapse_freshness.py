@@ -727,6 +727,8 @@ def test_immutable_storm_single_batch_no_superseding(tmp_path, monkeypatch):
         m1 = _storm_member("s1", "host-a", base_epoch=base_epoch)
         m2 = _storm_member("s2", "host-b", base_epoch=base_epoch)
         fingerprint = _disp.storm_fingerprint(m1)
+        _write_event(paths, "a.json", m1)
+        _write_event(paths, "b.json", m2)
         records = [
             (paths["outbox"] / "a.json", m1),
             (paths["outbox"] / "b.json", m2),
@@ -748,7 +750,7 @@ def test_immutable_storm_single_batch_no_superseding(tmp_path, monkeypatch):
 
 
 def test_immutable_storm_second_batch_creates_superseding(tmp_path, monkeypatch):
-    """Second batch after digest queued → superseding digest, original unchanged (#2282)."""
+    """Second batch after digest DELIVERED → superseding digest, original unchanged (#2282)."""
     os.environ["BOT_ERRORS_STATE_DIR"] = str(tmp_path)
     os.environ["BOT_ERRORS_STORM_THRESHOLD"] = "2"
     os.environ["BOT_ERRORS_STORM_WINDOW_SECONDS"] = "120"
@@ -761,6 +763,8 @@ def test_immutable_storm_second_batch_creates_superseding(tmp_path, monkeypatch)
         fingerprint = _disp.storm_fingerprint(m1)
 
         # Batch 1: 2 events → creates initial manifest + digest
+        _write_event(paths, "a.json", m1)
+        _write_event(paths, "b.json", m2)
         records1 = [
             (paths["outbox"] / "a.json", m1),
             (paths["outbox"] / "b.json", m2),
@@ -775,9 +779,16 @@ def test_immutable_storm_second_batch_creates_superseding(tmp_path, monkeypatch)
         initial_entries = json.loads(initial_manifests[0].read_text(encoding="utf-8")).get("entries", [])
         assert len(initial_entries) == 2, "initial manifest must have 2 entries"
 
-        # Batch 2: 1 more event for same storm window → should create superseding
+        # Deliver the queued digest: once sent, its evidence is immutable.
+        digest_files = [p for p in paths["outbox"].glob("*.json") if "storm-collapse" in p.name]
+        assert len(digest_files) == 1, f"expected 1 queued digest, got {len(digest_files)}"
+        os.replace(digest_files[0], paths["sent"] / f"{digest_files[0].name}.{int(time.time())}.sent")
+
+        # Batch 2 after delivery: 1 more event → must create a superseding revision
+        m3 = _storm_member("b2e3", "host-c", base_epoch=base_epoch + 30)
+        _write_event(paths, "c.json", m3)
         records2 = [
-            (paths["outbox"] / "c.json", _storm_member("b2e3", "host-c", base_epoch=base_epoch + 30)),
+            (paths["outbox"] / "c.json", m3),
         ]
         collapsed2 = _disp.collapse_storm_group(
             paths, (fingerprint, base_epoch), records2, incident_state,
@@ -804,6 +815,68 @@ def test_immutable_storm_second_batch_creates_superseding(tmp_path, monkeypatch)
         records = [json.loads(line) for line in log_path.read_text().splitlines() if line.strip()]
         superseded = [r for r in records if r.get("type") == "storm_digest_superseded"]
         assert len(superseded) >= 1, "dispatch log must have storm_digest_superseded entry"
+    finally:
+        os.environ.pop("BOT_ERRORS_STATE_DIR", None)
+        os.environ.pop("BOT_ERRORS_STORM_THRESHOLD", None)
+        os.environ.pop("BOT_ERRORS_STORM_WINDOW_SECONDS", None)
+
+
+def test_immutable_storm_queued_absorb_regenerates_digest(tmp_path, monkeypatch):
+    """Late arrivals while digest still QUEUED → one manifest, digest payload regenerated in lockstep (#2282)."""
+    os.environ["BOT_ERRORS_STATE_DIR"] = str(tmp_path)
+    os.environ["BOT_ERRORS_STORM_THRESHOLD"] = "2"
+    os.environ["BOT_ERRORS_STORM_WINDOW_SECONDS"] = "120"
+    try:
+        monkeypatch.setattr(_disp, "send_whatsapp", lambda text, socket_path="": None)
+        paths = _disp.setup_dirs()
+        base_epoch = int(time.time())
+        m1 = _storm_member("q1e1", "host-a", base_epoch=base_epoch)
+        m2 = _storm_member("q1e2", "host-b", base_epoch=base_epoch)
+        fingerprint = _disp.storm_fingerprint(m1)
+        _write_event(paths, "a.json", m1)
+        _write_event(paths, "b.json", m2)
+        incident_state = _disp.load_incident_state(paths)
+        collapsed1 = _disp.collapse_storm_group(
+            paths, (fingerprint, base_epoch),
+            [(paths["outbox"] / "a.json", m1), (paths["outbox"] / "b.json", m2)],
+            incident_state,
+        )
+        assert collapsed1 == 2, f"expected 2 collapsed, got {collapsed1}"
+
+        # Digest still queued in outbox — batch 2 must be absorbed, not superseded
+        m3 = _storm_member("q2e3", "host-c", base_epoch=base_epoch + 30)
+        _write_event(paths, "c.json", m3)
+        collapsed2 = _disp.collapse_storm_group(
+            paths, (fingerprint, base_epoch),
+            [(paths["outbox"] / "c.json", m3)],
+            incident_state,
+        )
+        assert collapsed2 == 1, f"expected 1 collapsed, got {collapsed2}"
+
+        manifests = sorted(paths["storm_manifests"].glob("*.json"))
+        assert len(manifests) == 1, f"queued absorb must not create a second manifest, got {len(manifests)}"
+        manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
+        assert len(manifest.get("entries", [])) == 3, "manifest must have all 3 entries"
+        assert len(manifest.get("entriesCollapsed", [])) == 3, "manifest must record all 3 collapses"
+
+        # The queued digest payload must agree with its manifest (evidence binding)
+        digest_files = [p for p in paths["outbox"].glob("*.json") if "storm-collapse" in p.name]
+        assert len(digest_files) == 1, f"expected 1 queued digest, got {len(digest_files)}"
+        digest = json.loads(digest_files[0].read_text(encoding="utf-8"))
+        assert digest["storm"]["affectedHosts"] == 3, "digest host count must match expanded membership"
+        assert digest["storm"]["collapsedEvents"] == len(manifest["entries"]), (
+            "digest membership count must agree with its manifest"
+        )
+        assert "3 hosts" in str(digest.get("summary")), "digest summary must reflect regenerated membership"
+
+        log_path = paths["logs"] / "dispatch.jsonl"
+        log_records = [json.loads(line) for line in log_path.read_text().splitlines() if line.strip()]
+        assert any(r.get("type") == "storm_digest_reused" for r in log_records), (
+            "dispatch log must record storm_digest_reused for the queued absorb"
+        )
+        assert not any(r.get("type") == "storm_digest_superseded" for r in log_records), (
+            "queued absorb must not create a superseding revision"
+        )
     finally:
         os.environ.pop("BOT_ERRORS_STATE_DIR", None)
         os.environ.pop("BOT_ERRORS_STORM_THRESHOLD", None)
