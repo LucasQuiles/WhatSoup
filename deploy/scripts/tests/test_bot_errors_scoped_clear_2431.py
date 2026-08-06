@@ -12,6 +12,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -27,6 +28,44 @@ def _load_module():
     assert spec.loader is not None
     spec.loader.exec_module(mod)
     return mod
+
+
+def _make_state_load_result(state: dict, mode: str = "valid") -> SimpleNamespace:
+    return SimpleNamespace(
+        mode=mode,
+        payload=state,
+        capability=SimpleNamespace(version=SimpleNamespace(generation=1, operation_epoch=0)),
+        diagnostic=SimpleNamespace(reason=None),
+    )
+
+
+def _make_session_mock(state: dict) -> tuple[SimpleNamespace, list[dict]]:
+    """Build a mock session backed by an in-memory *state* dict.
+    
+    Returns (session, saved_states) where saved_states captures every
+    payload passed to session.save() — mirrors the original test's
+    got_save pattern but through the session interface.
+    """
+    saved_states: list[dict] = []
+
+    def _load():
+        return _make_state_load_result(state)
+
+    def _save(payload: dict, capability: object) -> SimpleNamespace:
+        saved_states.append(payload)
+        return SimpleNamespace(
+            capability=SimpleNamespace(
+                version=SimpleNamespace(generation=2, operation_epoch=1),
+            ),
+        )
+
+    session = SimpleNamespace(
+        __enter__=lambda self: self,
+        __exit__=lambda self, *args: None,
+        load=_load,
+        save=_save,
+    )
+    return session, saved_states
 
 
 # ---------------------------------------------------------------------------
@@ -72,9 +111,7 @@ class TestIncidentNonEvaluatedInstanceSurvivesSweep:
         state = self._make_state_with_incident(mod, incident_key)
 
         monkeypatch.setattr(mod, "state_root", lambda: tmp_path)
-        monkeypatch.setattr(mod, "load_state", lambda: state)
-        got_save = []
-        monkeypatch.setattr(mod, "save_state", lambda s: got_save.append(s))
+        session, got_save = _make_session_mock(state)
 
         # The removed instance was NOT evaluated. A problem exists for a
         # different instance ("active-instance") so "local_health:" is an
@@ -87,7 +124,8 @@ class TestIncidentNonEvaluatedInstanceSurvivesSweep:
         prefixes = ["q_loop", "local_health:"]
 
         evaluated = {"active-instance", "other-instance"}
-        mod.reconcile(problems, prefixes, evaluated)
+        load_result = session.load()
+        mod.reconcile(problems, prefixes, state, session, load_result.capability, evaluated_instances=evaluated)
 
         saved = got_save[0] if got_save else state
         assert incident_key in saved["open"], (
@@ -110,9 +148,7 @@ class TestIncidentNonEvaluatedInstanceSurvivesSweep:
         state = self._make_state_with_incident(mod, incident_key)
 
         monkeypatch.setattr(mod, "state_root", lambda: tmp_path)
-        monkeypatch.setattr(mod, "load_state", lambda: state)
-        got_save = []
-        monkeypatch.setattr(mod, "save_state", lambda s: got_save.append(s))
+        session, got_save = _make_session_mock(state)
 
         # No local_health problems — instance is healthy (no problem generated)
         problems: dict[str, str] = {"q_loop": "q-loop heartbeat stale: age_seconds=999 max=600 detail=test"}
@@ -120,7 +156,8 @@ class TestIncidentNonEvaluatedInstanceSurvivesSweep:
 
         # The evaluated_instances includes "active-instance"
         evaluated = {"active-instance", "other-instance"}
-        mod.reconcile(problems, prefixes, evaluated)
+        load_result = session.load()
+        mod.reconcile(problems, prefixes, state, session, load_result.capability, evaluated_instances=evaluated)
 
         # The incident for active-instance should enter recovery (not immediately cleared).
         # It should still be in open with recoveryObservations.
