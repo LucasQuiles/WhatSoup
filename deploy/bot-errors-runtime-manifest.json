@@ -211,7 +211,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-selfcheck.py",
-      "sha256": "ef0b1bf19387e090c1d63c8595672089ca90196fa7879d1c23317d3fb46b60bc",
+      "sha256": "16e7d39a60132e7cac2fc7ddd636a595c5ef8679dbdf9a59dceb10a45e4d38b5",
       "mustContain": [
         "SAFE_HEAL_CLASSES",
         "HEAL_WINDOW_SECONDS"

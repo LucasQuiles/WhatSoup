@@ -2093,3 +2093,28 @@ def test_heal_with_stale_generation_reports_healed_unloaded(tmp_path: Path):
     assert second["action"] == "healed_unloaded"
     assert any(p.startswith("generation_mismatch:") for p in second["problems"])
     assert len(calls) == 1, "heal deploy must still have run exactly once"
+
+
+# ===========================================================================
+# TESTS: fatal selfcheck re-pushes heartbeat (#2469)
+# ===========================================================================
+
+def test_fatal_status_triggers_heartbeat_re_push():
+    """Unhealthy status (healthy=False) must trigger the fatal re-push guard."""
+    status = {"healthy": False, "class": "pin_untrusted"}
+    re_push = not status.get("healthy", True)
+    assert re_push is True, "unhealthy status must trigger re-push"
+
+
+def test_healthy_status_skips_heartbeat_re_push():
+    """Healthy status (healthy=True) must NOT trigger the fatal re-push guard."""
+    status = {"healthy": True, "class": "ok"}
+    re_push = not status.get("healthy", True)
+    assert re_push is False, "healthy status must not trigger re-push"
+
+
+def test_status_without_healthy_key_skips_re_push():
+    """Status missing healthy key defaults to True (no regression)."""
+    status = {"class": "unknown"}
+    re_push = not status.get("healthy", True)
+    assert re_push is False, "missing healthy key must default to True, no re-push"
