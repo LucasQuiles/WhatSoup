@@ -21,9 +21,12 @@ import { createChildLogger } from '../logger.ts';
 
 /**
  * Derive the state root directory for this instance.
- * Mirrors the pattern in bot-errors-outbox.ts and keyring.ts.
+ * Respects BOT_ERRORS_STATE_DIR for testing (see tests/lib/recovery-authority-store.test.ts),
+ * otherwise mirrors the XDG_DATA_HOME pattern in keyring.ts and bot-errors-outbox.ts.
  */
 function state_root(): string {
+  const override = process.env['BOT_ERRORS_STATE_DIR'];
+  if (override) return override;
   const base = process.env.XDG_DATA_HOME || Path.join(os.homedir(), '.local', 'share');
   return Path.join(base, 'whatsoup', 'instances', process.env.WHATSOUP_INSTANCE ?? 'sandbox-agent');
 }
