@@ -16,8 +16,17 @@
 
 import Path from 'node:path';
 import fs from 'node:fs';
-import { state_root } from './state-root.ts';
-import { createChildLogger } from './logger.ts';
+import os from 'node:os';
+import { createChildLogger } from '../logger.ts';
+
+/**
+ * Derive the state root directory for this instance.
+ * Mirrors the pattern in bot-errors-outbox.ts and keyring.ts.
+ */
+function state_root(): string {
+  const base = process.env.XDG_DATA_HOME || Path.join(os.homedir(), '.local', 'share');
+  return Path.join(base, 'whatsoup', 'instances', process.env.WHATSOUP_INSTANCE ?? 'sandbox-agent');
+}
 
 const MARKER_FILE = 'recovery-authority.json';
 const log = createChildLogger('recovery-authority-store');
@@ -27,11 +36,8 @@ function markerPath(): string {
 }
 
 /** Parse markers from an already-read JSON object, returning truthy-key set. */
-function parseMarkerJson(raw: unknown): Set<string> {
-  if (typeof raw === 'object' && raw !== null && !Array.isArray(raw)) {
-    return new Set(Object.keys(raw).filter((k) => raw[k] === true));
-  }
-  return new Set();
+function parseMarkerJson(raw: Record<string, unknown>): Set<string> {
+  return new Set(Object.keys(raw).filter((k) => raw[k] === true));
 }
 
 /**
@@ -50,12 +56,15 @@ function atomicWriteMarkers(markers: Map<string, boolean>): void {
 export function loadRecoveryMarkers(): Set<string> {
   const path = markerPath();
   try {
-    const raw = JSON.parse(fs.readFileSync(path, 'utf-8'));
-    return parseMarkerJson(raw);
+    const raw: unknown = JSON.parse(fs.readFileSync(path, 'utf-8'));
+    if (typeof raw === 'object' && raw !== null && !Array.isArray(raw)) {
+      return parseMarkerJson(raw as Record<string, unknown>);
+    }
+    return new Set();
   } catch {
     // Missing = empty (normal on first run / clean state).
     if (fs.existsSync(path)) {
-      log.warn('corrupt recovery-authority marker file, treating as empty');
+      log.warn('corrupt marker file, treating as empty');
     }
   }
   return new Set();
@@ -65,9 +74,11 @@ export function loadRecoveryMarkers(): Set<string> {
 export function setRecoveryMarker(source: string): void {
   const markers = new Map<string, boolean>();
   try {
-    const raw = JSON.parse(fs.readFileSync(markerPath(), 'utf-8'));
-    const parsed = parseMarkerJson(raw);
-    for (const k of parsed) markers.set(k, true);
+    const raw: unknown = JSON.parse(fs.readFileSync(markerPath(), 'utf-8'));
+    if (typeof raw === 'object' && raw !== null && !Array.isArray(raw)) {
+      const parsed = parseMarkerJson(raw as Record<string, unknown>);
+      for (const k of parsed) markers.set(k, true);
+    }
   } catch {
     // File missing — start fresh.
   }
@@ -86,9 +97,11 @@ export function setRecoveryMarker(source: string): void {
 export function clearRecoveryMarker(source: string): void {
   const markers = new Map<string, boolean>();
   try {
-    const raw = JSON.parse(fs.readFileSync(markerPath(), 'utf-8'));
-    const parsed = parseMarkerJson(raw);
-    for (const k of parsed) markers.set(k, true);
+    const raw: unknown = JSON.parse(fs.readFileSync(markerPath(), 'utf-8'));
+    if (typeof raw === 'object' && raw !== null && !Array.isArray(raw)) {
+      const parsed = parseMarkerJson(raw as Record<string, unknown>);
+      for (const k of parsed) markers.set(k, true);
+    }
   } catch {
     return; // Nothing to clear.
   }
