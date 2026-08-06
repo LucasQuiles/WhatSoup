@@ -4246,6 +4246,7 @@ def collapse_storm_group(
     key: tuple[str, int],
     records: list[tuple[Path, dict[str, Any]]],
     incident_state: dict[str, Any],
+    incident: IncidentStateCycle | None = None,
 ) -> int:
     fingerprint, requested_start = key
     window = storm_window_seconds()
@@ -4428,7 +4429,13 @@ def collapse_storm_group(
                 )
                 prepared.append((path, target, event))
             if state_changed:
-                publications.append(save_incident_state(paths, incident_state))
+                if incident:
+                    incident.commit()
+                else:
+                    if incident:
+                    incident.commit()
+                else:
+                    publications.append(save_incident_state(paths, incident_state))
             require_all_advance(publications)
             for path, target, event in prepared:
                 os.replace(path, target)
@@ -4742,7 +4749,10 @@ def collapse_storm_group(
         prepared.append((path, target, event))
 
     if state_changed:
-        publications.append(save_incident_state(paths, incident_state))
+        if incident:
+            incident.commit()
+        else:
+            publications.append(save_incident_state(paths, incident_state))
 
     require_all_advance(publications)
 
@@ -5787,10 +5797,13 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
             generation=suppressed_generation,
         )
         require_advance(suppressed_publication)
-        incident_publication = save_incident_state(paths, incident_state)
-        require_all_advance(
-            [suppressed_publication, incident_publication]
-        )
+        if incident:
+            incident.commit()
+        else:
+            incident_publication = save_incident_state(paths, incident_state)
+            require_all_advance(
+                [suppressed_publication, incident_publication]
+            )
         suppressed_path = archive_path(paths["suppressed"], path.name, "suppressed", event)
         os.replace(claimed, suppressed_path)
         append_dispatch_log(paths, {
@@ -5895,7 +5908,10 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
                 delivery["nextAttemptAtEpoch"] = 0
                 delivery["status"] = "email_delivered"
                 delivery["lastError"] = None
-            incident_publication = save_incident_state(paths, incident_state)
+            if incident:
+                incident.commit()
+            else:
+                incident_publication = save_incident_state(paths, incident_state)
             email_target = _durable_target(claimed)
             email_observation = observe_json(email_target)
             email_generation = (email_observation.version.generation or 0) + 1
@@ -5933,7 +5949,10 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
             # event is never reprocessed. The freshness/closure absorbed into
             # incident_state at the top of process_one must be persisted
             # before this terminal move, or it is lost for good.
-            save_incident_state(paths, incident_state)
+            if incident:
+                incident.commit()
+            else:
+                save_incident_state(paths, incident_state)
             dead_path = move_to_dead_letter(claimed, paths, event, original_name_from_processing(claimed))
             append_dispatch_log(paths, {
                 "type": "dead_lettered",
