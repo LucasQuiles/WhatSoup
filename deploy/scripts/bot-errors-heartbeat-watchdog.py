@@ -46,10 +46,8 @@ from lib.durable_json import (
 from lib.controller_state import (
     ControllerStateRequired,
     STATE_RECOVERY_REQUIRED_EXIT,
-    emit_state_recovery_fallback,
     open_controller_state,
     read_controller_state,
-    state_diagnostic_details,
     StateComponent,
     StateMode,
     StateReadResult,
