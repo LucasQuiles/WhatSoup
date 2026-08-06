@@ -110,6 +110,7 @@ let binDir: string;
 let emitScript: string;
 let emitLedger: string;
 let procRoot: string;
+let stateDir: string;
 
 function writeFake(name: string, body: string): void {
   const p = path.join(binDir, name);
@@ -158,6 +159,10 @@ function run(
       // simulate the supported platform so the suite passes on macOS dev
       // machines. The platform-guard test overrides this.
       BOT_ERRORS_DRY_SYS_PLATFORM: 'linux',
+      // #2505: the probe persists a staleness high-water mark; without a
+      // per-test state dir a mark written by one test leaks into the next
+      // (and onto the host's real /var/tmp).
+      BOT_ERRORS_STATE_DIR: stateDir,
       ...fakeEnv,
       PATH: `${binDir}:${process.env.PATH ?? '/usr/bin:/bin'}`,
     },
@@ -183,6 +188,8 @@ beforeEach(() => {
 
   procRoot = mkdtempSync(path.join(tmpdir(), 'brs-proc-'));
   setProcessRoot(process.cwd());
+
+  stateDir = mkdtempSync(path.join(tmpdir(), 'brs-state-'));
 });
 
 afterEach(() => {
@@ -192,6 +199,9 @@ afterEach(() => {
   }
   if (procRoot) {
     rmSync(procRoot, { recursive: true, force: true });
+  }
+  if (stateDir) {
+    rmSync(stateDir, { recursive: true, force: true });
   }
 });
 
