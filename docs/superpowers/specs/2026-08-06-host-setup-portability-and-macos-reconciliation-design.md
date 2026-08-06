@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-06
 
-**Status:** Under review for staged implementation
+**Status:** Approved for staged implementation
 
 **Issues:** #3031, #3032, #3033
 
@@ -91,7 +91,7 @@ Each record declares:
 - stable capability ID and profile;
 - required, optional, or platform-inapplicable disposition;
 - executable or feature probe;
-- minimum or compatible version rule where applicable;
+- exact, minimum, or compatibility-only version rule where applicable;
 - package names for supported package-manager adapters;
 - bounded remediation text.
 
@@ -108,6 +108,11 @@ Initial profiles are:
 
 External `flock` is required only where the Linux release-proof installer runs.
 It is platform-inapplicable for the macOS JavaScript test profile.
+
+The Node capability in every host profile requires the exact version declared
+by `.nvmrc`. A minimum or engine-compatible Node may be exercised only by an
+explicit compatibility-only CI lane and cannot satisfy host setup, doctor, or
+deployment readiness.
 
 ### 5.2 Read-only doctor
 
@@ -131,6 +136,13 @@ It never copies credential material between stores.
 The PATH check compares the invoking shell with the deterministic search roots
 used by WhatSoup wrappers. A binary present under a supported root but absent
 from the current PATH is `path_hidden`, not `missing`.
+
+Runtime probes also bind executable architecture to native host architecture.
+The doctor normalizes `x86_64`/`x64` and `aarch64`/`arm64`, compares the Node
+process architecture with the native kernel/hardware result, and reports a
+version-correct translated or wrong-architecture binary as `incompatible`.
+Unknown architecture or an unavailable native-architecture probe is
+`inconclusive`, never a pass.
 
 ### 5.3 Explicit host-dependency installation
 
@@ -158,7 +170,7 @@ documented entry point from a fresh checkout. Before its Node version gate or
 `npm ci`, it invokes the existing nvm-aware pinned-Node installer and prepends
 the exact pinned binary when available.
 
-If neither a compatible Node nor a usable nvm installation exists, setup stops
+If neither the exact pinned Node nor a usable nvm installation exists, setup stops
 before mutation with platform-specific installation guidance. It never pipes a
 remote installer into a shell. The quick start no longer requires `npm ci`
 before setup because setup already owns the lockfile-clean install.
@@ -169,9 +181,19 @@ ordinary runtime profile does not install quality or release tools.
 ### 5.5 CI convergence
 
 CI may continue using pinned marketplace actions for Node and Python, but host
-packages are installed through the same profile installer used locally. Every
-quality lane runs the doctor after provisioning. A workflow cannot claim green
-when the declared profile is incomplete or the doctor was skipped.
+packages are installed through the same profile installer used locally. The
+`quality (24.x)` authority job provisions the exact `.nvmrc` version and must
+emit a passing strict quality-profile doctor receipt. The existing
+`quality (25.x)` job emits a distinct compatibility-only receipt and cannot
+satisfy a host profile.
+
+Main branch protection requires both exact status contexts, and the repository's
+workflow-structure guard pins both job names and the `pull_request` and
+`merge_group` triggers. Each job fails nonzero if its required doctor receipt is
+absent, malformed, or non-passing; an absent required context therefore blocks
+merge instead of reading green. Release verification reads back the live
+required-context configuration, and inaccessible or divergent protection state
+is inconclusive.
 
 The real macOS lane runs the platform-sensitive suites from #3032. The full
 Linux authority remains responsible for Linux-only service/install behavior.
@@ -219,6 +241,23 @@ The reconciler exposes three operations:
 Machine-specific values come from validated arguments or the selected instance's
 validated configuration. Missing or ambiguous values fail before any write.
 
+Expected state comes from the canonical fleet template plus the tracked
+`deploy/health-profiles/<canonical-host>.json` record. An explicit `--profile`
+may select another tracked, schema-valid profile only when its host identity is
+bound to the target; command-line instance selection may narrow that expected
+set but cannot invent it. Missing, untracked, ambiguous, or host-mismatched
+profiles make `plan` inconclusive and block `apply`.
+
+All managed jobs are LaunchAgents in the explicit `gui/<target-uid>` bootstrap
+domain; `user/<uid>` is not a fallback. `plan` may still compare on-disk files
+when run through SSH, but it reports loaded state as inconclusive if
+`launchctl print gui/<target-uid>` cannot access the target Aqua session.
+`apply` and loaded-state `verify` require that domain to be accessible before
+any file or job mutation, and every `bootstrap`, `bootout`, and `print` call is
+bound to the same validated domain. Domain absence, target-user mismatch, or a
+session transition during the operation yields nonzero inconclusive evidence,
+not a retry in a different launchd domain.
+
 ### 6.3 Canonical fleet service
 
 A tracked template renders the canonical
@@ -241,6 +280,11 @@ paths, and template placeholders before writing either the script or plist.
 Apply changes only the selected watchdog. It backs up existing files, validates
 shell/plist syntax, bootstraps the job, and proves the loaded generation. It does
 not restart a healthy instance merely to install monitoring.
+
+Rendering and verification preserve the credential-state, freshness,
+marker/lock ownership, restart-cooldown, and final-state precedence contract
+landed in PR #2953. The reconciler consumes the tracked template and its focused
+tests; it does not reimplement or weaken that watchdog state machine.
 
 ### 6.5 Rollback
 
@@ -293,6 +337,10 @@ PR 1 begins with failing tests for:
 - pinned Node availability before the first npm step;
 - Homebrew, apt, pacman, unknown-manager, and check-only behavior;
 - missing, incompatible, PATH-hidden, optional, and not-applicable verdicts;
+- exact Node pinning, native-architecture matching, translated Node rejection,
+  and inconclusive architecture detection;
+- required CI context names/triggers and mandatory strict-versus-compatibility
+  doctor receipts;
 - Python override and version validation;
 - success-path fixture `flock` and controlled missing-`flock` behavior.
 
@@ -302,7 +350,11 @@ PR 2 begins with failing fixture tests for:
 - explicit legacy-label migration and conflict rejection;
 - absent, partial, current, and drifted instance watchdogs;
 - placeholder, port, path, and plist validation;
-- backup, idempotency, verification, and rollback boundaries.
+- tracked host-profile expected state and explicit profile mismatch rejection;
+- accessible `gui/<uid>`, inaccessible Aqua session, wrong-user, and forbidden
+  `user/<uid>` fallback behavior;
+- PR #2953 watchdog-contract preservation;
+- backup, idempotency, verification, and rollback boundaries;
 - separation of loaded-service, transport, fallback, and fresh target-context
   primary-provider verdicts;
 - stale, ambiguous, context-mismatched, and unavailable provider evidence
