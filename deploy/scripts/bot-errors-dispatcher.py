@@ -2725,6 +2725,8 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
         relay_reason = coalesce_relay_recovered(event, incident_state)
         if relay_reason is not None:
             return relay_reason
+        # #2419: relay_host_recovered now uses eventType="clear" (collector-side)
+        # so the dispatcher's standard clear-pop path closes the down incident.
     # Pattern B (Part 2) — silence incident ALERTS for a scope under a planned
     # maintenance window. CLEAR events are never gated here: a recovery during
     # maintenance must still close the incident. FAIL-OPEN: gate off, or any

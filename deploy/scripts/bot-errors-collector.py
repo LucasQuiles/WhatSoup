@@ -3209,10 +3209,13 @@ def emit_relay_host_state_event(remote: str, kind: str, evidence: str, state: di
         severity = "warning"
     else:
         severity = "info"
+    # #2419: relay_host_recovered uses event_type="clear" so the dispatcher's
+    # standard clear-pop path (mark_incident_sent) retires the paired down record.
+    event_type = "clear" if kind == "relay_host_recovered" else "alert"
     _emit_collector_outbox_event(
         remote,
         source=kind,
-        event_type="alert",
+        event_type=event_type,
         severity=severity,
         summary=f"BOT ERRORS collector relay host {kind.replace('_', ' ')}: {remote}",
         evidence=evidence,
