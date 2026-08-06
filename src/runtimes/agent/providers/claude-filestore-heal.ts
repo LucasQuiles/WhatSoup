@@ -54,7 +54,8 @@ export type ClaudeFileStoreHealOutcome =
   | 'skipped-no-keychain-token'
   | 'skipped-file-store-current'
   | 'skipped-error'
-  | 'healed';
+  | 'healed'
+  | 'shadow-detected';
 
 export interface ClaudeFileStoreHealResult {
   outcome: ClaudeFileStoreHealOutcome;
@@ -253,6 +254,20 @@ export function ensureClaudeFileStoreCredential(
       keychainExpiresAt !== null && fileExpiresAt !== null && keychainExpiresAt > fileExpiresAt;
 
     if (!fileTokenMissing && !fileTokenExpired && !keychainStrictlyNewer) {
+      // #2784: if the file-store token is fresher than the keychain token,
+      // the keychain may be shadowing the credential consumer's view.
+      const fileFresher = fileExpiresAt !== null && keychainExpiresAt !== null && fileExpiresAt > keychainExpiresAt;
+      if (fileFresher) {
+        log.warn(
+          { fileExpiresAt, keychainExpiresAt },
+          '#2784: file-store token is fresher than keychain — stale keychain OAuth may shadow credential consumer view',
+        );
+        return {
+          outcome: 'shadow-detected',
+          fileStoreExpiresAt: fileExpiresAt,
+          keychainExpiresAt,
+        };
+      }
       return {
         outcome: 'skipped-file-store-current',
         fileStoreExpiresAt: fileExpiresAt,
