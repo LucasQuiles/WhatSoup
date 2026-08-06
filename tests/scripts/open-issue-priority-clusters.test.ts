@@ -26,10 +26,10 @@ describe("open issue priority clusters", () => {
       "a18b17553c8cfcbaa07f1a57e7df1844171be955",
     );
     expect(inventory.source_registry_revision).toBe(
-      "59166b78357e129ab8140b145e304b5426bcb209",
+      "f0ece2d18883a66f04892a46669b3547e5bdf2b1",
     );
     expect(inventory.source_registry_sha256).toBe(
-      "8723a28a46976cc174a5c86abd266159e00089047952b6daeb1f2032ff8ccbe0",
+      "d07ea3ad9b50fc767482f31f3ecc43098459252fdd805c67ec88698d9d916923",
     );
     expect(inventory.counts).toEqual({
       P0: 4,

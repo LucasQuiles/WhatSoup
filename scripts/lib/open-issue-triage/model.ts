@@ -1213,16 +1213,10 @@ export function validateRegistry(
         ),
       );
     }
-    if (issue.pinned_revision !== registry.pinned_main_revision) {
-      issues.push(
-        finding(
-          issue.issue_number,
-          "pinned-revision-mismatch",
-          "pinned_revision",
-          "issue pinned_revision must match registry pinned_main_revision",
-        ),
-      );
-    }
+    // #2821: per-entry pinned_revision is authoritative — it carries the pin
+    // of the entry's own per-issue evidence file and may legitimately differ
+    // from registry.pinned_main_revision (the generation-run baseline).
+    // Uniformity with the header is no longer an invariant.
 
     if (issue.classification === "leaf") {
       if (issue.owner_boundary === null || issue.owner_boundary.length === 0) {
