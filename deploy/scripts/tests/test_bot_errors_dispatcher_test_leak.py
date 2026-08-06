@@ -655,3 +655,93 @@ class TestRunOnceTestLeakTally:
         paths = mod2.setup_dirs()
         assert "testleak" in paths, "setup_dirs must include 'testleak' key"
         assert paths["testleak"].is_dir(), "testleak dir must exist after setup_dirs"
+
+
+# ===========================================================================
+# INTEGRATION TESTS: episode-state gate in process_one (#2281)
+# ===========================================================================
+
+def _with_incident_state(paths: dict[str, Path], **overrides: Any) -> None:
+    """Set up incident-state.json with given fields using module's own persistence."""
+    state = _mod.load_incident_state(paths)
+    state.update({"currentEpisodeId": "ep-002", **overrides})
+    _mod.save_incident_state(paths, state)
+
+
+def _write_event_to_outbox(paths: dict[str, Path], event: dict[str, Any]) -> Path:
+    """Write an event to the outbox and return its path."""
+    name = f"{int(time.time())}.{event['id']}.json"
+    event_path = paths["outbox"] / name
+    event_path.write_text(json.dumps(event), encoding="utf-8")
+    event_path.chmod(0o600)
+    return event_path
+
+
+class TestEpisodeStateGate:
+    """process_one must quarantine events from a previous episode."""
+
+    def _setup(self, tmp_path, monkeypatch, current_episode="ep-002", event_episode="ep-001"):
+        """Shared setup: create paths, write incident state, write event, return (paths, event_path)."""
+        paths = _make_dirs(tmp_path)
+        monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(paths["root"]))
+        monkeypatch.setenv("BOT_ERRORS_OUTBOX_DIR", str(paths["outbox"]))
+        monkeypatch.setenv("BOT_ERRORS_JID", "12345@g.us")
+        monkeypatch.setattr(_mod, "send_whatsapp", lambda text, socket_path="": None)
+
+        _with_incident_state(paths, currentEpisodeId=current_episode)
+
+        event = _make_event(id="ep-evt-001", delivery={
+            "attempts": 1,
+            "status": "queued",
+            "nextAttemptAtEpoch": 0,
+            "episodeId": event_episode,
+        })
+        event_path = _write_event_to_outbox(paths, event)
+        return paths, event_path
+
+    def test_quarantines_old_episode_event(self, tmp_path, monkeypatch):
+        """Event from episode A when current is episode B → stale_episode_quarantined."""
+        paths, event_path = self._setup(tmp_path, monkeypatch)
+        ok, detail = _mod.process_one(event_path, paths)
+        assert ok is True, f"expected ok=True, got {ok}"
+        assert detail == "stale_episode_quarantined", (
+            f"expected stale_episode_quarantined, got {detail!r}"
+        )
+
+    def test_dispatch_log_has_quarantine_entry(self, tmp_path, monkeypatch):
+        """Quarantined event must have a dispatch log entry with type stale_episode_quarantined."""
+        paths, event_path = self._setup(tmp_path, monkeypatch)
+        _mod.process_one(event_path, paths)
+
+        log_path = paths["logs"] / "dispatch.jsonl"
+        assert log_path.exists(), "dispatch log must exist"
+        records = [json.loads(line) for line in log_path.read_text().splitlines() if line.strip()]
+        quarantine = [r for r in records if r.get("type") == "stale_episode_quarantined"]
+        assert len(quarantine) >= 1, "dispatch log must have stale_episode_quarantined entry"
+        # append_dispatch_log wraps payload in controller_log envelope;
+        # the key evidence is that the quarantined entry was written at all.
+
+    def test_current_episode_delivers_normally(self, tmp_path, monkeypatch):
+        """Event from the CURRENT episode (episodeId matches) must send normally."""
+        paths, event_path = self._setup(tmp_path, monkeypatch, current_episode="ep-001", event_episode="ep-001")
+        ok, detail = _mod.process_one(event_path, paths)
+        # Must NOT be quarantined; either sent or suppressed is fine
+        assert detail != "stale_episode_quarantined", (
+            "event with matching episodeId must not be quarantined"
+        )
+
+    def test_no_episode_id_delivers_normally(self, tmp_path, monkeypatch):
+        """Legacy event without episodeId must NOT be quarantined (backward compat)."""
+        paths = _make_dirs(tmp_path)
+        monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(paths["root"]))
+        monkeypatch.setenv("BOT_ERRORS_OUTBOX_DIR", str(paths["outbox"]))
+        monkeypatch.setenv("BOT_ERRORS_JID", "12345@g.us")
+        monkeypatch.setattr(_mod, "send_whatsapp", lambda text, socket_path="": None)
+
+        _with_incident_state(paths)
+        event = _make_event(id="ep-evt-legacy")  # no delivery.episodeId
+        event_path = _write_event_to_outbox(paths, event)
+        ok, detail = _mod.process_one(event_path, paths)
+        assert detail != "stale_episode_quarantined", (
+            "legacy event without episodeId must not be quarantined"
+        )

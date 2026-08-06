@@ -914,6 +914,9 @@ def load_incident_state(paths: dict[str, Path]) -> dict[str, Any]:
     # the FIFO-pruned archive (the false-positive root cause this ledger fixes).
     if isinstance(loaded.get("dailyHealthFreshness"), dict):
         state["dailyHealthFreshness"] = loaded["dailyHealthFreshness"]
+    # #2281: episode-state gate — current episode identity must survive reload.
+    if isinstance(loaded.get("currentEpisodeId"), str):
+        state["currentEpisodeId"] = loaded["currentEpisodeId"]
     return state
 
 
@@ -5221,6 +5224,21 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
     # (TRUTH-01) so a member consumed before ever reaching process_one still stamps
     # freshness and closes any incident its evidence recovers. absorb also stamps
     # the sourceSpecificRecoveredIncidents diagnostic itself now.
+    # --- Episode-state gate (#2281) ---
+    # If the event belongs to a previous (superseded) episode, quarantine it
+    # instead of delivering a stale alert for a condition that may no longer exist.
+    delivery = event.get("delivery")
+    if isinstance(delivery, dict) and delivery.get("episodeId") is not None:
+        current_episode = incident_state.get("currentEpisodeId")
+        if current_episode is not None and delivery["episodeId"] != current_episode:
+            append_dispatch_log(paths, {
+                "type": "stale_episode_quarantined",
+                "eventId": event.get("id"),
+                "oldEpisode": delivery["episodeId"],
+                "currentEpisode": current_episode,
+            })
+            return True, "stale_episode_quarantined"
+
     absorb_daily_health_signal(event, incident_state)
     suppress_reason = should_suppress_send(event, incident_state)
     if suppress_reason:
