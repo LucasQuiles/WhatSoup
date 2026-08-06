@@ -21,9 +21,20 @@ if [ -z "$DATA_ROOT" ]; then
 fi
 RESTART_MARKER="${DATA_ROOT}/intentional-restart.marker"
 if [ -f "$RESTART_MARKER" ] && [ -n "$(find "$RESTART_MARKER" -mmin -5 2>/dev/null)" ]; then
-    echo "heal-notify: intentional restart detected for ${INSTANCE}; suppressing crash alert" >&2
-    rm -f "$RESTART_MARKER"
-    exit 0
+    # #2511: check if the marker was rejected — if so, do NOT suppress the crash alert
+    if MARKER_JSON=$(cat "$RESTART_MARKER" 2>/dev/null); then
+        if echo "$MARKER_JSON" | grep -q '"rejected":\s*true'; then
+            echo "heal-notify: restart marker found but restart was rejected; treating as crash" >&2
+        else
+            echo "heal-notify: intentional restart detected for ${INSTANCE}; suppressing crash alert" >&2
+            rm -f "$RESTART_MARKER"
+            exit 0
+        fi
+    else
+        echo "heal-notify: intentional restart detected for ${INSTANCE}; suppressing crash alert" >&2
+        rm -f "$RESTART_MARKER"
+        exit 0
+    fi
 fi
 
 # Gather evidence

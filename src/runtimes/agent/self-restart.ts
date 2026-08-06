@@ -58,6 +58,8 @@ export interface IntentionalRestartMarker {
   requestedBy: string;
   chatJid?: string;
   pid: number;
+  /** #2511: set when the service-manager restart call rejected synchronously. */
+  rejected?: boolean;
 }
 
 /** Module-level re-entrancy guard: a second trigger in the same process is a no-op. */
@@ -157,7 +159,11 @@ export async function triggerSelfRestart(
   if (graceTimer) clearTimeout(graceTimer);
 
   if (invocationError !== undefined) {
-    log.error({ instance: opts.instance, err: invocationError }, 'service restart invocation failed; marker left in place for crash suppression');
+    // #2511: update the marker to show the restart was rejected so it cannot
+    // suppress a later unrelated crash.
+    const rejected: IntentionalRestartMarker = { ...marker, rejected: true };
+    writePrivateJsonMarkerSync(markerPath, rejected);
+    log.error({ instance: opts.instance, err: invocationError }, 'service restart invocation failed; marker marked as rejected');
     throw new Error(`self-restart failed to invoke service restart for ${opts.instance}: ${invocationError instanceof Error ? invocationError.message : String(invocationError)}`);
   }
 
@@ -182,6 +188,10 @@ export function consumeIntentionalRestartMarker(
   } catch {
     // Missing or already removed — best effort.
   }
+
+  // #2511: a rejected marker must not suppress a later crash or trigger
+  // completion — consumers treat a rejected marker as absent.
+  if (marker?.rejected) return null;
 
   return marker;
 }

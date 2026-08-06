@@ -139,6 +139,13 @@ describe('self-restart core', () => {
     })).rejects.toThrow(/restart/i);
 
     expect(existsSync(intentionalRestartMarkerPath(dataRoot))).toBe(true);
+    // #2511: rejected invocation must set rejected=true on the marker
+    const marker: Record<string, unknown> = JSON.parse(
+      readFileSync(intentionalRestartMarkerPath(dataRoot), 'utf-8'),
+    );
+    expect(marker.rejected).toBe(true);
+    // consume must return null for a rejected marker
+    expect(consumeIntentionalRestartMarker(dataRoot)).toBeNull();
   });
 
   it('consumes a fresh marker, returns it, and deletes the file', () => {
