@@ -5915,121 +5915,149 @@ def run_once(max_events: int) -> dict[str, Any]:
     lock_path = paths["locks"] / "dispatcher.lock"
     with lock_path.open("w", encoding="utf-8") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        writefail_recovered = recover_writefail_breadcrumbs(paths)
-        reclaimed = reclaim_processing(paths)
-        test_provenance_suppressed, test_provenance_meta_alerted = suppress_test_provenance_events(paths)
-        recovery_deduped = suppress_ready_recovery_duplicates(paths)
-        # Pattern F (§10 C1): count flap trips on raw input BEFORE storm-collapse
-        # consumes members. Emits consolidated flap_storm alerts; members are
-        # suppressed downstream in should_suppress_send via persisted flapState.
-        flap_storms = flap_scan_outbox(paths)
-        recovered_before_delivery = suppress_alerts_recovered_before_delivery(paths)
-        storm_collapsed = collapse_ready_storms(paths)
-        processed = 0
-        sent = 0
-        suppressed = test_provenance_suppressed + recovery_deduped + recovered_before_delivery
-        failed = 0
-        test_leak_dropped = 0
-        last_error = None
-        touched_incident_keys: set[str] = set()
-        for path in sorted(paths["outbox"].glob("*.json")):
-            if processed >= max_events:
-                break
-            if not ready(path, paths["quarantine"]):
-                continue
-            try:
-                preview = safe_read_json(path)
-                if is_incident_alert(preview) or is_incident_clear(preview):
-                    touched_incident_keys.add(incident_key(preview))
-            except Exception:
-                pass
-            processed += 1
-            ok, detail = process_one(path, paths)
-            if detail == "test_leak":
-                test_leak_dropped += 1
-            elif ok:
-                if detail == "suppressed":
-                    suppressed += 1
+        # #2723 R5.3: open controller state session BEFORE any domain effect
+        # (recover_writefail_breadcrumbs, reclaim_processing, etc.).
+        # ControllerStateRequired / recovery_required raises before ANY queue
+        # effect — the caller (run_daemon / main) catches and exits 78.
+        # The session stays open throughout the cycle so IncidentStateCycle
+        # can commit state at each save barrier.
+        with open_dispatcher_state_session() as session:
+            _load_result = session.load()
+            project_dispatcher_state_mode(_load_result.diagnostic)
+            if _load_result.mode == "recovery_required":
+                raise ControllerStateRequired(_load_result.diagnostic)
+            if _load_result.mode == "recovered":
+                _payload, _outcome = reconcile_recovered_dispatcher_state(_load_result.payload)
+                _committed = session.complete_reconciliation(
+                    _load_result.payload if _payload is None else _payload,
+                    _load_result.capability,
+                    outcome=_outcome,
+                )
+                project_dispatcher_state_mode(_committed.diagnostic)
+                _load_result = session.reload()
+                project_dispatcher_state_mode(_load_result.diagnostic)
+            if _load_result.mode not in {"bootstrap", "valid", "reconciled"}:
+                raise ControllerStateRequired(_load_result.diagnostic)
+            _incident_cycle = IncidentStateCycle(
+                session, _load_result.payload, _load_result.capability
+            )
+
+            writefail_recovered = recover_writefail_breadcrumbs(paths)
+            reclaimed = reclaim_processing(paths)
+            test_provenance_suppressed, test_provenance_meta_alerted = suppress_test_provenance_events(paths)
+            recovery_deduped = suppress_ready_recovery_duplicates(paths)
+            # Pattern F (§10 C1): count flap trips on raw input BEFORE storm-collapse
+            # consumes members. Emits consolidated flap_storm alerts; members are
+            # suppressed downstream in should_suppress_send via persisted flapState.
+            flap_storms = flap_scan_outbox(paths)
+            recovered_before_delivery = suppress_alerts_recovered_before_delivery(paths)
+            storm_collapsed = collapse_ready_storms(paths)
+            processed = 0
+            sent = 0
+            suppressed = test_provenance_suppressed + recovery_deduped + recovered_before_delivery
+            failed = 0
+            test_leak_dropped = 0
+            last_error = None
+            touched_incident_keys: set[str] = set()
+            for path in sorted(paths["outbox"].glob("*.json")):
+                if processed >= max_events:
+                    break
+                if not ready(path, paths["quarantine"]):
+                    continue
+                try:
+                    preview = safe_read_json(path)
+                    if is_incident_alert(preview) or is_incident_clear(preview):
+                        touched_incident_keys.add(incident_key(preview))
+                except Exception:
+                    pass
+                processed += 1
+                ok, detail = process_one(path, paths)
+                if detail == "test_leak":
+                    test_leak_dropped += 1
+                elif ok:
+                    if detail == "suppressed":
+                        suppressed += 1
+                    else:
+                        sent += 1
                 else:
-                    sent += 1
-            else:
-                failed += 1
-                last_error = detail
-        stale_renotified, stale_failed, stale_error = sweep_stale_incidents(paths, touched_incident_keys)
-        if stale_failed:
-            failed += stale_failed
-            last_error = stale_error
-        # Pattern F: resolve flap storms quiet beyond the stable window (one
-        # terminal "resolved after N flaps" summary each, then terminal removal).
-        flap_resolved, flap_resolve_errors = sweep_flap_storms(paths)
+                    failed += 1
+                    last_error = detail
+            stale_renotified, stale_failed, stale_error = sweep_stale_incidents(paths, touched_incident_keys)
+            if stale_failed:
+                failed += stale_failed
+                last_error = stale_error
+            # Pattern F: resolve flap storms quiet beyond the stable window (one
+            # terminal "resolved after N flaps" summary each, then terminal removal).
+            flap_resolved, flap_resolve_errors = sweep_flap_storms(paths)
 
-        # --- F5: dead-letter meta-alert (at most once per hour when dir non-empty) ---
-        dead_letter_meta_alerted = queue_dead_letter_meta_alert(paths, int(time.time()))
+            # --- F5: dead-letter meta-alert (at most once per hour when dir non-empty) ---
+            dead_letter_meta_alerted = queue_dead_letter_meta_alert(paths, int(time.time()))
 
-        # Daily test-leak summary marker (at most once per UTC date per day).
-        if test_leak_dropped > 0:
-            incident_state = load_incident_state(paths)
-            today = time.strftime("%Y-%m-%d", time.gmtime())
-            emitted = record_test_leak_daily_marker(incident_state, today, test_leak_dropped)
-            save_incident_state(paths, incident_state)
-            if emitted:
-                append_dispatch_log(paths, {
-                    "type": "test_leak_daily_summary",
-                    "date": today,
-                    "count": test_leak_dropped,
-                    "severity": "info",
-                    "source": "dispatcher",
-                })
+            # Daily test-leak summary marker (at most once per UTC date per day).
+            if test_leak_dropped > 0:
+                incident_state = _incident_cycle.payload
+                today = time.strftime("%Y-%m-%d", time.gmtime())
+                emitted = record_test_leak_daily_marker(incident_state, today, test_leak_dropped)
+                # Save only when a marker was actually emitted.
+                if emitted:
+                    _incident_cycle.commit()
+                    append_dispatch_log(paths, {
+                        "type": "test_leak_daily_summary",
+                        "date": today,
+                        "count": test_leak_dropped,
+                        "severity": "info",
+                        "source": "dispatcher",
+                    })
 
-        suppressed_pruned = prune_suppressed(paths)
+            suppressed_pruned = prune_suppressed(paths)
 
-        record_state(
-            paths,
-            lastRunAt=now_iso(),
-            cycleCompletedAt=now_iso(),
-            processed=processed,
-            sent=sent,
-            suppressed=suppressed,
-            staleRenotified=stale_renotified,
-            staleFailed=stale_failed,
-            failed=failed,
-            testLeakDropped=test_leak_dropped,
-            reclaimed=reclaimed,
-            writefailRecovered=writefail_recovered,
-            testProvenanceSuppressed=test_provenance_suppressed,
-            testProvenanceMetaAlerted=test_provenance_meta_alerted,
-            recoveryDeduped=recovery_deduped,
-            recoveredBeforeDelivery=recovered_before_delivery,
-            stormCollapsed=storm_collapsed,
-            flapStorms=flap_storms,
-            flapResolved=flap_resolved,
-            flapResolveErrors=flap_resolve_errors,
-            suppressedPruned=suppressed_pruned,
-            deadLetterMetaAlerted=dead_letter_meta_alerted,
-            lastError=last_error,
-        )
-        return {
-            "processed": processed,
-            "sent": sent,
-            "suppressed": suppressed,
-            "staleRenotified": stale_renotified,
-            "staleFailed": stale_failed,
-            "failed": failed,
-            "testLeakDropped": test_leak_dropped,
-            "reclaimed": reclaimed,
-            "writefailRecovered": writefail_recovered,
-            "testProvenanceSuppressed": test_provenance_suppressed,
-            "testProvenanceMetaAlerted": test_provenance_meta_alerted,
-            "recoveryDeduped": recovery_deduped,
-            "recoveredBeforeDelivery": recovered_before_delivery,
-            "stormCollapsed": storm_collapsed,
-            "flapStorms": flap_storms,
-            "flapResolved": flap_resolved,
-            "flapResolveErrors": flap_resolve_errors,
-            "suppressedPruned": suppressed_pruned,
-            "deadLetterMetaAlerted": dead_letter_meta_alerted,
-            "lastError": last_error,
-        }
+            record_state(
+                paths,
+                lastRunAt=now_iso(),
+                cycleCompletedAt=now_iso(),
+                processed=processed,
+                sent=sent,
+                suppressed=suppressed,
+                staleRenotified=stale_renotified,
+                staleFailed=stale_failed,
+                failed=failed,
+                testLeakDropped=test_leak_dropped,
+                reclaimed=reclaimed,
+                writefailRecovered=writefail_recovered,
+                testProvenanceSuppressed=test_provenance_suppressed,
+                testProvenanceMetaAlerted=test_provenance_meta_alerted,
+                recoveryDeduped=recovery_deduped,
+                recoveredBeforeDelivery=recovered_before_delivery,
+                stormCollapsed=storm_collapsed,
+                flapStorms=flap_storms,
+                flapResolved=flap_resolved,
+                flapResolveErrors=flap_resolve_errors,
+                suppressedPruned=suppressed_pruned,
+                deadLetterMetaAlerted=dead_letter_meta_alerted,
+                lastError=last_error,
+            )
+            return {
+                "processed": processed,
+                "sent": sent,
+                "suppressed": suppressed,
+                "staleRenotified": stale_renotified,
+                "staleFailed": stale_failed,
+                "failed": failed,
+                "testLeakDropped": test_leak_dropped,
+                "reclaimed": reclaimed,
+                "writefailRecovered": writefail_recovered,
+                "testProvenanceSuppressed": test_provenance_suppressed,
+                "testProvenanceMetaAlerted": test_provenance_meta_alerted,
+                "recoveryDeduped": recovery_deduped,
+                "recoveredBeforeDelivery": recovered_before_delivery,
+                "stormCollapsed": storm_collapsed,
+                "flapStorms": flap_storms,
+                "flapResolved": flap_resolved,
+                "flapResolveErrors": flap_resolve_errors,
+                "suppressedPruned": suppressed_pruned,
+                "deadLetterMetaAlerted": dead_letter_meta_alerted,
+                "lastError": last_error,
+            }
 
 
 def run_daemon(interval: int, max_events: int) -> None:
@@ -6039,6 +6067,13 @@ def run_daemon(interval: int, max_events: int) -> None:
             print(json.dumps({"time": now_iso(), **result}), flush=True)
         except BlockingIOError:
             print(json.dumps({"time": now_iso(), "skipped": "locked"}), flush=True)
+        except ControllerStateRequired as exc:
+            print(json.dumps({
+                "time": now_iso(),
+                "error": f"incident state recovery required: {exc.diagnostic}",
+                "exit": STATE_RECOVERY_REQUIRED_EXIT,
+            }), flush=True)
+            sys.exit(STATE_RECOVERY_REQUIRED_EXIT)
         except Exception as exc:
             paths = setup_dirs()
             record_state(paths, lastRunAt=now_iso(), processed=0, sent=0, failed=1, lastError=str(exc))
@@ -6063,7 +6098,15 @@ def main() -> int:
         run_daemon(args.interval, args.max_events)
         return 0
 
-    result = run_once(args.max_events)
+    try:
+        result = run_once(args.max_events)
+    except ControllerStateRequired as exc:
+        print(json.dumps({
+            "time": now_iso(),
+            "error": f"incident state recovery required: {exc.diagnostic}",
+            "exit": STATE_RECOVERY_REQUIRED_EXIT,
+        }))
+        return STATE_RECOVERY_REQUIRED_EXIT
     print(json.dumps(result, sort_keys=True))
     return 1 if result.get("failed") else 0
 
