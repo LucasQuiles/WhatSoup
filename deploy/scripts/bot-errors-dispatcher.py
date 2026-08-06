@@ -872,7 +872,7 @@ def quarantine_untrusted_entry(path: Path, quarantine_dir: Path, reason: str) ->
 
 
 def redact_dispatcher_text(value: Any) -> str:
-    return redact_bot_errors_text(value)
+    return redact_bot_errors_text(value, credential_path_marker="[REDACTED CREDENTIAL PATH]")
 
 
 # ---------------------------------------------------------------------------
@@ -1031,6 +1031,96 @@ class IncidentStateCycle:
         )
         self._capability = result.capability
         return result
+
+
+# ---------------------------------------------------------------------------
+# Session-backed compat wrappers for load_incident_state / save_incident_state
+# (RESTORE-COMPAT per Q53 conformance spec — preserves historical calling
+# conventions so 33+ callers work without immediate migration).
+# ---------------------------------------------------------------------------
+
+
+def load_incident_state(paths: dict[str, Path]) -> dict[str, Any]:
+    """Session-backed compat wrapper restoring the deleted function.
+
+    Opens a controller-state session at the incident-state file, loads
+    and validates the payload, and returns the state dict.  Falls back to
+    ``dispatcher_bootstrap_state()`` when the file is missing, corrupt,
+    or the session reports ``recovery_required``.
+
+    Uses ``paths["incident_state"]`` (the canonical ``state_paths()``
+    path) rather than a hardcoded ``state_root() / "incident-state.json"``
+    — preventing silent-rename drift of the same class as Task-4's
+    watchdog-state.json vs heartbeat-watchdog-state.json trap.
+    """
+    incident_path = paths.get("incident_state")
+    if incident_path is None or not incident_path.exists():
+        return dispatcher_bootstrap_state()
+    try:
+        with open_controller_state(
+            incident_path,
+            component="dispatcher-incident",
+            bootstrap=dispatcher_bootstrap_state,
+            validate_payload=validate_dispatcher_state,
+            lock_timeout_seconds=DISPATCHER_STATE_LOCK_TIMEOUT_SECONDS,
+        ) as session:
+            load_result = session.load()
+            if load_result.mode == "recovery_required":
+                return dispatcher_bootstrap_state()
+            return load_result.payload
+    except ControllerStateRequired:
+        return dispatcher_bootstrap_state()
+
+
+class _CompatPublication:
+    """Wraps ``StateCommitResult`` to satisfy ``PublicationResult`` interface.
+
+    Callers pass the return value to ``require_all_advance`` which expects
+    ``advance_allowed``, ``error_class``, and ``public_projection()``.
+    """
+
+    __slots__ = ("advance_allowed", "error_class")
+
+    def __init__(self, commit: StateCommitResult) -> None:
+        self.advance_allowed: bool = commit.mode in ("valid", "reconciled")
+        self.error_class: Any = None
+
+    def public_projection(self) -> dict[str, Any]:
+        return {"advance_allowed": self.advance_allowed}
+
+
+def save_incident_state(
+    paths: dict[str, Path],
+    state: dict[str, Any],
+) -> _CompatPublication:
+    """Session-backed compat wrapper restoring the deleted function.
+
+    Opens a controller-state session, loads to obtain the write
+    capability, sets ``updatedAt``, redacts via
+    ``redacted_dispatcher_payload``, persists via ``session.save()``,
+    and returns a ``PublicationResult`` compatible with
+    ``require_all_advance``.
+
+    Uses the canonical ``paths["incident_state"]`` path.
+    """
+    incident_path = paths.get("incident_state")
+    if incident_path is None:
+        raise ValueError("save_incident_state: paths missing incident_state key")
+    state.setdefault("updatedAt", now_iso())
+    with open_controller_state(
+        incident_path,
+        component="dispatcher-incident",
+        bootstrap=dispatcher_bootstrap_state,
+        validate_payload=validate_dispatcher_state,
+        lock_timeout_seconds=DISPATCHER_STATE_LOCK_TIMEOUT_SECONDS,
+    ) as session:
+        load_result = session.load()
+        state["updatedAt"] = now_iso()
+        commit = session.save(
+            redacted_dispatcher_payload(state),
+            load_result.capability,
+        )
+        return _CompatPublication(commit)
 
 
 def record_daily_health_freshness(event: dict[str, Any], incident_state: dict[str, Any]) -> str | None:
