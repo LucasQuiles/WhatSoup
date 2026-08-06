@@ -279,7 +279,7 @@
     },
     {
       "path": "deploy/scripts/install-bot-errors-release-proof.sh",
-      "sha256": "032b3b4d1eb001729315cf6d32614be9e0b5723a653e8f2b1140cf2731465224",
+      "sha256": "12bb97ecaa8c17ab429ddc03da78997cd7ba98a724f47724df3ba60e4a6680e4",
       "mustContain": [
         "host gate",
         "RECEIPT",
