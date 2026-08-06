@@ -180,6 +180,20 @@ def truncate(value: str, limit: int) -> str:
     return value[-limit:]
 
 
+def truncate_evidence(value: str, limit: int) -> str:
+    """Truncate evidence lines while preserving head context (#2439).
+
+    Keeps the first ``limit // 2`` characters (identifying context) and
+    the last ``limit // 2`` characters (recent output), separated by a
+    truncation marker. Prevents losing contextual headers (source=,
+    instance=, failure=, command=) when the output exceeds the limit.
+    """
+    if len(value) <= limit:
+        return value
+    half = limit // 2
+    return value[:half] + "\n...[truncated]...\n" + value[-half:]
+
+
 def safe_segment(value: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9_.:-]+", "_", value.strip()).strip("_")
     return (cleaned or "unknown")[:80]
@@ -377,10 +391,10 @@ def build_evidence(
         parts.extend(f"  {item}" for item in args.diagnostic)
     if stdout:
         parts.append("stdout_tail:")
-        parts.append(truncate(correlate_tail(stdout, args.source), limit))
+        parts.append(truncate_evidence(correlate_tail(stdout, args.source), limit))
     if stderr:
         parts.append("stderr_tail:")
-        parts.append(truncate(correlate_tail(stderr, args.source), limit))
+        parts.append(truncate_evidence(correlate_tail(stderr, args.source), limit))
     return redact("\n".join(parts))
 
 
