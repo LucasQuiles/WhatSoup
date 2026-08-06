@@ -295,6 +295,13 @@ export class RuntimeTurnSupervisor<TPostEffects> {
           this.recoveryWaiters.delete(turnId);
           recovered += 1;
           this.retryRecoveries += 1;
+          if (this.retained.size === 0 && this.blockedTurnsByScope.size === 0) {
+            // All retained work + blocked scopes resolved — emit idempotent
+            // recovery clear (#2395). No-op if no incident exists.
+            // eslint-disable-next-line @typescript-eslint/no-var-requires
+            const { clearAlertSourceChecked } = require('../../lib/emit-alert.ts');
+            clearAlertSourceChecked(this.instanceName, 'agent_turn_finalization_failed');
+          }
         } else if (result.kind === 'durable_failure_incident') {
           retained.incidentDurable = true;
           retained.mayAdvance = retained.mayAdvance || result.mayAdvance;
