@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { trackTmpDirs } from './tmp-dir.ts';
-import { resolveTestPython, TestPrerequisiteError } from './python-interpreter.ts';
+import { resolveTestPython } from './python-interpreter.ts';
 
 const tmp = trackTmpDirs('test-python-');
 
@@ -68,7 +68,7 @@ describe('resolveTestPython', () => {
 
     expect(() => resolveTestPython({
       env: { ...baseEnv(home, bin), WHATSOUP_TEST_PYTHON: join(home, 'missing') },
-    })).toThrowError(expect.objectContaining<TestPrerequisiteError>({ code: 'python-missing' }));
+    })).toThrowError(expect.objectContaining({ code: 'python-missing' }));
   });
 
   it('distinguishes a below-minimum interpreter from a failed probe', () => {
@@ -77,13 +77,13 @@ describe('resolveTestPython', () => {
     const oldPython = python(join(oldHome, 'python'), '3.11');
     expect(() => resolveTestPython({
       env: { ...baseEnv(oldHome, oldBin), WHATSOUP_TEST_PYTHON: oldPython },
-    })).toThrowError(expect.objectContaining<TestPrerequisiteError>({ code: 'python-version' }));
+    })).toThrowError(expect.objectContaining({ code: 'python-version' }));
 
     const failedHome = tmp.make('failed');
     const failedBin = join(failedHome, 'bin');
     const failedPython = python(join(failedHome, 'python'), '3.12', 9);
     expect(() => resolveTestPython({
       env: { ...baseEnv(failedHome, failedBin), WHATSOUP_TEST_PYTHON: failedPython },
-    })).toThrowError(expect.objectContaining<TestPrerequisiteError>({ code: 'python-probe-failed' }));
+    })).toThrowError(expect.objectContaining({ code: 'python-probe-failed' }));
   });
 });
