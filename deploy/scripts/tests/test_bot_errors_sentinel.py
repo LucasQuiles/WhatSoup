@@ -2529,3 +2529,167 @@ def test_p1_run_once_result_and_heartbeat_carry_metrics(tmp_path: Path):
     # Persisted to the central heartbeat so it is observable off-host.
     heartbeat = json.loads(_mod.heartbeat_path(config).read_text(encoding="utf-8"))
     assert heartbeat["metrics"]["hostsEvaluated"] == 1
+
+
+# ===========================================================================
+# TESTS: action outbox consumer (#2471)
+# ===========================================================================
+
+def test_execute_action_escalate_no_error(capsys):
+    """escalate action logs the reason to stderr and does not raise."""
+    action = {"action": "escalate", "reason": "test escalation"}
+    _mod.execute_action(action)
+    assert "escalation: test escalation" in capsys.readouterr().err
+
+
+def test_execute_action_unknown_does_not_raise(capsys):
+    """Unknown action type logs and returns, not raises."""
+    action = {"action": "nonexistent", "param": "value"}
+    _mod.execute_action(action)
+    assert "unknown action type 'nonexistent'" in capsys.readouterr().err
+
+
+def test_execute_action_rejects_flag_shaped_host():
+    """A host that could smuggle argv flags into systemctl is rejected."""
+    import pytest as _pytest
+    for bad in ("--force", "a b", "unit/../x"):
+        with _pytest.raises(ValueError) as excinfo:
+            _mod.execute_action({"action": "restart_host", "host": bad})
+        assert "invalid host" in str(excinfo.value), bad
+
+
+def test_consume_action_outbox_empty(tmp_path):
+    """Empty action outbox must return 0 and not raise."""
+    hosts = tmp_path / "hosts.json"
+    hosts.write_text("[]", encoding="utf-8")
+    config = _config(tmp_path, hosts)
+    consumed = _mod.consume_action_outbox(config)
+    assert consumed == 0, "empty outbox must consume 0"
+
+
+def test_consume_action_outbox_leaves_non_remediation_files_untouched(tmp_path):
+    """Only allowlisted remediation actions are consumed; clear/ack event
+    records and unknown types stay in place for their own readers."""
+    hosts = tmp_path / "hosts.json"
+    hosts.write_text("[]", encoding="utf-8")
+    config = _config(tmp_path, hosts, action_outbox_dir=tmp_path / "actions")
+    outbox = tmp_path / "actions"
+    outbox.mkdir(parents=True)
+    clear_file = outbox / "1010-host-a-clear.json"
+    clear_file.write_text('{"action": "clear", "host": "host-a"}', encoding="utf-8")
+    unknown_file = outbox / "test-action.json"
+    unknown_file.write_text('{"action": "invalid", "param": "x"}', encoding="utf-8")
+
+    consumed = _mod.consume_action_outbox(config)
+    assert consumed == 0, "non-remediation files must not be consumed"
+    assert clear_file.exists(), "clear event record must be left untouched"
+    assert unknown_file.exists(), "unknown action type must be left untouched"
+    assert not list(outbox.glob("*.done")) and not list(outbox.glob("*.failed"))
+
+
+def test_consume_action_outbox_leaves_escalate_for_redeem_flow(tmp_path):
+    """Escalate records carry q-remediation tokens consumed by the redeem
+    CLI — the outbox consumer must never eat them."""
+    hosts = tmp_path / "hosts.json"
+    hosts.write_text("[]", encoding="utf-8")
+    config = _config(tmp_path, hosts, action_outbox_dir=tmp_path / "actions")
+    outbox = tmp_path / "actions"
+    outbox.mkdir(parents=True)
+    action_file = outbox / "escalate.json"
+    action_file.write_text('{"action": "escalate", "reason": "r"}', encoding="utf-8")
+
+    consumed = _mod.consume_action_outbox(config)
+    assert consumed == 0
+    assert action_file.exists(), "escalate record must remain for redeem flow"
+
+
+def test_execute_action_restart_missing_host_raises():
+    """restart_host without a host is a hard error."""
+    import pytest as _pytest
+    with _pytest.raises(ValueError) as excinfo:
+        _mod.execute_action({"action": "restart_host"})
+    assert "missing 'host'" in str(excinfo.value)
+
+
+def test_execute_action_restart_requires_linux(monkeypatch):
+    """On non-linux platforms restart_host fails closed instead of shelling systemctl."""
+    import pytest as _pytest
+    import sys as _sys
+    monkeypatch.setattr(_sys, "platform", "darwin")
+    with _pytest.raises(RuntimeError) as excinfo:
+        _mod.execute_action({"action": "restart_host", "host": "wa-bot-x"})
+    assert "requires linux" in str(excinfo.value)
+
+
+def test_execute_action_restart_nonzero_rc_raises(tmp_path, monkeypatch):
+    """A failing systemctl restart surfaces as RuntimeError with the rc."""
+    import os as _os
+    import pytest as _pytest
+    import sys as _sys
+    monkeypatch.setattr(_sys, "platform", "linux")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake = fake_bin / "systemctl"
+    fake.write_text("#!/bin/sh\necho boom\nexit 1\n", encoding="utf-8")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}:{_os.environ.get('PATH', '')}")
+    with _pytest.raises(RuntimeError) as excinfo:
+        _mod.execute_action({"action": "restart_host", "host": "wa-bot-x"})
+    assert "failed rc=1" in str(excinfo.value)
+
+
+def test_consume_action_outbox_failed_action_renamed_failed(tmp_path, monkeypatch):
+    """A remediation whose execution fails is disposed .failed, not retried forever."""
+    import os as _os
+    import sys as _sys
+    monkeypatch.setattr(_sys, "platform", "linux")
+    hosts = tmp_path / "hosts.json"
+    hosts.write_text("[]", encoding="utf-8")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake = fake_bin / "systemctl"
+    fake.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}:{_os.environ.get('PATH', '')}")
+    config = _config(tmp_path, hosts, action_outbox_dir=tmp_path / "actions")
+    outbox = tmp_path / "actions"
+    outbox.mkdir(parents=True)
+    (outbox / "restart.json").write_text(
+        '{"action": "restart_host", "host": "wa-bot-x"}', encoding="utf-8"
+    )
+
+    consumed = _mod.consume_action_outbox(config)
+    assert consumed == 0
+    assert len(list(outbox.glob("*.failed"))) == 1
+    assert not list(outbox.glob("*.json"))
+
+
+def test_consume_action_outbox_consumes_restart_host(tmp_path, monkeypatch):
+    """restart_host is executed via systemctl and terminally disposed .done."""
+    import os as _os
+    import stat as _stat
+    import sys as _sys
+    monkeypatch.setattr(_sys, "platform", "linux")
+    hosts = tmp_path / "hosts.json"
+    hosts.write_text("[]", encoding="utf-8")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_systemctl = fake_bin / "systemctl"
+    ledger = tmp_path / "systemctl-calls.log"
+    fake_systemctl.write_text(
+        f"#!/bin/sh\necho \"$@\" >> {ledger}\nexit 0\n", encoding="utf-8"
+    )
+    fake_systemctl.chmod(fake_systemctl.stat().st_mode | _stat.S_IEXEC)
+    monkeypatch.setenv("PATH", f"{fake_bin}:{_os.environ.get('PATH', '')}")
+
+    config = _config(tmp_path, hosts, action_outbox_dir=tmp_path / "actions")
+    outbox = tmp_path / "actions"
+    outbox.mkdir(parents=True)
+    action_file = outbox / "restart.json"
+    action_file.write_text('{"action": "restart_host", "host": "wa-bot-x"}', encoding="utf-8")
+
+    consumed = _mod.consume_action_outbox(config)
+    assert consumed == 1
+    assert not action_file.exists()
+    assert len(list(outbox.glob("*.done"))) == 1
+    assert "restart -- wa-bot-x" in ledger.read_text(encoding="utf-8")

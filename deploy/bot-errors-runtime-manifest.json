@@ -219,7 +219,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-sentinel.py",
-      "sha256": "d67d085fff77d9256a5a65de076d19ebfb33d9d6e94f5f9d963d4ec603d4dfb9",
+      "sha256": "dc3d823c81bf03f929a35adb7f4aa49965ab8fd61118eaba31c0e2114d1e156e",
       "mustContain": [
         "DEFAULT_HEARTBEAT_MAX_AGE_SECONDS",
         "DEFAULT_HYSTERESIS_CYCLES"

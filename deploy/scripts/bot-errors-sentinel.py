@@ -396,10 +396,80 @@ def action_outbox_dir(config: SentinelConfig) -> Path:
     return config.action_outbox_dir or config.state_dir / "actions"
 
 
+def execute_action(action: dict[str, Any]) -> None:
+    """Execute a sentinel remediation action.
+
+    Supported action types:
+    - ``restart_host`` (host: str) — systemctl restart the host.
+    - ``escalate`` (reason: str) — log the escalation; actual alerting is
+      handled separately.
+    """
+    action_type = action.get("action") if isinstance(action, dict) else None
+    if action_type == "restart_host":
+        host = str(action.get("host", ""))
+        if not host:
+            raise ValueError("restart_host action missing 'host'")
+        if host.startswith("-") or "/" in host or any(c.isspace() for c in host):
+            raise ValueError(f"restart_host: invalid host {host!r}")
+        if sys.platform != "linux":
+            raise RuntimeError("restart_host requires linux/systemd")
+        proc = subprocess.run(
+            ["systemctl", "restart", "--", host],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            timeout=60, check=False,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(f"restart_host {host} failed rc={proc.returncode}: {proc.stdout[-200:]}")
+    elif action_type == "escalate":
+        reason = str(action.get("reason", "no reason given"))
+        print(f"[bot-errors-sentinel] escalation: {reason}", file=sys.stderr)
+    else:
+        print(f"[bot-errors-sentinel] unknown action type {action_type!r}", file=sys.stderr)
+
+
+EXTERNAL_REMEDIATION_ACTIONS = ("restart_host",)
+
+
+def consume_action_outbox(config: SentinelConfig) -> int:
+    """Consume pending external remediation actions from the action outbox.
+
+    Dispatches only the action types this consumer actually executes
+    (``EXTERNAL_REMEDIATION_ACTIONS``), renaming each file to ``.done`` on
+    success or ``.failed`` on error. Every other file is left untouched:
+    escalate / q-remediation records carry tokens whose consumer is the
+    redeem CLI (prune is their terminal disposition), clear/ack event records
+    have their own readers, and internal actions have their own consumers —
+    a broader match here once consumed clear-event and token files those
+    flows depended on. Returns the count of consumed actions.
+    """
+    outbox = action_outbox_dir(config)
+    consumed = 0
+    try:
+        for entry in sorted(outbox.iterdir()):
+            if entry.suffix != ".json" or entry.name.startswith("."):
+                continue
+            try:
+                action = json.loads(entry.read_text(encoding="utf-8"))
+                action_type = action.get("action") if isinstance(action, dict) else None
+                if action_type not in EXTERNAL_REMEDIATION_ACTIONS:
+                    continue
+                execute_action(action)
+                entry.rename(entry.with_suffix(".done"))
+                consumed += 1
+            except Exception as exc:
+                print(f"[bot-errors-sentinel] action consume failed {entry.name}: {exc}", file=sys.stderr)
+                entry.rename(entry.with_suffix(".failed"))
+    except FileNotFoundError:
+        pass
+    return consumed
+
+
 def prune_action_outbox(config: SentinelConfig) -> int:
     """Bound the action outbox: keep the newest ``action_outbox_retention``
-    files by mtime and delete the rest. The outbox has no consumer, so without
-    this sweep it grows without bound (inode/disk exhaustion). Returns the
+    files by mtime and delete the rest. ``consume_action_outbox`` renames
+    processed actions to ``.done``/``.failed`` rather than deleting them, and
+    internal action types are skipped entirely, so without this sweep the
+    directory still grows without bound (inode/disk exhaustion). Returns the
     outbox depth after pruning."""
     outbox = action_outbox_dir(config)
     retention = max(0, config.action_outbox_retention)
@@ -1802,8 +1872,10 @@ def run_once(config: SentinelConfig, deps: Optional[SentinelDeps] = None) -> dic
     # Advance a generation counter so workers can detect stale events.
     state["cycleSeq"] = int_or_zero(state.get("cycleSeq")) + 1
     action_events = emit_action_events(results, state, config, now, controller_host, fleet_action, oracle)
-    # Bound the outbox at cycle end: it has no consumer, so prune to the newest
-    # N files and surface the resulting depth for observability.
+    # Consume pending actions from the outbox, then prune remaining .done/
+    # .failed files.  The consumer reads .json, executes, and renames to .done
+    # or .failed so the same action is not consumed twice.
+    action_outbox_depth = consume_action_outbox(config)
     action_outbox_depth = prune_action_outbox(config)
     sweep_started_at = now_iso(now)
     sweep_ended_epoch = deps.now_epoch()
