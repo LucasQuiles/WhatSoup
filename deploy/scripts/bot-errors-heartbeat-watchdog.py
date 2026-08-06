@@ -401,7 +401,7 @@ def read_collector_state_snapshot() -> StateReadResult | None:
         return read_controller_state(
             coll_path,
             component="collector",
-            validate_payload=lambda p: p if isinstance(p, dict) and "open" in p else {},
+            validate_payload=lambda p: p if isinstance(p, dict) else {},
             lock_timeout_seconds=5,
         )
     except (OSError, json.JSONDecodeError):
@@ -1500,8 +1500,11 @@ def collector_reachability_evidence(host: str) -> str:
     execution while making a cadence alert actionable. Network addresses and
     arbitrary target lists are deliberately excluded.
     """
-    data = load_json(state_root() / "collector-state.json", require_private=True)
-    remotes = data.get("remotes") if isinstance(data, dict) else None
+    snap = read_collector_state_snapshot()
+    if snap is None or snap.mode not in ("valid", "legacy_valid"):
+        return ""
+    data = snap.payload if isinstance(snap.payload, dict) else {}
+    remotes = data.get("remotes") if data else None
     remote = remotes.get(host) if isinstance(remotes, dict) else None
     if not isinstance(remote, dict):
         return ""
@@ -1564,9 +1567,13 @@ def collector_roster_drift_problem() -> str | None:
         _roster_data, inventory = load_roster()
     except RosterError as exc:
         return f"collector roster comparison unavailable: roster unreadable: {exc}"
-    data = load_json(collector_path, require_private=True)
-    if data is None:
-        return f"collector roster drift: collector-state config-unreadable path={collector_path}"
+    snap = read_collector_state_snapshot()
+    if snap is None or snap.mode not in ("valid", "legacy_valid"):
+        return (
+            f"collector roster drift: collector-state "
+            f"config-unreadable mode={snap.mode if snap else 'unavailable'}"
+        )
+    data = snap.payload if isinstance(snap.payload, dict) else {}
     roster_required = set(inventory["collectorRemoteHosts"])
     roster_all = set(inventory["expectedHosts"])
     configured = set(collector_configured_hosts())
