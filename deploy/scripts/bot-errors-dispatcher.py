@@ -5995,7 +5995,6 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
         return False, f"{exc}; email_fallback={email_status}"
 
     mark_incident_sent(event, incident_state)
-    incident_publication = save_incident_state(paths, incident_state)
     event = mark_sent(event)
     sent_target = _durable_target(claimed)
     sent_observation = observe_json(sent_target)
@@ -6014,7 +6013,12 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
         expected=sent_observation.version,
         generation=sent_generation,
     )
-    require_all_advance([incident_publication, sent_publication])
+    if incident:
+        incident.commit()
+        require_all_advance([sent_publication])
+    else:
+        incident_publication = save_incident_state(paths, incident_state)
+        require_all_advance([incident_publication, sent_publication])
     sent_path = archive_path(paths["sent"], path.name, "sent", event)
     os.replace(claimed, sent_path)
     append_dispatch_log(paths, {
