@@ -43,6 +43,15 @@ from lib.durable_json import (
     publish_state_json,
     require_advance,
 )
+from lib.controller_state import (
+    ControllerStateRequired,
+    STATE_RECOVERY_REQUIRED_EXIT,
+    open_controller_state,
+    read_controller_state,
+    StateComponent,
+    StateMode,
+    StateReadResult,
+)
 
 
 DEFAULT_CHECKS = "q_loop,dispatcher,collector,daily_health,queue_backlog,local_services,local_instance_health,browser_debug"
