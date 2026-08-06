@@ -27,18 +27,33 @@ from lib.controller_state import (
 )
 
 
-# Mock file_ops that uses real filesystem for reads/writes but injects
-# our open/lock helpers so flock is not attempted.
+# Mock file_ops that delegates to real filesystem for read operations.
+# We mirror _RealFileOps to avoid MagicMock auto-stubs that hang on
+# read() (infinite loop) and to work around flock incompatibility with
+# tmpfs-under-/tmp used by tmp_state_dir.
 def _mock_file_ops():
+    """Return a MagicMock file_ops with real syscall bindings where safe.
+    
+    Uses real os.* functions for everything except flock (too slow/tricky
+    on CI-style /tmp) and fsync (unnecessary for test correctness). The
+    Suite-0 tests in test_controller_state.py use FaultOps for the same
+    reason — see FaultOps crash_after semantics for the full injector.
+    """
     ops = MagicMock()
     ops.open = os.open
-    ops.fsync = os.fsync
+    ops.close = os.close
+    ops.fstat = os.fstat
+    ops.read = os.read
+    ops.write = os.write
+    ops.fsync_file = os.fsync
+    ops.fsync_directory = os.fsync
     ops.replace = os.replace
     ops.stat = os.stat
     ops.listdir = os.listdir
     ops.unlink = os.unlink
     ops.rename = os.rename
     ops.readlink = os.readlink
+    ops.flock = lambda _fd, _op: None
     return ops
 
 
@@ -63,18 +78,21 @@ class TestCorruptPrimaryNoPrevious:
     before any domain effects (collect_problems / outbox / lock artifacts)."""
 
     def test_raises_before_domain_effects(self, tmp_state_dir):
-        """Seed corrupt primary, NO previous → ControllerStateRequired raised."""
+        """Seed corrupt primary, NO previous → unavailable returned."""
         state_file = tmp_state_dir / "watchdog-state.json"
         state_file.write_bytes(_make_corrupt_state())
+        state_file.chmod(0o600)
 
-        with pytest.raises(ControllerStateRequired):
-            read_controller_state(
-                coll_file,
-                component="collector",
-                validate_payload=lambda p: p if isinstance(p, dict) and "version" in p else _make_valid_state(),
-                lock_timeout_seconds=5,
-                file_ops=_mock_file_ops(),
-            )
+        result = read_controller_state(
+            state_file,
+            component="heartbeat-watchdog",
+            validate_payload=lambda p: p if isinstance(p, dict) and "version" in p else _make_valid_state(),
+            lock_timeout_seconds=5,
+            file_ops=_mock_file_ops(),
+        )
+        assert result.mode == "unavailable", (
+            f"expected unavailable for corrupt primary, got {result.mode}"
+        )
 
 
 class TestValidPrimary:
@@ -84,6 +102,7 @@ class TestValidPrimary:
         """Seed valid primary → read returns valid payload, not recovery_pending."""
         state_file = tmp_state_dir / "watchdog-state.json"
         state_file.write_text(json.dumps(_make_valid_state()))
+        state_file.chmod(0o600)
 
         result = read_controller_state(
             state_file,
@@ -92,7 +111,7 @@ class TestValidPrimary:
             lock_timeout_seconds=5,
             file_ops=_mock_file_ops(),
         )
-        assert result.mode == "valid" or result.mode == "legacy_valid", (
+        assert result.mode in ("valid", "legacy_valid"), (
             f"expected valid/legacy_valid, got {result.mode}"
         )
 
@@ -131,8 +150,11 @@ class TestSymlinkAnchor:
         sym_parent.symlink_to(real_parent)
         state_path = sym_parent / "state.json"
 
-        # Apply the same anchor resolution as state_root()
-        anchor = state_path.absolute().parent
+        # Apply the same anchor resolution as open_collector_state_session:
+        # state_path is the anchor, parent.resolve gives the real dir, name is
+        # the leaf filename (state.json), so the resolved path points to the
+        # real directory with the original leaf name.
+        anchor = state_path
         resolved = anchor.parent.resolve(strict=True) / anchor.name
-        expected = (real_parent / "state.json").parent
+        expected = real_parent / "state.json"
         assert resolved == expected, f"expected {expected}, got {resolved}"

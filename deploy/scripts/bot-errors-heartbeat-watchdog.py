@@ -2496,13 +2496,44 @@ def run_once(args: argparse.Namespace) -> int:
         print(f"configuration_error: {exc}", file=sys.stderr)
         print(json.dumps({"time": now_iso(), "verdict": "configuration_error", "error": str(exc)}, sort_keys=True))
         return 2
-    # #2723 R4.2: open state session before domain effects (collect_problems)
+    # #2723 R4.2/R4.3: open state session before domain effects (collect_problems).
+    # Load/inspect mode, reconcile recovered state per _load_collector_state_for_cycle
+    # pattern.  ControllerStateRequired raises before any domain effect.
     try:
         with open_watchdog_state_session() as session:
-            _session_state = session  # noqa: F841 — session active throughout cycle
+            _load_result = session.load()
+            project_watchdog_state_mode(_load_result.diagnostic)
+            if _load_result.mode == "recovery_required":
+                raise ControllerStateRequired(_load_result.diagnostic)
+            if _load_result.mode == "recovered":
+                # Payload is already validated by the session's validate_payload
+                # lambda; call reconcile_recovered_watchdog_state for the
+                # validated_previous_only semantic, then accept as-is.
+                reconcile_recovered_watchdog_state(session)
+                _committed = session.complete_reconciliation(
+                    _load_result.payload,
+                    _load_result.capability,
+                    outcome="validated_previous_only",
+                )
+                project_watchdog_state_mode(_committed.diagnostic)
+                _load_result = session.reload()
+                project_watchdog_state_mode(_load_result.diagnostic)
+            if _load_result.mode not in {"bootstrap", "valid", "reconciled"}:
+                raise ControllerStateRequired(_load_result.diagnostic)
+            # #2723 R4.2b: extract state + capability from session load result
+            # for the new reconcile signature (state/session/capability-injected).
+            _state = _load_result.payload
+            _capability = _load_result.capability
             evaluated_instances: set[str] = set()
             problems = collect_problems(args, checks, evaluated_instances)
-            written = reconcile(problems, active_reconcile_prefixes(checks), evaluated_instances)
+            written = reconcile(
+                problems,
+                active_reconcile_prefixes(checks),
+                _state,
+                session,
+                _capability,
+                evaluated_instances,
+            )
             print(json.dumps({
                 "time": now_iso(),
                 "problems": sorted(problems),
