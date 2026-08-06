@@ -44,10 +44,10 @@ if [ -z "$NVMRC_VERSION" ]; then
   exit 1
 fi
 
-# Validate format: .nvmrc must start with a digit (e.g. "24.15.0").
+# Validate format: .nvmrc must be an exact dotted version (e.g. "24.15.0").
 # Reject alias forms like "lts/iron" that nvm resolves but which the wrapper
 # version gate doesn't accept.
-if [[ "$NVMRC_VERSION" != [0-9]* ]]; then
+if [[ ! "$NVMRC_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   echo "FATAL: ensure-node-installed: .nvmrc contains non-numeric version '$NVMRC_VERSION' (expected dotted version like 24.15.0)" >&2
   exit 1
 fi
@@ -57,12 +57,24 @@ NVM_ROOT="${NVM_DIR:-$HOME/.nvm}"
 LOCAL_NODE="$NVM_ROOT/versions/node/v$NVMRC_VERSION/bin/node"
 NVM_SH="$NVM_ROOT/nvm.sh"
 
-if [ -x "$LOCAL_NODE" ]; then
+verify_local_node() {
+  local observed
+  [ -x "$LOCAL_NODE" ] || return 1
+  observed="$($LOCAL_NODE --version 2>/dev/null || true)"
+  [ "$observed" = "v$NVMRC_VERSION" ]
+}
+
+if verify_local_node; then
   echo "ensure-node-installed: v$NVMRC_VERSION already present at $LOCAL_NODE; skipping nvm install" >&2
   exit 0
 fi
 
 if [ ! -f "$NVM_SH" ]; then
+  if [ -x "$LOCAL_NODE" ]; then
+    observed_version="$($LOCAL_NODE --version 2>/dev/null || true)"
+    echo "FATAL: ensure-node-installed: $LOCAL_NODE reports '${observed_version:-unknown}'; expected v$NVMRC_VERSION" >&2
+    exit 1
+  fi
   echo "ensure-node-installed: nvm not found at $NVM_SH; skipping pre-install (wrapper's version gate will enforce compatibility at exec)" >&2
   exit 0
 fi
@@ -86,4 +98,12 @@ set +u
 install_status=0
 nvm install "$NVMRC_VERSION" --no-progress || install_status=$?
 set -u
-exit "$install_status"
+if [ "$install_status" -ne 0 ]; then
+  exit "$install_status"
+fi
+if ! verify_local_node; then
+  observed_version="$($LOCAL_NODE --version 2>/dev/null || true)"
+  echo "FATAL: ensure-node-installed: nvm install completed but $LOCAL_NODE reports '${observed_version:-unavailable}'; expected v$NVMRC_VERSION" >&2
+  exit 1
+fi
+exit 0

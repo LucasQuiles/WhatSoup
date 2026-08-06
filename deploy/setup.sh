@@ -103,11 +103,13 @@ require_readable_bot_errors_health_profile() {
 }
 
 if [ "${1:-}" = "--check" ]; then
+  [ "$#" -eq 1 ] || { echo "--check cannot be combined with other options" >&2; exit 2; }
   # macOS hosts have no systemd user dir — tolerate the documented skip
   # (exit 3 without the flag) instead of failing every Darwin --check.
   exec "$REPO_ROOT/scripts/check-unit-drift.sh" --allow-missing-systemd-dir
 fi
 if [ "${1:-}" = "--remove-timers" ]; then
+  [ "$#" -eq 1 ] || { echo "--remove-timers cannot be combined with other options" >&2; exit 2; }
   if [ "$PLATFORM" != "Darwin" ]; then
     echo "--remove-timers applies to macOS launchd timers only." >&2
     echo "On Linux, disable the systemd timers instead:" >&2
@@ -129,8 +131,14 @@ if [ "${1:-}" = "--remove-timers" ]; then
 fi
 if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
   cat <<'USAGE'
-Usage: deploy/setup.sh [--check | --remove-timers]
+Usage: deploy/setup.sh [--profile <runtime|quality|release>] [--install-host-dependencies] [--yes]
+       deploy/setup.sh [--check | --remove-timers]
 
+  --profile PROFILE  Validate the runtime, quality, or release capability profile.
+  --install-host-dependencies
+                     Apply the explicit host package plan before setup.
+  --yes              Confirm the host package plan non-interactively; valid only
+                     with --install-host-dependencies.
   --check          Compare checked-in systemd units with installed user units.
   --remove-timers  macOS only: remove the launchd maintenance timer plists from
                    ~/Library/LaunchAgents. Prints the bootout commands to unload
@@ -139,8 +147,58 @@ USAGE
   exit 0
 fi
 
+profile=runtime
+install_host_dependencies=0
+assume_yes=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --profile)
+      [ "$#" -ge 2 ] || { echo "--profile requires a value" >&2; exit 2; }
+      profile="$2"
+      shift 2
+      ;;
+    --install-host-dependencies)
+      install_host_dependencies=1
+      shift
+      ;;
+    --yes)
+      assume_yes=1
+      shift
+      ;;
+    *)
+      echo "Unknown setup option: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+case "$profile" in
+  runtime|quality|release) ;;
+  *) echo "Unsupported setup profile: $profile" >&2; exit 2 ;;
+esac
+if [ "$assume_yes" -eq 1 ] && [ "$install_host_dependencies" -ne 1 ]; then
+  echo "--yes requires --install-host-dependencies" >&2
+  exit 2
+fi
+
 echo "WhatSoup Setup"
 echo "=============="
+echo ""
+
+installer_args=(--profile "$profile")
+bash "$REPO_ROOT/deploy/scripts/install-host-dependencies.sh" "${installer_args[@]}"
+bash "$REPO_ROOT/deploy/scripts/ensure-node-installed.sh"
+pinned_version="$(tr -d '[:space:]' < "$REPO_ROOT/.nvmrc")"
+pinned_bin="${NVM_DIR:-$HOME/.nvm}/versions/node/v${pinned_version}/bin"
+if [ -x "$pinned_bin/node" ]; then
+  PATH="$pinned_bin:$PATH"
+  export PATH
+fi
+if [ "$install_host_dependencies" -eq 1 ]; then
+  installer_args+=(--apply)
+  [ "$assume_yes" -eq 1 ] && installer_args+=(--yes)
+  bash "$REPO_ROOT/deploy/scripts/install-host-dependencies.sh" "${installer_args[@]}"
+fi
+bash "$REPO_ROOT/deploy/scripts/whatsoup-host-doctor.sh" --profile "$profile"
 echo ""
 
 # ── Step 1: Check requirements ──────────────────────────────────────

@@ -76,7 +76,7 @@ cd console && npm run build        # Outputs to dist/, served by fleet server
 
 ### Host deployment (systemd / launchd)
 
-- **Node.js >= 24.0.0 and < 26** (pinned to `24.15.0` via `.nvmrc` / `volta` / `packageManager`) — native `--experimental-strip-types`, no transpilation (`node -v` to check)
+- **Node.js `24.15.0` on host deployments** — setup requires the exact native-architecture `.nvmrc` build before invoking npm. The `>=24 <26` engine range remains a compatibility contract tested separately on Node 25; it is not a host-readiness substitute.
 - **Linux with systemd** — user units for process management (`systemctl --user`); enable lingering for headless servers: `loginctl enable-linger $USER`
 - **macOS with launchd** — per-user `LaunchAgents` plists for the fleet and each instance; see the [macOS subsection](#macos-launchd) below
 - **GNOME Keyring** (`libsecret-tools`) on Linux, macOS Keychain on Darwin, or environment variables for API keys — the Linux setup script checks GNOME Keyring; the macOS runbook covers Keychain-backed secrets
@@ -89,30 +89,35 @@ WhatSoup auto-detects the host platform via `src/fleet/platform.ts` (`linux-syst
 - **Canonical operator runbook:** [docs/runbooks/macos-launchd-deployment.md](docs/runbooks/macos-launchd-deployment.md) — plist patterns (`com.whatsoup.<instance>.plist`, `com.whatsoup.fleet.plist`), Keychain-backed secrets, `PATH` handling for Homebrew Node, and per-instance health-token files.
 - **Service template:** `deploy/whatsoup@.service` is the systemd template; the matching launchd plists are generated per-instance under the `deploy:launchd.generated` public surface (see [docs/public-surface.md](docs/public-surface.md) — regeneration is non-destructive by policy).
 - **Platform-detection seam:** `src/fleet/platform.ts` is the single source of truth for which service manager runs — override with `WHATSOUP_DOCKER=1` to force the supervisor path inside containers.
-- The [Quick Start](#quick-start) below targets Linux/systemd as the primary path; macOS operators should follow the runbook for plist installation and `launchctl kickstart` lifecycle checks after `npm ci`.
+- The [Quick Start](#quick-start) below performs the portable host checks on Linux and macOS. macOS operators should then follow the launchd runbook for plist installation and `launchctl kickstart` lifecycle checks.
 
 ### Docker deployment
 
 - **Docker** with Compose V2 (`docker compose version`)
 - No Node.js, systemd, or keyring required — the image bundles everything
 
-> **Dependency policy:** Production and dev dependencies in `package.json` and `console/package.json` use caret-range constraints; reproducibility is enforced by the committed `package-lock.json` files, which pin every direct and transitive version. Always use `npm ci` (not `npm install`) in CI and on fresh checkouts so the lockfile is honored exactly. Lockfile updates are reviewed before merge as the supply-chain boundary.
+> **Dependency policy:** Production and dev dependencies in `package.json` and `console/package.json` use caret-range constraints; reproducibility is enforced by the committed `package-lock.json` files, which pin every direct and transitive version. Setup runs `npm ci` after proving the pinned Node runtime. When installing JavaScript dependencies directly, use `npm ci` (not `npm install`). Lockfile updates are reviewed before merge as the supply-chain boundary.
 
 ## Quick Start
 
 ```bash
-# 1. Clone and install
+# 1. Clone
 git clone https://github.com/LucasQuiles/WhatSoup.git
 cd WhatSoup
-npm ci
 
-# 2. Run setup (installs systemd unit, wrapper scripts, builds console)
-npm run setup
+# 2. Inspect the runtime prerequisites without changing the host
+bash deploy/scripts/whatsoup-host-doctor.sh --profile runtime
 
-# 3. Start the fleet server
+# 3. Run setup; review and confirm its explicit host-package plan
+bash deploy/setup.sh --profile runtime --install-host-dependencies
+
+# 4. Prove the stricter developer/CI tool profile when needed
+bash deploy/scripts/whatsoup-host-doctor.sh --profile quality
+
+# 5. Start the fleet server
 npm run fleet
 
-# 4. Open http://localhost:9099 and create your first instance
+# 6. Open http://localhost:9099 and create your first instance
 #    Click "Add Line" → choose a type → scan the QR code with WhatsApp
 ```
 
@@ -122,7 +127,9 @@ token is auto-generated on first run and stored at
 prints only a prefix). See [docs/console-guide.md](docs/console-guide.md) for
 console authentication details.
 
-The setup script installs the systemd template unit, symlinks the wrapper script to `~/.local/bin`, builds the console, and checks for API keys in your keyring. After setup, `npm run fleet` is the only command you need — everything else is managed from the browser.
+The doctor has three profiles: `runtime` covers the deployed service, `quality` adds Python 3.12, ripgrep, zsh, and ShellCheck, and `release` adds GNU timeout plus Linux-only `flock`. A result of `path_hidden` means the executable exists in a service search root but not in the invoking shell. Setup never installs host packages unless `--install-host-dependencies` is present and confirmed. Python test tooling lives in `${XDG_DATA_HOME:-$HOME/.local/share}/whatsoup/quality-venv` with mode `0700`. JavaScript tests provide their own `flock` fixture on macOS; the external binary remains a Linux release-proof requirement. The Node 25 CI lane is explicitly `compatibility_only` and cannot satisfy strict host readiness.
+
+After readiness passes, setup installs the service templates, symlinks wrapper scripts to `~/.local/bin`, installs lockfile-pinned JavaScript dependencies, builds the console, and checks for API keys in the platform credential store. After setup, `npm run fleet` is the only command you need — everything else is managed from the browser.
 
 ### Docker Quick Start
 

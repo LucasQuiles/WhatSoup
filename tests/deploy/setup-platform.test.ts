@@ -48,6 +48,16 @@ function writeHealthProfile(file: string): void {
 }
 
 function writeLinuxSetupShims(dir: string): void {
+  writeExecutable(dir, 'bash', [
+    '#!/bin/bash',
+    'case "${1:-}" in',
+    '  */install-host-dependencies.sh) printf "%s\\n" host-plan >> "$WHATSOUP_SETUP_EVENTS" ;;',
+    '  */ensure-node-installed.sh) printf "ensure-node:%s\\n" "$(tr -d "[:space:]" < "$PWD/.nvmrc")" >> "$WHATSOUP_SETUP_EVENTS" ;;',
+    '  */whatsoup-host-doctor.sh) printf "doctor:%s\\n" "${3:-}" >> "$WHATSOUP_SETUP_EVENTS" ;;',
+    'esac',
+    'exec /bin/bash "$@"',
+    '',
+  ].join('\n'));
   // Responds to `-m` with FAKE_UNAME_M (default x86_64) so tests can drive
   // deploy/setup.sh's arch_bin_suffix() through a real full-script replay;
   // any other invocation form (bare, `-s`) keeps the pre-existing "Linux"
@@ -60,14 +70,23 @@ function writeLinuxSetupShims(dir: string): void {
   ].join('\n'));
   writeExecutable(dir, 'node', [
     '#!/usr/bin/env bash',
-    'if [[ "${1:-}" == "-v" ]]; then printf "v24.15.0\\n"; exit 0; fi',
+    'if [[ "${1:-}" == "-v" || "${1:-}" == "--version" ]]; then printf "v24.15.0\\n"; exit 0; fi',
+    'if [[ "${1:-}" == "-p" ]]; then printf "%s\\n" "${FAKE_NODE_ARCH:-x64}"; exit 0; fi',
     'if [[ "${1:-}" == "-e" ]]; then printf "26"; exit 0; fi',
     'if [[ "${1:-}" == "--experimental-strip-types" ]]; then exit 0; fi',
     'printf "unexpected node shim invocation: %s\\n" "$*" >&2',
     'exit 1',
     '',
   ].join('\n'));
-  writeExecutable(dir, 'npm', '#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> "$HOME/npm.log"\nexit 0\n');
+  writeExecutable(dir, 'npm', [
+    '#!/usr/bin/env bash',
+    'if [[ "${1:-}" == "--version" ]]; then printf "11.12.1\\n"; exit 0; fi',
+    'printf "%s\\n" "$*" >> "$HOME/npm.log"',
+    'if [[ "${1:-}" == "ci" && "$PWD" == "$WHATSOUP_SETUP_REPO" ]]; then printf "%s\\n" npm:ci >> "$WHATSOUP_SETUP_EVENTS"; fi',
+    'exit 0',
+    '',
+  ].join('\n'));
+  writeExecutable(dir, 'apt-get', '#!/usr/bin/env bash\nexit 0\n');
   writeExecutable(dir, 'secret-tool', '#!/usr/bin/env bash\nexit 1\n');
   writeExecutable(dir, 'systemctl', [
     '#!/usr/bin/env bash',
@@ -91,8 +110,11 @@ function runLinuxSetupReplay(
       ...process.env,
       ...extraEnv,
       HOME: home,
+      NVM_DIR: extraEnv.NVM_DIR ?? path.join(home, '.nvm'),
       PATH: `${shimDir}:${realPath}`,
       USER: 'setup-test',
+      WHATSOUP_SETUP_EVENTS: path.join(home, 'setup-events.log'),
+      WHATSOUP_SETUP_REPO: repoRoot,
     },
     encoding: 'utf8',
   });
@@ -139,6 +161,116 @@ function sliceBetween(source: string, startMarker: string, endMarker: string): s
 }
 
 describe('deploy/setup.sh platform portability', () => {
+  it('plans host dependencies, ensures exact Node, and runs the doctor before npm', () => {
+    const installer = 'bash "$REPO_ROOT/deploy/scripts/install-host-dependencies.sh"';
+    const ensureNode = 'bash "$REPO_ROOT/deploy/scripts/ensure-node-installed.sh"';
+    const doctor = 'bash "$REPO_ROOT/deploy/scripts/whatsoup-host-doctor.sh"';
+    const npmCi = '(cd "$REPO_ROOT" && npm ci)';
+
+    for (const command of [installer, ensureNode, doctor, npmCi]) {
+      expect(setupSource).toContain(command);
+    }
+    expect(setupSource.indexOf(installer)).toBeLessThan(setupSource.indexOf(ensureNode));
+    expect(setupSource.indexOf(ensureNode)).toBeLessThan(setupSource.indexOf(doctor));
+    expect(setupSource.indexOf(doctor)).toBeLessThan(setupSource.indexOf(npmCi));
+  });
+
+  it('blocks wrong-architecture Node before npm during a full setup replay', () => {
+    const home = makeTempRoot('whatsoup-setup-home-');
+    const shimDir = makeTempRoot('whatsoup-setup-shims-');
+    const profile = path.join(home, 'profiles', 'testhost.json');
+    writeHealthProfile(profile);
+    writeLinuxSetupShims(shimDir);
+
+    const result = runLinuxSetupReplay(home, shimDir, {
+      BOT_ERRORS_HEALTH_PROFILE: profile,
+      FAKE_NODE_ARCH: 'arm64',
+    });
+    const eventsFile = path.join(home, 'setup-events.log');
+    const events = fs.existsSync(eventsFile)
+      ? fs.readFileSync(eventsFile, 'utf8').trim().split('\n')
+      : [];
+
+    expect(result.status).not.toBe(0);
+    expect(events).not.toContain('npm:ci');
+  });
+
+  it('executes the healthy bootstrap stages in the required order', () => {
+    const home = makeTempRoot('whatsoup-setup-home-');
+    const shimDir = makeTempRoot('whatsoup-setup-shims-');
+    const profile = path.join(home, 'profiles', 'testhost.json');
+    writeHealthProfile(profile);
+    writeLinuxSetupShims(shimDir);
+
+    const result = runLinuxSetupReplay(home, shimDir, { BOT_ERRORS_HEALTH_PROFILE: profile });
+    const events = fs.readFileSync(path.join(home, 'setup-events.log'), 'utf8').trim().split('\n');
+
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(events).toEqual([
+      'host-plan',
+      'ensure-node:24.15.0',
+      'doctor:runtime',
+      'npm:ci',
+    ]);
+  });
+
+  it('installs the pinned Node with nvm before reaching npm when PATH has no Node', () => {
+    const home = makeTempRoot('whatsoup-setup-home-');
+    const shimDir = makeTempRoot('whatsoup-setup-shims-');
+    const profile = path.join(home, 'profiles', 'testhost.json');
+    const nvmDir = path.join(home, '.nvm');
+    const nodeTemplate = path.join(home, 'node-template');
+    const npmTemplate = path.join(home, 'npm-template');
+    writeHealthProfile(profile);
+    writeLinuxSetupShims(shimDir);
+    fs.unlinkSync(path.join(shimDir, 'node'));
+    fs.unlinkSync(path.join(shimDir, 'npm'));
+    writeExecutable(home, 'node-template', [
+      '#!/usr/bin/env bash',
+      'if [[ "${1:-}" == "-v" || "${1:-}" == "--version" ]]; then printf "v24.15.0\\n"; exit 0; fi',
+      'if [[ "${1:-}" == "-p" ]]; then printf "x64\\n"; exit 0; fi',
+      'if [[ "${1:-}" == "-e" ]]; then printf "26"; exit 0; fi',
+      'if [[ "${1:-}" == "--experimental-strip-types" ]]; then exit 0; fi',
+      'exit 1',
+      '',
+    ].join('\n'));
+    writeExecutable(home, 'npm-template', [
+      '#!/usr/bin/env bash',
+      'if [[ "${1:-}" == "--version" ]]; then printf "11.12.1\\n"; exit 0; fi',
+      'if [[ "${1:-}" == "ci" && "$PWD" == "$WHATSOUP_SETUP_REPO" ]]; then printf "%s\\n" npm:ci >> "$WHATSOUP_SETUP_EVENTS"; fi',
+      'exit 0',
+      '',
+    ].join('\n'));
+    fs.mkdirSync(nvmDir, { recursive: true });
+    fs.writeFileSync(path.join(nvmDir, 'nvm.sh'), [
+      'nvm() {',
+      '  version="$2"',
+      '  target="$NVM_DIR/versions/node/v$version/bin"',
+      '  mkdir -p "$target"',
+      '  cp "$WHATSOUP_NODE_TEMPLATE" "$target/node"',
+      '  cp "$WHATSOUP_NPM_TEMPLATE" "$target/npm"',
+      '  chmod 755 "$target/node" "$target/npm"',
+      '}',
+      '',
+    ].join('\n'), 'utf8');
+
+    const result = runLinuxSetupReplay(home, shimDir, {
+      BOT_ERRORS_HEALTH_PROFILE: profile,
+      NVM_DIR: nvmDir,
+      WHATSOUP_NODE_TEMPLATE: nodeTemplate,
+      WHATSOUP_NPM_TEMPLATE: npmTemplate,
+    });
+    const events = fs.readFileSync(path.join(home, 'setup-events.log'), 'utf8').trim().split('\n');
+
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(events).toEqual([
+      'host-plan',
+      'ensure-node:24.15.0',
+      'doctor:runtime',
+      'npm:ci',
+    ]);
+  });
+
   it('defines PLATFORM via uname near the top of the script', () => {
     // Must appear before step 1 header
     const platformAssign = 'PLATFORM="$(uname -s)"';
@@ -575,7 +707,11 @@ describe('deploy/setup.sh — ffmpeg arch-suffix fallback (#2820)', () => {
     const result = runLinuxSetupReplay(
       home,
       shimDir,
-      { BOT_ERRORS_HEALTH_PROFILE: profile, FAKE_UNAME_M: 'aarch64' },
+      {
+        BOT_ERRORS_HEALTH_PROFILE: profile,
+        FAKE_UNAME_M: 'aarch64',
+        FAKE_NODE_ARCH: 'arm64',
+      },
       realPathWithoutFfmpeg(),
     );
 
@@ -596,6 +732,7 @@ describe('deploy/setup.sh — ffmpeg arch-suffix fallback (#2820)', () => {
     const result = runLinuxSetupReplay(home, shimDir, {
       BOT_ERRORS_HEALTH_PROFILE: profile,
       FAKE_UNAME_M: 'aarch64',
+      FAKE_NODE_ARCH: 'arm64',
     });
 
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
@@ -613,7 +750,11 @@ describe('deploy/setup.sh — ffmpeg arch-suffix fallback (#2820)', () => {
     const result = runLinuxSetupReplay(
       home,
       shimDir,
-      { BOT_ERRORS_HEALTH_PROFILE: profile, FAKE_UNAME_M: 'aarch64' },
+      {
+        BOT_ERRORS_HEALTH_PROFILE: profile,
+        FAKE_UNAME_M: 'aarch64',
+        FAKE_NODE_ARCH: 'arm64',
+      },
       realPathWithoutFfmpeg(),
     );
 
@@ -623,7 +764,7 @@ describe('deploy/setup.sh — ffmpeg arch-suffix fallback (#2820)', () => {
     );
   });
 
-  it('does not attempt an arch-suffixed fallback for an unrecognised `uname -m` value', () => {
+  it('fails closed before optional checks for an unrecognised native architecture', () => {
     const home = makeTempRoot('whatsoup-setup-home-');
     const shimDir = makeTempRoot('whatsoup-setup-shims-');
     const profile = path.join(home, 'profiles', 'testhost.json');
@@ -640,10 +781,9 @@ describe('deploy/setup.sh — ffmpeg arch-suffix fallback (#2820)', () => {
       realPathWithoutFfmpeg(),
     );
 
-    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
-    expect(result.stdout).toContain(
-      '  - ffmpeg not found (optional — video processing in chat mode disabled)',
-    );
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(2);
+    expect(result.stdout).toContain('outcome=inconclusive');
+    expect(result.stdout).not.toContain('ffmpeg not found');
   });
 });
 

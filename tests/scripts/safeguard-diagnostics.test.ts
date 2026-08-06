@@ -204,6 +204,7 @@ const requiredQualityWorkflow = [
   'name: Quality',
   'on:',
   '  pull_request:',
+  '  merge_group:',
   'permissions:',
   '  contents: read',
   'jobs:',
@@ -218,7 +219,16 @@ const requiredQualityWorkflow = [
   '      - name: Setup Node 24',
   '        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020',
   '        with:',
-  "          node-version: '24.x'",
+  "          node-version-file: '.nvmrc'",
+  '      - name: Host dependency profile (strict)',
+  '        run: |',
+  '          bash deploy/scripts/install-host-dependencies.sh --profile quality --apply --yes --json > "$RUNNER_TEMP/whatsoup-doctor-quality.json"',
+  '          echo "$HOME/.local/share/whatsoup/quality-venv/bin" >> "$GITHUB_PATH"',
+  '      - name: Validate strict doctor receipt',
+  '        run: |',
+  '          set -o pipefail',
+  '          bash deploy/scripts/whatsoup-host-doctor.sh --profile quality --json | tee "$RUNNER_TEMP/whatsoup-doctor-quality.json"',
+  '          node -e \'const r=require(process.env.RUNNER_TEMP + "/whatsoup-doctor-quality.json"); if (r.outcome !== "pass") process.exit(1)\'',
   '      - name: Enforce CI disk budget',
   '        run: bash scripts/ci-disk-reclaim.sh',
   '      - name: Semantic quality (shadow)',
@@ -281,6 +291,15 @@ const requiredQualityWorkflow = [
   '        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020',
   '        with:',
   "          node-version: '25.x'",
+  '      - name: Install compatibility host dependencies',
+  '        run: |',
+  '          bash deploy/scripts/install-host-dependencies.sh --profile quality --node-policy compatibility --apply --yes --json > "$RUNNER_TEMP/whatsoup-host-install-compatibility.json"',
+  '          echo "$HOME/.local/share/whatsoup/quality-venv/bin" >> "$GITHUB_PATH"',
+  '      - name: Host dependency profile (compatibility-only)',
+  '        run: |',
+  '          set -o pipefail',
+  '          bash deploy/scripts/whatsoup-host-doctor.sh --profile quality --node-policy compatibility --json | tee "$RUNNER_TEMP/whatsoup-doctor-compatibility.json"',
+  '          node -e \'const r=require(process.env.RUNNER_TEMP + "/whatsoup-doctor-compatibility.json"); if (r.outcome !== "compatibility_only") process.exit(1)\'',
   '      - name: Install dependencies',
   '        run: npm ci',
   '      - name: Install console dependencies',
@@ -289,6 +308,11 @@ const requiredQualityWorkflow = [
   '        run: npm test -- --pool=forks',
   '      - name: Console compatibility build',
   '        run: npm --prefix console run build',
+  '  bot-errors-health-macos:',
+  '    runs-on: macos-14',
+  '    steps:',
+  '      - name: Portable Python and release-proof prerequisites (real macOS)',
+  '        run: npm test -- tests/helpers/python-interpreter.test.ts tests/scripts/bot-errors-python-atomic-write-guard.test.ts tests/scripts/bot-errors-release-proof-installer.test.ts tests/scripts/bot-errors-release-proof-run.test.ts --pool=forks --maxWorkers=1',
 ].join('\n');
 
 const requiredTagReleaseWorkflow = [
@@ -938,6 +962,48 @@ describe('safeguard diagnostics', () => {
   });
 
   it.each([
+    {
+      name: 'renames the Node 24 required context',
+      mutate: (workflow: string) => workflow.replace('name: quality (24.x)', 'name: quality'),
+      evidence: 'jobs.quality name must be exactly quality (24.x)',
+    },
+    {
+      name: 'drops the merge queue trigger',
+      mutate: (workflow: string) => workflow.replace('  merge_group:\n', ''),
+      evidence: 'quality workflow must declare the merge_group trigger',
+    },
+    {
+      name: 'widens the Node 24 authority setup',
+      mutate: (workflow: string) => workflow.replace(
+        "          node-version-file: '.nvmrc'",
+        "          node-version: '24.x'",
+      ),
+      evidence: 'quality (24.x) Setup Node 24 must use node-version-file: .nvmrc',
+    },
+    {
+      name: 'drops the strict host dependency profile',
+      mutate: (workflow: string) => workflow.replace(
+        /      - name: Host dependency profile \(strict\)[\s\S]*?(?=      - name: Validate strict doctor receipt)/,
+        '',
+      ),
+      evidence: 'quality (24.x) must contain exactly one Host dependency profile (strict) step',
+    },
+    {
+      name: 'drops strict doctor receipt validation',
+      mutate: (workflow: string) => workflow.replace(
+        /      - name: Validate strict doctor receipt[\s\S]*?(?=      - name: Enforce CI disk budget)/,
+        '',
+      ),
+      evidence: 'quality (24.x) must contain exactly one Validate strict doctor receipt step',
+    },
+    {
+      name: 'drops the compatibility-only doctor profile',
+      mutate: (workflow: string) => workflow.replace(
+        /      - name: Host dependency profile \(compatibility-only\)[\s\S]*?(?=      - name: Install dependencies)/,
+        '',
+      ),
+      evidence: 'quality (25.x) must contain exactly one Host dependency profile (compatibility-only) step',
+    },
     {
       name: 'renames the Node 25 required context',
       mutate: (workflow: string) => workflow.replace('name: quality (25.x)', 'name: compatibility (25.x)'),

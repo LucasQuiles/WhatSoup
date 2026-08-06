@@ -15,6 +15,8 @@
     "start:instance": "bash scripts/run-with-pinned-node.sh src/bootstrap.ts",
     "fleet": "bash scripts/run-with-pinned-node.sh src/fleet/standalone.ts 9099",
     "setup": "bash deploy/setup.sh",
+    "doctor": "bash deploy/scripts/whatsoup-host-doctor.sh",
+    "setup:host-dependencies": "bash deploy/scripts/install-host-dependencies.sh",
     "auth": "bash scripts/run-with-pinned-node.sh src/transport/auth.ts",
     "auth:instance": "bash scripts/run-with-pinned-node.sh src/bootstrap-auth.ts",
     "imsg:relay": "bash scripts/run-with-pinned-node.sh scripts/imsg-rpc-relay.ts",
