@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-08-07T10:09:12.067Z",
+  "generatedAt": "2026-08-07T10:09:12.693Z",
   "scope": "bot-errors-runtime-scripts",
   "expectedHeadShaPolicy": "populated at deploy time by deploy step; absent here so committed state is observability-only",
   "files": [
@@ -194,7 +194,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-runner.py",
-      "sha256": "2f7a950d9a7e51cfcc9b3ef960d5143e0d528706083136a7029ac5d9bb68f3fd",
+      "sha256": "dbdf5ecab095ae132c4f1f9dbbe64e15fc632ed14647ef6ab832455fa2bc8c24",
       "mustContain": [
         "publish_event_json",
         "refusing to use private directory through symlink",
