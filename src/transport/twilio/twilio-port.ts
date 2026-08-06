@@ -234,7 +234,11 @@ export class SdkTwilioSmsPort implements TwilioSmsPort {
       body: string;
       from?: string;
       messagingServiceSid?: string;
+      idempotencyKey?: string;
     } = { to: args.to, body: args.body };
+
+    // #2553: stable messageId → Idempotency-Key for retry-safe deduplication
+    if (args.messageId) params.idempotencyKey = args.messageId;
 
     if (args.messagingServiceSid) {
       params.messagingServiceSid = args.messagingServiceSid;
