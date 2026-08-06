@@ -57,10 +57,20 @@ if (logDir && fileTransportEnabled) {
         },
       ],
     });
-  } catch {
-    // pino-roll not available or logDir invalid — fall back to stdout only
+  } catch (err) {
+    // #2513: log the rolling-file initialization failure so the operator
+    // knows the configured file sink is absent (stdout-only fallback).
+    console.error(`LOGGER: rolling-file sink failed: ${err}`);
     transport = undefined;
   }
+}
+
+// #2513: attach an error handler to the rolling-file transport so that async
+// worker failures are logged and do not terminate the process unobserved.
+if (transport) {
+  transport.on('error', (err: unknown) => {
+    console.error(`LOGGER: rolling-file sink error: ${String(err)}`);
+  });
 }
 
 // WS-A06: the same recursive pre-sink sanitizer applies to both construction

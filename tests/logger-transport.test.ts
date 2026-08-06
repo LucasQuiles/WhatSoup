@@ -26,9 +26,9 @@ const originalLogLevel = process.env.LOG_LEVEL;
 const originalVitest = process.env.VITEST;
 
 afterEach(() => {
+  vi.doUnmock('pino');
   vi.resetModules();
   vi.restoreAllMocks();
-  // Restore env
   if (originalLogDir === undefined) delete process.env.LOG_DIR;
   else process.env.LOG_DIR = originalLogDir;
   if (originalLogLevel === undefined) delete process.env.LOG_LEVEL;
@@ -184,6 +184,17 @@ describe('logger.ts — LOG_DIR (file transport) path', () => {
       // pino() opts level
       expect((pinoFn as ReturnType<typeof vi.fn>).mock.calls[0][0]).toMatchObject({ level: 'debug' });
     });
+
+    it('attaches an error handler to the transport (#2513)', async () => {
+      const { pinoFn, fakeTransport } = buildPinoMock({});
+      vi.doMock('pino', () => ({ default: pinoFn }));
+
+      await import('../src/logger.ts');
+
+      // The real module must call transport.on('error', handler) per #2513
+      const errorCalls = fakeTransport.on.mock.calls.filter((call) => call[0] === 'error');
+      expect(errorCalls.length).toBeGreaterThanOrEqual(1);
+    });
   });
 
   describe('when pino.transport() throws (pino-roll unavailable)', () => {
@@ -206,6 +217,20 @@ describe('logger.ts — LOG_DIR (file transport) path', () => {
 
       // Module still exports a functional logger
       expect(typeof mod.default.info).toBe('function');
+    });
+
+    it('reports construction failure via console.error (#2513)', async () => {
+      const seen: string[] = [];
+      const origError = console.error;
+      console.error = (...args: unknown[]) => { seen.push(args.map(String).join(' ')); };
+
+      const { pinoFn } = buildPinoMock({ throwOnTransport: true });
+      vi.doMock('pino', () => ({ default: pinoFn }));
+
+      await import('../src/logger.ts');
+
+      console.error = origError;
+      expect(seen.join(' ')).toMatch(/LOGGER: rolling-file sink failed/);
     });
 
     it('flushLogger() resolves immediately (no-op) when transport is undefined after catch', async () => {
