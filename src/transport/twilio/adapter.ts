@@ -337,7 +337,21 @@ export class TwilioSmsAdapter implements TransportAdapter, VoiceCapableTransport
     // full window DELAYS the send rather than throwing — bridge and MCP
     // send_sms callers treat rejection as hard failure; the cap is for cost
     // control, so queueing preserves their contract.
-    await this.smsRateLimiter.acquire(target.id);
+    // #2555: use bounded acquire so a limiter wait longer than 14s releases
+    // the slot and fails fast, preventing duplicate send when the caller
+    // timeout (15s) fires before the limiter grants passage.
+    const LIMITER_WAIT_MS = 14_000;
+    const acquired = await this.smsRateLimiter.acquireBounded(target.id, LIMITER_WAIT_MS);
+    if (acquired.capped) {
+      throw new TransientProviderError({
+        channelId: this.channelId,
+        operation: 'sendText',
+        correlationId,
+        scope: 'request',
+        message: `SMS rate limit wait exceeded ${LIMITER_WAIT_MS}ms for ${target.id}`,
+        providerCode: 'rate_limited',
+      });
+    }
 
     // Build port args: messagingServiceSid preferred over from per types.ts comment
     const sendArgs = this.messagingServiceSid !== undefined

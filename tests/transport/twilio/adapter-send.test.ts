@@ -426,7 +426,7 @@ describe('TwilioSmsAdapter sendText rate cap (QR-068)', () => {
     vi.useRealTimers();
   });
 
-  it('delays the over-cap send instead of throwing, and sends once the window slides', async () => {
+  it('delays an over-cap send within the acquire bound and sends once the window slides (#2555)', async () => {
     const port = new MockTwilioSmsPort();
     const adapter = new TwilioSmsAdapter(makeConfig({ rateLimit: { smsPerMinute: 2 } }), port);
 
@@ -434,25 +434,43 @@ describe('TwilioSmsAdapter sendText rate cap (QR-068)', () => {
     await adapter.sendText({ channel, id: A }, 'two');
     expect(port.sent).toHaveLength(2);
 
+    // 47s into the window the residual wait for a slot is ~13s — inside the
+    // 14s acquire bound, so the throttled send must delay, not throw.
+    await vi.advanceTimersByTimeAsync(47_000);
     let settled = false;
     const third = adapter.sendText({ channel, id: A }, 'three').then((ref) => {
       settled = true;
       return ref;
     });
 
-    // Still inside the window: the throttled send must be pending, not thrown,
-    // and must not have reached the port.
-    await vi.advanceTimersByTimeAsync(59_000);
+    await vi.advanceTimersByTimeAsync(12_000);
     expect(settled).toBe(false);
     expect(port.sent).toHaveLength(2);
 
     // Window slides — the delayed send goes out and resolves normally.
-    await vi.advanceTimersByTimeAsync(1_100);
+    await vi.advanceTimersByTimeAsync(1_500);
     const ref = await third;
     expect(settled).toBe(true);
     expect(port.sent).toHaveLength(3);
     expect(port.sent[2]!.body).toBe('three');
     expect(ref.id).toMatch(/^SM/);
+  });
+
+  it('fails transient instead of delaying past the acquire bound — no duplicate-send window (#2555)', async () => {
+    const port = new MockTwilioSmsPort();
+    const adapter = new TwilioSmsAdapter(makeConfig({ rateLimit: { smsPerMinute: 2 } }), port);
+
+    await adapter.sendText({ channel, id: A }, 'one');
+    await adapter.sendText({ channel, id: A }, 'two');
+    expect(port.sent).toHaveLength(2);
+
+    // A full-window (~60s) residual wait exceeds the 14s bound: the acquire
+    // sheds without reserving, so the caller fails fast instead of holding a
+    // send alive past its own timeout (the duplicate-send window).
+    await expect(adapter.sendText({ channel, id: A }, 'three')).rejects.toThrow(
+      /rate limit wait exceeded/i,
+    );
+    expect(port.sent).toHaveLength(2);
   });
 
   it('throttles per destination — traffic to one number does not delay another', async () => {
