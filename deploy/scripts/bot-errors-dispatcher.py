@@ -3932,26 +3932,30 @@ def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = N
                 last_sent_at.pop(closed_key, None)
         changed = True
 
-        # Accumulate into the persisted digest batch.
-        accum = incident_state.get("staleAutocloseDigest")
-        if not isinstance(accum, dict):
+    # #2403: evaluate pending digest on EVERY sweep, not only when new
+    # auto-closures occur.  A digest that was waiting for the coalescing window
+    # or recovering from a send failure must be re-checked even on a quiet sweep.
+    accum = incident_state.get("staleAutocloseDigest")
+    has_accum = isinstance(accum, dict)
+    pending_check = has_accum and (int(accum.get("pendingCount") or 0) > 0 or auto_closed)
+    if pending_check:
+        if not has_accum:
             accum = {}
             incident_state["staleAutocloseDigest"] = accum
-        pending_keys = accum.get("pendingKeys")
-        if not isinstance(pending_keys, list):
-            pending_keys = []
-        # Keep a bounded sample of keys for the digest preview; count is exact.
-        pending_keys.extend(auto_closed)
-        accum["pendingKeys"] = pending_keys[-200:]
-        accum["pendingCount"] = int(accum.get("pendingCount") or 0) + len(auto_closed)
-        if not accum.get("firstPendingAt"):
-            accum["firstPendingAt"] = current
+        if auto_closed:
+            pending_keys = accum.get("pendingKeys")
+            if not isinstance(pending_keys, list):
+                pending_keys = []
+            pending_keys.extend(auto_closed)
+            accum["pendingKeys"] = pending_keys[-200:]
+            accum["pendingCount"] = int(accum.get("pendingCount") or 0) + len(auto_closed)
+            if not accum.get("firstPendingAt"):
+                accum["firstPendingAt"] = current
 
         if should_emit_autoclose_digest(accum, current):
-            digest_keys = list(accum.get("pendingKeys") or auto_closed)
+            digest_keys = list(accum.get("pendingKeys") or [])
             digest_count = int(accum.get("pendingCount") or len(digest_keys))
             summary_event = stale_autoclose_summary_event(digest_keys, current)
-            # Report the exact coalesced total even when the key sample was trimmed.
             summary_event["summary"] = (
                 f"Auto-closed {digest_count} non-actionable stale incident(s)"
             )
@@ -3968,7 +3972,6 @@ def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = N
                 accum["firstPendingAt"] = 0
                 accum["lastDigestAt"] = current
             except Exception as exc:
-                # Keep the batch pending so it retries on the next sweep (no loss).
                 last_error = str(exc)
                 append_dispatch_log(paths, {
                     "type": "stale_autoclose_summary_failed",
@@ -3979,7 +3982,7 @@ def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = N
             append_dispatch_log(paths, {
                 "type": "stale_autoclose_digest_coalesced",
                 "pendingCount": accum.get("pendingCount"),
-                "closedThisSweep": len(auto_closed),
+                "closedThisSweep": len(auto_closed) if auto_closed else 0,
                 "nextDigestInSeconds": max(
                     0,
                     STALE_AUTOCLOSE_DIGEST_COALESCE_SECONDS
