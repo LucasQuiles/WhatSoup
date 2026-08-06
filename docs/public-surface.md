@@ -276,6 +276,7 @@ scripts are public; build/test scripts are internal.
 | `cli:npm.fleet` | `npm run fleet` | `package.json` | stable | active | Start the fleet server only |
 | `cli:npm.setup` | `npm run setup` | `package.json` | stable | active | First-run setup wizard |
 | `cli:npm.doctor` | `npm run doctor` | `package.json` | stable | active | Read-only runtime, quality, or release host capability and PATH diagnostic with human or JSON output |
+| `cli:npm.setup-host-dependencies` | `npm run setup:host-dependencies` | `package.json` | stable | active | Plan-only by default; explicitly installs runtime, quality, or release host dependencies after confirmation and verifies the result with the matching doctor profile |
 | `cli:npm.auth` | `npm run auth` | `package.json` | stable | active | QR-code authentication flow (supervisor) |
 | `cli:npm.auth-instance` | `npm run auth:instance` | `package.json` | stable | active | QR-code authentication for a specific instance |
 | `cli:npm.imsg-relay` | `npm run imsg:relay` | `package.json` | beta | active | Run the local version-pinned UNIX-socket relay that supervises one upstream `imsg rpc` process per client; see `docs/runbooks/imessage-transport.md` |

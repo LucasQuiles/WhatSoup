@@ -76,7 +76,7 @@ has_block=0
 has_inconclusive=0
 human_lines=""
 
-while IFS="$(printf '\t')" read -r capability_id disposition probe version_rule brew_package apt_package pacman_package remediation; do
+while IFS='|' read -r capability_id disposition probe version_rule brew_package apt_package pacman_package remediation; do
   [ -n "$capability_id" ] || continue
   whatsoup_probe_capability "$capability_id" "$disposition" "$probe" "$version_rule"
 

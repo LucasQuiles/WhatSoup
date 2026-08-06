@@ -72,42 +72,101 @@ EOF
   return 1
 }
 
+whatsoup_quality_venv_root() {
+  printf '%s\n' "${WHATSOUP_QUALITY_VENV:-${XDG_DATA_HOME:-$HOME/.local/share}/whatsoup/quality-venv}"
+}
+
+whatsoup_resolve_python312() {
+  managed_python="$(whatsoup_quality_venv_root)/bin/python"
+  if [ -x "$managed_python" ]; then
+    CAP_PATH="$managed_python"
+    CAP_VISIBILITY=managed_venv
+    return 0
+  fi
+
+  for python_candidate in python3.12 python3.13 python3.14 python3; do
+    if whatsoup_resolve_executable "$python_candidate"; then
+      return 0
+    fi
+  done
+
+  CAP_PATH=""
+  CAP_VISIBILITY=absent
+  return 1
+}
+
+whatsoup_packages_for_manager() {
+  profile="$1"
+  platform="$2"
+  manager="$3"
+  node_policy="${4:-exact}"
+  records="$(whatsoup_capability_records "$profile" "$platform" "$node_policy")" || return 2
+  package_list=""
+
+  while IFS='|' read -r _capability_id _disposition _probe _version_rule brew_packages apt_packages pacman_packages _remediation; do
+    case "$_capability_id" in
+      service_manager|credential_store) continue ;;
+    esac
+    case "$manager" in
+      brew) record_packages="$brew_packages" ;;
+      apt) record_packages="$apt_packages" ;;
+      pacman) record_packages="$pacman_packages" ;;
+      *) return 2 ;;
+    esac
+    for package_name in $record_packages; do
+      case "
+$package_list
+" in
+        *"
+$package_name
+"*) ;;
+        *) package_list="${package_list}${package_name}
+" ;;
+      esac
+    done
+  done <<EOF
+$records
+EOF
+
+  printf '%s' "$package_list"
+}
+
 whatsoup_capability_records() {
   profile="$1"
   platform="$2"
   node_policy="$3"
   pinned="$(whatsoup_pinned_node_version)" || return 2
 
-  printf 'node\trequired\tnode\t%s:%s\t\t\t\tInstall the .nvmrc-pinned Node with nvm.\n' "$node_policy" "$pinned"
-  printf 'npm\trequired\tnpm\tcommand\t\t\t\tInstall npm with the pinned Node distribution.\n'
-  printf 'git\trequired\tgit\tcommand\tgit\tgit\tgit\tInstall Git with the platform package manager.\n'
+  printf 'node|required|node|%s:%s||||Install the .nvmrc-pinned Node with nvm.\n' "$node_policy" "$pinned"
+  printf 'npm|required|npm|command||||Install npm with the pinned Node distribution.\n'
+  printf 'git|required|git|command|git|git|git|Install Git with the platform package manager.\n'
   if [ "$platform" = "darwin" ]; then
-    printf 'service_manager\trequired\tlaunchctl\tstructural\t\t\t\tlaunchctl is supplied by macOS.\n'
-    printf 'credential_store\toptional\tsecurity\tstructural\t\t\t\tsecurity is supplied by macOS.\n'
+    printf 'service_manager|required|launchctl|structural||||launchctl is supplied by macOS.\n'
+    printf 'credential_store|optional|security|structural||||security is supplied by macOS.\n'
   else
-    printf 'service_manager\trequired\tsystemctl\tstructural\t\tsystemd\tsystemd\tInstall the systemd user-service tools.\n'
-    printf 'credential_store\toptional\tsecret-tool\tstructural\t\tlibsecret-tools\tlibsecret\tInstall the platform credential-store client if required.\n'
+    printf 'service_manager|required|systemctl|structural||systemd|systemd|Install the systemd user-service tools.\n'
+    printf 'credential_store|optional|secret-tool|structural||libsecret-tools|libsecret|Install the platform credential-store client if required.\n'
   fi
 
   [ "$profile" = "runtime" ] && return 0
 
   if [ "$platform" = "darwin" ]; then
-    printf 'python\trequired\tpython3.12\tminimum:3.12\tpython@3.12\tpython3 python3-venv\tpython python-pip\tInstall Python 3.12 with venv support.\n'
+    printf 'python|required|python3.12|minimum:3.12|python@3.12|python3 python3-venv|python python-pip|Install Python 3.12 with venv support.\n'
   else
-    printf 'python\trequired\tpython3.12\tminimum:3.12\tpython@3.12\tpython3 python3-venv\tpython python-pip\tInstall Python 3.12 with venv support.\n'
+    printf 'python|required|python3.12|minimum:3.12|python@3.12|python3 python3-venv|python python-pip|Install Python 3.12 with venv support.\n'
   fi
-  printf 'rg\trequired\trg\tcommand\tripgrep\tripgrep\tripgrep\tInstall ripgrep.\n'
-  printf 'zsh\trequired\tzsh\tcommand\tzsh\tzsh\tzsh\tInstall zsh.\n'
-  printf 'shellcheck\trequired\tshellcheck\tcommand\tshellcheck\tshellcheck\tshellcheck\tInstall ShellCheck.\n'
+  printf 'rg|required|rg|command|ripgrep|ripgrep|ripgrep|Install ripgrep.\n'
+  printf 'zsh|required|zsh|command|zsh|zsh|zsh|Install zsh.\n'
+  printf 'shellcheck|required|shellcheck|command|shellcheck|shellcheck|shellcheck|Install ShellCheck.\n'
 
   [ "$profile" = "quality" ] && return 0
 
   if [ "$platform" = "darwin" ]; then
-    printf 'timeout\trequired\tgtimeout\tgnu-timeout\tcoreutils\tcoreutils\tcoreutils\tInstall GNU coreutils.\n'
-    printf 'flock\tnot_applicable\tflock\tlinux-only\t\tutil-linux\tutil-linux\tExternal flock is Linux-only for release proof.\n'
+    printf 'timeout|required|gtimeout|gnu-timeout|coreutils|coreutils|coreutils|Install GNU coreutils.\n'
+    printf 'flock|not_applicable|flock|linux-only||util-linux|util-linux|External flock is Linux-only for release proof.\n'
   else
-    printf 'timeout\trequired\ttimeout\tgnu-timeout\tcoreutils\tcoreutils\tcoreutils\tInstall GNU coreutils.\n'
-    printf 'flock\trequired\tflock\tcommand\t\tutil-linux\tutil-linux\tInstall util-linux for flock.\n'
+    printf 'timeout|required|timeout|gnu-timeout|coreutils|coreutils|coreutils|Install GNU coreutils.\n'
+    printf 'flock|required|flock|command||util-linux|util-linux|Install util-linux for flock.\n'
   fi
 }
 
@@ -199,7 +258,14 @@ whatsoup_probe_capability() {
     return 0
   fi
 
-  if ! whatsoup_resolve_executable "$probe"; then
+  if [ "$capability_id" = "python" ]; then
+    whatsoup_resolve_python312
+    resolved_status=$?
+  else
+    whatsoup_resolve_executable "$probe"
+    resolved_status=$?
+  fi
+  if [ "$resolved_status" -ne 0 ]; then
     if [ "$disposition" = "optional" ]; then
       CAP_STATUS=optional_missing
     else
