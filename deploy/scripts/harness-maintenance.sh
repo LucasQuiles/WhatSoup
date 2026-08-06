@@ -194,7 +194,7 @@ on_error() {
   trap - ERR
   record_event "harness-maintenance" "failed" "unexpected failure rc=$rc"
   write_state "failed" || true
-  send_alert "job" "warn" "Harness maintenance failed" "Unexpected failure rc=$rc. See $RUN_LOG"
+  send_alert "job" "warning" "Harness maintenance failed" "Unexpected failure rc=$rc. See $RUN_LOG"
   rm -rf "$TMP_DIR"
   exit "$rc"
 }
@@ -327,7 +327,7 @@ check_codex_npm_cooldown() {
   npm="$(npm_bin)"
   if [ -z "$npm" ]; then
     record_event "codex-npm-cooldown" "missing" "npm not found for Codex node"
-    send_alert "codex-cooldown-defense" "warn" "Codex npm cooldown check missing npm" "The Codex node npm binary was not found."
+    send_alert "codex-cooldown-defense" "warning" "Codex npm cooldown check missing npm" "The Codex node npm binary was not found."
     return 0
   fi
 
@@ -355,14 +355,14 @@ check_codex_npm_cooldown() {
     local err
     err="$(head -n "$PROBE_OUTPUT_LINES" "$stderr_file")"
     record_event "codex-npm-cooldown" "failed" "npm --version failed: $err"
-    send_alert "codex-cooldown-defense" "warn" "Codex npm cooldown check failed" "npm --version failed for Codex node. $err"
+    send_alert "codex-cooldown-defense" "warning" "Codex npm cooldown check failed" "npm --version failed for Codex node. $err"
     return 0
   fi
   if [ "$config_rc" -ne 0 ]; then
     local err
     err="$(head -n "$PROBE_OUTPUT_LINES" "$stderr_file")"
     record_event "codex-npm-cooldown" "failed" "npm config get min-release-age failed: $err"
-    send_alert "codex-cooldown-defense" "warn" "Codex npm cooldown check failed" "npm config get min-release-age failed for Codex node. $err"
+    send_alert "codex-cooldown-defense" "warning" "Codex npm cooldown check failed" "npm config get min-release-age failed for Codex node. $err"
     return 0
   fi
 
@@ -385,12 +385,12 @@ check_codex_npm_cooldown() {
   fi
   if [ "$rc" -eq 2 ]; then
     record_event "codex-npm-cooldown" "degraded" "npm $npm_version: $out"
-    send_alert "codex-cooldown-defense" "warn" "Codex npm cooldown defense dormant" "Codex node npm does not fully honor min-release-age. $out"
+    send_alert "codex-cooldown-defense" "warning" "Codex npm cooldown defense dormant" "Codex node npm does not fully honor min-release-age. $out"
     return 0
   fi
 
   record_event "codex-npm-cooldown" "failed" "cooldown recognition guard failed: $out"
-  send_alert "codex-cooldown-defense" "warn" "Codex npm cooldown check failed" "Cooldown recognition guard failed. $out"
+  send_alert "codex-cooldown-defense" "warning" "Codex npm cooldown check failed" "Cooldown recognition guard failed. $out"
 }
 
 npm_latest_version() {
@@ -437,7 +437,7 @@ ensure_npm_version_eligible() {
     return 2
   fi
   record_event "$pkg" "failed" "npm cooldown check failed: $out"
-  send_alert "${pkg##*/}-update" "warn" "Npm cooldown check failed" "The maintenance job could not verify publish age for $pkg@$version. $out"
+  send_alert "${pkg##*/}-update" "warning" "Npm cooldown check failed" "The maintenance job could not verify publish age for $pkg@$version. $out"
   return "$rc"
 }
 
@@ -464,7 +464,7 @@ install_opencode_npm() {
   npm="$(npm_bin)"
   if [ -z "$npm" ]; then
     record_event "opencode" "failed" "npm not found for opencode-ai install" "" "" "$target"
-    send_alert "opencode-update" "warn" "OpenCode harness install failed" "npm was not found; opencode-ai@$target could not be installed."
+    send_alert "opencode-update" "warning" "OpenCode harness install failed" "npm was not found; opencode-ai@$target could not be installed."
     return 1
   fi
   mkdir -p "$NPM_GLOBAL_PREFIX"
@@ -496,12 +496,12 @@ update_claude() {
   latest="$(npm_latest_version @anthropic-ai/claude-code || true)"
   if [ -z "$before" ]; then
     record_event "claude" "missing" "claude binary not found"
-    send_alert "claude-update" "warn" "Claude harness missing" "The maintenance job could not find the claude binary on PATH."
+    send_alert "claude-update" "warning" "Claude harness missing" "The maintenance job could not find the claude binary on PATH."
     return 0
   fi
   if [ -z "$latest" ]; then
     record_event "claude" "unknown" "latest version lookup failed" "$before"
-    send_alert "claude-update" "warn" "Claude latest lookup failed" "The maintenance job could not determine the latest Claude CLI version."
+    send_alert "claude-update" "warning" "Claude latest lookup failed" "The maintenance job could not determine the latest Claude CLI version."
     return 0
   fi
   if [ "$before" = "$latest" ]; then
@@ -531,12 +531,12 @@ update_codex() {
   npm="$(npm_bin)"
   if [ -z "$before" ]; then
     record_event "codex" "missing" "codex binary not found"
-    send_alert "codex-update" "warn" "Codex harness missing" "The maintenance job could not find the codex binary."
+    send_alert "codex-update" "warning" "Codex harness missing" "The maintenance job could not find the codex binary."
     return 0
   fi
   if [ -z "$latest" ] || [ -z "$npm" ]; then
     record_event "codex" "unknown" "latest version lookup failed" "$before"
-    send_alert "codex-update" "warn" "Codex latest lookup failed" "The maintenance job could not determine the latest Codex CLI version."
+    send_alert "codex-update" "warning" "Codex latest lookup failed" "The maintenance job could not determine the latest Codex CLI version."
     return 0
   fi
   if [ "$before" = "$latest" ]; then
@@ -622,10 +622,10 @@ probe_command() {
     record_event "$name" "ok" "$out"
   elif [ "$rc" -eq 124 ]; then
     record_event "$name" "timeout" "probe exceeded ${PROBE_TIMEOUT_SECS}s"
-    send_alert "probe-${name//[^A-Za-z0-9_.-]/_}" "warn" "Harness maintenance probe timed out" "$name exceeded ${PROBE_TIMEOUT_SECS}s"
+    send_alert "probe-${name//[^A-Za-z0-9_.-]/_}" "warning" "Harness maintenance probe timed out" "$name exceeded ${PROBE_TIMEOUT_SECS}s"
   else
     record_event "$name" "failed" "$out"
-    send_alert "probe-${name//[^A-Za-z0-9_.-]/_}" "warn" "Harness maintenance probe failed" "$name failed: $out"
+    send_alert "probe-${name//[^A-Za-z0-9_.-]/_}" "warning" "Harness maintenance probe failed" "$name failed: $out"
   fi
 }
 
