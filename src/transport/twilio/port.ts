@@ -8,6 +8,9 @@ export interface SendSmsArgs {
   readonly from?: string;
   readonly messagingServiceSid?: string;
   readonly body: string;
+  /** #2553: stable sender-provided message ID used as Twilio Idempotency-Key
+   * on retry-safe calls. When absent, no idempotency key is sent (legacy). */
+  readonly messageId?: string;
 }
 
 /**

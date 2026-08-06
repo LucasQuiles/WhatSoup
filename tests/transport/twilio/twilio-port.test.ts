@@ -871,3 +871,51 @@ describe('SdkTwilioSmsPort phase classification (GAP 1)', () => {
     });
   });
 });
+
+  describe('idempotency key (#2553)', () => {
+    it('includes idempotencyKey when messageId is provided', async () => {
+      const messagesCreate = vi.fn().mockResolvedValue({ sid: 'SM-idem' });
+      const port = new SdkTwilioSmsPort(BASE_CONFIG, {
+        credentialLookup: vi.fn().mockReturnValue(TOKEN),
+        clientFactory: () => makeMockClient({ messagesCreate }),
+      });
+
+      await port.sendSms({ to: '+15550001111', body: 'hello', messageId: 'msg-abc-123' });
+
+      expect(messagesCreate).toHaveBeenCalledWith(
+        expect.objectContaining({ idempotencyKey: 'msg-abc-123' }),
+      );
+    });
+
+    it('omits idempotencyKey when messageId is absent (legacy)', async () => {
+      const messagesCreate = vi.fn().mockResolvedValue({ sid: 'SM-legacy' });
+      const port = new SdkTwilioSmsPort(BASE_CONFIG, {
+        credentialLookup: vi.fn().mockReturnValue(TOKEN),
+        clientFactory: () => makeMockClient({ messagesCreate }),
+      });
+
+      await port.sendSms({ to: '+15550002222', body: 'hello' });
+
+      expect(messagesCreate).toHaveBeenCalledWith(
+        expect.not.objectContaining({ idempotencyKey: expect.any(String) }),
+      );
+    });
+
+    it('same messageId on retry produces same idempotencyKey', async () => {
+      const messagesCreate = vi.fn().mockResolvedValue({ sid: 'SM-retry' });
+      const port = new SdkTwilioSmsPort(BASE_CONFIG, {
+        credentialLookup: vi.fn().mockReturnValue(TOKEN),
+        clientFactory: () => makeMockClient({ messagesCreate }),
+      });
+
+      const args = { to: '+15550003333', body: 'retry', messageId: 'retry-key' };
+      await port.sendSms(args);
+      await port.sendSms(args);
+
+      expect(messagesCreate).toHaveBeenCalledTimes(2);
+      const call0 = messagesCreate.mock.calls[0][0] as Record<string, unknown>;
+      const call1 = messagesCreate.mock.calls[1][0] as Record<string, unknown>;
+      expect(call0.idempotencyKey).toBe('retry-key');
+      expect(call1.idempotencyKey).toBe('retry-key');
+    });
+  });
