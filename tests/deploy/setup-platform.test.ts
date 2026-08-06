@@ -110,6 +110,7 @@ function runLinuxSetupReplay(
       ...process.env,
       ...extraEnv,
       HOME: home,
+      NVM_DIR: extraEnv.NVM_DIR ?? path.join(home, '.nvm'),
       PATH: `${shimDir}:${realPath}`,
       USER: 'setup-test',
       WHATSOUP_SETUP_EVENTS: path.join(home, 'setup-events.log'),

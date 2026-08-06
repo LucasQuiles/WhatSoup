@@ -14,7 +14,7 @@ function python(path: string, version: string, exitCode = 0): string {
 }
 
 function baseEnv(home: string, bin: string): NodeJS.ProcessEnv {
-  return { HOME: home, PATH: `${bin}:/usr/bin:/bin` };
+  return { HOME: home, PATH: bin };
 }
 
 describe('resolveTestPython', () => {

@@ -1,9 +1,12 @@
 import { spawnSync } from 'node:child_process';
 import {
+  accessSync,
   chmodSync,
+  constants,
   mkdirSync,
   mkdtempSync,
   rmSync,
+  symlinkSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -46,11 +49,32 @@ function tool(bin: string, name: string, version: string): void {
   executable(join(bin, name), `printf '%s\\n' '${version}'`);
 }
 
+function resolveHostTool(name: string): string {
+  for (const directory of (process.env.PATH ?? '').split(':')) {
+    if (!directory) continue;
+    const candidate = join(directory, name);
+    try {
+      accessSync(candidate, constants.X_OK);
+      return candidate;
+    } catch {
+      // Keep searching the host PATH.
+    }
+  }
+  throw new Error(`host test prerequisite missing: ${name}`);
+}
+
+function installShellToolbox(bin: string): void {
+  for (const name of ['bash', 'cat', 'dirname', 'sed', 'tr']) {
+    symlinkSync(resolveHostTool(name), join(bin, name));
+  }
+}
+
 function fixture(overrides: NodeJS.ProcessEnv = {}): Fixture {
   const home = mkdtempSync(join(tmpdir(), 'whatsoup-host-doctor-'));
   roots.push(home);
   const bin = join(home, 'bin');
   mkdirSync(bin, { recursive: true });
+  installShellToolbox(bin);
 
   executable(join(bin, 'uname'), [
     'case "${1:-}" in',
@@ -90,7 +114,7 @@ function fixture(overrides: NodeJS.ProcessEnv = {}): Fixture {
       ...process.env,
       HOME: home,
       USER: 'fixture-user',
-      PATH: `${bin}:/usr/bin:/bin`,
+      PATH: bin,
       ...overrides,
     },
   };

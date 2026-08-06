@@ -1,11 +1,14 @@
 import { spawnSync } from 'node:child_process';
 import {
+  accessSync,
   chmodSync,
+  constants,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -44,12 +47,33 @@ function versionTool(bin: string, name: string, version: string): void {
   executable(join(bin, name), `printf '%s\\n' '${version}'`);
 }
 
+function resolveHostTool(name: string): string {
+  for (const directory of (process.env.PATH ?? '').split(':')) {
+    if (!directory) continue;
+    const candidate = join(directory, name);
+    try {
+      accessSync(candidate, constants.X_OK);
+      return candidate;
+    } catch {
+      // Keep searching the host PATH.
+    }
+  }
+  throw new Error(`host test prerequisite missing: ${name}`);
+}
+
+function installShellToolbox(bin: string): void {
+  for (const name of ['bash', 'cat', 'chmod', 'cp', 'dirname', 'mkdir', 'sed', 'tr']) {
+    symlinkSync(resolveHostTool(name), join(bin, name));
+  }
+}
+
 function fixture(platform: 'Darwin' | 'Linux' = 'Darwin'): Fixture {
   const home = mkdtempSync(join(tmpdir(), 'whatsoup-host-install-'));
   roots.push(home);
   const bin = join(home, 'bin');
   const ledger = join(home, 'ledger');
   mkdirSync(bin, { recursive: true });
+  installShellToolbox(bin);
   writeFileSync(ledger, '', 'utf8');
 
   executable(join(bin, 'uname'), [
@@ -109,7 +133,7 @@ function fixture(platform: 'Darwin' | 'Linux' = 'Darwin'): Fixture {
     env: {
       ...process.env,
       HOME: home,
-      PATH: `${bin}:/usr/bin:/bin`,
+      PATH: bin,
       WHATSOUP_TEST_LEDGER: ledger,
       WHATSOUP_QUALITY_VENV: join(home, 'quality-venv'),
     },
