@@ -17,44 +17,13 @@ SCRIPT_DIR = Path(__file__).resolve().parent.parent
 import sys
 sys.path.insert(0, str(SCRIPT_DIR))
 
-from unittest.mock import MagicMock
-
 from lib.controller_state import (
     ControllerStateRequired,
     STATE_RECOVERY_REQUIRED_EXIT,
     open_controller_state,
     read_controller_state,
+    StateComponent,
 )
-
-
-# Mock file_ops that delegates to real filesystem for read operations.
-# We mirror _RealFileOps to avoid MagicMock auto-stubs that hang on
-# read() (infinite loop) and to work around flock incompatibility with
-# tmpfs-under-/tmp used by tmp_state_dir.
-def _mock_file_ops():
-    """Return a MagicMock file_ops with real syscall bindings where safe.
-    
-    Uses real os.* functions for everything except flock (too slow/tricky
-    on CI-style /tmp) and fsync (unnecessary for test correctness). The
-    Suite-0 tests in test_controller_state.py use FaultOps for the same
-    reason — see FaultOps crash_after semantics for the full injector.
-    """
-    ops = MagicMock()
-    ops.open = os.open
-    ops.close = os.close
-    ops.fstat = os.fstat
-    ops.read = os.read
-    ops.write = os.write
-    ops.fsync_file = os.fsync
-    ops.fsync_directory = os.fsync
-    ops.replace = os.replace
-    ops.stat = os.stat
-    ops.listdir = os.listdir
-    ops.unlink = os.unlink
-    ops.rename = os.rename
-    ops.readlink = os.readlink
-    ops.flock = lambda _fd, _op: None
-    return ops
 
 
 def _make_valid_state(version: int = 1) -> dict:
@@ -68,9 +37,7 @@ def _make_corrupt_state() -> bytes:
 @pytest.fixture
 def tmp_state_dir():
     with tempfile.TemporaryDirectory() as d:
-        # resolve(): macOS tempdirs live under the /var symlink, which the
-        # controller-state O_NOFOLLOW directory walk correctly refuses.
-        yield Path(d).resolve()
+        yield Path(d)
 
 
 # ─── Discriminating test pair: corrupt primary, no previous ──────────────────
@@ -80,21 +47,19 @@ class TestCorruptPrimaryNoPrevious:
     before any domain effects (collect_problems / outbox / lock artifacts)."""
 
     def test_raises_before_domain_effects(self, tmp_state_dir):
-        """Seed corrupt primary, NO previous → unavailable returned."""
+        """Seed corrupt primary, NO previous → ControllerStateRequired raised."""
         state_file = tmp_state_dir / "watchdog-state.json"
         state_file.write_bytes(_make_corrupt_state())
-        state_file.chmod(0o600)
 
-        result = read_controller_state(
-            state_file,
-            component="heartbeat-watchdog",
-            validate_payload=lambda p: p if isinstance(p, dict) and "version" in p else _make_valid_state(),
-            lock_timeout_seconds=5,
-            file_ops=_mock_file_ops(),
-        )
-        assert result.mode == "unavailable", (
-            f"expected unavailable for corrupt primary, got {result.mode}"
-        )
+        with pytest.raises(ControllerStateRequired):
+            read_controller_state(
+                state_file,
+                component=StateComponent.WATCHDOG,
+                validate_payload=lambda p: p if isinstance(p, dict) and "version" in p else _make_valid_state(),
+                lock_timeout_seconds=5,
+            )
+        # Zero domain artifacts created (no lock file, no outbox)
+        assert not any(tmp_state_dir.iterdir()), "domain artifacts leaked before recovery"
 
 
 class TestValidPrimary:
@@ -104,16 +69,14 @@ class TestValidPrimary:
         """Seed valid primary → read returns valid payload, not recovery_pending."""
         state_file = tmp_state_dir / "watchdog-state.json"
         state_file.write_text(json.dumps(_make_valid_state()))
-        state_file.chmod(0o600)
 
         result = read_controller_state(
             state_file,
-            component="heartbeat-watchdog",
+            component=StateComponent.WATCHDOG,
             validate_payload=lambda p: p if isinstance(p, dict) and "version" in p else _make_valid_state(),
             lock_timeout_seconds=5,
-            file_ops=_mock_file_ops(),
         )
-        assert result.mode in ("valid", "legacy_valid"), (
+        assert result.mode == "valid" or result.mode == "legacy_valid", (
             f"expected valid/legacy_valid, got {result.mode}"
         )
 
@@ -130,7 +93,7 @@ class TestCrossReaderRecoveryPending:
 
         result = read_controller_state(
             coll_file,
-            component="collector",
+            component=StateComponent.COLLECTOR,
             validate_payload=lambda p: p if isinstance(p, dict) and "version" in p else _make_valid_state(),
             lock_timeout_seconds=5,
         )
@@ -142,21 +105,17 @@ class TestCrossReaderRecoveryPending:
 class TestSymlinkAnchor:
     """R4.7: macOS symlink aliases are resolved before state access."""
 
-    def test_parent_symlink_resolved(self, tmp_state_dir):
-        """A state root inside a symlinked parent directory resolves correctly.
-        This mirrors the macOS /tmp → /private/tmp pattern."""
-        # Create a real parent dir and symlink it
-        real_parent = tmp_state_dir / "real_parent"
-        real_parent.mkdir()
-        sym_parent = tmp_state_dir / "sym_parent"
-        sym_parent.symlink_to(real_parent)
-        state_path = sym_parent / "state.json"
+    def test_symlink_resolved(self, tmp_state_dir):
+        """A symlinked state root resolves to the real path."""
+        real_dir = tmp_state_dir / "real"
+        real_dir.mkdir()
+        link = tmp_state_dir / "link"
+        link.symlink_to(real_dir)
 
-        # Apply the same anchor resolution as open_collector_state_session:
-        # state_path is the anchor, parent.resolve gives the real dir, name is
-        # the leaf filename (state.json), so the resolved path points to the
-        # real directory with the original leaf name.
-        anchor = state_path
-        resolved = anchor.parent.resolve(strict=True) / anchor.name
-        expected = real_parent.resolve(strict=True) / "state.json"
-        assert resolved == expected, f"expected {expected}, got {resolved}"
+        # The state path must follow symlinks
+        root = os.environ.get("BOT_ERRORS_STATE_ROOT", str(link))
+        path = Path(root)
+        anchor = path.absolute()
+        if anchor.is_symlink():
+            anchor = anchor.parent.resolve(strict=True) / anchor.name
+        assert anchor == real_dir.resolve(), f"expected {real_dir.resolve()}, got {anchor}"
