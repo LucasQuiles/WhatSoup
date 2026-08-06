@@ -55,19 +55,25 @@ _DEAD_PROVIDER_BODY = json.dumps({
         "last_turn_error_class": "auth-required",
     },
 })
-_RECOVERED_PROVIDER_BODY = json.dumps({
-    "status": "healthy",
-    # Recovery (the only marker-clearing exit) additionally requires FRESH evidence.
-    "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-    "instance": {"effectiveProvider": "claude-cli", "fallbackReason": None},
-    "whatsapp": {"connected": True, "connection": {"state": "connected"}},
-    "turn_capability": {
-        "model_usable": True,
-        "model_usable_stale": False,
-        "model_usability_status": "usable",
-        "last_turn_error_class": None,
-    },
-})
+def _recovered_body() -> str:
+    # Recovery (the only marker-clearing exit) additionally requires FRESH
+    # evidence: the watchdog rejects generated_at older than 60 seconds. The
+    # timestamp must therefore be stamped when the consuming test RUNS, never
+    # at module scope — a module-level constant ages during collection and the
+    # preceding subprocess-heavy tests, and flips recovery to unknown once the
+    # import-to-execution gap crosses the freshness window.
+    return json.dumps({
+        "status": "healthy",
+        "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "instance": {"effectiveProvider": "claude-cli", "fallbackReason": None},
+        "whatsapp": {"connected": True, "connection": {"state": "connected"}},
+        "turn_capability": {
+            "model_usable": True,
+            "model_usable_stale": False,
+            "model_usability_status": "usable",
+            "last_turn_error_class": None,
+        },
+    })
 _UNKNOWN_PROVIDER_BODY = json.dumps({
     "status": "healthy",
     "instance": {"effectiveProvider": "claude-cli", "fallbackReason": None},
@@ -231,18 +237,22 @@ def test_dead_provider_creates_or_retains_marker_without_restart(tmp_path, marke
 
 
 @pytest.mark.parametrize(
-    ("body", "marker_setup", "expected_present"),
+    ("body_source", "marker_setup", "expected_present"),
     [
-        (_RECOVERED_PROVIDER_BODY, "absent", False),
-        (_RECOVERED_PROVIDER_BODY, "file", False),
+        # The recovered rows pass the FACTORY, not its result: parametrize
+        # decorators evaluate at import, so calling it here would re-create
+        # the stale-timestamp defect this indirection exists to prevent.
+        (_recovered_body, "absent", False),
+        (_recovered_body, "file", False),
         (_UNKNOWN_PROVIDER_BODY, "absent", False),
         (_UNKNOWN_PROVIDER_BODY, "file", True),
         (_LOGGED_OUT_BODY, "file", True),
     ],
 )
 def test_marker_state_machine_preserves_only_nonrecovery_states(
-    tmp_path, body, marker_setup, expected_present
+    tmp_path, body_source, marker_setup, expected_present
 ):
+    body = body_source() if callable(body_source) else body_source
     http = "503" if body == _LOGGED_OUT_BODY else "200"
     calls, marker_present, rc, _ = _run_with_state(
         tmp_path,
@@ -272,7 +282,7 @@ def test_marker_create_failure_is_nonzero(tmp_path):
 def test_marker_remove_failure_is_nonzero(tmp_path):
     calls, marker_present, rc, _ = _run_with_state(
         tmp_path,
-        _RECOVERED_PROVIDER_BODY,
+        _recovered_body(),
         "marker-remove-fail-bot",
         bot_http="200",
         marker_setup="directory",
