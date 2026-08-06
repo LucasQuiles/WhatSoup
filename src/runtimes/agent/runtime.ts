@@ -3908,6 +3908,10 @@ export class AgentRuntime implements Runtime {
             reviewByAt,
             actor: 'inline',
           });
+          // A successful createBead proves database writes recovered after a
+          // prior unrecoverable failure (#2406).  Idempotent clear — no-op if
+          // no incident exists.
+          clearAlertSourceChecked(this.instanceName, 'substrate-inline-hook');
           log.info(
             { verb: hit.verb, messageId: msg.messageId, chatJid: msg.chatJid, reviewByAt },
             'inline imperative persisted as proposed bead',
