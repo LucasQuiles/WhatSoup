@@ -1180,13 +1180,27 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           .run(reportId, errorClass, JSON.stringify(data));
 
         // Dispatch to runtime
+        let dispatchAccepted = true;
         if (deps.runtime?.handleControlTurn) {
           const payload = JSON.stringify({ ...data, reportId, errorClass });
           try {
             await deps.runtime.handleControlTurn(reportId, payload);
           } catch (err) {
             log.error({ err, reportId }, '/heal: handleControlTurn failed');
+            dispatchAccepted = false;
           }
+        } else {
+          dispatchAccepted = false;
+        }
+
+        if (!dispatchAccepted) {
+          // Roll back — no dispatch means the pending row would be orphaned (#2549)
+          deps.db.raw
+            .prepare('DELETE FROM pending_heal_reports WHERE report_id = ?')
+            .run(reportId);
+          res.writeHead(502, jsonHeaders);
+          res.end(JSON.stringify({ error: 'dispatch_rejected', reportId }));
+          return;
         }
 
         res.writeHead(202, jsonHeaders);

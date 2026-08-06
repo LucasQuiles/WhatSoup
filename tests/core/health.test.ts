@@ -4290,7 +4290,7 @@ describe('health command endpoints — malformed bodies and side effects', () =>
   });
 
   it('stores heal reports, dispatches the runtime turn, and rejects unresolved duplicates', async () => {
-    const handleControlTurn = vi.fn().mockRejectedValue(new Error('runtime unavailable'));
+    const handleControlTurn = vi.fn().mockResolvedValue(undefined);
     ({ server, port } = await buildTestServer(makeDeps(db, {
       runtime: { handleControlTurn } as any,
     })));
@@ -4320,6 +4320,48 @@ describe('health command endpoints — malformed bodies and side effects', () =>
       error: 'duplicate',
       existingReportId: 'report-1',
     });
+  });
+
+  it('rejects heal when dispatch throws (#2549)', async () => {
+    const handleControlTurn = vi.fn().mockRejectedValue(new Error('runtime unavailable'));
+    ({ server, port } = await buildTestServer(makeDeps(db, {
+      runtime: { handleControlTurn } as any,
+    })));
+    const payload = JSON.stringify({
+      reportId: 'report-reject',
+      type: 'service_crash',
+    });
+
+    const res = await httpReq(port, '/heal', 'POST', payload, {
+      authorization: 'Bearer test-health-token-2515',
+    });
+
+    expect(res.status).toBe(502);
+    expect(JSON.parse(res.body).error).toBe('dispatch_rejected');
+    // Row must be rolled back — retry should work
+    const retry = await httpReq(port, '/heal', 'POST', payload, {
+      authorization: 'Bearer test-health-token-2515',
+    });
+    expect(retry.status).toBe(502); // still rejected; not 409 (no orphan)
+  });
+
+  it('rejects heal when no runtime exists (#2549)', async () => {
+    // No runtime at all — no dispatch possible
+    ({ server, port } = await buildTestServer(makeDeps(db)));
+
+    const res = await httpReq(port, '/heal', 'POST',
+      JSON.stringify({ reportId: 'report-no-rt', type: 'service_crash' }),
+      { authorization: 'Bearer test-health-token-2515' },
+    );
+
+    expect(res.status).toBe(502);
+    expect(JSON.parse(res.body).error).toBe('dispatch_rejected');
+    // Row rolled back — same request can be retried
+    const retry = await httpReq(port, '/heal', 'POST',
+      JSON.stringify({ reportId: 'report-no-rt-2', type: 'service_crash' }),
+      { authorization: 'Bearer test-health-token-2515' },
+    );
+    expect(retry.status).toBe(502);
   });
 
   it('returns a 500 JSON response when /heal persistence unexpectedly fails', async () => {
@@ -5282,7 +5324,10 @@ describe('POST /heal — readBody error path', () => {
   });
 
   it('uses context field as fallback when errorHint is absent', async () => {
-    ({ server, port } = await buildTestServer(makeDeps(db)));
+    const handleControlTurn = vi.fn().mockResolvedValue(undefined);
+    ({ server, port } = await buildTestServer(makeDeps(db, {
+      runtime: { handleControlTurn } as any,
+    })));
 
     const { status, body } = await httpReq(
       port,
@@ -5299,7 +5344,10 @@ describe('POST /heal — readBody error path', () => {
   });
 
   it('generates a fresh UUID when reportId is absent', async () => {
-    ({ server, port } = await buildTestServer(makeDeps(db)));
+    const handleControlTurn = vi.fn().mockResolvedValue(undefined);
+    ({ server, port } = await buildTestServer(makeDeps(db, {
+      runtime: { handleControlTurn } as any,
+    })));
 
     const { status, body } = await httpReq(
       port,
