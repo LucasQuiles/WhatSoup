@@ -6067,13 +6067,13 @@ def run_once(max_events: int) -> dict[str, Any]:
             writefail_recovered = recover_writefail_breadcrumbs(paths)
             reclaimed = reclaim_processing(paths)
             test_provenance_suppressed, test_provenance_meta_alerted = suppress_test_provenance_events(paths)
-            recovery_deduped = suppress_ready_recovery_duplicates(paths)
+            recovery_deduped = suppress_ready_recovery_duplicates(paths, incident=_incident_cycle)
             # Pattern F (§10 C1): count flap trips on raw input BEFORE storm-collapse
             # consumes members. Emits consolidated flap_storm alerts; members are
             # suppressed downstream in should_suppress_send via persisted flapState.
-            flap_storms = flap_scan_outbox(paths)
-            recovered_before_delivery = suppress_alerts_recovered_before_delivery(paths)
-            storm_collapsed = collapse_ready_storms(paths)
+            flap_storms = flap_scan_outbox(paths, incident=_incident_cycle)
+            recovered_before_delivery = suppress_alerts_recovered_before_delivery(paths, incident=_incident_cycle)
+            storm_collapsed = collapse_ready_storms(paths, incident=_incident_cycle)
             processed = 0
             sent = 0
             suppressed = test_provenance_suppressed + recovery_deduped + recovered_before_delivery
@@ -6093,7 +6093,7 @@ def run_once(max_events: int) -> dict[str, Any]:
                 except Exception:
                     pass
                 processed += 1
-                ok, detail = process_one(path, paths)
+                ok, detail = process_one(path, paths, incident=_incident_cycle)
                 if detail == "test_leak":
                     test_leak_dropped += 1
                 elif ok:
@@ -6104,13 +6104,13 @@ def run_once(max_events: int) -> dict[str, Any]:
                 else:
                     failed += 1
                     last_error = detail
-            stale_renotified, stale_failed, stale_error = sweep_stale_incidents(paths, touched_incident_keys)
+            stale_renotified, stale_failed, stale_error = sweep_stale_incidents(paths, touched_incident_keys, incident=_incident_cycle)
             if stale_failed:
                 failed += stale_failed
                 last_error = stale_error
             # Pattern F: resolve flap storms quiet beyond the stable window (one
             # terminal "resolved after N flaps" summary each, then terminal removal).
-            flap_resolved, flap_resolve_errors = sweep_flap_storms(paths)
+            flap_resolved, flap_resolve_errors = sweep_flap_storms(paths, incident=_incident_cycle)
 
             # --- F5: dead-letter meta-alert (at most once per hour when dir non-empty) ---
             dead_letter_meta_alerted = queue_dead_letter_meta_alert(paths, int(time.time()))
