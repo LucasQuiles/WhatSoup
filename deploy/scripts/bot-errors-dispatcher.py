@@ -2648,7 +2648,18 @@ def queue_dead_letter_meta_alert(paths: dict[str, Path], now: int) -> int:
         return 0
     dl_files = [f for f in dl_dir.glob("*.json") if safe_is_regular_entry(f)]
     if not dl_files:
-        # #2421: queue empty — emit idempotent clear for the standing incident.
+        state = read_meta_state(paths)
+        was_nonempty = state.get("dlWasNonempty", False)
+        state["dlWasNonempty"] = False
+        write_meta_state(paths, state)
+        if not was_nonempty:
+            # Already empty on the previous sweep — no transition, no clear.
+            return 0
+        # #2421 with RED-3061-r6 fix: emit clear ONLY on the non-empty→empty
+        # transition, not on every sweep when the dead letter is already empty.
+        # This prevents the cyclic outbox occupation (the meta-clear writes to
+        # outbox; consuming it on the next dispatch leaves the queue empty,
+        # which without this guard would trigger another write, ad infinitum).
         clear_event = dead_letter_meta_event(paths, 0, "")
         clear_event["eventType"] = "clear"
         clear_event["severity"] = "info"
@@ -2701,6 +2712,7 @@ def queue_dead_letter_meta_alert(paths: dict[str, Path], now: int) -> int:
     require_advance(event_publication)
     state["deadLetterMetaAlertAtEpoch"] = now
     state["deadLetterMetaAlertEventId"] = event["id"]
+    state["dlWasNonempty"] = True
     state_publication = write_meta_state(paths, state)
     require_all_advance([event_publication, state_publication])
     append_dispatch_log(paths, {
