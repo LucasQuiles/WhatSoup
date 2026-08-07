@@ -1725,7 +1725,7 @@ describe('WhatSoupError non-retryable paths', () => {
 
     // Must NOT emit llm_total_failure (fallback was never tested)
     const totalCalls = vi.mocked(mockEmitAlert).mock.calls.filter(
-      (c: string[]) => c[1] === 'llm_total_failure',
+      (c) => c[1] === 'llm_total_failure',
     );
     expect(totalCalls).toHaveLength(0);
 
@@ -1749,7 +1749,13 @@ describe('WhatSoupError non-retryable paths', () => {
     expect(mockEmitAlert).toHaveBeenCalledWith(expect.any(String), 'llm_primary_failure', expect.any(String), expect.any(String));
 
     // Second turn: success → llm_primary_failure cleared
-    vi.mocked(primary.generate).mockResolvedValueOnce({ content: 'successful turn', inputTokens: 10, outputTokens: 20 });
+    vi.mocked(primary.generate).mockResolvedValueOnce({
+      content: 'successful turn',
+      inputTokens: 10,
+      outputTokens: 20,
+      model: 'claude-opus-4-6',
+      durationMs: 500,
+    });
     await handleAndDrain(handler, makeIncomingMessage());
     expect(mockClearAlert).toHaveBeenCalledWith(expect.any(String), 'llm_primary_failure');
   });
