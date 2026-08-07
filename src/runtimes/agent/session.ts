@@ -1517,7 +1517,14 @@ export class SessionManager {
     }
 
     const rowId = existingRowId === undefined
-      ? createSession(this.db, pid, cwd, this.chatJid, this.conversationKey, this.provider)
+      ? createSession(
+          this.db,
+          pid,
+          cwd,
+          this.chatJid,
+          this.conversationKey,
+          this.provider,
+        )
       : existingRowId;
     if (existingRowId !== undefined) {
       if (resumeSessionId === undefined) {
