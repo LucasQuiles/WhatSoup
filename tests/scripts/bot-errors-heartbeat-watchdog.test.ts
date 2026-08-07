@@ -513,12 +513,21 @@ m.reconcile({"credential_probe": evidence}, ["credential_probe"])
     });
 
     const events = readOutboxEvents();
-    expect(events).toHaveLength(1);
-    expect(events[0]!.severity).toBe('warning');
-    expect(events[0]!.alertSource).toBe('browser_debug:probe');
-    expect(events[0]!.summary).toBe('BOT ERRORS browser debug visibility degraded: browser_debug:probe');
-    expect(events[0]!.evidence).toContain('controller_connections=unknown');
-    expect(events[0]!.evidence).not.toContain('session unattended');
+    // #2426: an unknown-visibility session now yields the probe-level event
+    // AND a per-profile event, so reconciliation cannot falsely clear the
+    // profile's incident after two unknown observations.
+    expect(events).toHaveLength(2);
+    const probe = events.find((e) => e.alertSource === 'browser_debug:probe');
+    expect(probe).toBeDefined();
+    expect(probe!.severity).toBe('warning');
+    expect(probe!.summary).toBe('BOT ERRORS browser debug visibility degraded: browser_debug:probe');
+    expect(probe!.evidence).toContain('controller_connections=unknown');
+    expect(probe!.evidence).not.toContain('session unattended');
+    const perProfile = events.find((e) => e.alertSource === 'browser_debug:unknowncontroller');
+    expect(perProfile).toBeDefined();
+    expect(perProfile!.evidence).toContain('profile_hash=unknowncontroller');
+    expect(perProfile!.evidence).toContain('controller_connections=unknown');
+    expect(perProfile!.evidence).not.toContain('session unattended');
   });
 
   it('confirms browser debug recovery twice before clearing the incident', () => {
