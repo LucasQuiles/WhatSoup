@@ -7,17 +7,15 @@ import { mkdtempSync, writeFileSync, existsSync, readFileSync, rmSync } from 'no
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
-// Hoisted vi.mock: spy on the module-level log.warn.
-// The store imports createChildLogger from ../logger.ts (src/logger.ts).
+// Hoisted vi.mock via the sanctioned logger mock helper.
+// warnSpy lets tests assert on module-level log.warn calls.
+import { loggerMock } from '../helpers/logger-mock.ts';
+
 const warnSpy = vi.hoisted(() => vi.fn());
 vi.mock('../../src/logger.ts', () => ({
   createChildLogger: () => ({
-    info: vi.fn(),
+    ...loggerMock().createChildLogger(),
     warn: warnSpy,
-    error: vi.fn(),
-    debug: vi.fn(),
-    fatal: vi.fn(),
-    child: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(), fatal: vi.fn(), level: 'error' }),
   }),
 }));
 

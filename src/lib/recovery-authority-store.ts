@@ -14,6 +14,15 @@
  * concurrent reader never sees a partially-written file.
  */
 
+/**
+ * TRACKED_UNREACHABLE: recovery-authority-store is fully implemented and
+ * tested but has zero production call sites. Wiring tracked at:
+ * https://github.com/LucasQuiles/WhatSoup/issues/3086
+ *
+ * When wired, the intended consumer is heal-lifecycle dispatcher recovery
+ * scan (src/deploy/scripts/bot-errors-dispatcher.py — the recovery scanner
+ * that reconciles incident markers after cold restart).
+ */
 import Path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
