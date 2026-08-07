@@ -1,7 +1,7 @@
 {
-  "generated_at": "2026-08-07T14:33:12Z",
+  "generated_at": "2026-08-07T14:59:34Z",
   "repo": "WhatSoup",
-  "git_head": "27eadb9830b762c7380690878c5d6d46a6545832",
+  "git_head": "5bd54c6e42891f711a310bf3d2b514df0aad09ab",
   "git_head_note": "git_head is captured at scan time, so it reflects the branch HEAD at the moment `build-work-index` ran — NOT the commit that carries this index. Expect divergence in two cases: (1) intra-branch, when the regenerated index is committed after further content changes are staged; (2) post-squash-merge, when the landed main SHA differs from the pre-merge branch SHA. The row data and inconsistency detection remain accurate regardless of git_head freshness.",
   "total": 116,
   "schema_version": 5,
@@ -808,7 +808,7 @@
       "canonical_parent": "docs/superpowers/plans",
       "supersedes_hint": null,
       "last_modified": "2026-08-07",
-      "size_bytes": 18084
+      "size_bytes": 19764
     },
     {
       "path": "docs/superpowers/reviews/2026-04-07-anti-echo-review-handoff.md",
@@ -1324,7 +1324,7 @@
       "canonical_parent": "docs/superpowers/specs",
       "supersedes_hint": null,
       "last_modified": "2026-08-07",
-      "size_bytes": 9580
+      "size_bytes": 10286
     },
     {
       "path": "docs/superpowers/specs/kill-session-transactional-cancellation/design.md",

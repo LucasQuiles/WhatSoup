@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 import errno
 import fcntl
 import hashlib
+import html
 import json
 import os
 from pathlib import Path
@@ -114,8 +115,19 @@ SERVICE_ENV_MAP = {
     "openai": "OPENAI_API_KEY",
     "deepseek": "DEEPSEEK_API_KEY",
     "minimax": "MINIMAX_API_KEY",
+    "kimi": "KIMI_API_KEY",
+    "glm": "ZAI_API_KEY",
+    "xai": "XAI_API_KEY",
+    "groq": "GROQ_API_KEY",
+    "mistral": "MISTRAL_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+    "google": "GOOGLE_API_KEY",
+    "fireworks-ai": "FIREWORKS_API_KEY",
+    "togetherai": "TOGETHER_API_KEY",
     "pinecone": "PINECONE_API_KEY",
     "elevenlabs": "ELEVENLABS_API_KEY",
+    "whatsoup-health-token": "WHATSOUP_HEALTH_TOKEN",
+    "whatsoup_health": "WHATSOUP_HEALTH_TOKEN",
 }
 TERMINAL_AUTH_FAILURE_CLASSES = {"pairing_required", "serverside_logout_irreversible"}
 LOGGED_OUT_STATUS_CODE = 401
@@ -3247,6 +3259,71 @@ SERVICE_KEYCHAIN_FALLBACKS: dict[str, list[str]] = {
 }
 
 
+PRIVATE_CREDENTIAL_MAX_BYTES = 4096
+
+
+def read_private_credential_file(path: Path, max_bytes: int = PRIVATE_CREDENTIAL_MAX_BYTES) -> str | None:
+    """Read a current-user 0600 regular file without following symlinks."""
+    try:
+        parent_stat = path.parent.lstat()
+        if (
+            stat.S_ISLNK(parent_stat.st_mode)
+            or not stat.S_ISDIR(parent_stat.st_mode)
+            or parent_stat.st_uid != os.getuid()
+            or stat.S_IMODE(parent_stat.st_mode) & 0o077
+        ):
+            return None
+        path_stat = path.lstat()
+        if (
+            stat.S_ISLNK(path_stat.st_mode)
+            or not stat.S_ISREG(path_stat.st_mode)
+            or path_stat.st_uid != os.getuid()
+            or stat.S_IMODE(path_stat.st_mode) & 0o077
+            or path_stat.st_size > max_bytes
+        ):
+            return None
+    except OSError:
+        return None
+
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    fd: int | None = None
+    try:
+        fd = os.open(path, flags)
+        opened_stat = os.fstat(fd)
+        if (
+            not stat.S_ISREG(opened_stat.st_mode)
+            or opened_stat.st_uid != os.getuid()
+            or stat.S_IMODE(opened_stat.st_mode) & 0o077
+            or opened_stat.st_size > max_bytes
+        ):
+            return None
+        chunks: list[bytes] = []
+        remaining = max_bytes + 1
+        while remaining > 0:
+            chunk = os.read(fd, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+        if len(raw) > max_bytes:
+            return None
+        value = raw.decode("utf-8").strip()
+        return value or None
+    except (OSError, UnicodeDecodeError):
+        return None
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def whatsoup_keyfile_value(service: str) -> str | None:
+    base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    return read_private_credential_file(
+        Path(base) / "whatsoup" / "credentials" / f"{service}.key"
+    )
+
+
 def whatsoup_keyfile_present(service: str) -> bool:
     """True when ~/.config/whatsoup/credentials/<service>.key holds a non-empty value.
 
@@ -3256,12 +3333,24 @@ def whatsoup_keyfile_present(service: str) -> bool:
     it has no account dimension. NOTE: lookupCredential's file store keys on the ORIGINAL service
     name only (no migration), so we do too.
     """
-    base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
-    path = Path(base) / "whatsoup" / "credentials" / f"{service}.key"
+    return whatsoup_keyfile_value(service) is not None
+
+
+def opencode_auth_credential_value(service: str) -> str | None:
+    base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
+    auth_path = Path(base) / "opencode" / "auth.json"
     try:
-        return path.is_file() and bool(path.read_text(encoding="utf-8").strip())
-    except OSError:
-        return False
+        raw = auth_path.read_text(encoding="utf-8")
+        parsed = json.loads(raw)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    entry = parsed.get(service)
+    if not isinstance(entry, dict):
+        return None
+    key = entry.get("key")
+    return key.strip() if isinstance(key, str) and key.strip() else None
 
 
 def provider_credential_value(service: str, timeout_seconds: int) -> str | None:
@@ -3269,18 +3358,12 @@ def provider_credential_value(service: str, timeout_seconds: int) -> str | None:
     env_key = service_env_var(service)
     if env_key:
         value = os.environ.get(env_key)
-        if value:
-            return value
+        if value and value.strip():
+            return value.strip()
 
-    base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
-    key_path = Path(base) / "whatsoup" / "credentials" / f"{service}.key"
-    try:
-        if key_path.is_file():
-            value = key_path.read_text(encoding="utf-8").strip()
-            if value:
-                return value
-    except OSError:
-        pass
+    value = whatsoup_keyfile_value(service)
+    if value:
+        return value
 
     candidates = [service, *SERVICE_KEYCHAIN_FALLBACKS.get(service, [])]
     if HOST_PLATFORM == "darwin":
@@ -3316,7 +3399,7 @@ def provider_credential_value(service: str, timeout_seconds: int) -> str | None:
             value = proc.stdout.strip()
             if proc.returncode == 0 and value:
                 return value
-    return None
+    return opencode_auth_credential_value(service)
 
 
 def _keychain_secret_status(
@@ -3397,7 +3480,7 @@ def provider_credential_presence(
     if dry_status is not None:
         present = dry_status in {"present", "ok", "true", "1"}
         return present, "dry", dry_status
-    if user is None and env_key and os.environ.get(env_key):
+    if user is None and env_key and (os.environ.get(env_key) or "").strip():
         return True, "env", "present"
     if user is None and whatsoup_keyfile_present(service):
         return True, "whatsoup_keyfile", "present"
@@ -3417,8 +3500,11 @@ def provider_credential_presence(
     if keyring_status == "present":
         return True, keyring_source, "present"
 
-    if user is not None and env_key and os.environ.get(env_key):
+    if user is not None and env_key and (os.environ.get(env_key) or "").strip():
         return True, "env", "present"
+
+    if opencode_auth_credential_value(service):
+        return True, "opencode_auth", "present"
 
     # Not resolvable by the runtime. A populated ocw .env is a misplacement diagnostic only.
     if secret_file_has_service_key(service, env_key):
@@ -3472,7 +3558,12 @@ def detect_opencode_mode(help_text: str, run_help_text: str) -> str:
     return "unsupported"
 
 
-def executable_candidate(command_name: str) -> str | None:
+def executable_candidate(command_name: str, path_value: str | None = None) -> str | None:
+    on_path = shutil.which(command_name, path=path_value)
+    if on_path:
+        return on_path
+    if path_value is not None:
+        return None
     configured_dirs = [
         part.strip()
         for part in os.environ.get("BOT_ERRORS_PROVIDER_BIN_DIRS", "").split(os.pathsep)
@@ -3494,9 +3585,6 @@ def executable_candidate(command_name: str) -> str | None:
         candidate = Path(directory) / command_name
         if candidate.is_file() and os.access(candidate, os.X_OK):
             return str(candidate)
-    on_path = shutil.which(command_name)
-    if on_path:
-        return on_path
     for directory in ("/opt/homebrew/bin", "/usr/local/bin"):
         candidate = Path(directory) / command_name
         if candidate.is_file() and os.access(candidate, os.X_OK):
@@ -3519,7 +3607,46 @@ def opencode_provider_probe_command(profile: dict[str, Any], item: dict[str, Any
     if generic_command and "opencode" in Path(generic_command).name.lower():
         return generic_command
 
-    return executable_candidate("opencode") or "opencode"
+    return "opencode"
+
+
+def instance_provider_path(name: str) -> str | None:
+    dry_path = os.environ.get("BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH")
+    if dry_path is not None:
+        return dry_path.strip() or None
+    if HOST_PLATFORM != "darwin":
+        return os.environ.get("PATH") or None
+    plist_path = Path.home() / "Library" / "LaunchAgents" / f"com.whatsoup.{name}.plist"
+    try:
+        if plist_path.stat().st_size > 65536:
+            return None
+        raw = plist_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    label_match = re.search(
+        r"<key>Label</key>\s*<string>(.*?)</string>", raw, re.DOTALL
+    )
+    if label_match is None or html.unescape(label_match.group(1)) != f"com.whatsoup.{name}":
+        return None
+    environment_match = re.search(
+        r"<key>EnvironmentVariables</key>\s*<dict>(.*?)</dict>", raw, re.DOTALL
+    )
+    if environment_match is None:
+        return None
+    path_match = re.search(
+        r"<key>PATH</key>\s*<string>(.*?)</string>", environment_match.group(1), re.DOTALL
+    )
+    if path_match is None:
+        return None
+    value = html.unescape(path_match.group(1)).strip()
+    return value or None
+
+
+def agent_workspace_cwd(data: dict[str, Any], name: str) -> str:
+    configured = agent_options_from_config(data).get("cwd")
+    if isinstance(configured, str) and configured.strip():
+        return str(Path(configured.strip()).expanduser())
+    return str(Path.home() / ".local" / "share" / "whatsoup" / "instances" / name / "workspace")
 
 
 def opencode_functional_probe_enabled(profile: dict[str, Any], item: dict[str, Any]) -> bool:
@@ -3623,12 +3750,15 @@ def opencode_functional_probe_env(
     data: dict[str, Any],
     target: str,
     timeout_seconds: int,
+    provider_path: str | None = None,
 ) -> dict[str, str]:
     child_env = {
         key: value
         for key in OPENCODE_FUNCTIONAL_ENV_KEYS
         if (value := os.environ.get(key)) is not None
     }
+    if provider_path:
+        child_env["PATH"] = provider_path
     model = provider_model_from_config(data, target)
     service = opencode_key_service_for_model(model)
     env_key = service_env_var(service) if service else None
@@ -3646,13 +3776,25 @@ def opencode_provider_probe_inventory(
     provider: str,
     target: str = "primary",
 ) -> list[str]:
+    provider_path = instance_provider_path(name)
     command = opencode_provider_probe_command(profile, item)
+    if command == "opencode":
+        command = executable_candidate(command, provider_path) or command
     timeout_seconds = int_or_none(item.get("providerProbeTimeoutSeconds"))
     if timeout_seconds is None:
         timeout_seconds = int_or_none(profile.get("providerProbeTimeoutSeconds")) or 15
     timeout_seconds = max(1, min(timeout_seconds, 60))
     safe_command = redact_evidence_string(command, 120)
     configured_mode = opencode_command_mode_from_config(data, target)
+    child_env = opencode_functional_probe_env(data, target, timeout_seconds, provider_path)
+    child_cwd = agent_workspace_cwd(data, name)
+
+    if HOST_PLATFORM == "darwin" and provider_path is None:
+        return [(
+            f"FAIL provider_probe {name}: provider={provider} command={safe_command} "
+            "failure_class=provider_runtime_path_unavailable "
+            "remediation=regenerate_and_reload_the_instance_launchagent"
+        )]
 
     try:
         version_stdout, version_stderr, version_rc, _ = provider_command_output(
@@ -3661,6 +3803,8 @@ def opencode_provider_probe_inventory(
             "BOT_ERRORS_DRY_OPENCODE_VERSION_STDOUT",
             "BOT_ERRORS_DRY_OPENCODE_VERSION_STDERR",
             "BOT_ERRORS_DRY_OPENCODE_VERSION_RC",
+            child_env=child_env,
+            child_cwd=child_cwd,
         )
         help_stdout, help_stderr, help_rc, _ = provider_command_output(
             [command, "--help"],
@@ -3668,6 +3812,8 @@ def opencode_provider_probe_inventory(
             "BOT_ERRORS_DRY_OPENCODE_HELP_STDOUT",
             "BOT_ERRORS_DRY_OPENCODE_HELP_STDERR",
             "BOT_ERRORS_DRY_OPENCODE_HELP_RC",
+            child_env=child_env,
+            child_cwd=child_cwd,
         )
         run_help_stdout, run_help_stderr, run_help_rc, _ = provider_command_output(
             [command, "run", "--help"],
@@ -3675,6 +3821,8 @@ def opencode_provider_probe_inventory(
             "BOT_ERRORS_DRY_OPENCODE_RUN_HELP_STDOUT",
             "BOT_ERRORS_DRY_OPENCODE_RUN_HELP_STDERR",
             "BOT_ERRORS_DRY_OPENCODE_RUN_HELP_RC",
+            child_env=child_env,
+            child_cwd=child_cwd,
         )
     except Exception as exc:  # noqa: BLE001 - daily health should report provider probe failure.
         return [(
@@ -3748,7 +3896,8 @@ def opencode_provider_probe_inventory(
             "BOT_ERRORS_DRY_OPENCODE_FUNCTIONAL_STDERR",
             "BOT_ERRORS_DRY_OPENCODE_FUNCTIONAL_RC",
             "Reply with exactly OK.\n",
-            opencode_functional_probe_env(data, target, timeout_seconds),
+            child_env,
+            child_cwd,
         )
     except subprocess.TimeoutExpired:
         return [(
@@ -3790,6 +3939,7 @@ def provider_command_output(
     dry_rc_env: str,
     input_text: str | None = None,
     child_env: dict[str, str] | None = None,
+    child_cwd: str | None = None,
 ) -> tuple[str, str, int, bool]:
     dry_stdout = os.environ.get(dry_stdout_env)
     dry_stderr = os.environ.get(dry_stderr_env, "")
@@ -3804,6 +3954,7 @@ def provider_command_output(
         timeout=timeout_seconds,
         check=False,
         env=child_env,
+        cwd=child_cwd,
     )
     return proc.stdout or "", proc.stderr or "", proc.returncode, False
 

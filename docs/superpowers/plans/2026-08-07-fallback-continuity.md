@@ -322,6 +322,42 @@ Regenerate manifests, run integrity/focused/type/release gates under the pinned
 Node runtime, obtain independent approval and CI for the exact pushed SHA, then
 merge without bypassing repository protections.
 
+### Task 8: Close runtime-context parity gaps
+
+**Files:**
+- Modify: `deploy/scripts/bot-errors-health-check.py`
+- Modify: `docs/configuration.md`
+- Modify: focused tests and runtime manifest
+
+The second review found that the health process could still select a provider
+binary, credential source, environment, or working directory that differed
+from the instance process it was meant to validate.
+
+- [x] **Step 1: Reproduce registry, auth-store, PATH, cwd, and environment drift**
+
+Add RED coverage for the full runtime credential registry, OpenCode's terminal
+auth store, PATH collisions, the generated instance LaunchAgent PATH, the
+configured workspace, and every compatibility/functional child environment.
+
+- [x] **Step 2: Execute every OpenCode probe in the runtime context**
+
+Resolve the binary only through the instance PATH, use the configured/default
+agent workspace as cwd, pass one positive environment allowlist to version,
+help, and functional calls, and project only the selected provider credential.
+
+- [x] **Step 3: Match credential resolution and private-file constraints**
+
+Keep the health credential registry identical to the runtime registry, include
+the OpenCode auth store as the terminal fallback, and read WhatSoup key files
+as bounded, current-user, private regular files without following symlinks.
+
+- [ ] **Step 4: Re-review, publish, deploy, and prove exact-head parity**
+
+Run the full gates, obtain fresh independent review of the exact local head,
+push over SSH, observe CI and required approval, then deploy that exact head and
+capture loaded PATH, workspace/config, credential-source, canary, health, and
+single-message proof on the target host.
+
 ## Verification Receipt
 
 - The clean platform branch passed the repository push gate (50/50), TypeScript

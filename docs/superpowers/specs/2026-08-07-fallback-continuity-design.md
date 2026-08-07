@@ -39,6 +39,15 @@ This keeps stream integrity fail-closed while accommodating the known pseudo-ter
 
 The daily provider inventory will retain compatibility and credential-presence checks and add an opt-in OpenCode functional probe. The probe uses the runtime's effective fallback model and inherited provider settings, including the selected execution profile and auto-approval flag, while excluding the primary endpoint route. It invokes modern-run JSON mode with `--print-logs --log-level INFO`, supplies the fixed canary through stdin, and gives the child only system essentials plus the selected model credential. It captures stdout/stderr without printing secrets, accepts only the closed diagnostic grammar outside JSONL, and requires the ordered record sequence `step_start` → exact combined text `OK` → terminal `step_finish(reason=stop)`, with no later provider event.
 
+On macOS, the probe reads the generated instance LaunchAgent PATH and resolves
+the provider binary only through that ordered PATH. Every compatibility and
+functional subprocess receives the same positive environment allowlist and
+runs from the configured agent workspace (or the runtime's default workspace).
+Credential resolution mirrors the runtime registry and lookup order, including
+OpenCode's auth store as the terminal fallback. WhatSoup private key files are
+read with bounded, no-symlink, current-user/private-file checks before a value
+can be projected into the child environment.
+
 Any malformed first record—including the observed PTY artifact—fails with a distinct stream-integrity classification. A timeout or missing terminal record is inconclusive/failing, never success. Dry-run inputs provide deterministic test fixtures. Fleet profiles may enable this probe before a host is declared fallback-ready.
 
 ### 3. Context envelope
@@ -103,7 +112,7 @@ durable runtime.
 ## Verification
 
 - Parser unit tests cover exact first-record normalization, reset behavior, and fail-closed later/unknown corruption.
-- Health-check tests cover valid ordered JSONL, exact canary text, terminal-last enforcement, recognized PTY-merged diagnostics, PTY-corrupted JSONL, timeout, runtime-inherited fallback settings, positive credential allowlisting, and credential-missing behavior.
+- Health-check tests cover valid ordered JSONL, exact canary text, terminal-last enforcement, recognized PTY-merged diagnostics, PTY-corrupted JSONL, timeout, runtime-inherited fallback settings, exact instance PATH/cwd use, full credential-registry parity, OpenCode auth-store fallback, private-file refusal, positive credential allowlisting, and credential-missing behavior.
 - Session tests prove PTY-merged diagnostic stdout advances watchdog liveness without becoming a provider event.
 - Runtime tests prove chronological context and single occurrence of the current user request.
 - Session tests prove operational context and user text are absent from OpenCode argv and written to stdin in order.

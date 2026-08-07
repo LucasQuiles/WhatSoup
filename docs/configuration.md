@@ -1053,14 +1053,13 @@ later hardened fallback admission treats that state as not aligned. A present
 value other than `whatsoup-headless` fails config validation and the runtime
 resolver also rejects it before spawn.
 
-WhatSoup owns only the reserved selector contract. The fleet-policy package is
-the single source for the versioned `whatsoup-headless` agent artifact and its
-deployment; this repository does not synthesize an `agent` entry in
-`opencode.json` or carry a second permission-policy template. The fleet source
-is deliberately non-deployable until it has an exact workspace binding and
-supported-version proof. A fleet lane becomes eligible only after separate
-static resolution and an edit-plus-shell canary prove the installed profile.
-Its permission rules are dispatcher policy, not an operating-system sandbox.
+WhatSoup owns the reserved selector's delivery-authority rule. Its startup
+merge ensures that `opencode.json` contains a `whatsoup-headless` agent entry
+with `whatsoup_send_message: "deny"`, creating the entry when absent and
+preserving its other fields when present. The same deny is written at the
+global permission level, so both selected-agent and inherited permission
+resolution keep live-turn text as the only reply owner. These rules are
+dispatcher policy, not an operating-system sandbox.
 
 OpenCode children use a fresh positive environment allowlist. The non-secret
 base is `PATH`, `HOME`, `USER`, `SHELL`, `LANG`, `TERM`, `NODE_PATH`,
@@ -1124,12 +1123,12 @@ generated MCP block, the optional custom-endpoint block, and one exact
 single delivery owner for an OpenCode reply; denying that current-chat text
 tool prevents an auto-approved fallback from sending a second copy before the
 runtime echoes its normal answer. Other existing permission rules and unrelated
-`agent` entries are preserved. The merge removes the obsolete inline
-`whatsoup-headless` entry and never creates or replaces that reserved profile;
-the fleet-policy package owns the external artifact. A route with
-`providerConfig.executionProfile: "whatsoup-headless"` selects the externally
-provisioned profile explicitly for every fresh, resumed, and model-usability
-turn. Any other configured profile name is rejected.
+`agent` entries are preserved. The merge creates the reserved
+`whatsoup-headless` entry when absent, or preserves its existing fields while
+enforcing the one delivery deny when present. A route with
+`providerConfig.executionProfile: "whatsoup-headless"` selects that reserved
+profile explicitly for every fresh, resumed, and model-usability turn. Any
+other configured profile name is rejected.
 
 WhatSoup does not infer this selector from OpenCode's `default_agent` and never
 passes `--yolo` or an implicit blanket permission-bypass flag. A legacy route
