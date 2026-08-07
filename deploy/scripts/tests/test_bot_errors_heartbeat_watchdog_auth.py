@@ -93,6 +93,69 @@ def _private_state(monkeypatch, mod, tmp_path: Path) -> Path:
     return state
 
 
+def _make_state_load_result(state: dict[str, Any], mode: str = "valid") -> SimpleNamespace:
+    """Build a mock StateLoadResult for session-backed reconcile calls."""
+    return SimpleNamespace(
+        mode=mode,
+        payload=state,
+        capability=SimpleNamespace(version=SimpleNamespace(generation=1, operation_epoch=0)),
+        diagnostic=SimpleNamespace(reason=None),
+    )
+
+
+def _make_session_mock(state_file: Path) -> SimpleNamespace:
+    """Build a mock session object that reads/writes a state file.
+
+    The session's .load() reads the file and returns a valid StateLoadResult.
+    .save() writes the updated payload back to the file and returns a mock
+    PublicationResult with an advanced capability.
+    """
+    def _load():
+        payload = json.loads(state_file.read_text(encoding="utf-8"))
+        return _make_state_load_result(payload)
+
+    def _save(payload: Any, capability: Any) -> SimpleNamespace:
+        state_file.write_text(json.dumps(payload, default=str), encoding="utf-8")
+        state_file.chmod(0o600)
+        return SimpleNamespace(
+            capability=SimpleNamespace(
+                version=SimpleNamespace(generation=2, operation_epoch=1),
+            ),
+        )
+
+    return SimpleNamespace(
+        __enter__=lambda self: self,
+        __exit__=lambda self, *args: None,
+        load=_load,
+        save=_save,
+    )
+
+
+def _reconcile_with_session(
+    mod: Any,
+    problems: dict[str, str],
+    active_prefixes: list[str],
+    state_file: Path,
+    evaluated_instances: set[str] | None = None,
+) -> list[Any]:
+    """Call mod.reconcile with a backed session.
+
+    Reads *state_file*, creates a mock session, and calls reconcile
+    with the session-backed arguments. After reconcile returns the
+    state file has been updated via the mock session's save().
+    """
+    session = _make_session_mock(state_file)
+    result = session.load()
+    return mod.reconcile(
+        problems,
+        active_prefixes,
+        result.payload,
+        session,
+        result.capability,
+        evaluated_instances=evaluated_instances,
+    )
+
+
 def test_now_iso_formats_explicit_epoch_zero(monkeypatch):
     mod = _load_module()
     monkeypatch.setenv("BOT_ERRORS_DRY_NOW", "1000")
@@ -185,7 +248,10 @@ def test_malformed_open_incident_counters_do_not_crash_reconcile(tmp_path: Path,
         },
     )
 
-    written = mod.reconcile({"fleet_sentinel": "fleet sentinel heartbeat stale"}, ["fleet_sentinel"])
+    written = _reconcile_with_session(
+        mod, {"fleet_sentinel": "fleet sentinel heartbeat stale"},
+        ["fleet_sentinel"], state / "heartbeat-watchdog-state.json",
+    )
 
     assert written == []
     saved = json.loads((state / "heartbeat-watchdog-state.json").read_text(encoding="utf-8"))
@@ -214,7 +280,10 @@ def test_boolean_open_incident_counters_are_reinitialized(tmp_path: Path, monkey
         },
     )
 
-    written = mod.reconcile({"fleet_sentinel": "fleet sentinel heartbeat stale"}, ["fleet_sentinel"])
+    written = _reconcile_with_session(
+        mod, {"fleet_sentinel": "fleet sentinel heartbeat stale"},
+        ["fleet_sentinel"], state / "heartbeat-watchdog-state.json",
+    )
 
     assert written == []
     saved = json.loads((state / "heartbeat-watchdog-state.json").read_text(encoding="utf-8"))
@@ -223,7 +292,7 @@ def test_boolean_open_incident_counters_are_reinitialized(tmp_path: Path, monkey
     assert incident["ageSeconds"] == 1000
 
 
-def test_non_finite_open_incident_counters_do_not_crash_reconcile(tmp_path: Path, monkeypatch):
+def test_log_write_failure_does_not_block_renotify_event(tmp_path: Path, monkeypatch):
     mod = _load_module()
     state = _private_state(monkeypatch, mod, tmp_path)
     _write_private_json(
@@ -242,7 +311,10 @@ def test_non_finite_open_incident_counters_do_not_crash_reconcile(tmp_path: Path
         },
     )
 
-    written = mod.reconcile({"fleet_sentinel": "fleet sentinel heartbeat stale"}, ["fleet_sentinel"])
+    written = _reconcile_with_session(
+        mod, {"fleet_sentinel": "fleet sentinel heartbeat stale"},
+        ["fleet_sentinel"], state / "heartbeat-watchdog-state.json",
+    )
 
     assert written == []
     saved = json.loads((state / "heartbeat-watchdog-state.json").read_text(encoding="utf-8"))
@@ -279,7 +351,10 @@ def test_log_write_failure_does_not_block_renotify_event(tmp_path: Path, monkeyp
 
     monkeypatch.setattr(mod, "append_private_jsonl", fail_log)
 
-    written = mod.reconcile({"fleet_sentinel": "fleet sentinel heartbeat stale"}, ["fleet_sentinel"])
+    written = _reconcile_with_session(
+        mod, {"fleet_sentinel": "fleet sentinel heartbeat stale"},
+        ["fleet_sentinel"], state / "heartbeat-watchdog-state.json",
+    )
 
     assert len(written) == 1
     event = json.loads(written[0].read_text(encoding="utf-8"))
@@ -299,7 +374,10 @@ def test_malformed_open_incident_record_realerts_when_problem_persists(tmp_path:
         {"version": 1, "open": {"fleet_sentinel": ["corrupt"]}},
     )
 
-    written = mod.reconcile({"fleet_sentinel": "fleet sentinel heartbeat stale"}, ["fleet_sentinel"])
+    written = _reconcile_with_session(
+        mod, {"fleet_sentinel": "fleet sentinel heartbeat stale"},
+        ["fleet_sentinel"], state / "heartbeat-watchdog-state.json",
+    )
 
     assert len(written) == 1
     saved = json.loads((state / "heartbeat-watchdog-state.json").read_text(encoding="utf-8"))
@@ -329,7 +407,9 @@ def test_malformed_recovery_counter_restarts_recovery_confirmation(tmp_path: Pat
         },
     )
 
-    written = mod.reconcile({}, ["fleet_sentinel"])
+    written = _reconcile_with_session(
+        mod, {}, ["fleet_sentinel"], state / "heartbeat-watchdog-state.json",
+    )
 
     assert written == []
     saved = json.loads((state / "heartbeat-watchdog-state.json").read_text(encoding="utf-8"))
@@ -356,7 +436,9 @@ def test_non_finite_recovery_counter_restarts_recovery_confirmation(tmp_path: Pa
         },
     )
 
-    written = mod.reconcile({}, ["fleet_sentinel"])
+    written = _reconcile_with_session(
+        mod, {}, ["fleet_sentinel"], state / "heartbeat-watchdog-state.json",
+    )
 
     assert written == []
     saved = json.loads((state / "heartbeat-watchdog-state.json").read_text(encoding="utf-8"))
@@ -371,7 +453,9 @@ def test_malformed_open_incident_record_restarts_recovery_confirmation(tmp_path:
         {"version": 1, "open": {"fleet_sentinel": ["corrupt"]}},
     )
 
-    written = mod.reconcile({}, ["fleet_sentinel"])
+    written = _reconcile_with_session(
+        mod, {}, ["fleet_sentinel"], state / "heartbeat-watchdog-state.json",
+    )
 
     assert written == []
     saved = json.loads((state / "heartbeat-watchdog-state.json").read_text(encoding="utf-8"))

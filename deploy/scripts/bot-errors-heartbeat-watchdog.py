@@ -15,7 +15,7 @@ import socket
 import subprocess
 import sys
 import time
-from typing import Any
+from typing import Any, Mapping
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -42,6 +42,17 @@ from lib.durable_json import (
     publish_event_json,
     publish_state_json,
     require_advance,
+)
+from lib.controller_state import (
+    ControllerStateRequired,
+    STATE_RECOVERY_REQUIRED_EXIT,
+    emit_state_recovery_fallback,
+    open_controller_state,
+    read_controller_state,
+    state_diagnostic_details,
+    StateComponent,
+    StateMode,
+    StateReadResult,
 )
 
 
@@ -278,7 +289,11 @@ def parse_iso_epoch(value: Any) -> int | None:
 
 
 def state_root() -> Path:
-    return Path(os.environ.get("BOT_ERRORS_STATE_DIR", Path.home() / ".local/state/bot-errors"))
+    root = Path(os.environ.get("BOT_ERRORS_STATE_DIR", Path.home() / ".local/state/bot-errors"))
+    # #2723 R4.7: macOS state/tmp roots commonly traverse OS path aliases (/var and
+    # /tmp are symlinks to /private/...). Anchor at the resolved directory.
+    anchor = root.absolute()
+    return anchor.parent.resolve(strict=True) / anchor.name
 
 
 def q_loop_state_path() -> Path:
@@ -372,6 +387,67 @@ def redact_watchdog_text(value: Any) -> str:
 
 def redacted_watchdog_payload(value: Any) -> Any:
     return redact_shared_json_value(value, redact_watchdog_text)
+
+
+def project_watchdog_state_mode(diagnostic: Any) -> str:
+    """#2723 R4.6: project diagnostic details, stripping schemaVersion.
+
+    Uses ``state_diagnostic_details`` (not ``_asdict`` — ``StateDiagnostic``
+    is a frozen dataclass so ``_asdict`` is not a namedtuple method).
+    Follows the same pattern as collector.py:1695-1717 and dispatcher.py:945.
+    """
+    details = metadata_only_controller_details(
+        {
+            key: value
+            for key, value in state_diagnostic_details(diagnostic).items()
+            if key != "schemaVersion"
+        }
+    )
+    failed = getattr(diagnostic, "mode", None) == "recovery_required"
+    log_path = state_root() / "logs" / "watchdog.jsonl"
+    return write_controller_log(
+        context=CONTROLLER_LOG_CONTEXT,
+        record_kind="controller_state_mode",
+        level="error" if failed else "info",
+        outcome="failed" if failed else "observed",
+        durability_class="diagnostic_best_effort",
+        details=details,
+        append_record=lambda record: append_private_jsonl(log_path, record),
+        persist_health=persist_controller_log_health,
+        emit_fallback=lambda _line: emit_state_recovery_fallback(diagnostic),
+    )
+
+
+def read_collector_state_snapshot() -> StateReadResult | None:
+    """#2723 R4.4: cross-reader wrapper — read collector state via controller state."""
+    coll_path = state_root() / "collector-state.json"
+    if not coll_path.exists():
+        return None
+    try:
+        return read_controller_state(
+            coll_path,
+            component="collector",
+            validate_payload=lambda p: p if isinstance(p, dict) else {},
+            lock_timeout_seconds=5,
+        )
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def read_dispatcher_incident_snapshot() -> StateReadResult | None:
+    """#2723 R4.4: cross-reader wrapper for dispatcher state."""
+    disp_path = state_root() / "dispatcher-state.json"
+    if not disp_path.exists():
+        return None
+    try:
+        return read_controller_state(
+            disp_path,
+            component="dispatcher-incident",
+            validate_payload=lambda p: p if isinstance(p, dict) and "incidents" in p else {},
+            lock_timeout_seconds=5,
+        )
+    except (OSError, json.JSONDecodeError):
+        return None
 
 
 def persist_controller_log_health(record: dict[str, Any]) -> None:
@@ -494,39 +570,6 @@ def load_json(path: Path, *, require_private: bool = False) -> dict[str, Any] | 
     except Exception:
         return None
     return data if isinstance(data, dict) else None
-
-
-def load_state() -> dict[str, Any]:
-    path = watchdog_state_path()
-    data = load_json(path, require_private=True)
-    if data is None:
-        data = {"version": 1, "open": {}}
-    for section in ("open", "pendingStale", "recentlyRecovered"):
-        if not isinstance(data.get(section), dict):
-            data[section] = {}
-    return data
-
-
-def save_state(state: dict[str, Any]) -> None:
-    redacted_state = redacted_watchdog_payload(state)
-    redacted_state["updatedAt"] = now_iso()
-    target = _durable_target(watchdog_state_path())
-    observation = observe_json(target)
-    publication_operation = operation_id(
-        target,
-        redacted_state,
-        component="heartbeat_watchdog.state",
-        predecessor=observation.version,
-    )
-    publication = publish_state_json(
-        target,
-        redacted_state,
-        component="heartbeat_watchdog.state",
-        operation_id=publication_operation,
-        expected=observation.version,
-        generation=(observation.version.generation or 0) + 1,
-    )
-    require_advance(publication)
 
 
 def outbox_event(
@@ -1445,9 +1488,10 @@ def parse_remote_host(value: Any) -> str | None:
 
 
 def collector_configured_hosts() -> list[str]:
-    data = load_json(state_root() / "collector-state.json", require_private=True)
-    if not data:
+    snap = read_collector_state_snapshot()
+    if snap is None or snap.mode not in ("valid", "legacy_valid"):
         return []
+    data = snap.payload if snap.payload else {}
     raw_hosts = data.get("configuredRemoteHosts")
     if isinstance(raw_hosts, list):
         return unique_hosts([host for host in (parse_remote_host(value) for value in raw_hosts) if host])
@@ -1461,9 +1505,10 @@ def collector_configured_hosts() -> list[str]:
 
 
 def collector_best_effort_hosts() -> list[str]:
-    data = load_json(state_root() / "collector-state.json", require_private=True)
-    if not data:
+    snap = read_collector_state_snapshot()
+    if snap is None or snap.mode not in ("valid", "legacy_valid"):
         return []
+    data = snap.payload if snap.payload else {}
     raw_hosts = data.get("configuredBestEffortRemoteHosts")
     if isinstance(raw_hosts, list):
         return unique_hosts([host for host in (parse_remote_host(value) for value in raw_hosts) if host])
@@ -1481,8 +1526,11 @@ def collector_reachability_evidence(host: str) -> str:
     execution while making a cadence alert actionable. Network addresses and
     arbitrary target lists are deliberately excluded.
     """
-    data = load_json(state_root() / "collector-state.json", require_private=True)
-    remotes = data.get("remotes") if isinstance(data, dict) else None
+    snap = read_collector_state_snapshot()
+    if snap is None or snap.mode not in ("valid", "legacy_valid"):
+        return ""
+    data = snap.payload if isinstance(snap.payload, dict) else {}
+    remotes = data.get("remotes") if data else None
     remote = remotes.get(host) if isinstance(remotes, dict) else None
     if not isinstance(remote, dict):
         return ""
@@ -1545,9 +1593,13 @@ def collector_roster_drift_problem() -> str | None:
         _roster_data, inventory = load_roster()
     except RosterError as exc:
         return f"collector roster comparison unavailable: roster unreadable: {exc}"
-    data = load_json(collector_path, require_private=True)
-    if data is None:
-        return f"collector roster drift: collector-state config-unreadable path={collector_path}"
+    snap = read_collector_state_snapshot()
+    if snap is None or snap.mode not in ("valid", "legacy_valid"):
+        return (
+            f"collector roster drift: collector-state "
+            f"config-unreadable mode={snap.mode if snap else 'unavailable'}"
+        )
+    data = snap.payload if isinstance(snap.payload, dict) else {}
     roster_required = set(inventory["collectorRemoteHosts"])
     roster_all = set(inventory["expectedHosts"])
     configured = set(collector_configured_hosts())
@@ -2149,9 +2201,41 @@ def deferred_recovery_event(key: str, record: dict[str, Any]) -> Path:
     )
 
 
-def reconcile(problems: dict[str, str], active_prefixes: list[str], evaluated_instances: set[str] | None = None) -> list[Path]:
-    state = load_state()
-    open_incidents: dict[str, Any] = state["open"]
+def reconcile(
+    problems: dict[str, str],
+    active_prefixes: list[str],
+    state: dict[str, Any] | None = None,
+    session: Any = None,
+    capability: Any = None,
+    evaluated_instances: set[str] | None = None,
+) -> list[Path]:
+    """Reconcile problems against open incidents and write outbox events.
+
+    ``state`` is the current controller-state payload (already loaded by the
+    caller from the session).  ``session`` and ``capability`` are the open
+    ControllerStateSession and its current write capability; the function
+    persists through ``session.save()`` instead of the old ``save_state()``.
+
+    Compatibility: external callers (the TS behavioral harness, operator
+    tooling) invoke the historical two-argument form.  When ``session`` is
+    None the function opens its own session for the duration of the call.
+    """
+    if session is None:
+        with open_watchdog_state_session() as _compat_session:
+            _load = _compat_session.load()
+            _payload = _load.payload if isinstance(_load.payload, dict) else {"version": 1, "open": {}}
+            return reconcile(
+                problems,
+                active_prefixes,
+                _payload,
+                _compat_session,
+                _load.capability,
+                evaluated_instances,
+            )
+    assert state is not None and capability is not None
+    open_incidents: dict[str, Any] = state.setdefault("open", {})
+    state.setdefault("pendingStale", {})
+    state.setdefault("recentlyRecovered", {})
     written: list[Path] = []
     current = now_epoch()
     for key, evidence in sorted(problems.items()):
@@ -2411,7 +2495,7 @@ def reconcile(problems: dict[str, str], active_prefixes: list[str], evaluated_in
                     "recovery_notice_flushed",
                     {"source": key, "flapCount": int_or_zero(record.get("flapCount"))},
                 )
-    save_state(state)
+    session.save(redacted_watchdog_payload(state), capability)
     return written
 
 
@@ -2424,6 +2508,57 @@ def reconcile(problems: dict[str, str], active_prefixes: list[str], evaluated_in
         outcome=outcome,
     ),
 )
+def open_watchdog_state_session():
+    """#2723 R4.2: open controller state session."""
+    state_path = watchdog_state_path()
+    return open_controller_state(
+        state_path,
+        component="heartbeat-watchdog",
+        bootstrap=lambda: {"version": 1, "open": {}},
+        validate_payload=lambda p: p if isinstance(p, dict) and "version" in p else {"version": 1, "open": {}},
+        lock_timeout_seconds=5,
+    )
+
+
+def load_state() -> dict[str, Any]:
+    """#2723 compatibility surface. External consumers — the TS behavioral
+    harness, operator tooling — read watchdog state through this name; the
+    implementation is the controller-state read path, not the retired
+    durable-json loader."""
+    state_path = watchdog_state_path()
+    if not state_path.exists():
+        return {"version": 1, "open": {}}
+    try:
+        result = read_controller_state(
+            state_path,
+            component="heartbeat-watchdog",
+            validate_payload=lambda p: p if isinstance(p, dict) and "version" in p else {"version": 1, "open": {}},
+            lock_timeout_seconds=5,
+        )
+    except (OSError, json.JSONDecodeError):
+        return {"version": 1, "open": {}}
+    payload = result.payload
+    return payload if isinstance(payload, dict) else {"version": 1, "open": {}}
+
+
+def save_state(state: Mapping[str, Any]) -> None:
+    """#2723 compatibility surface: durable publication through the
+    controller-state session (redacted payload, session-managed locking)."""
+    with open_watchdog_state_session() as session:
+        result = session.load()
+        session.save(redacted_watchdog_payload(state), result.capability)
+
+
+def reconcile_recovered_watchdog_state(session: Any) -> None:
+    """#2723 R4.3: validate recovered watchdog state with validated_previous_only.
+    Pattern mirrors collector.py:1665-1670 _load_collector_state_for_cycle.
+    Consumes the recovered payload as valid without mutating its content.
+    The validated_previous_only mode accepts the previous state as-is; no
+    reconciliation beyond payload integrity is needed for watchdog state
+    (which is a projection of live health state, not a durable queue)."""
+    _session_state = session  # noqa: F841 — session active, validated_previous_only
+
+
 def run_once(args: argparse.Namespace) -> int:
     validate_thresholds()
     try:
@@ -2435,15 +2570,56 @@ def run_once(args: argparse.Namespace) -> int:
         print(f"configuration_error: {exc}", file=sys.stderr)
         print(json.dumps({"time": now_iso(), "verdict": "configuration_error", "error": str(exc)}, sort_keys=True))
         return 2
-    evaluated_instances: set[str] = set()
-    problems = collect_problems(args, checks, evaluated_instances)
-    written = reconcile(problems, active_reconcile_prefixes(checks), evaluated_instances)
-    print(json.dumps({
-        "time": now_iso(),
-        "problems": sorted(problems),
-        "eventsWritten": [str(path) for path in written],
-    }, sort_keys=True))
-    return 0
+    # #2723 R4.2/R4.3: open state session before domain effects (collect_problems).
+    # Load/inspect mode, reconcile recovered state per _load_collector_state_for_cycle
+    # pattern.  ControllerStateRequired raises before any domain effect.
+    try:
+        with open_watchdog_state_session() as session:
+            _load_result = session.load()
+            project_watchdog_state_mode(_load_result.diagnostic)
+            if _load_result.mode == "recovery_required":
+                raise ControllerStateRequired(_load_result.diagnostic)
+            if _load_result.mode == "recovered":
+                # Payload is already validated by the session's validate_payload
+                # lambda; call reconcile_recovered_watchdog_state for the
+                # validated_previous_only semantic, then accept as-is.
+                reconcile_recovered_watchdog_state(session)
+                _committed = session.complete_reconciliation(
+                    _load_result.payload,
+                    _load_result.capability,
+                    outcome="validated_previous_only",
+                )
+                project_watchdog_state_mode(_committed.diagnostic)
+                _load_result = session.reload()
+                project_watchdog_state_mode(_load_result.diagnostic)
+            if _load_result.mode not in {"bootstrap", "valid", "reconciled"}:
+                raise ControllerStateRequired(_load_result.diagnostic)
+            # #2723 R4.2b: extract state + capability from session load result
+            # for the new reconcile signature (state/session/capability-injected).
+            _state = _load_result.payload
+            _capability = _load_result.capability
+            evaluated_instances: set[str] = set()
+            problems = collect_problems(args, checks, evaluated_instances)
+            written = reconcile(
+                problems,
+                active_reconcile_prefixes(checks),
+                _state,
+                session,
+                _capability,
+                evaluated_instances,
+            )
+            print(json.dumps({
+                "time": now_iso(),
+                "problems": sorted(problems),
+                "eventsWritten": [str(path) for path in written],
+            }, sort_keys=True))
+            return 0
+    except ControllerStateRequired as exc:
+        # #2723 R4.5: recovery_required must fail before collect_problems effects
+        diagnostic = project_watchdog_state_mode(exc.diagnostic)
+        print(f"controller_state_required: {diagnostic}", file=sys.stderr)
+        print(json.dumps({"time": now_iso(), "verdict": "STATE_RECOVERY_REQUIRED", "diagnostic": diagnostic}, sort_keys=True))
+        return STATE_RECOVERY_REQUIRED_EXIT
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -2459,7 +2635,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    return run_once(args)
+    try:
+        return run_once(args)
+    except ControllerStateRequired:
+        # #2723 R4.8: daemon exits STATE_RECOVERY_REQUIRED_EXIT (78), not 0.
+        sys.exit(STATE_RECOVERY_REQUIRED_EXIT)
 
 
 if __name__ == "__main__":
