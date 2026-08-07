@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { FleetRealtimeEventPoller } from '../../src/fleet/realtime-event-poller.ts';
+import type { FleetDbReader } from '../../src/fleet/db-reader.ts';
 import type { FleetRealtimePublisher } from '../../src/fleet/realtime-publisher.ts';
 import { proxyToInstance } from '../../src/fleet/http-proxy.ts';
 
@@ -481,6 +482,75 @@ describe('FleetRealtimeEventPoller — #2137 failed typing probe', () => {
     expect(publisher.calls).toEqual([
       expect.objectContaining({ type: 'typing_update', instance: 'test', jid: 'group@g.us', composing: false }),
     ]);
+
+    poller.stop();
+  });
+});
+
+describe('FleetRealtimeEventPoller — #2520 marker read failure', () => {
+  let publisher: ReturnType<typeof makePublisher>;
+
+  const MARKERS = { latestMessagePk: 7, latestMessageMarker: 'msg:7:stable', latestAccessMarker: 'access:stable' };
+
+  beforeEach(() => {
+    publisher = makePublisher();
+    vi.useFakeTimers();
+    mockProxyToInstance.mockReset();
+    mockProxyToInstance.mockResolvedValue({ status: 200, body: '{"composing":[]}' });
+  });
+
+  function makeFailableDbReader() {
+    let fail = false;
+    const reader = makeDbReader(MARKERS) as FleetDbReader & { setFail: (v: boolean) => void };
+    reader.setFail = (v: boolean) => { fail = v; };
+    const origGet = reader.getLatestMarkers;
+    reader.getLatestMarkers = vi.fn((name: string, dbPath: string) => {
+      if (fail) return { ok: false as const, error: 'synthetic_unavailable' };
+      return origGet(name, dbPath);
+    });
+    return reader;
+  }
+
+  it('publishes zero domain events on fail → unchanged recovery (#2520)', async () => {
+    const discovery = makeDiscovery({ test: { dbPath: '/tmp/test.db', logDir: '/tmp/logs' } });
+    const dr = makeFailableDbReader();
+    const poller = new FleetRealtimeEventPoller({ discovery, dbReader: dr, realtime: publisher });
+
+    await poller.poll();           // baseline
+    publisher.calls.length = 0;
+
+    dr.setFail(true);
+    await poller.poll();           // failure — should not emit domain events
+    const failureEvents = publisher.calls.filter((c: any) => c.type !== 'typing_update');
+    expect(failureEvents).toEqual([]);
+
+    dr.setFail(false);
+    await poller.poll();           // recovery to same markers — no domain events
+    const recoveryEvents = publisher.calls.filter((c: any) => c.type !== 'typing_update');
+    expect(recoveryEvents).toEqual([]);
+
+    poller.stop();
+  });
+
+  it('emits correct domain events on fail → changed recovery (#2520)', async () => {
+    const discovery = makeDiscovery({ test: { dbPath: '/tmp/test.db', logDir: '/tmp/logs' } });
+    const dr = makeFailableDbReader();
+    const poller = new FleetRealtimeEventPoller({ discovery, dbReader: dr, realtime: publisher });
+
+    await poller.poll();           // baseline
+    publisher.calls.length = 0;
+
+    dr.setFail(true);
+    await poller.poll();           // failure — no events
+    publisher.calls.length = 0;
+
+    vi.mocked(dr.getLatestMarkers).mockReturnValueOnce(
+      { ok: true, data: { latestMessagePk: 8, latestMessageMarker: 'msg:8:changed', latestAccessMarker: 'access:changed' } }
+    );
+    await poller.poll();           // changed recovery — correct events once
+    const types = publisher.calls.map((c: any) => c.type);
+    expect(types).toContain('message_received');
+    expect(types).toContain('access_changed');
 
     poller.stop();
   });
