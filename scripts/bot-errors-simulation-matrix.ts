@@ -132,7 +132,7 @@ export const BOT_ERRORS_SIMULATION_MATRIX: BotErrorsSimulationRequirement[] = [
         file: 'tests/scripts/bot-errors-health-check.test.ts',
         anchors: [
           'alerts when an OpenCode fallback/provider install only supports the degraded legacy one-shot contract',
-          'probes configured OpenCode fallback using fallbackProviderConfig, not primary providerConfig',
+          'probes configured OpenCode fallback using the runtime-inherited primary providerConfig',
           'fails the OpenCode fallback provider probe when its model credential is missing',
           'passes the OpenCode fallback provider probe when its model credential is present',
           'warns when the health endpoint is serving through an active provider fallback',
