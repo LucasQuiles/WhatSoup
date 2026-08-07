@@ -414,7 +414,8 @@ def _arm_presence(monkeypatch, *, ocw_env_present, keychain_returncode, keychain
     monkeypatch.setattr(_mod, "dry_credential_status", lambda _service: None)
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     monkeypatch.setattr(_mod, "secret_file_has_service_key", lambda _service, _env_key: ocw_env_present)
-    def fake_keyfile(service):
+    def fake_keyfile(service, source_env=None):
+        assert source_env is None
         keyfile_checks.append(service)
         return keyfile_present
 
@@ -499,7 +500,11 @@ def test_credential_presence_scoped_darwin_alias_keeps_requested_user(monkeypatc
     monkeypatch.setattr(_mod, "dry_credential_status", lambda _service: None)
     monkeypatch.delenv("ZAI_API_KEY", raising=False)
     monkeypatch.setattr(_mod, "secret_file_has_service_key", lambda _service, _env_key: False)
-    monkeypatch.setattr(_mod, "whatsoup_keyfile_present", lambda _service: False)
+    monkeypatch.setattr(
+        _mod,
+        "whatsoup_keyfile_present",
+        lambda _service, _source_env=None: False,
+    )
 
     def fake_run(cmd, *_args, **_kwargs):
         commands.append(cmd)
@@ -526,7 +531,11 @@ def test_credential_presence_scoped_darwin_does_not_discover_local_account(monke
     monkeypatch.setattr(_mod, "dry_credential_status", lambda _service: None)
     monkeypatch.delenv("ZAI_API_KEY", raising=False)
     monkeypatch.delenv("USER", raising=False)
-    monkeypatch.setattr(_mod, "whatsoup_keyfile_present", lambda _service: False)
+    monkeypatch.setattr(
+        _mod,
+        "whatsoup_keyfile_present",
+        lambda _service, _source_env=None: False,
+    )
 
     class PathProbe:
         @staticmethod
@@ -561,7 +570,11 @@ def test_credential_presence_scoped_secret_tool_alias_keeps_requested_user(monke
     monkeypatch.setattr(_mod, "dry_credential_status", lambda _service: None)
     monkeypatch.delenv("ZAI_API_KEY", raising=False)
     monkeypatch.setattr(_mod, "secret_file_has_service_key", lambda _service, _env_key: False)
-    monkeypatch.setattr(_mod, "whatsoup_keyfile_present", lambda _service: False)
+    monkeypatch.setattr(
+        _mod,
+        "whatsoup_keyfile_present",
+        lambda _service, _source_env=None: False,
+    )
 
     def fake_run(cmd, *_args, **_kwargs):
         commands.append(cmd)
@@ -614,7 +627,11 @@ def test_credential_presence_glm_resolves_via_zai_api_key_migration(monkeypatch)
     monkeypatch.setattr(_mod, "dry_credential_status", lambda _service: None)
     monkeypatch.delenv("ZAI_API_KEY", raising=False)
     monkeypatch.setattr(_mod, "secret_file_has_service_key", lambda _service, _env_key: False)
-    monkeypatch.setattr(_mod, "whatsoup_keyfile_present", lambda _service: False)
+    monkeypatch.setattr(
+        _mod,
+        "whatsoup_keyfile_present",
+        lambda _service, _source_env=None: False,
+    )
 
     def fake_run(cmd, *_a, **_k):
         # resolvable ONLY under the migration service name "zai-api-key"
