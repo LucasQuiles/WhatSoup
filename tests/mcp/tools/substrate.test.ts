@@ -55,6 +55,7 @@ function registerDefaultTools(
   registerSubstrateTools(registry, {
     db: db.raw,
     dbWrapper: overrides.dbWrapper ?? db,
+    instanceName: 'test',
     adminPhones: new Set<string>([adminPhone]),
     enableUrlWatch: overrides.enableUrlWatch ?? false,
     memory: {
@@ -696,6 +697,7 @@ describe('substrate MCP tools', () => {
     registerSubstrateTools(emptyPhonesRegistry, {
       db: db.raw,
       dbWrapper: db,
+      instanceName: 'test',
       adminPhones: new Set<string>(),
       enableUrlWatch: false,
       memory: {
