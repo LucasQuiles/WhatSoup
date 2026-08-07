@@ -160,7 +160,7 @@
     },
     {
       "path": "deploy/lib/runtime-path.sh",
-      "sha256": "7bd3a9f7c42be4c9850d9f378b202789b0a35baa0279b6429a711da1614fd412",
+      "sha256": "6f20ad080462e10fc81d1fbb60ce8898be0dfde35bae99e744271c786c4a90ae",
       "mustContain": [
         "whatsoup_effective_runtime_path",
         "whatsoup_export_runtime_path"

@@ -44,7 +44,10 @@ the currently loaded `launchctl` environment and resolves the provider binary
 only through the launcher's effective ordered PATH. The launcher and health
 checker share `deploy/lib/runtime-path.sh`, so the `$HOME/.local/bin` and pinned
 Node prefixes applied after launchd start are part of the canary's binary
-selection too. Explicit health-only command overrides cannot select a
+selection too. The helper uses shell path expansion rather than an inherited
+PATH command and is an explicit integrity-required member of the health deploy
+packet, so the checker cannot be promoted without its calculation dependency.
+Explicit health-only command overrides cannot select a
 different binary. Every compatibility and functional subprocess
 receives the same positive environment allowlist and runs from the configured
 agent cwd (or `HOME`, matching the runtime when cwd is absent). Modern

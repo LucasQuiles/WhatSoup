@@ -5,11 +5,13 @@ whatsoup_effective_runtime_path() {
   local home_dir="$1"
   local node_bin="$2"
   local inherited_path="$3"
+  local node_dir
 
   [ -n "$home_dir" ] || return 1
-  [ -n "$node_bin" ] || return 1
+  [[ "$node_bin" == /*/* ]] || return 1
   [ -n "$inherited_path" ] || return 1
-  printf '%s\n' "$home_dir/.local/bin:$(dirname "$node_bin"):$inherited_path"
+  node_dir="${node_bin%/*}"
+  printf '%s\n' "$home_dir/.local/bin:$node_dir:$inherited_path"
 }
 
 whatsoup_export_runtime_path() {

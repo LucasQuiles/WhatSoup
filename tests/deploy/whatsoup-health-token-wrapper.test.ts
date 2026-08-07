@@ -647,6 +647,25 @@ describe('health token shell wrappers', () => {
     expect(source).not.toContain('export PATH="$HOME/.local/bin:$(dirname "$NODE"):$PATH"');
   });
 
+  it('the shared runtime PATH helper ignores a shadowed dirname executable', () => {
+    const root = tmp.make('whatsoup-runtime-path');
+    const binDir = path.join(root, 'bin');
+    const marker = path.join(root, 'dirname-ran');
+    fs.mkdirSync(binDir, { recursive: true });
+    writeExecutable(path.join(binDir, 'dirname'), `#!/bin/sh\n/usr/bin/touch '${marker}'\nprintf '/shadowed\\n'\n`);
+
+    const output = execFileSync('/bin/bash', [
+      '-c',
+      '. "$1"; PATH="$2"; whatsoup_effective_runtime_path "/fixture/user-root" "/fixture/node/bin/node" "/loaded/bin"',
+      'runtime-path',
+      path.resolve('deploy/lib/runtime-path.sh'),
+      binDir,
+    ], { encoding: 'utf8' }).trim();
+
+    expect(output).toBe('/fixture/user-root/.local/bin:/fixture/node/bin:/loaded/bin');
+    expect(fs.existsSync(marker)).toBe(false);
+  });
+
   it('deploy/whatsoup captures full checkout SHA and branch after preflight', () => {
     const source = fs.readFileSync('deploy/whatsoup', 'utf8');
     const preflightIndex = source.indexOf('preflight-check.sh');

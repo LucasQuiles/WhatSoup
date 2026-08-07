@@ -372,7 +372,9 @@ single-message proof on the target host.
   symlinks, loose file modes, ownership mismatch, and oversized payloads.
 - [x] Resolve provider binaries through the launcher's shared effective-PATH
   contract, including its post-launchd local-bin and pinned-Node prefixes, and
-  cover the shadowing collision with a regression test.
+  cover the shadowing collision with a regression test. Pin and materialize the
+  helper in the BOT ERRORS deployment packet, and keep its calculation free of
+  commands resolved through the inherited PATH.
 - [ ] Obtain fresh exact-head approval and complete publication/deployment
   proof without carrying forward claims from an older head.
 
