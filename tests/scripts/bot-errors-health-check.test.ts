@@ -5412,6 +5412,7 @@ print(m.probe_health(9092))
     const lines = JSON.parse(python([
       importHealthModulePrelude(),
       'import json',
+      'm.HOST_PLATFORM = "darwin"',
       'm.instance_provider_path = lambda name: "/generated/bin:/usr/bin:/bin"',
       'm.loaded_instance_environment = lambda name: {"PATH": "/loaded/bin:/usr/bin:/bin", "HOME": "/fixture"}',
       'm.executable_candidate = lambda command, path_value=None: "/loaded/bin/opencode"',

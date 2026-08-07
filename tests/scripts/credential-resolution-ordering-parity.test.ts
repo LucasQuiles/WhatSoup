@@ -59,8 +59,8 @@ describe('credential resolution ordering parity (env -> file -> keyring)', () =>
   it('deploy/scripts/bot-errors-health-check.py: env, then .key file, then keyring (mirrors keyring.ts)', () => {
     const src = read('deploy/scripts/bot-errors-health-check.py');
     assertOrder(src, 'bot-errors-health-check.py', [
-      'if user is None and env_key and os.environ.get(env_key):',
-      'if user is None and whatsoup_keyfile_present(service):',
+      'if user is None and env_key and (environment.get(env_key) or "").strip():',
+      'if user is None and whatsoup_keyfile_present(service, source_env):',
       '_keychain_secret_status(candidates, account',
     ]);
   });

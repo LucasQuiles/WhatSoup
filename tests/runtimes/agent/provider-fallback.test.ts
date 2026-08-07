@@ -13,6 +13,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fallbackStateDb from '../../../src/runtimes/agent/fallback-state-db.ts';
+import { formatContextLines } from '../../../src/runtimes/agent/context-lines.ts';
 
 vi.mock('../../../src/lib/emit-alert.ts', () => {
   const emitAlert = vi.fn(() => true);
@@ -221,7 +222,6 @@ type FallbackView = {
   stashHandoffNotice(chatJid: string, message: string, now: number): boolean;
   withHandoffPrefix(chatJid: string, text: string): string;
   flushPendingHandoffNotice(queue: { targetChatJid: string; enqueueText(text: string): void }): void;
-  formatContextLines(messages: ReadonlyArray<{ timestamp: number; senderName: string | null; senderJid: string; content: string | null }>): string;
   buildHandoffSystemBlock(conversationKey: string, provider: string): (() => string | null) | undefined;
   // Background handoff distiller seams (extracted into HandoffDistillCoordinator).
   handoffDistill: {
@@ -395,11 +395,10 @@ describe('AgentRuntime — provider fallback state machine', () => {
   });
 
   it('formatContextLines renders "sender: content" with a media fallback (SSOT)', () => {
-    const v = view(makeRuntime({}));
-    const lines = v.formatContextLines([
+    const lines = formatContextLines([
       { timestamp: 0, senderName: 'Alice', senderJid: 'a@x', content: 'hello there' },
       { timestamp: 0, senderName: null, senderJid: 'bob@x', content: null },
-    ]).split('\n');
+    ], false).split('\n');
     // Timestamp prefix is locale/TZ-dependent; assert the stable sender:content tail.
     expect(lines[0]).toContain('Alice: hello there');
     expect(lines[1]).toContain('bob@x: [media]');
@@ -407,19 +406,16 @@ describe('AgentRuntime — provider fallback state machine', () => {
   });
 
   it('scrubs secret shapes from context only when injecting into a cross-provider fallback', () => {
-    const v = view(makeRuntime({ agentFallbackProvider: 'opencode-cli' }));
     // A Bearer token embedded in chat content (the redactor catches the shape).
     const token = 'tokFAKE1234567890abcd';
     const msgs = [{ timestamp: 0, senderName: 'Lucas', senderJid: 'l@x', content: `use Bearer ${token} for the call` }];
     // No fallback active → same provider, no new exposure → verbatim.
-    expect(v.formatContextLines(msgs)).toContain(token);
+    expect(formatContextLines(msgs, false)).toContain(token);
     // Fallback active → content crosses to a DIFFERENT provider → scrubbed.
-    v.activateProviderFallback(null);
-    const redacted = v.formatContextLines(msgs);
+    const redacted = formatContextLines(msgs, true);
     expect(redacted).not.toContain(token);
     expect(redacted).toContain('Bearer [REDACTED]');
     expect(redacted).toContain('for the call'); // surgical — conversation text preserved
-    v.deactivateProviderFallback('test cleanup');
   });
 
   it('throttles the diagnostic bundle so a fallback storm cannot fan out probes', () => {
