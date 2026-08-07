@@ -167,11 +167,7 @@ import {
   sendDirect as sendDirectForPort,
   type ChatTransportPort,
 } from './chat-transport.ts';
-import {
-  getRecentMessages,
-  getMessagesSince,
-  hasFromMeReplyAfter,
-} from '../../core/messages.ts';
+import { getRecentMessages, getMessagesSince, hasFromMeReplyAfter } from '../../core/messages.ts';
 import { toConversationKey, isGroupConversationKey, GLOBAL_CONVERSATION_KEY } from '../../core/conversation-key.ts';
 import { bulletedSection, savedPreferenceLine } from './owner-render-format.ts';
 import { classifyAssistantTextEgress } from '../../core/outbound-message-safety.ts';
@@ -4723,11 +4719,7 @@ export class AgentRuntime implements Runtime {
       if (!resumeFailedOwnsContext) {
         try {
           const convKey = canonicalConversationKey(chatJid, this.db);
-          const recent = contextMessagesForTurn(
-            getRecentMessages(this.db, convKey, 20),
-            text,
-            actorJid,
-          );
+          const recent = contextMessagesForTurn(getRecentMessages(this.db, convKey, 20), text, actorJid);
           if (recent.length > 0) {
             const lines = this.formatContextLines(recent);
             contextPreamble = `[Recent chat context — read before responding]\n${lines}`;
@@ -12071,10 +12063,7 @@ export class AgentRuntime implements Runtime {
           let contextLease: SystemTurnLeaseToken | null = null;
           try {
             const recent = contextMessagesForTurn(
-              getRecentMessages(this.db, canonicalConversationKey(chatJid, this.db), 30),
-              pendingText,
-              pendingActorJid,
-            );
+              getRecentMessages(this.db, canonicalConversationKey(chatJid, this.db), 30), pendingText, pendingActorJid);
             if (recent.length > 0) {
               const lines = this.formatContextLines(recent);
               // QR-095: same fix as the sendTurnToSession injection — in single/
