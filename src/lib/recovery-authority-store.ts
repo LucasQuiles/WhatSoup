@@ -92,7 +92,8 @@ export function setRecoveryMarker(source: string): void {
       for (const k of parsed) markers.set(k, true);
     }
   } catch {
-    // File missing — start fresh.
+    // intentional: marker file missing or unreadable — start fresh; the
+    // atomic write below re-establishes it from this call's marker alone.
   }
   markers.set(source, true);
   atomicWriteMarkers(markers);
@@ -115,7 +116,9 @@ export function clearRecoveryMarker(source: string): void {
       for (const k of parsed) markers.set(k, true);
     }
   } catch {
-    return; // Nothing to clear.
+    // intentional: marker file missing or unreadable — there is nothing to
+    // clear, and writing an empty object here would clobber a concurrent set.
+    return;
   }
   markers.delete(source);
   if (markers.size === 0) {
