@@ -72,8 +72,8 @@ const mockClickHandler = vi.hoisted(() => vi.fn());
 // intercept trivially; we use react-router-dom as the mock-gate target because
 // it IS imported by the console module graph and is already stubbed in jsdom
 // suites. If this intercept fails, the test file will throw on import.)
-vi.mock('react-router-dom', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('react-router-dom')>();
+vi.mock('react-router', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('react-router')>();
   return {
     ...actual,
     // Sentinel: confirm the mock factory ran in browser mode by
@@ -97,10 +97,10 @@ afterEach(() => {
 
 describe('C-D7-1: browser-mode smoke gate', () => {
 
-  it('(A) vi.mock intercepts react-router-dom in browser mode', async () => {
+  it('(A) vi.mock intercepts react-router in browser mode', async () => {
     // If @vitest/mocker interception is broken, this import will return the
     // real module (without __d7_mock_active) and the assertion fails clearly.
-    const mod = await import('react-router-dom') as Record<string, unknown>;
+    const mod = await import('react-router') as Record<string, unknown>;
     expect(mod.__d7_mock_active).toBe(true);
   });
 

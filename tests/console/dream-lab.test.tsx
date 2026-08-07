@@ -16,7 +16,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ReactElement } from 'react';
 import { cleanup, render, screen, fireEvent } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter } from 'react-router';
 
 import DreamLab from '../../console/src/pages/DreamLab';
 import { DreamCard, DreamAvatar } from '../../console/src/components/dream/DreamCard';

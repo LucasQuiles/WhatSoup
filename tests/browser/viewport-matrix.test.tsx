@@ -79,7 +79,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { render, cleanup } from 'vitest-browser-react';
 import { page } from 'vitest/browser';
 import React from 'react';
-import { MemoryRouter, Routes, Route } from 'react-router-dom';
+import { MemoryRouter, Routes, Route } from 'react-router';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ToastContext } from '../../console/src/hooks/toast-context';
 import type { ToastContextValue } from '../../console/src/hooks/toast-context';

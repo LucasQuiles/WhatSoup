@@ -1,6 +1,6 @@
 import { type FC, useState, useMemo } from "react";
 import { Pause, Play, Circle, Square, AlertTriangle, RotateCw } from "lucide-react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from 'react-router';
 import { useToast } from "../hooks/toast-context";
 import { api } from "../lib/api";
 import FilterPill from "./FilterPill";

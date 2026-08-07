@@ -17,7 +17,7 @@ import {
   act,
   waitFor,
 } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter } from 'react-router';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ToastContext, type ToastContextValue } from '../../console/src/hooks/toast-context';
 import type { LineInstance } from '../../console/src/types';
@@ -57,8 +57,8 @@ const useMetricsMock = vi.hoisted(() => vi.fn(() => ({
   refetch: vi.fn(),
 })));
 
-vi.mock('react-router-dom', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('react-router-dom')>();
+vi.mock('react-router', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('react-router')>();
   return {
     ...actual,
     useParams: useParamsMock,

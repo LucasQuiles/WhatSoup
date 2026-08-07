@@ -15,7 +15,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ReactElement } from 'react';
 import { cleanup, render, screen, fireEvent, within } from '@testing-library/react';
-import { MemoryRouter, Routes, Route, useLocation } from 'react-router-dom';
+import { MemoryRouter, Routes, Route, useLocation } from 'react-router';
 
 import SkillsHub from '../../console/src/pages/SkillsHub';
 import { PLUGIN_CATALOG, sourceOf, CATEGORY_LABELS } from '../../console/src/lib/plugin-catalog';

@@ -13,7 +13,7 @@
  * landmark contract (tests/browser/a11y-contracts.test.tsx).
  */
 import { type FC } from 'react';
-import { Link, useLocation, useParams } from 'react-router-dom';
+import { Link, useLocation, useParams } from 'react-router';
 import { useTheme } from '../../hooks/use-theme';
 import { Button } from '../primitives/Button';
 import { routeMeta } from './route-meta';

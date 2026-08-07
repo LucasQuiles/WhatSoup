@@ -21,7 +21,7 @@ import { describe, it, expect, vi, beforeAll } from 'vitest';
 import { render, cleanup } from 'vitest-browser-react';
 import { page } from 'vitest/browser';
 import React, { Profiler } from 'react';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter } from 'react-router';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ToastContext } from '../../console/src/hooks/toast-context';
 import type { ToastContextValue } from '../../console/src/hooks/toast-context';

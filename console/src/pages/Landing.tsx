@@ -4,7 +4,7 @@
  * abstract glyph geometry, opacity 0.04–0.05, pointer-events none).
  * Journey register throughout; theme toggle is real (useTheme).
  */
-import { useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router'
 import type { FC } from 'react'
 import { useTheme } from '../hooks/use-theme'
 import { Button } from '../components/primitives/Button'

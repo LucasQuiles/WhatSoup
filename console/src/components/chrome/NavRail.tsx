@@ -10,7 +10,7 @@
  * the visual and a11y state can never drift. Collapse ≤1100px is pure CSS.
  */
 import { type FC } from 'react';
-import { Link, useLocation } from 'react-router-dom';
+import { Link, useLocation } from 'react-router';
 import { Wifi, WifiOff, Download, LogOut } from 'lucide-react';
 import { useRealtime } from '../../hooks/use-websocket';
 import { Button } from '../primitives/Button';

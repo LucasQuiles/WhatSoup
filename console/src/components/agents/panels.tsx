@@ -1,6 +1,6 @@
 import { useState, type FC, type ReactNode } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router';
 import { api } from '../../lib/api';
 import { useToast } from '../../hooks/toast-context';
 import { Button } from '../primitives/Button';
