@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { FleetRealtimeEventPoller } from '../../src/fleet/realtime-event-poller.ts';
+import type { FleetDbReader } from '../../src/fleet/db-reader.ts';
 import type { FleetRealtimePublisher } from '../../src/fleet/realtime-publisher.ts';
 import { proxyToInstance } from '../../src/fleet/http-proxy.ts';
 
@@ -500,14 +501,14 @@ describe('FleetRealtimeEventPoller — #2520 marker read failure', () => {
 
   function makeFailableDbReader() {
     let fail = false;
-    const reader = makeDbReader(MARKERS);
-    return {
-      setFail: (v: boolean) => { fail = v; },
-      getLatestMarkers: vi.fn((name: string, dbPath: string) => {
-        if (fail) return { ok: false as const, error: 'synthetic_unavailable' };
-        return reader.getLatestMarkers(name, dbPath);
-      }),
-    };
+    const reader = makeDbReader(MARKERS) as FleetDbReader & { setFail: (v: boolean) => void };
+    reader.setFail = (v: boolean) => { fail = v; };
+    const origGet = reader.getLatestMarkers;
+    reader.getLatestMarkers = vi.fn((name: string, dbPath: string) => {
+      if (fail) return { ok: false as const, error: 'synthetic_unavailable' };
+      return origGet(name, dbPath);
+    });
+    return reader;
   }
 
   it('publishes zero domain events on fail → unchanged recovery (#2520)', async () => {
@@ -543,7 +544,7 @@ describe('FleetRealtimeEventPoller — #2520 marker read failure', () => {
     await poller.poll();           // failure — no events
     publisher.calls.length = 0;
 
-    dr.getLatestMarkers.mockReturnValueOnce(
+    vi.mocked(dr.getLatestMarkers).mockReturnValueOnce(
       { ok: true, data: { latestMessagePk: 8, latestMessageMarker: 'msg:8:changed', latestAccessMarker: 'access:changed' } }
     );
     await poller.poll();           // changed recovery — correct events once
