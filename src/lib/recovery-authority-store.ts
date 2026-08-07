@@ -17,7 +17,7 @@
 /**
  * TRACKED_UNREACHABLE: recovery-authority-store is fully implemented and
  * tested but has zero production call sites. Wiring tracked at:
- * https://github.com/LucasQuiles/WhatSoup/issues/3086
+ * https://github.com/LucasQuiles/WhatSoup/issues/3057
  *
  * When wired, the intended consumer is heal-lifecycle dispatcher recovery
  * scan (src/deploy/scripts/bot-errors-dispatcher.py — the recovery scanner
