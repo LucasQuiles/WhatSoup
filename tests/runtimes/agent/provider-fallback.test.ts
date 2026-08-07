@@ -405,13 +405,13 @@ describe('AgentRuntime — provider fallback state machine', () => {
     expect(lines).toHaveLength(2);
   });
 
-  it('scrubs secret shapes from context only when injecting into a cross-provider fallback', () => {
+  it('formatContextLines scrubs secret shapes when its cross-provider flag is true', () => {
     // A Bearer token embedded in chat content (the redactor catches the shape).
     const token = 'tokFAKE1234567890abcd';
     const msgs = [{ timestamp: 0, senderName: 'Lucas', senderJid: 'l@x', content: `use Bearer ${token} for the call` }];
-    // No fallback active → same provider, no new exposure → verbatim.
+    // The helper preserves content when its caller reports no provider boundary.
     expect(formatContextLines(msgs, false)).toContain(token);
-    // Fallback active → content crosses to a DIFFERENT provider → scrubbed.
+    // Runtime boundary wiring is covered by AgentRuntime dispatch tests.
     const redacted = formatContextLines(msgs, true);
     expect(redacted).not.toContain(token);
     expect(redacted).toContain('Bearer [REDACTED]');

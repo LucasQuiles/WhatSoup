@@ -5204,6 +5204,25 @@ print(m.probe_health(9092))
     expect(healthMap).toEqual(RUNTIME_SERVICE_ENV_MAP);
   });
 
+  it('projects a provider credential found only in the loaded launchd environment', () => {
+    const result = JSON.parse(python([
+      importHealthModulePrelude(),
+      'import json',
+      'data = {"agentOptions": {"provider": "opencode-cli", "model": "openrouter/test-model", "providerConfig": {"apiKeyService": "openrouter"}}}',
+      'loaded_environment = {"PATH": "/loaded/bin:/usr/bin:/bin", "HOME": "/loaded/home", "OPENROUTER_API_KEY": "fixture-loaded-key", "WHATSOUP_HEALTH_TOKEN": "must-not-project", "UNRELATED_SECRET": "must-not-project"}',
+      'child = m.opencode_functional_probe_env(data, "primary", 2, base_env=loaded_environment)',
+      'print(json.dumps({"credential": child.get("OPENROUTER_API_KEY"), "path": child.get("PATH"), "home": child.get("HOME"), "has_health": "WHATSOUP_HEALTH_TOKEN" in child, "has_unrelated": "UNRELATED_SECRET" in child}))',
+    ].join('\n'))) as Record<string, unknown>;
+
+    expect(result).toEqual({
+      credential: 'fixture-loaded-key',
+      path: '/loaded/bin:/usr/bin:/bin',
+      home: '/loaded/home',
+      has_health: false,
+      has_unrelated: false,
+    });
+  });
+
   it('uses the terminal OpenCode auth store for fallback presence and child projection', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-opencode-auth-'));
     const dataHome = join(tmpRoot, 'data');
