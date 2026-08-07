@@ -1626,7 +1626,7 @@ describe('WhatSoupError non-retryable paths', () => {
     // Alert must be emitted
     expect(mockEmitAlert).toHaveBeenCalledWith(
       expect.any(String),
-      'llm_total_failure',
+      'llm_primary_failure',
       expect.stringContaining('LLM_AUTH_ERROR'),
       expect.any(String),
     );
@@ -1648,7 +1648,7 @@ describe('WhatSoupError non-retryable paths', () => {
     );
     expect(mockEmitAlert).toHaveBeenCalledWith(
       expect.any(String),
-      'llm_total_failure',
+      'llm_primary_failure',
       expect.stringContaining('LLM_RATE_LIMITED'),
       expect.any(String),
     );
@@ -1713,6 +1713,45 @@ describe('WhatSoupError non-retryable paths', () => {
     const { handler } = makeHandler();
     await handleAndDrain(handler, makeIncomingMessage());
     expect(mockClearAlert).toHaveBeenCalledWith(expect.any(String), 'llm_total_failure');
+    expect(mockClearAlert).toHaveBeenCalledWith(expect.any(String), 'llm_primary_failure');
+  });
+
+  it('#2416: auth failure emits llm_primary_failure, not llm_total_failure', async () => {
+    const { handler, primary, messenger } = makeHandler();
+    vi.mocked(primary.generate).mockRejectedValueOnce(
+      new WhatSoupError('Auth failed', 'LLM_AUTH_ERROR'),
+    );
+    await handleAndDrain(handler, makeIncomingMessage());
+
+    // Must NOT emit llm_total_failure (fallback was never tested)
+    const totalCalls = vi.mocked(mockEmitAlert).mock.calls.filter(
+      (c: string[]) => c[1] === 'llm_total_failure',
+    );
+    expect(totalCalls).toHaveLength(0);
+
+    // Must emit llm_primary_failure instead
+    expect(mockEmitAlert).toHaveBeenCalledWith(
+      expect.any(String),
+      'llm_primary_failure',
+      expect.any(String),
+      expect.any(String),
+    );
+  });
+
+  it('#2416: subsequent primary success clears llm_primary_failure', async () => {
+    const { handler, primary, messenger } = makeHandler();
+
+    // First turn: auth failure → llm_primary_failure emitted
+    vi.mocked(primary.generate).mockRejectedValueOnce(
+      new WhatSoupError('Auth failed', 'LLM_AUTH_ERROR'),
+    );
+    await handleAndDrain(handler, makeIncomingMessage());
+    expect(mockEmitAlert).toHaveBeenCalledWith(expect.any(String), 'llm_primary_failure', expect.any(String), expect.any(String));
+
+    // Second turn: success → llm_primary_failure cleared
+    vi.mocked(primary.generate).mockResolvedValueOnce(llmOk('successful turn'));
+    await handleAndDrain(handler, makeIncomingMessage());
+    expect(mockClearAlert).toHaveBeenCalledWith(expect.any(String), 'llm_primary_failure');
   });
 });
 
