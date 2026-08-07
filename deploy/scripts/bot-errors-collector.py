@@ -2670,7 +2670,8 @@ def writefail_ack_failure_bucket(state: dict[str, Any]) -> dict[str, Any]:
 
 def clear_writefail_ack_failure(remote: str, record: dict[str, Any], state: dict[str, Any]) -> None:
     key, payload_sha256 = writefail_ack_identity(remote, record)
-    removed = writefail_ack_failure_bucket(state).pop(key, None)
+    bucket = writefail_ack_failure_bucket(state)
+    removed = bucket.pop(key, None)
     if removed is not None:
         append_log({
             "type": "writefail_ack_failure_cleared",
@@ -2678,6 +2679,18 @@ def clear_writefail_ack_failure(remote: str, record: dict[str, Any], state: dict
             "payloadSha256": payload_sha256,
             "remoteClaim": record.get("claim"),
         })
+        if not bucket:
+            # All remote writefail ack failures cleared — emit idempotent
+            # recovery outbox event (#2405). No-op if no incident exists.
+            _emit_collector_outbox_event(
+                remote,
+                "remote-writefail-ack-failed",
+                "observation",
+                "info",
+                f"remote writefail ack recovered: {remote}",
+                redact_collector_text(f"remote={remote} writefail_ack_all_cleared=true"),
+                "writefail_ack_recovered",
+            )
 
 
 def enqueue_writefail_ack_failure(

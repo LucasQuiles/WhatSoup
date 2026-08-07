@@ -1138,8 +1138,8 @@ export class HealthPoller {
         });
         if (prevStatus !== 'online') {
           this.emitStatusChange(name, 'online', prevStatus);
-          this.clearRecoveredAlert(name, existing, health);
-        } else if (existing?.activeAlertSources.length) {
+        }
+        if (existing) {
           this.clearRecoveredAlert(name, existing, health);
         }
       } catch (err) {

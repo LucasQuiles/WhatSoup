@@ -86,25 +86,18 @@ def _state_with_open(mod, event: dict, *, last_notified_age: int, record_extra: 
 
 
 # ---------------------------------------------------------------------------
-# T1: open runtime-tool-error past the renotify cadence is suppressed (not
-#     re-paged), the audit counter increments, and lastNotifiedAt is NOT bumped.
+# T1: #2407 — runtime-tool-error:* is no longer stale-suppressed. Producer
+# emits only operator-actionable failures; stale auto-close would hide them.
 # ---------------------------------------------------------------------------
 
-def test_open_tool_error_renotify_suppressed(tmp_path):
+def test_open_tool_error_renotify_not_suppressed(tmp_path):
     mod = _load(tmp_path)
     evt = _alert("runtime-tool-error:provider-cli:Shell")
-    # 7h since last notify > 6h default cadence -> renotify branch reached.
     state, key = _state_with_open(mod, evt, last_notified_age=7 * 3600)
-    before = state["openIncidents"][key]["lastNotifiedAt"]
 
     reason = mod.should_suppress_send(evt, state)
 
-    assert reason is not None
-    assert "open renotify suppressed" in reason
-    rec = state["openIncidents"][key]
-    assert rec["openRenotifySuppressedCount"] == 1
-    # not re-paged: the notify clock is untouched
-    assert rec["lastNotifiedAt"] == before
+    assert reason is None  # no longer suppressed per #2407
 
 
 # ---------------------------------------------------------------------------

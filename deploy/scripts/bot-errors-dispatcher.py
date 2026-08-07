@@ -168,14 +168,12 @@ STALE_RENOTIFY_SUPPRESS_SOURCES = {
 }
 # Recovery / no-op source signatures: definitionally non-actionable once stale.
 STALE_RENOTIFY_SUPPRESS_SUFFIXES = ("_restored", "_recovered", "_reverted", "_unknown", "_cleared")
-# runtime-tool-error:* — an agent's own tool call failed and was self-corrected
-# inline. These are point-in-time, auto-recovered events, NOT a persistent open
-# condition: if the agent were genuinely stuck the SAME call would re-emit FRESH
-# events (which renotify normally and trip flap-storm). Once a runtime-tool-error
-# incident goes stale (no fresh occurrence), it is definitionally non-actionable
-# → Pattern A suppresses the renotify and auto-closes it. flap_storm stays exempt
-# (handled above), so a truly stuck agent still escalates on intensity.
-STALE_RENOTIFY_SUPPRESS_PREFIXES = ("provider_fallback_", "runtime-tool-error:")
+# runtime-tool-error:* — the producer explicitly emits only for operator-actionable
+# blocked or infrastructure failures (#2407). Stale incidents must NOT be auto-closed
+# without recovery proof. Previously suppressed as "self-corrected" — contradiction
+# with producer contract fixed by removing the prefix from stale suppression.
+# flap_storm stays exempt (handled above).
+STALE_RENOTIFY_SUPPRESS_PREFIXES = ("provider_fallback_",)
 # Pattern A (open variant) — suppress the periodic still-open renotify/age-escalation
 # for sources that are never operator-actionable even while live. A runtime-tool-error:*
 # incident is a collapsed bucket of self-corrected tool failures; the 6h "still open"
@@ -214,6 +212,13 @@ FLAP_TRIP_THRESHOLD = positive_env_int("BOT_ERRORS_FLAP_TRIP_THRESHOLD", 5)
 FLAP_WINDOW_SECONDS = positive_env_int("BOT_ERRORS_FLAP_WINDOW_SECONDS", 600)
 FLAP_PROMOTE_SECONDS = positive_env_int("BOT_ERRORS_FLAP_PROMOTE_SECONDS", 1800)
 FLAP_CRITICAL_COUNT = positive_env_int("BOT_ERRORS_FLAP_CRITICAL_COUNT", 50)
+# Post-promotion reminder backoff (seconds). Each successful critical reminder
+# advances to the next step. Exhausting the list repeats the last value.
+_FLAP_CADENCE_BACKOFF_DEFAULT = "1800,3600,7200,10800"
+FLAP_STORM_CADENCE_BACKOFF_SECONDS = [
+    int(x)
+    for x in os.environ.get("BOT_ERRORS_FLAP_STORM_CADENCE_BACKOFF", _FLAP_CADENCE_BACKOFF_DEFAULT).split(",")
+]
 FLAP_STABLE_SECONDS = positive_env_int("BOT_ERRORS_FLAP_STABLE_SECONDS", 3600)
 FLAP_STORM_ACTION = "source unstable — investigate root cause (flap storm)"
 AWAITING_PHYSICAL_CONFIRMATIONS = positive_env_int("BOT_ERRORS_AWAITING_PHYSICAL_CONFIRMATIONS", 2)
@@ -3406,10 +3411,21 @@ def flap_evaluate(entry: dict[str, Any], now: int) -> dict[str, Any]:
     new_severity = "critical" if promoted else "warning"
     escalated = new_severity == "critical" and entry.get("stormSeverity") != "critical"
     last_emit = int(entry.get("lastStormEmitAt") or storm_at)
-    cadence_due = now - last_emit >= FLAP_PROMOTE_SECONDS
+    # Use progressive backoff for post-promotion cadence, not the initial
+    # promotion threshold (#2393).  Before promotion and on escalation the
+    # cadence remains the original FLAP_PROMOTE_SECONDS interval.
+    if promoted and not escalated:
+        step = int(entry.get("cadenceStep") or 0)
+        backoff = FLAP_STORM_CADENCE_BACKOFF_SECONDS[min(step, len(FLAP_STORM_CADENCE_BACKOFF_SECONDS) - 1)]
+        cadence_due = now - last_emit >= backoff
+    else:
+        cadence_due = now - last_emit >= FLAP_PROMOTE_SECONDS
     entry["stormSeverity"] = new_severity
     if escalated or cadence_due:
         entry["lastStormEmitAt"] = now
+        if promoted and not escalated:
+            step = int(entry.get("cadenceStep") or 0)
+            entry["cadenceStep"] = step + 1
         return {
             "emit": True,
             "severity": new_severity,

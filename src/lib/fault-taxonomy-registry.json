@@ -4,12 +4,8 @@
     {
       "id": "auth_terminal",
       "description": "Terminal provider or WhatsApp auth loss that needs durable recovery proof before clear.",
-      "sources": [
-        "provider_unknown_terminal"
-      ],
-      "messagePrefixes": [
-        "suppressed unclassified terminal provider error from result"
-      ],
+      "sources": [],
+      "messagePrefixes": [],
       "recoveryProof": "confirmed_outbound_within_window",
       "owner": "src/lib/fault-classifier.ts",
       "tests": [
@@ -722,8 +718,8 @@
       "test": "tests/runtimes/agent/runtime.test.ts"
     },
     "provider_unknown_terminal": {
-      "disposition": "fault_class_auth_terminal",
-      "faultClass": "auth_terminal",
+      "disposition": "unknown_unclassified",
+      "faultClass": null,
       "owner": "src/runtimes/agent/runtime.ts",
       "test": "tests/runtimes/agent/runtime.test.ts"
     },

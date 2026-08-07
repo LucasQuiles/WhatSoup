@@ -6,17 +6,17 @@ import {
 } from '../../src/lib/fault-classifier.ts';
 
 describe('classifyFault', () => {
-  it('classifies a level-50 provider_unknown_terminal source as auth_terminal', () => {
-    expect(classifyFault({ level: 50, source: 'provider_unknown_terminal' })).toBe('auth_terminal');
+  it('does NOT classify provider_unknown_terminal as auth_terminal (#2388)', () => {
+    expect(classifyFault({ level: 50, source: 'provider_unknown_terminal' })).toBeNull();
   });
 
-  it('classifies the suppressed-terminal-provider message signature as auth_terminal', () => {
+  it('does NOT classify the suppressed-terminal-provider message as auth_terminal (#2388)', () => {
     expect(
       classifyFault({
         level: 50,
         message: 'suppressed unclassified terminal provider error from result — not forwarded to user',
       }),
-    ).toBe('auth_terminal');
+    ).toBeNull();
   });
 
   it('does NOT classify a non-error heartbeat whose pid contains the digits 401', () => {
@@ -35,12 +35,10 @@ describe('classifyFault', () => {
     expect(FAULT_TAXONOMY_REGISTRY.faultClasses.map((entry) => entry.id)).toEqual(FAULT_CLASSES);
   });
 
-  it('loads auth_terminal source and message classifiers from the registry', () => {
+  it('loads auth_terminal source and message classifiers from the registry (#2388)', () => {
     const auth = FAULT_TAXONOMY_REGISTRY.faultClasses.find((entry) => entry.id === 'auth_terminal');
-    expect(auth?.sources).toEqual(['provider_unknown_terminal']);
-    expect(auth?.messagePrefixes).toEqual([
-      'suppressed unclassified terminal provider error from result',
-    ]);
+    expect(auth?.sources).toEqual([]);
+    expect(auth?.messagePrefixes).toEqual([]);
   });
 
   it('freezes registry data so classifiers cannot mutate the contract at runtime', () => {
