@@ -485,3 +485,72 @@ describe('FleetRealtimeEventPoller — #2137 failed typing probe', () => {
     poller.stop();
   });
 });
+
+describe('FleetRealtimeEventPoller — #2520 marker read failure', () => {
+  let publisher: ReturnType<typeof makePublisher>;
+
+  const MARKERS = { latestMessagePk: 7, latestMessageMarker: 'msg:7:stable', latestAccessMarker: 'access:stable' };
+
+  beforeEach(() => {
+    publisher = makePublisher();
+    vi.useFakeTimers();
+    mockProxyToInstance.mockReset();
+    mockProxyToInstance.mockResolvedValue({ status: 200, body: '{"composing":[]}' });
+  });
+
+  function makeFailableDbReader() {
+    let fail = false;
+    const reader = makeDbReader(MARKERS);
+    return {
+      setFail: (v: boolean) => { fail = v; },
+      getLatestMarkers: vi.fn((name: string, dbPath: string) => {
+        if (fail) return { ok: false as const, error: 'synthetic_unavailable' };
+        return reader.getLatestMarkers(name, dbPath);
+      }),
+    };
+  }
+
+  it('publishes zero domain events on fail → unchanged recovery (#2520)', async () => {
+    const discovery = makeDiscovery({ test: { dbPath: '/tmp/test.db', logDir: '/tmp/logs' } });
+    const dr = makeFailableDbReader();
+    const poller = new FleetRealtimeEventPoller({ discovery, dbReader: dr, realtime: publisher });
+
+    await poller.poll();           // baseline
+    publisher.calls.length = 0;
+
+    dr.setFail(true);
+    await poller.poll();           // failure — should not emit domain events
+    const failureEvents = publisher.calls.filter((c: any) => c.type !== 'typing_update');
+    expect(failureEvents).toEqual([]);
+
+    dr.setFail(false);
+    await poller.poll();           // recovery to same markers — no domain events
+    const recoveryEvents = publisher.calls.filter((c: any) => c.type !== 'typing_update');
+    expect(recoveryEvents).toEqual([]);
+
+    poller.stop();
+  });
+
+  it('emits correct domain events on fail → changed recovery (#2520)', async () => {
+    const discovery = makeDiscovery({ test: { dbPath: '/tmp/test.db', logDir: '/tmp/logs' } });
+    const dr = makeFailableDbReader();
+    const poller = new FleetRealtimeEventPoller({ discovery, dbReader: dr, realtime: publisher });
+
+    await poller.poll();           // baseline
+    publisher.calls.length = 0;
+
+    dr.setFail(true);
+    await poller.poll();           // failure — no events
+    publisher.calls.length = 0;
+
+    dr.getLatestMarkers.mockReturnValueOnce(
+      { ok: true, data: { latestMessagePk: 8, latestMessageMarker: 'msg:8:changed', latestAccessMarker: 'access:changed' } }
+    );
+    await poller.poll();           // changed recovery — correct events once
+    const types = publisher.calls.map((c: any) => c.type);
+    expect(types).toContain('message_received');
+    expect(types).toContain('access_changed');
+
+    poller.stop();
+  });
+});

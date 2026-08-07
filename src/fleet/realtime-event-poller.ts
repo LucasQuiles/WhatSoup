@@ -86,12 +86,15 @@ export class FleetRealtimeEventPoller {
       for (const [name, inst] of instances) {
         try {
           const dbSnapshot = this.getSnapshot(name, inst.dbPath);
+          if (!dbSnapshot.available) continue; // #2520 preserve prior snapshot on read failure
+
           const previous = this.snapshots.get(name);
 
           // Re-scan each cycle so pino-roll rotation to a newer numbered file is observed.
           const logMtime = this.getLogMtime(inst.logDir, previous?.lastLogPath ?? null);
           const current: InstanceSnapshot = {
-            ...dbSnapshot,
+            latestMessageMarker: dbSnapshot.latestMessageMarker,
+            latestAccessMarker: dbSnapshot.latestAccessMarker,
             latestLogMtime: logMtime?.mtimeMs ?? previous?.latestLogMtime ?? null,
             lastLogPath: logMtime?.path ?? previous?.lastLogPath ?? null,
           };
@@ -145,12 +148,18 @@ export class FleetRealtimeEventPoller {
   // Private helpers
   // ---------------------------------------------------------------------------
 
-  private getSnapshot(name: string, dbPath: string): { latestMessageMarker: string | null; latestAccessMarker: string | null } {
+  /**
+   * Returns the current snapshot for `name`, or a sentinel indicating the
+   * database was unavailable (#2520). The caller preserves the previous
+   * snapshot and emits no domain events when unavailable.
+   */
+  private getSnapshot(name: string, dbPath: string): { available: false } | { available: true; latestMessageMarker: string | null; latestAccessMarker: string | null } {
     const result = this.deps.dbReader.getLatestMarkers(name, dbPath);
     if (!result.ok) {
-      return { latestMessageMarker: null, latestAccessMarker: null };
+      return { available: false };
     }
     return {
+      available: true,
       latestMessageMarker: result.data.latestMessageMarker
         ?? (result.data.latestMessagePk == null ? null : `pk:${result.data.latestMessagePk}`),
       latestAccessMarker: result.data.latestAccessMarker,
