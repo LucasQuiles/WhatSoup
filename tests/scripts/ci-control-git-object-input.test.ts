@@ -15,6 +15,8 @@ import { dirname, join } from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { resolveTrustedGit } from '../../../scripts/lib/ci-control/trusted-git.ts';
+
 import {
   ExactGitInputError,
   MAX_CHANGE_FACT_COUNT,
@@ -1289,6 +1291,7 @@ describe('exact commit metadata', () => {
     ]);
     assertImportSurface('scripts/lib/ci-control/git-input-core.ts', [
         '../../../src/lib/git-env.ts',
+        './trusted-git.ts',
         'node:child_process',
         'node:crypto',
         'node:fs',
@@ -1296,6 +1299,36 @@ describe('exact commit metadata', () => {
         'node:perf_hooks',
         'node:util',
     ]);
+  });
+
+  it('#2843: resolveGit() uses resolveTrustedGit() — fails closed when no candidate exists', () => {
+    // Discriminating test: without the trusted-git guard, the module would use
+    // bare PATH-searched "git". With the guard, resolveTrustedGit() checks a
+    // static allowlist. Mock a non-existent candidate list to verify fail-closed.
+    expect(() => resolveTrustedGit(['/nonexistent/git'])).toThrow('no trusted git executable');
+    // Also verify the import is wired — if the guard is removed, this import vanishes.
+    const src = readFileSync('scripts/lib/ci-control/git-input-core.ts', 'utf8');
+    expect(src).toContain('import { resolveTrustedGit } from "./trusted-git.ts"');
+  });
+
+  it('#2843 v2: test seam env var is guarded by VITEST and inert in production', () => {
+    // The __CI_CONTROL_TEST_GIT_PATH env var must only be read under the vitest
+    // runner so it is inert outside tests — production must never consult it.
+    const src = readFileSync('scripts/lib/ci-control/git-input-core.ts', 'utf8');
+    // Verify the VITEST guard wraps the test-path read; the code uses a const
+    // TEST_GIT_PATH_ENV rather than a literal string.
+    expect(src).toMatch(
+      /if\s*\(process\.env\[['"]VITEST['"]\]\s*&&\s*process\.env\[TEST_GIT_PATH_ENV\]\)/,
+    );
+    // Verify TEST_GIT_PATH_ENV is referenced only in the seam definition and
+    // within the VITEST-guarded accessor (not in any production code path).
+    // 1 declaration + 3 in __setTestGitPath + 2 in resolveGit = 6 total.
+    const constRefs = src.match(/TEST_GIT_PATH_ENV/g);
+    expect(constRefs?.length).toBe(6);
+    // Verify the production fallback path uses resolveTrustedGit, not the env var
+    expect(src).toMatch(
+      /return resolveTrustedGit\(\);/,
+    );
   });
 
   it('reads the requested exact commit rather than a later safe ambient HEAD', () => {

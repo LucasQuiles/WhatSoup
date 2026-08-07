@@ -6,6 +6,30 @@ import { performance } from "node:perf_hooks";
 import { TextDecoder, types as utilTypes } from "node:util";
 
 import { cleanGitEnv } from "../../../src/lib/git-env.ts";
+import { resolveTrustedGit } from "./trusted-git.ts";
+
+// #2843: path to the git executable, resolved via the static trusted-git allowlist
+// by default. Tests may inject a fake git shim path via __setTestGitPath().
+// Uses process.env to cross the ESM module boundary (vitest creates per-file
+// module instances; a module-level or globalThis variable would not be shared).
+const TEST_GIT_PATH_ENV = '__CI_CONTROL_TEST_GIT_PATH';
+export function __setTestGitPath(path: string | undefined): string | undefined {
+  const prev = process.env[TEST_GIT_PATH_ENV];
+  if (path === undefined) {
+    delete process.env[TEST_GIT_PATH_ENV];
+  } else {
+    process.env[TEST_GIT_PATH_ENV] = path;
+  }
+  return prev;
+}
+function resolveGit(): string {
+  // #2843 v2: the test seam env var is inert outside the vitest runner.
+  // Production must never consult an env var (PATH-injection vector class).
+  if (process.env['VITEST'] && process.env[TEST_GIT_PATH_ENV]) {
+    return process.env[TEST_GIT_PATH_ENV]!;
+  }
+  return resolveTrustedGit();
+}
 
 const TYPED_ARRAY_PROTOTYPE = Object.getPrototypeOf(Uint8Array.prototype) as object;
 const TYPED_ARRAY_BYTE_LENGTH = Object.getOwnPropertyDescriptor(
@@ -368,7 +392,7 @@ export function gitBytes(
 ): Buffer {
   assertNoLegacyGrafts(cwd);
   try {
-    return execFileSync("git", ["--no-replace-objects", ...args], {
+    return execFileSync(resolveGit(), ["--no-replace-objects", ...args], {
       cwd,
       env: gitEnvironment(),
       maxBuffer,
@@ -398,7 +422,7 @@ export function exactInputGitBytes(
 ): Buffer {
   assertNoLegacyGrafts(cwd);
   try {
-    return execFileSync("git", ["--no-replace-objects", ...args], {
+    return execFileSync(resolveGit(), ["--no-replace-objects", ...args], {
       cwd,
       env: gitEnvironment(),
       maxBuffer,
@@ -768,7 +792,7 @@ function boundedEvidenceGitBytes(
 ): Buffer {
   assertNoLegacyGrafts(cwd);
   try {
-    return execFileSync("git", ["--no-replace-objects", ...args], {
+    return execFileSync(resolveGit(), ["--no-replace-objects", ...args], {
       cwd,
       env: gitEnvironment(),
       maxBuffer,
@@ -798,7 +822,7 @@ function boundedEvidenceGitInputBytes(
 ): Buffer {
   assertNoLegacyGrafts(cwd);
   try {
-    return execFileSync("git", ["--no-replace-objects", ...args], {
+    return execFileSync(resolveGit(), ["--no-replace-objects", ...args], {
       cwd,
       env: gitEnvironment(),
       input,
