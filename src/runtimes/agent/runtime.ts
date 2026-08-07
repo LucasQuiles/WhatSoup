@@ -4706,22 +4706,14 @@ export class AgentRuntime implements Runtime {
       // Successful spawn after a crash — decay the crash counter
       this.decrementCrashCount(effectiveMapKey ?? crashScopeKey);
 
-      // Recent-history preamble for fresh spawns — merged into the USER turn
-      // at the provider boundary, deliberately NOT a fresh_session_context
-      // system turn: the admission gate rejects that owner's effects
-      // (purpose_disallows_effect), so an action-heavy context block burned its
-      // whole deadline and the timeout quarantine killed the session under the
-      // queued user turn (2x on the owner DM, 2026-07-17). Merging removes the
-      // deadline race and the QR-095 phantom-reply channel by construction;
-      // replay/journal capture keeps the pure user text. Skipped when
-      // handleResumeFailed owns context recovery (avoids double blocks).
+      // Fresh spawns merge recent context into the active turn; see context-handoff.ts.
       const resumeFailedOwnsContext = mapKeyForChat !== undefined && this.resumeFailedHandling.has(mapKeyForChat);
       if (!resumeFailedOwnsContext) {
         try {
           const convKey = canonicalConversationKey(chatJid, this.db);
           const recent = contextMessagesForTurn(getRecentMessages(this.db, convKey, 20), text, actorJid);
           if (recent.length > 0) {
-            const lines = this.formatContextLines(recent);
+            const lines = formatContextLines(recent, this.isFallbackWindowActive);
             contextPreamble = `[Recent chat context — read before responding]\n${lines}`;
           }
         } catch (err) {
@@ -11949,12 +11941,6 @@ export class AgentRuntime implements Runtime {
     }
   }
 
-  private formatContextLines(
-    messages: ReadonlyArray<{ timestamp: number; senderName: string | null; senderJid: string; content: string | null }>,
-  ): string {
-    return formatContextLines(messages, this.isFallbackWindowActive);
-  }
-
   /**
    * Inject messages the agent missed during downtime into a resumed session.
    * Uses `sinceUnixSec` (typically the checkpoint's updated_at) to fetch only
@@ -11973,7 +11959,7 @@ export class AgentRuntime implements Runtime {
       const convKey = canonicalConversationKey(chatJid, this.db);
       const missed = getMessagesSince(this.db, convKey, sinceUnixSec, 30);
       if (missed.length === 0) return false;
-      lines = this.formatContextLines(missed);
+      lines = formatContextLines(missed, this.isFallbackWindowActive);
       messageCount = missed.length;
     } catch (err) {
       log.warn({ err, chatJid }, 'missed message lookup failed — agent continues without context');
@@ -12065,7 +12051,7 @@ export class AgentRuntime implements Runtime {
             const recent = contextMessagesForTurn(
               getRecentMessages(this.db, canonicalConversationKey(chatJid, this.db), 30), pendingText, pendingActorJid);
             if (recent.length > 0) {
-              const lines = this.formatContextLines(recent);
+              const lines = formatContextLines(recent, this.isFallbackWindowActive);
               // QR-095: same fix as the sendTurnToSession injection — in single/
               // shared mode mapKey is undefined here, so mark under GLOBAL to match
               // the single/shared consumeIfPending(GLOBAL_TOOL_SCOPE_KEY); otherwise

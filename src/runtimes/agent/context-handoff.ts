@@ -2,6 +2,12 @@ import { jidNormalizedUser } from '@whiskeysockets/baileys';
 
 import type { StoredMessage } from '../../core/messages.ts';
 
+// Recent context for fresh spawns is merged into the active user turn, not
+// dispatched as a fresh_session_context system turn. That owner cannot admit
+// effects, so action-heavy context can consume the deadline and quarantine the
+// provider under the queued user turn. Merging avoids that deadline race and
+// the phantom-reply channel while replay/journal capture keeps the pure user
+// text. Callers skip this path when resume-failure handling owns recovery.
 export function contextMessagesForTurn(
   messages: readonly StoredMessage[],
   activeText?: string,
