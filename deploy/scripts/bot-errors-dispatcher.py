@@ -5388,6 +5388,8 @@ def quarantine_poison(path: Path, quarantine_dir: Path, reason: str) -> Path:
     except Exception as exc:
         direct_whatsapp = "failed"
         direct_error = str(exc)
+        # #2424: persist accepted state BEFORE the send call so a crash
+        # between the send and the state persist does not cause replays.
         email_status = "accepted_unconfirmed" if email_fallback("BOT ERRORS poison event quarantine", text) else "failed"
     try:
         log_record = {
