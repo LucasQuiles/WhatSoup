@@ -176,6 +176,7 @@ export function registerAllTools(
     adminPhones: config.adminPhones,
     enableUrlWatch: config.advanced?.enableUrlWatch ?? false,
     memory: config.memory,
+    instanceName: config.botName,
   }));
 
   // Pattern 2 — DB-dependent. The `register` argument is bound to this module's

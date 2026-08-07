@@ -11633,6 +11633,9 @@ export class AgentRuntime implements Runtime {
       }
     } else if (exhausted) {
       this.exhaustedRespawnOwners.add(currentMapKey);
+      // #3052: prune after 1h so a never-recovered conversation does not leak.
+      // Unref so the timer does not prevent process shutdown.
+      setTimeout(() => { this.exhaustedRespawnOwners.delete(currentMapKey); }, 3600_000).unref();
       log.error({ mapKey: currentMapKey, crashes: crashCount }, 'auto-respawn exhausted — emitting alert');
       emitAlertChecked(
         this.instanceName,

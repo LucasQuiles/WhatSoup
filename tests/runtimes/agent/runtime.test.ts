@@ -3102,6 +3102,86 @@ describe('AgentRuntime', () => {
     }
   });
 
+  it('#3052: TTL prunes exhaustedRespawnOwners entry after 1h without recovery', async () => {
+    vi.useFakeTimers();
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0);
+    try {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      const sessionMock = {
+        ...mockSession,
+        spawnSession: vi.fn(async () => {}),
+        getStatus: vi.fn(() => ({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null })),
+      };
+      const runtimeState = runtime as unknown as {
+        chatSessions: Map<string, typeof sessionMock>;
+        chatQueues: Map<string, IOutboundQueue>;
+        crashes: { record: (mapKey: string) => number };
+        exhaustedRespawnOwners: Set<string>;
+        handlePerChatCrash: (mapKey: string, chatJid?: string, info?: { exitCode: number | null; signal: NodeJS.Signals | null; sessionId: string | null; dbRowId: number | null }) => void;
+      };
+      setOwnedTestSession(runtime, 'chat-3052', sessionMock);
+      runtimeState.chatQueues.set('chat-3052', makeQueueMock('chat-3052@s.whatsapp.net'));
+      // Pre-populate 3 crashes so the next crash exceeds AUTO_RESPAWN_MAX_CRASHES
+      runtimeState.crashes.record('chat-3052');
+      runtimeState.crashes.record('chat-3052');
+      runtimeState.crashes.record('chat-3052');
+      runtimeState.handlePerChatCrash('chat-3052', 'chat-3052@s.whatsapp.net', {
+        exitCode: 1, signal: null, sessionId: 'sess-3052', dbRowId: 99,
+        ...currentCrashIdentity(runtime, 'chat-3052'),
+      });
+      expect(runtimeState.exhaustedRespawnOwners.has('chat-3052')).toBe(true);
+      // Advance past 1h TTL — entry must be pruned
+      await vi.advanceTimersByTimeAsync(3_600_000);
+      expect(runtimeState.exhaustedRespawnOwners.has('chat-3052')).toBe(false);
+    } finally {
+      randomSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('#3052: recovery before TTL clears entry and does not re-add on TTL expiry', async () => {
+    vi.useFakeTimers();
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0);
+    try {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      const sessionMock = {
+        ...mockSession,
+        spawnSession: vi.fn(async () => {}),
+        getStatus: vi.fn(() => ({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null })),
+      };
+      const runtimeState = runtime as unknown as {
+        chatSessions: Map<string, typeof sessionMock>;
+        chatQueues: Map<string, IOutboundQueue>;
+        crashes: { record: (mapKey: string) => number };
+        exhaustedRespawnOwners: Set<string>;
+        handlePerChatCrash: (mapKey: string, chatJid?: string, info?: { exitCode: number | null; signal: NodeJS.Signals | null; sessionId: string | null; dbRowId: number | null }) => void;
+      };
+      setOwnedTestSession(runtime, 'chat-3052b', sessionMock);
+      runtimeState.chatQueues.set('chat-3052b', makeQueueMock('chat-3052b@s.whatsapp.net'));
+      runtimeState.crashes.record('chat-3052b');
+      runtimeState.crashes.record('chat-3052b');
+      runtimeState.crashes.record('chat-3052b');
+      runtimeState.handlePerChatCrash('chat-3052b', 'chat-3052b@s.whatsapp.net', {
+        exitCode: 1, signal: null, sessionId: 'sess-3052b', dbRowId: 99,
+        ...currentCrashIdentity(runtime, 'chat-3052b'),
+      });
+      expect(runtimeState.exhaustedRespawnOwners.has('chat-3052b')).toBe(true);
+      // Simulate recovery — delete the entry
+      runtimeState.exhaustedRespawnOwners.delete('chat-3052b');
+      expect(runtimeState.exhaustedRespawnOwners.has('chat-3052b')).toBe(false);
+      // Advance past 1h TTL — must stay gone (no re-add)
+      await vi.advanceTimersByTimeAsync(3_600_000);
+      expect(runtimeState.exhaustedRespawnOwners.has('chat-3052b')).toBe(false);
+    } finally {
+      randomSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it('startup proactive-resume notification preserves the crashed owner and its state', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();

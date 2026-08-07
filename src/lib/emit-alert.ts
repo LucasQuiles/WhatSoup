@@ -13,6 +13,7 @@ const log = createChildLogger('emit-alert');
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { errorMessage } from './error-message.ts';
+import { systemClock } from './clock.ts';
 
 const ALERT_SCRIPT = join(homedir(), '.claude', 'scripts', 'whatsapp-alert.sh');
 let missingScriptWarned = false;
@@ -49,23 +50,6 @@ export function resetEmitAlertThrottle(): void {
   alertThrottleMap.clear();
 }
 
-/** Returns true when the legacy spawn should be suppressed. */
-function isThrottled(instance: string, source: string, summary: string): boolean {
-  const throttleMs = Number(process.env['EMIT_ALERT_THROTTLE_MS'] ?? EMIT_ALERT_THROTTLE_MS);
-  const effectiveWindow = Number.isFinite(throttleMs) ? Math.max(0, throttleMs) : EMIT_ALERT_THROTTLE_MS;
-  if (effectiveWindow === 0) return false;
-
-  const now = Date.now();
-  // Prune expired entries on insert.
-  for (const [key, recordedAt] of alertThrottleMap) {
-    if (now - recordedAt > effectiveWindow) alertThrottleMap.delete(key);
-  }
-
-  const key = `${instance}|${source}|${summary}`;
-  if (alertThrottleMap.has(key)) return true;
-  alertThrottleMap.set(key, now);
-  return false;
-}
 
 // ---------------------------------------------------------------------------
 
@@ -279,7 +263,15 @@ export function emitAlert(
   } catch (err) {
     const reason = errorMessage(err);
     log.warn({ instance, source, err: reason }, 'bot-errors outbox write failed');
-    if (isThrottled(instance, source, summary)) {
+    // #2434: throttle check WITHOUT recording — record only on success.
+    const throttleKey = `${instance}|${source}|${summary}`;
+    // Prune expired entries before checking.
+    const throttleWindow = Number(process.env['EMIT_ALERT_THROTTLE_MS'] ?? EMIT_ALERT_THROTTLE_MS);
+    const now = systemClock.now();
+    for (const [key, recordedAt] of alertThrottleMap) {
+      if (now - recordedAt > throttleWindow) alertThrottleMap.delete(key);
+    }
+    if (alertThrottleMap.has(throttleKey)) {
       return { ok: true, channel: 'legacy', status: 'legacy_accepted_unconfirmed', outboxError: reason };
     }
     // Issue #2386: the legacy fallback previously received raw summary and
@@ -295,6 +287,12 @@ export function emitAlert(
       { instance, source },
       'alert emission failed',
     );
+    // #2434: only record throttle on success, so a failed fallback retries.
+    if (legacy.accepted) {
+      const throttleMs = Number(process.env['EMIT_ALERT_THROTTLE_MS'] ?? EMIT_ALERT_THROTTLE_MS);
+      const effectiveWindow = Number.isFinite(throttleMs) ? Math.max(0, throttleMs) : EMIT_ALERT_THROTTLE_MS;
+      if (effectiveWindow > 0) alertThrottleMap.set(throttleKey, systemClock.now());
+    }
     return {
       ok: legacy.accepted,
       channel: legacy.accepted ? 'legacy' : 'none',

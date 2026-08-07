@@ -1961,6 +1961,18 @@ def browser_debug_problems() -> dict[str, str]:
             f"debug_ports={ports} controller_connections=unknown "
             f"scan_error={redact_watchdog_text(scan_error or 'unknown')}"
         )
+        # #2426: include per-profile keys for unknown-visibility sessions so
+        # reconciliation does NOT treat them as "clean recovery" (absent from
+        # problem map → falsely cleared after two unknown observations).
+        for row in unknown:
+            key = f"{BROWSER_DEBUG_PREFIX}{row['profileHash']}"
+            problems[key] = (
+                "browser debug session visibility unknown: "
+                f"profile_hash={row['profileHash']} root_pid={row['pid']} "
+                f"age_seconds={float(row['ageSeconds']):.0f} rss_mb={float(row['rssMb']):.1f} "
+                f"process_count={row['processCount']} debug_port={row['debugPort']} "
+                f"controller_connections=unknown min_age_seconds={min_age} min_rss_mb={min_rss}"
+            )
     for row in qualifying:
         if row["controllerConnections"] != 0:
             continue

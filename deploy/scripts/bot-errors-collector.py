@@ -3209,10 +3209,13 @@ def emit_relay_host_state_event(remote: str, kind: str, evidence: str, state: di
         severity = "warning"
     else:
         severity = "info"
+    # #2419: relay_host_recovered uses event_type="clear" so the dispatcher's
+    # standard clear-pop path (mark_incident_sent) retires the paired down record.
+    event_type = "clear" if kind == "relay_host_recovered" else "alert"
     _emit_collector_outbox_event(
         remote,
         source=kind,
-        event_type="alert",
+        event_type=event_type,
         severity=severity,
         summary=f"BOT ERRORS collector relay host {kind.replace('_', ' ')}: {remote}",
         evidence=evidence,
@@ -3639,13 +3642,6 @@ def _run_once_with_state(
                     [remote_root, str(max_events), str(lease_seconds)],
                     timeout,
                 )
-                enqueue_meta_recovery(
-                    remote,
-                    "remote-writefail-harvest-failed",
-                    f"BOT ERRORS collector remote writefail harvest recovered: {remote}",
-                    f"remote={remote}\nremote_root={remote_root}\nharvest_status=success",
-                    state,
-                )
             except Exception as exc:  # noqa: BLE001 - outbox relay must not be blocked by B6 harvest.
                 failed += 1
                 if is_best_effort:
@@ -3898,6 +3894,17 @@ def _run_once_with_state(
                     state,
                     alert_cooldown,
                 )
+        # #2420: recovery is here (AFTER the writefail records loop), not in
+        # the claim try block — a successful claim cannot clear a still-leased
+        # record that failed harvest in a prior cycle.
+        if writefail_harvested > 0:
+            enqueue_meta_recovery(
+                remote,
+                "remote-writefail-harvest-failed",
+                f"BOT ERRORS collector remote writefail harvest recovered: {remote}",
+                f"remote={remote}\nremote_root={remote_root}\nharvest_status=success",
+                state,
+            )
         if outbox_claim_failed:
             continue
         drain_record = remote_state.get(remote, {})

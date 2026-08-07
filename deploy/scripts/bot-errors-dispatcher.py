@@ -2648,6 +2648,31 @@ def queue_dead_letter_meta_alert(paths: dict[str, Path], now: int) -> int:
         return 0
     dl_files = [f for f in dl_dir.glob("*.json") if safe_is_regular_entry(f)]
     if not dl_files:
+        state = read_meta_state(paths)
+        was_nonempty = state.get("dlWasNonempty", False)
+        state["dlWasNonempty"] = False
+        write_meta_state(paths, state)
+        if not was_nonempty:
+            # Already empty on the previous sweep — no transition, no clear.
+            return 0
+        # #2421 with RED-3061-r6 fix: emit clear ONLY on the non-empty→empty
+        # transition, not on every sweep when the dead letter is already empty.
+        # This prevents the cyclic outbox occupation (the meta-clear writes to
+        # outbox; consuming it on the next dispatch leaves the queue empty,
+        # which without this guard would trigger another write, ad infinitum).
+        clear_event = dead_letter_meta_event(paths, 0, "")
+        clear_event["eventType"] = "clear"
+        clear_event["severity"] = "info"
+        clear_path = outbox_path_for_event(clear_event, paths)
+        clear_target = _durable_target(clear_path)
+        empty_observation = JsonVersion(False, None, None, None)
+        clear_publication = publish_event_json(
+            clear_target,
+            clear_event,
+            component="dispatcher.dead_letter_meta_clear",
+            operation_id=operation_id(clear_target, clear_event, component="dispatcher.dead_letter_meta_clear", predecessor=empty_observation),
+        )
+        require_advance(clear_publication)
         return 0
 
     state = read_meta_state(paths)
@@ -2687,6 +2712,7 @@ def queue_dead_letter_meta_alert(paths: dict[str, Path], now: int) -> int:
     require_advance(event_publication)
     state["deadLetterMetaAlertAtEpoch"] = now
     state["deadLetterMetaAlertEventId"] = event["id"]
+    state["dlWasNonempty"] = True
     state_publication = write_meta_state(paths, state)
     require_all_advance([event_publication, state_publication])
     append_dispatch_log(paths, {
@@ -2725,6 +2751,8 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
         relay_reason = coalesce_relay_recovered(event, incident_state)
         if relay_reason is not None:
             return relay_reason
+        # #2419: relay_host_recovered now uses eventType="clear" (collector-side)
+        # so the dispatcher's standard clear-pop path closes the down incident.
     # Pattern B (Part 2) — silence incident ALERTS for a scope under a planned
     # maintenance window. CLEAR events are never gated here: a recovery during
     # maintenance must still close the incident. FAIL-OPEN: gate off, or any
@@ -3932,26 +3960,34 @@ def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = N
                 last_sent_at.pop(closed_key, None)
         changed = True
 
-        # Accumulate into the persisted digest batch.
-        accum = incident_state.get("staleAutocloseDigest")
-        if not isinstance(accum, dict):
+    # #2403: evaluate pending digest on EVERY sweep, not only when new
+    # auto-closures occur.  A digest that was waiting for the coalescing window
+    # or recovering from a send failure must be re-checked even on a quiet sweep.
+    # BUGFIX RED-3061-R3: `pending_check` must also fire when `auto_closed` is
+    # non-empty but no `staleAutocloseDigest` entry exists yet (first-time auto-
+    # closure — the original pre-#2403 code created the digest inside `if auto_closed:`
+    # but the #2403 refactor moved it outside and the `has_accum` gate blocked it).
+    accum = incident_state.get("staleAutocloseDigest")
+    has_accum = isinstance(accum, dict)
+    pending_check = bool(auto_closed) or (has_accum and int(accum.get("pendingCount") or 0) > 0)
+    if pending_check:
+        if not has_accum:
             accum = {}
             incident_state["staleAutocloseDigest"] = accum
-        pending_keys = accum.get("pendingKeys")
-        if not isinstance(pending_keys, list):
-            pending_keys = []
-        # Keep a bounded sample of keys for the digest preview; count is exact.
-        pending_keys.extend(auto_closed)
-        accum["pendingKeys"] = pending_keys[-200:]
-        accum["pendingCount"] = int(accum.get("pendingCount") or 0) + len(auto_closed)
-        if not accum.get("firstPendingAt"):
-            accum["firstPendingAt"] = current
+        if auto_closed:
+            pending_keys = accum.get("pendingKeys")
+            if not isinstance(pending_keys, list):
+                pending_keys = []
+            pending_keys.extend(auto_closed)
+            accum["pendingKeys"] = pending_keys[-200:]
+            accum["pendingCount"] = int(accum.get("pendingCount") or 0) + len(auto_closed)
+            if not accum.get("firstPendingAt"):
+                accum["firstPendingAt"] = current
 
         if should_emit_autoclose_digest(accum, current):
-            digest_keys = list(accum.get("pendingKeys") or auto_closed)
+            digest_keys = list(accum.get("pendingKeys") or [])
             digest_count = int(accum.get("pendingCount") or len(digest_keys))
             summary_event = stale_autoclose_summary_event(digest_keys, current)
-            # Report the exact coalesced total even when the key sample was trimmed.
             summary_event["summary"] = (
                 f"Auto-closed {digest_count} non-actionable stale incident(s)"
             )
@@ -3968,7 +4004,6 @@ def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = N
                 accum["firstPendingAt"] = 0
                 accum["lastDigestAt"] = current
             except Exception as exc:
-                # Keep the batch pending so it retries on the next sweep (no loss).
                 last_error = str(exc)
                 append_dispatch_log(paths, {
                     "type": "stale_autoclose_summary_failed",
@@ -3979,7 +4014,7 @@ def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = N
             append_dispatch_log(paths, {
                 "type": "stale_autoclose_digest_coalesced",
                 "pendingCount": accum.get("pendingCount"),
-                "closedThisSweep": len(auto_closed),
+                "closedThisSweep": len(auto_closed) if auto_closed else 0,
                 "nextDigestInSeconds": max(
                     0,
                     STALE_AUTOCLOSE_DIGEST_COALESCE_SECONDS
@@ -5016,6 +5051,9 @@ def suppress_alerts_recovered_before_delivery(paths: dict[str, Path], incident: 
 
         alert_ids: list[str] = []
         for alert_path, alert_event, _alert_epoch, _alert_order in pending_alerts:
+            # #2430: preserve freshness before terminal move.
+            if str(alert_event.get("source") or "").startswith("daily-health"):
+                absorb_daily_health_signal(alert_event, incident_state)
             move_suppressed_event(
                 alert_path,
                 paths,
@@ -5037,6 +5075,9 @@ def suppress_alerts_recovered_before_delivery(paths: dict[str, Path], incident: 
                 "recovered_before_delivery_clear_suppressed",
             )
             suppressed += 1
+        # #2430: absorb daily-health clear signals into freshness too.
+        if str(clear_event.get("source") or "").startswith("daily-health"):
+            absorb_daily_health_signal(clear_event, incident_state)
         append_dispatch_log(paths, {
             "type": "recovered_before_delivery",
             "incidentKey": key,

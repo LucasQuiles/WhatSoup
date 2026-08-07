@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-07-28T12:38:40Z",
+  "generatedAt": "2026-08-07T15:56:09Z",
   "scope": "bot-errors-runtime-scripts",
   "expectedHeadShaPolicy": "populated at deploy time by deploy step; absent here so committed state is observability-only",
   "files": [
     {
       "path": "deploy/scripts/bot-errors-collector.py",
-      "sha256": "60b49097faeabecb1dca296d75d139c83315f03bcf93d337ec49a2e7fc743cd1",
+      "sha256": "c79b36dec295bf3673a449e052c9675997ccb6b45a8b618297e2dff571192238",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -28,7 +28,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "1c5f4eeae92f0fd790e9df0d9a7c56cc7c21c3de835dac0cc61ab4b3e3dd6c71",
+      "sha256": "cca18efbe6a2de28c6f55f40af4a6cc9dadb68237cb2b5a3f7583093efc83347",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -168,7 +168,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
-      "sha256": "6faaa57eb8e11c3b72dc21678ccbd98e6dc27fe779c2e535013e42eabc07b768",
+      "sha256": "5534e4f47843ae8c28ea920ac3f2e2e2a39270df7308af7204cd935bf128bdfc",
       "mustContain": [
         "BOT_ERRORS_Q_LOOP_STATE_DIR",
         "BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT",
@@ -205,7 +205,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-runner.py",
-      "sha256": "2f7a950d9a7e51cfcc9b3ef960d5143e0d528706083136a7029ac5d9bb68f3fd",
+      "sha256": "dbdf5ecab095ae132c4f1f9dbbe64e15fc632ed14647ef6ab832455fa2bc8c24",
       "mustContain": [
         "publish_event_json",
         "refusing to use private directory through symlink",

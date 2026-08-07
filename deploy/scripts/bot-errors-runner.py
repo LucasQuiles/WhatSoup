@@ -497,6 +497,11 @@ def main(argv: list[str] | None = None) -> int:
         stdout = (exc.stdout or "") if isinstance(exc.stdout, str) else (exc.stdout or b"").decode(errors="replace")
         stderr = (exc.stderr or "") if isinstance(exc.stderr, str) else (exc.stderr or b"").decode(errors="replace")
         failure = "timeout"
+    except Exception as exc:
+        # #2422: catch all launch/decoding errors so an outbox event is written.
+        returncode = 1
+        stderr = f"runner launch or decode error: {exc}"
+        failure = "launch_failed"
     duration_ms = int((time.monotonic() - started) * 1000)
     if stdout:
         sys.stdout.write(redact(stdout))
