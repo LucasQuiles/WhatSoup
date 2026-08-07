@@ -795,6 +795,8 @@ export class AgentRuntime implements Runtime {
   private readonly db: Database;
   private readonly messenger: Messenger;
   private readonly instanceName: string;
+  /** #2397: mapKeys that have exhausted auto-respawn and are not yet recovered. */
+  private readonly exhaustedRespawnOwners = new Set<string>();
   private readonly shared: boolean;
   private readonly sessionScope: SessionScope;
   private readonly cwd: string | undefined;
@@ -3906,6 +3908,10 @@ export class AgentRuntime implements Runtime {
             reviewByAt,
             actor: 'inline',
           });
+          // A successful createBead proves database writes recovered after a
+          // prior unrecoverable failure (#2406).  Idempotent clear — no-op if
+          // no incident exists.
+          clearAlertSourceChecked(this.instanceName, 'substrate-inline-hook');
           log.info(
             { verb: hit.verb, messageId: msg.messageId, chatJid: msg.chatJid, reviewByAt },
             'inline imperative persisted as proposed bead',
@@ -10380,14 +10386,16 @@ export class AgentRuntime implements Runtime {
     };
 
     if (result.status === 'usable') {
-      if (this.primaryModelUsabilityAlertActive) {
-        clearAlertSourceChecked(
-          this.instanceName,
-          'primary_model_unusable',
-          `provider=${alertEvidenceValue(result.provider)} model=${alertEvidenceValue(result.model)}`,
-        );
-        this.primaryModelUsabilityAlertActive = false;
-      }
+      // Always emit an idempotent clear on usable result.  If the prior process
+      // emitted `primary_model_unusable` before dying, this new process lacks
+      // the local flag but the clear is still required (#2394).  `clearAlert-`
+      // is idempotent when no incident exists, so there is no double-clear risk.
+      clearAlertSourceChecked(
+        this.instanceName,
+        'primary_model_unusable',
+        `provider=${alertEvidenceValue(result.provider)} model=${alertEvidenceValue(result.model)}`,
+      );
+      this.primaryModelUsabilityAlertActive = false;
       return;
     }
 
@@ -11618,6 +11626,7 @@ export class AgentRuntime implements Runtime {
         clearTimeout(timer);
       }
     } else if (exhausted) {
+      this.exhaustedRespawnOwners.add(currentMapKey);
       log.error({ mapKey: currentMapKey, crashes: crashCount }, 'auto-respawn exhausted — emitting alert');
       emitAlertChecked(
         this.instanceName,
@@ -11714,6 +11723,15 @@ export class AgentRuntime implements Runtime {
       const publishRespawnRecovery = (): void => {
         if (respawnRecoveryPublished) return;
         respawnRecoveryPublished = true;
+        // Remove this conversation from the exhausted set (#2397).
+        this.exhaustedRespawnOwners.delete(mapKey);
+        if (this.exhaustedRespawnOwners.size > 0) {
+          log.info(
+            { remaining: [...this.exhaustedRespawnOwners].length },
+            'respawn recovery: not clearing — other conversations still exhausted',
+          );
+          return;
+        }
         clearAlertSourceChecked(this.instanceName, 'agent_respawn_failed');
       };
       let contextLease: SystemTurnLeaseToken | null = null;

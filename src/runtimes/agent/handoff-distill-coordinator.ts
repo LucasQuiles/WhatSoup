@@ -17,7 +17,7 @@
 import type { Database } from '../../core/database.ts';
 import { createChildLogger } from '../../logger.ts';
 import { getRecentMessages } from '../../core/messages.ts';
-import { emitAlertChecked } from '../../lib/emit-alert.ts';
+import { clearAlertSourceChecked, emitAlertChecked } from '../../lib/emit-alert.ts';
 import { providerPreview } from './provider-preview-sanitizer.ts';
 import { redactHandoffPii } from './handoff-pii-redactor.ts';
 import { upsertHandoffArtifact } from './handoff-artifact.ts';
@@ -61,6 +61,9 @@ export class HandoffDistillCoordinator {
   private readonly instanceName: string;
   private readonly isEnabled: () => boolean;
   private readonly getModel: () => string | null;
+  /** #2401: conversation keys currently degraded. Cleared each sweep. */
+  private degradedConversations = new Set<string>();
+  private hadDegradedConversations = false;
 
   constructor(deps: HandoffDistillCoordinatorDeps) {
     this.db = deps.db;
@@ -192,8 +195,14 @@ export class HandoffDistillCoordinator {
       }
       // Bound memory: forget gate state for conversations no longer active.
       runner.prune(seen);
+      // If all conversations recovered during this sweep, emit idempotent
+      // clear (#2401). No-op if no incident exists.
+      if (this.hadDegradedConversations && this.degradedConversations.size === 0) {
+        this.hadDegradedConversations = false;
+        clearAlertSourceChecked(this.instanceName, `handoff-distill:${this.instanceName}`);
+      }
       log.info(
-        { instance: this.instanceName, ticked: seen.size },
+        { instance: this.instanceName, ticked: seen.size, degraded: this.degradedConversations.size },
         'handoff distill sweep complete',
       );
     } catch (err) {
@@ -205,8 +214,10 @@ export class HandoffDistillCoordinator {
     }
   }
 
-  /** Degradation signal from the runner — emit a redacted operational alert. */
+  /** Degradation signal from the runner — track conversation and emit alert. */
   private onDegraded(conversationKey: string, reason: string): void {
+    this.degradedConversations.add(conversationKey);
+    this.hadDegradedConversations = true;
     const source = `handoff-distill:${this.instanceName}`;
     // Reason may echo upstream error text; redact before it leaves the process.
     const safeReason = providerPreview(reason, 200);
