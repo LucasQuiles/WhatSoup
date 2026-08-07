@@ -1,5 +1,5 @@
 import React, { useState, useCallback, lazy, Suspense } from 'react'
-import { useParams, useNavigate } from 'react-router-dom'
+import { useParams, useNavigate } from 'react-router'
 import { useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useLine, useChats, useMessages, useAccess, useLogs, useTyping, useCheckpoints, useLiveSessions, useApprovals } from '../hooks/use-fleet'

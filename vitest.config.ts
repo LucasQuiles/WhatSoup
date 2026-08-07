@@ -23,7 +23,7 @@ export default defineConfig({
       'framer-motion': path.resolve(__dirname, 'node_modules/framer-motion'),
       'lucide-react': path.resolve(__dirname, 'node_modules/lucide-react'),
       'qrcode': path.resolve(__dirname, 'node_modules/qrcode'),
-      'react-router-dom': path.resolve(__dirname, 'node_modules/react-router-dom'),
+      'react-router': path.resolve(__dirname, 'node_modules/react-router'),
       'react-is': path.resolve(__dirname, 'node_modules/react-is'),
       'recharts': path.resolve(__dirname, 'node_modules/recharts'),
     },

@@ -12,7 +12,7 @@
  * (documented deviation).
  */
 import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router'
 import { useToast } from '../../hooks/toast-context'
 import { api } from '../../lib/api'
 import { Button } from '../primitives/Button'

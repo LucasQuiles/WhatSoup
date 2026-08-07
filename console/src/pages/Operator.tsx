@@ -1,5 +1,5 @@
 import { useState, useMemo, lazy, Suspense } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { useSearchParams } from 'react-router'
 import { motion } from 'framer-motion'
 import { useLines, useLogs, useFeed } from '../hooks/use-fleet'
 import { Tabs, Tab, TabPanel } from '../components/primitives/Tabs'

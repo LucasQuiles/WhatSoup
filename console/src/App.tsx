@@ -1,5 +1,5 @@
 import { lazy, Profiler, Suspense, useState, useCallback, useEffect, useRef } from 'react'
-import { Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom'
+import { Routes, Route, Navigate, useLocation, useNavigate } from 'react-router'
 import { MotionConfig } from 'framer-motion'
 import ErrorBoundary from './components/ErrorBoundary'
 import { KeyboardShortcutsHelp } from './components/KeyboardShortcutsHelp'

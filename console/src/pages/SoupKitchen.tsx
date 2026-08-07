@@ -9,7 +9,7 @@ import {
   lazy,
   Suspense,
 } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from 'react-router';
 import { Plus, RotateCw } from "lucide-react";
 const AddLineWizard = lazy(() => import("../components/AddLineWizard"));
 import { motion } from "framer-motion";

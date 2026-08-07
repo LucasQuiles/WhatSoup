@@ -16,7 +16,7 @@
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQueries, useQueryClient, type QueryClient } from '@tanstack/react-query'
-import { useSearchParams } from 'react-router-dom'
+import { useSearchParams } from 'react-router'
 import { getChatsQueryOptions, useLines, useMessages } from '../hooks/use-fleet'
 import { useRealtime } from '../hooks/use-websocket'
 import { useToast, type ToastContextValue } from '../hooks/toast-context'

@@ -9,7 +9,7 @@
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { MemoryRouter, Route, Routes } from 'react-router';
 import { createElement } from 'react';
 
 import ChromeHeader from '../../console/src/components/chrome/ChromeHeader';

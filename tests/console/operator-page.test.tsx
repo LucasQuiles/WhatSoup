@@ -18,7 +18,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter } from 'react-router'
 import type { ReactNode } from 'react'
 import { ToastContext, type ToastContextValue } from '../../console/src/hooks/toast-context'
 import { statusWashClass } from '../../console/src/lib/status-severity'

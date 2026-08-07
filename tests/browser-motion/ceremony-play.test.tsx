@@ -20,7 +20,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { render, cleanup } from 'vitest-browser-react';
 import { page } from 'vitest/browser';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter } from 'react-router';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Ceremony } from '../../console/src/components/journey/Ceremony';
 import { ToastContext, type ToastContextValue } from '../../console/src/hooks/toast-context';

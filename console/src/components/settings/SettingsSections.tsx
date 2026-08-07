@@ -14,7 +14,7 @@
  * - Danger zone: reset row disabled — no reset endpoint exists.
  */
 import { useState, type ReactNode } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useLines } from '../../hooks/use-fleet'
 import { useTheme, type Theme } from '../../hooks/use-theme'

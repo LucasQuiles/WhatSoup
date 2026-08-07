@@ -4,7 +4,7 @@
 // ---------------------------------------------------------------------------
 
 import { useEffect, useCallback, useRef } from 'react';
-import { useNavigate, useLocation } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router';
 
 interface ShortcutHandlers {
   /** Called when user triggers "search" shortcut (Cmd/Ctrl+K) */

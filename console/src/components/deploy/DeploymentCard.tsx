@@ -9,7 +9,7 @@
  * note (the b-05 posture verbatim).
  */
 import { useQuery } from '@tanstack/react-query'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router'
 import type { LineInstance } from '../../types'
 import { api } from '../../lib/api'
 import {

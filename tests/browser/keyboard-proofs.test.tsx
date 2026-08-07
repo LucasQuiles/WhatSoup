@@ -76,7 +76,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { render, cleanup } from 'vitest-browser-react';
 import { userEvent } from 'vitest/browser';
 import React from 'react';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter } from 'react-router';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import '../../console/src/index.css';
 

@@ -1,5 +1,5 @@
 import type { FC } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router';
 import { Button } from '../primitives/Button';
 import type { PluginCatalogEntry } from '../../lib/plugin-catalog';
 
