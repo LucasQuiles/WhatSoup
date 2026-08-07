@@ -33,6 +33,8 @@ const log = createChildLogger('mcp:substrate');
 
 export interface SubstrateDeps {
   db: DatabaseSync;
+  /** #2417: instance name used for alert source identification. */
+  instanceName: string;
   /**
    * Database wrapper — required for LID→phone resolution in admin gating.
    * `@lid` JIDs must be translated through `lid_mappings` before being
