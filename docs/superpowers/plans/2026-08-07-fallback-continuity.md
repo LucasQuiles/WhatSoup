@@ -283,6 +283,45 @@ Update the source-runtime manifest and work index, run the required branch gate,
 push over SSH, and include the live proof and rollback path in repository
 promotion.
 
+### Task 7: Close independent-review canary and permission gaps
+
+**Files:**
+- Modify: `deploy/scripts/bot-errors-health-check.py`
+- Modify: `deploy/scripts/install-bot-errors-{,health-}launchd.sh`
+- Modify: `src/core/provider-mcp-config.ts`
+- Modify: `src/runtimes/agent/session.ts`
+- Modify: focused tests and runtime manifests
+
+Two independent reviews found that the first functional probe could accept any
+non-empty text in any record order, used a fallback-only config surface the
+runtime does not consume, inherited the monitor's entire environment, and
+relied on a global permission that an agent-specific rule can override.
+
+- [x] **Step 1: Prove the gaps with failing tests**
+
+Add RED cases for wrong canary text, terminal-not-last streams, inherited
+fallback execution settings, positive credential allowlisting, explicit
+launchd provider paths, and selected-agent permission precedence.
+
+- [x] **Step 2: Make the functional probe runtime-faithful and fail-closed**
+
+Require an ordered exact `OK` turn, derive fallback settings from the primary
+provider config while excluding endpoint fields, include `--agent` and
+`--auto`, and pass only system essentials plus the selected credential.
+
+- [x] **Step 3: Align launchd path and delivery authority**
+
+Render an explicit provider PATH for the health LaunchAgents, add standard
+Homebrew discovery only after configured/PATH candidates, enforce the exact
+send deny on both global and selected-agent layers, and remove the impossible
+OpenCode late-send prompt instruction.
+
+- [ ] **Step 4: Re-review, push exact SHA, and promote**
+
+Regenerate manifests, run integrity/focused/type/release gates under the pinned
+Node runtime, obtain independent approval and CI for the exact pushed SHA, then
+merge without bypassing repository protections.
+
 ## Verification Receipt
 
 - The clean platform branch passed the repository push gate (50/50), TypeScript
@@ -299,3 +338,7 @@ promotion.
   quarantined. These records were not deleted or marked resolved by this work.
 - Host-specific identifiers, message bodies, hashes, and rollback artifacts are
   retained only in the private operation receipt.
+- Independent-review remediation currently has 573 changed-suite passes plus
+  142/142 health checks after explicitly excluding the inherited macOS
+  descriptor-walk fixture; that excluded fixture remains inconclusive, not
+  clean. Exact-SHA push/CI/re-review are still pending.

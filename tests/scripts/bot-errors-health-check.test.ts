@@ -134,7 +134,9 @@ function runOpenCodeFallbackProbeInventory(
     'import json',
     'import os',
     `functional_stdout = ${JSON.stringify(functionalStdout)}`,
-    'def fake_provider_command_output(command, timeout_seconds, dry_stdout_env, dry_stderr_env, dry_rc_env, input_text=None):',
+    'os.environ["MINIMAX_API_KEY"] = "fixture-minimax-key"',
+    'os.environ["WHATSOUP_HEALTH_TOKEN"] = "must-not-reach-provider"',
+    'def fake_provider_command_output(command, timeout_seconds, dry_stdout_env, dry_stderr_env, dry_rc_env, input_text=None, child_env=None):',
     '    if dry_stdout_env == "BOT_ERRORS_DRY_OPENCODE_VERSION_STDOUT":',
     '        return "1.2.3", "", 0, False',
     '    if dry_stdout_env in {"BOT_ERRORS_DRY_OPENCODE_HELP_STDOUT", "BOT_ERRORS_DRY_OPENCODE_RUN_HELP_STDOUT"}:',
@@ -142,8 +144,13 @@ function runOpenCodeFallbackProbeInventory(
     '    if dry_stdout_env == "BOT_ERRORS_DRY_OPENCODE_FUNCTIONAL_STDOUT":',
     '        assert "--print-logs" in command',
     '        assert command[command.index("--log-level") + 1] == "INFO"',
+    '        assert command[command.index("--agent") + 1] == "whatsoup-headless"',
+    '        assert "--auto" in command',
     '        assert "Reply with exactly OK." not in command',
     '        assert input_text == "Reply with exactly OK.\\n"',
+    '        assert child_env is not None',
+    '        assert child_env.get("MINIMAX_API_KEY") == "fixture-minimax-key"',
+    '        assert "WHATSOUP_HEALTH_TOKEN" not in child_env',
     '        return functional_stdout, "", 0, False',
     '    raise AssertionError(f"unexpected probe surface: {dry_stdout_env}")',
     'm.provider_command_output = fake_provider_command_output',
@@ -152,7 +159,7 @@ function runOpenCodeFallbackProbeInventory(
     ...(options.timeout ? ['os.environ["BOT_ERRORS_DRY_OPENCODE_FUNCTIONAL_TIMEOUT"] = "1"'] : []),
     'profile = {}',
     'item = {"expectOpenCodeFunctionalProbe": True}',
-    'data = {"agentOptions": {"fallbackModel": "minimax/MiniMax-M2.7", "fallbackProviderConfig": {"opencodeCommandMode": "modern-run"}}}',
+    'data = {"agentOptions": {"provider": "claude-cli", "providerConfig": {"opencodeCommandMode": "modern-run", "executionProfile": "whatsoup-headless", "autoApprovePermissions": True, "baseUrl": "https://primary.invalid", "apiKeyService": "openai"}, "fallbackProvider": "opencode-cli", "fallbackModel": "minimax/MiniMax-M2.7", "fallbackProviderConfig": {"executionProfile": "wrong-profile", "autoApprovePermissions": False}}}',
     'lines = m.opencode_provider_probe_inventory(profile, item, "agent-alpha", data, "opencode-cli", "fallback")',
     'print(json.dumps(lines))',
   ].join('\n'))) as string[];
@@ -5147,6 +5154,29 @@ print(m.probe_health(9092))
       expect(lines[0]).toContain('failure_class=provider_stream_missing_terminal');
     });
 
+    it('fails when the provider returns text other than the exact canary marker', () => {
+      const wrongText = JSON.stringify({ type: 'text', part: { text: 'IGNORED STDIN' } });
+      const lines = runOpenCodeFallbackProbeInventory([stepStart, wrongText, terminal].join('\n'));
+
+      expect(lines[0]).toContain('FAIL provider_probe agent-alpha');
+      expect(lines[0]).toContain('failure_class=provider_stream_unexpected_text');
+    });
+
+    it('fails when terminal output precedes the canary text', () => {
+      const lines = runOpenCodeFallbackProbeInventory([stepStart, terminal, textRecord].join('\n'));
+
+      expect(lines[0]).toContain('FAIL provider_probe agent-alpha');
+      expect(lines[0]).toContain('failure_class=provider_stream_terminal_not_last');
+    });
+
+    it('fails when any provider event follows the terminal record', () => {
+      const errorRecord = JSON.stringify({ type: 'error', error: { message: 'late failure' } });
+      const lines = runOpenCodeFallbackProbeInventory([stepStart, textRecord, terminal, errorRecord].join('\n'));
+
+      expect(lines[0]).toContain('FAIL provider_probe agent-alpha');
+      expect(lines[0]).toContain('failure_class=provider_stream_terminal_not_last');
+    });
+
     it('fails closed when the bounded functional turn times out', () => {
       const lines = runOpenCodeFallbackProbeInventory('', { timeout: true });
 
@@ -5261,7 +5291,7 @@ print(m.probe_health(9092))
     expect(event.evidence).not.toContain('agent-alpha@s.whatsapp.net');
   });
 
-  it('probes configured OpenCode fallback using fallbackProviderConfig, not primary providerConfig', () => {
+  it('probes configured OpenCode fallback using the runtime-inherited primary providerConfig', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-'));
     const binDir = join(tmpRoot, 'bin');
     const opencodeCommand = join(binDir, 'opencode');
@@ -5277,10 +5307,10 @@ print(m.probe_health(9092))
       healthPort: 9090,
       agentOptions: {
         provider: 'claude-cli',
-        providerConfig: {},
+        providerConfig: { opencodeCommandMode: 'modern-run' },
         fallbackProvider: 'opencode-cli',
         fallbackModel: 'minimax/MiniMax-M2.7-highspeed',
-        fallbackProviderConfig: { opencodeCommandMode: 'modern-run' },
+        fallbackProviderConfig: { opencodeCommandMode: 'legacy-prompt-json' },
       },
     }));
     chmodSync(join(configDir, 'config.json'), 0o600);

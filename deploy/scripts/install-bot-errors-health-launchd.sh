@@ -88,6 +88,15 @@ elif [[ -z "$BOT_ERRORS_SOCKET_VALUE" && -n "$BOT_ERRORS_SOCKET_PATH_VALUE" ]]; 
   BOT_ERRORS_SOCKET_VALUE="$BOT_ERRORS_SOCKET_PATH_VALUE"
 fi
 BOT_ERRORS_DB_VALUE="$(env_or_default BOT_ERRORS_DB "")"
+PINNED_NODE_BIN=""
+if [[ -r "$REPO_ROOT/.nvmrc" ]]; then
+  NVMRC_VERSION="$(tr -d '[:space:]' < "$REPO_ROOT/.nvmrc")"
+  if [[ "$NVMRC_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    PINNED_NODE_BIN="$HOME/.nvm/versions/node/v$NVMRC_VERSION/bin:"
+  fi
+fi
+DEFAULT_PROVIDER_PATH="$HOME/.local/share/whatsoup/npm-global/bin:${PINNED_NODE_BIN}$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+BOT_ERRORS_PROVIDER_PATH_VALUE="$(env_or_default BOT_ERRORS_PROVIDER_PATH "$DEFAULT_PROVIDER_PATH")"
 validate_label BOT_ERRORS_HEALTH_LABEL "$LABEL"
 validate_calendar_integer BOT_ERRORS_HEALTH_HOUR "$HEALTH_HOUR" 0 23
 validate_calendar_integer BOT_ERRORS_HEALTH_MINUTE "$HEALTH_MINUTE" 0 59
@@ -103,6 +112,7 @@ BOT_ERRORS_EXPECTED_JID_XML="$(xml_escape "$BOT_ERRORS_EXPECTED_JID_VALUE")"
 BOT_ERRORS_SOCKET_PATH_XML="$(xml_escape "$BOT_ERRORS_SOCKET_PATH_VALUE")"
 BOT_ERRORS_SOCKET_XML="$(xml_escape "$BOT_ERRORS_SOCKET_VALUE")"
 BOT_ERRORS_DB_XML="$(xml_escape "$BOT_ERRORS_DB_VALUE")"
+BOT_ERRORS_PROVIDER_PATH_XML="$(xml_escape "$BOT_ERRORS_PROVIDER_PATH_VALUE")"
 
 if [[ -z "$HEALTH_PROFILE" || ! -f "$HEALTH_PROFILE" || ! -r "$HEALTH_PROFILE" ]]; then
   echo "missing BOT_ERRORS_HEALTH_PROFILE; expected readable profile path" >&2
@@ -147,6 +157,7 @@ cat > "$plist" <<PLIST
   </array>
   <key>EnvironmentVariables</key>
   <dict>
+    <key>PATH</key><string>$BOT_ERRORS_PROVIDER_PATH_XML</string>
     <key>BOT_ERRORS_STATE_DIR</key><string>$STATE_DIR_XML</string>
     <key>BOT_ERRORS_JID</key><string>$BOT_ERRORS_JID_XML</string>
     <key>BOT_ERRORS_EXPECTED_JID</key><string>$BOT_ERRORS_EXPECTED_JID_XML</string>

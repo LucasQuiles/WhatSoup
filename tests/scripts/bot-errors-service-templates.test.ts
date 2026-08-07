@@ -234,6 +234,14 @@ describe('BOT ERRORS service templates', () => {
       expect(plist, `${label} missing escaped state dir`).toContain(`<key>BOT_ERRORS_STATE_DIR</key><string>${escapedStateDir}</string>`);
       expect(plist, `${label} missing escaped repo root`).toContain(`<key>WorkingDirectory</key><string>${escapedRepoRoot}</string>`);
     }
+    for (const label of ['com.bot-errors.health', 'com.bot-errors.health-only']) {
+      const plist = readFileSync(launchAgentPath(home, label), 'utf8');
+      expect(plist, `${label} missing explicit provider PATH`).toContain('<key>PATH</key><string>');
+      expect(plist).toContain(`${home}/.local/bin`);
+      expect(plist).toContain('/opt/homebrew/bin');
+      expect(plist).toContain('/usr/local/bin');
+      expect(plist).toContain('/usr/bin:/bin:/usr/sbin:/sbin');
+    }
   });
 
   it('prefers explicit launchd installer env over stale private env-file values', () => {

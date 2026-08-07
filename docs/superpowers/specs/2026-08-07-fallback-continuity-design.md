@@ -37,7 +37,7 @@ This keeps stream integrity fail-closed while accommodating the known pseudo-ter
 
 ### 2. Functional headless canary
 
-The daily provider inventory will retain compatibility and credential-presence checks and add an opt-in OpenCode functional probe. The probe will invoke the exact production command in modern-run JSON mode, including `--print-logs --log-level INFO`, with a bounded prompt. It captures stdout/stderr without printing secrets, accepts only the closed diagnostic grammar outside JSONL, requires a zero exit code, requires all remaining non-blank records to be valid JSON, requires at least one `step_start`, and requires a terminal `step_finish` with `reason=stop`.
+The daily provider inventory will retain compatibility and credential-presence checks and add an opt-in OpenCode functional probe. The probe uses the runtime's effective fallback model and inherited provider settings, including the selected execution profile and auto-approval flag, while excluding the primary endpoint route. It invokes modern-run JSON mode with `--print-logs --log-level INFO`, supplies the fixed canary through stdin, and gives the child only system essentials plus the selected model credential. It captures stdout/stderr without printing secrets, accepts only the closed diagnostic grammar outside JSONL, and requires the ordered record sequence `step_start` → exact combined text `OK` → terminal `step_finish(reason=stop)`, with no later provider event.
 
 Any malformed first record—including the observed PTY artifact—fails with a distinct stream-integrity classification. A timeout or missing terminal record is inconclusive/failing, never success. Dry-run inputs provide deterministic test fixtures. Fleet profiles may enable this probe before a host is declared fallback-ready.
 
@@ -85,9 +85,11 @@ its fixed prompt contains no user or instance context.
 The fleet functional canary follows the same stdin contract, making a
 PATH-shadowing wrapper that drops stdin a pre-traffic failure instead of a
 version-only pass. OpenCode's generated configuration also denies the
-current-chat `whatsoup_send_message` tool: assistant text is the live turn's
-single delivery owner, while background delivery remains governed by the
-provider/runtime contract rather than a duplicate self-send.
+current-chat `whatsoup_send_message` tool globally and on the selected headless
+agent, where agent permissions otherwise take precedence. Assistant text is
+the live turn's single delivery owner. The OpenCode prompt requires bounded
+work to finish in the owned turn and leaves interrupted-turn recovery to the
+durable runtime.
 
 ## Failure handling
 
@@ -101,7 +103,7 @@ provider/runtime contract rather than a duplicate self-send.
 ## Verification
 
 - Parser unit tests cover exact first-record normalization, reset behavior, and fail-closed later/unknown corruption.
-- Health-check tests cover valid JSONL, recognized PTY-merged diagnostics, PTY-corrupted JSONL, non-terminal JSONL, timeout, and credential-missing behavior.
+- Health-check tests cover valid ordered JSONL, exact canary text, terminal-last enforcement, recognized PTY-merged diagnostics, PTY-corrupted JSONL, timeout, runtime-inherited fallback settings, positive credential allowlisting, and credential-missing behavior.
 - Session tests prove PTY-merged diagnostic stdout advances watchdog liveness without becoming a provider event.
 - Runtime tests prove chronological context and single occurrence of the current user request.
 - Session tests prove operational context and user text are absent from OpenCode argv and written to stdin in order.

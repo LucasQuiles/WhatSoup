@@ -86,7 +86,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "47d9f611b98cc905eb05d0e81f3088df842fd7af74244342f11cff58d13ee956",
+      "sha256": "c4ca162f01d319f79781caf969ce0ff6ae6e4b22b9017bd29b941a4263f2ef23",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -94,6 +94,7 @@
         "RUNTIME_MANIFEST_FAILURE_RE",
         "provider_probe_inventory",
         "validate_opencode_functional_jsonl",
+        "opencode_functional_probe_env",
         "provider_usage_limit",
         "credential_item_status",
         "credential_item_status_acceptable",

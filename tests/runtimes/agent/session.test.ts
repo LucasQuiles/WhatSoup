@@ -4610,6 +4610,12 @@ describe('buildSystemPrompt edge cases', () => {
     expect(sm.buildSystemPrompt()).toContain(
       'Never call send_message for that same answer; the runtime delivers reply text automatically.',
     );
+    expect(sm.buildSystemPrompt()).toContain(
+      'The selected OpenCode profile denies send_message; keep work inside the owned live turn',
+    );
+    expect(sm.buildSystemPrompt()).not.toContain(
+      'deliver its result with the MCP send_message tool',
+    );
   });
 
   it('does not add OpenCode compaction guidance to other providers', () => {

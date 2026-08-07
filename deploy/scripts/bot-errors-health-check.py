@@ -3162,11 +3162,25 @@ def classify_provider_probe_failure(text: str, rc: int, timed_out: bool) -> str 
 
 
 def opencode_command_mode_from_config(data: dict[str, Any], target: str = "primary") -> str:
-    agent_options = agent_options_from_config(data)
-    config_key = "fallbackProviderConfig" if target == "fallback" else "providerConfig"
-    provider_config = agent_options.get(config_key) if isinstance(agent_options.get(config_key), dict) else {}
+    provider_config = opencode_provider_config_from_config(data, target)
     mode = provider_config.get("opencodeCommandMode")
     return mode.strip() if isinstance(mode, str) and mode.strip() else "auto"
+
+
+def opencode_provider_config_from_config(data: dict[str, Any], target: str) -> dict[str, Any]:
+    agent_options = agent_options_from_config(data)
+    primary = agent_options.get("providerConfig")
+    provider_config = dict(primary) if isinstance(primary, dict) else {}
+    if target != "fallback":
+        return provider_config
+
+    # Mirror fallbackProviderConfigFor(): OpenCode inherits the primary provider
+    # execution settings, but never its custom endpoint route or credential id.
+    if fallback_provider_from_config(data) == "opencode-cli":
+        provider_config.pop("baseUrl", None)
+        provider_config.pop("apiKeyService", None)
+        return provider_config
+    return {}
 
 
 def provider_model_from_config(data: dict[str, Any], target: str = "primary") -> str | None:
@@ -3248,6 +3262,61 @@ def whatsoup_keyfile_present(service: str) -> bool:
         return path.is_file() and bool(path.read_text(encoding="utf-8").strip())
     except OSError:
         return False
+
+
+def provider_credential_value(service: str, timeout_seconds: int) -> str | None:
+    """Resolve one provider credential using the runtime lookup order."""
+    env_key = service_env_var(service)
+    if env_key:
+        value = os.environ.get(env_key)
+        if value:
+            return value
+
+    base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    key_path = Path(base) / "whatsoup" / "credentials" / f"{service}.key"
+    try:
+        if key_path.is_file():
+            value = key_path.read_text(encoding="utf-8").strip()
+            if value:
+                return value
+    except OSError:
+        pass
+
+    candidates = [service, *SERVICE_KEYCHAIN_FALLBACKS.get(service, [])]
+    if HOST_PLATFORM == "darwin":
+        account = os.environ.get("USER") or Path.home().name or "unknown"
+        for candidate in candidates:
+            try:
+                proc = subprocess.run(
+                    ["security", "find-generic-password", "-s", candidate, "-a", account, "-w"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    timeout=min(timeout_seconds, 3),
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+            value = proc.stdout.strip()
+            if proc.returncode == 0 and value:
+                return value
+    elif shutil.which("secret-tool"):
+        for candidate in candidates:
+            try:
+                proc = subprocess.run(
+                    ["secret-tool", "lookup", "service", candidate],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    timeout=min(timeout_seconds, 3),
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+            value = proc.stdout.strip()
+            if proc.returncode == 0 and value:
+                return value
+    return None
 
 
 def _keychain_secret_status(
@@ -3425,7 +3494,14 @@ def executable_candidate(command_name: str) -> str | None:
         candidate = Path(directory) / command_name
         if candidate.is_file() and os.access(candidate, os.X_OK):
             return str(candidate)
-    return shutil.which(command_name)
+    on_path = shutil.which(command_name)
+    if on_path:
+        return on_path
+    for directory in ("/opt/homebrew/bin", "/usr/local/bin"):
+        candidate = Path(directory) / command_name
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return None
 
 
 def opencode_provider_probe_command(profile: dict[str, Any], item: dict[str, Any]) -> str:
@@ -3476,30 +3552,36 @@ def validate_opencode_functional_jsonl(stdout: str) -> tuple[bool, str]:
 
     if not records:
         return False, "provider_stream_empty"
-    if not any(record.get("type") == "step_start" for record in records):
+    if records[0].get("type") != "step_start":
         return False, "provider_stream_missing_step_start"
-    if not any(
-        record.get("type") == "text"
-        and isinstance(record.get("part"), dict)
-        and isinstance(record["part"].get("text"), str)
-        and bool(record["part"]["text"].strip())
-        for record in records
-    ):
-        return False, "provider_stream_missing_text"
-    if not any(
-        record.get("type") == "step_finish"
+    terminal_indexes = [
+        index for index, record in enumerate(records)
+        if record.get("type") == "step_finish"
         and isinstance(record.get("part"), dict)
         and record["part"].get("reason") == "stop"
-        for record in records
-    ):
+    ]
+    if not terminal_indexes:
         return False, "provider_stream_missing_terminal"
+    if terminal_indexes != [len(records) - 1]:
+        return False, "provider_stream_terminal_not_last"
+
+    text_parts: list[str] = []
+    for record in records[1:-1]:
+        if record.get("type") != "text" or not isinstance(record.get("part"), dict):
+            return False, "provider_stream_unexpected_event"
+        text = record["part"].get("text")
+        if not isinstance(text, str):
+            return False, "provider_stream_missing_text"
+        text_parts.append(text)
+    if not text_parts:
+        return False, "provider_stream_missing_text"
+    if "".join(text_parts).strip() != "OK":
+        return False, "provider_stream_unexpected_text"
     return True, "ok"
 
 
 def opencode_functional_probe_args(command: str, data: dict[str, Any], target: str) -> list[str]:
-    agent_options = agent_options_from_config(data)
-    config_key = "fallbackProviderConfig" if target == "fallback" else "providerConfig"
-    provider_config = agent_options.get(config_key) if isinstance(agent_options.get(config_key), dict) else {}
+    provider_config = opencode_provider_config_from_config(data, target)
     args = [
         command,
         "run",
@@ -3510,6 +3592,8 @@ def opencode_functional_probe_args(command: str, data: dict[str, Any], target: s
         "--log-level",
         "INFO",
     ]
+    if provider_config.get("autoApprovePermissions") is True:
+        args.append("--auto")
     execution_profile = provider_config.get("executionProfile")
     if isinstance(execution_profile, str) and execution_profile.strip():
         args.extend(["--agent", execution_profile.strip()])
@@ -3518,6 +3602,40 @@ def opencode_functional_probe_args(command: str, data: dict[str, Any], target: s
     if model and not (isinstance(base_url, str) and base_url.strip()):
         args.extend(["-m", model])
     return args
+
+
+OPENCODE_FUNCTIONAL_ENV_KEYS = (
+    "PATH",
+    "HOME",
+    "USER",
+    "SHELL",
+    "LANG",
+    "TERM",
+    "NODE_PATH",
+    "XDG_RUNTIME_DIR",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "TMPDIR",
+)
+
+
+def opencode_functional_probe_env(
+    data: dict[str, Any],
+    target: str,
+    timeout_seconds: int,
+) -> dict[str, str]:
+    child_env = {
+        key: value
+        for key in OPENCODE_FUNCTIONAL_ENV_KEYS
+        if (value := os.environ.get(key)) is not None
+    }
+    model = provider_model_from_config(data, target)
+    service = opencode_key_service_for_model(model)
+    env_key = service_env_var(service) if service else None
+    credential = provider_credential_value(service, timeout_seconds) if service else None
+    if env_key and credential:
+        child_env[env_key] = credential
+    return child_env
 
 
 def opencode_provider_probe_inventory(
@@ -3630,6 +3748,7 @@ def opencode_provider_probe_inventory(
             "BOT_ERRORS_DRY_OPENCODE_FUNCTIONAL_STDERR",
             "BOT_ERRORS_DRY_OPENCODE_FUNCTIONAL_RC",
             "Reply with exactly OK.\n",
+            opencode_functional_probe_env(data, target, timeout_seconds),
         )
     except subprocess.TimeoutExpired:
         return [(
@@ -3670,6 +3789,7 @@ def provider_command_output(
     dry_stderr_env: str,
     dry_rc_env: str,
     input_text: str | None = None,
+    child_env: dict[str, str] | None = None,
 ) -> tuple[str, str, int, bool]:
     dry_stdout = os.environ.get(dry_stdout_env)
     dry_stderr = os.environ.get(dry_stderr_env, "")
@@ -3683,6 +3803,7 @@ def provider_command_output(
         text=True,
         timeout=timeout_seconds,
         check=False,
+        env=child_env,
     )
     return proc.stdout or "", proc.stderr or "", proc.returncode, False
 

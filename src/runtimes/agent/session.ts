@@ -173,6 +173,14 @@ const BACKGROUND_TASK_DELIVERY_GUIDANCE = [
   '- Never say work is dispatched or running unless the dispatching tool call happened in the same turn; if you promise a report, deliver it via send_message when the task returns.',
 ].join('\n');
 
+const OPENCODE_BACKGROUND_TASK_DELIVERY_GUIDANCE = [
+  'Background tasks (Agent tool, background Bash):',
+  '- During a live user turn, answer the current chat with plain reply text. Never call send_message for that same answer; the runtime delivers reply text automatically.',
+  '- Reply text emitted after your turn ends is dropped by the transport as unowned — it never reaches the chat.',
+  '- The selected OpenCode profile denies send_message; keep work inside the owned live turn and await bounded tasks before giving the final response.',
+  '- Runtime durability and fallback recovery own interrupted user turns. Do not promise a later self-delivery or claim work is running unless it will complete inside this turn.',
+].join('\n');
+
 /**
  * Why the supervisor itself terminated the provider. Absent on a genuine provider fault.
  * `idle_watchdog` is routine housekeeping (the 30-min inactivity reap); `stalled_operation`
@@ -906,7 +914,9 @@ export class SessionManager {
       'You have full access to the local machine via bypassPermissions mode.',
       `Working directory: ${cwd}`,
       POLL_DECISION_GUIDANCE,
-      BACKGROUND_TASK_DELIVERY_GUIDANCE,
+      this.provider === 'opencode-cli'
+        ? OPENCODE_BACKGROUND_TASK_DELIVERY_GUIDANCE
+        : BACKGROUND_TASK_DELIVERY_GUIDANCE,
       ...(this.provider === 'opencode-cli' ? [OPENCODE_COMPACTION_CONTINUITY_GUIDANCE] : []),
     ].join('\n');
     const sources = [transportPrelude];
