@@ -126,7 +126,9 @@ export class FleetRealtimeEventPoller {
 
           this.snapshots.set(name, current);
         } catch {
-          // Instance DB unavailable — skip
+          // intentional: instance DB unavailable — this poll cycle skips the
+          // instance and the PREVIOUS snapshot is preserved (#2520), so a
+          // transient read failure cannot publish spurious change events.
         }
       }
 
