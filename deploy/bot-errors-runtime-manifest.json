@@ -6,7 +6,7 @@
   "files": [
     {
       "path": "deploy/scripts/bot-errors-collector.py",
-      "sha256": "05fb2104c9be49b3976339ca644ccfdf1c3eb6994477e0e580f3f6d6a724100e",
+      "sha256": "60b49097faeabecb1dca296d75d139c83315f03bcf93d337ec49a2e7fc743cd1",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -28,7 +28,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "f7c87783f4ab39a94870024961c5ff06830c11d9d185b39ce0086abbdfa42c45",
+      "sha256": "e3648bbbb9833ddc5fa6fb65da2778999df48b52f1819f55ed359187163645c3",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -86,7 +86,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "1f604c1be760d1bbfdee6a699d97f006f70392c0d5bda7a04cb9dc8b4f19778f",
+      "sha256": "1de19202c03c7a84d5bfe5a00e9b19d38cf1fa424be652f7ff69a9c59388caca",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -437,7 +437,7 @@
     },
     {
       "path": "src/lib/fault-taxonomy-registry.json",
-      "sha256": "aa540a630c1b13cb3ece2d4a01c781fb5414bc1e93e078b9a4b36be8e52b26af",
+      "sha256": "86199e3aa26a5b387cf161f989f0ba393100c02c02d95d87d1981e2117116083",
       "mustContain": [
         "whatsoup-fault-taxonomy-registry-v3",
         "runtimeAgentHealthSignals",
