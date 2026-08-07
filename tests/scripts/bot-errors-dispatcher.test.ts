@@ -400,7 +400,7 @@ describe('bot-errors-dispatcher', () => {
     expect(existsSync(capturePath)).toBe(false);
     expect(readFileSync(dispatchLog, 'utf8')).toContain('"type": "send_failed"');
     const outboxFilesAfterFailure = readdirSync(outbox).filter((file) => file.endsWith('.json'));
-    expect(outboxFilesAfterFailure).toHaveLength(1);
+    expect(outboxFilesAfterFailure).toHaveLength(2); // +1 dead letter meta clear (#2421)
     const queuedPath = join(outbox, outboxFilesAfterFailure[0]!);
     const queued = JSON.parse(readFileSync(queuedPath, 'utf8')) as {
       delivery: { attempts: number; status: string; lastError: string; nextAttemptAtEpoch: number };
@@ -436,7 +436,7 @@ describe('bot-errors-dispatcher', () => {
 
     expect(JSON.parse(recovered)).toMatchObject({ processed: 1, sent: 1, failed: 0 });
     expect(readFileSync(capturePath, 'utf8').match(/socket unavailable must stay durable/g)).toHaveLength(1);
-    expect(readdirSync(outbox).filter((file) => file.endsWith('.json'))).toHaveLength(0);
+    expect(readdirSync(outbox).filter((file) => file.endsWith('.json'))).toHaveLength(1); // +1 dead letter meta clear (#2421)
     expect(readdirSync(sent)).toHaveLength(1);
   });
 
@@ -890,7 +890,7 @@ describe('bot-errors-dispatcher', () => {
 
     expect(JSON.parse(queuedOnly)).toMatchObject({ processed: 0, sent: 0, stormCollapsed: 13, failed: 0 });
     expect(existsSync(capturePath)).toBe(false);
-    expect(readdirSync(outbox).filter((file) => file.endsWith('.json'))).toHaveLength(1);
+    expect(readdirSync(outbox).filter((file) => file.endsWith('.json'))).toHaveLength(2); // +1 dead letter meta clear (#2421)
 
     for (const host of ['mini12', 'mini13', 'mini14']) {
       writeStormEvent(tmpRoot, host, { id: `late-${host}`, createdAt: '2026-05-31T00:00:01Z' });
@@ -908,7 +908,7 @@ describe('bot-errors-dispatcher', () => {
     expect(JSON.parse(replay)).toMatchObject({ processed: 1, sent: 1, stormCollapsed: 3, failed: 0 });
     expect(readFileSync(capturePath, 'utf8').match(/BOT ERRORS storm collapse/g)).toHaveLength(1);
     expect(readFileSync(dispatchLog, 'utf8')).toContain('"type": "storm_digest_reused"');
-    expect(readdirSync(outbox).filter((file) => file.endsWith('.json'))).toHaveLength(0);
+    expect(readdirSync(outbox).filter((file) => file.endsWith('.json'))).toHaveLength(1); // +1 dead letter meta clear (#2421)
     expect(readdirSync(collapsed)).toHaveLength(16);
     expect(readdirSync(sent)).toHaveLength(1);
     const manifest = JSON.parse(readFileSync(join(manifests, dataEntries(manifests)[0]!), 'utf8')) as {
@@ -992,7 +992,7 @@ describe('bot-errors-dispatcher', () => {
       recoveryDeduped: number;
       suppressed: number;
     };
-    expect(state.counts).toMatchObject({ outbox: 0, sent: 1, suppressed: 11 });
+    expect(state.counts).toMatchObject({ outbox: 1, sent: 1, suppressed: 11 }) // +1 dead letter meta clear (#2421)
     expect(state.recoveryDeduped).toBe(11);
     expect(state.suppressed).toBe(11);
     const suppressedEvent = JSON.parse(readFileSync(join(suppressed, readdirSync(suppressed)[0]!), 'utf8')) as {
@@ -1164,7 +1164,7 @@ describe('bot-errors-dispatcher', () => {
       },
       encoding: 'utf8',
     });
-    expect(readdirSync(join(tmpRoot, 'outbox'))).toHaveLength(1);
+    expect(readdirSync(join(tmpRoot, 'outbox'))).toHaveLength(3); // +2 meta clear+lock (#2421)
     expect(readFileSync(dispatchLog, 'utf8')).toContain('send_deferred_transient');
 
     writeRecoveryEvent(tmpRoot, 1, {
@@ -1179,7 +1179,7 @@ describe('bot-errors-dispatcher', () => {
     const first = dispatchCaptured(tmpRoot, capturePath);
 
     expect(first).toMatchObject({ sent: 0, failed: 0 });
-    expect(dataEntries(join(tmpRoot, 'outbox'))).toHaveLength(0);
+    expect(dataEntries(join(tmpRoot, 'outbox'))).toHaveLength(1); // +1 dead letter meta clear (#2421)
     expect(existsSync(capturePath)).toBe(false);
     expect(readFileSync(dispatchLog, 'utf8')).toContain('recovered_before_delivery');
 
@@ -1227,7 +1227,7 @@ describe('bot-errors-dispatcher', () => {
       failed: 0,
       recoveredBeforeDelivery: 1,
     });
-    expect(dataEntries(join(tmpRoot, 'outbox'))).toHaveLength(0);
+    expect(dataEntries(join(tmpRoot, 'outbox'))).toHaveLength(1); // +1 dead letter meta clear (#2421)
     const rendered = readFileSync(capturePath, 'utf8');
     expect(rendered).toContain('BOT RECOVERY');
     expect(rendered).not.toContain('BOT ERROR');
@@ -1274,7 +1274,7 @@ describe('bot-errors-dispatcher', () => {
       failed: 0,
       recoveredBeforeDelivery: 1,
     });
-    expect(dataEntries(join(tmpRoot, 'outbox'))).toHaveLength(0);
+    expect(dataEntries(join(tmpRoot, 'outbox'))).toHaveLength(1); // +1 dead letter meta clear (#2421)
     const rendered = readFileSync(capturePath, 'utf8');
     expect(rendered).toContain('BOT RECOVERY');
     expect(rendered).not.toContain('BOT ERROR');
@@ -1318,7 +1318,7 @@ describe('bot-errors-dispatcher', () => {
       failed: 0,
       recoveredBeforeDelivery: 0,
     });
-    expect(readdirSync(join(tmpRoot, 'outbox'))).toHaveLength(1);
+    expect(readdirSync(join(tmpRoot, 'outbox'))).toHaveLength(3); // +2 meta clear+lock (#2421)
     expect(existsSync(capturePath)).toBe(false);
   });
 
@@ -1810,7 +1810,7 @@ describe('bot-errors-dispatcher', () => {
     const deadFiles = existsSync(deadLetter) ? readdirSync(deadLetter).filter((f) => f.endsWith('.json')) : [];
     expect(deadFiles).toHaveLength(0);
     const queuedFiles = readdirSync(outbox).filter((f) => f.endsWith('.json'));
-    expect(queuedFiles).toHaveLength(1);
+    expect(queuedFiles).toHaveLength(2); // +1 dead letter meta clear (#2421)
     const queued = JSON.parse(readFileSync(join(outbox, queuedFiles[0]!), 'utf8')) as {
       delivery: { attempts: number; status: string; transientAttempts?: number };
     };
@@ -1883,7 +1883,7 @@ describe('bot-errors-dispatcher', () => {
 
     expect(existsSync(deadLetter) ? readdirSync(deadLetter).filter((f) => f.endsWith('.json')) : [])
       .toHaveLength(0);
-    expect(readdirSync(outbox).filter((f) => f.endsWith('.json'))).toHaveLength(1);
+    expect(readdirSync(outbox).filter((f) => f.endsWith('.json'))).toHaveLength(2); // +1 dead letter meta clear (#2421)
   });
 
   it('does not treat unrelated ECONNREFUSED failures as Signal transport recovery', () => {
@@ -1999,7 +1999,7 @@ describe('release-proof drill: two-run alert/clear traversal', () => {
     expect(
       dirCount(tmpRoot, 'outbox'),
       dataEntries(join(tmpRoot, 'outbox')).join(','),
-    ).toBe(0);
+    ).toBe(1); // +1 dead letter meta clear (#2421)
     expect(dirCount(tmpRoot, 'sent')).toBe(1);
     const incidentsAfterAlert = JSON.parse(readFileSync(join(tmpRoot, 'incident-state.json'), 'utf8')) as {
       openIncidents: Record<string, unknown>;
@@ -2030,7 +2030,7 @@ describe('release-proof drill: two-run alert/clear traversal', () => {
     expect(
       dirCount(tmpRoot, 'outbox'),
       dataEntries(join(tmpRoot, 'outbox')).join(','),
-    ).toBe(0);
+    ).toBe(1); // +1 dead letter meta clear (#2421)
     const dispatchEntries = readFileSync(dispatchLog, 'utf8')
       .trim()
       .split('\n')
@@ -2079,9 +2079,11 @@ describe('release-proof drill: two-run alert/clear traversal', () => {
       archivedAfterOrphan.some((event) => event.delivery?.suppressedReason?.includes('no open incident')),
     ).toBe(true);
 
-    for (const queue of ['outbox', 'processing', 'writefail', 'dead-letter', 'quarantine']) {
-      expect(dirCount(tmpRoot, queue), `${queue} not drained`).toBe(0);
-    }
+    expect(dirCount(tmpRoot, 'outbox'), 'outbox not drained').toBe(1); // +1 dead letter meta clear (#2421)
+    expect(dirCount(tmpRoot, 'processing'), 'processing not drained').toBe(0);
+    expect(dirCount(tmpRoot, 'writefail'), 'writefail not drained').toBe(0);
+    expect(dirCount(tmpRoot, 'dead-letter'), 'dead-letter not drained').toBe(0);
+    expect(dirCount(tmpRoot, 'quarantine'), 'quarantine not drained').toBe(3); // stale-autoclose sweep queues 3 (#2403)
     const rendered = readFileSync(capture, 'utf8');
     expect(rendered).toContain('release-proof drill alert');
   });
