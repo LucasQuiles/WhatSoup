@@ -1308,7 +1308,11 @@ When deploying an instance config that uses `fallbackProvider` or `fallbacks` to
    job and fails on any mismatch. Regenerating a plist is therefore not enough:
    reload the LaunchAgent before treating its fallback canary as current. A
    health-only command override cannot substitute a GUI/SSH binary for the
-   runtime's `opencode` resolution.
+   runtime's `opencode` resolution. The launcher and health probe then derive
+   the effective provider PATH through `deploy/lib/runtime-path.sh`, including
+   the launcher's `$HOME/.local/bin` and pinned-Node prefixes. This second step
+   prevents a matching static LaunchAgent PATH from hiding a runtime-only
+   binary shadow or ordering change.
 
 2. **Provision the provider API key** via one of three portable routes. Runtime
    lookup order is environment variable, private WhatSoup credential file,

@@ -89,6 +89,11 @@ if ! NODE="$(whatsoup_resolve_node "$REPO_ROOT")"; then
   # whatsoup_resolve_node already printed a FATAL line describing the failure.
   exit 1
 fi
+# The health probe sources this same helper before resolving any provider CLI,
+# so launchd, GUI, and SSH paths cannot silently select different binaries.
+# shellcheck source=deploy/lib/runtime-path.sh
+. "$SCRIPT_DIR/lib/runtime-path.sh"
+whatsoup_export_runtime_path "$HOME" "$NODE"
 # shellcheck source=deploy/lib/read-private-health-token.sh
 . "$SCRIPT_DIR/lib/read-private-health-token.sh"
 # Credential-store probes must be bounded on BOTH platforms; `timeout(1)` is not
@@ -300,9 +305,6 @@ else
     echo "WARN: $REPO_ROOT is not a git work tree and no valid release manifest source.commit; WHATSOUP_GIT_SHA/WHATSOUP_GIT_BRANCH unset" >&2
   fi
 fi
-
-# Ensure PATH includes locations needed by agent instances (claude CLI, tools)
-export PATH="$HOME/.local/bin:$(dirname "$NODE"):$PATH"
 
 # Pin process temp files under a per-instance WhatSoup-owned tmp directory so
 # Baileys encrypted upload blobs are not exposed to macOS /var/folders cleanup.

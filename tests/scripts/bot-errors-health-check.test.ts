@@ -5363,6 +5363,37 @@ print(m.probe_health(9092))
     });
   });
 
+  it('resolves the provider binary from the wrapper-effective PATH after launchd', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-effective-path-'));
+    const loadedBin = join(tmpRoot, 'loaded-bin');
+    const localBin = join(tmpRoot, '.local', 'bin');
+    const nodeBin = join(tmpRoot, 'node', 'bin');
+    mkdirSync(loadedBin, { recursive: true });
+    mkdirSync(localBin, { recursive: true });
+    mkdirSync(nodeBin, { recursive: true });
+    for (const directory of [loadedBin, localBin]) {
+      const command = join(directory, 'opencode');
+      writeFileSync(command, '#!/bin/sh\nexit 0\n');
+      chmodSync(command, 0o700);
+    }
+
+    const selected = execFileSync('python3', ['-c', [
+      importHealthModulePrelude(),
+      `environment = ${JSON.stringify({
+        HOME: tmpRoot,
+        PATH: `${loadedBin}:/usr/bin:/bin`,
+        WHATSOUP_NODE: join(nodeBin, 'node'),
+      })}`,
+      'effective = m.effective_instance_provider_path(environment)',
+      'print(m.executable_candidate("opencode", effective) or "")',
+    ].join('\n')], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+    }).trim();
+
+    expect(selected).toBe(join(localBin, 'opencode'));
+  });
+
   it('rejects an explicit OpenCode probe command that differs from the runtime PATH binary', () => {
     const lines = JSON.parse(python([
       importHealthModulePrelude(),

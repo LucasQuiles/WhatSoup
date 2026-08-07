@@ -40,7 +40,7 @@ function extractTmpdirBlock(source: string): string {
 
 function extractVersionExposureBlock(source: string): string {
   const start = source.indexOf('# Expose checkout version metadata');
-  const end = source.indexOf('\n# Ensure PATH includes', start);
+  const end = source.indexOf('\n# Pin process temp files', start);
   expect(start).toBeGreaterThan(-1);
   expect(end).toBeGreaterThan(start);
   return source.slice(start, end);
@@ -639,14 +639,23 @@ describe('health token shell wrappers', () => {
     expect(stdout).toBe(path.join(dataHome, 'whatsoup', 'tmp', 'media-bot'));
   });
 
+  it('deploy/whatsoup derives its provider PATH through the shared runtime helper', () => {
+    const source = fs.readFileSync('deploy/whatsoup', 'utf8');
+
+    expect(source).toContain('. "$SCRIPT_DIR/lib/runtime-path.sh"');
+    expect(source).toContain('whatsoup_export_runtime_path "$HOME" "$NODE"');
+    expect(source).not.toContain('export PATH="$HOME/.local/bin:$(dirname "$NODE"):$PATH"');
+  });
+
   it('deploy/whatsoup captures full checkout SHA and branch after preflight', () => {
     const source = fs.readFileSync('deploy/whatsoup', 'utf8');
     const preflightIndex = source.indexOf('preflight-check.sh');
     const versionIndex = source.indexOf('# Expose checkout version metadata');
-    const pathIndex = source.indexOf('# Ensure PATH includes');
+    const pathIndex = source.indexOf('whatsoup_export_runtime_path "$HOME" "$NODE"');
+    expect(pathIndex).toBeGreaterThan(-1);
+    expect(preflightIndex).toBeGreaterThan(pathIndex);
     expect(preflightIndex).toBeGreaterThan(-1);
     expect(versionIndex).toBeGreaterThan(preflightIndex);
-    expect(pathIndex).toBeGreaterThan(versionIndex);
 
     const result = runVersionExposureProbe('main');
     expect(result.status).toBe(0);

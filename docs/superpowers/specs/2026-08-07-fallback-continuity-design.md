@@ -41,8 +41,11 @@ The daily provider inventory will retain compatibility and credential-presence c
 
 On macOS, the probe requires the generated instance LaunchAgent PATH to equal
 the currently loaded `launchctl` environment and resolves the provider binary
-only through that ordered PATH. Explicit health-only command overrides cannot
-select a different binary. Every compatibility and functional subprocess
+only through the launcher's effective ordered PATH. The launcher and health
+checker share `deploy/lib/runtime-path.sh`, so the `$HOME/.local/bin` and pinned
+Node prefixes applied after launchd start are part of the canary's binary
+selection too. Explicit health-only command overrides cannot select a
+different binary. Every compatibility and functional subprocess
 receives the same positive environment allowlist and runs from the configured
 agent cwd (or `HOME`, matching the runtime when cwd is absent). Modern
 `fallbacks[]` entries are probed individually in order with runtime model and
@@ -118,7 +121,7 @@ durable runtime.
 ## Verification
 
 - Parser unit tests cover exact first-record normalization, reset behavior, and fail-closed later/unknown corruption.
-- Health-check tests cover valid ordered JSONL, exact canary text, terminal-last enforcement, recognized PTY-merged diagnostics, PTY-corrupted JSONL, timeout, runtime-inherited fallback settings, exact instance PATH/cwd use, full credential-registry parity, OpenCode auth-store fallback, private-file refusal, positive credential allowlisting, and credential-missing behavior.
+- Health-check tests cover valid ordered JSONL, exact canary text, terminal-last enforcement, recognized PTY-merged diagnostics, PTY-corrupted JSONL, timeout, runtime-inherited fallback settings, exact instance and wrapper-effective PATH/cwd use (including a `$HOME/.local/bin` collision), full credential-registry parity, OpenCode auth-store fallback, private-file refusal, positive credential allowlisting, and credential-missing behavior.
 - Session tests prove PTY-merged diagnostic stdout advances watchdog liveness without becoming a provider event.
 - Runtime tests prove chronological context and single occurrence of the current user request.
 - Session tests prove operational context and user text are absent from OpenCode argv and written to stdin in order.

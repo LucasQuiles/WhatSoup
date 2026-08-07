@@ -3793,6 +3793,49 @@ def loaded_instance_provider_path(name: str) -> str | None:
     return loaded_instance_environment(name).get("PATH")
 
 
+def effective_instance_provider_path(environment: dict[str, str]) -> str | None:
+    inherited_path = environment.get("PATH", "").strip()
+    if os.environ.get("BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH") is not None:
+        return inherited_path or None
+    home = environment.get("HOME", "").strip()
+    node = environment.get("WHATSOUP_NODE", "").strip()
+    if not node and home:
+        try:
+            nvmrc_version = (REPO_ROOT / ".nvmrc").read_text(encoding="utf-8").strip()
+        except OSError:
+            nvmrc_version = ""
+        if nvmrc_version:
+            node = str(Path(home) / ".nvm" / "versions" / "node" / f"v{nvmrc_version}" / "bin" / "node")
+    if not inherited_path or not home or not node:
+        return None
+    helper = REPO_ROOT / "deploy" / "lib" / "runtime-path.sh"
+    try:
+        proc = subprocess.run(
+            [
+                "/bin/bash",
+                "-c",
+                '. "$1"; whatsoup_effective_runtime_path "$2" "$3" "$4"',
+                "runtime-path",
+                str(helper),
+                home,
+                node,
+                inherited_path,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=3,
+            check=False,
+            env={"PATH": "/usr/bin:/bin"},
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    effective_path = proc.stdout.strip()
+    return effective_path or None
+
+
 def instance_provider_path_match(generated_path: str | None, loaded_path: str | None) -> bool:
     return bool(generated_path and loaded_path and generated_path == loaded_path)
 
@@ -3952,8 +3995,9 @@ def opencode_provider_probe_inventory(
     generated_provider_path = instance_provider_path(name)
     loaded_environment = loaded_instance_environment(name)
     loaded_provider_path = loaded_environment.get("PATH")
+    effective_provider_path = effective_instance_provider_path(loaded_environment)
     requested_command = opencode_provider_probe_command(profile, item)
-    runtime_command = executable_candidate("opencode", loaded_provider_path)
+    runtime_command = executable_candidate("opencode", effective_provider_path)
     command = runtime_command or "opencode"
     timeout_seconds = int_or_none(item.get("providerProbeTimeoutSeconds"))
     if timeout_seconds is None:
@@ -3966,7 +4010,7 @@ def opencode_provider_probe_inventory(
         data,
         target,
         timeout_seconds,
-        loaded_provider_path,
+        effective_provider_path,
         name,
         child_cwd,
         loaded_environment,
@@ -3980,6 +4024,12 @@ def opencode_provider_probe_inventory(
             f"FAIL provider_probe {name}: provider={provider} command={safe_command} "
             "failure_class=provider_runtime_path_mismatch "
             "remediation=regenerate_and_reload_the_instance_launchagent"
+        )]
+    if effective_provider_path is None:
+        return [(
+            f"FAIL provider_probe {name}: provider={provider} command={safe_command} "
+            "failure_class=provider_runtime_path_unavailable "
+            "remediation=repair_the_shared_runtime_path_helper_and_node_pin"
         )]
     if requested_command != "opencode":
         requested_path = str(Path(requested_command).expanduser())

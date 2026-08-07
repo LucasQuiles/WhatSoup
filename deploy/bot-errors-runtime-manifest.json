@@ -86,7 +86,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "be3c229fd4d73656803cca2871ca17ec32e98b0aada7f99c4ab391fdc8a10aa2",
+      "sha256": "8406e960f6d031ceb1751fd28157ef09a78257e7778f323156d2760a00c75172",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -95,6 +95,7 @@
         "provider_probe_inventory",
         "validate_opencode_functional_jsonl",
         "opencode_functional_probe_env",
+        "effective_instance_provider_path",
         "provider_usage_limit",
         "credential_item_status",
         "credential_item_status_acceptable",
@@ -155,6 +156,14 @@
         "runtime_agent_health_signal_registry_invalid",
         "BOT_ERRORS_HEALTH_BODY_MAX_AGE_SECONDS",
         "BOT_ERRORS_HEALTH_BODY_MAX_FUTURE_SKEW_SECONDS"
+      ]
+    },
+    {
+      "path": "deploy/lib/runtime-path.sh",
+      "sha256": "7bd3a9f7c42be4c9850d9f378b202789b0a35baa0279b6429a711da1614fd412",
+      "mustContain": [
+        "whatsoup_effective_runtime_path",
+        "whatsoup_export_runtime_path"
       ]
     },
     {
