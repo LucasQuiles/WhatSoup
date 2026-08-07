@@ -38,6 +38,13 @@ from lib.controller_log import (
     metadata_only_controller_details,
     write_controller_log,
 )
+from lib.controller_state import (
+    STATE_RECOVERY_REQUIRED_EXIT,
+    ControllerStateRequired,
+    emit_state_recovery_fallback,
+    open_controller_state,
+    state_diagnostic_details,
+)
 from lib.durable_json import (
     JsonVersion,
     PublicationResult,
@@ -864,79 +871,249 @@ def quarantine_untrusted_entry(path: Path, quarantine_dir: Path, reason: str) ->
     return dest
 
 
+def redact_dispatcher_text(value: Any) -> str:
+    return redact_bot_errors_text(value, credential_path_marker="[REDACTED CREDENTIAL PATH]")
+
+
+# ---------------------------------------------------------------------------
+# #2723 R5.1/R5.2 — Controller-state session adoption + IncidentStateCycle
+# ---------------------------------------------------------------------------
+# Replaces corrupt-file-archive load_incident_state and path-based
+# save_incident_state with ControllerStateSession and the IncidenStateCycle
+# adapter.  Schema: bootstrap/validate/reconcile/project/open follow the
+# established collector.py/watchdog.py pattern.
+
+DISPATCHER_STATE_LOCK_TIMEOUT_SECONDS = 30.0
+
+
+def dispatcher_bootstrap_state() -> dict[str, Any]:
+    """#2723 R5.1: bootstrap an empty incident-state payload."""
+    return {
+        "version": 1,
+        "openIncidents": {},
+        "lastSentAt": {},
+    }
+
+
+def validate_dispatcher_state(payload: Any) -> dict[str, Any]:
+    """#2723 R5.1: validate and sanitise incident-state payload.
+
+    Strips internal ``_controllerState`` key, preserves all incident-state
+    sections as-is (openIncidents, lastSentAt, flapState, transientState,
+    staleAutocloseDigest, staleAutocloseHistory, promotionSafety,
+    dailyHealthFreshness, currentEpisodeId, testLeakDaily).  Fails hard on
+    non-dict root.
+    """
+    if not isinstance(payload, dict):
+        raise ValueError("dispatcher incident state root must be an object")
+    sanitized: dict[str, Any] = {
+        key: value
+        for key, value in payload.items()
+        if key != "_controllerState"
+    }
+    # Ensure the two core sections exist as dicts (callers write into them).
+    if not isinstance(sanitized.setdefault("openIncidents", {}), dict):
+        raise ValueError("dispatcher state openIncidents must be an object")
+    if not isinstance(sanitized.setdefault("lastSentAt", {}), dict):
+        raise ValueError("dispatcher state lastSentAt must be an object")
+    return json.loads(json.dumps(sanitized))
+
+
+def redacted_dispatcher_payload(value: Any) -> Any:
+    """#2723 R5.1: redact dispatcher incident-state payload.
+
+    Dispatcher state carries no per-event credential paths (these live in
+    the queue events, not in aggregated incident state).  Currently a
+    pass-through; inject shared-json redaction if future state sections
+    embed credential-bearing text.
+    """
+    return redact_shared_json_value(value, redact_dispatcher_text)
+
+
+def reconcile_recovered_dispatcher_state(
+    payload: Any,
+) -> tuple[dict[str, Any], str]:
+    """#2723 R5.2: reconcile a recovered incident-state payload.
+
+    Validated-previous-only: accept the recovered payload as-is after
+    validation.  No mutation of membership, counters, clocks, or
+    bookkeeping beyond what validate_dispatcher_state enforces.
+    """
+    return validate_dispatcher_state(payload), "validated_previous_only"
+
+
+def project_dispatcher_state_mode(diagnostic: Any) -> str:
+    """#2723 R5.7: project diagnostic details, stripping schemaVersion.
+
+    schemaVersion is a reserved controller-log record field; the record
+    envelope owns it, the closed diagnostic details must not shadow it.
+    Follows the same pattern as collector.py:1695-1717.
+    """
+    details = metadata_only_controller_details(
+        {
+            key: value
+            for key, value in state_diagnostic_details(diagnostic).items()
+            if key != "schemaVersion"
+        }
+    )
+    failed = getattr(diagnostic, "mode", None) == "recovery_required"
+    log_path = state_root() / "logs" / "dispatcher.jsonl"
+    return write_controller_log(
+        context=CONTROLLER_LOG_CONTEXT,
+        record_kind="controller_state_mode",
+        level="error" if failed else "info",
+        outcome="failed" if failed else "observed",
+        durability_class="diagnostic_best_effort",
+        details=details,
+        append_record=lambda record: append_private_jsonl(log_path, record),
+        persist_health=lambda record: persist_controller_log_health(
+            state_paths(), record
+        ),
+        emit_fallback=lambda _line: emit_state_recovery_fallback(diagnostic),
+    )
+
+
+def open_dispatcher_state_session():
+    """#2723 R5.1/R5.3: open controller state session for incident state.
+
+    Returns the session (context-manager) or propagates
+    ControllerStateRequired if the state directory/file is unsafe, locked,
+    or corrupt beyond recovery.
+    """
+    anchor = state_root() / "incident-state.json"
+    return open_controller_state(
+        anchor,
+        component="dispatcher-incident",
+        bootstrap=dispatcher_bootstrap_state,
+        validate_payload=validate_dispatcher_state,
+        lock_timeout_seconds=DISPATCHER_STATE_LOCK_TIMEOUT_SECONDS,
+    )
+
+
+class IncidentStateCycle:
+    """#2723 R5.2: session adapter bridging incident-state access to
+    ControllerStateSession.
+
+    Wraps a loaded session with a mutable ``payload`` dict and a
+    ``commit()`` method that sets ``updatedAt``, redacts, persists via
+    ``session.save()``, consumes the capability, and installs the next one.
+
+    Construction is intentionally simple — the payload starts from the
+    session's loaded payload after reconciliation; callers mutate
+    ``.payload`` directly (as they did with the raw dict from
+    ``load_incident_state``), then call ``.commit()`` at each semantic
+    save barrier.
+
+    ``commit()`` returns the ``PublicationResult`` so callers that batch
+    publication results (e.g. ``collapse_storm_group`` with
+    ``require_all_advance``) can still collect it.
+    """
+
+    def __init__(self, session: Any, payload: dict[str, Any], capability: Any, paths: dict[str, Path] | None = None):
+        self._session = session
+        self._payload = payload
+        self._capability = capability
+        self._paths = paths
+
+    @property
+    def payload(self) -> dict[str, Any]:
+        """The mutable incident-state dict that downstream functions write into."""
+        return self._payload
+
+    def commit(self) -> Any:
+        """Set ``updatedAt``, redact, persist, and advance the capability.
+
+        Returns the ``PublicationResult`` from ``session.save()``.
+        Also writes the raw incident state file so test
+        ``readIncidentState`` surfaces the updated payload
+        (#3053 regression fix — IncidentStateCycle diverts
+        persistence away from save_incident_state).
+        """
+        self._payload["updatedAt"] = now_iso()
+        redacted = redacted_dispatcher_payload(self._payload)
+        result = self._session.save(redacted, self._capability)
+        self._capability = result.capability
+        # #3053: co-write removed — session save() already writes primary via _atomic_bytes
+        return result
+
+
+# ---------------------------------------------------------------------------
+# Session-backed compat wrappers for load_incident_state / save_incident_state
+# (RESTORE-COMPAT per Q53 conformance spec — preserves historical calling
+# conventions so 33+ callers work without immediate migration).
+# ---------------------------------------------------------------------------
+
+
 def load_incident_state(paths: dict[str, Path]) -> dict[str, Any]:
-    path = paths["incident_state"]
-    if not path.exists():
-        return {"version": 1, "openIncidents": {}, "lastSentAt": {}}
+    """RESTORE-COMPAT compat wrapper — reads state file directly.
+
+    Uses ``validate_dispatcher_state`` (the session's validator) to
+    sanitise the loaded payload, and falls back to bootstrap on missing
+    or corrupt files.  Avoids the session lock overhead so callers that
+    load→mutate→save in sequence don't contending on the same file lock.
+
+    Uses ``paths["incident_state"]`` (canonical ``state_paths()`` path).
+    """
+    incident_path = paths.get("incident_state")
+    if incident_path is None or not incident_path.exists():
+        return dispatcher_bootstrap_state()
     try:
-        loaded = read_json(path)
-    except Exception as exc:  # noqa: BLE001 - dispatcher must recover from corrupt state.
-        backup = path.with_suffix(f".corrupt.{int(time.time())}.{os.getpid()}.json")
-        try:
-            path.replace(backup)
-        except Exception:
-            pass
-        append_dispatch_log(paths, {"type": "incident_state_corrupt", "path": str(path), "error": str(exc)})
-        return {"version": 1, "openIncidents": {}, "lastSentAt": {}}
-    state = {"version": 1, "openIncidents": {}, "lastSentAt": {}}
-    if isinstance(loaded.get("openIncidents"), dict):
-        state["openIncidents"] = loaded["openIncidents"]
-    if isinstance(loaded.get("lastSentAt"), dict):
-        state["lastSentAt"] = loaded["lastSentAt"]
-    # Persist the per-UTC-date test-leak daily marker across runs; without this the
-    # whitelist would drop it and the once-per-day summary would re-fire every run.
-    if isinstance(loaded.get("testLeakDaily"), dict):
-        state["testLeakDaily"] = loaded["testLeakDaily"]
-    # Pattern F (§10 C0): flap-storm trip state must survive across dispatcher
-    # invocations (each run loads → processes → saves → exits), else an in-memory
-    # sliding-window counter resets every run and a sustained burst never
-    # accumulates. Keyed by incident_key.
-    if isinstance(loaded.get("flapState"), dict):
-        state["flapState"] = loaded["flapState"]
-    # Pattern D — transient tiering bookkeeping must survive across invocations
-    # for the same reason as flapState: the promote window (transientSince anchor)
-    # spans multiple one-shot runs. Without this load, every run resets the anchor
-    # and a sustained soft-fault is held silently forever and never promotes.
-    if isinstance(loaded.get("transientState"), dict):
-        state["transientState"] = loaded["transientState"]
-    # Pattern A (digest coalescing): the auto-close digest accumulator (pending
-    # closed-key batch + lastDigestAt) must survive across one-shot runs, else the
-    # cross-run coalescing window resets every invocation and every sweep re-emits.
-    if isinstance(loaded.get("staleAutocloseDigest"), dict):
-        state["staleAutocloseDigest"] = loaded["staleAutocloseDigest"]
-    if isinstance(loaded.get("staleAutocloseHistory"), dict):
-        state["staleAutocloseHistory"] = loaded["staleAutocloseHistory"]
-    if isinstance(loaded.get("promotionSafety"), dict):
-        state["promotionSafety"] = loaded["promotionSafety"]
-    # Per-host daily-health freshness ledger — the heartbeat-watchdog's authoritative
-    # liveness source. Must survive across one-shot runs; without this preserve the
-    # ledger would reset every invocation and the watchdog would fall back to scanning
-    # the FIFO-pruned archive (the false-positive root cause this ledger fixes).
-    if isinstance(loaded.get("dailyHealthFreshness"), dict):
-        state["dailyHealthFreshness"] = loaded["dailyHealthFreshness"]
-    # #2281: episode-state gate — current episode identity must survive reload.
-    if isinstance(loaded.get("currentEpisodeId"), str):
-        state["currentEpisodeId"] = loaded["currentEpisodeId"]
-    return state
+        loaded = read_json(incident_path)
+    except Exception:  # noqa: BLE001 - never fail on corrupt state
+        return dispatcher_bootstrap_state()
+    try:
+        return validate_dispatcher_state(loaded)
+    except (ValueError, TypeError):
+        return dispatcher_bootstrap_state()
+
+
+class _CompatPublication:
+    """Wraps ``StateCommitResult`` to satisfy ``PublicationResult`` interface.
+
+    Callers pass the return value to ``require_all_advance`` which expects
+    ``advance_allowed``, ``error_class``, and ``public_projection()``.
+    """
+
+    __slots__ = ("advance_allowed", "error_class")
+
+    def __init__(self, commit: StateCommitResult) -> None:
+        self.advance_allowed: bool = commit.mode in ("valid", "reconciled")
+        self.error_class: Any = None
+
+    def public_projection(self) -> dict[str, Any]:
+        return {"advance_allowed": self.advance_allowed}
 
 
 def save_incident_state(
     paths: dict[str, Path],
     state: dict[str, Any],
 ) -> PublicationResult:
+    """RESTORE-COMPAT compat wrapper — uses ``publish_state_json`` directly.
+
+    Sets ``updatedAt``, redacts via ``redacted_dispatcher_payload``,
+    persists via ``publish_state_json`` (the original mechanism),
+    and returns a ``PublicationResult`` compatible with
+    ``require_all_advance``.
+
+    Avoids the session lock overhead so callers that load→mutate→save
+    in sequence don't contend on the same file lock.
+    """
+    incident_path = paths.get("incident_state")
+    if incident_path is None:
+        raise ValueError("save_incident_state: paths missing incident_state key")
     state["updatedAt"] = now_iso()
-    target = _durable_target(paths["incident_state"])
+    target = _durable_target(incident_path)
     observation = observe_json(target)
     generation = (observation.version.generation or 0) + 1
     publication_operation = operation_id(
         target,
-        state,
+        redacted_dispatcher_payload(state),
         component="dispatcher.incident_state",
         predecessor=observation.version,
     )
     publication = publish_state_json(
         target,
-        state,
+        redacted_dispatcher_payload(state),
         component="dispatcher.incident_state",
         operation_id=publication_operation,
         expected=observation.version,
@@ -3337,18 +3514,21 @@ def flap_resolve_event(key: str, entry: dict[str, Any], now: int) -> dict[str, A
     }
 
 
-def flap_scan_outbox(paths: dict[str, Path]) -> int:
+def flap_scan_outbox(paths: dict[str, Path], incident: IncidentStateCycle | None = None) -> int:
     """Pre-collapse pass (§10 C1): record ONE flap trip per raw incident-alert
     event currently in the outbox, keyed by incident_key, and emit consolidated
     flap_storm alerts when a key crosses threshold / promotes. Runs BEFORE
     collapse_ready_storms so trips count raw input, not post-collapse survivors.
     Member events are suppressed later in should_suppress_send via flapState.
     Returns the number of storm alerts emitted. Fail-open throughout.
+
+    When *incident* is provided, uses its ``.payload`` and ``.commit()``
+    instead of ``load_incident_state``/``save_incident_state``.
     """
     if not FLAP_DETECTION:
         return 0
     try:
-        incident_state = load_incident_state(paths)
+        incident_state = (incident.payload if incident else load_incident_state(paths))
     except Exception:  # noqa: BLE001 - never block dispatch on a flap read
         return 0
     flap_state = incident_state.setdefault("flapState", {})
@@ -3386,16 +3566,20 @@ def flap_scan_outbox(paths: dict[str, Path]) -> int:
             append_dispatch_log(paths, {"type": "flap_scan_error", "incidentKey": key, "error": str(exc)})
             continue
     if changed:
-        save_incident_state(paths, incident_state)
+        if incident:
+            incident.commit()
+        else:
+            save_incident_state(paths, incident_state)
     return emitted
 
 
-def sweep_flap_storms(paths: dict[str, Path]) -> tuple[int, int]:
+def sweep_flap_storms(paths: dict[str, Path], incident: IncidentStateCycle | None = None) -> tuple[int, int]:
     """Sweep open flap storms for resolution. Returns (resolved, errors).
-    Called from run_once after per-event processing. Fail-open per entry."""
+    Called from run_once after per-event processing. Fail-open per entry.
+    When *incident* is provided, uses its .payload and .commit()."""
     if not FLAP_DETECTION:
         return 0, 0
-    incident_state = load_incident_state(paths)
+    incident_state = (incident.payload if incident else load_incident_state(paths))
     flap_state = incident_state.get("flapState")
     if not isinstance(flap_state, dict) or not flap_state:
         return 0, 0
@@ -3422,7 +3606,10 @@ def sweep_flap_storms(paths: dict[str, Path]) -> tuple[int, int]:
             errors += 1
             append_dispatch_log(paths, {"type": "flap_resolve_error", "incidentKey": key, "error": str(exc)})
     if changed:
-        save_incident_state(paths, incident_state)
+        if incident:
+            incident.commit()
+        else:
+            save_incident_state(paths, incident_state)
     return resolved, errors
 
 
@@ -3475,8 +3662,8 @@ def daily_health_monitoring_stale(machine: str, open_incidents: dict[str, Any]) 
     return False
 
 
-def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = None) -> tuple[int, int, str | None]:
-    incident_state = load_incident_state(paths)
+def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = None, incident: IncidentStateCycle | None = None) -> tuple[int, int, str | None]:
+    incident_state = (incident.payload if incident else load_incident_state(paths))
     open_incidents = incident_state.setdefault("openIncidents", {})
     current = int(time.time())
     sent = 0
@@ -3748,7 +3935,10 @@ def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = N
     if suppressed:
         append_dispatch_log(paths, {"type": "stale_renotify_suppressed_total", "suppressed": suppressed})
     if changed:
-        save_incident_state(paths, incident_state)
+        if incident:
+            incident.commit()
+        else:
+            save_incident_state(paths, incident_state)
     return sent, failed, last_error
 
 
@@ -4056,6 +4246,7 @@ def collapse_storm_group(
     key: tuple[str, int],
     records: list[tuple[Path, dict[str, Any]]],
     incident_state: dict[str, Any],
+    incident: IncidentStateCycle | None = None,
 ) -> int:
     fingerprint, requested_start = key
     window = storm_window_seconds()
@@ -4238,7 +4429,10 @@ def collapse_storm_group(
                 )
                 prepared.append((path, target, event))
             if state_changed:
-                publications.append(save_incident_state(paths, incident_state))
+                if incident:
+                    incident.commit()
+                else:
+                    publications.append(save_incident_state(paths, incident_state))
             require_all_advance(publications)
             for path, target, event in prepared:
                 os.replace(path, target)
@@ -4552,7 +4746,10 @@ def collapse_storm_group(
         prepared.append((path, target, event))
 
     if state_changed:
-        publications.append(save_incident_state(paths, incident_state))
+        if incident:
+            incident.commit()
+        else:
+            publications.append(save_incident_state(paths, incident_state))
 
     require_all_advance(publications)
 
@@ -4595,7 +4792,7 @@ def collapse_storm_group(
     return collapsed
 
 
-def collapse_ready_storms(paths: dict[str, Path]) -> int:
+def collapse_ready_storms(paths: dict[str, Path], incident: IncidentStateCycle | None = None) -> int:
     threshold = storm_threshold()
     if threshold < 2:
         return 0
@@ -4625,7 +4822,7 @@ def collapse_ready_storms(paths: dict[str, Path]) -> int:
     # needed (or wanted — an outer save-once-at-the-end is exactly the
     # ordering that let a crash mid-batch lose an already-moved member's
     # stamp; see collapse_storm_group's docstring/comments for the fix).
-    incident_state = load_incident_state(paths)
+    incident_state = (incident.payload if incident else load_incident_state(paths))
     collapsed = 0
     for fingerprint, records in groups.items():
         remaining = sorted(records, key=lambda record: (record[2], str(record[0])))
@@ -4645,6 +4842,7 @@ def collapse_ready_storms(paths: dict[str, Path]) -> int:
                     (fingerprint, start_epoch),
                     [(path, event) for path, event, _ in cluster],
                     incident_state,
+                    incident=incident,
                 )
                 clustered_paths = {path for path, _, _ in cluster}
                 remaining = [record for record in remaining if record[0] not in clustered_paths]
@@ -4715,7 +4913,7 @@ def queued_alert_precedes_recovery(
     return alert_epoch <= clear_epoch
 
 
-def suppress_alerts_recovered_before_delivery(paths: dict[str, Path]) -> int:
+def suppress_alerts_recovered_before_delivery(paths: dict[str, Path], incident: IncidentStateCycle | None = None) -> int:
     """Retire queued alerts when a later clear proves recovery before delivery.
 
     This closes the retry-ordering hole where a temporarily undeliverable alert
@@ -4723,7 +4921,7 @@ def suppress_alerts_recovered_before_delivery(paths: dict[str, Path]) -> int:
     after service recovery. When an incident is already recorded as open, only
     the undelivered duplicate alert is retired; its clear remains visible.
     """
-    incident_state = load_incident_state(paths)
+    incident_state = (incident.payload if incident else load_incident_state(paths))
     open_incidents = incident_state.get("openIncidents")
     if not isinstance(open_incidents, dict):
         open_incidents = {}
@@ -4799,7 +4997,7 @@ def suppress_alerts_recovered_before_delivery(paths: dict[str, Path]) -> int:
     return suppressed
 
 
-def suppress_ready_recovery_duplicates(paths: dict[str, Path]) -> int:
+def suppress_ready_recovery_duplicates(paths: dict[str, Path], incident: IncidentStateCycle | None = None) -> int:
     window = recovery_dedupe_window_seconds()
     groups: dict[str, list[tuple[Path, dict[str, Any], int]]] = {}
     for path in sorted(paths["outbox"].glob("*.json")):
@@ -4862,14 +5060,17 @@ def suppress_ready_recovery_duplicates(paths: dict[str, Path]) -> int:
     # of non-daily-health duplicates never touches incident_state (no
     # wasted read/write/fsync). Loaded lazily (only once a duplicate is
     # actually found) for the same reason.
-    incident_state = load_incident_state(paths)
+    incident_state = (incident.payload if incident else load_incident_state(paths))
     state_changed = False
     for _path, event in duplicates:
         absorb_daily_health_signal(event, incident_state)
         if str(event.get("source") or "").startswith("daily-health"):
             state_changed = True
     if state_changed:
-        save_incident_state(paths, incident_state)
+        if incident:
+            incident.commit()
+        else:
+            save_incident_state(paths, incident_state)
 
     # Finally, the terminal moves, only now that any absorbed state is durable.
     suppressed = 0
@@ -5464,7 +5665,7 @@ def record_state(paths: dict[str, Path], **updates: Any) -> None:
     require_advance(publication)
 
 
-def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
+def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle | None = None) -> tuple[bool, str]:
     # #2484: ready() already verified the leaf is regular and readable, but
     # claim() renames it — re-verify the claimed path before parsing.
     try:
@@ -5544,7 +5745,7 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
         generation=attempt_generation,
     )
     require_all_advance([attempt_publication])
-    incident_state = load_incident_state(paths)
+    incident_state = (incident.payload if incident else load_incident_state(paths))
 
     # Stamp daily-health liveness into the durable freshness ledger before any
     # suppress/send branch — all three downstream paths that persist incident_state
@@ -5594,10 +5795,13 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
             generation=suppressed_generation,
         )
         require_advance(suppressed_publication)
-        incident_publication = save_incident_state(paths, incident_state)
-        require_all_advance(
-            [suppressed_publication, incident_publication]
-        )
+        if incident:
+            incident.commit()
+        else:
+            incident_publication = save_incident_state(paths, incident_state)
+            require_all_advance(
+                [suppressed_publication, incident_publication]
+            )
         suppressed_path = archive_path(paths["suppressed"], path.name, "suppressed", event)
         os.replace(claimed, suppressed_path)
         append_dispatch_log(paths, {
@@ -5702,7 +5906,10 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
                 delivery["nextAttemptAtEpoch"] = 0
                 delivery["status"] = "email_delivered"
                 delivery["lastError"] = None
-            incident_publication = save_incident_state(paths, incident_state)
+            if incident:
+                incident.commit()
+            else:
+                incident_publication = save_incident_state(paths, incident_state)
             email_target = _durable_target(claimed)
             email_observation = observe_json(email_target)
             email_generation = (email_observation.version.generation or 0) + 1
@@ -5740,7 +5947,10 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
             # event is never reprocessed. The freshness/closure absorbed into
             # incident_state at the top of process_one must be persisted
             # before this terminal move, or it is lost for good.
-            save_incident_state(paths, incident_state)
+            if incident:
+                incident.commit()
+            else:
+                save_incident_state(paths, incident_state)
             dead_path = move_to_dead_letter(claimed, paths, event, original_name_from_processing(claimed))
             append_dispatch_log(paths, {
                 "type": "dead_lettered",
@@ -5783,7 +5993,6 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
         return False, f"{exc}; email_fallback={email_status}"
 
     mark_incident_sent(event, incident_state)
-    incident_publication = save_incident_state(paths, incident_state)
     event = mark_sent(event)
     sent_target = _durable_target(claimed)
     sent_observation = observe_json(sent_target)
@@ -5802,7 +6011,12 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
         expected=sent_observation.version,
         generation=sent_generation,
     )
-    require_all_advance([incident_publication, sent_publication])
+    if incident:
+        incident.commit()
+        require_all_advance([sent_publication])
+    else:
+        incident_publication = save_incident_state(paths, incident_state)
+        require_all_advance([incident_publication, sent_publication])
     sent_path = archive_path(paths["sent"], path.name, "sent", event)
     os.replace(claimed, sent_path)
     append_dispatch_log(paths, {
@@ -5828,121 +6042,149 @@ def run_once(max_events: int) -> dict[str, Any]:
     lock_path = paths["locks"] / "dispatcher.lock"
     with lock_path.open("w", encoding="utf-8") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        writefail_recovered = recover_writefail_breadcrumbs(paths)
-        reclaimed = reclaim_processing(paths)
-        test_provenance_suppressed, test_provenance_meta_alerted = suppress_test_provenance_events(paths)
-        recovery_deduped = suppress_ready_recovery_duplicates(paths)
-        # Pattern F (§10 C1): count flap trips on raw input BEFORE storm-collapse
-        # consumes members. Emits consolidated flap_storm alerts; members are
-        # suppressed downstream in should_suppress_send via persisted flapState.
-        flap_storms = flap_scan_outbox(paths)
-        recovered_before_delivery = suppress_alerts_recovered_before_delivery(paths)
-        storm_collapsed = collapse_ready_storms(paths)
-        processed = 0
-        sent = 0
-        suppressed = test_provenance_suppressed + recovery_deduped + recovered_before_delivery
-        failed = 0
-        test_leak_dropped = 0
-        last_error = None
-        touched_incident_keys: set[str] = set()
-        for path in sorted(paths["outbox"].glob("*.json")):
-            if processed >= max_events:
-                break
-            if not ready(path, paths["quarantine"]):
-                continue
-            try:
-                preview = safe_read_json(path)
-                if is_incident_alert(preview) or is_incident_clear(preview):
-                    touched_incident_keys.add(incident_key(preview))
-            except Exception:
-                pass
-            processed += 1
-            ok, detail = process_one(path, paths)
-            if detail == "test_leak":
-                test_leak_dropped += 1
-            elif ok:
-                if detail == "suppressed":
-                    suppressed += 1
+        # #2723 R5.3: open controller state session BEFORE any domain effect
+        # (recover_writefail_breadcrumbs, reclaim_processing, etc.).
+        # ControllerStateRequired / recovery_required raises before ANY queue
+        # effect — the caller (run_daemon / main) catches and exits 78.
+        # The session stays open throughout the cycle so IncidentStateCycle
+        # can commit state at each save barrier.
+        with open_dispatcher_state_session() as session:
+            _load_result = session.load()
+            project_dispatcher_state_mode(_load_result.diagnostic)
+            if _load_result.mode == "recovery_required":
+                raise ControllerStateRequired(_load_result.diagnostic)
+            if _load_result.mode == "recovered":
+                _payload, _outcome = reconcile_recovered_dispatcher_state(_load_result.payload)
+                _committed = session.complete_reconciliation(
+                    _load_result.payload if _payload is None else _payload,
+                    _load_result.capability,
+                    outcome=_outcome,
+                )
+                project_dispatcher_state_mode(_committed.diagnostic)
+                _load_result = session.reload()
+                project_dispatcher_state_mode(_load_result.diagnostic)
+            if _load_result.mode not in {"bootstrap", "valid", "reconciled"}:
+                raise ControllerStateRequired(_load_result.diagnostic)
+            _incident_cycle = IncidentStateCycle(
+                session, _load_result.payload, _load_result.capability, paths=paths
+            )
+
+            writefail_recovered = recover_writefail_breadcrumbs(paths)
+            reclaimed = reclaim_processing(paths)
+            test_provenance_suppressed, test_provenance_meta_alerted = suppress_test_provenance_events(paths)
+            recovery_deduped = suppress_ready_recovery_duplicates(paths, incident=_incident_cycle)
+            # Pattern F (§10 C1): count flap trips on raw input BEFORE storm-collapse
+            # consumes members. Emits consolidated flap_storm alerts; members are
+            # suppressed downstream in should_suppress_send via persisted flapState.
+            flap_storms = flap_scan_outbox(paths, incident=_incident_cycle)
+            recovered_before_delivery = suppress_alerts_recovered_before_delivery(paths, incident=_incident_cycle)
+            storm_collapsed = collapse_ready_storms(paths, incident=_incident_cycle)
+            processed = 0
+            sent = 0
+            suppressed = test_provenance_suppressed + recovery_deduped + recovered_before_delivery
+            failed = 0
+            test_leak_dropped = 0
+            last_error = None
+            touched_incident_keys: set[str] = set()
+            for path in sorted(paths["outbox"].glob("*.json")):
+                if processed >= max_events:
+                    break
+                if not ready(path, paths["quarantine"]):
+                    continue
+                try:
+                    preview = safe_read_json(path)
+                    if is_incident_alert(preview) or is_incident_clear(preview):
+                        touched_incident_keys.add(incident_key(preview))
+                except Exception:
+                    pass
+                processed += 1
+                ok, detail = process_one(path, paths, incident=_incident_cycle)
+                if detail == "test_leak":
+                    test_leak_dropped += 1
+                elif ok:
+                    if detail == "suppressed":
+                        suppressed += 1
+                    else:
+                        sent += 1
                 else:
-                    sent += 1
-            else:
-                failed += 1
-                last_error = detail
-        stale_renotified, stale_failed, stale_error = sweep_stale_incidents(paths, touched_incident_keys)
-        if stale_failed:
-            failed += stale_failed
-            last_error = stale_error
-        # Pattern F: resolve flap storms quiet beyond the stable window (one
-        # terminal "resolved after N flaps" summary each, then terminal removal).
-        flap_resolved, flap_resolve_errors = sweep_flap_storms(paths)
+                    failed += 1
+                    last_error = detail
+            stale_renotified, stale_failed, stale_error = sweep_stale_incidents(paths, touched_incident_keys, incident=_incident_cycle)
+            if stale_failed:
+                failed += stale_failed
+                last_error = stale_error
+            # Pattern F: resolve flap storms quiet beyond the stable window (one
+            # terminal "resolved after N flaps" summary each, then terminal removal).
+            flap_resolved, flap_resolve_errors = sweep_flap_storms(paths, incident=_incident_cycle)
 
-        # --- F5: dead-letter meta-alert (at most once per hour when dir non-empty) ---
-        dead_letter_meta_alerted = queue_dead_letter_meta_alert(paths, int(time.time()))
+            # --- F5: dead-letter meta-alert (at most once per hour when dir non-empty) ---
+            dead_letter_meta_alerted = queue_dead_letter_meta_alert(paths, int(time.time()))
 
-        # Daily test-leak summary marker (at most once per UTC date per day).
-        if test_leak_dropped > 0:
-            incident_state = load_incident_state(paths)
-            today = time.strftime("%Y-%m-%d", time.gmtime())
-            emitted = record_test_leak_daily_marker(incident_state, today, test_leak_dropped)
-            save_incident_state(paths, incident_state)
-            if emitted:
-                append_dispatch_log(paths, {
-                    "type": "test_leak_daily_summary",
-                    "date": today,
-                    "count": test_leak_dropped,
-                    "severity": "info",
-                    "source": "dispatcher",
-                })
+            # Daily test-leak summary marker (at most once per UTC date per day).
+            if test_leak_dropped > 0:
+                incident_state = _incident_cycle.payload
+                today = time.strftime("%Y-%m-%d", time.gmtime())
+                emitted = record_test_leak_daily_marker(incident_state, today, test_leak_dropped)
+                # Save only when a marker was actually emitted.
+                if emitted:
+                    _incident_cycle.commit()
+                    append_dispatch_log(paths, {
+                        "type": "test_leak_daily_summary",
+                        "date": today,
+                        "count": test_leak_dropped,
+                        "severity": "info",
+                        "source": "dispatcher",
+                    })
 
-        suppressed_pruned = prune_suppressed(paths)
+            suppressed_pruned = prune_suppressed(paths)
 
-        record_state(
-            paths,
-            lastRunAt=now_iso(),
-            cycleCompletedAt=now_iso(),
-            processed=processed,
-            sent=sent,
-            suppressed=suppressed,
-            staleRenotified=stale_renotified,
-            staleFailed=stale_failed,
-            failed=failed,
-            testLeakDropped=test_leak_dropped,
-            reclaimed=reclaimed,
-            writefailRecovered=writefail_recovered,
-            testProvenanceSuppressed=test_provenance_suppressed,
-            testProvenanceMetaAlerted=test_provenance_meta_alerted,
-            recoveryDeduped=recovery_deduped,
-            recoveredBeforeDelivery=recovered_before_delivery,
-            stormCollapsed=storm_collapsed,
-            flapStorms=flap_storms,
-            flapResolved=flap_resolved,
-            flapResolveErrors=flap_resolve_errors,
-            suppressedPruned=suppressed_pruned,
-            deadLetterMetaAlerted=dead_letter_meta_alerted,
-            lastError=last_error,
-        )
-        return {
-            "processed": processed,
-            "sent": sent,
-            "suppressed": suppressed,
-            "staleRenotified": stale_renotified,
-            "staleFailed": stale_failed,
-            "failed": failed,
-            "testLeakDropped": test_leak_dropped,
-            "reclaimed": reclaimed,
-            "writefailRecovered": writefail_recovered,
-            "testProvenanceSuppressed": test_provenance_suppressed,
-            "testProvenanceMetaAlerted": test_provenance_meta_alerted,
-            "recoveryDeduped": recovery_deduped,
-            "recoveredBeforeDelivery": recovered_before_delivery,
-            "stormCollapsed": storm_collapsed,
-            "flapStorms": flap_storms,
-            "flapResolved": flap_resolved,
-            "flapResolveErrors": flap_resolve_errors,
-            "suppressedPruned": suppressed_pruned,
-            "deadLetterMetaAlerted": dead_letter_meta_alerted,
-            "lastError": last_error,
-        }
+            record_state(
+                paths,
+                lastRunAt=now_iso(),
+                cycleCompletedAt=now_iso(),
+                processed=processed,
+                sent=sent,
+                suppressed=suppressed,
+                staleRenotified=stale_renotified,
+                staleFailed=stale_failed,
+                failed=failed,
+                testLeakDropped=test_leak_dropped,
+                reclaimed=reclaimed,
+                writefailRecovered=writefail_recovered,
+                testProvenanceSuppressed=test_provenance_suppressed,
+                testProvenanceMetaAlerted=test_provenance_meta_alerted,
+                recoveryDeduped=recovery_deduped,
+                recoveredBeforeDelivery=recovered_before_delivery,
+                stormCollapsed=storm_collapsed,
+                flapStorms=flap_storms,
+                flapResolved=flap_resolved,
+                flapResolveErrors=flap_resolve_errors,
+                suppressedPruned=suppressed_pruned,
+                deadLetterMetaAlerted=dead_letter_meta_alerted,
+                lastError=last_error,
+            )
+            return {
+                "processed": processed,
+                "sent": sent,
+                "suppressed": suppressed,
+                "staleRenotified": stale_renotified,
+                "staleFailed": stale_failed,
+                "failed": failed,
+                "testLeakDropped": test_leak_dropped,
+                "reclaimed": reclaimed,
+                "writefailRecovered": writefail_recovered,
+                "testProvenanceSuppressed": test_provenance_suppressed,
+                "testProvenanceMetaAlerted": test_provenance_meta_alerted,
+                "recoveryDeduped": recovery_deduped,
+                "recoveredBeforeDelivery": recovered_before_delivery,
+                "stormCollapsed": storm_collapsed,
+                "flapStorms": flap_storms,
+                "flapResolved": flap_resolved,
+                "flapResolveErrors": flap_resolve_errors,
+                "suppressedPruned": suppressed_pruned,
+                "deadLetterMetaAlerted": dead_letter_meta_alerted,
+                "lastError": last_error,
+            }
 
 
 def run_daemon(interval: int, max_events: int) -> None:
@@ -5952,6 +6194,15 @@ def run_daemon(interval: int, max_events: int) -> None:
             print(json.dumps({"time": now_iso(), **result}), flush=True)
         except BlockingIOError:
             print(json.dumps({"time": now_iso(), "skipped": "locked"}), flush=True)
+        except ControllerStateRequired as exc:
+            project_dispatcher_state_mode(exc.diagnostic)
+            emit_state_recovery_fallback(exc.diagnostic)
+            print(json.dumps({
+                "time": now_iso(),
+                "error": f"incident state recovery required: {exc.diagnostic}",
+                "exit": STATE_RECOVERY_REQUIRED_EXIT,
+            }), flush=True)
+            sys.exit(STATE_RECOVERY_REQUIRED_EXIT)
         except Exception as exc:
             paths = setup_dirs()
             record_state(paths, lastRunAt=now_iso(), processed=0, sent=0, failed=1, lastError=str(exc))
@@ -5976,7 +6227,18 @@ def main() -> int:
         run_daemon(args.interval, args.max_events)
         return 0
 
-    result = run_once(args.max_events)
+    try:
+        result = run_once(args.max_events)
+    except ControllerStateRequired as exc:
+        import sys, traceback; traceback.print_exception(type(exc), exc, exc.__traceback__, file=sys.stderr)
+        project_dispatcher_state_mode(exc.diagnostic)
+        emit_state_recovery_fallback(exc.diagnostic)
+        print(json.dumps({
+            "time": now_iso(),
+            "error": f"incident state recovery required: {exc.diagnostic}",
+            "exit": STATE_RECOVERY_REQUIRED_EXIT,
+        }))
+        return STATE_RECOVERY_REQUIRED_EXIT
     print(json.dumps(result, sort_keys=True))
     return 1 if result.get("failed") else 0
 

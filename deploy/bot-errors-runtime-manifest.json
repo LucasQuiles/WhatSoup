@@ -28,7 +28,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "944c0a4b2fa07591169d18ff2ff05108e5c5b0491ad85518168c61d1e48ebc99",
+      "sha256": "f7c87783f4ab39a94870024961c5ff06830c11d9d185b39ce0086abbdfa42c45",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -443,6 +443,15 @@
         "runtimeAgentHealthSignals",
         "turnRecoveryBlockedUnsafe",
         "autoCompactActiveBackoffScopes"
+      ]
+    },
+    {
+      "path": "deploy/scripts/patch-incident-state.py",
+      "sha256": "99021a3c213121381baff843668f11c480d6767c0e75acbc3732ceb83239cf71",
+      "mustContain": [
+        "open_controller_state",
+        "session.save(payload, result.capability)",
+        "dispatcher_bootstrap_state"
       ]
     }
   ]
