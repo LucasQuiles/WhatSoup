@@ -1793,3 +1793,63 @@ describe('WHATSOUP_ALERT_SINK dry-run capture', () => {
     });
   });
 });
+
+describe('legacy-fallback throttle branches (#2434)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    loggerWarn.mockClear();
+    existsSyncMock.mockReturnValue(true);
+    process.env['BOT_ERRORS_OUTBOX_DIR'] = '/dev/null/outbox';
+    process.env['BOT_ERRORS_JID'] = BOT_ERRORS_JID;
+    process.env['BOT_ERRORS_EXPECTED_JID'] = BOT_ERRORS_JID;
+    resetEmitAlertThrottle();
+  });
+
+  it('a zero throttle window disables suppression entirely', () => {
+    process.env['EMIT_ALERT_THROTTLE_MS'] = '0';
+    emitAlert('inst', 'src_a', 'same summary', 'ev');
+    emitAlert('inst', 'src_a', 'same summary', 'ev');
+    expect(vi.mocked(spawn)).toHaveBeenCalledTimes(2);
+  });
+
+  it('suppresses a repeated identical alert inside the window without spawning again', () => {
+    process.env['EMIT_ALERT_THROTTLE_MS'] = '60000';
+    const first = emitAlert('inst', 'src_b', 'same summary', 'ev');
+    const second = emitAlert('inst', 'src_b', 'same summary', 'ev');
+    expect(vi.mocked(spawn)).toHaveBeenCalledTimes(1);
+    expect(first.status).toBe('legacy_accepted_unconfirmed');
+    expect(second).toMatchObject({ ok: true, channel: 'legacy', status: 'legacy_accepted_unconfirmed' });
+  });
+
+  it('prunes an expired throttle entry so the alert re-emits after the window', () => {
+    process.env['EMIT_ALERT_THROTTLE_MS'] = '1';
+    emitAlert('inst', 'src_c', 'same summary', 'ev');
+    const end = Date.now() + 10;
+    while (Date.now() < end) { /* let the 1ms window lapse */ }
+    emitAlert('inst', 'src_c', 'same summary', 'ev');
+    expect(vi.mocked(spawn)).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('observeAlertEmission strict capture handling (#2510)', () => {
+  it('treats a captured-only result as failure when strict', () => {
+    const ok = observeAlertEmission(
+      { ok: true, channel: 'sink', status: 'captured' },
+      { instance: 'inst', source: 'src', operation: 'alert' },
+      true,
+    );
+    expect(ok).toBe(false);
+    expect(loggerWarn).toHaveBeenCalledWith(
+      expect.objectContaining({ channel: 'sink', status: 'captured' }),
+      'bot-errors alert captured to file but not durably queued; strict caller treating as failure',
+    );
+  });
+
+  it('accepts a captured-only result when not strict', () => {
+    const ok = observeAlertEmission(
+      { ok: true, channel: 'sink', status: 'captured' },
+      { instance: 'inst', source: 'src', operation: 'alert' },
+    );
+    expect(ok).toBe(true);
+  });
+});

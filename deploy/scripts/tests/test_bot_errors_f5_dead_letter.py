@@ -464,14 +464,55 @@ class TestDeadLetterMetaAlert:
     def test_meta_alert_zero_when_dead_letter_empty(self, tmp_path):
         mod = _load_module({"BOT_ERRORS_STATE_DIR": str(tmp_path / "state")})
         paths = mod.setup_dirs()
-        # Dead-letter dir exists but is empty (only created by setup_dirs, no files placed)
+        # Dead-letter dir exists but is empty (only created by setup_dirs, no files placed).
+        # With the RED-3061-r6 transition-edge guard, an already-empty dead letter
+        # produces NO clear event (the #2421 cyclic emission was the defect).
 
         with patch.object(mod, "append_dispatch_log"), \
              patch.object(mod, "read_meta_state", return_value={}):
             count = mod.queue_dead_letter_meta_alert(paths, int(time.time()))
 
         assert count == 0, f"Expected no meta-alert for empty dead-letter dir, got {count}"
-        assert self._queued_meta_alerts(paths) == []
+        cleared = self._queued_meta_alerts(paths)
+        assert len(cleared) == 0, f"RED-3061-r6: expected ZERO clears for already-empty dead letter, got {len(cleared)}"
+
+    def test_meta_clear_on_nonempty_to_empty_transition(self, tmp_path):
+        """RED-3061-r6 discriminator: meta-clear fires ONLY when dead letter
+        transitions from non-empty to empty, never on an already-empty sweep."""
+        mod = _load_module({"BOT_ERRORS_STATE_DIR": str(tmp_path / "state")})
+        paths = mod.setup_dirs()
+        # Seed the dead letter with one file and call with prior state showing empty
+        self._seed_dead_letter(paths)
+        with patch.object(mod, "append_dispatch_log"), \
+             patch.object(mod, "read_meta_state", return_value={}):
+            count = mod.queue_dead_letter_meta_alert(paths, int(time.time()))
+        # Non-empty DL with prior-empty state: meta-alert fires (count=1), dlWasNonempty set
+        assert count == 1, f"Expected 1 meta-alert for non-empty DL, got {count}"
+        alerts = self._queued_meta_alerts(paths)
+        clear_events = [e for e in alerts if e.get("eventType") == "clear"]
+        assert len(clear_events) == 0, f"No clears for non-empty DL, got {len(clear_events)} out of {len(alerts)} total"
+
+        # Now remove the file from the dead letter and call again with dlWasNonempty=True
+        for f in sorted(paths["dead_letter"].glob("*.json")):
+            f.unlink()
+        with patch.object(mod, "append_dispatch_log"), \
+             patch.object(mod, "read_meta_state", return_value={"dlWasNonempty": True}):
+            count2 = mod.queue_dead_letter_meta_alert(paths, int(time.time()) + 1)
+        # Empty DL with prior non-empty: ONE clear fires (the transition)
+        assert count2 == 0, f"Expected 0 (clear, not meta-alert) for DL empty after non-empty, got {count2}"
+        after_transition = self._queued_meta_alerts(paths)
+        transition_clears = [e for e in after_transition if e.get("eventType") == "clear"]
+        assert len(transition_clears) == 1, f"RED-3061-r6: expected ONE clear on non-empty->empty transition, got {len(transition_clears)}"
+        assert transition_clears[0]["eventType"] == "clear"
+
+        # Second sweep with already-empty state produces NOTHING (no repeat clear)
+        with patch.object(mod, "append_dispatch_log"), \
+             patch.object(mod, "read_meta_state", return_value={"dlWasNonempty": False}):
+            count3 = mod.queue_dead_letter_meta_alert(paths, int(time.time()) + 2)
+        assert count3 == 0
+        after_idle = self._queued_meta_alerts(paths)
+        idle_clears = [e for e in after_idle if e.get("eventType") == "clear"]
+        assert len(idle_clears) == 1, f"RED-3061-r6: second sweep must NOT emit another clear, got {len(idle_clears)}"
 
     def test_meta_alert_source_not_in_test_leak_patterns(self):
         mod = _load_module()
