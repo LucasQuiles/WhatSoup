@@ -13,6 +13,7 @@ const log = createChildLogger('emit-alert');
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { errorMessage } from './error-message.ts';
+import { systemClock } from './clock.ts';
 
 const ALERT_SCRIPT = join(homedir(), '.claude', 'scripts', 'whatsapp-alert.sh');
 let missingScriptWarned = false;
@@ -283,7 +284,7 @@ export function emitAlert(
     const throttleKey = `${instance}|${source}|${summary}`;
     // Prune expired entries before checking (same policy as isThrottled).
     const throttleWindow = Number(process.env['EMIT_ALERT_THROTTLE_MS'] ?? EMIT_ALERT_THROTTLE_MS);
-    const now = Date.now();
+    const now = systemClock.now();
     for (const [key, recordedAt] of alertThrottleMap) {
       if (now - recordedAt > throttleWindow) alertThrottleMap.delete(key);
     }
@@ -307,7 +308,7 @@ export function emitAlert(
     if (legacy.accepted) {
       const throttleMs = Number(process.env['EMIT_ALERT_THROTTLE_MS'] ?? EMIT_ALERT_THROTTLE_MS);
       const effectiveWindow = Number.isFinite(throttleMs) ? Math.max(0, throttleMs) : EMIT_ALERT_THROTTLE_MS;
-      if (effectiveWindow > 0) alertThrottleMap.set(throttleKey, Date.now());
+      if (effectiveWindow > 0) alertThrottleMap.set(throttleKey, systemClock.now());
     }
     return {
       ok: legacy.accepted,
