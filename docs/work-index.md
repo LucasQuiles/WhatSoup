@@ -18,15 +18,15 @@ The **Inconsistencies** section lists missing or stale index entries compared wi
 scoped markdown files currently on disk.
 
 **Repo:** `WhatSoup`
-**Total entries:** 114
+**Total entries:** 116
 
 ## Totals
 
 | Dimension | Breakdown |
 |---|---|
-| Kind | handoff=8, plan=57, review=4, spec=44, state=1 |
-| Status | active=29, closed=4, completed=35, deferred=7, pending=15, unknown=24 |
-| Status source | body-marker=98, fallback=15, state-md-status=1 |
+| Kind | handoff=8, plan=58, review=4, spec=45, state=1 |
+| Status | active=29, closed=4, completed=35, deferred=7, pending=15, unknown=26 |
+| Status source | body-marker=99, fallback=16, state-md-status=1 |
 
 ## Inconsistencies
 
@@ -68,7 +68,7 @@ scoped markdown files currently on disk.
 | `docs/superpowers/specs/provider-event-lifecycle/requirements.md` | spec | requirements | body-marker |
 | `docs/superpowers/specs/provider-event-lifecycle/tasks.md` | spec | tasks | body-marker |
 
-### Unknown-status — triage needed (24)
+### Unknown-status — triage needed (26)
 
 | Path | Kind | Topic | Last Mod |
 |------|------|-------|----------|
@@ -85,6 +85,7 @@ scoped markdown files currently on disk.
 | `docs/superpowers/plans/2026-07-29-portable-startup-notification-protocol.md` | plan | portable-startup-notification-protocol | 2026-07-30 |
 | `docs/superpowers/plans/2026-07-29-pr-metadata-guard.md` | plan | pr-metadata-guard | 2026-07-31 |
 | `docs/superpowers/plans/2026-08-06-host-setup-portability.md` | plan | host-setup-portability | 2026-08-06 |
+| `docs/superpowers/plans/2026-08-07-fallback-continuity.md` | plan | fallback-continuity | 2026-08-07 |
 | `docs/superpowers/specs/2026-07-11-turn-lifecycle-fitness-extraction-design.md` | spec | turn-lifecycle-fitness-extraction-design | 2026-07-11 |
 | `docs/superpowers/specs/2026-07-17-macos-credential-durability-design.md` | spec | macos-credential-durability-design | 2026-07-17 |
 | `docs/superpowers/specs/2026-07-23-agent-reliability-remediation-design.md` | spec | agent-reliability-remediation-design | 2026-07-27 |
@@ -96,6 +97,7 @@ scoped markdown files currently on disk.
 | `docs/superpowers/specs/2026-07-29-maybe-sent-ambiguity-episode-design.md` | spec | maybe-sent-ambiguity-episode-design | 2026-07-30 |
 | `docs/superpowers/specs/2026-07-29-portable-startup-notification-protocol-design.md` | spec | portable-startup-notification-protocol-design | 2026-07-30 |
 | `docs/superpowers/specs/2026-08-06-host-setup-portability-and-macos-reconciliation-design.md` | spec | host-setup-portability-and-macos-reconciliation-design | 2026-08-06 |
+| `docs/superpowers/specs/2026-08-07-fallback-continuity-design.md` | spec | fallback-continuity-design | 2026-08-07 |
 
 ### Cross-tree topic clusters (4)
 
@@ -150,7 +152,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/handoffs/2026-07-16-boundary-core-history-mining.md` | handoff | pending | body-marker | boundary-core-history-mining | 2026-07-16 |  |
 | `docs/superpowers/handoffs/2026-07-28-incident-control-plane-finder-report.md` | handoff | unknown | fallback | incident-control-plane-finder-report | 2026-07-28 |  |
 
-### docs/superpowers/plans  _(57 entries)_
+### docs/superpowers/plans  _(58 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
@@ -211,6 +213,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/plans/2026-07-29-pr-metadata-guard.md` | plan | unknown | fallback | pr-metadata-guard | 2026-07-31 |  |
 | `docs/superpowers/plans/2026-08-03-watchdog-auth-required-contract.md` | plan | active | body-marker | watchdog-auth-required-contract | 2026-08-04 |  |
 | `docs/superpowers/plans/2026-08-06-host-setup-portability.md` | plan | unknown | fallback | host-setup-portability | 2026-08-06 |  |
+| `docs/superpowers/plans/2026-08-07-fallback-continuity.md` | plan | unknown | fallback | fallback-continuity | 2026-08-07 |  |
 
 ### docs/superpowers/reviews  _(4 entries)_
 
@@ -221,7 +224,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/reviews/2026-07-09-wall-to-wall-audit-pr-briefs.md` | review | completed | body-marker | wall-to-wall-audit-pr-briefs | 2026-07-10 |  |
 | `docs/superpowers/reviews/2026-07-24-r13-r15-tech-debt-review-map.md` | review | completed | body-marker | r13-r15-tech-debt-review-map | 2026-07-24 |  |
 
-### docs/superpowers/specs  _(38 entries)_
+### docs/superpowers/specs  _(39 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
@@ -263,6 +266,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/specs/2026-07-29-portable-startup-notification-protocol-design.md` | spec | unknown | body-marker | portable-startup-notification-protocol-design | 2026-07-30 |  |
 | `docs/superpowers/specs/2026-08-03-watchdog-auth-required-contract-design.md` | spec | active | body-marker | watchdog-auth-required-contract-design | 2026-08-04 |  |
 | `docs/superpowers/specs/2026-08-06-host-setup-portability-and-macos-reconciliation-design.md` | spec | unknown | body-marker | host-setup-portability-and-macos-reconciliation-design | 2026-08-06 |  |
+| `docs/superpowers/specs/2026-08-07-fallback-continuity-design.md` | spec | unknown | body-marker | fallback-continuity-design | 2026-08-07 |  |
 
 ### docs/superpowers/specs/kill-session-transactional-cancellation  _(3 entries)_
 
@@ -283,4 +287,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-08-06T06:32:22Z from commit `3d0298de877922ab619d8a153a7bf772b53f5140`
+- Generated at 2026-08-07T07:41:41Z from commit `603f7ce2e5d8ffbfcb8294e4f2827b79c88722cb`

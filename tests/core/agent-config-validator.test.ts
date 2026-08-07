@@ -1194,6 +1194,35 @@ describe('agent-config-validator.ts uncovered-branch coverage', () => {
     expect(result).toStrictEqual(null);
   });
 
+  it.each([null, 0, 1, 'true', [], {}])(
+    'rejects non-boolean providerConfig.autoApprovePermissions value %j',
+    (autoApprovePermissions) => {
+      const result = validateInstanceConfig(baseAgent({
+        agentOptions: {
+          sessionScope: 'single',
+          provider: 'opencode-cli',
+          providerConfig: { autoApprovePermissions },
+        },
+      }), ctx('load'));
+
+      expect(result?.field).toBe('agentOptions.providerConfig.autoApprovePermissions');
+      expect(result?.message).toContain('must be a boolean');
+    },
+  );
+
+  it('accepts an explicit providerConfig.autoApprovePermissions boolean', () => {
+    const result = validateInstanceConfig(baseAgent({
+      model: 'minimax/MiniMax-M3',
+      agentOptions: {
+        sessionScope: 'single',
+        provider: 'opencode-cli',
+        providerConfig: { autoApprovePermissions: true },
+      },
+    }), ctx('load'));
+
+    expect(result).toStrictEqual(null);
+  });
+
   // ---- chatOptions.openaiProviderConfig (QR-218 PR-2 — chat OpenAI provider config) ----
   it('accepts a chat config with no chatOptions at all (backward-compat)', () => {
     expect(validateInstanceConfig(baseChat({}), ctx('create'))).toBeNull();

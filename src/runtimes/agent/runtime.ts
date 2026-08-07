@@ -167,12 +167,17 @@ import {
   sendDirect as sendDirectForPort,
   type ChatTransportPort,
 } from './chat-transport.ts';
-import { getRecentMessages, getMessagesSince, hasFromMeReplyAfter } from '../../core/messages.ts';
+import {
+  getRecentMessages,
+  getMessagesSince,
+  hasFromMeReplyAfter,
+} from '../../core/messages.ts';
 import { toConversationKey, isGroupConversationKey, GLOBAL_CONVERSATION_KEY } from '../../core/conversation-key.ts';
 import { bulletedSection, savedPreferenceLine } from './owner-render-format.ts';
 import { classifyAssistantTextEgress } from '../../core/outbound-message-safety.ts';
 import { resolveConfiguredAdminJid, toPersonalJid, isGroupJid } from '../../core/jid-constants.ts';
 import { jidNormalizedUser } from '@whiskeysockets/baileys';
+import { contextMessagesForTurn } from './context-handoff.ts';
 import { canonicalizeChatJid } from '../../core/lid-resolver.ts';
 import { TurnQueue, type QueuedTurn, type TurnRejectReason } from './turn-queue.ts';
 import {
@@ -4712,9 +4717,13 @@ export class AgentRuntime implements Runtime {
       if (!resumeFailedOwnsContext) {
         try {
           const convKey = canonicalConversationKey(chatJid, this.db);
-          const recent = getRecentMessages(this.db, convKey, 20);
+          const recent = contextMessagesForTurn(
+            getRecentMessages(this.db, convKey, 20),
+            text,
+            actorJid,
+          );
           if (recent.length > 0) {
-            const lines = this.formatContextLines(recent.reverse());
+            const lines = this.formatContextLines(recent);
             contextPreamble = `[Recent chat context — read before responding]\n${lines}`;
           }
         } catch (err) {
@@ -11995,6 +12004,7 @@ export class AgentRuntime implements Runtime {
     // populates pendingTurnText, so mapKey is undefined here and pendingText will
     // always be undefined — which is correct, as no turn is in-flight at resume time.
     const pendingText = mapKey ? this.pendingTurnText.get(mapKey) : undefined;
+    const pendingActorJid = mapKey ? this.pendingTurnActorJid.get(mapKey) : undefined;
 
     if (!pendingText) {
       // No pending message — notify user to resend
@@ -12033,9 +12043,13 @@ export class AgentRuntime implements Runtime {
 
           let contextLease: SystemTurnLeaseToken | null = null;
           try {
-            const recent = getRecentMessages(this.db, canonicalConversationKey(chatJid, this.db), 30);
+            const recent = contextMessagesForTurn(
+              getRecentMessages(this.db, canonicalConversationKey(chatJid, this.db), 30),
+              pendingText,
+              pendingActorJid,
+            );
             if (recent.length > 0) {
-              const lines = this.formatContextLines(recent.reverse());
+              const lines = this.formatContextLines(recent);
               // QR-095: same fix as the sendTurnToSession injection — in single/
               // shared mode mapKey is undefined here, so mark under GLOBAL to match
               // the single/shared consumeIfPending(GLOBAL_TOOL_SCOPE_KEY); otherwise

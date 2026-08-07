@@ -459,6 +459,51 @@ describe('SessionManager spawn-per-turn child handlers (opencode-cli)', () => {
     expect(preview).not.toContain('session.id=test');
   });
 
+  it('treats PTY-merged OpenCode diagnostic stdout as watchdog progress, not provider JSON', async () => {
+    const events: AgentEvent[] = [];
+    const { sm } = await makeOpencodeSession({ onEvent: (event: AgentEvent) => events.push(event) });
+    await sm.sendTurn('hello');
+    events.length = 0;
+    const tick = vi.spyOn(sm, 'tickWatchdog');
+
+    child.stdout.emit('data', Buffer.from(
+      'timestamp=2026-08-07T05:49:16.000Z level=INFO run=runtime-test message=loop session.id=test\n',
+    ));
+
+    expect(tick).toHaveBeenCalledTimes(1);
+    expect(events).toEqual([]);
+  });
+
+  it('accepts the exact script(1) startup artifact before a PTY-merged diagnostic line', async () => {
+    const events: AgentEvent[] = [];
+    const { sm } = await makeOpencodeSession({ onEvent: (event: AgentEvent) => events.push(event) });
+    await sm.sendTurn('hello');
+    events.length = 0;
+    const tick = vi.spyOn(sm, 'tickWatchdog');
+
+    child.stdout.emit('data', Buffer.from(
+      '^D\b\btimestamp=2026-08-07T05:49:16.000Z level=INFO run=runtime-test message=loop\n',
+    ));
+
+    expect(tick).toHaveBeenCalledTimes(1);
+    expect(events).toEqual([]);
+  });
+
+  it('treats a PTY-merged OpenCode permission rejection as diagnostic progress', async () => {
+    const events: AgentEvent[] = [];
+    const { sm } = await makeOpencodeSession({ onEvent: (event: AgentEvent) => events.push(event) });
+    await sm.sendTurn('hello');
+    events.length = 0;
+    const tick = vi.spyOn(sm, 'tickWatchdog');
+
+    child.stdout.emit('data', Buffer.from(
+      '\x1b[93m\x1b[1m! \x1b[0mpermission requested: external_directory (/tmp/*); auto-rejecting\n',
+    ));
+
+    expect(tick).toHaveBeenCalledTimes(1);
+    expect(events).toEqual([]);
+  });
+
   it('recognizes fragmented progress lines and preserves adjacent raw crash diagnostics', async () => {
     const { sm } = await makeOpencodeSession();
     await sm.sendTurn('hello');

@@ -19,6 +19,8 @@
       "expected": "always_on",
       "service": "com.whatsoup.clanka",
       "healthPort": 9096,
+      "expectProviderProbe": true,
+      "expectOpenCodeFunctionalProbe": true,
       "primaryPhoneOwner": "instance:clanka"
     }
   ]

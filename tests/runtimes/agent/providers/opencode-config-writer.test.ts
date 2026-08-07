@@ -94,9 +94,9 @@ describe('mergeOpencodeConfig — merge without clobbering', () => {
 
   it('does NOT add a provider block when no baseUrl is set', () => {
     const merged = mergeOpencodeConfig(null, generatedMcp(), { model: 'x' });
-    // Without a baseUrl the merge contains only the managed MCP block:
-    // no `provider` block and no top-level `model` rewrite leaks in.
-    expect(Object.keys(merged)).toEqual(['mcp']);
+    // Without a baseUrl the merge contains only the managed MCP block and
+    // runtime-owned send deny: no provider/model rewrite leaks in.
+    expect(Object.keys(merged)).toEqual(['mcp', 'permission']);
   });
 });
 
@@ -160,7 +160,7 @@ describe('mergeOpencodeConfig — provider block apiKey env interpolation', () =
       model: 'MiniMax-M2',
       apiKeyService: 'minimax',
     });
-    expect(Object.keys(merged)).toEqual(['mcp']);
+    expect(Object.keys(merged)).toEqual(['mcp', 'permission']);
   });
 });
 

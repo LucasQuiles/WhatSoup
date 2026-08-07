@@ -1066,8 +1066,8 @@ describe('fresh-spawn context preamble (P4 — effect-free by construction)', ()
 
   function recentRows() {
     return [
-      { timestamp: 1_784_300_000, senderName: 'Lucas', senderJid: chatJid, content: 'earlier message two' },
-      { timestamp: 1_784_299_000, senderName: 'q', senderJid: '15550003333@s.whatsapp.net', content: 'earlier message one' },
+      { timestamp: 1_784_299_000, senderName: 'q', senderJid: '15550003333@s.whatsapp.net', content: 'earlier message one', isFromMe: true },
+      { timestamp: 1_784_300_000, senderName: 'Lucas', senderJid: chatJid, content: 'earlier message two', isFromMe: false },
     ];
   }
 
@@ -1098,7 +1098,45 @@ describe('fresh-spawn context preamble (P4 — effect-free by construction)', ()
     }])[0];
     expect(sent.applicationContext[0]).toMatch(/^\[Recent chat context — read before responding\]\n/);
     expect(sent.applicationContext[0]).toContain('earlier message one');
+    expect(sent.applicationContext[0].indexOf('earlier message one'))
+      .toBeLessThan(sent.applicationContext[0].indexOf('earlier message two'));
     expect(sent.userText).toBe('Continue');
+  });
+
+  it('keeps the active inbound request out of recent context so it appears exactly once', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test');
+    const state = runtime as unknown as PollRuntimeState & {
+      sendTurnToSession(
+        session: typeof mockSession,
+        chatJid: string,
+        text: string,
+        mapKey?: string,
+        actorJid?: string,
+      ): Promise<void>;
+    };
+    await runtime.start();
+    vi.mocked(getRecentMessages).mockReturnValue([
+      ...recentRows(),
+      {
+        timestamp: 1_784_301_000,
+        senderName: 'Lucas',
+        senderJid: chatJid,
+        content: 'Continue',
+        isFromMe: false,
+      },
+    ] as ReturnType<typeof getRecentMessages>);
+
+    await state.sendTurnToSession(mockSession, chatJid, 'Continue', undefined, chatJid);
+
+    const sent = (vi.mocked(mockSession.sendTurn).mock.calls[0] as unknown as [{
+      applicationContext: string[];
+      userText: string;
+    }])[0];
+    expect(sent.applicationContext[0]).not.toContain('Continue');
+    expect(sent.userText).toBe('Continue');
+    expect(JSON.stringify(sent).match(/Continue/g)).toHaveLength(1);
   });
 
   it('sends the plain user text when no recent history exists', async () => {

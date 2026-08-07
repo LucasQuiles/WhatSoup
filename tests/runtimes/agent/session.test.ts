@@ -4598,6 +4598,20 @@ describe('buildSystemPrompt edge cases', () => {
     );
   });
 
+  it('makes live-turn text delivery authoritative over the send_message tool', () => {
+    const sm = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'opencode-cli',
+    });
+
+    expect(sm.buildSystemPrompt()).toContain(
+      'Never call send_message for that same answer; the runtime delivers reply text automatically.',
+    );
+  });
+
   it('does not add OpenCode compaction guidance to other providers', () => {
     const sm = new SessionManager({
       db: makeDb(),
@@ -5871,7 +5885,7 @@ describe('opencode-cli session resume via sessionId', () => {
     expect(secondSpawnArgs).not.toContain('--session');
   });
 
-  it('places runtime application context before the separately labeled user message', async () => {
+  it('writes runtime application context and user message to OpenCode stdin, not argv', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
     const sm = new SessionManager({
@@ -5889,7 +5903,9 @@ describe('opencode-cli session resume via sessionId', () => {
     });
 
     const args: string[] = (spawn as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[1] ?? [];
-    const prompt = args.at(-1) ?? '';
+    const prompt = String(turnChild.stdin.end.mock.calls.at(-1)?.[0] ?? '');
+    expect(args.join('\n')).not.toContain('receipt=2026-05-28T20:26:40.000Z age=95');
+    expect(args.join('\n')).not.toContain('stop that flow now');
     expect(prompt).toContain('Application context (runtime-provided):\nreceipt=2026-05-28T20:26:40.000Z age=95');
     expect(prompt).toContain('User message:\nstop that flow now');
     expect(prompt.indexOf('Application context')).toBeLessThan(prompt.indexOf('User message:'));

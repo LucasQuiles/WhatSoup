@@ -86,13 +86,14 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "1f604c1be760d1bbfdee6a699d97f006f70392c0d5bda7a04cb9dc8b4f19778f",
+      "sha256": "ae59319a38b0b81d0dcbc8ccd631240dbebd9c642550c92d29d99d9186e5d373",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
         "q_loop_state_inventory",
         "RUNTIME_MANIFEST_FAILURE_RE",
         "provider_probe_inventory",
+        "validate_opencode_functional_jsonl",
         "provider_usage_limit",
         "credential_item_status",
         "credential_item_status_acceptable",

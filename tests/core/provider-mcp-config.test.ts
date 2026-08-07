@@ -187,10 +187,40 @@ describe('generateMcpConfigFile', () => {
 // path on the unset branch.
 // ---------------------------------------------------------------------------
 describe('mergeOpencodeConfig', () => {
-  it('seeds only mcp.whatsoup and never synthesizes an inline agent policy', () => {
+  it('denies the OpenCode current-chat text send tool while preserving sibling permissions', () => {
+    const merged = mergeOpencodeConfig({
+      permission: { '*': 'ask', bash: 'allow' },
+    }, generated());
+
+    expect(merged.permission).toEqual({
+      '*': 'ask',
+      bash: 'allow',
+      whatsoup_send_message: 'deny',
+    });
+  });
+
+  it('converts a scalar permission default and keeps the text-send deny explicit', () => {
+    const merged = mergeOpencodeConfig({ permission: 'allow' }, generated());
+
+    expect(merged.permission).toEqual({
+      '*': 'allow',
+      whatsoup_send_message: 'deny',
+    });
+  });
+
+  it('does not let a stale allow override the runtime-owned text-send deny', () => {
+    const merged = mergeOpencodeConfig({
+      permission: { whatsoup_send_message: 'allow' },
+    }, generated());
+
+    expect(merged.permission).toEqual({ whatsoup_send_message: 'deny' });
+  });
+
+  it('seeds mcp.whatsoup plus the text-send deny without an inline agent policy', () => {
     const merged = mergeOpencodeConfig(null, generated());
-    expect(Object.keys(merged)).toEqual(['mcp']);
+    expect(Object.keys(merged)).toEqual(['mcp', 'permission']);
     expect(merged.mcp).toHaveProperty('whatsoup');
+    expect(merged.permission).toEqual({ whatsoup_send_message: 'deny' });
     expect(merged).not.toHaveProperty('agent');
   });
 
@@ -214,7 +244,10 @@ describe('mergeOpencodeConfig', () => {
       },
     }, generated());
 
-    expect(merged.permission).toEqual(globalPermission);
+    expect(merged.permission).toEqual({
+      ...globalPermission,
+      whatsoup_send_message: 'deny',
+    });
     const agents = merged.agent as Record<string, Record<string, unknown>>;
     expect(agents.personal).toEqual(userAgent);
     expect(agents).not.toHaveProperty('whatsoup-headless');
@@ -454,8 +487,9 @@ describe('writeProviderMcpConfig', () => {
     const target = writeProviderMcpConfig('opencode-cli', '/agent', SOCKET, PROXY);
     expect(target).toBe(join('/agent', 'opencode.json'));
     const parsed = JSON.parse(mockWritePrivate.mock.calls[0][1]);
-    expect(Object.keys(parsed)).toEqual(['mcp']);
+    expect(Object.keys(parsed)).toEqual(['mcp', 'permission']);
     expect(parsed.mcp.whatsoup.environment).toEqual({ WHATSOUP_SOCKET: SOCKET });
+    expect(parsed.permission).toEqual({ whatsoup_send_message: 'deny' });
     expect(parsed).not.toHaveProperty('agent');
   });
 
@@ -564,7 +598,7 @@ describe('writeProviderMcpConfig', () => {
       model: 'm',
     });
     const parsed = JSON.parse(mockWritePrivate.mock.calls[0][1]);
-    expect(Object.keys(parsed)).toEqual(['mcp', 'provider', 'model']);
+    expect(Object.keys(parsed)).toEqual(['mcp', 'permission', 'provider', 'model']);
     expect(parsed.model).toBe('whatsoup-cloud/m');
     const provider = parsed.provider as Record<string, Record<string, Record<string, unknown>>>;
     expect(provider['whatsoup-cloud'].options.baseURL).toBe('https://api.example.com/v1');

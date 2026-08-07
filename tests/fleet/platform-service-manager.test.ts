@@ -432,6 +432,47 @@ describe('platform service managers', () => {
     expect(childProcessMocks.execFile).not.toHaveBeenCalled();
   });
 
+  it('retries a transient launchd bootstrap I/O error after bootout settles', async () => {
+    vi.useFakeTimers();
+    setPlatform('darwin');
+    fsMocks.readFileSync.mockReturnValue(generatedPlistIdentity());
+    childProcessMocks.execFile
+      .mockImplementationOnce((_cmd, _args, optionsOrCallback, maybeCallback) => {
+        const callback = typeof optionsOrCallback === 'function' ? optionsOrCallback : maybeCallback;
+        queueMicrotask(() => callback?.(null, '', ''));
+        return new EventEmitter();
+      })
+      .mockImplementationOnce((_cmd, _args, optionsOrCallback, maybeCallback) => {
+        const callback = typeof optionsOrCallback === 'function' ? optionsOrCallback : maybeCallback;
+        const error = Object.assign(new Error('Bootstrap failed: 5: Input/output error'), {
+          code: 5,
+          stderr: 'Bootstrap failed: 5: Input/output error',
+        });
+        queueMicrotask(() => callback?.(error, '', error.stderr));
+        return new EventEmitter();
+      })
+      .mockImplementation((_cmd, _args, optionsOrCallback, maybeCallback) => {
+        const callback = typeof optionsOrCallback === 'function' ? optionsOrCallback : maybeCallback;
+        queueMicrotask(() => callback?.(null, '', ''));
+        return new EventEmitter();
+      });
+    const { reconcileLaunchdPlist } = await importPlatform();
+
+    const reconciliation = reconcileLaunchdPlist('agent', {});
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    await expect(reconciliation).resolves.toMatchObject({
+      label: 'com.whatsoup.agent',
+      dryRun: false,
+    });
+    const domain = `gui/${currentUid()}`;
+    const plist = '/tmp/whatsoup-home/Library/LaunchAgents/com.whatsoup.agent.plist';
+    expect(childProcessMocks.execFile).toHaveBeenNthCalledWith(1, 'launchctl', ['bootout', `${domain}/com.whatsoup.agent`], expect.any(Function));
+    expect(childProcessMocks.execFile).toHaveBeenNthCalledWith(2, 'launchctl', ['bootstrap', domain, plist], expect.any(Function));
+    expect(childProcessMocks.execFile).toHaveBeenNthCalledWith(3, 'launchctl', ['bootstrap', domain, plist], expect.any(Function));
+    expect(childProcessMocks.execFile).toHaveBeenNthCalledWith(4, 'launchctl', ['kickstart', '-k', `${domain}/com.whatsoup.agent`], expect.any(Function));
+  });
+
   it('restores the prior plist and job when launchd reload fails', async () => {
     setPlatform('darwin');
     const plist = '/tmp/whatsoup-home/Library/LaunchAgents/com.whatsoup.agent.plist';

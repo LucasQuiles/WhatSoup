@@ -3442,6 +3442,80 @@ def opencode_provider_probe_command(profile: dict[str, Any], item: dict[str, Any
     return executable_candidate("opencode") or "opencode"
 
 
+def opencode_functional_probe_enabled(profile: dict[str, Any], item: dict[str, Any]) -> bool:
+    return profile_bool(
+        item,
+        "expectOpenCodeFunctionalProbe",
+        profile_bool(profile, "expectOpenCodeFunctionalProbe", False),
+    )
+
+
+OPENCODE_DIAGNOSTIC_LOG_RE = re.compile(
+    r"^(?:\^D\x08\x08)?timestamp=\S+\s+level=(?:TRACE|DEBUG|INFO|WARN|ERROR)\b"
+)
+
+
+def validate_opencode_functional_jsonl(stdout: str) -> tuple[bool, str]:
+    records: list[dict[str, Any]] = []
+    for line in stdout.splitlines():
+        if not line.strip():
+            continue
+        if OPENCODE_DIAGNOSTIC_LOG_RE.match(line):
+            continue
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            return False, "provider_stream_invalid_jsonl"
+        if not isinstance(parsed, dict):
+            return False, "provider_stream_invalid_event"
+        records.append(parsed)
+
+    if not records:
+        return False, "provider_stream_empty"
+    if not any(record.get("type") == "step_start" for record in records):
+        return False, "provider_stream_missing_step_start"
+    if not any(
+        record.get("type") == "text"
+        and isinstance(record.get("part"), dict)
+        and isinstance(record["part"].get("text"), str)
+        and bool(record["part"]["text"].strip())
+        for record in records
+    ):
+        return False, "provider_stream_missing_text"
+    if not any(
+        record.get("type") == "step_finish"
+        and isinstance(record.get("part"), dict)
+        and record["part"].get("reason") == "stop"
+        for record in records
+    ):
+        return False, "provider_stream_missing_terminal"
+    return True, "ok"
+
+
+def opencode_functional_probe_args(command: str, data: dict[str, Any], target: str) -> list[str]:
+    agent_options = agent_options_from_config(data)
+    config_key = "fallbackProviderConfig" if target == "fallback" else "providerConfig"
+    provider_config = agent_options.get(config_key) if isinstance(agent_options.get(config_key), dict) else {}
+    args = [
+        command,
+        "run",
+        "--format",
+        "json",
+        "--pure",
+        "--print-logs",
+        "--log-level",
+        "INFO",
+    ]
+    execution_profile = provider_config.get("executionProfile")
+    if isinstance(execution_profile, str) and execution_profile.strip():
+        args.extend(["--agent", execution_profile.strip()])
+    model = provider_model_from_config(data, target)
+    base_url = provider_config.get("baseUrl")
+    if model and not (isinstance(base_url, str) and base_url.strip()):
+        args.extend(["-m", model])
+    return args
+
+
 def opencode_provider_probe_inventory(
     profile: dict[str, Any],
     item: dict[str, Any],
@@ -3535,7 +3609,54 @@ def opencode_provider_probe_inventory(
         )]
 
     credential_suffix = " " + " ".join(credential_fragments) if credential_fragments else ""
-    return [f"{base} status=ok model_override=true session_resume=true{credential_suffix}"]
+    if not opencode_functional_probe_enabled(profile, item):
+        return [f"{base} status=ok model_override=true session_resume=true functional_status=skipped{credential_suffix}"]
+
+    if env_flag("BOT_ERRORS_DRY_OPENCODE_FUNCTIONAL_TIMEOUT", False):
+        return [(
+            f"FAIL {base} failure_class=provider_timeout functional_status=failed "
+            f"functional_timeout_seconds={timeout_seconds}{credential_suffix}"
+        )]
+
+    try:
+        functional_stdout, functional_stderr, functional_rc, functional_timed_out = provider_command_output(
+            opencode_functional_probe_args(command, data, target),
+            timeout_seconds,
+            "BOT_ERRORS_DRY_OPENCODE_FUNCTIONAL_STDOUT",
+            "BOT_ERRORS_DRY_OPENCODE_FUNCTIONAL_STDERR",
+            "BOT_ERRORS_DRY_OPENCODE_FUNCTIONAL_RC",
+            "Reply with exactly OK.\n",
+        )
+    except subprocess.TimeoutExpired:
+        return [(
+            f"FAIL {base} failure_class=provider_timeout functional_status=failed "
+            f"functional_timeout_seconds={timeout_seconds}{credential_suffix}"
+        )]
+    except Exception as exc:  # noqa: BLE001 - daily health must report functional probe failures.
+        return [(
+            f"FAIL {base} failure_class=provider_probe_failed functional_status=failed "
+            f"error={redact_evidence_string(str(exc), 180)}{credential_suffix}"
+        )]
+
+    combined = "\n".join(part for part in [functional_stdout, functional_stderr] if part)
+    functional_failure = classify_provider_probe_failure(combined, functional_rc, functional_timed_out)
+    if functional_failure:
+        return [(
+            f"FAIL {base} failure_class={functional_failure} functional_status=failed "
+            f"functional_rc={functional_rc}{credential_suffix}"
+        )]
+
+    valid_jsonl, stream_status = validate_opencode_functional_jsonl(functional_stdout)
+    if not valid_jsonl:
+        return [(
+            f"FAIL {base} failure_class={stream_status} functional_status=failed "
+            f"functional_rc={functional_rc}{credential_suffix}"
+        )]
+
+    return [(
+        f"{base} status=ok model_override=true session_resume=true "
+        f"functional_status=ok functional_rc={functional_rc}{credential_suffix}"
+    )]
 
 
 def provider_command_output(
@@ -3544,6 +3665,7 @@ def provider_command_output(
     dry_stdout_env: str,
     dry_stderr_env: str,
     dry_rc_env: str,
+    input_text: str | None = None,
 ) -> tuple[str, str, int, bool]:
     dry_stdout = os.environ.get(dry_stdout_env)
     dry_stderr = os.environ.get(dry_stderr_env, "")
@@ -3553,6 +3675,7 @@ def provider_command_output(
     proc = subprocess.run(
         command,
         capture_output=True,
+        input=input_text,
         text=True,
         timeout=timeout_seconds,
         check=False,

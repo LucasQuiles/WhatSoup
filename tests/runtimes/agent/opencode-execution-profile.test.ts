@@ -41,6 +41,24 @@ describe('OpenCode execution profile', () => {
     expect(openCodeAgentArgs({})).toEqual([]);
   });
 
+  it('adds --auto only for the explicit autoApprovePermissions opt-in', () => {
+    const optedIn = buildOpenCodeRunArgs({
+      providerConfig: { autoApprovePermissions: true },
+      model: 'minimax/MiniMax-M3',
+      prompt: 'fallback turn',
+      progressLogs: true,
+    });
+    const defaultArgs = buildOpenCodeRunArgs({
+      providerConfig: {},
+      model: 'minimax/MiniMax-M3',
+      prompt: 'fallback turn',
+      progressLogs: true,
+    });
+
+    expect(occurrences(optedIn, '--auto')).toBe(1);
+    expect(defaultArgs).not.toContain('--auto');
+  });
+
   it('selects the configured profile exactly once on fresh and resumed turns', () => {
     const fresh = buildOpenCodeRunArgs({
       providerConfig: PROFILE_CONFIG,

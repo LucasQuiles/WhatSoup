@@ -91,6 +91,44 @@ describe('OpenCode parser — boundary inputs', () => {
     expect(p.parse('{ no')).toEqual({ type: 'parse_error', line: '{ no' });
   });
 
+  it('normalizes the exact script(1) startup artifact on the first non-blank record', () => {
+    const p = createOpenCodeParser();
+    const record = JSON.stringify({ type: 'step_start', sessionID: 'headless-session' });
+
+    expect(p.parse('   ')).toBeNull();
+    expect(p.parse(`^D\b\b${record}`)).toEqual({
+      type: 'init',
+      sessionId: 'headless-session',
+    });
+  });
+
+  it('keeps the startup artifact fail-closed after the first non-blank record', () => {
+    const p = createOpenCodeParser();
+    const first = JSON.stringify({ type: 'step_start', sessionID: 'clean-session' });
+    const later = `^D\b\b${JSON.stringify({ type: 'text', part: { text: 'late' } })}`;
+
+    expect(p.parse(first)).toEqual({ type: 'init', sessionId: 'clean-session' });
+    expect(p.parse(later)).toEqual({ type: 'parse_error', line: later });
+  });
+
+  it('reset restores first-record startup normalization', () => {
+    const p = createOpenCodeParser();
+    p.parse(JSON.stringify({ type: 'step_start', sessionID: 'before-reset' }));
+    p.reset();
+
+    expect(p.parse(`^D\b\b${JSON.stringify({ type: 'step_start', sessionID: 'after-reset' })}`)).toEqual({
+      type: 'init',
+      sessionId: 'after-reset',
+    });
+  });
+
+  it('does not normalize unknown first-record control prefixes', () => {
+    const p = createOpenCodeParser();
+    const line = `\u0004\b\b${JSON.stringify({ type: 'step_start', sessionID: 'unknown-prefix' })}`;
+
+    expect(p.parse(line)).toEqual({ type: 'parse_error', line });
+  });
+
   it('non-object parsed value → unknown', () => {
     const p = createOpenCodeParser();
     expect(p.parse('"text"')).toEqual({ type: 'unknown', raw: 'text' });

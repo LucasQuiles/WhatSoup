@@ -308,7 +308,8 @@ export function writeMcpConfigToPath(
  * Merge the generated opencode `mcp` block into a possibly-existing
  * opencode.json object. Pure — does no IO. Preserves every unrelated top-level
  * key, sibling MCP server, and fleet/user-owned agent policy; overwrites only
- * generated MCP entries.
+ * generated MCP entries and the current-chat text-send deny owned by the
+ * spawn-per-turn delivery contract.
  */
 export function mergeOpencodeConfig(
   existing: Record<string, unknown> | null,
@@ -322,6 +323,15 @@ export function mergeOpencodeConfig(
     ? (base.mcp as Record<string, unknown>)
     : {};
   base.mcp = { ...existingMcp, ...generatedMcp };
+
+  const existingPermission = base.permission;
+  base.permission = {
+    ...(typeof existingPermission === 'string' ? { '*': existingPermission } : {}),
+    ...(existingPermission && typeof existingPermission === 'object' && !Array.isArray(existingPermission)
+      ? existingPermission as Record<string, unknown>
+      : {}),
+    whatsoup_send_message: 'deny',
+  };
 
   if (base.agent && typeof base.agent === 'object' && !Array.isArray(base.agent)) {
     const existingAgents = { ...(base.agent as Record<string, unknown>) };

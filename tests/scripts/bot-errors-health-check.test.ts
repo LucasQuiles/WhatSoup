@@ -125,6 +125,39 @@ function importHealthModulePrelude(): string {
   ].join('\n');
 }
 
+function runOpenCodeFallbackProbeInventory(
+  functionalStdout: string,
+  options: { timeout?: boolean } = {},
+): string[] {
+  return JSON.parse(python([
+    importHealthModulePrelude(),
+    'import json',
+    'import os',
+    `functional_stdout = ${JSON.stringify(functionalStdout)}`,
+    'def fake_provider_command_output(command, timeout_seconds, dry_stdout_env, dry_stderr_env, dry_rc_env, input_text=None):',
+    '    if dry_stdout_env == "BOT_ERRORS_DRY_OPENCODE_VERSION_STDOUT":',
+    '        return "1.2.3", "", 0, False',
+    '    if dry_stdout_env in {"BOT_ERRORS_DRY_OPENCODE_HELP_STDOUT", "BOT_ERRORS_DRY_OPENCODE_RUN_HELP_STDOUT"}:',
+    '        return "Usage: opencode run [flags]\\n  --format string\\n  --pure\\n  -m, --model string", "", 0, False',
+    '    if dry_stdout_env == "BOT_ERRORS_DRY_OPENCODE_FUNCTIONAL_STDOUT":',
+    '        assert "--print-logs" in command',
+    '        assert command[command.index("--log-level") + 1] == "INFO"',
+    '        assert "Reply with exactly OK." not in command',
+    '        assert input_text == "Reply with exactly OK.\\n"',
+    '        return functional_stdout, "", 0, False',
+    '    raise AssertionError(f"unexpected probe surface: {dry_stdout_env}")',
+    'm.provider_command_output = fake_provider_command_output',
+    'm.opencode_provider_probe_command = lambda profile, item: "/fixture/opencode"',
+    'm.opencode_provider_credential_fragments = lambda data, target, timeout: (True, ["credential_present=true"])',
+    ...(options.timeout ? ['os.environ["BOT_ERRORS_DRY_OPENCODE_FUNCTIONAL_TIMEOUT"] = "1"'] : []),
+    'profile = {}',
+    'item = {"expectOpenCodeFunctionalProbe": True}',
+    'data = {"agentOptions": {"fallbackModel": "minimax/MiniMax-M2.7", "fallbackProviderConfig": {"opencodeCommandMode": "modern-run"}}}',
+    'lines = m.opencode_provider_probe_inventory(profile, item, "agent-alpha", data, "opencode-cli", "fallback")',
+    'print(json.dumps(lines))',
+  ].join('\n'))) as string[];
+}
+
 function runDeadman(tmpRoot: string, extraEnv: Record<string, string> = {}) {
   return spawnSync('python3', [
     'deploy/scripts/bot-errors-health-check.py',
@@ -5064,6 +5097,62 @@ print(m.probe_health(9092))
     expect(event.evidence).not.toContain('FAIL provider_probe agent-alpha');
     expect(event.evidence).not.toContain('session_limit');
     expect(event.evidence).not.toContain('agent-alpha@s.whatsapp.net');
+  });
+
+  describe('OpenCode fallback provider probe functional JSONL canary', () => {
+    const stepStart = JSON.stringify({ type: 'step_start', sessionID: 'canary-session' });
+    const textRecord = JSON.stringify({ type: 'text', part: { text: 'OK' } });
+    const terminal = JSON.stringify({ type: 'step_finish', part: { reason: 'stop' } });
+
+    it('accepts a complete headless turn with valid JSONL and terminal output', () => {
+      const lines = runOpenCodeFallbackProbeInventory([stepStart, textRecord, terminal].join('\n'));
+
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain('status=ok');
+      expect(lines[0]).toContain('functional_status=ok');
+      expect(lines[0]).not.toContain('Reply with exactly');
+    });
+
+    it('accepts only recognized PTY-merged OpenCode diagnostics around a complete turn', () => {
+      const diagnostic = 'timestamp=2026-08-07T05:49:16.000Z level=INFO run=health message=loop';
+      const lines = runOpenCodeFallbackProbeInventory([
+        `^D\b\b${diagnostic}`,
+        stepStart,
+        textRecord,
+        diagnostic,
+        terminal,
+      ].join('\n'));
+
+      expect(lines[0]).toContain('status=ok');
+      expect(lines[0]).toContain('functional_status=ok');
+    });
+
+    it('fails closed when the first JSONL record contains the script(1) PTY artifact', () => {
+      const lines = runOpenCodeFallbackProbeInventory([
+        `^D\b\b${stepStart}`,
+        textRecord,
+        terminal,
+      ].join('\n'));
+
+      expect(lines[0]).toContain('FAIL provider_probe agent-alpha');
+      expect(lines[0]).toContain('failure_class=provider_stream_invalid_jsonl');
+      expect(lines[0]).not.toContain('canary-session');
+      expect(lines[0]).not.toContain('OK');
+    });
+
+    it('fails when valid JSONL never reaches a terminal step_finish', () => {
+      const lines = runOpenCodeFallbackProbeInventory([stepStart, textRecord].join('\n'));
+
+      expect(lines[0]).toContain('FAIL provider_probe agent-alpha');
+      expect(lines[0]).toContain('failure_class=provider_stream_missing_terminal');
+    });
+
+    it('fails closed when the bounded functional turn times out', () => {
+      const lines = runOpenCodeFallbackProbeInventory('', { timeout: true });
+
+      expect(lines[0]).toContain('FAIL provider_probe agent-alpha');
+      expect(lines[0]).toContain('failure_class=provider_timeout');
+    });
   });
 
   it('alerts when an OpenCode fallback/provider install only supports the degraded legacy one-shot contract', () => {
