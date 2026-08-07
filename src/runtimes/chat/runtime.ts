@@ -560,6 +560,7 @@ export class ChatRuntime implements Runtime {
         'primary provider response',
       );
       clearAlertSourceChecked(this.botName, 'llm_total_failure');
+      clearAlertSourceChecked(this.botName, 'llm_primary_failure');
     } catch (primaryErr) {
       if (primaryErr instanceof DatabaseCompatibilityError) throw primaryErr;
       log.warn({ step: 'primary', provider: this.primaryProvider.name, model: conversationModel, attempt: 1, error: (primaryErr as Error)?.message ?? 'unknown', elapsed_ms: Date.now() - llmStart, traceId }, 'llm_attempt_failed');
@@ -572,9 +573,11 @@ export class ChatRuntime implements Runtime {
         llmDurationMs = Date.now() - llmStart;
         responseText = null;
         failureCause = primaryErr.code === 'LLM_AUTH_ERROR' ? 'auth' : 'rate-limited';
+        // #2416: auth/rate-limit errors do NOT test the fallback route — emit
+        // llm_primary_failure (not llm_total_failure) to avoid false all-route outage.
         emitAlertChecked(
           this.botName,
-          'llm_total_failure',
+          'llm_primary_failure',
           `LLM ${primaryErr.code} for ${this.botName} (${this.primaryProvider.name})`,
           `model=${conversationModel} traceId=${traceId} error=${primaryErr.message}`,
         );
@@ -597,6 +600,7 @@ export class ChatRuntime implements Runtime {
           outputTokens = result.outputTokens;
           llmDurationMs = Date.now() - llmStart;
           clearAlertSourceChecked(this.botName, 'llm_total_failure');
+          clearAlertSourceChecked(this.botName, 'llm_primary_failure');
         } catch (fallbackErr) {
           if (fallbackErr instanceof DatabaseCompatibilityError) throw fallbackErr;
           log.error({ traceId, err: fallbackErr }, 'fallback also failed after primary 400');
@@ -627,6 +631,7 @@ export class ChatRuntime implements Runtime {
           'primary provider response (retry)',
         );
         clearAlertSourceChecked(this.botName, 'llm_total_failure');
+        clearAlertSourceChecked(this.botName, 'llm_primary_failure');
       } catch (retryErr) {
         if (retryErr instanceof DatabaseCompatibilityError) throw retryErr;
         log.warn({ step: 'retry', provider: this.primaryProvider.name, model: conversationModel, attempt: 2, error: (retryErr as Error)?.message ?? 'unknown', elapsed_ms: Date.now() - llmStart, traceId }, 'llm_attempt_failed');
@@ -649,6 +654,7 @@ export class ChatRuntime implements Runtime {
             'fallback provider response',
           );
           clearAlertSourceChecked(this.botName, 'llm_total_failure');
+          clearAlertSourceChecked(this.botName, 'llm_primary_failure');
         } catch (fallbackErr) {
           if (fallbackErr instanceof DatabaseCompatibilityError) throw fallbackErr;
           log.warn({ step: 'fallback', provider: this.fallbackProvider.name, model: fallbackModel, attempt: 3, error: (fallbackErr as Error)?.message ?? 'unknown', elapsed_ms: Date.now() - llmStart, traceId }, 'llm_attempt_failed');

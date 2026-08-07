@@ -5120,8 +5120,17 @@ export class AgentRuntime implements Runtime {
   private resolveTurnRecoveryDispatchTarget(job: TurnRecoveryJobRow): TurnRecoveryDispatchTarget | null {
     if (job.scope !== 'per_chat') return null;
     const mapKey = this.resolvePerChatMapKey(job.delivery_jid);
-    const session = this.chatSessions.get(mapKey);
-    if (!session?.getStatus().active) return null;
+    let session = this.chatSessions.get(mapKey);
+    if (!session?.getStatus().active) {
+      // #2169: cold per_chat turn recovery — create session proactively when
+      // the in-memory session map has none (e.g. after cold restart before any
+      // inbound message arrives for this conversation).
+      if (!this.chatSessions.has(mapKey)) {
+        this.ensureSessionAndQueueSync(job.delivery_jid, mapKey);
+        session = this.chatSessions.get(mapKey);
+      }
+      if (!session?.getStatus().active) return null;
+    }
     const managerId = this.sessionManagerIds.get(session);
     const owner = managerId ? this.sessionOwnership.get(mapKey) : undefined;
     if (

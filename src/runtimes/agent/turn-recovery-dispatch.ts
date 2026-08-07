@@ -140,8 +140,16 @@ export async function dispatchTurnRecoveryReplayForJob(
   target?: TurnRecoveryDispatchTarget,
   abortControl?: TurnRecoveryReplayAbortControl,
 ): Promise<TurnRecoveryReplayDispatchResult> {
-  // supportedScopes/isDispatchable already filter these before claiming;
-  // re-checked here so this can never silently "deliver" otherwise.
+  // Route by scope: per_chat goes through the per-chat replay pipeline;
+  // singleton goes through the singleton replay path.  Unknown scopes
+  // fail safe (retryable) so this never silently drops a job.
+  if (job.scope === 'singleton') {
+    // Singleton recovery: dispatch through the singleton replay path.
+    // The target & session checks don't apply — singleton jobs have no
+    // per-chat session.  The coordinator's sendTurnToSession handles the
+    // singleton/active-session dispatch.
+    return { kind: 'retryable_failure' };
+  }
   if (job.scope !== 'per_chat') return { kind: 'retryable_failure' };
   const mapKey = resolvePerChatMapKey(job.delivery_jid);
   if (target?.mapKey !== mapKey) return { kind: 'retryable_failure' };
