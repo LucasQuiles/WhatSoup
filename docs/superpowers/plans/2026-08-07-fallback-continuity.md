@@ -29,21 +29,21 @@
 - Consumes: `createOpenCodeParser(): OpenCodeParser`
 - Produces: unchanged `OpenCodeParser.parse(line): AgentEvent | null` with exact first-record startup normalization
 
-- [ ] **Step 1: Write failing parser tests**
+- [x] **Step 1: Write failing parser tests**
 
 Add tests proving `^D\b\b{...step_start...}` emits `init` only on the first non-blank record, reset restores that allowance, and the same prefix on a later record remains `parse_error`.
 
-- [ ] **Step 2: Run the parser test and verify RED**
+- [x] **Step 2: Run the parser test and verify RED**
 
 Run: `npm test -- tests/runtimes/agent/providers/opencode-parser.test.ts --pool=forks --fileParallelism=false --retry=0`
 
 Expected: the startup-artifact tests fail because `JSON.parse` receives the prefix.
 
-- [ ] **Step 3: Implement the minimal parser normalization**
+- [x] **Step 3: Implement the minimal parser normalization**
 
 Track whether the parser has consumed its first non-blank record. Before the first parse only, replace `/^\^D\x08\x08(?=\{)/` with an empty string. Mark the first record consumed regardless of parse success, and reset both parser state flags in `reset()`.
 
-- [ ] **Step 4: Run focused parser suites and verify GREEN**
+- [x] **Step 4: Run focused parser suites and verify GREEN**
 
 Run:
 
@@ -53,7 +53,7 @@ npm test -- tests/runtimes/agent/providers/opencode-parser.test.ts tests/runtime
 
 Expected: all selected tests pass with no masked failures.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/runtimes/agent/providers/opencode-parser.ts tests/runtimes/agent/providers/opencode-parser.test.ts
@@ -71,25 +71,25 @@ git commit -m "fix(agent): normalize OpenCode headless startup record"
 - Consumes: `opencode_provider_probe_inventory(...) -> list[str]`, existing dry-run provider probe environment
 - Produces: structural JSONL validation requiring `step_start` and terminal `step_finish(reason=stop)` for opt-in modern-run probes
 
-- [ ] **Step 1: Write failing health-check fixtures**
+- [x] **Step 1: Write failing health-check fixtures**
 
 Add hermetic cases for valid terminal JSONL, `^D\b\b`-corrupted first JSONL, valid but non-terminal JSONL, and a bounded timeout. Assert distinct failure classes and confirm evidence contains no prompt or credential value.
 
-- [ ] **Step 2: Run the selected health-check cases and verify RED**
+- [x] **Step 2: Run the selected health-check cases and verify RED**
 
 Run: `npm test -- tests/scripts/bot-errors-health-check.test.ts -t "OpenCode fallback provider probe" --pool=forks --fileParallelism=false --retry=0`
 
 Expected: functional-probe assertions fail because current inventory only checks version/help and credential presence.
 
-- [ ] **Step 3: Implement the bounded functional probe**
+- [x] **Step 3: Implement the bounded functional probe**
 
 Add a validator that accepts only the closed OpenCode diagnostic grammar outside JSONL, parses every remaining non-blank stdout line, rejects malformed records, requires `step_start`, and requires `step_finish` with `part.reason == "stop"`. Invoke the exact configured production command as `run --format json --pure --print-logs --log-level INFO -m <model>` and pass the bounded prompt on non-TTY stdin only when the profile opts into the functional canary; reuse the bounded process helper and deterministic dry-run inputs.
 
-- [ ] **Step 4: Enable the canary in the relevant fleet profile defaults**
+- [x] **Step 4: Enable the canary in the relevant fleet profile defaults**
 
 Add the smallest profile flag needed for agent instances with OpenCode fallback. Keep hosts without the supported modern-run contract explicitly skipped rather than silently passed.
 
-- [ ] **Step 5: Run focused health and profile tests and verify GREEN**
+- [x] **Step 5: Run focused health and profile tests and verify GREEN**
 
 Run:
 
@@ -100,7 +100,7 @@ npm run guard:bot-errors-runtime-manifest
 
 Expected: all selected tests and the manifest guard pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add deploy/scripts/bot-errors-health-check.py deploy/health-profiles tests/scripts/bot-errors-health-check.test.ts
@@ -117,21 +117,21 @@ git commit -m "fix(health): prove headless OpenCode fallback turns"
 - Consumes: `getRecentMessages(...): StoredMessage[]` in chronological ascending order and the accepted `userTurnText`
 - Produces: application context in chronological order with the active inbound request omitted when it is the newest matching inbound record
 
-- [ ] **Step 1: Write failing runtime tests**
+- [x] **Step 1: Write failing runtime tests**
 
 Return realistic chronological rows from the `getRecentMessages` mock. Assert the formatted context places the earlier message before the later one and excludes a newest inbound row whose sender/content identify the explicit `userText`.
 
-- [ ] **Step 2: Run the runtime case and verify RED**
+- [x] **Step 2: Run the runtime case and verify RED**
 
 Run: `npm test -- tests/runtimes/agent/runtime-secondhalf-branches.test.ts -t "fresh-spawn context preamble" --pool=forks --fileParallelism=false --retry=0`
 
 Expected: order and active-turn de-duplication assertions fail under `recent.reverse()` and unfiltered history.
 
-- [ ] **Step 3: Implement minimal context preparation**
+- [x] **Step 3: Implement minimal context preparation**
 
 Remove the reverse operation because `getRecentMessages` already returns ascending rows. Filter only the newest matching inbound record for the active sender/content; do not globally deduplicate repeated historical messages. Reuse the resulting helper in resume-failure context recovery where the active turn is known.
 
-- [ ] **Step 4: Run runtime continuity suites and verify GREEN**
+- [x] **Step 4: Run runtime continuity suites and verify GREEN**
 
 Run:
 
@@ -141,7 +141,7 @@ npm test -- tests/runtimes/agent/runtime-secondhalf-branches.test.ts tests/runti
 
 Expected: selected suites pass with chronological, single-occurrence context.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/runtimes/agent/runtime.ts tests/runtimes/agent/runtime-secondhalf-branches.test.ts
@@ -160,7 +160,7 @@ git commit -m "fix(agent): preserve fallback context continuity"
 
 Before live replay, reproduce a tool-using turn with the exact production logging flags. PTY-merged diagnostic lines must advance watchdog liveness and must not enter the JSON parser; unknown non-JSON output remains fatal.
 
-- [ ] **Step 1: Run repository verification**
+- [x] **Step 1: Run repository verification**
 
 Run:
 
@@ -174,27 +174,27 @@ npm run verify:push:branch
 
 Expected: every command passes. If a gate fails for an unrelated baseline condition, retain the exact failure and do not call it clean.
 
-- [ ] **Step 2: Review the branch**
+- [x] **Step 2: Review the branch**
 
 Run `git diff --check`, inspect `git diff origin/main...HEAD`, inspect `git log --oneline origin/main..HEAD`, and verify no secrets, host-private identifiers, forbidden attribution, or unrelated files are present.
 
-- [ ] **Step 3: Install a recoverable host repair**
+- [x] **Step 3: Install a recoverable host repair**
 
 Resolve the live wrapper and service paths read-only, create a timestamped backup, install the minimal exact-prefix scrub or deploy the parser fix, retain permissions, and record before/after hashes without credential content.
 
-- [ ] **Step 4: Validate all execution surfaces**
+- [x] **Step 4: Validate all execution surfaces**
 
 Run the same bounded OpenCode JSONL canary through non-interactive SSH, a launchd-like minimal environment matching the target instance, and an interactive PTY. Require valid records and terminal `step_finish(reason=stop)` on each available surface.
 
-- [ ] **Step 5: Replay through the proven inbound identity**
+- [x] **Step 5: Replay through the proven inbound identity**
 
 Resolve the admin-side sending instance or recovery injection surface, dry-run the exact destination and text `1`, confirm the authorized replay, and record the new agent inbound sequence. Never send `1` from the agent line to the admin because that reverses the request direction.
 
-- [ ] **Step 6: Monitor terminal answer and delivery**
+- [x] **Step 6: Monitor terminal answer and delivery**
 
 Observe fallback selection, provider terminal result, complete persisted outbound response, and terminal echo/delivery for every response operation. Compare the answer to the request represented by option `1`; if it only asks another question or restarts without completion, keep the replay open.
 
-- [ ] **Step 7: Commit final documentation adjustments and push**
+- [x] **Step 7: Commit final documentation adjustments and push**
 
 Run the relevant focused verification again, commit any reviewed documentation/profile receipts that are safe for the public repository, then push with `git push -u origin fix/fallback-continuity` over SSH.
 
@@ -226,14 +226,14 @@ failed against the argv transport before implementation.
 Build OpenCode argv from structural flags only. Write the composed turn once to
 stdin and close it immediately so the non-interactive command receives EOF.
 
-- [ ] **Step 3: Verify locally and on the deployed LaunchAgent**
+- [x] **Step 3: Verify locally and on the deployed LaunchAgent**
 
 Run the full session and OpenCode execution-profile suites, both TypeScript
 checks, the source-runtime manifest guard, and one live fallback replay. During
 the live turn, inspect only process metadata and prove the user text is absent
 from argv without printing the remaining arguments.
 
-- [ ] **Step 4: Commit, push, and include in repository promotion**
+- [x] **Step 4: Commit, push, and include in repository promotion**
 
 Commit the reviewed privacy hardening, rerun the branch push gate, deploy the
 exact pushed commit, and retain the live terminal delivery proof in the private
@@ -271,7 +271,7 @@ Preserve existing OpenCode permissions but force the exact
 `whatsoup_send_message` tool to `deny`; add direct live-turn prompt guidance and
 tests for absent, scalar, sibling, and stale-allow permission shapes.
 
-- [ ] **Step 4: Deploy and prove a single terminal response**
+- [x] **Step 4: Deploy and prove a single terminal response**
 
 Deploy the exact pushed ref, regenerate the instance OpenCode configuration,
 and run one final fallback canary. Require prompt absence from argv, one terminal
@@ -282,3 +282,20 @@ echo, no same-turn non-terminal text send, and a complete inbound disposition.
 Update the source-runtime manifest and work index, run the required branch gate,
 push over SSH, and include the live proof and rollback path in repository
 promotion.
+
+## Verification Receipt
+
+- The clean platform branch passed the repository push gate (50/50), TypeScript
+  checks, runtime-manifest guards, and focused fallback/config/session suites.
+- The repository-wide publication release audit remains non-clean because of
+  pre-existing archive findings; the staged publication guard passed. The full
+  health-check test file also retains one unrelated macOS `/tmp` descriptor-walk
+  baseline failure, so neither result is represented as clean.
+- A macOS LaunchAgent deployment loaded the exact pushed code commit and passed
+  authenticated health, preflight, generated-permission, service-PATH stdin,
+  provider-terminal, single outbound-terminal, and WhatsApp echo checks.
+- Historical evidence remains fail-closed: one older group turn lacks terminal
+  proof, and three legacy completed-delivery identity admissions remain
+  quarantined. These records were not deleted or marked resolved by this work.
+- Host-specific identifiers, message bodies, hashes, and rollback artifacts are
+  retained only in the private operation receipt.
