@@ -50,23 +50,6 @@ export function resetEmitAlertThrottle(): void {
   alertThrottleMap.clear();
 }
 
-/** Returns true when the legacy spawn should be suppressed. */
-function isThrottled(instance: string, source: string, summary: string): boolean {
-  const throttleMs = Number(process.env['EMIT_ALERT_THROTTLE_MS'] ?? EMIT_ALERT_THROTTLE_MS);
-  const effectiveWindow = Number.isFinite(throttleMs) ? Math.max(0, throttleMs) : EMIT_ALERT_THROTTLE_MS;
-  if (effectiveWindow === 0) return false;
-
-  const now = Date.now();
-  // Prune expired entries on insert.
-  for (const [key, recordedAt] of alertThrottleMap) {
-    if (now - recordedAt > effectiveWindow) alertThrottleMap.delete(key);
-  }
-
-  const key = `${instance}|${source}|${summary}`;
-  if (alertThrottleMap.has(key)) return true;
-  alertThrottleMap.set(key, now);
-  return false;
-}
 
 // ---------------------------------------------------------------------------
 
@@ -282,7 +265,7 @@ export function emitAlert(
     log.warn({ instance, source, err: reason }, 'bot-errors outbox write failed');
     // #2434: throttle check WITHOUT recording — record only on success.
     const throttleKey = `${instance}|${source}|${summary}`;
-    // Prune expired entries before checking (same policy as isThrottled).
+    // Prune expired entries before checking.
     const throttleWindow = Number(process.env['EMIT_ALERT_THROTTLE_MS'] ?? EMIT_ALERT_THROTTLE_MS);
     const now = systemClock.now();
     for (const [key, recordedAt] of alertThrottleMap) {
