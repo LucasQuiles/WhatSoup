@@ -80,6 +80,30 @@ describe('opencode auth.json credential fallback (BE-G3)', () => {
       expect(readOpenCodeAuthKey('glm')).toBeNull();
       expect(readOpenCodeAuthKey('deepseek')).toBeNull();
     });
+
+    it('refuses symlinked, non-private, and oversized auth stores', () => {
+      const authPath = path.join(openCodeDir, 'auth.json');
+      const outsidePath = path.join(path.dirname(openCodeDir), `outside-auth-${process.pid}.json`);
+      fs.writeFileSync(outsidePath, JSON.stringify({ minimax: { key: 'outside' } }), { mode: 0o600 });
+      fs.symlinkSync(outsidePath, authPath);
+      expect(readOpenCodeAuthKey('minimax')).toBeNull();
+
+      fs.unlinkSync(authPath);
+      writeAuth({ minimax: { key: 'loose' } });
+      fs.chmodSync(authPath, 0o644);
+      expect(readOpenCodeAuthKey('minimax')).toBeNull();
+
+      fs.chmodSync(authPath, 0o600);
+      fs.writeFileSync(authPath, `${JSON.stringify({ minimax: { key: 'large' } })}${' '.repeat(1024 * 1024)}`);
+      expect(readOpenCodeAuthKey('minimax')).toBeNull();
+      fs.rmSync(outsidePath, { force: true });
+    });
+
+    it('allows a current-user private auth file under a conventional 0755 data directory', () => {
+      fs.chmodSync(openCodeDir, 0o755);
+      writeAuth({ minimax: { key: 'private-file' } });
+      expect(readOpenCodeAuthKey('minimax')).toBe('private-file');
+    });
   });
 
   describe('lookupCredential terminal fallback', () => {

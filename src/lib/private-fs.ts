@@ -188,9 +188,11 @@ export function writeAtomicPrivateFileSync(
 export interface PrivateReadOptions {
   label?: string;
   maxBytes: number;
+  /** Keep file protections while allowing a conventional current-user 0755 parent. */
+  requirePrivateParent?: boolean;
 }
 
-function assertStrictPrivateDirectorySync(dirPath: string, label: string): void {
+function assertOwnedDirectorySync(dirPath: string, label: string): Stats {
   const stat = lstatSync(dirPath);
   if (stat.isSymbolicLink()) {
     throw privateWriteError(`refusing to use ${label} directory through symlink`, 'ELOOP');
@@ -202,6 +204,11 @@ function assertStrictPrivateDirectorySync(dirPath: string, label: string): void 
     stat,
     `refusing to use ${label} directory not owned by current user`,
   );
+  return stat;
+}
+
+function assertStrictPrivateDirectorySync(dirPath: string, label: string): void {
+  const stat = assertOwnedDirectorySync(dirPath, label);
   if ((stat.mode & 0o077) !== 0) {
     throw privateWriteError(`refusing to use ${label} directory with non-private permissions`, 'EACCES');
   }
@@ -245,7 +252,8 @@ export function readPrivateFileSync(filePath: string, options: PrivateReadOption
   const label = options.label ?? 'private file';
   const dir = dirname(filePath);
   try {
-    assertStrictPrivateDirectorySync(dir, label);
+    if (options.requirePrivateParent === false) assertOwnedDirectorySync(dir, label);
+    else assertStrictPrivateDirectorySync(dir, label);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
     throw err;

@@ -342,7 +342,7 @@ configured workspace, and every compatibility/functional child environment.
 - [x] **Step 2: Execute every OpenCode probe in the runtime context**
 
 Resolve the binary only through the instance PATH, use the configured/default
-agent workspace as cwd, pass one positive environment allowlist to version,
+agent cwd as cwd, pass one positive environment allowlist to version,
 help, and functional calls, and project only the selected provider credential.
 
 - [x] **Step 3: Match credential resolution and private-file constraints**
@@ -358,15 +358,30 @@ push over SSH, observe CI and required approval, then deploy that exact head and
 capture loaded PATH, workspace/config, credential-source, canary, health, and
 single-message proof on the target host.
 
+### Task 9: Close loaded-job and modern-chain review gaps
+
+- [x] Compare the generated LaunchAgent PATH with the currently loaded
+  `launchctl` environment and reject any mismatch or explicit command override.
+- [x] Probe every ordered `fallbacks[]` entry and mirror runtime model and
+  custom `apiKeyService` precedence.
+- [x] Use the runtime's absent-cwd fallback (`HOME`), project the loaded
+  instance environment, instance name, and provider-only MCP socket context,
+  and fail closed when sandbox-per-chat or dynamic egress context cannot be
+  reproduced safely.
+- [x] Harden both runtime and health reads of OpenCode `auth.json` against
+  symlinks, loose file modes, ownership mismatch, and oversized payloads.
+- [ ] Obtain fresh exact-head approval and complete publication/deployment
+  proof without carrying forward claims from an older head.
+
 ## Verification Receipt
 
-- The clean platform branch passed the repository push gate (50/50), TypeScript
+- An earlier platform head passed the repository push gate (50/50), TypeScript
   checks, runtime-manifest guards, and focused fallback/config/session suites.
 - The repository-wide publication release audit remains non-clean because of
   pre-existing archive findings; the staged publication guard passed. The full
   health-check test file also retains one unrelated macOS `/tmp` descriptor-walk
   baseline failure, so neither result is represented as clean.
-- A macOS LaunchAgent deployment loaded the exact pushed code commit and passed
+- That earlier macOS LaunchAgent deployment loaded its exact pushed code commit and passed
   authenticated health, preflight, generated-permission, service-PATH stdin,
   provider-terminal, single outbound-terminal, and WhatsApp echo checks.
 - Historical evidence remains fail-closed: one older group turn lacks terminal
@@ -374,7 +389,8 @@ single-message proof on the target host.
   quarantined. These records were not deleted or marked resolved by this work.
 - Host-specific identifiers, message bodies, hashes, and rollback artifacts are
   retained only in the private operation receipt.
-- Independent-review remediation currently has 573 changed-suite passes plus
+- The first independent-review remediation had 573 changed-suite passes plus
   142/142 health checks after explicitly excluding the inherited macOS
   descriptor-walk fixture; that excluded fixture remains inconclusive, not
-  clean. Exact-SHA push/CI/re-review are still pending.
+  clean. The current Task 9 exact-SHA push/CI/re-review remains pending; earlier
+  evidence is not promotion proof for the current head.

@@ -1303,7 +1303,18 @@ When deploying an instance config that uses `fallbackProvider` or `fallbacks` to
    ```
    The runtime spawns `opencode --version` at window-arm time (`src/runtimes/agent/providers/binary-preflight.ts`) and raises `fallback_binary_missing` if the binary is absent. The check runs on the service user's PATH, so install under that user or ensure the binary is in a PATH entry that the service environment inherits.
 
-2. **Provision the provider API key** via one of three portable routes. The lookup order is: environment variable first (when no per-user scoping is requested), then platform keyring (`src/lib/keyring.ts:82`).
+   On macOS, the daily functional health probe compares the PATH in the
+   generated instance plist with the PATH in the currently loaded `launchctl`
+   job and fails on any mismatch. Regenerating a plist is therefore not enough:
+   reload the LaunchAgent before treating its fallback canary as current. A
+   health-only command override cannot substitute a GUI/SSH binary for the
+   runtime's `opencode` resolution.
+
+2. **Provision the provider API key** via one of three portable routes. Runtime
+   lookup order is environment variable, private WhatSoup credential file,
+   platform keyring, then OpenCode's private `auth.json` entry. Credential files
+   must be current-user regular files with private mode and bounded size;
+   symlinks and loose modes are refused.
 
    **Route A — environment variable (universal).**
    Set the variable named in `SERVICE_ENV_MAP` (`src/lib/provider-key-service.ts`, re-exported from `src/lib/keyring.ts`):

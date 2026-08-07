@@ -39,14 +39,20 @@ This keeps stream integrity fail-closed while accommodating the known pseudo-ter
 
 The daily provider inventory will retain compatibility and credential-presence checks and add an opt-in OpenCode functional probe. The probe uses the runtime's effective fallback model and inherited provider settings, including the selected execution profile and auto-approval flag, while excluding the primary endpoint route. It invokes modern-run JSON mode with `--print-logs --log-level INFO`, supplies the fixed canary through stdin, and gives the child only system essentials plus the selected model credential. It captures stdout/stderr without printing secrets, accepts only the closed diagnostic grammar outside JSONL, and requires the ordered record sequence `step_start` → exact combined text `OK` → terminal `step_finish(reason=stop)`, with no later provider event.
 
-On macOS, the probe reads the generated instance LaunchAgent PATH and resolves
-the provider binary only through that ordered PATH. Every compatibility and
-functional subprocess receives the same positive environment allowlist and
-runs from the configured agent workspace (or the runtime's default workspace).
-Credential resolution mirrors the runtime registry and lookup order, including
-OpenCode's auth store as the terminal fallback. WhatSoup private key files are
-read with bounded, no-symlink, current-user/private-file checks before a value
-can be projected into the child environment.
+On macOS, the probe requires the generated instance LaunchAgent PATH to equal
+the currently loaded `launchctl` environment and resolves the provider binary
+only through that ordered PATH. Explicit health-only command overrides cannot
+select a different binary. Every compatibility and functional subprocess
+receives the same positive environment allowlist and runs from the configured
+agent cwd (or `HOME`, matching the runtime when cwd is absent). Modern
+`fallbacks[]` entries are probed individually in order with runtime model and
+custom credential-service precedence. Credential resolution mirrors the
+runtime registry and lookup order, including OpenCode's auth store as the
+terminal fallback. WhatSoup key files and OpenCode auth files are read with
+bounded, no-symlink, current-user/private-file checks before a value can be
+projected into the child environment. A sandbox-per-chat or dynamic egress
+configuration that the standalone canary cannot reproduce fails closed instead
+of producing false-green provider evidence.
 
 Any malformed first record—including the observed PTY artifact—fails with a distinct stream-integrity classification. A timeout or missing terminal record is inconclusive/failing, never success. Dry-run inputs provide deterministic test fixtures. Fleet profiles may enable this probe before a host is declared fallback-ready.
 
