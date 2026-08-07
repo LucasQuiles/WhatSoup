@@ -16,6 +16,7 @@ import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { resolveTrustedGit } from '../../scripts/lib/ci-control/trusted-git.ts';
+import { __setTestGitPath, gitBytes } from '../../scripts/lib/ci-control/git-input-core.ts';
 
 import {
   ExactGitInputError,
@@ -1306,29 +1307,33 @@ describe('exact commit metadata', () => {
     // bare PATH-searched "git". With the guard, resolveTrustedGit() checks a
     // static allowlist. Mock a non-existent candidate list to verify fail-closed.
     expect(() => resolveTrustedGit(['/nonexistent/git'])).toThrow('no trusted git executable');
-    // Also verify the import is wired — if the guard is removed, this import vanishes.
-    const src = readFileSync('scripts/lib/ci-control/git-input-core.ts', 'utf8');
-    expect(src).toContain('import { resolveTrustedGit } from "./trusted-git.ts"');
   });
 
-  it('#2843 v2: test seam env var is guarded by VITEST and inert in production', () => {
-    // The __CI_CONTROL_TEST_GIT_PATH env var must only be read under the vitest
-    // runner so it is inert outside tests — production must never consult it.
-    const src = readFileSync('scripts/lib/ci-control/git-input-core.ts', 'utf8');
-    // Verify the VITEST guard wraps the test-path read; the code uses a const
-    // TEST_GIT_PATH_ENV rather than a literal string.
-    expect(src).toMatch(
-      /if\s*\(process\.env\[['"]VITEST['"]\]\s*&&\s*process\.env\[TEST_GIT_PATH_ENV\]\)/,
-    );
-    // Verify TEST_GIT_PATH_ENV is referenced only in the seam definition and
-    // within the VITEST-guarded accessor (not in any production code path).
-    // 1 declaration + 3 in __setTestGitPath + 2 in resolveGit = 6 total.
-    const constRefs = src.match(/TEST_GIT_PATH_ENV/g);
-    expect(constRefs?.length).toBe(6);
-    // Verify the production fallback path uses resolveTrustedGit, not the env var
-    expect(src).toMatch(
-      /return resolveTrustedGit\(\);/,
-    );
+  it('#2843 v2: the test-seam git path is honored under vitest and inert without it', () => {
+    // Behavioral inertness pair: the seam env var points at a nonexistent
+    // binary. Under the vitest runner the seam must be consulted (the call
+    // fails on the fake path); with VITEST absent the seam must be ignored
+    // (resolveTrustedGit finds the real git and the call succeeds). If the
+    // guard were removed — seam always honored — the second case would fail;
+    // if the seam were dropped entirely, the first case would succeed.
+    const { root } = fixture();
+    const prior = __setTestGitPath('/nonexistent/ci-control-fake-git');
+    try {
+      expect(() =>
+        gitBytes(root, ['rev-parse', '--git-dir'], 'ci.classification.merge-base-unavailable', 1 << 20),
+      ).toThrow(ExactGitInputError);
+
+      const priorVitest = process.env['VITEST'];
+      delete process.env['VITEST'];
+      try {
+        const out = gitBytes(root, ['rev-parse', '--git-dir'], 'ci.classification.merge-base-unavailable', 1 << 20);
+        expect(out.toString('utf8').trim().length).toBeGreaterThan(0);
+      } finally {
+        if (priorVitest !== undefined) process.env['VITEST'] = priorVitest;
+      }
+    } finally {
+      __setTestGitPath(prior);
+    }
   });
 
   it('reads the requested exact commit rather than a later safe ambient HEAD', () => {
