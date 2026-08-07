@@ -7,6 +7,7 @@ import {
 } from './turn-finalizer.ts';
 import type { RuntimeTurnContext } from './runtime-turn-context.ts';
 import type { AttemptOutcome } from './turn-terminal.ts';
+import { clearAlertSourceChecked } from '../../lib/emit-alert.ts';
 import { createChildLogger } from '../../logger.ts';
 
 const log = createChildLogger('agent-runtime-turn-supervisor');
@@ -298,8 +299,6 @@ export class RuntimeTurnSupervisor<TPostEffects> {
           if (this.retained.size === 0 && this.blockedTurnsByScope.size === 0) {
             // All retained work + blocked scopes resolved — emit idempotent
             // recovery clear (#2395). No-op if no incident exists.
-            // eslint-disable-next-line @typescript-eslint/no-var-requires
-            const { clearAlertSourceChecked } = require('../../lib/emit-alert.ts');
             clearAlertSourceChecked(this.instanceName, 'agent_turn_finalization_failed');
           }
         } else if (result.kind === 'durable_failure_incident') {
