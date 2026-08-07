@@ -3951,9 +3951,13 @@ def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = N
     # #2403: evaluate pending digest on EVERY sweep, not only when new
     # auto-closures occur.  A digest that was waiting for the coalescing window
     # or recovering from a send failure must be re-checked even on a quiet sweep.
+    # BUGFIX RED-3061-R3: `pending_check` must also fire when `auto_closed` is
+    # non-empty but no `staleAutocloseDigest` entry exists yet (first-time auto-
+    # closure — the original pre-#2403 code created the digest inside `if auto_closed:`
+    # but the #2403 refactor moved it outside and the `has_accum` gate blocked it).
     accum = incident_state.get("staleAutocloseDigest")
     has_accum = isinstance(accum, dict)
-    pending_check = has_accum and (int(accum.get("pendingCount") or 0) > 0 or auto_closed)
+    pending_check = bool(auto_closed) or (has_accum and int(accum.get("pendingCount") or 0) > 0)
     if pending_check:
         if not has_accum:
             accum = {}
