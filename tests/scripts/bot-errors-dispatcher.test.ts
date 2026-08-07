@@ -9,6 +9,19 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
+/** Custom replacer that sorts object keys recursively to match Python's _canonical_bytes. */
+function canonicalJSON(obj: unknown): string {
+  return JSON.stringify(obj, (_key: string, value: unknown) => {
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      return Object.keys(value as Record<string, unknown>).sort().reduce(
+        (acc: Record<string, unknown>, k: string) => { acc[k] = (value as Record<string, unknown>)[k]; return acc; },
+        {},
+      );
+    }
+    return value;
+  });
+}
+
 let tmpRoot = '';
 const tmpdir = () => '/tmp';
 
@@ -141,8 +154,9 @@ function dispatchCaptured(root: string, capturePath: string): {
 // incident is orphan-suppressed as connection-flap noise (see commit 3c678e57 and
 // deploy/scripts/tests/test_bot_errors_orphan_clear_suppression.py). openedEpoch
 // predates the recovery events so the clear is not treated as clock-skewed.
+// Uses the Python patch helper to produce an enveloped file via session save.
 function seedOpenIncident(root: string, key: string, openedEpoch = Math.floor(Date.UTC(2026, 4, 30) / 1000)) {
-  const state = {
+  const payloadPatch = {
     version: 1,
     openIncidents: {
       [key]: {
@@ -155,7 +169,11 @@ function seedOpenIncident(root: string, key: string, openedEpoch = Math.floor(Da
     },
     lastSentAt: {},
   };
-  writeFileSync(join(root, 'incident-state.json'), `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
+  execFileSync('python3', ['deploy/scripts/patch-incident-state.py', root, JSON.stringify(payloadPatch)], {
+    cwd: process.cwd(),
+    env: { ...process.env, BOT_ERRORS_STATE_DIR: root },
+    encoding: 'utf8',
+  });
 }
 
 function writeWritefail(root: string, eventOverrides: Record<string, unknown> = {}) {
@@ -593,7 +611,7 @@ describe('bot-errors-dispatcher', () => {
     const capturePath = join(tmpRoot, 'sent-message.txt');
     const suppressed = join(tmpRoot, 'suppressed');
     const incidentKey = 'test-machine|line-a|daily-health-fail:line-a';
-    writeFileSync(join(tmpRoot, 'incident-state.json'), `${JSON.stringify({
+    execFileSync('python3', ['deploy/scripts/patch-incident-state.py', tmpRoot, JSON.stringify({
       version: 1,
       openIncidents: {
         [incidentKey]: {
@@ -608,7 +626,11 @@ describe('bot-errors-dispatcher', () => {
         },
       },
       lastSentAt: { [incidentKey]: 1780185600 },
-    }, null, 2)}\n`, { mode: 0o600 });
+    })], {
+      cwd: process.cwd(),
+      env: { ...process.env, BOT_ERRORS_STATE_DIR: tmpRoot },
+      encoding: 'utf8',
+    });
     writeEvent(tmpRoot, 'info', {
       id: 'daily-health-recovers-line-a',
       source: 'daily-health',
@@ -2114,10 +2136,16 @@ describe('still-open reminder exponential backoff', () => {
   }
 
   function patchOpenRecord(root: string, key: string, patch: Record<string, unknown>): void {
-    const statePath = join(root, 'incident-state.json');
-    const state = JSON.parse(readFileSync(statePath, 'utf8')) as { openIncidents: Record<string, OpenRecord> };
-    state.openIncidents[key] = { ...state.openIncidents[key], ...patch };
-    writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
+    const state = JSON.parse(readFileSync(join(root, 'incident-state.json'), 'utf8'));
+    const openIncidents = (state.openIncidents as Record<string, Record<string, unknown>>) || {};
+    openIncidents[key] = { ...(openIncidents[key] || {}), ...patch };
+    const payloadPatch: Record<string, unknown> = { openIncidents };
+    if (state.lastSentAt) payloadPatch.lastSentAt = state.lastSentAt;
+    execFileSync('python3', ['deploy/scripts/patch-incident-state.py', root, JSON.stringify(payloadPatch)], {
+      cwd: process.cwd(),
+      env: { ...process.env, BOT_ERRORS_STATE_DIR: root },
+      encoding: 'utf8',
+    });
   }
 
   it('doubles the still-open reminder interval per incident and persists it across dispatcher runs', () => {
@@ -2190,6 +2218,11 @@ describe('still-open reminder exponential backoff', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-backoff-'));
     const capture = join(tmpRoot, 'capture.jsonl');
     const capEnv = { BOT_ERRORS_INCIDENT_RENOTIFY_CAP_SECONDS: '180' };
+    execFileSync('python3', ['deploy/scripts/patch-incident-state.py', tmpRoot, JSON.stringify({ version: 1, openIncidents: {}, lastSentAt: {} })], {
+      cwd: process.cwd(),
+      env: { ...process.env, BOT_ERRORS_STATE_DIR: tmpRoot },
+      encoding: 'utf8',
+    });
 
     emitBackoffAlert(tmpRoot);
     expect(JSON.parse(dispatchBackoff(tmpRoot, capture, capEnv))).toMatchObject({ processed: 1, sent: 1 });

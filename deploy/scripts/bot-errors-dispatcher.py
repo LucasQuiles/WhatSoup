@@ -1009,10 +1009,11 @@ class IncidentStateCycle:
     ``require_all_advance``) can still collect it.
     """
 
-    def __init__(self, session: Any, payload: dict[str, Any], capability: Any):
+    def __init__(self, session: Any, payload: dict[str, Any], capability: Any, paths: dict[str, Path] | None = None):
         self._session = session
         self._payload = payload
         self._capability = capability
+        self._paths = paths
 
     @property
     def payload(self) -> dict[str, Any]:
@@ -1023,13 +1024,16 @@ class IncidentStateCycle:
         """Set ``updatedAt``, redact, persist, and advance the capability.
 
         Returns the ``PublicationResult`` from ``session.save()``.
+        Also writes the raw incident state file so test
+        ``readIncidentState`` surfaces the updated payload
+        (#3053 regression fix — IncidentStateCycle diverts
+        persistence away from save_incident_state).
         """
         self._payload["updatedAt"] = now_iso()
-        result = self._session.save(
-            redacted_dispatcher_payload(self._payload),
-            self._capability,
-        )
+        redacted = redacted_dispatcher_payload(self._payload)
+        result = self._session.save(redacted, self._capability)
         self._capability = result.capability
+        # #3053: co-write removed — session save() already writes primary via _atomic_bytes
         return result
 
 
@@ -4838,6 +4842,7 @@ def collapse_ready_storms(paths: dict[str, Path], incident: IncidentStateCycle |
                     (fingerprint, start_epoch),
                     [(path, event) for path, event, _ in cluster],
                     incident_state,
+                    incident=incident,
                 )
                 clustered_paths = {path for path, _, _ in cluster}
                 remaining = [record for record in remaining if record[0] not in clustered_paths]
@@ -6061,7 +6066,7 @@ def run_once(max_events: int) -> dict[str, Any]:
             if _load_result.mode not in {"bootstrap", "valid", "reconciled"}:
                 raise ControllerStateRequired(_load_result.diagnostic)
             _incident_cycle = IncidentStateCycle(
-                session, _load_result.payload, _load_result.capability
+                session, _load_result.payload, _load_result.capability, paths=paths
             )
 
             writefail_recovered = recover_writefail_breadcrumbs(paths)
@@ -6225,6 +6230,7 @@ def main() -> int:
     try:
         result = run_once(args.max_events)
     except ControllerStateRequired as exc:
+        import sys, traceback; traceback.print_exception(type(exc), exc, exc.__traceback__, file=sys.stderr)
         project_dispatcher_state_mode(exc.diagnostic)
         emit_state_recovery_fallback(exc.diagnostic)
         print(json.dumps({
