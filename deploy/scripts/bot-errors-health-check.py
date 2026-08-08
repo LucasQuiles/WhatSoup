@@ -332,6 +332,53 @@ def append_evidence_field(details: list[str], key: str, value: Any, max_len: int
             details.append(f"{key}={rendered}")
 
 
+def read_nvmrc_pin() -> str:
+    """Read the repo's pinned node version from .nvmrc (empty string if absent/unreadable).
+
+    #3074: the pin is the canonical .nvmrc value, also mirrored at
+    package.json#volta.node and package.json#packageManager. A long-running
+    instance process started under an older node keeps reporting healthy after
+    the pin advances; this read supplies the comparison baseline.
+    """
+    try:
+        return (REPO_ROOT / ".nvmrc").read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def normalize_node_version(raw: str) -> str:
+    """Normalize a node version string for comparison (strip leading v/V + whitespace).
+
+    Accepts both v24.15.0 (nvm/installer convention) and 24.15.0
+    (process.version in the lifecycle telemetry). #3074.
+    """
+    return raw.strip().lstrip("vV") if isinstance(raw, str) else ""
+
+
+def node_version_drift_marker(running_version, pinned_version: str):
+    """Return a node_version_drift WARN marker if the RUNNING process node version
+    disagrees with the repo pin, or None when drift cannot be determined.
+
+    #3074: running_version is the ACTUAL instance process version
+    (credential_lifecycle.environment.nodeVersion from the /health body),
+    not shutil.which('node') (which resolves the probe's own shell). When the
+    running version is absent (no lifecycle telemetry, degraded probe) this
+    returns None -- an undiscoverable running version is NOT a drift finding
+    (no false positive). A bare v/V prefix is tolerated on either side.
+    """
+    if not running_version or not isinstance(running_version, str):
+        return None
+    if not pinned_version:
+        return None
+    running = normalize_node_version(running_version)
+    pinned = normalize_node_version(pinned_version)
+    if not running or not pinned:
+        return None
+    if running == pinned:
+        return None
+    return f"node_version_drift running={running} pinned={pinned}"
+
+
 PROVIDER_EVIDENCE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 RUNTIME_PROVIDER_IDS = frozenset({
     "claude-cli",
@@ -2803,6 +2850,15 @@ def health_probe_details(status: int, body: str, expected_name: str | None = Non
         ("osUptimeSeconds", "lifecycle_os_uptime_seconds"),
     ]:
         append_evidence_field(details, label, lifecycle_env.get(source_key))
+    # #3074: assert the RUNNING instance process node version against the repo
+    # pin. The running version comes from lifecycle telemetry (the ACTUAL process,
+    # not shutil.which('node')); when absent (no telemetry) no drift marker is
+    # emitted -- undiscoverable is not drift.
+    drift_marker = node_version_drift_marker(
+        lifecycle_env.get("nodeVersion"), read_nvmrc_pin()
+    )
+    if drift_marker:
+        add_marker(drift_marker)
     lifecycle_memory = lifecycle_env.get("memory") if isinstance(lifecycle_env.get("memory"), dict) else {}
     append_evidence_field(details, "lifecycle_memory_free_bytes", lifecycle_memory.get("freeBytes"))
     append_evidence_field(details, "lifecycle_memory_total_bytes", lifecycle_memory.get("totalBytes"))
@@ -3080,6 +3136,7 @@ def format_health_probe(url: str, status: int, body: str = "", expected_name: st
         or "runtime_agent_fallback_active" in details
         or "auth_bond_restore_canary_failed" in details
         or "auth_bond_backup_age_warning" in details
+        or "node_version_drift" in details
     ):
         prefix = "WARN "
     else:
