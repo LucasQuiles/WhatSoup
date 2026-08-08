@@ -4,6 +4,7 @@ import type { Database } from './database.ts';
 import { withTransaction } from './db-tx.ts';
 import { deleteOldMessages } from './messages.ts';
 import { maintainOutboundSends } from './outbound-sends.ts';
+import { systemClock } from '../lib/clock.ts';
 
 const log = createChildLogger('database:retention');
 
@@ -447,17 +448,17 @@ export class DatabaseRetentionTimer {
   }
 
   async runCleanup(): Promise<DatabaseRetentionResult> {
-    this.lastRunAt = Date.now();
+    this.lastRunAt = systemClock.now();
     try {
       const result = runDatabaseRetention(this.db, this.retention);
-      this.lastSuccessAt = Date.now();
+      this.lastSuccessAt = systemClock.now();
       this.lastResult = { ...result };
       this.state = 'succeeded';
       this.consecutiveFailures = 0;
       this.failureCode = null;
       return result;
     } catch (err) {
-      this.lastFailureAt = Date.now();
+      this.lastFailureAt = systemClock.now();
       this.state = 'failed';
       this.consecutiveFailures = Math.min(
         Number.MAX_SAFE_INTEGER,

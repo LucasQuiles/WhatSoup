@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { createChildLogger } from '../logger.ts';
 import { isRecord } from '../lib/type-guards.ts';
 import { errorMessage } from '../lib/error-message.ts';
+import { systemClock } from '../lib/clock.ts';
 import { MS_PER_MINUTE } from '../lib/time-units.ts';
 
 const log = createChildLogger('alert-throttle-store');
@@ -37,7 +38,7 @@ function saveThrottle(entries: Map<string, string>): void {
 
   const orderedEntries = Array.from(entries.entries()).sort(([a], [b]) => a.localeCompare(b));
   const payload = JSON.stringify(Object.fromEntries(orderedEntries), null, 2) + '\n';
-  const tmpFile = join(CONFIG_DIR, `.fleet-alert-throttle.${process.pid}.${Date.now()}.tmp`);
+  const tmpFile = join(CONFIG_DIR, `.fleet-alert-throttle.${process.pid}.${systemClock.now()}.tmp`);
 
   try {
     writeFileSync(tmpFile, payload, { mode: 0o600 });
@@ -53,7 +54,7 @@ function saveThrottle(entries: Map<string, string>): void {
   }
 }
 
-export function loadAlertThrottleDetailed(nowMs = Date.now()): AlertThrottleLoadResult {
+export function loadAlertThrottleDetailed(nowMs = systemClock.now()): AlertThrottleLoadResult {
   try {
     const parsed = JSON.parse(readFileSync(ALERT_THROTTLE_FILE, 'utf-8')) as unknown;
     if (!isRecord(parsed)) {
@@ -89,11 +90,11 @@ export function loadAlertThrottleDetailed(nowMs = Date.now()): AlertThrottleLoad
   }
 }
 
-export function loadAlertThrottle(nowMs = Date.now()): Map<string, string> {
+export function loadAlertThrottle(nowMs = systemClock.now()): Map<string, string> {
   return loadAlertThrottleDetailed(nowMs).entries;
 }
 
-export function recordAlertThrottle(name: string, lastAlertAt: string, nowMs = Date.now()): void {
+export function recordAlertThrottle(name: string, lastAlertAt: string, nowMs = systemClock.now()): void {
   if (!isFreshTimestamp(lastAlertAt, nowMs)) return;
 
   const entries = loadAlertThrottle(nowMs);

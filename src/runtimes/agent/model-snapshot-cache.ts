@@ -31,6 +31,7 @@
  * `/model N default` recency-blind — the bug this single-slot design forecloses.)
  */
 
+import { systemClock } from '../../lib/clock.ts';
 import { MS_PER_MINUTE } from '../../lib/time-units.ts';
 
 export interface CatalogueEntry {
@@ -185,7 +186,7 @@ export function createCatalogueSnapshotCache(): CatalogueSnapshotCache {
       outboundMsgId: string,
       entries: CatalogueEntry[]
     ): void {
-      const now = Date.now();
+      const now = systemClock.now();
 
       // Store by msgId (for quoted-reply resolution)
       byMsgId.set(outboundMsgId, { msgId: outboundMsgId, entries, createdAt: now });
@@ -208,7 +209,7 @@ export function createCatalogueSnapshotCache(): CatalogueSnapshotCache {
       level: DrillLevel,
       entries: DrillEntry[]
     ): void {
-      const now = Date.now();
+      const now = systemClock.now();
       // Same slot as the flat menu — last-write-wins makes recency physical.
       latestByChat.set(latestSlotKey(chatJid, senderJid), { kind: 'drill', level, entries, createdAt: now });
     },
@@ -219,7 +220,7 @@ export function createCatalogueSnapshotCache(): CatalogueSnapshotCache {
       n: number,
       opts?: { quotedMsgId?: string }
     ): CatalogueEntry | null {
-      const now = Date.now();
+      const now = systemClock.now();
 
       if (opts?.quotedMsgId) {
         // Resolve against the quoted flat-message snapshot.
@@ -241,7 +242,7 @@ export function createCatalogueSnapshotCache(): CatalogueSnapshotCache {
       senderJid: string,
       n: number
     ): LatestPick | null {
-      const snapshot = liveLatest(chatJid, senderJid, Date.now());
+      const snapshot = liveLatest(chatJid, senderJid, systemClock.now());
       if (!snapshot) return null;
       if (snapshot.kind === 'flat') {
         const entry = snapshot.entries[n - 1];
@@ -252,7 +253,7 @@ export function createCatalogueSnapshotCache(): CatalogueSnapshotCache {
     },
 
     latestSnapshotKind(chatJid: string, senderJid: string): 'flat' | 'drill' | null {
-      return liveLatest(chatJid, senderJid, Date.now())?.kind ?? null;
+      return liveLatest(chatJid, senderJid, systemClock.now())?.kind ?? null;
     },
 
     getMsgIdMapSize(): number {

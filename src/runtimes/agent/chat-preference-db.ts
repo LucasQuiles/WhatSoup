@@ -1,4 +1,5 @@
 import type { Database } from '../../core/database.ts';
+import { systemClock } from '../../lib/clock.ts';
 
 /**
  * Per-sender chat model preference store (schema v2 — owner-approved PR-plan,
@@ -261,7 +262,7 @@ export function getPreference(
   db: Database,
   chatJid: string,
   senderJid: string,
-  now: number = Date.now(),
+  now: number = systemClock.now(),
 ): ChatModelPreference | null {
   const row = db.raw
     .prepare(`SELECT ${PREFERENCE_COLUMNS} FROM chat_model_preference WHERE chat_jid = ? AND sender_jid = ?`)
@@ -279,7 +280,7 @@ export function getPreference(
 export function getLatestChatPreference(
   db: Database,
   chatJid: string,
-  now: number = Date.now(),
+  now: number = systemClock.now(),
 ): ChatModelPreference | null {
   const row = db.raw
     .prepare(
@@ -311,7 +312,7 @@ export function clearChatPreference(db: Database, chatJid: string): void {
 
 /** Delete (not merely ignore) every expired row. Sticky rows (expires_at
  *  NULL) are never pruned — they clear only via /reset. */
-export function pruneExpired(db: Database, now: number = Date.now()): void {
+export function pruneExpired(db: Database, now: number = systemClock.now()): void {
   db.raw.prepare(`DELETE FROM chat_model_preference WHERE expires_at IS NOT NULL AND expires_at <= ?`).run(now);
 }
 
@@ -394,7 +395,7 @@ export function promoteToSticky(
     return { outcome: 'already_sticky', preference: winning };
   }
 
-  const updatedAt = Date.now();
+  const updatedAt = systemClock.now();
   const result = db.raw
     .prepare(
       `UPDATE chat_model_preference

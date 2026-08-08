@@ -10,6 +10,7 @@ import { forceEnsurePrivateDirectorySync } from '../lib/private-fs.ts';
 import { acquireProcessLock, releaseProcessLock } from '../lib/process-lock.ts';
 import { xdgDir } from './paths.ts';
 import type { SilenceStoreReasonClass } from './silence-manager.ts';
+import { systemClock } from '../lib/clock.ts';
 
 export const SILENCE_REGISTRY_EPISODE_FILENAME = 'silence-registry-episode.json';
 export const SILENCE_REGISTRY_EPISODE_FAILOVER_FILENAME = 'silence-registry-episode-failover.json';
@@ -253,7 +254,7 @@ export class SilenceRegistryEpisodeStore implements SilenceRegistryEpisodeStoreP
   }
 
   read(): SilenceRegistryEpisodeRead {
-    const loaded = this.resolveState(Date.now());
+    const loaded = this.resolveState(systemClock.now());
     return loaded.status === 'available'
       ? { status: 'available', phase: loaded.state.phase }
       : { status: 'journal_unreadable' };
@@ -261,7 +262,7 @@ export class SilenceRegistryEpisodeStore implements SilenceRegistryEpisodeStoreP
 
   prepareOnset(
     observation: { reasonClass: SilenceStoreReasonClass; readBasis: FailureReadBasis },
-    now = Date.now(),
+    now = systemClock.now(),
   ): SilenceRegistryEpisodePreparation {
     return this.withLock(() => {
       const loaded = this.resolveState(now);
@@ -297,7 +298,7 @@ export class SilenceRegistryEpisodeStore implements SilenceRegistryEpisodeStoreP
     });
   }
 
-  confirmOnset(episodeId: string, now = Date.now()): SilenceRegistryEpisodeSettlement {
+  confirmOnset(episodeId: string, now = systemClock.now()): SilenceRegistryEpisodeSettlement {
     return this.withLock(() => {
       const loaded = this.resolveState(now);
       if (loaded.status !== 'available') return { status: 'journal_unreadable' };
@@ -315,7 +316,7 @@ export class SilenceRegistryEpisodeStore implements SilenceRegistryEpisodeStoreP
     });
   }
 
-  prepareRecovery(now = Date.now()): SilenceRegistryEpisodePreparation {
+  prepareRecovery(now = systemClock.now()): SilenceRegistryEpisodePreparation {
     return this.withLock(() => {
       const loaded = this.resolveState(now);
       if (loaded.status !== 'available') return { status: 'journal_unreadable' };
@@ -338,7 +339,7 @@ export class SilenceRegistryEpisodeStore implements SilenceRegistryEpisodeStoreP
     });
   }
 
-  confirmRecovery(episodeId: string, now = Date.now()): SilenceRegistryEpisodeSettlement {
+  confirmRecovery(episodeId: string, now = systemClock.now()): SilenceRegistryEpisodeSettlement {
     return this.withLock(() => {
       const loaded = this.resolveState(now);
       if (loaded.status !== 'available') return { status: 'journal_unreadable' };
