@@ -116,7 +116,10 @@ run_preflight() {
   # PRE-03: whatsapp-mcp processes identified
   info "PRE-03  Identifying whatsapp-mcp processes..."
   local mcp_pids
-  mcp_pids=$(pgrep -af whatsapp-mcp 2>/dev/null | grep -v grep || true)
+  # #2979: exact match (-x) instead of full-command substring (-af) to avoid
+  # false positives from processes whose argv contains "whatsapp-mcp" in a
+  # path or working directory but are not the actual agent process.
+  mcp_pids=$(pgrep -x whatsapp-mcp 2>/dev/null || true)
   if [[ -n "$mcp_pids" ]]; then
     ok "PRE-03  whatsapp-mcp processes found (will be killed at CUT-02):"
     echo "$mcp_pids" | while IFS= read -r line; do echo "         $line"; done
