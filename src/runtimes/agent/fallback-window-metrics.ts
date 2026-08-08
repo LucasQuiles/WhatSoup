@@ -18,6 +18,8 @@
  * fallback-transition-alerts.test.ts, fallback-empty-turn.test.ts,
  * provider-fallback.test.ts, health-snapshot.test.ts).
  */
+import { systemClock } from '../../lib/clock.ts';
+
 export class FallbackWindowMetrics {
   /** Lifetime (process) count of turns served while a fallback window was active. */
   turnsServed = 0;
@@ -54,7 +56,7 @@ export class FallbackWindowMetrics {
   /** A turn was served during a window — bump served + stamp the last-turn time. */
   recordServedTurn(): void {
     this.turnsServed += 1;
-    this.lastTurnAt = Date.now();
+    this.lastTurnAt = systemClock.now();
   }
 
   /** The served turn had zero visible output — bump the empty counter. */

@@ -15,6 +15,8 @@
  * stays in AgentRuntime: it depends on runtime config (sessionScope / sandboxPerChat
  * / cwd), not on crash-count state.
  */
+import { systemClock } from '../../lib/clock.ts';
+
 export class CrashTracker {
   private readonly counts = new Map<string, number>();
   private _lastCrashAt: string | null = null;
@@ -34,7 +36,7 @@ export class CrashTracker {
     this.counts.set(scopeKey, count);
     this._lastCrashAt = new Date().toISOString();
     const times = this.crashTimes.get(scopeKey) ?? [];
-    times.push(Date.now());
+    times.push(systemClock.now());
     this.crashTimes.set(scopeKey, times);
     return count;
   }
@@ -60,7 +62,7 @@ export class CrashTracker {
    * pins health=degraded forever. Use this for the health-degraded decision;
    * keep {@link count}/{@link recentTotal} for cumulative respawn bookkeeping.
    */
-  recentWithin(windowMs: number, now: number = Date.now()): number {
+  recentWithin(windowMs: number, now: number = systemClock.now()): number {
     const cutoff = now - windowMs;
     let total = 0;
     for (const [scopeKey, times] of this.crashTimes) {
