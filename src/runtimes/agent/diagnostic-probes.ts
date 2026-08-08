@@ -54,6 +54,13 @@ function mapPrimaryModelUsability(r: PrimaryModelUsabilityResult): DiagnosticPro
     case 'unknown':
       // Inconclusive — the probe could not establish a verdict.
       return { ok: false, confidence: 'suspected', summary: `primary model usability ${r.status} (${r.provider})`, data };
+    case 'probe-blocked':
+      // #3017 AXIS C: the probe target context differs from the serving
+      // context — inconclusive, not a confirmed failure.
+      return { ok: false, confidence: 'suspected', summary: `primary model probe blocked: context mismatch (${r.provider})`, data };
+    case 'probe-error':
+      // #3017 AXIS C: the probe itself errored — inconclusive.
+      return { ok: false, confidence: 'suspected', summary: `primary model probe error (${r.provider})`, data };
   }
 }
 

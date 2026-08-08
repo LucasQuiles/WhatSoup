@@ -125,6 +125,8 @@ describe('buildDiagnosticProbes', () => {
       'provider-unavailable': { ok: false, confidence: 'confirmed' },
       timeout: { ok: false, confidence: 'suspected' },
       unknown: { ok: false, confidence: 'suspected' },
+      'probe-blocked': { ok: false, confidence: 'suspected' },
+      'probe-error': { ok: false, confidence: 'suspected' },
     };
     for (const status of Object.keys(expected) as PrimaryModelUsabilityStatus[]) {
       const result: PrimaryModelUsabilityResult = { status, provider: 'claude-cli', model: 'claude-opus-4-8' };

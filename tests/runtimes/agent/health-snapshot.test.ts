@@ -299,6 +299,7 @@ function expectedFallbackDetails(): Record<string, unknown> {
       lastSuccessfulTurnSessionCurrent: null,
       lastTurnErrorClass: null,
       lastTurnErrorAt: null,
+      periodicProbeExpected: false,
     },
     activeFallbackEntry: null,
     fallbackChain: [],

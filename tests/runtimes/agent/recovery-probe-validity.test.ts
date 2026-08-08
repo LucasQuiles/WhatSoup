@@ -212,25 +212,29 @@ describe('AgentRuntime.probePrimaryProviderRecovered — validity, not presence'
     expect(probePrimaryModelUsabilityMock).toHaveBeenCalledWith({ provider: 'claude-cli', model: null }, expect.anything());
   });
 
-  it('binary primary: does NOT consult the binary resolver — recovery follows the usability probe', async () => {
-    // QR-048: binary presence is never a recovery signal. The resolver is not
-    // consulted; a non-usable probe is NOT recovered even if a binary resolves.
-    getProviderBinaryMock.mockReturnValue(null);
+  it('binary primary: a resolving binary is never a recovery signal — recovery follows the usability probe', async () => {
+    // QR-048 (amended for #3017): the serving-context receipt may consult the
+    // resolver for its content-free binary digest, but binary PRESENCE is
+    // never a recovery signal — a non-usable probe is NOT recovered even
+    // when a binary resolves.
+    getProviderBinaryMock.mockReturnValue('/usr/local/bin/claude');
     probePrimaryModelUsabilityMock.mockResolvedValue(usability('credential-unavailable'));
     const v = view(makeRuntime('claude-cli'));
     await expect(v.probePrimaryProviderRecovered()).resolves.toBe(false);
-    expect(getProviderBinaryMock).not.toHaveBeenCalled();
     expect(probePrimaryModelUsabilityMock).toHaveBeenCalledTimes(1);
   });
 
-  it('binary primary: never rejects — the never-throws contract rests on the probe, not the binary resolver', async () => {
-    // QR-048: the resolver is no longer on the recovery path, so a throwing
-    // resolver can not break the never-rejects contract; recovery follows the probe.
+  it('binary primary: never rejects — a THROWING resolver cannot break recovery (receipt digest degrades to null)', async () => {
+    // QR-048 (amended for #3017): the receipt's resolver consultation is
+    // wrapped — this fixture PROVES the never-rejects contract by making the
+    // resolver throw on the live path and asserting recovery still follows
+    // the probe. Stronger than the old not-called pin, which never exercised
+    // the throw at all.
     getProviderBinaryMock.mockImplementation(() => { throw new Error('unknown provider'); });
     probePrimaryModelUsabilityMock.mockResolvedValue(usability('usable'));
     const v = view(makeRuntime('claude-cli'));
     await expect(v.probePrimaryProviderRecovered()).resolves.toBe(true);
-    expect(getProviderBinaryMock).not.toHaveBeenCalled();
+    expect(getProviderBinaryMock).toHaveBeenCalled();
     expect(probePrimaryModelUsabilityMock).toHaveBeenCalledTimes(1);
   });
 
