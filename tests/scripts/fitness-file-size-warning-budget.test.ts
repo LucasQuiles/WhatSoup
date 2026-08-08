@@ -62,6 +62,13 @@ function ceilingBumpMessage(measurement: FileSizeMeasurement, actualLines: numbe
 }
 
 const EXPECTED_FILE_SIZE_WARNING_FILES = [
+  // #2843's trusted-git hardening (resolveTrustedGit at every spawn site plus
+  // the VITEST-guarded test seam and its inertness documentation) took this
+  // security-critical input layer to ~2023 lines, just over the 2000-line
+  // arch.file-size warn budget. Grandfathered per the project norm for large
+  // cohesive core files rather than compressing security-relevant code; a
+  // git-input-core slice is a separate follow-up.
+  'scripts/lib/ci-control/git-input-core.ts',
   // The #2084 P3b RepoHygieneExactRange receipt block took this guard to ~2033
   // lines (the pattern/allowlist tables moved out to lib/repo-hygiene-policy.ts
   // in the same change; the receipt surface is cohesive with the guard's scan
@@ -145,6 +152,12 @@ const EXPECTED_FILE_SIZE_WARNING_FILES = [
   'tests/runtimes/chat/runtime.test.ts',
   'tests/scripts/bot-errors-dispatcher.test.ts',
   'tests/scripts/bot-errors-health-check.test.ts',
+  // #2843's discriminating coverage (import-surface pins, the fail-closed
+  // resolveTrustedGit case, and the behavioral seam-inertness pair) took this
+  // cohesive suite to ~2012 lines; the cases reuse the suite's shared exact-git
+  // fixture harness, so extracting them would duplicate that setup.
+  // Grandfathered per the project norm (cf. repo-hygiene-guard.test.ts below).
+  'tests/scripts/ci-control-git-object-input.test.ts',
   // The #2084 P3b ExactRange receipt cases (+~1,000 lines) reuse this suite's
   // shared temp-repo/commitAll harness; extracting them would duplicate that
   // git-fixture setup, so the cohesive suite is grandfathered (~2107 lines).
