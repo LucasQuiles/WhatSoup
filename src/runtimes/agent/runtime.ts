@@ -299,6 +299,7 @@ import {
   type PrimaryModelUsabilityResult,
 } from './providers/primary-model-usability.ts';
 import { createPrimaryModelProbeAdapters } from './providers/primary-model-usability-adapters.ts';
+import { calculatePeriodicProbeDelay, calculatePeriodicProbeBackoff, buildPrimaryProbeAdapterDeps, formatPrimaryModelUsabilityEvidence } from './primary-readiness-probe.ts';
 import { ensureClaudeFileStoreCredential } from './providers/claude-filestore-heal.ts';
 import {
   formatFallbackRecoveryReceiptEvidence,
@@ -931,6 +932,7 @@ export class AgentRuntime implements Runtime {
   private readonly fallbackEmptyAdvance = new FallbackEmptyAdvance();
   private revertTimer: ReturnType<typeof setTimeout> | null = null;
   private fallbackPrimaryProbeTimer: ReturnType<typeof setTimeout> | null = null;
+  private periodicUsabilityProbeTimer: ReturnType<typeof setTimeout> | null = null; private periodicUsabilityProbeBackoff = 0;
   // Consecutive failed recovery probes on the revert-timer EXTENSION path
   // (process-local, reset on deactivation — which a successful probe triggers).
   // Early-window standing probes do not count: nothing is extending yet.
@@ -3737,6 +3739,7 @@ export class AgentRuntime implements Runtime {
       ensureClaudeFileStoreCredential();
     }
     this.schedulePrimaryModelUsabilityProbe('startup');
+    this.scheduleNextPeriodicUsabilityProbe();
     this.startHealthStatsTimer();
     this.workspaceSweeper.start();
     this.startQueueSweepTimer();
@@ -7574,6 +7577,7 @@ export class AgentRuntime implements Runtime {
       clearTimeout(this.fallbackPrimaryProbeTimer);
       this.fallbackPrimaryProbeTimer = null;
     }
+    if (this.periodicUsabilityProbeTimer) { clearTimeout(this.periodicUsabilityProbeTimer); this.periodicUsabilityProbeTimer = null; }
     this.fallbackWindow.activeUntil = null;
     this.fallbackWindow.activatedAt = null;
     this.fallbackWindow.armReason = null;
@@ -9504,6 +9508,7 @@ export class AgentRuntime implements Runtime {
       lastSuccessfulTurnSessionCurrent: this.lastSuccessfulTurnSessionCurrent(),
       lastTurnErrorClass: this.turnCapabilityTracker.lastTurnErrorClass,
       lastTurnErrorAt: this.turnCapabilityTracker.lastTurnErrorAt,
+      periodicProbeExpected: this.periodicUsabilityProbeTimer !== null,
     };
   }
 
@@ -9526,7 +9531,8 @@ export class AgentRuntime implements Runtime {
     );
     this.consecutivePrimaryEmptyTurns = 0;
     this.consecutiveUnknownTerminalTurns = 0;
-    if (this.isFallbackWindowActive) return; // #1884 follow-up: a fallback turn proves nothing about the primary
+    if (this.isFallbackWindowActive) return;
+    if (session !== null) { const sm = typeof session?.getModelRef === 'function' ? session.getModelRef() : undefined; if (successProvider !== this.agentProvider || (sm ?? null) !== (this.model ?? null)) return; }
     // A2: this real post-revert turn IS the honest canary — the deferred clear a probe-confirmed revert withheld.
     if (this.pendingPostRevertConfirmation) {
       clearAlertSourceChecked(this.instanceName, 'provider_fallback_activated', 'reason=post-revert-turn-success');
@@ -10349,7 +10355,7 @@ export class AgentRuntime implements Runtime {
     this.fallbackPrimaryProbeTimer.unref?.();
   }
 
-  private schedulePrimaryModelUsabilityProbe(trigger: 'startup' | 'manual'): void {
+  private schedulePrimaryModelUsabilityProbe(trigger: 'startup' | 'manual' | 'periodic'): void {
     const target = {
       provider: this.agentProvider,
       model: this.model ?? null,
@@ -10363,7 +10369,7 @@ export class AgentRuntime implements Runtime {
       probeInFlight: true,
     };
 
-    const adapters = createPrimaryModelProbeAdapters(this.agentProviderConfig, { cwd: this.cwd ?? homedir(), egressProxyPort: this.egressProxy?.port, providerExecutionGate: this.providerExecutionGate });
+    const adapters = createPrimaryModelProbeAdapters(this.agentProviderConfig, buildPrimaryProbeAdapterDeps(this.agentProvider, this.model, this.cwd, this.egressProxy?.port, this.providerExecutionGate));
     void Promise.resolve()
       .then(() => probePrimaryModelUsability(target, adapters))
       .then((result) => this.recordPrimaryModelUsability(result, trigger))
@@ -10378,15 +10384,22 @@ export class AgentRuntime implements Runtime {
       });
   }
 
+  private scheduleNextPeriodicUsabilityProbe(): void {
+    if (this.periodicUsabilityProbeTimer) clearTimeout(this.periodicUsabilityProbeTimer);
+    this.periodicUsabilityProbeTimer = setTimeout(() => { this.periodicUsabilityProbeTimer = null; if (this.primaryModelUsability?.probeInFlight) return void this.scheduleNextPeriodicUsabilityProbe(); this.schedulePrimaryModelUsabilityProbe('periodic'); }, calculatePeriodicProbeDelay(this.periodicUsabilityProbeBackoff, this.primaryModelUsability?.checkedAt ?? null, Date.now()));
+    this.periodicUsabilityProbeTimer.unref?.();
+  }
+
   private recordPrimaryModelUsability(
     result: PrimaryModelUsabilityResult,
-    trigger: 'startup' | 'manual',
+    trigger: 'startup' | 'manual' | 'periodic',
   ): void {
     this.primaryModelUsability = {
       ...result,
       checkedAt: Date.now(),
       probeInFlight: false,
     };
+      this.periodicUsabilityProbeBackoff = calculatePeriodicProbeBackoff(this.periodicUsabilityProbeBackoff, result.status === 'usable'); if (trigger === 'periodic') this.scheduleNextPeriodicUsabilityProbe();
 
     if (result.status === 'usable') {
       // Always emit an idempotent clear on usable result.  If the prior process
@@ -10414,19 +10427,8 @@ export class AgentRuntime implements Runtime {
     );
   }
 
-  private primaryModelUsabilityEvidence(
-    result: PrimaryModelUsabilityResult,
-    trigger: 'startup' | 'manual',
-  ): string {
-    const parts = [
-      `trigger=${trigger}`,
-      `status=${alertEvidenceValue(result.status)}`,
-      `provider=${alertEvidenceValue(result.provider)}`,
-      `model=${alertEvidenceValue(result.model)}`,
-    ];
-    if (result.reason) parts.push(`reason=${alertEvidenceValue(result.reason)}`);
-    if (result.suggestion) parts.push(`suggestion=${alertEvidenceValue(result.suggestion)}`);
-    return parts.join(' ');
+  private primaryModelUsabilityEvidence(result: PrimaryModelUsabilityResult, trigger: 'startup' | 'manual' | 'periodic'): string {
+    return formatPrimaryModelUsabilityEvidence(result, trigger, alertEvidenceValue);
   }
 
   /**
@@ -10443,7 +10445,7 @@ export class AgentRuntime implements Runtime {
     signal?: AbortSignal,
   ): Promise<boolean> {
     const target = { provider: this.agentProvider, model: this.model ?? null };
-    const adapters = createPrimaryModelProbeAdapters(this.agentProviderConfig, { cwd: this.cwd ?? homedir(), egressProxyPort: this.egressProxy?.port, providerExecutionGate: this.providerExecutionGate });
+    const adapters = createPrimaryModelProbeAdapters(this.agentProviderConfig, buildPrimaryProbeAdapterDeps(this.agentProvider, this.model, this.cwd, this.egressProxy?.port, this.providerExecutionGate));
     const result = signal
       ? await probePrimaryModelUsability(target, adapters, { signal })
       : await probePrimaryModelUsability(target, adapters);
@@ -10488,7 +10490,7 @@ export class AgentRuntime implements Runtime {
         },
         runPrimaryModelUsability: (signal) => probePrimaryModelUsability(
           { provider: this.agentProvider, model: this.model ?? null },
-          createPrimaryModelProbeAdapters(this.agentProviderConfig, { cwd: this.cwd ?? homedir(), egressProxyPort: this.egressProxy?.port, providerExecutionGate: this.providerExecutionGate }),
+          createPrimaryModelProbeAdapters(this.agentProviderConfig, buildPrimaryProbeAdapterDeps(this.agentProvider, this.model, this.cwd, this.egressProxy?.port, this.providerExecutionGate)),
           { signal },
         ),
         runPrimaryRecoveryProbe: (signal) => this.probePrimaryProviderRecovered(undefined, signal),

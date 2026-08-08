@@ -16,6 +16,7 @@ import type {
   ApiModelAccessProbeResult,
   BinaryModelProbeResult,
   PrimaryModelProbeAdapters,
+  ServingContextReceipt,
 } from './primary-model-usability.ts';
 import type {
   ProviderExecutionGate,
@@ -55,6 +56,15 @@ export interface PrimaryModelProbeAdapterDeps {
   egressProxyPort?: number;
   /** Shared OpenCode state-store execution gate owned by the AgentRuntime. */
   providerExecutionGate?: ProviderExecutionGate;
+  /**
+   * #3017 AXIS C: serving-context receipt. When provided, the probe is bound
+   * to the serving admission/environment: if the config root, credential-store
+   * class, binary digest, provider, or model differs from the serving context,
+   * the probe fail-closes with 'probe-blocked' rather than producing evidence
+   * about a different environment. Content-free hashes only — never credential
+   * material, paths that expose user data, or account identity.
+   */
+  servingContext?: ServingContextReceipt;
 }
 
 const DEFAULT_OPENAI_BASE_URL = 'https://api.openai.com/v1';
@@ -65,15 +75,82 @@ const CLAUDE_MODEL_PROBE_PROMPT = 'Reply with OK only.';
 const OPENCODE_MODEL_PROBE_PROMPT = 'Reply with OK only.';
 const API_MODEL_PROBE_PROMPT = 'Reply with OK only.';
 
+// #3017 AXIS C: verify the probe target matches the serving context receipt.
+// Returns a reason string when the context differs (fail-closed), or null when
+// the context matches (or no receipt was provided — backward-compatible). All
+// comparisons are content-free: hashes, class identifiers, provider/model
+// names. Never credential material or account identity.
+export function verifyServingContext(
+  target: { provider: string; model: string | null },
+  deps: PrimaryModelProbeAdapterDeps,
+): string | null {
+  const ctx = deps.servingContext;
+  if (!ctx) return null; // no receipt → backward-compatible (no binding)
+  if (ctx.provider !== target.provider) {
+    return 'context-mismatch-provider';
+  }
+  if ((ctx.model ?? null) !== (target.model ?? null)) {
+    return 'context-mismatch-model';
+  }
+  // Config root: hash the deps.cwd and compare to the receipt's configRootHash.
+  if (ctx.configRootHash !== null && deps.cwd) {
+    const probeConfigRootHash = shortHash(deps.cwd);
+    if (probeConfigRootHash !== ctx.configRootHash) {
+      return 'context-mismatch-config-root';
+    }
+  }
+  // Credential-store class + binary digest: these are derived from the provider
+  // and its binary; the receipt captures what the runtime is serving with. If
+  // the probe's binary differs (e.g. a different claude binary version), block.
+  if (ctx.binaryDigest !== null && typeof deps.getProviderBinary === 'function') {
+    const binary = deps.getProviderBinary(target.provider);
+    if (binary !== null) {
+      const probeBinaryDigest = shortHash(binary);
+      if (probeBinaryDigest !== ctx.binaryDigest) {
+        return 'context-mismatch-binary-digest';
+      }
+    }
+  }
+  // Credential-store class is provider-derived; the receipt captures it at
+  // admission. A mismatch means the provider's credential-store class changed
+  // since admission (e.g. keychain → file-store migration mid-session).
+  if (ctx.credentialStoreClass !== null) {
+    const probeCredStoreClass = deriveCredentialStoreClass(target.provider);
+    if (probeCredStoreClass !== ctx.credentialStoreClass) {
+      return 'context-mismatch-credential-store-class';
+    }
+  }
+  return null; // context matches → proceed
+}
+
+function deriveCredentialStoreClass(provider: string): string | null {
+  if (provider === 'claude-cli') return 'keychain-or-file-store';
+  if (provider === 'opencode-cli') return 'keyring';
+  if (provider === 'openai-api' || provider === 'anthropic-api') return 'api-key';
+  return null;
+}
+
 export function createPrimaryModelProbeAdapters(
   providerConfig?: Record<string, unknown>,
   deps: PrimaryModelProbeAdapterDeps = {},
 ): PrimaryModelProbeAdapters {
   return {
-    probeBinaryModel: (target, signal) =>
-      probeCliModel(target.provider, target.model, providerConfig, deps, signal),
-    probeApiModelAccess: (target, signal) =>
-      probeApiModelAccess(target.provider, target.model, providerConfig, deps, signal),
+    probeBinaryModel: (target, signal) => {
+      // #3017 AXIS C: fail closed when the probe target context differs from
+      // the serving context receipt.
+      const mismatch = verifyServingContext(target, deps);
+      if (mismatch !== null) {
+        return Promise.resolve({ status: 'unknown', reason: mismatch });
+      }
+      return probeCliModel(target.provider, target.model, providerConfig, deps, signal);
+    },
+    probeApiModelAccess: (target, signal) => {
+      const mismatch = verifyServingContext(target, deps);
+      if (mismatch !== null) {
+        return Promise.resolve({ status: 'unknown', reason: mismatch });
+      }
+      return probeApiModelAccess(target.provider, target.model, providerConfig, deps, signal);
+    },
   };
 }
 
