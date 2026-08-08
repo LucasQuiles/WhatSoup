@@ -234,6 +234,11 @@ import { FallbackChain } from './fallback-chain-state.ts';
 import { FallbackEmptyAdvance } from './fallback-empty-advance.ts';
 import { PendingPollStore } from './pending-poll-store.ts';
 import { PendingPollPersistence } from './pending-poll-persistence.ts';
+import {
+  ConsumptionReceiptRecorder,
+  OfflineDecisionRetryScheduler,
+  QueuedDecisionConsumer,
+} from './pending-poll-health.ts';
 import { HandoffDistillCoordinator } from './handoff-distill-coordinator.ts';
 import { handoffDistillerEnabled, handoffContextEnabled, handoffDistillModel } from './handoff-distill-config.ts';
 import { config } from '../../config.ts';
@@ -1050,6 +1055,10 @@ export class AgentRuntime implements Runtime {
   // it needs the db. rehydratePendingPolls orchestrates loadRows() into the store +
   // timers + downtime notify; settle/delete/expiry call save/remove.
   private readonly pollPersistence: PendingPollPersistence;
+  // CAR-20 (#2539): offline poll-decision retry owner + durable consumption receipts.
+  private readonly offlineDecisionRetry = new OfflineDecisionRetryScheduler();
+  private readonly consumptionReceipts!: ConsumptionReceiptRecorder;
+  private readonly queuedDecisionConsumer!: QueuedDecisionConsumer;
 
   private recordCrash(mapKey: string): number {
     return this.crashes.record(mapKey);
@@ -2352,6 +2361,14 @@ export class AgentRuntime implements Runtime {
   constructor(db: Database, messenger: Messenger, instanceName?: string, options?: AgentRuntimeOptions) {
     this.db = db;
     this.pollPersistence = new PendingPollPersistence(db);
+    this.consumptionReceipts = new ConsumptionReceiptRecorder(db);
+    this.queuedDecisionConsumer = new QueuedDecisionConsumer(
+      db,
+      this.consumptionReceipts,
+      () => this.offlineDecisionRetry.scheduleRetry(() => {
+        void this.consumeQueuedPollDecisions();
+      }),
+    );
     this.messenger = messenger;
     this.instanceName = instanceName ?? 'personal';
     this.providerExecutionGate = createProviderExecutionGate(this.instanceName);
@@ -5899,73 +5916,21 @@ export class AgentRuntime implements Runtime {
    */
   /**
    * D-4 v1.1: consume console decisions that were queued durably while the
-   * instance was down (pending_poll_decisions, written by the fleet's
-   * approvals route — write-while-down discipline). Each queued decision
-   * resolves through resolvePollDecisionFromConsole — the same poll-
-   * resolution path as a live console decision or a WhatsApp vote. Rows for
-   * polls that expired/resolved while down are deleted as moot (fail-visible
-   * log, never silently kept); rows that fail validation stay for operator
-   * retry. Runs once at boot, after rehydratePendingPolls.
+   * instance was down (pending_poll_decisions, written by the fleet's approvals
+   * route — write-while-down discipline). Each queued decision resolves through
+   * resolvePollDecisionFromConsole — the same poll-resolution path as a live
+   * console decision or a WhatsApp vote. Moot / unparseable rows are dropped
+   * visibly; 'invalid' rows are retained for operator retry. The loop, durable
+   * consumption receipts, and the scheduled in-process retry live in the
+   * extracted QueuedDecisionConsumer (CAR-20 #2539) — previously a transient
+   * read/parse/delete failure stranded rows for "next boot" only. Runs once at
+   * boot, after rehydratePendingPolls.
    */
   private async consumeQueuedPollDecisions(): Promise<void> {
-    try {
-      const tables = new Set(
-        (this.db.raw.prepare(`SELECT name FROM sqlite_master WHERE type = 'table'`).all() as Array<{ name: string }>)
-          .map((r) => r.name),
-      );
-      if (!tables.has('pending_poll_decisions')) return;
-      const rows = this.db.raw.prepare(`
-        SELECT map_key, question_index, selected_options, via
-        FROM pending_poll_decisions
-        ORDER BY created_at ASC, rowid ASC
-      `).all() as Array<{ map_key: string; question_index: number; selected_options: string; via: string }>;
-      if (rows.length === 0) return;
-
-      let consumed = 0;
-      let moot = 0;
-      for (const row of rows) {
-        const deleteRow = () => this.db.raw.prepare(`
-          DELETE FROM pending_poll_decisions
-          WHERE map_key = ? AND question_index = ?
-        `).run(row.map_key, row.question_index);
-
-        if (!this.pendingPolls.questions.has(row.map_key)) {
-          // The poll expired or resolved while the instance was down — the
-          // queued decision is moot; drop it visibly rather than keeping a
-          // phantom queue.
-          log.info({ mapKey: row.map_key }, 'queued console decision dropped as moot (poll not pending at boot)');
-          deleteRow();
-          moot += 1;
-          continue;
-        }
-        let selectedOptions: string[];
-        try {
-          selectedOptions = JSON.parse(row.selected_options) as string[];
-        } catch {
-          log.warn({ mapKey: row.map_key }, 'queued console decision has unparseable options; dropped');
-          deleteRow();
-          moot += 1;
-          continue;
-        }
-        const result = await this.resolvePollDecisionFromConsole({
-          mapKey: row.map_key,
-          questionIndex: row.question_index,
-          selectedOptions,
-        });
-        if (result.ok || result.code === 'stale' || result.code === 'not_found') {
-          if (result.ok) consumed += 1;
-          else moot += 1;
-          deleteRow();
-        }
-        // 'invalid' rows stay for operator retry (validation may depend on
-        // post-boot state, e.g. a poll still re-sending its message).
-      }
-      if (consumed > 0 || moot > 0) {
-        log.info({ consumed, moot }, 'queued console decisions consumed at boot');
-      }
-    } catch (err) {
-      log.error({ err }, 'consumeQueuedPollDecisions: unhandled error (queued rows kept for next boot)');
-    }
+    await this.queuedDecisionConsumer.consume({
+      hasPending: (mapKey) => this.pendingPolls.questions.has(mapKey),
+      resolve: (decision) => this.resolvePollDecisionFromConsole(decision),
+    });
   }
 
   private async rehydratePendingPolls(): Promise<void> {
@@ -7100,6 +7065,10 @@ export class AgentRuntime implements Runtime {
     const completedDeliveryIdentityDebt = completedDeliveryIdentityAdmissions.unresolvedCount > 0;
     const finalizationDegraded = runtimeTurnRecoveryIsDegraded(finalizationHealth, recoveryHealth);
     const turnQueueHealth = this.runtimeTurnCoordinator.turnQueueHaltHealth(this.sessionScope);
+    // CAR-20 (#2539): current-vs-historical poll-persistence health + offline-decision
+    // retry state, surfaced in BOTH health branches below.
+    const pollPersistenceHealth = this.pollPersistence.healthDetails();
+    const offlineDecisionRetry = this.offlineDecisionRetry.healthDetails();
     if (this.sessionScope === 'per_chat') {
       const sessions = [...this.chatSessions.values()];
       let activeSessions = 0;
@@ -7129,6 +7098,8 @@ export class AgentRuntime implements Runtime {
       if (completedDeliveryIdentityDebt) degradedReasons.push('completed_delivery_identity_debt');
       if (turnQueueHealth.turnQueueHalted) degradedReasons.push('turn_queue_halted');
       if (providerExecution.pressureActive) degradedReasons.push('provider_execution_pressure');
+      if (pollPersistenceHealth.degraded) degradedReasons.push('poll_persistence_failure');
+      if (offlineDecisionRetry.exhausted) degradedReasons.push('offline_decision_retry_exhausted');
       const healthStatus: RuntimeHealth['status'] = degradedReasons.length > 0 ? 'degraded' : 'healthy';
       return {
         status: healthStatus,
@@ -7141,6 +7112,8 @@ export class AgentRuntime implements Runtime {
           recentCrashes: recentCrashCount,
           lastCrashAt: this.crashes.lastCrashAt,
           pollPersistenceErrors: this.pollPersistence.errors,
+          pollPersistenceHealth,
+          offlineDecisionRetry,
           autoCompactIneffective: this.autoCompact.ineffective,
           autoCompactConsecutiveRapidRearmsMax: this.autoCompact.consecutiveRapidRearmsMax,
           autoCompactNextTurnOverThreshold: this.autoCompact.nextTurnOverThreshold,
@@ -7181,6 +7154,8 @@ export class AgentRuntime implements Runtime {
     if (completedDeliveryIdentityDebt) degradedReasons.push('completed_delivery_identity_debt');
     if (providerExecution.pressureActive) degradedReasons.push('provider_execution_pressure');
     if (turnQueueHealth.turnQueueHalted) degradedReasons.push('turn_queue_halted');
+    if (pollPersistenceHealth.degraded) degradedReasons.push('poll_persistence_failure');
+    if (offlineDecisionRetry.exhausted) degradedReasons.push('offline_decision_retry_exhausted');
     // A halted single/shared queue is the active admission path — unhealthy/503,
     // matching the public-surface contract; every other reason degrades only.
     const healthStatus: RuntimeHealth['status'] =
@@ -7197,6 +7172,8 @@ export class AgentRuntime implements Runtime {
         pid: status?.pid ?? null,
         sessionId: status?.sessionId ?? null,
         pollPersistenceErrors: this.pollPersistence.errors,
+        pollPersistenceHealth,
+        offlineDecisionRetry,
         autoCompactIneffective: this.autoCompact.ineffective,
         autoCompactConsecutiveRapidRearmsMax: this.autoCompact.consecutiveRapidRearmsMax,
         autoCompactNextTurnOverThreshold: this.autoCompact.nextTurnOverThreshold,

@@ -469,6 +469,13 @@ export const SELF_PROVISIONED: SelfProvisionedEntry[] = [
     reason: 'per-sender command-surface preference store; self-managed schema (ensureCommandSurfacePrefsSchema), generalizes the chat-preference-db.ts convention.',
   },
   {
+    table: 'pending_poll_decision_receipts',
+    module: 'src/runtimes/agent/pending-poll-health.ts',
+    reason: 'durable consumption receipts for queued console poll decisions (#2539); self-managed schema (ConsumptionReceiptRecorder.ensureTable, best-effort latch that never blocks a turn), not a numbered global migration.',
+    justification:
+      "the `outcome` column (consumed/moot/failed) is terminal-only proof-of-completion, not lifecycle state: a row is INSERTed exactly once when its decision reaches a terminal outcome and is never updated, so no in-flight status can strand. Pending is represented by row ABSENCE (a pending_poll_decisions row with no matching receipt), which the consumer re-drives on every boot plus the #2539 in-process retry scheduler — the unresolved case therefore has an owning writer by construction, and a durability-writer check on `outcome` would assert a transition that cannot exist.",
+  },
+  {
     table: 'events',
     module: 'src/fleet/incidents/schema.ts',
     reason: 'incident control plane event ledger; dedicated fleet-level SQLite database with its own meta.schema_version (openIncidentDb), not the instance message DB migration ledger.',
