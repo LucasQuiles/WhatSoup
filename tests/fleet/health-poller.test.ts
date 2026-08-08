@@ -1327,7 +1327,11 @@ describe('HealthPoller', () => {
     poller.stop();
   });
 
-  it('keeps planned-maintenance outages internal while instance alerts are silenced', async () => {
+  // Contract updated by #3073: silence no longer suppresses critical-severity
+  // sources — a silenced instance still pages when it goes unreachable. The
+  // pre-#3073 behavior this test used to pin (maintenance silence keeps
+  // outages internal) is preserved only for sub-critical severities.
+  it('pages critical unreachable outages even while instance alerts are silenced (#3073)', async () => {
     silenceManager.isInstanceSilenced.mockReturnValue(true);
     mockFetch
       .mockResolvedValueOnce({
@@ -1350,13 +1354,19 @@ describe('HealthPoller', () => {
 
     expect(poller.getStatus('remote-1')!.status).toBe('unreachable');
     expect(poller.getStatus('remote-1')!.everReachable).toBe(true);
-    expect(alertFns.emitAlert).not.toHaveBeenCalled();
 
     await vi.advanceTimersByTimeAsync(30_000);
 
-    expect(alertFns.emitAlert).not.toHaveBeenCalled();
-    expect(alertThrottleStore.recordAlertThrottle).not.toHaveBeenCalled();
-    expect(logger.info).toHaveBeenCalledWith(
+    expect(alertFns.emitAlert).toHaveBeenCalledWith(
+      'remote-1',
+      'instance_unreachable',
+      expect.any(String),
+      expect.any(String),
+      'critical',
+      undefined,
+    );
+    expect(alertThrottleStore.recordAlertThrottle).toHaveBeenCalled();
+    expect(logger.info).not.toHaveBeenCalledWith(
       expect.objectContaining({
         name: 'remote-1',
         source: 'instance_unreachable',
