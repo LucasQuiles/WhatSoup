@@ -304,6 +304,7 @@ function expectedFallbackDetails(): Record<string, unknown> {
     fallbackChain: [],
     fallbackChainExhausted: false,
     failedEntryCount: 0,
+    fallbackRestoredFromPersist: false,
     turnErrorCounts: {},
     handoffDistiller: {
       enabled: false,

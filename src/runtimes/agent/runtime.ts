@@ -96,7 +96,12 @@ import {
   saveFallbackState,
   getFallbackState,
   clearFallbackState,
+  PERSISTED_FALLBACK_STATE_VERSION,
 } from './fallback-state-db.ts';
+import {
+  restorePersistedFallbackWindowState,
+  failedKeysToPersistedKeys,
+} from './fallback-restore.ts';
 import { chatJidToWorkspace, provisionWorkspace, writeSandboxArtifacts, ensurePermissionsSettings } from '../../core/workspace.ts';
 import { inspectUserClaudeSettings } from '../../core/user-claude-settings.ts';
 import { isSamePhysicalDirectory } from '../../lib/home-path.ts';
@@ -935,6 +940,10 @@ export class AgentRuntime implements Runtime {
   // Epoch ms of the most recent recovery probe (either path); null until the
   // first probe. Process-local observability only — never persisted.
   private fallbackLastProbeAt: number | null = null;
+  // #3019: true when the current fallback window was restored from persisted
+  // state (a restart mid-window), false when freshly activated in this
+  // process. Content-free continuity evidence surfaced in the health snapshot.
+  private fallbackWindowRestored = false;
   // A2: set on a probe-confirmed revert; cleared by the first real post-revert turn success (the honest canary) — a failing turn leaves it untouched.
   private pendingPostRevertConfirmation = false;
   // Epoch ms of the last diagnostic-bundle kick (instance-level throttle).
@@ -9411,6 +9420,7 @@ export class AgentRuntime implements Runtime {
     fallbackChain: Array<AgentFallbackEntry & { eligible: boolean | null }>;
     fallbackChainExhausted: boolean;
     failedEntryCount: number;
+    fallbackRestoredFromPersist: boolean;
     turnErrorCounts: Record<string, number>;
     handoffDistiller: { enabled: boolean; contextInjection: boolean; model: string | null };
   } {
@@ -9442,6 +9452,7 @@ export class AgentRuntime implements Runtime {
       fallbackChain: this.fallbackChain.snapshot(this.agentFallbacks, this.idleFallbackEligibilityResolver),
       fallbackChainExhausted: this.fallbackChain.isExhausted(this.agentFallbacks),
       failedEntryCount: this.fallbackChain.failedKeys.size,
+      fallbackRestoredFromPersist: this.fallbackWindowRestored,
       turnErrorCounts: Object.fromEntries(this.turnCapabilityTracker.errorCounts),
       handoffDistiller: {
         enabled: handoffDistillerEnabled(),
@@ -9894,6 +9905,10 @@ export class AgentRuntime implements Runtime {
         activatedAt,
         reason: persistReason,
         probeAttempts: this.fallbackProbeAttempts,
+        version: PERSISTED_FALLBACK_STATE_VERSION,
+        activeEntryProvider: fallbackEntry.provider,
+        activeEntryModel: fallbackEntry.model ?? null,
+        failedKeys: failedKeysToPersistedKeys(this.fallbackChain.failedKeys),
       });
     } catch (err) {
       log.warn({ err }, 'failed to persist fallback window — continuing in-memory');
@@ -10053,51 +10068,25 @@ export class AgentRuntime implements Runtime {
   }
 
   /**
-   * Re-arm a persisted fallback window after a process restart. Never throws —
-   * a corrupt, missing, or stale row is cleared and startup proceeds on the primary.
-   * getFallbackState returns null for both "no row" and "bad-typed row" (SQLite
-   * affinity can store TEXT in INTEGER columns); clearing on null ensures corrupt
-   * rows do not linger across restarts.
+   * Re-arm a persisted fallback window after a process restart. Never throws.
+   * #3019: restore/reconciliation logic extracted into fallback-restore.ts.
    */
   private restorePersistedFallbackWindow(): void {
-    try {
-      ensureFallbackStateSchema(this.db);
-      const persisted = getFallbackState(this.db);
-      if (!persisted) {
-        clearFallbackState(this.db);
-        return;
-      }
-      if (this.agentFallbacks.length === 0 || persisted.activeUntil <= Date.now()) {
-        clearFallbackState(this.db);
-        return;
-      }
-      // Clamp the restored window so a clock-skew or tampered row cannot pin
-      // the fallback for longer than MAX_FALLBACK_WINDOW_MS from now.
-      const clampedUntil = Math.min(persisted.activeUntil, Date.now() + MAX_FALLBACK_WINDOW_MS);
-      // Resume the stall clock BEFORE re-arming: the persisted attempts feed
-      // both the re-persist inside armFallbackWindow and the restore alert's
-      // evidence. Without this, every restart reset the count to zero and a
-      // dead primary could extend forever without ever reaching the stall
-      // threshold (restarts happen more often than 12 recheck cadences).
-      this.fallbackProbeAttempts = Number.isFinite(persisted.probeAttempts) ? persisted.probeAttempts : 0;
-      // Pass persisted.reason so the original cause survives the restart, and
-      // restored:true so the resumed window is not re-counted as an
-      // activation — provider_fallback_activated already fired when the
-      // window first armed; the resume emits provider_fallback_restored.
-      const restored = this.armFallbackWindow(clampedUntil, persisted.reason, persisted.activatedAt, { restored: true });
-      if (!restored) {
-        clearFallbackState(this.db);
-        return;
-      }
-      const wasClamped = clampedUntil < persisted.activeUntil;
-      log.info({
-        activeUntil: new Date(clampedUntil).toISOString(),
-        ...(wasClamped ? { persistedUntil: new Date(persisted.activeUntil).toISOString() } : {}),
-        originalReason: persisted.reason,
-      }, 'restored provider-fallback window from persisted state');
-    } catch (err) {
-      log.warn({ err }, 'failed to restore persisted fallback window');
-    }
+    const r = restorePersistedFallbackWindowState(
+      { db: this.db, agentFallbacks: this.agentFallbacks,
+        resetFailedKeys: () => this.fallbackChain.failedKeys.clear(),
+        addFailedKey: (k) => this.fallbackChain.failedKeys.add(k),
+        entryKeyFor: (p, m) => this.fallbackChain.entryKey({ provider: p, model: m ?? undefined }) },
+      MAX_FALLBACK_WINDOW_MS, Date.now);
+    if (r.outcome !== 'armed') { this.fallbackWindowRestored = false; return; }
+    this.fallbackProbeAttempts = r.persistedProbeAttempts;
+    const ok = this.armFallbackWindow(r.clampedUntil, r.persistedReason, r.persistedActivatedAt, { restored: true });
+    if (!ok) { clearFallbackState(this.db); this.fallbackWindowRestored = false; return; }
+    this.fallbackWindowRestored = true;
+    log.info({ activeUntil: new Date(r.clampedUntil).toISOString(),
+      ...(r.clampedUntil < r.persistedUntil ? { persistedUntil: new Date(r.persistedUntil).toISOString() } : {}),
+      originalReason: r.persistedReason, restoredFailedKeys: r.restoredFailedKeys },
+      'restored provider-fallback window from persisted state');
   }
 
   /**
@@ -10225,6 +10214,7 @@ export class AgentRuntime implements Runtime {
     this.fallbackEmptyAdvance.reset();
     this.fallbackWindow.resetAt = null;
     this.fallbackWindow.recoveryProbeRequired = false;
+    this.fallbackWindowRestored = false;
     // End of the stall episode (covers both successful-probe reverts and
     // manual/elapsed deactivations) — the next episode counts from zero and
     // may alert again at the threshold. fallbackLastProbeAt is kept as
@@ -10278,6 +10268,10 @@ export class AgentRuntime implements Runtime {
           // Persist the stall clock with the window so a restart mid-stall
           // resumes the count instead of resetting it.
           probeAttempts: this.fallbackProbeAttempts,
+          version: PERSISTED_FALLBACK_STATE_VERSION,
+          activeEntryProvider: this.fallbackWindow.activeEntry?.provider ?? null,
+          activeEntryModel: this.fallbackWindow.activeEntry?.model ?? null,
+          failedKeys: failedKeysToPersistedKeys(this.fallbackChain.failedKeys),
         });
       } catch (err) {
         log.warn({ err }, 'failed to extend persisted fallback window after failed recovery probe');

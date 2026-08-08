@@ -340,6 +340,10 @@ describe('armFallbackWindow — binary pre-flight', () => {
       activatedAt: now - 1000,
       reason: 'usage-limit',
       probeAttempts: 0,
+      version: 0,
+      activeEntryProvider: null,
+      activeEntryModel: null,
+      failedKeys: [],
     });
     vi.spyOn(fallbackStateDb, 'ensureFallbackStateSchema').mockImplementation(() => {});
     vi.spyOn(fallbackStateDb, 'saveFallbackState').mockImplementation(() => {});
