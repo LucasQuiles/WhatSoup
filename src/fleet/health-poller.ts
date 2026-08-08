@@ -2325,16 +2325,20 @@ export class HealthPoller {
     severity: 'critical' | 'error' | 'warning' | 'info' = 'critical',
     criticalAsset?: BotErrorsCriticalAssetDiagnostic,
   ): boolean {
-    const bypassSuppression = source === 'instance_logged_out';
+    // Critical-severity alerts bypass silence (operator must see them even on a
+    // silenced instance) but keep the throttle guard (15min rate-limit prevents
+    // storm if a critical source flaps). Only instance_logged_out bypasses BOTH.
+    const bypassSilence = severity === 'critical' || source === 'instance_logged_out';
+    const bypassThrottle = source === 'instance_logged_out';
     const throttleKey = this.alertThrottleKey(name, source);
-    const silenceState = bypassSuppression ? false : silenceManager.isInstanceSilenced(this.hostName, name);
+    const silenceState = bypassSilence ? false : silenceManager.isInstanceSilenced(this.hostName, name);
     if (silenceState === true) {
       this.noteAlertSuppressed(throttleKey, name, source, 'alert suppressed — instance is silenced');
       return false;
     }
     const existing = this.statuses.get(name);
     const lastAlertAt = this.persistedAlertThrottle.get(throttleKey) ?? null;
-    if (!bypassSuppression && lastAlertAt !== null) {
+    if (!bypassThrottle && lastAlertAt !== null) {
       const elapsed = Date.now() - new Date(lastAlertAt).getTime();
       if (elapsed < MIN_ALERT_INTERVAL_MS) {
         this.noteAlertSuppressed(throttleKey, name, source, 'alert suppressed — rate limit (15min)', { elapsed });
