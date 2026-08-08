@@ -858,6 +858,95 @@ describe('AgentRuntime', () => {
     expect(evidence).not.toContain('do-not-log-this');
   });
 
+  it('#2394 restart-recovery: usable probe clears primary_model_unusable despite flag never being true (fresh runtime = process B)', async () => {
+    // A fresh AgentRuntime's primaryModelUsabilityAlertActive is false at
+    // construction (runtime.ts:959), simulating process B after restart. The
+    // pre-#3058 code gated the clear behind that flag so a fresh process could
+    // never clear a prior process's alert; #3058 made the clear unconditional.
+    // This test guards against re-introducing that process-local gate (#2394).
+    const agentConfig = mockConfig as typeof mockConfig & { agentProvider?: string };
+    agentConfig.agentProvider = 'claude-cli';
+    const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger, 'test', {
+      model: 'configured-primary',
+    });
+    await runtime.start();
+    // Default mockProbePrimaryModelUsability returns 'usable' when model is set.
+    await vi.waitFor(() => {
+      expect(mockClearAlertSource).toHaveBeenCalledWith(
+        'test',
+        'primary_model_unusable',
+        expect.stringContaining('provider=claude-cli'),
+      );
+    });
+    // Usable result → alert emit branch skipped (no emit for this source at all).
+    const unusableEmits = mockEmitAlert.mock.calls.filter(
+      (c) => c[1] === 'primary_model_unusable',
+    );
+    expect(unusableEmits).toHaveLength(0);
+  });
+
+  it('#2394 continued degradation: non-usable result does NOT clear (no false clear)', async () => {
+    // Still-degraded after restart → probe returns model-unavailable → the
+    // clear branch at recordPrimaryModelUsability is NOT entered (only
+    // status==='usable' clears). Guards against a false-clear regression.
+    mockProbePrimaryModelUsability.mockResolvedValueOnce({
+      status: 'model-unavailable',
+      provider: 'claude-cli',
+      model: 'configured-primary',
+      reason: 'selected-model-rejected',
+    });
+    const agentConfig = mockConfig as typeof mockConfig & { agentProvider?: string };
+    agentConfig.agentProvider = 'claude-cli';
+    const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger, 'test', {
+      model: 'configured-primary',
+    });
+    await runtime.start();
+    await vi.waitFor(() => {
+      expect(mockEmitAlert).toHaveBeenCalledWith(
+        'test', 'primary_model_unusable',
+        'Primary model usability probe failed',
+        expect.stringContaining('status=model-unavailable'), 'warning',
+      );
+    });
+    // Non-usable → no clear emitted for this source (any evidence).
+    const unusableClears = mockClearAlertSource.mock.calls.filter(
+      (c) => c[1] === 'primary_model_unusable',
+    );
+    expect(unusableClears).toHaveLength(0);
+  });
+
+  it('#2394 turn-success clears primary_model_unusable on primary-route turn; fallback-route does NOT', async () => {
+    // Guards the #2394 criterion "a fallback-route turn cannot [clear]" and the
+    // turn-success refresh path (runtime.ts:9544 → recordPrimaryModelUsability).
+    const agentConfig = mockConfig as typeof mockConfig & { agentProvider?: string };
+    agentConfig.agentProvider = 'claude-cli';
+    const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger, 'test', {
+      model: 'configured-primary',
+    });
+    await runtime.start();
+    mockClearAlertSource.mockClear(); // isolate turn-success clear from startup-probe clear
+    const rt = runtime as unknown as {
+      recordTurnCapabilitySuccess: (u: boolean, s: unknown) => void;
+      fallbackWindow: { activeUntil: number | null };
+    };
+    const session = {
+      getProviderId: () => 'claude-cli',
+      getModelRef: () => 'configured-primary',
+      captureEvidenceBinding: () => null,
+    };
+    // Primary-route turn (fallback inactive) → usable → clear fires.
+    rt.fallbackWindow.activeUntil = null;
+    rt.recordTurnCapabilitySuccess(true, session);
+    expect(mockClearAlertSource).toHaveBeenCalledWith(
+      'test', 'primary_model_unusable', 'provider=claude-cli model=configured-primary',
+    );
+    // Fallback-route turn (fallback active) → early-return at :9536 → no clear.
+    mockClearAlertSource.mockClear();
+    rt.fallbackWindow.activeUntil = Date.now() + 60_000;
+    rt.recordTurnCapabilitySuccess(true, session);
+    expect(mockClearAlertSource).not.toHaveBeenCalled();
+  });
+
   it('applies outbound status routing config when creating queues', () => {
     mockConfig.toolUpdateMode = 'friendly';
     mockConfig.toolUpdateRedirectJid = 'status-log@g.us';
