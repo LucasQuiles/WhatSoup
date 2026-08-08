@@ -12,7 +12,14 @@ vi.mock('../../src/lib/emit-alert.ts', () => ({
   clearAlertSourceChecked: alertFns.clearAlertSource,
 }));
 
-import { emitAlert, clearAlertSource } from '../../src/lib/emit-alert.ts';
+import { emitAlert, emitAlertChecked, clearAlertSource } from '../../src/lib/emit-alert.ts';
+import {
+  loadRecoveryMarkers,
+  setRecoveryMarker,
+} from '../../src/lib/recovery-authority-store.ts';
+import { mkdtempSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import {
   checkModelCurrency,
   checkModelCurrencyStatus,
@@ -25,6 +32,7 @@ import {
   fetchLiveModelIdsCached,
   resolveModelRole,
   startModelCurrencyMonitor,
+  reconcileStartupRecoveryMarkers,
   __resetModelAdvisorForTest,
 } from '../../src/lib/model-advisor.ts';
 
@@ -500,5 +508,170 @@ describe('resolveModelRole (symbolic model resolution)', () => {
       level: 'upgrade-available',
       recommended: 'gpt-5.5',
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #2394 (sources 2+3): recovery-authority-store wiring for model-currency and
+// model-currency-live-scan. Mirrors the health-poller (#3057) template: a
+// marker is set on durable emit, cleared on durable clear, and reconciled on
+// cold start with a positive-proof guard (clean check result only). The mock
+// for emit-alert returns true (durable-accept) by default; T5 flips it false.
+// Per-test BOT_ERRORS_STATE_DIR temp isolation so the real marker store reads
+// and writes a throwaway file, exactly as recovery-authority-store.test.ts.
+// ---------------------------------------------------------------------------
+describe('#2394 recovery-authority-store wiring (model-currency + live-scan)', () => {
+  const advisory = {
+    model: 'claude-opus-4-6',
+    role: 'conversation',
+    level: 'upgrade-available' as const,
+    recommended: 'claude-opus-4-8',
+    message: 'upgrade available',
+  };
+  const degradedScan = {
+    mode: 'degraded' as const,
+    attemptedVendors: ['anthropic'],
+    degradedVendors: [{ vendor: 'anthropic', status: 401, reason: 'HTTP 401' }],
+    fetchedCount: 0,
+  };
+  const cleanScan = {
+    mode: 'live' as const,
+    attemptedVendors: ['anthropic'],
+    degradedVendors: [],
+    fetchedCount: 1,
+  };
+  let tmpRoot: string;
+
+  beforeEach(() => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'ws2394ma-'));
+    process.env['BOT_ERRORS_STATE_DIR'] = tmpRoot;
+  });
+
+  afterEach(() => {
+    delete process.env['BOT_ERRORS_STATE_DIR'];
+    if (tmpRoot) rmSync(tmpRoot, { recursive: true, force: true });
+  });
+
+  /** Read the marker file as a Set of present-keys (empty if file absent). */
+  function readMarkers(): Set<string> {
+    try {
+      const raw = JSON.parse(readFileSync(join(tmpRoot, 'recovery-authority.json'), 'utf-8'));
+      return new Set(Object.keys(raw).filter((k) => raw[k] === true));
+    } catch {
+      return new Set();
+    }
+  }
+
+  // T1 — model-currency restart-recovery (RED on main: zero clears emitted).
+  it('T1: model-currency marker set on emit, cleared by cold-start reconcile after restart', () => {
+    // Prior process: alert active → marker must be written.
+    notifyModelAdvisories('instance-A', [advisory]);
+    expect(readMarkers().has('model-currency:instance-A')).toBe(true);
+
+    // Simulated restart — module-local lastNotifiedKey → null.
+    __resetModelAdvisorForTest();
+
+    // Cold start: first check comes back clean; reconcile fires.
+    const result = { advisories: [], liveScan: cleanScan };
+    reconcileStartupRecoveryMarkers('instance-A', result);
+
+    // Outcome: exactly one durable clear for model-currency + marker removed.
+    const clears = clearAlertSourceMock.mock.calls.filter(
+      (c) => c[0] === 'instance-A' && c[1] === 'model-currency',
+    );
+    expect(clears).toHaveLength(1);
+    expect(readMarkers().has('model-currency:instance-A')).toBe(false);
+  });
+
+  // T2 — model-currency-live-scan restart-recovery (RED on main).
+  it('T2: live-scan marker set on emit, cleared by cold-start reconcile after restart', () => {
+    notifyModelLiveScanStatus('instance-A', degradedScan);
+    expect(readMarkers().has('model-currency-live-scan:instance-A')).toBe(true);
+
+    __resetModelAdvisorForTest();
+
+    const result = { advisories: [], liveScan: cleanScan };
+    reconcileStartupRecoveryMarkers('instance-A', result);
+
+    const clears = clearAlertSourceMock.mock.calls.filter(
+      (c) => c[0] === 'instance-A' && c[1] === 'model-currency-live-scan',
+    );
+    expect(clears).toHaveLength(1);
+    expect(readMarkers().has('model-currency-live-scan:instance-A')).toBe(false);
+  });
+
+  // T3 — guards the positive-proof rule: continued degradation must NOT clear.
+  it('T3: still-degraded result preserves marker (no false clear on absence)', () => {
+    notifyModelAdvisories('instance-A', [advisory]);
+    expect(readMarkers().has('model-currency:instance-A')).toBe(true);
+
+    __resetModelAdvisorForTest();
+
+    // Still degraded — no positive proof of recovery.
+    const result = { advisories: [advisory], liveScan: degradedScan };
+    reconcileStartupRecoveryMarkers('instance-A', result);
+
+    const clears = clearAlertSourceMock.mock.calls.filter(
+      (c) => c[0] === 'instance-A' && c[1] === 'model-currency',
+    );
+    expect(clears).toHaveLength(0);
+    expect(readMarkers().has('model-currency:instance-A')).toBe(true);
+  });
+
+  // T4 — idempotency: a second reconcile in the same process emits no clear.
+  it('T4: idempotent — second reconcile in same process emits no extra clear', () => {
+    setRecoveryMarker('model-currency:instance-A');
+    expect(readMarkers().has('model-currency:instance-A')).toBe(true);
+
+    const clean = { advisories: [], liveScan: cleanScan };
+    reconcileStartupRecoveryMarkers('instance-A', clean);
+    const clearsAfterFirst = clearAlertSourceMock.mock.calls.filter(
+      (c) => c[0] === 'instance-A' && c[1] === 'model-currency',
+    ).length;
+
+    // Second call in the same process — startupReconciled flag is already set.
+    reconcileStartupRecoveryMarkers('instance-A', clean);
+    const clearsAfterSecond = clearAlertSourceMock.mock.calls.filter(
+      (c) => c[0] === 'instance-A' && c[1] === 'model-currency',
+    ).length;
+
+    expect(clearsAfterFirst).toBe(1);
+    expect(clearsAfterSecond).toBe(1); // unchanged — no double clear
+  });
+
+  // T5 — durable-accept gating: no marker written when the emit is rejected.
+  it('T5: no marker written when emitAlertChecked returns false (durable queue rejected)', () => {
+    // The code under test calls the CHECKED variant (returns boolean); type the
+    // once-value through it — the underlying vi.fn is shared with emitAlert.
+    vi.mocked(emitAlertChecked).mockReturnValueOnce(false);
+    notifyModelAdvisories('instance-A', [advisory]);
+    // emitAlertChecked returned false → setRecoveryMarker must NOT run.
+    expect(readMarkers().has('model-currency:instance-A')).toBe(false);
+  });
+
+  // T6 — WIRING: the monitor's first run() must invoke the reconcile. T1–T5
+  // pin the reconcile's behavior by calling it directly; this pins the call
+  // site — a mutant that drops reconcileStartupRecoveryMarkers from
+  // startModelCurrencyMonitor.run() fails here and nowhere else.
+  it('T6: cold-start monitor run reconciles markers left by a prior process', async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', '');
+    vi.stubEnv('OPENAI_API_KEY', '');
+    const setIntervalSpy = vi
+      .spyOn(globalThis, 'setInterval')
+      .mockReturnValue({ unref: () => {} } as unknown as NodeJS.Timeout);
+    // Prior process left a marker; the configured model is current, so the
+    // first check result is clean (positive proof) and the reconcile clears.
+    setRecoveryMarker('model-currency:test-bot');
+    startModelCurrencyMonitor('test-bot', { conversation: 'claude-opus-4-8' });
+    for (let i = 0; i < 20; i += 1) await Promise.resolve();
+    // The clean path through notifyModelAdvisories cannot emit this clear
+    // (lastNotifiedKey is null in a fresh process, so its gate fails): the
+    // one durable clear can only come from the wired-in startup reconcile.
+    const clears = clearAlertSourceMock.mock.calls.filter(
+      (c) => c[0] === 'test-bot' && c[1] === 'model-currency',
+    );
+    expect(clears).toHaveLength(1);
+    expect(readMarkers().has('model-currency:test-bot')).toBe(false);
+    setIntervalSpy.mockRestore();
   });
 });

@@ -17,6 +17,11 @@
  */
 import { createChildLogger } from '../logger.ts';
 import { clearAlertSourceChecked, emitAlertChecked } from './emit-alert.ts';
+import {
+  clearRecoveryMarker,
+  loadRecoveryMarkers,
+  setRecoveryMarker,
+} from './recovery-authority-store.ts';
 import { adviseModel, type ModelAdvisory } from './model-catalog.ts';
 import {
   parseSymbolicModel,
@@ -46,6 +51,10 @@ let lastCheckedAt: string | null = null;
 // set changes (and once per process start), not on every daily re-check.
 let lastNotifiedKey: string | null = null;
 let lastLiveScanFailureKey: string | null = null;
+// #2394: tracks whether the cold-start recovery-marker reconcile has fired in
+// this process. The reconcile runs ONCE after the first startup check result,
+// never on daily interval ticks (trap 7).
+let startupReconciled = false;
 
 export interface LiveModelFetchFailure {
   vendor: string;
@@ -90,6 +99,7 @@ export function __resetModelAdvisorForTest(): void {
   lastCheckedAt = null;
   lastNotifiedKey = null;
   lastLiveScanFailureKey = null;
+  startupReconciled = false;
   liveIdsCache = null;
 }
 
@@ -482,7 +492,14 @@ export function notifyModelAdvisories(
 
   if (advisories.length === 0) {
     if (lastNotifiedKey !== null && lastNotifiedKey !== '') {
-      clearAlertSourceChecked(instance, ALERT_SOURCE);
+      if (clearAlertSourceChecked(instance, ALERT_SOURCE)) {
+        try {
+          clearRecoveryMarker(`${ALERT_SOURCE}:${instance}`);
+        } catch {
+          // intentional: marker removal is best-effort — a stale marker only
+          // causes a redundant idempotent clear on the next cold-start scan.
+        }
+      }
     }
     lastNotifiedKey = '';
     if (options.logAllCurrent !== false) {
@@ -504,7 +521,15 @@ export function notifyModelAdvisories(
   const summary = `[${severity}] model updates available (${advisories.length}): ` + advisories
     .map((a) => `${a.role}=${a.model} → ${a.recommended ?? '?'} [${a.level}]`)
     .join('; ');
-  emitAlertChecked(instance, ALERT_SOURCE, summary, JSON.stringify(advisories), severity);
+  if (emitAlertChecked(instance, ALERT_SOURCE, summary, JSON.stringify(advisories), severity)) {
+    try {
+      setRecoveryMarker(`${ALERT_SOURCE}:${instance}`);
+    } catch {
+      // intentional: marker write is best-effort — the alert itself was
+      // already durably queued above; a missing marker only means the next
+      // cold-start scan cannot reconcile this source.
+    }
+  }
 }
 
 export function notifyModelLiveScanStatus(instance: string, liveScan: LiveModelScanStatus): void {
@@ -512,7 +537,14 @@ export function notifyModelLiveScanStatus(instance: string, liveScan: LiveModelS
 
   if (liveScan.degradedVendors.length === 0) {
     if (lastLiveScanFailureKey !== null && lastLiveScanFailureKey !== '') {
-      clearAlertSourceChecked(instance, LIVE_SCAN_ALERT_SOURCE);
+      if (clearAlertSourceChecked(instance, LIVE_SCAN_ALERT_SOURCE)) {
+        try {
+          clearRecoveryMarker(`${LIVE_SCAN_ALERT_SOURCE}:${instance}`);
+        } catch {
+          // intentional: marker removal is best-effort — a stale marker only
+          // causes a redundant idempotent clear on the next cold-start scan.
+        }
+      }
     }
     lastLiveScanFailureKey = '';
     return;
@@ -529,7 +561,15 @@ export function notifyModelLiveScanStatus(instance: string, liveScan: LiveModelS
     .map((failure) => `${failure.vendor}=${failure.reason}`)
     .join('; ') + '; static catalog fallback in use';
   log.warn({ liveScan }, 'model currency live scan degraded');
-  emitAlertChecked(instance, LIVE_SCAN_ALERT_SOURCE, summary, JSON.stringify(liveScan), 'warning');
+  if (emitAlertChecked(instance, LIVE_SCAN_ALERT_SOURCE, summary, JSON.stringify(liveScan), 'warning')) {
+    try {
+      setRecoveryMarker(`${LIVE_SCAN_ALERT_SOURCE}:${instance}`);
+    } catch {
+      // intentional: marker write is best-effort — the alert itself was
+      // already durably queued above; a missing marker only means the next
+      // cold-start scan cannot reconcile this source.
+    }
+  }
 }
 
 export function notifyModelCurrencyResult(instance: string, result: ModelCurrencyCheckResult): void {
@@ -537,6 +577,56 @@ export function notifyModelCurrencyResult(instance: string, result: ModelCurrenc
     logAllCurrent: result.liveScan.mode !== 'degraded',
   });
   notifyModelLiveScanStatus(instance, result.liveScan);
+}
+
+/**
+ * #2394 (sources 2+3): reconcile recovery-authority markers left by a prior
+ * process against the just-completed cold-start currency check.
+ *
+ * Mirrors the health-poller reconcile (#3057) but with the model-advisor
+ * positive-proof analogue: a *clean* check result (no advisories AND no
+ * degraded vendors) is the only evidence that recovery has occurred. The
+ * reconcile NEVER clears on mere marker absence — without a clean result it
+ * preserves the marker so the next startup scan retries the idempotent clear.
+ *
+ * Fires exactly once per process (gated by the module-local ``startupReconciled``
+ * flag), on the first ``run()`` invocation; daily interval ticks bypass it.
+ */
+export function reconcileStartupRecoveryMarkers(
+  instance: string,
+  result: ModelCurrencyCheckResult,
+): void {
+  if (startupReconciled) return;
+  startupReconciled = true;
+  let markers: Set<string>;
+  try {
+    markers = loadRecoveryMarkers();
+  } catch {
+    // intentional: marker file unreadable — treat as no markers and proceed.
+    return;
+  }
+  if (markers.size === 0) return;
+  const mcKey = `${ALERT_SOURCE}:${instance}`;
+  const lsKey = `${LIVE_SCAN_ALERT_SOURCE}:${instance}`;
+  const cleanAdvisories = result.advisories.length === 0;
+  const cleanLiveScan = result.liveScan.degradedVendors.length === 0;
+  const tryClear = (key: string, source: string): void => {
+    if (!markers.has(key)) return;
+    if (!clearAlertSourceChecked(instance, source, 'startup recovery scan (#2394 sources 2+3)')) {
+      // Clear not durably accepted — keep the marker so the next cold-start
+      // scan retries the idempotent clear.
+      return;
+    }
+    try {
+      clearRecoveryMarker(key);
+    } catch {
+      // intentional: marker removal is best-effort — a stale marker only
+      // causes a redundant idempotent clear on the next cold-start scan.
+    }
+  };
+  // Positive-proof: only a confirmed clean result may clear the marker.
+  if (cleanAdvisories) tryClear(mcKey, ALERT_SOURCE);
+  if (cleanLiveScan) tryClear(lsKey, LIVE_SCAN_ALERT_SOURCE);
 }
 
 /**
@@ -549,7 +639,12 @@ export function startModelCurrencyMonitor(
 ): void {
   const run = async (): Promise<void> => {
     try {
-      notifyModelCurrencyResult(instance, await checkModelCurrencyStatus(models));
+      const result = await checkModelCurrencyStatus(models);
+      notifyModelCurrencyResult(instance, result);
+      // #2394: on the first (cold-start) check only, reconcile any recovery
+      // markers left by a prior process against this result. The flag inside
+      // reconcileStartupRecoveryMarkers makes this a no-op on daily ticks.
+      reconcileStartupRecoveryMarkers(instance, result);
     } catch (err) {
       const reason = errorMessage(err);
       log.warn({ err: reason }, 'model currency check failed');
