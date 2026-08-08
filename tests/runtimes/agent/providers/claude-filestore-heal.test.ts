@@ -20,6 +20,11 @@ function baseDeps(over: Partial<ClaudeFileStoreHealDeps> = {}): ClaudeFileStoreH
     readFileStore: () => null,
     writeFileStore: vi.fn(),
     log: silentLog,
+    // #3020: owner-reviewed expected-account identity receipt. Existing tests
+    // exercise the heal mechanics (merge policy, expiry, etc.) with a matching
+    // identity — verifyAccountId returns true so the heal proceeds.
+    expectedAccountId: 'test-expected-account',
+    verifyAccountId: () => true,
     ...over,
   };
 }
