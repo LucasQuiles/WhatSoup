@@ -13,7 +13,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tmpdir, hostname } from 'node:os';
 import { join } from 'node:path';
 import { HealthPoller, type InstanceHealth } from '../../src/fleet/health-poller.ts';
 import type { AlertEmissionResult } from '../../src/lib/emit-alert.ts';
@@ -165,10 +165,10 @@ describe('#2355 alert-suppression episodes', () => {
     return poller;
   }
 
-  /** Pins the throttle for `remote-1:instance_never_reachable` at `at`. */
+  /** Pins the throttle for `hostname():remote-1:instance_never_reachable` at `at`. */
   function throttledSince(at: string): void {
     alertThrottleStore.loadAlertThrottleDetailed.mockReturnValue({
-      entries: new Map([['remote-1:instance_never_reachable', at]]),
+      entries: new Map([[`${hostname()}:remote-1:instance_never_reachable`, at]]),
       loadError: null,
     });
   }

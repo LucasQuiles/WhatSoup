@@ -2,7 +2,7 @@
 // Verifies that the silence manager preserves the distinction between a
 // first-run registry and storage that cannot safely be used as a write basis.
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tmpdir, hostname } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -140,7 +140,7 @@ describe('silence-manager corrupt-file handling', () => {
       rules: null,
       reasonClass: 'invalid_json',
     });
-    expect(isInstanceSilenced('primary-line')).toBeNull();
+    expect(isInstanceSilenced(hostname(), 'primary-line')).toBeNull();
 
     expect(logWarn).toHaveBeenCalledOnce();
     const [fields, msg] = logWarn.mock.calls[0] as [Record<string, unknown>, string];
@@ -166,7 +166,7 @@ describe('silence-manager corrupt-file handling', () => {
       rules: null,
       reasonClass: 'read_failed',
     });
-    expect(isInstanceSilenced('primary-line')).toBeNull();
+    expect(isInstanceSilenced(hostname(), 'primary-line')).toBeNull();
     expect(logWarn).toHaveBeenCalledOnce();
     const [fields] = logWarn.mock.calls[0] as [Record<string, unknown>, string];
     expect(fields).toEqual({ availability: 'unavailable', reasonClass: 'read_failed' });
@@ -200,7 +200,7 @@ describe('silence-manager corrupt-file handling', () => {
     writeFileSync(silencesFile(), 'not valid json at all');
     const { isInstanceSilenced } = await importManager();
 
-    expect(isInstanceSilenced('primary-line')).toBeNull();
+    expect(isInstanceSilenced(hostname(), 'primary-line')).toBeNull();
   });
 
   it('reports a non-array document as invalid instead of an empty registry', async () => {
@@ -289,7 +289,7 @@ describe('silence-manager corrupt-file handling', () => {
       rules: null,
       reasonClass: 'invalid_document',
     });
-    expect(isInstanceSilenced('strict-date-line')).toBeNull();
+    expect(isInstanceSilenced(hostname(), 'strict-date-line')).toBeNull();
   });
 
   it('creates and lists an active silence from an empty first-run store', async () => {
@@ -301,7 +301,7 @@ describe('silence-manager corrupt-file handling', () => {
     expect(rule.reason).toBe('maintenance window');
     expect(rule.silencedBy).toBe('operator');
     expect(new Date(rule.until).getTime()).toBeGreaterThan(Date.now());
-    expect(isInstanceSilenced('primary-line')).toBe(true);
+    expect(isInstanceSilenced(hostname(), 'primary-line')).toBe(true);
     expectObservedRules(listActiveSilences(), [rule]);
     expect(readStoredRules()).toEqual([rule]);
   });
@@ -325,9 +325,51 @@ describe('silence-manager corrupt-file handling', () => {
     writeFileSync(silencesFile(), JSON.stringify([expired, active]));
     const { isInstanceSilenced, listActiveSilences } = await importManager();
 
-    expect(isInstanceSilenced('expired-line')).toBe(false);
-    expect(isInstanceSilenced('active-line')).toBe(true);
+    expect(isInstanceSilenced(hostname(), 'expired-line')).toBe(false);
+    expect(isInstanceSilenced(hostname(), 'active-line')).toBe(true);
     expectObservedRules(listActiveSilences(), [active]);
+  });
+
+  it('T2: host-scoped silence does not silence same-named instance on a different host (#3072)', async () => {
+    mkdirSync(configDir(), { recursive: true });
+    writeFileSync(
+      silencesFile(),
+      JSON.stringify([
+        {
+          instance: 'alice',
+          host: 'hostA',
+          until: new Date(Date.now() + 60_000).toISOString(),
+          reason: 'noisy on hostA',
+          silencedBy: 'operator',
+          createdAt: new Date().toISOString(),
+        },
+      ]),
+    );
+    const { isInstanceSilenced } = await importManager();
+
+    expect(isInstanceSilenced('hostA', 'alice')).toBe(true);
+    expect(isInstanceSilenced('hostB', 'alice')).toBe(false);
+  });
+
+  it('T3: legacy silence rule without host field still silences on any host (#3072 backward compat)', async () => {
+    mkdirSync(configDir(), { recursive: true });
+    writeFileSync(
+      silencesFile(),
+      JSON.stringify([
+        {
+          instance: 'alice',
+          until: new Date(Date.now() + 60_000).toISOString(),
+          reason: 'legacy unscoped rule',
+          silencedBy: 'operator',
+          createdAt: new Date().toISOString(),
+        },
+      ]),
+    );
+    const { isInstanceSilenced } = await importManager();
+
+    expect(isInstanceSilenced('hostA', 'alice')).toBe(true);
+    expect(isInstanceSilenced('hostB', 'alice')).toBe(true);
+    expect(isInstanceSilenced(hostname(), 'alice')).toBe(true);
   });
 
   it('replaces an existing rule for the same instance instead of duplicating it', async () => {
@@ -400,9 +442,9 @@ describe('silence-manager corrupt-file handling', () => {
     );
     const { isInstanceSilenced } = await importManager();
 
-    expect(isInstanceSilenced('primary-line')).toBe(true);
-    expect(isInstanceSilenced('expired-line')).toBe(false);
-    expect(isInstanceSilenced('missing-line')).toBe(false);
+    expect(isInstanceSilenced(hostname(), 'primary-line')).toBe(true);
+    expect(isInstanceSilenced(hostname(), 'expired-line')).toBe(false);
+    expect(isInstanceSilenced(hostname(), 'missing-line')).toBe(false);
   });
 
   it('preserves the prior file when private permissions cannot be staged before publication', async () => {
@@ -600,7 +642,7 @@ describe('silence-manager corrupt-file handling', () => {
       readBasis: 'last_known_good',
       rules: [activeRule],
     });
-    expect(isInstanceSilenced('maintenance-line')).toBe(true);
+    expect(isInstanceSilenced(hostname(), 'maintenance-line')).toBe(true);
   });
 
   it('never clobbers a source recreated before no-clobber reset publication', async () => {
@@ -725,7 +767,7 @@ describe('silence-manager corrupt-file handling', () => {
       rules: null,
       reasonClass: 'read_failed',
     });
-    expect(isInstanceSilenced('linked-line')).toBeNull();
+    expect(isInstanceSilenced(hostname(), 'linked-line')).toBeNull();
     expect(() => addSilence('new-line', 5, 'ordinary mutation', 'operator'))
       .toThrow(SilenceStoreUnavailableError);
     expect(readFileSync(target, 'utf-8')).toContain(marker);
@@ -759,7 +801,7 @@ describe('silence-manager corrupt-file handling', () => {
         lastKnownGoodAt: '2026-07-30T12:00:00.000Z',
         lastKnownGoodAgeMs: 0,
       });
-      expect(isInstanceSilenced('maintenance-line')).toBe(true);
+      expect(isInstanceSilenced(hostname(), 'maintenance-line')).toBe(true);
       expect(() => addSilence('another-line', 5, 'ordinary mutation', 'operator')).toThrow();
       expect(readFileSync(silencesFile(), 'utf-8')).toBe('{corrupt-registry-marker');
     } finally {
@@ -791,7 +833,7 @@ describe('silence-manager corrupt-file handling', () => {
         rules: null,
         reasonClass: 'invalid_json',
       });
-      expect(isInstanceSilenced('maintenance-line')).toBeNull();
+      expect(isInstanceSilenced(hostname(), 'maintenance-line')).toBeNull();
     } finally {
       vi.useRealTimers();
     }
@@ -812,7 +854,7 @@ describe('silence-manager corrupt-file handling', () => {
       writeFileSync(silencesFile(), JSON.stringify([rule]));
       const { isInstanceSilenced, listActiveSilences } = await importManager();
 
-      expect(isInstanceSilenced('short-window')).toBe(true);
+      expect(isInstanceSilenced(hostname(), 'short-window')).toBe(true);
       writeFileSync(silencesFile(), '{corrupt-registry-marker');
       vi.advanceTimersByTime(11_000);
 
@@ -822,7 +864,7 @@ describe('silence-manager corrupt-file handling', () => {
         rules: [],
         reasonClass: 'invalid_json',
       });
-      expect(isInstanceSilenced('short-window')).toBe(false);
+      expect(isInstanceSilenced(hostname(), 'short-window')).toBe(false);
     } finally {
       vi.useRealTimers();
     }

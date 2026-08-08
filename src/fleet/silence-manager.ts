@@ -16,7 +16,7 @@ import {
 } from 'node:fs';
 import type { Stats } from 'node:fs';
 import { basename, join } from 'node:path';
-import { homedir } from 'node:os';
+import { homedir, hostname } from 'node:os';
 import { z } from 'zod';
 import { createChildLogger } from '../logger.ts';
 import {
@@ -47,6 +47,7 @@ export const SILENCE_LAST_KNOWN_GOOD_MAX_AGE_MS = 5 * MS_PER_MINUTE;
 
 export interface SilenceRule {
   instance: string;
+  host?: string;        // host scope (os.hostname()); absent = legacy (matches any host)
   until: string;        // ISO8601
   reason: string;
   silencedBy: string;
@@ -193,6 +194,7 @@ const isoTimestamp = boundedText.refine(isStrictSilenceTimestamp);
 
 const silenceRuleSchema = z.object({
   instance: boundedText,
+  host: boundedText.optional(),
   until: isoTimestamp,
   reason: boundedText,
   silencedBy: boundedText,
@@ -853,12 +855,17 @@ export function resetInvalidSilenceRegistry(expectedRevision: string): SilenceRe
 }
 
 /** `null` means the registry could not provide a current silence verdict. */
-export function isInstanceSilenced(name: string): boolean | null {
+export function isInstanceSilenced(hostName: string, name: string): boolean | null {
   const loaded = getSilenceStoreObservation();
   if (loaded.rules === null) return null;
   const now = new Date();
   return loaded.rules.some(
-    (rule) => rule.instance === name && new Date(rule.until) > now,
+    (rule) =>
+      rule.instance === name &&
+      new Date(rule.until) > now &&
+      // Legacy rules without a host field match any host for backward compat;
+      // scoped rules only match their own host (car-29, ref #3072).
+      (rule.host ? rule.host === hostName : true),
   );
 }
 
@@ -877,6 +884,7 @@ export function addSilence(
   durationMinutes: number,
   reason: string,
   silencedBy: string,
+  hostName: string = hostname(),
 ): SilenceRule {
   return withSilenceRegistryLock(() => {
     const rules = requireMutableRules().filter((rule) => rule.instance !== instance);
@@ -884,6 +892,7 @@ export function addSilence(
     const until = new Date(now.getTime() + durationMinutes * MS_PER_MINUTE);
     const rule: SilenceRule = {
       instance,
+      host: hostName,
       until: until.toISOString(),
       reason,
       silencedBy,

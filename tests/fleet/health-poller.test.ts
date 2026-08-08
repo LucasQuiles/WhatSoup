@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { hostname } from 'node:os';
 import { HealthPoller, type InstanceHealth } from '../../src/fleet/health-poller.ts';
 import type { AlertEmissionResult } from '../../src/lib/emit-alert.ts';
 
@@ -828,7 +829,7 @@ describe('HealthPoller', () => {
 
   it('routes a sole healthy provider fallback as non-paging capacity with diagnostics', async () => {
     alertThrottleStore.loadAlertThrottleDetailed.mockReturnValue({
-      entries: new Map([['remote-1:health_body_degraded', '2026-05-20T11:55:00.000Z']]),
+      entries: new Map([[`${hostname()}:remote-1:health_body_degraded`, '2026-05-20T11:55:00.000Z']]),
       loadError: null,
     });
     mockFetch.mockResolvedValue({
@@ -2489,7 +2490,7 @@ describe('HealthPoller', () => {
   it('hydrates lastAlertAt from the persisted alert throttle store', async () => {
     const lastAlertAt = '2026-05-20T11:55:00.000Z';
     alertThrottleStore.loadAlertThrottleDetailed.mockReturnValue({
-      entries: new Map([['remote-1:instance_unreachable', lastAlertAt]]),
+      entries: new Map([[`${hostname()}:remote-1:instance_unreachable`, lastAlertAt]]),
       loadError: null,
     });
     mockFetch.mockResolvedValue({
@@ -2526,7 +2527,7 @@ describe('HealthPoller', () => {
     await vi.advanceTimersByTimeAsync(1_000);
 
     expect(alertThrottleStore.recordAlertThrottle).toHaveBeenCalledWith(
-      'remote-1:instance_never_reachable',
+      `${hostname()}:remote-1:instance_never_reachable`,
       '2026-05-20T12:00:02.000Z',
     );
     expect(alertFns.emitAlert).toHaveBeenCalledOnce();
@@ -2602,7 +2603,7 @@ describe('HealthPoller', () => {
 
     expect(alertFns.emitAlert).toHaveBeenCalledTimes(2);
     expect(alertThrottleStore.recordAlertThrottle).toHaveBeenCalledWith(
-      'remote-1:instance_logged_out',
+      `${hostname()}:remote-1:instance_logged_out`,
       '2026-05-20T12:00:01.000Z',
     );
     expect(poller.getStatus('remote-1')!.activeAlertSources).toEqual(['instance_logged_out']);
@@ -2641,7 +2642,7 @@ describe('HealthPoller', () => {
         err: persistErr,
         name: 'remote-1',
         source: 'instance_never_reachable',
-        throttleKey: 'remote-1:instance_never_reachable',
+        throttleKey: `${hostname()}:remote-1:instance_never_reachable`,
       }),
       'failed to persist alert throttle',
     );
@@ -2652,7 +2653,7 @@ describe('HealthPoller', () => {
   it('suppresses restart-cycle alerts using persisted lastAlertAt', async () => {
     alertThrottleStore.loadAlertThrottleDetailed.mockReturnValue({
       entries: new Map([
-        ['remote-1:instance_never_reachable', '2026-05-20T11:55:00.000Z'],
+        [`${hostname()}:remote-1:instance_never_reachable`, '2026-05-20T11:55:00.000Z'],
       ]),
       loadError: null,
     });
@@ -2728,11 +2729,11 @@ describe('HealthPoller', () => {
       undefined,
     );
     expect(alertThrottleStore.recordAlertThrottle).toHaveBeenCalledWith(
-      'remote-1:instance_degraded',
+      `${hostname()}:remote-1:instance_degraded`,
       '2026-05-20T12:00:01.000Z',
     );
     expect(alertThrottleStore.recordAlertThrottle).toHaveBeenCalledWith(
-      'remote-1:instance_unreachable',
+      `${hostname()}:remote-1:instance_unreachable`,
       expect.any(String),
     );
 
@@ -3731,9 +3732,9 @@ describe('HealthPoller', () => {
   it('lastAlertAtFor returns the most recent entry among multiple persisted throttle keys', async () => {
     alertThrottleStore.loadAlertThrottleDetailed.mockReturnValue({
       entries: new Map([
-        ['remote-1:instance_degraded', '2026-05-20T11:50:00.000Z'],
-        ['remote-1:instance_unreachable', '2026-05-20T11:58:00.000Z'],
-        ['remote-1:health_body_degraded', '2026-05-20T11:45:00.000Z'],
+        [`${hostname()}:remote-1:instance_degraded`, '2026-05-20T11:50:00.000Z'],
+        [`${hostname()}:remote-1:instance_unreachable`, '2026-05-20T11:58:00.000Z'],
+        [`${hostname()}:remote-1:health_body_degraded`, '2026-05-20T11:45:00.000Z'],
       ]),
       loadError: null,
     });
@@ -4825,9 +4826,9 @@ describe('health-poller.ts uncovered-branch coverage', () => {
     const olderMatching = '2026-05-20T11:40:00.000Z';
     alertThrottleStore.loadAlertThrottleDetailed.mockReturnValue({
       entries: new Map<string, string>([
-        ['other-instance:instance_unreachable', '2026-05-20T11:59:00.000Z'],
-        ['remote-1:instance_logged_out', olderMatching],
-        ['remote-1:instance_unreachable', matching],
+        [`${hostname()}:other-instance:instance_unreachable`, '2026-05-20T11:59:00.000Z'],
+        [`${hostname()}:remote-1:instance_logged_out`, olderMatching],
+        [`${hostname()}:remote-1:instance_unreachable`, matching],
       ]),
       loadError: null,
     });
@@ -5174,6 +5175,102 @@ describe('health-poller.ts uncovered-branch coverage', () => {
     // no auth_bond_issues=… entry.
     expect(evidence).toContain('auth_bond_status=revoked');
     expect(evidence).not.toMatch(/auth_bond_issues=/);
+
+    poller.stop();
+  });
+});
+
+describe('#3072 host-scoped alert throttle keys', () => {
+  let mockFetch: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    mockFetch = vi.fn();
+    mockFetch.mockRejectedValue(new Error('connection refused'));
+    vi.stubGlobal('fetch', mockFetch);
+    alertFns.emitAlert.mockReset();
+    alertFns.emitAlert.mockReturnValue(durableAlertResult());
+    alertFns.clearAlertSource.mockReset();
+    alertFns.clearAlertSource.mockReturnValue(true);
+    alertThrottleStore.loadAlertThrottle.mockReset();
+    alertThrottleStore.loadAlertThrottle.mockReturnValue(new Map());
+    alertThrottleStore.loadAlertThrottleDetailed.mockReset();
+    alertThrottleStore.loadAlertThrottleDetailed.mockReturnValue({ entries: new Map(), loadError: null });
+    alertThrottleStore.recordAlertThrottle.mockReset();
+    silenceManager.isInstanceSilenced.mockReset();
+    silenceManager.isInstanceSilenced.mockReturnValue(false);
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-05-20T12:00:00.000Z'));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('T1 [DISCRIMINATING]: host-A throttle does not suppress host-B same-named instance', async () => {
+    // host-A has already throttled remote-1:instance_never_reachable.
+    alertThrottleStore.loadAlertThrottleDetailed.mockReturnValue({
+      entries: new Map([['hostA:remote-1:instance_never_reachable', '2026-05-20T11:55:00.000Z']]),
+      loadError: null,
+    });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const getSelfHealth = vi.fn().mockReturnValue({});
+
+    // host-B poller: its throttle lookups use hostB-scoped keys, which miss the hostA entry.
+    const poller = new HealthPoller(
+      () => instances,
+      'self',
+      getSelfHealth,
+      1_000,
+      undefined,
+      undefined,
+      undefined,
+      'hostB',
+    );
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    // host-B emits the alert (not suppressed by host-A's throttle entry).
+    expect(alertFns.emitAlert).toHaveBeenCalled();
+    // host-B records its OWN hostB-scoped throttle key, not hostA's.
+    expect(alertThrottleStore.recordAlertThrottle).toHaveBeenCalledWith(
+      'hostB:remote-1:instance_never_reachable',
+      expect.any(String),
+    );
+
+    poller.stop();
+  });
+
+  it('T4: throttle TTL naturally orphans old unscoped keys (#3072 migration)', async () => {
+    // Persisted throttle file carries an OLD unscoped key (`name:source`, no host).
+    // The new scoped lookup (`hostname():name:source`) does NOT match → alert emits.
+    alertThrottleStore.loadAlertThrottleDetailed.mockReturnValue({
+      entries: new Map([['remote-1:instance_never_reachable', '2026-05-20T11:55:00.000Z']]),
+      loadError: null,
+    });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const getSelfHealth = vi.fn().mockReturnValue({});
+
+    const poller = new HealthPoller(() => instances, 'self', getSelfHealth, 1_000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    // Old unscoped key does not match the scoped lookup → alert is emitted (not suppressed).
+    expect(alertFns.emitAlert).toHaveBeenCalled();
+    // The new scoped key is recorded, leaving the orphan to age out via 15min TTL.
+    expect(alertThrottleStore.recordAlertThrottle).toHaveBeenCalledWith(
+      `${hostname()}:remote-1:instance_never_reachable`,
+      expect.any(String),
+    );
 
     poller.stop();
   });
