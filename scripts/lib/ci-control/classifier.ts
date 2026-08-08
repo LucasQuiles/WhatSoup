@@ -101,6 +101,7 @@ export const CLASSIFIER_RUNTIME_SOURCE_PATHS = [
   'scripts/lib/ci-control/manifest.ts',
   'scripts/lib/ci-control/reasons.ts',
   'scripts/lib/ci-control/ref-policy.ts',
+  'scripts/lib/ci-control/trusted-git.ts',
   'scripts/lib/verification/boundary-run/contracts.ts',
   'scripts/lib/verification/boundary-run/model.ts',
   'scripts/lib/verification/boundary-run/schema.ts',
