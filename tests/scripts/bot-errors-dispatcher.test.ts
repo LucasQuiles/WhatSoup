@@ -2394,3 +2394,79 @@ describe('Queue-entry leaf-trust (#2484)', () => {
     expect(existsSync(capturePath)).toBe(true);
   });
 });
+
+// #3054: post-adoption cycle-presence guard. A cycle-accepting helper called
+// post-adoption (the state dir carries the incident-state.json.initialized
+// marker) with incident=None falls through to save_incident_state's bare-JSON
+// wrapper, which would overwrite the enveloped _controllerState primary and
+// trip schema_incompatible on the next session.save() — the corruption class
+// #3053 fixed. The _require_incident_cycle_if_adopted guard must raise
+// IncidentCycleRequiredError at the helper boundary. This test FAILS if the
+// guard is removed (the inline Python prints NO_RAISE instead of RAISED).
+describe('#3054 post-adoption cycle-presence guard', () => {
+  it('raises IncidentCycleRequiredError when a guarded helper is called post-adoption without the cycle', () => {
+    const root = mkdtempSync(join(tmpdir(), 'ws3054-guard-'));
+    // Adopt the state dir via the session save path (creates .initialized).
+    seedOpenIncident(root, 'HOST-A|Loops|llm_total_failure');
+    const marker = join(root, 'incident-state.json.initialized');
+    expect(existsSync(marker)).toBe(true);
+
+    // Invoke collapse_ready_storms(paths) with incident=None post-adoption.
+    // The guard must raise IncidentCycleRequiredError; without the guard the
+    // bare save_incident_state path would silently corrupt the envelope.
+    const probe = spawnSync(
+      'python3',
+      [
+        '-c',
+        [
+          'import importlib.util, os, sys',
+          "sys.path.insert(0, 'deploy/scripts')",
+          "sys.path.insert(0, 'deploy/scripts/lib')",
+          "spec = importlib.util.spec_from_file_location('d3054', 'deploy/scripts/bot-errors-dispatcher.py')",
+          'disp = importlib.util.module_from_spec(spec)',
+          'spec.loader.exec_module(disp)',
+          `os.environ['BOT_ERRORS_STATE_DIR'] = ${JSON.stringify(root)}`,
+          'paths = disp.state_paths()',
+          'try:',
+          '    disp.collapse_ready_storms(paths)',
+          "    print('NO_RAISE')",
+          'except disp.IncidentCycleRequiredError as e:',
+          "    print('RAISED:' + str(e))",
+        ].join('\n'),
+      ],
+      { cwd: process.cwd(), encoding: 'utf8' },
+    );
+    expect(probe.status).toBe(0);
+    expect(probe.stdout).toContain('RAISED:');
+    expect(probe.stdout).not.toContain('NO_RAISE');
+  });
+
+  it('stays inert pre-adoption (bare legacy/compat path) and when the cycle is provided', () => {
+    // Pre-adoption (no .initialized): collapse_ready_storms(paths) with
+    // incident=None is the legitimate legacy path — must NOT raise.
+    const bareRoot = mkdtempSync(join(tmpdir(), 'ws3054-bare-'));
+    mkdirSync(join(bareRoot, 'outbox'), { recursive: true, mode: 0o700 });
+    mkdirSync(join(bareRoot, 'quarantine'), { recursive: true, mode: 0o700 });
+    expect(existsSync(join(bareRoot, 'incident-state.json.initialized'))).toBe(false);
+    const bareProbe = spawnSync(
+      'python3',
+      [
+        '-c',
+        [
+          'import importlib.util, os, sys',
+          "sys.path.insert(0, 'deploy/scripts')",
+          "sys.path.insert(0, 'deploy/scripts/lib')",
+          "spec = importlib.util.spec_from_file_location('d3054b', 'deploy/scripts/bot-errors-dispatcher.py')",
+          'disp = importlib.util.module_from_spec(spec)',
+          'spec.loader.exec_module(disp)',
+          `os.environ['BOT_ERRORS_STATE_DIR'] = ${JSON.stringify(bareRoot)}`,
+          'paths = disp.state_paths()',
+          'print("BARE:" + str(disp.collapse_ready_storms(paths)))',
+        ].join('\n'),
+      ],
+      { cwd: process.cwd(), encoding: 'utf8' },
+    );
+    expect(bareProbe.status).toBe(0);
+    expect(bareProbe.stdout).toContain('BARE:0');
+  });
+});
