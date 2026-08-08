@@ -51,6 +51,7 @@ export const CURATED_TEST_PATHS = [
   'tests/scripts/pr-metadata-guard.test.ts',
   'tests/scripts/ci-control-ref-policy.test.ts',
   'tests/scripts/ci-control-classifier.test.ts',
+  'tests/scripts/ci-required-contexts-guard.test.ts',
   'tests/scripts/hooks-installed-guard.test.ts',
   'tests/scripts/ci-control-result.test.ts',
   'tests/scripts/git-estate-guard.test.ts',

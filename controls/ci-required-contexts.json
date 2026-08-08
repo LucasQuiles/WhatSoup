@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "description": "Required CI contexts that must report a run at the exact head SHA before merge. A context that never starts is ABSENT — no failing row, nothing pending — and naive green logic ships unverified code. This registry plus ci-required-contexts-guard.ts turns that silent-green into a block. Fail closed: API error, timeout, or missing run = block, never green.",
+  "contexts": [
+    {
+      "name": "quality (24.x)",
+      "source": "github-actions",
+      "workflow": "Quality",
+      "description": "Primary quality suite on Node 24.x — full vitest run plus coverage."
+    },
+    {
+      "name": "quality (25.x)",
+      "source": "github-actions",
+      "workflow": "Quality",
+      "description": "Compatibility quality suite on Node 25.x."
+    }
+  ],
+  "failurePolicy": {
+    "missing": "block",
+    "apiError": "block",
+    "timeout": "block"
+  }
+}
