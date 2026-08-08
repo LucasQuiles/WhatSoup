@@ -9,6 +9,7 @@ import { cleanGitEnv } from '../../scripts/lib/guard-core.ts';
 import {
   buildWorkIndex,
   compareWorkIndexCoverage,
+  deriveLifecycle,
   findIgnoredCanonicalDocs,
   findWorkIndexCheckIssues,
   findWorkIndexCoverageIssues,
@@ -212,4 +213,65 @@ describe('work index scanner', () => {
 
     expect(findWorkIndexCheckIssues(root)).toEqual({ missing: [], stale: [], drift: [], ignoredCanonical: [] });
   }, WORK_INDEX_TEST_TIMEOUT_MS);
+});
+
+
+// ---------------------------------------------------------------------------
+// #2547: discriminating test — lifecycle classification dimension.
+//
+// Verifies that deriveLifecycle correctly classifies documents:
+//   - unchecked task boxes + execution-oriented language → 'executable'
+//   - no unchecked boxes + no execution language → 'receipt'
+//   - completed + stale-backlog markers (no tasks, no exec lang) → 'stale-backlog'
+//
+// DISCRIMINATOR: if the lifecycle classification is removed (all rows get the
+// same value or no lifecycle field), these tests FAIL.
+// ---------------------------------------------------------------------------
+
+describe('#2547 lifecycle classification', () => {
+  it('classifies a completed artifact with unchecked task boxes + execution language as executable', () => {
+    const text = `# Example Plan
+- [ ] Implement the foo feature
+- [ ] Dispatch the bar worker
+This plan contains task 1 implementation steps for the producer.
+Status: completed
+`;
+    const lifecycle = deriveLifecycle('completed', text);
+    expect(lifecycle).toBe('executable');
+  });
+
+  it('classifies a completed artifact with no unchecked boxes + no execution language as receipt', () => {
+    const text = `# Example Receipt
+- [x] Task one completed
+- [x] Task two completed
+This document records the historical outcome of the work.
+Status: completed
+`;
+    const lifecycle = deriveLifecycle('completed', text);
+    expect(lifecycle).toBe('receipt');
+  });
+
+  it('classifies a completed artifact with stale-backlog markers as stale-backlog', () => {
+    const text = `# Example Stale Backlog
+This document has TODO and unowned gap items that were never resolved.
+Status: completed
+`;
+    const lifecycle = deriveLifecycle('completed', text);
+    expect(lifecycle).toBe('stale-backlog');
+  });
+
+  it('DISCRIMINATOR: the checked-in work-index has lifecycle field on every row (fails if removed)', () => {
+    const index = buildWorkIndex(repoRoot);
+    expect(index.rows.length).toBeGreaterThan(0);
+    // Every row must have a lifecycle field — if the classification is removed,
+    // this assertion fails (undefined or missing field).
+    for (const row of index.rows) {
+      expect(row.lifecycle).toBeDefined();
+      expect(['executable', 'receipt', 'stale-backlog']).toContain(row.lifecycle);
+    }
+    // The distribution must include at least two distinct lifecycle values
+    // (proving the classification is actually differentiating, not a constant).
+    const lifecycles = new Set(index.rows.map((r) => r.lifecycle));
+    expect(lifecycles.size).toBeGreaterThanOrEqual(2);
+  });
 });
