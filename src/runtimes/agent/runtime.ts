@@ -4367,6 +4367,15 @@ export class AgentRuntime implements Runtime {
             break;
           }
         }
+        // #2357 B1: handler succeeded AND a compound body is present → dispatch
+        // the body as a follow-on agent turn under the same inbound. Reuses
+        // forwardAfterLocalCommand (the existing fall-through-to-turn lever) so
+        // the body enqueues through the normal turn path and the inbound completes
+        // via the turn's durable terminal — NOT local_command_handled. The body is
+        // a NEW first-turn admission (not #2334 active-turn steering).
+        if (classified.type === 'local' && classified.compoundBody !== undefined) {
+          forwardAfterLocalCommand = classified.compoundBody;
+        }
       } catch (err) {
         if (err instanceof AgentCommandRuntimeError && err.code === 'turn_in_progress') {
           log.info({ command: classified.command, chatJid }, 'local command deferred while turn is active');
@@ -4379,6 +4388,22 @@ export class AgentRuntime implements Runtime {
         // (the inbound WAS a locally-handled command).
           log.error({ err, command: classified.command, chatJid }, 'local command handler failed');
           this.sendDirect(chatJid, 'Something went wrong processing that command. Try again?');
+          // #2357 B1 AC4: command failed with a compound body present → retain it
+          // truthfully (NOT dispatched). Running the body under failed-command
+          // semantics would violate the issue's exactly-once rule. Complete the
+          // inbound with a truthful reason and log sanitized (length only — never
+          // the body text, per the telemetry AC). Return here to skip the
+          // local_command_handled fall-through (which would double-complete).
+          if (classified.type === 'local' && classified.compoundBody !== undefined) {
+            if (msg.inboundSeq !== undefined) {
+              this.durability?.completeInbound(msg.inboundSeq, 'command_failed_body_retained');
+            }
+            log.warn(
+              { command: classified.command, chatJid, compoundBodyLength: classified.compoundBody.length },
+              'local command failed with a compound body retained — body not dispatched',
+            );
+            return;
+          }
         }
       }
       if (forwardAfterLocalCommand === null) {

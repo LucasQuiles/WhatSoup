@@ -15656,6 +15656,62 @@ describe('NL routing handlers (nlRouting flag)', () => {
     expect(durability.completeInbound).toHaveBeenCalledWith(77, 'local_command_handled');
   });
 
+  it('#2357 B1 (AC3): a compound body after a successful local command is dispatched as a follow-on turn, not swallowed as local_command_handled', async () => {
+    const { runtime, sentMessages } = makeRoutingRuntime();
+    // Full fault-marker scaffold: the forwarded body turn carries an inboundSeq,
+    // so the real replyGuarantee/terminal-durability would await a settle that
+    // the mocked session never produces.
+    const { durability } = attachRuntimeFaultMarkerSpies(runtime);
+    mockSession.sendTurn.mockClear();
+    // Compound input: status command on line 1, body 'remind me' on line 2.
+    // The body turn carries inboundSeq 42, so its terminal settles only when
+    // the session emits a result — drive it like the other inboundSeq-carrying
+    // forwarded-turn tests (sendAndAwaitProviderDispatch + emitAgentResult),
+    // never sendAndDrain (turnChain would await the unemitted terminal forever).
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/status\nremind me', inboundSeq: 42 }));
+    // AC3-1: the status handler ran (a visible status reply was sent).
+    expect(allReplies(sentMessages).some((t) => t.includes('No active session') || t.includes('Active') || t.includes('route') || t.includes('session'))).toBe(true);
+    // AC3-2: the body was dispatched as a follow-on turn (cover both shared
+    // turnQueue.enqueue and non-shared sendTurn surfaces — the routing harness
+    // exercises the non-shared sendTurn path).
+    const dispatchedTurnTexts = [
+      ...(mockSession.sendTurn.mock.calls as unknown as [string][]).map((c) => c[0]),
+      ...mockQueue.enqueueText.mock.calls.map((c) => String(c[0])),
+    ];
+    expect(dispatchedTurnTexts.some((t) => t === 'remind me')).toBe(true);
+    // AC3-3: inbound NOT finalized as local_command_handled — the forwarded body
+    // turn's own durable terminal owns the completion.
+    expect(durability.completeInbound).not.toHaveBeenCalledWith(42, 'local_command_handled');
+    // Settle the in-flight body turn so no pending terminal leaks past the test.
+    await emitAgentResult(10, 'done');
+  });
+
+  it('#2357 B1 (AC4): a compound body is retained (not dispatched) when the local command handler throws — truthful completion', async () => {
+    const { runtime } = makeRoutingRuntime();
+    // Same full scaffold as AC3 — keeps both B1 tests on the sanctioned mocks.
+    const { durability } = attachRuntimeFaultMarkerSpies(runtime);
+    // Make the status handler fault: its sendDirect (1st call) throws. The
+    // catch's own error-message sendDirect (2nd call) falls back to the
+    // original implementation and succeeds.
+    const sendDirectSpy = vi
+      .spyOn(runtime as unknown as { sendDirect: (...args: unknown[]) => void }, 'sendDirect')
+      .mockImplementationOnce(() => { throw new Error('handler fault'); });
+    mockSession.sendTurn.mockClear();
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/status\nremind me', inboundSeq: 42 }));
+    // AC4-1: body NOT dispatched as a turn (handler failed; running the body
+    // under failed-command semantics would violate exactly-once).
+    const dispatchedTurnTexts = [
+      ...(mockSession.sendTurn.mock.calls as unknown as [string][]).map((c) => c[0]),
+      ...mockQueue.enqueueText.mock.calls.map((c) => String(c[0])),
+    ];
+    expect(dispatchedTurnTexts.some((t) => t === 'remind me')).toBe(false);
+    // AC4-2: inbound completed truthfully — command_failed_body_retained, NOT
+    // the silent local_command_handled drop.
+    expect(durability.completeInbound).toHaveBeenCalledWith(42, 'command_failed_body_retained');
+    expect(durability.completeInbound).not.toHaveBeenCalledWith(42, 'local_command_handled');
+    sendDirectSpy.mockRestore();
+  });
+
   it('/why is removed: forwards to the session rather than rendering a route receipt locally (D11)', async () => {
     const { runtime, sentMessages } = makeRoutingRuntime();
     await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/why' }));
