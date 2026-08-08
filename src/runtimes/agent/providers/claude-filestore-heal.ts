@@ -339,11 +339,12 @@ export function ensureClaudeFileStoreCredential(
       );
       return { outcome: 'refused-no-expected-identity', keychainExpiresAt };
     } else {
-      // Incomplete receipt (expected identity OR verify fn, not both) — cannot
-      // prove same-account identity.
+      // Incomplete receipt (expected identity OR verify fn, not both), or a
+      // complete receipt with an unreadable keychain store — either way,
+      // same-account identity cannot be proven.
       log.warn(
-        { hasExpectedIdentity, hasVerifyFn },
-        '#3020: incomplete account-identity receipt — refusing heal (fail closed, degraded readiness)',
+        { hasExpectedIdentity, hasVerifyFn, keychainStoreReadable: keychainStore !== null },
+        '#3020: account-identity receipt incomplete or keychain store unreadable — refusing heal (fail closed, degraded readiness)',
       );
       return { outcome: 'refused-identity-unverifiable', keychainExpiresAt };
     }
@@ -357,6 +358,11 @@ export function ensureClaudeFileStoreCredential(
         backupPath = null;
       }
     }
+    const tryRollback = (): void => {
+      if (backupPath !== null && typeof deps.restoreFileStore === 'function') {
+        try { deps.restoreFileStore(backupPath, path); } catch { /* deliberately: rollback is best-effort — the caller's signal (the re-thrown write error, or the healed-rolled-back outcome) is the actionable failure; a restore error must not mask it */ }
+      }
+    };
 
     // Merge policy:
     //   - every EXISTING file-store key wins (never clobber what the CLI wrote,
@@ -372,17 +378,18 @@ export function ensureClaudeFileStoreCredential(
       (deps.writeFileStore ?? defaultWriteFileStore)(path, `${JSON.stringify(merged, null, 2)}\n`);
     } catch (writeErr) {
       // #3020: if the write failed after a backup, attempt rollback.
-      if (backupPath !== null && typeof deps.restoreFileStore === 'function') {
-        try { deps.restoreFileStore(backupPath, path); } catch { /* deliberately: rollback is best-effort — writeErr is the actionable failure and is re-thrown below; a rollback error would only mask it */ }
-      }
+      tryRollback();
       throw writeErr;
     }
 
-    // #3020: post-heal canary — verify the WRITTEN store's identity matches
-    // expected WITHOUT publishing the identity. If the canary mismatches,
-    // rollback to the prior store. The canary re-reads the keychain blob
-    // (not the file store) to verify the source identity is still the expected
-    // one — a mismatch means the keychain changed between read and write.
+    // #3020: post-heal canary — re-invoke the verifier on the SAME in-memory
+    // keychain blob after the write, WITHOUT publishing the identity. For a
+    // pure verifier this is a double-check hook (a second chance to refuse and
+    // roll back), NOT protection against the keychain changing between read
+    // and write — the blob is not re-read here. A verifier that consults live
+    // state internally can use this hook to catch such races; a mismatch
+    // triggers rollback to the prior store. Canary only runs when rollback is
+    // possible (backup taken + restore fn provided).
     if (hasExpectedIdentity && hasVerifyFn && keychainStore !== null && typeof deps.restoreFileStore === 'function' && backupPath !== null) {
       const postCanary = deps.verifyAccountId!(keychainStore);
       if (postCanary !== true) {
@@ -390,7 +397,7 @@ export function ensureClaudeFileStoreCredential(
           { expectedAccountIdPresent: true, postCanary },
           '#3020: post-heal canary mismatch — rolling back to prior store',
         );
-        try { deps.restoreFileStore(backupPath, path); } catch { /* deliberately: rollback is best-effort — the healed-rolled-back outcome below is the actionable signal; a restore error must not convert it to a throw */ }
+        tryRollback();
         return { outcome: 'healed-rolled-back', keychainExpiresAt };
       }
     }
