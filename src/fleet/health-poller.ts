@@ -1,4 +1,5 @@
 import { createChildLogger } from '../logger.ts';
+import { hostname } from 'node:os';
 import {
   clearAlertSource,
   clearAlertSourceChecked,
@@ -657,6 +658,7 @@ export class HealthPoller {
   private latestPollRequestIdByInstance: Map<string, number> = new Map();
   private getInstances: () => Map<string, InstanceHealth>;
   private selfName: string;
+  private readonly hostName: string;
   private getSelfHealth: () => Record<string, unknown>;
   private intervalMs: number;
   private statusChangeListeners: StatusChangeCallback[] = [];
@@ -709,6 +711,7 @@ export class HealthPoller {
     loopLagSampler = new LoopLagSampler(),
     dbReader: FleetDbReader | null = null,
     silenceRegistryEpisodeStore: SilenceRegistryEpisodeStorePort = createSilenceRegistryEpisodeStore(),
+    hostName: string = hostname(),
   ) {
     this.getInstances = getInstances;
     this.selfName = selfName;
@@ -717,6 +720,7 @@ export class HealthPoller {
     this.loopLagSampler = loopLagSampler;
     this.dbReader = dbReader;
     this.silenceRegistryEpisodeStore = silenceRegistryEpisodeStore;
+    this.hostName = hostName;
     const throttle = loadAlertThrottleDetailed();
     this.persistedAlertThrottle = throttle.entries;
     this.alertThrottleLoadErrorCode = throttle.loadError?.code ?? (throttle.loadError ? 'UNKNOWN' : null);
@@ -777,7 +781,7 @@ export class HealthPoller {
   }
 
   private alertThrottleKey(name: string, source: string): string {
-    return `${name}:${source}`;
+    return `${this.hostName}:${name}:${source}`;
   }
 
   /**
@@ -929,7 +933,7 @@ export class HealthPoller {
   private lastAlertAtFor(name: string, existing: InstanceStatus | undefined): string | null {
     if (existing?.lastAlertAt) return existing.lastAlertAt;
     let latest = this.persistedAlertThrottle.get(name) ?? null;
-    const prefix = `${name}:`;
+    const prefix = `${this.hostName}:${name}:`;
     for (const [key, value] of this.persistedAlertThrottle.entries()) {
       if (!key.startsWith(prefix)) continue;
       if (latest === null || new Date(value).getTime() > new Date(latest).getTime()) {
@@ -2323,7 +2327,7 @@ export class HealthPoller {
   ): boolean {
     const bypassSuppression = source === 'instance_logged_out';
     const throttleKey = this.alertThrottleKey(name, source);
-    const silenceState = bypassSuppression ? false : silenceManager.isInstanceSilenced(name);
+    const silenceState = bypassSuppression ? false : silenceManager.isInstanceSilenced(this.hostName, name);
     if (silenceState === true) {
       this.noteAlertSuppressed(throttleKey, name, source, 'alert suppressed — instance is silenced');
       return false;
