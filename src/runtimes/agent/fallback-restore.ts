@@ -139,11 +139,13 @@ export function restorePersistedFallbackWindowState(
     if (persisted.version >= 1) {
       ctx.resetFailedKeys();
       for (const fk of persisted.failedKeys) {
+        // fk.model is always a string here: getFallbackState drops entries
+        // without a string model at the read boundary.
         const configured = ctx.agentFallbacks.some(
-          (entry) => entry.provider === fk.provider && (entry.model ?? null) === (fk.model ?? null),
+          (entry) => entry.provider === fk.provider && (entry.model ?? null) === fk.model,
         );
         if (configured) {
-          ctx.addFailedKey(ctx.entryKeyFor(fk.provider, fk.model ?? null));
+          ctx.addFailedKey(ctx.entryKeyFor(fk.provider, fk.model));
         }
       }
     }
@@ -152,7 +154,7 @@ export function restorePersistedFallbackWindowState(
     const clampedUntil = Math.min(persisted.activeUntil, now() + maxFallbackWindowMs);
     const restoredFailedKeys = persisted.version >= 1
       ? persisted.failedKeys.filter((fk) =>
-          ctx.agentFallbacks.some((e) => e.provider === fk.provider && (e.model ?? null) === (fk.model ?? null)),
+          ctx.agentFallbacks.some((e) => e.provider === fk.provider && (e.model ?? null) === fk.model),
         ).length
       : 0;
     return {
@@ -161,7 +163,9 @@ export function restorePersistedFallbackWindowState(
       persistedUntil: persisted.activeUntil,
       persistedReason: persisted.reason,
       persistedActivatedAt: persisted.activatedAt,
-      persistedProbeAttempts: Number.isFinite(persisted.probeAttempts) ? persisted.probeAttempts : 0,
+      // getFallbackState sanitizes probe_attempts (finite, >= 0) at the read
+      // boundary — a corrupt row can never surface a non-finite value here.
+      persistedProbeAttempts: persisted.probeAttempts,
       restoredFailedKeys,
     };
   } catch (err) {
