@@ -373,7 +373,7 @@ export function ensureClaudeFileStoreCredential(
     } catch (writeErr) {
       // #3020: if the write failed after a backup, attempt rollback.
       if (backupPath !== null && typeof deps.restoreFileStore === 'function') {
-        try { deps.restoreFileStore(backupPath, path); } catch { /* best-effort */ }
+        try { deps.restoreFileStore(backupPath, path); } catch { /* deliberately: rollback is best-effort — writeErr is the actionable failure and is re-thrown below; a rollback error would only mask it */ }
       }
       throw writeErr;
     }
@@ -390,7 +390,7 @@ export function ensureClaudeFileStoreCredential(
           { expectedAccountIdPresent: true, postCanary },
           '#3020: post-heal canary mismatch — rolling back to prior store',
         );
-        try { deps.restoreFileStore(backupPath, path); } catch { /* best-effort */ }
+        try { deps.restoreFileStore(backupPath, path); } catch { /* deliberately: rollback is best-effort — the healed-rolled-back outcome below is the actionable signal; a restore error must not convert it to a throw */ }
         return { outcome: 'healed-rolled-back', keychainExpiresAt };
       }
     }
