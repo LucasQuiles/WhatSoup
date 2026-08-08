@@ -1127,6 +1127,50 @@ def save_incident_state(
     require_advance(publication)
     return publication
 
+class IncidentCycleRequiredError(RuntimeError):
+    """#3054: a cycle-accepting helper was called post-adoption without the
+    ``IncidentStateCycle``.
+
+    Post-adoption (the state dir carries the ``.initialized`` marker) the
+    incident-state primary is enveloped (``_controllerState``). Routing a
+    state write through ``save_incident_state`` — the RESTORE-COMPAT
+    bare-JSON wrapper — would overwrite the enveloped primary with bare
+    JSON, so the next ``session.save()`` / ``_validate_envelope`` rejects
+    it with ``schema_incompatible``: the corruption class #3053 fixed.
+    Raising at the helper boundary fails the regression loudly instead of
+    silently corrupting state. Pre-adoption (no ``.initialized``) the bare
+    write is still the legitimate legacy/compat path, so the guard is inert.
+    """
+
+
+def _require_incident_cycle_if_adopted(
+    paths: dict[str, Path],
+    incident: "IncidentStateCycle | None",
+    *,
+    helper: str,
+) -> None:
+    """#3054 guard — fail closed when a cycle-accepting helper is invoked
+    post-adoption without the ``IncidentStateCycle``.
+
+    Inert when ``incident`` is provided (the session save path) or when the
+    state dir is not yet adopted (no ``.initialized`` marker beside the
+    incident-state anchor — the bare ``save_incident_state`` write is the
+    correct legacy/compat path there). The legacy-adoption read path in
+    ``controller_state`` (``.initialized`` absent → ``legacy_valid``) is
+    untouched: this guard only restrains writes, never reads.
+    """
+    if incident is not None:
+        return
+    anchor = paths.get("incident_state")
+    if anchor is None:
+        return
+    if (anchor.parent / (anchor.name + ".initialized")).exists():
+        raise IncidentCycleRequiredError(
+            f"{helper}: post-adoption incident-state write requires the "
+            f"IncidentStateCycle (incident=None would route through "
+            f"save_incident_state's bare-JSON wrapper and corrupt the "
+            f"_controllerState envelope — #3053/#3054)."
+        )
 
 def record_daily_health_freshness(event: dict[str, Any], incident_state: dict[str, Any]) -> str | None:
     """Stamp per-host daily-health liveness into the durable freshness ledger.
@@ -3607,6 +3651,7 @@ def flap_scan_outbox(paths: dict[str, Path], incident: IncidentStateCycle | None
     When *incident* is provided, uses its ``.payload`` and ``.commit()``
     instead of ``load_incident_state``/``save_incident_state``.
     """
+    _require_incident_cycle_if_adopted(paths, incident, helper="flap_scan_outbox")
     if not FLAP_DETECTION:
         return 0
     try:
@@ -3659,6 +3704,7 @@ def sweep_flap_storms(paths: dict[str, Path], incident: IncidentStateCycle | Non
     """Sweep open flap storms for resolution. Returns (resolved, errors).
     Called from run_once after per-event processing. Fail-open per entry.
     When *incident* is provided, uses its .payload and .commit()."""
+    _require_incident_cycle_if_adopted(paths, incident, helper="sweep_flap_storms")
     if not FLAP_DETECTION:
         return 0, 0
     incident_state = (incident.payload if incident else load_incident_state(paths))
@@ -3745,6 +3791,7 @@ def daily_health_monitoring_stale(machine: str, open_incidents: dict[str, Any]) 
 
 
 def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = None, incident: IncidentStateCycle | None = None) -> tuple[int, int, str | None]:
+    _require_incident_cycle_if_adopted(paths, incident, helper="sweep_stale_incidents")
     incident_state = (incident.payload if incident else load_incident_state(paths))
     open_incidents = incident_state.setdefault("openIncidents", {})
     current = int(time.time())
@@ -4337,6 +4384,7 @@ def collapse_storm_group(
     incident_state: dict[str, Any],
     incident: IncidentStateCycle | None = None,
 ) -> int:
+    _require_incident_cycle_if_adopted(paths, incident, helper="collapse_storm_group")
     fingerprint, requested_start = key
     window = storm_window_seconds()
     fingerprint_hash = storm_fingerprint_hash(fingerprint)
@@ -4882,6 +4930,7 @@ def collapse_storm_group(
 
 
 def collapse_ready_storms(paths: dict[str, Path], incident: IncidentStateCycle | None = None) -> int:
+    _require_incident_cycle_if_adopted(paths, incident, helper="collapse_ready_storms")
     threshold = storm_threshold()
     if threshold < 2:
         return 0
@@ -5010,6 +5059,7 @@ def suppress_alerts_recovered_before_delivery(paths: dict[str, Path], incident: 
     after service recovery. When an incident is already recorded as open, only
     the undelivered duplicate alert is retired; its clear remains visible.
     """
+    _require_incident_cycle_if_adopted(paths, incident, helper="suppress_alerts_recovered_before_delivery")
     incident_state = (incident.payload if incident else load_incident_state(paths))
     open_incidents = incident_state.get("openIncidents")
     if not isinstance(open_incidents, dict):
@@ -5093,6 +5143,7 @@ def suppress_alerts_recovered_before_delivery(paths: dict[str, Path], incident: 
 
 
 def suppress_ready_recovery_duplicates(paths: dict[str, Path], incident: IncidentStateCycle | None = None) -> int:
+    _require_incident_cycle_if_adopted(paths, incident, helper="suppress_ready_recovery_duplicates")
     window = recovery_dedupe_window_seconds()
     groups: dict[str, list[tuple[Path, dict[str, Any], int]]] = {}
     for path in sorted(paths["outbox"].glob("*.json")):
@@ -5763,6 +5814,7 @@ def record_state(paths: dict[str, Path], **updates: Any) -> None:
 
 
 def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle | None = None) -> tuple[bool, str]:
+    _require_incident_cycle_if_adopted(paths, incident, helper="process_one")
     # #2484: ready() already verified the leaf is regular and readable, but
     # claim() renames it — re-verify the claimed path before parsing.
     try:
