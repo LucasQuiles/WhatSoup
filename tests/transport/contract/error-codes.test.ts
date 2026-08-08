@@ -55,8 +55,9 @@ describe('ErrorCode registry', () => {
     // Per source header: "Adding a new code requires adding a runbook entry
     // under docs/runbooks/transport-error-<code>.md". This test pins the
     // suffix derivation rule so the runbook-file naming stays consistent.
-    // (As of this commit, the runbook files themselves do NOT exist — that's
-    // a separate documentation-gap-closure task.)
+    // (The runbook files themselves live under
+    // docs/runbooks/transport-error-<suffix>.md and are existence-guarded by
+    // error-codes-runbooks.test.ts, parameterized over allErrorCodes().)
     const suffixOf = (code: string) =>
       code.replace(/^transport\./, '').replace(/_/g, '-');
     expect(suffixOf('transport.unsupported_capability')).toBe('unsupported-capability');
