@@ -6376,3 +6376,52 @@ def test_old_format_receipt_with_record_fails_closed(tmp_path: Path) -> None:
         and call.role == "reconciliation_record"
     ]
     assert record_reads == []
+
+
+# ---------------------------------------------------------------------------
+# #3069: symlinked SYSTEM ANCESTOR (e.g. /tmp → /private/tmp on macOS).
+#
+# The O_NOFOLLOW walk in _open_directory must resolve root-owned system
+# ancestors (outside the threat model) while still rejecting symlinks INSIDE
+# the state tree. This test creates a symlinked ancestor ABOVE the state root
+# and verifies the session opens successfully. Pre-fix, the walk rejects the
+# symlinked ancestor with NotADirectoryError → recovery_required.
+# ---------------------------------------------------------------------------
+
+def test_symlinked_system_ancestor_is_resolved_not_rejected(tmp_path: Path) -> None:
+    """#3069: a state root reached through a symlinked SYSTEM ANCESTOR must
+    open successfully. The symlink is in the ancestor path (root-owned,
+    outside the threat model), not in the state tree itself.
+
+    Discriminating: this test FAILS on pre-fix code (the walk rejects the
+    symlinked ancestor with NotADirectoryError → recovery_required/ControllerStateRequired)
+    and PASSES after the fix (the ancestor prefix is resolved with realpath
+    once before the O_NOFOLLOW walk).
+    """
+    cs = load_controller_state_module()
+    # Create a real directory tree, then a symlinked ancestor above the state root.
+    real_ancestor = tmp_path / "real_ancestor"
+    real_state_root = real_ancestor / "state_root"
+    real_state_root.mkdir(parents=True)
+    path = real_state_root / "state.json"
+    _seed_store(cs, path)
+
+    # Symlink the ancestor: linked_ancestor → real_ancestor
+    linked_ancestor = tmp_path / "linked_ancestor"
+    os.symlink(real_ancestor, linked_ancestor)
+
+    # Open through the symlinked ancestor path.
+    # The state root (real_state_root.name = "state_root") is BELOW the
+    # symlinked ancestor — it's a real directory, not a symlink.
+    linked_path = linked_ancestor / "state_root" / "state.json"
+
+    # Post-fix: the session opens successfully and load() returns a valid result.
+    # Pre-fix: the walk rejects the symlinked ancestor → recovery_required or
+    # ControllerStateRequired.
+    with _open(cs, linked_path) as session:
+        result = session.load()
+    assert result.mode in ("valid", "legacy_valid"), (
+        f"#3069: session must open through a symlinked system ancestor, "
+        f"but got mode={result.mode} (expected valid or legacy_valid). "
+        f"Pre-fix, the O_NOFOLLOW walk rejects the symlinked ancestor."
+    )

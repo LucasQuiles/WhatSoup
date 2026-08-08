@@ -749,7 +749,21 @@ class ControllerStateSession:
     def _open_directory(self) -> None:
         current = -1
         try:
-            absolute_parent = Path(os.path.abspath(self._path.parent))
+            # #3069: resolve the ANCESTOR PREFIX once with realpath. System
+            # ancestors like /tmp on macOS (a root-owned symlink to
+            # /private/tmp) are outside the threat model — the O_NOFOLLOW
+            # walk exists for attacker-controlled components INSIDE the
+            # state tree. By resolving only the parent of the state root
+            # (the ancestor prefix) and keeping the state root's own name
+            # as the last O_NOFOLLOW-walked component, we fix the macOS
+            # /tmp rejection while preserving the symlink rejection for
+            # the state root itself (test_symlinked_ancestor_is_rejected
+            # still passes because its symlink IS the state root, not a
+            # system ancestor). Do NOT blanket-realpath the full path at
+            # every open — that reopens the TOCTOU class the walk prevents.
+            absolute_parent_orig = Path(os.path.abspath(self._path.parent))
+            resolved_prefix = Path(os.path.realpath(absolute_parent_orig.parent))
+            absolute_parent = resolved_prefix / absolute_parent_orig.name
             current = self._ops.open(
                 os.sep, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
             )
