@@ -80,6 +80,7 @@ export function OpsMetrics() {
 
   const meta = fleetMetrics?.meta
   const instancesFailed = meta?.instancesFailed ?? 0
+  const instancesQueried = meta?.instancesQueried ?? 0
 
   const fleetLoadErrorMessage = linesQueryError?.message ?? 'Unable to load fleet data'
 
@@ -135,6 +136,12 @@ export function OpsMetrics() {
               />
             </div>
           </div>
+
+          {instancesFailed > 0 && instancesQueried > 0 && (
+            <p className="font-mono text-s-warn text-label">
+              {`Metrics partial — ${instancesFailed}/${instancesQueried} instances failed`}
+            </p>
+          )}
 
           {linesError && (
             <p className="font-mono text-s-crit text-label">
