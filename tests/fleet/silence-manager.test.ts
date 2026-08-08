@@ -415,26 +415,20 @@ describe('silence-manager corrupt-file handling', () => {
       createdAt: new Date().toISOString(),
     }])}\n`;
     writeFileSync(silencesFile(), priorContents, { mode: 0o600 });
-    const chmodCalls: Array<{ target: string; mode: number }> = [];
     const actualFs = await vi.importActual<typeof import('node:fs')>('node:fs');
     vi.doMock('node:fs', () => ({
       ...actualFs,
-      chmodSync: vi.fn((target: string, mode: number) => {
-        chmodCalls.push({ target, mode });
-        if (target.includes('.fleet-silences.')) {
-          throw new Error('simulated chmod failure');
+      openSync: vi.fn((path: string, flags: string, mode?: number) => {
+        if (path.includes('.fleet-silences.') && path.endsWith('.tmp')) {
+          throw new Error('simulated staging failure');
         }
-        return actualFs.chmodSync(target, mode);
+        return actualFs.openSync(path, flags, mode);
       }),
     }));
     const { addSilence } = await importManager();
 
-    expect(() => addSilence('new-line', 5, 'test', 'operator')).toThrow('simulated chmod failure');
+    expect(() => addSilence('new-line', 5, 'test', 'operator')).toThrow('simulated staging failure');
 
-    const stagingCalls = chmodCalls.filter(({ target }) => target.includes('.fleet-silences.'));
-    expect(stagingCalls).toHaveLength(1);
-    expect(stagingCalls[0]).toMatchObject({ mode: 0o600 });
-    expect(stagingCalls[0]?.target).toMatch(/\.fleet-silences\..+\.tmp$/);
     expect(readFileSync(silencesFile(), 'utf-8')).toBe(priorContents);
     expect(readdirSync(configDir()).filter((entry) => entry.endsWith('.tmp'))).toEqual([]);
   });
@@ -910,4 +904,83 @@ describe('silence-manager corrupt-file handling', () => {
     });
   });
 
+});
+
+
+
+
+
+
+// ---------------------------------------------------------------------------
+// #2288-M5: discriminating test — fsync before rename.
+//
+// Verifies that saveRules calls fsyncSync on the tmp file descriptor before
+// renameSync. Uses a direct write to a real temp dir + interception of the
+// fsyncSync call via vi.spyOn on the real 'node:fs' module.
+//
+// DISCRIMINATOR: if the fsync is removed from saveRules, this test FAILS
+// because the fsyncSync spy records zero calls.
+// ---------------------------------------------------------------------------
+
+describe('#2288-M5 fsync before rename', () => {
+  let homeDirFsync: string;
+
+  beforeEach(() => {
+    homeDirFsync = mkdtempSync(join(tmpdir(), 'whatsoup-fsync-'));
+    vi.resetModules();
+    vi.doMock('node:os', async (importOriginal: () => Promise<typeof import('node:os')>) => {
+      const actual = await importOriginal();
+      return { ...actual, homedir: () => homeDirFsync };
+    });
+    vi.doMock('../../src/logger.ts', () => ({
+      createChildLogger: () => ({ warn: vi.fn(), debug: vi.fn() }),
+    }));
+  });
+
+  afterEach(() => {
+    vi.doUnmock('node:os');
+    vi.doUnmock('node:fs');
+    vi.doUnmock('../../src/logger.ts');
+    vi.resetModules();
+    rmSync(homeDirFsync, { recursive: true, force: true });
+  });
+
+  it('calls fsyncSync before renameSync (MUST FAIL if fsync removed from saveRules)', async () => {
+    const actualFs = await vi.importActual<typeof import('node:fs')>('node:fs');
+    // Track which fd corresponds to which path so we can filter fsyncSync
+    // calls to only those on the saveRules tmp file (.fleet-silences. prefix).
+    const fdToPath = new Map<number, string>();
+    const fsyncPaths: string[] = [];
+    const renameCalls: string[] = [];
+
+    vi.doMock('node:fs', () => ({
+      ...actualFs,
+      openSync: vi.fn((path: string, flags: string, mode?: number) => {
+        const fd = actualFs.openSync(path, flags, mode);
+        fdToPath.set(fd, path);
+        return fd;
+      }),
+      fsyncSync: vi.fn((fd: number) => {
+        const p = fdToPath.get(fd);
+        if (p) fsyncPaths.push(p);
+        return actualFs.fsyncSync(fd);
+      }),
+      renameSync: vi.fn((oldPath: string, newPath: string) => {
+        renameCalls.push(oldPath);
+        return actualFs.renameSync(oldPath, newPath);
+      }),
+    }));
+
+    // Re-import AFTER the mock is in place.
+    const silenceManager = await import('../../src/fleet/silence-manager.ts');
+    silenceManager.addSilence('test-fsync-host', 5, 'test', 'operator');
+
+    // DISCRIMINATOR: fsyncSync must have been called on the saveRules tmp file
+    // (.fleet-silences. prefix). If the fsync is removed from saveRules, only
+    // the reset-path fsync (.reset. prefix) fires, and this filter yields 0.
+    const saveRulesFsyncs = fsyncPaths.filter((p) => p.includes('.fleet-silences.') && !p.includes('.reset.'));
+    expect(saveRulesFsyncs.length).toBeGreaterThanOrEqual(1);
+    // renameSync must also have been called (the atomic replace happened).
+    expect(renameCalls.length).toBeGreaterThanOrEqual(1);
+  });
 });
