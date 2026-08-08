@@ -55,7 +55,15 @@ export type ClaudeFileStoreHealOutcome =
   | 'skipped-file-store-current'
   | 'skipped-error'
   | 'healed'
-  | 'shadow-detected';
+  | 'shadow-detected'
+  // #3020: account-identity refusal outcomes — fail closed, never a silent switch.
+  // A bare keychain item whose account identity cannot be proven to match the
+  // owner-reviewed expected identity is REFUSED: the heal degrades to readiness
+  // without healing rather than silently switching the bot to another account.
+  | 'refused-no-expected-identity'
+  | 'refused-identity-mismatch'
+  | 'refused-identity-unverifiable'
+  | 'healed-rolled-back';
 
 export interface ClaudeFileStoreHealResult {
   outcome: ClaudeFileStoreHealOutcome;
@@ -75,6 +83,24 @@ export interface ClaudeFileStoreHealDeps {
   /** Atomic write of the merged file store + chmod 600. */
   writeFileStore?: (path: string, data: string) => void;
   log?: { info: (o: unknown, m: string) => void; warn: (o: unknown, m: string) => void };
+  // #3020: account-identity guard — bind healing to an owner-reviewed receipt.
+  /** Owner-reviewed expected account identity (a provenance receipt). When
+   *  absent, a bare keychain item is REFUSED — the heal degrades to readiness
+   *  without healing rather than silently switching the bot to another account.
+   *  Suffixed-item unambiguity heal is preserved (the suffixed guard is its own
+   *  proof of identity). The identity itself is never published in logs/tests. */
+  expectedAccountId?: string | null;
+  /** Post-heal canary: verify the keychain blob's account identity WITHOUT
+   *  publishing it. Returns true if same-account, false if mismatch, null if
+   *  unverifiable. When expectedAccountId is set, the heal requires this to
+   *  return true before copying. A mismatch triggers rollback. */
+  verifyAccountId?: (keychainStore: Record<string, unknown>) => boolean | null;
+  /** Backup the prior file store before mutation (returns the backup path or
+   *  null on failure). Used for rollback-safe recovery when a post-heal canary
+   *  mismatch or write failure is detected. */
+  backupFileStore?: (path: string) => string | null;
+  /** Restore the prior file store from a backup path (rollback). */
+  restoreFileStore?: (backupPath: string, targetPath: string) => void;
 }
 
 interface OAuthEntry {
@@ -275,6 +301,63 @@ export function ensureClaudeFileStoreCredential(
       };
     }
 
+    // #3020: account-identity guard — bind healing to an owner-reviewed receipt.
+    // A bare keychain item from a DIFFERENT Claude account would silently switch
+    // the bot's account and report provider usability green. REFUSE to copy when
+    // same-account identity cannot be proven (fail closed → degraded readiness,
+    // never a silent switch). The suffixed-item unambiguity heal is preserved
+    // (readKeychainViaSecurity's suffixed guard is its own identity proof —
+    // it only returns when exactly one suffixed item exists, which is
+    // unambiguous by construction). The #2784 shadow-detection above is also
+    // preserved (it returns before reaching this guard).
+    const hasExpectedIdentity = deps.expectedAccountId !== undefined && deps.expectedAccountId !== null;
+    const hasVerifyFn = typeof deps.verifyAccountId === 'function';
+    if (hasExpectedIdentity && hasVerifyFn && keychainStore !== null) {
+      const verified = deps.verifyAccountId!(keychainStore);
+      if (verified === false) {
+        log.warn(
+          { expectedAccountIdPresent: true },
+          '#3020: keychain account identity does not match expected — refusing heal (fail closed, degraded readiness)',
+        );
+        return { outcome: 'refused-identity-mismatch', keychainExpiresAt };
+      }
+      if (verified === null) {
+        log.warn(
+          { expectedAccountIdPresent: true },
+          '#3020: keychain account identity could not be verified — refusing heal (fail closed, degraded readiness)',
+        );
+        return { outcome: 'refused-identity-unverifiable', keychainExpiresAt };
+      }
+      // verified === true → same account, proceed to heal.
+    } else if (!hasExpectedIdentity && !hasVerifyFn) {
+      // No receipt at all — a bare item's account identity is unknowable, so
+      // refuse. This is the core fix: without this guard, a bare item from a
+      // different account silently switches the bot.
+      log.warn(
+        {},
+        '#3020: no expected-account-identity receipt — refusing bare keychain heal (fail closed, degraded readiness)',
+      );
+      return { outcome: 'refused-no-expected-identity', keychainExpiresAt };
+    } else {
+      // Incomplete receipt (expected identity OR verify fn, not both) — cannot
+      // prove same-account identity.
+      log.warn(
+        { hasExpectedIdentity, hasVerifyFn },
+        '#3020: incomplete account-identity receipt — refusing heal (fail closed, degraded readiness)',
+      );
+      return { outcome: 'refused-identity-unverifiable', keychainExpiresAt };
+    }
+
+    // #3020: backup the prior file store before mutation (rollback-safe).
+    let backupPath: string | null = null;
+    if (typeof deps.backupFileStore === 'function') {
+      try {
+        backupPath = deps.backupFileStore(path);
+      } catch {
+        backupPath = null;
+      }
+    }
+
     // Merge policy:
     //   - every EXISTING file-store key wins (never clobber what the CLI wrote,
     //     e.g. a file-store-only mcpOAuth),
@@ -285,7 +368,32 @@ export function ensureClaudeFileStoreCredential(
     const merged: Record<string, unknown> = { ...(keychainStore ?? {}), ...(fileStore ?? {}) };
     merged[OAUTH_KEY] = keychainOAuth as unknown;
 
-    (deps.writeFileStore ?? defaultWriteFileStore)(path, `${JSON.stringify(merged, null, 2)}\n`);
+    try {
+      (deps.writeFileStore ?? defaultWriteFileStore)(path, `${JSON.stringify(merged, null, 2)}\n`);
+    } catch (writeErr) {
+      // #3020: if the write failed after a backup, attempt rollback.
+      if (backupPath !== null && typeof deps.restoreFileStore === 'function') {
+        try { deps.restoreFileStore(backupPath, path); } catch { /* best-effort */ }
+      }
+      throw writeErr;
+    }
+
+    // #3020: post-heal canary — verify the WRITTEN store's identity matches
+    // expected WITHOUT publishing the identity. If the canary mismatches,
+    // rollback to the prior store. The canary re-reads the keychain blob
+    // (not the file store) to verify the source identity is still the expected
+    // one — a mismatch means the keychain changed between read and write.
+    if (hasExpectedIdentity && hasVerifyFn && keychainStore !== null && typeof deps.restoreFileStore === 'function' && backupPath !== null) {
+      const postCanary = deps.verifyAccountId!(keychainStore);
+      if (postCanary !== true) {
+        log.warn(
+          { expectedAccountIdPresent: true, postCanary },
+          '#3020: post-heal canary mismatch — rolling back to prior store',
+        );
+        try { deps.restoreFileStore(backupPath, path); } catch { /* best-effort */ }
+        return { outcome: 'healed-rolled-back', keychainExpiresAt };
+      }
+    }
 
     log.info(
       {
