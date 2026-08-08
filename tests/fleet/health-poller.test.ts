@@ -5285,3 +5285,126 @@ describe('#3072 host-scoped alert throttle keys', () => {
     poller.stop();
   });
 });
+
+// #3057: recovery-authority-store adoption — the startup recovery scan reads
+// markers left by a prior process and emits idempotent clears for instances
+// that have recovered during the restart window.
+describe('#3057 recovery-authority-store startup scan', () => {
+  let mockFetch: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    mockFetch = vi.fn();
+    mockFetch.mockRejectedValue(new Error('connection refused'));
+    vi.stubGlobal('fetch', mockFetch);
+    alertFns.emitAlert.mockReset();
+    alertFns.emitAlert.mockReturnValue(durableAlertResult());
+    alertFns.clearAlertSource.mockReset();
+    alertFns.clearAlertSource.mockReturnValue(true);
+    alertThrottleStore.loadAlertThrottle.mockReset();
+    alertThrottleStore.loadAlertThrottle.mockReturnValue(new Map());
+    alertThrottleStore.loadAlertThrottleDetailed.mockReset();
+    alertThrottleStore.loadAlertThrottleDetailed.mockReturnValue({ entries: new Map(), loadError: null });
+    alertThrottleStore.recordAlertThrottle.mockReset();
+    silenceManager.isInstanceSilenced.mockReset();
+    silenceManager.isInstanceSilenced.mockReturnValue(false);
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-05-20T12:00:00.000Z'));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('emits recovery clear for a prior-process marker when instance is healthy', async () => {
+    const { mkdtempSync, rmSync, writeFileSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const { tmpdir } = await import('node:os');
+    const authDir = mkdtempSync(join(tmpdir(), 'recovery-auth-'));
+    const origStateDir = process.env['BOT_ERRORS_STATE_DIR'];
+    process.env['BOT_ERRORS_STATE_DIR'] = authDir;
+
+    try {
+      // Simulate prior-process state: marker exists for remote-1:instance_unreachable
+      writeFileSync(join(authDir, 'recovery-authority.json'), JSON.stringify({
+        'remote-1:instance_unreachable': true,
+      }));
+
+      const remoteHealth = makeOnlineHealth({ uptime_seconds: 100 });
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(remoteHealth),
+      });
+      const instances = makeInstances(
+        ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+      );
+      const getSelfHealth = vi.fn().mockReturnValue({});
+
+      const poller = new HealthPoller(() => instances, 'self', getSelfHealth, 1_000);
+      poller.start();
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Startup scan emitted an idempotent recovery clear for the marker
+      expect(alertFns.clearAlertSource).toHaveBeenCalledWith(
+        'remote-1',
+        'instance_unreachable',
+        'startup recovery scan (#3057)',
+      );
+
+      // Marker removed from the authority store after clearing
+      const { loadRecoveryMarkers } = await import(
+        '../../src/lib/recovery-authority-store.ts'
+      );
+      expect(loadRecoveryMarkers().has('remote-1:instance_unreachable')).toBe(false);
+
+      poller.stop();
+    } finally {
+      process.env['BOT_ERRORS_STATE_DIR'] = origStateDir;
+      rmSync(authDir, { recursive: true, force: true });
+    }
+  });
+
+  it('does NOT clear a marker when the instance is still degraded', async () => {
+    const { mkdtempSync, rmSync, writeFileSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const { tmpdir } = await import('node:os');
+    const authDir = mkdtempSync(join(tmpdir(), 'recovery-auth-'));
+    const origStateDir = process.env['BOT_ERRORS_STATE_DIR'];
+    process.env['BOT_ERRORS_STATE_DIR'] = authDir;
+
+    try {
+      writeFileSync(join(authDir, 'recovery-authority.json'), JSON.stringify({
+        'remote-1:instance_unreachable': true,
+      }));
+
+      // Instance is UNREACHABLE (not recovered) — fetch fails
+      mockFetch.mockRejectedValue(new Error('connection refused'));
+      const instances = makeInstances(
+        ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+      );
+      const getSelfHealth = vi.fn().mockReturnValue({});
+
+      const poller = new HealthPoller(() => instances, 'self', getSelfHealth, 1_000);
+      poller.start();
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      // No recovery clear should fire — instance is still degraded
+      expect(alertFns.clearAlertSource).not.toHaveBeenCalledWith(
+        'remote-1',
+        'instance_unreachable',
+        'startup recovery scan (#3057)',
+      );
+
+      // Marker preserved in the store
+      const { loadRecoveryMarkers } = await import(
+        '../../src/lib/recovery-authority-store.ts'
+      );
+      expect(loadRecoveryMarkers().has('remote-1:instance_unreachable')).toBe(true);
+
+      poller.stop();
+    } finally {
+      process.env['BOT_ERRORS_STATE_DIR'] = origStateDir;
+      rmSync(authDir, { recursive: true, force: true });
+    }
+  });
+});
