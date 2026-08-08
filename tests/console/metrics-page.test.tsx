@@ -328,3 +328,50 @@ describe('Ops metrics tab — freshness caption (GUI-5)', () => {
     expect(screen.queryByText(/^observed /)).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Partial-coverage caption (#2528) — OpsMetrics now derives the
+// instancesQueried denominator alongside instancesFailed so partial coverage
+// reads "failed/queried", not the bare count the per-chart ChartPanel badges
+// carry. The caption appears whenever at least one queried instance failed.
+// ---------------------------------------------------------------------------
+describe('Ops metrics tab — partial-coverage caption (failed/queried)', () => {
+  it('reads failed/queried when some queried instances failed', () => {
+    const fleetMetrics = makeFleetMetrics({
+      meta: {
+        instancesQueried: 3,
+        instancesFailed: 2,
+        hasMessageData: true,
+        hasTokenData: true,
+        hasSessionData: true,
+        providers: ['claude-cli', 'openai'],
+      },
+    });
+    renderPage({ lines: [makeLine()], fleetMetrics });
+
+    expect(screen.getByText(/Metrics partial.*2\/3 instances failed/)).toBeDefined();
+  });
+
+  it('still reads failed/queried when every queried instance failed (total failure)', () => {
+    const fleetMetrics = makeFleetMetrics({
+      meta: {
+        instancesQueried: 3,
+        instancesFailed: 3,
+        hasMessageData: false,
+        hasTokenData: false,
+        hasSessionData: false,
+        providers: [],
+      },
+    });
+    renderPage({ lines: [makeLine()], fleetMetrics });
+
+    expect(screen.getByText(/Metrics partial.*3\/3 instances failed/)).toBeDefined();
+  });
+
+  it('renders no partial-coverage caption when no instance failed', () => {
+    // Default makeFleetMetrics fixture carries instancesFailed: 0.
+    renderPage({ lines: [makeLine()] });
+
+    expect(screen.queryByText(/Metrics partial/)).toBeNull();
+  });
+});
