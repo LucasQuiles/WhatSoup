@@ -317,10 +317,11 @@ describe('structured /model grammar (C1 — agent-assisted design)', () => {
   });
 });
 
-// #2357 shadow classification: detect compound command+body (slash command
-// followed by a nonblank multi-line remainder). Detection-only — runtime
-// behavior is unchanged. The body is preserved byte-for-byte.
-describe('classifyInput compound body shadow detection (#2357)', () => {
+// #2357 compound command+body: detect a slash command followed by a nonblank
+// multi-line remainder and separate the body from command-line args (Layer A
+// execution slice). The body is preserved byte-for-byte; args hold first-line
+// command tokens only. Dual-phase body dispatch (B1/B2) is a later rollout step.
+describe('classifyInput compound body args-separation (#2357 Layer A)', () => {
   // The `message` union member never carries compoundBody, so property access
   // on an un-narrowed CommandResult is TS2339; the cast widens for assertion
   // only — runtime shapes are unchanged.
@@ -381,21 +382,32 @@ describe('classifyInput compound body shadow detection (#2357)', () => {
     // an unknown command name → forwarded, with compoundBody='body'.
   });
 
-  it('does not change args behavior (shadow: args still includes body tokens)', () => {
-    // Shadow phase: args are unchanged — the body tokens still appear in args.
-    // Promotion to dual-phase will separate them.
+  it('separates args from compoundBody (Layer A: args hold first-line tokens only)', () => {
+    // #2357 Layer A: the body no longer inflates args. Mutant: re-merge body
+    // tokens into args → this assertion REDs at 'arg do task'.
     const result = classifyInput('/status arg\ndo task');
     expect(result.type).toBe('local');
-    expect(shadow(result).args).toBe('arg do task');
+    expect(shadow(result).args).toBe('arg');
     expect(shadow(result).compoundBody).toBe('do task');
   });
 
-  it('detects compound body with routing aliases enabled', () => {
-    // Bare /model (parts.length===1) stays local even with a body line:
+  it('preserves single-line args parity (no body, no over-split)', () => {
+    // #2357 Layer A AC2: single-line command+args is byte-identical to
+    // pre-slice behavior. Mutant: over-split single line → args REDs.
+    const result = classifyInput('/status arg');
+    expect(result.type).toBe('local');
+    expect(shadow(result).args).toBe('arg');
+    expect(shadow(result).compoundBody).toBeUndefined();
+  });
+
+  it('classifies routing-alias compound input as local with separated body (Layer A)', () => {
+    // #2357 Layer A AC5: bare /model (first-line parts.length===1) is
+    // structured grammar → LOCAL even with a body line. The body is separated
+    // into compoundBody. Mutant: still-inflates-parts-with-body → forwards,
+    // type assertion REDs.
     const result = classifyInput('/model\nswitch to kimi', { routingAliases: true });
-    // NOTE: the body tokens inflate parts.length, so this forwards (structured
-    // grammar fails for multi-line content). This is CORRECT shadow behavior —
-    // the body is preserved in compoundBody regardless of local/forwarded.
+    expect(result.type).toBe('local');
+    expect(shadow(result).command).toBe('model');
     expect(shadow(result).compoundBody).toBe('switch to kimi');
   });
 

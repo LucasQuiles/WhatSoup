@@ -80,8 +80,9 @@ function isStructuredModelArg(parts: readonly string[]): boolean {
  * (including line endings and leading whitespace within the body) per #2357.
  *
  * Returns `undefined` when the input is single-line or the remainder is blank.
- * This is the SHADOW detection layer — it records the body without changing
- * runtime behavior. Promotion to dual-phase execution is a later rollout step.
+ * The classifier consumes this boundary to separate command-line args from the
+ * body (#2357 Layer A); dual-phase body dispatch (runtime execution of the body
+ * as a follow-on turn) is a later rollout step.
  */
 function extractCompoundBody(text: string): string | undefined {
   const newlineIdx = text.indexOf('\n');
@@ -106,23 +107,27 @@ function extractCompoundBody(text: string): string | undefined {
  * - No leading `/` → message
  */
 export function classifyInput(text: string, opts?: { routingAliases?: boolean }): CommandResult {
-  // #2357 shadow: detect compound command+body (slash command followed by a
-  // nonblank multi-line remainder). The body is preserved byte-for-byte but
-  // does NOT yet change runtime behavior — this is detection-only.
+  // #2357: detect compound command+body (slash command followed by a nonblank
+  // multi-line remainder). The body is preserved byte-for-byte; Layer A
+  // separates it from command-line args (see firstLine derivation below).
   const compoundBody = text.startsWith('/') ? extractCompoundBody(text) : undefined;
 
   if (!text.startsWith('/')) {
     return { type: 'message', text };
   }
 
-  // Extract the command name: the word directly after the leading slash,
-  // lowercased. E.g. "/Compact arg" → "compact".
-  // Filter empty split elements so a trailing space (e.g. "/reset ") does not
-  // inflate parts.length and knock a bare routing alias out of its
-  // `parts.length === 1` grammar — matching the base local commands, which key
-  // only on the command name and already tolerate a trailing space (R10).
-  const rest = text.slice(1);
-  const parts = rest.split(/\s+/).filter((p) => p.length > 0);
+  // #2357 Layer A (execution slice): derive command grammar from the FIRST
+  // LINE only so a multi-line body never inflates args or the parts.length
+  // grammar checks. The line/body boundary is the same newline
+  // extractCompoundBody keys on (single source of truth for the split); args
+  // and compoundBody are now mutually exclusive content. Empty split elements
+  // are filtered so a trailing space (e.g. "/reset ") does not inflate
+  // parts.length and knock a bare routing alias out of its
+  // `parts.length === 1` grammar — matching the base local commands, which
+  // key only on the command name and tolerate a trailing space (R10).
+  const newlineIdx = text.indexOf('\n');
+  const firstLine = newlineIdx === -1 ? text.slice(1) : text.slice(1, newlineIdx);
+  const parts = firstLine.split(/\s+/).filter((p) => p.length > 0);
   if (parts.length === 0) {
     return { type: 'local', command: 'help' };
   }
