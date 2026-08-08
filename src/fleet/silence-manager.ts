@@ -550,8 +550,21 @@ function saveRules(rules: SilenceRule[]): void {
     // later fails, a restart treats absence as unavailable rather than silently
     // reclassifying a potentially interrupted mutation as first run.
     persistObservedGeneration(revisionFor(raw), observedAt);
-    writeFileSync(tmpFile, raw, { mode: 0o600 });
-    chmodSync(tmpFile, 0o600);
+    // #2288-M5: fsync before rename. openSync + writeFileSync(fd, ...) +
+    // fsyncSync(fd) + closeSync(fd) (in a finally) before renameSync, following
+    // the in-file precedent (:636-641 persistObservedGeneration's init path)
+    // and the M6 sibling (incident-breaker.ts:79-86). Without the fsync
+    // barrier, a crash between write and rename flush can leave the tmp file
+    // present but empty → loadRules catches JSON.parse failure and returns []
+    // → every active silence silently vanishes, re-enabling alerting an
+    // operator deliberately suppressed.
+    const fd = openSync(tmpFile, 'w', 0o600);
+    try {
+      writeFileSync(fd, raw, 'utf8');
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
     renameSync(tmpFile, SILENCES_FILE);
     rememberObservedRules(rules, raw, observedAt);
   } catch (err) {
