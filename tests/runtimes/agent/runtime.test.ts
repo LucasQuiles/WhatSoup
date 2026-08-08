@@ -14120,6 +14120,71 @@ describe('AgentRuntime', () => {
       db.close();
     });
 
+    it('CAR-20 (#2539): persistence failure surfaces a degradation cause + current-vs-historical health', () => {
+      const db = makeRealDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+
+      const pending: PendingPollQuestion = {
+        questions: [{ question: 'Q', header: 'H', options: [{ label: 'A', description: '' }, { label: 'B', description: '' }], multiSelect: false }],
+        toolId: 'tool-d',
+        chatJid: 'chatD@g.us',
+        chatJidAliases: new Set(['chatD@g.us']),
+        mode: 'poll',
+        pollMessageIdToQuestionIndex: new Map([['POLL_D', 0]]),
+        currentQuestionIndex: 0,
+        answersCollected: {},
+        createdAt: Date.now(),
+        resolution: 'first-vote-wins',
+        timeoutMs: 3_600_000,
+        votesByQuestion: new Map(),
+        adminJids: null,
+        source: 'send_poll',
+        sentPollMessageIds: ['POLL_D'],
+      };
+
+      // Drop the table so save/remove hit "no such table" → recordFailure (current active failure).
+      db.raw.prepare('DROP TABLE pending_polls').run();
+      const p = (runtime as unknown as {
+        pollPersistence: { save(k: string, pp: PendingPollQuestion): void; remove(k: string): void };
+      }).pollPersistence;
+      p.save('send_poll:d', pending);
+      p.remove('send_poll:d');
+
+      const degraded = runtime.getHealthSnapshot();
+      const dDetails = degraded.details as {
+        degradedReasons: string[];
+        pollPersistenceHealth: { degraded: boolean; consecutiveFailures: number; totalRecoveries: number; lastRecoveredAt: number | null };
+      };
+      // [DISCRIMINATING (1): fails if the degradation surface is removed]
+      expect(dDetails.degradedReasons).toContain('poll_persistence_failure');
+      expect(dDetails.pollPersistenceHealth.degraded).toBe(true);         // CURRENT active failure
+      expect(dDetails.pollPersistenceHealth.consecutiveFailures).toBe(2);
+      expect(dDetails.pollPersistenceHealth.totalRecoveries).toBe(0);     // not yet recovered
+      expect(degraded.status).toBe('degraded');
+
+      // Recreate the table and succeed → historical recovery, no current failure.
+      db.raw.exec(
+        'CREATE TABLE pending_polls (map_key TEXT PRIMARY KEY, chat_jid TEXT NOT NULL, tool_id TEXT NOT NULL, ' +
+        'source TEXT NOT NULL, resolution TEXT NOT NULL, payload TEXT NOT NULL, created_at INTEGER NOT NULL, ' +
+        'closes_at INTEGER, hard_closes_at INTEGER)',
+      );
+      p.remove('send_poll:d'); // now succeeds → ends the streak, marks a recovery
+
+      const recovered = runtime.getHealthSnapshot();
+      const rDetails = recovered.details as {
+        degradedReasons: string[];
+        pollPersistenceHealth: { degraded: boolean; totalRecoveries: number; lastRecoveredAt: number | null };
+      };
+      // [DISCRIMINATING (4): current-vs-historical distinction]
+      expect(rDetails.degradedReasons).not.toContain('poll_persistence_failure');
+      expect(rDetails.pollPersistenceHealth.degraded).toBe(false);        // recovered → historical only
+      expect(rDetails.pollPersistenceHealth.totalRecoveries).toBe(1);     // one recovery recorded
+      expect(rDetails.pollPersistenceHealth.lastRecoveredAt).not.toBeNull();
+
+      db.close();
+    });
+
     it('normalizes legacy pending poll timeout before persistence', () => {
       const db = makeRealDb();
       const { messenger } = makeMessenger();
