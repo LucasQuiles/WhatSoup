@@ -54,6 +54,7 @@ from lib.durable_json import (
     require_advance,
 )
 from lib.state_files import GUI_SESSION_MONITOR_STATE
+from lib.state_root import DEFAULT_STATE_ROOT
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 EMIT_SCRIPT = SCRIPT_DIR / "bot-errors-emit.py"
@@ -835,7 +836,7 @@ def state_path() -> Path:
     if raw:
         return Path(raw).expanduser()
     base = os.environ.get("BOT_ERRORS_STATE_DIR", "").strip()
-    root = Path(base) if base else (Path.home() / ".local/state/bot-errors")
+    root = Path(base) if base else DEFAULT_STATE_ROOT
     return root / GUI_SESSION_MONITOR_STATE
 
 

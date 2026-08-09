@@ -62,7 +62,7 @@ from lib.state_files import (
     Q_LOOP_STATE,
     SENTINEL_HEARTBEAT,
 )
-from lib.state_root import sentinel_state_root, state_root as _ssot_state_root
+from lib.state_root import q_loop_state_root, sentinel_state_root, state_root as _ssot_state_root
 
 
 def state_root() -> Path:
@@ -312,7 +312,7 @@ def q_loop_state_path() -> Path:
     explicit = os.environ.get("BOT_ERRORS_Q_LOOP_STATE")
     if explicit:
         return Path(explicit)
-    root = Path(os.environ.get("BOT_ERRORS_Q_LOOP_STATE_DIR", Path.home() / ".local/state/bot-errors-q-loop"))
+    root = q_loop_state_root()
     return root / Q_LOOP_STATE
 
 

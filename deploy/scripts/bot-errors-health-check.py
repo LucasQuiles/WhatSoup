@@ -47,7 +47,7 @@ from lib.durable_json import (
     require_advance,
 )
 from lib.state_files import DEADMAN_STATE, DISPATCHER_STATE, Q_LOOP_STATE
-from lib.state_root import state_root, test_state_root
+from lib.state_root import DEFAULT_STATE_ROOT, q_loop_state_root, state_root, test_state_root
 
 
 BOT_ERRORS_JID = os.environ.get("BOT_ERRORS_JID", "").strip()
@@ -454,7 +454,7 @@ def canonical_path(path: Path) -> Path:
 
 
 def live_outbox_candidates() -> list[Path]:
-    candidates = [Path.home() / ".local/state/bot-errors/outbox"]
+    candidates = [DEFAULT_STATE_ROOT / "outbox"]
     override = env_value("BOT_ERRORS_LIVE_OUTBOX_DIR")
     if override:
         candidates.append(Path(override))
@@ -470,7 +470,7 @@ def resolve_outbox_dir() -> tuple[Path, dict[str, Any]]:
     explicit_state = env_value("BOT_ERRORS_STATE_DIR")
     test_state = test_state_root()
     policy = "default"
-    outbox = Path.home() / ".local/state/bot-errors/outbox"
+    outbox = DEFAULT_STATE_ROOT / "outbox"
     if explicit_outbox:
         outbox = Path(explicit_outbox)
         policy = "explicit-outbox"
@@ -6074,7 +6074,7 @@ def queue_directory_line(
 
 
 def q_loop_state_file() -> Path:
-    root = Path(os.environ.get("BOT_ERRORS_Q_LOOP_STATE_DIR", Path.home() / ".local/state/bot-errors-q-loop"))
+    root = q_loop_state_root()
     return root.expanduser() / Q_LOOP_STATE
 
 

@@ -8,6 +8,7 @@ copies across the dispatcher cluster (variant key in each docstring):
   C (anchor-resolve)   — heartbeat-watchdog (#2723 macOS /var -> /private/var)
   D (sentinel)         — sentinel (BOT_ERRORS_FLEET_SENTINEL_STATE_DIR + /fleet-sentinel)
   E (suffix + rename)  — selfcheck (appends /sentinel; fn was default_state_dir)
+  F (q-loop sibling)   — q-loop (BOT_ERRORS_Q_LOOP_STATE_DIR + /bot-errors-q-loop sibling, #3051 CAR42)
 
 Variant divergence is PRESERVED, not flattened: collapsing B breaks test
 isolation (state bleed across vitest workers), C regresses #2723 on macOS,
@@ -127,3 +128,27 @@ def selfcheck_state_dir() -> Path:
     Successor to bot-errors-selfcheck.py:114 ``default_state_dir()``; behavior-identical.
     """
     return state_root() / "sentinel"
+
+
+ENV_Q_LOOP_STATE_DIR = "BOT_ERRORS_Q_LOOP_STATE_DIR"
+DEFAULT_Q_LOOP_STATE_ROOT = DEFAULT_STATE_ROOT.parent / "bot-errors-q-loop"
+
+
+def q_loop_state_root() -> Path:
+    """Variant F — q-loop root (distinct root, #3051 CAR42).
+
+    Honors ``BOT_ERRORS_Q_LOOP_STATE_DIR`` as the specific override; otherwise
+    derives a SIBLING of the canonical bot-errors root (``…​/.local/state`` /
+    ``bot-errors-q-loop``) — a distinct root from :func:`state_root` that still
+    shares the same parent and env-driven test isolation. The three pre-CAR42
+    sites (health-check/heartbeat-watchdog/q-loop) routed through the inline
+    expression ``Path(os.environ.get("BOT_ERRORS_Q_LOOP_STATE_DIR",
+    Path.home() / ".local/state/bot-errors-q-loop"))``; this function preserves
+    that semantics byte-identically (the default derives from the same
+    ``DEFAULT_STATE_ROOT.parent`` so the two roots track each other under any
+    ``BOT_ERRORS_STATE_DIR`` / test-worker override without coupling to it).
+    """
+    explicit = os.environ.get(ENV_Q_LOOP_STATE_DIR)
+    if explicit and explicit.strip():
+        return Path(explicit)
+    return DEFAULT_Q_LOOP_STATE_ROOT

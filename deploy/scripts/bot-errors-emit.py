@@ -22,7 +22,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
-from lib.state_root import state_root, test_state_root
+from lib.state_root import DEFAULT_STATE_ROOT, state_root, test_state_root
 from lib.bot_errors_envelope import EVENT_TYPES, SEVERITIES, EnvelopeError, new_event_fields
 from lib.durable_json import (
     JsonVersion,
@@ -70,7 +70,7 @@ def canonical_path(path: Path) -> Path:
 
 
 def live_outbox_candidates() -> list[Path]:
-    candidates = [Path.home() / ".local/state/bot-errors/outbox"]
+    candidates = [DEFAULT_STATE_ROOT / "outbox"]
     override = env_value("BOT_ERRORS_LIVE_OUTBOX_DIR")
     if override:
         candidates.append(Path(override))
@@ -86,7 +86,7 @@ def resolve_outbox_dir() -> tuple[Path, dict[str, Any]]:
     explicit_state = env_value("BOT_ERRORS_STATE_DIR")
     test_state = test_state_root()
     policy = "default"
-    outbox = Path.home() / ".local/state/bot-errors/outbox"
+    outbox = DEFAULT_STATE_ROOT / "outbox"
     if explicit_outbox:
         outbox = Path(explicit_outbox)
         policy = "explicit-outbox"
