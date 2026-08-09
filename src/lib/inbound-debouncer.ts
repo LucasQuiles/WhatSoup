@@ -20,6 +20,8 @@
  * Test-friendly: injectable clock and timer factory.
  */
 
+import { systemClock } from './clock.ts';
+
 export interface DebounceClock {
   now: () => number;
 }
@@ -107,7 +109,7 @@ export function createInboundDebouncer<TMessage>(
       ? Math.floor(params.maxBatchSize)
       : undefined;
 
-  const clock = params.clock ?? { now: () => Date.now() };
+  const clock = params.clock ?? { now: () => systemClock.now() };
   const timers = params.timers ?? {
     setTimeout: (fn, ms) => setTimeout(fn, ms),
     clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
