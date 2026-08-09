@@ -5429,13 +5429,32 @@ def load_valid_event_or_quarantine(path: Path, quarantine_dir: Path) -> dict[str
 
 def delivery_ready(event: dict[str, Any]) -> bool:
     delivery = event.get("delivery") if isinstance(event.get("delivery"), dict) else {}
-    next_attempt = int(delivery.get("nextAttemptAtEpoch") or 0)
+    # #2437: a syntactically valid event may still carry a malformed
+    # nextAttemptAtEpoch (non-numeric string, float, dict, list, etc.).
+    # int(...) raises on those, which previously aborted the whole scan loop
+    # and permanently wedged the dispatcher queue. Treat any unreadable
+    # timestamp as "not ready" so the scan skips this record instead of
+    # crashing; ready() quarantines such events so they do not linger.
+    try:
+        next_attempt = int(delivery.get("nextAttemptAtEpoch") or 0)
+    except (TypeError, ValueError):
+        return False
     return next_attempt <= int(time.time())
 
 
 def ready(path: Path, quarantine_dir: Path) -> bool:
     event = load_valid_event_or_quarantine(path, quarantine_dir)
-    return event is not None and delivery_ready(event)
+    if event is None:
+        return False
+    delivery = event.get("delivery") if isinstance(event.get("delivery"), dict) else {}
+    try:
+        int(delivery.get("nextAttemptAtEpoch") or 0)
+    except (TypeError, ValueError) as exc:
+        # #2437: quarantine malformed metadata so a single poison record
+        # cannot wedge the queue; the scan continues with the next event.
+        quarantine_poison(path, quarantine_dir, f"malformed delivery.nextAttemptAtEpoch: {exc}")
+        return False
+    return delivery_ready(event)
 
 
 def quarantine_invalid_envelope(path: Path, quarantine_dir: Path, code: str) -> Path:
