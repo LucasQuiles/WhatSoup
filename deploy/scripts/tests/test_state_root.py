@@ -33,6 +33,7 @@ def _clean_env(monkeypatch):
     for var in (
         "BOT_ERRORS_STATE_DIR",
         "BOT_ERRORS_FLEET_SENTINEL_STATE_DIR",
+        "BOT_ERRORS_Q_LOOP_STATE_DIR",
         "VITEST",
         "VITEST_WORKER_ID",
         "JEST_WORKER_ID",
@@ -161,3 +162,82 @@ def test_t6_adopted_scripts_import_from_lib():
         assert "state_root" in body and (
             "from lib.state_root" in body or "from state_root" in body
         ), f"{script} does not import from lib/state_root.py"
+
+
+# ---------------------------------------------------------------------------
+# Variant F (#3051 CAR42) — q-loop root: distinct sibling root.
+# ---------------------------------------------------------------------------
+
+
+# TF1 -- env override honored.
+def test_tf1_variant_f_q_loop_env_override(monkeypatch, tmp_path):
+    """BOT_ERRORS_Q_LOOP_STATE_DIR wins when set (mirrors T1/T4 env-override shape)."""
+    monkeypatch.setenv("BOT_ERRORS_Q_LOOP_STATE_DIR", str(tmp_path))
+    assert sr_mod.q_loop_state_root() == tmp_path
+
+
+# TF2 -- default = sibling bot-errors-q-loop under the same parent as the
+# canonical bot-errors root.
+def test_tf2_variant_f_q_loop_default_is_sibling():
+    """Default q-loop root derives from DEFAULT_STATE_ROOT.parent, NOT state_root().
+
+    Discrimination: the pre-CAR42 inline sites hardcoded
+    ``Path.home() / ".local/state/bot-errors-q-loop"``; the SSOT default tracks
+    the same parent as DEFAULT_STATE_ROOT so the two roots stay siblings under
+    any future DEFAULT_STATE_ROOT relocation. Asserting the sibling relationship
+    (same parent, distinct leaf) catches a regression that re-couples the q-loop
+    root to state_root() (which would route it through test-isolation and break
+    the loop's persistent lock/state files under vitest workers).
+    """
+    default_q_loop = sr_mod.q_loop_state_root()
+    assert default_q_loop.parent == sr_mod.DEFAULT_STATE_ROOT.parent
+    assert default_q_loop.name == "bot-errors-q-loop"
+    assert default_q_loop != sr_mod.DEFAULT_STATE_ROOT  # distinct root, not the same
+
+
+# ---------------------------------------------------------------------------
+# T7c -- #3051 CAR42 zero-literal regression (mirrors test_state_files.py T7b
+# raw-literal scan shape). Drives the #3051 T6 acceptance grep to ZERO on the
+# path-construction sites (display/label strings are exempt per the gate's
+# ruling-b carve-out).
+# ---------------------------------------------------------------------------
+
+# The one known display/label literal the gate ruled OUT of scope (collector
+# remote-root label — the ``~`` tilde must be preserved byte-for-byte as a
+# display string; str(DEFAULT_STATE_ROOT) would expand it via Path.home()).
+DISPLAY_LABEL_EXEMPT_HITS = {
+    ("bot-errors-collector.py", 'return value, "~/.local/state/bot-errors"'),
+}
+
+# Path-construction literals that MUST be routed through lib/state_root.py.
+# Matches the gate's T6 grep substring ``.local/state/bot-errors``.
+T7C_LITERAL = ".local/state/bot-errors"
+
+
+def test_t7c_no_path_literals_in_consumer_scripts() -> None:
+    """T7c: no consumer script references the state-root path by raw literal
+    EXCEPT the gate-exempt display label in collector.py.
+
+    Mirrors test_state_files.py::test_no_raw_state_filename_literals_in_components.
+    Discrimination: reverting ANY migrated path-construction site (e.g.
+    restoring ``DEFAULT_STATE_ROOT / "outbox"`` back to
+    ``Path.home() / ".local/state/bot-errors/outbox"``) turns this red because
+    the literal substring ``.local/state/bot-errors`` reappears outside the
+    exempt set.
+    """
+    import re
+
+    offenders: list[str] = []
+    for script in sorted(SCRIPTS_DIR.glob("bot-errors-*.py")):
+        text = script.read_text(encoding="utf-8")
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            if T7C_LITERAL not in line:
+                continue
+            stripped = line.strip()
+            if (script.name, stripped) in DISPLAY_LABEL_EXEMPT_HITS:
+                continue  # gate ruling-b: display label, byte-identity preserved
+            offenders.append(f"{script.name}:{lineno}: {stripped}")
+    assert offenders == [], (
+        "raw state-root path literal(s) found outside lib/state_root.py "
+        "(route through the SSOT entry point instead):\n" + "\n".join(offenders)
+    )

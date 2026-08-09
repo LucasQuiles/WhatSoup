@@ -44,6 +44,7 @@ from lib.durable_json import (
     publish_state_json,
     require_advance,
 )
+from lib.state_root import q_loop_state_root, state_root
 
 
 BOT_ERRORS_JID = os.environ.get("BOT_ERRORS_JID", "").strip()
@@ -53,11 +54,7 @@ BOT_ERRORS_KEY = os.environ.get("BOT_ERRORS_KEY") or (
 )
 DEFAULT_DB = os.environ.get("BOT_ERRORS_DB", "")
 DEFAULT_SOCKET = os.environ.get("BOT_ERRORS_SOCKET", "")
-STATE_DIR = Path(
-    os.environ.get(
-        "BOT_ERRORS_Q_LOOP_STATE_DIR", Path.home() / ".local/state/bot-errors-q-loop"
-    )
-)
+STATE_DIR = q_loop_state_root()
 STATE_FILE = STATE_DIR / "state.json"
 EVENT_LOG = STATE_DIR / "events.jsonl"
 ACTIVITY_LOG = STATE_DIR / "activity.jsonl"
@@ -646,9 +643,7 @@ def bootstrap_cursor_pk(db_path: str) -> tuple[int, int]:
 
 
 def socket_rpc_lock_path() -> Path:
-    default_root = Path(
-        os.environ.get("BOT_ERRORS_STATE_DIR", Path.home() / ".local/state/bot-errors")
-    )
+    default_root = state_root()
     return Path(
         os.environ.get("BOT_ERRORS_SOCKET_RPC_LOCK", default_root / "socket-rpc.lock")
     ).expanduser()

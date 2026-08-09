@@ -49,7 +49,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-emit.py",
-      "sha256": "2f111e5c78fabdb8af3652365777c06b5a640d753248da8ebe7de64214557c28",
+      "sha256": "9beced653d22f2015b4c3bcf2dc4393eea400203f831c16c1e7be57ff5f71edf",
       "mustContain": [
         "publish_event_json",
         "refusing to use private directory through symlink",
@@ -67,7 +67,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-gui-session-monitor.py",
-      "sha256": "c48fa6a9bc82245a0ecd484bb995404300e10d647998606e1313abf806940a97",
+      "sha256": "3abcd0e3bb17669ea7e4bb40ece5d86db5ce23ae24d55de6a082a2709eb6d55a",
       "mustContain": [
         "classify_gui_session",
         "gui_targets_from_fleet",
@@ -86,7 +86,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "be7e6f89001c0b7c5e43979e3992dda3880e426177260ac033b38b1318339ad2",
+      "sha256": "aa2ebd4febd0b75992b7c7aefc0d5fd0d015d83d7826271af6a2f7b566eb0eb6",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -157,9 +157,9 @@
     },
     {
       "path": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
-      "sha256": "03e5cba959e67a3886caec6c0349285bfe69924ce135ef756d0d40c22f0d2998",
+      "sha256": "68ea4ba13950e0954b9b7b772b7c2826d6d3caea8e3559bea59f08cd624eef53",
       "mustContain": [
-        "BOT_ERRORS_Q_LOOP_STATE_DIR",
+        "q_loop_state_root",
         "BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT",
         "critical_file_problem",
         "fleet_sentinel_age",
@@ -172,7 +172,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-q-loop.py",
-      "sha256": "268c4b45ebf49cdee70d6333974ddf730adf92984a75ed33ed3096e5993cf556",
+      "sha256": "fe83c46b3ac0f4ff5881214f1a3232cf6398a743ac20cdb106aad9f539084f8e",
       "mustContain": [
         "q_unavailable_reason",
         "session_limit",
@@ -180,7 +180,7 @@
         "assert_private_regular_for_read",
         "state_integrity_failed",
         "redact_json_value(state)",
-        "BOT_ERRORS_Q_LOOP_STATE_DIR"
+        "q_loop_state_root"
       ]
     },
     {
@@ -194,7 +194,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-runner.py",
-      "sha256": "1c3cb9bea8c3aaea0897117c8945127cb75921df3c42d55d95a552f705a0f791",
+      "sha256": "a040ca195b211a852912546a33fddedec36047ac49c9ff6c91b2443a9582e2af",
       "mustContain": [
         "publish_event_json",
         "refusing to use private directory through symlink",
@@ -227,7 +227,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-tree-provenance.py",
-      "sha256": "62a2fa8f07a93d8438ca72b2b41c916c169fb926492583c9bd051b017983e45b",
+      "sha256": "1bf143838818901aa206f2af04033f5fe7abb74ca2839e30ab932dda56a71475",
       "mustContain": [
         "tree_provenance_inventory",
         "def redact_ref",
@@ -420,9 +420,10 @@
     },
     {
       "path": "deploy/scripts/lib/state_root.py",
-      "sha256": "d5a7ccb041ce77afa92cc8e3280c839a0bc650f47f16c20baf3e2a6fa67a2999",
+      "sha256": "d5165ece1fc189ea43adab6b9bb19af24f1914478614f3819f4a54d7d37bd8c2",
       "mustContain": [
-        "Single source of truth for bot-errors state-root resolution"
+        "Single source of truth for bot-errors state-root resolution",
+        "BOT_ERRORS_Q_LOOP_STATE_DIR"
       ]
     },
     {
