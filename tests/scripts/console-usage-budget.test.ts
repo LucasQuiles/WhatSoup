@@ -33,7 +33,9 @@ const srcRoot = resolve(repoRoot, 'src');
 // Ratchet ceiling: the count may only stay the same or decrease.
 // To raise it, update this constant AND explain why in the commit message.
 // Baseline: 31, measured 2026-08-09 on main b8e1cbc0d (#2209).
-const CONSOLE_USAGE_BUDGET = 31;
+// 2026-08-09: auth.ts 21 sites migrated to process.stderr.write (dual-channel
+// pairing CLI; structured pipeline already served by log.* twins, #2930); 31→10.
+const CONSOLE_USAGE_BUDGET = 10;
 
 function collectSrcFiles(): string[] {
   // Node 22+ readdirSync recursive (replaces the phantom-dep tinyglobby that #2909 purged).
