@@ -5102,11 +5102,40 @@ def suppress_alerts_recovered_before_delivery(paths: dict[str, Path], incident: 
         if not pending_alerts:
             continue
 
-        alert_ids: list[str] = []
-        for alert_path, alert_event, _alert_epoch, _alert_order in pending_alerts:
-            # #2430: preserve freshness before terminal move.
+        # #2430: absorb every daily-health carrier that will leave the
+        # outbox in this iteration, then persist changed incident state
+        # ONCE before any terminal move \u2014 mirroring the save-before-move
+        # pattern of collapse_ready_storms / suppress_ready_recovery_
+        # duplicates (the two sibling pre-loop passes). #3061 added the
+        # in-memory absorb but no save, so the mutation was discarded at
+        # end of cycle and the moved files could not be reconstructed.
+        # When no same-key incident is open, both the alert(s) and the
+        # clear are retired here, so batch-absorb both so the newer
+        # valid observation wins the monotonic freshness ledger. When an
+        # incident is open and the clear will still dispatch, only the
+        # retiring alert is absorbed here; the clear\u2019s freshness is left
+        # to normal process_one() processing. A save failure raises
+        # through save_incident_state()/incident.commit() (via
+        # require_advance) BEFORE any move runs, leaving both files
+        # retryable in the outbox as a visible failed run.
+        state_changed = False
+        for _alert_path, alert_event, _alert_epoch, _alert_order in pending_alerts:
             if str(alert_event.get("source") or "").startswith("daily-health"):
                 absorb_daily_health_signal(alert_event, incident_state)
+                state_changed = True
+        migrate_legacy_unqualified_incident(clear_event, incident_state)
+        clear_will_dispatch = isinstance(open_incidents.get(key), dict)
+        if not clear_will_dispatch and str(clear_event.get("source") or "").startswith("daily-health"):
+            absorb_daily_health_signal(clear_event, incident_state)
+            state_changed = True
+        if state_changed:
+            if incident:
+                incident.commit()
+            else:
+                save_incident_state(paths, incident_state)
+
+        alert_ids: list[str] = []
+        for alert_path, alert_event, _alert_epoch, _alert_order in pending_alerts:
             move_suppressed_event(
                 alert_path,
                 paths,
@@ -5116,9 +5145,6 @@ def suppress_alerts_recovered_before_delivery(paths: dict[str, Path], incident: 
             )
             alert_ids.append(str(alert_event.get("id") or "unknown"))
             suppressed += 1
-
-        migrate_legacy_unqualified_incident(clear_event, incident_state)
-        clear_will_dispatch = isinstance(open_incidents.get(key), dict)
         if not clear_will_dispatch:
             move_suppressed_event(
                 clear_path,
@@ -5128,9 +5154,6 @@ def suppress_alerts_recovered_before_delivery(paths: dict[str, Path], incident: 
                 "recovered_before_delivery_clear_suppressed",
             )
             suppressed += 1
-        # #2430: absorb daily-health clear signals into freshness too.
-        if str(clear_event.get("source") or "").startswith("daily-health"):
-            absorb_daily_health_signal(clear_event, incident_state)
         append_dispatch_log(paths, {
             "type": "recovered_before_delivery",
             "incidentKey": key,
