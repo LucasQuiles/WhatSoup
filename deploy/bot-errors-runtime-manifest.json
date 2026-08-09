@@ -355,7 +355,7 @@
     },
     {
       "path": "deploy/scripts/lib/controller_log.py",
-      "sha256": "2ae8bd93f0ef836ea3c20eb00198a8e25b19f33644e0a58b12a45e2755a8e795",
+      "sha256": "a761280f46c9067b63d635993ae4f93ce10c7641e79c340fc4d1a372e826e5d8",
       "mustContain": [
         "ControllerLogContext",
         "diagnostic_best_effort",

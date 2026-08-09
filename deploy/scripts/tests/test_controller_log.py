@@ -632,3 +632,37 @@ def test_metadata_projection_never_leaks_record_names_digests_or_manifest() -> N
             "stagingAttempt": 2,
         }
     ) == {"stagingAttempt": 2}
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        "email_delivered",
+        "accepted_unconfirmed",
+    ),
+)
+def test_metadata_projection_allowlists_email_fallback_classification_enums(
+    value: str,
+) -> None:
+    # #3070: the dispatcher's email-fallback classification values must survive
+    # projection so the quarantine/delivery fallback state is observable in
+    # dispatch.jsonl. RED-on-main: both values are absent from the allowlist on
+    # main, so metadata_only_controller_details drops the emailFallback key
+    # entirely (only directWhatsapp:"failed"/"sent" survived). Producers:
+    # email_delivered  -> bot-errors-dispatcher.py delivery site
+    #                     (delivery["status"], log "type", return value)
+    # accepted_unconfirmed -> poison-quarantine site + delivery fallback ternary
+    assert metadata_only_controller_details({"emailFallback": value}) == {
+        "emailFallback": value
+    }
+
+
+def test_metadata_projection_drops_unregistered_email_fallback_free_text() -> None:
+    # Security property (must not weaken): the string allowlist is exact, not
+    # prefix/substring matched, so registering the two email-fallback enums does
+    # not open a prose-leak path. An unregistered free-text value that matches
+    # the regex gate but is not a member still drops to {}.
+    assert metadata_only_controller_details(
+        {"emailFallback": "delivered_via_smtp_gateway"}
+    ) == {}
+
