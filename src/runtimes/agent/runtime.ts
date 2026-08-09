@@ -8377,8 +8377,12 @@ export class AgentRuntime implements Runtime {
     return getTrackerForPort(this.chatTransportHost, mapKey);
   }
 
+  // #2981 car-A SHIM — fire-and-forget wrapper. The free function now returns
+  // Promise<boolean> but this method's callers (53 sites) still expect void.
+  // Car-C deletes this shim and propagates the boolean to F2a consumers.
+  // Tracking marker: #2981-SHIM-RUNTIME-SENDDIRECT
   private sendDirect(chatJid: string, text: string, bypassEchoGuard = false): void {
-    sendDirectForPort(this.chatTransportHost, chatJid, text, bypassEchoGuard);
+    void sendDirectForPort(this.chatTransportHost, chatJid, text, bypassEchoGuard);
   }
 
   /**

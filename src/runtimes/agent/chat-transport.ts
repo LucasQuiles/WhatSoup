@@ -177,20 +177,30 @@ export function getTracker(port: ChatTransportPort, mapKey?: string): OperationT
   return port.operationTracker;
 }
 
-export function sendDirect(port: ChatTransportPort, chatJid: string, text: string, bypassEchoGuard = false): void {
+export async function sendDirect(port: ChatTransportPort, chatJid: string, text: string, bypassEchoGuard = false): Promise<boolean> {
   if (bypassEchoGuard) {
     // Bypass queue entirely — direct send for admin responses
-    port.messenger.sendMessage(chatJid, text).catch((err) =>
-      log.error({ err }, 'sendDirect bypass failed'),
-    );
-    return;
+    try {
+      await port.messenger.sendMessage(chatJid, text);
+      return true;
+    } catch (err) {
+      log.error({ err }, 'sendDirect bypass failed');
+      return false;
+    }
   }
   const queue = port.getQueueForChat(chatJid);
   if (queue) {
+    // Queue path: enqueueText is void (queue processes async). Return true =
+    // accepted into queue. The actual send outcome is deferred to the queue's
+    // own processing and is NOT observable here by design. #2981 car-A.
     queue.enqueueText(text);
-  } else {
-    port.messenger.sendMessage(chatJid, text).catch((err) =>
-      log.error({ err }, 'sendDirect fallback failed'),
-    );
+    return true;
+  }
+  try {
+    await port.messenger.sendMessage(chatJid, text);
+    return true;
+  } catch (err) {
+    log.error({ err }, 'sendDirect fallback failed');
+    return false;
   }
 }
