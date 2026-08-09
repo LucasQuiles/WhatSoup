@@ -1409,44 +1409,6 @@ def _truthy_token(value: Any) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def pinecone_contributors(state: dict[str, Any]) -> dict[str, set[str]]:
-    """#2412: track per-episode pinecone contributors so recovery of one
-    contributor does not clear the incident while others remain degraded."""
-    bucket = state.setdefault("pineconeContributors", {})
-    if not isinstance(bucket, dict):
-        bucket = {}
-        state["pineconeContributors"] = bucket
-    return {k: set(v) if isinstance(v, list) else set() for k, v in bucket.items()}
-
-
-def record_pinecone_contributor(state: dict[str, Any], episode: str, contributor: str) -> None:
-    """Record that *contributor* fired for *episode* (e.g. query, embedding)."""
-    bucket = state.setdefault("pineconeContributors", {})
-    if not isinstance(bucket, dict):
-        bucket = {}
-        state["pineconeContributors"] = bucket
-    ep_set = bucket.setdefault(episode, [])
-    if not isinstance(ep_set, list):
-        ep_set = []
-        bucket[episode] = ep_set
-    if contributor not in ep_set:
-        ep_set.append(contributor)
-
-
-def clear_pinecone_contributor(state: dict[str, Any], episode: str, contributor: str) -> bool:
-    """Remove *contributor* from *episode*. Returns True if episode has no
-    remaining contributors (incident can clear), False otherwise."""
-    contributors = pinecone_contributors(state)
-    ep_set = contributors.get(episode)
-    if not ep_set:
-        return True  # nothing tracked → safe to clear
-    ep_set.discard(contributor)
-    # Write back
-    bucket = state.setdefault("pineconeContributors", {})
-    bucket[episode] = list(ep_set)
-    return len(ep_set) == 0
-
-
 def classify_failure_mode(event: dict[str, Any]) -> str:
     """Classify an alert as ``"transient"`` (recoverable soft-fault) or ``"outage"``.
 

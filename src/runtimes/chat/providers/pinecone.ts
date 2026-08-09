@@ -64,8 +64,9 @@ function trackFailure(
   breaker.recordFailure();
 
   if (breaker.isOpen()) {
-    alertedOperations.add(operation);
-    emitAlertChecked(
+    // #2412: arm contributor membership only after the alert is durably
+    // accepted. A rejected enqueue must not arm local clear authority.
+    const accepted = emitAlertChecked(
       config.botName,
       'pinecone_degraded',
       `Pinecone ${operation} circuit breaker tripped`,
@@ -77,6 +78,9 @@ function trackFailure(
         `attempt=${attempt}`,
       ].join(' '),
     );
+    if (accepted) {
+      alertedOperations.add(operation);
+    }
   }
 }
 
@@ -85,15 +89,45 @@ const alertedOperations = new Set<MemoryOperation>();
 
 function trackSuccess(operation: MemoryOperation): void {
   getBreaker(operation).recordSuccess();
-  if (alertedOperations.has(operation)) {
-    alertedOperations.delete(operation);
-    clearAlertSourceChecked(config.botName, 'pinecone_degraded');
+  if (!alertedOperations.has(operation)) return;
+  // #2412: the asset-wide `pinecone_degraded` source is shared across every
+  // alerted contributor. Clear it only once the LAST contributor recovers;
+  // a partial recovery must not drop the global incident while siblings
+  // remain degraded.
+  alertedOperations.delete(operation);
+  if (alertedOperations.size > 0) return;
+  // Final contributor recovered → clear the global source. If the durable
+  // clear enqueue fails, restore membership so a later retry can re-clear
+  // (retained clear authority, not an orphaned incident).
+  const cleared = clearAlertSourceChecked(config.botName, 'pinecone_degraded');
+  if (!cleared) {
+    alertedOperations.add(operation);
   }
 }
 
 function isBreakerOpen(operation: MemoryOperation): boolean {
   return getBreaker(operation).isOpen();
 }
+
+/**
+ * Test-only surface for the pinecone_degraded alert/clear contract (#2412).
+ * Exposes the module-local contributor set + alerting transitions so focused
+ * falsifiers can drive the real state machine without the 3-failure breaker
+ * dance. Mirrors the openai-whisper `_testing` precedent. Not for runtime use.
+ */
+export const _testing = {
+  /** Clear all breaker + contributor state (test isolation across cases). */
+  reset(): void {
+    (Object.keys(breakers) as MemoryOperation[]).forEach((key) => delete breakers[key]);
+    alertedOperations.clear();
+  },
+  /** Read-only snapshot of currently-alerted contributor operations. */
+  alertedOperations(): MemoryOperation[] {
+    return [...alertedOperations];
+  },
+  trackFailure,
+  trackSuccess,
+};
 
 function logMemoryOperation(
   context: MemoryOperationContext,
