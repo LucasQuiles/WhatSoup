@@ -45,6 +45,7 @@ from lib.controller_state import (
     state_diagnostic_details,
 )
 from lib.state_files import COLLECTOR_STATE
+from lib.state_root import state_root
 
 
 TAILSCALE_STATUS_CACHE: dict[str, Any] | None = None
@@ -1418,10 +1419,6 @@ else:
 
 def now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-
-
-def state_root() -> Path:
-    return Path(os.environ.get("BOT_ERRORS_STATE_DIR", Path.home() / ".local/state/bot-errors"))
 
 
 def ensure_private_dir(path: Path) -> None:

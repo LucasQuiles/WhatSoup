@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import socket
 import sys
@@ -38,6 +37,7 @@ from lib.durable_json import (
     require_advance,
 )
 from lib.state_files import MAINTENANCE
+from lib.state_root import state_root
 
 # Hard ceiling on a window's length. A planned maintenance longer than this is
 # almost certainly a forgotten "open" — clamp so a stale window cannot silence
@@ -63,15 +63,6 @@ def parse_duration(text: str, *, max_seconds: int = MAX_DURATION_SECONDS) -> int
     if seconds <= 0:
         raise ValueError(f"duration must be positive: {text!r}")
     return min(seconds, max_seconds)
-
-
-def state_root() -> Path:
-    """Resolve the BOT ERRORS state directory.
-
-    MUST match the dispatcher's ``state_root()`` convention so both processes
-    read and write the same ``maintenance.json``.
-    """
-    return Path(os.environ.get("BOT_ERRORS_STATE_DIR", Path.home() / ".local/state/bot-errors"))
 
 
 def maintenance_state_path() -> Path:

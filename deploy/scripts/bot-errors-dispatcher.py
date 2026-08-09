@@ -62,6 +62,7 @@ from lib.state_files import (
     INCIDENT_STATE,
     MAINTENANCE,
 )
+from lib.state_root import state_root
 
 
 BOT_ERRORS_JID = os.environ.get("BOT_ERRORS_JID", "").strip()
@@ -552,10 +553,6 @@ QUARANTINE_INCIDENT_SOURCES = frozenset({
     "outbound_quarantine_unclassified",
     "outbound_quarantined",
 })
-
-
-def state_root() -> Path:
-    return Path(os.environ.get("BOT_ERRORS_STATE_DIR", Path.home() / ".local/state/bot-errors"))
 
 
 def state_paths() -> dict[str, Path]:

@@ -62,6 +62,18 @@ from lib.state_files import (
     Q_LOOP_STATE,
     SENTINEL_HEARTBEAT,
 )
+from lib.state_root import sentinel_state_root, state_root as _ssot_state_root
+
+
+def state_root() -> Path:
+    """#2723 R4.7: wraps the SSOT with anchor resolution (variant C).
+
+    macOS state/tmp roots commonly traverse OS path aliases (/var and /tmp are
+    symlinks to /private/...). Every call site in this file gets the resolved
+    path, matching pre-Car-B behavior. The SSOT state_root() takes
+    resolve_anchor as opt-in; this wrapper makes it the default for watchdog.
+    """
+    return _ssot_state_root(resolve_anchor=True)
 
 
 DEFAULT_CHECKS = "q_loop,dispatcher,collector,daily_health,queue_backlog,local_services,local_instance_health,browser_debug"
@@ -296,14 +308,6 @@ def parse_iso_epoch(value: Any) -> int | None:
     return int(parsed.timestamp())
 
 
-def state_root() -> Path:
-    root = Path(os.environ.get("BOT_ERRORS_STATE_DIR", Path.home() / ".local/state/bot-errors"))
-    # #2723 R4.7: macOS state/tmp roots commonly traverse OS path aliases (/var and
-    # /tmp are symlinks to /private/...). Anchor at the resolved directory.
-    anchor = root.absolute()
-    return anchor.parent.resolve(strict=True) / anchor.name
-
-
 def q_loop_state_path() -> Path:
     explicit = os.environ.get("BOT_ERRORS_Q_LOOP_STATE")
     if explicit:
@@ -320,7 +324,11 @@ def fleet_sentinel_heartbeat_path() -> Path:
     raw = os.environ.get("BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT", "").strip()
     if raw:
         return Path(raw).expanduser()
-    return state_root() / "fleet-sentinel" / SENTINEL_HEARTBEAT
+    # #3051: read where the sentinel WRITES (its own state_root honoring
+    # BOT_ERRORS_FLEET_SENTINEL_STATE_DIR), not the generic state root —
+    # env divergence here is the false-green root cause (sentinel writes
+    # the heartbeat under its override, watchdog reads a missing file).
+    return sentinel_state_root() / SENTINEL_HEARTBEAT
 
 
 def ensure_private_dir(path: Path) -> None:

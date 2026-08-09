@@ -46,6 +46,7 @@ from lib.durable_json import (  # noqa: E402
     require_all_advance,
 )
 from lib.state_files import FLEET_SENTINEL_STATE, SENTINEL_HEARTBEAT  # noqa: E402
+from lib.state_root import sentinel_state_root  # noqa: E402
 
 DEFAULT_HEARTBEAT_MAX_AGE_SECONDS = 45 * 60
 DEFAULT_HYSTERESIS_CYCLES = 2
@@ -199,10 +200,6 @@ def finite_float(value: object) -> Optional[float]:
     return result if math.isfinite(result) else None
 
 
-def state_root() -> Path:
-    return Path(os.environ.get("BOT_ERRORS_FLEET_SENTINEL_STATE_DIR", Path.home() / ".local/state/bot-errors/fleet-sentinel"))
-
-
 def default_hosts_path() -> Path:
     return Path(os.environ.get("BOT_ERRORS_FLEET_SENTINEL_HOSTS", REPO_ROOT / "deploy" / "bot-errors-expected-fleet.json"))
 
@@ -218,7 +215,7 @@ def positive_int_env(name: str, default: int, minimum: int = 0) -> int:
 def default_config(hosts_path: Optional[Path] = None, state_dir: Optional[Path] = None) -> SentinelConfig:
     oracle_raw = os.environ.get("BOT_ERRORS_FLEET_SENTINEL_ORACLE", "").strip()
     action_outbox_raw = os.environ.get("BOT_ERRORS_FLEET_SENTINEL_ACTION_OUTBOX_DIR", "").strip()
-    resolved_state_dir = state_dir or state_root()
+    resolved_state_dir = state_dir or sentinel_state_root()
     return SentinelConfig(
         state_dir=resolved_state_dir,
         hosts_path=hosts_path or default_hosts_path(),
@@ -1910,7 +1907,7 @@ def run_once(config: SentinelConfig, deps: Optional[SentinelDeps] = None) -> dic
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate BOT ERRORS Fleet Runtime Sentinel state")
     parser.add_argument("--hosts", default=str(default_hosts_path()))
-    parser.add_argument("--state-dir", default=str(state_root()))
+    parser.add_argument("--state-dir", default=str(sentinel_state_root()))
     parser.add_argument(
         "--redeem-token",
         default=None,
@@ -1939,7 +1936,7 @@ def _instance_lock_path() -> Path:
     return Path(
         os.environ.get(
             "BOT_ERRORS_FLEET_SENTINEL_LOCK",
-            str(state_root() / "sentinel-instance.lock"),
+            str(sentinel_state_root() / "sentinel-instance.lock"),
         )
     )
 

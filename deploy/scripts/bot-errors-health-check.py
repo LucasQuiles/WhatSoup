@@ -47,6 +47,7 @@ from lib.durable_json import (
     require_advance,
 )
 from lib.state_files import DEADMAN_STATE, DISPATCHER_STATE, Q_LOOP_STATE
+from lib.state_root import state_root, test_state_root
 
 
 BOT_ERRORS_JID = os.environ.get("BOT_ERRORS_JID", "").strip()
@@ -422,14 +423,6 @@ def service_env_var(service: str) -> str | None:
     return SERVICE_ENV_MAP.get(service.lower())
 
 
-def state_root() -> Path:
-    explicit = os.environ.get("BOT_ERRORS_STATE_DIR")
-    if explicit and explicit.strip():
-        return Path(explicit)
-    test_state = test_state_root()
-    return test_state or (Path.home() / ".local/state/bot-errors")
-
-
 STRONG_TEST_SIGNAL_KEYS = ("VITEST", "VITEST_WORKER_ID", "JEST_WORKER_ID", "PYTEST_CURRENT_TEST")
 CONTROLLER_LOG_CONTEXT = ControllerLogContext("deadman")
 
@@ -448,14 +441,6 @@ def provenance_signals() -> list[str]:
     if os.environ.get("NODE_ENV", "").strip().lower() == "test":
         signals.append("NODE_ENV")
     return sorted(set(signals))
-
-
-def test_state_root() -> Path | None:
-    if not strong_test_signals():
-        return None
-    cwd_hash = hashlib.sha256(os.getcwd().encode("utf-8")).hexdigest()[:12]
-    worker = safe_segment(env_value("VITEST_WORKER_ID") or env_value("JEST_WORKER_ID") or f"pid-{os.getpid()}")
-    return Path(os.environ.get("TMPDIR", "/tmp")) / "whatsoup-vitest-bot-errors" / f"{cwd_hash}.{worker}"
 
 
 def canonical_path(path: Path) -> Path:
