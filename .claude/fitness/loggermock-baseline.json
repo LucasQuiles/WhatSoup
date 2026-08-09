@@ -28,10 +28,6 @@
     "keysMatched": 4
   },
   {
-    "file": "tests/core/health-mark-read.test.ts",
-    "keysMatched": 4
-  },
-  {
     "file": "tests/core/health-poll-decision.test.ts",
     "keysMatched": 4
   },
