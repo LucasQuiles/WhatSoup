@@ -33,6 +33,7 @@ from durable_json import (  # noqa: E402
     require_advance,
     require_all_advance,
 )
+from state_files import SELFCHECK_STATE  # noqa: E402
 
 
 SAFE_HEAL_CLASSES = {"drift", "manifest_missing"}
@@ -130,7 +131,7 @@ def default_config(root: Path, state_dir: Optional[Path] = None) -> SelfcheckCon
         disabled_path=sentinel_state / "DISABLED",
         lock_path=sentinel_state / "selfcheck.lock",
         status_path=sentinel_state / "status.json",
-        memory_path=sentinel_state / "selfcheck-state.json",
+        memory_path=sentinel_state / SELFCHECK_STATE,
         heartbeat_path=Path(os.environ.get("BOT_ERRORS_SELFCHECK_HEARTBEAT", sentinel_state / "heartbeat.json")).expanduser(),
         central_ack_path=Path(central_ack).expanduser() if central_ack else None,
         central_down_alert_path=Path(central_down_alert or sentinel_state / "actions" / "central-down-alert.json").expanduser(),

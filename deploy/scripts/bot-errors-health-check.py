@@ -46,6 +46,7 @@ from lib.durable_json import (
     publish_state_json,
     require_advance,
 )
+from lib.state_files import DEADMAN_STATE, DISPATCHER_STATE, Q_LOOP_STATE
 
 
 BOT_ERRORS_JID = os.environ.get("BOT_ERRORS_JID", "").strip()
@@ -1488,7 +1489,7 @@ def append_deadman_log(
 
 
 def deadman_state_path() -> Path:
-    return state_root() / "deadman-state.json"
+    return state_root() / DEADMAN_STATE
 
 
 def load_deadman_state() -> dict[str, Any]:
@@ -5928,7 +5929,7 @@ def queue_inventory() -> list[str]:
         Path(os.environ.get("TMPDIR", "/tmp")) / "bot-errors-writefail",
         Path.home() / ".bot-errors-writefail",
     ]
-    state = root / "dispatcher-state.json"
+    state = root / DISPATCHER_STATE
     lines: list[str] = []
     state_problem = critical_file_problem(state)
     if state_problem is None:
@@ -6089,7 +6090,7 @@ def queue_directory_line(
 
 def q_loop_state_file() -> Path:
     root = Path(os.environ.get("BOT_ERRORS_Q_LOOP_STATE_DIR", Path.home() / ".local/state/bot-errors-q-loop"))
-    return root.expanduser() / "state.json"
+    return root.expanduser() / Q_LOOP_STATE
 
 
 def q_loop_state_inventory(profile: dict[str, Any]) -> list[str]:
@@ -6293,7 +6294,7 @@ def daily() -> int:
 )
 def deadman(max_state_age: int, restart_grace: int, cooldown_seconds: int) -> int:
     root = state_root()
-    state = root / "dispatcher-state.json"
+    state = root / DISPATCHER_STATE
     problems: list[str] = []
     state_age = None
     cycle_completed_at = None

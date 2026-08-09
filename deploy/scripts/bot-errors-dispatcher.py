@@ -56,6 +56,12 @@ from lib.durable_json import (
     require_advance,
     require_all_advance,
 )
+from lib.state_files import (
+    DISPATCHER_META_STATE,
+    DISPATCHER_STATE,
+    INCIDENT_STATE,
+    MAINTENANCE,
+)
 
 
 BOT_ERRORS_JID = os.environ.get("BOT_ERRORS_JID", "").strip()
@@ -569,9 +575,9 @@ def state_paths() -> dict[str, Path]:
         "locks": root / "locks",
         "logs": root / "logs",
         "dead_letter": root / "dead-letter",
-        "state": root / "dispatcher-state.json",
-        "incident_state": root / "incident-state.json",
-        "meta_state": root / "dispatcher-meta-state.json",
+        "state": root / DISPATCHER_STATE,
+        "incident_state": root / INCIDENT_STATE,
+        "meta_state": root / DISPATCHER_META_STATE,
     }
 
 
@@ -985,7 +991,7 @@ def open_dispatcher_state_session():
     ControllerStateRequired if the state directory/file is unsafe, locked,
     or corrupt beyond recovery.
     """
-    anchor = state_root() / "incident-state.json"
+    anchor = state_root() / INCIDENT_STATE
     return open_controller_state(
         anchor,
         component="dispatcher-incident",
@@ -1345,7 +1351,7 @@ def maintenance_state_path() -> Path:
     MUST match ``bot-errors-maintenance.py``'s resolution so the CLI and the
     dispatcher agree on a single file (``BOT_ERRORS_STATE_DIR`` honored).
     """
-    return state_root() / "maintenance.json"
+    return state_root() / MAINTENANCE
 
 
 def _load_maintenance_windows() -> dict[str, dict[str, Any]]:

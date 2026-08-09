@@ -45,6 +45,7 @@ from lib.durable_json import (  # noqa: E402
     require_advance,
     require_all_advance,
 )
+from lib.state_files import FLEET_SENTINEL_STATE, SENTINEL_HEARTBEAT  # noqa: E402
 
 DEFAULT_HEARTBEAT_MAX_AGE_SECONDS = 45 * 60
 DEFAULT_HYSTERESIS_CYCLES = 2
@@ -385,11 +386,11 @@ def load_hosts(path: Path, state_dir: Optional[Path] = None) -> list[HostSpec]:
 
 
 def state_path(config: SentinelConfig) -> Path:
-    return config.state_dir / "fleet-sentinel-state.json"
+    return config.state_dir / FLEET_SENTINEL_STATE
 
 
 def heartbeat_path(config: SentinelConfig) -> Path:
-    return config.state_dir / "sentinel-heartbeat.json"
+    return config.state_dir / SENTINEL_HEARTBEAT
 
 
 def action_outbox_dir(config: SentinelConfig) -> Path:

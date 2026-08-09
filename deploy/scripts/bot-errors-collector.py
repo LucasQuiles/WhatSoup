@@ -44,6 +44,7 @@ from lib.controller_state import (
     open_controller_state,
     state_diagnostic_details,
 )
+from lib.state_files import COLLECTOR_STATE
 
 
 TAILSCALE_STATUS_CACHE: dict[str, Any] | None = None
@@ -1614,7 +1615,7 @@ def append_log(
 
 
 def state_path() -> Path:
-    return state_root() / "collector-state.json"
+    return state_root() / COLLECTOR_STATE
 
 
 STATE_LOCK_TIMEOUT_SECONDS = 30.0
