@@ -24,10 +24,6 @@
     "keysMatched": 4
   },
   {
-    "file": "tests/core/heal-degradation.test.ts",
-    "keysMatched": 4
-  },
-  {
     "file": "tests/core/heal-endpoint.test.ts",
     "keysMatched": 4
   },
