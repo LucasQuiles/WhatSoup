@@ -144,8 +144,8 @@ describe('auth CLI restartRequired handling', () => {
     await handler(restartRequiredClose());
 
     expect(mocks.makeWASocket).toHaveBeenCalledTimes(callsBeforeFlap);
-    expect(console.error).toHaveBeenCalledWith(
-      'restartRequired flapping detected (10 in <60s) — backing off before reconnecting...',
+    expect(process.stderr.write).toHaveBeenCalledWith(
+      'restartRequired flapping detected (10 in <60s) — backing off before reconnecting...\n',
     );
 
     await vi.advanceTimersByTimeAsync(999);
@@ -164,11 +164,11 @@ describe('auth CLI restartRequired handling', () => {
 
     await expect(import('../../src/transport/auth.ts')).rejects.toThrow('exit:1');
 
-    expect(console.error).toHaveBeenCalledWith(
+    expect(process.stderr.write).toHaveBeenCalledWith(
       'Bot is currently running. Stop it first:\n' +
       '  Linux: systemctl --user stop whatsoup\n' +
       '  macOS: use the Fleet auth flow or see docs/runbooks/macos-launchd-deployment.md#restart-procedures\n' +
-      '         (do not use legacy launchctl stop for a KeepAlive job)',
+      '         (do not use legacy launchctl stop for a KeepAlive job)\n',
     );
     expect(mocks.makeWASocket).not.toHaveBeenCalled();
   });
@@ -208,7 +208,7 @@ describe('auth CLI restartRequired handling', () => {
     await handler({ qr: 'qr-payload' });
 
     expect(process.stdout.write).toHaveBeenCalledWith(JSON.stringify({ event: 'qr', data: 'qr-payload' }) + '\n');
-    expect(console.error).toHaveBeenCalledWith('\nScan the QR code below with WhatsApp > Linked Devices > Link a Device:\n');
+    expect(process.stderr.write).toHaveBeenCalledWith('\nScan the QR code below with WhatsApp > Linked Devices > Link a Device:\n');
     expect(mocks.qrcodeGenerate).toHaveBeenCalledWith('qr-payload', { small: true }, expect.any(Function));
     expect(process.stderr.write).toHaveBeenCalledWith('ASCII-QR\n');
   });
@@ -250,15 +250,15 @@ describe('auth CLI restartRequired handling', () => {
     await handler({ connection: 'open' });
 
     expect(process.stdout.write).toHaveBeenCalledWith(JSON.stringify({ event: 'connected' }) + '\n');
-    expect(console.error).toHaveBeenCalledWith('\nAuthenticated successfully as [REDACTED WHATSAPP JID]');
-    expect(console.error).toHaveBeenCalledWith('Saving credentials...');
+    expect(process.stderr.write).toHaveBeenCalledWith('\nAuthenticated successfully as [REDACTED WHATSAPP JID]\n');
+    expect(process.stderr.write).toHaveBeenCalledWith('Saving credentials...\n');
     expect(mocks.saveCreds).toHaveBeenCalledOnce();
 
     // #2322 M5: saveCreds() is already durable (fsync+rename) when it
     // resolves, so the socket close + exit happen immediately — no wall-clock
     // wait gates them anymore.
     expect(mocks.sockets[0]!.end).toHaveBeenCalledWith(undefined);
-    expect(console.error).toHaveBeenCalledWith('Done. You can now start the bot.');
+    expect(process.stderr.write).toHaveBeenCalledWith('Done. You can now start the bot.\n');
     expect(process.exit).toHaveBeenCalledWith(0);
   });
 
@@ -274,12 +274,12 @@ describe('auth CLI restartRequired handling', () => {
     if (!handler) throw new Error('missing connection.update handler');
     await handler({ connection: 'open' });
 
-    expect(console.error).toHaveBeenCalledWith('\nAuthenticated successfully as unknown');
+    expect(process.stderr.write).toHaveBeenCalledWith('\nAuthenticated successfully as unknown\n');
     expect(mocks.saveCreds).toHaveBeenCalledOnce();
 
     await vi.advanceTimersByTimeAsync(2_000);
     expect(mocks.sockets[0]!.end).toHaveBeenCalledWith(undefined);
-    expect(console.error).toHaveBeenCalledWith('Done. You can now start the bot.');
+    expect(process.stderr.write).toHaveBeenCalledWith('Done. You can now start the bot.\n');
     expect(process.exit).toHaveBeenCalledWith(0);
   });
 
@@ -289,7 +289,7 @@ describe('auth CLI restartRequired handling', () => {
 
     await vi.advanceTimersByTimeAsync(120_000);
 
-    expect(console.error).toHaveBeenCalledWith('Timed out after 120 seconds — no successful authentication.');
+    expect(process.stderr.write).toHaveBeenCalledWith('Timed out after 120 seconds — no successful authentication.\n');
     expect(process.exit).toHaveBeenCalledWith(1);
   });
 
@@ -304,7 +304,7 @@ describe('auth CLI restartRequired handling', () => {
       lastDisconnect: { error: { output: { statusCode: 401 } } },
     });
 
-    expect(console.error).toHaveBeenCalledWith('Logged out — delete the auth directory and re-run this script.');
+    expect(process.stderr.write).toHaveBeenCalledWith('Logged out — delete the auth directory and re-run this script.\n');
     expect(process.exit).toHaveBeenCalledWith(1);
     expect(mocks.makeWASocket).toHaveBeenCalledTimes(1);
   });
@@ -320,7 +320,7 @@ describe('auth CLI restartRequired handling', () => {
       lastDisconnect: { error: { output: { statusCode: 428 } } },
     });
 
-    expect(console.error).toHaveBeenCalledWith('Connection closed during auth: connectionClosed — reconnecting...');
+    expect(process.stderr.write).toHaveBeenCalledWith('Connection closed during auth: connectionClosed — reconnecting...\n');
     expect(mocks.sockets[0]!.end).toHaveBeenCalledWith(undefined);
     expect(mocks.makeWASocket).toHaveBeenCalledTimes(2);
   });
@@ -336,7 +336,7 @@ describe('auth CLI restartRequired handling', () => {
       lastDisconnect: { error: { output: { statusCode: 499 } } },
     });
 
-    expect(console.error).toHaveBeenCalledWith('Connection closed during auth: unknown(499) — reconnecting...');
+    expect(process.stderr.write).toHaveBeenCalledWith('Connection closed during auth: unknown(499) — reconnecting...\n');
     expect(mocks.sockets[0]!.end).toHaveBeenCalledWith(undefined);
     expect(mocks.makeWASocket).toHaveBeenCalledTimes(2);
   });
@@ -349,7 +349,7 @@ describe('auth CLI restartRequired handling', () => {
     if (!handler) throw new Error('missing connection.update handler');
     await handler({ connection: 'close', lastDisconnect: { error: {} } });
 
-    expect(console.error).toHaveBeenCalledWith('Connection closed during auth: unknown — reconnecting...');
+    expect(process.stderr.write).toHaveBeenCalledWith('Connection closed during auth: unknown — reconnecting...\n');
     expect(mocks.sockets[0]!.end).toHaveBeenCalledWith(undefined);
     expect(mocks.makeWASocket).toHaveBeenCalledTimes(2);
   });
@@ -360,9 +360,8 @@ describe('auth CLI restartRequired handling', () => {
     await import('../../src/transport/auth.ts');
     await flushPromises();
 
-    expect(console.error).toHaveBeenCalledWith(
-      'Auth failed:',
-      'token=[REDACTED] path=/tmp/private-auth',
+    expect(process.stderr.write).toHaveBeenCalledWith(
+      'Auth failed: token=[REDACTED] path=/tmp/private-auth\n',
     );
     expect(process.exit).toHaveBeenCalledWith(1);
   });
@@ -373,9 +372,8 @@ describe('auth CLI restartRequired handling', () => {
     await import('../../src/transport/auth.ts');
     await flushPromises();
 
-    expect(console.error).toHaveBeenCalledWith(
-      'Auth failed:',
-      'Authorization: Bearer [REDACTED]',
+    expect(process.stderr.write).toHaveBeenCalledWith(
+      'Auth failed: Authorization: Bearer [REDACTED]\n',
     );
     expect(process.exit).toHaveBeenCalledWith(1);
   });
