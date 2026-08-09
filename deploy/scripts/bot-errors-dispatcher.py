@@ -5483,9 +5483,12 @@ def quarantine_poison(path: Path, quarantine_dir: Path, reason: str) -> Path:
     except Exception as exc:
         direct_whatsapp = "failed"
         direct_error = str(exc)
-        # #2424: persist accepted state BEFORE the send call so a crash
-        # between the send and the state persist does not cause replays.
-        email_status = "accepted_unconfirmed" if email_fallback("BOT ERRORS poison event quarantine", text) else "failed"
+        # #3070: classify an accepted email fallback as TERMINAL here, not
+        # accepted_unconfirmed. A poison event is already moved to quarantine
+        # (no requeue path), so a successful email handoff is a delivered
+        # alert -- mirroring the #3024 delivery-site semantics so the dispatch
+        # log never reports a delivered poison alert as unconfirmed/retryable.
+        email_status = "email_delivered" if email_fallback("BOT ERRORS poison event quarantine", text) else "failed"
     try:
         log_record = {
             "type": "quarantine",
@@ -5497,6 +5500,8 @@ def quarantine_poison(path: Path, quarantine_dir: Path, reason: str) -> Path:
         }
         if direct_error:
             log_record["directError"] = direct_error
+        if email_status != "not_attempted":
+            log_record["emailFallbackAt"] = now_iso()
         append_dispatch_log(state_paths(), log_record)
     except Exception:
         pass
