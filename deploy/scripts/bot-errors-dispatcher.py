@@ -5477,6 +5477,17 @@ def ready(path: Path, quarantine_dir: Path) -> bool:
         # cannot wedge the queue; the scan continues with the next event.
         quarantine_poison(path, quarantine_dir, f"malformed delivery.nextAttemptAtEpoch: {exc}")
         return False
+    try:
+        int(delivery.get("attempts") or 0)
+    except (TypeError, ValueError) as exc:
+        # #2437 boundary-2: same poison-record class as nextAttemptAtEpoch,
+        # but the malformed value is only reached inside mark_attempt() AFTER
+        # claim() has moved the file to processing/. The exception escapes
+        # process_one() pre-update; on restart reclaim_processing() bounces
+        # the record back to outbox, creating an infinite claim-fail loop.
+        # Validate here (before claim) so the scan quarantines and continues.
+        quarantine_poison(path, quarantine_dir, f"malformed delivery.attempts: {exc}")
+        return False
     return delivery_ready(event)
 
 
