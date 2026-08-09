@@ -17,6 +17,10 @@
  * Tranche 1 (2026-08-08, #2200): migrated 10 timestamp-stamp files (34
  * Date.now() call sites) to systemClock.now(); live count dropped 363→329.
  *
+ * Slice (2026-08-09, #2200): migrated lib/inbound-debouncer.ts (1
+ * timing-math call site — createInboundDebouncer default clock object now
+ * thunk) to systemClock.now(); live count dropped 329→328.
+ *
  * Companion: #2200 slice 1.
  */
 import { readdirSync, readFileSync } from 'node:fs';
@@ -30,7 +34,7 @@ const srcRoot = resolve(repoRoot, 'src');
 
 // Ratchet ceiling: the count may only stay the same or decrease.
 // Lower this constant when a migration slice removes Date.now() call sites.
-const CLOCK_BUDGET = 329;
+const CLOCK_BUDGET = 328;
 
 // src/lib/clock.ts is the ONE file allowed to call Date.now() (it wraps it).
 const EXEMPT_FILE = 'src/lib/clock.ts';
