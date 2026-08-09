@@ -67,6 +67,8 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
+from lib.state_files import RUNTIME_STALENESS_STATE  # noqa: E402
+
 # Emit-script path. Overridable via env so tests can point at a stub and never
 # touch the real outbox, and so a deploy can relocate the emitter if needed.
 EMIT_SCRIPT = Path(
@@ -185,7 +187,7 @@ def is_stale(boot_epoch: int | None, newest_src_epoch: int | None) -> bool:
     return newest_src_epoch > boot_epoch
 
 
-_STALENESS_STATE_FILE = "runtime-staleness-state.json"
+_STALENESS_STATE_FILE = RUNTIME_STALENESS_STATE
 
 
 def staleness_state_path() -> str:

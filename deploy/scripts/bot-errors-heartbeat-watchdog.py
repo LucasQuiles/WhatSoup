@@ -54,6 +54,14 @@ from lib.controller_state import (
     StateMode,
     StateReadResult,
 )
+from lib.state_files import (
+    COLLECTOR_STATE,
+    DISPATCHER_STATE,
+    HEARTBEAT_WATCHDOG_STATE,
+    INCIDENT_STATE,
+    Q_LOOP_STATE,
+    SENTINEL_HEARTBEAT,
+)
 
 
 DEFAULT_CHECKS = "q_loop,dispatcher,collector,daily_health,queue_backlog,local_services,local_instance_health,browser_debug"
@@ -301,18 +309,18 @@ def q_loop_state_path() -> Path:
     if explicit:
         return Path(explicit)
     root = Path(os.environ.get("BOT_ERRORS_Q_LOOP_STATE_DIR", Path.home() / ".local/state/bot-errors-q-loop"))
-    return root / "state.json"
+    return root / Q_LOOP_STATE
 
 
 def watchdog_state_path() -> Path:
-    return state_root() / "heartbeat-watchdog-state.json"
+    return state_root() / HEARTBEAT_WATCHDOG_STATE
 
 
 def fleet_sentinel_heartbeat_path() -> Path:
     raw = os.environ.get("BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT", "").strip()
     if raw:
         return Path(raw).expanduser()
-    return state_root() / "fleet-sentinel" / "sentinel-heartbeat.json"
+    return state_root() / "fleet-sentinel" / SENTINEL_HEARTBEAT
 
 
 def ensure_private_dir(path: Path) -> None:
@@ -420,7 +428,7 @@ def project_watchdog_state_mode(diagnostic: Any) -> str:
 
 def read_collector_state_snapshot() -> StateReadResult | None:
     """#2723 R4.4: cross-reader wrapper — read collector state via controller state."""
-    coll_path = state_root() / "collector-state.json"
+    coll_path = state_root() / COLLECTOR_STATE
     if not coll_path.exists():
         return None
     try:
@@ -436,7 +444,7 @@ def read_collector_state_snapshot() -> StateReadResult | None:
 
 def read_dispatcher_incident_snapshot() -> StateReadResult | None:
     """#2723 R4.4: cross-reader wrapper for dispatcher state."""
-    disp_path = state_root() / "dispatcher-state.json"
+    disp_path = state_root() / DISPATCHER_STATE
     if not disp_path.exists():
         return None
     try:
@@ -1586,7 +1594,7 @@ def collector_roster_drift_problem() -> str | None:
     the collector freshness check; a present-but-unreadable one is reported as
     config-unreadable drift.
     """
-    collector_path = state_root() / "collector-state.json"
+    collector_path = state_root() / COLLECTOR_STATE
     if not collector_path.exists():
         return None
     try:
@@ -1661,7 +1669,7 @@ def daily_health_freshness_ledger_age(host: str) -> tuple[int | None, str]:
     it is the authoritative liveness source. Returns ``(age_seconds, detail)`` or
     ``(None, reason)`` when the host is absent or the record is unusable.
     """
-    path = state_root() / "incident-state.json"
+    path = state_root() / INCIDENT_STATE
     if not path.exists():
         return None, f"no incident-state ledger at {path}"
     data = load_json(path)
@@ -2096,11 +2104,11 @@ def collect_problems(args: argparse.Namespace, checks: set[str] | None = None, e
                             f"last_q_message_age_seconds={last_q_age} detail={detail}"
                         )
     if "dispatcher" in checks:
-        age, detail = file_age(state_root() / "dispatcher-state.json")
+        age, detail = file_age(state_root() / DISPATCHER_STATE)
         if age is None or age > args.max_dispatcher_age:
             problems["dispatcher"] = f"dispatcher heartbeat stale: age_seconds={age if age is not None else 'missing'} max={args.max_dispatcher_age} detail={detail}"
     if "collector" in checks:
-        age, detail = file_age(state_root() / "collector-state.json")
+        age, detail = file_age(state_root() / COLLECTOR_STATE)
         if age is None or age > args.max_collector_age:
             problems["collector"] = f"collector heartbeat stale: age_seconds={age if age is not None else 'missing'} max={args.max_collector_age} detail={detail}"
     if "fleet_sentinel" in checks:

@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-08-07T15:56:09Z",
+  "generatedAt": "2026-08-08T23:56:55Z",
   "scope": "bot-errors-runtime-scripts",
   "expectedHeadShaPolicy": "populated at deploy time by deploy step; absent here so committed state is observability-only",
   "files": [
     {
       "path": "deploy/scripts/bot-errors-collector.py",
-      "sha256": "c79b36dec295bf3673a449e052c9675997ccb6b45a8b618297e2dff571192238",
+      "sha256": "0265801c6f290ce25c5fd8394fc9ca169fbb44ac48bbc7b326de54600b21d87d",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -28,7 +28,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "97414c822544f48b848ab2538e0445db30e68ed6a76cf73ae7b35edab23f91bc",
+      "sha256": "acd0fa79e92f495a5f7349fc97dddc6ada3fe56de864df9bb75df82784d302d8",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -67,7 +67,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-gui-session-monitor.py",
-      "sha256": "200cceefa71e54e2768664c10248fc4bd3e3346ce6dcdc1eaa96c1e11a587d36",
+      "sha256": "c48fa6a9bc82245a0ecd484bb995404300e10d647998606e1313abf806940a97",
       "mustContain": [
         "classify_gui_session",
         "gui_targets_from_fleet",
@@ -86,7 +86,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "ff13ef2b56f46ea443f90887edbbac8cfc9821d79ec64775389242848f1b197b",
+      "sha256": "047d9360a75be35e6135074066999bff30eac059d36ca7ab08c7ac60a0e690de",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -157,7 +157,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
-      "sha256": "5534e4f47843ae8c28ea920ac3f2e2e2a39270df7308af7204cd935bf128bdfc",
+      "sha256": "14647c194c5719c515f1cf7c95efee2741658ff4b902f3c738759518a227b650",
       "mustContain": [
         "BOT_ERRORS_Q_LOOP_STATE_DIR",
         "BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT",
@@ -203,7 +203,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-runtime-staleness.py",
-      "sha256": "8c1e2f702f2453bef92c381d72d91cdc943b25520dd713a12c5e8584df3386ed",
+      "sha256": "7bf0ce8510843bf5a22d594afe2c171b3e8d3d138a176cc48b2eed9664a3d91d",
       "mustContain": [
         "Runtime code-staleness monitor",
         "runtime_stale"
@@ -211,7 +211,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-selfcheck.py",
-      "sha256": "16e7d39a60132e7cac2fc7ddd636a595c5ef8679dbdf9a59dceb10a45e4d38b5",
+      "sha256": "53d63ea827c51fde799143c3b06dc845318dcb3aa9e54316831bc19c04b27077",
       "mustContain": [
         "SAFE_HEAL_CLASSES",
         "HEAL_WINDOW_SECONDS"
@@ -219,7 +219,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-sentinel.py",
-      "sha256": "dc3d823c81bf03f929a35adb7f4aa49965ab8fd61118eaba31c0e2114d1e156e",
+      "sha256": "493b50013a839816b43d462983db3d96b5eadbda5d093394ec45c62964c20c42",
       "mustContain": [
         "DEFAULT_HEARTBEAT_MAX_AGE_SECONDS",
         "DEFAULT_HYSTERESIS_CYCLES"
@@ -409,6 +409,13 @@
         "def compute_manifest_digest(",
         "def load_approved_manifest_digests(",
         "manifest_digest"
+      ]
+    },
+    {
+      "path": "deploy/scripts/lib/state_files.py",
+      "sha256": "4bbcac85853544d51588d38cfb8f6d1946dcd03f6dc2e00b3849176febaf553c",
+      "mustContain": [
+        "Single source of truth for bot-errors state filenames"
       ]
     },
     {

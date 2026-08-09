@@ -37,6 +37,7 @@ from lib.durable_json import (
     publish_state_json,
     require_advance,
 )
+from lib.state_files import MAINTENANCE
 
 # Hard ceiling on a window's length. A planned maintenance longer than this is
 # almost certainly a forgotten "open" — clamp so a stale window cannot silence
@@ -74,7 +75,7 @@ def state_root() -> Path:
 
 
 def maintenance_state_path() -> Path:
-    return state_root() / "maintenance.json"
+    return state_root() / MAINTENANCE
 
 
 def safe_segment(value: str) -> str:
