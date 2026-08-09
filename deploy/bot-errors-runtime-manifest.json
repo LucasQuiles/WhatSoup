@@ -28,7 +28,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "5c0457e3e00ce9c583623ca465a3df0640f262b68a28083a4dcc13e5b2bad8c5",
+      "sha256": "4ef1ec7bc25b2f372f7b3c90f49ea8b649c850f0f3af33104725ab579b17f1e1",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -46,7 +46,8 @@
         "safe_is_regular_entry",
         "quarantine_untrusted_entry",
         "malformed delivery.nextAttemptAtEpoch",
-        "persist changed incident state"
+        "persist changed incident state",
+        "malformed delivery.attempts"
       ]
     },
     {
