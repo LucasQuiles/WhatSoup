@@ -1148,7 +1148,9 @@ def test_default_config_uses_env_overrides(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("BOT_ERRORS_SELFCHECK_CENTRAL_ACK", str(ack))
     central_alert = tmp_path / "central-down-alert.json"
     monkeypatch.setenv("BOT_ERRORS_SELFCHECK_CENTRAL_DOWN_ALERT", str(central_alert))
-    assert _mod.default_state_dir() == tmp_path / "state-root" / "sentinel"
+    # default_state_dir() moved to lib.state_root.selfcheck_state_dir (#3051 Car B);
+    # the module re-exports it via its import — same env-derivation contract.
+    assert _mod.selfcheck_state_dir() == tmp_path / "state-root" / "sentinel"
     config = _mod.default_config(root, state)
     assert config.manifest_path == manifest
     assert config.current_link == state / "current"
