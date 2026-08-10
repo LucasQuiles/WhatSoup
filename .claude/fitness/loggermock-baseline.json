@@ -16,10 +16,6 @@
     "keysMatched": 4
   },
   {
-    "file": "tests/core/health-schedule.test.ts",
-    "keysMatched": 4
-  },
-  {
     "file": "tests/core/health.test.ts",
     "keysMatched": 4
   },
