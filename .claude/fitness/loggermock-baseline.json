@@ -4,10 +4,6 @@
     "keysMatched": 4
   },
   {
-    "file": "tests/core/admin-fallback.test.ts",
-    "keysMatched": 4
-  },
-  {
     "file": "tests/core/admin.test.ts",
     "keysMatched": 4
   },
