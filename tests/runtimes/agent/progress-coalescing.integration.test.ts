@@ -15,9 +15,7 @@ import {
 import type { OperationTrackerConfig } from '../../../src/config.ts';
 import type { Messenger } from '../../../src/core/types.ts';
 
-vi.mock('../../../src/logger.ts', () => ({
-  createChildLogger: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }),
-}));
+vi.mock('../../../src/logger.ts', async () => (await import('../../helpers/logger-mock.ts')).loggerMock());
 
 const CHAT_JID = 'ana-invoicing@s.whatsapp.net';
 const INSTANCE = 'Ana';
