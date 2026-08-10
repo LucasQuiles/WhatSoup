@@ -44,10 +44,6 @@
     "keysMatched": 4
   },
   {
-    "file": "tests/core/ingest-fallback-routing.test.ts",
-    "keysMatched": 4
-  },
-  {
     "file": "tests/core/ingest-paused-chat-bypass.test.ts",
     "keysMatched": 4
   },
