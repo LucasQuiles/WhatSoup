@@ -60,10 +60,6 @@
     "keysMatched": 4
   },
   {
-    "file": "tests/core/lid-phone-resolution.test.ts",
-    "keysMatched": 4
-  },
-  {
     "file": "tests/core/lid-resolver-reconcile-dedup.test.ts",
     "keysMatched": 6
   },
