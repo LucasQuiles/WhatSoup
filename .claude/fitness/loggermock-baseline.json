@@ -64,10 +64,6 @@
     "keysMatched": 4
   },
   {
-    "file": "tests/core/media-retention-fs-errors.test.ts",
-    "keysMatched": 4
-  },
-  {
     "file": "tests/core/outbound-identity/guard-store-unavailable.test.ts",
     "keysMatched": 4
   },
