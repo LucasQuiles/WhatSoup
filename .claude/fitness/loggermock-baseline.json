@@ -88,10 +88,6 @@
     "keysMatched": 5
   },
   {
-    "file": "tests/core/signal-access-identity.test.ts",
-    "keysMatched": 4
-  },
-  {
     "file": "tests/core/sms-access-identity.test.ts",
     "keysMatched": 4
   },
