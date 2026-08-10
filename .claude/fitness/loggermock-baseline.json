@@ -20,10 +20,6 @@
     "keysMatched": 4
   },
   {
-    "file": "tests/core/ingest-control-transport-gate.test.ts",
-    "keysMatched": 4
-  },
-  {
     "file": "tests/core/ingest-paused-chat-bypass.test.ts",
     "keysMatched": 4
   },
