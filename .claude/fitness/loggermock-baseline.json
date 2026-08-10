@@ -36,10 +36,6 @@
     "keysMatched": 4
   },
   {
-    "file": "tests/core/ingest-backpressure.test.ts",
-    "keysMatched": 4
-  },
-  {
     "file": "tests/core/ingest-control-transport-gate.test.ts",
     "keysMatched": 4
   },
