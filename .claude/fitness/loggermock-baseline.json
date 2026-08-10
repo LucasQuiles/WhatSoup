@@ -1,9 +1,5 @@
 [
   {
-    "file": "tests/console/connection-card-emitter-contract.test.tsx",
-    "keysMatched": 4
-  },
-  {
     "file": "tests/core/admin.test.ts",
     "keysMatched": 4
   },
