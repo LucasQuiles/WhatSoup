@@ -22,14 +22,7 @@ vi.mock('../../src/config.ts', () => ({
   },
 }));
 
-vi.mock('../../src/logger.ts', () => ({
-  createChildLogger: () => ({
-    debug: vi.fn(),
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-  }),
-}));
+vi.mock('../../src/logger.ts', async () => (await import('../helpers/logger-mock.ts')).loggerMock());
 
 import { Database } from '../../src/core/database.ts';
 import type { HealthDeps } from '../../src/core/health.ts';
