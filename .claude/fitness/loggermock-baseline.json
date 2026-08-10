@@ -292,10 +292,6 @@
     "keysMatched": 4
   },
   {
-    "file": "tests/runtimes/agent/progress-coalescing.integration.test.ts",
-    "keysMatched": 4
-  },
-  {
     "file": "tests/runtimes/agent/progress-placeholder-rate-floor.test.ts",
     "keysMatched": 4
   },
