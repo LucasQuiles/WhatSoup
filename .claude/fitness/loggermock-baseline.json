@@ -52,10 +52,6 @@
     "keysMatched": 4
   },
   {
-    "file": "tests/core/lid-groups-only-policy-salvage.test.ts",
-    "keysMatched": 4
-  },
-  {
     "file": "tests/core/lid-resolver-reconcile-dedup.test.ts",
     "keysMatched": 6
   },
