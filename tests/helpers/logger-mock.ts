@@ -42,6 +42,10 @@ export function loggerMock() {
  * wrap this return (e.g. `{ ...singletonLoggerMock(), child: () =>
  * singleton }`), not extend this function, to keep the object this
  * function returns walkable by `Object.values(...).mockClear()`.
+ *
+ * Every key is a `vi.fn()` mock whose `.mock.calls` array accumulates
+ * every log call, giving assertion sites full access to call records
+ * (`.mock.calls[0]`, `.mockClear()`, `.toHaveBeenCalledWith(...)`, etc.).
  */
 export function singletonLoggerMock() {
   return {
