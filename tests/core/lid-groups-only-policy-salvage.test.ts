@@ -43,14 +43,7 @@ vi.mock('../../src/config.ts', () => ({
   config: testConfig,
 }));
 
-vi.mock('../../src/logger.ts', () => ({
-  createChildLogger: () => ({
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  }),
-}));
+vi.mock('../../src/logger.ts', async () => (await import('../helpers/logger-mock.ts')).loggerMock());
 
 import { Database } from '../../src/core/database.ts';
 import { insertPending, insertAllowed } from '../../src/core/access-list.ts';
