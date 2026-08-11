@@ -1,13 +1,5 @@
 [
   {
-    "file": "tests/core/health-probe-storm.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/core/health.test.ts",
-    "keysMatched": 4
-  },
-  {
     "file": "tests/core/outbound-message-safety.test.ts",
     "keysMatched": 4
   },
@@ -369,10 +361,6 @@
   },
   {
     "file": "tests/runtimes/chat/memory/memory-provider-telemetry-confidentiality.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/chat/memory/memory-telemetry-cross-surface.test.ts",
     "keysMatched": 4
   },
   {
