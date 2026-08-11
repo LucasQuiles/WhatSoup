@@ -1,9 +1,5 @@
 [
   {
-    "file": "tests/core/admin.test.ts",
-    "keysMatched": 4
-  },
-  {
     "file": "tests/core/admission-contract.test.ts",
     "keysMatched": 4
   },

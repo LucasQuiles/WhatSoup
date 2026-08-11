@@ -27,16 +27,18 @@ vi.mock('../../src/config.ts', () => ({
 // Shared, inspectable logger instance — admin.ts calls createChildLogger('admin')
 // once at module load, so every log call in the module lands on this same mock
 // and #2830's replay-failure log assertions can read it back.
-const mockLog = vi.hoisted(() => ({
-  info: vi.fn(),
-  warn: vi.fn(),
-  error: vi.fn(),
-  debug: vi.fn(),
-}));
+vi.mock('../../src/logger.ts', async () => {
+  const { singletonLoggerMock } = await import('../helpers/logger-mock.ts');
+  const logger = singletonLoggerMock();
+  return { createChildLogger: () => logger };
+});
 
-vi.mock('../../src/logger.ts', () => ({
-  createChildLogger: () => mockLog,
-}));
+import { createChildLogger } from '../../src/logger.ts';
+import type { singletonLoggerMock } from '../helpers/logger-mock.ts';
+// Runtime object IS the singleton from the vi.mock factory above; retype the
+// LogFn-declared surface to the helper's Mock-typed shape so call-record
+// assertions typecheck without weakening anything.
+const mockLog = createChildLogger('admin') as unknown as ReturnType<typeof singletonLoggerMock>;
 
 // ---------------------------------------------------------------------------
 // Imports
