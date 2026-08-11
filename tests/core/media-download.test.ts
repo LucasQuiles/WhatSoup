@@ -16,14 +16,10 @@ vi.mock('../../src/config.ts', () => ({
   },
 }));
 
-vi.mock('../../src/logger.ts', () => ({
-  createChildLogger: () => ({
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  }),
-}));
+vi.mock('../../src/logger.ts', async () => {
+  const { loggerMock } = await import('../helpers/logger-mock.ts');
+  return loggerMock();
+});
 
 // Mock fs so writeTempFile doesn't actually write to disk
 vi.mock('node:fs', () => ({

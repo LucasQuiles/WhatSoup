@@ -19,16 +19,9 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 // Database construction path is untouched.
 vi.mock('../../src/logger.ts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../src/logger.ts')>();
-  const child: Record<string, ReturnType<typeof vi.fn>> & { child?: unknown } = {
-    trace: vi.fn(),
-    debug: vi.fn(),
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    fatal: vi.fn(),
-    silent: vi.fn(),
-  };
-  child.child = () => child;
+  const { singletonLoggerMock } = await import('../helpers/logger-mock.ts');
+  const singleton = singletonLoggerMock();
+  const child = { ...singleton, child: () => child };
   return { ...actual, createChildLogger: () => child };
 });
 
