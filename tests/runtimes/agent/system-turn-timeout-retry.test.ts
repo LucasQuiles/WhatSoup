@@ -26,9 +26,12 @@ const { mockRuntimeLogger } = vi.hoisted(() => ({
   },
 }));
 
-vi.mock('../../../src/logger.ts', () => ({
-  createChildLogger: () => mockRuntimeLogger,
-}));
+vi.mock('../../../src/logger.ts', async () => {
+  const { singletonLoggerMock } = await import('../../helpers/logger-mock.ts');
+  const singleton = singletonLoggerMock();
+  Object.assign(mockRuntimeLogger, singleton);
+  return { createChildLogger: () => singleton };
+});
 
 vi.mock('../../../src/lib/emit-alert.ts', () => {
   const emitAlert = vi.fn(() => true);

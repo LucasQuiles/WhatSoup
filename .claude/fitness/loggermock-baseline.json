@@ -28,38 +28,6 @@
     "keysMatched": 4
   },
   {
-    "file": "tests/runtimes/agent/session.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/agent/system-turn-timeout-retry.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/agent/turn-queue.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/agent/workspace-sweeper.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/agent/zombie-sessions.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/chat/context.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/chat/enrichment/extractor-selffact-provenance.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/chat/enrichment/extractor-toulmin.test.ts",
-    "keysMatched": 4
-  },
-  {
     "file": "tests/runtimes/chat/enrichment/extractor.test.ts",
     "keysMatched": 4
   },
