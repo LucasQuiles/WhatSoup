@@ -30,9 +30,14 @@ vi.mock('../../src/fleet/alert-throttle-store.ts', () => ({
   ...alertThrottleStore,
 }));
 vi.mock('../../src/fleet/silence-manager.ts', () => silenceManager);
-vi.mock('../../src/logger.ts', () => ({
-  createChildLogger: () => ({ ...logger, child: vi.fn().mockReturnThis() }),
-}));
+vi.mock('../../src/logger.ts', async () => {
+  const { singletonLoggerMock } = await import('../helpers/logger-mock.ts');
+  const singleton = singletonLoggerMock();
+  Object.assign(logger, singleton);
+  return {
+    createChildLogger: () => ({ ...singleton, child: vi.fn().mockReturnThis() }),
+  };
+});
 
 const POLL_MS = 1_000;
 const WITHHELD_MSG = 'recovered alert clear withheld until recovery proof is complete';

@@ -4,38 +4,6 @@
     "keysMatched": 5
   },
   {
-    "file": "tests/fleet/health-poller-branches.test.ts",
-    "keysMatched": 5
-  },
-  {
-    "file": "tests/fleet/health-poller-branches2.test.ts",
-    "keysMatched": 5
-  },
-  {
-    "file": "tests/fleet/health-poller-observed-at.test.ts",
-    "keysMatched": 5
-  },
-  {
-    "file": "tests/fleet/health-poller-recovery-clear-episodes.test.ts",
-    "keysMatched": 5
-  },
-  {
-    "file": "tests/fleet/health-poller-suppression-episodes.test.ts",
-    "keysMatched": 5
-  },
-  {
-    "file": "tests/fleet/health-poller.test.ts",
-    "keysMatched": 5
-  },
-  {
-    "file": "tests/fleet/heatmap-by-date.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/fleet/probe-liveness-escalation.test.ts",
-    "keysMatched": 5
-  },
-  {
     "file": "tests/integration/heal-concurrency.test.ts",
     "keysMatched": 4
   },

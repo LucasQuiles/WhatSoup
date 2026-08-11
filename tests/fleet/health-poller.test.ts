@@ -53,12 +53,14 @@ vi.mock('../../src/fleet/alert-throttle-store.ts', () => ({
 vi.mock('../../src/fleet/silence-manager.ts', () => silenceManager);
 
 // Suppress pino output during tests
-vi.mock('../../src/logger.ts', () => ({
-  createChildLogger: () => ({
-    ...logger,
-    child: vi.fn().mockReturnThis(),
-  }),
-}));
+vi.mock('../../src/logger.ts', async () => {
+  const { singletonLoggerMock } = await import('../helpers/logger-mock.ts');
+  const singleton = singletonLoggerMock();
+  Object.assign(logger, singleton);
+  return {
+    createChildLogger: () => ({ ...singleton, child: vi.fn().mockReturnThis() }),
+  };
+});
 
 function makeInstance(overrides: Partial<InstanceHealth> = {}): InstanceHealth {
   return {
