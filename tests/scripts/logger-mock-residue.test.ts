@@ -347,15 +347,21 @@ describe('check-logger-mock-residue', () => {
     });
 
     it('the baseline is non-empty (grandfathered debt is actually tracked, not silently dropped)', () => {
+      // The #2977 migration campaign shrinks this toward zero; the guard's
+      // intent is "debt is tracked while it exists", not a floor on debt size —
+      // the old >100 threshold would have turned migration progress into a red.
       const repoRoot = path.resolve(import.meta.dirname, '../..');
-      expect(loadBaseline(repoRoot).length).toBeGreaterThan(100);
+      expect(loadBaseline(repoRoot).length).toBeGreaterThan(0);
     });
 
-    it('the real "lid-resolver-reconcile-dedup" file (the one #2243-proposed regex DOES catch) is in the baseline', () => {
+    it('a real still-unmigrated file (one the #2243-proposed regex DOES catch) is in the baseline', () => {
       // Converse check: the new signal is a strict superset of the old
       // regex on real content, not just on the synthetic RED fixture above.
+      // Specimen note: must name a file still carrying an inline mock; the
+      // #2977 campaign retires specimens over time — swap for another baseline
+      // entry when this one migrates (prior specimen: lid-resolver-reconcile-dedup).
       const repoRoot = path.resolve(import.meta.dirname, '../..');
-      expect(loadBaseline(repoRoot)).toContain('tests/core/lid-resolver-reconcile-dedup.test.ts');
+      expect(loadBaseline(repoRoot)).toContain('tests/core/scheduler.test.ts');
     });
   });
 });

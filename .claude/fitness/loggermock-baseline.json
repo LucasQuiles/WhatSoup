@@ -1,9 +1,5 @@
 [
   {
-    "file": "tests/core/admission-contract.test.ts",
-    "keysMatched": 4
-  },
-  {
     "file": "tests/core/health-probe-storm.test.ts",
     "keysMatched": 4
   },
@@ -12,35 +8,7 @@
     "keysMatched": 4
   },
   {
-    "file": "tests/core/ingest-paused-chats.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/core/ingest.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/core/lid-resolver-reconcile-dedup.test.ts",
-    "keysMatched": 6
-  },
-  {
-    "file": "tests/core/media-download.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/core/outbound-identity/guard-store-unavailable.test.ts",
-    "keysMatched": 4
-  },
-  {
     "file": "tests/core/outbound-message-safety.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/core/process-tmp-retention.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/core/scheduler-corrupt-payload.test.ts",
     "keysMatched": 4
   },
   {

@@ -4,11 +4,15 @@ import type { IdentityStore } from '../../../src/core/outbound-identity/types.ts
 // Hoisted logger spy: lets the fail-open audit be asserted by structured field,
 // not just by message string. createChildLogger is captured at guard.ts import.
 const { warnSpy } = vi.hoisted(() => ({ warnSpy: vi.fn() }));
-vi.mock('../../../src/logger.ts', () => ({
-  default: { warn: vi.fn(), info: vi.fn(), error: vi.fn(), debug: vi.fn() },
-  createChildLogger: () => ({ warn: warnSpy, info: vi.fn(), error: vi.fn(), debug: vi.fn() }),
-  flushLogger: () => Promise.resolve(),
-}));
+vi.mock('../../../src/logger.ts', async () => {
+  const { singletonLoggerMock } = await import('../../helpers/logger-mock.ts');
+  const singleton = { ...singletonLoggerMock(), warn: warnSpy };
+  return {
+    default: { warn: vi.fn(), info: vi.fn(), error: vi.fn(), debug: vi.fn() },
+    createChildLogger: () => singleton,
+    flushLogger: () => Promise.resolve(),
+  };
+});
 
 const { applyOutboundIdentityGuard, OutboundIdentityError } = await import(
   '../../../src/core/outbound-identity/guard.ts'

@@ -10,16 +10,10 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const mockSchedulerLog = vi.hoisted(() => ({
-  debug: vi.fn(),
-  error: vi.fn(),
-  info: vi.fn(),
-  warn: vi.fn(),
-}));
-
-vi.mock('../../src/logger.ts', () => ({
-  createChildLogger: () => mockSchedulerLog,
-}));
+vi.mock('../../src/logger.ts', async () => {
+  const { loggerMock } = await import('../helpers/logger-mock.ts');
+  return loggerMock();
+});
 
 import { Database } from '../../src/core/database.ts';
 import { MessageScheduler, ScheduledPayloadError } from '../../src/core/scheduler.ts';
