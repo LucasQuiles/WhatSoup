@@ -223,8 +223,8 @@ function topicInfo(relativePath: string): { topicRaw: string; topic: string } {
   return { topicRaw: stem, topic: topicFromSuperpowersStem(stem) };
 }
 
-function git(cwd: string, args: string[]): string {
-  return execFileSync('git', args, { cwd, encoding: 'utf8', env: cleanGitEnv(), stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+function git(cwd: string, args: string[], timeout?: number): string {
+  return execFileSync('git', args, { cwd, encoding: 'utf8', env: cleanGitEnv(), timeout: timeout ?? 30_000, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 }
 
 function gitList(cwd: string, args: string[]): string[] {
