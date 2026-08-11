@@ -46,9 +46,12 @@ vi.mock('../../src/config.ts', () => ({
   },
 }));
 
-vi.mock('../../src/logger.ts', () => ({
-  createChildLogger: () => mockConnectionLogger,
-}));
+vi.mock('../../src/logger.ts', async () => {
+  const { singletonLoggerMock } = await import('../helpers/logger-mock.ts');
+  const singleton = singletonLoggerMock();
+  Object.assign(mockConnectionLogger, singleton);
+  return { createChildLogger: () => mockConnectionLogger };
+});
 
 import { createHash } from 'node:crypto';
 import { makeWASocket } from '@whiskeysockets/baileys';

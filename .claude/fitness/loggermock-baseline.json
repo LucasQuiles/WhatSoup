@@ -32,52 +32,12 @@
     "keysMatched": 6
   },
   {
-    "file": "tests/runtimes/chat/providers/pinecone-readiness.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/chat/providers/pinecone.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/chat/providers/transcription/openai-whisper-extended.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/chat/providers/transcription/whisper-providers.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/chat/providers/whisper.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/chat/queue.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/chat/runtime-admission.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/passive/health-snapshot.test.ts",
-    "keysMatched": 4
-  },
-  {
     "file": "tests/transport/baileys-stream-error.test.ts",
-    "keysMatched": 6
-  },
-  {
-    "file": "tests/transport/connection-auth-bond-edge.test.ts",
     "keysMatched": 6
   },
   {
     "file": "tests/transport/outbound-governor.test.ts",
     "keysMatched": 4
-  },
-  {
-    "file": "tests/transport/poll-vote-bridge.test.ts",
-    "keysMatched": 6
   },
   {
     "file": "tests/transport/third-party-console-redaction.test.ts",

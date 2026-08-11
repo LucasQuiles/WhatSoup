@@ -7,14 +7,7 @@ import { ChatRuntime } from '../../../src/runtimes/chat/runtime.ts';
 import type { LLMProvider } from '../../../src/runtimes/chat/providers/types.ts';
 import type { PineconeMemory } from '../../../src/runtimes/chat/providers/pinecone.ts';
 
-vi.mock('../../../src/logger.ts', () => ({
-  createChildLogger: () => ({
-    debug: vi.fn(),
-    error: vi.fn(),
-    info: vi.fn(),
-    warn: vi.fn(),
-  }),
-}));
+vi.mock('../../../src/logger.ts', async () => (await import('../../helpers/logger-mock.ts')).loggerMock());
 
 vi.mock('../../../src/lib/model-advisor.ts', () => ({
   resolveModelRole: vi.fn(async (role: string) => role),
