@@ -45,6 +45,7 @@ if (resultsJsonArg) {
       cwd: consoleRoot,
       encoding: 'utf8',
       maxBuffer: 64 * 1024 * 1024,
+      timeout: 30_000,
     });
   } catch (err) {
     // eslint exits non-zero when errors (not warnings) exist; its stdout still carries the JSON

@@ -124,6 +124,7 @@ try {
         cwd: consoleRoot,
         encoding: 'utf8',
         maxBuffer: 64 * 1024 * 1024,
+        timeout: 30_000,
         // Suppress eslint's stderr so fatal config errors don't bleed into callers.
         // The error is captured in e.message / e.stderr and recorded as liveRunError.
         stdio: ['pipe', 'pipe', 'pipe'],
