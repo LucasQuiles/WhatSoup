@@ -1,9 +1,5 @@
 [
   {
-    "file": "tests/core/outbound-message-safety.test.ts",
-    "keysMatched": 4
-  },
-  {
     "file": "tests/core/scheduler-recurrence.test.ts",
     "keysMatched": 4
   },
