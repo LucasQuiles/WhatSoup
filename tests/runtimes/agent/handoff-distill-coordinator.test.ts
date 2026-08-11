@@ -51,9 +51,14 @@ const {
 
 // ─── Module mocks (declared before importing the coordinator) ───────────────
 
-vi.mock('../../../src/logger.ts', () => ({
-  createChildLogger: () => mockLogger,
-}));
+vi.mock('../../../src/logger.ts', async () => {
+  const { singletonLoggerMock } = await import('../../helpers/logger-mock.ts');
+  const singleton = singletonLoggerMock();
+  Object.assign(mockLogger, singleton);
+  return {
+    createChildLogger: () => ({ ...singleton, child: vi.fn().mockReturnThis() }),
+  };
+});
 
 vi.mock('../../../src/core/messages.ts', () => ({
   getRecentMessages: mockGetRecentMessages,

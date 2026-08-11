@@ -28,9 +28,10 @@ import {
 import type { ProgressEvent } from '../../../src/runtimes/agent/operation-tracker.ts';
 import type { Messenger } from '../../../src/core/types.ts';
 
-vi.mock('../../../src/logger.ts', () => ({
-  createChildLogger: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }),
-}));
+vi.mock('../../../src/logger.ts', async () => {
+  const { loggerMock } = await import('../../helpers/logger-mock.ts');
+  return loggerMock();
+});
 
 const CHAT_JID = 'bench@s.whatsapp.net';
 const INSTANCE = 'Bench';

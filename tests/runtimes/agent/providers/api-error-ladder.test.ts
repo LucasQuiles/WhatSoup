@@ -18,14 +18,10 @@ import type { AgentEvent } from '../../../../src/runtimes/agent/stream-parser.ts
 import { AnthropicApiProvider } from '../../../../src/runtimes/agent/providers/anthropic-api.ts';
 import { OpenAIApiProvider } from '../../../../src/runtimes/agent/providers/openai-api.ts';
 
-vi.mock('../../../../src/logger.ts', () => ({
-  createChildLogger: () => ({
-    debug: vi.fn(),
-    error: vi.fn(),
-    info: vi.fn(),
-    warn: vi.fn(),
-  }),
-}));
+vi.mock('../../../../src/logger.ts', async () => {
+  const { loggerMock } = await import('../../../helpers/logger-mock.ts');
+  return loggerMock();
+});
 
 type HttpProvider = OpenAIApiProvider | AnthropicApiProvider;
 

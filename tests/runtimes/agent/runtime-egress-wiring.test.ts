@@ -69,7 +69,10 @@ const { mockSocketServerInstance, MockWhatSoupSocketServer } = vi.hoisted(() => 
 });
 
 vi.mock('../../../src/config.ts', () => ({ config: mockConfig }));
-vi.mock('../../../src/logger.ts', () => ({ createChildLogger: () => mockRuntimeLogger }));
+vi.mock('../../../src/logger.ts', async () => {
+  const { loggerMock } = await import('../../helpers/logger-mock.ts');
+  return loggerMock();
+});
 vi.mock('../../../src/core/messages.ts', () => ({
   getRecentMessages: vi.fn(() => []),
   getMessagesSince: vi.fn(() => []),

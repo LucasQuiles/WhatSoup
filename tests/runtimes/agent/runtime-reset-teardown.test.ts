@@ -109,9 +109,10 @@ const { mockEmitAlert, mockClearAlertSource } = vi.hoisted(() => ({
   mockClearAlertSource: vi.fn(),
 }));
 
-vi.mock('../../../src/logger.ts', () => ({
-  createChildLogger: () => mockRuntimeLogger,
-}));
+vi.mock('../../../src/logger.ts', async () => {
+  const { loggerMock } = await import('../../helpers/logger-mock.ts');
+  return loggerMock();
+});
 
 vi.mock('../../../src/lib/emit-alert.ts', () => ({
   emitAlert: mockEmitAlert,

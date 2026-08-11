@@ -5,17 +5,24 @@ import { join } from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-const { createChildLogger } = vi.hoisted(() => ({
-  createChildLogger: vi.fn(() => ({
+const { createChildLogger, _logSingleton } = vi.hoisted(() => {
+  const _logSingleton = {
     debug: vi.fn(),
     error: vi.fn(),
     info: vi.fn(),
     trace: vi.fn(),
     warn: vi.fn(),
-  })),
-}));
+  };
+  const createChildLogger = vi.fn(() => _logSingleton);
+  return { createChildLogger, _logSingleton };
+});
 
-vi.mock('../../../src/logger.ts', () => ({ createChildLogger }));
+vi.mock('../../../src/logger.ts', async () => {
+  const { singletonLoggerMock } = await import('../../helpers/logger-mock.ts');
+  const singleton = singletonLoggerMock();
+  Object.assign(_logSingleton, singleton);
+  return { createChildLogger };
+});
 
 import { toConversationKey } from '../../../src/core/conversation-key.ts';
 import { Database } from '../../../src/core/database.ts';
