@@ -79,7 +79,7 @@ const privatePineconeProjectIds = [
 ].map((parts) => parts.join(''));
 
 function gitList(args: string[], cwd: string): string[] {
-  const output = execFileSync('git', args, { cwd, encoding: 'utf8', env: cleanGitEnv() }).trim();
+  const output = execFileSync('git', args, { cwd, encoding: 'utf8', env: cleanGitEnv(), timeout: 30_000 }).trim();
   return output ? output.split(/\r?\n/).map(normalizeRepoPath).filter(Boolean) : [];
 }
 

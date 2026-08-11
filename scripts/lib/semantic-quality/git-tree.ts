@@ -43,6 +43,7 @@ function git(cwd: string, args: string[]): string {
     encoding: 'utf8',
     env: cleanGitEnv(),
     maxBuffer: GIT_MAX_BUFFER,
+    timeout: 30_000,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 }

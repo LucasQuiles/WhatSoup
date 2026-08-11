@@ -150,6 +150,7 @@ function assertConsoleDependencies(cwd: string): void {
       ],
       {
         cwd,
+        timeout: 30_000,
         stdio: 'ignore',
       },
     );
@@ -185,7 +186,7 @@ export function runPrePushGuard(
   execFileSync(
     'npm',
     estateArgs,
-    { cwd, stdio: 'inherit' },
+    { cwd, timeout: 30_000, stdio: 'inherit' },
   );
   if (parseError) throw parseError;
 
@@ -200,7 +201,7 @@ export function runPrePushGuard(
       execFileSync(
         'bash',
         ['scripts/run-with-pinned-npm.sh', '--prefix', 'console', 'run', script],
-        { cwd, stdio: 'inherit' },
+        { cwd, timeout: 30_000, stdio: 'inherit' },
       );
     }
     return decision;
@@ -229,7 +230,10 @@ export function runPrePushGuard(
 
   for (const script of commands) {
     console.error(`pre-push guard: running npm run ${script}`);
-    execFileSync('npm', ['run', script], { cwd, stdio: 'inherit' });
+    // Gate STEP runner: individual npm steps (vitest suites, typecheck) legitimately
+    // run for minutes — 600s bounds a hang without tripping real steps. The 30s
+    // default used elsewhere in this series is for fast single git/gh invocations.
+    execFileSync('npm', ['run', script], { cwd, timeout: 600_000, stdio: 'inherit' });
   }
 
   if (alignmentReceipt) {

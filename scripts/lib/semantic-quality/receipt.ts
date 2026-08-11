@@ -824,6 +824,7 @@ export function writeLocalReceipt(cwd: string, receipt: BoundaryReceipt): string
       encoding: 'utf8',
       env: cleanGitEnv(),
       maxBuffer: 1024 * 1024,
+      timeout: 30_000,
       stdio: ['ignore', 'pipe', 'pipe'],
     },
   ).trim();
