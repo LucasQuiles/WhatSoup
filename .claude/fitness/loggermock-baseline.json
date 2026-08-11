@@ -4,22 +4,6 @@
     "keysMatched": 5
   },
   {
-    "file": "tests/integration/heal-concurrency.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/integration/heal-flow.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/lib/api-key-resolver.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/lib/keyring-typed-lookup.test.ts",
-    "keysMatched": 4
-  },
-  {
     "file": "tests/logger-error-key-serializer.test.ts",
     "keysMatched": 4
   },
@@ -69,10 +53,6 @@
   },
   {
     "file": "tests/runtimes/agent/command-gate-contract.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/agent/control-queue.test.ts",
     "keysMatched": 4
   },
   {
