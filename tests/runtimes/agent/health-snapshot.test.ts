@@ -431,6 +431,8 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
         proactiveResumeIdentityRejects: 0,
         restartLoopGuard: { enabled: true, bootsInWindow: 0, tripped: false, lastTripAt: null, windowMs: 300_000, bootsTotal: 0, checksPerformed: 0, lastCheckAt: null },
         unownedProviderEventRejects: 0,
+        suppressedSystemTurnEffectRejects: 0,
+        providerEventRejectReasons: {},
         chronologyDelayedDispatches: 0,
         chronologyRecoveryReplayDispatches: 0,
         completedDeliveryIdentityAdmissions: {
@@ -477,6 +479,8 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
         proactiveResumeIdentityRejects: 0,
         restartLoopGuard: { enabled: true, bootsInWindow: 0, tripped: false, lastTripAt: null, windowMs: 300_000, bootsTotal: 0, checksPerformed: 0, lastCheckAt: null },
         unownedProviderEventRejects: 0,
+        suppressedSystemTurnEffectRejects: 0,
+        providerEventRejectReasons: {},
         chronologyDelayedDispatches: 0,
         chronologyRecoveryReplayDispatches: 0,
         completedDeliveryIdentityAdmissions: {
@@ -726,6 +730,8 @@ describe('AgentRuntime.getHealthSnapshot — single-session shape', () => {
         proactiveResumeIdentityRejects: 0,
         restartLoopGuard: { enabled: true, bootsInWindow: 0, tripped: false, lastTripAt: null, windowMs: 300_000, bootsTotal: 0, checksPerformed: 0, lastCheckAt: null },
         unownedProviderEventRejects: 0,
+        suppressedSystemTurnEffectRejects: 0,
+        providerEventRejectReasons: {},
         chronologyDelayedDispatches: 0,
         chronologyRecoveryReplayDispatches: 0,
         completedDeliveryIdentityAdmissions: {

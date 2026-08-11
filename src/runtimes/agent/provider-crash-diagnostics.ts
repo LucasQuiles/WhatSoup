@@ -1,6 +1,7 @@
 // Shared, non-secret provider crash diagnostics for agent runtime alerts.
 
 import {
+  isProviderAuthRequiredMessage,
   isProviderStateLockedMessage,
   type AgentFailureClass,
 } from './failure-taxonomy.ts';
@@ -57,20 +58,13 @@ export function classifyProviderCrash(text: string): AgentFailureClass | undefin
   ) {
     return 'provider_permission_denied';
   }
-  if (
-    lower.includes('not logged in') ||
-    lower.includes('please run /login') ||
-    lower.includes('please login') ||
-    lower.includes('authentication required') ||
-    lower.includes('auth required') ||
-    lower.includes('invalid api key') ||
-    lower.includes('missing api key') ||
-    lower.includes('no api key') ||
-    lower.includes('unauthorized') ||
-    lower.includes('invalid authentication credentials') ||
-    lower.includes('failed to authenticate') ||
-    (lower.includes('oauth') && lower.includes('expired'))
-  ) {
+  // Reuse the result-path matcher instead of a drifting inline copy: this list
+  // once missed the structured 401 tokens (authentication_error /
+  // invalid_api_key) that failure-taxonomy deliberately matches, sending real
+  // auth crashes down the timeout/network/unknown branches. 'unauthorized' is a
+  // crash-only extra — stderr context makes the bare word safe where the
+  // result-path matcher deliberately avoids it.
+  if (isProviderAuthRequiredMessage(lower) || lower.includes('unauthorized')) {
     return 'provider_auth_required';
   }
   if (

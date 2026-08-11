@@ -500,8 +500,21 @@ type RuntimeTurnCapability = RuntimeTurnCapabilityHealth & {
 // (defined in auto-compact-controller.ts) so the silent-compact flag does not
 // expire mid-compaction.
 const AUTO_COMPACT_TIMEOUT_MS = 4 * MS_PER_MINUTE;
-/** Absolute wall bound for every non-auto provider request owned by the runtime. */
-const SYSTEM_TURN_TIMEOUT_MS = AUTO_COMPACT_TIMEOUT_MS;
+/**
+ * Absolute wall bound for every non-auto provider request owned by the runtime.
+ * Operator-overridable via WHATSOUP_SYSTEM_TURN_TIMEOUT_MS (positive integer,
+ * milliseconds): the previously hardcoded bound is implicated in group-turn
+ * failures where an injected context window full of unanswered asks provokes a
+ * long, effect-suppressed system turn that blows this timeout (ml-bot
+ * 2026-08-10 RCA — "no config knob"). Values well above the default extend how
+ * long a wedged system turn can hold its lane; tune with care.
+ */
+const SYSTEM_TURN_TIMEOUT_MS = (() => {
+  const raw = process.env['WHATSOUP_SYSTEM_TURN_TIMEOUT_MS'];
+  if (raw === undefined || raw.trim() === '') return AUTO_COMPACT_TIMEOUT_MS;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : AUTO_COMPACT_TIMEOUT_MS;
+})();
 // Cooldown after a timed-out /compact before another auto-compact may be tried.
 // Kept short so a session that times out retries soon (bounding how far it grows
 // between attempts) rather than degrading for a long window; still long enough to
@@ -891,6 +904,15 @@ export class AgentRuntime implements Runtime {
   // (captured at the top of start()); consumed by the startup resume gate.
   private restartLoopInterruptedBoot = false;
   private unownedProviderEventRejects = 0;
+  /**
+   * BY-DESIGN suppressions: effects of an OWNED system_request turn rejected
+   * as purpose_disallows_effect. Counted apart from unownedProviderEventRejects
+   * so designed suppression (a chatty model on a context-injection turn) is
+   * distinguishable in health from genuine attribution leakage (no_owner /
+   * source_session_not_current) — conflating them was the operator trap in the
+   * ml-bot 2026-08-10/11 investigations.
+   */
+  private suppressedSystemTurnEffectRejects = 0;
   private readonly turnChronology = new TurnChronologyTracker();
   private readonly providerEventRejectReasonCounts = new Map<string, number>();
   /**
@@ -1507,6 +1529,8 @@ export class AgentRuntime implements Runtime {
         ),
       },
       unownedProviderEventRejects: this.unownedProviderEventRejects,
+      suppressedSystemTurnEffectRejects: this.suppressedSystemTurnEffectRejects,
+      providerEventRejectReasons: Object.fromEntries(this.providerEventRejectReasonCounts),
       turnFinalizationRetainedRetries: finalizationHealth.retainedRetries,
       turnFinalizationDegradedScopes: finalizationHealth.degradedScopes,
       turnFinalizationRetryAttempts: finalizationHealth.retryAttempts,
@@ -5330,10 +5354,17 @@ export class AgentRuntime implements Runtime {
     reason: string,
     sourceSession?: SessionManager,
   ): void {
-    this.unownedProviderEventRejects = Math.min(
-      Number.MAX_SAFE_INTEGER,
-      this.unownedProviderEventRejects + 1,
-    );
+    if (ownerKind === 'system_request' && reason === 'purpose_disallows_effect') {
+      this.suppressedSystemTurnEffectRejects = Math.min(
+        Number.MAX_SAFE_INTEGER,
+        this.suppressedSystemTurnEffectRejects + 1,
+      );
+    } else {
+      this.unownedProviderEventRejects = Math.min(
+        Number.MAX_SAFE_INTEGER,
+        this.unownedProviderEventRejects + 1,
+      );
+    }
     const reasonCount = Math.min(
       Number.MAX_SAFE_INTEGER,
       (this.providerEventRejectReasonCounts.get(reason) ?? 0) + 1,
@@ -5514,22 +5545,43 @@ export class AgentRuntime implements Runtime {
     }
     this.recordTurnCostUsd(event);
 
+    // A restricted-purpose system turn can end in a terminal FAILURE
+    // (auth-required, server error, context overflow). This was the only
+    // terminal path that inspected neither event.isError nor event.text —
+    // forensics on effect-suppressed system turns (the ml-bot 2026-08-10/11
+    // purpose_disallows_effect incidents) saw the rejected stream events but
+    // never the terminal cause. Log-only by design: fallback arming and user
+    // notices stay user-turn concerns.
+    const systemTurnFailureKind = event.text !== null ? classifyProviderFailure(event.text) : null;
+    if (event.isError || systemTurnFailureKind !== null) {
+      log.warn({
+        scopeKey,
+        purpose: systemTurn.purpose,
+        isError: event.isError === true,
+        failureKind: systemTurnFailureKind,
+        textPreview: event.text !== null ? providerPreview(event.text, 300) : null,
+      }, 'restricted-purpose system turn ended in terminal failure');
+    }
+
     const compactPurpose = systemTurn.purpose === 'auto_compact_silent'
       || systemTurn.purpose === 'manual_compact_silent'
       || systemTurn.purpose === 'manual_compact_notice';
-    if (!compactPurpose) return;
-    const hadCompactBoundary = this.consumeCompactBoundary(scopeKey);
-    if (hadCompactBoundary && rowId !== null) {
-      markSessionCompacted(this.db, rowId);
-      this.recordAutoCompactSuccess(scopeKey);
+    if (compactPurpose) {
+      const hadCompactBoundary = this.consumeCompactBoundary(scopeKey);
+      if (hadCompactBoundary && rowId !== null) {
+        markSessionCompacted(this.db, rowId);
+        this.recordAutoCompactSuccess(scopeKey);
+      }
+      this.finishAutoCompact(scopeKey);
+      if (
+        systemTurn.purpose === 'auto_compact_silent'
+        || systemTurn.purpose === 'manual_compact_silent'
+      ) {
+        this.clearSilentCompact(scopeKey);
+      }
     }
-    this.finishAutoCompact(scopeKey);
-    if (
-      systemTurn.purpose === 'auto_compact_silent'
-      || systemTurn.purpose === 'manual_compact_silent'
-    ) {
-      this.clearSilentCompact(scopeKey);
-    }
+    // endTurn runs for EVERY purpose: the previous non-compact early return
+    // skipped it, leaving any asserted composing state to a watchdog.
     const routeQueue = scopeKey === GLOBAL_TOOL_SCOPE_KEY
       ? (systemTurn.routeChatJid
           ? this.getQueueForChat(systemTurn.routeChatJid)
@@ -7155,6 +7207,8 @@ export class AgentRuntime implements Runtime {
             ),
           },
           unownedProviderEventRejects: this.unownedProviderEventRejects,
+          suppressedSystemTurnEffectRejects: this.suppressedSystemTurnEffectRejects,
+          providerEventRejectReasons: Object.fromEntries(this.providerEventRejectReasonCounts),
           ...this.turnChronology.healthDetails(),
           providerExecution,
           turnFinalizationRetainedRetries: finalizationHealth.retainedRetries,
@@ -7215,6 +7269,8 @@ export class AgentRuntime implements Runtime {
           ),
         },
         unownedProviderEventRejects: this.unownedProviderEventRejects,
+        suppressedSystemTurnEffectRejects: this.suppressedSystemTurnEffectRejects,
+        providerEventRejectReasons: Object.fromEntries(this.providerEventRejectReasonCounts),
         ...this.turnChronology.healthDetails(),
         providerExecution,
         turnFinalizationRetainedRetries: finalizationHealth.retainedRetries,
@@ -9704,9 +9760,12 @@ export class AgentRuntime implements Runtime {
     }
     const noticeKey = [queue.targetChatJid, 'auth-required'].join(':');
     if (this.recentNoFallbackReauthNotices.has(noticeKey)) return;
+    queue.enqueueText('_The agent needs re-authentication before it can reply here. An operator has been notified._');
+    // Dedup is recorded only AFTER a successful enqueue: recording first meant a
+    // teardown-race throw suppressed both the notice and the alert for the full
+    // dedup window with no retry.
     this.recentNoFallbackReauthNotices.set(noticeKey, now);
     this.capDedupeMap(this.recentNoFallbackReauthNotices);
-    queue.enqueueText('_The agent needs re-authentication before it can reply here. An operator has been notified._');
     // Back the "operator has been notified" claim: no result-path alert fires on
     // the no-fallback auth-required teardown (fallback alerts fire only when a
     // fallback activates), so without this the notice claim would be unbacked.

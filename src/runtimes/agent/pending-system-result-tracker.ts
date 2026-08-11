@@ -341,7 +341,10 @@ export class PendingSystemResultTracker {
   ): void {
     if (queue.length === 0) {
       this.leases.delete(scopeKey);
-      this.counts.set(scopeKey, 0);
+      // Delete, don't zero: a permanent 0-count entry per retired scope grew
+      // `counts` unboundedly over process life, and the rejected-terminal path
+      // iterates every retained key. count() treats a missing key as 0.
+      this.counts.delete(scopeKey);
     } else {
       this.counts.set(scopeKey, queue.length);
     }
