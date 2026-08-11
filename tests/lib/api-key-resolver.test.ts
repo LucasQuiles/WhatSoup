@@ -5,14 +5,19 @@ vi.mock('../../src/lib/keyring.ts', () => ({
   lookupCredential: vi.fn(),
 }));
 
-// Mock the logger so the QR-104 observability warn can be asserted. Hoisted so
-// the vi.mock factory (which is hoisted above imports) can reference it.
-const { mockLog } = vi.hoisted(() => ({
-  mockLog: { warn: vi.fn(), info: vi.fn(), error: vi.fn(), debug: vi.fn() },
-}));
-vi.mock('../../src/logger.ts', () => ({
-  createChildLogger: () => mockLog,
-}));
+// Mock the logger so the QR-104 observability warn can be asserted.
+// The singleton pattern gives us a stable shared mock object so every
+// createChildLogger() call returns the same instance — assertion sites
+// can read call records back through the typed retrieval below.
+vi.mock('../../src/logger.ts', async () => {
+  const { singletonLoggerMock } = await import('../helpers/logger-mock.ts');
+  const logger = singletonLoggerMock();
+  return { createChildLogger: () => logger };
+});
+
+import { createChildLogger } from '../../src/logger.ts';
+import type { singletonLoggerMock } from '../helpers/logger-mock.ts';
+const mockLog = createChildLogger('api-key-resolver') as unknown as ReturnType<typeof singletonLoggerMock>;
 
 import { resolveApiKey } from '../../src/lib/api-key-resolver.ts';
 import { lookupCredential } from '../../src/lib/keyring.ts';
