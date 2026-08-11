@@ -28,34 +28,6 @@
     "keysMatched": 4
   },
   {
-    "file": "tests/runtimes/agent/session-budget.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/agent/session-checkpoints.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/agent/session-db.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/agent/session-error-durability.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/agent/session-residual-branches.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/agent/session-spawn-per-turn-handlers.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/agent/session-turn-error-branches.test.ts",
-    "keysMatched": 4
-  },
-  {
     "file": "tests/runtimes/agent/session.test.ts",
     "keysMatched": 4
   },
