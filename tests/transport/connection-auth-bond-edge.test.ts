@@ -57,7 +57,12 @@ vi.mock('@whiskeysockets/baileys', async () => {
 
 vi.mock('../../src/config.ts', () => ({ config: mockConfig }));
 
-vi.mock('../../src/logger.ts', () => ({ createChildLogger: () => logger }));
+vi.mock('../../src/logger.ts', async () => {
+  const { singletonLoggerMock } = await import('../helpers/logger-mock.ts');
+  const singleton = singletonLoggerMock();
+  Object.assign(logger, singleton);
+  return { createChildLogger: () => logger };
+});
 
 vi.mock('../../src/core/retry.ts', () => ({
   jitteredDelay: (baseMs: number, attempt: number, maxMs = 30_000) => {

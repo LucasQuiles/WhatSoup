@@ -27,15 +27,20 @@ vi.mock('../../../../src/config.ts', () => ({
   },
 }));
 
-vi.mock('../../../../src/logger.ts', () => ({
-  createChildLogger: () => mockReadinessLogger,
-  default: {
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  },
-}));
+vi.mock('../../../../src/logger.ts', async () => {
+  const { singletonLoggerMock } = await import('../../../helpers/logger-mock.ts');
+  const singleton = singletonLoggerMock();
+  Object.assign(mockReadinessLogger, singleton);
+  return {
+    createChildLogger: () => mockReadinessLogger,
+    default: {
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+      debug: vi.fn(),
+    },
+  };
+});
 
 import { Pinecone } from '@pinecone-database/pinecone';
 import * as configModule from '../../../../src/config.ts';
