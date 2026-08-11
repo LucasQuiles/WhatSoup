@@ -164,10 +164,6 @@
     "keysMatched": 4
   },
   {
-    "file": "tests/mcp/tools/heal.test.ts",
-    "keysMatched": 4
-  },
-  {
     "file": "tests/mcp/tools/knowledge.test.ts",
     "keysMatched": 4
   },
