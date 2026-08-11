@@ -462,7 +462,10 @@ describe('PendingSystemResultTracker', () => {
     expect(tracker.count('a')).toBe(0);
 
     expect(tracker.cancel(lease)).toBe(false);
-    expect(tracker.counts.get('a')).toBe(0);
+    // Retired scopes are DELETED, not zero-retained — a permanent 0-count entry
+    // per scope grew the map unboundedly; count() defaults a missing key to 0.
+    expect(tracker.counts.get('a')).toBeUndefined();
+    expect(tracker.count('a')).toBe(0);
     expect(tracker.count('a')).toBe(0);
   });
 
@@ -509,7 +512,9 @@ describe('PendingSystemResultTracker', () => {
     const consumed = tracker.consumeIfPending('a');
 
     expect(consumed).toBe(true);
-    expect(tracker.counts.get('a')).toBe(0);
+    // Deleted on retire (not zero-retained); count() defaults missing to 0.
+    expect(tracker.counts.get('a')).toBeUndefined();
+    expect(tracker.count('a')).toBe(0);
     expect(tracker.count('a')).toBe(0);
   });
 
@@ -666,5 +671,17 @@ describe('PendingSystemResultTracker', () => {
     tracker.consumeIfPending('chat-timeout-reject');
     await waiting;
     expect(released).toBe(true);
+  });
+});
+
+describe('retired-scope map hygiene (2026-08-11 review)', () => {
+  it('does not accumulate 0-count entries across many distinct retired scopes', () => {
+    const tracker = new PendingSystemResultTracker();
+    for (let i = 0; i < 50; i++) {
+      const scope = `chat-${i}`;
+      tracker.mark(scope);
+      expect(tracker.consumeIfPending(scope)).toBe(true);
+    }
+    expect(tracker.counts.size).toBe(0);
   });
 });

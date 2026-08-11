@@ -341,7 +341,15 @@ const recordTurnFailure = (errorClass: TurnCapabilityErrorClass): void => {
   turnCapabilityFailureRecorded = turnCapabilityFailureRecorded || isUserTurnResult;
 };
 
-if (event.text && !hasPendingPoll) {
+// A terminal provider failure can land while an AskUserQuestion poll is still
+// pending — the provider is dead, so the vote can never be served. Route it
+// through the failure ladder anyway: gating on the poll skipped classification,
+// the QR-211 notice, fallback arming, AND session shutdown, ending the turn in
+// unlogged permanent silence (the exact class the notice exists to kill).
+const terminalFailureDuringPoll = hasPendingPoll
+  && event.text !== null
+  && classifyProviderFailure(event.text) !== null;
+if (event.text && (!hasPendingPoll || terminalFailureDuringPoll)) {
   if (host.enqueueAutoSwitchNotice(queue, event.text, queue.targetChatJid, 'result')) return;
   if (responseRegistryDispatchEnabled() && dispatchProviderFailureResult(host, {
     queue,
@@ -885,6 +893,11 @@ queue.endTurn();
 // accumulate it while a fallback window is active.
 host.recordTurnCostUsd(event);
 const turnHadToolWork = host.singleTurnHadToolActivity;
+// Capture-and-clear, mirroring the per-chat path's turnHadToolActivity delete:
+// every branch below handles a TERMINAL result, and the early-return branches
+// (auto-switch, registry dispatch, policy-block, context-overflow) previously
+// leaked this turn's tool activity into the NEXT turn's empty-turn accounting.
+host.singleTurnHadToolActivity = false;
 host.clearToolNames(GLOBAL_TOOL_SCOPE_KEY);
 
 // System-turn results (auto-compact /compact, manual /compact) must not
@@ -963,7 +976,6 @@ if (event.text) {
       if (!activation) queue.enqueueText(host.usageLimitNotice());
       shutdownSessionQuietly(host.session);
     }
-    host.singleTurnHadToolActivity = false;
     return;
   }
   if (providerFailureKind === 'policy-block') {
@@ -1003,7 +1015,6 @@ if (event.text) {
       if (!activation) host.emitNoFallbackReauthNotice(queue);
       shutdownSessionQuietly(host.session);
     }
-    host.singleTurnHadToolActivity = false;
     return;
   }
   if (providerFailureKind === 'rate-limit' || providerFailureKind === 'server-error') {
@@ -1036,7 +1047,6 @@ if (event.text) {
       }
       shutdownSessionQuietly(host.session);
     }
-    host.singleTurnHadToolActivity = false;
     return;
   }
   if (providerFailureKind === 'model-unavailable') {
@@ -1061,7 +1071,6 @@ if (event.text) {
       if (!activation) enqueueNoFallbackTerminalNotice(queue, providerFailureKind);
       shutdownSessionQuietly(host.session);
     }
-    host.singleTurnHadToolActivity = false;
     return;
   }
   // Context overflow — session is unsalvageable, kill and let next message respawn
@@ -1085,7 +1094,6 @@ if (event.text) {
       'warning',
     );
     queue.enqueueText(providerTransientRetryNotice());
-    host.singleTurnHadToolActivity = false;
     return;
   }
   if (!wasSilentCompact) {
@@ -1105,7 +1113,6 @@ if (event.text) {
       // fallback activation. Mirror the sibling terminal branches on the single/
       // shared path — reset the tool-activity flag and return.
       if (host.maybeArmFallbackAfterUnknownTerminal(queue, host.session, turnHadToolWork, undefined, isUserTurnResult, event.text)) {
-        host.singleTurnHadToolActivity = false;
         return;
       }
       queue.enqueueText(providerUnknownTerminalNotice());
@@ -1124,7 +1131,6 @@ if (event.text) {
       // (turnHadVisibleOutput true), the entry delivered output and must not be
       // advanced past — so no wasUnclassifiedError override here.
       host.recordFallbackTurnOutcome(queue, host.turnHadVisibleOutput, turnHadToolWork, host.session);
-      host.singleTurnHadToolActivity = false;
       return;
     } else {
       queue.enqueueResultText(host.withHandoffPrefix(queue.targetChatJid, event.text));
@@ -1171,7 +1177,6 @@ if (!wasSilentCompact && !isSystemResult) {
     }
   }
 }
-host.singleTurnHadToolActivity = false;
 // If nothing visible was emitted this turn, send an explicit fallback —
 // unless we just armed the provider fallback (its activation notice has
 // already informed the user and the turn is being replayed on the backup).

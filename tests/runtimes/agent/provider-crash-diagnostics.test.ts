@@ -156,3 +156,16 @@ describe('provider crash diagnostics', () => {
     });
   });
 });
+
+describe('auth classification parity with failure-taxonomy (2026-08-11 review)', () => {
+  it('classifies structured 401 tokens the result-path matcher already knew', () => {
+    expect(classifyProviderCrash('API error {"type":"authentication_error","message":"x"}'))
+      .toBe('provider_auth_required');
+    expect(classifyProviderCrash('OpenAI error: invalid_api_key'))
+      .toBe('provider_auth_required');
+  });
+
+  it('keeps the crash-only unauthorized extra', () => {
+    expect(classifyProviderCrash('HTTP 401 Unauthorized')).toBe('provider_auth_required');
+  });
+});
