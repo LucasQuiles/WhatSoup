@@ -24,34 +24,6 @@
     "keysMatched": 5
   },
   {
-    "file": "tests/runtimes/agent/idle-session-eviction.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/agent/mcp-config-dual-write.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/agent/media-prep.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/agent/model-pin.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/agent/opencode-custom-endpoint-args.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/agent/operation-tracker.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/agent/outbound-queue-idempotency.test.ts",
-    "keysMatched": 4
-  },
-  {
     "file": "tests/runtimes/agent/outbound-queue-turn-evidence.test.ts",
     "keysMatched": 4
   },
