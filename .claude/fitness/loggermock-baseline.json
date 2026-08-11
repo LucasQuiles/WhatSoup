@@ -24,34 +24,6 @@
     "keysMatched": 5
   },
   {
-    "file": "tests/mcp/socket-server-log-redaction.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/mcp/tools/knowledge.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/mcp/tools/memory-write.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/memory/consolidation-cron.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/memory/consolidation-scheduler.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/memory/consolidation.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/agent/codex-turn-lifecycle.test.ts",
-    "keysMatched": 4
-  },
-  {
     "file": "tests/runtimes/agent/command-gate-contract.test.ts",
     "keysMatched": 4
   },

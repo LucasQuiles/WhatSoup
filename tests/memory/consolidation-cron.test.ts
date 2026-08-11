@@ -8,9 +8,14 @@ const mockCronLogger = vi.hoisted(() => ({
   debug: vi.fn(),
 }));
 
-vi.mock('../../src/logger.ts', () => ({
-  createChildLogger: () => mockCronLogger,
-}));
+vi.mock('../../src/logger.ts', async () => {
+  const { singletonLoggerMock } = await import('../helpers/logger-mock.ts');
+  const singleton = singletonLoggerMock();
+  Object.assign(mockCronLogger, singleton);
+  return {
+    createChildLogger: () => ({ ...singleton, child: vi.fn().mockReturnThis() }),
+  };
+});
 
 import { runConsolidation } from '../../src/memory/consolidation-cron.ts';
 

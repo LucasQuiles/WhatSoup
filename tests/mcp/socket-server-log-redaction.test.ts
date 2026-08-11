@@ -9,9 +9,14 @@ const mockLog = vi.hoisted(() => ({
   debug: vi.fn(),
 }));
 
-vi.mock('../../src/logger.ts', () => ({
-  createChildLogger: () => mockLog,
-}));
+vi.mock('../../src/logger.ts', async () => {
+  const { singletonLoggerMock } = await import('../helpers/logger-mock.ts');
+  const singleton = singletonLoggerMock();
+  Object.assign(mockLog, singleton);
+  return {
+    createChildLogger: () => ({ ...singleton, child: vi.fn().mockReturnThis() }),
+  };
+});
 
 import { WhatSoupSocketServer } from '../../src/mcp/socket-server.ts';
 import type { ToolRegistry } from '../../src/mcp/registry.ts';
