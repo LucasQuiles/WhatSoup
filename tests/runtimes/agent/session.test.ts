@@ -27,9 +27,12 @@ const { mockLogger } = vi.hoisted(() => ({
   mockLogger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }));
 
-vi.mock('../../../src/logger.ts', () => ({
-  createChildLogger: () => mockLogger,
-}));
+vi.mock('../../../src/logger.ts', async () => {
+  const { singletonLoggerMock } = await import('../../helpers/logger-mock.ts');
+  const singleton = singletonLoggerMock();
+  Object.assign(mockLogger, singleton);
+  return { createChildLogger: () => singleton };
+});
 
 vi.mock('node:os', () => ({
   homedir: vi.fn(() => '/mock/home'),

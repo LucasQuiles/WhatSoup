@@ -27,9 +27,12 @@ const mockContextLogger = vi.hoisted(() => ({
   debug: vi.fn(),
 }));
 
-vi.mock('../../../src/logger.ts', () => ({
-  createChildLogger: () => mockContextLogger,
-}));
+vi.mock('../../../src/logger.ts', async () => {
+  const { singletonLoggerMock } = await import('../../helpers/logger-mock.ts');
+  const singleton = singletonLoggerMock();
+  Object.assign(mockContextLogger, singleton);
+  return { createChildLogger: () => singleton };
+});
 
 import * as configModule from '../../../src/config.ts';
 

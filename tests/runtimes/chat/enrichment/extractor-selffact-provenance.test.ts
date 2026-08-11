@@ -19,9 +19,7 @@ import type { StoredMessage } from '../../../../src/core/messages.ts';
 vi.mock('../../../../src/config.ts', () => ({
   config: { models: { extraction: 'm', validation: 'm' }, enrichmentMinConfidence: 0.7 },
 }));
-vi.mock('../../../../src/logger.ts', () => ({
-  createChildLogger: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }),
-}));
+vi.mock('../../../../src/logger.ts', async () => (await import('../../../helpers/logger-mock.ts')).loggerMock());
 
 import { extractFacts } from '../../../../src/runtimes/chat/enrichment/extractor.ts';
 
