@@ -11,14 +11,10 @@ import {
   generateMcpConfigFile,
 } from '../../../../src/runtimes/agent/providers/mcp-bridge.ts';
 
-vi.mock('../../../../src/logger.ts', () => ({
-  createChildLogger: () => ({
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  }),
-}));
+vi.mock('../../../../src/logger.ts', async () => {
+  const { loggerMock } = await import('../../../helpers/logger-mock.ts');
+  return loggerMock();
+});
 
 vi.mock('node:os', () => ({
   homedir: vi.fn(() => '/tmp/whatsoup-test-home'),

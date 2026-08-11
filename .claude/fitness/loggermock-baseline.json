@@ -24,38 +24,6 @@
     "keysMatched": 5
   },
   {
-    "file": "tests/runtimes/agent/providers/api-mcp-bridge.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/agent/providers/conformance.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/agent/providers/http-provider-lifecycle-errors.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/agent/runtime-edge-coverage.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/agent/runtime-egress-wiring.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/agent/runtime-reset-teardown.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/agent/runtime-secondhalf-branches.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/agent/runtime-tool-registrations.test.ts",
-    "keysMatched": 5
-  },
-  {
     "file": "tests/runtimes/agent/runtime.test.ts",
     "keysMatched": 4
   },

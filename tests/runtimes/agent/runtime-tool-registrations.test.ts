@@ -10,7 +10,15 @@ const { createChildLogger } = vi.hoisted(() => ({
   })),
 }));
 
-vi.mock('../../../src/logger.ts', () => ({ createChildLogger }));
+vi.mock('../../../src/logger.ts', async () => {
+  const { singletonLoggerMock } = await import('../../helpers/logger-mock.ts');
+  const singleton = singletonLoggerMock();
+  // The hoisted literal's inferred type includes an (unasserted) trace member
+  // the shared singleton deliberately omits; spread preserves the singleton's
+  // spy identity for the asserted members.
+  createChildLogger.mockImplementation(() => ({ ...singleton, trace: vi.fn() }));
+  return { createChildLogger };
+});
 
 import { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
