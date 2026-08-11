@@ -40,20 +40,21 @@ vi.mock('../../src/config.ts', () => ({
 // actually holds. Every OTHER component (database.ts, chats-resolver.ts, ...)
 // keeps a fresh throwaway logger per call, same as before — otherwise their
 // unrelated warn/info calls (e.g. database.ts's WAL-journal-mode notice) would
-// pollute mockHealthLogger and make its call history meaningless.
-const mockHealthLogger = vi.hoisted(() => ({
+// pollute healthLogger and make its call history meaningless.
+const healthLogger = vi.hoisted(() => ({
   info: vi.fn(),
   warn: vi.fn(),
   error: vi.fn(),
   debug: vi.fn(),
 }));
 
-vi.mock('../../src/logger.ts', () => ({
-  createChildLogger: (component: string) =>
-    component === 'health'
-      ? mockHealthLogger
-      : { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
-}));
+vi.mock('../../src/logger.ts', async () => {
+  const { loggerMock } = await import('../helpers/logger-mock.ts');
+  return {
+    createChildLogger: (component: string) =>
+      component === 'health' ? healthLogger : loggerMock().createChildLogger(),
+  };
+});
 
 // The control_peer wiring tests drive heal.ts's emitHealReport directly; mock
 // the alert sink so no real BOT ERRORS outbox event is written from a test.
@@ -5859,11 +5860,11 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
   // This describe follows the enclosing block's convention: beforeEach only
   // creates `db`; each test builds its own server explicitly.
   describe('#1753 rem-1: event-loop-lag self-probe', () => {
-    // This describe's own beforeEach (line ~3674) doesn't clear mockHealthLogger —
+    // This describe's own beforeEach (line ~3674) doesn't clear healthLogger —
     // it wasn't tracked before #1753. Clear it locally so each test here only
     // sees warn calls from its OWN request, not ones left over from a sibling.
     beforeEach(() => {
-      mockHealthLogger.warn.mockClear();
+      healthLogger.warn.mockClear();
     });
 
     function fakeLoopLagSampler(snapshot: {
@@ -5928,7 +5929,7 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
       ({ server, port } = await buildTestServer(deps));
 
       await healthReq(port);
-      expect(mockHealthLogger.warn).toHaveBeenCalledWith(
+      expect(healthLogger.warn).toHaveBeenCalledWith(
         expect.objectContaining({ p95LagMs: 500, sampleCount: 20, thresholdMs: 250 }),
         'event loop starvation detected during health check',
       );
@@ -5954,11 +5955,11 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
       expect(first.status).toBe('degraded');
       expect(suppressed.status).toBe('degraded');
       expect(suppressed.event_loop.discontinuity_count).toBe(2);
-      expect(mockHealthLogger.warn).toHaveBeenCalledTimes(1);
+      expect(healthLogger.warn).toHaveBeenCalledTimes(1);
 
       nowMs += 1;
       await healthReq(port);
-      expect(mockHealthLogger.warn).toHaveBeenCalledTimes(2);
+      expect(healthLogger.warn).toHaveBeenCalledTimes(2);
     });
 
     it('warns immediately when starvation re-enters inside the repeat interval', async () => {
@@ -5988,7 +5989,7 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
       nowMs += 1;
       await healthReq(port);
 
-      expect(mockHealthLogger.warn).toHaveBeenCalledTimes(2);
+      expect(healthLogger.warn).toHaveBeenCalledTimes(2);
     });
 
     it('does not log a starvation warning when the sampler is not starved', async () => {
@@ -6002,7 +6003,7 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
       ({ server, port } = await buildTestServer(deps));
 
       await healthReq(port);
-      expect(mockHealthLogger.warn).not.toHaveBeenCalledWith(
+      expect(healthLogger.warn).not.toHaveBeenCalledWith(
         expect.anything(),
         'event loop starvation detected during health check',
       );
