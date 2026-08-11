@@ -36,10 +36,6 @@
     "keysMatched": 6
   },
   {
-    "file": "tests/core/media-download-fs-errors.test.ts",
-    "keysMatched": 4
-  },
-  {
     "file": "tests/core/media-download.test.ts",
     "keysMatched": 4
   },
