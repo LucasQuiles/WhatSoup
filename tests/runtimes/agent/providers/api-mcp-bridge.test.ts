@@ -7,14 +7,10 @@ import { OpenAIApiProvider } from '../../../../src/runtimes/agent/providers/open
 import { AnthropicApiProvider } from '../../../../src/runtimes/agent/providers/anthropic-api.ts';
 import { createProviderMcpBridge } from '../../../../src/runtimes/agent/providers/mcp-bridge.ts';
 
-vi.mock('../../../../src/logger.ts', () => ({
-  createChildLogger: () => ({
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  }),
-}));
+vi.mock('../../../../src/logger.ts', async () => {
+  const { loggerMock } = await import('../../../helpers/logger-mock.ts');
+  return loggerMock();
+});
 
 function makeSseResponse(events: Array<Record<string, unknown> | string>): Response {
   const body = events
