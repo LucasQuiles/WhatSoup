@@ -23,16 +23,18 @@ import type { Runtime } from '../../src/runtimes/types.ts';
 
 // Shared logger fns so tests can assert on the module-level ingest logger
 // (createChildLogger is called once at ingest.ts import time).
-const logFns = vi.hoisted(() => ({
-  info: vi.fn(),
-  warn: vi.fn(),
-  error: vi.fn(),
-  debug: vi.fn(),
-}));
+vi.mock('../../src/logger.ts', async () => {
+  const { singletonLoggerMock } = await import('../helpers/logger-mock.ts');
+  const logger = singletonLoggerMock();
+  return { createChildLogger: () => logger };
+});
 
-vi.mock('../../src/logger.ts', () => ({
-  createChildLogger: () => logFns,
-}));
+import { createChildLogger } from '../../src/logger.ts';
+import type { singletonLoggerMock } from '../helpers/logger-mock.ts';
+// Runtime object IS the singleton from the vi.mock factory above; retype the
+// LogFn-declared surface to the helper's Mock-typed shape so call-record
+// assertions typecheck without weakening anything.
+const logFns = createChildLogger('ingest') as unknown as ReturnType<typeof singletonLoggerMock>;
 
 vi.mock('../../src/core/command-router.ts', () => ({
   isAdminMessage: vi.fn().mockReturnValue(false),
