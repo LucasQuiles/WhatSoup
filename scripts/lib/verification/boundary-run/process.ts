@@ -158,6 +158,7 @@ function processGroupAlive(pid: number): boolean {
     const pgidOut = execFileSync('ps', ['-p', String(pid), '-o', 'pgid='], {
       encoding: 'utf8',
       env: cleanGitEnv(),
+      timeout: 30_000,
     }).toString().trim();
     // ps output: one header line + one data line. Take the last line.
     const lines = pgidOut.split('\n');
@@ -171,6 +172,7 @@ function processGroupAlive(pid: number): boolean {
     execFileSync('ps', ['-p', String(pgid), '-o', 'pid='], {
       encoding: 'utf8',
       env: cleanGitEnv(),
+      timeout: 30_000,
     });
     return true;
   } catch {

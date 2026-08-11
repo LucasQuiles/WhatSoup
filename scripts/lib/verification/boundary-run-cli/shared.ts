@@ -87,6 +87,7 @@ export function gitText(cwd: string, args: readonly string[]): string {
     cwd,
     encoding: 'utf8',
     env: cleanGitEnv(),
+    timeout: 30_000,
     stdio: ['ignore', 'pipe', 'pipe'],
   }).trim();
 }
@@ -124,6 +125,7 @@ export function discoverEntryTestRoster(
       encoding: 'utf8',
       env: reconstructedChildEnvironment(cwd),
       maxBuffer: 64 * 1024 * 1024,
+      timeout: 30_000,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     const parsed = JSON.parse(stdout) as unknown;

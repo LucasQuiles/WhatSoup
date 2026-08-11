@@ -126,6 +126,7 @@ function resolveBase(
         cwd: repoRoot,
         encoding: 'utf8',
         env: cleanGitEnv(),
+        timeout: 30_000,
         stdio: ['ignore', 'pipe', 'pipe'],
       });
       const oid = out.trim();
@@ -150,6 +151,7 @@ function resolveCommit(revision: string, repoRoot: string): string | null {
       cwd: repoRoot,
       encoding: 'utf8',
       env: cleanGitEnv(),
+      timeout: 30_000,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     const oid = out.trim();
@@ -181,6 +183,7 @@ function baseRelationError(baseOid: string, candidateOid: string, repoRoot: stri
     execFileSync('git', ['merge-base', '--is-ancestor', baseOid, candidateOid], {
       cwd: repoRoot,
       env: cleanGitEnv(),
+      timeout: 30_000,
       stdio: ['ignore', 'ignore', 'pipe'],
     });
     return null;
