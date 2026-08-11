@@ -18,9 +18,12 @@ vi.mock('../../../../src/config.ts', () => ({
   },
 }));
 
-vi.mock('../../../../src/logger.ts', () => ({
-  createChildLogger: () => mockUpserterLogger,
-}));
+vi.mock('../../../../src/logger.ts', async () => {
+  const { singletonLoggerMock } = await import('../../../helpers/logger-mock.ts');
+  const singleton = singletonLoggerMock();
+  Object.assign(mockUpserterLogger, singleton);
+  return { createChildLogger: () => singleton };
+});
 
 import { upsertFacts } from '../../../../src/runtimes/chat/enrichment/upserter.ts';
 import type { ValidatedFact } from '../../../../src/runtimes/chat/enrichment/validator.ts';

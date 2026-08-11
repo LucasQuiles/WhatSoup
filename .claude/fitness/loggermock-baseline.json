@@ -28,38 +28,6 @@
     "keysMatched": 4
   },
   {
-    "file": "tests/runtimes/chat/enrichment/extractor.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/chat/enrichment/poller-strict-integration.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/chat/enrichment/poller.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/chat/enrichment/upserter.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/chat/enrichment/validator.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/chat/health-snapshot.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/chat/media/links-extraction.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/chat/media/links.test.ts",
-    "keysMatched": 4
-  },
-  {
     "file": "tests/runtimes/chat/media/processor.test.ts",
     "keysMatched": 4
   },
