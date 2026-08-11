@@ -39,9 +39,14 @@ vi.mock('../../../../src/config.ts', () => ({
   },
 }));
 
-vi.mock('../../../../src/logger.ts', () => ({
-  createChildLogger: () => mocks.logger,
-}));
+vi.mock('../../../../src/logger.ts', async () => {
+  const { singletonLoggerMock } = await import('../../../helpers/logger-mock.ts');
+  const singleton = singletonLoggerMock();
+  Object.assign(mocks.logger, singleton);
+  return {
+    createChildLogger: () => mocks.logger,
+  };
+});
 
 vi.mock('../../../../src/lib/emit-alert.ts', () => ({
   clearAlertSourceChecked: mocks.clearAlert,
