@@ -389,6 +389,7 @@ export function gitBytes(
   args: readonly string[],
   code: ExactGitInputErrorCode,
   maxBuffer: number,
+  timeout?: number,
 ): Buffer {
   assertNoLegacyGrafts(cwd);
   try {
@@ -396,7 +397,7 @@ export function gitBytes(
       cwd,
       env: gitEnvironment(),
       maxBuffer,
-      timeout: GIT_TIMEOUT_MS,
+      timeout: timeout ?? GIT_TIMEOUT_MS,
       killSignal: "SIGKILL",
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -419,6 +420,7 @@ export function exactInputGitBytes(
   budgetCode: ExactGitInputErrorCode,
   maxBuffer: number,
   timeoutCode: ExactGitInputErrorCode = "ci.input.git-execution-timeout",
+  timeout?: number,
 ): Buffer {
   assertNoLegacyGrafts(cwd);
   try {
@@ -426,7 +428,7 @@ export function exactInputGitBytes(
       cwd,
       env: gitEnvironment(),
       maxBuffer,
-      timeout: GIT_TIMEOUT_MS,
+      timeout: timeout ?? GIT_TIMEOUT_MS,
       killSignal: "SIGKILL",
       stdio: ["ignore", "pipe", "pipe"],
     });

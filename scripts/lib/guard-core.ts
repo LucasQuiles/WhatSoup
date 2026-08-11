@@ -30,7 +30,7 @@ export function normalizeRepoPath(filePath: string): string {
   return filePath.split(path.sep).join('/').replace(/^\.\//, '');
 }
 
-export function git(args: string[], cwd: string): string {
+export function git(args: string[], cwd: string, timeout?: number): string {
   // 64 MiB: a large sync-merge's staged diff overflows the 1 MiB execFileSync
   // default and fails the guard with ENOBUFS instead of a real verdict.
   return execFileSync('git', args, {
@@ -38,6 +38,7 @@ export function git(args: string[], cwd: string): string {
     encoding: 'utf8',
     env: cleanGitEnv(),
     maxBuffer: 64 * 1024 * 1024,
+    timeout: timeout ?? 30_000,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 }
