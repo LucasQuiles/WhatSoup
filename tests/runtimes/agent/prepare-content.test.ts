@@ -15,14 +15,10 @@ const { mockUpdateMediaPath, mockDownloadMedia, mockWriteTempFile, mockTranscrib
   mockExtractDocumentText: vi.fn(),
 }));
 
-vi.mock('../../../src/logger.ts', () => ({
-  createChildLogger: () => ({
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  }),
-}));
+vi.mock('../../../src/logger.ts', async () => {
+  const { loggerMock } = await import('../../helpers/logger-mock.ts');
+  return loggerMock();
+});
 
 // Mock Baileys — downloadMediaMessage is imported dynamically inside the download fn
 vi.mock('@whiskeysockets/baileys', async () => {

@@ -24,38 +24,6 @@
     "keysMatched": 5
   },
   {
-    "file": "tests/runtimes/agent/outbound-queue-turn-evidence.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/agent/outbound-queue.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/agent/per-chat-actor-binding.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/agent/prepare-content.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/agent/progress-coalescing.bench.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/agent/progress-placeholder-rate-floor.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/agent/provider-execution-gate.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/agent/providers/api-error-ladder.test.ts",
-    "keysMatched": 4
-  },
-  {
     "file": "tests/runtimes/agent/providers/api-mcp-bridge.test.ts",
     "keysMatched": 4
   },
