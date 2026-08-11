@@ -7,9 +7,14 @@ const mockConsolidationLogger = vi.hoisted(() => ({
   debug: vi.fn(),
 }));
 
-vi.mock('../../src/logger.ts', () => ({
-  createChildLogger: () => mockConsolidationLogger,
-}));
+vi.mock('../../src/logger.ts', async () => {
+  const { singletonLoggerMock } = await import('../helpers/logger-mock.ts');
+  const singleton = singletonLoggerMock();
+  Object.assign(mockConsolidationLogger, singleton);
+  return {
+    createChildLogger: () => ({ ...singleton, child: vi.fn().mockReturnThis() }),
+  };
+});
 
 import { clusterMemories, consolidateCluster } from '../../src/memory/consolidation.ts';
 import type { MemoryCluster } from '../../src/memory/types.ts';

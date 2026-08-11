@@ -11,9 +11,14 @@ const mockMemoryWriteLogger = vi.hoisted(() => ({
   debug: vi.fn(),
 }));
 
-vi.mock('../../../src/logger.ts', () => ({
-  createChildLogger: () => mockMemoryWriteLogger,
-}));
+vi.mock('../../../src/logger.ts', async () => {
+  const { singletonLoggerMock } = await import('../../helpers/logger-mock.ts');
+  const singleton = singletonLoggerMock();
+  Object.assign(mockMemoryWriteLogger, singleton);
+  return {
+    createChildLogger: () => ({ ...singleton, child: vi.fn().mockReturnThis() }),
+  };
+});
 
 import { registerMemoryWriteTools, type MemoryWriter } from '../../../src/mcp/tools/memory-write.ts';
 import type { ToolDeclaration, SessionContext } from '../../../src/mcp/types.ts';
