@@ -48,7 +48,14 @@ const { mockSocketServerInstance, MockWhatSoupSocketServer } = vi.hoisted(() => 
 });
 
 vi.mock('../../../src/config.ts', () => ({ config: mockConfig }));
-vi.mock('../../../src/logger.ts', () => ({ createChildLogger: () => mockRuntimeLogger }));
+vi.mock('../../../src/logger.ts', async () => {
+  const { singletonLoggerMock } = await import('../../helpers/logger-mock.ts');
+  const singleton = singletonLoggerMock();
+  Object.assign(mockRuntimeLogger, singleton);
+  return {
+    createChildLogger: () => ({ ...singleton, child: vi.fn().mockReturnThis() }),
+  };
+});
 vi.mock('../../../src/core/messages.ts', () => ({
   getRecentMessages: vi.fn(() => []),
   getMessagesSince: vi.fn(() => []),
