@@ -2,9 +2,7 @@ import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { handleGetFleetMetrics, type FleetMetricsDeps } from '../../src/fleet/routes/fleet-metrics.ts';
 import { mockReq, mockRes } from '../helpers/http-mocks.ts';
 
-vi.mock('../../src/logger.ts', () => ({
-  createChildLogger: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }),
-}));
+vi.mock('../../src/logger.ts', async () => (await import('../helpers/logger-mock.ts')).loggerMock());
 
 describe('handleGetFleetMetrics — extended', () => {
   it('aggregates all 9 metrics across instances with meta flags', () => {

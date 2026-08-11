@@ -1,34 +1,6 @@
 [
   {
-    "file": "tests/core/scheduler-recurrence.test.ts",
-    "keysMatched": 4
-  },
-  {
     "file": "tests/core/scheduler.test.ts",
-    "keysMatched": 5
-  },
-  {
-    "file": "tests/core/sms-access-identity.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/core/substrate/vault-fs-errors.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/fleet/db-reader-metrics.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/fleet/fleet-metrics-extended.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/fleet/health-classifier-fuzz.test.ts",
-    "keysMatched": 5
-  },
-  {
-    "file": "tests/fleet/health-poller-auth-loss-signal.test.ts",
     "keysMatched": 5
   },
   {
