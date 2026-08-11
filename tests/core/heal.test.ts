@@ -31,20 +31,21 @@ vi.mock('../../src/config.ts', () => ({
 // heal.ts's own logger ('heal') is a stable shared instance so the latch tests
 // can assert the per-report warn keeps firing while the alert is suppressed.
 // Every other component keeps a fresh throwaway logger per call — otherwise
-// unrelated warn/info calls (e.g. database.ts) would pollute mockHealLogger.
-const mockHealLogger = vi.hoisted(() => ({
+// unrelated warn/info calls (e.g. database.ts) would pollute healLogger.
+const healLogger = vi.hoisted(() => ({
   info: vi.fn(),
   warn: vi.fn(),
   error: vi.fn(),
   debug: vi.fn(),
 }));
 
-vi.mock('../../src/logger.ts', () => ({
-  createChildLogger: (component: string) =>
-    component === 'heal'
-      ? mockHealLogger
-      : { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
-}));
+vi.mock('../../src/logger.ts', async () => {
+  const { loggerMock } = await import('../helpers/logger-mock.ts');
+  return {
+    createChildLogger: (component: string) =>
+      component === 'heal' ? healLogger : loggerMock().createChildLogger(),
+  };
+});
 
 vi.mock('../../src/lib/emit-alert.ts', () => {
   const emitAlert = vi.fn(() => true);
@@ -228,7 +229,7 @@ describe('emitHealReport', () => {
     expect(reportId).toBeNull();
     const row = db.raw.prepare('SELECT attempt_count FROM heal_reports WHERE report_id = ?').get('legacy-active') as { attempt_count: number };
     expect(row.attempt_count).toBe(2);
-    expect(JSON.stringify(mockHealLogger.debug.mock.calls)).not.toContain(canary);
+    expect(JSON.stringify(healLogger.debug.mock.calls)).not.toContain(canary);
   });
 
   // 3. emitHealReport queues when activeControlReportId is set
@@ -314,7 +315,7 @@ describe('emitHealReport', () => {
     });
     expect(message).toContain('Cause: provider_auth_required');
     expect(message).not.toContain(canary);
-    expect(JSON.stringify(mockHealLogger.info.mock.calls)).not.toContain(canary);
+    expect(JSON.stringify(healLogger.info.mock.calls)).not.toContain(canary);
   });
 });
 
@@ -598,7 +599,7 @@ describe('dequeueNextReport', () => {
     const dequeued = dequeueNextReport(db);
 
     expect(dequeued?.error_class).toBe('service_crash__legacy_unclassified');
-    expect(JSON.stringify(mockHealLogger.info.mock.calls)).not.toContain(canary);
+    expect(JSON.stringify(healLogger.info.mock.calls)).not.toContain(canary);
   });
 
   it('returns null when nothing is queued', () => {
@@ -976,7 +977,7 @@ describe('heal_delivery_unavailable latch', () => {
     emitHealReport(db, messenger, null, distinctCrash(0));
     emitHealReport(db, messenger, null, distinctCrash(1));
 
-    const warns = mockHealLogger.warn.mock.calls.filter(
+    const warns = healLogger.warn.mock.calls.filter(
       (call) => String(call[1]).includes('no Q control peer configured'),
     );
     expect(warns).toHaveLength(2);
