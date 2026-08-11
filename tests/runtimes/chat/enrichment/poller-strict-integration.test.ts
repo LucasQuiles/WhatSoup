@@ -22,9 +22,12 @@ vi.mock('../../../../src/config.ts', () => ({
   },
 }));
 
-vi.mock('../../../../src/logger.ts', () => ({
-  createChildLogger: () => mockLogger,
-}));
+vi.mock('../../../../src/logger.ts', async () => {
+  const { singletonLoggerMock } = await import('../../../helpers/logger-mock.ts');
+  const singleton = singletonLoggerMock();
+  Object.assign(mockLogger, singleton);
+  return { createChildLogger: () => singleton };
+});
 
 import { Database } from '../../../../src/core/database.ts';
 import { getUnprocessedMessages, storeMessageIfNew } from '../../../../src/core/messages.ts';

@@ -28,9 +28,12 @@ vi.mock('../../../../src/config.ts', () => ({
   },
 }));
 
-vi.mock('../../../../src/logger.ts', () => ({
-  createChildLogger: () => mockLogger,
-}));
+vi.mock('../../../../src/logger.ts', async () => {
+  const { singletonLoggerMock } = await import('../../../helpers/logger-mock.ts');
+  const singleton = singletonLoggerMock();
+  Object.assign(mockLogger, singleton);
+  return { createChildLogger: () => singleton };
+});
 
 // Mock the database message functions
 vi.mock('../../../../src/core/messages.ts', () => ({

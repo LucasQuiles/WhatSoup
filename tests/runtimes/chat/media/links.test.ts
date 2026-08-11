@@ -1,14 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import * as nodeDns from 'node:dns';
 
-vi.mock('../../../../src/logger.ts', () => ({
-  createChildLogger: () => ({
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  }),
-}));
+vi.mock('../../../../src/logger.ts', async () => (await import('../../../helpers/logger-mock.ts')).loggerMock());
 
 import { extractUrls, extractLinkContent, isPrivateHost, isPrivateIP, ssrfSafeLookup, readBodyCapped } from '../../../../src/runtimes/chat/media/links.ts';
 
