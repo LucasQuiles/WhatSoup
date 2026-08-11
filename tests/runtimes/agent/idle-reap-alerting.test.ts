@@ -39,9 +39,10 @@ const { mockQueue } = vi.hoisted(() => ({
   },
 }));
 
-vi.mock('../../../src/logger.ts', () => ({
-  createChildLogger: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }),
-}));
+vi.mock('../../../src/logger.ts', async () => {
+  const { loggerMock } = await import('../../helpers/logger-mock.ts');
+  return loggerMock();
+});
 
 vi.mock('../../../src/core/messages.ts', () => ({ getRecentMessages: vi.fn(() => []) }));
 

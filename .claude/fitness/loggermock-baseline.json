@@ -24,34 +24,6 @@
     "keysMatched": 5
   },
   {
-    "file": "tests/runtimes/agent/command-gate-contract.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/agent/control-timeout.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/agent/crash-count-tracking.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/agent/handoff-distill-coordinator.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/agent/handoff-notice-prefix.test.ts",
-    "keysMatched": 5
-  },
-  {
-    "file": "tests/runtimes/agent/health-snapshot.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/agent/idle-reap-alerting.test.ts",
-    "keysMatched": 4
-  },
-  {
     "file": "tests/runtimes/agent/idle-session-eviction.test.ts",
     "keysMatched": 4
   },
