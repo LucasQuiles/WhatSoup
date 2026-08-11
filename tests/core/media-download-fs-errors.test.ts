@@ -18,14 +18,18 @@ vi.mock('node:fs', async (importOriginal) => {
   return { ...actual, mkdirSync: fsMock.mkdirSync, writeFileSync: fsMock.writeFileSync };
 });
 
-const logMock = vi.hoisted(() => ({
-  info: vi.fn(),
-  warn: vi.fn(),
-  error: vi.fn(),
-  debug: vi.fn(),
-}));
+vi.mock('../../src/logger.ts', async () => {
+  const { singletonLoggerMock } = await import('../helpers/logger-mock.ts');
+  const logger = singletonLoggerMock();
+  return { createChildLogger: () => logger };
+});
 
-vi.mock('../../src/logger.ts', () => ({ createChildLogger: () => logMock }));
+import { createChildLogger } from '../../src/logger.ts';
+import type { singletonLoggerMock } from '../helpers/logger-mock.ts';
+// Runtime object IS the singleton from the vi.mock factory above; retype the
+// LogFn-declared surface to the helper's Mock-typed shape so call-record
+// assertions (.mock.calls, .mockReset) typecheck without weakening anything.
+const logMock = createChildLogger('media-download') as unknown as ReturnType<typeof singletonLoggerMock>;
 
 import { writeTempFile } from '../../src/core/media-download.ts';
 
