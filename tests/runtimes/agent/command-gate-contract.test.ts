@@ -111,9 +111,14 @@ const { mockRuntimeLogger, mockReaddirSync } = vi.hoisted(() => ({
   mockReaddirSync: vi.fn(() => ['0', '1', '2']),
 }));
 
-vi.mock('../../../src/logger.ts', () => ({
-  createChildLogger: () => mockRuntimeLogger,
-}));
+vi.mock('../../../src/logger.ts', async () => {
+  const { singletonLoggerMock } = await import('../../helpers/logger-mock.ts');
+  const singleton = singletonLoggerMock();
+  Object.assign(mockRuntimeLogger, singleton);
+  return {
+    createChildLogger: () => ({ ...singleton, child: vi.fn().mockReturnThis() }),
+  };
+});
 
 vi.mock('../../../src/runtimes/agent/process-tree.ts', () => ({
   killSessionTree: vi.fn(async () => {}),
