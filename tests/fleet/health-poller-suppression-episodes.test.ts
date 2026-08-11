@@ -67,9 +67,14 @@ vi.mock('../../src/fleet/alert-throttle-store.ts', () => ({
 
 vi.mock('../../src/fleet/silence-manager.ts', () => silenceManager);
 
-vi.mock('../../src/logger.ts', () => ({
-  createChildLogger: () => ({ ...logger, child: vi.fn().mockReturnThis() }),
-}));
+vi.mock('../../src/logger.ts', async () => {
+  const { singletonLoggerMock } = await import('../helpers/logger-mock.ts');
+  const singleton = singletonLoggerMock();
+  Object.assign(logger, singleton);
+  return {
+    createChildLogger: () => ({ ...singleton, child: vi.fn().mockReturnThis() }),
+  };
+});
 
 const RATE_LIMIT_MSG = 'alert suppressed — rate limit (15min)';
 const SILENCED_MSG = 'alert suppressed — instance is silenced';

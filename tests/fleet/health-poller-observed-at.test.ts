@@ -15,15 +15,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { HealthPoller } from '../../src/fleet/health-poller.ts';
 import type { InstanceHealth } from '../../src/fleet/health-poller.ts';
 
-vi.mock('../../src/logger.ts', () => ({
-  createChildLogger: () => ({
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-    child: vi.fn().mockReturnThis(),
-  }),
-}));
+vi.mock('../../src/logger.ts', async () => (await import('../helpers/logger-mock.ts')).loggerMock());
 vi.mock('../../src/lib/emit-alert.ts', () => ({
   emitAlertChecked: vi.fn(() => ({ ok: true, channel: 'outbox', status: 'durably_queued' })),
   clearAlertSourceChecked: vi.fn(() => true),
