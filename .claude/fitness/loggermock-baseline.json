@@ -28,36 +28,8 @@
     "keysMatched": 4
   },
   {
-    "file": "tests/runtimes/chat/media/processor.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/chat/media/video.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/chat/memory/memory-provider-telemetry-confidentiality.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/chat/memory/memory-tool-telemetry-confidentiality.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/chat/providers/anthropic.test.ts",
-    "keysMatched": 4
-  },
-  {
     "file": "tests/runtimes/chat/providers/api-error-classifier.test.ts",
     "keysMatched": 6
-  },
-  {
-    "file": "tests/runtimes/chat/providers/openai-env-baseurl.test.ts",
-    "keysMatched": 4
-  },
-  {
-    "file": "tests/runtimes/chat/providers/openai.test.ts",
-    "keysMatched": 4
   },
   {
     "file": "tests/runtimes/chat/providers/pinecone-readiness.test.ts",
