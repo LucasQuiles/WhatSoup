@@ -95,6 +95,7 @@ function readEslintJson(opts) {
       cwd,
       encoding: 'utf8',
       maxBuffer: 64 * 1024 * 1024,
+      timeout: 30_000,
     });
   } catch (err) {
     // ESLint exits non-zero when default-config errors exist; stdout still carries JSON.
