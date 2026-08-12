@@ -132,6 +132,11 @@ function writeWorkspaceMcpConfig(
  * @param pollLintHookPath Absolute path to poll-interaction-lint.mjs wired as an optional PostToolUse hook.
  * @param postToolUseLogHookPath Absolute path to post-tool-use-log.sh wired as an optional tool failure hook.
  */
+// POSIX single-quote a path so it survives as one argument when the hook command
+// is executed by the agent runtime. Workspace paths are instance-controlled, but
+// quoting keeps a path containing spaces from splitting into multiple arguments.
+const shellSingleQuote = (s: string): string => `'${s.replace(/'/g, "'\\''")}'`;
+
 export function writeSandboxArtifacts(
   claudeDir: string,
   policy: Record<string, unknown>,
@@ -140,10 +145,17 @@ export function writeSandboxArtifacts(
   postToolUseLogHookPath?: string,
 ): void {
   try {
-    writePrivateFileSync(join(claudeDir, 'sandbox-policy.json'), JSON.stringify(policy, null, 2));
+    const policyPath = join(claudeDir, 'sandbox-policy.json');
+    writePrivateFileSync(policyPath, JSON.stringify(policy, null, 2));
 
     const hooks: Record<string, unknown> = {
-      PreToolUse: [{ matcher: '', hooks: [{ type: 'command', command: hookPath }] }],
+      // Pass the ABSOLUTE policy path to the hook as an argument. The hook then
+      // enforces exactly the policy WhatSoup writes here, independent of the
+      // agent's cwd — a mid-turn `cd` into a subdirectory can neither miss the
+      // root policy (which previously tripped the fail-closed path) nor pick up a
+      // policy the agent plants in a writable subdir (which filesystem discovery
+      // would let shadow the root policy).
+      PreToolUse: [{ matcher: '', hooks: [{ type: 'command', command: `${shellSingleQuote(hookPath)} ${shellSingleQuote(policyPath)}` }] }],
     };
     const postToolUseHooks: Array<{ type: 'command'; command: string }> = [];
     if (pollLintHookPath) {
