@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { createChildLogger } from '../logger.ts';
+import { allFromStatement } from '../lib/db-query.ts';
 import { emitAlertChecked, clearAlertSourceChecked } from '../lib/emit-alert.ts';
 import { gateQuarantineClear } from '../lib/fleet-health-gate.ts';
 import { MS_PER_HOUR, MS_PER_MINUTE } from '../lib/time-units.ts';
@@ -2159,12 +2160,12 @@ export class DurabilityEngine {
   }
 
   getAllActiveCheckpoints(): ActiveSessionCheckpointRow[] {
-    return this.statements.getAllActiveCheckpoints.all() as unknown as ActiveSessionCheckpointRow[];
+    return allFromStatement<ActiveSessionCheckpointRow>(this.statements.getAllActiveCheckpoints);
   }
 
   /** Return checkpoints that are active or suspended — candidates for proactive resume on startup. */
   getResumableCheckpoints(): ActiveSessionCheckpointRow[] {
-    return this.statements.getResumableCheckpoints.all() as unknown as ActiveSessionCheckpointRow[];
+    return allFromStatement<ActiveSessionCheckpointRow>(this.statements.getResumableCheckpoints);
   }
 
   markSessionOrphaned(conversationKey: string): void {
@@ -2173,14 +2174,12 @@ export class DurabilityEngine {
 
   // ── Getters for recovery ──
   getPendingInbound(): InboundEventRow[] {
-    return this.statements.getPendingInbound.all() as unknown as InboundEventRow[];
+    return allFromStatement<InboundEventRow>(this.statements.getPendingInbound);
   }
 
   getOutboundByStatus(status: string): OutboundOpRow[] {
     return this.decodeOutboundRows(
-      this.statements.getOutboundByStatus.all(status) as unknown as Array<
-        Omit<OutboundOpRow, 'failure_evidence'>
-      >,
+      allFromStatement<Omit<OutboundOpRow, 'failure_evidence'>>(this.statements.getOutboundByStatus, status),
     );
   }
 
@@ -2427,9 +2426,7 @@ export class DurabilityEngine {
     // Promote only pre-startup submitted ops, then reconcile them in this pass.
     try {
       const staleSubmitted = this.decodeOutboundRows(
-        this.statements.getStaleSubmitted.all() as unknown as Array<
-          Omit<OutboundOpRow, 'failure_evidence'>
-        >,
+        allFromStatement<Omit<OutboundOpRow, 'failure_evidence'>>(this.statements.getStaleSubmitted),
       );
       for (const op of staleSubmitted) {
         const changed = this.markMaybeSent(op.id, createInternalOutboundFailureEvidence({
@@ -2573,9 +2570,7 @@ export class DurabilityEngine {
   /** Reconcile delivery debt created after the one-time post-connect pass. */
   reconcileLiveMaybeSent(): RecoveryStats {
     const maybeSent = this.decodeOutboundRows(
-      this.statements.getLiveReconcileMaybeSent.all() as unknown as Array<
-        Omit<OutboundOpRow, 'failure_evidence'>
-      >,
+      allFromStatement<Omit<OutboundOpRow, 'failure_evidence'>>(this.statements.getLiveReconcileMaybeSent),
     );
     if (maybeSent.length === 0) return createRecoveryStats();
 
@@ -2704,9 +2699,7 @@ export class DurabilityEngine {
   /** Promote live outbound ops whose echo window expired. */
   sweepStaleSubmitted(): number {
     const stale = this.decodeOutboundRows(
-      this.statements.getStaleSubmitted.all() as unknown as Array<
-        Omit<OutboundOpRow, 'failure_evidence'>
-      >,
+      allFromStatement<Omit<OutboundOpRow, 'failure_evidence'>>(this.statements.getStaleSubmitted),
     );
     let count = 0;
     for (const op of stale) {
