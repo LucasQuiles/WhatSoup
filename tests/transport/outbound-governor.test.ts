@@ -1,5 +1,7 @@
 // tests/transport/outbound-governor.test.ts
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+
+import { singletonLoggerMock } from '../helpers/logger-mock.ts';
 import {
   OutboundGovernor,
   wrapWithOutboundGovernor,
@@ -21,7 +23,7 @@ function fakeSock(sendImpl?: (...a: unknown[]) => unknown) {
 }
 
 function fakeLog() {
-  return { warn: vi.fn(), info: vi.fn(), error: vi.fn(), debug: vi.fn() };
+  return singletonLoggerMock();
 }
 
 const IDENTITY = (jid: string) => jid;

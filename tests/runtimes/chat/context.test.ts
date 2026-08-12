@@ -20,18 +20,12 @@ vi.mock('../../../src/config.ts', () => ({
 // Hoisted so the SAME mock object backs every createChildLogger() call —
 // context.ts calls it once at module load, and tests need a stable
 // reference to assert on the log calls it captures (QR-006).
-const mockContextLogger = vi.hoisted(() => ({
-  info: vi.fn(),
-  warn: vi.fn(),
-  error: vi.fn(),
-  debug: vi.fn(),
-}));
+const { mockContextLogger } = vi.hoisted(() => ({ mockContextLogger: {} as Record<string, ReturnType<typeof vi.fn>> }));
 
 vi.mock('../../../src/logger.ts', async () => {
-  const { singletonLoggerMock } = await import('../../helpers/logger-mock.ts');
-  const singleton = singletonLoggerMock();
-  Object.assign(mockContextLogger, singleton);
-  return { createChildLogger: () => singleton };
+  const { hoistedLoggerMock } = await import('../../helpers/logger-mock.ts');
+  const { createChildLogger } = hoistedLoggerMock(mockContextLogger);
+  return { createChildLogger };
 });
 
 import * as configModule from '../../../src/config.ts';

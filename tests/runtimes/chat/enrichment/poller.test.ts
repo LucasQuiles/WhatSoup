@@ -2,12 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // ── Module mocks must come before any imports that transitively load them ──
 
-const mockLogger = vi.hoisted(() => ({
-  info: vi.fn(),
-  warn: vi.fn(),
-  error: vi.fn(),
-  debug: vi.fn(),
-}));
+const { mockLogger } = vi.hoisted(() => ({ mockLogger: {} as Record<string, ReturnType<typeof vi.fn>> }));
 
 vi.mock('../../../../src/config.ts', () => ({
   config: {
@@ -29,10 +24,9 @@ vi.mock('../../../../src/config.ts', () => ({
 }));
 
 vi.mock('../../../../src/logger.ts', async () => {
-  const { singletonLoggerMock } = await import('../../../helpers/logger-mock.ts');
-  const singleton = singletonLoggerMock();
-  Object.assign(mockLogger, singleton);
-  return { createChildLogger: () => singleton };
+  const { hoistedLoggerMock } = await import('../../../helpers/logger-mock.ts');
+  const { createChildLogger } = hoistedLoggerMock(mockLogger);
+  return { createChildLogger };
 });
 
 // Mock the database message functions

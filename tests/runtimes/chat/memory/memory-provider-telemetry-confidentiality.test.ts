@@ -4,12 +4,7 @@ const mocks = vi.hoisted(() => ({
   clearAlert: vi.fn(),
   emitAlert: vi.fn(),
   listIndexes: vi.fn(),
-  logger: {
-    debug: vi.fn(),
-    error: vi.fn(),
-    info: vi.fn(),
-    warn: vi.fn(),
-  },
+  logger: {} as Record<string, ReturnType<typeof vi.fn>>,
   rerank: vi.fn(),
   searchRecords: vi.fn(),
   upsertRecords: vi.fn(),
@@ -40,12 +35,9 @@ vi.mock('../../../../src/config.ts', () => ({
 }));
 
 vi.mock('../../../../src/logger.ts', async () => {
-  const { singletonLoggerMock } = await import('../../../helpers/logger-mock.ts');
-  const singleton = singletonLoggerMock();
-  Object.assign(mocks.logger, singleton);
-  return {
-    createChildLogger: () => mocks.logger,
-  };
+  const { hoistedLoggerMock } = await import('../../../helpers/logger-mock.ts');
+  const { createChildLogger } = hoistedLoggerMock(mocks.logger);
+  return { createChildLogger };
 });
 
 vi.mock('../../../../src/lib/emit-alert.ts', () => ({

@@ -21,19 +21,17 @@ import { E9_BARE_AT_MESSAGE } from '../fixtures/e9-strings.ts';
 // helper, so the construction is inlined; see the factory's import for
 // provenance.
 const { mockAudienceLog } = vi.hoisted(() => ({
-  mockAudienceLog: { warn: vi.fn(), info: vi.fn(), error: vi.fn(), debug: vi.fn() },
+  mockAudienceLog: {} as Record<string, ReturnType<typeof vi.fn>>,
 }));
 vi.mock('../../src/logger.ts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../src/logger.ts')>();
-  void (await import('../helpers/logger-mock.ts')); // shared helper provenance
-  return {
-    ...actual,
-    // Only the module-under-test's 'outbound-audience' child logger is
-    // captured — every other component (e.g. Database's own child logger)
-    // keeps the REAL logger so this mock never masks unrelated warnings.
-    createChildLogger: (name: string) =>
-      name === 'outbound-audience' ? mockAudienceLog : actual.createChildLogger(name),
-  };
+  const { componentLoggerMock } = await import('../helpers/logger-mock.ts');
+  // Only the module-under-test's 'outbound-audience' child logger is
+  // captured — every other component (e.g. Database's own child logger)
+  // keeps the REAL logger so this mock never masks unrelated warnings.
+  const { log, createChildLogger } = componentLoggerMock('outbound-audience', actual.createChildLogger);
+  Object.assign(mockAudienceLog, log);
+  return { ...actual, createChildLogger };
 });
 
 // All fixtures use neutral placeholders. `/Users/testuser` and `/home/testuser`

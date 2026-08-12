@@ -1,12 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createHash } from 'node:crypto';
 
-const mockUpserterLogger = vi.hoisted(() => ({
-  info: vi.fn(),
-  warn: vi.fn(),
-  error: vi.fn(),
-  debug: vi.fn(),
-}));
+const { mockUpserterLogger } = vi.hoisted(() => ({ mockUpserterLogger: {} as Record<string, ReturnType<typeof vi.fn>> }));
 
 vi.mock('../../../../src/config.ts', () => ({
   config: {
@@ -19,10 +14,9 @@ vi.mock('../../../../src/config.ts', () => ({
 }));
 
 vi.mock('../../../../src/logger.ts', async () => {
-  const { singletonLoggerMock } = await import('../../../helpers/logger-mock.ts');
-  const singleton = singletonLoggerMock();
-  Object.assign(mockUpserterLogger, singleton);
-  return { createChildLogger: () => singleton };
+  const { hoistedLoggerMock } = await import('../../../helpers/logger-mock.ts');
+  const { createChildLogger } = hoistedLoggerMock(mockUpserterLogger);
+  return { createChildLogger };
 });
 
 import { upsertFacts } from '../../../../src/runtimes/chat/enrichment/upserter.ts';

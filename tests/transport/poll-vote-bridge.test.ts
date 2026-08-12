@@ -15,17 +15,11 @@ vi.mock('@whiskeysockets/baileys/lib/Utils/process-message.js', () => ({
   decryptPollVote: mockDecryptPollVote,
 }));
 
+// The asserted spies plus fatal/child(self) are assigned from the shared
+// helper inside the vi.mock factory below.
 const { mockConnectionLogger } = vi.hoisted(() => ({
-  mockConnectionLogger: {
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-    fatal: vi.fn(),
-    child: vi.fn(),
-  },
+  mockConnectionLogger: {} as Record<string, ReturnType<typeof vi.fn>>,
 }));
-mockConnectionLogger.child.mockReturnValue(mockConnectionLogger);
 
 vi.mock('../../src/config.ts', () => ({
   config: {
@@ -48,8 +42,10 @@ vi.mock('../../src/config.ts', () => ({
 
 vi.mock('../../src/logger.ts', async () => {
   const { singletonLoggerMock } = await import('../helpers/logger-mock.ts');
-  const singleton = singletonLoggerMock();
-  Object.assign(mockConnectionLogger, singleton);
+  Object.assign(mockConnectionLogger, singletonLoggerMock(), {
+    fatal: vi.fn(),
+    child: vi.fn().mockReturnValue(mockConnectionLogger),
+  });
   return { createChildLogger: () => mockConnectionLogger };
 });
 

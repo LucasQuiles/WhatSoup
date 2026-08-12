@@ -1,19 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 
-const mockToolLogger = vi.hoisted(() => ({
-  debug: vi.fn(),
-  error: vi.fn(),
-  info: vi.fn(),
-  warn: vi.fn(),
-}));
+const { mockToolLogger } = vi.hoisted(() => ({ mockToolLogger: {} as Record<string, ReturnType<typeof vi.fn>> }));
 
 vi.mock('../../../../src/logger.ts', async () => {
-  const { singletonLoggerMock } = await import('../../../helpers/logger-mock.ts');
-  const singleton = singletonLoggerMock();
-  Object.assign(mockToolLogger, singleton);
-  return {
-    createChildLogger: () => mockToolLogger,
-  };
+  const { hoistedLoggerMock } = await import('../../../helpers/logger-mock.ts');
+  const { createChildLogger } = hoistedLoggerMock(mockToolLogger);
+  return { createChildLogger };
 });
 
 import {

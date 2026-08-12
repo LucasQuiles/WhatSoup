@@ -5,6 +5,8 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { DatabaseSync } from 'node:sqlite';
+
+import { singletonLoggerMock } from '../helpers/logger-mock.ts';
 import { Database } from '../../src/core/database.ts';
 import { MessageScheduler } from '../../src/core/scheduler.ts';
 import type { ConnectionManager } from '../../src/transport/connection.ts';
@@ -706,13 +708,7 @@ describe('MessageScheduler — start/stop lifecycle', () => {
   });
 
   it('logs and suppresses rejected immediate and interval ticks', async () => {
-    const log = {
-      error: vi.fn(),
-      info: vi.fn(),
-      warn: vi.fn(),
-      debug: vi.fn(),
-      trace: vi.fn(),
-    };
+    const log = { ...singletonLoggerMock(), trace: vi.fn() };
     vi.resetModules();
     vi.doMock('../../src/logger.ts', () => ({
       createChildLogger: vi.fn(() => log),

@@ -71,6 +71,8 @@
 import { EventEmitter } from 'node:events';
 import { homedir, tmpdir } from 'node:os';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+import { singletonLoggerMock } from './helpers/logger-mock.ts';
 import type { StoredMessage } from '../src/core/messages.ts';
 
 type MainHarness = Awaited<ReturnType<typeof importMainWithMocks>>;
@@ -217,13 +219,7 @@ async function importMainWithMocks(options: {
     }
     return (originalSetInterval as typeof setInterval)(handler, timeout, ...args);
   }) as typeof setInterval);
-  const logger = {
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    fatal: vi.fn(),
-    debug: vi.fn(),
-  };
+  const logger = { ...singletonLoggerMock(), fatal: vi.fn() };
   const dbRows: Array<{ sender_jid: string; sender_name: string }> = [];
   const db = {
     raw: {
