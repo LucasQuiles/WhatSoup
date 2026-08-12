@@ -1,19 +1,11 @@
 import { describe, it, expect, vi } from 'vitest';
 
-const mockConsolidationLogger = vi.hoisted(() => ({
-  info: vi.fn(),
-  warn: vi.fn(),
-  error: vi.fn(),
-  debug: vi.fn(),
-}));
+const { mockConsolidationLogger } = vi.hoisted(() => ({ mockConsolidationLogger: {} as Record<string, ReturnType<typeof vi.fn>> }));
 
 vi.mock('../../src/logger.ts', async () => {
-  const { singletonLoggerMock } = await import('../helpers/logger-mock.ts');
-  const singleton = singletonLoggerMock();
-  Object.assign(mockConsolidationLogger, singleton);
-  return {
-    createChildLogger: () => ({ ...singleton, child: vi.fn().mockReturnThis() }),
-  };
+  const { hoistedLoggerMock } = await import('../helpers/logger-mock.ts');
+  const { createChildLogger } = hoistedLoggerMock(mockConsolidationLogger);
+  return { createChildLogger };
 });
 
 import { clusterMemories, consolidateCluster } from '../../src/memory/consolidation.ts';

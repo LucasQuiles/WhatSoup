@@ -29,19 +29,13 @@ vi.mock('../../src/config.ts', () => ({
   },
 }));
 
-const healthLogger = vi.hoisted(() => ({
-  info: vi.fn(),
-  warn: vi.fn(),
-  error: vi.fn(),
-  debug: vi.fn(),
-}));
+const healthLogger = vi.hoisted(() => ({} as Record<string, ReturnType<typeof vi.fn>>));
 
 vi.mock('../../src/logger.ts', async () => {
-  const { loggerMock } = await import('../helpers/logger-mock.ts');
-  return {
-    createChildLogger: (component: string) =>
-      component === 'health' ? healthLogger : loggerMock().createChildLogger(),
-  };
+  const { componentLoggerMock, loggerMock } = await import('../helpers/logger-mock.ts');
+  const { log, createChildLogger } = componentLoggerMock('health', () => loggerMock().createChildLogger());
+  Object.assign(healthLogger, log);
+  return { createChildLogger };
 });
 
 import { Database } from '../../src/core/database.ts';

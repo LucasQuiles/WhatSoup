@@ -41,19 +41,13 @@ vi.mock('../../src/config.ts', () => ({
 // keeps a fresh throwaway logger per call, same as before — otherwise their
 // unrelated warn/info calls (e.g. database.ts's WAL-journal-mode notice) would
 // pollute healthLogger and make its call history meaningless.
-const healthLogger = vi.hoisted(() => ({
-  info: vi.fn(),
-  warn: vi.fn(),
-  error: vi.fn(),
-  debug: vi.fn(),
-}));
+const healthLogger = vi.hoisted(() => ({} as Record<string, ReturnType<typeof vi.fn>>));
 
 vi.mock('../../src/logger.ts', async () => {
-  const { loggerMock } = await import('../helpers/logger-mock.ts');
-  return {
-    createChildLogger: (component: string) =>
-      component === 'health' ? healthLogger : loggerMock().createChildLogger(),
-  };
+  const { componentLoggerMock, loggerMock } = await import('../helpers/logger-mock.ts');
+  const { log, createChildLogger } = componentLoggerMock('health', () => loggerMock().createChildLogger());
+  Object.assign(healthLogger, log);
+  return { createChildLogger };
 });
 
 // The control_peer wiring tests drive heal.ts's emitHealReport directly; mock

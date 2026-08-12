@@ -2,20 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createConnection } from 'node:net';
 import { unlinkSync } from 'node:fs';
 
-const mockLog = vi.hoisted(() => ({
-  info: vi.fn(),
-  warn: vi.fn(),
-  error: vi.fn(),
-  debug: vi.fn(),
-}));
+const { mockLog } = vi.hoisted(() => ({ mockLog: {} as Record<string, ReturnType<typeof vi.fn>> }));
 
 vi.mock('../../src/logger.ts', async () => {
-  const { singletonLoggerMock } = await import('../helpers/logger-mock.ts');
-  const singleton = singletonLoggerMock();
-  Object.assign(mockLog, singleton);
-  return {
-    createChildLogger: () => ({ ...singleton, child: vi.fn().mockReturnThis() }),
-  };
+  const { hoistedLoggerMock } = await import('../helpers/logger-mock.ts');
+  const { createChildLogger } = hoistedLoggerMock(mockLog);
+  return { createChildLogger };
 });
 
 import { WhatSoupSocketServer } from '../../src/mcp/socket-server.ts';

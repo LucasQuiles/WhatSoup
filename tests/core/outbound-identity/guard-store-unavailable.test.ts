@@ -5,11 +5,13 @@ import type { IdentityStore } from '../../../src/core/outbound-identity/types.ts
 // not just by message string. createChildLogger is captured at guard.ts import.
 const { warnSpy } = vi.hoisted(() => ({ warnSpy: vi.fn() }));
 vi.mock('../../../src/logger.ts', async () => {
-  const { singletonLoggerMock } = await import('../../helpers/logger-mock.ts');
-  const singleton = { ...singletonLoggerMock(), warn: warnSpy };
+  const { hoistedLoggerMock, singletonLoggerMock } = await import('../../helpers/logger-mock.ts');
+  const { singleton, createChildLogger } = hoistedLoggerMock({} as Record<string, unknown>);
+  // Wire warnSpy into singleton.warn so assertions track calls through the logger
+  singleton.warn = warnSpy;
   return {
-    default: { warn: vi.fn(), info: vi.fn(), error: vi.fn(), debug: vi.fn() },
-    createChildLogger: () => singleton,
+    default: singletonLoggerMock(),
+    createChildLogger,
     flushLogger: () => Promise.resolve(),
   };
 });
