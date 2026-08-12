@@ -501,7 +501,12 @@ describe('ToolRegistry durability integration', () => {
     });
   });
 
-  it('keeps tool outcomes unchanged while counting bounded telemetry-write loss', async () => {
+  it('counts bounded telemetry-write loss; a RECORD loss refuses the call, later-stage losses do not', async () => {
+    // Contract supersession (capability-obligation replay, spec §3.2b): the
+    // record-stage write is admission evidence — its loss refuses the call
+    // outright. Executing/complete-stage losses stay contained (the effect may
+    // already exist; refusing after the fact would help nothing) and the row
+    // remains non-terminal, which the effect fold reads as inconclusive.
     let callNumber = 0;
     const fakeDurability = {
       recordToolCall: () => {
@@ -519,7 +524,15 @@ describe('ToolRegistry durability integration', () => {
     registry.setDurability(fakeDurability as unknown as DurabilityEngine);
     registry.register(makeTool({ name: 'loss_tool', scope: 'global' }));
 
-    for (let index = 0; index < 3; index += 1) {
+    const first = await registry.call(
+      'loss_tool',
+      { message: 'still-runs-0' },
+      makeSession({ tier: 'global', conversationKey: 'conv-loss-0' }),
+    );
+    expect(first.isError).toBe(true);
+    expect(first.content[0].text).toBe('Tool call refused: durable evidence journaling failed.');
+
+    for (let index = 1; index < 3; index += 1) {
       const result = await registry.call(
         'loss_tool',
         { message: `still-runs-${index}` },

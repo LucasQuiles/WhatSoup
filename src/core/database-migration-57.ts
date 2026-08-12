@@ -42,11 +42,15 @@ export function runMigration57(db: DatabaseSync): void {
   const toolCallColumns = new Set(
     (db.prepare('PRAGMA table_info(tool_calls)').all() as Array<{ name: string }>).map((c) => c.name),
   );
-  if (!toolCallColumns.has('logical_turn_id')) {
-    db.exec('ALTER TABLE tool_calls ADD COLUMN logical_turn_id TEXT');
-  }
-  if (!toolCallColumns.has('source_inbound_seq')) {
-    db.exec('ALTER TABLE tool_calls ADD COLUMN source_inbound_seq INTEGER');
+  // An empty set = the table itself is absent (legacy/partial fixtures the
+  // late-migration path must no-op on); such DBs carry no tool rows to correlate.
+  if (toolCallColumns.size > 0) {
+    if (!toolCallColumns.has('logical_turn_id')) {
+      db.exec('ALTER TABLE tool_calls ADD COLUMN logical_turn_id TEXT');
+    }
+    if (!toolCallColumns.has('source_inbound_seq')) {
+      db.exec('ALTER TABLE tool_calls ADD COLUMN source_inbound_seq INTEGER');
+    }
   }
 
   db.exec(`
