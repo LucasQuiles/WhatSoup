@@ -683,6 +683,49 @@ If `durability` is `undefined` (rare, test contexts only), the send proceeds wit
 
 ---
 
+### 5.7 Capability-Obligation Replay (Migration 57)
+
+Off by default; activates only under `agentOptions.capabilityObligations.enabled === true`
+(see `docs/configuration.md`) and only for `per_chat` scope. When a managed-loop provider
+turn cannot fulfil a declared capability (e.g. a `/watch` YouTube or media download that
+needs a child process), the C3 terminal transaction records a `capability_obligations` row
+instead of silently dropping the request, and a supervisor replays it later.
+
+**The dispatch contract (operators read this first).** The replayed turn re-enters the
+*same* per-chat pipeline as a real inbound. Its prompt is NOT the bare original message: it
+is a deterministic envelope (`composeCapabilityObligationReplayPrompt`) that names the
+required capability and the EXACT source, and instructs the agent to call the
+`execute_capability` MCP tool. **If the agent does not call `execute_capability`, no receipt
+is written and the obligation quarantines (`blocked_ambiguous`) — fail-closed by design.**
+So the serving line's skill/prompt guidance MUST lead the agent to call the tool; a stuck
+obligation is most often a serving line whose harness never invokes it (wrong provider, or a
+skill that answers from memory). The obligation never completes off a conversational
+acknowledgement.
+
+**Trusted execution (why a stuck obligation is safe).** Execution receipts are written ONLY
+by the in-process `execute_capability` handler, which spawns the instance-declared resolver
+argv itself (shell-lessly), derives the observed source digest from its own observations
+(retained-media bytes hashed directly; the exact source string hashed for token sources),
+validates a typed outcome (exit 0 + minimum output), and refuses any source beginning with
+`-` (argv option-flag smuggling). No model-controlled text can forge a receipt or launder a
+wrong source: a digest mismatch or a wrong/failed resolver records an *error* receipt that
+can never complete the obligation.
+
+**Settlement.** An obligation completes only when a bound `ok` receipt (obligation + claim
+epoch + attempt + contract + input/source/media digests) coincides with the minted turn's
+terminal record showing echoed delivery (`delivery_kind='echoed'`, non-null delivery op) and
+a completion proof naming that exact terminal (`ttr:<id>`). A receipt without proven delivery
+quarantines rather than completing.
+
+**Group drains and backfill are gated.** Group-scoped obligations sit in `waiting_approval`
+until a destination-specific, digest-bound `capability_drain_approvals` row is consumed (the
+schema enforces the four live drain facts match). Historical backfill (`creation_reason LIKE
+'reviewed_backfill:%'`) drains only reviewer-confirmed rows through the same machine, under a
+separately approved manifest. Retained media is bounded (`retentionHorizonDays`, A-08):
+expired media is no longer claimable and is GC-eligible.
+
+---
+
 ## 6. Database Schema
 
 Migration 2 creates the original durability tables. Migrations 37 and 38 add terminal-decision
