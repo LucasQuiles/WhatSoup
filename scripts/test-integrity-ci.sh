@@ -49,9 +49,45 @@ while IFS= read -r candidate; do
   scan_paths+=("$candidate")
 done < <(git ls-files --cached --others --exclude-standard -- . ':!.claude/worktrees/**')
 
+run_plugin() {
+  if [[ "${#scan_paths[@]}" -eq 0 ]]; then
+    "$PLUGIN_BIN" baseline --check --ci
+  else
+    "$PLUGIN_BIN" baseline --check --ci "${scan_paths[@]}"
+  fi
+}
+
 echo "Running test-integrity baseline --check --ci (${#scan_paths[@]} candidate file(s))"
-if [[ "${#scan_paths[@]}" -eq 0 ]]; then
-  "$PLUGIN_BIN" baseline --check --ci
-else
-  "$PLUGIN_BIN" baseline --check --ci "${scan_paths[@]}"
+
+# The plugin's tree-sitter pass intermittently faults on CI runners and then
+# reports parse errors on files the diff never touched (observed on PRs #3171,
+# #3174, #3175 — roving victims across .sh/.py/.mjs, never reproducible
+# locally on the identical tree). When the ONLY net-new findings are that
+# class, one retry discriminates: a runner fault clears, a genuinely
+# unparseable file reproduces and still fails. Any other net-new finding
+# fails immediately — this retry never masks a real integrity regression.
+set +e
+first_output="$(run_plugin 2>&1)"
+first_rc=$?
+set -e
+printf '%s\n' "$first_output"
+if [[ "$first_rc" -eq 0 ]]; then
+  exit 0
 fi
+
+new_lines="$(printf '%s\n' "$first_output" | grep '^NEW ' || true)"
+if [[ -z "$new_lines" ]]; then
+  exit "$first_rc"
+fi
+non_parse_new="$(printf '%s\n' "$new_lines" | grep -cv '^NEW test-file-tree-sitter-parse-error ' || true)"
+if [[ "$non_parse_new" != "0" ]]; then
+  exit "$first_rc"
+fi
+
+echo "test-integrity: all net-new findings are tree-sitter parse errors — retrying once to discriminate a runner fault from a real parse regression" >&2
+set +e
+second_output="$(run_plugin 2>&1)"
+second_rc=$?
+set -e
+printf '%s\n' "$second_output"
+exit "$second_rc"
