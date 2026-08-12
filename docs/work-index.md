@@ -85,7 +85,7 @@ scoped markdown files currently on disk.
 | `docs/superpowers/plans/2026-07-29-portable-startup-notification-protocol.md` | plan | portable-startup-notification-protocol | 2026-07-30 |
 | `docs/superpowers/plans/2026-07-29-pr-metadata-guard.md` | plan | pr-metadata-guard | 2026-07-31 |
 | `docs/superpowers/plans/2026-08-06-host-setup-portability.md` | plan | host-setup-portability | 2026-08-06 |
-| `docs/superpowers/plans/2026-08-07-fallback-continuity.md` | plan | fallback-continuity | 2026-08-07 |
+| `docs/superpowers/plans/2026-08-07-fallback-continuity.md` | plan | fallback-continuity | 2026-08-12 |
 | `docs/superpowers/specs/2026-07-11-turn-lifecycle-fitness-extraction-design.md` | spec | turn-lifecycle-fitness-extraction-design | 2026-07-11 |
 | `docs/superpowers/specs/2026-07-17-macos-credential-durability-design.md` | spec | macos-credential-durability-design | 2026-07-17 |
 | `docs/superpowers/specs/2026-07-23-agent-reliability-remediation-design.md` | spec | agent-reliability-remediation-design | 2026-07-27 |
@@ -97,7 +97,7 @@ scoped markdown files currently on disk.
 | `docs/superpowers/specs/2026-07-29-maybe-sent-ambiguity-episode-design.md` | spec | maybe-sent-ambiguity-episode-design | 2026-07-30 |
 | `docs/superpowers/specs/2026-07-29-portable-startup-notification-protocol-design.md` | spec | portable-startup-notification-protocol-design | 2026-07-30 |
 | `docs/superpowers/specs/2026-08-06-host-setup-portability-and-macos-reconciliation-design.md` | spec | host-setup-portability-and-macos-reconciliation-design | 2026-08-06 |
-| `docs/superpowers/specs/2026-08-07-fallback-continuity-design.md` | spec | fallback-continuity-design | 2026-08-07 |
+| `docs/superpowers/specs/2026-08-07-fallback-continuity-design.md` | spec | fallback-continuity-design | 2026-08-12 |
 
 ### Cross-tree topic clusters (4)
 
@@ -213,7 +213,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/plans/2026-07-29-pr-metadata-guard.md` | plan | unknown | fallback | pr-metadata-guard | 2026-07-31 |  |
 | `docs/superpowers/plans/2026-08-03-watchdog-auth-required-contract.md` | plan | active | body-marker | watchdog-auth-required-contract | 2026-08-04 |  |
 | `docs/superpowers/plans/2026-08-06-host-setup-portability.md` | plan | unknown | fallback | host-setup-portability | 2026-08-06 |  |
-| `docs/superpowers/plans/2026-08-07-fallback-continuity.md` | plan | unknown | fallback | fallback-continuity | 2026-08-07 |  |
+| `docs/superpowers/plans/2026-08-07-fallback-continuity.md` | plan | unknown | fallback | fallback-continuity | 2026-08-12 |  |
 
 ### docs/superpowers/reviews  _(4 entries)_
 
@@ -264,9 +264,9 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/specs/2026-07-29-launchd-restart-policy-2682-design.md` | spec | active | body-marker | launchd-restart-policy-2682-design | 2026-07-30 |  |
 | `docs/superpowers/specs/2026-07-29-maybe-sent-ambiguity-episode-design.md` | spec | unknown | fallback | maybe-sent-ambiguity-episode-design | 2026-07-30 |  |
 | `docs/superpowers/specs/2026-07-29-portable-startup-notification-protocol-design.md` | spec | unknown | body-marker | portable-startup-notification-protocol-design | 2026-07-30 |  |
-| `docs/superpowers/specs/2026-08-03-watchdog-auth-required-contract-design.md` | spec | active | body-marker | watchdog-auth-required-contract-design | 2026-08-04 |  |
+| `docs/superpowers/specs/2026-08-03-watchdog-auth-required-contract-design.md` | spec | active | body-marker | watchdog-auth-required-contract-design | 2026-08-12 |  |
 | `docs/superpowers/specs/2026-08-06-host-setup-portability-and-macos-reconciliation-design.md` | spec | unknown | body-marker | host-setup-portability-and-macos-reconciliation-design | 2026-08-06 |  |
-| `docs/superpowers/specs/2026-08-07-fallback-continuity-design.md` | spec | unknown | body-marker | fallback-continuity-design | 2026-08-07 |  |
+| `docs/superpowers/specs/2026-08-07-fallback-continuity-design.md` | spec | unknown | body-marker | fallback-continuity-design | 2026-08-12 |  |
 
 ### docs/superpowers/specs/kill-session-transactional-cancellation  _(3 entries)_
 
@@ -287,4 +287,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-08-12T06:06:30Z from commit `f147d02a6bed558b85615fd5433e58ef9761fe47`
+- Generated at 2026-08-12T07:34:15Z from commit `166e8c6c663bc55a85f98c324bc3f61ed1383021`

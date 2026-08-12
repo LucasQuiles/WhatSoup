@@ -661,5 +661,192 @@ class TestTerminalAuthFailureNoRestart:
         assert _run_decision(body) == 1
 
 
+class TestMutexRaceFixes:
+    """Tests for the three residual race fixes from #2961.
+
+    R1: the rename-then-remove window is closed by atomic rmdir.
+    R2: release_mutex no longer deletes a lock it doesn't own.
+    R3: run_with_timeout returns 124 on timeout.
+    """
+
+    @staticmethod
+    def _extract_function(text: str, name: str) -> str:
+        """Extract a shell function body from text by name.
+        Returns the function including its preceding comment block."""
+        pattern = rf"((?:^#[^\n]*\n)*)^{name}\(\)\s*\{{"
+        match = re.search(pattern, text, re.MULTILINE)
+        if not match:
+            raise ValueError(f"function {name} not found in text")
+        start = match.start()
+        depth = 0
+        for i in range(start, len(text)):
+            ch = text[i]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start : i + 1]
+        raise ValueError(f"unterminated function {name}")
+
+    @classmethod
+    def _get_function(cls, name: str) -> str:
+        """Extract a named function from the watchdog template."""
+        text = _TEMPLATE.read_text(encoding="utf-8")
+        return cls._extract_function(text, name)
+
+    # -- R2: release_mutex tests (bash-compatible) --
+
+    def test_r2_release_mutex_no_delete_on_mismatch(self, tmp_path):
+        """R2: When the pid in the lock dir doesn't match, release_mutex
+        does not delete the directory."""
+        lock = tmp_path / "lock"
+        rel_fn = self._get_function("release_mutex")
+        script = tmp_path / "test_mismatch.sh"
+        script.write_text(
+            f"""#!/bin/bash
+set -euo pipefail
+
+{rel_fn}
+
+mkdir -p "{lock}"
+echo "88888" > "{lock}/pid"
+
+release_mutex "{lock}"
+if [ -d "{lock}" ]; then
+  echo "LOCK_SURVIVED"
+  echo "PID_IN_LOCK=$(cat "{lock}/pid")"
+else
+  echo "LOCK_DELETED"
+fi
+""",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        proc = subprocess.run(
+            ["bash", str(script)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert "LOCK_SURVIVED" in proc.stdout, (
+            f"release_mutex must not delete lock with mismatched pid: {proc.stdout!r} stderr={proc.stderr!r}"
+        )
+        assert "PID_IN_LOCK=88888" in proc.stdout
+
+    def test_r2_release_mutex_deletes_own_lock(self, tmp_path):
+        """R2: When the pid matches, release_mutex deletes its own lock using rmdir."""
+        lock = tmp_path / "lock"
+        rel_fn = self._get_function("release_mutex")
+        script = tmp_path / "test_own.sh"
+        script.write_text(
+            f"""#!/bin/bash
+set -euo pipefail
+
+{rel_fn}
+
+mkdir -p "{lock}"
+echo "$$" > "{lock}/pid"
+
+release_mutex "{lock}"
+if [ -d "{lock}" ]; then
+  echo "LOCK_SURVIVED"
+else
+  echo "LOCK_CLEANED"
+fi
+""",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        proc = subprocess.run(
+            ["bash", str(script)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert "LOCK_CLEANED" in proc.stdout, (
+            f"release_mutex must delete own lock: {proc.stdout!r} stderr={proc.stderr!r}"
+        )
+
+    # -- R3: run_with_timeout tests (bash-compatible) --
+
+    def test_r3_run_with_timeout_returns_124_on_timeout(self):
+        """R3: run_with_timeout returns 124 when the inner command exceeds the timeout."""
+        rwt_fn = self._get_function("run_with_timeout")
+        proc = subprocess.run(
+            ["bash", "-c", f"{rwt_fn}\nrun_with_timeout 1 sleep 5\necho RC=$?"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert "RC=124" in proc.stdout, (
+            f"run_with_timeout 1 sleep 5 should exit 124: {proc.stdout!r}"
+        )
+
+    def test_r3_run_with_timeout_passes_exit_code(self):
+        """R3: run_with_timeout passes through the command's exit code on success."""
+        rwt_fn = self._get_function("run_with_timeout")
+        proc = subprocess.run(
+            [
+                "bash",
+                "-c",
+                f"{rwt_fn}\nrun_with_timeout 5 bash -c 'exit 42'\necho RC=$?",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert "RC=42" in proc.stdout, (
+            f"run_with_timeout should pass through exit 42: {proc.stdout!r}"
+        )
+
+    # -- R1: acquire_mutex (zsh-only due to <-> syntax) --
+
+    @pytest.mark.skipif(
+        shutil.which("zsh") is None,
+        reason="zsh not available for acquire_mutex <-> syntax",
+    )
+    def test_r1_stale_lock_reaped_by_rmdir(self, tmp_path):
+        """R1: acquire_mutex reclaims a stale lock via rmdir then re-acquires it."""
+        lock = tmp_path / "lock"
+        acq_fn = self._get_function("acquire_mutex")
+        script = tmp_path / "test_r1.sh"
+        script.write_text(
+            f"""#!/bin/zsh
+set -euo pipefail
+log() {{ :; }}
+now() {{ date +%s; }}
+
+{acq_fn}
+
+mkdir -p "{lock}"
+echo "99999" > "{lock}/pid"
+
+# stale_after=0 means any age qualifies as stale
+acquire_mutex "{lock}" 0
+rc=$?
+echo "ACQUIRE_RC=$rc"
+if [ -d "{lock}" ]; then
+  held=$(cat "{lock}/pid" 2>/dev/null || echo "none")
+  echo "HELD_PID=$held"
+  echo "MY_PID=$$"
+else
+  echo "LOCK_ABSENT"
+fi
+""",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        proc = subprocess.run(
+            ["zsh", str(script)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert "ACQUIRE_RC=0" in proc.stdout, (
+            f"acquire_mutex should acquire stale lock: {proc.stdout!r} stderr={proc.stderr!r}"
+        )
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

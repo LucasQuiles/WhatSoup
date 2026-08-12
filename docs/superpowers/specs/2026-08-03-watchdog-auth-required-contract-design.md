@@ -217,10 +217,10 @@ branch:
    lock now logs before exiting. Lock and restart-mutex release is ownership-guarded: cleanup
    deletes the lock only while its pid stamp still names the releasing process, so a hung
    invocation whose lock was age-reclaimed cannot delete the new owner's lock on exit.
-   Residuals: the reclaim uses rename-then-remove, so a sub-second reap race can still admit
-   one duplicate invocation (bounded by the restart cooldown); the ownership check itself is a
-   cat-then-remove micro-race whose loser is age-guarded; and `launchctl` calls carry no
-   timeout, so a hung invocation persists until its lock ages out.
+   Fixed in follow-up (#2961): the reclaim uses rmdir instead of rename-then-remove, closing
+   the sub-second reap race; the ownership check uses rmdir for atomic cleanup so a mismatched
+   pid does not delete another process's lock; and `launchctl` calls are wrapped with a
+   `run_with_timeout` helper (30 s bootstrap/kickstart, 15 s print).
 2. **Fleet-console restarts race across per-bot watchdogs.** Every bot watchdog shares the fleet
    label's cooldown stamp, and the read/check/kickstart sequence was non-atomic; watchdogs on
    the same 120-second cadence could restart the fleet console simultaneously. FIXED in this
