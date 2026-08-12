@@ -174,6 +174,9 @@ const communityConfigs: SockToolConfig<any>[] = [
     }),
     replayPolicy: 'safe',
     call: async ({ jid, subject, description }, sock) => {
+      if (subject === undefined && description === undefined) {
+        throw new Error('At least one of subject or description must be provided');
+      }
       if (subject !== undefined) {
         await sock.communityUpdateSubject(jid, subject);
       }

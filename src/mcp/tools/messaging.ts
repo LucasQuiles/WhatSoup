@@ -630,7 +630,7 @@ export function registerMessagingTools(
       const contactCards = contacts.map((c) => {
         const digits = c.phone.replace(/\D/g, '');
         return {
-          vcard: `BEGIN:VCARD\nVERSION:3.0\nFN:${c.displayName}\nTEL;type=CELL;type=VOICE;waid=${digits}:+${digits}\nEND:VCARD`,
+          vcard: `BEGIN:VCARD\nVERSION:3.0\nFN:${c.displayName.replace(/[\r\n\x00]/g, '')}\nTEL;type=CELL;type=VOICE;waid=${digits}:+${digits}\nEND:VCARD`,
         };
       });
 

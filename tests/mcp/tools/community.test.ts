@@ -497,13 +497,14 @@ describe('community tools', () => {
       expect((mockSock as any).communityUpdateDescription).toHaveBeenCalledWith('community1@g.us', 'New description');
     });
 
-    it('succeeds with neither subject nor description (no-op)', async () => {
+    it('errors when neither subject nor description is provided (#2325 L1: no silent no-op)', async () => {
       const result = await registry.call(
         'community_update_metadata',
         { jid: 'community1@g.us' },
         globalSession(),
       );
-      expect(result.isError).toBeUndefined();
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result.content)).toContain('At least one of subject or description');
       expect((mockSock as any).communityUpdateSubject).not.toHaveBeenCalled();
       expect((mockSock as any).communityUpdateDescription).not.toHaveBeenCalled();
     });

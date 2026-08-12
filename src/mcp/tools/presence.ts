@@ -2,7 +2,7 @@
 // Presence tools: send_typing, subscribe_presence, get_presence.
 
 import { z } from 'zod';
-import type { ToolDeclaration } from '../types.ts';
+import { toolError, type ToolDeclaration } from '../types.ts';
 import type { ExtendedBaileysSocket } from '../types.ts';
 import type { PresenceCache } from '../../transport/presence-cache.ts';
 import { type SockToolConfig, registerSockTools } from './sock-tool-factory.ts';
@@ -58,7 +58,11 @@ function makeGetPresence(presenceCache: PresenceCache): ToolDeclaration {
     targetMode: 'caller-supplied',
     replayPolicy: 'read_only',
     handler: async (params) => {
-      const { jid } = GetPresenceSchema.parse(params);
+      const parsed = GetPresenceSchema.safeParse(params);
+      if (!parsed.success) {
+        return toolError({ error: 'invalid_params', message: parsed.error.message });
+      }
+      const { jid } = parsed.data;
 
       const entry = presenceCache.get(jid);
       if (!entry) {
