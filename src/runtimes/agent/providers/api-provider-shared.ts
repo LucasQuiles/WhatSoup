@@ -18,6 +18,14 @@ import { providerPreview } from '../provider-preview-sanitizer.ts';
 
 type ProviderLogger = ReturnType<typeof createChildLogger>;
 
+/**
+ * Bound on the connect+response-headers phase of the streaming `fetch` in
+ * both providers (#2629). The stream BODY is deliberately unbounded — agent
+ * turns legitimately run for minutes — and is cancelled via `stop()`; a
+ * blanket `AbortSignal.timeout` on the request would kill long streams.
+ */
+export const CONNECT_TIMEOUT_MS = 30_000;
+
 /** Minimal terminal shape both providers' CallApiResult are assignable from. */
 interface TerminalApiResult {
   text: string;
