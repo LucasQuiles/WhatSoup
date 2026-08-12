@@ -214,6 +214,25 @@ function requirePathString(value: unknown, label: string): string {
   throw new ConfigValidationError(`${label} must be a non-empty string path, got ${JSON.stringify(value)}`);
 }
 
+/** Instance path fields must be absolute (#2295 M7/M8): a relative dbPath or
+ *  root would scatter filesystem state under whatever cwd the service manager
+ *  happened to launch from. */
+function requireAbsolutePathString(value: unknown, label: string): string {
+  const path = requirePathString(value, label);
+  if (!isAbsolute(path)) {
+    throw new ConfigValidationError(`${label} must be an absolute path, got ${JSON.stringify(path)}`);
+  }
+  return path;
+}
+
+/** Env-driven ports mirror the instance validator's 1024-65535 bound (#2295
+ *  M5) — out-of-range values fall back like every other env misconfiguration
+ *  in this file rather than throwing. */
+function portEnv(key: string, fallback: number): number {
+  const n = intEnv(key, fallback);
+  return n >= 1024 && n <= 65_535 ? n : fallback;
+}
+
 /** Optional-field variants for the former raw `as T | undefined` casts (#2295
  *  slice 3). Absent (undefined) and JSON null both mean "unset" and return
  *  undefined so the caller's `??` default applies — exactly what the casts'
@@ -438,8 +457,19 @@ if (instanceRaw) {
 // Path resolution
 // ---------------------------------------------------------------------------
 
-function resolveDir(explicit: string | undefined, xdgBase: string | undefined, fallback: string): string {
-  const dir = explicit ?? (xdgBase ? join(xdgBase, APP_NAME) : join(homedir(), fallback, APP_NAME));
+function resolveDir(explicit: string | undefined, explicitLabel: string, xdgBase: string | undefined, fallback: string): string {
+  // #2295 M7: an explicit override must land at an absolute location — a
+  // relative dir would scatter state under whatever cwd the service manager
+  // launched from. Tilde is expanded first (env vars set outside a shell,
+  // e.g. launchd plists, never get shell expansion).
+  const expandedExplicit = explicit !== undefined ? expandTilde(explicit) : undefined;
+  if (expandedExplicit !== undefined && !isAbsolute(expandedExplicit)) {
+    throw new ConfigValidationError(`${explicitLabel} must be an absolute path, got ${JSON.stringify(explicit)}`);
+  }
+  // #2295 M8: the XDG Base Directory spec requires relative XDG_*_HOME values
+  // to be IGNORED, not honored.
+  const xdgBaseAbs = xdgBase !== undefined && isAbsolute(xdgBase) ? xdgBase : undefined;
+  const dir = expandedExplicit ?? (xdgBaseAbs ? join(xdgBaseAbs, APP_NAME) : join(homedir(), fallback, APP_NAME));
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   return dir;
 }
@@ -450,9 +480,9 @@ let stateRoot: string;
 
 if (bootstrapConfig) {
   // Multi-instance mode: use paths from INSTANCE_CONFIG
-  configRoot = bootstrapConfig.paths.configRoot;
-  dataRoot = bootstrapConfig.paths.dataRoot;
-  stateRoot = bootstrapConfig.paths.stateRoot;
+  configRoot = requireAbsolutePathString(bootstrapConfig.paths.configRoot, 'paths.configRoot');
+  dataRoot = requireAbsolutePathString(bootstrapConfig.paths.dataRoot, 'paths.dataRoot');
+  stateRoot = requireAbsolutePathString(bootstrapConfig.paths.stateRoot, 'paths.stateRoot');
   mkdirSync(configRoot, { recursive: true, mode: 0o700 });
   mkdirSync(dataRoot, { recursive: true, mode: 0o700 });
   mkdirSync(stateRoot, { recursive: true, mode: 0o700 });
@@ -460,31 +490,34 @@ if (bootstrapConfig) {
   // Single-instance / legacy mode: XDG resolution (unchanged behavior)
   configRoot = resolveDir(
     process.env.WHATSOUP_CONFIG_DIR,
+    'WHATSOUP_CONFIG_DIR',
     process.env.XDG_CONFIG_HOME,
     '.config',
   );
   dataRoot = resolveDir(
     process.env.WHATSOUP_DATA_DIR,
+    'WHATSOUP_DATA_DIR',
     process.env.XDG_DATA_HOME,
     '.local/share',
   );
   stateRoot = resolveDir(
     process.env.WHATSOUP_STATE_DIR,
+    'WHATSOUP_STATE_DIR',
     process.env.XDG_STATE_HOME,
     '.local/state',
   );
 }
 
-const logDir = bootstrapConfig ? bootstrapConfig.paths.logDir : join(dataRoot, 'logs');
+const logDir = bootstrapConfig ? requireAbsolutePathString(bootstrapConfig.paths.logDir, 'paths.logDir') : join(dataRoot, 'logs');
 mkdirSync(logDir, { recursive: true, mode: 0o700 });
 // Expose logDir to logger.ts via env var — logger.ts evaluates after config.ts in the
 // ESM module graph (no transitive dependency between them), so this is available in time.
 process.env.LOG_DIR = logDir;
 
-const mediaDir = bootstrapConfig ? bootstrapConfig.paths.mediaDir : join(dataRoot, 'media', 'tmp');
+const mediaDir = bootstrapConfig ? requireAbsolutePathString(bootstrapConfig.paths.mediaDir, 'paths.mediaDir') : join(dataRoot, 'media', 'tmp');
 mkdirSync(mediaDir, { recursive: true, mode: 0o700 });
 const processTmpDir = bootstrapConfig?.paths.tmpDir
-  ? bootstrapConfig.paths.tmpDir
+  ? requireAbsolutePathString(bootstrapConfig.paths.tmpDir, 'paths.tmpDir')
   : join(dataRoot, 'tmp');
 mkdirSync(processTmpDir, { recursive: true, mode: 0o700 });
 process.env.TMPDIR = processTmpDir;
@@ -1117,10 +1150,10 @@ export const config = {
   configRoot,
   dataRoot,
   stateRoot,
-  authDir: instancePathsSection ? requirePathString(instancePathsSection.authDir, 'paths.authDir') : join(configRoot, 'auth_info'),
-  dbPath: instancePathsSection ? requirePathString(instancePathsSection.dbPath, 'paths.dbPath') : join(dataRoot, 'bot.db'),
+  authDir: instancePathsSection ? requireAbsolutePathString(instancePathsSection.authDir, 'paths.authDir') : join(configRoot, 'auth_info'),
+  dbPath: instancePathsSection ? requireAbsolutePathString(instancePathsSection.dbPath, 'paths.dbPath') : join(dataRoot, 'bot.db'),
   logDir,
-  lockPath: instancePathsSection ? requirePathString(instancePathsSection.lockPath, 'paths.lockPath') : join(stateRoot, 'bot.lock'),
+  lockPath: instancePathsSection ? requireAbsolutePathString(instancePathsSection.lockPath, 'paths.lockPath') : join(stateRoot, 'bot.lock'),
 
   // Models — deep merge: instance > env var > default. Each value is either a
   // literal model ID (pinned, exact passthrough — the default) or a symbolic
@@ -1245,11 +1278,11 @@ export const config = {
   },
 
   // Health
-  healthPort: optionalFiniteNumber(instance?.healthPort, 'healthPort') ?? intEnv('HEALTH_PORT', DEFAULT_INSTANCE_HEALTH_PORT),
+  healthPort: optionalFiniteNumber(instance?.healthPort, 'healthPort') ?? portEnv('HEALTH_PORT', DEFAULT_INSTANCE_HEALTH_PORT),
 
   // GUI
   gui: optionalBoolean(instance?.gui, 'gui') ?? false,
-  guiPort: optionalFiniteNumber(instance?.guiPort, 'guiPort') ?? intEnv('WHATSOUP_GUI_PORT', DEFAULT_FLEET_PORT),
+  guiPort: optionalFiniteNumber(instance?.guiPort, 'guiPort') ?? portEnv('WHATSOUP_GUI_PORT', DEFAULT_FLEET_PORT),
 
   // API
   // P3.6 review D-2: env-var override for operator-actionable timeout
