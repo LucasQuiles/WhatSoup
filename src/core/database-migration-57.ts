@@ -55,6 +55,7 @@ export function runMigration57(db: DatabaseSync): void {
       contract_version TEXT NOT NULL,
       required_capability TEXT NOT NULL,
       capability_params TEXT NOT NULL CHECK (json_valid(capability_params)),
+      input_digest TEXT NOT NULL CHECK (length(input_digest) = 64),
       creation_evidence_event_id INTEGER,
       -- retained-media identity (immutable; all-or-none; D3)
       retained_media_path TEXT,
@@ -73,6 +74,7 @@ export function runMigration57(db: DatabaseSync): void {
       next_attempt_at TEXT,
       completion_proof_id TEXT,
       capability_execution_receipt_id INTEGER,
+      drain_approval_id INTEGER,
       creation_reason TEXT NOT NULL CHECK (
         creation_reason = 'typed_deferral_signal'
         OR creation_reason LIKE 'reviewed_backfill:%'
@@ -154,7 +156,9 @@ export function runMigration57(db: DatabaseSync): void {
       approved_at TEXT NOT NULL,
       expires_at TEXT NOT NULL,
       revoked_at TEXT,
-      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      -- D7: a group approval without an attestation digest is unrepresentable.
+      CHECK (scope <> 'group' OR attestation_digest IS NOT NULL)
     );
 
     CREATE INDEX IF NOT EXISTS idx_capability_drain_approvals_obligation
@@ -171,6 +175,9 @@ export function runMigration57(db: DatabaseSync): void {
       media_digest TEXT,
       result_status TEXT NOT NULL CHECK (result_status IN ('ok', 'error')),
       output_evidence TEXT CHECK (output_evidence IS NULL OR json_valid(output_evidence)),
+      -- D6: the receipt names the exact claim/attempt it proves.
+      claim_epoch INTEGER NOT NULL CHECK (claim_epoch >= 1),
+      attempt_number INTEGER NOT NULL CHECK (attempt_number >= 1),
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       UNIQUE (obligation_id, tool_use_id)
     );
@@ -196,7 +203,7 @@ export function runMigration57(db: DatabaseSync): void {
       source_inbound_seq, source_message_id, conversation_key, delivery_jid,
       sender_jid, sender_name, is_group, group_name, scope,
       origin_recovery_job_id, replay_text, content_type_hint,
-      contract_version, required_capability, capability_params,
+      contract_version, required_capability, capability_params, input_digest,
       creation_evidence_event_id, retained_media_path, media_sha256,
       media_bytes, retention_policy_version, creation_reason, created_at
     ON capability_obligations
@@ -219,30 +226,58 @@ export function runMigration57(db: DatabaseSync): void {
       SELECT RAISE(ABORT, 'capability_obligations: illegal state transition');
     END;
 
+    -- D7: leaving waiting_approval must name the exact approval being consumed
+    -- (NEW.drain_approval_id); that approval must bind THIS obligation and
+    -- destination, carry an attestation digest, and be unrevoked and unexpired.
+    -- Live-fact equality (release SHA, manifest digest, drain-run ID) is
+    -- enforced by the sole sanctioned caller, consumeGroupDrainApproval.
     CREATE TRIGGER IF NOT EXISTS capability_obligations_group_approval_gate
     BEFORE UPDATE OF state ON capability_obligations
     WHEN OLD.is_group = 1
       AND OLD.state = 'waiting_approval'
       AND NEW.state = 'waiting_capability'
-      AND NOT EXISTS (
-        SELECT 1 FROM capability_drain_approvals a
-        WHERE a.obligation_id = OLD.id
-          AND a.scope = 'group'
-          AND a.destination_jid = OLD.delivery_jid
-          AND a.revoked_at IS NULL
-          AND datetime(a.expires_at) > datetime('now')
+      AND (
+        NEW.drain_approval_id IS NULL
+        OR NOT EXISTS (
+          SELECT 1 FROM capability_drain_approvals a
+          WHERE a.id = NEW.drain_approval_id
+            AND a.obligation_id = OLD.id
+            AND a.scope = 'group'
+            AND a.destination_jid = OLD.delivery_jid
+            AND a.attestation_digest IS NOT NULL
+            AND a.revoked_at IS NULL
+            AND datetime(a.expires_at) > datetime('now')
+        )
       )
     BEGIN
-      SELECT RAISE(ABORT, 'capability_obligations: group drain requires a current destination-specific approval');
+      SELECT RAISE(ABORT, 'capability_obligations: group drain requires consuming a current destination-specific approval');
     END;
 
     CREATE TRIGGER IF NOT EXISTS capability_obligations_completed_requires_proofs
     BEFORE UPDATE OF state ON capability_obligations
     WHEN NEW.state = 'completed'
       AND OLD.state = 'claimed'
-      AND (NEW.capability_execution_receipt_id IS NULL OR NEW.completion_proof_id IS NULL)
+      AND (
+        NEW.completion_proof_id IS NULL
+        OR NEW.capability_execution_receipt_id IS NULL
+        -- D6: the named receipt must prove THIS obligation's CURRENT attempt —
+        -- same obligation, same claim epoch, same attempt, non-error result,
+        -- same contract version, same input digest, and the retained-media
+        -- digest where the obligation carries media.
+        OR NOT EXISTS (
+          SELECT 1 FROM capability_execution_receipts r
+          WHERE r.id = NEW.capability_execution_receipt_id
+            AND r.obligation_id = NEW.id
+            AND r.claim_epoch = OLD.claim_epoch
+            AND r.attempt_number = NEW.attempt_count
+            AND r.result_status = 'ok'
+            AND r.contract_version = NEW.contract_version
+            AND r.input_digest = NEW.input_digest
+            AND (NEW.media_sha256 IS NULL OR r.media_digest = NEW.media_sha256)
+        )
+      )
     BEGIN
-      SELECT RAISE(ABORT, 'capability_obligations: completed requires an execution receipt and a completion proof');
+      SELECT RAISE(ABORT, 'capability_obligations: completed requires a bound execution receipt and a completion proof');
     END;
 
     CREATE TRIGGER IF NOT EXISTS capability_obligations_no_delete

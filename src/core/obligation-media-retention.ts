@@ -30,6 +30,8 @@ import { createReadStream } from 'node:fs';
 import { mkdir, open, readdir, rename, rm, stat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
+import { systemClock } from '../lib/clock.ts';
+
 export interface MediaRetentionOptions {
   /** Obligation-owned retention root (never media/tmp). */
   root: string;
@@ -93,7 +95,8 @@ export async function retainMediaForObligation(
     }
     // Content-addressed collision with wrong bytes = corruption; replace below.
   } catch {
-    // Not present — stage it.
+    // intentional: hashFile throws only when no retained object exists at the
+    // content-addressed path yet — absence simply means we stage the copy below.
   }
 
   // Same-directory temp so the rename is atomic on the same filesystem.
@@ -159,7 +162,7 @@ export async function cleanupUnreferencedMedia(
   cleanup: CleanupOptions,
 ): Promise<{ removed: string[] }> {
   const removed: string[] = [];
-  const cutoff = Date.now() - cleanup.graceMs;
+  const cutoff = systemClock.now() - cleanup.graceMs;
 
   let shards: Array<{ name: string; isDirectory(): boolean; isFile(): boolean }>;
   try {

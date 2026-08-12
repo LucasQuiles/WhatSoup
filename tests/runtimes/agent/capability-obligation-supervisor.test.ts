@@ -34,19 +34,19 @@ const BINDING: CapabilityAttestationBinding = {
   contractVersion: 'test-contract/1',
   capability: 'child_process_tools',
   skillName: 'watch',
+  skillVersion: '1.0.0',
   skillDigest: 'skill-digest-1',
+  resolverDigest: 'r1',
+  dependencyVersions: {},
+  probeVersion: 'p/1',
+  canaryId: 'c1',
   mediaRoot: '/var/media-root',
 };
 
 function freshAttestation(): void {
   recordCapabilityAttestation(db, {
     ...BINDING,
-    skillVersion: '1.0.0',
-    resolverDigest: 'r1',
-    dependencyVersions: {},
-    canaryId: 'c1',
     canaryResult: 'pass',
-    probeVersion: 'p/1',
     nonce: `n-${Math.random().toString(36).slice(2)}`,
     attestedAt: new Date().toISOString(),
     expiresAt: new Date(Date.now() + 3600_000).toISOString(),
@@ -78,7 +78,7 @@ function makeSupervisor(script: Script, options: { backoffSeconds?: number } = {
     },
     evidencePort: {
       providerAcceptedIds: () => new Set(script.accepted ?? []),
-      settlementEvidence: (id) => script.settlement?.get(id),
+      settlementEvidence: (id, _attempt) => script.settlement?.get(id),
     },
   });
   return { supervisor, dispatches };
@@ -105,6 +105,7 @@ function seedObligation(over: Partial<Record<string, unknown>> = {}): number {
         contractVersion: 'test-contract/1',
         requiredCapability: 'child_process_tools',
         capabilityParams: '{"skill":"watch"}',
+        inputDigest: 'aa'.repeat(32),
         retainedMedia: (over.retainedMedia as never) ?? null,
         creationReason: 'typed_deferral_signal',
       },
@@ -227,6 +228,8 @@ describe('settlement (D6)', () => {
       mediaDigest: null,
       resultStatus: 'ok',
       outputEvidence: { ok: true },
+      claimEpoch: 1,
+      attemptNumber: 1,
     });
     const { supervisor } = makeSupervisor({
       settlement: new Map([[id, { kind: 'completed', executionReceiptId: receiptId, completionProofId: 'wt-1' }]]),

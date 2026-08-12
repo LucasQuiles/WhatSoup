@@ -37,6 +37,7 @@ const OBLIGATION = {
   contract_version: 'test-instance/1',
   required_capability: 'child_process_tools',
   capability_params: '{"skill":"watch"}',
+  input_digest: 'ab'.repeat(32),
   state: 'waiting_capability',
   creation_reason: 'typed_deferral_signal',
 };
@@ -138,6 +139,7 @@ describe('capability_obligations — immutability and transition whitelist', () 
       ['contract_version', 'x/9'],
       ['required_capability', 'other_cap'],
       ['capability_params', '{}'],
+      ['input_digest', 'cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd'],
       ['creation_reason', 'typed_deferral_signal'],
       ['retained_media_path', '/tmp/evil'],
       ['media_sha256', 'cd'.repeat(32)],
@@ -174,20 +176,39 @@ describe('capability_obligations — immutability and transition whitelist', () 
     ).toThrow(/transition/i);
   });
 
-  it('completed requires an execution receipt and completion proof', () => {
+  it('completed requires a BOUND execution receipt and completion proof', () => {
     const id = insertObligation();
-    db.raw.prepare('UPDATE capability_obligations SET state=? WHERE id=?').run('claimed', id);
+    db.raw
+      .prepare('UPDATE capability_obligations SET state=?, claim_epoch=1, attempt_count=1 WHERE id=?')
+      .run('claimed', id);
     expect(() =>
       db.raw.prepare('UPDATE capability_obligations SET state=? WHERE id=?').run('completed', id),
     ).toThrow(/receipt|proof/i);
+    // A receipt for the wrong attempt does not satisfy the gate.
+    const staleReceiptId = Number(
+      db.raw
+        .prepare(
+          `INSERT INTO capability_execution_receipts
+             (obligation_id, logical_turn_id, tool_use_id, skill_name, contract_version, input_digest, result_status, claim_epoch, attempt_number)
+           VALUES (?, 'turn-0', 'tu-0', 'watch', 'test-instance/1', ?, 'ok', 9, 9)`,
+        )
+        .run(id, OBLIGATION.input_digest).lastInsertRowid,
+    );
+    expect(() =>
+      db.raw
+        .prepare(
+          'UPDATE capability_obligations SET state=?, capability_execution_receipt_id=?, completion_proof_id=? WHERE id=?',
+        )
+        .run('completed', staleReceiptId, 'terminal-proof-1', id),
+    ).toThrow(/bound|receipt/i);
     const receiptId = Number(
       db.raw
         .prepare(
           `INSERT INTO capability_execution_receipts
-             (obligation_id, logical_turn_id, tool_use_id, skill_name, contract_version, input_digest, result_status)
-           VALUES (?, 'turn-1', 'tu-1', 'watch', 'test-instance/1', 'aa', 'ok')`,
+             (obligation_id, logical_turn_id, tool_use_id, skill_name, contract_version, input_digest, result_status, claim_epoch, attempt_number)
+           VALUES (?, 'turn-1', 'tu-1', 'watch', 'test-instance/1', ?, 'ok', 1, 1)`,
         )
-        .run(id).lastInsertRowid,
+        .run(id, OBLIGATION.input_digest).lastInsertRowid,
     );
     expect(() =>
       db.raw
@@ -220,16 +241,25 @@ describe('group approval gate (D7)', () => {
     });
 
   const approve = (obligationId: number, scope: string, jid: string, expires = '2099-01-01T00:00:00Z') =>
-    db.raw
-      .prepare(
-        `INSERT INTO capability_drain_approvals
-           (obligation_id, destination_jid, scope, release_sha, manifest_digest, drain_run_id, approver, approved_at, expires_at)
-         VALUES (?, ?, ?, 'relsha', 'mdigest', 'RUN-1', 'owner', datetime('now'), ?)`,
-      )
-      .run(obligationId, jid, scope, expires);
+    Number(
+      db.raw
+        .prepare(
+          `INSERT INTO capability_drain_approvals
+             (obligation_id, destination_jid, scope, release_sha, attestation_digest, manifest_digest, drain_run_id, approver, approved_at, expires_at)
+           VALUES (?, ?, ?, 'relsha', 'attdig', 'mdigest', 'RUN-1', 'owner', datetime('now'), ?)`,
+        )
+        .run(obligationId, jid, scope, expires).lastInsertRowid,
+    );
 
-  it('blocks leaving waiting_approval without a matching unexpired group approval', () => {
+  const unlock = (id: number, approvalId: number | null) =>
+    db.raw
+      .prepare('UPDATE capability_obligations SET state=?, drain_approval_id=? WHERE id=?')
+      .run('waiting_capability', approvalId, id);
+
+  it('blocks leaving waiting_approval without naming a consumed approval', () => {
     const id = groupObligation();
+    approve(id, 'group', 'test-group-alpha@g.us');
+    // Even with a valid approval on file, the transition must reference it.
     expect(() =>
       db.raw.prepare('UPDATE capability_obligations SET state=? WHERE id=?').run('waiting_capability', id),
     ).toThrow(/approval/i);
@@ -237,34 +267,53 @@ describe('group approval gate (D7)', () => {
 
   it('a DM-scope approval cannot unlock a group obligation', () => {
     const id = groupObligation();
-    approve(id, 'dm', 'test-group-alpha@g.us');
-    expect(() =>
-      db.raw.prepare('UPDATE capability_obligations SET state=? WHERE id=?').run('waiting_capability', id),
-    ).toThrow(/approval/i);
+    const approvalId = approve(id, 'dm', 'test-group-alpha@g.us');
+    expect(() => unlock(id, approvalId)).toThrow(/approval/i);
   });
 
   it('an expired approval does not unlock', () => {
     const id = groupObligation();
-    approve(id, 'group', 'test-group-alpha@g.us', '2000-01-01T00:00:00Z');
-    expect(() =>
-      db.raw.prepare('UPDATE capability_obligations SET state=? WHERE id=?').run('waiting_capability', id),
-    ).toThrow(/approval/i);
+    const approvalId = approve(id, 'group', 'test-group-alpha@g.us', '2000-01-01T00:00:00Z');
+    expect(() => unlock(id, approvalId)).toThrow(/approval/i);
   });
 
-  it('a matching group approval for the exact destination unlocks', () => {
+  it('a matching group approval consumed by id unlocks', () => {
     const id = groupObligation();
-    approve(id, 'group', 'test-group-alpha@g.us');
-    expect(() =>
-      db.raw.prepare('UPDATE capability_obligations SET state=? WHERE id=?').run('waiting_capability', id),
-    ).not.toThrow();
+    const approvalId = approve(id, 'group', 'test-group-alpha@g.us');
+    expect(() => unlock(id, approvalId)).not.toThrow();
   });
 
   it('an approval bound to a different destination does not unlock', () => {
     const id = groupObligation();
-    approve(id, 'group', 'test-group-beta@g.us');
+    const approvalId = approve(id, 'group', 'test-group-beta@g.us');
+    expect(() => unlock(id, approvalId)).toThrow(/approval/i);
+  });
+
+  it('an approval recorded for a DIFFERENT obligation does not unlock this one', () => {
+    const id = groupObligation();
+    const otherId = insertObligation({
+      is_group: 1,
+      group_name: 'Test Group B',
+      delivery_jid: 'test-group-alpha@g.us',
+      state: 'waiting_approval',
+      source_inbound_seq: 1099,
+      source_message_id: 'TESTMSG-GROUP-0099',
+    });
+    const foreignApproval = approve(otherId, 'group', 'test-group-alpha@g.us');
+    expect(() => unlock(id, foreignApproval)).toThrow(/approval/i);
+  });
+
+  it('a group approval without an attestation digest is unrepresentable', () => {
+    const id = groupObligation();
     expect(() =>
-      db.raw.prepare('UPDATE capability_obligations SET state=? WHERE id=?').run('waiting_capability', id),
-    ).toThrow(/approval/i);
+      db.raw
+        .prepare(
+          `INSERT INTO capability_drain_approvals
+             (obligation_id, destination_jid, scope, release_sha, attestation_digest, manifest_digest, drain_run_id, approver, approved_at, expires_at)
+           VALUES (?, 'test-group-alpha@g.us', 'group', 'relsha', NULL, 'mdigest', 'RUN-1', 'owner', datetime('now'), '2099-01-01T00:00:00Z')`,
+        )
+        .run(id),
+    ).toThrow();
   });
 });
 
@@ -321,8 +370,8 @@ describe('append-only companions', () => {
       db.raw
         .prepare(
           `INSERT INTO capability_execution_receipts
-             (obligation_id, logical_turn_id, tool_use_id, skill_name, contract_version, input_digest, result_status)
-           VALUES (?, 'turn-1', 'tu-1', 'watch', 'v', 'aa', 'ok')`,
+             (obligation_id, logical_turn_id, tool_use_id, skill_name, contract_version, input_digest, result_status, claim_epoch, attempt_number)
+           VALUES (?, 'turn-1', 'tu-1', 'watch', 'v', 'aa', 'ok', 1, 1)`,
         )
         .run(id);
     ins();

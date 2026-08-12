@@ -19,6 +19,13 @@
  */
 import type { Database } from './database.ts';
 
+/**
+ * D5: EVERY field here participates in the exact-match admission WHERE clause.
+ * The running consumer derives all of them from live facts (host, release,
+ * provider, contract, installed skill/resolver/dependency identity, configured
+ * probe/canary identity, media root); an attestation that differs in any one
+ * of them never admits.
+ */
 export interface CapabilityAttestationBinding {
   hostId: string;
   runtimeUser: string;
@@ -29,20 +36,30 @@ export interface CapabilityAttestationBinding {
   contractVersion: string;
   capability: string;
   skillName: string;
+  skillVersion: string | null;
   skillDigest: string;
+  resolverDigest: string | null;
+  dependencyVersions: Record<string, string>;
+  probeVersion: string;
+  canaryId: string;
   mediaRoot: string;
 }
 
 export interface CapabilityAttestationRecordParams extends CapabilityAttestationBinding {
-  skillVersion: string | null;
-  resolverDigest: string | null;
-  dependencyVersions: Record<string, string>;
-  canaryId: string;
   canaryResult: 'pass' | 'fail';
-  probeVersion: string;
   nonce: string;
   attestedAt: string;
   expiresAt: string;
+}
+
+/**
+ * Sorted-key serialization shared by record and admission — key order must
+ * never defeat (or forge) a dependency-version match.
+ */
+export function canonicalDependencyVersions(deps: Record<string, string>): string {
+  return JSON.stringify(
+    Object.fromEntries(Object.entries(deps).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))),
+  );
 }
 
 export function recordCapabilityAttestation(
@@ -71,7 +88,7 @@ export function recordCapabilityAttestation(
       params.skillVersion,
       params.skillDigest,
       params.resolverDigest,
-      JSON.stringify(params.dependencyVersions),
+      canonicalDependencyVersions(params.dependencyVersions),
       params.mediaRoot,
       params.canaryId,
       params.canaryResult,
@@ -110,7 +127,9 @@ export function findAdmissibleAttestation(
        FROM capability_attestations
        WHERE host_id = ? AND runtime_user = ? AND release_sha = ? AND schema_version = ?
          AND provider_id = ? AND harness_type = ? AND contract_version = ? AND capability = ?
-         AND skill_name = ? AND skill_digest = ? AND media_root = ?
+         AND skill_name = ? AND skill_version IS ? AND skill_digest = ?
+         AND resolver_digest IS ? AND dependency_versions = ?
+         AND probe_version = ? AND canary_id = ? AND media_root = ?
        ORDER BY datetime(attested_at) DESC, id DESC`,
     )
     .all(
@@ -123,7 +142,12 @@ export function findAdmissibleAttestation(
       binding.contractVersion,
       binding.capability,
       binding.skillName,
+      binding.skillVersion,
       binding.skillDigest,
+      binding.resolverDigest,
+      canonicalDependencyVersions(binding.dependencyVersions),
+      binding.probeVersion,
+      binding.canaryId,
       binding.mediaRoot,
     ) as Array<{ id: number; canary_result: string; revoked_at: string | null; fresh: number }>;
 

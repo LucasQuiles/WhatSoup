@@ -35,19 +35,19 @@ const BINDING: CapabilityAttestationBinding = {
   contractVersion: 'test-instance/1',
   capability: 'child_process_tools',
   skillName: 'watch',
+  skillVersion: '1.0.0',
   skillDigest: 'skill-digest-1',
+  resolverDigest: 'resolver-digest-1',
+  dependencyVersions: { 'yt-dlp': '2026.03.17' },
+  probeVersion: 'probe/1',
+  canaryId: 'canary-1',
   mediaRoot: '/var/media-root',
 };
 
 function record(over: Partial<Parameters<typeof recordCapabilityAttestation>[1]> = {}) {
   return recordCapabilityAttestation(db, {
     ...BINDING,
-    skillVersion: '1.0.0',
-    resolverDigest: 'resolver-digest-1',
-    dependencyVersions: { 'yt-dlp': '2026.03.17' },
-    canaryId: 'canary-1',
     canaryResult: 'pass',
-    probeVersion: 'probe/1',
     nonce: `nonce-${Math.random().toString(36).slice(2)}`,
     attestedAt: new Date().toISOString(),
     expiresAt: new Date(Date.now() + 3600_000).toISOString(),
@@ -84,12 +84,35 @@ describe('findAdmissibleAttestation — exact binding', () => {
     ['contractVersion', 'test-instance/2'],
     ['capability', 'other_cap'],
     ['skillName', 'other-skill'],
+    ['skillVersion', '9.9.9'],
     ['skillDigest', 'other-digest'],
+    ['resolverDigest', 'other-resolver'],
+    ['probeVersion', 'probe/999'],
+    ['canaryId', 'other-canary'],
     ['mediaRoot', '/other/root'],
   ] as const)('a %s mismatch is a typed binding_mismatch skip', (field, wrong) => {
     record();
     const found = findAdmissibleAttestation(db, { ...BINDING, [field]: wrong });
     expect(found).toEqual({ outcome: 'skip', reason: 'binding_mismatch' });
+  });
+
+  it('a dependency-version mismatch is a binding_mismatch skip; key order is canonicalized', () => {
+    record({ dependencyVersions: { 'yt-dlp': '2026.03.17', ffmpeg: '7.1' } });
+    expect(
+      findAdmissibleAttestation(db, { ...BINDING, dependencyVersions: { 'yt-dlp': '0.0.0', ffmpeg: '7.1' } }),
+    ).toEqual({ outcome: 'skip', reason: 'binding_mismatch' });
+    expect(
+      findAdmissibleAttestation(db, {
+        ...BINDING,
+        dependencyVersions: { ffmpeg: '7.1', 'yt-dlp': '2026.03.17' },
+      }).outcome,
+    ).toBe('admissible');
+  });
+
+  it('a NULL skill version binds exactly (null matches only null)', () => {
+    record({ skillVersion: null });
+    expect(findAdmissibleAttestation(db, { ...BINDING, skillVersion: null }).outcome).toBe('admissible');
+    expect(findAdmissibleAttestation(db, BINDING)).toEqual({ outcome: 'skip', reason: 'binding_mismatch' });
   });
 
   it('a schemaVersion mismatch is a binding_mismatch skip', () => {

@@ -52,6 +52,7 @@ function seedObligation(over: Partial<Record<string, unknown>> = {}): number {
         contractVersion: 'test-instance/1',
         requiredCapability: 'child_process_tools',
         capabilityParams: '{"skill":"watch"}',
+        inputDigest: 'aa'.repeat(32),
         retainedMedia: null,
         creationReason: 'typed_deferral_signal',
       },
@@ -127,6 +128,8 @@ describe('fenced settlement', () => {
       mediaDigest: null,
       resultStatus: 'ok',
       outputEvidence: { resolver: 'qvideo', ok: true },
+      claimEpoch: claim.claimEpoch,
+      attemptNumber: claim.attemptCount,
     });
     const settled = store.settleCompleted(id, fence, {
       executionReceiptId: receiptId,

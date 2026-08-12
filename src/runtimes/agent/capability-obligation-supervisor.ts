@@ -29,6 +29,7 @@
  * scan selects `waiting_capability` only; the approval transition is guarded in
  * the schema itself).
  */
+import { systemClock } from '../../lib/clock.ts';
 import { createChildLogger } from '../../logger.ts';
 import {
   findAdmissibleAttestation,
@@ -81,8 +82,16 @@ export interface ObligationEvidencePort {
    * reclaim to choose requeue vs quarantine — fail closed toward quarantine.
    */
   providerAcceptedIds(): ReadonlySet<number>;
-  /** Durable settlement evidence for a claimed obligation; undefined = still running. */
-  settlementEvidence(obligationId: number): ObligationSettlementEvidence | undefined;
+  /**
+   * Durable settlement evidence for a claimed obligation's CURRENT attempt;
+   * undefined = still running. Implementations must correlate through the
+   * supplied claim identity (claim epoch + attempt number) — evidence from a
+   * prior attempt must never settle the current one (D6).
+   */
+  settlementEvidence(
+    obligationId: number,
+    attempt: { claimEpoch: number; attemptCount: number },
+  ): ObligationSettlementEvidence | undefined;
 }
 
 export interface CapabilityObligationSupervisorOptions {
@@ -152,7 +161,10 @@ export class CapabilityObligationSupervisor {
 
   private settleClaimed(report: ObligationTickReport): void {
     for (const claimed of this.store.listClaimedObligations()) {
-      const evidence = this.evidencePort.settlementEvidence(claimed.id);
+      const evidence = this.evidencePort.settlementEvidence(claimed.id, {
+        claimEpoch: claimed.claimEpoch,
+        attemptCount: claimed.attemptCount,
+      });
       if (evidence === undefined) continue; // still running under a live lease
       const fence: CapabilityObligationClaimFence = {
         claimToken: claimed.claimToken,
@@ -215,7 +227,7 @@ export class CapabilityObligationSupervisor {
       }
 
       // D7 — the transactional claim is the sole admission point.
-      const claimToken = `obl-claim-${Date.now()}-${++this.claimCounter}`;
+      const claimToken = `obl-claim-${systemClock.now()}-${++this.claimCounter}`;
       const claim = this.store.claimObligation(due.id, {
         claimToken,
         leaseSeconds: this.leaseSeconds,

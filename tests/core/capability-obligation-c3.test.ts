@@ -59,6 +59,7 @@ function decision(over: Partial<Record<string, unknown>> = {}): CapabilityDecisi
       contractVersion: 'test-instance/1',
       requiredCapability: 'child_process_tools',
       capabilityParams: '{"skill":"watch"}',
+      inputDigest: 'aa'.repeat(32),
       retainedMedia: null,
       creationReason: 'typed_deferral_signal',
       ...over,
@@ -159,10 +160,10 @@ describe('C3-joined capability decision (D4)', () => {
         `INSERT INTO capability_obligations
            (source_inbound_seq, source_message_id, conversation_key, delivery_jid, sender_jid,
             is_group, scope, replay_text, contract_version, required_capability,
-            capability_params, state, creation_reason)
+            capability_params, input_digest, state, creation_reason)
          VALUES (?, 'msg-obligation-1', 'ck', 'dj@lid', 'sj@s.whatsapp.net',
                  0, 'per_chat', 'x', 'test-instance/1', 'child_process_tools',
-                 '{}', 'waiting_capability', 'typed_deferral_signal')`,
+                 '{}', '${'aa'.repeat(32)}', 'waiting_capability', 'typed_deferral_signal')`,
       )
       .run(inboundSeq);
     const before = counts();

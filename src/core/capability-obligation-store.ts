@@ -76,6 +76,8 @@ export interface CapabilityObligationInsertParams {
   requiredCapability: string;
   /** Canonical (sorted-key) JSON string — ambiguous JSON equality is forbidden. */
   capabilityParams: string;
+  /** D1 input digest (64 hex) — execution receipts must reproduce it (D6). */
+  inputDigest: string;
   retainedMedia: CapabilityObligationRetainedMedia | null;
   creationReason: string;
 }
@@ -117,6 +119,9 @@ export function validateCapabilityDecisionParams(decision: CapabilityDecisionPar
     if (obligation.isGroup && obligation.groupName === null) {
       throw new Error('Capability obligation for a group requires a group name');
     }
+    if (!/^[0-9a-f]{64}$/.test(obligation.inputDigest)) {
+      throw new Error('Capability obligation requires a 64-hex input digest');
+    }
     try {
       JSON.parse(obligation.capabilityParams);
     } catch {
@@ -126,7 +131,11 @@ export function validateCapabilityDecisionParams(decision: CapabilityDecisionPar
 }
 
 export class CapabilityObligationStore {
-  constructor(private readonly db: Database) {}
+  private readonly db: Database;
+
+  constructor(db: Database) {
+    this.db = db;
+  }
 
   private assertInCallerTransaction(method: string): void {
     if (!this.db.raw.isTransaction) {
@@ -170,11 +179,11 @@ export class CapabilityObligationStore {
            source_inbound_seq, source_message_id, conversation_key, delivery_jid,
            sender_jid, sender_name, is_group, group_name, scope,
            origin_recovery_job_id, replay_text, content_type_hint,
-           contract_version, required_capability, capability_params,
+           contract_version, required_capability, capability_params, input_digest,
            creation_evidence_event_id,
            retained_media_path, media_sha256, media_bytes, retention_policy_version,
            state, creation_reason
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         params.sourceInboundSeq,
@@ -192,6 +201,7 @@ export class CapabilityObligationStore {
         params.contractVersion,
         params.requiredCapability,
         params.capabilityParams,
+        params.inputDigest,
         creationEvidenceEventId,
         params.retainedMedia?.path ?? null,
         params.retainedMedia?.sha256 ?? null,
@@ -346,8 +356,29 @@ export class CapabilityObligationStore {
     id: number,
     fence: CapabilityObligationClaimFence,
     proofs: { executionReceiptId: number; completionProofId: string },
-  ): { applied: boolean } {
+  ): { applied: boolean; reason?: 'receipt_binding_mismatch' } {
     return withTransaction(this.db, () => {
+      // D6: the receipt must prove THIS obligation's CURRENT claimed attempt —
+      // same obligation, same claim epoch, same attempt number, non-error
+      // result, same contract version and input digest, and the retained-media
+      // digest where the obligation carries media. The schema trigger enforces
+      // the same predicate against raw writes; checking here yields a typed
+      // rejection instead of an abort.
+      const bound = this.db.raw
+        .prepare(
+          `SELECT r.id FROM capability_execution_receipts r
+           JOIN capability_obligations o ON o.id = r.obligation_id
+           WHERE r.id = ? AND r.obligation_id = ?
+             AND o.state = 'claimed' AND o.claim_token = ? AND o.claim_epoch = ?
+             AND r.claim_epoch = o.claim_epoch
+             AND r.attempt_number = o.attempt_count
+             AND r.result_status = 'ok'
+             AND r.contract_version = o.contract_version
+             AND r.input_digest = o.input_digest
+             AND (o.media_sha256 IS NULL OR r.media_digest = o.media_sha256)`,
+        )
+        .get(proofs.executionReceiptId, id, fence.claimToken, fence.claimEpoch);
+      if (bound === undefined) return { applied: false, reason: 'receipt_binding_mismatch' as const };
       const row = this.db.raw
         .prepare(
           `UPDATE capability_obligations
@@ -394,14 +425,91 @@ export class CapabilityObligationStore {
     });
   }
 
-  listClaimedObligations(): Array<{ id: number; claimToken: string; claimEpoch: number }> {
+  listClaimedObligations(): Array<{
+    id: number;
+    claimToken: string;
+    claimEpoch: number;
+    attemptCount: number;
+  }> {
     const rows = this.db.raw
       .prepare(
-        `SELECT id, claim_token, claim_epoch FROM capability_obligations
+        `SELECT id, claim_token, claim_epoch, attempt_count FROM capability_obligations
          WHERE state = 'claimed' ORDER BY id ASC`,
       )
-      .all() as Array<{ id: number; claim_token: string; claim_epoch: number }>;
-    return rows.map((r) => ({ id: r.id, claimToken: r.claim_token, claimEpoch: r.claim_epoch }));
+      .all() as Array<{ id: number; claim_token: string; claim_epoch: number; attempt_count: number }>;
+    return rows.map((r) => ({
+      id: r.id,
+      claimToken: r.claim_token,
+      claimEpoch: r.claim_epoch,
+      attemptCount: r.attempt_count,
+    }));
+  }
+
+  /**
+   * D7: the sole sanctioned waiting_approval → waiting_capability path. The
+   * caller supplies the LIVE drain facts (running release, approved manifest
+   * digest, current drain-run ID, admissible attestation digest); consumption
+   * succeeds only when an unrevoked, unexpired group approval for exactly this
+   * obligation and destination matches every one of them. The consumed
+   * approval's id is stored on the obligation (drain_approval_id), which the
+   * schema trigger requires — raw state flips without it abort.
+   */
+  consumeGroupDrainApproval(
+    id: number,
+    live: {
+      destinationJid: string;
+      releaseSha: string;
+      manifestDigest: string;
+      drainRunId: string;
+      attestationDigest: string;
+    },
+  ): { applied: boolean; approvalId?: number; reason?: 'no_matching_approval' } {
+    return withTransaction(this.db, () => {
+      const approval = this.db.raw
+        .prepare(
+          `SELECT a.id FROM capability_drain_approvals a
+           JOIN capability_obligations o ON o.id = a.obligation_id
+           WHERE a.obligation_id = ? AND o.state = 'waiting_approval' AND o.is_group = 1
+             AND a.scope = 'group'
+             AND a.destination_jid = o.delivery_jid
+             AND a.destination_jid = ?
+             AND a.release_sha = ?
+             AND a.manifest_digest = ?
+             AND a.drain_run_id = ?
+             AND a.attestation_digest = ?
+             AND a.revoked_at IS NULL
+             AND datetime(a.expires_at) > datetime('now')
+           ORDER BY a.id DESC LIMIT 1`,
+        )
+        .get(
+          id,
+          live.destinationJid,
+          live.releaseSha,
+          live.manifestDigest,
+          live.drainRunId,
+          live.attestationDigest,
+        ) as { id: number } | undefined;
+      if (approval === undefined) return { applied: false, reason: 'no_matching_approval' as const };
+      const row = this.db.raw
+        .prepare(
+          `UPDATE capability_obligations
+           SET state = 'waiting_capability', drain_approval_id = ?, updated_at = datetime('now')
+           WHERE id = ? AND state = 'waiting_approval'
+           RETURNING id`,
+        )
+        .get(approval.id, id);
+      if (row === undefined) return { applied: false, reason: 'no_matching_approval' as const };
+      this.appendEventWithinCallerTransaction(
+        {
+          action: 'obligation.re_arm',
+          actorType: 'operator',
+          reasonCode: 'group_drain_approved',
+          detail: { approvalId: approval.id, drainRunId: live.drainRunId },
+        },
+        id,
+      );
+      return { applied: true, approvalId: approval.id };
+    });
   }
 
   recordExecutionReceipt(params: {
@@ -414,13 +522,17 @@ export class CapabilityObligationStore {
     mediaDigest: string | null;
     resultStatus: 'ok' | 'error';
     outputEvidence: Record<string, unknown> | null;
+    /** D6: the receipt names the exact claim/attempt it proves. */
+    claimEpoch: number;
+    attemptNumber: number;
   }): number {
     const result = this.db.raw
       .prepare(
         `INSERT INTO capability_execution_receipts
            (obligation_id, logical_turn_id, tool_use_id, skill_name, contract_version,
-            input_digest, media_digest, result_status, output_evidence)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            input_digest, media_digest, result_status, output_evidence,
+            claim_epoch, attempt_number)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         params.obligationId,
@@ -432,6 +544,8 @@ export class CapabilityObligationStore {
         params.mediaDigest,
         params.resultStatus,
         params.outputEvidence == null ? null : JSON.stringify(params.outputEvidence),
+        params.claimEpoch,
+        params.attemptNumber,
       );
     return Number(result.lastInsertRowid);
   }
