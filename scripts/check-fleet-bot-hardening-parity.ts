@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { isRecord } from '../src/lib/type-guards.ts';
+import { isNonEmptyString, isRecord } from '../src/lib/type-guards.ts';
 import { MS_PER_DAY } from '../src/lib/time-units.ts';
 import { receiptCapabilityDigest } from './lib/fleet-receipt-digest.ts';
 import { rosterEpoch, rosterInventory } from './lib/fleet-roster-inventory.ts';
@@ -441,7 +441,7 @@ function validateRows(
           ));
         }
 
-        if (typeof provider !== 'string' || provider.trim() === '') {
+        if (!isNonEmptyString(provider)) {
           findings.push(finding(
             'invalid-row-release-identity',
             `${context}.releaseIdentity.provider must be a non-empty string`,
@@ -580,12 +580,12 @@ function validateRows(
 
     if (status === 'pending-rollout') {
       if (gapCount === 0) findings.push(finding('pending-row-without-gap', `${context} is pending-rollout without a gap`));
-      if (typeof rawRow['nextAction'] !== 'string' || rawRow['nextAction'].trim() === '') {
+      if (!isNonEmptyString(rawRow['nextAction'])) {
         findings.push(finding('pending-row-without-next-action', `${context} needs a nextAction`));
       }
     }
 
-    if (status === 'blocked' && (typeof rawRow['nextAction'] !== 'string' || rawRow['nextAction'].trim() === '')) {
+    if (status === 'blocked' && !isNonEmptyString(rawRow['nextAction'])) {
       findings.push(finding('blocked-row-without-next-action', `${context} needs a nextAction`));
     }
 

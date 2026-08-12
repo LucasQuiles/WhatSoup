@@ -1,4 +1,5 @@
 import { execFileSync, spawn } from 'node:child_process';
+import { isNonEmptyString } from '../../../../src/lib/type-guards.ts';
 import {
   accessSync,
   closeSync,
@@ -526,7 +527,7 @@ export function validateBoundaryReviewInput(input: unknown): BoundaryValidationR
       Array.isArray(contract['argv'])
         && contract['argv'].length > 0
         && contract['argv'].length <= 128
-        && contract['argv'].every((entry) => typeof entry === 'string' && entry.length > 0 && !/[\0\r\n]/.test(entry) && Buffer.byteLength(entry, 'utf8') <= 4_096),
+        && contract['argv'].every((entry) => isNonEmptyString(entry) && !/[\0\r\n]/.test(entry) && Buffer.byteLength(entry, 'utf8') <= 4_096),
       issues,
       'reproduction-contract-argv-invalid',
       `${base}.argv`,

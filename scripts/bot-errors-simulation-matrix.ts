@@ -2,6 +2,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { isNonEmptyString } from '../src/lib/type-guards.ts';
 
 export type BotErrorsSimulationDomain =
   | 'provider-runtime'
@@ -319,15 +320,15 @@ function checkRequiredDomains(findings: string[]): void {
 
 function checkRowShape(findings: string[]): void {
   for (const row of BOT_ERRORS_SIMULATION_MATRIX) {
-    if (!row.id.trim()) findings.push('matrix row has empty id');
-    if (!row.signal.trim()) findings.push(`${row.id}: signal must be non-empty`);
-    if (!row.expectedOutcome.trim()) findings.push(`${row.id}: expectedOutcome must be non-empty`);
+    if (!isNonEmptyString(row.id)) findings.push('matrix row has empty id');
+    if (!isNonEmptyString(row.signal)) findings.push(`${row.id}: signal must be non-empty`);
+    if (!isNonEmptyString(row.expectedOutcome)) findings.push(`${row.id}: expectedOutcome must be non-empty`);
     if (row.evidence.length === 0) findings.push(`${row.id}: at least one evidence anchor is required`);
     for (const anchor of row.evidence) {
-      if (!anchor.file.trim()) findings.push(`${row.id}: evidence file must be non-empty`);
+      if (!isNonEmptyString(anchor.file)) findings.push(`${row.id}: evidence file must be non-empty`);
       if (anchor.anchors.length === 0) findings.push(`${row.id}: ${anchor.file} must list at least one anchor`);
       for (const marker of anchor.anchors) {
-        if (!marker.trim()) findings.push(`${row.id}: ${anchor.file} includes an empty anchor`);
+        if (!isNonEmptyString(marker)) findings.push(`${row.id}: ${anchor.file} includes an empty anchor`);
       }
     }
   }

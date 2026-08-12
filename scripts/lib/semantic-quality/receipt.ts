@@ -15,6 +15,7 @@ import {
 import path from 'node:path';
 
 import { assertNoSecretLike } from '../../artifact-redaction.ts';
+import { isNonEmptyString } from '../../../src/lib/type-guards.ts';
 import { cleanGitEnv } from '../../../src/lib/git-env.ts';
 import { fsyncDirectory, privateWriteError } from '../../../src/lib/private-fs.ts';
 import { parseBoundaryJsonBytes } from '../verification/boundary-run/schema.ts';
@@ -496,7 +497,7 @@ function correlationIdSha256(input: {
 }
 
 export function buildBoundaryReceipt(input: BuildBoundaryReceiptInput): BoundaryReceipt {
-  if (typeof input.invocation !== 'string' || input.invocation.trim().length === 0) {
+  if (!isNonEmptyString(input.invocation)) {
     throw new Error('boundary receipt invocation is required');
   }
   if (!BOUNDARY_ACTIONS.has(input.action)) {

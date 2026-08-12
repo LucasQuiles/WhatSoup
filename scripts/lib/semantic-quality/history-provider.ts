@@ -1,4 +1,5 @@
 import { assertNoSecretLike } from '../../artifact-redaction.ts';
+import { isNonEmptyString } from '../../../src/lib/type-guards.ts';
 
 import { canonicalPathBlobRecords } from './fingerprint.ts';
 import type {
@@ -155,7 +156,7 @@ function validArtifactUrl(
 function canonicalStringSet(value: unknown, field: string): string[] {
   if (!Array.isArray(value)) throw new Error(`${field} must be an array`);
   const entries = value.map((entry, index) => {
-    if (typeof entry !== 'string' || entry.trim().length === 0) {
+    if (!isNonEmptyString(entry)) {
       throw new Error(`${field}[${index}] must be a non-empty string`);
     }
     const text = entry.trim();

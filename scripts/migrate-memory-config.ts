@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { migrateLegacyMemoryConfig } from '../src/config-memory-migration.ts';
+import { isNonEmptyString } from '../src/lib/type-guards.ts';
 
 interface ParsedArgs {
   root: string;
@@ -87,13 +88,13 @@ export function parseArgs(argv: string[]): ParsedArgs {
     }
   }
 
-  if (!args.root.trim()) {
+  if (!isNonEmptyString(args.root)) {
     throw new Error('--root must not be empty');
   }
-  if (args.configs.some((configPath) => !configPath.trim())) {
+  if (args.configs.some((configPath) => !isNonEmptyString(configPath))) {
     throw new Error('--config requires a path');
   }
-  if (args.instances.some((name) => !name.trim())) {
+  if (args.instances.some((name) => !isNonEmptyString(name))) {
     throw new Error('--instance requires a name');
   }
 

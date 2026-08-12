@@ -115,6 +115,7 @@ import { DatabaseSync } from 'node:sqlite';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
+import { isNonEmptyString } from '../src/lib/type-guards.ts';
 import {
   REGISTRY,
   TRACKED_RESERVED,
@@ -444,7 +445,7 @@ export function scanDurabilityWriterInvariant(
   // an explicit justification — the same anti-dodge rule (2b) applies to
   // NON_STATUS_TABLES, applied here to self-provisioned ones.
   for (const entry of selfProvisioned) {
-    if (!entry.table?.trim() || !entry.module?.trim() || !entry.reason?.trim()) {
+    if (!isNonEmptyString(entry.table) || !isNonEmptyString(entry.module) || !isNonEmptyString(entry.reason)) {
       findings.push({
         kind: 'self-provisioned-missing-metadata',
         table: entry.table || '(unnamed)',
@@ -465,7 +466,7 @@ export function scanDurabilityWriterInvariant(
     }
     const strippedModule = stripComments(moduleContent);
     const ddl = extractCreateTableDdl(strippedModule, entry.table) ?? strippedModule;
-    if (STATUS_LIKE_COLUMN_RE.test(ddl) && !entry.justification?.trim()) {
+    if (STATUS_LIKE_COLUMN_RE.test(ddl) && !isNonEmptyString(entry.justification)) {
       findings.push({
         kind: 'self-provisioned-anti-dodge-unjustified',
         table: entry.table,
@@ -478,7 +479,7 @@ export function scanDurabilityWriterInvariant(
   // declared-exception array in this registry: a bare exclusion (no reason)
   // is not a declared one.
   for (const entry of discoveryExclusions) {
-    if (!entry.table?.trim() || !entry.reason?.trim()) {
+    if (!isNonEmptyString(entry.table) || !isNonEmptyString(entry.reason)) {
       findings.push({
         kind: 'discovery-exclusion-missing-metadata',
         table: entry.table || '(unnamed)',
@@ -510,7 +511,7 @@ export function scanDurabilityWriterInvariant(
       // Fall back to scanning the DDL TEXT itself with the same regex, so a
       // status-shaped column can't hide behind a replay failure.
       const createSql = snapshot.get(table)?.createSql ?? '';
-      if (STATUS_LIKE_COLUMN_RE.test(createSql) && !nonStatusJustifications[table]?.trim()) {
+      if (STATUS_LIKE_COLUMN_RE.test(createSql) && !isNonEmptyString(nonStatusJustifications[table])) {
         findings.push({
           kind: 'anti-dodge-unjustified',
           table,
@@ -522,7 +523,7 @@ export function scanDurabilityWriterInvariant(
     const tableColumns = introspection?.columns ?? [];
     const suspicious = tableColumns.filter((c) => STATUS_LIKE_COLUMN_RE.test(c));
     if (suspicious.length === 0) continue;
-    if (!nonStatusJustifications[table]?.trim()) {
+    if (!isNonEmptyString(nonStatusJustifications[table])) {
       findings.push({
         kind: 'anti-dodge-unjustified',
         table,

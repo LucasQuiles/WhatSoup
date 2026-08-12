@@ -23,6 +23,7 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { isHelpFlag, parseClosedOptions } from './lib/cli-args.ts';
+import { isNonEmptyString } from '../src/lib/type-guards.ts';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -119,7 +120,7 @@ export function loadRequiredContexts(cwd: string = process.cwd()): RequiredConte
       throw new Error(`${REGISTRY_PATH}: contexts[${i}] must be an object`);
     }
     const c = ctx as Record<string, unknown>;
-    if (typeof c.name !== 'string' || c.name.trim().length === 0) {
+    if (!isNonEmptyString(c.name)) {
       throw new Error(`${REGISTRY_PATH}: contexts[${i}].name must be a non-empty string`);
     }
     if (c.source !== 'github-actions' && c.source !== 'check-runs') {

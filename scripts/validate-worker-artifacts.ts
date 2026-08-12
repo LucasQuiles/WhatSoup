@@ -3,6 +3,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { MS_PER_MINUTE } from '../src/lib/time-units.ts';
+import { isNonEmptyString } from '../src/lib/type-guards.ts';
 
 export interface WorkerArtifactIssue {
   code: string;
@@ -130,7 +131,7 @@ function resolveDeclaredPath(dir: string, declaredPath: string): string {
 }
 
 function parseTimestamp(value: unknown): number | null {
-  if (typeof value !== 'string' || !value.trim()) return null;
+  if (!isNonEmptyString(value)) return null;
   const parsed = Date.parse(value);
   return Number.isFinite(parsed) ? parsed : null;
 }
@@ -154,7 +155,7 @@ function readManifest(
   }
 
   const body = readFileSync(manifestPath, 'utf8');
-  const lines = body.split(/\r?\n/).filter((line) => line.trim().length > 0);
+  const lines = body.split(/\r?\n/).filter((line) => isNonEmptyString(line));
   if (lines.length < 2) {
     issue(issues, 'empty-worker-manifest', manifestPath, 'Worker run manifest must include a header and at least one worker row.');
     return { path: manifestPath, rowsByReport: new Map() };
@@ -178,7 +179,7 @@ function readManifest(
     const fields = lines[i].split('\t');
     const values = Object.fromEntries(headers.map((header, index) => [header, fields[index] ?? '']));
 
-    const emptyColumns = REQUIRED_MANIFEST_COLUMNS.filter((column) => !values[column]?.trim());
+    const emptyColumns = REQUIRED_MANIFEST_COLUMNS.filter((column) => !isNonEmptyString(values[column]));
     if (emptyColumns.length > 0) {
       issue(
         issues,
@@ -277,7 +278,7 @@ export function validateWorkerArtifacts(options: WorkerArtifactOptions): WorkerA
     }
 
     const body = readFileSync(filePath, 'utf8');
-    if (!body.trim()) {
+    if (!isNonEmptyString(body)) {
       issue(issues, 'blank-worker-report', filePath, 'Worker report only contains whitespace.');
     }
 
@@ -302,7 +303,7 @@ export function validateWorkerArtifacts(options: WorkerArtifactOptions): WorkerA
         if (metadata.exitCode !== 0) {
           issue(issues, 'worker-nonzero-exit', filePath, 'Worker metadata must record exitCode: 0.');
         }
-        if (typeof metadata.model !== 'string' || !metadata.model.trim()) {
+        if (!isNonEmptyString(metadata.model)) {
           issue(issues, 'worker-missing-model', filePath, 'Worker metadata must include a non-empty model.');
         }
         if (typeof metadata.stdoutBytes !== 'number' || metadata.stdoutBytes <= 0) {

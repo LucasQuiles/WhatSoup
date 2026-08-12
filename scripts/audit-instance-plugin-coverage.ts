@@ -3,7 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { isRecord } from '../src/lib/type-guards.ts';
+import { isNonEmptyString, isRecord } from '../src/lib/type-guards.ts';
 
 interface ParsedArgs {
   root: string;
@@ -108,9 +108,9 @@ export function parseArgs(argv: string[]): ParsedArgs {
     }
   }
 
-  if (!args.root.trim()) throw new Error('--root must not be empty');
-  if (!args.settingsPath.trim()) throw new Error('--settings must not be empty');
-  if (args.instances.some((name) => !name.trim())) throw new Error('--instance requires a name');
+  if (!isNonEmptyString(args.root)) throw new Error('--root must not be empty');
+  if (!isNonEmptyString(args.settingsPath)) throw new Error('--settings must not be empty');
+  if (args.instances.some((name) => !isNonEmptyString(name))) throw new Error('--instance requires a name');
   return args;
 }
 

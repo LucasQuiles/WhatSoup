@@ -3,7 +3,7 @@
 // ---------------------------------------------------------------------------
 
 import type { QueryKey } from '@tanstack/react-query';
-import { isRecord } from './type-guards';
+import { isNonEmptyString, isRecord } from './type-guards';
 
 // ---------------------------------------------------------------------------
 // WS event types (mirrors server contract)
@@ -48,10 +48,6 @@ const INVALIDATION_TYPES = new Set<WsInvalidationEvent['type']>([
   'access_changed',
   'lid_conflict',
 ]);
-
-function isNonEmptyString(value: unknown): value is string {
-  return typeof value === 'string' && value.length > 0;
-}
 
 /** Parse and validate a WebSocket frame before the React hook uses it. */
 export function parseWsEvent(data: unknown): WsEvent | null {

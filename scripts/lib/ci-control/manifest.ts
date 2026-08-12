@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-import { isRecord } from '../../../src/lib/type-guards.ts';
+import { isNonEmptyString, isRecord } from '../../../src/lib/type-guards.ts';
 import { parseBoundaryJsonBytes } from '../verification/boundary-run/schema.ts';
 import { isValidGitRefName, type OutgoingRefPolicyV1 } from './ref-policy.ts';
 
@@ -281,7 +281,7 @@ function inspectExactObject(
 }
 
 function requiredString(value: unknown, path: string, problems: ManifestIssue[], code = 'ci.manifest.invalid-string'): value is string {
-  if (typeof value !== 'string' || value.trim().length === 0) {
+  if (!isNonEmptyString(value)) {
     problems.push(issue(code, path, 'a non-empty string is required'));
     return false;
   }

@@ -22,6 +22,8 @@
  * count or print it as one.
  */
 
+import { isNonEmptyString } from '../../src/lib/type-guards.ts';
+
 /** The five distinct document shapes the 7 baselines actually use. */
 export type BaselineShape = 'entry-array' | 'single-array-object' | 'count-map' | 'fitness-rules';
 
@@ -463,10 +465,10 @@ export function parseWaiverDocument(document: unknown): GrowthWaiver[] {
     if (typeof maxWeight !== 'number' || !Number.isInteger(maxWeight) || maxWeight < 0) {
       throw new BaselineShapeError(`growth-waivers[${i}]: maxWeight must be a non-negative integer`);
     }
-    if (typeof reason !== 'string' || reason.trim().length === 0) {
+    if (!isNonEmptyString(reason)) {
       throw new BaselineShapeError(`growth-waivers[${i}]: reason must be a non-empty string`);
     }
-    if (typeof issue !== 'string' || issue.trim().length === 0) {
+    if (!isNonEmptyString(issue)) {
       throw new BaselineShapeError(`growth-waivers[${i}]: issue must be a non-empty string`);
     }
     for (const [field, value] of [['grantedAt', grantedAt], ['expiresAt', expiresAt]] as const) {

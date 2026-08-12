@@ -3,6 +3,7 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { cleanGitEnv, normalizeRepoPath } from './lib/guard-core.ts';
+import { isNonEmptyString } from '../src/lib/type-guards.ts';
 
 export type DocDriftKind =
   | 'tool-count'
@@ -446,7 +447,7 @@ function findDesignGuardVitestArgs(cwd: string): { testFiles: string[]; vitestAr
   const packagePath = path.resolve(cwd, 'package.json');
   const packageJson = JSON.parse(readFileSync(packagePath, 'utf8')) as PackageJsonWithScripts;
   const script = packageJson.scripts?.['test:design-guards'];
-  if (typeof script !== 'string' || script.trim() === '') {
+  if (!isNonEmptyString(script)) {
     throw new Error('ERROR(schema:package.json): missing scripts.test:design-guards');
   }
 

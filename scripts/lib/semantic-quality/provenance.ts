@@ -1,4 +1,5 @@
 import { assertNoSecretLike } from '../../artifact-redaction.ts';
+import { isNonEmptyString } from '../../../src/lib/type-guards.ts';
 
 import type {
   BoundaryAction,
@@ -69,7 +70,7 @@ function uniqueSorted(values: Iterable<string>): string[] {
 function validLimitations(value: unknown): value is string[] {
   return (
     Array.isArray(value) &&
-    value.every((item) => typeof item === 'string' && item.trim().length > 0)
+    value.every(isNonEmptyString)
   );
 }
 
@@ -166,10 +167,7 @@ export function evaluateProvenance(input: {
   if (!REPOSITORY_RE.test(observation.repository)) {
     return [unavailable(input.action, observation, ['repository identity is invalid'])];
   }
-  if (
-    typeof observation.evidenceSource !== 'string' ||
-    observation.evidenceSource.trim().length === 0
-  ) {
+  if (!isNonEmptyString(observation.evidenceSource)) {
     return [unavailable(input.action, observation, ['evidence source is missing'])];
   }
   if (!isValidHistoryTimestamp(observation.observedAt)) {

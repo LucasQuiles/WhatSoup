@@ -9,7 +9,7 @@ import {
 } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { asNonEmptyString, isRecord } from '../src/lib/type-guards.ts';
+import { asNonEmptyString, isNonEmptyString, isRecord } from '../src/lib/type-guards.ts';
 
 type FileKind = 'missing' | 'regular' | 'directory' | 'symlink' | 'other';
 type ExpectedKind = 'file' | 'directory';
@@ -228,7 +228,7 @@ function parseProfileInstances(value: unknown): HealthProfileInstance[] {
     .map((item, index) => {
       if (!isRecord(item)) return null;
       const name = item['name'];
-      if (typeof name !== 'string' || name.trim().length === 0) return null;
+      if (!isNonEmptyString(name)) return null;
       const trimmed = name.trim();
       if (!/^[A-Za-z0-9._-]+$/.test(trimmed)) {
         throw new Error(`health profile instances[${index}].name must be a safe instance name`);
@@ -241,11 +241,12 @@ function parseProfileInstances(value: unknown): HealthProfileInstance[] {
 
 function profileStringValue(profile: Record<string, unknown>, key: string): string | undefined {
   const value = profile[key];
-  if (typeof value === 'string' && value.trim().length > 0) return value.trim();
+  const direct = asNonEmptyString(value);
+  if (direct !== undefined) return direct;
   const nested = profile['fleetApi'];
   if (isRecord(nested)) {
     const nestedValue = nested[key];
-    if (typeof nestedValue === 'string' && nestedValue.trim().length > 0) return nestedValue.trim();
+    return asNonEmptyString(nestedValue) ?? undefined;
   }
   return undefined;
 }
@@ -273,7 +274,7 @@ function normalizeProfilePathField(value: string | undefined, field: string): st
 export function parseHealthProfile(payload: unknown): HealthProfile {
   const profile = isRecord(payload) ? payload : {};
   const required = Array.isArray(profile['requiredCredentialFiles'])
-    ? profile['requiredCredentialFiles'].filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+    ? profile['requiredCredentialFiles'].filter((item): item is string => isNonEmptyString(item))
     : [];
   return {
     requiredCredentialFiles: required.map(normalizeCredentialRequirement),
@@ -328,7 +329,7 @@ function lstatKind(filePath: string): { exists: boolean; kind: FileKind; mode?: 
 }
 
 function safeErrorCode(error: unknown): string {
-  if (isRecord(error) && typeof error['code'] === 'string' && error['code'].length > 0) {
+  if (isRecord(error) && isNonEmptyString(error['code'])) {
     return error['code'];
   }
   if (error instanceof Error && error.name.length > 0) {

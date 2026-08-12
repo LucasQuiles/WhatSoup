@@ -43,7 +43,7 @@
  */
 import { createHash } from 'node:crypto';
 
-import { isRecord } from '../../src/lib/type-guards.ts';
+import { isNonEmptyString, isRecord } from '../../src/lib/type-guards.ts';
 import { pyJsonStringify } from './fleet-roster-inventory.ts';
 
 /** Raised when a receipt bundle cannot be reduced to the capability-identity
@@ -84,7 +84,7 @@ export interface ReceiptCapabilityIdentity {
 }
 
 function requireNonEmptyString(value: unknown, field: string): string {
-  if (typeof value !== 'string' || value.trim() === '') {
+  if (!isNonEmptyString(value)) {
     throw new ReceiptDigestError(`receipt.${field} must be a non-empty string`);
   }
   return value;
