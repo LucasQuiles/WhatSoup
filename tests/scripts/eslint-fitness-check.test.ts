@@ -1,6 +1,8 @@
+import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { afterAll, describe, expect, it, vi } from 'vitest';
 
@@ -124,5 +126,38 @@ describe('eslint fitness wrapper — refuses a scan of zero files', () => {
       errSpy.mockRestore();
       logSpy.mockRestore();
     }
+  }, 60_000);
+});
+
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
+
+describe('eslint fitness rule — db-read-prefix', () => {
+  // --stdin --stdin-filename matches the fitness config's src/** glob without
+  // writing scratch files into the real src/ tree (warn-level rules exit 0,
+  // so stdout capture needs no try/catch).
+  const lintVirtualSrcFile = (source: string): string =>
+    execFileSync(
+      'npx',
+      [
+        'eslint',
+        '--config', join(repoRoot, 'eslint.config.fitness.mjs'),
+        '--stdin',
+        '--stdin-filename', join(repoRoot, 'src', '_virtual_db_read_prefix.ts'),
+      ],
+      { encoding: 'utf8', stdio: 'pipe', input: source, cwd: repoRoot },
+    );
+
+  it('flags export function load* with db: Database param', () => {
+    const stdout = lintVirtualSrcFile(
+      'export function loadUsers(db: Database): string[] { return []; }\n',
+    );
+    expect(stdout).toContain('fitness/db-read-prefix');
+  }, 60_000);
+
+  it('passes clean get-prefixed code', () => {
+    const stdout = lintVirtualSrcFile(
+      'export function getUsers(db: Database): string[] { return []; }\n',
+    );
+    expect(stdout).not.toContain('fitness/db-read-prefix');
   }, 60_000);
 });
