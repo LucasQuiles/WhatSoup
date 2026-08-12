@@ -19,6 +19,7 @@ import {
   LEGACY_ACTIVE_SESSION_WITHOUT_COMPLETED_IDENTITY,
   LEGACY_COMPLETED_DELIVERY_IDENTITY_QUARANTINE,
 } from './completed-delivery-identity-admission.fixture.ts';
+import { hoistedLoggerMock, type SingletonLoggerMock } from '../../helpers/logger-mock.ts';
 
 // ─── Hoisted mocks ────────────────────────────────────────────────────────────
 // vi.hoisted values are available inside vi.mock factory callbacks.
@@ -123,14 +124,10 @@ const { mockSession, mockQueue, capturedSessionManagerOptsRef, capturedOnEventRe
 });
 
 const { mockRuntimeLogger, mockReaddirSync } = vi.hoisted(() => ({
-  mockRuntimeLogger: {
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  },
+  mockRuntimeLogger: {} as SingletonLoggerMock,
   mockReaddirSync: vi.fn(() => ['0', '1', '2']),
 }));
+hoistedLoggerMock(mockRuntimeLogger);
 
 const { mockKillSessionTree } = vi.hoisted(() => ({
   mockKillSessionTree: vi.fn(async () => {}),

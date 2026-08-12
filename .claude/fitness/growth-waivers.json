@@ -32,15 +32,6 @@
       "issue": "https://github.com/LucasQuiles/WhatSoup/pull/2128",
       "grantedAt": "2026-08-03",
       "expiresAt": "2026-08-17"
-    },
-    {
-      "path": ".claude/fitness/loggermock-baseline.json",
-      "maxWeight": 55,
-      "reason": "QC-2 (#2977) shape-gates the residue guard: importing the shared helper no longer excuses inline literals, so the baseline honestly re-grows 11 -> 55 machine-generated entries (4 permanent logger/scanner self-tests, 51 status:debt) under the new schemaVersion-2 status/reason format. Self-spending cap at the exact resulting weight; no further growth authorized; payback = the QC-3 remediation sweep draining status:debt toward zero.",
-      "issue": "https://github.com/LucasQuiles/WhatSoup/issues/2977",
-      "grantedAt": "2026-08-12",
-      "expiresAt": "2026-09-09",
-      "admitsNewIdentities": true
     }
   ]
 }
