@@ -724,6 +724,13 @@ schema enforces the four live drain facts match). Historical backfill (`creation
 separately approved manifest. Retained media is bounded (`retentionHorizonDays`, A-08):
 expired media is no longer claimable and is GC-eligible.
 
+**Operator tooling.** `scripts/capability-obligation-admin.ts` provides
+`inspect`/`list`/`cancel`/`adjudicate`. It refuses unless the target database is at exactly
+the current schema (it never migrates a live DB), previews by default (`cancel`/`adjudicate`
+mutate only with `--confirm`), and routes cancel/requeue through the SAME guarded state
+machine as the runtime (a `claimed` in-flight obligation is never operator-mutated). Every
+action records an `operator` audit event carrying the `--run-id` actor and `--idempotency-key`.
+
 ---
 
 ## 6. Database Schema

@@ -52,6 +52,37 @@ export interface CapabilityObligationEventParams {
   detail?: Record<string, unknown> | null;
 }
 
+export interface OperatorAdjudicationParams {
+  /** `cancel` retires; `requeue` re-arms a blocked obligation to the claim pool. */
+  action: 'cancel' | 'requeue';
+  /** Precondition: the obligation must currently be in this state, else refused. */
+  expectedState?: string;
+  reasonCode: string;
+  /** Operator identity / run id, recorded as the audit actor. */
+  actorId: string;
+  /** Recorded in the audit detail; re-running once the target is reached is a no-op. */
+  idempotencyKey?: string;
+  /** Preview only: run every check but never mutate (CLI `--dry-run`). */
+  dryRun?: boolean;
+}
+
+export interface OperatorAdjudicationResult {
+  /** The write actually happened (false for dry-run, no-op, or refusal). */
+  applied: boolean;
+  /** A non-dry-run WOULD mutate (all checks pass and not already in target). */
+  wouldApply: boolean;
+  currentState: string | null;
+  /** The obligation is already in the requested target state (idempotent no-op). */
+  alreadyInTarget: boolean;
+  refusedReason: 'not_found' | 'precondition_mismatch' | 'illegal_from_state' | null;
+}
+
+export interface OperatorObligationView {
+  obligation: Record<string, unknown>;
+  events: Array<Record<string, unknown>>;
+  receipts: Array<Record<string, unknown>>;
+}
+
 export interface CapabilityObligationRetainedMedia {
   path: string;
   sha256: string;
@@ -441,6 +472,130 @@ export class CapabilityObligationStore {
       );
       return { applied: true };
     });
+  }
+
+  /**
+   * Operator adjudication of a NON-claimed obligation (inspect/cancel/adjudicate
+   * CLI). `cancel` retires a waiting/blocked obligation; `requeue` re-arms a
+   * blocked (`blocked_ambiguous`/`blocked_media`) obligation to the claimable
+   * pool. Both go through the SAME guarded state machine as the runtime — never
+   * raw SQL that dodges the transition whitelist — and append an `operator`
+   * audit event. Idempotent: already-in-target is a no-op success. A claimed
+   * (in-flight) obligation is never operator-mutated; wait for it to block.
+   */
+  operatorAdjudicateObligation(
+    id: number,
+    params: OperatorAdjudicationParams,
+  ): OperatorAdjudicationResult {
+    const target = params.action === 'cancel' ? 'cancelled' : 'waiting_capability';
+    const legalFrom =
+      params.action === 'cancel'
+        ? ['waiting_approval', 'waiting_capability', 'blocked_media', 'blocked_ambiguous']
+        : ['blocked_ambiguous', 'blocked_media'];
+    return withTransaction(this.db, () => {
+      const row = this.db.raw
+        .prepare('SELECT state FROM capability_obligations WHERE id = ?')
+        .get(id) as { state: string } | undefined;
+      if (row === undefined) {
+        return { applied: false, wouldApply: false, currentState: null, alreadyInTarget: false, refusedReason: 'not_found' };
+      }
+      if (row.state === target) {
+        return { applied: false, wouldApply: false, currentState: row.state, alreadyInTarget: true, refusedReason: null };
+      }
+      if (params.expectedState !== undefined && row.state !== params.expectedState) {
+        return { applied: false, wouldApply: false, currentState: row.state, alreadyInTarget: false, refusedReason: 'precondition_mismatch' };
+      }
+      if (!legalFrom.includes(row.state)) {
+        return { applied: false, wouldApply: false, currentState: row.state, alreadyInTarget: false, refusedReason: 'illegal_from_state' };
+      }
+      // All checks pass — a real run would mutate. Dry-run stops here.
+      if (params.dryRun === true) {
+        return { applied: false, wouldApply: true, currentState: row.state, alreadyInTarget: false, refusedReason: null };
+      }
+      // The state-transition trigger is the ultimate authority; the WHERE state
+      // guard makes the write optimistic-concurrency safe.
+      const upd =
+        params.action === 'cancel'
+          ? this.db.raw
+              .prepare(
+                `UPDATE capability_obligations
+                 SET state = 'cancelled', claim_token = NULL, claim_expires_at = NULL,
+                     updated_at = datetime('now')
+                 WHERE id = ? AND state = ? RETURNING id`,
+              )
+              .get(id, row.state)
+          : this.db.raw
+              .prepare(
+                `UPDATE capability_obligations
+                 SET state = 'waiting_capability', claim_token = NULL, claim_expires_at = NULL,
+                     next_attempt_at = datetime('now'), updated_at = datetime('now')
+                 WHERE id = ? AND state = ? RETURNING id`,
+              )
+              .get(id, row.state);
+      if (upd === undefined) {
+        return { applied: false, wouldApply: false, currentState: row.state, alreadyInTarget: false, refusedReason: 'illegal_from_state' };
+      }
+      this.appendEventWithinCallerTransaction(
+        {
+          action: params.action === 'cancel' ? 'obligation.cancel' : 'obligation.re_arm',
+          actorType: 'operator',
+          actorId: params.actorId,
+          reasonCode: params.reasonCode,
+          detail: { idempotencyKey: params.idempotencyKey ?? null, expectedState: params.expectedState ?? null },
+        },
+        id,
+      );
+      return { applied: true, wouldApply: true, currentState: target, alreadyInTarget: false, refusedReason: null };
+    });
+  }
+
+  /** Operator read: one obligation's summary + its audit events + receipts. */
+  operatorInspectObligation(id: number): OperatorObligationView | null {
+    const obligation = this.db.raw
+      .prepare(
+        `SELECT id, state, is_group, delivery_jid, conversation_key, required_capability,
+                contract_version, source_digest, source_token, retained_media_path,
+                attempt_count, claim_epoch, next_attempt_at, completion_proof_id,
+                creation_reason, created_at, updated_at
+         FROM capability_obligations WHERE id = ?`,
+      )
+      .get(id) as Record<string, unknown> | undefined;
+    if (obligation === undefined) return null;
+    // The creation event is appended BEFORE the obligation row exists (its id
+    // becomes creation_evidence_event_id), so it carries obligation_id = NULL;
+    // include it via that back-reference for a complete operator history.
+    const events = this.db.raw
+      .prepare(
+        `SELECT action, actor_type, actor_id, reason_code, created_at
+         FROM capability_obligation_events
+         WHERE obligation_id = ?
+            OR id = (SELECT creation_evidence_event_id FROM capability_obligations WHERE id = ?)
+         ORDER BY id ASC`,
+      )
+      .all(id, id) as Array<Record<string, unknown>>;
+    const receipts = this.db.raw
+      .prepare(
+        `SELECT id, result_status, claim_epoch, attempt_number, source_digest, created_at
+         FROM capability_execution_receipts WHERE obligation_id = ? ORDER BY id ASC`,
+      )
+      .all(id) as Array<Record<string, unknown>>;
+    return { obligation, events, receipts };
+  }
+
+  /** Operator read: obligations filtered by state (or all), most-recent first. */
+  operatorListObligations(params: { state?: string; limit: number }): Array<Record<string, unknown>> {
+    const base =
+      `SELECT id, state, is_group, delivery_jid, required_capability, attempt_count,
+              next_attempt_at, created_at, updated_at
+       FROM capability_obligations`;
+    if (params.state !== undefined) {
+      return this.db.raw
+        .prepare(`${base} WHERE state = ? ORDER BY id DESC LIMIT ?`)
+        .all(params.state, params.limit) as Array<Record<string, unknown>>;
+    }
+    return this.db.raw
+      .prepare(`${base} ORDER BY id DESC LIMIT ?`)
+      .all(params.limit) as Array<Record<string, unknown>>;
   }
 
   settleCompleted(
