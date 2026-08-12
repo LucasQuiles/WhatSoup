@@ -25,12 +25,8 @@ const { mockConfig, mockRuntimeLogger } = vi.hoisted(() => ({
     pineconeAllowedIndexes: [] as string[],
     voiceReply: 'never' as const,
   },
-  mockRuntimeLogger: {
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  },
+  // TYPE NOTE: assertions use mockRuntimeLogger.info/warn/error; typed for property access.
+  mockRuntimeLogger: {} as Record<string, ReturnType<typeof vi.fn>>,
 }));
 
 const { mockSocketServerInstance, MockWhatSoupSocketServer } = vi.hoisted(() => {
@@ -49,12 +45,9 @@ const { mockSocketServerInstance, MockWhatSoupSocketServer } = vi.hoisted(() => 
 
 vi.mock('../../../src/config.ts', () => ({ config: mockConfig }));
 vi.mock('../../../src/logger.ts', async () => {
-  const { singletonLoggerMock } = await import('../../helpers/logger-mock.ts');
-  const singleton = singletonLoggerMock();
-  Object.assign(mockRuntimeLogger, singleton);
-  return {
-    createChildLogger: () => ({ ...singleton, child: vi.fn().mockReturnThis() }),
-  };
+  const { hoistedLoggerMock } = await import('../../helpers/logger-mock.ts');
+  const { createChildLogger } = hoistedLoggerMock(mockRuntimeLogger);
+  return { createChildLogger };
 });
 vi.mock('../../../src/core/messages.ts', () => ({
   getRecentMessages: vi.fn(() => []),

@@ -37,74 +37,9 @@
       "reason": "doMock module literal — loggerModuleMock() (QC-1) unblocks migration"
     },
     {
-      "file": "tests/runtimes/agent/command-gate-contract.test.ts",
-      "status": "debt",
-      "reason": "bridge literal alongside helper import — QC-3 remediation sweep"
-    },
-    {
-      "file": "tests/runtimes/agent/handoff-distill-coordinator.test.ts",
-      "status": "debt",
-      "reason": "bridge literal alongside helper import — QC-3 remediation sweep"
-    },
-    {
-      "file": "tests/runtimes/agent/handoff-notice-prefix.test.ts",
-      "status": "debt",
-      "reason": "bridge literal alongside helper import — QC-3 remediation sweep"
-    },
-    {
-      "file": "tests/runtimes/agent/mcp-config-dual-write.test.ts",
-      "status": "debt",
-      "reason": "bridge literal alongside helper import — QC-3 remediation sweep"
-    },
-    {
-      "file": "tests/runtimes/agent/model-pin.test.ts",
-      "status": "debt",
-      "reason": "bridge literal alongside helper import — QC-3 remediation sweep"
-    },
-    {
-      "file": "tests/runtimes/agent/outbound-queue.test.ts",
-      "status": "debt",
-      "reason": "bridge literal alongside helper import — QC-3 remediation sweep"
-    },
-    {
-      "file": "tests/runtimes/agent/runtime-edge-coverage.test.ts",
-      "status": "debt",
-      "reason": "bridge literal alongside helper import — QC-3 remediation sweep"
-    },
-    {
-      "file": "tests/runtimes/agent/runtime-egress-wiring.test.ts",
-      "status": "debt",
-      "reason": "bridge literal alongside helper import — QC-3 remediation sweep"
-    },
-    {
-      "file": "tests/runtimes/agent/runtime-reset-teardown.test.ts",
-      "status": "debt",
-      "reason": "bridge literal alongside helper import — QC-3 remediation sweep"
-    },
-    {
-      "file": "tests/runtimes/agent/runtime-secondhalf-branches.test.ts",
-      "status": "debt",
-      "reason": "bridge literal alongside helper import — QC-3 remediation sweep"
-    },
-    {
-      "file": "tests/runtimes/agent/runtime-tool-registrations.test.ts",
-      "status": "debt",
-      "reason": "bridge literal alongside helper import — QC-3 remediation sweep"
-    },
-    {
       "file": "tests/runtimes/agent/runtime.test.ts",
       "status": "debt",
       "reason": "waiver-deferred — migrate in the waiver car alongside growth-waivers.json"
-    },
-    {
-      "file": "tests/runtimes/agent/session.test.ts",
-      "status": "debt",
-      "reason": "bridge literal alongside helper import — QC-3 remediation sweep"
-    },
-    {
-      "file": "tests/runtimes/agent/system-turn-timeout-retry.test.ts",
-      "status": "debt",
-      "reason": "bridge literal alongside helper import — QC-3 remediation sweep"
     },
     {
       "file": "tests/runtimes/chat/context.test.ts",

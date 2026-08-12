@@ -1,21 +1,16 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-const { createChildLogger } = vi.hoisted(() => ({
-  createChildLogger: vi.fn(() => ({
-    debug: vi.fn(),
-    error: vi.fn(),
-    info: vi.fn(),
-    trace: vi.fn(),
-    warn: vi.fn(),
-  })),
+// TYPE NOTE: createChildLogger is a hoisted vi.fn asserted at L38; mockLogger carries the shared spy identity.
+const { mockLogger, createChildLogger } = vi.hoisted(() => ({
+  mockLogger: {} as Record<string, ReturnType<typeof vi.fn>>,
+  createChildLogger: vi.fn(),
 }));
 
 vi.mock('../../../src/logger.ts', async () => {
-  const { singletonLoggerMock } = await import('../../helpers/logger-mock.ts');
-  const singleton = singletonLoggerMock();
-  // The hoisted literal's inferred type includes an (unasserted) trace member
-  // the shared singleton deliberately omits; spread preserves the singleton's
-  // spy identity for the asserted members.
+  const { hoistedLoggerMock } = await import('../../helpers/logger-mock.ts');
+  const { singleton } = hoistedLoggerMock(mockLogger);
+  // The hoisted ref omits trace (the shared singleton has no trace key),
+  // so spread it back for callers that access .trace.
   createChildLogger.mockImplementation(() => ({ ...singleton, trace: vi.fn() }));
   return { createChildLogger };
 });

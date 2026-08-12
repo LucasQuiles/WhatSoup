@@ -6,21 +6,15 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const { createChildLogger, _logSingleton } = vi.hoisted(() => {
-  const _logSingleton = {
-    debug: vi.fn(),
-    error: vi.fn(),
-    info: vi.fn(),
-    trace: vi.fn(),
-    warn: vi.fn(),
-  };
+  // TYPE NOTE: hoistedLoggerMock assigns singleton mocks; typed loose for property access.
+  const _logSingleton = {} as Record<string, ReturnType<typeof vi.fn>>;
   const createChildLogger = vi.fn(() => _logSingleton);
   return { createChildLogger, _logSingleton };
 });
 
 vi.mock('../../../src/logger.ts', async () => {
-  const { singletonLoggerMock } = await import('../../helpers/logger-mock.ts');
-  const singleton = singletonLoggerMock();
-  Object.assign(_logSingleton, singleton);
+  const { hoistedLoggerMock } = await import('../../helpers/logger-mock.ts');
+  hoistedLoggerMock(_logSingleton);
   return { createChildLogger };
 });
 
