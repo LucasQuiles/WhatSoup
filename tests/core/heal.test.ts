@@ -32,19 +32,15 @@ vi.mock('../../src/config.ts', () => ({
 // can assert the per-report warn keeps firing while the alert is suppressed.
 // Every other component keeps a fresh throwaway logger per call — otherwise
 // unrelated warn/info calls (e.g. database.ts) would pollute healLogger.
-const healLogger = vi.hoisted(() => ({
-  info: vi.fn(),
-  warn: vi.fn(),
-  error: vi.fn(),
-  debug: vi.fn(),
-}));
+const healLogger = vi.hoisted(() => ({}) as Record<string, ReturnType<typeof vi.fn>>);
 
 vi.mock('../../src/logger.ts', async () => {
-  const { loggerMock } = await import('../helpers/logger-mock.ts');
-  return {
-    createChildLogger: (component: string) =>
-      component === 'heal' ? healLogger : loggerMock().createChildLogger(),
-  };
+  const { componentLoggerMock, loggerMock } = await import('../helpers/logger-mock.ts');
+  const { log, createChildLogger } = componentLoggerMock('heal', () =>
+    loggerMock().createChildLogger(),
+  );
+  Object.assign(healLogger, log);
+  return { createChildLogger };
 });
 
 vi.mock('../../src/lib/emit-alert.ts', () => {

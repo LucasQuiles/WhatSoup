@@ -2,26 +2,6 @@
   "schemaVersion": 2,
   "entries": [
     {
-      "file": "tests/core/heal.test.ts",
-      "status": "debt",
-      "reason": "bridge literal alongside helper import — QC-3 remediation sweep"
-    },
-    {
-      "file": "tests/core/health-probe-storm.test.ts",
-      "status": "debt",
-      "reason": "bridge literal alongside helper import — QC-3 remediation sweep"
-    },
-    {
-      "file": "tests/core/health.test.ts",
-      "status": "debt",
-      "reason": "bridge literal alongside helper import — QC-3 remediation sweep"
-    },
-    {
-      "file": "tests/core/outbound-identity/guard-store-unavailable.test.ts",
-      "status": "debt",
-      "reason": "bridge literal alongside helper import — QC-3 remediation sweep"
-    },
-    {
       "file": "tests/core/outbound-message-safety.test.ts",
       "status": "debt",
       "reason": "bridge literal alongside helper import — QC-3 remediation sweep"
@@ -30,36 +10,6 @@
       "file": "tests/core/scheduler.test.ts",
       "status": "debt",
       "reason": "unmigrated inline mock (former converse-check specimen)"
-    },
-    {
-      "file": "tests/fleet/health-poller-branches.test.ts",
-      "status": "debt",
-      "reason": "bridge literal alongside helper import — QC-3 remediation sweep"
-    },
-    {
-      "file": "tests/fleet/health-poller-branches2.test.ts",
-      "status": "debt",
-      "reason": "bridge literal alongside helper import — QC-3 remediation sweep"
-    },
-    {
-      "file": "tests/fleet/health-poller-recovery-clear-episodes.test.ts",
-      "status": "debt",
-      "reason": "bridge literal alongside helper import — QC-3 remediation sweep"
-    },
-    {
-      "file": "tests/fleet/health-poller-suppression-episodes.test.ts",
-      "status": "debt",
-      "reason": "bridge literal alongside helper import — QC-3 remediation sweep"
-    },
-    {
-      "file": "tests/fleet/health-poller.test.ts",
-      "status": "debt",
-      "reason": "bridge literal alongside helper import — QC-3 remediation sweep"
-    },
-    {
-      "file": "tests/fleet/probe-liveness-escalation.test.ts",
-      "status": "debt",
-      "reason": "bridge literal alongside helper import — QC-3 remediation sweep"
     },
     {
       "file": "tests/logger-error-key-serializer.test.ts",
