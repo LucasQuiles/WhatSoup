@@ -271,17 +271,20 @@ fi
 domain="gui/$(id -u)"
 
 # Run a command with a timeout in seconds. Returns the command's exit code,
-# or 124 on timeout (matching GNU timeout convention).
+# or 124 on timeout (matching GNU timeout convention). The watchdog subshell
+# must hold no inherited stdio: a killer that keeps the caller's pipes open
+# blocks command substitutions (and any harness reading our output) for the
+# full timeout even after the wrapped command has finished.
 run_with_timeout() {
   local timeout_sec="$1"; shift
-  local cmd_pid exit_code
+  local cmd_pid exit_code killer_pid
   "$@" &
   cmd_pid=$!
   (
     sleep "$timeout_sec"
     kill -9 "$cmd_pid" 2>/dev/null
-  ) &
-  local killer_pid=$!
+  ) < /dev/null > /dev/null 2>&1 &
+  killer_pid=$!
   wait "$cmd_pid" 2>/dev/null
   exit_code=$?
   kill -9 "$killer_pid" 2>/dev/null
