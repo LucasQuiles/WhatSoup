@@ -24,6 +24,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { pathToFileURL } from 'node:url';
 
 import {
+  capabilityInputDigest,
   capabilitySourceDigest,
   evaluateCapabilityContract,
   parseCapabilityContract,
@@ -55,6 +56,15 @@ export interface BackfillConfirmedEntry {
   recoveryJobId: number;
   /** Reviewer's fulfilment determination — only `confirmed_unfulfilled` is eligible. */
   fulfillmentClassification: FulfillmentClassification;
+  /**
+   * sha256 of the reviewer's EVIDENCE MATRIX artifact (candidate §4) — the
+   * transcript, tool/delivery receipts, and later-turn review the classification
+   * rests on. Bound into the manifest digest so the approval is tied to the
+   * SPECIFIC reviewed evidence; a different evidence set yields a different digest.
+   * The executor does not re-derive it (it cannot), but the binding means the
+   * classification is never a bare unauthenticated enum.
+   */
+  evidenceMatrixDigest: string;
   /** Reviewer media classification when the source is media ('document' | 'video'). */
   mediaClass?: string | null;
   /**
@@ -89,6 +99,17 @@ export interface BackfillDescriptor {
   recoveryJobId?: number;
   /** Reviewer's fulfilment determination (F2) — only confirmed_unfulfilled is eligible. */
   fulfillmentClassification?: FulfillmentClassification;
+  /** The media class used for the D1 input digest (F3) — bound, and the executor reuses it. */
+  preparedMediaClass?: string | null;
+  /**
+   * capabilityInputDigest over (message text + preparedMediaClass) at approval
+   * time (F3). Bound into the manifest digest and RE-VERIFIED by the executor
+   * against the current message, so a WhatsApp edit to the replayed instruction
+   * after approval cannot execute under a still-valid digest.
+   */
+  inputDigest?: string;
+  /** sha256 of the reviewer's evidence matrix (F6) — bound into the digest. */
+  evidenceMatrixDigest?: string;
 }
 
 /** Read surface for the recovery-job fulfilment check (a subset of BackfillReadDb). */
@@ -176,6 +197,9 @@ export function computeManifestDigest(manifestId: string, eligible: readonly Bac
         mediaBytes: e.mediaBytes,
         recoveryJobId: e.recoveryJobId,
         fulfillmentClassification: e.fulfillmentClassification,
+        preparedMediaClass: e.preparedMediaClass,
+        inputDigest: e.inputDigest,
+        evidenceMatrixDigest: e.evidenceMatrixDigest,
       }))
       .sort((a, b) => a.sourceInboundSeq - b.sourceInboundSeq),
   );
@@ -311,6 +335,12 @@ export function generateBackfillManifest(
       continue;
     }
 
+    // F3 — bind the actual replay payload: the media class the executor will use,
+    // and the input digest over (message text + that class). The executor
+    // re-verifies this against the CURRENT message, so a post-approval edit fails.
+    const preparedMediaClass = mediaSha256 !== null ? (c.mediaClass ?? null) : null;
+    const inputDigest = capabilityInputDigest({ text: message.content ?? '', preparedMediaClass });
+
     entries.push({
       ...base,
       eligible: true,
@@ -326,6 +356,9 @@ export function generateBackfillManifest(
       mediaBytes,
       recoveryJobId: c.recoveryJobId,
       fulfillmentClassification: c.fulfillmentClassification,
+      preparedMediaClass,
+      inputDigest,
+      evidenceMatrixDigest: c.evidenceMatrixDigest,
     });
   }
 
@@ -367,8 +400,10 @@ function usage(): string {
     'It NEVER inserts obligations or drains; backfill creation + drains are',
     'separately owner-gated steps that consume an APPROVED manifest.',
     '--confirmed is a JSON array of {sourceInboundSeq, sourceMessageId,',
-    '  recoveryJobId, fulfillmentClassification, mediaClass?, reviewerCapability?}.',
-    '  Only fulfillmentClassification="confirmed_unfulfilled" is eligible.',
+    '  recoveryJobId, fulfillmentClassification, evidenceMatrixDigest,',
+    '  mediaClass?, reviewerCapability?}. Only',
+    '  fulfillmentClassification="confirmed_unfulfilled" is eligible; the digest',
+    '  binds destination + source + job + classification + evidence + input digest.',
   ].join('\n');
 }
 
@@ -420,7 +455,8 @@ function renderHuman(m: BackfillManifest): string {
       lines.push(
         `  ELIGIBLE  seq=${e.sourceInboundSeq} dest=${e.deliveryJid}${e.isGroup ? '(group)' : '(dm)'} `
         + `job=${e.recoveryJobId} class=${e.fulfillmentClassification} cap=${e.requiredCapability} `
-        + `by=${e.classifiedBy} ${src} srcDigest=${e.sourceDigest?.slice(0, 12)}`,
+        + `by=${e.classifiedBy} ${src} srcDigest=${e.sourceDigest?.slice(0, 12)} `
+        + `inputDigest=${e.inputDigest?.slice(0, 12)} evidence=${e.evidenceMatrixDigest?.slice(0, 12)}`,
       );
     } else {
       lines.push(`  ineligible seq=${e.sourceInboundSeq} reason=${e.reason}`);

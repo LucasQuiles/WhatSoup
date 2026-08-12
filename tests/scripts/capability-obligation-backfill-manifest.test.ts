@@ -133,10 +133,16 @@ afterEach(() => {
   rmSync(work, { recursive: true, force: true });
 });
 
-function runOn(handle: Database, confirmed: BackfillConfirmedEntry[], manifestId = 'MANIFEST-1') {
-  return generateBackfillManifest(handle.raw as unknown as BackfillReadDb, { manifestId, contract: CONTRACT, confirmed });
+/** Confirmed entry with `evidenceMatrixDigest` optional — the helper supplies a
+ *  stable per-entry default so eligibility tests stay terse. */
+type ConfirmedInput = Omit<BackfillConfirmedEntry, 'evidenceMatrixDigest'> & { evidenceMatrixDigest?: string };
+function withEvidence(confirmed: ConfirmedInput[]): BackfillConfirmedEntry[] {
+  return confirmed.map((c) => ({ evidenceMatrixDigest: `ev-${c.sourceInboundSeq}-${c.sourceMessageId}`, ...c }));
 }
-function run(confirmed: BackfillConfirmedEntry[], manifestId = 'MANIFEST-1') {
+function runOn(handle: Database, confirmed: ConfirmedInput[], manifestId = 'MANIFEST-1') {
+  return generateBackfillManifest(handle.raw as unknown as BackfillReadDb, { manifestId, contract: CONTRACT, confirmed: withEvidence(confirmed) });
+}
+function run(confirmed: ConfirmedInput[], manifestId = 'MANIFEST-1') {
   return runOn(db, confirmed, manifestId);
 }
 
@@ -273,6 +279,28 @@ describe('generateBackfillManifest — digest binding', () => {
     } finally {
       gdb.close();
     }
+  });
+
+  it('FALSIFIER: editing the message text CHANGES the digest even when the source token is identical (F3 inputDigest bind)', () => {
+    seedInbound(db, 20, 'C', 'test-dm@lid');
+    seedMessage(db, 'C', 'test-dm@lid', 'https://youtu.be/a', null);
+    const j = seedRecoveryJob(db, 20, 'C', 'test-dm@lid');
+    const before = run([{ sourceInboundSeq: 20, sourceMessageId: 'C', recoveryJobId: j, fulfillmentClassification: CONFIRMED }]);
+    // Edit the text around the SAME url — sourceToken/sourceDigest unchanged, inputDigest changes.
+    db.raw.prepare("UPDATE messages SET content = 'please watch https://youtu.be/a' WHERE message_id = 'C'").run();
+    const after = run([{ sourceInboundSeq: 20, sourceMessageId: 'C', recoveryJobId: j, fulfillmentClassification: CONFIRMED }]);
+    expect(after.entries[0]!.sourceDigest).toBe(before.entries[0]!.sourceDigest); // token unchanged
+    expect(after.entries[0]!.inputDigest).not.toBe(before.entries[0]!.inputDigest); // payload changed
+    expect(after.manifestDigest).not.toBe(before.manifestDigest);
+  });
+
+  it('FALSIFIER: a different reviewer evidence-matrix digest CHANGES the manifest digest (F6)', () => {
+    seedInbound(db, 21, 'D', 'test-dm@lid');
+    seedMessage(db, 'D', 'test-dm@lid', 'https://youtu.be/a', null);
+    const j = seedRecoveryJob(db, 21, 'D', 'test-dm@lid');
+    const a = run([{ sourceInboundSeq: 21, sourceMessageId: 'D', recoveryJobId: j, fulfillmentClassification: CONFIRMED, evidenceMatrixDigest: 'evidence-A' }]);
+    const b = run([{ sourceInboundSeq: 21, sourceMessageId: 'D', recoveryJobId: j, fulfillmentClassification: CONFIRMED, evidenceMatrixDigest: 'evidence-B' }]);
+    expect(a.manifestDigest).not.toBe(b.manifestDigest);
   });
 
   it('is order-independent over eligible entries and binds the manifest id', () => {

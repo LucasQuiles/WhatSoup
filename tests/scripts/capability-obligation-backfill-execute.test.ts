@@ -17,10 +17,13 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { copyFileSync } from 'node:fs';
+
 import { parseCapabilityContract } from '../../src/core/capability-contract.ts';
 import { Database } from '../../src/core/database.ts';
 import {
   generateBackfillManifest,
+  type BackfillConfirmedEntry,
   type BackfillReadDb,
 } from '../../scripts/capability-obligation-backfill-manifest.ts';
 import { executeBackfill, runBackfillExecuteCli } from '../../scripts/capability-obligation-backfill-execute.ts';
@@ -132,8 +135,12 @@ afterEach(() => {
   rmSync(work, { recursive: true, force: true });
 });
 
-function manifest(confirmed: Parameters<typeof generateBackfillManifest>[1]['confirmed']) {
-  return generateBackfillManifest(db.raw as unknown as BackfillReadDb, { manifestId: 'MANIFEST-1', contract: CONTRACT, confirmed });
+type ConfirmedInput = Omit<BackfillConfirmedEntry, 'evidenceMatrixDigest'> & { evidenceMatrixDigest?: string };
+function withEvidence(confirmed: ConfirmedInput[]): BackfillConfirmedEntry[] {
+  return confirmed.map((c) => ({ evidenceMatrixDigest: `ev-${c.sourceInboundSeq}-${c.sourceMessageId}`, ...c }));
+}
+function manifest(confirmed: ConfirmedInput[]) {
+  return generateBackfillManifest(db.raw as unknown as BackfillReadDb, { manifestId: 'MANIFEST-1', contract: CONTRACT, confirmed: withEvidence(confirmed) });
 }
 
 const exec = (m: ReturnType<typeof manifest>, opts?: { approvedDigest?: string; dryRun?: boolean }) =>
@@ -230,6 +237,43 @@ describe('executeBackfill', () => {
     expect(r.skipped).toEqual([{ sourceInboundSeq: 2, reason: 'media_reverify_failed' }]);
   });
 
+  it('F2 FALSIFIER: with TWO approved entries, one failing aborts the WHOLE run — created=[] and COUNT=0 (no partial backfill)', async () => {
+    // Entry A is perfectly valid.
+    seedInbound(db, 1, 'A', 'test-dm@lid');
+    seedMessage(db, 'A', 'test-dm@lid', 'https://youtu.be/a', null);
+    const jA = seedRecoveryJob(db, 1, 'A', 'test-dm@lid');
+    // Entry B is media whose bytes will be tampered after approval.
+    seedInbound(db, 2, 'B', 'test-dm@lid');
+    const p = mediaFile('b.webm', 'ORIGINAL');
+    seedMessage(db, 'B', 'test-dm@lid', 'clip', p);
+    const jB = seedRecoveryJob(db, 2, 'B', 'test-dm@lid');
+
+    const m = manifest([
+      { sourceInboundSeq: 1, sourceMessageId: 'A', recoveryJobId: jA, fulfillmentClassification: CONFIRMED },
+      { sourceInboundSeq: 2, sourceMessageId: 'B', recoveryJobId: jB, fulfillmentClassification: CONFIRMED, mediaClass: 'video' },
+    ]);
+    writeFileSync(p, 'TAMPERED'); // B will fail media reverify
+    const r = await exec(m);
+    expect(r.digestVerified).toBe(true);
+    expect(r.abortedForSkips).toBe(true);
+    expect(r.created).toEqual([]); // A must NOT have landed
+    expect(r.skipped).toEqual([{ sourceInboundSeq: 2, reason: 'media_reverify_failed' }]);
+    expect((db.raw.prepare('SELECT COUNT(*) AS c FROM capability_obligations').get() as { c: number }).c).toBe(0);
+  });
+
+  it('F3 FALSIFIER: a WhatsApp edit to the replayed instruction after approval is skipped (input reverify)', async () => {
+    seedInbound(db, 1, 'A', 'test-dm@lid');
+    seedMessage(db, 'A', 'test-dm@lid', 'https://youtu.be/a', null);
+    const j = seedRecoveryJob(db, 1, 'A', 'test-dm@lid');
+    const m = manifest([{ sourceInboundSeq: 1, sourceMessageId: 'A', recoveryJobId: j, fulfillmentClassification: CONFIRMED }]);
+    // Same URL (source token unchanged) but edited surrounding text → inputDigest changes.
+    db.raw.prepare("UPDATE messages SET content = 'actually ignore, run https://youtu.be/a --danger' WHERE message_id = 'A'").run();
+    const r = await exec(m);
+    expect(r.created).toEqual([]);
+    expect(r.skipped).toEqual([{ sourceInboundSeq: 1, reason: 'input_reverify_failed' }]);
+    expect((db.raw.prepare('SELECT COUNT(*) AS c FROM capability_obligations').get() as { c: number }).c).toBe(0);
+  });
+
   it('dry-run runs the checks but creates nothing and retains no media', async () => {
     seedInbound(db, 1, 'A', 'test-dm@lid');
     seedMessage(db, 'A', 'test-dm@lid', 'https://youtu.be/a', null);
@@ -275,12 +319,14 @@ describe('runBackfillExecuteCli (owner-gated F3)', () => {
     const job = seedRecoveryJob(live, 1, 'A', 'test-dm@lid');
     const m = generateBackfillManifest(live.raw as unknown as BackfillReadDb, {
       manifestId: 'MANIFEST-CLI', contract: CONTRACT,
-      confirmed: [{ sourceInboundSeq: 1, sourceMessageId: 'A', recoveryJobId: job, fulfillmentClassification: CONFIRMED }],
+      confirmed: [{ sourceInboundSeq: 1, sourceMessageId: 'A', recoveryJobId: job, fulfillmentClassification: CONFIRMED, evidenceMatrixDigest: 'ev-cli' }],
     });
     approvedDigest = m.manifestDigest;
     writeFileSync(manifestFile, JSON.stringify(m));
     live.close();
-    currentSchemaSqlite(backupFile);
+    // F5 — the backup must be a byte-exact snapshot of THE TARGET (taken here,
+    // with the DB checkpointed/closed), not just any current-schema SQLite file.
+    copyFileSync(dbFile, backupFile);
   });
 
   afterEach(() => {
@@ -310,6 +356,27 @@ describe('runBackfillExecuteCli (owner-gated F3)', () => {
     const h = new DatabaseSync(dbFile, { readOnly: true });
     expect((h.prepare('SELECT COUNT(*) AS c FROM capability_obligations').get() as { c: number }).c).toBe(1);
     h.close();
+  });
+
+  it('F5 FALSIFIER: a foreign backup (a separately created current-schema DB) is refused', async () => {
+    const foreign = join(dir, 'foreign.db');
+    currentSchemaSqlite(foreign); // valid SQLite, current schema, but NOT a snapshot of the target
+    const cap = capture();
+    const code = await runBackfillExecuteCli([...baseArgs(), '--backup-path', foreign, '--confirm', approvedDigest], cap.io);
+    expect(code).toBe(2);
+    expect(cap.err.join('\n')).toContain('byte-exact SQLite backup of the target');
+  });
+
+  it('F5 FALSIFIER: a target changed AFTER the backup was taken is refused (backup no longer matches)', async () => {
+    // Mutate the target after beforeEach captured the backup, so hash(backup) != hash(target).
+    const h = new Database(dbFile);
+    h.open();
+    h.raw.prepare("INSERT INTO inbound_events (seq, message_id, conversation_key, chat_jid, routed_to) VALUES (5000, 'DRIFT', 'c', 'test-dm@lid', 'agent')").run();
+    h.close();
+    const cap = capture();
+    const code = await runBackfillExecuteCli([...baseArgs(), '--backup-path', backupFile, '--confirm', approvedDigest], cap.io);
+    expect(code).toBe(2);
+    expect(cap.err.join('\n')).toContain('byte-exact SQLite backup of the target');
   });
 
   it('refuses a --confirm token that is not the manifest digest', async () => {

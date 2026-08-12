@@ -5,38 +5,35 @@
  * obligations, idempotently, through the SAME guarded store as the runtime.
  *
  * Safety properties, all fixture-proven:
- *  - APPROVED-MANIFEST VERIFICATION (F1): the executor recomputes the manifest
+ *  - APPROVED-MANIFEST VERIFICATION (F1/r9): the executor recomputes the manifest
  *    digest over the descriptors it is about to run and REFUSES THE WHOLE RUN if
- *    it does not equal the operator-supplied approved digest. A descriptor
- *    tampered after approval (a changed destination, source, job, or
- *    classification) changes the recomputed digest, so it cannot be executed.
- *  - REVIEWER-CLASSIFIED NON-FULFILMENT (F2): an entry is created only when the
+ *    it does not equal the operator-supplied approved digest.
+ *  - REVIEWER-CLASSIFIED NON-FULFILMENT (F2/r9): an entry is created only when the
  *    reviewer classified it `confirmed_unfulfilled` AND the persisted recovery
- *    job named by the approval (selected BY ID, never "latest by sequence")
- *    agrees on inbound/message/conversation/destination, is completed+echo, and
- *    has no sibling worker-fulfilment. The executor does NOT re-derive
- *    non-fulfilment from echo-settlement — that delivery/fulfilment conflation is
- *    the very defect this feature corrects. Echo is corroboration with VETO
- *    power; the affirmative signal is the reviewer's classification, which F1's
- *    digest binds so it cannot be added after approval. The real recovery job id
- *    is persisted as `origin_recovery_job_id` (never null).
+ *    job named by the approval (selected BY ID) agrees on
+ *    inbound/message/conversation/destination, is completed+echo, and has no
+ *    sibling worker-fulfilment. Echo is corroboration with VETO power; the real
+ *    recovery job id is persisted as `origin_recovery_job_id` (never null).
+ *  - REPLAY-PAYLOAD BINDING (F3/r10): the manifest binds the input digest
+ *    (message text + prepared media class) at approval time; the executor
+ *    RE-COMPUTES it from the CURRENT message and skips on mismatch, so a WhatsApp
+ *    edit to the replayed instruction after approval cannot execute.
  *  - MEDIA hash/retain/REVERIFY: media is retained (copy+fsync+rehash) and its
  *    sha256 must match the approved descriptor, else skipped.
  *  - IDEMPOTENT: an obligation already present for the (inbound, message,
  *    contract, capability) key is a no-op — a second run creates nothing.
- *  - ALL-ROW TRANSACTION: every obligation insert for the run commits in ONE
- *    transaction, so a partial backfill can never land.
+ *  - TRUE ATOMICITY (F2/r10): validation is a first pass; if ANY approved entry
+ *    hard-fails (recovery/media/input reverify), the run commits NOTHING — no
+ *    partial backfill. Only when every approved entry prepares cleanly does the
+ *    single all-row transaction commit.
  *  - ORIGINAL RECOVERY ROWS UNCHANGED: the target recovery-job rows are
- *    snapshotted before/after and proven untouched (backfill never rewrites the
- *    original failure record).
+ *    snapshotted before/after and proven untouched.
  *
- * Reviewer classification (candidate §4) — including the audio path the live
- * contract cannot represent — arrives via the descriptor's requiredCapability.
  * The owner-gated CLI (`runBackfillExecuteCli`) adds a schema guard, a
- * quiescence check, a backup precondition, an expected-state precondition, a
- * confirmation token equal to the approved digest, and dry-run-by-default.
- * Execution against a live instance DB stays owner-gated; this module is
- * exercised against fixtures.
+ * quiescence lock, a backup precondition BOUND to the target (file-set hash
+ * equality, lock acquired first), an expected-state precondition, a confirmation
+ * token equal to the approved digest, a pre-commit concurrent-write re-check, and
+ * dry-run-by-default. Execution against a live instance DB stays owner-gated.
  */
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -57,7 +54,7 @@ import {
 } from './capability-obligation-backfill-manifest.ts';
 
 export interface BackfillExecuteResult {
-  /** F1 — false means the recomputed digest did not match the approval; nothing ran. */
+  /** false means the recomputed digest did not match the approval; nothing ran. */
   digestVerified: boolean;
   recomputedDigest: string;
   created: number[];
@@ -65,6 +62,8 @@ export interface BackfillExecuteResult {
   wouldCreate: number[];
   alreadyExisted: number[];
   skipped: Array<{ sourceInboundSeq: number; reason: string }>;
+  /** True when the run was aborted BEFORE committing because an approved entry hard-failed. */
+  abortedForSkips: boolean;
   recoveryRowsUnchanged: boolean;
 }
 
@@ -86,7 +85,6 @@ function snapshotRecovery(db: Database, seqs: readonly number[]): string {
   return JSON.stringify(rows);
 }
 
-/** A message + obligation payload prepared in the async phase, inserted in the transaction. */
 interface PreparedInsert {
   sourceInboundSeq: number;
   obligation: Parameters<CapabilityObligationStore['applyDecisionWithinCallerTransaction']>[0]['obligation'];
@@ -96,33 +94,27 @@ export async function executeBackfill(
   db: Database,
   params: {
     manifestId: string;
-    /** The approved manifest digest (F1) — the executor recomputes and must match. */
+    /** The approved manifest digest — the executor recomputes and must match. */
     approvedDigest: string;
     eligible: readonly BackfillDescriptor[];
     mediaRoot: string;
     retentionPolicyVersion: string;
     skillName: string;
-    /** preparedMediaClass used for the D1 input digest (reviewer classification). */
-    mediaClassFor?: (d: BackfillDescriptor) => string | null;
     /** Preview only — run all checks but insert nothing (no media retained either). */
     dryRun?: boolean;
+    /** Invoked at the START of the commit transaction (F5) — throw to abort with rollback. */
+    preCommitAssert?: () => void;
   },
 ): Promise<BackfillExecuteResult> {
   const dryRun = params.dryRun ?? false;
   const seqs = params.eligible.map((e) => e.sourceInboundSeq);
   const recoveryBefore = snapshotRecovery(db, seqs);
 
-  // F1 — recompute the manifest digest over the descriptors we are about to run.
   const recomputedDigest = computeManifestDigest(params.manifestId, params.eligible);
   if (recomputedDigest !== params.approvedDigest) {
     return {
-      digestVerified: false,
-      recomputedDigest,
-      created: [],
-      wouldCreate: [],
-      alreadyExisted: [],
-      skipped: [],
-      recoveryRowsUnchanged: true,
+      digestVerified: false, recomputedDigest, created: [], wouldCreate: [], alreadyExisted: [],
+      skipped: [], abortedForSkips: false, recoveryRowsUnchanged: true,
     };
   }
 
@@ -143,14 +135,9 @@ export async function executeBackfill(
 
   for (const d of params.eligible) {
     if (
-      !d.eligible
-      || d.requiredCapability === undefined
-      || d.contractVersion === undefined
-      || d.sourceDigest === undefined
-      || d.recoveryJobId === undefined
-      || d.fulfillmentClassification === undefined
-      || d.conversationKey === undefined
-      || d.deliveryJid === undefined
+      !d.eligible || d.requiredCapability === undefined || d.contractVersion === undefined
+      || d.sourceDigest === undefined || d.recoveryJobId === undefined || d.fulfillmentClassification === undefined
+      || d.conversationKey === undefined || d.deliveryJid === undefined || d.inputDigest === undefined
     ) {
       skipped.push({ sourceInboundSeq: d.sourceInboundSeq, reason: 'descriptor_not_eligible' });
       continue;
@@ -170,13 +157,12 @@ export async function executeBackfill(
     }
     // 2. Idempotency: an obligation for this key already exists → no-op.
     const existing = existsStmt.get(d.sourceInboundSeq, d.sourceMessageId, d.contractVersion, d.requiredCapability) as
-      | { id: number }
-      | undefined;
+      | { id: number } | undefined;
     if (existing !== undefined) {
       alreadyExisted.push(existing.id);
       continue;
     }
-    // 3. Read the message for the obligation payload.
+    // 3. Read the CURRENT message.
     const msg = msgStmt.get(d.sourceMessageId) as
       | { content: string | null; media_path: string | null; sender_jid: string; sender_name: string | null }
       | undefined;
@@ -184,9 +170,15 @@ export async function executeBackfill(
       skipped.push({ sourceInboundSeq: d.sourceInboundSeq, reason: 'message_not_found' });
       continue;
     }
-    // 4. Media: REVERIFY against the approved descriptor. In dry-run this is a
-    //    read-only hash compare (no retention); on a confirmed run it retains
-    //    (copy/fsync/rehash) and the retained sha256 must match.
+    // 4. F3 — RE-VERIFY the input digest against the CURRENT message. A post-approval
+    //    edit to the replayed instruction changes the digest and is refused.
+    const currentInputDigest = capabilityInputDigest({ text: msg.content ?? '', preparedMediaClass: d.preparedMediaClass ?? null });
+    if (currentInputDigest !== d.inputDigest) {
+      skipped.push({ sourceInboundSeq: d.sourceInboundSeq, reason: 'input_reverify_failed' });
+      continue;
+    }
+    // 5. Media: REVERIFY against the approved descriptor. Dry-run is a read-only
+    //    hash compare (no retention); a confirmed run retains (copy/fsync/rehash).
     let retainedMedia: { path: string; sha256: string; bytes: number; policyVersion: string } | null = null;
     if (d.mediaSha256 != null) {
       if (msg.media_path == null) {
@@ -224,11 +216,6 @@ export async function executeBackfill(
       wouldCreate.push(d.sourceInboundSeq);
       continue;
     }
-    // 5. Prepare the obligation payload for the single all-row transaction.
-    const inputDigest = capabilityInputDigest({
-      text: msg.content ?? '',
-      preparedMediaClass: params.mediaClassFor?.(d) ?? null,
-    });
     prepared.push({
       sourceInboundSeq: d.sourceInboundSeq,
       obligation: {
@@ -247,7 +234,7 @@ export async function executeBackfill(
         contractVersion: d.contractVersion,
         requiredCapability: d.requiredCapability,
         capabilityParams: JSON.stringify({ skill: params.skillName }),
-        inputDigest,
+        inputDigest: d.inputDigest,
         sourceDigest: d.sourceDigest,
         sourceToken: retainedMedia ? null : (d.sourceToken ?? null),
         retainedMedia,
@@ -256,9 +243,20 @@ export async function executeBackfill(
     });
   }
 
-  // 6. ALL-ROW TRANSACTION — every prepared insert commits atomically (or none).
+  // F2/r10 — TRUE ATOMICITY over the approved set. If any approved entry hard-failed,
+  // commit NOTHING (a partial backfill is never acceptable). alreadyExisted is an
+  // idempotent no-op and does not block.
+  if (!dryRun && skipped.length > 0) {
+    return {
+      digestVerified: true, recomputedDigest, created: [], wouldCreate, alreadyExisted, skipped,
+      abortedForSkips: true, recoveryRowsUnchanged: recoveryBefore === snapshotRecovery(db, seqs),
+    };
+  }
+
   if (!dryRun && prepared.length > 0) {
     withTransaction(db, () => {
+      // F5 — concurrent-write re-check inside the commit transaction.
+      params.preCommitAssert?.();
       for (const p of prepared) {
         const { obligationId } = store.applyDecisionWithinCallerTransaction({
           auditEvent: { action: 'obligation.create', actorType: 'operator', reasonCode: 'reviewed_backfill' },
@@ -269,29 +267,14 @@ export async function executeBackfill(
     });
   }
 
-  const recoveryAfter = snapshotRecovery(db, seqs);
   return {
-    digestVerified: true,
-    recomputedDigest,
-    created,
-    wouldCreate,
-    alreadyExisted,
-    skipped,
-    recoveryRowsUnchanged: recoveryBefore === recoveryAfter,
+    digestVerified: true, recomputedDigest, created, wouldCreate, alreadyExisted, skipped,
+    abortedForSkips: false, recoveryRowsUnchanged: recoveryBefore === snapshotRecovery(db, seqs),
   };
 }
 
 // ---------------------------------------------------------------------------
-// Owner-gated CLI (F3). Dry-run by default. To APPLY, the operator must:
-//   - point at a DB EXACTLY at the current schema (schema guard);
-//   - pass a --backup-path that exists, is SQLite, and matches the target schema;
-//   - pass --expect-existing N equal to the current backfill obligation count for
-//     this manifest (normally 0) — catches a half-completed prior run;
-//   - pass --confirm <approvedDigest>: a confirmation TOKEN that must equal the
-//     recomputed manifest digest (holding the flag is not enough — the operator
-//     must hold the artifact);
-//   - the DB must be QUIESCENT (BEGIN IMMEDIATE succeeds — a busy/locked DB means
-//     the bot is running, and the run is refused).
+// Owner-gated CLI (F3/r9 + F5/r10). Dry-run by default.
 // ---------------------------------------------------------------------------
 
 export interface BackfillExecuteIo {
@@ -314,13 +297,31 @@ function schemaVersionOf(dbPath: string): number {
   }
 }
 
-function isSqliteFile(path: string): boolean {
-  const buf = readFileSync(path).subarray(0, 16);
-  return buf.toString('latin1').startsWith('SQLite format 3');
+/** sha256 over the SQLite CONTENT file set (main || -wal), absent file = empty
+ *  (F5, WAL-aware). `-shm` is excluded — transient shared memory, not content. */
+export function dbFileSetHash(path: string): string {
+  const h = createHash('sha256');
+  for (const suffix of ['', '-wal']) {
+    try {
+      h.update(readFileSync(`${path}${suffix}`));
+    } catch { /* absent component contributes nothing */ }
+    h.update('\0');
+  }
+  return h.digest('hex');
 }
 
-/** Prove the DB is quiescent: BEGIN IMMEDIATE acquires the write lock only if no
- *  other connection (the bot) holds it. Busy/locked → refuse. */
+/** sha256 of the main db file only — stable across a read-only connection's transient -wal. */
+function mainFileHash(path: string): string {
+  return createHash('sha256').update(readFileSync(path)).digest('hex');
+}
+
+function isSqliteFile(path: string): boolean {
+  return readFileSync(path).subarray(0, 16).toString('latin1').startsWith('SQLite format 3');
+}
+
+/** Point-in-time quiescence: BEGIN IMMEDIATE acquires the write lock only if no
+ *  other connection (the bot) holds it. Busy/locked → refuse. NOTE: this detects
+ *  a current writer; it does NOT prove the bot process is stopped. */
 function assertQuiescent(dbPath: string): void {
   const raw = new DatabaseSync(dbPath);
   try {
@@ -362,7 +363,6 @@ export async function runBackfillExecuteCli(argv: readonly string[], io: Backfil
   if (!/^\d+$/.test(expectExistingRaw)) throw new Error('--expect-existing must be a non-negative integer');
   const expectExisting = Number(expectExistingRaw);
 
-  // Schema guard — never migrate a live DB.
   const version = schemaVersionOf(dbPath);
   if (version !== CURRENT_SCHEMA_MIGRATION) {
     io.err(`refusing: database is at schema ${version}, expected ${CURRENT_SCHEMA_MIGRATION}. This tool never migrates a live database.`);
@@ -370,46 +370,46 @@ export async function runBackfillExecuteCli(argv: readonly string[], io: Backfil
   }
 
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
-    manifestId: string;
-    manifestDigest: string;
-    entries: BackfillDescriptor[];
+    manifestId: string; manifestDigest: string; entries: BackfillDescriptor[];
   };
   const eligible = manifest.entries.filter((e) => e.eligible);
-
   const dryRun = confirmToken === null;
+  let mainBefore = '';
+
   if (!dryRun) {
-    // Confirmation token must equal the approved digest (hold the artifact, not the flag).
     if (confirmToken !== manifest.manifestDigest) {
       io.err('refusing: --confirm token does not equal the manifest digest (pass the approved digest as the confirmation token).');
       return 2;
     }
-    // Backup precondition — real file, SQLite, matching schema.
     if (!backupPath) {
       io.err('refusing: --backup-path is required to apply (a verified pre-run backup).');
       return 2;
     }
+    // F5 — acquire the quiescence lock FIRST, THEN bind the backup to the target
+    // by file-set hash. Ordering matters: comparing before the lock races the target.
+    assertQuiescent(dbPath);
     let backupOk = false;
     try {
-      backupOk = isSqliteFile(backupPath) && schemaVersionOf(backupPath) === CURRENT_SCHEMA_MIGRATION;
+      backupOk = isSqliteFile(backupPath)
+        && schemaVersionOf(backupPath) === CURRENT_SCHEMA_MIGRATION
+        && dbFileSetHash(backupPath) === dbFileSetHash(dbPath);
     } catch {
       backupOk = false;
     }
     if (!backupOk) {
-      io.err(`refusing: --backup-path ${backupPath} is not a SQLite backup at schema ${CURRENT_SCHEMA_MIGRATION}.`);
+      io.err(`refusing: --backup-path is not a byte-exact SQLite backup of the target at schema ${CURRENT_SCHEMA_MIGRATION} `
+        + '(the backup must be a current snapshot of THIS database). NOTE: this binds the backup and detects a '
+        + 'concurrent writer, but does NOT prove the bot process is stopped — that stays operator-attested.');
       return 2;
     }
-    // Quiescence — the DB must not be held by a running bot.
-    assertQuiescent(dbPath);
+    mainBefore = mainFileHash(dbPath);
   }
 
   const db = new Database(dbPath);
   db.open();
   try {
-    // Expected-state precondition — the backfill obligations for this manifest
-    // must currently equal --expect-existing (catches a half-completed prior run).
     const existingCount = Number(
-      (db.raw
-        .prepare("SELECT COUNT(*) AS c FROM capability_obligations WHERE creation_reason = ?")
+      (db.raw.prepare('SELECT COUNT(*) AS c FROM capability_obligations WHERE creation_reason = ?')
         .get(`reviewed_backfill:${manifest.manifestId}`) as { c: number }).c,
     );
     if (existingCount !== expectExisting) {
@@ -417,24 +417,33 @@ export async function runBackfillExecuteCli(argv: readonly string[], io: Backfil
       return 2;
     }
 
-    const result = await executeBackfill(db, {
-      manifestId: manifest.manifestId,
-      approvedDigest: manifest.manifestDigest,
-      eligible,
-      mediaRoot,
-      retentionPolicyVersion,
-      skillName,
-      mediaClassFor: (d) => (d.mediaSha256 != null ? 'video' : null),
-      dryRun,
-    });
+    let result: BackfillExecuteResult;
+    try {
+      result = await executeBackfill(db, {
+        manifestId: manifest.manifestId,
+        approvedDigest: manifest.manifestDigest,
+        eligible,
+        mediaRoot,
+        retentionPolicyVersion,
+        skillName,
+        dryRun,
+        preCommitAssert: dryRun ? undefined : () => {
+          if (mainFileHash(dbPath) !== mainBefore) {
+            throw new Error('target changed since backup — concurrent write detected; aborting before commit.');
+          }
+        },
+      });
+    } catch (err) {
+      io.err(`refusing: ${err instanceof Error ? err.message : String(err)}`);
+      return 2;
+    }
 
     if (!result.digestVerified) {
       io.err(`refusing: recomputed manifest digest ${result.recomputedDigest} != approved ${manifest.manifestDigest} (descriptors were altered after approval).`);
       return 2;
     }
     io.out(json ? JSON.stringify({ mode: dryRun ? 'dry-run' : 'confirm', runId, ...result }) : renderExecuteHuman(dryRun, runId, result));
-    // Exit non-zero if anything was skipped on a confirmed run (an approved entry
-    // that could not be created is an operator-visible incompleteness).
+    if (!dryRun && result.abortedForSkips) return 1;
     if (!dryRun && result.skipped.length > 0) return 1;
     return 0;
   } finally {
@@ -444,13 +453,14 @@ export async function runBackfillExecuteCli(argv: readonly string[], io: Backfil
 
 function renderExecuteHuman(dryRun: boolean, runId: string, r: BackfillExecuteResult): string {
   const lines = [
-    `backfill ${dryRun ? 'DRY-RUN' : 'APPLIED'} run=${runId} — digest verified`,
+    `backfill ${dryRun ? 'DRY-RUN' : r.abortedForSkips ? 'ABORTED (no partial backfill)' : 'APPLIED'} run=${runId} — digest verified`,
     dryRun
       ? `  wouldCreate=${r.wouldCreate.length} alreadyExisted=${r.alreadyExisted.length} skipped=${r.skipped.length}`
       : `  created=${r.created.length} alreadyExisted=${r.alreadyExisted.length} skipped=${r.skipped.length} recoveryRowsUnchanged=${r.recoveryRowsUnchanged}`,
   ];
   for (const s of r.skipped) lines.push(`  skipped seq=${s.sourceInboundSeq} reason=${s.reason}`);
-  if (dryRun) lines.push('DRY-RUN — nothing created. Pass --confirm <approvedDigest> with --backup-path to apply.');
+  if (r.abortedForSkips) lines.push('ABORTED — an approved entry could not be created, so the whole run was rolled back (all-or-nothing). Fix and re-run.');
+  else if (dryRun) lines.push('DRY-RUN — nothing created. Pass --confirm <approvedDigest> with --backup-path to apply.');
   return lines.join('\n');
 }
 
@@ -461,10 +471,11 @@ function backfillExecuteUsage(): string {
     '         [--expect-existing N] [--backup-path PATH] [--confirm APPROVED_DIGEST] [--json]',
     '',
     'OWNER-GATED. Dry-run by default (runs all checks, creates nothing, retains no media).',
-    'To APPLY: --confirm must equal the manifest digest, --backup-path must be a SQLite',
-    'backup at the current schema, the DB must be quiescent (bot stopped), and the current',
-    'backfill obligation count for this manifest must equal --expect-existing (default 0).',
-    'The executor recomputes the manifest digest and refuses if descriptors were altered.',
+    'To APPLY: --confirm must equal the manifest digest; the DB must be quiescent (a current',
+    'writer is refused — this does NOT prove the bot process is stopped, which is operator-',
+    'attested); --backup-path must be a byte-exact SQLite file-set snapshot of THE TARGET at',
+    'the current schema; the current backfill count for this manifest must equal --expect-existing.',
+    'The run is all-or-nothing: if any approved entry hard-fails, NOTHING is committed.',
   ].join('\n');
 }
 
