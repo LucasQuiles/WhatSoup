@@ -14,7 +14,7 @@ on the Linux collector host). This README establishes the repo as the source of 
 | `install-bot-errors-health-launchd.sh` | Installs only the daily health timer on a host that does not run the full dispatcher stack. Accepts `BOT_ERRORS_HEALTH_HOUR` / `BOT_ERRORS_HEALTH_MINUTE` overrides. |
 | `install-bot-errors-gui-monitor-launchd.sh` | Installs the external GUI-session monitor on the central hub. OS-aware: writes a systemd service+timer pair on Linux or a launchd plist on macOS. Accepts `--dry-run`. |
 
-### D1 — Env-file hydration (`bot-errors.env`)
+### NORMATIVE — D1 Env-file hydration (`bot-errors.env`)
 
 All `install-bot-errors-*launchd.sh` scripts read configuration from
 `~/.config/whatsoup/bot-errors.env` (overridable via `BOT_ERRORS_ENV_FILE`).
@@ -51,7 +51,7 @@ installer, which checks `${!key:-}` before calling `read_env_value`.
 `deploy/setup.sh` uses the same `awk` pattern (named `read_env_file_value`)
 to read and patch the env file during initial setup.
 
-### D2 — Fail-closed health-profile guard
+### NORMATIVE — D2 Fail-closed health-profile guard
 
 Every `install-bot-errors-*launchd.sh` installer and the Linux path of
 `deploy/setup.sh` will exit with code 2 if `BOT_ERRORS_HEALTH_PROFILE` is
@@ -78,7 +78,7 @@ The installers attempt to auto-detect a host profile at
 falling back to the env file, but this auto-detection only populates
 `HEALTH_PROFILE` if the file already exists — it does not suppress the guard.
 
-### D3 — `validate_calendar_integer` (health installer only)
+### NORMATIVE — D3 `validate_calendar_integer` (health installer only)
 
 `install-bot-errors-health-launchd.sh` exposes `BOT_ERRORS_HEALTH_HOUR`
 (default `7`) and `BOT_ERRORS_HEALTH_MINUTE` (default `20`) to control when
@@ -112,7 +112,7 @@ are not treated as octal in the range check. Both values are passed to the
 launchd `StartCalendarInterval` dict verbatim as integers; the installer exits
 before writing the plist if validation fails.
 
-### D4 — Pinned Node/npm toolchain (`run-with-pinned-npm.sh`)
+### NORMATIVE — D4 Pinned Node/npm toolchain (`run-with-pinned-npm.sh`)
 
 `scripts/run-with-pinned-npm.sh` resolves npm via the same pinned-Node
 mechanism used by all other WhatSoup scripts: it sources
@@ -141,7 +141,7 @@ system-installed Node/npm that differs from the version required by
 npm if the pinned one is missing; it fails closed with a clear error message
 asking you to install the pinned version or set `WHATSOUP_NODE`.
 
-### D5 — GUI-session monitor (`install-bot-errors-gui-monitor-launchd.sh`)
+### NORMATIVE — D5 GUI-session monitor (`install-bot-errors-gui-monitor-launchd.sh`)
 
 The GUI-session monitor detects when a bot user's GUI session has ended,
 taking the bot's launchd agents down silently with it. Because the monitored
@@ -278,7 +278,7 @@ write/claim paths are still computed for the *login* user, so the capture fails
 with `PermissionError` on the login user's state dir. Fix the alias's `User`
 instead.
 
-### Queue-event envelope v2 compatibility
+### NORMATIVE — Queue-event envelope v2 compatibility
 
 New queue writers emit `schemaVersion: 2` with one disjoint variant: an
 `incident_alert` (`alert` plus `critical`, `error`, or `warning`), an
@@ -350,7 +350,7 @@ means the notification count for a single dead host is 2, not 1; don't
 read the second page as a different host.
 
 
-## Alert source and ownership index
+## NORMATIVE — Alert source and ownership index
 
 This table is the canonical index for the in-repository BOT ERRORS runtime.
 Update it whenever a producer, scheduler, relay, or incident-state owner changes.
@@ -449,70 +449,12 @@ swept in automatically with no script edit required). Wall-clock cost: roughly +
 of the existing curated gate (measured on origin/main, `1330 passed in ~15-25s` depending
 on cache warmth).
 
-## Canonical source for this import (diff matrix)
+## Provenance
 
-Source of truth chosen = **newest copies** per the corrections plan. The local Mac
-Studio ("maclab" in the relay corpus) carries the newest LAB-tree copies (Jun 11-12),
-ahead of the hub's Jun-9 copies and the deployed mini7 vintage:
+Import history (sha256 matrix, deviation notes, RESUME NOTE) lives in
+[IMPORT-LOG.md](./IMPORT-LOG.md) — a one-time record, not a living contract.
 
-| script | imported sha256(16) | size | notes vs other copies |
-|--------|--------------------|------|-----------------------|
-| collector | 33fbc41b461516e6 | 78621 | 2062 lines; hub Jun-9 copy was 1353 lines (older) |
-| dispatcher | dda3d216a587ed52 | 78294 | |
-| emit | 969e269cff640d9f | 22601 | hub Jun-9 copy 19125B (older) |
-| health-check | e10755806e8af464 | 198839 | LOCAL vintage; ~581 lines ahead of deployed mini7 (170196B, sha 419ba2ef) |
-| heartbeat-watchdog | a9cd58d173ff4094 | 40187 | |
-| q-loop | 5929a71e76a391f8 | 32044 | |
-| runner | 6fccb93be94b5288 | 19576 | hub Jun-9 copy 17629B (older) |
-
-All seven `py_compile` clean (stdlib-only, python3).
-
-### Browser-debug resource ownership
-
-The heartbeat watchdog inventories Linux browser roots that expose a local
-remote-debugging port. A tree becomes `browser_debug:<profile-hash>` only when
-all three conditions hold: it is older than the configured dwell, its aggregate
-descendant RSS exceeds the configured threshold, and the debugging port has no
-established controller connection. The alert carries only bounded operational
-metadata (hashed profile identity, root PID, age, aggregate RSS, process count,
-debug port, and controller count); it never captures page URLs or the profile
-path. The watchdog alerts and confirms recovery but does not terminate the
-browser.
-
-| Variable | Default | Meaning |
-|----------|---------|---------|
-| `BOT_ERRORS_BROWSER_DEBUG_MIN_AGE_SECONDS` | `1800` | Minimum root age before an unattended debug tree is eligible. |
-| `BOT_ERRORS_BROWSER_DEBUG_MIN_RSS_MB` | `512` | Minimum aggregate root-plus-descendants RSS before an unattended debug tree is eligible. |
-| `BOT_ERRORS_DRY_BROWSER_DEBUG_SNAPSHOT` | unset | Test-only JSON snapshot used for deterministic policy and stress tests. |
-
-If controller-connection inventory is unavailable, the watchdog opens the
-non-paging `browser_debug:probe` visibility incident instead of asserting that
-the browser is unattended. Browser checks can be omitted from a specialized
-watchdog lane by excluding `browser_debug` from `BOT_ERRORS_WATCHDOG_CHECKS`.
-
-> NOTE: the detector-misconceptions audit register cites line numbers against the
-> **deployed mini7 health-check vintage (170KB)**. This import is the newer LOCAL vintage
-> (198KB), so register line numbers are approximate — locate code by function/marker, not
-> by deployed-vintage line number.
-
-## Import deviations from verbatim
-
-The import is byte-identical to the canonical maclab LAB-tree copies **except** for a
-single forced hygiene transform in `bot-errors-health-check.py`: the default macOS
-keychain service-name literal (a vendor product name) trips the public-repo hygiene
-guard's model-attribution pattern. It is assembled from string parts at the one
-assignment site; the resolved runtime value is unchanged. This is the only non-verbatim
-edit in the baseline import, isolated here so every later corrections diff stays clean.
-
-> RESUME NOTE (run 02): between run-01's capture (health-check sha `e10755…`, Jun-12
-> 00:29) and resume, the live maclab copy drifted forward (`bf9c36…`, Jun-12 01:16) with
-> three unrelated hunks (`recentResumeFailures` mapping, `lastResumeFailedAt` detail,
-> `credential_item_status` user-interaction acceptance). Those are out-of-scope feature
-> drift, NOT alert-truth corrections, and the audit registers line-cite the e10755
-> vintage — so this baseline pins the run-01 vintage. The drift is logged for a later
-> reconciliation pass; it must not be silently folded into the corrections series.
-
-## Deploy method (stream + hash-verify)
+## NORMATIVE — Deploy method (stream + hash-verify)
 
 Fleet minis have **no GitHub access**. Deploys are content-pushed from an operator machine:
 stream each script over ssh to the host's running location, then hash-verify on the host.
@@ -528,16 +470,11 @@ they can cover reachability, restart, hook, or verification residuals only when 
 approval text names the exact waived field. Backup failure, copy failure, manifest
 write/hash failure, raw secret output, or authorization ambiguity remains a hard abort.
 
-- macOS hosts (mini1/4/7/8/9/10/11, mwlab, maclab): running copies at
-  `~/LAB/WhatSoup/deploy/scripts/` (health job + bots read from this tree).
-- Linux hub (nucles): the collector/dispatcher/heartbeat copies under the hub's deploy path;
-  restart collector, dispatcher, and q-loop after deploying long-running code.
-
-Current close-out baseline: the 2026-06-13 C2/C3/C4 fleet pass streamed the
-manifest-tracked bot-errors runtime payload from an isolated operator staging directory,
-built from `289c5f7b77c86e64d2ee5ef820aabd7e21492a78`. At deploy time,
-`origin/main=2197bfdc`; the intervening diff did not touch bot-errors runtime,
-hook, profile, or manifest inputs.
+- macOS bot/relay hosts: running copies at `~/LAB/WhatSoup/deploy/scripts/`
+  (health job + bots read from this tree).
+- Linux collector hub: the collector/dispatcher/heartbeat copies under
+  the hub's deploy path; restart collector, dispatcher, and q-loop after
+  deploying long-running code.
 
 The deploy contract is:
 
@@ -590,7 +527,7 @@ Current stability evidence, refreshed read-only on 2026-06-13 14:03 ET:
   mismatch should write a temp-outbox `critical` event containing
   `git_head_sha_mismatch`.
 
-## Manual daily-health validation
+## OPERATIONAL — Manual daily-health validation
 
 Do not wait for the randomized systemd timer when validating a deploy or close-out fix.
 Trigger the same oneshot service the timer uses, then prove the dispatcher drained the
@@ -615,7 +552,7 @@ The expected successful shape is:
   match` evidence line. If `expected_head_sha` is unset, runtime-skew is only observable,
   not enforcing.
 
-## No-post runtime-skew simulation
+## OPERATIONAL — No-post runtime-skew simulation
 
 Use this when validating #809/C4a without posting to the production outbox. It exercises
 the same `--daily` CLI path that writes daily-health events, but isolates `HOME`,
@@ -660,7 +597,7 @@ severity `critical` and `FAIL git_head_sha ... git_head_sha_mismatch`; both even
 `outboxPolicy` as `explicit-outbox`. This proves runtime-skew event classification only.
 Use the deploy contract and host manifest verification above to prove file-hash parity.
 
-## Manual drift-hook simulation
+## OPERATIONAL — Manual drift-hook simulation
 
 If a host's Git config cannot activate `.husky/pre-commit`, prove the copied hook behavior
 with a temporary index instead of waiting for a real commit. This exercises the staged-file
@@ -684,16 +621,11 @@ block runs, drift failures are printed as warn-only recommendations, the hook ex
 and the real status hash is unchanged. This is behavior evidence only; it does not replace
 `core.hooksPath=.husky` on writable Git-backed hosts.
 
-Known residuals after the close-out pass:
+## Deployment history
 
-- One Git-backed macOS host has current runtime files and manifests, but hook activation
-  is blocked by root-owned `.git/config` and `.git/hooks/pre-commit`.
-- Non-Git mini runtime trees are not hook-capable; they can still run the copied runtime
-  payload and host-local manifest.
-- Stream-sync proves runtime payload currency. It does not imply that every dirty host
-  checkout was advanced to the latest `origin/main`.
+See [DEPLOY-LOG.md](./DEPLOY-LOG.md) — past close-out baselines, residuals, and fleet-pass receipts.
 
-## Release-proof monitor (central pilot)
+## NORMATIVE — Release-proof monitor (central pilot)
 
 Monitor-only detection of tree provenance drift and runtime code staleness on
 the in-place-git central pilot host. Design:
