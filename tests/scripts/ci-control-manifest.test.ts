@@ -146,6 +146,7 @@ describe('canonical CI control manifest', () => {
     expect(Object.fromEntries(inventory.controls.map(({ id, availability }) => [id, availability]))).toEqual({
       'architecture.fitness-lint': 'planned',
       'ci.agent-writer-lease': 'quarantined',
+      'config.validation': 'planned',
       'ci.drift-classifier-coverage': 'report-only',
       'ci.exact-revision-classifier': 'canary',
       'ci.hooks.installed': 'report-only',
