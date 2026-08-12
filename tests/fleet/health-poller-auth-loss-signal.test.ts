@@ -33,7 +33,6 @@ const alertFns = vi.hoisted(() => ({
   emitAlert: vi.fn(() => ({ ok: true, channel: 'outbox', status: 'durably_queued' })),
   clearAlertSource: vi.fn(() => true),
 }));
-const logger = vi.hoisted(() => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }));
 const alertThrottleStore = vi.hoisted(() => ({
   loadAlertThrottle: vi.fn(() => new Map<string, string>()),
   loadAlertThrottleDetailed: vi.fn(() => ({ entries: new Map<string, string>(), loadError: null })),
@@ -51,9 +50,15 @@ vi.mock('../../src/fleet/alert-throttle-store.ts', () => ({
   ...alertThrottleStore,
 }));
 vi.mock('../../src/fleet/silence-manager.ts', () => silenceManager);
-vi.mock('../../src/logger.ts', () => ({
-  createChildLogger: () => ({ ...logger, child: vi.fn().mockReturnThis() }),
-}));
+vi.mock('../../src/logger.ts', async () => {
+  const { singletonLoggerMock } = await import('../helpers/logger-mock.ts');
+  const logger = singletonLoggerMock();
+  return { createChildLogger: () => logger };
+});
+
+import { createChildLogger } from '../../src/logger.ts';
+import type { singletonLoggerMock } from '../helpers/logger-mock.ts';
+const logger = createChildLogger('health-poller') as unknown as ReturnType<typeof singletonLoggerMock>;
 
 import { HealthPoller, type InstanceHealth } from '../../src/fleet/health-poller.ts';
 import { FleetDbReader } from '../../src/fleet/db-reader.ts';

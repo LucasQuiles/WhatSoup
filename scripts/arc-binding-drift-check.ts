@@ -185,6 +185,7 @@ export function checkArcBindingDrift(opts: {
   try {
     printed = execFileSync('python3', [adopt, CONSUMER, '--print'], {
       encoding: 'utf8',
+      timeout: 30_000,
     });
   } catch (err) {
     if (pin.status === 'drift') {

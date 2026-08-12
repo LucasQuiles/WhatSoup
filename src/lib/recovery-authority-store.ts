@@ -1,5 +1,5 @@
 /**
- * Durable recovery-authority marker store (#2394).
+ * Durable recovery-authority marker store (#2394, wired #3057).
  *
  * Each warning producer that would lose its "alert was active" flag across a
  * restart writes a marker when it emits an alert and removes it on clear.
@@ -7,21 +7,16 @@
  * healthy it emits the idempotent same-source clear without the process-local
  * memory that the prior process held.
  *
+ * Production consumer: ``HealthPoller`` in ``src/fleet/health-poller.ts``
+ * calls ``setRecoveryMarker`` on durable alert emit, ``clearRecoveryMarker``
+ * on recovery clear, and ``loadRecoveryMarkers`` in the first-poll startup
+ * scan to reconcile markers left by a prior process.
+ *
  * Markers are stored at ``state_root() / "recovery-authority.json"`` and are
  * therefore durable across restarts but scoped to the same deployment.
  * Markers use string source keys; the values are ignored (presence = was
  * active).  The file is written atomically via temp-file + rename so that a
  * concurrent reader never sees a partially-written file.
- */
-
-/**
- * TRACKED_UNREACHABLE: recovery-authority-store is fully implemented and
- * tested but has zero production call sites. Wiring tracked at:
- * https://github.com/LucasQuiles/WhatSoup/issues/3057
- *
- * When wired, the intended consumer is heal-lifecycle dispatcher recovery
- * scan (src/deploy/scripts/bot-errors-dispatcher.py — the recovery scanner
- * that reconciles incident markers after cold restart).
  */
 import Path from 'node:path';
 import fs from 'node:fs';

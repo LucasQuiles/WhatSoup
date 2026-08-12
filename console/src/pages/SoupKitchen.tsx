@@ -422,7 +422,7 @@ const SoupKitchen: FC = () => {
   // Fleet-level 24h metrics feed exactly one KPI card (Tokens 24h); the v3.5
   // Fleet surface carries no charts (they live at /metrics until b-09a
   // absorbs them into Ops per 02-mapping §2 E4).
-  const { data: fleetMetrics } = useFleetMetrics("24h");
+  const { data: fleetMetrics, isLoading: fleetMetricsLoading, error: fleetMetricsError } = useFleetMetrics("24h");
   const tokens24h = useMemo(() => {
     if (!fleetMetrics?.meta?.hasTokenData) return null;
     return fleetMetrics.tokenUsage.reduce(
@@ -729,6 +729,10 @@ const SoupKitchen: FC = () => {
         lineCount={lines.length}
         tokens24h={tokens24h}
         freshness={linesFreshness}
+        isLoading={fleetMetricsLoading}
+        queryError={fleetMetricsError ?? null}
+        instancesFailed={fleetMetrics?.meta?.instancesFailed ?? 0}
+        instancesQueried={fleetMetrics?.meta?.instancesQueried ?? 0}
       />
 
       <AlertBanner alerts={alerts} />

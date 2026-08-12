@@ -38,6 +38,10 @@ describe('ensureClaudeFileStoreCredential — real filesystem', () => {
       now: () => NOW,
       readKeychain,
       log: silentLog,
+      // #3020: identity receipt — realfs tests exercise the real filesystem
+      // write path with a matching identity.
+      expectedAccountId: 'test-expected-account',
+      verifyAccountId: () => true,
       ...over,
     });
   }

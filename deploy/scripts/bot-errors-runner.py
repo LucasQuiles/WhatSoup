@@ -24,6 +24,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from lib.bot_errors_envelope import new_event_fields
+from lib.state_root import DEFAULT_STATE_ROOT, state_root, test_state_root
 from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
 from lib.durable_json import (
     JsonVersion,
@@ -36,14 +37,6 @@ from lib.durable_json import (
 
 def now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-
-
-def state_root() -> Path:
-    explicit = os.environ.get("BOT_ERRORS_STATE_DIR")
-    if explicit and explicit.strip():
-        return Path(explicit)
-    test_state = test_state_root()
-    return test_state or (Path.home() / ".local/state/bot-errors")
 
 
 STRONG_TEST_SIGNAL_KEYS = ("VITEST", "VITEST_WORKER_ID", "JEST_WORKER_ID", "PYTEST_CURRENT_TEST")
@@ -65,14 +58,6 @@ def provenance_signals() -> list[str]:
     return sorted(set(signals))
 
 
-def test_state_root() -> Path | None:
-    if not strong_test_signals():
-        return None
-    cwd_hash = hashlib.sha256(os.getcwd().encode("utf-8")).hexdigest()[:12]
-    worker = safe_segment(env_value("VITEST_WORKER_ID") or env_value("JEST_WORKER_ID") or f"pid-{os.getpid()}")
-    return Path(os.environ.get("TMPDIR", "/tmp")) / "whatsoup-vitest-bot-errors" / f"{cwd_hash}.{worker}"
-
-
 def canonical_path(path: Path) -> Path:
     try:
         return path.expanduser().resolve(strict=True)
@@ -84,7 +69,7 @@ def canonical_path(path: Path) -> Path:
 
 
 def live_outbox_candidates() -> list[Path]:
-    candidates = [Path.home() / ".local/state/bot-errors/outbox"]
+    candidates = [DEFAULT_STATE_ROOT / "outbox"]
     override = env_value("BOT_ERRORS_LIVE_OUTBOX_DIR")
     if override:
         candidates.append(Path(override))
@@ -100,7 +85,7 @@ def resolve_outbox_dir() -> tuple[Path, dict[str, Any]]:
     explicit_state = env_value("BOT_ERRORS_STATE_DIR")
     test_state = test_state_root()
     policy = "default"
-    outbox = Path.home() / ".local/state/bot-errors/outbox"
+    outbox = DEFAULT_STATE_ROOT / "outbox"
     if explicit_outbox:
         outbox = Path(explicit_outbox)
         policy = "explicit-outbox"

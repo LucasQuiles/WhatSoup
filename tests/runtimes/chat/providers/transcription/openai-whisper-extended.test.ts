@@ -51,14 +51,7 @@ vi.mock('../../../../../src/lib/emit-alert.ts', () => ({
   clearAlertSourceChecked: mockClearAlertSourceChecked,
 }));
 
-vi.mock('../../../../../src/logger.ts', () => ({
-  createChildLogger: () => ({
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  }),
-}));
+vi.mock('../../../../../src/logger.ts', async () => (await import('../../../../helpers/logger-mock.ts')).loggerMock());
 
 vi.mock('../../../../../src/config.ts', () => ({
   config: mockConfig,

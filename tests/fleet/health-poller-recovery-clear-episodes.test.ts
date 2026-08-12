@@ -6,12 +6,7 @@ const alertFns = vi.hoisted(() => ({
   emitAlert: vi.fn((): AlertEmissionResult => ({ ok: true, channel: 'outbox', status: 'durably_queued' })),
   clearAlertSource: vi.fn(() => true),
 }));
-const logger = vi.hoisted(() => ({
-  info: vi.fn(),
-  warn: vi.fn(),
-  error: vi.fn(),
-  debug: vi.fn(),
-}));
+const logger = vi.hoisted(() => ({} as Record<string, ReturnType<typeof vi.fn>>));
 const alertThrottleStore = vi.hoisted(() => ({
   loadAlertThrottleDetailed: vi.fn(() => ({ entries: new Map<string, string>(), loadError: null })),
   recordAlertThrottle: vi.fn(),
@@ -30,9 +25,11 @@ vi.mock('../../src/fleet/alert-throttle-store.ts', () => ({
   ...alertThrottleStore,
 }));
 vi.mock('../../src/fleet/silence-manager.ts', () => silenceManager);
-vi.mock('../../src/logger.ts', () => ({
-  createChildLogger: () => ({ ...logger, child: vi.fn().mockReturnThis() }),
-}));
+vi.mock('../../src/logger.ts', async () => {
+  const { hoistedLoggerMock } = await import('../helpers/logger-mock.ts');
+  const { createChildLogger } = hoistedLoggerMock(logger);
+  return { createChildLogger };
+});
 
 const POLL_MS = 1_000;
 const WITHHELD_MSG = 'recovered alert clear withheld until recovery proof is complete';

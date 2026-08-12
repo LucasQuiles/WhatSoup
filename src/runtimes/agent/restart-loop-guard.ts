@@ -31,6 +31,7 @@ import {
   type PrivateJournalStatus,
   writePrivateJournalSync,
 } from '../../lib/private-journal.ts';
+import { systemClock } from '../../lib/clock.ts';
 import { createChildLogger } from '../../logger.ts';
 
 const log = createChildLogger('restart-loop-guard');
@@ -175,7 +176,7 @@ function saveState(statePath: string, state: RestartLoopGuardState): boolean {
  * OOM). Call once, as early as the instance dataRoot is known. Best-effort:
  * persistence failure degrades to "not interrupted" (fail-open).
  */
-export function markBootInProgress(statePath: string, now = Date.now()): boolean {
+export function markBootInProgress(statePath: string, now = systemClock.now()): boolean {
   const loaded = loadState(statePath);
   if (loaded.status === 'journal_unreadable') return false;
   const wasInterrupted = loaded.state?.bootInProgress === true;
@@ -220,7 +221,7 @@ export function checkAndRecordInterruptedBoot(options: {
 }): RestartLoopGuardTrip {
   const maxRestarts = options.maxRestarts ?? RESTART_LOOP_GUARD_DEFAULTS.maxRestarts;
   const windowMs = options.windowMs ?? RESTART_LOOP_GUARD_DEFAULTS.windowMs;
-  const now = options.now ?? Date.now();
+  const now = options.now ?? systemClock.now();
   if (maxRestarts <= 0) return { tripped: false, bootsInWindow: 0 };
 
   const loaded = loadState(options.statePath);
@@ -258,7 +259,7 @@ export function checkAndRecordInterruptedBoot(options: {
 export function readRestartLoopGuardHealth(
   statePath: string,
   windowMs: number = RESTART_LOOP_GUARD_DEFAULTS.windowMs,
-  now: number = Date.now(),
+  now: number = systemClock.now(),
 ): RestartLoopGuardHealth {
   const loaded = loadState(statePath);
   if (loaded.status === 'journal_unreadable' || loaded.state === null) {

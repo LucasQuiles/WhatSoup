@@ -129,6 +129,23 @@ export class BaselineShapeError extends Error {
   }
 }
 
+/**
+ * An entry-array baseline is either the legacy bare array or the
+ * schemaVersion-2 wrapper `{ schemaVersion, entries: [...] }` (adopted by
+ * loggermock in QC-2 of #2977). Both forms must stay weighable under one
+ * shape id: the growth guard weighs the MERGE BASE file with the
+ * candidate's code, so a hard cutover would turn every legacy base into
+ * COULD-NOT-LOOK the moment a baseline migrates.
+ */
+function entryArrayEntries(doc: unknown): unknown[] {
+  if (Array.isArray(doc)) return doc;
+  if (doc !== null && typeof doc === 'object') {
+    const entries = (doc as { entries?: unknown }).entries;
+    if (Array.isArray(entries)) return entries;
+  }
+  throw new BaselineShapeError('expected an array of baseline entries');
+}
+
 function sumNumericValues(record: unknown, where: string): number {
   if (record === null || typeof record !== 'object' || Array.isArray(record)) {
     throw new BaselineShapeError(`${where}: expected an object of numeric counts`);
@@ -154,10 +171,7 @@ function sumNumericValues(record: unknown, where: string): number {
 export function weighBaseline(shape: BaselineShape, doc: unknown): number {
   switch (shape) {
     case 'entry-array': {
-      if (!Array.isArray(doc)) {
-        throw new BaselineShapeError('expected an array of baseline entries');
-      }
-      return doc.length;
+      return entryArrayEntries(doc).length;
     }
 
     case 'single-array-object': {
@@ -263,10 +277,7 @@ export function baselineIdentities(
   doc: unknown,
 ): string[] | undefined {
   if (shape !== 'entry-array') return undefined;
-  if (!Array.isArray(doc)) {
-    throw new BaselineShapeError('expected an array of baseline entries');
-  }
-  return doc.map(canonicalJson);
+  return entryArrayEntries(doc).map(canonicalJson);
 }
 
 export interface WeighedBaseline {
@@ -292,10 +303,10 @@ export interface BaselineFinding {
   /** True when the comparison could not be made at all. Report, never pass. */
   inconclusive: boolean;
   /**
-   * What kind of growth this is. Only `weight-growth` is waivable:
-   * `identity-introduction` means the candidate smuggled a NEW baseline entry, which no
-   * waiver may authorize — a waiver widens a numeric ceiling, it never admits new debt
-   * identities.
+   * What kind of growth this is. `weight-growth` is waivable by any valid waiver;
+   * `identity-introduction` means the candidate carries NEW baseline entries, which only
+   * a waiver explicitly marked `admitsNewIdentities: true` may authorize — a plain
+   * waiver widens a numeric ceiling, it never admits new debt identities.
    */
   kind?: 'weight-growth' | 'identity-introduction';
   message: string;
@@ -381,8 +392,9 @@ export function compareWeights(weighed: readonly WeighedBaseline[]): BaselineFin
  * - `maxWeight` is an ABSOLUTE cap, not a delta. The moment the widening lands, the base
  *   weight equals the cap and the waiver authorizes nothing further — it is self-spending.
  * - `expiresAt` bounds the window; an expired waiver authorizes nothing.
- * - Only `weight-growth` findings are waivable. Identity introductions (new debt entries)
- *   are never waivable regardless of weight.
+ * - `weight-growth` findings are waivable. Identity introductions (new debt entries) are
+ *   waivable ONLY by a waiver that explicitly sets `admitsNewIdentities: true` — reserved
+ *   for reviewed schema migrations / honest re-growth; a plain waiver never admits them.
  * - A malformed waiver document is a shape error (INCONCLUSIVE), never silently ignored:
  *   an unreadable authorization must not fail open into either blocking or allowing.
  *
@@ -406,6 +418,17 @@ export interface GrowthWaiver {
   grantedAt: string;
   /** ISO date (YYYY-MM-DD) after which the waiver authorizes nothing. */
   expiresAt: string;
+  /**
+   * When true, this waiver also covers `identity-introduction` findings on
+   * its path — new or restructured entries, still capped by maxWeight and
+   * the expiry window. Reserved for reviewed schema migrations and honest
+   * re-growth events where the entries themselves are self-documenting
+   * (e.g. the QC-2 loggermock status/reason format, #2977): the objection
+   * to identity admission is SMUGGLED debt, and a merge-base waiver naming
+   * the path, cap, expiry, and rationale is the opposite of smuggling.
+   * Absent or false preserves the identity law unchanged.
+   */
+  admitsNewIdentities?: boolean;
 }
 
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -444,7 +467,19 @@ export function parseWaiverDocument(document: unknown): GrowthWaiver[] {
         throw new BaselineShapeError(`growth-waivers[${i}]: ${field} must be an ISO date (YYYY-MM-DD)`);
       }
     }
-    return { path, maxWeight, reason, issue, grantedAt: grantedAt as string, expiresAt: expiresAt as string };
+    const { admitsNewIdentities } = w as Record<string, unknown>;
+    if (admitsNewIdentities !== undefined && typeof admitsNewIdentities !== 'boolean') {
+      throw new BaselineShapeError(`growth-waivers[${i}]: admitsNewIdentities must be a boolean when present`);
+    }
+    return {
+      path,
+      maxWeight,
+      reason,
+      issue,
+      grantedAt: grantedAt as string,
+      expiresAt: expiresAt as string,
+      ...(admitsNewIdentities === undefined ? {} : { admitsNewIdentities }),
+    };
   });
 }
 
@@ -468,7 +503,8 @@ export function applyWaivers(
     const w = waivers.find(
       (candidate) =>
         candidate.path === f.path
-        && f.kind === 'weight-growth'
+        && (f.kind === 'weight-growth'
+          || (f.kind === 'identity-introduction' && candidate.admitsNewIdentities === true))
         && !f.inconclusive
         && f.head !== null
         && f.head <= candidate.maxWeight

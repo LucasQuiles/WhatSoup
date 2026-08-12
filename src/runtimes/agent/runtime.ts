@@ -75,6 +75,28 @@ import {
 import { clearAlertSourceChecked, emitAlertChecked } from '../../lib/emit-alert.ts';
 import { lookupCredential, resolveProviderKeyService } from '../../lib/keyring.ts';
 import { MS_PER_SECOND, MS_PER_MINUTE, MS_PER_HOUR, MS_PER_DAY } from '../../lib/time-units.ts';
+import {
+  SESSION_IDLE_MS,
+  SESSION_SWEEP_INTERVAL_MS,
+  ZOMBIE_SESSION_SWEEP_INTERVAL_MS,
+  AMBIGUOUS_SESSION_MAX_AGE_MS,
+  MAX_RESIDENT_SESSIONS,
+  SESSION_MIN_RESIDENCY_MS,
+  MAX_TOOL_FAILURE_ALERT_DEDUP_KEYS,
+  DEFAULT_FALLBACK_WINDOW_MS,
+  MIN_FALLBACK_WINDOW_MS,
+  MAX_FALLBACK_WINDOW_MS,
+  PROVIDER_FALLBACK_NOTICE_DEDUP_MS,
+  PROVIDER_FALLBACK_PRIMARY_RECHECK_MS,
+  PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD,
+  PROVIDER_FALLBACK_PROBE_STALL_CEILING_MULTIPLE,
+  diagnosticBundleEnabled,
+  DIAGNOSTIC_BUNDLE_THROTTLE_MS,
+  HANDOFF_STALE_MS,
+  AUTO_COMPACT_TIMEOUT_MS,
+  SYSTEM_TURN_TIMEOUT_MS,
+  AUTO_COMPACT_TIMEOUT_BACKOFF_MS,
+} from './runtime-tunables.ts';
 import { resolveProviderCredentialState, isProviderRoutable, spawnFailureCredentialNote } from '../../lib/provider-credential-eligibility.ts';
 import { createChildLogger } from '../../logger.ts';
 import {
@@ -96,7 +118,12 @@ import {
   saveFallbackState,
   getFallbackState,
   clearFallbackState,
+  PERSISTED_FALLBACK_STATE_VERSION,
 } from './fallback-state-db.ts';
+import {
+  restorePersistedFallbackWindowState,
+  failedKeysToPersistedKeys,
+} from './fallback-restore.ts';
 import { chatJidToWorkspace, provisionWorkspace, writeSandboxArtifacts, ensurePermissionsSettings } from '../../core/workspace.ts';
 import { inspectUserClaudeSettings } from '../../core/user-claude-settings.ts';
 import { isSamePhysicalDirectory } from '../../lib/home-path.ts';
@@ -230,6 +257,11 @@ import { FallbackChain } from './fallback-chain-state.ts';
 import { FallbackEmptyAdvance } from './fallback-empty-advance.ts';
 import { PendingPollStore } from './pending-poll-store.ts';
 import { PendingPollPersistence } from './pending-poll-persistence.ts';
+import {
+  ConsumptionReceiptRecorder,
+  OfflineDecisionRetryScheduler,
+  QueuedDecisionConsumer,
+} from './pending-poll-health.ts';
 import { HandoffDistillCoordinator } from './handoff-distill-coordinator.ts';
 import { handoffDistillerEnabled, handoffContextEnabled, handoffDistillModel } from './handoff-distill-config.ts';
 import { config } from '../../config.ts';
@@ -295,6 +327,7 @@ import {
   type PrimaryModelUsabilityResult,
 } from './providers/primary-model-usability.ts';
 import { createPrimaryModelProbeAdapters } from './providers/primary-model-usability-adapters.ts';
+import { calculatePeriodicProbeDelay, calculatePeriodicProbeBackoff, buildPrimaryProbeAdapterDeps, formatPrimaryModelUsabilityEvidence } from './primary-readiness-probe.ts';
 import { ensureClaudeFileStoreCredential } from './providers/claude-filestore-heal.ts';
 import {
   formatFallbackRecoveryReceiptEvidence,
@@ -341,85 +374,11 @@ const AUTO_RESPAWN_MAX_DELAY_MS = 15 * MS_PER_SECOND;
 const HEALTH_STATS_INTERVAL_MS = MS_PER_MINUTE;
 const SHARED_QUEUE_IDLE_MS = MS_PER_HOUR;
 const SHARED_QUEUE_SWEEP_INTERVAL_MS = 10 * MS_PER_MINUTE;
-// Idle per-chat agent session lifecycle bounds. A resident session idle (no
-// message) beyond SESSION_IDLE_MS is suspended; sessions support --resume so the
-// next message rehydrates. MAX_RESIDENT_SESSIONS is an LRU ceiling so a burst of
-// distinct chats cannot pin unbounded memory; SESSION_MIN_RESIDENCY_MS is an
-// anti-thrash floor so a freshly-spawned session is never immediately evicted.
-const envPositiveInt = (key: string, fallback: number): number => {
-  const raw = Number(process.env[key]);
-  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : fallback;
-};
-const SESSION_IDLE_MS = envPositiveInt('WHATSOUP_SESSION_IDLE_MS', MS_PER_HOUR); // 1h
-const SESSION_SWEEP_INTERVAL_MS = envPositiveInt('WHATSOUP_SESSION_SWEEP_MS', 10 * MS_PER_MINUTE); // 10m
-// #1756: the agent_sessions DB classifier used to run startup-only, so an
-// init-failure session landing in the 'ambiguous' bucket was skipped forever.
-// ZOMBIE_SESSION_SWEEP_INTERVAL_MS re-runs the classifier periodically;
-// AMBIGUOUS_SESSION_MAX_AGE_MS is the age (with zero processed messages)
-// past which an ambiguous row is independently re-verified and, if still not
-// alive+owned, marked terminal (see resolveAmbiguousAgeFallback).
-const ZOMBIE_SESSION_SWEEP_INTERVAL_MS = envPositiveInt('WHATSOUP_ZOMBIE_SWEEP_MS', 30 * MS_PER_MINUTE); // 30m
-const AMBIGUOUS_SESSION_MAX_AGE_MS = envPositiveInt('WHATSOUP_AMBIGUOUS_SESSION_MAX_AGE_MS', MS_PER_DAY); // 24h
-const MAX_RESIDENT_SESSIONS = envPositiveInt('WHATSOUP_MAX_SESSIONS', 12);
-const SESSION_MIN_RESIDENCY_MS = envPositiveInt('WHATSOUP_SESSION_MIN_RESIDENCY_MS', 5 * MS_PER_MINUTE); // 5m
 // Single-sourced from conversation-key.ts so the tool/crash scope keys and the
 // tool_calls telemetry sentinel can never drift apart.
 const GLOBAL_TOOL_SCOPE_KEY = GLOBAL_CONVERSATION_KEY;
 const GLOBAL_CRASH_SCOPE_KEY = GLOBAL_CONVERSATION_KEY;
-const MAX_TOOL_FAILURE_ALERT_DEDUP_KEYS = 1_000;
 // (TOOL_FAILURE_ALERT_EXCERPT_CHARS moved to ./tool-update.ts with alertExcerpt.)
-// Default provider-fallback window when the usage-limit message names no reset
-// time. Claude usage limits operate on 5-hour rolling windows, so 5h is a safe
-// upper-bound estimate for when the primary provider becomes available again.
-const DEFAULT_FALLBACK_WINDOW_MS = 5 * MS_PER_HOUR; // 18_000_000 ms (5h)
-// Clamp the fallback window so a malformed/adversarial reset time can neither
-// revert almost immediately nor pin the fallback for an unreasonable span.
-const MIN_FALLBACK_WINDOW_MS = MS_PER_MINUTE; // 1 minute
-const MAX_FALLBACK_WINDOW_MS = MS_PER_DAY; // 24 hours
-const PROVIDER_FALLBACK_NOTICE_DEDUP_MS = (() => {
-  const raw = Number(process.env['WHATSOUP_PROVIDER_FALLBACK_NOTICE_DEDUP_MS']);
-  return Number.isFinite(raw) && raw > 0 ? raw : 30 * MS_PER_MINUTE;
-})();
-const PROVIDER_FALLBACK_PRIMARY_RECHECK_MS = (() => {
-  const raw = Number(process.env['WHATSOUP_PROVIDER_FALLBACK_PRIMARY_RECHECK_MS']);
-  if (!Number.isFinite(raw) || raw <= 0) return 5 * MS_PER_MINUTE;
-  return Math.min(Math.max(raw, 30 * MS_PER_SECOND), 30 * MS_PER_MINUTE);
-})();
-// The primary model usability probe has its own longer CLI deadline in
-// primary-model-usability-adapters.ts; shorter binary presence checks keep
-// their 5 s preflight timeout in providers/binary-preflight.ts.
-// Consecutive failed recovery probes (revert-timer extension path) before a
-// single fallback_recovery_stalled alert is emitted. The cap only surfaces the
-// stall — the window keeps extending so the instance is never stranded on a
-// dead primary. One alert per stall episode; the counter resets on deactivation
-// (which a successful probe triggers).
-const PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD = (() => {
-  const raw = Number(process.env['WHATSOUP_PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD']);
-  if (!Number.isFinite(raw) || raw <= 0) return 12;
-  return Math.min(Math.max(Math.trunc(raw), 3), 100);
-})();
-// Bounded-escalation ceiling multiple, passed to stallAlertPlan as a parameter (not a module-hidden global).
-const PROVIDER_FALLBACK_PROBE_STALL_CEILING_MULTIPLE = (() => {
-  const raw = Number(process.env['WHATSOUP_PROVIDER_FALLBACK_PROBE_STALL_CEILING_MULTIPLE']);
-  if (!Number.isFinite(raw) || raw <= 0) return 10;
-  return Math.min(Math.max(Math.trunc(raw), 1), 1000);
-})();
-// Opt-in: on an arming provider failure (via the registry dispatcher), run the
-// best-effort diagnostic bundle and emit its findings to the alert outbox.
-// Fire-and-forget — never blocks, delays, or alters the turn's fallback path.
-function diagnosticBundleEnabled(): boolean {
-  return process.env['WHATSOUP_DIAGNOSTIC_BUNDLE'] === '1';
-}
-// Guardrail: the diagnostic bundle probes the PRIMARY provider's health, which
-// is instance-global (identical across chats). Throttle it to at most once per
-// window so a fallback storm — many chats failing at once, or rapid repeated
-// failures — cannot spawn a flurry of CLI auth-status probes, and so we do not
-// re-probe the same primary health redundantly.
-const DIAGNOSTIC_BUNDLE_THROTTLE_MS = MS_PER_MINUTE;
-// Max age of a handoff artifact before it is considered stale and dropped from
-// the injected system block. A stale summary misleads the stand-in, so the
-// prelude builder rejects artifacts older than this when composing context.
-const HANDOFF_STALE_MS = 2 * MS_PER_MINUTE;
 /**
  * `modelUsable` reports `true` only when the primary-model usability probe behind
  * it is no older than this window. A stale `usable` probe (e.g. after reverting to
@@ -483,21 +442,6 @@ type RuntimeTurnCapability = RuntimeTurnCapabilityHealth & {
   lastTurnErrorClass: TurnCapabilityErrorClass | null;
 };
 
-// Time to wait for an auto-triggered /compact to complete before giving up.
-// A /compact must summarize the whole conversation, so on large contexts it can
-// legitimately take a few minutes; 2 min was too short and produced false
-// timeouts that fed an unbounded-growth spiral. Must stay < SILENT_COMPACT_TTL_MS
-// (defined in auto-compact-controller.ts) so the silent-compact flag does not
-// expire mid-compaction.
-const AUTO_COMPACT_TIMEOUT_MS = 4 * MS_PER_MINUTE;
-/** Absolute wall bound for every non-auto provider request owned by the runtime. */
-const SYSTEM_TURN_TIMEOUT_MS = AUTO_COMPACT_TIMEOUT_MS;
-// Cooldown after a timed-out /compact before another auto-compact may be tried.
-// Kept short so a session that times out retries soon (bounding how far it grows
-// between attempts) rather than degrading for a long window; still long enough to
-// prevent a per-turn retry storm. A session that genuinely cannot compact is
-// ultimately recovered by the prompt-too-long kill+respawn path.
-const AUTO_COMPACT_TIMEOUT_BACKOFF_MS = 5 * MS_PER_MINUTE;
 // The success-cooldown, rapid-rearm window, and backoff tiers now live in
 // auto-compact-controller.ts alongside the state machine that uses them;
 // AUTO_COMPACT_RAPID_REARM_WINDOW_MS is imported above for the trigger gate.
@@ -881,6 +825,15 @@ export class AgentRuntime implements Runtime {
   // (captured at the top of start()); consumed by the startup resume gate.
   private restartLoopInterruptedBoot = false;
   private unownedProviderEventRejects = 0;
+  /**
+   * BY-DESIGN suppressions: effects of an OWNED system_request turn rejected
+   * as purpose_disallows_effect. Counted apart from unownedProviderEventRejects
+   * so designed suppression (a chatty model on a context-injection turn) is
+   * distinguishable in health from genuine attribution leakage (no_owner /
+   * source_session_not_current) — conflating them was the operator trap in the
+   * ml-bot 2026-08-10/11 investigations.
+   */
+  private suppressedSystemTurnEffectRejects = 0;
   private readonly turnChronology = new TurnChronologyTracker();
   private readonly providerEventRejectReasonCounts = new Map<string, number>();
   /**
@@ -927,6 +880,7 @@ export class AgentRuntime implements Runtime {
   private readonly fallbackEmptyAdvance = new FallbackEmptyAdvance();
   private revertTimer: ReturnType<typeof setTimeout> | null = null;
   private fallbackPrimaryProbeTimer: ReturnType<typeof setTimeout> | null = null;
+  private periodicUsabilityProbeTimer: ReturnType<typeof setTimeout> | null = null; private periodicUsabilityProbeBackoff = 0;
   // Consecutive failed recovery probes on the revert-timer EXTENSION path
   // (process-local, reset on deactivation — which a successful probe triggers).
   // Early-window standing probes do not count: nothing is extending yet.
@@ -936,6 +890,10 @@ export class AgentRuntime implements Runtime {
   // Epoch ms of the most recent recovery probe (either path); null until the
   // first probe. Process-local observability only — never persisted.
   private fallbackLastProbeAt: number | null = null;
+  // #3019: true when the current fallback window was restored from persisted
+  // state (a restart mid-window), false when freshly activated in this
+  // process. Content-free continuity evidence surfaced in the health snapshot.
+  private fallbackWindowRestored = false;
   // A2: set on a probe-confirmed revert; cleared by the first real post-revert turn success (the honest canary) — a failing turn leaves it untouched.
   private pendingPostRevertConfirmation = false;
   // Epoch ms of the last diagnostic-bundle kick (instance-level throttle).
@@ -1040,6 +998,10 @@ export class AgentRuntime implements Runtime {
   // it needs the db. rehydratePendingPolls orchestrates loadRows() into the store +
   // timers + downtime notify; settle/delete/expiry call save/remove.
   private readonly pollPersistence: PendingPollPersistence;
+  // CAR-20 (#2539): offline poll-decision retry owner + durable consumption receipts.
+  private readonly offlineDecisionRetry = new OfflineDecisionRetryScheduler();
+  private readonly consumptionReceipts!: ConsumptionReceiptRecorder;
+  private readonly queuedDecisionConsumer!: QueuedDecisionConsumer;
 
   private recordCrash(mapKey: string): number {
     return this.crashes.record(mapKey);
@@ -1488,6 +1450,8 @@ export class AgentRuntime implements Runtime {
         ),
       },
       unownedProviderEventRejects: this.unownedProviderEventRejects,
+      suppressedSystemTurnEffectRejects: this.suppressedSystemTurnEffectRejects,
+      providerEventRejectReasons: Object.fromEntries(this.providerEventRejectReasonCounts),
       turnFinalizationRetainedRetries: finalizationHealth.retainedRetries,
       turnFinalizationDegradedScopes: finalizationHealth.degradedScopes,
       turnFinalizationRetryAttempts: finalizationHealth.retryAttempts,
@@ -2342,6 +2306,14 @@ export class AgentRuntime implements Runtime {
   constructor(db: Database, messenger: Messenger, instanceName?: string, options?: AgentRuntimeOptions) {
     this.db = db;
     this.pollPersistence = new PendingPollPersistence(db);
+    this.consumptionReceipts = new ConsumptionReceiptRecorder(db);
+    this.queuedDecisionConsumer = new QueuedDecisionConsumer(
+      db,
+      this.consumptionReceipts,
+      () => this.offlineDecisionRetry.scheduleRetry(() => {
+        void this.consumeQueuedPollDecisions();
+      }),
+    );
     this.messenger = messenger;
     this.instanceName = instanceName ?? 'personal';
     this.providerExecutionGate = createProviderExecutionGate(this.instanceName);
@@ -3729,6 +3701,7 @@ export class AgentRuntime implements Runtime {
       ensureClaudeFileStoreCredential();
     }
     this.schedulePrimaryModelUsabilityProbe('startup');
+    this.scheduleNextPeriodicUsabilityProbe();
     this.startHealthStatsTimer();
     this.workspaceSweeper.start();
     this.startQueueSweepTimer();
@@ -4339,6 +4312,15 @@ export class AgentRuntime implements Runtime {
             break;
           }
         }
+        // #2357 B1: handler succeeded AND a compound body is present → dispatch
+        // the body as a follow-on agent turn under the same inbound. Reuses
+        // forwardAfterLocalCommand (the existing fall-through-to-turn lever) so
+        // the body enqueues through the normal turn path and the inbound completes
+        // via the turn's durable terminal — NOT local_command_handled. The body is
+        // a NEW first-turn admission (not #2334 active-turn steering).
+        if (classified.type === 'local' && classified.compoundBody !== undefined) {
+          forwardAfterLocalCommand = classified.compoundBody;
+        }
       } catch (err) {
         if (err instanceof AgentCommandRuntimeError && err.code === 'turn_in_progress') {
           log.info({ command: classified.command, chatJid }, 'local command deferred while turn is active');
@@ -4351,6 +4333,22 @@ export class AgentRuntime implements Runtime {
         // (the inbound WAS a locally-handled command).
           log.error({ err, command: classified.command, chatJid }, 'local command handler failed');
           this.sendDirect(chatJid, 'Something went wrong processing that command. Try again?');
+          // #2357 B1 AC4: command failed with a compound body present → retain it
+          // truthfully (NOT dispatched). Running the body under failed-command
+          // semantics would violate the issue's exactly-once rule. Complete the
+          // inbound with a truthful reason and log sanitized (length only — never
+          // the body text, per the telemetry AC). Return here to skip the
+          // local_command_handled fall-through (which would double-complete).
+          if (classified.type === 'local' && classified.compoundBody !== undefined) {
+            if (msg.inboundSeq !== undefined) {
+              this.durability?.completeInbound(msg.inboundSeq, 'command_failed_body_retained');
+            }
+            log.warn(
+              { command: classified.command, chatJid, compoundBodyLength: classified.compoundBody.length },
+              'local command failed with a compound body retained — body not dispatched',
+            );
+            return;
+          }
         }
       }
       if (forwardAfterLocalCommand === null) {
@@ -5269,10 +5267,17 @@ export class AgentRuntime implements Runtime {
     reason: string,
     sourceSession?: SessionManager,
   ): void {
-    this.unownedProviderEventRejects = Math.min(
-      Number.MAX_SAFE_INTEGER,
-      this.unownedProviderEventRejects + 1,
-    );
+    if (ownerKind === 'system_request' && reason === 'purpose_disallows_effect') {
+      this.suppressedSystemTurnEffectRejects = Math.min(
+        Number.MAX_SAFE_INTEGER,
+        this.suppressedSystemTurnEffectRejects + 1,
+      );
+    } else {
+      this.unownedProviderEventRejects = Math.min(
+        Number.MAX_SAFE_INTEGER,
+        this.unownedProviderEventRejects + 1,
+      );
+    }
     const reasonCount = Math.min(
       Number.MAX_SAFE_INTEGER,
       (this.providerEventRejectReasonCounts.get(reason) ?? 0) + 1,
@@ -5453,22 +5458,43 @@ export class AgentRuntime implements Runtime {
     }
     this.recordTurnCostUsd(event);
 
+    // A restricted-purpose system turn can end in a terminal FAILURE
+    // (auth-required, server error, context overflow). This was the only
+    // terminal path that inspected neither event.isError nor event.text —
+    // forensics on effect-suppressed system turns (the ml-bot 2026-08-10/11
+    // purpose_disallows_effect incidents) saw the rejected stream events but
+    // never the terminal cause. Log-only by design: fallback arming and user
+    // notices stay user-turn concerns.
+    const systemTurnFailureKind = event.text !== null ? classifyProviderFailure(event.text) : null;
+    if (event.isError || systemTurnFailureKind !== null) {
+      log.warn({
+        scopeKey,
+        purpose: systemTurn.purpose,
+        isError: event.isError === true,
+        failureKind: systemTurnFailureKind,
+        textPreview: event.text !== null ? providerPreview(event.text, 300) : null,
+      }, 'restricted-purpose system turn ended in terminal failure');
+    }
+
     const compactPurpose = systemTurn.purpose === 'auto_compact_silent'
       || systemTurn.purpose === 'manual_compact_silent'
       || systemTurn.purpose === 'manual_compact_notice';
-    if (!compactPurpose) return;
-    const hadCompactBoundary = this.consumeCompactBoundary(scopeKey);
-    if (hadCompactBoundary && rowId !== null) {
-      markSessionCompacted(this.db, rowId);
-      this.recordAutoCompactSuccess(scopeKey);
+    if (compactPurpose) {
+      const hadCompactBoundary = this.consumeCompactBoundary(scopeKey);
+      if (hadCompactBoundary && rowId !== null) {
+        markSessionCompacted(this.db, rowId);
+        this.recordAutoCompactSuccess(scopeKey);
+      }
+      this.finishAutoCompact(scopeKey);
+      if (
+        systemTurn.purpose === 'auto_compact_silent'
+        || systemTurn.purpose === 'manual_compact_silent'
+      ) {
+        this.clearSilentCompact(scopeKey);
+      }
     }
-    this.finishAutoCompact(scopeKey);
-    if (
-      systemTurn.purpose === 'auto_compact_silent'
-      || systemTurn.purpose === 'manual_compact_silent'
-    ) {
-      this.clearSilentCompact(scopeKey);
-    }
+    // endTurn runs for EVERY purpose: the previous non-compact early return
+    // skipped it, leaving any asserted composing state to a watchdog.
     const routeQueue = scopeKey === GLOBAL_TOOL_SCOPE_KEY
       ? (systemTurn.routeChatJid
           ? this.getQueueForChat(systemTurn.routeChatJid)
@@ -5880,73 +5906,21 @@ export class AgentRuntime implements Runtime {
    */
   /**
    * D-4 v1.1: consume console decisions that were queued durably while the
-   * instance was down (pending_poll_decisions, written by the fleet's
-   * approvals route — write-while-down discipline). Each queued decision
-   * resolves through resolvePollDecisionFromConsole — the same poll-
-   * resolution path as a live console decision or a WhatsApp vote. Rows for
-   * polls that expired/resolved while down are deleted as moot (fail-visible
-   * log, never silently kept); rows that fail validation stay for operator
-   * retry. Runs once at boot, after rehydratePendingPolls.
+   * instance was down (pending_poll_decisions, written by the fleet's approvals
+   * route — write-while-down discipline). Each queued decision resolves through
+   * resolvePollDecisionFromConsole — the same poll-resolution path as a live
+   * console decision or a WhatsApp vote. Moot / unparseable rows are dropped
+   * visibly; 'invalid' rows are retained for operator retry. The loop, durable
+   * consumption receipts, and the scheduled in-process retry live in the
+   * extracted QueuedDecisionConsumer (CAR-20 #2539) — previously a transient
+   * read/parse/delete failure stranded rows for "next boot" only. Runs once at
+   * boot, after rehydratePendingPolls.
    */
   private async consumeQueuedPollDecisions(): Promise<void> {
-    try {
-      const tables = new Set(
-        (this.db.raw.prepare(`SELECT name FROM sqlite_master WHERE type = 'table'`).all() as Array<{ name: string }>)
-          .map((r) => r.name),
-      );
-      if (!tables.has('pending_poll_decisions')) return;
-      const rows = this.db.raw.prepare(`
-        SELECT map_key, question_index, selected_options, via
-        FROM pending_poll_decisions
-        ORDER BY created_at ASC, rowid ASC
-      `).all() as Array<{ map_key: string; question_index: number; selected_options: string; via: string }>;
-      if (rows.length === 0) return;
-
-      let consumed = 0;
-      let moot = 0;
-      for (const row of rows) {
-        const deleteRow = () => this.db.raw.prepare(`
-          DELETE FROM pending_poll_decisions
-          WHERE map_key = ? AND question_index = ?
-        `).run(row.map_key, row.question_index);
-
-        if (!this.pendingPolls.questions.has(row.map_key)) {
-          // The poll expired or resolved while the instance was down — the
-          // queued decision is moot; drop it visibly rather than keeping a
-          // phantom queue.
-          log.info({ mapKey: row.map_key }, 'queued console decision dropped as moot (poll not pending at boot)');
-          deleteRow();
-          moot += 1;
-          continue;
-        }
-        let selectedOptions: string[];
-        try {
-          selectedOptions = JSON.parse(row.selected_options) as string[];
-        } catch {
-          log.warn({ mapKey: row.map_key }, 'queued console decision has unparseable options; dropped');
-          deleteRow();
-          moot += 1;
-          continue;
-        }
-        const result = await this.resolvePollDecisionFromConsole({
-          mapKey: row.map_key,
-          questionIndex: row.question_index,
-          selectedOptions,
-        });
-        if (result.ok || result.code === 'stale' || result.code === 'not_found') {
-          if (result.ok) consumed += 1;
-          else moot += 1;
-          deleteRow();
-        }
-        // 'invalid' rows stay for operator retry (validation may depend on
-        // post-boot state, e.g. a poll still re-sending its message).
-      }
-      if (consumed > 0 || moot > 0) {
-        log.info({ consumed, moot }, 'queued console decisions consumed at boot');
-      }
-    } catch (err) {
-      log.error({ err }, 'consumeQueuedPollDecisions: unhandled error (queued rows kept for next boot)');
-    }
+    await this.queuedDecisionConsumer.consume({
+      hasPending: (mapKey) => this.pendingPolls.questions.has(mapKey),
+      resolve: (decision) => this.resolvePollDecisionFromConsole(decision),
+    });
   }
 
   private async rehydratePendingPolls(): Promise<void> {
@@ -7081,6 +7055,46 @@ export class AgentRuntime implements Runtime {
     const completedDeliveryIdentityDebt = completedDeliveryIdentityAdmissions.unresolvedCount > 0;
     const finalizationDegraded = runtimeTurnRecoveryIsDegraded(finalizationHealth, recoveryHealth);
     const turnQueueHealth = this.runtimeTurnCoordinator.turnQueueHaltHealth(this.sessionScope);
+    // CAR-20 (#2539): current-vs-historical poll-persistence health + offline-decision
+    // retry state, surfaced in BOTH health branches below.
+    const pollPersistenceHealth = this.pollPersistence.healthDetails();
+    const offlineDecisionRetry = this.offlineDecisionRetry.healthDetails();
+    // Health-detail fields shared verbatim by both session-scope branches below.
+    // Computed once here (all inputs are already in scope) and spread into each
+    // branch's `details` at the same position, preserving key order and output.
+    const sharedHealthDetails = {
+      pollPersistenceErrors: this.pollPersistence.errors,
+      pollPersistenceHealth,
+      offlineDecisionRetry,
+      autoCompactIneffective: this.autoCompact.ineffective,
+      autoCompactConsecutiveRapidRearmsMax: this.autoCompact.consecutiveRapidRearmsMax,
+      autoCompactNextTurnOverThreshold: this.autoCompact.nextTurnOverThreshold,
+      autoCompactState: autoCompactHealth.state,
+      autoCompactActiveBackoffScopes: autoCompactHealth.activeBackoffScopes,
+      autoCompactWorstCurrentBackoffTier: autoCompactHealth.worstCurrentBackoffTier,
+      proactiveResumeIdentityRejects: this.proactiveResumeIdentityRejects,
+      completedDeliveryIdentityAdmissions,
+      restartLoopGuard: {
+        enabled: config.restartLoopGuard.enabled,
+        ...readRestartLoopGuardHealth(
+          restartLoopGuardPath(config.stateRoot),
+          config.restartLoopGuard.windowMs,
+        ),
+      },
+      unownedProviderEventRejects: this.unownedProviderEventRejects,
+      suppressedSystemTurnEffectRejects: this.suppressedSystemTurnEffectRejects,
+      providerEventRejectReasons: Object.fromEntries(this.providerEventRejectReasonCounts),
+      ...this.turnChronology.healthDetails(),
+      providerExecution,
+      turnFinalizationRetainedRetries: finalizationHealth.retainedRetries,
+      turnFinalizationDegradedScopes: finalizationHealth.degradedScopes,
+      turnFinalizationRetryAttempts: finalizationHealth.retryAttempts,
+      turnFinalizationRetryRecoveries: finalizationHealth.retryRecoveries,
+      turnFinalizationRetryExhaustions: finalizationHealth.retryExhaustions,
+      ...turnQueueHealth,
+      ...recoveryHealth,
+      ...fallbackState,
+    };
     if (this.sessionScope === 'per_chat') {
       const sessions = [...this.chatSessions.values()];
       let activeSessions = 0;
@@ -7110,6 +7124,8 @@ export class AgentRuntime implements Runtime {
       if (completedDeliveryIdentityDebt) degradedReasons.push('completed_delivery_identity_debt');
       if (turnQueueHealth.turnQueueHalted) degradedReasons.push('turn_queue_halted');
       if (providerExecution.pressureActive) degradedReasons.push('provider_execution_pressure');
+      if (pollPersistenceHealth.degraded) degradedReasons.push('poll_persistence_failure');
+      if (offlineDecisionRetry.exhausted) degradedReasons.push('offline_decision_retry_exhausted');
       const healthStatus: RuntimeHealth['status'] = degradedReasons.length > 0 ? 'degraded' : 'healthy';
       return {
         status: healthStatus,
@@ -7121,33 +7137,7 @@ export class AgentRuntime implements Runtime {
           sessionCount: sessions.length,
           recentCrashes: recentCrashCount,
           lastCrashAt: this.crashes.lastCrashAt,
-          pollPersistenceErrors: this.pollPersistence.errors,
-          autoCompactIneffective: this.autoCompact.ineffective,
-          autoCompactConsecutiveRapidRearmsMax: this.autoCompact.consecutiveRapidRearmsMax,
-          autoCompactNextTurnOverThreshold: this.autoCompact.nextTurnOverThreshold,
-          autoCompactState: autoCompactHealth.state,
-          autoCompactActiveBackoffScopes: autoCompactHealth.activeBackoffScopes,
-          autoCompactWorstCurrentBackoffTier: autoCompactHealth.worstCurrentBackoffTier,
-          proactiveResumeIdentityRejects: this.proactiveResumeIdentityRejects,
-          completedDeliveryIdentityAdmissions,
-          restartLoopGuard: {
-            enabled: config.restartLoopGuard.enabled,
-            ...readRestartLoopGuardHealth(
-              restartLoopGuardPath(config.stateRoot),
-              config.restartLoopGuard.windowMs,
-            ),
-          },
-          unownedProviderEventRejects: this.unownedProviderEventRejects,
-          ...this.turnChronology.healthDetails(),
-          providerExecution,
-          turnFinalizationRetainedRetries: finalizationHealth.retainedRetries,
-          turnFinalizationDegradedScopes: finalizationHealth.degradedScopes,
-          turnFinalizationRetryAttempts: finalizationHealth.retryAttempts,
-          turnFinalizationRetryRecoveries: finalizationHealth.retryRecoveries,
-          turnFinalizationRetryExhaustions: finalizationHealth.retryExhaustions,
-          ...turnQueueHealth,
-          ...recoveryHealth,
-          ...fallbackState,
+          ...sharedHealthDetails,
         },
       };
     }
@@ -7162,6 +7152,8 @@ export class AgentRuntime implements Runtime {
     if (completedDeliveryIdentityDebt) degradedReasons.push('completed_delivery_identity_debt');
     if (providerExecution.pressureActive) degradedReasons.push('provider_execution_pressure');
     if (turnQueueHealth.turnQueueHalted) degradedReasons.push('turn_queue_halted');
+    if (pollPersistenceHealth.degraded) degradedReasons.push('poll_persistence_failure');
+    if (offlineDecisionRetry.exhausted) degradedReasons.push('offline_decision_retry_exhausted');
     // A halted single/shared queue is the active admission path — unhealthy/503,
     // matching the public-surface contract; every other reason degrades only.
     const healthStatus: RuntimeHealth['status'] =
@@ -7177,33 +7169,7 @@ export class AgentRuntime implements Runtime {
         active: status?.active ?? false,
         pid: status?.pid ?? null,
         sessionId: status?.sessionId ?? null,
-        pollPersistenceErrors: this.pollPersistence.errors,
-        autoCompactIneffective: this.autoCompact.ineffective,
-        autoCompactConsecutiveRapidRearmsMax: this.autoCompact.consecutiveRapidRearmsMax,
-        autoCompactNextTurnOverThreshold: this.autoCompact.nextTurnOverThreshold,
-        autoCompactState: autoCompactHealth.state,
-        autoCompactActiveBackoffScopes: autoCompactHealth.activeBackoffScopes,
-        autoCompactWorstCurrentBackoffTier: autoCompactHealth.worstCurrentBackoffTier,
-        proactiveResumeIdentityRejects: this.proactiveResumeIdentityRejects,
-        completedDeliveryIdentityAdmissions,
-        restartLoopGuard: {
-          enabled: config.restartLoopGuard.enabled,
-          ...readRestartLoopGuardHealth(
-            restartLoopGuardPath(config.stateRoot),
-            config.restartLoopGuard.windowMs,
-          ),
-        },
-        unownedProviderEventRejects: this.unownedProviderEventRejects,
-        ...this.turnChronology.healthDetails(),
-        providerExecution,
-        turnFinalizationRetainedRetries: finalizationHealth.retainedRetries,
-        turnFinalizationDegradedScopes: finalizationHealth.degradedScopes,
-        turnFinalizationRetryAttempts: finalizationHealth.retryAttempts,
-        turnFinalizationRetryRecoveries: finalizationHealth.retryRecoveries,
-        turnFinalizationRetryExhaustions: finalizationHealth.retryExhaustions,
-        ...turnQueueHealth,
-        ...recoveryHealth,
-        ...fallbackState,
+        ...sharedHealthDetails,
       },
     };
   }
@@ -7558,6 +7524,7 @@ export class AgentRuntime implements Runtime {
       clearTimeout(this.fallbackPrimaryProbeTimer);
       this.fallbackPrimaryProbeTimer = null;
     }
+    if (this.periodicUsabilityProbeTimer) { clearTimeout(this.periodicUsabilityProbeTimer); this.periodicUsabilityProbeTimer = null; }
     this.fallbackWindow.activeUntil = null;
     this.fallbackWindow.activatedAt = null;
     this.fallbackWindow.armReason = null;
@@ -8355,8 +8322,12 @@ export class AgentRuntime implements Runtime {
     return getTrackerForPort(this.chatTransportHost, mapKey);
   }
 
+  // #2981 car-A SHIM — fire-and-forget wrapper. The free function now returns
+  // Promise<boolean> but this method's callers (53 sites) still expect void.
+  // Car-C deletes this shim and propagates the boolean to F2a consumers.
+  // Tracking marker: #2981-SHIM-RUNTIME-SENDDIRECT
   private sendDirect(chatJid: string, text: string, bypassEchoGuard = false): void {
-    sendDirectForPort(this.chatTransportHost, chatJid, text, bypassEchoGuard);
+    void sendDirectForPort(this.chatTransportHost, chatJid, text, bypassEchoGuard);
   }
 
   /**
@@ -9408,6 +9379,7 @@ export class AgentRuntime implements Runtime {
     fallbackChain: Array<AgentFallbackEntry & { eligible: boolean | null }>;
     fallbackChainExhausted: boolean;
     failedEntryCount: number;
+    fallbackRestoredFromPersist: boolean;
     turnErrorCounts: Record<string, number>;
     handoffDistiller: { enabled: boolean; contextInjection: boolean; model: string | null };
   } {
@@ -9439,6 +9411,7 @@ export class AgentRuntime implements Runtime {
       fallbackChain: this.fallbackChain.snapshot(this.agentFallbacks, this.idleFallbackEligibilityResolver),
       fallbackChainExhausted: this.fallbackChain.isExhausted(this.agentFallbacks),
       failedEntryCount: this.fallbackChain.failedKeys.size,
+      fallbackRestoredFromPersist: this.fallbackWindowRestored,
       turnErrorCounts: Object.fromEntries(this.turnCapabilityTracker.errorCounts),
       handoffDistiller: {
         enabled: handoffDistillerEnabled(),
@@ -9490,6 +9463,7 @@ export class AgentRuntime implements Runtime {
       lastSuccessfulTurnSessionCurrent: this.lastSuccessfulTurnSessionCurrent(),
       lastTurnErrorClass: this.turnCapabilityTracker.lastTurnErrorClass,
       lastTurnErrorAt: this.turnCapabilityTracker.lastTurnErrorAt,
+      periodicProbeExpected: this.periodicUsabilityProbeTimer !== null,
     };
   }
 
@@ -9512,7 +9486,8 @@ export class AgentRuntime implements Runtime {
     );
     this.consecutivePrimaryEmptyTurns = 0;
     this.consecutiveUnknownTerminalTurns = 0;
-    if (this.isFallbackWindowActive) return; // #1884 follow-up: a fallback turn proves nothing about the primary
+    if (this.isFallbackWindowActive) return;
+    if (session !== null) { const sm = typeof session?.getModelRef === 'function' ? session.getModelRef() : undefined; if (successProvider !== this.agentProvider || (sm ?? null) !== (this.model ?? null)) return; }
     // A2: this real post-revert turn IS the honest canary — the deferred clear a probe-confirmed revert withheld.
     if (this.pendingPostRevertConfirmation) {
       clearAlertSourceChecked(this.instanceName, 'provider_fallback_activated', 'reason=post-revert-turn-success');
@@ -9678,9 +9653,12 @@ export class AgentRuntime implements Runtime {
     }
     const noticeKey = [queue.targetChatJid, 'auth-required'].join(':');
     if (this.recentNoFallbackReauthNotices.has(noticeKey)) return;
+    queue.enqueueText('_The agent needs re-authentication before it can reply here. An operator has been notified._');
+    // Dedup is recorded only AFTER a successful enqueue: recording first meant a
+    // teardown-race throw suppressed both the notice and the alert for the full
+    // dedup window with no retry.
     this.recentNoFallbackReauthNotices.set(noticeKey, now);
     this.capDedupeMap(this.recentNoFallbackReauthNotices);
-    queue.enqueueText('_The agent needs re-authentication before it can reply here. An operator has been notified._');
     // Back the "operator has been notified" claim: no result-path alert fires on
     // the no-fallback auth-required teardown (fallback alerts fire only when a
     // fallback activates), so without this the notice claim would be unbacked.
@@ -9891,6 +9869,10 @@ export class AgentRuntime implements Runtime {
         activatedAt,
         reason: persistReason,
         probeAttempts: this.fallbackProbeAttempts,
+        version: PERSISTED_FALLBACK_STATE_VERSION,
+        activeEntryProvider: fallbackEntry.provider,
+        activeEntryModel: fallbackEntry.model ?? null,
+        failedKeys: failedKeysToPersistedKeys(this.fallbackChain.failedKeys),
       });
     } catch (err) {
       log.warn({ err }, 'failed to persist fallback window — continuing in-memory');
@@ -10050,51 +10032,25 @@ export class AgentRuntime implements Runtime {
   }
 
   /**
-   * Re-arm a persisted fallback window after a process restart. Never throws —
-   * a corrupt, missing, or stale row is cleared and startup proceeds on the primary.
-   * getFallbackState returns null for both "no row" and "bad-typed row" (SQLite
-   * affinity can store TEXT in INTEGER columns); clearing on null ensures corrupt
-   * rows do not linger across restarts.
+   * Re-arm a persisted fallback window after a process restart. Never throws.
+   * #3019: restore/reconciliation logic extracted into fallback-restore.ts.
    */
   private restorePersistedFallbackWindow(): void {
-    try {
-      ensureFallbackStateSchema(this.db);
-      const persisted = getFallbackState(this.db);
-      if (!persisted) {
-        clearFallbackState(this.db);
-        return;
-      }
-      if (this.agentFallbacks.length === 0 || persisted.activeUntil <= Date.now()) {
-        clearFallbackState(this.db);
-        return;
-      }
-      // Clamp the restored window so a clock-skew or tampered row cannot pin
-      // the fallback for longer than MAX_FALLBACK_WINDOW_MS from now.
-      const clampedUntil = Math.min(persisted.activeUntil, Date.now() + MAX_FALLBACK_WINDOW_MS);
-      // Resume the stall clock BEFORE re-arming: the persisted attempts feed
-      // both the re-persist inside armFallbackWindow and the restore alert's
-      // evidence. Without this, every restart reset the count to zero and a
-      // dead primary could extend forever without ever reaching the stall
-      // threshold (restarts happen more often than 12 recheck cadences).
-      this.fallbackProbeAttempts = Number.isFinite(persisted.probeAttempts) ? persisted.probeAttempts : 0;
-      // Pass persisted.reason so the original cause survives the restart, and
-      // restored:true so the resumed window is not re-counted as an
-      // activation — provider_fallback_activated already fired when the
-      // window first armed; the resume emits provider_fallback_restored.
-      const restored = this.armFallbackWindow(clampedUntil, persisted.reason, persisted.activatedAt, { restored: true });
-      if (!restored) {
-        clearFallbackState(this.db);
-        return;
-      }
-      const wasClamped = clampedUntil < persisted.activeUntil;
-      log.info({
-        activeUntil: new Date(clampedUntil).toISOString(),
-        ...(wasClamped ? { persistedUntil: new Date(persisted.activeUntil).toISOString() } : {}),
-        originalReason: persisted.reason,
-      }, 'restored provider-fallback window from persisted state');
-    } catch (err) {
-      log.warn({ err }, 'failed to restore persisted fallback window');
-    }
+    const r = restorePersistedFallbackWindowState(
+      { db: this.db, agentFallbacks: this.agentFallbacks,
+        resetFailedKeys: () => this.fallbackChain.failedKeys.clear(),
+        addFailedKey: (k) => this.fallbackChain.failedKeys.add(k),
+        entryKeyFor: (p, m) => this.fallbackChain.entryKey({ provider: p, model: m ?? undefined }) },
+      MAX_FALLBACK_WINDOW_MS, Date.now);
+    if (r.outcome !== 'armed') { this.fallbackWindowRestored = false; return; }
+    this.fallbackProbeAttempts = r.persistedProbeAttempts;
+    const ok = this.armFallbackWindow(r.clampedUntil, r.persistedReason, r.persistedActivatedAt, { restored: true });
+    if (!ok) { clearFallbackState(this.db); this.fallbackWindowRestored = false; return; }
+    this.fallbackWindowRestored = true;
+    log.info({ activeUntil: new Date(r.clampedUntil).toISOString(),
+      ...(r.clampedUntil < r.persistedUntil ? { persistedUntil: new Date(r.persistedUntil).toISOString() } : {}),
+      originalReason: r.persistedReason, restoredFailedKeys: r.restoredFailedKeys },
+      'restored provider-fallback window from persisted state');
   }
 
   /**
@@ -10222,6 +10178,7 @@ export class AgentRuntime implements Runtime {
     this.fallbackEmptyAdvance.reset();
     this.fallbackWindow.resetAt = null;
     this.fallbackWindow.recoveryProbeRequired = false;
+    this.fallbackWindowRestored = false;
     // End of the stall episode (covers both successful-probe reverts and
     // manual/elapsed deactivations) — the next episode counts from zero and
     // may alert again at the threshold. fallbackLastProbeAt is kept as
@@ -10275,6 +10232,10 @@ export class AgentRuntime implements Runtime {
           // Persist the stall clock with the window so a restart mid-stall
           // resumes the count instead of resetting it.
           probeAttempts: this.fallbackProbeAttempts,
+          version: PERSISTED_FALLBACK_STATE_VERSION,
+          activeEntryProvider: this.fallbackWindow.activeEntry?.provider ?? null,
+          activeEntryModel: this.fallbackWindow.activeEntry?.model ?? null,
+          failedKeys: failedKeysToPersistedKeys(this.fallbackChain.failedKeys),
         });
       } catch (err) {
         log.warn({ err }, 'failed to extend persisted fallback window after failed recovery probe');
@@ -10352,7 +10313,7 @@ export class AgentRuntime implements Runtime {
     this.fallbackPrimaryProbeTimer.unref?.();
   }
 
-  private schedulePrimaryModelUsabilityProbe(trigger: 'startup' | 'manual'): void {
+  private schedulePrimaryModelUsabilityProbe(trigger: 'startup' | 'manual' | 'periodic'): void {
     const target = {
       provider: this.agentProvider,
       model: this.model ?? null,
@@ -10366,7 +10327,7 @@ export class AgentRuntime implements Runtime {
       probeInFlight: true,
     };
 
-    const adapters = createPrimaryModelProbeAdapters(this.agentProviderConfig, { cwd: this.cwd ?? homedir(), egressProxyPort: this.egressProxy?.port, providerExecutionGate: this.providerExecutionGate });
+    const adapters = createPrimaryModelProbeAdapters(this.agentProviderConfig, buildPrimaryProbeAdapterDeps(this.agentProvider, this.model, this.cwd, this.egressProxy?.port, this.providerExecutionGate));
     void Promise.resolve()
       .then(() => probePrimaryModelUsability(target, adapters))
       .then((result) => this.recordPrimaryModelUsability(result, trigger))
@@ -10381,15 +10342,22 @@ export class AgentRuntime implements Runtime {
       });
   }
 
+  private scheduleNextPeriodicUsabilityProbe(): void {
+    if (this.periodicUsabilityProbeTimer) clearTimeout(this.periodicUsabilityProbeTimer);
+    this.periodicUsabilityProbeTimer = setTimeout(() => { this.periodicUsabilityProbeTimer = null; if (this.primaryModelUsability?.probeInFlight) return void this.scheduleNextPeriodicUsabilityProbe(); this.schedulePrimaryModelUsabilityProbe('periodic'); }, calculatePeriodicProbeDelay(this.periodicUsabilityProbeBackoff, this.primaryModelUsability?.checkedAt ?? null, Date.now()));
+    this.periodicUsabilityProbeTimer.unref?.();
+  }
+
   private recordPrimaryModelUsability(
     result: PrimaryModelUsabilityResult,
-    trigger: 'startup' | 'manual',
+    trigger: 'startup' | 'manual' | 'periodic',
   ): void {
     this.primaryModelUsability = {
       ...result,
       checkedAt: Date.now(),
       probeInFlight: false,
     };
+      this.periodicUsabilityProbeBackoff = calculatePeriodicProbeBackoff(this.periodicUsabilityProbeBackoff, result.status === 'usable'); if (trigger === 'periodic') this.scheduleNextPeriodicUsabilityProbe();
 
     if (result.status === 'usable') {
       // Always emit an idempotent clear on usable result.  If the prior process
@@ -10417,19 +10385,8 @@ export class AgentRuntime implements Runtime {
     );
   }
 
-  private primaryModelUsabilityEvidence(
-    result: PrimaryModelUsabilityResult,
-    trigger: 'startup' | 'manual',
-  ): string {
-    const parts = [
-      `trigger=${trigger}`,
-      `status=${alertEvidenceValue(result.status)}`,
-      `provider=${alertEvidenceValue(result.provider)}`,
-      `model=${alertEvidenceValue(result.model)}`,
-    ];
-    if (result.reason) parts.push(`reason=${alertEvidenceValue(result.reason)}`);
-    if (result.suggestion) parts.push(`suggestion=${alertEvidenceValue(result.suggestion)}`);
-    return parts.join(' ');
+  private primaryModelUsabilityEvidence(result: PrimaryModelUsabilityResult, trigger: 'startup' | 'manual' | 'periodic'): string {
+    return formatPrimaryModelUsabilityEvidence(result, trigger, alertEvidenceValue);
   }
 
   /**
@@ -10446,7 +10403,7 @@ export class AgentRuntime implements Runtime {
     signal?: AbortSignal,
   ): Promise<boolean> {
     const target = { provider: this.agentProvider, model: this.model ?? null };
-    const adapters = createPrimaryModelProbeAdapters(this.agentProviderConfig, { cwd: this.cwd ?? homedir(), egressProxyPort: this.egressProxy?.port, providerExecutionGate: this.providerExecutionGate });
+    const adapters = createPrimaryModelProbeAdapters(this.agentProviderConfig, buildPrimaryProbeAdapterDeps(this.agentProvider, this.model, this.cwd, this.egressProxy?.port, this.providerExecutionGate));
     const result = signal
       ? await probePrimaryModelUsability(target, adapters, { signal })
       : await probePrimaryModelUsability(target, adapters);
@@ -10491,7 +10448,7 @@ export class AgentRuntime implements Runtime {
         },
         runPrimaryModelUsability: (signal) => probePrimaryModelUsability(
           { provider: this.agentProvider, model: this.model ?? null },
-          createPrimaryModelProbeAdapters(this.agentProviderConfig, { cwd: this.cwd ?? homedir(), egressProxyPort: this.egressProxy?.port, providerExecutionGate: this.providerExecutionGate }),
+          createPrimaryModelProbeAdapters(this.agentProviderConfig, buildPrimaryProbeAdapterDeps(this.agentProvider, this.model, this.cwd, this.egressProxy?.port, this.providerExecutionGate)),
           { signal },
         ),
         runPrimaryRecoveryProbe: (signal) => this.probePrimaryProviderRecovered(undefined, signal),

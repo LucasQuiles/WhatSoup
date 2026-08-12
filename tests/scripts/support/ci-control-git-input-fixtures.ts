@@ -15,6 +15,7 @@ import { dirname, join } from 'node:path';
 import { expect, vi } from 'vitest';
 
 import {
+  __setTestGitPath,
   ExactGitInputError,
   MAX_CHANGE_FACT_COUNT,
   MAX_EXACT_ADDED_LINE_BUDGET_V1,
@@ -239,7 +240,9 @@ export function withGitShim<T>(
   const scenarioPath = join(cwd, '.git-input-shim.json');
   writeFileSync(scenarioPath, JSON.stringify({ cwd, responses }), 'utf8');
   const shimPath = join(bin, 'git');
-  writeFileSync(shimPath, `#!/usr/bin/env node
+  // Use the full path to node so the shim works even when execFileSync
+  // passes an env without PATH (gitEnvironment() strips it by design — #2843).
+  writeFileSync(shimPath, `#!${process.execPath}
 const fs = require('node:fs');
 const path = require('node:path');
 const scenario = JSON.parse(fs.readFileSync(path.join(process.cwd(), '.git-input-shim.json'), 'utf8'));
@@ -274,9 +277,11 @@ process.exit(response.exit ?? 0);
   process.env.GIT_DIR = '/ambient/repository';
   process.env.GIT_WORK_TREE = '/ambient/worktree';
   process.env.GIT_INDEX_FILE = '/ambient/index';
+  const priorGitPath = __setTestGitPath(shimPath);
   try {
     return run(cwd);
   } finally {
+    __setTestGitPath(priorGitPath);
     for (const name of names) {
       const value = prior[name];
       if (value === undefined) delete process.env[name];

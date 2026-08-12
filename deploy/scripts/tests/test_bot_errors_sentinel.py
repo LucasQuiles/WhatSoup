@@ -2054,7 +2054,9 @@ def test_instance_lock_path_default_derives_from_state_root(monkeypatch):
     different state roots would contend on the same lock file."""
     monkeypatch.delenv("BOT_ERRORS_FLEET_SENTINEL_LOCK", raising=False)
     monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_STATE_DIR", "/tmp/state-root-a/fleet-sentinel")
-    assert _mod._instance_lock_path() == _mod.state_root() / "sentinel-instance.lock"
+    # state_root() moved to lib.state_root.sentinel_state_root (#3051 Car B);
+    # the module imports it — same override-derivation contract.
+    assert _mod._instance_lock_path() == _mod.sentinel_state_root() / "sentinel-instance.lock"
     assert str(_mod._instance_lock_path()) == "/tmp/state-root-a/fleet-sentinel/sentinel-instance.lock"
 
     monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_STATE_DIR", "/tmp/state-root-b/fleet-sentinel")

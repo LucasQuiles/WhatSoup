@@ -29,19 +29,14 @@ vi.mock('../../src/config.ts', () => ({
   },
 }));
 
-const mockHealthLogger = vi.hoisted(() => ({
-  info: vi.fn(),
-  warn: vi.fn(),
-  error: vi.fn(),
-  debug: vi.fn(),
-}));
+const healthLogger = vi.hoisted(() => ({} as Record<string, ReturnType<typeof vi.fn>>));
 
-vi.mock('../../src/logger.ts', () => ({
-  createChildLogger: (component: string) =>
-    component === 'health'
-      ? mockHealthLogger
-      : { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
-}));
+vi.mock('../../src/logger.ts', async () => {
+  const { componentLoggerMock, loggerMock } = await import('../helpers/logger-mock.ts');
+  const { log, createChildLogger } = componentLoggerMock('health', () => loggerMock().createChildLogger());
+  Object.assign(healthLogger, log);
+  return { createChildLogger };
+});
 
 import { Database } from '../../src/core/database.ts';
 import {
@@ -151,7 +146,7 @@ describe('GET /health with a missing probe table (#1778 Defect B)', () => {
 
   beforeEach(async () => {
     resetProbeErrorThrottle();
-    mockHealthLogger.error.mockClear();
+    healthLogger.error.mockClear();
     db = new Database(':memory:');
     db.open();
     // #2515: diagnostic projection is bearer-gated; set a test token.
@@ -179,8 +174,8 @@ describe('GET /health with a missing probe table (#1778 Defect B)', () => {
       expect(json.sqlite.pending_polls_readable).toBe(false);
     }
 
-    const pendingPollErrors = mockHealthLogger.error.mock.calls.filter(
-      (call) => call[1] === 'failed to count pending polls',
+    const pendingPollErrors = healthLogger.error.mock.calls.filter(
+      (call: unknown[]) => call[1] === 'failed to count pending polls',
     ).length;
     // 16 polls, all failing: powers of two ≤16 → {1,2,4,8,16} = 5 emissions.
     // Storm behaviour would be 16. Assert it is bounded well below the poll count.

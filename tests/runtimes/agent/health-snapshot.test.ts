@@ -66,14 +66,10 @@ const { mockSession, mockQueue, capturedOnEventRef, capturedTurnQueues } = vi.ho
 
 // ── Module mocks ────────────────────────────────────────────────────────────
 
-vi.mock('../../../src/logger.ts', () => ({
-  createChildLogger: () => ({
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  }),
-}));
+vi.mock('../../../src/logger.ts', async () => {
+  const { loggerMock } = await import('../../helpers/logger-mock.ts');
+  return loggerMock();
+});
 
 vi.mock('../../../src/lib/emit-alert.ts', () => ({
   emitAlertChecked: vi.fn(),
@@ -299,11 +295,13 @@ function expectedFallbackDetails(): Record<string, unknown> {
       lastSuccessfulTurnSessionCurrent: null,
       lastTurnErrorClass: null,
       lastTurnErrorAt: null,
+      periodicProbeExpected: false,
     },
     activeFallbackEntry: null,
     fallbackChain: [],
     fallbackChainExhausted: false,
     failedEntryCount: 0,
+    fallbackRestoredFromPersist: false,
     turnErrorCounts: {},
     handoffDistiller: {
       enabled: false,
@@ -418,6 +416,8 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
         recentCrashes: 0,
         lastCrashAt: null,
         pollPersistenceErrors: 0,
+        pollPersistenceHealth: { errors: 0, degraded: false, consecutiveFailures: 0, lastFailureAt: null, lastFailureErr: null, lastRecoveredAt: null, totalRecoveries: 0 },
+        offlineDecisionRetry: { pending: false, attempts: 0, exhausted: false, nextRetryAt: null },
         autoCompactIneffective: 0,
         autoCompactConsecutiveRapidRearmsMax: 0,
         autoCompactNextTurnOverThreshold: 0,
@@ -427,6 +427,8 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
         proactiveResumeIdentityRejects: 0,
         restartLoopGuard: { enabled: true, bootsInWindow: 0, tripped: false, lastTripAt: null, windowMs: 300_000, bootsTotal: 0, checksPerformed: 0, lastCheckAt: null },
         unownedProviderEventRejects: 0,
+        suppressedSystemTurnEffectRejects: 0,
+        providerEventRejectReasons: {},
         chronologyDelayedDispatches: 0,
         chronologyRecoveryReplayDispatches: 0,
         completedDeliveryIdentityAdmissions: {
@@ -462,6 +464,8 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
         recentCrashes: 0,
         lastCrashAt: null,
         pollPersistenceErrors: 0,
+        pollPersistenceHealth: { errors: 0, degraded: false, consecutiveFailures: 0, lastFailureAt: null, lastFailureErr: null, lastRecoveredAt: null, totalRecoveries: 0 },
+        offlineDecisionRetry: { pending: false, attempts: 0, exhausted: false, nextRetryAt: null },
         autoCompactIneffective: 0,
         autoCompactConsecutiveRapidRearmsMax: 0,
         autoCompactNextTurnOverThreshold: 0,
@@ -471,6 +475,8 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
         proactiveResumeIdentityRejects: 0,
         restartLoopGuard: { enabled: true, bootsInWindow: 0, tripped: false, lastTripAt: null, windowMs: 300_000, bootsTotal: 0, checksPerformed: 0, lastCheckAt: null },
         unownedProviderEventRejects: 0,
+        suppressedSystemTurnEffectRejects: 0,
+        providerEventRejectReasons: {},
         chronologyDelayedDispatches: 0,
         chronologyRecoveryReplayDispatches: 0,
         completedDeliveryIdentityAdmissions: {
@@ -709,6 +715,8 @@ describe('AgentRuntime.getHealthSnapshot — single-session shape', () => {
         pid: null,
         sessionId: null,
         pollPersistenceErrors: 0,
+        pollPersistenceHealth: { errors: 0, degraded: false, consecutiveFailures: 0, lastFailureAt: null, lastFailureErr: null, lastRecoveredAt: null, totalRecoveries: 0 },
+        offlineDecisionRetry: { pending: false, attempts: 0, exhausted: false, nextRetryAt: null },
         autoCompactIneffective: 0,
         autoCompactConsecutiveRapidRearmsMax: 0,
         autoCompactNextTurnOverThreshold: 0,
@@ -718,6 +726,8 @@ describe('AgentRuntime.getHealthSnapshot — single-session shape', () => {
         proactiveResumeIdentityRejects: 0,
         restartLoopGuard: { enabled: true, bootsInWindow: 0, tripped: false, lastTripAt: null, windowMs: 300_000, bootsTotal: 0, checksPerformed: 0, lastCheckAt: null },
         unownedProviderEventRejects: 0,
+        suppressedSystemTurnEffectRejects: 0,
+        providerEventRejectReasons: {},
         chronologyDelayedDispatches: 0,
         chronologyRecoveryReplayDispatches: 0,
         completedDeliveryIdentityAdmissions: {

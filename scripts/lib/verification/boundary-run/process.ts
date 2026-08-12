@@ -153,17 +153,30 @@ async function waitForPromiseOrTimeout(promise: Promise<void>, milliseconds: num
 
 function processGroupAlive(pid: number): boolean {
   try {
-    const table = execFileSync('ps', ['-axo', 'pid=,pgid='], {
+    // #2979: targeted process-group check without scanning ALL processes.
+    // 1. Get the PGID of the target PID (portable: ps -p on macOS/Linux).
+    const pgidOut = execFileSync('ps', ['-p', String(pid), '-o', 'pgid='], {
       encoding: 'utf8',
       env: cleanGitEnv(),
-      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 30_000,
+    }).toString().trim();
+    // ps output: one header line + one data line. Take the last line.
+    const lines = pgidOut.split('\n');
+    const pgid = parseInt(lines[lines.length - 1]?.trim() ?? '', 10);
+    if (isNaN(pgid) || pgid <= 0) return false;
+    // 2. Check if the process group leader (PID == PGID) is alive.
+    //    The leader being alive implies the group is alive. If the leader
+    //    died, children are re-parented to init but the PGID persists;
+    //    however boundary-run kills the group from the leader, so checking
+    //    the leader covers the common case.
+    execFileSync('ps', ['-p', String(pgid), '-o', 'pid='], {
+      encoding: 'utf8',
+      env: cleanGitEnv(),
+      timeout: 30_000,
     });
-    return table.split(/\r?\n/).some((line) => {
-      const columns = line.trim().split(/\s+/);
-      return columns.length >= 2 && Number(columns[1]) === pid;
-    });
-  } catch {
     return true;
+  } catch {
+    return false;
   }
 }
 

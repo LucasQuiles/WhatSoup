@@ -21,14 +21,7 @@ import type { Runtime } from '../../src/runtimes/types.ts';
 // Module mocks — registered before any imports of the mocked modules
 // ---------------------------------------------------------------------------
 
-vi.mock('../../src/logger.ts', () => ({
-  createChildLogger: () => ({
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  }),
-}));
+vi.mock('../../src/logger.ts', async () => (await import('../helpers/logger-mock.ts')).loggerMock());
 
 vi.mock('../../src/lib/emit-alert.ts', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),

@@ -7,9 +7,14 @@ const mockToolLogger = vi.hoisted(() => ({
   warn: vi.fn(),
 }));
 
-vi.mock('../../../../src/logger.ts', () => ({
-  createChildLogger: () => mockToolLogger,
-}));
+vi.mock('../../../../src/logger.ts', async () => {
+  const { singletonLoggerMock } = await import('../../../helpers/logger-mock.ts');
+  const singleton = singletonLoggerMock();
+  Object.assign(mockToolLogger, singleton);
+  return {
+    createChildLogger: () => mockToolLogger,
+  };
+});
 
 import {
   registerMemoryWriteTools,

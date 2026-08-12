@@ -93,6 +93,7 @@ if (import.meta.url === pathToFileURL(process.argv[1]!).href) {
       content = execFileSync('git', ['diff', '--cached', '--', '*.ts', '*.md', '*.json'], {
         encoding: 'utf8',
         maxBuffer: 10 * 1024 * 1024,
+        timeout: 30_000,
       });
     } catch {
       content = '';

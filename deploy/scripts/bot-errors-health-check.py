@@ -47,6 +47,8 @@ from lib.durable_json import (
     publish_state_json,
     require_advance,
 )
+from lib.state_files import DEADMAN_STATE, DISPATCHER_STATE, Q_LOOP_STATE
+from lib.state_root import DEFAULT_STATE_ROOT, q_loop_state_root, state_root, test_state_root
 
 
 BOT_ERRORS_JID = os.environ.get("BOT_ERRORS_JID", "").strip()
@@ -344,6 +346,53 @@ def append_evidence_field(details: list[str], key: str, value: Any, max_len: int
             details.append(f"{key}={rendered}")
 
 
+def read_nvmrc_pin() -> str:
+    """Read the repo's pinned node version from .nvmrc (empty string if absent/unreadable).
+
+    #3074: the pin is the canonical .nvmrc value, also mirrored at
+    package.json#volta.node and package.json#packageManager. A long-running
+    instance process started under an older node keeps reporting healthy after
+    the pin advances; this read supplies the comparison baseline.
+    """
+    try:
+        return (REPO_ROOT / ".nvmrc").read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def normalize_node_version(raw: str) -> str:
+    """Normalize a node version string for comparison (strip leading v/V + whitespace).
+
+    Accepts both v24.15.0 (nvm/installer convention) and 24.15.0
+    (process.version in the lifecycle telemetry). #3074.
+    """
+    return raw.strip().lstrip("vV") if isinstance(raw, str) else ""
+
+
+def node_version_drift_marker(running_version, pinned_version: str):
+    """Return a node_version_drift WARN marker if the RUNNING process node version
+    disagrees with the repo pin, or None when drift cannot be determined.
+
+    #3074: running_version is the ACTUAL instance process version
+    (credential_lifecycle.environment.nodeVersion from the /health body),
+    not shutil.which('node') (which resolves the probe's own shell). When the
+    running version is absent (no lifecycle telemetry, degraded probe) this
+    returns None -- an undiscoverable running version is NOT a drift finding
+    (no false positive). A bare v/V prefix is tolerated on either side.
+    """
+    if not running_version or not isinstance(running_version, str):
+        return None
+    if not pinned_version:
+        return None
+    running = normalize_node_version(running_version)
+    pinned = normalize_node_version(pinned_version)
+    if not running or not pinned:
+        return None
+    if running == pinned:
+        return None
+    return f"node_version_drift running={running} pinned={pinned}"
+
+
 PROVIDER_EVIDENCE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 RUNTIME_PROVIDER_IDS = frozenset({
     "claude-cli",
@@ -386,14 +435,6 @@ def service_env_var(service: str) -> str | None:
     return SERVICE_ENV_MAP.get(service.lower())
 
 
-def state_root() -> Path:
-    explicit = os.environ.get("BOT_ERRORS_STATE_DIR")
-    if explicit and explicit.strip():
-        return Path(explicit)
-    test_state = test_state_root()
-    return test_state or (Path.home() / ".local/state/bot-errors")
-
-
 STRONG_TEST_SIGNAL_KEYS = ("VITEST", "VITEST_WORKER_ID", "JEST_WORKER_ID", "PYTEST_CURRENT_TEST")
 CONTROLLER_LOG_CONTEXT = ControllerLogContext("deadman")
 
@@ -414,14 +455,6 @@ def provenance_signals() -> list[str]:
     return sorted(set(signals))
 
 
-def test_state_root() -> Path | None:
-    if not strong_test_signals():
-        return None
-    cwd_hash = hashlib.sha256(os.getcwd().encode("utf-8")).hexdigest()[:12]
-    worker = safe_segment(env_value("VITEST_WORKER_ID") or env_value("JEST_WORKER_ID") or f"pid-{os.getpid()}")
-    return Path(os.environ.get("TMPDIR", "/tmp")) / "whatsoup-vitest-bot-errors" / f"{cwd_hash}.{worker}"
-
-
 def canonical_path(path: Path) -> Path:
     try:
         return path.expanduser().resolve(strict=True)
@@ -433,7 +466,7 @@ def canonical_path(path: Path) -> Path:
 
 
 def live_outbox_candidates() -> list[Path]:
-    candidates = [Path.home() / ".local/state/bot-errors/outbox"]
+    candidates = [DEFAULT_STATE_ROOT / "outbox"]
     override = env_value("BOT_ERRORS_LIVE_OUTBOX_DIR")
     if override:
         candidates.append(Path(override))
@@ -449,7 +482,7 @@ def resolve_outbox_dir() -> tuple[Path, dict[str, Any]]:
     explicit_state = env_value("BOT_ERRORS_STATE_DIR")
     test_state = test_state_root()
     policy = "default"
-    outbox = Path.home() / ".local/state/bot-errors/outbox"
+    outbox = DEFAULT_STATE_ROOT / "outbox"
     if explicit_outbox:
         outbox = Path(explicit_outbox)
         policy = "explicit-outbox"
@@ -1453,7 +1486,7 @@ def append_deadman_log(
 
 
 def deadman_state_path() -> Path:
-    return state_root() / "deadman-state.json"
+    return state_root() / DEADMAN_STATE
 
 
 def load_deadman_state() -> dict[str, Any]:
@@ -2815,6 +2848,15 @@ def health_probe_details(status: int, body: str, expected_name: str | None = Non
         ("osUptimeSeconds", "lifecycle_os_uptime_seconds"),
     ]:
         append_evidence_field(details, label, lifecycle_env.get(source_key))
+    # #3074: assert the RUNNING instance process node version against the repo
+    # pin. The running version comes from lifecycle telemetry (the ACTUAL process,
+    # not shutil.which('node')); when absent (no telemetry) no drift marker is
+    # emitted -- undiscoverable is not drift.
+    drift_marker = node_version_drift_marker(
+        lifecycle_env.get("nodeVersion"), read_nvmrc_pin()
+    )
+    if drift_marker:
+        add_marker(drift_marker)
     lifecycle_memory = lifecycle_env.get("memory") if isinstance(lifecycle_env.get("memory"), dict) else {}
     append_evidence_field(details, "lifecycle_memory_free_bytes", lifecycle_memory.get("freeBytes"))
     append_evidence_field(details, "lifecycle_memory_total_bytes", lifecycle_memory.get("totalBytes"))
@@ -3092,6 +3134,7 @@ def format_health_probe(url: str, status: int, body: str = "", expected_name: st
         or "runtime_agent_fallback_active" in details
         or "auth_bond_restore_canary_failed" in details
         or "auth_bond_backup_age_warning" in details
+        or "node_version_drift" in details
     ):
         prefix = "WARN "
     else:
@@ -6528,7 +6571,7 @@ def queue_inventory() -> list[str]:
         Path(os.environ.get("TMPDIR", "/tmp")) / "bot-errors-writefail",
         Path.home() / ".bot-errors-writefail",
     ]
-    state = root / "dispatcher-state.json"
+    state = root / DISPATCHER_STATE
     lines: list[str] = []
     state_problem = critical_file_problem(state)
     if state_problem is None:
@@ -6688,8 +6731,8 @@ def queue_directory_line(
 
 
 def q_loop_state_file() -> Path:
-    root = Path(os.environ.get("BOT_ERRORS_Q_LOOP_STATE_DIR", Path.home() / ".local/state/bot-errors-q-loop"))
-    return root.expanduser() / "state.json"
+    root = q_loop_state_root()
+    return root.expanduser() / Q_LOOP_STATE
 
 
 def q_loop_state_inventory(profile: dict[str, Any]) -> list[str]:
@@ -6893,7 +6936,7 @@ def daily() -> int:
 )
 def deadman(max_state_age: int, restart_grace: int, cooldown_seconds: int) -> int:
     root = state_root()
-    state = root / "dispatcher-state.json"
+    state = root / DISPATCHER_STATE
     problems: list[str] = []
     state_age = None
     cycle_completed_at = None

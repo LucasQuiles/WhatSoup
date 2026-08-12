@@ -22,14 +22,7 @@ vi.mock('../../src/config.ts', () => ({
   },
 }));
 
-vi.mock('../../src/logger.ts', () => ({
-  createChildLogger: () => ({
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  }),
-}));
+vi.mock('../../src/logger.ts', async () => (await import('../helpers/logger-mock.ts')).loggerMock());
 
 vi.mock('../../src/lib/emit-alert.ts', () => ({
   emitAlert: vi.fn(() => true),

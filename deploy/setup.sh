@@ -129,10 +129,166 @@ if [ "${1:-}" = "--remove-timers" ]; then
   done
   exit 0
 fi
+if [ "${1:-}" = "--reconcile" ]; then
+  shift
+  reconcile_check=0
+  if [ "${1:-}" = "--check" ]; then
+    reconcile_check=1
+    shift
+  fi
+  if [ "$#" -gt 0 ]; then
+    echo "--reconcile accepts at most a single trailing --check flag" >&2
+    exit 2
+  fi
+
+  # Expected service sets — MUST mirror the step-4 install surface:
+  # the 7 named systemd cp targets enumerated below + every entry of
+  # BOT_ERRORS_SYSTEMD_UNITS, and the launchd labels in LAUNCHD_TIMER_LABELS.
+  # Per-instance units (whatsoup@<name>.service, the fleet-generated
+  # com.whatsoup.<name>.plist) are intentionally OUT of the expected set —
+  # they are operator-managed per-instance and excluded from discovery, never
+  # reconciled. This mode is print-only: it never executes launchctl/systemctl
+  # mutations (preserving the setup-platform.test.ts launchd-mutation
+  # invariant); the operator copies the printed remediation commands.
+  RECONCILE_SYSTEMD_EXPECTED=(
+    "whatsoup@.service"
+    "whatsoup-fleet.service"
+    "whatsoup-heal-notify@.service"
+    "whatsoup-reply-guarantee.service"
+    "whatsoup-reply-guarantee.timer"
+    "harness-maintenance.service"
+    "harness-maintenance.timer"
+  )
+  RECONCILE_SYSTEMD_EXPECTED+=("${BOT_ERRORS_SYSTEMD_UNITS[@]}")
+
+  reconcile_orphans_found=0
+  reconcile_missing_found=0
+
+  # Linear set membership (bash 3.2-safe: no associative arrays). Returns 0
+  # when $needle equals any remaining positional arg. Callers pass arrays via
+  # the ${arr[@]+"${arr[@]}"} guard so an empty installed-set does not trip
+  # `set -u`.
+  reconcile_set_contains() {
+    local needle="$1"
+    shift
+    local item
+    for item in "$@"; do
+      [ "$item" = "$needle" ] && return 0
+    done
+    return 1
+  }
+
+  echo "WhatSoup service reconcile"
+  echo "=========================="
+  echo ""
+
+  if [ "$PLATFORM" = "Darwin" ]; then
+    # --- reconcile: darwin (macos launchd) filesystem plist discovery ---
+    # Uses filesystem discovery (not `launchctl list`) so a stale plist that
+    # is no longer loaded — but still on disk — is still surfaced.
+    echo "macOS launchd reconcile — filesystem plist discovery in $LAUNCH_AGENTS_DIR"
+    echo ""
+    shopt -s nullglob
+    installed_plists=()
+    if [ -d "$LAUNCH_AGENTS_DIR" ]; then
+      for f in "$LAUNCH_AGENTS_DIR"/com.whatsoup.*.plist; do
+        # Existence guard: literal (non-wildcard) glob entries survive nullglob
+        # and would otherwise be reported as installed. Wildcard misses are
+        # already elided by nullglob; this also covers symlink/race edge cases.
+        [ -e "$f" ] || continue
+        installed_plists+=("$(basename "$f" .plist)")
+      done
+    fi
+    shopt -u nullglob
+
+    # Missing: an expected timer label whose plist is not installed.
+    for label in "${LAUNCHD_TIMER_LABELS[@]}"; do
+      if ! reconcile_set_contains "$label" ${installed_plists[@]+"${installed_plists[@]}"}; then
+        echo "  missing: $label.plist not installed in $LAUNCH_AGENTS_DIR"
+        echo "    Reinstall with: deploy/setup.sh"
+        reconcile_missing_found=1
+      fi
+    done
+
+    # Orphan candidates: any installed com.whatsoup.* plist that is not one of
+    # the setup-managed timer labels. Fleet-managed instance plists
+    # (com.whatsoup.<name>.plist for active lines) and any other
+    # intentionally-installed timer are NOT in the expected set, so the report
+    # asks the operator to verify before removing. Nothing is auto-removed.
+    for inst in ${installed_plists[@]+"${installed_plists[@]}"}; do
+      if ! reconcile_set_contains "$inst" "${LAUNCHD_TIMER_LABELS[@]}"; then
+        echo "  orphan candidate: $inst.plist installed but not in the setup-managed timer set"
+        echo "    (operator: verify this is stale — not an active fleet instance plist"
+        echo "     or another intentionally-managed timer — before removing)"
+        echo "    To remove (operator step, never auto-run):"
+        echo "      rm $LAUNCH_AGENTS_DIR/$inst.plist"
+        echo "      launchctl bootout gui/\$(id -u)/$inst"
+        reconcile_orphans_found=1
+      fi
+    done
+  else
+    # --- reconcile: linux (systemd) filesystem unit discovery ---
+    echo "Linux systemd reconcile — filesystem unit discovery in $SYSTEMD_DIR"
+    echo ""
+    shopt -s nullglob
+    installed_units=()
+    if [ -d "$SYSTEMD_DIR" ]; then
+      for f in "$SYSTEMD_DIR"/whatsoup*.service "$SYSTEMD_DIR"/whatsoup*.timer \
+               "$SYSTEMD_DIR"/bot-errors-*.service "$SYSTEMD_DIR"/bot-errors-*.timer \
+               "$SYSTEMD_DIR"/harness-maintenance.service "$SYSTEMD_DIR"/harness-maintenance.timer; do
+        # Existence guard: the harness-maintenance entries are literal (no
+        # wildcard), so nullglob does NOT elide them when absent and they
+        # would be falsely reported as installed. Wildcard misses are already
+        # elided by nullglob; this guard closes the literal-pattern hole and
+        # also covers symlink/race edge cases.
+        [ -e "$f" ] || continue
+        name="$(basename "$f")"
+        # Exclude per-instance units (whatsoup@<name>.service,
+        # whatsoup-heal-notify@<name>.service) — operator-managed, not
+        # reconciled. Templates (whatsoup@.service) carry an empty instance
+        # slot and are kept.
+        case "$name" in
+          *@[^.]*.service|*@[^.]*.timer) continue ;;
+        esac
+        installed_units+=("$name")
+      done
+    fi
+    shopt -u nullglob
+
+    for unit in "${RECONCILE_SYSTEMD_EXPECTED[@]}"; do
+      if ! reconcile_set_contains "$unit" ${installed_units[@]+"${installed_units[@]}"}; then
+        echo "  missing: $unit not installed in $SYSTEMD_DIR"
+        echo "    Reinstall with: deploy/setup.sh"
+        reconcile_missing_found=1
+      fi
+    done
+
+    for inst in ${installed_units[@]+"${installed_units[@]}"}; do
+      if ! reconcile_set_contains "$inst" "${RECONCILE_SYSTEMD_EXPECTED[@]}"; then
+        echo "  orphan: $inst installed but not in the expected set"
+        echo "    To remove (operator step, never auto-run):"
+        echo "      rm $SYSTEMD_DIR/$inst"
+        echo "      systemctl --user disable --now $inst"
+        reconcile_orphans_found=1
+      fi
+    done
+  fi
+
+  echo ""
+  if [ "$reconcile_orphans_found" -eq 0 ] && [ "$reconcile_missing_found" -eq 0 ]; then
+    echo "Reconcile clean: installed services match the expected set."
+    exit 0
+  fi
+  echo "Reconcile complete: review the items above; remediation commands are printed, not executed."
+  if [ "$reconcile_check" -eq 1 ]; then
+    exit 1
+  fi
+  exit 0
+fi
 if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
   cat <<'USAGE'
 Usage: deploy/setup.sh [--profile <runtime|quality|release>] [--install-host-dependencies] [--yes]
-       deploy/setup.sh [--check | --remove-timers]
+       deploy/setup.sh [--check | --remove-timers | --reconcile [--check]]
 
   --profile PROFILE  Validate the runtime, quality, or release capability profile.
   --install-host-dependencies
@@ -141,8 +297,17 @@ Usage: deploy/setup.sh [--profile <runtime|quality|release>] [--install-host-dep
                      with --install-host-dependencies.
   --check          Compare checked-in systemd units with installed user units.
   --remove-timers  macOS only: remove the launchd maintenance timer plists from
-                   ~/Library/LaunchAgents. Prints the bootout commands to unload
-                   any currently loaded jobs — they are never run automatically.
+                    ~/Library/LaunchAgents. Prints the bootout commands to unload
+                    any currently loaded jobs — they are never run automatically.
+  --reconcile      Compare installed launchd plists (Darwin) and systemd units
+                    (Linux) against the setup-managed expected set; report
+                    missing services and orphan candidates and PRINT remediation
+                    commands (the operator runs the launchd unload / systemd
+                    disable steps themselves — setup.sh never executes them).
+                    With --check, exits non-zero when any missing service or
+                    orphan is found (CI/scripting); without --check, exits 0
+                    after the report. Per-instance units are operator-managed
+                    and excluded.
 USAGE
   exit 0
 fi

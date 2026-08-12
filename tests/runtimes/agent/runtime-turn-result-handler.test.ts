@@ -594,3 +594,43 @@ describe('session shutdown rejection containment (#2698)', () => {
     realDb.close();
   });
 });
+
+describe('terminal failure during a pending AskUserQuestion poll (2026-08-11 review)', () => {
+  it('scoped auth-required terminal runs the failure ladder despite the pending poll', () => {
+    const harness = makeHarness({ fallbackActivation: null, replayScheduled: false });
+    (harness.host.pendingPolls.questions as Map<string, unknown>).set('15550190050', {
+      question: 'pick one',
+    });
+
+    driveResult('scoped', harness, 'Authentication required. Please run /login');
+
+    // The provider is dead — the vote can never be served. The ladder must run:
+    // QR-211 notice + session shutdown, never unlogged permanent silence.
+    expect(harness.host.emitNoFallbackReauthNotice).toHaveBeenCalledOnce();
+    expect(harness.session.shutdown).toHaveBeenCalledOnce();
+  });
+
+  it('scoped NON-failure text during a pending poll still skips the ladder', () => {
+    const harness = makeHarness({ fallbackActivation: null, replayScheduled: false });
+    (harness.host.pendingPolls.questions as Map<string, unknown>).set('15550190050', {
+      question: 'pick one',
+    });
+
+    driveResult('scoped', harness, 'Here is an ordinary assistant answer.');
+
+    expect(harness.host.emitNoFallbackReauthNotice).not.toHaveBeenCalled();
+    expect(harness.session.shutdown).not.toHaveBeenCalled();
+  });
+});
+
+describe('global-path tool-activity capture-and-clear (2026-08-11 review)', () => {
+  it('policy-block early return no longer leaks tool activity into the next turn', () => {
+    const harness = makeHarness({ fallbackActivation: null, replayScheduled: false });
+    harness.host.singleTurnHadToolActivity = true;
+
+    driveResult('global', harness, 'Request blocked by policy.');
+
+    expect(harness.session.shutdown).toHaveBeenCalledOnce();
+    expect(harness.host.singleTurnHadToolActivity).toBe(false);
+  });
+});

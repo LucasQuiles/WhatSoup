@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-08-07T15:56:09Z",
+  "generatedAt": "2026-08-09T01:57:15Z",
   "scope": "bot-errors-runtime-scripts",
   "expectedHeadShaPolicy": "populated at deploy time by deploy step; absent here so committed state is observability-only",
   "files": [
     {
       "path": "deploy/scripts/bot-errors-collector.py",
-      "sha256": "c79b36dec295bf3673a449e052c9675997ccb6b45a8b618297e2dff571192238",
+      "sha256": "990f028fb5db7941925ed5066181f996b72284acdc09b9a69778fae8aed44de1",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -28,7 +28,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "cca18efbe6a2de28c6f55f40af4a6cc9dadb68237cb2b5a3f7583093efc83347",
+      "sha256": "fa8a3ece94f975308617eb62ef9a480382aa5c4f1536f09ae2ccde80d89402a4",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -44,12 +44,15 @@
         "safe_open_entry",
         "safe_read_json",
         "safe_is_regular_entry",
-        "quarantine_untrusted_entry"
+        "quarantine_untrusted_entry",
+        "malformed delivery.nextAttemptAtEpoch",
+        "persist changed incident state",
+        "malformed delivery.attempts"
       ]
     },
     {
       "path": "deploy/scripts/bot-errors-emit.py",
-      "sha256": "ac849d62111881f384b27e6754441a6be587b02c6228aee3d79cc9297ebcd19d",
+      "sha256": "9beced653d22f2015b4c3bcf2dc4393eea400203f831c16c1e7be57ff5f71edf",
       "mustContain": [
         "publish_event_json",
         "refusing to use private directory through symlink",
@@ -67,7 +70,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-gui-session-monitor.py",
-      "sha256": "200cceefa71e54e2768664c10248fc4bd3e3346ce6dcdc1eaa96c1e11a587d36",
+      "sha256": "3abcd0e3bb17669ea7e4bb40ece5d86db5ce23ae24d55de6a082a2709eb6d55a",
       "mustContain": [
         "classify_gui_session",
         "gui_targets_from_fleet",
@@ -86,16 +89,13 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "8406e960f6d031ceb1751fd28157ef09a78257e7778f323156d2760a00c75172",
+      "sha256": "2ee50ada55c773194c9d25736e3413a3694ba75b65712a648ca6e37eba30b170",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
         "q_loop_state_inventory",
         "RUNTIME_MANIFEST_FAILURE_RE",
         "provider_probe_inventory",
-        "validate_opencode_functional_jsonl",
-        "opencode_functional_probe_env",
-        "effective_instance_provider_path",
         "provider_usage_limit",
         "credential_item_status",
         "credential_item_status_acceptable",
@@ -155,7 +155,10 @@
         "load_runtime_agent_health_signals",
         "runtime_agent_health_signal_registry_invalid",
         "BOT_ERRORS_HEALTH_BODY_MAX_AGE_SECONDS",
-        "BOT_ERRORS_HEALTH_BODY_MAX_FUTURE_SKEW_SECONDS"
+        "BOT_ERRORS_HEALTH_BODY_MAX_FUTURE_SKEW_SECONDS",
+        "validate_opencode_functional_jsonl",
+        "opencode_functional_probe_env",
+        "effective_instance_provider_path"
       ]
     },
     {
@@ -168,9 +171,9 @@
     },
     {
       "path": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
-      "sha256": "5534e4f47843ae8c28ea920ac3f2e2e2a39270df7308af7204cd935bf128bdfc",
+      "sha256": "68ea4ba13950e0954b9b7b772b7c2826d6d3caea8e3559bea59f08cd624eef53",
       "mustContain": [
-        "BOT_ERRORS_Q_LOOP_STATE_DIR",
+        "q_loop_state_root",
         "BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT",
         "critical_file_problem",
         "fleet_sentinel_age",
@@ -183,7 +186,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-q-loop.py",
-      "sha256": "268c4b45ebf49cdee70d6333974ddf730adf92984a75ed33ed3096e5993cf556",
+      "sha256": "fe83c46b3ac0f4ff5881214f1a3232cf6398a743ac20cdb106aad9f539084f8e",
       "mustContain": [
         "q_unavailable_reason",
         "session_limit",
@@ -191,7 +194,7 @@
         "assert_private_regular_for_read",
         "state_integrity_failed",
         "redact_json_value(state)",
-        "BOT_ERRORS_Q_LOOP_STATE_DIR"
+        "q_loop_state_root"
       ]
     },
     {
@@ -205,7 +208,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-runner.py",
-      "sha256": "dbdf5ecab095ae132c4f1f9dbbe64e15fc632ed14647ef6ab832455fa2bc8c24",
+      "sha256": "a040ca195b211a852912546a33fddedec36047ac49c9ff6c91b2443a9582e2af",
       "mustContain": [
         "publish_event_json",
         "refusing to use private directory through symlink",
@@ -214,7 +217,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-runtime-staleness.py",
-      "sha256": "8c1e2f702f2453bef92c381d72d91cdc943b25520dd713a12c5e8584df3386ed",
+      "sha256": "7bf0ce8510843bf5a22d594afe2c171b3e8d3d138a176cc48b2eed9664a3d91d",
       "mustContain": [
         "Runtime code-staleness monitor",
         "runtime_stale"
@@ -222,7 +225,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-selfcheck.py",
-      "sha256": "16e7d39a60132e7cac2fc7ddd636a595c5ef8679dbdf9a59dceb10a45e4d38b5",
+      "sha256": "af6ed1081f4b6f9f8d0e0484627b8ab1c1299638eac024e263e5ba92caa19629",
       "mustContain": [
         "SAFE_HEAL_CLASSES",
         "HEAL_WINDOW_SECONDS"
@@ -230,7 +233,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-sentinel.py",
-      "sha256": "dc3d823c81bf03f929a35adb7f4aa49965ab8fd61118eaba31c0e2114d1e156e",
+      "sha256": "ff385ea06f2029307c44b419f42b3240b5fbb208b8891a43744eec4eda5de09d",
       "mustContain": [
         "DEFAULT_HEARTBEAT_MAX_AGE_SECONDS",
         "DEFAULT_HYSTERESIS_CYCLES"
@@ -238,7 +241,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-tree-provenance.py",
-      "sha256": "62a2fa8f07a93d8438ca72b2b41c916c169fb926492583c9bd051b017983e45b",
+      "sha256": "1bf143838818901aa206f2af04033f5fe7abb74ca2839e30ab932dda56a71475",
       "mustContain": [
         "tree_provenance_inventory",
         "def redact_ref",
@@ -366,7 +369,7 @@
     },
     {
       "path": "deploy/scripts/lib/controller_log.py",
-      "sha256": "2ae8bd93f0ef836ea3c20eb00198a8e25b19f33644e0a58b12a45e2755a8e795",
+      "sha256": "a761280f46c9067b63d635993ae4f93ce10c7641e79c340fc4d1a372e826e5d8",
       "mustContain": [
         "ControllerLogContext",
         "diagnostic_best_effort",
@@ -377,7 +380,7 @@
     },
     {
       "path": "deploy/scripts/lib/controller_state.py",
-      "sha256": "f2f83805dde505f12e298d822d96a46d36ae566270216e87b243997f6b0cf4ce",
+      "sha256": "385cf41ecbe104d49f0e695cd0036dfec786d35d7ac72395d2ba73470bf24e20",
       "mustContain": [
         "ControllerStateSession",
         "open_controller_state",
@@ -420,6 +423,21 @@
         "def compute_manifest_digest(",
         "def load_approved_manifest_digests(",
         "manifest_digest"
+      ]
+    },
+    {
+      "path": "deploy/scripts/lib/state_files.py",
+      "sha256": "4bbcac85853544d51588d38cfb8f6d1946dcd03f6dc2e00b3849176febaf553c",
+      "mustContain": [
+        "Single source of truth for bot-errors state filenames"
+      ]
+    },
+    {
+      "path": "deploy/scripts/lib/state_root.py",
+      "sha256": "d5165ece1fc189ea43adab6b9bb19af24f1914478614f3819f4a54d7d37bd8c2",
+      "mustContain": [
+        "Single source of truth for bot-errors state-root resolution",
+        "BOT_ERRORS_Q_LOOP_STATE_DIR"
       ]
     },
     {

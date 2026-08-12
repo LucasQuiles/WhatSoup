@@ -62,6 +62,7 @@ function trackedFiles(root: string): string[] {
     cwd: root,
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
+    timeout: 30_000,
   });
   return out.split('\0').filter((p) => p.length > 0);
 }

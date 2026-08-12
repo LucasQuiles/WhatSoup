@@ -24,6 +24,12 @@ export interface RuntimeTurnCapabilityHealth {
   lastSuccessfulTurnSessionCurrent: boolean | null;
   lastTurnErrorClass: string | null;
   lastTurnErrorAt: number | null;
+  /** #3017 AXIS A: true when the periodic primary-readiness probe is active
+   *  (the recurring timer is armed). When true, stale model-usability evidence
+   *  is NOT benign for an idle bot — the periodic probe should have refreshed
+   *  it, so staleness means the probe failed to fire, not that the bot is
+   *  naturally idle. Default false for backward compatibility. */
+  periodicProbeExpected?: boolean;
 }
 
 export interface AgentCommandRequest {

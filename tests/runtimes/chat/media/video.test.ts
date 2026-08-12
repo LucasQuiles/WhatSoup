@@ -8,14 +8,7 @@ const { mockExecFile, mockReaddir, mockReadFile } = vi.hoisted(() => ({
 }));
 
 // Mock logger
-vi.mock('../../../../src/logger.ts', () => ({
-  createChildLogger: () => ({
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  }),
-}));
+vi.mock('../../../../src/logger.ts', async () => (await import('../../../helpers/logger-mock.ts')).loggerMock());
 
 // Mock media-download so writeTempFile/cleanupTempFile don't touch the real FS
 vi.mock('../../../../src/core/media-download.ts', () => ({

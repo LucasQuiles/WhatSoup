@@ -1,4 +1,5 @@
 import { createChildLogger } from '../logger.ts';
+import { hostname } from 'node:os';
 import {
   clearAlertSource,
   clearAlertSourceChecked,
@@ -12,6 +13,7 @@ import type { BotErrorsCriticalAssetDiagnostic } from '../lib/bot-errors-outbox.
 import { asRecord, nonEmptyString, nonEmptyStringRaw } from '../lib/type-guards.ts';
 import { sqliteUtcToEpochMs } from '../lib/sqlite-time.ts';
 import { ALERT_THROTTLE_INTERVAL_MS, loadAlertThrottleDetailed, recordAlertThrottle } from './alert-throttle-store.ts';
+import { setRecoveryMarker, clearRecoveryMarker, loadRecoveryMarkers } from '../lib/recovery-authority-store.ts';
 import * as silenceManager from './silence-manager.ts';
 import type { SilenceStoreReadResult } from './silence-manager.ts';
 import {
@@ -653,10 +655,13 @@ export class HealthPoller {
   private statuses: Map<string, InstanceStatus> = new Map();
   private pollInterval: ReturnType<typeof setInterval> | null = null;
   private pollEpoch = 0;
+  /** #3057: guards the one-time startup recovery-marker scan. */
+  private startupMarkersReconciled = false;
   private nextPollRequestId = 0;
   private latestPollRequestIdByInstance: Map<string, number> = new Map();
   private getInstances: () => Map<string, InstanceHealth>;
   private selfName: string;
+  private readonly hostName: string;
   private getSelfHealth: () => Record<string, unknown>;
   private intervalMs: number;
   private statusChangeListeners: StatusChangeCallback[] = [];
@@ -709,6 +714,7 @@ export class HealthPoller {
     loopLagSampler = new LoopLagSampler(),
     dbReader: FleetDbReader | null = null,
     silenceRegistryEpisodeStore: SilenceRegistryEpisodeStorePort = createSilenceRegistryEpisodeStore(),
+    hostName: string = hostname(),
   ) {
     this.getInstances = getInstances;
     this.selfName = selfName;
@@ -717,6 +723,7 @@ export class HealthPoller {
     this.loopLagSampler = loopLagSampler;
     this.dbReader = dbReader;
     this.silenceRegistryEpisodeStore = silenceRegistryEpisodeStore;
+    this.hostName = hostName;
     const throttle = loadAlertThrottleDetailed();
     this.persistedAlertThrottle = throttle.entries;
     this.alertThrottleLoadErrorCode = throttle.loadError?.code ?? (throttle.loadError ? 'UNKNOWN' : null);
@@ -751,6 +758,47 @@ export class HealthPoller {
     return initial;
   }
 
+  /**
+   * #3057: Reconcile recovery-authority markers left by a prior process.
+   * On cold start, for each marker whose instance has recovered (no longer
+   * has the source in its activeAlertSources), emit the idempotent clear and
+   * remove the marker. Markers for still-degraded instances are preserved.
+   */
+  private reconcileStartupMarkers(): void {
+    let markers: Set<string>;
+    try {
+      markers = loadRecoveryMarkers();
+    } catch {
+      // intentional: marker file unreadable — treat as no markers and proceed.
+      return;
+    }
+    if (markers.size === 0) return;
+    for (const marker of markers) {
+      const sep = marker.indexOf(':');
+      if (sep === -1) continue;
+      const mName = marker.slice(0, sep);
+      const mSource = marker.slice(sep + 1);
+      const status = this.statuses.get(mName);
+      // Positive-recovery evidence required: a merely-absent alert source is
+      // NOT proof of recovery on the first poll — a still-down instance has
+      // not yet re-accumulated consecutive failures, so its source is absent
+      // too. Only a confirmed-online instance may have its marker cleared.
+      if (status && status.status === 'online' && !status.activeAlertSources.includes(mSource)) {
+        if (!clearAlertSourceChecked(mName, mSource, 'startup recovery scan (#3057)')) {
+          // Clear not durably accepted — keep the marker so the next startup
+          // scan retries the idempotent clear.
+          continue;
+        }
+        try {
+          clearRecoveryMarker(marker);
+        } catch {
+          // intentional: marker removal is best-effort — a stale marker only
+          // causes a redundant idempotent clear on the next startup scan.
+        }
+      }
+    }
+  }
+
   stop(): void {
     this.pollEpoch += 1;
     this.latestPollRequestIdByInstance.clear();
@@ -777,7 +825,7 @@ export class HealthPoller {
   }
 
   private alertThrottleKey(name: string, source: string): string {
-    return `${name}:${source}`;
+    return `${this.hostName}:${name}:${source}`;
   }
 
   /**
@@ -929,7 +977,7 @@ export class HealthPoller {
   private lastAlertAtFor(name: string, existing: InstanceStatus | undefined): string | null {
     if (existing?.lastAlertAt) return existing.lastAlertAt;
     let latest = this.persistedAlertThrottle.get(name) ?? null;
-    const prefix = `${name}:`;
+    const prefix = `${this.hostName}:${name}:`;
     for (const [key, value] of this.persistedAlertThrottle.entries()) {
       if (!key.startsWith(prefix)) continue;
       if (latest === null || new Date(value).getTime() > new Date(latest).getTime()) {
@@ -1160,6 +1208,13 @@ export class HealthPoller {
         this.targetPids.delete(name);
         this.resetHealthBodyDegradedDebounce(name);
       }
+    }
+    // #3057: on the first poll only, reconcile recovery-authority markers
+    // from a prior process — any instance that recovered during the restart
+    // window receives an idempotent recovery clear.
+    if (!this.startupMarkersReconciled) {
+      this.startupMarkersReconciled = true;
+      this.reconcileStartupMarkers();
     }
   }
 
@@ -2092,6 +2147,13 @@ export class HealthPoller {
           retainedSources.push(source);
           continue;
         }
+        // #3057: alert was durably cleared — remove the recovery-authority marker.
+        try {
+          clearRecoveryMarker(`${name}:${source}`);
+        } catch {
+          // intentional: marker removal is best-effort — a stale marker only
+          // causes a redundant idempotent clear on the next startup scan.
+        }
         if (source === 'instance_unreachable') this.unreachableAlerted.delete(name);
       } catch (err) {
         log.warn({ err, name, source }, 'failed to emit alert clear');
@@ -2321,16 +2383,20 @@ export class HealthPoller {
     severity: 'critical' | 'error' | 'warning' | 'info' = 'critical',
     criticalAsset?: BotErrorsCriticalAssetDiagnostic,
   ): boolean {
-    const bypassSuppression = source === 'instance_logged_out';
+    // Critical-severity alerts bypass silence (operator must see them even on a
+    // silenced instance) but keep the throttle guard (15min rate-limit prevents
+    // storm if a critical source flaps). Only instance_logged_out bypasses BOTH.
+    const bypassSilence = severity === 'critical' || source === 'instance_logged_out';
+    const bypassThrottle = source === 'instance_logged_out';
     const throttleKey = this.alertThrottleKey(name, source);
-    const silenceState = bypassSuppression ? false : silenceManager.isInstanceSilenced(name);
+    const silenceState = bypassSilence ? false : silenceManager.isInstanceSilenced(this.hostName, name);
     if (silenceState === true) {
       this.noteAlertSuppressed(throttleKey, name, source, 'alert suppressed — instance is silenced');
       return false;
     }
     const existing = this.statuses.get(name);
     const lastAlertAt = this.persistedAlertThrottle.get(throttleKey) ?? null;
-    if (!bypassSuppression && lastAlertAt !== null) {
+    if (!bypassThrottle && lastAlertAt !== null) {
       const elapsed = Date.now() - new Date(lastAlertAt).getTime();
       if (elapsed < MIN_ALERT_INTERVAL_MS) {
         this.noteAlertSuppressed(throttleKey, name, source, 'alert suppressed — rate limit (15min)', { elapsed });
@@ -2361,6 +2427,17 @@ export class HealthPoller {
         status: result.status,
       }, 'alert emission was not durably accepted');
       return false;
+    }
+
+    // #3057: persist a recovery-authority marker so the alert identity
+    // survives restart — a new process reads it on cold start to emit the
+    // idempotent clear if the instance has recovered.
+    try {
+      setRecoveryMarker(`${name}:${source}`);
+    } catch {
+      // intentional: marker write is best-effort — a missing marker means the
+      // next startup scan cannot reconcile this source, but the alert itself
+      // was already durably queued above.
     }
 
     if (existing) {

@@ -22,14 +22,15 @@ vi.mock('node:fs', async (importOriginal) => {
   return { ...actual, writeFileSync: fsMock.writeFileSync, unlinkSync: fsMock.unlinkSync };
 });
 
-const logMock = vi.hoisted(() => ({
-  info: vi.fn(),
-  warn: vi.fn(),
-  error: vi.fn(),
-  debug: vi.fn(),
-}));
+vi.mock('../../../src/logger.ts', async () => {
+  const { singletonLoggerMock } = await import('../../helpers/logger-mock.ts');
+  const logger = singletonLoggerMock();
+  return { createChildLogger: () => logger };
+});
 
-vi.mock('../../../src/logger.ts', () => ({ createChildLogger: () => logMock }));
+import { createChildLogger } from '../../../src/logger.ts';
+import type { singletonLoggerMock } from '../../helpers/logger-mock.ts';
+const logMock = createChildLogger('vault') as unknown as ReturnType<typeof singletonLoggerMock>;
 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';

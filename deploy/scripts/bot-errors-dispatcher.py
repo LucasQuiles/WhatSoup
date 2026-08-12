@@ -56,6 +56,13 @@ from lib.durable_json import (
     require_advance,
     require_all_advance,
 )
+from lib.state_files import (
+    DISPATCHER_META_STATE,
+    DISPATCHER_STATE,
+    INCIDENT_STATE,
+    MAINTENANCE,
+)
+from lib.state_root import state_root
 
 
 BOT_ERRORS_JID = os.environ.get("BOT_ERRORS_JID", "").strip()
@@ -548,10 +555,6 @@ QUARANTINE_INCIDENT_SOURCES = frozenset({
 })
 
 
-def state_root() -> Path:
-    return Path(os.environ.get("BOT_ERRORS_STATE_DIR", Path.home() / ".local/state/bot-errors"))
-
-
 def state_paths() -> dict[str, Path]:
     root = state_root()
     return {
@@ -569,9 +572,9 @@ def state_paths() -> dict[str, Path]:
         "locks": root / "locks",
         "logs": root / "logs",
         "dead_letter": root / "dead-letter",
-        "state": root / "dispatcher-state.json",
-        "incident_state": root / "incident-state.json",
-        "meta_state": root / "dispatcher-meta-state.json",
+        "state": root / DISPATCHER_STATE,
+        "incident_state": root / INCIDENT_STATE,
+        "meta_state": root / DISPATCHER_META_STATE,
     }
 
 
@@ -985,7 +988,7 @@ def open_dispatcher_state_session():
     ControllerStateRequired if the state directory/file is unsafe, locked,
     or corrupt beyond recovery.
     """
-    anchor = state_root() / "incident-state.json"
+    anchor = state_root() / INCIDENT_STATE
     return open_controller_state(
         anchor,
         component="dispatcher-incident",
@@ -1127,6 +1130,50 @@ def save_incident_state(
     require_advance(publication)
     return publication
 
+class IncidentCycleRequiredError(RuntimeError):
+    """#3054: a cycle-accepting helper was called post-adoption without the
+    ``IncidentStateCycle``.
+
+    Post-adoption (the state dir carries the ``.initialized`` marker) the
+    incident-state primary is enveloped (``_controllerState``). Routing a
+    state write through ``save_incident_state`` — the RESTORE-COMPAT
+    bare-JSON wrapper — would overwrite the enveloped primary with bare
+    JSON, so the next ``session.save()`` / ``_validate_envelope`` rejects
+    it with ``schema_incompatible``: the corruption class #3053 fixed.
+    Raising at the helper boundary fails the regression loudly instead of
+    silently corrupting state. Pre-adoption (no ``.initialized``) the bare
+    write is still the legitimate legacy/compat path, so the guard is inert.
+    """
+
+
+def _require_incident_cycle_if_adopted(
+    paths: dict[str, Path],
+    incident: "IncidentStateCycle | None",
+    *,
+    helper: str,
+) -> None:
+    """#3054 guard — fail closed when a cycle-accepting helper is invoked
+    post-adoption without the ``IncidentStateCycle``.
+
+    Inert when ``incident`` is provided (the session save path) or when the
+    state dir is not yet adopted (no ``.initialized`` marker beside the
+    incident-state anchor — the bare ``save_incident_state`` write is the
+    correct legacy/compat path there). The legacy-adoption read path in
+    ``controller_state`` (``.initialized`` absent → ``legacy_valid``) is
+    untouched: this guard only restrains writes, never reads.
+    """
+    if incident is not None:
+        return
+    anchor = paths.get("incident_state")
+    if anchor is None:
+        return
+    if (anchor.parent / (anchor.name + ".initialized")).exists():
+        raise IncidentCycleRequiredError(
+            f"{helper}: post-adoption incident-state write requires the "
+            f"IncidentStateCycle (incident=None would route through "
+            f"save_incident_state's bare-JSON wrapper and corrupt the "
+            f"_controllerState envelope — #3053/#3054)."
+        )
 
 def record_daily_health_freshness(event: dict[str, Any], incident_state: dict[str, Any]) -> str | None:
     """Stamp per-host daily-health liveness into the durable freshness ledger.
@@ -1301,7 +1348,7 @@ def maintenance_state_path() -> Path:
     MUST match ``bot-errors-maintenance.py``'s resolution so the CLI and the
     dispatcher agree on a single file (``BOT_ERRORS_STATE_DIR`` honored).
     """
-    return state_root() / "maintenance.json"
+    return state_root() / MAINTENANCE
 
 
 def _load_maintenance_windows() -> dict[str, dict[str, Any]]:
@@ -1360,44 +1407,6 @@ def evidence_field(text: str, key: str) -> str | None:
 
 def _truthy_token(value: Any) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
-
-
-def pinecone_contributors(state: dict[str, Any]) -> dict[str, set[str]]:
-    """#2412: track per-episode pinecone contributors so recovery of one
-    contributor does not clear the incident while others remain degraded."""
-    bucket = state.setdefault("pineconeContributors", {})
-    if not isinstance(bucket, dict):
-        bucket = {}
-        state["pineconeContributors"] = bucket
-    return {k: set(v) if isinstance(v, list) else set() for k, v in bucket.items()}
-
-
-def record_pinecone_contributor(state: dict[str, Any], episode: str, contributor: str) -> None:
-    """Record that *contributor* fired for *episode* (e.g. query, embedding)."""
-    bucket = state.setdefault("pineconeContributors", {})
-    if not isinstance(bucket, dict):
-        bucket = {}
-        state["pineconeContributors"] = bucket
-    ep_set = bucket.setdefault(episode, [])
-    if not isinstance(ep_set, list):
-        ep_set = []
-        bucket[episode] = ep_set
-    if contributor not in ep_set:
-        ep_set.append(contributor)
-
-
-def clear_pinecone_contributor(state: dict[str, Any], episode: str, contributor: str) -> bool:
-    """Remove *contributor* from *episode*. Returns True if episode has no
-    remaining contributors (incident can clear), False otherwise."""
-    contributors = pinecone_contributors(state)
-    ep_set = contributors.get(episode)
-    if not ep_set:
-        return True  # nothing tracked → safe to clear
-    ep_set.discard(contributor)
-    # Write back
-    bucket = state.setdefault("pineconeContributors", {})
-    bucket[episode] = list(ep_set)
-    return len(ep_set) == 0
 
 
 def classify_failure_mode(event: dict[str, Any]) -> str:
@@ -3607,6 +3616,7 @@ def flap_scan_outbox(paths: dict[str, Path], incident: IncidentStateCycle | None
     When *incident* is provided, uses its ``.payload`` and ``.commit()``
     instead of ``load_incident_state``/``save_incident_state``.
     """
+    _require_incident_cycle_if_adopted(paths, incident, helper="flap_scan_outbox")
     if not FLAP_DETECTION:
         return 0
     try:
@@ -3659,6 +3669,7 @@ def sweep_flap_storms(paths: dict[str, Path], incident: IncidentStateCycle | Non
     """Sweep open flap storms for resolution. Returns (resolved, errors).
     Called from run_once after per-event processing. Fail-open per entry.
     When *incident* is provided, uses its .payload and .commit()."""
+    _require_incident_cycle_if_adopted(paths, incident, helper="sweep_flap_storms")
     if not FLAP_DETECTION:
         return 0, 0
     incident_state = (incident.payload if incident else load_incident_state(paths))
@@ -3745,6 +3756,7 @@ def daily_health_monitoring_stale(machine: str, open_incidents: dict[str, Any]) 
 
 
 def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = None, incident: IncidentStateCycle | None = None) -> tuple[int, int, str | None]:
+    _require_incident_cycle_if_adopted(paths, incident, helper="sweep_stale_incidents")
     incident_state = (incident.payload if incident else load_incident_state(paths))
     open_incidents = incident_state.setdefault("openIncidents", {})
     current = int(time.time())
@@ -4337,6 +4349,7 @@ def collapse_storm_group(
     incident_state: dict[str, Any],
     incident: IncidentStateCycle | None = None,
 ) -> int:
+    _require_incident_cycle_if_adopted(paths, incident, helper="collapse_storm_group")
     fingerprint, requested_start = key
     window = storm_window_seconds()
     fingerprint_hash = storm_fingerprint_hash(fingerprint)
@@ -4882,6 +4895,7 @@ def collapse_storm_group(
 
 
 def collapse_ready_storms(paths: dict[str, Path], incident: IncidentStateCycle | None = None) -> int:
+    _require_incident_cycle_if_adopted(paths, incident, helper="collapse_ready_storms")
     threshold = storm_threshold()
     if threshold < 2:
         return 0
@@ -5010,6 +5024,7 @@ def suppress_alerts_recovered_before_delivery(paths: dict[str, Path], incident: 
     after service recovery. When an incident is already recorded as open, only
     the undelivered duplicate alert is retired; its clear remains visible.
     """
+    _require_incident_cycle_if_adopted(paths, incident, helper="suppress_alerts_recovered_before_delivery")
     incident_state = (incident.payload if incident else load_incident_state(paths))
     open_incidents = incident_state.get("openIncidents")
     if not isinstance(open_incidents, dict):
@@ -5049,11 +5064,40 @@ def suppress_alerts_recovered_before_delivery(paths: dict[str, Path], incident: 
         if not pending_alerts:
             continue
 
-        alert_ids: list[str] = []
-        for alert_path, alert_event, _alert_epoch, _alert_order in pending_alerts:
-            # #2430: preserve freshness before terminal move.
+        # #2430: absorb every daily-health carrier that will leave the
+        # outbox in this iteration, then persist changed incident state
+        # ONCE before any terminal move \u2014 mirroring the save-before-move
+        # pattern of collapse_ready_storms / suppress_ready_recovery_
+        # duplicates (the two sibling pre-loop passes). #3061 added the
+        # in-memory absorb but no save, so the mutation was discarded at
+        # end of cycle and the moved files could not be reconstructed.
+        # When no same-key incident is open, both the alert(s) and the
+        # clear are retired here, so batch-absorb both so the newer
+        # valid observation wins the monotonic freshness ledger. When an
+        # incident is open and the clear will still dispatch, only the
+        # retiring alert is absorbed here; the clear\u2019s freshness is left
+        # to normal process_one() processing. A save failure raises
+        # through save_incident_state()/incident.commit() (via
+        # require_advance) BEFORE any move runs, leaving both files
+        # retryable in the outbox as a visible failed run.
+        state_changed = False
+        for _alert_path, alert_event, _alert_epoch, _alert_order in pending_alerts:
             if str(alert_event.get("source") or "").startswith("daily-health"):
                 absorb_daily_health_signal(alert_event, incident_state)
+                state_changed = True
+        migrate_legacy_unqualified_incident(clear_event, incident_state)
+        clear_will_dispatch = isinstance(open_incidents.get(key), dict)
+        if not clear_will_dispatch and str(clear_event.get("source") or "").startswith("daily-health"):
+            absorb_daily_health_signal(clear_event, incident_state)
+            state_changed = True
+        if state_changed:
+            if incident:
+                incident.commit()
+            else:
+                save_incident_state(paths, incident_state)
+
+        alert_ids: list[str] = []
+        for alert_path, alert_event, _alert_epoch, _alert_order in pending_alerts:
             move_suppressed_event(
                 alert_path,
                 paths,
@@ -5063,9 +5107,6 @@ def suppress_alerts_recovered_before_delivery(paths: dict[str, Path], incident: 
             )
             alert_ids.append(str(alert_event.get("id") or "unknown"))
             suppressed += 1
-
-        migrate_legacy_unqualified_incident(clear_event, incident_state)
-        clear_will_dispatch = isinstance(open_incidents.get(key), dict)
         if not clear_will_dispatch:
             move_suppressed_event(
                 clear_path,
@@ -5075,9 +5116,6 @@ def suppress_alerts_recovered_before_delivery(paths: dict[str, Path], incident: 
                 "recovered_before_delivery_clear_suppressed",
             )
             suppressed += 1
-        # #2430: absorb daily-health clear signals into freshness too.
-        if str(clear_event.get("source") or "").startswith("daily-health"):
-            absorb_daily_health_signal(clear_event, incident_state)
         append_dispatch_log(paths, {
             "type": "recovered_before_delivery",
             "incidentKey": key,
@@ -5093,6 +5131,7 @@ def suppress_alerts_recovered_before_delivery(paths: dict[str, Path], incident: 
 
 
 def suppress_ready_recovery_duplicates(paths: dict[str, Path], incident: IncidentStateCycle | None = None) -> int:
+    _require_incident_cycle_if_adopted(paths, incident, helper="suppress_ready_recovery_duplicates")
     window = recovery_dedupe_window_seconds()
     groups: dict[str, list[tuple[Path, dict[str, Any], int]]] = {}
     for path in sorted(paths["outbox"].glob("*.json")):
@@ -5375,13 +5414,43 @@ def load_valid_event_or_quarantine(path: Path, quarantine_dir: Path) -> dict[str
 
 def delivery_ready(event: dict[str, Any]) -> bool:
     delivery = event.get("delivery") if isinstance(event.get("delivery"), dict) else {}
-    next_attempt = int(delivery.get("nextAttemptAtEpoch") or 0)
+    # #2437: a syntactically valid event may still carry a malformed
+    # nextAttemptAtEpoch (non-numeric string, float, dict, list, etc.).
+    # int(...) raises on those, which previously aborted the whole scan loop
+    # and permanently wedged the dispatcher queue. Treat any unreadable
+    # timestamp as "not ready" so the scan skips this record instead of
+    # crashing; ready() quarantines such events so they do not linger.
+    try:
+        next_attempt = int(delivery.get("nextAttemptAtEpoch") or 0)
+    except (TypeError, ValueError):
+        return False
     return next_attempt <= int(time.time())
 
 
 def ready(path: Path, quarantine_dir: Path) -> bool:
     event = load_valid_event_or_quarantine(path, quarantine_dir)
-    return event is not None and delivery_ready(event)
+    if event is None:
+        return False
+    delivery = event.get("delivery") if isinstance(event.get("delivery"), dict) else {}
+    try:
+        int(delivery.get("nextAttemptAtEpoch") or 0)
+    except (TypeError, ValueError) as exc:
+        # #2437: quarantine malformed metadata so a single poison record
+        # cannot wedge the queue; the scan continues with the next event.
+        quarantine_poison(path, quarantine_dir, f"malformed delivery.nextAttemptAtEpoch: {exc}")
+        return False
+    try:
+        int(delivery.get("attempts") or 0)
+    except (TypeError, ValueError) as exc:
+        # #2437 boundary-2: same poison-record class as nextAttemptAtEpoch,
+        # but the malformed value is only reached inside mark_attempt() AFTER
+        # claim() has moved the file to processing/. The exception escapes
+        # process_one() pre-update; on restart reclaim_processing() bounces
+        # the record back to outbox, creating an infinite claim-fail loop.
+        # Validate here (before claim) so the scan quarantines and continues.
+        quarantine_poison(path, quarantine_dir, f"malformed delivery.attempts: {exc}")
+        return False
+    return delivery_ready(event)
 
 
 def quarantine_invalid_envelope(path: Path, quarantine_dir: Path, code: str) -> Path:
@@ -5429,9 +5498,12 @@ def quarantine_poison(path: Path, quarantine_dir: Path, reason: str) -> Path:
     except Exception as exc:
         direct_whatsapp = "failed"
         direct_error = str(exc)
-        # #2424: persist accepted state BEFORE the send call so a crash
-        # between the send and the state persist does not cause replays.
-        email_status = "accepted_unconfirmed" if email_fallback("BOT ERRORS poison event quarantine", text) else "failed"
+        # #3070: classify an accepted email fallback as TERMINAL here, not
+        # accepted_unconfirmed. A poison event is already moved to quarantine
+        # (no requeue path), so a successful email handoff is a delivered
+        # alert -- mirroring the #3024 delivery-site semantics so the dispatch
+        # log never reports a delivered poison alert as unconfirmed/retryable.
+        email_status = "email_delivered" if email_fallback("BOT ERRORS poison event quarantine", text) else "failed"
     try:
         log_record = {
             "type": "quarantine",
@@ -5443,6 +5515,8 @@ def quarantine_poison(path: Path, quarantine_dir: Path, reason: str) -> Path:
         }
         if direct_error:
             log_record["directError"] = direct_error
+        if email_status != "not_attempted":
+            log_record["emailFallbackAt"] = now_iso()
         append_dispatch_log(state_paths(), log_record)
     except Exception:
         pass
@@ -5763,6 +5837,7 @@ def record_state(paths: dict[str, Path], **updates: Any) -> None:
 
 
 def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle | None = None) -> tuple[bool, str]:
+    _require_incident_cycle_if_adopted(paths, incident, helper="process_one")
     # #2484: ready() already verified the leaf is regular and readable, but
     # claim() renames it — re-verify the claimed path before parsing.
     try:

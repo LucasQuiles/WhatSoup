@@ -14,8 +14,15 @@
  * delete / expiry call save/remove. Behavior is identical to the previous inline
  * methods — see the persistence characterization coverage (poll-persistence.test.ts,
  * runtime.test.ts persist-failure-counter, health-snapshot.test.ts).
+ *
+ * CAR-20 (#2539): in addition to the cumulative `errors` counter, every operation
+ * tracks a CURRENT-vs-HISTORICAL failure surface. `healthDetails()` exposes whether
+ * an unrecovered failure streak is active right now (degraded) versus when the last
+ * recovery happened (lastRecoveredAt / totalRecoveries) — the bare counter could not
+ * tell "failing now" apart from "failed earlier and has since recovered."
  */
 import type { Database } from '../../core/database.ts';
+import { systemClock } from '../../lib/clock.ts';
 import { createChildLogger } from '../../logger.ts';
 import {
   normalizePendingPollTimeoutMs,
@@ -35,14 +42,88 @@ export interface PendingPollRow {
   hard_closes_at: number | null;
 }
 
+/**
+ * Structured poll-persistence health surface. Distinguishes a CURRENT active failure
+ * (degraded=true, consecutiveFailures>0, not yet recovered) from a HISTORICAL recovery
+ * (lastRecoveredAt / totalRecoveries). The bare cumulative `errors` counter cannot
+ * express this distinction on its own — a process that failed 50 times an hour ago and
+ * has been healthy since looks identical to one failing right now.
+ */
+export interface PollPersistenceHealth {
+  /** Cumulative swallowed failures (back-compat with the pre-car health surface). */
+  errors: number;
+  /** True only while an active, unrecovered failure streak is in progress. */
+  degraded: boolean;
+  /** Current failure streak; resets to 0 on the next successful operation. */
+  consecutiveFailures: number;
+  /** Epoch-ms of the most recent failure, or null if none has occurred. */
+  lastFailureAt: number | null;
+  /** Sanitized message of the most recent failure (truncated; never the raw err object). */
+  lastFailureErr: string | null;
+  /** Epoch-ms of the most recent recovery (a success that ended a failure streak), or null. */
+  lastRecoveredAt: number | null;
+  /** Lifetime count of failure→success recoveries (increments once per recovered streak). */
+  totalRecoveries: number;
+}
+
+/** Reduce an arbitrary thrown value to a bounded, log-safe string (never the raw err). */
+function sanitizeErrMessage(err: unknown): string {
+  const msg = err instanceof Error ? err.message : String(err);
+  return msg.length > 200 ? `${msg.slice(0, 197)}...` : msg;
+}
+
 export class PendingPollPersistence {
   /** Count of swallowed pending_polls persistence failures (save/remove/rehydrate). Surfaced in health. */
   errors = 0;
+  // ── CAR-20 (#2539): current-vs-historical failure tracking ────────────────────
+  consecutiveFailures = 0;
+  lastFailureAt: number | null = null;
+  lastFailureErr: string | null = null;
+  lastRecoveredAt: number | null = null;
+  totalRecoveries = 0;
 
   private readonly db: Database;
 
   constructor(db: Database) {
     this.db = db;
+  }
+
+  /**
+   * Mark a successful operation. If it ends an active failure streak, record a single
+   * recovery (lastRecoveredAt / totalRecoveries) and reset the streak. A success with no
+   * prior failure is a no-op — a healthy process does not accumulate "recoveries".
+   */
+  private recordSuccess(): void {
+    if (this.consecutiveFailures > 0) {
+      this.lastRecoveredAt = systemClock.now();
+      this.totalRecoveries += 1;
+      this.consecutiveFailures = 0;
+    }
+  }
+
+  /** Mark a swallowed failure: bumps the cumulative `errors` counter AND the active streak. */
+  private recordFailure(err: unknown): void {
+    this.errors += 1;
+    this.consecutiveFailures += 1;
+    this.lastFailureAt = systemClock.now();
+    this.lastFailureErr = sanitizeErrMessage(err);
+  }
+
+  /**
+   * Structured health surface distinguishing current failure from historical recovery.
+   * `degraded` is true only while an unrecovered failure streak is active — the cumulative
+   * `errors` counter alone cannot express this. Surfaced in the runtime health snapshot.
+   */
+  healthDetails(): PollPersistenceHealth {
+    return {
+      errors: this.errors,
+      degraded: this.consecutiveFailures > 0,
+      consecutiveFailures: this.consecutiveFailures,
+      lastFailureAt: this.lastFailureAt,
+      lastFailureErr: this.lastFailureErr,
+      lastRecoveredAt: this.lastRecoveredAt,
+      totalRecoveries: this.totalRecoveries,
+    };
   }
 
   /**
@@ -82,8 +163,9 @@ export class PendingPollPersistence {
           closesAt,
           hardClosesAt,
         );
+      this.recordSuccess();
     } catch (err) {
-      this.errors += 1;
+      this.recordFailure(err);
       log.error({ err, mapKey }, 'persistPendingPoll failed; in-memory state remains authoritative');
     }
   }
@@ -92,8 +174,9 @@ export class PendingPollPersistence {
   remove(mapKey: string): void {
     try {
       this.db.raw.prepare('DELETE FROM pending_polls WHERE map_key = ?').run(mapKey);
+      this.recordSuccess();
     } catch (err) {
-      this.errors += 1;
+      this.recordFailure(err);
       log.error({ err, mapKey }, 'removePendingPoll failed');
     }
   }
@@ -104,11 +187,13 @@ export class PendingPollPersistence {
    */
   loadRows(): PendingPollRow[] {
     try {
-      return this.db.raw
+      const rows = this.db.raw
         .prepare('SELECT map_key, chat_jid, payload, hard_closes_at FROM pending_polls')
         .all() as unknown as PendingPollRow[];
+      this.recordSuccess();
+      return rows;
     } catch (err) {
-      this.errors += 1;
+      this.recordFailure(err);
       log.error({ err }, 'rehydratePendingPolls: SELECT failed; skipping');
       return [];
     }

@@ -384,7 +384,7 @@ function validateLaunchd(
   if (!skipPlutil && process.platform === 'darwin') {
     const abs = path.join(cwd, file);
     try {
-      execFileSync('plutil', ['-lint', abs], { stdio: 'pipe' });
+      execFileSync('plutil', ['-lint', abs], { timeout: 30_000, stdio: 'pipe' });
     } catch {
       structurallyValid = false;
       push('invalid-plist-structure', `plutil -lint rejected ${file}`);

@@ -22,12 +22,7 @@ const alertThrottleStore = vi.hoisted(() => ({
 const silenceManager = vi.hoisted(() => ({
   isInstanceSilenced: vi.fn(() => false),
 }));
-const logger = vi.hoisted(() => ({
-  info: vi.fn(),
-  warn: vi.fn(),
-  error: vi.fn(),
-  debug: vi.fn(),
-}));
+const { logger } = vi.hoisted(() => ({ logger: {} as Record<string, ReturnType<typeof vi.fn>> }));
 
 vi.mock('../../src/lib/emit-alert.ts', () => ({
   emitAlert: alertFns.emitAlert,
@@ -39,12 +34,11 @@ vi.mock('../../src/fleet/alert-throttle-store.ts', () => ({
   ...alertThrottleStore,
 }));
 vi.mock('../../src/fleet/silence-manager.ts', () => silenceManager);
-vi.mock('../../src/logger.ts', () => ({
-  createChildLogger: () => ({
-    ...logger,
-    child: vi.fn().mockReturnThis(),
-  }),
-}));
+vi.mock('../../src/logger.ts', async () => {
+  const { hoistedLoggerMock } = await import('../helpers/logger-mock.ts');
+  const { createChildLogger } = hoistedLoggerMock(logger);
+  return { createChildLogger };
+});
 
 describe('LoopLagSampler', () => {
   let nowMs: number;

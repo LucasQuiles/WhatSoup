@@ -1,16 +1,13 @@
 import { createHash } from 'node:crypto';
 import { describe, it, expect, vi } from 'vitest';
 
-const mockCronLogger = vi.hoisted(() => ({
-  info: vi.fn(),
-  warn: vi.fn(),
-  error: vi.fn(),
-  debug: vi.fn(),
-}));
+const { mockCronLogger } = vi.hoisted(() => ({ mockCronLogger: {} as Record<string, ReturnType<typeof vi.fn>> }));
 
-vi.mock('../../src/logger.ts', () => ({
-  createChildLogger: () => mockCronLogger,
-}));
+vi.mock('../../src/logger.ts', async () => {
+  const { hoistedLoggerMock } = await import('../helpers/logger-mock.ts');
+  const { createChildLogger } = hoistedLoggerMock(mockCronLogger);
+  return { createChildLogger };
+});
 
 import { runConsolidation } from '../../src/memory/consolidation-cron.ts';
 

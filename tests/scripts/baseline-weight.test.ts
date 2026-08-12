@@ -24,8 +24,11 @@ import { describe, expect, it } from 'vitest';
 
 import {
   BASELINE_REGISTRY,
+  type BaselineFinding,
   type BaselineShape,
+  applyWaivers,
   compareWeights,
+  parseWaiverDocument,
   weighBaseline,
 } from '../../scripts/lib/baseline-weight.ts';
 
@@ -36,6 +39,15 @@ describe('weighBaseline — one number per shape, higher means more tolerated de
     // boundary-baseline.json, transport-patterns-baseline.json
     expect(weigh('entry-array', [{ file: 'a' }, { file: 'b' }])).toBe(2);
     expect(weigh('entry-array', [])).toBe(0);
+  });
+
+  it('entry-array also accepts the schemaVersion-2 wrapper (loggermock after QC-2)', () => {
+    // The growth guard weighs the MERGE BASE file with the candidate's
+    // code, so both the legacy bare array and the v2 wrapper must weigh
+    // under the one registered shape during a migration.
+    expect(weigh('entry-array', { schemaVersion: 2, entries: [{ file: 'a', status: 'debt', reason: 'r' }] })).toBe(1);
+    expect(weigh('entry-array', { schemaVersion: 2, entries: [] })).toBe(0);
+    expect(() => weigh('entry-array', { schemaVersion: 2, entries: 'nope' })).toThrow(/expected an array/i);
   });
 
   it('single-array-object baselines weigh the wrapped array, whatever its key', () => {
@@ -164,5 +176,81 @@ describe('BASELINE_REGISTRY — the scan cannot go vacuous', () => {
       shape: 'entry-array',
       initialWeight: 127,
     });
+  });
+});
+
+describe('applyWaivers — identity admission requires the explicit opt-in', () => {
+  const idFinding: BaselineFinding = {
+    id: 'loggermock',
+    path: '.claude/fitness/loggermock-baseline.json',
+    base: 11,
+    head: 55,
+    delta: 44,
+    inconclusive: false,
+    kind: 'identity-introduction',
+    message: 'restructured entries',
+  };
+  const baseWaiver = {
+    path: '.claude/fitness/loggermock-baseline.json',
+    maxWeight: 55,
+    reason: 'schema migration',
+    issue: 'https://github.com/LucasQuiles/WhatSoup/issues/2977',
+    grantedAt: '2026-08-12',
+    expiresAt: '2026-09-09',
+  };
+
+  it('a plain waiver never admits new identities (the pre-existing law)', () => {
+    const { blocking, waived } = applyWaivers([idFinding], [baseWaiver], '2026-08-13');
+    expect(blocking).toHaveLength(1);
+    expect(waived).toHaveLength(0);
+  });
+
+  it('admitsNewIdentities: true waives an identity-introduction within cap and window', () => {
+    const { blocking, waived } = applyWaivers(
+      [idFinding],
+      [{ ...baseWaiver, admitsNewIdentities: true }],
+      '2026-08-13',
+    );
+    expect(blocking).toHaveLength(0);
+    expect(waived).toHaveLength(1);
+    expect(waived[0]?.waiver.admitsNewIdentities).toBe(true);
+  });
+
+  it('the opt-in still enforces maxWeight and the expiry window', () => {
+    const over = applyWaivers(
+      [{ ...idFinding, head: 56 }],
+      [{ ...baseWaiver, admitsNewIdentities: true }],
+      '2026-08-13',
+    );
+    expect(over.blocking).toHaveLength(1);
+
+    const expired = applyWaivers(
+      [idFinding],
+      [{ ...baseWaiver, admitsNewIdentities: true }],
+      '2026-09-10',
+    );
+    expect(expired.blocking).toHaveLength(1);
+  });
+
+  it('weight-growth stays waivable by a plain waiver (unchanged)', () => {
+    const { blocking, waived } = applyWaivers(
+      [{ ...idFinding, kind: 'weight-growth' }],
+      [baseWaiver],
+      '2026-08-13',
+    );
+    expect(blocking).toHaveLength(0);
+    expect(waived).toHaveLength(1);
+  });
+
+  it('parseWaiverDocument carries the flag through and rejects non-boolean values', () => {
+    const doc = { waivers: [{ ...baseWaiver, admitsNewIdentities: true }] };
+    expect(parseWaiverDocument(doc)[0]?.admitsNewIdentities).toBe(true);
+
+    const plain = parseWaiverDocument({ waivers: [baseWaiver] });
+    expect(plain[0]?.admitsNewIdentities).toBeUndefined();
+
+    expect(() =>
+      parseWaiverDocument({ waivers: [{ ...baseWaiver, admitsNewIdentities: 'yes' }] }),
+    ).toThrow(/admitsNewIdentities/);
   });
 });

@@ -9,6 +9,7 @@
  *   npx vitest run --pool=forks tests/fleet/health-poller-branches.test.ts
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { hostname } from 'node:os';
 import { HealthPoller, type InstanceHealth } from '../../src/fleet/health-poller.ts';
 import type { AlertEmissionResult } from '../../src/lib/emit-alert.ts';
 
@@ -24,12 +25,7 @@ const alertFns = vi.hoisted(() => ({
   })),
   clearAlertSource: vi.fn(() => true),
 }));
-const logger = vi.hoisted(() => ({
-  info: vi.fn(),
-  warn: vi.fn(),
-  error: vi.fn(),
-  debug: vi.fn(),
-}));
+const logger = vi.hoisted(() => ({} as Record<string, ReturnType<typeof vi.fn>>));
 const alertThrottleStore = vi.hoisted(() => ({
   loadAlertThrottle: vi.fn(() => new Map<string, string>()),
   loadAlertThrottleDetailed: vi.fn((): {
@@ -52,12 +48,11 @@ vi.mock('../../src/fleet/alert-throttle-store.ts', () => ({
   ...alertThrottleStore,
 }));
 vi.mock('../../src/fleet/silence-manager.ts', () => silenceManager);
-vi.mock('../../src/logger.ts', () => ({
-  createChildLogger: () => ({
-    ...logger,
-    child: vi.fn().mockReturnThis(),
-  }),
-}));
+vi.mock('../../src/logger.ts', async () => {
+  const { hoistedLoggerMock } = await import('../helpers/logger-mock.ts');
+  const { createChildLogger } = hoistedLoggerMock(logger);
+  return { createChildLogger };
+});
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -379,9 +374,9 @@ describe('HealthPoller — branch coverage supplement', () => {
       const later   = '2026-05-20T11:58:00.000Z';
       alertThrottleStore.loadAlertThrottleDetailed.mockReturnValue({
         entries: new Map([
-          ['remote-1:instance_degraded', earlier],
-          ['remote-1:instance_unreachable', later],
-          ['remote-2:instance_degraded', '2026-05-20T11:59:00.000Z'],
+          [`${hostname()}:remote-1:instance_degraded`, earlier],
+          [`${hostname()}:remote-1:instance_unreachable`, later],
+          [`${hostname()}:remote-2:instance_degraded`, '2026-05-20T11:59:00.000Z'],
         ]),
         loadError: null,
       });
@@ -394,7 +389,7 @@ describe('HealthPoller — branch coverage supplement', () => {
 
     it('returns null when no throttle entry matches the instance prefix', async () => {
       alertThrottleStore.loadAlertThrottleDetailed.mockReturnValue({
-        entries: new Map([['other-instance:instance_degraded', '2026-05-20T11:59:00.000Z']]),
+        entries: new Map([[`${hostname()}:other-instance:instance_degraded`, '2026-05-20T11:59:00.000Z']]),
         loadError: null,
       });
       mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve(onlineHealth()) });
@@ -1611,7 +1606,7 @@ describe('HealthPoller — branch coverage supplement', () => {
     it('adds source when emitAlert fails but persisted throttle has a prior entry', async () => {
       alertFns.emitAlert.mockReturnValue(failedAlertResult());
       alertThrottleStore.loadAlertThrottleDetailed.mockReturnValue({
-        entries: new Map([['remote-1:instance_logged_out', '2026-05-20T11:55:00.000Z']]),
+        entries: new Map([[`${hostname()}:remote-1:instance_logged_out`, '2026-05-20T11:55:00.000Z']]),
         loadError: null,
       });
       mockFetch.mockResolvedValue({

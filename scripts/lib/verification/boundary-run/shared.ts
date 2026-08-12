@@ -96,6 +96,7 @@ export function gitBytes(cwd: string, args: readonly string[]): Buffer {
     cwd,
     env: cleanGitEnv(),
     maxBuffer: 64 * 1024 * 1024,
+    timeout: 30_000,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 }

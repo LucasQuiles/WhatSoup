@@ -9,6 +9,7 @@
  * Part of docs/security-handoffs/2026-05-09-env-secret-exposure.md (W-2 observability).
  */
 
+import { systemClock } from './clock.ts';
 import { MS_PER_MINUTE } from './time-units.ts';
 import { isNonEmptyString } from './type-guards.ts';
 
@@ -65,7 +66,7 @@ const MAX_PLAUSIBLE_TIMESTAMP_MS = 8640000000000000; // ~year 275760
  * Classifies a token expiry timestamp for auth selection and refresh logic.
  *
  * @param expires - The expiry timestamp (ms since epoch), or undefined/null.
- * @param now - Current time (ms since epoch); defaults to Date.now().
+ * @param now - Current time (ms since epoch); defaults to systemClock.now().
  * @param opts.expiringWithinMs - Refresh margin; a credential expiring within
  *   this window is classified as 'expiring'. Defaults to
  *   {@link DEFAULT_REFRESH_MARGIN_MS}.
@@ -74,7 +75,7 @@ const MAX_PLAUSIBLE_TIMESTAMP_MS = 8640000000000000; // ~year 275760
  */
 export function resolveTokenExpiryState(
   expires: unknown,
-  now: number = Date.now(),
+  now: number = systemClock.now(),
   opts?: { expiringWithinMs?: number },
 ): TokenExpiryState {
   if (expires === undefined || expires === null) {
@@ -113,7 +114,7 @@ export interface CredentialLike {
  * keys) is usable as long as its value is non-empty.
  *
  * @param credential - The credential to check.
- * @param opts.now - Current time (ms since epoch); defaults to Date.now().
+ * @param opts.now - Current time (ms since epoch); defaults to systemClock.now().
  * @param opts.refreshMarginMs - Refresh margin for 'expiring' classification.
  *   A credential in the 'expiring' window is STILL usable (returns true) —
  *   the caller decides whether to refresh proactively.
@@ -131,7 +132,7 @@ export function hasUsableCredential(
   if (credential.expires === undefined || credential.expires === null) {
     return true;
   }
-  const now = opts?.now ?? Date.now();
+  const now = opts?.now ?? systemClock.now();
   const refreshMarginMs = Math.max(0, opts?.refreshMarginMs ?? DEFAULT_REFRESH_MARGIN_MS);
   const state = resolveTokenExpiryState(credential.expires, now, { expiringWithinMs: refreshMarginMs });
   // 'expiring' is still usable — the caller may refresh proactively but the

@@ -15,6 +15,9 @@ import { dirname, join } from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { resolveTrustedGit } from '../../scripts/lib/ci-control/trusted-git.ts';
+import { __setTestGitPath, gitBytes } from '../../scripts/lib/ci-control/git-input-core.ts';
+
 import {
   ExactGitInputError,
   MAX_CHANGE_FACT_COUNT,
@@ -1289,6 +1292,7 @@ describe('exact commit metadata', () => {
     ]);
     assertImportSurface('scripts/lib/ci-control/git-input-core.ts', [
         '../../../src/lib/git-env.ts',
+        './trusted-git.ts',
         'node:child_process',
         'node:crypto',
         'node:fs',
@@ -1296,6 +1300,40 @@ describe('exact commit metadata', () => {
         'node:perf_hooks',
         'node:util',
     ]);
+  });
+
+  it('#2843: resolveGit() uses resolveTrustedGit() — fails closed when no candidate exists', () => {
+    // Discriminating test: without the trusted-git guard, the module would use
+    // bare PATH-searched "git". With the guard, resolveTrustedGit() checks a
+    // static allowlist. Mock a non-existent candidate list to verify fail-closed.
+    expect(() => resolveTrustedGit(['/nonexistent/git'])).toThrow('no trusted git executable');
+  });
+
+  it('#2843 v2: the test-seam git path is honored under vitest and inert without it', () => {
+    // Behavioral inertness pair: the seam env var points at a nonexistent
+    // binary. Under the vitest runner the seam must be consulted (the call
+    // fails on the fake path); with VITEST absent the seam must be ignored
+    // (resolveTrustedGit finds the real git and the call succeeds). If the
+    // guard were removed — seam always honored — the second case would fail;
+    // if the seam were dropped entirely, the first case would succeed.
+    const { root } = fixture();
+    const prior = __setTestGitPath('/nonexistent/ci-control-fake-git');
+    try {
+      expect(() =>
+        gitBytes(root, ['rev-parse', '--git-dir'], 'ci.classification.merge-base-unavailable', 1 << 20),
+      ).toThrow(ExactGitInputError);
+
+      const priorVitest = process.env['VITEST'];
+      delete process.env['VITEST'];
+      try {
+        const out = gitBytes(root, ['rev-parse', '--git-dir'], 'ci.classification.merge-base-unavailable', 1 << 20);
+        expect(out.toString('utf8').trim().length).toBeGreaterThan(0);
+      } finally {
+        if (priorVitest !== undefined) process.env['VITEST'] = priorVitest;
+      }
+    } finally {
+      __setTestGitPath(prior);
+    }
   });
 
   it('reads the requested exact commit rather than a later safe ambient HEAD', () => {

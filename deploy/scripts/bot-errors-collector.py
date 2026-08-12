@@ -44,6 +44,8 @@ from lib.controller_state import (
     open_controller_state,
     state_diagnostic_details,
 )
+from lib.state_files import COLLECTOR_STATE
+from lib.state_root import state_root
 
 
 TAILSCALE_STATUS_CACHE: dict[str, Any] | None = None
@@ -1419,10 +1421,6 @@ def now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
-def state_root() -> Path:
-    return Path(os.environ.get("BOT_ERRORS_STATE_DIR", Path.home() / ".local/state/bot-errors"))
-
-
 def ensure_private_dir(path: Path) -> None:
     try:
         path.lstat()
@@ -1614,7 +1612,7 @@ def append_log(
 
 
 def state_path() -> Path:
-    return state_root() / "collector-state.json"
+    return state_root() / COLLECTOR_STATE
 
 
 STATE_LOCK_TIMEOUT_SECONDS = 30.0

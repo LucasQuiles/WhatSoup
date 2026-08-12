@@ -4,16 +4,13 @@ import { PineconeMemory, type MemoryRecord } from '../../../src/runtimes/chat/pr
 
 // Kept as a sentinel: memory_write must leave provider operation logging to
 // PineconeMemory and must not create a second tool-local event.
-const mockMemoryWriteLogger = vi.hoisted(() => ({
-  info: vi.fn(),
-  warn: vi.fn(),
-  error: vi.fn(),
-  debug: vi.fn(),
-}));
+const { mockMemoryWriteLogger } = vi.hoisted(() => ({ mockMemoryWriteLogger: {} as Record<string, ReturnType<typeof vi.fn>> }));
 
-vi.mock('../../../src/logger.ts', () => ({
-  createChildLogger: () => mockMemoryWriteLogger,
-}));
+vi.mock('../../../src/logger.ts', async () => {
+  const { hoistedLoggerMock } = await import('../../helpers/logger-mock.ts');
+  const { createChildLogger } = hoistedLoggerMock(mockMemoryWriteLogger);
+  return { createChildLogger };
+});
 
 import { registerMemoryWriteTools, type MemoryWriter } from '../../../src/mcp/tools/memory-write.ts';
 import type { ToolDeclaration, SessionContext } from '../../../src/mcp/types.ts';

@@ -13,7 +13,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tmpdir, hostname } from 'node:os';
 import { join } from 'node:path';
 import { HealthPoller, type InstanceHealth } from '../../src/fleet/health-poller.ts';
 import type { AlertEmissionResult } from '../../src/lib/emit-alert.ts';
@@ -29,12 +29,7 @@ const alertFns = vi.hoisted(() => ({
   emitAlert: vi.fn((): AlertEmissionResult => ({ ok: true, channel: 'outbox', status: 'durably_queued' })),
   clearAlertSource: vi.fn((): AlertEmissionResult => ({ ok: true, channel: 'outbox', status: 'durably_queued' })),
 }));
-const logger = vi.hoisted(() => ({
-  info: vi.fn(),
-  warn: vi.fn(),
-  error: vi.fn(),
-  debug: vi.fn(),
-}));
+const { logger } = vi.hoisted(() => ({ logger: {} as Record<string, ReturnType<typeof vi.fn>> }));
 const alertThrottleStore = vi.hoisted(() => ({
   loadAlertThrottle: vi.fn(() => new Map<string, string>()),
   loadAlertThrottleDetailed: vi.fn((): {
@@ -67,9 +62,11 @@ vi.mock('../../src/fleet/alert-throttle-store.ts', () => ({
 
 vi.mock('../../src/fleet/silence-manager.ts', () => silenceManager);
 
-vi.mock('../../src/logger.ts', () => ({
-  createChildLogger: () => ({ ...logger, child: vi.fn().mockReturnThis() }),
-}));
+vi.mock('../../src/logger.ts', async () => {
+  const { hoistedLoggerMock } = await import('../helpers/logger-mock.ts');
+  const { createChildLogger } = hoistedLoggerMock(logger);
+  return { createChildLogger };
+});
 
 const RATE_LIMIT_MSG = 'alert suppressed — rate limit (15min)';
 const SILENCED_MSG = 'alert suppressed — instance is silenced';
@@ -165,10 +162,10 @@ describe('#2355 alert-suppression episodes', () => {
     return poller;
   }
 
-  /** Pins the throttle for `remote-1:instance_never_reachable` at `at`. */
+  /** Pins the throttle for `hostname():remote-1:instance_never_reachable` at `at`. */
   function throttledSince(at: string): void {
     alertThrottleStore.loadAlertThrottleDetailed.mockReturnValue({
-      entries: new Map([['remote-1:instance_never_reachable', at]]),
+      entries: new Map([[`${hostname()}:remote-1:instance_never_reachable`, at]]),
       loadError: null,
     });
   }

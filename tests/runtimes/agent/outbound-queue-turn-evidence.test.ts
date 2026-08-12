@@ -5,14 +5,10 @@ import { toConversationKey } from '../../../src/core/conversation-key.ts';
 import type { DurabilityEngine } from '../../../src/core/durability.ts';
 import type { Messenger } from '../../../src/core/types.ts';
 
-vi.mock('../../../src/logger.ts', () => ({
-  createChildLogger: () => ({
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  }),
-}));
+vi.mock('../../../src/logger.ts', async () => {
+  const { loggerMock } = await import('../../helpers/logger-mock.ts');
+  return loggerMock();
+});
 
 const CHAT_JID = 'evidence@s.whatsapp.net';
 

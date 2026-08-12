@@ -6,17 +6,13 @@ import { deferred } from '../helpers/deferred.ts';
 
 const doubles = vi.hoisted(() => ({
   emitAlert: vi.fn(),
-  log: {
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  },
 }));
 
-vi.mock('../../src/logger.ts', () => ({
-  createChildLogger: () => doubles.log,
-}));
+vi.mock('../../src/logger.ts', async () => {
+  const { singletonLoggerMock } = await import('../helpers/logger-mock.ts');
+  const logger = singletonLoggerMock();
+  return { createChildLogger: () => logger };
+});
 
 vi.mock('../../src/lib/emit-alert.ts', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
@@ -45,6 +41,10 @@ vi.mock('../../src/core/access-list.ts', () => ({
   insertPending: vi.fn(),
   updateAccess: vi.fn(),
 }));
+
+import { createChildLogger } from '../../src/logger.ts';
+import type { singletonLoggerMock } from '../helpers/logger-mock.ts';
+const mockLog = createChildLogger('admission-contract') as unknown as ReturnType<typeof singletonLoggerMock>;
 
 import { Database } from '../../src/core/database.ts';
 import { config } from '../../src/config.ts';
@@ -129,7 +129,7 @@ async function withIngestConfig(fn: () => Promise<void>): Promise<void> {
 }
 
 function displacementLog(messageId: string): Record<string, unknown> | undefined {
-  return doubles.log.warn.mock.calls
+  return mockLog.warn.mock.calls
     .map(([context]) => context as Record<string, unknown>)
     .find((context) => context['droppedMessageId'] === messageId);
 }
@@ -278,7 +278,7 @@ describe('typed ingest admission contract', () => {
         senderJid: BOT_JID,
       }));
       await vi.waitFor(() => expect(matchEcho).toHaveBeenCalledTimes(3));
-      await vi.waitFor(() => expect(doubles.log.debug).toHaveBeenCalledWith(
+      await vi.waitFor(() => expect(mockLog.debug).toHaveBeenCalledWith(
         { messageId: 'echo-new', reason: 'duplicate' },
         'skipping duplicate message delivery',
       ));

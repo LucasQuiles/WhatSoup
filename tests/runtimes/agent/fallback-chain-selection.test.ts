@@ -461,6 +461,10 @@ describe('fallback chain selection — restore path', () => {
       activatedAt: now - 1000,
       reason: 'usage-limit',
       probeAttempts: 0,
+      version: 0,
+      activeEntryProvider: null,
+      activeEntryModel: null,
+      failedKeys: [],
     });
     vi.spyOn(fallbackStateDb, 'saveFallbackState').mockImplementation(() => {});
     const clearSpy = vi
@@ -504,6 +508,10 @@ describe('fallback chain selection — restore path', () => {
       activatedAt: now - 1000,
       reason: 'usage-limit',
       probeAttempts: 0,
+      version: 0,
+      activeEntryProvider: null,
+      activeEntryModel: null,
+      failedKeys: [],
     });
     const saveSpy = vi
       .spyOn(fallbackStateDb, 'saveFallbackState')
@@ -532,6 +540,10 @@ describe('fallback chain selection — restore path', () => {
       activatedAt: now - 1000,
       reason: 'auth-required',
       probeAttempts: 0,
+      version: 0,
+      activeEntryProvider: null,
+      activeEntryModel: null,
+      failedKeys: [],
     });
     const saveSpy = vi
       .spyOn(fallbackStateDb, 'saveFallbackState')

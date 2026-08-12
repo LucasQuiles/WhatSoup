@@ -1,15 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const mockLifecycleLog = vi.hoisted(() => ({
-  info: vi.fn(),
-  warn: vi.fn(),
-  error: vi.fn(),
-  debug: vi.fn(),
-}));
+const { mockLifecycleLog } = vi.hoisted(() => ({ mockLifecycleLog: {} as Record<string, ReturnType<typeof vi.fn>> }));
 
-vi.mock('../../src/logger.ts', () => ({
-  createChildLogger: () => mockLifecycleLog,
-}));
+vi.mock('../../src/logger.ts', async () => {
+  const { hoistedLoggerMock } = await import('../helpers/logger-mock.ts');
+  const { createChildLogger } = hoistedLoggerMock(mockLifecycleLog);
+  return { createChildLogger };
+});
 
 import { Database } from '../../src/core/database.ts';
 import type { ConsolidationPinecone } from '../../src/memory/consolidation-cron.ts';

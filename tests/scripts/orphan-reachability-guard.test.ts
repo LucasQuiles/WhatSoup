@@ -128,7 +128,9 @@ const TRACKED_UNREACHABLE: readonly TrackedEntry[] = [
   // (surfaced by this guard). Dead-until-wired island.
   { path: 'src/runtimes/agent/command-surface-config.ts', issue: '#1871', reason: 'command-surface config module; no production importer (imports command-registry + command-surface-prefs-db); unwired island — surfaced by this guard' },
   { path: 'src/runtimes/agent/command-surface-prefs-db.ts', issue: '#1871', reason: 'command-surface prefs store; imported only (type-only) by the also-unreachable command-surface-config; no runtime path — surfaced by this guard' },
-  { path: 'src/lib/recovery-authority-store.ts', issue: '#3057', reason: 'recovery-authority-store is fully implemented with discriminating tests but has no production call site yet; intended consumer is heal-lifecycle dispatcher recovery scan (bot-errors-dispatcher.py) — wiring tracked at #3057' },
+  // #3057 RESOLVED: recovery-authority-store is now wired into health-poller
+  // emit/clear/startup-scan — entry removed; the guard graduation test at :359
+  // confirms the module is reachable from the production import graph.
   // Signal + iMessage transport foundation (PR #1975): adapter contracts + types +
   // port interfaces land first; factory.ts has stub case arms that throw until the
   // Signal adapter, port, and types are reachable through the live factory

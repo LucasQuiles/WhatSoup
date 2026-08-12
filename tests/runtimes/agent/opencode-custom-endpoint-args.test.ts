@@ -17,14 +17,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 
-vi.mock('../../../src/logger.ts', () => ({
-  createChildLogger: () => ({
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  }),
-}));
+vi.mock('../../../src/logger.ts', async () => {
+  const { loggerMock } = await import('../../helpers/logger-mock.ts');
+  return loggerMock();
+});
 
 vi.mock('node:os', () => ({
   homedir: vi.fn(() => '/mock/home'),

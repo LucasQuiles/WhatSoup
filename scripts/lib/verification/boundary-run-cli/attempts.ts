@@ -639,6 +639,7 @@ function evaluateInternalCheck(
           encoding: 'utf8',
           env: reconstructedChildEnvironment(cwd),
           maxBuffer: 64 * 1024 * 1024,
+          timeout: 30_000,
           stdio: ['ignore', 'pipe', 'pipe'],
         });
         const inventoryMatches: Array<Record<string, unknown>> = [];
@@ -824,6 +825,7 @@ function evaluateInternalCheck(
               cwd,
               env: reconstructedChildEnvironment(cwd),
               maxBuffer: 64 * 1024 * 1024,
+              timeout: 30_000,
               stdio: ['ignore', 'pipe', 'pipe'],
             });
           } catch (error) {

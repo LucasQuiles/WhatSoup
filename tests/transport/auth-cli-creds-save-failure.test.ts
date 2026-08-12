@@ -66,7 +66,7 @@ async function flushPromises(): Promise<void> {
 
 /** Every `console.error` argument list, flattened to one string per call. */
 function errorLines(): string[] {
-  return vi.mocked(console.error).mock.calls.map((call) => call.map(String).join(' '));
+  return vi.mocked(process.stderr.write).mock.calls.map((call) => call.map(String).join(' '));
 }
 
 describe('#2165 auth CLI credential-save failure', () => {

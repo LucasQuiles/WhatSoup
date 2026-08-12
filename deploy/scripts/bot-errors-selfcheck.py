@@ -25,6 +25,7 @@ from urllib.request import Request, urlopen
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 import sentinel_pin as sp  # noqa: E402
+from state_root import selfcheck_state_dir  # noqa: E402
 from durable_json import (  # noqa: E402
     durable_json_target,
     observe_json,
@@ -33,6 +34,7 @@ from durable_json import (  # noqa: E402
     require_advance,
     require_all_advance,
 )
+from state_files import SELFCHECK_STATE  # noqa: E402
 
 
 SAFE_HEAL_CLASSES = {"drift", "manifest_missing"}
@@ -110,13 +112,9 @@ def now_iso(epoch: Optional[float] = None) -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() if epoch is None else epoch))
 
 
-def default_state_dir() -> Path:
-    return Path(os.environ.get("BOT_ERRORS_STATE_DIR", Path.home() / ".local/state/bot-errors")) / "sentinel"
-
-
 def default_config(root: Path, state_dir: Optional[Path] = None) -> SelfcheckConfig:
     scripts = root / "deploy" / "scripts"
-    sentinel_state = state_dir or default_state_dir()
+    sentinel_state = state_dir or selfcheck_state_dir()
     central_ack = os.environ.get("BOT_ERRORS_SELFCHECK_CENTRAL_ACK")
     central_down_alert = os.environ.get("BOT_ERRORS_SELFCHECK_CENTRAL_DOWN_ALERT")
     return SelfcheckConfig(
@@ -130,7 +128,7 @@ def default_config(root: Path, state_dir: Optional[Path] = None) -> SelfcheckCon
         disabled_path=sentinel_state / "DISABLED",
         lock_path=sentinel_state / "selfcheck.lock",
         status_path=sentinel_state / "status.json",
-        memory_path=sentinel_state / "selfcheck-state.json",
+        memory_path=sentinel_state / SELFCHECK_STATE,
         heartbeat_path=Path(os.environ.get("BOT_ERRORS_SELFCHECK_HEARTBEAT", sentinel_state / "heartbeat.json")).expanduser(),
         central_ack_path=Path(central_ack).expanduser() if central_ack else None,
         central_down_alert_path=Path(central_down_alert or sentinel_state / "actions" / "central-down-alert.json").expanduser(),

@@ -26,9 +26,14 @@ vi.mock('../../../../src/config.ts', () => ({
 const { mockLog } = vi.hoisted(() => ({
   mockLog: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }));
-vi.mock('../../../../src/logger.ts', () => ({
-  createChildLogger: () => mockLog,
-}));
+vi.mock('../../../../src/logger.ts', async () => {
+  const { singletonLoggerMock } = await import('../../../helpers/logger-mock.ts');
+  const singleton = singletonLoggerMock();
+  Object.assign(mockLog, singleton);
+  return {
+    createChildLogger: () => mockLog,
+  };
+});
 
 import OpenAI from 'openai';
 import { createOpenAIProvider } from '../../../../src/runtimes/chat/providers/openai.ts';

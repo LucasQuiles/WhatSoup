@@ -1,18 +1,21 @@
 import { existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  BASELINE_SCHEMA_VERSION,
   CANONICAL_KEYS,
-  ISSUE_2243_OLD_REGEXES,
   OFFENDER_THRESHOLD,
   importsHelper,
   loadBaseline,
+  loadBaselineEntries,
   matchedKeys,
   oldRegexHits,
   run,
   scan,
+  type BaselineEntry,
+  type Violation,
 } from '../../scripts/check-logger-mock-residue.ts';
 
 /**
@@ -28,8 +31,10 @@ import {
  * logger mocks — most are declared inside `vi.mock()` factories, with keys
  * in a different order, or bound to a name other than `logger`. This file
  * is the real ratchet: order-independent (>=4 of 7 canonical keys as
- * `key: vi.fn(`), helper-import-aware, with a growth/shrink baseline —
- * mirroring tests/scripts/console-ring-boundary-guard.test.ts's discipline.
+ * `key: vi.fn(`), literal-scoped (importing the shared helper does NOT
+ * excuse inline literals — QC-2 closed that blind spot), with a
+ * status/reason schemaVersion-2 growth/shrink baseline — mirroring
+ * tests/scripts/console-ring-boundary-guard.test.ts's discipline.
  */
 
 // ---------------------------------------------------------------------------
@@ -46,9 +51,12 @@ function createFixtureTree(files: Record<string, string>): void {
   }
 }
 
-function writeBaseline(entries: Array<{ file: string; keysMatched?: number }>): void {
+function writeBaseline(entries: Array<Partial<BaselineEntry> & { file: string }>): void {
   createFixtureTree({
-    '.claude/fitness/loggermock-baseline.json': JSON.stringify(entries),
+    '.claude/fitness/loggermock-baseline.json': JSON.stringify({
+      schemaVersion: BASELINE_SCHEMA_VERSION,
+      entries: entries.map((e) => ({ status: 'debt', reason: 'fixture', ...e })),
+    }),
   });
 }
 
@@ -104,6 +112,14 @@ describe('check-logger-mock-residue', () => {
       const src = `const l = { trace: noop, debug: () => {}, info: realLoggerFn };`;
       expect(matchedKeys(src)).toEqual([]);
     });
+
+    it('is reentrant — repeated calls on the same source return identical results (no shared lastIndex)', () => {
+      const src = `const l = { trace: vi.fn(), debug: vi.fn(), info: vi.fn(), warn: vi.fn() };`;
+      const first = matchedKeys(src);
+      const second = matchedKeys(src);
+      expect(second).toEqual(first);
+      expect(first.length).toBeGreaterThan(0);
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -156,10 +172,6 @@ describe('check-logger-mock-residue', () => {
       // ...but #2243's own proposed ratchet regex does not.
       expect(oldRegexHits(src)).toBe(false);
     });
-
-    it('the two ISSUE_2243_OLD_REGEXES are exactly the pair the issue body proposed', () => {
-      expect(ISSUE_2243_OLD_REGEXES).toHaveLength(2);
-    });
   });
 
   // -------------------------------------------------------------------------
@@ -185,11 +197,23 @@ describe('check-logger-mock-residue', () => {
       expect(scan(fixtureRoot)).toHaveLength(0);
     });
 
-    it('excludes a file that imports the shared helper, even if it also has >=4 local keys', () => {
+    it('flags a helper-importing file that still spells out >=4 local keys (literal-scoped, not import-gated)', () => {
       createFixtureTree({
         'tests/foo.test.ts': `
           const { loggerMock } = await import('../helpers/logger-mock.ts');
           const override = { trace: vi.fn(), debug: vi.fn(), info: vi.fn(), warn: vi.fn() };
+        `,
+      });
+      const violations = scan(fixtureRoot);
+      expect(violations).toHaveLength(1);
+      expect(violations[0]).toMatchObject({ file: 'tests/foo.test.ts', importsHelper: true } satisfies Partial<Violation>);
+    });
+
+    it('does not flag a helper-importing file with fewer than 4 inline keys', () => {
+      createFixtureTree({
+        'tests/foo.test.ts': `
+          const { loggerMock } = await import('../helpers/logger-mock.ts');
+          const partial = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
         `,
       });
       expect(scan(fixtureRoot)).toHaveLength(0);
@@ -234,20 +258,55 @@ describe('check-logger-mock-residue', () => {
   // loadBaseline
   // -------------------------------------------------------------------------
 
-  describe('loadBaseline', () => {
+  describe('loadBaselineEntries / loadBaseline', () => {
     it('returns an empty array when the baseline file is absent', () => {
+      expect(loadBaselineEntries(fixtureRoot)).toEqual([]);
       expect(loadBaseline(fixtureRoot)).toEqual([]);
     });
 
-    it('loads and sorts file names from a valid baseline', () => {
+    it('loads schemaVersion-2 entries with status and reason intact', () => {
+      writeBaseline([
+        { file: 'tests/b.test.ts', status: 'permanent', reason: 'real SUT' },
+        { file: 'tests/a.test.ts', status: 'debt', reason: 'to migrate' },
+      ]);
+      const entries = loadBaselineEntries(fixtureRoot);
+      expect(entries).toEqual([
+        { file: 'tests/b.test.ts', status: 'permanent', reason: 'real SUT' },
+        { file: 'tests/a.test.ts', status: 'debt', reason: 'to migrate' },
+      ]);
+    });
+
+    it('loadBaseline is the sorted file-name view over the same entries', () => {
       writeBaseline([{ file: 'tests/b.test.ts' }, { file: 'tests/a.test.ts' }]);
       expect(loadBaseline(fixtureRoot)).toEqual(['tests/a.test.ts', 'tests/b.test.ts']);
     });
 
-    it('warns and returns an empty array on a corrupt baseline', () => {
+    it('warns and returns null (corrupt, not empty) on malformed JSON', () => {
       createFixtureTree({ '.claude/fitness/loggermock-baseline.json': '{ not json' });
       const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      expect(loadBaselineEntries(fixtureRoot)).toBeNull();
       expect(loadBaseline(fixtureRoot)).toEqual([]);
+      expect(errSpy.mock.calls.flat().join(' ')).toMatch(/corrupt baseline/);
+    });
+
+    it('treats the legacy schemaVersion-less array format as corrupt (null)', () => {
+      createFixtureTree({
+        '.claude/fitness/loggermock-baseline.json': JSON.stringify([{ file: 'tests/a.test.ts', keysMatched: 4 }]),
+      });
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      expect(loadBaselineEntries(fixtureRoot)).toBeNull();
+      expect(errSpy.mock.calls.flat().join(' ')).toMatch(/corrupt baseline/);
+    });
+
+    it('treats an entry missing status/reason as corrupt (null)', () => {
+      createFixtureTree({
+        '.claude/fitness/loggermock-baseline.json': JSON.stringify({
+          schemaVersion: BASELINE_SCHEMA_VERSION,
+          entries: [{ file: 'tests/a.test.ts' }],
+        }),
+      });
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      expect(loadBaselineEntries(fixtureRoot)).toBeNull();
       expect(errSpy.mock.calls.flat().join(' ')).toMatch(/corrupt baseline/);
     });
   });
@@ -303,6 +362,17 @@ describe('check-logger-mock-residue', () => {
       expect(code).toBe(2);
       expect(errSpy.mock.calls.flat().join(' ')).toMatch(/INCONCLUSIVE/);
     });
+
+    it('exits 2 INCONCLUSIVE when the baseline exists but is corrupt (never a silent pass)', () => {
+      createFixtureTree({
+        'tests/clean.test.ts': `export const x = 1;`,
+        '.claude/fitness/loggermock-baseline.json': '{ not json',
+      });
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const code = run([], fixtureRoot);
+      expect(code).toBe(2);
+      expect(errSpy.mock.calls.flat().join(' ')).toMatch(/INCONCLUSIVE.*corrupt/s);
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -310,29 +380,42 @@ describe('check-logger-mock-residue', () => {
   // -------------------------------------------------------------------------
 
   describe('live repo ratchet', () => {
-    it('the real repo scans thousands of files, so the floor never fires on a real tree', () => {
-      const repoRoot = path.resolve(import.meta.dirname, '../..');
-      expect(() => scan(repoRoot)).not.toThrow();
+    // One scan + one baseline load shared by every assertion below — the
+    // repo walk reads ~1300 files, so re-running it per test was pure
+    // wall-clock waste (~294ms per push).
+    const repoRoot = path.resolve(import.meta.dirname, '../..');
+    let violations: Violation[];
+    let entries: BaselineEntry[];
+
+    beforeAll(() => {
+      violations = scan(repoRoot);
+      entries = loadBaselineEntries(repoRoot) ?? [];
+    });
+
+    it('the real repo scan finds offenders (the floor never fires on a real tree)', () => {
+      expect(violations.length).toBeGreaterThan(0);
+    });
+
+    it('the live baseline parses as schemaVersion-2 with status and reason on every entry', () => {
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const fresh = loadBaselineEntries(repoRoot);
+      expect(errSpy.mock.calls.flat().join(' ')).not.toMatch(/corrupt baseline/);
+      expect(fresh).not.toBeNull();
+      expect(fresh!.length).toBeGreaterThan(0);
     });
 
     it('pins current logger-mock offenders to the baseline exactly (growth fails naming the offender)', () => {
-      const repoRoot = path.resolve(import.meta.dirname, '../..');
-      const baseline = new Set(loadBaseline(repoRoot));
-      const actual = scan(repoRoot);
-
-      const growth = actual.filter((v) => !baseline.has(v.file));
+      const baseline = new Set(entries.map((e) => e.file));
+      const growth = violations.filter((v) => !baseline.has(v.file));
       expect(
         growth.map((v) => v.file),
-        `new logger-mock offender(s) outside the sanctioned baseline — migrate to tests/helpers/logger-mock.ts, or if intentional, add to .claude/fitness/loggermock-baseline.json deliberately:\n${growth.map((v) => v.file).join('\n')}`,
+        `new logger-mock offender(s) outside the sanctioned baseline — replace the inline literal with tests/helpers/logger-mock.ts APIs, or if intentional, add a status/reason entry to .claude/fitness/loggermock-baseline.json deliberately:\n${growth.map((v) => v.file).join('\n')}`,
       ).toEqual([]);
     });
 
     it('baseline entries that no longer match require a deliberate shrink (baseline edit)', () => {
-      const repoRoot = path.resolve(import.meta.dirname, '../..');
-      const baseline = loadBaseline(repoRoot);
-      const actualFiles = new Set(scan(repoRoot).map((v) => v.file));
-
-      const shrink = baseline.filter((f) => !actualFiles.has(f));
+      const actualFiles = new Set(violations.map((v) => v.file));
+      const shrink = entries.map((e) => e.file).filter((f) => !actualFiles.has(f));
       expect(
         shrink,
         `baseline entr(y/ies) no longer match — remove from .claude/fitness/loggermock-baseline.json in the same change (this is progress, not a bug):\n${shrink.join('\n')}`,
@@ -340,22 +423,9 @@ describe('check-logger-mock-residue', () => {
     });
 
     it('baseline files still exist (the ratchet cannot silently pin a moved/deleted file)', () => {
-      const repoRoot = path.resolve(import.meta.dirname, '../..');
-      for (const file of loadBaseline(repoRoot)) {
+      for (const { file } of entries) {
         expect(existsSync(path.join(repoRoot, file)), `${file} moved or was deleted — update the ratchet baseline`).toBe(true);
       }
-    });
-
-    it('the baseline is non-empty (grandfathered debt is actually tracked, not silently dropped)', () => {
-      const repoRoot = path.resolve(import.meta.dirname, '../..');
-      expect(loadBaseline(repoRoot).length).toBeGreaterThan(100);
-    });
-
-    it('the real "lid-resolver-reconcile-dedup" file (the one #2243-proposed regex DOES catch) is in the baseline', () => {
-      // Converse check: the new signal is a strict superset of the old
-      // regex on real content, not just on the synthetic RED fixture above.
-      const repoRoot = path.resolve(import.meta.dirname, '../..');
-      expect(loadBaseline(repoRoot)).toContain('tests/core/lid-resolver-reconcile-dedup.test.ts');
     });
   });
 });

@@ -270,6 +270,10 @@ interface HealthTurnCapability {
   last_successful_turn_session_current: boolean | null;
   last_turn_error_class: string | null;
   last_turn_error_at: number | null;
+  /** #3017 AXIS A: true when the periodic primary-readiness probe is active.
+   *  When true, stale model-usability evidence on an idle bot is NOT benign —
+   *  the periodic probe should have refreshed it. */
+  periodic_probe_expected: boolean | null;
 }
 
 const HEALTH_MODEL_USABILITY_STATUSES = new Set([
@@ -407,6 +411,7 @@ function normalizeAgentTurnCapability(details: Record<string, unknown> | null): 
     last_successful_turn_session_current: normalizeBooleanOrNull(raw.lastSuccessfulTurnSessionCurrent),
     last_turn_error_class: normalizeEnumStringOrNull(raw.lastTurnErrorClass, HEALTH_TURN_ERROR_CLASSES),
     last_turn_error_at: normalizeNumberOrNull(raw.lastTurnErrorAt),
+    periodic_probe_expected: normalizeBooleanOrNull(raw.periodicProbeExpected),
   };
 }
 
@@ -562,6 +567,14 @@ const HEALTH_PUBLIC_SCHEMA_VERSION = 'health.public.v1';
 // alone (owner decision 2026-07-17). A bot that has never turned is treated as
 // idle: its stale evidence is benign here (the usability probe still catches a
 // hard failure via model_usable===false independently).
+//
+// #3017 AXIS A: the above idle-benign rule only holds when nothing is EXPECTED
+// to refresh the evidence. With a periodic primary-readiness probe active
+// (periodic_probe_expected === true), stale evidence on an idle bot means the
+// probe failed to fire — the OAuth may have expired between probe cycles — so
+// the evidence is NOT benign. The function degrades in that case regardless of
+// turn activity. An idle primary with expired OAuth must go non-green without a
+// user turn.
 export const MODEL_STALE_RELIANCE_MS = 30 * MS_PER_MINUTE; // 30 minutes
 
 export function modelEvidenceStaleWhileRelied(
@@ -569,12 +582,17 @@ export function modelEvidenceStaleWhileRelied(
     model_usable_stale: boolean | null;
     last_successful_turn_at: number | null;
     last_turn_error_at: number | null;
+    periodic_probe_expected?: boolean | null;
   } | null,
   now: number,
 ): boolean {
   if (tc === null || tc.model_usable_stale !== true) return false;
+  // #3017 AXIS A: with a periodic probe active, stale evidence is never benign
+  // — the probe should have refreshed it. An idle primary with expired OAuth
+  // must go non-green without a user turn.
+  if (tc.periodic_probe_expected === true) return true;
   const lastTurnActivityAt = Math.max(tc.last_successful_turn_at ?? 0, tc.last_turn_error_at ?? 0);
-  if (lastTurnActivityAt <= 0) return false; // never turned → idle → benign
+  if (lastTurnActivityAt <= 0) return false; // never turned → idle → benign (no periodic probe)
   return now - lastTurnActivityAt <= MODEL_STALE_RELIANCE_MS;
 }
 

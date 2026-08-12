@@ -244,6 +244,40 @@ and end with an alphanumeric character. Exit code 2 on violation.
 | `bot-errors-q-loop.py` | The hub's agent loop driver. |
 | `retire-outbound-quarantine.py` | Fail-closed operator tool for one reviewed outbound quarantine. Its default inspection returns only bounded metadata plus an opaque evidence digest. An apply requires that exact digest, matching `--expected-disposition`, fixed acknowledgement, and `--confirm-op-id`; it creates an owner-only backup, changes `status`/`is_terminal`, preserves versioned evidence byte-for-byte, and records a bounded audit receipt in `outbound_quarantine_retirements`. It never replays an operation or emits a BOT ERRORS clear; runtime recovery remains the contributor-aware clear authority. |
 
+### Collector remote SSH user-mapping (login user MUST be the bot/outbox owner)
+
+`bot-errors-collector.py` reaches each `--remote <host>` by running its capture
+step **over `ssh <host>`** (the hub's `~/.ssh/config` resolves the login user).
+The remote capture reads that host's outbox under the **logged-in user's**
+`$HOME/.local/state/bot-errors/` and writes claim/write-marker state there, so it
+assumes **the ssh login user == the user that runs the bot and owns the outbox.**
+Every host must satisfy this: the hub's ssh alias for a host must log in as the
+operator account that runs the instance, so the alias always lands in the home
+directory where that instance's outbox actually lives.
+
+**Failure mode this prevents.** If the hub's ssh alias for a host logs in as some
+account *other* than the bot operator (for example a generic per-host login while
+the bot itself runs under a named operator account), the collector reads the
+empty outbox in the **login** user's `$HOME/.local/state/bot-errors/` and never
+sees the operator's real outbox. Alerts — including credential-expiry
+`auth-required` events — then accumulate **undelivered** while every
+`collectorRemote` sweep reports success against the wrong, empty outbox: a silent
+hole with no `relay_host_down`, because the pull itself "succeeded". This exact
+mismatch was observed in production and went undetected for weeks. Fix: point the
+host's ssh alias at the operator account (`User <operator>`) so login user == bot
+user. **Provisioning check for any new bot host:** confirm `ssh <alias>` from the
+hub lands as the operator user and that `ls ~/.local/state/bot-errors/outbox`
+shows that user's live queue.
+
+**`BOT_ERRORS_RELAY_EXEC_<HOST>` is a remote user-switch *prefix*, not an ssh
+replacement.** `remote_python_command` builds `ssh … <host> <RELAY_EXEC_prefix>
+python3 - …` (env key = host name uppercased, non-alphanumerics → `_`), so the
+value runs **after** ssh lands, as a command prefix. Switching effective user
+after login (e.g. `sudo -u <operator>`) does **not** fix a user mismatch:
+write/claim paths are still computed for the *login* user, so the capture fails
+with `PermissionError` on the login user's state dir. Fix the alias's `User`
+instead.
+
 ### Queue-event envelope v2 compatibility
 
 New queue writers emit `schemaVersion: 2` with one disjoint variant: an

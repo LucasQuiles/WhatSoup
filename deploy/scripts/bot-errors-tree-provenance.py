@@ -73,6 +73,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from lib.bot_errors_envelope import new_event_fields
+from lib.state_root import DEFAULT_STATE_ROOT
 from lib.durable_json import (
     JsonVersion,
     durable_json_target,
@@ -497,7 +498,7 @@ def _state_root() -> Path:
     explicit = os.environ.get("BOT_ERRORS_STATE_DIR", "").strip()
     if explicit:
         return Path(explicit)
-    return Path.home() / ".local/state/bot-errors"
+    return DEFAULT_STATE_ROOT
 
 
 def _resolve_outbox_dir() -> Path:

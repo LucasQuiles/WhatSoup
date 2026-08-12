@@ -4,7 +4,36 @@ export type PrimaryModelUsabilityStatus =
   | 'credential-unavailable'
   | 'provider-unavailable'
   | 'timeout'
-  | 'unknown';
+  | 'unknown'
+  // #3017 AXIS C: probe fail-closed outcomes. 'probe-blocked' = the probe
+  // target context (config root, credential-store class, binary digest,
+  // provider, or model) differs from the serving context receipt — the probe
+  // cannot prove anything about the serving environment, so it blocks rather
+  // than producing a misleading green. 'probe-error' = the probe itself threw
+  // or failed in a way that is not a timeout.
+  | 'probe-blocked'
+  | 'probe-error';
+
+// #3017 AXIS C: content-free serving-context receipt. The probe is bound to
+// the serving admission/environment: if the config root, credential-store
+// class, binary digest, provider, or model differs from what the runtime
+// is actually serving, the probe fail-closes with 'probe-blocked' rather
+// than producing evidence about a DIFFERENT environment that could read green
+// for a primary whose real serving context is broken. All fields are
+// content-free hashes or identifiers — never credential material, paths
+// that expose user data, or account identity.
+export interface ServingContextReceipt {
+  /** Short hash of the sandboxed config root (CLAUDE_CONFIG_DIR or equivalent). */
+  configRootHash: string | null;
+  /** Credential-store class identifier (e.g. 'keychain', 'file-store', 'api-key'). */
+  credentialStoreClass: string | null;
+  /** Short hash of the provider binary path + version, when applicable. */
+  binaryDigest: string | null;
+  /** The provider the runtime is serving turns with. */
+  provider: string;
+  /** The model the runtime is serving turns with (null = provider default). */
+  model: string | null;
+}
 
 export interface PrimaryModelProbeTarget {
   provider: string;

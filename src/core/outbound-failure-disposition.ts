@@ -6,6 +6,7 @@ import {
   type ErrorCode as TransportErrorCode,
   type OperationPhase,
 } from './transport-error-taxonomy.ts';
+import { systemClock } from '../lib/clock.ts';
 
 export const OUTBOUND_FAILURE_EVIDENCE_SCHEMA =
   'whatsoup-outbound-failure-v1' as const;
@@ -527,7 +528,7 @@ export function classifyOutboundFailure(
   if (!Number.isSafeInteger(options.attemptsRemaining) || options.attemptsRemaining < 0) {
     throw new RangeError('Outbound attempts remaining must be a non-negative safe integer');
   }
-  const nowMs = options.nowMs ?? Date.now();
+  const nowMs = options.nowMs ?? systemClock.now();
   const now = monotonicEvidenceTimestamp(nowMs, options.previousEvidence);
   const payload = readTransportPayload(error);
   const code: OutboundFailureCode = payload?.code as TransportErrorCode
@@ -591,7 +592,7 @@ export function createInternalOutboundFailureEvidence(
   options: CreateInternalOutboundFailureEvidenceOptions,
 ): OutboundFailureEvidenceV1 {
   const previous = options.previousEvidence;
-  const now = monotonicEvidenceTimestamp(options.nowMs ?? Date.now(), previous);
+  const now = monotonicEvidenceTimestamp(options.nowMs ?? systemClock.now(), previous);
   const retryDecision = options.retryDecision ?? 'stop';
   return assertValidEvidence({
     schema: OUTBOUND_FAILURE_EVIDENCE_SCHEMA,
@@ -693,7 +694,7 @@ export function outboundFailureWarrantsUserNotice(
 export function transferOutboundRetryOwnership(
   evidence: OutboundFailureEvidenceV1,
   retryOwner: Exclude<OutboundRetryOwner, 'none'>,
-  nowMs = Date.now(),
+  nowMs = systemClock.now(),
 ): OutboundFailureEvidenceV1 {
   return assertValidEvidence({
     ...evidence,

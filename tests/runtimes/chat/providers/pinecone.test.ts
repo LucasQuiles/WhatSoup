@@ -50,9 +50,14 @@ vi.mock('../../../../src/config.ts', () => ({
   },
 }));
 
-vi.mock('../../../../src/logger.ts', () => ({
-  createChildLogger: () => mockPineconeLogger,
-}));
+vi.mock('../../../../src/logger.ts', async () => {
+  const { singletonLoggerMock } = await import('../../../helpers/logger-mock.ts');
+  const singleton = singletonLoggerMock();
+  Object.assign(mockPineconeLogger, singleton);
+  return {
+    createChildLogger: () => mockPineconeLogger,
+  };
+});
 
 import { Pinecone } from '@pinecone-database/pinecone';
 import { PineconeMemory, MemoryRecord, decayScore, applyDecay, getPineconeReadiness } from '../../../../src/runtimes/chat/providers/pinecone.ts';

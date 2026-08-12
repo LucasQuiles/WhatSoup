@@ -173,6 +173,10 @@ describe('fallback reason provenance', () => {
       activatedAt: now - 1000,
       reason: 'admin-forced',
       probeAttempts: 0,
+      version: 0,
+      activeEntryProvider: null,
+      activeEntryModel: null,
+      failedKeys: [],
     });
     vi.spyOn(fallbackStateDb, 'ensureFallbackStateSchema').mockImplementation(() => {});
     const saveSpy = vi

@@ -39,11 +39,15 @@ const lockPath = (config as any).lockPath ?? join(tmpdir(), 'whatsoup-auth.lock'
 
 if (existsSync(lockPath)) {
   log.fatal({ lockPath }, 'bot is currently running; refusing auth attempt');
-  console.error(
+  // Human-readable pairing-CLI channel — writes to stderr (byte-identical to the
+  // prior console.error). The structured pipeline is served in parallel by the
+  // adjacent log.* twins (added by the #2930 console-ratchet tranche); stdout
+  // stays reserved for fleet JSON ({event:'qr'}/{event:'connected'}).
+  process.stderr.write(
     `Bot is currently running. Stop it first:\n` +
     `  Linux: systemctl --user stop whatsoup\n` +
     `  macOS: use the Fleet auth flow or see docs/runbooks/macos-launchd-deployment.md#restart-procedures\n` +
-    `         (do not use legacy launchctl stop for a KeepAlive job)`,
+    `         (do not use legacy launchctl stop for a KeepAlive job)\n`,
   );
   process.exit(1);
 }
@@ -58,7 +62,7 @@ const RESTART_REQUIRED_FLAP_RECONNECT_DELAY_MS = 1_000;
 
 const timeoutHandle = setTimeout(() => {
   log.error('auth timed out after 120s with no successful authentication');
-  console.error('Timed out after 120 seconds — no successful authentication.');
+  process.stderr.write('Timed out after 120 seconds — no successful authentication.\n');
   process.exit(1);
 }, TIMEOUT_MS);
 
@@ -83,7 +87,7 @@ async function startSocket(): Promise<void> {
   const saveCreds = createAtomicCredsSaver(config.authDir, () => state.creds);
   const resolvedVersion = await resolveBaileysVersion();
   log.info({ version: resolvedVersion.version, source: resolvedVersion.source }, 'using baileys web version');
-  console.error(`Using Baileys web version ${baileysVersionLabel(resolvedVersion.version)} (${resolvedVersion.source})`);
+  process.stderr.write(`Using Baileys web version ${baileysVersionLabel(resolvedVersion.version)} (${resolvedVersion.source})\n`);
 
   // Suppress Baileys internals (handshake material, signal keys, etc.)
   const baileysLogger = { level: 'silent', trace: () => {}, debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, child: () => baileysLogger } as any;
@@ -107,7 +111,7 @@ async function startSocket(): Promise<void> {
   sock.ev.on('creds.update', () => {
     void saveCreds().catch((err) => {
       log.error({ err }, 'credential save failed');
-      console.error('Credential save failed:', redactAuthCliText(errorMessage(err)));
+      process.stderr.write(`Credential save failed: ${redactAuthCliText(errorMessage(err))}\n`);
     });
   });
 
@@ -119,7 +123,7 @@ async function startSocket(): Promise<void> {
       process.stdout.write(JSON.stringify({ event: 'qr', data: qr }) + '\n');
       // Terminal QR for interactive use — redirect to stderr so stdout stays clean
       log.info('qr code ready for scanning');
-      console.error('\nScan the QR code below with WhatsApp > Linked Devices > Link a Device:\n');
+      process.stderr.write('\nScan the QR code below with WhatsApp > Linked Devices > Link a Device:\n');
       qrcodeTerminal.generate(qr, { small: true }, (asciiArt: string) => {
         process.stderr.write(asciiArt + '\n');
       });
@@ -130,9 +134,9 @@ async function startSocket(): Promise<void> {
       const rawId: string | undefined = (sock as any).user?.id;
       const jid = rawId ?? 'unknown';
       log.info({ jid: redactAuthCliText(jid) }, 'authenticated successfully');
-      console.error(`\nAuthenticated successfully as ${redactAuthCliText(jid)}`);
+      process.stderr.write(`\nAuthenticated successfully as ${redactAuthCliText(jid)}\n`);
       log.info('saving credentials');
-      console.error('Saving credentials...');
+      process.stderr.write('Saving credentials...\n');
       // #2165: an unguarded await here had two failure modes, both silent to
       // the operator — the rejection was unhandled (listener bodies are outside
       // main()'s chain), and the success path below never ran, so the CLI
@@ -142,8 +146,8 @@ async function startSocket(): Promise<void> {
         await saveCreds();
       } catch (err) {
         log.fatal({ err }, 'credential save failed; pairing cannot complete');
-        console.error('FATAL: credential save failed:', redactAuthCliText(errorMessage(err)));
-        console.error('Pairing did not complete — the bot cannot start without saved credentials.');
+        process.stderr.write(`FATAL: credential save failed: ${redactAuthCliText(errorMessage(err))}\n`);
+        process.stderr.write('Pairing did not complete — the bot cannot start without saved credentials.\n');
         process.exit(1);
         return;
       }
@@ -158,7 +162,7 @@ async function startSocket(): Promise<void> {
       // 2s to every pair flow for no benefit.
       try { sock.end(undefined); } catch { /* best-effort */ }
       log.info('pairing complete; bot can now be started');
-      console.error('Done. You can now start the bot.');
+      process.stderr.write('Done. You can now start the bot.\n');
       process.exit(0);
     }
 
@@ -170,15 +174,15 @@ async function startSocket(): Promise<void> {
       if (action.type === 'exit') {
         clearTimeout(timeoutHandle);
         log.warn('logged out; auth directory must be deleted before re-running');
-        console.error('Logged out — delete the auth directory and re-run this script.');
+        process.stderr.write('Logged out — delete the auth directory and re-run this script.\n');
         process.exit(1);
         return;
       }
 
       if (action.type === 'reconnect' && action.reason === 'restart-required-flapping') {
         log.warn({ count: action.count }, 'restartRequired flapping detected; backing off before reconnecting');
-        console.error(
-          `restartRequired flapping detected (${action.count} in <60s) — backing off before reconnecting...`,
+        process.stderr.write(
+          `restartRequired flapping detected (${action.count} in <60s) — backing off before reconnecting...\n`,
         );
         restartRequiredTimestamps = [];
         try { sock.end(undefined); } catch { /* best-effort */ }
@@ -190,14 +194,14 @@ async function startSocket(): Promise<void> {
 
       if (action.type === 'reconnect' && action.reason === 'restart-required') {
         log.info('restart required; reconnecting');
-        console.error('Restart required — reconnecting...');
+        process.stderr.write('Restart required — reconnecting...\n');
         try { sock.end(undefined); } catch { /* best-effort */ }
         await startSocket();
         return;
       }
       const reason = statusCode !== undefined ? (DisconnectReason[statusCode] ?? `unknown(${statusCode})`) : 'unknown';
       log.warn({ reason }, 'connection closed during auth; reconnecting');
-      console.error(`Connection closed during auth: ${reason} — reconnecting...`);
+      process.stderr.write(`Connection closed during auth: ${reason} — reconnecting...\n`);
       try { sock.end(undefined); } catch { /* best-effort */ }
       await startSocket();
     }
@@ -222,13 +226,13 @@ async function startSocket(): Promise<void> {
         process.stdout.write(pairingEmissionLine(code) + '\n');
         // Logs/human: masked only — never the full code, never the phone number.
         log.info({ maskedCode: maskPairingCode(code) }, 'pairing code ready');
-        console.error(
+        process.stderr.write(
           `Pairing code ready (masked ${maskPairingCode(code)}). Enter it on the primary phone: ` +
-          `Linked devices > Link a device > Link with phone number.`,
+          `Linked devices > Link a device > Link with phone number.\n`,
         );
       } catch (err) {
         log.error({ err }, 'requestPairingCode failed');
-        console.error('requestPairingCode failed:', redactAuthCliText(errorMessage(err)));
+        process.stderr.write(`requestPairingCode failed: ${redactAuthCliText(errorMessage(err))}\n`);
         pairingRequested = false;
       }
     }, 2_500);
@@ -239,21 +243,21 @@ async function main(): Promise<void> {
   const pairCls = classifyPairNumber(process.env.WHATSOUP_PAIR_NUMBER);
   if (pairCls.reason === 'invalid') {
     log.fatal('WHATSOUP_PAIR_NUMBER is set but not a valid number (expected 8-15 digits)');
-    console.error('FATAL: WHATSOUP_PAIR_NUMBER is set but not a valid number (expected 8-15 digits).');
+    process.stderr.write('FATAL: WHATSOUP_PAIR_NUMBER is set but not a valid number (expected 8-15 digits).\n');
     process.exit(1);
   }
   log.info(
     { mode: pairCls.ok ? 'pairing-code' : 'QR', authDir: redactAuthCliText(config.authDir) },
     'starting whatsapp authentication',
   );
-  console.error('Starting WhatsApp authentication...');
-  console.error(`Auth mode: ${pairCls.ok ? 'pairing-code' : 'QR'}`);
-  console.error(`Auth directory: ${redactAuthCliText(config.authDir)}`);
+  process.stderr.write('Starting WhatsApp authentication...\n');
+  process.stderr.write(`Auth mode: ${pairCls.ok ? 'pairing-code' : 'QR'}\n`);
+  process.stderr.write(`Auth directory: ${redactAuthCliText(config.authDir)}\n`);
   await startSocket();
 }
 
 main().catch((err) => {
   log.fatal({ err }, 'auth failed');
-  console.error('Auth failed:', redactAuthCliText(errorMessage(err)));
+  process.stderr.write(`Auth failed: ${redactAuthCliText(errorMessage(err))}\n`);
   process.exit(1);
 });

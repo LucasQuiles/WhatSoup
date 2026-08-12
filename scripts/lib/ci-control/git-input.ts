@@ -40,6 +40,7 @@ import type {
 } from "./git-input-core.ts";
 
 export {
+  __setTestGitPath,
   ExactGitInputError,
   MAX_CHANGE_SET_BYTES,
   MAX_CHANGE_FACT_COUNT,

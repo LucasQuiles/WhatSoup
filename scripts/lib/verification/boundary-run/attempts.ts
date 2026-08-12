@@ -381,6 +381,7 @@ export function resolveBoundaryToolCapability(name: string): BoundaryToolCapabil
   const version = execFileSync(executable, ['--version'], {
     encoding: 'utf8',
     env: cleanGitEnv(),
+    timeout: 30_000,
     stdio: ['ignore', 'pipe', 'pipe'],
   }).split(/\r?\n/, 1)[0]!.trim();
   if (name === 'gnu-timeout' && !version.includes('GNU coreutils')) {

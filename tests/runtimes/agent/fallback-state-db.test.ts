@@ -42,6 +42,10 @@ describe('fallback-state-db', () => {
       activatedAt: 1_699_999_000_000,
       reason: 'usage-limit',
       probeAttempts: 7,
+      version: 1,
+      activeEntryProvider: 'opencode-cli',
+      activeEntryModel: 'minimax/minimax-m2',
+      failedKeys: [{ provider: 'claude-cli', model: '' }],
     };
     saveFallbackState(db, state);
     const loaded = getFallbackState(db);
@@ -55,12 +59,20 @@ describe('fallback-state-db', () => {
       activatedAt: 1_699_999_000_000,
       reason: 'usage-limit',
       probeAttempts: 0,
+      version: 1,
+      activeEntryProvider: null,
+      activeEntryModel: null,
+      failedKeys: [],
     });
     const updated = {
       activeUntil: 1_800_000_000_000,
       activatedAt: 1_799_999_000_000,
       reason: 'restored',
       probeAttempts: 3,
+      version: 1,
+      activeEntryProvider: 'opencode-cli',
+      activeEntryModel: null,
+      failedKeys: [],
     };
     saveFallbackState(db, updated);
     const loaded = getFallbackState(db);
@@ -75,6 +87,10 @@ describe('fallback-state-db', () => {
       activatedAt: 1_699_999_000_000,
       reason: 'usage-limit',
       probeAttempts: 0,
+      version: 1,
+      activeEntryProvider: null,
+      activeEntryModel: null,
+      failedKeys: [],
     });
     clearFallbackState(db);
     expect(getFallbackState(db)).toBeNull();
@@ -90,6 +106,10 @@ describe('fallback-state-db', () => {
       activatedAt: 1_699_999_000_000,
       reason: 'usage-limit',
       probeAttempts: 0,
+      version: 1,
+      activeEntryProvider: null,
+      activeEntryModel: null,
+      failedKeys: [],
     });
     const loaded = getFallbackState(db);
     expect(loaded).not.toBeNull();
@@ -154,6 +174,12 @@ describe('fallback-state-db', () => {
         activatedAt: 1_699_999_000_000,
         reason: 'auth-required',
         probeAttempts: 0,
+        // #3019: additive migration — legacy row without the new columns
+        // reads back with legacy defaults (version 0, no identity, no failed keys).
+        version: 0,
+        activeEntryProvider: null,
+        activeEntryModel: null,
+        failedKeys: [],
       });
     } finally {
       legacyDb.close();
@@ -181,6 +207,10 @@ describe('fallback-state-db', () => {
       activatedAt: 1_699_999_000_000,
       reason: 'auth-required',
       probeAttempts: 0,
+      version: 0,
+      activeEntryProvider: null,
+      activeEntryModel: null,
+      failedKeys: [],
     });
   });
 });

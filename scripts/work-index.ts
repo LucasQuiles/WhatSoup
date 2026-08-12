@@ -22,6 +22,13 @@ export type WorkIndexStatusSource =
 
 export type WorkIndexKind = 'bead' | 'state' | 'doc' | 'plan' | 'spec' | 'handoff' | 'review';
 
+// #2547: lifecycle classification dimension. `status: 'completed'` answers
+// whether tracked work landed, NOT whether the document is executable guidance,
+// an immutable historical receipt, or a stale backlog. This derived field
+// classifies each row from content heuristics so operators can distinguish
+// "completed but still executable" from "completed and immutable receipt."
+export type WorkIndexLifecycle = 'executable' | 'receipt' | 'stale-backlog';
+
 export interface WorkIndexRow {
   path: string;
   kind: WorkIndexKind;
@@ -29,6 +36,7 @@ export interface WorkIndexRow {
   topic: string;
   status: WorkIndexStatus;
   status_source: WorkIndexStatusSource;
+  lifecycle: WorkIndexLifecycle;
   canonical_parent: string;
   supersedes_hint: string | null;
   last_modified: string;
@@ -215,8 +223,8 @@ function topicInfo(relativePath: string): { topicRaw: string; topic: string } {
   return { topicRaw: stem, topic: topicFromSuperpowersStem(stem) };
 }
 
-function git(cwd: string, args: string[]): string {
-  return execFileSync('git', args, { cwd, encoding: 'utf8', env: cleanGitEnv(), stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+function git(cwd: string, args: string[], timeout?: number): string {
+  return execFileSync('git', args, { cwd, encoding: 'utf8', env: cleanGitEnv(), timeout: timeout ?? 30_000, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 }
 
 function gitList(cwd: string, args: string[]): string[] {
@@ -379,6 +387,44 @@ function resolveSuperpowersStatus(text: string): { status: WorkIndexStatus; stat
   return { status: 'unknown', statusSource: 'fallback' };
 }
 
+// #2547: classify a document's lifecycle from its content. Heuristics:
+//   - unchecked task boxes (`- [ ]`) AND execution-oriented language (worker/
+//     dispatch instructions, numbered implementation tasks) → `executable`
+//   - no unchecked boxes AND no execution language → `receipt` (immutable
+//     historical record of completed work)
+//   - `completed` status + stale + unowned gap prose (e.g. "TODO", "TBD",
+//     "unowned", "gap") → `stale-backlog`
+// The function is pure (no I/O) so it's unit-testable.
+const UNCHECKED_TASK_RE = /^[ \t]*[-*+] \[ \]/m;
+const EXECUTION_LANGUAGE_RE = /\b(worker|dispatch(?:er)?|implement(?:ation)? step|task \d|car-\d+|producer|build exactly|acceptance criteria)\b/i;
+const STALE_BACKLOG_RE = /\b(TODO|TBD|unowned|gap|stale.backlog|needs.adjudication)\b/i;
+
+export function deriveLifecycle(
+  status: WorkIndexStatus,
+  text: string,
+): WorkIndexLifecycle {
+  const hasUncheckedTasks = UNCHECKED_TASK_RE.test(text);
+  const hasExecutionLanguage = EXECUTION_LANGUAGE_RE.test(text);
+  const hasStaleBacklogMarkers = STALE_BACKLOG_RE.test(text);
+
+  if (status === 'completed' && hasStaleBacklogMarkers && !hasUncheckedTasks && !hasExecutionLanguage) {
+    return 'stale-backlog';
+  }
+  if (hasUncheckedTasks && hasExecutionLanguage) {
+    return 'executable';
+  }
+  if (!hasUncheckedTasks && !hasExecutionLanguage) {
+    return 'receipt';
+  }
+  // Mixed: has one but not both — default to executable if either signal is
+  // present (conservative — a document with unchecked tasks OR execution
+  // language is more likely executable than a pure receipt).
+  if (hasUncheckedTasks || hasExecutionLanguage) {
+    return 'executable';
+  }
+  return 'receipt';
+}
+
 function resolveStatus(
   relativePath: string,
   stateInfoByEpic: Map<string, StateEpicInfo>,
@@ -470,6 +516,7 @@ function parseRows(cwd: string, files: string[]): WorkIndexRow[] {
       topic,
       status,
       status_source: statusSource,
+      lifecycle: deriveLifecycle(status, text),
       canonical_parent: canonicalParentFromPath(relativePath),
       supersedes_hint: parseSupersedesHint(text),
       last_modified: gitLastModified(cwd, relativePath, stat.mtime),

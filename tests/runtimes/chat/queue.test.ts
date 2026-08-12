@@ -1,13 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 
-vi.mock('../../../src/logger.ts', () => ({
-  createChildLogger: () => ({
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  }),
-}));
+vi.mock('../../../src/logger.ts', async () => (await import('../../helpers/logger-mock.ts')).loggerMock());
 
 import { ChatQueue } from '../../../src/runtimes/chat/queue.ts';
 

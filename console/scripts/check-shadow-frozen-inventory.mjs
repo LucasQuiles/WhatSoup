@@ -93,6 +93,7 @@ function readEslintJson(opts) {
       cwd: resolve(opts.root, 'console'),
       encoding: 'utf8',
       maxBuffer: 64 * 1024 * 1024,
+      timeout: 30_000,
     });
   } catch (err) {
     if (err.stdout) return err.stdout;

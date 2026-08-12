@@ -30,12 +30,7 @@ const alertFns = vi.hoisted(() => ({
   })),
   clearAlertSource: vi.fn(() => true),
 }));
-const logger = vi.hoisted(() => ({
-  info: vi.fn(),
-  warn: vi.fn(),
-  error: vi.fn(),
-  debug: vi.fn(),
-}));
+const logger = vi.hoisted(() => ({} as Record<string, ReturnType<typeof vi.fn>>));
 const alertThrottleStore = vi.hoisted(() => ({
   loadAlertThrottle: vi.fn(() => new Map<string, string>()),
   loadAlertThrottleDetailed: vi.fn((): {
@@ -58,12 +53,11 @@ vi.mock('../../src/fleet/alert-throttle-store.ts', () => ({
   ...alertThrottleStore,
 }));
 vi.mock('../../src/fleet/silence-manager.ts', () => silenceManager);
-vi.mock('../../src/logger.ts', () => ({
-  createChildLogger: () => ({
-    ...logger,
-    child: vi.fn().mockReturnThis(),
-  }),
-}));
+vi.mock('../../src/logger.ts', async () => {
+  const { hoistedLoggerMock } = await import('../helpers/logger-mock.ts');
+  const { createChildLogger } = hoistedLoggerMock(logger);
+  return { createChildLogger };
+});
 
 type AlertMockCall = [string, string, ...unknown[]];
 

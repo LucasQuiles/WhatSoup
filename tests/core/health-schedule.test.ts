@@ -18,9 +18,7 @@ vi.mock('../../src/config.ts', () => ({
     models: { conversation: 'claude-opus-4-5', extraction: 'claude-haiku-4-5', validation: 'claude-haiku-4-5', fallback: 'claude-sonnet-4-5' },
   },
 }));
-vi.mock('../../src/logger.ts', () => ({
-  createChildLogger: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }),
-}));
+vi.mock('../../src/logger.ts', async () => (await import('../helpers/logger-mock.ts')).loggerMock());
 
 import { Database } from '../../src/core/database.ts';
 import type { HealthDeps } from '../../src/core/health.ts';

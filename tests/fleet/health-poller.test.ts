@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { hostname } from 'node:os';
 import { HealthPoller, type InstanceHealth } from '../../src/fleet/health-poller.ts';
 import type { AlertEmissionResult } from '../../src/lib/emit-alert.ts';
 
@@ -10,12 +11,7 @@ const alertFns = vi.hoisted(() => ({
   })),
   clearAlertSource: vi.fn(() => true),
 }));
-const logger = vi.hoisted(() => ({
-  info: vi.fn(),
-  warn: vi.fn(),
-  error: vi.fn(),
-  debug: vi.fn(),
-}));
+const { logger } = vi.hoisted(() => ({ logger: {} as Record<string, ReturnType<typeof vi.fn>> }));
 const alertThrottleStore = vi.hoisted(() => ({
   loadAlertThrottle: vi.fn(() => new Map<string, string>()),
   loadAlertThrottleDetailed: vi.fn((): {
@@ -52,12 +48,11 @@ vi.mock('../../src/fleet/alert-throttle-store.ts', () => ({
 vi.mock('../../src/fleet/silence-manager.ts', () => silenceManager);
 
 // Suppress pino output during tests
-vi.mock('../../src/logger.ts', () => ({
-  createChildLogger: () => ({
-    ...logger,
-    child: vi.fn().mockReturnThis(),
-  }),
-}));
+vi.mock('../../src/logger.ts', async () => {
+  const { hoistedLoggerMock } = await import('../helpers/logger-mock.ts');
+  const { createChildLogger } = hoistedLoggerMock(logger);
+  return { createChildLogger };
+});
 
 function makeInstance(overrides: Partial<InstanceHealth> = {}): InstanceHealth {
   return {
@@ -828,7 +823,7 @@ describe('HealthPoller', () => {
 
   it('routes a sole healthy provider fallback as non-paging capacity with diagnostics', async () => {
     alertThrottleStore.loadAlertThrottleDetailed.mockReturnValue({
-      entries: new Map([['remote-1:health_body_degraded', '2026-05-20T11:55:00.000Z']]),
+      entries: new Map([[`${hostname()}:remote-1:health_body_degraded`, '2026-05-20T11:55:00.000Z']]),
       loadError: null,
     });
     mockFetch.mockResolvedValue({
@@ -1326,7 +1321,11 @@ describe('HealthPoller', () => {
     poller.stop();
   });
 
-  it('keeps planned-maintenance outages internal while instance alerts are silenced', async () => {
+  // Contract updated by #3073: silence no longer suppresses critical-severity
+  // sources — a silenced instance still pages when it goes unreachable. The
+  // pre-#3073 behavior this test used to pin (maintenance silence keeps
+  // outages internal) is preserved only for sub-critical severities.
+  it('pages critical unreachable outages even while instance alerts are silenced (#3073)', async () => {
     silenceManager.isInstanceSilenced.mockReturnValue(true);
     mockFetch
       .mockResolvedValueOnce({
@@ -1349,13 +1348,19 @@ describe('HealthPoller', () => {
 
     expect(poller.getStatus('remote-1')!.status).toBe('unreachable');
     expect(poller.getStatus('remote-1')!.everReachable).toBe(true);
-    expect(alertFns.emitAlert).not.toHaveBeenCalled();
 
     await vi.advanceTimersByTimeAsync(30_000);
 
-    expect(alertFns.emitAlert).not.toHaveBeenCalled();
-    expect(alertThrottleStore.recordAlertThrottle).not.toHaveBeenCalled();
-    expect(logger.info).toHaveBeenCalledWith(
+    expect(alertFns.emitAlert).toHaveBeenCalledWith(
+      'remote-1',
+      'instance_unreachable',
+      expect.any(String),
+      expect.any(String),
+      'critical',
+      undefined,
+    );
+    expect(alertThrottleStore.recordAlertThrottle).toHaveBeenCalled();
+    expect(logger.info).not.toHaveBeenCalledWith(
       expect.objectContaining({
         name: 'remote-1',
         source: 'instance_unreachable',
@@ -2489,7 +2494,7 @@ describe('HealthPoller', () => {
   it('hydrates lastAlertAt from the persisted alert throttle store', async () => {
     const lastAlertAt = '2026-05-20T11:55:00.000Z';
     alertThrottleStore.loadAlertThrottleDetailed.mockReturnValue({
-      entries: new Map([['remote-1:instance_unreachable', lastAlertAt]]),
+      entries: new Map([[`${hostname()}:remote-1:instance_unreachable`, lastAlertAt]]),
       loadError: null,
     });
     mockFetch.mockResolvedValue({
@@ -2526,7 +2531,7 @@ describe('HealthPoller', () => {
     await vi.advanceTimersByTimeAsync(1_000);
 
     expect(alertThrottleStore.recordAlertThrottle).toHaveBeenCalledWith(
-      'remote-1:instance_never_reachable',
+      `${hostname()}:remote-1:instance_never_reachable`,
       '2026-05-20T12:00:02.000Z',
     );
     expect(alertFns.emitAlert).toHaveBeenCalledOnce();
@@ -2602,7 +2607,7 @@ describe('HealthPoller', () => {
 
     expect(alertFns.emitAlert).toHaveBeenCalledTimes(2);
     expect(alertThrottleStore.recordAlertThrottle).toHaveBeenCalledWith(
-      'remote-1:instance_logged_out',
+      `${hostname()}:remote-1:instance_logged_out`,
       '2026-05-20T12:00:01.000Z',
     );
     expect(poller.getStatus('remote-1')!.activeAlertSources).toEqual(['instance_logged_out']);
@@ -2641,7 +2646,7 @@ describe('HealthPoller', () => {
         err: persistErr,
         name: 'remote-1',
         source: 'instance_never_reachable',
-        throttleKey: 'remote-1:instance_never_reachable',
+        throttleKey: `${hostname()}:remote-1:instance_never_reachable`,
       }),
       'failed to persist alert throttle',
     );
@@ -2652,7 +2657,7 @@ describe('HealthPoller', () => {
   it('suppresses restart-cycle alerts using persisted lastAlertAt', async () => {
     alertThrottleStore.loadAlertThrottleDetailed.mockReturnValue({
       entries: new Map([
-        ['remote-1:instance_never_reachable', '2026-05-20T11:55:00.000Z'],
+        [`${hostname()}:remote-1:instance_never_reachable`, '2026-05-20T11:55:00.000Z'],
       ]),
       loadError: null,
     });
@@ -2728,11 +2733,11 @@ describe('HealthPoller', () => {
       undefined,
     );
     expect(alertThrottleStore.recordAlertThrottle).toHaveBeenCalledWith(
-      'remote-1:instance_degraded',
+      `${hostname()}:remote-1:instance_degraded`,
       '2026-05-20T12:00:01.000Z',
     );
     expect(alertThrottleStore.recordAlertThrottle).toHaveBeenCalledWith(
-      'remote-1:instance_unreachable',
+      `${hostname()}:remote-1:instance_unreachable`,
       expect.any(String),
     );
 
@@ -3731,9 +3736,9 @@ describe('HealthPoller', () => {
   it('lastAlertAtFor returns the most recent entry among multiple persisted throttle keys', async () => {
     alertThrottleStore.loadAlertThrottleDetailed.mockReturnValue({
       entries: new Map([
-        ['remote-1:instance_degraded', '2026-05-20T11:50:00.000Z'],
-        ['remote-1:instance_unreachable', '2026-05-20T11:58:00.000Z'],
-        ['remote-1:health_body_degraded', '2026-05-20T11:45:00.000Z'],
+        [`${hostname()}:remote-1:instance_degraded`, '2026-05-20T11:50:00.000Z'],
+        [`${hostname()}:remote-1:instance_unreachable`, '2026-05-20T11:58:00.000Z'],
+        [`${hostname()}:remote-1:health_body_degraded`, '2026-05-20T11:45:00.000Z'],
       ]),
       loadError: null,
     });
@@ -4825,9 +4830,9 @@ describe('health-poller.ts uncovered-branch coverage', () => {
     const olderMatching = '2026-05-20T11:40:00.000Z';
     alertThrottleStore.loadAlertThrottleDetailed.mockReturnValue({
       entries: new Map<string, string>([
-        ['other-instance:instance_unreachable', '2026-05-20T11:59:00.000Z'],
-        ['remote-1:instance_logged_out', olderMatching],
-        ['remote-1:instance_unreachable', matching],
+        [`${hostname()}:other-instance:instance_unreachable`, '2026-05-20T11:59:00.000Z'],
+        [`${hostname()}:remote-1:instance_logged_out`, olderMatching],
+        [`${hostname()}:remote-1:instance_unreachable`, matching],
       ]),
       loadError: null,
     });
@@ -5176,5 +5181,224 @@ describe('health-poller.ts uncovered-branch coverage', () => {
     expect(evidence).not.toMatch(/auth_bond_issues=/);
 
     poller.stop();
+  });
+});
+
+describe('#3072 host-scoped alert throttle keys', () => {
+  let mockFetch: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    mockFetch = vi.fn();
+    mockFetch.mockRejectedValue(new Error('connection refused'));
+    vi.stubGlobal('fetch', mockFetch);
+    alertFns.emitAlert.mockReset();
+    alertFns.emitAlert.mockReturnValue(durableAlertResult());
+    alertFns.clearAlertSource.mockReset();
+    alertFns.clearAlertSource.mockReturnValue(true);
+    alertThrottleStore.loadAlertThrottle.mockReset();
+    alertThrottleStore.loadAlertThrottle.mockReturnValue(new Map());
+    alertThrottleStore.loadAlertThrottleDetailed.mockReset();
+    alertThrottleStore.loadAlertThrottleDetailed.mockReturnValue({ entries: new Map(), loadError: null });
+    alertThrottleStore.recordAlertThrottle.mockReset();
+    silenceManager.isInstanceSilenced.mockReset();
+    silenceManager.isInstanceSilenced.mockReturnValue(false);
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-05-20T12:00:00.000Z'));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('T1 [DISCRIMINATING]: host-A throttle does not suppress host-B same-named instance', async () => {
+    // host-A has already throttled remote-1:instance_never_reachable.
+    alertThrottleStore.loadAlertThrottleDetailed.mockReturnValue({
+      entries: new Map([['hostA:remote-1:instance_never_reachable', '2026-05-20T11:55:00.000Z']]),
+      loadError: null,
+    });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const getSelfHealth = vi.fn().mockReturnValue({});
+
+    // host-B poller: its throttle lookups use hostB-scoped keys, which miss the hostA entry.
+    const poller = new HealthPoller(
+      () => instances,
+      'self',
+      getSelfHealth,
+      1_000,
+      undefined,
+      undefined,
+      undefined,
+      'hostB',
+    );
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    // host-B emits the alert (not suppressed by host-A's throttle entry).
+    expect(alertFns.emitAlert).toHaveBeenCalled();
+    // host-B records its OWN hostB-scoped throttle key, not hostA's.
+    expect(alertThrottleStore.recordAlertThrottle).toHaveBeenCalledWith(
+      'hostB:remote-1:instance_never_reachable',
+      expect.any(String),
+    );
+
+    poller.stop();
+  });
+
+  it('T4: throttle TTL naturally orphans old unscoped keys (#3072 migration)', async () => {
+    // Persisted throttle file carries an OLD unscoped key (`name:source`, no host).
+    // The new scoped lookup (`hostname():name:source`) does NOT match → alert emits.
+    alertThrottleStore.loadAlertThrottleDetailed.mockReturnValue({
+      entries: new Map([['remote-1:instance_never_reachable', '2026-05-20T11:55:00.000Z']]),
+      loadError: null,
+    });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const getSelfHealth = vi.fn().mockReturnValue({});
+
+    const poller = new HealthPoller(() => instances, 'self', getSelfHealth, 1_000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    // Old unscoped key does not match the scoped lookup → alert is emitted (not suppressed).
+    expect(alertFns.emitAlert).toHaveBeenCalled();
+    // The new scoped key is recorded, leaving the orphan to age out via 15min TTL.
+    expect(alertThrottleStore.recordAlertThrottle).toHaveBeenCalledWith(
+      `${hostname()}:remote-1:instance_never_reachable`,
+      expect.any(String),
+    );
+
+    poller.stop();
+  });
+});
+
+// #3057: recovery-authority-store adoption — the startup recovery scan reads
+// markers left by a prior process and emits idempotent clears for instances
+// that have recovered during the restart window.
+describe('#3057 recovery-authority-store startup scan', () => {
+  let mockFetch: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    mockFetch = vi.fn();
+    mockFetch.mockRejectedValue(new Error('connection refused'));
+    vi.stubGlobal('fetch', mockFetch);
+    alertFns.emitAlert.mockReset();
+    alertFns.emitAlert.mockReturnValue(durableAlertResult());
+    alertFns.clearAlertSource.mockReset();
+    alertFns.clearAlertSource.mockReturnValue(true);
+    alertThrottleStore.loadAlertThrottle.mockReset();
+    alertThrottleStore.loadAlertThrottle.mockReturnValue(new Map());
+    alertThrottleStore.loadAlertThrottleDetailed.mockReset();
+    alertThrottleStore.loadAlertThrottleDetailed.mockReturnValue({ entries: new Map(), loadError: null });
+    alertThrottleStore.recordAlertThrottle.mockReset();
+    silenceManager.isInstanceSilenced.mockReset();
+    silenceManager.isInstanceSilenced.mockReturnValue(false);
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-05-20T12:00:00.000Z'));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('emits recovery clear for a prior-process marker when instance is healthy', async () => {
+    const { mkdtempSync, rmSync, writeFileSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const { tmpdir } = await import('node:os');
+    const authDir = mkdtempSync(join(tmpdir(), 'recovery-auth-'));
+    const origStateDir = process.env['BOT_ERRORS_STATE_DIR'];
+    process.env['BOT_ERRORS_STATE_DIR'] = authDir;
+
+    try {
+      // Simulate prior-process state: marker exists for remote-1:instance_unreachable
+      writeFileSync(join(authDir, 'recovery-authority.json'), JSON.stringify({
+        'remote-1:instance_unreachable': true,
+      }));
+
+      const remoteHealth = makeOnlineHealth({ uptime_seconds: 100 });
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(remoteHealth),
+      });
+      const instances = makeInstances(
+        ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+      );
+      const getSelfHealth = vi.fn().mockReturnValue({});
+
+      const poller = new HealthPoller(() => instances, 'self', getSelfHealth, 1_000);
+      poller.start();
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Startup scan emitted an idempotent recovery clear for the marker
+      expect(alertFns.clearAlertSource).toHaveBeenCalledWith(
+        'remote-1',
+        'instance_unreachable',
+        'startup recovery scan (#3057)',
+      );
+
+      // Marker removed from the authority store after clearing
+      const { loadRecoveryMarkers } = await import(
+        '../../src/lib/recovery-authority-store.ts'
+      );
+      expect(loadRecoveryMarkers().has('remote-1:instance_unreachable')).toBe(false);
+
+      poller.stop();
+    } finally {
+      process.env['BOT_ERRORS_STATE_DIR'] = origStateDir;
+      rmSync(authDir, { recursive: true, force: true });
+    }
+  });
+
+  it('does NOT clear a marker when the instance is still degraded', async () => {
+    const { mkdtempSync, rmSync, writeFileSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const { tmpdir } = await import('node:os');
+    const authDir = mkdtempSync(join(tmpdir(), 'recovery-auth-'));
+    const origStateDir = process.env['BOT_ERRORS_STATE_DIR'];
+    process.env['BOT_ERRORS_STATE_DIR'] = authDir;
+
+    try {
+      writeFileSync(join(authDir, 'recovery-authority.json'), JSON.stringify({
+        'remote-1:instance_unreachable': true,
+      }));
+
+      // Instance is UNREACHABLE (not recovered) — fetch fails
+      mockFetch.mockRejectedValue(new Error('connection refused'));
+      const instances = makeInstances(
+        ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+      );
+      const getSelfHealth = vi.fn().mockReturnValue({});
+
+      const poller = new HealthPoller(() => instances, 'self', getSelfHealth, 1_000);
+      poller.start();
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      // No recovery clear should fire — instance is still degraded
+      expect(alertFns.clearAlertSource).not.toHaveBeenCalledWith(
+        'remote-1',
+        'instance_unreachable',
+        'startup recovery scan (#3057)',
+      );
+
+      // Marker preserved in the store
+      const { loadRecoveryMarkers } = await import(
+        '../../src/lib/recovery-authority-store.ts'
+      );
+      expect(loadRecoveryMarkers().has('remote-1:instance_unreachable')).toBe(true);
+
+      poller.stop();
+    } finally {
+      process.env['BOT_ERRORS_STATE_DIR'] = origStateDir;
+      rmSync(authDir, { recursive: true, force: true });
+    }
   });
 });

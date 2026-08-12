@@ -858,6 +858,95 @@ describe('AgentRuntime', () => {
     expect(evidence).not.toContain('do-not-log-this');
   });
 
+  it('#2394 restart-recovery: usable probe clears primary_model_unusable despite flag never being true (fresh runtime = process B)', async () => {
+    // A fresh AgentRuntime's primaryModelUsabilityAlertActive is false at
+    // construction (runtime.ts:959), simulating process B after restart. The
+    // pre-#3058 code gated the clear behind that flag so a fresh process could
+    // never clear a prior process's alert; #3058 made the clear unconditional.
+    // This test guards against re-introducing that process-local gate (#2394).
+    const agentConfig = mockConfig as typeof mockConfig & { agentProvider?: string };
+    agentConfig.agentProvider = 'claude-cli';
+    const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger, 'test', {
+      model: 'configured-primary',
+    });
+    await runtime.start();
+    // Default mockProbePrimaryModelUsability returns 'usable' when model is set.
+    await vi.waitFor(() => {
+      expect(mockClearAlertSource).toHaveBeenCalledWith(
+        'test',
+        'primary_model_unusable',
+        expect.stringContaining('provider=claude-cli'),
+      );
+    });
+    // Usable result → alert emit branch skipped (no emit for this source at all).
+    const unusableEmits = mockEmitAlert.mock.calls.filter(
+      (c) => c[1] === 'primary_model_unusable',
+    );
+    expect(unusableEmits).toHaveLength(0);
+  });
+
+  it('#2394 continued degradation: non-usable result does NOT clear (no false clear)', async () => {
+    // Still-degraded after restart → probe returns model-unavailable → the
+    // clear branch at recordPrimaryModelUsability is NOT entered (only
+    // status==='usable' clears). Guards against a false-clear regression.
+    mockProbePrimaryModelUsability.mockResolvedValueOnce({
+      status: 'model-unavailable',
+      provider: 'claude-cli',
+      model: 'configured-primary',
+      reason: 'selected-model-rejected',
+    });
+    const agentConfig = mockConfig as typeof mockConfig & { agentProvider?: string };
+    agentConfig.agentProvider = 'claude-cli';
+    const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger, 'test', {
+      model: 'configured-primary',
+    });
+    await runtime.start();
+    await vi.waitFor(() => {
+      expect(mockEmitAlert).toHaveBeenCalledWith(
+        'test', 'primary_model_unusable',
+        'Primary model usability probe failed',
+        expect.stringContaining('status=model-unavailable'), 'warning',
+      );
+    });
+    // Non-usable → no clear emitted for this source (any evidence).
+    const unusableClears = mockClearAlertSource.mock.calls.filter(
+      (c) => c[1] === 'primary_model_unusable',
+    );
+    expect(unusableClears).toHaveLength(0);
+  });
+
+  it('#2394 turn-success clears primary_model_unusable on primary-route turn; fallback-route does NOT', async () => {
+    // Guards the #2394 criterion "a fallback-route turn cannot [clear]" and the
+    // turn-success refresh path (runtime.ts:9544 → recordPrimaryModelUsability).
+    const agentConfig = mockConfig as typeof mockConfig & { agentProvider?: string };
+    agentConfig.agentProvider = 'claude-cli';
+    const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger, 'test', {
+      model: 'configured-primary',
+    });
+    await runtime.start();
+    mockClearAlertSource.mockClear(); // isolate turn-success clear from startup-probe clear
+    const rt = runtime as unknown as {
+      recordTurnCapabilitySuccess: (u: boolean, s: unknown) => void;
+      fallbackWindow: { activeUntil: number | null };
+    };
+    const session = {
+      getProviderId: () => 'claude-cli',
+      getModelRef: () => 'configured-primary',
+      captureEvidenceBinding: () => null,
+    };
+    // Primary-route turn (fallback inactive) → usable → clear fires.
+    rt.fallbackWindow.activeUntil = null;
+    rt.recordTurnCapabilitySuccess(true, session);
+    expect(mockClearAlertSource).toHaveBeenCalledWith(
+      'test', 'primary_model_unusable', 'provider=claude-cli model=configured-primary',
+    );
+    // Fallback-route turn (fallback active) → early-return at :9536 → no clear.
+    mockClearAlertSource.mockClear();
+    rt.fallbackWindow.activeUntil = Date.now() + 60_000;
+    rt.recordTurnCapabilitySuccess(true, session);
+    expect(mockClearAlertSource).not.toHaveBeenCalled();
+  });
+
   it('applies outbound status routing config when creating queues', () => {
     mockConfig.toolUpdateMode = 'friendly';
     mockConfig.toolUpdateRedirectJid = 'status-log@g.us';
@@ -14120,6 +14209,71 @@ describe('AgentRuntime', () => {
       db.close();
     });
 
+    it('CAR-20 (#2539): persistence failure surfaces a degradation cause + current-vs-historical health', () => {
+      const db = makeRealDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+
+      const pending: PendingPollQuestion = {
+        questions: [{ question: 'Q', header: 'H', options: [{ label: 'A', description: '' }, { label: 'B', description: '' }], multiSelect: false }],
+        toolId: 'tool-d',
+        chatJid: 'chatD@g.us',
+        chatJidAliases: new Set(['chatD@g.us']),
+        mode: 'poll',
+        pollMessageIdToQuestionIndex: new Map([['POLL_D', 0]]),
+        currentQuestionIndex: 0,
+        answersCollected: {},
+        createdAt: Date.now(),
+        resolution: 'first-vote-wins',
+        timeoutMs: 3_600_000,
+        votesByQuestion: new Map(),
+        adminJids: null,
+        source: 'send_poll',
+        sentPollMessageIds: ['POLL_D'],
+      };
+
+      // Drop the table so save/remove hit "no such table" → recordFailure (current active failure).
+      db.raw.prepare('DROP TABLE pending_polls').run();
+      const p = (runtime as unknown as {
+        pollPersistence: { save(k: string, pp: PendingPollQuestion): void; remove(k: string): void };
+      }).pollPersistence;
+      p.save('send_poll:d', pending);
+      p.remove('send_poll:d');
+
+      const degraded = runtime.getHealthSnapshot();
+      const dDetails = degraded.details as {
+        degradedReasons: string[];
+        pollPersistenceHealth: { degraded: boolean; consecutiveFailures: number; totalRecoveries: number; lastRecoveredAt: number | null };
+      };
+      // [DISCRIMINATING (1): fails if the degradation surface is removed]
+      expect(dDetails.degradedReasons).toContain('poll_persistence_failure');
+      expect(dDetails.pollPersistenceHealth.degraded).toBe(true);         // CURRENT active failure
+      expect(dDetails.pollPersistenceHealth.consecutiveFailures).toBe(2);
+      expect(dDetails.pollPersistenceHealth.totalRecoveries).toBe(0);     // not yet recovered
+      expect(degraded.status).toBe('degraded');
+
+      // Recreate the table and succeed → historical recovery, no current failure.
+      db.raw.exec(
+        'CREATE TABLE pending_polls (map_key TEXT PRIMARY KEY, chat_jid TEXT NOT NULL, tool_id TEXT NOT NULL, ' +
+        'source TEXT NOT NULL, resolution TEXT NOT NULL, payload TEXT NOT NULL, created_at INTEGER NOT NULL, ' +
+        'closes_at INTEGER, hard_closes_at INTEGER)',
+      );
+      p.remove('send_poll:d'); // now succeeds → ends the streak, marks a recovery
+
+      const recovered = runtime.getHealthSnapshot();
+      const rDetails = recovered.details as {
+        degradedReasons: string[];
+        pollPersistenceHealth: { degraded: boolean; totalRecoveries: number; lastRecoveredAt: number | null };
+      };
+      // [DISCRIMINATING (4): current-vs-historical distinction]
+      expect(rDetails.degradedReasons).not.toContain('poll_persistence_failure');
+      expect(rDetails.pollPersistenceHealth.degraded).toBe(false);        // recovered → historical only
+      expect(rDetails.pollPersistenceHealth.totalRecoveries).toBe(1);     // one recovery recorded
+      expect(rDetails.pollPersistenceHealth.lastRecoveredAt).not.toBeNull();
+
+      db.close();
+    });
+
     it('normalizes legacy pending poll timeout before persistence', () => {
       const db = makeRealDb();
       const { messenger } = makeMessenger();
@@ -15589,6 +15743,62 @@ describe('NL routing handlers (nlRouting flag)', () => {
     // R14 completes the journal for every locally-handled command, not a name list.
     await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/status', inboundSeq: 77 }));
     expect(durability.completeInbound).toHaveBeenCalledWith(77, 'local_command_handled');
+  });
+
+  it('#2357 B1 (AC3): a compound body after a successful local command is dispatched as a follow-on turn, not swallowed as local_command_handled', async () => {
+    const { runtime, sentMessages } = makeRoutingRuntime();
+    // Full fault-marker scaffold: the forwarded body turn carries an inboundSeq,
+    // so the real replyGuarantee/terminal-durability would await a settle that
+    // the mocked session never produces.
+    const { durability } = attachRuntimeFaultMarkerSpies(runtime);
+    mockSession.sendTurn.mockClear();
+    // Compound input: status command on line 1, body 'remind me' on line 2.
+    // The body turn carries inboundSeq 42, so its terminal settles only when
+    // the session emits a result — drive it like the other inboundSeq-carrying
+    // forwarded-turn tests (sendAndAwaitProviderDispatch + emitAgentResult),
+    // never sendAndDrain (turnChain would await the unemitted terminal forever).
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/status\nremind me', inboundSeq: 42 }));
+    // AC3-1: the status handler ran (a visible status reply was sent).
+    expect(allReplies(sentMessages).some((t) => t.includes('No active session') || t.includes('Active') || t.includes('route') || t.includes('session'))).toBe(true);
+    // AC3-2: the body was dispatched as a follow-on turn (cover both shared
+    // turnQueue.enqueue and non-shared sendTurn surfaces — the routing harness
+    // exercises the non-shared sendTurn path).
+    const dispatchedTurnTexts = [
+      ...(mockSession.sendTurn.mock.calls as unknown as [string][]).map((c) => c[0]),
+      ...mockQueue.enqueueText.mock.calls.map((c) => String(c[0])),
+    ];
+    expect(dispatchedTurnTexts.some((t) => t === 'remind me')).toBe(true);
+    // AC3-3: inbound NOT finalized as local_command_handled — the forwarded body
+    // turn's own durable terminal owns the completion.
+    expect(durability.completeInbound).not.toHaveBeenCalledWith(42, 'local_command_handled');
+    // Settle the in-flight body turn so no pending terminal leaks past the test.
+    await emitAgentResult(10, 'done');
+  });
+
+  it('#2357 B1 (AC4): a compound body is retained (not dispatched) when the local command handler throws — truthful completion', async () => {
+    const { runtime } = makeRoutingRuntime();
+    // Same full scaffold as AC3 — keeps both B1 tests on the sanctioned mocks.
+    const { durability } = attachRuntimeFaultMarkerSpies(runtime);
+    // Make the status handler fault: its sendDirect (1st call) throws. The
+    // catch's own error-message sendDirect (2nd call) falls back to the
+    // original implementation and succeeds.
+    const sendDirectSpy = vi
+      .spyOn(runtime as unknown as { sendDirect: (...args: unknown[]) => void }, 'sendDirect')
+      .mockImplementationOnce(() => { throw new Error('handler fault'); });
+    mockSession.sendTurn.mockClear();
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/status\nremind me', inboundSeq: 42 }));
+    // AC4-1: body NOT dispatched as a turn (handler failed; running the body
+    // under failed-command semantics would violate exactly-once).
+    const dispatchedTurnTexts = [
+      ...(mockSession.sendTurn.mock.calls as unknown as [string][]).map((c) => c[0]),
+      ...mockQueue.enqueueText.mock.calls.map((c) => String(c[0])),
+    ];
+    expect(dispatchedTurnTexts.some((t) => t === 'remind me')).toBe(false);
+    // AC4-2: inbound completed truthfully — command_failed_body_retained, NOT
+    // the silent local_command_handled drop.
+    expect(durability.completeInbound).toHaveBeenCalledWith(42, 'command_failed_body_retained');
+    expect(durability.completeInbound).not.toHaveBeenCalledWith(42, 'local_command_handled');
+    sendDirectSpy.mockRestore();
   });
 
   it('/why is removed: forwards to the session rather than rendering a route receipt locally (D11)', async () => {

@@ -1,8 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-vi.mock('../../../src/logger.ts', () => ({
-  createChildLogger: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }),
-}));
+vi.mock('../../../src/logger.ts', async () => (await import('../../helpers/logger-mock.ts')).loggerMock());
 // WhatSoupSocketServer is a value import in the SUT but only used as a type; stub it
 // so importing the sweeper does not pull in the real socket-server dependency tree.
 vi.mock('../../../src/mcp/socket-server.ts', () => ({ WhatSoupSocketServer: class {} }));

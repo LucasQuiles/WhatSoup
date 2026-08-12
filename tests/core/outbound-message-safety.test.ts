@@ -17,11 +17,15 @@ import { E9_BARE_AT_MESSAGE } from '../fixtures/e9-strings.ts';
 // T8-F1+F2: isOperatorDmPeer logs (never-silent, WG-7) via the module's own
 // child logger. Hoisted so the mock factory (which vitest hoists above these
 // imports) can close over a stable object the tests assert against.
+// Shape matches singletonLoggerMock() — hoisted scope cannot import the
+// helper, so the construction is inlined; see the factory's import for
+// provenance.
 const { mockAudienceLog } = vi.hoisted(() => ({
   mockAudienceLog: { warn: vi.fn(), info: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }));
 vi.mock('../../src/logger.ts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../src/logger.ts')>();
+  void (await import('../helpers/logger-mock.ts')); // shared helper provenance
   return {
     ...actual,
     // Only the module-under-test's 'outbound-audience' child logger is
