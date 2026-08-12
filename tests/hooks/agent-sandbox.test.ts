@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
@@ -280,6 +280,83 @@ describe('agent-sandbox.sh — no policy file (R1-A: fail closed)', () => {
     const result = runNoPolicy({ WHATSOUP_SANDBOX_FAIL_OPEN: 'true' });
     const parsed = JSON.parse(result.stdout.trim());
     expect(parsed.hookSpecificOutput.permissionDecision).toBe('deny');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tests: explicit policy path via $1 (cwd-independent, no filesystem discovery)
+//
+// writeSandboxArtifacts wires the hook with the absolute policy path as $1, so
+// the hook enforces exactly that file regardless of the agent's cwd — a mid-turn
+// `cd` into a subdirectory can neither miss the root policy (which used to trip
+// the fail-closed branch) nor pick up a policy an agent plants in a writable
+// subdir (which filesystem discovery would let shadow the root policy).
+// ---------------------------------------------------------------------------
+
+describe('agent-sandbox.sh — explicit policy path ($1)', () => {
+  function runWithPolicyArg(policyFile: string, cwd: string, toolCall: ToolCall) {
+    const result = spawnSync('bash', [HOOK_PATH, policyFile], {
+      input: JSON.stringify(toolCall),
+      cwd,
+      encoding: 'utf8',
+    });
+    return parseResult(result.stdout ?? '', result.stderr ?? '');
+  }
+
+  it('enforces the $1 policy from an unrelated cwd (deny path)', () => {
+    const policyDir = makeTmpDir(); // creates policyDir/.claude
+    const policyFile = join(policyDir, '.claude', 'sandbox-policy.json');
+    writeFileSync(
+      policyFile,
+      JSON.stringify({ allowedPaths: [policyDir], allowedMcpTools: ['send_message'], bash: { enabled: false } }),
+    );
+    const otherCwd = makeTmpDir(); // a different dir; cwd must not affect the decision
+    const res = runWithPolicyArg(policyFile, otherCwd, { tool_name: 'mcp__whatsoup__list_contacts' });
+    expect(res.decision).toBe('deny');
+    expect(res.reason).toContain('not in allowedMcpTools');
+  });
+
+  it('enforces the $1 policy from an unrelated cwd (allow path)', () => {
+    const policyDir = makeTmpDir();
+    const policyFile = join(policyDir, '.claude', 'sandbox-policy.json');
+    writeFileSync(
+      policyFile,
+      JSON.stringify({ allowedPaths: [policyDir], allowedMcpTools: ['send_message'], bash: { enabled: false } }),
+    );
+    const otherCwd = makeTmpDir();
+    const res = runWithPolicyArg(policyFile, otherCwd, { tool_name: 'mcp__whatsoup__send_message' });
+    expect(res.decision).toBe('allow');
+  });
+
+  it('fails closed when the $1 policy path does not exist', () => {
+    const cwd = makeTmpDir();
+    const res = runWithPolicyArg(join(cwd, 'nope', 'sandbox-policy.json'), cwd, {
+      tool_name: 'mcp__whatsoup__send_message',
+    });
+    expect(res.decision).toBe('deny');
+    expect(res.reason).toContain('missing');
+  });
+
+  it('emits valid stderr JSON when failing closed from a cwd whose path contains a double quote', () => {
+    // The agent influences cwd; a double-quote in it would break a hand-built
+    // deny log. The log is now built by node from process.cwd(), so it stays
+    // valid JSON. (Pre-fix, the interpolated printf produced unparseable output.)
+    const base = makeTmpDir();
+    const quoteCwd = join(base, 'a"b'); // directory name contains a double quote
+    mkdirSync(quoteCwd, { recursive: true });
+    const res = runWithPolicyArg(join(quoteCwd, 'missing.json'), quoteCwd, {
+      tool_name: 'mcp__whatsoup__send_message',
+    });
+    expect(res.decision).toBe('deny');
+    let parsed: Record<string, unknown> | null = null;
+    try {
+      parsed = JSON.parse(res.stderr.trim());
+    } catch {
+      // parsed stays null → assertion below fails
+    }
+    expect(parsed).not.toBeNull();
+    expect(parsed!.event).toBe('sandbox_deny');
+    expect(parsed!.cwd).toContain('a"b');
   });
 });
 

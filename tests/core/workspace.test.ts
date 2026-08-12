@@ -165,7 +165,9 @@ describe('provisionWorkspace', () => {
     provisionWorkspace(opts);
 
     const settings = JSON.parse(readFileSync(join(workspacePath, '.claude', 'settings.json'), 'utf8'));
-    expect(settings.hooks.PreToolUse[0].hooks[0].command).toBe(opts.hookPath);
+    expect(settings.hooks.PreToolUse[0].hooks[0].command).toBe(
+      `'${opts.hookPath}' '${join(workspacePath, '.claude', 'sandbox-policy.json')}'`,
+    );
     expect(settings.hooks.PostToolUse[0].hooks[0].command).toBe(opts.pollLintHookPath);
     expect(settings.hooks.PostToolUse[0].hooks[1].command).toBe(opts.postToolUseLogHookPath);
     expect(settings.hooks.PostToolUseFailure[0].hooks[0].command).toBe(opts.postToolUseLogHookPath);
@@ -312,7 +314,9 @@ describe('provisionWorkspace', () => {
     provisionWorkspace(opts2);
 
     const settings = JSON.parse(readFileSync(join(workspacePath, '.claude', 'settings.json'), 'utf8'));
-    expect(settings.hooks.PreToolUse[0].hooks[0].command).toBe('/new/path/to/hook.sh');
+    expect(settings.hooks.PreToolUse[0].hooks[0].command).toBe(
+      `'/new/path/to/hook.sh' '${join(workspacePath, '.claude', 'sandbox-policy.json')}'`,
+    );
     expect(settings.hooks.PostToolUse[0].hooks[0].command).toBe('/new/path/to/poll-interaction-lint.mjs');
     expect(settings.hooks.PostToolUse[0].hooks[1].command).toBe('/new/path/to/post-tool-use-log.sh');
     expect(settings.hooks.PostToolUseFailure[0].hooks[0].command).toBe('/new/path/to/post-tool-use-log.sh');
@@ -458,7 +462,9 @@ describe('workspace.ts uncovered-branch coverage', () => {
     expect(policyFile).toEqual(policy);
 
     const settings = JSON.parse(readFileSync(join(claudeDir, 'settings.json'), 'utf8'));
-    expect(settings.hooks.PreToolUse[0].hooks[0].command).toBe('/hooks/agent-sandbox.sh');
+    expect(settings.hooks.PreToolUse[0].hooks[0].command).toBe(
+      `'/hooks/agent-sandbox.sh' '${join(claudeDir, 'sandbox-policy.json')}'`,
+    );
     expect(settings.hooks).not.toHaveProperty('PostToolUse');
     expect(settings.hooks).not.toHaveProperty('PostToolUseFailure');
   });

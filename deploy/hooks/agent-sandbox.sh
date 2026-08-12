@@ -4,9 +4,17 @@ set -euo pipefail
 # Read the tool call from stdin
 INPUT=$(cat)
 
-# Find sandbox-policy.json relative to this hook's location
-# Claude Code hooks run from the project root (cwd), so look in .claude/
-POLICY_FILE=".claude/sandbox-policy.json"
+# Resolve the sandbox policy. writeSandboxArtifacts wires this hook with the
+# absolute policy path as $1 (the code that writes the policy owns its location),
+# so the hook enforces exactly that file regardless of the agent's cwd: a mid-turn
+# `cd` into a subdirectory can neither miss the root policy nor pick up a policy
+# planted in a writable subdir (no filesystem discovery). Fall back to the
+# cwd-relative default for legacy/manual invocations wired with no argument.
+POLICY_FILE="${1:-.claude/sandbox-policy.json}"
+# Pass the resolved path to node via the ENVIRONMENT, never string-interpolated
+# into a -e script, so a path containing a quote or backslash cannot break out of
+# a JS string literal inside this security hook. node reads it from process.env.
+export WHATSOUP_SANDBOX_POLICY_FILE="$POLICY_FILE"
 
 if [ ! -f "$POLICY_FILE" ]; then
   # Missing policy contract (R1-A):
@@ -23,9 +31,11 @@ if [ ! -f "$POLICY_FILE" ]; then
     echo '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}'
     exit 0
   fi
-  # Structured deny log on stderr, mirroring the deny() reason emitted by node.
-  printf '%s\n' '{"event":"sandbox_deny","tool":"","reason":"sandbox-policy.json missing; failing closed (set WHATSOUP_SANDBOX_FAIL_OPEN=1 to allow)","cwd":"'"$PWD"'","policyPath":"'"$POLICY_FILE"'"}' >&2
+  # Emit the fail-closed decision FIRST so a diagnostic-logging failure can never
+  # suppress it, then best-effort a structured stderr log built by node — so an
+  # agent-controlled cwd containing a quote/backslash cannot corrupt the JSON.
   echo '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"sandbox-policy.json missing; failing closed (set WHATSOUP_SANDBOX_FAIL_OPEN=1 to allow)"}}'
+  node -e 'process.stderr.write(JSON.stringify({event:"sandbox_deny",tool:"",reason:"sandbox-policy.json missing; failing closed (set WHATSOUP_SANDBOX_FAIL_OPEN=1 to allow)",cwd:process.cwd(),policyPath:process.env.WHATSOUP_SANDBOX_POLICY_FILE})+"\n")' || true
   exit 0
 fi
 
@@ -42,7 +52,7 @@ echo "$INPUT" | exec node --experimental-strip-types -e "
   rl.on('close', () => {
     const raw = chunks.join('\n');
     const input = JSON.parse(raw);
-    const policy = JSON.parse(readFileSync('$POLICY_FILE', 'utf8'));
+    const policy = JSON.parse(readFileSync(process.env.WHATSOUP_SANDBOX_POLICY_FILE, 'utf8'));
     const toolName = input.tool_name ?? '';
     const toolInput = input.tool_input ?? {};
     const allowedPaths = policy.allowedPaths ?? [];
@@ -62,7 +72,7 @@ echo "$INPUT" | exec node --experimental-strip-types -e "
         tool: toolName,
         reason,
         cwd: process.cwd(),
-        policyPath: '$POLICY_FILE',
+        policyPath: process.env.WHATSOUP_SANDBOX_POLICY_FILE,
       });
       process.stderr.write(log + '\n');
       console.log(JSON.stringify({
