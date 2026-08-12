@@ -233,7 +233,12 @@ export function createPineconeWatchSearch(
         signal: AbortSignal.timeout(30_000),
       });
       if (!embedResp.ok) throw new Error(`embed service HTTP ${embedResp.status}`);
-      const embedJson = (await embedResp.json()) as { vectors: number[][] };
+      let embedJson: { vectors: number[][] };
+      try {
+        embedJson = (await embedResp.json()) as { vectors: number[][] };
+      } catch (err) {
+        throw new Error(`embed service returned non-JSON response: ${errorMessage(err)}`);
+      }
       const vec = embedJson.vectors?.[0];
       if (!Array.isArray(vec)) throw new Error('embed service returned no vectors');
       const resp = await index.namespace(namespace).query({ topK, vector: vec, includeMetadata: false });

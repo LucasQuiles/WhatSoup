@@ -278,7 +278,8 @@ function makeSendGroupInvite(getSock: () => ExtendedBaileysSocket | null, db?: D
     replayPolicy: 'unsafe',
     handler: async (params) => {
       const { chatJid, groupJid, inviteCode, inviteExpiration, groupName, jpegThumbnail, caption } = SendGroupInviteSchema.parse(params);
-      const jid = chatJid!;
+      if (!chatJid) throw new Error('chatJid is required in global sessions');
+      const jid = chatJid;
       const sock = getSock();
       if (!sock) throw new Error('WhatsApp is not connected');
       applyOutboundIdentityGuard(jid, { caller: 'mcp', mode: config.outboundIdentityMode }, db ? new SqliteIdentityStore(db.raw) : null);

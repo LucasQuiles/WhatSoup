@@ -48,8 +48,11 @@ export function registerVoiceTools(
       voice_id: z.string().optional().describe('ElevenLabs voice ID (defaults to instance config)'),
     }),
     handler: async (params, session: SessionContext) => {
-      const text = (params['text'] as string).trim();
-      const voiceId = params['voice_id'] as string | undefined;
+      const { text: rawText, voice_id: voiceId } = z.object({
+        text: z.string(),
+        voice_id: z.string().optional(),
+      }).parse(params);
+      const text = rawText.trim();
 
       if (!text) {
         return errorResult('invalid_input', 'Text cannot be empty.');
@@ -72,7 +75,14 @@ export function registerVoiceTools(
 
       // Write to temp file (for audit trail / replay)
       const ext = result.mimeType.includes('ogg') ? 'ogg' : 'mp3';
-      const filePath = writeTempFile(result.buffer, ext);
+      let filePath: string;
+      try {
+        filePath = writeTempFile(result.buffer, ext);
+      } catch (err) {
+        const message = errorMessage(err);
+        log.error({ err }, 'failed to write temp file for voice note');
+        return errorResult('write_failed', message);
+      }
 
       // Send as voice note (PTT) — use buffer directly (already in memory)
       try {
@@ -85,8 +95,8 @@ export function registerVoiceTools(
         });
       } catch (err) {
         const message = errorMessage(err);
-        log.error({ err, chatJid }, 'failed to send voice note');
-        return errorResult('send_failed', `Failed to send voice note: ${message}`);
+        log.error({ err, chatJid, filePath }, 'failed to send voice note');
+        return errorResult('send_failed', `Failed to send voice note: ${message} (temp file: ${filePath})`);
       }
 
       return {
