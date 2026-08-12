@@ -199,6 +199,7 @@ function git(cwd: string, args: string[]): GitCommandResult {
     encoding: 'utf8',
     env: cleanGitEnv(),
     maxBuffer: 16 * 1024 * 1024,
+    timeout: 30_000,
   });
   return {
     status: proc.status,

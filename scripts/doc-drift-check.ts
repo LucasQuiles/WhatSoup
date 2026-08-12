@@ -508,6 +508,8 @@ function listVitestTests(cwd: string, vitestArgs: string[]): unknown[] {
     cwd,
     encoding: 'utf8',
     env: { ...cleanGitEnv(), CI: 'true' },
+    // vitest list transforms the whole suite tree; give it real headroom.
+    timeout: 120_000,
   });
   if (result.error) {
     throw new Error(`ERROR(schema:vitest-list): vitest list failed: ${result.error.message}`);

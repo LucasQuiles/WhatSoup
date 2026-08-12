@@ -217,6 +217,7 @@ function runEmit(
     encoding: 'utf8',
     env: emitEnvironment(),
     maxBuffer: 1024 * 1024,
+    timeout: 60_000,
   });
 }
 

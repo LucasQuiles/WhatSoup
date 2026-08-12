@@ -281,6 +281,7 @@ function main(): number {
       cwd: repoRoot,
       encoding: 'utf8',
       maxBuffer: 64 * 1024 * 1024,
+      timeout: 30_000,
     })
       .split('\0')
       .filter((file) => SOURCE_FILE.test(file));
