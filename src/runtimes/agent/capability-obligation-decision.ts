@@ -39,6 +39,8 @@ export interface CapabilityDecisionProducerDeps {
   options: CapabilityObligationsOptions;
   /** D2 declaration lookup from the live tool registry. */
   externalEffectFor: (toolName: string) => ExternalEffectDeclaration | undefined;
+  /** AS-04: any tool-durability write loss at or after `sinceMs` (registry signal). */
+  writeLossSince: (sinceMs: number) => boolean;
 }
 
 /** managed_loop is the harness class with no child processes — it cannot carry
@@ -95,16 +97,27 @@ export async function deriveCapabilityDecision(
     return notCreated('not_created_unjournaled_source', decision.inputDigest);
   }
 
-  // D2 fold: the turn's MCP tool activity, enumerable because per-chat turns
-  // are serialized per conversation — every row in the window belongs to this
-  // turn. Any accepted/ambiguous/unknown invocation blocks creation.
+  // D2 fold over TURN-CORRELATED rows (AS-04, spec §3.2b): every row is
+  // stamped with its owning logical turn at the single writer. Enumeration is
+  // complete only when NO row in the conversation window lacks correlation —
+  // an unstamped row could belong to this turn, so it fails closed. Any
+  // durability write loss since the inbound arrived also fails closed: a
+  // mutating call whose record write was refused must never read as "no
+  // effect".
+  const uncorrelated = deps.db.raw
+    .prepare(
+      `SELECT COUNT(*) AS c FROM tool_calls
+       WHERE conversation_key = ?
+         AND created_at >= datetime(?, 'unixepoch')
+         AND logical_turn_id IS NULL`,
+    )
+    .get(context.identity.conversationKey, context.replay.receivedAtUnixSeconds) as { c: number };
   const toolRows = deps.db.raw
     .prepare(
       `SELECT tool_name, status, outcome_code, failure_stage FROM tool_calls
-       WHERE conversation_key = ?
-         AND created_at >= datetime(?, 'unixepoch')`,
+       WHERE logical_turn_id = ?`,
     )
-    .all(context.identity.conversationKey, context.replay.receivedAtUnixSeconds) as Array<{
+    .all(context.identity.logicalTurnId) as Array<{
     tool_name: string;
     status: string;
     outcome_code: string | null;
@@ -118,7 +131,10 @@ export async function deriveCapabilityDecision(
       failureStage: row.failure_stage,
     }),
   );
-  const fold = foldTurnEffects(classes, { enumerationComplete: true, writeLossInWindow: false });
+  const fold = foldTurnEffects(classes, {
+    enumerationComplete: uncorrelated.c === 0,
+    writeLossInWindow: deps.writeLossSince(context.replay.receivedAtUnixSeconds * 1000),
+  });
   if (!fold.conclusiveNoEffect) {
     return notCreated('not_created_side_effect_uncertain', decision.inputDigest);
   }

@@ -101,7 +101,64 @@ export interface CapabilityObligationRuntimeDeps {
   resolveMapKey?: (deliveryJid: string) => string;
   /** D2 declaration lookup from the live tool registry (creation-seam fold). */
   externalEffectFor: (toolName: string) => ExternalEffectDeclaration | undefined;
+  /** AS-04: registry tool-durability write-loss signal for the fold window. */
+  writeLossSince: (sinceMs: number) => boolean;
   scanIntervalMs?: number;
+}
+
+/**
+ * AS-04 record-time turn correlation: per-chat turns are serialized per
+ * conversation, so the head of a mapKey's context list IS the turn currently
+ * owning that conversation. Used by the registry's single tool_calls writer.
+ */
+export function turnCorrelationFromContexts(
+  contexts: ReadonlyMap<string, readonly RuntimeTurnContext[]>,
+  conversationKey: string,
+): { logicalTurnId: string; inboundSeq: number | null } | null {
+  for (const list of contexts.values()) {
+    const head = list[0];
+    if (head?.identity.conversationKey === conversationKey) {
+      return { logicalTurnId: head.identity.logicalTurnId, inboundSeq: head.identity.inboundSeq };
+    }
+  }
+  return null;
+}
+
+/**
+ * D6 source binding: an execution invocation counts for THIS obligation only
+ * when its input demonstrably carries the obligation's source — the retained
+ * media path or digest for media obligations, else a verbatim source URL token
+ * from the replay text, else (token-only inputs with a non-empty remainder)
+ * that remainder. A marker match alone is never source-bound.
+ */
+export function invocationBindsSource(
+  obligation: Pick<CapabilityObligationDueRow, 'replayText' | 'retainedMediaPath' | 'mediaSha256'>,
+  toolInput: Record<string, unknown>,
+): boolean {
+  const inputText = Object.values(toolInput)
+    .filter((value): value is string => typeof value === 'string')
+    .join(' ');
+  if (inputText.length === 0) return false;
+  if (obligation.retainedMediaPath !== null) {
+    return (
+      inputText.includes(obligation.retainedMediaPath)
+      || (obligation.mediaSha256 !== null && inputText.includes(obligation.mediaSha256))
+    );
+  }
+  const urlTokens = obligation.replayText.split(/\s+/).filter((token) => {
+    try {
+      const url = new URL(token);
+      return url.protocol === 'http:' || url.protocol === 'https:';
+    } catch {
+      // intentional: non-URL tokens are simply not source anchors — nothing to
+      // bind against, so they are filtered rather than treated as errors.
+      return false;
+    }
+  });
+  if (urlTokens.length > 0) return urlTokens.some((token) => inputText.includes(token));
+  // Leading-token obligations: the remainder after the command IS the source.
+  const remainder = obligation.replayText.trim().replace(/^\S+\s*/, '').trim();
+  return remainder.length > 0 && inputText.includes(remainder);
 }
 
 /**
@@ -139,6 +196,7 @@ export class CapabilityObligationRuntime {
   private readonly options: CapabilityObligationsOptions;
   private readonly resolveMapKey: (deliveryJid: string) => string;
   private readonly externalEffectFor: (toolName: string) => ExternalEffectDeclaration | undefined;
+  private readonly writeLossSince: (sinceMs: number) => boolean;
   private readonly scanIntervalMs: number;
   private readonly activeTurns = new Map<string, ActiveObligationTurn>();
   private scanTimer: ReturnType<typeof setTimeout> | null = null;
@@ -151,6 +209,7 @@ export class CapabilityObligationRuntime {
     this.options = deps.options;
     this.resolveMapKey = deps.resolveMapKey ?? ((jid) => jid);
     this.externalEffectFor = deps.externalEffectFor;
+    this.writeLossSince = deps.writeLossSince;
     this.scanIntervalMs = deps.scanIntervalMs ?? OBLIGATION_SCAN_INTERVAL_MS;
     this.supervisor = new CapabilityObligationSupervisor({
       db: deps.db,
@@ -273,7 +332,12 @@ export class CapabilityObligationRuntime {
     const active = this.activeTurns.get(mapKey);
     if (active === undefined) return;
     if (event.type === 'tool_use') {
-      if (matchesCapabilityExecution(this.options.receipt, event.toolName, event.toolInput)) {
+      // D6: rule match alone is NOT execution for this obligation — the
+      // invocation must also bind the obligation's SOURCE (URL / media).
+      if (
+        matchesCapabilityExecution(this.options.receipt, event.toolName, event.toolInput)
+        && invocationBindsSource(active.obligation, event.toolInput)
+      ) {
         active.pendingToolIds.set(event.toolId, event.toolName);
       }
       return;
@@ -364,7 +428,12 @@ export class CapabilityObligationRuntime {
     const providerId =
       session !== null && typeof session.getProviderId === 'function' ? session.getProviderId() : null;
     return deriveDecisionForTurn(
-      { db: this.db, options: this.options, externalEffectFor: this.externalEffectFor },
+      {
+        db: this.db,
+        options: this.options,
+        externalEffectFor: this.externalEffectFor,
+        writeLossSince: this.writeLossSince,
+      },
       context,
       providerId === null ? null : resolveHarnessType(providerId),
     );

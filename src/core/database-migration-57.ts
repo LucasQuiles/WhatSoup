@@ -35,6 +35,20 @@ import type { DatabaseSync } from 'node:sqlite';
  * runbook.
  */
 export function runMigration57(db: DatabaseSync): void {
+  // AS-04 turn correlation (spec §3.2b): tool_calls rows name the exact turn
+  // they belong to, populated at the single writer (registry.call). Additive
+  // and idempotent — NULL on rows written before this migration or by paths
+  // without a live turn, which the effect fold treats as enumeration-incomplete.
+  const toolCallColumns = new Set(
+    (db.prepare('PRAGMA table_info(tool_calls)').all() as Array<{ name: string }>).map((c) => c.name),
+  );
+  if (!toolCallColumns.has('logical_turn_id')) {
+    db.exec('ALTER TABLE tool_calls ADD COLUMN logical_turn_id TEXT');
+  }
+  if (!toolCallColumns.has('source_inbound_seq')) {
+    db.exec('ALTER TABLE tool_calls ADD COLUMN source_inbound_seq INTEGER');
+  }
+
   db.exec(`
     CREATE TABLE IF NOT EXISTS capability_obligations (
       id INTEGER PRIMARY KEY AUTOINCREMENT,

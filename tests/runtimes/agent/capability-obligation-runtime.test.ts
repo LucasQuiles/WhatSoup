@@ -15,6 +15,7 @@ import { Database } from '../../../src/core/database.ts';
 import { withTransaction } from '../../../src/core/db-tx.ts';
 import {
   CapabilityObligationRuntime,
+  invocationBindsSource,
   matchesCapabilityExecution,
   resolveReleaseIdentity,
   type CapabilityObligationLiveFacts,
@@ -162,6 +163,8 @@ function makeRuntime(script: HarnessScript = {}) {
       script.onDispatch?.(runtime.resolveRecorderKey(obligation.deliveryJid), runtime);
       return script.dispatchOutcome ?? 'dispatched';
     },
+    externalEffectFor: () => undefined,
+    writeLossSince: () => false,
   });
   return { runtime, dispatched };
 }
@@ -263,6 +266,23 @@ describe('receipt recorder (D6)', () => {
     expect(count).toBe(0);
   });
 
+  it('FALSIFIER: a marker-matched execution NOT bound to the source yields no receipt (and can never complete)', async () => {
+    const id = seedObligation();
+    freshAttestation();
+    const { runtime } = makeRuntime({
+      onDispatch: (mapKey, rt) => {
+        // Runs the skill, long output — but against NOTHING from this obligation.
+        rt.onStreamEvent(mapKey, { type: 'tool_use', toolName: 'Bash', toolId: 'tu-u', toolInput: { command: 'python3 watch.py go' } });
+        rt.onStreamEvent(mapKey, { type: 'tool_result', isError: false, toolId: 'tu-u', content: 'lots of plausible output here' });
+      },
+    });
+    await runtime.tickOnce();
+    const count = (db.raw
+      .prepare('SELECT COUNT(*) AS c FROM capability_execution_receipts WHERE obligation_id = ?')
+      .get(id) as { c: number }).c;
+    expect(count).toBe(0);
+  });
+
   it('unmarked Bash is ignored; errored or evidence-thin execution records an error receipt', async () => {
     const id = seedObligation();
     freshAttestation();
@@ -270,9 +290,9 @@ describe('receipt recorder (D6)', () => {
       onDispatch: (mapKey, rt) => {
         rt.onStreamEvent(mapKey, { type: 'tool_use', toolName: 'Bash', toolId: 'tu-x', toolInput: { command: 'ls -la' } });
         rt.onStreamEvent(mapKey, { type: 'tool_result', isError: false, toolId: 'tu-x', content: 'ls output here' });
-        rt.onStreamEvent(mapKey, { type: 'tool_use', toolName: 'Bash', toolId: 'tu-y', toolInput: { command: 'python3 watch.py x' } });
+        rt.onStreamEvent(mapKey, { type: 'tool_use', toolName: 'Bash', toolId: 'tu-y', toolInput: { command: 'python3 watch.py https://youtu.be/abc' } });
         rt.onStreamEvent(mapKey, { type: 'tool_result', isError: true, toolId: 'tu-y', content: 'traceback: boom' });
-        rt.onStreamEvent(mapKey, { type: 'tool_use', toolName: 'Bash', toolId: 'tu-z', toolInput: { command: 'python3 watch.py y' } });
+        rt.onStreamEvent(mapKey, { type: 'tool_use', toolName: 'Bash', toolId: 'tu-z', toolInput: { command: 'python3 watch.py --retry https://youtu.be/abc' } });
         rt.onStreamEvent(mapKey, { type: 'tool_result', isError: false, toolId: 'tu-z', content: 'ok' }); // 2 bytes < min 8
       },
     });
@@ -314,7 +334,7 @@ describe('evidence port (D6/D7)', () => {
   it('completes on receipt + echoed terminal with a delivery op', async () => {
     const id = await dispatchedObligation({
       onDispatch: (mapKey, rt) => {
-        rt.onStreamEvent(mapKey, { type: 'tool_use', toolName: 'Bash', toolId: 'tu-1', toolInput: { command: 'python3 watch.py go' } });
+        rt.onStreamEvent(mapKey, { type: 'tool_use', toolName: 'Bash', toolId: 'tu-1', toolInput: { command: 'python3 watch.py https://youtu.be/abc' } });
         rt.onStreamEvent(mapKey, { type: 'tool_result', isError: false, toolId: 'tu-1', content: 'frames + transcript done' });
       },
     });
@@ -343,7 +363,7 @@ describe('evidence port (D6/D7)', () => {
   it('a receipt WITHOUT echoed delivery proof quarantines', async () => {
     const id = await dispatchedObligation({
       onDispatch: (mapKey, rt) => {
-        rt.onStreamEvent(mapKey, { type: 'tool_use', toolName: 'Bash', toolId: 'tu-1', toolInput: { command: 'python3 watch.py go' } });
+        rt.onStreamEvent(mapKey, { type: 'tool_use', toolName: 'Bash', toolId: 'tu-1', toolInput: { command: 'python3 watch.py https://youtu.be/abc' } });
         rt.onStreamEvent(mapKey, { type: 'tool_result', isError: false, toolId: 'tu-1', content: 'frames + transcript done' });
       },
     });
@@ -390,6 +410,20 @@ describe('helpers', () => {
     expect(matchesCapabilityExecution(rule, 'Skill', { skill: 'watch' })).toBe(false);
     expect(matchesCapabilityExecution(rule, 'Skill', { skill: 'watch.py' })).toBe(false);
     expect(matchesCapabilityExecution(rule, 'Bash', {})).toBe(false);
+  });
+
+  it('invocationBindsSource: URL obligations bind by verbatim source URL; media by retained path/digest', () => {
+    const urlOb = { replayText: 'check https://youtu.be/abc please', retainedMediaPath: null, mediaSha256: null };
+    expect(invocationBindsSource(urlOb, { command: 'python3 watch.py https://youtu.be/abc' })).toBe(true);
+    expect(invocationBindsSource(urlOb, { command: 'python3 watch.py https://youtu.be/OTHER' })).toBe(false);
+    expect(invocationBindsSource(urlOb, { command: 'python3 watch.py go' })).toBe(false);
+    const mediaOb = { replayText: 'Tracker.webm', retainedMediaPath: '/ret/ab/deadbeef', mediaSha256: 'ff'.repeat(32) };
+    expect(invocationBindsSource(mediaOb, { command: 'python3 watch.py /ret/ab/deadbeef' })).toBe(true);
+    expect(invocationBindsSource(mediaOb, { command: `python3 watch.py ${'ff'.repeat(32)}` })).toBe(true);
+    expect(invocationBindsSource(mediaOb, { command: 'python3 watch.py /somewhere/else' })).toBe(false);
+    const tokenOb = { replayText: '/watch the quarterly recap', retainedMediaPath: null, mediaSha256: null };
+    expect(invocationBindsSource(tokenOb, { command: 'python3 watch.py "the quarterly recap"' })).toBe(true);
+    expect(invocationBindsSource(tokenOb, { command: 'python3 watch.py unrelated' })).toBe(false);
   });
 
   it('resolveReleaseIdentity: env wins, release-dir basename next, sentinel otherwise', () => {

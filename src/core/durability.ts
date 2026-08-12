@@ -684,10 +684,11 @@ export class DurabilityEngine {
         `INSERT INTO tool_calls (
            conversation_key, session_checkpoint_id, tool_name, tool_group,
            tool_input, status, replay_policy, outcome_code,
-           retry_disposition, operator_action, evidence_coverage
+           retry_disposition, operator_action, evidence_coverage,
+           logical_turn_id, source_inbound_seq
          )
          VALUES (?, ?, ?, ?, ?, 'pending', ?, 'not_terminal',
-                 'not_applicable', 'none', 'complete')`,
+                 'not_applicable', 'none', 'complete', ?, ?)`,
       ),
       markToolExecuting: prepare(`UPDATE tool_calls SET status = 'executing' WHERE id = ?`),
       markToolComplete: prepare(
@@ -2036,6 +2037,8 @@ export class DurabilityEngine {
     toolGroup: string,
     replayPolicy: string,
     checkpointId?: number,
+    /** AS-04 turn correlation, captured at the single writer (registry.call). */
+    correlation?: { logicalTurnId: string; inboundSeq: number | null } | null,
   ): number {
     const result = this.statements.recordToolCall.run(
       conversationKey,
@@ -2044,6 +2047,8 @@ export class DurabilityEngine {
       normalizeToolDurabilityGroup(toolGroup),
       TOOL_INPUT_MARKER,
       replayPolicy,
+      correlation?.logicalTurnId ?? null,
+      correlation?.inboundSeq ?? null,
     );
     const id = Number(result.lastInsertRowid);
     log.debug({ id, toolName, replayPolicy }, 'recordToolCall');

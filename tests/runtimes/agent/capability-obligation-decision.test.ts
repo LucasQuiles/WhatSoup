@@ -89,15 +89,23 @@ function makeContext(over: Partial<{
   };
 }
 
-function deps(mediaRoot?: string) {
+function deps(over: { mediaRoot?: string; writeLoss?: boolean } = {}) {
   return {
     db,
-    options: { ...OPTIONS, mediaRoot: mediaRoot ?? join(dir, 'retained') },
+    options: { ...OPTIONS, mediaRoot: over.mediaRoot ?? join(dir, 'retained') },
     externalEffectFor: (name: string) => EFFECTS[name],
+    writeLossSince: () => over.writeLoss ?? false,
   };
 }
 
-function insertToolCall(toolName: string, status: 'complete' | 'error', failureStage: string | null = null): void {
+function insertToolCall(
+  toolName: string,
+  status: 'complete' | 'error',
+  failureStage: string | null = null,
+  // AS-04: rows are turn-correlated by default; null simulates a writer path
+  // without a live turn (which must fail the fold closed).
+  logicalTurnId: string | null = 'turn-d1',
+): void {
   // Satisfies migration-50's status-coherence CHECK for the two statuses the
   // decision-seam fold exercises.
   if (status === 'complete') {
@@ -105,11 +113,13 @@ function insertToolCall(toolName: string, status: 'complete' | 'error', failureS
       .prepare(
         `INSERT INTO tool_calls
            (conversation_key, tool_name, tool_group, tool_input, status, replay_policy,
-            outcome_code, result, completed_at, retry_disposition, operator_action, evidence_coverage)
+            outcome_code, result, completed_at, retry_disposition, operator_action, evidence_coverage,
+            logical_turn_id, source_inbound_seq)
          VALUES ('conv-decision', ?, 'messaging', '[metadata-only]', 'complete', 'unsafe',
-                 'success', '[metadata-only:success]', datetime('now'), 'not_applicable', 'none', 'complete')`,
+                 'success', '[metadata-only:success]', datetime('now'), 'not_applicable', 'none', 'complete',
+                 ?, ?)`,
       )
-      .run(toolName);
+      .run(toolName, logicalTurnId, logicalTurnId === null ? null : 8801);
     return;
   }
   db.raw
@@ -117,12 +127,12 @@ function insertToolCall(toolName: string, status: 'complete' | 'error', failureS
       `INSERT INTO tool_calls
          (conversation_key, tool_name, tool_group, tool_input, status, replay_policy,
           outcome_code, result, completed_at, failure_code, failure_stage,
-          retry_disposition, operator_action, evidence_coverage)
+          retry_disposition, operator_action, evidence_coverage, logical_turn_id, source_inbound_seq)
        VALUES ('conv-decision', ?, 'messaging', '[metadata-only]', 'error', 'unsafe',
                'failure', '[metadata-only:error]', datetime('now'), 'validation_rejected', ?,
-               'not_retryable', 'none', 'complete')`,
+               'not_retryable', 'none', 'complete', ?, ?)`,
     )
-    .run(toolName, failureStage ?? 'validation');
+    .run(toolName, failureStage ?? 'validation', logicalTurnId, logicalTurnId === null ? null : 8801);
 }
 
 beforeEach(() => {
@@ -173,11 +183,11 @@ describe('D1 evaluation outcomes', () => {
   it('a conflicting inbound records a typed not_created decision', async () => {
     const context = makeContext({ text: '/watch https://youtu.be/abc' });
     const decision = await deriveCapabilityDecision(deps(), context, 'managed_loop');
+    expect(decision?.obligation).toBeUndefined();
     expect(decision?.auditEvent).toMatchObject({
       action: 'obligation.not_created',
       reasonCode: 'not_created_contract_conflict',
     });
-    expect(decision?.obligation).toBeUndefined();
   });
 
   it('an unjournaled source records a typed not_created decision', async () => {
@@ -212,8 +222,8 @@ describe('D2 effect fold', () => {
   it('an accepted external invocation in the turn window blocks creation (typed not_created)', async () => {
     insertToolCall('send_message', 'complete');
     const decision = await deriveCapabilityDecision(deps(), makeContext(), 'managed_loop');
-    expect(decision?.auditEvent.reasonCode).toBe('not_created_side_effect_uncertain');
     expect(decision?.obligation).toBeUndefined();
+    expect(decision?.auditEvent.reasonCode).toBe('not_created_side_effect_uncertain');
   });
 
   it('an undeclared tool in the window blocks creation (unknown effect)', async () => {
@@ -227,6 +237,32 @@ describe('D2 effect fold', () => {
     const decision = await deriveCapabilityDecision(deps(), makeContext(), 'managed_loop');
     expect(decision?.auditEvent.action).toBe('obligation.create');
     expect(decision?.obligation?.requiredCapability).toBe('child_process_tools');
+  });
+
+  it('FALSIFIER: an UNCORRELATED row in the window blocks creation, even for a declared-none tool', async () => {
+    insertToolCall('get_messages', 'complete', null, null); // no logical_turn_id
+    const decision = await deriveCapabilityDecision(deps(), makeContext(), 'managed_loop');
+    expect(decision?.obligation).toBeUndefined();
+    expect(decision?.auditEvent.reasonCode).toBe('not_created_side_effect_uncertain');
+  });
+
+  it("FALSIFIER: another turn's accepted external row does not block, but this turn's does", async () => {
+    insertToolCall('send_message', 'complete', null, 'some-other-turn');
+    const clean = await deriveCapabilityDecision(deps(), makeContext(), 'managed_loop');
+    expect(clean?.auditEvent.action).toBe('obligation.create');
+    insertToolCall('send_message', 'complete', null, 'turn-d1');
+    const blocked = await deriveCapabilityDecision(
+      deps(),
+      makeContext({ sourceMessageId: 'TESTMSG-DEC-2', inboundSeq: 8802 }),
+      'managed_loop',
+    );
+    expect(blocked?.auditEvent.reasonCode).toBe('not_created_side_effect_uncertain');
+  });
+
+  it('FALSIFIER: a tool-durability write loss in the window blocks creation', async () => {
+    const decision = await deriveCapabilityDecision(deps({ writeLoss: true }), makeContext(), 'managed_loop');
+    expect(decision?.obligation).toBeUndefined();
+    expect(decision?.auditEvent.reasonCode).toBe('not_created_side_effect_uncertain');
   });
 
   it('re-deriving for the same source is dedup-suppressed, never a crash', async () => {

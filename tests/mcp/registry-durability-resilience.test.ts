@@ -55,7 +55,11 @@ describe('ToolRegistry.call durability containment', () => {
     mockWarn.mockClear();
   });
 
-  it('still invokes the tool handler and returns its result when recordToolCall throws', async () => {
+  it('REFUSES the tool call when recordToolCall throws (AS-04 fail-closed evidence)', async () => {
+    // Contract supersession (capability-obligation replay, spec §3.2b): a tool
+    // call whose durability record cannot be written must NOT execute — a
+    // missing row is indistinguishable from "no effect" and would poison the
+    // no-side-effect fold. This replaces the earlier fail-open containment.
     let handlerInvoked = false;
     const throwingDurability = {
       recordToolCall: () => {
@@ -78,9 +82,9 @@ describe('ToolRegistry.call durability containment', () => {
 
     const result = await registry.call('test_tool', { message: 'hi' }, makeSession());
 
-    expect(handlerInvoked).toBe(true);
-    expect(result.isError).toBeUndefined();
-    expect(JSON.parse(result.content[0].text)).toEqual({ echo: 'hi' });
+    expect(handlerInvoked).toBe(false);
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toBe('Tool call refused: durable evidence journaling failed.');
     // durabilityId never resolved, so the downstream lifecycle call must not fire.
     expect(throwingDurability.markToolExecuting).not.toHaveBeenCalled();
     expect(mockWarn).toHaveBeenCalledTimes(1);
@@ -167,7 +171,11 @@ describe('ToolRegistry.call durability containment', () => {
     expect(mockWarn).toHaveBeenCalledTimes(1);
   });
 
-  it('still returns the uniform deny reply when the deny-path recordToolCall throws (QR-239)', async () => {
+  it('refuses fail-closed (not the deny reply) when the deny-path recordToolCall throws', async () => {
+    // Contract supersession (capability-obligation replay, spec §3.2b): the
+    // evidence-journaling refusal now precedes admission, so a record-write
+    // failure refuses the call BEFORE the R1 denial can be evaluated. Still a
+    // non-disclosing error; nothing downstream fires.
     const throwingDurability = {
       recordToolCall: () => {
         throw new Error('SQLITE_BUSY: database is locked');
@@ -186,20 +194,16 @@ describe('ToolRegistry.call durability containment', () => {
       makeSession({ actorJid: '15550000001@s.whatsapp.net', conversationKey: '15550000009' }),
     );
 
-    // Uniform non-disclosing deny reply, unaffected by the durability throw
-    // (no authorizer is installed, so this is a denial regardless).
     expect(result.isError).toBe(true);
-    expect(result.content[0].text).toBe(ADMIN_REQUIRED_DENIAL('sensitive_tool'));
+    expect(result.content[0].text).toBe('Tool call refused: durable evidence journaling failed.');
     // recordToolCall threw, so nothing downstream in the deny-path's
     // denyId-chained writes can fire.
     expect(throwingDurability.markToolExecuting).not.toHaveBeenCalled();
     expect(throwingDurability.markToolComplete).not.toHaveBeenCalled();
-    // Two distinct warns: the failed durability record is observed first,
-    // then the R1 denial logs its bounded policy event.
-    expect(mockWarn).toHaveBeenCalledTimes(2);
+    // One warn: the failed durability record; the R1 denial is never reached.
+    expect(mockWarn).toHaveBeenCalledTimes(1);
     expect(mockWarn.mock.calls[0][0]).toMatchObject({ tool: 'sensitive_tool', stage: 'record' });
     expect(mockWarn.mock.calls[0][0]).not.toHaveProperty('err');
-    expect(mockWarn.mock.calls[1][0]).toMatchObject({ tool: 'sensitive_tool' });
   });
 
   // ---------------------------------------------------------------------------

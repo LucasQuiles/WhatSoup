@@ -246,7 +246,7 @@ import {
   QueuedDecisionConsumer,
 } from './pending-poll-health.ts';
 import { HandoffDistillCoordinator } from './handoff-distill-coordinator.ts';
-import { activateCapabilityObligationRuntime, buildObligationLiveFacts, CapabilityObligationRuntime, dispatchCapabilityObligationTurnViaSession } from './capability-obligation-runtime.ts';
+import { activateCapabilityObligationRuntime, buildObligationLiveFacts, CapabilityObligationRuntime, dispatchCapabilityObligationTurnViaSession, turnCorrelationFromContexts } from './capability-obligation-runtime.ts';
 import { handoffDistillerEnabled, handoffContextEnabled, handoffDistillModel } from './handoff-distill-config.ts';
 import { config } from '../../config.ts';
 import type { StartupNotificationEvent } from '../../core/startup-notification-controller.ts';
@@ -2850,13 +2850,13 @@ export class AgentRuntime implements Runtime {
     this.turnRecoverySupervisor.start(); // PRESTAGE-T4; idempotent
     this.turnRecoveryDeadman.start();
 
-    // Capability-obligation replay: opt-in only, per_chat only (all-or-inert).
-    // `!= null` treats an ABSENT field (e.g. a mocked config) as inert too.
+    // Obligation replay: opt-in, per_chat only; != null keeps ABSENT fields inert.
     if (
       config.capabilityObligations != null
       && this.sessionScope === 'per_chat'
       && this.capabilityObligationRuntime === null
     ) {
+      this.registry.setTurnCorrelationResolver((ck) => turnCorrelationFromContexts(this.perChatRuntimeTurnContexts, ck));
       this.capabilityObligationRuntime = activateCapabilityObligationRuntime({
         db: this.db,
         store: engine.capabilityObligations,
@@ -2872,6 +2872,7 @@ export class AgentRuntime implements Runtime {
         ),
         resolveMapKey: (jid) => this.resolvePerChatMapKey(jid),
         externalEffectFor: (name) => this.registry.externalEffectDeclaration(name),
+        writeLossSince: (ms) => this.registry.hadDurabilityWriteLossSince(ms),
       });
     }
   }
@@ -6193,8 +6194,7 @@ export class AgentRuntime implements Runtime {
       case 'tool_use':
         session?.trackToolStart(event.toolId);
         session?.tickWatchdog();
-        // D6: obligation-owned turns persist capability execution receipts from
-        // the typed stream correlation (no-op unless this mapKey has one).
+        // D6: obligation-owned turns persist execution receipts (no-op otherwise).
         this.capabilityObligationRuntime?.onStreamEvent(mapKey, event, this.obligationTurnIdFor(mapKey));
         // Post-turn gate: suppress phantom tool_use events (same rationale as assistant_text)
         if (mapKey !== undefined && this.postTurnGate.has(mapKey)) {
