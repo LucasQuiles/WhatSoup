@@ -20,16 +20,28 @@
  *
  * This scanner replaces that non-functional detector with an
  * order-independent, name-independent signal: a test file is an offender if
- * it spells out >=4 of the 7 canonical logger keys as `key: vi.fn(` and does
- * NOT import the shared helper. The threshold and signal shape come from
- * the same audit (staging/loggermock-residue-final.log under the WhatSoup
- * merge-gate project state).
+ * it spells out >=4 of the 7 canonical logger keys as `key: vi.fn(`. The
+ * threshold and signal shape come from the same audit
+ * (staging/loggermock-residue-final.log under the WhatSoup merge-gate
+ * project state).
+ *
+ * The signal is literal-scoped, NOT import-gated: importing the shared
+ * helper does not excuse inline literals in the same file. (The original
+ * scanner skipped any helper-importing file wholesale, which let dozens of
+ * files keep full inline mocks behind a ceremonial import — the 2026-08-11
+ * quality audit found 27 of 133 helper-importers still carrying >=4 inline
+ * keys.) Each violation records `importsHelper` so remediation lanes can
+ * pick the right idiom per file.
  *
  * Baseline lives at .claude/fitness/loggermock-baseline.json (ratchet
- * discipline shared with tmpdir/boundary baselines): growth (a NEW offender
- * outside the baseline) fails naming the file; shrink (a baseline entry that
- * stopped matching, e.g. because a lane migrated it to the shared helper)
- * also fails, until the baseline is edited — mirroring
+ * discipline shared with tmpdir/boundary baselines), schemaVersion 2:
+ * `{ schemaVersion, entries: [{ file, status, reason }] }` where status is
+ * 'permanent' (the file legitimately needs inline literals, e.g. logger
+ * self-tests exercising the real SUT shape) or 'debt' (to be migrated; the
+ * campaign completion signal is zero 'debt' entries). Growth (a NEW
+ * offender outside the baseline) fails naming the file; shrink (a baseline
+ * entry that stopped matching, e.g. because a lane migrated it) also
+ * fails, until the baseline is edited — mirroring
  * tests/scripts/console-ring-boundary-guard.test.ts's growth/shrink pair.
  *
  * Usage:
@@ -73,21 +85,23 @@ export const ISSUE_2243_OLD_REGEXES: RegExp[] = [
 // ---------------------------------------------------------------------------
 
 /**
- * Builds an anchored `key: vi.fn(` matcher for one canonical key. Anchored
- * on the left so `onError: vi.fn()` / `mockError: vi.fn()` cannot be
- * mistaken for the `error` key — a bare substring match would count both.
+ * Single-pass alternation over all 7 canonical keys, anchored on the left so
+ * `onError: vi.fn()` / `mockError: vi.fn()` cannot be mistaken for the
+ * `error` key — a bare substring match would count both. Consumed via
+ * `matchAll` (which iterates on an internal clone, never mutating this
+ * regex's `lastIndex`), so `matchedKeys` stays reentrant.
  */
-function keyPattern(key: string): RegExp {
-  return new RegExp(`(?:^|[{,\\s])['"]?${key}['"]?\\s*:\\s*vi\\.fn\\(`, 'm');
-}
-
-const KEY_PATTERNS: ReadonlyArray<readonly [string, RegExp]> = CANONICAL_KEYS.map(
-  (key) => [key, keyPattern(key)] as const,
+const KEY_ALTERNATION = new RegExp(
+  `(?:^|[{,\\s])['"]?(${CANONICAL_KEYS.join('|')})['"]?\\s*:\\s*vi\\.fn\\(`,
+  'gm',
 );
 
-/** Canonical logger keys spelled out as `key: vi.fn(` in this source, order-independent. */
+/** Canonical logger keys spelled out as `key: vi.fn(` in this source, in canonical order. */
 export function matchedKeys(source: string): string[] {
-  return KEY_PATTERNS.filter(([, re]) => re.test(source)).map(([key]) => key);
+  if (!source.includes('vi.fn(')) return [];
+  const found = new Set<string>();
+  for (const m of source.matchAll(KEY_ALTERNATION)) found.add(m[1]);
+  return CANONICAL_KEYS.filter((key) => found.has(key));
 }
 
 /** True if the source imports the shared no-op logger helper (any specifier form). */
@@ -104,16 +118,51 @@ export function oldRegexHits(source: string): boolean {
 // Baseline
 // ---------------------------------------------------------------------------
 
-export function loadBaseline(root: string): string[] {
+export const BASELINE_SCHEMA_VERSION = 2;
+
+export interface BaselineEntry {
+  file: string;
+  /** 'permanent': inline literals are the point (e.g. logger self-tests). 'debt': to be migrated. */
+  status: 'permanent' | 'debt';
+  reason: string;
+}
+
+/**
+ * Parses the schemaVersion-2 baseline. Returns [] when the file is absent
+ * (a legitimate empty ratchet), and null when the file EXISTS but is
+ * corrupt — missing entries, wrong schemaVersion, malformed JSON, an entry
+ * without file/status/reason. Callers must treat null as inconclusive, not
+ * as an empty baseline: a corrupt baseline says nothing about which
+ * offenders are sanctioned.
+ */
+export function loadBaselineEntries(root: string): BaselineEntry[] | null {
   const baselinePath = path.join(root, BASELINE_REL_PATH);
   if (!existsSync(baselinePath)) return [];
   try {
-    const data: Array<{ file: string }> = JSON.parse(readFileSync(baselinePath, 'utf8'));
-    return data.map((e) => e.file).sort();
-  } catch {
-    console.error(`[check-logger-mock-residue] WARNING: corrupt baseline at ${baselinePath}`);
-    return [];
+    const data = JSON.parse(readFileSync(baselinePath, 'utf8')) as {
+      schemaVersion?: number;
+      entries?: BaselineEntry[];
+    };
+    if (data.schemaVersion !== BASELINE_SCHEMA_VERSION || !Array.isArray(data.entries)) {
+      throw new Error(`expected { schemaVersion: ${BASELINE_SCHEMA_VERSION}, entries: [...] }`);
+    }
+    for (const e of data.entries) {
+      if (typeof e.file !== 'string' || (e.status !== 'permanent' && e.status !== 'debt') || typeof e.reason !== 'string' || e.reason.length === 0) {
+        throw new Error(`malformed entry: ${JSON.stringify(e)}`);
+      }
+    }
+    return data.entries;
+  } catch (err) {
+    console.error(`[check-logger-mock-residue] WARNING: corrupt baseline at ${baselinePath} — ${err instanceof Error ? err.message : String(err)}`);
+    return null;
   }
+}
+
+/** Sorted baseline file names (ratchet comparison view; corrupt reads as empty here — use loadBaselineEntries to distinguish). */
+export function loadBaseline(root: string): string[] {
+  return (loadBaselineEntries(root) ?? [])
+    .map((e) => e.file)
+    .sort();
 }
 
 // ---------------------------------------------------------------------------
@@ -123,6 +172,8 @@ export function loadBaseline(root: string): string[] {
 export interface Violation {
   file: string;
   keysMatched: string[];
+  /** Whether the file also imports the shared helper — picks the remediation idiom, never excuses the literal. */
+  importsHelper: boolean;
 }
 
 function walk(dir: string, acc: string[] = []): string[] {
@@ -142,10 +193,11 @@ function walk(dir: string, acc: string[] = []): string[] {
 
 /**
  * All current test files that spell out >=4 canonical logger keys as
- * `key: vi.fn(` and do not import the shared helper. Baseline-blind by
- * design (mirrors tests/scripts/console-ring-boundary-guard.test.ts's
- * consoleToSrcEdges()) — ratchet growth/shrink comparison happens at the
- * call site (CLI `run()` below, or the ratchet test).
+ * `key: vi.fn(` — importing the shared helper does NOT excuse the literal
+ * (literal-scoped signal; see header). Baseline-blind by design (mirrors
+ * tests/scripts/console-ring-boundary-guard.test.ts's consoleToSrcEdges())
+ * — ratchet growth/shrink comparison happens at the call site (CLI `run()`
+ * below, or the ratchet test).
  */
 export function scan(root: string): Violation[] {
   const testsRoot = path.join(root, TESTS_DIR);
@@ -169,10 +221,9 @@ export function scan(root: string): Violation[] {
   for (const f of files) {
     const rel = path.relative(root, f).split(path.sep).join('/');
     const source = readFileSync(f, 'utf8');
-    if (importsHelper(source)) continue;
     const keys = matchedKeys(source);
     if (keys.length >= OFFENDER_THRESHOLD) {
-      out.push({ file: rel, keysMatched: keys });
+      out.push({ file: rel, keysMatched: keys, importsHelper: importsHelper(source) });
     }
   }
   return out.sort((a, b) => a.file.localeCompare(b.file));
@@ -187,18 +238,28 @@ export function run(argv: string[] = process.argv.slice(2), root: string = ROOT)
 
   try {
     const violations = scan(root);
-    const baseline = new Set(loadBaseline(root));
+    const entries = loadBaselineEntries(root);
+    if (entries === null) {
+      // Corrupt baseline: no way to tell sanctioned offenders from growth.
+      // INCONCLUSIVE, never a pass — mirrors the zero-files floor above.
+      throw new Error('baseline file exists but is corrupt — fix .claude/fitness/loggermock-baseline.json before certifying');
+    }
+    const baseline = new Set(entries.map((e) => e.file));
     const actual = new Set(violations.map((v) => v.file));
 
     const growth = violations.filter((v) => !baseline.has(v.file));
-    const shrink = [...baseline].filter((f) => !actual.has(f)).sort();
+    const shrink = entries
+      .map((e) => e.file)
+      .filter((f) => !actual.has(f))
+      .sort();
+    const debt = entries.filter((e) => e.status === 'debt').length;
 
     if (report) {
-      console.log(`logger-mock-baseline: ${baseline.size} known offenders`);
+      console.log(`logger-mock-baseline: ${baseline.size} known offender(s) — ${debt} debt, ${baseline.size - debt} permanent`);
       console.log(`current scan: ${violations.length} offender(s), ${growth.length} new, ${shrink.length} shrunk`);
       if (growth.length > 0) {
         console.log(`\nNEW offender(s) (not in baseline):\n`);
-        for (const v of growth) console.log(`  ${v.file}  (keys: ${v.keysMatched.join(', ')})`);
+        for (const v of growth) console.log(`  ${v.file}  (keys: ${v.keysMatched.join(', ')}; imports helper: ${v.importsHelper ? 'yes' : 'no'})`);
       }
       if (shrink.length > 0) {
         console.log(`\nBaseline entries no longer matching (update the baseline):\n`);
@@ -209,14 +270,15 @@ export function run(argv: string[] = process.argv.slice(2), root: string = ROOT)
     }
 
     if (growth.length === 0 && shrink.length === 0) {
-      console.log('guard:logger-mock-residue — passed (baseline matches current scan).');
+      const completion = debt === 0 ? ' Zero debt entries — #2977 remediation complete; remaining entries are permanent.' : ` ${debt} debt entr(y/ies) remain.`;
+      console.log(`guard:logger-mock-residue — passed (baseline matches current scan).${completion}`);
       return 0;
     }
 
     console.error(`guard:logger-mock-residue — FAIL — ${growth.length} new offender(s), ${shrink.length} stale baseline entr(y/ies).`);
-    for (const v of growth) console.error(`  NEW: ${v.file}`);
+    for (const v of growth) console.error(`  NEW: ${v.file}${v.importsHelper ? '  (imports the helper but still spells out inline literals)' : ''}`);
     for (const f of shrink) console.error(`  STALE BASELINE ENTRY: ${f}`);
-    console.error('\n  New offenders: import tests/helpers/logger-mock.ts instead of a local mock, or update the baseline deliberately.');
+    console.error('\n  New offenders: replace the inline literal with tests/helpers/logger-mock.ts APIs (importing the helper alone does not excuse the literal), or add a status/reason baseline entry deliberately.');
     console.error('  Stale entries: the file no longer matches (e.g. migrated) — remove it from the baseline in the same change.');
     return 1;
   } catch (err) {
