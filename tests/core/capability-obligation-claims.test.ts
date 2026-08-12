@@ -27,6 +27,29 @@ afterEach(() => {
   db.close();
 });
 
+// D6: settlement additionally requires the minted turn's terminal record to
+// name the receipt's logical turn — seed both halves of that chain.
+function seedMintedTurnTerminal(obligationId: number, attempt: number, logicalTurnId: string): void {
+  const seq = Number(
+    db.raw
+      .prepare(
+        `INSERT INTO inbound_events (message_id, conversation_key, chat_jid, routed_to)
+         VALUES (?, 'conv-claims', 'test-dm-target@lid', 'agent')`,
+      )
+      .run(`obl:${obligationId}:${attempt}`).lastInsertRowid,
+  );
+  db.raw
+    .prepare(
+      `INSERT INTO turn_terminal_records (
+         scope, conversation_key, delivery_jid, inbound_seq, inbound_seq_key,
+         logical_turn_id, manager_id, generation, attempt_kind,
+         inbound_disposition, delivery_kind, delivery_op_id, reply_guarantee_disarmed
+       ) VALUES ('per_chat', 'conv-claims', 'test-dm-target@lid', ?, ?, ?, 'mgr-1', 1,
+                 'replied', 'completed', 'echoed', 424242, 0)`,
+    )
+    .run(seq, seq, logicalTurnId);
+}
+
 function seedObligation(over: Partial<Record<string, unknown>> = {}): number {
   let id = 0;
   withTransaction(db, () => {
@@ -53,6 +76,7 @@ function seedObligation(over: Partial<Record<string, unknown>> = {}): number {
         requiredCapability: 'child_process_tools',
         capabilityParams: '{"skill":"watch"}',
         inputDigest: 'aa'.repeat(32),
+        sourceDigest: 'bb'.repeat(32),
         retainedMedia: null,
         creationReason: 'typed_deferral_signal',
       },
@@ -130,7 +154,9 @@ describe('fenced settlement', () => {
       outputEvidence: { resolver: 'qvideo', ok: true },
       claimEpoch: claim.claimEpoch,
       attemptNumber: claim.attemptCount,
+      sourceDigest: 'bb'.repeat(32),
     });
+    seedMintedTurnTerminal(id, claim.attemptCount, 'turn-1');
     const settled = store.settleCompleted(id, fence, {
       executionReceiptId: receiptId,
       completionProofId: 'terminal-proof-9',

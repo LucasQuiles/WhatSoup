@@ -63,6 +63,7 @@ function seedObligation(over: Partial<Record<string, unknown>> = {}): number {
         requiredCapability: 'child_process_tools',
         capabilityParams: '{"skill":"watch"}',
         inputDigest: INPUT_DIGEST,
+        sourceDigest: 'bb'.repeat(32),
         retainedMedia: null,
         creationReason: 'typed_deferral_signal',
       },
@@ -99,6 +100,7 @@ describe('D6 falsifier — settlement receipts are obligation- and attempt-bound
       outputEvidence: { ok: true },
       claimEpoch: otherFence.claimEpoch,
       attemptNumber: otherFence.attemptCount,
+      sourceDigest: 'bb'.repeat(32),
     });
 
     const settled = store.settleCompleted(victim, victimFence, {
@@ -135,6 +137,7 @@ describe('D6 falsifier — settlement receipts are obligation- and attempt-bound
       outputEvidence: null,
       claimEpoch: first.claimEpoch,
       attemptNumber: first.attemptCount,
+      sourceDigest: 'bb'.repeat(32),
     });
     const requeued = store.requeueObligation(id, first, { backoffSeconds: 0 });
     expect(requeued.applied).toBe(true);
@@ -163,6 +166,7 @@ describe('D6 falsifier — settlement receipts are obligation- and attempt-bound
       outputEvidence: null,
       claimEpoch: fence.claimEpoch,
       attemptNumber: fence.attemptCount,
+      sourceDigest: 'bb'.repeat(32),
     });
     const settled = store.settleCompleted(id, fence, {
       executionReceiptId: errorReceipt,
@@ -186,6 +190,7 @@ describe('D6 falsifier — settlement receipts are obligation- and attempt-bound
       outputEvidence: null,
       claimEpoch: fence.claimEpoch,
       attemptNumber: fence.attemptCount,
+      sourceDigest: 'bb'.repeat(32),
     });
     const settled = store.settleCompleted(id, fence, {
       executionReceiptId: mismatched,
@@ -211,6 +216,7 @@ describe('D6 falsifier — settlement receipts are obligation- and attempt-bound
       outputEvidence: null,
       claimEpoch: otherFence.claimEpoch,
       attemptNumber: otherFence.attemptCount,
+      sourceDigest: 'bb'.repeat(32),
     });
     expect(() =>
       db.raw

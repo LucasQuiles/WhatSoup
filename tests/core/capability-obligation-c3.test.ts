@@ -60,6 +60,7 @@ function decision(over: Partial<Record<string, unknown>> = {}): CapabilityDecisi
       requiredCapability: 'child_process_tools',
       capabilityParams: '{"skill":"watch"}',
       inputDigest: 'aa'.repeat(32),
+      sourceDigest: 'bb'.repeat(32),
       retainedMedia: null,
       creationReason: 'typed_deferral_signal',
       ...over,

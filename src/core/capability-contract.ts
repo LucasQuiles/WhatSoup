@@ -88,6 +88,8 @@ export type CapabilityRequirementDecision =
       capability: string;
       /** Privacy-safe: the token, the matched hostname, or the media class — never the full input. */
       normalizedMatchValue: string;
+      /** Canonical execution source (matched URL token / post-token remainder); null for media rules. */
+      sourceToken: string | null;
       inputDigest: string;
     }
   | { outcome: 'no_match'; contractVersion: string; inputDigest: string }
@@ -114,11 +116,22 @@ export function capabilityInputDigest(input: CapabilityContractInput): string {
 interface RuleMatch {
   rule: CapabilityContractRule;
   normalizedMatchValue: string;
+  /**
+   * The canonical SOURCE the capability must execute against: the exact
+   * matched URL token for url_host rules; the post-token remainder for
+   * leading_token rules; null for media_class rules (the retained media digest
+   * is the source identity there). D6 receipts must reproduce a digest of this
+   * from the execution result's structured evidence.
+   */
+  sourceToken: string | null;
 }
 
 function matchLeadingToken(rule: Extract<CapabilityContractRule, { kind: 'leading_token' }>, text: string): RuleMatch | undefined {
-  const first = text.trim().split(/\s+/, 1)[0] ?? '';
-  return first === rule.token ? { rule, normalizedMatchValue: rule.token } : undefined;
+  const trimmed = text.trim();
+  const first = trimmed.split(/\s+/, 1)[0] ?? '';
+  if (first !== rule.token) return undefined;
+  const remainder = trimmed.slice(first.length).trim();
+  return { rule, normalizedMatchValue: rule.token, sourceToken: remainder };
 }
 
 function matchUrlHost(rule: Extract<CapabilityContractRule, { kind: 'url_host' }>, text: string): RuleMatch | undefined {
@@ -134,13 +147,15 @@ function matchUrlHost(rule: Extract<CapabilityContractRule, { kind: 'url_host' }
     if (url.protocol !== 'http:' && url.protocol !== 'https:') continue;
     if (url.username !== '' || url.password !== '') continue; // userinfo is never accepted
     const hostname = url.hostname.toLowerCase();
-    if (allow.has(hostname)) return { rule, normalizedMatchValue: hostname };
+    if (allow.has(hostname)) return { rule, normalizedMatchValue: hostname, sourceToken: token };
   }
   return undefined;
 }
 
 function matchMediaClass(rule: Extract<CapabilityContractRule, { kind: 'media_class' }>, mediaClass: string | null | undefined): RuleMatch | undefined {
-  return mediaClass === rule.mediaClass ? { rule, normalizedMatchValue: rule.mediaClass } : undefined;
+  return mediaClass === rule.mediaClass
+    ? { rule, normalizedMatchValue: rule.mediaClass, sourceToken: null }
+    : undefined;
 }
 
 /**
@@ -190,8 +205,23 @@ export function evaluateCapabilityContract(
     ruleKind: only.rule.kind,
     capability: only.rule.capability,
     normalizedMatchValue: only.normalizedMatchValue,
+    sourceToken: only.sourceToken,
     inputDigest,
   };
+}
+
+/**
+ * The digest a D6 receipt must reproduce from execution evidence: the retained
+ * media sha256 for media obligations, else sha256 of the canonical source
+ * token. Computed independently on both sides — from the persisted inbound at
+ * creation, and from the resolver's structured evidence at receipt time.
+ */
+export function capabilitySourceDigest(
+  sourceToken: string | null,
+  mediaSha256: string | null,
+): string {
+  if (mediaSha256 !== null) return mediaSha256;
+  return createHash('sha256').update(sourceToken ?? '').digest('hex');
 }
 
 // ── Instance activation options (`agentOptions.capabilityObligations`) ───────
@@ -225,6 +255,13 @@ const receiptRuleSchema = z.object({
   commandMarker: z.string().min(1),
   /** Minimum non-error output bytes for an 'ok' receipt. */
   minOutputBytes: z.number().int().positive(),
+  /**
+   * Structured-evidence marker the resolver EMITS in its result (e.g.
+   * 'WATCH_EVIDENCE:'). The remainder of that line must be JSON carrying the
+   * observed `source` (and `mediaSha256` for media work); the receipt's source
+   * digest is DERIVED from it — never inferred from shell text.
+   */
+  evidenceMarker: z.string().min(1),
 });
 
 const capabilityObligationsOptionsSchema = z.object({

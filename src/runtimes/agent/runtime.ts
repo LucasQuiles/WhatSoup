@@ -6194,14 +6194,15 @@ export class AgentRuntime implements Runtime {
       case 'tool_use':
         session?.trackToolStart(event.toolId);
         session?.tickWatchdog();
-        // D6: obligation-owned turns persist execution receipts (no-op otherwise).
-        this.capabilityObligationRuntime?.onStreamEvent(mapKey, event, this.obligationTurnIdFor(mapKey));
         // Post-turn gate: suppress phantom tool_use events (same rationale as assistant_text)
         if (mapKey !== undefined && this.postTurnGate.has(mapKey)) {
           log.info({ mapKey, toolName: event.toolName }, 'post-turn gate: suppressed phantom tool_use');
           break;
         }
         if (this.isSilentCompact(mapKey)) break;
+        // D6 receipt tap AFTER the phantom/compact gates: a suppressed provider
+        // event must never seed receipt tracking.
+        this.capabilityObligationRuntime?.onStreamEvent(mapKey, event, this.obligationTurnIdFor(mapKey));
 
         if (mapKey !== undefined && this.pendingSystemResults.count(mapKey) === 0) {
           const contexts = this.perChatRuntimeTurnContexts.get(mapKey);
@@ -6248,7 +6249,6 @@ export class AgentRuntime implements Runtime {
         session?.trackToolEnd(event.toolId);
         session?.tickWatchdog();
         tracker?.onToolEnd(event.toolId);
-        // D6: correlated result for a tracked obligation invocation → receipt.
         this.capabilityObligationRuntime?.onStreamEvent(mapKey, event, this.obligationTurnIdFor(mapKey));
 
         // Suppress the auto-resolved "Answer questions?" error for AskUserQuestion

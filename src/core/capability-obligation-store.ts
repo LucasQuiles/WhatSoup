@@ -76,8 +76,14 @@ export interface CapabilityObligationInsertParams {
   requiredCapability: string;
   /** Canonical (sorted-key) JSON string — ambiguous JSON equality is forbidden. */
   capabilityParams: string;
-  /** D1 input digest (64 hex) — execution receipts must reproduce it (D6). */
+  /** D1 input digest (64 hex) — the obligation's evaluation identity. */
   inputDigest: string;
+  /**
+   * D6 execution-source digest (64 hex): media sha256, or sha256 of the
+   * canonical source token. Receipts must DERIVE and reproduce this from the
+   * resolver's structured evidence.
+   */
+  sourceDigest: string;
   retainedMedia: CapabilityObligationRetainedMedia | null;
   creationReason: string;
 }
@@ -121,6 +127,12 @@ export function validateCapabilityDecisionParams(decision: CapabilityDecisionPar
     }
     if (!/^[0-9a-f]{64}$/.test(obligation.inputDigest)) {
       throw new Error('Capability obligation requires a 64-hex input digest');
+    }
+    if (!/^[0-9a-f]{64}$/.test(obligation.sourceDigest)) {
+      throw new Error('Capability obligation requires a 64-hex source digest');
+    }
+    if (obligation.retainedMedia !== null && obligation.sourceDigest !== obligation.retainedMedia.sha256) {
+      throw new Error('Capability obligation source digest must equal the retained media digest');
     }
     try {
       JSON.parse(obligation.capabilityParams);
@@ -180,10 +192,10 @@ export class CapabilityObligationStore {
            sender_jid, sender_name, is_group, group_name, scope,
            origin_recovery_job_id, replay_text, content_type_hint,
            contract_version, required_capability, capability_params, input_digest,
-           creation_evidence_event_id,
+           source_digest, creation_evidence_event_id,
            retained_media_path, media_sha256, media_bytes, retention_policy_version,
            state, creation_reason
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         params.sourceInboundSeq,
@@ -202,6 +214,7 @@ export class CapabilityObligationStore {
         params.requiredCapability,
         params.capabilityParams,
         params.inputDigest,
+        params.sourceDigest,
         creationEvidenceEventId,
         params.retainedMedia?.path ?? null,
         params.retainedMedia?.sha256 ?? null,
@@ -273,7 +286,7 @@ export class CapabilityObligationStore {
         `SELECT id, source_inbound_seq, source_message_id, conversation_key, delivery_jid,
                 sender_jid, sender_name, is_group, group_name, replay_text, content_type_hint,
                 contract_version, required_capability, capability_params, input_digest,
-                retained_media_path, media_sha256, media_bytes, attempt_count,
+                source_digest, retained_media_path, media_sha256, media_bytes, attempt_count,
                 (retained_media_path IS NOT NULL AND ? IS NOT NULL
                   AND datetime(created_at, '+' || CAST(? AS INTEGER) || ' seconds') <= datetime('now')
                 ) AS media_expired
@@ -305,6 +318,7 @@ export class CapabilityObligationStore {
       requiredCapability: r.required_capability as string,
       capabilityParams: r.capability_params as string,
       inputDigest: r.input_digest as string,
+      sourceDigest: r.source_digest as string,
       retainedMediaPath: (r.retained_media_path as string | null) ?? null,
       mediaSha256: (r.media_sha256 as string | null) ?? null,
       mediaBytes: (r.media_bytes as number | null) ?? null,
@@ -433,7 +447,14 @@ export class CapabilityObligationStore {
              AND r.result_status = 'ok'
              AND r.contract_version = o.contract_version
              AND r.input_digest = o.input_digest
-             AND (o.media_sha256 IS NULL OR r.media_digest = o.media_sha256)`,
+             AND r.source_digest = o.source_digest
+             AND (o.media_sha256 IS NULL OR r.media_digest = o.media_sha256)
+             AND EXISTS (
+               SELECT 1 FROM turn_terminal_records t
+               JOIN inbound_events ie ON ie.seq = t.inbound_seq
+               WHERE ie.message_id = 'obl:' || o.id || ':' || o.attempt_count
+                 AND t.logical_turn_id = r.logical_turn_id
+             )`,
         )
         .get(proofs.executionReceiptId, id, fence.claimToken, fence.claimEpoch);
       if (bound === undefined) return { applied: false, reason: 'receipt_binding_mismatch' as const };
@@ -593,14 +614,16 @@ export class CapabilityObligationStore {
     /** D6: the receipt names the exact claim/attempt it proves. */
     claimEpoch: number;
     attemptNumber: number;
+    /** D6: DERIVED from the resolver's structured evidence; null = underivable. */
+    sourceDigest: string | null;
   }): number {
     const result = this.db.raw
       .prepare(
         `INSERT INTO capability_execution_receipts
            (obligation_id, logical_turn_id, tool_use_id, skill_name, contract_version,
             input_digest, media_digest, result_status, output_evidence,
-            claim_epoch, attempt_number)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            claim_epoch, attempt_number, source_digest)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         params.obligationId,
@@ -614,6 +637,7 @@ export class CapabilityObligationStore {
         params.outputEvidence == null ? null : JSON.stringify(params.outputEvidence),
         params.claimEpoch,
         params.attemptNumber,
+        params.sourceDigest,
       );
     return Number(result.lastInsertRowid);
   }
@@ -709,6 +733,7 @@ export interface CapabilityObligationDueRow {
   requiredCapability: string;
   capabilityParams: string;
   inputDigest: string;
+  sourceDigest: string;
   retainedMediaPath: string | null;
   mediaSha256: string | null;
   mediaBytes: number | null;

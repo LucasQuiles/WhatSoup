@@ -106,6 +106,7 @@ function seedObligation(over: Partial<Record<string, unknown>> = {}): number {
         requiredCapability: 'child_process_tools',
         capabilityParams: '{"skill":"watch"}',
         inputDigest: 'aa'.repeat(32),
+        sourceDigest: (over.retainedMedia as { sha256?: string } | null)?.sha256 ?? 'bb'.repeat(32),
         retainedMedia: (over.retainedMedia as never) ?? null,
         creationReason: 'typed_deferral_signal',
       },
@@ -230,7 +231,25 @@ describe('settlement (D6)', () => {
       outputEvidence: { ok: true },
       claimEpoch: 1,
       attemptNumber: 1,
+      sourceDigest: 'bb'.repeat(32),
     });
+    db.raw
+      .prepare(
+        `INSERT INTO inbound_events (message_id, conversation_key, chat_jid, routed_to)
+         VALUES (?, 'conv-sup', 'test-dm-target@lid', 'agent')`,
+      )
+      .run(`obl:${id}:1`);
+    const seq = (db.raw.prepare('SELECT seq FROM inbound_events WHERE message_id = ?').get(`obl:${id}:1`) as { seq: number }).seq;
+    db.raw
+      .prepare(
+        `INSERT INTO turn_terminal_records (
+           scope, conversation_key, delivery_jid, inbound_seq, inbound_seq_key,
+           logical_turn_id, manager_id, generation, attempt_kind,
+           inbound_disposition, delivery_kind, delivery_op_id, reply_guarantee_disarmed
+         ) VALUES ('per_chat', 'conv-sup', 'test-dm-target@lid', ?, ?, 'turn-1', 'mgr-1', 1,
+                   'replied', 'completed', 'echoed', 424242, 0)`,
+      )
+      .run(seq, seq);
     const { supervisor } = makeSupervisor({
       settlement: new Map([[id, { kind: 'completed', executionReceiptId: receiptId, completionProofId: 'wt-1' }]]),
     });

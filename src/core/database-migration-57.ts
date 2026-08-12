@@ -74,6 +74,9 @@ export function runMigration57(db: DatabaseSync): void {
       required_capability TEXT NOT NULL,
       capability_params TEXT NOT NULL CHECK (json_valid(capability_params)),
       input_digest TEXT NOT NULL CHECK (length(input_digest) = 64),
+      -- D6: the digest execution evidence must reproduce (media sha256, or
+      -- sha256 of the canonical source token) — derived at creation.
+      source_digest TEXT NOT NULL CHECK (length(source_digest) = 64),
       creation_evidence_event_id INTEGER,
       -- retained-media identity (immutable; all-or-none; D3)
       retained_media_path TEXT,
@@ -202,6 +205,9 @@ export function runMigration57(db: DatabaseSync): void {
       -- D6: the receipt names the exact claim/attempt it proves.
       claim_epoch INTEGER NOT NULL CHECK (claim_epoch >= 1),
       attempt_number INTEGER NOT NULL CHECK (attempt_number >= 1),
+      -- D6: DERIVED from the resolver's structured evidence (never copied);
+      -- NULL = evidence absent/underivable, which can never complete.
+      source_digest TEXT CHECK (source_digest IS NULL OR length(source_digest) = 64),
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       UNIQUE (obligation_id, tool_use_id)
     );
@@ -228,6 +234,7 @@ export function runMigration57(db: DatabaseSync): void {
       sender_jid, sender_name, is_group, group_name, scope,
       origin_recovery_job_id, replay_text, content_type_hint,
       contract_version, required_capability, capability_params, input_digest,
+      source_digest,
       creation_evidence_event_id, retained_media_path, media_sha256,
       media_bytes, retention_policy_version, creation_reason, created_at
     ON capability_obligations
@@ -307,7 +314,15 @@ export function runMigration57(db: DatabaseSync): void {
             AND r.result_status = 'ok'
             AND r.contract_version = NEW.contract_version
             AND r.input_digest = NEW.input_digest
+            AND r.source_digest = NEW.source_digest
             AND (NEW.media_sha256 IS NULL OR r.media_digest = NEW.media_sha256)
+            -- The receipt's turn must be the MINTED turn that terminalized.
+            AND EXISTS (
+              SELECT 1 FROM turn_terminal_records t
+              JOIN inbound_events ie ON ie.seq = t.inbound_seq
+              WHERE ie.message_id = 'obl:' || NEW.id || ':' || NEW.attempt_count
+                AND t.logical_turn_id = r.logical_turn_id
+            )
         )
       )
     BEGIN

@@ -224,7 +224,7 @@ describe('parseCapabilityObligationsOptions — all-or-inert activation', () => 
     mediaRoot: '/var/obligation-media',
     retentionPolicyVersion: 'policy/1',
     retentionHorizonDays: 30,
-    receipt: { toolName: 'Bash', commandMarker: 'watch.py', minOutputBytes: 8 },
+    receipt: { toolName: 'Bash', commandMarker: 'watch.py', minOutputBytes: 8, evidenceMarker: 'WATCH_EVIDENCE:' },
     attestation: {
       skillName: 'watch',
       skillVersion: '1.0.0',

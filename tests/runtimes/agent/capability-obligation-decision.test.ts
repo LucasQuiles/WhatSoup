@@ -39,7 +39,7 @@ const OPTIONS = parseCapabilityObligationsOptions({
   mediaRoot: '/unused-parse-time-root',
   retentionPolicyVersion: 'policy/1',
   retentionHorizonDays: 30,
-  receipt: { toolName: 'Bash', commandMarker: 'watch.py', minOutputBytes: 8 },
+  receipt: { toolName: 'Bash', commandMarker: 'watch.py', minOutputBytes: 8, evidenceMarker: 'WATCH_EVIDENCE:' },
   attestation: {
     skillName: 'watch',
     skillVersion: '1.0.0',
@@ -207,6 +207,8 @@ describe('D2 effect fold', () => {
       contractVersion: 'test-contract/1',
       creationReason: 'typed_deferral_signal',
     });
+    // D6: the source digest is derived from the matched URL token itself.
+    expect(decision?.obligation?.sourceDigest).toMatch(/^[0-9a-f]{64}$/);
     // The derived decision must be applicable through the REAL C3 store path.
     let outcome: { obligationId: number | null } = { obligationId: null };
     withTransaction(db, () => {
@@ -305,6 +307,8 @@ describe('D3 media staging', () => {
     });
     const decision = await deriveCapabilityDecision(deps(), context, 'managed_loop');
     expect(decision?.obligation?.retainedMedia).toMatchObject({ bytes: 15, policyVersion: 'policy/1' });
+    // Media obligations: source digest IS the retained media digest.
+    expect(decision?.obligation?.sourceDigest).toBe(decision?.obligation?.retainedMedia?.sha256);
     const retained = decision?.obligation?.retainedMedia;
     expect(retained?.path.startsWith(join(dir, 'retained'))).toBe(true);
     expect(retained?.sha256).toMatch(/^[0-9a-f]{64}$/);

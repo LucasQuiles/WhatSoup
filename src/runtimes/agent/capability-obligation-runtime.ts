@@ -26,6 +26,7 @@
  * The whole feature is all-or-inert: this module is only constructed when
  * `agentOptions.capabilityObligations` parsed with `enabled: true`.
  */
+import { createHash } from 'node:crypto';
 import { hostname, userInfo } from 'node:os';
 
 import type { CapabilityAttestationBinding } from '../../core/capability-attestation.ts';
@@ -125,49 +126,37 @@ export function turnCorrelationFromContexts(
 }
 
 /**
- * D6 source binding: an execution invocation counts for THIS obligation only
- * when its input demonstrably carries the obligation's source — the retained
- * media path or digest for media obligations, else a verbatim source URL token
- * from the replay text, else (token-only inputs with a non-empty remainder)
- * that remainder. A marker match alone is never source-bound.
+ * D6 execution evidence: the resolver EMITS a structured marker line in its
+ * result (`<evidenceMarker>{json}`); the receipt's source digest is DERIVED
+ * from that evidence — media work must report the sha256 of the bytes it
+ * actually processed, everything else the exact source it executed against.
+ * Shell text is never inferred from. Absent/malformed evidence derives null,
+ * which records as an error receipt and can never complete an obligation.
  */
-export function invocationBindsSource(
-  obligation: Pick<CapabilityObligationDueRow, 'replayText' | 'retainedMediaPath' | 'mediaSha256'>,
-  toolInput: Record<string, unknown>,
-): boolean {
-  const inputText = Object.values(toolInput)
-    .filter((value): value is string => typeof value === 'string')
-    .join(' ');
-  if (inputText.length === 0) return false;
-  if (obligation.retainedMediaPath !== null) {
-    return (
-      inputText.includes(obligation.retainedMediaPath)
-      || (obligation.mediaSha256 !== null && inputText.includes(obligation.mediaSha256))
-    );
+export function parseExecutionEvidence(
+  marker: string,
+  content: string,
+): { source?: unknown; mediaSha256?: unknown } | null {
+  const at = content.indexOf(marker);
+  if (at === -1) return null;
+  const line = content.slice(at + marker.length).split('\n', 1)[0] ?? '';
+  try {
+    const parsed = JSON.parse(line.trim()) as unknown;
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null;
+    return parsed as { source?: unknown; mediaSha256?: unknown };
+  } catch {
+    // intentional: malformed evidence is simply not evidence — the receipt
+    // records as error rather than guessing at what executed.
+    return null;
   }
-  const urlTokens = obligation.replayText.split(/\s+/).filter((token) => {
-    try {
-      const url = new URL(token);
-      return url.protocol === 'http:' || url.protocol === 'https:';
-    } catch {
-      // intentional: non-URL tokens are simply not source anchors — nothing to
-      // bind against, so they are filtered rather than treated as errors.
-      return false;
-    }
-  });
-  if (urlTokens.length > 0) return urlTokens.some((token) => inputText.includes(token));
-  // Leading-token obligations: the remainder after the command IS the source.
-  const remainder = obligation.replayText.trim().replace(/^\S+\s*/, '').trim();
-  return remainder.length > 0 && inputText.includes(remainder);
 }
 
 /**
  * Does a provider tool invocation EXECUTE the declared capability? Loading a
- * skill (the provider's Skill tool) is NOT execution — the live /watch skill
- * subsequently runs its resolver through the execution tool (e.g. Bash with
- * `watch.py`), and only that invocation is capability execution. The rule is
- * instance-declared (options.receipt): exact execution tool name plus a marker
- * that must appear in some string field of the invocation input.
+ * skill (the provider's Skill tool) is NOT execution — only an invocation of
+ * the instance-declared execution tool whose input carries the declared marker
+ * is tracked. This is only the TRACKING filter; proof comes from the
+ * structured result evidence below.
  */
 export function matchesCapabilityExecution(
   rule: CapabilityObligationsOptions['receipt'],
@@ -178,6 +167,21 @@ export function matchesCapabilityExecution(
   return Object.values(toolInput).some(
     (value) => typeof value === 'string' && value.includes(rule.commandMarker),
   );
+}
+
+/** Derive the observed source digest from parsed evidence, or null. */
+export function deriveObservedSourceDigest(
+  obligation: Pick<CapabilityObligationDueRow, 'retainedMediaPath'>,
+  evidence: { source?: unknown; mediaSha256?: unknown } | null,
+): string | null {
+  if (evidence === null) return null;
+  if (obligation.retainedMediaPath !== null) {
+    return typeof evidence.mediaSha256 === 'string' && /^[0-9a-f]{64}$/.test(evidence.mediaSha256)
+      ? evidence.mediaSha256
+      : null;
+  }
+  if (typeof evidence.source !== 'string' || evidence.source.length === 0) return null;
+  return createHash('sha256').update(evidence.source).digest('hex');
 }
 
 interface ActiveObligationTurn {
@@ -332,12 +336,7 @@ export class CapabilityObligationRuntime {
     const active = this.activeTurns.get(mapKey);
     if (active === undefined) return;
     if (event.type === 'tool_use') {
-      // D6: rule match alone is NOT execution for this obligation — the
-      // invocation must also bind the obligation's SOURCE (URL / media).
-      if (
-        matchesCapabilityExecution(this.options.receipt, event.toolName, event.toolInput)
-        && invocationBindsSource(active.obligation, event.toolInput)
-      ) {
+      if (matchesCapabilityExecution(this.options.receipt, event.toolName, event.toolInput)) {
         active.pendingToolIds.set(event.toolId, event.toolName);
       }
       return;
@@ -346,9 +345,16 @@ export class CapabilityObligationRuntime {
     const toolName = active.pendingToolIds.get(event.toolId);
     if (toolName === undefined) return;
     active.pendingToolIds.delete(event.toolId);
-    // D6 item 3: an 'ok' receipt needs a non-error result AND the declared
-    // minimum of output evidence — a bare exit is not proof of processing.
-    const evidentOk = !event.isError && event.content.length >= this.options.receipt.minOutputBytes;
+    // D6 item 3: an 'ok' receipt needs a non-error result, the declared
+    // minimum of output, AND structured evidence whose DERIVED source digest
+    // reproduces the obligation's — never inference from shell text.
+    const evidence = parseExecutionEvidence(this.options.receipt.evidenceMarker, event.content);
+    const derivedSourceDigest = deriveObservedSourceDigest(active.obligation, evidence);
+    const evidentOk =
+      !event.isError
+      && event.content.length >= this.options.receipt.minOutputBytes
+      && derivedSourceDigest !== null
+      && derivedSourceDigest === active.obligation.sourceDigest;
     try {
       this.store.recordExecutionReceipt({
         obligationId: active.obligation.id,
@@ -361,7 +367,13 @@ export class CapabilityObligationRuntime {
         inputDigest: active.obligation.inputDigest,
         mediaDigest: active.obligation.mediaSha256,
         resultStatus: evidentOk ? 'ok' : 'error',
-        outputEvidence: { toolName, contentBytes: event.content.length, isError: event.isError },
+        outputEvidence: {
+          toolName,
+          contentBytes: event.content.length,
+          isError: event.isError,
+          evidencePresent: evidence !== null,
+        },
+        sourceDigest: derivedSourceDigest,
         claimEpoch: active.fence.claimEpoch,
         attemptNumber: active.attemptNumber,
       });
@@ -461,18 +473,23 @@ export class CapabilityObligationRuntime {
     if (inbound === undefined) return undefined; // never accepted — lease reclaim decides
     const terminal = this.db.raw
       .prepare(
-        `SELECT id, delivery_kind, delivery_op_id FROM turn_terminal_records
+        `SELECT id, delivery_kind, delivery_op_id, logical_turn_id FROM turn_terminal_records
          WHERE inbound_seq = ? ORDER BY id DESC LIMIT 1`,
       )
-      .get(inbound.seq) as { id: number; delivery_kind: string; delivery_op_id: number | null } | undefined;
+      .get(inbound.seq) as
+      | { id: number; delivery_kind: string; delivery_op_id: number | null; logical_turn_id: string }
+      | undefined;
     if (terminal === undefined) return undefined; // turn still running under the lease
     const receipt = this.db.raw
       .prepare(
         `SELECT id FROM capability_execution_receipts
          WHERE obligation_id = ? AND claim_epoch = ? AND attempt_number = ? AND result_status = 'ok'
+           AND logical_turn_id = ?
          ORDER BY id DESC LIMIT 1`,
       )
-      .get(id, attempt.claimEpoch, attempt.attemptCount) as { id: number } | undefined;
+      .get(id, attempt.claimEpoch, attempt.attemptCount, terminal.logical_turn_id) as
+      | { id: number }
+      | undefined;
     if (
       receipt !== undefined
       && terminal.delivery_kind === 'echoed'

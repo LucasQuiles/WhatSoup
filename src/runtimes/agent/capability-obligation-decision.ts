@@ -17,7 +17,7 @@
  *    dispatchable obligation row.
  */
 import type { CapabilityObligationsOptions } from '../../core/capability-contract.ts';
-import { evaluateCapabilityContract } from '../../core/capability-contract.ts';
+import { capabilitySourceDigest, evaluateCapabilityContract } from '../../core/capability-contract.ts';
 import type {
   CapabilityDecisionParams,
   CapabilityObligationRetainedMedia,
@@ -191,6 +191,7 @@ export async function deriveCapabilityDecision(
       requiredCapability: decision.capability,
       capabilityParams: JSON.stringify({ skill: deps.options.attestation.skillName }),
       inputDigest: decision.inputDigest,
+      sourceDigest: capabilitySourceDigest(decision.sourceToken, retainedMedia?.sha256 ?? null),
       retainedMedia,
       creationReason: 'typed_deferral_signal',
     },

@@ -6,6 +6,7 @@
  * turn_terminal_records / capability_execution_receipts. Real SQLite; the
  * runtime pipeline entry is a scripted closure.
  */
+import { createHash } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { recordCapabilityAttestation } from '../../../src/core/capability-attestation.ts';
@@ -15,8 +16,9 @@ import { Database } from '../../../src/core/database.ts';
 import { withTransaction } from '../../../src/core/db-tx.ts';
 import {
   CapabilityObligationRuntime,
-  invocationBindsSource,
+  deriveObservedSourceDigest,
   matchesCapabilityExecution,
+  parseExecutionEvidence,
   resolveReleaseIdentity,
   type CapabilityObligationLiveFacts,
 } from '../../../src/runtimes/agent/capability-obligation-runtime.ts';
@@ -33,7 +35,7 @@ const OPTIONS = parseCapabilityObligationsOptions({
   mediaRoot: '/var/obligation-media',
   retentionPolicyVersion: 'policy/1',
   retentionHorizonDays: 30,
-  receipt: { toolName: 'Bash', commandMarker: 'watch.py', minOutputBytes: 8 },
+  receipt: { toolName: 'Bash', commandMarker: 'watch.py', minOutputBytes: 8, evidenceMarker: 'WATCH_EVIDENCE:' },
   attestation: {
     skillName: 'watch',
     skillVersion: '1.0.0',
@@ -53,6 +55,10 @@ const LIVE_FACTS: CapabilityObligationLiveFacts = {
   providerId: 'claude-cli',
   harnessType: 'persistent_session',
 };
+
+const SOURCE_URL = 'https://youtu.be/abc';
+const SOURCE_DIGEST = createHash('sha256').update(SOURCE_URL).digest('hex');
+const GOOD_EVIDENCE = `ran resolver\nWATCH_EVIDENCE:{"source":"${SOURCE_URL}","outcome":"ok"}\nframes + transcript done`;
 
 let db: Database;
 let store: CapabilityObligationStore;
@@ -109,6 +115,7 @@ function seedObligation(over: { sourceInboundSeq?: number; sourceMessageId?: str
         requiredCapability: 'child_process_tools',
         capabilityParams: '{"skill":"watch"}',
         inputDigest: 'aa'.repeat(32),
+        sourceDigest: SOURCE_DIGEST,
         retainedMedia: null,
         creationReason: 'typed_deferral_signal',
       },
@@ -229,14 +236,14 @@ describe('receipt recorder (D6)', () => {
           type: 'tool_result',
           isError: false,
           toolId: 'tu-1',
-          content: 'frames extracted; transcript ready',
+          content: GOOD_EVIDENCE,
         });
       },
     });
     await runtime.tickOnce();
     const receipt = db.raw
       .prepare(
-        `SELECT obligation_id, tool_use_id, result_status, claim_epoch, attempt_number, input_digest
+        `SELECT obligation_id, tool_use_id, result_status, claim_epoch, attempt_number, input_digest, source_digest
          FROM capability_execution_receipts WHERE obligation_id = ?`,
       )
       .get(id) as Record<string, unknown>;
@@ -247,7 +254,39 @@ describe('receipt recorder (D6)', () => {
       claim_epoch: 1,
       attempt_number: 1,
       input_digest: 'aa'.repeat(32),
+      // DERIVED from the structured evidence, equal to the obligation's.
+      source_digest: SOURCE_DIGEST,
     });
+  });
+
+  it('FALSIFIER: the adversarial probes — source only in shell text — never yield an ok receipt', async () => {
+    const id = seedObligation();
+    freshAttestation();
+    const probes = [
+      // source in a comment; evidence reports the WRONG source
+      { command: `python3 watch.py WRONG_URL # ${SOURCE_URL}`, content: 'WATCH_EVIDENCE:{"source":"https://youtu.be/WRONG"}\npadding padding' },
+      // source echoed to /dev/null; no structured evidence at all
+      { command: `echo ${SOURCE_URL} >/dev/null; python3 watch.py WRONG_URL`, content: 'lots of plausible output with no evidence line' },
+      // marker present but malformed JSON
+      { command: `python3 watch.py ${SOURCE_URL}`, content: 'WATCH_EVIDENCE:not-json at all, but long output' },
+    ];
+    const { runtime } = makeRuntime({
+      onDispatch: (mapKey, rt) => {
+        probes.forEach((probe, index) => {
+          rt.onStreamEvent(mapKey, { type: 'tool_use', toolName: 'Bash', toolId: `tu-p${index}`, toolInput: { command: probe.command } });
+          rt.onStreamEvent(mapKey, { type: 'tool_result', isError: false, toolId: `tu-p${index}`, content: probe.content });
+        });
+      },
+    });
+    await runtime.tickOnce();
+    const rows = db.raw
+      .prepare("SELECT result_status, source_digest FROM capability_execution_receipts WHERE obligation_id = ?")
+      .all(id) as Array<{ result_status: string; source_digest: string | null }>;
+    expect(rows).toHaveLength(3);
+    for (const row of rows) {
+      expect(row.result_status).toBe('error');
+      expect(row.source_digest === null || row.source_digest !== SOURCE_DIGEST).toBe(true);
+    }
   });
 
   it('a Skill LOAD is not execution — no receipt at all', async () => {
@@ -266,21 +305,21 @@ describe('receipt recorder (D6)', () => {
     expect(count).toBe(0);
   });
 
-  it('FALSIFIER: a marker-matched execution NOT bound to the source yields no receipt (and can never complete)', async () => {
+  it('FALSIFIER: a marker-matched execution with NO structured evidence records only an error receipt', async () => {
     const id = seedObligation();
     freshAttestation();
     const { runtime } = makeRuntime({
       onDispatch: (mapKey, rt) => {
-        // Runs the skill, long output — but against NOTHING from this obligation.
+        // Runs the skill, long output — but emits no evidence line at all.
         rt.onStreamEvent(mapKey, { type: 'tool_use', toolName: 'Bash', toolId: 'tu-u', toolInput: { command: 'python3 watch.py go' } });
         rt.onStreamEvent(mapKey, { type: 'tool_result', isError: false, toolId: 'tu-u', content: 'lots of plausible output here' });
       },
     });
     await runtime.tickOnce();
-    const count = (db.raw
-      .prepare('SELECT COUNT(*) AS c FROM capability_execution_receipts WHERE obligation_id = ?')
-      .get(id) as { c: number }).c;
-    expect(count).toBe(0);
+    const rows = db.raw
+      .prepare('SELECT result_status, source_digest FROM capability_execution_receipts WHERE obligation_id = ?')
+      .all(id) as Array<{ result_status: string; source_digest: string | null }>;
+    expect(rows).toEqual([{ result_status: 'error', source_digest: null }]);
   });
 
   it('unmarked Bash is ignored; errored or evidence-thin execution records an error receipt', async () => {
@@ -291,9 +330,9 @@ describe('receipt recorder (D6)', () => {
         rt.onStreamEvent(mapKey, { type: 'tool_use', toolName: 'Bash', toolId: 'tu-x', toolInput: { command: 'ls -la' } });
         rt.onStreamEvent(mapKey, { type: 'tool_result', isError: false, toolId: 'tu-x', content: 'ls output here' });
         rt.onStreamEvent(mapKey, { type: 'tool_use', toolName: 'Bash', toolId: 'tu-y', toolInput: { command: 'python3 watch.py https://youtu.be/abc' } });
-        rt.onStreamEvent(mapKey, { type: 'tool_result', isError: true, toolId: 'tu-y', content: 'traceback: boom' });
+        rt.onStreamEvent(mapKey, { type: 'tool_result', isError: true, toolId: 'tu-y', content: GOOD_EVIDENCE }); // errored run
         rt.onStreamEvent(mapKey, { type: 'tool_use', toolName: 'Bash', toolId: 'tu-z', toolInput: { command: 'python3 watch.py --retry https://youtu.be/abc' } });
-        rt.onStreamEvent(mapKey, { type: 'tool_result', isError: false, toolId: 'tu-z', content: 'ok' }); // 2 bytes < min 8
+        rt.onStreamEvent(mapKey, { type: 'tool_result', isError: false, toolId: 'tu-z', content: 'ok' }); // 2 bytes < min 8, no evidence
       },
     });
     await runtime.tickOnce();
@@ -334,8 +373,8 @@ describe('evidence port (D6/D7)', () => {
   it('completes on receipt + echoed terminal with a delivery op', async () => {
     const id = await dispatchedObligation({
       onDispatch: (mapKey, rt) => {
-        rt.onStreamEvent(mapKey, { type: 'tool_use', toolName: 'Bash', toolId: 'tu-1', toolInput: { command: 'python3 watch.py https://youtu.be/abc' } });
-        rt.onStreamEvent(mapKey, { type: 'tool_result', isError: false, toolId: 'tu-1', content: 'frames + transcript done' });
+        rt.onStreamEvent(mapKey, { type: 'tool_use', toolName: 'Bash', toolId: 'tu-1', toolInput: { command: 'python3 watch.py https://youtu.be/abc' } }, 'obl-turn');
+        rt.onStreamEvent(mapKey, { type: 'tool_result', isError: false, toolId: 'tu-1', content: GOOD_EVIDENCE }, 'obl-turn');
       },
     });
     const seq = (db.raw.prepare('SELECT seq FROM inbound_events WHERE message_id = ?').get(`obl:${id}:1`) as { seq: number }).seq;
@@ -363,8 +402,8 @@ describe('evidence port (D6/D7)', () => {
   it('a receipt WITHOUT echoed delivery proof quarantines', async () => {
     const id = await dispatchedObligation({
       onDispatch: (mapKey, rt) => {
-        rt.onStreamEvent(mapKey, { type: 'tool_use', toolName: 'Bash', toolId: 'tu-1', toolInput: { command: 'python3 watch.py https://youtu.be/abc' } });
-        rt.onStreamEvent(mapKey, { type: 'tool_result', isError: false, toolId: 'tu-1', content: 'frames + transcript done' });
+        rt.onStreamEvent(mapKey, { type: 'tool_use', toolName: 'Bash', toolId: 'tu-1', toolInput: { command: 'python3 watch.py https://youtu.be/abc' } }, 'obl-turn');
+        rt.onStreamEvent(mapKey, { type: 'tool_result', isError: false, toolId: 'tu-1', content: GOOD_EVIDENCE }, 'obl-turn');
       },
     });
     const seq = (db.raw.prepare('SELECT seq FROM inbound_events WHERE message_id = ?').get(`obl:${id}:1`) as { seq: number }).seq;
@@ -412,18 +451,22 @@ describe('helpers', () => {
     expect(matchesCapabilityExecution(rule, 'Bash', {})).toBe(false);
   });
 
-  it('invocationBindsSource: URL obligations bind by verbatim source URL; media by retained path/digest', () => {
-    const urlOb = { replayText: 'check https://youtu.be/abc please', retainedMediaPath: null, mediaSha256: null };
-    expect(invocationBindsSource(urlOb, { command: 'python3 watch.py https://youtu.be/abc' })).toBe(true);
-    expect(invocationBindsSource(urlOb, { command: 'python3 watch.py https://youtu.be/OTHER' })).toBe(false);
-    expect(invocationBindsSource(urlOb, { command: 'python3 watch.py go' })).toBe(false);
-    const mediaOb = { replayText: 'Tracker.webm', retainedMediaPath: '/ret/ab/deadbeef', mediaSha256: 'ff'.repeat(32) };
-    expect(invocationBindsSource(mediaOb, { command: 'python3 watch.py /ret/ab/deadbeef' })).toBe(true);
-    expect(invocationBindsSource(mediaOb, { command: `python3 watch.py ${'ff'.repeat(32)}` })).toBe(true);
-    expect(invocationBindsSource(mediaOb, { command: 'python3 watch.py /somewhere/else' })).toBe(false);
-    const tokenOb = { replayText: '/watch the quarterly recap', retainedMediaPath: null, mediaSha256: null };
-    expect(invocationBindsSource(tokenOb, { command: 'python3 watch.py "the quarterly recap"' })).toBe(true);
-    expect(invocationBindsSource(tokenOb, { command: 'python3 watch.py unrelated' })).toBe(false);
+  it('parseExecutionEvidence: extracts the marker line JSON; malformed or absent is null', () => {
+    expect(parseExecutionEvidence('WATCH_EVIDENCE:', GOOD_EVIDENCE)).toMatchObject({ source: SOURCE_URL });
+    expect(parseExecutionEvidence('WATCH_EVIDENCE:', 'no marker at all')).toBeNull();
+    expect(parseExecutionEvidence('WATCH_EVIDENCE:', 'WATCH_EVIDENCE:not-json')).toBeNull();
+    expect(parseExecutionEvidence('WATCH_EVIDENCE:', 'WATCH_EVIDENCE:[1,2]')).toBeNull();
+  });
+
+  it('deriveObservedSourceDigest: media wants a reported 64-hex sha; others hash the reported source', () => {
+    const urlOb = { retainedMediaPath: null };
+    expect(deriveObservedSourceDigest(urlOb, { source: SOURCE_URL })).toBe(SOURCE_DIGEST);
+    expect(deriveObservedSourceDigest(urlOb, { source: '' })).toBeNull();
+    expect(deriveObservedSourceDigest(urlOb, null)).toBeNull();
+    const mediaOb = { retainedMediaPath: '/ret/ab/x' };
+    expect(deriveObservedSourceDigest(mediaOb, { mediaSha256: 'ff'.repeat(32) })).toBe('ff'.repeat(32));
+    expect(deriveObservedSourceDigest(mediaOb, { mediaSha256: 'not-hex' })).toBeNull();
+    expect(deriveObservedSourceDigest(mediaOb, { source: SOURCE_URL })).toBeNull();
   });
 
   it('resolveReleaseIdentity: env wins, release-dir basename next, sentinel otherwise', () => {

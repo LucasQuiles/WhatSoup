@@ -38,6 +38,7 @@ const OBLIGATION = {
   required_capability: 'child_process_tools',
   capability_params: '{"skill":"watch"}',
   input_digest: 'ab'.repeat(32),
+  source_digest: 'cd'.repeat(32),
   state: 'waiting_capability',
   creation_reason: 'typed_deferral_signal',
 };
@@ -140,6 +141,7 @@ describe('capability_obligations — immutability and transition whitelist', () 
       ['required_capability', 'other_cap'],
       ['capability_params', '{}'],
       ['input_digest', 'cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd'],
+      ['source_digest', 'abababababababababababababababababababababababababababababababab'],
       ['creation_reason', 'typed_deferral_signal'],
       ['retained_media_path', '/tmp/evil'],
       ['media_sha256', 'cd'.repeat(32)],
@@ -184,15 +186,34 @@ describe('capability_obligations — immutability and transition whitelist', () 
     expect(() =>
       db.raw.prepare('UPDATE capability_obligations SET state=? WHERE id=?').run('completed', id),
     ).toThrow(/receipt|proof/i);
+    // Minted-turn terminal chain the completed gate additionally requires.
+    const seq = Number(
+      db.raw
+        .prepare(
+          `INSERT INTO inbound_events (message_id, conversation_key, chat_jid, routed_to)
+           VALUES (?, 'conv-mw', 'test-dm-target@lid', 'agent')`,
+        )
+        .run(`obl:${id}:1`).lastInsertRowid,
+    );
+    db.raw
+      .prepare(
+        `INSERT INTO turn_terminal_records (
+           scope, conversation_key, delivery_jid, inbound_seq, inbound_seq_key,
+           logical_turn_id, manager_id, generation, attempt_kind,
+           inbound_disposition, delivery_kind, delivery_op_id, reply_guarantee_disarmed
+         ) VALUES ('per_chat', 'conv-mw', 'test-dm-target@lid', ?, ?, 'turn-1', 'mgr-1', 1,
+                   'replied', 'completed', 'echoed', 424242, 0)`,
+      )
+      .run(seq, seq);
     // A receipt for the wrong attempt does not satisfy the gate.
     const staleReceiptId = Number(
       db.raw
         .prepare(
           `INSERT INTO capability_execution_receipts
-             (obligation_id, logical_turn_id, tool_use_id, skill_name, contract_version, input_digest, result_status, claim_epoch, attempt_number)
-           VALUES (?, 'turn-0', 'tu-0', 'watch', 'test-instance/1', ?, 'ok', 9, 9)`,
+             (obligation_id, logical_turn_id, tool_use_id, skill_name, contract_version, input_digest, source_digest, result_status, claim_epoch, attempt_number)
+           VALUES (?, 'turn-0', 'tu-0', 'watch', 'test-instance/1', ?, ?, 'ok', 9, 9)`,
         )
-        .run(id, OBLIGATION.input_digest).lastInsertRowid,
+        .run(id, OBLIGATION.input_digest, OBLIGATION.source_digest).lastInsertRowid,
     );
     expect(() =>
       db.raw
@@ -205,10 +226,10 @@ describe('capability_obligations — immutability and transition whitelist', () 
       db.raw
         .prepare(
           `INSERT INTO capability_execution_receipts
-             (obligation_id, logical_turn_id, tool_use_id, skill_name, contract_version, input_digest, result_status, claim_epoch, attempt_number)
-           VALUES (?, 'turn-1', 'tu-1', 'watch', 'test-instance/1', ?, 'ok', 1, 1)`,
+             (obligation_id, logical_turn_id, tool_use_id, skill_name, contract_version, input_digest, source_digest, result_status, claim_epoch, attempt_number)
+           VALUES (?, 'turn-1', 'tu-1', 'watch', 'test-instance/1', ?, ?, 'ok', 1, 1)`,
         )
-        .run(id, OBLIGATION.input_digest).lastInsertRowid,
+        .run(id, OBLIGATION.input_digest, OBLIGATION.source_digest).lastInsertRowid,
     );
     expect(() =>
       db.raw
