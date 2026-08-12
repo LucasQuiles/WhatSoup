@@ -32,6 +32,15 @@
       "issue": "https://github.com/LucasQuiles/WhatSoup/pull/2128",
       "grantedAt": "2026-08-03",
       "expiresAt": "2026-08-17"
+    },
+    {
+      "path": "eslint-rules/catch-ratchet-baseline.json",
+      "maxWeight": 103,
+      "reason": "Identity-rename authorization for the #2191 phase-2/3 typed-wrapper migration: refactoring query casts INSIDE try blocks re-hashes their catch-ratchet identities (identity = sha256 of the try-block tokens). Weight pinned at the exact current count 103 — token-driven identity replacements authorized, growth is not. First rider: the deferred db-reader access_list site from #3172.",
+      "issue": "https://github.com/LucasQuiles/WhatSoup/issues/2191",
+      "grantedAt": "2026-08-12",
+      "expiresAt": "2026-08-26",
+      "admitsNewIdentities": true
     }
   ]
 }
