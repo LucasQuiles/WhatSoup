@@ -505,6 +505,7 @@ function git(cwd: string, args: string[]): string {
     encoding: 'utf8',
     env: cleanGitEnv(),
     maxBuffer: 20 * 1024 * 1024,
+    timeout: 30_000,
   });
   if (proc.status !== 0) throw new Error((proc.stderr || proc.error?.message || 'git command failed').trim());
   return proc.stdout.trim();

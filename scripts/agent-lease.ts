@@ -382,7 +382,7 @@ export type ProcessProbe =
  */
 export function probeProcess(pid: number): ProcessProbe {
   if (!Number.isInteger(pid) || pid <= 0) return { state: 'unknown', detail: `not a valid pid: ${String(pid)}` };
-  const probe = spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', env: cleanGitEnv() });
+  const probe = spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', env: cleanGitEnv(), timeout: 30_000 });
   if (probe.error !== undefined) return { state: 'unknown', detail: `ps failed: ${probe.error.message}` };
   const stdout = (probe.stdout ?? '').trim();
   if (probe.status === 0) {
@@ -442,7 +442,7 @@ interface GitRun {
 }
 
 function git(cwd: string, args: string[]): GitRun {
-  const run = spawnSync('git', args, { cwd, encoding: 'utf8', env: cleanGitEnv() });
+  const run = spawnSync('git', args, { cwd, encoding: 'utf8', env: cleanGitEnv(), timeout: 30_000 });
   if (run.error !== undefined) {
     return { status: -1, stdout: '', stderr: run.error.message, failed: true };
   }

@@ -295,6 +295,7 @@ export function runPrMetadataGuard(
       encoding: 'utf8',
       env: cleanGitEnv(),
       stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 30_000,
     });
   } catch {
     return inconclusive('pr-metadata.commit-range-invalid');
@@ -306,6 +307,7 @@ export function runPrMetadataGuard(
       encoding: 'utf8',
       env: cleanGitEnv(),
       stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 30_000,
     });
   } catch {
     return inconclusive('pr-metadata.commit-range-unavailable');

@@ -62,6 +62,7 @@ export function readStagedAddedLines(cwd: string, filePath: string): string {
       env: cleanGitEnv(),
       maxBuffer: 20 * 1024 * 1024,
       stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 30_000,
     });
   } catch {
     return '';
@@ -94,6 +95,7 @@ function readGitBlob(cwd: string, blob: string): GitBlobReadResult {
         env: cleanGitEnv(),
         maxBuffer: 20 * 1024 * 1024,
         stdio: ['ignore', 'pipe', 'pipe'],
+        timeout: 30_000,
       }),
     };
   } catch (error) {

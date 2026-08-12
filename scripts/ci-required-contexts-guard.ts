@@ -222,6 +222,7 @@ function defaultGitHeadSha(): string {
   return execFileSync('git', ['rev-parse', 'HEAD'], {
     encoding: 'utf8',
     stdio: ['pipe', 'pipe', 'pipe'],
+    timeout: 30_000,
   }).trim();
 }
 
@@ -231,6 +232,7 @@ function defaultOwnerRepo(): string {
   const url = execFileSync('git', ['remote', 'get-url', 'origin'], {
     encoding: 'utf8',
     stdio: ['pipe', 'pipe', 'pipe'],
+    timeout: 30_000,
   }).trim();
   // git@github.com:owner/repo.git  OR  https://github.com/owner/repo.git
   const match = url.match(/github\.com[:/]([^/]+)\/([^/]+?)(?:\.git)?$/);
