@@ -7,6 +7,9 @@
  * runtime pipeline entry is a scripted closure.
  */
 import { createHash } from 'node:crypto';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { recordCapabilityAttestation } from '../../../src/core/capability-attestation.ts';
@@ -97,7 +100,9 @@ function freshAttestation(): void {
   });
 }
 
-function seedObligation(over: { sourceInboundSeq?: number; sourceMessageId?: string } = {}): number {
+function seedObligation(
+  over: { sourceInboundSeq?: number; sourceMessageId?: string; sourceDigest?: string; replayText?: string } = {},
+): number {
   let id = 0;
   withTransaction(db, () => {
     id = store.applyDecisionWithinCallerTransaction({
@@ -113,13 +118,13 @@ function seedObligation(over: { sourceInboundSeq?: number; sourceMessageId?: str
         groupName: null,
         scope: 'per_chat',
         originRecoveryJobId: null,
-        replayText: 'https://youtu.be/abc',
+        replayText: over.replayText ?? 'https://youtu.be/abc',
         contentTypeHint: 'text',
         contractVersion: 'test-contract/1',
         requiredCapability: 'child_process_tools',
         capabilityParams: '{"skill":"watch"}',
         inputDigest: 'aa'.repeat(32),
-        sourceDigest: SOURCE_DIGEST,
+        sourceDigest: over.sourceDigest ?? SOURCE_DIGEST,
         retainedMedia: null,
         creationReason: 'typed_deferral_signal',
       },
@@ -306,6 +311,53 @@ describe('trusted execution tool (D6)', () => {
       .prepare('SELECT result_status, source_digest FROM capability_execution_receipts WHERE obligation_id = ?')
       .all(id) as Array<{ result_status: string; source_digest: string }>;
     expect(rows).toEqual([{ result_status: 'error', source_digest: SOURCE_DIGEST }]);
+  });
+
+  it('FALSIFIER: a source that would smuggle an argv flag is refused BEFORE the resolver spawns', async () => {
+    // A leading_token remainder is arbitrary user text and can begin with '-';
+    // if it lands as a standalone argv element the resolver child parses it as
+    // an OPTION FLAG (argument injection). spawn() is shell-less, so this is the
+    // only argv-level vector, and it must be refused before the child starts.
+    //
+    // Non-vacuous by construction: the resolver here HONORS a `--output=PATH`
+    // flag by writing that file, so WITHOUT the guard this call would write an
+    // attacker-chosen path and record an 'ok' receipt. The guard must make the
+    // write never happen.
+    const work = mkdtempSync(join(tmpdir(), 'capx-smuggle-'));
+    try {
+      const resolver = join(work, 'resolver.cjs');
+      writeFileSync(
+        resolver,
+        `const fs=require('fs');for(const a of process.argv.slice(2)){const m=/^--output=(.+)$/.exec(a);if(m)fs.writeFileSync(m[1],'SMUGGLED');}console.log('resolver ran');`,
+      );
+      const smuggleTarget = join(work, 'pwned');
+      const SMUGGLE_SOURCE = `--output=${smuggleTarget}`;
+      const SMUGGLE_DIGEST = createHash('sha256').update(SMUGGLE_SOURCE).digest('hex');
+      const id = seedObligation({ sourceDigest: SMUGGLE_DIGEST, replayText: SMUGGLE_SOURCE });
+      freshAttestation();
+      const { runtime } = makeRuntime({
+        execution: { command: ['node', resolver, '{source}'], timeoutMs: 30_000, minOutputBytes: 1 },
+        onDispatch: async (tool) => {
+          const result = (await tool.handler({ source: SMUGGLE_SOURCE }, TOOL_SESSION)) as Record<string, unknown>;
+          expect(result['error']).toBe('capability_execution');
+        },
+      });
+      await runtime.tickOnce();
+      // The resolver never ran: the attacker-chosen path it would have written is absent.
+      expect(existsSync(smuggleTarget)).toBe(false);
+      // The receipt discriminates "refused before spawn" (a `reason`, no
+      // `exitCode`) from "ran and failed" (which records an exitCode).
+      const row = db.raw
+        .prepare('SELECT result_status, source_digest, output_evidence FROM capability_execution_receipts WHERE obligation_id = ?')
+        .get(id) as { result_status: string; source_digest: string; output_evidence: string };
+      expect(row.result_status).toBe('error');
+      expect(row.source_digest).toBe(SMUGGLE_DIGEST);
+      const evidence = JSON.parse(row.output_evidence) as Record<string, unknown>;
+      expect(evidence['reason']).toBe('source_would_smuggle_option_flag');
+      expect('exitCode' in evidence).toBe(false);
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
   });
 
   it('outside an active obligation turn the tool refuses and records nothing', async () => {

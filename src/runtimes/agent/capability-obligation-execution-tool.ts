@@ -10,9 +10,13 @@
  * Nothing here parses model-controlled text: a provider turn can neither forge
  * a receipt (only this handler writes them, from its own observations) nor
  * launder a wrong source (a digest mismatch records an error receipt that can
- * never complete the obligation). No tool call → no receipt → the obligation
- * quarantines instead of completing. Registered only when the obligation
- * feature activates (all-or-inert).
+ * never complete the obligation). The substituted source is DATA, never
+ * options: a source beginning with '-' is refused before the resolver is
+ * spawned, so a model-controlled remainder can never smuggle an argv flag into
+ * the resolver child (spawn is shell-less, so the flag is the only argv-level
+ * injection vector). No tool call → no receipt → the obligation quarantines
+ * instead of completing. Registered only when the obligation feature activates
+ * (all-or-inert).
  */
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
@@ -143,6 +147,21 @@ export function buildCapabilityExecutionTool(deps: CapabilityExecutionToolDeps):
       if (observedSourceDigest !== obligation.sourceDigest) {
         recordOutcome(deps, active, observedSourceDigest, 'error', { reason: 'source_mismatch' });
         return toolError({ error: 'capability_execution', message: 'Source does not match this obligation' });
+      }
+
+      // Argument-injection guard (data, never options). spawn() below is
+      // shell-less, so shell metacharacters are inert bytes; the sole argv-level
+      // vector is a source that, placed as a standalone argv element, the
+      // resolver child parses as an OPTION FLAG. A leading_token rule derives its
+      // source from the arbitrary post-command remainder, which can begin with
+      // '-'. Refuse fail-closed BEFORE spawning: a legitimate source (an http(s)
+      // URL, or a content-addressed retained-media path) never begins with '-';
+      // an operator needing a '-'-leading argument embeds it (--flag={source}).
+      if (source.startsWith('-')) {
+        recordOutcome(deps, active, observedSourceDigest, 'error', {
+          reason: 'source_would_smuggle_option_flag',
+        });
+        return toolError({ error: 'capability_execution', message: 'Source may not begin with "-" (option-flag smuggling refused)' });
       }
 
       const argv = deps.options.execution.command.map((part) =>
