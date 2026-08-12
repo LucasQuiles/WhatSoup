@@ -759,37 +759,52 @@ instruction after approval is skipped), retains+reverifies media, and is idempot
 run creates nothing). Atomicity is ALL-OR-NOTHING over the approved set: if ANY approved entry
 hard-fails (recovery/media/input reverify), the run commits NOTHING — there is no partial
 backfill. It persists the real recovery job id as `origin_recovery_job_id` and leaves the
-original recovery-job rows untouched. Its CLI (`runBackfillExecuteCli`) is dry-run by default;
-applying requires a schema guard, a quiescence lock (`BEGIN IMMEDIATE` — a current writer is
-refused; NOTE this detects a live writer but does NOT prove the bot process is stopped, which
-stays operator-attested), a `--backup-path` that is a byte-exact SQLite FILE-SET (main||-wal)
-snapshot of THE TARGET at the current schema (a foreign or stale backup, or a target that
-changed since the backup, is refused), a pre-commit re-check that the target did not change
-during the run, an `--expect-existing` precondition on the current backfill count, and a
-`--confirm <approvedDigest>` confirmation token equal to the manifest digest (holding the flag
-is not enough — the operator must hold the artifact).
+original recovery-job rows untouched. Concurrency is race-free: the executor holds ONE
+`BEGIN IMMEDIATE` write lock spanning the ENTIRE critical section — the WAL-aware file-set
+backup-verify, the authoritative re-run of the recovery + idempotency checks (the phase-1
+reads are advisory), and the commit — so no concurrent writer can interleave. Media retention
+(filesystem, content-addressed) runs BEFORE the lock, keeping the locked section fully
+synchronous. Its CLI (`runBackfillExecuteCli`) is dry-run by default; applying requires a
+schema guard, a fast-fail quiescence signal (a current writer is refused; NOTE this detects a
+live writer but does NOT prove the bot process is stopped, which stays operator-attested), a
+`--backup-path` that is a byte-exact SQLite FILE-SET (main||-wal) snapshot of THE TARGET at the
+current schema — verified UNDER the write lock, so a concurrent WAL-only commit (main file
+unchanged) is caught where a main-only check would miss it (a foreign or stale backup, or a
+target that changed since the backup, is refused), an `--expect-existing` precondition on the
+current backfill count, and a `--confirm <approvedDigest>` confirmation token equal to the
+manifest digest (holding the flag is not enough — the operator must hold the artifact).
 `scripts/capability-obligation-as01-rehearsal.ts` authors the old-binary/schema rehearsal: it
 reads the startup/schema-guard command from the OLD release's OWN `package.json` (never
 guessed); requires a real SQLite CLONE inside the designated sandbox using canonical realpath
-(a symlink to a live DB, a non-regular, or a non-SQLite file are refused); snapshots the clone,
-migrates it `startSchema→target` and HONORS the migration verdict — it proceeds ONLY when the
-migration is ok (integrity + read-only smoke + preserved key-table row counts + preserved
-trigger NAME-SET + target schema == current); an `ok:false` migration never reaches the old
-binary. It then runs the DECISIVE old-binary check only under `--confirm --network-isolated`.
-That check CLASSIFIES the observation — `rejected_no_write` (the EXPECTED behavior: a non-zero
-exit carrying `DatabaseCompatibilityError`/`future_schema` with no write) / `accepted` /
-`wrote_dangerous` / `inconclusive` — with a distinguishable exit code (0 pass, 1 inconclusive,
-2 INCOMPLETE-when-skipped, 3 accepted-owner-decision, 4 wrote-dangerous), so a skipped or
-unclassifiable step can never read as a pass. Write detection is WAL-AWARE: the file-set hash
-(main||-wal) makes a write the old binary lands in the write-ahead log visible, so a WAL-only
-write is classified `wrote_dangerous`, not a clean rejection. On the expected rejection it
-proves the coupled pre-migration RESTORE (candidate §5) — which restores the main file AND
-DELETES the clone's `-wal`/`-shm`, so a stale injected WAL frame cannot replay; the restored
-file-set must equal the backup and pass integrity_check. The old binary runs in a sandbox HOME
-+ npm cache (never the operator's live config), and network isolation is a fail-closed egress
-probe (a reachable network REFUSES the run) — isolation can be disproven, never proven, so
-`--network-isolated` stays an operator attestation the probe fails-closed against; no-SEND is
-guaranteed by construction (it never opens a WhatsApp session). Backfill EXECUTION,
+(a symlink to a live DB, a non-regular, or a non-SQLite file are refused); takes a COHERENT
+pre-migration snapshot (WAL checkpointed in, so committed WAL content is captured — not a
+main-only copy that would lose it); migrates it `startSchema→target` and HONORS the migration
+verdict — it proceeds ONLY when the migration is ok (integrity + read-only smoke + non-decreasing
+key-table row counts with the before→after delta reported + preserved trigger DEFINITIONS, name
+AND SQL + target schema == current); an `ok:false` migration never reaches the old binary. It
+then runs the DECISIVE old-binary check only under `--confirm --network-isolated`. That check
+CLASSIFIES the observation — `rejected_no_write` / `accepted` / `wrote_dangerous` /
+`inconclusive` — with a distinguishable exit code (0 pass, 1 inconclusive, 2 INCOMPLETE-when-
+skipped, 3 accepted-owner-decision, 4 wrote-dangerous), so a skipped or unclassifiable step can
+never read as a pass. The EXPECTED rejection has a STRICT contract: a non-zero exit (not a
+126/127 tooling code) carrying the `DatabaseCompatibilityError` class AND the `future_schema`
+reason together, with no write and no tooling-error signature (`npm ERR!` / missing script /
+module-not-found) — a tooling error that merely mentions the reason string is `inconclusive`,
+not a pass. The EXACT string/ceiling contract of the old binary is confirmable only at the
+owner-gated real run against the pinned old release. Write detection is WAL-AWARE: the file-set
+hash (main||-wal) makes a write the old binary lands in the write-ahead log visible, so a
+WAL-only write is classified `wrote_dangerous`, not a clean rejection. On the expected rejection
+it proves the coupled pre-migration RESTORE (candidate §5) — a CRASH-SAFE, ATOMIC restore: write
+temp ← backup, fsync temp, integrity_check temp, `rename()` over the main file (never a
+half-overwritten DB), then delete the clone's `-wal`/`-shm` (a stale injected WAL frame cannot
+replay), then fsync the directory; the restored file-set must equal the backup and pass
+integrity_check. The old binary runs in a sandbox HOME + npm cache (never the operator's live
+config); in tests an INJECTED runner spawns the fake directly (the default `npm run` transport
+ships unit-untested by construction and is exercised only at the owner-gated real run). Network
+isolation is a fail-closed egress probe (a reachable network REFUSES the run) — isolation can be
+disproven, never proven, so `--network-isolated` stays an operator attestation the probe
+fails-closed against; no-SEND is guaranteed by construction (it never opens a WhatsApp session).
+Backfill EXECUTION,
 the DM drain, both group drains, and the old-binary rehearsal are separately owner-gated.
 
 ---

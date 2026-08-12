@@ -28,8 +28,8 @@
  */
 import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { closeSync, copyFileSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, unlinkSync } from 'node:fs';
-import { isAbsolute, join, relative, resolve } from 'node:path';
+import { closeSync, copyFileSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, renameSync, unlinkSync } from 'node:fs';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { pathToFileURL } from 'node:url';
 
@@ -225,14 +225,39 @@ function dbFileSetHash(path: string): string {
   return h.digest('hex');
 }
 
-/** Sorted trigger names in the schema (F4 — a migration must not drop triggers). */
-function triggerNames(dbPath: string): string[] {
+/** Trigger name → definition SQL (F4 — a migration must not drop OR redefine a trigger). */
+function triggerDefs(dbPath: string): Map<string, string> {
   const raw = new DatabaseSync(dbPath, { readOnly: true });
   try {
-    return (raw.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' ORDER BY name").all() as Array<{ name: string }>)
-      .map((r) => r.name);
+    const rows = raw.prepare("SELECT name, sql FROM sqlite_master WHERE type = 'trigger' ORDER BY name").all() as Array<{ name: string; sql: string | null }>;
+    return new Map(rows.map((r) => [r.name, r.sql ?? '']));
   } finally {
     raw.close();
+  }
+}
+
+/**
+ * A COHERENT single-file snapshot of a SQLite DB: checkpoint the WAL into the main
+ * file (so committed WAL content is captured), then copy the main file. `-shm` is
+ * transient; `-wal` is empty post-checkpoint. Used for the pre-migration backup
+ * (F4 — a raw main-only copy would miss valid WAL content).
+ */
+export function snapshotDbCoherent(src: string, dest: string): void {
+  const raw = new DatabaseSync(src);
+  try {
+    raw.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+  } finally {
+    raw.close();
+  }
+  copyFileSync(src, dest);
+}
+
+function fsyncDir(path: string): void {
+  const fd = openSync(path, 'r');
+  try {
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
   }
 }
 
@@ -260,7 +285,7 @@ export function rehearseCloneMigration(
   }
   const integrityBefore = integrityCheck(cloneDb);
   const countsBefore = rowCounts(cloneDb, keyTables);
-  const triggersBefore = triggerNames(cloneDb);
+  const defsBefore = triggerDefs(cloneDb);
   // Forward migration via the current release's engine (no-op if already target).
   const db = new Database(cloneDb);
   db.open();
@@ -268,7 +293,9 @@ export function rehearseCloneMigration(
   const targetSchema = schemaVersion(cloneDb);
   const integrityAfter = integrityCheck(cloneDb);
   const countsAfter = rowCounts(cloneDb, keyTables);
-  const triggersAfter = triggerNames(cloneDb);
+  const defsAfter = triggerDefs(cloneDb);
+  const triggersBefore = [...defsBefore.keys()];
+  const triggersAfter = [...defsAfter.keys()];
   let readOnlySmokeOk = false;
   try {
     const raw = new DatabaseSync(cloneDb, { readOnly: true });
@@ -283,12 +310,17 @@ export function rehearseCloneMigration(
   }
   // No key-table row count may DECREASE (a table present before must not lose
   // rows or vanish); no trigger name present before may disappear.
+  // Non-decreasing (a real 44→current migration may backfill rows, e.g. migration
+  // 45); the before→after delta is reported in the CLI output so an increase is
+  // visible and attributable rather than silently allowed.
   const countsPreserved = keyTables.every((t) => {
     const before = countsBefore[t] ?? -1;
     const after = countsAfter[t] ?? -1;
     return before < 0 || (after >= 0 && after >= before);
   });
-  const triggersPreserved = triggersBefore.every((name) => triggersAfter.includes(name));
+  // Every trigger present before must still exist WITH THE SAME DEFINITION — this
+  // catches a trigger being dropped OR redefined, not just renamed away.
+  const triggersPreserved = [...defsBefore].every(([name, sql]) => defsAfter.get(name) === sql);
   return {
     ok: integrityAfter === 'ok' && readOnlySmokeOk && countsPreserved && triggersPreserved
       && targetSchema === CURRENT_SCHEMA_MIGRATION,
@@ -318,21 +350,39 @@ export interface As01CoupledRestore {
 /**
  * Coupled rollback rehearsal (candidate §5): when the old binary rejects the
  * migrated schema, binary rollback is only safe if the pre-migration DB can be
- * restored ATOMICALLY and completely. This restores `backupPath` (the
- * pre-migration snapshot) over `cloneDb`'s main file AND DELETES the clone's
- * `-wal` / `-shm` — a stale write-ahead log left by the old binary would
- * otherwise replay its (possibly injected) frames on the next open, so restoring
- * only the main file is not a restore. It then proves the restored FILE-SET
- * equals the backup and passes integrity_check.
+ * restored ATOMICALLY and completely (F4). The restore is crash-safe:
+ *   write temp ← backup → fsync temp → integrity_check temp → rename(temp, main)
+ *   → unlink clone -wal/-shm → fsync directory.
+ * The rename is the atomic main-file replacement (never a half-overwritten DB),
+ * and the `-wal`/`-shm` are discarded AFTER the rename so a stale write-ahead log
+ * left by the old binary cannot replay its (possibly injected) frames on the next
+ * open. `backupPath` is a COHERENT snapshot (see snapshotDbCoherent), so valid WAL
+ * content of the pre-migration DB was captured, not lost. Proves the restored
+ * FILE-SET equals the backup and passes integrity_check.
  */
 export function rehearseCoupledRestore(cloneDb: string, backupPath: string): As01CoupledRestore {
   const backupHash = dbFileSetHash(backupPath);
-  copyFileSync(backupPath, cloneDb);
+  const temp = `${cloneDb}.restore.tmp`;
+  copyFileSync(backupPath, temp);
+  // Flush the temp bytes before the rename — a rename of unflushed bytes is not durable.
+  const tempFd = openSync(temp, 'r+');
+  try {
+    fsyncSync(tempFd);
+  } finally {
+    closeSync(tempFd);
+  }
+  const integrityTemp = integrityCheck(temp);
+  if (integrityTemp !== 'ok') {
+    try { unlinkSync(temp); } catch { /* best-effort cleanup */ }
+    return { ok: false, backupHash, restoredHash: '', integrityAfter: integrityTemp };
+  }
+  renameSync(temp, cloneDb); // atomic main-file replacement
   for (const suffix of ['-wal', '-shm']) {
     try {
       unlinkSync(`${cloneDb}${suffix}`);
     } catch { /* absent component: nothing to discard */ }
   }
+  fsyncDir(dirname(cloneDb));
   const restoredHash = dbFileSetHash(cloneDb);
   const integrityAfter = integrityCheck(cloneDb);
   return {
@@ -363,8 +413,20 @@ export function classifyOldBinaryOutcome(obs: {
   if (obs.wrote) return 'wrote_dangerous';
   if (obs.spawnError || obs.signal !== null) return 'inconclusive';
   if (obs.status === 0) return 'accepted';
-  // Non-zero: a rejection only counts if it carries the expected compatibility signal.
-  if (/DatabaseCompatibilityError|future_schema/.test(`${obs.stdout}\n${obs.stderr}`)) {
+  // 126/127 are shell/exec-not-found codes (a missing script/binary), never a
+  // schema rejection.
+  if (obs.status === 126 || obs.status === 127) return 'inconclusive';
+  const text = `${obs.stdout}\n${obs.stderr}`;
+  // Tooling / environment failures that merely MENTION the reason string are not a
+  // schema rejection (e.g. `npm ERR! missing script: future_schema`).
+  if (/npm ERR!|missing script|command not found|MODULE_NOT_FOUND|[Cc]annot find module/.test(text)) {
+    return 'inconclusive';
+  }
+  // The expected rejection is the old binary's DatabaseCompatibilityError contract:
+  // the error CLASS and the `future_schema` reason together (AND, not OR). The
+  // EXACT string/ceiling contract is confirmable only at the owner-gated real run
+  // against the pinned old release; this is the strongest gate provable in-harness.
+  if (/DatabaseCompatibilityError/.test(text) && /future_schema/.test(text)) {
     return 'rejected_no_write';
   }
   return 'inconclusive';
@@ -482,8 +544,9 @@ export function runAs01RehearsalCli(argv: readonly string[], io: As01Io, opts: A
 
   // Snapshot the clone BEFORE migration — the coupled-restore baseline (the
   // migration mutates in place, so the pre-migration bytes must be captured now).
+  // A COHERENT snapshot (checkpoint + copy) captures committed WAL content (F4).
   const backupPath = join(realpathSync(rehearsalDir), 'pre-migration.bak');
-  copyFileSync(plan.cloneDb, backupPath);
+  snapshotDbCoherent(plan.cloneDb, backupPath);
 
   // Migrate the clone forward (mutates the CLONE — the rehearsal). No network, no send.
   const migration = rehearseCloneMigration(plan.cloneDb, { startSchema });

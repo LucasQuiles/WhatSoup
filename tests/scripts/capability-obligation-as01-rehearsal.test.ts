@@ -27,6 +27,7 @@ import {
   rehearseCloneMigration,
   rehearseCoupledRestore,
   runAs01RehearsalCli,
+  snapshotDbCoherent,
   type As01Io,
   type OldBinaryObservation,
 } from '../../scripts/capability-obligation-as01-rehearsal.ts';
@@ -200,18 +201,59 @@ describe('rehearseCoupledRestore (F1 — WAL-aware)', () => {
     check.close();
     expect(count).toBe(0); // the WAL-injected row did NOT survive the restore
   });
+
+  it('F4: the coherent pre-migration snapshot CAPTURES committed WAL content (not just the main file)', () => {
+    const cloneDb = join(rehearsalDir, 'clone.db');
+    makeSqliteClone(cloneDb);
+    // Commit a row that stays in the WAL (held reader blocks checkpoint), so a
+    // main-only copy would miss it.
+    {
+      const w = new DatabaseSync(cloneDb);
+      w.exec('CREATE TABLE keep(x)');
+      w.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+      w.close();
+    }
+    const reader = new DatabaseSync(cloneDb, { readOnly: true });
+    reader.exec('BEGIN');
+    reader.prepare('SELECT COUNT(*) AS c FROM keep').get();
+    const writer = new DatabaseSync(cloneDb);
+    writer.exec('PRAGMA wal_autocheckpoint=0');
+    writer.exec('INSERT INTO keep VALUES (42)');
+    writer.close();
+    reader.exec('ROLLBACK');
+    reader.close();
+    // A COHERENT snapshot folds the WAL in, so the committed row is captured.
+    const backup = join(rehearsalDir, 'coherent.bak');
+    snapshotDbCoherent(cloneDb, backup);
+    const check = new DatabaseSync(backup, { readOnly: true });
+    const count = Number((check.prepare('SELECT COUNT(*) AS c FROM keep').get() as { c: number }).c);
+    check.close();
+    expect(count).toBe(1); // WAL content survived into the snapshot
+  });
 });
 
-describe('classifyOldBinaryOutcome', () => {
+describe('classifyOldBinaryOutcome (F2/r11 — strict rejection contract)', () => {
   const base = { status: 1, signal: null, spawnError: false, stdout: '', stderr: '', wrote: false };
-  it('classifies each outcome distinctly', () => {
-    expect(classifyOldBinaryOutcome({ ...base, status: 1, stderr: 'DatabaseCompatibilityError: future_schema' })).toBe('rejected_no_write');
+  it('the expected rejection requires the error CLASS and the reason together', () => {
+    expect(classifyOldBinaryOutcome({ ...base, status: 1, stderr: 'DatabaseCompatibilityError: schema too new (future_schema)' })).toBe('rejected_no_write');
     expect(classifyOldBinaryOutcome({ ...base, status: 0 })).toBe('accepted');
     expect(classifyOldBinaryOutcome({ ...base, status: 0, wrote: true })).toBe('wrote_dangerous');
-    expect(classifyOldBinaryOutcome({ ...base, status: 1, wrote: true, stderr: 'DatabaseCompatibilityError' })).toBe('wrote_dangerous');
-    expect(classifyOldBinaryOutcome({ ...base, status: 127, stderr: 'command not found' })).toBe('inconclusive');
+    expect(classifyOldBinaryOutcome({ ...base, status: 1, wrote: true, stderr: 'DatabaseCompatibilityError future_schema' })).toBe('wrote_dangerous');
     expect(classifyOldBinaryOutcome({ ...base, status: null, signal: 'SIGKILL' })).toBe('inconclusive');
     expect(classifyOldBinaryOutcome({ ...base, status: null, spawnError: true })).toBe('inconclusive');
+  });
+
+  it('FALSIFIER: a tooling error that merely MENTIONS the reason is NOT a rejection', () => {
+    // The reviewer's exact falsifier: exit 127, npm missing-script naming future_schema.
+    expect(classifyOldBinaryOutcome({ ...base, status: 127, stderr: 'npm ERR! missing script: future_schema' })).toBe('inconclusive');
+    // 126/127 tooling codes are never a rejection, whatever the text.
+    expect(classifyOldBinaryOutcome({ ...base, status: 127, stderr: 'DatabaseCompatibilityError future_schema' })).toBe('inconclusive');
+    // The error class WITHOUT the reason is not the contract.
+    expect(classifyOldBinaryOutcome({ ...base, status: 1, stderr: 'DatabaseCompatibilityError: engine_recovery_required' })).toBe('inconclusive');
+    // The reason WITHOUT the class is not the contract.
+    expect(classifyOldBinaryOutcome({ ...base, status: 1, stderr: 'some future_schema mention' })).toBe('inconclusive');
+    // A module-not-found that happens to contain the reason is tooling, not a rejection.
+    expect(classifyOldBinaryOutcome({ ...base, status: 1, stderr: 'Cannot find module future_schema.js' })).toBe('inconclusive');
   });
 });
 
@@ -285,6 +327,16 @@ describe('runAs01RehearsalCli', () => {
     const cap = capture();
     const code = runAs01RehearsalCli(cliArgs(['--confirm', '--network-isolated']), cap.io, directRunner());
     expect(code).toBe(AS01_EXIT.INCONCLUSIVE);
+    expect(cap.out.join('\n')).toContain('outcome=inconclusive');
+  });
+
+  it('F2 FALSIFIER: an npm-style tooling error that names the reason string is INCONCLUSIVE, not a rejection', () => {
+    writeFileSync(join(releaseDir, 'npm-error.js'),
+      "process.stderr.write('npm ERR! missing script: future_schema\\n'); process.exit(127);");
+    setReleaseScript('npm-error.js');
+    const cap = capture();
+    const code = runAs01RehearsalCli(cliArgs(['--confirm', '--network-isolated']), cap.io, directRunner());
+    expect(code).toBe(AS01_EXIT.INCONCLUSIVE); // NOT rejected_no_write
     expect(cap.out.join('\n')).toContain('outcome=inconclusive');
   });
 
