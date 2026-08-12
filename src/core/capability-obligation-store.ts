@@ -370,6 +370,40 @@ export class CapabilityObligationStore {
     });
   }
 
+  /**
+   * D3: a media-integrity failure discovered BEFORE claiming blocks the
+   * obligation without consuming an execution attempt (attempts increment only
+   * at claim). CAS on waiting_capability.
+   */
+  blockWaitingObligation(id: number, reasonCode: string): { applied: boolean } {
+    return withTransaction(this.db, () => {
+      const row = this.db.raw
+        .prepare(
+          `UPDATE capability_obligations
+           SET state = 'blocked_media', updated_at = datetime('now')
+           WHERE id = ? AND state = 'waiting_capability'
+           RETURNING id`,
+        )
+        .get(id);
+      if (row === undefined) return { applied: false };
+      this.appendEventWithinCallerTransaction(
+        { action: 'obligation.block', actorType: 'supervisor', reasonCode },
+        id,
+      );
+      return { applied: true };
+    });
+  }
+
+  listClaimedObligations(): Array<{ id: number; claimToken: string; claimEpoch: number }> {
+    const rows = this.db.raw
+      .prepare(
+        `SELECT id, claim_token, claim_epoch FROM capability_obligations
+         WHERE state = 'claimed' ORDER BY id ASC`,
+      )
+      .all() as Array<{ id: number; claim_token: string; claim_epoch: number }>;
+    return rows.map((r) => ({ id: r.id, claimToken: r.claim_token, claimEpoch: r.claim_epoch }));
+  }
+
   recordExecutionReceipt(params: {
     obligationId: number;
     logicalTurnId: string;
