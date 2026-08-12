@@ -1,4 +1,4 @@
-import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
+import type { DatabaseSync, SQLInputValue, StatementSync } from 'node:sqlite';
 
 /**
  * Typed SQLite query helpers. `node:sqlite` statements return
@@ -16,4 +16,9 @@ export function queryAll<T>(db: DatabaseSync, sql: string, ...params: SQLInputVa
 /** Run a query and return the first row typed as T, or undefined when no row matches. */
 export function queryOne<T>(db: DatabaseSync, sql: string, ...params: SQLInputValue[]): T | undefined {
   return db.prepare(sql).get(...params) as T | undefined;
+}
+
+/** Run an already-prepared statement and return all rows typed as T. */
+export function allFromStatement<T>(stmt: StatementSync, ...params: SQLInputValue[]): T[] {
+  return stmt.all(...params) as T[];
 }

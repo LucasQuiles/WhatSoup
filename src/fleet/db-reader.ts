@@ -1,7 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { SQLITE_BUSY_TIMEOUT_PRAGMA } from '../lib/sqlite-constants.ts';
 import { buildSafeFtsMatchQuery } from '../lib/sql-fts.ts';
-import { queryAll } from '../lib/db-query.ts';
+import { queryAll, queryOne } from '../lib/db-query.ts';
 import { createChildLogger } from '../logger.ts';
 import { MS_PER_HOUR } from '../lib/time-units.ts';
 
@@ -20,6 +20,15 @@ export interface ChatSummary {
   lastMessagePreview: string | null;
   lastMessageSender: string | null;
 }
+
+/** Raw row shape for `getChats` — the GROUP BY aggregate columns. */
+type ChatSummaryRow = {
+  conversation_key: string;
+  sender_name: string | null;
+  message_count: number;
+  last_message_at: number | null;
+  is_group: number;
+};
 
 /** Full message row — includes raw_message for chat view. */
 export interface MessageRow {
@@ -48,6 +57,16 @@ export interface AccessEntry {
   requestedAt: string | null;
   decidedAt: string | null;
 }
+
+/** Raw row shape for `getAccessList` — snake_case source columns. */
+type AccessEntryRow = {
+  subject_type: string;
+  subject_id: string;
+  status: string;
+  display_name: string | null;
+  requested_at: string | null;
+  decided_at: string | null;
+};
 
 export interface DbStats {
   messageCount: number;
@@ -214,7 +233,7 @@ export class FleetDbReader {
   /** Get chat list grouped by conversation_key, ordered by last message time. */
   getChats(name: string, dbPath: string, opts: { limit: number; offset: number }): DbResult<ChatSummary[]> {
     return this.query(name, dbPath, (db) => {
-      const rows = db.prepare(`
+      const rows = queryAll<ChatSummaryRow>(db, `
         SELECT
           m.conversation_key,
           m.sender_name,
@@ -227,7 +246,7 @@ export class FleetDbReader {
         GROUP BY m.conversation_key
         ORDER BY last_message_at DESC
         LIMIT ? OFFSET ?
-      `).all(opts.limit, opts.offset) as any[];
+      `, opts.limit, opts.offset);
 
       return rows.map((r) => ({
         conversationKey: r.conversation_key,
@@ -311,11 +330,11 @@ export class FleetDbReader {
   /** Get access list entries, newest first. */
   getAccessList(name: string, dbPath: string): DbResult<AccessEntry[]> {
     return this.query(name, dbPath, (db) => {
-      const rows = db.prepare(`
+      const rows = queryAll<AccessEntryRow>(db, `
         SELECT subject_type, subject_id, status, display_name, requested_at, decided_at
         FROM access_list
         ORDER BY requested_at DESC
-      `).all() as any[];
+      `);
 
       return rows.map((r) => ({
         subjectType: r.subject_type,
@@ -685,14 +704,16 @@ export class FleetDbReader {
   getSummaryStats(name: string, dbPath: string): DbResult<DbStats> {
     return this.query(name, dbPath, (db) => {
       const msgCount =
-        (db.prepare('SELECT COUNT(*) as c FROM messages WHERE deleted_at IS NULL').get() as any)
-          ?.c ?? 0;
+        queryOne<{ c: number }>(db, 'SELECT COUNT(*) as c FROM messages WHERE deleted_at IS NULL')?.c ?? 0;
       const chatCount =
-        (db.prepare(
+        queryOne<{ c: number }>(db,
           'SELECT COUNT(DISTINCT conversation_key) as c FROM messages WHERE deleted_at IS NULL',
-        ).get() as any)?.c ?? 0;
+        )?.c ?? 0;
 
       // access_list may not exist in older schemas
+      // (kept on the raw cast: migrating this try-block re-hashes its
+      // catch-ratchet identity, which needs the admitsNewIdentities waiver
+      // car first — rides with #2191 chunk B)
       let pendingAccess = 0;
       try {
         pendingAccess =
