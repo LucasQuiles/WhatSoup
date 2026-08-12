@@ -106,22 +106,32 @@ acquire_mutex() {
       return 1
     fi
     log "reclaiming stale lock $dir (holder pid ${holder_pid:-none}, age ${age}s)"
-    if ! mv "$dir" "$dir.reap.$$" 2>/dev/null; then
+    # Atomically remove the stale lock directory. rmdir is atomic:
+    # it fails if the dir was re-created between our stat and the removal,
+    # closing the rename-then-remove window. Remove the pid file first so
+    # rmdir can succeed on the now-empty directory.
+    rm -f "$dir/pid" 2>/dev/null || true
+    if ! rmdir "$dir" 2>/dev/null; then
+      # Directory was re-created or has unexpected contents — retry the
+      # outer loop, which will re-stat the (now newer) lock.
       continue
     fi
-    rm -rf "$dir.reap.$$" 2>/dev/null || true
   done
   return 1
 }
 
 # Release a mutex only while this process still owns it: a hung invocation
 # whose lock was age-reclaimed by a newer one must not delete the new owner's
-# lock on exit. The cat-then-remove window is a benign micro-race — a
-# contender that slips in is itself protected by the age guard.
+# lock on exit. Uses rmdir for atomic cleanup; if the lock was reaped and
+# re-created by a new contender between the pid check and the removal, rmdir
+# fails because the new contender's mkdir re-created the directory — the age
+# guard protects the new contender in that case.
 release_mutex() {
-  local dir="$1"
-  if [ "$(cat "$dir/pid" 2>/dev/null)" = "$$" ]; then
-    rm -rf "$dir" 2>/dev/null || true
+  local dir="$1" held_pid
+  held_pid="$(cat "$dir/pid" 2>/dev/null || true)"
+  if [ "$held_pid" = "$$" ]; then
+    rm -f "$dir/pid" 2>/dev/null || true
+    rmdir "$dir" 2>/dev/null || true
   fi
 }
 
@@ -260,12 +270,34 @@ fi
 
 domain="gui/$(id -u)"
 
+# Run a command with a timeout in seconds. Returns the command's exit code,
+# or 124 on timeout (matching GNU timeout convention).
+run_with_timeout() {
+  local timeout_sec="$1"; shift
+  local cmd_pid exit_code
+  "$@" &
+  cmd_pid=$!
+  (
+    sleep "$timeout_sec"
+    kill -9 "$cmd_pid" 2>/dev/null
+  ) &
+  local killer_pid=$!
+  wait "$cmd_pid" 2>/dev/null
+  exit_code=$?
+  kill -9 "$killer_pid" 2>/dev/null
+  wait "$killer_pid" 2>/dev/null
+  if [ $exit_code -eq 137 ] || [ $exit_code -gt 128 ]; then
+    return 124
+  fi
+  return $exit_code
+}
+
 # Ensure a launchd job is loaded; bootstrap from its plist if not.
 ensure_loaded() {
   local job_label="$1" plist="$2"
   if ! launchctl print "$domain/$job_label" >/dev/null 2>&1; then
     log "$job_label not loaded; bootstrapping"
-    if ! launchctl bootstrap "$domain" "$plist" >> "$LOG" 2>&1; then
+    if ! run_with_timeout 30 launchctl bootstrap "$domain" "$plist" >> "$LOG" 2>&1; then
       log "ERROR: bootstrap failed for $job_label"
       wd_note ERROR
       WD_EXIT=1
@@ -276,7 +308,7 @@ ensure_loaded() {
 
 launchd_reports_permanent_stop() {
   local job_label="$1" launchd_state
-  launchd_state="$(launchctl print "$domain/$job_label" 2>/dev/null)" || return 1
+  launchd_state="$(run_with_timeout 15 launchctl print "$domain/$job_label" 2>/dev/null)" || return 1
   print -r -- "$launchd_state" | awk '
     /^[[:space:]]*state[[:space:]]*=/ {
       state_count++
@@ -340,7 +372,7 @@ restart_label() {
     return 0
   fi
   log "restarting $job_label: $reason"
-  if launchctl kickstart -k "$domain/$job_label" >> "$LOG" 2>&1; then
+  if run_with_timeout 30 launchctl kickstart -k "$domain/$job_label" >> "$LOG" 2>&1; then
     wd_note RESTARTED
     # Arm the cooldown only for a restart that actually happened; a failed
     # kickstart must retry next cycle, not sit suppressed for 5 minutes.
