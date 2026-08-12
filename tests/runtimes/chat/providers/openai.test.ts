@@ -24,15 +24,12 @@ vi.mock('../../../../src/config.ts', () => ({
 // assert the QR-104 keyring-miss warning below (mirrors
 // tests/lib/api-key-resolver.test.ts).
 const { mockLog } = vi.hoisted(() => ({
-  mockLog: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
+  mockLog: {} as Record<string, ReturnType<typeof vi.fn>>,
 }));
 vi.mock('../../../../src/logger.ts', async () => {
-  const { singletonLoggerMock } = await import('../../../helpers/logger-mock.ts');
-  const singleton = singletonLoggerMock();
-  Object.assign(mockLog, singleton);
-  return {
-    createChildLogger: () => mockLog,
-  };
+  const { hoistedLoggerMock } = await import('../../../helpers/logger-mock.ts');
+  const { createChildLogger } = hoistedLoggerMock(mockLog);
+  return { createChildLogger };
 });
 
 import OpenAI from 'openai';

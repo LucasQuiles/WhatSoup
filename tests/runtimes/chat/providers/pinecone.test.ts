@@ -5,12 +5,7 @@ import { WhatSoupError as AppError } from '../../../../src/errors.ts';
 const mockSearchRecords = vi.fn();
 const mockUpsertRecords = vi.fn();
 const mockRerank = vi.fn();
-const mockPineconeLogger = vi.hoisted(() => ({
-  info: vi.fn(),
-  warn: vi.fn(),
-  error: vi.fn(),
-  debug: vi.fn(),
-}));
+const { mockPineconeLogger } = vi.hoisted(() => ({ mockPineconeLogger: {} as Record<string, ReturnType<typeof vi.fn>> }));
 const mockIndex = {
   searchRecords: mockSearchRecords,
   upsertRecords: mockUpsertRecords,
@@ -51,12 +46,9 @@ vi.mock('../../../../src/config.ts', () => ({
 }));
 
 vi.mock('../../../../src/logger.ts', async () => {
-  const { singletonLoggerMock } = await import('../../../helpers/logger-mock.ts');
-  const singleton = singletonLoggerMock();
-  Object.assign(mockPineconeLogger, singleton);
-  return {
-    createChildLogger: () => mockPineconeLogger,
-  };
+  const { hoistedLoggerMock } = await import('../../../helpers/logger-mock.ts');
+  const { createChildLogger } = hoistedLoggerMock(mockPineconeLogger);
+  return { createChildLogger };
 });
 
 import { Pinecone } from '@pinecone-database/pinecone';

@@ -1,12 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const mockListIndexes = vi.fn();
-const mockReadinessLogger = vi.hoisted(() => ({
-  info: vi.fn(),
-  warn: vi.fn(),
-  error: vi.fn(),
-  debug: vi.fn(),
-}));
+const { mockReadinessLogger } = vi.hoisted(() => ({ mockReadinessLogger: {} as Record<string, ReturnType<typeof vi.fn>> }));
 
 vi.mock('@pinecone-database/pinecone', () => {
   const MockPinecone = vi.fn();
@@ -28,18 +23,10 @@ vi.mock('../../../../src/config.ts', () => ({
 }));
 
 vi.mock('../../../../src/logger.ts', async () => {
-  const { singletonLoggerMock } = await import('../../../helpers/logger-mock.ts');
-  const singleton = singletonLoggerMock();
-  Object.assign(mockReadinessLogger, singleton);
-  return {
-    createChildLogger: () => mockReadinessLogger,
-    default: {
-      info: vi.fn(),
-      warn: vi.fn(),
-      error: vi.fn(),
-      debug: vi.fn(),
-    },
-  };
+  const { hoistedLoggerMock } = await import('../../../helpers/logger-mock.ts');
+  const { createChildLogger, singleton } = hoistedLoggerMock(mockReadinessLogger);
+  // Extra factory member `default` built from hoistedLoggerMock singleton
+  return { createChildLogger, default: { ...singleton } };
 });
 
 import { Pinecone } from '@pinecone-database/pinecone';

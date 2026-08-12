@@ -8,15 +8,13 @@ type AuthBondSnapshotOverrides = Partial<Omit<AuthBondSnapshot, 'authDir' | 'cre
 };
 
 const { mockConfig, mockAuth, alertCalls, clearCalls, logger } = vi.hoisted(() => {
+  // Baileys-style logger shell: the asserted info/warn/error/debug spies and
+  // fatal are assigned from the shared helper inside the vi.mock factory
+  // below; only the members the helper does not provide live here.
   const log = {
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-    fatal: vi.fn(),
     level: 'error',
     child: vi.fn(() => log),
-  };
+  } as unknown as Record<string, ReturnType<typeof vi.fn>>;
   return {
     mockConfig: {
       adminPhones: new Set<string>(),
@@ -59,8 +57,7 @@ vi.mock('../../src/config.ts', () => ({ config: mockConfig }));
 
 vi.mock('../../src/logger.ts', async () => {
   const { singletonLoggerMock } = await import('../helpers/logger-mock.ts');
-  const singleton = singletonLoggerMock();
-  Object.assign(logger, singleton);
+  Object.assign(logger, singletonLoggerMock(), { fatal: vi.fn() });
   return { createChildLogger: () => logger };
 });
 

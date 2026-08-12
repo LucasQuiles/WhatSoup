@@ -42,69 +42,9 @@
       "reason": "waiver-deferred — migrate in the waiver car alongside growth-waivers.json"
     },
     {
-      "file": "tests/runtimes/chat/context.test.ts",
-      "status": "debt",
-      "reason": "bridge literal alongside helper import — QC-3 remediation sweep"
-    },
-    {
-      "file": "tests/runtimes/chat/enrichment/extractor.test.ts",
-      "status": "debt",
-      "reason": "bridge literal alongside helper import — QC-3 remediation sweep"
-    },
-    {
-      "file": "tests/runtimes/chat/enrichment/poller-strict-integration.test.ts",
-      "status": "debt",
-      "reason": "bridge literal alongside helper import — QC-3 remediation sweep"
-    },
-    {
-      "file": "tests/runtimes/chat/enrichment/poller.test.ts",
-      "status": "debt",
-      "reason": "bridge literal alongside helper import — QC-3 remediation sweep"
-    },
-    {
-      "file": "tests/runtimes/chat/enrichment/upserter.test.ts",
-      "status": "debt",
-      "reason": "bridge literal alongside helper import — QC-3 remediation sweep"
-    },
-    {
-      "file": "tests/runtimes/chat/enrichment/validator.test.ts",
-      "status": "debt",
-      "reason": "bridge literal alongside helper import — QC-3 remediation sweep"
-    },
-    {
-      "file": "tests/runtimes/chat/memory/memory-provider-telemetry-confidentiality.test.ts",
-      "status": "debt",
-      "reason": "bridge literal alongside helper import — QC-3 remediation sweep"
-    },
-    {
-      "file": "tests/runtimes/chat/memory/memory-tool-telemetry-confidentiality.test.ts",
-      "status": "debt",
-      "reason": "bridge literal alongside helper import — QC-3 remediation sweep"
-    },
-    {
       "file": "tests/runtimes/chat/providers/api-error-classifier.test.ts",
       "status": "debt",
       "reason": "inline Logger cast mock — singletonLoggerMock()+asMockLogger() (QC-1) unblocks"
-    },
-    {
-      "file": "tests/runtimes/chat/providers/openai.test.ts",
-      "status": "debt",
-      "reason": "bridge literal alongside helper import — QC-3 remediation sweep"
-    },
-    {
-      "file": "tests/runtimes/chat/providers/pinecone-readiness.test.ts",
-      "status": "debt",
-      "reason": "bridge literal alongside helper import — QC-3 remediation sweep"
-    },
-    {
-      "file": "tests/runtimes/chat/providers/pinecone.test.ts",
-      "status": "debt",
-      "reason": "bridge literal alongside helper import — QC-3 remediation sweep"
-    },
-    {
-      "file": "tests/runtimes/passive/health-snapshot.test.ts",
-      "status": "debt",
-      "reason": "bridge literal alongside helper import — QC-3 remediation sweep"
     },
     {
       "file": "tests/scripts/logger-mock-residue.test.ts",
@@ -117,19 +57,9 @@
       "reason": "inline Logger cast mock — singletonLoggerMock()+asMockLogger() (QC-1) unblocks"
     },
     {
-      "file": "tests/transport/connection-auth-bond-edge.test.ts",
-      "status": "debt",
-      "reason": "bridge literal alongside helper import — QC-3 remediation sweep"
-    },
-    {
       "file": "tests/transport/outbound-governor.test.ts",
       "status": "debt",
       "reason": "inline mock — adjudicated debt (QC-2), migrate via helper APIs"
-    },
-    {
-      "file": "tests/transport/poll-vote-bridge.test.ts",
-      "status": "debt",
-      "reason": "bridge literal alongside helper import — QC-3 remediation sweep"
     },
     {
       "file": "tests/transport/third-party-console-redaction.test.ts",
