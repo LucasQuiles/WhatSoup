@@ -711,15 +711,13 @@ export class FleetDbReader {
         )?.c ?? 0;
 
       // access_list may not exist in older schemas
-      // (kept on the raw cast: migrating this try-block re-hashes its
-      // catch-ratchet identity, which needs the admitsNewIdentities waiver
-      // car first — rides with #2191 chunk B)
       let pendingAccess = 0;
       try {
         pendingAccess =
-          (db.prepare(
+          queryOne<{ c: number }>(
+            db,
             "SELECT COUNT(*) as c FROM access_list WHERE status = 'pending'",
-          ).get() as any)?.c ?? 0;
+          )?.c ?? 0;
       } catch {
         /* table doesn't exist */
       }
