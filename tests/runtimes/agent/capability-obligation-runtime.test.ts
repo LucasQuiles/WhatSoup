@@ -7,7 +7,7 @@
  * runtime pipeline entry is a scripted closure.
  */
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -25,6 +25,7 @@ import {
 } from '../../../src/runtimes/agent/capability-obligation-runtime.ts';
 import type { CapabilityObligationDueRow } from '../../../src/core/capability-obligation-store.ts';
 import type { ObligationDispatchOutcome } from '../../../src/runtimes/agent/capability-obligation-supervisor.ts';
+import { ToolRegistry } from '../../../src/mcp/registry.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
 import type { ToolDeclaration } from '../../../src/mcp/types.ts';
 
@@ -109,9 +110,11 @@ function seedObligation(
     sourceDigest?: string;
     sourceToken?: string;
     replayText?: string;
+    retainedMedia?: { path: string; sha256: string; bytes: number; policyVersion: string };
   } = {},
 ): number {
   let id = 0;
+  const media = over.retainedMedia ?? null;
   withTransaction(db, () => {
     id = store.applyDecisionWithinCallerTransaction({
       auditEvent: { action: 'obligation.create', actorType: 'runtime', reasonCode: 'conclusive_no_effect' },
@@ -132,9 +135,9 @@ function seedObligation(
         requiredCapability: 'child_process_tools',
         capabilityParams: '{"skill":"watch"}',
         inputDigest: 'aa'.repeat(32),
-        sourceDigest: over.sourceDigest ?? SOURCE_DIGEST,
-        sourceToken: over.sourceToken ?? SOURCE_URL,
-        retainedMedia: null,
+        sourceDigest: media ? media.sha256 : (over.sourceDigest ?? SOURCE_DIGEST),
+        sourceToken: media ? null : (over.sourceToken ?? SOURCE_URL),
+        retainedMedia: media,
         creationReason: 'typed_deferral_signal',
       },
     }).obligationId!;
@@ -375,6 +378,100 @@ describe('trusted execution tool (D6)', () => {
     expect(result['error']).toBe('capability_execution');
     const count = (db.raw.prepare('SELECT COUNT(*) AS c FROM capability_execution_receipts').get() as { c: number }).c;
     expect(count).toBe(0);
+  });
+
+  it('FALSIFIER: an EMBEDDED {source} (--out={source}) is substituted, not passed literally', async () => {
+    // The config embeds the placeholder inside an argument. It must reach the
+    // child as --out=<real source>, not the literal --out={source} the old
+    // exact-match substitution left behind.
+    const work = mkdtempSync(join(tmpdir(), 'capx-embed-'));
+    try {
+      const resolver = join(work, 'echo.cjs');
+      writeFileSync(resolver, "const m=/^--out=(.+)$/.exec(process.argv[2]);console.log(m?m[1]:'NO-SUBSTITUTION');");
+      seedObligation();
+      freshAttestation();
+      let output = '';
+      const { runtime } = makeRuntime({
+        execution: { command: ['node', resolver, '--out={source}'], timeoutMs: 30_000, minOutputBytes: 8 },
+        onDispatch: async (tool) => {
+          const r = (await tool.handler({ source: SOURCE_URL }, TOOL_SESSION)) as { output?: string };
+          output = r.output ?? '';
+        },
+      });
+      await runtime.tickOnce();
+      expect(output).toContain(SOURCE_URL);
+      expect(output).not.toContain('{source}');
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
+  });
+
+  it('FALSIFIER: a resolver that MUTATES its media input records error, not ok (snapshot re-hash)', async () => {
+    // The child is handed a per-attempt SNAPSHOT, not the retained path. A
+    // resolver that overwrites its input changes the snapshot; the post-execution
+    // re-hash catches it and records error, never ok. WITHOUT the snapshot+rehash
+    // the handler recorded ok with the ORIGINAL digest for bytes never processed.
+    const work = mkdtempSync(join(tmpdir(), 'capx-media-in-'));
+    try {
+      const mediaPath = join(work, 'clip.webm');
+      const ORIGINAL = 'ORIGINAL-MEDIA-BYTES';
+      writeFileSync(mediaPath, ORIGINAL);
+      const mediaSha = createHash('sha256').update(ORIGINAL).digest('hex');
+      const mutator = join(work, 'mutator.cjs');
+      writeFileSync(mutator, "require('fs').writeFileSync(process.argv[2],'MUTATED-DIFFERENT-BYTES');console.log('processed-and-mutated-ok');");
+      const id = seedObligation({ retainedMedia: { path: mediaPath, sha256: mediaSha, bytes: ORIGINAL.length, policyVersion: 'p/1' } });
+      freshAttestation();
+      const { runtime } = makeRuntime({
+        execution: { command: ['node', mutator, '{source}'], timeoutMs: 30_000, minOutputBytes: 8 },
+        onDispatch: async (tool) => {
+          const r = (await tool.handler({ source: mediaPath }, TOOL_SESSION)) as Record<string, unknown>;
+          expect(r['error']).toBeDefined();
+        },
+      });
+      await runtime.tickOnce();
+      const row = db.raw
+        .prepare('SELECT result_status, output_evidence FROM capability_execution_receipts WHERE obligation_id = ?')
+        .get(id) as { result_status: string; output_evidence: string };
+      expect(row.result_status).toBe('error');
+      expect((JSON.parse(row.output_evidence) as Record<string, unknown>)['reason']).toBe('media_mutated_during_execution');
+      // The RETAINED original is untouched — the resolver mutated only the snapshot.
+      expect(readFileSync(mediaPath, 'utf8')).toBe(ORIGINAL);
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('execute_capability live-registry integration (proof-gap C)', () => {
+  it('activation registers execute_capability on the REAL registry, routed and callable', async () => {
+    const registry = new ToolRegistry();
+    // Mirror production wiring exactly: registerTool -> registry.register.
+    // Constructing the runtime performs the registration in its constructor.
+    const runtime = new CapabilityObligationRuntime({
+      db,
+      store,
+      options: OPTIONS,
+      liveFacts: () => LIVE_FACTS,
+      getDurability: () => ({ journalInbound: (m: string) => journalInboundRaw(m) }),
+      dispatchTurn: async () => 'dispatched',
+      externalEffectFor: () => undefined,
+      writeLossSince: () => false,
+      registerTool: (tool) => registry.register(tool),
+      turnIdFor: () => 'obl-turn',
+    });
+    expect(runtime).toBeDefined();
+    // A chat-SCOPED session (the tier the registry uses to auto-fill injected
+    // targets) — the minted obligation turn runs per_chat / chat-scoped.
+    const chatSession: SessionContext = { tier: 'chat-scoped', conversationKey: 'conv-rt', deliveryJid: 'test-dm-target@lid' };
+    // REGISTERED: the session sees it in the real registry's tool list.
+    expect(registry.listTools(chatSession).map((t) => t.name)).toContain('execute_capability');
+    // ROUTED + CALLABLE: the registry dispatches the call to the wired handler,
+    // which (no active obligation turn) refuses — NOT an "Unknown tool" miss.
+    const result = await registry.call('execute_capability', { source: SOURCE_URL }, chatSession);
+    expect(result.isError).toBe(true);
+    const text = result.content.map((c) => (c as { text?: string }).text ?? '').join(' ');
+    expect(text).not.toContain('Unknown tool');
+    expect(text).toContain('No active');
   });
 });
 

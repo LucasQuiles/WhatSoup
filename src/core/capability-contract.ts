@@ -131,6 +131,11 @@ function matchLeadingToken(rule: Extract<CapabilityContractRule, { kind: 'leadin
   const first = trimmed.split(/\s+/, 1)[0] ?? '';
   if (first !== rule.token) return undefined;
   const remainder = trimmed.slice(first.length).trim();
+  // A bare leading token with no argument has NO source to execute against; an
+  // empty sourceToken would mint an obligation whose execute_capability source
+  // ('' — the tool requires >= 1 char) can never be supplied, i.e. undrainable.
+  // Treat it as no match.
+  if (remainder === '') return undefined;
   return { rule, normalizedMatchValue: rule.token, sourceToken: remainder };
 }
 

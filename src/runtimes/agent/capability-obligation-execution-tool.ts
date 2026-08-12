@@ -7,6 +7,15 @@
  * outcome (exit code + minimum output evidence), and persists the
  * attempt-bound receipt through the store.
  *
+ * Media obligations are executed against a per-attempt SNAPSHOT: the handler
+ * copies the retained bytes into a private temp dir, hashes THAT snapshot, hands
+ * the snapshot path to the child, and re-hashes it after the child exits — the
+ * receipt is bound to bytes the child actually consumed, isolated from any
+ * concurrent writer of the retained path, and a net change (a resolver that
+ * mutates its input) records an error, never `ok`. (Residual, stated: a
+ * transient mutate-read-restore INSIDE the child is not detected; the snapshot
+ * path is known only to this handler.)
+ *
  * Nothing here parses model-controlled text: a provider turn can neither forge
  * a receipt (only this handler writes them, from its own observations) nor
  * launder a wrong source (a digest mismatch records an error receipt that can
@@ -21,6 +30,9 @@
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
+import { copyFile, mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { z } from 'zod';
 
 import type { CapabilityObligationsOptions } from '../../core/capability-contract.ts';
@@ -118,84 +130,121 @@ export function buildCapabilityExecutionTool(deps: CapabilityExecutionToolDeps):
         return toolError({ error: 'capability_execution', message: 'No active capability obligation turn for this conversation' });
       }
       const source = String(params['source'] ?? '');
-      const { obligation, fence, attemptNumber } = active;
+      const { obligation } = active;
 
-      // TRUSTED derivation — from what THIS handler observes, never from text:
-      // media obligations must name the retained path, whose BYTES are hashed
-      // here; everything else hashes the exact source string handed to the
-      // resolver child below.
+      // Derive the observed digest AND the value the child will actually execute
+      // against ("executionSource"), from what THIS handler observes:
+      //  - media: the agent must name the retained path; the handler copies its
+      //    bytes into a private per-attempt snapshot, hashes the SNAPSHOT, and
+      //    executes against the snapshot path (isolated from any writer of the
+      //    retained path). A post-execution re-hash proves the child consumed
+      //    the exact bytes hashed;
+      //  - URL/token: the source string IS the bytes.
       let observedSourceDigest: string;
       let observedMediaDigest: string | null = null;
-      if (obligation.retainedMediaPath !== null) {
-        if (source !== obligation.retainedMediaPath) {
-          recordOutcome(deps, active, null, 'error', {
-            reason: 'source_is_not_the_retained_media_path',
-          });
-          return toolError({ error: 'capability_execution', message: 'Source must be the retained media path for this obligation' });
-        }
-        try {
-          observedMediaDigest = await sha256File(source);
-        } catch (err) {
-          log.warn({ err, obligationId: obligation.id }, 'retained media unreadable at execution');
-          recordOutcome(deps, active, null, 'error', { reason: 'retained_media_unreadable' });
-          return toolError({ error: 'capability_execution', message: 'Retained media is unreadable' });
-        }
-        observedSourceDigest = observedMediaDigest;
-      } else {
-        observedSourceDigest = createHash('sha256').update(source).digest('hex');
-      }
-      if (observedSourceDigest !== obligation.sourceDigest) {
-        recordOutcome(deps, active, observedSourceDigest, 'error', { reason: 'source_mismatch' });
-        return toolError({ error: 'capability_execution', message: 'Source does not match this obligation' });
-      }
-
-      // Argument-injection guard (data, never options). spawn() below is
-      // shell-less, so shell metacharacters are inert bytes; the sole argv-level
-      // vector is a source that, placed as a standalone argv element, the
-      // resolver child parses as an OPTION FLAG. A leading_token rule derives its
-      // source from the arbitrary post-command remainder, which can begin with
-      // '-'. Refuse fail-closed BEFORE spawning: a legitimate source (an http(s)
-      // URL, or a content-addressed retained-media path) never begins with '-';
-      // an operator needing a '-'-leading argument embeds it (--flag={source}).
-      if (source.startsWith('-')) {
-        recordOutcome(deps, active, observedSourceDigest, 'error', {
-          reason: 'source_would_smuggle_option_flag',
-        });
-        return toolError({ error: 'capability_execution', message: 'Source may not begin with "-" (option-flag smuggling refused)' });
-      }
-
-      const argv = deps.options.execution.command.map((part) =>
-        part === '{source}' ? source : part,
-      );
-      let run: ResolverRun;
+      let executionSource: string;
+      let snapshotDir: string | null = null;
       try {
-        run = await runResolver(argv, deps.options.execution.timeoutMs);
-      } catch (err) {
-        log.warn({ err, obligationId: obligation.id }, 'capability resolver spawn failed');
-        recordOutcome(deps, active, observedSourceDigest, 'error', { reason: 'resolver_spawn_failed' });
-        return toolError({ error: 'capability_execution', message: 'Capability resolver could not be started' });
-      }
+        if (obligation.retainedMediaPath !== null) {
+          if (source !== obligation.retainedMediaPath) {
+            recordOutcome(deps, active, null, 'error', { reason: 'source_is_not_the_retained_media_path' });
+            return toolError({ error: 'capability_execution', message: 'Source must be the retained media path for this obligation' });
+          }
+          try {
+            snapshotDir = await mkdtemp(join(tmpdir(), 'capx-media-'));
+            const snapshotPath = join(snapshotDir, 'input');
+            await copyFile(obligation.retainedMediaPath, snapshotPath);
+            observedMediaDigest = await sha256File(snapshotPath);
+            executionSource = snapshotPath;
+          } catch (err) {
+            log.warn({ err, obligationId: obligation.id }, 'retained media unreadable at execution');
+            recordOutcome(deps, active, null, 'error', { reason: 'retained_media_unreadable' });
+            return toolError({ error: 'capability_execution', message: 'Retained media is unreadable' });
+          }
+          observedSourceDigest = observedMediaDigest;
+        } else {
+          observedSourceDigest = createHash('sha256').update(source).digest('hex');
+          executionSource = source;
+        }
+        if (observedSourceDigest !== obligation.sourceDigest) {
+          recordOutcome(deps, active, observedSourceDigest, 'error', { reason: 'source_mismatch' });
+          return toolError({ error: 'capability_execution', message: 'Source does not match this obligation' });
+        }
 
-      const ok =
-        !run.timedOut
-        && run.exitCode === 0
-        && Buffer.byteLength(run.stdout, 'utf8') >= deps.options.execution.minOutputBytes;
-      recordOutcome(deps, active, observedSourceDigest, ok ? 'ok' : 'error', {
-        exitCode: run.exitCode,
-        timedOut: run.timedOut,
-        stdoutBytes: Buffer.byteLength(run.stdout, 'utf8'),
-        stderrBytes: Buffer.byteLength(run.stderr, 'utf8'),
-      }, observedMediaDigest);
+        // Argument-injection guard (data, never options), on the value the child
+        // parses. spawn() below is shell-less, so shell metacharacters are inert;
+        // the sole argv-level vector is a source that, as a standalone argv
+        // element, the resolver parses as an OPTION FLAG. A leading_token
+        // remainder can begin with '-'. Refuse fail-closed BEFORE spawning: a
+        // legitimate source (http(s) URL, or a content-addressed media path)
+        // never begins with '-'; an operator needing a '-'-leading argument
+        // embeds it (--flag={source}).
+        if (executionSource.startsWith('-')) {
+          recordOutcome(deps, active, observedSourceDigest, 'error', { reason: 'source_would_smuggle_option_flag' });
+          return toolError({ error: 'capability_execution', message: 'Source may not begin with "-" (option-flag smuggling refused)' });
+        }
 
-      if (!ok) {
-        return toolError({
-          error: 'capability_execution_failed',
-          message:
-            `Capability resolver failed (exit=${run.exitCode ?? 'signal'}, timedOut=${run.timedOut}). `
-            + `stderr tail: ${run.stderr.slice(-1_024)}`,
-        });
+        // Substitute EVERY '{source}' occurrence — standalone ('{source}') AND
+        // embedded ('--url={source}') — so substitution matches the config
+        // validation (executionRuleSchema accepts any part CONTAINING the
+        // placeholder). A part that merely embedded it previously reached the
+        // child with the literal '{source}' unresolved.
+        const argv = deps.options.execution.command.map((part) => part.replaceAll('{source}', executionSource));
+        let run: ResolverRun;
+        try {
+          run = await runResolver(argv, deps.options.execution.timeoutMs);
+        } catch (err) {
+          log.warn({ err, obligationId: obligation.id }, 'capability resolver spawn failed');
+          recordOutcome(deps, active, observedSourceDigest, 'error', { reason: 'resolver_spawn_failed' });
+          return toolError({ error: 'capability_execution', message: 'Capability resolver could not be started' });
+        }
+
+        // Media integrity: prove the child consumed the exact bytes hashed. A net
+        // change to the snapshot means the resolver (or a writer of a path only
+        // this handler knows) altered the input, so the recorded digest no longer
+        // represents what was processed → error, never `ok`.
+        if (snapshotDir !== null && observedMediaDigest !== null) {
+          let postDigest = '';
+          try {
+            postDigest = await sha256File(join(snapshotDir, 'input'));
+          } catch {
+            postDigest = '';
+          }
+          if (postDigest !== observedMediaDigest) {
+            recordOutcome(deps, active, observedSourceDigest, 'error', { reason: 'media_mutated_during_execution' }, observedMediaDigest);
+            return toolError({ error: 'capability_execution_failed', message: 'Retained media changed during execution' });
+          }
+        }
+
+        const ok =
+          !run.timedOut
+          && run.exitCode === 0
+          && Buffer.byteLength(run.stdout, 'utf8') >= deps.options.execution.minOutputBytes;
+        recordOutcome(deps, active, observedSourceDigest, ok ? 'ok' : 'error', {
+          exitCode: run.exitCode,
+          timedOut: run.timedOut,
+          stdoutBytes: Buffer.byteLength(run.stdout, 'utf8'),
+          stderrBytes: Buffer.byteLength(run.stderr, 'utf8'),
+        }, observedMediaDigest);
+
+        if (!ok) {
+          return toolError({
+            error: 'capability_execution_failed',
+            message:
+              `Capability resolver failed (exit=${run.exitCode ?? 'signal'}, timedOut=${run.timedOut}). `
+              + `stderr tail: ${run.stderr.slice(-1_024)}`,
+          });
+        }
+        return { executed: true, exitCode: 0, output: run.stdout };
+      } finally {
+        if (snapshotDir !== null) {
+          try {
+            await rm(snapshotDir, { recursive: true, force: true });
+          } catch (err) {
+            log.warn({ err, obligationId: obligation.id }, 'capability media snapshot cleanup failed');
+          }
+        }
       }
-      return { executed: true, exitCode: 0, output: run.stdout };
     },
   };
 

@@ -247,7 +247,7 @@ export function runMigration57(db: DatabaseSync): void {
       sender_jid, sender_name, is_group, group_name, scope,
       origin_recovery_job_id, replay_text, content_type_hint,
       contract_version, required_capability, capability_params, input_digest,
-      source_digest,
+      source_digest, source_token,
       creation_evidence_event_id, retained_media_path, media_sha256,
       media_bytes, retention_policy_version, creation_reason, created_at
     ON capability_obligations

@@ -173,6 +173,7 @@ describe('capability_obligations — immutability and transition whitelist', () 
       ['capability_params', '{}'],
       ['input_digest', 'cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd'],
       ['source_digest', 'abababababababababababababababababababababababababababababababab'],
+      ['source_token', 'https://evil.example/x'],
       ['creation_reason', 'typed_deferral_signal'],
       ['retained_media_path', '/tmp/evil'],
       ['media_sha256', 'cd'.repeat(32)],

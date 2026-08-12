@@ -163,6 +163,13 @@ describe('evaluateCapabilityContract — leading-token rule', () => {
     const d = evaluateCapabilityContract(contract(), { text: '/watchful eyes' });
     expect(d.outcome).toBe('no_match');
   });
+
+  it('a BARE leading token with no argument is no_match (undrainable empty source)', () => {
+    // '/watch' alone has no source to execute against; an empty sourceToken would
+    // mint an obligation whose execute_capability source can never be supplied.
+    expect(evaluateCapabilityContract(contract(), { text: '/watch' }).outcome).toBe('no_match');
+    expect(evaluateCapabilityContract(contract(), { text: '   /watch   ' }).outcome).toBe('no_match');
+  });
 });
 
 describe('evaluateCapabilityContract — media-class rule', () => {
