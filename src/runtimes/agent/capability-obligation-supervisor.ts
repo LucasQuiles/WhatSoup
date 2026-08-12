@@ -62,6 +62,8 @@ export interface ObligationDispatchPort {
     obligation: CapabilityObligationDueRow,
     mintedMessageId: string,
     fence: CapabilityObligationClaimFence,
+    /** The claimed attempt this dispatch executes (mintedMessageId embeds it too). */
+    attemptNumber: number,
   ): Promise<ObligationDispatchOutcome>;
 }
 
@@ -242,7 +244,7 @@ export class CapabilityObligationSupervisor {
       const mintedMessageId = `obl:${due.id}:${claim.attemptCount}`;
       let outcome: ObligationDispatchOutcome;
       try {
-        outcome = await this.dispatchPort.dispatch(due, mintedMessageId, fence);
+        outcome = await this.dispatchPort.dispatch(due, mintedMessageId, fence, claim.attemptCount);
       } catch (err) {
         log.warn({ err, obligationId: due.id }, 'obligation dispatch threw; requeueing under fence');
         outcome = 'retryable';

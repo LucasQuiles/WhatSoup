@@ -3,7 +3,7 @@
 
 import type { AgentCommandRequest, AgentCommandResult, Runtime, RuntimeTurnCapabilityHealth } from '../types.ts';
 import type { ContentType, IncomingMessage, Messenger, RuntimeHealth } from '../../core/types.ts';
-import type { Database } from '../../core/database.ts';
+import { CURRENT_SCHEMA_MIGRATION, type Database } from '../../core/database.ts';
 import type {
   DurabilityEngine,
   SessionCheckpointRow,
@@ -246,6 +246,7 @@ import {
   QueuedDecisionConsumer,
 } from './pending-poll-health.ts';
 import { HandoffDistillCoordinator } from './handoff-distill-coordinator.ts';
+import { activateCapabilityObligationRuntime, buildObligationLiveFacts, CapabilityObligationRuntime, dispatchCapabilityObligationTurnViaSession } from './capability-obligation-runtime.ts';
 import { handoffDistillerEnabled, handoffContextEnabled, handoffDistillModel } from './handoff-distill-config.ts';
 import { config } from '../../config.ts';
 import type { StartupNotificationEvent } from '../../core/startup-notification-controller.ts';
@@ -1705,6 +1706,8 @@ export class AgentRuntime implements Runtime {
   /** Owns bounded terminal retries and sticky affected-scope degradation. */
   private readonly runtimeTurnSupervisor: RuntimeTurnSupervisor<RuntimeTurnPostEffects>;
   private readonly turnRecoverySupervisor: TurnRecoverySupervisor;
+  /** Obligation replay drain; null unless opted in (all-or-inert). */
+  private capabilityObligationRuntime: CapabilityObligationRuntime | null = null;
   private readonly turnRecoveryDeadman: TurnRecoveryDeadman;
   private readonly runtimeTurnHost: RuntimeTurnCoordinatorPort & RuntimeResultHandlerPort;
   private readonly runtimeTurnCoordinator: RuntimeTurnCoordinator;
@@ -2844,6 +2847,30 @@ export class AgentRuntime implements Runtime {
     for (const q of this.chatQueues.values()) q.setDurability(engine);
     this.turnRecoverySupervisor.start(); // PRESTAGE-T4; idempotent
     this.turnRecoveryDeadman.start();
+
+    // Capability-obligation replay: activated here (the store lives on the
+    // durability engine); opt-in only, per_chat scope only (all-or-inert).
+    if (
+      config.capabilityObligations !== null
+      && this.sessionScope === 'per_chat'
+      && this.capabilityObligationRuntime === null
+    ) {
+      this.capabilityObligationRuntime = activateCapabilityObligationRuntime({
+        db: this.db,
+        store: engine.capabilityObligations,
+        options: config.capabilityObligations,
+        liveFacts: () => buildObligationLiveFacts(config.agentProvider),
+        getDurability: () => this.durability,
+        dispatchTurn: (o, m, s) => dispatchCapabilityObligationTurnViaSession(
+          this.runtimeTurnCoordinator,
+          (jid) => this.resolvePerChatDispatchTarget(jid),
+          (sess) => this.requireSessionToolScopeKey(sess),
+          (target) => this.isTurnRecoveryDispatchTargetCurrent(target),
+          o, m, s,
+        ),
+        resolveMapKey: (jid) => this.resolvePerChatMapKey(jid),
+      });
+    }
   }
 
   /**
@@ -5233,14 +5260,19 @@ export class AgentRuntime implements Runtime {
       return { scope: job.scope, managerId: this.managerIdFor(session), generation: 1, session };
     }
     if (job.scope !== 'per_chat') return null;
-    const mapKey = this.resolvePerChatMapKey(job.delivery_jid);
+    return this.resolvePerChatDispatchTarget(job.delivery_jid);
+  }
+
+  /** Shared by turn recovery and capability-obligation dispatch. */
+  private resolvePerChatDispatchTarget(deliveryJid: string): TurnRecoveryDispatchTarget | null {
+    const mapKey = this.resolvePerChatMapKey(deliveryJid);
     let session = this.chatSessions.get(mapKey);
     if (!session?.getStatus().active) {
       // #2169: cold per_chat turn recovery — create session proactively when
       // the in-memory session map has none (e.g. after cold restart before any
       // inbound message arrives for this conversation).
       if (!this.chatSessions.has(mapKey)) {
-        this.ensureSessionAndQueueSync(job.delivery_jid, mapKey);
+        this.ensureSessionAndQueueSync(deliveryJid, mapKey);
         session = this.chatSessions.get(mapKey);
       }
       if (!session?.getStatus().active) return null;
@@ -5255,6 +5287,12 @@ export class AgentRuntime implements Runtime {
       return null;
     }
     return { scope: 'per_chat', mapKey, managerId, generation: owner.generation, session };
+  }
+
+  /** Obligation-owned turn identity for the D6 receipt tap. */
+  private obligationTurnIdFor(mapKey: string | undefined): string | undefined {
+    if (mapKey === undefined) return undefined;
+    return this.perChatRuntimeTurnContexts.get(mapKey)?.[0]?.identity.logicalTurnId;
   }
 
   private isTurnRecoveryDispatchTargetCurrent(target: TurnRecoveryDispatchTarget): boolean {
@@ -6153,6 +6191,9 @@ export class AgentRuntime implements Runtime {
       case 'tool_use':
         session?.trackToolStart(event.toolId);
         session?.tickWatchdog();
+        // D6: obligation-owned turns persist capability execution receipts from
+        // the typed stream correlation (no-op unless this mapKey has one).
+        this.capabilityObligationRuntime?.onStreamEvent(mapKey, event, this.obligationTurnIdFor(mapKey));
         // Post-turn gate: suppress phantom tool_use events (same rationale as assistant_text)
         if (mapKey !== undefined && this.postTurnGate.has(mapKey)) {
           log.info({ mapKey, toolName: event.toolName }, 'post-turn gate: suppressed phantom tool_use');
@@ -6205,6 +6246,8 @@ export class AgentRuntime implements Runtime {
         session?.trackToolEnd(event.toolId);
         session?.tickWatchdog();
         tracker?.onToolEnd(event.toolId);
+        // D6: correlated result for a tracked obligation invocation → receipt.
+        this.capabilityObligationRuntime?.onStreamEvent(mapKey, event, this.obligationTurnIdFor(mapKey));
 
         // Suppress the auto-resolved "Answer questions?" error for AskUserQuestion
         if (this.suppressedAskUserToolIds.has(event.toolId)) {
@@ -6758,6 +6801,7 @@ export class AgentRuntime implements Runtime {
     // -- that's a different, narrower race this stop() call does not (and
     // cannot) close by itself.
     this.turnRecoverySupervisor.stop();
+    this.capabilityObligationRuntime?.stop();
     if (this.queueSweepTimer) {
       clearInterval(this.queueSweepTimer);
       this.queueSweepTimer = null;
@@ -6880,6 +6924,12 @@ export class AgentRuntime implements Runtime {
     }
     const trErr = await shutdownTurnRecoverySupervisorSafely(this.turnRecoverySupervisor);
     if (trErr) shutdownFailures.push(trErr);
+    try {
+      await this.capabilityObligationRuntime?.shutdown();
+    } catch (err) {
+      shutdownFailures.push(err);
+      log.error({ err }, 'capability-obligation runtime shutdown failed');
+    }
     try {
       await this.runtimeTurnCoordinator.awaitUndispatchedCrashFinalizations();
     } catch (err) {

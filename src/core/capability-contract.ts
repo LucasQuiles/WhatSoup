@@ -193,3 +193,38 @@ export function evaluateCapabilityContract(
     inputDigest,
   };
 }
+
+// ── Instance activation options (`agentOptions.capabilityObligations`) ───────
+//
+// The whole obligation feature is ALL-OR-INERT: absent config, or anything not
+// explicitly `enabled: true`, yields null and no runtime surface activates.
+// `enabled: true` with a malformed body throws at config load — a partially
+// valid activation must never run.
+
+const attestationExpectationSchema = z.object({
+  /** Expected installed-skill identity the D5 attestation must match exactly. */
+  skillName: z.string().min(1),
+  skillVersion: z.string().min(1).nullable().default(null),
+  skillDigest: z.string().min(1),
+  resolverDigest: z.string().min(1).nullable().default(null),
+  dependencyVersions: z.record(z.string(), z.string()).default({}),
+  probeVersion: z.string().min(1),
+  canaryId: z.string().min(1),
+});
+
+const capabilityObligationsOptionsSchema = z.object({
+  enabled: z.literal(true),
+  contract: contractSchema,
+  /** Obligation-owned retained-media root (D3); also a D5 binding field. */
+  mediaRoot: z.string().min(1),
+  retentionPolicyVersion: z.string().min(1),
+  attestation: attestationExpectationSchema,
+});
+
+export type CapabilityObligationsOptions = z.infer<typeof capabilityObligationsOptionsSchema>;
+
+export function parseCapabilityObligationsOptions(raw: unknown): CapabilityObligationsOptions | null {
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw !== 'object' || (raw as { enabled?: unknown }).enabled !== true) return null;
+  return capabilityObligationsOptionsSchema.parse(raw);
+}

@@ -14,6 +14,7 @@ import { describe, expect, it } from 'vitest';
 import {
   evaluateCapabilityContract,
   parseCapabilityContract,
+  parseCapabilityObligationsOptions,
 } from '../../src/core/capability-contract.ts';
 
 const CONTRACT_RAW = {
@@ -213,5 +214,50 @@ describe('evaluateCapabilityContract — conflict and absence are fail-closed', 
     const empty = parseCapabilityContract({ version: 'x/1', rules: [] });
     const d = evaluateCapabilityContract(empty, { text: 'https://youtube.com/x' });
     expect(d.outcome).toBe('no_match');
+  });
+});
+
+describe('parseCapabilityObligationsOptions — all-or-inert activation', () => {
+  const VALID = {
+    enabled: true,
+    contract: CONTRACT_RAW,
+    mediaRoot: '/var/obligation-media',
+    retentionPolicyVersion: 'policy/1',
+    attestation: {
+      skillName: 'watch',
+      skillVersion: '1.0.0',
+      skillDigest: 'digest-1',
+      resolverDigest: 'resolver-1',
+      dependencyVersions: { 'yt-dlp': '2026.03.17' },
+      probeVersion: 'probe/1',
+      canaryId: 'canary-1',
+    },
+  };
+
+  it('absent, null, or not-explicitly-enabled config is inert (null)', () => {
+    expect(parseCapabilityObligationsOptions(undefined)).toBeNull();
+    expect(parseCapabilityObligationsOptions(null)).toBeNull();
+    expect(parseCapabilityObligationsOptions({ ...VALID, enabled: false })).toBeNull();
+    expect(parseCapabilityObligationsOptions({ ...VALID, enabled: 'yes' })).toBeNull();
+  });
+
+  it('a fully valid enabled body parses', () => {
+    const options = parseCapabilityObligationsOptions(VALID);
+    expect(options?.contract.version).toBe('test-contract/2026-08-12.1');
+    expect(options?.attestation.canaryId).toBe('canary-1');
+  });
+
+  it('enabled with a malformed body FAILS CLOSED (throws; never a partial activation)', () => {
+    expect(() => parseCapabilityObligationsOptions({ enabled: true })).toThrow();
+    expect(() => parseCapabilityObligationsOptions({ ...VALID, mediaRoot: '' })).toThrow();
+    expect(() =>
+      parseCapabilityObligationsOptions({
+        ...VALID,
+        contract: { version: 'x/1', rules: [{ id: 'bad', kind: 'media_class', mediaClass: 'audio', capability: 'c' }] },
+      }),
+    ).toThrow();
+    expect(() =>
+      parseCapabilityObligationsOptions({ ...VALID, attestation: { ...VALID.attestation, canaryId: '' } }),
+    ).toThrow();
   });
 });

@@ -12,6 +12,7 @@ import { DEFAULT_TWILIO_SMS, DEFAULT_TWILIO_VOICE, type TwilioSmsConfig, type Tw
 import { DEFAULT_IMESSAGE, type ImessageConfig, type ImessageInboundMode } from './transport/imessage/types.ts';
 import { DEFAULT_SIGNAL, SIGNAL_UUID_RE, type SignalConfig, type SignalInboundMode } from './transport/signal/types.ts';
 import { canonicalizeImessageDirectIdentity } from './core/transport-refs.ts';
+import { parseCapabilityObligationsOptions } from './core/capability-contract.ts';
 import { normalizeFallbackEntriesFromAgentOptions } from './core/fallback-chain.ts';
 import {
   isProviderBoundaryMode,
@@ -1128,7 +1129,24 @@ function configModelRole(value: string, role: string): string {
   }
 }
 
+// Load-time capability-obligation validation mirrors configModelRole: a
+// malformed `enabled: true` body is a permanent config defect and must exit
+// EX_CONFIG(78) (stops the restart-flap), never a bare throw with exit 1.
+function configCapabilityObligations() {
+  try {
+    return parseCapabilityObligationsOptions(resolvedAgentOptions['capabilityObligations']);
+  } catch (err) {
+    throw new ConfigValidationError(
+      `agentOptions.capabilityObligations is enabled but malformed: ${errorMessage(err)}`,
+    );
+  }
+}
+
 export const config = {
+  // Capability-obligation replay (all-or-inert; default OFF). `enabled: true`
+  // with a malformed body fails startup as EX_CONFIG — never a partial activation.
+  capabilityObligations: configCapabilityObligations(),
+
   // NL-first routing aliases + per-sender preference store (owner-approved
   // PR-plan v2). Default false: flag off keeps behavior byte-identical —
   // /model,/why,/reset stay forwarded and no preference table is created.

@@ -239,7 +239,7 @@ export class CapabilityObligationStore {
       .prepare(
         `SELECT id, source_inbound_seq, source_message_id, conversation_key, delivery_jid,
                 sender_jid, sender_name, is_group, group_name, replay_text, content_type_hint,
-                contract_version, required_capability, capability_params,
+                contract_version, required_capability, capability_params, input_digest,
                 retained_media_path, media_sha256, media_bytes, attempt_count
          FROM capability_obligations
          WHERE state = 'waiting_capability'
@@ -264,6 +264,7 @@ export class CapabilityObligationStore {
       contractVersion: r.contract_version as string,
       requiredCapability: r.required_capability as string,
       capabilityParams: r.capability_params as string,
+      inputDigest: r.input_digest as string,
       retainedMediaPath: (r.retained_media_path as string | null) ?? null,
       mediaSha256: (r.media_sha256 as string | null) ?? null,
       mediaBytes: (r.media_bytes as number | null) ?? null,
@@ -640,6 +641,7 @@ export interface CapabilityObligationDueRow {
   contractVersion: string;
   requiredCapability: string;
   capabilityParams: string;
+  inputDigest: string;
   retainedMediaPath: string | null;
   mediaSha256: string | null;
   mediaBytes: number | null;
