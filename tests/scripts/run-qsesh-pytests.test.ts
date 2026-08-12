@@ -25,6 +25,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -104,7 +105,7 @@ afterEach(() => {
 
 describe("run-qsesh-pytests.sh interpreter selection", () => {
   it("invokes both the managed 3.14 runtime and python3.12, not just the first", () => {
-    tmpRoot = mkdtempSync("/tmp/qsesh-runner-");
+    tmpRoot = mkdtempSync(join(tmpdir(), "qsesh-runner-"));
     const log = join(tmpRoot, "invocations.log");
     const binDir = join(tmpRoot, "bin");
     const managed = join(
@@ -128,7 +129,7 @@ describe("run-qsesh-pytests.sh interpreter selection", () => {
   });
 
   it("continues after an early runtime failure and returns nonzero", () => {
-    tmpRoot = mkdtempSync("/tmp/qsesh-runner-");
+    tmpRoot = mkdtempSync(join(tmpdir(), "qsesh-runner-"));
     const log = join(tmpRoot, "invocations.log");
     const binDir = join(tmpRoot, "bin");
     const managed = join(
@@ -153,7 +154,7 @@ describe("run-qsesh-pytests.sh interpreter selection", () => {
   });
 
   it("keeps a later runtime failure nonzero after an earlier runtime passes", () => {
-    tmpRoot = mkdtempSync("/tmp/qsesh-runner-");
+    tmpRoot = mkdtempSync(join(tmpdir(), "qsesh-runner-"));
     const log = join(tmpRoot, "invocations.log");
     const binDir = join(tmpRoot, "bin");
     const managed = join(
@@ -177,7 +178,7 @@ describe("run-qsesh-pytests.sh interpreter selection", () => {
   });
 
   it("runs aliases with the same environment identity once", () => {
-    tmpRoot = mkdtempSync("/tmp/qsesh-runner-");
+    tmpRoot = mkdtempSync(join(tmpdir(), "qsesh-runner-"));
     const log = join(tmpRoot, "invocations.log");
     const binDir = join(tmpRoot, "bin");
     const managed = join(
@@ -202,7 +203,7 @@ describe("run-qsesh-pytests.sh interpreter selection", () => {
   });
 
   it("runs one executable twice when each symlink resolves to a distinct environment", () => {
-    tmpRoot = mkdtempSync("/tmp/qsesh-runner-");
+    tmpRoot = mkdtempSync(join(tmpdir(), "qsesh-runner-"));
     const log = join(tmpRoot, "invocations.log");
     const binDir = join(tmpRoot, "bin");
     const managed = join(
@@ -231,7 +232,7 @@ describe("run-qsesh-pytests.sh interpreter selection", () => {
   });
 
   it("honours an explicit QSESH_PYTHON override as the sole interpreter", () => {
-    tmpRoot = mkdtempSync("/tmp/qsesh-runner-");
+    tmpRoot = mkdtempSync(join(tmpdir(), "qsesh-runner-"));
     const log = join(tmpRoot, "invocations.log");
     const binDir = join(tmpRoot, "bin");
     const chosen = join(binDir, "chosen-python");
@@ -252,7 +253,7 @@ describe("run-qsesh-pytests.sh interpreter selection", () => {
   });
 
   it("still exits 2 when no interpreter has pytest", () => {
-    tmpRoot = mkdtempSync("/tmp/qsesh-runner-");
+    tmpRoot = mkdtempSync(join(tmpdir(), "qsesh-runner-"));
     const binDir = join(tmpRoot, "bin");
     mkdirSync(binDir, { recursive: true });
     const noPytest = join(binDir, "python3.12");
