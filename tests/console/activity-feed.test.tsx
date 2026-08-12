@@ -8,6 +8,8 @@ import ActivityFeed from '../../console/src/components/ActivityFeed'
 import { ToastContext, type ToastContextValue } from '../../console/src/hooks/toast-context'
 import type { FeedEvent } from '../../console/src/types'
 
+const _origNavClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+
 const navigateMock = vi.hoisted(() => vi.fn())
 const restartMock = vi.hoisted(() => vi.fn())
 const stopInstanceMock = vi.hoisted(() => vi.fn())
@@ -30,6 +32,11 @@ vi.mock('../../console/src/lib/api', () => ({
 afterEach(() => {
   cleanup()
   vi.restoreAllMocks()
+  if (_origNavClipboard) {
+    Object.defineProperty(navigator, 'clipboard', _origNavClipboard);
+  } else {
+    delete (navigator as unknown as Record<string, unknown>).clipboard;
+  }
   navigateMock.mockReset()
   restartMock.mockReset()
   stopInstanceMock.mockReset()

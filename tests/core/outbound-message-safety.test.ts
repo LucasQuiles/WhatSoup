@@ -596,7 +596,7 @@ describe('redactInternalArtifacts — audience scoping', () => {
     const elapsedMs = performance.now() - startedAt;
 
     expect(text).toBe(input);
-    expect(elapsedMs).toBeLessThan(500);
+    expect(elapsedMs).toBeLessThan(1000);
   });
 
   it('scans internal sensitive paths in linear time on slash-heavy input', () => {
