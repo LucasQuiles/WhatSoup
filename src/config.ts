@@ -214,6 +214,48 @@ function requirePathString(value: unknown, label: string): string {
   throw new ConfigValidationError(`${label} must be a non-empty string path, got ${JSON.stringify(value)}`);
 }
 
+/** Optional-field variants for the former raw `as T | undefined` casts (#2295
+ *  slice 3). Absent (undefined) and JSON null both mean "unset" and return
+ *  undefined so the caller's `??` default applies — exactly what the casts'
+ *  nullish coalescing did — while a SET wrong-typed value fails loud instead of
+ *  flowing on under a lying type. */
+function optionalFiniteNumber(value: unknown, label: string): number | undefined {
+  if (value === undefined || value === null) return undefined;
+  return requireFiniteNumber(value, label);
+}
+
+function optionalString(value: unknown, label: string): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === 'string') return value;
+  throw new ConfigValidationError(`${label} must be a string, got ${JSON.stringify(value)}`);
+}
+
+function optionalBoolean(value: unknown, label: string): boolean | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === 'boolean') return value;
+  throw new ConfigValidationError(`${label} must be a boolean, got ${JSON.stringify(value)}`);
+}
+
+function optionalEnum<T extends string>(value: unknown, label: string, allowed: readonly T[]): T | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === 'string' && (allowed as readonly string[]).includes(value)) return value as T;
+  throw new ConfigValidationError(`${label} must be one of: ${allowed.join(', ')}, got ${JSON.stringify(value)}`);
+}
+
+function configSection(value: unknown, label: string): Record<string, unknown> | undefined {
+  if (value === undefined || value === null) return undefined;
+  const obj = asRecord(value);
+  if (!obj) throw new ConfigValidationError(`${label} must be an object, got ${JSON.stringify(value)}`);
+  return obj;
+}
+
+function requireStringEntries(values: readonly unknown[], label: string): string[] {
+  return values.map((entry, index) => {
+    if (isNonEmptyString(entry)) return entry;
+    throw new ConfigValidationError(`${label}[${index}] must be a non-empty string, got ${JSON.stringify(entry)}`);
+  });
+}
+
 function boundedIntProp(
   source: Record<string, unknown> | undefined,
   key: string,
@@ -385,7 +427,7 @@ function mergeToolThresholds(
 }
 
 const instanceRaw = process.env.INSTANCE_CONFIG;
-let instance: Record<string, any> | null = null;
+let instance: Record<string, unknown> | null = null;
 let bootstrapConfig: RuntimeBootstrapConfig | null = null;
 if (instanceRaw) {
   bootstrapConfig = parseRuntimeBootstrapConfig(instanceRaw);
@@ -452,11 +494,13 @@ mkdirSync(join(mediaDir, '..', 'cache'), { recursive: true, mode: 0o700 });
 // ---------------------------------------------------------------------------
 // Model defaults — priority: instance.models > env vars > built-in defaults
 // ---------------------------------------------------------------------------
-const instanceModels: Record<string, string> = instance?.models ?? {};
+const instanceModels = configSection(instance?.models, 'models');
 
 const rawAdminPhones: string[] = instance
   ? (Array.isArray(instance.adminPhones) && instance.adminPhones.length > 0
-      ? (instance.adminPhones as string[])
+      // Fail loud on a junk entry (was an unchecked string[] cast that let a
+      // non-string crash later in resolveAdminIdentities with a bare TypeError).
+      ? requireStringEntries(instance.adminPhones, 'adminPhones')
       : [])
   : (process.env.ADMIN_PHONES ?? '').split(',').map(p => p.trim()).filter(Boolean);
 export function resolveAdminIdentities(
@@ -1019,10 +1063,23 @@ const resolvedSignalConfig: SignalConfig | undefined =
     ? resolveSignalConfig(instance?.signalConfig as Record<string, unknown>)
     : undefined;
 
-const resolvedAgentOptions = (instance?.agentOptions as Record<string, unknown> | undefined) ?? {};
+const resolvedAgentOptions = configSection(instance?.agentOptions, 'agentOptions') ?? {};
 const resolvedFallbacks = normalizeFallbackEntriesFromAgentOptions(resolvedAgentOptions);
-const resolvedChatOptions = (instance?.chatOptions as Record<string, unknown> | undefined) ?? {};
-const resolvedTranscriptionOptions = (instance?.transcriptionOptions as Record<string, unknown> | undefined) ?? {};
+const resolvedChatOptions = configSection(instance?.chatOptions, 'chatOptions') ?? {};
+const resolvedTranscriptionOptions = configSection(instance?.transcriptionOptions, 'transcriptionOptions') ?? {};
+
+// Nested config sections, validated once here: a SET-but-non-object section
+// fails loud instead of every field inside it silently reading undefined.
+const outboundGovernorSection = configSection(instance?.outboundGovernor, 'outboundGovernor');
+const restartLoopGuardSection = configSection(instance?.restartLoopGuard, 'restartLoopGuard');
+const operationTrackerSection = configSection(instance?.operationTracker, 'operationTracker');
+const pollResolutionSection = configSection(instance?.pollResolution, 'pollResolution');
+const echoGuardSection = configSection(instance?.echoGuard, 'echoGuard');
+const elevenlabsSection = configSection(instance?.elevenlabs, 'elevenlabs');
+const mediaRetentionSection = configSection(instance?.mediaRetention, 'mediaRetention');
+const ingestSection = configSection(instance?.ingest, 'ingest');
+const advancedSection = configSection(instance?.advanced, 'advanced');
+const instancePathsSection = instance ? configSection(instance.paths, 'paths') : undefined;
 
 // Load-time model-role validation: a malformed symbolic model value is a permanent
 // config typo. validateModelRoleValue throws a bare Error; convert it to a
@@ -1048,20 +1105,22 @@ export const config = {
   nlRoutingTiers: (resolvedAgentOptions['nlRoutingTiers'] ?? null) as { strongest?: string; fastest?: string } | null,
   // Sink dir for the fail-closed route-event sidecar; default (null) resolves
   // to the per-instance config dir at emit time. Tests point this at a tmpdir.
-  nlRoutingEventsDir: (resolvedAgentOptions['nlRoutingEventsDir'] ?? null) as string | null,
+  nlRoutingEventsDir: optionalString(resolvedAgentOptions['nlRoutingEventsDir'], 'agentOptions.nlRoutingEventsDir') ?? null,
 
   // Identity
-  botName: (instance?.name as string | undefined) ?? 'Loops',
-  instanceType: ((instance?.type as string | undefined) ?? 'chat') as 'passive' | 'chat' | 'agent',
+  botName: optionalString(instance?.name, 'name') ?? 'Loops',
+  // Defense in depth: validateInstanceConfig already rejects an invalid type
+  // on the load path, so this throw is unreachable for validated configs.
+  instanceType: optionalEnum(instance?.type, 'type', ['passive', 'chat', 'agent'] as const) ?? 'chat',
 
   // Paths
   configRoot,
   dataRoot,
   stateRoot,
-  authDir: instance ? requirePathString(instance.paths.authDir, 'paths.authDir') : join(configRoot, 'auth_info'),
-  dbPath: instance ? requirePathString(instance.paths.dbPath, 'paths.dbPath') : join(dataRoot, 'bot.db'),
+  authDir: instancePathsSection ? requirePathString(instancePathsSection.authDir, 'paths.authDir') : join(configRoot, 'auth_info'),
+  dbPath: instancePathsSection ? requirePathString(instancePathsSection.dbPath, 'paths.dbPath') : join(dataRoot, 'bot.db'),
   logDir,
-  lockPath: instance ? requirePathString(instance.paths.lockPath, 'paths.lockPath') : join(stateRoot, 'bot.lock'),
+  lockPath: instancePathsSection ? requirePathString(instancePathsSection.lockPath, 'paths.lockPath') : join(stateRoot, 'bot.lock'),
 
   // Models — deep merge: instance > env var > default. Each value is either a
   // literal model ID (pinned, exact passthrough — the default) or a symbolic
@@ -1069,21 +1128,21 @@ export const config = {
   // (src/lib/model-resolver.ts). Validation throws at load on malformed
   // symbolic values so typos never reach a provider as bogus literal IDs.
   models: {
-    conversation: configModelRole((instanceModels.conversation as string | undefined) ?? process.env.CONVERSATION_MODEL ?? 'claude-opus-4-8', 'conversation'),
-    extraction: configModelRole((instanceModels.extraction as string | undefined) ?? process.env.EXTRACTION_MODEL ?? 'claude-sonnet-4-6', 'extraction'),
-    validation: configModelRole((instanceModels.validation as string | undefined) ?? process.env.VALIDATION_MODEL ?? 'claude-haiku-4-5', 'validation'),
-    fallback: configModelRole((instanceModels.fallback as string | undefined) ?? process.env.FALLBACK_MODEL ?? 'gpt-5.4', 'fallback'),
+    conversation: configModelRole(optionalString(instanceModels?.conversation, 'models.conversation') ?? process.env.CONVERSATION_MODEL ?? 'claude-opus-4-8', 'conversation'),
+    extraction: configModelRole(optionalString(instanceModels?.extraction, 'models.extraction') ?? process.env.EXTRACTION_MODEL ?? 'claude-sonnet-4-6', 'extraction'),
+    validation: configModelRole(optionalString(instanceModels?.validation, 'models.validation') ?? process.env.VALIDATION_MODEL ?? 'claude-haiku-4-5', 'validation'),
+    fallback: configModelRole(optionalString(instanceModels?.fallback, 'models.fallback') ?? process.env.FALLBACK_MODEL ?? 'gpt-5.4', 'fallback'),
   },
 
   // Conversation
-  maxTokens: (instance?.maxTokens as number | undefined) ?? intEnv('MAX_TOKENS', 750),
+  maxTokens: optionalFiniteNumber(instance?.maxTokens, 'maxTokens') ?? intEnv('MAX_TOKENS', 750),
   memory: resolvedMemory,
   conversationWindow: resolvedMemory.conversation.recent,
   conversationWindowExtended: resolvedMemory.conversation.extended,
   windowExtensionThresholdMs: resolvedMemory.conversation.extendedWithinMs,
 
   // Rate limiting
-  rateLimitPerHour: (instance?.rateLimitPerHour as number | undefined) ?? intEnv('RATE_LIMIT_PER_HOUR', 45),
+  rateLimitPerHour: optionalFiniteNumber(instance?.rateLimitPerHour, 'rateLimitPerHour') ?? intEnv('RATE_LIMIT_PER_HOUR', 45),
   rateLimitWindowMs: resolvedRateLimitWindowMs, // measurement window for counting responses (SP6)
   rateLimitNoticeWindowMs: instance?.rateLimitNoticeWindowMs != null
     ? requireFiniteNumber(instance.rateLimitNoticeWindowMs, 'rateLimitNoticeWindowMs')
@@ -1100,14 +1159,14 @@ export const config = {
   // is per-instance overridable. windowMs is kept <= maxWaitMs so a full-window
   // pacing wait for a single reservation never itself trips the shed.
   outboundGovernor: {
-    enabled: (instance?.outboundGovernor?.enabled as boolean | undefined) ?? true,
-    windowMs: (instance?.outboundGovernor?.windowMs as number | undefined) ?? 3 * MS_PER_SECOND,
-    maxPerWindow: (instance?.outboundGovernor?.maxPerWindow as number | undefined) ?? 6,
-    maxWaitMs: (instance?.outboundGovernor?.maxWaitMs as number | undefined) ?? 5 * MS_PER_SECOND,
-    hardCeiling: (instance?.outboundGovernor?.hardCeiling as number | undefined) ?? 120,
-    hardCeilingWindowMs: (instance?.outboundGovernor?.hardCeilingWindowMs as number | undefined) ?? MS_PER_HOUR,
-    globalMaxPerWindow: (instance?.outboundGovernor?.globalMaxPerWindow as number | undefined) ?? 40,
-    globalWindowMs: (instance?.outboundGovernor?.globalWindowMs as number | undefined) ?? 3 * MS_PER_SECOND,
+    enabled: optionalBoolean(outboundGovernorSection?.enabled, 'outboundGovernor.enabled') ?? true,
+    windowMs: optionalFiniteNumber(outboundGovernorSection?.windowMs, 'outboundGovernor.windowMs') ?? 3 * MS_PER_SECOND,
+    maxPerWindow: optionalFiniteNumber(outboundGovernorSection?.maxPerWindow, 'outboundGovernor.maxPerWindow') ?? 6,
+    maxWaitMs: optionalFiniteNumber(outboundGovernorSection?.maxWaitMs, 'outboundGovernor.maxWaitMs') ?? 5 * MS_PER_SECOND,
+    hardCeiling: optionalFiniteNumber(outboundGovernorSection?.hardCeiling, 'outboundGovernor.hardCeiling') ?? 120,
+    hardCeilingWindowMs: optionalFiniteNumber(outboundGovernorSection?.hardCeilingWindowMs, 'outboundGovernor.hardCeilingWindowMs') ?? MS_PER_HOUR,
+    globalMaxPerWindow: optionalFiniteNumber(outboundGovernorSection?.globalMaxPerWindow, 'outboundGovernor.globalMaxPerWindow') ?? 40,
+    globalWindowMs: optionalFiniteNumber(outboundGovernorSection?.globalWindowMs, 'outboundGovernor.globalWindowMs') ?? 3 * MS_PER_SECOND,
   },
 
   // Enrichment
@@ -1134,7 +1193,7 @@ export const config = {
   // Tool update verbosity: 'full' (default — all updates shown to user),
   // 'friendly' (all updates in plain language for non-technical users),
   // 'minimal' (suppress most updates — only critical status shown)
-  toolUpdateMode: ((instance?.toolUpdateMode as string | undefined) ?? 'full') as 'full' | 'friendly' | 'minimal',
+  toolUpdateMode: optionalEnum(instance?.toolUpdateMode, 'toolUpdateMode', ['full', 'friendly', 'minimal'] as const) ?? 'full',
   toolUpdateRedirectJid: stringProp(instance ?? undefined, 'toolUpdateRedirectJid') ?? null,
   // Gate the agent restart/back-online notification. Default true preserves existing behavior.
   startupNotifications: booleanProp(instance ?? undefined, 'startupNotifications', true),
@@ -1154,43 +1213,43 @@ export const config = {
   // so the instance self-heals instead of going dark. windowMs is clamped to
   // >= 1s inside the guard; maxRestarts <= 0 disables tripping.
   restartLoopGuard: {
-    enabled: (instance?.restartLoopGuard?.enabled as boolean | undefined) ?? true,
-    maxRestarts: positiveIntValue(instance?.restartLoopGuard?.maxRestarts, 3),
-    windowMs: positiveIntValue(instance?.restartLoopGuard?.windowMs, 5 * MS_PER_MINUTE),
+    enabled: optionalBoolean(restartLoopGuardSection?.enabled, 'restartLoopGuard.enabled') ?? true,
+    maxRestarts: positiveIntValue(restartLoopGuardSection?.maxRestarts, 3),
+    windowMs: positiveIntValue(restartLoopGuardSection?.windowMs, 5 * MS_PER_MINUTE),
   },
   textAggregateDelayMs: positiveIntValue(instance?.textAggregateDelayMs, 2 * MS_PER_SECOND),
 
   // Operation tracker: per-tool progress reporting & stall detection
   operationTracker: {
-    enabled: (instance?.operationTracker?.enabled as boolean | undefined) ?? true,
-    progressIntervalMs: (instance?.operationTracker?.progressIntervalMs as number | undefined) ?? 30 * MS_PER_SECOND,
-    thinkingLongMs: (instance?.operationTracker?.thinkingLongMs as number | undefined) ?? 45 * MS_PER_SECOND,
-    thinkingStallMs: (instance?.operationTracker?.thinkingStallMs as number | undefined) ?? 5 * MS_PER_MINUTE,
+    enabled: optionalBoolean(operationTrackerSection?.enabled, 'operationTracker.enabled') ?? true,
+    progressIntervalMs: optionalFiniteNumber(operationTrackerSection?.progressIntervalMs, 'operationTracker.progressIntervalMs') ?? 30 * MS_PER_SECOND,
+    thinkingLongMs: optionalFiniteNumber(operationTrackerSection?.thinkingLongMs, 'operationTracker.thinkingLongMs') ?? 45 * MS_PER_SECOND,
+    thinkingStallMs: optionalFiniteNumber(operationTrackerSection?.thinkingStallMs, 'operationTracker.thinkingStallMs') ?? 5 * MS_PER_MINUTE,
     progressPlaceholderRateLimitMs:
-      (instance?.operationTracker?.progressPlaceholderRateLimitMs as number | undefined) ?? 3 * MS_PER_MINUTE,
+      optionalFiniteNumber(operationTrackerSection?.progressPlaceholderRateLimitMs, 'operationTracker.progressPlaceholderRateLimitMs') ?? 3 * MS_PER_MINUTE,
     // PR-E status-narration cap default; literal mirrors MAX_STATUS_MESSAGES_PER_TURN
     // in outbound-queue.ts (kept literal here to avoid a config↔queue import cycle).
     maxStatusMessagesPerTurn:
-      (instance?.operationTracker?.maxStatusMessagesPerTurn as number | undefined) ?? 10,
+      optionalFiniteNumber(operationTrackerSection?.maxStatusMessagesPerTurn, 'operationTracker.maxStatusMessagesPerTurn') ?? 10,
     maxStatusMessagesPerWindow:
-      positiveIntValue(instance?.operationTracker?.maxStatusMessagesPerWindow, 10),
+      positiveIntValue(operationTrackerSection?.maxStatusMessagesPerWindow, 10),
     statusMessageWindowMs:
-      positiveIntValue(instance?.operationTracker?.statusMessageWindowMs, 5 * MS_PER_MINUTE),
-    toolThresholds: mergeToolThresholds(instance?.operationTracker?.toolThresholds),
+      positiveIntValue(operationTrackerSection?.statusMessageWindowMs, 5 * MS_PER_MINUTE),
+    toolThresholds: mergeToolThresholds(operationTrackerSection?.toolThresholds),
   } satisfies OperationTrackerConfig,
 
   // Poll resolution: configurable group poll behavior
   pollResolution: {
-    defaultStrategy: (instance?.pollResolution?.defaultStrategy as string | undefined) ?? 'first-vote-wins',
-    defaultTimeoutMs: (instance?.pollResolution?.defaultTimeoutMs as number | undefined) ?? MS_PER_HOUR,
+    defaultStrategy: optionalString(pollResolutionSection?.defaultStrategy, 'pollResolution.defaultStrategy') ?? 'first-vote-wins',
+    defaultTimeoutMs: optionalFiniteNumber(pollResolutionSection?.defaultTimeoutMs, 'pollResolution.defaultTimeoutMs') ?? MS_PER_HOUR,
   },
 
   // Health
-  healthPort: (instance?.healthPort as number | undefined) ?? intEnv('HEALTH_PORT', DEFAULT_INSTANCE_HEALTH_PORT),
+  healthPort: optionalFiniteNumber(instance?.healthPort, 'healthPort') ?? intEnv('HEALTH_PORT', DEFAULT_INSTANCE_HEALTH_PORT),
 
   // GUI
-  gui: (instance?.gui as boolean | undefined) ?? false,
-  guiPort: (instance?.guiPort as number | undefined) ?? intEnv('WHATSOUP_GUI_PORT', DEFAULT_FLEET_PORT),
+  gui: optionalBoolean(instance?.gui, 'gui') ?? false,
+  guiPort: optionalFiniteNumber(instance?.guiPort, 'guiPort') ?? intEnv('WHATSOUP_GUI_PORT', DEFAULT_FLEET_PORT),
 
   // API
   // P3.6 review D-2: env-var override for operator-actionable timeout
@@ -1217,9 +1276,11 @@ export const config = {
       .map((jid: string) => jid.trim()),
   ),
 
-  // Control peers — phones trusted to send self-healing control messages
+  // Control peers — phones trusted to send self-healing control messages.
+  // stringRecordProp fails loud on non-string values (and trims), replacing
+  // the former unchecked Record cast.
   controlPeers: new Map<string, string>(
-    Object.entries((instance?.controlPeers ?? {}) as Record<string, string>)
+    Object.entries(stringRecordProp(instance, 'controlPeers'))
   ),
 
   // Sibling bot phones — phone numbers of other WhatSoup instances that share
@@ -1237,8 +1298,8 @@ export const config = {
   // without blocking crash recovery or /new session first responses.
   // In-memory, resets on restart. DMs are never affected.
   echoGuard: {
-    enabled: ((instance?.echoGuard as Record<string, unknown> | undefined)?.enabled as boolean | undefined) !== false,
-    groupCooldownMs: ((instance?.echoGuard as Record<string, unknown> | undefined)?.groupCooldownMs as number | undefined) ?? MS_PER_SECOND,
+    enabled: optionalBoolean(echoGuardSection?.enabled, 'echoGuard.enabled') !== false,
+    groupCooldownMs: optionalFiniteNumber(echoGuardSection?.groupCooldownMs, 'echoGuard.groupCooldownMs') ?? MS_PER_SECOND,
   },
 
   // Paused chats — messages are stored but never dispatched to runtime.
@@ -1272,7 +1333,7 @@ export const config = {
   profiles: profileRecordProp(instance, 'profiles'),
 
   // Token budget
-  tokenBudget: (instance?.tokenBudget as number | undefined) ?? 100_000,
+  tokenBudget: optionalFiniteNumber(instance?.tokenBudget, 'tokenBudget') ?? 100_000,
 
   // Working-memory summarize-before-trim (#1445 QR-010). When the conversation
   // window would exceed tokenBudget, the oldest overflow turns are summarized
@@ -1280,7 +1341,7 @@ export const config = {
   // silently dropped. Default true. When false (or when the summarization call
   // fails), a deterministic "[N earlier turns omitted]" marker is used instead
   // — there is never silent, untraceable loss either way.
-  workingMemorySummarization: (instance?.workingMemorySummarization as boolean | undefined) ?? true,
+  workingMemorySummarization: optionalBoolean(instance?.workingMemorySummarization, 'workingMemorySummarization') ?? true,
 
   // Retention
   retentionDays: resolvedMemory.retention.days,
@@ -1289,18 +1350,18 @@ export const config = {
   enrichmentMaxRetries: resolvedMemory.enrichment.maxRetries,
 
   // Logging
-  logLevel: (process.env.LOG_LEVEL ?? 'info') as string,
+  logLevel: process.env.LOG_LEVEL ?? 'info',
 
   // System prompt
-  systemPrompt: (instance?.systemPrompt as string | undefined) ?? DEFAULT_SYSTEM_PROMPT,
+  systemPrompt: optionalString(instance?.systemPrompt, 'systemPrompt') ?? DEFAULT_SYSTEM_PROMPT,
 
   // Link preview quality — when true, Baileys generates high-quality thumbnails
-  generateHighQualityLinkPreview: (instance?.generateHighQualityLinkPreview as boolean | undefined) ?? false,
+  generateHighQualityLinkPreview: optionalBoolean(instance?.generateHighQualityLinkPreview, 'generateHighQualityLinkPreview') ?? false,
 
 
   // Agent provider selection — read from agentOptions.provider / agentOptions.providerConfig
   // Defaults to 'claude-cli' for backward compatibility when not specified.
-  agentProvider: (resolvedAgentOptions['provider'] as string | undefined) ?? 'claude-cli',
+  agentProvider: optionalString(resolvedAgentOptions['provider'], 'agentOptions.provider') ?? 'claude-cli',
   agentProviderConfig: (resolvedAgentOptions['providerConfig'] as Record<string, unknown> | undefined) ?? undefined,
   agentProviderDataPolicy: isProviderDataPolicy(resolvedAgentOptions['providerDataPolicy'])
     ? resolvedAgentOptions['providerDataPolicy']
@@ -1332,22 +1393,22 @@ export const config = {
 
   // Voice (ElevenLabs TTS)
   elevenlabs: {
-    defaultVoiceId: (instance?.elevenlabs?.defaultVoiceId as string | undefined) ?? 'pNInz6obpgDQGcFmaJgB',
-    defaultModel: (instance?.elevenlabs?.defaultModel as string | undefined) ?? 'eleven_multilingual_v2',
-    stability: (instance?.elevenlabs?.stability as number | undefined) ?? 0.5,
-    similarityBoost: (instance?.elevenlabs?.similarityBoost as number | undefined) ?? 0.75,
+    defaultVoiceId: optionalString(elevenlabsSection?.defaultVoiceId, 'elevenlabs.defaultVoiceId') ?? 'pNInz6obpgDQGcFmaJgB',
+    defaultModel: optionalString(elevenlabsSection?.defaultModel, 'elevenlabs.defaultModel') ?? 'eleven_multilingual_v2',
+    stability: optionalFiniteNumber(elevenlabsSection?.stability, 'elevenlabs.stability') ?? 0.5,
+    similarityBoost: optionalFiniteNumber(elevenlabsSection?.similarityBoost, 'elevenlabs.similarityBoost') ?? 0.75,
   },
-  voiceReply: ((instance?.voiceReply as string | undefined) ?? 'never') as 'always' | 'when_received' | 'never',
+  voiceReply: optionalEnum(instance?.voiceReply, 'voiceReply', ['always', 'when_received', 'never'] as const) ?? 'never',
 
   // Typing simulation (SP5)
-  autoTyping: ((instance?.autoTyping as string | undefined) ?? 'off') as 'composing' | 'recording' | 'off',
+  autoTyping: optionalEnum(instance?.autoTyping, 'autoTyping', ['composing', 'recording', 'off'] as const) ?? 'off',
 
   // Temporary capability grants (#1835): named groups of tool patterns that an
   // admin `/grant <group>` can temporarily unlock (auto-reverting on expiry).
   // Empty by default — configure per instance; each group is validated at
   // startup to not intersect the REQUIRED_DENY floor.
   capabilityGrantGroups: ((): Record<string, { capabilities: string[] }> => {
-    const raw = (instance as { capabilityGrantGroups?: unknown } | undefined)?.capabilityGrantGroups;
+    const raw = instance?.capabilityGrantGroups;
     const out: Record<string, { capabilities: string[] }> = {};
     if (raw && typeof raw === 'object') {
       for (const [name, def] of Object.entries(raw as Record<string, unknown>)) {
@@ -1362,43 +1423,43 @@ export const config = {
 
   // Media retention (SP7) — per-instance config with safe defaults
   mediaRetention: {
-    tempHours:     (instance?.mediaRetention?.tempHours     as number | undefined) ?? 72,
-    cacheHours:    (instance?.mediaRetention?.cacheHours    as number | undefined) ?? 168, // 7 days
-    intervalHours: (instance?.mediaRetention?.intervalHours as number | undefined) ?? 6,
+    tempHours:     optionalFiniteNumber(mediaRetentionSection?.tempHours, 'mediaRetention.tempHours') ?? 72,
+    cacheHours:    optionalFiniteNumber(mediaRetentionSection?.cacheHours, 'mediaRetention.cacheHours') ?? 168, // 7 days
+    intervalHours: optionalFiniteNumber(mediaRetentionSection?.intervalHours, 'mediaRetention.intervalHours') ?? 6,
   },
 
   // Ingest backpressure (SP1)
   ingest: {
-    maxConcurrent: (instance?.ingest?.maxConcurrent as number | undefined) ?? 20,
-    maxQueueDepth: (instance?.ingest?.maxQueueDepth as number | undefined) ?? 500,
+    maxConcurrent: optionalFiniteNumber(ingestSection?.maxConcurrent, 'ingest.maxConcurrent') ?? 20,
+    maxQueueDepth: optionalFiniteNumber(ingestSection?.maxQueueDepth, 'ingest.maxQueueDepth') ?? 500,
   },
 
   // Connection exhaustion (SP2) — exit after N exhaustion cycles so systemd can restart
-  maxExhaustionCycles: (instance?.maxExhaustionCycles as number | undefined) ?? 2,
+  maxExhaustionCycles: optionalFiniteNumber(instance?.maxExhaustionCycles, 'maxExhaustionCycles') ?? 2,
 
   // Turn queue depth cap (SP3)
-  agentMaxQueueDepth: (instance?.agentMaxQueueDepth as number | undefined) ?? 25,
+  agentMaxQueueDepth: optionalFiniteNumber(instance?.agentMaxQueueDepth, 'agentMaxQueueDepth') ?? 25,
 
   // Admin allow replay throttle (SP4)
-  adminReplayMax: (instance?.adminReplayMax as number | undefined) ?? 5,
-  adminReplayDelayMs: (instance?.adminReplayDelayMs as number | undefined) ?? 2000,
+  adminReplayMax: optionalFiniteNumber(instance?.adminReplayMax, 'adminReplayMax') ?? 5,
+  adminReplayDelayMs: optionalFiniteNumber(instance?.adminReplayDelayMs, 'adminReplayDelayMs') ?? 2000,
 
   // Advanced tool gates (SP5)
   advanced: {
-    enableRelayMessage: (instance?.advanced?.enableRelayMessage as boolean | undefined) ?? false,
-    enableResync: (instance?.advanced?.enableResync as boolean | undefined) ?? false,
-    relayMaxPayloadBytes: (instance?.advanced?.relayMaxPayloadBytes as number | undefined) ?? 1_048_576, // 1MB
+    enableRelayMessage: optionalBoolean(advancedSection?.enableRelayMessage, 'advanced.enableRelayMessage') ?? false,
+    enableResync: optionalBoolean(advancedSection?.enableResync, 'advanced.enableResync') ?? false,
+    relayMaxPayloadBytes: optionalFiniteNumber(advancedSection?.relayMaxPayloadBytes, 'advanced.relayMaxPayloadBytes') ?? 1_048_576, // 1MB
     // poll.url watch gate (F2 Slice B). Default OFF: create_watch rejects
     // source:'poll.url' at creation and the poller fails closed at exec time
     // unless an operator opts in. Mirrors enableRelayMessage/enableResync.
-    enableUrlWatch: (instance?.advanced?.enableUrlWatch as boolean | undefined) ?? false,
+    enableUrlWatch: optionalBoolean(advancedSection?.enableUrlWatch, 'advanced.enableUrlWatch') ?? false,
   },
 
   // Access mode (from instance config, defaults to allowlist for backward compat).
   // Source of truth: VALID_ACCESS_MODES + AccessMode in ./instance-loader.ts,
   // which re-exports from ./core/agent-config-validator.ts.
   accessMode: (() => {
-    const raw = (instance?.accessMode as string | undefined) ?? 'allowlist';
+    const raw = optionalString(instance?.accessMode, 'accessMode') ?? 'allowlist';
     if (!VALID_ACCESS_MODES.has(raw)) {
       throw new ConfigValidationError(
         `Invalid accessMode "${raw}" — must be one of: ${[...VALID_ACCESS_MODES].join(', ')}`,
@@ -1414,7 +1475,7 @@ export const config = {
   // operator can flip strict mode per instance without editing config.json.
   groupSenderPolicy: (() => {
     const raw = process.env.WHATSOUP_GROUP_SENDER_POLICY
-      ?? (instance?.groupSenderPolicy as string | undefined)
+      ?? optionalString(instance?.groupSenderPolicy, 'groupSenderPolicy')
       ?? 'any_member';
     if (!VALID_GROUP_SENDER_POLICIES.has(raw)) {
       throw new ConfigValidationError(
