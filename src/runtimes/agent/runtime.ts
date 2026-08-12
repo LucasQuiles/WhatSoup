@@ -76,7 +76,6 @@ import { clearAlertSourceChecked, emitAlertChecked } from '../../lib/emit-alert.
 import { lookupCredential, resolveProviderKeyService } from '../../lib/keyring.ts';
 import { MS_PER_SECOND, MS_PER_MINUTE, MS_PER_HOUR, MS_PER_DAY } from '../../lib/time-units.ts';
 import {
-  envPositiveInt,
   SESSION_IDLE_MS,
   SESSION_SWEEP_INTERVAL_MS,
   ZOMBIE_SESSION_SWEEP_INTERVAL_MS,
@@ -7067,6 +7066,42 @@ export class AgentRuntime implements Runtime {
     // retry state, surfaced in BOTH health branches below.
     const pollPersistenceHealth = this.pollPersistence.healthDetails();
     const offlineDecisionRetry = this.offlineDecisionRetry.healthDetails();
+    // Health-detail fields shared verbatim by both session-scope branches below.
+    // Computed once here (all inputs are already in scope) and spread into each
+    // branch's `details` at the same position, preserving key order and output.
+    const sharedHealthDetails = {
+      pollPersistenceErrors: this.pollPersistence.errors,
+      pollPersistenceHealth,
+      offlineDecisionRetry,
+      autoCompactIneffective: this.autoCompact.ineffective,
+      autoCompactConsecutiveRapidRearmsMax: this.autoCompact.consecutiveRapidRearmsMax,
+      autoCompactNextTurnOverThreshold: this.autoCompact.nextTurnOverThreshold,
+      autoCompactState: autoCompactHealth.state,
+      autoCompactActiveBackoffScopes: autoCompactHealth.activeBackoffScopes,
+      autoCompactWorstCurrentBackoffTier: autoCompactHealth.worstCurrentBackoffTier,
+      proactiveResumeIdentityRejects: this.proactiveResumeIdentityRejects,
+      completedDeliveryIdentityAdmissions,
+      restartLoopGuard: {
+        enabled: config.restartLoopGuard.enabled,
+        ...readRestartLoopGuardHealth(
+          restartLoopGuardPath(config.stateRoot),
+          config.restartLoopGuard.windowMs,
+        ),
+      },
+      unownedProviderEventRejects: this.unownedProviderEventRejects,
+      suppressedSystemTurnEffectRejects: this.suppressedSystemTurnEffectRejects,
+      providerEventRejectReasons: Object.fromEntries(this.providerEventRejectReasonCounts),
+      ...this.turnChronology.healthDetails(),
+      providerExecution,
+      turnFinalizationRetainedRetries: finalizationHealth.retainedRetries,
+      turnFinalizationDegradedScopes: finalizationHealth.degradedScopes,
+      turnFinalizationRetryAttempts: finalizationHealth.retryAttempts,
+      turnFinalizationRetryRecoveries: finalizationHealth.retryRecoveries,
+      turnFinalizationRetryExhaustions: finalizationHealth.retryExhaustions,
+      ...turnQueueHealth,
+      ...recoveryHealth,
+      ...fallbackState,
+    };
     if (this.sessionScope === 'per_chat') {
       const sessions = [...this.chatSessions.values()];
       let activeSessions = 0;
@@ -7109,37 +7144,7 @@ export class AgentRuntime implements Runtime {
           sessionCount: sessions.length,
           recentCrashes: recentCrashCount,
           lastCrashAt: this.crashes.lastCrashAt,
-          pollPersistenceErrors: this.pollPersistence.errors,
-          pollPersistenceHealth,
-          offlineDecisionRetry,
-          autoCompactIneffective: this.autoCompact.ineffective,
-          autoCompactConsecutiveRapidRearmsMax: this.autoCompact.consecutiveRapidRearmsMax,
-          autoCompactNextTurnOverThreshold: this.autoCompact.nextTurnOverThreshold,
-          autoCompactState: autoCompactHealth.state,
-          autoCompactActiveBackoffScopes: autoCompactHealth.activeBackoffScopes,
-          autoCompactWorstCurrentBackoffTier: autoCompactHealth.worstCurrentBackoffTier,
-          proactiveResumeIdentityRejects: this.proactiveResumeIdentityRejects,
-          completedDeliveryIdentityAdmissions,
-          restartLoopGuard: {
-            enabled: config.restartLoopGuard.enabled,
-            ...readRestartLoopGuardHealth(
-              restartLoopGuardPath(config.stateRoot),
-              config.restartLoopGuard.windowMs,
-            ),
-          },
-          unownedProviderEventRejects: this.unownedProviderEventRejects,
-          suppressedSystemTurnEffectRejects: this.suppressedSystemTurnEffectRejects,
-          providerEventRejectReasons: Object.fromEntries(this.providerEventRejectReasonCounts),
-          ...this.turnChronology.healthDetails(),
-          providerExecution,
-          turnFinalizationRetainedRetries: finalizationHealth.retainedRetries,
-          turnFinalizationDegradedScopes: finalizationHealth.degradedScopes,
-          turnFinalizationRetryAttempts: finalizationHealth.retryAttempts,
-          turnFinalizationRetryRecoveries: finalizationHealth.retryRecoveries,
-          turnFinalizationRetryExhaustions: finalizationHealth.retryExhaustions,
-          ...turnQueueHealth,
-          ...recoveryHealth,
-          ...fallbackState,
+          ...sharedHealthDetails,
         },
       };
     }
@@ -7171,37 +7176,7 @@ export class AgentRuntime implements Runtime {
         active: status?.active ?? false,
         pid: status?.pid ?? null,
         sessionId: status?.sessionId ?? null,
-        pollPersistenceErrors: this.pollPersistence.errors,
-        pollPersistenceHealth,
-        offlineDecisionRetry,
-        autoCompactIneffective: this.autoCompact.ineffective,
-        autoCompactConsecutiveRapidRearmsMax: this.autoCompact.consecutiveRapidRearmsMax,
-        autoCompactNextTurnOverThreshold: this.autoCompact.nextTurnOverThreshold,
-        autoCompactState: autoCompactHealth.state,
-        autoCompactActiveBackoffScopes: autoCompactHealth.activeBackoffScopes,
-        autoCompactWorstCurrentBackoffTier: autoCompactHealth.worstCurrentBackoffTier,
-        proactiveResumeIdentityRejects: this.proactiveResumeIdentityRejects,
-        completedDeliveryIdentityAdmissions,
-        restartLoopGuard: {
-          enabled: config.restartLoopGuard.enabled,
-          ...readRestartLoopGuardHealth(
-            restartLoopGuardPath(config.stateRoot),
-            config.restartLoopGuard.windowMs,
-          ),
-        },
-        unownedProviderEventRejects: this.unownedProviderEventRejects,
-        suppressedSystemTurnEffectRejects: this.suppressedSystemTurnEffectRejects,
-        providerEventRejectReasons: Object.fromEntries(this.providerEventRejectReasonCounts),
-        ...this.turnChronology.healthDetails(),
-        providerExecution,
-        turnFinalizationRetainedRetries: finalizationHealth.retainedRetries,
-        turnFinalizationDegradedScopes: finalizationHealth.degradedScopes,
-        turnFinalizationRetryAttempts: finalizationHealth.retryAttempts,
-        turnFinalizationRetryRecoveries: finalizationHealth.retryRecoveries,
-        turnFinalizationRetryExhaustions: finalizationHealth.retryExhaustions,
-        ...turnQueueHealth,
-        ...recoveryHealth,
-        ...fallbackState,
+        ...sharedHealthDetails,
       },
     };
   }
