@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { closeSync, fsyncSync, openSync, writeFileSync } from 'node:fs';
 
 import { cleanGitEnv } from '../../../../src/lib/git-env.ts';
-import { isRecord } from '../../../../src/lib/type-guards.ts';
+import { isNonEmptyString, isRecord } from '../../../../src/lib/type-guards.ts';
 import type { BoundaryValidationIssue, BoundaryValidationResult, BoundaryVerdict } from './model.ts';
 
 export { isRecord };
@@ -110,7 +110,7 @@ export function isOperationalId(value: unknown): value is string {
 }
 
 export function isBoundedText(value: unknown, maxBytes = 4_096): value is string {
-  return typeof value === 'string' && value.length > 0 && Buffer.byteLength(value, 'utf8') <= maxBytes;
+  return isNonEmptyString(value) && Buffer.byteLength(value, 'utf8') <= maxBytes;
 }
 
 export function isVerdict(value: unknown): value is BoundaryVerdict {

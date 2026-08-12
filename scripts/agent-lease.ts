@@ -70,6 +70,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { cleanGitEnv } from './lib/guard-core.ts';
+import { isNonEmptyString } from '../src/lib/type-guards.ts';
 
 // ── Outcome taxonomy ────────────────────────────────────────────────────────
 
@@ -230,7 +231,7 @@ function isStringArray(value: unknown): value is string[] {
 }
 
 function isIsoTimestamp(value: unknown): value is string {
-  return typeof value === 'string' && value.length > 0 && !Number.isNaN(Date.parse(value));
+  return isNonEmptyString(value) && !Number.isNaN(Date.parse(value));
 }
 
 function isNullableString(value: unknown): value is string | null {

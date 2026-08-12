@@ -117,6 +117,11 @@ const config = [
       ...ruleEntriesFor('invariant.timer-rearm-without-clear'),
       ...ruleEntriesFor('portability.fetch-timeout'),
       ...ruleEntriesFor('portability.sync-exec-timeout'),
+      // #2871: prevent re-accretion of inline non-empty-string guards
+      'no-restricted-syntax': ['warn', {
+        selector: 'LogicalExpression[operator="&&"] > BinaryExpression[operator="==="][right.value="string"]',
+        message: 'Use isNonEmptyString() or asNonEmptyString() from src/lib/type-guards.ts instead of typeof x === "string" && x.length > 0 guards.',
+      }],
     },
   },
   {
@@ -135,6 +140,11 @@ const config = [
     plugins,
     rules: {
       ...ruleEntriesFor('arch.ring-boundaries'),
+      // #2871: prevent re-accretion of inline non-empty-string guards
+      'no-restricted-syntax': ['warn', {
+        selector: 'LogicalExpression[operator="&&"] > BinaryExpression[operator="==="][right.value="string"]',
+        message: 'Use isNonEmptyString() or asNonEmptyString() from console/src/lib/type-guards.ts instead of typeof x === "string" && x.length > 0 guards.',
+      }],
     },
   },
   {

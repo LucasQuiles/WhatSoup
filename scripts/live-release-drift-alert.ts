@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { parsePlist } from './check-service-units.ts';
+import { isNonEmptyString } from '../src/lib/type-guards.ts';
 import {
   createReleaseSnapshotDriftReport,
   type ReleaseSnapshotDriftReport,
@@ -142,8 +143,8 @@ function parseArgs(argv: string[]): ParsedArgs {
   if (parsed.launchdPlistPath) parsed.launchdPlistPath = requireAbsolute('--launchd-plist', parsed.launchdPlistPath);
   parsed.repoRoot = requireAbsolute('--repo-root', parsed.repoRoot);
   if (parsed.manifestPath) parsed.manifestPath = requireAbsolute('--manifest', parsed.manifestPath);
-  if (!parsed.instance.trim()) throw new Error('--instance must be non-empty');
-  if (!parsed.source.trim()) throw new Error('--source must be non-empty');
+  if (!isNonEmptyString(parsed.instance)) throw new Error('--instance must be non-empty');
+  if (!isNonEmptyString(parsed.source)) throw new Error('--source must be non-empty');
   return parsed;
 }
 

@@ -5,7 +5,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { cleanGitEnv } from './lib/guard-core.ts';
-import { isRecord } from '../src/lib/type-guards.ts';
+import { isNonEmptyString, isRecord } from '../src/lib/type-guards.ts';
 
 export type SourceRuntimeIssueKind =
   | 'invalid-manifest'
@@ -124,7 +124,7 @@ export function parseSourceRuntimeManifest(payload: unknown): SourceRuntimeManif
   if (payload['schemaVersion'] !== 1) {
     throw new Error(`unsupported source runtime manifest schemaVersion=${String(payload['schemaVersion'])}`);
   }
-  const scope = typeof payload['scope'] === 'string' && payload['scope'].length > 0
+  const scope = isNonEmptyString(payload['scope'])
     ? payload['scope']
     : 'source-runtime';
   const rawEntrypoints = payload['entrypoints'];

@@ -99,7 +99,7 @@ import {
   type RefreshIssue,
   type RefreshPullRequest,
 } from "./lib/open-issue-triage/reconcile.ts";
-import { isRecord } from "../src/lib/type-guards.ts";
+import { isNonEmptyString, isRecord } from "../src/lib/type-guards.ts";
 
 export { commandSchema, parseArgs, renderRegistryMarkdown };
 export type { ArtifactHookContext, CliRuntime };
@@ -525,7 +525,7 @@ function gitOutput(
   kind: string,
 ): string {
   const result = runtime.git(args, root);
-  if (result.status !== 0 || result.stdout.trim().length === 0) {
+  if (result.status !== 0 || !isNonEmptyString(result.stdout)) {
     throw new CliFailure(
       4,
       kind,
@@ -576,7 +576,7 @@ async function assertMainAgreement(
     ["ls-remote", "--exit-code", "origin", "refs/heads/main"],
     root,
   );
-  if (remoteResult.status !== 0 || remoteResult.stdout.trim().length === 0) {
+  if (remoteResult.status !== 0 || !isNonEmptyString(remoteResult.stdout)) {
     throw new CliFailure(
       6,
       "remote-main-unavailable",

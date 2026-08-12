@@ -4,6 +4,7 @@ import { createServer, type Server, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { isNonEmptyString } from '../../src/lib/type-guards.ts';
 import {
   buildProviderMcpConfigArgs,
   writeProviderMcpConfig,
@@ -207,7 +208,7 @@ class RpcSentinel {
       const lines = buffer.split('\n');
       buffer = lines.pop() ?? '';
       for (const line of lines) {
-        if (!line.trim()) continue;
+        if (!isNonEmptyString(line)) continue;
         let frame: Record<string, unknown>;
         try {
           frame = JSON.parse(line) as Record<string, unknown>;

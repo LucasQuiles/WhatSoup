@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import { assertCanonicalSchema43 } from '../../src/core/database-migration-43.ts';
+import { isNonEmptyString } from '../../src/lib/type-guards.ts';
 
 const MAX_RECEIPTS = 200;
 const HASH_PATTERN = /^[a-f0-9]{64}$/;
@@ -113,7 +114,7 @@ function exactKeys(
 }
 
 function boundedText(value: unknown, label: string, maxBytes: number): string {
-  if (typeof value !== 'string' || value.trim() === '') {
+  if (!isNonEmptyString(value)) {
     throw new Error(`${label} must be a nonempty string`);
   }
   if (Buffer.byteLength(value, 'utf8') > maxBytes) {

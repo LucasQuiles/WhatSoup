@@ -11,6 +11,7 @@ import {
   type PathBlobRecord,
   type ProposalIdentity,
 } from './fingerprint.ts';
+import { isNonEmptyString } from '../../../src/lib/type-guards.ts';
 import {
   canonicalHistoryArtifact,
   isValidHistoryTimestamp,
@@ -61,7 +62,7 @@ function compareArtifacts(left: HistoryArtifactRecord, right: HistoryArtifactRec
 function validStringArray(value: unknown): value is string[] {
   return (
     Array.isArray(value) &&
-    value.every((entry) => typeof entry === 'string' && entry.trim().length > 0) &&
+    value.every(isNonEmptyString) &&
     new Set(value).size === value.length
   );
 }
@@ -274,7 +275,7 @@ function reentryFinding(input: {
 
   observed.push({ label: 'delta_kind', value: String(packet.deltaKind ?? 'missing') });
   let productionOwnerPath: string | null = null;
-  if (typeof packet.productionOwner === 'string' && packet.productionOwner.trim().length > 0) {
+  if (isNonEmptyString(packet.productionOwner)) {
     try {
       productionOwnerPath = canonicalRepositoryPath(packet.productionOwner, 'productionOwner');
     } catch {
@@ -298,7 +299,7 @@ function reentryFinding(input: {
   if (packet.override != null) {
     const override = packet.override;
     const overrideFailures: string[] = [];
-    if (typeof override.owner !== 'string' || override.owner.trim().length === 0) {
+    if (!isNonEmptyString(override.owner)) {
       overrideFailures.push('owner is missing');
     } else if (!input.verifiedOverrideOwners.has(override.owner)) {
       overrideFailures.push('owner authority is unverified');
@@ -313,7 +314,7 @@ function reentryFinding(input: {
     ) {
       overrideFailures.push('proposal fingerprint scope does not match');
     }
-    if (typeof override.reason !== 'string' || override.reason.trim().length === 0) {
+    if (!isNonEmptyString(override.reason)) {
       overrideFailures.push('reason is missing');
     }
     if (
