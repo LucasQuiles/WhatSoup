@@ -26,9 +26,9 @@
  * exit code distinguishes every outcome so a skipped or inconclusive step can
  * never read as a pass (F4/F5).
  */
-import { spawnSync } from 'node:child_process';
+import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { closeSync, copyFileSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync } from 'node:fs';
+import { closeSync, copyFileSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, unlinkSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { pathToFileURL } from 'node:url';
@@ -153,9 +153,15 @@ export interface As01MigrationRehearsal {
   integrityAfter: string;
   countsBefore: Record<string, number>;
   countsAfter: Record<string, number>;
-  /** sha256 of the migrated clone — the baseline for the old-binary write-delta. */
+  /** file-set sha256 of the migrated clone — the baseline for the old-binary write-delta. */
   migratedCloneHash: string;
   readOnlySmokeOk: boolean;
+  /** Trigger name-sets before/after (F4 — a migration must not lose triggers). */
+  triggersBefore: string[];
+  triggersAfter: string[];
+  /** True when no key-table row count decreased and no trigger disappeared. */
+  countsPreserved: boolean;
+  triggersPreserved: boolean;
 }
 
 const DEFAULT_KEY_TABLES = ['messages', 'inbound_events', 'outbound_ops', 'turn_terminal_records'];
@@ -199,8 +205,35 @@ function integrityCheck(dbPath: string): string {
   }
 }
 
-function sha256File(path: string): string {
-  return createHash('sha256').update(readFileSync(path)).digest('hex');
+/**
+ * sha256 over the SQLite CONTENT file set (main || -wal), absent component =
+ * empty (F1, WAL-aware). Hashing ONLY the main file misses a write the old
+ * binary lands in the write-ahead log; the -wal carries those frames, so hashing
+ * it makes any WAL write visible without opening (and possibly checkpointing)
+ * the database. `-shm` is deliberately excluded — it is transient shared memory
+ * (an index into the -wal), not durable content, and hashing it invites spurious
+ * mismatches from a merely-opened connection.
+ */
+function dbFileSetHash(path: string): string {
+  const h = createHash('sha256');
+  for (const suffix of ['', '-wal']) {
+    try {
+      h.update(readFileSync(`${path}${suffix}`));
+    } catch { /* absent component contributes nothing */ }
+    h.update('\0');
+  }
+  return h.digest('hex');
+}
+
+/** Sorted trigger names in the schema (F4 — a migration must not drop triggers). */
+function triggerNames(dbPath: string): string[] {
+  const raw = new DatabaseSync(dbPath, { readOnly: true });
+  try {
+    return (raw.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' ORDER BY name").all() as Array<{ name: string }>)
+      .map((r) => r.name);
+  } finally {
+    raw.close();
+  }
 }
 
 /**
@@ -219,6 +252,7 @@ export function rehearseCloneMigration(
   const empty: As01MigrationRehearsal = {
     ok: false, reason: null, startSchema: opts.startSchema, targetSchema: CURRENT_SCHEMA_MIGRATION,
     integrityBefore: '', integrityAfter: '', countsBefore: {}, countsAfter: {}, migratedCloneHash: '', readOnlySmokeOk: false,
+    triggersBefore: [], triggersAfter: [], countsPreserved: false, triggersPreserved: false,
   };
   const actual = schemaVersion(cloneDb);
   if (actual !== opts.startSchema) {
@@ -226,6 +260,7 @@ export function rehearseCloneMigration(
   }
   const integrityBefore = integrityCheck(cloneDb);
   const countsBefore = rowCounts(cloneDb, keyTables);
+  const triggersBefore = triggerNames(cloneDb);
   // Forward migration via the current release's engine (no-op if already target).
   const db = new Database(cloneDb);
   db.open();
@@ -233,6 +268,7 @@ export function rehearseCloneMigration(
   const targetSchema = schemaVersion(cloneDb);
   const integrityAfter = integrityCheck(cloneDb);
   const countsAfter = rowCounts(cloneDb, keyTables);
+  const triggersAfter = triggerNames(cloneDb);
   let readOnlySmokeOk = false;
   try {
     const raw = new DatabaseSync(cloneDb, { readOnly: true });
@@ -245,8 +281,17 @@ export function rehearseCloneMigration(
   } catch {
     readOnlySmokeOk = false;
   }
+  // No key-table row count may DECREASE (a table present before must not lose
+  // rows or vanish); no trigger name present before may disappear.
+  const countsPreserved = keyTables.every((t) => {
+    const before = countsBefore[t] ?? -1;
+    const after = countsAfter[t] ?? -1;
+    return before < 0 || (after >= 0 && after >= before);
+  });
+  const triggersPreserved = triggersBefore.every((name) => triggersAfter.includes(name));
   return {
-    ok: integrityAfter === 'ok' && readOnlySmokeOk,
+    ok: integrityAfter === 'ok' && readOnlySmokeOk && countsPreserved && triggersPreserved
+      && targetSchema === CURRENT_SCHEMA_MIGRATION,
     reason: null,
     startSchema: opts.startSchema,
     targetSchema,
@@ -254,8 +299,12 @@ export function rehearseCloneMigration(
     integrityAfter,
     countsBefore,
     countsAfter,
-    migratedCloneHash: sha256File(cloneDb),
+    migratedCloneHash: dbFileSetHash(cloneDb),
     readOnlySmokeOk,
+    triggersBefore,
+    triggersAfter,
+    countsPreserved,
+    triggersPreserved,
   };
 }
 
@@ -269,16 +318,22 @@ export interface As01CoupledRestore {
 /**
  * Coupled rollback rehearsal (candidate §5): when the old binary rejects the
  * migrated schema, binary rollback is only safe if the pre-migration DB can be
- * restored ATOMICALLY and byte-exactly. This restores `backupPath` (the
- * pre-migration snapshot) over `cloneDb` and proves the restored bytes equal the
- * backup AND pass integrity_check. It is the durable, reproducible guarantee;
- * whether the old binary then STARTS on the restored (its own) schema is the
- * same "accepted" observation, left to the owner-gated real run.
+ * restored ATOMICALLY and completely. This restores `backupPath` (the
+ * pre-migration snapshot) over `cloneDb`'s main file AND DELETES the clone's
+ * `-wal` / `-shm` — a stale write-ahead log left by the old binary would
+ * otherwise replay its (possibly injected) frames on the next open, so restoring
+ * only the main file is not a restore. It then proves the restored FILE-SET
+ * equals the backup and passes integrity_check.
  */
 export function rehearseCoupledRestore(cloneDb: string, backupPath: string): As01CoupledRestore {
-  const backupHash = sha256File(backupPath);
+  const backupHash = dbFileSetHash(backupPath);
   copyFileSync(backupPath, cloneDb);
-  const restoredHash = sha256File(cloneDb);
+  for (const suffix of ['-wal', '-shm']) {
+    try {
+      unlinkSync(`${cloneDb}${suffix}`);
+    } catch { /* absent component: nothing to discard */ }
+  }
+  const restoredHash = dbFileSetHash(cloneDb);
   const integrityAfter = integrityCheck(cloneDb);
   return {
     ok: restoredHash === backupHash && integrityAfter === 'ok',
@@ -357,9 +412,31 @@ export interface As01Io {
   err: (line: string) => void;
 }
 
+export interface OldBinaryObservation {
+  status: number | null;
+  signal: NodeJS.Signals | null;
+  error: boolean;
+  stdout: string;
+  stderr: string;
+}
+
+/** Default old-binary runner: the release's OWN `npm run <script>` (real transport). */
+function defaultRunOldBinary(spec: { scriptName: string; releaseDir: string; env: Record<string, string> }): OldBinaryObservation {
+  const r: SpawnSyncReturns<string> = spawnSync('npm', ['run', spec.scriptName], {
+    cwd: spec.releaseDir, env: spec.env, encoding: 'utf8', timeout: 600_000,
+  });
+  return { status: r.status, signal: r.signal ?? null, error: r.error !== undefined, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
+}
+
 export interface As01Options {
   /** Injected egress prober (tests). Returns true when egress is reachable. */
   probeEgress?: () => boolean;
+  /**
+   * Injected old-binary runner. Default runs the release's `npm run <script>`;
+   * tests inject a runner that spawns the fake directly (no npm subprocess tree),
+   * keeping the write-delta observation real while removing npm from the suite.
+   */
+  runOldBinary?: (spec: { command: string; scriptName: string; releaseDir: string; env: Record<string, string> }) => OldBinaryObservation;
 }
 
 export function runAs01RehearsalCli(argv: readonly string[], io: As01Io, opts: As01Options = {}): number {
@@ -410,15 +487,21 @@ export function runAs01RehearsalCli(argv: readonly string[], io: As01Io, opts: A
 
   // Migrate the clone forward (mutates the CLONE — the rehearsal). No network, no send.
   const migration = rehearseCloneMigration(plan.cloneDb, { startSchema });
-  if (migration.reason !== null) {
-    io.err(`AS-01 migration rehearsal refused: ${migration.reason}`);
-    return AS01_EXIT.INCONCLUSIVE;
-  }
   io.out(`  migrated    : ${migration.startSchema} -> ${migration.targetSchema}`);
   io.out(`  integrity   : before=${migration.integrityBefore} after=${migration.integrityAfter}`);
-  io.out(`  counts      : ${JSON.stringify(migration.countsBefore)} -> ${JSON.stringify(migration.countsAfter)}`);
+  io.out(`  counts      : ${JSON.stringify(migration.countsBefore)} -> ${JSON.stringify(migration.countsAfter)} preserved=${migration.countsPreserved}`);
+  io.out(`  triggers    : before=${migration.triggersBefore.length} after=${migration.triggersAfter.length} preserved=${migration.triggersPreserved}`);
   io.out(`  smoke(ro)   : ${migration.readOnlySmokeOk}`);
   io.out(`  clone-hash  : ${migration.migratedCloneHash}`);
+  // F4 — the CLI must HONOR the migration verdict, not just `reason`. A migration
+  // that ended not-ok (integrity/smoke/counts/triggers/target-schema) never
+  // proceeds to the decisive old-binary step.
+  if (migration.reason !== null || !migration.ok || migration.targetSchema !== CURRENT_SCHEMA_MIGRATION) {
+    io.err(`AS-01 migration rehearsal refused: reason=${migration.reason ?? 'not_ok'} `
+      + `ok=${migration.ok} target=${migration.targetSchema} countsPreserved=${migration.countsPreserved} `
+      + `triggersPreserved=${migration.triggersPreserved}`);
+    return AS01_EXIT.INCONCLUSIVE;
+  }
 
   // The DECISIVE old-binary step requires operator-attested network isolation.
   // WITHOUT it, the rehearsal is INCOMPLETE — not a pass (F4).
@@ -444,17 +527,17 @@ export function runAs01RehearsalCli(argv: readonly string[], io: As01Io, opts: A
   const pathValue = process.env.PATH;
   if (pathValue !== undefined) childEnv.PATH = pathValue;
 
-  const result = spawnSync('npm', ['run', plan.scriptName], {
-    cwd: plan.releaseDir, env: childEnv, encoding: 'utf8', timeout: 600_000,
-  });
-  const hashAfterOldBinary = sha256File(plan.cloneDb);
+  const runOldBinary = opts.runOldBinary ?? defaultRunOldBinary;
+  const result = runOldBinary({ command: plan.resolvedCommand!, scriptName: plan.scriptName, releaseDir: plan.releaseDir, env: childEnv });
+  // F1 — WAL-aware write-delta: the file-SET hash makes a WAL-only write visible.
+  const hashAfterOldBinary = dbFileSetHash(plan.cloneDb);
   const wrote = hashAfterOldBinary !== migration.migratedCloneHash;
   const outcome = classifyOldBinaryOutcome({
     status: result.status,
-    signal: result.signal ?? null,
-    spawnError: result.error !== undefined,
-    stdout: result.stdout ?? '',
-    stderr: result.stderr ?? '',
+    signal: result.signal,
+    spawnError: result.error,
+    stdout: result.stdout,
+    stderr: result.stderr,
     wrote,
   });
   io.out(`  old-binary  : exit=${result.status ?? 'signal'} wrote=${wrote} outcome=${outcome}`);

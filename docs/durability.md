@@ -736,9 +736,12 @@ action records an `operator` audit event carrying the `--run-id` actor and `--id
 source identities it emits a digest-addressed manifest of the historical obligations that
 WOULD be reprocessed (ineligible entries reported, never dropped), for owner approval. The
 digest binds the DESTINATION (conversationKey/deliveryJid/isGroup), the SOURCE identity
-(sourceDigest + token/media hash+size), the EXACT reviewer-classified recovery job id, and the
-reviewer's fulfilment classification — so an approval cannot be reused for a different
-destination, a swapped source, a different job, or a changed classification. Only a reviewer
+(sourceDigest + token/media hash+size), the EXACT reviewer-classified recovery job id, the
+reviewer's fulfilment classification, the replay-payload INPUT DIGEST (message text + prepared
+media class), and the reviewer's EVIDENCE-MATRIX digest (transcript + tool/delivery receipts +
+later-turn review) — so an approval cannot be reused for a different destination, a swapped
+source, a different job, a changed classification, an EDITED instruction, or a different
+evidence set. Only a reviewer
 `confirmed_unfulfilled` whose persisted job agrees on inbound/message/conversation/destination,
 is completed+`echo`, and has no sibling worker-fulfilment is eligible; echo-settlement is
 corroboration with VETO power, never the affirmative proof (the executor does NOT re-derive
@@ -751,28 +754,40 @@ approver SEES what the approval commits to.
 the manifest digest over the descriptors it is about to run and REFUSES the whole run on
 mismatch (a descriptor altered after approval cannot execute). For each entry it re-verifies
 the reviewer classification + exact recovery job (selected BY ID, never latest-by-sequence),
-retains+reverifies media, is idempotent (a second run creates nothing), commits every insert
-in ONE all-row transaction (no partial backfill), persists the real recovery job id as
-`origin_recovery_job_id`, and leaves the original recovery-job rows untouched. Its CLI
-(`runBackfillExecuteCli`) is dry-run by default; applying requires a schema guard, a
-quiescence check (`BEGIN IMMEDIATE` — a busy DB means the bot is running → refused), a
-SQLite `--backup-path` at the current schema, an `--expect-existing` precondition on the
-current backfill count, and a `--confirm <approvedDigest>` confirmation token equal to the
-manifest digest (holding the flag is not enough — the operator must hold the artifact).
+RE-COMPUTES the input digest from the CURRENT message (a WhatsApp edit to the replayed
+instruction after approval is skipped), retains+reverifies media, and is idempotent (a second
+run creates nothing). Atomicity is ALL-OR-NOTHING over the approved set: if ANY approved entry
+hard-fails (recovery/media/input reverify), the run commits NOTHING — there is no partial
+backfill. It persists the real recovery job id as `origin_recovery_job_id` and leaves the
+original recovery-job rows untouched. Its CLI (`runBackfillExecuteCli`) is dry-run by default;
+applying requires a schema guard, a quiescence lock (`BEGIN IMMEDIATE` — a current writer is
+refused; NOTE this detects a live writer but does NOT prove the bot process is stopped, which
+stays operator-attested), a `--backup-path` that is a byte-exact SQLite FILE-SET (main||-wal)
+snapshot of THE TARGET at the current schema (a foreign or stale backup, or a target that
+changed since the backup, is refused), a pre-commit re-check that the target did not change
+during the run, an `--expect-existing` precondition on the current backfill count, and a
+`--confirm <approvedDigest>` confirmation token equal to the manifest digest (holding the flag
+is not enough — the operator must hold the artifact).
 `scripts/capability-obligation-as01-rehearsal.ts` authors the old-binary/schema rehearsal: it
 reads the startup/schema-guard command from the OLD release's OWN `package.json` (never
 guessed); requires a real SQLite CLONE inside the designated sandbox using canonical realpath
 (a symlink to a live DB, a non-regular, or a non-SQLite file are refused); snapshots the clone,
-migrates it `startSchema→target` with integrity + row-count + read-only-smoke evidence; and
-runs the DECISIVE old-binary check only under `--confirm --network-isolated`. That check
-CLASSIFIES the observation — `rejected_no_write` (the EXPECTED behavior: a non-zero exit
-carrying `DatabaseCompatibilityError`/`future_schema` with no write) / `accepted` / 
+migrates it `startSchema→target` and HONORS the migration verdict — it proceeds ONLY when the
+migration is ok (integrity + read-only smoke + preserved key-table row counts + preserved
+trigger NAME-SET + target schema == current); an `ok:false` migration never reaches the old
+binary. It then runs the DECISIVE old-binary check only under `--confirm --network-isolated`.
+That check CLASSIFIES the observation — `rejected_no_write` (the EXPECTED behavior: a non-zero
+exit carrying `DatabaseCompatibilityError`/`future_schema` with no write) / `accepted` /
 `wrote_dangerous` / `inconclusive` — with a distinguishable exit code (0 pass, 1 inconclusive,
 2 INCOMPLETE-when-skipped, 3 accepted-owner-decision, 4 wrote-dangerous), so a skipped or
-unclassifiable step can never read as a pass. On the expected rejection it proves the coupled
-byte-exact pre-migration RESTORE (candidate §5). The old binary runs in a sandbox HOME + npm
-cache (never the operator's live config), and network isolation is a fail-closed egress probe
-(a reachable network REFUSES the run) — isolation can be disproven, never proven, so
+unclassifiable step can never read as a pass. Write detection is WAL-AWARE: the file-set hash
+(main||-wal) makes a write the old binary lands in the write-ahead log visible, so a WAL-only
+write is classified `wrote_dangerous`, not a clean rejection. On the expected rejection it
+proves the coupled pre-migration RESTORE (candidate §5) — which restores the main file AND
+DELETES the clone's `-wal`/`-shm`, so a stale injected WAL frame cannot replay; the restored
+file-set must equal the backup and pass integrity_check. The old binary runs in a sandbox HOME
++ npm cache (never the operator's live config), and network isolation is a fail-closed egress
+probe (a reachable network REFUSES the run) — isolation can be disproven, never proven, so
 `--network-isolated` stays an operator attestation the probe fails-closed against; no-SEND is
 guaranteed by construction (it never opens a WhatsApp session). Backfill EXECUTION,
 the DM drain, both group drains, and the old-binary rehearsal are separately owner-gated.
