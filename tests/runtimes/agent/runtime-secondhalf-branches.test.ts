@@ -108,8 +108,9 @@ const {
   return { mockSession, mockQueue, capturedOnEventRef, capturedOnCrashRef, capturedNotifyUserRef };
 });
 
+// TYPE NOTE: assertions use mockRuntimeLogger.warn; typed for property access.
 const { mockRuntimeLogger } = vi.hoisted(() => ({
-  mockRuntimeLogger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
+  mockRuntimeLogger: {} as Record<string, ReturnType<typeof vi.fn>>,
 }));
 
 const { mockEmitAlert, mockClearAlertSource } = vi.hoisted(() => ({
@@ -143,10 +144,9 @@ const { mockGetActiveSession } = vi.hoisted(() => ({
 // ─── Module mocks ───────────────────────────────────────────────────────────
 
 vi.mock('../../../src/logger.ts', async () => {
-  const { singletonLoggerMock } = await import('../../helpers/logger-mock.ts');
-  const singleton = singletonLoggerMock();
-  Object.assign(mockRuntimeLogger, singleton);
-  return { createChildLogger: () => mockRuntimeLogger };
+  const { hoistedLoggerMock } = await import('../../helpers/logger-mock.ts');
+  const { createChildLogger } = hoistedLoggerMock(mockRuntimeLogger);
+  return { createChildLogger };
 });
 
 vi.mock('../../../src/lib/emit-alert.ts', () => ({

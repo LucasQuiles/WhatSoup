@@ -101,23 +101,17 @@ const { mockSession, mockQueue, capturedOnEventRef } = vi.hoisted(() => {
   return { mockSession, mockQueue, capturedOnEventRef };
 });
 
+// TYPE NOTE: assertions use mockRuntimeLogger.warn etc; typed as Record<string, ReturnType<typeof vi.fn>>
+// so property access on the hoisted ref doesn't produce type errors.
 const { mockRuntimeLogger, mockReaddirSync } = vi.hoisted(() => ({
-  mockRuntimeLogger: {
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  },
+  mockRuntimeLogger: {} as Record<string, ReturnType<typeof vi.fn>>,
   mockReaddirSync: vi.fn(() => ['0', '1', '2']),
 }));
 
 vi.mock('../../../src/logger.ts', async () => {
-  const { singletonLoggerMock } = await import('../../helpers/logger-mock.ts');
-  const singleton = singletonLoggerMock();
-  Object.assign(mockRuntimeLogger, singleton);
-  return {
-    createChildLogger: () => ({ ...singleton, child: vi.fn().mockReturnThis() }),
-  };
+  const { hoistedLoggerMock } = await import('../../helpers/logger-mock.ts');
+  const { createChildLogger } = hoistedLoggerMock(mockRuntimeLogger);
+  return { createChildLogger };
 });
 
 vi.mock('../../../src/runtimes/agent/process-tree.ts', () => ({

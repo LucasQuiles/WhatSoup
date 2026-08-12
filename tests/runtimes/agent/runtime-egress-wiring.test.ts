@@ -46,12 +46,8 @@ const { mockConfig, mockRuntimeLogger } = vi.hoisted(() => ({
     stateRoot: '/tmp/whatsoup-test-state-egress-wiring',
     restartLoopGuard: { enabled: true, maxRestarts: 3, windowMs: 300_000 },
   },
-  mockRuntimeLogger: {
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  },
+  // TYPE NOTE: assertions use mockRuntimeLogger.warn/error; typed for property access.
+  mockRuntimeLogger: {} as Record<string, ReturnType<typeof vi.fn>>,
 }));
 
 const { mockSocketServerInstance, MockWhatSoupSocketServer } = vi.hoisted(() => {
@@ -70,8 +66,9 @@ const { mockSocketServerInstance, MockWhatSoupSocketServer } = vi.hoisted(() => 
 
 vi.mock('../../../src/config.ts', () => ({ config: mockConfig }));
 vi.mock('../../../src/logger.ts', async () => {
-  const { loggerMock } = await import('../../helpers/logger-mock.ts');
-  return loggerMock();
+  const { hoistedLoggerMock } = await import('../../helpers/logger-mock.ts');
+  const { createChildLogger } = hoistedLoggerMock(mockRuntimeLogger);
+  return { createChildLogger };
 });
 vi.mock('../../../src/core/messages.ts', () => ({
   getRecentMessages: vi.fn(() => []),

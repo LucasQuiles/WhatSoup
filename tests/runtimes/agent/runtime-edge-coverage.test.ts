@@ -75,12 +75,8 @@ const {
   const createdSessions: Array<{ opts: SessionOptions; session: MockSession }> = [];
   const createdQueues: unknown[] = [];
   const createdControlQueues: unknown[] = [];
-  const mockRuntimeLogger = {
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  };
+  // TYPE NOTE: assertions use mockRuntimeLogger.warn/error/info + dynamic index; typed for property access.
+  const mockRuntimeLogger = {} as Record<string, ReturnType<typeof vi.fn>>;
   const mockEmitAlert = vi.fn(() => true);
   const mockRunDiagnosticBundle = vi.fn(async () => ({
     errorClass: 'provider_usage_limit',
@@ -134,10 +130,9 @@ const {
 });
 
 vi.mock('../../../src/logger.ts', async () => {
-  const { singletonLoggerMock } = await import('../../helpers/logger-mock.ts');
-  const singleton = singletonLoggerMock();
-  Object.assign(mockRuntimeLogger, singleton);
-  return { createChildLogger: () => mockRuntimeLogger };
+  const { hoistedLoggerMock } = await import('../../helpers/logger-mock.ts');
+  const { createChildLogger } = hoistedLoggerMock(mockRuntimeLogger);
+  return { createChildLogger };
 });
 
 vi.mock('../../../src/lib/emit-alert.ts', () => ({

@@ -95,13 +95,9 @@ const {
   };
 });
 
+// TYPE NOTE: assertions use mockRuntimeLogger.warn/error; typed for property access.
 const { mockRuntimeLogger } = vi.hoisted(() => ({
-  mockRuntimeLogger: {
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  },
+  mockRuntimeLogger: {} as Record<string, ReturnType<typeof vi.fn>>,
 }));
 
 const { mockEmitAlert, mockClearAlertSource } = vi.hoisted(() => ({
@@ -110,8 +106,9 @@ const { mockEmitAlert, mockClearAlertSource } = vi.hoisted(() => ({
 }));
 
 vi.mock('../../../src/logger.ts', async () => {
-  const { loggerMock } = await import('../../helpers/logger-mock.ts');
-  return loggerMock();
+  const { hoistedLoggerMock } = await import('../../helpers/logger-mock.ts');
+  const { createChildLogger } = hoistedLoggerMock(mockRuntimeLogger);
+  return { createChildLogger };
 });
 
 vi.mock('../../../src/lib/emit-alert.ts', () => ({

@@ -28,18 +28,13 @@ import { canSendToGroup, recordGroupOutbound, __resetForTests } from '../../../s
 import type { EchoGuardConfig } from '../../../src/core/echo-guard.ts';
 
 // vi.mock is hoisted, so mockLog must be created with vi.hoisted to be accessible inside the factory
-const mockLog = vi.hoisted(() => ({
-  info: vi.fn(),
-  warn: vi.fn(),
-  error: vi.fn(),
-  debug: vi.fn(),
-}));
+// TYPE NOTE: assertions use mockLog.warn/error/info; typed for property access.
+const mockLog = vi.hoisted(() => ({} as Record<string, ReturnType<typeof vi.fn>>));
 
 vi.mock('../../../src/logger.ts', async () => {
-  const { singletonLoggerMock } = await import('../../helpers/logger-mock.ts');
-  const singleton = singletonLoggerMock();
-  Object.assign(mockLog, singleton);
-  return { createChildLogger: () => mockLog };
+  const { hoistedLoggerMock } = await import('../../helpers/logger-mock.ts');
+  const { createChildLogger } = hoistedLoggerMock(mockLog);
+  return { createChildLogger };
 });
 
 const CHAT_JID = 'test@s.whatsapp.net';

@@ -23,15 +23,15 @@ vi.mock('../../../src/runtimes/agent/provider-canary-proof.ts');
 // handoff-distill-coordinator.test.ts's `mockLogger`. Nothing else in this file
 // reads `log` calls today, so switching from "new object per call" to "one
 // shared object" is behaviorally invisible to every other test here.
+// TYPE NOTE: mockLogger.debug asserted at L7187; typed for property access.
 const { mockLogger } = vi.hoisted(() => ({
-  mockLogger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
+  mockLogger: {} as Record<string, ReturnType<typeof vi.fn>>,
 }));
 
 vi.mock('../../../src/logger.ts', async () => {
-  const { singletonLoggerMock } = await import('../../helpers/logger-mock.ts');
-  const singleton = singletonLoggerMock();
-  Object.assign(mockLogger, singleton);
-  return { createChildLogger: () => singleton };
+  const { hoistedLoggerMock } = await import('../../helpers/logger-mock.ts');
+  const { createChildLogger } = hoistedLoggerMock(mockLogger);
+  return { createChildLogger };
 });
 
 vi.mock('node:os', () => ({

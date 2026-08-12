@@ -17,20 +17,15 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // ─── Mocks (declared before importing the runtime, hoisted by vitest) ──────────
 
+// TYPE NOTE: assertions use mockRuntimeLogger.warn/error; typed for property access.
 const { mockRuntimeLogger } = vi.hoisted(() => ({
-  mockRuntimeLogger: {
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  },
+  mockRuntimeLogger: {} as Record<string, ReturnType<typeof vi.fn>>,
 }));
 
 vi.mock('../../../src/logger.ts', async () => {
-  const { singletonLoggerMock } = await import('../../helpers/logger-mock.ts');
-  const singleton = singletonLoggerMock();
-  Object.assign(mockRuntimeLogger, singleton);
-  return { createChildLogger: () => singleton };
+  const { hoistedLoggerMock } = await import('../../helpers/logger-mock.ts');
+  const { createChildLogger } = hoistedLoggerMock(mockRuntimeLogger);
+  return { createChildLogger };
 });
 
 vi.mock('../../../src/lib/emit-alert.ts', () => {

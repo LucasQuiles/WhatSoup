@@ -45,19 +45,17 @@ const {
   mockGetRecentMessages: vi.fn(() => []),
   mockUpsertHandoffArtifact: vi.fn(),
   mockEmitAlertChecked: vi.fn(() => true),
-  mockLogger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
+  // TYPE NOTE: assertions use mockLogger.info/warn etc; typed loose so property access doesn't error.
+  mockLogger: {} as Record<string, ReturnType<typeof vi.fn>>,
   mockBuildHandoffDistill: vi.fn(),
 }));
 
 // ─── Module mocks (declared before importing the coordinator) ───────────────
 
 vi.mock('../../../src/logger.ts', async () => {
-  const { singletonLoggerMock } = await import('../../helpers/logger-mock.ts');
-  const singleton = singletonLoggerMock();
-  Object.assign(mockLogger, singleton);
-  return {
-    createChildLogger: () => ({ ...singleton, child: vi.fn().mockReturnThis() }),
-  };
+  const { hoistedLoggerMock } = await import('../../helpers/logger-mock.ts');
+  const { createChildLogger } = hoistedLoggerMock(mockLogger);
+  return { createChildLogger };
 });
 
 vi.mock('../../../src/core/messages.ts', () => ({

@@ -121,13 +121,9 @@ const { mockSession, mockQueue, capturedSessionManagerOptsRef, capturedOnEventRe
   return { mockSession, mockQueue, capturedSessionManagerOptsRef, capturedOnEventRef, capturedOnResumeFailedRef, capturedOnCrashRef, capturedNotifyUserRef };
 });
 
+// TYPE NOTE: assertions use mockRuntimeLogger.info/warn/error; typed for property access.
 const { mockRuntimeLogger, mockReaddirSync } = vi.hoisted(() => ({
-  mockRuntimeLogger: {
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  },
+  mockRuntimeLogger: {} as Record<string, ReturnType<typeof vi.fn>>,
   mockReaddirSync: vi.fn(() => ['0', '1', '2']),
 }));
 
@@ -159,12 +155,9 @@ const { mockProbePrimaryModelUsability, mockCreatePrimaryModelProbeAdapters } = 
 // ─── Module mocks ─────────────────────────────────────────────────────────────
 
 vi.mock('../../../src/logger.ts', async () => {
-  const { singletonLoggerMock } = await import('../../helpers/logger-mock.ts');
-  const singleton = singletonLoggerMock();
-  Object.assign(mockRuntimeLogger, singleton);
-  return {
-    createChildLogger: () => ({ ...singleton, child: vi.fn().mockReturnThis() }),
-  };
+  const { hoistedLoggerMock } = await import('../../helpers/logger-mock.ts');
+  const { createChildLogger } = hoistedLoggerMock(mockRuntimeLogger);
+  return { createChildLogger };
 });
 
 vi.mock('../../../src/runtimes/agent/process-tree.ts', () => ({
