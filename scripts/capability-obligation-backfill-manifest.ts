@@ -18,12 +18,13 @@
  * exactly this set.
  */
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { pathToFileURL } from 'node:url';
 
 import {
+  capabilitySourceDigest,
   evaluateCapabilityContract,
   parseCapabilityContract,
   type CapabilityContract,
@@ -35,6 +36,14 @@ export interface BackfillConfirmedEntry {
   sourceMessageId: string;
   /** Reviewer media classification when the source is media ('document' | 'video'). */
   mediaClass?: string | null;
+  /**
+   * REVIEWER capability override (candidate §4). Backfill is reviewer-driven,
+   * so an entry the live contract cannot classify — notably audio (excluded
+   * from the contract BY CONSTRUCTION), the incident-7795 shape — is still
+   * eligible when the reviewer supplies the capability here. It bypasses
+   * `evaluateCapabilityContract` for THIS entry only.
+   */
+  reviewerCapability?: string;
 }
 
 export interface BackfillDescriptor {
@@ -43,13 +52,18 @@ export interface BackfillDescriptor {
   eligible: boolean;
   /** Ineligibility reason (null when eligible) — reported, never silently dropped. */
   reason: string | null;
+  /** How the capability was classified: the live contract, or a reviewer override. */
+  classifiedBy?: 'contract' | 'reviewer';
   conversationKey?: string;
   deliveryJid?: string;
   isGroup?: boolean;
   requiredCapability?: string;
   contractVersion?: string;
-  normalizedMatchValue?: string;
-  mediaPresent?: boolean;
+  sourceToken?: string | null;
+  /** sha256 the D6 receipt must reproduce (media sha256, or sha256 of the source token). */
+  sourceDigest?: string;
+  mediaSha256?: string | null;
+  mediaBytes?: number | null;
 }
 
 export interface BackfillManifest {
@@ -107,38 +121,99 @@ export function generateBackfillManifest(
       entries.push({ ...base, reason: 'message_is_outbound' });
       continue;
     }
-    const decision = evaluateCapabilityContract(params.contract, {
-      text: message.content ?? '',
-      preparedMediaClass: c.mediaClass ?? null,
-    });
-    if (decision.outcome !== 'match') {
-      entries.push({ ...base, reason: `contract_${decision.outcome}` });
-      continue;
+
+    // Classify: reviewer override (candidate §4 — the audio path the contract
+    // cannot represent) OR the live contract.
+    let requiredCapability: string;
+    let classifiedBy: 'contract' | 'reviewer';
+    let contractSourceToken: string | null = null;
+    if (c.reviewerCapability !== undefined) {
+      requiredCapability = c.reviewerCapability;
+      classifiedBy = 'reviewer';
+    } else {
+      const decision = evaluateCapabilityContract(params.contract, {
+        text: message.content ?? '',
+        preparedMediaClass: c.mediaClass ?? null,
+      });
+      if (decision.outcome !== 'match') {
+        entries.push({ ...base, reason: `contract_${decision.outcome}` });
+        continue;
+      }
+      requiredCapability = decision.capability;
+      classifiedBy = 'contract';
+      contractSourceToken = decision.sourceToken;
     }
+
+    // Bind the exact source identity: media obligations hash the media bytes;
+    // token obligations hash the canonical source token.
+    let sourceToken: string | null;
+    let sourceDigest: string;
+    let mediaSha256: string | null = null;
+    let mediaBytes: number | null = null;
+    if (message.media_path !== null) {
+      let buf: Buffer;
+      try {
+        buf = readFileSync(message.media_path);
+        statSync(message.media_path); // presence/regular-file probe
+      } catch {
+        entries.push({ ...base, reason: 'media_unavailable' });
+        continue;
+      }
+      mediaSha256 = createHash('sha256').update(buf).digest('hex');
+      mediaBytes = buf.length;
+      sourceToken = null;
+      sourceDigest = capabilitySourceDigest(null, mediaSha256);
+    } else {
+      // A reviewer override is only for media the contract cannot represent.
+      if (classifiedBy === 'reviewer') {
+        entries.push({ ...base, reason: 'reviewer_override_requires_media' });
+        continue;
+      }
+      if (contractSourceToken === null) {
+        entries.push({ ...base, reason: 'no_source_token' });
+        continue;
+      }
+      sourceToken = contractSourceToken;
+      sourceDigest = capabilitySourceDigest(sourceToken, null);
+    }
+
     entries.push({
       ...base,
       eligible: true,
+      classifiedBy,
       conversationKey: inbound.conversation_key,
       deliveryJid: inbound.chat_jid,
       isGroup: inbound.chat_jid.endsWith('@g.us'),
-      requiredCapability: decision.capability,
-      contractVersion: decision.contractVersion,
-      normalizedMatchValue: decision.normalizedMatchValue,
-      mediaPresent: message.media_path !== null,
+      requiredCapability,
+      contractVersion: params.contract.version,
+      sourceToken,
+      sourceDigest,
+      mediaSha256,
+      mediaBytes,
     });
   }
 
   const eligible = entries.filter((e) => e.eligible);
-  // Canonical (order-independent) digest over the eligible descriptors.
+  // Canonical (order-independent) digest over the eligible descriptors. It binds
+  // the DESTINATION (conversationKey/deliveryJid/isGroup), the SOURCE identity
+  // (sourceDigest + token/media hash+size) and the capability — so an approval
+  // for a DM can never be reused for a group, and a source swap changes the
+  // digest.
   const canonical = JSON.stringify(
     eligible
       .map((e) => ({
         sourceInboundSeq: e.sourceInboundSeq,
         sourceMessageId: e.sourceMessageId,
+        conversationKey: e.conversationKey,
+        deliveryJid: e.deliveryJid,
+        isGroup: e.isGroup,
+        classifiedBy: e.classifiedBy,
         requiredCapability: e.requiredCapability,
         contractVersion: e.contractVersion,
-        normalizedMatchValue: e.normalizedMatchValue,
-        mediaPresent: e.mediaPresent,
+        sourceToken: e.sourceToken,
+        sourceDigest: e.sourceDigest,
+        mediaSha256: e.mediaSha256,
+        mediaBytes: e.mediaBytes,
       }))
       .sort((a, b) => a.sourceInboundSeq - b.sourceInboundSeq),
   );

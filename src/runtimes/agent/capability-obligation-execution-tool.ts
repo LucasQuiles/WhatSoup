@@ -9,12 +9,14 @@
  *
  * Media obligations are executed against a per-attempt SNAPSHOT: the handler
  * copies the retained bytes into a private temp dir, hashes THAT snapshot, hands
- * the snapshot path to the child, and re-hashes it after the child exits — the
- * receipt is bound to bytes the child actually consumed, isolated from any
- * concurrent writer of the retained path, and a net change (a resolver that
- * mutates its input) records an error, never `ok`. (Residual, stated: a
- * transient mutate-read-restore INSIDE the child is not detected; the snapshot
- * path is known only to this handler.)
+ * the snapshot path to the child, and re-hashes it after the child exits. The
+ * receipt binds a snapshot digest verified UNCHANGED before and after the run
+ * (isolated from any concurrent writer of the retained path); a net change — a
+ * resolver that mutates its input — records an error, never `ok`. This is
+ * net-change DETECTION, NOT a cryptographic proof of which bytes the child
+ * actually read: a transient mutate-read-restore inside the child would evade
+ * the re-hash. Closing that gap needs a stronger resolver contract (a read-only
+ * fd / stdin the child cannot reopen).
  *
  * Nothing here parses model-controlled text: a provider turn can neither forge
  * a receipt (only this handler writes them, from its own observations) nor
@@ -137,8 +139,8 @@ export function buildCapabilityExecutionTool(deps: CapabilityExecutionToolDeps):
       //  - media: the agent must name the retained path; the handler copies its
       //    bytes into a private per-attempt snapshot, hashes the SNAPSHOT, and
       //    executes against the snapshot path (isolated from any writer of the
-      //    retained path). A post-execution re-hash proves the child consumed
-      //    the exact bytes hashed;
+      //    retained path). A post-execution re-hash DETECTS any net change to
+      //    the snapshot (not a proof of which bytes the child read);
       //  - URL/token: the source string IS the bytes.
       let observedSourceDigest: string;
       let observedMediaDigest: string | null = null;
@@ -199,10 +201,11 @@ export function buildCapabilityExecutionTool(deps: CapabilityExecutionToolDeps):
           return toolError({ error: 'capability_execution', message: 'Capability resolver could not be started' });
         }
 
-        // Media integrity: prove the child consumed the exact bytes hashed. A net
-        // change to the snapshot means the resolver (or a writer of a path only
-        // this handler knows) altered the input, so the recorded digest no longer
-        // represents what was processed → error, never `ok`.
+        // Media integrity: DETECT a net change to the snapshot the child was
+        // handed. A change means the resolver (or a writer of a path only this
+        // handler knows) altered the input, so the recorded digest no longer
+        // represents the bytes present during the run → error, never `ok`. This
+        // is change-detection, not proof the child read exactly these bytes.
         if (snapshotDir !== null && observedMediaDigest !== null) {
           let postDigest = '';
           try {

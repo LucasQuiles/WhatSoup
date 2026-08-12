@@ -734,12 +734,24 @@ action records an `operator` audit event carrying the `--run-id` actor and `--id
 **Backfill and AS-01 rehearsal (both owner-gated).**
 `scripts/capability-obligation-backfill-manifest.ts` is READ-ONLY: from reviewer-confirmed
 source identities it emits a digest-addressed manifest of the historical obligations that
-WOULD be reprocessed (ineligible entries reported, never dropped), for owner approval — it
-never inserts or drains. `scripts/capability-obligation-as01-rehearsal.ts` authors the
-old-binary/schema rehearsal: it reads the startup/schema-guard command from the OLD release's
-OWN `package.json` (never guessed), refuses any target not inside the designated rehearsal
-sandbox (never a live DB), and is dry-run unless `--confirm`. Backfill creation, the DM drain,
-both group drains, and running the rehearsal are separately owner-gated.
+WOULD be reprocessed (ineligible entries reported, never dropped), for owner approval. The
+digest binds the DESTINATION (conversationKey/deliveryJid/isGroup) and SOURCE identity
+(sourceDigest + token/media hash) so an approval cannot be reused for a different destination
+or a swapped source. A reviewer capability override makes historical AUDIO eligible (audio is
+excluded from the live contract by construction; incident-7795 shape).
+`scripts/capability-obligation-backfill-execute.ts` is the owner-gated EXECUTOR: it appends
+obligations through the guarded store ONLY for inbounds proven non-fulfilled (a completed
+recovery job settled `completion_kind='echo'`), with media hash/retain/reverify, idempotently
+(a second run creates nothing), and leaves the original recovery-job rows untouched.
+`scripts/capability-obligation-as01-rehearsal.ts` authors the old-binary/schema rehearsal: it
+reads the startup/schema-guard command from the OLD release's OWN `package.json` (never
+guessed); requires a real SQLite CLONE inside the designated sandbox using canonical realpath
+(a symlink to a live DB, a non-regular, or a non-SQLite file are refused); migrates the clone
+`startSchema→target` with integrity + row-count + read-only-smoke evidence; and runs the
+old-binary check + before/after write-delta proof only under `--confirm --network-isolated`.
+It provides no-SEND by construction (it never opens a WhatsApp session) but CANNOT itself
+guarantee OS network isolation — the operator supplies that externally. Backfill EXECUTION,
+the DM drain, both group drains, and the old-binary rehearsal are separately owner-gated.
 
 ---
 
