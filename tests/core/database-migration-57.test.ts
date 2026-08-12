@@ -39,6 +39,7 @@ const OBLIGATION = {
   capability_params: '{"skill":"watch"}',
   input_digest: 'ab'.repeat(32),
   source_digest: 'cd'.repeat(32),
+  source_token: 'https://youtu.be/abc',
   state: 'waiting_capability',
   creation_reason: 'typed_deferral_signal',
 };
@@ -112,14 +113,44 @@ describe('capability_obligations — creation gates', () => {
 
   it('requires media identity columns to be all-present or all-absent', () => {
     expect(() =>
-      insertObligation({ source_inbound_seq: 1003, retained_media_path: '/x/y', media_sha256: null, media_bytes: null }),
+      insertObligation({ source_inbound_seq: 1003, source_token: null, retained_media_path: '/x/y', media_sha256: null, media_bytes: null }),
     ).toThrow();
     expect(() =>
       insertObligation({
         source_inbound_seq: 1003,
+        source_token: null,
         retained_media_path: '/x/y',
         media_sha256: 'ab'.repeat(32),
         media_bytes: 10,
+        retention_policy_version: 'p1',
+      }),
+    ).not.toThrow();
+  });
+
+  it('requires EXACTLY ONE execution source (source_token XOR retained media)', () => {
+    // neither → rejected
+    expect(() => insertObligation({ source_inbound_seq: 1004, source_token: null })).toThrow(/constraint/i);
+    // both → rejected
+    expect(() =>
+      insertObligation({
+        source_inbound_seq: 1005,
+        source_token: 'https://youtu.be/abc',
+        retained_media_path: '/x/y',
+        media_sha256: 'ab'.repeat(32),
+        media_bytes: 10,
+        retention_policy_version: 'p1',
+      }),
+    ).toThrow(/constraint/i);
+    // token only → ok
+    expect(() => insertObligation({ source_inbound_seq: 1006 })).not.toThrow();
+    // media only → ok
+    expect(() =>
+      insertObligation({
+        source_inbound_seq: 1007,
+        source_token: null,
+        retained_media_path: '/x/z',
+        media_sha256: 'ef'.repeat(32),
+        media_bytes: 12,
         retention_policy_version: 'p1',
       }),
     ).not.toThrow();

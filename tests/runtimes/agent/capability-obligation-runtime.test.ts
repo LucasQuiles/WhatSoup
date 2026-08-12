@@ -19,9 +19,11 @@ import { Database } from '../../../src/core/database.ts';
 import { withTransaction } from '../../../src/core/db-tx.ts';
 import {
   CapabilityObligationRuntime,
+  composeCapabilityObligationReplayPrompt,
   resolveReleaseIdentity,
   type CapabilityObligationLiveFacts,
 } from '../../../src/runtimes/agent/capability-obligation-runtime.ts';
+import type { CapabilityObligationDueRow } from '../../../src/core/capability-obligation-store.ts';
 import type { ObligationDispatchOutcome } from '../../../src/runtimes/agent/capability-obligation-supervisor.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
 import type { ToolDeclaration } from '../../../src/mcp/types.ts';
@@ -101,7 +103,13 @@ function freshAttestation(): void {
 }
 
 function seedObligation(
-  over: { sourceInboundSeq?: number; sourceMessageId?: string; sourceDigest?: string; replayText?: string } = {},
+  over: {
+    sourceInboundSeq?: number;
+    sourceMessageId?: string;
+    sourceDigest?: string;
+    sourceToken?: string;
+    replayText?: string;
+  } = {},
 ): number {
   let id = 0;
   withTransaction(db, () => {
@@ -125,6 +133,7 @@ function seedObligation(
         capabilityParams: '{"skill":"watch"}',
         inputDigest: 'aa'.repeat(32),
         sourceDigest: over.sourceDigest ?? SOURCE_DIGEST,
+        sourceToken: over.sourceToken ?? SOURCE_URL,
         retainedMedia: null,
         creationReason: 'typed_deferral_signal',
       },
@@ -333,7 +342,7 @@ describe('trusted execution tool (D6)', () => {
       const smuggleTarget = join(work, 'pwned');
       const SMUGGLE_SOURCE = `--output=${smuggleTarget}`;
       const SMUGGLE_DIGEST = createHash('sha256').update(SMUGGLE_SOURCE).digest('hex');
-      const id = seedObligation({ sourceDigest: SMUGGLE_DIGEST, replayText: SMUGGLE_SOURCE });
+      const id = seedObligation({ sourceDigest: SMUGGLE_DIGEST, sourceToken: SMUGGLE_SOURCE, replayText: SMUGGLE_SOURCE });
       freshAttestation();
       const { runtime } = makeRuntime({
         execution: { command: ['node', resolver, '{source}'], timeoutMs: 30_000, minOutputBytes: 1 },
@@ -366,6 +375,66 @@ describe('trusted execution tool (D6)', () => {
     expect(result['error']).toBe('capability_execution');
     const count = (db.raw.prepare('SELECT COUNT(*) AS c FROM capability_execution_receipts').get() as { c: number }).c;
     expect(count).toBe(0);
+  });
+});
+
+describe('minted obligation turn prompt (execute_capability instruction)', () => {
+  function dueRow(over: Partial<CapabilityObligationDueRow>): CapabilityObligationDueRow {
+    return {
+      id: 42,
+      sourceInboundSeq: 5001,
+      sourceMessageId: 'TESTMSG-RT-1',
+      conversationKey: 'conv-rt',
+      deliveryJid: 'test-dm-target@lid',
+      senderJid: 'test-sender@s.whatsapp.net',
+      senderName: 'Test Sender',
+      isGroup: false,
+      groupName: null,
+      replayText: 'check this https://youtu.be/abc',
+      contentTypeHint: 'text',
+      contractVersion: 'test-contract/1',
+      requiredCapability: 'child_process_tools',
+      capabilityParams: '{"skill":"watch"}',
+      inputDigest: 'aa'.repeat(32),
+      sourceDigest: SOURCE_DIGEST,
+      sourceToken: 'https://youtu.be/abc',
+      retainedMediaPath: null,
+      mediaSha256: null,
+      mediaBytes: null,
+      attemptCount: 0,
+      mediaExpired: false,
+      ...over,
+    };
+  }
+
+  it('a URL obligation instructs execute_capability with the exact source token', () => {
+    const prompt = composeCapabilityObligationReplayPrompt(dueRow({}));
+    expect(prompt).toContain('execute_capability');
+    expect(prompt).toContain('child_process_tools');
+    expect(prompt).toContain('https://youtu.be/abc'); // the exact source line
+    expect(prompt).toContain('check this https://youtu.be/abc'); // original message preserved
+  });
+
+  it('a media obligation names the retained media PATH as the source, not the replay text', () => {
+    const prompt = composeCapabilityObligationReplayPrompt(
+      dueRow({
+        sourceToken: null,
+        retainedMediaPath: '/var/obligation-media/ab/cd/clip.webm',
+        mediaSha256: 'cc'.repeat(32),
+        mediaBytes: 10,
+        replayText: 'Weekly Tracker.webm',
+      }),
+    );
+    expect(prompt).toContain('execute_capability');
+    expect(prompt).toContain('/var/obligation-media/ab/cd/clip.webm'); // the source is the retained path
+    expect(prompt).toContain('Weekly Tracker.webm'); // original message preserved
+  });
+
+  it('FALSIFIER: the bare replay text alone is never the whole prompt (or the agent would not call the tool)', () => {
+    const row = dueRow({});
+    const prompt = composeCapabilityObligationReplayPrompt(row);
+    expect(prompt).not.toBe(row.replayText);
+    expect(prompt.length).toBeGreaterThan(row.replayText.length);
   });
 });
 

@@ -192,6 +192,9 @@ export async function deriveCapabilityDecision(
       capabilityParams: JSON.stringify({ skill: deps.options.attestation.skillName }),
       inputDigest: decision.inputDigest,
       sourceDigest: capabilitySourceDigest(decision.sourceToken, retainedMedia?.sha256 ?? null),
+      // Exactly one source: media rules carry retainedMedia and a null token;
+      // url_host/leading_token rules carry the token and no media.
+      sourceToken: retainedMedia !== null ? null : decision.sourceToken,
       retainedMedia,
       creationReason: 'typed_deferral_signal',
     },

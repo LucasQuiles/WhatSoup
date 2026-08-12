@@ -84,6 +84,13 @@ export interface CapabilityObligationInsertParams {
    * resolver's structured evidence.
    */
   sourceDigest: string;
+  /**
+   * The canonical execution-source STRING the replayed agent must pass to
+   * execute_capability (its sha256 equals sourceDigest). Exactly one of
+   * {sourceToken, retainedMedia}: the URL / command remainder for token
+   * obligations; null for media obligations (retainedMedia is the source).
+   */
+  sourceToken: string | null;
   retainedMedia: CapabilityObligationRetainedMedia | null;
   creationReason: string;
 }
@@ -133,6 +140,16 @@ export function validateCapabilityDecisionParams(decision: CapabilityDecisionPar
     }
     if (obligation.retainedMedia !== null && obligation.sourceDigest !== obligation.retainedMedia.sha256) {
       throw new Error('Capability obligation source digest must equal the retained media digest');
+    }
+    // Exactly one execution source. The media digest can diverge from its
+    // separately-staged sha (checked above); the token digest is DERIVED from
+    // the token in one expression at creation, so only the structural
+    // exactly-one invariant is enforced here (the DB CHECK is defense in depth).
+    if (obligation.retainedMedia !== null && obligation.sourceToken !== null) {
+      throw new Error('Capability obligation must not carry both retained media and a source token');
+    }
+    if (obligation.retainedMedia === null && obligation.sourceToken === null) {
+      throw new Error('Capability obligation without media requires a source token');
     }
     try {
       JSON.parse(obligation.capabilityParams);
@@ -192,10 +209,10 @@ export class CapabilityObligationStore {
            sender_jid, sender_name, is_group, group_name, scope,
            origin_recovery_job_id, replay_text, content_type_hint,
            contract_version, required_capability, capability_params, input_digest,
-           source_digest, creation_evidence_event_id,
+           source_digest, source_token, creation_evidence_event_id,
            retained_media_path, media_sha256, media_bytes, retention_policy_version,
            state, creation_reason
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         params.sourceInboundSeq,
@@ -215,6 +232,7 @@ export class CapabilityObligationStore {
         params.capabilityParams,
         params.inputDigest,
         params.sourceDigest,
+        params.sourceToken,
         creationEvidenceEventId,
         params.retainedMedia?.path ?? null,
         params.retainedMedia?.sha256 ?? null,
@@ -286,7 +304,7 @@ export class CapabilityObligationStore {
         `SELECT id, source_inbound_seq, source_message_id, conversation_key, delivery_jid,
                 sender_jid, sender_name, is_group, group_name, replay_text, content_type_hint,
                 contract_version, required_capability, capability_params, input_digest,
-                source_digest, retained_media_path, media_sha256, media_bytes, attempt_count,
+                source_digest, source_token, retained_media_path, media_sha256, media_bytes, attempt_count,
                 (retained_media_path IS NOT NULL AND ? IS NOT NULL
                   AND datetime(created_at, '+' || CAST(? AS INTEGER) || ' seconds') <= datetime('now')
                 ) AS media_expired
@@ -319,6 +337,7 @@ export class CapabilityObligationStore {
       capabilityParams: r.capability_params as string,
       inputDigest: r.input_digest as string,
       sourceDigest: r.source_digest as string,
+      sourceToken: (r.source_token as string | null) ?? null,
       retainedMediaPath: (r.retained_media_path as string | null) ?? null,
       mediaSha256: (r.media_sha256 as string | null) ?? null,
       mediaBytes: (r.media_bytes as number | null) ?? null,
@@ -743,6 +762,8 @@ export interface CapabilityObligationDueRow {
   capabilityParams: string;
   inputDigest: string;
   sourceDigest: string;
+  /** Canonical execution source string (URL / command remainder); null for media. */
+  sourceToken: string | null;
   retainedMediaPath: string | null;
   mediaSha256: string | null;
   mediaBytes: number | null;

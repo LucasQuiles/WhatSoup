@@ -458,6 +458,30 @@ export function buildObligationLiveFacts(providerId: string): CapabilityObligati
  * inbound — never a parallel send path. 'retryable' covers every
  * not-current/cold/failed case; the obligation supervisor requeues bounded.
  */
+/**
+ * The minted obligation turn's prompt. The replayed turn enters the SAME
+ * per-chat pipeline as a real inbound; if it carried only the bare original
+ * message the agent would answer from memory (or not at all) and never call
+ * execute_capability — the obligation would quarantine and the request would
+ * never drain. This deterministic envelope names the required capability and the
+ * EXACT source the agent must pass (the retained media path, or the persisted
+ * source token — its sha256 is the obligation's source_digest, so the handler's
+ * digest check matches), and preserves the original message for context. Pure:
+ * no clock, no randomness.
+ */
+export function composeCapabilityObligationReplayPrompt(obligation: CapabilityObligationDueRow): string {
+  const source = obligation.retainedMediaPath ?? obligation.sourceToken ?? '';
+  return [
+    `[capability-obligation replay #${obligation.id}]`,
+    `An earlier turn in this chat could not fulfil a required capability (${obligation.requiredCapability}).`,
+    'To fulfil it you MUST call the execute_capability tool with its `source` set EXACTLY to the following (do not alter, normalise, or re-derive it):',
+    source,
+    'The runtime runs the declared resolver itself and returns its output; compose your reply from that output and do not answer from prior knowledge.',
+    'Original message:',
+    obligation.replayText,
+  ].join('\n');
+}
+
 export async function dispatchCapabilityObligationTurnViaSession(
   coordinator: RuntimeTurnCoordinator,
   resolveTarget: (deliveryJid: string) => TurnRecoveryDispatchTarget | null,
@@ -470,6 +494,9 @@ export async function dispatchCapabilityObligationTurnViaSession(
   const target = resolveTarget(obligation.deliveryJid);
   if (!target) return 'retryable';
   const session = target.session as SessionManager;
+  // The minted turn must INSTRUCT the agent to run the capability (naming the
+  // exact source); the bare replay text alone would quarantine silently.
+  const replayPrompt = composeCapabilityObligationReplayPrompt(obligation);
   const source: RuntimeTurnSourceSnapshot = {
     sourceMessageId: mintedMessageId,
     receivedAtUnixSeconds: systemClock.nowUnixSec(),
@@ -485,7 +512,7 @@ export async function dispatchCapabilityObligationTurnViaSession(
     runtimeContext = coordinator.createRuntimeTurnForDispatch({
       scope: 'per_chat',
       chatJid: obligation.deliveryJid,
-      text: obligation.replayText,
+      text: replayPrompt,
       inboundSeq: mintedSeq,
       source,
       session,
@@ -504,7 +531,7 @@ export async function dispatchCapabilityObligationTurnViaSession(
     chatJid: obligation.deliveryJid,
     senderJid: obligation.senderJid,
     senderName: obligation.senderName,
-    text: obligation.replayText,
+    text: replayPrompt,
     isGroup: source.isGroup,
     groupName: source.groupName,
     contentType: 'text',

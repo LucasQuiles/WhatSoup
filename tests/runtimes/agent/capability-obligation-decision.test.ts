@@ -207,8 +207,12 @@ describe('D2 effect fold', () => {
       contractVersion: 'test-contract/1',
       creationReason: 'typed_deferral_signal',
     });
-    // D6: the source digest is derived from the matched URL token itself.
+    // D6: the source digest is derived from the matched URL token itself, and
+    // the token STRING is persisted so the replayed agent passes it verbatim to
+    // execute_capability; a URL obligation carries no media.
     expect(decision?.obligation?.sourceDigest).toMatch(/^[0-9a-f]{64}$/);
+    expect(decision?.obligation?.sourceToken).toBe('https://youtu.be/abc123');
+    expect(decision?.obligation?.retainedMedia).toBeNull();
     // The derived decision must be applicable through the REAL C3 store path.
     let outcome: { obligationId: number | null } = { obligationId: null };
     withTransaction(db, () => {
@@ -216,8 +220,9 @@ describe('D2 effect fold', () => {
     });
     expect(outcome.obligationId).not.toBeNull();
     const row = db.raw
-      .prepare('SELECT state FROM capability_obligations WHERE id=?')
-      .get(outcome.obligationId!) as { state: string };
+      .prepare('SELECT state, source_token FROM capability_obligations WHERE id=?')
+      .get(outcome.obligationId!) as { state: string; source_token: string };
+    expect(row.source_token).toBe('https://youtu.be/abc123');
     expect(row.state).toBe('waiting_capability');
   });
 
@@ -307,8 +312,10 @@ describe('D3 media staging', () => {
     });
     const decision = await deriveCapabilityDecision(deps(), context, 'managed_loop');
     expect(decision?.obligation?.retainedMedia).toMatchObject({ bytes: 15, policyVersion: 'policy/1' });
-    // Media obligations: source digest IS the retained media digest.
+    // Media obligations: source digest IS the retained media digest, and there
+    // is no source token (the retained media path is the execution source).
     expect(decision?.obligation?.sourceDigest).toBe(decision?.obligation?.retainedMedia?.sha256);
+    expect(decision?.obligation?.sourceToken).toBeNull();
     const retained = decision?.obligation?.retainedMedia;
     expect(retained?.path.startsWith(join(dir, 'retained'))).toBe(true);
     expect(retained?.sha256).toMatch(/^[0-9a-f]{64}$/);

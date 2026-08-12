@@ -77,6 +77,12 @@ export function runMigration57(db: DatabaseSync): void {
       -- D6: the digest execution evidence must reproduce (media sha256, or
       -- sha256 of the canonical source token) — derived at creation.
       source_digest TEXT NOT NULL CHECK (length(source_digest) = 64),
+      -- The canonical execution source STRING the replayed agent must pass to
+      -- execute_capability (its sha256 is source_digest). Exactly one of
+      -- {source_token, retained_media_path} is set (enforced below): the URL /
+      -- command remainder for token obligations, NULL for media obligations
+      -- (retained_media_path is the source there).
+      source_token TEXT,
       creation_evidence_event_id INTEGER,
       -- retained-media identity (immutable; all-or-none; D3)
       retained_media_path TEXT,
@@ -114,6 +120,13 @@ export function runMigration57(db: DatabaseSync): void {
           AND media_bytes IS NULL AND retention_policy_version IS NULL)
         OR (retained_media_path IS NOT NULL AND media_sha256 IS NOT NULL
           AND media_bytes IS NOT NULL AND retention_policy_version IS NOT NULL)
+      ),
+      -- Exactly one execution source: a token obligation carries source_token
+      -- and no media; a media obligation carries retained_media_path and no
+      -- token. Neither-both is unrepresentable.
+      CHECK (
+        (retained_media_path IS NULL AND source_token IS NOT NULL)
+        OR (retained_media_path IS NOT NULL AND source_token IS NULL)
       )
     );
 

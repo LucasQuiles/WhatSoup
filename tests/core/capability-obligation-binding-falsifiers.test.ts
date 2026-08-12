@@ -64,6 +64,7 @@ function seedObligation(over: Partial<Record<string, unknown>> = {}): number {
         capabilityParams: '{"skill":"watch"}',
         inputDigest: INPUT_DIGEST,
         sourceDigest: 'bb'.repeat(32),
+        sourceToken: 'https://youtu.be/abc',
         retainedMedia: null,
         creationReason: 'typed_deferral_signal',
       },
