@@ -2,16 +2,6 @@
   "schemaVersion": 2,
   "entries": [
     {
-      "file": "tests/core/outbound-message-safety.test.ts",
-      "status": "debt",
-      "reason": "bridge literal alongside helper import — QC-3 remediation sweep"
-    },
-    {
-      "file": "tests/core/scheduler.test.ts",
-      "status": "debt",
-      "reason": "unmigrated inline mock (former converse-check specimen)"
-    },
-    {
       "file": "tests/logger-error-key-serializer.test.ts",
       "status": "permanent",
       "reason": "logger self-test — exercises the real SUT logger shape"
@@ -27,24 +17,9 @@
       "reason": "logger self-test — exercises the real SUT logger shape"
     },
     {
-      "file": "tests/main-bootstrap-helpers.test.ts",
-      "status": "debt",
-      "reason": "doMock module literal — loggerModuleMock() (QC-1) unblocks migration"
-    },
-    {
-      "file": "tests/main-bootstrap.test.ts",
-      "status": "debt",
-      "reason": "doMock module literal — loggerModuleMock() (QC-1) unblocks migration"
-    },
-    {
       "file": "tests/runtimes/agent/runtime.test.ts",
       "status": "debt",
       "reason": "waiver-deferred — migrate in the waiver car alongside growth-waivers.json"
-    },
-    {
-      "file": "tests/runtimes/chat/providers/api-error-classifier.test.ts",
-      "status": "debt",
-      "reason": "inline Logger cast mock — singletonLoggerMock()+asMockLogger() (QC-1) unblocks"
     },
     {
       "file": "tests/scripts/logger-mock-residue.test.ts",
@@ -52,19 +27,9 @@
       "reason": "scanner self-test — canonical-key fixtures live in template literals by design"
     },
     {
-      "file": "tests/transport/baileys-stream-error.test.ts",
-      "status": "debt",
-      "reason": "inline Logger cast mock — singletonLoggerMock()+asMockLogger() (QC-1) unblocks"
-    },
-    {
-      "file": "tests/transport/outbound-governor.test.ts",
-      "status": "debt",
-      "reason": "inline mock — adjudicated debt (QC-2), migrate via helper APIs"
-    },
-    {
       "file": "tests/transport/third-party-console-redaction.test.ts",
-      "status": "debt",
-      "reason": "inline mock — adjudicated debt (QC-2), migrate via helper APIs"
+      "status": "permanent",
+      "reason": "console-redaction targets — the canonical keys are console methods with capture implementations (the SUT), not logger mocks"
     }
   ]
 }

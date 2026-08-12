@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Logger } from 'pino';
 
+import { asMockLogger, singletonLoggerMock } from '../../../helpers/logger-mock.ts';
+
 import {
   extractStatusCode,
   classifyApiError,
@@ -21,15 +23,12 @@ function makeErrnoError(code: string): NodeJS.ErrnoException {
 }
 
 function makeLogger(): Logger {
-  return {
-    error: vi.fn(),
-    info: vi.fn(),
-    warn: vi.fn(),
-    debug: vi.fn(),
+  return asMockLogger({
+    ...singletonLoggerMock(),
     fatal: vi.fn(),
     trace: vi.fn(),
     child: () => makeLogger(),
-  } as unknown as Logger;
+  });
 }
 
 describe('extractStatusCode', () => {

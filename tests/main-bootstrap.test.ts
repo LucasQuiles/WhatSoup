@@ -1,6 +1,8 @@
 import { EventEmitter } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { singletonLoggerMock } from './helpers/logger-mock.ts';
+
 type MainHarness = Awaited<ReturnType<typeof importMainWithMocks>>;
 
 type HealthServerDepsForTest = {
@@ -91,13 +93,7 @@ async function importMainWithMocks(options: {
 
   const existingPaths = new Set(options.existingPaths ?? []);
   const processOn = installProcessOnCapture();
-  const logger = {
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    fatal: vi.fn(),
-    debug: vi.fn(),
-  };
+  const logger = { ...singletonLoggerMock(), fatal: vi.fn() };
   const dbRows = [
     { sender_jid: '15551230000@s.whatsapp.net', sender_name: 'Ada' },
   ];

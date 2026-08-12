@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os';
 import { once } from 'node:events';
 import type { Logger } from 'pino';
 import { createMediaReadStream } from '../../src/transport/baileys-media-errors.ts';
+import { asMockLogger, singletonLoggerMock } from '../helpers/logger-mock.ts';
 
 // ─── Test infrastructure ──────────────────────────────────────────────────────
 
@@ -29,17 +30,16 @@ function uncaughtListener(err: Error) {
 
 function makeStubLog(): { log: Logger; warned: Array<{ err: unknown; path: string; msg: string }> } {
   const warned: Array<{ err: unknown; path: string; msg: string }> = [];
-  const log = {
-    error: vi.fn((obj: { err: unknown; path: string }, msg: string) => {
-      warned.push({ ...obj, msg });
-    }),
-    warn: vi.fn(),
-    info: vi.fn(),
-    debug: vi.fn(),
+  const base = singletonLoggerMock();
+  base.error.mockImplementation((obj: { err: unknown; path: string }, msg: string) => {
+    warned.push({ ...obj, msg });
+  });
+  const log = asMockLogger({
+    ...base,
     fatal: vi.fn(),
     trace: vi.fn(),
     child: () => log,
-  } as unknown as Logger;
+  });
   return { log, warned };
 }
 
