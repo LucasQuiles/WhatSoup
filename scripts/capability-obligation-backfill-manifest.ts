@@ -31,9 +31,30 @@ import {
 } from '../src/core/capability-contract.ts';
 import { CURRENT_SCHEMA_MIGRATION } from '../src/core/database-schema-version.ts';
 
+/**
+ * Reviewer fulfillment classification (candidate §4). ONLY `confirmed_unfulfilled`
+ * is eligible for backfill; `conflicting`/`inconclusive` are reported ineligible.
+ * This is the REVIEWER's determination — the executor does NOT re-derive
+ * non-fulfillment from echo-settlement (that conflation is the very defect this
+ * feature corrects). Echo-settlement is corroborated with VETO power (a job that
+ * is not completed+echo, or that has a sibling worker-fulfilment, cannot be
+ * confirmed), but the affirmative "unfulfilled" signal comes from the reviewer,
+ * and it is bound into the manifest digest so it cannot be added after approval.
+ */
+export type FulfillmentClassification = 'confirmed_unfulfilled' | 'conflicting' | 'inconclusive';
+
 export interface BackfillConfirmedEntry {
   sourceInboundSeq: number;
   sourceMessageId: string;
+  /**
+   * The EXACT recovery job the reviewer classified (candidate §4). The manifest
+   * binds this job id; the executor selects the job BY ID (never "latest by
+   * sequence") and verifies its inbound/message/conversation/destination all
+   * agree before any mutation.
+   */
+  recoveryJobId: number;
+  /** Reviewer's fulfilment determination — only `confirmed_unfulfilled` is eligible. */
+  fulfillmentClassification: FulfillmentClassification;
   /** Reviewer media classification when the source is media ('document' | 'video'). */
   mediaClass?: string | null;
   /**
@@ -64,6 +85,101 @@ export interface BackfillDescriptor {
   sourceDigest?: string;
   mediaSha256?: string | null;
   mediaBytes?: number | null;
+  /** The exact reviewer-classified recovery job (F2) — bound into the digest. */
+  recoveryJobId?: number;
+  /** Reviewer's fulfilment determination (F2) — only confirmed_unfulfilled is eligible. */
+  fulfillmentClassification?: FulfillmentClassification;
+}
+
+/** Read surface for the recovery-job fulfilment check (a subset of BackfillReadDb). */
+export interface RecoveryFulfillmentReadDb {
+  prepare(sql: string): { get(...params: unknown[]): unknown };
+}
+
+/**
+ * Corroborate a reviewer's `confirmed_unfulfilled` classification against the
+ * PERSISTED recovery record (F2). This is the veto: the reviewer's determination
+ * is the affirmative signal, but a job that does not exist, does not agree on
+ * inbound/message/conversation/destination, is not completed+echo, or has a
+ * sibling WORKER fulfilment for the same inbound cannot be confirmed. Echo is
+ * corroboration, never the proof of non-fulfilment.
+ *
+ * Returns `null` when the job is confirmable, or a reason string otherwise.
+ * Shared by the manifest generator (approval artifact) and the executor
+ * (defense-in-depth at the mutation point), so both agree byte-for-byte.
+ */
+export function classifyRecoveryFulfillment(
+  db: RecoveryFulfillmentReadDb,
+  bind: {
+    recoveryJobId: number;
+    sourceInboundSeq: number;
+    sourceMessageId: string;
+    conversationKey: string;
+    deliveryJid: string;
+    classification: FulfillmentClassification;
+  },
+): string | null {
+  if (bind.classification !== 'confirmed_unfulfilled') return 'fulfillment_not_confirmed';
+  const job = db
+    .prepare(
+      'SELECT source_inbound_seq, source_message_id, conversation_key, delivery_jid, state, completion_kind '
+      + 'FROM turn_recovery_jobs WHERE id = ?',
+    )
+    .get(bind.recoveryJobId) as
+    | { source_inbound_seq: number; source_message_id: string; conversation_key: string; delivery_jid: string; state: string; completion_kind: string | null }
+    | undefined;
+  if (job === undefined) return 'recovery_job_not_found';
+  if (
+    job.source_inbound_seq !== bind.sourceInboundSeq
+    || job.source_message_id !== bind.sourceMessageId
+    || job.conversation_key !== bind.conversationKey
+    || job.delivery_jid !== bind.deliveryJid
+  ) {
+    return 'recovery_job_binding_mismatch';
+  }
+  if (job.state !== 'completed' || job.completion_kind !== 'echo') return 'recovery_job_not_echo_settled';
+  // No later/sibling WORKER fulfilment for the same inbound — a worker-settled job
+  // means the request WAS actually served, so it must not be backfilled.
+  const worker = db
+    .prepare(
+      "SELECT COUNT(*) AS c FROM turn_recovery_jobs WHERE source_inbound_seq = ? AND state = 'completed' AND completion_kind = 'worker'",
+    )
+    .get(bind.sourceInboundSeq) as { c: number };
+  if (worker.c > 0) return 'later_fulfillment_found';
+  return null;
+}
+
+/**
+ * Canonical, order-independent manifest digest over the eligible descriptors. It
+ * binds the DESTINATION (conversationKey/deliveryJid/isGroup), the SOURCE identity
+ * (sourceDigest + token/media hash+size), the capability, the exact recovery job,
+ * AND the reviewer's fulfilment classification — so an approval for a DM can
+ * never be reused for a group, a source swap changes the digest, and the
+ * classification cannot be altered after approval. The EXECUTOR recomputes this
+ * over the descriptors it is about to run and refuses on mismatch (F1).
+ */
+export function computeManifestDigest(manifestId: string, eligible: readonly BackfillDescriptor[]): string {
+  const canonical = JSON.stringify(
+    eligible
+      .map((e) => ({
+        sourceInboundSeq: e.sourceInboundSeq,
+        sourceMessageId: e.sourceMessageId,
+        conversationKey: e.conversationKey,
+        deliveryJid: e.deliveryJid,
+        isGroup: e.isGroup,
+        classifiedBy: e.classifiedBy,
+        requiredCapability: e.requiredCapability,
+        contractVersion: e.contractVersion,
+        sourceToken: e.sourceToken,
+        sourceDigest: e.sourceDigest,
+        mediaSha256: e.mediaSha256,
+        mediaBytes: e.mediaBytes,
+        recoveryJobId: e.recoveryJobId,
+        fulfillmentClassification: e.fulfillmentClassification,
+      }))
+      .sort((a, b) => a.sourceInboundSeq - b.sourceInboundSeq),
+  );
+  return createHash('sha256').update(`${manifestId}\n${canonical}`).digest('hex');
 }
 
 export interface BackfillManifest {
@@ -177,6 +293,24 @@ export function generateBackfillManifest(
       sourceDigest = capabilitySourceDigest(sourceToken, null);
     }
 
+    // F2 — bind and corroborate the EXACT reviewer-classified recovery job (run
+    // LAST so contract/source ineligibility reports independently). Only a
+    // reviewer `confirmed_unfulfilled` whose persisted job agrees on
+    // inbound/message/conversation/destination, is completed+echo, and has no
+    // sibling worker-fulfilment is eligible. Echo has veto power, not proof power.
+    const recoveryReason = classifyRecoveryFulfillment(db, {
+      recoveryJobId: c.recoveryJobId,
+      sourceInboundSeq: c.sourceInboundSeq,
+      sourceMessageId: c.sourceMessageId,
+      conversationKey: inbound.conversation_key,
+      deliveryJid: inbound.chat_jid,
+      classification: c.fulfillmentClassification,
+    });
+    if (recoveryReason !== null) {
+      entries.push({ ...base, reason: recoveryReason });
+      continue;
+    }
+
     entries.push({
       ...base,
       eligible: true,
@@ -190,39 +324,18 @@ export function generateBackfillManifest(
       sourceDigest,
       mediaSha256,
       mediaBytes,
+      recoveryJobId: c.recoveryJobId,
+      fulfillmentClassification: c.fulfillmentClassification,
     });
   }
 
   const eligible = entries.filter((e) => e.eligible);
-  // Canonical (order-independent) digest over the eligible descriptors. It binds
-  // the DESTINATION (conversationKey/deliveryJid/isGroup), the SOURCE identity
-  // (sourceDigest + token/media hash+size) and the capability — so an approval
-  // for a DM can never be reused for a group, and a source swap changes the
-  // digest.
-  const canonical = JSON.stringify(
-    eligible
-      .map((e) => ({
-        sourceInboundSeq: e.sourceInboundSeq,
-        sourceMessageId: e.sourceMessageId,
-        conversationKey: e.conversationKey,
-        deliveryJid: e.deliveryJid,
-        isGroup: e.isGroup,
-        classifiedBy: e.classifiedBy,
-        requiredCapability: e.requiredCapability,
-        contractVersion: e.contractVersion,
-        sourceToken: e.sourceToken,
-        sourceDigest: e.sourceDigest,
-        mediaSha256: e.mediaSha256,
-        mediaBytes: e.mediaBytes,
-      }))
-      .sort((a, b) => a.sourceInboundSeq - b.sourceInboundSeq),
-  );
   return {
     manifestId: params.manifestId,
     contractVersion: params.contract.version,
     entries,
     eligibleCount: eligible.length,
-    manifestDigest: createHash('sha256').update(`${params.manifestId}\n${canonical}`).digest('hex'),
+    manifestDigest: computeManifestDigest(params.manifestId, eligible),
   };
 }
 
@@ -253,7 +366,9 @@ function usage(): string {
     'READ-ONLY. Emits the reviewer-confirmed backfill manifest for owner approval.',
     'It NEVER inserts obligations or drains; backfill creation + drains are',
     'separately owner-gated steps that consume an APPROVED manifest.',
-    '--confirmed is a JSON array of {sourceInboundSeq, sourceMessageId, mediaClass?}.',
+    '--confirmed is a JSON array of {sourceInboundSeq, sourceMessageId,',
+    '  recoveryJobId, fulfillmentClassification, mediaClass?, reviewerCapability?}.',
+    '  Only fulfillmentClassification="confirmed_unfulfilled" is eligible.',
   ].join('\n');
 }
 
@@ -295,11 +410,21 @@ function renderHuman(m: BackfillManifest): string {
     `digest ${m.manifestDigest}`,
   ];
   for (const e of m.entries) {
-    lines.push(
-      e.eligible
-        ? `  ELIGIBLE  seq=${e.sourceInboundSeq} cap=${e.requiredCapability} media=${e.mediaPresent}`
-        : `  ineligible seq=${e.sourceInboundSeq} reason=${e.reason}`,
-    );
+    if (e.eligible) {
+      // Print exactly what the digest binds, so the approver SEES the
+      // destination / job / classification / source the approval commits to —
+      // "destination-bound" must be visible, not just cryptographic.
+      const src = e.mediaSha256 !== null && e.mediaSha256 !== undefined
+        ? `media:${e.mediaSha256.slice(0, 12)}(${e.mediaBytes}B)`
+        : `token:${e.sourceToken}`;
+      lines.push(
+        `  ELIGIBLE  seq=${e.sourceInboundSeq} dest=${e.deliveryJid}${e.isGroup ? '(group)' : '(dm)'} `
+        + `job=${e.recoveryJobId} class=${e.fulfillmentClassification} cap=${e.requiredCapability} `
+        + `by=${e.classifiedBy} ${src} srcDigest=${e.sourceDigest?.slice(0, 12)}`,
+      );
+    } else {
+      lines.push(`  ineligible seq=${e.sourceInboundSeq} reason=${e.reason}`);
+    }
   }
   lines.push('NOTE: read-only manifest. Backfill creation and drains are separately owner-gated.');
   return lines.join('\n');
