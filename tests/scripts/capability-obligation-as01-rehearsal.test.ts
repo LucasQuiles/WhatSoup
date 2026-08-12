@@ -4,10 +4,13 @@
  * the rehearsal sandbox — a SYMLINK to a live DB, a non-regular file, or a
  * non-SQLite file are refused (canonical realpath, not lexical). Rehearsal:
  * migrates the clone forward with integrity + count + read-only-smoke evidence,
- * and (only under operator-attested network isolation) runs the old-binary
- * schema check with a before/after write-delta proof.
+ * then runs the DECISIVE old-binary schema check whose outcome is classified
+ * (rejected_no_write / accepted / wrote_dangerous / inconclusive) with a
+ * distinguishable exit code — a skipped decisive step is exit 2, never a pass
+ * (F4/F5). The expected rejection additionally proves the coupled byte-exact
+ * restore. Network isolation is a fail-closed egress probe, not an assertion.
  */
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, copyFileSync, mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -15,8 +18,11 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { CURRENT_SCHEMA_MIGRATION } from '../../src/core/database-schema-version.ts';
 import { Database } from '../../src/core/database.ts';
 import {
+  AS01_EXIT,
+  classifyOldBinaryOutcome,
   planAs01Rehearsal,
   rehearseCloneMigration,
+  rehearseCoupledRestore,
   runAs01RehearsalCli,
   type As01Io,
 } from '../../scripts/capability-obligation-as01-rehearsal.ts';
@@ -51,6 +57,11 @@ function capture(): { io: As01Io; out: string[]; err: string[] } {
   const out: string[] = [];
   const err: string[] = [];
   return { io: { out: (l) => out.push(l), err: (l) => err.push(l) }, out, err };
+}
+
+/** Point the release's schema:guard script at a specific behavior file. */
+function setReleaseScript(file: string): void {
+  writeFileSync(join(releaseDir, 'package.json'), JSON.stringify({ scripts: { 'schema:guard': `node ${file}` } }));
 }
 
 describe('planAs01Rehearsal — clone guard', () => {
@@ -120,50 +131,118 @@ describe('rehearseCloneMigration', () => {
   });
 });
 
-describe('runAs01RehearsalCli', () => {
-  it('dry-run migrates nothing', () => {
+describe('rehearseCoupledRestore', () => {
+  it('restores byte-exact pre-migration bytes with integrity after a mutation', () => {
     const cloneDb = join(rehearsalDir, 'clone.db');
     makeSqliteClone(cloneDb);
+    const backup = join(rehearsalDir, 'pre.bak');
+    // Snapshot the good bytes, then CORRUPT the clone.
+    copyFileSync(cloneDb, backup);
+    appendFileSync(cloneDb, 'CORRUPTION');
+    const r = rehearseCoupledRestore(cloneDb, backup);
+    expect(r.ok).toBe(true);
+    expect(r.restoredHash).toBe(r.backupHash);
+    expect(r.integrityAfter).toBe('ok');
+  });
+
+  it('FALSIFIER: a non-SQLite backup restores to a DB that fails integrity → not ok', () => {
+    const cloneDb = join(rehearsalDir, 'clone.db');
+    makeSqliteClone(cloneDb);
+    const garbageBackup = join(rehearsalDir, 'garbage.bak');
+    writeFileSync(garbageBackup, 'not sqlite at all');
+    const r = rehearseCoupledRestore(cloneDb, garbageBackup);
+    expect(r.ok).toBe(false);
+    expect(r.integrityAfter).toBe('unreadable');
+  });
+});
+
+describe('classifyOldBinaryOutcome', () => {
+  const base = { status: 1, signal: null, spawnError: false, stdout: '', stderr: '', wrote: false };
+  it('classifies each outcome distinctly', () => {
+    expect(classifyOldBinaryOutcome({ ...base, status: 1, stderr: 'DatabaseCompatibilityError: future_schema' })).toBe('rejected_no_write');
+    expect(classifyOldBinaryOutcome({ ...base, status: 0 })).toBe('accepted');
+    expect(classifyOldBinaryOutcome({ ...base, status: 0, wrote: true })).toBe('wrote_dangerous');
+    expect(classifyOldBinaryOutcome({ ...base, status: 1, wrote: true, stderr: 'DatabaseCompatibilityError' })).toBe('wrote_dangerous');
+    expect(classifyOldBinaryOutcome({ ...base, status: 127, stderr: 'command not found' })).toBe('inconclusive');
+    expect(classifyOldBinaryOutcome({ ...base, status: null, signal: 'SIGKILL' })).toBe('inconclusive');
+    expect(classifyOldBinaryOutcome({ ...base, status: null, spawnError: true })).toBe('inconclusive');
+  });
+});
+
+describe('runAs01RehearsalCli', () => {
+  const noEgress = { probeEgress: () => false };
+
+  function cliArgs(extra: string[]): string[] {
+    const cloneDb = join(rehearsalDir, 'clone.db');
+    makeSqliteClone(cloneDb);
+    return ['--release-dir', releaseDir, '--clone-db', cloneDb, '--rehearsal-dir', rehearsalDir,
+      '--script-name', 'schema:guard', '--start-schema', String(CURRENT_SCHEMA_MIGRATION), ...extra];
+  }
+
+  it('dry-run migrates nothing and exits PASS(0)', () => {
     const cap = capture();
-    const code = runAs01RehearsalCli(
-      ['--release-dir', releaseDir, '--clone-db', cloneDb, '--rehearsal-dir', rehearsalDir, '--script-name', 'schema:guard', '--start-schema', String(CURRENT_SCHEMA_MIGRATION)],
-      cap.io,
-    );
-    expect(code).toBe(0);
+    const code = runAs01RehearsalCli(cliArgs([]), cap.io, noEgress);
+    expect(code).toBe(AS01_EXIT.PASS);
     const text = cap.out.join('\n');
     expect(text).toContain('DRY-RUN');
-    expect(text).not.toContain('smoke(ro)'); // migration-result marker — absent in dry-run
+    expect(text).not.toContain('outcome='); // old-binary marker — absent in dry-run
   });
 
-  it('--confirm migrates + skips the old-binary step without --network-isolated', () => {
-    const cloneDb = join(rehearsalDir, 'clone.db');
-    makeSqliteClone(cloneDb);
+  it('F4: --confirm WITHOUT --network-isolated is INCOMPLETE(2), never a pass', () => {
     const cap = capture();
-    const code = runAs01RehearsalCli(
-      ['--release-dir', releaseDir, '--clone-db', cloneDb, '--rehearsal-dir', rehearsalDir, '--script-name', 'schema:guard', '--start-schema', String(CURRENT_SCHEMA_MIGRATION), '--confirm'],
-      cap.io,
-    );
-    expect(code).toBe(0);
+    const code = runAs01RehearsalCli(cliArgs(['--confirm']), cap.io, noEgress);
+    expect(code).toBe(AS01_EXIT.INCOMPLETE);
     const text = cap.out.join('\n');
     expect(text).toContain('migrated');
-    expect(text).toContain('integrity');
-    expect(text).toContain('OLD-BINARY STEP SKIPPED');
+    expect(text).toContain('OLD-BINARY STEP INCOMPLETE');
+    expect(text).toContain('does NOT pass');
   });
 
-  it('--network-isolated runs the old-binary check and proves a write-delta', () => {
-    // Release script that WRITES to the clone (a bad old binary): write-delta true.
-    writeFileSync(join(releaseDir, 'package.json'), JSON.stringify({ scripts: { 'schema:guard': 'node writer.js' } }));
-    writeFileSync(join(releaseDir, 'writer.js'), "require('fs').appendFileSync(process.env.WHATSOUP_DB_PATH, 'MUT');");
-    const cloneDb = join(rehearsalDir, 'clone.db');
-    makeSqliteClone(cloneDb);
+  it('F5: an old binary that REJECTS the future schema with no write PASSES(0) and proves the coupled restore', () => {
+    writeFileSync(join(releaseDir, 'reject.js'), "process.stderr.write('DatabaseCompatibilityError: future_schema\\n'); process.exit(1);");
+    setReleaseScript('reject.js');
     const cap = capture();
-    const code = runAs01RehearsalCli(
-      ['--release-dir', releaseDir, '--clone-db', cloneDb, '--rehearsal-dir', rehearsalDir, '--script-name', 'schema:guard', '--start-schema', String(CURRENT_SCHEMA_MIGRATION), '--confirm', '--network-isolated'],
-      cap.io,
-    );
+    const code = runAs01RehearsalCli(cliArgs(['--confirm', '--network-isolated']), cap.io, noEgress);
+    expect(code).toBe(AS01_EXIT.PASS);
     const text = cap.out.join('\n');
-    expect(text).toContain('old-binary');
-    expect(text).toContain('wrote=true'); // the write-delta was detected
-    expect(code).toBe(1); // a write by the old binary fails the rehearsal
+    expect(text).toContain('outcome=rejected_no_write');
+    expect(text).toContain('restore     : ok=true');
+    expect(text).toContain('AS-01 PASS');
   }, 30_000);
+
+  it('an old binary that ACCEPTS the new schema (no write) is ACCEPTED(3) — owner decision', () => {
+    writeFileSync(join(releaseDir, 'accept.js'), 'process.exit(0);');
+    setReleaseScript('accept.js');
+    const cap = capture();
+    const code = runAs01RehearsalCli(cliArgs(['--confirm', '--network-isolated']), cap.io, noEgress);
+    expect(code).toBe(AS01_EXIT.ACCEPTED);
+    expect(cap.out.join('\n')).toContain('outcome=accepted');
+  }, 30_000);
+
+  it('an old binary that WRITES to the clone is WROTE_DANGEROUS(4)', () => {
+    writeFileSync(join(releaseDir, 'writer.js'), "require('fs').appendFileSync(process.env.WHATSOUP_DB_PATH, 'MUT'); process.exit(1);");
+    setReleaseScript('writer.js');
+    const cap = capture();
+    const code = runAs01RehearsalCli(cliArgs(['--confirm', '--network-isolated']), cap.io, noEgress);
+    expect(code).toBe(AS01_EXIT.WROTE_DANGEROUS);
+    expect(cap.out.join('\n')).toContain('outcome=wrote_dangerous');
+  }, 30_000);
+
+  it('an unrecognized failure (no compat signal) is INCONCLUSIVE(1)', () => {
+    setReleaseScript('does-not-exist.js'); // node cannot find module — non-zero, no compat signal
+    const cap = capture();
+    const code = runAs01RehearsalCli(cliArgs(['--confirm', '--network-isolated']), cap.io, noEgress);
+    expect(code).toBe(AS01_EXIT.INCONCLUSIVE);
+    expect(cap.out.join('\n')).toContain('outcome=inconclusive');
+  }, 30_000);
+
+  it('FALSIFIER: a reachable egress under --network-isolated is REFUSED before the old binary runs', () => {
+    writeFileSync(join(releaseDir, 'reject.js'), "process.stderr.write('DatabaseCompatibilityError\\n'); process.exit(1);");
+    setReleaseScript('reject.js');
+    const cap = capture();
+    const code = runAs01RehearsalCli(cliArgs(['--confirm', '--network-isolated']), cap.io, { probeEgress: () => true });
+    expect(code).toBe(AS01_EXIT.INCONCLUSIVE);
+    expect(cap.err.join('\n')).toContain('egress is reachable');
+    expect(cap.out.join('\n')).not.toContain('outcome='); // never reached the old binary
+  });
 });

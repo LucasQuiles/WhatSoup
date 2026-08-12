@@ -3,31 +3,52 @@
  * harness (candidate §5, coupled evidence-gated rollback).
  *
  * EXECUTION IS OWNER-GATED. This authors the runnable harness; it does not run a
- * migration or an old binary on its own. Two guarantees make it an artifact, not
- * a loaded gun:
+ * migration or an old binary on its own. Guarantees that make it an artifact,
+ * not a loaded gun:
  *
  *  1. Commands are NEVER guessed. The startup / schema-guard command is read at
  *     RUNTIME from the OLD release's OWN package.json scripts (`--release-dir`
  *     + `--script-name`); an unknown script name is refused.
  *  2. It only ever touches a CLONE. `--clone-db` must resolve INSIDE the
- *     operator-designated `--rehearsal-dir` sandbox; a target outside it (a live
- *     instance DB) is refused. And it is DRY-RUN by default — it prints the
- *     resolved plan and executes nothing unless `--confirm` is passed.
+ *     operator-designated `--rehearsal-dir` sandbox (canonical realpath, not
+ *     lexical — a symlink to a live DB is refused). Dry-run by default.
+ *  3. The old binary runs in an ISOLATED environment — a sandbox HOME and npm
+ *     cache (so it cannot load the operator's live config), only PATH inherited.
+ *  4. Network isolation is a CHECKED precondition, not an assertion: an egress
+ *     probe runs first and REFUSES if egress is reachable. The probe can only
+ *     DISPROVE isolation (reachable ⇒ not isolated); a failed probe is
+ *     consistent-with-isolation but never proof, so `--network-isolated` remains
+ *     an operator attestation the probe merely fails-closed against.
  *
- * The rehearsal answers candidate §5: does the OLD binary accept / reject /
- * find-inconclusive the target-schema clone. A reject/inconclusive makes binary
- * rollback a COUPLED pre-migration DB restore — that decision stays with the
- * owner; this harness only produces the observation.
+ * The rehearsal answers candidate §5 by OBSERVING one of four outcomes when the
+ * old binary meets the target-schema clone, and — on the expected rejection —
+ * proving the COUPLED pre-migration DB restore (byte-exact + integrity). The
+ * exit code distinguishes every outcome so a skipped or inconclusive step can
+ * never read as a pass (F4/F5).
  */
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { closeSync, lstatSync, openSync, readFileSync, readSync, realpathSync } from 'node:fs';
-import { isAbsolute, relative, resolve } from 'node:path';
+import { closeSync, copyFileSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync } from 'node:fs';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { pathToFileURL } from 'node:url';
 
 import { Database } from '../src/core/database.ts';
 import { CURRENT_SCHEMA_MIGRATION } from '../src/core/database-schema-version.ts';
+
+/** AS-01 rehearsal exit codes — every outcome is distinguishable (F4/F5). */
+export const AS01_EXIT = {
+  /** Expected rejection observed AND coupled restore proven — safe to proceed. */
+  PASS: 0,
+  /** Inconclusive (missing npm, crash, signal, timeout, unrecognized failure) or a hard error. */
+  INCONCLUSIVE: 1,
+  /** Decisive old-binary step was SKIPPED (no --network-isolated) — NOT a pass. */
+  INCOMPLETE: 2,
+  /** Old binary ACCEPTED the new schema (no write) — a different rollback branch; owner decision. */
+  ACCEPTED: 3,
+  /** Old binary WROTE to the clone — dangerous; coupled restore is mandatory. */
+  WROTE_DANGEROUS: 4,
+} as const;
 
 export type As01RefusedReason =
   | 'clone_is_symlink'
@@ -166,11 +187,15 @@ function rowCounts(dbPath: string, tables: readonly string[]): Record<string, nu
 }
 
 function integrityCheck(dbPath: string): string {
-  const raw = new DatabaseSync(dbPath, { readOnly: true });
   try {
-    return String((raw.prepare('PRAGMA integrity_check').get() as { integrity_check: string }).integrity_check);
-  } finally {
-    raw.close();
+    const raw = new DatabaseSync(dbPath, { readOnly: true });
+    try {
+      return String((raw.prepare('PRAGMA integrity_check').get() as { integrity_check: string }).integrity_check);
+    } finally {
+      raw.close();
+    }
+  } catch {
+    return 'unreadable';
   }
 }
 
@@ -234,6 +259,78 @@ export function rehearseCloneMigration(
   };
 }
 
+export interface As01CoupledRestore {
+  ok: boolean;
+  backupHash: string;
+  restoredHash: string;
+  integrityAfter: string;
+}
+
+/**
+ * Coupled rollback rehearsal (candidate §5): when the old binary rejects the
+ * migrated schema, binary rollback is only safe if the pre-migration DB can be
+ * restored ATOMICALLY and byte-exactly. This restores `backupPath` (the
+ * pre-migration snapshot) over `cloneDb` and proves the restored bytes equal the
+ * backup AND pass integrity_check. It is the durable, reproducible guarantee;
+ * whether the old binary then STARTS on the restored (its own) schema is the
+ * same "accepted" observation, left to the owner-gated real run.
+ */
+export function rehearseCoupledRestore(cloneDb: string, backupPath: string): As01CoupledRestore {
+  const backupHash = sha256File(backupPath);
+  copyFileSync(backupPath, cloneDb);
+  const restoredHash = sha256File(cloneDb);
+  const integrityAfter = integrityCheck(cloneDb);
+  return {
+    ok: restoredHash === backupHash && integrityAfter === 'ok',
+    backupHash,
+    restoredHash,
+    integrityAfter,
+  };
+}
+
+export type OldBinaryOutcome = 'rejected_no_write' | 'accepted' | 'wrote_dangerous' | 'inconclusive';
+
+/**
+ * Classify the old binary's observation. The EXPECTED behavior (candidate §5) is
+ * a REJECTION of the future schema with a DatabaseCompatibilityError and no
+ * write — that is the ONLY pass path. Anything else is a distinct outcome; a
+ * missing npm / crash / timeout / unrelated failure is `inconclusive`, never
+ * conflated with the designed rejection.
+ */
+export function classifyOldBinaryOutcome(obs: {
+  status: number | null;
+  signal: string | null;
+  spawnError: boolean;
+  stdout: string;
+  stderr: string;
+  wrote: boolean;
+}): OldBinaryOutcome {
+  if (obs.wrote) return 'wrote_dangerous';
+  if (obs.spawnError || obs.signal !== null) return 'inconclusive';
+  if (obs.status === 0) return 'accepted';
+  // Non-zero: a rejection only counts if it carries the expected compatibility signal.
+  if (/DatabaseCompatibilityError|future_schema/.test(`${obs.stdout}\n${obs.stderr}`)) {
+    return 'rejected_no_write';
+  }
+  return 'inconclusive';
+}
+
+/**
+ * Default egress probe (synchronous). Attempts a short TCP connect to a public
+ * resolver; a successful connect proves egress is reachable → NOT isolated.
+ * Runs a child `node -e` so the whole CLI stays synchronous. Only ever called on
+ * the `--network-isolated` path; tests inject a deterministic stub.
+ */
+function defaultProbeEgress(): boolean {
+  const probe = "const s=require('net').connect({host:'1.1.1.1',port:53});"
+    + "s.setTimeout(1500);"
+    + "s.on('connect',()=>{s.destroy();process.exit(0)});"
+    + "s.on('timeout',()=>{s.destroy();process.exit(1)});"
+    + "s.on('error',()=>process.exit(1));";
+  const r = spawnSync(process.execPath, ['-e', probe], { timeout: 5000 });
+  return r.status === 0; // connected ⇒ egress reachable ⇒ not isolated
+}
+
 function usage(): string {
   return [
     'Usage: capability-obligation-as01-rehearsal --release-dir DIR --clone-db PATH \\',
@@ -244,15 +341,14 @@ function usage(): string {
     '--clone-db must be a real SQLite file inside --rehearsal-dir; symlinks, a live',
     'DB, or a non-SQLite file are refused (canonical realpath, not lexical).',
     '',
-    'With --confirm it migrates the CLONE startSchema -> target using the current',
-    'engine (this MUTATES the clone — the rehearsal), with integrity_check, key-table',
-    'row counts before/after, and a read-only smoke.',
+    'With --confirm it migrates the CLONE startSchema -> target (integrity, counts,',
+    'read-only smoke). The DECISIVE old-binary schema check additionally requires',
+    '--network-isolated; WITHOUT it the run is INCOMPLETE (exit 2), never a pass.',
     '',
-    'The OLD-binary schema check (the release\'s OWN package.json script NAME, never',
-    'guessed) additionally requires --network-isolated: this harness provides no-SEND',
-    'by construction (it never opens a WhatsApp session) but CANNOT itself guarantee',
-    'network isolation on this OS — the operator must supply it externally and affirm',
-    'it. It then hashes the clone before/after to prove whether the old binary wrote.',
+    'The old binary runs in a sandbox HOME + npm cache (no live config), with an',
+    'egress probe that REFUSES if the network is reachable (isolation can be',
+    'disproven, never proven). Exit codes: 0 expected-rejection+restore-proven,',
+    '1 inconclusive, 2 incomplete(skipped), 3 accepted(owner decision), 4 wrote(danger).',
   ].join('\n');
 }
 
@@ -261,7 +357,12 @@ export interface As01Io {
   err: (line: string) => void;
 }
 
-export function runAs01RehearsalCli(argv: readonly string[], io: As01Io): number {
+export interface As01Options {
+  /** Injected egress prober (tests). Returns true when egress is reachable. */
+  probeEgress?: () => boolean;
+}
+
+export function runAs01RehearsalCli(argv: readonly string[], io: As01Io, opts: As01Options = {}): number {
   const flags = new Map<string, string>();
   let confirm = false;
   let networkIsolated = false;
@@ -290,7 +391,7 @@ export function runAs01RehearsalCli(argv: readonly string[], io: As01Io): number
   const plan = planAs01Rehearsal({ releaseDir, cloneDb, rehearsalDir, scriptName, dbEnvVar });
   if (!plan.ok) {
     io.err(`AS-01 rehearsal refused: ${plan.refusedReason}`);
-    return 1;
+    return AS01_EXIT.INCONCLUSIVE;
   }
   io.out(`AS-01 rehearsal plan:`);
   io.out(`  release-dir : ${plan.releaseDir}`);
@@ -298,15 +399,20 @@ export function runAs01RehearsalCli(argv: readonly string[], io: As01Io): number
   io.out(`  script      : ${plan.scriptName} => ${plan.resolvedCommand}`);
   io.out(`  start-schema: ${startSchema} -> target ${CURRENT_SCHEMA_MIGRATION}`);
   if (!confirm) {
-    io.out('DRY-RUN — nothing migrated or executed. --confirm migrates the clone; --network-isolated additionally runs the old-binary check.');
-    return 0;
+    io.out('DRY-RUN — nothing migrated or executed. --confirm migrates the clone; --network-isolated additionally runs the decisive old-binary check.');
+    return AS01_EXIT.PASS;
   }
+
+  // Snapshot the clone BEFORE migration — the coupled-restore baseline (the
+  // migration mutates in place, so the pre-migration bytes must be captured now).
+  const backupPath = join(realpathSync(rehearsalDir), 'pre-migration.bak');
+  copyFileSync(plan.cloneDb, backupPath);
 
   // Migrate the clone forward (mutates the CLONE — the rehearsal). No network, no send.
   const migration = rehearseCloneMigration(plan.cloneDb, { startSchema });
   if (migration.reason !== null) {
     io.err(`AS-01 migration rehearsal refused: ${migration.reason}`);
-    return 1;
+    return AS01_EXIT.INCONCLUSIVE;
   }
   io.out(`  migrated    : ${migration.startSchema} -> ${migration.targetSchema}`);
   io.out(`  integrity   : before=${migration.integrityBefore} after=${migration.integrityAfter}`);
@@ -314,28 +420,70 @@ export function runAs01RehearsalCli(argv: readonly string[], io: As01Io): number
   io.out(`  smoke(ro)   : ${migration.readOnlySmokeOk}`);
   io.out(`  clone-hash  : ${migration.migratedCloneHash}`);
 
-  // OLD-binary schema check — additionally gated on operator-attested network
-  // isolation (this harness cannot itself isolate the network on this OS).
+  // The DECISIVE old-binary step requires operator-attested network isolation.
+  // WITHOUT it, the rehearsal is INCOMPLETE — not a pass (F4).
   if (!networkIsolated) {
-    io.out('OLD-BINARY STEP SKIPPED — pass --network-isolated to run the old release schema check (operator must supply external network isolation; this harness only guarantees no-send).');
-    return migration.ok ? 0 : 1;
+    io.out('OLD-BINARY STEP INCOMPLETE — pass --network-isolated to run the decisive old-release schema check. This run does NOT pass.');
+    return AS01_EXIT.INCOMPLETE;
   }
-  const childEnv: Record<string, string> = { [plan.dbEnvVar]: plan.cloneDb };
-  for (const key of ['PATH', 'HOME'] as const) {
-    const value = process.env[key];
-    if (value !== undefined) childEnv[key] = value;
+
+  // Network isolation is a CHECKED precondition (fail-closed): a reachable egress
+  // DISPROVES isolation. A failed probe is consistent-with-isolation, not proof.
+  const probeEgress = opts.probeEgress ?? defaultProbeEgress;
+  if (probeEgress()) {
+    io.err('AS-01 refused: egress is reachable — --network-isolated is contradicted (isolation can be disproven, not proven).');
+    return AS01_EXIT.INCONCLUSIVE;
   }
+
+  // Isolate the old binary: a sandbox HOME + npm cache so it cannot load the
+  // operator's live config; only PATH is inherited.
+  const sandboxHome = join(realpathSync(rehearsalDir), 'old-binary-home');
+  const npmCache = join(sandboxHome, '.npm');
+  mkdirSync(npmCache, { recursive: true });
+  const childEnv: Record<string, string> = { [plan.dbEnvVar]: plan.cloneDb, HOME: sandboxHome, npm_config_cache: npmCache };
+  const pathValue = process.env.PATH;
+  if (pathValue !== undefined) childEnv.PATH = pathValue;
+
   const result = spawnSync('npm', ['run', plan.scriptName], {
     cwd: plan.releaseDir, env: childEnv, encoding: 'utf8', timeout: 600_000,
   });
   const hashAfterOldBinary = sha256File(plan.cloneDb);
   const wrote = hashAfterOldBinary !== migration.migratedCloneHash;
-  io.out(`  old-binary  : exit=${result.status ?? 'signal'} wrote=${wrote}`);
+  const outcome = classifyOldBinaryOutcome({
+    status: result.status,
+    signal: result.signal ?? null,
+    spawnError: result.error !== undefined,
+    stdout: result.stdout ?? '',
+    stderr: result.stderr ?? '',
+    wrote,
+  });
+  io.out(`  old-binary  : exit=${result.status ?? 'signal'} wrote=${wrote} outcome=${outcome}`);
   if (result.stdout) io.out(result.stdout.slice(-2048));
   if (result.stderr) io.err(result.stderr.slice(-2048));
-  // The exit code + write-delta are the OBSERVATION (accept/reject, and whether
-  // the old binary mutated the clone); coupled rollback is the owner's decision.
-  return result.status === 0 && !wrote ? 0 : 1;
+
+  switch (outcome) {
+    case 'rejected_no_write': {
+      // Expected: prove the coupled restore branch before calling it a pass.
+      const restore = rehearseCoupledRestore(plan.cloneDb, backupPath);
+      io.out(`  restore     : ok=${restore.ok} integrity=${restore.integrityAfter} hash=${restore.restoredHash === restore.backupHash}`);
+      if (!restore.ok) {
+        io.err('AS-01 INCONCLUSIVE — old binary rejected as expected but the coupled restore could not be proven.');
+        return AS01_EXIT.INCONCLUSIVE;
+      }
+      io.out('AS-01 PASS — old binary rejected the future schema with no write, and the coupled restore is byte-exact.');
+      return AS01_EXIT.PASS;
+    }
+    case 'accepted':
+      io.out('AS-01 ACCEPTED — old binary ran on the new schema without writing. Rollback is a binary swap; owner must decide (not the expected rejection).');
+      return AS01_EXIT.ACCEPTED;
+    case 'wrote_dangerous':
+      io.err('AS-01 DANGEROUS — old binary WROTE to the migrated clone. A live rollback would require a coupled DB restore.');
+      return AS01_EXIT.WROTE_DANGEROUS;
+    case 'inconclusive':
+    default:
+      io.err('AS-01 INCONCLUSIVE — the old-binary observation could not be classified (missing npm, crash, timeout, or unrecognized failure).');
+      return AS01_EXIT.INCONCLUSIVE;
+  }
 }
 
 const invokedPath = process.argv[1] ? pathToFileURL(resolve(process.argv[1])).href : '';
@@ -347,6 +495,6 @@ if (import.meta.url === invokedPath) {
     });
   } catch (error) {
     process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
-    process.exitCode = 2;
+    process.exitCode = AS01_EXIT.INCOMPLETE;
   }
 }

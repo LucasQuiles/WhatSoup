@@ -735,22 +735,46 @@ action records an `operator` audit event carrying the `--run-id` actor and `--id
 `scripts/capability-obligation-backfill-manifest.ts` is READ-ONLY: from reviewer-confirmed
 source identities it emits a digest-addressed manifest of the historical obligations that
 WOULD be reprocessed (ineligible entries reported, never dropped), for owner approval. The
-digest binds the DESTINATION (conversationKey/deliveryJid/isGroup) and SOURCE identity
-(sourceDigest + token/media hash) so an approval cannot be reused for a different destination
-or a swapped source. A reviewer capability override makes historical AUDIO eligible (audio is
-excluded from the live contract by construction; incident-7795 shape).
-`scripts/capability-obligation-backfill-execute.ts` is the owner-gated EXECUTOR: it appends
-obligations through the guarded store ONLY for inbounds proven non-fulfilled (a completed
-recovery job settled `completion_kind='echo'`), with media hash/retain/reverify, idempotently
-(a second run creates nothing), and leaves the original recovery-job rows untouched.
+digest binds the DESTINATION (conversationKey/deliveryJid/isGroup), the SOURCE identity
+(sourceDigest + token/media hash+size), the EXACT reviewer-classified recovery job id, and the
+reviewer's fulfilment classification — so an approval cannot be reused for a different
+destination, a swapped source, a different job, or a changed classification. Only a reviewer
+`confirmed_unfulfilled` whose persisted job agrees on inbound/message/conversation/destination,
+is completed+`echo`, and has no sibling worker-fulfilment is eligible; echo-settlement is
+corroboration with VETO power, never the affirmative proof (the executor does NOT re-derive
+non-fulfilment from echo — that delivery/fulfilment conflation is the defect this feature
+corrects). A reviewer capability override makes historical AUDIO eligible (audio is excluded
+from the live contract by construction; incident-7795 shape). The human-readable manifest
+prints exactly the digest-bound fields (destination, job, classification, source) so the
+approver SEES what the approval commits to.
+`scripts/capability-obligation-backfill-execute.ts` is the owner-gated EXECUTOR. It RECOMPUTES
+the manifest digest over the descriptors it is about to run and REFUSES the whole run on
+mismatch (a descriptor altered after approval cannot execute). For each entry it re-verifies
+the reviewer classification + exact recovery job (selected BY ID, never latest-by-sequence),
+retains+reverifies media, is idempotent (a second run creates nothing), commits every insert
+in ONE all-row transaction (no partial backfill), persists the real recovery job id as
+`origin_recovery_job_id`, and leaves the original recovery-job rows untouched. Its CLI
+(`runBackfillExecuteCli`) is dry-run by default; applying requires a schema guard, a
+quiescence check (`BEGIN IMMEDIATE` — a busy DB means the bot is running → refused), a
+SQLite `--backup-path` at the current schema, an `--expect-existing` precondition on the
+current backfill count, and a `--confirm <approvedDigest>` confirmation token equal to the
+manifest digest (holding the flag is not enough — the operator must hold the artifact).
 `scripts/capability-obligation-as01-rehearsal.ts` authors the old-binary/schema rehearsal: it
 reads the startup/schema-guard command from the OLD release's OWN `package.json` (never
 guessed); requires a real SQLite CLONE inside the designated sandbox using canonical realpath
-(a symlink to a live DB, a non-regular, or a non-SQLite file are refused); migrates the clone
-`startSchema→target` with integrity + row-count + read-only-smoke evidence; and runs the
-old-binary check + before/after write-delta proof only under `--confirm --network-isolated`.
-It provides no-SEND by construction (it never opens a WhatsApp session) but CANNOT itself
-guarantee OS network isolation — the operator supplies that externally. Backfill EXECUTION,
+(a symlink to a live DB, a non-regular, or a non-SQLite file are refused); snapshots the clone,
+migrates it `startSchema→target` with integrity + row-count + read-only-smoke evidence; and
+runs the DECISIVE old-binary check only under `--confirm --network-isolated`. That check
+CLASSIFIES the observation — `rejected_no_write` (the EXPECTED behavior: a non-zero exit
+carrying `DatabaseCompatibilityError`/`future_schema` with no write) / `accepted` / 
+`wrote_dangerous` / `inconclusive` — with a distinguishable exit code (0 pass, 1 inconclusive,
+2 INCOMPLETE-when-skipped, 3 accepted-owner-decision, 4 wrote-dangerous), so a skipped or
+unclassifiable step can never read as a pass. On the expected rejection it proves the coupled
+byte-exact pre-migration RESTORE (candidate §5). The old binary runs in a sandbox HOME + npm
+cache (never the operator's live config), and network isolation is a fail-closed egress probe
+(a reachable network REFUSES the run) — isolation can be disproven, never proven, so
+`--network-isolated` stays an operator attestation the probe fails-closed against; no-SEND is
+guaranteed by construction (it never opens a WhatsApp session). Backfill EXECUTION,
 the DM drain, both group drains, and the old-binary rehearsal are separately owner-gated.
 
 ---
