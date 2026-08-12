@@ -14,6 +14,7 @@ import { errorResult, toolError, type ToolDeclaration } from '../types.ts';
 import { pineconeProjectGuardError, type PineconeProjectGuard } from '../../lib/pinecone-project-guard.ts';
 import { errorMessage } from '../../lib/error-message.ts';
 import { resolveApiKey } from '../../lib/api-key-resolver.ts';
+import { EXTERNAL_EFFECT_CONTRACT_VERSION } from '../external-effect.ts';
 
 const log = createChildLogger('knowledge-tools');
 
@@ -316,6 +317,7 @@ export function registerKnowledgeTools(
     scope: 'chat',
     targetMode: 'caller-supplied',
     replayPolicy: 'read_only',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'none' },
     // Optional vendor-gated tool: Pinecone may be absent/misconfigured, in which case
     // registerAllTools logs and continues rather than aborting boot.
     core: false,

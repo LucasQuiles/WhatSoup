@@ -28,6 +28,7 @@ import { errorResult } from '../types.ts';
 import { nowUnixSec } from '../../core/substrate/time.ts';
 import type { EntityRef, TriggerKind } from '../../core/substrate/types.ts';
 import { regenerateVault, projectBead, projectEntity, removeEntityProjection } from '../../core/substrate/vault.ts';
+import { EXTERNAL_EFFECT_CONTRACT_VERSION } from '../external-effect.ts';
 
 const log = createChildLogger('mcp:substrate');
 
@@ -182,6 +183,7 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
     sensitive: true,
     description: 'Create an agent_job bead + schedule trigger. Admin only.',
     scope: 'global', targetMode: 'caller-supplied', replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     schema: z.object({
       prompt: z.string().min(1),
       title: z.string().optional(),
@@ -240,6 +242,7 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
     sensitive: true,
     description: 'Create a watch bead + poll trigger. Admin only. TTL defaults to config.memory.watchTtl.defaultHours; clamped to maxHours. Wired kinds: poll.sqlite, poll.pinecone, poll.file, poll.url (gated behind advanced.enableUrlWatch, default OFF — rejected at creation when disabled), and schedule.*. poll.email is accepted and persisted but no-op until its executor is wired. event.message is accepted and persisted but is a reserved scaffold (next_fire_at=NULL, never polled) pending a future ingest path. poll.shell is removed from creation (not in this enum; retained internally only for legacy fail-closed handling).',
     scope: 'global', targetMode: 'caller-supplied', replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     schema: z.object({
       title: z.string().optional(),
       // poll.shell removed from creation (F2 Slice B): not in this enum so
@@ -307,6 +310,7 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
     scope: 'global',
     targetMode: 'caller-supplied',
     replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     schema: z.object({}),
     handler: async (_raw, session) => {
       assertAdmin(deps, session);
@@ -319,6 +323,7 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
     sensitive: true,
     description: 'Create a task bead (no trigger). Admin only.',
     scope: 'global', targetMode: 'caller-supplied', replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     schema: z.object({
       title: z.string().min(1),
       body: z.string().optional(),
@@ -354,6 +359,7 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
     sensitive: true,
     description: 'Append an entity observation. Append/supersede semantics — never mutates existing rows. Admin only.',
     scope: 'global', targetMode: 'caller-supplied', replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     schema: z.object({
       entity_ref: EntityRefSchema,
       // Observation kinds are a closed whitelist that mirrors the DB CHECK
@@ -396,6 +402,7 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
     name: 'list_beads',
     description: 'List beads with optional filters. review_overdue surfaces status=proposed beads whose review_by_at deadline has passed (#1773) and overrides any status filter with the hardcoded proposed predicate.',
     scope: 'global', targetMode: 'caller-supplied', replayPolicy: 'read_only',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'none' },
     schema: z.object({
       owner_jid: z.string().optional(),
       kind: z.enum(['task','project','observation','agent_job','watch']).optional(),
@@ -426,6 +433,7 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
     name: 'get_activity',
     description: 'Return a unified durable-memory timeline of bead events and live entity observations, newest first. Optionally owner-scoped; live-view only (superseded/forgotten observations excluded). Read only.',
     scope: 'global', targetMode: 'caller-supplied', replayPolicy: 'read_only',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'none' },
     schema: z.object({
       owner_jid: z.string().optional(),
       since: z.number().int().positive().optional(),
@@ -443,6 +451,7 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
     name: 'get_bead',
     description: 'Return a bead and its recent events.',
     scope: 'global', targetMode: 'caller-supplied', replayPolicy: 'read_only',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'none' },
     schema: z.object({ id: z.number().int().positive() }),
     handler: async (raw) => {
       const p = raw as { id: number };
@@ -457,6 +466,7 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
     sensitive: true,
     description: 'Update title/body/due_at/priority/metadata on a bead. Cannot change kind/owner/status. Admin only.',
     scope: 'global', targetMode: 'caller-supplied', replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     schema: z.object({
       id: z.number().int().positive(),
       fields: z.object({
@@ -481,6 +491,7 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
     sensitive: true,
     description: 'Transition a bead to completed. Admin only.',
     scope: 'global', targetMode: 'caller-supplied', replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     schema: z.object({ id: z.number().int().positive(), note: z.string().optional() }),
     handler: async (raw, session) => {
       assertAdmin(deps, session);
@@ -496,6 +507,7 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
     sensitive: true,
     description: 'Transition a bead to cancelled. Admin only.',
     scope: 'global', targetMode: 'caller-supplied', replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     schema: z.object({ id: z.number().int().positive(), reason: z.string().optional() }),
     handler: async (raw, session) => {
       assertAdmin(deps, session);
@@ -511,6 +523,7 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
     sensitive: true,
     description: 'Promote status=proposed bead to active. Admin only.',
     scope: 'global', targetMode: 'caller-supplied', replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     schema: z.object({ id: z.number().int().positive(), overrides: z.record(z.unknown()).optional() }),
     handler: async (raw, session) => {
       assertAdmin(deps, session);
@@ -528,6 +541,7 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
     sensitive: true,
     description: 'Cancel status=proposed bead with rejection reason. Admin only.',
     scope: 'global', targetMode: 'caller-supplied', replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     schema: z.object({ id: z.number().int().positive(), reason: z.string().optional() }),
     handler: async (raw, session) => {
       assertAdmin(deps, session);
@@ -542,6 +556,7 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
     name: 'list_triggers',
     description: 'List triggers, optionally filtered.',
     scope: 'global', targetMode: 'caller-supplied', replayPolicy: 'read_only',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'none' },
     schema: z.object({
       bead_id: z.number().int().positive().optional(),
       kind: z.string().optional(),
@@ -558,6 +573,7 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
     sensitive: true,
     description: 'Pause a trigger. Admin only.',
     scope: 'global', targetMode: 'caller-supplied', replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     schema: z.object({ id: z.number().int().positive() }),
     handler: async (raw, session) => {
       assertAdmin(deps, session);
@@ -572,6 +588,7 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
     sensitive: true,
     description: 'Push trigger terminal_at forward (clamped to policy max). Admin only.',
     scope: 'global', targetMode: 'caller-supplied', replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     schema: z.object({ id: z.number().int().positive(), until: z.number().int().positive() }),
     handler: async (raw, session) => {
       assertAdmin(deps, session);
@@ -588,6 +605,7 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
     name: 'get_profile',
     description: 'Return entity + aliases + live observations + linked beads.',
     scope: 'global', targetMode: 'caller-supplied', replayPolicy: 'read_only',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'none' },
     schema: z.object({ entity_ref: EntityRefSchema }),
     handler: async (raw) => {
       const p = raw as { entity_ref: z.infer<typeof EntityRefSchema> };
@@ -601,6 +619,7 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
     name: 'list_entities',
     description: 'List entities with optional kind/text_match filter.',
     scope: 'global', targetMode: 'caller-supplied', replayPolicy: 'read_only',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'none' },
     schema: z.object({
       kind: z.enum(['person','org','project','place','topic','other']).optional(),
       text_match: z.string().optional(),
@@ -617,6 +636,7 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
     sensitive: true,
     description: 'Add an alias (display_name/handle/email/phone/url/nickname/other) to an entity — the write-half of the aliases surface read by get_profile. Duplicate (entity, alias, kind) rows are ignored. Admin only.',
     scope: 'global', targetMode: 'caller-supplied', replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     schema: z.object({
       entity_ref: EntityRefSchema,
       alias: z.string().min(1),
@@ -651,6 +671,7 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
     sensitive: true,
     description: 'Merge entity A into B; non-destructive. Admin only.',
     scope: 'global', targetMode: 'caller-supplied', replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     schema: z.object({ from_id: z.number().int().positive(), into_id: z.number().int().positive() }),
     handler: async (raw, session) => {
       assertAdmin(deps, session);
@@ -667,6 +688,7 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
     sensitive: true,
     description: 'Tombstone an observation (forgotten=1 with reason). Admin only.',
     scope: 'global', targetMode: 'caller-supplied', replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     schema: z.object({ id: z.number().int().positive(), reason: z.string().min(1) }),
     handler: async (raw, session) => {
       assertAdmin(deps, session);

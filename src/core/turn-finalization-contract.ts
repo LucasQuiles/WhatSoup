@@ -1,3 +1,5 @@
+import type { CapabilityDecisionParams } from './capability-obligation-store.ts';
+import { validateCapabilityDecisionParams } from './capability-obligation-store.ts';
 import type { InboundFailureClass } from './inbound-failure-class.ts';
 import {
   ADMISSION_REJECT_CLASSES,
@@ -188,6 +190,8 @@ export interface FinalizeTurnTerminalResult extends RecordTurnTerminalResult {
    */
   effectiveReplyGuaranteeDisarmed: boolean;
   recoveryJob?: EnqueueTurnRecoveryJobResult;
+  /** D4: present iff a capability decision was applied inside this C3 commit. */
+  capabilityDecision?: { eventId: number; obligationId: number | null };
 }
 
 export type TurnFinalizationBookkeepingParams = Omit<TurnBookkeepingParams, 'lastOpId'>;
@@ -197,6 +201,14 @@ export interface FinalizeTurnTerminalParams {
   inbound?: TerminalInboundMutation;
   bookkeeping?: TurnFinalizationBookkeepingParams;
   recoveryJob?: TurnRecoveryJobPersistenceParams;
+  /**
+   * D4 (capability-obligation replay) — the typed capability-debt decision that
+   * must share C3 atomicity with the terminal record: an audit event always,
+   * plus the unique obligation row only for the conclusive eligible case. The
+   * duplicate-winner path never re-applies it (read-only branch), so a
+   * re-finalization cannot create a second obligation.
+   */
+  capabilityDecision?: CapabilityDecisionParams;
 }
 
 export const TERMINAL_PROVIDER_FAILURE_CLASSES: ReadonlySet<string> = new Set([
@@ -244,6 +256,9 @@ export function normalizeFinalizeTurnTerminalParams(
   const { terminal, inbound, bookkeeping } = params;
   if (!['per_chat', 'shared', 'singleton'].includes(terminal.scope)) {
     throw new Error('Terminal identity has an invalid scope');
+  }
+  if (params.capabilityDecision !== undefined) {
+    validateCapabilityDecisionParams(params.capabilityDecision);
   }
   validateBoundedRequired(
     terminal.conversationKey,

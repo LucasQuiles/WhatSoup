@@ -8,6 +8,7 @@ import type { Database } from '../../core/database.ts';
 import { type MessageRow, rowToMessage } from '../../core/messages.ts';
 import { buildSafeFtsMatchQuery } from '../../lib/sql-fts.ts';
 import { escapeSqlLikePattern } from '../../lib/sql-like.ts';
+import { EXTERNAL_EFFECT_CONTRACT_VERSION } from '../external-effect.ts';
 
 const SQLITE_READ_LIMIT_MAX = 1000;
 const SqliteReadLimitSchema = z.number().int().positive().max(SQLITE_READ_LIMIT_MAX);
@@ -36,6 +37,7 @@ function makeSearchMessages(db: Database): ToolDeclaration {
     scope: 'global',
     targetMode: 'caller-supplied',
     replayPolicy: 'read_only',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'none' },
     handler: async (params) => {
       const { query, limit = 20 } = SearchMessagesSchema.parse(params);
       const matchQuery = buildSafeFtsMatchQuery(query);
@@ -76,6 +78,7 @@ function makeSearchChatMessages(db: Database): ToolDeclaration {
     scope: 'chat',
     targetMode: 'caller-supplied',
     replayPolicy: 'read_only',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'none' },
     handler: async (params, session: SessionContext) => {
       const { conversation_key: caller_key, query, limit = 20 } = SearchChatMessagesSchema.parse(params);
       const conversation_key = resolveConversationKey(session, caller_key);
@@ -126,6 +129,7 @@ function makeSearchContacts(db: Database): ToolDeclaration {
     scope: 'global',
     targetMode: 'caller-supplied',
     replayPolicy: 'read_only',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'none' },
     handler: async (params) => {
       const { query, limit = 20 } = SearchContactsSchema.parse(params);
 
@@ -181,6 +185,7 @@ function makeSearchMessagesAdvanced(db: Database): ToolDeclaration {
     scope: 'global',
     targetMode: 'caller-supplied',
     replayPolicy: 'read_only',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'none' },
     handler: async (params) => {
       const {
         query,

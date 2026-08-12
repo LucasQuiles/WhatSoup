@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { DEFAULT_DATABASE_RETENTION } from '../../core/database-retention.ts';
 import type { OutboundSendsWriter } from '../../core/outbound-sends.ts';
 import type { ToolRegistry } from '../registry.ts';
+import { EXTERNAL_EFFECT_CONTRACT_VERSION } from '../external-effect.ts';
 
 export interface OutboundAuditDeps {
   writer: OutboundSendsWriter;
@@ -14,6 +15,7 @@ export function registerOutboundAuditTools(registry: ToolRegistry, deps: Outboun
     scope: 'global',
     targetMode: 'caller-supplied',
     replayPolicy: 'read_only',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'none' },
     schema: z.object({
       limit: z
         .number()
@@ -41,6 +43,7 @@ export function registerOutboundAuditTools(registry: ToolRegistry, deps: Outboun
     scope: 'global',
     targetMode: 'caller-supplied',
     replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     sensitive: true,
     schema: z.object({
       dry_run: z.boolean(),

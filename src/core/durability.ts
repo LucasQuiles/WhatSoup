@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 import { createChildLogger } from '../logger.ts';
 import { allFromStatement } from '../lib/db-query.ts';
+import { CapabilityObligationStore } from './capability-obligation-store.ts';
+import type { CapabilityDecisionOutcome } from './capability-obligation-store.ts';
 import { emitAlertChecked, clearAlertSourceChecked } from '../lib/emit-alert.ts';
 import { gateQuarantineClear } from '../lib/fleet-health-gate.ts';
 import {
@@ -501,6 +503,8 @@ export class DurabilityEngine {
   private readonly statements: DurabilityStatements;
   private readonly recoveryEvidence: DurabilityRecoveryEvidence;
   private readonly turnRecovery: TurnRecoveryStore;
+  /** D4 (capability-obligation replay): joined into C3 via applyDecisionWithinCallerTransaction. */
+  readonly capabilityObligations: CapabilityObligationStore;
   private readonly sessionLifecycle: SessionLifecycleStore;
   private readonly confirmedOutboundProbe: (seconds: number) => boolean;
   constructor(db: Database) {
@@ -1124,6 +1128,7 @@ export class DurabilityEngine {
     this.turnRecovery = new TurnRecoveryStore(db, () => (
       this.statements.selectNow.get() as { now: string }
     ).now);
+    this.capabilityObligations = new CapabilityObligationStore(db);
     this.sessionLifecycle = new SessionLifecycleStore(db);
     this.confirmedOutboundProbe = makeConfirmedOutboundProbe(db.raw);
     // Pre-warm the immediate-transaction runner so lifecycle methods that call
@@ -1484,6 +1489,7 @@ export class DurabilityEngine {
       const result = this.runRecordTurnTerminal(normalized.terminal);
       let winnerMatchesRequest = result.applied;
       let recoveryJob: EnqueueTurnRecoveryJobResult | undefined;
+      let capabilityDecision: CapabilityDecisionOutcome | undefined;
       if (result.applied) {
         this.validateTerminalInboundProof(normalized);
         const deliveryOp = this.validateTerminalDeliveryProof(normalized.terminal);
@@ -1491,6 +1497,15 @@ export class DurabilityEngine {
           recoveryJob = this.turnRecovery.insertLinkedWithinCallerTransaction(
             result.recordId,
             normalized.recoveryJob,
+          );
+        }
+        if (normalized.capabilityDecision !== undefined) {
+          // D4: the typed capability-debt decision shares C3 atomicity — an
+          // audit/store failure here aborts the terminal record too. The
+          // duplicate-winner branch below is read-only, so a re-finalization
+          // can never apply the decision twice.
+          capabilityDecision = this.capabilityObligations.applyDecisionWithinCallerTransaction(
+            normalized.capabilityDecision,
           );
         }
         if (normalized.bookkeeping) this.runTurnBookkeeping(normalized.bookkeeping);
@@ -1545,6 +1560,7 @@ export class DurabilityEngine {
         replyGuaranteeDisarmed,
         effectiveReplyGuaranteeDisarmed,
         ...(recoveryJob === undefined ? {} : { recoveryJob }),
+        ...(capabilityDecision === undefined ? {} : { capabilityDecision }),
       };
     } catch (err) {
       log.error({

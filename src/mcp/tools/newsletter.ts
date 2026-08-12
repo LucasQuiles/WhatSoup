@@ -6,6 +6,7 @@ import type { ToolDeclaration } from '../types.ts';
 import type { ExtendedBaileysSocket } from '../types.ts';
 import { validateBase64Image } from '../../core/base64.ts';
 import { type SockToolConfig, registerSockTools } from './sock-tool-factory.ts';
+import { EXTERNAL_EFFECT_CONTRACT_VERSION } from '../external-effect.ts';
 
 // ---------------------------------------------------------------------------
 // NOTE: newsletter_update, newsletter_update_name, and newsletter_update_description
@@ -28,6 +29,7 @@ const newsletterConfigs: SockToolConfig<any>[] = [
       description: z.string().optional(),
     }),
     replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ name, description }, sock) => {
       return sock.newsletterCreate(name, description);
     },
@@ -40,6 +42,7 @@ const newsletterConfigs: SockToolConfig<any>[] = [
       updates: z.record(z.unknown()),
     }),
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ jid, updates }, sock) => {
       return sock.newsletterUpdate(jid, updates);
     },
@@ -53,6 +56,7 @@ const newsletterConfigs: SockToolConfig<any>[] = [
       key: z.string(),
     }),
     replayPolicy: 'read_only',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'none' },
     call: async ({ type, key }, sock) => {
       return sock.newsletterMetadata(type, key);
     },
@@ -62,6 +66,7 @@ const newsletterConfigs: SockToolConfig<any>[] = [
     description: 'Fetch the subscriber list for a WhatsApp newsletter by JID (global).',
     schema: z.object({ jid: z.string() }),
     replayPolicy: 'read_only',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'none' },
     call: async ({ jid }, sock) => {
       return sock.newsletterSubscribers(jid);
     },
@@ -71,6 +76,7 @@ const newsletterConfigs: SockToolConfig<any>[] = [
     description: 'Follow (subscribe to) a WhatsApp newsletter by JID (global).',
     schema: z.object({ jid: z.string() }),
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ jid }, sock) => {
       await sock.newsletterFollow(jid);
       return { success: true, jid };
@@ -81,6 +87,7 @@ const newsletterConfigs: SockToolConfig<any>[] = [
     description: 'Unfollow (unsubscribe from) a WhatsApp newsletter by JID (global).',
     schema: z.object({ jid: z.string() }),
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ jid }, sock) => {
       await sock.newsletterUnfollow(jid);
       return { success: true, jid };
@@ -91,6 +98,7 @@ const newsletterConfigs: SockToolConfig<any>[] = [
     description: 'Mute a WhatsApp newsletter by JID (global).',
     schema: z.object({ jid: z.string() }),
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ jid }, sock) => {
       await sock.newsletterMute(jid);
       return { success: true, jid };
@@ -101,6 +109,7 @@ const newsletterConfigs: SockToolConfig<any>[] = [
     description: 'Unmute a WhatsApp newsletter by JID (global).',
     schema: z.object({ jid: z.string() }),
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ jid }, sock) => {
       await sock.newsletterUnmute(jid);
       return { success: true, jid };
@@ -114,6 +123,7 @@ const newsletterConfigs: SockToolConfig<any>[] = [
       name: z.string(),
     }),
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ jid, name }, sock) => {
       await sock.newsletterUpdateName(jid, name);
       return { success: true, jid, name };
@@ -127,6 +137,7 @@ const newsletterConfigs: SockToolConfig<any>[] = [
       description: z.string(),
     }),
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ jid, description }, sock) => {
       await sock.newsletterUpdateDescription(jid, description);
       return { success: true, jid, description };
@@ -141,6 +152,7 @@ const newsletterConfigs: SockToolConfig<any>[] = [
       content: z.string().describe('Base64-encoded image data'),
     }),
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ jid, content }, sock) => {
       const cleanContent = validateBase64Image(content);
       const buffer = Buffer.from(cleanContent, 'base64');
@@ -153,6 +165,7 @@ const newsletterConfigs: SockToolConfig<any>[] = [
     description: 'Remove the profile picture from a WhatsApp newsletter by JID (global).',
     schema: z.object({ jid: z.string() }),
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ jid }, sock) => {
       await sock.newsletterRemovePicture(jid);
       return { success: true, jid };
@@ -168,6 +181,7 @@ const newsletterConfigs: SockToolConfig<any>[] = [
       reaction: z.string().optional(),
     }),
     replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ jid, serverId, reaction }, sock) => {
       await sock.newsletterReactMessage(jid, serverId, reaction);
       return { success: true, jid, serverId };
@@ -184,6 +198,7 @@ const newsletterConfigs: SockToolConfig<any>[] = [
       after: z.number().optional().describe('Cursor offset as a number (message server ID).'),
     }),
     replayPolicy: 'read_only',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'none' },
     call: async ({ jid, count, since, after }, sock) => {
       return sock.newsletterFetchMessages(jid, count, since, after);
     },
@@ -193,6 +208,7 @@ const newsletterConfigs: SockToolConfig<any>[] = [
     description: 'Subscribe to live updates for a WhatsApp newsletter by JID (global).',
     schema: z.object({ jid: z.string() }),
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ jid }, sock) => {
       await sock.subscribeNewsletterUpdates(jid);
       return { success: true, jid };
@@ -203,6 +219,7 @@ const newsletterConfigs: SockToolConfig<any>[] = [
     description: 'Get the number of admins for a WhatsApp newsletter by JID (global).',
     schema: z.object({ jid: z.string() }),
     replayPolicy: 'read_only',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'none' },
     call: async ({ jid }, sock) => {
       const count = await sock.newsletterAdminCount(jid);
       return { jid, adminCount: count };
@@ -216,6 +233,7 @@ const newsletterConfigs: SockToolConfig<any>[] = [
       newOwnerJid: z.string(),
     }),
     replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ jid, newOwnerJid }, sock) => {
       await sock.newsletterChangeOwner(jid, newOwnerJid);
       return { success: true, jid, newOwnerJid };
@@ -229,6 +247,7 @@ const newsletterConfigs: SockToolConfig<any>[] = [
       userJid: z.string(),
     }),
     replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ jid, userJid }, sock) => {
       await sock.newsletterDemote(jid, userJid);
       return { success: true, jid, userJid };
@@ -239,6 +258,7 @@ const newsletterConfigs: SockToolConfig<any>[] = [
     description: 'Permanently delete a WhatsApp newsletter by JID (global).',
     schema: z.object({ jid: z.string() }),
     replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ jid }, sock) => {
       await sock.newsletterDelete(jid);
       return { success: true, jid };

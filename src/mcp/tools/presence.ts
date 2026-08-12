@@ -6,6 +6,7 @@ import { toolError, type ToolDeclaration } from '../types.ts';
 import type { ExtendedBaileysSocket } from '../types.ts';
 import type { PresenceCache } from '../../transport/presence-cache.ts';
 import { type SockToolConfig, registerSockTools } from './sock-tool-factory.ts';
+import { EXTERNAL_EFFECT_CONTRACT_VERSION } from '../external-effect.ts';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- configs have heterogeneous ZodRawShape types; shared array requires any; expires 2026-12-31
 const presenceSockConfigs: SockToolConfig<any>[] = [
@@ -20,6 +21,7 @@ const presenceSockConfigs: SockToolConfig<any>[] = [
     scope: 'chat',
     targetMode: 'injected',
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ chatJid, type }, sock) => {
       await sock.sendPresenceUpdate(type, chatJid);
       return { success: true, type };
@@ -33,6 +35,7 @@ const presenceSockConfigs: SockToolConfig<any>[] = [
       jid: z.string(),
     }),
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ jid }, sock) => {
       await sock.presenceSubscribe(jid);
       return { success: true, jid };
@@ -57,6 +60,7 @@ function makeGetPresence(presenceCache: PresenceCache): ToolDeclaration {
     scope: 'global',
     targetMode: 'caller-supplied',
     replayPolicy: 'read_only',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'none' },
     handler: async (params) => {
       const parsed = GetPresenceSchema.safeParse(params);
       if (!parsed.success) {

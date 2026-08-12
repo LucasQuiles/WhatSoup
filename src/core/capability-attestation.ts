@@ -1,0 +1,142 @@
+/**
+ * D5 — exact-bound capability attestation (capability-obligation replay).
+ *
+ * An attestation is an immutable, versioned readiness record (migration 57)
+ * proving the DECLARED capability contract is actually executable on a specific
+ * host/release/provider/skill/dependency/media-root combination, backed by a
+ * bounded non-sending canary. Provider health or `/health` output NEVER admits
+ * a claim; only an exact, fresh, unrevoked, canary-passing attestation does.
+ *
+ * `findAdmissibleAttestation` is the single admission query the obligation
+ * supervisor consumes: every binding field must match exactly; the result is
+ * either `admissible` (newest match) or a typed skip reason. A skip consumes
+ * zero execution attempts (D5) — the supervisor simply does not claim.
+ *
+ * Attestation PRODUCTION (hashing the installed skill, probing dependencies,
+ * running the canary) lives in the ops probe tooling; this module owns only the
+ * durable record + the admission decision, so the trust boundary is a single
+ * reviewed query.
+ */
+import type { Database } from './database.ts';
+
+export interface CapabilityAttestationBinding {
+  hostId: string;
+  runtimeUser: string;
+  releaseSha: string;
+  schemaVersion: number;
+  providerId: string;
+  harnessType: string;
+  contractVersion: string;
+  capability: string;
+  skillName: string;
+  skillDigest: string;
+  mediaRoot: string;
+}
+
+export interface CapabilityAttestationRecordParams extends CapabilityAttestationBinding {
+  skillVersion: string | null;
+  resolverDigest: string | null;
+  dependencyVersions: Record<string, string>;
+  canaryId: string;
+  canaryResult: 'pass' | 'fail';
+  probeVersion: string;
+  nonce: string;
+  attestedAt: string;
+  expiresAt: string;
+}
+
+export function recordCapabilityAttestation(
+  db: Database,
+  params: CapabilityAttestationRecordParams,
+): number {
+  const result = db.raw
+    .prepare(
+      `INSERT INTO capability_attestations (
+         host_id, runtime_user, release_sha, schema_version, provider_id, harness_type,
+         contract_version, capability, skill_name, skill_version, skill_digest,
+         resolver_digest, dependency_versions, media_root, canary_id, canary_result,
+         probe_version, nonce, attested_at, expires_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      params.hostId,
+      params.runtimeUser,
+      params.releaseSha,
+      params.schemaVersion,
+      params.providerId,
+      params.harnessType,
+      params.contractVersion,
+      params.capability,
+      params.skillName,
+      params.skillVersion,
+      params.skillDigest,
+      params.resolverDigest,
+      JSON.stringify(params.dependencyVersions),
+      params.mediaRoot,
+      params.canaryId,
+      params.canaryResult,
+      params.probeVersion,
+      params.nonce,
+      params.attestedAt,
+      params.expiresAt,
+    );
+  return Number(result.lastInsertRowid);
+}
+
+export type AttestationAdmission =
+  | { outcome: 'admissible'; attestationId: number }
+  | { outcome: 'skip'; reason: 'none_recorded' | 'binding_mismatch' | 'stale' | 'revoked' | 'canary_failed' };
+
+/**
+ * The single admission decision. Exact-match on EVERY binding field; among
+ * exact matches, freshness/revocation/canary decide; the newest fully
+ * admissible record wins. Reason precedence when nothing admits: a fully
+ * matching record's defect (canary > revoked > stale) is more informative than
+ * `binding_mismatch`, which in turn beats `none_recorded`.
+ */
+export function findAdmissibleAttestation(
+  db: Database,
+  binding: CapabilityAttestationBinding,
+): AttestationAdmission {
+  const total = (
+    db.raw.prepare('SELECT COUNT(*) AS c FROM capability_attestations').get() as { c: number }
+  ).c;
+  if (total === 0) return { outcome: 'skip', reason: 'none_recorded' };
+
+  const rows = db.raw
+    .prepare(
+      `SELECT id, canary_result, revoked_at,
+              (datetime(expires_at) > datetime('now')) AS fresh
+       FROM capability_attestations
+       WHERE host_id = ? AND runtime_user = ? AND release_sha = ? AND schema_version = ?
+         AND provider_id = ? AND harness_type = ? AND contract_version = ? AND capability = ?
+         AND skill_name = ? AND skill_digest = ? AND media_root = ?
+       ORDER BY datetime(attested_at) DESC, id DESC`,
+    )
+    .all(
+      binding.hostId,
+      binding.runtimeUser,
+      binding.releaseSha,
+      binding.schemaVersion,
+      binding.providerId,
+      binding.harnessType,
+      binding.contractVersion,
+      binding.capability,
+      binding.skillName,
+      binding.skillDigest,
+      binding.mediaRoot,
+    ) as Array<{ id: number; canary_result: string; revoked_at: string | null; fresh: number }>;
+
+  if (rows.length === 0) return { outcome: 'skip', reason: 'binding_mismatch' };
+
+  for (const row of rows) {
+    if (row.canary_result === 'pass' && row.revoked_at === null && row.fresh === 1) {
+      return { outcome: 'admissible', attestationId: row.id };
+    }
+  }
+  // Nothing admissible among exact matches: report the newest record's defect.
+  const newest = rows[0]!;
+  if (newest.canary_result !== 'pass') return { outcome: 'skip', reason: 'canary_failed' };
+  if (newest.revoked_at !== null) return { outcome: 'skip', reason: 'revoked' };
+  return { outcome: 'skip', reason: 'stale' };
+}
