@@ -171,9 +171,12 @@ export interface OperationTrackerConfig {
 function intEnv(key: string, fallback: number): number {
   const raw = process.env[key];
   if (!isNonEmptyString(raw)) return fallback;
-  const n = parseInt(raw, 10);
-  if (isNaN(n)) return fallback;
-  return n;
+  // Full-string validation: parseInt would accept "123abc" as 123 and
+  // "0x10" as 0, silently truncating typos into wrong-but-plausible values.
+  const trimmed = raw.trim();
+  if (!/^-?\d+$/.test(trimmed)) return fallback;
+  const n = parseInt(trimmed, 10);
+  return Number.isSafeInteger(n) ? n : fallback;
 }
 
 function positiveIntValue(value: unknown, fallback: number): number {
@@ -196,6 +199,19 @@ function stringProp(source: Record<string, unknown> | undefined, key: string): s
 function numberProp(source: Record<string, unknown> | undefined, key: string, fallback: number): number {
   const value = source?.[key];
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+/** For fields where a SET-but-invalid value must fail loud at startup rather
+ *  than silently coerce (rate-limit windows becoming NaN disables limiting;
+ *  a non-string path would send filesystem state to a stringified junk dir). */
+function requireFiniteNumber(value: unknown, label: string): number {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  throw new ConfigValidationError(`${label} must be a finite number, got ${JSON.stringify(value)}`);
+}
+
+function requirePathString(value: unknown, label: string): string {
+  if (isNonEmptyString(value)) return value;
+  throw new ConfigValidationError(`${label} must be a non-empty string path, got ${JSON.stringify(value)}`);
 }
 
 function boundedIntProp(
@@ -511,7 +527,7 @@ What you never do:
 const DEFAULT_RATE_WINDOW_MS = MS_PER_HOUR; // 1 hour
 const resolvedRateLimitWindowMs: number = (() => {
   if (instance?.rateLimitWindowMs != null) {
-    return instance.rateLimitWindowMs as number;
+    return requireFiniteNumber(instance.rateLimitWindowMs, 'rateLimitWindowMs');
   }
   if (instance?.rateLimitNoticeWindowMs != null) {
     // eslint-disable-next-line no-console -- startup deprecation warning before logger is available; legacy rateLimitNoticeWindowMs fallback is still supported (read at runtime.ts:176), so this nudge is retained, not scheduled for removal; expires 2026-12-31
@@ -520,7 +536,7 @@ const resolvedRateLimitWindowMs: number = (() => {
         'Set rateLimitWindowMs explicitly to silence this warning.',
       instance.rateLimitNoticeWindowMs,
     );
-    return instance.rateLimitNoticeWindowMs as number;
+    return requireFiniteNumber(instance.rateLimitNoticeWindowMs, 'rateLimitNoticeWindowMs');
   }
   return DEFAULT_RATE_WINDOW_MS;
 })();
@@ -1042,10 +1058,10 @@ export const config = {
   configRoot,
   dataRoot,
   stateRoot,
-  authDir: instance ? (instance.paths.authDir as string) : join(configRoot, 'auth_info'),
-  dbPath: instance ? (instance.paths.dbPath as string) : join(dataRoot, 'bot.db'),
+  authDir: instance ? requirePathString(instance.paths.authDir, 'paths.authDir') : join(configRoot, 'auth_info'),
+  dbPath: instance ? requirePathString(instance.paths.dbPath, 'paths.dbPath') : join(dataRoot, 'bot.db'),
   logDir,
-  lockPath: instance ? (instance.paths.lockPath as string) : join(stateRoot, 'bot.lock'),
+  lockPath: instance ? requirePathString(instance.paths.lockPath, 'paths.lockPath') : join(stateRoot, 'bot.lock'),
 
   // Models — deep merge: instance > env var > default. Each value is either a
   // literal model ID (pinned, exact passthrough — the default) or a symbolic
@@ -1069,7 +1085,9 @@ export const config = {
   // Rate limiting
   rateLimitPerHour: (instance?.rateLimitPerHour as number | undefined) ?? intEnv('RATE_LIMIT_PER_HOUR', 45),
   rateLimitWindowMs: resolvedRateLimitWindowMs, // measurement window for counting responses (SP6)
-  rateLimitNoticeWindowMs: (instance?.rateLimitNoticeWindowMs as number | undefined) ?? DEFAULT_RATE_WINDOW_MS, // dedup window for rate-limit notices
+  rateLimitNoticeWindowMs: instance?.rateLimitNoticeWindowMs != null
+    ? requireFiniteNumber(instance.rateLimitNoticeWindowMs, 'rateLimitNoticeWindowMs')
+    : DEFAULT_RATE_WINDOW_MS, // dedup window for rate-limit notices
 
   // Outbound socket governor (PR-F) — bounds the send RATE to any conversation
   // across EVERY send path (runtime, MCP send tools, raw-socket tools) at the
