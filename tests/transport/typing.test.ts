@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 const { mockConfig } = vi.hoisted(() => ({
   mockConfig: {
     adminPhones: new Set<string>(),
-    authDir: '/tmp/wa-test-auth',
+    authDir: '/tmp/wa-test-auth-typing',
     dbPath: ':memory:',
     mediaDir: '/tmp',
     botName: 'WhatSoup',
