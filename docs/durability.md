@@ -731,6 +731,16 @@ mutate only with `--confirm`), and routes cancel/requeue through the SAME guarde
 machine as the runtime (a `claimed` in-flight obligation is never operator-mutated). Every
 action records an `operator` audit event carrying the `--run-id` actor and `--idempotency-key`.
 
+**Backfill and AS-01 rehearsal (both owner-gated).**
+`scripts/capability-obligation-backfill-manifest.ts` is READ-ONLY: from reviewer-confirmed
+source identities it emits a digest-addressed manifest of the historical obligations that
+WOULD be reprocessed (ineligible entries reported, never dropped), for owner approval — it
+never inserts or drains. `scripts/capability-obligation-as01-rehearsal.ts` authors the
+old-binary/schema rehearsal: it reads the startup/schema-guard command from the OLD release's
+OWN `package.json` (never guessed), refuses any target not inside the designated rehearsal
+sandbox (never a live DB), and is dry-run unless `--confirm`. Backfill creation, the DM drain,
+both group drains, and running the rehearsal are separately owner-gated.
+
 ---
 
 ## 6. Database Schema
