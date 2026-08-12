@@ -215,12 +215,15 @@ describe('capability_obligations — immutability and transition whitelist', () 
         )
         .run(id, OBLIGATION.input_digest, OBLIGATION.source_digest).lastInsertRowid,
     );
+    const terminalId = Number(
+      (db.raw.prepare('SELECT id FROM turn_terminal_records WHERE inbound_seq = ?').get(seq) as { id: number }).id,
+    );
     expect(() =>
       db.raw
         .prepare(
           'UPDATE capability_obligations SET state=?, capability_execution_receipt_id=?, completion_proof_id=? WHERE id=?',
         )
-        .run('completed', staleReceiptId, 'terminal-proof-1', id),
+        .run('completed', staleReceiptId, `ttr:${terminalId}`, id),
     ).toThrow(/bound|receipt/i);
     const receiptId = Number(
       db.raw
@@ -231,12 +234,20 @@ describe('capability_obligations — immutability and transition whitelist', () 
         )
         .run(id, OBLIGATION.input_digest, OBLIGATION.source_digest).lastInsertRowid,
     );
+    // A completion proof that does not name the exact terminal record aborts.
     expect(() =>
       db.raw
         .prepare(
           'UPDATE capability_obligations SET state=?, capability_execution_receipt_id=?, completion_proof_id=? WHERE id=?',
         )
-        .run('completed', receiptId, 'terminal-proof-1', id),
+        .run('completed', receiptId, 'terminal-proof-arbitrary', id),
+    ).toThrow(/bound|receipt/i);
+    expect(() =>
+      db.raw
+        .prepare(
+          'UPDATE capability_obligations SET state=?, capability_execution_receipt_id=?, completion_proof_id=? WHERE id=?',
+        )
+        .run('completed', receiptId, `ttr:${terminalId}`, id),
     ).not.toThrow();
     // completed is terminal
     expect(() =>

@@ -26,7 +26,6 @@
  * The whole feature is all-or-inert: this module is only constructed when
  * `agentOptions.capabilityObligations` parsed with `enabled: true`.
  */
-import { createHash } from 'node:crypto';
 import { hostname, userInfo } from 'node:os';
 
 import type { CapabilityAttestationBinding } from '../../core/capability-attestation.ts';
@@ -42,7 +41,12 @@ import { cleanupUnreferencedMedia } from '../../core/obligation-media-retention.
 import { systemClock } from '../../lib/clock.ts';
 import { createChildLogger } from '../../logger.ts';
 import type { ExternalEffectDeclaration } from '../../mcp/external-effect.ts';
+import type { ToolDeclaration } from '../../mcp/types.ts';
 import { deriveCapabilityDecision as deriveDecisionForTurn } from './capability-obligation-decision.ts';
+import {
+  buildCapabilityExecutionTool,
+  type ActiveObligationExecution,
+} from './capability-obligation-execution-tool.ts';
 import {
   CapabilityObligationSupervisor,
   type ObligationDispatchOutcome,
@@ -104,6 +108,10 @@ export interface CapabilityObligationRuntimeDeps {
   externalEffectFor: (toolName: string) => ExternalEffectDeclaration | undefined;
   /** AS-04: registry tool-durability write-loss signal for the fold window. */
   writeLossSince: (sinceMs: number) => boolean;
+  /** Registers the trusted `execute_capability` tool (activation-scoped). */
+  registerTool: (tool: ToolDeclaration) => void;
+  /** Live logical turn id owning a conversation (shared correlation resolver). */
+  turnIdFor: (conversationKey: string) => string | null;
   scanIntervalMs?: number;
 }
 
@@ -125,73 +133,7 @@ export function turnCorrelationFromContexts(
   return null;
 }
 
-/**
- * D6 execution evidence: the resolver EMITS a structured marker line in its
- * result (`<evidenceMarker>{json}`); the receipt's source digest is DERIVED
- * from that evidence — media work must report the sha256 of the bytes it
- * actually processed, everything else the exact source it executed against.
- * Shell text is never inferred from. Absent/malformed evidence derives null,
- * which records as an error receipt and can never complete an obligation.
- */
-export function parseExecutionEvidence(
-  marker: string,
-  content: string,
-): { source?: unknown; mediaSha256?: unknown } | null {
-  const at = content.indexOf(marker);
-  if (at === -1) return null;
-  const line = content.slice(at + marker.length).split('\n', 1)[0] ?? '';
-  try {
-    const parsed = JSON.parse(line.trim()) as unknown;
-    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null;
-    return parsed as { source?: unknown; mediaSha256?: unknown };
-  } catch {
-    // intentional: malformed evidence is simply not evidence — the receipt
-    // records as error rather than guessing at what executed.
-    return null;
-  }
-}
 
-/**
- * Does a provider tool invocation EXECUTE the declared capability? Loading a
- * skill (the provider's Skill tool) is NOT execution — only an invocation of
- * the instance-declared execution tool whose input carries the declared marker
- * is tracked. This is only the TRACKING filter; proof comes from the
- * structured result evidence below.
- */
-export function matchesCapabilityExecution(
-  rule: CapabilityObligationsOptions['receipt'],
-  toolName: string,
-  toolInput: Record<string, unknown>,
-): boolean {
-  if (toolName !== rule.toolName) return false;
-  return Object.values(toolInput).some(
-    (value) => typeof value === 'string' && value.includes(rule.commandMarker),
-  );
-}
-
-/** Derive the observed source digest from parsed evidence, or null. */
-export function deriveObservedSourceDigest(
-  obligation: Pick<CapabilityObligationDueRow, 'retainedMediaPath'>,
-  evidence: { source?: unknown; mediaSha256?: unknown } | null,
-): string | null {
-  if (evidence === null) return null;
-  if (obligation.retainedMediaPath !== null) {
-    return typeof evidence.mediaSha256 === 'string' && /^[0-9a-f]{64}$/.test(evidence.mediaSha256)
-      ? evidence.mediaSha256
-      : null;
-  }
-  if (typeof evidence.source !== 'string' || evidence.source.length === 0) return null;
-  return createHash('sha256').update(evidence.source).digest('hex');
-}
-
-interface ActiveObligationTurn {
-  obligation: CapabilityObligationDueRow;
-  mintedMessageId: string;
-  fence: CapabilityObligationClaimFence;
-  attemptNumber: number;
-  /** toolId → toolName for capability-matching tool_use events seen this turn. */
-  pendingToolIds: Map<string, string>;
-}
 
 export class CapabilityObligationRuntime {
   readonly supervisor: CapabilityObligationSupervisor;
@@ -202,7 +144,7 @@ export class CapabilityObligationRuntime {
   private readonly externalEffectFor: (toolName: string) => ExternalEffectDeclaration | undefined;
   private readonly writeLossSince: (sinceMs: number) => boolean;
   private readonly scanIntervalMs: number;
-  private readonly activeTurns = new Map<string, ActiveObligationTurn>();
+  private readonly activeTurns = new Map<string, ActiveObligationExecution>();
   private scanTimer: ReturnType<typeof setTimeout> | null = null;
   private tickInFlight: Promise<unknown> | null = null;
   private closed = false;
@@ -215,6 +157,15 @@ export class CapabilityObligationRuntime {
     this.externalEffectFor = deps.externalEffectFor;
     this.writeLossSince = deps.writeLossSince;
     this.scanIntervalMs = deps.scanIntervalMs ?? OBLIGATION_SCAN_INTERVAL_MS;
+    // D6 trusted execution seam: receipts are written ONLY by this handler.
+    deps.registerTool(
+      buildCapabilityExecutionTool({
+        store: deps.store,
+        options: deps.options,
+        findActiveTurn: (conversationKey) => this.findActiveTurn(conversationKey),
+        turnIdFor: deps.turnIdFor,
+      }),
+    );
     this.supervisor = new CapabilityObligationSupervisor({
       db: deps.db,
       store: deps.store,
@@ -324,64 +275,14 @@ export class CapabilityObligationRuntime {
     this.scanTimer.unref?.();
   }
 
-  // ── D6 receipt recorder (provider stream tap) ─────────────────────────────
+  // ── D6 trusted execution lookup ───────────────────────────────────────────
 
-  /**
-   * The runtime's per-chat stream handler forwards typed tool events here.
-   * Only events on a mapKey with an active obligation-owned turn are examined;
-   * everything else is a no-op.
-   */
-  onStreamEvent(mapKey: string | undefined, event: AgentEvent, logicalTurnId?: string): void {
-    if (mapKey === undefined) return;
-    const active = this.activeTurns.get(mapKey);
-    if (active === undefined) return;
-    if (event.type === 'tool_use') {
-      if (matchesCapabilityExecution(this.options.receipt, event.toolName, event.toolInput)) {
-        active.pendingToolIds.set(event.toolId, event.toolName);
-      }
-      return;
+  /** The active obligation-owned turn for a conversation, if any. */
+  findActiveTurn(conversationKey: string): ActiveObligationExecution | null {
+    for (const active of this.activeTurns.values()) {
+      if (active.obligation.conversationKey === conversationKey) return active;
     }
-    if (event.type !== 'tool_result') return;
-    const toolName = active.pendingToolIds.get(event.toolId);
-    if (toolName === undefined) return;
-    active.pendingToolIds.delete(event.toolId);
-    // D6 item 3: an 'ok' receipt needs a non-error result, the declared
-    // minimum of output, AND structured evidence whose DERIVED source digest
-    // reproduces the obligation's — never inference from shell text.
-    const evidence = parseExecutionEvidence(this.options.receipt.evidenceMarker, event.content);
-    const derivedSourceDigest = deriveObservedSourceDigest(active.obligation, evidence);
-    const evidentOk =
-      !event.isError
-      && event.content.length >= this.options.receipt.minOutputBytes
-      && derivedSourceDigest !== null
-      && derivedSourceDigest === active.obligation.sourceDigest;
-    try {
-      this.store.recordExecutionReceipt({
-        obligationId: active.obligation.id,
-        // Prefer the live runtime turn identity; the minted inbound id is the
-        // deterministic fallback correlate for the same turn.
-        logicalTurnId: logicalTurnId ?? active.mintedMessageId,
-        toolUseId: event.toolId,
-        skillName: this.options.attestation.skillName,
-        contractVersion: active.obligation.contractVersion,
-        inputDigest: active.obligation.inputDigest,
-        mediaDigest: active.obligation.mediaSha256,
-        resultStatus: evidentOk ? 'ok' : 'error',
-        outputEvidence: {
-          toolName,
-          contentBytes: event.content.length,
-          isError: event.isError,
-          evidencePresent: evidence !== null,
-        },
-        sourceDigest: derivedSourceDigest,
-        claimEpoch: active.fence.claimEpoch,
-        attemptNumber: active.attemptNumber,
-      });
-    } catch (err) {
-      // Never crash the stream loop; a missing receipt fails CLOSED (the
-      // obligation cannot complete without one — it quarantines instead).
-      log.error({ err, obligationId: active.obligation.id }, 'execution receipt persistence failed');
-    }
+    return null;
   }
 
   // ── ports ─────────────────────────────────────────────────────────────────
@@ -408,13 +309,7 @@ export class CapabilityObligationRuntime {
       return 'retryable';
     }
     const mapKey = this.resolveRecorderKey(obligation.deliveryJid);
-    this.activeTurns.set(mapKey, {
-      obligation,
-      mintedMessageId,
-      fence,
-      attemptNumber,
-      pendingToolIds: new Map(),
-    });
+    this.activeTurns.set(mapKey, { obligation, mintedMessageId, fence, attemptNumber });
     try {
       return await deps.dispatchTurn(obligation, mintedMessageId, mintedSeq);
     } finally {

@@ -250,8 +250,11 @@ describe('settlement (D6)', () => {
                    'replied', 'completed', 'echoed', 424242, 0)`,
       )
       .run(seq, seq);
+    const terminalId = Number(
+      (db.raw.prepare('SELECT id FROM turn_terminal_records WHERE inbound_seq = ?').get(seq) as { id: number }).id,
+    );
     const { supervisor } = makeSupervisor({
-      settlement: new Map([[id, { kind: 'completed', executionReceiptId: receiptId, completionProofId: 'wt-1' }]]),
+      settlement: new Map([[id, { kind: 'completed', executionReceiptId: receiptId, completionProofId: `ttr:${terminalId}` }]]),
     });
     const report = await supervisor.tick();
     expect(report.settled).toEqual([id]);

@@ -243,26 +243,24 @@ const attestationExpectationSchema = z.object({
 });
 
 /**
- * What counts as capability EXECUTION for D6 receipts. Loading a skill is not
- * execution: the receipt records only an invocation of the declared execution
- * tool whose input carries the declared marker, and an 'ok' result additionally
- * requires the declared minimum of output evidence.
+ * D6 trusted execution (capability-obligation replay): receipts are written
+ * ONLY by the in-process `execute_capability` tool handler, which spawns this
+ * declared resolver argv itself, derives the observed source digest from what
+ * IT executed (never from model-controlled text), and validates the typed
+ * outcome (exit code + minimum output evidence).
  */
-const receiptRuleSchema = z.object({
-  /** Provider tool whose invocation IS capability execution (e.g. 'Bash'). */
-  toolName: z.string().min(1),
-  /** Substring that must appear in a string field of the invocation input. */
-  commandMarker: z.string().min(1),
-  /** Minimum non-error output bytes for an 'ok' receipt. */
-  minOutputBytes: z.number().int().positive(),
-  /**
-   * Structured-evidence marker the resolver EMITS in its result (e.g.
-   * 'WATCH_EVIDENCE:'). The remainder of that line must be JSON carrying the
-   * observed `source` (and `mediaSha256` for media work); the receipt's source
-   * digest is DERIVED from it — never inferred from shell text.
-   */
-  evidenceMarker: z.string().min(1),
-});
+const executionRuleSchema = z
+  .object({
+    /** Resolver argv; the literal '{source}' argument is replaced with the validated source. */
+    command: z.array(z.string().min(1)).nonempty(),
+    /** Hard wall-clock bound on the resolver child process. */
+    timeoutMs: z.number().int().positive().max(600_000),
+    /** Minimum resolver stdout bytes for an 'ok' receipt. */
+    minOutputBytes: z.number().int().positive(),
+  })
+  .refine((rule) => rule.command.some((part) => part.includes('{source}')), {
+    message: "execution.command must reference the '{source}' placeholder",
+  });
 
 const capabilityObligationsOptionsSchema = z.object({
   enabled: z.literal(true),
@@ -277,7 +275,7 @@ const capabilityObligationsOptionsSchema = z.object({
    * unrepresentable.
    */
   retentionHorizonDays: z.number().int().positive().max(365),
-  receipt: receiptRuleSchema,
+  execution: executionRuleSchema,
   attestation: attestationExpectationSchema,
 });
 

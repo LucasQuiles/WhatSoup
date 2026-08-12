@@ -29,7 +29,7 @@ afterEach(() => {
 
 // D6: settlement additionally requires the minted turn's terminal record to
 // name the receipt's logical turn — seed both halves of that chain.
-function seedMintedTurnTerminal(obligationId: number, attempt: number, logicalTurnId: string): void {
+function seedMintedTurnTerminal(obligationId: number, attempt: number, logicalTurnId: string): number {
   const seq = Number(
     db.raw
       .prepare(
@@ -48,6 +48,9 @@ function seedMintedTurnTerminal(obligationId: number, attempt: number, logicalTu
                  'replied', 'completed', 'echoed', 424242, 0)`,
     )
     .run(seq, seq, logicalTurnId);
+  return Number(
+    (db.raw.prepare('SELECT id FROM turn_terminal_records WHERE inbound_seq = ?').get(seq) as { id: number }).id,
+  );
 }
 
 function seedObligation(over: Partial<Record<string, unknown>> = {}): number {
@@ -156,10 +159,10 @@ describe('fenced settlement', () => {
       attemptNumber: claim.attemptCount,
       sourceDigest: 'bb'.repeat(32),
     });
-    seedMintedTurnTerminal(id, claim.attemptCount, 'turn-1');
+    const terminalId = seedMintedTurnTerminal(id, claim.attemptCount, 'turn-1');
     const settled = store.settleCompleted(id, fence, {
       executionReceiptId: receiptId,
-      completionProofId: 'terminal-proof-9',
+      completionProofId: `ttr:${terminalId}`,
     });
     expect(settled.applied).toBe(true);
     const row = db.raw
@@ -167,7 +170,7 @@ describe('fenced settlement', () => {
       .get(id) as Record<string, unknown>;
     expect(row.state).toBe('completed');
     expect(row.capability_execution_receipt_id).toBe(receiptId);
-    expect(row.completion_proof_id).toBe('terminal-proof-9');
+    expect(row.completion_proof_id).toBe(`ttr:${terminalId}`);
   });
 });
 

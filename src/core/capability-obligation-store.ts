@@ -454,9 +454,18 @@ export class CapabilityObligationStore {
                JOIN inbound_events ie ON ie.seq = t.inbound_seq
                WHERE ie.message_id = 'obl:' || o.id || ':' || o.attempt_count
                  AND t.logical_turn_id = r.logical_turn_id
+                 AND t.delivery_kind = 'echoed'
+                 AND t.delivery_op_id IS NOT NULL
+                 AND ? = 'ttr:' || t.id
              )`,
         )
-        .get(proofs.executionReceiptId, id, fence.claimToken, fence.claimEpoch);
+        .get(
+          proofs.executionReceiptId,
+          id,
+          fence.claimToken,
+          fence.claimEpoch,
+          proofs.completionProofId,
+        );
       if (bound === undefined) return { applied: false, reason: 'receipt_binding_mismatch' as const };
       const row = this.db.raw
         .prepare(

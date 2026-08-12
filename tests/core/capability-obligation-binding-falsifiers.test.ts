@@ -199,6 +199,50 @@ describe('D6 falsifier — settlement receipts are obligation- and attempt-bound
     expect(settled.applied).toBe(false);
   });
 
+  it('FALSIFIER: an unproven-delivery terminal (kind!=echoed / null op / arbitrary proof) cannot settle', () => {
+    const id = seedObligation({ sourceInboundSeq: 3004, sourceMessageId: 'TESTMSG-BIND-4' });
+    const fence = claimIt(id);
+    const receiptId = store.recordExecutionReceipt({
+      obligationId: id,
+      logicalTurnId: 'turn-d',
+      toolUseId: 'tu-d',
+      skillName: 'watch',
+      contractVersion: 'test-contract/1',
+      inputDigest: INPUT_DIGEST,
+      mediaDigest: null,
+      resultStatus: 'ok',
+      outputEvidence: null,
+      claimEpoch: fence.claimEpoch,
+      attemptNumber: fence.attemptCount,
+      sourceDigest: 'bb'.repeat(32),
+    });
+    // The minted turn terminalized WITHOUT proven delivery.
+    const seq = Number(
+      db.raw
+        .prepare(
+          `INSERT INTO inbound_events (message_id, conversation_key, chat_jid, routed_to)
+           VALUES (?, 'conv-bind', 'test-dm-target@lid', 'agent')`,
+        )
+        .run(`obl:${id}:${fence.attemptCount}`).lastInsertRowid,
+    );
+    db.raw
+      .prepare(
+        `INSERT INTO turn_terminal_records (
+           scope, conversation_key, delivery_jid, inbound_seq, inbound_seq_key,
+           logical_turn_id, manager_id, generation, attempt_kind,
+           inbound_disposition, delivery_kind, delivery_op_id, reply_guarantee_disarmed
+         ) VALUES ('per_chat', 'conv-bind', 'test-dm-target@lid', ?, ?, 'turn-d', 'mgr-1', 1,
+                   'replied', 'failed_terminal', 'none', NULL, 0)`,
+      )
+      .run(seq, seq);
+    const settled = store.settleCompleted(id, fence, {
+      executionReceiptId: receiptId,
+      completionProofId: 'arbitrary-non-null',
+    });
+    expect(settled.applied).toBe(false);
+    expect(stateOf(id)).toBe('claimed');
+  });
+
   it('raw SQL cannot complete with a cross-obligation receipt: the schema itself refuses', () => {
     const victim = seedObligation();
     const other = seedObligation({ sourceInboundSeq: 3003, sourceMessageId: 'TESTMSG-BIND-3' });

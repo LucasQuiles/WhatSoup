@@ -316,12 +316,17 @@ export function runMigration57(db: DatabaseSync): void {
             AND r.input_digest = NEW.input_digest
             AND r.source_digest = NEW.source_digest
             AND (NEW.media_sha256 IS NULL OR r.media_digest = NEW.media_sha256)
-            -- The receipt's turn must be the MINTED turn that terminalized.
+            -- The receipt's turn must be the MINTED turn that terminalized,
+            -- with PROVEN echoed delivery, and the completion proof must name
+            -- that exact terminal record.
             AND EXISTS (
               SELECT 1 FROM turn_terminal_records t
               JOIN inbound_events ie ON ie.seq = t.inbound_seq
               WHERE ie.message_id = 'obl:' || NEW.id || ':' || NEW.attempt_count
                 AND t.logical_turn_id = r.logical_turn_id
+                AND t.delivery_kind = 'echoed'
+                AND t.delivery_op_id IS NOT NULL
+                AND NEW.completion_proof_id = 'ttr:' || t.id
             )
         )
       )

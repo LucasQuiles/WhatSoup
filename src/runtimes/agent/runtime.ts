@@ -2873,6 +2873,8 @@ export class AgentRuntime implements Runtime {
         resolveMapKey: (jid) => this.resolvePerChatMapKey(jid),
         externalEffectFor: (name) => this.registry.externalEffectDeclaration(name),
         writeLossSince: (ms) => this.registry.hadDurabilityWriteLossSince(ms),
+        registerTool: (tool) => this.registry.register(tool),
+        turnIdFor: (ck) => turnCorrelationFromContexts(this.perChatRuntimeTurnContexts, ck)?.logicalTurnId ?? null,
       });
     }
   }
@@ -5293,11 +5295,6 @@ export class AgentRuntime implements Runtime {
     return { scope: 'per_chat', mapKey, managerId, generation: owner.generation, session };
   }
 
-  /** Obligation-owned turn identity for the D6 receipt tap. */
-  private obligationTurnIdFor(mapKey: string | undefined): string | undefined {
-    return mapKey === undefined ? undefined : this.perChatRuntimeTurnContexts.get(mapKey)?.[0]?.identity.logicalTurnId;
-  }
-
   private isTurnRecoveryDispatchTargetCurrent(target: TurnRecoveryDispatchTarget): boolean {
     const session = target.session as SessionManager;
     if (target.scope !== 'per_chat') {
@@ -6200,9 +6197,6 @@ export class AgentRuntime implements Runtime {
           break;
         }
         if (this.isSilentCompact(mapKey)) break;
-        // D6 receipt tap AFTER the phantom/compact gates: a suppressed provider
-        // event must never seed receipt tracking.
-        this.capabilityObligationRuntime?.onStreamEvent(mapKey, event, this.obligationTurnIdFor(mapKey));
 
         if (mapKey !== undefined && this.pendingSystemResults.count(mapKey) === 0) {
           const contexts = this.perChatRuntimeTurnContexts.get(mapKey);
@@ -6249,7 +6243,6 @@ export class AgentRuntime implements Runtime {
         session?.trackToolEnd(event.toolId);
         session?.tickWatchdog();
         tracker?.onToolEnd(event.toolId);
-        this.capabilityObligationRuntime?.onStreamEvent(mapKey, event, this.obligationTurnIdFor(mapKey));
 
         // Suppress the auto-resolved "Answer questions?" error for AskUserQuestion
         if (this.suppressedAskUserToolIds.has(event.toolId)) {

@@ -39,7 +39,7 @@ const OPTIONS = parseCapabilityObligationsOptions({
   mediaRoot: '/unused-parse-time-root',
   retentionPolicyVersion: 'policy/1',
   retentionHorizonDays: 30,
-  receipt: { toolName: 'Bash', commandMarker: 'watch.py', minOutputBytes: 8, evidenceMarker: 'WATCH_EVIDENCE:' },
+  execution: { command: ['node', '-e', 'console.log(process.argv[1])', '{source}'], timeoutMs: 30_000, minOutputBytes: 8 },
   attestation: {
     skillName: 'watch',
     skillVersion: '1.0.0',
