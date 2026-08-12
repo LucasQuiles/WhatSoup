@@ -264,9 +264,9 @@ export async function executeBackfill(
   if (skipped.length > 0) return done(true);
   if (prepared.length === 0) return done(false);
 
-  // ---- STAGE B — acquire the write lock. This IS the quiescence gate: if the bot
-  // holds it, BEGIN IMMEDIATE fails fast (busy_timeout=0) and the run is refused.
-  db.raw.exec('PRAGMA busy_timeout = 0');
+  // ---- STAGE B — acquire the write lock. This IS the quiescence gate: if a
+  // concurrent writer holds it, BEGIN IMMEDIATE is refused (the fast-fail
+  // assertQuiescent pre-check already caught the common bot-running case).
   db.raw.exec('BEGIN IMMEDIATE');
   let committed = false;
   try {
@@ -354,9 +354,10 @@ function isSqliteFile(path: string): boolean {
  *  under that lock. It detects a current writer; it does NOT prove the bot process
  *  is stopped (operator-attested). */
 function assertQuiescent(dbPath: string): void {
+  // A fresh DatabaseSync connection does not inherit the app's busy-timeout, so
+  // BEGIN IMMEDIATE fails immediately when the write lock is held (no PRAGMA needed).
   const raw = new DatabaseSync(dbPath);
   try {
-    raw.exec('PRAGMA busy_timeout = 0');
     raw.exec('BEGIN IMMEDIATE');
     raw.exec('ROLLBACK');
   } catch (err) {
