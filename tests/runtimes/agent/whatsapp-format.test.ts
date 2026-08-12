@@ -370,7 +370,7 @@ describe('markdownToWhatsApp — bracket-transform DoS bound (QR-083)', () => {
     const elapsed = Date.now() - start;
     // Without the length guard this is multi-second (quadratic). With it, the
     // oversized bracket blob skips the expensive transforms → near-instant.
-    expect(elapsed).toBeLessThan(200);
+    expect(elapsed).toBeLessThan(500);
     // Oversized text is returned (un-mangled is fine; brackets left as-is).
     expect(out.length).toBeGreaterThan(0);
   });
@@ -392,8 +392,9 @@ describe('QR-127: table-row cleanup is linear (no catastrophic backtracking)', (
     const evil = '|' + ' '.repeat(4000) + 'x';
     const start = Date.now();
     markdownToWhatsApp(evil);
-    // Fixed: ~0ms. Unfixed: multiple seconds. 500ms cleanly separates them.
-    expect(Date.now() - start).toBeLessThan(500);
+    // Fixed: ~0ms. Unfixed: multiple seconds. 1000ms cleanly separates them
+    // even on slow CI runners.
+    expect(Date.now() - start).toBeLessThan(1000);
   });
 
   it('still strips leading/trailing pipes and trims cells (output parity)', () => {

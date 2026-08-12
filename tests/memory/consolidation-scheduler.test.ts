@@ -14,8 +14,6 @@ import { MemoryConsolidationScheduler } from '../../src/memory/consolidation-sch
 import { ConsolidationRunStore } from '../../src/memory/consolidation-run-store.ts';
 import type { LLMProvider } from '../../src/runtimes/chat/providers/types.ts';
 
-vi.useFakeTimers();
-
 function okSearch(results: unknown[] = []) {
   return {
     results,
@@ -43,6 +41,7 @@ describe('MemoryConsolidationScheduler', () => {
   };
 
   beforeEach(() => {
+    vi.useFakeTimers();
     vi.clearAllMocks();
     vi.setSystemTime(new Date('2026-07-28T12:00:00.000Z'));
     db = new Database(':memory:');
@@ -57,6 +56,7 @@ describe('MemoryConsolidationScheduler', () => {
 
   afterEach(() => {
     vi.clearAllTimers();
+    vi.useRealTimers();
     db.close();
   });
 

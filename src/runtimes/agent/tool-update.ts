@@ -53,8 +53,8 @@ export function buildToolUpdate(toolName: string, input: Record<string, unknown>
 
   /** Strip home-dir prefixes, make relative, and middle-truncate to 80 chars. */
   function shortPath(p: string): string {
-    // Strip any /home/<user>/ prefix to avoid leaking absolute paths
-    const rel = p.replace(/^\/home\/[^/]+\//, '~/').replace(/^~\/LAB\/[^/]+\//, '');
+    // Strip any /home/<user>/ or /Users/<user>/ prefix to avoid leaking absolute paths
+    const rel = p.replace(/^\/(home|Users)\/[^/]+\//, '~/').replace(/^~\/LAB\/[^/]+\//, '');
     if (rel.length <= 80) return rel;
     const half = 38;
     return rel.slice(0, half) + '…' + rel.slice(-(80 - half - 1));

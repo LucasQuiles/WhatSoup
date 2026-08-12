@@ -21,6 +21,8 @@ import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vite
 import { ToastContext, type ToastContextValue } from '../../console/src/hooks/toast-context.js'
 import type { ContactResult, GroupDetail, GroupInfo } from '../../console/src/types.js'
 
+const _origNavClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+
 // ---- Mocks ----
 
 const getGroupDetailMock = vi.fn()
@@ -227,6 +229,11 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  if (_origNavClipboard) {
+    Object.defineProperty(navigator, 'clipboard', _origNavClipboard);
+  } else {
+    delete (navigator as unknown as Record<string, unknown>).clipboard;
+  }
   getGroupDetailMock.mockReset()
   getGroupInviteLinkMock.mockReset()
   leaveGroupMock.mockReset()

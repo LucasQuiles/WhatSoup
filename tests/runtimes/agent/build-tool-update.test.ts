@@ -247,6 +247,11 @@ describe('buildToolUpdate — shortPath and trunc helpers', () => {
     expect(u.detail).toBe('`~/notes.txt`');
   });
 
+  it('strips a /Users/<user>/ prefix like /home to ~/', () => {
+    const u = buildToolUpdate('Edit', { file_path: '/Users/testuser/notes.txt' });
+    expect(u.detail).toBe('`~/notes.txt`');
+  });
+
   it('strips a ~/LAB/<project>/ prefix entirely (via the /home + LAB rewrite)', () => {
     const u = buildToolUpdate('Edit', {
       file_path: '/home/testuser/LAB/WhatSoup/src/runtimes/agent/runtime.ts',

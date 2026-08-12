@@ -7,9 +7,16 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import FeedCard from '../../console/src/components/FeedCard'
 import type { FeedEvent } from '../../console/src/types'
 
+const _origNavClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+
 afterEach(() => {
   cleanup()
   vi.restoreAllMocks()
+  if (_origNavClipboard) {
+    Object.defineProperty(navigator, 'clipboard', _origNavClipboard);
+  } else {
+    delete (navigator as unknown as Record<string, unknown>).clipboard;
+  }
 })
 
 function event(overrides: Partial<FeedEvent> = {}): FeedEvent {
