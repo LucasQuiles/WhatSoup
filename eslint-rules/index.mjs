@@ -20,6 +20,7 @@ import requireCatchJustification from './require-catch-justification.mjs';
 import noRawFleetError from './no-raw-fleet-error.mjs';
 import fetchTimeout from './fetch-timeout.mjs';
 import syncExecTimeout from './sync-exec-timeout.mjs';
+import dbReadPrefix from './db-read-prefix.mjs';
 
 /** @type {import('eslint').ESLint.Plugin} */
 const plugin = {
@@ -38,6 +39,7 @@ const plugin = {
     'no-raw-fleet-error': noRawFleetError,
     'fetch-timeout': fetchTimeout,
     'sync-exec-timeout': syncExecTimeout,
+    'db-read-prefix': dbReadPrefix,
   },
 };
 

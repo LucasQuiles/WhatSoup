@@ -195,6 +195,19 @@ const config = [
       'fitness/no-raw-fleet-error': 'warn',
     },
   },
+  {
+    // src: DB-read helpers must use `get` prefix, not `load`/`fetch` (#2213).
+    files: ['src/**/*.ts'],
+    linterOptions,
+    languageOptions: {
+      parser: tseslint.parser,
+      parserOptions: { ecmaVersion: 2024, sourceType: 'module' },
+    },
+    plugins,
+    rules: {
+      'fitness/db-read-prefix': 'warn',
+    },
+  },
 ];
 
 export default config;

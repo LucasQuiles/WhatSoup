@@ -99,6 +99,13 @@ export const BASELINE_REGISTRY: readonly RegisteredBaseline[] = [
     tolerates: 'inherited catch blocks that swallow failures without meaningful handling',
   },
   {
+    id: 'db-read-prefix',
+    path: 'eslint-rules/db-read-prefix-baseline.json',
+    shape: 'entry-array',
+    initialWeight: 0,
+    tolerates: 'nothing — the get-prefix ratchet starts and must stay at zero (#2213)',
+  },
+  {
     id: 'tmpdir',
     path: '.claude/fitness/tmpdir-baseline.json',
     shape: 'entry-array',
