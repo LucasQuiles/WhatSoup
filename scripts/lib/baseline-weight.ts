@@ -129,6 +129,23 @@ export class BaselineShapeError extends Error {
   }
 }
 
+/**
+ * An entry-array baseline is either the legacy bare array or the
+ * schemaVersion-2 wrapper `{ schemaVersion, entries: [...] }` (adopted by
+ * loggermock in QC-2 of #2977). Both forms must stay weighable under one
+ * shape id: the growth guard weighs the MERGE BASE file with the
+ * candidate's code, so a hard cutover would turn every legacy base into
+ * COULD-NOT-LOOK the moment a baseline migrates.
+ */
+function entryArrayEntries(doc: unknown): unknown[] {
+  if (Array.isArray(doc)) return doc;
+  if (doc !== null && typeof doc === 'object') {
+    const entries = (doc as { entries?: unknown }).entries;
+    if (Array.isArray(entries)) return entries;
+  }
+  throw new BaselineShapeError('expected an array of baseline entries');
+}
+
 function sumNumericValues(record: unknown, where: string): number {
   if (record === null || typeof record !== 'object' || Array.isArray(record)) {
     throw new BaselineShapeError(`${where}: expected an object of numeric counts`);
@@ -154,10 +171,7 @@ function sumNumericValues(record: unknown, where: string): number {
 export function weighBaseline(shape: BaselineShape, doc: unknown): number {
   switch (shape) {
     case 'entry-array': {
-      if (!Array.isArray(doc)) {
-        throw new BaselineShapeError('expected an array of baseline entries');
-      }
-      return doc.length;
+      return entryArrayEntries(doc).length;
     }
 
     case 'single-array-object': {
@@ -263,10 +277,7 @@ export function baselineIdentities(
   doc: unknown,
 ): string[] | undefined {
   if (shape !== 'entry-array') return undefined;
-  if (!Array.isArray(doc)) {
-    throw new BaselineShapeError('expected an array of baseline entries');
-  }
-  return doc.map(canonicalJson);
+  return entryArrayEntries(doc).map(canonicalJson);
 }
 
 export interface WeighedBaseline {

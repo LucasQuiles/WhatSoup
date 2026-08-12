@@ -41,6 +41,15 @@ describe('weighBaseline — one number per shape, higher means more tolerated de
     expect(weigh('entry-array', [])).toBe(0);
   });
 
+  it('entry-array also accepts the schemaVersion-2 wrapper (loggermock after QC-2)', () => {
+    // The growth guard weighs the MERGE BASE file with the candidate's
+    // code, so both the legacy bare array and the v2 wrapper must weigh
+    // under the one registered shape during a migration.
+    expect(weigh('entry-array', { schemaVersion: 2, entries: [{ file: 'a', status: 'debt', reason: 'r' }] })).toBe(1);
+    expect(weigh('entry-array', { schemaVersion: 2, entries: [] })).toBe(0);
+    expect(() => weigh('entry-array', { schemaVersion: 2, entries: 'nope' })).toThrow(/expected an array/i);
+  });
+
   it('single-array-object baselines weigh the wrapped array, whatever its key', () => {
     // .claude/test-integrity/baseline.json uses `findings`; service-units-baseline.json
     // uses `grandfathered` alongside a `_comment` string. Keying on the SHAPE rather than
