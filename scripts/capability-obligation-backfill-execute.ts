@@ -45,7 +45,6 @@ import { capabilityInputDigest } from '../src/core/capability-contract.ts';
 import { CapabilityObligationStore } from '../src/core/capability-obligation-store.ts';
 import { Database } from '../src/core/database.ts';
 import { CURRENT_SCHEMA_MIGRATION } from '../src/core/database-schema-version.ts';
-import { withTransaction } from '../src/core/db-tx.ts';
 import { retainMediaForObligation } from '../src/core/obligation-media-retention.ts';
 import {
   classifyRecoveryFulfillment,
@@ -85,8 +84,19 @@ function snapshotRecovery(db: Database, seqs: readonly number[]): string {
   return JSON.stringify(rows);
 }
 
+interface RecoveryBind {
+  recoveryJobId: number;
+  sourceInboundSeq: number;
+  sourceMessageId: string;
+  conversationKey: string;
+  deliveryJid: string;
+  classification: NonNullable<BackfillDescriptor['fulfillmentClassification']>;
+}
 interface PreparedInsert {
   sourceInboundSeq: number;
+  bind: RecoveryBind;
+  contractVersion: string;
+  requiredCapability: string;
   obligation: Parameters<CapabilityObligationStore['applyDecisionWithinCallerTransaction']>[0]['obligation'];
 }
 
@@ -102,7 +112,7 @@ export async function executeBackfill(
     skillName: string;
     /** Preview only — run all checks but insert nothing (no media retained either). */
     dryRun?: boolean;
-    /** Invoked at the START of the commit transaction (F5) — throw to abort with rollback. */
+    /** F1 — invoked INSIDE the write lock before commit; throw to abort with rollback. */
     preCommitAssert?: () => void;
   },
 ): Promise<BackfillExecuteResult> {
@@ -132,7 +142,14 @@ export async function executeBackfill(
     `SELECT id FROM capability_obligations
      WHERE source_inbound_seq = ? AND source_message_id = ? AND contract_version = ? AND required_capability = ?`,
   );
+  const done = (abortedForSkips: boolean): BackfillExecuteResult => ({
+    digestVerified: true, recomputedDigest, created, wouldCreate, alreadyExisted, skipped,
+    abortedForSkips, recoveryRowsUnchanged: recoveryBefore === snapshotRecovery(db, seqs),
+  });
 
+  // ---- STAGE A (UNLOCKED, async): validate, retain+reverify media, build prepared[].
+  // The recovery/idempotency reads here are a first pass (for reporting + dry-run);
+  // they are RE-RUN authoritatively inside the lock in stage C.
   for (const d of params.eligible) {
     if (
       !d.eligible || d.requiredCapability === undefined || d.contractVersion === undefined
@@ -142,27 +159,25 @@ export async function executeBackfill(
       skipped.push({ sourceInboundSeq: d.sourceInboundSeq, reason: 'descriptor_not_eligible' });
       continue;
     }
-    // 1. F2 — prove prior non-fulfilment against the EXACT reviewer-classified job.
-    const recoveryReason = classifyRecoveryFulfillment(db.raw, {
+    const bind: RecoveryBind = {
       recoveryJobId: d.recoveryJobId,
       sourceInboundSeq: d.sourceInboundSeq,
       sourceMessageId: d.sourceMessageId,
       conversationKey: d.conversationKey,
       deliveryJid: d.deliveryJid,
       classification: d.fulfillmentClassification,
-    });
+    };
+    const recoveryReason = classifyRecoveryFulfillment(db.raw, bind);
     if (recoveryReason !== null) {
       skipped.push({ sourceInboundSeq: d.sourceInboundSeq, reason: recoveryReason });
       continue;
     }
-    // 2. Idempotency: an obligation for this key already exists → no-op.
     const existing = existsStmt.get(d.sourceInboundSeq, d.sourceMessageId, d.contractVersion, d.requiredCapability) as
       | { id: number } | undefined;
     if (existing !== undefined) {
       alreadyExisted.push(existing.id);
       continue;
     }
-    // 3. Read the CURRENT message.
     const msg = msgStmt.get(d.sourceMessageId) as
       | { content: string | null; media_path: string | null; sender_jid: string; sender_name: string | null }
       | undefined;
@@ -170,15 +185,13 @@ export async function executeBackfill(
       skipped.push({ sourceInboundSeq: d.sourceInboundSeq, reason: 'message_not_found' });
       continue;
     }
-    // 4. F3 — RE-VERIFY the input digest against the CURRENT message. A post-approval
-    //    edit to the replayed instruction changes the digest and is refused.
+    // F3 — RE-VERIFY the input digest against the CURRENT message.
     const currentInputDigest = capabilityInputDigest({ text: msg.content ?? '', preparedMediaClass: d.preparedMediaClass ?? null });
     if (currentInputDigest !== d.inputDigest) {
       skipped.push({ sourceInboundSeq: d.sourceInboundSeq, reason: 'input_reverify_failed' });
       continue;
     }
-    // 5. Media: REVERIFY against the approved descriptor. Dry-run is a read-only
-    //    hash compare (no retention); a confirmed run retains (copy/fsync/rehash).
+    // Media: REVERIFY. Dry-run is a read-only hash compare; a confirmed run retains.
     let retainedMedia: { path: string; sha256: string; bytes: number; policyVersion: string } | null = null;
     if (d.mediaSha256 != null) {
       if (msg.media_path == null) {
@@ -218,6 +231,9 @@ export async function executeBackfill(
     }
     prepared.push({
       sourceInboundSeq: d.sourceInboundSeq,
+      bind,
+      contractVersion: d.contractVersion,
+      requiredCapability: d.requiredCapability,
       obligation: {
         sourceInboundSeq: d.sourceInboundSeq,
         sourceMessageId: d.sourceMessageId,
@@ -243,34 +259,51 @@ export async function executeBackfill(
     });
   }
 
-  // F2/r10 — TRUE ATOMICITY over the approved set. If any approved entry hard-failed,
-  // commit NOTHING (a partial backfill is never acceptable). alreadyExisted is an
-  // idempotent no-op and does not block.
-  if (!dryRun && skipped.length > 0) {
-    return {
-      digestVerified: true, recomputedDigest, created: [], wouldCreate, alreadyExisted, skipped,
-      abortedForSkips: true, recoveryRowsUnchanged: recoveryBefore === snapshotRecovery(db, seqs),
-    };
-  }
+  if (dryRun) return done(false);
+  // TRUE ATOMICITY — any hard skip commits NOTHING (no lock needed; nothing to write).
+  if (skipped.length > 0) return done(true);
+  if (prepared.length === 0) return done(false);
 
-  if (!dryRun && prepared.length > 0) {
-    withTransaction(db, () => {
-      // F5 — concurrent-write re-check inside the commit transaction.
-      params.preCommitAssert?.();
-      for (const p of prepared) {
-        const { obligationId } = store.applyDecisionWithinCallerTransaction({
-          auditEvent: { action: 'obligation.create', actorType: 'operator', reasonCode: 'reviewed_backfill' },
-          obligation: p.obligation,
-        });
-        if (obligationId != null) created.push(obligationId);
+  // ---- STAGE B — acquire the write lock. This IS the quiescence gate: if the bot
+  // holds it, BEGIN IMMEDIATE fails fast (busy_timeout=0) and the run is refused.
+  db.raw.exec('PRAGMA busy_timeout = 0');
+  db.raw.exec('BEGIN IMMEDIATE');
+  let committed = false;
+  try {
+    // ---- STAGE C (SYNCHRONOUS, under the lock):
+    // 3a. F1 — backup-verify uses a WAL-aware file-set snapshot WHILE holding the
+    //     write lock, so a concurrent WAL commit before we locked is caught and no
+    //     new write can land during the critical section.
+    params.preCommitAssert?.();
+    // 3b. Re-run recovery + idempotency under the lock (TOCTOU): the stage-A reads
+    //     are advisory; only these authoritative re-checks gate the insert.
+    for (const p of prepared) {
+      const recovered = classifyRecoveryFulfillment(db.raw, p.bind);
+      const existsNow = existsStmt.get(p.sourceInboundSeq, p.obligation.sourceMessageId, p.contractVersion, p.requiredCapability);
+      if (recovered !== null || existsNow !== undefined) {
+        db.raw.exec('ROLLBACK');
+        committed = true; // finally must not double-rollback
+        skipped.push({ sourceInboundSeq: p.sourceInboundSeq, reason: 'state_changed_under_lock' });
+        return done(true);
       }
-    });
+    }
+    // 3c. Inserts + commit — all-or-nothing.
+    for (const p of prepared) {
+      const { obligationId } = store.applyDecisionWithinCallerTransaction({
+        auditEvent: { action: 'obligation.create', actorType: 'operator', reasonCode: 'reviewed_backfill' },
+        obligation: p.obligation,
+      });
+      if (obligationId != null) created.push(obligationId);
+    }
+    db.raw.exec('COMMIT');
+    committed = true;
+  } finally {
+    if (!committed) {
+      try { db.raw.exec('ROLLBACK'); } catch { /* best-effort */ }
+    }
   }
 
-  return {
-    digestVerified: true, recomputedDigest, created, wouldCreate, alreadyExisted, skipped,
-    abortedForSkips: false, recoveryRowsUnchanged: recoveryBefore === snapshotRecovery(db, seqs),
-  };
+  return done(false);
 }
 
 // ---------------------------------------------------------------------------
@@ -310,21 +343,20 @@ export function dbFileSetHash(path: string): string {
   return h.digest('hex');
 }
 
-/** sha256 of the main db file only — stable across a read-only connection's transient -wal. */
-function mainFileHash(path: string): string {
-  return createHash('sha256').update(readFileSync(path)).digest('hex');
-}
-
 function isSqliteFile(path: string): boolean {
   return readFileSync(path).subarray(0, 16).toString('latin1').startsWith('SQLite format 3');
 }
 
-/** Point-in-time quiescence: BEGIN IMMEDIATE acquires the write lock only if no
- *  other connection (the bot) holds it. Busy/locked → refuse. NOTE: this detects
- *  a current writer; it does NOT prove the bot process is stopped. */
+/** Fast-fail quiescence PRE-CHECK: a `BEGIN IMMEDIATE` that fails immediately
+ *  (busy_timeout=0) if another connection (the bot) holds the write lock. This is
+ *  ergonomics only — the REAL race protection is executeBackfill holding the write
+ *  lock across the whole critical section plus the WAL-aware file-set backup-verify
+ *  under that lock. It detects a current writer; it does NOT prove the bot process
+ *  is stopped (operator-attested). */
 function assertQuiescent(dbPath: string): void {
   const raw = new DatabaseSync(dbPath);
   try {
+    raw.exec('PRAGMA busy_timeout = 0');
     raw.exec('BEGIN IMMEDIATE');
     raw.exec('ROLLBACK');
   } catch (err) {
@@ -374,7 +406,7 @@ export async function runBackfillExecuteCli(argv: readonly string[], io: Backfil
   };
   const eligible = manifest.entries.filter((e) => e.eligible);
   const dryRun = confirmToken === null;
-  let mainBefore = '';
+  let backupFileSetHash = '';
 
   if (!dryRun) {
     if (confirmToken !== manifest.manifestDigest) {
@@ -385,24 +417,23 @@ export async function runBackfillExecuteCli(argv: readonly string[], io: Backfil
       io.err('refusing: --backup-path is required to apply (a verified pre-run backup).');
       return 2;
     }
-    // F5 — acquire the quiescence lock FIRST, THEN bind the backup to the target
-    // by file-set hash. Ordering matters: comparing before the lock races the target.
+    // Fast-fail quiescence signal (ergonomics). The AUTHORITATIVE race protection
+    // is executeBackfill holding BEGIN IMMEDIATE across the critical section plus
+    // the WAL-aware file-set backup-verify UNDER that lock (preCommitAssert below).
     assertQuiescent(dbPath);
-    let backupOk = false;
+    // Validate the backup is a real SQLite file at the current schema (fail fast);
+    // the byte-exact FILE-SET match to the target is checked under the lock.
+    let backupValid = false;
     try {
-      backupOk = isSqliteFile(backupPath)
-        && schemaVersionOf(backupPath) === CURRENT_SCHEMA_MIGRATION
-        && dbFileSetHash(backupPath) === dbFileSetHash(dbPath);
+      backupValid = isSqliteFile(backupPath) && schemaVersionOf(backupPath) === CURRENT_SCHEMA_MIGRATION;
     } catch {
-      backupOk = false;
+      backupValid = false;
     }
-    if (!backupOk) {
-      io.err(`refusing: --backup-path is not a byte-exact SQLite backup of the target at schema ${CURRENT_SCHEMA_MIGRATION} `
-        + '(the backup must be a current snapshot of THIS database). NOTE: this binds the backup and detects a '
-        + 'concurrent writer, but does NOT prove the bot process is stopped — that stays operator-attested.');
+    if (!backupValid) {
+      io.err(`refusing: --backup-path is not a SQLite backup at schema ${CURRENT_SCHEMA_MIGRATION}.`);
       return 2;
     }
-    mainBefore = mainFileHash(dbPath);
+    backupFileSetHash = dbFileSetHash(backupPath);
   }
 
   const db = new Database(dbPath);
@@ -427,9 +458,14 @@ export async function runBackfillExecuteCli(argv: readonly string[], io: Backfil
         retentionPolicyVersion,
         skillName,
         dryRun,
+        // F1 — runs UNDER the write lock: a WAL-aware file-set comparison to the
+        // approved backup. Catches a concurrent WAL/main commit that landed since
+        // the backup was taken (main-only hashing would miss a WAL-only write).
         preCommitAssert: dryRun ? undefined : () => {
-          if (mainFileHash(dbPath) !== mainBefore) {
-            throw new Error('target changed since backup — concurrent write detected; aborting before commit.');
+          if (dbFileSetHash(dbPath) !== backupFileSetHash) {
+            throw new Error('the target file-set does not match the --backup-path — not a byte-exact SQLite backup of the target, '
+              + 'or the target changed since the backup (a concurrent WAL/main write). This binds the backup and detects a concurrent '
+              + 'writer, but does NOT prove the bot process is stopped — that stays operator-attested.');
           }
         },
       });

@@ -17,7 +17,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { copyFileSync } from 'node:fs';
+import { copyFileSync, readFileSync } from 'node:fs';
 
 import { parseCapabilityContract } from '../../src/core/capability-contract.ts';
 import { Database } from '../../src/core/database.ts';
@@ -136,8 +136,11 @@ afterEach(() => {
 });
 
 type ConfirmedInput = Omit<BackfillConfirmedEntry, 'evidenceMatrixDigest'> & { evidenceMatrixDigest?: string };
+function evidenceHex(seed: string): string {
+  return createHash('sha256').update(`evidence-${seed}`).digest('hex');
+}
 function withEvidence(confirmed: ConfirmedInput[]): BackfillConfirmedEntry[] {
-  return confirmed.map((c) => ({ evidenceMatrixDigest: `ev-${c.sourceInboundSeq}-${c.sourceMessageId}`, ...c }));
+  return confirmed.map((c) => ({ evidenceMatrixDigest: evidenceHex(`${c.sourceInboundSeq}-${c.sourceMessageId}`), ...c }));
 }
 function manifest(confirmed: ConfirmedInput[]) {
   return generateBackfillManifest(db.raw as unknown as BackfillReadDb, { manifestId: 'MANIFEST-1', contract: CONTRACT, confirmed: withEvidence(confirmed) });
@@ -319,7 +322,7 @@ describe('runBackfillExecuteCli (owner-gated F3)', () => {
     const job = seedRecoveryJob(live, 1, 'A', 'test-dm@lid');
     const m = generateBackfillManifest(live.raw as unknown as BackfillReadDb, {
       manifestId: 'MANIFEST-CLI', contract: CONTRACT,
-      confirmed: [{ sourceInboundSeq: 1, sourceMessageId: 'A', recoveryJobId: job, fulfillmentClassification: CONFIRMED, evidenceMatrixDigest: 'ev-cli' }],
+      confirmed: [{ sourceInboundSeq: 1, sourceMessageId: 'A', recoveryJobId: job, fulfillmentClassification: CONFIRMED, evidenceMatrixDigest: evidenceHex('cli') }],
     });
     approvedDigest = m.manifestDigest;
     writeFileSync(manifestFile, JSON.stringify(m));
@@ -377,6 +380,26 @@ describe('runBackfillExecuteCli (owner-gated F3)', () => {
     const code = await runBackfillExecuteCli([...baseArgs(), '--backup-path', backupFile, '--confirm', approvedDigest], cap.io);
     expect(code).toBe(2);
     expect(cap.err.join('\n')).toContain('byte-exact SQLite backup of the target');
+  });
+
+  it('F1 FALSIFIER: a concurrent WAL-ONLY commit (main file UNCHANGED) is caught by the file-set check under the lock', async () => {
+    // The reviewer's exact race: a writer commits into the WAL, leaving the main
+    // file byte-identical to the backup. A main-only pre-commit check would pass.
+    const mainBefore = createHash('sha256').update(readFileSync(dbFile)).digest('hex');
+    const writer = new DatabaseSync(dbFile);
+    writer.exec('PRAGMA wal_autocheckpoint=0');
+    writer.exec("INSERT INTO inbound_events (seq, message_id, conversation_key, chat_jid, routed_to) VALUES (6000, 'WALRACE', 'c', 'test-dm@lid', 'agent')");
+    try {
+      const mainAfter = createHash('sha256').update(readFileSync(dbFile)).digest('hex');
+      expect(mainAfter).toBe(mainBefore); // main UNCHANGED — a main-only check would miss this
+      const cap = capture();
+      const code = await runBackfillExecuteCli([...baseArgs(), '--backup-path', backupFile, '--confirm', approvedDigest], cap.io);
+      expect(code).toBe(2); // the WAL-aware file-set check refuses
+      expect(cap.err.join('\n')).toContain('byte-exact SQLite backup of the target');
+      expect((new DatabaseSync(dbFile, { readOnly: true }).prepare("SELECT COUNT(*) AS c FROM capability_obligations").get() as { c: number }).c).toBe(0);
+    } finally {
+      writer.close();
+    }
   });
 
   it('refuses a --confirm token that is not the manifest digest', async () => {

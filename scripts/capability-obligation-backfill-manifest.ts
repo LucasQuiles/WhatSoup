@@ -57,12 +57,18 @@ export interface BackfillConfirmedEntry {
   /** Reviewer's fulfilment determination — only `confirmed_unfulfilled` is eligible. */
   fulfillmentClassification: FulfillmentClassification;
   /**
-   * sha256 of the reviewer's EVIDENCE MATRIX artifact (candidate §4) — the
+   * The reviewer's EVIDENCE MATRIX artifact (candidate §4) — the file holding the
    * transcript, tool/delivery receipts, and later-turn review the classification
-   * rests on. Bound into the manifest digest so the approval is tied to the
-   * SPECIFIC reviewed evidence; a different evidence set yields a different digest.
-   * The executor does not re-derive it (it cannot), but the binding means the
-   * classification is never a bare unauthenticated enum.
+   * rests on. PRIMARY form: when provided, the generator RECOMPUTES its sha256
+   * (and cross-checks any supplied `evidenceMatrixDigest`), so the bound digest is
+   * verifiable against a real artifact rather than an asserted string.
+   */
+  evidenceMatrixPath?: string;
+  /**
+   * sha256 of the reviewer's evidence-matrix artifact, bound into the manifest
+   * digest so the approval is tied to the SPECIFIC reviewed evidence. Must be a
+   * 64-hex digest. When `evidenceMatrixPath` is given, the recomputed hash wins
+   * and this (if present) must match it.
    */
   evidenceMatrixDigest: string;
   /** Reviewer media classification when the source is media ('document' | 'video'). */
@@ -335,6 +341,28 @@ export function generateBackfillManifest(
       continue;
     }
 
+    // F3/r11 — resolve the evidence-matrix digest. PRIMARY form: recompute from the
+    // named artifact (verifiable). Otherwise require a 64-hex digest. A bare string
+    // (the reviewer's r10 gap) is now ineligible, not silently accepted.
+    let evidenceMatrixDigest: string;
+    if (c.evidenceMatrixPath !== undefined) {
+      try {
+        evidenceMatrixDigest = createHash('sha256').update(readFileSync(c.evidenceMatrixPath)).digest('hex');
+      } catch {
+        entries.push({ ...base, reason: 'evidence_artifact_unreadable' });
+        continue;
+      }
+      if (c.evidenceMatrixDigest !== undefined && c.evidenceMatrixDigest !== evidenceMatrixDigest) {
+        entries.push({ ...base, reason: 'evidence_digest_mismatch' });
+        continue;
+      }
+    } else if (/^[0-9a-f]{64}$/.test(c.evidenceMatrixDigest ?? '')) {
+      evidenceMatrixDigest = c.evidenceMatrixDigest;
+    } else {
+      entries.push({ ...base, reason: 'evidence_digest_invalid' });
+      continue;
+    }
+
     // F3 — bind the actual replay payload: the media class the executor will use,
     // and the input digest over (message text + that class). The executor
     // re-verifies this against the CURRENT message, so a post-approval edit fails.
@@ -358,7 +386,7 @@ export function generateBackfillManifest(
       fulfillmentClassification: c.fulfillmentClassification,
       preparedMediaClass,
       inputDigest,
-      evidenceMatrixDigest: c.evidenceMatrixDigest,
+      evidenceMatrixDigest,
     });
   }
 
