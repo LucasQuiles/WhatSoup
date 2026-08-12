@@ -251,10 +251,25 @@ describe('group approval gate (D7)', () => {
         .run(obligationId, jid, scope, expires).lastInsertRowid,
     );
 
-  const unlock = (id: number, approvalId: number | null) =>
+  // Raw unlock carrying the SAME drain facts the approval records — the gate
+  // additionally requires them to be present and equal on the NEW row.
+  const unlock = (id: number, approvalId: number | null, facts?: Partial<Record<string, string | null>>) =>
     db.raw
-      .prepare('UPDATE capability_obligations SET state=?, drain_approval_id=? WHERE id=?')
-      .run('waiting_capability', approvalId, id);
+      .prepare(
+        `UPDATE capability_obligations
+         SET state=?, drain_approval_id=?, drain_release_sha=?, drain_manifest_digest=?,
+             drain_run_id=?, drain_attestation_digest=?
+         WHERE id=?`,
+      )
+      .run(
+        'waiting_capability',
+        approvalId,
+        (facts?.releaseSha as string | null) ?? 'relsha',
+        (facts?.manifestDigest as string | null) ?? 'mdigest',
+        (facts?.drainRunId as string | null) ?? 'RUN-1',
+        (facts?.attestationDigest as string | null) ?? 'attdig',
+        id,
+      );
 
   it('blocks leaving waiting_approval without naming a consumed approval', () => {
     const id = groupObligation();
@@ -277,10 +292,33 @@ describe('group approval gate (D7)', () => {
     expect(() => unlock(id, approvalId)).toThrow(/approval/i);
   });
 
-  it('a matching group approval consumed by id unlocks', () => {
+  it('a matching group approval consumed by id with matching drain facts unlocks', () => {
     const id = groupObligation();
     const approvalId = approve(id, 'group', 'test-group-alpha@g.us');
     expect(() => unlock(id, approvalId)).not.toThrow();
+  });
+
+  it('the consumed reference alone is NOT enough — absent drain facts abort', () => {
+    const id = groupObligation();
+    const approvalId = approve(id, 'group', 'test-group-alpha@g.us');
+    expect(() =>
+      db.raw
+        .prepare('UPDATE capability_obligations SET state=?, drain_approval_id=? WHERE id=?')
+        .run('waiting_capability', approvalId, id),
+    ).toThrow(/approval/i);
+  });
+
+  it('drain facts that differ from the consumed approval abort (per-field)', () => {
+    const id = groupObligation();
+    const approvalId = approve(id, 'group', 'test-group-alpha@g.us');
+    for (const wrong of [
+      { releaseSha: 'rel-forged' },
+      { manifestDigest: 'md-forged' },
+      { drainRunId: 'RUN-forged' },
+      { attestationDigest: 'att-forged' },
+    ]) {
+      expect(() => unlock(id, approvalId, wrong)).toThrow(/approval/i);
+    }
   });
 
   it('an approval bound to a different destination does not unlock', () => {

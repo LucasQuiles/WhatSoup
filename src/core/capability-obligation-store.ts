@@ -221,6 +221,34 @@ export class CapabilityObligationStore {
   applyDecisionWithinCallerTransaction(decision: CapabilityDecisionParams): CapabilityDecisionOutcome {
     this.assertInCallerTransaction('applyDecisionWithinCallerTransaction');
     validateCapabilityDecisionParams(decision);
+    if (decision.obligation !== undefined) {
+      // Ambiguity-safe dedup (§3.1): a recovery replay of the same source
+      // re-derives the same decision; the existing row wins and the replay is
+      // recorded as a suppressed duplicate instead of aborting finalization.
+      const existing = this.db.raw
+        .prepare(
+          `SELECT id FROM capability_obligations
+           WHERE source_inbound_seq = ? AND source_message_id = ?
+             AND contract_version = ? AND required_capability = ?`,
+        )
+        .get(
+          decision.obligation.sourceInboundSeq,
+          decision.obligation.sourceMessageId,
+          decision.obligation.contractVersion,
+          decision.obligation.requiredCapability,
+        ) as { id: number } | undefined;
+      if (existing !== undefined) {
+        const eventId = this.appendEventWithinCallerTransaction(
+          {
+            ...decision.auditEvent,
+            reasonCode: 'duplicate_suppressed',
+            detail: { existingObligationId: existing.id },
+          },
+          existing.id,
+        );
+        return { eventId, obligationId: existing.id };
+      }
+    }
     const eventId = this.appendEventWithinCallerTransaction(decision.auditEvent, null);
     if (decision.obligation === undefined) {
       return { eventId, obligationId: null };
@@ -234,13 +262,21 @@ export class CapabilityObligationStore {
   // database transition IS the admission gate; readiness signals only wake the
   // scanner. Every terminal write is fenced by (claim_token, claim_epoch).
 
-  listDueObligations(limit: number): CapabilityObligationDueRow[] {
+  listDueObligations(
+    limit: number,
+    opts: { mediaMaxAgeSeconds?: number } = {},
+  ): CapabilityObligationDueRow[] {
+    // A-08: media claimability is bounded — `mediaExpired` is computed in SQL
+    // so the horizon comparison shares the database's own clock.
     const rows = this.db.raw
       .prepare(
         `SELECT id, source_inbound_seq, source_message_id, conversation_key, delivery_jid,
                 sender_jid, sender_name, is_group, group_name, replay_text, content_type_hint,
                 contract_version, required_capability, capability_params, input_digest,
-                retained_media_path, media_sha256, media_bytes, attempt_count
+                retained_media_path, media_sha256, media_bytes, attempt_count,
+                (retained_media_path IS NOT NULL AND ? IS NOT NULL
+                  AND datetime(created_at, '+' || CAST(? AS INTEGER) || ' seconds') <= datetime('now')
+                ) AS media_expired
          FROM capability_obligations
          WHERE state = 'waiting_capability'
            AND attempt_count < ${CAPABILITY_OBLIGATION_MAX_ATTEMPTS}
@@ -248,7 +284,11 @@ export class CapabilityObligationStore {
          ORDER BY id ASC
          LIMIT ?`,
       )
-      .all(limit) as Array<Record<string, unknown>>;
+      .all(
+        opts.mediaMaxAgeSeconds ?? null,
+        opts.mediaMaxAgeSeconds ?? null,
+        limit,
+      ) as Array<Record<string, unknown>>;
     return rows.map((r) => ({
       id: r.id as number,
       sourceInboundSeq: r.source_inbound_seq as number,
@@ -269,7 +309,24 @@ export class CapabilityObligationStore {
       mediaSha256: (r.media_sha256 as string | null) ?? null,
       mediaBytes: (r.media_bytes as number | null) ?? null,
       attemptCount: r.attempt_count as number,
+      mediaExpired: (r.media_expired as number) === 1,
     }));
+  }
+
+  /**
+   * Retained paths that must NOT be garbage-collected: media of live
+   * (non-terminal) obligations still inside the retention horizon (A-08).
+   */
+  listRetainedMediaReferences(opts: { mediaMaxAgeSeconds: number }): Set<string> {
+    const rows = this.db.raw
+      .prepare(
+        `SELECT retained_media_path FROM capability_obligations
+         WHERE retained_media_path IS NOT NULL
+           AND state IN ('waiting_capability', 'waiting_approval', 'claimed', 'blocked_media', 'blocked_ambiguous')
+           AND datetime(created_at, '+' || CAST(? AS INTEGER) || ' seconds') > datetime('now')`,
+      )
+      .all(opts.mediaMaxAgeSeconds) as Array<{ retained_media_path: string }>;
+    return new Set(rows.map((r) => r.retained_media_path));
   }
 
   claimObligation(
@@ -494,11 +551,21 @@ export class CapabilityObligationStore {
       const row = this.db.raw
         .prepare(
           `UPDATE capability_obligations
-           SET state = 'waiting_capability', drain_approval_id = ?, updated_at = datetime('now')
+           SET state = 'waiting_capability', drain_approval_id = ?,
+               drain_release_sha = ?, drain_manifest_digest = ?,
+               drain_run_id = ?, drain_attestation_digest = ?,
+               updated_at = datetime('now')
            WHERE id = ? AND state = 'waiting_approval'
            RETURNING id`,
         )
-        .get(approval.id, id);
+        .get(
+          approval.id,
+          live.releaseSha,
+          live.manifestDigest,
+          live.drainRunId,
+          live.attestationDigest,
+          id,
+        );
       if (row === undefined) return { applied: false, reason: 'no_matching_approval' as const };
       this.appendEventWithinCallerTransaction(
         {
@@ -646,4 +713,6 @@ export interface CapabilityObligationDueRow {
   mediaSha256: string | null;
   mediaBytes: number | null;
   attemptCount: number;
+  /** A-08: retained media older than the configured horizon; never claimable. */
+  mediaExpired: boolean;
 }

@@ -223,6 +223,8 @@ describe('parseCapabilityObligationsOptions — all-or-inert activation', () => 
     contract: CONTRACT_RAW,
     mediaRoot: '/var/obligation-media',
     retentionPolicyVersion: 'policy/1',
+    retentionHorizonDays: 30,
+    receipt: { toolName: 'Bash', commandMarker: 'watch.py', minOutputBytes: 8 },
     attestation: {
       skillName: 'watch',
       skillVersion: '1.0.0',
@@ -250,6 +252,11 @@ describe('parseCapabilityObligationsOptions — all-or-inert activation', () => 
   it('enabled with a malformed body FAILS CLOSED (throws; never a partial activation)', () => {
     expect(() => parseCapabilityObligationsOptions({ enabled: true })).toThrow();
     expect(() => parseCapabilityObligationsOptions({ ...VALID, mediaRoot: '' })).toThrow();
+    // A-08: an infinite or absent retention horizon is unrepresentable.
+    expect(() => parseCapabilityObligationsOptions({ ...VALID, retentionHorizonDays: undefined })).toThrow();
+    expect(() => parseCapabilityObligationsOptions({ ...VALID, retentionHorizonDays: 0 })).toThrow();
+    expect(() => parseCapabilityObligationsOptions({ ...VALID, retentionHorizonDays: 10_000 })).toThrow();
+    expect(() => parseCapabilityObligationsOptions({ ...VALID, receipt: undefined })).toThrow();
     expect(() =>
       parseCapabilityObligationsOptions({
         ...VALID,

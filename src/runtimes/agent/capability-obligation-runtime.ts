@@ -31,13 +31,17 @@ import { hostname, userInfo } from 'node:os';
 import type { CapabilityAttestationBinding } from '../../core/capability-attestation.ts';
 import type { CapabilityObligationsOptions } from '../../core/capability-contract.ts';
 import type {
+  CapabilityDecisionParams,
   CapabilityObligationClaimFence,
   CapabilityObligationDueRow,
   CapabilityObligationStore,
 } from '../../core/capability-obligation-store.ts';
 import { CURRENT_SCHEMA_MIGRATION, type Database } from '../../core/database.ts';
+import { cleanupUnreferencedMedia } from '../../core/obligation-media-retention.ts';
 import { systemClock } from '../../lib/clock.ts';
 import { createChildLogger } from '../../logger.ts';
+import type { ExternalEffectDeclaration } from '../../mcp/external-effect.ts';
+import { deriveCapabilityDecision as deriveDecisionForTurn } from './capability-obligation-decision.ts';
 import {
   CapabilityObligationSupervisor,
   type ObligationDispatchOutcome,
@@ -95,31 +99,28 @@ export interface CapabilityObligationRuntimeDeps {
    * this key. Defaults to identity for unit tests.
    */
   resolveMapKey?: (deliveryJid: string) => string;
+  /** D2 declaration lookup from the live tool registry (creation-seam fold). */
+  externalEffectFor: (toolName: string) => ExternalEffectDeclaration | undefined;
   scanIntervalMs?: number;
 }
 
 /**
- * Does a provider tool invocation execute the obligation's declared
- * capability? Deterministic: the capability params' `skill` is invoked either
- * through the provider's Skill tool (`{ skill: <name> }` input) or as a
- * directly-named tool. Anything else is not capability execution.
+ * Does a provider tool invocation EXECUTE the declared capability? Loading a
+ * skill (the provider's Skill tool) is NOT execution — the live /watch skill
+ * subsequently runs its resolver through the execution tool (e.g. Bash with
+ * `watch.py`), and only that invocation is capability execution. The rule is
+ * instance-declared (options.receipt): exact execution tool name plus a marker
+ * that must appear in some string field of the invocation input.
  */
-export function matchesCapabilityInvocation(
-  capabilityParams: string,
+export function matchesCapabilityExecution(
+  rule: CapabilityObligationsOptions['receipt'],
   toolName: string,
   toolInput: Record<string, unknown>,
 ): boolean {
-  let skill: unknown;
-  try {
-    skill = (JSON.parse(capabilityParams) as Record<string, unknown>)['skill'];
-  } catch {
-    // intentional: a malformed params payload can never authorize a receipt —
-    // fail closed by matching nothing rather than guessing an invocation shape.
-    return false;
-  }
-  if (typeof skill !== 'string' || skill.length === 0) return false;
-  if (toolName === skill) return true;
-  return toolName === 'Skill' && toolInput['skill'] === skill;
+  if (toolName !== rule.toolName) return false;
+  return Object.values(toolInput).some(
+    (value) => typeof value === 'string' && value.includes(rule.commandMarker),
+  );
 }
 
 interface ActiveObligationTurn {
@@ -137,6 +138,7 @@ export class CapabilityObligationRuntime {
   private readonly store: CapabilityObligationStore;
   private readonly options: CapabilityObligationsOptions;
   private readonly resolveMapKey: (deliveryJid: string) => string;
+  private readonly externalEffectFor: (toolName: string) => ExternalEffectDeclaration | undefined;
   private readonly scanIntervalMs: number;
   private readonly activeTurns = new Map<string, ActiveObligationTurn>();
   private scanTimer: ReturnType<typeof setTimeout> | null = null;
@@ -148,10 +150,12 @@ export class CapabilityObligationRuntime {
     this.store = deps.store;
     this.options = deps.options;
     this.resolveMapKey = deps.resolveMapKey ?? ((jid) => jid);
+    this.externalEffectFor = deps.externalEffectFor;
     this.scanIntervalMs = deps.scanIntervalMs ?? OBLIGATION_SCAN_INTERVAL_MS;
     this.supervisor = new CapabilityObligationSupervisor({
       db: deps.db,
       store: deps.store,
+      mediaMaxAgeSeconds: deps.options.retentionHorizonDays * 86_400,
       attestationPort: {
         binding: (obligation): CapabilityAttestationBinding => ({
           ...deps.liveFacts(),
@@ -209,6 +213,10 @@ export class CapabilityObligationRuntime {
     if (this.tickInFlight) return this.tickInFlight;
     const run = this.supervisor
       .tick()
+      .then(async (report) => {
+        await this.collectExpiredMedia();
+        return report;
+      })
       .catch((err) => {
         log.error({ err }, 'capability-obligation tick failed');
         return null;
@@ -218,6 +226,28 @@ export class CapabilityObligationRuntime {
       });
     this.tickInFlight = run;
     return run;
+  }
+
+  /**
+   * A-08 finite retention: retained bytes survive only while some live
+   * obligation inside the horizon references them; everything else is removed
+   * once older than the horizon. Runs outside any DB transaction (D3).
+   */
+  private async collectExpiredMedia(): Promise<void> {
+    const horizonMs = this.options.retentionHorizonDays * 86_400_000;
+    try {
+      await cleanupUnreferencedMedia(
+        { root: this.options.mediaRoot, policyVersion: this.options.retentionPolicyVersion },
+        {
+          referencedPaths: this.store.listRetainedMediaReferences({
+            mediaMaxAgeSeconds: this.options.retentionHorizonDays * 86_400,
+          }),
+          graceMs: horizonMs,
+        },
+      );
+    } catch (err) {
+      log.warn({ err }, 'retained-media horizon GC failed; will retry next tick');
+    }
   }
 
   private scheduleTick(): void {
@@ -243,7 +273,7 @@ export class CapabilityObligationRuntime {
     const active = this.activeTurns.get(mapKey);
     if (active === undefined) return;
     if (event.type === 'tool_use') {
-      if (matchesCapabilityInvocation(active.obligation.capabilityParams, event.toolName, event.toolInput)) {
+      if (matchesCapabilityExecution(this.options.receipt, event.toolName, event.toolInput)) {
         active.pendingToolIds.set(event.toolId, event.toolName);
       }
       return;
@@ -252,6 +282,9 @@ export class CapabilityObligationRuntime {
     const toolName = active.pendingToolIds.get(event.toolId);
     if (toolName === undefined) return;
     active.pendingToolIds.delete(event.toolId);
+    // D6 item 3: an 'ok' receipt needs a non-error result AND the declared
+    // minimum of output evidence — a bare exit is not proof of processing.
+    const evidentOk = !event.isError && event.content.length >= this.options.receipt.minOutputBytes;
     try {
       this.store.recordExecutionReceipt({
         obligationId: active.obligation.id,
@@ -263,8 +296,8 @@ export class CapabilityObligationRuntime {
         contractVersion: active.obligation.contractVersion,
         inputDigest: active.obligation.inputDigest,
         mediaDigest: active.obligation.mediaSha256,
-        resultStatus: event.isError ? 'error' : 'ok',
-        outputEvidence: { toolName, contentBytes: event.content.length },
+        resultStatus: evidentOk ? 'ok' : 'error',
+        outputEvidence: { toolName, contentBytes: event.content.length, isError: event.isError },
         claimEpoch: active.fence.claimEpoch,
         attemptNumber: active.attemptNumber,
       });
@@ -318,6 +351,25 @@ export class CapabilityObligationRuntime {
     return this.resolveMapKey(deliveryJid);
   }
 
+  /**
+   * The CREATION seam (D1/D2/D3): derive the C3 capability decision for a
+   * finalizing turn. The harness is the execution mode of the provider that
+   * SERVED the turn (fallback-aware, read from the live session).
+   */
+  deriveCapabilityDecision(
+    context: RuntimeTurnContext,
+    session: { getProviderId?: () => string | null } | null,
+  ): Promise<CapabilityDecisionParams | undefined> {
+    // Defensive typeof mirrors the runtime's other getProviderId call sites.
+    const providerId =
+      session !== null && typeof session.getProviderId === 'function' ? session.getProviderId() : null;
+    return deriveDecisionForTurn(
+      { db: this.db, options: this.options, externalEffectFor: this.externalEffectFor },
+      context,
+      providerId === null ? null : resolveHarnessType(providerId),
+    );
+  }
+
   private providerAcceptedIds(): ReadonlySet<number> {
     const rows = this.db.raw
       .prepare(
@@ -368,12 +420,6 @@ export class CapabilityObligationRuntime {
     // outcomes are never auto-retried.
     return { kind: 'ambiguous' };
   }
-}
-
-export function createCapabilityObligationRuntime(
-  deps: CapabilityObligationRuntimeDeps,
-): CapabilityObligationRuntime {
-  return new CapabilityObligationRuntime(deps);
 }
 
 /** Construct AND start — the one-call activation runtime.ts uses in setDurability. */

@@ -212,12 +212,35 @@ const attestationExpectationSchema = z.object({
   canaryId: z.string().min(1),
 });
 
+/**
+ * What counts as capability EXECUTION for D6 receipts. Loading a skill is not
+ * execution: the receipt records only an invocation of the declared execution
+ * tool whose input carries the declared marker, and an 'ok' result additionally
+ * requires the declared minimum of output evidence.
+ */
+const receiptRuleSchema = z.object({
+  /** Provider tool whose invocation IS capability execution (e.g. 'Bash'). */
+  toolName: z.string().min(1),
+  /** Substring that must appear in a string field of the invocation input. */
+  commandMarker: z.string().min(1),
+  /** Minimum non-error output bytes for an 'ok' receipt. */
+  minOutputBytes: z.number().int().positive(),
+});
+
 const capabilityObligationsOptionsSchema = z.object({
   enabled: z.literal(true),
   contract: contractSchema,
   /** Obligation-owned retained-media root (D3); also a D5 binding field. */
   mediaRoot: z.string().min(1),
   retentionPolicyVersion: z.string().min(1),
+  /**
+   * Finite retained-media horizon (A-08): media-carrying obligations older
+   * than this are no longer claimable and their retained bytes become
+   * GC-eligible. Bounded by construction — indefinite retention is
+   * unrepresentable.
+   */
+  retentionHorizonDays: z.number().int().positive().max(365),
+  receipt: receiptRuleSchema,
   attestation: attestationExpectationSchema,
 });
 

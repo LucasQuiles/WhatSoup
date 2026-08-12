@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import type { CapabilityDecisionParams } from '../../core/capability-obligation-store.ts';
 import type { ContentType } from '../../core/types.ts';
 import type {
   DurabilityEngine,
@@ -228,6 +229,15 @@ export interface RuntimeTurnCoordinatorPort {
   turnHadSuppressedReplySatisfaction: boolean;
   readonly runtimeTurnAfterTerminal: Map<string, RuntimeTurnAfterTerminalAction>;
   managerIdFor(session: SessionManager): string;
+  /**
+   * Capability-obligation replay: derive the C3 decision for a finalizing
+   * turn (undefined = the turn owes nothing / feature inert). Runs BEFORE
+   * `finalizeTurnTerminal` so media staging precedes the transaction (D3).
+   */
+  deriveCapabilityDecision?(
+    context: RuntimeTurnContext,
+    session: SessionManager | null,
+  ): Promise<CapabilityDecisionParams | undefined>;
   isShuttingDown?(): boolean;
   getActiveQueue(): IOutboundQueue | null;
   getQueueForChat(chatJid: string, mapKey?: string): IOutboundQueue | null;
@@ -757,6 +767,23 @@ private async performRuntimeTurnFinalization(args: {
       : { clearReplayOnSuccess: args.clearReplayOnSuccess }),
     ...(args.voice === undefined ? {} : { voice: args.voice }),
   });
+  let capabilityDecision: CapabilityDecisionParams | undefined;
+  if (this.host.deriveCapabilityDecision !== undefined) {
+    try {
+      capabilityDecision = await this.host.deriveCapabilityDecision(args.context, args.session);
+    } catch (err) {
+      // A producer fault must neither block finalization NOR lose the signal
+      // silently — record a typed not_created audit event in its place.
+      log.error({ err, logicalTurnId: args.context.identity.logicalTurnId }, 'capability decision producer failed');
+      capabilityDecision = {
+        auditEvent: {
+          action: 'obligation.not_created',
+          actorType: 'runtime',
+          reasonCode: 'not_created_decision_producer_error',
+        },
+      };
+    }
+  }
   const result = finalizeRuntimeTurn({
     instanceName: this.host.instanceName,
     durability: this.host.durability,
@@ -766,6 +793,7 @@ private async performRuntimeTurnFinalization(args: {
     recoveryOwner: args.context.recoveryOwner,
     replay: args.context.replay,
     bookkeeping,
+    ...(capabilityDecision === undefined ? {} : { capabilityDecision }),
   });
   const retained = result.kind === 'terminal'
     ? null

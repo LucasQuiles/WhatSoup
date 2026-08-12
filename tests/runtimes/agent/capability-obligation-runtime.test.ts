@@ -15,7 +15,7 @@ import { Database } from '../../../src/core/database.ts';
 import { withTransaction } from '../../../src/core/db-tx.ts';
 import {
   CapabilityObligationRuntime,
-  matchesCapabilityInvocation,
+  matchesCapabilityExecution,
   resolveReleaseIdentity,
   type CapabilityObligationLiveFacts,
 } from '../../../src/runtimes/agent/capability-obligation-runtime.ts';
@@ -31,6 +31,8 @@ const OPTIONS = parseCapabilityObligationsOptions({
   },
   mediaRoot: '/var/obligation-media',
   retentionPolicyVersion: 'policy/1',
+  retentionHorizonDays: 30,
+  receipt: { toolName: 'Bash', commandMarker: 'watch.py', minOutputBytes: 8 },
   attestation: {
     skillName: 'watch',
     skillVersion: '1.0.0',
@@ -209,22 +211,22 @@ describe('dispatch port (D7)', () => {
 });
 
 describe('receipt recorder (D6)', () => {
-  it('persists an attempt-bound receipt for a matching tool_use/tool_result pair', async () => {
+  it('persists an ok receipt ONLY for the declared execution invocation with real output', async () => {
     const id = seedObligation();
     freshAttestation();
     const { runtime } = makeRuntime({
       onDispatch: (mapKey, rt) => {
         rt.onStreamEvent(mapKey, {
           type: 'tool_use',
-          toolName: 'Skill',
+          toolName: 'Bash',
           toolId: 'tu-1',
-          toolInput: { skill: 'watch' },
+          toolInput: { command: 'python3 /skills/watch/watch.py --url https://youtu.be/abc' },
         });
         rt.onStreamEvent(mapKey, {
           type: 'tool_result',
           isError: false,
           toolId: 'tu-1',
-          content: 'transcript ready',
+          content: 'frames extracted; transcript ready',
         });
       },
     });
@@ -245,22 +247,43 @@ describe('receipt recorder (D6)', () => {
     });
   });
 
-  it('ignores non-matching invocations and records error results as error receipts', async () => {
+  it('a Skill LOAD is not execution — no receipt at all', async () => {
     const id = seedObligation();
     freshAttestation();
     const { runtime } = makeRuntime({
       onDispatch: (mapKey, rt) => {
-        rt.onStreamEvent(mapKey, { type: 'tool_use', toolName: 'Bash', toolId: 'tu-x', toolInput: {} });
-        rt.onStreamEvent(mapKey, { type: 'tool_result', isError: false, toolId: 'tu-x', content: 'ls output' });
-        rt.onStreamEvent(mapKey, { type: 'tool_use', toolName: 'watch', toolId: 'tu-y', toolInput: {} });
-        rt.onStreamEvent(mapKey, { type: 'tool_result', isError: true, toolId: 'tu-y', content: 'boom' });
+        rt.onStreamEvent(mapKey, { type: 'tool_use', toolName: 'Skill', toolId: 'tu-s', toolInput: { skill: 'watch' } });
+        rt.onStreamEvent(mapKey, { type: 'tool_result', isError: false, toolId: 'tu-s', content: 'skill loaded successfully' });
+      },
+    });
+    await runtime.tickOnce();
+    const count = (db.raw
+      .prepare('SELECT COUNT(*) AS c FROM capability_execution_receipts WHERE obligation_id = ?')
+      .get(id) as { c: number }).c;
+    expect(count).toBe(0);
+  });
+
+  it('unmarked Bash is ignored; errored or evidence-thin execution records an error receipt', async () => {
+    const id = seedObligation();
+    freshAttestation();
+    const { runtime } = makeRuntime({
+      onDispatch: (mapKey, rt) => {
+        rt.onStreamEvent(mapKey, { type: 'tool_use', toolName: 'Bash', toolId: 'tu-x', toolInput: { command: 'ls -la' } });
+        rt.onStreamEvent(mapKey, { type: 'tool_result', isError: false, toolId: 'tu-x', content: 'ls output here' });
+        rt.onStreamEvent(mapKey, { type: 'tool_use', toolName: 'Bash', toolId: 'tu-y', toolInput: { command: 'python3 watch.py x' } });
+        rt.onStreamEvent(mapKey, { type: 'tool_result', isError: true, toolId: 'tu-y', content: 'traceback: boom' });
+        rt.onStreamEvent(mapKey, { type: 'tool_use', toolName: 'Bash', toolId: 'tu-z', toolInput: { command: 'python3 watch.py y' } });
+        rt.onStreamEvent(mapKey, { type: 'tool_result', isError: false, toolId: 'tu-z', content: 'ok' }); // 2 bytes < min 8
       },
     });
     await runtime.tickOnce();
     const rows = db.raw
-      .prepare('SELECT tool_use_id, result_status FROM capability_execution_receipts WHERE obligation_id = ?')
+      .prepare('SELECT tool_use_id, result_status FROM capability_execution_receipts WHERE obligation_id = ? ORDER BY id')
       .all(id) as Array<{ tool_use_id: string; result_status: string }>;
-    expect(rows).toEqual([{ tool_use_id: 'tu-y', result_status: 'error' }]);
+    expect(rows).toEqual([
+      { tool_use_id: 'tu-y', result_status: 'error' },
+      { tool_use_id: 'tu-z', result_status: 'error' },
+    ]);
   });
 
   it('events outside an active obligation turn are no-ops', () => {
@@ -268,9 +291,9 @@ describe('receipt recorder (D6)', () => {
     expect(() =>
       runtime.onStreamEvent('some-chat@lid', {
         type: 'tool_use',
-        toolName: 'Skill',
+        toolName: 'Bash',
         toolId: 'tu-z',
-        toolInput: { skill: 'watch' },
+        toolInput: { command: 'python3 watch.py x' },
       }),
     ).not.toThrow();
     const count = (db.raw.prepare('SELECT COUNT(*) AS c FROM capability_execution_receipts').get() as { c: number }).c;
@@ -291,8 +314,8 @@ describe('evidence port (D6/D7)', () => {
   it('completes on receipt + echoed terminal with a delivery op', async () => {
     const id = await dispatchedObligation({
       onDispatch: (mapKey, rt) => {
-        rt.onStreamEvent(mapKey, { type: 'tool_use', toolName: 'Skill', toolId: 'tu-1', toolInput: { skill: 'watch' } });
-        rt.onStreamEvent(mapKey, { type: 'tool_result', isError: false, toolId: 'tu-1', content: 'ok' });
+        rt.onStreamEvent(mapKey, { type: 'tool_use', toolName: 'Bash', toolId: 'tu-1', toolInput: { command: 'python3 watch.py go' } });
+        rt.onStreamEvent(mapKey, { type: 'tool_result', isError: false, toolId: 'tu-1', content: 'frames + transcript done' });
       },
     });
     const seq = (db.raw.prepare('SELECT seq FROM inbound_events WHERE message_id = ?').get(`obl:${id}:1`) as { seq: number }).seq;
@@ -320,8 +343,8 @@ describe('evidence port (D6/D7)', () => {
   it('a receipt WITHOUT echoed delivery proof quarantines', async () => {
     const id = await dispatchedObligation({
       onDispatch: (mapKey, rt) => {
-        rt.onStreamEvent(mapKey, { type: 'tool_use', toolName: 'Skill', toolId: 'tu-1', toolInput: { skill: 'watch' } });
-        rt.onStreamEvent(mapKey, { type: 'tool_result', isError: false, toolId: 'tu-1', content: 'ok' });
+        rt.onStreamEvent(mapKey, { type: 'tool_use', toolName: 'Bash', toolId: 'tu-1', toolInput: { command: 'python3 watch.py go' } });
+        rt.onStreamEvent(mapKey, { type: 'tool_result', isError: false, toolId: 'tu-1', content: 'frames + transcript done' });
       },
     });
     const seq = (db.raw.prepare('SELECT seq FROM inbound_events WHERE message_id = ?').get(`obl:${id}:1`) as { seq: number }).seq;
@@ -360,13 +383,13 @@ describe('evidence port (D6/D7)', () => {
 });
 
 describe('helpers', () => {
-  it('matchesCapabilityInvocation accepts Skill-tool and direct-name forms only', () => {
-    expect(matchesCapabilityInvocation('{"skill":"watch"}', 'Skill', { skill: 'watch' })).toBe(true);
-    expect(matchesCapabilityInvocation('{"skill":"watch"}', 'watch', {})).toBe(true);
-    expect(matchesCapabilityInvocation('{"skill":"watch"}', 'Skill', { skill: 'other' })).toBe(false);
-    expect(matchesCapabilityInvocation('{"skill":"watch"}', 'Bash', { command: 'watch' })).toBe(false);
-    expect(matchesCapabilityInvocation('not-json', 'watch', {})).toBe(false);
-    expect(matchesCapabilityInvocation('{}', 'watch', {})).toBe(false);
+  it('matchesCapabilityExecution requires the declared tool AND the command marker', () => {
+    const rule = OPTIONS.receipt;
+    expect(matchesCapabilityExecution(rule, 'Bash', { command: 'python3 watch.py --x' })).toBe(true);
+    expect(matchesCapabilityExecution(rule, 'Bash', { command: 'ls -la' })).toBe(false);
+    expect(matchesCapabilityExecution(rule, 'Skill', { skill: 'watch' })).toBe(false);
+    expect(matchesCapabilityExecution(rule, 'Skill', { skill: 'watch.py' })).toBe(false);
+    expect(matchesCapabilityExecution(rule, 'Bash', {})).toBe(false);
   });
 
   it('resolveReleaseIdentity: env wins, release-dir basename next, sentinel otherwise', () => {

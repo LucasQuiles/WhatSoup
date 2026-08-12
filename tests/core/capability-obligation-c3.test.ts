@@ -149,35 +149,40 @@ describe('C3-joined capability decision (D4)', () => {
 
   it('FAULT: an obligation insert failure rolls back the terminal record and the audit event', () => {
     const { inboundSeq, opId } = seedEchoedTurn();
-    // Violates the migration-57 group insert gate: group obligation forced to
-    // waiting_capability is impossible, but a group WITHOUT a group name fails
-    // store validation; use a schema-level failure instead — an is_group row
-    // must be born waiting_approval, which the store derives, so trip the CHECK
-    // via an invalid sha (media identity all-or-none is store-shaped, so use a
-    // duplicate UNIQUE key seeded directly).
-    db.raw
-      .prepare(
-        `INSERT INTO capability_obligations
-           (source_inbound_seq, source_message_id, conversation_key, delivery_jid, sender_jid,
-            is_group, scope, replay_text, contract_version, required_capability,
-            capability_params, input_digest, state, creation_reason)
-         VALUES (?, 'msg-obligation-1', 'ck', 'dj@lid', 'sj@s.whatsapp.net',
-                 0, 'per_chat', 'x', 'test-instance/1', 'child_process_tools',
-                 '{}', '${'aa'.repeat(32)}', 'waiting_capability', 'typed_deferral_signal')`,
-      )
-      .run(inboundSeq);
+    // Schema-level injected fault: creation_reason is validated only by the
+    // migration-57 CHECK (the store's JS validation does not cover it), so an
+    // invalid reason reaches the INSERT and aborts inside the C3 transaction.
+    // (A duplicate dedup-key is no longer a fault — it dedup-suppresses.)
     const before = counts();
 
     expect(() =>
       durability.finalizeTurnTerminal({
         ...toTurnFinalizationPersistence(replied(inboundSeq, opId)),
-        capabilityDecision: decision({ sourceInboundSeq: inboundSeq }),
+        capabilityDecision: decision({ sourceInboundSeq: inboundSeq, creationReason: 'improvised' }),
       }),
-    ).toThrow(/UNIQUE/i);
+    ).toThrow(/CHECK/i);
 
     // Full rollback: no new terminal, no new event, no new obligation.
     expect(counts()).toEqual(before);
     expect(counts().terminals).toBe(0);
+  });
+
+  it('a duplicate creation for the same source dedup-suppresses instead of aborting finalization', () => {
+    const { inboundSeq, opId } = seedEchoedTurn();
+    const first = durability.finalizeTurnTerminal({
+      ...toTurnFinalizationPersistence(replied(inboundSeq, opId)),
+      capabilityDecision: decision({ sourceInboundSeq: inboundSeq }),
+    });
+    expect(first.capabilityDecision?.obligationId).not.toBeNull();
+    // A duplicate finalization of the SAME terminal is read-only by design —
+    // the decision is not re-applied and no second obligation appears. (Dedup
+    // on a genuinely re-applied decision is proven in the decision-seam suite.)
+    const second = durability.finalizeTurnTerminal({
+      ...toTurnFinalizationPersistence(replied(inboundSeq, opId)),
+      capabilityDecision: decision({ sourceInboundSeq: inboundSeq }),
+    });
+    expect(second.capabilityDecision).toBeUndefined();
+    expect(counts().obligations).toBe(1);
   });
 
   it('FAULT: an audit-event failure aborts the terminal too (audit-write blocks the state change)', () => {

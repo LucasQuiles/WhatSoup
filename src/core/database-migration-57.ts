@@ -75,6 +75,12 @@ export function runMigration57(db: DatabaseSync): void {
       completion_proof_id TEXT,
       capability_execution_receipt_id INTEGER,
       drain_approval_id INTEGER,
+      -- D7: the LIVE drain facts recorded at approval consumption; the
+      -- group-approval gate requires them to equal the consumed approval's.
+      drain_release_sha TEXT,
+      drain_manifest_digest TEXT,
+      drain_run_id TEXT,
+      drain_attestation_digest TEXT,
       creation_reason TEXT NOT NULL CHECK (
         creation_reason = 'typed_deferral_signal'
         OR creation_reason LIKE 'reviewed_backfill:%'
@@ -227,10 +233,12 @@ export function runMigration57(db: DatabaseSync): void {
     END;
 
     -- D7: leaving waiting_approval must name the exact approval being consumed
-    -- (NEW.drain_approval_id); that approval must bind THIS obligation and
-    -- destination, carry an attestation digest, and be unrevoked and unexpired.
-    -- Live-fact equality (release SHA, manifest digest, drain-run ID) is
-    -- enforced by the sole sanctioned caller, consumeGroupDrainApproval.
+    -- (NEW.drain_approval_id) AND record the live drain facts on the row
+    -- (NEW.drain_*); the gate requires the consumed approval to bind THIS
+    -- obligation and destination, carry an attestation digest, be unrevoked and
+    -- unexpired, and match every recorded drain fact. The sanctioned caller
+    -- (consumeGroupDrainApproval) writes the drain facts from LIVE values it
+    -- verified; a raw transition that omits or forges them aborts here.
     CREATE TRIGGER IF NOT EXISTS capability_obligations_group_approval_gate
     BEFORE UPDATE OF state ON capability_obligations
     WHEN OLD.is_group = 1
@@ -238,6 +246,10 @@ export function runMigration57(db: DatabaseSync): void {
       AND NEW.state = 'waiting_capability'
       AND (
         NEW.drain_approval_id IS NULL
+        OR NEW.drain_release_sha IS NULL
+        OR NEW.drain_manifest_digest IS NULL
+        OR NEW.drain_run_id IS NULL
+        OR NEW.drain_attestation_digest IS NULL
         OR NOT EXISTS (
           SELECT 1 FROM capability_drain_approvals a
           WHERE a.id = NEW.drain_approval_id
@@ -245,6 +257,10 @@ export function runMigration57(db: DatabaseSync): void {
             AND a.scope = 'group'
             AND a.destination_jid = OLD.delivery_jid
             AND a.attestation_digest IS NOT NULL
+            AND a.release_sha = NEW.drain_release_sha
+            AND a.manifest_digest = NEW.drain_manifest_digest
+            AND a.drain_run_id = NEW.drain_run_id
+            AND a.attestation_digest = NEW.drain_attestation_digest
             AND a.revoked_at IS NULL
             AND datetime(a.expires_at) > datetime('now')
         )

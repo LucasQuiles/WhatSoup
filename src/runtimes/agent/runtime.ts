@@ -2713,6 +2713,8 @@ export class AgentRuntime implements Runtime {
       set singleTurnHadToolActivity(value) { runtime.singleTurnHadToolActivity = value; },
       get isFallbackWindowActive() { return runtime.isFallbackWindowActive; },
       managerIdFor: (session) => runtime.managerIdFor(session),
+      deriveCapabilityDecision: (context, session) =>
+        runtime.capabilityObligationRuntime?.deriveCapabilityDecision(context, session) ?? Promise.resolve(undefined),
       isShuttingDown: () => runtime.shutdownRequested,
       getActiveQueue: () => runtime.getActiveQueue(),
       getQueueForChat: (chatJid, mapKey) => runtime.getQueueForChat(chatJid, mapKey),
@@ -2848,10 +2850,10 @@ export class AgentRuntime implements Runtime {
     this.turnRecoverySupervisor.start(); // PRESTAGE-T4; idempotent
     this.turnRecoveryDeadman.start();
 
-    // Capability-obligation replay: activated here (the store lives on the
-    // durability engine); opt-in only, per_chat scope only (all-or-inert).
+    // Capability-obligation replay: opt-in only, per_chat only (all-or-inert).
+    // `!= null` treats an ABSENT field (e.g. a mocked config) as inert too.
     if (
-      config.capabilityObligations !== null
+      config.capabilityObligations != null
       && this.sessionScope === 'per_chat'
       && this.capabilityObligationRuntime === null
     ) {
@@ -2869,6 +2871,7 @@ export class AgentRuntime implements Runtime {
           o, m, s,
         ),
         resolveMapKey: (jid) => this.resolvePerChatMapKey(jid),
+        externalEffectFor: (name) => this.registry.externalEffectDeclaration(name),
       });
     }
   }
@@ -5291,8 +5294,7 @@ export class AgentRuntime implements Runtime {
 
   /** Obligation-owned turn identity for the D6 receipt tap. */
   private obligationTurnIdFor(mapKey: string | undefined): string | undefined {
-    if (mapKey === undefined) return undefined;
-    return this.perChatRuntimeTurnContexts.get(mapKey)?.[0]?.identity.logicalTurnId;
+    return mapKey === undefined ? undefined : this.perChatRuntimeTurnContexts.get(mapKey)?.[0]?.identity.logicalTurnId;
   }
 
   private isTurnRecoveryDispatchTargetCurrent(target: TurnRecoveryDispatchTarget): boolean {

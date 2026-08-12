@@ -392,6 +392,11 @@ export class ToolRegistry {
     }
   }
 
+  /** D2: the declared external-effect contract of a registered tool, if any. */
+  externalEffectDeclaration(name: string): ToolDeclaration['externalEffect'] {
+    return this.tools.get(name)?.externalEffect;
+  }
+
   /**
    * Returns tool listing entries filtered and adapted for the given session.
    *

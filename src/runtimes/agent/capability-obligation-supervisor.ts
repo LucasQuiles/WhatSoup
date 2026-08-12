@@ -104,6 +104,8 @@ export interface CapabilityObligationSupervisorOptions {
   evidencePort: ObligationEvidencePort;
   leaseSeconds?: number;
   backoffSeconds?: number;
+  /** A-08: finite retained-media horizon in seconds; expired media never claims. */
+  mediaMaxAgeSeconds?: number;
 }
 
 export interface ObligationTickReport {
@@ -126,6 +128,7 @@ export class CapabilityObligationSupervisor {
   private readonly evidencePort: ObligationEvidencePort;
   private readonly leaseSeconds: number;
   private readonly backoffSeconds: number;
+  private readonly mediaMaxAgeSeconds: number | undefined;
   private claimCounter = 0;
 
   constructor(options: CapabilityObligationSupervisorOptions) {
@@ -136,6 +139,7 @@ export class CapabilityObligationSupervisor {
     this.evidencePort = options.evidencePort;
     this.leaseSeconds = options.leaseSeconds ?? OBLIGATION_LEASE_SECONDS;
     this.backoffSeconds = options.backoffSeconds ?? OBLIGATION_BACKOFF_SECONDS;
+    this.mediaMaxAgeSeconds = options.mediaMaxAgeSeconds;
   }
 
   /** One full pass: reclaim → settle → scan/admit/claim/dispatch. */
@@ -203,7 +207,10 @@ export class CapabilityObligationSupervisor {
   }
 
   private async scanAndDispatch(report: ObligationTickReport): Promise<void> {
-    for (const due of this.store.listDueObligations(SCAN_LIMIT)) {
+    const dueRows = this.store.listDueObligations(SCAN_LIMIT, {
+      mediaMaxAgeSeconds: this.mediaMaxAgeSeconds,
+    });
+    for (const due of dueRows) {
       // D5 — exact-bound attestation; skips consume zero attempts.
       const admission: AttestationAdmission = findAdmissibleAttestation(
         this.db,
@@ -211,6 +218,13 @@ export class CapabilityObligationSupervisor {
       );
       if (admission.outcome === 'skip') {
         report.attestationSkips.push({ id: due.id, reason: admission.reason });
+        continue;
+      }
+
+      // A-08 — retained media past the finite horizon never claims.
+      if (due.mediaExpired) {
+        const blocked = this.store.blockWaitingObligation(due.id, 'media_retention_expired');
+        if (blocked.applied) report.mediaBlocked.push(due.id);
         continue;
       }
 
