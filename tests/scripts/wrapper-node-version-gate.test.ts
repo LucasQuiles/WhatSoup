@@ -182,6 +182,10 @@ function makeFixtureRepoWithNvmrc(
     path.join(repoRoot, 'deploy', 'lib', 'resolve-node.sh'),
     path.join(fixtureRoot, 'deploy', 'lib', 'resolve-node.sh'),
   );
+  fs.copyFileSync(
+    path.join(repoRoot, 'deploy', 'lib', 'runtime-path.sh'),
+    path.join(fixtureRoot, 'deploy', 'lib', 'runtime-path.sh'),
+  );
   fs.writeFileSync(path.join(fixtureRoot, '.nvmrc'), `${nvmrcContents}\n`, 'utf8');
   fs.writeFileSync(
     path.join(fixtureRoot, 'package.json'),

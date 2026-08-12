@@ -308,7 +308,8 @@ export function writeMcpConfigToPath(
  * Merge the generated opencode `mcp` block into a possibly-existing
  * opencode.json object. Pure — does no IO. Preserves every unrelated top-level
  * key, sibling MCP server, and fleet/user-owned agent policy; overwrites only
- * generated MCP entries.
+ * generated MCP entries and both layers of the current-chat text-send deny
+ * owned by the spawn-per-turn delivery contract.
  */
 export function mergeOpencodeConfig(
   existing: Record<string, unknown> | null,
@@ -323,14 +324,33 @@ export function mergeOpencodeConfig(
     : {};
   base.mcp = { ...existingMcp, ...generatedMcp };
 
-  if (base.agent && typeof base.agent === 'object' && !Array.isArray(base.agent)) {
-    const existingAgents = { ...(base.agent as Record<string, unknown>) };
-    delete existingAgents[WHATSOUP_HEADLESS_EXECUTION_PROFILE];
-    if (Object.keys(existingAgents).length > 0) {
-      base.agent = existingAgents;
-    } else {
-      delete base.agent;
-    }
+  const existingPermission = base.permission;
+  base.permission = {
+    ...(typeof existingPermission === 'string' ? { '*': existingPermission } : {}),
+    ...(existingPermission && typeof existingPermission === 'object' && !Array.isArray(existingPermission)
+      ? existingPermission as Record<string, unknown>
+      : {}),
+    whatsoup_send_message: 'deny',
+  };
+
+  if (base.agent === undefined || (base.agent && typeof base.agent === 'object' && !Array.isArray(base.agent))) {
+    const existingAgents = base.agent === undefined
+      ? {}
+      : { ...(base.agent as Record<string, unknown>) };
+    const existingHeadless = existingAgents[WHATSOUP_HEADLESS_EXECUTION_PROFILE];
+    const headless = existingHeadless && typeof existingHeadless === 'object' && !Array.isArray(existingHeadless)
+      ? { ...(existingHeadless as Record<string, unknown>) }
+      : {};
+    const existingHeadlessPermission = headless.permission;
+    headless.permission = {
+      ...(typeof existingHeadlessPermission === 'string' ? { '*': existingHeadlessPermission } : {}),
+      ...(existingHeadlessPermission && typeof existingHeadlessPermission === 'object' && !Array.isArray(existingHeadlessPermission)
+        ? existingHeadlessPermission as Record<string, unknown>
+        : {}),
+      whatsoup_send_message: 'deny',
+    };
+    existingAgents[WHATSOUP_HEADLESS_EXECUTION_PROFILE] = headless;
+    base.agent = existingAgents;
   }
 
   if (providerConfig?.baseUrl) {

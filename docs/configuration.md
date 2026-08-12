@@ -864,7 +864,7 @@ proof unless a WhatSoup-specific proof artifact says so.
 | `sessionScope` | string | no | `single` at runtime (`per_chat` via fleet API) | `single`, `shared`, or `per_chat`. See [Session Scopes](#session-scopes). Omitted = the runtime defaults to `single`; the fleet create/update APIs fill `per_chat` when the whole `agentOptions` block is omitted. Invalid values are rejected on every path (create, update, load, discovery). |
 | `model` | string | no | provider default | Agent-scoped model override, passed to the provider CLI as `--model` at spawn. Highest-precedence agent-model source: wins over top-level `model` and `models.conversation` (`resolveAgentModel`, `src/core/agent-model.ts`). When set, the provider CLI runs this model regardless of the harness's own settings default. |
 | `provider` | string | no | `claude-cli` | Agent provider ID. Must be one of `claude-cli`, `codex-cli`, `gemini-cli`, `opencode-cli`, `openai-api`, or `anthropic-api`. A primary `opencode-cli` route requires a non-empty top-level `model` or `models.conversation`; other CLI providers may use their own default model. |
-| `providerConfig` | object | no | — | Provider-specific overrides. The selected provider owns the accepted keys; unknown provider IDs are rejected before runtime startup. For `opencode-cli`, `providerConfig.executionProfile` selects an explicit OpenCode agent. `providerConfig.baseUrl` selects a custom endpoint and `providerConfig.apiKeyService` names the keyring service that authenticates it — see [OpenCode headless execution profile](#opencode-headless-execution-profile) and [Custom endpoint](#custom-endpoint-providerconfigbaseurl) for routing, auth, and validation semantics. |
+| `providerConfig` | object | no | — | Provider-specific overrides. The selected provider owns the accepted keys; unknown provider IDs are rejected before runtime startup. For `opencode-cli`, `providerConfig.executionProfile` selects an explicit OpenCode agent and `providerConfig.autoApprovePermissions` opts a trusted unattended lane into OpenCode `--auto`. `providerConfig.baseUrl` selects a custom endpoint and `providerConfig.apiKeyService` names the keyring service that authenticates it — see [OpenCode headless execution profile](#opencode-headless-execution-profile) and [Custom endpoint](#custom-endpoint-providerconfigbaseurl) for routing, auth, and validation semantics. |
 | `providerDataPolicy` | string | no | — | Classification attached to the primary provider route: `trusted` or `restricted`. It is required when `providerBoundaryMode` is `enforce`. `restricted` is currently supported only for `openai-api` and `anthropic-api`; CLI providers are rejected because this classification layer does not provide a mechanical CLI isolation boundary. Classification alone does not sanitize provider payloads. |
 | `providerBoundaryMode` | string | no | `shadow` | `shadow` records route policy state without blocking a missing classification. `enforce` rejects startup or route admission when the primary or any fallback route lacks a supported explicit policy. This is a route-admission/checkpoint-integrity gate, not the restricted-provider payload boundary described in the open [provider data-policy security handoff](security-handoffs/2026-07-23-provider-data-policy.md). |
 | `fallbackProvider` | string | no | — | Legacy single fallback provider. Prefer `fallbacks` when configuring more than one backup. Must be one of the same IDs as `provider` (`claude-cli`, `codex-cli`, `gemini-cli`, `opencode-cli`, `openai-api`, `anthropic-api`); unknown IDs are rejected before startup. When the primary returns a usage-limit, rate-limit, or auth-required terminal result and the selected fallback is usable, the runtime sends a short in-chat handoff notice and replays the interrupted turn on the fallback provider when no tool side effects have started. Usage-limit and rate-limit fallbacks automatically revert when the window ends; auth-required fallbacks stay armed until the primary passes a background recovery probe. Omitted = fallback disabled (unless `fallbacks` is set). See [Provider fallback behavior](#provider-fallback-behavior) for the full lifecycle: user notice, window persistence across restarts, turn telemetry, credential pre-flight, and admin override commands. |
@@ -1021,6 +1021,8 @@ config error):
 - **Unsupported `providerConfig.executionProfile`.** When present, the value
   must be exactly `whatsoup-headless`. Arbitrary safe-looking agent names are
   rejected so a config cannot silently select a user/default policy.
+- **Non-boolean `providerConfig.autoApprovePermissions`.** The opt-in must be
+  exactly `true` or `false`; string/number/object lookalikes are rejected.
 
 A missing `sessionScope` is **not** an error: the runtime defaults it to
 `single`, so load and discovery accept the omission rather than flagging a
@@ -1036,27 +1038,29 @@ agent name provisioned for the instance, `whatsoup-headless`:
 "agentOptions": {
   "provider": "opencode-cli",
   "providerConfig": {
-    "executionProfile": "whatsoup-headless"
+    "executionProfile": "whatsoup-headless",
+    "autoApprovePermissions": true
   }
 }
 ```
 
 Every fresh turn, resumed turn, and model-usability probe with that field
 configured passes exactly one `--agent whatsoup-headless` selector. WhatSoup
-does not read OpenCode's `default_agent` and never adds `--auto`. An absent
-field remains a legacy, report-only state during the first source rollout;
+does not read OpenCode's `default_agent`. It adds exactly one `--auto` only when
+`autoApprovePermissions` is explicitly `true`; absent or `false` stays on
+OpenCode's approval-default path. An absent execution-profile field remains a
+legacy, report-only state during the first source rollout;
 later hardened fallback admission treats that state as not aligned. A present
 value other than `whatsoup-headless` fails config validation and the runtime
 resolver also rejects it before spawn.
 
-WhatSoup owns only the reserved selector contract. The fleet-policy package is
-the single source for the versioned `whatsoup-headless` agent artifact and its
-deployment; this repository does not synthesize an `agent` entry in
-`opencode.json` or carry a second permission-policy template. The fleet source
-is deliberately non-deployable until it has an exact workspace binding and
-supported-version proof. A fleet lane becomes eligible only after separate
-static resolution and an edit-plus-shell canary prove the installed profile.
-Its permission rules are dispatcher policy, not an operating-system sandbox.
+WhatSoup owns the reserved selector's delivery-authority rule. Its startup
+merge ensures that `opencode.json` contains a `whatsoup-headless` agent entry
+with `whatsoup_send_message: "deny"`, creating the entry when absent and
+preserving its other fields when present. The same deny is written at the
+global permission level, so both selected-agent and inherited permission
+resolution keep live-turn text as the only reply owner. These rules are
+dispatcher policy, not an operating-system sandbox.
 
 OpenCode children use a fresh positive environment allowlist. The non-secret
 base is `PATH`, `HOME`, `USER`, `SHELL`, `LANG`, `TERM`, `NODE_PATH`,
@@ -1067,6 +1071,17 @@ roots, but its controlling flag is not forwarded. The child does not receive
 `SUDO_ASKPASS`, `ALLOW_M365_MUTATIONS`, `CLAUDE_CONFIG_DIR`, unrelated
 connector/provider mutation flags, non-selected provider credentials, or
 unknown secret-shaped parent variables.
+
+Conversation turns also keep their composed system instructions, application
+context, and user text out of process arguments. WhatSoup starts `opencode run`
+with only structural flags, writes the complete turn once to the child's
+non-TTY stdin, and closes stdin so OpenCode can begin. This prevents ordinary
+same-user process inspection from exposing chat content through argv. The
+opt-in fleet functional probe uses the same non-TTY stdin contract, so a PATH
+shadow or wrapper that allocates a PTY, discards stdin, or re-adds the prompt to
+argv fails the probe instead of passing version/help checks. The fixed
+model-usability probe text contains no user or instance context and remains a
+separate diagnostic path.
 
 #### Custom endpoint (`providerConfig.baseUrl`)
 
@@ -1103,19 +1118,32 @@ must name an inference-provider service (`PROVIDER_API_KEY_SERVICES`) and
 requires `baseUrl` (see
 [Cross-field validation rules](#cross-field-validation-rules)).
 
-**Headless permissions (opencode-cli):** WhatSoup's startup merge owns only the
-generated MCP and optional custom-endpoint blocks. It preserves every existing
-unrelated `agent` entry, removes the obsolete inline `whatsoup-headless` entry,
-and never creates or replaces that reserved profile; the fleet-policy package
-owns the external artifact. A route with
-`providerConfig.executionProfile: "whatsoup-headless"` selects the externally
-provisioned profile explicitly for every fresh, resumed, and model-usability
-turn. Any other configured profile name is rejected.
+**Headless permissions (opencode-cli):** WhatSoup's startup merge owns the
+generated MCP block, the optional custom-endpoint block, and one exact
+`whatsoup_send_message: "deny"` permission. Live-turn assistant text is the
+single delivery owner for an OpenCode reply; denying that current-chat text
+tool prevents an auto-approved fallback from sending a second copy before the
+runtime echoes its normal answer. Other existing permission rules and unrelated
+`agent` entries are preserved. The merge creates the reserved
+`whatsoup-headless` entry when absent, or preserves its existing fields while
+enforcing the one delivery deny when present. A route with
+`providerConfig.executionProfile: "whatsoup-headless"` selects that reserved
+profile explicitly for every fresh, resumed, and model-usability turn. Any
+other configured profile name is rejected.
 
-WhatSoup does not infer this selector from OpenCode's `default_agent`, and does
-not pass `--auto`, `--yolo`, or a blanket permission-bypass flag. A legacy
-route without `executionProfile` remains non-hardened and must not pass fleet
-fallback admission.
+WhatSoup does not infer this selector from OpenCode's `default_agent` and never
+passes `--yolo` or an implicit blanket permission-bypass flag. A legacy route
+without `executionProfile` remains non-hardened and must not pass fleet fallback
+admission. For a trusted unattended route,
+`providerConfig.autoApprovePermissions: true` passes OpenCode's documented
+`--auto` flag so permissions that would otherwise ask are approved; explicit
+OpenCode `deny` rules still apply, including the generated current-chat
+`whatsoup_send_message` deny. The setting is inherited by OpenCode fallback
+entries after primary custom-endpoint fields are stripped, which lets a primary
+and fallback share one declared authority posture without sharing credentials.
+Because this broadens tool execution, leave it absent unless the fallback is
+intended to carry the same host authority as the primary and its explicit deny
+rules have been reviewed. See [OpenCode permissions](https://opencode.ai/docs/permissions).
 OpenCode permissions are an approval policy, not an operating-system sandbox:
 they do not establish filesystem confidentiality, process isolation, or network
 containment. Use an OS-level boundary when those properties are required. If
@@ -1276,7 +1304,22 @@ When deploying an instance config that uses `fallbackProvider` or `fallbacks` to
    ```
    The runtime spawns `opencode --version` at window-arm time (`src/runtimes/agent/providers/binary-preflight.ts`) and raises `fallback_binary_missing` if the binary is absent. The check runs on the service user's PATH, so install under that user or ensure the binary is in a PATH entry that the service environment inherits.
 
-2. **Provision the provider API key** via one of three portable routes. The lookup order is: environment variable first (when no per-user scoping is requested), then platform keyring (`src/lib/keyring.ts:82`).
+   On macOS, the daily functional health probe compares the PATH in the
+   generated instance plist with the PATH in the currently loaded `launchctl`
+   job and fails on any mismatch. Regenerating a plist is therefore not enough:
+   reload the LaunchAgent before treating its fallback canary as current. A
+   health-only command override cannot substitute a GUI/SSH binary for the
+   runtime's `opencode` resolution. The launcher and health probe then derive
+   the effective provider PATH through `deploy/lib/runtime-path.sh`, including
+   the launcher's `$HOME/.local/bin` and pinned-Node prefixes. This second step
+   prevents a matching static LaunchAgent PATH from hiding a runtime-only
+   binary shadow or ordering change.
+
+2. **Provision the provider API key** via one of three portable routes. Runtime
+   lookup order is environment variable, private WhatSoup credential file,
+   platform keyring, then OpenCode's private `auth.json` entry. Credential files
+   must be current-user regular files with private mode and bounded size;
+   symlinks and loose modes are refused.
 
    **Route A — environment variable (universal).**
    Set the variable named in `SERVICE_ENV_MAP` (`src/lib/provider-key-service.ts`, re-exported from `src/lib/keyring.ts`):

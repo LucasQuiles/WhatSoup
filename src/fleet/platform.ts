@@ -19,6 +19,8 @@ import { repoRoot, tmpRoot, xdgDir } from './paths.ts';
 import { SIGNAL } from '../lib/signals.ts';
 
 const execFileAsync = promisify(execFile);
+const LAUNCHD_BOOTSTRAP_RETRY_LIMIT = 10;
+const LAUNCHD_BOOTSTRAP_RETRY_DELAY_MS = 1_000;
 
 // ---------------------------------------------------------------------------
 // Platform detection
@@ -280,9 +282,39 @@ function rollbackFailure(original: unknown, rollbacks: readonly unknown[]): Erro
   return new Error(`launchd reload failed: ${originalMessage}; rollback also failed: ${rollbackMessage}`);
 }
 
+function isTransientLaunchdBootstrapError(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false;
+  const candidate = error as { code?: unknown; message?: unknown; stderr?: unknown };
+  if (candidate.code === 5 || candidate.code === '5') return true;
+  const detail = [candidate.message, candidate.stderr]
+    .filter((value): value is string => typeof value === 'string')
+    .join('\n');
+  return /Bootstrap failed:\s*5:\s*Input\/output error/u.test(detail);
+}
+
+async function waitForLaunchdBootstrapRetry(): Promise<void> {
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, LAUNCHD_BOOTSTRAP_RETRY_DELAY_MS);
+  });
+}
+
+async function bootstrapLaunchdJobWithRetry(domain: string, dest: string): Promise<void> {
+  for (let attempt = 1; attempt <= LAUNCHD_BOOTSTRAP_RETRY_LIMIT; attempt += 1) {
+    try {
+      await execFileAsync('launchctl', ['bootstrap', domain, dest]);
+      return;
+    } catch (error) {
+      if (attempt === LAUNCHD_BOOTSTRAP_RETRY_LIMIT || !isTransientLaunchdBootstrapError(error)) {
+        throw error;
+      }
+      await waitForLaunchdBootstrapRetry();
+    }
+  }
+}
+
 async function bootstrapLaunchdService(name: string, dest: string): Promise<void> {
   const domain = launchdDomain();
-  await execFileAsync('launchctl', ['bootstrap', domain, dest]);
+  await bootstrapLaunchdJobWithRetry(domain, dest);
   await execFileAsync('launchctl', ['kickstart', '-k', launchdServiceTarget(name)]);
 }
 

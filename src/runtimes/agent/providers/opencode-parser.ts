@@ -56,6 +56,7 @@ export interface OpenCodeParser {
  */
 export function createOpenCodeParser(): OpenCodeParser {
   let firstStepSeen = false;
+  let firstRecordSeen = false;
 
   return {
     parse(line: string): AgentEvent | null {
@@ -63,9 +64,14 @@ export function createOpenCodeParser(): OpenCodeParser {
         return null;
       }
 
+      const normalizedLine = !firstRecordSeen
+        ? line.replace(/^\^D\x08\x08(?=\{)/, '')
+        : line;
+      firstRecordSeen = true;
+
       let parsed: unknown;
       try {
-        parsed = JSON.parse(line);
+        parsed = JSON.parse(normalizedLine);
       } catch {
         return { type: 'parse_error', line };
       }
@@ -189,6 +195,7 @@ export function createOpenCodeParser(): OpenCodeParser {
 
     reset() {
       firstStepSeen = false;
+      firstRecordSeen = false;
     },
   };
 }

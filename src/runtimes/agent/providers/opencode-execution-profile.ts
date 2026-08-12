@@ -8,6 +8,7 @@ export { WHATSOUP_HEADLESS_EXECUTION_PROFILE };
 
 export interface OpenCodeExecutionProfileConfig {
   executionProfile?: unknown;
+  autoApprovePermissions?: unknown;
   baseUrl?: unknown;
   [key: string]: unknown;
 }
@@ -55,6 +56,7 @@ export function buildOpenCodeRunArgs(options: OpenCodeRunArgsOptions): string[] 
     'run',
     '--format', 'json',
     '--pure',
+    ...(options.providerConfig?.autoApprovePermissions === true ? ['--auto'] : []),
     ...(options.progressLogs ? ['--print-logs', '--log-level', 'INFO'] : []),
     ...openCodeAgentArgs(options.providerConfig),
     ...(options.sessionId ? ['--session', options.sessionId] : []),

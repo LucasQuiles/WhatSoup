@@ -75,6 +75,15 @@ elif [[ -z "$BOT_ERRORS_SOCKET_VALUE" && -n "$BOT_ERRORS_SOCKET_PATH_VALUE" ]]; 
   BOT_ERRORS_SOCKET_VALUE="$BOT_ERRORS_SOCKET_PATH_VALUE"
 fi
 BOT_ERRORS_DB_VALUE="$(env_or_default BOT_ERRORS_DB "")"
+PINNED_NODE_BIN=""
+if [[ -r "$REPO_ROOT/.nvmrc" ]]; then
+  NVMRC_VERSION="$(tr -d '[:space:]' < "$REPO_ROOT/.nvmrc")"
+  if [[ "$NVMRC_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    PINNED_NODE_BIN="$HOME/.nvm/versions/node/v$NVMRC_VERSION/bin:"
+  fi
+fi
+DEFAULT_PROVIDER_PATH="$HOME/.local/share/whatsoup/npm-global/bin:${PINNED_NODE_BIN}$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+BOT_ERRORS_PROVIDER_PATH_VALUE="$(env_or_default BOT_ERRORS_PROVIDER_PATH "$DEFAULT_PROVIDER_PATH")"
 
 # Heartbeat-watchdog check selector (#2466). Default to local-safe checks that
 # exclude hub-only central services (q_loop, collector, fleet_sentinel,
@@ -104,6 +113,7 @@ BOT_ERRORS_EXPECTED_JID_XML="$(xml_escape "$BOT_ERRORS_EXPECTED_JID_VALUE")"
 BOT_ERRORS_SOCKET_PATH_XML="$(xml_escape "$BOT_ERRORS_SOCKET_PATH_VALUE")"
 BOT_ERRORS_SOCKET_XML="$(xml_escape "$BOT_ERRORS_SOCKET_VALUE")"
 BOT_ERRORS_DB_XML="$(xml_escape "$BOT_ERRORS_DB_VALUE")"
+BOT_ERRORS_PROVIDER_PATH_XML="$(xml_escape "$BOT_ERRORS_PROVIDER_PATH_VALUE")"
 
 mkdir -p "$STATE_DIR/logs" "$LAUNCH_AGENTS"
 chmod 700 "$STATE_DIR" "$STATE_DIR/logs" 2>/dev/null || true
@@ -249,6 +259,7 @@ write_plist "$health_label" "$health_plist" "$(cat <<PLIST
   </array>
   <key>EnvironmentVariables</key>
   <dict>
+    <key>PATH</key><string>$BOT_ERRORS_PROVIDER_PATH_XML</string>
     <key>BOT_ERRORS_STATE_DIR</key><string>$STATE_DIR_XML</string>
     <key>BOT_ERRORS_JID</key><string>$BOT_ERRORS_JID_XML</string>
     <key>BOT_ERRORS_EXPECTED_JID</key><string>$BOT_ERRORS_EXPECTED_JID_XML</string>

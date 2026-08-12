@@ -40,7 +40,7 @@ function extractTmpdirBlock(source: string): string {
 
 function extractVersionExposureBlock(source: string): string {
   const start = source.indexOf('# Expose checkout version metadata');
-  const end = source.indexOf('\n# Ensure PATH includes', start);
+  const end = source.indexOf('\n# Pin process temp files', start);
   expect(start).toBeGreaterThan(-1);
   expect(end).toBeGreaterThan(start);
   return source.slice(start, end);
@@ -639,14 +639,42 @@ describe('health token shell wrappers', () => {
     expect(stdout).toBe(path.join(dataHome, 'whatsoup', 'tmp', 'media-bot'));
   });
 
+  it('deploy/whatsoup derives its provider PATH through the shared runtime helper', () => {
+    const source = fs.readFileSync('deploy/whatsoup', 'utf8');
+
+    expect(source).toContain('. "$SCRIPT_DIR/lib/runtime-path.sh"');
+    expect(source).toContain('whatsoup_export_runtime_path "$HOME" "$NODE"');
+    expect(source).not.toContain('export PATH="$HOME/.local/bin:$(dirname "$NODE"):$PATH"');
+  });
+
+  it('the shared runtime PATH helper ignores a shadowed dirname executable', () => {
+    const root = tmp.make('whatsoup-runtime-path');
+    const binDir = path.join(root, 'bin');
+    const marker = path.join(root, 'dirname-ran');
+    fs.mkdirSync(binDir, { recursive: true });
+    writeExecutable(path.join(binDir, 'dirname'), `#!/bin/sh\n/usr/bin/touch '${marker}'\nprintf '/shadowed\\n'\n`);
+
+    const output = execFileSync('/bin/bash', [
+      '-c',
+      '. "$1"; PATH="$2"; whatsoup_effective_runtime_path "/fixture/user-root" "/fixture/node/bin/node" "/loaded/bin"',
+      'runtime-path',
+      path.resolve('deploy/lib/runtime-path.sh'),
+      binDir,
+    ], { encoding: 'utf8' }).trim();
+
+    expect(output).toBe('/fixture/user-root/.local/bin:/fixture/node/bin:/loaded/bin');
+    expect(fs.existsSync(marker)).toBe(false);
+  });
+
   it('deploy/whatsoup captures full checkout SHA and branch after preflight', () => {
     const source = fs.readFileSync('deploy/whatsoup', 'utf8');
     const preflightIndex = source.indexOf('preflight-check.sh');
     const versionIndex = source.indexOf('# Expose checkout version metadata');
-    const pathIndex = source.indexOf('# Ensure PATH includes');
+    const pathIndex = source.indexOf('whatsoup_export_runtime_path "$HOME" "$NODE"');
+    expect(pathIndex).toBeGreaterThan(-1);
+    expect(preflightIndex).toBeGreaterThan(pathIndex);
     expect(preflightIndex).toBeGreaterThan(-1);
     expect(versionIndex).toBeGreaterThan(preflightIndex);
-    expect(pathIndex).toBeGreaterThan(versionIndex);
 
     const result = runVersionExposureProbe('main');
     expect(result.status).toBe(0);

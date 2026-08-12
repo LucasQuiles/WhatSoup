@@ -92,7 +92,10 @@ const OPENCODE_COMPACTION_CONTINUITY_GUIDANCE =
 export const MAX_STDOUT_LINE_BYTES = 16 * 1024 * 1024;
 
 function isOpenCodeDiagnosticLogLine(line: string): boolean {
-  return /^timestamp=\S+\s+level=(?:TRACE|DEBUG|INFO|WARN|ERROR)\b/.test(line);
+  if (/^(?:\^D\x08\x08)?timestamp=\S+\s+level=(?:TRACE|DEBUG|INFO|WARN|ERROR)\b/.test(line)) {
+    return true;
+  }
+  return /^\x1b\[93m\x1b\[1m! \x1b\[0mpermission requested: [a-z][a-z0-9_-]{0,63} \([^\r\n\x1b]{1,512}\); auto-rejecting\r?$/u.test(line);
 }
 // ─── 3-tier watchdog ────────────────────────────────────────────────────────
 // Soft probes notify the user; hard kill terminates the process.
@@ -164,9 +167,18 @@ const POLL_DECISION_GUIDANCE = [
 
 const BACKGROUND_TASK_DELIVERY_GUIDANCE = [
   'Background tasks (Agent tool, background Bash):',
+  '- During a live user turn, answer the current chat with plain reply text. Never call send_message for that same answer; the runtime delivers reply text automatically.',
   '- Reply text during a live turn is delivered normally, but reply text emitted after your turn ends is dropped by the transport as unowned — it never reaches the chat.',
   '- When a background task completes after your turn has ended, deliver its result with the MCP send_message tool, never plain reply text; in a global-tier session pass this chat\'s JID explicitly. A result that returns while your turn is still live is normal reply text — do not also restate a result you already delivered via send_message.',
   '- Never say work is dispatched or running unless the dispatching tool call happened in the same turn; if you promise a report, deliver it via send_message when the task returns.',
+].join('\n');
+
+const OPENCODE_BACKGROUND_TASK_DELIVERY_GUIDANCE = [
+  'Background tasks (Agent tool, background Bash):',
+  '- During a live user turn, answer the current chat with plain reply text. Never call send_message for that same answer; the runtime delivers reply text automatically.',
+  '- Reply text emitted after your turn ends is dropped by the transport as unowned — it never reaches the chat.',
+  '- The selected OpenCode profile denies send_message; keep work inside the owned live turn and await bounded tasks before giving the final response.',
+  '- Runtime durability and fallback recovery own interrupted user turns. Do not promise a later self-delivery or claim work is running unless it will complete inside this turn.',
 ].join('\n');
 
 /**
@@ -902,7 +914,9 @@ export class SessionManager {
       'You have full access to the local machine via bypassPermissions mode.',
       `Working directory: ${cwd}`,
       POLL_DECISION_GUIDANCE,
-      BACKGROUND_TASK_DELIVERY_GUIDANCE,
+      this.provider === 'opencode-cli'
+        ? OPENCODE_BACKGROUND_TASK_DELIVERY_GUIDANCE
+        : BACKGROUND_TASK_DELIVERY_GUIDANCE,
       ...(this.provider === 'opencode-cli' ? [OPENCODE_COMPACTION_CONTINUITY_GUIDANCE] : []),
     ].join('\n');
     const sources = [transportPrelude];
@@ -1398,8 +1412,6 @@ export class SessionManager {
   }
 
   private buildSpawnPerTurnArgs(cwd: string, input: ProviderTurnInput): string[] {
-    const prompt = this.buildSpawnPerTurnPrompt(input);
-
     switch (this.provider) {
       // codex-cli and gemini-cli are now persistent, not spawn-per-turn.
 
@@ -1415,7 +1427,6 @@ export class SessionManager {
             providerConfig: this.providerConfig,
             sessionId: resumableSessionId,
             model: this.model,
-            prompt,
             progressLogs: true,
           });
         }
@@ -1423,7 +1434,6 @@ export class SessionManager {
         return buildOpenCodeRunArgs({
           providerConfig: this.providerConfig,
           model: this.model,
-          prompt,
           progressLogs: true,
         });
       }
@@ -3455,10 +3465,15 @@ export class SessionManager {
       );
       this.child = child;
 
-      // Spawn-per-turn providers receive their prompt as CLI args, not stdin.
-      // Close stdin immediately so providers that read stdin (like Codex exec's
-      // read_to_end()) don't block waiting for EOF.
-      child.stdin.end();
+      // OpenCode reads a non-TTY stdin stream as its run message. Keep the
+      // system prompt, continuity context, and user text out of process argv,
+      // where same-host process inspection would otherwise expose them.
+      // Other spawn-per-turn providers still receive EOF immediately.
+      child.stdin.end(
+        this.provider === 'opencode-cli'
+          ? this.buildSpawnPerTurnPrompt(input)
+          : undefined,
+      );
 
       child.on('error', (err: NodeJS.ErrnoException) => {
         if (!this.isCurrentPersistentChild(child, childGeneration) || boundarySettled) return;
@@ -3510,6 +3525,10 @@ export class SessionManager {
             || !this.isCurrentPersistentChild(child, childGeneration)
             || this.activeProviderTurnToken !== providerTurnToken
           ) return;
+          if (this.provider === 'opencode-cli' && isOpenCodeDiagnosticLogLine(line)) {
+            this.tickWatchdog();
+            continue;
+          }
           for (const event of parse(line)) {
             if (
               !this.active

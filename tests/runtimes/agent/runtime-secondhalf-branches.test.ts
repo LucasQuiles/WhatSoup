@@ -202,6 +202,7 @@ vi.mock('../../../src/runtimes/agent/session.ts', () => ({
     return mockSession;
   }),
   formatAge: vi.fn(() => 'now'),
+  getProviderBinary: vi.fn(() => null),
 }));
 
 vi.mock('../../../src/runtimes/agent/outbound-queue.ts', () => ({
@@ -1060,17 +1061,42 @@ import { getRecentMessages } from '../../../src/core/messages.ts';
 
 describe('fresh-spawn context preamble (P4 — effect-free by construction)', () => {
   const chatJid = '15550002222@s.whatsapp.net';
+  const bearerToken = 'tokFAKE1234567890abcd';
 
   beforeEach(() => {
-    vi.mocked(mockSession.sendTurn).mockClear();
+    const agentConfig = mockConfig as typeof mockConfig & {
+      agentProvider?: string;
+      agentFallbacks?: Array<{ provider: string; model?: string }>;
+    };
+    agentConfig.agentProvider = 'claude-cli';
+    delete agentConfig.agentFallbacks;
+    vi.mocked(mockSession.sendTurn).mockReset().mockResolvedValue(undefined);
+    vi.mocked(mockSession.getProviderId).mockReset().mockReturnValue('claude-cli');
+    vi.mocked(mockSession.getStatus).mockReset().mockReturnValue({
+      active: false,
+      pid: null,
+      sessionId: null,
+      startedAt: null,
+      messageCount: 0,
+      lastMessageAt: null,
+    });
     vi.mocked(getRecentMessages).mockReset();
     vi.mocked(getRecentMessages).mockReturnValue([]);
   });
 
+  afterEach(() => {
+    const agentConfig = mockConfig as typeof mockConfig & {
+      agentProvider?: string;
+      agentFallbacks?: Array<{ provider: string; model?: string }>;
+    };
+    delete agentConfig.agentProvider;
+    delete agentConfig.agentFallbacks;
+  });
+
   function recentRows() {
     return [
-      { timestamp: 1_784_300_000, senderName: 'Lucas', senderJid: chatJid, content: 'earlier message two' },
-      { timestamp: 1_784_299_000, senderName: 'q', senderJid: '15550003333@s.whatsapp.net', content: 'earlier message one' },
+      { timestamp: 1_784_299_000, senderName: 'q', senderJid: '15550003333@s.whatsapp.net', content: 'earlier message one', isFromMe: true },
+      { timestamp: 1_784_300_000, senderName: 'Lucas', senderJid: chatJid, content: 'earlier message two', isFromMe: false },
     ];
   }
 
@@ -1101,7 +1127,45 @@ describe('fresh-spawn context preamble (P4 — effect-free by construction)', ()
     }])[0];
     expect(sent.applicationContext[0]).toMatch(/^\[Recent chat context — read before responding\]\n/);
     expect(sent.applicationContext[0]).toContain('earlier message one');
+    expect(sent.applicationContext[0].indexOf('earlier message one'))
+      .toBeLessThan(sent.applicationContext[0].indexOf('earlier message two'));
     expect(sent.userText).toBe('Continue');
+  });
+
+  it('keeps the active inbound request out of recent context so it appears exactly once', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test');
+    const state = runtime as unknown as PollRuntimeState & {
+      sendTurnToSession(
+        session: typeof mockSession,
+        chatJid: string,
+        text: string,
+        mapKey?: string,
+        actorJid?: string,
+      ): Promise<void>;
+    };
+    await runtime.start();
+    vi.mocked(getRecentMessages).mockReturnValue([
+      ...recentRows(),
+      {
+        timestamp: 1_784_301_000,
+        senderName: 'Lucas',
+        senderJid: chatJid,
+        content: 'Continue',
+        isFromMe: false,
+      },
+    ] as ReturnType<typeof getRecentMessages>);
+
+    await state.sendTurnToSession(mockSession, chatJid, 'Continue', undefined, chatJid);
+
+    const sent = (vi.mocked(mockSession.sendTurn).mock.calls[0] as unknown as [{
+      applicationContext: string[];
+      userText: string;
+    }])[0];
+    expect(sent.applicationContext[0]).not.toContain('Continue');
+    expect(sent.userText).toBe('Continue');
+    expect(JSON.stringify(sent).match(/Continue/g)).toHaveLength(1);
   });
 
   it('sends the plain user text when no recent history exists', async () => {
@@ -1136,6 +1200,66 @@ describe('fresh-spawn context preamble (P4 — effect-free by construction)', ()
 
     expect(mockSession.sendTurn).toHaveBeenCalledTimes(1);
     expect(mockSession.sendTurn).toHaveBeenCalledWith('Continue');
+  });
+
+  it('redacts fresh context for a live cross-provider session after the fallback window expires', async () => {
+    const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger, 'test');
+    await runtime.start();
+    vi.mocked(mockSession.getProviderId).mockReturnValue('opencode-cli');
+    vi.mocked(getRecentMessages).mockReturnValue([{
+      timestamp: 1_784_300_000,
+      senderName: 'Lucas',
+      senderJid: chatJid,
+      content: `use Bearer ${bearerToken} for the call`,
+      isFromMe: false,
+    }] as ReturnType<typeof getRecentMessages>);
+
+    await runtime.handleMessage(makeMsg({
+      chatJid,
+      senderJid: chatJid,
+      content: 'Continue',
+    }));
+    await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledTimes(1));
+
+    const sent = (vi.mocked(mockSession.sendTurn).mock.calls[0] as unknown as [{
+      applicationContext: string[];
+      userText: string;
+    }])[0];
+    expect(sent.applicationContext[0]).toContain('Bearer [REDACTED]');
+    expect(sent.applicationContext[0]).not.toContain(bearerToken);
+    expect(sent.userText).toBe('Continue');
+  });
+
+  it('preserves fresh context for a same-provider session while a fallback window is active', async () => {
+    const agentConfig = mockConfig as typeof mockConfig & {
+      agentFallbacks?: Array<{ provider: string; model?: string }>;
+    };
+    agentConfig.agentFallbacks = [{ provider: 'claude-cli', model: 'haiku-fast' }];
+    const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger, 'test');
+    await runtime.start();
+    expect(runtime.forceFallback()).toMatchObject({ ok: true });
+    vi.mocked(getRecentMessages).mockReturnValue([{
+      timestamp: 1_784_300_000,
+      senderName: 'Lucas',
+      senderJid: chatJid,
+      content: `use Bearer ${bearerToken} for the call`,
+      isFromMe: false,
+    }] as ReturnType<typeof getRecentMessages>);
+
+    await runtime.handleMessage(makeMsg({
+      chatJid,
+      senderJid: chatJid,
+      content: 'Continue',
+    }));
+    await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledTimes(1));
+
+    const sent = (vi.mocked(mockSession.sendTurn).mock.calls[0] as unknown as [{
+      applicationContext: string[];
+      userText: string;
+    }])[0];
+    expect(sent.applicationContext[0]).toContain(bearerToken);
+    expect(sent.applicationContext[0]).not.toContain('Bearer [REDACTED]');
+    expect(sent.userText).toBe('Continue');
   });
 });
 

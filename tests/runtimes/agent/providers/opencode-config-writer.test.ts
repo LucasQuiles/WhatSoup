@@ -36,17 +36,25 @@ describe('mergeOpencodeConfig — merge without clobbering', () => {
         enabled: true,
       },
     });
-    expect(merged).not.toHaveProperty('agent');
+    expect(merged.agent).toEqual({
+      'whatsoup-headless': { permission: { whatsoup_send_message: 'deny' } },
+    });
   });
 
-  it('preserves sibling agents while removing the obsolete reserved inline profile', () => {
+  it('preserves sibling agents while hardening the reserved inline profile', () => {
     const agents = {
       personal: { mode: 'subagent', permission: { '*': 'ask' } },
       'whatsoup-headless': { mode: 'primary', permission: { edit: 'deny' } },
     };
     const merged = mergeOpencodeConfig({ agent: agents }, generatedMcp());
 
-    expect(merged.agent).toEqual({ personal: agents.personal });
+    expect(merged.agent).toEqual({
+      personal: agents.personal,
+      'whatsoup-headless': {
+        mode: 'primary',
+        permission: { edit: 'deny', whatsoup_send_message: 'deny' },
+      },
+    });
   });
 
   it('preserves existing top-level keys and sibling mcp servers', () => {
@@ -94,9 +102,9 @@ describe('mergeOpencodeConfig — merge without clobbering', () => {
 
   it('does NOT add a provider block when no baseUrl is set', () => {
     const merged = mergeOpencodeConfig(null, generatedMcp(), { model: 'x' });
-    // Without a baseUrl the merge contains only the managed MCP block:
-    // no `provider` block and no top-level `model` rewrite leaks in.
-    expect(Object.keys(merged)).toEqual(['mcp']);
+    // Without a baseUrl the merge contains only the managed MCP block and
+    // runtime-owned global/agent send denies: no provider/model rewrite leaks in.
+    expect(Object.keys(merged)).toEqual(['mcp', 'permission', 'agent']);
   });
 });
 
@@ -160,7 +168,7 @@ describe('mergeOpencodeConfig — provider block apiKey env interpolation', () =
       model: 'MiniMax-M2',
       apiKeyService: 'minimax',
     });
-    expect(Object.keys(merged)).toEqual(['mcp']);
+    expect(Object.keys(merged)).toEqual(['mcp', 'permission', 'agent']);
   });
 });
 

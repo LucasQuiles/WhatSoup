@@ -45,6 +45,7 @@ const REPO_ROOT = resolve(__dirname, '../..');
 const PREFLIGHT = join(REPO_ROOT, 'deploy/preflight-check.sh');
 const WRAPPER = join(REPO_ROOT, 'deploy/whatsoup');
 const RESOLVE_NODE_LIB = join(REPO_ROOT, 'deploy/lib/resolve-node.sh');
+const RUNTIME_PATH_LIB = join(REPO_ROOT, 'deploy/lib/runtime-path.sh');
 const READ_PRIVATE_HEALTH_TOKEN_LIB = join(REPO_ROOT, 'deploy/lib/read-private-health-token.sh');
 const READ_PRIVATE_HEALTH_TOKEN_READER = join(REPO_ROOT, 'deploy/lib/read-private-health-token.mjs');
 const BOUNDED_EXEC_LIB = join(REPO_ROOT, 'deploy/lib/bounded-exec.sh');
@@ -193,6 +194,7 @@ function makeWrapperFixture(): WrapperFixture {
   copyFileSync(WRAPPER, wrapper);
   chmodSync(wrapper, 0o755);
   copyFileSync(RESOLVE_NODE_LIB, join(lib, 'resolve-node.sh'));
+  copyFileSync(RUNTIME_PATH_LIB, join(lib, 'runtime-path.sh'));
   copyFileSync(READ_PRIVATE_HEALTH_TOKEN_LIB, join(lib, 'read-private-health-token.sh'));
   copyFileSync(READ_PRIVATE_HEALTH_TOKEN_READER, join(lib, 'read-private-health-token.mjs'));
   copyFileSync(BOUNDED_EXEC_LIB, join(lib, 'bounded-exec.sh'));

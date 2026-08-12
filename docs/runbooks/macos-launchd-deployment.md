@@ -49,6 +49,22 @@ WhatSoup instance plists also set `TMPDIR` to a per-instance directory under
 `$XDG_DATA_HOME/whatsoup/tmp/<name>/` so process temp files stay out of macOS
 system-cleaned `/var/folders`.
 
+### OpenCode PATH shadows
+
+For an unattended OpenCode provider, validate the executable resolved by the
+plist PATH, not the executable resolved by an interactive shell. A local shim is
+part of the provider contract: it must preserve non-TTY stdin and stdout and
+must not wrap `opencode run` in `script(1)`, redirect stdin from `/dev/null`, or
+move the message back into argv. Those patterns can pass an interactive GUI
+test while failing under launchd or SSH.
+
+Profiles with `expectOpenCodeFunctionalProbe` enabled exercise the selected
+binary with structural arguments only, write the fixed canary message to stdin,
+and require terminal JSONL. A version/help pass without this functional result
+is not proof that fallback turns work. When diagnosing drift, compare the plist
+PATH, the loaded job PATH, and the exact resolved executable without printing
+its arguments or any credential value.
+
 ## Runtime Node
 
 WhatSoup's default wrappers derive the pinned runtime from `.nvmrc` and enforce
@@ -233,6 +249,28 @@ new release directory) you must reload it with `bootout` + `bootstrap`:
 launchctl bootout   gui/$(id -u)/com.whatsoup.<instance>
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.whatsoup.<instance>.plist
 ```
+
+`bootout` returning does not guarantee that launchd will immediately accept the
+same label again. During teardown, `bootstrap` can transiently return error 5
+(`Input/output error`) even when the plist is valid. Prefer the repository
+reconciler for generated instance plists:
+
+```bash
+npm run reconcile-launchd-restart-policy -- --instance <instance> --apply
+```
+
+It retries only that transient bootstrap class for a bounded interval and
+restores the previous plist/job if reload still fails. Other failures—including
+authorization or a wrong launchd domain—remain terminal. For a manual reload,
+wait and retry `bootstrap` without editing the plist again; confirm the exact
+loaded label and a new PID before declaring success.
+
+An SSH process may be able to inspect `gui/<uid>` while lacking permission to
+switch into its audit session (`launchctl asuser` can return `Operation not
+permitted`). Do not treat SSH reachability as proof of GUI-session mutation
+authority. If direct reconciliation is denied, run the bounded transaction from
+the already logged-in GUI user session or an approved session supervisor, then
+verify the loaded environment and authenticated `/health` response separately.
 
 Hazard: a `bootout`+`bootstrap` performed **over SSH** drops the job out of the
 Aqua (GUI-login) keychain *session*. For an instance whose model uses the

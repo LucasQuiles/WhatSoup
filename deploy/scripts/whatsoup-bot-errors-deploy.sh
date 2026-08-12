@@ -38,6 +38,7 @@ ROOT="${2:?missing <root>}"
 # this file's source text to derive the managed-path set independent of any
 # runtime manifest lookup.
 FILES=(
+  "deploy/lib/runtime-path.sh"
   "deploy/scripts/bot-errors-dispatcher.py"
   "deploy/scripts/bot-errors-health-check.py"
   "deploy/scripts/bot-errors-heartbeat-watchdog.py"

@@ -121,6 +121,11 @@ prepare_staging "$staging"
 clean_root="$tmp/clean-runtime"
 prepare_current_root "$clean_root"
 bash "$D" deploy "$clean_root" "$staging" > "$tmp/clean-deploy.log" 2>&1
+[[ -f "$clean_root/deploy/lib/runtime-path.sh" ]] \
+  || fail "clean deploy omitted shared runtime PATH helper"
+/bin/bash -c '. "$1"; [[ "$(whatsoup_effective_runtime_path "/fixture/user-root" "/fixture/node/bin/node" "/loaded/bin")" == "/fixture/user-root/.local/bin:/fixture/node/bin:/loaded/bin" ]]' \
+  runtime-path "$clean_root/deploy/lib/runtime-path.sh" \
+  || fail "deployed shared runtime PATH helper is not sourceable/invocable"
 grep -q "DEPLOY_OK" "$tmp/clean-deploy.log" || { cat "$tmp/clean-deploy.log"; fail "clean deploy did not report DEPLOY_OK"; }
 clean_backup=$(backup_from_log "$tmp/clean-deploy.log")
 assert_backup_outside_root "$clean_root" "$clean_backup"

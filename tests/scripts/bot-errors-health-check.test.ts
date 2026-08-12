@@ -1,10 +1,11 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative, sep } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { privateHostLabels } from '../../scripts/repo-hygiene-guard.ts';
+import { SERVICE_ENV_MAP as RUNTIME_SERVICE_ENV_MAP } from '../../src/lib/provider-key-service.ts';
 
 let tmpRoot = '';
 const privateHostLabelFixture = ['nuc', 'les'].join('');
@@ -123,6 +124,54 @@ function importHealthModulePrelude(): string {
     'm = importlib.util.module_from_spec(spec)',
     'spec.loader.exec_module(m)',
   ].join('\n');
+}
+
+function runOpenCodeFallbackProbeInventory(
+  functionalStdout: string,
+  options: { timeout?: boolean } = {},
+): string[] {
+  return JSON.parse(python([
+    importHealthModulePrelude(),
+    'import json',
+    'import os',
+    `functional_stdout = ${JSON.stringify(functionalStdout)}`,
+    'os.environ["MINIMAX_API_KEY"] = "fixture-minimax-key"',
+    'os.environ["WHATSOUP_HEALTH_TOKEN"] = "must-not-reach-provider"',
+    'os.environ["BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH"] = "/fixture/bin:/usr/bin:/bin"',
+    'def fake_provider_command_output(command, timeout_seconds, dry_stdout_env, dry_stderr_env, dry_rc_env, input_text=None, child_env=None, child_cwd=None):',
+    '    assert child_env is not None',
+    '    assert "WHATSOUP_HEALTH_TOKEN" not in child_env',
+    '    assert child_env.get("PATH") == "/fixture/bin:/usr/bin:/bin"',
+    '    assert child_env.get("MINIMAX_API_KEY") == "fixture-minimax-key"',
+    '    assert child_env.get("WHATSOUP_INSTANCE") == "agent-alpha"',
+    '    assert child_env.get("WHATSOUP_MCP_SOCKET") == "/fixture/workspace/.claude/whatsoup.sock"',
+    '    assert child_cwd == "/fixture/workspace"',
+    '    if dry_stdout_env == "BOT_ERRORS_DRY_OPENCODE_VERSION_STDOUT":',
+    '        return "1.2.3", "", 0, False',
+    '    if dry_stdout_env in {"BOT_ERRORS_DRY_OPENCODE_HELP_STDOUT", "BOT_ERRORS_DRY_OPENCODE_RUN_HELP_STDOUT"}:',
+    '        return "Usage: opencode run [flags]\\n  --format string\\n  --pure\\n  -m, --model string", "", 0, False',
+    '    if dry_stdout_env == "BOT_ERRORS_DRY_OPENCODE_FUNCTIONAL_STDOUT":',
+    '        assert "--print-logs" in command',
+    '        assert command[command.index("--log-level") + 1] == "INFO"',
+    '        assert command[command.index("--agent") + 1] == "whatsoup-headless"',
+    '        assert "--auto" in command',
+    '        assert "Reply with exactly OK." not in command',
+    '        assert input_text == "Reply with exactly OK.\\n"',
+    '        assert child_env is not None',
+    '        assert child_env.get("MINIMAX_API_KEY") == "fixture-minimax-key"',
+    '        assert "WHATSOUP_HEALTH_TOKEN" not in child_env',
+    '        return functional_stdout, "", 0, False',
+    '    raise AssertionError(f"unexpected probe surface: {dry_stdout_env}")',
+    'm.provider_command_output = fake_provider_command_output',
+    'm.executable_candidate = lambda command, path_value=None: "/fixture/opencode" if command == "opencode" and path_value == "/fixture/bin:/usr/bin:/bin" else None',
+    'm.opencode_provider_credential_fragments = lambda data, target, timeout, source_env=None: (True, ["credential_present=true"])',
+    ...(options.timeout ? ['os.environ["BOT_ERRORS_DRY_OPENCODE_FUNCTIONAL_TIMEOUT"] = "1"'] : []),
+    'profile = {}',
+    'item = {"expectOpenCodeFunctionalProbe": True}',
+    'data = {"agentOptions": {"cwd": "/fixture/workspace", "provider": "claude-cli", "providerConfig": {"opencodeCommandMode": "modern-run", "executionProfile": "whatsoup-headless", "autoApprovePermissions": True, "baseUrl": "https://primary.invalid", "apiKeyService": "openai"}, "fallbackProvider": "opencode-cli", "fallbackModel": "minimax/MiniMax-M2.7", "fallbackProviderConfig": {"executionProfile": "wrong-profile", "autoApprovePermissions": False}}}',
+    'lines = m.opencode_provider_probe_inventory(profile, item, "agent-alpha", data, "opencode-cli", "fallback")',
+    'print(json.dumps(lines))',
+  ].join('\n'))) as string[];
 }
 
 function runDeadman(tmpRoot: string, extraEnv: Record<string, string> = {}) {
@@ -5066,6 +5115,394 @@ print(m.probe_health(9092))
     expect(event.evidence).not.toContain('agent-alpha@s.whatsapp.net');
   });
 
+  describe('OpenCode fallback provider probe functional JSONL canary', () => {
+    const stepStart = JSON.stringify({ type: 'step_start', sessionID: 'canary-session' });
+    const textRecord = JSON.stringify({ type: 'text', part: { text: 'OK' } });
+    const terminal = JSON.stringify({ type: 'step_finish', part: { reason: 'stop' } });
+
+    it('accepts a complete headless turn with valid JSONL and terminal output', () => {
+      const lines = runOpenCodeFallbackProbeInventory([stepStart, textRecord, terminal].join('\n'));
+
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain('status=ok');
+      expect(lines[0]).toContain('functional_status=ok');
+      expect(lines[0]).not.toContain('Reply with exactly');
+    });
+
+    it('accepts only recognized PTY-merged OpenCode diagnostics around a complete turn', () => {
+      const diagnostic = 'timestamp=2026-08-07T05:49:16.000Z level=INFO run=health message=loop';
+      const lines = runOpenCodeFallbackProbeInventory([
+        `^D\b\b${diagnostic}`,
+        stepStart,
+        textRecord,
+        diagnostic,
+        terminal,
+      ].join('\n'));
+
+      expect(lines[0]).toContain('status=ok');
+      expect(lines[0]).toContain('functional_status=ok');
+    });
+
+    it('fails closed when the first JSONL record contains the script(1) PTY artifact', () => {
+      const lines = runOpenCodeFallbackProbeInventory([
+        `^D\b\b${stepStart}`,
+        textRecord,
+        terminal,
+      ].join('\n'));
+
+      expect(lines[0]).toContain('FAIL provider_probe agent-alpha');
+      expect(lines[0]).toContain('failure_class=provider_stream_invalid_jsonl');
+      expect(lines[0]).not.toContain('canary-session');
+      expect(lines[0]).not.toContain('OK');
+    });
+
+    it('fails when valid JSONL never reaches a terminal step_finish', () => {
+      const lines = runOpenCodeFallbackProbeInventory([stepStart, textRecord].join('\n'));
+
+      expect(lines[0]).toContain('FAIL provider_probe agent-alpha');
+      expect(lines[0]).toContain('failure_class=provider_stream_missing_terminal');
+    });
+
+    it('fails when the provider returns text other than the exact canary marker', () => {
+      const wrongText = JSON.stringify({ type: 'text', part: { text: 'IGNORED STDIN' } });
+      const lines = runOpenCodeFallbackProbeInventory([stepStart, wrongText, terminal].join('\n'));
+
+      expect(lines[0]).toContain('FAIL provider_probe agent-alpha');
+      expect(lines[0]).toContain('failure_class=provider_stream_unexpected_text');
+    });
+
+    it('fails when terminal output precedes the canary text', () => {
+      const lines = runOpenCodeFallbackProbeInventory([stepStart, terminal, textRecord].join('\n'));
+
+      expect(lines[0]).toContain('FAIL provider_probe agent-alpha');
+      expect(lines[0]).toContain('failure_class=provider_stream_terminal_not_last');
+    });
+
+    it('fails when any provider event follows the terminal record', () => {
+      const errorRecord = JSON.stringify({ type: 'error', error: { message: 'late failure' } });
+      const lines = runOpenCodeFallbackProbeInventory([stepStart, textRecord, terminal, errorRecord].join('\n'));
+
+      expect(lines[0]).toContain('FAIL provider_probe agent-alpha');
+      expect(lines[0]).toContain('failure_class=provider_stream_terminal_not_last');
+    });
+
+    it('fails closed when the bounded functional turn times out', () => {
+      const lines = runOpenCodeFallbackProbeInventory('', { timeout: true });
+
+      expect(lines[0]).toContain('FAIL provider_probe agent-alpha');
+      expect(lines[0]).toContain('failure_class=provider_timeout');
+    });
+  });
+
+  it('keeps the health-check credential registry identical to the runtime registry', () => {
+    const healthMap = JSON.parse(python([
+      importHealthModulePrelude(),
+      'import json',
+      'print(json.dumps(m.SERVICE_ENV_MAP, sort_keys=True))',
+    ].join('\n'))) as Record<string, string>;
+
+    expect(healthMap).toEqual(RUNTIME_SERVICE_ENV_MAP);
+  });
+
+  it('projects a provider credential found only in the loaded launchd environment', () => {
+    const result = JSON.parse(python([
+      importHealthModulePrelude(),
+      'import json',
+      'data = {"agentOptions": {"provider": "opencode-cli", "model": "openrouter/test-model", "providerConfig": {"apiKeyService": "openrouter"}}}',
+      'loaded_environment = {"PATH": "/loaded/bin:/usr/bin:/bin", "HOME": "/loaded/home", "OPENROUTER_API_KEY": "fixture-loaded-key", "WHATSOUP_HEALTH_TOKEN": "must-not-project", "UNRELATED_SECRET": "must-not-project"}',
+      'child = m.opencode_functional_probe_env(data, "primary", 2, base_env=loaded_environment)',
+      'print(json.dumps({"credential": child.get("OPENROUTER_API_KEY"), "path": child.get("PATH"), "home": child.get("HOME"), "has_health": "WHATSOUP_HEALTH_TOKEN" in child, "has_unrelated": "UNRELATED_SECRET" in child}))',
+    ].join('\n'))) as Record<string, unknown>;
+
+    expect(result).toEqual({
+      credential: 'fixture-loaded-key',
+      path: '/loaded/bin:/usr/bin:/bin',
+      home: '/loaded/home',
+      has_health: false,
+      has_unrelated: false,
+    });
+  });
+
+  it('uses the terminal OpenCode auth store for fallback presence and child projection', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-opencode-auth-'));
+    const dataHome = join(tmpRoot, 'data');
+    const authDir = join(dataHome, 'opencode');
+    mkdirSync(authDir, { recursive: true });
+    writePrivateJson(join(authDir, 'auth.json'), {
+      xai: { type: 'api', key: 'fixture-xai-key' },
+    });
+
+    const result = JSON.parse(execFileSync('python3', ['-c', [
+      importHealthModulePrelude(),
+      'import json',
+      'data = {"agentOptions": {"provider": "claude-cli", "providerConfig": {"executionProfile": "whatsoup-headless"}, "fallbackProvider": "opencode-cli", "fallbackModel": "xai/grok-4"}}',
+      'present, source, status = m.provider_credential_presence("xai", 2)',
+      'child = m.opencode_functional_probe_env(data, "fallback", 2)',
+      'print(json.dumps({"present": present, "source": source, "status": status, "has_xai": bool(child.get("XAI_API_KEY")), "has_health": "WHATSOUP_HEALTH_TOKEN" in child}))',
+    ].join('\n')], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        XDG_DATA_HOME: dataHome,
+        XAI_API_KEY: '',
+        WHATSOUP_HEALTH_TOKEN: 'must-not-reach-provider',
+      },
+      encoding: 'utf8',
+    })) as Record<string, unknown>;
+
+    expect(result).toEqual({
+      present: true,
+      source: 'opencode_auth',
+      status: 'present',
+      has_xai: true,
+      has_health: false,
+    });
+  });
+
+  it('refuses unsafe OpenCode auth stores before child credential projection', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-opencode-auth-private-'));
+    const dataHome = join(tmpRoot, 'data');
+    const authDir = join(dataHome, 'opencode');
+    const outside = join(tmpRoot, 'outside-auth.json');
+    mkdirSync(authDir, { recursive: true });
+    writePrivateJson(outside, { xai: { key: 'outside-key' } });
+    symlinkSync(outside, join(authDir, 'auth.json'));
+
+    const lookup = () => execFileSync('python3', ['-c', [
+      importHealthModulePrelude(),
+      'print(m.opencode_auth_credential_value("xai") or "")',
+    ].join('\n')], {
+      cwd: process.cwd(),
+      env: { ...process.env, XDG_DATA_HOME: dataHome, XAI_API_KEY: '' },
+      encoding: 'utf8',
+    }).trim();
+
+    expect(lookup()).toBe('');
+    unlinkSync(join(authDir, 'auth.json'));
+    writePrivateJson(join(authDir, 'auth.json'), { xai: { key: 'loose-key' } });
+    chmodSync(join(authDir, 'auth.json'), 0o644);
+    expect(lookup()).toBe('');
+    chmodSync(join(authDir, 'auth.json'), 0o600);
+    writeFileSync(join(authDir, 'auth.json'), `${JSON.stringify({ xai: { key: 'large-key' } })}${' '.repeat(1024 * 1024)}`);
+    expect(lookup()).toBe('');
+  });
+
+  it('refuses unsafe WhatSoup credential files before projecting provider credentials', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-private-credential-'));
+    const configHome = join(tmpRoot, 'config');
+    const credentialDir = join(configHome, 'whatsoup', 'credentials');
+    mkdirSync(credentialDir, { recursive: true, mode: 0o700 });
+    chmodSync(credentialDir, 0o700);
+    const safePath = join(credentialDir, 'xai.key');
+    writeFileSync(safePath, 'safe-value\n', { mode: 0o600 });
+
+    const lookup = () => JSON.parse(execFileSync('python3', ['-c', [
+      importHealthModulePrelude(),
+      'import json',
+      'print(json.dumps({"value": m.whatsoup_keyfile_value("xai"), "present": m.whatsoup_keyfile_present("xai")}))',
+    ].join('\n')], {
+      cwd: process.cwd(),
+      env: { ...process.env, XDG_CONFIG_HOME: configHome, XAI_API_KEY: '' },
+      encoding: 'utf8',
+    })) as { value: string | null; present: boolean };
+
+    expect(lookup()).toEqual({ value: 'safe-value', present: true });
+    chmodSync(safePath, 0o644);
+    expect(lookup()).toEqual({ value: null, present: false });
+    unlinkSync(safePath);
+    symlinkSync(join(tmpRoot, 'outside-key'), safePath);
+    writeFileSync(join(tmpRoot, 'outside-key'), 'outside-value\n', { mode: 0o600 });
+    expect(lookup()).toEqual({ value: null, present: false });
+    unlinkSync(safePath);
+    writeFileSync(safePath, 'x'.repeat(4097), { mode: 0o600 });
+    expect(lookup()).toEqual({ value: null, present: false });
+  });
+
+  it('resolves the provider binary from the instance PATH before fallback directories', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-provider-path-'));
+    const pathBin = join(tmpRoot, 'runtime-bin');
+    const fallbackBin = join(tmpRoot, '.local', 'bin');
+    mkdirSync(pathBin, { recursive: true });
+    mkdirSync(fallbackBin, { recursive: true });
+    for (const directory of [pathBin, fallbackBin]) {
+      const command = join(directory, 'opencode');
+      writeFileSync(command, '#!/bin/sh\nexit 0\n');
+      chmodSync(command, 0o700);
+    }
+
+    const selected = execFileSync('python3', ['-c', [
+      importHealthModulePrelude(),
+      'import os',
+      'print(m.executable_candidate("opencode", os.environ["PATH"]))',
+    ].join('\n')], {
+      cwd: process.cwd(),
+      env: { ...process.env, HOME: tmpRoot, PATH: `${pathBin}:/usr/bin:/bin` },
+      encoding: 'utf8',
+    }).trim();
+
+    expect(selected).toBe(join(pathBin, 'opencode'));
+  });
+
+  it('reads the exact provider PATH from the generated instance LaunchAgent', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-instance-path-'));
+    const launchAgents = join(tmpRoot, 'Library', 'LaunchAgents');
+    mkdirSync(launchAgents, { recursive: true });
+    writeFileSync(join(launchAgents, 'com.whatsoup.agent-alpha.plist'), [
+      '<?xml version="1.0" encoding="UTF-8"?>',
+      '<plist version="1.0"><dict>',
+      '<key>Label</key><string>com.whatsoup.agent-alpha</string>',
+      '<key>EnvironmentVariables</key><dict><key>PATH</key><string>/runtime/first:/runtime/second</string></dict>',
+      '</dict></plist>',
+    ].join(''));
+
+    const selectedPath = execFileSync('python3', ['-c', [
+      importHealthModulePrelude(),
+      'print(m.instance_provider_path("agent-alpha") or "")',
+    ].join('\n')], {
+      cwd: process.cwd(),
+      env: { ...process.env, HOME: tmpRoot, BOT_ERRORS_DRY_PLATFORM: 'darwin' },
+      encoding: 'utf8',
+    }).trim();
+
+    expect(selectedPath).toBe('/runtime/first:/runtime/second');
+  });
+
+  it('reads and requires the loaded launchd PATH to match the generated plist PATH', () => {
+    const result = JSON.parse(python([
+      importHealthModulePrelude(),
+      'import json',
+      'loaded = """gui/501/com.whatsoup.agent-alpha = {\n\tenvironment = {\n\t\tPATH => /loaded/first:/loaded/second\n\t\tHOME => /fixture\n\t}\n}"""',
+      'print(json.dumps({"parsed": m.launchctl_environment_path(loaded), "match": m.instance_provider_path_match("/loaded/first:/loaded/second", "/loaded/first:/loaded/second"), "mismatch": m.instance_provider_path_match("/disk", "/loaded")}))',
+    ].join('\n'))) as Record<string, unknown>;
+
+    expect(result).toEqual({
+      parsed: '/loaded/first:/loaded/second',
+      match: true,
+      mismatch: false,
+    });
+  });
+
+  it('resolves the provider binary from the wrapper-effective PATH after launchd', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-effective-path-'));
+    const loadedBin = join(tmpRoot, 'loaded-bin');
+    const localBin = join(tmpRoot, '.local', 'bin');
+    const nodeBin = join(tmpRoot, 'node', 'bin');
+    mkdirSync(loadedBin, { recursive: true });
+    mkdirSync(localBin, { recursive: true });
+    mkdirSync(nodeBin, { recursive: true });
+    for (const directory of [loadedBin, localBin]) {
+      const command = join(directory, 'opencode');
+      writeFileSync(command, '#!/bin/sh\nexit 0\n');
+      chmodSync(command, 0o700);
+    }
+
+    const selected = execFileSync('python3', ['-c', [
+      importHealthModulePrelude(),
+      `environment = ${JSON.stringify({
+        HOME: tmpRoot,
+        PATH: `${loadedBin}:/usr/bin:/bin`,
+        WHATSOUP_NODE: join(nodeBin, 'node'),
+      })}`,
+      'effective = m.effective_instance_provider_path(environment)',
+      'print(m.executable_candidate("opencode", effective) or "")',
+    ].join('\n')], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+    }).trim();
+
+    expect(selected).toBe(join(localBin, 'opencode'));
+  });
+
+  it('rejects an explicit OpenCode probe command that differs from the runtime PATH binary', () => {
+    const lines = JSON.parse(python([
+      importHealthModulePrelude(),
+      'import json',
+      'm.instance_provider_path = lambda name: "/runtime/bin:/usr/bin:/bin"',
+      'm.loaded_instance_environment = lambda name: {"PATH": "/runtime/bin:/usr/bin:/bin", "HOME": "/fixture"}',
+      'm.executable_candidate = lambda command, path_value=None: "/runtime/bin/opencode"',
+      'lines = m.opencode_provider_probe_inventory({}, {"opencodeProviderProbeCommand": "/gui-only/bin/opencode"}, "agent-alpha", {"type": "agent", "agentOptions": {"provider": "opencode-cli", "model": "xai/grok-4"}}, "opencode-cli")',
+      'print(json.dumps(lines))',
+    ].join('\n'))) as string[];
+
+    expect(lines[0]).toContain('failure_class=provider_runtime_command_mismatch');
+  });
+
+  it('fails before probing when the loaded launchd PATH differs from the generated plist', () => {
+    const lines = JSON.parse(python([
+      importHealthModulePrelude(),
+      'import json',
+      'm.HOST_PLATFORM = "darwin"',
+      'm.instance_provider_path = lambda name: "/generated/bin:/usr/bin:/bin"',
+      'm.loaded_instance_environment = lambda name: {"PATH": "/loaded/bin:/usr/bin:/bin", "HOME": "/fixture"}',
+      'm.executable_candidate = lambda command, path_value=None: "/loaded/bin/opencode"',
+      'lines = m.opencode_provider_probe_inventory({}, {}, "agent-alpha", {"type": "agent", "agentOptions": {"provider": "opencode-cli", "model": "xai/grok-4"}}, "opencode-cli")',
+      'print(json.dumps(lines))',
+    ].join('\n'))) as string[];
+
+    expect(lines[0]).toContain('failure_class=provider_runtime_path_mismatch');
+  });
+
+  it('matches runtime model, custom credential-service, cwd, and fallback-chain resolution', () => {
+    const result = JSON.parse(python([
+      importHealthModulePrelude(),
+      'import json',
+      'import os',
+      'os.environ["OPENROUTER_API_KEY"] = "fixture-openrouter"',
+      'os.environ["XAI_API_KEY"] = "must-not-project"',
+      'primary = {"models": {"conversation": "xai/conversation"}, "agentOptions": {"provider": "opencode-cli", "model": "xai/agent", "providerConfig": {"baseUrl": "https://example.invalid", "apiKeyService": "openrouter"}, "fallbacks": [{"provider": "opencode-cli", "model": "minimax/MiniMax-M3"}, {"provider": "opencode-cli", "model": "deepseek/deepseek-v4-pro"}]}}',
+      'targets = m.fallback_probe_targets(primary)',
+      'child = m.opencode_functional_probe_env(primary, "primary", 2)',
+      'print(json.dumps({"model": m.provider_model_from_config(primary), "service": m.opencode_key_service_from_config(primary, "primary"), "cwd": m.agent_workspace_cwd({"agentOptions": {}}, "agent-alpha"), "has_openrouter": child.get("OPENROUTER_API_KEY") == "fixture-openrouter", "has_xai": "XAI_API_KEY" in child, "targets": targets}))',
+    ].join('\n'))) as Record<string, unknown>;
+
+    expect(result).toEqual({
+      model: 'xai/agent',
+      service: 'openrouter',
+      cwd: process.env.HOME,
+      has_openrouter: true,
+      has_xai: false,
+      targets: [
+        { provider: 'opencode-cli', model: 'minimax/MiniMax-M3', target: 'fallback[0]' },
+        { provider: 'opencode-cli', model: 'deepseek/deepseek-v4-pro', target: 'fallback[1]' },
+      ],
+    });
+  });
+
+  it('probes every modern fallback-chain entry instead of only the legacy pair', () => {
+    const calls = JSON.parse(python([
+      importHealthModulePrelude(),
+      'import json',
+      'calls = []',
+      'm.provider_probe_target_inventory = lambda profile, item, name, data, provider, target, health=None: calls.append({"provider": provider, "target": target}) or []',
+      'data = {"type": "agent", "agentOptions": {"provider": "claude-cli", "fallbacks": [{"provider": "opencode-cli", "model": "minimax/MiniMax-M3"}, {"provider": "opencode-cli", "model": "deepseek/deepseek-v4-pro"}]}}',
+      'm.provider_probe_inventory({}, {"expectProviderProbe": True}, "agent-alpha", data, "always_on")',
+      'print(json.dumps(calls))',
+    ].join('\n'))) as Array<Record<string, string>>;
+
+    expect(calls).toEqual([
+      { provider: 'claude-cli', target: 'primary' },
+      { provider: 'opencode-cli', target: 'fallback[0]' },
+      { provider: 'opencode-cli', target: 'fallback[1]' },
+    ]);
+  });
+
+  it('fails closed when a functional probe cannot reproduce sandbox config-root or egress context', () => {
+    const result = JSON.parse(python([
+      importHealthModulePrelude(),
+      'import json',
+      'sandboxed = {"agentOptions": {"sandboxPerChat": True}}',
+      'egress = {"agentOptions": {"sandbox": {"allowedEgress": []}}}',
+      'plain = {"agentOptions": {"sessionScope": "per_chat"}}',
+      'print(json.dumps({"sandboxed": m.opencode_runtime_context_problem(sandboxed), "egress": m.opencode_runtime_context_problem(egress), "plain": m.opencode_runtime_context_problem(plain)}))',
+    ].join('\n'))) as Record<string, unknown>;
+
+    expect(result).toEqual({
+      sandboxed: 'sandbox_per_chat_context_unavailable',
+      egress: 'egress_proxy_context_unavailable',
+      plain: null,
+    });
+  });
+
   it('alerts when an OpenCode fallback/provider install only supports the degraded legacy one-shot contract', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-'));
     const configDir = join(tmpRoot, '.config', 'whatsoup', 'instances', 'agent-alpha');
@@ -5122,6 +5559,7 @@ print(m.probe_health(9092))
         BOT_ERRORS_DRY_OPENCODE_VERSION_STDOUT: '0.0.55',
         BOT_ERRORS_DRY_OPENCODE_HELP_STDOUT: legacyHelp,
         BOT_ERRORS_DRY_OPENCODE_RUN_HELP_STDOUT: legacyHelp,
+        BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH: '/fixture/bin:/usr/bin:/bin',
         BOT_ERRORS_HEALTH_PROFILE_JSON: JSON.stringify({
           role: 'central',
           expectDispatcher: false,
@@ -5172,7 +5610,7 @@ print(m.probe_health(9092))
     expect(event.evidence).not.toContain('agent-alpha@s.whatsapp.net');
   });
 
-  it('probes configured OpenCode fallback using fallbackProviderConfig, not primary providerConfig', () => {
+  it('probes configured OpenCode fallback using the runtime-inherited primary providerConfig', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-'));
     const binDir = join(tmpRoot, 'bin');
     const opencodeCommand = join(binDir, 'opencode');
@@ -5188,10 +5626,10 @@ print(m.probe_health(9092))
       healthPort: 9090,
       agentOptions: {
         provider: 'claude-cli',
-        providerConfig: {},
+        providerConfig: { opencodeCommandMode: 'modern-run' },
         fallbackProvider: 'opencode-cli',
         fallbackModel: 'minimax/MiniMax-M2.7-highspeed',
-        fallbackProviderConfig: { opencodeCommandMode: 'modern-run' },
+        fallbackProviderConfig: { opencodeCommandMode: 'legacy-prompt-json' },
       },
     }));
     chmodSync(join(configDir, 'config.json'), 0o600);
@@ -5238,6 +5676,7 @@ print(m.probe_health(9092))
         BOT_ERRORS_DRY_OPENCODE_VERSION_STDOUT: '0.0.55',
         BOT_ERRORS_DRY_OPENCODE_HELP_STDOUT: legacyHelp,
         BOT_ERRORS_DRY_OPENCODE_RUN_HELP_STDOUT: legacyHelp,
+        BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH: `${binDir}${process.env.PATH ? `:${process.env.PATH}` : ''}`,
         BOT_ERRORS_HEALTH_PROFILE_JSON: JSON.stringify({
           role: 'central',
           expectDispatcher: false,
@@ -5435,6 +5874,7 @@ print(m.probe_health(9092))
         BOT_ERRORS_DRY_OPENCODE_VERSION_STDOUT: '0.1.0',
         BOT_ERRORS_DRY_OPENCODE_HELP_STDOUT: 'Usage: opencode',
         BOT_ERRORS_DRY_OPENCODE_RUN_HELP_STDOUT: modernRunHelp,
+        BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH: '/fixture/bin:/usr/bin:/bin',
         BOT_ERRORS_DRY_CREDENTIAL_STATUS_MINIMAX: 'missing',
         BOT_ERRORS_HEALTH_PROFILE_JSON: JSON.stringify({
           role: 'central',
@@ -5546,6 +5986,7 @@ print(m.probe_health(9092))
         BOT_ERRORS_DRY_OPENCODE_VERSION_STDOUT: '0.1.0',
         BOT_ERRORS_DRY_OPENCODE_HELP_STDOUT: 'Usage: opencode',
         BOT_ERRORS_DRY_OPENCODE_RUN_HELP_STDOUT: modernRunHelp,
+        BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH: `${opencodeBinDir}:/usr/bin:/bin`,
         BOT_ERRORS_DRY_CREDENTIAL_STATUS_MINIMAX: 'present',
         BOT_ERRORS_HEALTH_PROFILE_JSON: JSON.stringify({
           role: 'central',

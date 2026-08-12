@@ -54,6 +54,7 @@ export interface CredentialLookupOptions {
 let _cachedBackend: KeyringBackend | undefined;
 const KEYRING_COMMAND_TIMEOUT_MS = 3_000;
 const FILE_STORE_MAX_BYTES = 4_096;
+const OPENCODE_AUTH_MAX_BYTES = 1024 * 1024;
 /**
  * Which store a credential read failed against. Keyed into the warn-dedup set so
  * a platform-keyring failure for a service does not suppress the file-store or
@@ -603,7 +604,12 @@ function openCodeAuthPath(): string {
  */
 export function readOpenCodeAuthKey(provider: string): string | null {
   try {
-    const raw = fs.readFileSync(openCodeAuthPath(), 'utf-8');
+    const raw = readPrivateFileSync(openCodeAuthPath(), {
+      label: 'OpenCode auth',
+      maxBytes: OPENCODE_AUTH_MAX_BYTES,
+      requirePrivateParent: false,
+    });
+    if (raw === null) return null;
     const data = JSON.parse(raw) as Record<string, unknown>;
     const entry = data[provider];
     if (entry && typeof entry === 'object') {

@@ -216,10 +216,12 @@ describe('SessionManager spawn-per-turn — opencode-cli custom endpoint omits -
     const args = await spawnTurnArgs(BASE_URL_CONFIG);
     expect(args).not.toContain('-m');
     expect(args).not.toContain('minimax/MiniMax-M2');
-    // The prompt and run flags still ship.
+    expect(args).not.toContain('hello there');
     expect(args.slice(0, 4)).toEqual(['run', '--format', 'json', '--pure']);
     expectContainedHeadlessArgs(args);
-    expect(args.at(-1)).toContain('hello there');
+    const child = (spawn as ReturnType<typeof vi.fn>).mock.results.at(-1)?.value as ReturnType<typeof makeMockChild>;
+    expect(child.stdin.end).toHaveBeenCalledOnce();
+    expect(child.stdin.end).toHaveBeenCalledWith(expect.stringContaining('hello there'));
   });
 
   it('keeps -m in the per-turn argv without a baseUrl (regression pin)', async () => {

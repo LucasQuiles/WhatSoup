@@ -64,10 +64,12 @@ describe('fallback-config', () => {
         baseUrl: 'https://primary-openai.example/v1',
         apiKeyService: 'openai',
         executionProfile: 'whatsoup-headless',
+        autoApprovePermissions: true,
         budget: { requestsPerMinute: 10 },
       };
       const expected = {
         executionProfile: 'whatsoup-headless',
+        autoApprovePermissions: true,
         budget: { requestsPerMinute: 10 },
       };
 

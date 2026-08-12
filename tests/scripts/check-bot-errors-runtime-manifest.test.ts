@@ -8,6 +8,7 @@ import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 import {
   checkBotErrorsRuntimeManifest,
   computeRequiredRuntimePaths,
+  EXPLICIT_REQUIRED_RUNTIME_PATHS,
   REQUIRED_RUNTIME_MANIFEST_PATHS,
   run,
 } from '../../scripts/check-bot-errors-runtime-manifest.ts';
@@ -39,6 +40,9 @@ afterEach(() => {
 });
 
 describe('check-bot-errors-runtime-manifest guard', () => {
+  it('requires the shared launcher PATH helper as a non-Python runtime dependency', () => {
+    expect(EXPLICIT_REQUIRED_RUNTIME_PATHS).toContain('deploy/lib/runtime-path.sh');
+  });
   it('requires the runtime health signal registry as an integrity-pinned dependency', () => {
     expect(computeRequiredRuntimePaths(repoRoot))
       .toContain('src/lib/fault-taxonomy-registry.json');

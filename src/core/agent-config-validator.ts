@@ -1179,6 +1179,15 @@ function validateAgentOptions(
         `agentOptions.providerConfig.executionProfile must be exactly "${WHATSOUP_HEADLESS_EXECUTION_PROFILE}" when configured`,
       );
     }
+    if (
+      pc['autoApprovePermissions'] !== undefined
+      && typeof pc['autoApprovePermissions'] !== 'boolean'
+    ) {
+      return err(
+        'agentOptions.providerConfig.autoApprovePermissions',
+        'agentOptions.providerConfig.autoApprovePermissions must be a boolean when provided',
+      );
+    }
     // AGENT-ONLY: budget shape (not part of the shared baseUrl/apiKeyService
     // rules chat also uses — chatOptions.openaiProviderConfig has no budget).
     if (pc['budget'] !== undefined) {
