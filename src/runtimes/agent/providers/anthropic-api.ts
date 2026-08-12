@@ -33,6 +33,7 @@ import {
   buildApiKeyEnv,
   mapSharedApiError,
   connectionErrorResult,
+  CONNECT_TIMEOUT_MS,
   type ParsedToolInput,
 } from './api-provider-shared.ts';
 
@@ -311,6 +312,10 @@ export class AnthropicApiProvider implements ProviderSession {
     sanitizeMessageHistory(this.messages as Array<{ role: string; content: unknown }>);
 
     let response: Response;
+    // Captured locally: retry paths re-enter callApi and replace
+    // this.abortController; the timer must only ever abort its own call.
+    const controller = this.abortController;
+    const connectTimer = setTimeout(() => controller.abort(), CONNECT_TIMEOUT_MS);
     try {
       // Resolve each request so key rotation / late-set keyring entries are picked up.
       const authKey = resolveApiKey({ service: this.config?.apiKeyService, envVar: 'ANTHROPIC_API_KEY' });
@@ -335,6 +340,8 @@ export class AnthropicApiProvider implements ProviderSession {
       });
     } catch (err: unknown) {
       return connectionErrorResult(err, model, log);
+    } finally {
+      clearTimeout(connectTimer);
     }
 
     if (!response.ok) {
