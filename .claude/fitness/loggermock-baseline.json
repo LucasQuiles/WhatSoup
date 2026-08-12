@@ -17,11 +17,6 @@
       "reason": "logger self-test — exercises the real SUT logger shape"
     },
     {
-      "file": "tests/runtimes/agent/runtime.test.ts",
-      "status": "debt",
-      "reason": "waiver-deferred — migrate in the waiver car alongside growth-waivers.json"
-    },
-    {
       "file": "tests/scripts/logger-mock-residue.test.ts",
       "status": "permanent",
       "reason": "scanner self-test — canonical-key fixtures live in template literals by design"
