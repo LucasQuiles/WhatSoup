@@ -27,6 +27,11 @@ const MANAGED_ENV = [
   // config.ts repoints TMPDIR under dataRoot at import; without restore, the
   // NEXT test's mkdtempSync targets a directory afterEach just deleted.
   'TMPDIR',
+  'HEALTH_PORT',
+  'XDG_STATE_HOME',
+  // homedir() honors $HOME on POSIX — the XDG-ignore test points it at the
+  // per-test tmpdir so the fallback root never touches the real home.
+  'HOME',
 ] as const;
 
 let savedEnv: Record<string, string | undefined>;
@@ -212,6 +217,46 @@ describe('cast-sweep families (#2295 slice 3)', () => {
     expect(config.controlPeers.get('15550000002')).toBe('ops');
     expect(config.mediaRetention.tempHours).toBe(24);
     expect(config.mediaRetention.cacheHours).toBe(168);
+  });
+});
+
+describe('path absoluteness + env port range (#2295 M5/M7/M8)', () => {
+  it('rejects a relative WHATSOUP_*_DIR override', async () => {
+    process.env.WHATSOUP_DATA_DIR = 'relative/data';
+    await expect(import('../src/config.ts')).rejects.toThrow(
+      /WHATSOUP_DATA_DIR must be an absolute path/,
+    );
+  });
+
+  it('ignores a relative XDG base per the XDG spec instead of honoring it', async () => {
+    const fakeHome = path.join(tmpDir, 'home');
+    fs.mkdirSync(fakeHome, { recursive: true });
+    process.env.HOME = fakeHome;
+    delete process.env.WHATSOUP_STATE_DIR;
+    process.env.XDG_STATE_HOME = 'relative/state';
+    const { config } = await import('../src/config.ts');
+    expect(config.stateRoot).toBe(path.join(fakeHome, '.local/state', 'whatsoup'));
+  });
+
+  it('rejects a relative instance dbPath', async () => {
+    const base = makeInstanceConfig();
+    (base.paths as Record<string, unknown>).dbPath = 'relative/bot.db';
+    process.env.INSTANCE_CONFIG = JSON.stringify(base);
+    await expect(import('../src/config.ts')).rejects.toThrow(
+      /paths\.dbPath must be an absolute path/,
+    );
+  });
+
+  it('falls back on an out-of-range env health port (validator range 1024-65535)', async () => {
+    process.env.HEALTH_PORT = '80';
+    const { config } = await import('../src/config.ts');
+    expect(config.healthPort).toBe(9090);
+  });
+
+  it('still accepts an in-range env health port', async () => {
+    process.env.HEALTH_PORT = '9099';
+    const { config } = await import('../src/config.ts');
+    expect(config.healthPort).toBe(9099);
   });
 });
 
