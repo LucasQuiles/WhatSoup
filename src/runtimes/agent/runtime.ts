@@ -3739,9 +3739,31 @@ export class AgentRuntime implements Runtime {
   }): { dispatched: boolean; detail?: string } {
     try {
       this.db.assertWritableCompatibility();
+      // #2144: the acknowledgement below is what the poller records as an ok
+      // trigger run (and what expires a one-shot schedule), so the occurrence
+      // must have a DURABLE owner before we return it. Journaling the
+      // synthetic inbound first means a crash between ack and turn start
+      // leaves a journaled 'processing' row that the W2 stuck-inbound
+      // reconciler surfaces — never a silent loss behind successful history.
+      // Per the agent_turn_admission_rejected disposition, a journaled but
+      // undispatched turn is surfaced for owner resend, not auto-replayed.
+      if (!this.durability) {
+        return {
+          dispatched: false,
+          detail: 'durability engine not set — refusing unowned scheduled dispatch (#2144)',
+        };
+      }
       const now = Math.floor(Date.now() / 1000);
+      const messageId = `agentjob-${ctx.triggerId}-${now}`;
+      const inboundSeq = this.durability.journalInbound(
+        messageId,
+        toConversationKey(ctx.reportChatJid),
+        ctx.reportChatJid,
+        'agent',
+        now,
+      );
       const synthetic: IncomingMessage = {
-        messageId: `agentjob-${ctx.triggerId}-${now}`,
+        messageId,
         chatJid: ctx.reportChatJid,
         senderJid: config.memory.adminJid,
         senderName: ctx.title ? `Scheduled job: ${ctx.title}`.slice(0, 80) : 'Scheduled job',
@@ -3754,7 +3776,7 @@ export class AgentRuntime implements Runtime {
         timestamp: now,
         quotedMessageId: null,
         isResponseWorthy: true,
-        inboundSeq: undefined,
+        inboundSeq,
         isSyntheticJob: true,
       };
       // Fire-and-forget onto the turn chain; failures inside the turn are logged
@@ -3765,7 +3787,10 @@ export class AgentRuntime implements Runtime {
           'agent job turn failed after dispatch',
         );
       });
-      return { dispatched: true, detail: `enqueued turn for bead ${ctx.beadId}` };
+      return {
+        dispatched: true,
+        detail: `enqueued turn for bead ${ctx.beadId} (inbound seq ${inboundSeq})`,
+      };
     } catch (err) {
       return { dispatched: false, detail: errorMessage(err) };
     }
