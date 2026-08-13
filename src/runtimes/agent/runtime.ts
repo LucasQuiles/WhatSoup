@@ -2861,21 +2861,20 @@ export class AgentRuntime implements Runtime {
         db: this.db,
         store: engine.capabilityObligations,
         options: config.capabilityObligations,
-        liveFacts: (deliveryJid: string) => {
-          // r13 F4 — bind the provider SERVING this chat, not the configured
-          // primary: resolve the same dispatch target dispatch uses (so they agree
-          // on the harness), then read its provider (servingProviderId fails closed).
-          const target = this.resolvePerChatDispatchTarget(deliveryJid);
-          return buildObligationLiveFacts(servingProviderId(target?.session as SessionManager | undefined));
+        // r14 F3 — resolve the serving target ONCE (see prepareDispatch dep doc);
+        // null target fails closed (sentinel provider → admission skips).
+        prepareDispatch: (obligation) => {
+          const target = this.resolvePerChatDispatchTarget(obligation.deliveryJid);
+          const facts = buildObligationLiveFacts(servingProviderId(target?.session as SessionManager | undefined));
+          if (!target) return { facts, dispatch: null };
+          return { facts, dispatch: (mintedMessageId, mintedSeq) => dispatchCapabilityObligationTurnViaSession(
+            this.runtimeTurnCoordinator, target,
+            (sess) => this.requireSessionToolScopeKey(sess),
+            (t) => this.isTurnRecoveryDispatchTargetCurrent(t),
+            obligation, mintedMessageId, mintedSeq,
+          ) };
         },
         getDurability: () => this.durability,
-        dispatchTurn: (o, m, s) => dispatchCapabilityObligationTurnViaSession(
-          this.runtimeTurnCoordinator,
-          (jid) => this.resolvePerChatDispatchTarget(jid),
-          (sess) => this.requireSessionToolScopeKey(sess),
-          (target) => this.isTurnRecoveryDispatchTargetCurrent(target),
-          o, m, s,
-        ),
         resolveMapKey: (jid) => this.resolvePerChatMapKey(jid),
         externalEffectFor: (name) => this.registry.externalEffectDeclaration(name),
         writeLossSince: (ms) => this.registry.hadDurabilityWriteLossSince(ms),

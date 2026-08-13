@@ -32,6 +32,7 @@
 import { systemClock } from '../../lib/clock.ts';
 import { createChildLogger } from '../../logger.ts';
 import {
+  attestationBindingDigest,
   findAdmissibleAttestation,
   type AttestationAdmission,
   type CapabilityAttestationBinding,
@@ -52,27 +53,44 @@ const SCAN_LIMIT = 10;
 
 export type ObligationDispatchOutcome = 'dispatched' | 'retryable' | 'ambiguous';
 
-export interface ObligationDispatchPort {
+/**
+ * The single dispatch-preparation result (r14 F3). The serving target is
+ * resolved ONCE; both the D5 admission binding and the dispatch derive from that
+ * one resolution, so a session that recycles onto a different provider/generation
+ * between admission and dispatch can no longer run a replay on a never-attested
+ * harness (the prior split ports each resolved independently — the TOCTOU).
+ */
+export interface PreparedObligationDispatch {
+  /** The exact D5 binding — carries the provider ACTUALLY serving this chat now. */
+  binding: CapabilityAttestationBinding;
   /**
-   * Journal the minted inbound and enter the normal turn pipeline. Must NOT
-   * send through transport directly. 'retryable' = target/session not current
-   * (nothing crossed the provider boundary) → requeue under bounded backoff.
-   * 'ambiguous' = the turn crossed the provider boundary and then failed, so the
-   * side effect may or may not have happened → quarantine `blocked_ambiguous`,
-   * NEVER auto-retried (spec: ambiguous provider outcome ⇒ blocked_ambiguous).
+   * Journal the minted inbound and enter the normal turn pipeline against the
+   * SAME resolved target the binding came from (re-verified at the provider
+   * boundary). Must NOT send through transport directly. 'retryable' = the
+   * target was not current at the boundary (nothing crossed it) → requeue under
+   * bounded backoff. 'ambiguous' = the turn crossed the provider boundary and
+   * then failed, so the side effect may or may not have happened → quarantine
+   * `blocked_ambiguous`, NEVER auto-retried. `null` when the target is not
+   * dispatchable (cold/not-current) — `binding` then carries the fail-closed
+   * sentinel provider, so admission skips before dispatch is ever reached.
    */
-  dispatch(
-    obligation: CapabilityObligationDueRow,
-    mintedMessageId: string,
-    fence: CapabilityObligationClaimFence,
-    /** The claimed attempt this dispatch executes (mintedMessageId embeds it too). */
-    attemptNumber: number,
-  ): Promise<ObligationDispatchOutcome>;
+  dispatch:
+    | ((
+        mintedMessageId: string,
+        fence: CapabilityObligationClaimFence,
+        /** The claimed attempt this dispatch executes (mintedMessageId embeds it too). */
+        attemptNumber: number,
+      ) => Promise<ObligationDispatchOutcome>)
+    | null;
 }
 
-export interface ObligationAttestationPort {
-  /** Live runtime facts + the obligation's contract → the exact D5 binding. */
-  binding(obligation: CapabilityObligationDueRow): CapabilityAttestationBinding;
+export interface ObligationDispatchPort {
+  /**
+   * Resolve the serving target for the obligation's chat ONCE and return the D5
+   * binding plus a dispatch bound to that exact resolution (r14 F3). Called once
+   * per due obligation at the top of the scan iteration.
+   */
+  prepare(obligation: CapabilityObligationDueRow): PreparedObligationDispatch;
 }
 
 export type ObligationSettlementEvidence =
@@ -103,7 +121,6 @@ export interface CapabilityObligationSupervisorOptions {
   db: Database;
   store: CapabilityObligationStore;
   dispatchPort: ObligationDispatchPort;
-  attestationPort: ObligationAttestationPort;
   evidencePort: ObligationEvidencePort;
   leaseSeconds?: number;
   backoffSeconds?: number;
@@ -127,7 +144,6 @@ export class CapabilityObligationSupervisor {
   private readonly db: Database;
   private readonly store: CapabilityObligationStore;
   private readonly dispatchPort: ObligationDispatchPort;
-  private readonly attestationPort: ObligationAttestationPort;
   private readonly evidencePort: ObligationEvidencePort;
   private readonly leaseSeconds: number;
   private readonly backoffSeconds: number;
@@ -138,7 +154,6 @@ export class CapabilityObligationSupervisor {
     this.db = options.db;
     this.store = options.store;
     this.dispatchPort = options.dispatchPort;
-    this.attestationPort = options.attestationPort;
     this.evidencePort = options.evidencePort;
     this.leaseSeconds = options.leaseSeconds ?? OBLIGATION_LEASE_SECONDS;
     this.backoffSeconds = options.backoffSeconds ?? OBLIGATION_BACKOFF_SECONDS;
@@ -214,11 +229,13 @@ export class CapabilityObligationSupervisor {
       mediaMaxAgeSeconds: this.mediaMaxAgeSeconds,
     });
     for (const due of dueRows) {
+      // r14 F3 — resolve the serving target ONCE; the admission binding and the
+      // dispatch below both come from this single resolution (no second resolve
+      // that could pick a recycled provider/generation after admission).
+      const prepared = this.dispatchPort.prepare(due);
+
       // D5 — exact-bound attestation; skips consume zero attempts.
-      const admission: AttestationAdmission = findAdmissibleAttestation(
-        this.db,
-        this.attestationPort.binding(due),
-      );
+      const admission: AttestationAdmission = findAdmissibleAttestation(this.db, prepared.binding);
       if (admission.outcome === 'skip') {
         report.attestationSkips.push({ id: due.id, reason: admission.reason });
         continue;
@@ -245,11 +262,16 @@ export class CapabilityObligationSupervisor {
         }
       }
 
-      // D7 — the transactional claim is the sole admission point.
+      // D7 — the transactional claim is the sole admission point. r14 F1 — bind
+      // the claim to the attestation that ACTUALLY admitted: its binding-identity
+      // digest must equal the group approval's drain_attestation_digest, or a
+      // drain approved under one release/attestation could run under a different
+      // release-new attestation that admits here. Non-group claims ignore it.
       const claimToken = `obl-claim-${systemClock.now()}-${++this.claimCounter}`;
       const claim = this.store.claimObligation(due.id, {
         claimToken,
         leaseSeconds: this.leaseSeconds,
+        admissionAttestationDigest: attestationBindingDigest(prepared.binding),
       });
       if (!claim.applied) continue; // lost the race — another scanner owns it
       report.claimed.push(due.id);
@@ -258,10 +280,20 @@ export class CapabilityObligationSupervisor {
         claimEpoch: claim.claimEpoch,
       };
 
+      // A real attestation admitted, so the target resolved and `dispatch` is
+      // non-null; guard fail-closed if it somehow became undispatchable.
+      if (prepared.dispatch === null) {
+        const requeued = this.store.requeueObligation(due.id, fence, {
+          backoffSeconds: this.backoffSeconds,
+        });
+        if (requeued.applied) report.requeuedRetryable.push(due.id);
+        continue;
+      }
+
       const mintedMessageId = `obl:${due.id}:${claim.attemptCount}`;
       let outcome: ObligationDispatchOutcome;
       try {
-        outcome = await this.dispatchPort.dispatch(due, mintedMessageId, fence, claim.attemptCount);
+        outcome = await prepared.dispatch(mintedMessageId, fence, claim.attemptCount);
       } catch (err) {
         // The dispatch port converts every post-boundary failure to 'ambiguous'
         // itself, so a THROW that escapes to here cannot be proven pre-boundary.

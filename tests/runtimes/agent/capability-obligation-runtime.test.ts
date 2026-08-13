@@ -201,16 +201,20 @@ function makeRuntime(script: HarnessScript = {}) {
     db,
     store,
     options: script.execution === undefined ? OPTIONS : { ...OPTIONS, execution: script.execution },
-    liveFacts: script.liveFacts ?? (() => LIVE_FACTS),
+    // r14 F3 — merged: one resolution yields the SERVING-provider facts (r13 F4
+    // knob preserved) AND the dispatch bound to it.
+    prepareDispatch: (obligation) => ({
+      facts: (script.liveFacts ?? (() => LIVE_FACTS))(obligation.deliveryJid),
+      dispatch: async (minted, seq) => {
+        dispatched.push({ id: obligation.id, minted, seq });
+        await script.onDispatch?.(registeredTool!, runtime);
+        return script.dispatchOutcome ?? 'dispatched';
+      },
+    }),
     getDurability: () =>
       script.journalThrows
         ? null
         : { journalInbound: (messageId: string) => journalInboundRaw(messageId) },
-    dispatchTurn: async (obligation, minted, seq) => {
-      dispatched.push({ id: obligation.id, minted, seq });
-      await script.onDispatch?.(registeredTool!, runtime);
-      return script.dispatchOutcome ?? 'dispatched';
-    },
     externalEffectFor: () => undefined,
     writeLossSince: () => false,
     registerTool: (tool) => {
@@ -583,9 +587,8 @@ describe('execute_capability live-registry integration (proof-gap C)', () => {
       db,
       store,
       options: OPTIONS,
-      liveFacts: () => LIVE_FACTS,
+      prepareDispatch: () => ({ facts: LIVE_FACTS, dispatch: async () => 'dispatched' }),
       getDurability: () => ({ journalInbound: (m: string) => journalInboundRaw(m) }),
-      dispatchTurn: async () => 'dispatched',
       externalEffectFor: () => undefined,
       writeLossSince: () => false,
       registerTool: (tool) => registry.register(tool),
@@ -775,20 +778,27 @@ describe('dispatch provider-boundary outcome (D7/r13 F1)', () => {
     requiredCapability: 'child_process_tools', retainedMediaPath: null,
     sourceToken: 'https://youtu.be/x', replayText: 'watch this',
   } as unknown as DispatchArgs[4];
-  const target = { session: {}, mapKey: 'mk' };
+  const target = { scope: 'per_chat', session: {}, mapKey: 'mk', managerId: 'm1', generation: 1 };
 
-  // A fake coordinator whose processPerChatTurn drives the onProviderBoundary
-  // callback (5th arg) exactly as the caller wires it, then behaves as scripted.
-  function callWith(process: (onBoundary: () => void) => Promise<void>): Promise<string> {
+  // A fake coordinator whose processPerChatTurn drives the dispatchAllowed gate
+  // (4th arg) and the onProviderBoundary callback (5th arg) exactly as the caller
+  // wires them, then behaves as scripted. `isCurrent` feeds isTargetCurrent → the
+  // dispatchAllowed the production coordinator consults BEFORE the boundary.
+  function callWith(
+    process: (onBoundary: () => void, dispatchAllowed: () => boolean) => Promise<void>,
+    isCurrent = true,
+  ): Promise<string> {
     const coord = {
       createRuntimeTurnForDispatch: () => ({ ctx: true }),
-      processPerChatTurn: (_s: unknown, _t: unknown, _x: unknown, _a: unknown, onBoundary: () => void) => process(onBoundary),
+      processPerChatTurn: (
+        _s: unknown, _t: unknown, _x: unknown, dispatchAllowed: () => boolean, onBoundary: () => void,
+      ) => process(onBoundary, dispatchAllowed),
     } as unknown as DispatchArgs[0];
     return dispatchCapabilityObligationTurnViaSession(
       coord,
-      (() => target) as unknown as DispatchArgs[1],
+      target as unknown as DispatchArgs[1], // r14 F3: PRE-RESOLVED target (no resolver)
       (() => 'scope-key') as unknown as DispatchArgs[2],
-      (() => true) as unknown as DispatchArgs[3],
+      (() => isCurrent) as unknown as DispatchArgs[3],
       DUE,
       'obl:1:1',
       42,
@@ -808,5 +818,20 @@ describe('dispatch provider-boundary outcome (D7/r13 F1)', () => {
   it("a clean turn returns 'dispatched'", async () => {
     await expect(callWith(async (onBoundary) => { onBoundary(); }))
       .resolves.toBe('dispatched');
+  });
+
+  it("FALSIFIER (r14 F3): a turn DISCARDED pre-boundary (carried target not current) returns 'retryable', never 'dispatched'", async () => {
+    // The admission-time target recycled onto a different provider/generation
+    // before dispatch; production's processPerChatTurn drops the turn via the
+    // dispatchAllowed gate BEFORE the provider boundary. Nothing reached the
+    // provider → must requeue, not falsely report 'dispatched' (which would
+    // consume the attempt and the obligation would never settle).
+    await expect(callWith(
+      async (onBoundary, dispatchAllowed) => {
+        if (dispatchAllowed() === false) return; // discarded pre-boundary, like production
+        onBoundary();
+      },
+      false, // isTargetCurrent → false: the carried target is stale at dispatch
+    )).resolves.toBe('retryable');
   });
 });

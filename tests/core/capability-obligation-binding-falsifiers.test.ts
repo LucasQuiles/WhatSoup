@@ -18,6 +18,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
+  attestationBindingDigest,
   findAdmissibleAttestation,
   recordCapabilityAttestation,
   type CapabilityAttestationBinding,
@@ -360,7 +361,9 @@ describe('D7 falsifier — group drains need an exactly bound, live-matching app
     expect(stateOf(id)).toBe('waiting_capability');
     // Revoke AFTER consumption — the obligation row is untouched (still parked).
     db.raw.prepare("UPDATE capability_drain_approvals SET revoked_at = datetime('now') WHERE id = ?").run(approvalId);
-    const claim = store.claimObligation(id, { claimToken: 'tok-revoked', leaseSeconds: 300 });
+    // Pass the MATCHING admission digest so the ONLY thing failing the claim is the
+    // revocation (not the r14 F1 absent-digest guard) — the test keeps biting r13 F3.
+    const claim = store.claimObligation(id, { claimToken: 'tok-revoked', leaseSeconds: 300, admissionAttestationDigest: LIVE.attestationDigest });
     expect(claim.applied).toBe(false); // revoked approval is re-checked at claim time
     expect(stateOf(id)).toBe('waiting_capability'); // nothing dispatched
   });
@@ -369,9 +372,69 @@ describe('D7 falsifier — group drains need an exactly bound, live-matching app
     const id = seedObligation(GROUP);
     insertApproval(id);
     expect(store.consumeGroupDrainApproval(id, LIVE).applied).toBe(true);
-    const claim = store.claimObligation(id, { claimToken: 'tok-ok', leaseSeconds: 300 });
+    // r14 F1 — the claim now also requires the admission digest to match the
+    // approved drain_attestation_digest; the drain was consumed at LIVE.attestationDigest.
+    const claim = store.claimObligation(id, { claimToken: 'tok-ok', leaseSeconds: 300, admissionAttestationDigest: LIVE.attestationDigest });
     expect(claim.applied).toBe(true);
     expect(stateOf(id)).toBe('claimed');
+  });
+
+  it('FALSIFIER (r14 F1): a group claim whose ADMITTING attestation differs from the approved one is refused', () => {
+    // The approval binds a specific attestation identity (drain_attestation_digest).
+    // If a DIFFERENT attestation admits at claim time (e.g. a release-new attestation),
+    // its binding digest differs from the approved one and the claim must refuse —
+    // otherwise a drain approved for release-old runs under an un-approved release-new
+    // attestation.
+    const id = seedObligation(GROUP);
+    insertApproval(id); // approval + consume bind drain_attestation_digest = LIVE.attestationDigest
+    expect(store.consumeGroupDrainApproval(id, LIVE).applied).toBe(true);
+    const claim = store.claimObligation(id, {
+      claimToken: 'tok-mismatch',
+      leaseSeconds: 300,
+      admissionAttestationDigest: 'att-digest-DIFFERENT', // a different attestation admitted
+    });
+    expect(claim.applied).toBe(false);
+    expect(stateOf(id)).toBe('waiting_capability'); // nothing dispatched
+  });
+
+  it('FALSIFIER (r14 F1): a group claim with NO admission digest is refused (fail-closed)', () => {
+    // The supervisor must always supply the admitting attestation's identity for a
+    // group drain; an absent digest can never satisfy drain_attestation_digest = NULL.
+    const id = seedObligation(GROUP);
+    insertApproval(id);
+    expect(store.consumeGroupDrainApproval(id, LIVE).applied).toBe(true);
+    const claim = store.claimObligation(id, { claimToken: 'tok-absent', leaseSeconds: 300 });
+    expect(claim.applied).toBe(false);
+    expect(stateOf(id)).toBe('waiting_capability');
+  });
+
+  it('r14 F1 positive control: an approval bound to the REAL attestationBindingDigest is claimable; a release change invalidates it', () => {
+    // Prove ops can produce a CLAIMABLE approval using the real digest function
+    // end-to-end, and that a release change (the reviewer's discriminator) breaks it.
+    const bindingOld: CapabilityAttestationBinding = {
+      hostId: 'h', runtimeUser: 'u', releaseSha: 'rel-OLD', schemaVersion: 57,
+      providerId: 'claude-cli', harnessType: 'persistent_session', contractVersion: 'c/1',
+      capability: 'child_process_tools', skillName: 'watch', skillVersion: '1.0.0',
+      skillDigest: 'sd', resolverDigest: 'rd', dependencyVersions: { 'yt-dlp': '2026.03.17' },
+      probeVersion: 'p/1', canaryId: 'can-1', mediaRoot: '/var/obligation-media',
+    };
+    const digestOld = attestationBindingDigest(bindingOld);
+    const digestNew = attestationBindingDigest({ ...bindingOld, releaseSha: 'rel-NEW' });
+    expect(digestNew).not.toBe(digestOld); // release is inside the binding identity
+
+    const okId = seedObligation(GROUP);
+    insertApproval(okId, { attestationDigest: digestOld });
+    expect(store.consumeGroupDrainApproval(okId, { ...LIVE, attestationDigest: digestOld }).applied).toBe(true);
+    // Admitting attestation matches the approved binding → claims.
+    expect(store.claimObligation(okId, { claimToken: 'tok-real-ok', leaseSeconds: 300, admissionAttestationDigest: digestOld }).applied).toBe(true);
+
+    // Distinct seq/msgId so ambiguity-safe dedup does not fold this into okId.
+    const badId = seedObligation({ ...GROUP, sourceInboundSeq: 3002, sourceMessageId: 'TESTMSG-BIND-2' });
+    insertApproval(badId, { attestationDigest: digestOld });
+    expect(store.consumeGroupDrainApproval(badId, { ...LIVE, attestationDigest: digestOld }).applied).toBe(true);
+    // A release-new attestation admits instead → identity differs → refused.
+    expect(store.claimObligation(badId, { claimToken: 'tok-real-bad', leaseSeconds: 300, admissionAttestationDigest: digestNew }).applied).toBe(false);
+    expect(stateOf(badId)).toBe('waiting_capability');
   });
 
   it('a group approval row without an attestation digest is unrepresentable', () => {

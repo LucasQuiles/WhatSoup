@@ -395,7 +395,7 @@ export class CapabilityObligationStore {
 
   claimObligation(
     id: number,
-    params: { claimToken: string; leaseSeconds: number },
+    params: { claimToken: string; leaseSeconds: number; admissionAttestationDigest?: string },
   ): { applied: true; claimEpoch: number; attemptCount: number } | { applied: false } {
     // r13 F3 — group obligations RE-VALIDATE the consumed drain approval at CLAIM
     // time, not only at the waiting_approval → waiting_capability transition (the
@@ -404,6 +404,16 @@ export class CapabilityObligationStore {
     // on the obligation — could still be claimed and dispatched. Fail-closed: the
     // EXISTS must still hold (unrevoked, unexpired, facts match) or the claim is
     // refused and the group obligation dispatches nothing.
+    //
+    // r14 F1 — the approval must bind to the attestation ACTUALLY admitting THIS
+    // claim, not merely to the drain facts cached on the obligation. The caller
+    // (supervisor) supplies `admissionAttestationDigest` = the binding-identity
+    // digest of whatever `findAdmissibleAttestation` admitted; the claim requires
+    // it to equal `drain_attestation_digest` (which the EXISTS already ties to the
+    // approval). Without this a drain approved under one release/attestation could
+    // be executed under a DIFFERENT release-new attestation that admits at claim
+    // time. Fail-closed: a group claim with no admission digest (NULL) can never
+    // satisfy `drain_attestation_digest = NULL`, so it is refused.
     const row = this.db.raw
       .prepare(
         `UPDATE capability_obligations
@@ -420,23 +430,26 @@ export class CapabilityObligationStore {
            AND (next_attempt_at IS NULL OR datetime(next_attempt_at) <= datetime('now'))
            AND (
              capability_obligations.is_group = 0
-             OR EXISTS (
-               SELECT 1 FROM capability_drain_approvals a
-               WHERE a.id = capability_obligations.drain_approval_id
-                 AND a.obligation_id = capability_obligations.id
-                 AND a.scope = 'group'
-                 AND a.destination_jid = capability_obligations.delivery_jid
-                 AND a.release_sha = capability_obligations.drain_release_sha
-                 AND a.manifest_digest = capability_obligations.drain_manifest_digest
-                 AND a.drain_run_id = capability_obligations.drain_run_id
-                 AND a.attestation_digest = capability_obligations.drain_attestation_digest
-                 AND a.revoked_at IS NULL
-                 AND datetime(a.expires_at) > datetime('now')
+             OR (
+               capability_obligations.drain_attestation_digest = ?
+               AND EXISTS (
+                 SELECT 1 FROM capability_drain_approvals a
+                 WHERE a.id = capability_obligations.drain_approval_id
+                   AND a.obligation_id = capability_obligations.id
+                   AND a.scope = 'group'
+                   AND a.destination_jid = capability_obligations.delivery_jid
+                   AND a.release_sha = capability_obligations.drain_release_sha
+                   AND a.manifest_digest = capability_obligations.drain_manifest_digest
+                   AND a.drain_run_id = capability_obligations.drain_run_id
+                   AND a.attestation_digest = capability_obligations.drain_attestation_digest
+                   AND a.revoked_at IS NULL
+                   AND datetime(a.expires_at) > datetime('now')
+               )
              )
            )
          RETURNING claim_epoch, attempt_count`,
       )
-      .get(params.claimToken, params.leaseSeconds, id) as
+      .get(params.claimToken, params.leaseSeconds, id, params.admissionAttestationDigest ?? null) as
       | { claim_epoch: number; attempt_count: number }
       | undefined;
     if (row === undefined) return { applied: false };

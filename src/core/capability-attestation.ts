@@ -17,6 +17,8 @@
  * durable record + the admission decision, so the trust boundary is a single
  * reviewed query.
  */
+import { createHash } from 'node:crypto';
+
 import type { Database } from './database.ts';
 
 /**
@@ -60,6 +62,45 @@ export function canonicalDependencyVersions(deps: Record<string, string>): strin
   return JSON.stringify(
     Object.fromEntries(Object.entries(deps).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))),
   );
+}
+
+/**
+ * A stable, recomputable digest of an attestation's BINDING IDENTITY — exactly
+ * the fields `findAdmissibleAttestation` matches on, and NOTHING ephemeral
+ * (nonce / attested_at / expires_at are deliberately excluded, so a routine
+ * canary re-mint of the same host/release/provider/skill keeps a drain approval
+ * valid, while a release/provider/skill/dependency change invalidates it).
+ *
+ * Because admission is an EXACT match on every one of these fields, this digest
+ * computed over the admission `binding` IS the identity of whichever attestation
+ * admitted — no row re-read needed. A group drain approval binds to it
+ * (`drain_attestation_digest`), and the claim refuses unless the attestation
+ * admitting THAT claim carries the same identity (r14 F1): approval →
+ * cached-drain-facts → admitting-attestation must all agree.
+ *
+ * Positional array (not an object) so key order can never defeat or forge a
+ * match; `canonicalDependencyVersions` normalises the one nested map.
+ */
+export function attestationBindingDigest(binding: CapabilityAttestationBinding): string {
+  const canonical = JSON.stringify([
+    binding.hostId,
+    binding.runtimeUser,
+    binding.releaseSha,
+    binding.schemaVersion,
+    binding.providerId,
+    binding.harnessType,
+    binding.contractVersion,
+    binding.capability,
+    binding.skillName,
+    binding.skillVersion,
+    binding.skillDigest,
+    binding.resolverDigest,
+    canonicalDependencyVersions(binding.dependencyVersions),
+    binding.probeVersion,
+    binding.canaryId,
+    binding.mediaRoot,
+  ]);
+  return createHash('sha256').update(canonical).digest('hex');
 }
 
 export function recordCapabilityAttestation(

@@ -81,12 +81,22 @@ export interface CapabilityObligationRuntimeDeps {
   store: CapabilityObligationStore;
   options: CapabilityObligationsOptions;
   /**
-   * D5 live binding facts for the provider SERVING a given chat (r13 F4). The
-   * caller resolves the effective/fallback provider of the target session (not the
-   * configured primary), so attestation admits only against the harness that will
-   * actually execute; an unresolvable session yields a fail-closed sentinel.
+   * Resolve the serving dispatch target for a chat ONCE (r14 F3) and return both
+   * the live D5 binding facts (for the SERVING provider — r13 F4) and a dispatch
+   * bound to THAT exact resolved target, re-verified at the provider boundary.
+   * Resolving once — rather than the attestation binding and the dispatch each
+   * resolving the target independently — closes the TOCTOU where a session
+   * recycled onto a different provider/generation between admission and dispatch
+   * would run a replay on a never-attested harness. A null/unresolved target
+   * yields the fail-closed sentinel provider in `facts` (so admission skips) and
+   * a `null` dispatch.
    */
-  liveFacts: (deliveryJid: string) => CapabilityObligationLiveFacts;
+  prepareDispatch: (obligation: CapabilityObligationDueRow) => {
+    facts: CapabilityObligationLiveFacts;
+    dispatch:
+      | ((mintedMessageId: string, mintedSeq: number) => Promise<ObligationDispatchOutcome>)
+      | null;
+  };
   /**
    * The live durability engine, or null before setDurability. A null engine at
    * dispatch time makes the attempt retryable (never a crash).
@@ -94,16 +104,6 @@ export interface CapabilityObligationRuntimeDeps {
   getDurability: () => {
     journalInbound: (messageId: string, conversationKey: string, chatJid: string, routedTo: string) => number;
   } | null;
-  /**
-   * Enter the normal per-chat pipeline for the minted, already-journaled
-   * inbound. 'retryable' = target/session not current (cold, superseded, shut
-   * down); the obligation requeues under bounded backoff.
-   */
-  dispatchTurn: (
-    obligation: CapabilityObligationDueRow,
-    mintedMessageId: string,
-    mintedSeq: number,
-  ) => Promise<ObligationDispatchOutcome>;
   /**
    * Map a delivery JID to the runtime's per-chat map key (LID aliasing means
    * these can differ). The stream tap and the dispatch recorder must agree on
@@ -176,24 +176,20 @@ export class CapabilityObligationRuntime {
       db: deps.db,
       store: deps.store,
       mediaMaxAgeSeconds: deps.options.retentionHorizonDays * 86_400,
-      attestationPort: {
-        binding: (obligation): CapabilityAttestationBinding => ({
-          ...deps.liveFacts(obligation.deliveryJid),
-          contractVersion: obligation.contractVersion,
-          capability: obligation.requiredCapability,
-          skillName: this.options.attestation.skillName,
-          skillVersion: this.options.attestation.skillVersion,
-          skillDigest: this.options.attestation.skillDigest,
-          resolverDigest: this.options.attestation.resolverDigest,
-          dependencyVersions: this.options.attestation.dependencyVersions,
-          probeVersion: this.options.attestation.probeVersion,
-          canaryId: this.options.attestation.canaryId,
-          mediaRoot: this.options.mediaRoot,
-        }),
-      },
       dispatchPort: {
-        dispatch: (obligation, mintedMessageId, fence, attemptNumber) =>
-          this.dispatch(deps, obligation, mintedMessageId, fence, attemptNumber),
+        // r14 F3 — resolve the serving target ONCE; the admission binding and the
+        // dispatch both come from that single resolution.
+        prepare: (obligation) => {
+          const prep = deps.prepareDispatch(obligation);
+          const binding = this.attestationBinding(prep.facts, obligation);
+          if (prep.dispatch === null) return { binding, dispatch: null };
+          const boundDispatch = prep.dispatch;
+          return {
+            binding,
+            dispatch: (mintedMessageId, fence, attemptNumber) =>
+              this.dispatch(deps, obligation, mintedMessageId, fence, attemptNumber, boundDispatch),
+          };
+        },
       },
       evidencePort: {
         providerAcceptedIds: () => this.providerAcceptedIds(),
@@ -293,12 +289,34 @@ export class CapabilityObligationRuntime {
 
   // ── ports ─────────────────────────────────────────────────────────────────
 
+  /** Live serving-provider facts + the obligation's contract → the exact D5 binding. */
+  private attestationBinding(
+    facts: CapabilityObligationLiveFacts,
+    obligation: CapabilityObligationDueRow,
+  ): CapabilityAttestationBinding {
+    return {
+      ...facts,
+      contractVersion: obligation.contractVersion,
+      capability: obligation.requiredCapability,
+      skillName: this.options.attestation.skillName,
+      skillVersion: this.options.attestation.skillVersion,
+      skillDigest: this.options.attestation.skillDigest,
+      resolverDigest: this.options.attestation.resolverDigest,
+      dependencyVersions: this.options.attestation.dependencyVersions,
+      probeVersion: this.options.attestation.probeVersion,
+      canaryId: this.options.attestation.canaryId,
+      mediaRoot: this.options.mediaRoot,
+    };
+  }
+
   private async dispatch(
     deps: CapabilityObligationRuntimeDeps,
     obligation: CapabilityObligationDueRow,
     mintedMessageId: string,
     fence: CapabilityObligationClaimFence,
     attemptNumber: number,
+    // r14 F3 — the dispatch bound to the SINGLE resolved target from prepareDispatch.
+    boundDispatch: (mintedMessageId: string, mintedSeq: number) => Promise<ObligationDispatchOutcome>,
   ): Promise<ObligationDispatchOutcome> {
     let mintedSeq: number;
     try {
@@ -317,7 +335,7 @@ export class CapabilityObligationRuntime {
     const mapKey = this.resolveRecorderKey(obligation.deliveryJid);
     this.activeTurns.set(mapKey, { obligation, mintedMessageId, fence, attemptNumber });
     try {
-      return await deps.dispatchTurn(obligation, mintedMessageId, mintedSeq);
+      return await boundDispatch(mintedMessageId, mintedSeq);
     } finally {
       this.activeTurns.delete(mapKey);
     }
@@ -510,15 +528,17 @@ export function composeCapabilityObligationReplayPrompt(obligation: CapabilityOb
 
 export async function dispatchCapabilityObligationTurnViaSession(
   coordinator: RuntimeTurnCoordinator,
-  resolveTarget: (deliveryJid: string) => TurnRecoveryDispatchTarget | null,
+  // r14 F3 — the PRE-RESOLVED target from prepareDispatch (the SAME resolution the
+  // attestation admitted against). Dispatch does NOT resolve again; it re-verifies
+  // THIS target at the provider boundary, so a session recycled onto a different
+  // provider/generation after admission is caught (never runs on a new harness).
+  target: TurnRecoveryDispatchTarget,
   requireSessionToolScopeKey: (session: SessionManager) => string,
   isTargetCurrent: (target: TurnRecoveryDispatchTarget) => boolean,
   obligation: CapabilityObligationDueRow,
   mintedMessageId: string,
   mintedSeq: number,
 ): Promise<ObligationDispatchOutcome> {
-  const target = resolveTarget(obligation.deliveryJid);
-  if (!target) return 'retryable';
   const session = target.session as SessionManager;
   // The minted turn must INSTRUCT the agent to run the capability (naming the
   // exact source); the bare replay text alone would quarantine silently.
@@ -584,6 +604,32 @@ export async function dispatchCapabilityObligationTurnViaSession(
       return 'ambiguous';
     }
     log.warn({ err, obligationId: obligation.id }, 'obligation turn dispatch failed pre-boundary; retryable');
+    return 'retryable';
+  }
+  // r14 F3 fail-closed: a NORMAL return that never crossed the provider boundary
+  // means the turn was DISCARDED pre-boundary — the carried admission-time target
+  // was no longer current (e.g. the session recycled onto a different
+  // provider/generation between admission and dispatch), so processPerChatTurn's
+  // dispatchAllowed gate dropped it before any provider call. Nothing reached the
+  // provider ⇒ no side effect is possible ⇒ requeue. Reporting 'dispatched' here
+  // (the prior fall-through, formerly masked because dispatch re-resolved a fresh
+  // current target) would consume the attempt and the obligation would never
+  // settle. `providerBoundaryCrossed` is authoritative: a genuine turn fires the
+  // boundary callback the instant it reaches the provider (same signal r13 uses
+  // to classify post-boundary throws as ambiguous).
+  // r14 F3 fail-closed: a NORMAL return that never crossed the provider boundary
+  // means the turn was DISCARDED pre-boundary — the carried admission-time target
+  // was no longer current (e.g. the session recycled onto a different
+  // provider/generation between admission and dispatch), so processPerChatTurn's
+  // dispatchAllowed gate dropped it before any provider call. Nothing reached the
+  // provider ⇒ no side effect is possible ⇒ requeue. Reporting 'dispatched' here
+  // (the prior fall-through, formerly masked because dispatch re-resolved a fresh
+  // current target) would consume the attempt and the obligation would never
+  // settle. `providerBoundaryCrossed` is authoritative: a genuine turn fires the
+  // boundary callback the instant it reaches the provider (same signal r13 uses
+  // to classify post-boundary throws as ambiguous).
+  if (!providerBoundaryCrossed) {
+    log.info({ obligationId: obligation.id }, 'obligation turn discarded pre-boundary (target not current); retryable');
     return 'retryable';
   }
   return 'dispatched';

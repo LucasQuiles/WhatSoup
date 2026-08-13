@@ -66,15 +66,16 @@ function makeSupervisor(script: Script, options: { backoffSeconds?: number } = {
     store,
     backoffSeconds: options.backoffSeconds ?? 0,
     dispatchPort: {
-      async dispatch(obligation, mintedMessageId) {
-        dispatches.push({ id: obligation.id, mintedMessageId });
-        const outcome = script.dispatch ?? 'dispatched';
-        if (outcome instanceof Error) throw outcome;
-        return outcome;
-      },
-    },
-    attestationPort: {
-      binding: (obligation) => ({ ...BINDING, contractVersion: obligation.contractVersion }),
+      // r14 F3 — merged prepare: one resolution yields the binding AND the dispatch.
+      prepare: (obligation) => ({
+        binding: { ...BINDING, contractVersion: obligation.contractVersion },
+        dispatch: async (mintedMessageId) => {
+          dispatches.push({ id: obligation.id, mintedMessageId });
+          const outcome = script.dispatch ?? 'dispatched';
+          if (outcome instanceof Error) throw outcome;
+          return outcome;
+        },
+      }),
     },
     evidencePort: {
       providerAcceptedIds: () => new Set(script.accepted ?? []),
