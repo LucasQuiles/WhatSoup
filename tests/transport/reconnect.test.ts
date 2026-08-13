@@ -61,7 +61,7 @@ vi.mock('../../src/config.ts', () => ({
     stateRoot: testStateRoot,
     dataRoot: testDataRoot,
     dbPath: ':memory:',
-    mediaDir: '/tmp',
+    mediaDir: '/tmp/whatsoup-test-media-reconnect/tmp',
     botName: 'WhatSoup',
     accessMode: 'allowlist',
     healthPort: 9090,

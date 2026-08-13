@@ -21,7 +21,7 @@ vi.mock('../../src/config.ts', () => ({
     // Q control peer: name 'q' → phone '15559998888' (control_peer wiring tests)
     controlPeers: new Map<string, string>([['q', '15559998888']]),
     dbPath: ':memory:',
-    mediaDir: '/tmp',
+    mediaDir: '/tmp/whatsoup-test-media-health/tmp',
     botName: 'WhatSoup',
     accessMode: 'allowlist',
     healthPort: 9999, // won't actually be used (tests override)

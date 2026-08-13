@@ -8,7 +8,7 @@ vi.mock('../../src/config.ts', () => ({
     adminPhones: new Set(['15550100001']),
     dbPath: ':memory:',
     authDir: '/tmp/wa-test-auth-command-router',
-    mediaDir: '/tmp',
+    mediaDir: '/tmp/whatsoup-test-media-command-router/tmp',
     botName: 'WhatSoup',
     accessMode: 'allowlist',
     healthPort: 9090,

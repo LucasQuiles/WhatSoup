@@ -20,7 +20,7 @@ vi.mock('../../src/config.ts', () => ({
     authDir: '/tmp/wa-test-auth-connection-exhaustion-exit',
     dataRoot: tempDataRoot,
     dbPath: ':memory:',
-    mediaDir: '/tmp',
+    mediaDir: '/tmp/whatsoup-test-media-connection-exhaustion-exit/tmp',
     botName: 'WhatSoup',
     accessMode: 'allowlist',
     healthPort: 9090,
