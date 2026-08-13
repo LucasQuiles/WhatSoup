@@ -5,6 +5,12 @@
  * obligation consumes and claims. Dry-run records nothing; non-group / non-waiting
  * obligations are refused.
  */
+import { spawnSync } from 'node:child_process';
+import { realpathSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
@@ -17,10 +23,14 @@ import { CapabilityObligationStore } from '../../src/core/capability-obligation-
 import { Database } from '../../src/core/database.ts';
 import { withTransaction } from '../../src/core/db-tx.ts';
 import { resolveHarnessType } from '../../src/runtimes/agent/capability-obligation-runtime.ts';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 import { approveDrain, type ApproveDrainArgs } from '../../scripts/capability-obligation-approve-drain.ts';
 
 let db: Database;
 let store: CapabilityObligationStore;
+
+const CLI_PATH = fileURLToPath(new URL('../../scripts/capability-obligation-approve-drain.ts', import.meta.url));
+const tmp = trackTmpDirs('approve-drain-cli-', { base: realpathSync(tmpdir()) });
 
 const GROUP_JID = 'test-group-alpha@g.us';
 const SKILL: AttestationSkillIdentity = {
@@ -120,4 +130,84 @@ describe('approveDrain (operator group-drain approval)', () => {
   it('refuses an unknown obligation id', () => {
     expect(approveDrain(store, db, baseArgs(4242, { confirm: true })).reason).toBe('not_found');
   });
+});
+
+describe('capability-obligation-approve-drain CLI (main block reaches approveDrain end-to-end)', () => {
+  /**
+   * Runs the ACTUAL script main block as a subprocess. The existing tests above
+   * call approveDrain() directly; this proves the runApproveDrain wiring
+   * (parseApproveDrainArgs → assertSchemaCurrent → open DB → approveDrain →
+   * exit code) actually executes and records — the same unexercised-main-block
+   * surface that carried the attest-CLI defect.
+   */
+  function seedGroupObligationInFileDb(dbFile: string): number {
+    const seed = new Database(dbFile);
+    seed.open();
+    let id = 0;
+    try {
+      const s = new CapabilityObligationStore(seed);
+      withTransaction(seed, () => {
+        id = s.applyDecisionWithinCallerTransaction({
+          auditEvent: { action: 'obligation.create', actorType: 'runtime', reasonCode: 'conclusive_no_effect' },
+          obligation: {
+            sourceInboundSeq: 9101, sourceMessageId: 'TESTMSG-CLI-1', conversationKey: 'conv-approve-cli',
+            deliveryJid: GROUP_JID, senderJid: 'test-sender@s.whatsapp.net', senderName: 'S',
+            isGroup: true, groupName: 'Test Group Alpha', scope: 'per_chat', originRecoveryJobId: null,
+            replayText: 'https://youtu.be/abc', contentTypeHint: 'text', contractVersion: 'c/1',
+            requiredCapability: 'child_process_tools', capabilityParams: '{"skill":"watch"}',
+            inputDigest: 'ab'.repeat(32), sourceDigest: 'bb'.repeat(32), sourceToken: 'https://youtu.be/abc',
+            retainedMedia: null, creationReason: 'typed_deferral_signal',
+          },
+        }).obligationId!;
+      });
+    } finally {
+      seed.close();
+    }
+    return id;
+  }
+
+  function runCli(dbFile: string, obligationId: number, extra: readonly string[]): ReturnType<typeof spawnSync> {
+    const cliArgs = [
+      '--db', dbFile, '--obligation-id', String(obligationId), '--release-sha', 'rel-live-1', '--provider', 'claude-cli',
+      '--skill-name', 'watch', '--skill-version', '1.0.0', '--skill-digest', 'sd', '--resolver-digest', 'rd',
+      '--dep', 'yt-dlp=2026.03.17', '--probe-version', 'p/1', '--canary-id', 'can-1',
+      '--media-root', '/var/media', '--manifest-digest', 'md-1', '--drain-run-id', 'drain-1', '--approver', 'owner',
+      '--valid-seconds', '3600', '--host', 'test-host', '--runtime-user', 'test-user', ...extra,
+    ];
+    return spawnSync(
+      process.execPath,
+      ['--disable-warning=ExperimentalWarning', '--experimental-strip-types', CLI_PATH, ...cliArgs],
+      { encoding: 'utf8' },
+    );
+  }
+
+  function approvalCount(dbFile: string): number {
+    const check = new Database(dbFile);
+    check.open();
+    try {
+      return (check.raw.prepare('SELECT COUNT(*) AS c FROM capability_drain_approvals').get() as { c: number }).c;
+    } finally {
+      check.close();
+    }
+  }
+
+  it('--confirm records a group-drain approval (proves the runApproveDrain wiring executes)', () => {
+    const dir = tmp.make('confirm');
+    const dbFile = join(dir, 'obligations.db');
+    const id = seedGroupObligationInFileDb(dbFile);
+    const result = runCli(dbFile, id, ['--confirm']);
+    expect(result.status, `stderr: ${result.stderr}`).toBe(0);
+    expect(result.stdout).toMatch(/APPROVED group drain/);
+    expect(approvalCount(dbFile)).toBe(1);
+  }, 30_000);
+
+  it('FALSIFIER: dry-run (no --confirm) records NO approval', () => {
+    const dir = tmp.make('dryrun');
+    const dbFile = join(dir, 'obligations.db');
+    const id = seedGroupObligationInFileDb(dbFile);
+    const result = runCli(dbFile, id, []);
+    expect(result.status, `stderr: ${result.stderr}`).toBe(0);
+    expect(result.stdout).toMatch(/DRY-RUN approve/);
+    expect(approvalCount(dbFile)).toBe(0);
+  }, 30_000);
 });

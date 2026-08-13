@@ -119,6 +119,17 @@ describe('assertArgsMatchConfig (attestation must be admittable by the live inst
     expect(() => assertArgsMatchConfig(bad, configOptions())).toThrow(/does not match --config/);
   });
 
+  it('FALSIFIER: refuses a binding whose mediaRoot differs from config (proves the digest covers mediaRoot)', () => {
+    const bad = args({ mediaRoot: '/other/media' });
+    expect(() => assertArgsMatchConfig(bad, configOptions())).toThrow(/does not match --config/);
+  });
+
+  it('FALSIFIER: refuses a binding whose contract version differs from config (proves the digest covers contractVersion)', () => {
+    const bad = args({ contractVersion: 'c/2' });
+    // The config contract is version c/1; c/2 differs, so the derived binding cannot match.
+    expect(() => assertArgsMatchConfig(bad, configOptions())).toThrow(/does not match --config/);
+  });
+
   it('FALSIFIER: refuses a capability the config contract does not declare', () => {
     // Binding identity still matches (capability is on both sides), but no rule requires it.
     const opts = configOptions({
