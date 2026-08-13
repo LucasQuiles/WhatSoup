@@ -225,3 +225,80 @@ def test_coalesce_ignores_non_recovered_source():
     mod = _load()
     # A non-relay-recovered event must pass straight through (None).
     assert mod.coalesce_relay_recovered(_down(), _empty_state()) is None
+
+
+# ---------------------------------------------------------------------------
+# #2419 — recovery as a typed SAME-SOURCE clear (source=relay_host_down,
+# eventType=clear). Incident identity includes the exact source, so only a
+# down-source clear can retire the paired down record; the legacy
+# relay_host_recovered info alert never could (and, once flipped to a clear
+# WITHOUT the source substitution, was suppressed as a stale recovery while
+# the down incident stayed open — the #3061 regression this closes).
+# ---------------------------------------------------------------------------
+
+
+def _recovered_clear(remote: str = "peer-a", *, machine: str = _MACHINE) -> dict:
+    return {
+        "schemaVersion": 1,
+        "id": f"evt-clear-{remote}",
+        "eventType": "clear",
+        "severity": "info",
+        "machine": machine,
+        "instance": "bot-errors-collector",
+        "source": "relay_host_down",
+        "summary": f"relay host recovered: {remote}",
+        "evidence": "",
+        "diagnostics": {"remote": remote},
+    }
+
+
+def test_same_source_clear_closes_surfaced_down():
+    mod = _load()
+    state = _empty_state()
+    # Surface the outage (open incident under the down key).
+    mod.mark_incident_sent(_down(), state)
+    down_key = mod.incident_key(_down())
+    assert down_key in state["openIncidents"]
+
+    # The clear is news for a surfaced outage: it must send…
+    assert mod.should_suppress_send(_recovered_clear(), state) is None
+    # …and its send must durably close the exact paired episode.
+    mod.mark_incident_sent(_recovered_clear(), state)
+    assert down_key not in state["openIncidents"]
+    assert down_key not in state.get("lastSentAt", {})
+
+
+def test_same_source_clear_retires_held_flap_silently():
+    mod = _load()
+    state = _empty_state()
+    # Hold the down as an unpromoted transient (never surfaced).
+    reason = mod.should_suppress_send(_down(), state)
+    assert reason is not None and reason.startswith("transient_held:")
+    down_key = mod.incident_key(_down())
+    assert down_key in state["transientState"]
+
+    # The clear retires the held record silently — neither leg pages.
+    clear_reason = mod.should_suppress_send(_recovered_clear(), state)
+    assert clear_reason is not None
+    assert down_key not in state["transientState"]
+    assert down_key not in state["openIncidents"]
+
+
+def test_same_source_clear_with_no_record_is_idempotent():
+    mod = _load()
+    state = _empty_state()
+    reason = mod.should_suppress_send(_recovered_clear(), state)
+    assert reason is not None
+    assert "no open incident" in reason
+
+
+def test_same_source_clear_is_scoped_to_its_remote():
+    mod = _load()
+    state = _empty_state()
+    mod.mark_incident_sent(_down("peer-a"), state)
+    down_a = mod.incident_key(_down("peer-a"))
+
+    # peer-b's recovery cannot close peer-a's outage.
+    reason = mod.should_suppress_send(_recovered_clear("peer-b"), state)
+    assert reason is not None
+    assert down_a in state["openIncidents"]

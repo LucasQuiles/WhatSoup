@@ -1548,9 +1548,13 @@ def resolve_transient_on_clear(
 def coalesce_relay_recovered(event: dict[str, Any], incident_state: dict[str, Any]) -> str | None:
     """Suppress a relay_host_recovered whose paired down was held silently (Pattern H).
 
-    relay_host_recovered is emitted as an ``info`` alert (not a clear), so it never
-    matches the same-key Pattern D clear path. We pair it to its ``relay_host_down``
-    incident by source-segment substitution and decide:
+    #2419: the collector now emits recovery as a typed SAME-SOURCE clear
+    (event_type="clear", source="relay_host_down"), which the standard Pattern D
+    clear path handles end-to-end: a held transient retires silently via
+    resolve_transient_on_clear, a surfaced outage pops via mark_incident_sent.
+    This function remains ONLY for legacy in-flight events that still carry
+    source="relay_host_recovered"; new-format clears never enter it. Legacy
+    pairing is by source-segment substitution:
 
     - paired down is a SURFACED open incident → the recovery is news → ``None`` (send).
     - paired down is a HELD, unpromoted transient → never surfaced → suppress the
@@ -2757,11 +2761,12 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
     # neither leg. Handled here because the info severity means it never reaches the
     # is_incident_alert / is_incident_clear branches below.
     if source == RELAY_RECOVERED_SOURCE:
+        # #2419: LEGACY-ONLY branch — the collector now emits recovery as a
+        # same-source clear (source="relay_host_down"), which routes through
+        # the standard Pattern D clear path below instead of this pairing shim.
         relay_reason = coalesce_relay_recovered(event, incident_state)
         if relay_reason is not None:
             return relay_reason
-        # #2419: relay_host_recovered now uses eventType="clear" (collector-side)
-        # so the dispatcher's standard clear-pop path closes the down incident.
     # Pattern B (Part 2) — silence incident ALERTS for a scope under a planned
     # maintenance window. CLEAR events are never gated here: a recovery during
     # maintenance must still close the incident. FAIL-OPEN: gate off, or any
