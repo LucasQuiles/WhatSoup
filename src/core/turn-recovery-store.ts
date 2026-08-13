@@ -92,6 +92,23 @@ export interface TurnRecoveryJobRow {
   echo_conflict_reason: string | null;
 }
 
+/**
+ * The single replay-eligibility contract shared by the pending recovery
+ * consumer and operator tooling (#2155). A pending job may dispatch when it
+ * was born replay-safe, OR when an operator promoted it from blocked_unsafe
+ * through promoteBlockedTurnRecoveryJob — which records the evidence proof
+ * reference while immutably preserving replay_safe=0. A never-promoted
+ * unsafe job (replay_safe=0, no proof) must NEVER dispatch automatically.
+ */
+export function isTurnRecoveryReplayEligible(
+  job: Pick<TurnRecoveryJobRow, 'replay_safe' | 'replay_safety_proof_id'>,
+): boolean {
+  if (job.replay_safe === 1) return true;
+  return job.replay_safe === 0
+    && typeof job.replay_safety_proof_id === 'string'
+    && job.replay_safety_proof_id.length > 0;
+}
+
 export interface EnqueueTurnRecoveryJobResult {
   status: 'durably_queued' | 'durably_blocked';
   applied: boolean;

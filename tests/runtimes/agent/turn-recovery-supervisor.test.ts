@@ -96,7 +96,7 @@ describe('TurnRecoverySupervisor — BRICK-LAB-shaped regression', () => {
    * still-ambiguous original send.
    */
   function crashOneSourceTurn(
-    options: { resolveOriginalDelivery?: boolean; suffix?: string } = {},
+    options: { resolveOriginalDelivery?: boolean; suffix?: string; replaySafe?: boolean } = {},
   ): {
     jobId: number;
     conversationKey: string;
@@ -133,7 +133,10 @@ describe('TurnRecoverySupervisor — BRICK-LAB-shaped regression', () => {
       identity,
       deliveryEvidence: { kind: 'enqueued', opId: deliveryOpId },
     };
-    const envelope = replayEnvelope(suffix, { sourceMessageId: `wamid-brick-source-${suffix}` });
+    const envelope = replayEnvelope(suffix, {
+      sourceMessageId: `wamid-brick-source-${suffix}`,
+      replaySafe: options.replaySafe ?? true,
+    });
     const params = {
       ...toTurnFinalizationPersistence(result, terminal.owner),
       recoveryJob: toTurnRecoveryJobPersistence(result, terminal.owner, envelope),
@@ -255,6 +258,64 @@ describe('TurnRecoverySupervisor — BRICK-LAB-shaped regression', () => {
     const secondScan = await supervisor.scanOnce();
     expect(secondScan.claimed).toBe(0);
     expect(dispatchCalls).toBe(1);
+  });
+
+  it('dispatches an evidence-promoted blocked_unsafe job while a never-promoted one stays blocked (#2155)', async () => {
+    const promoted = crashOneSourceTurn({ suffix: 'promoted', replaySafe: false });
+    const unpromoted = crashOneSourceTurn({ suffix: 'unpromoted', replaySafe: false });
+    expect(durability.getTurnRecoveryJob(promoted.jobId)).toMatchObject({
+      state: 'blocked_unsafe', replay_safe: 0, replay_safety_proof_id: null,
+    });
+
+    let dispatchCalls = 0;
+    const supervisor = new TurnRecoverySupervisor({
+      instanceName: 'brick-instance',
+      durability: () => durability,
+      freshOwnerIdentity: (): TurnRecoveryOwnerIdentity => ({
+        logicalTurnId: 'brick-recovery-owner',
+        managerId: 'brick-supervisor',
+        generation: 1,
+      }),
+      dispatchReplay: async (): Promise<TurnRecoveryReplayDispatchResult> => {
+        dispatchCalls += 1;
+        durability.completeInbound(promoted.sourceInboundSeq, 'response_sent');
+        return { kind: 'delivered' };
+      },
+    });
+
+    // Blocked-unsafe work never auto-replays: a scan touches neither job.
+    const preScan = await supervisor.scanOnce();
+    expect(preScan.claimed).toBe(0);
+    expect(dispatchCalls).toBe(0);
+    expect(durability.getTurnRecoveryJob(promoted.jobId)?.state).toBe('blocked_unsafe');
+
+    // Operator promotion through the fenced store transition: state flips to
+    // pending, the proof reference is recorded, replay_safe stays immutably 0.
+    const promotion = durability.promoteBlockedTurnRecoveryJob(
+      promoted.jobId,
+      OWNER,
+      { claimEpoch: 0, assignmentEpoch: 0 },
+      { idempotencyProofId: 'proof:ambiguity-resolved:v1' },
+    );
+    expect(promotion).toMatchObject({ applied: true, state: 'pending' });
+    expect(durability.getTurnRecoveryJob(promoted.jobId)).toMatchObject({
+      state: 'pending', replay_safe: 0, replay_safety_proof_id: 'proof:ambiguity-resolved:v1',
+    });
+
+    // The shared eligibility contract dispatches the proof-promoted job and
+    // ONLY that job: the never-promoted sibling remains blocked_unsafe.
+    const scan = await supervisor.scanOnce();
+    expect(scan.claimed).toBe(1);
+    expect(scan.completed).toBe(1);
+    expect(dispatchCalls).toBe(1);
+    expect(durability.getTurnRecoveryJob(promoted.jobId)?.state).toBe('completed');
+    expect(durability.getTurnRecoveryJob(unpromoted.jobId)).toMatchObject({
+      state: 'blocked_unsafe', replay_safe: 0, replay_safety_proof_id: null,
+    });
+
+    // Terminal blocked work does not wedge the scope (#1760): admission is
+    // open even though the never-promoted job remains retained for operators.
+    expect(() => attemptAdmission('per_chat', promoted.conversationKey)).not.toThrow();
   });
 
   it('requeues on a retryable dispatch failure without completing the job or unblocking the scope', async () => {
