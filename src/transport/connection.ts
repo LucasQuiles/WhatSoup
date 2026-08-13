@@ -568,6 +568,10 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   private loggedOutAlertEmitted = false;
   private unclassified401ReconnectSpent = false;
   private localAuthAlertEmitted = false;
+  // #2394 (connection_exhausted): restart-safe incident ownership + the
+  // stability timer that converts a fresh socket into recovery proof.
+  private connectionExhaustedAlerted = false;
+  private exhaustionRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingAuthBondClearSends = new Map<string, AuthBondClearCandidate>();
   private confirmedAuthBondSendProofs = new Map<string, AuthBondSendProof>();
   private connectionState: ConnectionLifecycleState = 'disconnected';
@@ -598,6 +602,10 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   private static readonly RECENT_DISCONNECT_WINDOW_MS = 10 * MS_PER_MINUTE;
   private static readonly MAX_FAILURE_DURATION_MS = 30 * MS_PER_MINUTE;
   private static readonly COOLDOWN_MS = 5 * MS_PER_MINUTE;
+  // #2394 (connection_exhausted): how long a fresh socket must stay connected
+  // before it counts as recovery proof for a prior exhaustion incident. Socket
+  // open alone is an observation; only the survived window is proof.
+  private static readonly EXHAUSTION_RECOVERY_STABILITY_MS = MS_PER_MINUTE;
   private static readonly KEEPALIVE_INTERVAL_MS = 30 * MS_PER_SECOND;
   private static readonly KEEPALIVE_TIMEOUT_MS = 10 * MS_PER_SECOND;
   private static readonly AUTH_BOND_CLEAR_PROOF_TTL_MS = 10 * MS_PER_MINUTE;
@@ -726,8 +734,14 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     // gated on full proof (confirmed send + verified snapshot with healthy
     // contributors), so a restart can never manufacture recovery.
     try {
-      this.localAuthAlertEmitted = loadRecoveryMarkers().has(
+      const markers = loadRecoveryMarkers();
+      this.localAuthAlertEmitted = markers.has(
         `whatsapp_auth_bond_local_failure:${config.botName}`,
+      );
+      // #2394 (connection_exhausted): same restoration — the clear stays
+      // gated on a socket surviving the stability window.
+      this.connectionExhaustedAlerted = markers.has(
+        `connection_exhausted:${config.botName}`,
       );
     } catch {
       // intentional: marker file unreadable — start without prior ownership;
@@ -2081,6 +2095,19 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       // snapshot), and re-emit stays correctly suppressed while the incident
       // is open.
       this.gracefulReconnectInFlight = false;
+      // #2394 (connection_exhausted): a fresh socket becomes recovery proof
+      // only after surviving the stability window; the callback re-checks the
+      // live connection state, so a window broken by another disconnect emits
+      // nothing and ownership is retained for the next open.
+      if (this.exhaustionRecoveryTimer !== null) clearTimeout(this.exhaustionRecoveryTimer);
+      this.exhaustionRecoveryTimer = null;
+      if (this.connectionExhaustedAlerted) {
+        this.exhaustionRecoveryTimer = setTimeout(() => {
+          this.exhaustionRecoveryTimer = null;
+          this.clearConnectionExhaustedAfterStableSocket();
+        }, ConnectionManager.EXHAUSTION_RECOVERY_STABILITY_MS);
+        this.exhaustionRecoveryTimer.unref?.();
+      }
       // #1872: a fresh connection gets a fresh typing breaker — give the presence
       // backend another chance after any prior trip.
       this.typingGuard.reset();
@@ -2628,6 +2655,35 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     };
   }
 
+  /**
+   * #2394 (connection_exhausted): the socket survived the stability window —
+   * that is the recovery proof for a prior exhaustion incident (this-process
+   * or restored from a prior-process marker). A rejected clear retains
+   * ownership so the next open re-arms the window and retries idempotently.
+   */
+  private clearConnectionExhaustedAfterStableSocket(): void {
+    if (!this.connectionExhaustedAlerted) return;
+    if (this.shuttingDown || this.connectionState !== 'connected') return;
+    if (!clearAlertSourceChecked(
+      config.botName,
+      'connection_exhausted',
+      [
+        `repair_lane:${config.botName}`,
+        `stable_socket_ms=${ConnectionManager.EXHAUSTION_RECOVERY_STABILITY_MS}`,
+        `connection_state=${this.connectionState}`,
+      ].join('\n'),
+    )) {
+      return;
+    }
+    this.connectionExhaustedAlerted = false;
+    try {
+      clearRecoveryMarker(`connection_exhausted:${config.botName}`);
+    } catch {
+      // intentional: marker removal is best-effort — a stale marker only
+      // causes one redundant idempotent clear after the next restart.
+    }
+  }
+
   // -------------------------------------------------------------------------
   // Reconnection with three-phase backoff
   // -------------------------------------------------------------------------
@@ -2646,12 +2702,26 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     if (elapsedMs > ConnectionManager.MAX_FAILURE_DURATION_MS) {
       this.log.fatal({ elapsedMs }, 'Connection failed for over 30 minutes — emitting exhausted');
       this.persistConnectionRuntimeState('connection_exhausted');
-      emitAlertChecked(
+      // #2394: arm incident ownership only on CHECKED acceptance so a rejected
+      // emit retries on the next exhaustion pass, and persist a marker so a
+      // restart can still reconcile the incident from later stable-socket
+      // proof.
+      const exhaustedEmitted = emitAlertChecked(
         config.botName,
         'connection_exhausted',
         `whatsoup@${config.botName} connection exhausted after ${Math.round(elapsedMs / 60_000)}min`,
         `Reconnect phases exhausted. Elapsed: ${Math.round(elapsedMs / 1000)}s. Last disconnect: ${this.lastDisconnectReason ?? 'unknown'} (code ${this.lastStatusCode ?? 'none'})`,
       );
+      if (exhaustedEmitted) {
+        this.connectionExhaustedAlerted = true;
+        try {
+          setRecoveryMarker(`connection_exhausted:${config.botName}`);
+        } catch {
+          // intentional: marker write is best-effort — the alert itself was
+          // durably queued; a missing marker only loses cross-restart
+          // reconciliation for this incident.
+        }
+      }
       this.emit('exhausted');
       return;
     }
