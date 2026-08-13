@@ -757,6 +757,41 @@
       "disposition": "auth_root_requires_physical_confirmation",
       "owner": "src/transport/connection.ts",
       "test": "tests/transport/auth-bond.test.ts"
+    },
+    "connection_exhausted": {
+      "disposition": "retry_exhaustion_cleared_by_stable_socket_window",
+      "owner": "src/transport/connection.ts",
+      "test": "tests/transport/reconnect.test.ts"
+    },
+    "fleet_health_verify_gate_failed": {
+      "disposition": "gate_infrastructure_fault_cleared_by_active_mode_gate_pass",
+      "owner": "src/core/durability.ts",
+      "test": "tests/core/durability-edge.test.ts"
+    },
+    "heal_delivery_unavailable": {
+      "disposition": "persistent_config_state_cleared_only_by_validated_startup_config",
+      "owner": "src/core/heal.ts",
+      "test": "tests/core/heal.test.ts"
+    },
+    "runtime_stale": {
+      "disposition": "fresh_running_observation_proves_recovery_with_durable_pending_clear",
+      "owner": "deploy/scripts/bot-errors-runtime-staleness.py",
+      "test": "tests/scripts/bot-errors-runtime-staleness.test.ts"
+    },
+    "signal_cli_unregistered": {
+      "disposition": "account_verification_on_connect_proves_recovery_checked_clear_retained",
+      "owner": "src/transport/signal/connection-bridge.ts",
+      "test": "tests/transport/signal/connection-bridge-recovery.test.ts"
+    },
+    "trigger_past_due": {
+      "disposition": "zero_past_due_observation_proves_recovery_with_marker_reconcile",
+      "owner": "src/core/substrate/poller.ts",
+      "test": "tests/core/substrate/poller-past-due-alert.test.ts"
+    },
+    "whisper_degraded": {
+      "disposition": "breaker_degradation_cleared_by_probe_proven_success",
+      "owner": "src/runtimes/chat/providers/transcription/openai-whisper.ts",
+      "test": "tests/runtimes/chat/providers/transcription/openai-whisper-extended.test.ts"
     }
   }
 }
