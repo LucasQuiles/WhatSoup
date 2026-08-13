@@ -223,13 +223,37 @@ def update_staleness_mark(instance: str, boot_epoch: int | None, src_epoch: int)
         mark = src_epoch
     instances[instance] = {"bootEpoch": boot_epoch, "maxSrcEpoch": mark}
     state["instances"] = instances
+    _write_staleness_state(state)
+    return mark
+
+
+def _write_staleness_state(state: dict) -> None:
     path = staleness_state_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp_path = f"{path}.tmp"
     with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(state, f)
     os.replace(tmp_path, path)
-    return mark
+
+
+def load_pending_clears() -> set[str]:
+    """#2394: instances whose fresh/running recovery proof was accepted by an
+    earlier cycle but whose runtime_stale clear handoff was rejected.
+
+    The one-shot detector exits between observations, so the obligation must
+    be durable. Bounded and content-free: instance names only (public
+    identifiers), one entry per instance."""
+    pending = load_staleness_state().get("pendingClears")
+    if not isinstance(pending, list):
+        return set()
+    return {entry for entry in pending if isinstance(entry, str)}
+
+
+def save_pending_clears(pending: set[str]) -> None:
+    """Persist the pending-clear set, preserving unrelated state keys."""
+    state = load_staleness_state()
+    state["pendingClears"] = sorted(pending)
+    _write_staleness_state(state)
 
 
 def is_critical_stale(
@@ -527,6 +551,25 @@ def run_once(*, instances: list[str] | None, dry_run: bool) -> int:
             )
             return 2
 
+    # #2394: clears proven fresh/running by an earlier cycle whose emit
+    # handoff was rejected. Retried each cycle until accepted. A new stale
+    # episode voids the old proof; unknown or not-running observations
+    # neither manufacture recovery nor discard the already-proven obligation.
+    pending_clears = load_pending_clears()
+
+    def retry_pending_clear(inst: str) -> None:
+        nonlocal emit_failed
+        print(f"whatsoup@{inst}: retrying pending runtime_stale clear (#2394)")
+        rc = emit_event(build_clear_argv(instance=inst), dry_run=dry_run)
+        if rc != 0:
+            print(
+                f"pending clear retry failed for whatsoup@{inst} (rc={rc})",
+                file=sys.stderr,
+            )
+            emit_failed = True
+            return
+        pending_clears.discard(inst)
+
     probe_error = False
     emit_failed = False
     for inst in instances:
@@ -535,13 +578,21 @@ def run_once(*, instances: list[str] | None, dry_run: bool) -> int:
         except ProbeError as exc:
             print(f"probe error: {exc}", file=sys.stderr)
             probe_error = True
+            if inst in pending_clears:
+                retry_pending_clear(inst)
             continue
 
         if not result["running"]:
             print(f"whatsoup@{inst}: not running — skipping (no emit)")
+            if inst in pending_clears:
+                retry_pending_clear(inst)
             continue
 
         if result["stale"]:
+            # A new stale episode: the earlier fresh proof is no longer
+            # recovery evidence and must not close the incident this warning
+            # opens — drop the obligation regardless of this emit's fate.
+            pending_clears.discard(inst)
             argv = build_emit_argv(
                 instance=inst,
                 lag_seconds=int(result["lag_seconds"] or 0),
@@ -559,6 +610,15 @@ def run_once(*, instances: list[str] | None, dry_run: bool) -> int:
         if rc != 0:
             print(f"emit failed for whatsoup@{inst} (rc={rc})", file=sys.stderr)
             emit_failed = True
+            if not result["stale"]:
+                # Fresh/running proof exists but the clear handoff was
+                # rejected — retain the durable obligation for later cycles.
+                pending_clears.add(inst)
+        elif not result["stale"]:
+            pending_clears.discard(inst)
+
+    if not dry_run:
+        save_pending_clears(pending_clears)
 
     if probe_error:
         return 2

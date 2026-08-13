@@ -217,7 +217,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-runtime-staleness.py",
-      "sha256": "7bf0ce8510843bf5a22d594afe2c171b3e8d3d138a176cc48b2eed9664a3d91d",
+      "sha256": "13253e5d6ecdf220f99ad043f03120dc809c4afa0cbb7c6b9ec70c4838c41c22",
       "mustContain": [
         "Runtime code-staleness monitor",
         "runtime_stale"

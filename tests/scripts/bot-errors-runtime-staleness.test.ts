@@ -16,6 +16,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   utimesSync,
   writeFileSync,
@@ -697,5 +698,106 @@ describe('probe honesty (B1)', () => {
     });
     expect(res.status).toBe(1);
     expect(res.stderr).toContain('emit failed');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runtime_stale pending-clear obligation (#2394). A fresh/running observation
+// is recovery proof; the one-shot detector exits between observations, so a
+// rejected clear handoff must survive as a durable obligation and be retried
+// on later cycles — including unknown and not-running observations, which are
+// never themselves recovery proof. A new stale episode voids the old proof.
+// ---------------------------------------------------------------------------
+
+describe('runtime_stale pending-clear obligation (#2394)', () => {
+  const STATE_FILE = 'runtime-staleness-state.json';
+
+  function readPending(): string[] {
+    const raw = JSON.parse(
+      readFileSync(path.join(stateDir, STATE_FILE), 'utf8'),
+    ) as { pendingClears?: string[] };
+    return raw.pendingClears ?? [];
+  }
+
+  it('a rejected fresh clear persists a durable obligation across the one-shot exit', () => {
+    const res = run(['--instance', 'demo'], { FAKE_EMIT_RC: '9' });
+
+    expect(res.status).toBe(1);
+    expect(res.stderr).toContain('emit failed');
+    expect(readPending()).toEqual(['demo']);
+  });
+
+  it('retries the pending clear on a later not-running observation and resolves it', () => {
+    run(['--instance', 'demo'], { FAKE_EMIT_RC: '9' });
+
+    const second = run(['--instance', 'demo'], { FAKE_MAINPID: '0' });
+    expect(second.status).toBe(0);
+    expect(second.stdout).toContain('retrying pending runtime_stale clear');
+    expect(second.stdout).toContain('CLEAR runtime_stale demo');
+    expect(readPending()).toEqual([]);
+
+    // Obligation resolved: a later not-running cycle emits nothing.
+    const third = run(['--instance', 'demo'], { FAKE_MAINPID: '0' });
+    expect(third.status).toBe(0);
+    expect(third.stdout).not.toContain('retrying');
+    expect(third.stdout).not.toContain('CLEAR');
+  });
+
+  it('retries on an unknown observation while the probe failure still fails the check', () => {
+    run(['--instance', 'demo'], { FAKE_EMIT_RC: '9' });
+
+    const second = run(['--instance', 'demo'], { FAKE_PS_RC: '3' });
+    expect(second.status).toBe(2);
+    expect(second.stdout).toContain('CLEAR runtime_stale demo');
+    expect(readPending()).toEqual([]);
+  });
+
+  it('a failed retry keeps the obligation and exits 1', () => {
+    run(['--instance', 'demo'], { FAKE_EMIT_RC: '9' });
+
+    const second = run(['--instance', 'demo'], { FAKE_MAINPID: '0', FAKE_EMIT_RC: '9' });
+    expect(second.status).toBe(1);
+    expect(second.stderr).toContain('pending clear retry failed');
+    expect(readPending()).toEqual(['demo']);
+  });
+
+  it('a repeated fresh observation resolves the obligation with a single clear', () => {
+    run(['--instance', 'demo'], { FAKE_EMIT_RC: '9' });
+
+    const second = run(['--instance', 'demo'], {});
+    expect(second.status).toBe(0);
+    expect(second.stdout.match(/CLEAR runtime_stale demo/g)).toHaveLength(1);
+    expect(readPending()).toEqual([]);
+
+    const third = run(['--instance', 'demo'], {});
+    expect(third.status).toBe(0);
+    expect(third.stdout.match(/CLEAR runtime_stale demo/g)).toHaveLength(1);
+    expect(readPending()).toEqual([]);
+  });
+
+  it('a later independent stale episode voids the old proof instead of closing the new incident', () => {
+    run(['--instance', 'demo'], { FAKE_EMIT_RC: '9' });
+    expect(readPending()).toEqual(['demo']);
+
+    const staleRun = run(['--instance', 'demo'], {
+      FAKE_SRC_EPOCH: String(Math.floor(Date.now() / 1000) + 3600),
+    });
+    expect(staleRun.status).toBe(0);
+    expect(staleRun.stdout).toContain('ALERT');
+    expect(staleRun.stdout).not.toContain('CLEAR');
+    expect(readPending()).toEqual([]);
+
+    // The voided proof must not resurrect on a later not-running cycle.
+    const after = run(['--instance', 'demo'], { FAKE_MAINPID: '0' });
+    expect(after.stdout).not.toContain('retrying');
+  });
+
+  it('--dry-run neither records nor consumes the obligation', () => {
+    run(['--instance', 'demo'], { FAKE_EMIT_RC: '9' });
+    expect(readPending()).toEqual(['demo']);
+
+    const dry = run(['--instance', 'demo', '--dry-run'], { FAKE_MAINPID: '0' });
+    expect(dry.status).toBe(0);
+    expect(readPending()).toEqual(['demo']);
   });
 });
