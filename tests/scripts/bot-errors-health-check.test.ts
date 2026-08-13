@@ -276,7 +276,7 @@ describe('bot-errors-health-check', () => {
   });
 
   it('records a recoverable writefail breadcrumb when daily health outbox is unwritable', () => {
-    tmpRoot = mkdtempSync('/tmp/bot-errors-health-');
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-'));
     const blocked = join(tmpRoot, 'blocked-outbox-parent');
     const writefail = join(tmpRoot, 'writefail');
     writeFileSync(blocked, 'not a directory');
