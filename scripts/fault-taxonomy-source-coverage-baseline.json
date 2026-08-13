@@ -3,42 +3,6 @@
   "description": "Debt ledger for scripts/fault-taxonomy-source-coverage-guard.ts (#2147). Entries are emitted sources with no sourceDispositions registry entry. The guard fails on growth and on stale debt; #2147 completes when this list is empty. dynamicClaims name runtime-computed emit sites by file with the source (family) they emit.",
   "entries": [
     {
-      "source": "agent_respawn_failed",
-      "owner": "src/runtimes/agent/runtime.ts",
-      "status": "debt",
-      "reason": "emitted on main without a sourceDispositions entry; awaiting deliberate disposition authorship (#2147)"
-    },
-    {
-      "source": "agent_turn_finalization_escaped",
-      "owner": "src/runtimes/agent/runtime-turn-result-handler.ts",
-      "status": "debt",
-      "reason": "emitted on main without a sourceDispositions entry; awaiting deliberate disposition authorship (#2147)"
-    },
-    {
-      "source": "agent_turn_finalization_failed",
-      "owner": "src/runtimes/agent/runtime-turn-supervisor.ts",
-      "status": "debt",
-      "reason": "emitted on main without a sourceDispositions entry; awaiting deliberate disposition authorship (#2147)"
-    },
-    {
-      "source": "agent_turn_usage_unavailable",
-      "owner": "src/runtimes/agent/runtime-turn-coordinator.ts",
-      "status": "debt",
-      "reason": "emitted on main without a sourceDispositions entry; awaiting deliberate disposition authorship (#2147)"
-    },
-    {
-      "source": "auth_terminal",
-      "owner": "src/core/durability.ts",
-      "status": "debt",
-      "reason": "emitted on main without a sourceDispositions entry; awaiting deliberate disposition authorship (#2147)"
-    },
-    {
-      "source": "bead_proposal_backlog",
-      "owner": "src/core/substrate/poller.ts",
-      "status": "debt",
-      "reason": "emitted on main without a sourceDispositions entry; awaiting deliberate disposition authorship (#2147)"
-    },
-    {
       "source": "fallback_binary_incompatible",
       "owner": "src/runtimes/agent/runtime.ts",
       "status": "debt",
@@ -55,18 +19,6 @@
       "owner": "src/runtimes/agent/handoff-distill-coordinator.ts",
       "status": "debt",
       "reason": "dynamic emitter family/const; awaiting deliberate disposition authorship (#2147)"
-    },
-    {
-      "source": "heal_repeated_failures",
-      "owner": "src/core/heal.ts",
-      "status": "debt",
-      "reason": "emitted on main without a sourceDispositions entry; awaiting deliberate disposition authorship (#2147)"
-    },
-    {
-      "source": "ingest_queue_displacement",
-      "owner": "src/core/ingest.ts",
-      "status": "debt",
-      "reason": "emitted on main without a sourceDispositions entry; awaiting deliberate disposition authorship (#2147)"
     },
     {
       "source": "llm_primary_failure",
@@ -161,24 +113,6 @@
     {
       "source": "runtime_provider_fallback_replay_failed",
       "owner": "src/runtimes/agent/runtime.ts",
-      "status": "debt",
-      "reason": "emitted on main without a sourceDispositions entry; awaiting deliberate disposition authorship (#2147)"
-    },
-    {
-      "source": "scheduler_delinked_send_held",
-      "owner": "src/core/scheduler.ts",
-      "status": "debt",
-      "reason": "emitted on main without a sourceDispositions entry; awaiting deliberate disposition authorship (#2147)"
-    },
-    {
-      "source": "scheduler_send_failed",
-      "owner": "src/core/scheduler.ts",
-      "status": "debt",
-      "reason": "emitted on main without a sourceDispositions entry; awaiting deliberate disposition authorship (#2147)"
-    },
-    {
-      "source": "self_restart_completed",
-      "owner": "src/main.ts",
       "status": "debt",
       "reason": "emitted on main without a sourceDispositions entry; awaiting deliberate disposition authorship (#2147)"
     },

@@ -847,6 +847,61 @@
       "disposition": "recovery_probe_stall_notice_until_probe_succeeds_and_window_reverts",
       "owner": "src/runtimes/agent/runtime.ts",
       "test": "tests/core/heal-fallback-prerequisite-2399.test.ts"
+    },
+    "agent_respawn_failed": {
+      "disposition": "auto_respawn_exhausted_requires_operator_intervention",
+      "owner": "src/runtimes/agent/runtime.ts",
+      "test": "tests/runtimes/agent/runtime-secondhalf-branches.test.ts"
+    },
+    "agent_turn_finalization_escaped": {
+      "disposition": "escaped_finalization_bookkeeping_loss_surfaced_for_operator_audit",
+      "owner": "src/runtimes/agent/runtime-turn-result-handler.ts",
+      "test": "tests/runtimes/agent/runtime-turn-result-handler-escape-alert.test.ts"
+    },
+    "agent_turn_finalization_failed": {
+      "disposition": "delivery_proof_or_terminal_finalize_failure_requires_operator_catchup",
+      "owner": "src/runtimes/agent/turn-finalizer.ts",
+      "test": "tests/runtimes/agent/turn-finalizer.test.ts"
+    },
+    "agent_turn_usage_unavailable": {
+      "disposition": "unrecoverable_turn_usage_gap_surfaced_once_per_turn",
+      "owner": "src/runtimes/agent/runtime-turn-coordinator.ts",
+      "test": "tests/runtimes/agent/runtime-turn-coordinator.test.ts"
+    },
+    "auth_terminal": {
+      "disposition": "human_required_quarantine_escalation_awaiting_physical_repair",
+      "owner": "src/core/durability.ts",
+      "test": "tests/core/durability-edge.test.ts"
+    },
+    "bead_proposal_backlog": {
+      "disposition": "overdue_proposal_threshold_latch_cleared_when_backlog_drains",
+      "owner": "src/core/substrate/poller.ts",
+      "test": "tests/core/substrate/poller-overdue-alert.test.ts"
+    },
+    "heal_repeated_failures": {
+      "disposition": "hourly_repair_valve_trip_routes_reports_to_durable_outbox",
+      "owner": "src/core/heal.ts",
+      "test": "tests/core/heal.test.ts"
+    },
+    "ingest_queue_displacement": {
+      "disposition": "admission_displacement_surfaced_per_episode_no_automatic_replay",
+      "owner": "src/core/ingest.ts",
+      "test": "tests/core/admission-contract.test.ts"
+    },
+    "scheduler_delinked_send_held": {
+      "disposition": "delink_hold_latch_until_relink_restores_delivery",
+      "owner": "src/core/scheduler.ts",
+      "test": "tests/core/scheduler-link-awareness.test.ts"
+    },
+    "scheduler_send_failed": {
+      "disposition": "undecodable_or_failed_scheduled_send_dead_lettered_for_operator",
+      "owner": "src/core/scheduler.ts",
+      "test": "tests/core/scheduler-link-awareness.test.ts"
+    },
+    "self_restart_completed": {
+      "disposition": "informational_restart_receipt_no_incident_lifecycle",
+      "owner": "src/main.ts",
+      "test": "tests/main-bootstrap-helpers.test.ts"
     }
   }
 }
