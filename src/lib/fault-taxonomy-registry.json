@@ -792,6 +792,61 @@
       "disposition": "breaker_degradation_cleared_by_probe_proven_success",
       "owner": "src/runtimes/chat/providers/transcription/openai-whisper.ts",
       "test": "tests/runtimes/chat/providers/transcription/openai-whisper-extended.test.ts"
+    },
+    "fallback_binary_missing": {
+      "disposition": "operator_installs_fallback_binary_then_notice_cadence_stops",
+      "owner": "src/runtimes/agent/runtime.ts",
+      "test": "tests/core/heal-fallback-prerequisite-2399.test.ts"
+    },
+    "fallback_credential_invalid": {
+      "disposition": "provider_rejected_key_requires_operator_credential_repair",
+      "owner": "src/runtimes/agent/runtime.ts",
+      "test": "tests/runtimes/agent/fallback-credential-preflight.test.ts"
+    },
+    "fallback_credential_missing": {
+      "disposition": "keyring_gap_requires_operator_credential_provisioning",
+      "owner": "src/runtimes/agent/runtime.ts",
+      "test": "tests/core/heal-fallback-prerequisite-2399.test.ts"
+    },
+    "fallback_empty_turn": {
+      "disposition": "per_chat_notice_cadence_while_fallback_serves_empty_turns",
+      "owner": "src/runtimes/agent/runtime.ts",
+      "test": "tests/runtimes/agent/fallback-empty-turn.test.ts"
+    },
+    "fallback_model_unknown": {
+      "disposition": "catalog_miss_requires_operator_model_config_repair",
+      "owner": "src/runtimes/agent/runtime.ts",
+      "test": "tests/core/heal-fallback-prerequisite-2399.test.ts"
+    },
+    "fallback_no_independent_provider": {
+      "disposition": "chain_exhausted_requires_operator_chain_or_credential_repair",
+      "owner": "src/runtimes/agent/runtime.ts",
+      "test": "tests/runtimes/agent/fallback-chain-selection.test.ts"
+    },
+    "fallback_persist_chain_mismatch": {
+      "disposition": "restore_refused_on_chain_shape_drift_window_continues_in_memory",
+      "owner": "src/runtimes/agent/fallback-restore.ts",
+      "test": "tests/runtimes/agent/fallback-restore-unit.test.ts"
+    },
+    "fallback_persist_failed": {
+      "disposition": "window_continues_in_memory_next_persist_retries",
+      "owner": "src/runtimes/agent/runtime.ts",
+      "test": "tests/core/heal-fallback-prerequisite-2399.test.ts"
+    },
+    "fallback_preflight_config_error": {
+      "disposition": "child_env_config_fault_requires_operator_repair_before_fallback_serves",
+      "owner": "src/runtimes/agent/runtime.ts",
+      "test": "tests/runtimes/agent/fallback-model-preflight.test.ts"
+    },
+    "fallback_provider_failed": {
+      "disposition": "once_per_failed_chain_entry_until_chain_advances_or_reverts",
+      "owner": "src/runtimes/agent/runtime.ts",
+      "test": "tests/runtimes/agent/fallback-usage-limit-cascade.test.ts"
+    },
+    "fallback_recovery_stalled": {
+      "disposition": "recovery_probe_stall_notice_until_probe_succeeds_and_window_reverts",
+      "owner": "src/runtimes/agent/runtime.ts",
+      "test": "tests/core/heal-fallback-prerequisite-2399.test.ts"
     }
   }
 }
