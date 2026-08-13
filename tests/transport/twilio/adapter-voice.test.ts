@@ -28,6 +28,27 @@ describe('TwilioSmsAdapter voice capability', () => {
       adapter.placeCall({ channel: makeChannelId('sms', 'ml-bot'), id: '+15551230001' }),
     ).rejects.toThrow(/voice is not enabled/);
   });
+
+  it('bare network-style placeCall failure throws SendAmbiguousError (non-retryable) — #2553', async () => {
+    const port = new MockTwilioSmsPort();
+    const adapter = new TwilioSmsAdapter(
+      makeTwilioConfig({ voice: { enabled: true, voicemailMaxLengthSec: 120 } }), port);
+    await adapter.connect();
+
+    port.failNextCall(new Error('socket hang up'));
+
+    // A call is a provider mutation too: a response-less network failure may
+    // have placed it, so a generic retry risks a duplicate ring.
+    await expect(
+      adapter.placeCall({ channel: makeChannelId('sms', 'ml-bot'), id: '+15551230001' }),
+    ).rejects.toMatchObject({
+      payload: {
+        code: 'transport.send_ambiguous',
+        retryable: false,
+        providerCode: 'network_no_reply',
+      },
+    });
+  });
 });
 
 

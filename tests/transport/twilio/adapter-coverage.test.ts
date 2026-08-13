@@ -124,17 +124,21 @@ describe('adapter.ts uncovered-branch coverage', () => {
       expect(payload.retryable).toBe(true);
     });
 
-    it('maps a port error with no status and no code to TransientProviderError', async () => {
+    it('maps a port error with no status and no code to SendAmbiguousError (#2553)', async () => {
       const port = new MockTwilioSmsPort();
       const adapter = new TwilioSmsAdapter(makeTwilioConfig(VOICE_CONFIG), port);
       await adapter.connect();
 
-      // Bare network-style error: no `status`, no `code` → transient.
+      // Bare network-style error on a mutation: no `status`, no `code`, no
+      // API reply — the call may have been placed, so the outcome is the
+      // non-retryable ambiguous class.
       port.failNextCall(new Error('socket hang up'));
 
       await expect(
         adapter.placeCall({ channel: makeChannelId('sms', 'ml-bot'), id: '+15551230001' }),
-      ).rejects.toBeInstanceOf(TransientProviderError);
+      ).rejects.toMatchObject({
+        payload: { code: 'transport.send_ambiguous', retryable: false },
+      });
     });
   });
 
