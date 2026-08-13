@@ -189,7 +189,7 @@ const { mockConfig } = vi.hoisted(() => {
     textAggregateDelayMs: 2_000,
     startupNotifications: true,
     proactiveResumeOnStartup: true,
-    mediaDir: '/tmp/whatsoup-test-media/tmp',
+    mediaDir: '/tmp/whatsoup-test-media-command-gate-contract/tmp',
     pineconeAllowedIndexes: [] as string[],
     voiceReply: 'never' as 'always' | 'when_received' | 'never',
     elevenlabs: {

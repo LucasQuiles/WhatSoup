@@ -41,7 +41,7 @@ vi.mock('../../../src/config.ts', () => {
     toolUpdateMode: 'full',
     toolUpdateRedirectJid: null,
     textAggregateDelayMs: 2_000,
-    mediaDir: '/tmp/whatsoup-test-media/tmp',
+    mediaDir: '/tmp/whatsoup-test-media-fallback-credential-preflight/tmp',
     voiceReply: 'never',
     elevenlabs: {
       defaultVoiceId: 'v',

@@ -122,7 +122,7 @@ vi.mock('../../../src/config.ts', () => ({
     agentFallbacks: [],
     stateRoot: '/tmp/whatsoup-test-state-idle',
     restartLoopGuard: { enabled: true, maxRestarts: 3, windowMs: 300_000 },
-    mediaDir: '/tmp/whatsoup-test-media/tmp',
+    mediaDir: '/tmp/whatsoup-test-media-idle-session-eviction/tmp',
     pineconeAllowedIndexes: [],
   },
 }));

@@ -99,7 +99,7 @@ const {
     restartLoopGuard: { enabled: true, maxRestarts: 3, windowMs: 300_000 },
     startupNotifications: true,
     proactiveResumeOnStartup: true,
-    mediaDir: '/tmp/whatsoup-test-media/tmp',
+    mediaDir: '/tmp/whatsoup-test-media-runtime-edge-coverage/tmp',
     pineconeAllowedIndexes: [] as string[],
     voiceReply: 'never' as const,
     elevenlabs: {
