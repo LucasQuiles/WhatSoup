@@ -1697,6 +1697,10 @@ export class DurabilityEngine {
     return this.turnRecovery.getOutstandingTurnRecoveryJobsForSupervisor(options);
   }
 
+  getNewestInboundSeqForConversation(conversationKey: string): number | null {
+    return this.turnRecovery.getNewestInboundSeqForConversation(conversationKey);
+  }
+
   getTurnRecoverySupervisorCounts(): TurnRecoverySupervisorCounts {
     return this.turnRecovery.getTurnRecoverySupervisorCounts();
   }
