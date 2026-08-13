@@ -638,3 +638,101 @@ describe('ConnectionManager auth-bond edge coverage', () => {
     expect(mockSock.end).not.toHaveBeenCalled();
   });
 });
+
+// #2394 (auth-bond): restart-safe recovery authority + contributor predicate.
+// Uses the REAL recovery-authority store under a per-test BOT_ERRORS_STATE_DIR
+// temp dir; emit/clear stay mocked (checked results controlled per test).
+describe('#2394 auth-bond restart recovery authority', () => {
+  const MARKER = 'whatsapp_auth_bond_local_failure:WhatSoup';
+
+  async function withMarkerDir(
+    fn: (tools: {
+      markerPresent: () => Promise<boolean>;
+      writeMarker: () => Promise<void>;
+    }) => Promise<void>,
+  ): Promise<void> {
+    const { mkdtempSync, rmSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const { tmpdir } = await import('node:os');
+    const dir = mkdtempSync(join(tmpdir(), 'auth-bond-recovery-'));
+    const prior = process.env['BOT_ERRORS_STATE_DIR'];
+    process.env['BOT_ERRORS_STATE_DIR'] = dir;
+    const store = () => import('../../src/lib/recovery-authority-store.ts');
+    try {
+      await fn({
+        markerPresent: async () => (await store()).loadRecoveryMarkers().has(MARKER),
+        writeMarker: async () => (await store()).setRecoveryMarker(MARKER),
+      });
+    } finally {
+      if (prior === undefined) delete process.env['BOT_ERRORS_STATE_DIR'];
+      else process.env['BOT_ERRORS_STATE_DIR'] = prior;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('restores incident ownership from a prior-process marker and clears on full proof', async () => {
+    await withMarkerDir(async ({ markerPresent, writeMarker }) => {
+      await writeMarker();
+
+      const { manager, emit } = await connectRegistered();
+      // Ownership restored at construction — without emitting anything.
+      expect((manager as any).localAuthAlertEmitted).toBe(true);
+      expect(clearCalls).toHaveLength(0);
+
+      emit(openEvent());
+      // Socket open is observation, not recovery: ownership survives.
+      expect((manager as any).localAuthAlertEmitted).toBe(true);
+      expect(clearCalls).toHaveLength(0);
+
+      mockAuth.snapshot = makeSnapshot();
+      (manager as any).clearLocalAuthBondFailureAfterVerifiedSend(clearCandidate(), clearProof());
+
+      expect(clearCalls).toHaveLength(1);
+      expect(clearCalls[0]?.[1]).toBe('whatsapp_auth_bond_local_failure');
+      expect((manager as any).localAuthAlertEmitted).toBe(false);
+      // Durable clear dropped the restart marker.
+      expect(await markerPresent()).toBe(false);
+    });
+  });
+
+  it('starts without ownership when no prior-process marker exists', async () => {
+    await withMarkerDir(async () => {
+      const { manager, emit } = await connectRegistered();
+      expect((manager as any).localAuthAlertEmitted).toBe(false);
+      emit(openEvent());
+      (manager as any).clearLocalAuthBondFailureAfterVerifiedSend(clearCandidate(), clearProof());
+      // No prior incident — proof alone must not manufacture a clear.
+      expect(clearCalls).toHaveLength(0);
+    });
+  });
+
+  it('persists a marker on durable alert emit', async () => {
+    await withMarkerDir(async ({ markerPresent }) => {
+      const { emit } = await connectRegistered();
+      expect(await markerPresent()).toBe(false);
+
+      emit({ 'connection.update': { qr: 'pairing-required' } });
+
+      expect(alertCalls.some((call) => call[1] === 'whatsapp_auth_bond_local_failure')).toBe(true);
+      expect(await markerPresent()).toBe(true);
+    });
+  });
+
+  it.each([
+    ['current capture error', { backup: { lastCaptureError: 'disk full' } }],
+    ['current restore error', { backup: { lastRestoreError: 'restore failed' } }],
+    ['unresolved issues', { issues: ['auth dir mode drift'] }],
+  ])('refuses to clear while a contributor is still failing (%s)', async (_label, overrides) => {
+    await withMarkerDir(async () => {
+      const { manager, emit } = await connectRegistered();
+      emit(openEvent());
+      (manager as any).localAuthAlertEmitted = true;
+      mockAuth.snapshot = makeSnapshot(overrides as AuthBondSnapshotOverrides);
+
+      (manager as any).clearLocalAuthBondFailureAfterVerifiedSend(clearCandidate(), clearProof());
+
+      expect(clearCalls).toHaveLength(0);
+      expect((manager as any).localAuthAlertEmitted).toBe(true);
+    });
+  });
+});

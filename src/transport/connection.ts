@@ -25,6 +25,11 @@ import { MS_PER_SECOND, MS_PER_MINUTE } from '../lib/time-units.ts';
 import { config } from '../config.ts';
 import { createChildLogger } from '../logger.ts';
 import { clearAlertSourceChecked, emitAlertChecked } from '../lib/emit-alert.ts';
+import {
+  clearRecoveryMarker,
+  loadRecoveryMarkers,
+  setRecoveryMarker,
+} from '../lib/recovery-authority-store.ts';
 import type { BotErrorsCriticalAssetDiagnostic } from '../lib/bot-errors-outbox.ts';
 import { WhatSoupError } from '../errors.ts';
 import { normalizeUnixTimestampSeconds, nowUnixSec } from '../core/substrate/time.ts';
@@ -715,6 +720,19 @@ export class ConnectionManager extends EventEmitter implements Messenger {
 
   constructor() {
     super();
+    // #2394 (auth-bond): restore exact-source recovery authority from the
+    // durable marker a prior process left on durable alert emit. Restoring the
+    // OWNERSHIP FLAG (not emitting a clear) is deliberate — the clear stays
+    // gated on full proof (confirmed send + verified snapshot with healthy
+    // contributors), so a restart can never manufacture recovery.
+    try {
+      this.localAuthAlertEmitted = loadRecoveryMarkers().has(
+        `whatsapp_auth_bond_local_failure:${config.botName}`,
+      );
+    } catch {
+      // intentional: marker file unreadable — start without prior ownership;
+      // a still-failing bond re-emits (re-arming ownership) on its next probe.
+    }
     // authDir is sourced from config — no constructor parameters needed
     // Production config always defines this block; the `?.` guard means a
     // partial/legacy config (e.g. a test mock without it) cleanly disables the
@@ -2055,7 +2073,13 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       this.lastDisconnectReason = null;
       this.loggedOutAlertEmitted = false;
       this.unclassified401ReconnectSpent = false;
-      this.localAuthAlertEmitted = false;
+      // #2394 (auth-bond): localAuthAlertEmitted deliberately NOT reset here.
+      // Socket open is an observation, not recovery proof — resetting on every
+      // reconnect stranded an accepted incident (the proof-gated clear path
+      // returns early once ownership is false). The clear fires only via
+      // clearLocalAuthBondFailureAfterVerifiedSend (confirmed send + verified
+      // snapshot), and re-emit stays correctly suppressed while the incident
+      // is open.
       this.gracefulReconnectInFlight = false;
       // #1872: a fresh connection gets a fresh typing breaker — give the presence
       // backend another chance after any prior trip.
@@ -2447,6 +2471,14 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       this.localAuthBondClearCriticalAsset(snapshot),
     )) {
       this.localAuthAlertEmitted = false;
+      // #2394 (auth-bond): alert durably cleared — drop the restart marker.
+      try {
+        clearRecoveryMarker(`whatsapp_auth_bond_local_failure:${config.botName}`);
+      } catch {
+        // intentional: marker removal is best-effort — a stale marker only
+        // re-arms ownership on the next startup, and the proof-gated clear
+        // path re-clears idempotently.
+      }
     }
     this.pendingAuthBondClearSends.delete(candidate.messageId);
     this.confirmedAuthBondSendProofs.delete(candidate.messageId);
@@ -2459,6 +2491,14 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     if (!snapshot.creds.sha256 || snapshot.creds.sha256 === 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855') return false;
     if (!snapshot.treeHash) return false;
     if (!snapshot.backup.latest) return false;
+    // #2394 (auth-bond contributor predicate): the shared source aggregates
+    // credential presence AND snapshot capture/restore health. Present
+    // credentials plus an older backup must not clear while a contributor is
+    // still failing — core/health classifies the bond at-risk under exactly
+    // these conditions, and producer and dispatcher recovery must not diverge.
+    if (snapshot.issues.length > 0) return false;
+    if (snapshot.backup.lastCaptureError) return false;
+    if (snapshot.backup.lastRestoreError) return false;
     return true;
   }
 
@@ -2499,6 +2539,17 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         'critical',
         this.localAuthBondFailureCriticalAsset(reason, snapshot),
       );
+      if (this.localAuthAlertEmitted) {
+        // #2394 (auth-bond): persist restart-safe ownership of the accepted
+        // incident so a new process can reconcile it from later proof.
+        try {
+          setRecoveryMarker(`whatsapp_auth_bond_local_failure:${config.botName}`);
+        } catch {
+          // intentional: marker write is best-effort — the alert itself was
+          // durably queued above; a missing marker only means a restart loses
+          // ownership until the bond re-probes.
+        }
+      }
     } catch (err) {
       this.log.error({ err }, 'failed to enqueue local auth bond failure alert');
     }
