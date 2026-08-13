@@ -217,6 +217,9 @@ interface HarnessScript {
   onDispatch?: (tool: ToolDeclaration, runtime: CapabilityObligationRuntime) => Promise<void> | void;
   journalThrows?: boolean;
   execution?: CapabilityObligationsOptions['execution'];
+  /** r19 F2 — pin the ATTESTED resolverDigest independent of the live execution shape, so a
+   *  test can bind the attestation to shape A while the executor runs shape B (drift at the seam). */
+  attestationDigestOverride?: string;
   /** r13 F4 — override the SERVING-provider facts, keyed by the chat's deliveryJid. */
   liveFacts?: (deliveryJid: string) => CapabilityObligationLiveFacts;
 }
@@ -227,9 +230,20 @@ function makeRuntime(script: HarnessScript = {}) {
   const runtime = new CapabilityObligationRuntime({
     db,
     store,
-    options: script.execution === undefined
+    options: script.execution === undefined && script.attestationDigestOverride === undefined
       ? OPTIONS
-      : { ...OPTIONS, execution: script.execution, attestation: { ...OPTIONS.attestation, resolverDigest: compositeOf(script.execution) } },
+      : {
+          ...OPTIONS,
+          execution: script.execution ?? OPTIONS.execution,
+          attestation: {
+            ...OPTIONS.attestation,
+            // r19 F2 — the attested digest is normally the COMPOSITE of the LIVE shape,
+            // so the drain-time re-derivation always matches. attestationDigestOverride
+            // lets a test PIN it to a DIFFERENT shape's composite (bind shape A, run shape B),
+            // exercising the executor's shape-drift refusal end-to-end.
+            resolverDigest: script.attestationDigestOverride ?? compositeOf(script.execution ?? OPTIONS.execution),
+          },
+        },
     // r14 F3 — merged: one resolution yields the SERVING-provider facts (r13 F4
     // knob preserved) AND the dispatch bound to it.
     prepareDispatch: (obligation) => ({
@@ -662,6 +676,43 @@ describe('trusted execution tool (D6)', () => {
           // The reviewer's real-CLI repro: replace the resolver at the SAME path after attestation.
           // The executor re-derives the live composite and must refuse — the swapped bytes never run.
           writeFileSync(resolver, 'require("node:fs").writeFileSync(process.argv[3] || "/tmp/evil-marker", "PWNED"); console.log("processed " + process.argv[2] + " SWAPPED-EVIL ok");');
+          const r = (await tool.handler({ source: SOURCE_URL }, TOOL_SESSION)) as Record<string, unknown>;
+          expect(r['error']).toBe('capability_execution');
+        },
+      });
+      await runtime.tickOnce();
+      const row = db.raw
+        .prepare('SELECT result_status, output_evidence FROM capability_execution_receipts WHERE obligation_id = ?')
+        .get(id) as { result_status: string; output_evidence: string };
+      expect(row.result_status).toBe('error');
+      expect((JSON.parse(row.output_evidence) as Record<string, unknown>)['reason']).toBe('resolver_digest_mismatch');
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
+  });
+
+  it('FALSIFIER (finding 2): a command SHAPE drifted after attestation (same bytes, appended flag) is REFUSED at the drain seam, never executed', async () => {
+    const work = mkdtempSync(join(tmpdir(), 'capx-shape-'));
+    try {
+      const resolver = join(work, 'resolver.cjs');
+      // The artifact CONTENT is never touched here — only the argv SHAPE changes. The
+      // pre-composite D5 binding excluded command/interpreter/mode, so an attacker who
+      // could rewrite the instance execution config could append a behavior-changing Node
+      // flag (e.g. --experimental-loader=./evil.mjs, -r ./preload.cjs) to the SAME verified
+      // bytes and it would have executed. The composite digest now binds the shape, so the
+      // executor re-derives composite(liveShape) and refuses when it differs from the
+      // admitted composite(attestedShape).
+      writeFileSync(resolver, 'console.log("processed " + process.argv[process.argv.length - 1] + " ORIGINAL ok");');
+      const attestedShape: CapabilityObligationsOptions['execution'] = { command: [process.execPath, resolver, '{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: resolver, interpreted: true };
+      // Same artifact, same bytes — but a flag is spliced in ahead of {source}. Only the
+      // shape differs; a content-only binding would wave this straight through.
+      const driftedShape: CapabilityObligationsOptions['execution'] = { command: [process.execPath, resolver, '--experimental-vm-modules', '{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: resolver, interpreted: true };
+      const id = seedObligation();
+      freshAttestation(attestedShape); // admission binds the COMPOSITE of the ATTESTED shape
+      const { runtime } = makeRuntime({
+        execution: driftedShape, // the executor runs the DRIFTED shape...
+        attestationDigestOverride: compositeOf(attestedShape), // ...against the ATTESTED shape's composite
+        onDispatch: async (tool) => {
           const r = (await tool.handler({ source: SOURCE_URL }, TOOL_SESSION)) as Record<string, unknown>;
           expect(r['error']).toBe('capability_execution');
         },

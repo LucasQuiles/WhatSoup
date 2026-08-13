@@ -11,7 +11,7 @@ import { join } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
-import { runBoundedBattery } from '../../scripts/full-suite-battery.ts';
+import { buildVitestArgs, runBoundedBattery } from '../../scripts/full-suite-battery.ts';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const NODE = process.execPath;
@@ -122,4 +122,35 @@ describe('runBoundedBattery (externally bounded full-suite runner)', () => {
     expect(r.wrappedExit).toBe(125); // NEVER a false 0; the grace's inconclusive exit
     expect(elapsed).toBeLessThan(2_000); // grace (600ms) fired well before the grandchild's 2500ms release
   }, 30_000);
+});
+
+describe('buildVitestArgs (round-19 F5 regression: --pool default must not collide with a caller pool)', () => {
+  // vitest's CAC parser rejects a duplicated single-value option:
+  //   Error: Expected a single value for option "--pool <pool>", received ["forks","forks"]
+  // F5 rewired `npm test` (and coverage:check) through this battery with --pool=forks
+  // hardcoded, so every gate/CI caller that ALSO passes --pool=forks arg-crashed. The builder
+  // must add the forks default ONLY when the caller named no pool.
+  it('adds --pool=forks exactly once when the caller names no pool (default preserved)', () => {
+    const args = buildVitestArgs(['tests/x.test.ts']);
+    expect(args.filter((a) => a === '--pool=forks')).toHaveLength(1);
+    expect(args).toContain('run');
+    expect(args[args.length - 1]).toBe('tests/x.test.ts'); // passthrough preserved after `run`
+  });
+
+  it('does NOT add a second --pool when the caller already passed --pool=forks (the F5 crash)', () => {
+    const args = buildVitestArgs(['tests/x.test.ts', '--pool=forks']);
+    const pools = args.filter((a) => a === '--pool' || a.startsWith('--pool='));
+    expect(pools).toEqual(['--pool=forks']); // exactly one — the caller's, not a duplicate
+  });
+
+  it('honors a caller pool other than forks in the space form without adding the forks default', () => {
+    const args = buildVitestArgs(['--pool', 'threads', 'tests/x.test.ts']);
+    expect(args).not.toContain('--pool=forks');
+    expect(args.filter((a) => a === '--pool')).toHaveLength(1); // caller's --pool survives, singular
+  });
+
+  it('does NOT treat --poolOptions.* as a pool selection (forks default still added)', () => {
+    const args = buildVitestArgs(['--poolOptions.forks.singleFork', 'true']);
+    expect(args.filter((a) => a === '--pool=forks')).toHaveLength(1); // configures a pool, does not choose one
+  });
 });

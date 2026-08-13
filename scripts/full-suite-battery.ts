@@ -178,6 +178,33 @@ export function runBoundedBattery(options: BoundedBatteryOptions): Promise<Bound
   });
 }
 
+/**
+ * Build the `node … vitest run …` argv the battery spawns. `--pool=forks` is the battery's
+ * DEFAULT pool, but any caller that already supplies its own `--pool`/`--pool=…` in the
+ * passthrough MUST win: vitest's CAC parser rejects a duplicated single-value option
+ * (`Error: Expected a single value for option "--pool <pool>", received ["forks","forks"]`)
+ * and aborts before running a single test. When round-19 finding 5 rewired the canonical
+ * `npm test` (and `coverage:check`) THROUGH this battery with `--pool=forks` hardcoded, every
+ * existing gate/CI caller that ALSO passes `--pool=forks` — push-gate curated-tests +
+ * coverage:check, `quality.yml` (`npm test -- … --pool=forks`, `coverage:check -- --pool=forks`),
+ * `verify:semantic:shadow`, `test:design-guards` — would arg-crash. So add the default pool
+ * ONLY when the caller named none; a caller-supplied pool passes through untouched, exactly once.
+ *
+ * `--poolOptions.*` is deliberately NOT treated as a pool selection (it configures a pool, it
+ * does not choose one), so the forks default is still added alongside it.
+ */
+export function buildVitestArgs(passthrough: readonly string[]): string[] {
+  const callerNamedPool = passthrough.some((arg) => arg === '--pool' || arg.startsWith('--pool='));
+  return [
+    '--disable-warning=ExperimentalWarning',
+    '--experimental-strip-types',
+    'node_modules/vitest/vitest.mjs',
+    'run',
+    ...(callerNamedPool ? [] : ['--pool=forks']),
+    ...passthrough,
+  ];
+}
+
 const invokedPath = process.argv[1] ? new URL(`file://${process.argv[1]}`).href : '';
 if (import.meta.url === invokedPath || (process.argv[1] ?? '').endsWith('full-suite-battery.ts')) {
   void (async () => {
@@ -188,8 +215,7 @@ if (import.meta.url === invokedPath || (process.argv[1] ?? '').endsWith('full-su
     const passthrough = process.argv.slice(2);
     const result = await runBoundedBattery({
       command: process.execPath,
-      args: ['--disable-warning=ExperimentalWarning', '--experimental-strip-types',
-        'node_modules/vitest/vitest.mjs', 'run', '--pool=forks', ...passthrough],
+      args: buildVitestArgs(passthrough),
       timeoutMs,
     });
     if (result.outcome === 'timedOut') {
