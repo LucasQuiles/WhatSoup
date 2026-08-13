@@ -29,6 +29,11 @@ function isLoopbackHost(host: string): boolean {
   return host === '127.0.0.1' || host === '::1' || host === 'localhost';
 }
 
+/** sun_path is 104 bytes on macOS (108 on Linux); use the conservative bound.
+ *  Without this guard an over-long path surfaces as an opaque ENAMETOOLONG
+ *  from connect()/listen() (#2322 L2). */
+export const MAX_UNIX_SOCKET_PATH_BYTES = 104;
+
 function assertEndpoint(config: SignalConfig): void {
   const hasSocket = typeof config.socketPath === 'string' && config.socketPath.length > 0;
   const hasTcp = Number.isInteger(config.tcpPort)
@@ -39,6 +44,11 @@ function assertEndpoint(config: SignalConfig): void {
   }
   if (hasSocket && !isAbsolute(config.socketPath!)) {
     throw new Error('SignalCliPort socketPath must be absolute');
+  }
+  if (hasSocket && Buffer.byteLength(config.socketPath!, 'utf8') > MAX_UNIX_SOCKET_PATH_BYTES) {
+    throw new Error(
+      `SignalCliPort socketPath exceeds the ${MAX_UNIX_SOCKET_PATH_BYTES}-byte unix socket path limit (sun_path); shorten the path`,
+    );
   }
   if (hasTcp && config.tcpHost !== undefined && !isLoopbackHost(config.tcpHost)) {
     throw new Error('SignalCliPort plaintext TCP requires a loopback host');

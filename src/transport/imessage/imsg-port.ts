@@ -66,7 +66,18 @@ export function createSocketConnection(
   config: ImessageConfig,
   onTerminal?: () => void,
 ): ImsgRpcConnection {
-  const socket = net.createConnection(config.imsgSocketPath ?? '/tmp/imsg.sock');
+  // The fallback below is the documented rendezvous contract with the external
+  // imsg daemon (types.ts DEFAULTS) — changing it requires a daemon-side change
+  // in lockstep (#2632 owns that refactor).
+  const socketPath = config.imsgSocketPath ?? '/tmp/imsg.sock';
+  // sun_path is 104 bytes on macOS; fail with a clear error instead of the
+  // opaque ENAMETOOLONG connect() would raise (#2322 L2).
+  if (Buffer.byteLength(socketPath, 'utf8') > 104) {
+    throw new Error(
+      `imsg socket path exceeds the 104-byte unix socket path limit (sun_path); shorten imsgSocketPath`,
+    );
+  }
+  const socket = net.createConnection(socketPath);
 
   let buffer = '';
   let nextId = 1;
