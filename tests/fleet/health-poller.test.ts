@@ -5402,3 +5402,163 @@ describe('#3057 recovery-authority-store startup scan', () => {
     }
   });
 });
+
+// #2394 (source 5): health_body_degraded startup recovery authority — the
+// issue's named regression sequences. The marker plumbing is source-generic
+// (#3057); these tests pin the health_body_degraded-specific timings: a fully
+// valid healthy FIRST poll clears a prior-process incident with fresh,
+// expired, or missing persisted-throttle state, while continued body
+// degradation (status flips to 'degraded' on poll 1, before the alert's
+// N-poll debounce) and clear-sink rejection both preserve the marker.
+describe('#2394 source 5: health_body_degraded startup recovery authority', () => {
+  const MARKER = 'remote-1:health_body_degraded';
+  let mockFetch: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    mockFetch = vi.fn();
+    vi.stubGlobal('fetch', mockFetch);
+    alertFns.emitAlert.mockReset();
+    alertFns.emitAlert.mockReturnValue(durableAlertResult());
+    alertFns.clearAlertSource.mockReset();
+    alertFns.clearAlertSource.mockReturnValue(true);
+    alertThrottleStore.loadAlertThrottle.mockReset();
+    alertThrottleStore.loadAlertThrottle.mockReturnValue(new Map());
+    alertThrottleStore.loadAlertThrottleDetailed.mockReset();
+    alertThrottleStore.loadAlertThrottleDetailed.mockReturnValue({ entries: new Map(), loadError: null });
+    alertThrottleStore.recordAlertThrottle.mockReset();
+    silenceManager.isInstanceSilenced.mockReset();
+    silenceManager.isInstanceSilenced.mockReturnValue(false);
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-05-20T12:00:00.000Z'));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  async function withMarker(
+    fn: (tools: { markerPresent: () => Promise<boolean> }) => Promise<void>,
+  ): Promise<void> {
+    const { mkdtempSync, rmSync, writeFileSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const { tmpdir } = await import('node:os');
+    const authDir = mkdtempSync(join(tmpdir(), 'recovery-auth-'));
+    const origStateDir = process.env['BOT_ERRORS_STATE_DIR'];
+    process.env['BOT_ERRORS_STATE_DIR'] = authDir;
+    writeFileSync(join(authDir, 'recovery-authority.json'), JSON.stringify({ [MARKER]: true }));
+    const markerPresent = async (): Promise<boolean> => {
+      const { loadRecoveryMarkers } = await import('../../src/lib/recovery-authority-store.ts');
+      return loadRecoveryMarkers().has(MARKER);
+    };
+    try {
+      await fn({ markerPresent });
+    } finally {
+      process.env['BOT_ERRORS_STATE_DIR'] = origStateDir;
+      rmSync(authDir, { recursive: true, force: true });
+    }
+  }
+
+  function makePoller(): HealthPoller {
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    return new HealthPoller(
+      () => instances,
+      'self',
+      vi.fn().mockReturnValue({}),
+      1_000,
+      undefined,
+      null,
+      undefined,
+      'test-host',
+    );
+  }
+
+  const throttleEntry = (iso: string): { entries: Map<string, string>; loadError: null } => ({
+    entries: new Map([[`test-host:remote-1:health_body_degraded`, iso]]),
+    loadError: null,
+  });
+
+  it.each([
+    ['missing', null],
+    ['fresh', '2026-05-20T11:59:30.000Z'],
+    ['expired', '2026-01-01T00:00:00.000Z'],
+  ])('clears a prior-process marker on a fully healthy first poll (throttle: %s)', async (_label, throttleIso) => {
+    await withMarker(async ({ markerPresent }) => {
+      if (throttleIso !== null) {
+        alertThrottleStore.loadAlertThrottleDetailed.mockReturnValue(throttleEntry(throttleIso));
+      }
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(makeOnlineHealth({ uptime_seconds: 100 })),
+      });
+
+      const poller = makePoller();
+      poller.start();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(alertFns.clearAlertSource).toHaveBeenCalledWith(
+        'remote-1',
+        'health_body_degraded',
+        'startup recovery scan (#3057)',
+      );
+      expect(await markerPresent()).toBe(false);
+
+      poller.stop();
+    });
+  });
+
+  it('does NOT clear while the body is still degraded on the first poll', async () => {
+    await withMarker(async ({ markerPresent }) => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({
+          status: 'degraded',
+          reason: 'runtime_agent_at_risk',
+          whatsapp: { connected: true, connection: { state: null } },
+        }),
+      });
+
+      const poller = makePoller();
+      poller.start();
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      // Restart into continued degradation: the status record is 'degraded'
+      // from poll 1 (the N-poll debounce gates only the alert), so the
+      // online-gated reconcile must neither clear nor drop the marker.
+      expect(alertFns.clearAlertSource).not.toHaveBeenCalledWith(
+        'remote-1',
+        'health_body_degraded',
+        'startup recovery scan (#3057)',
+      );
+      expect(await markerPresent()).toBe(true);
+
+      poller.stop();
+    });
+  });
+
+  it('keeps the marker when the startup clear is not durably accepted', async () => {
+    await withMarker(async ({ markerPresent }) => {
+      alertFns.clearAlertSource.mockReturnValue(false);
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(makeOnlineHealth({ uptime_seconds: 100 })),
+      });
+
+      const poller = makePoller();
+      poller.start();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(alertFns.clearAlertSource).toHaveBeenCalledWith(
+        'remote-1',
+        'health_body_degraded',
+        'startup recovery scan (#3057)',
+      );
+      // Clear rejected — the marker must survive so the next startup retries.
+      expect(await markerPresent()).toBe(true);
+
+      poller.stop();
+    });
+  });
+});
