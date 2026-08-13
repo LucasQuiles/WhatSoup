@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { createChildLogger } from '../../logger.ts';
-import { TurnRecoveryClaimFenceError } from '../../core/turn-recovery-store.ts';
+import { TurnRecoveryClaimFenceError, isTurnRecoveryReplayEligible } from '../../core/turn-recovery-store.ts';
 import type {
   ClaimTurnRecoveryJobOptions,
   ClaimTurnRecoveryJobResult,
@@ -594,7 +594,10 @@ export class TurnRecoverySupervisor {
 
     if (job.state === 'pending') {
       if (job.next_attempt_at > isoNow()) return {};
-      if (job.replay_safe !== 1) return { skippedBlockedUnsafe: 1 };
+      // Shared eligibility contract (#2155): an operator promotion records a
+      // proof reference while immutably keeping replay_safe=0 — those jobs
+      // dispatch; never-promoted unsafe jobs stay skipped.
+      if (!isTurnRecoveryReplayEligible(job)) return { skippedBlockedUnsafe: 1 };
       // A never-reassigned job's assigned owner still equals its
       // creation-time recovery-owner identity — that IS the "current
       // assigned owner" the store's ownership check (getOwnedTurnRecoveryJob)
