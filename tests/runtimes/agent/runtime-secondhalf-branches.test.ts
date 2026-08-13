@@ -227,6 +227,7 @@ const { mockConfig } = vi.hoisted(() => ({
     pineconeAllowedIndexes: [] as string[],
     voiceReply: 'never' as const,
     elevenlabs: { defaultVoiceId: 'v', defaultModel: 'm', stability: 0.5, similarityBoost: 0.75 },
+    memory: { adminJid: 'admin@s.whatsapp.net' },
   },
 }));
 
@@ -492,6 +493,74 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       })).toEqual({ dispatched: false, detail: 'database compatibility drain' });
       expect(db.assertWritableCompatibility).toHaveBeenCalledTimes(1);
       expect(mockSession.sendTurn).not.toHaveBeenCalled();
+    });
+
+    it('refuses a scheduled dispatch when no durability engine is set (#2144)', () => {
+      const db = makeDb();
+      const runtime = new AgentRuntime(db, makeMessenger().messenger);
+
+      const result = runtime.dispatchAgentJob({
+        beadId: 1,
+        triggerId: 2,
+        prompt: 'do work',
+        title: 'scheduled work',
+        reportChatJid: 'test@g.us',
+      });
+
+      expect(result.dispatched).toBe(false);
+      expect(String(result.detail)).toContain('durability engine not set');
+      expect(mockSession.sendTurn).not.toHaveBeenCalled();
+    });
+
+    it('journals a durable inbound owner BEFORE acknowledging a scheduled dispatch (#2144)', () => {
+      const db = makeDb();
+      const runtime = new AgentRuntime(db, makeMessenger().messenger);
+      const journalInbound = vi.fn(() => 77);
+      (runtime as unknown as { durability: unknown }).durability = { journalInbound };
+      const handleMessage = vi
+        .spyOn(runtime, 'handleMessage')
+        .mockResolvedValue(undefined);
+
+      const result = runtime.dispatchAgentJob({
+        beadId: 5,
+        triggerId: 9,
+        prompt: 'do work',
+        title: 'scheduled work',
+        reportChatJid: 'test@g.us',
+      });
+
+      // Ownership precedes the fire-and-forget AND the acknowledgement.
+      expect(journalInbound).toHaveBeenCalledTimes(1);
+      const journalArgs = journalInbound.mock.calls[0] as unknown[];
+      expect(String(journalArgs[0])).toMatch(/^agentjob-9-/);
+      expect(journalArgs[2]).toBe('test@g.us');
+      expect(journalArgs[3]).toBe('agent');
+      expect(journalInbound.mock.invocationCallOrder[0]).toBeLessThan(
+        handleMessage.mock.invocationCallOrder[0]!,
+      );
+      // The synthetic turn carries the durable seq, and the ack names it.
+      expect(handleMessage.mock.calls[0]?.[0]).toMatchObject({ inboundSeq: 77, isSyntheticJob: true });
+      expect(result).toEqual({ dispatched: true, detail: expect.stringContaining('inbound seq 77') });
+    });
+
+    it('maps a journal failure to a refused dispatch instead of an unowned ack (#2144)', () => {
+      const db = makeDb();
+      const runtime = new AgentRuntime(db, makeMessenger().messenger);
+      (runtime as unknown as { durability: unknown }).durability = {
+        journalInbound: vi.fn(() => { throw new Error('journal write failed'); }),
+      };
+      const handleMessage = vi.spyOn(runtime, 'handleMessage').mockResolvedValue(undefined);
+
+      const result = runtime.dispatchAgentJob({
+        beadId: 5,
+        triggerId: 9,
+        prompt: 'do work',
+        title: 'scheduled work',
+        reportChatJid: 'test@g.us',
+      });
+
+      expect(result).toEqual({ dispatched: false, detail: 'journal write failed' });
+      expect(handleMessage).not.toHaveBeenCalled();
     });
 
     it('rejects a control turn before constructing a repair session', async () => {
