@@ -1,0 +1,107 @@
+# Capability-Obligation Replay — Operator Runbook
+
+Operator procedures for the capability-obligation replay feature (the delivery-vs-fulfillment
+repair: a managed-loop capability refusal that was echo-settled into silence is turned into a
+durable, replayable obligation the supervisor drains through the normal per-chat pipeline).
+
+This runbook covers the **operator front-door commands** only. The scanner/claim/dispatch
+supervisor is autonomous; these commands supply the two things it cannot mint for itself: a
+capability **attestation** (readiness) and, for a group, a **drain approval** (authorization).
+
+> **Holds.** Every command here defaults to a dry run and never migrates a live database.
+> Recording an attestation, approving a group drain, and any live migration remain
+> owner-gated (H5 / AS-08 / AS-01). Nothing in this runbook has been executed against a live
+> instance. The `--json` flag is available on each command for machine-readable output.
+
+## Prerequisites
+
+- Run from the **release whose schema matches the target instance** — each command refuses
+  unless the database is at exactly `CURRENT_SCHEMA_MIGRATION` (it never migrates).
+- Node pinned to `24.15.0`; invoke via the repo's pinned-node wrapper.
+- The binding facts (host, runtime user, release SHA, provider, contract version, skill
+  identity, media root) must match what the **live supervisor** builds, or the recorded
+  attestation will never admit a real obligation. `--config PATH` (the instance
+  `agentOptions.capabilityObligations` block) is cross-checked against your flags and the
+  command refuses on any binding mismatch.
+
+## 1. Produce a capability attestation — `scripts/capability-obligation-attest.ts`
+
+Without an admissible attestation the supervisor admits nothing and every obligation parks.
+This command derives the live binding and records ONE attestation **iff** a bounded,
+non-sending resolver canary passes.
+
+- **Dry run (default):** derives the binding + digest, records nothing. With `--config` it
+  additionally proves the binding matches the instance config.
+- **Record:** `--run-canary --confirm --config PATH --probe-source SOURCE --receipt-out PATH`.
+
+Before recording, the command is **fail-closed** on three observations:
+
+1. **media-root readability** — refuses unless the binding's media root is a readable directory.
+2. **installed-artifact observation** — sha256s `execution.command[0]` and refuses on a
+   mismatch with the declared `--resolver-digest`. It never silently trusts the declared
+   digest; a bare PATH binary is recorded `resolver_artifact_observed: false` (not verified).
+3. **evidence preservation** — the probe's stdout/stderr digests + byte counts + exit/signal
+   + observed-source digest are written to the `--receipt-out` file; `--run-canary` refuses
+   without it.
+
+The canary also owns a **process group** (`detached`) and SIGKILLs it on timeout AND on clean
+exit, so a resolver that forks a grandchild (yt-dlp → ffmpeg) cannot leave it to land a side
+effect after the outcome is reported.
+
+**NARROW CLAIM (read this).** A passing canary attests ONLY that the observed installed
+resolver, run against `sha256(probeSource)`, exited 0 within bound and produced ≥
+`minOutputBytes` on stdout. It is **not** proof of semantic processing — a bounded probe
+cannot establish that. Per the design spec §3.3 the fulfillment proof is the D6 execution
+receipt + the normal-delivery chain, not the canary.
+
+> The attestation ROW has no probe-evidence columns; adding them needs migration 58, which
+> bumps `CURRENT_SCHEMA_MIGRATION` **inside the attestation binding** — invalidating every
+> computed digest and reopening AS-01. Evidence therefore lives in the `--receipt-out` file,
+> correlated to the row by `nonce`, not in the row. This is deliberate, not an oversight.
+
+## 2. Approve + arm a group drain — `scripts/capability-obligation-approve-drain.ts`
+
+Group obligations sit in `waiting_approval` until a destination-specific, digest-bound owner
+approval (AS-08). This command records the approval AND drives the sole
+`waiting_approval → waiting_capability` transition (`consumeGroupDrainApproval`) so **one
+operator action arms the drain**. Dry run (default) records nothing.
+
+```
+capability-obligation-approve-drain --db PATH --obligation-id N --release-sha SHA \
+  --provider P --skill-name N --skill-digest D --probe-version PV --canary-id CID \
+  --media-root PATH --manifest-digest MD --drain-run-id ID --approver WHO \
+  --valid-seconds N [--dep k=v ...] --confirm
+```
+
+On `--confirm` the obligation reaches `waiting_capability`. **Claimability still additionally
+requires a fresh admissible attestation** (step 1) — "armed" is not "will drain". The
+supervisor then claims (single-flight, fenced) and dispatches through the normal pipeline.
+
+## 3. Cold-obligation activation — NOT WIRED (owner-gated)
+
+After a cold restart the incident obligations need their per-chat **session** active for the
+supervisor to dispatch. `src/runtimes/agent/capability-obligation-drain-now.ts`
+(`drainObligationNow`) is the gated activation CORE: it activates ONE named
+`waiting_capability` obligation's session and runs one tick, fail-closed, refusing a GROUP
+unless a live AS-08 approval is in force.
+
+**Its `activateSession` port has no live adapter and no operator trigger.** Activating a real
+group session is the AE1-sensitive act (a resumed group session can emit unsolicited
+messages bypassing the sibling filter), so the live adapter is left for an owner-authorized
+change with its own review. Until it exists, the three incident obligations are **not
+operationally drainable after a cold deploy** — this is a named acceptance blocker, not a
+supported path.
+
+## End-to-end order
+
+1. `capability-obligation-attest … --run-canary --confirm` (readiness attestation).
+2. For a group: `capability-obligation-approve-drain … --confirm` (AS-08 approval + arm).
+3. The supervisor scans → admits (attestation) → claims (fenced) → dispatches → settles.
+4. (Cold restart only) session activation — **owner-gated, not yet wired** (§3).
+
+## Safety recap
+
+- Schema-guarded, dry-run-by-default, `--json` for automation.
+- No live DB write, provider call, or WhatsApp send occurs from a dry run.
+- Recording an attestation and approving a group drain are owner-gated actions (H5 / AS-08);
+  a live migration additionally requires the AS-01 old-binary rehearsal to pass.

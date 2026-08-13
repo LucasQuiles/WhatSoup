@@ -20,16 +20,34 @@
  * a mismatch is refused, because an attestation whose binding differs from the live
  * supervisor's would be recorded yet never admit a real obligation (still inert).
  *
+ * FAIL-CLOSED OBSERVATION (round 16): before recording under `--run-canary` the
+ * command additionally (a) refuses unless the binding's media root is a readable
+ * directory; (b) OBSERVES the installed resolver artifact (`execution.command[0]`)
+ * and refuses on a digest mismatch with the declared `--resolver-digest` — it never
+ * silently trusts the declared digest; (c) PRESERVES the probe stdout/stderr/exit
+ * digests + byte counts + observed-source digest to a durable receipt (`--receipt-out`),
+ * required so no attestation is minted without preserved evidence (spec §3.3).
+ *
+ * NARROW CLAIM: a passing canary attests ONLY that the OBSERVED installed resolver,
+ * run against the recorded `sha256(probeSource)`, exited 0 within bound and produced
+ * >= minOutputBytes — it is NOT proof of semantic processing (a bounded probe cannot
+ * establish that). Per spec §3.3 the fulfillment proof is the D6 execution receipt +
+ * normal-delivery chain, not the canary. Attestation-row evidence columns are NOT
+ * added here: a new column needs migration 58, which bumps CURRENT_SCHEMA_MIGRATION
+ * INSIDE the attestation binding and would invalidate every digest + reopen AS-01.
+ *
  *   dry-run (default): capability-obligation-attest --db PATH --provider P \
  *     --contract-version V --capability C --skill-name N --skill-digest D \
  *     --probe-version PV --canary-id CID --media-root PATH --release-sha SHA \
  *     --valid-seconds N --run-id ID [--skill-version V] [--resolver-digest D] [--dep k=v ...]
  *     [--config PATH]   (with --config, also proves the binding matches config)
- *   record:  ... --run-canary --confirm --config PATH --probe-source SOURCE
- *            (executes the config's resolver canary against SOURCE, records on pass)
+ *   record:  ... --run-canary --confirm --config PATH --probe-source SOURCE --receipt-out PATH
+ *            (observes the installed resolver + media root, runs the config's canary,
+ *             records on pass, preserves probe evidence to the receipt)
  */
 import { spawn } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { accessSync, constants as fsConstants, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { hostname, userInfo } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
 import { resolve } from 'node:path';
@@ -69,6 +87,8 @@ export interface AttestArgs {
   configPath: string | null;
   /** Bounded, non-sending probe source the resolver canary runs against; required with --run-canary. */
   probeSource: string | null;
+  /** Path to write the durable probe-evidence receipt (stdout/stderr/exit digests, artifact obs); required with --run-canary. */
+  receiptOut: string | null;
   runCanary: boolean;
   confirm: boolean;
   json: boolean;
@@ -78,7 +98,7 @@ const VALUE_FLAGS = new Set([
   '--db', '--provider', '--contract-version', '--capability', '--skill-name', '--skill-version',
   '--skill-digest', '--resolver-digest', '--probe-version', '--canary-id', '--media-root',
   '--release-sha', '--valid-seconds', '--run-id', '--host', '--runtime-user',
-  '--config', '--probe-source',
+  '--config', '--probe-source', '--receipt-out',
 ]);
 
 function positiveInt(value: string, label: string): number {
@@ -141,6 +161,7 @@ export function parseAttestArgs(argv: readonly string[]): AttestArgs {
     runtimeUser: flags.get('--runtime-user') ?? userInfo().username,
     configPath: flags.get('--config') ?? null,
     probeSource: flags.get('--probe-source') ?? null,
+    receiptOut: flags.get('--receipt-out') ?? null,
     runCanary,
     confirm,
     json,
@@ -236,11 +257,26 @@ export function assertArgsMatchConfig(args: AttestArgs, options: CapabilityOblig
   }
 }
 
+const CANARY_STREAM_CAP_BYTES = 262_144;
+
 /**
- * The bounded, NON-SENDING resolver canary — the gated real execution. It runs
- * the declared resolver against a bounded probe input and returns pass iff it
- * exits 0 in time with output. It sends no WhatsApp message (a resolver fetches /
- * processes media; it is not a send path). Invoked ONLY under `--run-canary`.
+ * The bounded, NON-SENDING resolver canary — the gated real execution.
+ *
+ * NARROW CLAIM (spec §3.3): a `pass` means ONLY that the declared resolver, run
+ * against the recorded `sha256(probeSource)`, exited 0 within the timeout and
+ * produced >= minOutputBytes on stdout (this repo's resolvers write their result
+ * to stdout; `execution-tool.ts` gates the same way). It is NOT proof the resolver
+ * semantically processed that source — a bounded probe cannot establish that, and
+ * per §3.3 the fulfillment proof lives in the D6 execution receipt + delivery
+ * chain, not the canary. The `detail` preserves stdout/stderr digests + byte counts
+ * + exit/signal (references without raw content = no secret leak) so the recorded
+ * attestation is auditable.
+ *
+ * Process-group ownership (mirrors execution-tool.ts:88, r13/r14 F2): the child is
+ * its OWN group leader (`detached`), and the group is SIGKILLed on timeout AND in
+ * the close handler — a resolver that forks a grandchild (yt-dlp → ffmpeg, a shell)
+ * cannot leave it alive to land a side effect after the outcome is reported. Node's
+ * built-in `timeout` only signals the direct child, so we own the watchdog.
  */
 export function runResolverCanary(params: {
   command: readonly string[];
@@ -250,18 +286,110 @@ export function runResolverCanary(params: {
   nonce: string;
 }): Promise<CapabilityCanaryOutcome> {
   const argv = params.command.map((part) => part.replaceAll('{source}', params.probeSource));
+  const probeSourceDigest = createHash('sha256').update(params.probeSource).digest('hex');
   return new Promise((resolvePromise) => {
-    const child = spawn(argv[0]!, argv.slice(1), { stdio: ['ignore', 'pipe', 'pipe'], timeout: params.timeoutMs });
+    const child = spawn(argv[0]!, argv.slice(1), { stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+    const pid = child.pid; // capture now — undefined if spawn failed
     let stdout = '';
+    let stderr = '';
     let timedOut = false;
-    child.stdout.on('data', (c: Buffer) => { if (stdout.length < 262_144) stdout += c.toString('utf8'); });
-    child.on('error', () => resolvePromise({ result: 'fail', nonce: params.nonce, detail: { spawn: 'failed' } }));
+    let settled = false;
+    const killGroup = (): void => {
+      if (pid === undefined) return;
+      try { process.kill(-pid, 'SIGKILL'); } catch { /* already reaped by a clean exit or an earlier kill */ }
+    };
+    const watchdog = setTimeout(() => { timedOut = true; killGroup(); }, params.timeoutMs);
+    watchdog.unref?.();
+    child.stdout.on('data', (c: Buffer) => { if (stdout.length < CANARY_STREAM_CAP_BYTES) stdout += c.toString('utf8'); });
+    child.stderr.on('data', (c: Buffer) => { if (stderr.length < CANARY_STREAM_CAP_BYTES) stderr += c.toString('utf8'); });
+    child.on('error', () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(watchdog);
+      killGroup();
+      resolvePromise({ result: 'fail', nonce: params.nonce, detail: { reason: 'resolver_spawn_failed', probeSourceDigest } });
+    });
     child.on('close', (code, signal) => {
-      if (signal !== null) timedOut = true;
-      const pass = !timedOut && code === 0 && Buffer.byteLength(stdout, 'utf8') >= params.minOutputBytes;
-      resolvePromise({ result: pass ? 'pass' : 'fail', nonce: params.nonce, detail: { exitCode: code, timedOut } });
+      if (settled) return;
+      settled = true;
+      clearTimeout(watchdog);
+      if (signal !== null) timedOut = true; // a SIGKILLed resolver is a timeout, not a plain non-zero exit
+      // Reap the (now-leaderless) group before reporting: the leader has exited, so
+      // signalling the negative pid only sweeps a grandchild that outlived it.
+      killGroup();
+      const stdoutBytes = Buffer.byteLength(stdout, 'utf8');
+      const stderrBytes = Buffer.byteLength(stderr, 'utf8');
+      const pass = !timedOut && code === 0 && stdoutBytes >= params.minOutputBytes;
+      resolvePromise({
+        result: pass ? 'pass' : 'fail',
+        nonce: params.nonce,
+        detail: {
+          exitCode: code,
+          signal,
+          timedOut,
+          stdoutBytes,
+          stderrBytes,
+          stdoutSha256: createHash('sha256').update(stdout).digest('hex'),
+          stderrSha256: createHash('sha256').update(stderr).digest('hex'),
+          probeSourceDigest,
+        },
+      });
     });
   });
+}
+
+/**
+ * Blocker-1 (round 16): OBSERVE the installed resolver artifact rather than
+ * silently trusting the declared `resolverDigest`. When `execution.command[0]` is a
+ * real file (an absolute/relative path to the resolver), sha256 it; if the operator
+ * declared a `resolverDigest`, REFUSE fail-closed on mismatch. When command[0] is a
+ * bare PATH binary (no separator), it cannot be observed here — record
+ * `observed: false` so the attestation stops implying a verification that did not
+ * happen. Never fabricates a match.
+ */
+export interface ResolverArtifactObservation {
+  observed: boolean;
+  digest: string | null;
+  declaredDigest: string | null;
+  verified: boolean;
+}
+export function observeResolverArtifact(commandZero: string, declaredResolverDigest: string | null): ResolverArtifactObservation {
+  const looksLikePath = commandZero.includes('/');
+  if (!looksLikePath) {
+    return { observed: false, digest: null, declaredDigest: declaredResolverDigest, verified: false };
+  }
+  let bytes: Buffer;
+  try {
+    bytes = readFileSync(commandZero);
+  } catch (err) {
+    throw new Error(`refusing to record: resolver artifact ${commandZero} is unreadable: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  const digest = createHash('sha256').update(bytes).digest('hex');
+  if (declaredResolverDigest !== null && digest !== declaredResolverDigest) {
+    throw new Error(
+      `refusing to record: installed resolver artifact digest ${digest} does not match declared --resolver-digest ${declaredResolverDigest} `
+      + `(the attestation would bind a resolver that is not the one installed)`,
+    );
+  }
+  return { observed: true, digest, declaredDigest: declaredResolverDigest, verified: declaredResolverDigest !== null };
+}
+
+/**
+ * Blocker-1 (round 16): refuse to record unless the binding's media root exists and
+ * is readable — a D3/D5 binding field that must name a real, reachable retained-media
+ * directory, not an unverified string.
+ */
+export function assertMediaRootReadable(mediaRoot: string): void {
+  let stat;
+  try {
+    accessSync(mediaRoot, fsConstants.R_OK);
+    stat = statSync(mediaRoot);
+  } catch (err) {
+    throw new Error(`refusing to record: media root ${mediaRoot} is not readable: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  if (!stat.isDirectory()) {
+    throw new Error(`refusing to record: media root ${mediaRoot} is not a directory`);
+  }
 }
 
 export interface AttestIo { out: (line: string) => void; err: (line: string) => void; }
@@ -331,8 +459,12 @@ if (import.meta.url === invokedPath) {
           if (!args.confirm) throw new Error('--run-canary requires --confirm (it executes the resolver and records an attestation)');
           if (args.configPath === null) throw new Error('--run-canary requires --config PATH (the resolver command comes from the instance config, never a guess)');
           if (args.probeSource === null || args.probeSource.length === 0) throw new Error('--run-canary requires --probe-source SOURCE (a bounded, non-sending URL/token to probe)');
+          if (args.receiptOut === null) throw new Error('--run-canary requires --receipt-out PATH (the probe stdout/stderr/exit evidence is preserved there per spec §3.3)');
           const options = loadObligationOptionsFromConfig(args.configPath);
           assertArgsMatchConfig(args, options); // refuse an un-admittable binding before running anything
+          assertMediaRootReadable(options.mediaRoot); // blocker-1: media-root must be a readable directory
+          const artifact = observeResolverArtifact(options.execution.command[0]!, args.skill.resolverDigest); // blocker-1: observe installed resolver (throws on digest mismatch)
+          const now = new Date();
           const canary = await runResolverCanary({
             command: options.execution.command,
             probeSource: args.probeSource,
@@ -340,13 +472,29 @@ if (import.meta.url === invokedPath) {
             minOutputBytes: options.execution.minOutputBytes,
             nonce: args.runId,
           });
-          const result = attest(db, args, canary, new Date());
+          const result = attest(db, args, canary, now);
+          // blocker-1: PRESERVE the probe evidence durably (references, no raw stream content).
+          const receipt = {
+            schemaVersion: CURRENT_SCHEMA_MIGRATION,
+            capability: args.capability,
+            attestationBindingDigest: result.attestationDigest,
+            recorded: result.recorded,
+            attestationId: result.recorded ? result.attestationId : null,
+            reason: result.recorded ? null : (result.mode === 'record' ? result.reason : 'dry-run'),
+            canary,
+            resolverArtifact: artifact,
+            mediaRoot: options.mediaRoot,
+            probeSourceDigest: (canary.detail as { probeSourceDigest?: string } | undefined)?.probeSourceDigest ?? null,
+            claimScope: 'NOT a proof of semantic processing — exit0+bytes+observed-artifact+source-digest only; fulfillment proof = D6 receipt + delivery chain (spec §3.3)',
+            attestedAt: now.toISOString(),
+          };
+          writeFileSync(args.receiptOut, JSON.stringify(receipt, null, 2));
           if (result.recorded) {
-            process.stdout.write((args.json ? JSON.stringify(result) : `RECORDED attest ${args.capability}: id=${result.attestationId} digest=${result.attestationDigest}`) + '\n');
+            process.stdout.write((args.json ? JSON.stringify(result) : `RECORDED attest ${args.capability}: id=${result.attestationId} digest=${result.attestationDigest} receipt=${args.receiptOut}`) + '\n');
             process.exitCode = 0;
           } else {
             const reason = result.mode === 'record' ? result.reason : 'dry-run';
-            process.stdout.write((args.json ? JSON.stringify(result) : `NOT RECORDED attest ${args.capability}: ${reason} digest=${result.attestationDigest}`) + '\n');
+            process.stdout.write((args.json ? JSON.stringify(result) : `NOT RECORDED attest ${args.capability}: ${reason} digest=${result.attestationDigest} receipt=${args.receiptOut}`) + '\n');
             process.exitCode = 3; // nonzero when the canary/producer refused to record
           }
           return;

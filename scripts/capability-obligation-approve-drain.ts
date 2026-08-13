@@ -164,6 +164,8 @@ export function approveDrain(
   reason?: string;
   attestationDigest?: string;
   approvalId?: number;
+  consumed?: boolean;
+  currentState?: string;
   mode: 'dry-run' | 'confirm';
 } {
   const obligation = db.raw
@@ -207,7 +209,25 @@ export function approveDrain(
     validForSeconds: args.validForSeconds,
   });
   if (!recorded.recorded) return { ok: false, reason: recorded.reason, attestationDigest, mode };
-  return { ok: true, attestationDigest, approvalId: recorded.approvalId, mode };
+  // blocker-2 (round 16): drive the SOLE waiting_approval → waiting_capability
+  // transition (store.consumeGroupDrainApproval) with the same live facts + digest
+  // the approval was cut for. Recording the approval row alone leaves the group
+  // PARKED — this is the missing supported operational path. One operator command
+  // now arms the drain to `waiting_capability`.
+  const consumed = store.consumeGroupDrainApproval(args.obligationId, {
+    destinationJid: obligation.deliveryJid,
+    releaseSha: args.releaseSha,
+    manifestDigest: args.manifestDigest,
+    drainRunId: args.drainRunId,
+    attestationDigest,
+  });
+  const currentState = (db.raw
+    .prepare('SELECT state FROM capability_obligations WHERE id = ?')
+    .get(args.obligationId) as { state: string }).state;
+  if (!consumed.applied) {
+    return { ok: false, reason: `approval_recorded_but_not_consumed:${consumed.reason ?? 'unknown'}`, attestationDigest, approvalId: recorded.approvalId, consumed: false, currentState, mode };
+  }
+  return { ok: true, attestationDigest, approvalId: recorded.approvalId, consumed: true, currentState, mode };
 }
 
 export function runApproveDrain(args: ApproveDrainArgs, io: ApproveDrainIo): number {
@@ -220,8 +240,8 @@ export function runApproveDrain(args: ApproveDrainArgs, io: ApproveDrainIo): num
     io.out(args.json ? JSON.stringify(result) : (
       result.ok
         ? (args.confirm
-          ? `APPROVED group drain for obligation #${args.obligationId}: approvalId=${result.approvalId} attDigest=${result.attestationDigest}`
-          : `DRY-RUN approve #${args.obligationId}: WOULD record group approval with attDigest=${result.attestationDigest} — pass --confirm to apply`)
+          ? `APPROVED + ARMED group drain for obligation #${args.obligationId}: approvalId=${result.approvalId} state=${result.currentState} attDigest=${result.attestationDigest} (claim still requires a fresh admissible attestation — run capability-obligation-attest first)`
+          : `DRY-RUN approve #${args.obligationId}: WOULD record + consume a group approval with attDigest=${result.attestationDigest} — pass --confirm to apply`)
         : `refused #${args.obligationId}: ${result.reason}`
     ));
     return result.ok ? 0 : 1;

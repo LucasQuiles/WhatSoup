@@ -86,7 +86,7 @@ beforeEach(() => { db = new Database(':memory:'); db.open(); store = new Capabil
 afterEach(() => db.close());
 
 describe('approveDrain (operator group-drain approval)', () => {
-  it('produces a CLAIMABLE approval end-to-end: approve → consume → claim succeeds', () => {
+  it('records AND consumes in one command (round-16 blocker-2): approve → waiting_capability → claim succeeds', () => {
     const id = seedGroupObligation();
     const args = baseArgs(id, { confirm: true });
     const binding = expectedBinding(args);
@@ -97,15 +97,11 @@ describe('approveDrain (operator group-drain approval)', () => {
       attestedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 3600_000).toISOString(),
     });
 
+    // ONE operator command records the approval AND drives the sole
+    // waiting_approval → waiting_capability transition (no manual consume needed now).
     const result = approveDrain(store, db, args);
-    expect(result).toMatchObject({ ok: true, mode: 'confirm', attestationDigest: digest, approvalId: expect.any(Number) });
-
-    // Consume with the SAME live drain facts the approval was cut for.
-    const consumed = store.consumeGroupDrainApproval(id, {
-      destinationJid: GROUP_JID, releaseSha: 'rel-live-1', manifestDigest: 'md-1',
-      drainRunId: 'drain-1', attestationDigest: digest,
-    });
-    expect(consumed.applied).toBe(true);
+    expect(result).toMatchObject({ ok: true, mode: 'confirm', attestationDigest: digest, approvalId: expect.any(Number), consumed: true, currentState: 'waiting_capability' });
+    expect((db.raw.prepare('SELECT state FROM capability_obligations WHERE id=?').get(id) as { state: string }).state).toBe('waiting_capability');
 
     // The claim (r14 F1 + r15 F4) accepts it because the CLI computed the digest correctly.
     const claim = store.claimObligation(id, {
@@ -191,14 +187,26 @@ describe('capability-obligation-approve-drain CLI (main block reaches approveDra
     }
   }
 
+  function stateOf(dbFile: string, id: number): string {
+    const check = new Database(dbFile);
+    check.open();
+    try {
+      return (check.raw.prepare('SELECT state FROM capability_obligations WHERE id=?').get(id) as { state: string }).state;
+    } finally {
+      check.close();
+    }
+  }
+
   it('--confirm records a group-drain approval (proves the runApproveDrain wiring executes)', () => {
     const dir = tmp.make('confirm');
     const dbFile = join(dir, 'obligations.db');
     const id = seedGroupObligationInFileDb(dbFile);
     const result = runCli(dbFile, id, ['--confirm']);
     expect(result.status, `stderr: ${result.stderr}`).toBe(0);
-    expect(result.stdout).toMatch(/APPROVED group drain/);
+    expect(result.stdout).toMatch(/APPROVED \+ ARMED group drain/);
     expect(approvalCount(dbFile)).toBe(1);
+    // blocker-2: the CLI drove the transition — the group is now claimable-eligible.
+    expect(stateOf(dbFile, id)).toBe('waiting_capability');
   }, 30_000);
 
   it('FALSIFIER: dry-run (no --confirm) records NO approval', () => {

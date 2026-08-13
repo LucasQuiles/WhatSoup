@@ -5,7 +5,8 @@
  * nothing (fail-closed). The canary outcome is injected here — no resolver runs.
  */
 import { spawnSync } from 'node:child_process';
-import { realpathSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -18,9 +19,11 @@ import { Database } from '../../src/core/database.ts';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 import {
   assertArgsMatchConfig,
+  assertMediaRootReadable,
   attest,
   bindingForAttestArgs,
   loadObligationOptionsFromConfig,
+  observeResolverArtifact,
   parseAttestArgs,
   runResolverCanary,
   type AttestArgs,
@@ -30,6 +33,17 @@ let db: Database;
 
 const CLI_PATH = fileURLToPath(new URL('../../scripts/capability-obligation-attest.ts', import.meta.url));
 const tmp = trackTmpDirs('attest-cli-', { base: realpathSync(tmpdir()) });
+
+/**
+ * Structured timing exemption (test-integrity `js-sleep-in-test`): the resolver
+ * process-group reap test observes whether a REAL grandchild process writes after
+ * a REAL timeout. Fake timers cannot advance an external process's wall clock, and
+ * the only condition to poll (the marker file) is the very absence the test
+ * asserts — so we must let real time pass the grandchild's would-be write.
+ */
+function TIMING(waitMs: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, waitMs));
+}
 
 /**
  * A parsed `capabilityObligations` block whose mediaRoot / contract version /
@@ -183,6 +197,25 @@ describe('runResolverCanary (bounded, non-sending resolver probe)', () => {
     expect(result).toMatchObject({ mode: 'record', recorded: true });
     expect(findAdmissibleAttestation(db, bindingForAttestArgs(a))).toMatchObject({ outcome: 'admissible' });
   });
+
+  it('BLOCKER-3 FALSIFIER: a resolver that exits 0 cleanly cannot leave a grandchild to write AFTER the outcome', async () => {
+    const dir = tmp.make('reap');
+    const marker = join(dir, 'grandchild-marker');
+    const grandchild = join(dir, 'grandchild.cjs');
+    const parent = join(dir, 'parent.cjs');
+    // grandchild: 600ms after the parent's clean exit, write the marker (no try/catch — a
+    // reaped process is SIGKILLed before the timer fires, so the write simply never happens).
+    writeFileSync(grandchild, 'const fs=require("node:fs");setTimeout(function(){fs.writeFileSync(process.argv[2],"escaped")},600);');
+    // parent (the "resolver"): fork the same-group grandchild, print output, exit 0 cleanly.
+    writeFileSync(parent, `const cp=require("node:child_process");const m=process.argv[2];const gc=cp.spawn(process.execPath,[${JSON.stringify(grandchild)},m],{stdio:"ignore"});gc.unref();process.stdout.write("processed-with-grandchild");process.exit(0);`);
+    const outcome = await runResolverCanary({
+      command: [NODE, parent, '{source}'], probeSource: marker, timeoutMs: 10_000, minOutputBytes: 5, nonce: 'reap-1',
+    });
+    expect(outcome.result).toBe('pass'); // the parent exited 0 with output — a naive canary would stop here
+    await TIMING(1_000); // let real time pass the grandchild's 600ms timer
+    // With the close-handler group reap, the grandchild was SIGKILLed → the marker never lands.
+    expect(existsSync(marker)).toBe(false);
+  }, 30_000);
 });
 
 describe('capability-obligation-attest CLI (the operator front-door records end-to-end)', () => {
@@ -192,14 +225,18 @@ describe('capability-obligation-attest CLI (the operator front-door records end-
    * recording). Proves that `--run-canary --confirm --config --probe-source`
    * executes the config's resolver canary and writes an admissible attestation.
    */
-  function writeConfig(dir: string): string {
+  // The resolver artifact the canary observes is the node binary itself (command[0]);
+  // the config + CLI declare its REAL digest so artifact observation VERIFIES.
+  const NODE_DIGEST = createHash('sha256').update(readFileSync(process.execPath)).digest('hex');
+
+  function writeConfig(dir: string, over: { mediaRoot?: string; resolverDigest?: string } = {}): string {
     const configFile = join(dir, 'instance.json');
     writeFileSync(configFile, JSON.stringify({
       agentOptions: {
         capabilityObligations: {
           enabled: true,
           contract: { version: 'c/1', rules: [{ id: 'r-watch', kind: 'leading_token', token: '/watch', capability: 'child_process_tools' }] },
-          mediaRoot: '/var/media',
+          mediaRoot: over.mediaRoot ?? dir, // a real readable directory
           retentionPolicyVersion: 'ret/1',
           retentionHorizonDays: 30,
           execution: {
@@ -207,7 +244,7 @@ describe('capability-obligation-attest CLI (the operator front-door records end-
             timeoutMs: 10_000, minOutputBytes: 5,
           },
           attestation: {
-            skillName: 'watch', skillVersion: '1.0.0', skillDigest: 'sd', resolverDigest: 'rd',
+            skillName: 'watch', skillVersion: '1.0.0', skillDigest: 'sd', resolverDigest: over.resolverDigest ?? NODE_DIGEST,
             dependencyVersions: { 'yt-dlp': '2026.03.17' }, probeVersion: 'p/1', canaryId: 'can-1',
           },
         },
@@ -224,12 +261,12 @@ describe('capability-obligation-attest CLI (the operator front-door records end-
     return dbFile;
   }
 
-  function runCli(dbFile: string, configFile: string, extra: readonly string[] = []): ReturnType<typeof spawnSync> {
+  function runCli(dbFile: string, configFile: string, mediaRoot: string, extra: readonly string[] = [], resolverDigest = NODE_DIGEST): ReturnType<typeof spawnSync> {
     const cliArgs = [
       '--db', dbFile, '--provider', 'claude-cli', '--contract-version', 'c/1', '--capability', 'child_process_tools',
-      '--skill-name', 'watch', '--skill-version', '1.0.0', '--skill-digest', 'sd', '--resolver-digest', 'rd',
+      '--skill-name', 'watch', '--skill-version', '1.0.0', '--skill-digest', 'sd', '--resolver-digest', resolverDigest,
       '--dep', 'yt-dlp=2026.03.17', '--probe-version', 'p/1', '--canary-id', 'can-1',
-      '--media-root', '/var/media', '--release-sha', 'rel-1', '--valid-seconds', '3600', '--run-id', 'run-1',
+      '--media-root', mediaRoot, '--release-sha', 'rel-1', '--valid-seconds', '3600', '--run-id', 'run-1',
       '--host', 'test-host', '--runtime-user', 'test-user', '--config', configFile, ...extra,
     ];
     return spawnSync(
@@ -239,44 +276,102 @@ describe('capability-obligation-attest CLI (the operator front-door records end-
     );
   }
 
-  function admissibleCount(dbFile: string): 'admissible' | 'skip' | string {
+  function admissibleOutcome(dbFile: string, mediaRoot: string): string {
     const check = new Database(dbFile);
     check.open();
     try {
-      const a = args({ dbPath: dbFile, hostId: 'test-host', runtimeUser: 'test-user' });
+      const a = args({ dbPath: dbFile, hostId: 'test-host', runtimeUser: 'test-user', mediaRoot, skill: { ...args().skill, resolverDigest: NODE_DIGEST } });
       return (findAdmissibleAttestation(check, bindingForAttestArgs(a)) as { outcome: string }).outcome;
     } finally {
       check.close();
     }
   }
 
-  it('--run-canary --confirm executes the config resolver and RECORDS an admissible attestation', () => {
+  it('--run-canary --confirm observes the resolver + media root, RECORDS an admissible attestation, and preserves a probe receipt', () => {
     const dir = tmp.make('record');
     const dbFile = seedSchemaCurrentDb(dir);
     const configFile = writeConfig(dir);
-    const result = runCli(dbFile, configFile, ['--run-canary', '--confirm', '--probe-source', 'https://probe.example/clip']);
+    const receiptOut = join(dir, 'probe-receipt.json');
+    const result = runCli(dbFile, configFile, dir, ['--run-canary', '--confirm', '--probe-source', 'https://probe.example/clip', '--receipt-out', receiptOut]);
     expect(result.status, `stderr: ${result.stderr}`).toBe(0);
     expect(result.stdout).toMatch(/RECORDED attest child_process_tools/);
-    expect(admissibleCount(dbFile)).toBe('admissible');
+    expect(admissibleOutcome(dbFile, dir)).toBe('admissible');
+    // Evidence preserved: the receipt carries the probe streams' digests + observed artifact.
+    expect(existsSync(receiptOut)).toBe(true);
+    const receipt = JSON.parse(readFileSync(receiptOut, 'utf8')) as Record<string, unknown>;
+    expect(receipt).toMatchObject({ recorded: true, resolverArtifact: { observed: true, verified: true } });
+    expect((receipt.canary as { detail: { stdoutSha256: string; stderrSha256: string; probeSourceDigest: string } }).detail.probeSourceDigest).toEqual(expect.any(String));
+  }, 30_000);
+
+  it('FALSIFIER: an installed-resolver digest MISMATCH refuses to record (never trusts the declared digest)', () => {
+    const dir = tmp.make('mismatch');
+    const dbFile = seedSchemaCurrentDb(dir);
+    // config + CLI both declare a WRONG resolver digest; observation of the real node binary fails.
+    const configFile = writeConfig(dir, { resolverDigest: 'de'.repeat(32) });
+    const receiptOut = join(dir, 'r.json');
+    const result = runCli(dbFile, configFile, dir, ['--run-canary', '--confirm', '--probe-source', 'https://probe.example/clip', '--receipt-out', receiptOut], 'de'.repeat(32));
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/does not match declared --resolver-digest/);
+    expect(admissibleOutcome(dbFile, dir)).toBe('skip');
+  }, 30_000);
+
+  it('FALSIFIER: an unreadable media root refuses to record', () => {
+    const dir = tmp.make('badmedia');
+    const dbFile = seedSchemaCurrentDb(dir);
+    const configFile = writeConfig(dir, { mediaRoot: '/no/such/media/root' });
+    const receiptOut = join(dir, 'r.json');
+    const result = runCli(dbFile, configFile, '/no/such/media/root', ['--run-canary', '--confirm', '--probe-source', 'https://probe.example/clip', '--receipt-out', receiptOut]);
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/media root .* is not readable/);
+  }, 30_000);
+
+  it('FALSIFIER: --run-canary without --receipt-out refuses (evidence must be preserved)', () => {
+    const dir = tmp.make('noreceipt');
+    const dbFile = seedSchemaCurrentDb(dir);
+    const configFile = writeConfig(dir);
+    const result = runCli(dbFile, configFile, dir, ['--run-canary', '--confirm', '--probe-source', 'https://probe.example/clip']);
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/--run-canary requires --receipt-out/);
+    expect(admissibleOutcome(dbFile, dir)).toBe('skip');
   }, 30_000);
 
   it('FALSIFIER: the default dry-run records NOTHING (admission stays closed)', () => {
     const dir = tmp.make('dryrun');
     const dbFile = seedSchemaCurrentDb(dir);
     const configFile = writeConfig(dir);
-    const result = runCli(dbFile, configFile, []); // no --run-canary
+    const result = runCli(dbFile, configFile, dir, []); // no --run-canary
     expect(result.status, `stderr: ${result.stderr}`).toBe(0);
     expect(result.stdout).toMatch(/DRY-RUN attest child_process_tools/);
-    expect(admissibleCount(dbFile)).toBe('skip'); // nothing recorded → not admissible
+    expect(admissibleOutcome(dbFile, dir)).toBe('skip'); // nothing recorded → not admissible
   }, 30_000);
 
   it('FALSIFIER: --run-canary without --confirm refuses (exit non-zero, records nothing)', () => {
     const dir = tmp.make('noconfirm');
     const dbFile = seedSchemaCurrentDb(dir);
     const configFile = writeConfig(dir);
-    const result = runCli(dbFile, configFile, ['--run-canary', '--probe-source', 'https://probe.example/clip']);
+    const result = runCli(dbFile, configFile, dir, ['--run-canary', '--probe-source', 'https://probe.example/clip', '--receipt-out', join(dir, 'r.json')]);
     expect(result.status).not.toBe(0);
     expect(result.stderr).toMatch(/--run-canary requires --confirm/);
-    expect(admissibleCount(dbFile)).toBe('skip');
+    expect(admissibleOutcome(dbFile, dir)).toBe('skip');
   }, 30_000);
+});
+
+describe('observeResolverArtifact + assertMediaRootReadable (round-16 fail-closed observations)', () => {
+  it('observes a real file artifact and VERIFIES a matching declared digest', () => {
+    const digest = createHash('sha256').update(readFileSync(process.execPath)).digest('hex');
+    expect(observeResolverArtifact(process.execPath, digest)).toEqual({ observed: true, digest, declaredDigest: digest, verified: true });
+  });
+
+  it('FALSIFIER: a real file artifact whose declared digest MISMATCHES throws', () => {
+    expect(() => observeResolverArtifact(process.execPath, 'ab'.repeat(32))).toThrow(/does not match declared/);
+  });
+
+  it('records observed:false for a bare PATH binary (cannot be hashed here) — never fabricates a match', () => {
+    expect(observeResolverArtifact('yt-dlp', 'ab'.repeat(32))).toEqual({ observed: false, digest: null, declaredDigest: 'ab'.repeat(32), verified: false });
+  });
+
+  it('assertMediaRootReadable passes for a real dir and FALSIFIER-throws for a missing one', () => {
+    expect(() => assertMediaRootReadable(tmp.make('mr'))).not.toThrow();
+    expect(() => assertMediaRootReadable('/no/such/dir/xyz')).toThrow(/not readable/);
+  });
 });
