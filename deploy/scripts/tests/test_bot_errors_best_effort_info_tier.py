@@ -130,13 +130,18 @@ def test_relay_host_down_gate_off_stays_warning_even_best_effort(_clean_env):
 
 def test_relay_host_recovered_always_info(_clean_env):
     # Recovery is info regardless of best_effort — never a page either way.
+    # #2419: recovery is a typed SAME-SOURCE clear (source=relay_host_down,
+    # eventType=clear) so the dispatcher's standard clear path closes the
+    # paired down incident; the recovered kind survives in the summary.
     _state_dir, outbox_dir = _clean_env
     mod = _load()
     mod.emit_relay_host_state_event("host-a", "relay_host_recovered", "remote=host-a", {}, best_effort=False)
     mod.emit_relay_host_state_event("peer-flaky", "relay_host_recovered", "remote=peer-flaky", {}, best_effort=True)
-    evs = _events(outbox_dir, "relay_host_recovered")
+    assert _events(outbox_dir, "relay_host_recovered") == []
+    evs = [e for e in _events(outbox_dir, "relay_host_down") if e.get("eventType") == "clear"]
     assert len(evs) == 2
     assert all(e["severity"] == "info" for e in evs)
+    assert all("recovered" in str(e.get("summary")) for e in evs)
 
 
 # ---------------------------------------------------------------------------

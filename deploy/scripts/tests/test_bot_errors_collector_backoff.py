@@ -51,6 +51,16 @@ _patched_collector_clock = _conftest._patched_collector_clock
 _all_outbox_events = _conftest._all_outbox_events
 _outbox_by_source = _conftest._outbox_by_source
 
+def _recovered_clears(outbox_dir):
+    """#2419: recovery is a typed SAME-SOURCE clear (source=relay_host_down,
+    eventType=clear); the recovered kind survives only in summary/log_type."""
+    return [
+        e
+        for e in _outbox_by_source(outbox_dir).get("relay_host_down", [])
+        if e.get("eventType") == "clear"
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Constants / module-level assertions
 # ---------------------------------------------------------------------------
@@ -328,7 +338,7 @@ def test_relay_host_recovered_and_reset(tmp_state):
         _run_once_defaults(mod, [remote])
         # First success is only recovery evidence; do not clear a flapping host yet.
         evs = _outbox_by_source(outbox_dir)
-        assert len(evs.get("relay_host_recovered", [])) == 0
+        assert len(_recovered_clears(outbox_dir)) == 0
         state = _read_collector_state(mod)
         rr = state["remotes"][remote]
         assert rr.get("downEventEmitted") is True
@@ -338,7 +348,7 @@ def test_relay_host_recovered_and_reset(tmp_state):
         _run_once_defaults(mod, [remote])
         # relay_host_recovered should be emitted after the configured threshold.
         evs = _outbox_by_source(outbox_dir)
-        assert len(evs.get("relay_host_recovered", [])) == 1
+        assert len(_recovered_clears(outbox_dir)) == 1
 
         # State reset
         state = _read_collector_state(mod)
@@ -355,7 +365,7 @@ def test_relay_host_recovered_and_reset(tmp_state):
             _run_once_defaults(mod, [remote])
             clock.advance(30)
         evs = _outbox_by_source(outbox_dir)
-        assert len(evs.get("relay_host_recovered", [])) == 1
+        assert len(_recovered_clears(outbox_dir)) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -580,13 +590,13 @@ def test_event_severities(tmp_state):
         failing[0] = False
         _run_once_defaults(mod, [remote])
 
-        rec_evs = _outbox_by_source(outbox_dir).get("relay_host_recovered", [])
+        rec_evs = _recovered_clears(outbox_dir)
         assert len(rec_evs) == 0
 
         clock.advance(30)
         _run_once_defaults(mod, [remote])
 
-        rec_evs = _outbox_by_source(outbox_dir).get("relay_host_recovered", [])
+        rec_evs = _recovered_clears(outbox_dir)
         assert len(rec_evs) == 1
         assert rec_evs[0]["severity"] == "info"
 
@@ -638,7 +648,7 @@ def test_recovery_on_outbox_success_despite_writefail_failure(tmp_state):
         _run_once_defaults(mod, [remote])
 
         # First split-success is not enough to clear a flapping host.
-        rec = _outbox_by_source(outbox_dir).get("relay_host_recovered", [])
+        rec = _recovered_clears(outbox_dir)
         assert len(rec) == 0
         rr_pending = _read_collector_state(mod)["remotes"][remote]
         assert rr_pending.get("downEventEmitted") is True
@@ -648,7 +658,7 @@ def test_recovery_on_outbox_success_despite_writefail_failure(tmp_state):
         _run_once_defaults(mod, [remote])
 
         # Recovery MUST fire after the threshold even though the writefail harvest failed.
-        rec = _outbox_by_source(outbox_dir).get("relay_host_recovered", [])
+        rec = _recovered_clears(outbox_dir)
         assert len(rec) == 1, "outbox-claim success streak must emit relay_host_recovered"
 
         # Backoff state fully reset (no livelock): consecutiveFailures back to 0,
@@ -665,5 +675,10 @@ def test_recovery_on_outbox_success_despite_writefail_failure(tmp_state):
         for _ in range(3):
             _run_once_defaults(mod, [remote])
             clock.advance(30)
-        assert len(_outbox_by_source(outbox_dir).get("relay_host_down", [])) == 1
+        down_alerts = [
+            e
+            for e in _outbox_by_source(outbox_dir).get("relay_host_down", [])
+            if e.get("eventType") != "clear"
+        ]
+        assert len(down_alerts) == 1
         assert _read_collector_state(mod)["remotes"][remote].get("consecutiveFailures", 0) == 0

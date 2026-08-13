@@ -3207,12 +3207,17 @@ def emit_relay_host_state_event(remote: str, kind: str, evidence: str, state: di
         severity = "warning"
     else:
         severity = "info"
-    # #2419: relay_host_recovered uses event_type="clear" so the dispatcher's
-    # standard clear-pop path (mark_incident_sent) retires the paired down record.
+    # #2419: recovery is a typed SAME-SOURCE clear. Incident identity includes
+    # the exact source (dispatcher incident_key), so an event_type="clear" that
+    # carried source="relay_host_recovered" would key onto an incident that is
+    # never open and be suppressed as a stale recovery, leaving the paired
+    # relay_host_down record open forever. The clear must carry the DOWN source;
+    # the recovered kind survives in the summary and collector log_type.
     event_type = "clear" if kind == "relay_host_recovered" else "alert"
+    source = "relay_host_down" if kind == "relay_host_recovered" else kind
     _emit_collector_outbox_event(
         remote,
-        source=kind,
+        source=source,
         event_type=event_type,
         severity=severity,
         summary=f"BOT ERRORS collector relay host {kind.replace('_', ' ')}: {remote}",
