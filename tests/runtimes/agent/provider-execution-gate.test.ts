@@ -19,6 +19,13 @@ import {
   createProviderExecutionGate,
   ProviderExecutionGate,
 } from '../../../src/runtimes/agent/provider-execution-gate.ts';
+import {
+  loadRecoveryMarkers,
+  setRecoveryMarker,
+} from '../../../src/lib/recovery-authority-store.ts';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 describe('ProviderExecutionGate', () => {
   it('admits one owner and preserves FIFO order across waiters', async () => {
@@ -233,6 +240,128 @@ describe('ProviderExecutionGate', () => {
       pending: 0,
       totalWaits: 50,
       abortedWaits: aborted.size,
+    });
+  });
+});
+
+// #2394 (source 4): recovery-authority marker wiring for the pressure alert.
+// Mirrors the model-advisor (#3091) template — marker set on durable emit,
+// removed on durable clear, and reconciled at gate construction (a fresh gate
+// is verifiably idle, which the issue contract treats as recovery authority).
+// Uses the REAL marker store under a per-test BOT_ERRORS_STATE_DIR temp dir.
+describe('provider_execution_queue_pressure recovery authority (#2394 source 4)', () => {
+  const MARKER_KEY = 'provider_execution_queue_pressure:marker-test';
+
+  async function withMarkerDir(fn: () => Promise<void> | void): Promise<void> {
+    const dir = mkdtempSync(join(tmpdir(), 'gate-recovery-'));
+    const prior = process.env['BOT_ERRORS_STATE_DIR'];
+    process.env['BOT_ERRORS_STATE_DIR'] = dir;
+    emitAlertMock.mockReset();
+    clearAlertMock.mockReset();
+    emitAlertMock.mockReturnValue(true);
+    clearAlertMock.mockReturnValue(true);
+    try {
+      await fn();
+    } finally {
+      if (prior === undefined) delete process.env['BOT_ERRORS_STATE_DIR'];
+      else process.env['BOT_ERRORS_STATE_DIR'] = prior;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('sets the marker on durable pressure emit and removes it on durable drain clear', async () => {
+    await withMarkerDir(async () => {
+      vi.useFakeTimers();
+      try {
+        const gate = createProviderExecutionGate('marker-test');
+        const first = await gate.acquire();
+        const secondPromise = gate.acquire();
+
+        await vi.advanceTimersByTimeAsync(30_000);
+        expect(emitAlertMock).toHaveBeenCalledTimes(1);
+        expect(loadRecoveryMarkers().has(MARKER_KEY)).toBe(true);
+
+        first.release();
+        const second = await secondPromise;
+        second.release();
+        expect(clearAlertMock).toHaveBeenCalledWith('marker-test', 'provider_execution_queue_pressure');
+        expect(loadRecoveryMarkers().has(MARKER_KEY)).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  it('does not set the marker when the pressure emit is not durably accepted', async () => {
+    await withMarkerDir(async () => {
+      vi.useFakeTimers();
+      try {
+        emitAlertMock.mockReturnValue(false);
+        const gate = createProviderExecutionGate('marker-test');
+        const first = await gate.acquire();
+        const secondPromise = gate.acquire();
+
+        await vi.advanceTimersByTimeAsync(30_000);
+        expect(emitAlertMock).toHaveBeenCalledTimes(1);
+        expect(loadRecoveryMarkers().has(MARKER_KEY)).toBe(false);
+
+        first.release();
+        (await secondPromise).release();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  it('reconciles a prior-process marker at construction of a verified idle gate', async () => {
+    await withMarkerDir(() => {
+      setRecoveryMarker(MARKER_KEY);
+
+      createProviderExecutionGate('marker-test');
+      expect(clearAlertMock).toHaveBeenCalledTimes(1);
+      expect(clearAlertMock).toHaveBeenCalledWith(
+        'marker-test',
+        'provider_execution_queue_pressure',
+        'startup idle-gate reconcile (#2394 source 4)',
+      );
+      expect(loadRecoveryMarkers().has(MARKER_KEY)).toBe(false);
+
+      // Idempotence: a second construction finds no marker and emits nothing.
+      createProviderExecutionGate('marker-test');
+      expect(clearAlertMock).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('emits no startup clear when no prior-process marker exists', async () => {
+    await withMarkerDir(() => {
+      createProviderExecutionGate('marker-test');
+      expect(clearAlertMock).not.toHaveBeenCalled();
+    });
+  });
+
+  it('keeps the marker when the startup clear is not durably accepted', async () => {
+    await withMarkerDir(() => {
+      setRecoveryMarker(MARKER_KEY);
+      clearAlertMock.mockReturnValue(false);
+
+      createProviderExecutionGate('marker-test');
+      expect(clearAlertMock).toHaveBeenCalledTimes(1);
+      expect(loadRecoveryMarkers().has(MARKER_KEY)).toBe(true);
+
+      // The next startup retries the idempotent clear once accepted.
+      clearAlertMock.mockReturnValue(true);
+      createProviderExecutionGate('marker-test');
+      expect(loadRecoveryMarkers().has(MARKER_KEY)).toBe(false);
+    });
+  });
+
+  it('does not clear a different instance’s marker', async () => {
+    await withMarkerDir(() => {
+      setRecoveryMarker('provider_execution_queue_pressure:other-instance');
+
+      createProviderExecutionGate('marker-test');
+      expect(clearAlertMock).not.toHaveBeenCalled();
+      expect(loadRecoveryMarkers().has('provider_execution_queue_pressure:other-instance')).toBe(true);
     });
   });
 });
