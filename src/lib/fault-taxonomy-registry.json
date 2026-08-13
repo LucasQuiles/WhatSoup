@@ -902,6 +902,91 @@
       "disposition": "informational_restart_receipt_no_incident_lifecycle",
       "owner": "src/main.ts",
       "test": "tests/main-bootstrap-helpers.test.ts"
+    },
+    "llm_primary_failure": {
+      "disposition": "chat_primary_provider_failure_while_fallback_serves",
+      "owner": "src/runtimes/chat/runtime.ts",
+      "test": "tests/runtimes/chat/runtime.test.ts"
+    },
+    "llm_total_failure": {
+      "disposition": "all_chat_providers_failed_turn_lost_requires_operator_attention",
+      "owner": "src/runtimes/chat/runtime.ts",
+      "test": "tests/runtimes/chat/runtime.test.ts"
+    },
+    "model-currency": {
+      "disposition": "advisory_model_staleness_cleared_by_startup_recovery_scan",
+      "owner": "src/lib/model-advisor.ts",
+      "test": "tests/lib/model-advisor.test.ts"
+    },
+    "model-currency-live-scan": {
+      "disposition": "live_vendor_scan_degradation_cleared_by_startup_recovery_scan",
+      "owner": "src/lib/model-advisor.ts",
+      "test": "tests/lib/model-advisor.test.ts"
+    },
+    "outbound_flood": {
+      "disposition": "flood_breaker_incident_lifecycle_with_same_source_clear",
+      "owner": "src/transport/outbound-flood-incident.ts",
+      "test": "tests/transport/outbound-flood-incident.test.ts"
+    },
+    "outbound_message_guard": {
+      "disposition": "diverted_false_infra_claim_surfaced_per_episode",
+      "owner": "src/mcp/tools/messaging.ts",
+      "test": "tests/mcp/tools/messaging.test.ts"
+    },
+    "pinecone_degraded": {
+      "disposition": "memory_provider_degradation_recovery_contract_owned_by_2412",
+      "owner": "src/runtimes/chat/providers/pinecone.ts",
+      "test": "tests/runtimes/chat/memory/memory-telemetry-cross-surface.test.ts"
+    },
+    "primary_model_unusable": {
+      "disposition": "primary_model_verdict_requires_operator_model_or_credential_repair",
+      "owner": "src/runtimes/agent/runtime.ts",
+      "test": "tests/core/health.test.ts"
+    },
+    "provider_auth_required_no_fallback": {
+      "disposition": "auth_teardown_without_fallback_notice_cadence_until_reauth",
+      "owner": "src/runtimes/agent/runtime.ts",
+      "test": "tests/core/heal-fallback-prerequisite-2399.test.ts"
+    },
+    "provider_execution_queue_pressure": {
+      "disposition": "sustained_queue_pressure_cleared_by_idle_gate_with_startup_marker_reconcile",
+      "owner": "src/runtimes/agent/provider-execution-gate.ts",
+      "test": "tests/runtimes/agent/provider-execution-gate.test.ts"
+    },
+    "provider_failure_diagnostics": {
+      "disposition": "bounded_crash_diagnostics_receipt_no_incident_lifecycle",
+      "owner": "src/runtimes/agent/runtime.ts",
+      "test": "tests/runtimes/agent/runtime-edge-coverage.test.ts"
+    },
+    "provider_fallback_activated": {
+      "disposition": "fallback_window_open_critical_until_reverted_receipt",
+      "owner": "src/runtimes/agent/runtime.ts",
+      "test": "tests/runtimes/agent/fallback-severity-downgrade.test.ts"
+    },
+    "provider_fallback_replayed": {
+      "disposition": "post_revert_replay_receipt_no_incident_lifecycle",
+      "owner": "src/runtimes/agent/runtime.ts",
+      "test": "tests/runtimes/agent/fallback-severity-downgrade.test.ts"
+    },
+    "provider_fallback_restored": {
+      "disposition": "persisted_window_restore_receipt_no_incident_lifecycle",
+      "owner": "src/runtimes/agent/runtime.ts",
+      "test": "tests/runtimes/agent/fallback-severity-downgrade.test.ts"
+    },
+    "provider_fallback_reverted": {
+      "disposition": "window_end_receipt_with_probe_confirmed_recovery_evidence",
+      "owner": "src/runtimes/agent/runtime.ts",
+      "test": "tests/runtimes/agent/fallback-probe-stall-transaction.test.ts"
+    },
+    "runtime_provider_fallback_replay_failed": {
+      "disposition": "post_revert_replay_failure_requires_operator_catchup",
+      "owner": "src/runtimes/agent/runtime.ts",
+      "test": "tests/runtimes/agent/fallback-severity-downgrade.test.ts"
+    },
+    "substrate-inline-hook": {
+      "disposition": "inline_hook_execution_fault_surfaced_per_episode",
+      "owner": "src/runtimes/agent/runtime.ts",
+      "test": "tests/runtimes/agent/runtime.test.ts"
     }
   }
 }
