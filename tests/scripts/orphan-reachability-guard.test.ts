@@ -146,6 +146,19 @@ const TRACKED_UNREACHABLE: readonly TrackedEntry[] = [
   // Clock abstraction (#2200 slice 1): the module lands first as the SSOT
   // foundation; call-site migration (365 Date.now sites) lands in follow-up
   // slices. Unreachable until the first cluster (heal, livez, etc) imports it.
+  // Capability-obligation replay (round-15 finding 2): the gated cold-obligation
+  // activation CORE lands unwired BY DESIGN. Its ports (activateSession/runTick) are
+  // injected; the live activateSession adapter + operator trigger are owner-gated —
+  // activating a group session is the AE1-sensitive act the review must approve
+  // separately. No production importer yet; graduates when the owner authorises the
+  // live adapter. See cold-group-obligation-drain-gap.md (round-15 state block).
+  { path: 'src/runtimes/agent/capability-obligation-drain-now.ts', issue: 'cap-obligation-replay/finding-2', reason: 'gated cold-drain core; live activateSession adapter + operator trigger are owner-gated (AE1-sensitive), no production importer by design' },
+  // Capability-obligation replay (round-15 finding 1): the attestation PRODUCER is
+  // an OPERATOR action — its only caller is the gated CLI scripts/capability-obligation-attest.ts
+  // (a scripts/ file, outside this guard's src/ production roots). The runtime only
+  // CONSUMES attestations (findAdmissibleAttestation in the supervisor). No autonomous
+  // production path mints one by design, so the producer has no src/ importer.
+  { path: 'src/core/capability-attestation-producer.ts', issue: 'cap-obligation-replay/finding-1', reason: 'attestation producer is operator-CLI-only (scripts/capability-obligation-attest.ts); runtime only consumes attestations — no production importer by design' },
 ];
 
 // ---------------------------------------------------------------------------

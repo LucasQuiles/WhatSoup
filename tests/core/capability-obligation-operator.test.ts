@@ -6,12 +6,14 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { recordCapabilityAttestation } from '../../src/core/capability-attestation.ts';
 import { CapabilityObligationStore } from '../../src/core/capability-obligation-store.ts';
 import { Database } from '../../src/core/database.ts';
 import { withTransaction } from '../../src/core/db-tx.ts';
 
 let db: Database;
 let store: CapabilityObligationStore;
+let attSeq = 0;
 
 beforeEach(() => {
   db = new Database(':memory:');
@@ -22,6 +24,22 @@ beforeEach(() => {
 afterEach(() => {
   db.close();
 });
+
+/** Record a passing, unrevoked, unexpired attestation (r15 F4: a claim now
+ * transactionally re-checks the admitted attestation, so a claim that must reach
+ * 'claimed' supplies one). */
+function seedFreshAttestation(): number {
+  return recordCapabilityAttestation(db, {
+    hostId: 'h', runtimeUser: 'u', releaseSha: 'r', schemaVersion: 57,
+    providerId: 'claude-cli', harnessType: 'persistent_session', contractVersion: 'c/1',
+    capability: 'child_process_tools', skillName: 'watch', skillVersion: '1.0.0',
+    skillDigest: 'sd', resolverDigest: 'rd', dependencyVersions: {}, probeVersion: 'p/1',
+    canaryId: 'can', mediaRoot: '/var/media',
+    canaryResult: 'pass', nonce: `att-${++attSeq}`,
+    attestedAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+  });
+}
 
 function seed(over: { isGroup?: boolean; sourceInboundSeq?: number; sourceMessageId?: string } = {}): number {
   let id = 0;
@@ -60,7 +78,7 @@ const stateOf = (id: number) =>
 
 /** Drive an obligation into blocked_ambiguous via the real claim→block path. */
 function toBlockedAmbiguous(id: number): void {
-  const claim = store.claimObligation(id, { claimToken: `tok-${id}`, leaseSeconds: 300 });
+  const claim = store.claimObligation(id, { claimToken: `tok-${id}`, leaseSeconds: 300, admissionAttestationId: seedFreshAttestation() });
   expect(claim.applied).toBe(true);
   const blocked = store.blockObligation(
     id,
@@ -93,7 +111,7 @@ describe('operator cancel', () => {
 
   it('REFUSES cancelling a claimed (in-flight) obligation — never mutated mid-flight', () => {
     const id = seed();
-    store.claimObligation(id, { claimToken: `tok-${id}`, leaseSeconds: 300 });
+    store.claimObligation(id, { claimToken: `tok-${id}`, leaseSeconds: 300, admissionAttestationId: seedFreshAttestation() });
     const res = store.operatorAdjudicateObligation(id, { action: 'cancel', reasonCode: 'r', actorId: 'run-1' });
     expect(res).toMatchObject({ applied: false, currentState: 'claimed', refusedReason: 'illegal_from_state' });
     expect(stateOf(id)).toBe('claimed');
@@ -153,7 +171,7 @@ describe('operator requeue (adjudicate)', () => {
 
   it('REFUSES requeueing a claimed (in-flight) obligation', () => {
     const id = seed();
-    store.claimObligation(id, { claimToken: `tok-${id}`, leaseSeconds: 300 });
+    store.claimObligation(id, { claimToken: `tok-${id}`, leaseSeconds: 300, admissionAttestationId: seedFreshAttestation() });
     const res = store.operatorAdjudicateObligation(id, { action: 'requeue', reasonCode: 'r', actorId: 'run-9' });
     expect(res).toMatchObject({ applied: false, currentState: 'claimed', refusedReason: 'illegal_from_state' });
     expect(stateOf(id)).toBe('claimed');
