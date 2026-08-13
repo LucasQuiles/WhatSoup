@@ -454,6 +454,56 @@ describe('trusted execution tool (D6)', () => {
     }
   }, 15_000);
 
+  it('FALSIFIER (r14 F2): a resolver that exits 0 CLEANLY still has its escaped grandchild reaped before the ok receipt', async () => {
+    // r13 F2 only reaped the group on the watchdog TIMEOUT; on a clean exit the
+    // watchdog was cleared and nothing swept a grandchild left in the group. Here
+    // the resolver forks a same-group grandchild that writes a marker 600ms in,
+    // prints enough output to satisfy minOutputBytes, and EXITS 0 immediately.
+    // Pre-fix: the handler records an `ok` receipt and the grandchild escapes to
+    // write AFTER it. Fixed (killGroup in `close`): the leaderless group is swept
+    // when `close` fires, so the marker is never written even though the run is ok.
+    const work = mkdtempSync(join(tmpdir(), 'capx-reap-clean-'));
+    try {
+      const resolver = join(work, 'resolver.cjs');
+      writeFileSync(
+        resolver,
+        [
+          "const cp=require('child_process');",
+          'const marker=process.argv[2];',
+          // same-group grandchild (NOT detached): a correct group reap reaches it
+          'const gc=cp.spawn(process.execPath,[\'-e\',\'setTimeout(function(){require("fs").writeFileSync(process.argv[1],"ESCAPED")},600)\',marker],{stdio:\'ignore\'});',
+          'gc.unref();',
+          "console.log('resolver-alive-clean');",
+          // no keep-alive: the resolver exits 0 NOW, the grandchild outlives it
+        ].join('\n'),
+      );
+      const escaped = join(work, 'escaped');
+      const ESCAPED_DIGEST = createHash('sha256').update(escaped).digest('hex');
+      const id = seedObligation({ sourceDigest: ESCAPED_DIGEST, sourceToken: escaped, replayText: escaped });
+      freshAttestation();
+      const { runtime } = makeRuntime({
+        // timeout far larger than the clean exit — this is NOT the timeout path
+        execution: { command: ['node', resolver, '{source}'], timeoutMs: 30_000, minOutputBytes: 1 },
+        onDispatch: async (tool) => {
+          const result = (await tool.handler({ source: escaped }, TOOL_SESSION)) as Record<string, unknown>;
+          expect(result['executed']).toBe(true); // clean exit 0 with output → ok receipt
+          // Wait past the grandchild's would-be write (600ms from spawn); a group
+          // swept on clean close never gets there.
+          await TIMING(1000);
+        },
+      });
+      await runtime.tickOnce();
+      expect(existsSync(escaped)).toBe(false); // grandchild reaped on clean close, not left to escape
+      const row = db.raw
+        .prepare('SELECT result_status, output_evidence FROM capability_execution_receipts WHERE obligation_id = ?')
+        .get(id) as { result_status: string; output_evidence: string };
+      expect(row.result_status).toBe('ok');
+      expect((JSON.parse(row.output_evidence) as Record<string, unknown>)['timedOut']).toBe(false);
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
+  }, 15_000);
+
   it('outside an active obligation turn the tool refuses and records nothing', async () => {
     const { tool } = makeRuntime();
     const result = (await tool().handler({ source: SOURCE_URL }, TOOL_SESSION)) as Record<string, unknown>;

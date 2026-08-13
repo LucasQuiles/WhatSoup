@@ -126,10 +126,20 @@ function runResolver(argv: readonly string[], timeoutMs: number): Promise<Resolv
     child.on('close', (code, signal) => {
       if (settled) return;
       settled = true;
-      // Clear the watchdog BEFORE resolving so a child that exits cleanly just
-      // before the deadline is never group-killed after a successful run.
       clearTimeout(watchdog);
       if (signal !== null) timedOut = true;
+      // r14 F2: the leader has already exited (that is why `close` fired), but a
+      // grandchild it forked into the SAME process group can OUTLIVE it and land
+      // a side effect AFTER we record the receipt below. On a clean exit the
+      // watchdog is cleared and would never reap that grandchild, so reap the
+      // group HERE before resolving. The leader is gone, so signalling the
+      // (now leaderless) negative pid only reaches escaped descendants — a clean
+      // run is not "group-killed after success", it just sweeps stragglers. If
+      // no grandchild escaped, killGroup is a no-op (ESRCH → swallowed). This
+      // narrows but does not eliminate the window: a grandchild that itself
+      // called setsid() leaves the group and is unreachable by pgid — that needs
+      // the stronger resolver contract noted in the module header.
+      killGroup();
       resolve({ exitCode: code, timedOut, stdout, stderr });
     });
   });
