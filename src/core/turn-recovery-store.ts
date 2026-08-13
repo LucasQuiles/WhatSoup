@@ -474,6 +474,7 @@ type TurnRecoveryStatements = {
   reclaimDeadDeliveryRecoveryJob: PreparedStatement;
   getRecoverableTurnRecoveryJobs: PreparedStatement;
   getOutstandingTurnRecoveryJobsForSupervisor: PreparedStatement;
+  getNewestInboundSeqForConversation: PreparedStatement;
   getTurnRecoverySupervisorCounts: PreparedStatement;
   hasOutstandingTurnRecoveryForScope: PreparedStatement;
 };
@@ -835,6 +836,9 @@ export class TurnRecoveryStore {
           )
         ORDER BY j.id ASC
         LIMIT ?
+      `),
+      getNewestInboundSeqForConversation: prepare(`
+        SELECT MAX(seq) AS newest FROM inbound_events WHERE conversation_key = ?
       `),
       getTurnRecoverySupervisorCounts: prepare(`
         WITH orphan_transfers AS (
@@ -1727,6 +1731,19 @@ export class TurnRecoveryStore {
       limit + 1,
     ) as unknown as InternalTurnRecoveryJobRow[];
     return this.toRecoveryEnumerationPage(rows, limit);
+  }
+
+  /**
+   * Newest journaled inbound seq for a conversation, or null when none exists.
+   * Read-only support for the operator promotion workflow (#2155): promotion
+   * refuses when conversation activity newer than the job's source exists, so
+   * an old reply is never blindly replayed over a moved-on conversation.
+   */
+  getNewestInboundSeqForConversation(conversationKey: string): number | null {
+    const row = this.statements.getNewestInboundSeqForConversation.get(conversationKey) as
+      | { newest: number | null }
+      | undefined;
+    return row?.newest ?? null;
   }
 
   getTurnRecoverySupervisorCounts(): TurnRecoverySupervisorCounts {
