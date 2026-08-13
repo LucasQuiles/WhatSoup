@@ -113,6 +113,10 @@ export const CI_EXEMPT_PUSH_GATE_GUARDS: Readonly<
     backedBy: 'tests/scripts/deployer-static-parity.test.ts',
     why: 'reads the deploy script and package.json from the live repoRoot.',
   },
+  'guard:fault-taxonomy-coverage': {
+    backedBy: 'tests/scripts/fault-taxonomy-source-coverage-guard.test.ts',
+    why: 'its "passes on the live tree" test executes the exact guard script as a subprocess against REPO_ROOT in the full CI suite.',
+  },
   'guard:publication:staged': {
     backedBy: null,
     why: 'quality.yml runs guard:publication:all (--all), which scans every tracked doc and is a strict superset of the --staged subset. No test backs this; the CI step does.',

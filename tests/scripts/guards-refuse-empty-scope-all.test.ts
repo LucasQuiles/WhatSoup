@@ -98,6 +98,7 @@ const SCOPE_MAP: Record<string, ScopeEntry> = {
   'platform-patterns': { class: 'probe-refuse', reason: 'scans cwd tree for platform-specific patterns; takes --root; floor added this session — refuses "matched 0 files"', probe: { via: 'flag', flag: '--root' } },
 
   // ---- probe-nonzero: cwd-relative fixed-artifact guards that fail closed on an empty tree ----
+  'fault-taxonomy-coverage': { class: 'probe-nonzero', reason: 'reads cwd registry + debt baseline; ENOENT -> exit 2 non-zero', probe: { via: 'cwd' } },
   'doc-drift': { class: 'probe-nonzero', reason: 'reads cwd docs/ manifests; ENOENT -> non-zero', probe: { via: 'cwd' } },
   'doc-tally': { class: 'probe-nonzero', reason: 'reads cwd docs/ index; missing -> non-zero', probe: { via: 'cwd' } },
   'public-surface-drift': { class: 'probe-nonzero', reason: 'reads cwd docs/public-surface.md; ENOENT -> non-zero', probe: { via: 'cwd' } },

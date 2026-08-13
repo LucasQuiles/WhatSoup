@@ -82,6 +82,7 @@
     "guard:zero-byte-tracked": "bash scripts/run-with-pinned-node.sh scripts/check-zero-byte-tracked.ts",
     "guard:no-destructive-git": "bash scripts/run-with-pinned-node.sh scripts/no-destructive-git-guard.ts",
     "guard:baseline-growth": "bash scripts/run-with-pinned-node.sh scripts/baseline-growth-guard.ts",
+    "guard:fault-taxonomy-coverage": "bash scripts/run-with-pinned-node.sh scripts/fault-taxonomy-source-coverage-guard.ts",
     "guard:catch-ratchet": "bash scripts/run-with-pinned-node.sh scripts/generate-catch-ratchet.mjs --check",
     "guard:import-cycle": "bash scripts/run-with-pinned-node.sh scripts/import-cycle-guard.ts",
     "guard:phantom-deps": "bash scripts/run-with-pinned-node.sh scripts/phantom-dependency-guard.ts",
