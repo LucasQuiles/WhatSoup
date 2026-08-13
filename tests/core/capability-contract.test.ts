@@ -231,7 +231,10 @@ describe('parseCapabilityObligationsOptions — all-or-inert activation', () => 
     mediaRoot: '/var/obligation-media',
     retentionPolicyVersion: 'policy/1',
     retentionHorizonDays: 30,
-    execution: { command: ['node', '-e', 'console.log(process.argv[1])', '{source}'], timeoutMs: 30_000, minOutputBytes: 8 },
+    // round-18/20: an enabled config REQUIRES an explicit resolver artifact, an explicit
+    // interpreted flag, and (interpreted) an explicit interpreter PATH. Validation here is
+    // syntactic (Zod only) — the paths need not exist on disk for a parse test.
+    execution: { command: ['/usr/bin/node', '/opt/watch/resolver.cjs', '{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: '/opt/watch/resolver.cjs', interpreted: true },
     attestation: {
       skillName: 'watch',
       skillVersion: '1.0.0',
@@ -280,5 +283,39 @@ describe('parseCapabilityObligationsOptions — all-or-inert activation', () => 
     expect(() =>
       parseCapabilityObligationsOptions({ ...VALID, attestation: { ...VALID.attestation, canaryId: '' } }),
     ).toThrow();
+  });
+
+  it('round-18/20 refines: an enabled config with a missing resolver declaration FAILS CLOSED at LOAD (never deferred to the drain seam)', () => {
+    // resolverArtifactPath is REQUIRED (non-null) for an enabled config.
+    expect(() =>
+      parseCapabilityObligationsOptions({
+        ...VALID,
+        execution: { command: ['/usr/bin/node', '/opt/watch/resolver.cjs', '{source}'], timeoutMs: 30_000, minOutputBytes: 8, interpreted: true },
+      }),
+    ).toThrow(/resolverArtifactPath is required/);
+    // interpreted is REQUIRED (non-null) for an enabled config.
+    expect(() =>
+      parseCapabilityObligationsOptions({
+        ...VALID,
+        execution: { command: ['/usr/bin/node', '/opt/watch/resolver.cjs', '{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: '/opt/watch/resolver.cjs' },
+      }),
+    ).toThrow(/interpreted is required/);
+  });
+
+  it('round-20 refine: interpreted:true with a BARE interpreter name (no path separator) is refused at LOAD — a $PATH-resolved interpreter is unpinnable', () => {
+    expect(() =>
+      parseCapabilityObligationsOptions({
+        ...VALID,
+        execution: { command: ['node', '/opt/watch/resolver.cjs', '{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: '/opt/watch/resolver.cjs', interpreted: true },
+      }),
+    ).toThrow(/explicit interpreter PATH|unpinnable/);
+    // interpreted:false does NOT require a path separator in command[0] (the artifact itself may be
+    // declared relative and is realpath-resolved at verify time, not here).
+    expect(
+      parseCapabilityObligationsOptions({
+        ...VALID,
+        execution: { command: ['/opt/watch/resolver', '{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: '/opt/watch/resolver', interpreted: false },
+      }),
+    ).not.toBeNull();
   });
 });

@@ -42,15 +42,25 @@ Before recording, the command is **fail-closed** on three observations (hardened
    is an interpreter and the artifact is `command[1]`; false ⇒ `command[0]` is the artifact). The
    command sha256s **that declared file** (by realpath), requires its realpath to BE the token that
    executes — NEVER inferred from argv (round-18 finding 1) — and folds that content hash with the
-   canonical command shape into a **COMPOSITE** `resolver_digest`. `--resolver-digest` is REQUIRED and
-   must equal that COMPOSITE (round-19 findings 1+2). It **refuses** an inline/flag at the script
-   position (`node -e …`, `perl -eCODE`), a declared artifact whose realpath ≠ the executing token,
-   an `interpreted:false` MISLABEL of an interpreter (a `watch-resolver`→node symlink declared "direct"),
-   a missing/unreadable artifact, or any composite mismatch. **The executor re-derives the SAME composite
-   from the LIVE artifact + shape at the drain seam and refuses on any mismatch** — a post-attest content
-   swap OR command-shape change is caught before any spawn — then executes a same-directory **hardlink
-   PIN** of the verified bytes (path-swap-proof, sibling-resolution-preserving; an unpinnable directory
-   fails closed).
+   whole-**DIRECTORY MANIFEST** (a canonical hash of every regular file's `[relpath, sha256]`, so a
+   sibling swap is caught), the **INTERPRETER content** (`command[0]` when `interpreted`), and the
+   canonical command **shape + envelope** (`timeoutMs`/`minOutputBytes`) into a **COMPOSITE**
+   `resolver_digest` (round-20). `--resolver-digest` is REQUIRED and must equal that COMPOSITE. It
+   **refuses** an inline/flag at the script position (`node -e …`, `perl -eCODE`), a declared artifact
+   whose realpath ≠ the executing token, an `interpreted:false` MISLABEL of an interpreter (a
+   `watch-resolver`→node symlink declared "direct") or any bare positional arg after a direct artifact,
+   a `interpreted:true` command whose `command[0]` is a bare `$PATH` name (refused at config LOAD — an
+   interpreter must be an explicit path), a symlink or non-regular entry in the resolver directory, a
+   missing/unreadable artifact, or any composite mismatch. **The executor re-derives the SAME composite
+   from the LIVE staged tree + shape at the drain seam and refuses on any mismatch** — a post-attest
+   content swap, sibling swap, interpreter swap, OR command-shape/envelope change is caught before any
+   spawn (the log names the staged files via `stagedManifestFiles` so a stray file is diagnosable) —
+   then **content-addressed STAGES** the artifact's whole directory into a private root and executes the
+   immutable COPY (round-20 findings 1+3; swap-proof, sibling-resolution-preserving). **The resolver
+   artifact MUST live in an ISOLATED, symlink-free directory containing ONLY the resolver and its
+   intentional siblings** — nothing else may be written next to it (no `.DS_Store`, editor swap file,
+   `__pycache__`, log, db, or media), and the tree must be within the 64 MB staging bound, or every
+   drain fails closed as `resolver_digest_mismatch`.
 3. **evidence preservation, durable + no-clobber, before admission** — the probe's stdout/stderr
    digests + byte counts + exit/signal + observed-source digest are written to the `--receipt-out`
    file, which is **fsynced, read-back-verified, and published NO-CLOBBER (`link()`) BEFORE the

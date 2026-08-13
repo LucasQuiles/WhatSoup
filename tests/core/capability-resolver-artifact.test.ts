@@ -10,21 +10,31 @@
  *     deterministic and is what `verifyResolverArtifact` returns.
  */
 import { createHash } from 'node:crypto';
-import { readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
 import {
   canonicalExecutionIdentity,
+  directoryManifestDigest,
   resolverCompositeDigest,
+  stageResolverArtifact,
   verifyResolverArtifact,
 } from '../../src/core/capability-resolver-artifact.ts';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const tmp = trackTmpDirs('resolver-artifact-', { base: realpathSync(tmpdir()) });
 const NODE = realpathSync(process.execPath);
+/** round-20: the composite now binds the INTERPRETER content too; interpreted fixtures use NODE. */
+const NODE_DIGEST = createHash('sha256').update(readFileSync(NODE)).digest('hex');
+/**
+ * round-20 (advisor): the composite now also binds the whole-directory MANIFEST. Compute it EXACTLY
+ * the way production does — over `dirname(realpathSync(artifactPath))` — so a test that hand-builds a
+ * composite matches `verifyResolverArtifact`/`stageResolverArtifact`.
+ */
+const manifestOf = (path: string): string => directoryManifestDigest(dirname(realpathSync(path)));
 
 function script(dir: string, name = 'resolver.cjs'): { path: string; contentDigest: string } {
   const path = join(dir, name);
@@ -65,7 +75,11 @@ describe('verifyResolverArtifact (explicit, deny-by-default)', () => {
 
   it('BYPASS-B, honest form: with interpreted:true the SCRIPT (command[1]) is what gets verified — decoy cannot be substituted', () => {
     const dir = tmp.make('symlink-ok');
-    const symlink = join(dir, 'watch-resolver');
+    // The interpreter symlink lives OUTSIDE the resolver dir (round-20: a symlink INSIDE the
+    // resolver dir is refused fail-closed by the whole-tree manifest). command[0] is realpath-
+    // resolved to node and its target hashed; the resolver dir itself stays symlink-free.
+    const binDir = tmp.make('symlink-ok-bin');
+    const symlink = join(binDir, 'watch-resolver');
     symlinkSync(process.execPath, symlink);
     const { path: realScript, contentDigest } = script(dir);
     const { path: decoy } = script(dir, 'decoy.js');
@@ -120,21 +134,25 @@ describe('verifyResolverArtifact (explicit, deny-by-default)', () => {
 });
 
 describe('composite digest (round-19 findings 1+2): content AND shape are bound', () => {
-  it('verifyResolverArtifact.compositeDigest === resolverCompositeDigest(contentDigest, execution) — the ONE canonicalizer', () => {
+  it('verifyResolverArtifact.compositeDigest === resolverCompositeDigest(contentDigest, manifestDigest, execution) — the ONE canonicalizer', () => {
     const dir = tmp.make('composite-eq');
     const { path, contentDigest } = script(dir);
     const execution = { command: [NODE, path, '{source}'], resolverArtifactPath: path, interpreted: true };
     const v = verifyResolverArtifact(execution);
     expect(v.contentDigest).toBe(contentDigest);
-    expect(v.compositeDigest).toBe(resolverCompositeDigest(contentDigest, execution));
+    // Pass the manifest production computed (v.manifestDigest) AND assert it matches an independent
+    // walk — proving the returned composite is exactly the pure-function recompute of the same inputs.
+    expect(v.manifestDigest).toBe(manifestOf(path));
+    expect(v.compositeDigest).toBe(resolverCompositeDigest(contentDigest, v.manifestDigest, execution, NODE_DIGEST));
   });
 
   it('the composite CHANGES when the execution SHAPE changes but the content does not (finding 2)', () => {
     const dir = tmp.make('composite-shape');
     const { path, contentDigest } = script(dir);
-    const base = resolverCompositeDigest(contentDigest, { command: [NODE, path, '{source}'], resolverArtifactPath: path, interpreted: true });
-    const extraArg = resolverCompositeDigest(contentDigest, { command: [NODE, path, '--danger', '{source}'], resolverArtifactPath: path, interpreted: true });
-    const swappedTemplate = resolverCompositeDigest(contentDigest, { command: [NODE, path, '--out={source}'], resolverArtifactPath: path, interpreted: true });
+    const m = manifestOf(path); // constant across all three: same dir, only the SHAPE varies
+    const base = resolverCompositeDigest(contentDigest, m, { command: [NODE, path, '{source}'], resolverArtifactPath: path, interpreted: true }, NODE_DIGEST);
+    const extraArg = resolverCompositeDigest(contentDigest, m, { command: [NODE, path, '--danger', '{source}'], resolverArtifactPath: path, interpreted: true }, NODE_DIGEST);
+    const swappedTemplate = resolverCompositeDigest(contentDigest, m, { command: [NODE, path, '--out={source}'], resolverArtifactPath: path, interpreted: true }, NODE_DIGEST);
     expect(extraArg).not.toBe(base);
     expect(swappedTemplate).not.toBe(base);
   });
@@ -144,9 +162,9 @@ describe('composite digest (round-19 findings 1+2): content AND shape are bound'
     const path = join(dir, 'resolver.cjs');
     const execution = { command: [NODE, path, '{source}'], resolverArtifactPath: path, interpreted: true };
     writeFileSync(path, 'process.stdout.write("v1")\n');
-    const v1 = resolverCompositeDigest(createHash('sha256').update(readFileSync(path)).digest('hex'), execution);
+    const v1 = resolverCompositeDigest(createHash('sha256').update(readFileSync(path)).digest('hex'), manifestOf(path), execution, NODE_DIGEST);
     writeFileSync(path, 'process.stdout.write("v2-EVIL")\n');
-    const v2 = resolverCompositeDigest(createHash('sha256').update(readFileSync(path)).digest('hex'), execution);
+    const v2 = resolverCompositeDigest(createHash('sha256').update(readFileSync(path)).digest('hex'), manifestOf(path), execution, NODE_DIGEST);
     expect(v2).not.toBe(v1);
   });
 
@@ -159,5 +177,159 @@ describe('composite digest (round-19 findings 1+2): content AND shape are bound'
     expect(canonicalExecutionIdentity({ command: [NODE, path, '{source}'], resolverArtifactPath: path, interpreted: false })).not.toBe(a);
     expect(() => canonicalExecutionIdentity({ command: [NODE, path, '{source}'], interpreted: true }))
       .toThrow(/resolverArtifactPath is required/);
+  });
+});
+
+describe('round-20: interpreter identity, direct-mode arg constraint, and envelope binding', () => {
+  it('BLOCKER-2a FALSIFIER: the composite CHANGES when the INTERPRETER content changes (same script) — a same-path interpreter swap is detected', () => {
+    const dir = tmp.make('interp-swap');
+    const { path } = script(dir);
+    // The interpreter lives in a SEPARATE dir from the script so the whole-tree manifest (walked
+    // over the script's dir) stays CONSTANT — isolating interpreterDigest as the sole variable.
+    // Otherwise the manifest would also catch the fake-interp change and this test would pass even
+    // if interpreterDigest were dropped from the composite (defeating its falsification power).
+    const binDir = tmp.make('interp-swap-bin');
+    const fakeInterp = join(binDir, 'fake-interp');
+    writeFileSync(fakeInterp, '#!/bin/sh\nexec node "$@"\n');
+    const execution = { command: [fakeInterp, path, '{source}'], resolverArtifactPath: path, interpreted: true };
+    const c1 = verifyResolverArtifact(execution).compositeDigest;
+    writeFileSync(fakeInterp, '#!/bin/sh\nexec node --EVIL-FLAG "$@"\n'); // swap ONLY the interpreter content
+    const c2 = verifyResolverArtifact(execution).compositeDigest;
+    expect(c2).not.toBe(c1); // pre-round-20 the interpreter was not hashed → these were equal
+  });
+
+  it('BLOCKER-2b FALSIFIER: a direct-mode command with a bare positional arg after the artifact is REFUSED (a renamed interpreter could run it)', () => {
+    const dir = tmp.make('direct-bare');
+    const { path } = script(dir, 'watch-resolver'); // basename evades the interpreter deny-list
+    const smuggledScript = join(dir, 'evil.js');
+    writeFileSync(smuggledScript, 'process.stdout.write("PWNED")');
+    expect(() => verifyResolverArtifact({ command: [path, smuggledScript, '{source}'], resolverArtifactPath: path, interpreted: false }))
+      .toThrow(/bare positional argument/);
+  });
+
+  it('the composite CHANGES when the ENVELOPE (timeoutMs / minOutputBytes) changes (round-20 gap)', () => {
+    const dir = tmp.make('envelope');
+    const { path, contentDigest } = script(dir);
+    const m = manifestOf(path); // constant across all three: only the ENVELOPE varies
+    const base = resolverCompositeDigest(contentDigest, m, { command: [NODE, path, '{source}'], resolverArtifactPath: path, interpreted: true, timeoutMs: 1000, minOutputBytes: 8 }, NODE_DIGEST);
+    const diffTimeout = resolverCompositeDigest(contentDigest, m, { command: [NODE, path, '{source}'], resolverArtifactPath: path, interpreted: true, timeoutMs: 2000, minOutputBytes: 8 }, NODE_DIGEST);
+    const diffMinOut = resolverCompositeDigest(contentDigest, m, { command: [NODE, path, '{source}'], resolverArtifactPath: path, interpreted: true, timeoutMs: 1000, minOutputBytes: 16 }, NODE_DIGEST);
+    expect(diffTimeout).not.toBe(base);
+    expect(diffMinOut).not.toBe(base);
+  });
+});
+
+describe('stageResolverArtifact (round-20 findings 1+3: content-addressed immutable execution)', () => {
+  it('BLOCKER-1 FALSIFIER: the staged bytes are UNAFFECTED by an in-place overwrite of the original after staging (verify == execute)', () => {
+    const dir = tmp.make('stage-iso');
+    const { path, contentDigest } = script(dir);
+    const staged = stageResolverArtifact({ command: [NODE, path, '{source}'], resolverArtifactPath: path, interpreted: true });
+    try {
+      expect(staged.contentDigest).toBe(contentDigest); // the copy carries the verified bytes
+      // The round-19 hardlink shared the inode, so this overwrite would have changed the executed
+      // bytes. The staged COPY is a separate inode → the executed bytes are unchanged.
+      writeFileSync(path, 'process.stdout.write("SWAPPED-EVIL")\n');
+      const executedDigest = createHash('sha256').update(readFileSync(staged.stagedArtifactPath)).digest('hex');
+      expect(executedDigest).toBe(contentDigest); // NOT the swapped bytes
+    } finally {
+      rmSync(staged.stageDir, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves sibling-module resolution: a sibling file is copied next to the staged artifact (dir-staging)', () => {
+    const dir = tmp.make('stage-sibling');
+    const { path } = script(dir);
+    writeFileSync(join(dir, 'helper.cjs'), 'module.exports = () => "HELPER-OK";\n');
+    const staged = stageResolverArtifact({ command: [NODE, path, '{source}'], resolverArtifactPath: path, interpreted: true });
+    try {
+      expect(existsSync(join(dirname(staged.stagedArtifactPath), 'helper.cjs'))).toBe(true);
+    } finally {
+      rmSync(staged.stageDir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a resolver directory that exceeds the staging size bound (fail-closed, no copy)', () => {
+    const dir = tmp.make('stage-toobig');
+    const { path } = script(dir);
+    const big = join(dir, 'big.bin');
+    writeFileSync(big, '');
+    truncateSync(big, 65 * 1024 * 1024); // sparse — 65MB apparent size (> 64MB bound), instant
+    expect(() => stageResolverArtifact({ command: [NODE, path, '{source}'], resolverArtifactPath: path, interpreted: true }))
+      .toThrow(/exceeds the .*staging bound/);
+  });
+
+  it('ADVISOR-BLOCKER FALSIFIER: swapping a SIBLING after attestation changes the composite — the WHOLE tree is bound, not just the artifact', () => {
+    // The exploit the advisor named: stage+execute the whole directory, but bind only the single
+    // artifact file, and a post-attest `helper.cjs` overwrite executes (an `import './helper'` loads
+    // it) while the artifact's own contentDigest — and thus the composite — is unchanged.
+    const dir = tmp.make('stage-sibling-swap');
+    const { path, contentDigest } = script(dir);
+    const sibling = join(dir, 'helper.cjs');
+    writeFileSync(sibling, 'module.exports = () => "HELPER-OK";\n');
+    const execution = { command: [NODE, path, '{source}'], resolverArtifactPath: path, interpreted: true };
+    const s1 = stageResolverArtifact(execution);
+    const composite1 = s1.compositeDigest;
+    const manifest1 = s1.manifestDigest;
+    rmSync(s1.stageDir, { recursive: true, force: true });
+    // Swap ONLY the sibling; the artifact's own bytes are untouched.
+    writeFileSync(sibling, 'module.exports = () => "HELPER-EVIL";\n');
+    const s2 = stageResolverArtifact(execution);
+    const composite2 = s2.compositeDigest;
+    const manifest2 = s2.manifestDigest;
+    rmSync(s2.stageDir, { recursive: true, force: true });
+    expect(s2.contentDigest).toBe(contentDigest); // artifact bytes unchanged...
+    expect(manifest2).not.toBe(manifest1); // ...but the manifest saw the sibling change...
+    expect(composite2).not.toBe(composite1); // ...so the drain-seam composite CHANGED (would refuse it).
+  });
+
+  it('refuses a resolver directory containing a SYMLINK, fail-closed BEFORE any copy (a symlink survives cpSync and can point at mutable bytes)', () => {
+    const dir = tmp.make('stage-symlink');
+    const { path } = script(dir);
+    symlinkSync('/etc/hosts', join(dir, 'sneaky-link')); // target need not exist / is never read
+    expect(() => stageResolverArtifact({ command: [NODE, path, '{source}'], resolverArtifactPath: path, interpreted: true }))
+      .toThrow(/symlink/);
+  });
+});
+
+describe('directoryManifestDigest (round-20 advisor: canonical whole-tree binding)', () => {
+  it('is deterministic (independent of readdir order and locale) and recurses into subdirectories', () => {
+    const dir = tmp.make('manifest-det');
+    writeFileSync(join(dir, 'b.cjs'), 'B');
+    writeFileSync(join(dir, 'a.cjs'), 'A');
+    mkdirSync(join(dir, 'lib'));
+    writeFileSync(join(dir, 'lib', 'nested.cjs'), 'N'); // exercises the recursive walk + relpath
+    expect(directoryManifestDigest(dir)).toBe(directoryManifestDigest(dir));
+  });
+
+  it('CHANGES when a nested subdirectory file changes (recursion is content-bound, not name-only)', () => {
+    const dir = tmp.make('manifest-nested');
+    mkdirSync(join(dir, 'lib'));
+    writeFileSync(join(dir, 'lib', 'nested.cjs'), 'N');
+    const before = directoryManifestDigest(dir);
+    writeFileSync(join(dir, 'lib', 'nested.cjs'), 'N-EVIL');
+    expect(directoryManifestDigest(dir)).not.toBe(before);
+  });
+
+  it('CHANGES when any file content changes', () => {
+    const dir = tmp.make('manifest-content');
+    writeFileSync(join(dir, 'a.cjs'), 'A');
+    const before = directoryManifestDigest(dir);
+    writeFileSync(join(dir, 'a.cjs'), 'A-EVIL');
+    expect(directoryManifestDigest(dir)).not.toBe(before);
+  });
+
+  it('CHANGES when a new sibling file is added', () => {
+    const dir = tmp.make('manifest-add');
+    writeFileSync(join(dir, 'a.cjs'), 'A');
+    const before = directoryManifestDigest(dir);
+    writeFileSync(join(dir, 'evil.cjs'), 'EVIL');
+    expect(directoryManifestDigest(dir)).not.toBe(before);
+  });
+
+  it('refuses a symlink fail-closed', () => {
+    const dir = tmp.make('manifest-symlink');
+    writeFileSync(join(dir, 'a.cjs'), 'A');
+    symlinkSync('/etc/hosts', join(dir, 'link'));
+    expect(() => directoryManifestDigest(dir)).toThrow(/symlink/);
   });
 });

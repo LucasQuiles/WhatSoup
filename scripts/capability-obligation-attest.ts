@@ -52,7 +52,7 @@
  */
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { accessSync, closeSync, constants as fsConstants, fsyncSync, linkSync, openSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { accessSync, closeSync, constants as fsConstants, fsyncSync, linkSync, openSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { hostname, userInfo } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
@@ -72,7 +72,12 @@ import {
   parseCapabilityObligationsOptions,
   type CapabilityObligationsOptions,
 } from '../src/core/capability-contract.ts';
-import { verifyResolverArtifact, type ResolverArtifactDeclaration } from '../src/core/capability-resolver-artifact.ts';
+import {
+  stageResolverArtifact,
+  verifyResolverArtifact,
+  type ResolverArtifactDeclaration,
+  type StagedResolverArtifact,
+} from '../src/core/capability-resolver-artifact.ts';
 import { CURRENT_SCHEMA_MIGRATION } from '../src/core/database-schema-version.ts';
 import { Database } from '../src/core/database.ts';
 import { resolveHarnessType } from '../src/runtimes/agent/capability-obligation-runtime.ts';
@@ -285,15 +290,42 @@ const CANARY_STREAM_CAP_BYTES = 262_144;
  * built-in `timeout` only signals the direct child, so we own the watchdog.
  */
 export function runResolverCanary(params: {
-  command: readonly string[];
+  execution: ResolverArtifactDeclaration & { command: readonly string[]; timeoutMs: number; minOutputBytes: number };
+  declaredResolverDigest: string;
   probeSource: string;
-  timeoutMs: number;
-  minOutputBytes: number;
   nonce: string;
 }): Promise<CapabilityCanaryOutcome> {
-  const argv = params.command.map((part) => part.replaceAll('{source}', params.probeSource));
   const probeSourceDigest = createHash('sha256').update(params.probeSource).digest('hex');
+  // round-20 finding 3: the canary must execute EXACTLY the bytes it verifies — the SAME
+  // content-addressed staging the runtime uses (previously it spawned the ORIGINAL path while
+  // the runtime executed a `.pinned-*` copy, so canary and runtime could diverge). Stage,
+  // refuse unless the staged composite equals the declared/attested digest, then spawn the
+  // STAGED copy (never the original path); the staging root is removed in every terminal path.
+  let staged: StagedResolverArtifact;
+  try {
+    staged = stageResolverArtifact(params.execution);
+  } catch (err) {
+    return Promise.resolve({ result: 'fail', nonce: params.nonce, detail: { reason: 'resolver_artifact_unverified', message: err instanceof Error ? err.message : String(err), probeSourceDigest } });
+  }
+  if (staged.compositeDigest !== params.declaredResolverDigest) {
+    rmSync(staged.stageDir, { recursive: true, force: true });
+    // round-20 (advisor): name the staged tree so a stray file next to the resolver (which drifts the
+    // whole-directory manifest) is diagnosable from the receipt rather than an opaque mismatch.
+    return Promise.resolve({ result: 'fail', nonce: params.nonce, detail: { reason: 'resolver_digest_mismatch', probeSourceDigest, stagedManifestFiles: staged.manifestRelpaths } });
+  }
+  const artifactIndex = params.execution.interpreted === true ? 1 : 0;
+  const argv = params.execution.command.map((part, i) => {
+    if (i === artifactIndex) return staged.stagedArtifactPath;
+    if (i === 0 && staged.interpreterRealpath !== null) return staged.interpreterRealpath;
+    return part.replaceAll('{source}', params.probeSource);
+  });
   return new Promise((resolvePromise) => {
+    let cleaned = false;
+    const cleanup = (): void => {
+      if (cleaned) return;
+      cleaned = true;
+      try { rmSync(staged.stageDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+    };
     const child = spawn(argv[0]!, argv.slice(1), { stdio: ['ignore', 'pipe', 'pipe'], detached: true });
     const pid = child.pid; // capture now — undefined if spawn failed
     let stdout = '';
@@ -304,7 +336,7 @@ export function runResolverCanary(params: {
       if (pid === undefined) return;
       try { process.kill(-pid, 'SIGKILL'); } catch { /* already reaped by a clean exit or an earlier kill */ }
     };
-    const watchdog = setTimeout(() => { timedOut = true; killGroup(); }, params.timeoutMs);
+    const watchdog = setTimeout(() => { timedOut = true; killGroup(); }, params.execution.timeoutMs);
     watchdog.unref?.();
     child.stdout.on('data', (c: Buffer) => { if (stdout.length < CANARY_STREAM_CAP_BYTES) stdout += c.toString('utf8'); });
     child.stderr.on('data', (c: Buffer) => { if (stderr.length < CANARY_STREAM_CAP_BYTES) stderr += c.toString('utf8'); });
@@ -313,6 +345,7 @@ export function runResolverCanary(params: {
       settled = true;
       clearTimeout(watchdog);
       killGroup();
+      cleanup();
       resolvePromise({ result: 'fail', nonce: params.nonce, detail: { reason: 'resolver_spawn_failed', probeSourceDigest } });
     });
     child.on('close', (code, signal) => {
@@ -323,9 +356,10 @@ export function runResolverCanary(params: {
       // Reap the (now-leaderless) group before reporting: the leader has exited, so
       // signalling the negative pid only sweeps a grandchild that outlived it.
       killGroup();
+      cleanup();
       const stdoutBytes = Buffer.byteLength(stdout, 'utf8');
       const stderrBytes = Buffer.byteLength(stderr, 'utf8');
-      const pass = !timedOut && code === 0 && stdoutBytes >= params.minOutputBytes;
+      const pass = !timedOut && code === 0 && stdoutBytes >= params.execution.minOutputBytes;
       resolvePromise({
         result: pass ? 'pass' : 'fail',
         nonce: params.nonce,
@@ -540,10 +574,9 @@ if (import.meta.url === invokedPath) {
           const artifact = observeResolverArtifact(options.execution, args.skill.resolverDigest);
           const now = new Date();
           const canary = await runResolverCanary({
-            command: options.execution.command,
+            execution: options.execution,
+            declaredResolverDigest: args.skill.resolverDigest,
             probeSource: args.probeSource,
-            timeoutMs: options.execution.timeoutMs,
-            minOutputBytes: options.execution.minOutputBytes,
             nonce: args.runId,
           });
           if (canary.result !== 'pass') {

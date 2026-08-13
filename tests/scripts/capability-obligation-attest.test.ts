@@ -6,16 +6,16 @@
  */
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { attestationBindingDigest, findAdmissibleAttestation } from '../../src/core/capability-attestation.ts';
 import { parseCapabilityObligationsOptions, type CapabilityObligationsOptions } from '../../src/core/capability-contract.ts';
-import { resolverCompositeDigest } from '../../src/core/capability-resolver-artifact.ts';
+import { directoryManifestDigest, resolverCompositeDigest } from '../../src/core/capability-resolver-artifact.ts';
 import { Database } from '../../src/core/database.ts';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 import {
@@ -58,7 +58,7 @@ function configOptions(over: Record<string, unknown> = {}): CapabilityObligation
     mediaRoot: '/var/media',
     retentionPolicyVersion: 'ret/1',
     retentionHorizonDays: 30,
-    execution: { command: ['resolver', '{source}'], timeoutMs: 5000, minOutputBytes: 1 },
+    execution: { command: ['resolver', '{source}'], timeoutMs: 5000, minOutputBytes: 1, resolverArtifactPath: 'resolver', interpreted: false },
     attestation: {
       skillName: 'watch', skillVersion: '1.0.0', skillDigest: 'sd', resolverDigest: 'rd',
       dependencyVersions: { 'yt-dlp': '2026.03.17' }, probeVersion: 'p/1', canaryId: 'can-1',
@@ -161,38 +161,61 @@ describe('loadObligationOptionsFromConfig', () => {
 });
 
 describe('runResolverCanary (bounded, non-sending resolver probe)', () => {
-  const NODE = process.execPath;
+  const NODE = realpathSync(process.execPath);
+  // round-20 finding 3: the canary now STAGES a real artifact and executes the STAGED copy
+  // (previously it spawned the original path while the runtime ran a `.pinned-*` copy — they
+  // could diverge). Build a real resolver script + its composite so canary == runtime bytes.
+  function canaryInput(
+    dir: string,
+    src: string,
+    over: { name?: string; command?: readonly string[]; interpreted?: boolean; timeoutMs?: number; minOutputBytes?: number; declaredResolverDigest?: string } = {},
+  ): { execution: { command: readonly string[]; resolverArtifactPath: string; interpreted: boolean; timeoutMs: number; minOutputBytes: number }; declaredResolverDigest: string } {
+    const resolverPath = join(dir, over.name ?? 'resolver.cjs');
+    writeFileSync(resolverPath, src);
+    const command = over.command ?? [NODE, resolverPath, '{source}'];
+    const interpreted = over.interpreted ?? true;
+    const execution = { command, resolverArtifactPath: resolverPath, interpreted, timeoutMs: over.timeoutMs ?? 10_000, minOutputBytes: over.minOutputBytes ?? 5 };
+    const contentDigest = createHash('sha256').update(readFileSync(realpathSync(resolverPath))).digest('hex');
+    const interpreterDigest = interpreted ? createHash('sha256').update(readFileSync(realpathSync(command[0]!))).digest('hex') : null;
+    // round-20 (advisor): the composite binds the whole resolver directory manifest. The canary dir
+    // holds only the resolver (+ any intentional sibling, e.g. the reap grandchild), so this manifest
+    // equals what runResolverCanary's stageResolverArtifact recomputes over the staged copy.
+    const manifestDigest = directoryManifestDigest(dirname(realpathSync(resolverPath)));
+    const declaredResolverDigest = over.declaredResolverDigest ?? resolverCompositeDigest(contentDigest, manifestDigest, execution, interpreterDigest);
+    return { execution, declaredResolverDigest };
+  }
 
   it('PASS: a resolver that exits 0 with sufficient output over the substituted source', async () => {
-    const outcome = await runResolverCanary({
-      command: [NODE, '-e', 'process.stdout.write("processed:" + process.argv[1])', '{source}'],
-      probeSource: 'https://probe.example/clip', timeoutMs: 10_000, minOutputBytes: 5, nonce: 'run-1',
-    });
+    const dir = tmp.make('canary-pass');
+    const outcome = await runResolverCanary({ ...canaryInput(dir, 'process.stdout.write("processed:" + process.argv[2])\n'), probeSource: 'https://probe.example/clip', nonce: 'run-1' });
     expect(outcome).toMatchObject({ result: 'pass', nonce: 'run-1' });
   });
 
   it('FALSIFIER: a resolver that exits non-zero fails', async () => {
-    const outcome = await runResolverCanary({
-      command: [NODE, '-e', 'process.exit(4)', '{source}'],
-      probeSource: 'https://probe.example/clip', timeoutMs: 10_000, minOutputBytes: 1, nonce: 'run-1',
-    });
+    const dir = tmp.make('canary-nonzero');
+    const outcome = await runResolverCanary({ ...canaryInput(dir, 'process.stdout.write("x".repeat(50));process.exit(4)\n', { minOutputBytes: 1 }), probeSource: 'https://probe.example/clip', nonce: 'run-1' });
     expect(outcome.result).toBe('fail');
   });
 
   it('FALSIFIER: a resolver whose output is under minOutputBytes fails even on exit 0', async () => {
-    const outcome = await runResolverCanary({
-      command: [NODE, '-e', 'process.stdout.write("x")', '{source}'],
-      probeSource: 'https://probe.example/clip', timeoutMs: 10_000, minOutputBytes: 100, nonce: 'run-1',
-    });
+    const dir = tmp.make('canary-short');
+    const outcome = await runResolverCanary({ ...canaryInput(dir, 'process.stdout.write("x")\n', { minOutputBytes: 100 }), probeSource: 'https://probe.example/clip', nonce: 'run-1' });
     expect(outcome.result).toBe('fail');
   });
 
+  it('FALSIFIER (finding 3): a resolver whose bytes do not match the declared digest is REFUSED before spawn (never executes)', async () => {
+    const dir = tmp.make('canary-mismatch');
+    // A deliberately-wrong declared digest: the staged copy's composite cannot equal it, so the
+    // canary refuses without spawning — the canary executes ONLY the verified bytes.
+    const outcome = await runResolverCanary({ ...canaryInput(dir, 'process.stdout.write("processed:" + process.argv[2])\n', { declaredResolverDigest: 'deadbeef'.repeat(8) }), probeSource: 'https://probe.example/clip', nonce: 'run-1' });
+    expect(outcome.result).toBe('fail');
+    expect((outcome.detail as Record<string, unknown>)?.['reason']).toBe('resolver_digest_mismatch');
+  });
+
   it('END-TO-END: a real passing canary outcome piped into attest records an ADMISSIBLE attestation', async () => {
+    const dir = tmp.make('canary-e2e');
     const a = args();
-    const canary = await runResolverCanary({
-      command: [NODE, '-e', 'process.stdout.write("processed:" + process.argv[1])', '{source}'],
-      probeSource: 'https://probe.example/clip', timeoutMs: 10_000, minOutputBytes: 5, nonce: a.runId,
-    });
+    const canary = await runResolverCanary({ ...canaryInput(dir, 'process.stdout.write("processed:" + process.argv[2])\n'), probeSource: 'https://probe.example/clip', nonce: a.runId });
     expect(canary.result).toBe('pass');
     const result = attest(db, a, canary, new Date());
     expect(result).toMatchObject({ mode: 'record', recorded: true });
@@ -203,15 +226,12 @@ describe('runResolverCanary (bounded, non-sending resolver probe)', () => {
     const dir = tmp.make('reap');
     const marker = join(dir, 'grandchild-marker');
     const grandchild = join(dir, 'grandchild.cjs');
-    const parent = join(dir, 'parent.cjs');
     // grandchild: 600ms after the parent's clean exit, write the marker (no try/catch — a
     // reaped process is SIGKILLed before the timer fires, so the write simply never happens).
     writeFileSync(grandchild, 'const fs=require("node:fs");setTimeout(function(){fs.writeFileSync(process.argv[2],"escaped")},600);');
-    // parent (the "resolver"): fork the same-group grandchild, print output, exit 0 cleanly.
-    writeFileSync(parent, `const cp=require("node:child_process");const m=process.argv[2];const gc=cp.spawn(process.execPath,[${JSON.stringify(grandchild)},m],{stdio:"ignore"});gc.unref();process.stdout.write("processed-with-grandchild");process.exit(0);`);
-    const outcome = await runResolverCanary({
-      command: [NODE, parent, '{source}'], probeSource: marker, timeoutMs: 10_000, minOutputBytes: 5, nonce: 'reap-1',
-    });
+    // parent (the "resolver" artifact): fork the same-group grandchild, print output, exit 0.
+    const parentSrc = `const cp=require("node:child_process");const m=process.argv[2];const gc=cp.spawn(process.execPath,[${JSON.stringify(grandchild)},m],{stdio:"ignore"});gc.unref();process.stdout.write("processed-with-grandchild");process.exit(0);`;
+    const outcome = await runResolverCanary({ ...canaryInput(dir, parentSrc, { name: 'parent.cjs' }), probeSource: marker, nonce: 'reap-1' });
     expect(outcome.result).toBe('pass'); // the parent exited 0 with output — a naive canary would stop here
     await TIMING(1_000); // let real time pass the grandchild's 600ms timer
     // With the close-handler group reap, the grandchild was SIGKILLed → the marker never lands.
@@ -236,21 +256,35 @@ describe('capability-obligation-attest CLI (the operator front-door records end-
   // exactly as the producer/executor do, so admission and the drain-seam re-comparison match.
   function compositeFromConfigFile(configFile: string): string {
     const cfg = JSON.parse(readFileSync(configFile, 'utf8')) as {
-      agentOptions: { capabilityObligations: { execution: { command: string[]; resolverArtifactPath: string; interpreted: boolean } } };
+      agentOptions: { capabilityObligations: { execution: { command: string[]; resolverArtifactPath: string; interpreted: boolean; timeoutMs: number; minOutputBytes: number } } };
     };
     const ex = cfg.agentOptions.capabilityObligations.execution;
     const contentDigest = createHash('sha256').update(readFileSync(realpathSync(ex.resolverArtifactPath))).digest('hex');
-    return resolverCompositeDigest(contentDigest, { command: ex.command, resolverArtifactPath: ex.resolverArtifactPath, interpreted: ex.interpreted });
+    // round-20: the composite binds the interpreter content, the envelope (timeoutMs/minOutputBytes),
+    // AND the whole resolver-directory manifest.
+    const interpreterDigest = ex.interpreted ? createHash('sha256').update(readFileSync(realpathSync(ex.command[0]!))).digest('hex') : null;
+    const manifestDigest = directoryManifestDigest(dirname(realpathSync(ex.resolverArtifactPath)));
+    return resolverCompositeDigest(contentDigest, manifestDigest, { command: ex.command, resolverArtifactPath: ex.resolverArtifactPath, interpreted: ex.interpreted, timeoutMs: ex.timeoutMs, minOutputBytes: ex.minOutputBytes }, interpreterDigest);
   }
 
   function writeConfig(dir: string, over: { mediaRoot?: string; resolverDigest?: string; command?: readonly string[]; resolverArtifactPath?: string; interpreted?: boolean } = {}): string {
-    const resolverPath = join(dir, 'resolver.cjs');
+    // round-20 (advisor): the composite now binds the WHOLE resolver directory. `dir` itself
+    // accumulates instance.json, obligations.db, media, and receipts, which would poison and drift
+    // the manifest — so the resolver lives in its own isolated subdirectory holding ONLY resolver.cjs.
+    const resolverDir = join(dir, 'resolver-src');
+    mkdirSync(resolverDir, { recursive: true });
+    const resolverPath = over.resolverArtifactPath ?? join(resolverDir, 'resolver.cjs');
     writeFileSync(resolverPath, RESOLVER_SRC);
     const command = over.command ?? [process.execPath, resolverPath, '{source}'];
     const resolverArtifactPath = over.resolverArtifactPath ?? resolverPath;
     const interpreted = over.interpreted ?? true;
+    const timeoutMs = 10_000;
+    const minOutputBytes = 5;
     // The config declares the COMPOSITE (unless a test overrides with a deliberately-wrong one).
-    const composite = resolverCompositeDigest(createHash('sha256').update(RESOLVER_SRC).digest('hex'), { command, resolverArtifactPath, interpreted });
+    // round-20: the composite binds the interpreter content, the envelope, AND the directory manifest.
+    const interpreterDigest = interpreted ? createHash('sha256').update(readFileSync(realpathSync(command[0]!))).digest('hex') : null;
+    const manifestDigest = directoryManifestDigest(dirname(realpathSync(resolverPath)));
+    const composite = resolverCompositeDigest(createHash('sha256').update(RESOLVER_SRC).digest('hex'), manifestDigest, { command, resolverArtifactPath, interpreted, timeoutMs, minOutputBytes }, interpreterDigest);
     const configFile = join(dir, 'instance.json');
     writeFileSync(configFile, JSON.stringify({
       agentOptions: {
@@ -262,7 +296,7 @@ describe('capability-obligation-attest CLI (the operator front-door records end-
           retentionHorizonDays: 30,
           execution: {
             command,
-            timeoutMs: 10_000, minOutputBytes: 5,
+            timeoutMs, minOutputBytes,
             // round-18 finding 1: explicit artifact declaration (verified, never inferred).
             resolverArtifactPath,
             interpreted,
@@ -437,7 +471,9 @@ describe('observeResolverArtifact (round-18: verify the EXPLICITLY-declared arti
   it('verifies the declared interpreted SCRIPT and returns its COMPOSITE digest (content + shape)', () => {
     const { path, digest } = writeScript('r.cjs');
     const execution = { command: [process.execPath, path, '{source}'], resolverArtifactPath: path, interpreted: true };
-    const composite = resolverCompositeDigest(digest, execution);
+    const interpreterDigest = createHash('sha256').update(readFileSync(realpathSync(process.execPath))).digest('hex');
+    const manifestDigest = directoryManifestDigest(dirname(realpathSync(path)));
+    const composite = resolverCompositeDigest(digest, manifestDigest, execution, interpreterDigest);
     expect(observeResolverArtifact(execution, composite))
       .toMatchObject({ observed: true, verified: true, digest: composite, contentDigest: digest, interpreted: true });
   });

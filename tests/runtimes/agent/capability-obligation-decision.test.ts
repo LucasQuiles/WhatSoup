@@ -39,7 +39,9 @@ const OPTIONS = parseCapabilityObligationsOptions({
   mediaRoot: '/unused-parse-time-root',
   retentionPolicyVersion: 'policy/1',
   retentionHorizonDays: 30,
-  execution: { command: ['node', '-e', 'console.log(process.argv[1])', '{source}'], timeoutMs: 30_000, minOutputBytes: 8 },
+  // round-18/20: an enabled config requires an explicit interpreter PATH, an explicit resolver
+  // artifact, and an explicit interpreted flag (syntactic Zod validation; paths need not exist here).
+  execution: { command: ['/usr/bin/node', '/opt/watch/resolver.cjs', '{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: '/opt/watch/resolver.cjs', interpreted: true },
   attestation: {
     skillName: 'watch',
     skillVersion: '1.0.0',

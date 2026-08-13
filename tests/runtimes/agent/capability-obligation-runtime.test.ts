@@ -9,11 +9,11 @@
 import { createHash } from 'node:crypto';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { recordCapabilityAttestation } from '../../../src/core/capability-attestation.ts';
-import { resolverCompositeDigest } from '../../../src/core/capability-resolver-artifact.ts';
+import { directoryManifestDigest, resolverCompositeDigest } from '../../../src/core/capability-resolver-artifact.ts';
 import { parseCapabilityObligationsOptions, type CapabilityObligationsOptions } from '../../../src/core/capability-contract.ts';
 import { CapabilityObligationStore } from '../../../src/core/capability-obligation-store.ts';
 import { Database } from '../../../src/core/database.ts';
@@ -43,10 +43,26 @@ const TOOL_SESSION: SessionContext = { tier: 'chat-scoped', conversationKey: 'co
  * attestation AND its runtime options must both carry the composite for the execution the
  * executor actually runs. `compositeOf` derives it the same way the producer/executor do.
  */
+const interpreterDigestCache = new Map<string, string>();
+/** round-20: mirror the source — hash the interpreter (command[0]) when interpreted; memoize
+ *  since every fixture reuses process.execPath (an ~80MB binary). */
+function interpreterDigestOf(execution: CapabilityObligationsOptions['execution']): string | null {
+  if (execution.interpreted !== true) return null;
+  const real = realpathSync(execution.command[0]!);
+  let d = interpreterDigestCache.get(real);
+  if (d === undefined) {
+    d = createHash('sha256').update(readFileSync(real)).digest('hex');
+    interpreterDigestCache.set(real, d);
+  }
+  return d;
+}
 function compositeOf(execution: CapabilityObligationsOptions['execution']): string {
   const artifactPath = execution.resolverArtifactPath as string; // always declared in these fixtures
-  const contentDigest = createHash('sha256').update(readFileSync(realpathSync(artifactPath))).digest('hex');
-  return resolverCompositeDigest(contentDigest, execution);
+  const artifactReal = realpathSync(artifactPath);
+  const contentDigest = createHash('sha256').update(readFileSync(artifactReal)).digest('hex');
+  // round-20 (advisor): the composite also binds the whole-directory manifest.
+  const manifestDigest = directoryManifestDigest(dirname(artifactReal));
+  return resolverCompositeDigest(contentDigest, manifestDigest, execution, interpreterDigestOf(execution));
 }
 
 /**
@@ -397,7 +413,7 @@ describe('trusted execution tool (D6)', () => {
       const resolver = join(work, 'resolver.cjs');
       writeFileSync(resolver, 'console.log("plenty of output before dying"); process.exit(3)\n');
       const id = seedObligation();
-      const execution: CapabilityObligationsOptions['execution'] = { command: ['node', resolver, '{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: resolver, interpreted: true };
+      const execution: CapabilityObligationsOptions['execution'] = { command: [process.execPath,resolver, '{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: resolver, interpreted: true };
       freshAttestation(execution);
       const { runtime } = makeRuntime({
         execution,
@@ -436,7 +452,7 @@ describe('trusted execution tool (D6)', () => {
       const SMUGGLE_SOURCE = `--output=${smuggleTarget}`;
       const SMUGGLE_DIGEST = createHash('sha256').update(SMUGGLE_SOURCE).digest('hex');
       const id = seedObligation({ sourceDigest: SMUGGLE_DIGEST, sourceToken: SMUGGLE_SOURCE, replayText: SMUGGLE_SOURCE });
-      const execution: CapabilityObligationsOptions['execution'] = { command: ['node', resolver, '{source}'], timeoutMs: 30_000, minOutputBytes: 1, resolverArtifactPath: resolver, interpreted: true };
+      const execution: CapabilityObligationsOptions['execution'] = { command: [process.execPath,resolver, '{source}'], timeoutMs: 30_000, minOutputBytes: 1, resolverArtifactPath: resolver, interpreted: true };
       freshAttestation(execution);
       const { runtime } = makeRuntime({
         execution,
@@ -487,7 +503,7 @@ describe('trusted execution tool (D6)', () => {
       const escaped = join(work, 'escaped');
       const ESCAPED_DIGEST = createHash('sha256').update(escaped).digest('hex');
       const id = seedObligation({ sourceDigest: ESCAPED_DIGEST, sourceToken: escaped, replayText: escaped });
-      const execution: CapabilityObligationsOptions['execution'] = { command: ['node', resolver, '{source}'], timeoutMs: 200, minOutputBytes: 1, resolverArtifactPath: resolver, interpreted: true };
+      const execution: CapabilityObligationsOptions['execution'] = { command: [process.execPath,resolver, '{source}'], timeoutMs: 200, minOutputBytes: 1, resolverArtifactPath: resolver, interpreted: true };
       freshAttestation(execution);
       const { runtime } = makeRuntime({
         execution,
@@ -537,7 +553,7 @@ describe('trusted execution tool (D6)', () => {
       const escaped = join(work, 'escaped');
       const ESCAPED_DIGEST = createHash('sha256').update(escaped).digest('hex');
       const id = seedObligation({ sourceDigest: ESCAPED_DIGEST, sourceToken: escaped, replayText: escaped });
-      const execution: CapabilityObligationsOptions['execution'] = { command: ['node', resolver, '{source}'], timeoutMs: 30_000, minOutputBytes: 1, resolverArtifactPath: resolver, interpreted: true };
+      const execution: CapabilityObligationsOptions['execution'] = { command: [process.execPath,resolver, '{source}'], timeoutMs: 30_000, minOutputBytes: 1, resolverArtifactPath: resolver, interpreted: true };
       freshAttestation(execution);
       const { runtime } = makeRuntime({
         // timeout far larger than the clean exit — this is NOT the timeout path
@@ -579,7 +595,7 @@ describe('trusted execution tool (D6)', () => {
       const resolver = join(work, 'echo.cjs');
       writeFileSync(resolver, "const m=/^--out=(.+)$/.exec(process.argv[2]);console.log(m?m[1]:'NO-SUBSTITUTION');");
       seedObligation();
-      const execution: CapabilityObligationsOptions['execution'] = { command: ['node', resolver, '--out={source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: resolver, interpreted: true };
+      const execution: CapabilityObligationsOptions['execution'] = { command: [process.execPath,resolver, '--out={source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: resolver, interpreted: true };
       freshAttestation(execution);
       let output = '';
       const { runtime } = makeRuntime({
@@ -611,7 +627,7 @@ describe('trusted execution tool (D6)', () => {
       const mutator = join(work, 'mutator.cjs');
       writeFileSync(mutator, "require('fs').writeFileSync(process.argv[2],'MUTATED-DIFFERENT-BYTES');console.log('processed-and-mutated-ok');");
       const id = seedObligation({ retainedMedia: { path: mediaPath, sha256: mediaSha, bytes: ORIGINAL.length, policyVersion: 'p/1' } });
-      const execution: CapabilityObligationsOptions['execution'] = { command: ['node', mutator, '{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: mutator, interpreted: true };
+      const execution: CapabilityObligationsOptions['execution'] = { command: [process.execPath,mutator, '{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: mutator, interpreted: true };
       freshAttestation(execution);
       const { runtime } = makeRuntime({
         execution,
@@ -633,14 +649,15 @@ describe('trusted execution tool (D6)', () => {
     }
   });
 
-  it('finding 3 (r19): the pinned resolver still resolves a SIBLING module — the same-dir hardlink preserves resolution a temp copy would break', async () => {
+  it('round-20 (finding 3): the staged resolver still resolves a SIBLING module — whole-directory staging preserves resolution a single-file copy would break', async () => {
     const work = mkdtempSync(join(tmpdir(), 'capx-sibling-'));
     try {
       writeFileSync(join(work, 'helper.cjs'), 'module.exports = function () { return "HELPER-OK"; };');
       const resolver = join(work, 'resolver.cjs');
-      // require('./helper.cjs') resolves relative to the EXECUTING file's dir; a private-temp
-      // COPY would look in the temp dir (no helper) and throw. The same-dir hardlink pin keeps
-      // the sibling reachable — this is why finding 3 uses a hardlink, not a copy.
+      // require('./helper.cjs') resolves relative to the EXECUTING file's dir. Round-20 stages the
+      // WHOLE directory into a private root (content-addressed, immutable), so the sibling is copied
+      // next to the staged resolver and resolves — a single-file copy (or the round-19 hardlink) was
+      // replaced precisely so sibling modules keep working while execution is a swap-proof copy.
       writeFileSync(resolver, 'const h = require("./helper.cjs"); console.log("processed " + process.argv[2] + " " + h());');
       const execution: CapabilityObligationsOptions['execution'] = { command: [process.execPath, resolver, '{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: resolver, interpreted: true };
       seedObligation();
@@ -655,8 +672,10 @@ describe('trusted execution tool (D6)', () => {
         },
       });
       await runtime.tickOnce();
-      expect(output).toContain('HELPER-OK'); // the sibling module resolved through the pin
-      expect(readdirSync(work).some((f) => f.startsWith('.pinned-'))).toBe(false); // pin cleaned up, no litter
+      expect(output).toContain('HELPER-OK'); // the sibling module resolved from the staged copy
+      // Execution stages into a PRIVATE temp root (mkdtemp), never next to the original: the source
+      // dir keeps only its two real files, with no staging litter written back into it.
+      expect(readdirSync(work).sort()).toEqual(['helper.cjs', 'resolver.cjs']);
     } finally {
       rmSync(work, { recursive: true, force: true });
     }
@@ -686,6 +705,44 @@ describe('trusted execution tool (D6)', () => {
         .get(id) as { result_status: string; output_evidence: string };
       expect(row.result_status).toBe('error');
       expect((JSON.parse(row.output_evidence) as Record<string, unknown>)['reason']).toBe('resolver_digest_mismatch');
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
+  });
+
+  it('FALSIFIER (advisor round-20): a SIBLING swapped after attestation is REFUSED at the drain seam (whole-tree manifest), and the evil sibling never executes', async () => {
+    // The advisor's exact exploit reaching EXECUTION: stage+execute the whole directory but bind only
+    // the artifact file, and a post-attest `helper.cjs` overwrite runs via `require('./helper.cjs')`
+    // while the artifact's own bytes — and a content-only composite — are unchanged. This asserts at
+    // the EXECUTOR (not the pure stage seam): the drain refuses AND the evil sibling never runs.
+    const work = mkdtempSync(join(tmpdir(), 'capx-sibswap-'));
+    try {
+      const marker = join(work, 'evil-marker');
+      const helper = join(work, 'helper.cjs');
+      const resolver = join(work, 'resolver.cjs');
+      writeFileSync(helper, 'module.exports = function () { return "HELPER-OK"; };');
+      // require('./helper.cjs') loads the sibling from the executing (staged) dir — dir-staging copies it.
+      writeFileSync(resolver, 'const h = require("./helper.cjs"); console.log("processed " + process.argv[2] + " " + h());');
+      const execution: CapabilityObligationsOptions['execution'] = { command: [process.execPath, resolver, '{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: resolver, interpreted: true };
+      const id = seedObligation();
+      freshAttestation(execution); // records the COMPOSITE of the ORIGINAL tree (resolver + OK helper)
+      const { runtime } = makeRuntime({
+        execution,
+        onDispatch: async (tool) => {
+          // Swap ONLY the sibling; the artifact's own bytes are untouched. The evil helper writes a
+          // marker at module-load — so if the resolver ever spawned, `require('./helper.cjs')` runs it.
+          writeFileSync(helper, `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "PWNED"); module.exports = function () { return "HELPER-EVIL"; };`);
+          const r = (await tool.handler({ source: SOURCE_URL }, TOOL_SESSION)) as Record<string, unknown>;
+          expect(r['error']).toBe('capability_execution');
+        },
+      });
+      await runtime.tickOnce();
+      const row = db.raw
+        .prepare('SELECT result_status, output_evidence FROM capability_execution_receipts WHERE obligation_id = ?')
+        .get(id) as { result_status: string; output_evidence: string };
+      expect(row.result_status).toBe('error');
+      expect((JSON.parse(row.output_evidence) as Record<string, unknown>)['reason']).toBe('resolver_digest_mismatch');
+      expect(existsSync(marker)).toBe(false); // the evil sibling was refused BEFORE it could execute
     } finally {
       rmSync(work, { recursive: true, force: true });
     }

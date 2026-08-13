@@ -263,23 +263,49 @@ const executionRuleSchema = z
     /** Minimum resolver stdout bytes for an 'ok' receipt. */
     minOutputBytes: z.number().int().positive(),
     /**
-     * Round-18 finding 1: the EXPLICIT path to the resolver's code artifact — the
-     * file whose content the attestation verifies (never inferred from argv). Optional
-     * in the schema so unrelated configs still parse, but REQUIRED, fail-closed, at the
-     * attest canary and the executor spawn seam: an obligation cannot be attested or
-     * drained without it. See `capability-resolver-artifact.ts`.
+     * Round-18 finding 1: the EXPLICIT path to the resolver's code artifact — the file whose
+     * content the attestation verifies (never inferred from argv). Nullable in the field type
+     * for back-compat, but round-20 REQUIRES it (non-null) for an ENABLED config at LOAD (the
+     * refine below): the documented contract is "enabled: true requires a fully valid body",
+     * so a missing declaration is a startup ConfigValidationError, never a deferred drain-seam
+     * failure. See `capability-resolver-artifact.ts`.
      */
     resolverArtifactPath: z.string().min(1).nullable().default(null),
     /**
-     * Round-18 finding 1: true ⇒ command[0] is an interpreter and the artifact is
-     * command[1]; false ⇒ command[0] is the artifact itself. The operator declares the
-     * structure; the verifier never guesses it.
+     * Round-18 finding 1: true ⇒ command[0] is an interpreter and the artifact is command[1];
+     * false ⇒ command[0] is the artifact itself. The operator declares the structure; the
+     * verifier never guesses it. Round-20 REQUIRES it (non-null) at LOAD for an enabled config.
      */
     interpreted: z.boolean().nullable().default(null),
   })
   .refine((rule) => rule.command.some((part) => part.includes('{source}')), {
     message: "execution.command must reference the '{source}' placeholder",
-  });
+  })
+  .refine((rule) => rule.resolverArtifactPath !== null && rule.resolverArtifactPath.length > 0, {
+    message: 'execution.resolverArtifactPath is required for an enabled capability-obligation config — declare the resolver artifact explicitly (validated at load, not deferred to the drain seam)',
+    path: ['resolverArtifactPath'],
+  })
+  .refine((rule) => rule.interpreted !== null, {
+    message: 'execution.interpreted is required for an enabled capability-obligation config — declare whether command[0] is an interpreter (validated at load, not deferred to the drain seam)',
+    path: ['interpreted'],
+  })
+  .refine(
+    (rule) => {
+      if (rule.interpreted !== true) return true;
+      const interpreter = rule.command[0];
+      // Round-20 (advisor): SYNTACTIC load check (no fs access at parse time — the resolver host
+      // may differ from the parse host and paths may be relative). A bare interpreter name resolved
+      // via $PATH (`node`, `python3`) is unpinnable: $PATH is ambient and mutable, so the attested
+      // interpreter is not provably the one that would execute. Require an explicit path (contains
+      // '/'); the runtime then realpath-resolves and content-hashes it into the composite. Caught at
+      // LOAD as a ConfigValidationError, never deferred to the drain seam.
+      return typeof interpreter === 'string' && interpreter.includes('/');
+    },
+    {
+      message: 'execution.command[0] must be an explicit interpreter PATH (containing "/") when interpreted:true — a bare name resolved via $PATH is unpinnable and is refused at load',
+      path: ['command', 0],
+    },
+  );
 
 const capabilityObligationsOptionsSchema = z.object({
   enabled: z.literal(true),

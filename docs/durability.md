@@ -757,15 +757,37 @@ admission (admission = the row carrying the run's `nonce`). The **executor re-de
 `resolver_digest` (`options.attestation.resolverDigest`), fail-closed to an error receipt: a same-path
 CONTENT swap (round-18 finding 1) OR a post-attest command-SHAPE change — injected `-e`, swapped
 interpreter, changed template (round-18 finding 2) — changes the live composite and is refused before
-any spawn. The executor then executes a **same-directory hardlink PIN** of the verified artifact, so a
-path-swap of the original between verify and spawn cannot substitute different code, while the
-same-directory hardlink preserves the resolver's sibling-module resolution (a private-temp copy would
-break `import './lib'` or a `node_modules` lookup); an unpinnable directory fails closed (round-19
-finding 3). RESIDUALS (named, narrowed by round-19): a same-path IN-PLACE write to the SHARED inode
-between hash and spawn still lands (the hardlink shares the inode), and an interpreter outside the
-deny-list could still be mislabeled. Both close under Option C (a typed
-`{ interpreter enum, resolverArtifactPath, args }` contract executed from content-addressed storage) —
-the graduation debt. NARROW CLAIM: a passing canary attests only that the verified resolver, run against
+any spawn. The executor then **content-addressed STAGES** the artifact (round-20 findings 1+3):
+it copies the artifact's WHOLE DIRECTORY into a fresh private staging root (`mkdtemp`, 0700,
+unpredictable, single-use), RE-HASHES the copy, compares the COPY's composite to the attested value,
+and executes the COPY — so a rename OR an in-place write to the original AFTER verification cannot
+substitute unverified bytes (the round-19 hardlink shared the inode AND re-resolved the path; a
+reviewer defeated both vectors). Staging the whole directory (not just the file) preserves
+sibling-module resolution (`require('./helper')`, a Python sibling import) that a single-file copy
+would break. The composite now binds FOUR things via ONE canonicalizer: (1) the artifact CONTENT
+digest; (2) the whole-DIRECTORY MANIFEST — a canonical `sha256` over the sorted `[relpath,
+sha256(bytes)]` of every regular file, so a post-attest SIBLING swap (overwrite `helper.cjs` after
+attestation) changes the manifest and is refused (advisor round-20); a SYMLINK or non-regular entry
+is refused fail-closed (a symlink survives the copy and can point at post-attest-mutable bytes), and
+file MODE is deliberately excluded (its `cpSync` preservation is not verified bit-identical, and a
+divergence would fail EVERY legitimate drain); (3) the INTERPRETER content digest (`command[0]`
+hashed when `interpreted`, executed from its verified realpath) — the interpreter must be an EXPLICIT
+path (a bare `node`/`python3` resolved via `$PATH` is unpinnable and is refused at config LOAD, not
+the drain); (4) the canonical execution SHAPE + ENVELOPE (`command`, `interpreted`, `timeoutMs`,
+`minOutputBytes`). A direct-mode (`interpreted:false`) command additionally refuses any bare
+positional token after the artifact (a renamed interpreter could execute it as an unattested script,
+round-20 finding 2b). On a composite mismatch the executor logs the staged directory's file list
+(`stagedManifestFiles`) so a stray file next to the resolver is diagnosable rather than opaque. The
+round-19 RESIDUALS are closed at RUNTIME: the copy is a separate inode (an in-place write to the
+original no longer lands), interpreter identity is bound, and interpreter mislabel is refused
+structurally. **OPERATOR CONSTRAINT (hard requirement):** the resolver artifact MUST live in an
+ISOLATED directory containing ONLY the resolver and its intentional siblings — nothing else may be
+written next to it (no `.DS_Store`, editor swap file, `__pycache__`, log, db, or media), it must be
+symlink-free, and within the 64 MB staging bound; otherwise every subsequent drain fails closed as
+`resolver_digest_mismatch`. The remaining graduation debt is the CONFIG-CONTRACT half of Option C
+(a typed `{ interpreter, resolverArtifactPath, args }` execution struct replacing the `command`
+array) — **owner-gated** because it touches every deployment resolver config; the runtime half
+(content-addressed execution + interpreter identity) is done. NARROW CLAIM: a passing canary attests only that the verified resolver, run against
 `sha256(probeSource)`, exited 0 within bound and produced ≥ `minOutputBytes` — it is NOT proof of
 semantic processing; the fulfillment proof stays the D6 receipt + delivery chain. The attestation
 ROW has **no probe-evidence columns**: adding them needs migration 58, which bumps

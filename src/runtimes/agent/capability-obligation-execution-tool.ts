@@ -31,14 +31,14 @@
  */
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { createReadStream, linkSync, unlinkSync } from 'node:fs';
+import { createReadStream } from 'node:fs';
 import { copyFile, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { z } from 'zod';
 
 import type { CapabilityObligationsOptions } from '../../core/capability-contract.ts';
-import { verifyResolverArtifact, type VerifiedResolverArtifact } from '../../core/capability-resolver-artifact.ts';
+import { stageResolverArtifact, type StagedResolverArtifact } from '../../core/capability-resolver-artifact.ts';
 import type {
   CapabilityObligationClaimFence,
   CapabilityObligationDueRow,
@@ -184,7 +184,7 @@ export function buildCapabilityExecutionTool(deps: CapabilityExecutionToolDeps):
       let observedMediaDigest: string | null = null;
       let executionSource: string;
       let snapshotDir: string | null = null;
-      let pinnedPath: string | null = null; // finding 3: the hardlink pin, cleaned up in finally
+      let stageDir: string | null = null; // round-20 findings 1+3: content-addressed staging root, rm'd in finally
       try {
         if (obligation.retainedMediaPath !== null) {
           if (source !== obligation.retainedMediaPath) {
@@ -225,62 +225,52 @@ export function buildCapabilityExecutionTool(deps: CapabilityExecutionToolDeps):
           return toolError({ error: 'capability_execution', message: 'Source may not begin with "-" (option-flag smuggling refused)' });
         }
 
-        // findings 1+2 (r19): the LIVE resolver must EQUAL what was attested — both its
-        // CONTENT and its execution SHAPE — re-checked HERE, before any spawn, fail-closed.
-        // `verifyResolverArtifact` recomputes the COMPOSITE digest (sha256 of the live
-        // artifact content folded with the canonical command shape); it also refuses a
-        // flag-at-script-position, a declared artifact that is not the executing token, and
-        // an `interpreted:false` mislabel of an interpreter. The composite is then compared
-        // to `options.attestation.resolverDigest` (the value admission bound): a same-path
-        // content swap (r18 finding 1) OR a post-attest shape change — injected `-e`,
-        // swapped interpreter, changed template (r18 finding 2) — changes the live composite
-        // and is refused. RESIDUAL (named): a same-path IN-PLACE write between this hash and
-        // the spawn is narrowed by the hardlink pin below (finding 3), not eliminated —
-        // full closure is content-addressed execution (Option C).
-        let verified: VerifiedResolverArtifact;
+        // round-20 findings 1+2+3: CONTENT-ADDRESSED staging — the only sound verify==execute.
+        // `stageResolverArtifact` validates the shape (incl. the round-20 interpreter-identity
+        // and direct-mode-bare-arg refusals), copies the artifact's whole directory into a fresh
+        // PRIVATE staging root, and RE-HASHES the copy. We compare the COPY's composite to the
+        // attested value and execute the COPY, so a rename OR an in-place write to the original
+        // after this point cannot substitute unverified bytes — the round-19 hardlink shared the
+        // inode AND re-resolved the path, and a reviewer defeated both. The composite also binds
+        // the INTERPRETER content and the execution envelope (timeoutMs/minOutputBytes), so an
+        // interpreter-content swap or an envelope change after attestation is refused too.
+        let staged: StagedResolverArtifact;
         try {
-          verified = verifyResolverArtifact(deps.options.execution);
+          staged = stageResolverArtifact(deps.options.execution);
+          stageDir = staged.stageDir; // record for finally cleanup
         } catch (err) {
-          log.warn({ err, obligationId: obligation.id }, 'resolver artifact verification failed at drain');
+          log.warn({ err, obligationId: obligation.id }, 'resolver artifact could not be staged/verified at drain');
           recordOutcome(deps, active, observedSourceDigest, 'error', { reason: 'resolver_artifact_unverified' });
-          return toolError({ error: 'capability_execution', message: 'Resolver artifact could not be verified' });
+          return toolError({ error: 'capability_execution', message: 'Resolver artifact could not be staged for verified execution' });
         }
         const attestedDigest = deps.options.attestation.resolverDigest;
-        if (attestedDigest === null || verified.compositeDigest !== attestedDigest) {
+        if (attestedDigest === null || staged.compositeDigest !== attestedDigest) {
           log.warn(
-            { obligationId: obligation.id, hasAttested: attestedDigest !== null },
-            'resolver composite digest does not match the attested digest — content or shape drifted after attestation',
+            {
+              obligationId: obligation.id,
+              hasAttested: attestedDigest !== null,
+              // round-20 (advisor): name the staged tree contents so an operator can spot a stray
+              // file (a `.DS_Store`, editor swap, `__pycache__`, log) written next to the resolver
+              // that silently drifts the whole-directory manifest, instead of only an opaque mismatch.
+              stagedManifestFiles: staged.manifestRelpaths,
+            },
+            'staged resolver composite digest does not match the attested digest — content, sibling, interpreter, shape, or envelope drifted after attestation',
           );
           recordOutcome(deps, active, observedSourceDigest, 'error', { reason: 'resolver_digest_mismatch' });
           return toolError({ error: 'capability_execution', message: 'Resolver artifact does not match the attested digest' });
         }
 
-        // finding 3 (r19): PIN the verified artifact by HARDLINK in its OWN directory and
-        // execute the PIN — a path-swap of the original between this verification and the spawn
-        // then cannot substitute different code, while a same-directory hardlink preserves the
-        // resolver's sibling module resolution (a private-temp COPY would break `import './lib'`
-        // or a node_modules lookup). On an unpinnable directory we FAIL CLOSED rather than
-        // execute unpinned. RESIDUAL (named): a same-path IN-PLACE write to the SHARED inode
-        // still lands (the hardlink shares the inode) — full closure is content-addressed
-        // execution (Option C), the graduation debt.
-        const pinned = join(dirname(verified.realpath), `.pinned-${randomUUID()}`);
-        try {
-          linkSync(verified.realpath, pinned);
-          pinnedPath = pinned; // record for finally cleanup
-        } catch (err) {
-          log.warn({ err, obligationId: obligation.id }, 'resolver artifact could not be pinned (hardlink failed) — refusing to execute unpinned');
-          recordOutcome(deps, active, observedSourceDigest, 'error', { reason: 'resolver_artifact_unpinnable' });
-          return toolError({ error: 'capability_execution', message: 'Resolver artifact could not be pinned for immutable execution' });
-        }
-
         // Substitute EVERY '{source}' occurrence — standalone ('{source}') AND embedded
-        // ('--url={source}') — so substitution matches the config validation (executionRuleSchema
-        // accepts any part CONTAINING the placeholder), AND redirect the ARTIFACT token
-        // (command[1] when interpreted, command[0] when direct) to the pinned hardlink so the
-        // executed bytes are exactly the verified ones.
+        // ('--url={source}') — so substitution matches the config validation, AND redirect the
+        // ARTIFACT token (command[1] interpreted, command[0] direct) to the STAGED COPY and the
+        // INTERPRETER token (command[0] interpreted) to its VERIFIED realpath, so the executed
+        // bytes AND interpreter are exactly the ones the composite attested.
         const artifactIndex = deps.options.execution.interpreted === true ? 1 : 0;
-        const argv = deps.options.execution.command.map((part, i) =>
-          i === artifactIndex ? pinned : part.replaceAll('{source}', executionSource));
+        const argv = deps.options.execution.command.map((part, i) => {
+          if (i === artifactIndex) return staged.stagedArtifactPath;
+          if (i === 0 && staged.interpreterRealpath !== null) return staged.interpreterRealpath;
+          return part.replaceAll('{source}', executionSource);
+        });
         let run: ResolverRun;
         try {
           run = await runResolver(argv, deps.options.execution.timeoutMs);
@@ -336,11 +326,11 @@ export function buildCapabilityExecutionTool(deps: CapabilityExecutionToolDeps):
             log.warn({ err, obligationId: obligation.id }, 'capability media snapshot cleanup failed');
           }
         }
-        if (pinnedPath !== null) {
+        if (stageDir !== null) {
           try {
-            unlinkSync(pinnedPath); // remove the hardlink pin (best-effort; the inode survives via the real path)
+            await rm(stageDir, { recursive: true, force: true }); // remove the whole content-addressed staging root
           } catch (err) {
-            log.warn({ err, obligationId: obligation.id }, 'pinned resolver artifact cleanup failed');
+            log.warn({ err, obligationId: obligation.id }, 'staged resolver artifact cleanup failed');
           }
         }
       }
