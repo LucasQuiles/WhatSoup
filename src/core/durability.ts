@@ -3,6 +3,11 @@ import { createChildLogger } from '../logger.ts';
 import { allFromStatement } from '../lib/db-query.ts';
 import { emitAlertChecked, clearAlertSourceChecked } from '../lib/emit-alert.ts';
 import { gateQuarantineClear } from '../lib/fleet-health-gate.ts';
+import {
+  clearRecoveryMarker,
+  loadRecoveryMarkers,
+  setRecoveryMarker,
+} from '../lib/recovery-authority-store.ts';
 import { MS_PER_HOUR, MS_PER_MINUTE } from '../lib/time-units.ts';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -2512,6 +2517,15 @@ export class DurabilityEngine {
               'postConnectRecovery: quarantine gate-failure evidence could not be durably queued',
             );
           }
+          // #2394: the accepted warning outlives this process only via the
+          // durable marker — a later pass proves recovery and clears it.
+          try {
+            setRecoveryMarker(`fleet_health_verify_gate_failed:${config.botName}`);
+          } catch {
+            // intentional: marker write is best-effort — the warning itself
+            // was durably queued; a missing marker only loses restart
+            // reconciliation.
+          }
         },
       });
       log.info({ decision }, 'postConnectRecovery: quarantine-clear gate decision');
@@ -2553,6 +2567,16 @@ export class DurabilityEngine {
           }
         });
       }
+      // #2394: reaching this point in an ACTIVE mode means the whole gate
+      // transaction succeeded — probes ran, breaker state persisted, and
+      // every required callback (clear, shadow-clear, escalation, staged
+      // quarantine clears) was durably accepted. That is the recovery proof
+      // for a prior fleet_health_verify_gate_failed warning. Mode 'off'
+      // skips verification entirely and proves nothing; a failing gate
+      // rethrows above and never reaches here.
+      if (decision.mode !== 'off') {
+        this.reconcileVerifyGateRecovery();
+      }
     } catch (err) {
       log.error({ err }, 'postConnectRecovery: quarantine-clear verification failed');
       recoveryRun.failImmediately(
@@ -2565,6 +2589,41 @@ export class DurabilityEngine {
     recoveryRun.finalize();
     log.info(stats, 'postConnectRecovery: complete');
     return stats;
+  }
+
+  /**
+   * #2394 (fleet_health_verify_gate_failed): clear a prior-process gate
+   * warning once a fully-successful active-mode gate pass has proven the
+   * verification infrastructure recovered. Owns ONLY the gate-failure
+   * warning — authentication and quarantine incidents have their own
+   * lifecycles. A rejected clear keeps the marker so the next gate pass
+   * retries; a missing/unreadable marker store means no prior incident.
+   */
+  private reconcileVerifyGateRecovery(): void {
+    const markerKey = `fleet_health_verify_gate_failed:${config.botName}`;
+    try {
+      if (!loadRecoveryMarkers().has(markerKey)) return;
+    } catch {
+      // intentional: marker store unreadable — treat as no prior incident.
+      return;
+    }
+    if (!clearAlertSourceChecked(
+      config.botName,
+      'fleet_health_verify_gate_failed',
+      'active-mode quarantine verify gate pass succeeded (#2394)',
+      undefined,
+      { requireDurableOutbox: true },
+    )) {
+      // Clear not durably accepted — marker retained; the next successful
+      // gate pass retries. Never fail the recovery run over reconciliation.
+      return;
+    }
+    try {
+      clearRecoveryMarker(markerKey);
+    } catch {
+      // intentional: marker removal is best-effort — a stale marker only
+      // causes one redundant idempotent clear on a later pass.
+    }
   }
 
   /** Reconcile delivery debt created after the one-time post-connect pass. */
