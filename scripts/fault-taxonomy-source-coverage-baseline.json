@@ -45,74 +45,8 @@
       "reason": "emitted on main without a sourceDispositions entry; awaiting deliberate disposition authorship (#2147)"
     },
     {
-      "source": "fallback_binary_missing",
-      "owner": "src/runtimes/agent/runtime.ts",
-      "status": "debt",
-      "reason": "emitted on main without a sourceDispositions entry; awaiting deliberate disposition authorship (#2147)"
-    },
-    {
-      "source": "fallback_credential_invalid",
-      "owner": "src/runtimes/agent/runtime.ts",
-      "status": "debt",
-      "reason": "emitted on main without a sourceDispositions entry; awaiting deliberate disposition authorship (#2147)"
-    },
-    {
-      "source": "fallback_credential_missing",
-      "owner": "src/runtimes/agent/runtime.ts",
-      "status": "debt",
-      "reason": "emitted on main without a sourceDispositions entry; awaiting deliberate disposition authorship (#2147)"
-    },
-    {
-      "source": "fallback_empty_turn",
-      "owner": "src/runtimes/agent/runtime.ts",
-      "status": "debt",
-      "reason": "emitted on main without a sourceDispositions entry; awaiting deliberate disposition authorship (#2147)"
-    },
-    {
-      "source": "fallback_model_unknown",
-      "owner": "src/runtimes/agent/runtime.ts",
-      "status": "debt",
-      "reason": "emitted on main without a sourceDispositions entry; awaiting deliberate disposition authorship (#2147)"
-    },
-    {
-      "source": "fallback_no_independent_provider",
-      "owner": "src/runtimes/agent/runtime.ts",
-      "status": "debt",
-      "reason": "emitted on main without a sourceDispositions entry; awaiting deliberate disposition authorship (#2147)"
-    },
-    {
-      "source": "fallback_persist_chain_mismatch",
-      "owner": "src/runtimes/agent/fallback-restore.ts",
-      "status": "debt",
-      "reason": "emitted on main without a sourceDispositions entry; awaiting deliberate disposition authorship (#2147)"
-    },
-    {
-      "source": "fallback_persist_failed",
-      "owner": "src/runtimes/agent/runtime.ts",
-      "status": "debt",
-      "reason": "emitted on main without a sourceDispositions entry; awaiting deliberate disposition authorship (#2147)"
-    },
-    {
       "source": "fallback_persist_version_incompatible",
       "owner": "src/runtimes/agent/fallback-restore.ts",
-      "status": "debt",
-      "reason": "emitted on main without a sourceDispositions entry; awaiting deliberate disposition authorship (#2147)"
-    },
-    {
-      "source": "fallback_preflight_config_error",
-      "owner": "src/runtimes/agent/runtime.ts",
-      "status": "debt",
-      "reason": "emitted on main without a sourceDispositions entry; awaiting deliberate disposition authorship (#2147)"
-    },
-    {
-      "source": "fallback_provider_failed",
-      "owner": "src/runtimes/agent/runtime.ts",
-      "status": "debt",
-      "reason": "emitted on main without a sourceDispositions entry; awaiting deliberate disposition authorship (#2147)"
-    },
-    {
-      "source": "fallback_recovery_stalled",
-      "owner": "src/runtimes/agent/runtime.ts",
       "status": "debt",
       "reason": "emitted on main without a sourceDispositions entry; awaiting deliberate disposition authorship (#2147)"
     },
