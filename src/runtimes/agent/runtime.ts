@@ -246,7 +246,7 @@ import {
   QueuedDecisionConsumer,
 } from './pending-poll-health.ts';
 import { HandoffDistillCoordinator } from './handoff-distill-coordinator.ts';
-import { activateCapabilityObligationRuntime, buildObligationLiveFacts, CapabilityObligationRuntime, dispatchCapabilityObligationTurnViaSession, turnCorrelationFromContexts } from './capability-obligation-runtime.ts';
+import { activateCapabilityObligationRuntime, buildObligationLiveFacts, CapabilityObligationRuntime, dispatchCapabilityObligationTurnViaSession, servingProviderId, turnCorrelationFromContexts } from './capability-obligation-runtime.ts';
 import { handoffDistillerEnabled, handoffContextEnabled, handoffDistillModel } from './handoff-distill-config.ts';
 import { config } from '../../config.ts';
 import type { StartupNotificationEvent } from '../../core/startup-notification-controller.ts';
@@ -2861,7 +2861,13 @@ export class AgentRuntime implements Runtime {
         db: this.db,
         store: engine.capabilityObligations,
         options: config.capabilityObligations,
-        liveFacts: () => buildObligationLiveFacts(config.agentProvider),
+        liveFacts: (deliveryJid: string) => {
+          // r13 F4 — bind the provider SERVING this chat, not the configured
+          // primary: resolve the same dispatch target dispatch uses (so they agree
+          // on the harness), then read its provider (servingProviderId fails closed).
+          const target = this.resolvePerChatDispatchTarget(deliveryJid);
+          return buildObligationLiveFacts(servingProviderId(target?.session as SessionManager | undefined));
+        },
         getDurability: () => this.durability,
         dispatchTurn: (o, m, s) => dispatchCapabilityObligationTurnViaSession(
           this.runtimeTurnCoordinator,

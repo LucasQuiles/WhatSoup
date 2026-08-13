@@ -350,6 +350,30 @@ describe('D7 falsifier — group drains need an exactly bound, live-matching app
     expect(stateOf(id)).toBe('waiting_approval');
   });
 
+  it('FALSIFIER (r13 F3): a group approval REVOKED after consumption can no longer be CLAIMED', () => {
+    // The group_approval_gate trigger fires only on waiting_approval →
+    // waiting_capability; the claim out of waiting_capability must re-validate the
+    // approval, or a revoked approval still dispatches (the r13 High).
+    const id = seedObligation(GROUP);
+    const approvalId = insertApproval(id);
+    expect(store.consumeGroupDrainApproval(id, LIVE).applied).toBe(true);
+    expect(stateOf(id)).toBe('waiting_capability');
+    // Revoke AFTER consumption — the obligation row is untouched (still parked).
+    db.raw.prepare("UPDATE capability_drain_approvals SET revoked_at = datetime('now') WHERE id = ?").run(approvalId);
+    const claim = store.claimObligation(id, { claimToken: 'tok-revoked', leaseSeconds: 300 });
+    expect(claim.applied).toBe(false); // revoked approval is re-checked at claim time
+    expect(stateOf(id)).toBe('waiting_capability'); // nothing dispatched
+  });
+
+  it('a group approval still valid at claim time claims normally (r13 F3 positive control)', () => {
+    const id = seedObligation(GROUP);
+    insertApproval(id);
+    expect(store.consumeGroupDrainApproval(id, LIVE).applied).toBe(true);
+    const claim = store.claimObligation(id, { claimToken: 'tok-ok', leaseSeconds: 300 });
+    expect(claim.applied).toBe(true);
+    expect(stateOf(id)).toBe('claimed');
+  });
+
   it('a group approval row without an attestation digest is unrepresentable', () => {
     const id = seedObligation(GROUP);
     expect(() => insertApproval(id, { attestationDigest: null })).toThrow();

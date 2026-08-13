@@ -87,21 +87,48 @@ interface ResolverRun {
 
 function runResolver(argv: readonly string[], timeoutMs: number): Promise<ResolverRun> {
   return new Promise((resolve, reject) => {
+    // `detached: true` makes the child its OWN process-group leader, so a timeout
+    // can reap the WHOLE descendant tree, not just the immediate child. Node's
+    // built-in `timeout` option only signals the direct child (r13 F2): a resolver
+    // that forks a grandchild (yt-dlp → ffmpeg, a shell, etc.) would leave it alive
+    // to land side effects AFTER the error receipt and before a retry. We own the
+    // watchdog instead and SIGKILL the negative pid (the whole group).
     const child = spawn(argv[0]!, argv.slice(1), {
       stdio: ['ignore', 'pipe', 'pipe'],
-      timeout: timeoutMs,
+      detached: true,
     });
+    const pid = child.pid; // capture now — undefined if spawn failed
     let stdout = '';
     let stderr = '';
     let timedOut = false;
+    let settled = false;
+    const killGroup = (): void => {
+      if (pid === undefined) return;
+      try { process.kill(-pid, 'SIGKILL'); } catch { /* already dead: the process group was reaped by a clean exit or an earlier kill */ }
+    };
+    const watchdog = setTimeout(() => {
+      timedOut = true;
+      killGroup(); // reap the leader AND every descendant
+    }, timeoutMs);
+    watchdog.unref?.();
     child.stdout.on('data', (chunk: Buffer) => {
       if (stdout.length < STDOUT_CAP_BYTES) stdout += chunk.toString('utf8');
     });
     child.stderr.on('data', (chunk: Buffer) => {
       if (stderr.length < STDERR_CAP_BYTES) stderr += chunk.toString('utf8');
     });
-    child.on('error', reject);
+    child.on('error', (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(watchdog);
+      reject(err);
+    });
     child.on('close', (code, signal) => {
+      if (settled) return;
+      settled = true;
+      // Clear the watchdog BEFORE resolving so a child that exits cleanly just
+      // before the deadline is never group-killed after a successful run.
+      clearTimeout(watchdog);
       if (signal !== null) timedOut = true;
       resolve({ exitCode: code, timedOut, stdout, stderr });
     });

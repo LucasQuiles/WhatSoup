@@ -80,7 +80,13 @@ export interface CapabilityObligationRuntimeDeps {
   db: Database;
   store: CapabilityObligationStore;
   options: CapabilityObligationsOptions;
-  liveFacts: () => CapabilityObligationLiveFacts;
+  /**
+   * D5 live binding facts for the provider SERVING a given chat (r13 F4). The
+   * caller resolves the effective/fallback provider of the target session (not the
+   * configured primary), so attestation admits only against the harness that will
+   * actually execute; an unresolvable session yields a fail-closed sentinel.
+   */
+  liveFacts: (deliveryJid: string) => CapabilityObligationLiveFacts;
   /**
    * The live durability engine, or null before setDurability. A null engine at
    * dispatch time makes the attempt retryable (never a crash).
@@ -172,7 +178,7 @@ export class CapabilityObligationRuntime {
       mediaMaxAgeSeconds: deps.options.retentionHorizonDays * 86_400,
       attestationPort: {
         binding: (obligation): CapabilityAttestationBinding => ({
-          ...deps.liveFacts(),
+          ...deps.liveFacts(obligation.deliveryJid),
           contractVersion: obligation.contractVersion,
           capability: obligation.requiredCapability,
           skillName: this.options.attestation.skillName,
@@ -439,6 +445,26 @@ export function resolveHarnessType(providerId: string): string {
   }
 }
 
+/**
+ * The fail-closed sentinel provider id used when the serving provider of a chat
+ * cannot be determined. resolveHarnessType maps it to 'unknown_harness', which
+ * never matches a recorded attestation — so admission fails closed and the
+ * obligation waits rather than running on an unverified harness (r13 F4).
+ */
+export const UNRESOLVED_SERVING_PROVIDER = 'unresolved-serving-provider';
+
+/**
+ * The provider ACTUALLY serving a chat, read from its live session's
+ * effective/fallback provider (r13 F4). Returns the fail-closed sentinel when the
+ * session is absent or does not report a provider — never the configured primary,
+ * which is the defect this closes.
+ */
+export function servingProviderId(session: { getProviderId?: () => string | null } | null | undefined): string {
+  const providerId =
+    session && typeof session.getProviderId === 'function' ? session.getProviderId() : null;
+  return providerId ?? UNRESOLVED_SERVING_PROVIDER;
+}
+
 /** Live D5 binding facts for the running process (extracted from runtime.ts). */
 export function buildObligationLiveFacts(providerId: string): CapabilityObligationLiveFacts {
   return {
@@ -538,16 +564,26 @@ export async function dispatchCapabilityObligationTurnViaSession(
     runtimeContext,
     inboundSeq: mintedSeq,
   };
+  // Track the REAL provider boundary. Once the turn crosses it, the capability
+  // side effect may already have happened, so a subsequent failure is AMBIGUOUS,
+  // not retryable (spec §3.2: an ambiguous provider outcome ⇒ blocked_ambiguous,
+  // never auto-retried). Discarding this signal (the old `() => {}`) let every
+  // post-boundary exception fall through to 'retryable' and auto-re-execute.
+  let providerBoundaryCrossed = false;
   try {
     await coordinator.processPerChatTurn(
       { value: target.mapKey },
       turn,
       undefined,
       () => isTargetCurrent(target),
-      () => {},
+      () => { providerBoundaryCrossed = true; },
     );
   } catch (err) {
-    log.warn({ err, obligationId: obligation.id }, 'obligation turn dispatch failed');
+    if (providerBoundaryCrossed) {
+      log.warn({ err, obligationId: obligation.id }, 'obligation turn failed AFTER the provider boundary; quarantining ambiguous');
+      return 'ambiguous';
+    }
+    log.warn({ err, obligationId: obligation.id }, 'obligation turn dispatch failed pre-boundary; retryable');
     return 'retryable';
   }
   return 'dispatched';

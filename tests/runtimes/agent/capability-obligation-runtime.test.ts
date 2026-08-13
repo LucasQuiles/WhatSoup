@@ -20,7 +20,11 @@ import { withTransaction } from '../../../src/core/db-tx.ts';
 import {
   CapabilityObligationRuntime,
   composeCapabilityObligationReplayPrompt,
+  dispatchCapabilityObligationTurnViaSession,
+  resolveHarnessType,
   resolveReleaseIdentity,
+  servingProviderId,
+  UNRESOLVED_SERVING_PROVIDER,
   type CapabilityObligationLiveFacts,
 } from '../../../src/runtimes/agent/capability-obligation-runtime.ts';
 import type { CapabilityObligationDueRow } from '../../../src/core/capability-obligation-store.ts';
@@ -30,6 +34,17 @@ import type { SessionContext } from '../../../src/mcp/types.ts';
 import type { ToolDeclaration } from '../../../src/mcp/types.ts';
 
 const TOOL_SESSION: SessionContext = { tier: 'chat', conversationKey: 'conv-rt', deliveryJid: 'test-dm-target@lid' };
+
+/**
+ * Structured timing exemption (test-integrity `js-sleep-in-test`): the resolver
+ * process-group reap test observes whether a REAL grandchild process writes after
+ * a REAL timeout. Fake timers cannot advance an external process's wall clock, and
+ * the only condition to poll (the marker file) is the very absence the test
+ * asserts — so we must let real time pass the grandchild's would-be write.
+ */
+function TIMING(waitMs: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, waitMs));
+}
 
 const OPTIONS = parseCapabilityObligationsOptions({
   enabled: true,
@@ -175,6 +190,8 @@ interface HarnessScript {
   onDispatch?: (tool: ToolDeclaration, runtime: CapabilityObligationRuntime) => Promise<void> | void;
   journalThrows?: boolean;
   execution?: CapabilityObligationsOptions['execution'];
+  /** r13 F4 — override the SERVING-provider facts, keyed by the chat's deliveryJid. */
+  liveFacts?: (deliveryJid: string) => CapabilityObligationLiveFacts;
 }
 
 function makeRuntime(script: HarnessScript = {}) {
@@ -184,7 +201,7 @@ function makeRuntime(script: HarnessScript = {}) {
     db,
     store,
     options: script.execution === undefined ? OPTIONS : { ...OPTIONS, execution: script.execution },
-    liveFacts: () => LIVE_FACTS,
+    liveFacts: script.liveFacts ?? (() => LIVE_FACTS),
     getDurability: () =>
       script.journalThrows
         ? null
@@ -222,6 +239,24 @@ describe('attestation port (D5)', () => {
     report = (await runtime.tickOnce()) as never;
     expect(dispatched).toEqual([{ id, minted: `obl:${id}:1`, seq: expect.any(Number) }]);
     expect(state(id)).toEqual({ state: 'claimed', attempt_count: 1 });
+  });
+
+  it('FALSIFIER (r13 F4): a PRIMARY-provider attestation does NOT admit a replay served by a FALLBACK harness', async () => {
+    const id = seedObligation();
+    freshAttestation(); // recorded for LIVE_FACTS (primary: claude-cli / persistent_session)
+    const seenJids: string[] = [];
+    const { runtime, dispatched } = makeRuntime({
+      // The chat is DEGRADED onto a fallback harness — the serving provider differs
+      // from the configured primary the attestation was recorded for.
+      liveFacts: (deliveryJid) => {
+        seenJids.push(deliveryJid);
+        return { ...LIVE_FACTS, providerId: 'opencode-cli', harnessType: 'spawn_per_turn' };
+      },
+    });
+    const report = (await runtime.tickOnce()) as { attestationSkips: Array<{ id: number; reason: string }> };
+    expect(report.attestationSkips.map((s) => s.id)).toEqual([id]); // not admitted on the fallback
+    expect(dispatched).toEqual([]);
+    expect(seenJids).toContain('test-dm-target@lid'); // liveFacts resolved PER the obligation's chat
   });
 });
 
@@ -371,6 +406,53 @@ describe('trusted execution tool (D6)', () => {
       rmSync(work, { recursive: true, force: true });
     }
   });
+
+  it('FALSIFIER: a resolver timeout REAPS the whole process group — a grandchild cannot escape and write after the deadline', async () => {
+    // Node's spawn `timeout` option signals only the IMMEDIATE child (r13 F2). A
+    // resolver that forks a grandchild and times out would leave the grandchild
+    // alive to land a side effect AFTER the error receipt. The resolver here forks
+    // a grandchild that writes a marker 600ms in, and itself stays alive past the
+    // 200ms deadline; a correct reap (SIGKILL the process GROUP) kills both, so the
+    // marker is never written.
+    const work = mkdtempSync(join(tmpdir(), 'capx-reap-'));
+    try {
+      const resolver = join(work, 'resolver.cjs');
+      writeFileSync(
+        resolver,
+        [
+          "const cp=require('child_process');",
+          'const marker=process.argv[2];',
+          'const gc=cp.spawn(process.execPath,[\'-e\',\'setTimeout(function(){require("fs").writeFileSync(process.argv[1],"ESCAPED")},600)\',marker],{stdio:\'ignore\'});',
+          'gc.unref();',
+          "console.log('resolver-alive');",
+          'setTimeout(function(){},5000);',
+        ].join('\n'),
+      );
+      const escaped = join(work, 'escaped');
+      const ESCAPED_DIGEST = createHash('sha256').update(escaped).digest('hex');
+      const id = seedObligation({ sourceDigest: ESCAPED_DIGEST, sourceToken: escaped, replayText: escaped });
+      freshAttestation();
+      const { runtime } = makeRuntime({
+        execution: { command: ['node', resolver, '{source}'], timeoutMs: 200, minOutputBytes: 1 },
+        onDispatch: async (tool) => {
+          const result = (await tool.handler({ source: escaped }, TOOL_SESSION)) as Record<string, unknown>;
+          expect(result['error']).toBe('capability_execution_failed'); // timed out
+          // Wait past the grandchild's would-be write (600ms from spawn); a reaped
+          // group never gets there.
+          await TIMING(1000);
+        },
+      });
+      await runtime.tickOnce();
+      expect(existsSync(escaped)).toBe(false); // the descendant was reaped, not left to escape
+      const row = db.raw
+        .prepare('SELECT result_status, output_evidence FROM capability_execution_receipts WHERE obligation_id = ?')
+        .get(id) as { result_status: string; output_evidence: string };
+      expect(row.result_status).toBe('error');
+      expect((JSON.parse(row.output_evidence) as Record<string, unknown>)['timedOut']).toBe(true);
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
+  }, 15_000);
 
   it('outside an active obligation turn the tool refuses and records nothing', async () => {
     const { tool } = makeRuntime();
@@ -619,5 +701,62 @@ describe('helpers', () => {
     expect(resolveReleaseIdentity('/opt/WhatSoup-release-abc1234', { WHATSOUP_RELEASE_SHA: 'envsha' })).toBe('envsha');
     expect(resolveReleaseIdentity('/opt/WhatSoup-release-abc1234', {})).toBe('abc1234');
     expect(resolveReleaseIdentity('/opt/whatsoup-dev-checkout', {})).toBe('unreleased-dev-tree');
+  });
+
+  it('servingProviderId: reads the live session provider, else a fail-closed sentinel (r13 F4)', () => {
+    // The serving/fallback provider of the live session is bound — NOT the primary.
+    expect(servingProviderId({ getProviderId: () => 'opencode-cli' })).toBe('opencode-cli');
+    // Absent session / no provider / null provider all fail closed to the sentinel.
+    expect(servingProviderId(null)).toBe(UNRESOLVED_SERVING_PROVIDER);
+    expect(servingProviderId(undefined)).toBe(UNRESOLVED_SERVING_PROVIDER);
+    expect(servingProviderId({})).toBe(UNRESOLVED_SERVING_PROVIDER);
+    expect(servingProviderId({ getProviderId: () => null })).toBe(UNRESOLVED_SERVING_PROVIDER);
+    // The sentinel routes to 'unknown_harness', which matches no recorded
+    // attestation — the fail-closed claim the fix relies on.
+    expect(resolveHarnessType(UNRESOLVED_SERVING_PROVIDER)).toBe('unknown_harness');
+  });
+});
+
+describe('dispatch provider-boundary outcome (D7/r13 F1)', () => {
+  type DispatchArgs = Parameters<typeof dispatchCapabilityObligationTurnViaSession>;
+  const DUE = {
+    id: 1, conversationKey: 'conv-b', deliveryJid: 'test-dm-target@lid',
+    senderJid: 'test-sender@s.whatsapp.net', senderName: 'S', isGroup: false, groupName: null,
+    requiredCapability: 'child_process_tools', retainedMediaPath: null,
+    sourceToken: 'https://youtu.be/x', replayText: 'watch this',
+  } as unknown as DispatchArgs[4];
+  const target = { session: {}, mapKey: 'mk' };
+
+  // A fake coordinator whose processPerChatTurn drives the onProviderBoundary
+  // callback (5th arg) exactly as the caller wires it, then behaves as scripted.
+  function callWith(process: (onBoundary: () => void) => Promise<void>): Promise<string> {
+    const coord = {
+      createRuntimeTurnForDispatch: () => ({ ctx: true }),
+      processPerChatTurn: (_s: unknown, _t: unknown, _x: unknown, _a: unknown, onBoundary: () => void) => process(onBoundary),
+    } as unknown as DispatchArgs[0];
+    return dispatchCapabilityObligationTurnViaSession(
+      coord,
+      (() => target) as unknown as DispatchArgs[1],
+      (() => 'scope-key') as unknown as DispatchArgs[2],
+      (() => true) as unknown as DispatchArgs[3],
+      DUE,
+      'obl:1:1',
+      42,
+    );
+  }
+
+  it("FALSIFIER: crossing the provider boundary then THROWING returns 'ambiguous', never retryable", async () => {
+    await expect(callWith(async (onBoundary) => { onBoundary(); throw new Error('post-boundary crash'); }))
+      .resolves.toBe('ambiguous');
+  });
+
+  it("a PRE-boundary throw returns 'retryable' (nothing was executed, safe to auto-retry)", async () => {
+    await expect(callWith(async () => { throw new Error('pre-boundary crash'); }))
+      .resolves.toBe('retryable');
+  });
+
+  it("a clean turn returns 'dispatched'", async () => {
+    await expect(callWith(async (onBoundary) => { onBoundary(); }))
+      .resolves.toBe('dispatched');
   });
 });

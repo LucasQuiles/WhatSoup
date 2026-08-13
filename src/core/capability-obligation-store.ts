@@ -397,6 +397,13 @@ export class CapabilityObligationStore {
     id: number,
     params: { claimToken: string; leaseSeconds: number },
   ): { applied: true; claimEpoch: number; attemptCount: number } | { applied: false } {
+    // r13 F3 — group obligations RE-VALIDATE the consumed drain approval at CLAIM
+    // time, not only at the waiting_approval → waiting_capability transition (the
+    // group_approval_gate trigger fires only there). Without this, an approval
+    // revoked or expired AFTER consumption — or that drifted from the facts stored
+    // on the obligation — could still be claimed and dispatched. Fail-closed: the
+    // EXISTS must still hold (unrevoked, unexpired, facts match) or the claim is
+    // refused and the group obligation dispatches nothing.
     const row = this.db.raw
       .prepare(
         `UPDATE capability_obligations
@@ -411,6 +418,22 @@ export class CapabilityObligationStore {
            AND state = 'waiting_capability'
            AND attempt_count < ${CAPABILITY_OBLIGATION_MAX_ATTEMPTS}
            AND (next_attempt_at IS NULL OR datetime(next_attempt_at) <= datetime('now'))
+           AND (
+             capability_obligations.is_group = 0
+             OR EXISTS (
+               SELECT 1 FROM capability_drain_approvals a
+               WHERE a.id = capability_obligations.drain_approval_id
+                 AND a.obligation_id = capability_obligations.id
+                 AND a.scope = 'group'
+                 AND a.destination_jid = capability_obligations.delivery_jid
+                 AND a.release_sha = capability_obligations.drain_release_sha
+                 AND a.manifest_digest = capability_obligations.drain_manifest_digest
+                 AND a.drain_run_id = capability_obligations.drain_run_id
+                 AND a.attestation_digest = capability_obligations.drain_attestation_digest
+                 AND a.revoked_at IS NULL
+                 AND datetime(a.expires_at) > datetime('now')
+             )
+           )
          RETURNING claim_epoch, attempt_count`,
       )
       .get(params.claimToken, params.leaseSeconds, id) as

@@ -50,13 +50,16 @@ export const OBLIGATION_LEASE_SECONDS = 300;
 export const OBLIGATION_BACKOFF_SECONDS = 60;
 const SCAN_LIMIT = 10;
 
-export type ObligationDispatchOutcome = 'dispatched' | 'retryable';
+export type ObligationDispatchOutcome = 'dispatched' | 'retryable' | 'ambiguous';
 
 export interface ObligationDispatchPort {
   /**
    * Journal the minted inbound and enter the normal turn pipeline. Must NOT
-   * send through transport directly. 'retryable' = target/session not current;
-   * the obligation requeues under bounded backoff.
+   * send through transport directly. 'retryable' = target/session not current
+   * (nothing crossed the provider boundary) → requeue under bounded backoff.
+   * 'ambiguous' = the turn crossed the provider boundary and then failed, so the
+   * side effect may or may not have happened → quarantine `blocked_ambiguous`,
+   * NEVER auto-retried (spec: ambiguous provider outcome ⇒ blocked_ambiguous).
    */
   dispatch(
     obligation: CapabilityObligationDueRow,
@@ -260,11 +263,19 @@ export class CapabilityObligationSupervisor {
       try {
         outcome = await this.dispatchPort.dispatch(due, mintedMessageId, fence, claim.attemptCount);
       } catch (err) {
-        log.warn({ err, obligationId: due.id }, 'obligation dispatch threw; requeueing under fence');
-        outcome = 'retryable';
+        // The dispatch port converts every post-boundary failure to 'ambiguous'
+        // itself, so a THROW that escapes to here cannot be proven pre-boundary.
+        // Fail closed: quarantine rather than auto-retry a possibly-effected turn.
+        log.warn({ err, obligationId: due.id }, 'obligation dispatch threw; quarantining fail-closed under fence');
+        outcome = 'ambiguous';
       }
       if (outcome === 'dispatched') {
         report.dispatched.push(due.id);
+      } else if (outcome === 'ambiguous') {
+        // Crossed the provider boundary then failed — the side effect is
+        // unprovable, so the obligation is quarantined and NEVER auto-retried.
+        const blocked = this.store.blockObligation(due.id, fence, 'blocked_ambiguous', 'dispatch_outcome_ambiguous');
+        if (blocked.applied) report.quarantinedAmbiguous.push(due.id);
       } else {
         const requeued = this.store.requeueObligation(due.id, fence, {
           backoffSeconds: this.backoffSeconds,

@@ -198,13 +198,31 @@ describe('dispatch outcomes (D7)', () => {
     expect(state(id)).toEqual({ state: 'waiting_capability', attempt_count: 1 });
   });
 
-  it('a throwing dispatch is treated as retryable, never crashes the tick', async () => {
+  it('a throwing dispatch is QUARANTINED fail-closed (ambiguous), never retried or crashing the tick', async () => {
+    // A throw that escapes the dispatch port cannot be proven pre-boundary, so it
+    // must fail closed to blocked_ambiguous — auto-retrying a possibly-effected
+    // turn is the r13 Critical.
     const id = seedObligation();
     freshAttestation();
     const { supervisor } = makeSupervisor({ dispatch: new Error('boom') });
     const report = await supervisor.tick();
-    expect(report.requeuedRetryable).toEqual([id]);
-    expect(state(id).state).toBe('waiting_capability');
+    expect(report.requeuedRetryable).toEqual([]);
+    expect(report.quarantinedAmbiguous).toEqual([id]);
+    expect(state(id).state).toBe('blocked_ambiguous');
+  });
+
+  it("a dispatch that returns 'ambiguous' (crossed the provider boundary then failed) quarantines, never auto-retries", async () => {
+    const id = seedObligation();
+    freshAttestation();
+    const { supervisor } = makeSupervisor({ dispatch: 'ambiguous' });
+    const report = await supervisor.tick();
+    expect(report.quarantinedAmbiguous).toEqual([id]);
+    expect(report.requeuedRetryable).toEqual([]);
+    expect(state(id).state).toBe('blocked_ambiguous');
+    // A later tick must NOT re-dispatch a quarantined obligation.
+    const report2 = await supervisor.tick();
+    expect(report2.dispatched).toEqual([]);
+    expect(state(id).state).toBe('blocked_ambiguous');
   });
 });
 
