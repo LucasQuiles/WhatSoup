@@ -21,7 +21,9 @@ import {
   type SilenceRegistryEpisodeStorePort,
 } from './silence-registry-episode-store.ts';
 import { hasExplicitAuthLossSignal } from './auth-loss-signals.ts';
-import { AuthLossSignalStore, type AuthLossSignalInput } from './auth-loss-signal-store.ts';
+import { AUTH_LOSS_SIGNAL_CLASSIFIERS, AuthLossSignalStore, type AuthLossSignalInput } from './auth-loss-signal-store.ts';
+import { AuthLossSignalTransitionController, type AuthLossSignalStorePort } from './auth-loss-signal-transition-controller.ts';
+import type { StableAuthenticatedOpenSample } from './auth-loss-signal-resolver.ts';
 import type { FleetDbReader } from './db-reader.ts';
 import { jidPattern } from '../lib/redaction-patterns.ts';
 import {
@@ -224,6 +226,29 @@ function booleanValue(value: unknown): boolean | null {
 function evidenceField(name: string, value: unknown): string {
   if (value === undefined || value === null || value === '') return `${name}=unknown`;
   return `${name}=${String(value)}`;
+}
+
+/**
+ * #1786: projects a health snapshot onto the stable-authenticated-open sample
+ * shape the auth-loss resolver evaluates. Field extraction mirrors
+ * {@link classifyHealthSnapshot}; missing/unparseable fields stay null (or
+ * false for `connected`), which the resolver treats as NOT stable — unknown
+ * never counts toward recovery proof.
+ */
+function stableAuthenticatedOpenSampleFromHealth(health: Record<string, unknown>): StableAuthenticatedOpenSample {
+  const whatsapp = asRecord(health.whatsapp);
+  const connection = asRecord(whatsapp?.connection);
+  const accountJid = stringValue(whatsapp?.account_jid);
+  const generatedAt = stringValue(health.generated_at);
+  return {
+    sampledAt: generatedAt !== null && Number.isFinite(Date.parse(generatedAt)) ? generatedAt : new Date().toISOString(),
+    connected: booleanValue(whatsapp?.connected) === true,
+    accountStatus: accountJid === null ? 'missing' : accountJid === 'not connected' ? 'not_connected' : 'present',
+    connectionState: stringValue(connection?.state),
+    reconnectPhase: stringValue(connection?.reconnect_phase),
+    reconnectAttempts: nonNegativeIntegerValue(connection?.reconnect_attempts),
+    recentDisconnectCount: nonNegativeIntegerValue(asRecord(connection?.recent_disconnects)?.count),
+  };
 }
 
 function classifyDatabaseInspectionHealth(
@@ -705,6 +730,10 @@ export class HealthPoller {
    */
   private readonly dbReader: FleetDbReader | null;
   private readonly silenceRegistryEpisodeStore: SilenceRegistryEpisodeStorePort;
+  // #1786: production owner for durable auth-loss recovery. Null exactly when
+  // dbReader is null (no durable rows can exist to resolve).
+  private readonly authLossTransition: AuthLossSignalTransitionController | null;
+  private readonly authLossObserveWarned = new Set<string>();
 
   constructor(
     getInstances: () => Map<string, InstanceHealth>,
@@ -715,6 +744,7 @@ export class HealthPoller {
     dbReader: FleetDbReader | null = null,
     silenceRegistryEpisodeStore: SilenceRegistryEpisodeStorePort = createSilenceRegistryEpisodeStore(),
     hostName: string = hostname(),
+    authLossQuietDwellSeconds = 300,
   ) {
     this.getInstances = getInstances;
     this.selfName = selfName;
@@ -724,6 +754,14 @@ export class HealthPoller {
     this.dbReader = dbReader;
     this.silenceRegistryEpisodeStore = silenceRegistryEpisodeStore;
     this.hostName = hostName;
+    this.authLossTransition = dbReader === null ? null : new AuthLossSignalTransitionController(
+      this.createAuthLossStorePort(),
+      {
+        quietDwellSeconds: authLossQuietDwellSeconds,
+        pollIntervalSeconds: Math.max(1, intervalMs / 1000),
+        sampleTolerance: 1,
+      },
+    );
     const throttle = loadAlertThrottleDetailed();
     this.persistedAlertThrottle = throttle.entries;
     this.alertThrottleLoadErrorCode = throttle.loadError?.code ?? (throttle.loadError ? 'UNKNOWN' : null);
@@ -1010,6 +1048,7 @@ export class HealthPoller {
         try {
           const health = this.getSelfHealth();
           const classification = classifyHealthSnapshot(health, name);
+          this.observeAuthRecoverySample(name, health);
           if (isNonOnlineClassification(classification)) {
             this.updateFromHealthSnapshot(name, health, classification);
             return;
@@ -1082,6 +1121,7 @@ export class HealthPoller {
                 return;
               }
               const classification = classifyHealthSnapshot(failureHealth, name, res.status);
+              this.observeAuthRecoverySample(name, failureHealth);
               if (
                 isNonOnlineClassification(classification) &&
                 classification.reason !== 'health_body_unrecognized' &&
@@ -1104,6 +1144,7 @@ export class HealthPoller {
 
         const loggedOutSignal = this.classifyLoggedOutSignal(name, health);
         const classification = classifyHealthSnapshot(health, name, responseStatus);
+        this.observeAuthRecoverySample(name, health);
 
         const healthStatus = typeof health['status'] === 'string' ? health['status'] : '';
 
@@ -2064,12 +2105,65 @@ export class HealthPoller {
     name: string,
     signal: Pick<AuthLossSignalInput, 'classifier' | 'reason' | 'confidence'>,
   ): void {
-    if (this.dbReader === null) return;
-    const dbPath = this.getInstances().get(name)?.dbPath ?? '';
-    const result = this.dbReader.queryWrite(name, dbPath, (rawDb) =>
-      new AuthLossSignalStore(rawDb).record({ instance: name, host: this.selfName, ...signal }));
-    if (!result.ok) {
-      log.warn({ name, dbPath, error: result.error }, 'failed to record durable auth-loss signal (#1786)');
+    if (this.authLossTransition === null) return;
+    try {
+      // Through the transition controller (not the bare store) so a recorded
+      // loss also arms the recovery window that later resolves it (#1786).
+      this.authLossTransition.recordAuthLoss({ instance: name, host: this.selfName, ...signal });
+    } catch (err) {
+      const dbPath = this.getInstances().get(name)?.dbPath ?? '';
+      log.warn({ name, dbPath, error: err instanceof Error ? err.message : String(err) }, 'failed to record durable auth-loss signal (#1786)');
+    }
+  }
+
+  /**
+   * Store port routing each call to the target instance's own migrated DB via
+   * the queryWrite seam (see {@link writeDurableAuthLoss} for why never
+   * `deps.db`). Infra failures throw; callers log and continue — the loop is
+   * level-triggered, so the next poll retries (#1786).
+   */
+  private createAuthLossStorePort(): AuthLossSignalStorePort {
+    const call = <T,>(instance: string, op: string, fn: (store: AuthLossSignalStore) => T): T => {
+      if (this.dbReader === null) throw new Error(`auth-loss ${op}: no dbReader`);
+      const dbPath = this.getInstances().get(instance)?.dbPath ?? '';
+      const result = this.dbReader.queryWrite(instance, dbPath, (rawDb) => fn(new AuthLossSignalStore(rawDb)));
+      if (!result.ok) throw new Error(`auth-loss ${op} failed: ${result.error}`);
+      return result.data;
+    };
+    return {
+      record: (input) => call(input.instance, 'record', (store) => store.record(input)),
+      resolve: (input) => call(input.instance, 'resolve', (store) => store.resolve(input)),
+      hasUnresolved: (instance, classifier) => call(instance, 'hasUnresolved', (store) => store.hasUnresolved(instance, classifier)),
+    };
+  }
+
+  /**
+   * #1786 recovery feed: every classified health snapshot — including online
+   * ones, which never reach {@link updateFromHealthSnapshot} — is offered to
+   * the transition controller for both classifiers. Unstable samples reset
+   * the quiet window (fail-closed); resolution requires the full
+   * stable-authenticated-open proof, so a bare reconnect is never enough.
+   */
+  private observeAuthRecoverySample(name: string, health: Record<string, unknown>): void {
+    if (this.authLossTransition === null) return;
+    const sample = stableAuthenticatedOpenSampleFromHealth(health);
+    for (const classifier of AUTH_LOSS_SIGNAL_CLASSIFIERS) {
+      const warnKey = `${name}:${classifier}`;
+      try {
+        const result = this.authLossTransition.observeHealthSample({ instance: name, classifier, sample });
+        this.authLossObserveWarned.delete(warnKey);
+        if (result.resolved) {
+          log.info({ name, classifier, observedSamples: result.observedSamples, requiredSamples: result.requiredSamples }, 'durable auth-loss signal resolved after stable authenticated window (#1786)');
+        }
+      } catch (err) {
+        // Level-triggered retry next poll; warn once per key until a success
+        // so a persistent infra fault (e.g. the self :memory: db without the
+        // migrated table) stays visible without per-poll spam.
+        if (!this.authLossObserveWarned.has(warnKey)) {
+          this.authLossObserveWarned.add(warnKey);
+          log.warn({ name, classifier, error: err instanceof Error ? err.message : String(err) }, 'auth-loss recovery observation failed (#1786)');
+        }
+      }
     }
   }
 

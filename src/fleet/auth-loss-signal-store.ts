@@ -136,6 +136,28 @@ export class AuthLossSignalStore {
 
     return { resolved: true, id: row.id, reason: 'resolved' };
   }
+
+  /**
+   * True when an unresolved row exists for (instance, classifier). Read-only
+   * restart-discovery probe for the transition controller (#1786): a fresh
+   * process must find rows persisted by a previous run before evaluating
+   * recovery.
+   */
+  hasUnresolved(instance: string, classifier: AuthLossSignalClassifier): boolean {
+    const inst = safeLabel(instance, 'instance');
+    const cls = enumValue(classifier, CLASSIFIERS, 'auth-loss classifier');
+    const row = this.db
+      .prepare(`
+        SELECT id
+        FROM auth_loss_signal
+        WHERE instance = ?
+          AND classifier = ?
+          AND resolved_at IS NULL
+        LIMIT 1
+      `)
+      .get(inst, cls) as { id: number } | undefined;
+    return row !== undefined;
+  }
 }
 
 function safeLabel(value: unknown, field: 'instance' | 'host'): string {
