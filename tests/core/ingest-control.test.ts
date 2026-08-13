@@ -25,7 +25,7 @@ vi.mock('../../src/config.ts', () => ({
     // PEER_PHONE inlined: '15559998888'
     controlPeers: new Map<string, string>([['q', '15559998888']]),
     dbPath: ':memory:',
-    authDir: '/tmp/wa-test-auth',
+    authDir: '/tmp/wa-test-auth-ingest-control',
     mediaDir: '/tmp',
     botName: 'WhatSoup',
     accessMode: 'allowlist',

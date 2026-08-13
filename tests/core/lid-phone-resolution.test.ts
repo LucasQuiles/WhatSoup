@@ -28,7 +28,7 @@ const { testConfig } = vi.hoisted(() => {
     adminPhones: new Set(['15551230007']),
     accessMode: 'allowlist' as string,
     dbPath: ':memory:',
-    authDir: '/tmp/wa-test-auth',
+    authDir: '/tmp/wa-test-auth-lid-phone-resolution',
     mediaDir: '/tmp',
     botName: 'WhatSoup',
     healthPort: 9090,

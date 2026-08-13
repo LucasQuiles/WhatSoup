@@ -8,7 +8,7 @@ vi.mock('@whiskeysockets/baileys', async () => {
 vi.mock('../../src/config.ts', () => ({
   config: {
     adminPhones: new Set(['15550100001']),
-    authDir: '/tmp/wa-test-auth',
+    authDir: '/tmp/wa-test-auth-connection-connect-failure',
     dbPath: ':memory:',
     mediaDir: '/tmp',
     botName: 'WhatSoup',

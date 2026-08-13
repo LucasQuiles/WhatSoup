@@ -47,7 +47,7 @@ vi.mock('@whiskeysockets/baileys', () => ({
 vi.mock('qrcode-terminal', () => ({ default: { generate: mocks.qrcodeGenerate } }));
 
 vi.mock('../../src/config.ts', () => ({
-  config: { authDir: '/tmp/wa-test-auth', lockPath: '/tmp/wa-test-auth.lock' },
+  config: { authDir: '/tmp/wa-test-auth-auth-cli-creds-save-failure', lockPath: '/tmp/wa-test-auth-auth-cli-creds-save-failure.lock' },
 }));
 
 vi.mock('../../src/transport/third-party-console-redaction.ts', () => ({

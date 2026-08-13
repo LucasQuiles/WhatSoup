@@ -58,8 +58,8 @@ vi.mock('qrcode-terminal', () => ({
 
 vi.mock('../../src/config.ts', () => ({
   config: {
-    authDir: '/tmp/wa-test-auth',
-    lockPath: '/tmp/wa-test-auth.lock',
+    authDir: '/tmp/wa-test-auth-auth-cli-restart-flapping',
+    lockPath: '/tmp/wa-test-auth-auth-cli-restart-flapping.lock',
   },
 }));
 
@@ -176,7 +176,7 @@ describe('auth CLI restartRequired handling', () => {
   it('uses the default lock path when config provides no lockPath', async () => {
     vi.resetModules();
     vi.doMock('../../src/config.ts', () => ({
-      config: { authDir: '/tmp/wa-test-auth' },
+      config: { authDir: '/tmp/wa-test-auth-auth-cli-restart-flapping' },
     }));
     const checkedPaths: unknown[] = [];
     mocks.existsSync.mockImplementation((lockPath: unknown) => {

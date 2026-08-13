@@ -22,7 +22,7 @@ vi.mock('../../src/config.ts', () => ({
   config: {
     adminPhones: new Set(['15550100001']),
     dbPath: ':memory:',
-    authDir: '/tmp/wa-test-auth',
+    authDir: '/tmp/wa-test-auth-sms-access-identity',
     mediaDir: '/tmp',
     botName: 'WhatSoup',
     accessMode: 'allowlist',

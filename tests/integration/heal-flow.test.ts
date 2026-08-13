@@ -38,7 +38,7 @@ vi.mock('../../src/config.ts', () => ({
     controlPeers: new Map<string, string>([['q', '15559998888']]),
     adminPhones: new Set<string>(),
     dbPath: ':memory:',
-    authDir: '/tmp/wa-test-auth',
+    authDir: '/tmp/wa-test-auth-heal-flow',
     mediaDir: '/tmp',
     botName: 'WhatSoup',
     accessMode: 'allowlist',

@@ -24,7 +24,7 @@ const { mockConnectionLogger } = vi.hoisted(() => ({
 vi.mock('../../src/config.ts', () => ({
   config: {
     adminPhones: new Set(['1111']),
-    authDir: '/tmp/wa-test-auth',
+    authDir: '/tmp/wa-test-auth-poll-vote-bridge',
     dbPath: ':memory:',
     mediaDir: '/tmp',
     botName: 'WhatSoup',
