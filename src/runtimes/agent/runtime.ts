@@ -80,13 +80,8 @@ import {
   MAX_RESIDENT_SESSIONS,
   SESSION_MIN_RESIDENCY_MS,
   MAX_TOOL_FAILURE_ALERT_DEDUP_KEYS,
-  DEFAULT_FALLBACK_WINDOW_MS,
-  MIN_FALLBACK_WINDOW_MS,
-  MAX_FALLBACK_WINDOW_MS,
   PROVIDER_FALLBACK_NOTICE_DEDUP_MS,
-  PROVIDER_FALLBACK_PRIMARY_RECHECK_MS,
   PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD,
-  PROVIDER_FALLBACK_PROBE_STALL_CEILING_MULTIPLE,
   diagnosticBundleEnabled,
   DIAGNOSTIC_BUNDLE_THROTTLE_MS,
   HANDOFF_STALE_MS,
@@ -112,22 +107,14 @@ import {
 import { reconcileResidentSessionStatuses } from './resident-session-reconciler.ts';
 import {
   ensureFallbackStateSchema,
-  saveFallbackState,
   getFallbackState,
-  clearFallbackState,
-  PERSISTED_FALLBACK_STATE_VERSION,
 } from './fallback-state-db.ts';
-import {
-  restorePersistedFallbackWindowState,
-  failedKeysToPersistedKeys,
-} from './fallback-restore.ts';
 import { chatJidToWorkspace, provisionWorkspace, writeSandboxArtifacts, ensurePermissionsSettings } from '../../core/workspace.ts';
 import { inspectUserClaudeSettings } from '../../core/user-claude-settings.ts';
 import { isSamePhysicalDirectory } from '../../lib/home-path.ts';
 import { classifyActiveSessions, resolveAmbiguousAgeFallback } from './session-classifier.ts';
 import {
   SessionManager,
-  buildChildEnv,
   formatAge,
   getProviderBinary,
   type SessionCrashInfo,
@@ -135,8 +122,13 @@ import {
 import { createProviderExecutionGate, ProviderExecutionGate } from './provider-execution-gate.ts';
 import { dispatchProviderTurn, withProviderApplicationContext } from './provider-boundary-dispatch.ts';
 import { TurnChronologyTracker, type TurnDeliveryKind } from './turn-chronology.ts';
-import { receivedAtUnixSeconds, renderPendingReplay, renderUserTurnForProvider,
-  sharedReplayApplicationContext, sharedRuntimeApplicationContext } from './turn-provider-text.ts';
+import {
+  receivedAtUnixSeconds,
+  renderPendingReplay,
+  renderUserTurnForProvider,
+  sharedReplayApplicationContext,
+  sharedRuntimeApplicationContext,
+} from './turn-provider-text.ts';
 import { markDeferredSystemTurn, requireSystemTurnProviderBoundary } from './system-turn-deadline.ts';
 import {
   OutboundQueue,
@@ -156,11 +148,13 @@ import type { RouteDecision } from './route-resolution.ts';
 import type { fetchAnthropicModelIdsWithStatus } from '../../lib/model-advisor.ts';
 import type { ModelRouteEvent } from './route-events.ts';
 import { RuntimeRoutingCoordinator, type RuntimeRoutingPort } from './runtime-routing.ts';
+import { RuntimeFallbackCoordinator, type RuntimeFallbackPort } from './runtime-fallback.ts';
 import { buildRoutingPromptContract } from './route-intent.ts';
 import { createCatalogueSnapshotCache, type CatalogueSnapshotCache } from './model-snapshot-cache.ts';
 import { tiersConfigured as modelTiersConfigured } from './model-catalogue-render.ts';
 import {
-  handleModelCommand, tryHandleBareKeep,
+  handleModelCommand,
+  tryHandleBareKeep,
   consumePendingRecycleIfIdle as consumePendingRecycleIfIdleForPort,
   type ModelPinPort,
   type RouteRecycleOutcome,
@@ -218,8 +212,8 @@ import {
   handleGlobalRuntimeResult,
   handleScopedRuntimeResult,
   type ProviderFailureResultContext,
-  type ProviderFallbackActivation,
   type ProviderFallbackReason,
+  type ProviderFallbackActivation,
   type RuntimeResultHandlerPort,
 } from './runtime-turn-result-handler.ts';
 import {
@@ -280,48 +274,38 @@ import { startMediaBridge, setMediaBridgeChat, type MediaBridge } from './media-
 import { WorkspaceSweeper, type WorkspaceResource } from './workspace-sweeper.ts';
 import {
   fallbackProviderConfigFor,
-  fallbackKeyPresent as fallbackKeyPresentFor,
-  fallbackRequiresIndependentProbe,
   oneMessageHandoffEnabled,
 } from './fallback-config.ts';
 import {
-  fallbackRequiresPrimaryProbe,
   formatClockForUser,
   formatTokenCount,
-  isProviderFallbackReason,
   modelCardLabel,
   providerDisplayName,
   templateForFallbackReason,
 } from './runtime-presentation.ts';
-import { makeIdleEligibilityResolver } from './fallback-eligibility-cache.ts';
 import {
   buildProviderMcpConfigArgs,
   createProviderMcpBridge,
   providerMcpProxyScriptPath,
   writeProviderMcpConfig,
   writeProviderMcpConfigTarget,
-  type OpencodeProviderConfig,
 } from './providers/mcp-bridge.ts';
 import {
   providerUsesWhatSoupMcp,
   requiresPerChatActorSocket,
 } from './providers/index.ts';
 import { canaryStoreProvisioned, readProviderCanaryAdmission } from './provider-canary-proof.ts';
-import { verifyFallbackCredential } from './providers/credential-verify.ts';
-import { probeFallbackBinary, probeModelCatalog, probeBinaryAuthStatus, type listModelCatalog } from './providers/binary-preflight.ts';
+import { probeBinaryAuthStatus, type listModelCatalog } from './providers/binary-preflight.ts';
 import {
   probePrimaryModelUsability,
   primaryModelUsabilityRequiresAlert,
   type PrimaryModelUsabilityResult,
 } from './providers/primary-model-usability.ts';
 import { createPrimaryModelProbeAdapters } from './providers/primary-model-usability-adapters.ts';
-import { calculatePeriodicProbeDelay, calculatePeriodicProbeBackoff, buildPrimaryProbeAdapterDeps, formatPrimaryModelUsabilityEvidence } from './primary-readiness-probe.ts';
+import { buildPrimaryProbeAdapterDeps } from './primary-readiness-probe.ts';
 import { ensureClaudeFileStoreCredential } from './providers/claude-filestore-heal.ts';
 import {
-  formatFallbackRecoveryReceiptEvidence,
   resolveFallbackRecoveryDecision,
-  stallAlertPlan,
-  type FallbackRecoveryDecision,
   type FallbackRecoveryEvidence,
   type FallbackRecoveryReceipt,
 } from './fallback-recovery-transaction.ts';
@@ -376,56 +360,7 @@ const GLOBAL_CRASH_SCOPE_KEY = GLOBAL_CONVERSATION_KEY;
  */
 const MODEL_USABILITY_FRESHNESS_MS = 30 * MS_PER_MINUTE;
 
-/**
- * Consecutive empty PRIMARY-provider user turns that force a provider fallback
- * even when the independent usability probe has not (yet) flagged the primary.
- * A healthy primary effectively never returns two pure-empty user turns in a
- * row; a broken primary auth/session (e.g. claude-cli after a silent CLI
- * auto-update invalidated its keychain login) exits cleanly with NO text on
- * every turn. Deterministic trigger threshold — see
- * {@link AgentRuntime.maybeArmFallbackAfterEmptyPrimaryTurn}.
- */
-const EMPTY_OUTPUT_FALLBACK_THRESHOLD = 2;
-
-/**
- * Consecutive unclassified-terminal PRIMARY user turns that force a provider
- * fallback. An UNKNOWN terminal provider error (is_error result whose text
- * classifyProviderFailure() cannot place in any known class) has historically
- * only surfaced a generic notice + ops alert and armed NO fallback, so a broken
- * primary throwing them turn after turn stalled on the primary while an eligible
- * fallback sat idle. A single one is treated as transient (keep the session); a
- * bounded run fails over. Dedicated constant — it intentionally tracks the value
- * of {@link EMPTY_OUTPUT_FALLBACK_THRESHOLD} today, but is kept separate so tuning
- * the empty-output threshold cannot silently move the unknown-terminal one. See
- * {@link AgentRuntime.maybeArmFallbackAfterUnknownTerminal}.
- */
-const UNKNOWN_TERMINAL_FALLBACK_THRESHOLD = 2;
-
-/**
- * Startup grace for empty-output fallback arming. The boot/recovery sequence
- * (proactive per-chat resume → resume-fail → context-recovery / replayed turns)
- * emits empty results while the usability probe is still transiently `unknown`,
- * which `primaryModelUsabilityRequiresAlert` treats as unusable. Arming on that
- * noise via the single-empty probe fast-path falsely fails the instance over to
- * the backup on every restart (and persists the window, so it reloads on the
- * next restart — a primary/backup flap). Within this window, before the instance
- * has proven it can serve a turn (`lastSuccessfulTurnAt === null`), ONLY the
- * probe fast-path is suppressed: empty turns are still counted toward
- * {@link EMPTY_OUTPUT_FALLBACK_THRESHOLD} so the consecutive-empty threshold can
- * still arm (a genuinely-dead primary on real early traffic still fails over,
- * and the per-chat replay that arms via the threshold is preserved). The
- * fast-path is live again immediately after the window elapses or the first
- * successful turn.
- *
- * The elapsed measurement uses `performance.now()` (monotonic clock) rather
- * than `Date.now()` so wall-clock steps — NTP corrections, host sleep/wake, VM
- * migration, all most likely in the first seconds of process life — cannot
- * prematurely end or over-extend the window (R1 hardening).
- *
- * See {@link AgentRuntime.maybeArmFallbackAfterEmptyPrimaryTurn}.
- */
-const EMPTY_OUTPUT_ARM_STARTUP_GRACE_MS = MS_PER_MINUTE;
-type RuntimeTurnCapability = RuntimeTurnCapabilityHealth & {
+export type RuntimeTurnCapability = RuntimeTurnCapabilityHealth & {
   modelUsabilityStatus: PrimaryModelUsabilityResult['status'] | null;
   lastTurnErrorClass: TurnCapabilityErrorClass | null;
 };
@@ -622,7 +557,6 @@ export {
 import {
   buildToolUpdate,
   classifyToolError,
-  alertEvidenceValue,
 } from './tool-update.ts';
 import { maybeEmitToolFailureAlert, type ToolFailureAlertDeps } from './tool-failure-alert.ts';
 import { runNewCommand } from './runtime-new-command.ts';
@@ -1785,6 +1719,7 @@ export class AgentRuntime implements Runtime {
   private readonly runtimeTurnCoordinator: RuntimeTurnCoordinator;
   private readonly modelPinHost: ModelPinPort;
   private readonly routing: RuntimeRoutingCoordinator;
+  private readonly fallback: RuntimeFallbackCoordinator;
   private readonly sessionLifecycleHost: RuntimeSessionLifecycleHost<SessionManager, RuntimeTurnQueueTeardown>;
   private readonly chatTransportHost: ChatTransportPort;
   private readonly runtimeTurnAfterTerminal = new Map<string, RuntimeTurnAfterTerminalAction>();
@@ -2390,6 +2325,7 @@ export class AgentRuntime implements Runtime {
     this.sessionLifecycleHost = this.createSessionLifecycleHost();
     this.chatTransportHost = this.createChatTransportHost();
     this.routing = new RuntimeRoutingCoordinator(this.createRuntimeRoutingHost());
+    this.fallback = new RuntimeFallbackCoordinator(this.createRuntimeFallbackHost());
 
     // Subscribe to poll vote events for AskUserQuestion → Poll bridge
     const connection = this.messenger as ConnectionManager;
@@ -2598,6 +2534,78 @@ export class AgentRuntime implements Runtime {
     };
   }
 
+  /**
+   * Host for the extracted fallback coordinator (runtime-fallback.ts, #1977
+   * D2) — live-getter shape. ALL fallback state stays owned here: the
+   * characterization suites bind these fields on the runtime instance, and
+   * probePrimaryProviderRecovered / deactivateProviderFallback are stub/spy
+   * seams that must observe in-cluster calls.
+   */
+  private createRuntimeFallbackHost(): RuntimeFallbackPort {
+    const runtime = this;
+    return {
+      get db() { return runtime.db; },
+      get instanceName() { return runtime.instanceName; },
+      get cwd() { return runtime.cwd; },
+      get model() { return runtime.model; },
+      get agentProvider() { return runtime.agentProvider; },
+      get agentProviderConfig() { return runtime.agentProviderConfig; },
+      get agentFallbacks() { return runtime.agentFallbacks; },
+      get allowM365Mutations() { return runtime.allowM365Mutations; },
+      get runtimeBootPerfMs() { return runtime.runtimeBootPerfMs; },
+      get globalMcpSocketPath() { return runtime.globalMcpSocketPath; },
+      get egressProxy() { return runtime.egressProxy; },
+      get providerExecutionGate() { return runtime.providerExecutionGate; },
+      get controlSession() { return runtime.controlSession; },
+      get fallbackWindow() { return runtime.fallbackWindow; },
+      get fallbackMetrics() { return runtime.fallbackMetrics; },
+      get fallbackChain() { return runtime.fallbackChain; },
+      get fallbackEmptyAdvance() { return runtime.fallbackEmptyAdvance; },
+      get turnCapabilityTracker() { return runtime.turnCapabilityTracker; },
+      get recentNoFallbackReauthNotices() { return runtime.recentNoFallbackReauthNotices; },
+      get recentFallbackEmptyTurnAlerts() { return runtime.recentFallbackEmptyTurnAlerts; },
+      get revertTimer() { return runtime.revertTimer; },
+      set revertTimer(value) { runtime.revertTimer = value; },
+      get fallbackPrimaryProbeTimer() { return runtime.fallbackPrimaryProbeTimer; },
+      set fallbackPrimaryProbeTimer(value) { runtime.fallbackPrimaryProbeTimer = value; },
+      get periodicUsabilityProbeTimer() { return runtime.periodicUsabilityProbeTimer; },
+      set periodicUsabilityProbeTimer(value) { runtime.periodicUsabilityProbeTimer = value; },
+      get periodicUsabilityProbeBackoff() { return runtime.periodicUsabilityProbeBackoff; },
+      set periodicUsabilityProbeBackoff(value) { runtime.periodicUsabilityProbeBackoff = value; },
+      get fallbackProbeAttempts() { return runtime.fallbackProbeAttempts; },
+      set fallbackProbeAttempts(value) { runtime.fallbackProbeAttempts = value; },
+      get fallbackLastProbeAt() { return runtime.fallbackLastProbeAt; },
+      set fallbackLastProbeAt(value) { runtime.fallbackLastProbeAt = value; },
+      get fallbackWindowRestored() { return runtime.fallbackWindowRestored; },
+      set fallbackWindowRestored(value) { runtime.fallbackWindowRestored = value; },
+      get pendingPostRevertConfirmation() { return runtime.pendingPostRevertConfirmation; },
+      set pendingPostRevertConfirmation(value) { runtime.pendingPostRevertConfirmation = value; },
+      get primaryModelUsability() { return runtime.primaryModelUsability; },
+      set primaryModelUsability(value) { runtime.primaryModelUsability = value; },
+      get primaryModelUsabilityAlertActive() { return runtime.primaryModelUsabilityAlertActive; },
+      set primaryModelUsabilityAlertActive(value) { runtime.primaryModelUsabilityAlertActive = value; },
+      get consecutivePrimaryEmptyTurns() { return runtime.consecutivePrimaryEmptyTurns; },
+      set consecutivePrimaryEmptyTurns(value) { runtime.consecutivePrimaryEmptyTurns = value; },
+      get consecutiveUnknownTerminalTurns() { return runtime.consecutiveUnknownTerminalTurns; },
+      set consecutiveUnknownTerminalTurns(value) { runtime.consecutiveUnknownTerminalTurns = value; },
+      get idleFallbackEligibilityResolver() { return runtime.idleFallbackEligibilityResolver; },
+      set idleFallbackEligibilityResolver(value) { runtime.idleFallbackEligibilityResolver = value; },
+      get effectiveProvider() { return runtime.effectiveProvider; },
+      get effectiveFallbackEntry() { return runtime.effectiveFallbackEntry; },
+      get isFallbackWindowActive() { return runtime.isFallbackWindowActive; },
+      isEntryCredentialed: (entry) => runtime.isEntryCredentialed(entry),
+      emitRouteEventChecked: (ev) => runtime.emitRouteEventChecked(ev),
+      capDedupeMap: (map, max) => runtime.capDedupeMap(map, max),
+      getTurnCapability: () => runtime.getTurnCapability(),
+      scheduleFallbackReplay: (args) => runtime.scheduleFallbackReplay(args),
+      notifyProviderFallbackActivated: (queue, activation, replay) =>
+        runtime.notifyProviderFallbackActivated(queue, activation, replay),
+      probePrimaryProviderRecovered: (onEvidence, signal) =>
+        runtime.probePrimaryProviderRecovered(onEvidence, signal),
+      deactivateProviderFallback: (reason, receipt) => runtime.deactivateProviderFallback(reason, receipt),
+    };
+  }
+
   private createRuntimeTurnHost(): RuntimeTurnCoordinatorPort & RuntimeResultHandlerPort {
     const runtime = this;
     return {
@@ -2704,23 +2712,23 @@ export class AgentRuntime implements Runtime {
       recordTurnCapabilityFailure: (isUserTurnResult, errorClass) =>
         runtime.recordTurnCapabilityFailure(isUserTurnResult, errorClass),
       recordFallbackTurnOutcome: (queue, hadVisibleOutput, hadToolWork, session, wasUnclassifiedError) =>
-        runtime.recordFallbackTurnOutcome(queue, hadVisibleOutput, hadToolWork, session, wasUnclassifiedError),
+        runtime.fallback.recordFallbackTurnOutcome(queue, hadVisibleOutput, hadToolWork, session, wasUnclassifiedError),
       maybeArmFallbackAfterEmptyPrimaryTurn: (queue, session, turnHadToolWork, mapKey) =>
-        runtime.maybeArmFallbackAfterEmptyPrimaryTurn(queue, session, turnHadToolWork, mapKey),
+        runtime.fallback.maybeArmFallbackAfterEmptyPrimaryTurn(queue, session, turnHadToolWork, mapKey),
       maybeArmFallbackAfterUnknownTerminal: (queue, session, turnHadToolWork, mapKey, isUserTurnResult, evidenceText) =>
-        runtime.maybeArmFallbackAfterUnknownTerminal(queue, session, turnHadToolWork, mapKey, isUserTurnResult, evidenceText),
+        runtime.fallback.maybeArmFallbackAfterUnknownTerminal(queue, session, turnHadToolWork, mapKey, isUserTurnResult, evidenceText),
       enqueueAutoSwitchNotice: (queue, text, logChatJid, mode) =>
         runtime.enqueueAutoSwitchNotice(queue, text, logChatJid, mode),
       withHandoffPrefix: (chatJid, text) => runtime.withHandoffPrefix(chatJid, text),
       flushPendingHandoffNotice: (queue) => runtime.flushPendingHandoffNotice(queue),
-      activateProviderFallback: (resetAt, reason) => runtime.activateProviderFallback(resetAt, reason),
+      activateProviderFallback: (resetAt, reason) => runtime.fallback.activateProviderFallback(resetAt, reason),
       activateProviderFallbackAfterTerminalResult: (resetAt, reason, session, evidenceText) =>
-        runtime.activateProviderFallbackAfterTerminalResult(resetAt, reason, session, evidenceText),
+        runtime.fallback.activateProviderFallbackAfterTerminalResult(resetAt, reason, session, evidenceText),
       scheduleFallbackReplay: (args) => runtime.scheduleFallbackReplay(args),
       notifyProviderFallbackActivated: (queue, activation, replay) =>
         runtime.notifyProviderFallbackActivated(queue, activation, replay),
-      emitNoFallbackReauthNotice: (queue) => runtime.emitNoFallbackReauthNotice(queue),
-      usageLimitNotice: () => runtime.usageLimitNotice(),
+      emitNoFallbackReauthNotice: (queue) => runtime.fallback.emitNoFallbackReauthNotice(queue),
+      usageLimitNotice: () => runtime.fallback.usageLimitNotice(),
       kickDiagnosticBundle: (workflow, providerText) => runtime.kickDiagnosticBundle(workflow, providerText),
     } satisfies RuntimeTurnCoordinatorPort & RuntimeResultHandlerPort;
   }
@@ -3156,7 +3164,7 @@ export class AgentRuntime implements Runtime {
     // injection itself is flag-gated (WHATSOUP_HANDOFF_CONTEXT); creating the
     // table unconditionally is inert when the flag is off.
     ensureHandoffArtifactSchema(this.db);
-    this.restorePersistedFallbackWindow();
+    this.fallback.restorePersistedFallbackWindow();
     backfillSessionProvider(this.db, this.agentProvider ?? 'claude-cli');
     if (config.nlRouting) {
       // Additive + idempotent; gated so flag-off leaves the DB untouched.
@@ -3304,7 +3312,7 @@ export class AgentRuntime implements Runtime {
           }
         };
 
-        const primaryOpencodeProviderConfig = this.primaryOpencodeProviderConfig();
+        const primaryOpencodeProviderConfig = this.fallback.primaryOpencodeProviderConfig();
         writeFor(this.agentProvider, primaryOpencodeProviderConfig);
         for (const entry of this.agentFallbacks) {
           if (entry.provider === this.agentProvider) continue;
@@ -3731,8 +3739,8 @@ export class AgentRuntime implements Runtime {
     if (this.agentProvider === 'claude-cli') {
       ensureClaudeFileStoreCredential();
     }
-    this.schedulePrimaryModelUsabilityProbe('startup');
-    this.scheduleNextPeriodicUsabilityProbe();
+    this.fallback.schedulePrimaryModelUsabilityProbe('startup');
+    this.fallback.scheduleNextPeriodicUsabilityProbe();
     this.startHealthStatsTimer();
     this.workspaceSweeper.start();
     this.startQueueSweepTimer();
@@ -8529,353 +8537,6 @@ export class AgentRuntime implements Runtime {
     return this.fallbackWindow.activeEntry ?? this.agentFallbacks[0] ?? null;
   }
 
-  private selectFallbackEntryForWindow(reason?: string): { entry: AgentFallbackEntry; selectedHadMissingCredential: boolean } | null {
-    if (this.agentFallbacks.length === 0) {
-      this.fallbackChain.chainState = [];
-      return null;
-    }
-
-    const requireIndependentProvider = fallbackRequiresIndependentProbe(reason);
-    let firstEligibleIndex = -1;
-    let firstIndependentIndex = -1;
-    const state: Array<AgentFallbackEntry & { eligible: boolean }> = [];
-    for (let i = 0; i < this.agentFallbacks.length; i++) {
-      const entry = this.agentFallbacks[i]!;
-      if (requireIndependentProvider && entry.provider === this.agentProvider) {
-        state.push({ ...entry, eligible: false });
-        continue;
-      }
-      if (this.fallbackChain.failedKeys.has(this.fallbackChain.entryKey(entry))) {
-        state.push({ ...entry, eligible: false });
-        continue;
-      }
-      if (entry.provider !== this.agentProvider && firstIndependentIndex === -1) {
-        firstIndependentIndex = i;
-      }
-      // Eligibility DECISION comes from the shared predicate (C4) so it can
-      // never desync from pin eligibility; `service` is recomputed only for
-      // the credential-missing alert below (the selector's own concern).
-      const eligible = this.isEntryCredentialed(entry);
-      const service = resolveProviderKeyService(
-        entry.provider,
-        entry.model,
-        fallbackProviderConfigFor(entry.provider, this.agentProvider, this.agentProviderConfig),
-      );
-      state.push({ ...entry, eligible });
-      if (eligible && firstEligibleIndex === -1) {
-        firstEligibleIndex = i;
-      }
-      if (!eligible) {
-        emitAlertChecked(
-          this.instanceName,
-          'fallback_credential_missing',
-          'Fallback provider key not found in keyring',
-          `entry=${i} service=${service} provider=${entry.provider} model=${entry.model ?? ''}`,
-        );
-      } else {
-        // #2399: prerequisite now satisfied — emit recovery clear so the
-        // incident does not remain open until stale timeout.
-        clearAlertSourceChecked(
-          this.instanceName,
-          'fallback_credential_missing',
-          `recoveryProof=credential_valid entry=${i} provider=${entry.provider}`,
-        );
-      }
-    }
-    this.fallbackChain.chainState = state;
-    if (requireIndependentProvider && firstEligibleIndex === -1 && firstIndependentIndex === -1) {
-      emitAlertChecked(
-        this.instanceName,
-        'fallback_no_independent_provider',
-        'Fallback requires an independent provider target',
-        `primaryProvider=${this.agentProvider} reason=${reason}`,
-      );
-      return null;
-    }
-    const selectedIndex = firstEligibleIndex === -1
-      ? (requireIndependentProvider ? firstIndependentIndex : 0)
-      : firstEligibleIndex;
-    return {
-      entry: this.agentFallbacks[selectedIndex]!,
-      selectedHadMissingCredential: state[selectedIndex]?.eligible === false,
-    };
-  }
-
-  private markActiveFallbackFailed(
-    session: SessionManager | null,
-    reason: ProviderFallbackReason,
-    evidenceText?: string,
-  ): string | null {
-    if (!this.isFallbackWindowActive || !this.fallbackWindow.activeEntry || !session) return null;
-    const sessionProvider = typeof session.getProviderId === 'function' ? session.getProviderId() : null;
-    if (sessionProvider !== null) {
-      if (sessionProvider !== this.fallbackWindow.activeEntry.provider) return null;
-    } else {
-      const sessionId = session.getStatus().sessionId;
-      if (!sessionId?.startsWith(`${this.fallbackWindow.activeEntry.provider}-`)) return null;
-    }
-
-    const key = this.fallbackChain.entryKey(this.fallbackWindow.activeEntry);
-    if (!this.fallbackChain.failedKeys.has(key)) {
-      this.fallbackChain.failedKeys.add(key);
-      emitAlertChecked(
-        this.instanceName,
-        'fallback_provider_failed',
-        'Active fallback provider failed during fallback window',
-        `provider=${this.fallbackWindow.activeEntry.provider} model=${this.fallbackWindow.activeEntry.model ?? 'default'}`
-          + ` reason=${reason}`
-          + (evidenceText ? ` evidence=${evidenceText.slice(0, 160)}` : ''),
-      );
-    }
-    return key;
-  }
-
-  /**
-   * Arm provider fallback when the PRIMARY provider returns empty output — the
-   * failure mode a broken primary auth/session produces (e.g. claude-cli after
-   * a silent CLI auto-update invalidated its keychain login). Such a turn exits
-   * cleanly with NO text, so it never classifies as a provider-failure message
-   * and the normal text-driven arming path never fires; without this the bot
-   * stays pinned to the dead primary and only reports `degraded` forever while
-   * the configured fallback ladder sits idle.
-   *
-   * Deterministic trigger (the user-facing message is templated; the DECISION
-   * is fully deterministic):
-   *   - arm on the FIRST empty primary turn when the independent usability probe
-   *     already flags the primary unusable, OR
-   *   - arm after {@link EMPTY_OUTPUT_FALLBACK_THRESHOLD} consecutive empty
-   *     primary turns (a healthy primary never returns two pure-empty turns).
-   *
-   * Armed with first-class empty-output/probe-unusable reasons while preserving
-   * the old auth-required control semantics: fallback SELECTION skips same-
-   * provider entries (a broken claude-cli login breaks every claude-cli fallback
-   * too → jump straight to the independent provider) and REVERT is gated on a
-   * fresh primary probe — so it self-heals once the primary auth is restored.
-   * No-op (returns false) when already on a fallback window or when no fallback
-   * is configured. Returns true only when it armed a window this call.
-   */
-  private maybeArmFallbackAfterEmptyPrimaryTurn(
-    queue: IOutboundQueue,
-    session: SessionManager | null,
-    turnHadToolWork: boolean,
-    mapKey: string | undefined,
-  ): boolean {
-    if (this.isFallbackWindowActive) return false;
-    if (this.agentFallbacks.length === 0) return false;
-    // The control/repair session (control@heal.internal) is a synthetic
-    // diagnostic probe, not a real conversation turn. Its emptiness must NOT
-    // feed the production consecutivePrimaryEmptyTurns counter: a canned repair
-    // prompt can legitimately produce no text, and counting it cross-contaminates
-    // the threshold that the NEXT real-chat turn trips on. The control session
-    // has its own lifecycle (onCrash → HEAL_ESCALATE, 15min hard timeout) and
-    // does not need the fallback ladder. (Seen in production on ml-bot: a /heal
-    // provider-reset repair turn returned empty, bumped the counter to 1, then a
-    // single real-chat empty armed the fallback at threshold 2 — false failover.)
-    // The controlSession !== null guard avoids the null===null trap: per-chat
-    // turns pass session=null here, and this.controlSession also defaults to
-    // null, so a bare session===this.controlSession would match every turn.
-    if ((this.controlSession !== null && session === this.controlSession) || mapKey === 'control@heal.internal') {
-      return false;
-    }
-
-    this.consecutivePrimaryEmptyTurns += 1;
-    // R2 guard: mirror getTurnCapability's probeInFlight check. When the
-    // startup probe has not yet resolved ({probeInFlight:true}), the usability
-    // field carries {status:'unknown', reason:'probe-in-flight'}, which
-    // primaryModelUsabilityRequiresAlert() would (correctly) treat as unusable
-    // — but that is indeterminate, not confirmed-unusable.  Treating it as
-    // confirmed-unusable arms the probe fast-path against a healthy primary
-    // whenever the probe takes longer than the grace window.  Gate exactly as
-    // getTurnCapability does: skip the alert check while the probe is still
-    // in-flight.  A resolved-unusable probe (probeInFlight:false) still arms
-    // normally; the threshold path is entirely unaffected.
-    const probeFlagsUnusable = this.primaryModelUsability && !this.primaryModelUsability.probeInFlight
-      ? primaryModelUsabilityRequiresAlert(this.primaryModelUsability)
-      : false;
-    const reachedThreshold =
-      this.consecutivePrimaryEmptyTurns >= EMPTY_OUTPUT_FALLBACK_THRESHOLD;
-
-    // Startup grace (anti-flap): during the boot/recovery window the usability
-    // probe is transiently 'unknown', which primaryModelUsabilityRequiresAlert
-    // treats as unusable. That makes the single-empty *probe fast-path* arm on
-    // the very first empty turn and flap the instance onto the backup on every
-    // restart (seen in production: the spurious startup activations were all
-    // single-empty 'probe-unusable', none from the threshold). Suppress ONLY the
-    // probe fast-path during the grace window. We still COUNT the empty and
-    // still honour the consecutive-empty threshold — so a genuinely dead
-    // primary taking real inbound traffic in the first 60s still fails over
-    // (at most one extra turn of latency, no silent blind spot), and the
-    // per-chat empty-output replay that arms via the threshold (#972) is
-    // preserved. The counter resets on any successful turn.
-    // R1 hardening: use monotonic performance.now() so wall-clock steps (NTP
-    // corrections, host sleep/wake, VM migration — all most likely right after
-    // process start) cannot prematurely end or over-extend the grace window.
-    const inStartupGrace =
-      this.turnCapabilityTracker.lastSuccessfulTurnAt === null &&
-      performance.now() - this.runtimeBootPerfMs < EMPTY_OUTPUT_ARM_STARTUP_GRACE_MS;
-    const armViaProbe = probeFlagsUnusable && !inStartupGrace;
-    if (!armViaProbe && !reachedThreshold) return false;
-
-    log.warn(
-      {
-        instanceName: this.instanceName,
-        primaryProvider: this.agentProvider,
-        consecutivePrimaryEmptyTurns: this.consecutivePrimaryEmptyTurns,
-        // `trigger` names the dominant signal (probe fast-path vs threshold);
-        // `triggeredByThreshold` is the one non-derivable observable kept beside
-        // it so a dual-arm (probe unusable AND threshold reached) stays visible —
-        // the load-bearing signal for catching a startup-flap regression on this
-        // failover path. The probe-arm fact is recoverable from `trigger` alone.
-        trigger: armViaProbe ? 'probe-unusable' : 'consecutive-empty-output',
-        triggeredByThreshold: reachedThreshold,
-      },
-      'primary provider returned empty output — arming provider fallback',
-    );
-
-    // Emit the TRUE trigger as the fallback reason so the operator-facing
-    // provider_fallback_activated alert names the real cause (empty-output /
-    // probe-unusable) instead of the misleading 'auth-required' this path used
-    // to borrow purely for its control side-effects (#1421). The probe + the
-    // independent-provider gates that 'auth-required' provided are preserved for
-    // both reasons via fallbackRequiresIndependentProbe().
-    const activation = this.activateProviderFallbackAfterTerminalResult(
-      null,
-      armViaProbe ? 'probe-unusable' : 'empty-output',
-      session,
-      '',
-    );
-    if (!activation) return false;
-
-    const replayScheduled = this.scheduleFallbackReplay({
-      activation,
-      chatJid: queue.targetChatJid,
-      mapKey,
-      oldSession: session,
-      hadToolActivity: turnHadToolWork,
-    });
-    this.notifyProviderFallbackActivated(queue, activation, {
-      replayScheduled,
-      blockedByToolActivity: turnHadToolWork,
-    });
-    this.consecutivePrimaryEmptyTurns = 0;
-    return true;
-  }
-
-  /**
-   * Arm provider fallback when the PRIMARY provider returns REPEATED unclassified
-   * terminal errors — the default-deny "unknown-terminal" case (an is_error result
-   * whose text {@link classifyProviderFailure} cannot place in any known class).
-   * Such a turn produces no arming provider-failure MESSAGE, so the text-driven
-   * ladders never fire and (unlike empty output) the failure is masked behind a
-   * generic notice; a broken primary throwing them stalled turn after turn while
-   * an eligible fallback sat idle.
-   *
-   * A single unknown-terminal is transient (the caller keeps the session and
-   * surfaces the generic notice). After {@link UNKNOWN_TERMINAL_FALLBACK_THRESHOLD}
-   * consecutive occurrences on REAL user turns this fails over exactly like the
-   * sibling terminal classes: activate + replay + notify, with reason
-   * 'unknown-terminal-repeated'. Selection does NOT force an independent provider
-   * (unknown-terminal-repeated is absent from fallbackRequiresIndependentProbe),
-   * so an operator-configured same-provider downgrade rung stays eligible; the
-   * revert is still gated on a fresh primary probe (fallbackRequiresPrimaryProbe)
-   * because there is no parseable reset estimate.
-   *
-   * Gated exactly like {@link maybeArmFallbackAfterEmptyPrimaryTurn}: only real
-   * user turns count (isUserTurnResult), never while a window is already active,
-   * never without a configured fallback, and never for the synthetic
-   * control/repair session (control@heal.internal) — whose emptiness/errors must
-   * not cross-contaminate the real-chat counter. Returns true only when it armed
-   * a window this call; the counter resets on activation and on any successful turn.
-   */
-  private maybeArmFallbackAfterUnknownTerminal(
-    queue: IOutboundQueue,
-    session: SessionManager | null,
-    turnHadToolWork: boolean,
-    mapKey: string | undefined,
-    isUserTurnResult: boolean,
-    evidenceText: string,
-  ): boolean {
-    // System/heal/synthetic turns must never advance or trip the consecutive
-    // threshold. Unlike the empty-output arming call-site (already inside the
-    // is-user-turn guard), this branch runs in the result.text path regardless of
-    // isSystemResult, so the guard is explicit here.
-    if (!isUserTurnResult) return false;
-    if (this.isFallbackWindowActive) return false;
-    if (this.agentFallbacks.length === 0) return false;
-    // control@heal.internal repair-probe exclusion — mirrors
-    // maybeArmFallbackAfterEmptyPrimaryTurn (ml-bot false-failover class): the
-    // controlSession !== null guard avoids the null===null trap (per-chat turns
-    // pass session=null, and controlSession also defaults to null).
-    if ((this.controlSession !== null && session === this.controlSession) || mapKey === 'control@heal.internal') {
-      return false;
-    }
-
-    this.consecutiveUnknownTerminalTurns += 1;
-    if (this.consecutiveUnknownTerminalTurns < UNKNOWN_TERMINAL_FALLBACK_THRESHOLD) return false;
-
-    log.warn(
-      {
-        instanceName: this.instanceName,
-        primaryProvider: this.agentProvider,
-        consecutiveUnknownTerminalTurns: this.consecutiveUnknownTerminalTurns,
-      },
-      'primary provider returned repeated unclassified terminal errors — arming provider fallback',
-    );
-
-    const activation = this.activateProviderFallbackAfterTerminalResult(
-      null,
-      'unknown-terminal-repeated',
-      session,
-      evidenceText,
-    );
-    if (!activation) return false;
-
-    const replayScheduled = this.scheduleFallbackReplay({
-      activation,
-      chatJid: queue.targetChatJid,
-      mapKey,
-      oldSession: session,
-      hadToolActivity: turnHadToolWork,
-    });
-    this.notifyProviderFallbackActivated(queue, activation, {
-      replayScheduled,
-      blockedByToolActivity: turnHadToolWork,
-    });
-    // No replay took over (tool activity already started, or nothing to replay):
-    // the primary session actually errored, so tear it down like the sibling
-    // terminal branches — the active window routes the next turn to the fallback.
-    if (!replayScheduled) session?.shutdown();
-    this.consecutiveUnknownTerminalTurns = 0;
-    return true;
-  }
-
-  private activateProviderFallbackAfterTerminalResult(
-    resetAt: Date | null,
-    reason: ProviderFallbackReason,
-    session: SessionManager | null,
-    evidenceText?: string,
-  ): ProviderFallbackActivation | null {
-    const failedKey = this.markActiveFallbackFailed(session, reason, evidenceText);
-    const activation = this.activateProviderFallback(resetAt, reason);
-    if (activation || !failedKey) return activation;
-
-    // Preserve previous single-fallback behavior when no alternate exists:
-    // keep the current fallback window instead of reverting to a known-bad primary.
-    this.fallbackChain.failedKeys.delete(failedKey);
-    return this.activateProviderFallback(resetAt, reason);
-  }
-
-  /**
-   * Public, read-only view of the provider-fallback state for observability
-   * (health snapshot / fleet provider-status). Returns the currently effective
-   * provider, the epoch-ms expiry of an active fallback window (`null` when
-   * the bot is on its primary provider), and process-local turn counters (reset
-   * on restart). Mirrors {@link effectiveProvider} but does not widen the
-   * underlying fields' visibility.
-   *
-   * Health spreads this object verbatim into /health, so new fields must be
-   * JSON-safe and additive.
-   */
   /**
    * TTL-memoised resolver for idle (pre-selection) fallback eligibility. Built
    * lazily so the keyring is consulted at most once per entry per TTL even though
@@ -8883,71 +8544,67 @@ export class AgentRuntime implements Runtime {
    */
   private idleFallbackEligibilityResolver?: (entry: AgentFallbackEntry) => boolean | null;
 
-  getFallbackState(): {
-    effectiveProvider: string;
-    fallbackActiveUntil: number | null;
-    fallbackReason: string | null;
-    fallbackModel: string | null;
-    fallbackResetAt: number | null;
-    fallbackRecoveryProbeRequired: boolean;
-    fallbackTurnsServed: number;
-    fallbackTurnsEmpty: number;
-    lastFallbackTurnAt: number | null;
-    probeAttempts: number;
-    lastProbeAt: number | null;
-    fallbackActivations: number;
-    fallbackReverts: number;
-    fallbackReplays: number;
-    fallbackWindowCostUsd: number;
-    primaryModelUsability: RuntimePrimaryModelUsability | null;
-    turnCapability: RuntimeTurnCapability;
-    activeFallbackEntry: AgentFallbackEntry | null;
-    fallbackChain: Array<AgentFallbackEntry & { eligible: boolean | null }>;
-    fallbackChainExhausted: boolean;
-    failedEntryCount: number;
-    fallbackRestoredFromPersist: boolean;
-    turnErrorCounts: Record<string, number>;
-    handoffDistiller: { enabled: boolean; contextInjection: boolean; model: string | null };
-  } {
-    const active = this.isFallbackWindowActive;
-    const fallbackEntry = active ? this.effectiveFallbackEntry : null;
-    this.idleFallbackEligibilityResolver ??= makeIdleEligibilityResolver(
-      (entry) => this.fallbackKeyPresent(entry.provider, entry.model),
-      Date.now,
-    );
-    return {
-      effectiveProvider: this.effectiveProvider,
-      fallbackActiveUntil: active ? this.fallbackWindow.activeUntil : null,
-      fallbackReason: active ? this.fallbackWindow.armReason : null,
-      fallbackModel: fallbackEntry?.model ?? null,
-      fallbackResetAt: active ? this.fallbackWindow.resetAt : null,
-      fallbackRecoveryProbeRequired: active ? this.fallbackWindow.recoveryProbeRequired : false,
-      fallbackTurnsServed: this.fallbackMetrics.turnsServed,
-      fallbackTurnsEmpty: this.fallbackMetrics.turnsEmpty,
-      lastFallbackTurnAt: this.fallbackMetrics.lastTurnAt,
-      probeAttempts: this.fallbackProbeAttempts,
-      lastProbeAt: this.fallbackLastProbeAt,
-      fallbackActivations: this.fallbackMetrics.activations,
-      fallbackReverts: this.fallbackMetrics.reverts,
-      fallbackReplays: this.fallbackMetrics.replays,
-      fallbackWindowCostUsd: this.fallbackMetrics.windowCostUsd,
-      primaryModelUsability: this.primaryModelUsability ? { ...this.primaryModelUsability } : null,
-      turnCapability: this.getTurnCapability(),
-      activeFallbackEntry: fallbackEntry ? { ...fallbackEntry } : null,
-      fallbackChain: this.fallbackChain.snapshot(this.agentFallbacks, this.idleFallbackEligibilityResolver),
-      fallbackChainExhausted: this.fallbackChain.isExhausted(this.agentFallbacks),
-      failedEntryCount: this.fallbackChain.failedKeys.size,
-      fallbackRestoredFromPersist: this.fallbackWindowRestored,
-      turnErrorCounts: Object.fromEntries(this.turnCapabilityTracker.errorCounts),
-      handoffDistiller: {
-        enabled: handoffDistillerEnabled(),
-        contextInjection: handoffContextEnabled(),
-        model: handoffDistillModel(),
-      },
-    };
+  // ---------------------------------------------------------------------------
+  // Provider fallback core (#1977 D2) — extracted to runtime-fallback.ts.
+  // Public Runtime-interface surface and the deactivation spy seam stay here
+  // as named delegators; everything else lives on the coordinator behind
+  // RuntimeFallbackPort.
+  // ---------------------------------------------------------------------------
+
+  getFallbackState(): ReturnType<RuntimeFallbackCoordinator['getFallbackState']> {
+    return this.fallback.getFallbackState();
   }
 
-  // #1753 rem-2: delegates to the ToolRegistry every socket server (global and per-chat) shares — the single choke point every MCP tool call flows through, so this reflects in-flight calls across the whole instance.
+  forceFallback(durationMs?: number): ReturnType<RuntimeFallbackCoordinator['forceFallback']> {
+    return this.fallback.forceFallback(durationMs);
+  }
+
+  disableFallback(): { ok: true } {
+    return this.fallback.disableFallback();
+  }
+
+  /** Named seam: fallback-probe suites spy this method on the runtime instance;
+   *  coordinator-internal callers route through the host so the spy sees them. */
+  private deactivateProviderFallback(reason: string, receipt: FallbackRecoveryReceipt | null = null): void {
+    this.fallback.deactivateProviderFallback(reason, receipt);
+  }
+
+  private activateProviderFallback(
+    resetAt: Date | null,
+    reason: ProviderFallbackReason = 'usage-limit',
+  ): ReturnType<RuntimeFallbackCoordinator['activateProviderFallback']> {
+    return this.fallback.activateProviderFallback(resetAt, reason);
+  }
+
+  private armFallbackWindow(until: number, reason: string, activatedAt?: number, opts?: { restored?: boolean }): boolean {
+    return this.fallback.armFallbackWindow(until, reason, activatedAt, opts);
+  }
+
+  private restorePersistedFallbackWindow(): void {
+    this.fallback.restorePersistedFallbackWindow();
+  }
+
+  private recordFallbackTurnOutcome(
+    queue: IOutboundQueue,
+    hadVisibleOutput: boolean,
+    hadToolWork: boolean = false,
+    session: SessionManager | null = null,
+    wasUnclassifiedError: boolean = false,
+  ): void {
+    this.fallback.recordFallbackTurnOutcome(queue, hadVisibleOutput, hadToolWork, session, wasUnclassifiedError);
+  }
+
+  private fallbackKeyPresent(provider: string | undefined, model: string | undefined): boolean | null {
+    return this.fallback.fallbackKeyPresent(provider, model);
+  }
+
+  private usageLimitNotice(): string {
+    return this.fallback.usageLimitNotice();
+  }
+
+  private emitNoFallbackReauthNotice(queue: IOutboundQueue): void {
+    this.fallback.emitNoFallbackReauthNotice(queue);
+  }
   getMcpLivenessSnapshot(): {
     pendingCount: number;
     oldestCallAgeMs: number | null;
@@ -9020,7 +8677,7 @@ export class AgentRuntime implements Runtime {
       this.pendingPostRevertConfirmation = false;
     }
     const wasStale = deriveModelUsable(this.primaryModelUsability, Date.now()).modelUsableStale;
-    this.recordPrimaryModelUsability({ status: 'usable', provider: this.agentProvider, model: this.model ?? null, reason: 'turn-success' }, 'manual');
+    this.fallback.recordPrimaryModelUsability({ status: 'usable', provider: this.agentProvider, model: this.model ?? null, reason: 'turn-success' }, 'manual');
     if (wasStale) log.info({ provider: this.agentProvider, model: this.model ?? null }, 'primary model usability refreshed by turn success after going stale');
   }
 
@@ -9056,39 +8713,6 @@ export class AgentRuntime implements Runtime {
     }
   }
 
-  /**
-   * Admin override (FALLBACK ON): force a fallback window. Unlike usage-limit
-   * activation, the window is set EXACTLY — it may shorten an active window;
-   * operator intent wins over extend-never-shorten. Arms via the shared
-   * hardened path (persistence + credential pre-flight).
-   *
-   * Reason provenance: an admin force is always treated as a NEW cause, even
-   * when a usage-limit window is already active. The stored reason is reset to
-   * 'admin-forced' so the persisted record accurately reflects the current
-   * operator action rather than the original automatic trigger.
-   */
-  forceFallback(durationMs?: number): { ok: true; activeUntil: number; clamped: boolean } | { ok: false; reason: string } {
-    if (this.agentFallbacks.length === 0) {
-      return { ok: false, reason: 'no fallback provider or chain configured for this instance' };
-    }
-    const requested = durationMs ?? DEFAULT_FALLBACK_WINDOW_MS;
-    const dur = Math.min(MAX_FALLBACK_WINDOW_MS, Math.max(MIN_FALLBACK_WINDOW_MS, requested));
-    const until = Date.now() + dur;
-    // Reset reason so armFallbackWindow stores 'admin-forced' as the new
-    // original cause, replacing any prior reason (e.g. 'usage-limit').
-    this.fallbackWindow.armReason = null;
-    this.fallbackChain.failedKeys.clear();
-    this.fallbackEmptyAdvance.reset();
-    this.armFallbackWindow(until, 'admin-forced');
-    log.info({ activeUntil: new Date(until).toISOString() }, 'fallback window forced by admin');
-    return { ok: true, activeUntil: until, clamped: dur !== requested };
-  }
-
-  /** Admin override (FALLBACK OFF): end any active fallback window now. Idempotent. */
-  disableFallback(): { ok: true } {
-    this.deactivateProviderFallback('admin-disabled');
-    return { ok: true };
-  }
 
   /** Model paired with {@link effectiveProvider}: fallbackModel while the window is active, else the primary model. */
   private get effectiveModel(): string | undefined {
@@ -9098,822 +8722,6 @@ export class AgentRuntime implements Runtime {
       : this.model;
   }
 
-  /** Provider config paired with {@link effectiveProvider}. */
-  private get effectiveProviderConfig(): Record<string, unknown> | undefined {
-    const fallbackEntry = this.effectiveFallbackEntry;
-    if (!fallbackEntry) return this.agentProviderConfig;
-    return fallbackProviderConfigFor(fallbackEntry.provider, this.agentProvider, this.agentProviderConfig) ?? this.agentProviderConfig;
-  }
-
-  private primaryOpencodeProviderConfig(): OpencodeProviderConfig | undefined {
-    if (this.agentProvider !== 'opencode-cli' || !this.agentProviderConfig) return undefined;
-
-    const providerConfig: OpencodeProviderConfig = {};
-    const baseUrl = this.agentProviderConfig['baseUrl'];
-    if (typeof baseUrl === 'string') {
-      providerConfig.baseUrl = baseUrl;
-    }
-    if (this.model) {
-      providerConfig.model = this.model;
-    }
-    const apiKeyService = this.agentProviderConfig['apiKeyService'];
-    if (typeof apiKeyService === 'string') {
-      providerConfig.apiKeyService = apiKeyService;
-    }
-    return providerConfig;
-  }
-
-  /**
-   * Whether the keyring holds an API key for the configured fallback target.
-   *
-   * Returns:
-   *  - `true`  — a key is present for the resolved service.
-   *  - `false` — a key is expected but absent (opencode sessions would fail auth).
-   *  - `null`  — not applicable: native-auth CLI providers (claude-cli,
-   *              codex-cli, gemini-cli) authenticate via subscription/login,
-   *              so no keyring key is checked.
-   *
-   * Service mapping: opencode-cli → the model's provider prefix
-   * (`minimax/...` → `minimax`); openai-api → `openai`;
-   * anthropic-api → `anthropic`. Managed API fallbacks honor inherited
-   * `providerConfig.apiKeyService`. Never logs the value.
-   */
-  private fallbackKeyPresent(provider: string | undefined, model: string | undefined): boolean | null {
-    return fallbackKeyPresentFor(provider, model, this.agentProvider, this.agentProviderConfig);
-  }
-
-  /**
-   * User-facing notice for a usage-limit teardown when no fallback replay can
-   * run. A per-model-tier usage cap is NOT cleared by waiting — the remedy is
-   * operator action (add credits or switch the model), so the copy names that
-   * call to action rather than telling the user to "try again after the limit
-   * resets". No ops alert fires on either branch, so the copy does not claim an
-   * operator was already notified. Pure factory (single source of copy);
-   * redaction-safe (no provider text, no PII).
-   */
-  private usageLimitNotice(): string {
-    return this.agentFallbacks.length > 0
-      ? "_I've reached a model usage limit and the backup couldn't continue this turn. An operator needs to add credits or switch my model._"
-      : "_I've reached a model usage limit and couldn't switch automatically. An operator needs to add credits or switch my model._";
-  }
-
-  /**
-   * QR-211: user-visible notice for an auth-required terminal result when no
-   * fallback could be activated (not configured, or activation failed) — the
-   * three legacy-ladder / registry-handler auth-required branches otherwise end
-   * in permanent silence: the session shuts down with nothing ever forwarded to
-   * the chat. Generic by design (seam-6: no secrets, no provider internals).
-   *
-   * Owns its own enqueue AND de-dup (unlike usageLimitNotice, a pure string
-   * factory called from a single site) because it is invoked from three
-   * independent call sites and must not spam one notice per turn during a
-   * sustained auth-required episode. Mirrors the recentFallbackEmptyTurnAlerts
-   * prune→check→set→capDedupeMap idiom, reusing PROVIDER_FALLBACK_NOTICE_DEDUP_MS.
-   */
-  private emitNoFallbackReauthNotice(queue: IOutboundQueue): void {
-    const now = Date.now();
-    for (const [key, recordedAt] of this.recentNoFallbackReauthNotices) {
-      if (now - recordedAt > PROVIDER_FALLBACK_NOTICE_DEDUP_MS) {
-        this.recentNoFallbackReauthNotices.delete(key);
-      }
-    }
-    const noticeKey = [queue.targetChatJid, 'auth-required'].join(':');
-    if (this.recentNoFallbackReauthNotices.has(noticeKey)) return;
-    queue.enqueueText('_The agent needs re-authentication before it can reply here. An operator has been notified._');
-    // Dedup is recorded only AFTER a successful enqueue: recording first meant a
-    // teardown-race throw suppressed both the notice and the alert for the full
-    // dedup window with no retry.
-    this.recentNoFallbackReauthNotices.set(noticeKey, now);
-    this.capDedupeMap(this.recentNoFallbackReauthNotices);
-    // Back the "operator has been notified" claim: no result-path alert fires on
-    // the no-fallback auth-required teardown (fallback alerts fire only when a
-    // fallback activates), so without this the notice claim would be unbacked.
-    // Fires at notice cadence — the dedup early-return above gates both.
-    emitAlertChecked(
-      this.instanceName,
-      'provider_auth_required_no_fallback',
-      'Agent needs re-authentication and no fallback is available',
-      `chat=${queue.targetChatJid}`,
-    );
-  }
-
-  /**
-   * Count a completed turn during an active fallback window; alert and enqueue
-   * a user notice when the turn produced neither visible text nor tool activity.
-   *
-   * A turn whose entire reply was MCP tool sends (send_message, send_media, etc.)
-   * is NOT silent — the user already received the visible result through the
-   * outbound channel. hadToolWork suppresses both the counter and the notice for
-   * those turns, preserving the signal for genuinely empty ones.
-   */
-  private recordFallbackTurnOutcome(
-    queue: IOutboundQueue,
-    hadVisibleOutput: boolean,
-    hadToolWork: boolean = false,
-    session: SessionManager | null = null,
-    wasUnclassifiedError: boolean = false,
-  ): void {
-    if (!this.isFallbackWindowActive) return;
-    this.fallbackMetrics.recordServedTurn();
-    // An UNCLASSIFIED terminal error from the active fallback ENTRY carries
-    // non-empty raw error text (suppressed from the user, replaced by a notice),
-    // so hadVisibleOutput is true even though the turn produced no usable reply.
-    // Treat it as unproductive like a structurally-empty turn — otherwise the
-    // reset below wipes the advance run every turn and the bot pins forever on a
-    // dead entry while a working entry waits behind it in the chain.
-    if ((hadVisibleOutput || hadToolWork) && !wasUnclassifiedError) {
-      // The active entry produced a real reply — it is healthy. Clear the
-      // empty-advance accounting so a later isolated empty turn starts fresh.
-      this.fallbackEmptyAdvance.reset();
-      return;
-    }
-    this.fallbackMetrics.recordEmptyTurn();
-    this.fallbackEmptyAdvance.recordEmpty();
-    const entry = this.fallbackWindow.activeEntry ?? this.agentFallbacks[0] ?? null;
-    log.warn({
-      chatJid: queue.targetChatJid,
-      fallbackProvider: entry?.provider,
-      fallbackModel: entry?.model,
-      served: this.fallbackMetrics.turnsServed,
-      empty: this.fallbackMetrics.turnsEmpty,
-    }, 'fallback turn completed with zero visible output');
-    // Per-chat dedup: reuse PROVIDER_FALLBACK_NOTICE_DEDUP_MS window to avoid
-    // one alert per empty turn in a sustained silent-bot episode.
-    const emptyAlertNow = Date.now();
-    for (const [k, ts] of this.recentFallbackEmptyTurnAlerts) {
-      if (emptyAlertNow - ts > PROVIDER_FALLBACK_NOTICE_DEDUP_MS) this.recentFallbackEmptyTurnAlerts.delete(k);
-    }
-    if (!this.recentFallbackEmptyTurnAlerts.has(queue.targetChatJid)) {
-      this.recentFallbackEmptyTurnAlerts.set(queue.targetChatJid, emptyAlertNow);
-      this.capDedupeMap(this.recentFallbackEmptyTurnAlerts);
-      emitAlertChecked(
-        this.instanceName,
-        'fallback_empty_turn',
-        'Fallback turn produced no visible output',
-        `provider=${entry?.provider} model=${entry?.model} served=${this.fallbackMetrics.turnsServed} empty=${this.fallbackMetrics.turnsEmpty} chat=${queue.targetChatJid}`,
-      );
-    }
-
-    // Advance the chain when the ACTIVE fallback entry is structurally empty.
-    // An entry that connects but emits no assistant text (e.g. a broken
-    // opencode provider integration) produces no terminal-failure MESSAGE, so
-    // the text-driven advance path (activateProviderFallbackAfterTerminalResult
-    // on a classified failure) never fires and the bot pins to the dead entry,
-    // emitting "_backup returned no reply — resend_" every turn while a working
-    // entry sits behind it. Mirror the PRIMARY empty-output trigger: after
-    // EMPTY_OUTPUT_FALLBACK_THRESHOLD consecutive empty turns on the same entry,
-    // route it through the SAME advance path terminal failures use — mark the
-    // entry failed and re-select the next eligible entry. Preserve the window's
-    // original arm reason so selection keeps skipping same-as-primary entries
-    // (an auth-required window must not advance back onto a dead primary
-    // provider). The attempted-key guard stops re-advancing (and re-alerting)
-    // the same entry when no alternate exists. Reuses the terminal path's
-    // single-fallback preservation: when no alternate remains the window keeps
-    // the current entry rather than reverting to a known-bad primary.
-    const entryKey = entry ? this.fallbackChain.entryKey(entry) : null;
-    if (
-      session !== null &&
-      entryKey !== null &&
-      this.fallbackEmptyAdvance.shouldAttemptAdvance(entryKey, EMPTY_OUTPUT_FALLBACK_THRESHOLD)
-    ) {
-      const advanceReason = isProviderFallbackReason(this.fallbackWindow.armReason)
-        ? this.fallbackWindow.armReason
-        : 'auth-required';
-      const resetAt = this.fallbackWindow.resetAt !== null ? new Date(this.fallbackWindow.resetAt) : null;
-      const activation = this.activateProviderFallbackAfterTerminalResult(
-        resetAt,
-        advanceReason,
-        session,
-        'fallback entry returned empty output',
-      );
-      if (activation) {
-        // Advanced to a fresh entry — clear the empty run so the new entry
-        // starts from zero (the attempted-key guard now tracks the prior key,
-        // which differs from the newly-selected entry).
-        this.fallbackEmptyAdvance.clearConsecutive();
-        log.warn({
-          chatJid: queue.targetChatJid,
-          deadProvider: entry?.provider,
-          deadModel: entry?.model,
-          advancedTo: this.fallbackWindow.activeEntry?.provider,
-          advancedModel: this.fallbackWindow.activeEntry?.model,
-        }, 'advanced fallback chain past structurally-empty entry');
-      }
-    }
-  }
-
-  /** Arm (or move) the fallback window to `until`, schedule the revert timer,
-   *  and persist best-effort so a restart mid-window resumes on fallback.
-   *  Pass `activatedAt` explicitly when restoring to preserve the original
-   *  time, and `opts.restored` so a resumed window is not re-counted. */
-  private armFallbackWindow(until: number, reason: string, activatedAt: number = Date.now(), opts?: { restored?: boolean }): boolean {
-    const selection = this.selectFallbackEntryForWindow(reason);
-    if (!selection) return false;
-    const fallbackEntry = selection.entry;
-    this.fallbackWindow.activeEntry = fallbackEntry;
-    this.fallbackWindow.activeUntil = until;
-    this.fallbackWindow.activatedAt = activatedAt;
-    // First-arm discriminator, captured before the guard below consumes it:
-    // null means this call is the window's first arm in this process (a fresh
-    // activation or a post-restart restore), non-null means an extension of
-    // the already-armed window. Pre-flight runs only on first arms — an
-    // extension re-arm re-spawning the credential/binary/catalog probes and
-    // re-firing their alerts on every per-turn usage-limit is an unthrottled
-    // storm, and nothing about the target entry's environment changed.
-    const firstArm = this.fallbackWindow.armReason === null;
-    // Preserve original cause: only set on first arm; extensions and restores
-    // must pass the original reason so it is not overwritten. The activation
-    // alert + counter fire exactly once per window, never on extensions. A
-    // restored window is the SAME window resuming after a restart — the
-    // first-arm discriminator is per-process, so without the restored flag
-    // every restart would re-count and re-alert the activation that already
-    // fired before the restart.
-    if (firstArm) {
-      // Slice-4 observability: exactly one auto_fallback_started per window
-      // (extensions re-arm the same window; a restore resumes it quietly).
-      this.emitRouteEventChecked({
-        event: 'auto_fallback_started',
-        conversationKey: null,
-        provider: fallbackEntry.provider,
-        modelRef: fallbackEntry.model ?? null,
-        source: 'auto_fallback',
-        userVisible: !opts?.restored,
-        reasonCode: opts?.restored ? `${reason} (restored)` : reason,
-      });
-      this.fallbackWindow.armReason = reason;
-      // Snapshot the lifetime turn counters at the first arm of every window
-      // (the null-guard skips extensions; restores hit it too because the
-      // guard is per-process, which is correct — the counters are also
-      // per-process, so a restored window counts from this process's zero).
-      this.fallbackMetrics.snapshotAtArm();
-      if (opts?.restored) {
-        // A restored window is the SAME window resuming after a restart, so
-        // it never re-counts as an activation — but the resume itself is an
-        // operator-visible transition (a restart mid-window; repeated
-        // restores are the crash-loop signature), so it gets its own
-        // additive source instead of silence.
-        // A restore is a RESUMPTION, not a new fault: the activation already
-        // fired before the restart and its window is still open. Paging an
-        // operator to "investigate/remediate" a healthy service restart mid-
-        // window is noise. Downgraded to 'info' (BE-G3 gap 2).
-        emitAlertChecked(
-          this.instanceName,
-          'provider_fallback_restored',
-          'Provider fallback window restored after restart',
-          `reason=${reason} provider=${fallbackEntry.provider} model=${fallbackEntry.model ?? 'default'}`
-            + ` until=${new Date(until).toISOString()} probeAttempts=${this.fallbackProbeAttempts}`,
-          'info',
-        );
-      } else {
-        this.fallbackMetrics.recordActivation();
-        emitAlertChecked(
-          this.instanceName,
-          'provider_fallback_activated',
-          'Provider fallback window activated',
-          `reason=${reason} provider=${fallbackEntry.provider} model=${fallbackEntry.model ?? 'default'} until=${new Date(until).toISOString()}`,
-        );
-      }
-    }
-    if (this.revertTimer) {
-      clearTimeout(this.revertTimer);
-      this.revertTimer = null;
-    }
-    this.revertTimer = setTimeout(() => {
-      this.handleFallbackRevertTimer();
-    }, Math.max(0, until - Date.now()));
-    // Do not let the revert timer keep the process alive at shutdown.
-    this.revertTimer.unref?.();
-    // Belt-and-suspenders: persist the memory-authoritative reason (fallbackArmReason
-    // after the set-when-null guard above) so the DB can never diverge from the
-    // in-memory value even if a caller passes an incorrect reason directly.
-    const persistReason = this.fallbackWindow.armReason ?? reason;
-    this.fallbackWindow.recoveryProbeRequired = fallbackRequiresPrimaryProbe(persistReason as ProviderFallbackReason);
-    this.scheduleFallbackPrimaryProbe();
-    try {
-      saveFallbackState(this.db, {
-        activeUntil: until,
-        activatedAt,
-        reason: persistReason,
-        probeAttempts: this.fallbackProbeAttempts,
-        version: PERSISTED_FALLBACK_STATE_VERSION,
-        activeEntryProvider: fallbackEntry.provider,
-        activeEntryModel: fallbackEntry.model ?? null,
-        failedKeys: failedKeysToPersistedKeys(this.fallbackChain.failedKeys),
-      });
-    } catch (err) {
-      log.warn({ err }, 'failed to persist fallback window — continuing in-memory');
-      emitAlertChecked(
-        this.instanceName,
-        'fallback_persist_failed',
-        'Failed to persist fallback window — will not survive restart',
-        `until=${new Date(until).toISOString()} reason=${persistReason}`,
-      );
-    }
-    // Pre-flight is gated to first arms (fresh activation or post-restart
-    // restore). An extension re-arm changes nothing about the target entry's
-    // environment, and per-turn usage-limit extensions would otherwise
-    // re-spawn every probe and re-fire every pre-flight alert — an
-    // unthrottled storm under sustained load.
-    if (!firstArm) return true;
-    // Pre-flight: check key presence and probe validity; never blocks or reverts
-    // the window — fail-open on anything except a definitive 401/403.
-    const fallbackProviderConfig = fallbackProviderConfigFor(
-      fallbackEntry.provider,
-      this.agentProvider,
-      this.agentProviderConfig,
-    );
-    const fallbackBinary = getProviderBinary(fallbackEntry.provider);
-    let fallbackProbeEnv: NodeJS.ProcessEnv | null = null;
-    if (fallbackBinary) {
-      try {
-        fallbackProbeEnv = buildChildEnv(
-          fallbackEntry.provider,
-          {
-            allowM365Mutations: this.allowM365Mutations,
-            whatsoupInstance: this.instanceName,
-            whatsoupMcpSocket: this.globalMcpSocketPath ?? undefined,
-          },
-          fallbackEntry.model,
-          fallbackProviderConfig,
-        );
-      } catch (err) {
-        const detail = errorMessage(err);
-        log.error({
-          err: detail,
-          fallbackProvider: fallbackEntry.provider,
-          fallbackModel: fallbackEntry.model,
-        }, 'fallback preflight child environment configuration failed');
-        emitAlertChecked(
-          this.instanceName,
-          'fallback_preflight_config_error',
-          'Fallback provider preflight configuration error',
-          `provider=${alertEvidenceValue(fallbackEntry.provider)}`
-            + ` model=${alertEvidenceValue(fallbackEntry.model)}`
-            + ` detail=${alertEvidenceValue(detail)}`,
-        );
-        return true;
-      }
-    }
-
-    const service = resolveProviderKeyService(
-      fallbackEntry.provider,
-      fallbackEntry.model,
-      fallbackProviderConfig,
-    );
-    if (service) {
-      const key = lookupCredential(service);
-      if (!key) {
-        log.warn({
-          instanceName: this.instanceName,
-          fallbackProvider: fallbackEntry.provider,
-          fallbackModel: fallbackEntry.model,
-        }, 'fallback provider key not found in keyring — opencode sessions will fail auth');
-        if (!selection.selectedHadMissingCredential) {
-          emitAlertChecked(
-            this.instanceName,
-            'fallback_credential_missing',
-            'Fallback provider key not found in keyring',
-            `service=${service} provider=${fallbackEntry.provider} model=${fallbackEntry.model}`,
-          );
-        }
-      } else {
-        void verifyFallbackCredential(service, key).then((result) => {
-          if (result !== 'invalid') return;
-          log.error({ service, fallbackProvider: fallbackEntry.provider }, 'fallback credential rejected by provider (401/403)');
-          emitAlertChecked(
-            this.instanceName,
-            'fallback_credential_invalid',
-            'Fallback API key rejected by provider',
-            `service=${service} provider=${fallbackEntry.provider} model=${fallbackEntry.model}`,
-          );
-        });
-      }
-    }
-    // Pre-flight: check binary presence for CLI-backed fallback providers.
-    // Managed-loop providers (openai-api, anthropic-api) have no binary to probe.
-    // Never blocks or reverts the window — fail-open on anything except ENOENT.
-    if (fallbackBinary && fallbackProbeEnv) {
-      void probeFallbackBinary(fallbackBinary, fallbackProbeEnv).then((r) => {
-        if (r.status === 'missing') {
-          log.error(
-            { fallbackProvider: fallbackEntry.provider, binary: fallbackBinary },
-            'fallback provider binary not found on this host',
-          );
-          emitAlertChecked(
-            this.instanceName,
-            'fallback_binary_missing',
-            'Fallback provider binary not found on this host',
-            `binary=${fallbackBinary} provider=${fallbackEntry.provider} model=${fallbackEntry.model}`,
-          );
-        } else if (r.status === 'incompatible') {
-          log.error(
-            { fallbackProvider: fallbackEntry.provider, binary: fallbackBinary },
-            'fallback provider binary has wrong architecture for this host',
-          );
-          emitAlertChecked(
-            this.instanceName,
-            'fallback_binary_incompatible',
-            'Fallback provider binary wrong architecture',
-            `binary=${fallbackBinary} provider=${fallbackEntry.provider} model=${fallbackEntry.model}`,
-          );
-        } else if (r.status === 'present') {
-          if (r.version) {
-            log.info(
-              { fallbackProvider: fallbackEntry.provider, binary: fallbackBinary, version: r.version },
-              'fallback provider binary present',
-            );
-          }
-          // Pre-flight: check the configured model against the provider's model
-          // catalog. Model ids are case-sensitive on the provider side and a
-          // wrong-case id fails every session with an opaque error, so warn the
-          // operator now instead of at first-turn failure. opencode-cli only —
-          // it is the one CLI provider whose `models` output we parse.
-          // Fire-and-forget, fail-open: never blocks or reverts the window.
-          if (fallbackEntry.model && fallbackEntry.provider === 'opencode-cli') {
-            const fallbackModel = fallbackEntry.model;
-            void probeModelCatalog(fallbackBinary, fallbackModel, fallbackProbeEnv).then((catalog) => {
-              if (catalog.status !== 'not_found') return;
-              log.error(
-                {
-                  fallbackProvider: fallbackEntry.provider,
-                  fallbackModel,
-                  catalogSuggestion: catalog.suggestion,
-                },
-                'fallback model not found in provider catalog — sessions will fail until corrected',
-              );
-              emitAlertChecked(
-                this.instanceName,
-                'fallback_model_unknown',
-                'Fallback model not found in provider catalog',
-                `model=${fallbackModel}`
-                  + (catalog.suggestion ? ` suggestion=${catalog.suggestion}` : '')
-                  + ` provider=${fallbackEntry.provider}`,
-              );
-            });
-          }
-        }
-      });
-    }
-    return true;
-  }
-
-  /**
-   * Re-arm a persisted fallback window after a process restart. Never throws.
-   * #3019: restore/reconciliation logic extracted into fallback-restore.ts.
-   */
-  private restorePersistedFallbackWindow(): void {
-    const r = restorePersistedFallbackWindowState(
-      { db: this.db, agentFallbacks: this.agentFallbacks,
-        resetFailedKeys: () => this.fallbackChain.failedKeys.clear(),
-        addFailedKey: (k) => this.fallbackChain.failedKeys.add(k),
-        entryKeyFor: (p, m) => this.fallbackChain.entryKey({ provider: p, model: m ?? undefined }) },
-      MAX_FALLBACK_WINDOW_MS, Date.now);
-    if (r.outcome !== 'armed') { this.fallbackWindowRestored = false; return; }
-    this.fallbackProbeAttempts = r.persistedProbeAttempts;
-    const ok = this.armFallbackWindow(r.clampedUntil, r.persistedReason, r.persistedActivatedAt, { restored: true });
-    if (!ok) { clearFallbackState(this.db); this.fallbackWindowRestored = false; return; }
-    this.fallbackWindowRestored = true;
-    log.info({ activeUntil: new Date(r.clampedUntil).toISOString(),
-      ...(r.clampedUntil < r.persistedUntil ? { persistedUntil: new Date(r.persistedUntil).toISOString() } : {}),
-      originalReason: r.persistedReason, restoredFailedKeys: r.restoredFailedKeys },
-      'restored provider-fallback window from persisted state');
-  }
-
-  /**
-   * Activate provider fallback after the primary provider cannot serve a turn.
-   *
-   * No-op unless a fallback provider is configured. The window ends at the
-   * parsed `resetAt` when available, else `DEFAULT_FALLBACK_WINDOW_MS` from now,
-   * clamped to [MIN_FALLBACK_WINDOW_MS, MAX_FALLBACK_WINDOW_MS]. Idempotent: a
-   * second activation while already active extends the window to the later of
-   * the two. Schedules an auto-revert timer (unref'd so it never keeps the
-   * process alive).
-   */
-  private activateProviderFallback(
-    resetAt: Date | null,
-    reason: ProviderFallbackReason = 'usage-limit',
-  ): ProviderFallbackActivation | null {
-    if (this.agentFallbacks.length === 0) return null;
-
-    const now = Date.now();
-    const rawUntil = resetAt ? resetAt.getTime() : now + DEFAULT_FALLBACK_WINDOW_MS;
-    const clampedUntil = Math.min(
-      now + MAX_FALLBACK_WINDOW_MS,
-      Math.max(now + MIN_FALLBACK_WINDOW_MS, rawUntil),
-    );
-    // Extend rather than shorten an already-active window.
-    const until = this.fallbackWindow.activeUntil
-      ? Math.max(this.fallbackWindow.activeUntil, clampedUntil)
-      : clampedUntil;
-
-    const wasActive = this.fallbackWindow.activeUntil !== null;
-    // Preserve the original first-engagement time across extensions so the
-    // persisted record always reflects when the fallback was first triggered,
-    // not when it was last extended.
-    const activatedAt = wasActive && this.fallbackWindow.activatedAt !== null
-      ? this.fallbackWindow.activatedAt
-      : now;
-    // Pass the original cause on extension so the root cause is preserved;
-    // on first activation fallbackArmReason is null so armFallbackWindow
-    // stores 'usage-limit' as the original cause.
-    const persistedReason = wasActive && this.fallbackWindow.armReason !== null ? this.fallbackWindow.armReason : reason;
-    this.fallbackWindow.resetAt = resetAt?.getTime() ?? null;
-    const armed = this.armFallbackWindow(until, persistedReason, activatedAt);
-    if (!armed) return null;
-    const fallbackEntry = this.fallbackWindow.activeEntry;
-    if (!fallbackEntry) return null;
-    const keyPresent = this.fallbackKeyPresent(fallbackEntry.provider, fallbackEntry.model);
-
-    log.info({
-      instanceName: this.instanceName,
-      primaryProvider: this.agentProvider,
-      fallbackProvider: fallbackEntry.provider,
-      fallbackModel: fallbackEntry.model,
-      fallbackChain: this.fallbackChain.snapshot(this.agentFallbacks),
-      resetAt: resetAt ? resetAt.toISOString() : null,
-      activeUntil: new Date(until).toISOString(),
-      extended: wasActive,
-      keyPresent,
-      recoveryProbeRequired: this.fallbackWindow.recoveryProbeRequired,
-      reason,
-    }, 'activating provider fallback after primary provider failure');
-
-    return {
-      primaryProvider: this.agentProvider,
-      fallbackProvider: fallbackEntry.provider,
-      fallbackModel: fallbackEntry.model,
-      reason,
-      resetAt,
-      activeUntil: until,
-      extended: wasActive,
-      keyPresent,
-      recoveryProbeRequired: this.fallbackWindow.recoveryProbeRequired,
-    };
-  }
-
-  /** Clear the fallback window + timer, reverting new sessions to the primary provider. `receipt` (DUR-02, probe-confirmed only) drives the dual clear below; every durable emission fires BEFORE the counter reset and the DB clear, so a crash mid-transition replays idempotently instead of stranding an open incident. */
-  private deactivateProviderFallback(reason: string, receipt: FallbackRecoveryReceipt | null = null): void {
-    if (this.revertTimer) {
-      clearTimeout(this.revertTimer);
-      this.revertTimer = null;
-    }
-    if (this.fallbackPrimaryProbeTimer) {
-      clearTimeout(this.fallbackPrimaryProbeTimer);
-      this.fallbackPrimaryProbeTimer = null;
-    }
-    if (this.fallbackWindow.activeUntil === null) return;
-    // Capture before clearing: the revert alert reports how long the window
-    // ran. The idempotency guard above means this fires once per window.
-    const windowMs = this.fallbackWindow.activatedAt !== null ? Date.now() - this.fallbackWindow.activatedAt : null;
-    // Per-window deltas against the arm-time snapshots — the lifetime counters
-    // are NOT reset here (getFallbackState keeps reporting process totals).
-    const { served: windowTurnsServed, empty: windowTurnsEmpty } = this.fallbackMetrics.windowDeltas();
-    // Slice-4 observability: one auto_fallback_cleared per window. Recovery
-    // restores QUIETLY — the record is /why-retrievable, not a user notice
-    // (UH-003).
-    this.emitRouteEventChecked({
-      event: 'auto_fallback_cleared',
-      conversationKey: null,
-      provider: this.fallbackWindow.activeEntry?.provider ?? this.agentProvider,
-      modelRef: this.fallbackWindow.activeEntry?.model ?? null,
-      source: 'auto_fallback',
-      userVisible: false,
-      reasonCode: reason,
-    });
-    // A revert is a RECOVERY, not a fault: the window ran its course (or was
-    // manually disabled) and new sessions are back on the primary provider.
-    // It carries useful per-window telemetry (turns served/empty, duration) so
-    // it stays an emitted source rather than a bare clear — but at `info`, not
-    // the emitAlertChecked `critical` default. Paging an operator to
-    // "investigate/remediate" a healthy revert is pure noise (it was firing
-    // critical for clean window-elapsed cycles). The matching FAULT alert —
-    // provider_fallback_activated — keeps its critical default. A
-    // probe-confirmed recovery appends the receipt (allowlisted fields only).
-    const receiptEvidence = receipt ? formatFallbackRecoveryReceiptEvidence(receipt) : null;
-    emitAlertChecked(this.instanceName, 'provider_fallback_reverted', 'Provider fallback window ended — reverted to primary provider', `reason=${reason} turnsServed=${windowTurnsServed} turnsEmpty=${windowTurnsEmpty} windowMs=${windowMs ?? 'unknown'}${receiptEvidence ? ` ${receiptEvidence}` : ''}`, 'info');
-    // A2: real traffic isn't proven yet — the FIRST post-revert turn succeeding is (recordTurnCapabilitySuccess); a non-probe-confirmed deactivation makes no recovery claim, so it clears now.
-    if (receipt) this.pendingPostRevertConfirmation = true;
-    else clearAlertSourceChecked(this.instanceName, 'provider_fallback_activated', `reason=${reason} windowMs=${windowMs ?? 'unknown'}`);
-    // H5: stall-incident open/closed = attempts>=threshold NOW, true for ANY reason — fixes admin-disable-mid-stall re-stranding it forever.
-    if (this.fallbackProbeAttempts >= PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD) clearAlertSourceChecked(this.instanceName, 'fallback_recovery_stalled', receiptEvidence ?? `reason=${reason} attempts=${this.fallbackProbeAttempts} recovery=unconfirmed episode=abandoned`);
-    this.fallbackWindow.activeUntil = null;
-    this.fallbackWindow.activatedAt = null;
-    this.fallbackWindow.armReason = null;
-    this.fallbackWindow.activeEntry = null;
-    this.fallbackChain.failedKeys.clear();
-    this.fallbackEmptyAdvance.reset();
-    this.fallbackWindow.resetAt = null;
-    this.fallbackWindow.recoveryProbeRequired = false;
-    this.fallbackWindowRestored = false;
-    // End of the stall episode (covers both successful-probe reverts and
-    // manual/elapsed deactivations) — the next episode counts from zero and
-    // may alert again at the threshold. fallbackLastProbeAt is kept as
-    // historical observability, mirroring lastFallbackTurnAt.
-    this.fallbackProbeAttempts = 0;
-    try {
-      clearFallbackState(this.db);
-    } catch (err) {
-      log.warn({ err }, 'failed to clear persisted fallback state');
-    }
-    log.info({
-      instanceName: this.instanceName,
-      primaryProvider: this.agentProvider,
-      reason,
-    }, 'reverting to primary provider');
-    this.fallbackMetrics.recordRevert();
-  }
-
-  private handleFallbackRevertTimer(): void {
-    if (this.fallbackWindow.activeUntil === null) return;
-    if (!this.fallbackWindow.recoveryProbeRequired) {
-      this.deactivateProviderFallback('window-elapsed');
-      return;
-    }
-    this.fallbackLastProbeAt = Date.now();
-    // The probe spawns a child process; fire-and-forget with the result
-    // driving deactivate-or-extend in the resolution. While the probe is in
-    // flight (≤5 s) the window shows expired — acceptable: the previous
-    // spawnSync froze the WHOLE event loop for the same duration, forever on
-    // a dead auth primary.
-    const windowAtProbe = this.fallbackWindow.activeUntil;
-    void this.probeAndEvaluateFallbackRecovery().then((decision) => {
-      if (this.fallbackWindow.activeUntil === null || this.fallbackWindow.activeUntil !== windowAtProbe) return; // stale: window deactivated/re-armed mid-flight
-      if (decision.commit) {
-        this.deactivateProviderFallback('primary-probe-ok', decision.receipt);
-        return;
-      }
-      this.fallbackProbeAttempts += 1;
-      const now = Date.now();
-      const until = now + PROVIDER_FALLBACK_PRIMARY_RECHECK_MS;
-      this.fallbackWindow.activeUntil = until;
-      this.revertTimer = setTimeout(() => {
-        this.handleFallbackRevertTimer();
-      }, PROVIDER_FALLBACK_PRIMARY_RECHECK_MS);
-      this.revertTimer.unref?.();
-      try {
-        saveFallbackState(this.db, {
-          activeUntil: until,
-          activatedAt: this.fallbackWindow.activatedAt ?? now,
-          reason: this.fallbackWindow.armReason ?? 'auth-required',
-          // Persist the stall clock with the window so a restart mid-stall
-          // resumes the count instead of resetting it.
-          probeAttempts: this.fallbackProbeAttempts,
-          version: PERSISTED_FALLBACK_STATE_VERSION,
-          activeEntryProvider: this.fallbackWindow.activeEntry?.provider ?? null,
-          activeEntryModel: this.fallbackWindow.activeEntry?.model ?? null,
-          failedKeys: failedKeysToPersistedKeys(this.fallbackChain.failedKeys),
-        });
-      } catch (err) {
-        log.warn({ err }, 'failed to extend persisted fallback window after failed recovery probe');
-      }
-      // Stall alert at T, 2T, 3T ... up to the DUR-02 escalation ceiling, then no repeats (see stallAlertPlan) — counter resets only on deactivation, window keeps extending.
-      const atts = this.fallbackProbeAttempts;
-      const plan = stallAlertPlan(atts, PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD, PROVIDER_FALLBACK_PROBE_STALL_CEILING_MULTIPLE);
-      if (plan.emit) {
-        emitAlertChecked(this.instanceName, 'fallback_recovery_stalled', 'Primary provider recovery probe is stalled — fallback window extending indefinitely', `reason=${this.fallbackWindow.armReason ?? 'auth-required'} attempts=${atts} windowEnd=${new Date(until).toISOString()} primaryProvider=${this.agentProvider}${plan.ceiling ? ' ceiling=true' : ''}`);
-      }
-      // No scheduleFallbackPrimaryProbe() here: the extension window equals the
-      // recheck cadence, so this timer IS the probe cadence. Re-arming the
-      // standing probe alongside it produced a double-probe (two probes per
-      // cadence); the standing probe's guard makes it a no-op in this state.
-      log.warn({
-        instanceName: this.instanceName,
-        primaryProvider: this.agentProvider,
-        fallbackProvider: this.fallbackWindow.activeEntry?.provider,
-        reason: this.fallbackWindow.armReason,
-        probeAttempts: this.fallbackProbeAttempts,
-      }, 'primary provider recovery probe still failing; keeping fallback armed');
-    });
-  }
-
-  /** DUR-02: thin delegator — see resolveFallbackRecoveryDecision (fallback-recovery-transaction.ts) for the shared probe/evaluate core. A3: a commit feeds its fresh evidence straight into recordPrimaryModelUsability so /health refreshes immediately, not transitively on the first post-revert turn. */
-  private probeAndEvaluateFallbackRecovery(): Promise<FallbackRecoveryDecision> {
-    return resolveFallbackRecoveryDecision(
-      (onEvidence) => this.probePrimaryProviderRecovered(onEvidence),
-      {
-        instanceName: this.instanceName, primaryProvider: this.agentProvider, primaryModel: this.model ?? null,
-        fallbackProvider: this.fallbackWindow.activeEntry?.provider ?? this.agentProvider, fallbackModel: this.fallbackWindow.activeEntry?.model ?? null,
-        probeAttemptsAtTransition: this.fallbackProbeAttempts,
-      },
-      (err) => log.warn({ err }, 'primary provider recovery probe threw — treating as failed'),
-    ).then((decision) => { if (decision.commit) this.recordPrimaryModelUsability(decision.receipt.evidence, 'manual'); return decision; });
-  }
-
-  /**
-   * Standing early-recovery probe. Its only purpose is to revert BEFORE a long
-   * window (e.g. the 5h usage-limit default) elapses; once the remaining window
-   * is within one recheck cadence the revert timer itself probes on the same
-   * cadence, so arming this timer too would double-probe — the guard below
-   * makes it a no-op in that state (the revert-timer path is authoritative).
-   */
-  private scheduleFallbackPrimaryProbe(): void {
-    if (this.fallbackPrimaryProbeTimer) {
-      clearTimeout(this.fallbackPrimaryProbeTimer);
-      this.fallbackPrimaryProbeTimer = null;
-    }
-    if (!this.fallbackWindow.recoveryProbeRequired) return;
-    if (
-      this.fallbackWindow.activeUntil === null
-      || this.fallbackWindow.activeUntil - Date.now() <= PROVIDER_FALLBACK_PRIMARY_RECHECK_MS
-    ) {
-      return;
-    }
-    this.fallbackPrimaryProbeTimer = setTimeout(() => {
-      this.fallbackPrimaryProbeTimer = null;
-      if (this.fallbackWindow.activeUntil === null || !this.fallbackWindow.recoveryProbeRequired) return;
-      this.fallbackLastProbeAt = Date.now();
-      const windowAtProbe = this.fallbackWindow.activeUntil;
-      void this.probeAndEvaluateFallbackRecovery().then((decision) => {
-        if (
-          this.fallbackWindow.activeUntil === null ||
-          !this.fallbackWindow.recoveryProbeRequired ||
-          this.fallbackWindow.activeUntil !== windowAtProbe
-        ) return;
-        if (decision.commit) {
-          this.deactivateProviderFallback('primary-probe-ok', decision.receipt);
-          return;
-        }
-        this.scheduleFallbackPrimaryProbe();
-      });
-    }, PROVIDER_FALLBACK_PRIMARY_RECHECK_MS);
-    this.fallbackPrimaryProbeTimer.unref?.();
-  }
-
-  private schedulePrimaryModelUsabilityProbe(trigger: 'startup' | 'manual' | 'periodic'): void {
-    const target = {
-      provider: this.agentProvider,
-      model: this.model ?? null,
-    };
-    this.primaryModelUsability = {
-      status: 'unknown',
-      provider: target.provider,
-      model: target.model,
-      reason: 'probe-in-flight',
-      checkedAt: this.primaryModelUsability?.checkedAt ?? null,
-      probeInFlight: true,
-    };
-
-    const adapters = createPrimaryModelProbeAdapters(this.agentProviderConfig, buildPrimaryProbeAdapterDeps(this.agentProvider, this.model, this.cwd, this.egressProxy?.port, this.providerExecutionGate));
-    void Promise.resolve()
-      .then(() => probePrimaryModelUsability(target, adapters))
-      .then((result) => this.recordPrimaryModelUsability(result, trigger))
-      .catch((err) => {
-        log.warn({ err, provider: target.provider, model: target.model }, 'primary model usability probe threw');
-        this.recordPrimaryModelUsability({
-          status: 'unknown',
-          provider: target.provider,
-          model: target.model,
-          reason: 'probe-threw',
-        }, trigger);
-      });
-  }
-
-  private scheduleNextPeriodicUsabilityProbe(): void {
-    if (this.periodicUsabilityProbeTimer) clearTimeout(this.periodicUsabilityProbeTimer);
-    this.periodicUsabilityProbeTimer = setTimeout(() => { this.periodicUsabilityProbeTimer = null; if (this.primaryModelUsability?.probeInFlight) return void this.scheduleNextPeriodicUsabilityProbe(); this.schedulePrimaryModelUsabilityProbe('periodic'); }, calculatePeriodicProbeDelay(this.periodicUsabilityProbeBackoff, this.primaryModelUsability?.checkedAt ?? null, Date.now()));
-    this.periodicUsabilityProbeTimer.unref?.();
-  }
-
-  private recordPrimaryModelUsability(
-    result: PrimaryModelUsabilityResult,
-    trigger: 'startup' | 'manual' | 'periodic',
-  ): void {
-    this.primaryModelUsability = {
-      ...result,
-      checkedAt: Date.now(),
-      probeInFlight: false,
-    };
-      this.periodicUsabilityProbeBackoff = calculatePeriodicProbeBackoff(this.periodicUsabilityProbeBackoff, result.status === 'usable'); if (trigger === 'periodic') this.scheduleNextPeriodicUsabilityProbe();
-
-    if (result.status === 'usable') {
-      // Always emit an idempotent clear on usable result.  If the prior process
-      // emitted `primary_model_unusable` before dying, this new process lacks
-      // the local flag but the clear is still required (#2394).  `clearAlert-`
-      // is idempotent when no incident exists, so there is no double-clear risk.
-      clearAlertSourceChecked(
-        this.instanceName,
-        'primary_model_unusable',
-        `provider=${alertEvidenceValue(result.provider)} model=${alertEvidenceValue(result.model)}`,
-      );
-      this.primaryModelUsabilityAlertActive = false;
-      return;
-    }
-
-    if (!primaryModelUsabilityRequiresAlert(result)) return;
-
-    this.primaryModelUsabilityAlertActive = true;
-    emitAlertChecked(
-      this.instanceName,
-      'primary_model_unusable',
-      'Primary model usability probe failed',
-      this.primaryModelUsabilityEvidence(result, trigger),
-      'warning',
-    );
-  }
-
-  private primaryModelUsabilityEvidence(result: PrimaryModelUsabilityResult, trigger: 'startup' | 'manual' | 'periodic'): string {
-    return formatPrimaryModelUsabilityEvidence(result, trigger, alertEvidenceValue);
-  }
 
   /**
    * Probe whether the primary provider can serve again. Recovery requires a
@@ -10464,7 +9272,7 @@ export class AgentRuntime implements Runtime {
    * sessions receive the configured providerConfig unchanged.
    */
   private sessionProviderConfig(): Record<string, unknown> | undefined {
-    return this.effectiveProviderConfig;
+    return this.fallback.effectiveProviderConfig;
   }
 
 
@@ -10713,7 +9521,7 @@ export class AgentRuntime implements Runtime {
         const chatScopedToolNames = this.registry.getChatScopedToolNames();
         const providerConfig =
           this.effectiveProvider === 'opencode-cli' && this.effectiveFallbackEntry === null
-            ? this.primaryOpencodeProviderConfig()
+            ? this.fallback.primaryOpencodeProviderConfig()
             : undefined;
         const socketPath = provisionWorkspace({
           workspacePath,
