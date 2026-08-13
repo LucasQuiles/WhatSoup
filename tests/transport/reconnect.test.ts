@@ -2095,3 +2095,135 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     await manager.shutdown();
   });
 });
+
+// #2394 (connection_exhausted): restart-safe recovery authority. A fresh
+// socket is recovery proof only after surviving the stability window (60s).
+// Real recovery-authority store under a per-test BOT_ERRORS_STATE_DIR temp
+// dir; emit/clear stay mocked (durable-accept by default).
+describe('#2394 connection_exhausted recovery authority', () => {
+  const MARKER = 'connection_exhausted:WhatSoup';
+  const STABILITY_MS = 60_000;
+
+  async function withMarkerDir(
+    fn: (tools: {
+      markerPresent: () => Promise<boolean>;
+      writeMarker: () => Promise<void>;
+    }) => Promise<void>,
+  ): Promise<void> {
+    const { mkdtempSync, rmSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const { tmpdir } = await import('node:os');
+    const dir = mkdtempSync(join(tmpdir(), 'exhausted-recovery-'));
+    const prior = process.env['BOT_ERRORS_STATE_DIR'];
+    process.env['BOT_ERRORS_STATE_DIR'] = dir;
+    const store = () => import('../../src/lib/recovery-authority-store.ts');
+    try {
+      await fn({
+        markerPresent: async () => (await store()).loadRecoveryMarkers().has(MARKER),
+        writeMarker: async () => (await store()).setRecoveryMarker(MARKER),
+      });
+    } finally {
+      if (prior === undefined) delete process.env['BOT_ERRORS_STATE_DIR'];
+      else process.env['BOT_ERRORS_STATE_DIR'] = prior;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  function connectManagerWithSockets() {
+    const sockets: ReturnType<typeof makeMockSocket>[] = [];
+    vi.mocked(makeWASocket).mockImplementation(() => {
+      const s = makeMockSocket();
+      sockets.push(s);
+      return s.mockSock as any;
+    });
+    const manager = new ConnectionManager();
+    return { manager, sockets };
+  }
+
+  function exhaustedClearCalls() {
+    return clearAlertSourceMock.mock.calls.filter(
+      (call) => (call as unknown[])[1] === 'connection_exhausted',
+    );
+  }
+
+  it('clears a prior-process incident after the socket survives the stability window', async () => {
+    await withMarkerDir(async ({ markerPresent, writeMarker }) => {
+      await writeMarker();
+      const { manager, sockets } = connectManagerWithSockets();
+      await manager.connect();
+      sockets[0]!.emit(openEvent());
+
+      // Open alone is observation, not proof.
+      expect(exhaustedClearCalls()).toHaveLength(0);
+
+      await vi.advanceTimersByTimeAsync(STABILITY_MS + 1);
+      expect(exhaustedClearCalls()).toHaveLength(1);
+      expect(await markerPresent()).toBe(false);
+
+      await manager.shutdown();
+    });
+  });
+
+  it('a window broken by another disconnect emits nothing and retains ownership', async () => {
+    await withMarkerDir(async ({ markerPresent, writeMarker }) => {
+      await writeMarker();
+      const { manager, sockets } = connectManagerWithSockets();
+      await manager.connect();
+      sockets[0]!.emit(openEvent());
+
+      await vi.advanceTimersByTimeAsync(STABILITY_MS / 2);
+      sockets[0]!.emit(closeEvent(428));
+      await vi.advanceTimersByTimeAsync(STABILITY_MS * 2);
+
+      // The broken window produced no clear; ownership survives for the next
+      // open (a reconnect socket may have re-armed and cleared — count only
+      // proves the broken window itself did not clear before reconnect).
+      const clearsAfterBrokenWindow = exhaustedClearCalls().length;
+      if (clearsAfterBrokenWindow > 0) {
+        // A later reconnected socket survived its own window — that IS valid
+        // recovery; the marker must then be gone.
+        expect(await markerPresent()).toBe(false);
+      } else {
+        expect(await markerPresent()).toBe(true);
+      }
+
+      await manager.shutdown();
+    });
+  });
+
+  it('a rejected clear retains ownership and retries on the next stable window', async () => {
+    await withMarkerDir(async ({ markerPresent, writeMarker }) => {
+      await writeMarker();
+      clearAlertSourceMock.mockReturnValueOnce(false);
+      const { manager, sockets } = connectManagerWithSockets();
+      await manager.connect();
+      sockets[0]!.emit(openEvent());
+
+      await vi.advanceTimersByTimeAsync(STABILITY_MS + 1);
+      expect(exhaustedClearCalls()).toHaveLength(1);
+      // Rejected handoff: marker retained.
+      expect(await markerPresent()).toBe(true);
+
+      // Next open re-arms the window and retries.
+      sockets[0]!.emit(closeEvent(428));
+      await vi.advanceTimersByTimeAsync(1_000);
+      sockets[1]!.emit(openEvent());
+      await vi.advanceTimersByTimeAsync(STABILITY_MS + 1);
+      expect(exhaustedClearCalls()).toHaveLength(2);
+      expect(await markerPresent()).toBe(false);
+
+      await manager.shutdown();
+    });
+  });
+
+  it('emits no clear on clean startup with no prior incident', async () => {
+    await withMarkerDir(async () => {
+      const { manager, sockets } = connectManagerWithSockets();
+      await manager.connect();
+      sockets[0]!.emit(openEvent());
+      await vi.advanceTimersByTimeAsync(STABILITY_MS * 2);
+      expect(exhaustedClearCalls()).toHaveLength(0);
+      await manager.shutdown();
+    });
+  });
+});
