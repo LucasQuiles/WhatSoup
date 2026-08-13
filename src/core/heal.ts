@@ -3,7 +3,12 @@
 
 import { randomUUID } from 'node:crypto';
 import { createChildLogger } from '../logger.ts';
-import { emitAlertChecked } from '../lib/emit-alert.ts';
+import { clearAlertSourceChecked, emitAlertChecked } from '../lib/emit-alert.ts';
+import {
+  clearRecoveryMarker,
+  loadRecoveryMarkers,
+  setRecoveryMarker,
+} from '../lib/recovery-authority-store.ts';
 import { MS_PER_HOUR, MS_PER_MINUTE } from '../lib/time-units.ts';
 import type { Database } from './database.ts';
 import type { Messenger } from './types.ts';
@@ -39,6 +44,11 @@ export const HEAL_ACTIVE_STALE_MS = RESOLUTION_WINDOW_MS;
 // control_peer (see startHealthServer).
 let deliveryUnavailableAlerted = false;
 let suppressedDeliveryUnavailableAlerts = 0;
+// #2394 (heal_delivery_unavailable): true once the prior-process recovery
+// marker has been consulted and resolved. Config repair takes effect on the
+// NEXT boot — exactly when the old process-local latch was lost — so the
+// startup reconcile is the only path that can ever clear this source.
+let healDeliveryStartupReconciled = false;
 
 export interface ControlPeerWiring {
   configured: boolean;
@@ -57,6 +67,50 @@ export function getControlPeerWiring(): ControlPeerWiring {
 export function resetDeliveryUnavailableLatch(): void {
   deliveryUnavailableAlerted = false;
   suppressedDeliveryUnavailableAlerts = 0;
+  healDeliveryStartupReconciled = false;
+}
+
+/**
+ * #2394 (heal_delivery_unavailable): once-per-process startup reconcile.
+ * A validated control-delivery configuration is the recovery proof — repair
+ * lands in config.json and takes effect on this boot. Missing or invalid
+ * configuration cannot clear the incident; instead it RESTORES ownership so
+ * this process's reports suppress into the open incident rather than
+ * duplicating the critical. A rejected clear re-arms the reconcile so the
+ * next degradation sweep retries.
+ */
+function reconcileHealDeliveryStartup(): void {
+  if (healDeliveryStartupReconciled) return;
+  healDeliveryStartupReconciled = true;
+  let markerPresent = false;
+  try {
+    markerPresent = loadRecoveryMarkers().has(`heal_delivery_unavailable:${config.botName}`);
+  } catch {
+    // intentional: marker file unreadable — treat as no prior incident.
+    return;
+  }
+  if (!markerPresent) return;
+  if (!(config.controlPeers?.has('q') ?? false)) {
+    // Config still broken: the incident remains true. Restore ownership so
+    // later reports count as suppressed instead of re-emitting.
+    deliveryUnavailableAlerted = true;
+    return;
+  }
+  if (!clearAlertSourceChecked(
+    config.botName,
+    'heal_delivery_unavailable',
+    'startup control-delivery configuration validated (#2394)',
+  )) {
+    // Clear not durably accepted — retry on the next degradation sweep.
+    healDeliveryStartupReconciled = false;
+    return;
+  }
+  try {
+    clearRecoveryMarker(`heal_delivery_unavailable:${config.botName}`);
+  } catch {
+    // intentional: marker removal is best-effort — a stale marker only causes
+    // one redundant idempotent clear after the next restart.
+  }
 }
 
 export interface HealReportData extends AutomaticHealReportInput {}
@@ -180,8 +234,10 @@ export function emitHealReport(
       suppressedDeliveryUnavailableAlerts++;
       return reportId;
     }
-    deliveryUnavailableAlerted = true;
-    emitAlertChecked(
+    // #2394: latch only on CHECKED acceptance — a rejected emit leaves the
+    // latch false so the next report retries (bounded by report cadence) —
+    // and persist a restart-safe marker so the next boot can reconcile.
+    deliveryUnavailableAlerted = emitAlertChecked(
       config.botName,
       'heal_delivery_unavailable',
       `whatsoup@${config.botName} heal report ${reportId} could not reach Q — no control peer configured`,
@@ -190,6 +246,15 @@ export function emitHealReport(
         'further occurrences are latched for this process — suppressed count at /health control_peer.suppressed_unavailable_alerts',
       ].join('\n'),
     );
+    if (deliveryUnavailableAlerted) {
+      try {
+        setRecoveryMarker(`heal_delivery_unavailable:${config.botName}`);
+      } catch {
+        // intentional: marker write is best-effort — the alert itself was
+        // durably queued; a missing marker only loses next-boot
+        // reconciliation.
+      }
+    }
     return reportId;
   }
   const qJid = toPersonalJid(qPhone);
@@ -399,6 +464,10 @@ export function checkDegradationSignals(
   durability: DurabilityEngine | null,
   activeControlReportId: string | null,
 ): void {
+  // #2394: piggyback the once-per-process heal-delivery reconcile on the
+  // periodic degradation sweep — the first sweep after boot is the "startup
+  // that validates the required control-delivery configuration".
+  reconcileHealDeliveryStartup();
   const cutoff = new Date(Date.now() - 5 * MS_PER_MINUTE).toISOString();
   const aggregate = db.raw.prepare(`
     SELECT COUNT(*) as affected_scope_count, COALESCE(SUM(cnt), 0) as total_failures

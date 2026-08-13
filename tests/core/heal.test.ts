@@ -70,7 +70,7 @@ vi.mock('../../src/core/durability.ts', async (importOriginal) => {
 import { Database } from '../../src/core/database.ts';
 import type { Messenger } from '../../src/core/types.ts';
 import { sendTracked } from '../../src/core/durability.ts';
-import { emitAlert } from '../../src/lib/emit-alert.ts';
+import { clearAlertSourceChecked, emitAlert, emitAlertChecked } from '../../src/lib/emit-alert.ts';
 import { config } from '../../src/config.ts';
 import type { AutomaticHealReportInput } from '../../src/core/heal-evidence.ts';
 import {
@@ -1016,6 +1016,172 @@ describe('heal_delivery_unavailable latch', () => {
     expect(reportId).not.toBeNull();
     expect(vi.mocked(emitAlert)).not.toHaveBeenCalled();
     expect(getControlPeerWiring()).toEqual({ configured: true, suppressedUnavailableAlerts: 0 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// heal_delivery_unavailable recovery authority (#2394) — the process-local
+// latch is lost on restart, exactly when the config repair takes effect. A
+// restart-safe marker persists ownership: set only on CHECKED emit acceptance,
+// reconciled once per process by the first degradation sweep. Validated config
+// is the recovery proof and clears; still-broken config RESTORES ownership so
+// reports suppress instead of duplicating the critical.
+// Uses the REAL recovery-authority store under a per-test BOT_ERRORS_STATE_DIR.
+// ---------------------------------------------------------------------------
+
+describe('heal_delivery_unavailable recovery authority (#2394)', () => {
+  const MARKER = 'heal_delivery_unavailable:WhatSoup';
+
+  async function withMarkerDir(
+    fn: (tools: {
+      markerPresent: () => Promise<boolean>;
+      writeMarker: () => Promise<void>;
+    }) => Promise<void>,
+  ): Promise<void> {
+    const { mkdtempSync, rmSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const { tmpdir } = await import('node:os');
+    const dir = mkdtempSync(join(tmpdir(), 'heal-delivery-recovery-'));
+    const prior = process.env['BOT_ERRORS_STATE_DIR'];
+    process.env['BOT_ERRORS_STATE_DIR'] = dir;
+    const store = () => import('../../src/lib/recovery-authority-store.ts');
+    try {
+      await fn({
+        markerPresent: async () => (await store()).loadRecoveryMarkers().has(MARKER),
+        writeMarker: async () => (await store()).setRecoveryMarker(MARKER),
+      });
+    } finally {
+      if (prior === undefined) delete process.env['BOT_ERRORS_STATE_DIR'];
+      else process.env['BOT_ERRORS_STATE_DIR'] = prior;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  beforeEach(() => {
+    // mockReturnValue survives vi.clearAllMocks() — re-assert the durable
+    // accept defaults so rejection-path tests cannot leak into later ones.
+    vi.mocked(emitAlertChecked).mockReturnValue(true);
+    vi.mocked(clearAlertSourceChecked).mockReturnValue(true);
+  });
+
+  it('persists a restart-safe marker only when the checked emit is accepted', async () => {
+    await withMarkerDir(async ({ markerPresent }) => {
+      const db = makeDb();
+      const messenger = makeMessenger();
+      config.controlPeers.delete('q');
+      try {
+        emitHealReport(db, messenger, null, distinctCrash(0));
+
+        expect(vi.mocked(emitAlertChecked)).toHaveBeenCalledOnce();
+        expect(vi.mocked(emitAlertChecked).mock.calls[0]![1]).toBe('heal_delivery_unavailable');
+        expect(await markerPresent()).toBe(true);
+      } finally {
+        config.controlPeers.set('q', '15559998888');
+      }
+    });
+  });
+
+  it('leaves the latch unarmed and writes no marker on a rejected emit, then retries on the next report', async () => {
+    await withMarkerDir(async ({ markerPresent }) => {
+      const db = makeDb();
+      const messenger = makeMessenger();
+      config.controlPeers.delete('q');
+      try {
+        vi.mocked(emitAlertChecked).mockReturnValueOnce(false);
+        emitHealReport(db, messenger, null, distinctCrash(0));
+        expect(await markerPresent()).toBe(false);
+        expect(getControlPeerWiring().suppressedUnavailableAlerts).toBe(0);
+
+        // Latch stayed false — the next report retries and the accepted emit
+        // arms it and persists the marker.
+        emitHealReport(db, messenger, null, distinctCrash(1));
+        expect(vi.mocked(emitAlertChecked)).toHaveBeenCalledTimes(2);
+        expect(await markerPresent()).toBe(true);
+
+        // Now latched: a third report suppresses instead of re-emitting.
+        emitHealReport(db, messenger, null, distinctCrash(2));
+        expect(vi.mocked(emitAlertChecked)).toHaveBeenCalledTimes(2);
+        expect(getControlPeerWiring().suppressedUnavailableAlerts).toBe(1);
+      } finally {
+        config.controlPeers.set('q', '15559998888');
+      }
+    });
+  });
+
+  it('startup reconcile clears a prior-process incident exactly once when config is validated', async () => {
+    await withMarkerDir(async ({ markerPresent, writeMarker }) => {
+      const db = makeDb();
+      const messenger = makeMessenger();
+      await writeMarker();
+
+      checkDegradationSignals(db, messenger, null, null);
+
+      expect(vi.mocked(clearAlertSourceChecked)).toHaveBeenCalledOnce();
+      const [instance, source, evidence] = vi.mocked(clearAlertSourceChecked).mock.calls[0]!;
+      expect(instance).toBe('WhatSoup');
+      expect(source).toBe('heal_delivery_unavailable');
+      expect(String(evidence)).toContain('#2394');
+      expect(await markerPresent()).toBe(false);
+
+      // Once per process: later sweeps must not re-clear.
+      checkDegradationSignals(db, messenger, null, null);
+      expect(vi.mocked(clearAlertSourceChecked)).toHaveBeenCalledOnce();
+    });
+  });
+
+  it('restores ownership instead of clearing when the config is still broken', async () => {
+    await withMarkerDir(async ({ markerPresent, writeMarker }) => {
+      const db = makeDb();
+      const messenger = makeMessenger();
+      await writeMarker();
+      config.controlPeers.delete('q');
+      try {
+        checkDegradationSignals(db, messenger, null, null);
+
+        // The incident is still true: no clear, marker retained.
+        expect(vi.mocked(clearAlertSourceChecked)).not.toHaveBeenCalled();
+        expect(await markerPresent()).toBe(true);
+
+        // Ownership restored: this process's reports suppress into the open
+        // incident instead of duplicating the critical.
+        emitHealReport(db, messenger, null, distinctCrash(0));
+        expect(vi.mocked(emitAlertChecked)).not.toHaveBeenCalled();
+        expect(getControlPeerWiring().suppressedUnavailableAlerts).toBe(1);
+      } finally {
+        config.controlPeers.set('q', '15559998888');
+      }
+    });
+  });
+
+  it('re-arms the reconcile when the clear is not durably accepted, retrying on the next sweep', async () => {
+    await withMarkerDir(async ({ markerPresent, writeMarker }) => {
+      const db = makeDb();
+      const messenger = makeMessenger();
+      await writeMarker();
+
+      vi.mocked(clearAlertSourceChecked).mockReturnValueOnce(false);
+      checkDegradationSignals(db, messenger, null, null);
+      expect(vi.mocked(clearAlertSourceChecked)).toHaveBeenCalledOnce();
+      expect(await markerPresent()).toBe(true);
+
+      // Next sweep retries; the accepted clear removes the marker.
+      checkDegradationSignals(db, messenger, null, null);
+      expect(vi.mocked(clearAlertSourceChecked)).toHaveBeenCalledTimes(2);
+      expect(await markerPresent()).toBe(false);
+    });
+  });
+
+  it('stays silent on a clean cold start with no marker', async () => {
+    await withMarkerDir(async ({ markerPresent }) => {
+      const db = makeDb();
+      const messenger = makeMessenger();
+
+      checkDegradationSignals(db, messenger, null, null);
+
+      expect(vi.mocked(clearAlertSourceChecked)).not.toHaveBeenCalled();
+      expect(vi.mocked(emitAlertChecked)).not.toHaveBeenCalled();
+      expect(await markerPresent()).toBe(false);
+    });
   });
 });
 
