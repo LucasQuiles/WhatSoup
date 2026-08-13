@@ -1,5 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Database } from '../../src/core/database.ts';
+import {
+  loadRecoveryMarkers,
+  setRecoveryMarker,
+} from '../../src/lib/recovery-authority-store.ts';
 import {
   DurabilityEngine,
   drainPendingOutbound,
@@ -55,12 +62,22 @@ function makeMessenger(
 describe('DurabilityEngine edge coverage', () => {
   let db: Database;
   let engine: DurabilityEngine;
+  let markerDir: string;
+  let priorMarkerDir: string | undefined;
 
   beforeEach(() => {
+    // Isolate the REAL recovery-authority store per test: postConnectRecovery
+    // consults it whenever the gate decision is not mode 'off' (#2394), and
+    // unit tests must never read this machine's live marker file.
+    markerDir = mkdtempSync(join(tmpdir(), 'durability-edge-recovery-'));
+    priorMarkerDir = process.env['BOT_ERRORS_STATE_DIR'];
+    process.env['BOT_ERRORS_STATE_DIR'] = markerDir;
     db = makeDb();
     engine = new DurabilityEngine(db);
     emitAlert.mockClear();
+    emitAlert.mockReturnValue(true);
     clearAlertSource.mockClear();
+    clearAlertSource.mockReturnValue(true);
     gateQuarantineClear.mockReset();
     gateQuarantineClear.mockImplementation((_botName: string, opts: { now: () => string }) => {
       opts.now();
@@ -68,7 +85,12 @@ describe('DurabilityEngine edge coverage', () => {
     });
   });
 
-  afterEach(() => { db.close(); });
+  afterEach(() => {
+    db.close();
+    if (priorMarkerDir === undefined) delete process.env['BOT_ERRORS_STATE_DIR'];
+    else process.env['BOT_ERRORS_STATE_DIR'] = priorMarkerDir;
+    rmSync(markerDir, { recursive: true, force: true });
+  });
 
   it('marks inbound skipped and exposes pending inbound rows', () => {
     const first = engine.journalInbound('msg-pending-1', 'key-pending-1', 'jid-1', 'agent');
@@ -455,6 +477,152 @@ describe('DurabilityEngine edge coverage', () => {
       status: 'incomplete',
       failedPhases: ['emit_outbound_quarantine_alert'],
       openRecoveries: 0,
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // fleet_health_verify_gate_failed recovery authority (#2394) — the warning
+  // marks an exception inside the gate itself, not a failed auth proof. A
+  // fully-successful ACTIVE-mode gate pass proves the verification
+  // infrastructure recovered; mode 'off' skips verification and proves
+  // nothing. Ownership is scoped to this exact warning — auth and quarantine
+  // incidents have their own lifecycles.
+  // -------------------------------------------------------------------------
+
+  describe('fleet_health_verify_gate_failed recovery authority (#2394)', () => {
+    const MARKER = 'fleet_health_verify_gate_failed:Loops';
+    const markerPresent = () => loadRecoveryMarkers().has(MARKER);
+    const gateFailureClearCall = () => vi.mocked(clearAlertSource).mock.calls.filter(
+      (call) => (call as unknown[])[1] === 'fleet_health_verify_gate_failed',
+    );
+
+    it('persists a restart-safe marker when the gate-failure warning is durably accepted', () => {
+      gateQuarantineClear.mockImplementationOnce((
+        _botName: string,
+        opts: { emitGateFailure: (evidence: string) => void },
+      ) => {
+        opts.emitGateFailure('mode=warn error=probe exploded');
+        throw new Error('probe exploded');
+      });
+
+      expect(() => engine.postConnectRecovery()).toThrow('probe exploded');
+      expect(markerPresent()).toBe(true);
+      // A failing pass must never clear its own fresh warning.
+      expect(gateFailureClearCall()).toHaveLength(0);
+    });
+
+    it('writes no marker when the warning itself cannot be durably queued', () => {
+      gateQuarantineClear.mockImplementationOnce((
+        _botName: string,
+        opts: { emitGateFailure: (evidence: string) => void },
+      ) => {
+        opts.emitGateFailure('mode=warn error=probe exploded');
+        throw new Error('probe exploded');
+      });
+      emitAlert.mockReturnValueOnce(false);
+
+      expect(() => engine.postConnectRecovery()).toThrow(
+        'quarantine gate-failure evidence could not be durably queued',
+      );
+      expect(markerPresent()).toBe(false);
+    });
+
+    it.each([
+      ['clear', 'warn', true],
+      ['clear_shadow', 'shadow', true],
+      ['suppress_and_escalate', 'enforce', false],
+    ] as const)(
+      'active decision %s (mode %s) reconciles a prior-process warning exactly once',
+      (action, mode, callsEmitClear) => {
+        setRecoveryMarker(MARKER);
+        gateQuarantineClear.mockImplementation((
+          _botName: string,
+          opts: { now: () => string; emitClear: () => void },
+        ) => {
+          opts.now();
+          if (callsEmitClear) opts.emitClear();
+          return { action, mode, tripped: false, evidence: 'proof' };
+        });
+
+        engine.postConnectRecovery();
+
+        expect(gateFailureClearCall()).toHaveLength(1);
+        expect(clearAlertSource).toHaveBeenCalledWith(
+          'Loops',
+          'fleet_health_verify_gate_failed',
+          expect.stringContaining('#2394'),
+          undefined,
+          QUARANTINE_CLEAR_OPTIONS,
+        );
+        expect(markerPresent()).toBe(false);
+
+        // Marker consumed: the next successful pass stays silent.
+        clearAlertSource.mockClear();
+        engine.postConnectRecovery();
+        expect(gateFailureClearCall()).toHaveLength(0);
+      },
+    );
+
+    it('mode off is not verification proof — marker and warning are retained', () => {
+      setRecoveryMarker(MARKER);
+      gateQuarantineClear.mockImplementationOnce((
+        _botName: string,
+        opts: { emitClear: () => void },
+      ) => {
+        opts.emitClear();
+        return { action: 'clear', mode: 'off', tripped: false, evidence: 'mode=off' };
+      });
+
+      engine.postConnectRecovery();
+
+      expect(gateFailureClearCall()).toHaveLength(0);
+      expect(markerPresent()).toBe(true);
+    });
+
+    it('retains ownership on a rejected clear and retries on the next successful pass', () => {
+      setRecoveryMarker(MARKER);
+      gateQuarantineClear.mockImplementation((_botName: string) => (
+        { action: 'suppress_and_escalate', mode: 'warn', tripped: false, evidence: 'proof' }
+      ));
+
+      clearAlertSource.mockReturnValueOnce(false);
+      // A rejected reconcile clear must never fail the recovery run.
+      engine.postConnectRecovery();
+      expect(gateFailureClearCall()).toHaveLength(1);
+      expect(markerPresent()).toBe(true);
+
+      engine.postConnectRecovery();
+      expect(gateFailureClearCall()).toHaveLength(2);
+      expect(markerPresent()).toBe(false);
+    });
+
+    it('a rejected staged quarantine clear aborts the pass before reconciliation', () => {
+      setRecoveryMarker(MARKER);
+      gateQuarantineClear.mockImplementationOnce((
+        _botName: string,
+        opts: { emitClear: () => void },
+      ) => {
+        opts.emitClear();
+        return { action: 'clear', mode: 'warn', tripped: false, evidence: 'proof' };
+      });
+      clearAlertSource.mockReturnValueOnce(false);
+
+      expect(() => engine.postConnectRecovery()).toThrow(
+        'quarantine clear could not be durably queued',
+      );
+      expect(gateFailureClearCall()).toHaveLength(0);
+      expect(markerPresent()).toBe(true);
+    });
+
+    it('stays silent on a clean cold start with no marker', () => {
+      gateQuarantineClear.mockImplementationOnce((_botName: string) => (
+        { action: 'suppress_and_escalate', mode: 'warn', tripped: false, evidence: 'proof' }
+      ));
+
+      engine.postConnectRecovery();
+
+      expect(gateFailureClearCall()).toHaveLength(0);
+      expect(markerPresent()).toBe(false);
     });
   });
 
