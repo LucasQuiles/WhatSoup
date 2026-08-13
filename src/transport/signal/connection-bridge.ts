@@ -70,6 +70,12 @@ export class SignalConnection extends EventEmitter implements RuntimeConnection 
   private identityStore: IdentityStore | null = null;
   private identityMode: GuardMode = 'log-only';
   private unregisteredAlertEmitted = false;
+  // #2394: a successful connect PROVES account recovery, but the checked
+  // clear handoff can be rejected. Retain the obligation and retry it on
+  // later transport activity — never by repeating provider connection or
+  // account-repair actions. A single boolean bounds the obligation: repeated
+  // clean connects reuse it instead of stacking redundant recovery work.
+  private unregisteredClearPending = false;
 
   constructor(
     adapter: SignalAdapter,
@@ -94,16 +100,12 @@ export class SignalConnection extends EventEmitter implements RuntimeConnection 
       this.emitUnregisteredAlert(error);
       throw error;
     }
-    clearAlertSourceChecked(
-      this.instanceName,
-      'signal_cli_unregistered',
-      'signal-cli account verification recovered',
-    );
-    this.unregisteredAlertEmitted = false;
+    this.reconcileUnregisteredClear('signal-cli account verification recovered');
     this.botJid = toSignalJid(this.adapter.selfRef().id);
 
     this.messageSubscription?.dispose();
     this.messageSubscription = this.adapter.on('message', (message) => {
+      this.retryPendingUnregisteredClear();
       this.onMessage?.(
         contractToIncoming(
           message,
@@ -149,6 +151,36 @@ export class SignalConnection extends EventEmitter implements RuntimeConnection 
       }),
       'critical',
     );
+    // #2394: a fresh accepted onset means the account is broken AGAIN — any
+    // pending clear proven by an earlier connect is no longer recovery
+    // evidence and must not close the new incident.
+    if (this.unregisteredAlertEmitted) this.unregisteredClearPending = false;
+  }
+
+  /**
+   * #2394: emit the idempotent recovery clear and take the checked result
+   * seriously. Acceptance releases ownership; rejection retains a bounded
+   * pending obligation retried on later transport activity.
+   */
+  private reconcileUnregisteredClear(evidence: string): void {
+    if (!clearAlertSourceChecked(
+      this.instanceName,
+      'signal_cli_unregistered',
+      evidence,
+    )) {
+      this.unregisteredClearPending = true;
+      return;
+    }
+    this.unregisteredClearPending = false;
+    this.unregisteredAlertEmitted = false;
+  }
+
+  /** Retry a rejected recovery clear without touching the provider connection. */
+  private retryPendingUnregisteredClear(): void {
+    if (!this.unregisteredClearPending) return;
+    this.reconcileUnregisteredClear(
+      'signal transport activity confirms account verification (#2394)',
+    );
   }
 
   async shutdown(): Promise<void> {
@@ -173,6 +205,7 @@ export class SignalConnection extends EventEmitter implements RuntimeConnection 
       },
       text,
     );
+    this.retryPendingUnregisteredClear();
     return { waMessageId: ref.id };
   }
 
