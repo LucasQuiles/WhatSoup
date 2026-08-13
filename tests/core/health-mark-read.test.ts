@@ -13,7 +13,7 @@ vi.mock('../../src/config.ts', () => ({
   config: {
     adminPhones: new Set(['15550100001']),
     dbPath: ':memory:',
-    mediaDir: '/tmp',
+    mediaDir: '/tmp/whatsoup-test-media-health-mark-read/tmp',
     botName: 'WhatSoup',
     accessMode: 'allowlist',
     healthPort: 9998, // won't actually be used (tests override)

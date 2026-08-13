@@ -26,7 +26,7 @@ vi.mock('../../src/config.ts', () => ({
     adminPhones: new Set(['1111']),
     authDir: '/tmp/wa-test-auth-poll-vote-bridge',
     dbPath: ':memory:',
-    mediaDir: '/tmp',
+    mediaDir: '/tmp/whatsoup-test-media-poll-vote-bridge/tmp',
     botName: 'WhatSoup',
     accessMode: 'allowlist',
     healthPort: 9090,

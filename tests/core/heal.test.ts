@@ -15,7 +15,7 @@ vi.mock('../../src/config.ts', () => ({
     adminPhones: new Set<string>(),
     dbPath: ':memory:',
     authDir: '/tmp/wa-test-auth-heal',
-    mediaDir: '/tmp',
+    mediaDir: '/tmp/whatsoup-test-media-heal/tmp',
     botName: 'WhatSoup',
     accessMode: 'allowlist',
     healthPort: 9090,

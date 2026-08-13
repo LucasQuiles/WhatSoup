@@ -16,7 +16,7 @@ vi.mock('../../src/config.ts', () => ({
   config: {
     adminPhones: new Set(['15550100001']),
     dbPath: ':memory:',
-    mediaDir: '/tmp',
+    mediaDir: '/tmp/whatsoup-test-media-heal-endpoint/tmp',
     botName: 'WhatSoup',
     accessMode: 'allowlist',
     healthPort: 9999,

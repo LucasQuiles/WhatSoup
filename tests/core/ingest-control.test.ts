@@ -26,7 +26,7 @@ vi.mock('../../src/config.ts', () => ({
     controlPeers: new Map<string, string>([['q', '15559998888']]),
     dbPath: ':memory:',
     authDir: '/tmp/wa-test-auth-ingest-control',
-    mediaDir: '/tmp',
+    mediaDir: '/tmp/whatsoup-test-media-ingest-control/tmp',
     botName: 'WhatSoup',
     accessMode: 'allowlist',
     healthPort: 9090,

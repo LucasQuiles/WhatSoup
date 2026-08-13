@@ -30,7 +30,7 @@ vi.mock('../../src/config.ts', () => ({
   config: {
     adminPhones: new Set<string>(),
     dbPath: ':memory:',
-    mediaDir: '/tmp',
+    mediaDir: '/tmp/whatsoup-test-media-connection-card-emitter-contract.test.tsx/tmp',
     botName: 'WhatSoup',
     accessMode: 'allowlist',
     healthPort: 9999,

@@ -26,7 +26,7 @@ vi.mock('../../src/config.ts', () => ({
     adminPhones: new Set(['15550100001']),
     authDir: '/tmp/wa-test-auth-message-parser-branches',
     dbPath: ':memory:',
-    mediaDir: '/tmp',
+    mediaDir: '/tmp/whatsoup-test-media-message-parser-branches/tmp',
     botName: 'WhatSoup',
     accessMode: 'allowlist',
     healthPort: 9090,

@@ -23,7 +23,7 @@ const { mockConfig, mockAuth, alertCalls, clearCalls, logger } = vi.hoisted(() =
       dataRoot: '/tmp/wa-test-auth-bond-edge-data',
       lockPath: '/tmp/wa-test-auth-bond-edge.lock',
       dbPath: ':memory:',
-      mediaDir: '/tmp',
+      mediaDir: '/tmp/whatsoup-test-media-connection-auth-bond-edge/tmp',
       botName: 'WhatSoup',
       accessMode: 'allowlist',
       healthPort: 9090,

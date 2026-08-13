@@ -29,7 +29,7 @@ const { testConfig } = vi.hoisted(() => {
     accessMode: 'allowlist' as string,
     dbPath: ':memory:',
     authDir: '/tmp/wa-test-auth-lid-phone-resolution',
-    mediaDir: '/tmp',
+    mediaDir: '/tmp/whatsoup-test-media-lid-phone-resolution/tmp',
     botName: 'WhatSoup',
     healthPort: 9090,
     maxTokens: 4096,

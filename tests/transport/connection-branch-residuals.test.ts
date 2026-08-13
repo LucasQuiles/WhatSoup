@@ -32,7 +32,7 @@ const { mockConfig } = vi.hoisted(() => ({
     adminPhones: new Set<string>(),
     authDir: '/tmp/wa-test-auth-residuals',
     dbPath: ':memory:',
-    mediaDir: '/tmp',
+    mediaDir: '/tmp/whatsoup-test-media-connection-branch-residuals/tmp',
     botName: 'WhatSoup',
     accessMode: 'allowlist',
     healthPort: 9090,

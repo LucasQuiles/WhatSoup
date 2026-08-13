@@ -19,7 +19,7 @@ vi.mock('../../src/config.ts', () => ({
     authDir: '/tmp/wa-test-auth-gov',
     stateRoot: '/tmp/wa-test-state-gov',
     dbPath: ':memory:',
-    mediaDir: '/tmp',
+    mediaDir: '/tmp/whatsoup-test-media-outbound-governor-wiring/tmp',
     botName: 'WhatSoup',
     accessMode: 'allowlist',
     healthPort: 9090,
