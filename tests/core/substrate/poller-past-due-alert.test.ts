@@ -143,3 +143,124 @@ describe('TriggerPoller — past-due trigger liveness watchdog (#1765)', () => {
     expect(emitAlertChecked).not.toHaveBeenCalled();
   });
 });
+
+// #2394 (trigger_past_due): checked-clear retry authority + restart-safe
+// marker reconciliation. Real recovery-authority store under a per-test
+// BOT_ERRORS_STATE_DIR temp dir; emit/clear stay mocked.
+describe('TriggerPoller — past-due recovery authority (#2394)', () => {
+  const MARKER = 'trigger_past_due:test-bot';
+  let path: string;
+  let db: Database;
+  let stateDir: string;
+  let priorStateDir: string | undefined;
+
+  beforeEach(async () => {
+    const { mkdtempSync } = await import('node:fs');
+    path = tmpFile(); db = new Database(path); db.open();
+    vi.mocked(emitAlertChecked).mockClear();
+    vi.mocked(emitAlertChecked).mockReturnValue(true);
+    vi.mocked(clearAlertSourceChecked).mockClear();
+    vi.mocked(clearAlertSourceChecked).mockReturnValue(true);
+    stateDir = mkdtempSync(join(tmpdir(), 'pastdue-recovery-'));
+    priorStateDir = process.env['BOT_ERRORS_STATE_DIR'];
+    process.env['BOT_ERRORS_STATE_DIR'] = stateDir;
+  });
+
+  afterEach(async () => {
+    const { rmSync } = await import('node:fs');
+    db.close(); if (existsSync(path)) unlinkSync(path);
+    if (priorStateDir === undefined) delete process.env['BOT_ERRORS_STATE_DIR'];
+    else process.env['BOT_ERRORS_STATE_DIR'] = priorStateDir;
+    rmSync(stateDir, { recursive: true, force: true });
+  });
+
+  async function markerPresent(): Promise<boolean> {
+    const { loadRecoveryMarkers } = await import('../../../src/lib/recovery-authority-store.ts');
+    return loadRecoveryMarkers().has(MARKER);
+  }
+
+  function createPastDueTrigger(nextFireAt = NOW - 1000) {
+    const bead = createBead(db.raw, { kind: 'watch', title: 'w', ownerJid: 'mw', actor: 'u' });
+    return createTrigger(db.raw, {
+      beadId: bead.id, kind: 'schedule.cron', spec: { expr: '0 8 * * *' },
+      reportChatJid: 'admin@s.whatsapp.net', nextFireAt, actor: 'u',
+    });
+  }
+
+  function poller() {
+    return new TriggerPoller(db.raw, makeMessenger(), {
+      now: () => NOW, batchSize: 0, triggerPastDueGraceSeconds: GRACE,
+      instance: 'test-bot',
+    });
+  }
+
+  it('persists a marker on accepted emit and drops it on accepted clear', async () => {
+    const trigger = createPastDueTrigger();
+    const p = poller();
+
+    await p.tickOnce();
+    expect(await markerPresent()).toBe(true);
+
+    db.raw.prepare('UPDATE bead_triggers SET last_fire_at = ? WHERE id = ?').run(NOW - 10, trigger.id);
+    await p.tickOnce();
+    expect(clearAlertSourceChecked).toHaveBeenCalledTimes(1);
+    expect(await markerPresent()).toBe(false);
+  });
+
+  it('retains clear-retry authority until the checked clear is accepted', async () => {
+    const trigger = createPastDueTrigger();
+    const p = poller();
+    await p.tickOnce();
+
+    db.raw.prepare('UPDATE bead_triggers SET last_fire_at = ? WHERE id = ?').run(NOW - 10, trigger.id);
+    vi.mocked(clearAlertSourceChecked).mockReturnValueOnce(false);
+    await p.tickOnce();
+    expect(clearAlertSourceChecked).toHaveBeenCalledTimes(1);
+    // Rejected enqueue: ownership and marker retained for the next tick.
+    expect(await markerPresent()).toBe(true);
+
+    await p.tickOnce();
+    expect(clearAlertSourceChecked).toHaveBeenCalledTimes(2);
+    expect(await markerPresent()).toBe(false);
+  });
+
+  it('reconciles a prior-process marker from a fresh zero-count observation', async () => {
+    const trigger = createPastDueTrigger();
+    const alerting = poller();
+    await alerting.tickOnce();
+    expect(await markerPresent()).toBe(true);
+
+    // Backlog resolves, then "restart": a NEW poller with fresh local latches.
+    db.raw.prepare('UPDATE bead_triggers SET last_fire_at = ? WHERE id = ?').run(NOW - 10, trigger.id);
+    vi.mocked(clearAlertSourceChecked).mockClear();
+    const restarted = poller();
+    await restarted.tickOnce();
+
+    expect(clearAlertSourceChecked).toHaveBeenCalledWith(
+      'test-bot',
+      'trigger_past_due',
+      expect.stringContaining('pastDueCount=0'),
+    );
+    expect(await markerPresent()).toBe(false);
+  });
+
+  it('emits no clear on clean startup with no prior incident', async () => {
+    const p = poller();
+    await p.tickOnce();
+    expect(clearAlertSourceChecked).not.toHaveBeenCalled();
+    expect(emitAlertChecked).not.toHaveBeenCalled();
+  });
+
+  it('a still-positive count never clears merely from absent local history', async () => {
+    createPastDueTrigger();
+    const alerting = poller();
+    await alerting.tickOnce();
+
+    // Restart while STILL past due: the new process re-observes the backlog.
+    vi.mocked(emitAlertChecked).mockClear();
+    const restarted = poller();
+    await restarted.tickOnce();
+    expect(clearAlertSourceChecked).not.toHaveBeenCalled();
+    expect(await markerPresent()).toBe(true);
+  });
+});

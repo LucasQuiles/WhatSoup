@@ -55,6 +55,11 @@ import { createChildLogger } from '../../logger.ts';
 import { errorMessage } from '../../lib/error-message.ts';
 import { fetchUrlGuarded, SsrfBlockedError, type GuardedFetchResult } from '../../lib/ssrf-fetch.ts';
 import { emitAlertChecked, clearAlertSourceChecked } from '../../lib/emit-alert.ts';
+import {
+  clearRecoveryMarker,
+  loadRecoveryMarkers,
+  setRecoveryMarker,
+} from '../../lib/recovery-authority-store.ts';
 
 const log = createChildLogger('substrate.trigger-poller');
 
@@ -421,6 +426,9 @@ export class TriggerPoller {
    * every tick while the firing path stays down.
    */
   private triggerPastDueAlertEmitted = false;
+  // #2394 (trigger_past_due): true once the prior-process recovery marker has
+  // been consulted and resolved (absent, or its clear durably accepted).
+  private triggerPastDueMarkerReconciled = false;
   public lastRunAt: string | null = null;
 
   /**
@@ -731,13 +739,48 @@ export class TriggerPoller {
         ].join('\n'),
         'warning',
       );
-    } else if (!over && this.triggerPastDueAlertEmitted) {
-      clearAlertSourceChecked(
+      if (this.triggerPastDueAlertEmitted) {
+        // #2394: persist restart-safe ownership of the accepted incident.
+        try {
+          setRecoveryMarker(`trigger_past_due:${this.instance}`);
+        } catch {
+          // intentional: marker write is best-effort — the alert itself was
+          // durably queued; a missing marker only loses cross-restart
+          // reconciliation for this incident.
+        }
+      }
+    } else if (!over) {
+      // #2394 (trigger_past_due): a fresh zero-count aggregate is the recovery
+      // proof. Ownership comes from the in-process latch OR, once per process,
+      // the marker a prior process left — and it is retained until the checked
+      // clear is ACCEPTED, so a rejected enqueue retries on later healthy
+      // ticks instead of being dropped by an unconditional latch reset.
+      let hadIncident = this.triggerPastDueAlertEmitted;
+      if (!hadIncident && !this.triggerPastDueMarkerReconciled) {
+        try {
+          hadIncident = loadRecoveryMarkers().has(`trigger_past_due:${this.instance}`);
+        } catch {
+          // intentional: marker file unreadable — treat as no prior incident
+          // and stop consulting the store this process.
+        }
+        if (!hadIncident) this.triggerPastDueMarkerReconciled = true;
+      }
+      if (!hadIncident) return;
+      if (!clearAlertSourceChecked(
         this.instance,
         'trigger_past_due',
         `pastDueCount=0 (graceSeconds=${this.triggerPastDueGraceSeconds})`,
-      );
+      )) {
+        return;
+      }
       this.triggerPastDueAlertEmitted = false;
+      this.triggerPastDueMarkerReconciled = true;
+      try {
+        clearRecoveryMarker(`trigger_past_due:${this.instance}`);
+      } catch {
+        // intentional: marker removal is best-effort — a stale marker only
+        // causes one redundant idempotent clear after the next restart.
+      }
     }
   }
 
