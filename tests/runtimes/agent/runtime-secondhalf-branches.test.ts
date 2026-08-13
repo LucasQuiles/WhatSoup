@@ -223,7 +223,7 @@ const { mockConfig } = vi.hoisted(() => ({
     restartLoopGuard: { enabled: true, maxRestarts: 3, windowMs: 300_000 },
     startupNotifications: true,
     proactiveResumeOnStartup: true,
-    mediaDir: '/tmp/whatsoup-test-media/tmp',
+    mediaDir: '/tmp/whatsoup-test-media-runtime-secondhalf-branches/tmp',
     pineconeAllowedIndexes: [] as string[],
     voiceReply: 'never' as const,
     elevenlabs: { defaultVoiceId: 'v', defaultModel: 'm', stability: 0.5, similarityBoost: 0.75 },

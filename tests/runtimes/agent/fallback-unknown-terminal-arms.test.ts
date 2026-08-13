@@ -39,7 +39,7 @@ vi.mock('../../../src/config.ts', () => {
     toolUpdateMode: 'full',
     toolUpdateRedirectJid: null,
     textAggregateDelayMs: 2_000,
-    mediaDir: '/tmp/whatsoup-test-media/tmp',
+    mediaDir: '/tmp/whatsoup-test-media-fallback-unknown-terminal-arms/tmp',
     voiceReply: 'never',
     elevenlabs: {
       defaultVoiceId: 'v',

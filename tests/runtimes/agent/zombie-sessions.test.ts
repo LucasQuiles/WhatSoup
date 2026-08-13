@@ -125,7 +125,7 @@ vi.mock('../../../src/config.ts', () => ({
     textAggregateDelayMs: 2_000,
     stateRoot: '/tmp/whatsoup-test-state-zombie',
     restartLoopGuard: { enabled: true, maxRestarts: 3, windowMs: 300_000 },
-    mediaDir: '/tmp/whatsoup-test-media/tmp',
+    mediaDir: '/tmp/whatsoup-test-media-zombie-sessions/tmp',
     pineconeAllowedIndexes: [],
   },
 }));

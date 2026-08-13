@@ -33,7 +33,7 @@ vi.mock('../../../src/config.ts', () => {
     toolUpdateMode: 'full',
     toolUpdateRedirectJid: null,
     textAggregateDelayMs: 2_000,
-    mediaDir: '/tmp/whatsoup-test-media/tmp',
+    mediaDir: '/tmp/whatsoup-test-media-fallback-probe-stall-onevidence-wiring/tmp',
     voiceReply: 'never',
     elevenlabs: { defaultVoiceId: 'v', defaultModel: 'eleven_multilingual_v2', stability: 0.5, similarityBoost: 0.75 },
     agentMaxQueueDepth: 25,

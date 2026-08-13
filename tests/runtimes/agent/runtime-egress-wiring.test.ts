@@ -38,7 +38,7 @@ const { mockConfig, mockRuntimeLogger } = vi.hoisted(() => ({
     toolUpdateMode: 'full' as const,
     toolUpdateRedirectJid: null as string | null,
     textAggregateDelayMs: 0,
-    mediaDir: '/tmp/whatsoup-test-media',
+    mediaDir: '/tmp/whatsoup-test-media-runtime-egress-wiring',
     pineconeAllowedIndexes: [] as string[],
     voiceReply: 'never' as const,
     // Required since the C5 restart-loop guard (#1929) merged into main: start()
