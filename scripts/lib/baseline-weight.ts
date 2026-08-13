@@ -76,6 +76,13 @@ export const BASELINE_REGISTRY: readonly RegisteredBaseline[] = [
     tolerates: 'known test-integrity findings (vacuous assertions, masked failures)',
   },
   {
+    id: 'fault-taxonomy-coverage',
+    path: 'scripts/fault-taxonomy-source-coverage-baseline.json',
+    shape: 'single-array-object',
+    initialWeight: 44,
+    tolerates: 'emitted alert sources without a fault-taxonomy sourceDispositions entry (#2147)',
+  },
+  {
     id: 'lint-shadow',
     path: 'console/lint-shadow-baseline.json',
     shape: 'count-map',
