@@ -135,12 +135,20 @@ afterEach(() => {
   rmSync(work, { recursive: true, force: true });
 });
 
-type ConfirmedInput = Omit<BackfillConfirmedEntry, 'evidenceMatrixDigest'> & { evidenceMatrixDigest?: string };
-function evidenceHex(seed: string): string {
-  return createHash('sha256').update(`evidence-${seed}`).digest('hex');
+type ConfirmedInput = BackfillConfirmedEntry;
+/** Write a per-entry evidence-matrix artifact (F4/r12: a real, readable file is
+ *  required — a bare asserted digest is no longer accepted) and return its path. */
+function evidenceArtifact(seed: string): string {
+  const p = join(work, `evidence-${seed.replace(/[^A-Za-z0-9_-]/g, '_')}.json`);
+  writeFileSync(p, JSON.stringify({ evidence: seed, transcript: `t-${seed}`, receipts: [] }));
+  return p;
 }
 function withEvidence(confirmed: ConfirmedInput[]): BackfillConfirmedEntry[] {
-  return confirmed.map((c) => ({ evidenceMatrixDigest: evidenceHex(`${c.sourceInboundSeq}-${c.sourceMessageId}`), ...c }));
+  return confirmed.map((c) =>
+    c.evidenceMatrixPath !== undefined
+      ? c
+      : { ...c, evidenceMatrixPath: evidenceArtifact(`${c.sourceInboundSeq}-${c.sourceMessageId}`) },
+  );
 }
 function manifest(confirmed: ConfirmedInput[]) {
   return generateBackfillManifest(db.raw as unknown as BackfillReadDb, { manifestId: 'MANIFEST-1', contract: CONTRACT, confirmed: withEvidence(confirmed) });
@@ -322,7 +330,7 @@ describe('runBackfillExecuteCli (owner-gated F3)', () => {
     const job = seedRecoveryJob(live, 1, 'A', 'test-dm@lid');
     const m = generateBackfillManifest(live.raw as unknown as BackfillReadDb, {
       manifestId: 'MANIFEST-CLI', contract: CONTRACT,
-      confirmed: [{ sourceInboundSeq: 1, sourceMessageId: 'A', recoveryJobId: job, fulfillmentClassification: CONFIRMED, evidenceMatrixDigest: evidenceHex('cli') }],
+      confirmed: [{ sourceInboundSeq: 1, sourceMessageId: 'A', recoveryJobId: job, fulfillmentClassification: CONFIRMED, evidenceMatrixPath: evidenceArtifact('cli') }],
     });
     approvedDigest = m.manifestDigest;
     writeFileSync(manifestFile, JSON.stringify(m));

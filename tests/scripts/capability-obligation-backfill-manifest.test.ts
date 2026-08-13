@@ -133,15 +133,24 @@ afterEach(() => {
   rmSync(work, { recursive: true, force: true });
 });
 
-/** A valid 64-hex evidence digest (the field must be a real sha256). */
-function evidenceHex(seed: string): string {
-  return createHash('sha256').update(`evidence-${seed}`).digest('hex');
+/** Write a per-entry evidence-matrix artifact (F4/r12 requires a REAL, readable
+ *  file — a bare asserted digest is no longer accepted) and return its path. Content
+ *  is unique per seed, so distinct entries get distinct recomputed digests. */
+function evidenceArtifact(seed: string): string {
+  const p = join(work, `evidence-${seed.replace(/[^A-Za-z0-9_-]/g, '_')}.json`);
+  writeFileSync(p, JSON.stringify({ evidence: seed, transcript: `t-${seed}`, receipts: [] }));
+  return p;
 }
-/** Confirmed entry with `evidenceMatrixDigest` optional — the helper supplies a
- *  stable, VALID 64-hex per-entry default so eligibility tests stay terse. */
-type ConfirmedInput = Omit<BackfillConfirmedEntry, 'evidenceMatrixDigest'> & { evidenceMatrixDigest?: string };
+/** Confirmed entry with `evidenceMatrixPath` optional — the helper supplies a real,
+ *  readable per-entry artifact when the test does not pin one, so eligibility tests
+ *  stay terse. */
+type ConfirmedInput = BackfillConfirmedEntry;
 function withEvidence(confirmed: ConfirmedInput[]): BackfillConfirmedEntry[] {
-  return confirmed.map((c) => ({ evidenceMatrixDigest: evidenceHex(`${c.sourceInboundSeq}-${c.sourceMessageId}`), ...c }));
+  return confirmed.map((c) =>
+    c.evidenceMatrixPath !== undefined
+      ? c
+      : { ...c, evidenceMatrixPath: evidenceArtifact(`${c.sourceInboundSeq}-${c.sourceMessageId}`) },
+  );
 }
 function runOn(handle: Database, confirmed: ConfirmedInput[], manifestId = 'MANIFEST-1') {
   return generateBackfillManifest(handle.raw as unknown as BackfillReadDb, { manifestId, contract: CONTRACT, confirmed: withEvidence(confirmed) });
@@ -298,12 +307,14 @@ describe('generateBackfillManifest — digest binding', () => {
     expect(after.manifestDigest).not.toBe(before.manifestDigest);
   });
 
-  it('FALSIFIER: a different reviewer evidence-matrix digest CHANGES the manifest digest (F6)', () => {
+  it('FALSIFIER: a different reviewer evidence-matrix ARTIFACT CHANGES the manifest digest (F6)', () => {
     seedInbound(db, 21, 'D', 'test-dm@lid');
     seedMessage(db, 'D', 'test-dm@lid', 'https://youtu.be/a', null);
     const j = seedRecoveryJob(db, 21, 'D', 'test-dm@lid');
-    const a = run([{ sourceInboundSeq: 21, sourceMessageId: 'D', recoveryJobId: j, fulfillmentClassification: CONFIRMED, evidenceMatrixDigest: evidenceHex('A') }]);
-    const b = run([{ sourceInboundSeq: 21, sourceMessageId: 'D', recoveryJobId: j, fulfillmentClassification: CONFIRMED, evidenceMatrixDigest: evidenceHex('B') }]);
+    const artA = join(work, 'ev-A.json'); writeFileSync(artA, '{"e":"A"}');
+    const artB = join(work, 'ev-B.json'); writeFileSync(artB, '{"e":"B"}');
+    const a = run([{ sourceInboundSeq: 21, sourceMessageId: 'D', recoveryJobId: j, fulfillmentClassification: CONFIRMED, evidenceMatrixPath: artA }]);
+    const b = run([{ sourceInboundSeq: 21, sourceMessageId: 'D', recoveryJobId: j, fulfillmentClassification: CONFIRMED, evidenceMatrixPath: artB }]);
     expect(a.manifestDigest).not.toBe(b.manifestDigest);
   });
 
@@ -324,26 +335,38 @@ describe('generateBackfillManifest — digest binding', () => {
   });
 });
 
-describe('generateBackfillManifest — evidence-matrix validation (F3/r11)', () => {
-  it('a non-64-hex evidence digest (or an omitted one) is INELIGIBLE, not silently accepted', () => {
+describe('generateBackfillManifest — evidence-matrix validation (F4/r12)', () => {
+  it('a confirmed entry with NO evidence artifact path is INELIGIBLE (evidence_artifact_required)', () => {
     seedInbound(db, 30, 'E', 'test-dm@lid');
     seedMessage(db, 'E', 'test-dm@lid', 'https://youtu.be/a', null);
     const j = seedRecoveryJob(db, 30, 'E', 'test-dm@lid');
-    // Arbitrary string (the r10 gap).
+    // A bare asserted digest with no artifact to read (the r10/r12 gap) is refused —
+    // a 64-hex string can no longer stand in for a real evidence file.
     const bare = generateBackfillManifest(db.raw as unknown as BackfillReadDb, {
       manifestId: 'M', contract: CONTRACT,
-      confirmed: [{ sourceInboundSeq: 30, sourceMessageId: 'E', recoveryJobId: j, fulfillmentClassification: CONFIRMED, evidenceMatrixDigest: 'ev-cli' }],
+      confirmed: [{ sourceInboundSeq: 30, sourceMessageId: 'E', recoveryJobId: j, fulfillmentClassification: CONFIRMED, evidenceMatrixDigest: 'a'.repeat(64) }],
     });
-    expect(bare.entries[0]).toMatchObject({ eligible: false, reason: 'evidence_digest_invalid' });
-    // Omitted entirely (runtime, past the type).
+    expect(bare.entries[0]).toMatchObject({ eligible: false, reason: 'evidence_artifact_required' });
+    // Both fields omitted entirely (runtime, past the type) → same fail-closed reason.
     const omitted = generateBackfillManifest(db.raw as unknown as BackfillReadDb, {
       manifestId: 'M', contract: CONTRACT,
       confirmed: [{ sourceInboundSeq: 30, sourceMessageId: 'E', recoveryJobId: j, fulfillmentClassification: CONFIRMED } as unknown as BackfillConfirmedEntry],
     });
-    expect(omitted.entries[0]).toMatchObject({ eligible: false, reason: 'evidence_digest_invalid' });
+    expect(omitted.entries[0]).toMatchObject({ eligible: false, reason: 'evidence_artifact_required' });
   });
 
-  it('evidenceMatrixPath RECOMPUTES the digest from the named artifact (primary form), and a wrong supplied digest is rejected', () => {
+  it('a confirmed entry whose evidence artifact is UNREADABLE is INELIGIBLE (evidence_artifact_unreadable)', () => {
+    seedInbound(db, 30, 'E', 'test-dm@lid');
+    seedMessage(db, 'E', 'test-dm@lid', 'https://youtu.be/a', null);
+    const j = seedRecoveryJob(db, 30, 'E', 'test-dm@lid');
+    const missing = generateBackfillManifest(db.raw as unknown as BackfillReadDb, {
+      manifestId: 'M', contract: CONTRACT,
+      confirmed: [{ sourceInboundSeq: 30, sourceMessageId: 'E', recoveryJobId: j, fulfillmentClassification: CONFIRMED, evidenceMatrixPath: join(work, 'does-not-exist.json') }],
+    });
+    expect(missing.entries[0]).toMatchObject({ eligible: false, reason: 'evidence_artifact_unreadable' });
+  });
+
+  it('evidenceMatrixPath RECOMPUTES the digest from the named artifact (required form), and a wrong supplied digest is rejected', () => {
     seedInbound(db, 31, 'F', 'test-dm@lid');
     seedMessage(db, 'F', 'test-dm@lid', 'https://youtu.be/a', null);
     const j = seedRecoveryJob(db, 31, 'F', 'test-dm@lid');

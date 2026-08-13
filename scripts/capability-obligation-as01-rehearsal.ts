@@ -237,19 +237,37 @@ function triggerDefs(dbPath: string): Map<string, string> {
 }
 
 /**
- * A COHERENT single-file snapshot of a SQLite DB: checkpoint the WAL into the main
- * file (so committed WAL content is captured), then copy the main file. `-shm` is
- * transient; `-wal` is empty post-checkpoint. Used for the pre-migration backup
- * (F4 — a raw main-only copy would miss valid WAL content).
+ * A COHERENT single-file snapshot of a SQLite DB via `VACUUM INTO`. SQLite reads
+ * the database through its OWN read snapshot and writes a fresh, defragmented file,
+ * so ALL committed content — including frames still living in the WAL — is captured
+ * even when another connection holds a read transaction. `wal_checkpoint(TRUNCATE)`
+ * + a main-file copy is NOT sufficient: under a pinned reader the checkpoint returns
+ * `{busy:1, checkpointed:0}` and SILENTLY leaves committed WAL frames out of the copy
+ * (F1 r12 — the reviewer reproduced source=1 / snapshot=0). VACUUM INTO fails if the
+ * destination already exists, so a stale dest file-set is removed first. The produced
+ * file is byte-different from a raw copy (defragmented) but content-identical for all
+ * committed rows, which is what the coupled-restore file-set hash is taken over.
  */
 export function snapshotDbCoherent(src: string, dest: string): void {
+  for (const suffix of ['', '-wal', '-shm']) {
+    try { unlinkSync(`${dest}${suffix}`); } catch { /* absent dest component: nothing to remove */ }
+  }
   const raw = new DatabaseSync(src);
   try {
-    raw.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+    raw.exec(`VACUUM INTO '${dest.replace(/'/g, "''")}'`);
   } finally {
     raw.close();
   }
-  copyFileSync(src, dest);
+  // VERIFY the capture rather than trust the API returned void: the produced
+  // snapshot must be a structurally valid SQLite DB. Fail-closed — a corrupt or
+  // unreadable snapshot must never be handed to the coupled restore as a baseline.
+  // (Full row-parity against the live source is deferred to the owner-gated real
+  // run, where the source is quiescent; the reader-held falsifier proves committed
+  // WAL content is captured.)
+  const integrity = integrityCheck(dest);
+  if (integrity !== 'ok') {
+    throw new Error(`snapshotDbCoherent: VACUUM INTO produced an invalid snapshot (integrity_check=${integrity})`);
+  }
 }
 
 function fsyncDir(path: string): void {
@@ -350,17 +368,26 @@ export interface As01CoupledRestore {
 /**
  * Coupled rollback rehearsal (candidate §5): when the old binary rejects the
  * migrated schema, binary rollback is only safe if the pre-migration DB can be
- * restored ATOMICALLY and completely (F4). The restore is crash-safe:
- *   write temp ← backup → fsync temp → integrity_check temp → rename(temp, main)
- *   → unlink clone -wal/-shm → fsync directory.
- * The rename is the atomic main-file replacement (never a half-overwritten DB),
- * and the `-wal`/`-shm` are discarded AFTER the rename so a stale write-ahead log
- * left by the old binary cannot replay its (possibly injected) frames on the next
- * open. `backupPath` is a COHERENT snapshot (see snapshotDbCoherent), so valid WAL
- * content of the pre-migration DB was captured, not lost. Proves the restored
- * FILE-SET equals the backup and passes integrity_check.
+ * restored crash-safely and completely (F2). The restore ordering is:
+ *   write temp ← backup → fsync temp → integrity_check temp
+ *   → UNLINK clone -wal/-shm → rename(temp, main) → fsync directory.
+ * The `-wal`/`-shm` are discarded BEFORE the rename, never after (the r12 defect
+ * was rename-then-unlink): a stale write-ahead log left by the old binary must not
+ * survive to replay its (possibly injected) frames onto the freshly restored main
+ * on the next open. With unlink-first, every crash boundary leaves a RECOVERABLE
+ * file-set — either the un-restored migrated clone, or the restored backup — never
+ * a restored-backup main paired with a stale WAL. `backupPath` is a COHERENT
+ * snapshot (see snapshotDbCoherent), so valid WAL content of the pre-migration DB
+ * was captured, not lost. Proves the restored FILE-SET equals the backup and passes
+ * integrity_check. `opts.onStep` is a test seam: it fires after each durable step
+ * ('temp-written' | 'sidecars-unlinked' | 'main-renamed') so a falsifier can
+ * simulate a crash at that exact boundary by throwing.
  */
-export function rehearseCoupledRestore(cloneDb: string, backupPath: string): As01CoupledRestore {
+export function rehearseCoupledRestore(
+  cloneDb: string,
+  backupPath: string,
+  opts: { onStep?: (step: 'temp-written' | 'sidecars-unlinked' | 'main-renamed') => void } = {},
+): As01CoupledRestore {
   const backupHash = dbFileSetHash(backupPath);
   const temp = `${cloneDb}.restore.tmp`;
   copyFileSync(backupPath, temp);
@@ -376,12 +403,22 @@ export function rehearseCoupledRestore(cloneDb: string, backupPath: string): As0
     try { unlinkSync(temp); } catch { /* best-effort cleanup */ }
     return { ok: false, backupHash, restoredHash: '', integrityAfter: integrityTemp };
   }
-  renameSync(temp, cloneDb); // atomic main-file replacement
+  opts.onStep?.('temp-written');
+  // Discard the clone's stale write-ahead log BEFORE replacing main. A crash here
+  // leaves the migrated clone with no -wal — still valid, restore simply re-runs.
   for (const suffix of ['-wal', '-shm']) {
     try {
       unlinkSync(`${cloneDb}${suffix}`);
     } catch { /* absent component: nothing to discard */ }
   }
+  // Make the sidecar removal DURABLE before the rename: unlink and rename are both
+  // directory-metadata ops and may be reordered on a power-loss crash. fsyncing the
+  // directory here guarantees the -wal/-shm are gone before main is replaced, so no
+  // crash can leave the restored-backup main paired with a surviving stale -wal.
+  fsyncDir(dirname(cloneDb));
+  opts.onStep?.('sidecars-unlinked');
+  renameSync(temp, cloneDb); // atomic main-file replacement, no stale -wal to replay
+  opts.onStep?.('main-renamed');
   fsyncDir(dirname(cloneDb));
   const restoredHash = dbFileSetHash(cloneDb);
   const integrityAfter = integrityCheck(cloneDb);
@@ -544,7 +581,9 @@ export function runAs01RehearsalCli(argv: readonly string[], io: As01Io, opts: A
 
   // Snapshot the clone BEFORE migration — the coupled-restore baseline (the
   // migration mutates in place, so the pre-migration bytes must be captured now).
-  // A COHERENT snapshot (checkpoint + copy) captures committed WAL content (F4).
+  // A COHERENT snapshot (VACUUM INTO) captures committed WAL content (F1/r12). The
+  // dest is harness-derived (fixed name inside the rehearsal sandbox), never an
+  // operator argv path, so snapshotDbCoherent's unconditional dest unlink is safe.
   const backupPath = join(realpathSync(rehearsalDir), 'pre-migration.bak');
   snapshotDbCoherent(plan.cloneDb, backupPath);
 

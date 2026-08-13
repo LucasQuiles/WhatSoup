@@ -777,8 +777,11 @@ manifest digest (holding the flag is not enough — the operator must hold the a
 reads the startup/schema-guard command from the OLD release's OWN `package.json` (never
 guessed); requires a real SQLite CLONE inside the designated sandbox using canonical realpath
 (a symlink to a live DB, a non-regular, or a non-SQLite file are refused); takes a COHERENT
-pre-migration snapshot (WAL checkpointed in, so committed WAL content is captured — not a
-main-only copy that would lose it); migrates it `startSchema→target` and HONORS the migration
+pre-migration snapshot via `VACUUM INTO` (SQLite reads its own snapshot and writes a fresh,
+defragmented file, so ALL committed content — including frames still in the WAL — is captured
+even under a concurrent reader; a `wal_checkpoint(TRUNCATE)`+main-copy would SILENTLY drop
+committed WAL data whenever a pinned reader forces the checkpoint to return `{busy:1,
+checkpointed:0}`); migrates it `startSchema→target` and HONORS the migration
 verdict — it proceeds ONLY when the migration is ok (integrity + read-only smoke + non-decreasing
 key-table row counts with the before→after delta reported + preserved trigger DEFINITIONS, name
 AND SQL + target schema == current); an `ok:false` migration never reaches the old binary. It
@@ -794,11 +797,13 @@ not a pass. The EXACT string/ceiling contract of the old binary is confirmable o
 owner-gated real run against the pinned old release. Write detection is WAL-AWARE: the file-set
 hash (main||-wal) makes a write the old binary lands in the write-ahead log visible, so a
 WAL-only write is classified `wrote_dangerous`, not a clean rejection. On the expected rejection
-it proves the coupled pre-migration RESTORE (candidate §5) — a CRASH-SAFE, ATOMIC restore: write
-temp ← backup, fsync temp, integrity_check temp, `rename()` over the main file (never a
-half-overwritten DB), then delete the clone's `-wal`/`-shm` (a stale injected WAL frame cannot
-replay), then fsync the directory; the restored file-set must equal the backup and pass
-integrity_check. The old binary runs in a sandbox HOME + npm cache (never the operator's live
+it proves the coupled pre-migration RESTORE (candidate §5) — a CRASH-SAFE restore: write
+temp ← backup, fsync temp, integrity_check temp, then delete the clone's `-wal`/`-shm` BEFORE
+`rename()`ing the temp over the main file, then fsync the directory. The `-wal`/`-shm` are
+discarded FIRST, never after the rename (the r12 defect): a crash at any boundary then leaves a
+recoverable file-set — the un-restored migrated clone, or the restored backup — never a
+restored-backup main paired with a stale WAL that would replay the old binary's frames on the
+next open. The restored file-set must equal the backup and pass integrity_check. The old binary runs in a sandbox HOME + npm cache (never the operator's live
 config); in tests an INJECTED runner spawns the fake directly (the default `npm run` transport
 ships unit-untested by construction and is exercised only at the owner-gated real run). Network
 isolation is a fail-closed egress probe (a reachable network REFUSES the run) — isolation can be

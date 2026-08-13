@@ -59,18 +59,19 @@ export interface BackfillConfirmedEntry {
   /**
    * The reviewer's EVIDENCE MATRIX artifact (candidate §4) — the file holding the
    * transcript, tool/delivery receipts, and later-turn review the classification
-   * rests on. PRIMARY form: when provided, the generator RECOMPUTES its sha256
-   * (and cross-checks any supplied `evidenceMatrixDigest`), so the bound digest is
-   * verifiable against a real artifact rather than an asserted string.
+   * rests on. REQUIRED (F4/r12): the generator RECOMPUTES its sha256 from this file
+   * and binds THAT into the manifest digest, so the approval is tied to a real,
+   * re-readable artifact rather than an asserted string. Absent ⇒ ineligible
+   * (`evidence_artifact_required`); unreadable ⇒ `evidence_artifact_unreadable`.
    */
   evidenceMatrixPath?: string;
   /**
-   * sha256 of the reviewer's evidence-matrix artifact, bound into the manifest
-   * digest so the approval is tied to the SPECIFIC reviewed evidence. Must be a
-   * 64-hex digest. When `evidenceMatrixPath` is given, the recomputed hash wins
-   * and this (if present) must match it.
+   * OPTIONAL cross-check: the reviewer's expected sha256 of the artifact. When
+   * supplied it must equal the hash recomputed from `evidenceMatrixPath`, else the
+   * entry is ineligible (`evidence_digest_mismatch`). The recomputed hash — never a
+   * supplied string — is what the manifest digest binds.
    */
-  evidenceMatrixDigest: string;
+  evidenceMatrixDigest?: string;
   /** Reviewer media classification when the source is media ('document' | 'video'). */
   mediaClass?: string | null;
   /**
@@ -341,25 +342,24 @@ export function generateBackfillManifest(
       continue;
     }
 
-    // F3/r11 — resolve the evidence-matrix digest. PRIMARY form: recompute from the
-    // named artifact (verifiable). Otherwise require a 64-hex digest. A bare string
-    // (the reviewer's r10 gap) is now ineligible, not silently accepted.
+    // F4/r12 — the evidence-matrix digest is ALWAYS recomputed from a readable
+    // artifact; a bare 64-hex string is no longer accepted (the r10/r12 gap: an
+    // asserted hash proves nothing about a real evidence file). Three distinct,
+    // fail-closed reasons: no path supplied, path unreadable, or a supplied digest
+    // that disagrees with the recomputed one.
+    if (c.evidenceMatrixPath === undefined) {
+      entries.push({ ...base, reason: 'evidence_artifact_required' });
+      continue;
+    }
     let evidenceMatrixDigest: string;
-    if (c.evidenceMatrixPath !== undefined) {
-      try {
-        evidenceMatrixDigest = createHash('sha256').update(readFileSync(c.evidenceMatrixPath)).digest('hex');
-      } catch {
-        entries.push({ ...base, reason: 'evidence_artifact_unreadable' });
-        continue;
-      }
-      if (c.evidenceMatrixDigest !== undefined && c.evidenceMatrixDigest !== evidenceMatrixDigest) {
-        entries.push({ ...base, reason: 'evidence_digest_mismatch' });
-        continue;
-      }
-    } else if (/^[0-9a-f]{64}$/.test(c.evidenceMatrixDigest ?? '')) {
-      evidenceMatrixDigest = c.evidenceMatrixDigest;
-    } else {
-      entries.push({ ...base, reason: 'evidence_digest_invalid' });
+    try {
+      evidenceMatrixDigest = createHash('sha256').update(readFileSync(c.evidenceMatrixPath)).digest('hex');
+    } catch {
+      entries.push({ ...base, reason: 'evidence_artifact_unreadable' });
+      continue;
+    }
+    if (c.evidenceMatrixDigest !== undefined && c.evidenceMatrixDigest !== evidenceMatrixDigest) {
+      entries.push({ ...base, reason: 'evidence_digest_mismatch' });
       continue;
     }
 

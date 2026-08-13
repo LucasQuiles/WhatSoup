@@ -12,7 +12,7 @@
  * via an INJECTED runner in tests (no npm subprocess trees).
  */
 import { spawnSync } from 'node:child_process';
-import { appendFileSync, copyFileSync, mkdtempSync, mkdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, copyFileSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -229,6 +229,88 @@ describe('rehearseCoupledRestore (F1 — WAL-aware)', () => {
     const count = Number((check.prepare('SELECT COUNT(*) AS c FROM keep').get() as { c: number }).c);
     check.close();
     expect(count).toBe(1); // WAL content survived into the snapshot
+  });
+
+  it('F1 FALSIFIER: the coherent snapshot captures committed WAL content even while a reader is PINNED', () => {
+    const cloneDb = join(rehearsalDir, 'clone.db');
+    makeSqliteClone(cloneDb);
+    {
+      const w = new DatabaseSync(cloneDb);
+      w.exec('CREATE TABLE keep(x)');
+      w.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+      w.close();
+    }
+    // Pin an OLD read snapshot: wal_checkpoint(TRUNCATE) would now return
+    // {busy:1, checkpointed:0}, so a checkpoint-then-copy snapshot would SILENTLY
+    // drop the committed WAL row. VACUUM INTO reads its own snapshot and must still
+    // capture it. The reader is HELD across the snapshot (unlike the test above).
+    const reader = new DatabaseSync(cloneDb, { readOnly: true });
+    reader.exec('BEGIN');
+    reader.prepare('SELECT COUNT(*) AS c FROM keep').get();
+    const writer = new DatabaseSync(cloneDb);
+    writer.exec('PRAGMA wal_autocheckpoint=0');
+    writer.exec('INSERT INTO keep VALUES (7)');
+    writer.close();
+    expect(statSync(`${cloneDb}-wal`).size).toBeGreaterThan(0); // the row lives only in -wal
+    const backup = join(rehearsalDir, 'pinned.bak');
+    snapshotDbCoherent(cloneDb, backup); // reader STILL pinned here
+    reader.exec('ROLLBACK');
+    reader.close();
+    const check = new DatabaseSync(backup, { readOnly: true });
+    const count = Number((check.prepare('SELECT COUNT(*) AS c FROM keep').get() as { c: number }).c);
+    check.close();
+    expect(count).toBe(1); // committed WAL row survived the snapshot despite the pinned reader
+  });
+
+  it('F2 FALSIFIER: no restore crash boundary leaves the restored backup main paired with a stale -wal', () => {
+    // Layout-independent, deterministic invariant: the forbidden r12 intermediate
+    // state is the restored-backup MAIN BYTES sitting next to a stale -wal that
+    // would replay the old binary's frames on the next open. Asserted at the file-set
+    // level (not via non-deterministic WAL replay, which depends on page layout).
+    for (const crashAt of ['temp-written', 'sidecars-unlinked', 'main-renamed'] as const) {
+      const cloneDb = join(rehearsalDir, `crash-${crashAt}.db`);
+      makeSqliteClone(cloneDb);
+      {
+        const w = new DatabaseSync(cloneDb);
+        w.exec('CREATE TABLE danger(x)');
+        w.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+        w.close();
+      }
+      // Coherent pre-migration backup; it becomes the restored main.
+      const backup = join(rehearsalDir, `crash-${crashAt}.bak`);
+      snapshotDbCoherent(cloneDb, backup);
+      // The old binary writes a DANGEROUS row that stays ONLY in the -wal — the exact
+      // stale frame that must not survive to replay onto the restored backup.
+      const reader = new DatabaseSync(cloneDb, { readOnly: true });
+      reader.exec('BEGIN');
+      reader.prepare('SELECT COUNT(*) AS c FROM danger').get();
+      const writer = new DatabaseSync(cloneDb);
+      writer.exec('PRAGMA wal_autocheckpoint=0');
+      writer.exec('INSERT INTO danger VALUES (1)');
+      writer.close();
+      reader.exec('ROLLBACK');
+      reader.close();
+      expect(statSync(`${cloneDb}-wal`).size).toBeGreaterThan(0);
+      // Crash the restore at this exact boundary.
+      expect(() => rehearseCoupledRestore(cloneDb, backup, {
+        onStep: (s) => { if (s === crashAt) throw new Error(`crash@${s}`); },
+      })).toThrow(`crash@${crashAt}`);
+      // Read the file-set BEFORE any reopen (a reopen could checkpoint away the -wal).
+      const mainIsRestoredBackup = readFileSync(cloneDb).equals(readFileSync(backup));
+      const staleWal = existsSync(`${cloneDb}-wal`) && statSync(`${cloneDb}-wal`).size > 0;
+      // The forbidden r12 state: restored-backup main + a surviving stale -wal.
+      expect(mainIsRestoredBackup && staleWal).toBe(false);
+      // And every boundary leaves a recoverable file-set (opens + integrity ok).
+      let integrity = '';
+      try {
+        const chk = new DatabaseSync(cloneDb);
+        integrity = String((chk.prepare('PRAGMA integrity_check').get() as { integrity_check: string }).integrity_check);
+        chk.close();
+      } catch {
+        integrity = 'open_failed';
+      }
+      expect(integrity).toBe('ok');
+    }
   });
 });
 
