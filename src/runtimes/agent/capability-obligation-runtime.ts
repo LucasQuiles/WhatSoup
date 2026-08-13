@@ -28,7 +28,7 @@
  */
 import { hostname, userInfo } from 'node:os';
 
-import type { CapabilityAttestationBinding } from '../../core/capability-attestation.ts';
+import { buildCapabilityAttestationBinding, type CapabilityAttestationBinding } from '../../core/capability-attestation.ts';
 import type { CapabilityObligationsOptions } from '../../core/capability-contract.ts';
 import type {
   CapabilityDecisionParams,
@@ -294,19 +294,15 @@ export class CapabilityObligationRuntime {
     facts: CapabilityObligationLiveFacts,
     obligation: CapabilityObligationDueRow,
   ): CapabilityAttestationBinding {
-    return {
-      ...facts,
+    // Shared builder (round-15) — the operator attest/approve CLIs assemble the
+    // binding the SAME way, so an approval's digest matches what admission computes.
+    return buildCapabilityAttestationBinding({
+      liveFacts: facts,
       contractVersion: obligation.contractVersion,
       capability: obligation.requiredCapability,
-      skillName: this.options.attestation.skillName,
-      skillVersion: this.options.attestation.skillVersion,
-      skillDigest: this.options.attestation.skillDigest,
-      resolverDigest: this.options.attestation.resolverDigest,
-      dependencyVersions: this.options.attestation.dependencyVersions,
-      probeVersion: this.options.attestation.probeVersion,
-      canaryId: this.options.attestation.canaryId,
+      skill: this.options.attestation,
       mediaRoot: this.options.mediaRoot,
-    };
+    });
   }
 
   private async dispatch(

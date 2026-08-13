@@ -749,6 +749,69 @@ export class CapabilityObligationStore {
     });
   }
 
+  /**
+   * Create a group-drain approval (round-15 finding 3) — the operator side of the
+   * AS-08 authorization that `consumeGroupDrainApproval` later spends. Refuses
+   * unless the obligation is a GROUP still in `waiting_approval` whose delivery
+   * JID matches the approved destination. `attestationDigest` MUST be the
+   * binding-identity digest (`attestationBindingDigest`) of the attestation the
+   * drain will run under — the approval CLI computes it — so the claim's r14-F1
+   * check (`drain_attestation_digest == admitting digest`) can pass; a hand-typed
+   * string would produce an unclaimable approval.
+   */
+  recordGroupDrainApproval(params: {
+    obligationId: number;
+    destinationJid: string;
+    releaseSha: string;
+    manifestDigest: string;
+    drainRunId: string;
+    attestationDigest: string;
+    approver: string;
+    validForSeconds: number;
+  }): { recorded: boolean; approvalId?: number; reason?: 'not_a_waiting_group' | 'destination_mismatch' } {
+    return withTransaction(this.db, () => {
+      const o = this.db.raw
+        .prepare('SELECT is_group AS isGroup, state, delivery_jid AS deliveryJid FROM capability_obligations WHERE id = ?')
+        .get(params.obligationId) as { isGroup: number; state: string; deliveryJid: string } | undefined;
+      if (o === undefined || o.isGroup !== 1 || o.state !== 'waiting_approval') {
+        return { recorded: false as const, reason: 'not_a_waiting_group' as const };
+      }
+      if (o.deliveryJid !== params.destinationJid) {
+        return { recorded: false as const, reason: 'destination_mismatch' as const };
+      }
+      const inserted = this.db.raw
+        .prepare(
+          `INSERT INTO capability_drain_approvals
+             (obligation_id, destination_jid, scope, release_sha, attestation_digest,
+              manifest_digest, drain_run_id, approver, approved_at, expires_at)
+           VALUES (?, ?, 'group', ?, ?, ?, ?, ?, datetime('now'),
+                   datetime('now', '+' || CAST(? AS INTEGER) || ' seconds'))`,
+        )
+        .run(
+          params.obligationId,
+          params.destinationJid,
+          params.releaseSha,
+          params.attestationDigest,
+          params.manifestDigest,
+          params.drainRunId,
+          params.approver,
+          params.validForSeconds,
+        );
+      const approvalId = Number(inserted.lastInsertRowid);
+      this.appendEventWithinCallerTransaction(
+        {
+          action: 'approval.record',
+          actorType: 'operator',
+          actorId: params.approver,
+          reasonCode: 'group_drain_approved',
+          detail: { approvalId, drainRunId: params.drainRunId },
+        },
+        params.obligationId,
+      );
+      return { recorded: true as const, approvalId };
+    });
+  }
+
   listClaimedObligations(): Array<{
     id: number;
     claimToken: string;

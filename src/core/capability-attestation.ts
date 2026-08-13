@@ -81,6 +81,53 @@ export function canonicalDependencyVersions(deps: Record<string, string>): strin
  * Positional array (not an object) so key order can never defeat or forge a
  * match; `canonicalDependencyVersions` normalises the one nested map.
  */
+/**
+ * The declared skill/resolver/probe identity half of a binding (from
+ * `options.attestation`). Kept separate from the live facts so one shared builder
+ * assembles the binding the SAME way for the supervisor's admission and for the
+ * operator CLIs — a mismatch here would make every approval unclaimable under the
+ * r14-F1 rule (`drain_attestation_digest == admitting binding digest`).
+ */
+export interface AttestationSkillIdentity {
+  skillName: string;
+  skillVersion: string | null;
+  skillDigest: string;
+  resolverDigest: string | null;
+  dependencyVersions: Record<string, string>;
+  probeVersion: string;
+  canaryId: string;
+}
+
+/** Assemble the exact D5 binding from its three sources (live facts + obligation/contract + declared identity). */
+export function buildCapabilityAttestationBinding(params: {
+  liveFacts: {
+    hostId: string;
+    runtimeUser: string;
+    releaseSha: string;
+    schemaVersion: number;
+    providerId: string;
+    harnessType: string;
+  };
+  contractVersion: string;
+  capability: string;
+  skill: AttestationSkillIdentity;
+  mediaRoot: string;
+}): CapabilityAttestationBinding {
+  return {
+    ...params.liveFacts,
+    contractVersion: params.contractVersion,
+    capability: params.capability,
+    skillName: params.skill.skillName,
+    skillVersion: params.skill.skillVersion,
+    skillDigest: params.skill.skillDigest,
+    resolverDigest: params.skill.resolverDigest,
+    dependencyVersions: params.skill.dependencyVersions,
+    probeVersion: params.skill.probeVersion,
+    canaryId: params.skill.canaryId,
+    mediaRoot: params.mediaRoot,
+  };
+}
+
 export function attestationBindingDigest(binding: CapabilityAttestationBinding): string {
   const canonical = JSON.stringify([
     binding.hostId,
