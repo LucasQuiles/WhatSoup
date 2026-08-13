@@ -20,15 +20,20 @@
  * a mismatch is refused, because an attestation whose binding differs from the live
  * supervisor's would be recorded yet never admit a real obligation (still inert).
  *
- * FAIL-CLOSED OBSERVATION (round 16): before recording under `--run-canary` the
- * command additionally (a) refuses unless the binding's media root is a readable
- * directory; (b) OBSERVES the installed resolver artifact (`execution.command[0]`)
- * and refuses on a digest mismatch with the declared `--resolver-digest` — it never
- * silently trusts the declared digest; (c) PRESERVES the probe stdout/stderr/exit
- * digests + byte counts + observed-source digest to a durable receipt (`--receipt-out`),
- * required so no attestation is minted without preserved evidence (spec §3.3).
+ * FAIL-CLOSED OBSERVATION (round 16, hardened round 17): before recording under
+ * `--run-canary` the command additionally (a) refuses unless the binding's media root
+ * is a readable directory; (b) requires `--resolver-digest` and VERIFIES the resolver
+ * SCRIPT artifact — it locates the script within the execution argv (skipping a leading
+ * interpreter such as `node`/`python`, refusing code-loading flags like `-e`/`--require`
+ * and bare names), sha256s it, and refuses on any mismatch; it never hashes the
+ * interpreter and never soft-passes an unverified resolver; (c) PRESERVES the probe
+ * stdout/stderr/exit digests + byte counts + observed-source digest to a DURABLE receipt
+ * (`--receipt-out`) that is fsynced+read-back BEFORE the attestation row is admitted, so
+ * no admissible row can exist without its receipt already durable (round-17 finding 1).
+ * The receipt records probe evidence only; it does NOT assert admission (admission = the
+ * `capability_attestations` row carrying this run's nonce).
  *
- * NARROW CLAIM: a passing canary attests ONLY that the OBSERVED installed resolver,
+ * NARROW CLAIM: a passing canary attests ONLY that the VERIFIED installed resolver,
  * run against the recorded `sha256(probeSource)`, exited 0 within bound and produced
  * >= minOutputBytes — it is NOT proof of semantic processing (a bounded probe cannot
  * establish that). Per spec §3.3 the fulfillment proof is the D6 execution receipt +
@@ -47,10 +52,10 @@
  */
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { accessSync, constants as fsConstants, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { accessSync, closeSync, constants as fsConstants, fsyncSync, openSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { basename, dirname, resolve } from 'node:path';
 import { hostname, userInfo } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
-import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import {
@@ -338,40 +343,100 @@ export function runResolverCanary(params: {
   });
 }
 
+/** Interpreter basenames whose real resolver code is a following SCRIPT argument, not command[0]. */
+const INTERPRETER_BASENAMES = new Set([
+  'node', 'node.exe', 'nodejs', 'deno', 'bun', 'ts-node', 'tsx',
+  'python', 'python2', 'python3', 'ruby', 'perl', 'php',
+  'sh', 'bash', 'zsh', 'dash', 'osascript',
+]);
+
 /**
- * Blocker-1 (round 16): OBSERVE the installed resolver artifact rather than
- * silently trusting the declared `resolverDigest`. When `execution.command[0]` is a
- * real file (an absolute/relative path to the resolver), sha256 it; if the operator
- * declared a `resolverDigest`, REFUSE fail-closed on mismatch. When command[0] is a
- * bare PATH binary (no separator), it cannot be observed here — record
- * `observed: false` so the attestation stops implying a verification that did not
- * happen. Never fabricates a match.
+ * Interpreter flags that INJECT or REPLACE the code that runs, taking their value as
+ * a SEPARATE token (`--require x`) or an inline value (`--require=x` / `-e '...'`).
+ * If the resolver command uses any of these we REFUSE: the actual code that executes
+ * cannot be pinned to the single script argument, so verifying one file would be
+ * fail-open theatre (round-17 finding 2 / advisor gap-2). The operator must invoke
+ * the resolver by an explicit script/binary path instead.
+ */
+const CODE_LOADING_INTERPRETER_FLAGS = new Set([
+  '-e', '--eval', '-p', '--print', '-r', '--require', '--import',
+  '--loader', '--experimental-loader',
+]);
+
+/**
+ * Round-17 finding 2 (+ advisor gap-2): identify the resolver ARTIFACT FILE that the
+ * declared `--resolver-digest` must verify. Fail CLOSED — this NEVER returns an
+ * unverified observation:
+ *   - a bare command (no path separator, not resolvable) → throw;
+ *   - hashing an INTERPRETER (`node`, `python`, …) instead of the resolver script → throw;
+ *     the artifact is the first non-flag token AFTER the interpreter (its flags skipped);
+ *   - a code-loading interpreter flag (`-e`, `--require`, `--import`, `--loader`, …) →
+ *     throw (the running code is not pinned to a single script);
+ *   - a missing/unreadable artifact, an absent declared digest, or a digest MISMATCH → throw.
+ * The round-16 form hashed `command[0]` unconditionally and soft-passed a bare binary
+ * with `verified:false` while the caller admitted anyway — both fail-open.
  */
 export interface ResolverArtifactObservation {
-  observed: boolean;
-  digest: string | null;
-  declaredDigest: string | null;
-  verified: boolean;
+  observed: true;
+  digest: string;
+  declaredDigest: string;
+  verified: true;
+  artifactPath: string;
 }
-export function observeResolverArtifact(commandZero: string, declaredResolverDigest: string | null): ResolverArtifactObservation {
-  const looksLikePath = commandZero.includes('/');
-  if (!looksLikePath) {
-    return { observed: false, digest: null, declaredDigest: declaredResolverDigest, verified: false };
+
+/** Locate the resolver artifact file within the execution command argv. Throws (fail-closed) on any ambiguity. */
+export function resolveResolverArtifactPath(command: readonly string[]): string {
+  if (command.length === 0) throw new Error('refusing to record: resolver command is empty — nothing to verify');
+  let idx = 0;
+  // `env [VAR=val ...] <real-cmd> …` — consume env and its assignments, then continue.
+  if (basename(command[0]!) === 'env') {
+    idx = 1;
+    while (idx < command.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(command[idx]!)) idx += 1;
+    if (idx >= command.length) throw new Error('refusing to record: resolver command is only `env` with no program to verify');
   }
+  const zero = command[idx]!;
+  const zeroIsInterpreter = INTERPRETER_BASENAMES.has(basename(zero));
+  if (!zeroIsInterpreter) {
+    if (!zero.includes('/')) {
+      throw new Error(`refusing to record: resolver command "${zero}" is a bare name with no path — cannot locate and verify the installed artifact; declare an absolute resolver path in the instance config`);
+    }
+    return zero; // command[idx] IS the resolver binary/script
+  }
+  // Interpreter: walk its flags to the script, refusing anything that injects code.
+  for (let i = idx + 1; i < command.length; i += 1) {
+    const tok = command[i]!;
+    const flagName = tok.startsWith('-') ? tok.split('=', 1)[0]! : null;
+    if (flagName !== null && CODE_LOADING_INTERPRETER_FLAGS.has(flagName)) {
+      throw new Error(`refusing to record: resolver command loads code via ${flagName} — the running code is not pinned to a single script, so the attestation cannot verify the exact resolver; invoke the resolver by an explicit script/binary path`);
+    }
+    if (flagName !== null) continue; // a benign interpreter flag (e.g. --experimental-strip-types)
+    if (!tok.includes('/')) {
+      throw new Error(`refusing to record: resolver script "${tok}" (after interpreter ${basename(zero)}) is a bare name with no path — declare an absolute script path so the artifact can be verified`);
+    }
+    return tok; // the first non-flag token after the interpreter is the resolver script
+  }
+  throw new Error(`refusing to record: resolver command uses interpreter ${basename(zero)} but names no script path to verify`);
+}
+
+export function observeResolverArtifact(command: readonly string[], declaredResolverDigest: string | null): ResolverArtifactObservation {
+  if (declaredResolverDigest === null || declaredResolverDigest.length === 0) {
+    throw new Error('refusing to record: --resolver-digest is required — the attestation MUST verify the exact resolver artifact that runs; a missing declared digest cannot be checked');
+  }
+  const artifactPath = resolveResolverArtifactPath(command);
   let bytes: Buffer;
   try {
-    bytes = readFileSync(commandZero);
+    bytes = readFileSync(artifactPath);
   } catch (err) {
-    throw new Error(`refusing to record: resolver artifact ${commandZero} is unreadable: ${err instanceof Error ? err.message : String(err)}`);
+    throw new Error(`refusing to record: resolver artifact ${artifactPath} is unreadable: ${err instanceof Error ? err.message : String(err)}`);
   }
   const digest = createHash('sha256').update(bytes).digest('hex');
-  if (declaredResolverDigest !== null && digest !== declaredResolverDigest) {
+  if (digest !== declaredResolverDigest) {
     throw new Error(
-      `refusing to record: installed resolver artifact digest ${digest} does not match declared --resolver-digest ${declaredResolverDigest} `
+      `refusing to record: installed resolver artifact ${artifactPath} digest ${digest} does not match declared --resolver-digest ${declaredResolverDigest} `
       + `(the attestation would bind a resolver that is not the one installed)`,
     );
   }
-  return { observed: true, digest, declaredDigest: declaredResolverDigest, verified: declaredResolverDigest !== null };
+  return { observed: true, digest, declaredDigest: declaredResolverDigest, verified: true, artifactPath };
 }
 
 /**
@@ -389,6 +454,44 @@ export function assertMediaRootReadable(mediaRoot: string): void {
   }
   if (!stat.isDirectory()) {
     throw new Error(`refusing to record: media root ${mediaRoot} is not a directory`);
+  }
+}
+
+/**
+ * Round-17 finding 1 (+ advisor gap-1): persist the probe-evidence receipt DURABLY
+ * so that it can be written BEFORE the attestation row is admitted. Write → fsync
+ * file → atomic rename → fsync directory → READ-BACK verify. Any filesystem failure
+ * (unwritable destination, disk-full, partial write) THROWS here — the caller runs
+ * this strictly before `attest()`, so a receipt that cannot be made durable means NO
+ * attestation row is ever committed.
+ *
+ * Invariant (one direction, stated deliberately): an admissible attestation row
+ * IMPLIES its receipt was durably fsynced first. The reverse is NOT asserted — a
+ * receipt may exist with no row if the INSERT later fails — which is safe because
+ * the receipt does NOT claim admission (admission = the `capability_attestations`
+ * row carrying this `nonce`; a reader confirms the row, never the receipt alone).
+ */
+export function writeReceiptDurably(receiptPath: string, receipt: unknown): void {
+  const json = JSON.stringify(receipt, null, 2);
+  const abs = resolve(receiptPath);
+  const tmp = `${abs}.tmp-${process.pid}`;
+  const fd = openSync(tmp, 'w');
+  try {
+    writeFileSync(fd, json);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  renameSync(tmp, abs);
+  const dirFd = openSync(dirname(abs), 'r');
+  try {
+    fsyncSync(dirFd);
+  } finally {
+    closeSync(dirFd);
+  }
+  const readBack = readFileSync(abs, 'utf8');
+  if (readBack !== json) {
+    throw new Error(`refusing to record: receipt at ${abs} did not persist verifiably (read-back mismatch) — attestation not admitted`);
   }
 }
 
@@ -460,10 +563,13 @@ if (import.meta.url === invokedPath) {
           if (args.configPath === null) throw new Error('--run-canary requires --config PATH (the resolver command comes from the instance config, never a guess)');
           if (args.probeSource === null || args.probeSource.length === 0) throw new Error('--run-canary requires --probe-source SOURCE (a bounded, non-sending URL/token to probe)');
           if (args.receiptOut === null) throw new Error('--run-canary requires --receipt-out PATH (the probe stdout/stderr/exit evidence is preserved there per spec §3.3)');
+          if (args.skill.resolverDigest === null || args.skill.resolverDigest.length === 0) throw new Error('--run-canary requires --resolver-digest DIGEST (the attestation must verify the exact resolver artifact that runs)');
           const options = loadObligationOptionsFromConfig(args.configPath);
           assertArgsMatchConfig(args, options); // refuse an un-admittable binding before running anything
-          assertMediaRootReadable(options.mediaRoot); // blocker-1: media-root must be a readable directory
-          const artifact = observeResolverArtifact(options.execution.command[0]!, args.skill.resolverDigest); // blocker-1: observe installed resolver (throws on digest mismatch)
+          assertMediaRootReadable(options.mediaRoot); // finding-1: media-root must be a readable directory
+          // finding-2: identify + VERIFY the resolver SCRIPT artifact (skips a leading
+          // interpreter; refuses code-loading flags/bare names/mismatch). Throws unless verified.
+          const artifact = observeResolverArtifact(options.execution.command, args.skill.resolverDigest);
           const now = new Date();
           const canary = await runResolverCanary({
             command: options.execution.command,
@@ -472,30 +578,41 @@ if (import.meta.url === invokedPath) {
             minOutputBytes: options.execution.minOutputBytes,
             nonce: args.runId,
           });
-          const result = attest(db, args, canary, now);
-          // blocker-1: PRESERVE the probe evidence durably (references, no raw stream content).
+          if (canary.result !== 'pass') {
+            // Failed/insufficient canary: record NOTHING and do NOT write the admission
+            // receipt (a receipt at --receipt-out means an admission was attempted).
+            process.stdout.write((args.json ? JSON.stringify({ mode: 'record', recorded: false, reason: 'canary_failed' }) : `NOT RECORDED attest ${args.capability}: canary_failed (no attestation, no receipt)`) + '\n');
+            process.exitCode = 3;
+            return;
+          }
+          // finding-1 (+ advisor gap-1): PERSIST the probe-evidence receipt DURABLY
+          // BEFORE admission. The receipt is keyed by nonce + binding digest (not the
+          // post-insert row id) and does NOT assert admission. If it cannot be made
+          // durable, this throws and NO attestation row is committed.
+          const attestationDigest = attestationBindingDigest(bindingForAttestArgs(args));
           const receipt = {
             schemaVersion: CURRENT_SCHEMA_MIGRATION,
             capability: args.capability,
-            attestationBindingDigest: result.attestationDigest,
-            recorded: result.recorded,
-            attestationId: result.recorded ? result.attestationId : null,
-            reason: result.recorded ? null : (result.mode === 'record' ? result.reason : 'dry-run'),
+            attestationBindingDigest: attestationDigest,
+            nonce: args.runId,
+            canaryResult: canary.result,
             canary,
             resolverArtifact: artifact,
             mediaRoot: options.mediaRoot,
             probeSourceDigest: (canary.detail as { probeSourceDigest?: string } | undefined)?.probeSourceDigest ?? null,
-            claimScope: 'NOT a proof of semantic processing — exit0+bytes+observed-artifact+source-digest only; fulfillment proof = D6 receipt + delivery chain (spec §3.3)',
+            admission: `evidence only — admission is the capability_attestations row with nonce=${args.runId}; verify the row exists, this receipt does not assert it`,
+            claimScope: 'NOT a proof of semantic processing — exit0+bytes+verified-artifact+source-digest only; fulfillment proof = D6 receipt + delivery chain (spec §3.3)',
             attestedAt: now.toISOString(),
           };
-          writeFileSync(args.receiptOut, JSON.stringify(receipt, null, 2));
+          writeReceiptDurably(args.receiptOut, receipt); // durable + read-back verified, strictly before the INSERT below
+          const result = attest(db, args, canary, now);
           if (result.recorded) {
             process.stdout.write((args.json ? JSON.stringify(result) : `RECORDED attest ${args.capability}: id=${result.attestationId} digest=${result.attestationDigest} receipt=${args.receiptOut}`) + '\n');
             process.exitCode = 0;
           } else {
             const reason = result.mode === 'record' ? result.reason : 'dry-run';
             process.stdout.write((args.json ? JSON.stringify(result) : `NOT RECORDED attest ${args.capability}: ${reason} digest=${result.attestationDigest} receipt=${args.receiptOut}`) + '\n');
-            process.exitCode = 3; // nonzero when the canary/producer refused to record
+            process.exitCode = 3; // nonzero when the producer refused to record
           }
           return;
         }

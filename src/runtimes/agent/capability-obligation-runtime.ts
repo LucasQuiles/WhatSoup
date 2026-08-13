@@ -41,6 +41,7 @@ import { cleanupUnreferencedMedia } from '../../core/obligation-media-retention.
 import { systemClock } from '../../lib/clock.ts';
 import { createChildLogger } from '../../logger.ts';
 import type { ExternalEffectDeclaration } from '../../mcp/external-effect.ts';
+import type { ToolRegistry } from '../../mcp/registry.ts';
 import type { ToolDeclaration } from '../../mcp/types.ts';
 import { deriveCapabilityDecision as deriveDecisionForTurn } from './capability-obligation-decision.ts';
 import {
@@ -430,6 +431,73 @@ export function activateCapabilityObligationRuntime(
   const runtime = new CapabilityObligationRuntime(deps);
   runtime.start();
   return runtime;
+}
+
+/**
+ * Wire the capability-obligation replay runtime to the AgentRuntime — extracted from
+ * runtime.ts (arch.file-size ratchet). Returns the activated runtime, or null when the
+ * feature is not opted in, the scope is not `per_chat`, or it is already active — the
+ * all-or-inert guard as one decision. It also installs the shared turn-correlation
+ * resolver and builds the r14-F3 single-resolution `prepareDispatch`. Runtime deps arrive
+ * as closures capturing the AgentRuntime, so no private members are widened.
+ */
+export function maybeActivateCapabilityObligationRuntime(host: {
+  enabled: boolean;
+  alreadyActive: boolean;
+  options: CapabilityObligationsOptions | null | undefined;
+  db: Database;
+  store: CapabilityObligationStore;
+  registry: ToolRegistry;
+  perChatTurnContexts: () => ReadonlyMap<string, readonly RuntimeTurnContext[]>;
+  resolveDispatchTarget: (deliveryJid: string) => TurnRecoveryDispatchTarget | null;
+  turnCoordinator: RuntimeTurnCoordinator;
+  requireSessionToolScopeKey: (session: SessionManager) => string;
+  isDispatchTargetCurrent: (target: TurnRecoveryDispatchTarget) => boolean;
+  getDurability: CapabilityObligationRuntimeDeps['getDurability'];
+  resolveMapKey: (deliveryJid: string) => string;
+}): CapabilityObligationRuntime | null {
+  if (host.options == null || !host.enabled || host.alreadyActive) return null;
+  const { registry } = host;
+  registry.setTurnCorrelationResolver((ck) => turnCorrelationFromContexts(host.perChatTurnContexts(), ck));
+  return activateCapabilityObligationRuntime({
+    db: host.db,
+    store: host.store,
+    options: host.options,
+    // r14 F3 — resolve the serving target ONCE; a null target fails closed.
+    prepareDispatch: (obligation) => {
+      const target = host.resolveDispatchTarget(obligation.deliveryJid);
+      const facts = buildObligationLiveFacts(servingProviderId(target?.session as SessionManager | undefined));
+      if (!target) return { facts, dispatch: null };
+      return { facts, dispatch: (mintedMessageId, mintedSeq) => dispatchCapabilityObligationTurnViaSession(
+        host.turnCoordinator, target, host.requireSessionToolScopeKey, host.isDispatchTargetCurrent,
+        obligation, mintedMessageId, mintedSeq) };
+    },
+    getDurability: host.getDurability,
+    resolveMapKey: host.resolveMapKey,
+    externalEffectFor: (name) => registry.externalEffectDeclaration(name),
+    writeLossSince: (ms) => registry.hadDurabilityWriteLossSince(ms),
+    registerTool: (tool) => registry.register(tool),
+    turnIdFor: (ck) => turnCorrelationFromContexts(host.perChatTurnContexts(), ck)?.logicalTurnId ?? null,
+  });
+}
+
+/**
+ * Shut the obligation runtime down during AgentRuntime teardown, swallowing + logging
+ * its error and returning it to collect (extracted from runtime.ts — matches the
+ * `shutdownTurnRecoverySupervisorSafely` pattern). A null runtime (feature inert) is a
+ * no-op returning null.
+ */
+export async function shutdownCapabilityObligationRuntimeSafely(
+  runtime: CapabilityObligationRuntime | null,
+): Promise<unknown> {
+  if (runtime === null) return null;
+  try {
+    await runtime.shutdown();
+    return null;
+  } catch (err) {
+    log.error({ err }, 'capability-obligation runtime shutdown failed');
+    return err;
+  }
 }
 
 /**

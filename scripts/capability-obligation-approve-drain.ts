@@ -198,7 +198,12 @@ export function approveDrain(
   });
   const attestationDigest = attestationBindingDigest(binding);
   if (!args.confirm) return { ok: true, attestationDigest, mode };
-  const recorded = store.recordGroupDrainApproval({
+  // round-17 finding 3: record the approval AND arm the drain
+  // (waiting_approval → waiting_capability) in ONE transaction. The round-16 form
+  // did these as two separate transactions, which could leave an orphan approval
+  // row on a consume failure. `recordAndConsumeGroupDrainApproval` rolls both back
+  // together, so there is no partial-approval window.
+  const result = store.recordAndConsumeGroupDrainApproval({
     obligationId: args.obligationId,
     destinationJid: obligation.deliveryJid,
     releaseSha: args.releaseSha,
@@ -208,26 +213,11 @@ export function approveDrain(
     approver: args.approver,
     validForSeconds: args.validForSeconds,
   });
-  if (!recorded.recorded) return { ok: false, reason: recorded.reason, attestationDigest, mode };
-  // blocker-2 (round 16): drive the SOLE waiting_approval → waiting_capability
-  // transition (store.consumeGroupDrainApproval) with the same live facts + digest
-  // the approval was cut for. Recording the approval row alone leaves the group
-  // PARKED — this is the missing supported operational path. One operator command
-  // now arms the drain to `waiting_capability`.
-  const consumed = store.consumeGroupDrainApproval(args.obligationId, {
-    destinationJid: obligation.deliveryJid,
-    releaseSha: args.releaseSha,
-    manifestDigest: args.manifestDigest,
-    drainRunId: args.drainRunId,
-    attestationDigest,
-  });
+  if (!result.ok) return { ok: false, reason: result.reason, attestationDigest, mode };
   const currentState = (db.raw
     .prepare('SELECT state FROM capability_obligations WHERE id = ?')
     .get(args.obligationId) as { state: string }).state;
-  if (!consumed.applied) {
-    return { ok: false, reason: `approval_recorded_but_not_consumed:${consumed.reason ?? 'unknown'}`, attestationDigest, approvalId: recorded.approvalId, consumed: false, currentState, mode };
-  }
-  return { ok: true, attestationDigest, approvalId: recorded.approvalId, consumed: true, currentState, mode };
+  return { ok: true, attestationDigest, approvalId: result.approvalId, consumed: true, currentState, mode };
 }
 
 export function runApproveDrain(args: ApproveDrainArgs, io: ApproveDrainIo): number {

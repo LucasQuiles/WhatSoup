@@ -731,6 +731,56 @@ mutate only with `--confirm`), and routes cancel/requeue through the SAME guarde
 machine as the runtime (a `claimed` in-flight obligation is never operator-mutated). Every
 action records an `operator` audit event carrying the `--run-id` actor and `--idempotency-key`.
 
+**Readiness attestation producer (`scripts/capability-obligation-attest.ts`).** The supervisor
+claims nothing without an admissible D5 attestation, and the recording core had no caller until
+this front-door. It derives the live binding, runs a bounded NON-SENDING resolver canary, and
+records ONE attestation iff the canary passes. Recording is fail-closed on three observations
+(round-16, hardened round-17): (a) the binding's media root must be a readable directory; (b)
+`--resolver-digest` is REQUIRED and the command VERIFIES the resolver **script** — it locates the
+script inside `execution.command` (skipping a leading interpreter and its benign flags), sha256s
+it, and refuses a code-loading flag (`-e`/`--require`/`--import`/`--loader`), a bare name with no
+path, an unreadable artifact, or any digest mismatch (it never hashes the interpreter and never
+soft-passes an unverified resolver — the round-16 fail-opens finding 2 closed); (c) the probe
+evidence (stdout/stderr digests + byte counts + exit/signal + observed-source digest) is written to
+a `--receipt-out` file that is **fsynced and read-back-verified BEFORE the attestation row is
+admitted** — so an admissible row IMPLIES its receipt was durably persisted first (finding 1). The
+receipt records probe evidence only and does NOT assert admission (admission = the row carrying the
+run's `nonce`). NARROW CLAIM: a passing canary attests only that the verified resolver, run against
+`sha256(probeSource)`, exited 0 within bound and produced ≥ `minOutputBytes` — it is NOT proof of
+semantic processing; the fulfillment proof stays the D6 receipt + delivery chain. The attestation
+ROW has **no probe-evidence columns**: adding them needs migration 58, which bumps
+`CURRENT_SCHEMA_MIGRATION` *inside the attestation binding* — invalidating every computed digest and
+reopening AS-01 — so the evidence lives in the receipt file, correlated by `nonce`, as a deliberate
+deferral. (Design-spec deviation of record: the pinned Phase-2 spec §3.3 lists these as attestation
+row fields; migration-57 realizes them as the correlated receipt instead. Not an oversight — the
+spec's row-storage form is graduated with migration 58.)
+
+**Group-drain approval is atomic.** `scripts/capability-obligation-approve-drain.ts` records the
+AS-08 approval AND drives the sole `waiting_approval → waiting_capability` transition in ONE store
+transaction (`recordAndConsumeGroupDrainApproval`, round-17 finding 3): a failure rolls back both
+the approval row and the state flip, so there is no orphan-approval window. "Armed" is still not
+"will drain" — the claim additionally requires a fresh admissible attestation.
+
+**Cold-obligation activation is NOT wired (owner-gated acceptance limitation).**
+`src/runtimes/agent/capability-obligation-drain-now.ts` (`drainObligationNow`) is the gated
+activation core — it activates ONE named `waiting_capability` obligation's per-chat session and runs
+one tick, fail-closed, refusing a group without a live AS-08 approval — but its `activateSession`
+port has **no live adapter and no operator trigger**. Activating a real group session is the
+AE1-sensitive act (a resumed group session can emit unsolicited messages bypassing the sibling
+filter), so the adapter is left for an owner-authorized change with its own review. Until it lands,
+the incident obligations are **not operationally drainable after a cold deploy** — the named
+acceptance blocker that keeps the feature not-yet-releasable regardless of green tests. Operator
+procedures: `docs/runbooks/capability-obligation-operator.md`.
+
+**Verification-harness bound.** The full-suite battery runs under an externally bounded runner
+(`scripts/full-suite-battery.ts`), which spawns vitest as a detached PROCESS GROUP with a hard
+wall-clock bound and SIGKILLs the whole group on timeout. This exists because a synchronous
+fixture `execFileSync('git', …)` (a starved `git hash-object` on `index.lock` under load) once
+wedged a worker for ~72 minutes: vitest's async per-test timeout structurally cannot interrupt a
+blocking synchronous call, so a hung fixture produced no truthful completion signal. The bound
+converts that silent wedge into a fast, truthful non-zero exit (code 124) without a per-fixture
+change.
+
 **Backfill and AS-01 rehearsal (both owner-gated).**
 `scripts/capability-obligation-backfill-manifest.ts` is READ-ONLY: from reviewer-confirmed
 source identities it emits a digest-addressed manifest of the historical obligations that

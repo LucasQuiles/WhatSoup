@@ -812,6 +812,104 @@ export class CapabilityObligationStore {
     });
   }
 
+  /**
+   * Round-17 finding 3: record the group-drain approval AND consume it (arm the
+   * drain to `waiting_capability`) in ONE transaction. The round-16 operator CLI
+   * did these as two separate `withTransaction` calls (`recordGroupDrainApproval`
+   * then `consumeGroupDrainApproval`); a failure between them left an unused
+   * approval row behind (an orphan authorization). Here the INSERT and the state
+   * flip share a single `withTransaction`, so any failure rolls BOTH back — there
+   * is no partial-approval window by construction. The separate methods remain for
+   * the cold-drain path, which consumes at drain time, not approval time.
+   */
+  recordAndConsumeGroupDrainApproval(params: {
+    obligationId: number;
+    destinationJid: string;
+    releaseSha: string;
+    manifestDigest: string;
+    drainRunId: string;
+    attestationDigest: string;
+    approver: string;
+    validForSeconds: number;
+  }): { ok: boolean; approvalId?: number; reason?: 'not_a_waiting_group' | 'destination_mismatch' | 'consume_failed' } {
+    return withTransaction(this.db, () => {
+      const o = this.db.raw
+        .prepare('SELECT is_group AS isGroup, state, delivery_jid AS deliveryJid FROM capability_obligations WHERE id = ?')
+        .get(params.obligationId) as { isGroup: number; state: string; deliveryJid: string } | undefined;
+      if (o === undefined || o.isGroup !== 1 || o.state !== 'waiting_approval') {
+        return { ok: false as const, reason: 'not_a_waiting_group' as const };
+      }
+      if (o.deliveryJid !== params.destinationJid) {
+        return { ok: false as const, reason: 'destination_mismatch' as const };
+      }
+      const inserted = this.db.raw
+        .prepare(
+          `INSERT INTO capability_drain_approvals
+             (obligation_id, destination_jid, scope, release_sha, attestation_digest,
+              manifest_digest, drain_run_id, approver, approved_at, expires_at)
+           VALUES (?, ?, 'group', ?, ?, ?, ?, ?, datetime('now'),
+                   datetime('now', '+' || CAST(? AS INTEGER) || ' seconds'))`,
+        )
+        .run(
+          params.obligationId,
+          params.destinationJid,
+          params.releaseSha,
+          params.attestationDigest,
+          params.manifestDigest,
+          params.drainRunId,
+          params.approver,
+          params.validForSeconds,
+        );
+      const approvalId = Number(inserted.lastInsertRowid);
+      this.appendEventWithinCallerTransaction(
+        {
+          action: 'approval.record',
+          actorType: 'operator',
+          actorId: params.approver,
+          reasonCode: 'group_drain_approved',
+          detail: { approvalId, drainRunId: params.drainRunId },
+        },
+        params.obligationId,
+      );
+      // Consume immediately with the SAME live facts the approval was cut for, within
+      // this transaction. The schema trigger requires `drain_approval_id`; we already
+      // hold the freshly-inserted id, so no re-SELECT is needed. If the flip does not
+      // apply the whole transaction rolls back (throw) — no orphan approval.
+      const flipped = this.db.raw
+        .prepare(
+          `UPDATE capability_obligations
+           SET state = 'waiting_capability', drain_approval_id = ?,
+               drain_release_sha = ?, drain_manifest_digest = ?,
+               drain_run_id = ?, drain_attestation_digest = ?,
+               updated_at = datetime('now')
+           WHERE id = ? AND state = 'waiting_approval'
+           RETURNING id`,
+        )
+        .get(
+          approvalId,
+          params.releaseSha,
+          params.manifestDigest,
+          params.drainRunId,
+          params.attestationDigest,
+          params.obligationId,
+        );
+      if (flipped === undefined) {
+        // Cannot happen under the checks above, but fail CLOSED: rolling back the INSERT.
+        throw new Error('recordAndConsumeGroupDrainApproval: consume did not apply within the atomic transaction');
+      }
+      this.appendEventWithinCallerTransaction(
+        {
+          action: 'obligation.re_arm',
+          actorType: 'operator',
+          reasonCode: 'group_drain_approved',
+          detail: { approvalId, drainRunId: params.drainRunId },
+        },
+        params.obligationId,
+      );
+      return { ok: true as const, approvalId };
+    });
+  }
+
   listClaimedObligations(): Array<{
     id: number;
     claimToken: string;

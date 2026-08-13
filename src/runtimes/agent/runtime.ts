@@ -3,7 +3,7 @@
 
 import type { AgentCommandRequest, AgentCommandResult, Runtime, RuntimeTurnCapabilityHealth } from '../types.ts';
 import type { ContentType, IncomingMessage, Messenger, RuntimeHealth } from '../../core/types.ts';
-import { CURRENT_SCHEMA_MIGRATION, type Database } from '../../core/database.ts';
+import type { Database } from '../../core/database.ts';
 import type {
   DurabilityEngine,
   SessionCheckpointRow,
@@ -246,7 +246,7 @@ import {
   QueuedDecisionConsumer,
 } from './pending-poll-health.ts';
 import { HandoffDistillCoordinator } from './handoff-distill-coordinator.ts';
-import { activateCapabilityObligationRuntime, buildObligationLiveFacts, CapabilityObligationRuntime, dispatchCapabilityObligationTurnViaSession, servingProviderId, turnCorrelationFromContexts } from './capability-obligation-runtime.ts';
+import { CapabilityObligationRuntime, maybeActivateCapabilityObligationRuntime, shutdownCapabilityObligationRuntimeSafely } from './capability-obligation-runtime.ts';
 import { handoffDistillerEnabled, handoffContextEnabled, handoffDistillModel } from './handoff-distill-config.ts';
 import { config } from '../../config.ts';
 import type { StartupNotificationEvent } from '../../core/startup-notification-controller.ts';
@@ -2713,8 +2713,7 @@ export class AgentRuntime implements Runtime {
       set singleTurnHadToolActivity(value) { runtime.singleTurnHadToolActivity = value; },
       get isFallbackWindowActive() { return runtime.isFallbackWindowActive; },
       managerIdFor: (session) => runtime.managerIdFor(session),
-      deriveCapabilityDecision: (context, session) =>
-        runtime.capabilityObligationRuntime?.deriveCapabilityDecision(context, session) ?? Promise.resolve(undefined),
+      deriveCapabilityDecision: (context, session) => runtime.capabilityObligationRuntime?.deriveCapabilityDecision(context, session) ?? Promise.resolve(undefined),
       isShuttingDown: () => runtime.shutdownRequested,
       getActiveQueue: () => runtime.getActiveQueue(),
       getQueueForChat: (chatJid, mapKey) => runtime.getQueueForChat(chatJid, mapKey),
@@ -2850,38 +2849,16 @@ export class AgentRuntime implements Runtime {
     this.turnRecoverySupervisor.start(); // PRESTAGE-T4; idempotent
     this.turnRecoveryDeadman.start();
 
-    // Obligation replay: opt-in, per_chat only; != null keeps ABSENT fields inert.
-    if (
-      config.capabilityObligations != null
-      && this.sessionScope === 'per_chat'
-      && this.capabilityObligationRuntime === null
-    ) {
-      this.registry.setTurnCorrelationResolver((ck) => turnCorrelationFromContexts(this.perChatRuntimeTurnContexts, ck));
-      this.capabilityObligationRuntime = activateCapabilityObligationRuntime({
-        db: this.db,
-        store: engine.capabilityObligations,
-        options: config.capabilityObligations,
-        // r14 F3 — resolve the serving target ONCE (see prepareDispatch dep doc);
-        // null target fails closed (sentinel provider → admission skips).
-        prepareDispatch: (obligation) => {
-          const target = this.resolvePerChatDispatchTarget(obligation.deliveryJid);
-          const facts = buildObligationLiveFacts(servingProviderId(target?.session as SessionManager | undefined));
-          if (!target) return { facts, dispatch: null };
-          return { facts, dispatch: (mintedMessageId, mintedSeq) => dispatchCapabilityObligationTurnViaSession(
-            this.runtimeTurnCoordinator, target,
-            (sess) => this.requireSessionToolScopeKey(sess),
-            (t) => this.isTurnRecoveryDispatchTargetCurrent(t),
-            obligation, mintedMessageId, mintedSeq,
-          ) };
-        },
-        getDurability: () => this.durability,
-        resolveMapKey: (jid) => this.resolvePerChatMapKey(jid),
-        externalEffectFor: (name) => this.registry.externalEffectDeclaration(name),
-        writeLossSince: (ms) => this.registry.hadDurabilityWriteLossSince(ms),
-        registerTool: (tool) => this.registry.register(tool),
-        turnIdFor: (ck) => turnCorrelationFromContexts(this.perChatRuntimeTurnContexts, ck)?.logicalTurnId ?? null,
-      });
-    }
+    // Obligation replay: opt-in, per_chat only; the helper keeps ABSENT fields inert.
+    this.capabilityObligationRuntime = maybeActivateCapabilityObligationRuntime({
+      enabled: this.sessionScope === 'per_chat', alreadyActive: this.capabilityObligationRuntime !== null,
+      options: config.capabilityObligations, db: this.db, store: engine.capabilityObligations, registry: this.registry,
+      getDurability: () => this.durability, resolveMapKey: (jid) => this.resolvePerChatMapKey(jid),
+      perChatTurnContexts: () => this.perChatRuntimeTurnContexts, turnCoordinator: this.runtimeTurnCoordinator,
+      resolveDispatchTarget: (jid) => this.resolvePerChatDispatchTarget(jid),
+      requireSessionToolScopeKey: (sess) => this.requireSessionToolScopeKey(sess),
+      isDispatchTargetCurrent: (t) => this.isTurnRecoveryDispatchTargetCurrent(t),
+    }) ?? this.capabilityObligationRuntime;
   }
 
   /**
@@ -6924,12 +6901,8 @@ export class AgentRuntime implements Runtime {
     }
     const trErr = await shutdownTurnRecoverySupervisorSafely(this.turnRecoverySupervisor);
     if (trErr) shutdownFailures.push(trErr);
-    try {
-      await this.capabilityObligationRuntime?.shutdown();
-    } catch (err) {
-      shutdownFailures.push(err);
-      log.error({ err }, 'capability-obligation runtime shutdown failed');
-    }
+    const coErr = await shutdownCapabilityObligationRuntimeSafely(this.capabilityObligationRuntime);
+    if (coErr) shutdownFailures.push(coErr);
     try {
       await this.runtimeTurnCoordinator.awaitUndispatchedCrashFinalizations();
     } catch (err) {

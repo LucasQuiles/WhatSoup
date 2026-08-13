@@ -32,17 +32,23 @@ non-sending resolver canary passes.
 
 - **Dry run (default):** derives the binding + digest, records nothing. With `--config` it
   additionally proves the binding matches the instance config.
-- **Record:** `--run-canary --confirm --config PATH --probe-source SOURCE --receipt-out PATH`.
+- **Record:** `--run-canary --confirm --config PATH --probe-source SOURCE --receipt-out PATH --resolver-digest DIGEST`.
 
-Before recording, the command is **fail-closed** on three observations:
+Before recording, the command is **fail-closed** on three observations (hardened round 17):
 
 1. **media-root readability** — refuses unless the binding's media root is a readable directory.
-2. **installed-artifact observation** — sha256s `execution.command[0]` and refuses on a
-   mismatch with the declared `--resolver-digest`. It never silently trusts the declared
-   digest; a bare PATH binary is recorded `resolver_artifact_observed: false` (not verified).
-3. **evidence preservation** — the probe's stdout/stderr digests + byte counts + exit/signal
-   + observed-source digest are written to the `--receipt-out` file; `--run-canary` refuses
-   without it.
+2. **resolver-artifact verification (mandatory)** — `--resolver-digest` is REQUIRED and the
+   command sha256s the resolver **script**, not the interpreter: it locates the script within
+   `execution.command` (skipping a leading `node`/`python`/… interpreter and its benign flags),
+   and **refuses** a code-loading flag (`-e`, `--require`, `--import`, `--loader`, …), a bare
+   name with no path, an unreadable artifact, or any digest mismatch. There is no soft
+   "observed:false" pass — an unverifiable resolver is refused, never admitted.
+3. **evidence preservation, durable before admission** — the probe's stdout/stderr digests +
+   byte counts + exit/signal + observed-source digest are written to the `--receipt-out` file,
+   which is **fsynced and read-back-verified BEFORE the attestation row is admitted**. If the
+   receipt cannot be made durable, no attestation row is committed (round-17 finding 1). The
+   receipt records probe evidence only; it does not assert admission (admission = the
+   `capability_attestations` row carrying this run's `nonce`).
 
 The canary also owns a **process group** (`detached`) and SIGKILLs it on timeout AND on clean
 exit, so a resolver that forks a grandchild (yt-dlp → ffmpeg) cannot leave it to land a side
@@ -63,8 +69,10 @@ receipt + the normal-delivery chain, not the canary.
 
 Group obligations sit in `waiting_approval` until a destination-specific, digest-bound owner
 approval (AS-08). This command records the approval AND drives the sole
-`waiting_approval → waiting_capability` transition (`consumeGroupDrainApproval`) so **one
-operator action arms the drain**. Dry run (default) records nothing.
+`waiting_approval → waiting_capability` transition in **one atomic store transaction**
+(`recordAndConsumeGroupDrainApproval`, round-17 finding 3) so one operator action arms the
+drain with **no orphan-approval window** — a failure rolls back both the approval row and the
+state flip together. Dry run (default) records nothing.
 
 ```
 capability-obligation-approve-drain --db PATH --obligation-id N --release-sha SHA \

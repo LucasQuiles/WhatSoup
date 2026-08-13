@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { findAdmissibleAttestation } from '../../src/core/capability-attestation.ts';
+import { attestationBindingDigest, findAdmissibleAttestation } from '../../src/core/capability-attestation.ts';
 import { parseCapabilityObligationsOptions, type CapabilityObligationsOptions } from '../../src/core/capability-contract.ts';
 import { Database } from '../../src/core/database.ts';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
@@ -225,11 +225,15 @@ describe('capability-obligation-attest CLI (the operator front-door records end-
    * recording). Proves that `--run-canary --confirm --config --probe-source`
    * executes the config's resolver canary and writes an admissible attestation.
    */
-  // The resolver artifact the canary observes is the node binary itself (command[0]);
-  // the config + CLI declare its REAL digest so artifact observation VERIFIES.
-  const NODE_DIGEST = createHash('sha256').update(readFileSync(process.execPath)).digest('hex');
+  // Round-17 finding 2: the resolver is a real installed SCRIPT; the config + CLI
+  // declare the SCRIPT's digest, and artifact observation hashes the SCRIPT — never the
+  // node interpreter. (`node -e '<inline>'` has no artifact and is correctly unattestable.)
+  const RESOLVER_SRC = 'const s = process.argv[2]; process.stdout.write("processed:" + s);\n';
+  const RESOLVER_DIGEST = createHash('sha256').update(RESOLVER_SRC).digest('hex');
 
-  function writeConfig(dir: string, over: { mediaRoot?: string; resolverDigest?: string } = {}): string {
+  function writeConfig(dir: string, over: { mediaRoot?: string; resolverDigest?: string; command?: readonly string[] } = {}): string {
+    const resolverPath = join(dir, 'resolver.cjs');
+    writeFileSync(resolverPath, RESOLVER_SRC);
     const configFile = join(dir, 'instance.json');
     writeFileSync(configFile, JSON.stringify({
       agentOptions: {
@@ -240,11 +244,11 @@ describe('capability-obligation-attest CLI (the operator front-door records end-
           retentionPolicyVersion: 'ret/1',
           retentionHorizonDays: 30,
           execution: {
-            command: [process.execPath, '-e', 'process.stdout.write("processed:" + process.argv[1])', '{source}'],
+            command: over.command ?? [process.execPath, resolverPath, '{source}'],
             timeoutMs: 10_000, minOutputBytes: 5,
           },
           attestation: {
-            skillName: 'watch', skillVersion: '1.0.0', skillDigest: 'sd', resolverDigest: over.resolverDigest ?? NODE_DIGEST,
+            skillName: 'watch', skillVersion: '1.0.0', skillDigest: 'sd', resolverDigest: over.resolverDigest ?? RESOLVER_DIGEST,
             dependencyVersions: { 'yt-dlp': '2026.03.17' }, probeVersion: 'p/1', canaryId: 'can-1',
           },
         },
@@ -261,7 +265,7 @@ describe('capability-obligation-attest CLI (the operator front-door records end-
     return dbFile;
   }
 
-  function runCli(dbFile: string, configFile: string, mediaRoot: string, extra: readonly string[] = [], resolverDigest = NODE_DIGEST): ReturnType<typeof spawnSync> {
+  function runCli(dbFile: string, configFile: string, mediaRoot: string, extra: readonly string[] = [], resolverDigest = RESOLVER_DIGEST): ReturnType<typeof spawnSync> {
     const cliArgs = [
       '--db', dbFile, '--provider', 'claude-cli', '--contract-version', 'c/1', '--capability', 'child_process_tools',
       '--skill-name', 'watch', '--skill-version', '1.0.0', '--skill-digest', 'sd', '--resolver-digest', resolverDigest,
@@ -280,7 +284,7 @@ describe('capability-obligation-attest CLI (the operator front-door records end-
     const check = new Database(dbFile);
     check.open();
     try {
-      const a = args({ dbPath: dbFile, hostId: 'test-host', runtimeUser: 'test-user', mediaRoot, skill: { ...args().skill, resolverDigest: NODE_DIGEST } });
+      const a = args({ dbPath: dbFile, hostId: 'test-host', runtimeUser: 'test-user', mediaRoot, skill: { ...args().skill, resolverDigest: RESOLVER_DIGEST } });
       return (findAdmissibleAttestation(check, bindingForAttestArgs(a)) as { outcome: string }).outcome;
     } finally {
       check.close();
@@ -296,17 +300,46 @@ describe('capability-obligation-attest CLI (the operator front-door records end-
     expect(result.status, `stderr: ${result.stderr}`).toBe(0);
     expect(result.stdout).toMatch(/RECORDED attest child_process_tools/);
     expect(admissibleOutcome(dbFile, dir)).toBe('admissible');
-    // Evidence preserved: the receipt carries the probe streams' digests + observed artifact.
+    // Evidence preserved: the receipt carries the probe streams' digests + verified artifact.
     expect(existsSync(receiptOut)).toBe(true);
     const receipt = JSON.parse(readFileSync(receiptOut, 'utf8')) as Record<string, unknown>;
-    expect(receipt).toMatchObject({ recorded: true, resolverArtifact: { observed: true, verified: true } });
+    // Round-17: the receipt records probe evidence, does NOT assert admission, and is digest-bound.
+    expect(receipt).toMatchObject({ canaryResult: 'pass', resolverArtifact: { observed: true, verified: true } });
     expect((receipt.canary as { detail: { stdoutSha256: string; stderrSha256: string; probeSourceDigest: string } }).detail.probeSourceDigest).toEqual(expect.any(String));
+    // digest-bound: the receipt's binding digest equals the digest recomputable from the binding (the "digest-bound" half of finding 1)
+    const boundArgs = args({ dbPath: dbFile, hostId: 'test-host', runtimeUser: 'test-user', mediaRoot: dir, skill: { ...args().skill, resolverDigest: RESOLVER_DIGEST } });
+    expect(receipt.attestationBindingDigest).toBe(attestationBindingDigest(bindingForAttestArgs(boundArgs)));
+    expect(receipt.nonce).toBe('run-1');
+  }, 30_000);
+
+  it('FALSIFIER (finding 1): an UNWRITABLE --receipt-out refuses AND admits nothing (receipt durable before admission)', () => {
+    const dir = tmp.make('badreceipt');
+    const dbFile = seedSchemaCurrentDb(dir);
+    const configFile = writeConfig(dir);
+    const receiptOut = join(dir, 'no-such-subdir', 'r.json'); // parent dir does not exist → unwritable
+    const result = runCli(dbFile, configFile, dir, ['--run-canary', '--confirm', '--probe-source', 'https://probe.example/clip', '--receipt-out', receiptOut]);
+    expect(result.status).not.toBe(0);
+    expect(existsSync(receiptOut)).toBe(false);
+    expect(admissibleOutcome(dbFile, dir)).toBe('skip'); // ZERO admissible rows — no fail-open row without a durable receipt
+  }, 30_000);
+
+  it('FALSIFIER (finding 2): a config resolver that LOADS CODE via -e refuses AND admits nothing (never hashes the interpreter)', () => {
+    const dir = tmp.make('codeflag');
+    const dbFile = seedSchemaCurrentDb(dir);
+    // The old defect: `node -e '<inline>'` with the node binary's digest declared "verified".
+    const configFile = writeConfig(dir, { command: [process.execPath, '-e', 'process.stdout.write("processed:x")', '{source}'] });
+    const receiptOut = join(dir, 'r.json');
+    const result = runCli(dbFile, configFile, dir, ['--run-canary', '--confirm', '--probe-source', 'https://probe.example/clip', '--receipt-out', receiptOut]);
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/loads code via -e/);
+    expect(existsSync(receiptOut)).toBe(false);
+    expect(admissibleOutcome(dbFile, dir)).toBe('skip');
   }, 30_000);
 
   it('FALSIFIER: an installed-resolver digest MISMATCH refuses to record (never trusts the declared digest)', () => {
     const dir = tmp.make('mismatch');
     const dbFile = seedSchemaCurrentDb(dir);
-    // config + CLI both declare a WRONG resolver digest; observation of the real node binary fails.
+    // config + CLI both declare a WRONG resolver digest; observation of the real resolver script fails.
     const configFile = writeConfig(dir, { resolverDigest: 'de'.repeat(32) });
     const receiptOut = join(dir, 'r.json');
     const result = runCli(dbFile, configFile, dir, ['--run-canary', '--confirm', '--probe-source', 'https://probe.example/clip', '--receipt-out', receiptOut], 'de'.repeat(32));
@@ -356,18 +389,57 @@ describe('capability-obligation-attest CLI (the operator front-door records end-
   }, 30_000);
 });
 
-describe('observeResolverArtifact + assertMediaRootReadable (round-16 fail-closed observations)', () => {
-  it('observes a real file artifact and VERIFIES a matching declared digest', () => {
-    const digest = createHash('sha256').update(readFileSync(process.execPath)).digest('hex');
-    expect(observeResolverArtifact(process.execPath, digest)).toEqual({ observed: true, digest, declaredDigest: digest, verified: true });
+describe('observeResolverArtifact (round-17 mandatory resolver-script verification)', () => {
+  function writeScript(name: string): { path: string; digest: string } {
+    const dir = tmp.make('obs');
+    const path = join(dir, name);
+    writeFileSync(path, 'process.stdout.write("ok")\n');
+    return { path, digest: createHash('sha256').update(readFileSync(path)).digest('hex') };
+  }
+
+  it('hashes the SCRIPT after an interpreter (never the interpreter) and VERIFIES a matching digest', () => {
+    const { path, digest } = writeScript('r.cjs');
+    expect(observeResolverArtifact([process.execPath, path, '{source}'], digest))
+      .toMatchObject({ observed: true, verified: true, digest, artifactPath: path });
   });
 
-  it('FALSIFIER: a real file artifact whose declared digest MISMATCHES throws', () => {
-    expect(() => observeResolverArtifact(process.execPath, 'ab'.repeat(32))).toThrow(/does not match declared/);
+  it('verifies a direct-path resolver where command[0] IS the artifact', () => {
+    const { path, digest } = writeScript('r');
+    expect(observeResolverArtifact([path, '{source}'], digest)).toMatchObject({ verified: true, artifactPath: path });
   });
 
-  it('records observed:false for a bare PATH binary (cannot be hashed here) — never fabricates a match', () => {
-    expect(observeResolverArtifact('yt-dlp', 'ab'.repeat(32))).toEqual({ observed: false, digest: null, declaredDigest: 'ab'.repeat(32), verified: false });
+  it('skips a benign interpreter flag (--experimental-strip-types) and finds the script', () => {
+    const { path, digest } = writeScript('r.ts');
+    expect(observeResolverArtifact([process.execPath, '--experimental-strip-types', path], digest))
+      .toMatchObject({ verified: true, artifactPath: path });
+  });
+
+  it('consumes `env` and VAR=val before the interpreter', () => {
+    const { path, digest } = writeScript('r.cjs');
+    expect(observeResolverArtifact(['/usr/bin/env', 'FOO=bar', 'node', path], digest))
+      .toMatchObject({ verified: true, artifactPath: path });
+  });
+
+  it('FALSIFIER: a MISMATCHED declared digest throws', () => {
+    const { path } = writeScript('r.cjs');
+    expect(() => observeResolverArtifact([process.execPath, path, '{source}'], 'ab'.repeat(32))).toThrow(/does not match declared/);
+  });
+
+  it('FALSIFIER: a null/empty declared digest throws (verification is mandatory)', () => {
+    expect(() => observeResolverArtifact([process.execPath, '/x/r.cjs'], null)).toThrow(/--resolver-digest is required/);
+  });
+
+  it('FALSIFIER: a bare binary with no path throws (cannot locate the artifact to verify)', () => {
+    expect(() => observeResolverArtifact(['yt-dlp', '{source}'], 'ab'.repeat(32))).toThrow(/bare name with no path/);
+  });
+
+  it('FALSIFIER: an inline `-e` resolver throws (code not pinned to a script — the round-16 fail-open)', () => {
+    expect(() => observeResolverArtifact([process.execPath, '-e', 'evil()', '{source}'], 'ab'.repeat(32))).toThrow(/loads code via -e/);
+  });
+
+  it('FALSIFIER: `--require /preload` throws instead of silently verifying the WRONG file (advisor gap-2)', () => {
+    expect(() => observeResolverArtifact([process.execPath, '--require', '/tmp/preload.js', '/tmp/script.js'], 'ab'.repeat(32)))
+      .toThrow(/loads code via --require/);
   });
 
   it('assertMediaRootReadable passes for a real dir and FALSIFIER-throws for a missing one', () => {

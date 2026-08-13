@@ -110,6 +110,33 @@ describe('approveDrain (operator group-drain approval)', () => {
     expect(claim.applied).toBe(true);
   });
 
+  it('finding 3: recordAndConsumeGroupDrainApproval writes the approval AND flips state in ONE transaction (no orphan window)', () => {
+    const id = seedGroupObligation();
+    const args = baseArgs(id, { confirm: true });
+    const digest = attestationBindingDigest(expectedBinding(args));
+    const r = store.recordAndConsumeGroupDrainApproval({
+      obligationId: id, destinationJid: GROUP_JID, releaseSha: args.releaseSha,
+      manifestDigest: args.manifestDigest, drainRunId: args.drainRunId, attestationDigest: digest,
+      approver: args.approver, validForSeconds: args.validForSeconds,
+    });
+    expect(r).toMatchObject({ ok: true, approvalId: expect.any(Number) });
+    // BOTH writes landed together: exactly one approval row AND the state flip.
+    expect((db.raw.prepare('SELECT COUNT(*) AS c FROM capability_drain_approvals').get() as { c: number }).c).toBe(1);
+    expect((db.raw.prepare('SELECT state, drain_approval_id AS a FROM capability_obligations WHERE id=?').get(id) as { state: string; a: number }))
+      .toMatchObject({ state: 'waiting_capability', a: r.approvalId });
+  });
+
+  it('FALSIFIER (finding 3): a non-waiting obligation records NEITHER an approval NOR a state change', () => {
+    const id = seedGroupObligation({ isGroup: false }); // DM, not a waiting group
+    const digest = attestationBindingDigest(expectedBinding(baseArgs(id, { confirm: true })));
+    const r = store.recordAndConsumeGroupDrainApproval({
+      obligationId: id, destinationJid: GROUP_JID, releaseSha: 'rel-live-1',
+      manifestDigest: 'md-1', drainRunId: 'drain-1', attestationDigest: digest, approver: 'owner', validForSeconds: 3600,
+    });
+    expect(r.ok).toBe(false);
+    expect((db.raw.prepare('SELECT COUNT(*) AS c FROM capability_drain_approvals').get() as { c: number }).c).toBe(0);
+  });
+
   it('dry-run reports the digest but records NO approval', () => {
     const id = seedGroupObligation();
     const result = approveDrain(store, db, baseArgs(id, { confirm: false }));
