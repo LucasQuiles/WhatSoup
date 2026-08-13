@@ -1,7 +1,14 @@
 import { clearAlertSourceChecked, emitAlertChecked } from '../../lib/emit-alert.ts';
+import {
+  clearRecoveryMarker,
+  loadRecoveryMarkers,
+  setRecoveryMarker,
+} from '../../lib/recovery-authority-store.ts';
 import { createChildLogger } from '../../logger.ts';
 
 const log = createChildLogger('provider-execution-gate');
+
+const ALERT_SOURCE = 'provider_execution_queue_pressure';
 
 export interface ProviderExecutionGateSnapshot {
   readonly active: boolean;
@@ -201,12 +208,13 @@ export class ProviderExecutionGate {
 }
 
 export function createProviderExecutionGate(instanceName: string): ProviderExecutionGate {
-  return new ProviderExecutionGate({
+  const markerKey = `${ALERT_SOURCE}:${instanceName}`;
+  const gate = new ProviderExecutionGate({
     pressureAfterMs: 30_000,
     onPressure: (snapshot) => {
-      emitAlertChecked(
+      const emitted = emitAlertChecked(
         instanceName,
-        'provider_execution_queue_pressure',
+        ALERT_SOURCE,
         'OpenCode execution queue has waited at least 30 seconds',
         [
           'provider=opencode-cli',
@@ -226,6 +234,15 @@ export function createProviderExecutionGate(instanceName: string): ProviderExecu
         ].join('\n'),
         'warning',
       );
+      if (emitted) {
+        try {
+          setRecoveryMarker(markerKey);
+        } catch {
+          // intentional: marker write is best-effort — the alert itself was
+          // already durably queued above; a missing marker only means the next
+          // cold-start reconcile cannot clear this source without a drain.
+        }
+      }
     },
     onRecovered: (snapshot) => {
       log.info({
@@ -236,9 +253,34 @@ export function createProviderExecutionGate(instanceName: string): ProviderExecu
         lastWaitMs: snapshot.lastWaitMs,
         abortedWaits: snapshot.abortedWaits,
       }, 'OpenCode execution queue pressure recovered');
-      clearAlertSourceChecked(instanceName, 'provider_execution_queue_pressure');
+      if (clearAlertSourceChecked(instanceName, ALERT_SOURCE)) {
+        try {
+          clearRecoveryMarker(markerKey);
+        } catch {
+          // intentional: marker removal is best-effort — a stale marker only
+          // causes a redundant idempotent clear on the next cold-start
+          // reconcile.
+        }
+      }
     },
   });
+  // #2394 (source 4): a just-constructed gate is verifiably idle (no holder,
+  // no waiters), which the issue contract treats as recovery authority for a
+  // prior-process pressure incident. Reconcile any marker left by process A —
+  // without this, a restart into an idle lane that never receives another
+  // turn would leave the durable incident open forever. Positive-proof rule:
+  // clear only on a present marker, and keep the marker when the clear is not
+  // durably accepted so the next startup retries the idempotent clear.
+  try {
+    if (loadRecoveryMarkers().has(markerKey)
+      && clearAlertSourceChecked(instanceName, ALERT_SOURCE, 'startup idle-gate reconcile (#2394 source 4)')) {
+      clearRecoveryMarker(markerKey);
+    }
+  } catch {
+    // intentional: marker file unreadable — skip reconcile; the first
+    // same-process drain still clears via onRecovered above.
+  }
+  return gate;
 }
 
 function normalizeWorkIdentity(
