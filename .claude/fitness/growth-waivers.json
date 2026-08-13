@@ -41,6 +41,15 @@
       "grantedAt": "2026-08-12",
       "expiresAt": "2026-08-26",
       "admitsNewIdentities": true
+    },
+    {
+      "path": ".claude/fitness/tmpdir-baseline.json",
+      "maxWeight": 7,
+      "reason": "Identity-relocation authorization for the #2322 L2 sun_path guard: the grandfathered imsg-port rendezvous-default entry moves (line 69 -> 72, snippet re-shaped) because the length guard and its rendezvous-contract annotation are inserted above it. Weight pinned at the exact current count 7 — the single relocated identity is authorized, growth is not. The underlying debt remains tracked by #2632.",
+      "issue": "https://github.com/LucasQuiles/WhatSoup/issues/2322",
+      "grantedAt": "2026-08-13",
+      "expiresAt": "2026-08-27",
+      "admitsNewIdentities": true
     }
   ]
 }
