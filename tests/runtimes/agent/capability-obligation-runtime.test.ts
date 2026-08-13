@@ -98,8 +98,8 @@ afterEach(() => {
   db.close();
 });
 
-function freshAttestation(): void {
-  recordCapabilityAttestation(db, {
+function freshAttestation(): number {
+  return recordCapabilityAttestation(db, {
     ...LIVE_FACTS,
     contractVersion: 'test-contract/1',
     capability: 'child_process_tools',
@@ -736,8 +736,9 @@ describe('evidence port (D6/D7)', () => {
     db.raw
       .prepare("UPDATE capability_obligations SET claim_expires_at = datetime('now','-5 seconds') WHERE id = ?")
       .run(accepted);
-    // Claim the second WITHOUT journaling (simulate crash before journal).
-    const claim = store.claimObligation(unaccepted, { claimToken: 'tok-u', leaseSeconds: 300 });
+    // Claim the second WITHOUT journaling (simulate crash before journal). r15 F4 —
+    // a claim needs a still-admissible attestation id (freshAttestation records one).
+    const claim = store.claimObligation(unaccepted, { claimToken: 'tok-u', leaseSeconds: 300, admissionAttestationId: freshAttestation() });
     expect(claim.applied).toBe(true);
     db.raw
       .prepare("UPDATE capability_obligations SET claim_expires_at = datetime('now','-5 seconds') WHERE id = ?")

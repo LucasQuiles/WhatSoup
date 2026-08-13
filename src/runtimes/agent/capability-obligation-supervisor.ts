@@ -271,6 +271,9 @@ export class CapabilityObligationSupervisor {
       const claim = this.store.claimObligation(due.id, {
         claimToken,
         leaseSeconds: this.leaseSeconds,
+        // r15 F4 — the EXACT admitted attestation row must still be admissible in
+        // the claim transaction (revocation/expiry during the media-verify await).
+        admissionAttestationId: admission.attestationId,
         admissionAttestationDigest: attestationBindingDigest(prepared.binding),
       });
       if (!claim.applied) continue; // lost the race — another scanner owns it

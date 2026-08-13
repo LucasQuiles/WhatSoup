@@ -74,8 +74,25 @@ function seedObligation(over: Partial<Record<string, unknown>> = {}): number {
   return id;
 }
 
+let attSeq = 0;
+/** Record a passing, unrevoked attestation and return its id (r15 F4). expires_at
+ * is immutable by trigger, so an expired attestation must be recorded expired. */
+function seedFreshAttestation(over: { expiresAt?: string } = {}): number {
+  return recordCapabilityAttestation(db, {
+    hostId: 'h', runtimeUser: 'u', releaseSha: 'r', schemaVersion: 57,
+    providerId: 'claude-cli', harnessType: 'persistent_session', contractVersion: 'c/1',
+    capability: 'child_process_tools', skillName: 'watch', skillVersion: '1.0.0',
+    skillDigest: 'sd', resolverDigest: 'rd', dependencyVersions: {}, probeVersion: 'p/1',
+    canaryId: 'can', mediaRoot: '/var/media',
+    canaryResult: 'pass', nonce: `att-${++attSeq}`,
+    attestedAt: new Date().toISOString(),
+    expiresAt: over.expiresAt ?? new Date(Date.now() + 3600_000).toISOString(),
+  });
+}
+
 function claimIt(id: number): { claimToken: string; claimEpoch: number; attemptCount: number } {
-  const claim = store.claimObligation(id, { claimToken: `tok-${id}`, leaseSeconds: 300 });
+  // r15 F4 — a claim now requires a still-admissible attestation id.
+  const claim = store.claimObligation(id, { claimToken: `tok-${id}`, leaseSeconds: 300, admissionAttestationId: seedFreshAttestation() });
   expect(claim.applied).toBe(true);
   if (!claim.applied) throw new Error('unreachable');
   return { claimToken: `tok-${id}`, claimEpoch: claim.claimEpoch, attemptCount: claim.attemptCount };
@@ -363,7 +380,7 @@ describe('D7 falsifier — group drains need an exactly bound, live-matching app
     db.raw.prepare("UPDATE capability_drain_approvals SET revoked_at = datetime('now') WHERE id = ?").run(approvalId);
     // Pass the MATCHING admission digest so the ONLY thing failing the claim is the
     // revocation (not the r14 F1 absent-digest guard) — the test keeps biting r13 F3.
-    const claim = store.claimObligation(id, { claimToken: 'tok-revoked', leaseSeconds: 300, admissionAttestationDigest: LIVE.attestationDigest });
+    const claim = store.claimObligation(id, { claimToken: 'tok-revoked', leaseSeconds: 300, admissionAttestationId: seedFreshAttestation(), admissionAttestationDigest: LIVE.attestationDigest });
     expect(claim.applied).toBe(false); // revoked approval is re-checked at claim time
     expect(stateOf(id)).toBe('waiting_capability'); // nothing dispatched
   });
@@ -374,7 +391,7 @@ describe('D7 falsifier — group drains need an exactly bound, live-matching app
     expect(store.consumeGroupDrainApproval(id, LIVE).applied).toBe(true);
     // r14 F1 — the claim now also requires the admission digest to match the
     // approved drain_attestation_digest; the drain was consumed at LIVE.attestationDigest.
-    const claim = store.claimObligation(id, { claimToken: 'tok-ok', leaseSeconds: 300, admissionAttestationDigest: LIVE.attestationDigest });
+    const claim = store.claimObligation(id, { claimToken: 'tok-ok', leaseSeconds: 300, admissionAttestationId: seedFreshAttestation(), admissionAttestationDigest: LIVE.attestationDigest });
     expect(claim.applied).toBe(true);
     expect(stateOf(id)).toBe('claimed');
   });
@@ -391,6 +408,7 @@ describe('D7 falsifier — group drains need an exactly bound, live-matching app
     const claim = store.claimObligation(id, {
       claimToken: 'tok-mismatch',
       leaseSeconds: 300,
+      admissionAttestationId: seedFreshAttestation(),
       admissionAttestationDigest: 'att-digest-DIFFERENT', // a different attestation admitted
     });
     expect(claim.applied).toBe(false);
@@ -403,7 +421,7 @@ describe('D7 falsifier — group drains need an exactly bound, live-matching app
     const id = seedObligation(GROUP);
     insertApproval(id);
     expect(store.consumeGroupDrainApproval(id, LIVE).applied).toBe(true);
-    const claim = store.claimObligation(id, { claimToken: 'tok-absent', leaseSeconds: 300 });
+    const claim = store.claimObligation(id, { claimToken: 'tok-absent', leaseSeconds: 300, admissionAttestationId: seedFreshAttestation() });
     expect(claim.applied).toBe(false);
     expect(stateOf(id)).toBe('waiting_capability');
   });
@@ -426,20 +444,60 @@ describe('D7 falsifier — group drains need an exactly bound, live-matching app
     insertApproval(okId, { attestationDigest: digestOld });
     expect(store.consumeGroupDrainApproval(okId, { ...LIVE, attestationDigest: digestOld }).applied).toBe(true);
     // Admitting attestation matches the approved binding → claims.
-    expect(store.claimObligation(okId, { claimToken: 'tok-real-ok', leaseSeconds: 300, admissionAttestationDigest: digestOld }).applied).toBe(true);
+    expect(store.claimObligation(okId, { claimToken: 'tok-real-ok', leaseSeconds: 300, admissionAttestationId: seedFreshAttestation(), admissionAttestationDigest: digestOld }).applied).toBe(true);
 
     // Distinct seq/msgId so ambiguity-safe dedup does not fold this into okId.
     const badId = seedObligation({ ...GROUP, sourceInboundSeq: 3002, sourceMessageId: 'TESTMSG-BIND-2' });
     insertApproval(badId, { attestationDigest: digestOld });
     expect(store.consumeGroupDrainApproval(badId, { ...LIVE, attestationDigest: digestOld }).applied).toBe(true);
     // A release-new attestation admits instead → identity differs → refused.
-    expect(store.claimObligation(badId, { claimToken: 'tok-real-bad', leaseSeconds: 300, admissionAttestationDigest: digestNew }).applied).toBe(false);
+    expect(store.claimObligation(badId, { claimToken: 'tok-real-bad', leaseSeconds: 300, admissionAttestationId: seedFreshAttestation(), admissionAttestationDigest: digestNew }).applied).toBe(false);
     expect(stateOf(badId)).toBe('waiting_capability');
   });
 
   it('a group approval row without an attestation digest is unrepresentable', () => {
     const id = seedObligation(GROUP);
     expect(() => insertApproval(id, { attestationDigest: null })).toThrow();
+  });
+});
+
+describe('D5/D7 falsifier — atomic attestation-bound claim (r15 F4)', () => {
+  it('FALSIFIER (r15 F4): an attestation REVOKED after admission can no longer CLAIM; no attempt is consumed', () => {
+    // findAdmissibleAttestation runs BEFORE the media-verify await; a revocation
+    // during that await must be caught by the claim transaction itself. Model it:
+    // the attestation was admissible, then revoked, then the claim runs.
+    const id = seedObligation(); // non-group, waiting_capability
+    const attId = seedFreshAttestation();
+    db.raw.prepare("UPDATE capability_attestations SET revoked_at = datetime('now') WHERE id = ?").run(attId);
+    const claim = store.claimObligation(id, { claimToken: 'tok', leaseSeconds: 300, admissionAttestationId: attId });
+    expect(claim.applied).toBe(false);
+    // The reviewer's repro showed attempt_count=1 (claimed anyway); it must stay 0.
+    expect(
+      db.raw.prepare('SELECT state, attempt_count FROM capability_obligations WHERE id=?').get(id),
+    ).toMatchObject({ state: 'waiting_capability', attempt_count: 0 });
+  });
+
+  it('FALSIFIER (r15 F4): an EXPIRED admitted attestation cannot claim', () => {
+    const id = seedObligation();
+    const attId = seedFreshAttestation({ expiresAt: new Date(Date.now() - 1000).toISOString() });
+    expect(store.claimObligation(id, { claimToken: 'tok', leaseSeconds: 300, admissionAttestationId: attId }).applied).toBe(false);
+    expect(stateOf(id)).toBe('waiting_capability');
+  });
+
+  it('FALSIFIER (r15 F4): a claim with NO admission attestation id is refused (fail-closed)', () => {
+    const id = seedObligation();
+    seedFreshAttestation(); // an admissible attestation EXISTS, but its id is not supplied
+    expect(store.claimObligation(id, { claimToken: 'tok', leaseSeconds: 300 }).applied).toBe(false);
+    expect(stateOf(id)).toBe('waiting_capability');
+  });
+
+  it('r15 F4 positive control: a still-admissible attestation claims and consumes exactly one attempt', () => {
+    const id = seedObligation();
+    const attId = seedFreshAttestation();
+    expect(store.claimObligation(id, { claimToken: 'tok', leaseSeconds: 300, admissionAttestationId: attId }).applied).toBe(true);
+    expect(
+      db.raw.prepare('SELECT state, attempt_count FROM capability_obligations WHERE id=?').get(id),
+    ).toMatchObject({ state: 'claimed', attempt_count: 1 });
   });
 });
 

@@ -395,8 +395,21 @@ export class CapabilityObligationStore {
 
   claimObligation(
     id: number,
-    params: { claimToken: string; leaseSeconds: number; admissionAttestationDigest?: string },
+    params: {
+      claimToken: string;
+      leaseSeconds: number;
+      admissionAttestationId?: number;
+      admissionAttestationDigest?: string;
+    },
   ): { applied: true; claimEpoch: number; attemptCount: number } | { applied: false } {
+    // r15 F4 — ATOMIC attestation-bound claim. Admission (findAdmissibleAttestation)
+    // runs BEFORE media verification, whose await is a window in which the admitted
+    // attestation can be revoked or expire. The claim must therefore re-check, in
+    // the SAME transaction that flips the state, that the exact admitted attestation
+    // row is STILL admissible (canary pass, unrevoked, unexpired). This applies to
+    // EVERY obligation (group and non-group) — non-group ones have no approval, so
+    // without this nothing re-validates the attestation at claim. Fail-closed: a
+    // missing admission id (NULL) matches no row, so the claim is refused.
     // r13 F3 — group obligations RE-VALIDATE the consumed drain approval at CLAIM
     // time, not only at the waiting_approval → waiting_capability transition (the
     // group_approval_gate trigger fires only there). Without this, an approval
@@ -428,6 +441,13 @@ export class CapabilityObligationStore {
            AND state = 'waiting_capability'
            AND attempt_count < ${CAPABILITY_OBLIGATION_MAX_ATTEMPTS}
            AND (next_attempt_at IS NULL OR datetime(next_attempt_at) <= datetime('now'))
+           AND EXISTS (
+             SELECT 1 FROM capability_attestations att
+             WHERE att.id = ?
+               AND att.canary_result = 'pass'
+               AND att.revoked_at IS NULL
+               AND datetime(att.expires_at) > datetime('now')
+           )
            AND (
              capability_obligations.is_group = 0
              OR (
@@ -449,7 +469,13 @@ export class CapabilityObligationStore {
            )
          RETURNING claim_epoch, attempt_count`,
       )
-      .get(params.claimToken, params.leaseSeconds, id, params.admissionAttestationDigest ?? null) as
+      .get(
+        params.claimToken,
+        params.leaseSeconds,
+        id,
+        params.admissionAttestationId ?? null,
+        params.admissionAttestationDigest ?? null,
+      ) as
       | { claim_epoch: number; attempt_count: number }
       | undefined;
     if (row === undefined) return { applied: false };
