@@ -1,38 +1,7 @@
 {
   "schemaVersion": 1,
   "description": "Debt ledger for scripts/fault-taxonomy-source-coverage-guard.ts (#2147). Entries are emitted sources with no sourceDispositions registry entry. The guard fails on growth and on stale debt; #2147 completes when this list is empty. dynamicClaims name runtime-computed emit sites by file with the source (family) they emit.",
-  "entries": [
-    {
-      "source": "fallback_binary_incompatible",
-      "owner": "src/runtimes/agent/runtime.ts",
-      "status": "debt",
-      "reason": "emitted on main without a sourceDispositions entry; awaiting deliberate disposition authorship (#2147)"
-    },
-    {
-      "source": "fallback_persist_version_incompatible",
-      "owner": "src/runtimes/agent/fallback-restore.ts",
-      "status": "debt",
-      "reason": "emitted on main without a sourceDispositions entry; awaiting deliberate disposition authorship (#2147)"
-    },
-    {
-      "source": "handoff-distill",
-      "owner": "src/runtimes/agent/handoff-distill-coordinator.ts",
-      "status": "debt",
-      "reason": "dynamic emitter family/const; awaiting deliberate disposition authorship (#2147)"
-    },
-    {
-      "source": "self_restart_requested",
-      "owner": "src/runtimes/agent/self-restart.ts",
-      "status": "debt",
-      "reason": "emitted on main without a sourceDispositions entry; awaiting deliberate disposition authorship (#2147)"
-    },
-    {
-      "source": "trigger_forbidden_target",
-      "owner": "src/core/substrate/poller.ts",
-      "status": "debt",
-      "reason": "emitted on main without a sourceDispositions entry; awaiting deliberate disposition authorship (#2147)"
-    }
-  ],
+  "entries": [],
   "dynamicClaims": {
     "instance_degraded": "src/fleet/health-poller.ts",
     "instance_logged_out": "src/fleet/health-poller.ts",

@@ -987,6 +987,31 @@
       "disposition": "inline_hook_execution_fault_surfaced_per_episode",
       "owner": "src/runtimes/agent/runtime.ts",
       "test": "tests/runtimes/agent/runtime.test.ts"
+    },
+    "fallback_binary_incompatible": {
+      "disposition": "wrong_architecture_binary_requires_operator_reinstall",
+      "owner": "src/runtimes/agent/runtime.ts",
+      "test": "tests/runtimes/agent/fallback-binary-preflight.test.ts"
+    },
+    "fallback_persist_version_incompatible": {
+      "disposition": "newer_persisted_version_cleared_to_reconcile_never_guessed",
+      "owner": "src/runtimes/agent/fallback-restore.ts",
+      "test": "tests/runtimes/agent/fallback-restore-unit.test.ts"
+    },
+    "handoff-distill": {
+      "disposition": "per_instance_family_degradation_cleared_when_sweep_finds_all_recovered",
+      "owner": "src/runtimes/agent/handoff-distill-coordinator.ts",
+      "test": "tests/runtimes/agent/handoff-distill-coordinator.test.ts"
+    },
+    "self_restart_requested": {
+      "disposition": "informational_restart_request_receipt_no_incident_lifecycle",
+      "owner": "src/runtimes/agent/self-restart.ts",
+      "test": "tests/runtimes/agent/self-restart.test.ts"
+    },
+    "trigger_forbidden_target": {
+      "disposition": "trigger_retired_after_bounded_forbidden_rejects_requires_producer_rearm",
+      "owner": "src/core/substrate/poller.ts",
+      "test": "tests/core/substrate/poller-forbidden-target.test.ts"
     }
   }
 }

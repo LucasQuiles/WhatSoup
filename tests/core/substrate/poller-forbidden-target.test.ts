@@ -1,4 +1,12 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+
+const emitAlertMock = vi.hoisted(() => vi.fn(() => true));
+vi.mock('../../../src/lib/emit-alert.ts', () => ({
+  emitAlert: emitAlertMock,
+  emitAlertChecked: emitAlertMock,
+  clearAlertSource: vi.fn(() => true),
+  clearAlertSourceChecked: vi.fn(() => true),
+}));
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -93,6 +101,14 @@ describe('TriggerPoller — forbidden-target producer feedback (#1745)', () => {
     ).all(t.id) as Array<{ status: string; error_kind: string | null }>;
     expect(runs).toHaveLength(3);
     for (const r of runs) expect(r.error_kind).toBe('notify_forbidden_target');
+
+    // OPERATOR SIGNALLED (#2147): the retirement emits exactly one
+    // trigger_forbidden_target alert carrying the trigger identity.
+    const alertCalls = emitAlertMock.mock.calls.filter((c) => (c as unknown[])[1] === 'trigger_forbidden_target');
+    expect(alertCalls).toHaveLength(1);
+    const alertArgs = alertCalls[0] as unknown[];
+    expect(String(alertArgs[0])).toBe('q');
+    expect(String(alertArgs[3])).toContain(`triggerId=${t.id}`);
   });
 
   it('classifies a Boom-shaped 403 (statusCode) even when the message text is opaque', async () => {

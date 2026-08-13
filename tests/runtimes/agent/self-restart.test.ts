@@ -3,6 +3,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+const emitAlertMock = vi.hoisted(() => vi.fn(() => true));
+vi.mock('../../../src/lib/emit-alert.ts', () => ({
+  emitAlert: emitAlertMock,
+  emitAlertChecked: emitAlertMock,
+  clearAlertSource: vi.fn(() => true),
+  clearAlertSourceChecked: vi.fn(() => true),
+}));
+
 import type { ServiceManager } from '../../../src/fleet/platform.ts';
 import {
   INTENTIONAL_RESTART_MARKER,
@@ -70,6 +78,27 @@ describe('self-restart core', () => {
     expect(marker.chatJid).toBe('1111111000000000@g.us');
     expect(marker.timestamp).toBe('2026-06-28T00:00:00.000Z');
     expect(typeof marker.pid).toBe('number');
+  });
+
+  it('emits the self_restart_requested info receipt alongside the marker (#2147)', async () => {
+    const sm = makeServiceManager();
+
+    await triggerSelfRestart({
+      instance: 'q',
+      dataRoot,
+      reason: 'load merged main',
+      code: 'redeploy',
+      requestedBy: 'agent',
+      serviceManager: sm,
+    });
+
+    expect(emitAlertMock).toHaveBeenCalledWith(
+      'q',
+      'self_restart_requested',
+      expect.stringContaining('intentional restart (redeploy)'),
+      expect.stringContaining('requestedBy=agent'),
+      'info',
+    );
   });
 
   it('defaults code to self_restart when omitted', async () => {

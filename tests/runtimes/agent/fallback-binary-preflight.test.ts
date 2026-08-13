@@ -85,7 +85,7 @@ vi.mock('../../../src/lib/keyring.ts', async (importOriginal) => {
 
 // Mutable probeFallbackBinary mock — tests control what the probe returns.
 const probeFallbackBinaryMock = vi.fn<
-  (binary: string) => Promise<{ status: 'present' | 'missing' | 'unknown'; version: string | null }>
+  (binary: string) => Promise<{ status: 'present' | 'missing' | 'incompatible' | 'unknown'; version: string | null }>
 >(() => Promise.resolve({ status: 'unknown', version: null }));
 
 vi.mock('../../../src/runtimes/agent/providers/binary-preflight.ts', () => ({
@@ -192,6 +192,26 @@ describe('armFallbackWindow — binary pre-flight', () => {
       expect(vi.mocked(emitAlert)).toHaveBeenCalledWith(
         'test',
         'fallback_binary_missing',
+        expect.any(String),
+        expect.stringContaining('binary=opencode'),
+      );
+    }, { interval: 0 });
+  });
+
+  it('emits fallback_binary_incompatible alert when binary has the wrong architecture', async () => {
+    probeFallbackBinaryMock.mockResolvedValue({ status: 'incompatible', version: null });
+
+    const runtime = makeRuntime({
+      agentFallbackProvider: 'opencode-cli',
+      agentFallbackModel: 'minimax/minimax-m2',
+    });
+
+    fbView(runtime).activateProviderFallback(null);
+
+    await vi.waitFor(() => {
+      expect(vi.mocked(emitAlert)).toHaveBeenCalledWith(
+        'test',
+        'fallback_binary_incompatible',
         expect.any(String),
         expect.stringContaining('binary=opencode'),
       );
