@@ -33,8 +33,18 @@ let _baileysPollDecrypt: ((vote: any, ctx: any) => any) | null = null;
 async function loadBaileysPollDecrypt(): Promise<(vote: any, ctx: any) => any> {
   if (_baileysPollDecrypt) return _baileysPollDecrypt;
   const mod = await import('@whiskeysockets/baileys/lib/Utils/process-message.js' as string);
-  _baileysPollDecrypt = mod.decryptPollVote;
-  return _baileysPollDecrypt!;
+  // Internal-module import: a Baileys upgrade can rename or move this export.
+  // Without the check the undefined lands at the call site as an opaque
+  // "not a function" TypeError on every vote (#2322 M2); the throw here rides
+  // the caller's existing failed-to-decrypt log path instead.
+  if (typeof mod.decryptPollVote !== 'function') {
+    throw new Error(
+      'baileys internal decryptPollVote export missing — poll vote decryption unavailable after a Baileys upgrade',
+    );
+  }
+  const decrypt = mod.decryptPollVote as (vote: any, ctx: any) => any;
+  _baileysPollDecrypt = decrypt;
+  return decrypt;
 }
 
 /** A poll we sent, tracked so we can decrypt incoming votes for it. */

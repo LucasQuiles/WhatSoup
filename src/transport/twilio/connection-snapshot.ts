@@ -10,6 +10,7 @@
 // as overrides; everything else (including process.* environment capture, which
 // is evaluated at call time exactly as before) is baked in here.
 
+import { hostname } from 'node:os';
 import type { ConnectionStateSnapshot } from '../connection.ts';
 import { MS_PER_MINUTE } from '../../lib/time-units.ts';
 
@@ -57,7 +58,9 @@ export function emptyConnectionStateSnapshot(
       },
       environment: {
         instance: 'twilio-sms',
-        host: process.env['HOSTNAME'] ?? 'unknown',
+        // os.hostname(), not $HOSTNAME: the env var is a shell convention that
+        // launchd and systemd never export (#2322 M6).
+        host: hostname(),
         pid: process.pid,
         nodeVersion: process.version,
         platform: process.platform,
