@@ -62,6 +62,12 @@ export interface BoundedBatteryOptions {
   now?: () => number;
   /** Terminal-grace bound (ms) after a kill before declaring INCONCLUSIVE; overridable for tests. */
   graceMs?: number;
+  /**
+   * Injected group-signal function (defaults to `process.kill`). Present so a test can force a
+   * reap FAILURE (e.g. EPERM) deterministically — a real EPERM needs a privilege boundary that
+   * cannot be arranged in-process (round-20 finding 4). Signature matches `process.kill`.
+   */
+  kill?: (pid: number, signal: NodeJS.Signals | number) => void;
 }
 
 /** How long to wait for the group to die after a kill before declaring the result inconclusive. */
@@ -100,10 +106,11 @@ export function runBoundedBattery(options: BoundedBatteryOptions): Promise<Bound
     // gone → ESRCH); false if the kill FAILED for another reason (EPERM/…), which the
     // caller must treat as inconclusive rather than silently swallow (the round-17 form
     // swallowed every error, turning an EPERM into an unbounded wait).
+    const killSignal = options.kill ?? process.kill;
     const killGroup = (): boolean => {
       if (pid === undefined) return true;
       try {
-        process.kill(-pid, 'SIGKILL'); // negative pid → the whole group
+        killSignal(-pid, 'SIGKILL'); // negative pid → the whole group
         return true;
       } catch (err) {
         const code = (err as NodeJS.ErrnoException).code;
@@ -120,6 +127,7 @@ export function runBoundedBattery(options: BoundedBatteryOptions): Promise<Bound
       if (graceTimer !== undefined) clearTimeout(graceTimer);
       process.off('SIGTERM', onSignal);
       process.off('SIGINT', onSignal);
+      process.off('SIGHUP', onSignal);
       resolvePromise({ outcome, timedOut, exitCode: code, signal, wallMs: clock() - started, wrappedExit, reapError });
     };
 
@@ -155,6 +163,10 @@ export function runBoundedBattery(options: BoundedBatteryOptions): Promise<Bound
     };
     process.on('SIGTERM', onSignal);
     process.on('SIGINT', onSignal);
+    // round-20 finding 5: SIGHUP (terminal hangup / parent death) must ALSO forward a group
+    // kill. Without it a SIGHUP kills the wrapper (exit 129) while the detached child group
+    // survives, reparented to PID 1 — an orphaned test run the battery exists to prevent.
+    process.on('SIGHUP', onSignal);
 
     child.on('error', (err) => {
       if (settled) return;
@@ -163,14 +175,20 @@ export function runBoundedBattery(options: BoundedBatteryOptions): Promise<Bound
       if (graceTimer !== undefined) clearTimeout(graceTimer);
       process.off('SIGTERM', onSignal);
       process.off('SIGINT', onSignal);
+      process.off('SIGHUP', onSignal);
       rejectPromise(err);
     });
 
     child.on('close', (code, signal) => {
       // Reap the group on EVERY exit — a grandchild can survive the leader's clean exit.
       const reaped = killGroup();
-      if (timedOut) { finish('timedOut', null, signal, 124); return; }
+      // round-20 finding 4: a REAP FAILURE dominates a timeout. If the group could not be
+      // proven reaped (EPERM/…), a descendant may still be alive, so the result is
+      // INCONCLUSIVE (125) — NEVER 124 — even when the bound also fired. The previous order
+      // returned 124 on a timed-out-AND-EPERM close, hiding a surviving process behind an
+      // ordinary-timeout verdict (reviewer's reproduced EPERM case). Check `!reaped` FIRST.
       if (!reaped) { finish('inconclusive', code, signal, 125); return; }
+      if (timedOut) { finish('timedOut', null, signal, 124); return; }
       if (signal) { finish('failed', null, signal, 128 + (osConstants.signals[signal] ?? 0)); return; }
       const exitCode = code ?? 1;
       finish(exitCode === 0 ? 'passed' : 'failed', exitCode, null, exitCode);
@@ -205,13 +223,43 @@ export function buildVitestArgs(passthrough: readonly string[]): string[] {
   ];
 }
 
+/** GNU sysexits EX_USAGE — signals an invalid battery CONFIGURATION, distinct from a test failure. */
+export const EX_USAGE = 64;
+/** Default wall-clock bound: 20 minutes (full suite ~8-10 min uncontended; absorbs load, never near the 72-min wedge). */
+export const DEFAULT_BATTERY_TIMEOUT_MS = 20 * 60 * 1000;
+
+/**
+ * Resolve the wall-clock bound from FULL_SUITE_BATTERY_TIMEOUT_MS (round-20 gap). An ABSENT
+ * env var uses the default. A PRESENT but non-finite-or-non-positive value is a CONFIGURATION
+ * ERROR, never a 0ms bound: `Number('abc')` is NaN, `Number('')` is 0, `Number('-1')` is
+ * negative, and `setTimeout` with any of those fires (or is clamped to fire) immediately — a
+ * misleading instant "timeout" that reads as a wedged suite. Returns a discriminated result
+ * so the CLI exits EX_USAGE with a truthful diagnostic instead of running with a bad bound.
+ */
+export function resolveBatteryTimeoutMs(raw: string | undefined): { ok: true; timeoutMs: number } | { ok: false; message: string } {
+  if (raw === undefined) return { ok: true, timeoutMs: DEFAULT_BATTERY_TIMEOUT_MS };
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) {
+    return {
+      ok: false,
+      message: `FULL_SUITE_BATTERY_TIMEOUT_MS="${raw}" is not a positive finite number of milliseconds — refusing to run with an invalid bound (it would fire an immediate, misleading timeout).`,
+    };
+  }
+  return { ok: true, timeoutMs: n };
+}
+
 const invokedPath = process.argv[1] ? new URL(`file://${process.argv[1]}`).href : '';
 if (import.meta.url === invokedPath || (process.argv[1] ?? '').endsWith('full-suite-battery.ts')) {
   void (async () => {
-    // Default bound: 20 minutes. The full suite runs in ~8-10 min uncontended; 20 min
-    // absorbs load without ever approaching the 72-minute wedge. Override with
-    // FULL_SUITE_BATTERY_TIMEOUT_MS. Extra args after `--` pass through to vitest.
-    const timeoutMs = Number(process.env.FULL_SUITE_BATTERY_TIMEOUT_MS ?? 20 * 60 * 1000);
+    // Override the default bound with FULL_SUITE_BATTERY_TIMEOUT_MS. An invalid value is a
+    // config error (EX_USAGE), not a silent immediate timeout. Extra args after `--` pass
+    // through to vitest.
+    const timeoutResolution = resolveBatteryTimeoutMs(process.env.FULL_SUITE_BATTERY_TIMEOUT_MS);
+    if (!timeoutResolution.ok) {
+      process.stderr.write(`full-suite-battery: CONFIG ERROR — ${timeoutResolution.message}\n`);
+      process.exit(EX_USAGE);
+    }
+    const timeoutMs = timeoutResolution.timeoutMs;
     const passthrough = process.argv.slice(2);
     const result = await runBoundedBattery({
       command: process.execPath,

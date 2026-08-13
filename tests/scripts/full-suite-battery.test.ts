@@ -5,13 +5,14 @@
  * a worker for ~72 minutes. Uses real child processes and real time: a fake timer
  * cannot advance an external process's wall clock.
  */
+import { spawn } from 'node:child_process';
 import { existsSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
-import { buildVitestArgs, runBoundedBattery } from '../../scripts/full-suite-battery.ts';
+import { buildVitestArgs, resolveBatteryTimeoutMs, runBoundedBattery } from '../../scripts/full-suite-battery.ts';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const NODE = process.execPath;
@@ -122,6 +123,80 @@ describe('runBoundedBattery (externally bounded full-suite runner)', () => {
     expect(r.wrappedExit).toBe(125); // NEVER a false 0; the grace's inconclusive exit
     expect(elapsed).toBeLessThan(2_000); // grace (600ms) fired well before the grandchild's 2500ms release
   }, 30_000);
+
+  it('FALSIFIER (round-20 finding 4): a reap FAILURE during a timeout is INCONCLUSIVE (125), never an ordinary timeout (124)', async () => {
+    const dir = tmp.make('eperm-timeout');
+    const child = join(dir, 'child.cjs');
+    // The child outruns the 200ms bound, then EXITS ON ITS OWN ~500ms later (before the 5s
+    // grace), so `close` fires with `timedOut` already set. The injected kill ALWAYS throws
+    // EPERM, so the group can never be proven reaped — a descendant might still be alive. The
+    // close-time verdict MUST be inconclusive/125. The pre-round-20 order checked `timedOut`
+    // first and returned 124, hiding the un-reaped descendant behind an ordinary-timeout pass.
+    writeFileSync(child, 'Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,500);');
+    const eperm = (): never => {
+      const e = new Error('operation not permitted') as NodeJS.ErrnoException;
+      e.code = 'EPERM';
+      throw e;
+    };
+    const r = await runBoundedBattery({ command: NODE, args: [child], timeoutMs: 200, stdio: 'ignore', graceMs: 5_000, kill: eperm });
+    expect(r.timedOut).toBe(true);
+    expect(r.outcome).toBe('inconclusive'); // reap failure dominates the timeout
+    expect(r.wrappedExit).toBe(125); // NOT 124 — a possibly-alive descendant is never a clean timeout
+    expect(r.reapError).toMatch(/EPERM/);
+  }, 30_000);
+
+  it('FALSIFIER (round-20 finding 5): SIGHUP to the wrapper forwards a group kill — the detached child group is not orphaned', async () => {
+    const dir = tmp.make('sighup');
+    const marker = join(dir, 'gc-marker');
+    const grandchild = join(dir, 'gc.cjs');
+    const parent = join(dir, 'parent.cjs');
+    const runner = join(dir, 'runner.ts');
+    // grandchild: write the marker 900ms after spawn (no try/catch — a group reap on SIGHUP
+    // reaches it first, so the write never happens).
+    writeFileSync(grandchild, 'const fs=require("node:fs");setTimeout(function(){fs.writeFileSync(process.argv[2],"orphaned")},900);');
+    // parent: fork a same-group grandchild, then block forever so ONLY the SIGHUP path ends it.
+    writeFileSync(parent, `const cp=require("node:child_process");cp.spawn(process.execPath,[${JSON.stringify(grandchild)},process.argv[2]],{stdio:"ignore"});require("node:net").createServer(function(){}).listen(0,"127.0.0.1");`);
+    // runner: drive runBoundedBattery with a LONG bound so the timeout path never fires; print
+    // READY, then wait to be SIGHUP'd. WITHOUT SIGHUP forwarding, the default action kills the
+    // runner (exit 129) and the detached parent+grandchild reparent to PID 1 → the marker lands.
+    // Resolve the battery module relative to THIS test file (CWD-independent — matches the
+    // static import above), so the runner imports the same source regardless of the run cwd.
+    const batteryHref = new URL('../../scripts/full-suite-battery.ts', import.meta.url).href;
+    writeFileSync(runner, [
+      `import { runBoundedBattery } from ${JSON.stringify(batteryHref)};`,
+      `const [marker, parent] = process.argv.slice(2);`,
+      `void runBoundedBattery({ command: process.execPath, args: [parent, marker], timeoutMs: 60000, stdio: 'ignore' }).then((r) => process.exit(r.wrappedExit));`,
+      `setTimeout(() => process.stdout.write('READY\\n'), 100);`,
+    ].join('\n'));
+    const wrapper = spawn(NODE, ['--disable-warning=ExperimentalWarning', '--experimental-strip-types', runner, marker, parent], { stdio: ['ignore', 'pipe', 'ignore'] });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        wrapper.stdout.on('data', (d: Buffer) => { if (String(d).includes('READY')) resolve(); });
+        wrapper.on('error', reject);
+      });
+      await TIMING(250); // let the battery actually spawn the parent + grandchild
+      wrapper.kill('SIGHUP');
+      await TIMING(1_300); // past the grandchild's 900ms marker timer
+      expect(existsSync(marker)).toBe(false); // SIGHUP forwarded a group kill → grandchild reaped, never orphaned
+    } finally {
+      wrapper.kill('SIGKILL'); // ensure no leak regardless of outcome
+    }
+  }, 30_000);
+});
+
+describe('resolveBatteryTimeoutMs (round-20 gap: invalid FULL_SUITE_BATTERY_TIMEOUT_MS is a config error, not an instant timeout)', () => {
+  it('absent env → the 20-minute default', () => {
+    const r = resolveBatteryTimeoutMs(undefined);
+    expect(r).toEqual({ ok: true, timeoutMs: 20 * 60 * 1000 });
+  });
+  it('a valid positive number → that bound', () => {
+    expect(resolveBatteryTimeoutMs('300000')).toEqual({ ok: true, timeoutMs: 300000 });
+  });
+  it.each(['abc', '', 'NaN', '0', '-1', 'Infinity'])('rejects %j as a config error (would fire an immediate misleading timeout)', (raw) => {
+    const r = resolveBatteryTimeoutMs(raw);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.message).toContain('FULL_SUITE_BATTERY_TIMEOUT_MS');
+  });
 });
 
 describe('buildVitestArgs (round-19 F5 regression: --pool default must not collide with a caller pool)', () => {
