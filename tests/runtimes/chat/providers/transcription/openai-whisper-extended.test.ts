@@ -32,8 +32,10 @@ const {
   mockConfig,
 } = vi.hoisted(() => ({
   mockTranscriptionsCreate: vi.fn(),
-  mockEmitAlertChecked: vi.fn(),
-  mockClearAlertSourceChecked: vi.fn(),
+  // #2394: ownership arms only on CHECKED acceptance — default the mocks to
+  // durable-accept (true); rejection-path tests flip them per test.
+  mockEmitAlertChecked: vi.fn(() => true),
+  mockClearAlertSourceChecked: vi.fn(() => true),
   mockResolveApiKey: vi.fn(),
   mockConfig: {
     botName: 'test-bot',
@@ -441,5 +443,133 @@ describe('getClient — transcriptionOptions.openaiProviderConfig', () => {
         apiKey: undefined,
       }],
     ]);
+  });
+});
+
+// #2394 (whisper_degraded): checked-acceptance ownership + restart-safe
+// marker reconciliation. Uses the REAL recovery-authority store under a
+// per-test BOT_ERRORS_STATE_DIR temp dir; emit/clear stay mocked.
+describe('#2394 whisper_degraded recovery authority', () => {
+  const MARKER = 'whisper_degraded:test-bot';
+
+  async function withMarkerDir(
+    fn: (tools: { markerPresent: () => Promise<boolean> }) => Promise<void>,
+  ): Promise<void> {
+    const { mkdtempSync, rmSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const { tmpdir } = await import('node:os');
+    const dir = mkdtempSync(join(tmpdir(), 'whisper-recovery-'));
+    const prior = process.env['BOT_ERRORS_STATE_DIR'];
+    process.env['BOT_ERRORS_STATE_DIR'] = dir;
+    try {
+      await fn({
+        markerPresent: async () => {
+          const { loadRecoveryMarkers } = await import('../../../../../src/lib/recovery-authority-store.ts');
+          return loadRecoveryMarkers().has(MARKER);
+        },
+      });
+    } finally {
+      if (prior === undefined) delete process.env['BOT_ERRORS_STATE_DIR'];
+      else process.env['BOT_ERRORS_STATE_DIR'] = prior;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // mockReturnValue survives clearAllMocks — re-assert durable-accept
+    // defaults so a rejection-path test cannot leak into its neighbors.
+    mockEmitAlertChecked.mockReturnValue(true);
+    mockClearAlertSourceChecked.mockReturnValue(true);
+    process.env.OPENAI_API_KEY = 'sk-test';
+    _testing.reset();
+    installOpenAIMock();
+    mockResolveApiKey.mockReturnValue('sk-test');
+  });
+
+  afterEach(() => {
+    delete process.env.OPENAI_API_KEY;
+  });
+
+  async function tripBreaker(): Promise<void> {
+    mockTranscriptionsCreate.mockRejectedValue(new Error('trip'));
+    for (let i = 0; i < 5; i++) {
+      try { await transcribeWithOpenAI(makeBuffer(), 'audio/ogg'); } catch { /* expected */ }
+    }
+  }
+
+  async function recoverThroughProbe(text = 'recovered'): Promise<string> {
+    vi.useFakeTimers();
+    try {
+      vi.advanceTimersByTime(61_000);
+      mockTranscriptionsCreate.mockResolvedValueOnce({ text });
+      return await transcribeWithOpenAI(makeBuffer(), 'audio/ogg');
+    } finally {
+      vi.useRealTimers();
+    }
+  }
+
+  it('persists a marker on accepted emit and drops it on accepted clear', async () => {
+    await withMarkerDir(async ({ markerPresent }) => {
+      await tripBreaker();
+      expect(await markerPresent()).toBe(true);
+
+      await recoverThroughProbe();
+      expect(mockClearAlertSourceChecked).toHaveBeenCalledWith('test-bot', 'whisper_degraded');
+      expect(await markerPresent()).toBe(false);
+    });
+  });
+
+  it('does not arm ownership or write a marker when the emit is rejected', async () => {
+    await withMarkerDir(async ({ markerPresent }) => {
+      mockEmitAlertChecked.mockReturnValue(false);
+      await tripBreaker();
+      expect(await markerPresent()).toBe(false);
+
+      await recoverThroughProbe();
+      // No accepted incident — success must not manufacture an orphan clear.
+      expect(mockClearAlertSourceChecked).not.toHaveBeenCalled();
+    });
+  });
+
+  it('retains clear-retry authority until the checked clear is accepted', async () => {
+    await withMarkerDir(async ({ markerPresent }) => {
+      await tripBreaker();
+
+      mockClearAlertSourceChecked.mockReturnValueOnce(false);
+      await recoverThroughProbe();
+      expect(mockClearAlertSourceChecked).toHaveBeenCalledTimes(1);
+      // Rejected handoff: ownership and marker retained.
+      expect(await markerPresent()).toBe(true);
+
+      mockTranscriptionsCreate.mockResolvedValueOnce({ text: 'again' });
+      await transcribeWithOpenAI(makeBuffer(), 'audio/ogg');
+      expect(mockClearAlertSourceChecked).toHaveBeenCalledTimes(2);
+      expect(await markerPresent()).toBe(false);
+    });
+  });
+
+  it('reconciles a prior-process marker on fresh same-route success after restart', async () => {
+    await withMarkerDir(async ({ markerPresent }) => {
+      await tripBreaker();
+      expect(await markerPresent()).toBe(true);
+
+      // Simulate restart: module-local flag and breaker state wiped.
+      _testing.reset();
+      mockClearAlertSourceChecked.mockClear();
+
+      mockTranscriptionsCreate.mockResolvedValueOnce({ text: 'post-restart' });
+      await transcribeWithOpenAI(makeBuffer(), 'audio/ogg');
+      expect(mockClearAlertSourceChecked).toHaveBeenCalledWith('test-bot', 'whisper_degraded');
+      expect(await markerPresent()).toBe(false);
+    });
+  });
+
+  it('emits no clear on clean startup with no prior incident', async () => {
+    await withMarkerDir(async () => {
+      mockTranscriptionsCreate.mockResolvedValueOnce({ text: 'clean' });
+      await transcribeWithOpenAI(makeBuffer(), 'audio/ogg');
+      expect(mockClearAlertSourceChecked).not.toHaveBeenCalled();
+    });
   });
 });
