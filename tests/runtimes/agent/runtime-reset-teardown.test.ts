@@ -881,7 +881,7 @@ describe('AgentRuntime reset teardown ownership', () => {
     expect(state.runtimeTurnCoordinator.hasPerChatTeardownPending(mapKey)).toBe(false);
   });
 
-  it('interrupts an unsequenced synthetic per-chat turn owning the runtime queue on /new', async () => {
+  it('interrupts an unsequenced per-chat turn owning the runtime queue on /new', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
@@ -889,10 +889,6 @@ describe('AgentRuntime reset teardown ownership', () => {
       perChatInboundSeqQueue: Map<string, number[]>;
       perChatTurnQueues: Map<string, { isProcessing: boolean; idle: () => Promise<void> }>;
     };
-    const mutableConfig = mockConfig as typeof mockConfig & {
-      memory?: { adminJid: string };
-    };
-    const previousMemory = mutableConfig.memory;
     let markSendStarted!: () => void;
     let releaseSend!: () => void;
     const sendStarted = new Promise<void>((resolve) => {
@@ -903,9 +899,6 @@ describe('AgentRuntime reset teardown ownership', () => {
     });
 
     await runtime.start();
-    // A local command initializes the per-chat session without admitting a turn.
-    await sendAndDrain(runtime, makeMsg({ content: '/status' }));
-    mutableConfig.memory = { adminJid: '15550100001@s.whatsapp.net' };
     mockSession.getStatus.mockReturnValue({
       active: true,
       pid: 123,
@@ -923,18 +916,15 @@ describe('AgentRuntime reset teardown ownership', () => {
     });
 
     try {
-      expect(runtime.dispatchAgentJob({
-        beadId: 7,
-        triggerId: 11,
-        prompt: 'Summarize the current state.',
-        title: 'Synthetic status',
-        reportChatJid: 'test@s.whatsapp.net',
-      })).toMatchObject({ dispatched: true });
-      await sendStarted;
+      // This harness wires no durability engine, so an ordinary inbound admits
+      // a turn with no journal seq; queue ownership is the only active-turn
+      // proof in this state. (Synthetic jobs can no longer reach it:
+      // dispatchAgentJob refuses without an engine and journals a seq with
+      // one — #2144.)
+      await runtime.handleMessage(makeMsg({ content: 'long-running work' }));
       await (runtime as unknown as { turnChain: Promise<void> }).turnChain;
+      await sendStarted;
 
-      // Synthetic jobs deliberately have no journal seq; queue ownership is
-      // the only active-turn proof in this state.
       expect(state.perChatInboundSeqQueue.get('test@s.whatsapp.net')).toEqual([]);
       expect(state.perChatTurnQueues.get('test@s.whatsapp.net')?.isProcessing).toBe(true);
       mockQueue.abortTurn.mockClear();
@@ -954,8 +944,6 @@ describe('AgentRuntime reset teardown ownership', () => {
       expect(ackTexts.some((t) => t.includes('still in progress'))).toBe(false);
     } finally {
       releaseSend();
-      if (previousMemory === undefined) delete mutableConfig.memory;
-      else mutableConfig.memory = previousMemory;
     }
     await state.perChatTurnQueues.get('test@s.whatsapp.net')?.idle();
   });
