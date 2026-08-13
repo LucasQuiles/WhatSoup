@@ -10,7 +10,14 @@
 import { Keyboard } from 'lucide-react';
 import { Modal, ModalBody } from './primitives';
 
-const isMac = typeof navigator !== 'undefined' && /Mac/.test(navigator.platform);
+// userAgentData.platform where available; navigator.platform (deprecated but
+// universal) as the fallback so the modifier glyph stays right on older engines.
+const isMac = typeof navigator !== 'undefined'
+  && /mac/i.test(
+    (navigator as { userAgentData?: { platform?: string } }).userAgentData?.platform
+      ?? navigator.platform
+      ?? '',
+  );
 const mod = isMac ? '⌘' : 'Ctrl';
 
 const SHORTCUTS = [
