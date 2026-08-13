@@ -79,7 +79,7 @@ function snapshotRecovery(db: Database, seqs: readonly number[]): string {
     'SELECT source_inbound_seq, state, completion_kind, completion_proof_id FROM turn_recovery_jobs WHERE source_inbound_seq = ? ORDER BY id ASC',
   );
   for (const seq of [...seqs].sort((a, b) => a - b)) {
-    for (const r of stmt.all(seq) as RecoverySnapshotRow[]) rows.push(r);
+    for (const r of stmt.all(seq) as unknown as RecoverySnapshotRow[]) rows.push(r);
   }
   return JSON.stringify(rows);
 }
@@ -97,7 +97,9 @@ interface PreparedInsert {
   bind: RecoveryBind;
   contractVersion: string;
   requiredCapability: string;
-  obligation: Parameters<CapabilityObligationStore['applyDecisionWithinCallerTransaction']>[0]['obligation'];
+  // NonNullable: prepared[] entries ALWAYS carry an obligation (built unconditionally in
+  // STAGE A below), so the under-lock re-check and the insert may read it without a guard.
+  obligation: NonNullable<Parameters<CapabilityObligationStore['applyDecisionWithinCallerTransaction']>[0]['obligation']>;
 }
 
 export async function executeBackfill(

@@ -735,17 +735,37 @@ action records an `operator` audit event carrying the `--run-id` actor and `--id
 claims nothing without an admissible D5 attestation, and the recording core had no caller until
 this front-door. It derives the live binding, runs a bounded NON-SENDING resolver canary, and
 records ONE attestation iff the canary passes. Recording is fail-closed on three observations
-(round-16, hardened round-17): (a) the binding's media root must be a readable directory; (b)
-`--resolver-digest` is REQUIRED and the command VERIFIES the resolver **script** — it locates the
-script inside `execution.command` (skipping a leading interpreter and its benign flags), sha256s
-it, and refuses a code-loading flag (`-e`/`--require`/`--import`/`--loader`), a bare name with no
-path, an unreadable artifact, or any digest mismatch (it never hashes the interpreter and never
-soft-passes an unverified resolver — the round-16 fail-opens finding 2 closed); (c) the probe
-evidence (stdout/stderr digests + byte counts + exit/signal + observed-source digest) is written to
-a `--receipt-out` file that is **fsynced and read-back-verified BEFORE the attestation row is
-admitted** — so an admissible row IMPLIES its receipt was durably persisted first (finding 1). The
-receipt records probe evidence only and does NOT assert admission (admission = the row carrying the
-run's `nonce`). NARROW CLAIM: a passing canary attests only that the verified resolver, run against
+(round-16..18): (a) the binding's media root must be a readable directory; (b) `--resolver-digest`
+is REQUIRED and the resolver artifact is **declared EXPLICITLY** on `execution`
+(`resolverArtifactPath` + `interpreted`) and verified by `verifyResolverArtifact` — NEVER inferred
+from argv (round-18 finding 1). The declared artifact's realpath must BE the token that executes
+(`command[0]` when not interpreted; EXACTLY `command[1]`, with no tokens between the interpreter
+and the script and no flag at `command[1]`, when interpreted), and an `interpreted:false` MISLABEL of
+an interpreter (a `watch-resolver`→node symlink declared "direct") is structurally REFUSED (round-19
+finding 2). `--resolver-digest` must equal the **COMPOSITE** digest
+`sha256([content_sha256, canonicalExecutionIdentity])` (round-19 findings 1+2) — the artifact CONTENT
+folded with the canonical command SHAPE through ONE exported `canonicalExecutionIdentity()`, so the
+attested value binds both. This refuses the two round-17 bypasses a reviewer proved (a `perl -eCODE`
+that verified a decoy while inline code ran; a symlink `watch-resolver`→node hashed as node while
+a script ran) — argv classification is unsound and was removed. (c) the probe evidence
+(stdout/stderr digests + byte counts + exit/signal + observed-source digest) is written to a
+`--receipt-out` file that is **fsynced, read-back-verified, and published NO-CLOBBER (`link()`, not
+`rename()`) BEFORE the attestation row is admitted** — so an admissible row IMPLIES its receipt was
+durably persisted first (round-17 finding 1) and a second run can never overwrite / destroy the
+first's evidence (round-18 finding 2). The receipt records probe evidence only and does NOT assert
+admission (admission = the row carrying the run's `nonce`). The **executor re-derives the COMPOSITE at the drain seam** and re-compares it to the admitted
+`resolver_digest` (`options.attestation.resolverDigest`), fail-closed to an error receipt: a same-path
+CONTENT swap (round-18 finding 1) OR a post-attest command-SHAPE change — injected `-e`, swapped
+interpreter, changed template (round-18 finding 2) — changes the live composite and is refused before
+any spawn. The executor then executes a **same-directory hardlink PIN** of the verified artifact, so a
+path-swap of the original between verify and spawn cannot substitute different code, while the
+same-directory hardlink preserves the resolver's sibling-module resolution (a private-temp copy would
+break `import './lib'` or a `node_modules` lookup); an unpinnable directory fails closed (round-19
+finding 3). RESIDUALS (named, narrowed by round-19): a same-path IN-PLACE write to the SHARED inode
+between hash and spawn still lands (the hardlink shares the inode), and an interpreter outside the
+deny-list could still be mislabeled. Both close under Option C (a typed
+`{ interpreter enum, resolverArtifactPath, args }` contract executed from content-addressed storage) —
+the graduation debt. NARROW CLAIM: a passing canary attests only that the verified resolver, run against
 `sha256(probeSource)`, exited 0 within bound and produced ≥ `minOutputBytes` — it is NOT proof of
 semantic processing; the fulfillment proof stays the D6 receipt + delivery chain. The attestation
 ROW has **no probe-evidence columns**: adding them needs migration 58, which bumps
@@ -767,19 +787,32 @@ activation core — it activates ONE named `waiting_capability` obligation's per
 one tick, fail-closed, refusing a group without a live AS-08 approval — but its `activateSession`
 port has **no live adapter and no operator trigger**. Activating a real group session is the
 AE1-sensitive act (a resumed group session can emit unsolicited messages bypassing the sibling
-filter), so the adapter is left for an owner-authorized change with its own review. Until it lands,
-the incident obligations are **not operationally drainable after a cold deploy** — the named
+filter), so the adapter is left for an owner-authorized change with its own review. The precise gap
+(round-18 correction — the earlier "no obligation drains cold" was too strong): there is **no
+deterministic, operator-triggered cold-drain path**. A DM obligation MAY still resume opportunistically
+via a fresh checkpoint or a natural next inbound in that chat; a GROUP obligation cannot (AE1). What
+is missing is a deterministic operator command to drain a named cold obligation on demand — the named
 acceptance blocker that keeps the feature not-yet-releasable regardless of green tests. Operator
 procedures: `docs/runbooks/capability-obligation-operator.md`.
 
 **Verification-harness bound.** The full-suite battery runs under an externally bounded runner
 (`scripts/full-suite-battery.ts`), which spawns vitest as a detached PROCESS GROUP with a hard
-wall-clock bound and SIGKILLs the whole group on timeout. This exists because a synchronous
-fixture `execFileSync('git', …)` (a starved `git hash-object` on `index.lock` under load) once
-wedged a worker for ~72 minutes: vitest's async per-test timeout structurally cannot interrupt a
-blocking synchronous call, so a hung fixture produced no truthful completion signal. The bound
-converts that silent wedge into a fast, truthful non-zero exit (code 124) without a per-fixture
-change.
+wall-clock bound and SIGKILLs the whole group on timeout AND on every close (so a grandchild cannot
+survive a clean exit — round-18 finding 3). This exists because a synchronous fixture
+`execFileSync('git', …)` (a starved `git hash-object` on `index.lock` under load) once wedged a
+worker for ~72 minutes: vitest's async per-test timeout structurally cannot interrupt a blocking
+synchronous call, so a hung fixture produced no truthful completion signal. Semantics
+(round-18..19): a timeout is **inconclusive** (exit 124), never reportable as a pass OR a code failure;
+a group kill that fails for a non-`ESRCH` reason (e.g. `EPERM`) is inconclusive (exit 125); a signalled
+child maps to `128 + signal`. On a bound firing AND on a wrapper `SIGTERM`/`SIGINT`, a terminal grace is
+armed **UNCONDITIONALLY** and is deliberately **NOT `.unref()`'d**, so a `close` that never arrives (an
+escaped descendant holding a stdio pipe after a successful kill) resolves INCONCLUSIVE (125) rather than
+letting the event loop drain to a FALSE exit 0 — the exact false-pass the battery exists to prevent
+(round-19 finding 4). The runner is wired into the platform verification path (round-18 finding 4;
+round-19 finding 5): the **canonical `npm test`** now runs THROUGH the bounded runner, so cutover
+(`scripts/cutover.sh` PRE-01 `npm test`), the Node CI `npm test` jobs, and the release/CI full-suite
+coverage gate (`scripts/run-coverage-check.sh`, invoked by `push-gate.ts`) are ALL bounded — not only an
+ad-hoc entry.
 
 **Backfill and AS-01 rehearsal (both owner-gated).**
 `scripts/capability-obligation-backfill-manifest.ts` is READ-ONLY: from reviewer-confirmed

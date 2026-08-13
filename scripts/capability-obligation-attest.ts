@@ -51,9 +51,9 @@
  *             records on pass, preserves probe evidence to the receipt)
  */
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { accessSync, closeSync, constants as fsConstants, fsyncSync, openSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
-import { basename, dirname, resolve } from 'node:path';
+import { createHash, randomUUID } from 'node:crypto';
+import { accessSync, closeSync, constants as fsConstants, fsyncSync, linkSync, openSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
 import { hostname, userInfo } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
 import { pathToFileURL } from 'node:url';
@@ -72,6 +72,7 @@ import {
   parseCapabilityObligationsOptions,
   type CapabilityObligationsOptions,
 } from '../src/core/capability-contract.ts';
+import { verifyResolverArtifact, type ResolverArtifactDeclaration } from '../src/core/capability-resolver-artifact.ts';
 import { CURRENT_SCHEMA_MIGRATION } from '../src/core/database-schema-version.ts';
 import { Database } from '../src/core/database.ts';
 import { resolveHarnessType } from '../src/runtimes/agent/capability-obligation-runtime.ts';
@@ -343,100 +344,55 @@ export function runResolverCanary(params: {
   });
 }
 
-/** Interpreter basenames whose real resolver code is a following SCRIPT argument, not command[0]. */
-const INTERPRETER_BASENAMES = new Set([
-  'node', 'node.exe', 'nodejs', 'deno', 'bun', 'ts-node', 'tsx',
-  'python', 'python2', 'python3', 'ruby', 'perl', 'php',
-  'sh', 'bash', 'zsh', 'dash', 'osascript',
-]);
-
 /**
- * Interpreter flags that INJECT or REPLACE the code that runs, taking their value as
- * a SEPARATE token (`--require x`) or an inline value (`--require=x` / `-e '...'`).
- * If the resolver command uses any of these we REFUSE: the actual code that executes
- * cannot be pinned to the single script argument, so verifying one file would be
- * fail-open theatre (round-17 finding 2 / advisor gap-2). The operator must invoke
- * the resolver by an explicit script/binary path instead.
- */
-const CODE_LOADING_INTERPRETER_FLAGS = new Set([
-  '-e', '--eval', '-p', '--print', '-r', '--require', '--import',
-  '--loader', '--experimental-loader',
-]);
-
-/**
- * Round-17 finding 2 (+ advisor gap-2): identify the resolver ARTIFACT FILE that the
- * declared `--resolver-digest` must verify. Fail CLOSED — this NEVER returns an
- * unverified observation:
- *   - a bare command (no path separator, not resolvable) → throw;
- *   - hashing an INTERPRETER (`node`, `python`, …) instead of the resolver script → throw;
- *     the artifact is the first non-flag token AFTER the interpreter (its flags skipped);
- *   - a code-loading interpreter flag (`-e`, `--require`, `--import`, `--loader`, …) →
- *     throw (the running code is not pinned to a single script);
- *   - a missing/unreadable artifact, an absent declared digest, or a digest MISMATCH → throw.
- * The round-16 form hashed `command[0]` unconditionally and soft-passed a bare binary
- * with `verified:false` while the caller admitted anyway — both fail-open.
+ * Round-18 finding 1: VERIFY the EXPLICITLY-DECLARED resolver artifact and refuse on
+ * any mismatch. Round 17 INFERRED the artifact from argv (skip a leading interpreter,
+ * hash the first path token); a reviewer proved that unsound (`perl -eCODE <decoy>`
+ * verified the decoy while perl ran inline code; a symlink named `watch-resolver` → node
+ * was hashed as node while a script argument ran). The sound rule lives in
+ * `verifyResolverArtifact`: the operator declares `execution.resolverArtifactPath` +
+ * `execution.interpreted`, and the command SHAPE is validated (deny-by-default) against
+ * that declaration by realpath. Here we additionally require the declared
+ * `--resolver-digest` and refuse unless the verified artifact's COMPOSITE digest matches
+ * it. The composite (round-19 findings 1+2) folds the artifact CONTENT hash with the
+ * canonical execution SHAPE, so `--resolver-digest` binds BOTH — and the executor
+ * re-derives and re-compares the SAME composite at the drain seam.
  */
 export interface ResolverArtifactObservation {
   observed: true;
+  /** The COMPOSITE digest (content + shape) — the value bound as `resolver_digest`. */
   digest: string;
+  /** The artifact CONTENT digest alone (recorded in the receipt for corroboration). */
+  contentDigest: string;
   declaredDigest: string;
   verified: true;
   artifactPath: string;
+  interpreted: boolean;
 }
 
-/** Locate the resolver artifact file within the execution command argv. Throws (fail-closed) on any ambiguity. */
-export function resolveResolverArtifactPath(command: readonly string[]): string {
-  if (command.length === 0) throw new Error('refusing to record: resolver command is empty — nothing to verify');
-  let idx = 0;
-  // `env [VAR=val ...] <real-cmd> …` — consume env and its assignments, then continue.
-  if (basename(command[0]!) === 'env') {
-    idx = 1;
-    while (idx < command.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(command[idx]!)) idx += 1;
-    if (idx >= command.length) throw new Error('refusing to record: resolver command is only `env` with no program to verify');
-  }
-  const zero = command[idx]!;
-  const zeroIsInterpreter = INTERPRETER_BASENAMES.has(basename(zero));
-  if (!zeroIsInterpreter) {
-    if (!zero.includes('/')) {
-      throw new Error(`refusing to record: resolver command "${zero}" is a bare name with no path — cannot locate and verify the installed artifact; declare an absolute resolver path in the instance config`);
-    }
-    return zero; // command[idx] IS the resolver binary/script
-  }
-  // Interpreter: walk its flags to the script, refusing anything that injects code.
-  for (let i = idx + 1; i < command.length; i += 1) {
-    const tok = command[i]!;
-    const flagName = tok.startsWith('-') ? tok.split('=', 1)[0]! : null;
-    if (flagName !== null && CODE_LOADING_INTERPRETER_FLAGS.has(flagName)) {
-      throw new Error(`refusing to record: resolver command loads code via ${flagName} — the running code is not pinned to a single script, so the attestation cannot verify the exact resolver; invoke the resolver by an explicit script/binary path`);
-    }
-    if (flagName !== null) continue; // a benign interpreter flag (e.g. --experimental-strip-types)
-    if (!tok.includes('/')) {
-      throw new Error(`refusing to record: resolver script "${tok}" (after interpreter ${basename(zero)}) is a bare name with no path — declare an absolute script path so the artifact can be verified`);
-    }
-    return tok; // the first non-flag token after the interpreter is the resolver script
-  }
-  throw new Error(`refusing to record: resolver command uses interpreter ${basename(zero)} but names no script path to verify`);
-}
-
-export function observeResolverArtifact(command: readonly string[], declaredResolverDigest: string | null): ResolverArtifactObservation {
+export function observeResolverArtifact(
+  execution: ResolverArtifactDeclaration,
+  declaredResolverDigest: string | null,
+): ResolverArtifactObservation {
   if (declaredResolverDigest === null || declaredResolverDigest.length === 0) {
-    throw new Error('refusing to record: --resolver-digest is required — the attestation MUST verify the exact resolver artifact that runs; a missing declared digest cannot be checked');
+    throw new Error('refusing to record: --resolver-digest is required — the attestation MUST verify the exact resolver artifact (content AND shape) that runs; a missing declared digest cannot be checked');
   }
-  const artifactPath = resolveResolverArtifactPath(command);
-  let bytes: Buffer;
-  try {
-    bytes = readFileSync(artifactPath);
-  } catch (err) {
-    throw new Error(`refusing to record: resolver artifact ${artifactPath} is unreadable: ${err instanceof Error ? err.message : String(err)}`);
-  }
-  const digest = createHash('sha256').update(bytes).digest('hex');
-  if (digest !== declaredResolverDigest) {
+  const verified = verifyResolverArtifact(execution);
+  if (verified.compositeDigest !== declaredResolverDigest) {
     throw new Error(
-      `refusing to record: installed resolver artifact ${artifactPath} digest ${digest} does not match declared --resolver-digest ${declaredResolverDigest} `
-      + `(the attestation would bind a resolver that is not the one installed)`,
+      `refusing to record: declared resolver artifact ${verified.realpath} composite digest ${verified.compositeDigest} does not match declared --resolver-digest ${declaredResolverDigest} `
+      + `(the attestation would bind a resolver whose content or execution shape is not the one installed)`,
     );
   }
-  return { observed: true, digest, declaredDigest: declaredResolverDigest, verified: true, artifactPath };
+  return {
+    observed: true,
+    digest: verified.compositeDigest,
+    contentDigest: verified.contentDigest,
+    declaredDigest: declaredResolverDigest,
+    verified: true,
+    artifactPath: verified.realpath,
+    interpreted: verified.interpreted,
+  };
 }
 
 /**
@@ -474,15 +430,26 @@ export function assertMediaRootReadable(mediaRoot: string): void {
 export function writeReceiptDurably(receiptPath: string, receipt: unknown): void {
   const json = JSON.stringify(receipt, null, 2);
   const abs = resolve(receiptPath);
-  const tmp = `${abs}.tmp-${process.pid}`;
-  const fd = openSync(tmp, 'w');
+  const tmp = `${abs}.tmp-${process.pid}-${randomUUID()}`;
+  const fd = openSync(tmp, 'wx'); // exclusive temp (unique name; never reuses a sibling)
   try {
     writeFileSync(fd, json);
     fsyncSync(fd);
   } finally {
     closeSync(fd);
   }
-  renameSync(tmp, abs);
+  // finding-2 (r18): PUBLISH atomically and NO-CLOBBER. `link()` fails EEXIST if the
+  // receipt already exists, so a second attestation can never overwrite / destroy the
+  // first's preserved evidence (the round-17 form `rename()`d OVER any existing receipt;
+  // reusing a nonce then destroyed the prior row's evidence and failed the unique-nonce
+  // insert). Evidence is write-once; a re-run must use a fresh --receipt-out.
+  try {
+    linkSync(tmp, abs);
+  } catch (err) {
+    unlinkSync(tmp);
+    throw new Error(`refusing to record: receipt ${abs} already exists — probe evidence is write-once and must not be overwritten (use a fresh --receipt-out per run): ${err instanceof Error ? err.message : String(err)}`);
+  }
+  unlinkSync(tmp);
   const dirFd = openSync(dirname(abs), 'r');
   try {
     fsyncSync(dirFd);
@@ -567,9 +534,10 @@ if (import.meta.url === invokedPath) {
           const options = loadObligationOptionsFromConfig(args.configPath);
           assertArgsMatchConfig(args, options); // refuse an un-admittable binding before running anything
           assertMediaRootReadable(options.mediaRoot); // finding-1: media-root must be a readable directory
-          // finding-2: identify + VERIFY the resolver SCRIPT artifact (skips a leading
-          // interpreter; refuses code-loading flags/bare names/mismatch). Throws unless verified.
-          const artifact = observeResolverArtifact(options.execution.command, args.skill.resolverDigest);
+          // finding-1 (r18): VERIFY the EXPLICITLY-DECLARED resolver artifact by realpath
+          // shape-validation (never argv inference). Throws unless the declared artifact
+          // IS the token that executes and its content matches --resolver-digest.
+          const artifact = observeResolverArtifact(options.execution, args.skill.resolverDigest);
           const now = new Date();
           const canary = await runResolverCanary({
             command: options.execution.command,

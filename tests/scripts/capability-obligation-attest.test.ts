@@ -15,6 +15,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { attestationBindingDigest, findAdmissibleAttestation } from '../../src/core/capability-attestation.ts';
 import { parseCapabilityObligationsOptions, type CapabilityObligationsOptions } from '../../src/core/capability-contract.ts';
+import { resolverCompositeDigest } from '../../src/core/capability-resolver-artifact.ts';
 import { Database } from '../../src/core/database.ts';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 import {
@@ -76,7 +77,7 @@ function args(over: Partial<AttestArgs> = {}): AttestArgs {
       dependencyVersions: { 'yt-dlp': '2026.03.17' }, probeVersion: 'p/1', canaryId: 'can-1',
     },
     mediaRoot: '/var/media', releaseSha: 'rel-1', validForSeconds: 3600, runId: 'run-1',
-    hostId: 'test-host', runtimeUser: 'test-user', configPath: null, probeSource: null,
+    hostId: 'test-host', runtimeUser: 'test-user', configPath: null, probeSource: null, receiptOut: null,
     runCanary: false, confirm: false, json: false,
     ...over,
   };
@@ -229,11 +230,27 @@ describe('capability-obligation-attest CLI (the operator front-door records end-
   // declare the SCRIPT's digest, and artifact observation hashes the SCRIPT — never the
   // node interpreter. (`node -e '<inline>'` has no artifact and is correctly unattestable.)
   const RESOLVER_SRC = 'const s = process.argv[2]; process.stdout.write("processed:" + s);\n';
-  const RESOLVER_DIGEST = createHash('sha256').update(RESOLVER_SRC).digest('hex');
 
-  function writeConfig(dir: string, over: { mediaRoot?: string; resolverDigest?: string; command?: readonly string[] } = {}): string {
+  // findings 1+2: the attested `resolverDigest` is now a COMPOSITE (artifact CONTENT folded
+  // with the canonical execution SHAPE). Derive it from the config the CLI actually reads,
+  // exactly as the producer/executor do, so admission and the drain-seam re-comparison match.
+  function compositeFromConfigFile(configFile: string): string {
+    const cfg = JSON.parse(readFileSync(configFile, 'utf8')) as {
+      agentOptions: { capabilityObligations: { execution: { command: string[]; resolverArtifactPath: string; interpreted: boolean } } };
+    };
+    const ex = cfg.agentOptions.capabilityObligations.execution;
+    const contentDigest = createHash('sha256').update(readFileSync(realpathSync(ex.resolverArtifactPath))).digest('hex');
+    return resolverCompositeDigest(contentDigest, { command: ex.command, resolverArtifactPath: ex.resolverArtifactPath, interpreted: ex.interpreted });
+  }
+
+  function writeConfig(dir: string, over: { mediaRoot?: string; resolverDigest?: string; command?: readonly string[]; resolverArtifactPath?: string; interpreted?: boolean } = {}): string {
     const resolverPath = join(dir, 'resolver.cjs');
     writeFileSync(resolverPath, RESOLVER_SRC);
+    const command = over.command ?? [process.execPath, resolverPath, '{source}'];
+    const resolverArtifactPath = over.resolverArtifactPath ?? resolverPath;
+    const interpreted = over.interpreted ?? true;
+    // The config declares the COMPOSITE (unless a test overrides with a deliberately-wrong one).
+    const composite = resolverCompositeDigest(createHash('sha256').update(RESOLVER_SRC).digest('hex'), { command, resolverArtifactPath, interpreted });
     const configFile = join(dir, 'instance.json');
     writeFileSync(configFile, JSON.stringify({
       agentOptions: {
@@ -244,11 +261,14 @@ describe('capability-obligation-attest CLI (the operator front-door records end-
           retentionPolicyVersion: 'ret/1',
           retentionHorizonDays: 30,
           execution: {
-            command: over.command ?? [process.execPath, resolverPath, '{source}'],
+            command,
             timeoutMs: 10_000, minOutputBytes: 5,
+            // round-18 finding 1: explicit artifact declaration (verified, never inferred).
+            resolverArtifactPath,
+            interpreted,
           },
           attestation: {
-            skillName: 'watch', skillVersion: '1.0.0', skillDigest: 'sd', resolverDigest: over.resolverDigest ?? RESOLVER_DIGEST,
+            skillName: 'watch', skillVersion: '1.0.0', skillDigest: 'sd', resolverDigest: over.resolverDigest ?? composite,
             dependencyVersions: { 'yt-dlp': '2026.03.17' }, probeVersion: 'p/1', canaryId: 'can-1',
           },
         },
@@ -265,10 +285,11 @@ describe('capability-obligation-attest CLI (the operator front-door records end-
     return dbFile;
   }
 
-  function runCli(dbFile: string, configFile: string, mediaRoot: string, extra: readonly string[] = [], resolverDigest = RESOLVER_DIGEST): ReturnType<typeof spawnSync> {
+  function runCli(dbFile: string, configFile: string, mediaRoot: string, extra: readonly string[] = [], resolverDigest?: string): ReturnType<typeof spawnSync> {
+    const digest = resolverDigest ?? compositeFromConfigFile(configFile);
     const cliArgs = [
       '--db', dbFile, '--provider', 'claude-cli', '--contract-version', 'c/1', '--capability', 'child_process_tools',
-      '--skill-name', 'watch', '--skill-version', '1.0.0', '--skill-digest', 'sd', '--resolver-digest', resolverDigest,
+      '--skill-name', 'watch', '--skill-version', '1.0.0', '--skill-digest', 'sd', '--resolver-digest', digest,
       '--dep', 'yt-dlp=2026.03.17', '--probe-version', 'p/1', '--canary-id', 'can-1',
       '--media-root', mediaRoot, '--release-sha', 'rel-1', '--valid-seconds', '3600', '--run-id', 'run-1',
       '--host', 'test-host', '--runtime-user', 'test-user', '--config', configFile, ...extra,
@@ -280,11 +301,11 @@ describe('capability-obligation-attest CLI (the operator front-door records end-
     );
   }
 
-  function admissibleOutcome(dbFile: string, mediaRoot: string): string {
+  function admissibleOutcome(dbFile: string, mediaRoot: string, configFile: string): string {
     const check = new Database(dbFile);
     check.open();
     try {
-      const a = args({ dbPath: dbFile, hostId: 'test-host', runtimeUser: 'test-user', mediaRoot, skill: { ...args().skill, resolverDigest: RESOLVER_DIGEST } });
+      const a = args({ dbPath: dbFile, hostId: 'test-host', runtimeUser: 'test-user', mediaRoot, skill: { ...args().skill, resolverDigest: compositeFromConfigFile(configFile) } });
       return (findAdmissibleAttestation(check, bindingForAttestArgs(a)) as { outcome: string }).outcome;
     } finally {
       check.close();
@@ -299,7 +320,7 @@ describe('capability-obligation-attest CLI (the operator front-door records end-
     const result = runCli(dbFile, configFile, dir, ['--run-canary', '--confirm', '--probe-source', 'https://probe.example/clip', '--receipt-out', receiptOut]);
     expect(result.status, `stderr: ${result.stderr}`).toBe(0);
     expect(result.stdout).toMatch(/RECORDED attest child_process_tools/);
-    expect(admissibleOutcome(dbFile, dir)).toBe('admissible');
+    expect(admissibleOutcome(dbFile, dir, configFile)).toBe('admissible');
     // Evidence preserved: the receipt carries the probe streams' digests + verified artifact.
     expect(existsSync(receiptOut)).toBe(true);
     const receipt = JSON.parse(readFileSync(receiptOut, 'utf8')) as Record<string, unknown>;
@@ -307,7 +328,7 @@ describe('capability-obligation-attest CLI (the operator front-door records end-
     expect(receipt).toMatchObject({ canaryResult: 'pass', resolverArtifact: { observed: true, verified: true } });
     expect((receipt.canary as { detail: { stdoutSha256: string; stderrSha256: string; probeSourceDigest: string } }).detail.probeSourceDigest).toEqual(expect.any(String));
     // digest-bound: the receipt's binding digest equals the digest recomputable from the binding (the "digest-bound" half of finding 1)
-    const boundArgs = args({ dbPath: dbFile, hostId: 'test-host', runtimeUser: 'test-user', mediaRoot: dir, skill: { ...args().skill, resolverDigest: RESOLVER_DIGEST } });
+    const boundArgs = args({ dbPath: dbFile, hostId: 'test-host', runtimeUser: 'test-user', mediaRoot: dir, skill: { ...args().skill, resolverDigest: compositeFromConfigFile(configFile) } });
     expect(receipt.attestationBindingDigest).toBe(attestationBindingDigest(bindingForAttestArgs(boundArgs)));
     expect(receipt.nonce).toBe('run-1');
   }, 30_000);
@@ -320,20 +341,36 @@ describe('capability-obligation-attest CLI (the operator front-door records end-
     const result = runCli(dbFile, configFile, dir, ['--run-canary', '--confirm', '--probe-source', 'https://probe.example/clip', '--receipt-out', receiptOut]);
     expect(result.status).not.toBe(0);
     expect(existsSync(receiptOut)).toBe(false);
-    expect(admissibleOutcome(dbFile, dir)).toBe('skip'); // ZERO admissible rows — no fail-open row without a durable receipt
+    expect(admissibleOutcome(dbFile, dir, configFile)).toBe('skip'); // ZERO admissible rows — no fail-open row without a durable receipt
   }, 30_000);
 
-  it('FALSIFIER (finding 2): a config resolver that LOADS CODE via -e refuses AND admits nothing (never hashes the interpreter)', () => {
+  it('FALSIFIER (finding 1, r18): a config resolver whose command[1] is an inline `-e` flag refuses AND admits nothing', () => {
     const dir = tmp.make('codeflag');
     const dbFile = seedSchemaCurrentDb(dir);
-    // The old defect: `node -e '<inline>'` with the node binary's digest declared "verified".
+    // The old defect: `node -e '<inline>'` verified a decoy while inline code ran. Now the
+    // declared artifact must BE command[1]; a flag at command[1] is refused.
     const configFile = writeConfig(dir, { command: [process.execPath, '-e', 'process.stdout.write("processed:x")', '{source}'] });
     const receiptOut = join(dir, 'r.json');
     const result = runCli(dbFile, configFile, dir, ['--run-canary', '--confirm', '--probe-source', 'https://probe.example/clip', '--receipt-out', receiptOut]);
     expect(result.status).not.toBe(0);
-    expect(result.stderr).toMatch(/loads code via -e/);
+    expect(result.stderr).toMatch(/is a flag, not the declared script|inline-code/);
     expect(existsSync(receiptOut)).toBe(false);
-    expect(admissibleOutcome(dbFile, dir)).toBe('skip');
+    expect(admissibleOutcome(dbFile, dir, configFile)).toBe('skip');
+  }, 30_000);
+
+  it('FALSIFIER (finding 2, r18): a second --run-canary to the SAME --receipt-out is REFUSED (evidence is write-once, no clobber)', () => {
+    const dir = tmp.make('receipt-clobber');
+    const dbFile = seedSchemaCurrentDb(dir);
+    const configFile = writeConfig(dir);
+    const receiptOut = join(dir, 'r.json');
+    const first = runCli(dbFile, configFile, dir, ['--run-canary', '--confirm', '--probe-source', 'https://probe.example/clip', '--receipt-out', receiptOut]);
+    expect(first.status, `stderr: ${first.stderr}`).toBe(0);
+    const firstReceipt = readFileSync(receiptOut, 'utf8');
+    // A second run to the same path must NOT overwrite the first receipt's evidence.
+    const second = runCli(dbFile, configFile, dir, ['--run-canary', '--confirm', '--probe-source', 'https://probe.example/other', '--receipt-out', receiptOut]);
+    expect(second.status).not.toBe(0);
+    expect(second.stderr).toMatch(/already exists|write-once/);
+    expect(readFileSync(receiptOut, 'utf8')).toBe(firstReceipt); // first evidence intact
   }, 30_000);
 
   it('FALSIFIER: an installed-resolver digest MISMATCH refuses to record (never trusts the declared digest)', () => {
@@ -345,7 +382,7 @@ describe('capability-obligation-attest CLI (the operator front-door records end-
     const result = runCli(dbFile, configFile, dir, ['--run-canary', '--confirm', '--probe-source', 'https://probe.example/clip', '--receipt-out', receiptOut], 'de'.repeat(32));
     expect(result.status).not.toBe(0);
     expect(result.stderr).toMatch(/does not match declared --resolver-digest/);
-    expect(admissibleOutcome(dbFile, dir)).toBe('skip');
+    expect(admissibleOutcome(dbFile, dir, configFile)).toBe('skip');
   }, 30_000);
 
   it('FALSIFIER: an unreadable media root refuses to record', () => {
@@ -365,7 +402,7 @@ describe('capability-obligation-attest CLI (the operator front-door records end-
     const result = runCli(dbFile, configFile, dir, ['--run-canary', '--confirm', '--probe-source', 'https://probe.example/clip']);
     expect(result.status).not.toBe(0);
     expect(result.stderr).toMatch(/--run-canary requires --receipt-out/);
-    expect(admissibleOutcome(dbFile, dir)).toBe('skip');
+    expect(admissibleOutcome(dbFile, dir, configFile)).toBe('skip');
   }, 30_000);
 
   it('FALSIFIER: the default dry-run records NOTHING (admission stays closed)', () => {
@@ -375,7 +412,7 @@ describe('capability-obligation-attest CLI (the operator front-door records end-
     const result = runCli(dbFile, configFile, dir, []); // no --run-canary
     expect(result.status, `stderr: ${result.stderr}`).toBe(0);
     expect(result.stdout).toMatch(/DRY-RUN attest child_process_tools/);
-    expect(admissibleOutcome(dbFile, dir)).toBe('skip'); // nothing recorded → not admissible
+    expect(admissibleOutcome(dbFile, dir, configFile)).toBe('skip'); // nothing recorded → not admissible
   }, 30_000);
 
   it('FALSIFIER: --run-canary without --confirm refuses (exit non-zero, records nothing)', () => {
@@ -385,11 +422,11 @@ describe('capability-obligation-attest CLI (the operator front-door records end-
     const result = runCli(dbFile, configFile, dir, ['--run-canary', '--probe-source', 'https://probe.example/clip', '--receipt-out', join(dir, 'r.json')]);
     expect(result.status).not.toBe(0);
     expect(result.stderr).toMatch(/--run-canary requires --confirm/);
-    expect(admissibleOutcome(dbFile, dir)).toBe('skip');
+    expect(admissibleOutcome(dbFile, dir, configFile)).toBe('skip');
   }, 30_000);
 });
 
-describe('observeResolverArtifact (round-17 mandatory resolver-script verification)', () => {
+describe('observeResolverArtifact (round-18: verify the EXPLICITLY-declared artifact + digest compare)', () => {
   function writeScript(name: string): { path: string; digest: string } {
     const dir = tmp.make('obs');
     const path = join(dir, name);
@@ -397,49 +434,30 @@ describe('observeResolverArtifact (round-17 mandatory resolver-script verificati
     return { path, digest: createHash('sha256').update(readFileSync(path)).digest('hex') };
   }
 
-  it('hashes the SCRIPT after an interpreter (never the interpreter) and VERIFIES a matching digest', () => {
+  it('verifies the declared interpreted SCRIPT and returns its COMPOSITE digest (content + shape)', () => {
     const { path, digest } = writeScript('r.cjs');
-    expect(observeResolverArtifact([process.execPath, path, '{source}'], digest))
-      .toMatchObject({ observed: true, verified: true, digest, artifactPath: path });
+    const execution = { command: [process.execPath, path, '{source}'], resolverArtifactPath: path, interpreted: true };
+    const composite = resolverCompositeDigest(digest, execution);
+    expect(observeResolverArtifact(execution, composite))
+      .toMatchObject({ observed: true, verified: true, digest: composite, contentDigest: digest, interpreted: true });
   });
 
-  it('verifies a direct-path resolver where command[0] IS the artifact', () => {
-    const { path, digest } = writeScript('r');
-    expect(observeResolverArtifact([path, '{source}'], digest)).toMatchObject({ verified: true, artifactPath: path });
-  });
-
-  it('skips a benign interpreter flag (--experimental-strip-types) and finds the script', () => {
-    const { path, digest } = writeScript('r.ts');
-    expect(observeResolverArtifact([process.execPath, '--experimental-strip-types', path], digest))
-      .toMatchObject({ verified: true, artifactPath: path });
-  });
-
-  it('consumes `env` and VAR=val before the interpreter', () => {
-    const { path, digest } = writeScript('r.cjs');
-    expect(observeResolverArtifact(['/usr/bin/env', 'FOO=bar', 'node', path], digest))
-      .toMatchObject({ verified: true, artifactPath: path });
-  });
-
-  it('FALSIFIER: a MISMATCHED declared digest throws', () => {
+  it('FALSIFIER: a MISMATCHED declared --resolver-digest throws', () => {
     const { path } = writeScript('r.cjs');
-    expect(() => observeResolverArtifact([process.execPath, path, '{source}'], 'ab'.repeat(32))).toThrow(/does not match declared/);
+    expect(() => observeResolverArtifact({ command: [process.execPath, path, '{source}'], resolverArtifactPath: path, interpreted: true }, 'ab'.repeat(32)))
+      .toThrow(/does not match declared --resolver-digest/);
   });
 
-  it('FALSIFIER: a null/empty declared digest throws (verification is mandatory)', () => {
-    expect(() => observeResolverArtifact([process.execPath, '/x/r.cjs'], null)).toThrow(/--resolver-digest is required/);
+  it('FALSIFIER: a null/empty --resolver-digest throws (verification is mandatory)', () => {
+    const { path } = writeScript('r.cjs');
+    expect(() => observeResolverArtifact({ command: [process.execPath, path, '{source}'], resolverArtifactPath: path, interpreted: true }, null))
+      .toThrow(/--resolver-digest is required/);
   });
 
-  it('FALSIFIER: a bare binary with no path throws (cannot locate the artifact to verify)', () => {
-    expect(() => observeResolverArtifact(['yt-dlp', '{source}'], 'ab'.repeat(32))).toThrow(/bare name with no path/);
-  });
-
-  it('FALSIFIER: an inline `-e` resolver throws (code not pinned to a script — the round-16 fail-open)', () => {
-    expect(() => observeResolverArtifact([process.execPath, '-e', 'evil()', '{source}'], 'ab'.repeat(32))).toThrow(/loads code via -e/);
-  });
-
-  it('FALSIFIER: `--require /preload` throws instead of silently verifying the WRONG file (advisor gap-2)', () => {
-    expect(() => observeResolverArtifact([process.execPath, '--require', '/tmp/preload.js', '/tmp/script.js'], 'ab'.repeat(32)))
-      .toThrow(/loads code via --require/);
+  it('FALSIFIER: an UNDECLARED artifact (would be inferred from argv) is refused', () => {
+    const { path, digest } = writeScript('r.cjs');
+    expect(() => observeResolverArtifact({ command: [process.execPath, path, '{source}'] }, digest))
+      .toThrow(/resolverArtifactPath is required/);
   });
 
   it('assertMediaRootReadable passes for a real dir and FALSIFIER-throws for a missing one', () => {

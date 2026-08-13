@@ -7,12 +7,13 @@
  * runtime pipeline entry is a scripted closure.
  */
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { recordCapabilityAttestation } from '../../../src/core/capability-attestation.ts';
+import { resolverCompositeDigest } from '../../../src/core/capability-resolver-artifact.ts';
 import { parseCapabilityObligationsOptions, type CapabilityObligationsOptions } from '../../../src/core/capability-contract.ts';
 import { CapabilityObligationStore } from '../../../src/core/capability-obligation-store.ts';
 import { Database } from '../../../src/core/database.ts';
@@ -33,7 +34,20 @@ import { ToolRegistry } from '../../../src/mcp/registry.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
 import type { ToolDeclaration } from '../../../src/mcp/types.ts';
 
-const TOOL_SESSION: SessionContext = { tier: 'chat', conversationKey: 'conv-rt', deliveryJid: 'test-dm-target@lid' };
+const TOOL_SESSION: SessionContext = { tier: 'chat-scoped', conversationKey: 'conv-rt', deliveryJid: 'test-dm-target@lid' };
+
+/**
+ * The attested `resolverDigest` is a COMPOSITE (round-19 findings 1+2): the artifact
+ * CONTENT digest folded with the canonical execution SHAPE. The executor recomputes it
+ * from the LIVE execution at drain and refuses on any mismatch, so a test's recorded
+ * attestation AND its runtime options must both carry the composite for the execution the
+ * executor actually runs. `compositeOf` derives it the same way the producer/executor do.
+ */
+function compositeOf(execution: CapabilityObligationsOptions['execution']): string {
+  const artifactPath = execution.resolverArtifactPath as string; // always declared in these fixtures
+  const contentDigest = createHash('sha256').update(readFileSync(realpathSync(artifactPath))).digest('hex');
+  return resolverCompositeDigest(contentDigest, execution);
+}
 
 /**
  * Structured timing exemption (test-integrity `js-sleep-in-test`): the resolver
@@ -45,6 +59,12 @@ const TOOL_SESSION: SessionContext = { tier: 'chat', conversationKey: 'conv-rt',
 function TIMING(waitMs: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, waitMs));
 }
+
+// Round-18 finding 1: a real, explicitly-declared resolver script (the executor
+// verifies the declared artifact by realpath, refusing `node -e` inline forms).
+const RESOLVER_DIR = mkdtempSync(join(tmpdir(), 'co-runtime-resolver-'));
+const RESOLVER_PATH = join(RESOLVER_DIR, 'resolver.cjs');
+writeFileSync(RESOLVER_PATH, 'console.log("processed " + process.argv[2] + " frames+transcript ok")\n');
 
 const OPTIONS = parseCapabilityObligationsOptions({
   enabled: true,
@@ -58,9 +78,11 @@ const OPTIONS = parseCapabilityObligationsOptions({
   retentionPolicyVersion: 'policy/1',
   retentionHorizonDays: 30,
   execution: {
-    command: ['node', '-e', 'console.log("processed " + process.argv[1] + " frames+transcript ok")', '{source}'],
+    command: [process.execPath, RESOLVER_PATH, '{source}'],
     timeoutMs: 30_000,
     minOutputBytes: 8,
+    resolverArtifactPath: RESOLVER_PATH,
+    interpreted: true,
   },
   attestation: {
     skillName: 'watch',
@@ -72,6 +94,10 @@ const OPTIONS = parseCapabilityObligationsOptions({
     canaryId: 'canary-1',
   },
 }) as CapabilityObligationsOptions;
+// findings 1+2: the attested resolverDigest is the COMPOSITE (content + shape) of the
+// default execution — the placeholder above is overwritten so the executor's drain-seam
+// re-comparison matches. Override tests derive their own composite via compositeOf().
+OPTIONS.attestation.resolverDigest = compositeOf(OPTIONS.execution);
 
 const LIVE_FACTS: CapabilityObligationLiveFacts = {
   hostId: 'test-host',
@@ -98,7 +124,7 @@ afterEach(() => {
   db.close();
 });
 
-function freshAttestation(): number {
+function freshAttestation(execution: CapabilityObligationsOptions['execution'] = OPTIONS.execution): number {
   return recordCapabilityAttestation(db, {
     ...LIVE_FACTS,
     contractVersion: 'test-contract/1',
@@ -106,7 +132,8 @@ function freshAttestation(): number {
     skillName: OPTIONS.attestation.skillName,
     skillVersion: OPTIONS.attestation.skillVersion,
     skillDigest: OPTIONS.attestation.skillDigest,
-    resolverDigest: OPTIONS.attestation.resolverDigest,
+    // findings 1+2: record the COMPOSITE that admission + the executor will compare.
+    resolverDigest: compositeOf(execution),
     dependencyVersions: OPTIONS.attestation.dependencyVersions,
     probeVersion: OPTIONS.attestation.probeVersion,
     canaryId: OPTIONS.attestation.canaryId,
@@ -200,7 +227,9 @@ function makeRuntime(script: HarnessScript = {}) {
   const runtime = new CapabilityObligationRuntime({
     db,
     store,
-    options: script.execution === undefined ? OPTIONS : { ...OPTIONS, execution: script.execution },
+    options: script.execution === undefined
+      ? OPTIONS
+      : { ...OPTIONS, execution: script.execution, attestation: { ...OPTIONS.attestation, resolverDigest: compositeOf(script.execution) } },
     // r14 F3 — merged: one resolution yields the SERVING-provider facts (r13 F4
     // knob preserved) AND the dispatch bound to it.
     prepareDispatch: (obligation) => ({
@@ -349,19 +378,27 @@ describe('trusted execution tool (D6)', () => {
   });
 
   it('FALSIFIER: a failing resolver (nonzero exit) records an error receipt even with the right source', async () => {
-    const id = seedObligation();
-    freshAttestation();
-    const { runtime } = makeRuntime({
-      execution: { command: ['node', '-e', 'console.log("plenty of output before dying"); process.exit(3)', '{source}'], timeoutMs: 30_000, minOutputBytes: 8 },
-      onDispatch: async (tool) => {
-        await tool.handler({ source: SOURCE_URL }, TOOL_SESSION);
-      },
-    });
-    await runtime.tickOnce();
-    const rows = db.raw
-      .prepare('SELECT result_status, source_digest FROM capability_execution_receipts WHERE obligation_id = ?')
-      .all(id) as Array<{ result_status: string; source_digest: string }>;
-    expect(rows).toEqual([{ result_status: 'error', source_digest: SOURCE_DIGEST }]);
+    const work = mkdtempSync(join(tmpdir(), 'capx-exit3-'));
+    try {
+      const resolver = join(work, 'resolver.cjs');
+      writeFileSync(resolver, 'console.log("plenty of output before dying"); process.exit(3)\n');
+      const id = seedObligation();
+      const execution: CapabilityObligationsOptions['execution'] = { command: ['node', resolver, '{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: resolver, interpreted: true };
+      freshAttestation(execution);
+      const { runtime } = makeRuntime({
+        execution,
+        onDispatch: async (tool) => {
+          await tool.handler({ source: SOURCE_URL }, TOOL_SESSION);
+        },
+      });
+      await runtime.tickOnce();
+      const rows = db.raw
+        .prepare('SELECT result_status, source_digest FROM capability_execution_receipts WHERE obligation_id = ?')
+        .all(id) as Array<{ result_status: string; source_digest: string }>;
+      expect(rows).toEqual([{ result_status: 'error', source_digest: SOURCE_DIGEST }]);
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
   });
 
   it('FALSIFIER: a source that would smuggle an argv flag is refused BEFORE the resolver spawns', async () => {
@@ -385,9 +422,10 @@ describe('trusted execution tool (D6)', () => {
       const SMUGGLE_SOURCE = `--output=${smuggleTarget}`;
       const SMUGGLE_DIGEST = createHash('sha256').update(SMUGGLE_SOURCE).digest('hex');
       const id = seedObligation({ sourceDigest: SMUGGLE_DIGEST, sourceToken: SMUGGLE_SOURCE, replayText: SMUGGLE_SOURCE });
-      freshAttestation();
+      const execution: CapabilityObligationsOptions['execution'] = { command: ['node', resolver, '{source}'], timeoutMs: 30_000, minOutputBytes: 1, resolverArtifactPath: resolver, interpreted: true };
+      freshAttestation(execution);
       const { runtime } = makeRuntime({
-        execution: { command: ['node', resolver, '{source}'], timeoutMs: 30_000, minOutputBytes: 1 },
+        execution,
         onDispatch: async (tool) => {
           const result = (await tool.handler({ source: SMUGGLE_SOURCE }, TOOL_SESSION)) as Record<string, unknown>;
           expect(result['error']).toBe('capability_execution');
@@ -435,9 +473,10 @@ describe('trusted execution tool (D6)', () => {
       const escaped = join(work, 'escaped');
       const ESCAPED_DIGEST = createHash('sha256').update(escaped).digest('hex');
       const id = seedObligation({ sourceDigest: ESCAPED_DIGEST, sourceToken: escaped, replayText: escaped });
-      freshAttestation();
+      const execution: CapabilityObligationsOptions['execution'] = { command: ['node', resolver, '{source}'], timeoutMs: 200, minOutputBytes: 1, resolverArtifactPath: resolver, interpreted: true };
+      freshAttestation(execution);
       const { runtime } = makeRuntime({
-        execution: { command: ['node', resolver, '{source}'], timeoutMs: 200, minOutputBytes: 1 },
+        execution,
         onDispatch: async (tool) => {
           const result = (await tool.handler({ source: escaped }, TOOL_SESSION)) as Record<string, unknown>;
           expect(result['error']).toBe('capability_execution_failed'); // timed out
@@ -484,10 +523,11 @@ describe('trusted execution tool (D6)', () => {
       const escaped = join(work, 'escaped');
       const ESCAPED_DIGEST = createHash('sha256').update(escaped).digest('hex');
       const id = seedObligation({ sourceDigest: ESCAPED_DIGEST, sourceToken: escaped, replayText: escaped });
-      freshAttestation();
+      const execution: CapabilityObligationsOptions['execution'] = { command: ['node', resolver, '{source}'], timeoutMs: 30_000, minOutputBytes: 1, resolverArtifactPath: resolver, interpreted: true };
+      freshAttestation(execution);
       const { runtime } = makeRuntime({
         // timeout far larger than the clean exit — this is NOT the timeout path
-        execution: { command: ['node', resolver, '{source}'], timeoutMs: 30_000, minOutputBytes: 1 },
+        execution,
         onDispatch: async (tool) => {
           const result = (await tool.handler({ source: escaped }, TOOL_SESSION)) as Record<string, unknown>;
           expect(result['executed']).toBe(true); // clean exit 0 with output → ok receipt
@@ -525,10 +565,11 @@ describe('trusted execution tool (D6)', () => {
       const resolver = join(work, 'echo.cjs');
       writeFileSync(resolver, "const m=/^--out=(.+)$/.exec(process.argv[2]);console.log(m?m[1]:'NO-SUBSTITUTION');");
       seedObligation();
-      freshAttestation();
+      const execution: CapabilityObligationsOptions['execution'] = { command: ['node', resolver, '--out={source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: resolver, interpreted: true };
+      freshAttestation(execution);
       let output = '';
       const { runtime } = makeRuntime({
-        execution: { command: ['node', resolver, '--out={source}'], timeoutMs: 30_000, minOutputBytes: 8 },
+        execution,
         onDispatch: async (tool) => {
           const r = (await tool.handler({ source: SOURCE_URL }, TOOL_SESSION)) as { output?: string };
           output = r.output ?? '';
@@ -556,9 +597,10 @@ describe('trusted execution tool (D6)', () => {
       const mutator = join(work, 'mutator.cjs');
       writeFileSync(mutator, "require('fs').writeFileSync(process.argv[2],'MUTATED-DIFFERENT-BYTES');console.log('processed-and-mutated-ok');");
       const id = seedObligation({ retainedMedia: { path: mediaPath, sha256: mediaSha, bytes: ORIGINAL.length, policyVersion: 'p/1' } });
-      freshAttestation();
+      const execution: CapabilityObligationsOptions['execution'] = { command: ['node', mutator, '{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: mutator, interpreted: true };
+      freshAttestation(execution);
       const { runtime } = makeRuntime({
-        execution: { command: ['node', mutator, '{source}'], timeoutMs: 30_000, minOutputBytes: 8 },
+        execution,
         onDispatch: async (tool) => {
           const r = (await tool.handler({ source: mediaPath }, TOOL_SESSION)) as Record<string, unknown>;
           expect(r['error']).toBeDefined();
@@ -572,6 +614,64 @@ describe('trusted execution tool (D6)', () => {
       expect((JSON.parse(row.output_evidence) as Record<string, unknown>)['reason']).toBe('media_mutated_during_execution');
       // The RETAINED original is untouched — the resolver mutated only the snapshot.
       expect(readFileSync(mediaPath, 'utf8')).toBe(ORIGINAL);
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
+  });
+
+  it('finding 3 (r19): the pinned resolver still resolves a SIBLING module — the same-dir hardlink preserves resolution a temp copy would break', async () => {
+    const work = mkdtempSync(join(tmpdir(), 'capx-sibling-'));
+    try {
+      writeFileSync(join(work, 'helper.cjs'), 'module.exports = function () { return "HELPER-OK"; };');
+      const resolver = join(work, 'resolver.cjs');
+      // require('./helper.cjs') resolves relative to the EXECUTING file's dir; a private-temp
+      // COPY would look in the temp dir (no helper) and throw. The same-dir hardlink pin keeps
+      // the sibling reachable — this is why finding 3 uses a hardlink, not a copy.
+      writeFileSync(resolver, 'const h = require("./helper.cjs"); console.log("processed " + process.argv[2] + " " + h());');
+      const execution: CapabilityObligationsOptions['execution'] = { command: [process.execPath, resolver, '{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: resolver, interpreted: true };
+      seedObligation();
+      freshAttestation(execution);
+      let output = '';
+      const { runtime } = makeRuntime({
+        execution,
+        onDispatch: async (tool) => {
+          const r = (await tool.handler({ source: SOURCE_URL }, TOOL_SESSION)) as { executed?: boolean; output?: string };
+          expect(r.executed).toBe(true);
+          output = r.output ?? '';
+        },
+      });
+      await runtime.tickOnce();
+      expect(output).toContain('HELPER-OK'); // the sibling module resolved through the pin
+      expect(readdirSync(work).some((f) => f.startsWith('.pinned-'))).toBe(false); // pin cleaned up, no litter
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
+  });
+
+  it('FALSIFIER (findings 1+2): a resolver whose CONTENT is swapped AFTER attestation is REFUSED at the drain seam (composite mismatch), never executed', async () => {
+    const work = mkdtempSync(join(tmpdir(), 'capx-swap-'));
+    try {
+      const resolver = join(work, 'resolver.cjs');
+      writeFileSync(resolver, 'console.log("processed " + process.argv[2] + " ORIGINAL ok");');
+      const execution: CapabilityObligationsOptions['execution'] = { command: [process.execPath, resolver, '{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: resolver, interpreted: true };
+      const id = seedObligation();
+      freshAttestation(execution); // records the COMPOSITE of the ORIGINAL bytes + shape
+      const { runtime } = makeRuntime({
+        execution,
+        onDispatch: async (tool) => {
+          // The reviewer's real-CLI repro: replace the resolver at the SAME path after attestation.
+          // The executor re-derives the live composite and must refuse — the swapped bytes never run.
+          writeFileSync(resolver, 'require("node:fs").writeFileSync(process.argv[3] || "/tmp/evil-marker", "PWNED"); console.log("processed " + process.argv[2] + " SWAPPED-EVIL ok");');
+          const r = (await tool.handler({ source: SOURCE_URL }, TOOL_SESSION)) as Record<string, unknown>;
+          expect(r['error']).toBe('capability_execution');
+        },
+      });
+      await runtime.tickOnce();
+      const row = db.raw
+        .prepare('SELECT result_status, output_evidence FROM capability_execution_receipts WHERE obligation_id = ?')
+        .get(id) as { result_status: string; output_evidence: string };
+      expect(row.result_status).toBe('error');
+      expect((JSON.parse(row.output_evidence) as Record<string, unknown>)['reason']).toBe('resolver_digest_mismatch');
     } finally {
       rmSync(work, { recursive: true, force: true });
     }

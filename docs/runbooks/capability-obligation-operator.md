@@ -34,21 +34,30 @@ non-sending resolver canary passes.
   additionally proves the binding matches the instance config.
 - **Record:** `--run-canary --confirm --config PATH --probe-source SOURCE --receipt-out PATH --resolver-digest DIGEST`.
 
-Before recording, the command is **fail-closed** on three observations (hardened round 17):
+Before recording, the command is **fail-closed** on three observations (hardened round 18):
 
 1. **media-root readability** — refuses unless the binding's media root is a readable directory.
-2. **resolver-artifact verification (mandatory)** — `--resolver-digest` is REQUIRED and the
-   command sha256s the resolver **script**, not the interpreter: it locates the script within
-   `execution.command` (skipping a leading `node`/`python`/… interpreter and its benign flags),
-   and **refuses** a code-loading flag (`-e`, `--require`, `--import`, `--loader`, …), a bare
-   name with no path, an unreadable artifact, or any digest mismatch. There is no soft
-   "observed:false" pass — an unverifiable resolver is refused, never admitted.
-3. **evidence preservation, durable before admission** — the probe's stdout/stderr digests +
-   byte counts + exit/signal + observed-source digest are written to the `--receipt-out` file,
-   which is **fsynced and read-back-verified BEFORE the attestation row is admitted**. If the
-   receipt cannot be made durable, no attestation row is committed (round-17 finding 1). The
-   receipt records probe evidence only; it does not assert admission (admission = the
-   `capability_attestations` row carrying this run's `nonce`).
+2. **resolver-artifact verification (mandatory, EXPLICIT, content+shape)** — the resolver artifact is
+   declared on `execution`: `resolverArtifactPath` (the code file) + `interpreted` (true ⇒ `command[0]`
+   is an interpreter and the artifact is `command[1]`; false ⇒ `command[0]` is the artifact). The
+   command sha256s **that declared file** (by realpath), requires its realpath to BE the token that
+   executes — NEVER inferred from argv (round-18 finding 1) — and folds that content hash with the
+   canonical command shape into a **COMPOSITE** `resolver_digest`. `--resolver-digest` is REQUIRED and
+   must equal that COMPOSITE (round-19 findings 1+2). It **refuses** an inline/flag at the script
+   position (`node -e …`, `perl -eCODE`), a declared artifact whose realpath ≠ the executing token,
+   an `interpreted:false` MISLABEL of an interpreter (a `watch-resolver`→node symlink declared "direct"),
+   a missing/unreadable artifact, or any composite mismatch. **The executor re-derives the SAME composite
+   from the LIVE artifact + shape at the drain seam and refuses on any mismatch** — a post-attest content
+   swap OR command-shape change is caught before any spawn — then executes a same-directory **hardlink
+   PIN** of the verified bytes (path-swap-proof, sibling-resolution-preserving; an unpinnable directory
+   fails closed).
+3. **evidence preservation, durable + no-clobber, before admission** — the probe's stdout/stderr
+   digests + byte counts + exit/signal + observed-source digest are written to the `--receipt-out`
+   file, which is **fsynced, read-back-verified, and published NO-CLOBBER (`link()`) BEFORE the
+   attestation row is admitted** — so an admissible row implies its receipt was durable first, and
+   a second run to the SAME path is REFUSED rather than overwriting the first's evidence (round-18
+   finding 2; use a fresh `--receipt-out` per run). The receipt records probe evidence only; it
+   does not assert admission (admission = the `capability_attestations` row carrying this `nonce`).
 
 The canary also owns a **process group** (`detached`) and SIGKILLs it on timeout AND on clean
 exit, so a resolver that forks a grandchild (yt-dlp → ffmpeg) cannot leave it to land a side
@@ -96,9 +105,11 @@ unless a live AS-08 approval is in force.
 **Its `activateSession` port has no live adapter and no operator trigger.** Activating a real
 group session is the AE1-sensitive act (a resumed group session can emit unsolicited
 messages bypassing the sibling filter), so the live adapter is left for an owner-authorized
-change with its own review. Until it exists, the three incident obligations are **not
-operationally drainable after a cold deploy** — this is a named acceptance blocker, not a
-supported path.
+change with its own review. The precise gap (round-18 correction): there is **no deterministic,
+operator-triggered cold-drain path**. A DM obligation MAY still resume opportunistically via a
+fresh checkpoint or the chat's next natural inbound; a GROUP obligation cannot (AE1). The missing
+piece is a deterministic operator command to drain a NAMED cold obligation on demand — a named
+acceptance blocker, not a supported path.
 
 ## End-to-end order
 

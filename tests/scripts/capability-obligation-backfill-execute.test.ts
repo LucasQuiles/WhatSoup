@@ -162,7 +162,6 @@ const exec = (m: ReturnType<typeof manifest>, opts?: { approvedDigest?: string; 
     mediaRoot: join(work, 'retained'),
     retentionPolicyVersion: 'policy/1',
     skillName: 'watch',
-    mediaClassFor: (d) => (d.mediaSha256 != null ? 'video' : null),
     dryRun: opts?.dryRun ?? false,
   });
 

@@ -262,6 +262,20 @@ const executionRuleSchema = z
     timeoutMs: z.number().int().positive().max(600_000),
     /** Minimum resolver stdout bytes for an 'ok' receipt. */
     minOutputBytes: z.number().int().positive(),
+    /**
+     * Round-18 finding 1: the EXPLICIT path to the resolver's code artifact — the
+     * file whose content the attestation verifies (never inferred from argv). Optional
+     * in the schema so unrelated configs still parse, but REQUIRED, fail-closed, at the
+     * attest canary and the executor spawn seam: an obligation cannot be attested or
+     * drained without it. See `capability-resolver-artifact.ts`.
+     */
+    resolverArtifactPath: z.string().min(1).nullable().default(null),
+    /**
+     * Round-18 finding 1: true ⇒ command[0] is an interpreter and the artifact is
+     * command[1]; false ⇒ command[0] is the artifact itself. The operator declares the
+     * structure; the verifier never guesses it.
+     */
+    interpreted: z.boolean().nullable().default(null),
   })
   .refine((rule) => rule.command.some((part) => part.includes('{source}')), {
     message: "execution.command must reference the '{source}' placeholder",

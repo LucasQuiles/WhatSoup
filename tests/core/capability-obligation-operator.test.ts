@@ -80,6 +80,7 @@ const stateOf = (id: number) =>
 function toBlockedAmbiguous(id: number): void {
   const claim = store.claimObligation(id, { claimToken: `tok-${id}`, leaseSeconds: 300, admissionAttestationId: seedFreshAttestation() });
   expect(claim.applied).toBe(true);
+  if (!claim.applied) throw new Error('unreachable: claim.applied asserted true above'); // narrows the union for claimEpoch
   const blocked = store.blockObligation(
     id,
     { claimToken: `tok-${id}`, claimEpoch: claim.claimEpoch },
