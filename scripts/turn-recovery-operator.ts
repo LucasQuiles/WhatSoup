@@ -30,6 +30,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { appendFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
+import { CliArgError, takeValue } from './lib/cli-args.ts';
 import type { TurnRecoveryJobRow } from '../src/core/turn-recovery-store.ts';
 
 // stdout is the CLI's data channel (JSON only) — silence the pino logger the
@@ -71,10 +72,9 @@ function parseArgs(argv: string[]): Args {
   for (let i = 0; i < rest.length; i += 1) {
     const flag = rest[i];
     const next = (): string => {
-      const v = rest[i + 1];
-      if (v === undefined) throw new Error(`missing value for ${flag}`);
-      i += 1;
-      return v;
+      const taken = takeValue(rest, i, flag);
+      i = taken.index;
+      return taken.value;
     };
     switch (flag) {
       case '--db': args.db = next(); break;
@@ -85,7 +85,7 @@ function parseArgs(argv: string[]): Args {
       case '--evidence-type': args.evidenceType = next(); break;
       case '--evidence-ref': args.evidenceRef = next(); break;
       case '--audit-file': args.auditFile = next(); break;
-      default: throw new Error(`unknown flag: ${flag}`);
+      default: throw new CliArgError(`unknown flag: ${flag}`);
     }
   }
   return args;
