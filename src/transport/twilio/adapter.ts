@@ -23,6 +23,7 @@ import {
   PayloadTooLargeError,
   PermanentProviderError,
   RateLimitedError,
+  SendAmbiguousError,
   TransientProviderError,
   UnsupportedCapabilityError,
 } from '../contract/errors.ts';
@@ -61,11 +62,23 @@ function isTwilioRateLimit(err: PortErrorLike): boolean {
 }
 
 function isTwilioTransient(err: PortErrorLike): boolean {
-  // 5xx = provider-side fault; no status AND no Twilio code = network-level
-  // failure (DNS, timeout, connection reset) that never produced an API reply.
-  return (typeof err.status === 'number' && err.status >= 500)
-    || (err.status === undefined && err.code === undefined);
+  // 5xx = provider-side fault. A definitive API reply proves Twilio did NOT
+  // accept this message, so a retry cannot duplicate it.
+  return typeof err.status === 'number' && err.status >= 500;
 }
+
+function isTwilioNetworkFailure(err: PortErrorLike): boolean {
+  // No status AND no Twilio code = network-level failure (DNS, timeout,
+  // connection reset) that never produced an API reply.
+  return err.status === undefined && err.code === undefined;
+}
+
+// Operations that mutate provider state. A response-less network failure on
+// one of these is AMBIGUOUS — the request may have reached Twilio before the
+// connection died, so a generic retry risks a duplicate SMS/call (#2553).
+// Reads and connection setup stay plainly transient: re-running them cannot
+// double-deliver anything.
+const MUTATION_OPERATIONS: ReadonlySet<string> = new Set(['sendText', 'placeCall']);
 
 // ---------------------------------------------------------------------------
 // mapPortError: translate a raw port error to a typed TransportError.
@@ -97,10 +110,19 @@ function mapPortError(
     // Retry-After yet. If the SDK port (twilio-port.ts) ever surfaces it, wire it here.
     return new RateLimitedError({ ...base, message: `Twilio rate limit: ${msg}`, providerCode: String(pe.code ?? pe.status ?? '') });
   }
+  if (isTwilioNetworkFailure(pe)) {
+    // phase 'not_started' is a definitive pre-handoff failure: nothing reached
+    // Twilio, so retrying cannot duplicate — it stays plainly transient.
+    if (MUTATION_OPERATIONS.has(operation) && base.phase !== 'not_started') {
+      // The typed non-retryable outcome the taxonomy prescribes for
+      // uncertain-after-handoff sends (#2553): the durable disposition layer
+      // records mutation_state 'ambiguous' and retry admission stops instead
+      // of risking a duplicate SMS/call.
+      return new SendAmbiguousError({ ...base, message: `Twilio ${operation} outcome is ambiguous (network failure without an API reply): ${msg}`, providerCode: 'network_no_reply' });
+    }
+    return new TransientProviderError({ ...base, message: `Twilio transient error: ${msg}`, providerCode: String(pe.code ?? pe.status ?? '') });
+  }
   if (isTwilioTransient(pe)) {
-    // NOTE for send-path callers: a network failure after handoff is ambiguous
-    // — Twilio may have accepted the message. Generic retry loops risk
-    // duplicate SMS on this class of error.
     return new TransientProviderError({ ...base, message: `Twilio transient error: ${msg}`, providerCode: String(pe.code ?? pe.status ?? '') });
   }
   return new PermanentProviderError({ ...base, message: `Twilio provider error: ${msg}`, providerCode: String(pe.code ?? pe.status ?? '') });

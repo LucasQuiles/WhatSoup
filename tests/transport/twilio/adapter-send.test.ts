@@ -194,7 +194,7 @@ describe('TwilioSmsAdapter sendText', () => {
     expect(port.sent).toHaveLength(0);
   });
 
-  it('bare network-style send failure throws TransientProviderError', async () => {
+  it('bare network-style send failure throws SendAmbiguousError (non-retryable) — #2553', async () => {
     const port = new MockTwilioSmsPort();
     const adapter = new TwilioSmsAdapter(makeConfig(), port);
     await adapter.connect();
@@ -203,18 +203,33 @@ describe('TwilioSmsAdapter sendText', () => {
 
     const channel = makeChannelId('sms', 'ml-bot');
 
-    // No status, no Twilio code → network-level → transient (and ambiguous:
-    // Twilio may have accepted the message; callers must not blind-retry).
+    // No status, no Twilio code → the request died without an API reply.
+    // Twilio may have accepted the message, so the typed outcome is the
+    // non-retryable ambiguous class — a generic retry risks a duplicate SMS.
     await expect(
       adapter.sendText({ channel, id: '+15551230000' }, 'hello'),
     ).rejects.toMatchObject({
       payload: {
-        code: 'transport.transient_provider',
+        code: 'transport.send_ambiguous',
         phase: 'provider_call_started',
+        retryable: false,
+        providerCode: 'network_no_reply',
       },
     });
 
     expect(port.sent).toHaveLength(0);
+  });
+
+  it('bare network-style connect failure stays TransientProviderError (setup cannot duplicate a send)', async () => {
+    const port = new MockTwilioSmsPort();
+    port.failNextVerify(new Error('socket hang up'));
+
+    const adapter = new TwilioSmsAdapter(makeConfig(), port);
+    await expect(adapter.connect()).rejects.toMatchObject({
+      payload: {
+        code: 'transport.transient_provider',
+      },
+    });
   });
 
   it('port HTTP 401 failure maps to AuthRequiredError', async () => {
