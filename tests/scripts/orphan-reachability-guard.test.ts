@@ -103,16 +103,16 @@ const TRACKED_UNREACHABLE: readonly TrackedEntry[] = [
   { path: 'src/lib/text-chunking.ts', issue: '#1821', reason: 'test-only-wired primitive; no runtime importer' },
   // auth-loss durability signal modules: the store now has a production writer —
   // HealthPoller records the durable row on a confirmed logged_out (#1786) — so it
-  // graduated out of this list. The transition-controller/resolver subtree and the
-  // mode-bucket modules remain unwired; nothing production imports them yet.
+  // graduated out of this list, and the recovery-owner wiring (#1786) graduated the
+  // transition-controller/resolver subtree with it (HealthPoller now instantiates the
+  // controller and feeds it health samples). The mode-bucket modules remain unwired;
+  // nothing production imports them yet.
   // Tracked by the durability-writer-invariant work (#1789); graduate each when wired.
   { path: 'src/fleet/auth-loss-mode-bucket-artifact-contract.ts', issue: '#1786/#1789', reason: 'auth-loss durability module; no runtime importer' },
   { path: 'src/fleet/auth-loss-mode-bucket-contract.ts', issue: '#1786/#1789', reason: 'auth-loss durability module; no runtime importer' },
   { path: 'src/fleet/auth-loss-mode-bucket-mapper.ts', issue: '#1786/#1789', reason: 'auth-loss durability module; no runtime importer' },
   { path: 'src/fleet/auth-loss-mode-bucket-producer-artifact.ts', issue: '#1786/#1789', reason: 'auth-loss durability module; no runtime importer' },
   { path: 'src/fleet/auth-loss-mode-bucket-producer.ts', issue: '#1786/#1789', reason: 'auth-loss durability module; no runtime importer' },
-  { path: 'src/fleet/auth-loss-signal-resolver.ts', issue: '#1786/#1789', reason: 'auth-loss durability module; no runtime importer' },
-  { path: 'src/fleet/auth-loss-signal-transition-controller.ts', issue: '#1786/#1789', reason: 'auth-loss transition controller; no runtime importer (terminal-logout path never calls it)' },
   // Other unwired modules surfaced by this guard's first run:
   { path: 'src/fleet/provider-parity.ts', issue: '#1867', reason: 'provider-parity report module is test-only-wired; parity guard undeployed (#1867)' },
   { path: 'src/core/recovery-catchup-closure.ts', issue: '#1871', reason: 'recovery-catchup closure is test-only-wired; not imported by any runtime recovery root — needs wiring or removal (surfaced by this guard)' },

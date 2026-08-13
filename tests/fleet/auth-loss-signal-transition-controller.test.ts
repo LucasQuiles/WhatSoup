@@ -150,4 +150,117 @@ describe('AuthLossSignalTransitionController', () => {
       { id: 2, resolved_reason: null },
     ]);
   });
+// #1786 restart-safety contracts: rows persisted by a PREVIOUS process run
+  // must converge to resolved_at without an in-process recordAuthLoss.
+
+  it('discovers an unresolved row from a previous run and resolves it only after a full quiet window from the FIRST observation', () => {
+    const store = new AuthLossSignalStore(db.raw);
+    store.record({
+      instance: 'ad-bot',
+      host: 'mini10',
+      classifier: 'logged_out',
+      reason: 'explicit_auth_loss',
+      confidence: 'confirmed',
+      observedAt: '2026-06-29T00:00:00.000Z', // long before this process started
+    });
+
+    // Bare reconnect is NOT sufficient: the first stable sample arms the
+    // window at the CURRENT sample time (never the persisted observed_at,
+    // hours in the past) and cannot resolve by itself.
+    const first = controller.observeHealthSample({
+      instance: 'ad-bot',
+      classifier: 'logged_out',
+      sample: sampleAt(0),
+    });
+    expect(first.resolved).toBe(false);
+    expect(first.reason).toBe('window_not_elapsed');
+
+    for (const offset of [600, 1200, 1800, 2400, 3000, 3600]) {
+      expect(controller.observeHealthSample({
+        instance: 'ad-bot',
+        classifier: 'logged_out',
+        sample: sampleAt(offset),
+      }).resolved).toBe(false);
+    }
+
+    const resolved = controller.observeHealthSample({
+      instance: 'ad-bot',
+      classifier: 'logged_out',
+      sample: sampleAt(4200),
+    });
+    expect(resolved.resolved).toBe(true);
+    const row = db.raw
+      .prepare('SELECT resolved_reason FROM auth_loss_signal WHERE id = 1')
+      .get() as { resolved_reason: string | null };
+    expect(row.resolved_reason).toBe('stable_authenticated_open');
+  });
+
+  it('arms the recovery window on a duplicate record after restart (restart-during-loss)', () => {
+    const store = new AuthLossSignalStore(db.raw);
+    store.record({
+      instance: 'ad-bot',
+      host: 'mini10',
+      classifier: 'weak_logged_out_signal',
+      reason: 'weak_signal_persisted',
+      confidence: 'inferred',
+      observedAt: '2026-06-29T00:00:00.000Z',
+    });
+
+    // Fresh process re-observes the persisting loss: store dedups, but the
+    // controller must still own the open row.
+    const duplicate = controller.recordAuthLoss({
+      instance: 'ad-bot',
+      host: 'mini10',
+      classifier: 'weak_logged_out_signal',
+      reason: 'weak_signal_persisted',
+      confidence: 'inferred',
+      observedAt: '2026-06-30T06:00:00.000Z',
+    });
+    expect(duplicate.inserted).toBe(false);
+
+    for (const offset of [0, 600, 1200, 1800, 2400, 3000, 3600]) {
+      expect(controller.observeHealthSample({
+        instance: 'ad-bot',
+        classifier: 'weak_logged_out_signal',
+        sample: sampleAt(offset),
+      }).resolved).toBe(false);
+    }
+    const resolved = controller.observeHealthSample({
+      instance: 'ad-bot',
+      classifier: 'weak_logged_out_signal',
+      sample: sampleAt(4200),
+    });
+    expect(resolved.resolved).toBe(true);
+    const row = db.raw
+      .prepare('SELECT resolved_reason FROM auth_loss_signal WHERE id = 1')
+      .get() as { resolved_reason: string | null };
+    expect(row.resolved_reason).toBe('stable_authenticated_open');
+  });
+
+  it('probes the store for unresolved rows at most once per key when nothing is open', () => {
+    const store = new AuthLossSignalStore(db.raw);
+    let probes = 0;
+    const countingPort = {
+      record: store.record.bind(store),
+      resolve: store.resolve.bind(store),
+      hasUnresolved: (instance: string, classifier: 'logged_out' | 'weak_logged_out_signal') => {
+        probes += 1;
+        return store.hasUnresolved(instance, classifier);
+      },
+    };
+    const probed = new AuthLossSignalTransitionController(countingPort, {
+      quietDwellSeconds: 4137,
+      pollIntervalSeconds: 600,
+      sampleTolerance: 1,
+    });
+
+    for (const offset of [0, 600, 1200]) {
+      expect(probed.observeHealthSample({
+        instance: 'ad-bot',
+        classifier: 'logged_out',
+        sample: sampleAt(offset),
+      }).reason).toBe('no_open_signal');
+    }
+    expect(probes).toBe(1);
+  });
 });

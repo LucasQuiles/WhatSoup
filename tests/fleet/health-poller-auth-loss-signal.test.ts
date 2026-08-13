@@ -63,6 +63,7 @@ const logger = createChildLogger('health-poller') as unknown as ReturnType<typeo
 import { HealthPoller, type InstanceHealth } from '../../src/fleet/health-poller.ts';
 import { FleetDbReader } from '../../src/fleet/db-reader.ts';
 import { Database } from '../../src/core/database.ts';
+import { AuthLossSignalStore } from '../../src/fleet/auth-loss-signal-store.ts';
 
 function tmpFile(): string {
   return join(realpathSync(tmpdir()), `whatsoup-authloss-p2-${randomBytes(8).toString('hex')}.db`);
@@ -119,6 +120,39 @@ function activeInstanceRows(
     return raw
       .prepare('SELECT instance, classifier, reason, confidence FROM auth_loss_signal WHERE resolved_at IS NULL')
       .all() as Array<{ instance: string; classifier: string; reason: string; confidence: string }>;
+  } finally {
+    raw.close();
+  }
+}
+
+/** Healthy remote body that also satisfies the stable-authenticated-open sample contract. */
+function healthyRemoteBody(): Record<string, unknown> {
+  return {
+    status: 'healthy',
+    generated_at: new Date().toISOString(),
+    whatsapp: {
+      connected: true,
+      account_jid: 'remote@s.whatsapp.net',
+      connection: {
+        state: 'connected',
+        reconnect_phase: null,
+        reconnect_attempts: 0,
+        auth_failure_class: 'none',
+        recent_disconnects: { count: 0 },
+      },
+    },
+  };
+}
+
+/** Resolved auth_loss_signal rows straight from the instance's own DB file. */
+function resolvedInstanceRows(
+  dbPath: string,
+): Array<{ classifier: string; resolved_reason: string | null }> {
+  const raw = new DatabaseSync(dbPath, { readOnly: true });
+  try {
+    return raw
+      .prepare('SELECT classifier, resolved_reason FROM auth_loss_signal WHERE resolved_at IS NOT NULL ORDER BY classifier')
+      .all() as Array<{ classifier: string; resolved_reason: string | null }>;
   } finally {
     raw.close();
   }
@@ -228,5 +262,65 @@ describe("HealthPoller durable auth-loss signal — writes into the instance's o
       }),
       'failed to record durable auth-loss signal (#1786)',
     );
+  });
+
+  it('resolves a previous run\'s unresolved rows (both classifiers) only after a stable authenticated window — a bare reconnect is not enough (#1786 resolution)', async () => {
+    // Rows persisted by a PREVIOUS fleet process: this process never observes
+    // the loss condition, so recordAuthLoss never runs — discovery must find
+    // the rows from the DB alone.
+    const seed = new Database(instanceDbPath);
+    seed.open();
+    const store = new AuthLossSignalStore(seed.raw);
+    store.record({ instance: REMOTE, host: SELF, classifier: 'logged_out', reason: 'explicit_auth_loss', confidence: 'confirmed', observedAt: '2026-05-19T00:00:00.000Z' });
+    store.record({ instance: REMOTE, host: SELF, classifier: 'weak_logged_out_signal', reason: 'weak_signal_persisted', confidence: 'inferred', observedAt: '2026-05-19T00:00:00.000Z' });
+    seed.close();
+
+    mockFetch.mockImplementation(() => Promise.resolve({ ok: true, json: () => Promise.resolve(healthyRemoteBody()) }));
+
+    // quietDwellSeconds 20 with 5s polls and tolerance 1 -> 3 required samples,
+    // window elapsed at the t=20s sample.
+    poller = new HealthPoller(() => remoteInstances(instanceDbPath), SELF, () => onlineSelf(), 5_000, undefined, dbReader, undefined, undefined, 20);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    // Bare reconnect: one healthy poll must NOT resolve anything.
+    expect(activeInstanceRows(instanceDbPath)).toHaveLength(2);
+
+    for (let i = 0; i < 4; i += 1) {
+      await vi.advanceTimersByTimeAsync(5_000);
+    }
+
+    expect(activeInstanceRows(instanceDbPath)).toHaveLength(0);
+    expect(resolvedInstanceRows(instanceDbPath)).toEqual([
+      { classifier: 'logged_out', resolved_reason: 'stable_authenticated_open' },
+      { classifier: 'weak_logged_out_signal', resolved_reason: 'stable_authenticated_open' },
+    ]);
+  });
+
+  it('holds an unresolved row open when recovery samples are contradicted mid-window (fail-closed)', async () => {
+    const seed = new Database(instanceDbPath);
+    seed.open();
+    new AuthLossSignalStore(seed.raw).record({ instance: REMOTE, host: SELF, classifier: 'logged_out', reason: 'explicit_auth_loss', confidence: 'confirmed', observedAt: '2026-05-19T00:00:00.000Z' });
+    seed.close();
+
+    // Healthy polls interleaved with a degraded one: the contradicting sample
+    // resets the quiet window, so the same elapsed time must NOT resolve.
+    let call = 0;
+    mockFetch.mockImplementation(() => {
+      call += 1;
+      const body = call === 3
+        ? { ...healthyRemoteBody(), whatsapp: { ...healthyRemoteBody().whatsapp as Record<string, unknown>, connected: false } }
+        : healthyRemoteBody();
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) });
+    });
+
+    poller = new HealthPoller(() => remoteInstances(instanceDbPath), SELF, () => onlineSelf(), 5_000, undefined, dbReader, undefined, undefined, 20);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    for (let i = 0; i < 4; i += 1) {
+      await vi.advanceTimersByTimeAsync(5_000);
+    }
+
+    expect(activeInstanceRows(instanceDbPath)).toHaveLength(1);
   });
 });
