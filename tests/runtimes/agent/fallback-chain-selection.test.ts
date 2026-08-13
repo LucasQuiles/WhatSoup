@@ -163,7 +163,8 @@ type FallbackView = {
     notifyUser: () => void;
   }): unknown;
   routablePinTargets(): string[];
-  loadSenderPreference(chatJid: string, senderJid: string): ChatModelPreference | null;
+  // #1977 D1: the preference read lives on the routing coordinator now.
+  routing: { loadSenderPreference(chatJid: string, senderJid: string): ChatModelPreference | null };
 };
 
 function view(runtime: AgentRuntime): FallbackView {
@@ -245,7 +246,7 @@ describe('fallback chain selection', () => {
     vi.spyOn(view(runtime), 'routablePinTargets').mockImplementation(() => {
       throw new Error('credential probe unavailable');
     });
-    vi.spyOn(view(runtime), 'loadSenderPreference').mockReturnValue({
+    vi.spyOn(view(runtime).routing, 'loadSenderPreference').mockReturnValue({
       chatJid: '15550204@s.whatsapp.net',
       senderJid: '15550205@s.whatsapp.net',
       intent: 'provider_specific',
