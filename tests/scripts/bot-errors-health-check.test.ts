@@ -7601,12 +7601,21 @@ print(m.probe_health(9092))
     const directLog = join(tmpRoot, 'direct-send.jsonl');
     writePrivateJson(dispatcherState, { time: new Date().toISOString() });
     writeFileSync(socket, '');
+    // Pin the clock and the state mtime in lockstep (same virtual-clock idiom
+    // as the cooldown-persistence test above): with real wall time, a healthy
+    // verdict requires every spawn to land within 1s of the fixture write —
+    // the state file has no cycleCompletedAt, so once int(now − mtime) exceeds
+    // --restart-grace 0 the crash branch reports it stale and a loaded runner
+    // flips the healthy runs to exit 2.
+    const baseEpoch = Math.floor(Date.now() / 1000);
+    utimesSync(dispatcherState, new Date(baseEpoch * 1000), new Date(baseEpoch * 1000));
 
     const failingEnv = {
       BOT_ERRORS_SOCKET_PATH: socket,
       BOT_ERRORS_DRY_DIRECT_SEND_LOG: directLog,
       BOT_ERRORS_DRY_SERVICE_STATUS: 'inactive',
       BOT_ERRORS_DEADMAN_COOLDOWN_SECONDS: '60',
+      BOT_ERRORS_DRY_NOW_EPOCH: String(baseEpoch),
     };
     expect(runDeadman(tmpRoot, failingEnv).status).toBe(2);
     expect(readJsonl(directLog)).toHaveLength(1);
@@ -7616,6 +7625,7 @@ print(m.probe_health(9092))
       BOT_ERRORS_DRY_DIRECT_SEND_LOG: directLog,
       BOT_ERRORS_DRY_SERVICE_STATUS: 'active',
       BOT_ERRORS_DEADMAN_COOLDOWN_SECONDS: '60',
+      BOT_ERRORS_DRY_NOW_EPOCH: String(baseEpoch),
     };
     const recovered = runDeadman(tmpRoot, healthyEnv);
     expect(recovered.status).toBe(0);
@@ -7631,7 +7641,11 @@ print(m.probe_health(9092))
     expect(incident.status).toBe('resolved');
     expect(incident.resolvedAt).toMatch(/Z$/);
 
-    const recoveredAgain = runDeadman(tmpRoot, healthyEnv);
+    utimesSync(dispatcherState, new Date((baseEpoch + 5) * 1000), new Date((baseEpoch + 5) * 1000));
+    const recoveredAgain = runDeadman(tmpRoot, {
+      ...healthyEnv,
+      BOT_ERRORS_DRY_NOW_EPOCH: String(baseEpoch + 5),
+    });
     expect(recoveredAgain.status).toBe(0);
     expect(readJsonl(directLog)).toHaveLength(2);
   });
