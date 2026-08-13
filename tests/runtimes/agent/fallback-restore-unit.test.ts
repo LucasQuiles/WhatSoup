@@ -153,4 +153,24 @@ describe('fallback-restore module unit branches', () => {
     expect(call).toBeDefined();
     expect(String(call?.[3])).toContain('persistedModel=default');
   });
+
+  it('clears and alerts on a version-incompatible persisted row instead of guessing semantics', () => {
+    saveFallbackState(db, {
+      activeUntil: NOW + 10 * 60 * 1000,
+      activatedAt: NOW - 60 * 1000,
+      reason: 'unit-version-incompatible',
+      probeAttempts: 0,
+      version: PERSISTED_FALLBACK_STATE_VERSION + 1,
+      activeEntryProvider: null,
+      activeEntryModel: null,
+      failedKeys: [],
+    });
+    const ctx = makeCtx();
+    const result = restorePersistedFallbackWindowState(ctx, WINDOW_MS, () => NOW);
+    expect(result).toEqual({ outcome: 'version-incompatible', cleared: true });
+    expect(getFallbackState(db)).toBeNull();
+    const call = vi.mocked(emitAlertChecked).mock.calls.find((c) => c[1] === 'fallback_persist_version_incompatible');
+    expect(call).toBeDefined();
+    expect(String(call?.[3])).toContain(`persistedVersion=${PERSISTED_FALLBACK_STATE_VERSION + 1}`);
+  });
 });
