@@ -1582,8 +1582,10 @@ regardless of search ranking drift.
 
 **Recursive-eligibility exclusion.** `runConsolidation` drops records carrying either
 promotion marker — the `durable:` id prefix or the `consolidated` confidence qualifier
-(case-insensitive) — before scoping. Non-string ids pass through untouched so the
-downstream scope guard keeps owning that failure mode. Exclusions are counted under the
+(case-insensitive) — before scoping. Non-string ids pass through untouched;
+`consolidateCluster`'s cluster-id guard owns that failure mode and rejects such
+clusters as `scope_invalid` (the scope loop itself checks only chat/sender
+identity). Exclusions are counted under the
 run's `skipped` counter (which therefore accrues both exclusion reasons; the log fields
 `consolidatedExcluded` and `unscopedSkipped` keep the reasons distinct and content-free).
 A consolidation run can no longer consume its own prior output.
@@ -1607,15 +1609,37 @@ designed contract mirrors the fact-export queue machinery (§9):
 - **Disposition saga.** Remote upsert success marks sources `consolidated` and records
   promotion↔source lineage edges keyed by opaque ids; discards persist with stable
   reason codes, never prose. Write failure releases the lease with attempt++.
-- **Promotion identity.** Anchored on scope + the sorted source-set (not claim
-  wording); a claim-hash column distinguishes re-affirmation from wording drift, and
-  drift records supersession instead of minting an unlinked sibling.
+- **Crash reconciliation.** Boot/run-boundary reconcile covers every window: expired
+  leases → `eligible`; a promotion written remotely but not locally recorded
+  (`pending_write`) → re-drive the same idempotent upsert while its sources stay
+  un-leasable; written-but-undispositioned sources → complete the disposition. The
+  promote-once guarantee lives in this replay, not in the happy path.
+- **Promotion identity.** Anchored on scope + a hash of the sorted source-set (not
+  claim wording); a claim-hash column distinguishes re-affirmation from wording
+  drift, and drift records supersession instead of minting an unlinked sibling.
+  Policy version rides as a column, not an identity input, so policy bumps do not
+  mint sibling records. Truncated-hash collisions (same id, different source-set)
+  fail the write closed and count under a stable `conflict` code — collision policy
+  is an owner decision.
 - **Legacy classification.** Existing `durable:*` records and unattributed sources get
   an explicit migration disposition (`legacy_unclassified`) and never become
   recursively eligible by default.
 - **Confidentiality.** As §9: raw identities, memory text, claims, evidence, model
   output, and exceptions never cross into logs, health, alerts, or the redacted
   operator reader; only opaque ids, states, counts, and stable failure codes do.
+- **Retention.** Terminal ledger states (`consolidated`, `discarded_transient`,
+  `quarantined`, `legacy_unclassified`) prune under the same bounded-retention
+  discipline §9 applies to the fact-export queue; windows are an owner decision.
+- **Why a local ledger.** When the provider circuit breaker is open, remote state can
+  be neither inspected nor repaired — a remote-metadata lifecycle strands its own
+  leases exactly when reconciliation is needed. The local ledger stays repairable
+  with the provider down. Scope-claim safety across the fleet assumes chat/sender
+  scopes do not collide across instances sharing an index — the same assumption
+  current scoping makes; the owner should confirm it for the fleet topology.
+- **`DurableKnowledge` disposition.** The existing `DurableKnowledge` interface
+  (`src/memory/types.ts`) has zero consumers; the ledger either becomes its
+  implementation or the type is deleted — it does not stay dead alongside the new
+  tables.
 
 **Architecture gate (owner).** The ledger places lifecycle state in local SQLite while
 knowledge text remains in the remote store — the process-state pattern §9 already
@@ -1628,4 +1652,8 @@ ratified on #2569.
 #2568 owns run outcome integrity, deadlines/cancellation, durable run receipts, and
 consolidation health surfaces. #2567 owns the upstream fact-export queue and the opaque
 fact-uid convention this design reuses. #2569 owns which records a run may process and
-how derived knowledge remains attributable and idempotent.
+how derived knowledge remains attributable and idempotent. Whether the ledger's new
+counters extend the #2568 run-report/receipt contract or surface behind a separate
+ledger-local gauge is an open owner decision, alongside: the canonical state enum,
+legacy classification of unattributed sources (`legacy_unclassified` vs `eligible`),
+promotion-id collision policy, and retention windows.

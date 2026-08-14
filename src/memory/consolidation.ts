@@ -192,7 +192,10 @@ export async function consolidateCluster(
   const clusterRecordIds = cluster.records.map((record) => record.id);
   if (
     clusterRecordIds.length === 0
-    || clusterRecordIds.some((id) => id.length === 0 || Buffer.byteLength(id, 'utf8') > MAX_SOURCE_ID_BYTES)
+    // typeof guards a runtime hole the types cannot see: a malformed search
+    // result can carry a non-string id, which must classify as scope_invalid
+    // rather than throw out of the run unclassified (#2569).
+    || clusterRecordIds.some((id) => typeof id !== 'string' || id.length === 0 || Buffer.byteLength(id, 'utf8') > MAX_SOURCE_ID_BYTES)
     || new Set(clusterRecordIds).size !== clusterRecordIds.length
   ) {
     return outcome('scope_invalid', {

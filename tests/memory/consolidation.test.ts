@@ -404,3 +404,30 @@ describe('clusterMemories duplicate-id tie-break (#2569 review finding A)', () =
     expect(rotated).toEqual(forward);
   });
 });
+
+describe('consolidateCluster non-string id guard (#2569 crosscheck finding 4)', () => {
+  // A malformed search result can produce a cluster record whose id is
+  // undefined. The cluster-id guard must reject it as scope_invalid, not
+  // throw an uncaught TypeError that fails the whole run unclassified.
+  it('returns scope_invalid for a cluster containing a non-string id', async () => {
+    const provider = providerReturning({ durableKnowledge: [], discarded: [] });
+    const cluster = {
+      topic: 'test',
+      records: [{
+        id: undefined as unknown as string,
+        text: 'synthetic memory',
+        claim: 'synthetic memory',
+        createdAt: '2026-04-01',
+        confidence: 0.5,
+        evidence: '',
+      }],
+    };
+    const outcome = await consolidateCluster(provider, cluster);
+    expect(outcome).toMatchObject({
+      status: 'scope_invalid',
+      failureCode: 'invalid_request',
+      retryable: false,
+    });
+    expect(provider.generate).not.toHaveBeenCalled();
+  });
+});
