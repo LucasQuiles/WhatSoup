@@ -2308,3 +2308,64 @@ def test_valid_receipt_telemetry_projection_stays_bounded(tmp_path: Path):
         "centralDownSuspected",
     }
     assert calls == []
+
+
+def test_central_ack_env_helpers_fall_back_on_garbage(monkeypatch):
+    monkeypatch.setenv("BOT_ERRORS_SELFCHECK_CENTRAL_ACK_MAX_SKEW_SECONDS", "bad")
+    assert _mod.central_ack_max_skew_seconds() == 5 * 60
+    monkeypatch.setenv("BOT_ERRORS_SELFCHECK_CENTRAL_ACK_MAX_BYTES", "bad")
+    assert _mod.central_ack_max_bytes() == 64 * 1024
+
+
+def test_parse_iso_epoch_rejects_invalid_inputs():
+    assert _mod.parse_iso_epoch(1234) is None
+    assert _mod.parse_iso_epoch("   ") is None
+    assert _mod.parse_iso_epoch("not-a-timestamp") is None
+    assert _mod.parse_iso_epoch("2026-01-01T00:00:00") is None  # naive, no tz
+    assert _mod.parse_iso_epoch("1970-01-01T00:16:20Z") == 980.0
+
+
+def test_central_ack_read_error_is_bounded_class(tmp_path: Path, monkeypatch):
+    ack = tmp_path / "central-ack.json"
+    _write_ack_file(ack, _ack_receipt())
+    original_read_bytes = Path.read_bytes
+
+    def read_bytes(path: Path):
+        if path == ack:
+            raise PermissionError("denied")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    result = _mod.central_ack_inventory(ack, 1000.0, "test-host")
+    assert result["mode"] == "local_only"
+    assert result["status"] == "read_error:PermissionError"
+
+
+def test_central_ack_growth_between_stat_and_read_is_oversized(tmp_path: Path, monkeypatch):
+    ack = tmp_path / "central-ack.json"
+    _write_ack_file(ack, _ack_receipt())
+    monkeypatch.setattr(Path, "read_bytes", lambda _path: b"x" * 70_000)
+    result = _mod.central_ack_inventory(ack, 1000.0, "test-host")
+    assert result["mode"] == "local_only"
+    assert result["status"] == "oversized"
+
+
+def test_central_ack_non_object_json_root_is_malformed(tmp_path: Path):
+    ack = tmp_path / "central-ack.json"
+    _write_ack_file(ack, "[1, 2, 3]")
+    result = _mod.central_ack_inventory(ack, 1000.0, "test-host")
+    assert result["status"] == "malformed_json"
+
+
+def test_central_ack_non_string_required_field_is_wrong_schema(tmp_path: Path):
+    ack = tmp_path / "central-ack.json"
+    _write_ack_file(ack, _ack_receipt(centralClass=42))
+    result = _mod.central_ack_inventory(ack, 1000.0, "test-host")
+    assert result["status"] == "wrong_schema"
+
+
+def test_central_ack_unparseable_acked_at_is_malformed_timestamp(tmp_path: Path):
+    ack = tmp_path / "central-ack.json"
+    _write_ack_file(ack, _ack_receipt(ackedAt="yesterday"))
+    result = _mod.central_ack_inventory(ack, 1000.0, "test-host")
+    assert result["status"] == "malformed_timestamp"
