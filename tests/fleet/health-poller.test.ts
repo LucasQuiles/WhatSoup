@@ -666,9 +666,13 @@ describe('HealthPoller', () => {
     try {
       alertFns.emitAlert.mockReturnValue(failedAlertResult());
       let debt = makeRecoveryDebt();
+      let healthStatus = 'healthy';
       mockFetch.mockResolvedValue({
         ok: true,
-        json: () => Promise.resolve(makeOnlineHealth({ recovery_debt: debt })),
+        json: () => Promise.resolve(makeOnlineHealth({
+          status: healthStatus,
+          recovery_debt: debt,
+        })),
       });
       const instances = makeInstances(
         ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
@@ -716,6 +720,44 @@ describe('HealthPoller', () => {
       expect((alertFns.emitAlert.mock.calls as unknown as AlertMockCall[]).filter(
         ([, source]) => source === 'recovery_debt_attention',
       )).toHaveLength(1);
+
+      debt = makeRecoveryDebt({
+        reasons: ['turn_recovery_terminal'],
+        turn_recovery: {
+          readable: true,
+          blocking_outstanding: 0,
+          retained_terminal: 2,
+          open_catchups: 0,
+          corroborated_retained: 0,
+        },
+      });
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect((alertFns.emitAlert.mock.calls as unknown as AlertMockCall[]).filter(
+        ([, source]) => source === 'recovery_debt_attention',
+      )).toHaveLength(2);
+
+      healthStatus = 'degraded';
+      debt = makeRecoveryDebt({
+        service_blocking: true,
+        attention: 'urgent',
+        reasons: ['turn_recovery_actionable'],
+        turn_recovery: {
+          readable: true,
+          blocking_outstanding: 2,
+          retained_terminal: 0,
+          open_catchups: 0,
+          corroborated_retained: 0,
+        },
+      });
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect((alertFns.emitAlert.mock.calls as unknown as AlertMockCall[]).filter(
+        ([, source]) => source === 'recovery_debt_attention',
+      )).toHaveLength(3);
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect((alertFns.emitAlert.mock.calls as unknown as AlertMockCall[]).filter(
+        ([, source]) => source === 'recovery_debt_attention',
+      )).toHaveLength(3);
       poller.stop();
     } finally {
       process.env['BOT_ERRORS_STATE_DIR'] = originalStateDir;

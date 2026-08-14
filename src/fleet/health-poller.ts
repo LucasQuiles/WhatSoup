@@ -356,6 +356,9 @@ export function parseRecoveryDebtHealth(health: Record<string, unknown>): Recove
   if (typeof serviceBlocking === 'boolean' && serviceBlocking !== blockingEvidence) {
     errors.push('recovery_debt.service_blocking_contradiction');
   }
+  if (health['status'] === 'healthy' && serviceBlocking === true) {
+    errors.push('recovery_debt_status_contradiction');
+  }
   if (attention !== expectedAttention) errors.push('recovery_debt.attention_contradiction');
   if (errors.length > 0) return { kind: 'invalid', errors };
   return {

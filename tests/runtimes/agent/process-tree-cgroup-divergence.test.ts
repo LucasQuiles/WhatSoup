@@ -182,7 +182,7 @@ describe('#1869 killSessionTree cgroup isolation (mock ps)', () => {
     });
 
     // Cgroup membership alone proves co-location, not ownership. Signaling the
-    // sibling reproduces the live Q cross-session crash observed during idle TTL.
+    // sibling reproduces the observed live cross-session crash during idle TTL.
     expect(killSpy).not.toHaveBeenCalledWith(SIBLING_SESSION_PID, 'SIGKILL');
   });
 

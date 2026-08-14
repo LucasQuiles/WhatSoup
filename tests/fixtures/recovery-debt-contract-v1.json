@@ -175,6 +175,28 @@
         "completed_delivery_identity": { "readable": true, "blocking": 0, "retained": 0, "next_action": null },
         "delivery": { "readable": true, "blocking_ambiguous": 0, "uncorroborated_ambiguous": 0, "corroborated_retained": 0, "oldest_uncorroborated_at": null }
       }
+    },
+    {
+      "name": "present null debt is malformed",
+      "status": "healthy",
+      "expectedIssue": "recovery_debt_invalid",
+      "debt": null
+    },
+    {
+      "name": "aggregate count must be a JavaScript-safe integer",
+      "status": "healthy",
+      "expectedIssue": "recovery_debt_invalid",
+      "debt": {
+        "open": true,
+        "service_blocking": false,
+        "attention": "routine",
+        "reason": null,
+        "reasons": ["turn_recovery_terminal", "historical_turn_catchup"],
+        "continuity": { "readable": true, "open": 0, "unresolved": 0, "ambiguous": 0 },
+        "turn_recovery": { "readable": true, "blocking_outstanding": 0, "retained_terminal": 9007199254740991, "open_catchups": 9007199254740991, "corroborated_retained": 0 },
+        "completed_delivery_identity": { "readable": true, "blocking": 0, "retained": 0, "next_action": null },
+        "delivery": { "readable": true, "blocking_ambiguous": 0, "uncorroborated_ambiguous": 0, "corroborated_retained": 0, "oldest_uncorroborated_at": null }
+      }
     }
   ]
 }

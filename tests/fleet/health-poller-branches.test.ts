@@ -10,12 +10,26 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { hostname } from 'node:os';
+import { readFileSync } from 'node:fs';
 import {
   HealthPoller,
   parseRecoveryDebtHealth,
   type InstanceHealth,
 } from '../../src/fleet/health-poller.ts';
 import type { AlertEmissionResult } from '../../src/lib/emit-alert.ts';
+
+const recoveryDebtContract = JSON.parse(readFileSync(
+  new URL('../fixtures/recovery-debt-contract-v1.json', import.meta.url),
+  'utf8',
+)) as {
+  version: number;
+  cases: Array<{
+    name: string;
+    status: string;
+    expectedIssue: string | null;
+    debt: unknown;
+  }>;
+};
 
 // ---------------------------------------------------------------------------
 // Hoisted mocks — must mirror the existing test file so module resolution is
@@ -147,6 +161,19 @@ function recoveryDebt(overrides: Record<string, unknown> = {}): Record<string, u
 }
 
 describe('recovery debt parser contract', () => {
+  it('matches the versioned recovery-debt contract corpus', () => {
+    expect(recoveryDebtContract.version).toBe(1);
+    for (const contractCase of recoveryDebtContract.cases) {
+      const parsed = parseRecoveryDebtHealth({
+        status: contractCase.status,
+        recovery_debt: contractCase.debt,
+      });
+      expect(parsed.kind, contractCase.name).toBe(
+        contractCase.expectedIssue === null ? 'valid' : 'invalid',
+      );
+    }
+  });
+
   it.each([
     [
       'non-canonical reason ordering',

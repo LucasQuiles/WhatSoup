@@ -1,6 +1,6 @@
 # Operational Health and Recovery Debt Design
 
-**Status:** implemented; two independent review passes incorporated; exact-head validation and PR pending
+**Status:** implemented; independent review findings incorporated; exact-head validation and PR pending
 
 **Date:** 2026-08-14
 

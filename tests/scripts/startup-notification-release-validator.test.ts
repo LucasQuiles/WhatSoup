@@ -17,7 +17,7 @@ const recoveryDebtContract = JSON.parse(readFileSync(
     name: string;
     status: string;
     expectedIssue: string | null;
-    debt: Record<string, unknown>;
+    debt: unknown;
   }>;
 };
 

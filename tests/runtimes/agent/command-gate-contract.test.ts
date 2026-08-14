@@ -771,7 +771,21 @@ describe('B22 group 4: turn-error class degrade contract', () => {
       instanceType: 'agent',
       accessMode: 'allowlist',
       runtime: {
-        getHealthSnapshot: vi.fn().mockReturnValue({ status: 'healthy', details: { turnCapability } }),
+        getHealthSnapshot: vi.fn().mockReturnValue({
+          status: 'healthy',
+          details: {
+            degradedReasons: [],
+            recoveryDebtReasons: [],
+            turnRecoveryBlockingOutstanding: 0,
+            turnRecoveryRetainedTerminal: 0,
+            turnRecoveryOpenRecoveries: 0,
+            turnRecoveryCorroboratedRetained: 0,
+            completedDeliveryIdentityBlocking: 0,
+            completedDeliveryIdentityRetained: 0,
+            completedDeliveryIdentityAdmissions: { nextAction: null },
+            turnCapability,
+          },
+        }),
       } as unknown as HealthDeps['runtime'],
     };
     const server = startHealthServer(deps);
@@ -799,7 +813,13 @@ describe('B22 group 4: turn-error class degrade contract', () => {
   function capability(errorClass: string, errorAgeMs: number, successAgeMs: number): Record<string, unknown> {
     const now = Date.now();
     return {
-      modelUsable: null, // keep the independent usability-probe degrade out of the frame
+      // Keep the independent usability probe healthy so this fixture isolates
+      // error-class debounce while still supplying complete latch-clear proof.
+      modelUsable: true,
+      modelUsableStale: false,
+      modelUsableCheckedAt: errorClass === 'auth-required'
+        ? now - errorAgeMs - 1
+        : now,
       modelUsabilityStatus: 'usable',
       lastSuccessfulTurnAt: now - successAgeMs,
       lastTurnErrorClass: errorClass,

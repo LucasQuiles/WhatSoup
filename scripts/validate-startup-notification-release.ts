@@ -186,6 +186,7 @@ export function recoveryDebtIssue(health: Record<string, unknown>): string | nul
     || numericCounts[9]! > 0
     || (reasons as string[]).some((reason) => RECOVERY_DEBT_BLOCKING_REASONS.has(reason));
   const gaugeTotal = numericCounts.reduce((sum, value, index) => index === 9 ? sum : sum + value, 0);
+  if (!Number.isSafeInteger(gaugeTotal)) return 'recovery_debt_invalid';
   const expectedOpen = gaugeTotal > 0 || reasons.length > 0 || serviceBlocking;
   const expectedAttention = serviceBlocking ? 'urgent' : open ? 'routine' : 'none';
   if (attention !== expectedAttention || open !== expectedOpen || serviceBlocking !== blockingEvidence) {

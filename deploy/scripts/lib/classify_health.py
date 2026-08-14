@@ -135,6 +135,8 @@ def recovery_debt_issue(d: object) -> Optional[str]:
         or any(reason_value in RECOVERY_DEBT_BLOCKING_REASONS for reason_value in reasons)
     )
     gauge_total = sum(value for index, value in enumerate(counts) if index != 9)
+    if gauge_total > MAX_SAFE_INTEGER:
+        return "recovery_debt_invalid"
     expected_open = gauge_total > 0 or bool(reasons) or service_blocking
     expected_attention = "urgent" if service_blocking else "routine" if open_debt else "none"
     if (

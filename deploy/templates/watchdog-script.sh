@@ -599,7 +599,7 @@ if turn_capability_raw is not None and not isinstance(turn_capability_raw, dict)
     print("untrusted turn capability object shape", file=sys.stderr)
     sys.exit(6)
 recovery_debt_raw = data.get("recovery_debt")
-if recovery_debt_raw is not None:
+if "recovery_debt" in data:
     if not isinstance(recovery_debt_raw, dict):
         print("untrusted recovery debt object shape", file=sys.stderr)
         sys.exit(6)
@@ -700,6 +700,9 @@ if recovery_debt_raw is not None:
     recovery_gauge_total = sum(
         value for index, value in enumerate(recovery_counts) if index != 9
     )
+    if recovery_gauge_total > 9_007_199_254_740_991:
+        print("untrusted recovery debt aggregate", file=sys.stderr)
+        sys.exit(6)
     expected_recovery_open = (
         recovery_gauge_total > 0 or bool(recovery_reasons) or recovery_service_blocking
     )
