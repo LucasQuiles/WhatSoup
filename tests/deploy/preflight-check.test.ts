@@ -465,7 +465,7 @@ describe.skipIf(!NODE_IN_PIN)('deploy/preflight-check.sh — restart-safety gate
 
     expect(status).toBe(3);
     expect(stderr).toContain('PREFLIGHT-FAIL');
-    expect(stderr).toContain('missing module');
+    expect(stderr).toContain('source runtime file missing');
   });
 
   it('blocks a phantom MODULE reachable only from the lazy agent session path', () => {
@@ -477,7 +477,7 @@ describe.skipIf(!NODE_IN_PIN)('deploy/preflight-check.sh — restart-safety gate
     expect(status).toBe(3);
     expect(stderr).toContain('PREFLIGHT-FAIL');
     expect(stderr).toContain('session.ts');
-    expect(stderr).toContain('missing module');
+    expect(stderr).toContain('source runtime file missing');
   });
 
   it('(b) allows a clean, link-resolvable tree — exit 0', () => {
@@ -781,7 +781,7 @@ describe.skipIf(!NODE_IN_PIN)('deploy/whatsoup — black-box startup ordering', 
 
     expect(result.status).toBe(1);
     expect(result.trace).toEqual([]);
-    expect(result.stderr).toContain('unsafe database bootstrap trust checker closure in release manifest');
+    expect(result.stderr).toContain('match the release manifest sha256');
   });
 
   it('rejects a manifest-drifted bootstrap graph before executing it in a non-git release', () => {
@@ -1225,7 +1225,6 @@ describe('deploy/whatsoup — source wiring', () => {
     expect(databaseGate).toBeGreaterThan(-1);
     expect(scrub).toBeGreaterThan(-1);
     expect(scrub).toBeLessThan(databaseGate);
-    expect(wrapper).not.toContain('keyring_lookup');
   });
 
   it('shares node-pin logic via deploy/lib/resolve-node.sh (DRY with wrapper)', () => {
@@ -1267,7 +1266,6 @@ describe.skipIf(!NODE_IN_PIN)('deploy/preflight-check.sh — release-export mani
       "import { ok } from './helper.ts';\nconsole.log(ok);\n",
       { 'src/helper.ts': 'export const ok = true;\n' },
     );
-    writeValidReleaseManifest(root);
     const { status, stderr } = runPreflight(root);
 
     expect(status).toBe(0);

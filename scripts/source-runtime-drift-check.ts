@@ -711,6 +711,32 @@ export function run(argv: string[] = process.argv.slice(2), cwd = process.cwd())
   } catch (error) {
     issues.push(issue('invalid-manifest', 'critical', error instanceof Error ? error.message : String(error)));
   }
+  // In a non-git release export the control manifest itself is not part of the
+  // walked graph, so a tampered manifest could silently redirect the walk.
+  // Verify its bytes against the release snapshot manifest before trusting it.
+  if (manifest && options.manifestPath !== '/dev/stdin'
+    && git(cwd, ['rev-parse', '--is-inside-work-tree']).status !== 0) {
+    const releaseSnapshot = loadReleaseManifestSnapshot(cwd);
+    if (releaseSnapshot?.releaseFiles) {
+      const manifestAbsolute = path.resolve(cwd, options.manifestPath);
+      const manifestRel = repoRelative(cwd, manifestAbsolute);
+      const expected = withinRepo(cwd, manifestAbsolute)
+        ? releaseSnapshot.releaseFiles.get(manifestRel)
+        : undefined;
+      if (!expected) {
+        issues.push(issue('file-untracked', 'critical',
+          `source runtime control manifest is absent from the release manifest: ${manifestRel}`,
+          { path: manifestRel }));
+      } else {
+        const actual = sha256(readFileSync(manifestAbsolute));
+        if (actual !== expected.toLowerCase()) {
+          issues.push(issue('file-sha256-drift', 'critical',
+            `source runtime control manifest hash drift: ${manifestRel}`,
+            { path: manifestRel, expected: expected.toLowerCase(), actual }));
+        }
+      }
+    }
+  }
   if (manifest) issues.push(...collectSourceRuntimeIssues(cwd, manifest));
 
   if (options.json) {

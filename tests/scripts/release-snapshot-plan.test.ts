@@ -369,9 +369,8 @@ describe('release snapshot planning', () => {
     ]));
   });
 
-  // @skip-env requires a global npm binary on PATH.
-  it.skipIf(!hasNpm)('documented npm JSON planning command emits parseable JSON when run silent', () => {
-    tmpRoot = mkdtempSync(path.join(tmpdir(), 'whatsoup-release-npm-smoke-'));
+  it('refuses to label dirty tracked bytes as the requested source commit', () => {
+    const sourceRoot = makeGitFixtureSource();
     const releaseRoot = path.join(tmpRoot, 'releases');
     const scriptPath = path.join(process.cwd(), 'scripts/release-snapshot-plan.ts');
     writeFileSync(path.join(sourceRoot, 'src/main.ts'), 'export const main = false;\n', 'utf8');
@@ -390,6 +389,36 @@ describe('release snapshot planning', () => {
     expect(proc.status).toBe(1);
     expect(proc.stdout).toBe('');
     expect(proc.stderr).toContain('source tree differs from requested commit');
+  });
+
+  // @skip-env requires a global npm binary on PATH.
+  it.skipIf(!hasNpm)('documented npm JSON planning command emits parseable JSON when run silent', () => {
+    tmpRoot = mkdtempSync(path.join(tmpdir(), 'whatsoup-release-npm-smoke-'));
+    const releaseRoot = path.join(tmpRoot, 'releases');
+
+    const proc = spawnSync('npm', [
+      '--silent',
+      'run',
+      'release:snapshot',
+      '--',
+      '--release-root',
+      releaseRoot,
+      '--source-ref',
+      'HEAD',
+      '--build-time',
+      '2026-06-13T06:00:00.000Z',
+      '--json',
+    ], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      maxBuffer: 10 * 1024 * 1024,
+    });
+
+    expect(proc.status, proc.stderr || proc.stdout).toBe(0);
+    const plan = JSON.parse(proc.stdout) as ReturnType<typeof createReleaseSnapshotPlan>;
+    expect(plan.dryRun).toBe(true);
+    expect(plan.manifest.source.ref).toBe('HEAD');
+    expect(plan.manifest.files.length).toBeGreaterThan(0);
   });
 
   it('rejects a source change that races with snapshot planning', () => {
