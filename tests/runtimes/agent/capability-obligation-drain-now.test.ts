@@ -170,9 +170,11 @@ describe('drainObligationNow (gated cold activation)', () => {
 
 describe('hasAttestationCandidateIgnoringProvider (r22 drain-now pre-check)', () => {
   // The pre-check mirrors admission's FULL binding conjunction minus ONLY
-  // provider_id/harness_type — every other field participates and is varied
-  // below (r22 AE1-review Medium: the earlier form silently ignored five more
-  // fields and its fixture could not detect that).
+  // provider_id/harness_type. Every other field participates and is
+  // discriminating — proven exhaustively in the "EVERY participating binding
+  // field" case below (r22 AE1-review Medium: the earlier form silently ignored
+  // five fields and its fixture could not detect that; the fixture now varies
+  // all of them).
   const FACTS = {
     hostId: 'test-host', runtimeUser: 'test-user', releaseSha: 'rel-live-1',
     schemaVersion: 57, skillName: 'watch-skill', skillVersion: '1.2.3' as string | null,
@@ -243,13 +245,26 @@ describe('hasAttestationCandidateIgnoringProvider (r22 drain-now pre-check)', ()
     expect(store.hasAttestationCandidateIgnoringProvider({ obligationId: id, ...FACTS })).toBe(false);
   });
 
-  it('every remaining binding field participates: skill_version / dependency_versions / probe_version / canary_id', () => {
+  it('EVERY participating binding field is discriminating (r22 review L2 — all 11, not just the easy 6)', () => {
+    // Each wrong-field attestation must NOT match; only an exact one does. This
+    // varies the five the prior fixture silently skipped (host_id, runtime_user,
+    // schema_version, contract_version via the JOINed obligation, media_root) in
+    // addition to skill_version / resolver_digest / dependency_versions /
+    // probe_version / canary_id / release_sha — closing the coverage gap a
+    // second reviewer flagged (the SQL was already correct; the suite couldn't
+    // prove it).
     const id = seedObligation({ isGroup: false, deliveryJid: 'test-dm@lid', sourceInboundSeq: 8105, sourceMessageId: 'M-ATT-6' });
+    insertAttestation({ hostId: 'host-OTHER' });
+    insertAttestation({ runtimeUser: 'user-OTHER' });
+    insertAttestation({ schemaVersion: 999 });
+    insertAttestation({ contractVersion: 'contract-OTHER' }); // JOINed from the obligation
+    insertAttestation({ mediaRoot: '/media-OTHER' });
     insertAttestation({ skillVersion: '9.9.9' });
-    insertAttestation({ skillVersion: null });
+    insertAttestation({ resolverDigest: 'resolver-OTHER' });
     insertAttestation({ dependencyVersions: JSON.stringify({ 'yt-dlp': '1999.01.01' }) });
     insertAttestation({ probeVersion: 'probe/OTHER' });
     insertAttestation({ canaryId: 'canary-OTHER' });
+    insertAttestation({ releaseSha: 'rel-OTHER-2' });
     expect(store.hasAttestationCandidateIgnoringProvider({ obligationId: id, ...FACTS })).toBe(false);
     insertAttestation(); // exact match (any provider) — now a candidate
     expect(store.hasAttestationCandidateIgnoringProvider({ obligationId: id, ...FACTS })).toBe(true);

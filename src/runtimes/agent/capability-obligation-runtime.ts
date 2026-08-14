@@ -313,7 +313,17 @@ export class CapabilityObligationRuntime {
           ),
       });
       for (const outcome of outcomes) {
-        log.info({ outcome }, 'operator drain-now request serviced');
+        if (outcome.kind === 'drained') {
+          log.info({ outcome }, 'operator drain-now request drained an obligation');
+        } else if (outcome.kind === 'refused') {
+          log.info({ outcome }, 'operator drain-now request refused by a gate');
+        } else {
+          // invalid (unparseable / id-mismatch / symlink / untrusted_request_dir):
+          // warn, not info — an untrusted drop-dir repeats every scan interval, so
+          // the wording must not read as a successful service. Structured
+          // kind/reason fields carry the detail.
+          log.warn({ outcome }, 'operator drain-now request rejected as invalid');
+        }
       }
     } catch (err) {
       log.warn({ err }, 'operator drain-now servicing failed; will retry next tick');

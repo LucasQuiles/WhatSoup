@@ -41,6 +41,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   renameSync,
   rmSync,
   statSync,
@@ -76,12 +77,24 @@ export type DrainNowRequest = z.infer<typeof drainNowRequestSchema>;
 /**
  * The request drop-dir for a given database path. Both the runtime and the
  * operator CLI derive it from the SAME `--db` path, so no extra configuration
- * can point them at different dirs. An in-memory DB has no dir → null (the
- * servicing loop is inert).
+ * can point them at different dirs. The DB's parent directory is
+ * realpath-CANONICALIZED (r22 review L6) so a relative-vs-absolute spelling or
+ * a symlinked data dir cannot land the CLI's request in a dir the runtime never
+ * watches; if canonicalization fails (dir absent — it never is for an open DB)
+ * it falls back to the raw join. An in-memory DB has no dir → null (inert).
  */
 export function drainNowRequestDirForDbPath(dbPath: string): string | null {
   if (dbPath === ':memory:') return null;
-  return join(dirname(dbPath), DRAIN_NOW_REQUEST_DIRNAME);
+  const parent = dirname(dbPath);
+  let canonicalParent = parent;
+  try {
+    canonicalParent = realpathSync(parent);
+  } catch {
+    // intentional: an unresolvable parent (should never happen for an open DB)
+    // falls back to the raw path — the two sides still agree byte-for-byte when
+    // spelled identically, which is the common case.
+  }
+  return join(canonicalParent, DRAIN_NOW_REQUEST_DIRNAME);
 }
 
 // ── live session activation (the AE1 adapter half) ──────────────────────────
@@ -263,6 +276,11 @@ export async function serviceDrainNowRequests(
     // r22 AE1-review hardening: re-lstat the CONSUMED path — the pre-rename
     // lstat is TOCTOU-racable (same-UID only, but closing it is one syscall).
     // The rename moved whatever the entry was; only a regular file may be read.
+    // NOT separately unit-tested (the swap window is same-UID-only and thus
+    // out of scope under the ratified F4 boundary, like the drop-dir uid check):
+    // the committed symlink test covers the pre-rename lstat, and forcing a
+    // swap strictly between these two syscalls needs fs mocking that would buy
+    // no real coverage of an already-accepted threat. Defense-in-depth.
     try {
       if (!lstatSync(consumedPath).isFile()) isRegular = false;
     } catch {
@@ -314,13 +332,21 @@ export async function serviceDrainNowRequests(
   return outcomes;
 }
 
-/** Bounded GC of consumed/result artifacts older than the retention window. */
+/**
+ * Bounded GC of stale artifacts older than the retention window: consumed
+ * requests, their result files, AND orphaned `.tmp-*` files (r22 review L5 — a
+ * crash between the writer's tmp-write and rename would otherwise leak a
+ * `.tmp-<nonce>-<id>` file forever, since it matches neither the request nor
+ * the consumed pattern).
+ */
 function pruneConsumedArtifacts(requestDir: string, names: readonly string[]): void {
-  const cutoff = Date.now() - CONSUMED_RETENTION_MS;
+  const cutoff = systemClock.now() - CONSUMED_RETENTION_MS;
   let pruned = 0;
   for (const name of names) {
     if (pruned >= CONSUMED_PRUNE_PER_CYCLE) return;
-    if (!/\.json\.consumed-\d+(\.result\.json)?$/.test(name)) continue;
+    const isConsumed = /\.json\.consumed-\d+(\.result\.json)?$/.test(name);
+    const isOrphanTmp = /^\.tmp-/.test(name);
+    if (!isConsumed && !isOrphanTmp) continue;
     const full = join(requestDir, name);
     try {
       if (statSync(full).mtimeMs < cutoff) {

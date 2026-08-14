@@ -210,22 +210,29 @@ describe('serviceDrainNowRequests', () => {
     ]);
   });
 
-  it('prunes consumed/result artifacts older than the retention window', async () => {
+  it('prunes consumed/result artifacts AND orphaned .tmp-* files older than the retention window', async () => {
     const old = join(dir, '1.json.consumed-100');
     const oldResult = join(dir, '1.json.consumed-100.result.json');
+    const orphanTmp = join(dir, '.tmp-nonce-abc-1'); // r22 review L5: a crashed writer's leak
     writeFileSync(old, '{}');
     writeFileSync(oldResult, '{}');
+    writeFileSync(orphanTmp, '{}');
     const past = new Date(Date.now() - 8 * 24 * 3600 * 1000);
     utimesSync(old, past, past);
     utimesSync(oldResult, past, past);
+    utimesSync(orphanTmp, past, past);
     const fresh = join(dir, '2.json.consumed-200');
+    const freshTmp = join(dir, '.tmp-nonce-def-2'); // recent — a request being written right now
     writeFileSync(fresh, '{}');
+    writeFileSync(freshTmp, '{}');
     const { drain } = collectingDrain();
     await serviceDrainNowRequests({ requestDir: dir, drain, nowUnixSec: () => NOW });
     const names = readdirSync(dir);
     expect(names).not.toContain('1.json.consumed-100');
     expect(names).not.toContain('1.json.consumed-100.result.json');
+    expect(names).not.toContain('.tmp-nonce-abc-1'); // stale orphan pruned
     expect(names).toContain('2.json.consumed-200');
+    expect(names).toContain('.tmp-nonce-def-2'); // fresh tmp left alone (in-flight write)
   });
 });
 

@@ -145,6 +145,19 @@ test). The drop-dir itself must be a directory owned by the runtime UID with no
 group/other write bit — otherwise the whole cycle is refused (`untrusted_request_dir`)
 and nothing is consumed.
 
+**⚠ Trust boundary — the drop-file trigger is same-UID, NOT operator-exclusive (r22 review).**
+Any process running as the WhatSoup runtime UID — including an agent subprocess holding a
+file/child-process capability — can write a drop-file request. Security does NOT rest on the
+trigger being operator-only; it rests entirely on the per-obligation gates, which hold
+regardless of who dropped the request: a group is refused without a live AS-08 approval
+re-validated inside the claim transaction, every obligation requires an admissible
+attestation, the minted replay turn is deterministic (no attacker-supplied content), and an
+obligation can only be *created* by the real deferral pipeline — draining merely accelerates
+an already-authorized `waiting_capability` obligation that the 30s scan would drain anyway.
+This is the documented single-trusted-UID F4 boundary. The dry-run preview does NOT evaluate
+the attestation-candidate gate, so a green dry-run can still be refused
+`no_admissible_attestation` at service time — attest first.
+
 **Operator note — activation is one-way (r22 review):** drain-now activates the session
 and runs one tick; nothing tears the session down afterwards. If the approval is revoked
 right after activation, no send can occur (the claim re-validates the approval in the
