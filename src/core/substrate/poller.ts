@@ -501,6 +501,7 @@ export class TriggerPoller {
   private readonly stmtRecordDeliveredWaMessageId: StatementSync;
   private readonly stmtRecordNotifyDispatchFailed: StatementSync;
   private readonly stmtRecordNotifyForbiddenTarget: StatementSync;
+  private readonly stmtReconcileDeliveryIntents: StatementSync;
   private readonly stmtRecentErrorKinds: StatementSync;
   private readonly stmtRetireTriggerOnForbiddenTarget: StatementSync;
   private readonly stmtScheduleNextFire: StatementSync;
@@ -601,16 +602,34 @@ export class TriggerPoller {
     );
     this.stmtRecordDeliveredWaMessageId = this.db.prepare(
       `UPDATE trigger_runs
-       SET output_json = json_set(COALESCE(output_json, '{}'), '$.deliveredWaMessageId', ?)
+       SET output_json = json_remove(
+         json_set(COALESCE(output_json, '{}'), '$.deliveredWaMessageId', ?),
+         '$.notifyPending')
        WHERE id = ?`,
     );
     this.stmtRecordNotifyDispatchFailed = this.db.prepare(
-      `UPDATE trigger_runs SET error_kind = 'notify_dispatch_failed'
+      `UPDATE trigger_runs
+       SET error_kind = 'notify_dispatch_failed',
+           output_json = json_remove(COALESCE(output_json, '{}'), '$.notifyPending')
        WHERE id = ? AND error_kind IS NULL`,
     );
     this.stmtRecordNotifyForbiddenTarget = this.db.prepare(
-      `UPDATE trigger_runs SET error_kind = 'notify_forbidden_target'
+      `UPDATE trigger_runs
+       SET error_kind = 'notify_forbidden_target',
+           output_json = json_remove(COALESCE(output_json, '{}'), '$.notifyPending')
        WHERE id = ? AND error_kind IS NULL`,
+    );
+    // #2566 slice 3 — startup delivery reconcile: a run that committed
+    // dispatch intent but has neither a delivery receipt nor a classified
+    // dispatch failure crashed inside the dispatch window. The outcome is
+    // UNKNOWABLE (the send may or may not have left the process), so the row
+    // is marked with the bounded class and is NEVER re-sent.
+    this.stmtReconcileDeliveryIntents = this.db.prepare(
+      `UPDATE trigger_runs
+       SET error_kind = 'notify_outcome_unknown'
+       WHERE json_extract(output_json, '$.notifyPending') = 1
+         AND json_extract(output_json, '$.deliveredWaMessageId') IS NULL
+         AND error_kind IS NULL`,
     );
     this.stmtRecentErrorKinds = this.db.prepare(
       `SELECT error_kind FROM trigger_runs
@@ -707,8 +726,31 @@ export class TriggerPoller {
     this.stopped = false;
     log.info({ intervalMs: this.intervalMs, batchSize: this.batchSize }, 'trigger poller starting');
     this.reconcileStaleOccurrences(this.nowFn());
+    this.reconcileDeliveryIntents(this.nowFn());
     this.livenessObserver.start();
     this.scheduleNext();
+  }
+
+  /**
+   * #2566 slice 3 — startup delivery reconcile. At process start nothing is
+   * in flight, so every run still carrying dispatch intent without a receipt
+   * or a classified failure crashed inside the dispatch window. The outcome
+   * is unknowable; the row gets the bounded class 'notify_outcome_unknown'
+   * and is NEVER re-sent (whether the message left the old process cannot be
+   * proven, and a duplicate send is a worse failure than a surfaced unknown).
+   */
+  reconcileDeliveryIntents(now: number): void {
+    try {
+      const marked = this.stmtReconcileDeliveryIntents.run();
+      if (Number(marked.changes) > 0) {
+        log.warn(
+          { count: Number(marked.changes), reconciledAt: now },
+          'runs with unknown notification outcome marked (crashed inside the dispatch window)',
+        );
+      }
+    } catch (err) {
+      log.error({ err }, 'delivery-intent reconcile failed unexpectedly');
+    }
   }
 
   /**
@@ -1014,6 +1056,12 @@ export class TriggerPoller {
       }
     }
 
+    // #2566 slice 3 — durable dispatch intent: committed in the SAME finalize
+    // transaction as the run result, so a crash between COMMIT and the
+    // post-commit sendMessage leaves evidence instead of a silent loss.
+    if (shouldDispatchNotification) {
+      outcome.outputJson = { ...outcome.outputJson, notifyPending: true };
+    }
     const finishedAt = this.nowFn();
     let runId = 0;
     const postCommitActions: PostCommitActions = {};
