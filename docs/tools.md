@@ -1,8 +1,8 @@
 # WhatSoup MCP Tool API Reference
 
-Complete reference for all 166 MCP tools exposed by WhatSoup. Tools are grouped by module. Each tool lists its scope, replay policy, and parameters extracted from the Zod schema.
+Complete reference for all 167 MCP tools exposed by WhatSoup. Tools are grouped by module. Each tool lists its scope, replay policy, and parameters extracted from the Zod schema.
 
-> **Conditionally-registered tools.** Of the 166 documented tools, 163 are always registered at startup and 3 are conditionally registered. Conditional tools are tagged `core: false` in their `ToolDeclaration` so that absence on an instance which does not meet the gate is tolerated rather than fatal (see `src/mcp/types.ts`).
+> **Conditionally-registered tools.** Of the 167 documented tools, 164 are always registered at startup and 3 are conditionally registered. Conditional tools are tagged `core: false` in their `ToolDeclaration` so that absence on an instance which does not meet the gate is tolerated rather than fatal (see `src/mcp/types.ts`).
 >
 > **`knowledge_search`** is registered only when all of the following hold:
 >
@@ -20,7 +20,7 @@ Complete reference for all 166 MCP tools exposed by WhatSoup. Tools are grouped 
 > - the runtime is not in `sandboxPerChat` mode, and
 > - the runtime is not in `sandbox` mode.
 >
-> The intent is that only the repair-issuing role (Q) exposes `emit_heal_result`; sandboxed repair targets (Loops) do not. Instances that fail any of these gates omit the corresponding tool at runtime; the documented total of 165 reflects the full tool surface available to a fully-configured non-sandboxed Q instance with Pinecone configured.
+> The intent is that only the repair-issuing role (Q) exposes `emit_heal_result`; sandboxed repair targets (Loops) do not. Instances that fail any of these gates omit the corresponding tool at runtime; the documented total of 166 reflects the full tool surface available to a fully-configured non-sandboxed Q instance with Pinecone configured.
 
 ## Scope and Replay Policy Glossary
 
@@ -77,11 +77,11 @@ Complete reference for all 166 MCP tools exposed by WhatSoup. Tools are grouped 
 | [status.ts](#statusts) | 2 |
 | [scheduling.ts](#schedulingts) | 5 |
 | [audit.ts](#auditts) | 2 |
-| [substrate.ts](#substratets) | 21 |
+| [substrate.ts](#substratets) | 22 |
 | [memory-write.ts](#memory-writets) | 1 |
-| **Total** | **166** |
+| **Total** | **167** |
 
-> The total above (`166`) reflects the full canonical surface — `165` tools registered from the per-module `src/mcp/tools/*.ts` factories plus `1` (`emit_heal_result`) registered inline (declared in `src/runtimes/agent/runtime-tool-registrations.ts`, wired from `AgentRuntime.start()`). The inline registration is documented below under [runtime-tool-registrations.ts (inline)](#runtime-tool-registrationsts-inline); it is intentionally absent from the module breakdown because it does not live under `src/mcp/tools/`.
+> The total above (`167`) reflects the full canonical surface — `166` tools registered from the per-module `src/mcp/tools/*.ts` factories plus `1` (`emit_heal_result`) registered inline (declared in `src/runtimes/agent/runtime-tool-registrations.ts`, wired from `AgentRuntime.start()`). The inline registration is documented below under [runtime-tool-registrations.ts (inline)](#runtime-tool-registrationsts-inline); it is intentionally absent from the module breakdown because it does not live under `src/mcp/tools/`.
 
 ---
 
@@ -628,6 +628,25 @@ List triggers with optional filters.
 | bead_id | number | optional | Filter by bead id. |
 | kind | string | optional | Filter by trigger kind. |
 | status | `"active"` \| `"paused"` \| `"expired"` \| `"cancelled"` | optional | Filter by trigger status. |
+
+---
+
+### list_trigger_runs
+
+Redacted run history for a trigger or bead (#2566). Bounded fields only — status, timestamps, attempt, bounded error class, and delivery booleans (`delivered`, `notifyPending`, `throttled`); output content, summaries, error prose, and transport identifiers never cross this projection. Requires `trigger_id` or `bead_id`.
+
+| | |
+|---|---|
+| **Scope** | `global` |
+| **Replay Policy** | `read_only` |
+
+**Parameters**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| trigger_id | number | optional | Filter by trigger id (this or bead_id required). |
+| bead_id | number | optional | Filter by bead id (this or trigger_id required). |
+| limit | number | optional | Max rows, newest first. Default 50, cap 200. |
 
 ---
 
