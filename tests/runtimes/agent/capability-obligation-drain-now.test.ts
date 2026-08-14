@@ -177,7 +177,7 @@ describe('hasAttestationCandidateIgnoringProvider (r22 drain-now pre-check)', ()
   // all of them).
   const FACTS = {
     hostId: 'test-host', runtimeUser: 'test-user', releaseSha: 'rel-live-1',
-    schemaVersion: 57, skillName: 'watch-skill', skillVersion: '1.2.3' as string | null,
+    schemaVersion: 58, skillName: 'watch-skill', skillVersion: '1.2.3' as string | null,
     skillDigest: 'skill-digest-1', resolverDigest: 'resolver-composite-1' as string | null,
     dependencyVersions: { 'yt-dlp': '2026.03.17' } as Record<string, string>,
     probeVersion: 'probe/1', canaryId: 'canary-1', mediaRoot: '/tmp/media-root',

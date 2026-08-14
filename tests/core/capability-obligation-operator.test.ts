@@ -1,6 +1,6 @@
 /**
  * Operator adjudication (inspect/cancel/adjudicate) over the REAL guarded state
- * machine. Cancel and requeue go through the same migration-57 transition
+ * machine. Cancel and requeue go through the same migration-58 transition
  * whitelist as the runtime — never raw SQL — so an illegal source state is
  * refused, and every action leaves an `operator` audit event. Real SQLite.
  */
@@ -30,7 +30,7 @@ afterEach(() => {
  * 'claimed' supplies one). */
 function seedFreshAttestation(): number {
   return recordCapabilityAttestation(db, {
-    hostId: 'h', runtimeUser: 'u', releaseSha: 'r', schemaVersion: 57,
+    hostId: 'h', runtimeUser: 'u', releaseSha: 'r', schemaVersion: 58,
     providerId: 'claude-cli', harnessType: 'persistent_session', contractVersion: 'c/1',
     capability: 'child_process_tools', skillName: 'watch', skillVersion: '1.0.0',
     skillDigest: 'sd', resolverDigest: 'rd', dependencyVersions: {}, probeVersion: 'p/1',

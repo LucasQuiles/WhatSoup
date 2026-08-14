@@ -487,6 +487,7 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       expect(runtime.dispatchAgentJob({
         beadId: 1,
         triggerId: 2,
+        occurrenceId: 77,
         prompt: 'do work',
         title: 'scheduled work',
         reportChatJid: 'test@g.us',
@@ -502,6 +503,7 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       const result = runtime.dispatchAgentJob({
         beadId: 1,
         triggerId: 2,
+        occurrenceId: 77,
         prompt: 'do work',
         title: 'scheduled work',
         reportChatJid: 'test@g.us',
@@ -524,6 +526,7 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       const result = runtime.dispatchAgentJob({
         beadId: 5,
         triggerId: 9,
+        occurrenceId: 77,
         prompt: 'do work',
         title: 'scheduled work',
         reportChatJid: 'test@g.us',
@@ -554,6 +557,7 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       const result = runtime.dispatchAgentJob({
         beadId: 5,
         triggerId: 9,
+        occurrenceId: 77,
         prompt: 'do work',
         title: 'scheduled work',
         reportChatJid: 'test@g.us',

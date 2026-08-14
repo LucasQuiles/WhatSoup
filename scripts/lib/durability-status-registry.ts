@@ -132,6 +132,17 @@ export const REGISTRY: DurabilityStatusEntry[] = [
     writerSites: ['src/core/substrate/poller.ts'], // finishRun() writes outcome.status
   },
   {
+    // #2566 slice 1 — pre-execution occurrence lifecycle. 'failed' is written
+    // by the fenced finalize (outcome.status); 'stale' by the startup
+    // lease-expiry sweep. 'claimed' is reserved for a future two-phase claim.
+    table: 'trigger_occurrences',
+    statusColumn: 'state',
+    vocabulary: ['claimed', 'running', 'ok', 'noop', 'failed', 'terminal_fired', 'stale'],
+    vocabularySource: 'sql-check',
+    terminalFailureValues: ['failed', 'stale'],
+    writerSites: ['src/core/substrate/poller.ts'], // stmtFinalizeOccurrence + stmtSweepStaleOccurrences
+  },
+  {
     table: 'auth_loss_signal',
     statusColumn: 'classifier',
     vocabulary: ['logged_out', 'weak_logged_out_signal'],

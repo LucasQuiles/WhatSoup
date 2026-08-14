@@ -1,7 +1,7 @@
 /**
  * D4 — capability-obligation store (capability-obligation replay).
  *
- * Persistence for the append-only capability-debt lifecycle (migration 57).
+ * Persistence for the append-only capability-debt lifecycle (migration 58).
  * The creation-side API follows the `*WithinCallerTransaction` convention
  * (turn-recovery-store.ts precedent): methods here NEVER open a transaction —
  * the caller owns it. The one production caller of the decision API is

@@ -1,9 +1,9 @@
 {
-  "generated_at": "2026-08-12T15:12:21Z",
+  "generated_at": "2026-08-14T15:59:24Z",
   "repo": "WhatSoup",
-  "git_head": "52b0c807c77dfb9fa9e740b9cb5f056c30dd47a9",
+  "git_head": "f677e92ec1ffc575f8e33625242f4ce520706e2b",
   "git_head_note": "git_head is captured at scan time, so it reflects the branch HEAD at the moment `build-work-index` ran — NOT the commit that carries this index. Expect divergence in two cases: (1) intra-branch, when the regenerated index is committed after further content changes are staged; (2) post-squash-merge, when the landed main SHA differs from the pre-merge branch SHA. The row data and inconsistency detection remain accurate regardless of git_head freshness.",
-  "total": 116,
+  "total": 122,
   "schema_version": 5,
   "rows": [
     {
@@ -1485,8 +1485,34 @@
       "lifecycle": "executable",
       "canonical_parent": "docs/superpowers/specs/provider-event-lifecycle",
       "supersedes_hint": null,
-      "last_modified": "2026-08-12",
-      "size_bytes": 82584
+      "last_modified": "2026-08-14",
+      "size_bytes": 82647
+    },
+    {
+      "path": "docs/superpowers/specs/provider-event-lifecycle/design.md",
+      "kind": "spec",
+      "topic_raw": "design",
+      "topic": "design",
+      "status": "active",
+      "status_source": "body-marker",
+      "lifecycle": "executable",
+      "canonical_parent": "docs/superpowers/specs/provider-event-lifecycle",
+      "supersedes_hint": null,
+      "last_modified": "2026-08-14",
+      "size_bytes": 82647
+    },
+    {
+      "path": "docs/superpowers/specs/provider-event-lifecycle/design.md",
+      "kind": "spec",
+      "topic_raw": "design",
+      "topic": "design",
+      "status": "active",
+      "status_source": "body-marker",
+      "lifecycle": "executable",
+      "canonical_parent": "docs/superpowers/specs/provider-event-lifecycle",
+      "supersedes_hint": null,
+      "last_modified": "2026-08-14",
+      "size_bytes": 82647
     },
     {
       "path": "docs/superpowers/specs/provider-event-lifecycle/requirements.md",
@@ -1498,8 +1524,34 @@
       "lifecycle": "executable",
       "canonical_parent": "docs/superpowers/specs/provider-event-lifecycle",
       "supersedes_hint": null,
-      "last_modified": "2026-08-12",
-      "size_bytes": 112114
+      "last_modified": "2026-08-14",
+      "size_bytes": 112831
+    },
+    {
+      "path": "docs/superpowers/specs/provider-event-lifecycle/requirements.md",
+      "kind": "spec",
+      "topic_raw": "requirements",
+      "topic": "requirements",
+      "status": "active",
+      "status_source": "body-marker",
+      "lifecycle": "executable",
+      "canonical_parent": "docs/superpowers/specs/provider-event-lifecycle",
+      "supersedes_hint": null,
+      "last_modified": "2026-08-14",
+      "size_bytes": 112831
+    },
+    {
+      "path": "docs/superpowers/specs/provider-event-lifecycle/requirements.md",
+      "kind": "spec",
+      "topic_raw": "requirements",
+      "topic": "requirements",
+      "status": "active",
+      "status_source": "body-marker",
+      "lifecycle": "executable",
+      "canonical_parent": "docs/superpowers/specs/provider-event-lifecycle",
+      "supersedes_hint": null,
+      "last_modified": "2026-08-14",
+      "size_bytes": 112831
     },
     {
       "path": "docs/superpowers/specs/provider-event-lifecycle/tasks.md",
@@ -1511,13 +1563,41 @@
       "lifecycle": "executable",
       "canonical_parent": "docs/superpowers/specs/provider-event-lifecycle",
       "supersedes_hint": null,
-      "last_modified": "2026-08-12",
-      "size_bytes": 61527
+      "last_modified": "2026-08-14",
+      "size_bytes": 61590
+    },
+    {
+      "path": "docs/superpowers/specs/provider-event-lifecycle/tasks.md",
+      "kind": "spec",
+      "topic_raw": "tasks",
+      "topic": "tasks",
+      "status": "active",
+      "status_source": "body-marker",
+      "lifecycle": "executable",
+      "canonical_parent": "docs/superpowers/specs/provider-event-lifecycle",
+      "supersedes_hint": null,
+      "last_modified": "2026-08-14",
+      "size_bytes": 61590
+    },
+    {
+      "path": "docs/superpowers/specs/provider-event-lifecycle/tasks.md",
+      "kind": "spec",
+      "topic_raw": "tasks",
+      "topic": "tasks",
+      "status": "active",
+      "status_source": "body-marker",
+      "lifecycle": "executable",
+      "canonical_parent": "docs/superpowers/specs/provider-event-lifecycle",
+      "supersedes_hint": null,
+      "last_modified": "2026-08-14",
+      "size_bytes": 61590
     }
   ],
   "cross_tree_topics": {
     "design": [
       "docs/superpowers/specs/kill-session-transactional-cancellation/design.md",
+      "docs/superpowers/specs/provider-event-lifecycle/design.md",
+      "docs/superpowers/specs/provider-event-lifecycle/design.md",
       "docs/superpowers/specs/provider-event-lifecycle/design.md"
     ],
     "fleet-charts": [
@@ -1526,10 +1606,14 @@
     ],
     "requirements": [
       "docs/superpowers/specs/kill-session-transactional-cancellation/requirements.md",
+      "docs/superpowers/specs/provider-event-lifecycle/requirements.md",
+      "docs/superpowers/specs/provider-event-lifecycle/requirements.md",
       "docs/superpowers/specs/provider-event-lifecycle/requirements.md"
     ],
     "tasks": [
       "docs/superpowers/specs/kill-session-transactional-cancellation/tasks.md",
+      "docs/superpowers/specs/provider-event-lifecycle/tasks.md",
+      "docs/superpowers/specs/provider-event-lifecycle/tasks.md",
       "docs/superpowers/specs/provider-event-lifecycle/tasks.md"
     ]
   },

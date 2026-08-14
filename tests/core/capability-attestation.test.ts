@@ -29,7 +29,7 @@ const BINDING: CapabilityAttestationBinding = {
   hostId: 'test-host',
   runtimeUser: 'test-user',
   releaseSha: 'relsha-1',
-  schemaVersion: 57,
+  schemaVersion: 58,
   providerId: 'claude-cli',
   harnessType: 'persistent_session',
   contractVersion: 'test-instance/1',

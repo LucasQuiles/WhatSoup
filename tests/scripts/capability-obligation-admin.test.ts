@@ -106,7 +106,7 @@ describe('schema guard', () => {
     const { io } = captureIo();
     expect(() =>
       runCapabilityObligationAdmin(parseAdminArgs(['list', '--db', dbPath]), io),
-    ).toThrow(/schema 44, expected 57/);
+    ).toThrow(/schema 44, expected 58/);
   });
 
   it('an absent schema_migrations table refuses cleanly as schema 0', () => {
@@ -117,7 +117,7 @@ describe('schema guard', () => {
     const { io } = captureIo();
     expect(() =>
       runCapabilityObligationAdmin(parseAdminArgs(['list', '--db', dbPath]), io),
-    ).toThrow(/schema 0, expected 57/);
+    ).toThrow(/schema 0, expected 58/);
   });
 
   it('a non-schema read error (corrupt/locked DB) surfaces distinctly, NOT as schema 0', () => {
@@ -132,7 +132,7 @@ describe('schema guard', () => {
     } catch (err) {
       message = err instanceof Error ? err.message : String(err);
     }
-    expect(message).not.toMatch(/expected 57/);
+    expect(message).not.toMatch(/expected 58/);
     expect(message.length).toBeGreaterThan(0);
   });
 });

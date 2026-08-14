@@ -1,16 +1,16 @@
 /**
  * capability-obligation-admin — operator inspect/list/cancel/adjudicate over the
- * capability-obligation ledger (migration 57).
+ * capability-obligation ledger (migration 58).
  *
  * Safety by construction:
  *  - SCHEMA GUARD: the target DB must already be EXACTLY at the current schema
  *    version. This CLI never migrates a live database — pointing it at an
- *    older instance (e.g. a bot still on a pre-57 schema) refuses cleanly
+ *    older instance (e.g. a bot still on a pre-58 schema) refuses cleanly
  *    instead of silently upgrading it.
  *  - DRY-RUN BY DEFAULT: `cancel`/`adjudicate` only preview unless `--confirm`
  *    is passed; the preview reports whether a real run WOULD apply.
  *  - GUARDED TRANSITIONS: cancel/requeue go through the store's guarded state
- *    machine (the migration-57 transition whitelist), never raw SQL.
+ *    machine (the migration-58 transition whitelist), never raw SQL.
  *  - IDEMPOTENT: an already-in-target obligation is a no-op success; `--run-id`
  *    is recorded as the audit actor and `--idempotency-key` in the audit detail.
  *

@@ -152,7 +152,7 @@ describe('C3-joined capability decision (D4)', () => {
   it('FAULT: an obligation insert failure rolls back the terminal record and the audit event', () => {
     const { inboundSeq, opId } = seedEchoedTurn();
     // Schema-level injected fault: creation_reason is validated only by the
-    // migration-57 CHECK (the store's JS validation does not cover it), so an
+    // migration-58 CHECK (the store's JS validation does not cover it), so an
     // invalid reason reaches the INSERT and aborts inside the C3 transaction.
     // (A duplicate dedup-key is no longer a fault — it dedup-suppresses.)
     const before = counts();

@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-08-14T05:07:09Z",
+  "generatedAt": "2026-08-14T13:00:00Z",
   "scope": "bot-errors-runtime-scripts",
   "expectedHeadShaPolicy": "populated at deploy time by deploy step; absent here so committed state is observability-only",
   "files": [
@@ -466,7 +466,7 @@
     },
     {
       "path": "src/lib/fault-taxonomy-registry.json",
-      "sha256": "13a78b9d31dfbe609d5e17ce47adeb96ba3c07284a5b63748776e9169e4057a0",
+      "sha256": "8cf964ca3fc6b75ebff27be9b78de64f6abadb3d8ae4b5af07ec9e7d8672f0dd",
       "mustContain": [
         "whatsoup-fault-taxonomy-registry-v3",
         "runtimeAgentHealthSignals",

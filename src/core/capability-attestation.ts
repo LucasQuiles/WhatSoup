@@ -1,7 +1,7 @@
 /**
  * D5 — exact-bound capability attestation (capability-obligation replay).
  *
- * An attestation is an immutable, versioned readiness record (migration 57)
+ * An attestation is an immutable, versioned readiness record (migration 58)
  * proving the DECLARED capability contract is actually executable on a specific
  * host/release/provider/skill/dependency/media-root combination, backed by a
  * bounded non-sending canary. Provider health or `/health` output NEVER admits

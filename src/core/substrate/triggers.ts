@@ -319,3 +319,29 @@ export function countPastDueTriggers(
   ).get(now - graceSeconds) as { c: number };
   return row.c;
 }
+
+/** Default grace before a previously-fired trigger counts as recurring-overdue. */
+export const DEFAULT_RECURRING_OVERDUE_GRACE_SEC = 900;
+
+/**
+ * #2566 slice 2 — recurring-overdue gauge: count active triggers that HAVE
+ * fired before (last_fire_at IS NOT NULL) but whose next_fire_at is more than
+ * `graceSeconds` in the past. The #1765 gauge above covers the never-fired
+ * case; together they partition "active with a stale next_fire_at" exactly.
+ * Prior-failure rows count too (deliberate superset of "after prior success"):
+ * a stalled firing path matters regardless of the last outcome.
+ */
+export function countRecurringOverdueTriggers(
+  db: DatabaseSync,
+  now: number = nowUnixSec(),
+  graceSeconds: number = DEFAULT_RECURRING_OVERDUE_GRACE_SEC,
+): number {
+  const row = db.prepare(
+    `SELECT COUNT(*) AS c FROM bead_triggers
+     WHERE status = 'active'
+       AND next_fire_at IS NOT NULL
+       AND next_fire_at < ?
+       AND last_fire_at IS NOT NULL`,
+  ).get(now - graceSeconds) as { c: number };
+  return row.c;
+}
