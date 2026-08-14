@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomUUID } from 'node:crypto';
+import { systemClock } from '../lib/clock.ts';
 import { config } from '../config.ts';
 import { safeStringEqual } from '../lib/safe-compare.ts';
 import { lookupCredential } from '../lib/keyring.ts';
@@ -1851,7 +1852,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
             count: row.c,
             oldestAgeS: row.oldest == null
               ? 0
-              : Math.max(0, Math.floor(Date.now() / 1000) - row.oldest),
+              : Math.max(0, systemClock.nowUnixSec() - row.oldest),
           };
         },
         { count: 0, oldestAgeS: 0 },
