@@ -265,18 +265,23 @@ def test_heartbeat_push_failure_does_not_mask_runtime_status(tmp_path: Path):
     assert calls == []
 
 
-def test_central_ack_fresh_records_central_acked(tmp_path: Path):
+def test_central_ack_valid_receipt_records_central_acked(tmp_path: Path):
     ack = tmp_path / "central-ack.json"
-    ack.write_text("{}", encoding="utf-8")
+    ack.write_text(_ack_receipt(acked_epoch=980.0), encoding="utf-8")
     os.utime(ack, (980.0, 980.0))
     config, deps, calls, _head = _fixture(tmp_path, central_ack_path=ack)
     status = _mod.run_selfcheck(config, deps)
     assert status["centralAck"]["mode"] == "central_acked"
     assert status["centralAck"]["status"] == "fresh"
     assert status["centralAck"]["ageSeconds"] == 20
+    assert status["centralAck"]["receiptAckedAt"] == _mod.now_iso(980.0)
+    assert len(status["centralAck"]["receiptDigest"]) == 64
     assert status["centralAck"]["centralDownSuspected"] is False
     assert "centralDownAlert" not in status
     assert status["healthy"] is True
+    memory = json.loads(config.memory_path.read_text(encoding="utf-8"))
+    assert memory["centralAckHighWater"] == 980.0
+    assert memory["centralAckLastValid"]["digest"] == status["centralAck"]["receiptDigest"]
     assert calls == []
 
 
@@ -327,13 +332,13 @@ def test_central_ack_missing_or_stale_records_local_only(tmp_path: Path, monkeyp
     stale_root = tmp_path / "stale-case"
     stale_root.mkdir()
     ack = stale_root / "stale-ack.json"
-    ack.write_text("{}", encoding="utf-8")
+    ack.write_text(_ack_receipt(acked_epoch=900.0), encoding="utf-8")
     os.utime(ack, (900.0, 900.0))
     monkeypatch.setenv("BOT_ERRORS_SELFCHECK_CENTRAL_ACK_MAX_AGE_SECONDS", "60")
     config, deps, calls, _head = _fixture(stale_root, central_ack_path=ack)
     status = _mod.run_selfcheck(config, deps)
     assert status["centralAck"]["mode"] == "local_only"
-    assert status["centralAck"]["status"] == "stale"
+    assert status["centralAck"]["status"] == "stale_payload"
     assert status["centralAck"]["ageSeconds"] == 100
     assert status["centralAck"]["centralDownSuspected"] is False
     assert calls == []
@@ -341,14 +346,14 @@ def test_central_ack_missing_or_stale_records_local_only(tmp_path: Path, monkeyp
 
 def test_long_stale_central_ack_writes_central_down_alert(tmp_path: Path, monkeypatch):
     ack = tmp_path / "central-ack.json"
-    ack.write_text("{}", encoding="utf-8")
+    ack.write_text(_ack_receipt(acked_epoch=100.0), encoding="utf-8")
     os.utime(ack, (100.0, 100.0))
     monkeypatch.setenv("BOT_ERRORS_SELFCHECK_CENTRAL_ACK_MAX_AGE_SECONDS", "60")
     monkeypatch.setenv("BOT_ERRORS_SELFCHECK_CENTRAL_DOWN_MAX_AGE_SECONDS", "600")
     config, deps, calls, _head = _fixture(tmp_path, central_ack_path=ack)
     status = _mod.run_selfcheck(config, deps)
     assert status["healthy"] is True
-    assert status["centralAck"]["status"] == "stale"
+    assert status["centralAck"]["status"] == "stale_payload"
     assert status["centralAck"]["ageSeconds"] == 900
     assert status["centralAck"]["centralDownSuspected"] is True
     assert status["centralDownAlert"] == {
@@ -365,7 +370,7 @@ def test_long_stale_central_ack_writes_central_down_alert(tmp_path: Path, monkey
     assert "root" not in alert
     assert alert["action"] == "central_down_suspected"
     assert alert["tier"] == "tier3"
-    assert alert["centralAck"]["status"] == "stale"
+    assert alert["centralAck"]["status"] == "stale_payload"
     assert "path" not in alert["centralAck"]
     heartbeat = json.loads(config.heartbeat_path.read_text(encoding="utf-8"))
     assert heartbeat["centralDownAlert"]["ok"] is True
@@ -397,7 +402,7 @@ def test_missing_central_ack_alerts_after_local_only_threshold(tmp_path: Path, m
 
 def test_central_down_alert_write_failure_is_reported(tmp_path: Path, monkeypatch):
     ack = tmp_path / "central-ack.json"
-    ack.write_text("{}", encoding="utf-8")
+    ack.write_text(_ack_receipt(acked_epoch=100.0), encoding="utf-8")
     os.utime(ack, (100.0, 100.0))
     monkeypatch.setenv("BOT_ERRORS_SELFCHECK_CENTRAL_ACK_MAX_AGE_SECONDS", "60")
     monkeypatch.setenv("BOT_ERRORS_SELFCHECK_CENTRAL_DOWN_MAX_AGE_SECONDS", "600")
@@ -488,7 +493,7 @@ def test_boolean_central_ack_local_only_since_is_reset(tmp_path: Path, monkeypat
 
 def test_fresh_central_ack_clears_local_only_watch(tmp_path: Path):
     ack = tmp_path / "central-ack.json"
-    ack.write_text("{}", encoding="utf-8")
+    ack.write_text(_ack_receipt(acked_epoch=990.0), encoding="utf-8")
     os.utime(ack, (990.0, 990.0))
     config, deps, calls, _head = _fixture(tmp_path, central_ack_path=ack)
     _seed_memory(
@@ -519,7 +524,7 @@ def test_central_ack_stat_error_and_invalid_max_age_fallback(tmp_path: Path, mon
 
     monkeypatch.setattr(Path, "stat", stat)
     monkeypatch.setenv("BOT_ERRORS_SELFCHECK_CENTRAL_ACK_MAX_AGE_SECONDS", "bad")
-    result = _mod.central_ack_inventory(ack, 1000.0)
+    result = _mod.central_ack_inventory(ack, 1000.0, "test-host")
     monkeypatch.setenv("BOT_ERRORS_SELFCHECK_CENTRAL_DOWN_MAX_AGE_SECONDS", "bad")
     assert _mod.central_down_max_age_seconds() == 2 * 60 * 60
     assert result == {
@@ -2011,7 +2016,7 @@ def test_publish_heartbeat_pushes_telemetry_not_full_payload(tmp_path: Path):
 def test_central_down_alert_uses_digests_not_raw_identity(tmp_path: Path, monkeypatch):
     """Central-down alert artifact must use digests, not raw host/root/path."""
     ack = tmp_path / "central-ack.json"
-    ack.write_text("{}", encoding="utf-8")
+    ack.write_text(_ack_receipt(acked_epoch=100.0), encoding="utf-8")
     os.utime(ack, (100.0, 100.0))
     monkeypatch.setenv("BOT_ERRORS_SELFCHECK_CENTRAL_ACK_MAX_AGE_SECONDS", "60")
     monkeypatch.setenv("BOT_ERRORS_SELFCHECK_CENTRAL_DOWN_MAX_AGE_SECONDS", "600")
@@ -2120,3 +2125,186 @@ def test_status_without_healthy_key_skips_re_push():
     status = {"class": "unknown"}
     re_push = not status.get("healthy", True)
     assert re_push is False, "missing healthy key must default to True, no re-push"
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Issue #2468: central acknowledgement must be a validated receipt, not a
+# fresh-mtime file. Slice 1 (consumer-side): content/schema/subject/temporal
+# validation with existing v1 payload fields, ackedAt-anchored freshness,
+# ordering guards, and preserve-last-valid semantics.
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def _ack_receipt(acked_epoch: float = 980.0, host: str = "test-host", **overrides) -> str:
+    payload = {
+        "schemaVersion": 1,
+        "host": host,
+        "ackedAt": _mod.now_iso(acked_epoch),
+        "centralClass": "healthy",
+        "centralAction": "noop",
+    }
+    payload.update(overrides)
+    return json.dumps(payload)
+
+
+def _write_ack_file(path: Path, content: str | bytes, mtime: float = 980.0) -> None:
+    if isinstance(content, str):
+        path.write_text(content, encoding="utf-8")
+    else:
+        path.write_bytes(content)
+    os.utime(path, (mtime, mtime))
+
+
+def test_fresh_arbitrary_bytes_are_not_central_proof(tmp_path: Path):
+    ack = tmp_path / "central-ack.json"
+    _write_ack_file(ack, b"not json at all\x00\xff")
+    config, deps, calls, _head = _fixture(tmp_path, central_ack_path=ack)
+    status = _mod.run_selfcheck(config, deps)
+    assert status["centralAck"]["mode"] == "local_only"
+    assert status["centralAck"]["status"] == "malformed_json"
+    assert "localOnlySince" in status["centralAck"]
+    assert calls == []
+
+
+def test_fresh_empty_object_is_not_central_proof(tmp_path: Path):
+    ack = tmp_path / "central-ack.json"
+    _write_ack_file(ack, "{}")
+    config, deps, calls, _head = _fixture(tmp_path, central_ack_path=ack)
+    status = _mod.run_selfcheck(config, deps)
+    assert status["centralAck"]["mode"] == "local_only"
+    assert status["centralAck"]["status"] == "wrong_schema"
+    assert calls == []
+
+
+def test_wrong_schema_version_is_not_central_proof(tmp_path: Path):
+    ack = tmp_path / "central-ack.json"
+    _write_ack_file(ack, _ack_receipt(schemaVersion=2))
+    config, deps, calls, _head = _fixture(tmp_path, central_ack_path=ack)
+    status = _mod.run_selfcheck(config, deps)
+    assert status["centralAck"]["mode"] == "local_only"
+    assert status["centralAck"]["status"] == "wrong_schema"
+    assert calls == []
+
+
+def test_wrong_subject_receipt_is_not_central_proof(tmp_path: Path):
+    ack = tmp_path / "central-ack.json"
+    _write_ack_file(ack, _ack_receipt(host="other-host"))
+    config, deps, calls, _head = _fixture(tmp_path, central_ack_path=ack)
+    status = _mod.run_selfcheck(config, deps)
+    assert status["centralAck"]["mode"] == "local_only"
+    assert status["centralAck"]["status"] == "wrong_subject"
+    assert calls == []
+
+
+def test_future_acked_at_receipt_is_not_central_proof(tmp_path: Path):
+    ack = tmp_path / "central-ack.json"
+    _write_ack_file(ack, _ack_receipt(acked_epoch=2000.0))
+    config, deps, calls, _head = _fixture(tmp_path, central_ack_path=ack)
+    status = _mod.run_selfcheck(config, deps)
+    assert status["centralAck"]["mode"] == "local_only"
+    assert status["centralAck"]["status"] == "future_receipt"
+    assert calls == []
+
+
+def test_touched_stale_receipt_cannot_advance_freshness(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("BOT_ERRORS_SELFCHECK_CENTRAL_ACK_MAX_AGE_SECONDS", "60")
+    ack = tmp_path / "central-ack.json"
+    _write_ack_file(ack, _ack_receipt(acked_epoch=900.0), mtime=999.0)
+    config, deps, calls, _head = _fixture(tmp_path, central_ack_path=ack)
+    status = _mod.run_selfcheck(config, deps)
+    assert status["centralAck"]["mode"] == "local_only"
+    assert status["centralAck"]["status"] == "stale_payload"
+    assert status["centralAck"]["ageSeconds"] == 100
+    assert calls == []
+
+
+def test_oversized_receipt_is_not_central_proof(tmp_path: Path):
+    ack = tmp_path / "central-ack.json"
+    _write_ack_file(ack, b"x" * 70_000)
+    config, deps, calls, _head = _fixture(tmp_path, central_ack_path=ack)
+    status = _mod.run_selfcheck(config, deps)
+    assert status["centralAck"]["mode"] == "local_only"
+    assert status["centralAck"]["status"] == "oversized"
+    assert calls == []
+
+
+def test_out_of_order_receipt_cannot_advance(tmp_path: Path):
+    ack = tmp_path / "central-ack.json"
+    _write_ack_file(ack, _ack_receipt(acked_epoch=980.0))
+    config, deps, calls, _head = _fixture(tmp_path, central_ack_path=ack)
+    _seed_memory(
+        config,
+        {
+            "lastClass": "healthy",
+            "consecutive": 1,
+            "healHistory": [],
+            "centralAckHighWater": 990.0,
+        },
+    )
+    status = _mod.run_selfcheck(config, deps)
+    assert status["centralAck"]["mode"] == "local_only"
+    assert status["centralAck"]["status"] == "out_of_order"
+    assert calls == []
+
+
+def test_contradictory_receipt_is_flagged(tmp_path: Path):
+    ack = tmp_path / "central-ack.json"
+    _write_ack_file(ack, _ack_receipt(acked_epoch=980.0))
+    config, deps, calls, _head = _fixture(tmp_path, central_ack_path=ack)
+    _seed_memory(
+        config,
+        {
+            "lastClass": "healthy",
+            "consecutive": 1,
+            "healHistory": [],
+            "centralAckLastSeen": {"ackedAtEpoch": 980.0, "digest": "0" * 64},
+        },
+    )
+    status = _mod.run_selfcheck(config, deps)
+    assert status["centralAck"]["mode"] == "local_only"
+    assert status["centralAck"]["status"] == "contradictory"
+    assert calls == []
+
+
+def test_invalid_receipt_preserves_last_valid_and_episode(tmp_path: Path):
+    ack = tmp_path / "central-ack.json"
+    _write_ack_file(ack, "{}")
+    config, deps, calls, _head = _fixture(tmp_path, central_ack_path=ack)
+    last_valid = {"ackedAt": _mod.now_iso(900.0), "digest": "d" * 64, "recordedAt": _mod.now_iso(910.0)}
+    _seed_memory(
+        config,
+        {
+            "lastClass": "healthy",
+            "consecutive": 1,
+            "healHistory": [],
+            "centralAckLastValid": last_valid,
+            "centralAckLocalOnlySince": 940.0,
+        },
+    )
+    status = _mod.run_selfcheck(config, deps)
+    assert status["centralAck"]["mode"] == "local_only"
+    assert status["centralAck"]["status"] == "wrong_schema"
+    assert status["centralAck"]["lastValid"] == last_valid
+    assert status["centralAck"]["localOnlySeconds"] == 60
+    memory = json.loads(config.memory_path.read_text(encoding="utf-8"))
+    assert memory["centralAckLastValid"] == last_valid
+    assert memory["centralAckLocalOnlySince"] == 940.0
+    assert calls == []
+
+
+def test_valid_receipt_telemetry_projection_stays_bounded(tmp_path: Path):
+    ack = tmp_path / "central-ack.json"
+    _write_ack_file(ack, _ack_receipt())
+    config, deps, calls, _head = _fixture(tmp_path, central_ack_path=ack)
+    status = _mod.run_selfcheck(config, deps)
+    assert status["centralAck"]["mode"] == "central_acked"
+    projected = _mod.central_telemetry_payload(status)["centralAck"]
+    assert set(projected.keys()) <= {
+        "configured",
+        "mode",
+        "status",
+        "ageSeconds",
+        "maxAgeSeconds",
+        "centralDownSuspected",
+    }
+    assert calls == []
