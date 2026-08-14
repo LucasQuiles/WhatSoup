@@ -307,46 +307,6 @@ export function runMigration58(db: DatabaseSync): void {
       SELECT RAISE(ABORT, 'capability_obligations: group drain requires consuming a current destination-specific approval');
     END;
 
-    CREATE TRIGGER IF NOT EXISTS capability_obligations_completed_requires_proofs
-    BEFORE UPDATE OF state ON capability_obligations
-    WHEN NEW.state = 'completed'
-      AND OLD.state = 'claimed'
-      AND (
-        NEW.completion_proof_id IS NULL
-        OR NEW.capability_execution_receipt_id IS NULL
-        -- D6: the named receipt must prove THIS obligation's CURRENT attempt —
-        -- same obligation, same claim epoch, same attempt, non-error result,
-        -- same contract version, same input digest, and the retained-media
-        -- digest where the obligation carries media.
-        OR NOT EXISTS (
-          SELECT 1 FROM capability_execution_receipts r
-          WHERE r.id = NEW.capability_execution_receipt_id
-            AND r.obligation_id = NEW.id
-            AND r.claim_epoch = OLD.claim_epoch
-            AND r.attempt_number = NEW.attempt_count
-            AND r.result_status = 'ok'
-            AND r.contract_version = NEW.contract_version
-            AND r.input_digest = NEW.input_digest
-            AND r.source_digest = NEW.source_digest
-            AND (NEW.media_sha256 IS NULL OR r.media_digest = NEW.media_sha256)
-            -- The receipt's turn must be the MINTED turn that terminalized,
-            -- with PROVEN echoed delivery, and the completion proof must name
-            -- that exact terminal record.
-            AND EXISTS (
-              SELECT 1 FROM turn_terminal_records t
-              JOIN inbound_events ie ON ie.seq = t.inbound_seq
-              WHERE ie.message_id = 'obl:' || NEW.id || ':' || NEW.attempt_count
-                AND t.logical_turn_id = r.logical_turn_id
-                AND t.delivery_kind = 'echoed'
-                AND t.delivery_op_id IS NOT NULL
-                AND NEW.completion_proof_id = 'ttr:' || t.id
-            )
-        )
-      )
-    BEGIN
-      SELECT RAISE(ABORT, 'capability_obligations: completed requires a bound execution receipt and a completion proof');
-    END;
-
     CREATE TRIGGER IF NOT EXISTS capability_obligations_no_delete
     BEFORE DELETE ON capability_obligations
     BEGIN
@@ -432,4 +392,70 @@ export function runMigration58(db: DatabaseSync): void {
       SELECT RAISE(ABORT, 'capability_execution_receipts: append-only');
     END;
   `);
+
+  // The completion-proof trigger joins turn_terminal_records/inbound_events.
+  // SQLite creates triggers without validating table references, but any LATER
+  // schema change (e.g. migration 59's table rebuild) reparses every trigger
+  // and fails hard on a dangling reference — so on partial fixtures that
+  // bypass the durability migrations (see the tool_calls guard above) the
+  // unconditional form wedges every subsequent migration. Where the evidence
+  // tables exist (every real fresh or upgraded database), create the full
+  // proof-bound trigger; where they do not, create a strictly HARSHER
+  // fail-closed fallback under the same name that aborts ALL completion
+  // transitions — absence of delivery evidence must never fail open.
+  const hasDeliveryEvidence = ['turn_terminal_records', 'inbound_events'].every(
+    (t) => db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = ?").get(t) !== undefined,
+  );
+  if (hasDeliveryEvidence) {
+    db.exec(`
+      CREATE TRIGGER IF NOT EXISTS capability_obligations_completed_requires_proofs
+      BEFORE UPDATE OF state ON capability_obligations
+      WHEN NEW.state = 'completed'
+        AND OLD.state = 'claimed'
+        AND (
+          NEW.completion_proof_id IS NULL
+          OR NEW.capability_execution_receipt_id IS NULL
+          -- D6: the named receipt must prove THIS obligation's CURRENT attempt —
+          -- same obligation, same claim epoch, same attempt, non-error result,
+          -- same contract version, same input digest, and the retained-media
+          -- digest where the obligation carries media.
+          OR NOT EXISTS (
+            SELECT 1 FROM capability_execution_receipts r
+            WHERE r.id = NEW.capability_execution_receipt_id
+              AND r.obligation_id = NEW.id
+              AND r.claim_epoch = OLD.claim_epoch
+              AND r.attempt_number = NEW.attempt_count
+              AND r.result_status = 'ok'
+              AND r.contract_version = NEW.contract_version
+              AND r.input_digest = NEW.input_digest
+              AND r.source_digest = NEW.source_digest
+              AND (NEW.media_sha256 IS NULL OR r.media_digest = NEW.media_sha256)
+              -- The receipt's turn must be the MINTED turn that terminalized,
+              -- with PROVEN echoed delivery, and the completion proof must name
+              -- that exact terminal record.
+              AND EXISTS (
+                SELECT 1 FROM turn_terminal_records t
+                JOIN inbound_events ie ON ie.seq = t.inbound_seq
+                WHERE ie.message_id = 'obl:' || NEW.id || ':' || NEW.attempt_count
+                  AND t.logical_turn_id = r.logical_turn_id
+                  AND t.delivery_kind = 'echoed'
+                  AND t.delivery_op_id IS NOT NULL
+                  AND NEW.completion_proof_id = 'ttr:' || t.id
+              )
+          )
+        )
+      BEGIN
+        SELECT RAISE(ABORT, 'capability_obligations: completed requires a bound execution receipt and a completion proof');
+      END;
+    `);
+  } else {
+    db.exec(`
+      CREATE TRIGGER IF NOT EXISTS capability_obligations_completed_requires_proofs
+      BEFORE UPDATE OF state ON capability_obligations
+      WHEN NEW.state = 'completed'
+      BEGIN
+        SELECT RAISE(ABORT, 'capability_obligations: completed requires delivery-evidence tables absent from this database');
+      END;
+    `);
+  }
 }

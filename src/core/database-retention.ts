@@ -319,7 +319,7 @@ export function runDatabaseRetention(
 
     const factExportQueue = changes(db.raw.prepare(`
       DELETE FROM fact_export_queue
-       WHERE status = 'exported'
+       WHERE state = 'exported'
          AND COALESCE(exported_at, created_at) < datetime('now', ?)
     `).run(factCutoff));
 

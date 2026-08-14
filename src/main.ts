@@ -467,8 +467,9 @@ if (instanceType === 'agent') {
   const pinecone = new PineconeMemory();
   // Enrichment is queue-backed: the poller enqueues validated facts into
   // `fact_export_queue`. A deployment may provide an external bridge that
-  // drains pending rows and writes them to Pinecone; this process only proves
-  // queue admission, not remote export. Any instance with a configured
+  // leases due rows (leasePendingFacts), writes them to Pinecone, and
+  // acknowledges per-row outcomes (ackFacts); this process only proves queue
+  // admission, not remote export. Any instance with a configured
   // pineconeIndex participates, and the bridge owns target index/project
   // routing plus export acknowledgement.
   const enableEnrichment =

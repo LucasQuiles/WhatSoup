@@ -241,11 +241,14 @@ export const REGISTRY: DurabilityStatusEntry[] = [
   },
   {
     table: 'fact_export_queue',
-    statusColumn: 'status',
-    vocabulary: ['pending', 'quarantined', 'exported'],
-    vocabularySource: 'literal', // DDL has no CHECK; values are fact-export-queue.ts string literals
-    terminalFailureValues: ['quarantined'],
-    writerSites: ['src/runtimes/chat/enrichment/fact-export-queue.ts'],
+    statusColumn: 'state',
+    vocabulary: ['pending', 'leased', 'retry_wait', 'exported', 'quarantined', 'retry_exhausted', 'legacy_unclassified'],
+    vocabularySource: 'sql-check', // migration 58 rebuild enforces the state machine via CHECK
+    terminalFailureValues: ['quarantined', 'retry_exhausted'],
+    writerSites: [
+      'src/runtimes/chat/enrichment/fact-export-queue.ts',
+      'src/core/database-migration-59.ts',
+    ],
   },
   {
     table: 'decryption_failures',
@@ -443,6 +446,7 @@ export const NON_STATUS_TABLES: Set<string> = new Set([
   'entities',
   'entity_aliases',
   'entity_observations',
+  'fact_export_meta',
   'groups',
   'heal_reports',
   'inbound_disposition_links',
@@ -594,6 +598,10 @@ export const DISCOVERY_EXCLUSIONS: DiscoveryExclusionEntry[] = [
   {
     table: 'inbound_events_v56',
     reason: 'migration-56 transient create-copy-drop-rename artifact; the rebuilt table persists only after being renamed to inbound_events.',
+  },
+  {
+    table: 'fact_export_queue_v59',
+    reason: 'migration-59 transient create-copy-drop-rename artifact; the rebuilt table persists only after being renamed to fact_export_queue.',
   },
 ];
 
