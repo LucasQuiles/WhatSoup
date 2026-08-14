@@ -23,7 +23,7 @@ import { isRecord } from '../lib/type-guards.ts';
 import { MS_PER_SECOND, MS_PER_MINUTE } from '../lib/time-units.ts';
 import { getModelAdvisories } from '../lib/model-advisor.ts';
 import { enqueueScheduledMessage, type EnqueueMessageParams } from './schedule-enqueue.ts';
-import { countPastDueTriggers } from './substrate/triggers.ts';
+import { countPastDueTriggers, countRecurringOverdueTriggers } from './substrate/triggers.ts';
 import {
   AliasNotFoundError,
   MissingTargetError,
@@ -1834,6 +1834,37 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         'failed to count past-due triggers',
       );
 
+      // #2566 slice 4 — occurrence-lifecycle gauges. Counts and ages ONLY:
+      // no title/prompt/JID/SQL content may cross this projection.
+      const recurringOverdueTriggers = safeDbQuery(
+        () => countRecurringOverdueTriggers(deps.db.raw),
+        0,
+        'failed to count recurring-overdue triggers',
+      );
+      const activeOccurrenceStats = safeDbQuery(
+        () => {
+          const row = deps.db.raw.prepare(
+            `SELECT COUNT(*) AS c, MIN(claimed_at) AS oldest
+               FROM trigger_occurrences WHERE state IN ('claimed','running')`,
+          ).get() as { c: number; oldest: number | null };
+          return {
+            count: row.c,
+            oldestAgeS: row.oldest == null
+              ? 0
+              : Math.max(0, Math.floor(Date.now() / 1000) - row.oldest),
+          };
+        },
+        { count: 0, oldestAgeS: 0 },
+        'failed to read active trigger occurrences',
+      );
+      const notifyOutcomeUnknownRuns = safeDbQuery(
+        () => (deps.db.raw.prepare(
+          `SELECT COUNT(*) AS c FROM trigger_runs WHERE error_kind = 'notify_outcome_unknown'`,
+        ).get() as { c: number }).c,
+        0,
+        'failed to count unknown-notification-outcome runs',
+      );
+
       // Provider-fallback observability (agent runtimes only). Surfaced in the
       // instance block so operators can see when a bot is running on its
       // fallback provider and when that window expires.
@@ -2100,6 +2131,10 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           pending_polls_total: pendingPollsTotal,
           pending_polls_readable: pendingPollsReadable,
           past_due_triggers: pastDueTriggers,
+          recurring_overdue_triggers: recurringOverdueTriggers,
+          active_trigger_occurrences: activeOccurrenceStats.count,
+          oldest_active_occurrence_age_s: activeOccurrenceStats.oldestAgeS,
+          notify_outcome_unknown_runs: notifyOutcomeUnknownRuns,
           probe_availability: probeAvailability,
         },
         access_control: {
