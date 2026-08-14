@@ -1156,3 +1156,27 @@ runtime embeds it in the journaled synthetic inbound's messageId
 `trigger_occurrences` are therefore deterministically joinable — an accepted agent-job
 occurrence without a matching journaled owner is auditable incoherence rather than an
 unanswerable question.
+
+### 8.6 History lifecycle, gauges, reader, and field audit
+
+**Retention.** `triggerRunDays` / `triggerOccurrenceDays` (default 30) ride the shared
+database-retention engine: terminal `trigger_runs` and terminal/stale `trigger_occurrences`
+past the window are deleted; running runs and running/claimed occurrences are NEVER pruned
+regardless of age. Retention failure is observable through the engine's existing
+`database_retention_failed` health path.
+
+**Gauges.** The health `sqlite` block surfaces `past_due_triggers`,
+`recurring_overdue_triggers`, `active_trigger_occurrences`,
+`oldest_active_occurrence_age_s`, and `notify_outcome_unknown_runs` — counts and ages only.
+
+**Reader.** `list_trigger_runs` (MCP, read-only) returns redacted history: status,
+timestamps, attempt, bounded error class, and delivery booleans. Output content, summaries,
+error prose, and transport identifiers never cross the projection; a trigger or bead filter
+is required.
+
+**Field audit (#2566 slice 4).** `trigger_runs.status='queued'` is reserved (runs insert
+directly as `running`); `trigger_runs.attempt` and `trigger_occurrences.attempt` are always
+1 today, reserved for retry lineage; `trigger_occurrences.state='claimed'` is reserved for
+a future two-phase claim (slice 1 claims directly to `running` in one commit). Each is kept
+in its CHECK vocabulary deliberately — removal would cost a migration for no behavioral
+win. `sweep_runs` remains reserved per its schema marker pending an owner ruling.

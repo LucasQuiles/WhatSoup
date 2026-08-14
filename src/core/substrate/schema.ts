@@ -60,6 +60,8 @@ CREATE TABLE IF NOT EXISTS trigger_runs (
   trigger_id            INTEGER NOT NULL REFERENCES bead_triggers(id) ON DELETE CASCADE,
   bead_id               INTEGER NOT NULL REFERENCES beads(id) ON DELETE CASCADE,
   status                TEXT    NOT NULL CHECK (status IN ('queued','running','ok','noop','failed','terminal_fired')),
+  -- 'queued' is reserved: runs insert directly as 'running' (#2566 slice-4 audit);
+  -- kept in the CHECK for a future admission queue rather than paying a migration.
   started_at            INTEGER NOT NULL,
   finished_at           INTEGER,
   duration_ms           INTEGER,
@@ -69,7 +71,7 @@ CREATE TABLE IF NOT EXISTS trigger_runs (
   error_kind            TEXT,
   error_message         TEXT,
   delivered_message_pk  INTEGER,
-  attempt               INTEGER NOT NULL DEFAULT 1,
+  attempt               INTEGER NOT NULL DEFAULT 1,  -- always 1 today; reserved for retry lineage (#2566 slice-4 audit)
   metadata_json         TEXT NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS idx_runs_trigger_started ON trigger_runs(trigger_id, started_at DESC);
