@@ -55,6 +55,7 @@ import { createChildLogger } from '../../logger.ts';
 import { errorMessage } from '../../lib/error-message.ts';
 import { fetchUrlGuarded, SsrfBlockedError, type GuardedFetchResult } from '../../lib/ssrf-fetch.ts';
 import { emitAlertChecked, clearAlertSourceChecked } from '../../lib/emit-alert.ts';
+import { TriggerLivenessObserver } from './trigger-liveness-observer.ts';
 import {
   clearRecoveryMarker,
   loadRecoveryMarkers,
@@ -342,6 +343,17 @@ export interface TriggerPollerOptions {
    * alert). Tests inject a small value to exercise the watchdog deterministically.
    */
   triggerPastDueGraceSeconds?: number;
+  /**
+   * #2566 slice 2 — cadence of the independent liveness observer, which runs
+   * the past-due and recurring-overdue gauges on its OWN timer so they still
+   * fire when a tick hangs. Only started when `instance` is set. Default 60s.
+   */
+  observerIntervalMs?: number;
+  /**
+   * #2566 slice 2 — grace (seconds) before a previously-fired trigger with a
+   * stale next_fire_at is reported as recurring-overdue. Default 900s.
+   */
+  recurringOverdueGraceSeconds?: number;
 }
 
 interface SqliteSpec {
@@ -506,6 +518,7 @@ export class TriggerPoller {
   private readonly maxConcurrentExecutors: number;
   private readonly tickBudgetSeconds: number;
   private readonly executionTimeoutSeconds: number;
+  private readonly livenessObserver: TriggerLivenessObserver;
 
   constructor(db: DatabaseSync, messenger: Messenger, opts: TriggerPollerOptions = {}) {
     this.db = db;
@@ -655,6 +668,15 @@ export class TriggerPoller {
     this.maxConcurrentExecutors = opts.maxConcurrentExecutors ?? 4;
     this.tickBudgetSeconds = opts.tickBudgetSeconds ?? 600;
     this.executionTimeoutSeconds = opts.executionTimeoutSeconds ?? 300;
+    this.livenessObserver = new TriggerLivenessObserver(this.db, {
+      instance: opts.instance,
+      intervalMs: opts.observerIntervalMs,
+      recurringOverdueGraceSeconds: opts.recurringOverdueGraceSeconds,
+      now: this.nowFn,
+      setTimeoutImpl: this.setTimeoutImpl,
+      clearTimeoutImpl: this.clearTimeoutImpl,
+      pastDueCheck: (now) => this.checkPastDueTriggers(now),
+    });
     this.stmtClaimOccurrence = this.db.prepare(
       `INSERT INTO trigger_occurrences (
          trigger_id, bead_id, scheduled_for, attempt, state,
@@ -685,6 +707,7 @@ export class TriggerPoller {
     this.stopped = false;
     log.info({ intervalMs: this.intervalMs, batchSize: this.batchSize }, 'trigger poller starting');
     this.reconcileStaleOccurrences(this.nowFn());
+    this.livenessObserver.start();
     this.scheduleNext();
   }
 
@@ -707,6 +730,7 @@ export class TriggerPoller {
 
   stop(): void {
     this.stopped = true;
+    this.livenessObserver.stop();
     if (this.timer !== null) {
       this.clearTimeoutImpl(this.timer);
       this.timer = null;
