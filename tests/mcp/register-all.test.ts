@@ -13,7 +13,7 @@ import type { ToolDeclaration } from '../../src/mcp/types.ts';
 // Baseline tool count for a non-Pinecone build.
 // Bumped from a loose `>= 100` to an exact baseline so a missing module is detected.
 // 164 always-registered + 1 conditional `knowledge_search` when Pinecone is configured.
-const BASELINE_TOOL_COUNT = 164;
+const BASELINE_TOOL_COUNT = 165;
 
 // ---------------------------------------------------------------------------
 // Minimal ConnectionManager mock — mirrors what tool-registration.test.ts uses

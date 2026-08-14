@@ -98,7 +98,7 @@ describe('doc drift check', { timeout: 30_000 }, () => {
       staleDoc,
       currentToolsDoc
         .replace('| [substrate.ts](#substratets) | 22 |', '| [substrate.ts](#substratets) | 18 |')
-        .replace('| **Total** | **167** |', '| **Total** | **160** |'),
+        .replace('| **Total** | **168** |', '| **Total** | **160** |'),
       'utf8',
     );
 

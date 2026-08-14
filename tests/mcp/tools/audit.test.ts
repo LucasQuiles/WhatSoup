@@ -30,6 +30,7 @@ describe('outbound audit tools', () => {
     };
     registerOutboundAuditTools(registry, {
       writer: createOutboundSendsWriter({ db: db.raw, line: 'personal' }),
+      db,
     });
   });
 
@@ -170,5 +171,96 @@ describe('outbound audit tools', () => {
 
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toMatch(/Invalid parameters/);
+  });
+});
+
+// #2567 slice 2 — redacted fact-export queue operator reader. Counts, ages,
+// attempt distribution, and opaque per-row fields ONLY: fact text, payload
+// JSON, chat/sender JIDs, and the legacy fact_id never cross the wire.
+describe('list_fact_export_queue (redacted operator reader)', () => {
+  let db: Database;
+  let registry: ToolRegistry;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    db.open();
+    registry = new ToolRegistry();
+    registerOutboundAuditTools(registry, {
+      writer: createOutboundSendsWriter({ db: db.raw, line: 'personal' }),
+      db,
+    });
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  function seed(factId: string, state: string, extra: Record<string, unknown> = {}): void {
+    const cols = ['fact_uid', 'fact_id', 'chat_jid', 'sender_jid', 'payload_json', 'state', ...Object.keys(extra)];
+    const vals = [
+      `fe_${factId.replace(/[^a-z0-9]/gi, '').padEnd(24, '0').slice(0, 24)}`,
+      factId, 'SECRET-CHAT@g.us', 'SECRET-SENDER@s.whatsapp.net',
+      '{"text":"SECRET-FACT-TEXT"}', state, ...Object.values(extra),
+    ];
+    db.raw.prepare(
+      `INSERT INTO fact_export_queue (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`,
+    ).run(...(vals as never[]));
+  }
+
+  it('registers as a global read-only tool, absent from chat scope', () => {
+    expect(registry.listTools({ tier: 'global' }).find((t) => t.name === 'list_fact_export_queue')).toBeDefined();
+    expect(
+      registry.listTools({ tier: 'chat-scoped', conversationKey: '111', deliveryJid: '111@s.whatsapp.net' })
+        .find((t) => t.name === 'list_fact_export_queue'),
+    ).toBeUndefined();
+  });
+
+  it('returns summary counts, ages, attempt distribution, and redacted rows only', async () => {
+    seed('SECRET-ID-1', 'pending');
+    seed('SECRET-ID-2', 'leased', { lease_owner: 'SECRET-WORKER', lease_expires_at: 9999999999, attempt_count: 2 });
+    seed('SECRET-ID-3', 'quarantined', { failure_code: 'payload_invalid', failure_stage: 'claim_validate' });
+    seed('SECRET-ID-4', 'retry_wait', { attempt_count: 3, next_attempt_at: 9999999999, failure_code: 'remote_unavailable' });
+
+    const result = await registry.call('list_fact_export_queue', {}, { tier: 'global' });
+    expect(result.isError).toBeUndefined();
+    const raw = result.content[0].text;
+    const body = JSON.parse(raw) as {
+      summary: {
+        counts: Record<string, number>;
+        oldest_pending_age_s: number;
+        latest_ack_age_s: number | null;
+        attempt_histogram: Record<string, number>;
+      };
+      rows: Array<Record<string, unknown>>;
+    };
+    expect(body.summary.counts).toMatchObject({ pending: 1, leased: 1, quarantined: 1, retry_wait: 1 });
+    expect(body.summary.attempt_histogram).toMatchObject({ '2': 1, '3': 1 });
+    expect(body.rows).toHaveLength(4);
+    for (const row of body.rows) {
+      expect(row.fact_uid).toMatch(/^fe_/);
+      expect(row).not.toHaveProperty('fact_id');
+      expect(row).not.toHaveProperty('chat_jid');
+      expect(row).not.toHaveProperty('sender_jid');
+      expect(row).not.toHaveProperty('payload_json');
+      expect(row).not.toHaveProperty('lease_owner');
+    }
+    // Exact-byte discipline over the whole wire payload.
+    expect(raw).not.toContain('SECRET-ID');
+    expect(raw).not.toContain('SECRET-CHAT');
+    expect(raw).not.toContain('SECRET-SENDER');
+    expect(raw).not.toContain('SECRET-FACT-TEXT');
+    expect(raw).not.toContain('SECRET-WORKER');
+  });
+
+  it('filters by state and clamps the row limit', async () => {
+    for (let i = 0; i < 5; i++) seed(`bulk-${i}`, 'pending');
+    seed('quar-1', 'quarantined', { failure_code: 'payload_invalid' });
+
+    const result = await registry.call('list_fact_export_queue', { state: 'pending', limit: 2 }, { tier: 'global' });
+    const body = JSON.parse(result.content[0].text) as { summary: { counts: Record<string, number> }; rows: Array<{ state: string }> };
+    expect(body.rows).toHaveLength(2);
+    expect(body.rows.every((r) => r.state === 'pending')).toBe(true);
+    // Summary always covers the WHOLE queue regardless of the row filter.
+    expect(body.summary.counts).toMatchObject({ pending: 5, quarantined: 1 });
   });
 });
