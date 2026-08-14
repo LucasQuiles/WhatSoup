@@ -17,6 +17,7 @@
  * is defense in depth. This is exactly-once obligation CREATION, not
  * exactly-once provider execution (D7 owns execution semantics).
  */
+import { canonicalDependencyVersions } from './capability-attestation.ts';
 import type { Database } from './database.ts';
 import { withTransaction } from './db-tx.ts';
 
@@ -396,12 +397,16 @@ export class CapabilityObligationStore {
   /**
    * Drain-now PRE-CHECK (round-22, gap-doc remaining item 2): does ANY live
    * attestation (canary pass, unrevoked, unexpired) exist that could plausibly
-   * admit this obligation on this host/user/release/schema — ignoring only the
-   * provider/harness pair, which is unknowable until the session actually
-   * spawns? Used to refuse ACTIVATING a session that would necessarily park.
-   * Heuristic pre-activation gate only: the claim's exact-binding admission
-   * (r15 F4) remains the authoritative gate; this can only refuse earlier,
-   * never admit more.
+   * admit this obligation? Mirrors `findAdmissibleAttestation`'s 16-field
+   * conjunction EXACTLY, minus ONLY `provider_id`/`harness_type` — the two
+   * fields that are unknowable until the session actually spawns (same `IS`
+   * semantics for the nullable skill_version/resolver_digest, same canonical
+   * dependency-versions serialization). Used to refuse ACTIVATING a session
+   * that would necessarily park — including the resolver-drift case, where a
+   * stale attestation bound to an OLD composite must NOT count as a candidate
+   * (r22 AE1-review Medium). Heuristic pre-activation gate only: the claim's
+   * exact-binding admission (r15 F4) remains the authoritative gate; this can
+   * only refuse earlier, never admit more.
    */
   hasAttestationCandidateIgnoringProvider(params: {
     obligationId: number;
@@ -410,7 +415,12 @@ export class CapabilityObligationStore {
     releaseSha: string;
     schemaVersion: number;
     skillName: string;
+    skillVersion: string | null;
     skillDigest: string;
+    resolverDigest: string | null;
+    dependencyVersions: Record<string, string>;
+    probeVersion: string;
+    canaryId: string;
     mediaRoot: string;
   }): boolean {
     const row = this.db.raw
@@ -421,7 +431,9 @@ export class CapabilityObligationStore {
            AND att.schema_version = ?
            AND att.contract_version = o.contract_version
            AND att.capability = o.required_capability
-           AND att.skill_name = ? AND att.skill_digest = ? AND att.media_root = ?
+           AND att.skill_name = ? AND att.skill_version IS ? AND att.skill_digest = ?
+           AND att.resolver_digest IS ? AND att.dependency_versions = ?
+           AND att.probe_version = ? AND att.canary_id = ? AND att.media_root = ?
            AND att.canary_result = 'pass' AND att.revoked_at IS NULL
            AND datetime(att.expires_at) > datetime('now')
          LIMIT 1`,
@@ -433,7 +445,12 @@ export class CapabilityObligationStore {
         params.releaseSha,
         params.schemaVersion,
         params.skillName,
+        params.skillVersion,
         params.skillDigest,
+        params.resolverDigest,
+        canonicalDependencyVersions(params.dependencyVersions),
+        params.probeVersion,
+        params.canaryId,
         params.mediaRoot,
       ) as { ok: number } | undefined;
     return row !== undefined;

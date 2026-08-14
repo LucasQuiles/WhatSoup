@@ -141,7 +141,17 @@ runtime's `drainObligationNow` decides.
 AE1 remains intact: proactive resume still excludes groups; the ONLY path that activates a
 group session is this operator command, and only while its AS-08 approval is live. With no
 request file present the runtime never activates anything (asserted by an executor-seam
-test).
+test). The drop-dir itself must be a directory owned by the runtime UID with no
+group/other write bit — otherwise the whole cycle is refused (`untrusted_request_dir`)
+and nothing is consumed.
+
+**Operator note — activation is one-way (r22 review):** drain-now activates the session
+and runs one tick; nothing tears the session down afterwards. If the approval is revoked
+right after activation, no send can occur (the claim re-validates the approval in the
+same transaction), but the activated agent session lingers until the normal
+sweep/lifecycle ends it. If that matters (e.g. a group you no longer want an active
+agent in), restart the instance or end the session via the normal service controls after
+the drain settles.
 
 ## End-to-end order
 

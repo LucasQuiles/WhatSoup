@@ -321,10 +321,11 @@ export class CapabilityObligationRuntime {
   }
 
   /**
-   * Provider-agnostic attestation candidate for the drain-now pre-activation
-   * gate: the FIXED live facts (host/user/release/schema) + the declared skill
-   * identity + mediaRoot; provider/harness are unknowable pre-spawn and are
-   * the only fields ignored. The claim's exact-binding admission (r15 F4)
+   * Attestation candidate for the drain-now pre-activation gate: the FULL
+   * admission binding — fixed live facts, the COMPLETE declared skill identity
+   * (incl. the resolver composite, so resolver drift refuses BEFORE spawn),
+   * and mediaRoot — with provider/harness as the ONLY ignored fields
+   * (unknowable pre-spawn). The claim's exact-binding admission (r15 F4)
    * remains the authoritative gate.
    */
   private hasAttestationCandidate(obligationId: number): boolean {
@@ -336,7 +337,12 @@ export class CapabilityObligationRuntime {
       releaseSha: facts.releaseSha,
       schemaVersion: facts.schemaVersion,
       skillName: this.options.attestation.skillName,
+      skillVersion: this.options.attestation.skillVersion,
       skillDigest: this.options.attestation.skillDigest,
+      resolverDigest: this.options.attestation.resolverDigest,
+      dependencyVersions: this.options.attestation.dependencyVersions,
+      probeVersion: this.options.attestation.probeVersion,
+      canaryId: this.options.attestation.canaryId,
       mediaRoot: this.options.mediaRoot,
     });
   }

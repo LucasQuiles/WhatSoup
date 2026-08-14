@@ -5,7 +5,7 @@
  * bound — and the activation closure's post-condition is the SAME dispatch
  * predicate the supervisor uses, never the session flag alone.
  */
-import { mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -176,6 +176,19 @@ describe('serviceDrainNowRequests', () => {
     expect(outcomes.map((o) => (o.kind === 'drained' ? o.obligationId : -1))).toEqual([3, 5]);
     expect(calls).toEqual([3, 5]);
     expect(readdirSync(dir).filter((n) => /^\d+\.json$/.test(n)).sort()).toEqual(['7.json', '9.json']);
+  });
+
+  it('r22 review hardening: a GROUP/OTHER-writable drop-dir is refused wholesale, nothing serviced', async () => {
+    dropRequest(70);
+    chmodSync(dir, 0o777);
+    const { calls, drain } = collectingDrain();
+    const outcomes = await serviceDrainNowRequests({ requestDir: dir, drain, nowUnixSec: () => NOW });
+    expect(outcomes).toEqual([{ kind: 'invalid', file: '.', reason: 'untrusted_request_dir' }]);
+    expect(calls).toEqual([]);
+    expect(readdirSync(dir)).toContain('70.json'); // not even consumed — the dir is not trusted
+    chmodSync(dir, 0o700);
+    const after = await serviceDrainNowRequests({ requestDir: dir, drain, nowUnixSec: () => NOW });
+    expect(after).toEqual([{ kind: 'drained', obligationId: 70, file: '70.json' }]); // trusted again → serviced
   });
 
   it('a missing drop-dir yields no outcomes and never throws', async () => {

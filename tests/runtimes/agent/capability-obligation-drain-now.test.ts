@@ -169,9 +169,16 @@ describe('drainObligationNow (gated cold activation)', () => {
 });
 
 describe('hasAttestationCandidateIgnoringProvider (r22 drain-now pre-check)', () => {
+  // The pre-check mirrors admission's FULL binding conjunction minus ONLY
+  // provider_id/harness_type — every other field participates and is varied
+  // below (r22 AE1-review Medium: the earlier form silently ignored five more
+  // fields and its fixture could not detect that).
   const FACTS = {
     hostId: 'test-host', runtimeUser: 'test-user', releaseSha: 'rel-live-1',
-    schemaVersion: 57, skillName: 'watch-skill', skillDigest: 'skill-digest-1', mediaRoot: '/tmp/media-root',
+    schemaVersion: 57, skillName: 'watch-skill', skillVersion: '1.2.3' as string | null,
+    skillDigest: 'skill-digest-1', resolverDigest: 'resolver-composite-1' as string | null,
+    dependencyVersions: { 'yt-dlp': '2026.03.17' } as Record<string, string>,
+    probeVersion: 'probe/1', canaryId: 'canary-1', mediaRoot: '/tmp/media-root',
   };
 
   function insertAttestation(over: Partial<Record<string, unknown>> = {}): void {
@@ -182,7 +189,7 @@ describe('hasAttestationCandidateIgnoringProvider (r22 drain-now pre-check)', ()
             contract_version, capability, skill_name, skill_version, skill_digest, resolver_digest,
             dependency_versions, media_root, canary_id, canary_result, probe_version, nonce,
             attested_at, expires_at, revoked_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, '{}', ?, 'canary-1', ?, 'probe/1', ?,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                  datetime('now'), ?, ?)`,
       )
       .run(
@@ -195,16 +202,21 @@ describe('hasAttestationCandidateIgnoringProvider (r22 drain-now pre-check)', ()
         (over.contractVersion as string) ?? 'c/1',
         (over.capability as string) ?? 'child_process_tools',
         (over.skillName as string) ?? FACTS.skillName,
+        'skillVersion' in over ? (over.skillVersion as string | null) : FACTS.skillVersion,
         (over.skillDigest as string) ?? FACTS.skillDigest,
+        'resolverDigest' in over ? (over.resolverDigest as string | null) : FACTS.resolverDigest,
+        (over.dependencyVersions as string) ?? JSON.stringify(FACTS.dependencyVersions),
         (over.mediaRoot as string) ?? FACTS.mediaRoot,
+        (over.canaryId as string) ?? FACTS.canaryId,
         (over.canaryResult as string) ?? 'pass',
+        (over.probeVersion as string) ?? FACTS.probeVersion,
         (over.nonce as string) ?? `nonce-${Math.random().toString(36).slice(2)}`,
         (over.expiresAt as string) ?? new Date(Date.now() + 3_600_000).toISOString().replace('T', ' ').slice(0, 19),
         (over.revokedAt as string | null) ?? null,
       );
   }
 
-  it('matches a live attestation REGARDLESS of provider/harness (the only ignored fields)', () => {
+  it('matches a live attestation REGARDLESS of provider/harness — and of nothing else', () => {
     const id = seedObligation({ isGroup: false, deliveryJid: 'test-dm@lid', sourceInboundSeq: 8100, sourceMessageId: 'M-ATT-1' });
     insertAttestation({ providerId: 'provider-never-seen', harnessType: 'harness-never-seen' });
     expect(store.hasAttestationCandidateIgnoringProvider({ obligationId: id, ...FACTS })).toBe(true);
@@ -222,6 +234,32 @@ describe('hasAttestationCandidateIgnoringProvider (r22 drain-now pre-check)', ()
     insertAttestation({ releaseSha: 'rel-OTHER' });
     insertAttestation({ skillDigest: 'skill-digest-OTHER' });
     insertAttestation({ capability: 'network_tools' });
+    expect(store.hasAttestationCandidateIgnoringProvider({ obligationId: id, ...FACTS })).toBe(false);
+  });
+
+  it('FALSIFIER (r22 review Medium — resolver DRIFT): an attestation bound to an OLD composite is NOT a candidate', () => {
+    const id = seedObligation({ isGroup: false, deliveryJid: 'test-dm@lid', sourceInboundSeq: 8104, sourceMessageId: 'M-ATT-5' });
+    insertAttestation({ resolverDigest: 'resolver-composite-STALE' });
+    expect(store.hasAttestationCandidateIgnoringProvider({ obligationId: id, ...FACTS })).toBe(false);
+  });
+
+  it('every remaining binding field participates: skill_version / dependency_versions / probe_version / canary_id', () => {
+    const id = seedObligation({ isGroup: false, deliveryJid: 'test-dm@lid', sourceInboundSeq: 8105, sourceMessageId: 'M-ATT-6' });
+    insertAttestation({ skillVersion: '9.9.9' });
+    insertAttestation({ skillVersion: null });
+    insertAttestation({ dependencyVersions: JSON.stringify({ 'yt-dlp': '1999.01.01' }) });
+    insertAttestation({ probeVersion: 'probe/OTHER' });
+    insertAttestation({ canaryId: 'canary-OTHER' });
+    expect(store.hasAttestationCandidateIgnoringProvider({ obligationId: id, ...FACTS })).toBe(false);
+    insertAttestation(); // exact match (any provider) — now a candidate
+    expect(store.hasAttestationCandidateIgnoringProvider({ obligationId: id, ...FACTS })).toBe(true);
+  });
+
+  it('NULL skill_version/resolver_digest match with IS semantics (same as admission)', () => {
+    const id = seedObligation({ isGroup: false, deliveryJid: 'test-dm@lid', sourceInboundSeq: 8106, sourceMessageId: 'M-ATT-7' });
+    insertAttestation({ skillVersion: null, resolverDigest: null });
+    const nullFacts = { ...FACTS, skillVersion: null, resolverDigest: null };
+    expect(store.hasAttestationCandidateIgnoringProvider({ obligationId: id, ...nullFacts })).toBe(true);
     expect(store.hasAttestationCandidateIgnoringProvider({ obligationId: id, ...FACTS })).toBe(false);
   });
 

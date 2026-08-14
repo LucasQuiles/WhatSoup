@@ -193,6 +193,26 @@ export async function serviceDrainNowRequests(
   } catch {
     return []; // no drop-dir → nothing requested (the common case)
   }
+
+  // r22 AE1-review hardening: the drop-dir itself must be trustworthy — a
+  // regular directory owned by THIS process's EUID with no group/other write
+  // bit. Anything else is refused (fail-closed, surfaced for logging) rather
+  // than serviced; the CLI creates the dir 0700, so a legitimate deploy never
+  // trips this.
+  try {
+    const dirStat = lstatSync(deps.requestDir);
+    const euid = typeof process.geteuid === 'function' ? process.geteuid() : null;
+    if (
+      !dirStat.isDirectory()
+      || (dirStat.mode & 0o022) !== 0
+      || euid === null
+      || dirStat.uid !== euid
+    ) {
+      return [{ kind: 'invalid', file: '.', reason: 'untrusted_request_dir' }];
+    }
+  } catch {
+    return [{ kind: 'invalid', file: '.', reason: 'untrusted_request_dir' }];
+  }
   pruneConsumedArtifacts(deps.requestDir, names);
 
   const pending = names
@@ -240,6 +260,14 @@ export async function serviceDrainNowRequests(
       }
     };
 
+    // r22 AE1-review hardening: re-lstat the CONSUMED path — the pre-rename
+    // lstat is TOCTOU-racable (same-UID only, but closing it is one syscall).
+    // The rename moved whatever the entry was; only a regular file may be read.
+    try {
+      if (!lstatSync(consumedPath).isFile()) isRegular = false;
+    } catch {
+      continue; // vanished post-rename — nothing to service
+    }
     if (!isRegular) {
       record({ kind: 'invalid', file: entry.name, reason: 'not_a_regular_file' });
       continue;
