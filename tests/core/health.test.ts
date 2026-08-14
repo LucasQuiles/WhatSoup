@@ -163,7 +163,7 @@ function makeDb(): Database {
 }
 
 function makeDeps(db: Database, overrides: Partial<HealthDeps> = {}): HealthDeps {
-  return {
+  const deps: HealthDeps = {
     db,
     connectionManager: {
       botJid: '15551230004@s.whatsapp.net',
@@ -185,6 +185,45 @@ function makeDeps(db: Database, overrides: Partial<HealthDeps> = {}): HealthDeps
     accessMode: 'allowlist',
     ...overrides,
   };
+  if (deps.instanceType === 'agent' && deps.runtime?.getHealthSnapshot) {
+    const runtime = deps.runtime;
+    const getHealthSnapshot = runtime.getHealthSnapshot.bind(runtime);
+    deps.runtime = {
+      ...runtime,
+      getHealthSnapshot: () => {
+        const snapshot = getHealthSnapshot();
+        return {
+          ...snapshot,
+          details: {
+            degradedReasons: [],
+            recoveryDebtReasons: [],
+            turnRecoveryBlockingOutstanding: 0,
+            turnRecoveryRetainedTerminal: 0,
+            turnRecoveryOpenRecoveries: 0,
+            turnRecoveryCorroboratedRetained: 0,
+            completedDeliveryIdentityBlocking: 0,
+            completedDeliveryIdentityRetained: 0,
+            completedDeliveryIdentityAdmissions: { nextAction: null },
+            ...snapshot.details,
+          },
+        };
+      },
+    };
+  }
+  if (deps.instanceType === 'agent' && !deps.durability) {
+    deps.durability = {
+      getHealthStats: () => ({
+        oldestMaybeSentAt: null,
+        deliveryAmbiguity: {
+          readable: true,
+          uncorroboratedAmbiguous: 0,
+          corroboratedRetained: 0,
+          oldestUncorroboratedAt: null,
+        },
+      }),
+    } as unknown as NonNullable<HealthDeps['durability']>;
+  }
+  return deps;
 }
 
 function makeAuthBond(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -2221,12 +2260,34 @@ describe('GET /health', () => {
     expect(json.degradation_causes).toContain('continuity_gap_open');
     expect(json.recovery_debt).toEqual({
       open: true,
+      service_blocking: false,
+      attention: 'routine',
       reason: 'continuity_gap_open',
+      reasons: ['continuity_gap_open'],
       continuity: {
         readable: true,
         open: 2,
         unresolved: 1,
         ambiguous: 1,
+      },
+      turn_recovery: {
+        readable: true,
+        blocking_outstanding: 0,
+        retained_terminal: 0,
+        open_catchups: 0,
+        corroborated_retained: 0,
+      },
+      completed_delivery_identity: {
+        readable: true,
+        blocking: 0,
+        retained: 0,
+        next_action: null,
+      },
+      delivery: {
+        readable: true,
+        uncorroborated_ambiguous: 0,
+        corroborated_retained: 0,
+        oldest_uncorroborated_at: null,
       },
     });
     expect(json.continuity).toEqual({
@@ -2253,8 +2314,8 @@ describe('GET /health', () => {
     const { status, body } = await healthReq(port);
     const json = JSON.parse(body);
     expect(status).toBe(200);
-    // Unreadable continuity alone no longer flips status (#2973 Option A)
-    expect(json.status).toBe('healthy');
+    // Unreadable safety evidence fails closed even though readable open gaps are retained debt.
+    expect(json.status).toBe('degraded');
     expect(json.degradation_causes).toContain('continuity_gap_unreadable');
     expect(json.recovery_debt).toMatchObject({
       open: true,
@@ -2382,6 +2443,72 @@ describe('GET /health', () => {
     });
     expect(json.recovery_debt).toMatchObject({ open: true, reason: 'continuity_gap_open' });
     expect(json.degradation_causes).toContain('continuity_gap_open');
+    db2.close();
+  });
+
+  it('clears the degraded latch on complete retained-only proof in the same server process', async () => {
+    db.close();
+    const db2 = makeDb();
+    const turnCapability = {
+      modelUsable: true,
+      modelUsableStale: false,
+      modelUsabilityStatus: 'usable',
+      lastSuccessfulTurnAt: Date.now(),
+      lastTurnErrorClass: null,
+      lastTurnErrorAt: null,
+    };
+    const getHealthSnapshot = vi.fn()
+      .mockReturnValueOnce({
+        status: 'degraded',
+        details: {
+          degradedReasons: ['turn_recovery_actionable'],
+          turnRecoveryBlockingOutstanding: 1,
+          turnCapability,
+        },
+      })
+      .mockReturnValueOnce({
+        status: 'healthy',
+        details: {
+          degradedReasons: [],
+          recoveryDebtReasons: ['historical_turn_catchup'],
+          turnRecoveryOpenRecoveries: 1,
+          turnCapability,
+        },
+      })
+      .mockReturnValue({
+        status: 'healthy',
+        details: { degradedReasons: [], recoveryDebtReasons: [], turnCapability },
+      });
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: { getHealthSnapshot } as unknown as HealthDeps['runtime'],
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const first = JSON.parse((await healthReq(port)).body);
+    const retained = JSON.parse((await healthReq(port)).body);
+    const clear = JSON.parse((await healthReq(port)).body);
+
+    expect(first).toMatchObject({
+      status: 'degraded',
+      recovery_debt: { open: true, service_blocking: true },
+    });
+    expect(retained).toMatchObject({
+      status: 'healthy',
+      status_reasons: [],
+      recovery_debt: {
+        open: true,
+        service_blocking: false,
+        reasons: ['historical_turn_catchup'],
+      },
+    });
+    expect(clear).toMatchObject({
+      status: 'healthy',
+      status_reasons: [],
+      recovery_debt: { open: false, service_blocking: false },
+    });
+    expect(getHealthSnapshot).toHaveBeenCalledTimes(3);
     db2.close();
   });
 
@@ -2763,7 +2890,19 @@ describe('GET /health', () => {
     const json = JSON.parse(body);
     expect(json.status).toBe('degraded');
     expect(json.runtime).toEqual({
-      agent: { sessions: 2, compact: { lastError: 'timeout' } },
+      agent: {
+        sessions: 2,
+        compact: { lastError: 'timeout' },
+        degradedReasons: [],
+        recoveryDebtReasons: [],
+        turnRecoveryBlockingOutstanding: 0,
+        turnRecoveryRetainedTerminal: 0,
+        turnRecoveryOpenRecoveries: 0,
+        turnRecoveryCorroboratedRetained: 0,
+        completedDeliveryIdentityBlocking: 0,
+        completedDeliveryIdentityRetained: 0,
+        completedDeliveryIdentityAdmissions: { nextAction: null },
+      },
     });
     db2.close();
   });
