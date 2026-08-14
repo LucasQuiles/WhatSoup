@@ -572,6 +572,7 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
     name: 'list_trigger_runs',
     description: 'Redacted run history for a trigger or bead (#2566). Bounded fields only — status, timestamps, attempt, bounded error class, and delivery booleans; output content, summaries, error prose, and transport identifiers never cross this projection.',
     scope: 'global', targetMode: 'caller-supplied', replayPolicy: 'read_only',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'none' },
     schema: z.object({
       trigger_id: z.number().int().positive().optional(),
       bead_id: z.number().int().positive().optional(),
