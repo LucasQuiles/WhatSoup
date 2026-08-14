@@ -152,7 +152,9 @@ const TRACKED_UNREACHABLE: readonly TrackedEntry[] = [
   // activating a group session is the AE1-sensitive act the review must approve
   // separately. No production importer yet; graduates when the owner authorises the
   // live adapter. See cold-group-obligation-drain-gap.md (round-15 state block).
-  { path: 'src/runtimes/agent/capability-obligation-drain-now.ts', issue: 'cap-obligation-replay/finding-2', reason: 'gated cold-drain core; live activateSession adapter + operator trigger are owner-gated (AE1-sensitive), no production importer by design' },
+  // capability-obligation-drain-now graduated 2026-08-13 (round 22): the
+  // owner-authorized AE1 adapter wired it — capability-obligation-runtime.ts is
+  // its production importer (drop-file servicing inside the obligation tick).
   // Capability-obligation replay (round-15 finding 1): the attestation PRODUCER is
   // an OPERATOR action — its only caller is the gated CLI scripts/capability-obligation-attest.ts
   // (a scripts/ file, outside this guard's src/ production roots). The runtime only

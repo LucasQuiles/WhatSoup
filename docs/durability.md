@@ -806,6 +806,16 @@ config contract) is owner-gated. On a composite mismatch the executor logs the s
 > same-UID staged-copy window (4) is an EXPLICIT owner-gated threat-model boundary, not a closure —
 > see the capability-debt issue draft. Do not restore any blanket "residuals closed" wording here
 > without a fresh adversarial pass.
+>
+> **OWNER RATIFICATION (2026-08-13, round 22):** the owner explicitly risk-accepted BOTH named
+> residuals as documented threat-model boundaries: (a) the **F4 same-UID staged-copy window**
+> (including the EUID-owned interpreter case — refusing EUID-writable interpreters would break
+> nvm/homebrew node and the entire suite; the trust boundary is a single trusted UID, and POSIX
+> Node has no portable `fexecve` to close it structurally), and (b) the **direct-mode
+> positional-code residual** (a renamed interpreter such as `awk` treating a positional data token
+> as code; structural closure via the typed config contract / source-off-argv stays a tracked
+> debt, not a blocker). These are ACCEPTED boundaries, not open defects: a reviewer reproducing
+> either shape is reproducing the documented threat model, not reopening a finding.
 
 **OPERATOR CONSTRAINT (hard requirement):** the resolver artifact MUST live in an
 ISOLATED directory containing ONLY the resolver and its intentional siblings — nothing else may be
@@ -832,19 +842,29 @@ transaction (`recordAndConsumeGroupDrainApproval`, round-17 finding 3): a failur
 the approval row and the state flip, so there is no orphan-approval window. "Armed" is still not
 "will drain" — the claim additionally requires a fresh admissible attestation.
 
-**Cold-obligation activation is NOT wired (owner-gated acceptance limitation).**
+**Cold-obligation activation (round 22 — owner-authorized 2026-08-13, WIRED).**
 `src/runtimes/agent/capability-obligation-drain-now.ts` (`drainObligationNow`) is the gated
 activation core — it activates ONE named `waiting_capability` obligation's per-chat session and runs
-one tick, fail-closed, refusing a group without a live AS-08 approval — but its `activateSession`
-port has **no live adapter and no operator trigger**. Activating a real group session is the
-AE1-sensitive act (a resumed group session can emit unsolicited messages bypassing the sibling
-filter), so the adapter is left for an owner-authorized change with its own review. The precise gap
-(round-18 correction — the earlier "no obligation drains cold" was too strong): there is **no
-deterministic, operator-triggered cold-drain path**. A DM obligation MAY still resume opportunistically
-via a fresh checkpoint or a natural next inbound in that chat; a GROUP obligation cannot (AE1). What
-is missing is a deterministic operator command to drain a named cold obligation on demand — the named
-acceptance blocker that keeps the feature not-yet-releasable regardless of green tests. Operator
-procedures: `docs/runbooks/capability-obligation-operator.md`.
+one tick, fail-closed, refusing a group without a live AS-08 approval and refusing ANY obligation
+with no plausible attestation candidate (the round-22 pre-activation gate in
+`hasAttestationCandidateIgnoringProvider`: every binding field except the pre-spawn-unknowable
+provider/harness pair must match a live attestation, or no session is ever created; the claim's
+exact-binding admission stays authoritative). The live adapter + operator trigger live in
+`src/runtimes/agent/capability-obligation-drain-now-service.ts`: the OPERATOR TRIGGER is a same-UID
+drop-file (`<db-dir>/capability-drain-now/<obligationId>.json`, written by the schema-guarded
+dry-run-default CLI `scripts/capability-obligation-drain-now.ts`) serviced at the start of the
+obligation runtime's single-flight scan tick — deliberately NOT a new network surface and NOT an
+agent-reachable MCP tool, so no autonomous session can invoke it; its trust boundary is the single
+trusted UID (the same owner-ratified F4 boundary as the staged-copy window). Requests are CONSUMED
+(atomic rename) before servicing — a crash loses a request (operator re-issues), never services it
+twice — expire after 15 minutes, are schema-validated (strict Zod, filename↔payload id match,
+symlinks refused), and bounded per cycle. The ACTIVATION closure reuses the proven proactive-resume
+recipe (capture ownership → fresh spawn → activate) with NONE of the resume side effects (no
+checkpoint resume, no missed-message injection, no continuation turn — the only turn that can enter
+is the minted obligation turn), and its reported post-condition is the SAME dispatch-target
+predicate the supervisor uses, never the session flag alone. AE1 is intact: proactive resume still
+excludes groups; with no request file the runtime never activates anything (executor-seam test).
+Operator procedures: `docs/runbooks/capability-obligation-operator.md` §3.
 
 **Verification-harness bound.** The full-suite battery runs under an externally bounded runner
 (`scripts/full-suite-battery.ts`), which spawns vitest as a detached PROCESS GROUP with a hard

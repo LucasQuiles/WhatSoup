@@ -27,12 +27,25 @@ export interface DrainNowDeps {
   activateSession: (deliveryJid: string) => Promise<boolean>;
   /** Run exactly one supervisor tick (scan → admit → claim → dispatch → settle). */
   runTick: () => Promise<ObligationTickReport>;
+  /**
+   * Round-22 pre-activation gate (gap-doc remaining item 2): could ANY live
+   * attestation plausibly admit this obligation (provider/harness ignored —
+   * unknowable pre-spawn)? False (or a throw — fail-closed) refuses BEFORE the
+   * session is created, so a drain that would necessarily park never activates
+   * anything. The claim's exact-binding admission (r15 F4) stays authoritative.
+   */
+  hasAdmissibleAttestationCandidate: (obligationId: number) => boolean;
 }
 
 export type DrainNowResult =
   | {
       activated: false;
-      reason: 'not_found' | 'not_drainable' | 'group_approval_required' | 'session_activation_failed';
+      reason:
+        | 'not_found'
+        | 'not_drainable'
+        | 'group_approval_required'
+        | 'no_admissible_attestation'
+        | 'session_activation_failed';
     }
   | { activated: true; tick: ObligationTickReport };
 
@@ -69,6 +82,16 @@ export async function drainObligationNow(deps: DrainNowDeps, obligationId: numbe
           .get(o.drainApprovalId, obligationId) as { ok: number } | undefined);
     if (approval === undefined) return { activated: false, reason: 'group_approval_required' };
   }
+
+  // Round-22 pre-activation gate: never create/activate a session for an
+  // obligation nothing could admit. A throwing check refuses (fail-closed).
+  let candidate = false;
+  try {
+    candidate = deps.hasAdmissibleAttestationCandidate(obligationId);
+  } catch {
+    candidate = false;
+  }
+  if (!candidate) return { activated: false, reason: 'no_admissible_attestation' };
 
   const active = await deps.activateSession(o.deliveryJid);
   if (!active) return { activated: false, reason: 'session_activation_failed' };

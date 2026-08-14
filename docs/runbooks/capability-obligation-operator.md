@@ -109,29 +109,47 @@ On `--confirm` the obligation reaches `waiting_capability`. **Claimability still
 requires a fresh admissible attestation** (step 1) — "armed" is not "will drain". The
 supervisor then claims (single-flight, fenced) and dispatches through the normal pipeline.
 
-## 3. Cold-obligation activation — NOT WIRED (owner-gated)
+## 3. Cold-obligation activation — `capability-obligation-drain-now` (round 22, owner-authorized)
 
 After a cold restart the incident obligations need their per-chat **session** active for the
 supervisor to dispatch. `src/runtimes/agent/capability-obligation-drain-now.ts`
 (`drainObligationNow`) is the gated activation CORE: it activates ONE named
 `waiting_capability` obligation's session and runs one tick, fail-closed, refusing a GROUP
-unless a live AS-08 approval is in force.
+unless a live AS-08 approval is in force, and refusing ANY obligation with no plausible
+attestation candidate (the round-22 pre-activation gate — provider/harness are the only
+binding fields ignored, since they are unknowable before the session spawns; the claim's
+exact-binding admission stays authoritative).
 
-**Its `activateSession` port has no live adapter and no operator trigger.** Activating a real
-group session is the AE1-sensitive act (a resumed group session can emit unsolicited
-messages bypassing the sibling filter), so the live adapter is left for an owner-authorized
-change with its own review. The precise gap (round-18 correction): there is **no deterministic,
-operator-triggered cold-drain path**. A DM obligation MAY still resume opportunistically via a
-fresh checkpoint or the chat's next natural inbound; a GROUP obligation cannot (AE1). The missing
-piece is a deterministic operator command to drain a NAMED cold obligation on demand — a named
-acceptance blocker, not a supported path.
+The live adapter + operator trigger were built in round 22 under an explicit owner grant
+(2026-08-13). The trigger is a **same-UID drop-file**, not a new network surface or an
+agent-reachable MCP tool:
+
+```
+capability-obligation-drain-now --db PATH --obligation-id N --requested-by WHO [--json] --confirm
+```
+
+Dry-run (default) previews the obligation state and the group-approval liveness and writes
+nothing. `--confirm` writes `<db-dir>/capability-drain-now/<obligationId>.json`; the LIVE
+instance's obligation scan (30s interval) consumes the request (rename-before-service — a
+crash can lose a request, never double-service it), re-checks EVERY gate itself, activates
+the session with a FRESH spawn (no checkpoint resume, no missed-message injection, no
+continuation turn — the only turn that can enter is the minted obligation turn), and runs
+one supervisor tick. Requests expire after 15 minutes; outcomes are recorded next to the
+consumed file as `<name>.result.json`. The CLI's own gate checks are ADVISORY — the
+runtime's `drainObligationNow` decides.
+
+AE1 remains intact: proactive resume still excludes groups; the ONLY path that activates a
+group session is this operator command, and only while its AS-08 approval is live. With no
+request file present the runtime never activates anything (asserted by an executor-seam
+test).
 
 ## End-to-end order
 
 1. `capability-obligation-attest … --run-canary --confirm` (readiness attestation).
 2. For a group: `capability-obligation-approve-drain … --confirm` (AS-08 approval + arm).
 3. The supervisor scans → admits (attestation) → claims (fenced) → dispatches → settles.
-4. (Cold restart only) session activation — **owner-gated, not yet wired** (§3).
+4. (Cold restart only) `capability-obligation-drain-now … --confirm` (§3) to activate the
+   named obligation's session; the same scan then drains it.
 
 ## Safety recap
 
@@ -139,3 +157,7 @@ acceptance blocker, not a supported path.
 - No live DB write, provider call, or WhatsApp send occurs from a dry run.
 - Recording an attestation and approving a group drain are owner-gated actions (H5 / AS-08);
   a live migration additionally requires the AS-01 old-binary rehearsal to pass.
+- The same-UID staged-copy window (F4, incl. the EUID-owned interpreter) and the direct-mode
+  positional-code residual (awk-shape) are OWNER-RATIFIED threat-model boundaries
+  (2026-08-13) — documented in `docs/durability.md` §5.7, not open defects. The drain-now
+  drop-file shares the same single-trusted-UID boundary.

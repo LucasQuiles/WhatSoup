@@ -44,6 +44,14 @@ import type { ExternalEffectDeclaration } from '../../mcp/external-effect.ts';
 import type { ToolRegistry } from '../../mcp/registry.ts';
 import type { ToolDeclaration } from '../../mcp/types.ts';
 import { deriveCapabilityDecision as deriveDecisionForTurn } from './capability-obligation-decision.ts';
+import { drainObligationNow } from './capability-obligation-drain-now.ts';
+import {
+  buildLiveActivateSession,
+  drainNowRequestDirForDbPath,
+  serviceDrainNowRequests,
+  type OwnedGeneration,
+  type SessionActivationPorts,
+} from './capability-obligation-drain-now-service.ts';
 import {
   buildCapabilityExecutionTool,
   type ActiveObligationExecution,
@@ -120,6 +128,15 @@ export interface CapabilityObligationRuntimeDeps {
   /** Live logical turn id owning a conversation (shared correlation resolver). */
   turnIdFor: (conversationKey: string) => string | null;
   scanIntervalMs?: number;
+  /**
+   * Round-22 AE1 adapter: live session-activation ports for the operator
+   * drain-now trigger. ABSENT (unit tests / non-live constructions) ⇒ the
+   * drop-file servicing is inert — the all-or-inert rule extended to the
+   * operator surface.
+   */
+  sessionActivation?: SessionActivationPorts;
+  /** Test override for the drop-file dir; default derives from the DB path. */
+  drainNowRequestDir?: string;
 }
 
 /**
@@ -152,6 +169,8 @@ export class CapabilityObligationRuntime {
   private readonly writeLossSince: (sinceMs: number) => boolean;
   private readonly scanIntervalMs: number;
   private readonly activeTurns = new Map<string, ActiveObligationExecution>();
+  private readonly sessionActivation: SessionActivationPorts | undefined;
+  private readonly drainNowRequestDir: string | null;
   private scanTimer: ReturnType<typeof setTimeout> | null = null;
   private tickInFlight: Promise<unknown> | null = null;
   private closed = false;
@@ -164,6 +183,8 @@ export class CapabilityObligationRuntime {
     this.externalEffectFor = deps.externalEffectFor;
     this.writeLossSince = deps.writeLossSince;
     this.scanIntervalMs = deps.scanIntervalMs ?? OBLIGATION_SCAN_INTERVAL_MS;
+    this.sessionActivation = deps.sessionActivation;
+    this.drainNowRequestDir = deps.drainNowRequestDir ?? drainNowRequestDirForDbPath(deps.db.path);
     // D6 trusted execution seam: receipts are written ONLY by this handler.
     deps.registerTool(
       buildCapabilityExecutionTool({
@@ -228,8 +249,8 @@ export class CapabilityObligationRuntime {
   /** Single-flight: a tick already in progress is awaited, not re-entered. */
   tickOnce(): Promise<unknown> {
     if (this.tickInFlight) return this.tickInFlight;
-    const run = this.supervisor
-      .tick()
+    const run = this.serviceDrainNowSafely()
+      .then(() => this.supervisor.tick())
       .then(async (report) => {
         await this.collectExpiredMedia();
         return report;
@@ -265,6 +286,59 @@ export class CapabilityObligationRuntime {
     } catch (err) {
       log.warn({ err }, 'retained-media horizon GC failed; will retry next tick');
     }
+  }
+
+  /**
+   * Round-22 operator drain-now servicing (runs FIRST inside the single-flight
+   * tick chain). Inert unless BOTH live activation ports and a real drop-dir
+   * exist — the all-or-inert rule. Never throws: a drop-file failure must not
+   * cost the regular obligation tick.
+   */
+  private async serviceDrainNowSafely(): Promise<void> {
+    if (this.sessionActivation === undefined || this.drainNowRequestDir === null) return;
+    const activation = this.sessionActivation;
+    try {
+      const outcomes = await serviceDrainNowRequests({
+        requestDir: this.drainNowRequestDir,
+        drain: (obligationId) =>
+          drainObligationNow(
+            {
+              db: this.db,
+              store: this.store,
+              activateSession: buildLiveActivateSession(activation),
+              runTick: () => this.supervisor.tick(),
+              hasAdmissibleAttestationCandidate: (id) => this.hasAttestationCandidate(id),
+            },
+            obligationId,
+          ),
+      });
+      for (const outcome of outcomes) {
+        log.info({ outcome }, 'operator drain-now request serviced');
+      }
+    } catch (err) {
+      log.warn({ err }, 'operator drain-now servicing failed; will retry next tick');
+    }
+  }
+
+  /**
+   * Provider-agnostic attestation candidate for the drain-now pre-activation
+   * gate: the FIXED live facts (host/user/release/schema) + the declared skill
+   * identity + mediaRoot; provider/harness are unknowable pre-spawn and are
+   * the only fields ignored. The claim's exact-binding admission (r15 F4)
+   * remains the authoritative gate.
+   */
+  private hasAttestationCandidate(obligationId: number): boolean {
+    const facts = buildObligationLiveFacts(UNRESOLVED_SERVING_PROVIDER);
+    return this.store.hasAttestationCandidateIgnoringProvider({
+      obligationId,
+      hostId: facts.hostId,
+      runtimeUser: facts.runtimeUser,
+      releaseSha: facts.releaseSha,
+      schemaVersion: facts.schemaVersion,
+      skillName: this.options.attestation.skillName,
+      skillDigest: this.options.attestation.skillDigest,
+      mediaRoot: this.options.mediaRoot,
+    });
   }
 
   private scheduleTick(): void {
@@ -455,6 +529,9 @@ export function maybeActivateCapabilityObligationRuntime(host: {
   isDispatchTargetCurrent: (target: TurnRecoveryDispatchTarget) => boolean;
   getDurability: CapabilityObligationRuntimeDeps['getDurability'];
   resolveMapKey: (deliveryJid: string) => string;
+  getChatSession: (mapKey: string) => SessionManager | undefined;
+  captureOwnedGeneration: (mapKey: string, session: SessionManager) => OwnedGeneration;
+  activateSpawnedSession: (mapKey: string, session: SessionManager, expected: OwnedGeneration) => Promise<string>;
 }): CapabilityObligationRuntime | null {
   if (host.options == null || !host.enabled || host.alreadyActive) return null;
   const { registry } = host;
@@ -463,6 +540,18 @@ export function maybeActivateCapabilityObligationRuntime(host: {
     db: host.db,
     store: host.store,
     options: host.options,
+    // Round-22 AE1 adapter: the live activation ports for operator drain-now.
+    // The sessions flowing through are always the runtime's own SessionManagers
+    // (they come from getChatSession), so the structural narrowing is sound.
+    sessionActivation: {
+      resolveMapKey: host.resolveMapKey,
+      resolveActiveTarget: (jid) => host.resolveDispatchTarget(jid),
+      getSession: (mapKey) => host.getChatSession(mapKey),
+      captureOwnedGeneration: (mapKey, session) =>
+        host.captureOwnedGeneration(mapKey, session as SessionManager),
+      activateSpawnedSession: (mapKey, session, expected) =>
+        host.activateSpawnedSession(mapKey, session as SessionManager, expected),
+    },
     // r14 F3 — resolve the serving target ONCE; a null target fails closed.
     prepareDispatch: (obligation) => {
       const target = host.resolveDispatchTarget(obligation.deliveryJid);

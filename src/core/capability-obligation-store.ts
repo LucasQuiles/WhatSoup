@@ -393,6 +393,52 @@ export class CapabilityObligationStore {
     return new Set(rows.map((r) => r.retained_media_path));
   }
 
+  /**
+   * Drain-now PRE-CHECK (round-22, gap-doc remaining item 2): does ANY live
+   * attestation (canary pass, unrevoked, unexpired) exist that could plausibly
+   * admit this obligation on this host/user/release/schema — ignoring only the
+   * provider/harness pair, which is unknowable until the session actually
+   * spawns? Used to refuse ACTIVATING a session that would necessarily park.
+   * Heuristic pre-activation gate only: the claim's exact-binding admission
+   * (r15 F4) remains the authoritative gate; this can only refuse earlier,
+   * never admit more.
+   */
+  hasAttestationCandidateIgnoringProvider(params: {
+    obligationId: number;
+    hostId: string;
+    runtimeUser: string;
+    releaseSha: string;
+    schemaVersion: number;
+    skillName: string;
+    skillDigest: string;
+    mediaRoot: string;
+  }): boolean {
+    const row = this.db.raw
+      .prepare(
+        `SELECT 1 AS ok FROM capability_attestations att
+         JOIN capability_obligations o ON o.id = ?
+         WHERE att.host_id = ? AND att.runtime_user = ? AND att.release_sha = ?
+           AND att.schema_version = ?
+           AND att.contract_version = o.contract_version
+           AND att.capability = o.required_capability
+           AND att.skill_name = ? AND att.skill_digest = ? AND att.media_root = ?
+           AND att.canary_result = 'pass' AND att.revoked_at IS NULL
+           AND datetime(att.expires_at) > datetime('now')
+         LIMIT 1`,
+      )
+      .get(
+        params.obligationId,
+        params.hostId,
+        params.runtimeUser,
+        params.releaseSha,
+        params.schemaVersion,
+        params.skillName,
+        params.skillDigest,
+        params.mediaRoot,
+      ) as { ok: number } | undefined;
+    return row !== undefined;
+  }
+
   claimObligation(
     id: number,
     params: {

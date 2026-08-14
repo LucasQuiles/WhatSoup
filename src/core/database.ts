@@ -1463,6 +1463,11 @@ export class Database {
   private connectionClosed = false;
   private writableReady = false;
 
+  /** The path this database was opened at (':memory:' for in-memory). */
+  get path(): string {
+    return this.dbPath;
+  }
+
   constructor(dbPath: string) {
     this.dbPath = dbPath;
     let existedBeforeConstruction = false;

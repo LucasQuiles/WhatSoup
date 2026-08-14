@@ -19,6 +19,7 @@ import { CapabilityObligationStore } from '../../../src/core/capability-obligati
 import { Database } from '../../../src/core/database.ts';
 import { withTransaction } from '../../../src/core/db-tx.ts';
 import {
+  buildObligationLiveFacts,
   CapabilityObligationRuntime,
   composeCapabilityObligationReplayPrompt,
   dispatchCapabilityObligationTurnViaSession,
@@ -28,6 +29,7 @@ import {
   UNRESOLVED_SERVING_PROVIDER,
   type CapabilityObligationLiveFacts,
 } from '../../../src/runtimes/agent/capability-obligation-runtime.ts';
+import type { SessionActivationPorts } from '../../../src/runtimes/agent/capability-obligation-drain-now-service.ts';
 import type { CapabilityObligationDueRow } from '../../../src/core/capability-obligation-store.ts';
 import type { ObligationDispatchOutcome } from '../../../src/runtimes/agent/capability-obligation-supervisor.ts';
 import { ToolRegistry } from '../../../src/mcp/registry.ts';
@@ -1163,5 +1165,197 @@ describe('dispatch provider-boundary outcome (D7/r13 F1)', () => {
       },
       false, // isTargetCurrent → false: the carried target is stale at dispatch
     )).resolves.toBe('retryable');
+  });
+});
+
+describe('operator drain-now servicing at the EXECUTOR seam (r22 AE1 adapter)', () => {
+  const GROUP_JID = 'test-group-alpha@g.us';
+  let requestDir: string;
+
+  beforeEach(() => {
+    requestDir = mkdtempSync(join(tmpdir(), 'co-runtime-drain-now-'));
+  });
+  afterEach(() => {
+    rmSync(requestDir, { recursive: true, force: true });
+  });
+
+  function dropRequest(obligationId: number): void {
+    writeFileSync(
+      join(requestDir, `${obligationId}.json`),
+      JSON.stringify({
+        obligationId,
+        requestedAtUnixSec: Math.floor(Date.now() / 1000),
+        requestedBy: 'operator-test',
+        nonce: 'nonce-0123456789',
+      }),
+    );
+  }
+
+  /** An attestation the r22 PRE-CHECK finds: the REAL process facts (any provider). */
+  function preCheckAttestation(): number {
+    const facts = buildObligationLiveFacts('provider-precheck-only');
+    return recordCapabilityAttestation(db, {
+      ...facts,
+      contractVersion: 'test-contract/1',
+      capability: 'child_process_tools',
+      skillName: OPTIONS.attestation.skillName,
+      skillVersion: OPTIONS.attestation.skillVersion,
+      skillDigest: OPTIONS.attestation.skillDigest,
+      resolverDigest: OPTIONS.attestation.resolverDigest,
+      dependencyVersions: OPTIONS.attestation.dependencyVersions,
+      probeVersion: OPTIONS.attestation.probeVersion,
+      canaryId: OPTIONS.attestation.canaryId,
+      mediaRoot: OPTIONS.mediaRoot,
+      canaryResult: 'pass',
+      nonce: `pre-${Math.random().toString(36).slice(2)}`,
+      attestedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+    });
+  }
+
+  function makeDrainNowRuntime() {
+    const dispatched: Array<{ id: number; minted: string }> = [];
+    const activation: string[] = [];
+    // The ports report an ALREADY-dispatchable target once "activated" — the
+    // point here is the runtime→drainObligationNow→activation ORDER and gating,
+    // not the SessionManager internals (unit-tested in the service suite).
+    let activated = false;
+    const ports: SessionActivationPorts = {
+      resolveMapKey: (jid) => jid,
+      resolveActiveTarget: (jid) => {
+        if (activated) return { jid };
+        activation.push(`resolve-cold:${jid}`);
+        return null;
+      },
+      getSession: (mapKey) => {
+        activation.push(`get:${mapKey}`);
+        return {
+          getStatus: () => ({ active: activated }),
+          spawnSession: async () => {
+            activation.push(`spawn:${mapKey}`);
+            activated = true;
+          },
+        };
+      },
+      captureOwnedGeneration: (mapKey) => {
+        activation.push(`capture:${mapKey}`);
+        return { managerId: 'm1', generation: 1 };
+      },
+      activateSpawnedSession: async (mapKey) => {
+        activation.push(`activate:${mapKey}`);
+        return mapKey;
+      },
+    };
+    const runtime = new CapabilityObligationRuntime({
+      db,
+      store,
+      options: OPTIONS,
+      prepareDispatch: (obligation) => ({
+        facts: LIVE_FACTS,
+        dispatch: async (minted) => {
+          dispatched.push({ id: obligation.id, minted });
+          return 'dispatched';
+        },
+      }),
+      getDurability: () => ({ journalInbound: (messageId: string) => journalInboundRaw(messageId) }),
+      externalEffectFor: () => undefined,
+      writeLossSince: () => false,
+      registerTool: () => {},
+      turnIdFor: () => 'obl-turn',
+      sessionActivation: ports,
+      drainNowRequestDir: requestDir,
+    });
+    return { runtime, dispatched, activation };
+  }
+
+  function seedArmedGroupObligation(): { id: number; approvalId: number } {
+    let id = 0;
+    withTransaction(db, () => {
+      id = store.applyDecisionWithinCallerTransaction({
+        auditEvent: { action: 'obligation.create', actorType: 'runtime', reasonCode: 'conclusive_no_effect' },
+        obligation: {
+          sourceInboundSeq: 5601, sourceMessageId: 'TESTMSG-DRAINNOW-G1',
+          conversationKey: 'conv-rt-group', deliveryJid: GROUP_JID,
+          senderJid: 'test-sender@s.whatsapp.net', senderName: 'Test Sender',
+          isGroup: true, groupName: 'Test Group Alpha',
+          scope: 'per_chat', originRecoveryJobId: null, replayText: 'https://youtu.be/abc',
+          contentTypeHint: 'text', contractVersion: 'test-contract/1', requiredCapability: 'child_process_tools',
+          capabilityParams: '{"skill":"watch"}', inputDigest: 'aa'.repeat(32), sourceDigest: SOURCE_DIGEST,
+          sourceToken: SOURCE_URL, retainedMedia: null, creationReason: 'typed_deferral_signal',
+        },
+      }).obligationId!;
+    });
+    const approvalId = Number(
+      db.raw
+        .prepare(
+          `INSERT INTO capability_drain_approvals
+             (obligation_id, destination_jid, scope, release_sha, attestation_digest, manifest_digest, drain_run_id, approver, approved_at, expires_at)
+           VALUES (?, ?, 'group', 'rel-1', 'att-1', 'md-1', 'run-1', 'owner', datetime('now'), datetime('now','+1 hour'))`,
+        )
+        .run(id, GROUP_JID)
+        .lastInsertRowid,
+    );
+    expect(
+      store.consumeGroupDrainApproval(id, {
+        destinationJid: GROUP_JID, releaseSha: 'rel-1', manifestDigest: 'md-1',
+        drainRunId: 'run-1', attestationDigest: 'att-1',
+      }).applied,
+    ).toBe(true);
+    return { id, approvalId };
+  }
+
+  it('END-TO-END: a dropped request activates the cold session and the obligation dispatches in the same tick chain', async () => {
+    const id = seedObligation();
+    freshAttestation(); // admission (LIVE_FACTS via prepareDispatch)
+    preCheckAttestation(); // r22 pre-activation gate (real process facts)
+    dropRequest(id);
+    const { runtime, dispatched, activation } = makeDrainNowRuntime();
+    await runtime.tickOnce();
+    // The request was consumed and the activation recipe ran in order.
+    expect(readdirSync(requestDir).some((n) => n === `${id}.json`)).toBe(false);
+    expect(activation).toEqual([
+      `resolve-cold:test-dm-target@lid`, `get:test-dm-target@lid`,
+      `capture:test-dm-target@lid`, `spawn:test-dm-target@lid`, `activate:test-dm-target@lid`,
+    ]);
+    expect(dispatched).toEqual([{ id, minted: `obl:${id}:1` }]);
+    const result = readdirSync(requestDir).find((n) => n.endsWith('.result.json'))!;
+    expect(JSON.parse(readFileSync(join(requestDir, result), 'utf8'))).toMatchObject({ kind: 'drained', obligationId: id });
+  });
+
+  it('AE1 FALSIFIER at the executor: a REVOKED group approval is refused and the session ports are NEVER touched', async () => {
+    const { id, approvalId } = seedArmedGroupObligation();
+    db.raw.prepare("UPDATE capability_drain_approvals SET revoked_at = datetime('now') WHERE id = ?").run(approvalId);
+    preCheckAttestation();
+    dropRequest(id);
+    const { runtime, dispatched, activation } = makeDrainNowRuntime();
+    await runtime.tickOnce();
+    expect(activation).toEqual([]); // the group session was never resolved, created, or activated
+    expect(dispatched).toEqual([]);
+    const result = readdirSync(requestDir).find((n) => n.endsWith('.result.json'))!;
+    expect(JSON.parse(readFileSync(join(requestDir, result), 'utf8'))).toMatchObject({
+      kind: 'refused', obligationId: id, reason: 'group_approval_required',
+    });
+  });
+
+  it('PRE-CHECK FALSIFIER at the executor: no candidate attestation refuses BEFORE any session port is touched', async () => {
+    const id = seedObligation();
+    freshAttestation(); // admission-only row — LIVE_FACTS host, NOT this process's facts
+    dropRequest(id);
+    const { runtime, activation } = makeDrainNowRuntime();
+    await runtime.tickOnce();
+    expect(activation).toEqual([]);
+    const result = readdirSync(requestDir).find((n) => n.endsWith('.result.json'))!;
+    expect(JSON.parse(readFileSync(join(requestDir, result), 'utf8'))).toMatchObject({
+      kind: 'refused', obligationId: id, reason: 'no_admissible_attestation',
+    });
+  });
+
+  it('AE1 baseline: with NO request file the runtime never touches the session ports (no spontaneous activation)', async () => {
+    seedObligation();
+    freshAttestation();
+    preCheckAttestation();
+    const { runtime, activation } = makeDrainNowRuntime();
+    await runtime.tickOnce();
+    expect(activation).toEqual([]);
   });
 });

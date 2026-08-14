@@ -28,12 +28,14 @@ function emptyReport(): ObligationTickReport {
   };
 }
 
-function makeDeps(): { deps: DrainNowDeps; activated: string[] } {
+function makeDeps(over: Partial<DrainNowDeps> = {}): { deps: DrainNowDeps; activated: string[] } {
   const activated: string[] = [];
   const deps: DrainNowDeps = {
     db, store,
     activateSession: async (jid) => { activated.push(jid); return true; },
     runTick: async () => emptyReport(),
+    hasAdmissibleAttestationCandidate: () => true,
+    ...over,
   };
   return { deps, activated };
 }
@@ -121,13 +123,111 @@ describe('drainObligationNow (gated cold activation)', () => {
     let ticks = 0;
     const deps: DrainNowDeps = {
       db, store, activateSession: async () => false, runTick: async () => { ticks += 1; return emptyReport(); },
+      hasAdmissibleAttestationCandidate: () => true,
     };
     expect(await drainObligationNow(deps, id)).toEqual({ activated: false, reason: 'session_activation_failed' });
     expect(ticks).toBe(0);
   });
 
+  it('FALSIFIER (r22 pre-activation gate): no attestation candidate refuses BEFORE any session is activated', async () => {
+    const id = seedObligation({ isGroup: false, deliveryJid: 'test-dm-target@lid', sourceInboundSeq: 8004, sourceMessageId: 'M-DM3' });
+    let ticks = 0;
+    const { deps, activated } = makeDeps({
+      hasAdmissibleAttestationCandidate: () => false,
+      runTick: async () => { ticks += 1; return emptyReport(); },
+    });
+    expect(await drainObligationNow(deps, id)).toEqual({ activated: false, reason: 'no_admissible_attestation' });
+    expect(activated).toEqual([]); // the session was never created/activated
+    expect(ticks).toBe(0);
+  });
+
+  it('a THROWING attestation pre-check refuses fail-closed (never activates)', async () => {
+    const id = seedObligation({ isGroup: false, deliveryJid: 'test-dm-target@lid', sourceInboundSeq: 8005, sourceMessageId: 'M-DM4' });
+    const { deps, activated } = makeDeps({
+      hasAdmissibleAttestationCandidate: () => { throw new Error('store unavailable'); },
+    });
+    expect(await drainObligationNow(deps, id)).toEqual({ activated: false, reason: 'no_admissible_attestation' });
+    expect(activated).toEqual([]);
+  });
+
+  it('the group-approval gate runs BEFORE the attestation pre-check (revoked group never reaches it)', async () => {
+    const { id, approvalId } = approvedGroup();
+    db.raw.prepare("UPDATE capability_drain_approvals SET revoked_at = datetime('now') WHERE id = ?").run(approvalId);
+    let preChecked = 0;
+    const { deps, activated } = makeDeps({
+      hasAdmissibleAttestationCandidate: () => { preChecked += 1; return true; },
+    });
+    expect(await drainObligationNow(deps, id)).toEqual({ activated: false, reason: 'group_approval_required' });
+    expect(preChecked).toBe(0);
+    expect(activated).toEqual([]);
+  });
+
   it('refuses an unknown obligation id', async () => {
     const { deps } = makeDeps();
     expect(await drainObligationNow(deps, 9999)).toEqual({ activated: false, reason: 'not_found' });
+  });
+});
+
+describe('hasAttestationCandidateIgnoringProvider (r22 drain-now pre-check)', () => {
+  const FACTS = {
+    hostId: 'test-host', runtimeUser: 'test-user', releaseSha: 'rel-live-1',
+    schemaVersion: 57, skillName: 'watch-skill', skillDigest: 'skill-digest-1', mediaRoot: '/tmp/media-root',
+  };
+
+  function insertAttestation(over: Partial<Record<string, unknown>> = {}): void {
+    db.raw
+      .prepare(
+        `INSERT INTO capability_attestations
+           (host_id, runtime_user, release_sha, schema_version, provider_id, harness_type,
+            contract_version, capability, skill_name, skill_version, skill_digest, resolver_digest,
+            dependency_versions, media_root, canary_id, canary_result, probe_version, nonce,
+            attested_at, expires_at, revoked_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, '{}', ?, 'canary-1', ?, 'probe/1', ?,
+                 datetime('now'), ?, ?)`,
+      )
+      .run(
+        (over.hostId as string) ?? FACTS.hostId,
+        (over.runtimeUser as string) ?? FACTS.runtimeUser,
+        (over.releaseSha as string) ?? FACTS.releaseSha,
+        (over.schemaVersion as number) ?? FACTS.schemaVersion,
+        (over.providerId as string) ?? 'some-provider-the-runtime-never-uses',
+        (over.harnessType as string) ?? 'some-harness',
+        (over.contractVersion as string) ?? 'c/1',
+        (over.capability as string) ?? 'child_process_tools',
+        (over.skillName as string) ?? FACTS.skillName,
+        (over.skillDigest as string) ?? FACTS.skillDigest,
+        (over.mediaRoot as string) ?? FACTS.mediaRoot,
+        (over.canaryResult as string) ?? 'pass',
+        (over.nonce as string) ?? `nonce-${Math.random().toString(36).slice(2)}`,
+        (over.expiresAt as string) ?? new Date(Date.now() + 3_600_000).toISOString().replace('T', ' ').slice(0, 19),
+        (over.revokedAt as string | null) ?? null,
+      );
+  }
+
+  it('matches a live attestation REGARDLESS of provider/harness (the only ignored fields)', () => {
+    const id = seedObligation({ isGroup: false, deliveryJid: 'test-dm@lid', sourceInboundSeq: 8100, sourceMessageId: 'M-ATT-1' });
+    insertAttestation({ providerId: 'provider-never-seen', harnessType: 'harness-never-seen' });
+    expect(store.hasAttestationCandidateIgnoringProvider({ obligationId: id, ...FACTS })).toBe(true);
+  });
+
+  it('false when no attestation exists at all', () => {
+    const id = seedObligation({ isGroup: false, deliveryJid: 'test-dm@lid', sourceInboundSeq: 8101, sourceMessageId: 'M-ATT-2' });
+    expect(store.hasAttestationCandidateIgnoringProvider({ obligationId: id, ...FACTS })).toBe(false);
+  });
+
+  it('false for revoked, failed-canary, wrong-release, wrong-skill-digest, or wrong-capability rows', () => {
+    const id = seedObligation({ isGroup: false, deliveryJid: 'test-dm@lid', sourceInboundSeq: 8102, sourceMessageId: 'M-ATT-3' });
+    insertAttestation({ revokedAt: '2020-01-01 00:00:00' });
+    insertAttestation({ canaryResult: 'fail' });
+    insertAttestation({ releaseSha: 'rel-OTHER' });
+    insertAttestation({ skillDigest: 'skill-digest-OTHER' });
+    insertAttestation({ capability: 'network_tools' });
+    expect(store.hasAttestationCandidateIgnoringProvider({ obligationId: id, ...FACTS })).toBe(false);
+  });
+
+  it('false for an expired attestation', () => {
+    const id = seedObligation({ isGroup: false, deliveryJid: 'test-dm@lid', sourceInboundSeq: 8103, sourceMessageId: 'M-ATT-4' });
+    insertAttestation({ expiresAt: '2020-01-01 00:00:00' });
+    expect(store.hasAttestationCandidateIgnoringProvider({ obligationId: id, ...FACTS })).toBe(false);
   });
 });

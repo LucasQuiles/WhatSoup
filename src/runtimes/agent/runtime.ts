@@ -2858,6 +2858,9 @@ export class AgentRuntime implements Runtime {
       resolveDispatchTarget: (jid) => this.resolvePerChatDispatchTarget(jid),
       requireSessionToolScopeKey: (sess) => this.requireSessionToolScopeKey(sess),
       isDispatchTargetCurrent: (t) => this.isTurnRecoveryDispatchTargetCurrent(t),
+      getChatSession: (key) => this.chatSessions.get(key),
+      captureOwnedGeneration: (key, s) => this.captureOwnedPerChatGeneration(key, s),
+      activateSpawnedSession: (key, s, o) => this.activateSpawnedOwnedPerChatSession(key, s, o),
     }) ?? this.capabilityObligationRuntime;
   }
 
