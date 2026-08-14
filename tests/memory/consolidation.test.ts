@@ -343,3 +343,40 @@ describe('consolidateCluster', () => {
     expect(serializedLogs).not.toContain(forbiddenOutput);
   });
 });
+
+describe('clusterMemories order invariance (#2569)', () => {
+  // Greedy first-match clustering seeded in input order lets the same record
+  // set produce different partitions when only search-result order changes.
+  // The partition must be a pure function of the record SET.
+  const recordA = { id: 'a', text: 'alpha beta gamma delta', claim: 'alpha beta gamma delta', createdAt: '2026-04-01', confidence: 0.9, evidence: '' };
+  const recordB = { id: 'b', text: 'epsilon zeta eta theta', claim: 'epsilon zeta eta theta', createdAt: '2026-04-02', confidence: 0.9, evidence: '' };
+  // Bridges both seeds: sim(a,x) = sim(b,x) = 2/6 >= 0.3, sim(a,b) = 0.
+  const recordX = { id: 'x', text: 'alpha beta epsilon zeta', claim: 'alpha beta epsilon zeta', createdAt: '2026-04-03', confidence: 0.9, evidence: '' };
+
+  function partition(clusters: MemoryCluster[]): string[][] {
+    return clusters
+      .map((cluster) => cluster.records.map((r) => r.id).sort())
+      .sort((left, right) => left[0].localeCompare(right[0]));
+  }
+
+  it('produces the same partition regardless of input order', () => {
+    const forward = partition(clusterMemories([recordA, recordB, recordX]));
+    const reversed = partition(clusterMemories([recordX, recordB, recordA]));
+    const rotated = partition(clusterMemories([recordB, recordX, recordA]));
+    expect(reversed).toEqual(forward);
+    expect(rotated).toEqual(forward);
+  });
+
+  it('pins the deterministic partition for the bridge-record set', () => {
+    // Deterministic seed order is ascending record id: 'a' seeds first and
+    // captures the bridge record 'x'; 'b' clusters alone.
+    const clusters = clusterMemories([recordX, recordB, recordA]);
+    expect(partition(clusters)).toEqual([['a', 'x'], ['b']]);
+  });
+
+  it('does not mutate the caller-supplied records array', () => {
+    const input = [recordX, recordB, recordA];
+    clusterMemories(input);
+    expect(input.map((r) => r.id)).toEqual(['x', 'b', 'a']);
+  });
+});

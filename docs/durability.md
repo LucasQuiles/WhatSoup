@@ -1544,3 +1544,83 @@ architecture-owner gated (#2567). Everything above is deliberately neutral — b
 require identical lease, acknowledgement, evidence, privacy, and health contracts. Until
 a consumer ships, the honest steady state for an enrichment-enabled instance with queue
 growth is `consumer_missing`, and that is exactly what health now reports.
+
+## 10. Memory Consolidation Source Lineage (#2569)
+
+### 10.1 Pipeline shape and the defects it had
+
+Consolidation promotes durable knowledge out of episodic memory:
+`MemoryConsolidationScheduler` (`src/memory/consolidation-scheduler.ts`) owns deadlines,
+durable run receipts, cancellation, and the post-stop write fence;
+`runConsolidation` (`src/memory/consolidation-cron.ts`) selects sources (fixed semantic
+query, top-100, unfiltered), scopes them by chat+sender, clusters them
+(`clusterMemories`, `src/memory/consolidation.ts`), sends each cluster to the model, and
+upserts promoted claims back to the remote store under
+`durable:<shortHash(scope + claim)>` ids with `confidenceQualifier: 'consolidated'`.
+
+Three defects were proven against this shape (#2569):
+
+1. **Recursive eligibility.** Promotion outputs are written as ordinary records
+   (`memoryType: 'user_fact'`), so later runs re-selected prior outputs — and previously
+   discarded records — as fresh source material. Nothing was ever marked consumed.
+2. **Order-dependent partition.** Greedy first-match clustering seeded in search-result
+   order: the same record set produced different cluster partitions (and therefore
+   different model inputs) when only arrival order changed. A bridge record arriving
+   first could merge two unrelated topics into one cluster.
+3. **Wording-keyed promotion identity.** The durable id hashes scope + claim text:
+   identical wording silently overwrites, while a wording variation for the same
+   sources mints a new durable record with no supersession link.
+
+### 10.2 Landed guards (this slice)
+
+**Order-invariant clustering.** `clusterMemories` seeds in ascending record-id order
+(plain code-unit compare) over a copy of the input, making the partition a pure function
+of the record set. Same set in, same partition out, regardless of search ranking drift.
+
+**Recursive-eligibility exclusion.** `runConsolidation` drops records carrying either
+promotion marker — the `durable:` id prefix or the `consolidated` confidence
+qualifier — before scoping. Exclusions are counted under the run's `skipped` counter and
+logged content-free (`consolidatedExcluded` count only). A consolidation run can no
+longer consume its own prior output.
+
+These are live-safe defect fixes: no schema, store, or contract change.
+
+### 10.3 Durable lineage contract (designed; ledger slices owner-gated)
+
+Repeated promotion of the *same raw sources* and durable disposition need state. The
+designed contract mirrors the fact-export queue machinery (§9):
+
+- **Source ledger** (local SQLite): one row per selected source with states
+  `eligible → leased → consolidated | discarded_transient` plus `quarantined`,
+  `legacy_unclassified`, attempt accounting, and an opaque salted `source_uid`
+  (fact-uid pattern, §9). Selection becomes a deterministic paged reader over the
+  ledger; the semantic search demotes to discovery/admission.
+- **Fenced claim.** A run leases sources with a single guarded `UPDATE … RETURNING`
+  keyed to its run lease (§ scheduler receipts); expired leases reconcile back to
+  `eligible` at the next run boundary. Model-returned source ids outside the leased
+  cluster fail closed before any write.
+- **Disposition saga.** Remote upsert success marks sources `consolidated` and records
+  promotion↔source lineage edges keyed by opaque ids; discards persist with stable
+  reason codes, never prose. Write failure releases the lease with attempt++.
+- **Promotion identity.** Anchored on scope + the sorted source-set (not claim
+  wording); a claim-hash column distinguishes re-affirmation from wording drift, and
+  drift records supersession instead of minting an unlinked sibling.
+- **Legacy classification.** Existing `durable:*` records and unattributed sources get
+  an explicit migration disposition (`legacy_unclassified`) and never become
+  recursively eligible by default.
+- **Confidentiality.** As §9: raw identities, memory text, claims, evidence, model
+  output, and exceptions never cross into logs, health, alerts, or the redacted
+  operator reader; only opaque ids, states, counts, and stable failure codes do.
+
+**Architecture gate (owner).** The ledger places lifecycle state in local SQLite while
+knowledge text remains in the remote store — the process-state pattern §9 already
+established. The QR-004 memory-SSOT decision (closed epic #1445) and the ledger
+migration itself remain owner-gated; ledger slices do not land until that ADR is
+ratified on #2569.
+
+### 10.4 Boundaries
+
+#2568 owns run outcome integrity, deadlines/cancellation, durable run receipts, and
+consolidation health surfaces. #2567 owns the upstream fact-export queue and the opaque
+fact-uid convention this design reuses. #2569 owns which records a run may process and
+how derived knowledge remains attributable and idempotent.

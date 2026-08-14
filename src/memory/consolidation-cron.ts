@@ -185,10 +185,24 @@ export async function runConsolidation(
   }
 
   const cutoffMs = startedAtMs - options.lookbackDays * 86_400_000;
-  const recentMemories = search.results.filter((result) => {
+  const withinWindow = search.results.filter((result) => {
     const createdMs = new Date(result.record.createdAt).getTime();
     return Number.isFinite(createdMs) && createdMs >= cutoffMs;
   });
+  // Recursive-eligibility guard (#2569): promotion outputs are upserted as
+  // ordinary records and re-enter the top-K selector on later runs. Both
+  // promotion markers — the durable: id prefix and the consolidated
+  // confidence qualifier — exclude a record from serving as source material.
+  const isConsolidatedOutput = (result: (typeof search.results)[number]): boolean =>
+    result.id.startsWith('durable:')
+    || result.record.id.startsWith('durable:')
+    || result.record.confidenceQualifier === 'consolidated';
+  const recentMemories = withinWindow.filter((result) => !isConsolidatedOutput(result));
+  const consolidatedExcluded = withinWindow.length - recentMemories.length;
+  if (consolidatedExcluded > 0) {
+    counters.skipped += consolidatedExcluded;
+    log.info({ consolidatedExcluded }, 'Excluded prior consolidation outputs from source selection');
+  }
   counters.recordsObserved = recentMemories.length;
 
   if (recentMemories.length === 0) {
