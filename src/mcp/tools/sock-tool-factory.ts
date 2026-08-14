@@ -3,6 +3,7 @@
 // Eliminates per-tool boilerplate: schema parsing, getSock(), null check, call, return.
 
 import { z } from 'zod';
+import type { ExternalEffectDeclaration } from '../external-effect.ts';
 import type { ToolDeclaration, ToolScope, TargetMode, ExtendedBaileysSocket } from '../types.ts';
 
 export interface SockToolConfig<T extends z.ZodRawShape> {
@@ -12,6 +13,8 @@ export interface SockToolConfig<T extends z.ZodRawShape> {
   scope?: ToolScope;
   targetMode?: TargetMode;
   replayPolicy?: 'safe' | 'unsafe' | 'read_only';
+  /** D2 external-effect declaration, copied verbatim onto the built ToolDeclaration. */
+  externalEffect?: ExternalEffectDeclaration;
   /** Given parsed params and a live socket, call the sock method and return the result. */
   call: (parsed: z.infer<z.ZodObject<T>>, sock: ExtendedBaileysSocket) => Promise<unknown>;
 }
@@ -31,6 +34,7 @@ export function makeSockTool<T extends z.ZodRawShape>(
     scope: config.scope ?? 'global',
     targetMode: config.targetMode ?? 'caller-supplied',
     replayPolicy: config.replayPolicy,
+    externalEffect: config.externalEffect,
     handler: async (params) => {
       const parsed = config.schema.parse(params);
       const sock = getSock();

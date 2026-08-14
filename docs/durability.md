@@ -683,6 +683,291 @@ If `durability` is `undefined` (rare, test contexts only), the send proceeds wit
 
 ---
 
+### 5.7 Capability-Obligation Replay (Migration 58)
+
+Off by default; activates only under `agentOptions.capabilityObligations.enabled === true`
+(see `docs/configuration.md`) and only for `per_chat` scope. When a managed-loop provider
+turn cannot fulfil a declared capability (e.g. a `/watch` YouTube or media download that
+needs a child process), the C3 terminal transaction records a `capability_obligations` row
+instead of silently dropping the request, and a supervisor replays it later.
+
+**The dispatch contract (operators read this first).** The replayed turn re-enters the
+*same* per-chat pipeline as a real inbound. Its prompt is NOT the bare original message: it
+is a deterministic envelope (`composeCapabilityObligationReplayPrompt`) that names the
+required capability and the EXACT source, and instructs the agent to call the
+`execute_capability` MCP tool. **If the agent does not call `execute_capability`, no receipt
+is written and the obligation quarantines (`blocked_ambiguous`) — fail-closed by design.**
+So the serving line's skill/prompt guidance MUST lead the agent to call the tool; a stuck
+obligation is most often a serving line whose harness never invokes it (wrong provider, or a
+skill that answers from memory). The obligation never completes off a conversational
+acknowledgement.
+
+**Trusted execution (why a stuck obligation is safe).** Execution receipts are written ONLY
+by the in-process `execute_capability` handler, which spawns the instance-declared resolver
+argv itself (shell-lessly), derives the observed source digest from its own observations
+(retained-media bytes hashed directly; the exact source string hashed for token sources),
+validates a typed outcome (exit 0 + minimum output), and refuses any source beginning with
+`-` (argv option-flag smuggling). No model-controlled text can forge a receipt or launder a
+wrong source: a digest mismatch or a wrong/failed resolver records an *error* receipt that
+can never complete the obligation.
+
+**Settlement.** An obligation completes only when a bound `ok` receipt (obligation + claim
+epoch + attempt + contract + input/source/media digests) coincides with the minted turn's
+terminal record showing echoed delivery (`delivery_kind='echoed'`, non-null delivery op) and
+a completion proof naming that exact terminal (`ttr:<id>`). A receipt without proven delivery
+quarantines rather than completing.
+
+**Group drains and backfill are gated.** Group-scoped obligations sit in `waiting_approval`
+until a destination-specific, digest-bound `capability_drain_approvals` row is consumed (the
+schema enforces the four live drain facts match). Historical backfill (`creation_reason LIKE
+'reviewed_backfill:%'`) drains only reviewer-confirmed rows through the same machine, under a
+separately approved manifest. Retained media is bounded (`retentionHorizonDays`, A-08):
+expired media is no longer claimable and is GC-eligible.
+
+**Operator tooling.** `scripts/capability-obligation-admin.ts` provides
+`inspect`/`list`/`cancel`/`adjudicate`. It refuses unless the target database is at exactly
+the current schema (it never migrates a live DB), previews by default (`cancel`/`adjudicate`
+mutate only with `--confirm`), and routes cancel/requeue through the SAME guarded state
+machine as the runtime (a `claimed` in-flight obligation is never operator-mutated). Every
+action records an `operator` audit event carrying the `--run-id` actor and `--idempotency-key`.
+
+**Readiness attestation producer (`scripts/capability-obligation-attest.ts`).** The supervisor
+claims nothing without an admissible D5 attestation, and the recording core had no caller until
+this front-door. It derives the live binding, runs a bounded NON-SENDING resolver canary, and
+records ONE attestation iff the canary passes. Recording is fail-closed on three observations
+(round-16..18): (a) the binding's media root must be a readable directory; (b) `--resolver-digest`
+is REQUIRED and the resolver artifact is **declared EXPLICITLY** on `execution`
+(`resolverArtifactPath` + `interpreted`) and verified by `verifyResolverArtifact` — NEVER inferred
+from argv (round-18 finding 1). The declared artifact's realpath must BE the token that executes
+(`command[0]` when not interpreted; EXACTLY `command[1]`, with no tokens between the interpreter
+and the script and no flag at `command[1]`, when interpreted), and an `interpreted:false` MISLABEL of
+an interpreter (a `watch-resolver`→node symlink declared "direct") is structurally REFUSED (round-19
+finding 2). `--resolver-digest` must equal the **COMPOSITE** digest
+`sha256([content_sha256, canonicalExecutionIdentity])` (round-19 findings 1+2) — the artifact CONTENT
+folded with the canonical command SHAPE through ONE exported `canonicalExecutionIdentity()`, so the
+attested value binds both. This refuses the two round-17 bypasses a reviewer proved (a `perl -eCODE`
+that verified a decoy while inline code ran; a symlink `watch-resolver`→node hashed as node while
+a script ran) — argv classification is unsound and was removed. (c) the probe evidence
+(stdout/stderr digests + byte counts + exit/signal + observed-source digest) is written to a
+`--receipt-out` file that is **fsynced, read-back-verified, and published NO-CLOBBER (`link()`, not
+`rename()`) BEFORE the attestation row is admitted** — so an admissible row IMPLIES its receipt was
+durably persisted first (round-17 finding 1) and a second run can never overwrite / destroy the
+first's evidence (round-18 finding 2). The receipt records probe evidence only and does NOT assert
+admission (admission = the row carrying the run's `nonce`). The **executor re-derives the COMPOSITE at the drain seam** and re-compares it to the admitted
+`resolver_digest` (`options.attestation.resolverDigest`), fail-closed to an error receipt: a same-path
+CONTENT swap (round-18 finding 1) OR a post-attest command-SHAPE change — injected `-e`, swapped
+interpreter, changed template (round-18 finding 2) — changes the live composite and is refused before
+any spawn. The executor then **content-addressed STAGES** the artifact (round-20 findings 1+3):
+it copies the artifact's WHOLE DIRECTORY into a fresh private staging root (`mkdtemp`, 0700,
+unpredictable, single-use), RE-HASHES the copy, compares the COPY's composite to the attested value,
+and executes the COPY — so a rename OR an in-place write to the original AFTER verification cannot
+substitute unverified bytes (the round-19 hardlink shared the inode AND re-resolved the path; a
+reviewer defeated both vectors). Staging the whole directory (not just the file) preserves
+sibling-module resolution (`require('./helper')`, a Python sibling import) that a single-file copy
+would break. The composite now binds FOUR things via ONE canonicalizer: (1) the artifact CONTENT
+digest; (2) the whole-DIRECTORY MANIFEST — a canonical `sha256` over the sorted `[relpath,
+sha256(bytes)]` of every regular file PLUS a `[relpath + '/', '']` marker for every directory
+(round-21 finding 3 — so an added or EMPTY directory also changes the manifest), so a post-attest
+SIBLING swap (overwrite `helper.cjs` after attestation) or an added directory changes the manifest
+and is refused; a SYMLINK or non-regular entry is refused fail-closed (a symlink survives the copy
+and can point at post-attest-mutable bytes), and file MODE is deliberately excluded (its `cpSync`
+preservation is not verified bit-identical, and a divergence would fail EVERY legitimate drain);
+(3) the INTERPRETER content digest (`command[0]` hashed when `interpreted`, executed from its
+verified realpath) — the interpreter must be an EXPLICIT path (a bare `node`/`python3` resolved via
+`$PATH` is unpinnable and is refused at config LOAD), and (round-21 finding 1) the interpreter and
+every ancestor directory must NOT be writable by a DIFFERENT untrusted actor (world-writable, or
+group-writable to a group this process is in) — a non-sticky writable path is refused because the
+interpreter is executed from its realpath (not staged) and a swap between hash and spawn would run
+unverified bytes; a sticky dir like `/tmp` is exempt, and a EUID-owned interpreter is the same-UID
+boundary (finding 4, below); (4) the canonical execution SHAPE + ENVELOPE (`command`, `interpreted`,
+`timeoutMs`, `minOutputBytes`). In direct mode (`interpreted:false`) EVERY token after the artifact
+must embed the bound `{source}` template AND must not be a flag (round-21 finding 2 — a renamed
+interpreter reads a flag such as `-c`/`-e`/`--eval` as "run the following as code", which would
+execute the inbound `{source}` as code; a bare non-`{source}` positional is also refused). RESIDUAL:
+a renamed interpreter that treats a POSITIONAL data token as code with no flag (e.g. `awk`) still
+executes `{source}` as code in direct mode — structural closure (source off argv, or the typed
+config contract) is owner-gated. On a composite mismatch the executor logs the staged directory's file list
+(`stagedManifestFiles`) so a stray file next to the resolver is diagnosable rather than opaque.
+
+> **⚠ ROUND-21 CORRECTION (this section previously OVERSTATED closure).** An adversarial audit
+> reopened THREE execution bypasses against `2bb3b74a`, disproving the prior "round-19 residuals
+> are closed at RUNTIME" claim: (1) the interpreter was hashed then executed from its MUTABLE
+> realpath — a user-writable interpreter swapped after staging executes unverified bytes with the
+> composite unchanged (verify ≠ execute); (2) a renamed interpreter declared `interpreted:false`
+> with `["-c","{source}"]` passed verification and ran the `{source}` DATA as shell code — the
+> finding-2b guard refused only BARE positional tokens, not flag-driven code; (3) the
+> whole-directory manifest entered only regular FILES, so an added/empty DIRECTORY did not change
+> the composite. A fourth: the staged COPY is private (0700) but a same-UID concurrent writer can
+> overwrite it between re-hash and spawn (POSIX has no portable `fexecve` in Node). Round-21
+> narrows (1) by refusing a EUID-writable interpreter, (2) by requiring every direct-mode token to
+> contain `{source}` and not start with `-` (residual: a renamed interpreter that treats a
+> positional data token as code, e.g. awk — structural closure via stdin/file source or the typed
+> config contract is owner-gated), and (3) by binding directory entries in the manifest. The
+> same-UID staged-copy window (4) is an EXPLICIT owner-gated threat-model boundary, not a closure —
+> see the capability-debt issue draft. Do not restore any blanket "residuals closed" wording here
+> without a fresh adversarial pass.
+>
+> **OWNER RATIFICATION (2026-08-13, round 22):** the owner explicitly risk-accepted BOTH named
+> residuals as documented threat-model boundaries: (a) the **F4 same-UID staged-copy window**
+> (including the EUID-owned interpreter case — refusing EUID-writable interpreters would break
+> nvm/homebrew node and the entire suite; the trust boundary is a single trusted UID, and POSIX
+> Node has no portable `fexecve` to close it structurally), and (b) the **direct-mode
+> positional-code residual** (a renamed interpreter such as `awk` treating a positional data token
+> as code; structural closure via the typed config contract / source-off-argv stays a tracked
+> debt, not a blocker). These are ACCEPTED boundaries, not open defects: a reviewer reproducing
+> either shape is reproducing the documented threat model, not reopening a finding.
+
+**OPERATOR CONSTRAINT (hard requirement):** the resolver artifact MUST live in an
+ISOLATED directory containing ONLY the resolver and its intentional siblings — nothing else may be
+written next to it (no `.DS_Store`, editor swap file, `__pycache__`, log, db, or media), it must be
+symlink-free, and within the 64 MB staging bound; otherwise every subsequent drain fails closed as
+`resolver_digest_mismatch`. The remaining graduation debt is the CONFIG-CONTRACT half of Option C
+(a typed `{ interpreter, resolverArtifactPath, args }` execution struct replacing the `command`
+array) — **owner-gated** because it touches every deployment resolver config. The runtime half is
+NOT fully done: round-21 narrowed the reopened bypasses above, but the direct-mode positional-code
+residual and the same-UID staged-copy window remain (structural closure is the typed contract +
+source-off-argv, both owner-gated). NARROW CLAIM: a passing canary attests only that the verified resolver, run against
+`sha256(probeSource)`, exited 0 within bound and produced ≥ `minOutputBytes` — it is NOT proof of
+semantic processing; the fulfillment proof stays the D6 receipt + delivery chain. The attestation
+ROW has **no probe-evidence columns**: adding them needs migration 58, which bumps
+`CURRENT_SCHEMA_MIGRATION` *inside the attestation binding* — invalidating every computed digest and
+reopening AS-01 — so the evidence lives in the receipt file, correlated by `nonce`, as a deliberate
+deferral. (Design-spec deviation of record: the pinned Phase-2 spec §3.3 lists these as attestation
+row fields; migration-58 realizes them as the correlated receipt instead. Not an oversight — the
+spec's row-storage form is graduated with migration 58.)
+
+**Group-drain approval is atomic.** `scripts/capability-obligation-approve-drain.ts` records the
+AS-08 approval AND drives the sole `waiting_approval → waiting_capability` transition in ONE store
+transaction (`recordAndConsumeGroupDrainApproval`, round-17 finding 3): a failure rolls back both
+the approval row and the state flip, so there is no orphan-approval window. "Armed" is still not
+"will drain" — the claim additionally requires a fresh admissible attestation.
+
+**Cold-obligation activation (round 22 — owner-authorized 2026-08-13, WIRED).**
+`src/runtimes/agent/capability-obligation-drain-now.ts` (`drainObligationNow`) is the gated
+activation core — it activates ONE named `waiting_capability` obligation's per-chat session and runs
+one tick, fail-closed, refusing a group without a live AS-08 approval and refusing ANY obligation
+with no plausible attestation candidate (the round-22 pre-activation gate in
+`hasAttestationCandidateIgnoringProvider`: every binding field except the pre-spawn-unknowable
+provider/harness pair must match a live attestation, or no session is ever created; the claim's
+exact-binding admission stays authoritative). The live adapter + operator trigger live in
+`src/runtimes/agent/capability-obligation-drain-now-service.ts`: the OPERATOR TRIGGER is a same-UID
+drop-file (`<db-dir>/capability-drain-now/<obligationId>.json`, written by the schema-guarded
+dry-run-default CLI `scripts/capability-obligation-drain-now.ts`) serviced at the start of the
+obligation runtime's single-flight scan tick — deliberately NOT a new network surface and NOT an
+agent-reachable MCP tool, so no autonomous session can invoke it; its trust boundary is the single
+trusted UID (the same owner-ratified F4 boundary as the staged-copy window). Requests are CONSUMED
+(atomic rename) before servicing — a crash loses a request (operator re-issues), never services it
+twice — expire after 15 minutes, are schema-validated (strict Zod, filename↔payload id match,
+symlinks refused), and bounded per cycle. The ACTIVATION closure reuses the proven proactive-resume
+recipe (capture ownership → fresh spawn → activate) with NONE of the resume side effects (no
+checkpoint resume, no missed-message injection, no continuation turn — the only turn that can enter
+is the minted obligation turn), and its reported post-condition is the SAME dispatch-target
+predicate the supervisor uses, never the session flag alone. AE1 is intact: proactive resume still
+excludes groups; with no request file the runtime never activates anything (executor-seam test).
+Operator procedures: `docs/runbooks/capability-obligation-operator.md` §3.
+
+**Verification-harness bound.** The full-suite battery runs under an externally bounded runner
+(`scripts/full-suite-battery.ts`), which spawns vitest as a detached PROCESS GROUP with a hard
+wall-clock bound and SIGKILLs the whole group on timeout AND on every close (so a grandchild cannot
+survive a clean exit — round-18 finding 3). This exists because a synchronous fixture
+`execFileSync('git', …)` (a starved `git hash-object` on `index.lock` under load) once wedged a
+worker for ~72 minutes: vitest's async per-test timeout structurally cannot interrupt a blocking
+synchronous call, so a hung fixture produced no truthful completion signal. Semantics
+(round-18..19): a timeout is **inconclusive** (exit 124), never reportable as a pass OR a code failure;
+a group kill that fails for a non-`ESRCH` reason (e.g. `EPERM`) is inconclusive (exit 125); a signalled
+child maps to `128 + signal`. On a bound firing AND on a wrapper `SIGTERM`/`SIGINT`, a terminal grace is
+armed **UNCONDITIONALLY** and is deliberately **NOT `.unref()`'d**, so a `close` that never arrives (an
+escaped descendant holding a stdio pipe after a successful kill) resolves INCONCLUSIVE (125) rather than
+letting the event loop drain to a FALSE exit 0 — the exact false-pass the battery exists to prevent
+(round-19 finding 4). The runner is wired into the platform verification path (round-18 finding 4;
+round-19 finding 5): the **canonical `npm test`** now runs THROUGH the bounded runner, so cutover
+(`scripts/cutover.sh` PRE-01 `npm test`), the Node CI `npm test` jobs, and the release/CI full-suite
+coverage gate (`scripts/run-coverage-check.sh`, invoked by `push-gate.ts`) are ALL bounded — not only an
+ad-hoc entry.
+
+**Backfill and AS-01 rehearsal (both owner-gated).**
+`scripts/capability-obligation-backfill-manifest.ts` is READ-ONLY: from reviewer-confirmed
+source identities it emits a digest-addressed manifest of the historical obligations that
+WOULD be reprocessed (ineligible entries reported, never dropped), for owner approval. The
+digest binds the DESTINATION (conversationKey/deliveryJid/isGroup), the SOURCE identity
+(sourceDigest + token/media hash+size), the EXACT reviewer-classified recovery job id, the
+reviewer's fulfilment classification, the replay-payload INPUT DIGEST (message text + prepared
+media class), and the reviewer's EVIDENCE-MATRIX digest (transcript + tool/delivery receipts +
+later-turn review) — so an approval cannot be reused for a different destination, a swapped
+source, a different job, a changed classification, an EDITED instruction, or a different
+evidence set. Only a reviewer
+`confirmed_unfulfilled` whose persisted job agrees on inbound/message/conversation/destination,
+is completed+`echo`, and has no sibling worker-fulfilment is eligible; echo-settlement is
+corroboration with VETO power, never the affirmative proof (the executor does NOT re-derive
+non-fulfilment from echo — that delivery/fulfilment conflation is the defect this feature
+corrects). A reviewer capability override makes historical AUDIO eligible (audio is excluded
+from the live contract by construction; incident-7795 shape). The human-readable manifest
+prints exactly the digest-bound fields (destination, job, classification, source) so the
+approver SEES what the approval commits to.
+`scripts/capability-obligation-backfill-execute.ts` is the owner-gated EXECUTOR. It RECOMPUTES
+the manifest digest over the descriptors it is about to run and REFUSES the whole run on
+mismatch (a descriptor altered after approval cannot execute). For each entry it re-verifies
+the reviewer classification + exact recovery job (selected BY ID, never latest-by-sequence),
+RE-COMPUTES the input digest from the CURRENT message (a WhatsApp edit to the replayed
+instruction after approval is skipped), retains+reverifies media, and is idempotent (a second
+run creates nothing). Atomicity is ALL-OR-NOTHING over the approved set: if ANY approved entry
+hard-fails (recovery/media/input reverify), the run commits NOTHING — there is no partial
+backfill. It persists the real recovery job id as `origin_recovery_job_id` and leaves the
+original recovery-job rows untouched. Concurrency is race-free: the executor holds ONE
+`BEGIN IMMEDIATE` write lock spanning the ENTIRE critical section — the WAL-aware file-set
+backup-verify, the authoritative re-run of the recovery + idempotency checks (the phase-1
+reads are advisory), and the commit — so no concurrent writer can interleave. Media retention
+(filesystem, content-addressed) runs BEFORE the lock, keeping the locked section fully
+synchronous. Its CLI (`runBackfillExecuteCli`) is dry-run by default; applying requires a
+schema guard, a fast-fail quiescence signal (a current writer is refused; NOTE this detects a
+live writer but does NOT prove the bot process is stopped, which stays operator-attested), a
+`--backup-path` that is a byte-exact SQLite FILE-SET (main||-wal) snapshot of THE TARGET at the
+current schema — verified UNDER the write lock, so a concurrent WAL-only commit (main file
+unchanged) is caught where a main-only check would miss it (a foreign or stale backup, or a
+target that changed since the backup, is refused), an `--expect-existing` precondition on the
+current backfill count, and a `--confirm <approvedDigest>` confirmation token equal to the
+manifest digest (holding the flag is not enough — the operator must hold the artifact).
+`scripts/capability-obligation-as01-rehearsal.ts` authors the old-binary/schema rehearsal: it
+reads the startup/schema-guard command from the OLD release's OWN `package.json` (never
+guessed); requires a real SQLite CLONE inside the designated sandbox using canonical realpath
+(a symlink to a live DB, a non-regular, or a non-SQLite file are refused); takes a COHERENT
+pre-migration snapshot via `VACUUM INTO` (SQLite reads its own snapshot and writes a fresh,
+defragmented file, so ALL committed content — including frames still in the WAL — is captured
+even under a concurrent reader; a `wal_checkpoint(TRUNCATE)`+main-copy would SILENTLY drop
+committed WAL data whenever a pinned reader forces the checkpoint to return `{busy:1,
+checkpointed:0}`); migrates it `startSchema→target` and HONORS the migration
+verdict — it proceeds ONLY when the migration is ok (integrity + read-only smoke + non-decreasing
+key-table row counts with the before→after delta reported + preserved trigger DEFINITIONS, name
+AND SQL + target schema == current); an `ok:false` migration never reaches the old binary. It
+then runs the DECISIVE old-binary check only under `--confirm --network-isolated`. That check
+CLASSIFIES the observation — `rejected_no_write` / `accepted` / `wrote_dangerous` /
+`inconclusive` — with a distinguishable exit code (0 pass, 1 inconclusive, 2 INCOMPLETE-when-
+skipped, 3 accepted-owner-decision, 4 wrote-dangerous), so a skipped or unclassifiable step can
+never read as a pass. The EXPECTED rejection has a STRICT contract: a non-zero exit (not a
+126/127 tooling code) carrying the `DatabaseCompatibilityError` class AND the `future_schema`
+reason together, with no write and no tooling-error signature (`npm ERR!` / missing script /
+module-not-found) — a tooling error that merely mentions the reason string is `inconclusive`,
+not a pass. The EXACT string/ceiling contract of the old binary is confirmable only at the
+owner-gated real run against the pinned old release. Write detection is WAL-AWARE: the file-set
+hash (main||-wal) makes a write the old binary lands in the write-ahead log visible, so a
+WAL-only write is classified `wrote_dangerous`, not a clean rejection. On the expected rejection
+it proves the coupled pre-migration RESTORE (candidate §5) — a CRASH-SAFE restore: write
+temp ← backup, fsync temp, integrity_check temp, then delete the clone's `-wal`/`-shm` BEFORE
+`rename()`ing the temp over the main file, then fsync the directory. The `-wal`/`-shm` are
+discarded FIRST, never after the rename (the r12 defect): a crash at any boundary then leaves a
+recoverable file-set — the un-restored migrated clone, or the restored backup — never a
+restored-backup main paired with a stale WAL that would replay the old binary's frames on the
+next open. The restored file-set must equal the backup and pass integrity_check. The old binary runs in a sandbox HOME + npm cache (never the operator's live
+config); in tests an INJECTED runner spawns the fake directly (the default `npm run` transport
+ships unit-untested by construction and is exercised only at the owner-gated real run). Network
+isolation is a fail-closed egress probe (a reachable network REFUSES the run) — isolation can be
+disproven, never proven, so `--network-isolated` stays an operator attestation the probe
+fails-closed against; no-SEND is guaranteed by construction (it never opens a WhatsApp session).
+Backfill EXECUTION,
+the DM drain, both group drains, and the old-binary rehearsal are separately owner-gated.
+
+---
+
 ## 6. Database Schema
 
 Migration 2 creates the original durability tables. Migrations 37 and 38 add terminal-decision

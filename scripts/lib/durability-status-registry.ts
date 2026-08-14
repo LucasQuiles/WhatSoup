@@ -335,6 +335,44 @@ export const REGISTRY: DurabilityStatusEntry[] = [
     terminalFailureValues: ['partial', 'failed', 'cancelled', 'abandoned'],
     writerSites: ['src/memory/consolidation-run-store.ts'],
   },
+  {
+    table: 'capability_obligations',
+    statusColumn: 'state',
+    vocabulary: [
+      'waiting_capability',
+      'waiting_approval',
+      'claimed',
+      'completed',
+      'exhausted',
+      'blocked_media',
+      'blocked_ambiguous',
+      'cancelled',
+    ],
+    vocabularySource: 'sql-check',
+    terminalFailureValues: ['exhausted', 'blocked_media', 'blocked_ambiguous'],
+    // requeueObligation exhaustion CASE, blockObligation/blockWaitingObligation,
+    // and reclaimExpiredClaims quarantine all write the bad-news states.
+    writerSites: ['src/core/capability-obligation-store.ts'],
+  },
+  {
+    table: 'capability_execution_receipts',
+    statusColumn: 'result_status',
+    vocabulary: ['ok', 'error'],
+    vocabularySource: 'sql-check',
+    terminalFailureValues: ['error'],
+    // recordExecutionReceipt persists the typed provider result, including 'error'.
+    writerSites: ['src/core/capability-obligation-store.ts'],
+  },
+  {
+    table: 'capability_attestations',
+    statusColumn: 'canary_result',
+    vocabulary: ['pass', 'fail'],
+    vocabularySource: 'sql-check',
+    terminalFailureValues: ['fail'],
+    // recordCapabilityAttestation persists the canary outcome verbatim; a 'fail'
+    // row is the durable bad-news record that blocks admission (D5).
+    writerSites: ['src/core/capability-attestation.ts'],
+  },
 ];
 
 /**
@@ -396,6 +434,8 @@ export const NON_STATUS_TABLES: Set<string> = new Set([
   'bead_events',
   'bead_triggers',
   'blocklist',
+  'capability_drain_approvals',
+  'capability_obligation_events',
   'chat_aliases',
   'chats',
   'contacts',

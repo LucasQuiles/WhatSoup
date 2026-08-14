@@ -8,6 +8,7 @@ import type { Database } from '../../core/database.ts';
 import { createChildLogger } from '../../logger.ts';
 import { validateBase64Image } from '../../core/base64.ts';
 import { type SockToolConfig, registerSockTools } from './sock-tool-factory.ts';
+import { EXTERNAL_EFFECT_CONTRACT_VERSION } from '../external-effect.ts';
 
 const log = createChildLogger('profile');
 
@@ -26,6 +27,7 @@ const profileConfigs: SockToolConfig<any>[] = [
       type: z.enum(['preview', 'image']).optional(),
     }),
     replayPolicy: 'read_only',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'none' },
     call: async ({ jid, type = 'preview' }, sock) => {
       const url = await sock.profilePictureUrl(jid, type);
       return { jid, url: url ?? null };
@@ -38,6 +40,7 @@ const profileConfigs: SockToolConfig<any>[] = [
       jid: z.string(),
     }),
     replayPolicy: 'read_only',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'none' },
     call: async ({ jid }, sock) => {
       const results = await sock.fetchStatus(jid);
       // fetchStatus returns USyncQueryResultList[] | undefined
@@ -59,6 +62,7 @@ const profileConfigs: SockToolConfig<any>[] = [
       phone_numbers: z.array(z.string()),
     }),
     replayPolicy: 'read_only',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'none' },
     call: async ({ phone_numbers }, sock) => {
       const results = await sock.onWhatsApp(...phone_numbers);
       return { results: results ?? [] };
@@ -72,6 +76,7 @@ const profileConfigs: SockToolConfig<any>[] = [
       action: z.enum(['block', 'unblock']),
     }),
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ jid, action }, sock) => {
       await sock.updateBlockStatus(jid, action);
       return { success: true, jid, action };
@@ -85,6 +90,7 @@ const profileConfigs: SockToolConfig<any>[] = [
       content: z.string().describe('Base64-encoded image content'),
     }),
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ jid, content }, sock) => {
       const cleanContent = validateBase64Image(content);
       const buffer = Buffer.from(cleanContent, 'base64');
@@ -99,6 +105,7 @@ const profileConfigs: SockToolConfig<any>[] = [
       jid: z.string(),
     }),
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ jid }, sock) => {
       await sock.removeProfilePicture(jid);
       return { success: true, jid };
@@ -111,6 +118,7 @@ const profileConfigs: SockToolConfig<any>[] = [
       status: z.string().describe('New status text (about/bio)'),
     }),
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ status }, sock) => {
       await sock.updateProfileStatus(status);
       return { success: true, status };
@@ -123,6 +131,7 @@ const profileConfigs: SockToolConfig<any>[] = [
       name: z.string().describe('New display name'),
     }),
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ name }, sock) => {
       await sock.updateProfileName(name);
       return { success: true, name };
@@ -170,6 +179,7 @@ const profileConfigs: SockToolConfig<any>[] = [
         }),
     }),
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ setting, value }, sock) => {
       // Per-setting value validation (strict enum settings only).
       // link_previews and default_disappearing accept free-form values and are not validated here.
@@ -214,6 +224,7 @@ const profileConfigs: SockToolConfig<any>[] = [
     description: 'Fetch all current WhatsApp privacy settings (global).',
     schema: z.object({}),
     replayPolicy: 'read_only',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'none' },
     call: async (_parsed, sock) => {
       const settings = await sock.fetchPrivacySettings();
       return { settings: settings ?? null };
@@ -230,6 +241,7 @@ const profileConfigs: SockToolConfig<any>[] = [
       phone: z.string().optional(),
     }),
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ jid, firstName, lastName, company, phone }, sock) => {
       const contactAction: Record<string, string> = {};
       if (firstName !== undefined) contactAction.firstName = firstName;
@@ -248,6 +260,7 @@ const profileConfigs: SockToolConfig<any>[] = [
       jid: z.string(),
     }),
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ jid }, sock) => {
       await sock.removeContact(jid);
       return { success: true, jid };
@@ -260,6 +273,7 @@ const profileConfigs: SockToolConfig<any>[] = [
       jids: z.array(z.string()).min(1).describe('One or more JIDs to query disappearing message duration for'),
     }),
     replayPolicy: 'read_only',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'none' },
     call: async ({ jids }, sock) => {
       const result = await sock.fetchDisappearingDuration(...jids);
       return { result: result ?? null };
@@ -279,6 +293,7 @@ function makeGetBlocklist(getSock: () => ExtendedBaileysSocket | null, db: Datab
     scope: 'global',
     targetMode: 'caller-supplied',
     replayPolicy: 'read_only',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'none' },
     handler: async (_params) => {
       const sock = getSock();
 

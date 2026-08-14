@@ -119,6 +119,18 @@ export interface ToolDeclaration {
    * of the design).
    */
   group?: string;
+  /**
+   * D2 (capability-obligation replay) — explicit closed external-effect
+   * declaration: does an ACCEPTED invocation of this tool observably mutate
+   * anything outside the process (WhatsApp, DB/memory stores, third parties)?
+   * `kind: 'none'` = pure read; `kind: 'external'` = may mutate (fail-closed
+   * default when authoring). This is independent of `replayPolicy` (recovery
+   * semantics) and MUST NOT be derived from it. Coverage is CI-enforced with no
+   * grandfather list (tests/mcp/external-effect-coverage.test.ts); an
+   * unclassified tool folds to `unknown`, which blocks automatic obligation
+   * creation. See src/mcp/external-effect.ts.
+   */
+  externalEffect?: import('./external-effect.ts').ExternalEffectDeclaration;
   handler: (params: Record<string, unknown>, session: SessionContext) => Promise<unknown>;
 }
 

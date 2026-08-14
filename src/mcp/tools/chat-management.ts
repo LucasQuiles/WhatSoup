@@ -18,6 +18,7 @@ import { type SockToolConfig, registerSockTools } from './sock-tool-factory.ts';
 import { config } from '../../config.ts';
 import { SqliteIdentityStore } from '../../core/outbound-identity/store.ts';
 import { applyOutboundIdentityGuard } from '../../core/outbound-identity/guard.ts';
+import { EXTERNAL_EFFECT_CONTRACT_VERSION } from '../external-effect.ts';
 
 const log = createChildLogger('chat-management');
 const SQLITE_READ_LIMIT_MAX = 1000;
@@ -44,6 +45,7 @@ function makeListMessages(db: Database): ToolDeclaration {
     scope: 'chat',
     targetMode: 'caller-supplied',
     replayPolicy: 'read_only',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'none' },
     handler: async (params, session: SessionContext) => {
       const { conversation_key: caller_key, limit = 50, before_pk } = ListMessagesSchema.parse(params);
       const conversation_key = resolveConversationKey(session, caller_key);
@@ -98,6 +100,7 @@ function makeGetMessageContext(db: Database): ToolDeclaration {
     scope: 'chat',
     targetMode: 'caller-supplied',
     replayPolicy: 'read_only',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'none' },
     handler: async (params, session: SessionContext) => {
       const { message_id, conversation_key: caller_key, context_size = 5 } = GetMessageContextSchema.parse(params);
       const conversation_key = resolveConversationKey(session, caller_key);
@@ -189,6 +192,7 @@ function makeListChats(db: Database): ToolDeclaration {
     scope: 'global',
     targetMode: 'caller-supplied',
     replayPolicy: 'read_only',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'none' },
     handler: async (params) => {
       const {
         limit = 100,
@@ -383,6 +387,7 @@ function makeGetChat(db: Database): ToolDeclaration {
     scope: 'global',
     targetMode: 'caller-supplied',
     replayPolicy: 'read_only',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'none' },
     handler: async (params) => {
       const { conversation_key: rawKey } = GetChatSchema.parse(params);
       // Normalize raw JID (e.g. "…@g.us") to DB key format ("…_at_g.us")
@@ -464,6 +469,7 @@ function makeForwardMessage(db: Database, getSock: () => ExtendedBaileysSocket |
     scope: 'global',
     targetMode: 'caller-supplied',
     replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     handler: async (params, session) => {
       const { message_id, to_jid } = ForwardMessageSchema.parse(params);
 
@@ -546,6 +552,7 @@ const chatManagementSockConfigs: SockToolConfig<any>[] = [
       archive: z.boolean(),
     }),
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ jid, archive }, sock) => {
       await sock.chatModify({ archive, lastMessages: [] }, jid);
       return { success: true, jid, archive };
@@ -559,6 +566,7 @@ const chatManagementSockConfigs: SockToolConfig<any>[] = [
       pin: z.boolean(),
     }),
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ jid, pin }, sock) => {
       await sock.chatModify({ pin }, jid);
       return { success: true, jid, pin };
@@ -574,6 +582,7 @@ const chatManagementSockConfigs: SockToolConfig<any>[] = [
       until: z.number().optional(),
     }),
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ jid, mute, until }, sock) => {
       if (mute) {
         const muteEndTime = until ?? (nowUnixSec() + 8 * 3600); // default 8h
@@ -595,6 +604,7 @@ const chatManagementSockConfigs: SockToolConfig<any>[] = [
       from_me: z.boolean().optional(),
     }),
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ jid, message_ids, from_me = false }, sock) => {
       const keys = message_ids.map((id: string) => ({
         remoteJid: jid,
@@ -616,6 +626,7 @@ const chatManagementSockConfigs: SockToolConfig<any>[] = [
       from_me: z.boolean().optional(),
     }),
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ jid, message_ids, star, from_me = false }, sock) => {
       const messages = message_ids.map((id: string) => ({ id, fromMe: from_me }));
       await sock.star(jid, messages, star);

@@ -12,6 +12,7 @@ import { config } from '../../config.ts';
 import { createChildLogger } from '../../logger.ts';
 import { SqliteIdentityStore } from '../../core/outbound-identity/store.ts';
 import { applyOutboundIdentityGuard } from '../../core/outbound-identity/guard.ts';
+import { EXTERNAL_EFFECT_CONTRACT_VERSION } from '../external-effect.ts';
 
 const log = createChildLogger('advanced-tools');
 
@@ -63,6 +64,7 @@ const advancedConfigs: SockToolConfig<any>[] = [
       timeoutMs: z.number().optional().describe('Optional timeout in milliseconds'),
     }),
     replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ type, event, timeoutMs }, sock) => {
       return sock.createCallLink(type, event, timeoutMs);
     },
@@ -82,6 +84,7 @@ const advancedConfigs: SockToolConfig<any>[] = [
       customCode: z.string().optional().describe('Optional custom pairing code'),
     }),
     replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ phoneNumber, customCode }, sock) => {
       const code = await sock.requestPairingCode(phoneNumber, customCode);
       return { pairingCode: code };
@@ -92,6 +95,7 @@ const advancedConfigs: SockToolConfig<any>[] = [
     description: 'Retrieve the list of available WhatsApp bots (global).',
     schema: z.object({}),
     replayPolicy: 'read_only',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'none' },
     call: async (_parsed, sock) => {
       const bots = await sock.getBotListV2();
       return { bots };
@@ -111,6 +115,7 @@ const advancedConfigs: SockToolConfig<any>[] = [
     scope: 'chat',
     targetMode: 'injected',
     replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ chatJid, displayText, id, type }, sock) => {
       await sock.sendMessage(chatJid, {
         buttonReply: { displayText, id, type },
@@ -130,6 +135,7 @@ const advancedConfigs: SockToolConfig<any>[] = [
     scope: 'chat',
     targetMode: 'injected',
     replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ chatJid, title, listType, selectedRowId }, sock) => {
       await sock.sendMessage(chatJid, {
         listReply: {
@@ -150,6 +156,7 @@ const advancedConfigs: SockToolConfig<any>[] = [
     scope: 'chat',
     targetMode: 'injected',
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ chatJid }, sock) => {
       await sock.sendMessage(chatJid, { limitSharing: true } as any);
       return { sent: true, chatJid };
@@ -165,6 +172,7 @@ const advancedConfigs: SockToolConfig<any>[] = [
       msg: z.string().optional().describe('Optional logout message'),
     }),
     replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ msg }, sock) => {
       await sock.logout(msg);
       return { loggedOut: true };
@@ -182,6 +190,7 @@ const advancedConfigs: SockToolConfig<any>[] = [
       isInitialSync: z.boolean().describe('Whether this is an initial sync (true) or incremental (false)'),
     }),
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ collections, isInitialSync }, sock) => {
       if (!config.advanced.enableResync) {
         throw new Error('resync_app_state is disabled. Set advanced.enableResync: true in instance config to enable.');
@@ -218,6 +227,7 @@ function makeSharePhoneNumber(getSock: () => ExtendedBaileysSocket | null, db?: 
     scope: 'global',
     targetMode: 'caller-supplied',
     replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     handler: async (params) => {
       const { jid } = z.object({ jid: z.string() }).parse(params);
       const sock = getSock();
@@ -237,6 +247,7 @@ function makeRequestPhoneNumber(getSock: () => ExtendedBaileysSocket | null, db?
     scope: 'global',
     targetMode: 'caller-supplied',
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     handler: async (params) => {
       const { jid } = z.object({ jid: z.string() }).parse(params);
       const sock = getSock();
@@ -261,6 +272,7 @@ function makeSendProductMessage(getSock: () => ExtendedBaileysSocket | null, db?
     scope: 'global',
     targetMode: 'caller-supplied',
     replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     handler: async (params) => {
       const { jid, product } = SendProductSchema.parse(params);
       const sock = getSock();
@@ -296,6 +308,7 @@ function makeRelayMessage(
     scope: 'global',
     targetMode: 'caller-supplied',
     replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     handler: async (params) => {
       const { jid, proto, opts } = RelayMessageSchema.parse(params);
       const sock = getSock();
@@ -355,6 +368,7 @@ function makeResetEnrichmentErrors(db: Database): ToolDeclaration {
     scope: 'global',
     targetMode: 'caller-supplied',
     replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     handler: async (params) => {
       const { pks } = ResetEnrichmentErrorsSchema.parse(params);
       const count = resetEnrichmentErrors(db, pks);

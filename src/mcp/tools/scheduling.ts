@@ -6,6 +6,7 @@ import { conversationBoundKey, type SessionContext } from '../types.ts';
 import { parseCron, nextCronRun } from '../../core/cron.ts';
 import { nowUnixSec } from '../../core/substrate/time.ts';
 import { enqueueScheduledMessage, isValidIanaTimeZone } from '../../core/schedule-enqueue.ts';
+import { EXTERNAL_EFFECT_CONTRACT_VERSION } from '../external-effect.ts';
 
 // #1067: validate a recurrence timezone is a real IANA zone before storing it.
 // `isValidIanaTimeZone` is the single source in schedule-enqueue.ts, shared with the
@@ -193,6 +194,7 @@ export function registerSchedulingTools(registry: ToolRegistry, deps: Scheduling
     scope: 'chat',
     targetMode: 'injected',
     replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     schema: ScheduleMessageSchema,
     handler: async (params, session) => {
       const parsed = ScheduleMessageSchema.parse(params);
@@ -206,6 +208,7 @@ export function registerSchedulingTools(registry: ToolRegistry, deps: Scheduling
     scope: 'chat',
     targetMode: 'caller-supplied',
     replayPolicy: 'read_only',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'none' },
     schema: ListScheduledSchema,
     handler: async (params, session) => {
       return listScheduledMessages(db, params, session);
@@ -218,6 +221,7 @@ export function registerSchedulingTools(registry: ToolRegistry, deps: Scheduling
     scope: 'chat',
     targetMode: 'caller-supplied',
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     schema: CancelScheduledSchema,
     handler: async (params, session) => {
       const { id } = CancelScheduledSchema.parse(params);
@@ -248,6 +252,7 @@ export function registerSchedulingTools(registry: ToolRegistry, deps: Scheduling
     scope: 'chat',
     targetMode: 'caller-supplied',
     replayPolicy: 'read_only',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'none' },
     schema: GetScheduledSchema,
     handler: async (params, session) => {
       const { id } = GetScheduledSchema.parse(params);
@@ -264,6 +269,7 @@ export function registerSchedulingTools(registry: ToolRegistry, deps: Scheduling
     scope: 'chat',
     targetMode: 'caller-supplied',
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     schema: UpdateScheduledSchema,
     handler: async (params, session) => {
       const { id, scheduled_at, text, recurrence } = UpdateScheduledSchema.parse(params);

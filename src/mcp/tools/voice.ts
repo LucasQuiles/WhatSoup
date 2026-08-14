@@ -10,6 +10,7 @@ import { synthesizeSpeech } from '../../runtimes/chat/providers/elevenlabs.ts';
 import { writeTempFile } from '../../core/media-download.ts';
 import { createChildLogger } from '../../logger.ts';
 import { errorMessage } from '../../lib/error-message.ts';
+import { EXTERNAL_EFFECT_CONTRACT_VERSION } from '../external-effect.ts';
 
 const log = createChildLogger('mcp:voice');
 
@@ -43,6 +44,7 @@ export function registerVoiceTools(
     scope: 'chat',
     targetMode: 'injected',
     replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     schema: z.object({
       text: z.string().describe('Text to synthesize and send as a voice note'),
       voice_id: z.string().optional().describe('ElevenLabs voice ID (defaults to instance config)'),

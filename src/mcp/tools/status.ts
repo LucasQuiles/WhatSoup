@@ -8,6 +8,7 @@ import { createChildLogger } from '../../logger.ts';
 import { isBaileysEncryptedTmpEnoent } from '../../transport/baileys-media-errors.ts';
 import type { ToolRegistry } from '../registry.ts';
 import { isPathWithinAllowedRoot, type SessionContext, type ToolDeclaration, type ExtendedBaileysSocket } from '../types.ts';
+import { EXTERNAL_EFFECT_CONTRACT_VERSION } from '../external-effect.ts';
 
 const STATUS_BROADCAST_JID = 'status@broadcast';
 const MAX_STATUS_FILE_SIZE_BYTES = 50 * 1024 * 1024;
@@ -156,6 +157,7 @@ function makePostStatus(deps: StatusDeps): ToolDeclaration {
     scope: 'global',
     targetMode: 'caller-supplied',
     replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     handler: async (params, session) => {
       const { text, filePath, caption, backgroundColor, font } = PostStatusSchema.parse(params);
       if (!text && !filePath) {
@@ -216,6 +218,7 @@ function makeListStatuses(deps: StatusDeps): ToolDeclaration {
     scope: 'global',
     targetMode: 'caller-supplied',
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     handler: async (params) => {
       const { limit = 50, sender_jid, mark_read = false } = ListStatusesSchema.parse(params);
 

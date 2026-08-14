@@ -256,6 +256,9 @@ export class ToolRegistry {
   };
   private firstDurabilityWriteLossAt: number | null = null;
   private lastDurabilityWriteLossAt: number | null = null;
+  private turnCorrelationResolver:
+    | ((conversationKey: string) => { logicalTurnId: string; inboundSeq: number | null } | null)
+    | null = null;
   // QR-017 / #1976: transient group tag applied by withModule() to any tool
   // registered inside the bracket. Set only for the synchronous span of a
   // withModule() call, so there is no cross-registration bleed. Pure taxonomy
@@ -392,6 +395,28 @@ export class ToolRegistry {
     }
   }
 
+  /** D2: the declared external-effect contract of a registered tool, if any. */
+  externalEffectDeclaration(name: string): ToolDeclaration['externalEffect'] {
+    return this.tools.get(name)?.externalEffect;
+  }
+
+  /**
+   * AS-04 turn correlation: resolve the live turn owning a conversation at
+   * record time (per-chat turns are serialized, so the current context head IS
+   * the owning turn). Set once by the runtime; null resolver = uncorrelated
+   * rows, which the effect fold treats as enumeration-incomplete.
+   */
+  setTurnCorrelationResolver(
+    resolver: (conversationKey: string) => { logicalTurnId: string; inboundSeq: number | null } | null,
+  ): void {
+    this.turnCorrelationResolver = resolver;
+  }
+
+  /** AS-04: any tool-durability write loss at or after `sinceMs`? */
+  hadDurabilityWriteLossSince(sinceMs: number): boolean {
+    return this.lastDurabilityWriteLossAt !== null && this.lastDurabilityWriteLossAt >= sinceMs;
+  }
+
   /**
    * Returns tool listing entries filtered and adapted for the given session.
    *
@@ -448,16 +473,33 @@ export class ToolRegistry {
     const durabilityKey = session.conversationKey
       || (session.tier === 'global' ? GLOBAL_CONVERSATION_KEY : '');
     let durabilityId: number | undefined;
-    if (this.durability && durabilityKey) {
+    if (this.durability) {
+      // AS-04 fail-closed evidence (spec §3.2b): a tool call whose durability
+      // record cannot be written must NOT execute — a missing row would be
+      // indistinguishable from "no effect". The former ''-key silent skip is
+      // closed the same way.
+      if (!durabilityKey) {
+        this.recordDurabilityWriteLoss('record', name);
+        return {
+          content: [{ type: 'text', text: 'Tool call refused: no durable evidence identity for this session.' }],
+          isError: true,
+        };
+      }
       try {
         durabilityId = this.durability.recordToolCall(
           durabilityKey,
           name,
           normalizeToolDurabilityGroup(tool.group),
           replayPolicy,
+          undefined,
+          this.turnCorrelationResolver?.(durabilityKey) ?? null,
         );
       } catch {
         this.recordDurabilityWriteLoss('record', name);
+        return {
+          content: [{ type: 'text', text: 'Tool call refused: durable evidence journaling failed.' }],
+          isError: true,
+        };
       }
     }
 

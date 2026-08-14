@@ -28,6 +28,7 @@ import {
   toolError,
   type ToolDeclaration,
 } from '../types.ts';
+import { EXTERNAL_EFFECT_CONTRACT_VERSION } from '../external-effect.ts';
 
 /** Minimal writer seam so tests can inject a fake without constructing a live client. */
 export interface MemoryWriteOperationContext {
@@ -88,6 +89,7 @@ export function registerMemoryWriteTools(
     targetMode: 'injected',
     core: false,
     replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     handler: async (params, session) => {
       const p = params as z.infer<typeof MemoryWriteSchema>;
       // File ONLY under a conversation key already pinned by the runtime —

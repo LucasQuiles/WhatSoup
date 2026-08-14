@@ -76,6 +76,14 @@ interface AgentOptions {
    * `docs/configuration.md` for the migration plan.
    */
   allowM365Mutations?: boolean;
+  /**
+   * Capability-obligation replay activation (all-or-inert; default OFF).
+   * Structurally validated at config load by
+   * `parseCapabilityObligationsOptions` (src/core/capability-contract.ts):
+   * absent or not-`enabled: true` is inert; `enabled: true` with a malformed
+   * body is a startup ConfigValidationError. See `docs/configuration.md`.
+   */
+  capabilityObligations?: Record<string, unknown>;
 }
 
 interface InstanceConfig {

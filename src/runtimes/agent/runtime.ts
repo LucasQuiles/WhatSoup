@@ -246,6 +246,7 @@ import {
   QueuedDecisionConsumer,
 } from './pending-poll-health.ts';
 import { HandoffDistillCoordinator } from './handoff-distill-coordinator.ts';
+import { CapabilityObligationRuntime, maybeActivateCapabilityObligationRuntime, shutdownCapabilityObligationRuntimeSafely } from './capability-obligation-runtime.ts';
 import { handoffDistillerEnabled, handoffContextEnabled, handoffDistillModel } from './handoff-distill-config.ts';
 import { config } from '../../config.ts';
 import type { StartupNotificationEvent } from '../../core/startup-notification-controller.ts';
@@ -1705,6 +1706,8 @@ export class AgentRuntime implements Runtime {
   /** Owns bounded terminal retries and sticky affected-scope degradation. */
   private readonly runtimeTurnSupervisor: RuntimeTurnSupervisor<RuntimeTurnPostEffects>;
   private readonly turnRecoverySupervisor: TurnRecoverySupervisor;
+  /** Obligation replay drain; null unless opted in (all-or-inert). */
+  private capabilityObligationRuntime: CapabilityObligationRuntime | null = null;
   private readonly turnRecoveryDeadman: TurnRecoveryDeadman;
   private readonly runtimeTurnHost: RuntimeTurnCoordinatorPort & RuntimeResultHandlerPort;
   private readonly runtimeTurnCoordinator: RuntimeTurnCoordinator;
@@ -2710,6 +2713,7 @@ export class AgentRuntime implements Runtime {
       set singleTurnHadToolActivity(value) { runtime.singleTurnHadToolActivity = value; },
       get isFallbackWindowActive() { return runtime.isFallbackWindowActive; },
       managerIdFor: (session) => runtime.managerIdFor(session),
+      deriveCapabilityDecision: (context, session) => runtime.capabilityObligationRuntime?.deriveCapabilityDecision(context, session) ?? Promise.resolve(undefined),
       isShuttingDown: () => runtime.shutdownRequested,
       getActiveQueue: () => runtime.getActiveQueue(),
       getQueueForChat: (chatJid, mapKey) => runtime.getQueueForChat(chatJid, mapKey),
@@ -2844,6 +2848,20 @@ export class AgentRuntime implements Runtime {
     for (const q of this.chatQueues.values()) q.setDurability(engine);
     this.turnRecoverySupervisor.start(); // PRESTAGE-T4; idempotent
     this.turnRecoveryDeadman.start();
+
+    // Obligation replay: opt-in, per_chat only; the helper keeps ABSENT fields inert.
+    this.capabilityObligationRuntime = maybeActivateCapabilityObligationRuntime({
+      enabled: this.sessionScope === 'per_chat', alreadyActive: this.capabilityObligationRuntime !== null,
+      options: config.capabilityObligations, db: this.db, store: engine.capabilityObligations, registry: this.registry,
+      getDurability: () => this.durability, resolveMapKey: (jid) => this.resolvePerChatMapKey(jid),
+      perChatTurnContexts: () => this.perChatRuntimeTurnContexts, turnCoordinator: this.runtimeTurnCoordinator,
+      resolveDispatchTarget: (jid) => this.resolvePerChatDispatchTarget(jid),
+      requireSessionToolScopeKey: (sess) => this.requireSessionToolScopeKey(sess),
+      isDispatchTargetCurrent: (t) => this.isTurnRecoveryDispatchTargetCurrent(t),
+      getChatSession: (key) => this.chatSessions.get(key),
+      captureOwnedGeneration: (key, s) => this.captureOwnedPerChatGeneration(key, s),
+      activateSpawnedSession: (key, s, o) => this.activateSpawnedOwnedPerChatSession(key, s, o),
+    }) ?? this.capabilityObligationRuntime;
   }
 
   /**
@@ -5237,14 +5255,19 @@ export class AgentRuntime implements Runtime {
       return { scope: job.scope, managerId: this.managerIdFor(session), generation: 1, session };
     }
     if (job.scope !== 'per_chat') return null;
-    const mapKey = this.resolvePerChatMapKey(job.delivery_jid);
+    return this.resolvePerChatDispatchTarget(job.delivery_jid);
+  }
+
+  /** Shared by turn recovery and capability-obligation dispatch. */
+  private resolvePerChatDispatchTarget(deliveryJid: string): TurnRecoveryDispatchTarget | null {
+    const mapKey = this.resolvePerChatMapKey(deliveryJid);
     let session = this.chatSessions.get(mapKey);
     if (!session?.getStatus().active) {
       // #2169: cold per_chat turn recovery — create session proactively when
       // the in-memory session map has none (e.g. after cold restart before any
       // inbound message arrives for this conversation).
       if (!this.chatSessions.has(mapKey)) {
-        this.ensureSessionAndQueueSync(job.delivery_jid, mapKey);
+        this.ensureSessionAndQueueSync(deliveryJid, mapKey);
         session = this.chatSessions.get(mapKey);
       }
       if (!session?.getStatus().active) return null;
@@ -6762,6 +6785,7 @@ export class AgentRuntime implements Runtime {
     // -- that's a different, narrower race this stop() call does not (and
     // cannot) close by itself.
     this.turnRecoverySupervisor.stop();
+    this.capabilityObligationRuntime?.stop();
     if (this.queueSweepTimer) {
       clearInterval(this.queueSweepTimer);
       this.queueSweepTimer = null;
@@ -6884,6 +6908,8 @@ export class AgentRuntime implements Runtime {
     }
     const trErr = await shutdownTurnRecoverySupervisorSafely(this.turnRecoverySupervisor);
     if (trErr) shutdownFailures.push(trErr);
+    const coErr = await shutdownCapabilityObligationRuntimeSafely(this.capabilityObligationRuntime);
+    if (coErr) shutdownFailures.push(coErr);
     try {
       await this.runtimeTurnCoordinator.awaitUndispatchedCrashFinalizations();
     } catch (err) {
