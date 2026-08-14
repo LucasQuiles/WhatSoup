@@ -7,7 +7,7 @@ import type { PineconeMemory } from '../providers/pinecone.ts';
 import type { StoredMessage } from '../../../core/messages.ts';
 import { extractFacts } from './extractor.ts';
 import { validateFacts } from './validator.ts';
-import { enqueueFacts, toExportable } from './fact-export-queue.ts';
+import { enqueueFacts, reconcileExpiredLeases, toExportable } from './fact-export-queue.ts';
 import {
   readOnlineEnrichmentCycleLedger,
   writeEnrichmentCycleReceipt,
@@ -167,6 +167,24 @@ export class EnrichmentPoller {
 
   private async runCycle(): Promise<void> {
     const cycleStart = Date.now();
+
+    // #2567 slice 2 — crash hygiene, consumer-model neutral: expired
+    // fact-export leases return to the retry lane (or park as
+    // retry_exhausted) on every cycle, so a crashed consumer's rows can
+    // never stay 'leased' forever. Failure here must not block enrichment.
+    try {
+      const reconciled = reconcileExpiredLeases(this.db, {
+        nowUnixSec: Math.floor(cycleStart / 1000),
+      });
+      if (reconciled.expired > 0) {
+        log.warn(
+          { expired: reconciled.expired, exhausted: reconciled.exhausted },
+          'enrichment: reconciled expired fact-export leases',
+        );
+      }
+    } catch (err) {
+      log.error({ err }, 'enrichment: expired-lease reconciliation failed');
+    }
 
     let totalExtracted = 0;
     let totalQueued = 0;

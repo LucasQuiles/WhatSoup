@@ -108,6 +108,7 @@ const REVIEWED_GRANDFATHERED: string[] = [
   'list_groups',                 // grandfathered 2026-08-04 pending per-tool review (#2773 P2 residual)
   'list_statuses',               // grandfathered 2026-08-04 pending per-tool review (#2773 P2 residual)
   'list_trigger_runs',           // reviewed 2026-08-14 (#2566): read-only redacted projection — bounded fields only, no content/prose/transport ids cross; filter required
+  'list_fact_export_queue',      // reviewed 2026-08-14 (#2567): read-only redacted queue evidence — counts/ages/attempts + opaque fact_uid rows; fact text, payload, identities, legacy fact_id, lease owners never cross
   'list_triggers',               // grandfathered 2026-08-04 pending per-tool review (#2773 P2 residual)
   'logout',                      // grandfathered 2026-08-04 pending per-tool review (#2773 P2 residual)
   'manage_labels',               // grandfathered 2026-08-04 pending per-tool review (#2773 P2 residual)

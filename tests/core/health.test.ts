@@ -3795,6 +3795,7 @@ describe('POST /send — Authorization header check', () => {
         toolCalls: 3,
         outboundSends: 4,
         factExportQueue: 0,
+        factExportTerminal: 0,
         memoryConsolidationRuns: 0,
         metricsHourly: 0,
         decryptionFailures: 0,
@@ -3894,6 +3895,60 @@ describe('POST /send — Authorization header check', () => {
     // Exact-byte discipline: no seeded content crosses the projection.
     expect(body).not.toContain('SECRET-GAUGE-TITLE');
     expect(body).not.toContain('SECRET-GAUGE-CHAT');
+  });
+
+  // #2567 slice 2 — fact-export queue gauges + honest consumer evidence.
+  // Counts, ages, and a derived consumer_state ONLY — never fact text,
+  // JIDs, payload JSON, or the legacy fact_id.
+  it('surfaces fact-export gauges and degrades when pending work has no consumer evidence', async () => {
+    process.env.WHATSOUP_HEALTH_TOKEN = TEST_HEALTH_TOKEN;
+    db.raw.prepare(
+      `INSERT INTO fact_export_queue (fact_uid, fact_id, chat_jid, payload_json, state, created_at)
+       VALUES ('fe_gaugepending0000000001', 'SECRET-FACT-ID:SECRET-CHAT@g.us:abc', 'SECRET-CHAT@g.us', '{"text":"SECRET-FACT-TEXT"}', 'pending', datetime('now', '-2 hours'))`,
+    ).run();
+    db.raw.prepare(
+      `INSERT INTO fact_export_queue (fact_uid, fact_id, chat_jid, payload_json, state, failure_code, created_at)
+       VALUES ('fe_gaugequarantine00000001', 'SECRET-QUAR-ID', 'SECRET-CHAT@g.us', '{"text":"SECRET-QUAR-TEXT"}', 'quarantined', 'payload_invalid', datetime('now', '-1 hours'))`,
+    ).run();
+
+    const { status, body } = await healthReq(port);
+    expect(status).toBe(200);
+    const json = JSON.parse(body);
+    const gauges = json.sqlite;
+    expect(gauges.fact_export_pending).toBe(1);
+    expect(gauges.fact_export_quarantined).toBe(1);
+    expect(gauges.fact_export_oldest_pending_age_s).toBeGreaterThanOrEqual(7000);
+    expect(gauges.fact_export_consumer_state).toBe('consumer_missing');
+    // Honest health: pending export work with zero consumer evidence can
+    // never report end-to-end healthy.
+    expect(json.status).toBe('degraded');
+    expect(json.status_reasons).toContain('fact_export_consumer_missing');
+    // Exact-byte discipline.
+    expect(body).not.toContain('SECRET-FACT-ID');
+    expect(body).not.toContain('SECRET-FACT-TEXT');
+    expect(body).not.toContain('SECRET-QUAR');
+    expect(body).not.toContain('SECRET-CHAT');
+  });
+
+  it('reports current consumer evidence without degrading when acks are fresh', async () => {
+    process.env.WHATSOUP_HEALTH_TOKEN = TEST_HEALTH_TOKEN;
+    const now = Math.floor(Date.now() / 1000);
+    db.raw.prepare(
+      `INSERT INTO fact_export_queue (fact_uid, fact_id, chat_jid, payload_json, state, created_at)
+       VALUES ('fe_gaugefreshpend00000001', 'fresh-pending', 'seed-chat@g.us', '{}', 'pending', datetime('now', '-30 seconds'))`,
+    ).run();
+    db.raw.prepare(
+      `INSERT INTO fact_export_queue (fact_uid, fact_id, chat_jid, payload_json, state, exported_at, acked_at, created_at)
+       VALUES ('fe_gaugefreshack000000001', 'fresh-acked', 'seed-chat@g.us', '{}', 'exported', datetime('now'), ?, datetime('now', '-10 minutes'))`,
+    ).run(now - 60);
+
+    const { status, body } = await healthReq(port);
+    expect(status).toBe(200);
+    const json = JSON.parse(body);
+    expect(json.sqlite.fact_export_consumer_state).toBe('current');
+    expect(json.sqlite.fact_export_latest_ack_age_s).toBeGreaterThanOrEqual(60);
+    expect(json.sqlite.fact_export_latest_ack_age_s).toBeLessThan(300);
+    expect(json.status_reasons ?? []).not.toContain('fact_export_consumer_missing');
   });
 
   it('returns 401 when no WHATSOUP_HEALTH_TOKEN is set (fail-closed)', async () => {

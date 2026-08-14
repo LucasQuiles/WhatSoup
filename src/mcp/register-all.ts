@@ -169,7 +169,7 @@ export function registerAllTools(
   runModule('retention', true, () => retentionTools.registerRetentionTools(registry, { db }));
   runModule('status', true, () => statusTools.registerStatusTools(registry, { db, getSock }));
   runModule('scheduling', true, () => schedulingTools.registerSchedulingTools(registry, { db }));
-  runModule('audit', true, () => auditTools.registerOutboundAuditTools(registry, { writer: outboundSendsWriter }));
+  runModule('audit', true, () => auditTools.registerOutboundAuditTools(registry, { writer: outboundSendsWriter, db }));
   runModule('substrate', true, () => substrateTools.registerSubstrateTools(registry, {
     db: db.raw,
     dbWrapper: db,

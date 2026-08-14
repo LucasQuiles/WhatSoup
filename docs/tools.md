@@ -1,8 +1,8 @@
 # WhatSoup MCP Tool API Reference
 
-Complete reference for all 167 MCP tools exposed by WhatSoup. Tools are grouped by module. Each tool lists its scope, replay policy, and parameters extracted from the Zod schema.
+Complete reference for all 168 MCP tools exposed by WhatSoup. Tools are grouped by module. Each tool lists its scope, replay policy, and parameters extracted from the Zod schema.
 
-> **Conditionally-registered tools.** Of the 167 documented tools, 164 are always registered at startup and 3 are conditionally registered. Conditional tools are tagged `core: false` in their `ToolDeclaration` so that absence on an instance which does not meet the gate is tolerated rather than fatal (see `src/mcp/types.ts`).
+> **Conditionally-registered tools.** Of the 168 documented tools, 165 are always registered at startup and 3 are conditionally registered. Conditional tools are tagged `core: false` in their `ToolDeclaration` so that absence on an instance which does not meet the gate is tolerated rather than fatal (see `src/mcp/types.ts`).
 >
 > **`knowledge_search`** is registered only when all of the following hold:
 >
@@ -20,7 +20,7 @@ Complete reference for all 167 MCP tools exposed by WhatSoup. Tools are grouped 
 > - the runtime is not in `sandboxPerChat` mode, and
 > - the runtime is not in `sandbox` mode.
 >
-> The intent is that only the repair-issuing role (Q) exposes `emit_heal_result`; sandboxed repair targets (Loops) do not. Instances that fail any of these gates omit the corresponding tool at runtime; the documented total of 166 reflects the full tool surface available to a fully-configured non-sandboxed Q instance with Pinecone configured.
+> The intent is that only the repair-issuing role (Q) exposes `emit_heal_result`; sandboxed repair targets (Loops) do not. Instances that fail any of these gates omit the corresponding tool at runtime; the documented total of 167 reflects the full tool surface available to a fully-configured non-sandboxed Q instance with Pinecone configured.
 
 ## Scope and Replay Policy Glossary
 
@@ -76,12 +76,12 @@ Complete reference for all 167 MCP tools exposed by WhatSoup. Tools are grouped 
 | [retention.ts](#retentionts) | 1 |
 | [status.ts](#statusts) | 2 |
 | [scheduling.ts](#schedulingts) | 5 |
-| [audit.ts](#auditts) | 2 |
+| [audit.ts](#auditts) | 3 |
 | [substrate.ts](#substratets) | 22 |
 | [memory-write.ts](#memory-writets) | 1 |
-| **Total** | **167** |
+| **Total** | **168** |
 
-> The total above (`167`) reflects the full canonical surface — `166` tools registered from the per-module `src/mcp/tools/*.ts` factories plus `1` (`emit_heal_result`) registered inline (declared in `src/runtimes/agent/runtime-tool-registrations.ts`, wired from `AgentRuntime.start()`). The inline registration is documented below under [runtime-tool-registrations.ts (inline)](#runtime-tool-registrationsts-inline); it is intentionally absent from the module breakdown because it does not live under `src/mcp/tools/`.
+> The total above (`168`) reflects the full canonical surface — `167` tools registered from the per-module `src/mcp/tools/*.ts` factories plus `1` (`emit_heal_result`) registered inline (declared in `src/runtimes/agent/runtime-tool-registrations.ts`, wired from `AgentRuntime.start()`). The inline registration is documented below under [runtime-tool-registrations.ts (inline)](#runtime-tool-registrationsts-inline); it is intentionally absent from the module breakdown because it does not live under `src/mcp/tools/`.
 
 ---
 
@@ -342,6 +342,51 @@ Preview or apply bounded retention to terminal metadata-only outbound audit rows
 The caller cannot override the configured 30-day/10,000-terminal-row policy. The result
 reports `dry_run`, `retention_days`, `eligible`, and `deleted`. Unresolved `intent` rows
 are never eligible for age or capacity pruning.
+
+---
+
+### list_fact_export_queue
+
+Redacted fact-export queue evidence (#2567): summary counts by state, oldest-pending and latest-ack ages, attempt distribution, and bounded per-row records keyed by the opaque `fact_uid`.
+
+| | |
+|---|---|
+| **Scope** | `global` |
+| **Replay Policy** | `read_only` |
+
+**Parameters**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| state | enum | optional | Row filter: `pending` \| `leased` \| `retry_wait` \| `exported` \| `quarantined` \| `retry_exhausted` \| `legacy_unclassified`. The summary always covers the whole queue. |
+| limit | number | optional | Maximum rows to return. Defaults to `50`; clamps to `1..200`. |
+
+**Return shape**
+
+```json
+{
+  "summary": {
+    "counts": { "pending": 3, "quarantined": 1 },
+    "oldest_pending_age_s": 120,
+    "latest_ack_age_s": 60,
+    "attempt_histogram": { "1": 2, "3": 1 }
+  },
+  "rows": [
+    {
+      "fact_uid": "fe_0123456789abcdef01234567",
+      "state": "pending",
+      "attempt_count": 0,
+      "failure_code": null,
+      "failure_stage": null,
+      "created_at": "2026-08-14 20:30:00",
+      "next_attempt_at": null,
+      "acked_at": null
+    }
+  ]
+}
+```
+
+**Non-disclosure invariant:** fact text, payload JSON, chat/sender identities, the identity-bearing legacy `fact_id`, and lease owners never cross this projection; `failure_code`/`failure_stage` are stable machine codes, never provider or error prose.
 
 ---
 

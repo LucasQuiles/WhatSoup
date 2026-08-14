@@ -54,6 +54,14 @@ export interface DatabaseRetentionConfig {
    */
   triggerRunDays: number;
   triggerOccurrenceDays: number;
+  /**
+   * #2567 slice 2 — retention window for TERMINAL fact-export rows
+   * (quarantined / retry_exhausted / legacy_unclassified). These carry full
+   * fact payloads and previously lived forever; recoverable states
+   * (pending / leased / retry_wait) are never pruned regardless of age.
+   * Exported rows have their own window (exportedFactDays).
+   */
+  factTerminalDays: number;
 }
 
 export interface DatabaseRetentionResult {
@@ -64,6 +72,7 @@ export interface DatabaseRetentionResult {
   toolCalls: number;
   outboundSends: number;
   factExportQueue: number;
+  factExportTerminal: number;
   memoryConsolidationRuns: number;
   metricsHourly: number;
   decryptionFailures: number;
@@ -96,6 +105,7 @@ export const DEFAULT_DATABASE_RETENTION: DatabaseRetentionConfig = {
   messageRetentionDays: 30,
   triggerRunDays: 30,
   triggerOccurrenceDays: 30,
+  factTerminalDays: 30,
 };
 
 /**
@@ -323,6 +333,12 @@ export function runDatabaseRetention(
          AND COALESCE(exported_at, created_at) < datetime('now', ?)
     `).run(factCutoff));
 
+    const factExportTerminal = changes(db.raw.prepare(`
+      DELETE FROM fact_export_queue
+       WHERE state IN ('quarantined', 'retry_exhausted', 'legacy_unclassified')
+         AND created_at < datetime('now', ?)
+    `).run(daysModifier(retention.factTerminalDays)));
+
     const memoryConsolidationMaxAgeMs =
       Math.max(1, Math.floor(retention.memoryConsolidationDays)) * 86_400_000;
     const memoryConsolidationMaxRows = Math.max(
@@ -412,6 +428,7 @@ export function runDatabaseRetention(
       toolCalls,
       outboundSends,
       factExportQueue,
+      factExportTerminal,
       memoryConsolidationRuns,
       metricsHourly,
       decryptionFailures,

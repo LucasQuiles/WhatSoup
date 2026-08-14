@@ -95,3 +95,40 @@ describe('EnrichmentPoller strict provider integration', () => {
     expect(JSON.stringify(mockLogger.error.mock.calls)).not.toContain('PRIVATE-ENRICHMENT');
   });
 });
+
+// #2567 slice 2 — crash-hygiene wiring: every enrichment cycle reconciles
+// expired fact-export leases back to the retry lane, independent of which
+// consumer model (in-process drainer vs external bridge) eventually owns
+// the drain. A crashed consumer's rows must not stay 'leased' forever.
+describe('expired-lease reconciliation wiring', () => {
+  let db: Database;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    db = new Database(':memory:');
+    db.open();
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  it('runCycle returns expired leases to retry_wait with the lease_expired code', async () => {
+    db.raw.prepare(
+      `INSERT INTO fact_export_queue (fact_uid, fact_id, chat_jid, payload_json, state, lease_owner, lease_expires_at, attempt_count)
+       VALUES ('fe_expiredlease0000000001', 'expired-1', 'seed-chat@g.us', '{}', 'leased', 'dead-worker', 1, 1)`,
+    ).run();
+    const provider: LLMProvider = {
+      name: 'noop',
+      generate: vi.fn().mockResolvedValue('[]'),
+    };
+    const poller = new EnrichmentPoller(db, {} as PineconeMemory, provider, provider);
+
+    await (poller as unknown as { runCycle(): Promise<void> }).runCycle();
+
+    const row = db.raw.prepare(
+      `SELECT state, failure_code, lease_owner FROM fact_export_queue WHERE fact_id = 'expired-1'`,
+    ).get() as { state: string; failure_code: string | null; lease_owner: string | null };
+    expect(row).toEqual({ state: 'retry_wait', failure_code: 'lease_expired', lease_owner: null });
+  });
+});

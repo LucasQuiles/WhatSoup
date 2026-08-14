@@ -1866,6 +1866,68 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         'failed to count unknown-notification-outcome runs',
       );
 
+      // #2567 slice 2 — fact-export queue evidence. Counts, ages, and a
+      // DB-derived consumer_state ONLY: no fact text, JID, payload JSON, or
+      // legacy fact_id may cross this projection. consumer_missing = pending
+      // work past the grace window with zero lease/ack evidence — the state
+      // the pre-#2567 queue could never surface (health stayed green while a
+      // silent or absent bridge accumulated facts indefinitely).
+      const factExportStats = safeDbQuery(
+        () => {
+          const counts: Record<string, number> = {};
+          for (const row of deps.db.raw.prepare(
+            'SELECT state, COUNT(*) AS n FROM fact_export_queue GROUP BY state',
+          ).all() as Array<{ state: string; n: number }>) {
+            counts[row.state] = row.n;
+          }
+          const now = systemClock.nowUnixSec();
+          const oldestPending = (deps.db.raw.prepare(
+            `SELECT MIN(CAST(strftime('%s', created_at) AS INTEGER)) AS t
+               FROM fact_export_queue WHERE state = 'pending'`,
+          ).get() as { t: number | null }).t;
+          const latestAck = (deps.db.raw.prepare(
+            'SELECT MAX(acked_at) AS t FROM fact_export_queue',
+          ).get() as { t: number | null }).t;
+          const pending = counts.pending ?? 0;
+          const leased = counts.leased ?? 0;
+          const retryWait = counts.retry_wait ?? 0;
+          const oldestPendingAgeS = oldestPending == null ? 0 : Math.max(0, now - oldestPending);
+          const latestAckAgeS = latestAck == null ? null : Math.max(0, now - latestAck);
+          const EVIDENCE_FRESH_SEC = 3600;
+          const BACKLOG_THRESHOLD = 100;
+          let consumerState: 'idle' | 'current' | 'backlogged' | 'consumer_missing';
+          if (pending + leased + retryWait === 0) {
+            consumerState = 'idle';
+          } else if (leased > 0 || (latestAckAgeS != null && latestAckAgeS < EVIDENCE_FRESH_SEC)) {
+            consumerState = pending > BACKLOG_THRESHOLD ? 'backlogged' : 'current';
+          } else {
+            consumerState = oldestPendingAgeS > EVIDENCE_FRESH_SEC ? 'consumer_missing' : 'current';
+          }
+          return {
+            pending,
+            leased,
+            retryWait,
+            quarantined: counts.quarantined ?? 0,
+            retryExhausted: counts.retry_exhausted ?? 0,
+            legacyUnclassified: counts.legacy_unclassified ?? 0,
+            oldestPendingAgeS,
+            latestAckAgeS,
+            consumerState,
+          };
+        },
+        {
+          pending: 0, leased: 0, retryWait: 0, quarantined: 0, retryExhausted: 0,
+          legacyUnclassified: 0, oldestPendingAgeS: 0,
+          latestAckAgeS: null as number | null,
+          consumerState: 'idle' as 'idle' | 'current' | 'backlogged' | 'consumer_missing',
+        },
+        'failed to read fact export queue stats',
+      );
+      if (factExportStats.consumerState === 'consumer_missing') {
+        if (status === 'healthy') status = 'degraded';
+        statusReasons.push('fact_export_consumer_missing');
+      }
+
       // Provider-fallback observability (agent runtimes only). Surfaced in the
       // instance block so operators can see when a bot is running on its
       // fallback provider and when that window expires.
@@ -2136,6 +2198,15 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           active_trigger_occurrences: activeOccurrenceStats.count,
           oldest_active_occurrence_age_s: activeOccurrenceStats.oldestAgeS,
           notify_outcome_unknown_runs: notifyOutcomeUnknownRuns,
+          fact_export_pending: factExportStats.pending,
+          fact_export_leased: factExportStats.leased,
+          fact_export_retry_wait: factExportStats.retryWait,
+          fact_export_quarantined: factExportStats.quarantined,
+          fact_export_retry_exhausted: factExportStats.retryExhausted,
+          fact_export_legacy_unclassified: factExportStats.legacyUnclassified,
+          fact_export_oldest_pending_age_s: factExportStats.oldestPendingAgeS,
+          fact_export_latest_ack_age_s: factExportStats.latestAckAgeS,
+          fact_export_consumer_state: factExportStats.consumerState,
           probe_availability: probeAvailability,
         },
         access_control: {
