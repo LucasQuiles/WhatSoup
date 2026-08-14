@@ -1479,3 +1479,68 @@ directly as `running`); `trigger_runs.attempt` and `trigger_occurrences.attempt`
 a future two-phase claim (slice 1 claims directly to `running` in one commit). Each is kept
 in its CHECK vocabulary deliberately — removal would cost a migration for no behavioral
 win. `sweep_runs` remains reserved per its schema marker pending an owner ruling.
+
+## 9. Fact-Export Queue Lifecycle (#2567)
+
+The enrichment fact-export queue (`fact_export_queue`) is the durable handoff between the
+chat-runtime enrichment poller (producer) and a fact consumer that writes facts to the
+external memory store and acknowledges outcomes. Before #2567 the claim path was an
+unfenced SELECT, acknowledgement was a void call that swallowed errors, terminal payloads
+lived forever, and health stayed green with zero consumer evidence.
+
+### 9.1 State machine and fenced leases (migration 59)
+
+Migration 59 rebuilds the table with a CHECK-enforced state machine — `pending`,
+`leased`, `retry_wait`, `exported`, `quarantined`, `retry_exhausted`,
+`legacy_unclassified` — plus lease (`lease_owner`, `lease_expires_at`), attempt
+(`attempt_count`, `next_attempt_at`), failure (`failure_code`, `failure_stage`), and
+acknowledgement (`acked_at`, `remote_record_id`) columns. Every row carries an opaque
+salted `fact_uid` (salt in `fact_export_meta`); the identity-bearing legacy `fact_id`
+never crosses a wire, log, or observability surface. Known legacy statuses mapped
+one-to-one at migration; anything else parked terminally as `legacy_unclassified`.
+
+`leasePendingFacts` claims due rows atomically (single guarded `UPDATE...RETURNING`
+with owner, expiry, and attempt increment) — two concurrent claimers can never hold the
+same row. `ackFacts` returns one explicit outcome per id (`acknowledged`,
+`already_terminal`, `lease_lost`, `unknown`, `write_failed`) with fenced writes, capped
+exponential retry backoff, and terminal `retry_exhausted` parking; `remote_record_id`
+carries the idempotent remote id for the crash window between remote write and local
+acknowledgement. Poison payloads quarantine at lease time with
+`failure_code='payload_invalid'` and never occupy wire slots.
+
+### 9.2 Crash reconciliation
+
+`reconcileExpiredLeases` returns every expired lease to `retry_wait` (with backoff and
+`failure_code='lease_expired'`) or parks it as `retry_exhausted` once attempts are spent.
+The enrichment poller runs it at the top of every cycle — consumer-model neutral crash
+hygiene, so a crashed or vanished consumer's rows can never stay `leased` forever.
+Reconciliation failure is logged and never blocks enrichment.
+
+### 9.3 Retention, gauges, and reader
+
+**Retention.** Exported rows prune past `exportedFactDays`; terminal rows
+(`quarantined` / `retry_exhausted` / `legacy_unclassified`) prune past `factTerminalDays`
+(both 30d defaults, `factExportQueue` / `factExportTerminal` result counters).
+Recoverable states (`pending` / `leased` / `retry_wait`) are NEVER pruned regardless of
+age — unfinalized work is crash evidence, not history.
+
+**Gauges.** The health `sqlite` block surfaces per-state counts
+(`fact_export_pending` … `fact_export_legacy_unclassified`),
+`fact_export_oldest_pending_age_s`, `fact_export_latest_ack_age_s`, and a derived
+`fact_export_consumer_state` (`idle` / `current` / `backlogged` / `consumer_missing`).
+Pending work past the evidence window with no lease or acknowledgement activity degrades
+overall health with `fact_export_consumer_missing` — queue admission can no longer
+masquerade as durable external memory.
+
+**Reader.** `list_fact_export_queue` (MCP, read-only, audit module) returns the redacted
+summary plus bounded rows keyed by `fact_uid`. Fact text, payload JSON, chat/sender
+identities, the legacy `fact_id`, and lease owners never cross; failure codes are stable
+machine vocabulary, never provider or error prose.
+
+### 9.4 Consumer model (held)
+
+The in-process-drainer vs. external-consumer capability/heartbeat decision is
+architecture-owner gated (#2567). Everything above is deliberately neutral — both models
+require identical lease, acknowledgement, evidence, privacy, and health contracts. Until
+a consumer ships, the honest steady state for an enrichment-enabled instance with queue
+growth is `consumer_missing`, and that is exactly what health now reports.

@@ -300,8 +300,11 @@ describe('EnrichmentPoller', () => {
     );
     expect(db._runFn).toHaveBeenCalledTimes(1);
     // The writer explicitly stores NULL in the legacy free-form column while
-    // binding only the bounded receipt fields.
-    const [sql] = db._prepareFn.mock.calls[0] as [string];
+    // binding only the bounded receipt fields. Select the enrichment_runs
+    // INSERT by content — the #2567 lease-reconcile query now precedes it.
+    const [sql] = db._prepareFn.mock.calls.find(
+      (call: unknown[]) => typeof call[0] === 'string' && (call[0] as string).includes('INSERT INTO enrichment_runs'),
+    ) as [string];
     expect(sql).toContain('error');
     expect(sql).toContain('status');
     expect(db._runFn.mock.calls[0]).toHaveLength(18);

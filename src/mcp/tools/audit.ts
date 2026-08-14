@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { DEFAULT_DATABASE_RETENTION } from '../../core/database-retention.ts';
 import type { Database } from '../../core/database.ts';
 import type { OutboundSendsWriter } from '../../core/outbound-sends.ts';
-import { listFactExportQueueRedacted } from '../../runtimes/chat/enrichment/fact-export-queue.ts';
+import { listFactExportQueueRedacted } from '../../core/fact-export-read.ts';
 import type { ToolRegistry } from '../registry.ts';
 import { EXTERNAL_EFFECT_CONTRACT_VERSION } from '../external-effect.ts';
 
