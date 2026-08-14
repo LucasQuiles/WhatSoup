@@ -106,3 +106,44 @@ Operator-facing errors/log reasons lack **host / invariant / values / next-step*
 ## Working notes
 - The active hardening stream merges to `main` rapidly; treat this as a **shared backlog** — re-verify each item against current `origin/main` and coordinate to avoid duplicate work. The P0 cluster is the gate for live O3 fan-out.
 - Full per-finding detail (file:line, repro) is in the 2026-06-15 audit transcripts; this doc is the deduped, prioritized synthesis.
+
+---
+
+## Central-ack receipt protocol (#2468, landed in three slices)
+
+The host selfcheck previously derived `centralAck.mode = central_acked` from the
+configured ack file's mtime alone — any fresh regular file (non-JSON bytes, `{}`,
+another host's receipt, or an old receipt with a refreshed mtime) proved central
+acknowledgement and cleared the local-only timer. That false-green is closed:
+
+- **Receipt validation (consumer, slice 1):** freshness is anchored to the receipt's
+  own `ackedAt` (skew-bounded), never file mtime. Validation runs size → JSON →
+  schema → subject → temporal, each rejection a bounded class (`oversized`,
+  `read_error:*`, `malformed_json`, `wrong_schema`, `wrong_subject`,
+  `malformed_timestamp`, `future_receipt`, `stale_payload`). Ordering guards:
+  `out_of_order` (accepted-`ackedAt` high-water mark) and `contradictory`
+  (same `ackedAt`, different content digest). Invalid evidence preserves the last
+  valid acknowledgement (`centralAckLastValid`) and never clears an open
+  local-only episode.
+- **Observation binding (receipt v2, slice 2):** `write_ack` emits
+  `schemaVersion: 2` receipts carrying `observedHeartbeat` (`checkedAt`,
+  domain-separated canonical `contentDigest`, `ageSeconds` — digest is null when
+  the heartbeat was unparseable) and `evaluation` (`evaluatedAt`, `cycleSeq`
+  computed before the ack loop, `rosterEpoch`, `rosterDigest`). The host records
+  digests of both published heartbeat projections in a capped durable ring
+  (`heartbeatDigestRing`) and accepts a v2 receipt only when its observed digest
+  is in that ring (`wrong_observation` otherwise — fresh-install empty ring is
+  fail-closed). Acceptance records `centralAckCoverage` for exactly the
+  acknowledged observation. The digest helper is intentionally duplicated in both
+  pinned scripts and cross-pinned byte-identical by test.
+- **Recovery + crash battery (slice 3):** transition back from an open local-only
+  episode stamps a durable once-per-episode `centralAckRecovery` marker and
+  `recovered: true` on that run's status. Named crash tests cover the five
+  boundaries (heartbeat write, central evaluation, receipt write, receipt
+  transport, host read).
+- **Transition gate:** v1 receipts are accepted by default while the fleet
+  sentinel still writes v1 (`BOT_ERRORS_SELFCHECK_ACCEPT_LEGACY_ACK=0` enables
+  strict mode → `legacy_unbound`). Flip once the fleet sentinel is redeployed
+  with v2 receipts. Consumer-side roster **rejection** is deliberately not
+  implemented (roster revision is central-side knowledge); receipts carry
+  `rosterEpoch`/`rosterDigest` for audit.
