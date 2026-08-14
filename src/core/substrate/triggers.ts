@@ -6,6 +6,7 @@ import { writeBeadEvent } from './events.ts';
 import type { TriggerKind, TriggerRow, OnTerminal } from './types.ts';
 import { nextCronRun } from '../cron.ts';
 import { createChildLogger } from '../../logger.ts';
+import { queryAll } from '../../lib/db-query.ts';
 
 const log = createChildLogger('substrate.triggers');
 
@@ -356,7 +357,13 @@ export function listTriggerRunsRedacted(
   if (f.triggerId != null) { w.push('trigger_id = ?'); b.push(f.triggerId); }
   if (f.beadId != null)    { w.push('bead_id = ?');    b.push(f.beadId); }
   const limit = Math.min(Math.max(1, Math.floor(f.limit ?? 50)), 200);
-  const rows = db.prepare(
+  const rows = queryAll<{
+    id: number; trigger_id: number; bead_id: number; status: string;
+    started_at: number; finished_at: number | null; duration_ms: number | null;
+    attempt: number; error_kind: string | null;
+    delivered: number; notify_pending: number; throttled: number;
+  }>(
+    db,
     `SELECT id, trigger_id, bead_id, status, started_at, finished_at, duration_ms, attempt, error_kind,
             json_extract(output_json, '$.deliveredWaMessageId') IS NOT NULL AS delivered,
             COALESCE(json_extract(output_json, '$.notifyPending'), 0) AS notify_pending,
@@ -364,12 +371,8 @@ export function listTriggerRunsRedacted(
        FROM trigger_runs
        ${w.length ? 'WHERE ' + w.join(' AND ') : ''}
        ORDER BY id DESC LIMIT ?`,
-  ).all(...b, limit) as unknown as Array<{
-    id: number; trigger_id: number; bead_id: number; status: string;
-    started_at: number; finished_at: number | null; duration_ms: number | null;
-    attempt: number; error_kind: string | null;
-    delivered: number; notify_pending: number; throttled: number;
-  }>;
+    ...b, limit,
+  );
   return rows.map((r) => ({
     id: r.id, triggerId: r.trigger_id, beadId: r.bead_id, status: r.status,
     startedAt: r.started_at, finishedAt: r.finished_at, durationMs: r.duration_ms,
