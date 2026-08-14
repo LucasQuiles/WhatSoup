@@ -379,6 +379,71 @@ export class CapabilityObligationStore {
   }
 
   /**
+   * Targeted drain (post-merge audit F2): the due row for ONE named obligation,
+   * or a typed not-due classification derived from the same eligibility
+   * predicate `listDueObligations` scans with. The drain-now path uses this so
+   * a named obligation is never starved by the global oldest-first cap, and so
+   * its reported outcome is derived from the row's actual state — never from
+   * "a tick ran".
+   */
+  dueObligationById(
+    id: number,
+    opts: { mediaMaxAgeSeconds?: number } = {},
+  ):
+    | { due: CapabilityObligationDueRow }
+    | { due: null; state: string | null; notDueReason: 'not_found' | 'not_waiting' | 'attempts_exhausted' | 'backoff_pending' } {
+    const row = this.db.raw
+      .prepare(
+        `SELECT id, source_inbound_seq, source_message_id, conversation_key, delivery_jid,
+                sender_jid, sender_name, is_group, group_name, replay_text, content_type_hint,
+                contract_version, required_capability, capability_params, input_digest,
+                source_digest, source_token, retained_media_path, media_sha256, media_bytes, attempt_count,
+                state,
+                (attempt_count >= ${CAPABILITY_OBLIGATION_MAX_ATTEMPTS}) AS attempts_exhausted,
+                (next_attempt_at IS NOT NULL AND datetime(next_attempt_at) > datetime('now')) AS backoff_pending,
+                (retained_media_path IS NOT NULL AND ? IS NOT NULL
+                  AND datetime(created_at, '+' || CAST(? AS INTEGER) || ' seconds') <= datetime('now')
+                ) AS media_expired
+         FROM capability_obligations
+         WHERE id = ?`,
+      )
+      .get(opts.mediaMaxAgeSeconds ?? null, opts.mediaMaxAgeSeconds ?? null, id) as
+      | Record<string, unknown>
+      | undefined;
+    if (row === undefined) return { due: null, state: null, notDueReason: 'not_found' };
+    const state = row.state as string;
+    if (state !== 'waiting_capability') return { due: null, state, notDueReason: 'not_waiting' };
+    if ((row.attempts_exhausted as number) === 1) return { due: null, state, notDueReason: 'attempts_exhausted' };
+    if ((row.backoff_pending as number) === 1) return { due: null, state, notDueReason: 'backoff_pending' };
+    return {
+      due: {
+        id: row.id as number,
+        sourceInboundSeq: row.source_inbound_seq as number,
+        sourceMessageId: row.source_message_id as string,
+        conversationKey: row.conversation_key as string,
+        deliveryJid: row.delivery_jid as string,
+        senderJid: row.sender_jid as string,
+        senderName: (row.sender_name as string | null) ?? null,
+        isGroup: (row.is_group as number) === 1,
+        groupName: (row.group_name as string | null) ?? null,
+        replayText: row.replay_text as string,
+        contentTypeHint: (row.content_type_hint as string | null) ?? null,
+        contractVersion: row.contract_version as string,
+        requiredCapability: row.required_capability as string,
+        capabilityParams: row.capability_params as string,
+        inputDigest: row.input_digest as string,
+        sourceDigest: row.source_digest as string,
+        sourceToken: (row.source_token as string | null) ?? null,
+        retainedMediaPath: (row.retained_media_path as string | null) ?? null,
+        mediaSha256: (row.media_sha256 as string | null) ?? null,
+        mediaBytes: (row.media_bytes as number | null) ?? null,
+        attemptCount: row.attempt_count as number,
+        mediaExpired: (row.media_expired as number) === 1,
+      },
+    };
+  }
+
+  /**
    * Retained paths that must NOT be garbage-collected: media of live
    * (non-terminal) obligations still inside the retention horizon (A-08).
    */
