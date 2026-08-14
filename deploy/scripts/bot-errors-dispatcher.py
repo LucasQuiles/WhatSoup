@@ -227,6 +227,15 @@ FLAP_STORM_CADENCE_BACKOFF_SECONDS = [
     for x in os.environ.get("BOT_ERRORS_FLAP_STORM_CADENCE_BACKOFF", _FLAP_CADENCE_BACKOFF_DEFAULT).split(",")
 ]
 FLAP_STABLE_SECONDS = positive_env_int("BOT_ERRORS_FLAP_STABLE_SECONDS", 3600)
+# #2428: how long a counted event id is remembered after it was last seen in
+# the outbox. An undelivered event keeps being seen every scan so it never
+# ages out while retries continue; once delivered/quarantined it ages out and
+# the memory stays bounded. Default covers the transient-transport retry
+# ceiling (240 attempts) with margin.
+FLAP_SEEN_EVENT_RETENTION_SECONDS = positive_env_int(
+    "BOT_ERRORS_FLAP_SEEN_EVENT_RETENTION_SECONDS", 21600
+)
+FLAP_SEEN_EVENT_MAX_IDS = positive_env_int("BOT_ERRORS_FLAP_SEEN_EVENT_MAX_IDS", 512)
 FLAP_STORM_ACTION = "source unstable — investigate root cause (flap storm)"
 AWAITING_PHYSICAL_CONFIRMATIONS = positive_env_int("BOT_ERRORS_AWAITING_PHYSICAL_CONFIRMATIONS", 2)
 AWAITING_PHYSICAL_RENOTIFY_SECONDS = positive_env_int(
@@ -3452,6 +3461,39 @@ def flap_trips_in_window(entry: dict[str, Any], now: int) -> int:
     )
 
 
+def flap_occurrence_already_counted(entry: dict[str, Any], event_id: str, now: int) -> bool:
+    """#2428: one trip per distinct event OCCURRENCE, not per delivery attempt.
+
+    The dispatcher returns an undelivered event to the outbox with its
+    ORIGINAL identity, so every scan re-reads the same ``id`` while ordinary
+    (10-attempt) or transient-transport (240-attempt) retries are in flight.
+    Counting each re-scan as a trip measured dispatcher delivery attempts —
+    one stuck alert across five scans reached FLAP_TRIP_THRESHOLD and opened
+    a synthetic storm whose members then became suppressible.
+
+    Ids are remembered under ``entry["seenEventIds"]`` (id -> last-seen
+    epoch), refreshed on every sighting, pruned once unseen for
+    FLAP_SEEN_EVENT_RETENTION_SECONDS (i.e. after the event left the outbox),
+    and hard-capped at FLAP_SEEN_EVENT_MAX_IDS by dropping the oldest. An
+    id-less event cannot be deduped and falls back to per-scan counting
+    (the pre-#2428 behavior, fail-open).
+    """
+    if not event_id:
+        return False
+    seen = entry.get("seenEventIds")
+    if not isinstance(seen, dict):
+        seen = {}
+        entry["seenEventIds"] = seen
+    for stale in [k for k, t in seen.items() if not isinstance(t, (int, float)) or now - t > FLAP_SEEN_EVENT_RETENTION_SECONDS]:
+        seen.pop(stale, None)
+    already = event_id in seen
+    seen[event_id] = now
+    if len(seen) > FLAP_SEEN_EVENT_MAX_IDS:
+        for oldest in sorted(seen, key=lambda k: seen[k])[: len(seen) - FLAP_SEEN_EVENT_MAX_IDS]:
+            seen.pop(oldest, None)
+    return already
+
+
 def record_flap_trip(flap_state: dict[str, Any], key: str, now: int) -> dict[str, Any]:
     """Record one raw trip for incident_key at wall-clock `now`, pruning the
     sliding window. Counts input per raw trip (C1)."""
@@ -3645,6 +3687,13 @@ def flap_scan_outbox(paths: dict[str, Path], incident: IncidentStateCycle | None
             continue
         key = incident_key(event)
         try:
+            # #2428: a delivery retry of the SAME event occurrence must not
+            # re-trip — count once per distinct event id (see
+            # flap_occurrence_already_counted). The seen-map refresh is a
+            # state change even when no trip is recorded.
+            if flap_occurrence_already_counted(flap_entry(flap_state, key), str(event.get("id") or ""), now):
+                changed = True
+                continue
             entry = record_flap_trip(flap_state, key, now)
             changed = True
             decision = flap_evaluate(entry, now)
