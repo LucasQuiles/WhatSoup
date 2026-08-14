@@ -65,12 +65,12 @@ describe('database retention', () => {
       )
     `).run(TOOL_INPUT_MARKER, TOOL_RESULT_MARKERS.success);
     db.raw.prepare(`
-      INSERT INTO fact_export_queue (fact_id, chat_jid, payload_json, status, created_at, exported_at)
-      VALUES ('fact-old', 'chat@g.us', '{}', 'exported', datetime('now', '-45 days'), datetime('now', '-40 days'))
+      INSERT INTO fact_export_queue (fact_uid, fact_id, chat_jid, payload_json, state, created_at, exported_at)
+      VALUES ('fe_retentionold000000000r1', 'fact-old', 'chat@g.us', '{}', 'exported', datetime('now', '-45 days'), datetime('now', '-40 days'))
     `).run();
     db.raw.prepare(`
-      INSERT INTO fact_export_queue (fact_id, chat_jid, payload_json, status, created_at, exported_at)
-      VALUES ('fact-young', 'chat@g.us', '{}', 'exported', datetime('now', '-6 days'), datetime('now', '-5 days'))
+      INSERT INTO fact_export_queue (fact_uid, fact_id, chat_jid, payload_json, state, created_at, exported_at)
+      VALUES ('fe_retentionyoung0000000r1', 'fact-young', 'chat@g.us', '{}', 'exported', datetime('now', '-6 days'), datetime('now', '-5 days'))
     `).run();
 
     const result = runDatabaseRetention(db, {
@@ -561,8 +561,8 @@ describe('database retention', () => {
       )
     `).run(TOOL_INPUT_MARKER);
     db.raw.prepare(`
-      INSERT INTO fact_export_queue (fact_id, chat_jid, payload_json, status, created_at)
-      VALUES ('fact-pending', 'chat@g.us', '{}', 'pending', datetime('now', '-60 days'))
+      INSERT INTO fact_export_queue (fact_uid, fact_id, chat_jid, payload_json, state, created_at)
+      VALUES ('fe_retentionpending00000r1', 'fact-pending', 'chat@g.us', '{}', 'pending', datetime('now', '-60 days'))
     `).run();
 
     const result = runDatabaseRetention(db, DEFAULT_DATABASE_RETENTION);

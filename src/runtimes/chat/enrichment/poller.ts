@@ -261,8 +261,9 @@ export class EnrichmentPoller {
 
           // Enqueue validated facts for an external Pinecone exporter. Source
           // messages are marked processed after successful queueing, NOT after
-          // Pinecone write. A deployment-provided bridge, if configured, owns the
-          // remote upsert and calls markFactsExported after Pinecone confirms.
+          // Pinecone write. A deployment-provided bridge, if configured, leases
+          // due rows (leasePendingFacts), owns the remote upsert, and
+          // acknowledges per-row outcomes (ackFacts) after Pinecone confirms.
           //
           // Queue accounting-gated promotion: we only mark the segment's
           // messages as processed if the queue accepted every fact without
