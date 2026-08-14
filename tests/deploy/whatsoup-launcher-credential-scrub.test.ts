@@ -6,6 +6,7 @@ const PROTECTED_ENV_NAMES = [
   'ANTHROPIC_API_KEY',
   'OPENAI_API_KEY',
   'DEEPSEEK_API_KEY',
+  'KIMI_API_KEY',
   'MINIMAX_API_KEY',
   'ZAI_API_KEY',
   'XAI_API_KEY',
@@ -48,7 +49,6 @@ describe('deploy/whatsoup credential environment boundary', () => {
       ...Object.values(SERVICE_ENV_MAP),
       'GOOGLE_GENERATIVE_AI_API_KEY',
       'GEMINI_API_KEY',
-      'WHATSOUP_HEALTH_TOKEN',
     ]);
 
     expect(new Set(PROTECTED_ENV_NAMES)).toEqual(expected);

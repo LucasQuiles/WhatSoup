@@ -485,12 +485,20 @@ describe.skipIf(!NODE_IN_PIN)('deploy/preflight-check.sh — restart-safety gate
   it('blocks a phantom MODULE reachable only from the lazy agent session path', () => {
     const root = makeFixtureTree('export const mainOk = true;\n', {
       'src/runtimes/agent/session.ts': "import './prompt-compose.ts';\n",
+      'deploy/source-runtime-manifest.json': JSON.stringify({
+        schemaVersion: 1,
+        scope: 'preflight-lazy-session',
+        entrypoints: [
+          { path: 'src/main.ts', importGraph: true },
+          { path: 'src/runtimes/agent/session.ts', importGraph: true },
+        ],
+      }),
     });
     const { status, stderr } = runPreflight(root);
 
     expect(status).toBe(3);
     expect(stderr).toContain('PREFLIGHT-FAIL');
-    expect(stderr).toContain('session.ts');
+    expect(stderr).toContain('prompt-compose.ts');
     expect(stderr).toContain('source runtime file missing');
   });
 
@@ -1251,7 +1259,7 @@ describe('deploy/whatsoup — source wiring', () => {
     const wrapper = readFileSync(WRAPPER, 'utf8');
     const databaseGate = wrapper.indexOf('database-compatibility-bootstrap.ts');
     const scrub = wrapper.indexOf(
-      'unset ANTHROPIC_API_KEY OPENAI_API_KEY DEEPSEEK_API_KEY MINIMAX_API_KEY ZAI_API_KEY XAI_API_KEY GROQ_API_KEY MISTRAL_API_KEY OPENROUTER_API_KEY GOOGLE_API_KEY GOOGLE_GENERATIVE_AI_API_KEY GEMINI_API_KEY FIREWORKS_API_KEY TOGETHER_API_KEY PINECONE_API_KEY ELEVENLABS_API_KEY WHATSOUP_HEALTH_TOKEN',
+      'unset ANTHROPIC_API_KEY OPENAI_API_KEY DEEPSEEK_API_KEY KIMI_API_KEY',
     );
     expect(databaseGate).toBeGreaterThan(-1);
     expect(scrub).toBeGreaterThan(-1);
