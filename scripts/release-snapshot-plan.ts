@@ -515,6 +515,7 @@ function requireSourceTreeAtCommit(cwd: string, sourceCommit: string): void {
   const proc = spawnSync('git', ['-C', cwd, 'diff', '--quiet', sourceCommit, '--'], {
     encoding: 'utf8',
     env: cleanGitEnv(),
+    timeout: 30_000,
   });
   if (proc.status === 0) return;
   if (proc.status === 1) {
@@ -536,6 +537,7 @@ function requirePlanMatchesCommit(
     env: cleanGitEnv(),
     input: `${files.map((file) => `${sourceCommit}:${file.path}`).join('\n')}\n`,
     maxBuffer: totalBytes + files.length * 256 + 1024,
+    timeout: 30_000,
   });
   if (proc.status !== 0) {
     throw new Error((proc.stderr?.toString('utf8') || proc.error?.message || 'git cat-file batch read failed').trim());
