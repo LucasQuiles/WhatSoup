@@ -284,6 +284,21 @@ threshold must be documented and included in deploy/runtime manifests.
 
 ## Compatibility and Rollout
 
+### Adjacent live process-isolation finding
+
+Live validation exposed one independent crash mechanism that could otherwise obscure the health
+split. Two idle per-chat sessions entered graceful suspension and, three seconds later, a different
+active provider session exited with code 143 while the WhatSoup service PID remained stable. The
+process-tree reaper had promoted every PID in the shared service cgroup into the target session's
+owned set. Because a per-chat runtime deliberately hosts multiple provider trees in one service
+cgroup, membership proves co-location, not ownership.
+
+The compensating change keeps cgroup divergence as telemetry but signals only the provider root and
+its identity-checked PPID descendants. A controlled census test must prove that a cgroup-only sibling
+is observed and not signaled; existing reaping, ambiguity, shutdown, idle-eviction, checkpoint, and
+generation tests remain mandatory. Rollback of this compensation restores the sibling-termination
+risk and is therefore not a safe standalone rollback while per-chat sessions share a cgroup.
+
 1. Add producer fields and consumer parsing in one PR so no merged state loses
    visibility.
 2. Older consumers continue to read `status`, `status_reasons`, existing

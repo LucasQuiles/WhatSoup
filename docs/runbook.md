@@ -1383,21 +1383,44 @@ fingerprints and bounded taxonomy into the existing recovery ledger; it never st
 destination, manifest, or evidence values. Repeating the command is idempotent. Its JSON output
 contains only audit counts plus created/existing/unresolved/ambiguous ledger counts.
 
-After recording, `/health` reports `status: "healthy"` with a `recovery_debt` field (#2973
-Option A — continuity gaps no longer flip the top-level status). The `continuity` block and
-`continuity_gap_open`/`continuity_gap_unreadable` in `degradation_causes` are both preserved:
+After recording, authenticated `/health` reports the normalized recovery-debt projection separately
+from current service status. A readable retained continuity gap does not flip an otherwise healthy
+service to degraded. The compatibility `continuity` block remains available:
 
 ```json
 {
   "status": "healthy",
+  "status_reasons": [],
   "recovery_debt": {
     "open": true,
+    "service_blocking": false,
+    "attention": "routine",
     "reason": "continuity_gap_open",
+    "reasons": ["continuity_gap_open"],
     "continuity": {
       "readable": true,
       "open": 3,
       "unresolved": 2,
       "ambiguous": 1
+    },
+    "turn_recovery": {
+      "readable": true,
+      "blocking_outstanding": 0,
+      "retained_terminal": 0,
+      "open_catchups": 0,
+      "corroborated_retained": 0
+    },
+    "completed_delivery_identity": {
+      "readable": true,
+      "blocking": 0,
+      "retained": 0,
+      "next_action": null
+    },
+    "delivery": {
+      "readable": true,
+      "uncorroborated_ambiguous": 0,
+      "corroborated_retained": 0,
+      "oldest_uncorroborated_at": null
     }
   },
   "continuity": {
@@ -1409,8 +1432,11 @@ Option A — continuity gaps no longer flip the top-level status). The `continui
 }
 ```
 
-If the ledger cannot be parsed exactly, health reports `recovery_debt.reason: "continuity_gap_unreadable"`
-with `degradation_causes` still containing `continuity_gap_unreadable`.
+If any required recovery evidence cannot be parsed exactly, health fails closed with
+`status: "degraded"`, `status_reasons: ["recovery_debt_blocking"]`,
+`recovery_debt.service_blocking: true`, and `attention: "urgent"`. A malformed or contradictory
+present debt projection is likewise not valid green evidence for release, heal, watchdog, or fleet
+consumers.
 Recording does not send, replay, synthesize an inbound, or close a gap. Do not edit the recovery
 rows to force green health; controlled catch-up and terminal closure require a later proof-bound
 mechanism.
@@ -1750,6 +1776,7 @@ Migration 51 removes old raw columns from the live schema, but migration success
 |--------|-------|-----------------|
 | WhatsApp connected | `health.whatsapp.connected` | False for >2 min |
 | Health status | `health.status` | `unhealthy` |
+| Recovery debt | `health.recovery_debt.open` / `service_blocking` / `attention` | Retained `routine` debt needs operator review but is not an outage; `service_blocking=true` is owned by degraded health. |
 | Enrichment staleness | `health.enrichment.last_run` | Null or >15 min ago (chat instances only) |
 | Quarantined outbound ops | `health.durability.outboundQuarantineDispositions` | Any `delivery_ambiguous_unsafe` or `legacy_unclassified` group needs review; coarse count alone does not prove loss. |
 | Pending outbound | `health.durability.pendingOutbound` | >50 (queue buildup) |
@@ -1776,6 +1803,7 @@ machine-readable disposition registry for sources that participate in fault clas
 | Source | Producer owner | Policy / proof owner |
 |---|---|---|
 | `health_body_degraded`, `instance_never_reachable` | `src/fleet/health-poller.ts` | `deploy/scripts/bot-errors-dispatcher.py`; verify the complete health body, transport connection, service generation, and recovery gauges |
+| `recovery_debt_attention` | `src/fleet/health-poller.ts` | Informational, non-paging operator debt lifecycle; clear only from a fresh readable `open=false` sample and never restart or heal from this source alone. |
 | `whatsapp_device_bond_lost` | `src/transport/connection.ts` and fleet health polling | Physical linked-device state; never infer repair from HTTP reachability |
 | `outbound_flood` | `src/transport/connection.ts` | `src/core/health.ts`; correlate distinct sends, source inbound IDs, and echo state |
 | `bead_proposal_backlog` | `src/core/substrate/poller.ts` | Proposal state and `review_by_at`, not message volume |

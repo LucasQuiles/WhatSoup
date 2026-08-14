@@ -798,20 +798,24 @@ work that requires provenance-labeled operator catch-up and emits no identifiers
 After that dry run, `record-continuity-manifest --confirm-record` can persist only the
 `absent`, `observed_not_admitted`, and `ambiguous` classifications in the existing recovery
 ledger. Durable identities and evidence are SHA-256 fingerprints; no raw receipt, destination,
-manifest, or evidence value is written. Repeated recording is idempotent. `/health` exposes open/unresolved/ambiguous counts in a `continuity`
-block and a `recovery_debt` field (status stays `"healthy"` when only continuity gaps are present —
-see `docs/runbook.md` §7.6 or issue #2973); `degradation_causes` still includes `continuity_gap_open`
-or `continuity_gap_unreadable` for diagnostic consumers. The recorder does not send,
+manifest, or evidence value is written. Repeated recording is idempotent. `/health` exposes
+open/unresolved/ambiguous counts in a `continuity` block and includes them in the normalized
+`recovery_debt` projection. Readable retained obligations use `open=true`,
+`service_blocking=false`, and `attention="routine"` without changing an otherwise healthy service
+status. Unreadable or actionable recovery evidence uses `service_blocking=true`,
+`attention="urgent"`, and degrades service health; see `docs/runbook.md` §7.6. Compatibility
+`degradation_causes` may still include continuity reason codes for diagnostic consumers, but those
+codes are not independently an outage verdict. The recorder does not send,
 replay, admit, or close work. A later proof-bound catch-up lane must close these rows only after an
 exact provenance link and terminal delivery proof exist.
 Admission blocks only `pending` or `claimed` jobs plus orphan transfers, and only on the affected
 per-chat or global scope. When the selected delivery is provably dead (`failed_permanent`/
 `quarantined`) the job can never echo-settle, so the stuck-inbound reclaim (§4.7) drives a
 `pending`/`claimed` owning job to `exhausted` and fails its source inbound, releasing the scope.
-Terminal `blocked_unsafe` and `exhausted` jobs do not block admission;
-an isolated blocked-unsafe receipt is retained but does not make health degraded. Exhausted work,
-an unmatched `recovery_pending_operator_catchup` link, corrupt proof, or a recorded echo conflict
-independently keeps health degraded until operator closure or retention resolution. Appending the
+Terminal `blocked_unsafe` and `exhausted` jobs do not block admission; isolated terminal receipts
+and historical catch-ups remain visible as retained recovery debt without making health degraded.
+Pending/claimed work, orphan transfers, active finalization, corrupt or unclassified proof, and
+uncorroborated delivery ambiguity are blocking. Appending the
 matching `superseded_by_operator_catchup` closure removes that catch-up from the live gauge without
 rewriting either durable disposition.
 
