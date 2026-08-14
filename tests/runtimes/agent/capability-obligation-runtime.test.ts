@@ -1243,7 +1243,10 @@ describe('helpers', () => {
     // A different conversation with a SINGLE head in the same map still correlates.
     const mixed = new Map([
       ...contexts,
-      ['chat-c', [{ identity: { conversationKey: 'conv-single', logicalTurnId: 'lt-single', inboundSeq: 3 } }]],
+      [
+        'chat-c',
+        [{ identity: { conversationKey: 'conv-single', logicalTurnId: 'lt-single', inboundSeq: 3 } }] as unknown as readonly RuntimeTurnContext[],
+      ] as const,
     ]) as unknown as ReadonlyMap<string, readonly RuntimeTurnContext[]>;
     expect(turnCorrelationFromContexts(mixed, 'conv-single')).toEqual({ logicalTurnId: 'lt-single', inboundSeq: 3 });
   });
