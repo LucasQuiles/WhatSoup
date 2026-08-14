@@ -14,6 +14,7 @@ import json
 import math
 import os
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 import socket
 import subprocess
@@ -625,44 +626,110 @@ def central_down_max_age_seconds() -> int:
         return DEFAULT_CENTRAL_DOWN_ALERT_SECONDS
 
 
-def central_ack_inventory(path: Optional[Path], now: float) -> dict:
+def central_ack_max_skew_seconds() -> int:
+    raw = os.environ.get("BOT_ERRORS_SELFCHECK_CENTRAL_ACK_MAX_SKEW_SECONDS", str(5 * 60))
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 5 * 60
+
+
+def central_ack_max_bytes() -> int:
+    raw = os.environ.get("BOT_ERRORS_SELFCHECK_CENTRAL_ACK_MAX_BYTES", str(64 * 1024))
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 64 * 1024
+
+
+def parse_iso_epoch(value: object) -> Optional[float]:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(f"{text[:-1]}+00:00" if text.endswith("Z") else text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc).timestamp()
+
+
+CENTRAL_ACK_REQUIRED_STR_FIELDS = ("host", "ackedAt", "centralClass", "centralAction")
+_CENTRAL_ACK_DIGEST_DOMAIN = b"bot-errors-central-ack-receipt:"
+
+
+def central_ack_receipt_digest(raw: bytes) -> str:
+    return hashlib.sha256(_CENTRAL_ACK_DIGEST_DOMAIN + raw).hexdigest()
+
+
+def central_ack_inventory(path: Optional[Path], now: float, expected_host: object) -> dict:
+    """Validate the central acknowledgement receipt (#2468 slice 1).
+
+    Freshness is anchored to the receipt's own ``ackedAt`` claim, never the
+    file mtime — touching or copying a file must not manufacture central
+    proof. Every rejection carries a bounded status class; raw payload
+    content never leaves this dict except as an opaque digest.
+    """
     if path is None:
         return {"configured": False, "mode": "local_only", "status": "not_configured"}
     max_age = central_ack_max_age_seconds()
+    base = {"configured": True, "mode": "local_only", "path": str(path), "maxAgeSeconds": max_age}
     try:
         if path.is_symlink():
-            return {
-                "configured": True,
-                "mode": "local_only",
-                "status": "symlink",
-                "path": str(path),
-                "maxAgeSeconds": max_age,
-            }
+            return {**base, "status": "symlink"}
         stat = path.stat()
     except FileNotFoundError:
-        return {"configured": True, "mode": "local_only", "status": "missing", "path": str(path), "maxAgeSeconds": max_age}
+        return {**base, "status": "missing"}
     except OSError as exc:
-        return {
-            "configured": True,
-            "mode": "local_only",
-            "status": f"stat_error:{type(exc).__name__}",
-            "path": str(path),
-            "maxAgeSeconds": max_age,
-        }
+        return {**base, "status": f"stat_error:{type(exc).__name__}"}
     raw_age = int(now - stat.st_mtime)
     if raw_age < 0:
-        return {
-            "configured": True,
-            "mode": "local_only",
-            "status": "future_mtime",
-            "path": str(path),
-            "futureBySeconds": abs(raw_age),
-            "maxAgeSeconds": max_age,
-        }
-    age = raw_age
-    status = "fresh" if age <= max_age else "stale"
-    mode = "central_acked" if status == "fresh" else "local_only"
-    return {"configured": True, "mode": mode, "status": status, "path": str(path), "ageSeconds": age, "maxAgeSeconds": max_age}
+        return {**base, "status": "future_mtime", "futureBySeconds": abs(raw_age)}
+    max_bytes = central_ack_max_bytes()
+    if stat.st_size > max_bytes:
+        return {**base, "status": "oversized", "sizeBytes": int(stat.st_size), "maxSizeBytes": max_bytes}
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        return {**base, "status": f"read_error:{type(exc).__name__}"}
+    if len(raw) > max_bytes:
+        return {**base, "status": "oversized", "sizeBytes": len(raw), "maxSizeBytes": max_bytes}
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return {**base, "status": "malformed_json"}
+    if not isinstance(payload, dict):
+        return {**base, "status": "malformed_json"}
+    digest = central_ack_receipt_digest(raw)
+    schema_version = payload.get("schemaVersion")
+    if not isinstance(schema_version, int) or isinstance(schema_version, bool) or schema_version != 1:
+        return {**base, "status": "wrong_schema", "receiptDigest": digest}
+    for field in CENTRAL_ACK_REQUIRED_STR_FIELDS:
+        value = payload.get(field)
+        if not isinstance(value, str) or not value.strip():
+            return {**base, "status": "wrong_schema", "receiptDigest": digest}
+    if not isinstance(expected_host, str) or payload["host"] != expected_host:
+        return {**base, "status": "wrong_subject", "receiptDigest": digest}
+    acked_epoch = parse_iso_epoch(payload["ackedAt"])
+    if acked_epoch is None:
+        return {**base, "status": "malformed_timestamp", "receiptDigest": digest}
+    if acked_epoch > now + central_ack_max_skew_seconds():
+        return {**base, "status": "future_receipt", "futureBySeconds": int(acked_epoch - now), "receiptDigest": digest}
+    age = max(0, int(now - acked_epoch))
+    if age > max_age:
+        return {**base, "status": "stale_payload", "ageSeconds": age, "receiptDigest": digest}
+    return {
+        **base,
+        "mode": "central_acked",
+        "status": "fresh",
+        "ageSeconds": age,
+        "receiptDigest": digest,
+        "receiptAckedAt": payload["ackedAt"],
+        "receiptAckedAtEpoch": acked_epoch,
+    }
 
 
 def update_central_ack_watch(memory: dict, central_ack: dict, now: float) -> None:
@@ -672,10 +739,44 @@ def update_central_ack_watch(memory: dict, central_ack: dict, now: float) -> Non
     threshold = central_down_max_age_seconds()
     central_ack["centralDownMaxAgeSeconds"] = threshold
     if central_ack.get("mode") == "central_acked":
+        # Ordering guards can only DOWNGRADE a structurally valid receipt:
+        # a receipt older than the accepted high-water mark, or one that
+        # contradicts a previously seen receipt for the same ackedAt, must
+        # not clear a local-only episode (#2468 replay/contradiction rules).
+        acked_epoch = finite_float(central_ack.get("receiptAckedAtEpoch"))
+        digest = central_ack.get("receiptDigest")
+        last_seen = memory.get("centralAckLastSeen")
+        high_water = finite_float(memory.get("centralAckHighWater"))
+        if (
+            acked_epoch is not None
+            and isinstance(last_seen, dict)
+            and finite_float(last_seen.get("ackedAtEpoch")) == acked_epoch
+            and last_seen.get("digest") != digest
+        ):
+            central_ack["mode"] = "local_only"
+            central_ack["status"] = "contradictory"
+        elif acked_epoch is not None and high_water is not None and acked_epoch < high_water:
+            central_ack["mode"] = "local_only"
+            central_ack["status"] = "out_of_order"
+    if central_ack.get("mode") == "central_acked":
+        acked_epoch = finite_float(central_ack.get("receiptAckedAtEpoch"))
+        digest = central_ack.get("receiptDigest")
+        if acked_epoch is not None:
+            high_water = finite_float(memory.get("centralAckHighWater"))
+            memory["centralAckHighWater"] = max(high_water, acked_epoch) if high_water is not None else acked_epoch
+            memory["centralAckLastSeen"] = {"ackedAtEpoch": acked_epoch, "digest": digest}
+            memory["centralAckLastValid"] = {
+                "ackedAt": central_ack.get("receiptAckedAt"),
+                "digest": digest,
+                "recordedAt": now_iso(now),
+            }
         memory.pop("centralAckLocalOnlySince", None)
         central_ack["centralDownSuspected"] = False
         return
 
+    last_valid = memory.get("centralAckLastValid")
+    if isinstance(last_valid, dict):
+        central_ack["lastValid"] = dict(last_valid)
     since = finite_float(memory.get("centralAckLocalOnlySince"))
     if since is None or since > now:
         since = now
@@ -1045,7 +1146,7 @@ def run_selfcheck(config: SelfcheckConfig, deps: Optional[SelfcheckDeps] = None,
         status["problems"] = [f"lever stat failed: {r}" for r in lever_stat_errors]
         status["consecutive"] = update_consecutive(memory, status["class"])
         return finalize_status(config, deps, memory, status)
-    status["centralAck"] = central_ack_inventory(config.central_ack_path, now)
+    status["centralAck"] = central_ack_inventory(config.central_ack_path, now, status.get("host"))
     update_central_ack_watch(memory, status["centralAck"], now)
 
     try:

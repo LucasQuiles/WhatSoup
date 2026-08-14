@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-08-14T02:05:22Z",
+  "generatedAt": "2026-08-14T03:39:34Z",
   "scope": "bot-errors-runtime-scripts",
   "expectedHeadShaPolicy": "populated at deploy time by deploy step; absent here so committed state is observability-only",
   "files": [
@@ -225,7 +225,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-selfcheck.py",
-      "sha256": "af6ed1081f4b6f9f8d0e0484627b8ab1c1299638eac024e263e5ba92caa19629",
+      "sha256": "5f040843c6c420c077e246d8430a9d078fb08742274197b3fb0ab14cc92bdcfc",
       "mustContain": [
         "SAFE_HEAL_CLASSES",
         "HEAL_WINDOW_SECONDS"
