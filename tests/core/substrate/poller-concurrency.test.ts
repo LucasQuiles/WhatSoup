@@ -140,17 +140,30 @@ describe('TriggerPoller — hang isolation and bounded concurrency (#2566 slice 
       maxConcurrentExecutors: 2,
     });
 
+    // Deterministic overlap: each mock execution parks on a gate the test
+    // releases explicitly — no wall-clock sleeps.
     let active = 0;
     let peak = 0;
+    const gates: Array<() => void> = [];
     vi.spyOn(poller as unknown as ExecSpy, 'executeTrigger').mockImplementation(async () => {
       active++;
       peak = Math.max(peak, active);
-      await new Promise((resolve) => setTimeout(resolve, 20));
+      await new Promise<void>((resolve) => { gates.push(resolve); });
       active--;
       return { status: 'noop', fired: false, outputSummary: 'probe ok', outputJson: {} };
     });
 
-    await poller.tickOnce();
+    const tick = poller.tickOnce();
+    // With 6 pending probes and a pool of 2, exactly 2 park concurrently.
+    await vi.waitFor(() => expect(gates.length).toBe(2));
+    expect(active).toBe(2);
+    let released = 0;
+    while (released < 6) {
+      await vi.waitFor(() => expect(gates.length).toBeGreaterThan(0));
+      gates.shift()!();
+      released++;
+    }
+    await tick;
     expect(peak).toBe(2);
     for (const t of triggers) {
       expect(occurrenceStates(db, t.id)).toEqual(['noop']);
@@ -213,17 +226,27 @@ describe('TriggerPoller — hang isolation and bounded concurrency (#2566 slice 
       maxConcurrentExecutors: 4,
     });
 
+    // Deterministic overlap probe: each execution parks on a gate; if the
+    // serial lane ever ran two side-effecting triggers concurrently, two
+    // gates would accumulate before any release.
     let active = 0;
     let peak = 0;
+    const gates: Array<() => void> = [];
     vi.spyOn(poller as unknown as ExecSpy, 'executeTrigger').mockImplementation(async () => {
       active++;
       peak = Math.max(peak, active);
-      await new Promise((resolve) => setTimeout(resolve, 15));
+      await new Promise<void>((resolve) => { gates.push(resolve); });
       active--;
       return { status: 'ok', fired: false, outputSummary: 'cron ok', outputJson: {} };
     });
 
-    await poller.tickOnce();
+    const tick = poller.tickOnce();
+    for (let released = 0; released < 3; released++) {
+      await vi.waitFor(() => expect(gates.length).toBe(1));
+      expect(active).toBe(1);
+      gates.shift()!();
+    }
+    await tick;
     expect(peak).toBe(1);
     for (const t of triggers) {
       expect(occurrenceStates(db, t.id)).toEqual(['ok']);
