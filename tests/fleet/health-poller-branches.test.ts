@@ -137,6 +137,7 @@ function recoveryDebt(overrides: Record<string, unknown> = {}): Record<string, u
     },
     delivery: {
       readable: true,
+      blocking_ambiguous: 0,
       uncorroborated_ambiguous: 0,
       corroborated_retained: 0,
       oldest_uncorroborated_at: null,
@@ -167,11 +168,12 @@ describe('recovery debt parser contract', () => {
       'recovery_debt.service_blocking_contradiction',
     ],
     [
-      'uncorroborated delivery ambiguity marked non-blocking',
+      'blocking delivery gauge marked non-blocking',
       recoveryDebt({
         reasons: ['uncorroborated_delivery_ambiguity'],
         delivery: {
           readable: true,
+          blocking_ambiguous: 1,
           uncorroborated_ambiguous: 1,
           corroborated_retained: 0,
           oldest_uncorroborated_at: '2026-08-14 05:09:26',
@@ -194,6 +196,7 @@ describe('recovery debt parser contract', () => {
         reasons: ['uncorroborated_delivery_ambiguity', 'historical_turn_catchup'],
         delivery: {
           readable: true,
+          blocking_ambiguous: 1,
           uncorroborated_ambiguous: 1,
           corroborated_retained: 0,
           oldest_uncorroborated_at: '2026-08-14 05:09:26',
@@ -206,8 +209,26 @@ describe('recovery debt parser contract', () => {
         serviceBlocking: true,
         attention: 'urgent',
         reasons: ['uncorroborated_delivery_ambiguity', 'historical_turn_catchup'],
-        total: 2,
+        gaugeTotal: 2,
       },
+    });
+  });
+
+  it('accepts fresh uncorroborated ambiguity as routine debt', () => {
+    expect(parseRecoveryDebtHealth({
+      recovery_debt: recoveryDebt({
+        reasons: ['uncorroborated_delivery_ambiguity'],
+        delivery: {
+          readable: true,
+          blocking_ambiguous: 0,
+          uncorroborated_ambiguous: 1,
+          corroborated_retained: 0,
+          oldest_uncorroborated_at: '2026-08-14 05:09:26',
+        },
+      }),
+    })).toMatchObject({
+      kind: 'valid',
+      summary: { open: true, serviceBlocking: false, attention: 'routine' },
     });
   });
 });

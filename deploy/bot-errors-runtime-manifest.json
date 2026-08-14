@@ -364,7 +364,7 @@
     },
     {
       "path": "deploy/scripts/lib/classify_health.py",
-      "sha256": "bb41e782630eaaaf23fb19b5bc37d0d569b6fca1d997f119c1647c6b15606554",
+      "sha256": "41dcbba99aea58cec563ed83119d770450cc23dde94ca666378d2670b887b5ed",
       "mustContain": [
         "def classify(d: object) -> str:",
         "def recovery_debt_issue(d: object) -> Optional[str]:"

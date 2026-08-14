@@ -40,6 +40,7 @@ export interface RecoveryDebtSnapshot {
   };
   delivery: {
     readable: boolean;
+    blocking_ambiguous: number;
     uncorroborated_ambiguous: number;
     corroborated_retained: number;
     oldest_uncorroborated_at: string | null;
@@ -234,6 +235,7 @@ function normalizeDelivery(value: RecoveryDebtEvidence['durability']): {
   const unreadable = {
     delivery: {
       readable: false,
+      blocking_ambiguous: 0,
       uncorroborated_ambiguous: 0,
       corroborated_retained: 0,
       oldest_uncorroborated_at: null,
@@ -249,10 +251,15 @@ function normalizeDelivery(value: RecoveryDebtEvidence['durability']): {
   const uncorroborated = count(source['uncorroboratedAmbiguous']);
   const corroborated = count(source['corroboratedRetained']);
   const oldest = source['oldestUncorroboratedAt'];
+  const oldestMs = typeof oldest === 'string'
+    ? Date.parse(oldest.includes('T') ? oldest : `${oldest.replace(' ', 'T')}Z`)
+    : Number.NaN;
   if (
     uncorroborated === null
     || corroborated === null
     || (oldest !== null && typeof oldest !== 'string')
+    || (uncorroborated > 0 && !Number.isFinite(oldestMs))
+    || (uncorroborated === 0 && oldest !== null)
     || typeof value.deliveryBlocking !== 'boolean'
     || (value.deliveryBlocking && uncorroborated === 0)
   ) return unreadable;
@@ -262,6 +269,7 @@ function normalizeDelivery(value: RecoveryDebtEvidence['durability']): {
   return {
     delivery: {
       readable: true,
+      blocking_ambiguous: value.deliveryBlocking ? uncorroborated : 0,
       uncorroborated_ambiguous: uncorroborated,
       corroborated_retained: corroborated,
       oldest_uncorroborated_at: oldest,

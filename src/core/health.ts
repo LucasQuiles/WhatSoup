@@ -1638,9 +1638,11 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       // UTC datetimes for the active ambiguity episode or a fail-closed stale
       // sentinel, so normalize that bounded value before parsing.
       const durabilityStats = deps.durability?.getHealthStats() ?? null;
+      const oldestUncorroboratedMaybeSentAt =
+        durabilityStats?.deliveryAmbiguity?.oldestUncorroboratedAt ?? null;
       const oldestMaybeSentMs =
-        durabilityStats?.oldestMaybeSentAt != null && durabilityStats.oldestMaybeSentAt !== ''
-          ? Date.parse(durabilityStats.oldestMaybeSentAt.replace(' ', 'T') + 'Z')
+        oldestUncorroboratedMaybeSentAt !== '' && oldestUncorroboratedMaybeSentAt !== null
+          ? Date.parse(oldestUncorroboratedMaybeSentAt.replace(' ', 'T') + 'Z')
           : Number.NaN;
       const durabilityDebtIsDegraded =
         Number.isFinite(oldestMaybeSentMs)

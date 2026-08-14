@@ -330,7 +330,7 @@ describe('Ops page fleet states', () => {
           serviceBlocking: false,
           attention: 'routine',
           reasons: ['historical_turn_catchup'],
-          total: 1,
+          gaugeTotal: 1,
         },
       })],
     })

@@ -627,6 +627,80 @@ describe('GET /health', () => {
     }
   });
 
+  it('keeps a stale corroborated maybe_sent delivery as retained debt without degrading service', async () => {
+    const db2 = makeDb();
+    const durability = new DurabilityEngine(db2);
+    const conversationKey = 'health-corroborated-conversation';
+    const deliveryJid = 'health-corroborated@g.us';
+    const inboundSeq = durability.journalInbound(
+      'health-corroborated-message',
+      conversationKey,
+      deliveryJid,
+      'agent',
+    );
+    const selectedOpId = durability.createOutboundOp({
+      conversationKey,
+      chatJid: deliveryJid,
+      opType: 'text',
+      payload: '{}',
+      replayPolicy: 'unsafe',
+      sourceInboundSeq: inboundSeq,
+      isTerminal: true,
+    });
+    durability.markSending(selectedOpId);
+    durability.markMaybeSent(selectedOpId, 'transport result unknown');
+    db2.raw.prepare(
+      "UPDATE outbound_ops SET ambiguity_at = datetime('now', '-3600 seconds') WHERE id = ?",
+    ).run(selectedOpId);
+    db2.raw.prepare(`
+      INSERT INTO turn_terminal_records (
+        scope, conversation_key, delivery_jid, inbound_seq, inbound_seq_key,
+        logical_turn_id, manager_id, generation, attempt_kind,
+        inbound_disposition, delivery_kind, delivery_op_id,
+        reply_guarantee_disarmed
+      ) VALUES ('per_chat', ?, ?, ?, ?, 'health-corroborated-turn',
+                'health-corroborated-manager', 1, 'failed', 'failed_terminal',
+                'delivery_unknown', ?, 0)
+    `).run(conversationKey, deliveryJid, inboundSeq, inboundSeq, selectedOpId);
+    const corroboratingOpId = durability.createOutboundOp({
+      conversationKey,
+      chatJid: deliveryJid,
+      opType: 'text',
+      payload: '{}',
+      replayPolicy: 'unsafe',
+      sourceInboundSeq: inboundSeq,
+    });
+    durability.markSending(corroboratingOpId);
+    durability.markSubmitted(corroboratingOpId, 'WA_HEALTH_CORROBORATED');
+    durability.markEchoed(corroboratingOpId);
+    durability.postConnectRecovery();
+
+    const { server: server2, port: port2 } = await buildTestServer(makeDeps(db2, { durability }));
+    try {
+      const { status, body } = await healthReq(port2);
+      const json = JSON.parse(body);
+      expect(status).toBe(200);
+      expect(json.status).toBe('healthy');
+      expect(json.status_reasons).toEqual([]);
+      expect(json.recovery_debt).toMatchObject({
+        open: true,
+        service_blocking: false,
+        attention: 'routine',
+        reasons: ['corroborated_delivery_retained'],
+        delivery: {
+          blocking_ambiguous: 0,
+          uncorroborated_ambiguous: 0,
+          corroborated_retained: 1,
+          oldest_uncorroborated_at: null,
+        },
+      });
+      expect(json.durability.oldestMaybeSentAt).not.toBeNull();
+    } finally {
+      await new Promise<void>((resolve) => server2.close(() => resolve()));
+      db2.close();
+    }
+  });
+
   it('projects only the redacted quarantine aggregate to authenticated health diagnostics', async () => {
     const db2 = makeDb();
     const durability = new DurabilityEngine(db2);
@@ -2285,6 +2359,7 @@ describe('GET /health', () => {
       },
       delivery: {
         readable: true,
+        blocking_ambiguous: 0,
         uncorroborated_ambiguous: 0,
         corroborated_retained: 0,
         oldest_uncorroborated_at: null,

@@ -151,7 +151,7 @@ describe('handleGetLines', () => {
       serviceBlocking: false,
       attention: 'routine' as const,
       reasons: ['historical_turn_catchup'],
-      total: 2,
+      gaugeTotal: 2,
     };
     const status = fakeStatus({
       name: 'debt-line',

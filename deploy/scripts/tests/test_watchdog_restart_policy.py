@@ -81,6 +81,39 @@ _CONNECTED = {
 }
 
 
+def _debt(**overrides) -> dict:
+    value = {
+        "open": True,
+        "service_blocking": False,
+        "attention": "routine",
+        "reason": None,
+        "reasons": ["historical_turn_catchup"],
+        "continuity": {"readable": True, "open": 0, "unresolved": 0, "ambiguous": 0},
+        "turn_recovery": {
+            "readable": True,
+            "blocking_outstanding": 0,
+            "retained_terminal": 0,
+            "open_catchups": 1,
+            "corroborated_retained": 0,
+        },
+        "completed_delivery_identity": {
+            "readable": True,
+            "blocking": 0,
+            "retained": 0,
+            "next_action": None,
+        },
+        "delivery": {
+            "readable": True,
+            "blocking_ambiguous": 0,
+            "uncorroborated_ambiguous": 0,
+            "corroborated_retained": 0,
+            "oldest_uncorroborated_at": None,
+        },
+    }
+    value.update(overrides)
+    return value
+
+
 def _health(status: str, **overrides) -> dict:
     body = {
         "status": status,
@@ -108,25 +141,35 @@ class TestNoRestartWhenConnected:
         assert _run_decision(_health("degraded")) == 0
 
     def test_degraded_blocking_recovery_debt_no_restart(self):
-        assert _run_decision(_health("degraded", recovery_debt={
-            "open": True,
-            "service_blocking": True,
-            "attention": "urgent",
-        })) == 0
+        assert _run_decision(_health("degraded", recovery_debt=_debt(
+            service_blocking=True,
+            attention="urgent",
+            reasons=["turn_recovery_actionable"],
+            turn_recovery={
+                "readable": True,
+                "blocking_outstanding": 1,
+                "retained_terminal": 0,
+                "open_catchups": 0,
+                "corroborated_retained": 0,
+            },
+        ))) == 0
 
     def test_healthy_retained_recovery_debt_no_restart(self):
-        assert _run_decision(_health("healthy", recovery_debt={
-            "open": True,
-            "service_blocking": False,
-            "attention": "routine",
-        })) == 0
+        assert _run_decision(_health("healthy", recovery_debt=_debt())) == 0
 
     def test_healthy_blocking_recovery_debt_is_health_unknown(self):
-        assert _run_decision(_health("healthy", recovery_debt={
-            "open": True,
-            "service_blocking": True,
-            "attention": "urgent",
-        })) == 6
+        assert _run_decision(_health("healthy", recovery_debt=_debt(
+            service_blocking=True,
+            attention="urgent",
+            reasons=["turn_recovery_actionable"],
+            turn_recovery={
+                "readable": True,
+                "blocking_outstanding": 1,
+                "retained_terminal": 0,
+                "open_catchups": 0,
+                "corroborated_retained": 0,
+            },
+        ))) == 6
 
     def test_malformed_recovery_debt_is_health_unknown(self):
         assert _run_decision(_health("healthy", recovery_debt={

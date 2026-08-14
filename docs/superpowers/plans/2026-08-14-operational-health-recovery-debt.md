@@ -8,6 +8,9 @@
 
 **Tech Stack:** TypeScript, SQLite/better-sqlite3, Vitest, React, Python unittest/pytest-compatible scripts, Bash deployment templates, JSON fault taxonomy.
 
+**Execution status:** Implemented through the independent-review remediation pass. Final exact-head
+verification, current-main range comparison, PR publication, and controlled live rollout remain.
+
 ## Global Constraints
 
 - Keep `healthy | degraded | unhealthy`; do not add a fourth status enum.
@@ -332,7 +335,7 @@ export interface RecoveryDebtSnapshot {
   continuity: ContinuityGapHealth;
   turn_recovery: { readable: boolean; blocking_outstanding: number; retained_terminal: number; open_catchups: number; corroborated_retained: number };
   completed_delivery_identity: { readable: boolean; blocking: number; retained: number; next_action: 'fresh_inbound' | 'operator' | null };
-  delivery: { readable: boolean; uncorroborated_ambiguous: number; corroborated_retained: number; oldest_uncorroborated_at: string | null };
+  delivery: { readable: boolean; blocking_ambiguous: number; uncorroborated_ambiguous: number; corroborated_retained: number; oldest_uncorroborated_at: string | null };
 }
 ```
 
@@ -418,7 +421,7 @@ recoveryDebt: {
   serviceBlocking: boolean;
   attention: 'none' | 'routine' | 'urgent';
   reasons: string[];
-  total: number;
+  gaugeTotal: number;
 } | null;
 ```
 

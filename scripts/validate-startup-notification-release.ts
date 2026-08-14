@@ -74,7 +74,43 @@ function reject(issues: string[]): StartupNotificationReleaseValidationResult {
   return { exitCode: 1, outcome: 'rejected', issues };
 }
 
-function recoveryDebtIssue(health: Record<string, unknown>): string | null {
+const RECOVERY_DEBT_REASON_ORDER = [
+  'continuity_gap_unreadable',
+  'continuity_gap_open',
+  'recovery_evidence_unreadable',
+  'delivery_evidence_unreadable',
+  'turn_finalization_active',
+  'turn_recovery_actionable',
+  'turn_recovery_integrity',
+  'turn_recovery_unclassified',
+  'completed_delivery_identity_unclassified',
+  'uncorroborated_delivery_ambiguity',
+  'turn_recovery_terminal',
+  'turn_recovery_quarantined',
+  'historical_turn_catchup',
+  'corroborated_delivery_retained',
+  'completed_delivery_identity_fresh_inbound',
+  'completed_delivery_identity_operator',
+] as const;
+const RECOVERY_DEBT_REASON_INDEX = new Map<string, number>(
+  RECOVERY_DEBT_REASON_ORDER.map((reason, index) => [reason, index]),
+);
+const RECOVERY_DEBT_BLOCKING_REASONS = new Set([
+  'continuity_gap_unreadable',
+  'recovery_evidence_unreadable',
+  'delivery_evidence_unreadable',
+  'turn_finalization_active',
+  'turn_recovery_actionable',
+  'turn_recovery_integrity',
+  'turn_recovery_unclassified',
+  'completed_delivery_identity_unclassified',
+]);
+
+function recoveryCount(value: unknown): number | null {
+  return Number.isSafeInteger(value) && (value as number) >= 0 ? value as number : null;
+}
+
+export function recoveryDebtIssue(health: Record<string, unknown>): string | null {
   if (!Object.hasOwn(health, 'recovery_debt')) return null;
   const debt = health.recovery_debt;
   if (!isRecord(debt)) return 'recovery_debt_invalid';
@@ -86,8 +122,73 @@ function recoveryDebtIssue(health: Record<string, unknown>): string | null {
     || typeof serviceBlocking !== 'boolean'
     || (attention !== 'none' && attention !== 'routine' && attention !== 'urgent')
   ) return 'recovery_debt_invalid';
+  const reasons = debt.reasons;
+  if (
+    !Array.isArray(reasons)
+    || reasons.length > 32
+    || reasons.some((reason) => typeof reason !== 'string' || !RECOVERY_DEBT_REASON_INDEX.has(reason))
+    || new Set(reasons).size !== reasons.length
+    || reasons.some((reason, index) => (
+      index > 0
+      && RECOVERY_DEBT_REASON_INDEX.get(reason as string)! <= RECOVERY_DEBT_REASON_INDEX.get(reasons[index - 1] as string)!
+    ))
+  ) return 'recovery_debt_invalid';
+  const continuity = debt.continuity;
+  const turnRecovery = debt.turn_recovery;
+  const identity = debt.completed_delivery_identity;
+  const delivery = debt.delivery;
+  if (![continuity, turnRecovery, identity, delivery].every(isRecord)) {
+    return 'recovery_debt_invalid';
+  }
+  const sections = [continuity, turnRecovery, identity, delivery] as Record<string, unknown>[];
+  if (sections.some((section) => typeof section.readable !== 'boolean')) {
+    return 'recovery_debt_invalid';
+  }
+  const countFields: Array<readonly [Record<string, unknown>, string]> = [
+    [continuity as Record<string, unknown>, 'open'],
+    [continuity as Record<string, unknown>, 'unresolved'],
+    [continuity as Record<string, unknown>, 'ambiguous'],
+    [turnRecovery as Record<string, unknown>, 'blocking_outstanding'],
+    [turnRecovery as Record<string, unknown>, 'retained_terminal'],
+    [turnRecovery as Record<string, unknown>, 'open_catchups'],
+    [turnRecovery as Record<string, unknown>, 'corroborated_retained'],
+    [identity as Record<string, unknown>, 'blocking'],
+    [identity as Record<string, unknown>, 'retained'],
+    [delivery as Record<string, unknown>, 'blocking_ambiguous'],
+    [delivery as Record<string, unknown>, 'uncorroborated_ambiguous'],
+    [delivery as Record<string, unknown>, 'corroborated_retained'],
+  ];
+  const counts = countFields.map(([section, field]) => recoveryCount(section[field]));
+  if (counts.some((value) => value === null)) return 'recovery_debt_invalid';
+  const numericCounts = counts as number[];
+  const nextAction = (identity as Record<string, unknown>).next_action;
+  if (nextAction !== null && nextAction !== 'fresh_inbound' && nextAction !== 'operator') {
+    return 'recovery_debt_invalid';
+  }
+  const oldest = (delivery as Record<string, unknown>).oldest_uncorroborated_at;
+  const oldestValid = typeof oldest === 'string' && Number.isFinite(Date.parse(
+    oldest.includes('T') ? oldest : `${oldest.replace(' ', 'T')}Z`,
+  ));
+  if (
+    (numericCounts[10]! > 0 && !oldestValid)
+    || (numericCounts[10] === 0 && oldest !== null)
+    || numericCounts[9]! > numericCounts[10]!
+  ) return 'recovery_debt_invalid';
+  const expectedReason = (continuity as Record<string, unknown>).readable !== true
+    ? 'continuity_gap_unreadable'
+    : numericCounts[0]! > 0
+      ? 'continuity_gap_open'
+      : null;
+  if (debt.reason !== expectedReason) return 'recovery_debt_invalid';
+  const blockingEvidence = sections.some((section) => section.readable !== true)
+    || numericCounts[3]! > 0
+    || numericCounts[7]! > 0
+    || numericCounts[9]! > 0
+    || (reasons as string[]).some((reason) => RECOVERY_DEBT_BLOCKING_REASONS.has(reason));
+  const gaugeTotal = numericCounts.reduce((sum, value, index) => index === 9 ? sum : sum + value, 0);
+  const expectedOpen = gaugeTotal > 0 || reasons.length > 0 || serviceBlocking;
   const expectedAttention = serviceBlocking ? 'urgent' : open ? 'routine' : 'none';
-  if (attention !== expectedAttention || (serviceBlocking && !open)) {
+  if (attention !== expectedAttention || open !== expectedOpen || serviceBlocking !== blockingEvidence) {
     return 'recovery_debt_invalid';
   }
   if (health.status === 'healthy' && serviceBlocking) {

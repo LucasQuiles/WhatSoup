@@ -6,6 +6,21 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 let tmpRoot = '';
 
+function canonicalRecoveryDebt(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    open: true,
+    service_blocking: false,
+    attention: 'routine',
+    reason: null,
+    reasons: ['historical_turn_catchup'],
+    continuity: { readable: true, open: 0, unresolved: 0, ambiguous: 0 },
+    turn_recovery: { readable: true, blocking_outstanding: 0, retained_terminal: 0, open_catchups: 1, corroborated_retained: 0 },
+    completed_delivery_identity: { readable: true, blocking: 0, retained: 0, next_action: null },
+    delivery: { readable: true, blocking_ambiguous: 0, uncorroborated_ambiguous: 0, corroborated_retained: 0, oldest_uncorroborated_at: null },
+    ...overrides,
+  };
+}
+
 afterEach(() => {
   if (tmpRoot) rmSync(tmpRoot, { recursive: true, force: true });
   tmpRoot = '';
@@ -918,11 +933,7 @@ m.reconcile({"credential_probe": evidence}, ["credential_probe"])
           status: 200,
           body: {
             status: 'healthy',
-            recovery_debt: {
-              open: true,
-              service_blocking: false,
-              attention: 'routine',
-            },
+            recovery_debt: canonicalRecoveryDebt(),
             instance: { name: 'agent-alpha' },
             whatsapp: {
               connected: true,
@@ -941,7 +952,12 @@ m.reconcile({"credential_probe": evidence}, ["credential_probe"])
   it.each([
     [
       'healthy blocking contradiction',
-      { open: true, service_blocking: true, attention: 'urgent' },
+      canonicalRecoveryDebt({
+        service_blocking: true,
+        attention: 'urgent',
+        reasons: ['turn_recovery_actionable'],
+        turn_recovery: { readable: true, blocking_outstanding: 1, retained_terminal: 0, open_catchups: 0, corroborated_retained: 0 },
+      }),
       'recovery_debt_status_contradiction',
     ],
     [
@@ -1003,11 +1019,12 @@ m.reconcile({"credential_probe": evidence}, ["credential_probe"])
           body: {
             status: 'degraded',
             degradation_causes: ['finalization_debt', 'recovery_debt'],
-            recovery_debt: {
-              open: true,
+            recovery_debt: canonicalRecoveryDebt({
               service_blocking: true,
               attention: 'urgent',
-            },
+              reasons: ['turn_recovery_actionable'],
+              turn_recovery: { readable: true, blocking_outstanding: 1, retained_terminal: 0, open_catchups: 0, corroborated_retained: 0 },
+            }),
             instance: { name: 'agent-alpha' },
             whatsapp: {
               connected: true,

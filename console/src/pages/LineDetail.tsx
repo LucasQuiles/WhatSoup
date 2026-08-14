@@ -225,7 +225,7 @@ export default function LineDetail() {
         {line.recoveryDebt?.open && (
           <details className="text-xs text-text-2 mt-1">
             <summary className="cursor-pointer">
-              Recovery debt ({line.recoveryDebt.total})
+              Recovery debt ({line.recoveryDebt.gaugeTotal} aggregate signals)
             </summary>
             <div className="mt-1 font-mono">
               {line.recoveryDebt.attention} attention

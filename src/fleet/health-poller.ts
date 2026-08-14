@@ -137,7 +137,15 @@ export interface FleetRecoveryDebtSummary {
   serviceBlocking: boolean;
   attention: 'none' | 'routine' | 'urgent';
   reasons: string[];
-  total: number;
+  gaugeTotal: number;
+}
+
+export function recoveryDebtGaugeBucket(value: number): 'none' | 'one' | 'few' | 'several' | 'many' {
+  if (value <= 0) return 'none';
+  if (value === 1) return 'one';
+  if (value <= 4) return 'few';
+  if (value <= 9) return 'several';
+  return 'many';
 }
 
 export type RecoveryDebtParseResult =
@@ -278,6 +286,11 @@ export function parseRecoveryDebtHealth(health: Record<string, unknown>): Recove
       'recovery_debt.completed_delivery_identity.retained',
     ),
     recoveryDebtCount(
+      delivery?.['blocking_ambiguous'],
+      errors,
+      'recovery_debt.delivery.blocking_ambiguous',
+    ),
+    recoveryDebtCount(
       delivery?.['uncorroborated_ambiguous'],
       errors,
       'recovery_debt.delivery.uncorroborated_ambiguous',
@@ -300,6 +313,15 @@ export function parseRecoveryDebtHealth(health: Record<string, unknown>): Recove
     oldest !== null
     && (typeof oldest !== 'string' || !Number.isFinite(oldestMs))
   ) errors.push('recovery_debt.delivery.oldest_uncorroborated_at');
+  if (counts[10]! > 0 && !Number.isFinite(oldestMs)) {
+    errors.push('recovery_debt.delivery.oldest_uncorroborated_at_missing');
+  }
+  if (counts[10] === 0 && oldest !== null) {
+    errors.push('recovery_debt.delivery.oldest_uncorroborated_at_contradiction');
+  }
+  if (counts[9]! > counts[10]!) {
+    errors.push('recovery_debt.delivery.blocking_ambiguous_contradiction');
+  }
 
   const continuityReason = debt['reason'];
   if (
@@ -316,8 +338,10 @@ export function parseRecoveryDebtHealth(health: Record<string, unknown>): Recove
     errors.push('recovery_debt.reason_contradiction');
   }
 
-  const total = counts.reduce((sum, value) => sum + value, 0);
-  if (!Number.isSafeInteger(total)) errors.push('recovery_debt.total');
+  const gaugeTotal = counts.reduce((sum, value, index) => (
+    index === 9 ? sum : sum + value
+  ), 0);
+  if (!Number.isSafeInteger(gaugeTotal)) errors.push('recovery_debt.gauge_total');
   const blockingEvidence = !continuityReadable
     || !turnRecoveryReadable
     || !identityReadable
@@ -326,7 +350,7 @@ export function parseRecoveryDebtHealth(health: Record<string, unknown>): Recove
     || counts[7]! > 0
     || counts[9]! > 0
     || reasons.some((reason) => RECOVERY_DEBT_BLOCKING_REASONS.has(reason));
-  const expectedOpen = total > 0 || reasons.length > 0 || serviceBlocking === true;
+  const expectedOpen = gaugeTotal > 0 || reasons.length > 0 || serviceBlocking === true;
   const expectedAttention = serviceBlocking === true ? 'urgent' : expectedOpen ? 'routine' : 'none';
   if (open !== expectedOpen) errors.push('recovery_debt.open_contradiction');
   if (typeof serviceBlocking === 'boolean' && serviceBlocking !== blockingEvidence) {
@@ -341,7 +365,7 @@ export function parseRecoveryDebtHealth(health: Record<string, unknown>): Recove
       serviceBlocking: serviceBlocking as boolean,
       attention: attention as FleetRecoveryDebtSummary['attention'],
       reasons,
-      total,
+      gaugeTotal,
     },
   };
 }
@@ -1035,6 +1059,9 @@ export class HealthPoller {
       const mName = marker.slice(0, sep);
       const mSource = marker.slice(sep + 1);
       const status = this.statuses.get(mName);
+      if (mSource === 'recovery_debt_attention') {
+        if (status?.recoveryDebt?.open !== false) continue;
+      }
       // Positive-recovery evidence required: a merely-absent alert source is
       // NOT proof of recovery on the first poll — a still-down instance has
       // not yet re-accumulated consecutive failures, so its source is absent
@@ -2708,16 +2735,25 @@ export class HealthPoller {
       summary.serviceBlocking,
       summary.attention,
       summary.reasons,
-      summary.total,
+      recoveryDebtGaugeBucket(summary.gaugeTotal),
     ]);
     if (summary.open) {
       if (this.recoveryDebtFingerprints.get(name) === fingerprint) return;
+      try {
+        if (loadRecoveryMarkers().has(`${name}:${source}`)) {
+          this.recoveryDebtFingerprints.set(name, fingerprint);
+          this.trackActiveAlertSource(name, source, true);
+          return;
+        }
+      } catch (err) {
+        log.warn({ err, name, source }, 'recovery debt marker read failed');
+      }
       const evidence = [
         'recovery_debt_open=true',
         `service_blocking=${String(summary.serviceBlocking)}`,
         `attention=${summary.attention}`,
         `reasons=${summary.reasons.join(',') || 'none'}`,
-        `aggregate_total=${summary.total}`,
+        `aggregate_gauge_total=${summary.gaugeTotal}`,
       ].join(' ');
       const emitted = emitAlertChecked(
         name,

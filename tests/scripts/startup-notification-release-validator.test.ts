@@ -1,10 +1,25 @@
 import { describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
 
 import {
   runStartupNotificationReleaseCli,
+  recoveryDebtIssue,
   type StartupNotificationProbe,
   validateStartupNotificationRelease,
 } from '../../scripts/validate-startup-notification-release.ts';
+
+const recoveryDebtContract = JSON.parse(readFileSync(
+  new URL('../fixtures/recovery-debt-contract-v1.json', import.meta.url),
+  'utf8',
+)) as {
+  version: number;
+  cases: Array<{
+    name: string;
+    status: string;
+    expectedIssue: string | null;
+    debt: Record<string, unknown>;
+  }>;
+};
 
 function completeHealth(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -41,6 +56,29 @@ function recoveryDebt(overrides: Record<string, unknown> = {}): Record<string, u
     open: true,
     service_blocking: false,
     attention: 'routine',
+    reason: null,
+    reasons: ['historical_turn_catchup'],
+    continuity: { readable: true, open: 0, unresolved: 0, ambiguous: 0 },
+    turn_recovery: {
+      readable: true,
+      blocking_outstanding: 0,
+      retained_terminal: 0,
+      open_catchups: 1,
+      corroborated_retained: 0,
+    },
+    completed_delivery_identity: {
+      readable: true,
+      blocking: 0,
+      retained: 0,
+      next_action: null,
+    },
+    delivery: {
+      readable: true,
+      blocking_ambiguous: 0,
+      uncorroborated_ambiguous: 0,
+      corroborated_retained: 0,
+      oldest_uncorroborated_at: null,
+    },
     ...overrides,
   };
 }
@@ -64,6 +102,15 @@ function cliArgs(probeOutcome: string): string[] {
 }
 
 describe('startup notification release validator', () => {
+  it('matches the versioned recovery-debt contract corpus', () => {
+    expect(recoveryDebtContract.version).toBe(1);
+    for (const contractCase of recoveryDebtContract.cases) {
+      expect(recoveryDebtIssue({
+        status: contractCase.status,
+        recovery_debt: contractCase.debt,
+      }), contractCase.name).toBe(contractCase.expectedIssue);
+    }
+  });
   it('returns 0 only for a complete sent generic submission with matching v1 watermark evidence', () => {
     expect(validateStartupNotificationRelease({
       health: completeHealth(),
@@ -83,7 +130,18 @@ describe('startup notification release validator', () => {
   it.each([
     [
       'healthy status with blocking debt',
-      recoveryDebt({ service_blocking: true, attention: 'urgent' }),
+      recoveryDebt({
+        service_blocking: true,
+        attention: 'urgent',
+        reasons: ['turn_recovery_actionable'],
+        turn_recovery: {
+          readable: true,
+          blocking_outstanding: 1,
+          retained_terminal: 0,
+          open_catchups: 0,
+          corroborated_retained: 0,
+        },
+      }),
       'recovery_debt_status_contradiction',
     ],
     [
@@ -108,7 +166,18 @@ describe('startup notification release validator', () => {
       health: {
         ...completeHealth(),
         status: 'degraded',
-        recovery_debt: recoveryDebt({ service_blocking: true, attention: 'urgent' }),
+        recovery_debt: recoveryDebt({
+          service_blocking: true,
+          attention: 'urgent',
+          reasons: ['turn_recovery_actionable'],
+          turn_recovery: {
+            readable: true,
+            blocking_outstanding: 1,
+            retained_terminal: 0,
+            open_catchups: 0,
+            corroborated_retained: 0,
+          },
+        }),
       },
       journal: validJournal(),
       probe: { outcome: 'passed' },

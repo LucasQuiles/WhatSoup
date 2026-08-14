@@ -1418,6 +1418,7 @@ service to degraded. The compatibility `continuity` block remains available:
     },
     "delivery": {
       "readable": true,
+      "blocking_ambiguous": 0,
       "uncorroborated_ambiguous": 0,
       "corroborated_retained": 0,
       "oldest_uncorroborated_at": null
@@ -1437,6 +1438,10 @@ If any required recovery evidence cannot be parsed exactly, health fails closed 
 `recovery_debt.service_blocking: true`, and `attention: "urgent"`. A malformed or contradictory
 present debt projection is likewise not valid green evidence for release, heal, watchdog, or fleet
 consumers.
+`blocking_ambiguous` is the sampled stale subset of `uncorroborated_ambiguous`; it is the delivery
+gauge that contributes to `service_blocking`. A fresh uncorroborated ambiguity remains routine debt
+until its dwell threshold expires. Fleet and console summaries call their numeric value an aggregate
+gauge total because category gauges can overlap and are not a count of distinct obligations.
 Recording does not send, replay, synthesize an inbound, or close a gap. Do not edit the recovery
 rows to force green health; controlled catch-up and terminal closure require a later proof-bound
 mechanism.

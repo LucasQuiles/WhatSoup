@@ -30,7 +30,7 @@ export interface RecoveryDebtSummary {
   serviceBlocking: boolean;
   attention: 'none' | 'routine' | 'urgent';
   reasons: string[];
-  total: number;
+  gaugeTotal: number;
 }
 
 export interface LineInstance {

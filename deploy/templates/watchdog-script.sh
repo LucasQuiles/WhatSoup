@@ -609,12 +609,98 @@ if recovery_debt_raw is not None:
     if type(recovery_open) is not bool or type(recovery_service_blocking) is not bool:
         print("untrusted recovery debt fields", file=sys.stderr)
         sys.exit(6)
+    recovery_reason_order = (
+        "continuity_gap_unreadable", "continuity_gap_open",
+        "recovery_evidence_unreadable", "delivery_evidence_unreadable",
+        "turn_finalization_active", "turn_recovery_actionable",
+        "turn_recovery_integrity", "turn_recovery_unclassified",
+        "completed_delivery_identity_unclassified", "uncorroborated_delivery_ambiguity",
+        "turn_recovery_terminal", "turn_recovery_quarantined",
+        "historical_turn_catchup", "corroborated_delivery_retained",
+        "completed_delivery_identity_fresh_inbound", "completed_delivery_identity_operator",
+    )
+    recovery_blocking_reasons = {
+        "continuity_gap_unreadable", "recovery_evidence_unreadable",
+        "delivery_evidence_unreadable", "turn_finalization_active",
+        "turn_recovery_actionable", "turn_recovery_integrity",
+        "turn_recovery_unclassified", "completed_delivery_identity_unclassified",
+    }
+    recovery_reasons = recovery_debt_raw.get("reasons")
+    if (
+        not isinstance(recovery_reasons, list)
+        or len(recovery_reasons) > 32
+        or any(not isinstance(reason, str) or reason not in recovery_reason_order for reason in recovery_reasons)
+        or len(set(recovery_reasons)) != len(recovery_reasons)
+        or recovery_reasons != sorted(recovery_reasons, key=recovery_reason_order.index)
+    ):
+        print("untrusted recovery debt reasons", file=sys.stderr)
+        sys.exit(6)
+    recovery_continuity = recovery_debt_raw.get("continuity")
+    recovery_turn = recovery_debt_raw.get("turn_recovery")
+    recovery_identity = recovery_debt_raw.get("completed_delivery_identity")
+    recovery_delivery = recovery_debt_raw.get("delivery")
+    recovery_sections = (recovery_continuity, recovery_turn, recovery_identity, recovery_delivery)
+    if (
+        not all(isinstance(section, dict) for section in recovery_sections)
+        or any(type(section.get("readable")) is not bool for section in recovery_sections)
+    ):
+        print("untrusted recovery debt sections", file=sys.stderr)
+        sys.exit(6)
+    recovery_count_fields = (
+        (recovery_continuity, "open"), (recovery_continuity, "unresolved"),
+        (recovery_continuity, "ambiguous"), (recovery_turn, "blocking_outstanding"),
+        (recovery_turn, "retained_terminal"), (recovery_turn, "open_catchups"),
+        (recovery_turn, "corroborated_retained"), (recovery_identity, "blocking"),
+        (recovery_identity, "retained"), (recovery_delivery, "blocking_ambiguous"),
+        (recovery_delivery, "uncorroborated_ambiguous"),
+        (recovery_delivery, "corroborated_retained"),
+    )
+    recovery_counts = [section.get(field) for section, field in recovery_count_fields]
+    if any(type(value) is not int or value < 0 for value in recovery_counts):
+        print("untrusted recovery debt counts", file=sys.stderr)
+        sys.exit(6)
+    recovery_next_action = recovery_identity.get("next_action")
+    recovery_oldest = recovery_delivery.get("oldest_uncorroborated_at")
+    recovery_oldest_valid = False
+    if isinstance(recovery_oldest, str):
+        try:
+            dt.datetime.fromisoformat(recovery_oldest.replace("Z", "+00:00"))
+            recovery_oldest_valid = True
+        except ValueError:
+            pass
+    if (
+        recovery_next_action not in (None, "fresh_inbound", "operator")
+        or (recovery_counts[10] > 0 and not recovery_oldest_valid)
+        or (recovery_counts[10] == 0 and recovery_oldest is not None)
+        or recovery_counts[9] > recovery_counts[10]
+    ):
+        print("contradictory recovery debt category fields", file=sys.stderr)
+        sys.exit(6)
+    expected_recovery_reason = (
+        "continuity_gap_unreadable" if not recovery_continuity["readable"]
+        else "continuity_gap_open" if recovery_counts[0] > 0 else None
+    )
+    recovery_blocking_evidence = (
+        any(not section["readable"] for section in recovery_sections)
+        or recovery_counts[3] > 0
+        or recovery_counts[7] > 0
+        or recovery_counts[9] > 0
+        or any(reason in recovery_blocking_reasons for reason in recovery_reasons)
+    )
+    recovery_gauge_total = sum(
+        value for index, value in enumerate(recovery_counts) if index != 9
+    )
+    expected_recovery_open = (
+        recovery_gauge_total > 0 or bool(recovery_reasons) or recovery_service_blocking
+    )
     expected_recovery_attention = (
         "urgent" if recovery_service_blocking else "routine" if recovery_open else "none"
     )
     if (
         recovery_attention != expected_recovery_attention
-        or (recovery_service_blocking and not recovery_open)
+        or recovery_debt_raw.get("reason") != expected_recovery_reason
+        or recovery_open != expected_recovery_open
+        or recovery_service_blocking != recovery_blocking_evidence
         or (status == "healthy" and recovery_service_blocking)
     ):
         print("contradictory recovery debt fields", file=sys.stderr)

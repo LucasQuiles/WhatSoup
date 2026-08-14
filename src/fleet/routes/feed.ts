@@ -2,10 +2,11 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { jsonResponse, parseQueryString, parseIntParam } from '../../lib/http.ts';
 import { errorMessage } from '../../lib/error-message.ts';
 import type { FleetDiscovery, DiscoveredInstance } from '../discovery.ts';
-import type {
-  FleetRecoveryDebtSummary,
-  HealthPoller,
-  InstanceStatus,
+import {
+  recoveryDebtGaugeBucket,
+  type FleetRecoveryDebtSummary,
+  type HealthPoller,
+  type InstanceStatus,
 } from '../health-poller.ts';
 import { inspectLatestLogFile, readTailLinesDetailed, type LogReadFailure } from '../log-utils.ts';
 import { normalizeTimestamp } from '../time-utils.ts';
@@ -54,7 +55,7 @@ type FeedDetail =
       serviceBlocking: boolean;
       attention: FleetRecoveryDebtSummary['attention'];
       reasons: string[];
-      total: number;
+      gaugeTotal: number;
     }
   | { type: 'import'; table?: string; count?: number; skipped?: boolean }
   | { type: 'message'; direction: 'inbound' | 'outbound'; chatJid?: string; messageId?: string; preview?: string; senderName?: string; contentType?: string; conversationKey?: string }
@@ -376,7 +377,7 @@ function recoveryDebtFingerprint(summary: FleetRecoveryDebtSummary): string {
     summary.serviceBlocking,
     summary.attention,
     summary.reasons,
-    summary.total,
+    recoveryDebtGaugeBucket(summary.gaugeTotal),
   ]);
 }
 
@@ -400,7 +401,7 @@ function recoveryDebtEvent(
       serviceBlocking: summary.serviceBlocking,
       attention: summary.attention,
       reasons: summary.reasons,
-      total: summary.total,
+      gaugeTotal: summary.gaugeTotal,
     },
   };
 }

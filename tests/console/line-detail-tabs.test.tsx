@@ -305,13 +305,13 @@ describe('LineDetail recovery debt separation', () => {
             serviceBlocking: false,
             attention: 'routine',
             reasons: ['historical_turn_catchup'],
-            total: 1,
+            gaugeTotal: 1,
           },
         }),
       });
     });
 
-    expect(screen.getByText('Recovery debt (1)')).toBeDefined();
+    expect(screen.getByText('Recovery debt (1 aggregate signals)')).toBeDefined();
     expect(screen.getByText('historical_turn_catchup')).toBeDefined();
     expect(screen.queryByTitle('historical_turn_catchup')).toBeNull();
   });

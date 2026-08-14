@@ -120,6 +120,7 @@ function makeRecoveryDebt(overrides: Record<string, unknown> = {}): Record<strin
     },
     delivery: {
       readable: true,
+      blocking_ambiguous: 0,
       uncorroborated_ambiguous: 0,
       corroborated_retained: 0,
       oldest_uncorroborated_at: null,
@@ -531,7 +532,7 @@ describe('HealthPoller', () => {
         serviceBlocking: false,
         attention: 'routine',
         reasons: ['historical_turn_catchup'],
-        total: 1,
+        gaugeTotal: 1,
       },
     });
     expect(alertFns.emitAlert).not.toHaveBeenCalledWith(
@@ -562,7 +563,22 @@ describe('HealthPoller', () => {
       },
     });
     await vi.advanceTimersByTimeAsync(1_000);
-    expect(poller.getStatus('remote-1')?.recoveryDebt?.total).toBe(2);
+    expect(poller.getStatus('remote-1')?.recoveryDebt?.gaugeTotal).toBe(2);
+    expect((alertFns.emitAlert.mock.calls as unknown as AlertMockCall[]).filter(
+      ([, source]) => source === 'recovery_debt_attention',
+    )).toHaveLength(2);
+
+    debt = makeRecoveryDebt({
+      turn_recovery: {
+        readable: true,
+        blocking_outstanding: 0,
+        retained_terminal: 0,
+        open_catchups: 3,
+        corroborated_retained: 0,
+      },
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(poller.getStatus('remote-1')?.recoveryDebt?.gaugeTotal).toBe(3);
     expect((alertFns.emitAlert.mock.calls as unknown as AlertMockCall[]).filter(
       ([, source]) => source === 'recovery_debt_attention',
     )).toHaveLength(2);
@@ -582,7 +598,7 @@ describe('HealthPoller', () => {
     await vi.advanceTimersByTimeAsync(1_000);
     expect(poller.getStatus('remote-1')).toMatchObject({
       status: 'online',
-      recoveryDebt: { open: false, total: 0 },
+      recoveryDebt: { open: false, gaugeTotal: 0 },
     });
     expect(alertFns.clearAlertSource).toHaveBeenCalledWith(
       'remote-1',
@@ -626,7 +642,7 @@ describe('HealthPoller', () => {
     expect(poller.getStatus('remote-1')).toMatchObject({
       status: 'degraded',
       statusReason: 'health_body_type_error',
-      recoveryDebt: { open: true, total: 1 },
+      recoveryDebt: { open: true, gaugeTotal: 1 },
     });
     expect(alertFns.clearAlertSource).not.toHaveBeenCalledWith(
       'remote-1',
@@ -634,6 +650,61 @@ describe('HealthPoller', () => {
       expect.anything(),
     );
     poller.stop();
+  });
+
+  it('preserves an open recovery-debt marker on restart without re-emitting or clearing it', async () => {
+    const { mkdtempSync, rmSync, writeFileSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const { tmpdir } = await import('node:os');
+    const stateDir = mkdtempSync(join(tmpdir(), 'recovery-debt-authority-'));
+    const originalStateDir = process.env['BOT_ERRORS_STATE_DIR'];
+    process.env['BOT_ERRORS_STATE_DIR'] = stateDir;
+    writeFileSync(join(stateDir, 'recovery-authority.json'), JSON.stringify({
+      'remote-1:recovery_debt_attention': true,
+    }));
+
+    try {
+      alertFns.emitAlert.mockReturnValue(failedAlertResult());
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(makeOnlineHealth({ recovery_debt: makeRecoveryDebt() })),
+      });
+      const instances = makeInstances(
+        ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+      );
+      const poller = new HealthPoller(
+        () => instances,
+        'self',
+        vi.fn().mockReturnValue({}),
+        1_000,
+      );
+      poller.start();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(poller.getStatus('remote-1')).toMatchObject({
+        status: 'online',
+        activeAlertSources: ['recovery_debt_attention'],
+        recoveryDebt: { open: true },
+      });
+      expect(alertFns.emitAlert).not.toHaveBeenCalledWith(
+        'remote-1',
+        'recovery_debt_attention',
+        expect.anything(),
+        expect.anything(),
+        expect.anything(),
+      );
+      expect(alertFns.clearAlertSource).not.toHaveBeenCalledWith(
+        'remote-1',
+        'recovery_debt_attention',
+        expect.anything(),
+      );
+      const { loadRecoveryMarkers } = await import('../../src/lib/recovery-authority-store.ts');
+      expect(loadRecoveryMarkers().has('remote-1:recovery_debt_attention')).toBe(true);
+      poller.stop();
+    } finally {
+      process.env['BOT_ERRORS_STATE_DIR'] = originalStateDir;
+      rmSync(stateDir, { recursive: true, force: true });
+    }
   });
 
   it('keeps the dedicated recovery debt source non-paging when debt is service-blocking', async () => {

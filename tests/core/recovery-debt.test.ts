@@ -61,6 +61,7 @@ describe('normalizeRecoveryDebt', () => {
       },
       delivery: {
         readable: true,
+        blocking_ambiguous: 0,
         uncorroborated_ambiguous: 0,
         corroborated_retained: 0,
         oldest_uncorroborated_at: null,
@@ -150,6 +151,33 @@ describe('normalizeRecoveryDebt', () => {
       service_blocking: true,
       attention: 'urgent',
       reasons: ['turn_recovery_actionable', 'uncorroborated_delivery_ambiguity'],
+      delivery: { blocking_ambiguous: 1 },
+    });
+  });
+
+  it('keeps fresh uncorroborated delivery ambiguity nonblocking with an explicit blocking gauge', () => {
+    const value = evidence({
+      durability: {
+        readable: true,
+        deliveryBlocking: false,
+        deliveryAmbiguity: {
+          readable: true,
+          uncorroboratedAmbiguous: 2,
+          corroboratedRetained: 0,
+          oldestUncorroboratedAt: '2026-08-14 06:00:00',
+        },
+      },
+    });
+
+    expect(normalizeRecoveryDebt(value)).toMatchObject({
+      open: true,
+      service_blocking: false,
+      attention: 'routine',
+      reasons: ['uncorroborated_delivery_ambiguity'],
+      delivery: {
+        blocking_ambiguous: 0,
+        uncorroborated_ambiguous: 2,
+      },
     });
   });
 
@@ -190,6 +218,18 @@ describe('normalizeRecoveryDebt', () => {
         deliveryAmbiguity: {
           readable: true,
           uncorroboratedAmbiguous: 0,
+          corroboratedRetained: 0,
+          oldestUncorroboratedAt: null,
+        },
+      },
+    })],
+    ['uncorroborated delivery without an oldest timestamp', evidence({
+      durability: {
+        readable: true,
+        deliveryBlocking: false,
+        deliveryAmbiguity: {
+          readable: true,
+          uncorroboratedAmbiguous: 1,
           corroboratedRetained: 0,
           oldestUncorroboratedAt: null,
         },

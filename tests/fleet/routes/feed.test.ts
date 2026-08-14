@@ -504,7 +504,7 @@ describe('health transition events via handleGetFeed', () => {
             serviceBlocking: false,
             attention: 'routine',
             reasons: ['historical_turn_catchup'],
-            total: 1,
+            gaugeTotal: 1,
           },
         })),
       } as any,
@@ -542,7 +542,7 @@ describe('health transition events via handleGetFeed', () => {
         serviceBlocking: false,
         attention: 'routine',
         reasons: ['historical_turn_catchup'],
-        total: 1,
+        gaugeTotal: 1,
       },
     });
     const openedRes = mockRes();
@@ -557,7 +557,7 @@ describe('health transition events via handleGetFeed', () => {
         serviceBlocking: false,
         attention: 'routine',
         reasons: ['historical_turn_catchup'],
-        total: 1,
+        gaugeTotal: 1,
       },
     });
 
@@ -569,13 +569,29 @@ describe('health transition events via handleGetFeed', () => {
         serviceBlocking: false,
         attention: 'routine',
         reasons: ['turn_recovery_terminal'],
-        total: 2,
+        gaugeTotal: 2,
       },
     });
     const changedRes = mockRes();
     handleGetFeed(mockReq(), changedRes, deps);
     expect(JSON.parse(changedRes._body).find((event: any) => event.detail?.type === 'recovery_debt'))
-      .toMatchObject({ detail: { state: 'changed', total: 2 } });
+      .toMatchObject({ detail: { state: 'changed', gaugeTotal: 2 } });
+
+    getStatus.mockReturnValue({
+      status: 'online',
+      error: null,
+      recoveryDebt: {
+        open: true,
+        serviceBlocking: false,
+        attention: 'routine',
+        reasons: ['turn_recovery_terminal'],
+        gaugeTotal: 3,
+      },
+    });
+    const sameBucketRes = mockRes();
+    handleGetFeed(mockReq(), sameBucketRes, deps);
+    expect(JSON.parse(sameBucketRes._body).find((event: any) => event.detail?.type === 'recovery_debt'))
+      .toBeUndefined();
 
     getStatus.mockReturnValue({
       status: 'online',
@@ -585,7 +601,7 @@ describe('health transition events via handleGetFeed', () => {
         serviceBlocking: false,
         attention: 'none',
         reasons: [],
-        total: 0,
+        gaugeTotal: 0,
       },
     });
     const clearedRes = mockRes();
@@ -593,7 +609,7 @@ describe('health transition events via handleGetFeed', () => {
     expect(JSON.parse(clearedRes._body).find((event: any) => event.detail?.type === 'recovery_debt'))
       .toMatchObject({
         text: 'debt-feed: recovery debt cleared',
-        detail: { state: 'cleared', attention: 'none', reasons: [], total: 0 },
+        detail: { state: 'cleared', attention: 'none', reasons: [], gaugeTotal: 0 },
       });
   });
 
@@ -622,7 +638,7 @@ describe('health transition events via handleGetFeed', () => {
         serviceBlocking: false,
         attention: 'routine',
         reasons: ['turn_recovery_terminal'],
-        total: 1,
+        gaugeTotal: 1,
       },
     });
     const res = mockRes();

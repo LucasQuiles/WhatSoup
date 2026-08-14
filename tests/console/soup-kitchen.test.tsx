@@ -402,7 +402,7 @@ describe('KPI strip (mockup .kpis — 5 cards, k/v/d anatomy)', () => {
             serviceBlocking: false,
             attention: 'routine',
             reasons: ['historical_turn_catchup'],
-            total: 1,
+            gaugeTotal: 1,
           },
         }),
         makeLine({
