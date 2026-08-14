@@ -87,6 +87,7 @@ describe('database retention', () => {
       toolCalls: 1,
       outboundSends: 0,
       factExportQueue: 1,
+      factExportTerminal: 0,
       memoryConsolidationRuns: 0,
       metricsHourly: 0,
       decryptionFailures: 0,
@@ -575,6 +576,7 @@ describe('database retention', () => {
       toolCalls: 0,
       outboundSends: 0,
       factExportQueue: 0,
+      factExportTerminal: 0,
       memoryConsolidationRuns: 0,
       metricsHourly: 0,
       decryptionFailures: 0,
@@ -981,6 +983,7 @@ describe('database retention', () => {
         messageRetentionDays: 30,
         triggerRunDays: 30,
         triggerOccurrenceDays: 30,
+        factTerminalDays: 30,
       });
 
       expect(timer.getHealthSnapshot()).toEqual({
@@ -1040,6 +1043,7 @@ describe('database retention', () => {
         messageRetentionDays: 30,
         triggerRunDays: 30,
         triggerOccurrenceDays: 30,
+        factTerminalDays: 30,
       });
       const emptyResult = {
         turnRecoveryJobs: 0,
@@ -1049,6 +1053,7 @@ describe('database retention', () => {
         toolCalls: 0,
         outboundSends: 0,
         factExportQueue: 0,
+        factExportTerminal: 0,
         memoryConsolidationRuns: 0,
         metricsHourly: 0,
         decryptionFailures: 0,
