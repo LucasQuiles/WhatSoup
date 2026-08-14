@@ -4627,7 +4627,19 @@ export class AgentRuntime implements Runtime {
     return this.runtimeTurnCoordinator.processPerChatTurn(scopeRef, turn);
   }
 
-  private async processTurn(turn: QueuedTurn): Promise<void> {
+  private async processTurn(
+    turn: QueuedTurn,
+    // #2170: set only by the turn-recovery supervisor's scope-native replay
+    // dispatch (never by the live global-queue processor): threads the job's
+    // excludeJobId into admission (self-block exemption), re-checks the
+    // dispatch target immediately before the provider send, and signals the
+    // provider boundary for abort accounting.
+    recoveryDispatch?: {
+      excludeJobId: number;
+      dispatchAllowed: () => boolean;
+      onProviderBoundary: () => void;
+    },
+  ): Promise<void> {
     const { chatJid, senderJid, senderName, text, isGroup } = turn;
 
     // Clear post-turn gate — legitimate new user turn begins (shared mode)
@@ -4664,7 +4676,7 @@ export class AgentRuntime implements Runtime {
     let completion: RuntimeTurnCompletion | null = null;
     if (context) {
       if (!queue) throw new Error('Shared runtime turn has no outbound queue');
-      this.runtimeTurnCoordinator.beginRuntimeTurnEvidence(queue, context);
+      this.runtimeTurnCoordinator.beginRuntimeTurnEvidence(queue, context, recoveryDispatch?.excludeJobId);
       this.currentRuntimeTurnContext = context;
       completion = this.runtimeTurnCoordinator.createRuntimeTurnCompletion(context);
       this.currentRuntimeTurnCompletion = completion;
@@ -4683,6 +4695,12 @@ export class AgentRuntime implements Runtime {
         )
       : null;
     try {
+      if (recoveryDispatch) {
+        if (!recoveryDispatch.dispatchAllowed()) {
+          throw new Error('turn recovery replay target lost before provider send');
+        }
+        recoveryDispatch.onProviderBoundary();
+      }
       this.updateSessionActorJid(this.session!, senderJid);
       await this.session!.sendTurn(withProviderApplicationContext(
         renderUserTurnForProvider(this.turnChronology, exactText, context, 'live'),
@@ -5205,6 +5223,15 @@ export class AgentRuntime implements Runtime {
   }
 
   private resolveTurnRecoveryDispatchTarget(job: TurnRecoveryJobRow): TurnRecoveryDispatchTarget | null {
+    if (job.scope === 'shared' || job.scope === 'singleton') {
+      // #2170: singleton/shared target = the instance's one live session.
+      // No cold session creation here (that is the owner-gated cold-activation
+      // lane); an inactive/absent session leaves the job pending for a later
+      // scan, exactly like an absent per_chat session.
+      const session = this.session;
+      if (!session?.getStatus().active) return null;
+      return { scope: job.scope, managerId: this.managerIdFor(session), generation: 1, session };
+    }
     if (job.scope !== 'per_chat') return null;
     const mapKey = this.resolvePerChatMapKey(job.delivery_jid);
     let session = this.chatSessions.get(mapKey);
@@ -5232,6 +5259,13 @@ export class AgentRuntime implements Runtime {
 
   private isTurnRecoveryDispatchTargetCurrent(target: TurnRecoveryDispatchTarget): boolean {
     const session = target.session as SessionManager;
+    if (target.scope !== 'per_chat') {
+      // #2170: singleton/shared currency — the exact session object is still
+      // THE instance session, still active, still the same manager identity.
+      return this.session === session
+        && session.getStatus().active
+        && this.sessionManagerIds.get(session) === target.managerId;
+    }
     const owner = this.sessionOwnership.get(target.mapKey);
     return this.chatSessions.get(target.mapKey) === session
       && this.sessionManagerIds.get(session) === target.managerId
@@ -5249,13 +5283,16 @@ export class AgentRuntime implements Runtime {
       const status = session.getStatus();
       return !status.active && status.pid === null && status.turnInFlight !== true;
     }
-    const queue = this.chatQueues.get(target.mapKey) ?? null;
+    // #2170: singleton/shared targets have no mapKey — the reject/finalize
+    // pair and queue lookup take their global (mapKey-less) forms.
+    const mapKey = target.scope === 'per_chat' ? target.mapKey : undefined;
+    const queue = (mapKey !== undefined ? this.chatQueues.get(mapKey) : this.getActiveQueue()) ?? null;
     this.runtimeTurnCoordinator.rejectRuntimeTurnCompletion(
       new Error('TURN_RECOVERY_REPLAY_ABORTED'),
-      target.mapKey,
+      mapKey,
       context,
     );
-    this.runtimeTurnCoordinator.finalizeRuntimeCrash(context, queue, session, target.mapKey);
+    this.runtimeTurnCoordinator.finalizeRuntimeCrash(context, queue, session, mapKey);
     try {
       await session.shutdown(false);
     } catch (err) {
@@ -5278,6 +5315,8 @@ export class AgentRuntime implements Runtime {
       (mapKey) => this.chatSessions.get(mapKey), (s) => this.requireSessionToolScopeKey(s),
       (candidate) => this.isTurnRecoveryDispatchTargetCurrent(candidate),
       (candidate, context) => this.abortTurnRecoveryReplay(candidate, context),
+      (turn, recoveryDispatch) => this.processTurn(turn, recoveryDispatch),
+      GLOBAL_TOOL_SCOPE_KEY,
       job, dispatchTarget, abortControl,
     );
   }

@@ -42,10 +42,12 @@ export function createTurnRecoverySupervisorForRuntime(deps: {
   readonly nextRecoveryGeneration: () => number;
   readonly resolveDispatchTarget: (job: TurnRecoveryJobRow) => TurnRecoveryDispatchTarget | null;
 }): TurnRecoverySupervisor {
-  // per_chat only for now — shared/singleton recovery jobs are left exactly
-  // as wedged as they are today (skippedUnsupportedScope, not a regression);
-  // their session-lifecycle machinery differs materially and is separate
-  // follow-up wiring.
+  // #2170: all three scopes are dispatchable — per_chat through the per-chat
+  // replay pipeline, shared/singleton through the global-turn pipeline
+  // (processTurn with a recovery-dispatch envelope). The scope gate and the
+  // dispatcher arms widened in the same change: widening the gate without a
+  // real dispatch path would make jobs claim-then-fail, which is worse than
+  // the old pre-claim skip.
   return new TurnRecoverySupervisor({
     instanceName: deps.instanceName,
     durability: deps.getDurability,
@@ -55,7 +57,7 @@ export function createTurnRecoverySupervisorForRuntime(deps: {
       managerId: deps.recoveryManagerId,
       generation: deps.nextRecoveryGeneration(),
     }),
-    supportedScopes: new Set(['per_chat']),
+    supportedScopes: new Set(['per_chat', 'shared', 'singleton']),
     resolveDispatchTarget: deps.resolveDispatchTarget,
   });
 }
@@ -136,23 +138,31 @@ export async function dispatchTurnRecoveryReplayForJob(
     target: TurnRecoveryDispatchTarget,
     context: RuntimeTurnContext,
   ) => Promise<boolean>,
+  processSingletonReplayTurn: (
+    turn: QueuedTurn,
+    recoveryDispatch: {
+      excludeJobId: number;
+      dispatchAllowed: () => boolean;
+      onProviderBoundary: () => void;
+    },
+  ) => Promise<void>,
+  globalToolScopeKey: string,
   job: TurnRecoveryJobRow,
   target?: TurnRecoveryDispatchTarget,
   abortControl?: TurnRecoveryReplayAbortControl,
 ): Promise<TurnRecoveryReplayDispatchResult> {
   // Route by scope: per_chat goes through the per-chat replay pipeline;
-  // singleton goes through the singleton replay path.  Unknown scopes
-  // fail safe (retryable) so this never silently drops a job.
-  if (job.scope === 'singleton') {
-    // Singleton recovery: dispatch through the singleton replay path.
-    // The target & session checks don't apply — singleton jobs have no
-    // per-chat session.  The coordinator's sendTurnToSession handles the
-    // singleton/active-session dispatch.
-    return { kind: 'retryable_failure' };
+  // shared/singleton go through the global-turn pipeline (#2170). Unknown
+  // scopes fail safe (retryable) so this never silently drops a job.
+  if (job.scope === 'shared' || job.scope === 'singleton') {
+    return dispatchGlobalScopeReplay(
+      coordinator, isTargetCurrent, abortTarget, processSingletonReplayTurn,
+      globalToolScopeKey, job, target, abortControl,
+    );
   }
   if (job.scope !== 'per_chat') return { kind: 'retryable_failure' };
   const mapKey = resolvePerChatMapKey(job.delivery_jid);
-  if (target?.mapKey !== mapKey) return { kind: 'retryable_failure' };
+  if (target?.scope !== 'per_chat' || target.mapKey !== mapKey) return { kind: 'retryable_failure' };
   const session = target?.session as SessionManager | undefined;
   if (session !== getSession(mapKey)) return { kind: 'retryable_failure' };
   if (!session || !target || !isTargetCurrent(target)) return { kind: 'retryable_failure' };
@@ -217,6 +227,102 @@ export async function dispatchTurnRecoveryReplayForJob(
     );
   } catch (err) {
     log.warn({ err, jobId: job.id }, 'turn recovery replay dispatch failed');
+    return { kind: 'retryable_failure' };
+  }
+  return { kind: 'delivered' };
+}
+
+/**
+ * #2170 scope-native shared/singleton replay: reuses the exact global-turn
+ * pipeline (createRuntimeTurnForDispatch with no mapKey -> processTurn with a
+ * recovery-dispatch envelope -> rebind -> beginRuntimeTurnEvidence with
+ * excludeJobId -> session.sendTurn -> await completion), not a parallel
+ * delivery path. Same proof discipline as per_chat: 'delivered' here is
+ * re-verified by verifyProvenBeforeDelivered and completeTurnRecoveryJob
+ * before the job closes. The provider boundary is signalled conservatively
+ * (immediately before the send attempt), so a fence-loss abort that fires
+ * pre-send reports cleanly-not-sent.
+ */
+async function dispatchGlobalScopeReplay(
+  coordinator: RuntimeTurnCoordinator,
+  isTargetCurrent: (target: TurnRecoveryDispatchTarget) => boolean,
+  abortTarget: (
+    target: TurnRecoveryDispatchTarget,
+    context: RuntimeTurnContext,
+  ) => Promise<boolean>,
+  processSingletonReplayTurn: (
+    turn: QueuedTurn,
+    recoveryDispatch: {
+      excludeJobId: number;
+      dispatchAllowed: () => boolean;
+      onProviderBoundary: () => void;
+    },
+  ) => Promise<void>,
+  globalToolScopeKey: string,
+  job: TurnRecoveryJobRow,
+  target?: TurnRecoveryDispatchTarget,
+  abortControl?: TurnRecoveryReplayAbortControl,
+): Promise<TurnRecoveryReplayDispatchResult> {
+  if (!target || target.scope !== job.scope) return { kind: 'retryable_failure' };
+  const session = target.session as SessionManager | undefined;
+  if (!session || !isTargetCurrent(target)) return { kind: 'retryable_failure' };
+
+  const source: RuntimeTurnSourceSnapshot = {
+    sourceMessageId: job.source_message_id,
+    receivedAtUnixSeconds: job.source_received_at_unix_seconds,
+    conversationKey: job.conversation_key,
+    senderJid: job.sender_jid,
+    senderName: job.sender_name,
+    contentType: 'text',
+    isGroup: job.is_group === 1,
+    ...(job.is_group === 1 ? { groupName: job.group_name ?? job.delivery_jid } : {}),
+  };
+
+  let runtimeContext: RuntimeTurnContext | null;
+  try {
+    runtimeContext = coordinator.createRuntimeTurnForDispatch({
+      scope: job.scope,
+      chatJid: job.delivery_jid,
+      text: job.replay_text,
+      inboundSeq: job.source_inbound_seq,
+      source,
+      session,
+      toolScopeKey: globalToolScopeKey,
+    });
+  } catch (err) {
+    log.warn({ err, jobId: job.id, scope: job.scope }, 'turn recovery replay context construction failed');
+    return { kind: 'retryable_failure' };
+  }
+  if (!runtimeContext) return { kind: 'retryable_failure' };
+  let providerBoundaryCrossed = false;
+  abortControl?.registerAbort(async () => (
+    providerBoundaryCrossed
+      ? abortTarget(target, runtimeContext)
+      : true
+  ));
+
+  const turn: QueuedTurn = {
+    sourceMessageId: source.sourceMessageId,
+    receivedAtUnixSeconds: source.receivedAtUnixSeconds,
+    conversationKey: source.conversationKey,
+    chatJid: job.delivery_jid,
+    senderJid: source.senderJid,
+    senderName: source.senderName,
+    text: job.replay_text,
+    isGroup: source.isGroup,
+    groupName: source.groupName,
+    contentType: 'text',
+    runtimeContext,
+    inboundSeq: job.source_inbound_seq,
+  };
+  try {
+    await processSingletonReplayTurn(turn, {
+      excludeJobId: job.id,
+      dispatchAllowed: () => isTargetCurrent(target) && abortControl?.signal.aborted !== true,
+      onProviderBoundary: () => { providerBoundaryCrossed = true; },
+    });
+  } catch (err) {
+    log.warn({ err, jobId: job.id, scope: job.scope }, 'turn recovery replay dispatch failed');
     return { kind: 'retryable_failure' };
   }
   return { kind: 'delivered' };
