@@ -20,6 +20,8 @@
 import { spawn } from 'node:child_process';
 import { constants as osConstants } from 'node:os';
 
+import { SIGNAL } from '../src/lib/signals.ts';
+
 /**
  * The semantic outcome — kept DISTINCT from the exit code so an INCONCLUSIVE result
  * (the bound fired but the group could not be proven reaped) is never reportable as a
@@ -125,9 +127,9 @@ export function runBoundedBattery(options: BoundedBatteryOptions): Promise<Bound
       settled = true;
       clearTimeout(timer);
       if (graceTimer !== undefined) clearTimeout(graceTimer);
-      process.off('SIGTERM', onSignal);
-      process.off('SIGINT', onSignal);
-      process.off('SIGHUP', onSignal);
+      process.off(SIGNAL.TERM, onSignal);
+      process.off(SIGNAL.INT, onSignal);
+      process.off(SIGNAL.HUP, onSignal);
       resolvePromise({ outcome, timedOut, exitCode: code, signal, wallMs: clock() - started, wrappedExit, reapError });
     };
 
@@ -161,21 +163,21 @@ export function runBoundedBattery(options: BoundedBatteryOptions): Promise<Bound
       killGroup();
       armTerminalGrace('wrapper received a termination signal — awaiting reap / close');
     };
-    process.on('SIGTERM', onSignal);
-    process.on('SIGINT', onSignal);
+    process.on(SIGNAL.TERM, onSignal);
+    process.on(SIGNAL.INT, onSignal);
     // round-20 finding 5: SIGHUP (terminal hangup / parent death) must ALSO forward a group
     // kill. Without it a SIGHUP kills the wrapper (exit 129) while the detached child group
     // survives, reparented to PID 1 — an orphaned test run the battery exists to prevent.
-    process.on('SIGHUP', onSignal);
+    process.on(SIGNAL.HUP, onSignal);
 
     child.on('error', (err) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       if (graceTimer !== undefined) clearTimeout(graceTimer);
-      process.off('SIGTERM', onSignal);
-      process.off('SIGINT', onSignal);
-      process.off('SIGHUP', onSignal);
+      process.off(SIGNAL.TERM, onSignal);
+      process.off(SIGNAL.INT, onSignal);
+      process.off(SIGNAL.HUP, onSignal);
       rejectPromise(err);
     });
 

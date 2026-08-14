@@ -14,6 +14,10 @@ export const SIGNAL = {
   TERM: 'SIGTERM',
   /** Immediate, uncatchable termination. */
   KILL: 'SIGKILL',
+  /** Interactive interrupt (Ctrl-C); catchable. */
+  INT: 'SIGINT',
+  /** Controlling-terminal hangup / parent death; catchable. */
+  HUP: 'SIGHUP',
 } as const;
 
 export type SignalName = (typeof SIGNAL)[keyof typeof SIGNAL];
