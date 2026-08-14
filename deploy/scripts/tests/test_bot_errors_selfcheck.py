@@ -2369,3 +2369,176 @@ def test_central_ack_unparseable_acked_at_is_malformed_timestamp(tmp_path: Path)
     _write_ack_file(ack, _ack_receipt(ackedAt="yesterday"))
     result = _mod.central_ack_inventory(ack, 1000.0, "test-host")
     assert result["status"] == "malformed_timestamp"
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Issue #2468 slice 2 (consumer): v2 receipts must bind to a heartbeat
+# observation this host actually published (digest ring); v1 receipts are
+# legacy_unbound when strict mode is enabled; acceptance records coverage
+# of exactly the acknowledged observation.
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def _ack_receipt_v2(acked_epoch: float = 980.0, host: str = "test-host", digest: str = "a" * 64, **overrides) -> str:
+    payload = {
+        "schemaVersion": 2,
+        "kind": "bot-errors-central-ack-receipt",
+        "host": host,
+        "ackedAt": _mod.now_iso(acked_epoch),
+        "centralClass": "healthy",
+        "centralAction": "noop",
+        "observedHeartbeat": {"checkedAt": _mod.now_iso(970.0), "contentDigest": digest, "ageSeconds": 10},
+        "evaluation": {"evaluatedAt": _mod.now_iso(acked_epoch), "cycleSeq": 3, "rosterEpoch": 1, "rosterDigest": "b" * 64},
+    }
+    payload.update(overrides)
+    return json.dumps(payload)
+
+
+def _memory_with_ring(digests: list[str], **extra) -> dict:
+    return {
+        "lastClass": "healthy",
+        "consecutive": 1,
+        "healHistory": [],
+        "heartbeatDigestRing": [{"digest": d, "recordedAt": _mod.now_iso(900.0)} for d in digests],
+        **extra,
+    }
+
+
+def test_v2_receipt_with_known_observation_is_central_acked(tmp_path: Path):
+    ack = tmp_path / "central-ack.json"
+    _write_ack_file(ack, _ack_receipt_v2(digest="d1" * 32))
+    config, deps, calls, _head = _fixture(tmp_path, central_ack_path=ack)
+    _seed_memory(config, _memory_with_ring(["d1" * 32]))
+    status = _mod.run_selfcheck(config, deps)
+    assert status["centralAck"]["mode"] == "central_acked"
+    assert status["centralAck"]["status"] == "fresh"
+    assert status["centralAck"]["observedDigest"] == "d1" * 32
+    memory = json.loads(config.memory_path.read_text(encoding="utf-8"))
+    assert memory["centralAckCoverage"]["digest"] == "d1" * 32
+    assert calls == []
+
+
+def test_v2_receipt_with_unknown_observation_is_wrong_observation(tmp_path: Path):
+    ack = tmp_path / "central-ack.json"
+    _write_ack_file(ack, _ack_receipt_v2(digest="e" * 64))
+    config, deps, calls, _head = _fixture(tmp_path, central_ack_path=ack)
+    _seed_memory(config, _memory_with_ring(["d1" * 32]))
+    status = _mod.run_selfcheck(config, deps)
+    assert status["centralAck"]["mode"] == "local_only"
+    assert status["centralAck"]["status"] == "wrong_observation"
+    memory = json.loads(config.memory_path.read_text(encoding="utf-8"))
+    assert "centralAckCoverage" not in memory
+    assert calls == []
+
+
+def test_v2_receipt_with_empty_ring_is_wrong_observation(tmp_path: Path):
+    ack = tmp_path / "central-ack.json"
+    _write_ack_file(ack, _ack_receipt_v2())
+    config, deps, calls, _head = _fixture(tmp_path, central_ack_path=ack)
+    status = _mod.run_selfcheck(config, deps)
+    assert status["centralAck"]["mode"] == "local_only"
+    assert status["centralAck"]["status"] == "wrong_observation"
+    assert calls == []
+
+
+def test_v2_receipt_missing_observation_block_is_wrong_schema(tmp_path: Path):
+    ack = tmp_path / "central-ack.json"
+    _write_ack_file(ack, _ack_receipt_v2(observedHeartbeat={}))
+    config, deps, calls, _head = _fixture(tmp_path, central_ack_path=ack)
+    _seed_memory(config, _memory_with_ring(["d1" * 32]))
+    status = _mod.run_selfcheck(config, deps)
+    assert status["centralAck"]["mode"] == "local_only"
+    assert status["centralAck"]["status"] == "wrong_schema"
+    assert calls == []
+
+
+def test_v2_receipt_wrong_kind_is_wrong_schema(tmp_path: Path):
+    ack = tmp_path / "central-ack.json"
+    _write_ack_file(ack, _ack_receipt_v2(kind="something-else"))
+    config, deps, calls, _head = _fixture(tmp_path, central_ack_path=ack)
+    _seed_memory(config, _memory_with_ring(["a" * 64]))
+    status = _mod.run_selfcheck(config, deps)
+    assert status["centralAck"]["mode"] == "local_only"
+    assert status["centralAck"]["status"] == "wrong_schema"
+    assert calls == []
+
+
+def test_v1_receipt_in_strict_mode_is_legacy_unbound(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("BOT_ERRORS_SELFCHECK_ACCEPT_LEGACY_ACK", "0")
+    ack = tmp_path / "central-ack.json"
+    _write_ack_file(ack, _ack_receipt())
+    config, deps, calls, _head = _fixture(tmp_path, central_ack_path=ack)
+    status = _mod.run_selfcheck(config, deps)
+    assert status["centralAck"]["mode"] == "local_only"
+    assert status["centralAck"]["status"] == "legacy_unbound"
+    assert calls == []
+
+
+def test_v1_receipt_default_transition_acceptance_persists(tmp_path: Path):
+    ack = tmp_path / "central-ack.json"
+    _write_ack_file(ack, _ack_receipt())
+    config, deps, calls, _head = _fixture(tmp_path, central_ack_path=ack)
+    status = _mod.run_selfcheck(config, deps)
+    assert status["centralAck"]["mode"] == "central_acked"
+    assert status["centralAck"]["status"] == "fresh"
+    memory = json.loads(config.memory_path.read_text(encoding="utf-8"))
+    assert "centralAckCoverage" not in memory
+    assert calls == []
+
+
+def test_v2_receipt_for_older_observation_acknowledges_it_exactly(tmp_path: Path):
+    older, newer = "01" * 32, "02" * 32
+    ack = tmp_path / "central-ack.json"
+    _write_ack_file(ack, _ack_receipt_v2(digest=older))
+    config, deps, calls, _head = _fixture(tmp_path, central_ack_path=ack)
+    _seed_memory(config, _memory_with_ring([older, newer]))
+    status = _mod.run_selfcheck(config, deps)
+    assert status["centralAck"]["mode"] == "central_acked"
+    memory = json.loads(config.memory_path.read_text(encoding="utf-8"))
+    assert memory["centralAckCoverage"]["digest"] == older
+    assert memory["centralAckCoverage"]["digest"] != newer
+    assert calls == []
+
+
+def test_repeated_receipt_over_unchanged_observation_does_not_advance_coverage(tmp_path: Path):
+    observed, newer = "01" * 32, "02" * 32
+    config = None
+    for cycle_seq in (3, 4, 5):
+        tmp = tmp_path / f"cycle-{cycle_seq}"
+        tmp.mkdir()
+        ack = tmp / "central-ack.json"
+        _write_ack_file(ack, _ack_receipt_v2(digest=observed, evaluation={"evaluatedAt": _mod.now_iso(980.0), "cycleSeq": cycle_seq, "rosterEpoch": 1, "rosterDigest": "b" * 64}))
+        config, deps, calls, _head = _fixture(tmp, central_ack_path=ack)
+        _seed_memory(config, _memory_with_ring([observed, newer]))
+        status = _mod.run_selfcheck(config, deps)
+        assert status["centralAck"]["mode"] == "central_acked"
+        memory = json.loads(config.memory_path.read_text(encoding="utf-8"))
+        assert memory["centralAckCoverage"]["digest"] == observed
+        assert calls == []
+
+
+def test_selfcheck_publishes_heartbeat_digest_ring(tmp_path: Path):
+    config, deps, calls, _head = _fixture(tmp_path)
+    status = _mod.run_selfcheck(config, deps)
+    assert status["healthy"] is True
+    memory = json.loads(config.memory_path.read_text(encoding="utf-8"))
+    ring = memory["heartbeatDigestRing"]
+    assert len(ring) == 2
+    local_payload = json.loads(config.heartbeat_path.read_text(encoding="utf-8"))
+    assert ring[0]["digest"] == _mod.heartbeat_observation_digest(local_payload)
+    assert all(len(entry["digest"]) == 64 for entry in ring)
+    assert calls == []
+
+
+def test_heartbeat_digest_ring_is_capped(tmp_path: Path):
+    config, deps, calls, _head = _fixture(tmp_path)
+    seeded = [{"digest": f"{i:02d}" * 32, "recordedAt": _mod.now_iso(900.0)} for i in range(8)]
+    _seed_memory(config, {"lastClass": "healthy", "consecutive": 1, "healHistory": [], "heartbeatDigestRing": seeded})
+    _mod.run_selfcheck(config, deps)
+    memory = json.loads(config.memory_path.read_text(encoding="utf-8"))
+    ring = memory["heartbeatDigestRing"]
+    assert len(ring) <= 8
+    seeded_digests = {entry["digest"] for entry in seeded}
+    new_entries = [entry for entry in ring if entry["digest"] not in seeded_digests]
+    assert len(new_entries) == 2
+    assert calls == []

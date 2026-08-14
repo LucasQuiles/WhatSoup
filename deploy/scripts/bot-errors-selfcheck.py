@@ -658,14 +658,35 @@ def parse_iso_epoch(value: object) -> Optional[float]:
 
 
 CENTRAL_ACK_REQUIRED_STR_FIELDS = ("host", "ackedAt", "centralClass", "centralAction")
+CENTRAL_ACK_RECEIPT_KIND = "bot-errors-central-ack-receipt"
+HEARTBEAT_DIGEST_RING_CAP = 8
 _CENTRAL_ACK_DIGEST_DOMAIN = b"bot-errors-central-ack-receipt:"
+_OBSERVATION_DIGEST_DOMAIN = b"bot-errors-heartbeat-observation:"
 
 
 def central_ack_receipt_digest(raw: bytes) -> str:
     return hashlib.sha256(_CENTRAL_ACK_DIGEST_DOMAIN + raw).hexdigest()
 
 
-def central_ack_inventory(path: Optional[Path], now: float, expected_host: object) -> dict:
+def heartbeat_observation_digest(payload: dict) -> str:
+    """Domain-separated digest of a heartbeat's canonical content (#2468).
+
+    Must stay byte-identical to the helper of the same name in
+    bot-errors-sentinel.py (cross-pinned by test).
+    """
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(_OBSERVATION_DIGEST_DOMAIN + canonical).hexdigest()
+
+
+def accept_legacy_central_ack() -> bool:
+    # Transition gate: v1 receipts carry no observation binding. Default is
+    # accept (a redeployed host must not false-alarm into central-down while
+    # the central sentinel still writes v1); flip to "0" once the fleet
+    # sentinel writes v2 receipts.
+    return os.environ.get("BOT_ERRORS_SELFCHECK_ACCEPT_LEGACY_ACK", "1").strip() != "0"
+
+
+def central_ack_inventory(path: Optional[Path], now: float, expected_host: object, known_digests: Optional[set] = None) -> dict:
     """Validate the central acknowledgement receipt (#2468 slice 1).
 
     Freshness is anchored to the receipt's own ``ackedAt`` claim, never the
@@ -705,11 +726,17 @@ def central_ack_inventory(path: Optional[Path], now: float, expected_host: objec
         return {**base, "status": "malformed_json"}
     digest = central_ack_receipt_digest(raw)
     schema_version = payload.get("schemaVersion")
-    if not isinstance(schema_version, int) or isinstance(schema_version, bool) or schema_version != 1:
+    if not isinstance(schema_version, int) or isinstance(schema_version, bool) or schema_version not in (1, 2):
         return {**base, "status": "wrong_schema", "receiptDigest": digest}
     for field in CENTRAL_ACK_REQUIRED_STR_FIELDS:
         value = payload.get(field)
         if not isinstance(value, str) or not value.strip():
+            return {**base, "status": "wrong_schema", "receiptDigest": digest}
+    observed_digest = None
+    if schema_version == 2:
+        observed = payload.get("observedHeartbeat")
+        observed_digest = observed.get("contentDigest") if isinstance(observed, dict) else None
+        if payload.get("kind") != CENTRAL_ACK_RECEIPT_KIND or not isinstance(observed_digest, str) or not observed_digest:
             return {**base, "status": "wrong_schema", "receiptDigest": digest}
     if not isinstance(expected_host, str) or payload["host"] != expected_host:
         return {**base, "status": "wrong_subject", "receiptDigest": digest}
@@ -721,7 +748,16 @@ def central_ack_inventory(path: Optional[Path], now: float, expected_host: objec
     age = max(0, int(now - acked_epoch))
     if age > max_age:
         return {**base, "status": "stale_payload", "ageSeconds": age, "receiptDigest": digest}
-    return {
+    if schema_version == 1:
+        if not accept_legacy_central_ack():
+            return {**base, "status": "legacy_unbound", "receiptDigest": digest}
+    elif observed_digest not in (known_digests or set()):
+        # Observation binding (#2468): the receipt must reference a heartbeat
+        # this host actually published. A digest we never recorded proves
+        # nothing — including on a fresh install with an empty ring, where no
+        # prior heartbeat existed for the central evaluator to observe.
+        return {**base, "status": "wrong_observation", "receiptDigest": digest}
+    accepted = {
         **base,
         "mode": "central_acked",
         "status": "fresh",
@@ -730,6 +766,9 @@ def central_ack_inventory(path: Optional[Path], now: float, expected_host: objec
         "receiptAckedAt": payload["ackedAt"],
         "receiptAckedAtEpoch": acked_epoch,
     }
+    if observed_digest is not None:
+        accepted["observedDigest"] = observed_digest
+    return accepted
 
 
 def update_central_ack_watch(memory: dict, central_ack: dict, now: float) -> None:
@@ -770,6 +809,12 @@ def update_central_ack_watch(memory: dict, central_ack: dict, now: float) -> Non
                 "digest": digest,
                 "recordedAt": now_iso(now),
             }
+        observed_digest = central_ack.get("observedDigest")
+        if isinstance(observed_digest, str) and observed_digest:
+            # Coverage marker (#2468 AC3/AC7): record exactly which heartbeat
+            # observation the central evaluator proved it saw — never a newer
+            # one the receipt does not bind to.
+            memory["centralAckCoverage"] = {"digest": observed_digest, "recordedAt": now_iso(now)}
         memory.pop("centralAckLocalOnlySince", None)
         central_ack["centralDownSuspected"] = False
         return
@@ -1058,9 +1103,23 @@ def publish_central_down_alert(config: SelfcheckConfig, status: dict) -> None:
     status["centralDownAlert"] = result
 
 
+def record_heartbeat_digests(memory: dict, status: dict) -> None:
+    # Digest ring (#2468): remember which heartbeat projections this host
+    # published so a v2 ack receipt can be verified against them. Both the
+    # local forensic payload and the bounded central push are recorded — the
+    # sentinel may read either, depending on transport.
+    ring = memory.get("heartbeatDigestRing")
+    entries = [entry for entry in (ring if isinstance(ring, list) else []) if isinstance(entry, dict)]
+    recorded_at = status.get("checkedAt")
+    for payload in (heartbeat_payload(status), central_telemetry_payload(status)):
+        entries.append({"digest": heartbeat_observation_digest(payload), "recordedAt": recorded_at})
+    memory["heartbeatDigestRing"] = entries[-HEARTBEAT_DIGEST_RING_CAP:]
+
+
 def finalize_status(config: SelfcheckConfig, deps: SelfcheckDeps, memory: dict, status: dict) -> dict:
     publish_central_down_alert(config, status)
     publish_heartbeat(config, deps, status)
+    record_heartbeat_digests(memory, status)
     memory_target = _durable_target(config.memory_path)
     memory_observation = observe_json(memory_target)
     memory_operation = operation_id(
@@ -1146,7 +1205,13 @@ def run_selfcheck(config: SelfcheckConfig, deps: Optional[SelfcheckDeps] = None,
         status["problems"] = [f"lever stat failed: {r}" for r in lever_stat_errors]
         status["consecutive"] = update_consecutive(memory, status["class"])
         return finalize_status(config, deps, memory, status)
-    status["centralAck"] = central_ack_inventory(config.central_ack_path, now, status.get("host"))
+    ring = memory.get("heartbeatDigestRing")
+    known_digests = {
+        entry["digest"]
+        for entry in (ring if isinstance(ring, list) else [])
+        if isinstance(entry, dict) and isinstance(entry.get("digest"), str)
+    }
+    status["centralAck"] = central_ack_inventory(config.central_ack_path, now, status.get("host"), known_digests)
     update_central_ack_watch(memory, status["centralAck"], now)
 
     try:

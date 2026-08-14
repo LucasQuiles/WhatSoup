@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-08-14T03:39:34Z",
+  "generatedAt": "2026-08-14T04:37:28Z",
   "scope": "bot-errors-runtime-scripts",
   "expectedHeadShaPolicy": "populated at deploy time by deploy step; absent here so committed state is observability-only",
   "files": [
@@ -225,7 +225,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-selfcheck.py",
-      "sha256": "5f040843c6c420c077e246d8430a9d078fb08742274197b3fb0ab14cc92bdcfc",
+      "sha256": "c46b97633820f71a23446303c51d7f0d91427cb46d4394302241ecacee4b8349",
       "mustContain": [
         "SAFE_HEAL_CLASSES",
         "HEAL_WINDOW_SECONDS"
@@ -233,7 +233,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-sentinel.py",
-      "sha256": "ff385ea06f2029307c44b419f42b3240b5fbb208b8891a43744eec4eda5de09d",
+      "sha256": "08639cab5c59f0f7025d79b20bca7ab7f7231da24cf466cb86cde058b8cca5fb",
       "mustContain": [
         "DEFAULT_HEARTBEAT_MAX_AGE_SECONDS",
         "DEFAULT_HYSTERESIS_CYCLES"

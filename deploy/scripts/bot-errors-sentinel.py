@@ -308,6 +308,21 @@ def optional_json_object(path: Path) -> Optional[dict]:
         return None
 
 
+_OBSERVATION_DIGEST_DOMAIN = b"bot-errors-heartbeat-observation:"
+
+
+def heartbeat_observation_digest(payload: dict) -> str:
+    """Domain-separated digest of a heartbeat's canonical content (#2468).
+
+    Content-canonical (sorted keys, compact separators) rather than raw
+    bytes, so a transport that re-serializes the same content still matches
+    the digest the writer recorded. Must stay byte-identical to the helper
+    of the same name in bot-errors-selfcheck.py (cross-pinned by test).
+    """
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(_OBSERVATION_DIGEST_DOMAIN + canonical).hexdigest()
+
+
 def optional_text(value: object, field: str) -> Optional[str]:
     if value is None:
         return None
@@ -718,6 +733,7 @@ def heartbeat_inventory(spec: HostSpec, now: float, max_age_seconds: int, max_cl
         signal = "healthy"
     else:
         signal = "unhealthy"
+    raw_checked_at = payload.get("checkedAt")
     result = {
         "configured": True,
         "signal": signal,
@@ -729,6 +745,8 @@ def heartbeat_inventory(spec: HostSpec, now: float, max_age_seconds: int, max_cl
         "class": heartbeat_class,
         "action": str(payload.get("action") or "unknown"),
         "pin": payload.get("pin"),
+        "checkedAt": raw_checked_at if isinstance(raw_checked_at, str) else None,
+        "contentDigest": heartbeat_observation_digest(payload),
     }
     if clock_skew_seconds is not None:
         result["clockSkewSeconds"] = clock_skew_seconds
@@ -1706,15 +1724,26 @@ def emit_action_events(
     return emitted
 
 
-def write_ack(spec: HostSpec, result: dict, now: float) -> Optional[str]:
+def write_ack(spec: HostSpec, result: dict, now: float, evaluation: Optional[dict] = None) -> Optional[str]:
     if spec.ack_path is None:
         return None
+    heartbeat = result.get("heartbeat") if isinstance(result.get("heartbeat"), dict) else {}
     payload = {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
+        "kind": "bot-errors-central-ack-receipt",
         "host": spec.host,
         "ackedAt": now_iso(now),
         "centralClass": result.get("class"),
         "centralAction": result.get("action"),
+        # Observation binding (#2468): which heartbeat content this receipt
+        # actually evaluated. contentDigest is None when the heartbeat was
+        # missing or unparseable — a receipt must never bind to garbage.
+        "observedHeartbeat": {
+            "checkedAt": heartbeat.get("checkedAt"),
+            "contentDigest": heartbeat.get("contentDigest"),
+            "ageSeconds": heartbeat.get("ageSeconds"),
+        },
+        "evaluation": {"evaluatedAt": now_iso(now), **(evaluation or {})},
     }
     target = _durable_target(spec.ack_path)
     observation = observe_json(target)
@@ -1856,9 +1885,18 @@ def run_once(config: SentinelConfig, deps: Optional[SentinelDeps] = None) -> dic
         if tier1_action is not None:
             fleet_action = tier1_action
 
+    # The receipts written below must carry the sequence of the cycle that
+    # evaluated them, so the counter is computed before the ack loop and
+    # committed to state afterwards (#2468 ordering).
+    next_cycle_seq = int_or_zero(state.get("cycleSeq")) + 1
+    ack_evaluation = {
+        "cycleSeq": next_cycle_seq,
+        "rosterEpoch": roster_epoch_value,
+        "rosterDigest": (roster_inventory_data or {}).get("digest"),
+    }
     for spec, result in zip(hosts, results):
         try:
-            ack_path = write_ack(spec, result, now)
+            ack_path = write_ack(spec, result, now, ack_evaluation)
         except Exception as exc:
             result["ackError"] = f"{type(exc).__name__}: {exc}"[:300]
         else:
@@ -1868,7 +1906,7 @@ def run_once(config: SentinelConfig, deps: Optional[SentinelDeps] = None) -> dic
     state["lastFleetAction"] = fleet_action
     state["lastReachabilityOracle"] = oracle
     # Advance a generation counter so workers can detect stale events.
-    state["cycleSeq"] = int_or_zero(state.get("cycleSeq")) + 1
+    state["cycleSeq"] = next_cycle_seq
     action_events = emit_action_events(results, state, config, now, controller_host, fleet_action, oracle)
     # Consume pending actions from the outbox, then prune remaining .done/
     # .failed files.  The consumer reads .json, executes, and renames to .done
