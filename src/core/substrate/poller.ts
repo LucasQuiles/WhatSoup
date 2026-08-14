@@ -40,7 +40,7 @@
 import type { DatabaseSync, SQLInputValue, StatementSync } from 'node:sqlite';
 import { basename, resolve, sep } from 'node:path';
 import { realpathSync, statSync, createReadStream } from 'node:fs';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { nowUnixSec } from './time.ts';
 import {
   dueTriggers, validateTriggerSpec, isSafeSqliteSql,
@@ -233,6 +233,17 @@ export type AgentJobDispatchFn = (ctx: AgentJobContext) => AgentJobDispatchResul
 export interface TriggerPollerOptions {
   /** How often to call dueTriggers. Default 30s. */
   intervalMs?: number;
+  /**
+   * #2566 — lease TTL for durable occurrence rows. An occurrence whose lease
+   * expires without a terminal state is swept to 'stale' on the next startup,
+   * never silently replayed. Default 900s.
+   */
+  occurrenceLeaseTtlSeconds?: number;
+  /**
+   * #2566 — lease owner token stamped on claimed occurrences. Default is a
+   * process-scoped random token; tests inject a fixed value.
+   */
+  occurrenceLeaseOwner?: string;
   /** Max triggers fetched per tick. Default 50. */
   batchSize?: number;
   /** Injectable clock for tests. Returns unix seconds. */
@@ -458,6 +469,11 @@ export class TriggerPoller {
   private readonly stmtInsertExpiryRun: StatementSync;
   private readonly stmtLookupBeadStatus: StatementSync;
   private readonly stmtReopenBead: StatementSync;
+  private readonly stmtClaimOccurrence: StatementSync;
+  private readonly stmtFinalizeOccurrence: StatementSync;
+  private readonly stmtSweepStaleOccurrences: StatementSync;
+  private readonly occurrenceLeaseTtlSeconds: number;
+  private readonly occurrenceLeaseOwner: string;
 
   constructor(db: DatabaseSync, messenger: Messenger, opts: TriggerPollerOptions = {}) {
     this.db = db;
@@ -597,6 +613,29 @@ export class TriggerPoller {
        SET status = 'active', completed_at = NULL, cancelled_at = NULL, updated_at = ?
        WHERE id = ?`,
     );
+
+    // #2566 — durable occurrence lifecycle. The claim is committed BEFORE the
+    // executor runs; the finalize is fenced on (lease_owner, lease_generation)
+    // so a competing claimant can never have its state overwritten.
+    this.occurrenceLeaseTtlSeconds = opts.occurrenceLeaseTtlSeconds ?? 900;
+    this.occurrenceLeaseOwner = opts.occurrenceLeaseOwner
+      ?? `pid:${process.pid}:${randomBytes(4).toString('hex')}`;
+    this.stmtClaimOccurrence = this.db.prepare(
+      `INSERT INTO trigger_occurrences (
+         trigger_id, bead_id, scheduled_for, attempt, state,
+         lease_owner, lease_generation, lease_expires_at, claimed_at, started_at
+       ) VALUES (?, ?, ?, 1, 'running', ?, 1, ?, ?, ?)`,
+    );
+    this.stmtFinalizeOccurrence = this.db.prepare(
+      `UPDATE trigger_occurrences
+       SET state = ?, finished_at = ?
+       WHERE id = ? AND lease_owner = ? AND lease_generation = ?`,
+    );
+    this.stmtSweepStaleOccurrences = this.db.prepare(
+      `UPDATE trigger_occurrences
+       SET state = 'stale', stale_cause = 'lease_expired', finished_at = ?
+       WHERE state IN ('claimed','running') AND lease_expires_at IS NOT NULL AND lease_expires_at < ?`,
+    );
   }
 
   start(): void {
@@ -609,7 +648,25 @@ export class TriggerPoller {
     }
     this.stopped = false;
     log.info({ intervalMs: this.intervalMs, batchSize: this.batchSize }, 'trigger poller starting');
+    this.reconcileStaleOccurrences(this.nowFn());
     this.scheduleNext();
+  }
+
+  /**
+   * #2566 — restart reconciliation. Occurrences whose lease expired without a
+   * terminal state are marked 'stale' (bounded cause, no raw prose) and are
+   * NEVER silently replayed: whether a side effect happened is unknowable
+   * here, so replay policy belongs to a capability-aware layer, not startup.
+   */
+  reconcileStaleOccurrences(now: number): void {
+    try {
+      const swept = this.stmtSweepStaleOccurrences.run(now, now);
+      if (Number(swept.changes) > 0) {
+        log.warn({ count: Number(swept.changes) }, 'stale trigger occurrences swept (lease expired without terminal state)');
+      }
+    } catch (err) {
+      log.error({ err }, 'stale-occurrence sweep failed unexpectedly');
+    }
   }
 
   stop(): void {
@@ -801,6 +858,31 @@ export class TriggerPoller {
   private async processTrigger(t: TriggerRow, now: number): Promise<void> {
     // Terminal-at expiry is handled by the expiry sweep in tickOnce; dueTriggers
     // already filters out rows past terminal_at, so we should never see one here.
+
+    // #2566 — claim the occurrence DURABLY before invoking any executor. The
+    // committed row is the only evidence a crash or hang can leave behind, and
+    // UNIQUE(trigger_id, scheduled_for, attempt) makes the occurrence identity
+    // stable across processes: a second claim of the same occurrence is a
+    // conflict, not a rerun.
+    const scheduledFor = t.next_fire_at ?? now;
+    let occurrenceId: number;
+    try {
+      const claim = this.stmtClaimOccurrence.run(
+        t.id, t.bead_id, scheduledFor,
+        this.occurrenceLeaseOwner, now + this.occurrenceLeaseTtlSeconds, now, now,
+      );
+      occurrenceId = Number(claim.lastInsertRowid);
+    } catch (err) {
+      if (/UNIQUE/.test(errorMessage(err))) {
+        log.warn(
+          { triggerId: t.id, scheduledFor },
+          'trigger occurrence already claimed — skipping without executing',
+        );
+        return;
+      }
+      throw err;
+    }
+
     let outcome: ExecuteOutcome;
     try {
       outcome = await this.executeTrigger(t);
@@ -840,6 +922,14 @@ export class TriggerPoller {
       runId = this.insertRun(t, now);
       this.finishRun(runId, now, finishedAt, outcome, null);
       this.scheduleNextFire(t, now, outcome, postCommitActions);
+      // #2566 — fenced occurrence finalize: only the owner that claimed this
+      // occurrence (same lease owner AND generation) may commit its terminal
+      // state. A stolen/expired lease leaves the row for reconciliation
+      // instead of being silently overwritten.
+      this.stmtFinalizeOccurrence.run(
+        outcome.status, finishedAt, occurrenceId,
+        this.occurrenceLeaseOwner, 1,
+      );
       this.db.exec('COMMIT');
     } catch (err) {
       try { this.db.exec('ROLLBACK'); } catch { /* best effort */ }
