@@ -71,9 +71,9 @@ describe('prepared statement caching', () => {
     // ForFreshLifecycle — the bounded content-free admission/quarantine
     // statements that keep unprovable resume identities resumable while
     // health stays green. Merge union with main's +5 (#2560) on the rebased tree (136); verified by running this suite.)
-    // (+1 vs 136, #2155: getNewestInboundSeqForConversation — the operator
-    // promotion workflow's read-only newer-activity probe.)
-    expect(prepareSpy).toHaveBeenCalledTimes(137);
+    // (+1 vs 137: the corroboration-aware delivery ambiguity health aggregate
+    // is prepared once and reused with the rest of the durability statements.)
+    expect(prepareSpy).toHaveBeenCalledTimes(138);
     prepareSpy.mockClear();
 
     const seq = engine.journalInbound('msg-1', 'conv-1', 'jid-1@s.whatsapp.net', 'agent');
