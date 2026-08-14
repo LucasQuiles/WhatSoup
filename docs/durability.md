@@ -1091,3 +1091,46 @@ the work. Fully autonomous re-adoption is a deliberate later decision, not a def
   `TRACKED_UNREACHABLE` (`tests/scripts/orphan-reachability-guard.test.ts`) so the gap stays
   visible rather than silent.
 - **PR3** — CLI shim so operator-side scripts can register, plus the runbook.
+
+## 8. Trigger Occurrence Lifecycle (#2566)
+
+The trigger poller commits durable evidence of every execution BEFORE the executor runs, and
+isolates hung executors from unrelated work. Slices 1–2 of #2566 implement the claim/lease,
+concurrency, and liveness-observation layers documented here; delivery separation, replay policy,
+and retention are later slices and are NOT yet implemented.
+
+### 8.1 Fenced occurrence claim (migration 57)
+
+`trigger_occurrences` gives every scheduled execution a stable identity —
+`UNIQUE(trigger_id, scheduled_for, attempt)` — and a fenced lease (`lease_owner`,
+`lease_generation`, `lease_expires_at`). `processTrigger` claims the occurrence (state
+`running`) in its own committed transaction BEFORE invoking any executor: a crash or hang
+always leaves committed evidence, and a second claim of the same occurrence is a UNIQUE
+conflict that skips WITHOUT executing — restart cannot run the same occurrence twice. The
+terminal finalize runs inside the existing run transaction and is fenced three ways: same
+`lease_owner`, same `lease_generation`, AND current state in (`claimed`,`running`) — a stolen
+lease or an abandoned execution can never rewrite a terminal state. On startup,
+`reconcileStaleOccurrences` sweeps expired-lease claims to `stale` (`stale_cause=lease_expired`)
+and never replays them: whether a side effect happened is unknowable at startup, so replay
+policy belongs to a capability-aware later slice. `trigger_runs` is byte-unchanged alongside.
+
+### 8.2 Bounded concurrency and hang isolation
+
+Non-side-effecting probe kinds (`poll.sqlite`, `poll.pinecone`, `poll.file`, `poll.url`) run
+through a bounded pool (`maxConcurrentExecutors`, default 4); every side-effecting kind
+(`poll.shell`, `schedule.*`, `event.message`) stays strictly serial. Probes carry a
+per-execution timeout (`executionTimeoutSeconds`, default 300s) finalized as the bounded class
+`execution_timeout` — abandoning a read-only probe is always safe, and the finalize state
+guard makes any late write from the abandoned execution a no-op. The run loop awaits each tick
+under `tickBudgetSeconds` (default 600s) and re-arms the timer past stragglers, which keep
+running detached and finalize under their lease.
+
+### 8.3 Independent liveness observation
+
+`TriggerLivenessObserver` runs the liveness gauges on its OWN timer (`observerIntervalMs`,
+default 60s) so they still fire when a tick hangs — a watchdog inside `tickOnce` is starved by
+the very hang it should report. It runs the #1765 past-due gauge (active, never-fired, stale
+`next_fire_at`) via a poller-owned hook, and the recurring-overdue gauge
+(`trigger_recurring_overdue`: active, fired before, `next_fire_at` more than
+`recurringOverdueGraceSeconds` past — default 900s). Both are fire-once/clear-once latched
+with restart-safe recovery markers.
