@@ -91,6 +91,8 @@ describe('database retention', () => {
       metricsHourly: 0,
       decryptionFailures: 0,
       messages: 0,
+      triggerRuns: 0,
+      triggerOccurrences: 0,
     });
     expect(rowCount('inbound_events')).toBe(1);
     expect(rowCount('outbound_ops')).toBe(1);
@@ -288,6 +290,8 @@ describe('database retention', () => {
     const result = runDatabaseRetention(db, {
       ...DEFAULT_DATABASE_RETENTION,
       messageRetentionDays: 30,
+      triggerRunDays: 30,
+      triggerOccurrenceDays: 30,
     });
 
     expect(result.messages).toBe(1);
@@ -575,6 +579,8 @@ describe('database retention', () => {
       metricsHourly: 0,
       decryptionFailures: 0,
       messages: 0,
+      triggerRuns: 0,
+      triggerOccurrences: 0,
     });
     expect(rowCount('inbound_events')).toBe(2);
     expect(rowCount('outbound_ops')).toBe(2);
@@ -973,6 +979,8 @@ describe('database retention', () => {
         outboundSendDays: 30,
         outboundSendMaxRows: 10_000,
         messageRetentionDays: 30,
+        triggerRunDays: 30,
+        triggerOccurrenceDays: 30,
       });
 
       expect(timer.getHealthSnapshot()).toEqual({
@@ -1030,6 +1038,8 @@ describe('database retention', () => {
         outboundSendDays: 30,
         outboundSendMaxRows: 10_000,
         messageRetentionDays: 30,
+        triggerRunDays: 30,
+        triggerOccurrenceDays: 30,
       });
       const emptyResult = {
         turnRecoveryJobs: 0,
@@ -1043,6 +1053,8 @@ describe('database retention', () => {
         metricsHourly: 0,
         decryptionFailures: 0,
         messages: 0,
+        triggerRuns: 0,
+        triggerOccurrences: 0,
       };
       const runSpy = vi.spyOn(timer, 'runCleanup')
         .mockRejectedValueOnce(new Error('immediate-retention-failed'))

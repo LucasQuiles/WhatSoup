@@ -3799,6 +3799,8 @@ describe('POST /send — Authorization header check', () => {
         metricsHourly: 0,
         decryptionFailures: 0,
         messages: 0,
+        triggerRuns: 0,
+        triggerOccurrences: 0,
       },
     });
 
