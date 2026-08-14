@@ -10,17 +10,47 @@
  * exceptions swallowed into a dispatch.
  */
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import {
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
 import { readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { dirname, join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   cleanupUnreferencedMedia,
   retainMediaForObligation,
   verifyRetainedMedia,
 } from '../../src/core/obligation-media-retention.ts';
+
+// Fault injection for the post-copy verification gate: passthrough to the real
+// fs/promises, except that when `corruptTo` is armed the rename target's bytes
+// are silently replaced AFTER the atomic rename — the torn-object scenario the
+// reopen + re-hash step exists to catch. Every other test runs the real fs.
+const renameCorruption = vi.hoisted(() => ({ corruptTo: null as Buffer | null }));
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    rename: async (oldPath: string, newPath: string): Promise<void> => {
+      await actual.rename(oldPath, newPath);
+      const corruptTo = renameCorruption.corruptTo;
+      if (corruptTo !== null) {
+        renameCorruption.corruptTo = null;
+        await actual.writeFile(newPath, corruptTo);
+      }
+    },
+  };
+});
 
 let dir: string;
 let root: string;
@@ -33,6 +63,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  renameCorruption.corruptTo = null;
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -68,6 +99,38 @@ describe('retainMediaForObligation', () => {
 
   it('fails closed when the source is missing', async () => {
     await expect(retainMediaForObligation(OPTS(), join(dir, 'nope.bin'))).rejects.toThrow();
+  });
+
+  it('fails closed when the source is not a regular file', async () => {
+    const srcDir = join(dir, 'not-a-file');
+    mkdirSync(srcDir);
+    await expect(retainMediaForObligation(OPTS(), srcDir)).rejects.toThrow(/not a regular file/);
+  });
+
+  it('replaces a corrupt pre-existing object at the content-addressed path', async () => {
+    const content = Buffer.from('true-bytes-payload');
+    const digest = sha256(content);
+    const destDir = join(root, digest.slice(0, 2));
+    mkdirSync(destDir, { recursive: true });
+    const destPath = join(destDir, digest);
+    // Wrong bytes sitting at the digest path = corruption, never the retained copy.
+    writeFileSync(destPath, 'corrupt-collision');
+    const retained = await retainMediaForObligation(OPTS(), makeSource('true.bin', content));
+    expect(retained.path).toBe(destPath);
+    expect(retained.sha256).toBe(digest);
+    expect(readFileSync(destPath)).toEqual(content);
+    expect(await verifyRetainedMedia(retained)).toBe('ok');
+  });
+
+  it('fails closed when the retained object fails post-copy verification (torn rename)', async () => {
+    const content = Buffer.from('bytes-that-get-torn');
+    const src = makeSource('torn.bin', content);
+    renameCorruption.corruptTo = Buffer.from('silently-different-bytes');
+    await expect(retainMediaForObligation(OPTS(), src)).rejects.toThrow(/post-copy verification/);
+    // A later clean retain repairs the corrupt object and verifies.
+    const retained = await retainMediaForObligation(OPTS(), src);
+    expect(retained.sha256).toBe(sha256(content));
+    expect(await verifyRetainedMedia(retained)).toBe('ok');
   });
 
   it('the retained copy is independent of the source (source eviction is harmless)', async () => {
@@ -173,5 +236,30 @@ describe('cleanupUnreferencedMedia — bounded orphan GC', () => {
   it('an empty or missing root is a no-op', async () => {
     const res = await cleanupUnreferencedMedia(OPTS(), { referencedPaths: new Set(), graceMs: AGE });
     expect(res.removed).toEqual([]);
+  });
+
+  it('a symlink at the root is never a GC candidate (not removed, not followed)', async () => {
+    const orphan = await retainMediaForObligation(OPTS(), makeSource('o.bin', 'o'));
+    ageFile(orphan.path, AGE * 2);
+    const linkTarget = join(dir, 'outside-root');
+    writeFileSync(linkTarget, 'outside');
+    ageFile(linkTarget, AGE * 2); // if the link WERE a candidate, the followed stat would say "aged"
+    const link = join(root, 'rogue-link');
+    symlinkSync(linkTarget, link);
+    const res = await cleanupUnreferencedMedia(OPTS(), { referencedPaths: new Set(), graceMs: AGE });
+    expect(res.removed).toEqual([orphan.path]);
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(readFileSync(linkTarget, 'utf8')).toBe('outside');
+  });
+
+  it('a non-file entry inside a shard directory is never a GC candidate', async () => {
+    const orphan = await retainMediaForObligation(OPTS(), makeSource('p.bin', 'p'));
+    ageFile(orphan.path, AGE * 2);
+    const nested = join(dirname(orphan.path), 'nested-dir');
+    mkdirSync(nested);
+    ageFile(nested, AGE * 2); // survival must come from the type check, not the grace period
+    const res = await cleanupUnreferencedMedia(OPTS(), { referencedPaths: new Set(), graceMs: AGE });
+    expect(res.removed).toEqual([orphan.path]);
+    expect(statSync(nested).isDirectory()).toBe(true);
   });
 });

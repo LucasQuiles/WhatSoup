@@ -5,7 +5,7 @@
  * bound — and the activation closure's post-condition is the SAME dispatch
  * predicate the supervisor uses, never the session flag alone.
  */
-import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -210,6 +210,58 @@ describe('serviceDrainNowRequests', () => {
     ]);
   });
 
+  it('uses the system clock when no nowUnixSec is injected (fresh request drains)', async () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    dropRequest(56, { requestedAtUnixSec: nowSec }); // well inside TTL and skew under the real clock
+    const { calls, drain } = collectingDrain();
+    const outcomes = await serviceDrainNowRequests({ requestDir: dir, drain });
+    expect(outcomes).toEqual([{ kind: 'drained', obligationId: 56, file: '56.json' }]);
+    expect(calls).toEqual([56]);
+  });
+
+  it('a drain that rejects with a NON-Error is recorded as drain_threw:unknown', async () => {
+    dropRequest(55);
+    const outcomes = await serviceDrainNowRequests({
+      requestDir: dir,
+      nowUnixSec: () => NOW,
+      drain: () => Promise.reject('string-bomb'),
+    });
+    expect(outcomes).toEqual([
+      { kind: 'refused', obligationId: 55, file: '55.json', reason: 'drain_threw:unknown' },
+    ]);
+  });
+
+  it('fails closed when the platform has no geteuid (dir ownership unverifiable)', async () => {
+    dropRequest(72);
+    const { calls, drain } = collectingDrain();
+    const original = process.geteuid;
+    delete (process as { geteuid?: () => number }).geteuid;
+    try {
+      const outcomes = await serviceDrainNowRequests({ requestDir: dir, drain, nowUnixSec: () => NOW });
+      expect(outcomes).toEqual([{ kind: 'invalid', file: '.', reason: 'untrusted_request_dir' }]);
+      expect(calls).toEqual([]);
+      expect(readdirSync(dir)).toContain('72.json'); // not even consumed — ownership unprovable
+    } finally {
+      (process as { geteuid?: () => number }).geteuid = original;
+    }
+  });
+
+  it('prunes at most 20 stale artifacts per cycle; the next cycle finishes the job', async () => {
+    const past = new Date(Date.now() - 8 * 24 * 3600 * 1000);
+    for (let i = 1; i <= 25; i += 1) {
+      const p = join(dir, `${i}.json.consumed-100`);
+      writeFileSync(p, '{}');
+      utimesSync(p, past, past);
+    }
+    const { drain } = collectingDrain();
+    const outcomes = await serviceDrainNowRequests({ requestDir: dir, drain, nowUnixSec: () => NOW });
+    expect(outcomes).toEqual([]);
+    // CONSUMED_PRUNE_PER_CYCLE = 20: exactly 5 of the 25 stale artifacts survive.
+    expect(readdirSync(dir).filter((n) => n.includes('.consumed-'))).toHaveLength(5);
+    await serviceDrainNowRequests({ requestDir: dir, drain, nowUnixSec: () => NOW });
+    expect(readdirSync(dir).filter((n) => n.includes('.consumed-'))).toHaveLength(0);
+  });
+
   it('prunes consumed/result artifacts AND orphaned .tmp-* files older than the retention window', async () => {
     const old = join(dir, '1.json.consumed-100');
     const oldResult = join(dir, '1.json.consumed-100.result.json');
@@ -260,6 +312,19 @@ describe('writeDrainNowRequest', () => {
       writeDrainNowRequest(sub, { ...validRequest(62), requestedBy: '' } as DrainNowRequest),
     ).toThrow();
     expect(readdirSync(dir)).not.toContain('never-created'); // dir never created
+  });
+
+  it('propagates a non-ENOENT stat failure instead of treating it as no-pending-request', () => {
+    // An unsearchable drop-dir must fail the write, never be read as "nothing
+    // pending" (which would proceed to write into a dir of unknowable state).
+    const sub = join(dir, 'unsearchable');
+    mkdirSync(sub, { mode: 0o700 });
+    chmodSync(sub, 0o000);
+    try {
+      expect(() => writeDrainNowRequest(sub, validRequest(63))).toThrow(/EACCES|EPERM/);
+    } finally {
+      chmodSync(sub, 0o700);
+    }
   });
 });
 
@@ -329,6 +394,20 @@ describe('buildLiveActivateSession', () => {
     const active = await activate('dm@lid');
     expect(active).toBe(true);
     expect(session.spawned).toBe(0);
+  });
+
+  it('an active-but-undispatchable session is NOT re-spawned; the predicate verdict is reported', async () => {
+    // #2169 cold path: the session flag reads active while the dispatch
+    // predicate still refuses (e.g. ownership superseded). Spawning again would
+    // double-spawn a live session — the closure must skip capture/spawn/activate
+    // entirely and report the predicate's refusal.
+    const session = makeSession(false, true); // already active
+    const { ports, log } = makePorts({ session, resolveActiveTarget: () => null });
+    const activate = buildLiveActivateSession(ports);
+    const active = await activate('dm@lid');
+    expect(active).toBe(false);
+    expect(session.spawned).toBe(0);
+    expect(log).toEqual(['get:key:dm@lid']); // no capture, no activate
   });
 
   it('FALSIFIER: reports false when the spawn does NOT produce a dispatchable target', async () => {

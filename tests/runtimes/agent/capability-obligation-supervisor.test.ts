@@ -9,8 +9,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { recordCapabilityAttestation, type CapabilityAttestationBinding } from '../../../src/core/capability-attestation.ts';
-import { CapabilityObligationStore } from '../../../src/core/capability-obligation-store.ts';
+import {
+  findAdmissibleAttestation,
+  recordCapabilityAttestation,
+  type CapabilityAttestationBinding,
+} from '../../../src/core/capability-attestation.ts';
+import {
+  CapabilityObligationStore,
+  type CapabilityObligationClaimFence,
+  type CapabilityObligationDueRow,
+} from '../../../src/core/capability-obligation-store.ts';
 import { Database } from '../../../src/core/database.ts';
 import { withTransaction } from '../../../src/core/db-tx.ts';
 import { retainMediaForObligation } from '../../../src/core/obligation-media-retention.ts';
@@ -55,31 +63,57 @@ function freshAttestation(): void {
 
 interface Script {
   dispatch?: ObligationDispatchOutcome | Error;
+  /** Per-call dispatch override; receives the fence so a rival's fenced write can race the outcome. */
+  dispatchFn?: (
+    obligationId: number,
+    mintedMessageId: string,
+    fence: CapabilityObligationClaimFence,
+  ) => Promise<ObligationDispatchOutcome>;
+  /** prepare() resolves an undispatchable target: binding still admits, dispatch is null. */
+  nullDispatch?: boolean;
+  /** Side effect between the due-scan and admission — a rival scanner's window. */
+  onPrepare?: (obligation: CapabilityObligationDueRow) => void;
   accepted?: number[];
   settlement?: Map<number, ObligationSettlementEvidence>;
+  /** Per-call settlement override; runs before the supervisor's fenced settle writes. */
+  settlementFn?: (
+    id: number,
+    attempt: { claimEpoch: number; attemptCount: number },
+  ) => ObligationSettlementEvidence | undefined;
 }
 
-function makeSupervisor(script: Script, options: { backoffSeconds?: number } = {}) {
+function makeSupervisor(
+  script: Script,
+  options: { backoffSeconds?: number; mediaMaxAgeSeconds?: number; store?: CapabilityObligationStore } = {},
+) {
   const dispatches: Array<{ id: number; mintedMessageId: string }> = [];
   const supervisor = new CapabilityObligationSupervisor({
     db,
-    store,
+    store: options.store ?? store,
     backoffSeconds: options.backoffSeconds ?? 0,
+    mediaMaxAgeSeconds: options.mediaMaxAgeSeconds,
     dispatchPort: {
       // r14 F3 — merged prepare: one resolution yields the binding AND the dispatch.
-      prepare: (obligation) => ({
-        binding: { ...BINDING, contractVersion: obligation.contractVersion },
-        dispatch: async (mintedMessageId) => {
-          dispatches.push({ id: obligation.id, mintedMessageId });
-          const outcome = script.dispatch ?? 'dispatched';
-          if (outcome instanceof Error) throw outcome;
-          return outcome;
-        },
-      }),
+      prepare: (obligation) => {
+        script.onPrepare?.(obligation);
+        return {
+          binding: { ...BINDING, contractVersion: obligation.contractVersion },
+          dispatch: script.nullDispatch
+            ? null
+            : async (mintedMessageId, fence) => {
+                dispatches.push({ id: obligation.id, mintedMessageId });
+                if (script.dispatchFn) return script.dispatchFn(obligation.id, mintedMessageId, fence);
+                const outcome = script.dispatch ?? 'dispatched';
+                if (outcome instanceof Error) throw outcome;
+                return outcome;
+              },
+        };
+      },
     },
     evidencePort: {
       providerAcceptedIds: () => new Set(script.accepted ?? []),
-      settlementEvidence: (id, _attempt) => script.settlement?.get(id),
+      settlementEvidence: (id, attempt) =>
+        script.settlementFn ? script.settlementFn(id, attempt) : script.settlement?.get(id),
     },
   });
   return { supervisor, dispatches };
@@ -135,6 +169,14 @@ const state = (id: number) =>
     attempt_count: number;
   });
 
+/** The live fence of a claimed obligation — what any rival replica would read from the database. */
+const fenceOf = (id: number): CapabilityObligationClaimFence => {
+  const row = db.raw
+    .prepare('SELECT claim_token, claim_epoch FROM capability_obligations WHERE id=?')
+    .get(id) as { claim_token: string; claim_epoch: number };
+  return { claimToken: row.claim_token, claimEpoch: row.claim_epoch };
+};
+
 describe('attestation admission (D5)', () => {
   it('skips without claiming or consuming attempts when no attestation exists', async () => {
     const id = seedObligation();
@@ -187,6 +229,66 @@ describe('media admission (D3)', () => {
     const report = await supervisor.tick();
     expect(report.dispatched).toEqual([id]);
   });
+
+  it('retained media past the finite horizon blocks without claiming (A-08) even when the bytes are intact', async () => {
+    // A zero-second horizon makes any retained media already expired without
+    // touching created_at (which the schema keeps immutable).
+    const src = join(dir, 'old.webm');
+    writeFileSync(src, 'still-intact-bytes');
+    const retained = await retainMediaForObligation({ root: join(dir, 'retained'), policyVersion: 'p/1' }, src);
+    const id = seedObligation({
+      retainedMedia: { path: retained.path, sha256: retained.sha256, bytes: retained.bytes, policyVersion: 'p/1' },
+    });
+    freshAttestation();
+    const { supervisor, dispatches } = makeSupervisor({}, { mediaMaxAgeSeconds: 0 });
+    const report = await supervisor.tick();
+    expect(report.mediaBlocked).toEqual([id]);
+    expect(report.claimed).toEqual([]);
+    expect(dispatches).toEqual([]);
+    expect(state(id)).toEqual({ state: 'blocked_media', attempt_count: 0 });
+  });
+
+  it('an expired-media obligation a rival scanner already blocked is not double-blocked or double-reported', async () => {
+    // The rival blocks the row between the due-scan and this scanner's own
+    // horizon block: the CAS on waiting_capability refuses, report stays empty.
+    const src = join(dir, 'expired.webm');
+    writeFileSync(src, 'expired-bytes');
+    const retained = await retainMediaForObligation({ root: join(dir, 'retained'), policyVersion: 'p/1' }, src);
+    const id = seedObligation({
+      retainedMedia: { path: retained.path, sha256: retained.sha256, bytes: retained.bytes, policyVersion: 'p/1' },
+    });
+    freshAttestation();
+    const { supervisor, dispatches } = makeSupervisor(
+      { onPrepare: (obligation) => void store.blockWaitingObligation(obligation.id, 'rival_scanner') },
+      { mediaMaxAgeSeconds: 0 },
+    );
+    const report = await supervisor.tick();
+    expect(report.mediaBlocked).toEqual([]);
+    expect(report.claimed).toEqual([]);
+    expect(dispatches).toEqual([]);
+    expect(state(id)).toEqual({ state: 'blocked_media', attempt_count: 0 });
+  });
+
+  it('a mismatched-media obligation a rival scanner already blocked is not double-blocked or double-reported', async () => {
+    // Same race on the integrity-mismatch path: the rival's block lands during
+    // this scanner's admission/verify window, so the second block must no-op.
+    const src = join(dir, 'corrupt.webm');
+    writeFileSync(src, 'original-bytes');
+    const retained = await retainMediaForObligation({ root: join(dir, 'retained'), policyVersion: 'p/1' }, src);
+    writeFileSync(retained.path, 'corrupted-bytes!');
+    const id = seedObligation({
+      retainedMedia: { path: retained.path, sha256: retained.sha256, bytes: retained.bytes, policyVersion: 'p/1' },
+    });
+    freshAttestation();
+    const { supervisor, dispatches } = makeSupervisor({
+      onPrepare: (obligation) => void store.blockWaitingObligation(obligation.id, 'rival_scanner'),
+    });
+    const report = await supervisor.tick();
+    expect(report.mediaBlocked).toEqual([]);
+    expect(report.claimed).toEqual([]);
+    expect(dispatches).toEqual([]);
+    expect(state(id)).toEqual({ state: 'blocked_media', attempt_count: 0 });
+  });
 });
 
 describe('dispatch outcomes (D7)', () => {
@@ -224,6 +326,22 @@ describe('dispatch outcomes (D7)', () => {
     const report2 = await supervisor.tick();
     expect(report2.dispatched).toEqual([]);
     expect(state(id).state).toBe('blocked_ambiguous');
+  });
+
+  it('an admitted claim whose prepared target became undispatchable requeues fail-closed under the fence', async () => {
+    // prepare() resolved a target good enough to admit, but its dispatch is
+    // null (undispatchable). Nothing crossed the provider boundary, so the
+    // fail-closed guard requeues bounded instead of quarantining.
+    const id = seedObligation();
+    freshAttestation();
+    const { supervisor, dispatches } = makeSupervisor({ nullDispatch: true }, { backoffSeconds: 3600 });
+    const report = await supervisor.tick();
+    expect(report.claimed).toEqual([id]);
+    expect(report.requeuedRetryable).toEqual([id]);
+    expect(report.dispatched).toEqual([]);
+    expect(report.quarantinedAmbiguous).toEqual([]);
+    expect(dispatches).toEqual([]);
+    expect(state(id)).toEqual({ state: 'waiting_capability', attempt_count: 1 });
   });
 });
 
@@ -324,6 +442,153 @@ describe('settlement (D6)', () => {
     const report = await supervisor.tick();
     expect(report.settled).toEqual([]);
     expect(state(id).state).toBe('claimed');
+  });
+
+  it('without an explicit backoff the runtime default keeps a requeued obligation off the same tick', async () => {
+    // No backoffSeconds option: OBLIGATION_BACKOFF_SECONDS (60s) applies, so
+    // the default configuration cannot hot-loop a requeue back into the same
+    // tick's scan.
+    const id = await claimedObligation();
+    const dispatches: string[] = [];
+    const supervisor = new CapabilityObligationSupervisor({
+      db,
+      store,
+      dispatchPort: {
+        prepare: (obligation) => ({
+          binding: { ...BINDING, contractVersion: obligation.contractVersion },
+          dispatch: async (mintedMessageId) => {
+            dispatches.push(mintedMessageId);
+            return 'dispatched';
+          },
+        }),
+      },
+      evidencePort: {
+        providerAcceptedIds: () => new Set(),
+        settlementEvidence: (obligationId) =>
+          obligationId === id ? { kind: 'pre_accept_failure' } : undefined,
+      },
+    });
+    const report = await supervisor.tick();
+    expect(report.requeuedAfterPreAcceptFailure).toEqual([id]);
+    expect(state(id)).toEqual({ state: 'waiting_capability', attempt_count: 1 });
+    expect(dispatches).toEqual([]);
+  });
+
+  it('completed evidence that fails the receipt binding does not settle (fail-closed, stays claimed)', async () => {
+    // The typed chain is validated inside settleCompleted itself: evidence
+    // naming a receipt/proof that does not bind to THIS claim must be refused,
+    // never reported as settled.
+    const id = await claimedObligation();
+    const { supervisor } = makeSupervisor({
+      settlement: new Map([[id, { kind: 'completed', executionReceiptId: 999999, completionProofId: 'ttr:999999' }]]),
+    });
+    const report = await supervisor.tick();
+    expect(report.settled).toEqual([]);
+    expect(state(id)).toEqual({ state: 'claimed', attempt_count: 1 });
+  });
+
+  it('a settlement a rival replica already applied under the same fence is not double-applied or double-reported', async () => {
+    // Two replicas read the same durable evidence. The rival's fenced write
+    // lands first (inside our evidence read, before our fenced write); our own
+    // requeue/block CAS then refuses, and the report must not count it.
+    const a = seedObligation({ sourceMessageId: 'TESTMSG-SUP-RIVAL-A', sourceInboundSeq: 2020 });
+    const b = seedObligation({ sourceMessageId: 'TESTMSG-SUP-RIVAL-B', sourceInboundSeq: 2021 });
+    freshAttestation();
+    const { supervisor: claimer } = makeSupervisor({ dispatch: 'dispatched' });
+    await claimer.tick();
+    expect(state(a).state).toBe('claimed');
+    expect(state(b).state).toBe('claimed');
+    const { supervisor } = makeSupervisor({
+      settlementFn: (id) => {
+        if (id === a) {
+          store.requeueObligation(a, fenceOf(a), { backoffSeconds: 3600 });
+          return { kind: 'pre_accept_failure' };
+        }
+        store.blockObligation(b, fenceOf(b), 'blocked_ambiguous', 'execution_outcome_ambiguous');
+        return { kind: 'ambiguous' };
+      },
+    });
+    const report = await supervisor.tick();
+    expect(report.requeuedAfterPreAcceptFailure).toEqual([]);
+    expect(report.quarantinedAmbiguous).toEqual([]);
+    // The rival's single application stands.
+    expect(state(a)).toEqual({ state: 'waiting_capability', attempt_count: 1 });
+    expect(state(b).state).toBe('blocked_ambiguous');
+  });
+});
+
+describe('single-flight claim and fence races (D7)', () => {
+  it('a claim lost to a rival scanner consumes nothing and dispatches nothing', async () => {
+    const id = seedObligation();
+    freshAttestation();
+    const { supervisor, dispatches } = makeSupervisor({
+      onPrepare: (obligation) => {
+        // A rival scanner claims through the same admission path between our
+        // due-scan and our claim CAS.
+        const admission = findAdmissibleAttestation(db, { ...BINDING, contractVersion: obligation.contractVersion });
+        if (admission.outcome !== 'admissible') throw new Error('test setup: expected an admissible attestation');
+        store.claimObligation(obligation.id, {
+          claimToken: 'rival-token',
+          leaseSeconds: 300,
+          admissionAttestationId: admission.attestationId,
+        });
+      },
+    });
+    const report = await supervisor.tick();
+    expect(report.claimed).toEqual([]);
+    expect(report.dispatched).toEqual([]);
+    expect(dispatches).toEqual([]);
+    // Exactly the rival's attempt was consumed — losing the race costs nothing.
+    expect(state(id)).toEqual({ state: 'claimed', attempt_count: 1 });
+  });
+
+  it("a 'retryable' outcome whose fence a rival already spent does not double-requeue or double-report", async () => {
+    const id = seedObligation();
+    freshAttestation();
+    const { supervisor } = makeSupervisor({
+      dispatchFn: async (obligationId, _minted, fence) => {
+        store.requeueObligation(obligationId, fence, { backoffSeconds: 3600 });
+        return 'retryable';
+      },
+    });
+    const report = await supervisor.tick();
+    expect(report.claimed).toEqual([id]);
+    expect(report.requeuedRetryable).toEqual([]);
+    expect(state(id)).toEqual({ state: 'waiting_capability', attempt_count: 1 });
+  });
+
+  it("an 'ambiguous' outcome whose fence a rival already spent stays quarantined once, reported once", async () => {
+    const id = seedObligation();
+    freshAttestation();
+    const { supervisor } = makeSupervisor({
+      dispatchFn: async (obligationId, _minted, fence) => {
+        store.blockObligation(obligationId, fence, 'blocked_ambiguous', 'rival_replica');
+        return 'ambiguous';
+      },
+    });
+    const report = await supervisor.tick();
+    expect(report.claimed).toEqual([id]);
+    expect(report.quarantinedAmbiguous).toEqual([]);
+    expect(state(id).state).toBe('blocked_ambiguous');
+  });
+
+  it('the fail-closed requeue for an undispatchable target is applied once under replica double-delivery', async () => {
+    const id = seedObligation();
+    freshAttestation();
+    // Model a rival replica whose IDENTICAL fenced requeue lands in the window
+    // before ours: the real store method runs twice — the second CAS refuses on
+    // state — so the supervisor must not report a requeue it did not apply.
+    const racing = new CapabilityObligationStore(db);
+    const realRequeue = racing.requeueObligation.bind(racing);
+    racing.requeueObligation = (obligationId, fence, params) => {
+      realRequeue(obligationId, fence, params);
+      return realRequeue(obligationId, fence, params);
+    };
+    const { supervisor } = makeSupervisor({ nullDispatch: true }, { backoffSeconds: 3600, store: racing });
+    const report = await supervisor.tick();
+    expect(report.claimed).toEqual([id]);
+    expect(report.requeuedRetryable).toEqual([]);
+    expect(state(id)).toEqual({ state: 'waiting_capability', attempt_count: 1 });
   });
 });
 

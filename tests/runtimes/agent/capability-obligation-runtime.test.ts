@@ -23,13 +23,17 @@ import {
   CapabilityObligationRuntime,
   composeCapabilityObligationReplayPrompt,
   dispatchCapabilityObligationTurnViaSession,
+  maybeActivateCapabilityObligationRuntime,
   resolveHarnessType,
   resolveReleaseIdentity,
   servingProviderId,
+  shutdownCapabilityObligationRuntimeSafely,
+  turnCorrelationFromContexts,
   UNRESOLVED_SERVING_PROVIDER,
   type CapabilityObligationLiveFacts,
 } from '../../../src/runtimes/agent/capability-obligation-runtime.ts';
 import type { SessionActivationPorts } from '../../../src/runtimes/agent/capability-obligation-drain-now-service.ts';
+import type { RuntimeTurnContext } from '../../../src/runtimes/agent/runtime-turn-context.ts';
 import type { CapabilityObligationDueRow } from '../../../src/core/capability-obligation-store.ts';
 import type { ObligationDispatchOutcome } from '../../../src/runtimes/agent/capability-obligation-supervisor.ts';
 import { ToolRegistry } from '../../../src/mcp/registry.ts';
@@ -252,6 +256,8 @@ interface HarnessScript {
   attestationDigestOverride?: string;
   /** r13 F4 — override the SERVING-provider facts, keyed by the chat's deliveryJid. */
   liveFacts?: (deliveryJid: string) => CapabilityObligationLiveFacts;
+  /** Lifecycle tests: shrink the scan interval so the SCHEDULED loop fires in test time. */
+  scanIntervalMs?: number;
 }
 
 function makeRuntime(script: HarnessScript = {}) {
@@ -294,6 +300,7 @@ function makeRuntime(script: HarnessScript = {}) {
       registeredTool = tool;
     },
     turnIdFor: () => 'obl-turn',
+    ...(script.scanIntervalMs !== undefined ? { scanIntervalMs: script.scanIntervalMs } : {}),
   });
   return { runtime, dispatched, tool: () => registeredTool! };
 }
@@ -357,6 +364,61 @@ describe('dispatch port (D7)', () => {
     expect(report.requeuedRetryable).toEqual([id]);
     expect(dispatched).toEqual([]);
     expect(state(id).state).toBe('waiting_capability');
+  });
+});
+
+describe('scan-loop lifecycle (start/stop/shutdown)', () => {
+  it('start() arms the scan loop (double-start is a no-op), shutdown() awaits the in-flight tick, and the CLOSED loop never dispatches again', async () => {
+    const id = seedObligation();
+    freshAttestation();
+    let releaseDispatch!: () => void;
+    const dispatchGate = new Promise<void>((resolve) => { releaseDispatch = resolve; });
+    let signalDispatchStarted!: () => void;
+    const dispatchStarted = new Promise<void>((resolve) => { signalDispatchStarted = resolve; });
+    const { runtime, dispatched } = makeRuntime({
+      scanIntervalMs: 10,
+      onDispatch: async () => {
+        signalDispatchStarted();
+        await dispatchGate;
+      },
+    });
+    runtime.start();
+    runtime.start(); // already armed — must not double-schedule (single timer, single tick below)
+    await dispatchStarted; // the SCHEDULED tick (no manual tickOnce) reached the dispatch port
+    const shutdownDone = runtime.shutdown(); // closes the loop, then awaits the in-flight tick
+    releaseDispatch();
+    await shutdownDone;
+    expect(dispatched).toEqual([{ id, minted: `obl:${id}:1`, seq: expect.any(Number) }]);
+    expect(state(id)).toEqual({ state: 'claimed', attempt_count: 1 });
+
+    // Fail-closed: the closed runtime must never dispatch again, even with NEW due
+    // work and an explicit re-start(). (Were the loop alive, the fresh obligation
+    // below would admit against the already-recorded attestation and dispatch.)
+    const id2 = seedObligation({ sourceInboundSeq: 5003, sourceMessageId: 'TESTMSG-RT-LOOP2' });
+    runtime.start(); // closed → must not re-arm
+    runtime.stop(); // stop with no armed timer — still closed, still inert
+    await runtime.shutdown(); // idle shutdown — nothing in flight
+    // Structured timing exemption (test-integrity `js-sleep-in-test`): the assertion
+    // is the ABSENCE of a scheduled tick; the only way to observe "the loop never
+    // fires again" is to let several real scan intervals elapse.
+    await TIMING(80);
+    expect(dispatched).toHaveLength(1);
+    expect(state(id2).state).toBe('waiting_capability');
+  });
+
+  it('tickOnce is single-flight: a concurrent caller receives the SAME in-flight tick and no second dispatch occurs', async () => {
+    const id = seedObligation();
+    freshAttestation();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const { runtime, dispatched } = makeRuntime({ onDispatch: async () => { await gate; } });
+    const first = runtime.tickOnce();
+    const second = runtime.tickOnce();
+    expect(second).toBe(first); // the documented contract: awaited, never re-entered
+    release();
+    await first;
+    expect(dispatched).toHaveLength(1); // the concurrent caller did not double-dispatch
+    expect(state(id)).toEqual({ state: 'claimed', attempt_count: 1 });
   });
 });
 
@@ -914,6 +976,22 @@ describe('trusted execution tool (D6)', () => {
       rmSync(work, { recursive: true, force: true });
     }
   });
+
+  it('findActiveTurn matches only the OWNING conversation — an unrelated conversation sees NO active obligation turn', async () => {
+    seedObligation();
+    freshAttestation();
+    let during: { own: unknown; other: unknown } | null = null;
+    const { runtime } = makeRuntime({
+      onDispatch: (_tool, rt) => {
+        during = { own: rt.findActiveTurn('conv-rt'), other: rt.findActiveTurn('conv-unrelated') };
+      },
+    });
+    await runtime.tickOnce();
+    const own = during!.own as { obligation: { conversationKey: string } };
+    expect(own.obligation.conversationKey).toBe('conv-rt');
+    expect(during!.other).toBeNull(); // the active turn never leaks across conversations
+    expect(runtime.findActiveTurn('conv-rt')).toBeNull(); // cleared once the turn finishes
+  });
 });
 
 describe('execute_capability live-registry integration (proof-gap C)', () => {
@@ -1006,6 +1084,17 @@ describe('minted obligation turn prompt (execute_capability instruction)', () =>
     expect(prompt).not.toBe(row.replayText);
     expect(prompt.length).toBeGreaterThan(row.replayText.length);
   });
+
+  it('an obligation with NEITHER retained media NOR a source token yields an EMPTY source line — never a stringified null', () => {
+    const prompt = composeCapabilityObligationReplayPrompt(
+      dueRow({ sourceToken: null, retainedMediaPath: null }),
+    );
+    const lines = prompt.split('\n');
+    // Line 3 is the exact-source line the agent must pass to execute_capability.
+    expect(lines[2]).toContain('set EXACTLY to the following');
+    expect(lines[3]).toBe('');
+    expect(prompt).not.toContain('null');
+  });
 });
 
 describe('evidence port (D6/D7)', () => {
@@ -1068,6 +1157,25 @@ describe('evidence port (D6/D7)', () => {
     expect(state(id).state).toBe('claimed');
   });
 
+  it('a CLAIMED obligation whose minted inbound was never journaled has NO settlement evidence — it stays claimed under the live lease', async () => {
+    // Claim directly WITHOUT journaling (dispatch never journaled): the evidence
+    // port finds no inbound_events row for the minted id, so settlement reports
+    // nothing and the live lease keeps the claim — the lease reclaimer, not the
+    // settler, owns this case once the lease expires.
+    const id = seedObligation();
+    const claim = store.claimObligation(id, { claimToken: 'tok-nj', leaseSeconds: 300, admissionAttestationId: freshAttestation() });
+    expect(claim.applied).toBe(true);
+    const { runtime, dispatched } = makeRuntime();
+    const report = (await runtime.tickOnce()) as {
+      settled: number[]; quarantinedAmbiguous: number[]; requeuedAfterPreAcceptFailure: number[];
+    };
+    expect(report.settled).toEqual([]);
+    expect(report.quarantinedAmbiguous).toEqual([]);
+    expect(report.requeuedAfterPreAcceptFailure).toEqual([]);
+    expect(dispatched).toEqual([]); // claimed is not due — nothing re-dispatches
+    expect(state(id)).toEqual({ state: 'claimed', attempt_count: 1 });
+  });
+
   it('lease reclaim: journaled minted inbound counts as provider acceptance (quarantine); unjournaled requeues', async () => {
     const accepted = await dispatchedObligation();
     const unaccepted = seedObligation({ sourceInboundSeq: 5002, sourceMessageId: 'TESTMSG-RT-2' });
@@ -1106,6 +1214,20 @@ describe('helpers', () => {
     // The sentinel routes to 'unknown_harness', which matches no recorded
     // attestation — the fail-closed claim the fix relies on.
     expect(resolveHarnessType(UNRESOLVED_SERVING_PROVIDER)).toBe('unknown_harness');
+  });
+
+  it('turnCorrelationFromContexts: the OWNING head correlates; non-matching heads and empty lists yield null', () => {
+    const contexts = new Map([
+      ['empty-chat', []],
+      ['chat-a', [{ identity: { conversationKey: 'conv-a', logicalTurnId: 'lt-a', inboundSeq: 11 } }]],
+      ['chat-b', [{ identity: { conversationKey: 'conv-b', logicalTurnId: 'lt-b', inboundSeq: null } }]],
+    ]) as unknown as ReadonlyMap<string, readonly RuntimeTurnContext[]>;
+    // Reaching conv-b iterates PAST the empty list and the non-matching conv-a head.
+    expect(turnCorrelationFromContexts(contexts, 'conv-b')).toEqual({ logicalTurnId: 'lt-b', inboundSeq: null });
+    expect(turnCorrelationFromContexts(contexts, 'conv-a')).toEqual({ logicalTurnId: 'lt-a', inboundSeq: 11 });
+    // No head owns the conversation → no correlation, never a wrong turn id.
+    expect(turnCorrelationFromContexts(contexts, 'conv-none')).toBeNull();
+    expect(turnCorrelationFromContexts(new Map(), 'conv-a')).toBeNull();
   });
 });
 
@@ -1172,6 +1294,69 @@ describe('dispatch provider-boundary outcome (D7/r13 F1)', () => {
       },
       false, // isTargetCurrent → false: the carried target is stale at dispatch
     )).resolves.toBe('retryable');
+  });
+
+  it("FALSIFIER (#2170 narrowing): a scope-native shared/singleton target (no mapKey) is REFUSED — 'retryable', the pipeline is NEVER entered", async () => {
+    let entered = 0;
+    const coord = {
+      createRuntimeTurnForDispatch: () => { entered += 1; return { ctx: true }; },
+      processPerChatTurn: async () => { entered += 1; },
+    } as unknown as DispatchArgs[0];
+    const sharedTarget = { scope: 'shared', session: {} };
+    await expect(dispatchCapabilityObligationTurnViaSession(
+      coord,
+      sharedTarget as unknown as DispatchArgs[1],
+      (() => 'scope-key') as unknown as DispatchArgs[2],
+      (() => true) as unknown as DispatchArgs[3],
+      DUE,
+      'obl:1:1',
+      42,
+    )).resolves.toBe('retryable');
+    expect(entered).toBe(0); // neither context construction nor the pipeline ran
+  });
+
+  it("a coordinator yielding NO runtime context requeues ('retryable') without entering the pipeline", async () => {
+    let processed = 0;
+    const coord = {
+      createRuntimeTurnForDispatch: () => null,
+      processPerChatTurn: async () => { processed += 1; },
+    } as unknown as DispatchArgs[0];
+    await expect(dispatchCapabilityObligationTurnViaSession(
+      coord,
+      target as unknown as DispatchArgs[1],
+      (() => 'scope-key') as unknown as DispatchArgs[2],
+      (() => true) as unknown as DispatchArgs[3],
+      DUE,
+      'obl:1:1',
+      42,
+    )).resolves.toBe('retryable');
+    expect(processed).toBe(0); // nothing reached the provider path
+  });
+
+  it('a GROUP obligation turn carries the group identity: the declared groupName, else the delivery JID', async () => {
+    const captured: Array<{ isGroup: boolean; groupName?: string }> = [];
+    const coord = {
+      createRuntimeTurnForDispatch: () => ({ ctx: true }),
+      processPerChatTurn: async (
+        _s: unknown, turn: { isGroup: boolean; groupName?: string }, _x: unknown, _allowed: unknown, onBoundary: () => void,
+      ) => { captured.push(turn); onBoundary(); },
+    } as unknown as DispatchArgs[0];
+    const call = (due: DispatchArgs[4]) => dispatchCapabilityObligationTurnViaSession(
+      coord,
+      target as unknown as DispatchArgs[1],
+      (() => 'scope-key') as unknown as DispatchArgs[2],
+      (() => true) as unknown as DispatchArgs[3],
+      due,
+      'obl:1:1',
+      42,
+    );
+    const named = { ...(DUE as unknown as Record<string, unknown>), isGroup: true, groupName: 'Alpha Group' } as unknown as DispatchArgs[4];
+    const unnamed = { ...(DUE as unknown as Record<string, unknown>), isGroup: true, groupName: null } as unknown as DispatchArgs[4];
+    await expect(call(named)).resolves.toBe('dispatched');
+    await expect(call(unnamed)).resolves.toBe('dispatched');
+    expect(captured[0]).toMatchObject({ isGroup: true, groupName: 'Alpha Group' });
+    // A group row without a stored name falls back to the delivery JID (never undefined).
+    expect(captured[1]).toMatchObject({ isGroup: true, groupName: 'test-dm-target@lid' });
   });
 });
 
@@ -1364,5 +1549,216 @@ describe('operator drain-now servicing at the EXECUTOR seam (r22 AE1 adapter)', 
     const { runtime, activation } = makeDrainNowRuntime();
     await runtime.tickOnce();
     expect(activation).toEqual([]);
+  });
+
+  it('an UNPARSEABLE drop-file is consumed and recorded INVALID — never serviced, session ports untouched', async () => {
+    const id = seedObligation(); // deliberately NO attestation: nothing may dispatch this tick
+    writeFileSync(join(requestDir, `${id}.json`), '{not-json');
+    const { runtime, dispatched, activation } = makeDrainNowRuntime();
+    await runtime.tickOnce();
+    expect(activation).toEqual([]);
+    expect(dispatched).toEqual([]);
+    // Consumed (renamed away), so a repeat tick cannot re-service it…
+    expect(readdirSync(requestDir).some((n) => n === `${id}.json`)).toBe(false);
+    // …and the recorded outcome names the invalid kind, not a drain or a refusal.
+    const result = readdirSync(requestDir).find((n) => n.endsWith('.result.json'))!;
+    expect(JSON.parse(readFileSync(join(requestDir, result), 'utf8'))).toMatchObject({
+      kind: 'invalid', file: `${id}.json`, reason: 'unparseable_request',
+    });
+  });
+});
+
+describe('creation seam (C3): deriveCapabilityDecision provider/harness resolution', () => {
+  function turnContext(): RuntimeTurnContext {
+    return {
+      identity: {
+        scope: 'per_chat',
+        conversationKey: 'conv-rt',
+        deliveryJid: 'test-dm-target@lid',
+        logicalTurnId: 'lt-c3',
+        inboundSeq: 6001,
+      },
+      replay: {
+        sourceMessageId: 'C3MSG-1',
+        text: 'https://youtu.be/abc',
+        receivedAtUnixSeconds: Math.floor(Date.now() / 1000),
+        senderJid: 'test-sender@s.whatsapp.net',
+        senderName: 'Test Sender',
+        isGroup: false,
+        groupName: null,
+      },
+      contentType: 'text',
+    } as unknown as RuntimeTurnContext;
+  }
+
+  it('a managed_loop-served turn owes an obligation; a capable, absent, or providerless session fails closed to none', async () => {
+    const { runtime } = makeRuntime();
+    // managed_loop (anthropic-api) lacks child_process_tools → the contract match owes debt.
+    const owed = await runtime.deriveCapabilityDecision(turnContext(), { getProviderId: () => 'anthropic-api' });
+    expect(owed?.auditEvent.action).toBe('obligation.create');
+    expect(owed?.obligation?.requiredCapability).toBe('child_process_tools');
+    expect(owed?.obligation?.sourceToken).toBe('https://youtu.be/abc');
+    // A capability-capable harness (persistent_session) owes nothing for the same turn.
+    expect(await runtime.deriveCapabilityDecision(turnContext(), { getProviderId: () => 'claude-cli' })).toBeUndefined();
+    // Absent session → provider unknowable → capability availability unprovable → no debt.
+    expect(await runtime.deriveCapabilityDecision(turnContext(), null)).toBeUndefined();
+    // A session without getProviderId (the defensive typeof) takes the same fail-closed path.
+    expect(await runtime.deriveCapabilityDecision(turnContext(), {})).toBeUndefined();
+  });
+});
+
+describe('live wiring (maybeActivateCapabilityObligationRuntime)', () => {
+  type ActivationHost = Parameters<typeof maybeActivateCapabilityObligationRuntime>[0];
+
+  /** An attestation for THIS process's real facts under the given serving provider —
+   *  exactly what admission computes when the live wiring resolves a real target. */
+  function liveProcessAttestation(providerId: string): number {
+    return recordCapabilityAttestation(db, {
+      ...buildObligationLiveFacts(providerId),
+      contractVersion: 'test-contract/1',
+      capability: 'child_process_tools',
+      skillName: OPTIONS.attestation.skillName,
+      skillVersion: OPTIONS.attestation.skillVersion,
+      skillDigest: OPTIONS.attestation.skillDigest,
+      resolverDigest: OPTIONS.attestation.resolverDigest,
+      dependencyVersions: OPTIONS.attestation.dependencyVersions,
+      probeVersion: OPTIONS.attestation.probeVersion,
+      canaryId: OPTIONS.attestation.canaryId,
+      mediaRoot: OPTIONS.mediaRoot,
+      canaryResult: 'pass',
+      nonce: `live-${Math.random().toString(36).slice(2)}`,
+      attestedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+    });
+  }
+
+  function makeActivationHost(over: {
+    target?: Record<string, unknown> | null;
+    contexts?: ReadonlyMap<string, ReadonlyArray<{ identity: Record<string, unknown> }>>;
+    /** Runs inside the fake coordinator's processPerChatTurn (the dispatched-turn window). */
+    onProcessTurn?: (onBoundary: () => void, registry: ToolRegistry) => Promise<void>;
+  } = {}): { host: ActivationHost; registry: ToolRegistry } {
+    const registry = new ToolRegistry();
+    const host = {
+      enabled: true,
+      alreadyActive: false,
+      options: OPTIONS,
+      db,
+      store,
+      registry,
+      perChatTurnContexts: () => over.contexts ?? new Map(),
+      resolveDispatchTarget: () => over.target ?? null,
+      turnCoordinator: {
+        createRuntimeTurnForDispatch: () => ({ ctx: true }),
+        processPerChatTurn: async (
+          _key: unknown, _turn: unknown, _third: unknown, _allowed: unknown, onBoundary: () => void,
+        ) => { await over.onProcessTurn?.(onBoundary, registry); },
+      },
+      requireSessionToolScopeKey: () => 'scope-key',
+      isDispatchTargetCurrent: () => true,
+      getDurability: () => ({ journalInbound: (messageId: string) => journalInboundRaw(messageId) }),
+      resolveMapKey: (jid: string) => jid,
+      getChatSession: () => undefined,
+      captureOwnedGeneration: () => ({ managerId: 'm1', generation: 1 }),
+      activateSpawnedSession: async () => 'mk',
+    } as unknown as ActivationHost;
+    return { host, registry };
+  }
+
+  it('activation guards: a disabled or already-active host activates NOTHING — no runtime, no execute_capability registration', async () => {
+    const disabled = makeActivationHost();
+    expect(maybeActivateCapabilityObligationRuntime({ ...disabled.host, enabled: false })).toBeNull();
+    expect(disabled.registry.listTools(TOOL_SESSION).map((t) => t.name)).not.toContain('execute_capability');
+    const active = makeActivationHost();
+    expect(maybeActivateCapabilityObligationRuntime({ ...active.host, alreadyActive: true })).toBeNull();
+    expect(active.registry.listTools(TOOL_SESSION).map((t) => t.name)).not.toContain('execute_capability');
+    // The inert feature's teardown is the matching no-op: null in, null out.
+    expect(await shutdownCapabilityObligationRuntimeSafely(null)).toBeNull();
+  });
+
+  it('an activated runtime with an UNRESOLVED dispatch target fails closed: sentinel facts skip admission, nothing dispatches', async () => {
+    const { host, registry } = makeActivationHost({ target: null });
+    const runtime = maybeActivateCapabilityObligationRuntime(host);
+    expect(runtime).not.toBeNull();
+    try {
+      // Activation registered the trusted tool on the live registry.
+      expect(registry.listTools(TOOL_SESSION).map((t) => t.name)).toContain('execute_capability');
+      const id = seedObligation();
+      freshAttestation(); // recorded for LIVE_FACTS — the sentinel facts can never match it
+      const report = (await runtime!.tickOnce()) as {
+        attestationSkips: Array<{ id: number }>; dispatched: number[]; claimed: number[];
+      };
+      expect(report.attestationSkips.map((s) => s.id)).toEqual([id]);
+      expect(report.claimed).toEqual([]);
+      expect(report.dispatched).toEqual([]);
+      expect(state(id).state).toBe('waiting_capability'); // waits — no attempt consumed
+    } finally {
+      expect(await shutdownCapabilityObligationRuntimeSafely(runtime)).toBeNull();
+    }
+  });
+
+  it('END-TO-END: a resolved per_chat target admits on the SERVING provider, dispatches through the coordinator, and the receipt carries the LIVE correlated turn id', async () => {
+    const session = { getProviderId: () => 'claude-cli' };
+    const target = { scope: 'per_chat', session, mapKey: 'test-dm-target@lid', managerId: 'm1', generation: 1 };
+    // The head of the OWNING chat's context list is the live turn (AS-04); an
+    // unrelated chat's head comes first so correlation must iterate past it.
+    const contexts = new Map([
+      ['other-chat', [{ identity: { conversationKey: 'conv-other', logicalTurnId: 'lt-other', inboundSeq: 1 } }]],
+      ['test-dm-target@lid', [{ identity: { conversationKey: 'conv-rt', logicalTurnId: 'lt-live-1', inboundSeq: 777 } }]],
+    ]);
+    const { host } = makeActivationHost({
+      target,
+      contexts,
+      onProcessTurn: async (onBoundary, registry) => {
+        onBoundary();
+        const result = await registry.call('execute_capability', { source: SOURCE_URL }, TOOL_SESSION);
+        expect(result.isError).not.toBe(true);
+      },
+    });
+    const runtime = maybeActivateCapabilityObligationRuntime(host);
+    expect(runtime).not.toBeNull();
+    try {
+      const id = seedObligation();
+      liveProcessAttestation('claude-cli'); // the provider the live session reports
+      const report = (await runtime!.tickOnce()) as { dispatched: number[] };
+      expect(report.dispatched).toEqual([id]);
+      const inbound = db.raw.prepare('SELECT seq FROM inbound_events WHERE message_id = ?').get(`obl:${id}:1`);
+      expect(inbound).toBeDefined(); // the minted inbound entered the real journal
+      const receipt = db.raw
+        .prepare('SELECT result_status, logical_turn_id FROM capability_execution_receipts WHERE obligation_id = ?')
+        .get(id) as { result_status: string; logical_turn_id: string };
+      // The wired turnIdFor resolved the OWNING turn from the live contexts.
+      expect(receipt).toEqual({ result_status: 'ok', logical_turn_id: 'lt-live-1' });
+    } finally {
+      expect(await shutdownCapabilityObligationRuntimeSafely(runtime)).toBeNull();
+    }
+  });
+
+  it('with NO live correlated turn the receipt falls back to the minted message id (the wiring seam yields null, never a wrong id)', async () => {
+    const session = { getProviderId: () => 'claude-cli' };
+    const target = { scope: 'per_chat', session, mapKey: 'test-dm-target@lid', managerId: 'm1', generation: 1 };
+    const { host } = makeActivationHost({
+      target,
+      // Only a NON-matching head: correlation finds no owner for conv-rt.
+      contexts: new Map([['other-chat', [{ identity: { conversationKey: 'conv-other', logicalTurnId: 'lt-other', inboundSeq: 1 } }]]]),
+      onProcessTurn: async (onBoundary, registry) => {
+        onBoundary();
+        await registry.call('execute_capability', { source: SOURCE_URL }, TOOL_SESSION);
+      },
+    });
+    const runtime = maybeActivateCapabilityObligationRuntime(host);
+    expect(runtime).not.toBeNull();
+    try {
+      const id = seedObligation();
+      liveProcessAttestation('claude-cli');
+      const report = (await runtime!.tickOnce()) as { dispatched: number[] };
+      expect(report.dispatched).toEqual([id]);
+      const receipt = db.raw
+        .prepare('SELECT result_status, logical_turn_id FROM capability_execution_receipts WHERE obligation_id = ?')
+        .get(id) as { result_status: string; logical_turn_id: string };
+      expect(receipt).toEqual({ result_status: 'ok', logical_turn_id: `obl:${id}:1` });
+    } finally {
+      expect(await shutdownCapabilityObligationRuntimeSafely(runtime)).toBeNull();
+    }
   });
 });

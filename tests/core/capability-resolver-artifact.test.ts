@@ -9,8 +9,9 @@
  *     composite changes on a content swap OR a shape change; the ONE canonicalizer is
  *     deterministic and is what `verifyResolverArtifact` returns.
  */
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
+import { chmodSync, chownSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -18,6 +19,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   canonicalExecutionIdentity,
+  directoryManifest,
   directoryManifestDigest,
   resolverCompositeDigest,
   stageResolverArtifact,
@@ -394,5 +396,158 @@ describe('round-21 execution-boundary falsifiers (reopened bypasses)', () => {
     expect(() => stageResolverArtifact(decl)).toThrow(/world-writable/i);
     // positive control — the real user-owned node (755, not world/group-writable) is accepted
     expect(() => verifyResolverArtifact({ command: [NODE, resolver, '{source}'], resolverArtifactPath: resolver, interpreted: true })).not.toThrow();
+  });
+});
+
+describe('deny-by-default refusal arms: every declaration/shape violation names its reason', () => {
+  it('refuses an EMPTY command — nothing to verify', () => {
+    expect(() => verifyResolverArtifact({ command: [], resolverArtifactPath: '/anything', interpreted: true }))
+      .toThrow(/resolver command is empty/);
+  });
+
+  it('refuses a declared artifact whose realpath is a DIRECTORY, not a regular file', () => {
+    const dir = tmp.make('artifact-is-dir');
+    expect(() => verifyResolverArtifact({ command: [NODE, dir, '{source}'], resolverArtifactPath: dir, interpreted: true }))
+      .toThrow(/resolver artifact .* is not a regular file/);
+  });
+
+  it('refuses an interpreted command with no script argument (command.length < 2)', () => {
+    const dir = tmp.make('no-script-arg');
+    const { path } = script(dir);
+    expect(() => verifyResolverArtifact({ command: [NODE], resolverArtifactPath: path, interpreted: true }))
+      .toThrow(/needs an interpreter AND a script argument/);
+  });
+
+  it('refuses an interpreted command whose SCRIPT token (command[1]) does not resolve', () => {
+    const dir = tmp.make('ghost-script');
+    const { path } = script(dir);
+    expect(() => verifyResolverArtifact({ command: [NODE, join(dir, 'ghost.cjs'), '{source}'], resolverArtifactPath: path, interpreted: true }))
+      .toThrow(/interpreted resolver command\[1\].*not resolvable/);
+  });
+
+  it('refuses an interpreted command whose INTERPRETER token (command[0]) does not resolve — an unresolvable interpreter cannot be hashed', () => {
+    const dir = tmp.make('ghost-interp');
+    const { path } = script(dir);
+    expect(() => verifyResolverArtifact({ command: ['/no/such/interp-binary', path, '{source}'], resolverArtifactPath: path, interpreted: true }))
+      .toThrow(/interpreted resolver interpreter command\[0\].*not resolvable/);
+  });
+
+  it('refuses an interpreted command whose command[0] is a FLAG (a flag cannot be the interpreter binary)', () => {
+    const dir = tmp.make('interp-flag');
+    const { path } = script(dir);
+    expect(() => verifyResolverArtifact({ command: ['--experimental-evil', path, '{source}'], resolverArtifactPath: path, interpreted: true }))
+      .toThrow(/command\[0\] may not be a flag/);
+  });
+
+  it('refuses an interpreted command whose command[0] resolves to a NON-regular file (a directory cannot be hashed and executed)', () => {
+    const dir = tmp.make('interp-dir');
+    const { path } = script(dir);
+    const notABinary = join(dir, 'not-a-binary');
+    mkdirSync(notABinary);
+    expect(() => verifyResolverArtifact({ command: [notABinary, path, '{source}'], resolverArtifactPath: path, interpreted: true }))
+      .toThrow(/interpreter command\[0\] realpath .* is not a regular file/);
+  });
+
+  it('refuses a DIRECT command whose command[0] is a different file than the declared artifact', () => {
+    const dir = tmp.make('direct-mismatch');
+    const { path } = script(dir, 'resolver-a');
+    const { path: other } = script(dir, 'resolver-b');
+    expect(() => verifyResolverArtifact({ command: [other, '{source}'], resolverArtifactPath: path, interpreted: false }))
+      .toThrow(/direct resolver command\[0\] realpath does not equal declared resolverArtifactPath realpath/);
+  });
+});
+
+describe('round-21 F1: group-writable arm and getgroups degradation', () => {
+  // The existing F1 falsifier trips the WORLD-writable arm via an ancestor DIRECTORY. These pin the
+  // remaining arms: a group-writable regular FILE must be refused naming "group"-writable, and the
+  // documented non-POSIX degradation (no process.getgroups) must skip ONLY the group arm.
+  it('R21 F1: an interpreter FILE that is group-writable by a group THIS process is in is refused, naming group-writable', () => {
+    const dir = tmp.make('r21-f1-group');
+    const resolver = join(dir, 'resolver.cjs');
+    writeFileSync(resolver, 'process.stdout.write("ok")');
+    const binDir = tmp.make('r21-f1-group-bin');
+    const interp = join(binDir, 'fake-node');
+    writeFileSync(interp, '#!/bin/sh\nexit 0\n');
+    // Pin the file's group to this process's effective gid — Node guarantees getgroups() includes
+    // the egid — so "group-writable AND we are a member of that group" holds on any runner.
+    chownSync(interp, process.getuid?.() ?? -1, process.getgid?.() ?? -1);
+    chmodSync(interp, 0o775); // g+w set, o+w CLEAR: the refusal must attribute GROUP, not world
+    const decl = { command: [interp, resolver, '{source}'], resolverArtifactPath: resolver, interpreted: true } as const;
+    expect(() => verifyResolverArtifact(decl)).toThrow(/group-writable without the sticky bit/);
+    expect(() => stageResolverArtifact(decl)).toThrow(/group-writable/);
+  });
+
+  it('R21 F1 degradation: without process.getgroups (non-POSIX), group membership is unknowable — the group arm is skipped but WORLD-writable is still refused', () => {
+    const dir = tmp.make('r21-f1-nogroups');
+    const resolver = join(dir, 'resolver.cjs');
+    writeFileSync(resolver, 'process.stdout.write("ok")');
+    const binDir = tmp.make('r21-f1-nogroups-bin');
+    const interp = join(binDir, 'fake-node');
+    writeFileSync(interp, '#!/bin/sh\nexit 0\n');
+    chownSync(interp, process.getuid?.() ?? -1, process.getgid?.() ?? -1);
+    chmodSync(interp, 0o775);
+    const decl = { command: [interp, resolver, '{source}'], resolverArtifactPath: resolver, interpreted: true } as const;
+    expect(() => verifyResolverArtifact(decl)).toThrow(/group-writable/); // control: refused WITH group info
+    const proc = process as unknown as { getgroups?: () => number[] };
+    const saved = proc.getgroups;
+    proc.getgroups = undefined;
+    try {
+      // Membership can no longer be attributed, so the group-writable file is accepted — the
+      // documented degradation on platforms without getgroups, not a weakening (there is no
+      // group list to consult)…
+      expect(() => verifyResolverArtifact(decl)).not.toThrow();
+      // …but the WORLD-writable refusal does not depend on getgroups and must still fire.
+      chmodSync(interp, 0o777);
+      expect(() => verifyResolverArtifact(decl)).toThrow(/world-writable/);
+    } finally {
+      proc.getgroups = saved;
+    }
+  });
+});
+
+describe('directoryManifest: non-regular entries and canonical ordering', () => {
+  it('refuses a FIFO (neither regular file nor directory) fail-closed', () => {
+    const dir = tmp.make('manifest-fifo');
+    writeFileSync(join(dir, 'a.cjs'), 'A');
+    execFileSync('mkfifo', [join(dir, 'pipe')]); // a fifo would also block the hash read
+    expect(() => directoryManifestDigest(dir)).toThrow(/neither a regular file nor a directory/);
+  });
+
+  it('orders entries by raw codepoint, independent of walk order: a dir marker sorts between "." and "0" siblings', () => {
+    // The walk pushes a directory marker BEFORE its children and before later siblings in readdir
+    // order, so the pushed sequence is NOT already sorted when a sibling's name diverges from the
+    // dir name with a codepoint below "/" (0x2F) — "d.pre" (0x2E) and "x-file" (0x2D) are pushed
+    // AFTER the dir's children yet must sort BEFORE the "d/" / "x/" markers. relpaths is the
+    // canonical, codepoint-sorted projection the digest binds.
+    const dir = tmp.make('manifest-order');
+    mkdirSync(join(dir, 'd'));
+    writeFileSync(join(dir, 'd', 'kid.cjs'), 'K');
+    writeFileSync(join(dir, 'd.pre'), 'P');
+    writeFileSync(join(dir, 'd0post'), 'Q');
+    mkdirSync(join(dir, 'x'));
+    writeFileSync(join(dir, 'x', 'inner.cjs'), 'I');
+    writeFileSync(join(dir, 'x-file'), 'X');
+    const m = directoryManifest(dir);
+    expect(m.relpaths).toEqual(['d.pre', 'd/', 'd/kid.cjs', 'd0post', 'x-file', 'x/', 'x/inner.cjs']);
+    expect(directoryManifest(dir).digest).toBe(m.digest); // canonical → stable across walks
+  });
+});
+
+describe('stageResolverArtifact in DIRECT mode (no interpreter to hash)', () => {
+  it('stages a direct resolver with null interpreter fields and a composite equal to verify — the drain-seam invariant holds without an interpreter', () => {
+    const dir = tmp.make('stage-direct');
+    const { path, contentDigest } = script(dir, 'resolver-direct');
+    const execution = { command: [path, '{source}'], resolverArtifactPath: path, interpreted: false } as const;
+    const v = verifyResolverArtifact(execution);
+    const staged = stageResolverArtifact(execution);
+    try {
+      expect(staged.interpreted).toBe(false);
+      expect(staged.interpreterDigest).toBeNull();
+      expect(staged.interpreterRealpath).toBeNull();
+      expect(staged.contentDigest).toBe(contentDigest);
+      expect(staged.compositeDigest).toBe(v.compositeDigest);
+    } finally {
+      rmSync(staged.stageDir, { recursive: true, force: true });
+    }
   });
 });
