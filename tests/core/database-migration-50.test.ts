@@ -251,7 +251,7 @@ describe('migration 50 metadata-only tool-call evidence', () => {
     const db = new Database(':memory:');
     db.open();
     try {
-      expect(CURRENT_SCHEMA_MIGRATION).toBe(58);
+      expect(CURRENT_SCHEMA_MIGRATION).toBe(59);
       expect(db.raw.prepare(
         'SELECT version FROM schema_migrations WHERE version = 50',
       ).get()).toEqual({ version: 50 });

@@ -1135,6 +1135,40 @@ export class CapabilityObligationStore {
     });
   }
 
+  /**
+   * Durable pre-spawn execution reservation (post-merge audit F1, Critical).
+   * The executor calls this in its own committed write BEFORE spawning the
+   * external resolver; the UNIQUE(obligation_id, claim_epoch, attempt_number)
+   * constraint turns a second spawn attempt for the same claim/attempt into a
+   * typed refusal instead of a duplicate external side effect. Crash-safe by
+   * construction — a process-local flag cannot provide this.
+   */
+  reserveExecutionAttempt(params: {
+    obligationId: number;
+    claimEpoch: number;
+    attemptNumber: number;
+    toolUseId: string;
+  }): { reserved: true } | { reserved: false; reason: 'already_reserved' } {
+    try {
+      this.db.raw
+        .prepare(
+          `INSERT INTO capability_execution_reservations
+             (obligation_id, claim_epoch, attempt_number, tool_use_id)
+           VALUES (?, ?, ?, ?)`,
+        )
+        .run(params.obligationId, params.claimEpoch, params.attemptNumber, params.toolUseId);
+      return { reserved: true };
+    } catch (err) {
+      if (
+        err instanceof Error
+        && err.message.includes('UNIQUE constraint failed: capability_execution_reservations')
+      ) {
+        return { reserved: false, reason: 'already_reserved' };
+      }
+      throw err;
+    }
+  }
+
   recordExecutionReceipt(params: {
     obligationId: number;
     logicalTurnId: string;

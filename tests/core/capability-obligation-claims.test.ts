@@ -34,7 +34,7 @@ beforeEach(() => {
  */
 function seedFreshAttestation(): number {
   return recordCapabilityAttestation(db, {
-    hostId: 'h', runtimeUser: 'u', releaseSha: 'r', schemaVersion: 58,
+    hostId: 'h', runtimeUser: 'u', releaseSha: 'r', schemaVersion: 59,
     providerId: 'claude-cli', harnessType: 'persistent_session', contractVersion: 'c/1',
     capability: 'child_process_tools', skillName: 'watch', skillVersion: '1.0.0',
     skillDigest: 'sd', resolverDigest: 'rd', dependencyVersions: {}, probeVersion: 'p/1',
@@ -104,7 +104,7 @@ function seedObligation(over: Partial<Record<string, unknown>> = {}): number {
         sourceDigest: 'bb'.repeat(32),
         sourceToken: 'https://youtu.be/abc',
         retainedMedia: null,
-        creationReason: 'typed_deferral_signal',
+        creationReason: 'harness_capability_gap',
       },
     });
     id = outcome.obligationId!;

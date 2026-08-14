@@ -41,7 +41,7 @@ const OBLIGATION = {
   source_digest: 'cd'.repeat(32),
   source_token: 'https://youtu.be/abc',
   state: 'waiting_capability',
-  creation_reason: 'typed_deferral_signal',
+  creation_reason: 'harness_capability_gap',
 };
 
 function insertObligation(over: Partial<Record<string, unknown>> = {}): number {
@@ -56,11 +56,11 @@ function insertObligation(over: Partial<Record<string, unknown>> = {}): number {
 
 describe('migration 58 — registration and idempotency', () => {
   it('is applied by Database.open() and matches CURRENT_SCHEMA_MIGRATION', () => {
-    expect(CURRENT_SCHEMA_MIGRATION).toBe(58);
+    expect(CURRENT_SCHEMA_MIGRATION).toBe(59);
     const applied = db.raw
       .prepare('SELECT MAX(version) AS v FROM schema_migrations')
       .get() as { v: number };
-    expect(applied.v).toBe(58);
+    expect(applied.v).toBe(59);
     for (const table of [
       'capability_obligations',
       'capability_obligation_events',
@@ -174,7 +174,7 @@ describe('capability_obligations — immutability and transition whitelist', () 
       ['input_digest', 'cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd'],
       ['source_digest', 'abababababababababababababababababababababababababababababababab'],
       ['source_token', 'https://evil.example/x'],
-      ['creation_reason', 'typed_deferral_signal'],
+      ['creation_reason', 'harness_capability_gap'],
       ['retained_media_path', '/tmp/evil'],
       ['media_sha256', 'cd'.repeat(32)],
     ] as const) {

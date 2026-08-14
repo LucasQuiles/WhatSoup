@@ -64,7 +64,7 @@ function seedGroupObligation(over: Partial<Record<string, unknown>> = {}): numbe
         scope: 'per_chat', originRecoveryJobId: null, replayText: 'https://youtu.be/abc',
         contentTypeHint: 'text', contractVersion: 'c/1', requiredCapability: 'child_process_tools',
         capabilityParams: '{"skill":"watch"}', inputDigest: 'ab'.repeat(32), sourceDigest: 'bb'.repeat(32),
-        sourceToken: 'https://youtu.be/abc', retainedMedia: null, creationReason: 'typed_deferral_signal',
+        sourceToken: 'https://youtu.be/abc', retainedMedia: null, creationReason: 'harness_capability_gap',
       },
     }).obligationId!;
   });
@@ -76,7 +76,7 @@ function expectedBinding(args: ApproveDrainArgs) {
   return buildCapabilityAttestationBinding({
     liveFacts: {
       hostId: args.hostId, runtimeUser: args.runtimeUser, releaseSha: args.releaseSha,
-      schemaVersion: 58, providerId: args.providerId, harnessType: resolveHarnessType(args.providerId),
+      schemaVersion: 59, providerId: args.providerId, harnessType: resolveHarnessType(args.providerId),
     },
     contractVersion: 'c/1', capability: 'child_process_tools', skill: SKILL, mediaRoot: args.mediaRoot,
   });
@@ -179,7 +179,7 @@ describe('capability-obligation-approve-drain CLI (main block reaches approveDra
             replayText: 'https://youtu.be/abc', contentTypeHint: 'text', contractVersion: 'c/1',
             requiredCapability: 'child_process_tools', capabilityParams: '{"skill":"watch"}',
             inputDigest: 'ab'.repeat(32), sourceDigest: 'bb'.repeat(32), sourceToken: 'https://youtu.be/abc',
-            retainedMedia: null, creationReason: 'typed_deferral_signal',
+            retainedMedia: null, creationReason: 'harness_capability_gap',
           },
         }).obligationId!;
       });

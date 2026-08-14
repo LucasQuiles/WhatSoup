@@ -16,7 +16,7 @@ import { Database } from '../../src/core/database.ts';
 let db: Database;
 
 const BINDING: CapabilityAttestationBinding = {
-  hostId: 'test-host', runtimeUser: 'test-user', releaseSha: 'relsha-1', schemaVersion: 58,
+  hostId: 'test-host', runtimeUser: 'test-user', releaseSha: 'relsha-1', schemaVersion: 59,
   providerId: 'claude-cli', harnessType: 'persistent_session', contractVersion: 'c/1',
   capability: 'child_process_tools', skillName: 'watch', skillVersion: '1.0.0',
   skillDigest: 'sd', resolverDigest: 'rd', dependencyVersions: { 'yt-dlp': '2026.03.17' },

@@ -34,6 +34,7 @@ import type { Readable } from 'node:stream';
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { copyFile, mkdtemp, rm } from 'node:fs/promises';
+import { StringDecoder } from 'node:string_decoder';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { z } from 'zod';
@@ -82,9 +83,45 @@ function sha256File(path: string): Promise<string> {
 
 interface ResolverRun {
   exitCode: number | null;
+  /** The signal that terminated the child, if any — reported as itself, never conflated with a timeout (audit F8). */
+  signal: NodeJS.Signals | null;
+  /** True ONLY when this handler's own watchdog fired (audit F8). */
   timedOut: boolean;
   stdout: string;
   stderr: string;
+  /** Raw child-output bytes CAPTURED (capped at the advertised limit) — the truthful evidence measure (audit F8). */
+  stdoutBytes: number;
+  stderrBytes: number;
+}
+
+/**
+ * Byte-exact capped accumulator (audit F8): the previous char-count compare +
+ * whole-chunk append let multi-byte UTF-8 output exceed the advertised BYTE
+ * cap. Chunks are collected as Buffers with byte accounting, the final chunk
+ * is sliced at the cap boundary, and decoding goes through StringDecoder
+ * WITHOUT end() so a codepoint split at the cap is dropped rather than
+ * decoded as a replacement char that would re-encode PAST the cap. `bytes()`
+ * reports the raw captured byte count — never more than `capBytes`.
+ */
+function cappedCollector(capBytes: number): { push: (chunk: Buffer) => void; text: () => string; bytes: () => number } {
+  const chunks: Buffer[] = [];
+  let bytes = 0;
+  return {
+    push: (chunk: Buffer): void => {
+      if (bytes >= capBytes) return;
+      const room = capBytes - bytes;
+      const take = chunk.length <= room ? chunk : chunk.subarray(0, room);
+      chunks.push(take);
+      bytes += take.length;
+    },
+    text: (): string => {
+      const decoder = new StringDecoder('utf8');
+      let out = '';
+      for (const chunk of chunks) out += decoder.write(chunk);
+      return out; // no decoder.end(): a dangling partial codepoint is dropped, keeping byteLength(text) <= capBytes
+    },
+    bytes: (): number => bytes,
+  };
 }
 
 function runResolver(argv: readonly string[], timeoutMs: number): Promise<ResolverRun> {
@@ -114,8 +151,8 @@ function runResolver(argv: readonly string[], timeoutMs: number): Promise<Resolv
       return;
     }
     const pid = child.pid; // capture now — undefined if spawn failed
-    let stdout = '';
-    let stderr = '';
+    const stdout = cappedCollector(STDOUT_CAP_BYTES);
+    const stderr = cappedCollector(STDERR_CAP_BYTES);
     let timedOut = false;
     let settled = false;
     const killGroup = (): void => {
@@ -127,12 +164,8 @@ function runResolver(argv: readonly string[], timeoutMs: number): Promise<Resolv
       killGroup(); // reap the leader AND every descendant
     }, timeoutMs);
     watchdog.unref?.();
-    child.stdout.on('data', (chunk: Buffer) => {
-      if (stdout.length < STDOUT_CAP_BYTES) stdout += chunk.toString('utf8');
-    });
-    child.stderr.on('data', (chunk: Buffer) => {
-      if (stderr.length < STDERR_CAP_BYTES) stderr += chunk.toString('utf8');
-    });
+    child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk));
+    child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk));
     child.on('error', (err) => {
       if (settled) return;
       settled = true;
@@ -143,7 +176,6 @@ function runResolver(argv: readonly string[], timeoutMs: number): Promise<Resolv
       if (settled) return;
       settled = true;
       clearTimeout(watchdog);
-      if (signal !== null) timedOut = true;
       // r14 F2: the leader has already exited (that is why `close` fired), but a
       // grandchild it forked into the SAME process group can OUTLIVE it and land
       // a side effect AFTER we record the receipt below. On a clean exit the
@@ -156,7 +188,15 @@ function runResolver(argv: readonly string[], timeoutMs: number): Promise<Resolv
       // called setsid() leaves the group and is unreachable by pgid — that needs
       // the stronger resolver contract noted in the module header.
       killGroup();
-      resolve({ exitCode: code, timedOut, stdout, stderr });
+      resolve({
+        exitCode: code,
+        signal,
+        timedOut,
+        stdout: stdout.text(),
+        stderr: stderr.text(),
+        stdoutBytes: stdout.bytes(),
+        stderrBytes: stderr.bytes(),
+      });
     });
   });
 }
@@ -286,6 +326,34 @@ export function buildCapabilityExecutionTool(deps: CapabilityExecutionToolDeps):
           if (i === 0 && staged.interpreterRealpath !== null) return staged.interpreterRealpath;
           return part.replaceAll('{source}', executionSource);
         });
+        // Audit F1 (Critical): a DURABLE pre-spawn reservation keyed
+        // (obligation, claim epoch, attempt). Every validation above is
+        // side-effect-free, so a refused call (wrong source, digest mismatch)
+        // never consumes the attempt; from here on the external side effect is
+        // imminent, so the reservation is taken FIRST, in its own committed
+        // write. A duplicate call for the same claim/attempt — concurrent or
+        // sequential, same process or a successor — hits the UNIQUE constraint
+        // and is refused before any spawn.
+        const reservationToolUseId = `capx-${randomUUID()}`;
+        let reservation: { reserved: true } | { reserved: false; reason: 'already_reserved' };
+        try {
+          reservation = deps.store.reserveExecutionAttempt({
+            obligationId: obligation.id,
+            claimEpoch: active.fence.claimEpoch,
+            attemptNumber: active.attemptNumber,
+            toolUseId: reservationToolUseId,
+          });
+        } catch (err) {
+          log.error({ err, obligationId: obligation.id }, 'execution reservation write failed — refusing to spawn');
+          return toolError({ error: 'capability_execution', message: 'Execution reservation could not be recorded; refusing to run the resolver' });
+        }
+        if (!reservation.reserved) {
+          recordOutcome(deps, active, observedSourceDigest, 'error', { reason: 'execution_already_reserved' });
+          return toolError({
+            error: 'capability_execution',
+            message: 'This obligation attempt already reserved an execution — refusing a duplicate external run',
+          });
+        }
         let run: ResolverRun;
         try {
           run = await runResolver(argv, deps.options.execution.timeoutMs);
@@ -315,21 +383,37 @@ export function buildCapabilityExecutionTool(deps: CapabilityExecutionToolDeps):
 
         const ok =
           !run.timedOut
+          && run.signal === null
           && run.exitCode === 0
-          && Buffer.byteLength(run.stdout, 'utf8') >= deps.options.execution.minOutputBytes;
-        recordOutcome(deps, active, observedSourceDigest, ok ? 'ok' : 'error', {
+          && run.stdoutBytes >= deps.options.execution.minOutputBytes;
+        const receiptPersisted = recordOutcome(deps, active, observedSourceDigest, ok ? 'ok' : 'error', {
           exitCode: run.exitCode,
+          signal: run.signal,
           timedOut: run.timedOut,
-          stdoutBytes: Buffer.byteLength(run.stdout, 'utf8'),
-          stderrBytes: Buffer.byteLength(run.stderr, 'utf8'),
+          stdoutBytes: run.stdoutBytes,
+          stderrBytes: run.stderrBytes,
         }, observedMediaDigest);
 
         if (!ok) {
           return toolError({
             error: 'capability_execution_failed',
             message:
-              `Capability resolver failed (exit=${run.exitCode ?? 'signal'}, timedOut=${run.timedOut}). `
+              `Capability resolver failed (exit=${run.exitCode ?? 'none'}, signal=${run.signal ?? 'none'}, timedOut=${run.timedOut}). `
               + `stderr tail: ${run.stderr.slice(-1_024)}`,
+          });
+        }
+        // Audit F3: the external work SUCCEEDED but its receipt did not
+        // persist — returning the output as clean success would let the agent
+        // send a result whose obligation later quarantines receipt-less, and
+        // invite a repeat of the external work. Surface the durability loss
+        // explicitly instead; the consumed reservation above keeps this
+        // attempt from being silently re-executed.
+        if (!receiptPersisted) {
+          return toolError({
+            error: 'capability_execution_durability_loss',
+            message:
+              'The resolver executed successfully but its execution receipt could NOT be persisted. '
+              + 'Do not send or reuse the result; the obligation will quarantine for operator review.',
           });
         }
         return { executed: true, exitCode: 0, output: run.stdout };
@@ -352,6 +436,12 @@ export function buildCapabilityExecutionTool(deps: CapabilityExecutionToolDeps):
     },
   };
 
+  /**
+   * Returns whether the receipt PERSISTED (audit F3). A false return on the
+   * ok-path becomes a caller-visible durability-loss error — never a clean
+   * success — because a missing receipt can never complete the obligation and
+   * a caller acting on unrecorded success invites repeated external work.
+   */
   function recordOutcome(
     toolDeps: CapabilityExecutionToolDeps,
     active: ActiveObligationExecution,
@@ -359,7 +449,7 @@ export function buildCapabilityExecutionTool(deps: CapabilityExecutionToolDeps):
     resultStatus: 'ok' | 'error',
     evidence: Record<string, unknown>,
     observedMediaDigest: string | null = null,
-  ): void {
+  ): boolean {
     try {
       toolDeps.store.recordExecutionReceipt({
         obligationId: active.obligation.id,
@@ -376,9 +466,11 @@ export function buildCapabilityExecutionTool(deps: CapabilityExecutionToolDeps):
         attemptNumber: active.attemptNumber,
         sourceDigest: observedSourceDigest,
       });
+      return true;
     } catch (err) {
       // Fail closed: a missing receipt can never complete the obligation.
       log.error({ err, obligationId: active.obligation.id }, 'execution receipt persistence failed');
+      return false;
     }
   }
 }
