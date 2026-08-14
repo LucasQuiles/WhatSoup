@@ -117,7 +117,7 @@ describe('findAdmissibleAttestation — exact binding', () => {
 
   it('a schemaVersion mismatch is a binding_mismatch skip', () => {
     record();
-    const found = findAdmissibleAttestation(db, { ...BINDING, schemaVersion: 58 });
+    const found = findAdmissibleAttestation(db, { ...BINDING, schemaVersion: 59 });
     expect(found).toEqual({ outcome: 'skip', reason: 'binding_mismatch' });
   });
 
