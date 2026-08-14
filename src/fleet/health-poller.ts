@@ -13,7 +13,11 @@ import type { BotErrorsCriticalAssetDiagnostic } from '../lib/bot-errors-outbox.
 import { asRecord, nonEmptyString, nonEmptyStringRaw } from '../lib/type-guards.ts';
 import { sqliteUtcToEpochMs } from '../lib/sqlite-time.ts';
 import { ALERT_THROTTLE_INTERVAL_MS, loadAlertThrottleDetailed, recordAlertThrottle } from './alert-throttle-store.ts';
-import { setRecoveryMarker, clearRecoveryMarker, loadRecoveryMarkers } from '../lib/recovery-authority-store.ts';
+import { loadRecoveryMarkers } from '../lib/recovery-authority-store.ts';
+import {
+  clearRecoveryMarkerObserved,
+  setRecoveryMarkerObserved,
+} from './recovery-marker-observability.ts';
 import * as silenceManager from './silence-manager.ts';
 import type { SilenceStoreReadResult } from './silence-manager.ts';
 import {
@@ -1075,12 +1079,7 @@ export class HealthPoller {
           // scan retries the idempotent clear.
           continue;
         }
-        try {
-          clearRecoveryMarker(marker);
-        } catch {
-          // intentional: marker removal is best-effort — a stale marker only
-          // causes a redundant idempotent clear on the next startup scan.
-        }
+        clearRecoveryMarkerObserved(mName, mSource);
       }
     }
   }
@@ -2506,12 +2505,7 @@ export class HealthPoller {
           continue;
         }
         // #3057: alert was durably cleared — remove the recovery-authority marker.
-        try {
-          clearRecoveryMarker(`${name}:${source}`);
-        } catch {
-          // intentional: marker removal is best-effort — a stale marker only
-          // causes a redundant idempotent clear on the next startup scan.
-        }
+        clearRecoveryMarkerObserved(name, source);
         if (source === 'instance_unreachable') this.unreachableAlerted.delete(name);
       } catch (err) {
         log.warn({ err, name, source }, 'failed to emit alert clear');
@@ -2769,12 +2763,7 @@ export class HealthPoller {
         'info',
       );
       if (!emitted) return;
-      try {
-        setRecoveryMarker(`${name}:${source}`);
-      } catch {
-        // Intentional: the debt alert is already durable; a missing marker only
-        // prevents restart-time reconciliation of its eventual clear.
-      }
+      setRecoveryMarkerObserved(name, source);
       this.recoveryDebtFingerprints.set(name, fingerprint);
       this.trackActiveAlertSource(name, source, true);
       return;
@@ -2784,11 +2773,7 @@ export class HealthPoller {
       || this.hasConfirmedAlert(name, source);
     if (!hadOpenDebt) return;
     if (!clearAlertSourceChecked(name, source, 'recovery_debt_open=false')) return;
-    try {
-      clearRecoveryMarker(`${name}:${source}`);
-    } catch {
-      // Intentional: a stale marker only causes a redundant idempotent clear.
-    }
+    clearRecoveryMarkerObserved(name, source);
     this.recoveryDebtFingerprints.delete(name);
     const status = this.statuses.get(name);
     if (status) {
@@ -2866,13 +2851,7 @@ export class HealthPoller {
     // #3057: persist a recovery-authority marker so the alert identity
     // survives restart — a new process reads it on cold start to emit the
     // idempotent clear if the instance has recovered.
-    try {
-      setRecoveryMarker(`${name}:${source}`);
-    } catch {
-      // intentional: marker write is best-effort — a missing marker means the
-      // next startup scan cannot reconcile this source, but the alert itself
-      // was already durably queued above.
-    }
+    setRecoveryMarkerObserved(name, source);
 
     if (existing) {
       const now = new Date().toISOString();
