@@ -7,7 +7,7 @@
  * runtime pipeline entry is a scripted closure.
  */
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -140,7 +140,12 @@ afterEach(() => {
   db.close();
 });
 
-function freshAttestation(execution: CapabilityObligationsOptions['execution'] = OPTIONS.execution): number {
+function freshAttestation(
+  execution: CapabilityObligationsOptions['execution'] = OPTIONS.execution,
+  // round-21: an explicit digest for configs whose composite CANNOT be computed because
+  // verify/stage refuses them (F1/F2). `??` short-circuits compositeOf so it is never evaluated.
+  resolverDigestOverride?: string,
+): number {
   return recordCapabilityAttestation(db, {
     ...LIVE_FACTS,
     contractVersion: 'test-contract/1',
@@ -149,7 +154,7 @@ function freshAttestation(execution: CapabilityObligationsOptions['execution'] =
     skillVersion: OPTIONS.attestation.skillVersion,
     skillDigest: OPTIONS.attestation.skillDigest,
     // findings 1+2: record the COMPOSITE that admission + the executor will compare.
-    resolverDigest: compositeOf(execution),
+    resolverDigest: resolverDigestOverride ?? compositeOf(execution),
     dependencyVersions: OPTIONS.attestation.dependencyVersions,
     probeVersion: OPTIONS.attestation.probeVersion,
     canaryId: OPTIONS.attestation.canaryId,
@@ -743,6 +748,122 @@ describe('trusted execution tool (D6)', () => {
       expect(row.result_status).toBe('error');
       expect((JSON.parse(row.output_evidence) as Record<string, unknown>)['reason']).toBe('resolver_digest_mismatch');
       expect(existsSync(marker)).toBe(false); // the evil sibling was refused BEFORE it could execute
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
+  });
+
+  it('R21 F2 FALSIFIER (executor seam): direct-mode [artifact,"-c","{source}"] is REFUSED at the drain (stage rejects the flag; nothing spawns)', async () => {
+    // round-21: a renamed interpreter declared interpreted:false with a `-c` flag would run the
+    // inbound {source} as SHELL CODE. Staging refuses the shape BEFORE any spawn. Reason discriminates:
+    // with the fix → resolver_artifact_unverified (stage threw); revert it → resolver_digest_mismatch.
+    const work = mkdtempSync(join(tmpdir(), 'capx-r21-f2-'));
+    try {
+      const artifact = join(work, 'watch-resolver'); // basename evades isInterpreterName
+      writeFileSync(artifact, '#!/bin/sh\nexec "$@"\n');
+      chmodSync(artifact, 0o755);
+      const execution: CapabilityObligationsOptions['execution'] = { command: [artifact, '-c', '{source}'], timeoutMs: 30_000, minOutputBytes: 1, resolverArtifactPath: artifact, interpreted: false };
+      const id = seedObligation();
+      freshAttestation(execution, 'r21-f2-unattestable'); // admissible row; digest matches the override below
+      const { runtime } = makeRuntime({
+        execution,
+        attestationDigestOverride: 'r21-f2-unattestable',
+        onDispatch: async (tool) => {
+          const r = (await tool.handler({ source: SOURCE_URL }, TOOL_SESSION)) as Record<string, unknown>;
+          expect(r['error']).toBe('capability_execution');
+        },
+      });
+      await runtime.tickOnce();
+      const row = db.raw.prepare('SELECT result_status, output_evidence FROM capability_execution_receipts WHERE obligation_id = ?').get(id) as { result_status: string; output_evidence: string };
+      expect(row.result_status).toBe('error');
+      expect((JSON.parse(row.output_evidence) as Record<string, unknown>)['reason']).toBe('resolver_artifact_unverified');
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
+  });
+
+  it('R21 F1 FALSIFIER (executor seam): an interpreter in a WORLD-writable dir is REFUSED at the drain (nothing spawns)', async () => {
+    const work = mkdtempSync(join(tmpdir(), 'capx-r21-f1-'));
+    const binDir = mkdtempSync(join(tmpdir(), 'capx-r21-f1-bin-'));
+    try {
+      const resolver = join(work, 'resolver.cjs');
+      writeFileSync(resolver, 'process.stdout.write("processed:" + process.argv[2])');
+      const interp = join(binDir, 'node');
+      writeFileSync(interp, '#!/bin/sh\nexit 0\n');
+      chmodSync(interp, 0o755);
+      chmodSync(binDir, 0o777); // WORLD-writable ancestor → a different actor could swap the interpreter
+      const execution: CapabilityObligationsOptions['execution'] = { command: [interp, resolver, '{source}'], timeoutMs: 30_000, minOutputBytes: 1, resolverArtifactPath: resolver, interpreted: true };
+      const id = seedObligation();
+      freshAttestation(execution, 'r21-f1-unattestable'); // admissible row; digest matches the override below
+      const { runtime } = makeRuntime({
+        execution,
+        attestationDigestOverride: 'r21-f1-unattestable',
+        onDispatch: async (tool) => {
+          const r = (await tool.handler({ source: SOURCE_URL }, TOOL_SESSION)) as Record<string, unknown>;
+          expect(r['error']).toBe('capability_execution');
+        },
+      });
+      await runtime.tickOnce();
+      const row = db.raw.prepare('SELECT result_status, output_evidence FROM capability_execution_receipts WHERE obligation_id = ?').get(id) as { result_status: string; output_evidence: string };
+      expect(row.result_status).toBe('error');
+      expect((JSON.parse(row.output_evidence) as Record<string, unknown>)['reason']).toBe('resolver_artifact_unverified');
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+      rmSync(binDir, { recursive: true, force: true });
+    }
+  });
+
+  it('R21 F3 FALSIFIER (executor seam): an EMPTY directory added after attestation is REFUSED at the drain (manifest binds dirs)', async () => {
+    const work = mkdtempSync(join(tmpdir(), 'capx-r21-f3-'));
+    try {
+      const resolver = join(work, 'resolver.cjs');
+      writeFileSync(resolver, 'console.log("processed " + process.argv[2] + " ok");');
+      const execution: CapabilityObligationsOptions['execution'] = { command: [process.execPath, resolver, '{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: resolver, interpreted: true };
+      const id = seedObligation();
+      freshAttestation(execution); // composite of the tree WITHOUT the extra dir
+      const { runtime } = makeRuntime({
+        execution,
+        onDispatch: async (tool) => {
+          mkdirSync(join(work, 'evil-empty-dir')); // add an empty dir AFTER attestation
+          const r = (await tool.handler({ source: SOURCE_URL }, TOOL_SESSION)) as Record<string, unknown>;
+          expect(r['error']).toBe('capability_execution');
+        },
+      });
+      await runtime.tickOnce();
+      const row = db.raw.prepare('SELECT result_status, output_evidence FROM capability_execution_receipts WHERE obligation_id = ?').get(id) as { result_status: string; output_evidence: string };
+      // revert F3 → the empty dir is invisible → composite matches → the resolver SPAWNS and succeeds → RED
+      expect(row.result_status).toBe('error');
+      expect((JSON.parse(row.output_evidence) as Record<string, unknown>)['reason']).toBe('resolver_digest_mismatch');
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
+  });
+
+  it('R21 F3 HAPPY-PATH: a resolver whose directory contains an EMPTY subdir still drains OK (the dir marker does not break legit resolvers)', async () => {
+    // Guards the MATCH direction of finding 3: cpSync(recursive) reproduces empty directories, so the
+    // stage-time manifest (over the copy) equals the attest-time manifest (over the source). If a
+    // platform/cpSync regression ever dropped empty dirs, EVERY resolver with a subdir would fail
+    // closed — the availability-break class that mode-exclusion was chosen to avoid. This proves it does not.
+    const work = mkdtempSync(join(tmpdir(), 'capx-r21-f3ok-'));
+    try {
+      const resolver = join(work, 'resolver.cjs');
+      writeFileSync(resolver, 'console.log("processed " + process.argv[2] + " ok");');
+      mkdirSync(join(work, 'sub'));                              // an intentional EMPTY sibling directory
+      writeFileSync(join(work, 'sub', 'helper.cjs'), 'module.exports = 1;'); // and a non-empty one below it
+      mkdirSync(join(work, 'emptypkg'));                         // a genuinely empty directory
+      const execution: CapabilityObligationsOptions['execution'] = { command: [process.execPath, resolver, '{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: resolver, interpreted: true };
+      const id = seedObligation();
+      freshAttestation(execution); // composite over the tree WITH the empty dir
+      const { runtime } = makeRuntime({
+        execution,
+        onDispatch: async (tool) => {
+          const r = (await tool.handler({ source: SOURCE_URL }, TOOL_SESSION)) as Record<string, unknown>;
+          expect(r['error']).toBeUndefined(); // no drift → the resolver runs
+        },
+      });
+      await runtime.tickOnce();
+      const row = db.raw.prepare('SELECT result_status FROM capability_execution_receipts WHERE obligation_id = ?').get(id) as { result_status: string };
+      expect(row.result_status).toBe('ok'); // verify == execute for a resolver that legitimately has subdirs
     } finally {
       rmSync(work, { recursive: true, force: true });
     }

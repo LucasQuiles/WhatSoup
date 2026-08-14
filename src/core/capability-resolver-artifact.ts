@@ -128,6 +128,54 @@ function isInterpreterName(name: string): boolean {
   return /^(python|node|nodejs|ruby|perl|php|deno|bun)[0-9][0-9.]*$/.test(lower);
 }
 
+const MODE_IWGRP = 0o020;
+const MODE_IWOTH = 0o002;
+const MODE_ISVTX = 0o1000; // sticky bit
+
+/**
+ * round-21 finding 1 (interpreter verify ≠ execute): the interpreter (`command[0]` in interpreted
+ * mode) is hashed here but EXECUTED from this same realpath — a system binary is 119 MB and is not
+ * staged/copied. So a swap between the hash and the spawn executes unverified bytes with the
+ * composite unchanged. Refuse an interpreter (or ANY ancestor directory — a writable ancestor lets
+ * an actor `rename` the target) that a DIFFERENT, untrusted actor could write: world-writable, or
+ * group-writable when THIS process is a member of the file's group. These are genuine cross-actor
+ * holes and are closed here.
+ *
+ * STICKY DIRECTORY EXEMPTION: a directory that is world/group-writable but carries the STICKY bit
+ * (e.g. `/tmp`, mode 1777) is NOT refused — the sticky bit restricts rename/delete of an entry to
+ * the entry's OWNER (or root) regardless of directory write permission, so a different actor cannot
+ * swap OUR file inside it. (This is exactly what makes `/tmp` safe for owner-created files, and is
+ * why a fake interpreter placed under `/private/tmp` in a test is not a real swap vector.) The
+ * exemption applies only to DIRECTORIES; a world/group-writable regular FILE is always refused.
+ *
+ * The remaining case — an interpreter owned by and writable by our OWN effective UID (e.g. an
+ * nvm/homebrew node in a user-owned dir, mode 755) — is NOT refused: it is the SAME same-UID
+ * boundary as the staged resolver copy (finding 4). A same-UID actor that can rewrite the
+ * interpreter can also rewrite the staged copy and ptrace the child, so this layer cannot defend
+ * against it; that boundary is documented and owner-gated (see docs/durability.md + the debt
+ * draft), not silently accepted here. Enforcing "refuse euid-writable" would also refuse the
+ * legitimate user-owned interpreter that every real deployment and this test suite use.
+ */
+function assertInterpreterNotUntrustedWritable(target: string, label: string): void {
+  const myGids = typeof process.getgroups === 'function' ? new Set<number>(process.getgroups()) : null;
+  let cur = target;
+  for (;;) {
+    const st = statSync(cur);
+    const worldWritable = (st.mode & MODE_IWOTH) !== 0;
+    const groupWritable = (st.mode & MODE_IWGRP) !== 0 && myGids !== null && myGids.has(st.gid);
+    if (worldWritable || groupWritable) {
+      // A sticky DIRECTORY confines rename/delete to each entry's owner, so it is not a swap vector.
+      const stickyDir = st.isDirectory() && (st.mode & MODE_ISVTX) !== 0;
+      if (!stickyDir) {
+        throw new Error(`refusing: ${label} path ${cur} is ${worldWritable ? 'world' : 'group'}-writable without the sticky bit — a different actor could swap the interpreter between verification (hash) and execution (spawn), executing unverified bytes while the composite is unchanged (verify≠execute); the interpreter and every ancestor directory must be writable only by a trusted UID (a sticky dir such as /tmp is exempt)`);
+      }
+    }
+    const parent = dirname(cur);
+    if (parent === cur) break; // filesystem root
+    cur = parent;
+  }
+}
+
 /**
  * Validate the deny-by-default declaration shape common to `canonicalExecutionIdentity`
  * and `verifyResolverArtifact`. Both require an explicit artifact path and an explicit
@@ -261,6 +309,9 @@ function resolveExecutionShape(execution: ResolverArtifactDeclaration): Resolved
     if (!statSync(interpreterReal).isFile()) {
       throw new Error(`refusing: interpreter command[0] realpath ${interpreterReal} is not a regular file`);
     }
+    // round-21 finding 1: the interpreter is executed from this realpath (not staged), so refuse it
+    // if a DIFFERENT untrusted actor (world / a group we're in) could swap it between hash and spawn.
+    assertInterpreterNotUntrustedWritable(interpreterReal, 'interpreted resolver interpreter command[0]');
   } else {
     if (realpathOf(command[0]!, 'direct resolver command[0]') !== artifactReal) {
       throw new Error(`refusing: direct resolver command[0] realpath does not equal declared resolverArtifactPath realpath ${artifactReal} — the verified file is not the one that executes`);
@@ -269,15 +320,29 @@ function resolveExecutionShape(execution: ResolverArtifactDeclaration): Resolved
     if (isInterpreterName(basename(artifactReal))) {
       throw new Error(`refusing: resolver declared interpreted:false but the artifact realpath basename "${basename(artifactReal)}" is a known interpreter — declare interpreted:true with the script as command[1] (mislabel refused)`);
     }
-    // round-20 finding 2b: basename detection is defeated by `mv`. In direct mode NO token
-    // after the artifact may be a bare (non-flag, non-`{source}`) path — such a token is a
-    // script a renamed-interpreter artifact could execute while only the artifact is attested.
+    // round-21 finding 2: round-20's finding-2b allowed FLAGS after a direct artifact — but a
+    // renamed interpreter (basename evades isInterpreterName) reads `-c`/`-e`/`--eval` as "run the
+    // NEXT token as code", so `[watch-resolver(→bash), "-c", "{source}"]` verified bash's bytes and
+    // then executed the inbound `{source}` as SHELL CODE. In direct mode we cannot know whether the
+    // (possibly renamed) artifact treats a token as data or code, so the shape is constrained
+    // STRUCTURALLY: every token after the artifact MUST embed the bound `{source}` template AND MUST
+    // NOT be a flag (start with `-`). This refuses a bare `-c`/`-e` (no `{source}`) AND a
+    // `--eval={source}` (a `-`-prefixed code flag that embeds `{source}`).
     for (let i = 1; i < command.length; i++) {
       const tok = command[i]!;
-      if (tok.startsWith('-')) continue; // a flag
-      if (tok.includes('{source}')) continue; // the bound data-source template
-      throw new Error(`refusing: direct-mode resolver command[${i}] "${tok}" is a bare positional argument — a direct artifact that is (or wraps) an interpreter could execute it as an unattested script; only flags and {source} tokens may follow a direct artifact`);
+      if (tok.startsWith('-')) {
+        throw new Error(`refusing: direct-mode resolver command[${i}] "${tok}" is a flag — a renamed interpreter reads a flag such as -c/-e/--eval as "execute the following as code", which would run the inbound {source} as code; a direct artifact may take only {source}-bearing DATA tokens, never flags`);
+      }
+      if (!tok.includes('{source}')) {
+        throw new Error(`refusing: direct-mode resolver command[${i}] "${tok}" is a bare positional argument (no {source}) — a direct artifact that is or wraps an interpreter could execute it as an unattested script; only {source}-bearing data tokens may follow a direct artifact`);
+      }
     }
+    // RESIDUAL (named; structural closure is owner-gated). A renamed interpreter that treats a
+    // POSITIONAL data token as code with no flag — e.g. `awk '{source}'` runs {source} as an awk
+    // PROGRAM — still executes {source} as code in direct mode. Closing this needs the source OFF
+    // argv entirely (stdin/temp file) or the typed `{interpreter, resolverArtifactPath, args}`
+    // contract; both touch every deployment config and are owner-gated (Debt 4). Interpreted mode is
+    // not exposed to this (command[1] must realpath-equal the declared artifact, never a flag).
   }
   return { command, interpreted, declaredPath, artifactReal, interpreterReal };
 }
@@ -315,8 +380,9 @@ export function verifyResolverArtifact(execution: ResolverArtifactDeclaration): 
  * not just the single artifact file. Without this a sibling swap — overwrite `helper.cjs` after
  * attestation — leaves the artifact's own `contentDigest` unchanged and the evil sibling executes
  * (an `import './helper'` loads it). The manifest is `sha256(JSON.stringify(entries))` where
- * `entries` is the array of `[relpath, sha256(bytes)]` pairs for EVERY regular file, sorted by
- * relpath in codepoint order (NOT `localeCompare` — that is locale-dependent and could diverge
+ * `entries` is the array of `[relpath, sha256(bytes)]` pairs for EVERY regular file PLUS a
+ * `[relpath + '/', '']` marker for EVERY directory (round-21 finding 3 — so an added or empty
+ * directory changes the manifest), sorted by relpath in codepoint order (NOT `localeCompare` — that is locale-dependent and could diverge
  * between attest and drain). JSON is the join so a filename containing a separator or newline can
  * never forge a different tree's manifest. It runs at BOTH attest (over the real source dir) and
  * stage (over the private copy) time; because `cpSync` preserves content byte-for-byte, the two
@@ -367,7 +433,14 @@ export function directoryManifest(dir: string, cap: number = MAX_STAGED_DIR_BYTE
       if (entry.isSymbolicLink()) {
         throw new Error(`refusing: resolver directory contains a symlink (${full}) — a symlink survives the copy and can point at post-attest-mutable bytes; resolver trees must be symlink-free`);
       }
+      const rel = relative(dir, full).split(sep).join('/');
       if (entry.isDirectory()) {
+        // round-21 finding 3: record the DIRECTORY itself, not only its files. Round-20 entered
+        // only regular files, so an added or EMPTY directory (which carries no files) left the
+        // manifest — and the composite — unchanged, yet directory structure can change execution
+        // (an implicit namespace package, a `__pycache__`, a dir that shadows a module). A trailing
+        // "/" distinguishes the dir marker from a same-named file; its digest slot is empty.
+        entries.push([`${rel}/`, '']);
         walk(full);
         continue;
       }
@@ -378,7 +451,6 @@ export function directoryManifest(dir: string, cap: number = MAX_STAGED_DIR_BYTE
       if (total > cap) {
         throw new Error(`refusing: resolver directory ${dir} exceeds the ${cap}-byte staging bound — a resolver plus its immediate siblings must be small; a bundled node_modules/venv is a misconfiguration, not a resolver`);
       }
-      const rel = relative(dir, full).split(sep).join('/');
       entries.push([rel, createHash('sha256').update(readFileSync(full)).digest('hex')]);
     }
   };

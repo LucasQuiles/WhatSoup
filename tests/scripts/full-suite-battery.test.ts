@@ -197,6 +197,16 @@ describe('resolveBatteryTimeoutMs (round-20 gap: invalid FULL_SUITE_BATTERY_TIME
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.message).toContain('FULL_SUITE_BATTERY_TIMEOUT_MS');
   });
+  // round-21 finding 6: setTimeout's 32-bit delay overflows above 2^31-1 and Node CLAMPS it to
+  // ~1ms — a value that PASSES the finite/positive check but fires an instant misleading timeout.
+  it.each(['2147483648', '9999999999', '2.5'])('rejects %j (> 2^31-1 or fractional → setTimeout overflow/clamp)', (raw) => {
+    const r = resolveBatteryTimeoutMs(raw);
+    expect(r.ok).toBe(false); // revert the upper-bound fix → 2147483648 accepted → RED
+    if (!r.ok) expect(r.message).toContain('FULL_SUITE_BATTERY_TIMEOUT_MS');
+  });
+  it('accepts exactly 2^31-1 (the setTimeout maximum) as the boundary', () => {
+    expect(resolveBatteryTimeoutMs('2147483647')).toEqual({ ok: true, timeoutMs: 2147483647 });
+  });
 });
 
 describe('buildVitestArgs (round-19 F5 regression: --pool default must not collide with a caller pool)', () => {

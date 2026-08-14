@@ -245,6 +245,17 @@ export function resolveBatteryTimeoutMs(raw: string | undefined): { ok: true; ti
       message: `FULL_SUITE_BATTERY_TIMEOUT_MS="${raw}" is not a positive finite number of milliseconds — refusing to run with an invalid bound (it would fire an immediate, misleading timeout).`,
     };
   }
+  // round-21: setTimeout's delay is a 32-bit signed int; a value ABOVE 2^31-1 (TIMEOUT_MAX)
+  // overflows and Node CLAMPS it to 1ms — the exact misleading-instant-timeout this guard exists
+  // to prevent (FULL_SUITE_BATTERY_TIMEOUT_MS=2147483648 was accepted, then fired at 1ms). Require
+  // an integer within [1, TIMEOUT_MAX]; a fractional or over-max value is a config error, not a bound.
+  const TIMEOUT_MAX = 2_147_483_647; // 2^31 - 1, Node's setTimeout maximum
+  if (!Number.isInteger(n) || n > TIMEOUT_MAX) {
+    return {
+      ok: false,
+      message: `FULL_SUITE_BATTERY_TIMEOUT_MS="${raw}" must be an integer in [1, ${TIMEOUT_MAX}] ms — a larger or fractional value overflows setTimeout's 32-bit delay and is clamped to ~1ms (a misleading instant timeout).`,
+    };
+  }
   return { ok: true, timeoutMs: n };
 }
 

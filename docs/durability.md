@@ -766,28 +766,57 @@ reviewer defeated both vectors). Staging the whole directory (not just the file)
 sibling-module resolution (`require('./helper')`, a Python sibling import) that a single-file copy
 would break. The composite now binds FOUR things via ONE canonicalizer: (1) the artifact CONTENT
 digest; (2) the whole-DIRECTORY MANIFEST — a canonical `sha256` over the sorted `[relpath,
-sha256(bytes)]` of every regular file, so a post-attest SIBLING swap (overwrite `helper.cjs` after
-attestation) changes the manifest and is refused (advisor round-20); a SYMLINK or non-regular entry
-is refused fail-closed (a symlink survives the copy and can point at post-attest-mutable bytes), and
-file MODE is deliberately excluded (its `cpSync` preservation is not verified bit-identical, and a
-divergence would fail EVERY legitimate drain); (3) the INTERPRETER content digest (`command[0]`
-hashed when `interpreted`, executed from its verified realpath) — the interpreter must be an EXPLICIT
-path (a bare `node`/`python3` resolved via `$PATH` is unpinnable and is refused at config LOAD, not
-the drain); (4) the canonical execution SHAPE + ENVELOPE (`command`, `interpreted`, `timeoutMs`,
-`minOutputBytes`). A direct-mode (`interpreted:false`) command additionally refuses any bare
-positional token after the artifact (a renamed interpreter could execute it as an unattested script,
-round-20 finding 2b). On a composite mismatch the executor logs the staged directory's file list
-(`stagedManifestFiles`) so a stray file next to the resolver is diagnosable rather than opaque. The
-round-19 RESIDUALS are closed at RUNTIME: the copy is a separate inode (an in-place write to the
-original no longer lands), interpreter identity is bound, and interpreter mislabel is refused
-structurally. **OPERATOR CONSTRAINT (hard requirement):** the resolver artifact MUST live in an
+sha256(bytes)]` of every regular file PLUS a `[relpath + '/', '']` marker for every directory
+(round-21 finding 3 — so an added or EMPTY directory also changes the manifest), so a post-attest
+SIBLING swap (overwrite `helper.cjs` after attestation) or an added directory changes the manifest
+and is refused; a SYMLINK or non-regular entry is refused fail-closed (a symlink survives the copy
+and can point at post-attest-mutable bytes), and file MODE is deliberately excluded (its `cpSync`
+preservation is not verified bit-identical, and a divergence would fail EVERY legitimate drain);
+(3) the INTERPRETER content digest (`command[0]` hashed when `interpreted`, executed from its
+verified realpath) — the interpreter must be an EXPLICIT path (a bare `node`/`python3` resolved via
+`$PATH` is unpinnable and is refused at config LOAD), and (round-21 finding 1) the interpreter and
+every ancestor directory must NOT be writable by a DIFFERENT untrusted actor (world-writable, or
+group-writable to a group this process is in) — a non-sticky writable path is refused because the
+interpreter is executed from its realpath (not staged) and a swap between hash and spawn would run
+unverified bytes; a sticky dir like `/tmp` is exempt, and a EUID-owned interpreter is the same-UID
+boundary (finding 4, below); (4) the canonical execution SHAPE + ENVELOPE (`command`, `interpreted`,
+`timeoutMs`, `minOutputBytes`). In direct mode (`interpreted:false`) EVERY token after the artifact
+must embed the bound `{source}` template AND must not be a flag (round-21 finding 2 — a renamed
+interpreter reads a flag such as `-c`/`-e`/`--eval` as "run the following as code", which would
+execute the inbound `{source}` as code; a bare non-`{source}` positional is also refused). RESIDUAL:
+a renamed interpreter that treats a POSITIONAL data token as code with no flag (e.g. `awk`) still
+executes `{source}` as code in direct mode — structural closure (source off argv, or the typed
+config contract) is owner-gated. On a composite mismatch the executor logs the staged directory's file list
+(`stagedManifestFiles`) so a stray file next to the resolver is diagnosable rather than opaque.
+
+> **⚠ ROUND-21 CORRECTION (this section previously OVERSTATED closure).** An adversarial audit
+> reopened THREE execution bypasses against `2bb3b74a`, disproving the prior "round-19 residuals
+> are closed at RUNTIME" claim: (1) the interpreter was hashed then executed from its MUTABLE
+> realpath — a user-writable interpreter swapped after staging executes unverified bytes with the
+> composite unchanged (verify ≠ execute); (2) a renamed interpreter declared `interpreted:false`
+> with `["-c","{source}"]` passed verification and ran the `{source}` DATA as shell code — the
+> finding-2b guard refused only BARE positional tokens, not flag-driven code; (3) the
+> whole-directory manifest entered only regular FILES, so an added/empty DIRECTORY did not change
+> the composite. A fourth: the staged COPY is private (0700) but a same-UID concurrent writer can
+> overwrite it between re-hash and spawn (POSIX has no portable `fexecve` in Node). Round-21
+> narrows (1) by refusing a EUID-writable interpreter, (2) by requiring every direct-mode token to
+> contain `{source}` and not start with `-` (residual: a renamed interpreter that treats a
+> positional data token as code, e.g. awk — structural closure via stdin/file source or the typed
+> config contract is owner-gated), and (3) by binding directory entries in the manifest. The
+> same-UID staged-copy window (4) is an EXPLICIT owner-gated threat-model boundary, not a closure —
+> see the capability-debt issue draft. Do not restore any blanket "residuals closed" wording here
+> without a fresh adversarial pass.
+
+**OPERATOR CONSTRAINT (hard requirement):** the resolver artifact MUST live in an
 ISOLATED directory containing ONLY the resolver and its intentional siblings — nothing else may be
 written next to it (no `.DS_Store`, editor swap file, `__pycache__`, log, db, or media), it must be
 symlink-free, and within the 64 MB staging bound; otherwise every subsequent drain fails closed as
 `resolver_digest_mismatch`. The remaining graduation debt is the CONFIG-CONTRACT half of Option C
 (a typed `{ interpreter, resolverArtifactPath, args }` execution struct replacing the `command`
-array) — **owner-gated** because it touches every deployment resolver config; the runtime half
-(content-addressed execution + interpreter identity) is done. NARROW CLAIM: a passing canary attests only that the verified resolver, run against
+array) — **owner-gated** because it touches every deployment resolver config. The runtime half is
+NOT fully done: round-21 narrowed the reopened bypasses above, but the direct-mode positional-code
+residual and the same-UID staged-copy window remain (structural closure is the typed contract +
+source-off-argv, both owner-gated). NARROW CLAIM: a passing canary attests only that the verified resolver, run against
 `sha256(probeSource)`, exited 0 within bound and produced ≥ `minOutputBytes` — it is NOT proof of
 semantic processing; the fulfillment proof stays the D6 receipt + delivery chain. The attestation
 ROW has **no probe-evidence columns**: adding them needs migration 58, which bumps

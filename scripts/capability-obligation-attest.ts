@@ -50,7 +50,8 @@
  *            (observes the installed resolver + media root, runs the config's canary,
  *             records on pass, preserves probe evidence to the receipt)
  */
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcessByStdio } from 'node:child_process';
+import type { Readable } from 'node:stream';
 import { createHash, randomUUID } from 'node:crypto';
 import { accessSync, closeSync, constants as fsConstants, fsyncSync, linkSync, openSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -326,7 +327,24 @@ export function runResolverCanary(params: {
       cleaned = true;
       try { rmSync(staged.stageDir, { recursive: true, force: true }); } catch { /* best-effort */ }
     };
-    const child = spawn(argv[0]!, argv.slice(1), { stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+    // round-21 finding 5: an argv element containing a NUL byte makes spawn() throw SYNCHRONOUSLY
+    // (ERR_INVALID_ARG_VALUE) — before any 'error' listener is attached — which would reject this
+    // Promise and LEAK the staging root (cleanup runs only from the child event handlers). Guard the
+    // substituted argv for NUL up front, AND wrap spawn in try/catch, so EVERY failure path cleans
+    // the stage dir and resolves a fail rather than throwing/leaking.
+    if (argv.some((a) => a.includes('\0'))) {
+      cleanup();
+      resolvePromise({ result: 'fail', nonce: params.nonce, detail: { reason: 'resolver_arg_contains_nul', probeSourceDigest } });
+      return;
+    }
+    let child: ChildProcessByStdio<null, Readable, Readable>;
+    try {
+      child = spawn(argv[0]!, argv.slice(1), { stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+    } catch (err) {
+      cleanup();
+      resolvePromise({ result: 'fail', nonce: params.nonce, detail: { reason: 'resolver_spawn_failed', message: err instanceof Error ? err.message : String(err), probeSourceDigest } });
+      return;
+    }
     const pid = child.pid; // capture now — undefined if spawn failed
     let stdout = '';
     let stderr = '';

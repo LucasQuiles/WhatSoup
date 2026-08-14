@@ -6,7 +6,7 @@
  */
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -210,6 +210,21 @@ describe('runResolverCanary (bounded, non-sending resolver probe)', () => {
     const outcome = await runResolverCanary({ ...canaryInput(dir, 'process.stdout.write("processed:" + process.argv[2])\n', { declaredResolverDigest: 'deadbeef'.repeat(8) }), probeSource: 'https://probe.example/clip', nonce: 'run-1' });
     expect(outcome.result).toBe('fail');
     expect((outcome.detail as Record<string, unknown>)?.['reason']).toBe('resolver_digest_mismatch');
+  });
+
+  it('R21 F5 FALSIFIER: a NUL byte in the probe source fails cleanly (resolver_arg_contains_nul) and leaks NO staging root', async () => {
+    const dir = tmp.make('canary-nul');
+    // A NUL in the substituted {source} makes spawn() throw SYNCHRONOUSLY (ERR_INVALID_ARG_VALUE),
+    // before any 'error' listener is attached — without the guard the ws-resolver-stage-* dir leaks
+    // (cleanup ran only from child events) and the promise rejects instead of failing cleanly.
+    const stageParent = tmpdir();
+    const listStages = (): string[] => readdirSync(stageParent).filter((n) => n.startsWith('ws-resolver-stage-'));
+    const before = new Set(listStages());
+    const outcome = await runResolverCanary({ ...canaryInput(dir, 'process.stdout.write("processed:" + process.argv[2])\n'), probeSource: 'evil\0injected', nonce: 'run-nul' });
+    expect(outcome.result).toBe('fail'); // revert the guard → await throws → RED
+    expect((outcome.detail as Record<string, unknown>)?.['reason']).toBe('resolver_arg_contains_nul');
+    const leaked = listStages().filter((n) => !before.has(n));
+    expect(leaked).toEqual([]); // no staging root left behind
   });
 
   it('END-TO-END: a real passing canary outcome piped into attest records an ADMISSIBLE attestation', async () => {

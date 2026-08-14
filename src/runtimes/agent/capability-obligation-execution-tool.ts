@@ -29,7 +29,8 @@
  * instead of completing. Registered only when the obligation feature activates
  * (all-or-inert).
  */
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcessByStdio } from 'node:child_process';
+import type { Readable } from 'node:stream';
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { copyFile, mkdtemp, rm } from 'node:fs/promises';
@@ -94,10 +95,24 @@ function runResolver(argv: readonly string[], timeoutMs: number): Promise<Resolv
     // that forks a grandchild (yt-dlp → ffmpeg, a shell, etc.) would leave it alive
     // to land side effects AFTER the error receipt and before a retry. We own the
     // watchdog instead and SIGKILL the negative pid (the whole group).
-    const child = spawn(argv[0]!, argv.slice(1), {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      detached: true,
-    });
+    // round-21 finding 5: a NUL byte in any argv element makes spawn() throw SYNCHRONOUSLY
+    // (ERR_INVALID_ARG_VALUE). Rejecting cleanly here (the caller's finally still frees the stage
+    // dir) gives a precise diagnostic instead of an opaque spawn stack; also wrap spawn so no other
+    // synchronous throw escapes unlabeled.
+    if (argv.some((a) => a.includes('\0'))) {
+      reject(new Error('resolver argv contains a NUL byte — refusing to spawn'));
+      return;
+    }
+    let child: ChildProcessByStdio<null, Readable, Readable>;
+    try {
+      child = spawn(argv[0]!, argv.slice(1), {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        detached: true,
+      });
+    } catch (err) {
+      reject(err instanceof Error ? err : new Error(String(err)));
+      return;
+    }
     const pid = child.pid; // capture now — undefined if spawn failed
     let stdout = '';
     let stderr = '';

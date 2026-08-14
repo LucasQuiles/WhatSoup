@@ -10,7 +10,7 @@
  *     deterministic and is what `verifyResolverArtifact` returns.
  */
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -331,5 +331,64 @@ describe('directoryManifestDigest (round-20 advisor: canonical whole-tree bindin
     writeFileSync(join(dir, 'a.cjs'), 'A');
     symlinkSync('/etc/hosts', join(dir, 'link'));
     expect(() => directoryManifestDigest(dir)).toThrow(/symlink/);
+  });
+
+  // round-21 finding 3: an added/empty DIRECTORY must change the manifest (round-20 entered only
+  // regular files, so a post-attest empty dir was invisible to the composite).
+  it('R21 F3 FALSIFIER: adding an EMPTY directory changes the manifest digest (directory entries are bound)', () => {
+    const dir = tmp.make('r21-f3-manifest');
+    writeFileSync(join(dir, 'resolver.cjs'), 'X');
+    const before = directoryManifestDigest(dir);
+    mkdirSync(join(dir, 'evil-empty-dir'));
+    const after = directoryManifestDigest(dir);
+    expect(after).not.toBe(before); // revert the fix → the empty dir is invisible → equal → RED
+  });
+
+  it('R21 F3: a NESTED empty directory is bound too (recursive)', () => {
+    const dir = tmp.make('r21-f3-nested');
+    writeFileSync(join(dir, 'resolver.cjs'), 'X');
+    mkdirSync(join(dir, 'pkg'));
+    const before = directoryManifestDigest(dir);
+    mkdirSync(join(dir, 'pkg', '__pycache__'));
+    expect(directoryManifestDigest(dir)).not.toBe(before);
+  });
+});
+
+describe('round-21 execution-boundary falsifiers (reopened bypasses)', () => {
+  // F2 (no precondition): round-20's finding-2b allowed FLAGS after a direct artifact, so a renamed
+  // interpreter with `["-c","{source}"]` ran the inbound {source} as shell code. The malicious config
+  // is refused at VERIFY (and STAGE) — so it can never be attested and can never reach the executor.
+  it('R21 F2 FALSIFIER: direct-mode [artifact, "-c", "{source}"] is REFUSED at verify/stage (flag runs {source} as code)', () => {
+    const dir = tmp.make('r21-f2');
+    const artifact = join(dir, 'watch-resolver'); // renamed interpreter: basename evades isInterpreterName
+    writeFileSync(artifact, '#!/bin/sh\nexec "$@"\n');
+    const decl = { command: [artifact, '-c', '{source}'], resolverArtifactPath: artifact, interpreted: false } as const;
+    expect(() => verifyResolverArtifact(decl)).toThrow(/flag/i); // revert fix → accepted → RED
+    expect(() => stageResolverArtifact(decl)).toThrow(/flag/i);
+    // a `--eval={source}` embedded code flag is ALSO refused (it starts with '-')
+    expect(() => verifyResolverArtifact({ command: [artifact, '--eval={source}'], resolverArtifactPath: artifact, interpreted: false })).toThrow(/flag/i);
+    // positive control — a bare {source} DATA token (no flag) is still accepted (the named awk-style
+    // residual, whose structural closure is owner-gated; NOT this exploit)
+    expect(() => verifyResolverArtifact({ command: [artifact, '{source}'], resolverArtifactPath: artifact, interpreted: false })).not.toThrow();
+  });
+
+  // F1: the interpreter is hashed then executed from its realpath (not staged). Refuse an interpreter
+  // (or ancestor dir) a DIFFERENT untrusted actor could swap between hash and spawn: world-writable,
+  // or group-writable by a group we belong to. (A euid-owned interpreter — nvm/homebrew node — is the
+  // same-UID finding-4 boundary and is NOT refused; that is the positive control.)
+  it('R21 F1 FALSIFIER: an interpreter in a WORLD-writable directory is REFUSED at verify/stage', () => {
+    const dir = tmp.make('r21-f1');
+    const resolver = join(dir, 'resolver.cjs');
+    writeFileSync(resolver, 'process.stdout.write("ok")');
+    const binDir = tmp.make('r21-f1-bin');
+    const interp = join(binDir, 'node');
+    writeFileSync(interp, '#!/bin/sh\nexit 0\n');
+    chmodSync(interp, 0o755);
+    chmodSync(binDir, 0o777); // WORLD-writable ancestor → any actor can rename the interpreter
+    const decl = { command: [interp, resolver, '{source}'], resolverArtifactPath: resolver, interpreted: true } as const;
+    expect(() => verifyResolverArtifact(decl)).toThrow(/world-writable/i); // revert fix → accepted → RED
+    expect(() => stageResolverArtifact(decl)).toThrow(/world-writable/i);
+    // positive control — the real user-owned node (755, not world/group-writable) is accepted
+    expect(() => verifyResolverArtifact({ command: [NODE, resolver, '{source}'], resolverArtifactPath: resolver, interpreted: true })).not.toThrow();
   });
 });

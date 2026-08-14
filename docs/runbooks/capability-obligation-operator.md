@@ -48,10 +48,15 @@ Before recording, the command is **fail-closed** on three observations (hardened
    `resolver_digest` (round-20). `--resolver-digest` is REQUIRED and must equal that COMPOSITE. It
    **refuses** an inline/flag at the script position (`node -e …`, `perl -eCODE`), a declared artifact
    whose realpath ≠ the executing token, an `interpreted:false` MISLABEL of an interpreter (a
-   `watch-resolver`→node symlink declared "direct") or any bare positional arg after a direct artifact,
-   a `interpreted:true` command whose `command[0]` is a bare `$PATH` name (refused at config LOAD — an
-   interpreter must be an explicit path), a symlink or non-regular entry in the resolver directory, a
-   missing/unreadable artifact, or any composite mismatch. **The executor re-derives the SAME composite
+   `watch-resolver`→node symlink declared "direct"), in direct mode ANY token after the artifact that
+   is a FLAG or does not embed `{source}` (round-21 finding 2 — `["-c","{source}"]` would run the
+   inbound source as code), a `interpreted:true` command whose `command[0]` is a bare `$PATH` name
+   (refused at config LOAD — an interpreter must be an explicit path) or an interpreter (or ancestor
+   dir) writable by a DIFFERENT untrusted actor — world-writable, or group-writable to a group the
+   process is in, unless it is a sticky dir like `/tmp` (round-21 finding 1; the interpreter is not
+   staged, so a swap between hash and spawn would run unverified bytes), a symlink or non-regular entry
+   in the resolver directory, an added/empty DIRECTORY after attestation (round-21 finding 3 — the
+   manifest binds directory entries), a missing/unreadable artifact, or any composite mismatch. **The executor re-derives the SAME composite
    from the LIVE staged tree + shape at the drain seam and refuses on any mismatch** — a post-attest
    content swap, sibling swap, interpreter swap, OR command-shape/envelope change is caught before any
    spawn (the log names the staged files via `stagedManifestFiles` so a stray file is diagnosable) —
