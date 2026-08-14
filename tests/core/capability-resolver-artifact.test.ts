@@ -24,9 +24,13 @@ import {
   verifyResolverArtifact,
 } from '../../src/core/capability-resolver-artifact.ts';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
+import { trustedNodePath } from '../helpers/trusted-node.ts';
 
 const tmp = trackTmpDirs('resolver-artifact-', { base: realpathSync(tmpdir()) });
-const NODE = realpathSync(process.execPath);
+// The interpreter must live at a TRUSTED path: `process.execPath` is world-writable on CI
+// (hostedtoolcache) / a Homebrew node, which the r21 F1 guard correctly refuses. Falsifiers that
+// assert that refusal build their OWN world-writable interpreter below and do NOT use NODE.
+const NODE = trustedNodePath();
 /** round-20: the composite now binds the INTERPRETER content too; interpreted fixtures use NODE. */
 const NODE_DIGEST = createHash('sha256').update(readFileSync(NODE)).digest('hex');
 /**
@@ -80,7 +84,7 @@ describe('verifyResolverArtifact (explicit, deny-by-default)', () => {
     // resolved to node and its target hashed; the resolver dir itself stays symlink-free.
     const binDir = tmp.make('symlink-ok-bin');
     const symlink = join(binDir, 'watch-resolver');
-    symlinkSync(process.execPath, symlink);
+    symlinkSync(NODE, symlink); // trusted target: this test's second assertion expects verify to SUCCEED
     const { path: realScript, contentDigest } = script(dir);
     const { path: decoy } = script(dir, 'decoy.js');
     expect(() => verifyResolverArtifact({ command: [symlink, realScript, '{source}'], resolverArtifactPath: decoy, interpreted: true }))

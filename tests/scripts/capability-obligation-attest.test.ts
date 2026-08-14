@@ -18,6 +18,7 @@ import { parseCapabilityObligationsOptions, type CapabilityObligationsOptions } 
 import { directoryManifestDigest, resolverCompositeDigest } from '../../src/core/capability-resolver-artifact.ts';
 import { Database } from '../../src/core/database.ts';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
+import { trustedNodePath } from '../helpers/trusted-node.ts';
 import {
   assertArgsMatchConfig,
   assertMediaRootReadable,
@@ -34,6 +35,10 @@ let db: Database;
 
 const CLI_PATH = fileURLToPath(new URL('../../scripts/capability-obligation-attest.ts', import.meta.url));
 const tmp = trackTmpDirs('attest-cli-', { base: realpathSync(tmpdir()) });
+// The resolver INTERPRETER must live at a trusted path. `process.execPath` is world-writable on CI
+// (hostedtoolcache) / a Homebrew node, which the r21 F1 guard refuses. Byte-identical to the
+// running node; module-scoped so every describe block below can reference it.
+const NODE = trustedNodePath();
 
 /**
  * Structured timing exemption (test-integrity `js-sleep-in-test`): the resolver
@@ -161,7 +166,6 @@ describe('loadObligationOptionsFromConfig', () => {
 });
 
 describe('runResolverCanary (bounded, non-sending resolver probe)', () => {
-  const NODE = realpathSync(process.execPath);
   // round-20 finding 3: the canary now STAGES a real artifact and executes the STAGED copy
   // (previously it spawned the original path while the runtime ran a `.pinned-*` copy — they
   // could diverge). Build a real resolver script + its composite so canary == runtime bytes.
@@ -290,7 +294,7 @@ describe('capability-obligation-attest CLI (the operator front-door records end-
     mkdirSync(resolverDir, { recursive: true });
     const resolverPath = over.resolverArtifactPath ?? join(resolverDir, 'resolver.cjs');
     writeFileSync(resolverPath, RESOLVER_SRC);
-    const command = over.command ?? [process.execPath, resolverPath, '{source}'];
+    const command = over.command ?? [NODE, resolverPath, '{source}'];
     const resolverArtifactPath = over.resolverArtifactPath ?? resolverPath;
     const interpreted = over.interpreted ?? true;
     const timeoutMs = 10_000;
@@ -485,8 +489,8 @@ describe('observeResolverArtifact (round-18: verify the EXPLICITLY-declared arti
 
   it('verifies the declared interpreted SCRIPT and returns its COMPOSITE digest (content + shape)', () => {
     const { path, digest } = writeScript('r.cjs');
-    const execution = { command: [process.execPath, path, '{source}'], resolverArtifactPath: path, interpreted: true };
-    const interpreterDigest = createHash('sha256').update(readFileSync(realpathSync(process.execPath))).digest('hex');
+    const execution = { command: [NODE, path, '{source}'], resolverArtifactPath: path, interpreted: true };
+    const interpreterDigest = createHash('sha256').update(readFileSync(realpathSync(NODE))).digest('hex');
     const manifestDigest = directoryManifestDigest(dirname(realpathSync(path)));
     const composite = resolverCompositeDigest(digest, manifestDigest, execution, interpreterDigest);
     expect(observeResolverArtifact(execution, composite))
@@ -495,19 +499,19 @@ describe('observeResolverArtifact (round-18: verify the EXPLICITLY-declared arti
 
   it('FALSIFIER: a MISMATCHED declared --resolver-digest throws', () => {
     const { path } = writeScript('r.cjs');
-    expect(() => observeResolverArtifact({ command: [process.execPath, path, '{source}'], resolverArtifactPath: path, interpreted: true }, 'ab'.repeat(32)))
+    expect(() => observeResolverArtifact({ command: [NODE, path, '{source}'], resolverArtifactPath: path, interpreted: true }, 'ab'.repeat(32)))
       .toThrow(/does not match declared --resolver-digest/);
   });
 
   it('FALSIFIER: a null/empty --resolver-digest throws (verification is mandatory)', () => {
     const { path } = writeScript('r.cjs');
-    expect(() => observeResolverArtifact({ command: [process.execPath, path, '{source}'], resolverArtifactPath: path, interpreted: true }, null))
+    expect(() => observeResolverArtifact({ command: [NODE, path, '{source}'], resolverArtifactPath: path, interpreted: true }, null))
       .toThrow(/--resolver-digest is required/);
   });
 
   it('FALSIFIER: an UNDECLARED artifact (would be inferred from argv) is refused', () => {
     const { path, digest } = writeScript('r.cjs');
-    expect(() => observeResolverArtifact({ command: [process.execPath, path, '{source}'] }, digest))
+    expect(() => observeResolverArtifact({ command: [NODE, path, '{source}'] }, digest))
       .toThrow(/resolverArtifactPath is required/);
   });
 
