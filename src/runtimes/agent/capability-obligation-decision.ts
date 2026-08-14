@@ -196,7 +196,12 @@ export async function deriveCapabilityDecision(
       // url_host/leading_token rules carry the token and no media.
       sourceToken: retainedMedia !== null ? null : decision.sourceToken,
       retainedMedia,
-      creationReason: 'typed_deferral_signal',
+      // What this derivation OBSERVED is the serving harness class lacking the
+      // declared capability (plus the contract match on the input shape and the
+      // conclusive-no-effect fold above) — never a typed model deferral.
+      // 'typed_deferral' stays reserved for the future typed-deferral contract
+      // (audit mid-term M1); migration 59's CHECK enforces this vocabulary.
+      creationReason: 'harness_capability_gap',
     },
   };
 }

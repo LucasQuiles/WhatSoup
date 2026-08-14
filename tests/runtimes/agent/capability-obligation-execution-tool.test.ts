@@ -796,11 +796,11 @@ describe('receipt durability loss is caller-visible (audit F3)', () => {
     expect(counting.runs()).toBe(1); // the external work DID happen — which is exactly why the loss must be visible
     expect(observed).not.toBeNull();
     const r = observed! as Record<string, unknown>;
-    expect(r['error']).toBe('capability_execution_durability_loss');
     expect(String(r['message'])).toContain('could NOT be persisted');
     expect(String(r['message'])).toContain('Do not send');
     expect(r['executed']).toBeUndefined();
     expect(r['output']).toBeUndefined();
+    expect(r).toMatchObject({ error: 'capability_execution_durability_loss' });
   });
 });
 
