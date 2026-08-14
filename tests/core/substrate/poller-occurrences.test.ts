@@ -166,6 +166,37 @@ describe('TriggerPoller — durable occurrence lifecycle (#2566 slice 1)', () =>
     expect(rows[0].lease_owner).toBe('pid:thief:bbbb');
   });
 
+  it('S3-F4: an agent-job dispatch carries the durable occurrence identity', async () => {
+    const { messenger } = makeMessenger();
+    const bead = createBead(db.raw, {
+      kind: 'agent_job', title: 'sweep', ownerJid: 'mw', actor: 'u',
+      body: 'Run the sweep.',
+    });
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'schedule.cron',
+      spec: { expr: '*/5 * * * *' },
+      reportChatJid: 'admin@s.whatsapp.net',
+      nextFireAt: 1_000_000_000, actor: 'u',
+    });
+
+    const dispatched: Array<{ occurrenceId: number; triggerId: number }> = [];
+    const poller = new TriggerPoller(db.raw, messenger, {
+      now: () => 1_000_000_001,
+      agentJobDispatch: (ctx) => {
+        dispatched.push({ occurrenceId: ctx.occurrenceId, triggerId: ctx.triggerId });
+        return { dispatched: true, detail: 'enqueued' };
+      },
+    });
+    await poller.tickOnce();
+
+    expect(dispatched).toHaveLength(1);
+    const occ = db.raw.prepare(
+      `SELECT id FROM trigger_occurrences WHERE trigger_id = ?`,
+    ).get(t.id) as { id: number };
+    expect(dispatched[0].triggerId).toBe(t.id);
+    expect(dispatched[0].occurrenceId).toBe(occ.id);
+  });
+
   it('F7: happy path commits one ordered claimed→running→terminal occurrence', async () => {
     const { messenger } = makeMessenger();
     const t = makeWatchTrigger(db, 1_000_000_000);
