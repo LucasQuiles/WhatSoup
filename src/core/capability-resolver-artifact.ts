@@ -78,7 +78,7 @@ export interface VerifiedResolverArtifact {
  * COPY is executed — so a rename or in-place write to the original AFTER verification cannot
  * substitute unverified bytes (the round-19 hardlink shared the inode and re-resolved the path,
  * which the reviewer defeated with both vectors). The directory (not just the file) is staged so
- * sibling-module resolution (`import './lib'`, a Python sibling import) still works.
+ * sibling-module resolution (a relative require/import of a `./lib` sibling) still works.
  */
 export interface StagedResolverArtifact {
   /** Private staging root the caller MUST `rmSync(recursive)` when execution completes. */
@@ -379,7 +379,7 @@ export function verifyResolverArtifact(execution: ResolverArtifactDeclaration): 
  * into the composite so the attestation binds the WHOLE staged tree (artifact + every sibling),
  * not just the single artifact file. Without this a sibling swap — overwrite `helper.cjs` after
  * attestation — leaves the artifact's own `contentDigest` unchanged and the evil sibling executes
- * (an `import './helper'` loads it). The manifest is `sha256(JSON.stringify(entries))` where
+ * (a relative require of a `./helper` sibling loads it). The manifest is `sha256(JSON.stringify(entries))` where
  * `entries` is the array of `[relpath, sha256(bytes)]` pairs for EVERY regular file PLUS a
  * `[relpath + '/', '']` marker for EVERY directory (round-21 finding 3 — so an added or empty
  * directory changes the manifest), sorted by relpath in codepoint order (NOT `localeCompare` — that is locale-dependent and could diverge
