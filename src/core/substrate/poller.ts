@@ -206,6 +206,12 @@ export type UrlFetchFn = (url: string, opts: { maxBytes: number }) => Promise<Gu
 export interface AgentJobContext {
   beadId: number;
   triggerId: number;
+  /**
+   * #2566 slice 3 — durable occurrence identity of THIS dispatch. The runtime
+   * embeds it in the journaled synthetic inbound's messageId so the agent-job
+   * turn journal and trigger_occurrences are deterministically joinable.
+   */
+  occurrenceId: number;
   /** agent_job bead body — the prompt to run as a turn. */
   prompt: string;
   /** agent_job bead title — for logging / turn labelling. */
@@ -1027,7 +1033,7 @@ export class TriggerPoller {
 
     let outcome: ExecuteOutcome;
     try {
-      outcome = await this.executeWithTimeout(t);
+      outcome = await this.executeWithTimeout(t, occurrenceId);
     } catch (err) {
       outcome = {
         status: 'failed',
@@ -1161,9 +1167,9 @@ export class TriggerPoller {
    * no-op. Side-effecting kinds pass through un-raced: whether their side
    * effect happened is unknowable, so they are never abandoned.
    */
-  private async executeWithTimeout(t: TriggerRow): Promise<ExecuteOutcome> {
-    if (!PROBE_KINDS.has(t.kind)) return this.executeTrigger(t);
-    const exec = this.executeTrigger(t);
+  private async executeWithTimeout(t: TriggerRow, occurrenceId: number): Promise<ExecuteOutcome> {
+    if (!PROBE_KINDS.has(t.kind)) return this.executeTrigger(t, occurrenceId);
+    const exec = this.executeTrigger(t, occurrenceId);
     let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
     const timeout = new Promise<'timeout'>((resolve) => {
       timeoutTimer = this.setTimeoutImpl(() => resolve('timeout'), this.executionTimeoutSeconds * 1000);
@@ -1187,7 +1193,7 @@ export class TriggerPoller {
     }
   }
 
-  private async executeTrigger(t: TriggerRow): Promise<ExecuteOutcome> {
+  private async executeTrigger(t: TriggerRow, occurrenceId: number): Promise<ExecuteOutcome> {
     const kind = t.kind as TriggerKind;
     let spec: unknown;
     try {
@@ -1241,7 +1247,7 @@ export class TriggerPoller {
       // prompt in the bead body was never executed.)
       const bead = this.lookupBead(t.bead_id);
       if (bead?.kind === 'agent_job') {
-        return this.dispatchAgentJob(t, bead);
+        return this.dispatchAgentJob(t, bead, occurrenceId);
       }
       return {
         status: 'ok',
@@ -1292,6 +1298,7 @@ export class TriggerPoller {
   private dispatchAgentJob(
     t: TriggerRow,
     bead: { title: string; body: string | null },
+    occurrenceId: number,
   ): ExecuteOutcome {
     const prompt = bead.body?.trim();
     if (!prompt) {
@@ -1315,7 +1322,7 @@ export class TriggerPoller {
     let result: AgentJobDispatchResult;
     try {
       result = this.agentJobDispatch({
-        beadId: t.bead_id, triggerId: t.id,
+        beadId: t.bead_id, triggerId: t.id, occurrenceId,
         prompt, title: bead.title, reportChatJid: t.report_chat_jid,
       });
     } catch (err) {

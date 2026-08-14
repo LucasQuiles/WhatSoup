@@ -3806,7 +3806,8 @@ export class AgentRuntime implements Runtime {
    * as a fail-CLOSED dispatch (the schedule does not silently no-op).
    */
   dispatchAgentJob(ctx: {
-    beadId: number; triggerId: number; prompt: string; title: string; reportChatJid: string;
+    beadId: number; triggerId: number; occurrenceId: number;
+    prompt: string; title: string; reportChatJid: string;
   }): { dispatched: boolean; detail?: string } {
     try {
       this.db.assertWritableCompatibility();
@@ -3825,7 +3826,10 @@ export class AgentRuntime implements Runtime {
         };
       }
       const now = Math.floor(Date.now() / 1000);
-      const messageId = `agentjob-${ctx.triggerId}-${now}`;
+      // #2566 slice 3 — the occurrence id suffix makes the journaled inbound
+      // deterministically joinable to its trigger_occurrences row (the bare
+      // trigger-id + wall-clock prefix is kept for existing consumers).
+      const messageId = `agentjob-${ctx.triggerId}-${now}-occ${ctx.occurrenceId}`;
       const inboundSeq = this.durability.journalInbound(
         messageId,
         toConversationKey(ctx.reportChatJid),
