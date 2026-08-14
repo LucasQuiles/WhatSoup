@@ -815,6 +815,17 @@ def update_central_ack_watch(memory: dict, central_ack: dict, now: float) -> Non
             # observation the central evaluator proved it saw — never a newer
             # one the receipt does not bind to.
             memory["centralAckCoverage"] = {"digest": observed_digest, "recordedAt": now_iso(now)}
+        episode_since = finite_float(memory.get("centralAckLocalOnlySince"))
+        if episode_since is not None:
+            # Recovery observation (#2468 AC5): stamped once per local-only
+            # episode, at the transition back to central_acked — durable via
+            # the memory persist, and idempotent because the episode key is
+            # consumed here.
+            memory["centralAckRecovery"] = {
+                "recoveredAt": now_iso(now),
+                "episodeStartedAt": now_iso(min(episode_since, now)),
+            }
+            central_ack["recovered"] = True
         memory.pop("centralAckLocalOnlySince", None)
         central_ack["centralDownSuspected"] = False
         return

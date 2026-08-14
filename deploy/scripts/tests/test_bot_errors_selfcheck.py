@@ -2542,3 +2542,154 @@ def test_heartbeat_digest_ring_is_capped(tmp_path: Path):
     new_entries = [entry for entry in ring if entry["digest"] not in seeded_digests]
     assert len(new_entries) == 2
     assert calls == []
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Issue #2468 slice 3: named crash-boundary battery (AC6), durable
+# once-per-episode recovery observation (AC5), and the v2-field privacy
+# sweep (AC8).
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def test_recovery_from_open_episode_is_recorded_durably_once(tmp_path: Path):
+    ack = tmp_path / "central-ack.json"
+    _write_ack_file(ack, _ack_receipt_v2(digest="d1" * 32))
+    config, deps, calls, _head = _fixture(tmp_path, central_ack_path=ack)
+    _seed_memory(config, _memory_with_ring(["d1" * 32], centralAckLocalOnlySince=900.0))
+    status = _mod.run_selfcheck(config, deps)
+    assert status["centralAck"]["mode"] == "central_acked"
+    assert status["centralAck"]["recovered"] is True
+    memory = json.loads(config.memory_path.read_text(encoding="utf-8"))
+    recovery = memory["centralAckRecovery"]
+    assert recovery["recoveredAt"] == _mod.now_iso(1000.0)
+    assert recovery["episodeStartedAt"] == _mod.now_iso(900.0)
+    assert "centralAckLocalOnlySince" not in memory
+
+    # Second run with no open episode: the marker must not be re-stamped.
+    status2 = _mod.run_selfcheck(config, deps)
+    assert status2["centralAck"]["mode"] == "central_acked"
+    assert "recovered" not in status2["centralAck"]
+    memory2 = json.loads(config.memory_path.read_text(encoding="utf-8"))
+    assert memory2["centralAckRecovery"] == recovery
+    assert calls == []
+
+
+def test_crash_boundary_heartbeat_write(tmp_path: Path):
+    """Torn heartbeat FILE cannot poison ack validation — the ring is authoritative."""
+    ack = tmp_path / "central-ack.json"
+    _write_ack_file(ack, _ack_receipt_v2(digest="d1" * 32))
+    config, deps, calls, _head = _fixture(tmp_path, central_ack_path=ack)
+    _seed_memory(config, _memory_with_ring(["d1" * 32]))
+    config.heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
+    config.heartbeat_path.write_text('{"kind": "bot-errors-selfcheck-heartb', encoding="utf-8")
+    status = _mod.run_selfcheck(config, deps)
+    assert status["centralAck"]["mode"] == "central_acked"
+    assert status["centralAck"]["observedDigest"] == "d1" * 32
+    assert calls == []
+
+
+def test_crash_boundary_central_evaluation(tmp_path: Path):
+    """No receipt written (central died pre-ack): the host ages out honestly."""
+    stale = tmp_path / "never-written-ack.json"
+    config, deps, calls, _head = _fixture(tmp_path, central_ack_path=stale)
+    _seed_memory(config, _memory_with_ring(["d1" * 32], centralAckLocalOnlySince=100.0))
+    status = _mod.run_selfcheck(config, deps)
+    assert status["centralAck"]["mode"] == "local_only"
+    assert status["centralAck"]["status"] == "missing"
+    assert status["centralAck"]["localOnlySeconds"] == 900
+    memory = json.loads(config.memory_path.read_text(encoding="utf-8"))
+    assert memory["centralAckLocalOnlySince"] == 100.0
+    assert calls == []
+
+
+def test_crash_boundary_receipt_write(tmp_path: Path):
+    """Truncated receipt bytes: bounded malformed class, open episode preserved."""
+    ack = tmp_path / "central-ack.json"
+    full = _ack_receipt_v2(digest="d1" * 32)
+    _write_ack_file(ack, full[: len(full) // 2])
+    config, deps, calls, _head = _fixture(tmp_path, central_ack_path=ack)
+    last_valid = {"ackedAt": _mod.now_iso(800.0), "digest": "c" * 64, "recordedAt": _mod.now_iso(810.0)}
+    _seed_memory(
+        config,
+        _memory_with_ring(["d1" * 32], centralAckLocalOnlySince=900.0, centralAckLastValid=last_valid),
+    )
+    status = _mod.run_selfcheck(config, deps)
+    assert status["centralAck"]["mode"] == "local_only"
+    assert status["centralAck"]["status"] == "malformed_json"
+    assert status["centralAck"]["lastValid"] == last_valid
+    memory = json.loads(config.memory_path.read_text(encoding="utf-8"))
+    assert memory["centralAckLocalOnlySince"] == 900.0
+    assert memory["centralAckLastValid"] == last_valid
+    assert "centralAckRecovery" not in memory
+    assert calls == []
+
+
+def test_crash_boundary_receipt_transport(tmp_path: Path):
+    """Redelivered old receipt (fresh mtime) and out-of-order receipt cannot clear
+    an open episode or regress coverage."""
+    older_digest, newer_digest = "01" * 32, "02" * 32
+    ack = tmp_path / "central-ack.json"
+    _write_ack_file(ack, _ack_receipt_v2(acked_epoch=940.0, digest=older_digest), mtime=999.0)
+    config, deps, calls, _head = _fixture(tmp_path, central_ack_path=ack)
+    _seed_memory(
+        config,
+        _memory_with_ring(
+            [older_digest, newer_digest],
+            centralAckLocalOnlySince=950.0,
+            centralAckHighWater=960.0,
+            centralAckCoverage={"digest": newer_digest, "recordedAt": _mod.now_iso(960.0)},
+        ),
+    )
+    status = _mod.run_selfcheck(config, deps)
+    assert status["centralAck"]["mode"] == "local_only"
+    assert status["centralAck"]["status"] == "out_of_order"
+    memory = json.loads(config.memory_path.read_text(encoding="utf-8"))
+    assert memory["centralAckLocalOnlySince"] == 950.0
+    assert memory["centralAckCoverage"]["digest"] == newer_digest
+    assert "centralAckRecovery" not in memory
+    assert calls == []
+
+
+def test_crash_boundary_host_read(tmp_path: Path):
+    """Crash after acceptance before memory persist: re-reading the same receipt
+    is idempotent — identical final memory, no duplicated recovery."""
+    ack = tmp_path / "central-ack.json"
+    _write_ack_file(ack, _ack_receipt_v2(digest="d1" * 32))
+    config, deps, calls, _head = _fixture(tmp_path, central_ack_path=ack)
+    pre_accept = _memory_with_ring(["d1" * 32], centralAckLocalOnlySince=900.0)
+    _seed_memory(config, pre_accept)
+    _mod.run_selfcheck(config, deps)
+    first = json.loads(config.memory_path.read_text(encoding="utf-8"))
+
+    # Simulate the crash: restore pre-accept memory (persist never happened),
+    # then re-run against the same receipt.
+    _seed_memory(config, pre_accept)
+    _mod.run_selfcheck(config, deps)
+    second = json.loads(config.memory_path.read_text(encoding="utf-8"))
+    for key in ("centralAckHighWater", "centralAckLastSeen", "centralAckCoverage", "centralAckLastValid"):
+        assert second[key] == first[key]
+    assert second["centralAckRecovery"]["episodeStartedAt"] == first["centralAckRecovery"]["episodeStartedAt"]
+    assert calls == []
+
+
+def test_v2_receipt_fields_never_reach_central_projections(tmp_path: Path):
+    ack = tmp_path / "central-ack.json"
+    _write_ack_file(ack, _ack_receipt_v2(digest="d1" * 32))
+    config, deps, calls, _head = _fixture(tmp_path, central_ack_path=ack)
+    _seed_memory(config, _memory_with_ring(["d1" * 32]))
+    status = _mod.run_selfcheck(config, deps)
+    assert status["centralAck"]["mode"] == "central_acked"
+    projected = _mod.central_telemetry_payload(status)["centralAck"]
+    assert set(projected.keys()) <= {
+        "configured",
+        "mode",
+        "status",
+        "ageSeconds",
+        "maxAgeSeconds",
+        "centralDownSuspected",
+    }
+    serialized = json.dumps(_mod.central_telemetry_payload(status), sort_keys=True)
+    assert "d1" * 32 not in serialized
+    assert str(ack) not in serialized
+    assert "test-host" not in serialized
+    assert calls == []
