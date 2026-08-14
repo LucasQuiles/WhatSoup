@@ -143,18 +143,33 @@ export interface CapabilityObligationRuntimeDeps {
  * AS-04 record-time turn correlation: per-chat turns are serialized per
  * conversation, so the head of a mapKey's context list IS the turn currently
  * owning that conversation. Used by the registry's single tool_calls writer.
+ *
+ * Audit F7 fail-closed: alias/session transitions can leave TWO heads carrying
+ * the same conversation key; silently taking the first would attribute a tool
+ * call to a stale logical turn. A duplicate match is therefore NO correlation
+ * (null — the executor refuses typed / the receipt falls back to the minted
+ * id), and the duplicate heads are logged so the condition is diagnosable.
  */
 export function turnCorrelationFromContexts(
   contexts: ReadonlyMap<string, readonly RuntimeTurnContext[]>,
   conversationKey: string,
 ): { logicalTurnId: string; inboundSeq: number | null } | null {
-  for (const list of contexts.values()) {
+  const matches: Array<{ mapKey: string; logicalTurnId: string; inboundSeq: number | null }> = [];
+  for (const [mapKey, list] of contexts) {
     const head = list[0];
     if (head?.identity.conversationKey === conversationKey) {
-      return { logicalTurnId: head.identity.logicalTurnId, inboundSeq: head.identity.inboundSeq };
+      matches.push({ mapKey, logicalTurnId: head.identity.logicalTurnId, inboundSeq: head.identity.inboundSeq });
     }
   }
-  return null;
+  if (matches.length > 1) {
+    log.warn(
+      { conversationKey, duplicateHeads: matches.map(({ mapKey, logicalTurnId }) => ({ mapKey, logicalTurnId })) },
+      'turn correlation found MULTIPLE context heads for one conversation key; failing closed to no active turn',
+    );
+    return null;
+  }
+  const only = matches[0];
+  return only === undefined ? null : { logicalTurnId: only.logicalTurnId, inboundSeq: only.inboundSeq };
 }
 
 
@@ -306,15 +321,19 @@ export class CapabilityObligationRuntime {
               db: this.db,
               store: this.store,
               activateSession: buildLiveActivateSession(activation),
-              runTick: () => this.supervisor.tick(),
+              // Audit F2: the TARGETED per-row pipeline for the named obligation —
+              // the global tick (oldest-first, capped) may never scan the named row.
+              drainNamed: (id) => this.supervisor.drainNamed(id),
               hasAdmissibleAttestationCandidate: (id) => this.hasAttestationCandidate(id),
             },
             obligationId,
           ),
       });
       for (const outcome of outcomes) {
-        if (outcome.kind === 'drained') {
-          log.info({ outcome }, 'operator drain-now request drained an obligation');
+        if (outcome.kind === 'activated') {
+          // Audit F2: 'activated' vouches only for activation — the named row's
+          // truth is the post-state-derived `named` outcome carried inside.
+          log.info({ outcome }, 'operator drain-now request activated; named outcome derived from post-state');
         } else if (outcome.kind === 'refused') {
           log.info({ outcome }, 'operator drain-now request refused by a gate');
         } else {
@@ -370,12 +389,26 @@ export class CapabilityObligationRuntime {
 
   // ── D6 trusted execution lookup ───────────────────────────────────────────
 
-  /** The active obligation-owned turn for a conversation, if any. */
+  /**
+   * The active obligation-owned turn for a conversation, if any. Audit F7
+   * fail-closed twin of `turnCorrelationFromContexts`: aliased mapKeys can put
+   * TWO active entries under one conversation key, and picking one silently
+   * could bind a receipt to the wrong attempt — a duplicate match is "no
+   * active turn" (the executor refuses typed) plus a diagnosable warning.
+   */
   findActiveTurn(conversationKey: string): ActiveObligationExecution | null {
+    const matches: ActiveObligationExecution[] = [];
     for (const active of this.activeTurns.values()) {
-      if (active.obligation.conversationKey === conversationKey) return active;
+      if (active.obligation.conversationKey === conversationKey) matches.push(active);
     }
-    return null;
+    if (matches.length > 1) {
+      log.warn(
+        { conversationKey, obligationIds: matches.map((m) => m.obligation.id) },
+        'MULTIPLE active obligation turns for one conversation key; failing closed to no active turn',
+      );
+      return null;
+    }
+    return matches[0] ?? null;
   }
 
   // ── ports ─────────────────────────────────────────────────────────────────
@@ -786,17 +819,6 @@ export async function dispatchCapabilityObligationTurnViaSession(
     log.warn({ err, obligationId: obligation.id }, 'obligation turn dispatch failed pre-boundary; retryable');
     return 'retryable';
   }
-  // r14 F3 fail-closed: a NORMAL return that never crossed the provider boundary
-  // means the turn was DISCARDED pre-boundary — the carried admission-time target
-  // was no longer current (e.g. the session recycled onto a different
-  // provider/generation between admission and dispatch), so processPerChatTurn's
-  // dispatchAllowed gate dropped it before any provider call. Nothing reached the
-  // provider ⇒ no side effect is possible ⇒ requeue. Reporting 'dispatched' here
-  // (the prior fall-through, formerly masked because dispatch re-resolved a fresh
-  // current target) would consume the attempt and the obligation would never
-  // settle. `providerBoundaryCrossed` is authoritative: a genuine turn fires the
-  // boundary callback the instant it reaches the provider (same signal r13 uses
-  // to classify post-boundary throws as ambiguous).
   // r14 F3 fail-closed: a NORMAL return that never crossed the provider boundary
   // means the turn was DISCARDED pre-boundary — the carried admission-time target
   // was no longer current (e.g. the session recycled onto a different

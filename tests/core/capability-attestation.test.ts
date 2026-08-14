@@ -29,7 +29,7 @@ const BINDING: CapabilityAttestationBinding = {
   hostId: 'test-host',
   runtimeUser: 'test-user',
   releaseSha: 'relsha-1',
-  schemaVersion: 58,
+  schemaVersion: 60,
   providerId: 'claude-cli',
   harnessType: 'persistent_session',
   contractVersion: 'test-instance/1',
@@ -117,7 +117,7 @@ describe('findAdmissibleAttestation — exact binding', () => {
 
   it('a schemaVersion mismatch is a binding_mismatch skip', () => {
     record();
-    const found = findAdmissibleAttestation(db, { ...BINDING, schemaVersion: 59 });
+    const found = findAdmissibleAttestation(db, { ...BINDING, schemaVersion: 61 });
     expect(found).toEqual({ outcome: 'skip', reason: 'binding_mismatch' });
   });
 

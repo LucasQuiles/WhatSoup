@@ -438,6 +438,7 @@ export const NON_STATUS_TABLES: Set<string> = new Set([
   'bead_triggers',
   'blocklist',
   'capability_drain_approvals',
+  'capability_execution_reservations',
   'capability_obligation_events',
   'chat_aliases',
   'chats',
@@ -602,6 +603,10 @@ export const DISCOVERY_EXCLUSIONS: DiscoveryExclusionEntry[] = [
   {
     table: 'fact_export_queue_v59',
     reason: 'migration-59 transient create-copy-drop-rename artifact; the rebuilt table persists only after being renamed to fact_export_queue.',
+  },
+  {
+    table: 'capability_obligations_v60',
+    reason: 'migration-60 transient create-copy-drop-rename artifact (src/core/database-migration-60.ts): the creation_reason CHECK rebuild copies into capability_obligations_v60, drops the old table, then renames v60 to capability_obligations — it never persists under its own name, so it never appears in migratedSchemaSnapshot().',
   },
 ];
 

@@ -140,6 +140,37 @@ export interface ObligationTickReport {
   requeuedRetryable: number[];
 }
 
+/**
+ * Result of a TARGETED named drain (post-merge audit F2). `processed: true`
+ * means the named obligation's due row went through the SAME per-row
+ * admission/claim/dispatch path the global scan uses; the report then describes
+ * what happened to it. `processed: false` carries the store's typed not-due
+ * classification (from the same eligibility predicate the global scan applies)
+ * with an empty report.
+ */
+export type NamedObligationTickResult =
+  | { processed: true; report: ObligationTickReport }
+  | {
+      processed: false;
+      state: string | null;
+      notDueReason: 'not_found' | 'not_waiting' | 'attempts_exhausted' | 'backoff_pending';
+      report: ObligationTickReport;
+    };
+
+function emptyTickReport(): ObligationTickReport {
+  return {
+    reclaimed: { requeued: [], quarantined: [] },
+    settled: [],
+    requeuedAfterPreAcceptFailure: [],
+    quarantinedAmbiguous: [],
+    attestationSkips: [],
+    mediaBlocked: [],
+    claimed: [],
+    dispatched: [],
+    requeuedRetryable: [],
+  };
+}
+
 export class CapabilityObligationSupervisor {
   private readonly db: Database;
   private readonly store: CapabilityObligationStore;
@@ -162,17 +193,7 @@ export class CapabilityObligationSupervisor {
 
   /** One full pass: reclaim → settle → scan/admit/claim/dispatch. */
   async tick(): Promise<ObligationTickReport> {
-    const report: ObligationTickReport = {
-      reclaimed: { requeued: [], quarantined: [] },
-      settled: [],
-      requeuedAfterPreAcceptFailure: [],
-      quarantinedAmbiguous: [],
-      attestationSkips: [],
-      mediaBlocked: [],
-      claimed: [],
-      dispatched: [],
-      requeuedRetryable: [],
-    };
+    const report = emptyTickReport();
 
     report.reclaimed = this.store.reclaimExpiredClaims({
       providerAcceptedIds: this.evidencePort.providerAcceptedIds(),
@@ -181,6 +202,27 @@ export class CapabilityObligationSupervisor {
     this.settleClaimed(report);
     await this.scanAndDispatch(report);
     return report;
+  }
+
+  /**
+   * TARGETED named drain (post-merge audit F2): process exactly ONE named
+   * obligation through the SAME per-row admission/claim/dispatch pipeline the
+   * global scan runs — never a parallel one. The global tick is oldest-first
+   * with a scan cap, so a named obligation behind enough older due rows would
+   * otherwise never be scanned; the drain-now path calls this instead of (not
+   * in addition to) a global tick, and derives its reported outcome from the
+   * named row's post-state.
+   */
+  async drainNamed(obligationId: number): Promise<NamedObligationTickResult> {
+    const report = emptyTickReport();
+    const targeted = this.store.dueObligationById(obligationId, {
+      mediaMaxAgeSeconds: this.mediaMaxAgeSeconds,
+    });
+    if (targeted.due === null) {
+      return { processed: false, state: targeted.state, notDueReason: targeted.notDueReason, report };
+    }
+    await this.processDueObligation(targeted.due, report);
+    return { processed: true, report };
   }
 
   private settleClaimed(report: ObligationTickReport): void {
@@ -229,94 +271,106 @@ export class CapabilityObligationSupervisor {
       mediaMaxAgeSeconds: this.mediaMaxAgeSeconds,
     });
     for (const due of dueRows) {
-      // r14 F3 — resolve the serving target ONCE; the admission binding and the
-      // dispatch below both come from this single resolution (no second resolve
-      // that could pick a recycled provider/generation after admission).
-      const prepared = this.dispatchPort.prepare(due);
+      await this.processDueObligation(due, report);
+    }
+  }
 
-      // D5 — exact-bound attestation; skips consume zero attempts.
-      const admission: AttestationAdmission = findAdmissibleAttestation(this.db, prepared.binding);
-      if (admission.outcome === 'skip') {
-        report.attestationSkips.push({ id: due.id, reason: admission.reason });
-        continue;
-      }
+  /**
+   * The single per-row admission/claim/dispatch pipeline — shared verbatim by
+   * the global scan and the targeted named drain (audit F2: the named path must
+   * ride the SAME claim-fence/dispatch/settle machinery, never a parallel one).
+   */
+  private async processDueObligation(
+    due: CapabilityObligationDueRow,
+    report: ObligationTickReport,
+  ): Promise<void> {
+    // r14 F3 — resolve the serving target ONCE; the admission binding and the
+    // dispatch below both come from this single resolution (no second resolve
+    // that could pick a recycled provider/generation after admission).
+    const prepared = this.dispatchPort.prepare(due);
 
-      // A-08 — retained media past the finite horizon never claims.
-      if (due.mediaExpired) {
-        const blocked = this.store.blockWaitingObligation(due.id, 'media_retention_expired');
-        if (blocked.applied) report.mediaBlocked.push(due.id);
-        continue;
-      }
+    // D5 — exact-bound attestation; skips consume zero attempts.
+    const admission: AttestationAdmission = findAdmissibleAttestation(this.db, prepared.binding);
+    if (admission.outcome === 'skip') {
+      report.attestationSkips.push({ id: due.id, reason: admission.reason });
+      return;
+    }
 
-      // D3 — media integrity BEFORE claim; block without consuming an attempt.
-      if (due.retainedMediaPath !== null) {
-        const verdict = await verifyRetainedMedia({
-          path: due.retainedMediaPath,
-          sha256: due.mediaSha256!,
-          bytes: due.mediaBytes!,
-        });
-        if (verdict !== 'ok') {
-          const blocked = this.store.blockWaitingObligation(due.id, `media_${verdict}`);
-          if (blocked.applied) report.mediaBlocked.push(due.id);
-          continue;
-        }
-      }
+    // A-08 — retained media past the finite horizon never claims.
+    if (due.mediaExpired) {
+      const blocked = this.store.blockWaitingObligation(due.id, 'media_retention_expired');
+      if (blocked.applied) report.mediaBlocked.push(due.id);
+      return;
+    }
 
-      // D7 — the transactional claim is the sole admission point. r14 F1 — bind
-      // the claim to the attestation that ACTUALLY admitted: its binding-identity
-      // digest must equal the group approval's drain_attestation_digest, or a
-      // drain approved under one release/attestation could run under a different
-      // release-new attestation that admits here. Non-group claims ignore it.
-      const claimToken = `obl-claim-${systemClock.now()}-${++this.claimCounter}`;
-      const claim = this.store.claimObligation(due.id, {
-        claimToken,
-        leaseSeconds: this.leaseSeconds,
-        // r15 F4 — the EXACT admitted attestation row must still be admissible in
-        // the claim transaction (revocation/expiry during the media-verify await).
-        admissionAttestationId: admission.attestationId,
-        admissionAttestationDigest: attestationBindingDigest(prepared.binding),
+    // D3 — media integrity BEFORE claim; block without consuming an attempt.
+    if (due.retainedMediaPath !== null) {
+      const verdict = await verifyRetainedMedia({
+        path: due.retainedMediaPath,
+        sha256: due.mediaSha256!,
+        bytes: due.mediaBytes!,
       });
-      if (!claim.applied) continue; // lost the race — another scanner owns it
-      report.claimed.push(due.id);
-      const fence: CapabilityObligationClaimFence = {
-        claimToken,
-        claimEpoch: claim.claimEpoch,
-      };
+      if (verdict !== 'ok') {
+        const blocked = this.store.blockWaitingObligation(due.id, `media_${verdict}`);
+        if (blocked.applied) report.mediaBlocked.push(due.id);
+        return;
+      }
+    }
 
-      // A real attestation admitted, so the target resolved and `dispatch` is
-      // non-null; guard fail-closed if it somehow became undispatchable.
-      if (prepared.dispatch === null) {
-        const requeued = this.store.requeueObligation(due.id, fence, {
-          backoffSeconds: this.backoffSeconds,
-        });
-        if (requeued.applied) report.requeuedRetryable.push(due.id);
-        continue;
-      }
+    // D7 — the transactional claim is the sole admission point. r14 F1 — bind
+    // the claim to the attestation that ACTUALLY admitted: its binding-identity
+    // digest must equal the group approval's drain_attestation_digest, or a
+    // drain approved under one release/attestation could run under a different
+    // release-new attestation that admits here. Non-group claims ignore it.
+    const claimToken = `obl-claim-${systemClock.now()}-${++this.claimCounter}`;
+    const claim = this.store.claimObligation(due.id, {
+      claimToken,
+      leaseSeconds: this.leaseSeconds,
+      // r15 F4 — the EXACT admitted attestation row must still be admissible in
+      // the claim transaction (revocation/expiry during the media-verify await).
+      admissionAttestationId: admission.attestationId,
+      admissionAttestationDigest: attestationBindingDigest(prepared.binding),
+    });
+    if (!claim.applied) return; // lost the race — another scanner owns it
+    report.claimed.push(due.id);
+    const fence: CapabilityObligationClaimFence = {
+      claimToken,
+      claimEpoch: claim.claimEpoch,
+    };
 
-      const mintedMessageId = `obl:${due.id}:${claim.attemptCount}`;
-      let outcome: ObligationDispatchOutcome;
-      try {
-        outcome = await prepared.dispatch(mintedMessageId, fence, claim.attemptCount);
-      } catch (err) {
-        // The dispatch port converts every post-boundary failure to 'ambiguous'
-        // itself, so a THROW that escapes to here cannot be proven pre-boundary.
-        // Fail closed: quarantine rather than auto-retry a possibly-effected turn.
-        log.warn({ err, obligationId: due.id }, 'obligation dispatch threw; quarantining fail-closed under fence');
-        outcome = 'ambiguous';
-      }
-      if (outcome === 'dispatched') {
-        report.dispatched.push(due.id);
-      } else if (outcome === 'ambiguous') {
-        // Crossed the provider boundary then failed — the side effect is
-        // unprovable, so the obligation is quarantined and NEVER auto-retried.
-        const blocked = this.store.blockObligation(due.id, fence, 'blocked_ambiguous', 'dispatch_outcome_ambiguous');
-        if (blocked.applied) report.quarantinedAmbiguous.push(due.id);
-      } else {
-        const requeued = this.store.requeueObligation(due.id, fence, {
-          backoffSeconds: this.backoffSeconds,
-        });
-        if (requeued.applied) report.requeuedRetryable.push(due.id);
-      }
+    // A real attestation admitted, so the target resolved and `dispatch` is
+    // non-null; guard fail-closed if it somehow became undispatchable.
+    if (prepared.dispatch === null) {
+      const requeued = this.store.requeueObligation(due.id, fence, {
+        backoffSeconds: this.backoffSeconds,
+      });
+      if (requeued.applied) report.requeuedRetryable.push(due.id);
+      return;
+    }
+
+    const mintedMessageId = `obl:${due.id}:${claim.attemptCount}`;
+    let outcome: ObligationDispatchOutcome;
+    try {
+      outcome = await prepared.dispatch(mintedMessageId, fence, claim.attemptCount);
+    } catch (err) {
+      // The dispatch port converts every post-boundary failure to 'ambiguous'
+      // itself, so a THROW that escapes to here cannot be proven pre-boundary.
+      // Fail closed: quarantine rather than auto-retry a possibly-effected turn.
+      log.warn({ err, obligationId: due.id }, 'obligation dispatch threw; quarantining fail-closed under fence');
+      outcome = 'ambiguous';
+    }
+    if (outcome === 'dispatched') {
+      report.dispatched.push(due.id);
+    } else if (outcome === 'ambiguous') {
+      // Crossed the provider boundary then failed — the side effect is
+      // unprovable, so the obligation is quarantined and NEVER auto-retried.
+      const blocked = this.store.blockObligation(due.id, fence, 'blocked_ambiguous', 'dispatch_outcome_ambiguous');
+      if (blocked.applied) report.quarantinedAmbiguous.push(due.id);
+    } else {
+      const requeued = this.store.requeueObligation(due.id, fence, {
+        backoffSeconds: this.backoffSeconds,
+      });
+      if (requeued.applied) report.requeuedRetryable.push(due.id);
     }
   }
 }

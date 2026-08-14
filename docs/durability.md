@@ -683,13 +683,23 @@ If `durability` is `undefined` (rare, test contexts only), the send proceeds wit
 
 ---
 
-### 5.7 Capability-Obligation Replay (Migration 58)
+### 5.7 Capability-Obligation Replay (Migrations 58–59)
 
 Off by default; activates only under `agentOptions.capabilityObligations.enabled === true`
 (see `docs/configuration.md`) and only for `per_chat` scope. When a managed-loop provider
 turn cannot fulfil a declared capability (e.g. a `/watch` YouTube or media download that
 needs a child process), the C3 terminal transaction records a `capability_obligations` row
 instead of silently dropping the request, and a supervisor replays it later.
+
+**Migration 59 (post-merge-audit hotfix).** Two schema changes ride migration 59: (a)
+`capability_execution_reservations` — an append-only durable pre-spawn reservation, UNIQUE on
+(obligation, claim epoch, attempt), committed BEFORE the resolver spawns so a duplicate
+`execute_capability` call is a typed refusal instead of a second external side effect; and (b) the
+`creation_reason` vocabulary is rebuilt to what creation actually observes:
+`harness_capability_gap` (derivation sees the input-shape match, the turn's tool-effect fold, and
+the serving harness class — never a model's typed deferral) alongside `reviewed_backfill:%`.
+`typed_deferral` is reserved for the future typed-deferral contract (mid-term M1); legacy
+`typed_deferral_signal` rows are mapped to `harness_capability_gap` during the rebuild.
 
 **The dispatch contract (operators read this first).** The replayed turn re-enters the
 *same* per-chat pipeline as a real inbound. Its prompt is NOT the bare original message: it
@@ -742,10 +752,11 @@ from argv (round-18 finding 1). The declared artifact's realpath must BE the tok
 (`command[0]` when not interpreted; EXACTLY `command[1]`, with no tokens between the interpreter
 and the script and no flag at `command[1]`, when interpreted), and an `interpreted:false` MISLABEL of
 an interpreter (a `watch-resolver`→node symlink declared "direct") is structurally REFUSED (round-19
-finding 2). `--resolver-digest` must equal the **COMPOSITE** digest
-`sha256([content_sha256, canonicalExecutionIdentity])` (round-19 findings 1+2) — the artifact CONTENT
-folded with the canonical command SHAPE through ONE exported `canonicalExecutionIdentity()`, so the
-attested value binds both. This refuses the two round-17 bypasses a reviewer proved (a `perl -eCODE`
+finding 2). `--resolver-digest` must equal the **COMPOSITE** digest (round-19 findings 1+2, extended in
+rounds 20-21) — the FOUR-part binding computed by the ONE exported `resolverCompositeDigest()`:
+the artifact CONTENT digest, the whole-DIRECTORY MANIFEST digest, the INTERPRETER content digest,
+and the canonical execution SHAPE/ENVELOPE (`canonicalExecutionIdentity()`), so the attested value
+binds all four (each part is detailed below). This refuses the two round-17 bypasses a reviewer proved (a `perl -eCODE`
 that verified a decoy while inline code ran; a symlink `watch-resolver`→node hashed as node while
 a script ran) — argv classification is unsound and was removed. (c) the probe evidence
 (stdout/stderr digests + byte counts + exit/signal + observed-source digest) is written to a
@@ -799,7 +810,9 @@ config contract) is owner-gated. On a composite mismatch the executor logs the s
 > whole-directory manifest entered only regular FILES, so an added/empty DIRECTORY did not change
 > the composite. A fourth: the staged COPY is private (0700) but a same-UID concurrent writer can
 > overwrite it between re-hash and spawn (POSIX has no portable `fexecve` in Node). Round-21
-> narrows (1) by refusing a EUID-writable interpreter, (2) by requiring every direct-mode token to
+> narrows (1) by refusing an interpreter path writable by a DIFFERENT untrusted actor
+> (world-writable, or non-sticky group-writable to a group this process is in) — an EUID-owned
+> interpreter is NOT refused; it is the ratified same-UID boundary (below) — (2) by requiring every direct-mode token to
 > contain `{source}` and not start with `-` (residual: a renamed interpreter that treats a
 > positional data token as code, e.g. awk — structural closure via stdin/file source or the typed
 > config contract is owner-gated), and (3) by binding directory entries in the manifest. The
@@ -829,12 +842,13 @@ residual and the same-UID staged-copy window remain (structural closure is the t
 source-off-argv, both owner-gated). NARROW CLAIM: a passing canary attests only that the verified resolver, run against
 `sha256(probeSource)`, exited 0 within bound and produced ≥ `minOutputBytes` — it is NOT proof of
 semantic processing; the fulfillment proof stays the D6 receipt + delivery chain. The attestation
-ROW has **no probe-evidence columns**: adding them needs migration 58, which bumps
+ROW has **no probe-evidence columns**: adding them is allocated migration 60 (58 and 59 are
+published), and any such migration bumps
 `CURRENT_SCHEMA_MIGRATION` *inside the attestation binding* — invalidating every computed digest and
 reopening AS-01 — so the evidence lives in the receipt file, correlated by `nonce`, as a deliberate
 deferral. (Design-spec deviation of record: the pinned Phase-2 spec §3.3 lists these as attestation
 row fields; migration-58 realizes them as the correlated receipt instead. Not an oversight — the
-spec's row-storage form is graduated with migration 58.)
+spec's row-storage form graduates with the allocated migration 60.)
 
 **Group-drain approval is atomic.** `scripts/capability-obligation-approve-drain.ts` records the
 AS-08 approval AND drives the sole `waiting_approval → waiting_capability` transition in ONE store

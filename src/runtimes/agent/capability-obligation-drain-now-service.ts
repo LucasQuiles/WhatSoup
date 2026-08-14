@@ -37,21 +37,28 @@
  *  - at most `maxRequestsPerCycle` requests are serviced per tick.
  */
 import {
+  closeSync,
+  fsyncSync,
+  linkSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
   readdirSync,
   realpathSync,
   renameSync,
   rmSync,
   statSync,
+  unlinkSync,
   writeFileSync,
+  writeSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 import { z } from 'zod';
 
 import { systemClock } from '../../lib/clock.ts';
+import type { DrainNowResult, NamedDrainOutcome } from './capability-obligation-drain-now.ts';
 
 export const DRAIN_NOW_REQUEST_DIRNAME = 'capability-drain-now';
 export const DRAIN_NOW_REQUEST_TTL_SECONDS = 900;
@@ -169,20 +176,74 @@ export function buildLiveActivateSession(
 
 // ── drop-file request servicing (the operator trigger half) ─────────────────
 
+/**
+ * Audit F2: there is deliberately no 'drained' kind. A serviced request whose
+ * gates passed reports `kind: 'activated'` carrying the NAMED obligation's
+ * post-state-derived outcome — activation is the only thing the service itself
+ * can vouch for; everything else is the named row's queried truth.
+ */
 export type DrainNowServiceOutcome =
-  | { kind: 'drained'; obligationId: number; file: string }
+  | { kind: 'activated'; obligationId: number; file: string; named: NamedDrainOutcome }
   | { kind: 'refused'; obligationId: number; file: string; reason: string }
   | { kind: 'invalid'; file: string; reason: string };
 
 export interface DrainNowServiceDeps {
   requestDir: string;
   /** drainObligationNow bound to the live deps. */
-  drain: (obligationId: number) => Promise<
-    { activated: true } | { activated: false; reason: string }
-  >;
+  drain: (obligationId: number) => Promise<DrainNowResult>;
   maxRequestsPerCycle?: number;
   requestTtlSeconds?: number;
   nowUnixSec?: () => number;
+}
+
+// ── ONE trust authority for the request dir (audit F5) ──────────────────────
+
+/** Typed writer-side refusal: the request dir failed the shared trust check. */
+export class UntrustedRequestDirError extends Error {
+  readonly code = 'untrusted_request_dir' as const;
+  constructor(requestDir: string) {
+    super(`refusing to publish into an untrusted request dir: ${requestDir}`);
+    this.name = 'UntrustedRequestDirError';
+  }
+}
+
+/** Typed writer-side refusal: an unconsumed request for the obligation is already pending. */
+export class PendingRequestExistsError extends Error {
+  readonly code = 'pending_request_exists' as const;
+  constructor(requestPath: string) {
+    super(`a pending drain-now request already exists: ${requestPath}`);
+    this.name = 'PendingRequestExistsError';
+  }
+}
+
+/**
+ * THE single trust predicate for the drop-dir, used by BOTH the runtime reader
+ * (before servicing) and the operator writer (before publishing): a real
+ * directory (lstat — a symlinked dir refuses), owned by THIS process's EUID,
+ * with no group/other write bit. Anything else — including an unstattable path
+ * or a platform without geteuid — is untrusted (fail-closed). Audit F5: the
+ * writer previously only mkdir'd 0700 and happily published into an EXISTING
+ * 0777 dir the runtime would then refuse, reporting success for a request that
+ * could never be serviced.
+ */
+export function validateRequestDirTrust(
+  requestDir: string,
+): { trusted: true } | { trusted: false; reason: 'untrusted_request_dir' } {
+  try {
+    const dirStat = lstatSync(requestDir);
+    const euid = typeof process.geteuid === 'function' ? process.geteuid() : null;
+    if (
+      !dirStat.isDirectory()
+      || (dirStat.mode & 0o022) !== 0
+      || euid === null
+      || dirStat.uid !== euid
+    ) {
+      return { trusted: false, reason: 'untrusted_request_dir' };
+    }
+    return { trusted: true };
+  } catch {
+    return { trusted: false, reason: 'untrusted_request_dir' };
+  }
 }
 
 /**
@@ -207,24 +268,13 @@ export async function serviceDrainNowRequests(
     return []; // no drop-dir → nothing requested (the common case)
   }
 
-  // r22 AE1-review hardening: the drop-dir itself must be trustworthy — a
-  // regular directory owned by THIS process's EUID with no group/other write
-  // bit. Anything else is refused (fail-closed, surfaced for logging) rather
-  // than serviced; the CLI creates the dir 0700, so a legitimate deploy never
-  // trips this.
-  try {
-    const dirStat = lstatSync(deps.requestDir);
-    const euid = typeof process.geteuid === 'function' ? process.geteuid() : null;
-    if (
-      !dirStat.isDirectory()
-      || (dirStat.mode & 0o022) !== 0
-      || euid === null
-      || dirStat.uid !== euid
-    ) {
-      return [{ kind: 'invalid', file: '.', reason: 'untrusted_request_dir' }];
-    }
-  } catch {
-    return [{ kind: 'invalid', file: '.', reason: 'untrusted_request_dir' }];
+  // r22 AE1-review hardening, unified for audit F5: the drop-dir must pass the
+  // SAME trust predicate the writer applies (`validateRequestDirTrust`) —
+  // refused wholesale (fail-closed, surfaced for logging) rather than serviced.
+  // The CLI creates the dir 0700, so a legitimate deploy never trips this.
+  const trust = validateRequestDirTrust(deps.requestDir);
+  if (!trust.trusted) {
+    return [{ kind: 'invalid', file: '.', reason: trust.reason }];
   }
   pruneConsumedArtifacts(deps.requestDir, names);
 
@@ -316,7 +366,9 @@ export async function serviceDrainNowRequests(
     try {
       const result = await deps.drain(request.obligationId);
       if (result.activated) {
-        record({ kind: 'drained', obligationId: entry.id, file: entry.name });
+        // Audit F2: carry the post-state-derived named outcome verbatim —
+        // never collapse it into an unqualified success.
+        record({ kind: 'activated', obligationId: entry.id, file: entry.name, named: result.named });
       } else {
         record({ kind: 'refused', obligationId: entry.id, file: entry.name, reason: result.reason });
       }
@@ -360,24 +412,56 @@ function pruneConsumedArtifacts(requestDir: string, names: readonly string[]): v
 }
 
 /**
- * Write an operator drain-now request atomically (tmp + rename, never
- * overwriting a pending request). Used by the operator CLI; exported here so
- * the writer and the reader share one protocol definition.
+ * Write an operator drain-now request atomically, never overwriting a pending
+ * request. Used by the operator CLI; exported here so the writer and the
+ * reader share one protocol definition.
+ *
+ * Audit F4: the previous lstat(final)→rename(tmp, final) sequence was a TOCTOU
+ * — POSIX rename REPLACES a destination created between the two calls, so a
+ * rival's pending request landing in that window was silently clobbered. The
+ * publish is now a hardlink: link(2) fails EEXIST ATOMICALLY when the
+ * destination exists (typed `PendingRequestExistsError`), and the tmp file is
+ * always unlinked. Audit F5: before publishing, the dir must pass the SAME
+ * `validateRequestDirTrust` predicate the runtime reader enforces (typed
+ * `UntrustedRequestDirError`), so an existing untrusted dir refuses at write
+ * time instead of producing a "successful" write the runtime then refuses.
+ *
+ * `hooks.beforePublish` is a test-only seam between the tmp write and the
+ * atomic publish, used to prove the no-clobber property under a deterministic
+ * concurrent-writer interleaving.
  */
-export function writeDrainNowRequest(requestDir: string, request: DrainNowRequest): string {
+export function writeDrainNowRequest(
+  requestDir: string,
+  request: DrainNowRequest,
+  hooks: { beforePublish?: () => void } = {},
+): string {
   drainNowRequestSchema.parse(request);
   mkdirSync(requestDir, { recursive: true, mode: 0o700 });
+  const trust = validateRequestDirTrust(requestDir);
+  if (!trust.trusted) throw new UntrustedRequestDirError(requestDir);
   const finalPath = join(requestDir, `${request.obligationId}.json`);
-  let pendingExists = true;
-  try {
-    lstatSync(finalPath);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-    pendingExists = false;
-  }
-  if (pendingExists) throw new Error(`a pending drain-now request already exists: ${finalPath}`);
   const tmpPath = join(requestDir, `.tmp-${request.nonce}-${request.obligationId}`);
-  writeFileSync(tmpPath, `${JSON.stringify(request)}\n`, { flag: 'wx', mode: 0o600 });
-  renameSync(tmpPath, finalPath);
+  const fd = openSync(tmpPath, 'wx', 0o600);
+  try {
+    try {
+      writeSync(fd, `${JSON.stringify(request)}\n`);
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    hooks.beforePublish?.();
+    try {
+      linkSync(tmpPath, finalPath);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'EEXIST') throw new PendingRequestExistsError(finalPath);
+      throw err;
+    }
+  } finally {
+    try {
+      unlinkSync(tmpPath);
+    } catch {
+      // intentional: tmp cleanup is best-effort — the pruner reaps orphans.
+    }
+  }
   return finalPath;
 }

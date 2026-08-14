@@ -136,7 +136,7 @@ const LIVE_FACTS: CapabilityObligationLiveFacts = {
   hostId: 'test-host',
   runtimeUser: 'test-user',
   releaseSha: 'relsha-live',
-  schemaVersion: 58,
+  schemaVersion: 60,
   providerId: 'claude-cli',
   harnessType: 'persistent_session',
 };
@@ -211,7 +211,7 @@ function seedObligation(
         sourceDigest: media ? media.sha256 : (over.sourceDigest ?? SOURCE_DIGEST),
         sourceToken: media ? null : (over.sourceToken ?? SOURCE_URL),
         retainedMedia: media,
-        creationReason: 'typed_deferral_signal',
+        creationReason: 'harness_capability_gap',
       },
     }).obligationId!;
   });
@@ -691,5 +691,175 @@ describe('receipt turn identity', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]!.result_status).toBe('ok');
     expect(rows[0]!.logical_turn_id).toBe(dispatched[0]!.minted);
+  });
+});
+
+// ── post-merge audit hotfix (2026-08-14): F1 duplicate execution, F3 durability loss, F8 caps/signals ──
+
+/** A resolver in its own isolated dir that APPENDS one line to a count file per run. */
+function countingResolver(): { execution: CapabilityObligationsOptions['execution']; countFile: string; runs: () => number } {
+  const dir = mkdtempSync(join(tmpdir(), 'co-exectool-count-'));
+  const counterDir = mkdtempSync(join(tmpdir(), 'co-exectool-countfile-')); // OUTSIDE the resolver dir: the whole-dir manifest binds every sibling
+  const countFile = join(counterDir, 'runs.log');
+  const script = join(dir, 'counting-resolver.cjs');
+  writeFileSync(
+    script,
+    `require('node:fs').appendFileSync(${JSON.stringify(countFile)}, 'ran\\n');\nconsole.log('processed ' + process.argv[2] + ' externally ok');\n`,
+  );
+  return {
+    execution: {
+      command: [NODE, script, '{source}'],
+      timeoutMs: 30_000,
+      minOutputBytes: 8,
+      resolverArtifactPath: script,
+      interpreted: true,
+    },
+    countFile,
+    runs: () => (existsSync(countFile) ? readFileSync(countFile, 'utf8').split('\n').filter(Boolean).length : 0),
+  };
+}
+
+describe('durable execution reservation (audit F1 — Critical)', () => {
+  it('a second call for the SAME claim epoch and attempt is refused and the external resolver runs exactly ONCE', async () => {
+    const counting = countingResolver();
+    const id = seedObligation();
+    freshAttestation(counting.execution);
+    const { runtime } = makeRuntime({
+      execution: counting.execution,
+      onDispatch: async (tool) => {
+        const first = (await tool.handler({ source: SOURCE_URL }, TOOL_SESSION)) as Record<string, unknown>;
+        expect(first['executed']).toBe(true);
+        const second = (await tool.handler({ source: SOURCE_URL }, TOOL_SESSION)) as Record<string, unknown>;
+        expect(second['error']).toBe('capability_execution');
+        expect(String(second['message'])).toContain('already reserved an execution');
+      },
+    });
+    await runtime.tickOnce();
+    expect(counting.runs()).toBe(1); // the external side effect happened exactly once
+    const rows = receiptRows(id);
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => r.result_status).sort()).toEqual(['error', 'ok']);
+    const errorRow = rows.find((r) => r.result_status === 'error')!;
+    expect(evidenceOf(errorRow)['reason']).toBe('execution_already_reserved');
+    const reservations = db.raw
+      .prepare('SELECT COUNT(*) AS n FROM capability_execution_reservations WHERE obligation_id = ?')
+      .get(id) as { n: number };
+    expect(reservations).toEqual({ n: 1 });
+  });
+
+  it('a refused call (source mismatch) consumes NO reservation — the corrected retry still executes', async () => {
+    const counting = countingResolver();
+    const id = seedObligation();
+    freshAttestation(counting.execution);
+    const { runtime } = makeRuntime({
+      execution: counting.execution,
+      onDispatch: async (tool) => {
+        const wrong = (await tool.handler({ source: 'https://youtu.be/WRONG' }, TOOL_SESSION)) as Record<string, unknown>;
+        expect(wrong['error']).toBe('capability_execution');
+        const right = (await tool.handler({ source: SOURCE_URL }, TOOL_SESSION)) as Record<string, unknown>;
+        expect(right['executed']).toBe(true);
+      },
+    });
+    await runtime.tickOnce();
+    expect(counting.runs()).toBe(1);
+    const rows = receiptRows(id);
+    expect(rows.map((r) => r.result_status).sort()).toEqual(['error', 'ok']);
+  });
+});
+
+describe('receipt durability loss is caller-visible (audit F3)', () => {
+  it('a successful execution whose receipt cannot persist returns a durability-loss ERROR, never clean success', async () => {
+    const counting = countingResolver();
+    seedObligation();
+    freshAttestation(counting.execution);
+    const originalRecord = store.recordExecutionReceipt.bind(store);
+    let failNext = false;
+    (store as { recordExecutionReceipt: typeof store.recordExecutionReceipt }).recordExecutionReceipt = (params) => {
+      if (failNext) {
+        failNext = false;
+        throw new Error('synthetic receipt write loss');
+      }
+      return originalRecord(params);
+    };
+    // The runtime QUARANTINES a throwing dispatch, so an expect() inside
+    // onDispatch is swallowed — capture the handler result and assert OUTSIDE
+    // the dispatch closure (this is what actually kills the return-true mutant).
+    let observed: Record<string, unknown> | null = null;
+    const { runtime } = makeRuntime({
+      execution: counting.execution,
+      onDispatch: async (tool) => {
+        failNext = true; // the NEXT receipt write (this call's) is lost
+        observed = (await tool.handler({ source: SOURCE_URL }, TOOL_SESSION)) as Record<string, unknown>;
+      },
+    });
+    await runtime.tickOnce();
+    expect(counting.runs()).toBe(1); // the external work DID happen — which is exactly why the loss must be visible
+    expect(observed).not.toBeNull();
+    const r = observed! as Record<string, unknown>;
+    expect(String(r['message'])).toContain('could NOT be persisted');
+    expect(String(r['message'])).toContain('Do not send');
+    expect(r['executed']).toBeUndefined();
+    expect(r['output']).toBeUndefined();
+    expect(r).toMatchObject({ error: 'capability_execution_durability_loss' });
+  });
+});
+
+describe('byte-exact caps and honest signal labeling (audit F8)', () => {
+  it('multi-byte UTF-8 flood is capped at EXACTLY the advertised stdout byte limit', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'co-exectool-flood-'));
+    const script = join(dir, 'flood-resolver.cjs');
+    // 100k × '€' = 300,000 UTF-8 bytes > the 262,144 cap
+    writeFileSync(script, "process.stdout.write('\\u20ac'.repeat(100000));\n");
+    const execution: CapabilityObligationsOptions['execution'] = {
+      command: [NODE, script, '{source}'],
+      timeoutMs: 30_000,
+      minOutputBytes: 8,
+      resolverArtifactPath: script,
+      interpreted: true,
+    };
+    const id = seedObligation();
+    freshAttestation(execution);
+    const { runtime } = makeRuntime({
+      execution,
+      onDispatch: async (tool) => {
+        const r = (await tool.handler({ source: SOURCE_URL }, TOOL_SESSION)) as Record<string, unknown>;
+        expect(r['executed']).toBe(true);
+        expect(Buffer.byteLength(String(r['output']), 'utf8')).toBeLessThanOrEqual(262_144);
+      },
+    });
+    await runtime.tickOnce();
+    const rows = receiptRows(id);
+    expect(rows).toHaveLength(1);
+    expect(evidenceOf(rows[0]!)['stdoutBytes']).toBe(262_144); // byte-exact at the cap, never beyond
+  });
+
+  it('a child killed by a signal reports signal=SIGKILL with timedOut=false — no watchdog, no timeout claim', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'co-exectool-sig-'));
+    const script = join(dir, 'selfkill-resolver.cjs');
+    writeFileSync(script, "process.kill(process.pid, 'SIGKILL');\n");
+    const execution: CapabilityObligationsOptions['execution'] = {
+      command: [NODE, script, '{source}'],
+      timeoutMs: 30_000,
+      minOutputBytes: 8,
+      resolverArtifactPath: script,
+      interpreted: true,
+    };
+    const id = seedObligation();
+    freshAttestation(execution);
+    const { runtime } = makeRuntime({
+      execution,
+      onDispatch: async (tool) => {
+        const r = (await tool.handler({ source: SOURCE_URL }, TOOL_SESSION)) as Record<string, unknown>;
+        expect(r['error']).toBe('capability_execution_failed');
+        expect(String(r['message'])).toContain('signal=SIGKILL');
+        expect(String(r['message'])).toContain('timedOut=false');
+      },
+    });
+    await runtime.tickOnce();
+    const rows = receiptRows(id);
+    expect(rows).toHaveLength(1);
+    const evidence = evidenceOf(rows[0]!);
+    expect(evidence['signal']).toBe('SIGKILL');
+    expect(evidence['timedOut']).toBe(false);
   });
 });

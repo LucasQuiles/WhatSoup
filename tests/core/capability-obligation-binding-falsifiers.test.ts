@@ -67,7 +67,7 @@ function seedObligation(over: Partial<Record<string, unknown>> = {}): number {
         sourceDigest: 'bb'.repeat(32),
         sourceToken: 'https://youtu.be/abc',
         retainedMedia: null,
-        creationReason: 'typed_deferral_signal',
+        creationReason: 'harness_capability_gap',
       },
     }).obligationId!;
   });
@@ -79,7 +79,7 @@ let attSeq = 0;
  * is immutable by trigger, so an expired attestation must be recorded expired. */
 function seedFreshAttestation(over: { expiresAt?: string } = {}): number {
   return recordCapabilityAttestation(db, {
-    hostId: 'h', runtimeUser: 'u', releaseSha: 'r', schemaVersion: 58,
+    hostId: 'h', runtimeUser: 'u', releaseSha: 'r', schemaVersion: 60,
     providerId: 'claude-cli', harnessType: 'persistent_session', contractVersion: 'c/1',
     capability: 'child_process_tools', skillName: 'watch', skillVersion: '1.0.0',
     skillDigest: 'sd', resolverDigest: 'rd', dependencyVersions: {}, probeVersion: 'p/1',
@@ -430,7 +430,7 @@ describe('D7 falsifier — group drains need an exactly bound, live-matching app
     // Prove ops can produce a CLAIMABLE approval using the real digest function
     // end-to-end, and that a release change (the reviewer's discriminator) breaks it.
     const bindingOld: CapabilityAttestationBinding = {
-      hostId: 'h', runtimeUser: 'u', releaseSha: 'rel-OLD', schemaVersion: 58,
+      hostId: 'h', runtimeUser: 'u', releaseSha: 'rel-OLD', schemaVersion: 60,
       providerId: 'claude-cli', harnessType: 'persistent_session', contractVersion: 'c/1',
       capability: 'child_process_tools', skillName: 'watch', skillVersion: '1.0.0',
       skillDigest: 'sd', resolverDigest: 'rd', dependencyVersions: { 'yt-dlp': '2026.03.17' },
@@ -506,7 +506,7 @@ describe('D5 falsifier — attestation admission matches EVERY recorded binding 
     hostId: 'test-host',
     runtimeUser: 'test-user',
     releaseSha: 'relsha-1',
-    schemaVersion: 58,
+    schemaVersion: 60,
     providerId: 'claude-cli',
     harnessType: 'persistent_session',
     contractVersion: 'test-contract/1',

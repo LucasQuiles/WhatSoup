@@ -63,7 +63,7 @@ function decision(over: Partial<Record<string, unknown>> = {}): CapabilityDecisi
       sourceDigest: 'bb'.repeat(32),
       sourceToken: 'https://youtu.be/abc',
       retainedMedia: null,
-      creationReason: 'typed_deferral_signal',
+      creationReason: 'harness_capability_gap',
       ...over,
     } as CapabilityDecisionParams['obligation'],
   };
@@ -128,7 +128,7 @@ describe('C3-joined capability decision (D4)', () => {
       .get(result.capabilityDecision!.obligationId!) as Record<string, unknown>;
     expect(row.state).toBe('waiting_capability');
     expect(row.creation_evidence_event_id).toBe(result.capabilityDecision!.eventId);
-    expect(row.creation_reason).toBe('typed_deferral_signal');
+    expect(row.creation_reason).toBe('harness_capability_gap');
   });
 
   it('records a not_created decision with an event and no obligation row', () => {

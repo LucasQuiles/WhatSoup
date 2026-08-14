@@ -207,7 +207,11 @@ describe('D2 effect fold', () => {
       sourceInboundSeq: 8801,
       requiredCapability: 'child_process_tools',
       contractVersion: 'test-contract/1',
-      creationReason: 'typed_deferral_signal',
+      // F6 honesty: creation observes the harness class lacking the declared
+      // capability — never a typed model deferral. Migration 59's CHECK refuses
+      // the old 'typed_deferral_signal' literal, so the store apply below also
+      // pins the vocabulary end-to-end.
+      creationReason: 'harness_capability_gap',
     });
     // D6: the source digest is derived from the matched URL token itself, and
     // the token STRING is persisted so the replayed agent passes it verbatim to

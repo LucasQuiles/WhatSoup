@@ -36,7 +36,7 @@ const BINDING: CapabilityAttestationBinding = {
   hostId: 'test-host',
   runtimeUser: 'test-user',
   releaseSha: 'relsha-1',
-  schemaVersion: 58,
+  schemaVersion: 60,
   providerId: 'claude-cli',
   harnessType: 'persistent_session',
   contractVersion: 'test-contract/1',
@@ -144,7 +144,7 @@ function seedObligation(over: Partial<Record<string, unknown>> = {}): number {
         sourceDigest: (over.retainedMedia as { sha256?: string } | null)?.sha256 ?? 'bb'.repeat(32),
         sourceToken: over.retainedMedia ? null : 'https://youtu.be/abc',
         retainedMedia: (over.retainedMedia as never) ?? null,
-        creationReason: 'typed_deferral_signal',
+        creationReason: 'harness_capability_gap',
       },
     }).obligationId!;
   });
@@ -607,5 +607,72 @@ describe('lease reclaim wiring (D7)', () => {
     expect(report.reclaimed.requeued).toContain(a);
     expect(report.reclaimed.quarantined).toContain(b);
     expect(state(b).state).toBe('blocked_ambiguous');
+  });
+});
+
+describe('targeted named drain (audit F2)', () => {
+  it('FALSIFIER: drainNamed processes the NAMED obligation even behind >SCAN_LIMIT older due obligations', async () => {
+    // The global tick is oldest-first with SCAN_LIMIT=10 — the named 12th row
+    // would never be scanned by it. The targeted path must claim and dispatch
+    // exactly the named row through the SAME per-row pipeline, touching none
+    // of the older backlog.
+    const older: number[] = [];
+    for (let i = 0; i < 11; i += 1) {
+      older.push(seedObligation({ sourceMessageId: `TESTMSG-SUP-OLD-${i}`, sourceInboundSeq: 2100 + i }));
+    }
+    const named = seedObligation({ sourceMessageId: 'TESTMSG-SUP-NAMED', sourceInboundSeq: 2200 });
+    freshAttestation();
+    const { supervisor, dispatches } = makeSupervisor({ dispatch: 'dispatched' });
+    const result = await supervisor.drainNamed(named);
+    expect(result.processed).toBe(true);
+    expect(result.report.claimed).toEqual([named]);
+    expect(result.report.dispatched).toEqual([named]);
+    expect(dispatches).toEqual([{ id: named, mintedMessageId: `obl:${named}:1` }]);
+    expect(state(named)).toEqual({ state: 'claimed', attempt_count: 1 });
+    for (const id of older) expect(state(id)).toEqual({ state: 'waiting_capability', attempt_count: 0 });
+  });
+
+  it('drainNamed rides the same admission gates: an attestation skip consumes zero attempts', async () => {
+    const id = seedObligation({ sourceMessageId: 'TESTMSG-SUP-NAMED-SKIP', sourceInboundSeq: 2201 });
+    const { supervisor, dispatches } = makeSupervisor({ dispatch: 'dispatched' });
+    const result = await supervisor.drainNamed(id);
+    expect(result.processed).toBe(true);
+    expect(result.report.attestationSkips).toEqual([{ id, reason: 'none_recorded' }]);
+    expect(result.report.claimed).toEqual([]);
+    expect(dispatches).toEqual([]);
+    expect(state(id)).toEqual({ state: 'waiting_capability', attempt_count: 0 });
+  });
+
+  it('drainNamed classifies a non-waiting obligation as not due (not_waiting) and touches nothing', async () => {
+    const id = seedObligation({ sourceMessageId: 'TESTMSG-SUP-NAMED-CLAIMED', sourceInboundSeq: 2202 });
+    freshAttestation();
+    const { supervisor } = makeSupervisor({ dispatch: 'dispatched' });
+    await supervisor.tick(); // claims it
+    expect(state(id).state).toBe('claimed');
+    const { supervisor: second, dispatches } = makeSupervisor({ dispatch: 'dispatched' });
+    const result = await second.drainNamed(id);
+    expect(result).toMatchObject({ processed: false, state: 'claimed', notDueReason: 'not_waiting' });
+    expect(dispatches).toEqual([]);
+    expect(state(id)).toEqual({ state: 'claimed', attempt_count: 1 });
+  });
+
+  it('drainNamed classifies a backoff-pending obligation as not due without consuming an attempt', async () => {
+    const id = seedObligation({ sourceMessageId: 'TESTMSG-SUP-NAMED-BACKOFF', sourceInboundSeq: 2203 });
+    freshAttestation();
+    const { supervisor } = makeSupervisor({ dispatch: 'retryable' }, { backoffSeconds: 3600 });
+    await supervisor.tick(); // claim + retryable → requeued under a 1h backoff
+    expect(state(id)).toEqual({ state: 'waiting_capability', attempt_count: 1 });
+    const { supervisor: second, dispatches } = makeSupervisor({ dispatch: 'dispatched' });
+    const result = await second.drainNamed(id);
+    expect(result).toMatchObject({ processed: false, state: 'waiting_capability', notDueReason: 'backoff_pending' });
+    expect(dispatches).toEqual([]);
+    expect(state(id)).toEqual({ state: 'waiting_capability', attempt_count: 1 });
+  });
+
+  it('drainNamed reports not_found for an unknown obligation id', async () => {
+    const { supervisor, dispatches } = makeSupervisor({ dispatch: 'dispatched' });
+    const result = await supervisor.drainNamed(424242);
+    expect(result).toMatchObject({ processed: false, state: null, notDueReason: 'not_found' });
+    expect(dispatches).toEqual([]);
   });
 });

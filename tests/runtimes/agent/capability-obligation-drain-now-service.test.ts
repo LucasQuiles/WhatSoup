@@ -11,10 +11,13 @@ import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import type { DrainNowResult } from '../../../src/runtimes/agent/capability-obligation-drain-now.ts';
 import {
   buildLiveActivateSession,
   drainNowRequestDirForDbPath,
+  PendingRequestExistsError,
   serviceDrainNowRequests,
+  UntrustedRequestDirError,
   writeDrainNowRequest,
   type ActivatableSession,
   type DrainNowRequest,
@@ -47,13 +50,21 @@ function dropRequest(obligationId: number, over: Partial<DrainNowRequest> = {}):
   return path;
 }
 
-function collectingDrain(): { calls: number[]; drain: (id: number) => Promise<{ activated: true }> } {
+/** The post-state-derived outcome a truthful drain stub reports (audit F2). */
+const NAMED_DISPATCHED = {
+  kind: 'named_dispatched',
+  state: 'claimed',
+  attemptCount: 1,
+  claimEpoch: 1,
+} as const;
+
+function collectingDrain(): { calls: number[]; drain: (id: number) => Promise<DrainNowResult> } {
   const calls: number[] = [];
   return {
     calls,
     drain: async (id: number) => {
       calls.push(id);
-      return { activated: true as const };
+      return { activated: true as const, named: NAMED_DISPATCHED };
     },
   };
 }
@@ -72,12 +83,13 @@ describe('serviceDrainNowRequests', () => {
     dropRequest(41);
     const { calls, drain } = collectingDrain();
     const outcomes = await serviceDrainNowRequests({ requestDir: dir, drain, nowUnixSec: () => NOW });
-    expect(outcomes).toEqual([{ kind: 'drained', obligationId: 41, file: '41.json' }]);
+    expect(outcomes).toEqual([{ kind: 'activated', obligationId: 41, file: '41.json', named: NAMED_DISPATCHED }]);
     expect(calls).toEqual([41]);
     const names = readdirSync(dir).sort();
     expect(names).toEqual([`41.json.consumed-${NOW}`, `41.json.consumed-${NOW}.result.json`]);
     const result = JSON.parse(readFileSync(join(dir, `41.json.consumed-${NOW}.result.json`), 'utf8')) as Record<string, unknown>;
-    expect(result).toMatchObject({ kind: 'drained', obligationId: 41, at: NOW });
+    // Audit F2: the recorded outcome carries the named post-state, not a blanket "drained".
+    expect(result).toMatchObject({ kind: 'activated', obligationId: 41, named: NAMED_DISPATCHED, at: NOW });
   });
 
   it('FALSIFIER (consume-before-act): the request file is already renamed when the drain runs', async () => {
@@ -88,7 +100,7 @@ describe('serviceDrainNowRequests', () => {
       nowUnixSec: () => NOW,
       drain: async () => {
         requestFileDuringDrain = readdirSync(dir).filter((n) => n === '42.json');
-        return { activated: true as const };
+        return { activated: true as const, named: NAMED_DISPATCHED };
       },
     });
     expect(outcomes).toHaveLength(1);
@@ -173,7 +185,7 @@ describe('serviceDrainNowRequests', () => {
     dropRequest(5);
     const { calls, drain } = collectingDrain();
     const outcomes = await serviceDrainNowRequests({ requestDir: dir, drain, nowUnixSec: () => NOW, maxRequestsPerCycle: 2 });
-    expect(outcomes.map((o) => (o.kind === 'drained' ? o.obligationId : -1))).toEqual([3, 5]);
+    expect(outcomes.map((o) => (o.kind === 'activated' ? o.obligationId : -1))).toEqual([3, 5]);
     expect(calls).toEqual([3, 5]);
     expect(readdirSync(dir).filter((n) => /^\d+\.json$/.test(n)).sort()).toEqual(['7.json', '9.json']);
   });
@@ -188,7 +200,7 @@ describe('serviceDrainNowRequests', () => {
     expect(readdirSync(dir)).toContain('70.json'); // not even consumed — the dir is not trusted
     chmodSync(dir, 0o700);
     const after = await serviceDrainNowRequests({ requestDir: dir, drain, nowUnixSec: () => NOW });
-    expect(after).toEqual([{ kind: 'drained', obligationId: 70, file: '70.json' }]); // trusted again → serviced
+    expect(after).toEqual([{ kind: 'activated', obligationId: 70, file: '70.json', named: NAMED_DISPATCHED }]); // trusted again → serviced
   });
 
   it('a missing drop-dir yields no outcomes and never throws', async () => {
@@ -215,7 +227,7 @@ describe('serviceDrainNowRequests', () => {
     dropRequest(56, { requestedAtUnixSec: nowSec }); // well inside TTL and skew under the real clock
     const { calls, drain } = collectingDrain();
     const outcomes = await serviceDrainNowRequests({ requestDir: dir, drain });
-    expect(outcomes).toEqual([{ kind: 'drained', obligationId: 56, file: '56.json' }]);
+    expect(outcomes).toEqual([{ kind: 'activated', obligationId: 56, file: '56.json', named: NAMED_DISPATCHED }]);
     expect(calls).toEqual([56]);
   });
 
@@ -295,7 +307,7 @@ describe('writeDrainNowRequest', () => {
     expect(path).toBe(join(sub, '60.json'));
     const { calls, drain } = collectingDrain();
     const outcomes = await serviceDrainNowRequests({ requestDir: sub, drain, nowUnixSec: () => NOW });
-    expect(outcomes).toEqual([{ kind: 'drained', obligationId: 60, file: '60.json' }]);
+    expect(outcomes).toEqual([{ kind: 'activated', obligationId: 60, file: '60.json', named: NAMED_DISPATCHED }]);
     expect(calls).toEqual([60]);
   });
 
@@ -304,6 +316,41 @@ describe('writeDrainNowRequest', () => {
     expect(() => writeDrainNowRequest(dir, validRequest(61, { nonce: 'nonce-different-1' }))).toThrow(
       /already exists/,
     );
+  });
+
+  it('FALSIFIER (audit F4): a rival request published inside the check→publish window is NEVER clobbered', () => {
+    // POSIX rename() REPLACES an existing destination, so a check-then-rename
+    // writer silently overwrites a pending request that lands between the two
+    // calls. The publish must be atomically no-clobber (link(2) EEXIST).
+    const rivalPayload = JSON.stringify(validRequest(64, { requestedBy: 'rival-operator', nonce: 'nonce-rival-00001' }));
+    expect(() =>
+      writeDrainNowRequest(dir, validRequest(64), {
+        beforePublish: () => writeFileSync(join(dir, '64.json'), `${rivalPayload}\n`),
+      }),
+    ).toThrow(PendingRequestExistsError);
+    const kept = JSON.parse(readFileSync(join(dir, '64.json'), 'utf8')) as Record<string, unknown>;
+    expect(kept.requestedBy).toBe('rival-operator'); // the FIRST pending request wins
+    expect(readdirSync(dir).filter((n) => n.startsWith('.tmp-'))).toEqual([]); // no tmp leak either way
+  });
+
+  it('FALSIFIER (audit F5): an EXISTING group/other-writable request dir refuses the WRITE itself', () => {
+    // The runtime reader refuses an untrusted dir; the writer must apply the
+    // SAME trust authority so the operator gets a typed refusal at write time,
+    // not a "success" whose request the runtime then refuses to service.
+    const sub = join(dir, 'evil-0777');
+    mkdirSync(sub, { mode: 0o700 });
+    chmodSync(sub, 0o777);
+    expect(() => writeDrainNowRequest(sub, validRequest(65))).toThrow(UntrustedRequestDirError);
+    expect(readdirSync(sub)).toEqual([]); // nothing published into the untrusted dir
+  });
+
+  it('FALSIFIER (audit F5): a SYMLINKED request dir refuses the write', () => {
+    const real = join(dir, 'real-dir');
+    mkdirSync(real, { mode: 0o700 });
+    const link = join(dir, 'link-dir');
+    symlinkSync(real, link);
+    expect(() => writeDrainNowRequest(link, validRequest(66))).toThrow(UntrustedRequestDirError);
+    expect(readdirSync(real)).toEqual([]); // nothing reached the symlink target
   });
 
   it('rejects an invalid request payload before touching the filesystem', () => {

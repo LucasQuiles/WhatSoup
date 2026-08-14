@@ -132,7 +132,7 @@ const LIVE_FACTS: CapabilityObligationLiveFacts = {
   hostId: 'test-host',
   runtimeUser: 'test-user',
   releaseSha: 'relsha-live',
-  schemaVersion: 58,
+  schemaVersion: 60,
   providerId: 'claude-cli',
   harnessType: 'persistent_session',
 };
@@ -214,7 +214,7 @@ function seedObligation(
         sourceDigest: media ? media.sha256 : (over.sourceDigest ?? SOURCE_DIGEST),
         sourceToken: media ? null : (over.sourceToken ?? SOURCE_URL),
         retainedMedia: media,
-        creationReason: 'typed_deferral_signal',
+        creationReason: 'harness_capability_gap',
       },
     }).obligationId!;
   });
@@ -1229,6 +1229,46 @@ describe('helpers', () => {
     expect(turnCorrelationFromContexts(contexts, 'conv-none')).toBeNull();
     expect(turnCorrelationFromContexts(new Map(), 'conv-a')).toBeNull();
   });
+
+  it('F7 FALSIFIER: TWO context heads carrying the SAME conversation key refuse correlation — null, never a silent first-match', () => {
+    // Alias/session transitions can leave two live heads keyed by different
+    // mapKeys but the same conversation key. Taking whichever iterates first
+    // would attribute a tool call to a stale logical turn; the correlation
+    // must treat a duplicate match as "no active turn".
+    const contexts = new Map([
+      ['chat-alias-a', [{ identity: { conversationKey: 'conv-dup', logicalTurnId: 'lt-stale', inboundSeq: 1 } }]],
+      ['chat-alias-b', [{ identity: { conversationKey: 'conv-dup', logicalTurnId: 'lt-live', inboundSeq: 2 } }]],
+    ]) as unknown as ReadonlyMap<string, readonly RuntimeTurnContext[]>;
+    expect(turnCorrelationFromContexts(contexts, 'conv-dup')).toBeNull();
+    // A different conversation with a SINGLE head in the same map still correlates.
+    const mixed = new Map([
+      ...contexts,
+      [
+        'chat-c',
+        [{ identity: { conversationKey: 'conv-single', logicalTurnId: 'lt-single', inboundSeq: 3 } }] as unknown as readonly RuntimeTurnContext[],
+      ] as const,
+    ]) as unknown as ReadonlyMap<string, readonly RuntimeTurnContext[]>;
+    expect(turnCorrelationFromContexts(mixed, 'conv-single')).toEqual({ logicalTurnId: 'lt-single', inboundSeq: 3 });
+  });
+
+  it('F7 FALSIFIER: findActiveTurn with TWO active obligation turns for one conversation key fails closed to null (typed executor refusal)', () => {
+    // Two simultaneously active entries for one conversation key is the
+    // aliased-mapKey twin of the duplicate-head case. The map is private and
+    // the supervisor dispatches sequentially, so the duplicate state is
+    // constructed directly — the point is the lookup's refusal contract.
+    const { runtime } = makeRuntime();
+    const active = (id: number) => ({
+      obligation: { id, conversationKey: 'conv-dup' } as unknown as CapabilityObligationDueRow,
+      mintedMessageId: `obl:${id}:1`,
+      fence: { claimEpoch: 1, attemptCount: 1 } as unknown as never,
+      attemptNumber: 1,
+    });
+    const turns = (runtime as unknown as { activeTurns: Map<string, ReturnType<typeof active>> }).activeTurns;
+    turns.set('alias-a@lid', active(11));
+    expect(runtime.findActiveTurn('conv-dup')?.obligation.id).toBe(11); // single match resolves
+    turns.set('alias-b@s.whatsapp.net', active(12));
+    expect(runtime.findActiveTurn('conv-dup')).toBeNull(); // duplicate → no active turn
+  });
 });
 
 describe('dispatch provider-boundary outcome (D7/r13 F1)', () => {
@@ -1473,7 +1513,7 @@ describe('operator drain-now servicing at the EXECUTOR seam (r22 AE1 adapter)', 
           scope: 'per_chat', originRecoveryJobId: null, replayText: 'https://youtu.be/abc',
           contentTypeHint: 'text', contractVersion: 'test-contract/1', requiredCapability: 'child_process_tools',
           capabilityParams: '{"skill":"watch"}', inputDigest: 'aa'.repeat(32), sourceDigest: SOURCE_DIGEST,
-          sourceToken: SOURCE_URL, retainedMedia: null, creationReason: 'typed_deferral_signal',
+          sourceToken: SOURCE_URL, retainedMedia: null, creationReason: 'harness_capability_gap',
         },
       }).obligationId!;
     });
@@ -1511,7 +1551,11 @@ describe('operator drain-now servicing at the EXECUTOR seam (r22 AE1 adapter)', 
     ]);
     expect(dispatched).toEqual([{ id, minted: `obl:${id}:1` }]);
     const result = readdirSync(requestDir).find((n) => n.endsWith('.result.json'))!;
-    expect(JSON.parse(readFileSync(join(requestDir, result), 'utf8'))).toMatchObject({ kind: 'drained', obligationId: id });
+    // Audit F2: the result reports 'activated' plus the NAMED row's post-state-
+    // derived outcome — here the targeted pass claimed and dispatched attempt 1.
+    expect(JSON.parse(readFileSync(join(requestDir, result), 'utf8'))).toMatchObject({
+      kind: 'activated', obligationId: id, named: { kind: 'named_dispatched', state: 'claimed' },
+    });
   });
 
   it('AE1 FALSIFIER at the executor: a REVOKED group approval is refused and the session ports are NEVER touched', async () => {
