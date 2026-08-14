@@ -242,3 +242,106 @@ def test_should_not_suppress_when_no_open_storm(tmp_path):
         "evidence": "auth bond failed",
     }
     assert mod.should_suppress_send(member, incident_state) is None
+
+
+# ---------------------------------------------------------------------------
+# #2428 — one trip per distinct event occurrence, not per delivery attempt
+# ---------------------------------------------------------------------------
+
+def _outbox_event(mod, event_id: str, evidence: str = "auth bond failed"):
+    return {
+        "schemaVersion": 1,
+        "id": event_id,
+        "eventType": "alert",
+        "severity": "warning",
+        "machine": "host-a",
+        "instance": "instance-x",
+        "source": "whatsapp_auth_bond_local_failure",
+        "summary": "auth bond failing",
+        "evidence": evidence,
+        "createdAt": mod.iso_from_epoch(int(time.time())),
+        "delivery": {"attempts": 0, "status": "queued", "nextAttemptAtEpoch": 0},
+    }
+
+
+def _write_outbox(mod, paths, name: str, event) -> Path:
+    path = paths["outbox"] / name
+    path.write_text(json.dumps(event), encoding="utf-8")
+    return path
+
+
+def test_2428_same_event_rescanned_never_opens_a_storm(tmp_path, monkeypatch):
+    """FALSIFIER (#2428): an undelivered alert returned to the outbox with its
+    original identity is re-scanned every dispatcher run. Pre-#2428 each
+    re-scan recorded a fresh trip, so one stuck alert crossed the 3-trip test
+    threshold and opened a synthetic storm. Now the SAME id counts exactly
+    once however many times it is scanned."""
+    mod = _load(tmp_path)
+    paths = mod.setup_dirs()
+    sent = []
+    monkeypatch.setattr(mod, "send_whatsapp", lambda *a, **k: sent.append(a))
+    _write_outbox(mod, paths, "20260815T000000Z.stuck.json", _outbox_event(mod, "evt-stuck-1"))
+
+    for _ in range(5):  # well past the 3-trip test threshold
+        mod.flap_scan_outbox(paths)
+
+    state = mod.load_incident_state(paths)
+    entry = state["flapState"][KEY]
+    assert entry["cumulativeCount"] == 1
+    assert len(entry["tripTimestamps"]) == 1
+    assert not entry.get("stormAt"), "a delivery-retry loop must never open a storm"
+    assert sent == []
+
+
+def test_2428_distinct_events_still_open_a_storm(tmp_path, monkeypatch):
+    """Control: genuinely distinct occurrences (distinct ids) for the same
+    incident key still accumulate trips and open the storm at threshold —
+    the dedup narrows retry counting only, never real flapping."""
+    mod = _load(tmp_path)
+    paths = mod.setup_dirs()
+    sent = []
+    monkeypatch.setattr(mod, "send_whatsapp", lambda *a, **k: sent.append(a))
+    for i in range(3):  # test threshold
+        _write_outbox(mod, paths, f"20260815T00000{i}Z.distinct.json", _outbox_event(mod, f"evt-distinct-{i}", evidence=f"failure {i}"))
+
+    mod.flap_scan_outbox(paths)
+
+    state = mod.load_incident_state(paths)
+    entry = state["flapState"][KEY]
+    assert entry["cumulativeCount"] == 3
+    assert entry.get("stormAt"), "three distinct occurrences must open the storm"
+    assert len(sent) == 1
+
+
+def test_2428_id_less_event_falls_back_to_per_scan_counting(tmp_path, monkeypatch):
+    """An event with no id cannot be deduped — it keeps the pre-#2428
+    per-scan counting (fail-open) rather than being silently ignored."""
+    mod = _load(tmp_path)
+    paths = mod.setup_dirs()
+    monkeypatch.setattr(mod, "send_whatsapp", lambda *a, **k: None)
+    event = _outbox_event(mod, "ignored")
+    del event["id"]
+    _write_outbox(mod, paths, "20260815T000009Z.noid.json", event)
+
+    mod.flap_scan_outbox(paths)
+    mod.flap_scan_outbox(paths)
+
+    state = mod.load_incident_state(paths)
+    assert state["flapState"][KEY]["cumulativeCount"] == 2
+
+
+def test_2428_seen_ids_prune_after_retention_and_stay_bounded(tmp_path):
+    """The per-key seen map ages out ids unseen past retention and enforces
+    the hard cap by dropping the oldest — flapState stays bounded."""
+    mod = _load(tmp_path)
+    now = int(time.time())
+    entry = {"tripTimestamps": [], "cumulativeCount": 0}
+    assert mod.flap_occurrence_already_counted(entry, "evt-a", now) is False
+    assert mod.flap_occurrence_already_counted(entry, "evt-a", now + 1) is True
+    # past retention the same id counts as a NEW occurrence again
+    later = now + mod.FLAP_SEEN_EVENT_RETENTION_SECONDS + 2
+    assert mod.flap_occurrence_already_counted(entry, "evt-a", later) is False
+    # hard cap: oldest ids are dropped once the map exceeds the ceiling
+    for i in range(mod.FLAP_SEEN_EVENT_MAX_IDS + 10):
+        mod.flap_occurrence_already_counted(entry, f"evt-cap-{i}", later + i)
+    assert len(entry["seenEventIds"]) <= mod.FLAP_SEEN_EVENT_MAX_IDS
