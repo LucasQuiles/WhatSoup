@@ -9259,9 +9259,16 @@ export class AgentRuntime implements Runtime {
             const mapKey = resolveSessionMapKey() ?? initialMapKey;
             this.handlePerChatCrash(mapKey, chatJid, info, session);
           },
-          notifyUser: (msg) => {
-            this.handleCrashNotify(msg, chatJid, session);
-          },
+          notifyUser: isScheduledAgentJobMapKey(initialMapKey)
+            ? () => {
+                log.warn(
+                  { mapKey: initialMapKey },
+                  'scheduled agent job crash notification suppressed',
+                );
+              }
+            : (msg) => {
+                this.handleCrashNotify(msg, chatJid, session);
+              },
           eventToolScopeKey: toolScopeKey,
         });
         log.info({ chatJid, mapKey: initialMapKey, sessionScope: this.sessionScope }, 'created per-chat session manager');

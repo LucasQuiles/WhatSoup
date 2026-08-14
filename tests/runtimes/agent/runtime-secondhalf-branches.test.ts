@@ -659,10 +659,19 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
 
     it('uses a different provider session for a scheduled turn than the interactive group session', async () => {
       const { SessionManager: MockSessionManagerCtor } = await import('../../../src/runtimes/agent/session.ts');
-      const createdOptions: Array<{ chatJid: string; persistenceConversationKey?: string }> = [];
+      const createdOptions: Array<{
+        chatJid: string;
+        persistenceConversationKey?: string;
+        notifyUser?: (msg: string) => void;
+      }> = [];
       const createdSessions: Array<typeof mockSession> = [];
       (MockSessionManagerCtor as unknown as ReturnType<typeof vi.fn>).mockImplementation(function (
-        opts: { chatJid: string; persistenceConversationKey?: string; onEvent: (event: AgentEvent) => void },
+        opts: {
+          chatJid: string;
+          persistenceConversationKey?: string;
+          notifyUser?: (msg: string) => void;
+          onEvent: (event: AgentEvent) => void;
+        },
       ) {
         const session = {
           ...mockSession,
@@ -713,6 +722,14 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       expect(createdOptions.map((opts) => opts.chatJid)).toEqual([groupJid, groupJid]);
       expect(createdOptions[0]?.persistenceConversationKey).toBe(toConversationKey(groupJid));
       expect(createdOptions[1]?.persistenceConversationKey).toBe(`${groupJid}::scheduled-agent-job`);
+
+      mockQueue.enqueueText.mockClear();
+      mockQueue.flush.mockClear();
+      createdOptions[1]?.notifyUser?.(
+        'Agent session ended (exited with code 143). Send any message to start a new session.',
+      );
+      expect(mockQueue.enqueueText).not.toHaveBeenCalled();
+      expect(mockQueue.flush).not.toHaveBeenCalled();
     });
 
     it('maps a journal failure to a refused dispatch instead of an unowned ack (#2144)', () => {
