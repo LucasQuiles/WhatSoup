@@ -1,3 +1,5 @@
+import { isRecord } from '../lib/type-guards.ts';
+
 export type RecoveryDebtAttention = 'none' | 'routine' | 'urgent';
 
 export interface RecoveryDebtEvidence {
@@ -87,12 +89,6 @@ const RECOVERY_REASON_ORDER = [
   ...RETAINED_RUNTIME_REASONS,
 ] as const;
 
-function record(value: unknown): Record<string, unknown> | null {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : null;
-}
-
 function count(value: unknown): number | null {
   return Number.isSafeInteger(value) && (value as number) >= 0 ? value as number : null;
 }
@@ -111,7 +107,7 @@ function unreadableContinuity(): RecoveryDebtSnapshot['continuity'] {
 }
 
 function normalizeContinuity(value: unknown): RecoveryDebtSnapshot['continuity'] {
-  const source = record(value);
+  const source = isRecord(value) ? value : null;
   if (!source || typeof source['readable'] !== 'boolean') return unreadableContinuity();
   const open = count(source['open']);
   const unresolved = count(source['unresolved']);
@@ -148,7 +144,7 @@ function normalizeRuntime(value: RecoveryDebtEvidence['runtime']): {
     blockingReasons: string[];
     retainedReasons: string[];
   };
-  const details = record(value.details);
+  const details = isRecord(value.details) ? value.details : null;
   if (!value.readable || !details) return unreadable;
 
   const blockingOutstanding = count(details['turnRecoveryBlockingOutstanding']);
@@ -159,7 +155,8 @@ function normalizeRuntime(value: RecoveryDebtEvidence['runtime']): {
   const identityRetained = count(details['completedDeliveryIdentityRetained']);
   const degradedReasons = stringArray(details['degradedReasons']);
   const retainedReasons = stringArray(details['recoveryDebtReasons']);
-  const admissions = record(details['completedDeliveryIdentityAdmissions']);
+  const admissionValue = details['completedDeliveryIdentityAdmissions'];
+  const admissions = isRecord(admissionValue) ? admissionValue : null;
   const nextAction = admissions?.['nextAction'];
   const nextActionValid = nextAction === null || nextAction === 'fresh_inbound' || nextAction === 'operator';
   if (
@@ -231,7 +228,7 @@ function normalizeDelivery(value: RecoveryDebtEvidence['durability']): {
   blocking: boolean;
   reasons: string[];
 } {
-  const source = record(value.deliveryAmbiguity);
+  const source = isRecord(value.deliveryAmbiguity) ? value.deliveryAmbiguity : null;
   const unreadable = {
     delivery: {
       readable: false,

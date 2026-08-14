@@ -26,6 +26,18 @@ const silenceManager = vi.hoisted(() => ({
 
 type AlertMockCall = [string, string, ...unknown[]];
 
+function expectNoAlertSource(name: string, source: string): void {
+  expect((alertFns.emitAlert.mock.calls as unknown as AlertMockCall[]).some(
+    ([callName, callSource]) => callName === name && callSource === source,
+  )).toBe(false);
+}
+
+function expectNoClearAlertSource(name: string, source: string): void {
+  expect((alertFns.clearAlertSource.mock.calls as unknown as AlertMockCall[]).some(
+    ([callName, callSource]) => callName === name && callSource === source,
+  )).toBe(false);
+}
+
 function durableAlertResult(): AlertEmissionResult {
   return { ok: true, channel: 'outbox', status: 'durably_queued' };
 }
@@ -535,14 +547,7 @@ describe('HealthPoller', () => {
         gaugeTotal: 1,
       },
     });
-    expect(alertFns.emitAlert).not.toHaveBeenCalledWith(
-      'remote-1',
-      'health_body_degraded',
-      expect.anything(),
-      expect.anything(),
-      expect.anything(),
-      expect.anything(),
-    );
+    expectNoAlertSource('remote-1', 'health_body_degraded');
     expect((alertFns.emitAlert.mock.calls as unknown as AlertMockCall[]).filter(
       ([, source]) => source === 'recovery_debt_attention',
     )).toHaveLength(1);
@@ -644,11 +649,7 @@ describe('HealthPoller', () => {
       statusReason: 'health_body_type_error',
       recoveryDebt: { open: true, gaugeTotal: 1 },
     });
-    expect(alertFns.clearAlertSource).not.toHaveBeenCalledWith(
-      'remote-1',
-      'recovery_debt_attention',
-      expect.anything(),
-    );
+    expectNoClearAlertSource('remote-1', 'recovery_debt_attention');
     poller.stop();
   });
 
@@ -691,18 +692,8 @@ describe('HealthPoller', () => {
         activeAlertSources: ['recovery_debt_attention'],
         recoveryDebt: { open: true },
       });
-      expect(alertFns.emitAlert).not.toHaveBeenCalledWith(
-        'remote-1',
-        'recovery_debt_attention',
-        expect.anything(),
-        expect.anything(),
-        expect.anything(),
-      );
-      expect(alertFns.clearAlertSource).not.toHaveBeenCalledWith(
-        'remote-1',
-        'recovery_debt_attention',
-        expect.anything(),
-      );
+      expectNoAlertSource('remote-1', 'recovery_debt_attention');
+      expectNoClearAlertSource('remote-1', 'recovery_debt_attention');
       const { loadRecoveryMarkers } = await import('../../src/lib/recovery-authority-store.ts');
       expect(loadRecoveryMarkers().has('remote-1:recovery_debt_attention')).toBe(true);
 

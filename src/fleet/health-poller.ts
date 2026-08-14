@@ -2772,7 +2772,7 @@ export class HealthPoller {
       try {
         setRecoveryMarker(`${name}:${source}`);
       } catch {
-        // Best-effort: the debt alert is already durable; a missing marker only
+        // Intentional: the debt alert is already durable; a missing marker only
         // prevents restart-time reconciliation of its eventual clear.
       }
       this.recoveryDebtFingerprints.set(name, fingerprint);
@@ -2787,7 +2787,7 @@ export class HealthPoller {
     try {
       clearRecoveryMarker(`${name}:${source}`);
     } catch {
-      // Best-effort: a stale marker only causes a redundant idempotent clear.
+      // Intentional: a stale marker only causes a redundant idempotent clear.
     }
     this.recoveryDebtFingerprints.delete(name);
     const status = this.statuses.get(name);
