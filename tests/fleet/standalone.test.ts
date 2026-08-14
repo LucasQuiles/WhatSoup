@@ -1,5 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+const { mockStandaloneLogger } = vi.hoisted(() => ({ mockStandaloneLogger: {} as Record<string, ReturnType<typeof vi.fn>> }));
+
+vi.mock('../../src/logger.ts', async () => {
+  const { hoistedLoggerMock } = await import('../helpers/logger-mock.ts');
+  const { createChildLogger } = hoistedLoggerMock(mockStandaloneLogger);
+  return { createChildLogger };
+});
+
 type FleetServerDeps = {
   db: unknown;
   selfName: string;
@@ -34,7 +42,7 @@ describe('fleet standalone launcher', () => {
   it('starts on the default fleet port with a throwaway database and token loader', async () => {
     process.argv = ['node', 'src/fleet/standalone.ts'];
     delete process.env.FLEET_BIND_ADDRESS;
-    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     const { start, createFleetServer, loadOrCreateFleetTokens, DatabaseSync } = mockLauncherDeps({
       active: 'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789',
       accept: ['old-token'],
@@ -63,18 +71,21 @@ describe('fleet standalone launcher', () => {
     expect(generatedAt).toBeGreaterThanOrEqual(beforeHealth);
     expect(generatedAt).toBeLessThanOrEqual(afterHealth);
     expect(start).toHaveBeenCalledWith(9099);
-    expect(log.mock.calls.map(([message]) => message)).toEqual([
-      'Fleet token: abcdef01...',
-      'Console unlock token: full value in ~/.config/whatsoup/fleet-tokens.json (field "active")',
-      'Fleet server listening on http://127.0.0.1:9099',
-      'Press Ctrl+C to stop',
+    // Human channel is stderr via the redacting print seam (#2209); the token
+    // banner and listening line live only in their structured twins now.
+    expect(stderrSpy.mock.calls.map(([chunk]) => String(chunk))).toEqual([
+      'The console unlock token is the "active" field in the fleet-tokens config file.\n',
+      'Press Ctrl+C to stop\n',
     ]);
+    expect(mockStandaloneLogger.info).toHaveBeenCalledWith(
+      { tokenPrefix: 'abcdef01' },
+      'fleet token generated',
+    );
   });
 
   it('honors an explicit CLI port and bind-address display value', async () => {
     process.argv = ['node', 'src/fleet/standalone.ts', '4545'];
     process.env.FLEET_BIND_ADDRESS = '0.0.0.0';
-    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
     const { start } = mockLauncherDeps({
       active: '1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef',
       accept: [],
@@ -83,8 +94,9 @@ describe('fleet standalone launcher', () => {
     await import('../../src/fleet/standalone.ts');
 
     expect(start).toHaveBeenCalledWith(4545);
-    expect(log.mock.calls.map(([message]) => message)).toContain(
-      'Fleet server listening on http://0.0.0.0:4545',
+    expect(mockStandaloneLogger.info).toHaveBeenCalledWith(
+      { bindAddress: '0.0.0.0', port: 4545 },
+      'fleet server listening',
     );
   });
 });
