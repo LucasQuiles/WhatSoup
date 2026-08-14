@@ -183,6 +183,11 @@ import {
 import { getRecentMessages, getMessagesSince, hasFromMeReplyAfter } from '../../core/messages.ts';
 import { toConversationKey, isGroupConversationKey, GLOBAL_CONVERSATION_KEY } from '../../core/conversation-key.ts';
 import { classifyAssistantTextEgress } from '../../core/outbound-message-safety.ts';
+import {
+  isolateScheduledAgentJobPrompt,
+  isScheduledAgentJobMapKey,
+  resolveAgentTurnMapKey,
+} from './scheduled-agent-job-isolation.ts';
 import { resolveConfiguredAdminJid, toPersonalJid, isGroupJid } from '../../core/jid-constants.ts';
 import { jidNormalizedUser } from '@whiskeysockets/baileys';
 import { contextMessagesForTurn } from './context-handoff.ts';
@@ -2119,6 +2124,19 @@ export class AgentRuntime implements Runtime {
     inboundSeq: number | undefined,
     mapKey?: string,
   ): string | null {
+    if (mapKey !== undefined && isScheduledAgentJobMapKey(mapKey)) {
+      this.perChatTurnSuppressedReplySatisfaction.add(mapKey);
+      log.info(
+        {
+          chatJid: queue.targetChatJid,
+          reason: 'scheduled_job_plain_text',
+          satisfiesReplyGuarantee: true,
+          textPreview: providerPreview(text, 200),
+        },
+        'assistant_text egress gate suppressed scheduled-job plain text',
+      );
+      return null;
+    }
     const decision = classifyAssistantTextEgress(text);
     if (decision.action === 'allow') return text;
 
@@ -3936,7 +3954,7 @@ export class AgentRuntime implements Runtime {
         chatJid: ctx.reportChatJid,
         senderJid: config.memory.adminJid,
         senderName: ctx.title ? `Scheduled job: ${ctx.title}`.slice(0, 80) : 'Scheduled job',
-        content: ctx.prompt,
+        content: isolateScheduledAgentJobPrompt(ctx.prompt),
         contentText: null,
         contentType: 'text',
         isFromMe: false,
@@ -4145,7 +4163,10 @@ export class AgentRuntime implements Runtime {
         this.sendDirect(msg.chatJid, 'Something went wrong processing that message. Try again?');
       });
     const recycleScopeKey = this.sessionScope === 'per_chat'
-      ? this.resolvePerChatMapKey(msg.chatJid)
+      ? resolveAgentTurnMapKey(
+          this.resolvePerChatMapKey(msg.chatJid),
+          msg.isSyntheticJob === true && !this.sandboxPerChat,
+        )
       : GLOBAL_TOOL_SCOPE_KEY;
     this.routeRecycleLifecycle.trackPublication(queuedWork, recycleScopeKey);
     this.turnChain = queuedWork;
@@ -4159,7 +4180,10 @@ export class AgentRuntime implements Runtime {
     // durable conversation key is the resolved phone while delivery stays @lid.
     const journalConversationKey = canonicalConversationKey(chatJid, this.db);
     const perChatMapKey = this.sessionScope === 'per_chat'
-      ? this.resolvePerChatMapKey(chatJid)
+      ? resolveAgentTurnMapKey(
+          this.resolvePerChatMapKey(chatJid),
+          msg.isSyntheticJob === true && !this.sandboxPerChat,
+        )
       : undefined;
 
     // Substrate slice 1: propagate sender identity to every MCP session so
@@ -7767,10 +7791,10 @@ export class AgentRuntime implements Runtime {
     return providerUsesWhatSoupMcp(provider);
   }
 
-  private wirePerChatActorSocket(chatJid: string, provider: string):
+  private wirePerChatActorSocket(chatJid: string, provider: string, mapKeyOverride?: string):
     | { mcpSocketPath?: string; providerTransitionReady: Promise<void> }
     | undefined {
-    return wirePerChatActorSocketForPort(this.chatTransportHost, chatJid, provider);
+    return wirePerChatActorSocketForPort(this.chatTransportHost, chatJid, provider, mapKeyOverride);
   }
 
   private teardownPerChatActorSocket(mapKey: string): void {
@@ -8885,6 +8909,7 @@ export class AgentRuntime implements Runtime {
    */
   private createSessionManager(opts: {
     chatJid: string;
+    sessionMapKey?: string;
     cwd: string | undefined;
     actorJid?: string;
     trackSingletonMcpSession?: boolean;
@@ -8897,11 +8922,12 @@ export class AgentRuntime implements Runtime {
     eventToolScopeKey?: string;
     routeOverride?: ResolvedReplayRoute;
   }): SessionManager {
-    const conversationKey = toConversationKey(opts.chatJid);
+    const deliveryConversationKey = toConversationKey(opts.chatJid);
+    const sessionConversationKey = opts.sessionMapKey ?? deliveryConversationKey;
     // Resolve the provider/model/policy tuple for every session. NL preferences
     // remain flag-gated inside resolveRouteForTurn; policy admission does not.
     const route = opts.routeOverride ?? this.resolveRouteForTurn(opts.chatJid, opts.actorJid);
-    if (this.nlRoutingEnabled) this.noteRouteAtSpawn(opts.chatJid, conversationKey, route);
+    if (this.nlRoutingEnabled) this.noteRouteAtSpawn(opts.chatJid, deliveryConversationKey, route);
     // F-STICKY-ACTOR (QR-247 hardening): wire the per-chat actor socket HERE — the
     // single choke point every spawn path (ensure / proactive-resume / provider-
     // fallback) flows through — keyed on the session's ACTUAL provider, not the
@@ -8910,8 +8936,14 @@ export class AgentRuntime implements Runtime {
     const mcpServerScript = providerMcpProxyScriptPath();
     // BRNCH: undefined provider (no route, no effectiveProvider) means no per-chat
     // actor socket to wire — skip entirely (main parity on the undefined path).
+    const actorSocketMapKey = opts.sessionMapKey !== undefined
+      && opts.sessionMapKey !== this.resolvePerChatMapKey(opts.chatJid)
+      ? opts.sessionMapKey
+      : undefined;
     const perChatWire = sessionProvider
-      ? this.wirePerChatActorSocket(opts.chatJid, sessionProvider)
+      ? (actorSocketMapKey === undefined
+          ? this.wirePerChatActorSocket(opts.chatJid, sessionProvider)
+          : this.wirePerChatActorSocket(opts.chatJid, sessionProvider, actorSocketMapKey))
       : undefined;
     const mcpSocketPath = opts.mcpSocketPath ?? perChatWire?.mcpSocketPath;
     const providerTransitionReady = perChatWire?.providerTransitionReady;
@@ -8921,21 +8953,24 @@ export class AgentRuntime implements Runtime {
       this.sandboxPerChat,
     );
     if (actorSocketRequired && !mcpSocketPath?.trim()) {
-      throw new Error(`per_chat ${sessionProvider} session for ${conversationKey} would spawn without an actor-bound socket`);
+      throw new Error(`per_chat ${sessionProvider} session for ${sessionConversationKey} would spawn without an actor-bound socket`);
     }
     const providerToolSession: SessionContext =
       this.sandboxPerChat || this.sessionScope === 'per_chat'
         ? {
             tier: 'chat-scoped',
-            conversationKey,
+            conversationKey: deliveryConversationKey,
             deliveryJid: opts.chatJid,
             ...(opts.actorJid ? { actorJid: opts.actorJid } : {}),
             ...(opts.cwd ? { allowedRoot: opts.cwd } : {}),
+            ...(isScheduledAgentJobMapKey(sessionConversationKey)
+              ? { purpose: 'scheduled-agent-job' as const }
+              : {}),
           }
         : {
             tier: 'global',
             ...(opts.actorJid ? { actorJid: opts.actorJid } : {}),
-            ...(!this.shared ? { conversationKey } : {}),
+            ...(!this.shared ? { conversationKey: deliveryConversationKey } : {}),
         };
     if (opts.trackSingletonMcpSession) {
       this.singletonProviderToolSession = providerToolSession;
@@ -8945,6 +8980,7 @@ export class AgentRuntime implements Runtime {
       db: this.db,
       messenger: this.messenger,
       chatJid: opts.chatJid,
+      persistenceConversationKey: sessionConversationKey,
       onEvent: opts.onEvent,
       instanceName: this.instanceName,
       onResumeFailed: opts.onResumeFailed,
@@ -8966,7 +9002,7 @@ export class AgentRuntime implements Runtime {
       whatsoupInstance: this.instanceName,
       whatsoupMcpSocket: mcpSocketPath ?? this.globalMcpSocketPath ?? undefined,
       providerTransitionReady,
-      handoffSystemBlock: this.buildHandoffSystemBlock(conversationKey, route ? route.provider : this.effectiveProvider),
+      handoffSystemBlock: this.buildHandoffSystemBlock(sessionConversationKey, route ? route.provider : this.effectiveProvider),
       routingSystemBlock: config.nlRouting ? () => this.buildRoutingContractBlock(route ? route.provider : this.effectiveProvider) : undefined,
       routePolicy: route ?? undefined,
       egressProxyPort: this.egressProxy?.port,
@@ -9215,6 +9251,7 @@ export class AgentRuntime implements Runtime {
         // wirePerChatActorSocket + the choke-point guard.
         session = this.createSessionManager({
           chatJid,
+          ...(isScheduledAgentJobMapKey(initialMapKey) ? { sessionMapKey: initialMapKey } : {}),
           cwd: this.cwd,
           actorJid,
           onEvent: (event) => this.handleEventPerChat(session, event, toolScopeKey),
