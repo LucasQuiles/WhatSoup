@@ -97,6 +97,37 @@ function makeOnlineHealth(overrides: Record<string, unknown> = {}): Record<strin
   };
 }
 
+function makeRecoveryDebt(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    open: true,
+    service_blocking: false,
+    attention: 'routine',
+    reason: null,
+    reasons: ['historical_turn_catchup'],
+    continuity: { readable: true, open: 0, unresolved: 0, ambiguous: 0 },
+    turn_recovery: {
+      readable: true,
+      blocking_outstanding: 0,
+      retained_terminal: 0,
+      open_catchups: 1,
+      corroborated_retained: 0,
+    },
+    completed_delivery_identity: {
+      readable: true,
+      blocking: 0,
+      retained: 0,
+      next_action: null,
+    },
+    delivery: {
+      readable: true,
+      uncorroborated_ambiguous: 0,
+      corroborated_retained: 0,
+      oldest_uncorroborated_at: null,
+    },
+    ...overrides,
+  };
+}
+
 function makeOperationalFallbackHealth(overrides: {
   degradationCauses?: readonly string[];
   pressureActive?: boolean;
@@ -475,6 +506,170 @@ describe('HealthPoller', () => {
       }),
     );
 
+    poller.stop();
+  });
+
+  it('observes retained recovery debt without changing online service status', async () => {
+    let debt = makeRecoveryDebt();
+    mockFetch.mockImplementation(() => Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve(makeOnlineHealth({ recovery_debt: debt })),
+    }));
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const statusChange = vi.fn();
+    const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}), 1_000);
+    poller.on('statusChange', statusChange);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(poller.getStatus('remote-1')).toMatchObject({
+      status: 'online',
+      recoveryDebt: {
+        open: true,
+        serviceBlocking: false,
+        attention: 'routine',
+        reasons: ['historical_turn_catchup'],
+        total: 1,
+      },
+    });
+    expect(alertFns.emitAlert).not.toHaveBeenCalledWith(
+      'remote-1',
+      'health_body_degraded',
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+    );
+    expect((alertFns.emitAlert.mock.calls as unknown as AlertMockCall[]).filter(
+      ([, source]) => source === 'recovery_debt_attention',
+    )).toHaveLength(1);
+    expect(statusChange).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect((alertFns.emitAlert.mock.calls as unknown as AlertMockCall[]).filter(
+      ([, source]) => source === 'recovery_debt_attention',
+    )).toHaveLength(1);
+
+    debt = makeRecoveryDebt({
+      turn_recovery: {
+        readable: true,
+        blocking_outstanding: 0,
+        retained_terminal: 0,
+        open_catchups: 2,
+        corroborated_retained: 0,
+      },
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(poller.getStatus('remote-1')?.recoveryDebt?.total).toBe(2);
+    expect((alertFns.emitAlert.mock.calls as unknown as AlertMockCall[]).filter(
+      ([, source]) => source === 'recovery_debt_attention',
+    )).toHaveLength(2);
+
+    debt = makeRecoveryDebt({
+      open: false,
+      attention: 'none',
+      reasons: [],
+      turn_recovery: {
+        readable: true,
+        blocking_outstanding: 0,
+        retained_terminal: 0,
+        open_catchups: 0,
+        corroborated_retained: 0,
+      },
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(poller.getStatus('remote-1')).toMatchObject({
+      status: 'online',
+      recoveryDebt: { open: false, total: 0 },
+    });
+    expect(alertFns.clearAlertSource).toHaveBeenCalledWith(
+      'remote-1',
+      'recovery_debt_attention',
+      expect.stringContaining('recovery_debt_open=false'),
+    );
+    expect(statusChange).not.toHaveBeenCalled();
+    poller.stop();
+  });
+
+  it('degrades malformed recovery debt and cannot clear the prior debt alert', async () => {
+    let health = makeOnlineHealth({ recovery_debt: makeRecoveryDebt() });
+    mockFetch.mockImplementation(() => Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve(health),
+    }));
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}), 1_000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    alertFns.clearAlertSource.mockClear();
+
+    health = makeOnlineHealth({
+      recovery_debt: makeRecoveryDebt({
+        open: false,
+        attention: 'none',
+        reasons: [],
+        turn_recovery: {
+          readable: true,
+          blocking_outstanding: 0,
+          retained_terminal: -1,
+          open_catchups: 0,
+          corroborated_retained: 0,
+        },
+      }),
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(poller.getStatus('remote-1')).toMatchObject({
+      status: 'degraded',
+      statusReason: 'health_body_type_error',
+      recoveryDebt: { open: true, total: 1 },
+    });
+    expect(alertFns.clearAlertSource).not.toHaveBeenCalledWith(
+      'remote-1',
+      'recovery_debt_attention',
+      expect.anything(),
+    );
+    poller.stop();
+  });
+
+  it('keeps the dedicated recovery debt source non-paging when debt is service-blocking', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve(makeOnlineHealth({
+        status: 'degraded',
+        degradation_causes: ['turn_recovery_actionable'],
+        recovery_debt: makeRecoveryDebt({
+          service_blocking: true,
+          attention: 'urgent',
+          reasons: ['turn_recovery_actionable'],
+          turn_recovery: {
+            readable: true,
+            blocking_outstanding: 1,
+            retained_terminal: 0,
+            open_catchups: 0,
+            corroborated_retained: 0,
+          },
+        }),
+      })),
+    });
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}), 1_000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(alertFns.emitAlert).toHaveBeenCalledWith(
+      'remote-1',
+      'recovery_debt_attention',
+      expect.any(String),
+      expect.stringContaining('attention=urgent'),
+      'info',
+    );
     poller.stop();
   });
 
