@@ -2738,15 +2738,18 @@ export class HealthPoller {
       recoveryDebtGaugeBucket(summary.gaugeTotal),
     ]);
     if (summary.open) {
-      if (this.recoveryDebtFingerprints.get(name) === fingerprint) return;
-      try {
-        if (loadRecoveryMarkers().has(`${name}:${source}`)) {
-          this.recoveryDebtFingerprints.set(name, fingerprint);
-          this.trackActiveAlertSource(name, source, true);
-          return;
+      const previousFingerprint = this.recoveryDebtFingerprints.get(name);
+      if (previousFingerprint === fingerprint) return;
+      if (previousFingerprint === undefined) {
+        try {
+          if (loadRecoveryMarkers().has(`${name}:${source}`)) {
+            this.recoveryDebtFingerprints.set(name, fingerprint);
+            this.trackActiveAlertSource(name, source, true);
+            return;
+          }
+        } catch (err) {
+          log.warn({ err, name, source }, 'recovery debt marker read failed');
         }
-      } catch (err) {
-        log.warn({ err, name, source }, 'recovery debt marker read failed');
       }
       const evidence = [
         'recovery_debt_open=true',

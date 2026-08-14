@@ -1,10 +1,10 @@
 # Operational Health and Recovery Debt Design
 
-**Status:** implemented; independent review findings incorporated; final PR validation pending
+**Status:** implemented; two independent review passes incorporated; exact-head validation and PR pending
 
 **Date:** 2026-08-14
 
-**Baseline:** `d0b4b3de401fa8da0d5e7b51e57614c541b39985` (`origin/main` at implementation rebase)
+**Baseline:** `a87ac8c7c7f9d513a01439e53599c9ee3fe262eb` (`origin/main` at the final implementation rebase)
 
 **Incident:** affected per-chat agent fleet instance
 

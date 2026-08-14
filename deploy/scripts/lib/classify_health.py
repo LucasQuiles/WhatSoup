@@ -46,10 +46,11 @@ RECOVERY_DEBT_BLOCKING_REASONS = {
     "turn_recovery_unclassified",
     "completed_delivery_identity_unclassified",
 }
+MAX_SAFE_INTEGER = 9_007_199_254_740_991
 
 
 def _recovery_count(value: object) -> Optional[int]:
-    return value if type(value) is int and value >= 0 else None
+    return value if type(value) is int and 0 <= value <= MAX_SAFE_INTEGER else None
 
 
 def recovery_debt_issue(d: object) -> Optional[str]:
@@ -58,6 +59,8 @@ def recovery_debt_issue(d: object) -> Optional[str]:
         return None
     debt = d.get("recovery_debt")
     if not isinstance(debt, dict):
+        return "recovery_debt_invalid"
+    if "reason" not in debt:
         return "recovery_debt_invalid"
     open_debt = debt.get("open")
     service_blocking = debt.get("service_blocking")
@@ -100,6 +103,8 @@ def recovery_debt_issue(d: object) -> Optional[str]:
     )
     counts = [_recovery_count(section.get(field)) for section, field in count_fields]
     if any(value is None for value in counts):
+        return "recovery_debt_invalid"
+    if "next_action" not in identity or "oldest_uncorroborated_at" not in delivery:
         return "recovery_debt_invalid"
     next_action = identity.get("next_action")
     if next_action not in (None, "fresh_inbound", "operator"):

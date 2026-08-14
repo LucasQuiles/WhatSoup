@@ -2532,27 +2532,38 @@ describe('GET /health', () => {
       lastTurnErrorClass: null,
       lastTurnErrorAt: null,
     };
+    const completeRecoveryDetails = (overrides: Record<string, unknown>) => ({
+      degradedReasons: [],
+      recoveryDebtReasons: [],
+      turnRecoveryBlockingOutstanding: 0,
+      turnRecoveryRetainedTerminal: 0,
+      turnRecoveryOpenRecoveries: 0,
+      turnRecoveryCorroboratedRetained: 0,
+      completedDeliveryIdentityBlocking: 0,
+      completedDeliveryIdentityRetained: 0,
+      completedDeliveryIdentityAdmissions: { nextAction: null },
+      ...overrides,
+    });
     const getHealthSnapshot = vi.fn()
       .mockReturnValueOnce({
         status: 'degraded',
-        details: {
+        details: completeRecoveryDetails({
           degradedReasons: ['turn_recovery_actionable'],
           turnRecoveryBlockingOutstanding: 1,
           turnCapability,
-        },
+        }),
       })
       .mockReturnValueOnce({
         status: 'healthy',
-        details: {
-          degradedReasons: [],
+        details: completeRecoveryDetails({
           recoveryDebtReasons: ['historical_turn_catchup'],
           turnRecoveryOpenRecoveries: 1,
           turnCapability,
-        },
+        }),
       })
       .mockReturnValue({
         status: 'healthy',
-        details: { degradedReasons: [], recoveryDebtReasons: [], turnCapability },
+        details: completeRecoveryDetails({ turnCapability }),
       });
     const deps = makeDeps(db2, {
       instanceType: 'agent',

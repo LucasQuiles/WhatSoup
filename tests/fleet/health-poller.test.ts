@@ -665,9 +665,10 @@ describe('HealthPoller', () => {
 
     try {
       alertFns.emitAlert.mockReturnValue(failedAlertResult());
+      let debt = makeRecoveryDebt();
       mockFetch.mockResolvedValue({
         ok: true,
-        json: () => Promise.resolve(makeOnlineHealth({ recovery_debt: makeRecoveryDebt() })),
+        json: () => Promise.resolve(makeOnlineHealth({ recovery_debt: debt })),
       });
       const instances = makeInstances(
         ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
@@ -700,6 +701,21 @@ describe('HealthPoller', () => {
       );
       const { loadRecoveryMarkers } = await import('../../src/lib/recovery-authority-store.ts');
       expect(loadRecoveryMarkers().has('remote-1:recovery_debt_attention')).toBe(true);
+
+      alertFns.emitAlert.mockReturnValue(durableAlertResult());
+      debt = makeRecoveryDebt({
+        turn_recovery: {
+          readable: true,
+          blocking_outstanding: 0,
+          retained_terminal: 0,
+          open_catchups: 2,
+          corroborated_retained: 0,
+        },
+      });
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect((alertFns.emitAlert.mock.calls as unknown as AlertMockCall[]).filter(
+        ([, source]) => source === 'recovery_debt_attention',
+      )).toHaveLength(1);
       poller.stop();
     } finally {
       process.env['BOT_ERRORS_STATE_DIR'] = originalStateDir;

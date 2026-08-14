@@ -8,8 +8,8 @@
 
 **Tech Stack:** TypeScript, SQLite/better-sqlite3, Vitest, React, Python unittest/pytest-compatible scripts, Bash deployment templates, JSON fault taxonomy.
 
-**Execution status:** Implemented through the independent-review remediation pass. Final exact-head
-verification, current-main range comparison, PR publication, and controlled live rollout remain.
+**Execution status:** Tasks 1-8 are implemented through two independent-review remediation passes.
+Final exact-head verification, PR publication, and controlled live rollout remain.
 
 ## Global Constraints
 
@@ -87,7 +87,7 @@ export function classifyRuntimeRecoveryHealth(
 ): RuntimeRecoveryHealthClassification;
 ```
 
-- [ ] **Step 1: Write the table-driven failing test**
+- [x] **Step 1: Write the table-driven failing test**
 
 Use one fixture per design row and assert both `blocking` and ordered reasons:
 
@@ -112,7 +112,7 @@ it.each([
 });
 ```
 
-- [ ] **Step 2: Run the new test against baseline behavior**
+- [x] **Step 2: Run the new test against baseline behavior**
 
 Run:
 
@@ -122,7 +122,7 @@ npm test -- tests/runtimes/agent/runtime-recovery-health.test.ts --pool=forks --
 
 Expected: FAIL because the module does not exist. Record the baseline as `0/10 contract rows executable` in the experiment log.
 
-- [ ] **Step 3: Implement the pure classifier**
+- [x] **Step 3: Implement the pure classifier**
 
 Use explicit predicates; never infer severity from arbitrary positive numbers:
 
@@ -148,11 +148,11 @@ Classify `blockedUnsafe`, `exhausted`, `openRecoveries`, corroborated retained,
 and recognized identity admission actions as retained. Treat an unknown action
 with unresolved rows as blocking.
 
-- [ ] **Step 4: Re-run and measure the contract**
+- [x] **Step 4: Re-run and measure the contract**
 
 Expected: PASS with `10/10` rows. Record `baseline=0/10`, `variant=10/10`, `verdict=keep`.
 
-- [ ] **Step 5: Commit the classifier**
+- [x] **Step 5: Commit the classifier**
 
 ```bash
 git add src/runtimes/agent/runtime-recovery-health.ts tests/runtimes/agent/runtime-recovery-health.test.ts
@@ -189,7 +189,7 @@ turnRecoveryRetainedTerminal: number;
 turnRecoveryCorroboratedRetained: number;
 ```
 
-- [ ] **Step 1: Write failing store tests with real rows**
+- [x] **Step 1: Write failing store tests with real rows**
 
 Create two otherwise identical stale `maybe_sent` fixtures. Add valid
 `same_source_later_echoed_op` corroboration to one. Assert:
@@ -207,7 +207,7 @@ Create a pending recovery job bound to the corroborated selected operation and
 assert it is absent from due/claimable enumeration, counted as
 `turnRecoveryCorroboratedRetained=1`, and remains unchanged in SQLite.
 
-- [ ] **Step 2: Run focused tests to verify the semantic failures**
+- [x] **Step 2: Run focused tests to verify the semantic failures**
 
 ```bash
 npm test -- tests/core/durability-recovery.test.ts tests/core/turn-recovery-jobs.test.ts tests/core/durability-recovery-evidence.test.ts --pool=forks --fileParallelism=false --retry=0
@@ -215,7 +215,7 @@ npm test -- tests/core/durability-recovery.test.ts tests/core/turn-recovery-jobs
 
 Expected: FAIL on missing aggregate fields and the still-claimable corroborated job. Record the failing assertion count.
 
-- [ ] **Step 3: Add one shared SQL predicate**
+- [x] **Step 3: Add one shared SQL predicate**
 
 Use the existing proof relationship:
 
@@ -233,20 +233,20 @@ Apply the positive and negative forms consistently to ambiguity aggregates,
 recovery due enumeration, and supervisor counts. Do not update the selected
 operation or job row.
 
-- [ ] **Step 4: Re-run and compare**
+- [x] **Step 4: Re-run and compare**
 
 Expected: all focused tests PASS; direct SQL assertions prove the selected op,
 terminal, job state, and corroboration record are byte-for-byte unchanged.
 Record `verdict=keep` only if both behavior and immutability pass.
 
-- [ ] **Step 5: Inspect the query plan**
+- [x] **Step 5: Inspect the query plan**
 
 Run `EXPLAIN QUERY PLAN` for the new aggregate and due-job query against the
 test schema. Expected: indexed primary/foreign-key lookups and no unbounded
 content scan beyond the bounded status cohort. If not, add only the minimal
 migration/index justified by the plan output and extend migration tests.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/core/durability.ts src/core/*turn-recovery* tests/core/durability-recovery.test.ts tests/core/turn-recovery-jobs.test.ts tests/core/durability-recovery-evidence.test.ts
@@ -266,7 +266,7 @@ git commit -m "fix(durability): recognize corroborated retained delivery debt"
 - Consumes: `classifyRuntimeRecoveryHealth` and new recovery counters.
 - Produces: existing runtime fields plus the five explicit blocking/retained gauges from Task 1.
 
-- [ ] **Step 1: Change existing expectations to the approved matrix**
+- [x] **Step 1: Change existing expectations to the approved matrix**
 
 Add or update tests so blocked-unsafe, exhausted, open catch-up, and
 fresh-inbound admission rows remain healthy; pending/claimed, finalization,
@@ -275,7 +275,7 @@ corrupt-link, echo-conflict, and unknown identity-action rows remain degraded.
 Assert retained reasons stay in `details.recoveryDebtReasons`, not
 `details.degradedReasons`.
 
-- [ ] **Step 2: Run tests and preserve the RED evidence**
+- [x] **Step 2: Run tests and preserve the RED evidence**
 
 ```bash
 npm test -- tests/runtimes/agent/runtime-turn-recovery-health.test.ts tests/runtimes/agent/health-snapshot.test.ts --pool=forks --fileParallelism=false --retry=0
@@ -283,7 +283,7 @@ npm test -- tests/runtimes/agent/runtime-turn-recovery-health.test.ts tests/runt
 
 Expected: the historical-debt cases fail because current runtime status is degraded.
 
-- [ ] **Step 3: Replace the broad predicate at the call site**
+- [x] **Step 3: Replace the broad predicate at the call site**
 
 ```ts
 const recoveryClassification = classifyRuntimeRecoveryHealth({
@@ -300,12 +300,12 @@ if (recoveryClassification.blocking) {
 Publish ordered retained reasons and explicit gauges in both per-chat and
 single-session health branches. Keep non-recovery degradation unchanged.
 
-- [ ] **Step 4: Re-run tests**
+- [x] **Step 4: Re-run tests**
 
 Expected: PASS. Record classification-row accuracy before/after and keep only
 if all blocker cases remain degraded and all retained-only cases recover.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/runtimes/agent/runtime.ts src/runtimes/agent/runtime-turn-supervisor.ts src/runtimes/agent/turn-recovery-dispatch.ts tests/runtimes/agent/runtime-turn-recovery-health.test.ts tests/runtimes/agent/health-snapshot.test.ts
@@ -341,13 +341,13 @@ export interface RecoveryDebtSnapshot {
 
 - Produces `evaluateRecoveryProof(...)` that distinguishes `clear`, `retain`, and `degrade`.
 
-- [ ] **Step 1: Write pure aggregate and contradiction tests**
+- [x] **Step 1: Write pure aggregate and contradiction tests**
 
 Cover no debt, retained only, blocking only, mixed, unreadable, unknown reason,
 negative/noninteger count, `service_blocking=false` with a blocker, and stable
 reason ordering. Malformed inputs must produce a blocking unreadable result.
 
-- [ ] **Step 2: Write the same-process latch regression**
+- [x] **Step 2: Write the same-process latch regression**
 
 Exercise one server instance through:
 
@@ -359,7 +359,7 @@ Assert the second and third samples are healthy after complete readable proof.
 Add a separate sequence where one required probe is unreadable and assert
 `degradation_silence_unproven` remains.
 
-- [ ] **Step 3: Run RED tests**
+- [x] **Step 3: Run RED tests**
 
 ```bash
 npm test -- tests/core/recovery-debt.test.ts tests/core/health.test.ts tests/core/health-silence-proof-2280.test.ts --pool=forks --fileParallelism=false --retry=0
@@ -367,14 +367,14 @@ npm test -- tests/core/recovery-debt.test.ts tests/core/health.test.ts tests/cor
 
 Expected: missing module/fields and latch recovery failure.
 
-- [ ] **Step 4: Implement one normalized snapshot per request**
+- [x] **Step 4: Implement one normalized snapshot per request**
 
 Build `recoveryDebt` after the once-sampled runtime and durability evidence.
 Use `recoveryDebt.service_blocking` as the only debt contribution to
 `statusReasons`. Keep the existing singular `reason` for continuity
 compatibility and add ordered `reasons`.
 
-- [ ] **Step 5: Implement explicit latch clearing**
+- [x] **Step 5: Implement explicit latch clearing**
 
 Replace unconditional set-only behavior with:
 
@@ -388,12 +388,12 @@ else if (recentlyDegraded.has(instanceName)) statusReasons.push('degradation_sil
 The proof must include connected transport, current model evidence, sampled
 runtime, schema/pending-poll readability, and readable nonblocking debt.
 
-- [ ] **Step 6: Re-run and measure**
+- [x] **Step 6: Re-run and measure**
 
 Expected: all focused tests PASS and the same-process recovery sequence changes
 from `0/1 recovered` to `1/1 recovered` without weakening unreadable behavior.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/core/recovery-debt.ts src/core/health.ts tests/core/recovery-debt.test.ts tests/core/health.test.ts tests/core/health-silence-proof-2280.test.ts
@@ -425,7 +425,7 @@ recoveryDebt: {
 } | null;
 ```
 
-- [ ] **Step 1: Write poller lifecycle tests**
+- [x] **Step 1: Write poller lifecycle tests**
 
 Assert a connected `status=healthy`, `recovery_debt.open=true`,
 `service_blocking=false` response is `online`, does not emit
@@ -435,19 +435,19 @@ a fresh readable `open=false` sample.
 
 Assert malformed debt becomes degraded and cannot clear either alert.
 
-- [ ] **Step 2: Run RED tests**
+- [x] **Step 2: Run RED tests**
 
 Expected: healthy debt is online but no debt summary/alert exists; malformed
 debt currently slips through as online.
 
-- [ ] **Step 3: Add a strict debt parser and lifecycle owner**
+- [x] **Step 3: Add a strict debt parser and lifecycle owner**
 
 Parse only bounded arrays, enums, nonnegative safe integers, and timestamps.
 Evidence contains reason codes and aggregate buckets only. Reuse poll cadence
 and checked alert/clear functions. Do not call heal or status-change listeners
 for debt-only changes.
 
-- [ ] **Step 4: Register source and signal dispositions**
+- [x] **Step 4: Register source and signal dispositions**
 
 Add `recovery_debt_attention` with disposition
 `non_paging_operator_recovery_debt` and owner `src/fleet/health-poller.ts`.
@@ -455,7 +455,7 @@ Register blocking gauges as `positive_is_risk` and retained gauges as
 `diagnostic_only`. Update the deployed registry manifest through its canonical
 guard workflow.
 
-- [ ] **Step 5: Re-run TypeScript and Python contract tests**
+- [x] **Step 5: Re-run TypeScript and Python contract tests**
 
 ```bash
 npm test -- tests/core/failure-taxonomy-cross-contract.test.ts tests/fleet/health-poller.test.ts tests/fleet/health-poller-branches.test.ts --pool=forks --fileParallelism=false --retry=0
@@ -465,7 +465,7 @@ python3 -m unittest deploy.scripts.tests.test_bot_errors_fault_taxonomy_registry
 Expected: PASS. Record alert counts for identical debt samples before/after;
 keep only if exactly one open and one clear are emitted.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/lib/fault-taxonomy-registry.json src/lib/fault-classifier.ts src/fleet/health-poller.ts tests/core/failure-taxonomy-cross-contract.test.ts tests/fleet/health-poller.test.ts tests/fleet/health-poller-branches.test.ts deploy/scripts/tests/test_bot_errors_fault_taxonomy_registry.py deploy/bot-errors-runtime-manifest.json
@@ -493,7 +493,7 @@ git commit -m "feat(fleet): observe recovery debt independently of health status
 - `computeKpis` adds `recoveryDebtLines: number` without changing `needAttention`.
 - Feed adds `detail.type='recovery_debt'` with `state='opened'|'changed'|'cleared'`.
 
-- [ ] **Step 1: Write failing API and KPI tests**
+- [x] **Step 1: Write failing API and KPI tests**
 
 For an online line with nonblocking debt, assert:
 
@@ -505,13 +505,13 @@ Assert the lines API contains the normalized summary, line detail renders a
 separate “Recovery debt” section, and no `degradation_causes` warning chip is
 shown solely for retained debt.
 
-- [ ] **Step 2: Write feed transition tests**
+- [x] **Step 2: Write feed transition tests**
 
 Assert debt open/change/clear emits independently from operational status and
 that an online transition plus retained debt is represented as operational
 recovery followed by debt context, not as degraded health.
 
-- [ ] **Step 3: Run RED tests**
+- [x] **Step 3: Run RED tests**
 
 ```bash
 npm test -- tests/fleet/routes/lines.test.ts tests/fleet/routes/feed.test.ts tests/console/compute-kpis.test.ts tests/console/operator-page.test.tsx --pool=forks --fileParallelism=false --retry=0
@@ -519,14 +519,14 @@ npm test -- tests/fleet/routes/lines.test.ts tests/fleet/routes/feed.test.ts tes
 
 Expected: missing summary/KPI/feed/UI assertions fail.
 
-- [ ] **Step 4: Implement additive projections and UI**
+- [x] **Step 4: Implement additive projections and UI**
 
 Keep `needAttention` status-derived. Add debt count to fleet metadata and show
 “all services healthy · N with recovery debt” rather than “N unhealthy”. On
 line detail, render operational causes only when status is not online and debt
 reasons under their own labelled details element.
 
-- [ ] **Step 5: Re-run tests and console build**
+- [x] **Step 5: Re-run tests and console build**
 
 ```bash
 npm test -- tests/fleet/routes/lines.test.ts tests/fleet/routes/feed.test.ts tests/console/compute-kpis.test.ts tests/console/operator-page.test.tsx --pool=forks --fileParallelism=false --retry=0
@@ -537,7 +537,7 @@ npm --prefix console run build
 Expected: PASS. Compare KPI vectors before/after; `needAttention` must stay zero
 for debt-only and one for operational degradation.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/fleet/routes/lines.ts src/fleet/routes/feed.ts tests/fleet/routes/lines.test.ts tests/fleet/routes/feed.test.ts console/src/types.ts console/src/lib/compute-kpis.ts console/src/components/fleet/FleetKpis.tsx console/src/pages/LineDetail.tsx console/src/pages/Operator.tsx tests/console
@@ -559,32 +559,32 @@ git commit -m "feat(console): distinguish service health from recovery debt"
 - `status=healthy` plus readable `service_blocking=false` remains accepted.
 - `status=healthy` plus `service_blocking=true`, malformed debt, or unreadable blocking evidence is rejected as contradictory.
 
-- [ ] **Step 1: Add consumer matrix fixtures**
+- [x] **Step 1: Add consumer matrix fixtures**
 
 Each consumer receives four bodies: healthy/no debt, healthy/retained debt,
 degraded/blocking debt, and contradictory healthy/blocking debt. Assert release
 and heal acceptance only for the first two, no watchdog restart for the first
 two, and no general degraded alert for retained debt.
 
-- [ ] **Step 2: Run RED tests**
+- [x] **Step 2: Run RED tests**
 
 Expected: retained debt is already accepted where status alone is used;
 contradictory debt is not yet rejected. Record this partial baseline rather
 than calling it green.
 
-- [ ] **Step 3: Add shared validation semantics at each language boundary**
+- [x] **Step 3: Add shared validation semantics at each language boundary**
 
 Python and TypeScript consumers validate the three debt fields they require:
 `open`, `service_blocking`, and `attention`. They do not reimplement producer
 category arithmetic. A missing debt object remains compatible; a present
 malformed or contradictory object fails closed.
 
-- [ ] **Step 4: Re-run all consumer fixtures**
+- [x] **Step 4: Re-run all consumer fixtures**
 
 Run the focused Vitest suites plus the exact Python unittest modules found in
 Step 1. Expected: all four-body matrices pass for every consumer.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add deploy/scripts/lib/classify_health.py scripts/validate-startup-notification-release.ts deploy/scripts/tests tests/scripts
@@ -603,20 +603,20 @@ git commit -m "fix(ops): validate health and recovery debt consistently"
 **Interfaces:**
 - Documents the exact JSON fields, classification table, alert ownership, and rollback.
 
-- [ ] **Step 1: Update public surface and durability contracts**
+- [x] **Step 1: Update public surface and durability contracts**
 
 Replace claims that all open recovery/catch-up debt degrades health. Document
 the additive object, compatibility `reason`, ordered `reasons`, blocking
 invariants, corroboration immutability, and authenticated-only exposure.
 
-- [ ] **Step 2: Update runbook and configuration**
+- [x] **Step 2: Update runbook and configuration**
 
 Document how to distinguish outage from debt, inspect aggregate categories,
 respond to routine versus urgent debt, interpret the dedicated fleet alert,
 and prove a latch clear. Add any new environment variable only if Task 5
 demonstrates the existing cadence/dedupe is insufficient.
 
-- [ ] **Step 3: Regenerate publication classification and run doc gates**
+- [x] **Step 3: Regenerate publication classification and run doc gates**
 
 ```bash
 npm run guard:publication:write
@@ -627,7 +627,7 @@ npm run guard:doc-drift
 
 Expected: PASS with no unclassified files or stale public-surface claims.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add docs/public-surface.md docs/runbook.md docs/configuration.md docs/durability.md docs/publication-audit.md

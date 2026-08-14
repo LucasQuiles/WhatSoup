@@ -656,8 +656,18 @@ if recovery_debt_raw is not None:
         (recovery_delivery, "corroborated_retained"),
     )
     recovery_counts = [section.get(field) for section, field in recovery_count_fields]
-    if any(type(value) is not int or value < 0 for value in recovery_counts):
+    if any(
+        type(value) is not int or value < 0 or value > 9_007_199_254_740_991
+        for value in recovery_counts
+    ):
         print("untrusted recovery debt counts", file=sys.stderr)
+        sys.exit(6)
+    if (
+        "reason" not in recovery_debt_raw
+        or "next_action" not in recovery_identity
+        or "oldest_uncorroborated_at" not in recovery_delivery
+    ):
+        print("missing recovery debt nullable fields", file=sys.stderr)
         sys.exit(6)
     recovery_next_action = recovery_identity.get("next_action")
     recovery_oldest = recovery_delivery.get("oldest_uncorroborated_at")

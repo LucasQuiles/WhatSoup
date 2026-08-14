@@ -81,6 +81,23 @@ _CONNECTED = {
 }
 
 
+def test_recovery_debt_matches_versioned_contract_corpus():
+    fixture_path = (
+        Path(__file__).resolve().parents[3]
+        / "tests"
+        / "fixtures"
+        / "recovery-debt-contract-v1.json"
+    )
+    corpus = json.loads(fixture_path.read_text(encoding="utf-8"))
+    assert corpus["version"] == 1
+    for case in corpus["cases"]:
+        expected_code = 0 if case["expectedIssue"] is None else 6
+        assert _run_decision(_health(
+            case["status"],
+            recovery_debt=case["debt"],
+        )) == expected_code, case["name"]
+
+
 def _debt(**overrides) -> dict:
     value = {
         "open": True,
