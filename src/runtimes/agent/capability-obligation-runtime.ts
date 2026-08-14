@@ -708,6 +708,17 @@ export async function dispatchCapabilityObligationTurnViaSession(
   mintedMessageId: string,
   mintedSeq: number,
 ): Promise<ObligationDispatchOutcome> {
+  // Capability-obligation replay is per_chat-only (the runtime is activated
+  // solely under sessionScope === 'per_chat'). Upstream (#2170) widened
+  // TurnRecoveryDispatchTarget to a discriminated union that also admits
+  // scope-native shared/singleton targets with NO mapKey; such a target can
+  // never carry a per-chat obligation, so narrow to the per_chat variant and
+  // fail closed on anything else (requeue — never dispatch on a target the
+  // per-chat pipeline cannot key).
+  if (target.scope !== 'per_chat') {
+    log.warn({ obligationId: obligation.id, scope: target.scope }, 'obligation dispatch target is not per_chat; retryable');
+    return 'retryable';
+  }
   const session = target.session as SessionManager;
   // The minted turn must INSTRUCT the agent to run the capability (naming the
   // exact source); the bare replay text alone would quarantine silently.
