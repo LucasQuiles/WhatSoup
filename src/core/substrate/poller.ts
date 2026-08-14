@@ -246,6 +246,28 @@ export interface TriggerPollerOptions {
   occurrenceLeaseOwner?: string;
   /** Max triggers fetched per tick. Default 50. */
   batchSize?: number;
+  /**
+   * #2566 slice 2 — max concurrently executing non-side-effecting probe
+   * triggers (poll.sqlite/pinecone/file/url) per tick. Side-effecting kinds
+   * (poll.shell, schedule.*, event.message) always run strictly serially.
+   * Default 4.
+   */
+  maxConcurrentExecutors?: number;
+  /**
+   * #2566 slice 2 — upper bound (seconds) the run loop waits for a tick
+   * before re-arming the timer anyway. Stragglers keep running detached and
+   * finalize normally; the budget only protects the TIMER from a hung
+   * executor. Default 600s.
+   */
+  tickBudgetSeconds?: number;
+  /**
+   * #2566 slice 2 — per-execution timeout (seconds) for probe kinds only.
+   * A probe is read-only, so abandoning it is safe: the occurrence is
+   * finalized 'failed' with errorKind 'execution_timeout' and the pool slot
+   * is freed. Side-effecting kinds are never timed out here (whether their
+   * side effect happened is unknowable). Default 300s.
+   */
+  executionTimeoutSeconds?: number;
   /** Injectable clock for tests. Returns unix seconds. */
   now?: () => number;
   /** Injectable timers for tests. */
@@ -349,6 +371,13 @@ interface UrlTriggerSpec {
 
 /** Default top_k when a poll.pinecone spec omits it. */
 const PINECONE_DEFAULT_TOP_K = 5;
+
+/**
+ * #2566 slice 2 — trigger kinds with no side effects. Only these are eligible
+ * for the bounded concurrent pool and the execution timeout: abandoning a
+ * read-only probe is always safe, abandoning anything else is not.
+ */
+const PROBE_KINDS = new Set(['poll.sqlite', 'poll.pinecone', 'poll.file', 'poll.url']);
 
 /**
  * Enumerated `outputJson.reason` codes emitted by the trigger executors. Single source of truth to
@@ -474,6 +503,9 @@ export class TriggerPoller {
   private readonly stmtSweepStaleOccurrences: StatementSync;
   private readonly occurrenceLeaseTtlSeconds: number;
   private readonly occurrenceLeaseOwner: string;
+  private readonly maxConcurrentExecutors: number;
+  private readonly tickBudgetSeconds: number;
+  private readonly executionTimeoutSeconds: number;
 
   constructor(db: DatabaseSync, messenger: Messenger, opts: TriggerPollerOptions = {}) {
     this.db = db;
@@ -620,6 +652,9 @@ export class TriggerPoller {
     this.occurrenceLeaseTtlSeconds = opts.occurrenceLeaseTtlSeconds ?? 900;
     this.occurrenceLeaseOwner = opts.occurrenceLeaseOwner
       ?? `pid:${process.pid}:${randomBytes(4).toString('hex')}`;
+    this.maxConcurrentExecutors = opts.maxConcurrentExecutors ?? 4;
+    this.tickBudgetSeconds = opts.tickBudgetSeconds ?? 600;
+    this.executionTimeoutSeconds = opts.executionTimeoutSeconds ?? 300;
     this.stmtClaimOccurrence = this.db.prepare(
       `INSERT INTO trigger_occurrences (
          trigger_id, bead_id, scheduled_for, attempt, state,
@@ -629,7 +664,8 @@ export class TriggerPoller {
     this.stmtFinalizeOccurrence = this.db.prepare(
       `UPDATE trigger_occurrences
        SET state = ?, finished_at = ?
-       WHERE id = ? AND lease_owner = ? AND lease_generation = ?`,
+       WHERE id = ? AND lease_owner = ? AND lease_generation = ?
+         AND state IN ('claimed','running')`,
     );
     this.stmtSweepStaleOccurrences = this.db.prepare(
       `UPDATE trigger_occurrences
@@ -699,8 +735,33 @@ export class TriggerPoller {
       }
     }
     // 2. Due triggers — normal poll/schedule execution path.
+    //    #2566 slice 2: non-side-effecting probes run through a bounded pool
+    //    so one hung probe cannot starve unrelated due triggers; every
+    //    side-effecting kind stays strictly serial (ordering contract, and
+    //    replay/idempotency for those kinds is later-slice material).
     const due = dueTriggers(this.db, now, this.batchSize);
-    for (const t of due) {
+    const probes = due.filter((t) => PROBE_KINDS.has(t.kind));
+    const serial = due.filter((t) => !PROBE_KINDS.has(t.kind));
+    let nextProbe = 0;
+    const probeWorker = async (): Promise<void> => {
+      while (nextProbe < probes.length) {
+        const t = probes[nextProbe++];
+        try {
+          await this.processTrigger(t, now);
+          processed++;
+        } catch (err) {
+          log.error(
+            { err, triggerId: t.id, kind: t.kind },
+            'trigger run failed unexpectedly',
+          );
+        }
+      }
+    };
+    const workers = Array.from(
+      { length: Math.min(this.maxConcurrentExecutors, probes.length) },
+      () => probeWorker(),
+    );
+    for (const t of serial) {
       try {
         await this.processTrigger(t, now);
         processed++;
@@ -711,6 +772,7 @@ export class TriggerPoller {
         );
       }
     }
+    await Promise.all(workers);
     // 3. Backlog-growth alert (#1773 rem-3). Isolated in its own try/catch so
     //    a count-query failure can never disrupt trigger draining above —
     //    tickOnce's primary job is dueTriggers/expiry, not this alert.
@@ -847,10 +909,24 @@ export class TriggerPoller {
 
   private async tick(): Promise<void> {
     this.timer = null;
-    try {
-      await this.tickOnce();
-    } catch (err) {
+    // #2566 slice 2 — bounded await: the timer must survive a hung executor.
+    // Stragglers past the budget keep running detached and finalize normally
+    // (fenced); only the re-arm decision stops waiting for them.
+    const tickPromise = this.tickOnce().catch((err) => {
       log.error({ err }, 'unexpected error in tick — rescheduling');
+      return 0;
+    });
+    let budgetTimer: ReturnType<typeof setTimeout> | null = null;
+    const budget = new Promise<'budget'>((resolve) => {
+      budgetTimer = this.setTimeoutImpl(() => resolve('budget'), this.tickBudgetSeconds * 1000);
+    });
+    const raced = await Promise.race([tickPromise, budget]);
+    if (budgetTimer !== null) this.clearTimeoutImpl(budgetTimer);
+    if (raced === 'budget') {
+      log.warn(
+        { tickBudgetSeconds: this.tickBudgetSeconds },
+        'tick exceeded budget — re-arming timer with stragglers still in flight',
+      );
     }
     if (!this.stopped) this.scheduleNext();
   }
@@ -885,7 +961,7 @@ export class TriggerPoller {
 
     let outcome: ExecuteOutcome;
     try {
-      outcome = await this.executeTrigger(t);
+      outcome = await this.executeWithTimeout(t);
     } catch (err) {
       outcome = {
         status: 'failed',
@@ -1002,6 +1078,41 @@ export class TriggerPoller {
     const elapsed = now - row.started_at;
     if (elapsed >= this.notificationThrottleMinIntervalSec) return 0;
     return this.notificationThrottleMinIntervalSec - elapsed;
+  }
+
+  /**
+   * #2566 slice 2 — probe kinds race their executor against
+   * executionTimeoutSeconds. On timeout the occurrence is finalized 'failed'
+   * with the bounded class 'execution_timeout' and the pool slot frees; the
+   * abandoned promise is detached with its rejection swallowed, and the
+   * finalize state guard (state IN claimed/running) makes any late write a
+   * no-op. Side-effecting kinds pass through un-raced: whether their side
+   * effect happened is unknowable, so they are never abandoned.
+   */
+  private async executeWithTimeout(t: TriggerRow): Promise<ExecuteOutcome> {
+    if (!PROBE_KINDS.has(t.kind)) return this.executeTrigger(t);
+    const exec = this.executeTrigger(t);
+    let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
+    const timeout = new Promise<'timeout'>((resolve) => {
+      timeoutTimer = this.setTimeoutImpl(() => resolve('timeout'), this.executionTimeoutSeconds * 1000);
+    });
+    try {
+      const raced = await Promise.race([exec, timeout]);
+      if (raced !== 'timeout') return raced as ExecuteOutcome;
+      exec.catch((err) => {
+        log.warn({ err, triggerId: t.id, kind: t.kind }, 'timed-out probe rejected after abandonment');
+      });
+      return {
+        status: 'failed',
+        fired: false,
+        outputSummary: `probe exceeded execution timeout (${this.executionTimeoutSeconds}s)`,
+        outputJson: {},
+        errorKind: 'execution_timeout',
+        errorMessage: `execution exceeded ${this.executionTimeoutSeconds}s`,
+      };
+    } finally {
+      if (timeoutTimer !== null) this.clearTimeoutImpl(timeoutTimer);
+    }
   }
 
   private async executeTrigger(t: TriggerRow): Promise<ExecuteOutcome> {
