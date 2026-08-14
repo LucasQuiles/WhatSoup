@@ -58,6 +58,10 @@ interface LiveWiringRuntimeState extends RuntimeState {
     abortControl?: TurnRecoveryReplayAbortControl,
   ): Promise<TurnRecoveryReplayDispatchResult>;
   perChatRuntimeTurnCompletions: Map<string, RuntimeTurnCompletion>;
+  // #2170 global-scope wiring proof: the singleton/shared pipeline exposes
+  // its one live session and the scalar completion the same narrow-cast way.
+  session: ReturnType<typeof sessionStub> | null;
+  currentRuntimeTurnCompletion: RuntimeTurnCompletion | null;
   // requireSessionToolScopeKey (runtime.ts:1069) reads this WeakMap, normally
   // populated only by the real session-spawn path (runtime.ts:11166). A
   // stub session injected directly into chatSessions was never spawned, so
@@ -242,23 +246,23 @@ describe('AgentRuntime.dispatchTurnRecoveryReplay — live wiring (PRESTAGE-T4 P
     expect(outcome).toEqual({ kind: 'delivered' });
   });
 
-  it('(c) both pre-claim skips fire on the REAL constructed supervisor instance, not a fresh test-only one', async () => {
+  it('(c) pre-claim skips fire on the REAL constructed supervisor instance, not a fresh test-only one (#2170: shared scope is now supported and skips only on target resolution)', async () => {
     const supervisorState = state as unknown as LiveWiringRuntimeState;
 
-    // Unsupported scope: a genuine shared-scope job, created as 'shared'
-    // from the start (scope is immutable post-creation — see the fixture's
-    // doc comment).
+    // #2170: a shared-scope job is no longer skippedUnsupportedScope — the
+    // production supervisor supports all three scopes. With NO live singleton
+    // session on this runtime, target resolution returns null and the job
+    // skips as not-dispatchable BEFORE claiming (never claim-then-fail).
     crashOneSourceTurn(db, durability, '15550190778', 'shared-scope', 'shared');
 
     // Not dispatchable: a genuine per_chat job with NO live session — the
-    // REAL isDispatchable closure built in AgentRuntime's constructor checks
-    // state.chatSessions.has(mapKey), which is empty for this mapKey.
+    // REAL resolveDispatchTarget closure returns null for its mapKey.
     crashOneSourceTurn(db, durability, '15550190779', 'no-session');
 
     const result = await supervisorState.turnRecoverySupervisor.scanOnce();
     expect(result.scanned).toBe(2);
-    expect(result.skippedUnsupportedScope).toBe(1);
-    expect(result.skippedNotDispatchable).toBe(1);
+    expect(result.skippedUnsupportedScope).toBe(0);
+    expect(result.skippedNotDispatchable).toBe(2);
     expect(result.claimed).toBe(0);
   });
 
@@ -684,5 +688,104 @@ describe('AgentRuntime.shutdown — H2 turn-recovery scan quiescence ordering', 
     expect(deadmanStop.mock.invocationCallOrder[0]).toBeLessThan(
       supervisorStop.mock.invocationCallOrder[0]!,
     );
+  });
+});
+
+describe('AgentRuntime.dispatchTurnRecoveryReplay — #2170 scope-native shared/singleton wiring', () => {
+  let db: Database;
+  let durability: DurabilityEngine;
+  let runtime: ReturnType<typeof makeRuntimeState<LiveWiringRuntimeState>>['runtime'];
+  let state: LiveWiringRuntimeState;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    db.open();
+    durability = new DurabilityEngine(db);
+    // Shared-mode runtime: global TurnQueue + the one instance session — the
+    // exact production shape whose recovery jobs were skipped before #2170.
+    const built = makeRuntimeState<LiveWiringRuntimeState>(db, { sessionScope: 'shared' });
+    runtime = built.runtime;
+    state = built.state;
+    runtime.setDurability(durability);
+  });
+
+  afterEach(async () => {
+    await runtime.shutdown().catch(() => {});
+    db.close();
+  });
+
+  it('dispatches a claimed shared-scope job through the REAL global-turn pipeline with excludeJobId admission (falsifier: skipped pre-#2170)', async () => {
+    const { jobId, conversationKey, sourceInboundSeq } = crashOneSourceTurn(db, durability, '15550190790', 'shared-e2e', 'shared');
+
+    // The block is REAL for the whole shared scope while the job is open...
+    expect(durability.hasOutstandingTurnRecoveryForScope('shared', conversationKey)).toBe(true);
+    // ...and the replay's own exclusion is the only admission that passes.
+    expect(durability.hasOutstandingTurnRecoveryForScope('shared', conversationKey, { excludeJobId: jobId })).toBe(false);
+
+    const owner = { logicalTurnId: OWNER.logicalTurnId, managerId: OWNER.managerId, generation: OWNER.generation };
+    const claim = durability.claimTurnRecoveryJob(jobId, owner, { claimToken: 'shared-e2e-claim', leaseSeconds: 120 });
+    expect(claim.applied).toBe(true);
+    const fence: TurnRecoveryClaimFence = { claimToken: claim.claimToken, claimEpoch: claim.claimEpoch };
+
+    // The instance's one live session (stub subprocess boundary, as above).
+    const session = sessionStub();
+    state.session = session;
+
+    const job = durability.getTurnRecoveryJob(jobId)!;
+    const dispatchPromise = state.dispatchTurnRecoveryReplay(job, fence);
+
+    // Admission (beginRuntimeTurnEvidence with excludeJobId) runs inside the
+    // REAL processTurn before the provider send; once it succeeds the scalar
+    // singleton completion is registered. If the global-scope arm were still
+    // the pre-#2170 stub, dispatchReplay would fast-resolve retryable_failure
+    // and no completion would ever appear — waitFor times out RED.
+    await vi.waitFor(() => {
+      expect(state.currentRuntimeTurnCompletion).not.toBeNull();
+    });
+    expect(session.sendTurn).toHaveBeenCalledTimes(1);
+
+    durability.completeInbound(sourceInboundSeq, 'response_sent');
+    state.currentRuntimeTurnCompletion!.resolve();
+
+    const outcome = await dispatchPromise;
+    expect(outcome).toEqual({ kind: 'delivered' });
+  });
+
+  it('fails retryable when the resolved target went stale (session replaced) instead of sending on the wrong session', async () => {
+    const { jobId } = crashOneSourceTurn(db, durability, '15550190791', 'shared-stale', 'shared');
+    const owner = { logicalTurnId: OWNER.logicalTurnId, managerId: OWNER.managerId, generation: OWNER.generation };
+    const claim = durability.claimTurnRecoveryJob(jobId, owner, { claimToken: 'shared-stale-claim', leaseSeconds: 120 });
+    const fence: TurnRecoveryClaimFence = { claimToken: claim.claimToken, claimEpoch: claim.claimEpoch };
+
+    const original = sessionStub();
+    state.session = original;
+    const job = durability.getTurnRecoveryJob(jobId)!;
+    // Resolve the target against the ORIGINAL session, then replace the
+    // instance session before dispatch — the currency check must refuse.
+    const target = {
+      scope: 'shared' as const,
+      managerId: state.managerIdFor(original),
+      generation: 1,
+      session: original,
+    };
+    const replacement = sessionStub();
+    state.session = replacement;
+
+    const outcome = await state.dispatchTurnRecoveryReplay(job, fence, target);
+    expect(outcome).toEqual({ kind: 'retryable_failure' });
+    expect(original.sendTurn).not.toHaveBeenCalled();
+    expect(replacement.sendTurn).not.toHaveBeenCalled();
+  });
+
+  it('a singleton-scope job with no live instance session resolves no target and skips pre-claim (never claim-then-fail)', async () => {
+    const supervisorState = state as unknown as LiveWiringRuntimeState;
+    crashOneSourceTurn(db, durability, '15550190792', 'singleton-cold', 'singleton');
+    state.session = null;
+
+    const result = await supervisorState.turnRecoverySupervisor.scanOnce();
+    expect(result.scanned).toBe(1);
+    expect(result.skippedUnsupportedScope).toBe(0);
+    expect(result.skippedNotDispatchable).toBe(1);
+    expect(result.claimed).toBe(0);
   });
 });

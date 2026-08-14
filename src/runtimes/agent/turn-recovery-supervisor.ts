@@ -111,14 +111,23 @@ export type TurnRecoveryReplayDispatchResult =
   /** Newly-discovered unsafe condition; the store's blocked_unsafe path owns this, not a requeue. */
   | { readonly kind: 'blocked_unsafe_detected' };
 
-export interface TurnRecoveryDispatchTarget {
-  readonly scope: 'per_chat';
-  readonly mapKey: string;
-  readonly managerId: string;
-  readonly generation: number;
-  /** Exact in-memory target; intentionally opaque to the supervisor. */
-  readonly session: object;
-}
+export type TurnRecoveryDispatchTarget =
+  | {
+      readonly scope: 'per_chat';
+      readonly mapKey: string;
+      readonly managerId: string;
+      readonly generation: number;
+      /** Exact in-memory target; intentionally opaque to the supervisor. */
+      readonly session: object;
+    }
+  | {
+      /** #2170: scope-native singleton/shared targets — the instance's one
+       *  live session; no mapKey (the global turn pipeline has none). */
+      readonly scope: 'shared' | 'singleton';
+      readonly managerId: string;
+      readonly generation: number;
+      readonly session: object;
+    };
 
 export type TurnRecoveryReplayAbortReason =
   | 'claim_fence_lost'
