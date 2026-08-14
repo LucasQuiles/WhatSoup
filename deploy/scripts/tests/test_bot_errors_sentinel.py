@@ -2695,3 +2695,89 @@ def test_consume_action_outbox_consumes_restart_host(tmp_path, monkeypatch):
     assert not action_file.exists()
     assert len(list(outbox.glob("*.done"))) == 1
     assert "restart -- wa-bot-x" in ledger.read_text(encoding="utf-8")
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Issue #2468 slice 2: the ack receipt must bind the exact heartbeat
+# observation the sentinel evaluated (content digest + checkedAt) and the
+# evaluation context (cycleSeq, roster epoch/digest).
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def _observation_digest(payload: dict) -> str:
+    import hashlib
+
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(b"bot-errors-heartbeat-observation:" + canonical).hexdigest()
+
+
+def test_ack_receipt_v2_binds_observation_and_evaluation(tmp_path: Path):
+    hb = _heartbeat(tmp_path / "host-a-hb.json", healthy=True, mtime=1000.0, checked_at="1970-01-01T00:16:40Z")
+    ack = tmp_path / "acks" / "host-a.json"
+    hosts = _hosts_file(tmp_path, [{"host": "host-a", "heartbeatPath": str(hb), "ackPath": str(ack)}])
+    config = _config(tmp_path, hosts)
+    result = _mod.run_once(config, _deps(1010.0, {"host-a": {"reachable": True, "healthy": True, "class": "healthy"}}))
+    receipt = json.loads(ack.read_text(encoding="utf-8"))
+    assert receipt["schemaVersion"] == 2
+    assert receipt["kind"] == "bot-errors-central-ack-receipt"
+    assert receipt["host"] == "host-a"
+    assert receipt["centralClass"] == "healthy"
+    expected_digest = _observation_digest(json.loads(hb.read_text(encoding="utf-8")))
+    assert receipt["observedHeartbeat"]["contentDigest"] == expected_digest
+    assert receipt["observedHeartbeat"]["checkedAt"] == "1970-01-01T00:16:40Z"
+    assert receipt["observedHeartbeat"]["ageSeconds"] == 10
+    assert receipt["evaluation"]["evaluatedAt"] == _mod.now_iso(1010.0)
+    assert receipt["evaluation"]["cycleSeq"] == result["cycleSeq"]
+    assert receipt["evaluation"]["rosterEpoch"] == int(hosts.stat().st_mtime)
+    assert receipt["evaluation"]["rosterDigest"] == result["rosterInventory"]["digest"]
+
+
+def test_ack_receipt_without_heartbeat_checked_at_still_binds_digest(tmp_path: Path):
+    hb = _heartbeat(tmp_path / "host-a-hb.json", healthy=True, mtime=1000.0)
+    ack = tmp_path / "acks" / "host-a.json"
+    hosts = _hosts_file(tmp_path, [{"host": "host-a", "heartbeatPath": str(hb), "ackPath": str(ack)}])
+    config = _config(tmp_path, hosts)
+    _mod.run_once(config, _deps(1010.0, {"host-a": {"reachable": True, "healthy": True, "class": "healthy"}}))
+    receipt = json.loads(ack.read_text(encoding="utf-8"))
+    assert receipt["observedHeartbeat"]["checkedAt"] is None
+    assert receipt["observedHeartbeat"]["contentDigest"] == _observation_digest(json.loads(hb.read_text(encoding="utf-8")))
+
+
+def test_ack_receipt_never_binds_to_unparseable_heartbeat(tmp_path: Path):
+    hb = tmp_path / "host-a-hb.json"
+    hb.write_text("{torn", encoding="utf-8")
+    os.utime(hb, (1000.0, 1000.0))
+    ack = tmp_path / "acks" / "host-a.json"
+    hosts = _hosts_file(tmp_path, [{"host": "host-a", "heartbeatPath": str(hb), "ackPath": str(ack)}])
+    config = _config(tmp_path, hosts)
+    _mod.run_once(config, _deps(1010.0, {"host-a": {"reachable": True, "healthy": True, "class": "healthy"}}))
+    receipt = json.loads(ack.read_text(encoding="utf-8"))
+    assert receipt["observedHeartbeat"]["contentDigest"] is None
+    assert receipt["observedHeartbeat"]["checkedAt"] is None
+
+
+def test_ack_receipt_cycle_seq_matches_evaluating_cycle_across_runs(tmp_path: Path):
+    hb = _heartbeat(tmp_path / "host-a-hb.json", healthy=True, mtime=1000.0)
+    ack = tmp_path / "acks" / "host-a.json"
+    hosts = _hosts_file(tmp_path, [{"host": "host-a", "heartbeatPath": str(hb), "ackPath": str(ack)}])
+    config = _config(tmp_path, hosts)
+    for expected_seq in (1, 2, 3):
+        result = _mod.run_once(config, _deps(1000.0 + expected_seq, {"host-a": {"reachable": True, "healthy": True, "class": "healthy"}}))
+        receipt = json.loads(ack.read_text(encoding="utf-8"))
+        assert result["cycleSeq"] == expected_seq
+        assert receipt["evaluation"]["cycleSeq"] == expected_seq
+
+
+def test_observation_digest_matches_selfcheck_digest_helper(tmp_path: Path):
+    import importlib.util as _ilu
+
+    spec = _ilu.spec_from_file_location(
+        "bot_errors_selfcheck_for_digest",
+        Path(__file__).resolve().parents[1] / "bot-errors-selfcheck.py",
+    )
+    selfcheck = _ilu.module_from_spec(spec)
+    sys.modules[spec.name] = selfcheck
+    spec.loader.exec_module(selfcheck)
+    sample = {"kind": "bot-errors-selfcheck-heartbeat", "host": "x", "healthy": True, "nested": {"b": 2, "a": 1}}
+    assert selfcheck.heartbeat_observation_digest(sample) == _mod.heartbeat_observation_digest(sample)
+    assert _mod.heartbeat_observation_digest(sample) == _observation_digest(sample)
