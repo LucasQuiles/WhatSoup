@@ -7,7 +7,7 @@
  * certain to be refused.
  */
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -19,6 +19,7 @@ import { Database } from '../../src/core/database.ts';
 import { withTransaction } from '../../src/core/db-tx.ts';
 import {
   drainNowRequestSchema,
+  UntrustedRequestDirError,
 } from '../../src/runtimes/agent/capability-obligation-drain-now-service.ts';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 import { parseDrainNowArgs, runDrainNowCli } from '../../scripts/capability-obligation-drain-now.ts';
@@ -67,7 +68,7 @@ function seedObligation(over: Partial<Record<string, unknown>> = {}): number {
           scope: 'per_chat', originRecoveryJobId: null, replayText: 'https://youtu.be/abc',
           contentTypeHint: 'text', contractVersion: 'c/1', requiredCapability: 'child_process_tools',
           capabilityParams: '{"skill":"watch"}', inputDigest: 'ab'.repeat(32), sourceDigest: 'bb'.repeat(32),
-          sourceToken: 'https://youtu.be/abc', retainedMedia: null, creationReason: 'typed_deferral_signal',
+          sourceToken: 'https://youtu.be/abc', retainedMedia: null, creationReason: 'harness_capability_gap',
         },
       }).obligationId!;
     });
@@ -167,6 +168,19 @@ describe('runDrainNowCli', () => {
     expect(result).toMatchObject({ ok: true, obligation: { isGroup: true, groupApprovalLive: true } });
     expect(readdirSync(requestDir)).toEqual([`${id}.json`]);
   });
+
+  it('FALSIFIER (audit F5, real CLI): a pre-existing world-writable drop dir refuses --confirm with a typed error', () => {
+    // The runtime reader would refuse this dir; the CLI writer must refuse it
+    // at write time too — "success" followed by a silent runtime refusal is the
+    // audit F5 split-trust defect.
+    const id = seedObligation({ isGroup: false, deliveryJid: 'test-dm@lid' });
+    mkdirSync(requestDir, { mode: 0o700 });
+    chmodSync(requestDir, 0o777);
+    expect(() =>
+      runDrainNowCli({ dbPath: dbFile, obligationId: id, requestedBy: 'op', json: false, confirm: true }),
+    ).toThrow(UntrustedRequestDirError);
+    expect(readdirSync(requestDir)).toEqual([]); // nothing was published
+  });
 });
 
 describe('drain-now CLI main block (subprocess)', () => {
@@ -183,6 +197,12 @@ describe('drain-now CLI main block (subprocess)', () => {
     const result = runCli(['--db', dbFile, '--obligation-id', String(id), '--requested-by', 'op-subproc', '--confirm']);
     expect(result.status, `stderr: ${result.stderr}`).toBe(0);
     expect(result.stdout).toMatch(/REQUESTED drain-now/);
+    // Audit F2 wording: the runtime consumes at most 3 requests per tick and
+    // drains the NAMED obligation through a targeted scan — the old "services
+    // it within one scan interval" claim was false (global cap-10 oldest-first
+    // tick could starve the named row indefinitely).
+    expect(result.stdout).not.toMatch(/services it within one scan interval/);
+    expect(result.stdout).toMatch(/targeted/);
     expect(readdirSync(requestDir)).toEqual([`${id}.json`]);
   }, 30_000);
 

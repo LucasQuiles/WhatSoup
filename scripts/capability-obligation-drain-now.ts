@@ -1,10 +1,14 @@
 /**
  * capability-obligation-drain-now — the operator front-door for the round-22
- * AE1 drain-now trigger. Writes a drop-file request that the LIVE instance's
- * obligation scan services within one scan interval (30s): the runtime
- * consumes the request, re-checks every gate (`waiting_capability`, live AS-08
- * approval for groups, attestation candidate), activates the per-chat session
- * (fresh spawn, no resume side effects), and runs one supervisor tick.
+ * AE1 drain-now trigger. Writes a drop-file request that the LIVE instance
+ * consumes at the start of an upcoming obligation tick (at most 3 requests per
+ * tick, lowest obligation id first — a backlog can take several intervals):
+ * the runtime re-checks every gate (`waiting_capability`, live AS-08 approval
+ * for groups, attestation candidate), activates the per-chat session (fresh
+ * spawn, no resume side effects), and drains the NAMED obligation through the
+ * supervisor's TARGETED scan. The outcome is derived from the obligation's
+ * post-state and recorded beside the consumed request file (audit F2: never
+ * a blanket "drained" claim).
  *
  * Safety by construction (mirrors capability-obligation-approve-drain):
  *  - SCHEMA GUARD: refuses unless the DB is EXACTLY at the current schema.
@@ -196,7 +200,7 @@ if (import.meta.url === invokedPath) {
       ? JSON.stringify(result)
       : (result.ok
         ? (args.confirm
-          ? `REQUESTED drain-now for obligation #${args.obligationId}: ${result.requestPath} (the live instance services it within one scan interval; expires after ${result.ttlSeconds}s)`
+          ? `REQUESTED drain-now for obligation #${args.obligationId}: ${result.requestPath} (the live instance consumes pending requests at its next obligation tick — at most 3 per tick, lowest id first — and drains the named obligation via a targeted scan; the post-state outcome is recorded beside the consumed request; expires after ${result.ttlSeconds}s)`
           : `DRY-RUN drain-now #${args.obligationId}: WOULD write ${result.requestPath} — pass --confirm to apply`)
         : `refused #${args.obligationId}: ${result.reason}`);
     process.stdout.write(`${line}\n`);

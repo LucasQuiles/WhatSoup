@@ -6,11 +6,22 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import {
+  recordCapabilityAttestation,
+  type CapabilityAttestationBinding,
+} from '../../../src/core/capability-attestation.ts';
 import { CapabilityObligationStore } from '../../../src/core/capability-obligation-store.ts';
 import { Database } from '../../../src/core/database.ts';
 import { withTransaction } from '../../../src/core/db-tx.ts';
-import { drainObligationNow, type DrainNowDeps } from '../../../src/runtimes/agent/capability-obligation-drain-now.ts';
-import type { ObligationTickReport } from '../../../src/runtimes/agent/capability-obligation-supervisor.ts';
+import {
+  deriveNamedDrainOutcome,
+  drainObligationNow,
+  type DrainNowDeps,
+} from '../../../src/runtimes/agent/capability-obligation-drain-now.ts';
+import {
+  CapabilityObligationSupervisor,
+  type ObligationTickReport,
+} from '../../../src/runtimes/agent/capability-obligation-supervisor.ts';
 
 let db: Database;
 let store: CapabilityObligationStore;
@@ -33,7 +44,9 @@ function makeDeps(over: Partial<DrainNowDeps> = {}): { deps: DrainNowDeps; activ
   const deps: DrainNowDeps = {
     db, store,
     activateSession: async (jid) => { activated.push(jid); return true; },
-    runTick: async () => emptyReport(),
+    // A no-op targeted drain: nothing is claimed or dispatched, so the truthful
+    // post-state outcome for a still-due named row is named_parked/still_due.
+    drainNamed: async () => ({ processed: true as const, report: emptyReport() }),
     hasAdmissibleAttestationCandidate: () => true,
     ...over,
   };
@@ -54,7 +67,7 @@ function seedObligation(over: Partial<Record<string, unknown>> = {}): number {
         scope: 'per_chat', originRecoveryJobId: null, replayText: 'https://youtu.be/abc',
         contentTypeHint: 'text', contractVersion: 'c/1', requiredCapability: 'child_process_tools',
         capabilityParams: '{"skill":"watch"}', inputDigest: 'ab'.repeat(32), sourceDigest: 'bb'.repeat(32),
-        sourceToken: 'https://youtu.be/abc', retainedMedia: null, creationReason: 'typed_deferral_signal',
+        sourceToken: 'https://youtu.be/abc', retainedMedia: null, creationReason: 'harness_capability_gap',
       },
     }).obligationId!;
   });
@@ -86,11 +99,12 @@ beforeEach(() => { db = new Database(':memory:'); db.open(); store = new Capabil
 afterEach(() => db.close());
 
 describe('drainObligationNow (gated cold activation)', () => {
-  it('a GROUP with a live AS-08 approval activates the session and runs one tick', async () => {
+  it('a GROUP with a live AS-08 approval activates the session and runs the targeted drain', async () => {
     const { id } = approvedGroup();
     const { deps, activated } = makeDeps();
     const result = await drainObligationNow(deps, id);
-    expect(result).toMatchObject({ activated: true });
+    // The stub drain touches nothing, so the truthful outcome is parked/still_due.
+    expect(result).toMatchObject({ activated: true, named: { kind: 'named_parked', reason: 'still_due' } });
     expect(activated).toEqual([GROUP_JID]);
   });
 
@@ -103,11 +117,11 @@ describe('drainObligationNow (gated cold activation)', () => {
     expect(activated).toEqual([]); // the session is NOT activated for an unauthorised group
   });
 
-  it('a DM in waiting_capability activates and drains without any approval', async () => {
+  it('a DM in waiting_capability activates and runs the targeted drain without any approval', async () => {
     const id = seedObligation({ isGroup: false, deliveryJid: 'test-dm-target@lid', sourceInboundSeq: 8002, sourceMessageId: 'M-DM' });
     const { deps, activated } = makeDeps();
     const result = await drainObligationNow(deps, id);
-    expect(result).toMatchObject({ activated: true });
+    expect(result).toMatchObject({ activated: true, named: { kind: 'named_parked', reason: 'still_due' } });
     expect(activated).toEqual(['test-dm-target@lid']);
   });
 
@@ -118,27 +132,28 @@ describe('drainObligationNow (gated cold activation)', () => {
     expect(activated).toEqual([]);
   });
 
-  it('reports session_activation_failed without running a tick when activation fails', async () => {
+  it('reports session_activation_failed without running the targeted drain when activation fails', async () => {
     const id = seedObligation({ isGroup: false, deliveryJid: 'test-dm-target@lid', sourceInboundSeq: 8003, sourceMessageId: 'M-DM2' });
-    let ticks = 0;
+    let drains = 0;
     const deps: DrainNowDeps = {
-      db, store, activateSession: async () => false, runTick: async () => { ticks += 1; return emptyReport(); },
+      db, store, activateSession: async () => false,
+      drainNamed: async () => { drains += 1; return { processed: true as const, report: emptyReport() }; },
       hasAdmissibleAttestationCandidate: () => true,
     };
     expect(await drainObligationNow(deps, id)).toEqual({ activated: false, reason: 'session_activation_failed' });
-    expect(ticks).toBe(0);
+    expect(drains).toBe(0);
   });
 
   it('FALSIFIER (r22 pre-activation gate): no attestation candidate refuses BEFORE any session is activated', async () => {
     const id = seedObligation({ isGroup: false, deliveryJid: 'test-dm-target@lid', sourceInboundSeq: 8004, sourceMessageId: 'M-DM3' });
-    let ticks = 0;
+    let drains = 0;
     const { deps, activated } = makeDeps({
       hasAdmissibleAttestationCandidate: () => false,
-      runTick: async () => { ticks += 1; return emptyReport(); },
+      drainNamed: async () => { drains += 1; return { processed: true as const, report: emptyReport() }; },
     });
     expect(await drainObligationNow(deps, id)).toEqual({ activated: false, reason: 'no_admissible_attestation' });
     expect(activated).toEqual([]); // the session was never created/activated
-    expect(ticks).toBe(0);
+    expect(drains).toBe(0);
   });
 
   it('a THROWING attestation pre-check refuses fail-closed (never activates)', async () => {
@@ -168,6 +183,218 @@ describe('drainObligationNow (gated cold activation)', () => {
   });
 });
 
+describe('truthful named-drain outcomes (audit F2)', () => {
+  const ATTESTED_BINDING: CapabilityAttestationBinding = {
+    hostId: 'test-host', runtimeUser: 'test-user', releaseSha: 'rel-live-1', schemaVersion: 59,
+    providerId: 'claude-cli', harnessType: 'persistent_session', contractVersion: 'c/1',
+    capability: 'child_process_tools', skillName: 'watch-skill', skillVersion: '1.2.3',
+    skillDigest: 'skill-digest-1', resolverDigest: 'resolver-composite-1',
+    dependencyVersions: { 'yt-dlp': '2026.03.17' }, probeVersion: 'probe/1', canaryId: 'canary-1',
+    mediaRoot: '/tmp/media-root',
+  };
+
+  function freshAttestation(): void {
+    recordCapabilityAttestation(db, {
+      ...ATTESTED_BINDING,
+      canaryResult: 'pass',
+      nonce: `n-${Math.random().toString(36).slice(2)}`,
+      attestedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+    });
+  }
+
+  function realSupervisor(): { supervisor: CapabilityObligationSupervisor; dispatches: number[] } {
+    const dispatches: number[] = [];
+    const supervisor = new CapabilityObligationSupervisor({
+      db,
+      store,
+      dispatchPort: {
+        prepare: (obligation) => ({
+          binding: { ...ATTESTED_BINDING, contractVersion: obligation.contractVersion },
+          dispatch: async () => {
+            dispatches.push(obligation.id);
+            return 'dispatched';
+          },
+        }),
+      },
+      evidencePort: {
+        providerAcceptedIds: () => new Set(),
+        settlementEvidence: () => undefined,
+      },
+    });
+    return { supervisor, dispatches };
+  }
+
+  const rowState = (id: number) =>
+    db.raw.prepare('SELECT state, attempt_count AS attemptCount FROM capability_obligations WHERE id = ?').get(id) as {
+      state: string;
+      attemptCount: number;
+    };
+
+  it('FALSIFIER (audit F2 red): a NAMED obligation behind >10 older due obligations is ACTUALLY processed, and the result says so', async () => {
+    // Global tick is oldest-first, cap 10 — the named 12th row would never be
+    // scanned (the pre-fix code reported success from exactly that tick). A
+    // truthful drain processes the NAMED obligation via the supervisor's
+    // targeted scan and reports an outcome derived from ITS post-state.
+    const older: number[] = [];
+    for (let i = 0; i < 11; i += 1) {
+      older.push(seedObligation({ isGroup: false, deliveryJid: 'test-dm-target@lid', sourceInboundSeq: 8200 + i, sourceMessageId: `M-OLD-${i}` }));
+    }
+    const named = seedObligation({ isGroup: false, deliveryJid: 'test-dm-target@lid', sourceInboundSeq: 8300, sourceMessageId: 'M-NAMED' });
+    freshAttestation();
+    const { supervisor, dispatches } = realSupervisor();
+    const { deps } = makeDeps({ drainNamed: (id) => supervisor.drainNamed(id) });
+    const result = await drainObligationNow(deps, named);
+    // The named obligation itself must have been claimed and dispatched…
+    expect(rowState(named)).toEqual({ state: 'claimed', attemptCount: 1 });
+    expect(dispatches).toEqual([named]);
+    // …and the reported outcome must be derived from the NAMED row's post-state.
+    expect(result).toEqual({
+      activated: true,
+      named: { kind: 'named_dispatched', state: 'claimed', attemptCount: 1, claimEpoch: 1 },
+    });
+    // The targeted path never touches the older backlog.
+    for (const id of older) expect(rowState(id)).toEqual({ state: 'waiting_capability', attemptCount: 0 });
+  });
+
+  it('FALSIFIER (audit F2 red): a drain whose named obligation was NOT touched must not read as success', async () => {
+    // The committed r22 test encoded the lie: an EMPTY tick report was accepted
+    // as a successful drain. The truthful outcome for an untouched, still-due
+    // named row is a typed parked classification — never an unqualified success.
+    const id = seedObligation({ isGroup: false, deliveryJid: 'test-dm-target@lid', sourceInboundSeq: 8301, sourceMessageId: 'M-EMPTY' });
+    const { deps } = makeDeps(); // the no-op drain: nothing scans the named row
+    const result = await drainObligationNow(deps, id);
+    expect(rowState(id)).toEqual({ state: 'waiting_capability', attemptCount: 0 }); // untouched
+    expect(result).toEqual({
+      activated: true,
+      named: { kind: 'named_parked', state: 'waiting_capability', reason: 'still_due', detail: null },
+    });
+  });
+
+  it('an attestation skip during the targeted drain reports named_parked/attestation_skip with the skip reason', async () => {
+    // No attestation recorded: the targeted scan skips (zero attempts) and the
+    // outcome must say so, not claim success.
+    const id = seedObligation({ isGroup: false, deliveryJid: 'test-dm-target@lid', sourceInboundSeq: 8302, sourceMessageId: 'M-SKIP' });
+    const { supervisor, dispatches } = realSupervisor();
+    const { deps } = makeDeps({ drainNamed: (obligationId) => supervisor.drainNamed(obligationId) });
+    const result = await drainObligationNow(deps, id);
+    expect(dispatches).toEqual([]);
+    expect(rowState(id)).toEqual({ state: 'waiting_capability', attemptCount: 0 });
+    expect(result).toEqual({
+      activated: true,
+      named: { kind: 'named_parked', state: 'waiting_capability', reason: 'attestation_skip', detail: 'none_recorded' },
+    });
+  });
+
+  it('a rival claim between gating and the targeted drain reports named_claimed, never this drain\'s success', async () => {
+    const id = seedObligation({ isGroup: false, deliveryJid: 'test-dm-target@lid', sourceInboundSeq: 8303, sourceMessageId: 'M-RIVAL' });
+    freshAttestation();
+    const { supervisor } = realSupervisor();
+    const { deps } = makeDeps({
+      drainNamed: async (obligationId) => {
+        // The rival's claim lands first; our targeted pass then finds it not due.
+        db.raw
+          .prepare(
+            `UPDATE capability_obligations
+             SET state = 'claimed', attempt_count = attempt_count + 1, claim_epoch = claim_epoch + 1,
+                 claim_token = 'rival-token', claim_expires_at = datetime('now', '+300 seconds')
+             WHERE id = ?`,
+          )
+          .run(obligationId);
+        return supervisor.drainNamed(obligationId);
+      },
+    });
+    const result = await drainObligationNow(deps, id);
+    expect(result).toEqual({
+      activated: true,
+      named: { kind: 'named_claimed', state: 'claimed', attemptCount: 1 },
+    });
+  });
+
+  it('deriveNamedDrainOutcome reports named_settled ONLY from the queried row + verified receipt chain', async () => {
+    // Drive a REAL completion through the store (claim → receipt → minted-turn
+    // terminal record → fenced settle) and require the derivation to surface
+    // exactly the durable proofs, not a blanket success.
+    const id = seedObligation({ isGroup: false, deliveryJid: 'test-dm-target@lid', sourceInboundSeq: 8304, sourceMessageId: 'M-CHAIN' });
+    freshAttestation();
+    const { supervisor } = realSupervisor();
+    const tick = await supervisor.drainNamed(id);
+    expect(rowState(id).state).toBe('claimed');
+    const receiptId = store.recordExecutionReceipt({
+      obligationId: id, logicalTurnId: 'turn-drain-1', toolUseId: 'tu-drain-1', skillName: 'watch',
+      contractVersion: 'c/1', inputDigest: 'ab'.repeat(32), mediaDigest: null, resultStatus: 'ok',
+      outputEvidence: { ok: true }, claimEpoch: 1, attemptNumber: 1, sourceDigest: 'bb'.repeat(32),
+    });
+    db.raw
+      .prepare(
+        `INSERT INTO inbound_events (message_id, conversation_key, chat_jid, routed_to)
+         VALUES (?, 'conv-drain', 'test-dm-target@lid', 'agent')`,
+      )
+      .run(`obl:${id}:1`);
+    const seq = (db.raw.prepare('SELECT seq FROM inbound_events WHERE message_id = ?').get(`obl:${id}:1`) as { seq: number }).seq;
+    db.raw
+      .prepare(
+        `INSERT INTO turn_terminal_records (
+           scope, conversation_key, delivery_jid, inbound_seq, inbound_seq_key,
+           logical_turn_id, manager_id, generation, attempt_kind,
+           inbound_disposition, delivery_kind, delivery_op_id, reply_guarantee_disarmed
+         ) VALUES ('per_chat', 'conv-drain', 'test-dm-target@lid', ?, ?, 'turn-drain-1', 'mgr-1', 1,
+                   'replied', 'completed', 'echoed', 434343, 0)`,
+      )
+      .run(seq, seq);
+    const terminalId = Number(
+      (db.raw.prepare('SELECT id FROM turn_terminal_records WHERE inbound_seq = ?').get(seq) as { id: number }).id,
+    );
+    const fence = db.raw
+      .prepare('SELECT claim_token AS claimToken, claim_epoch AS claimEpoch FROM capability_obligations WHERE id = ?')
+      .get(id) as { claimToken: string; claimEpoch: number };
+    expect(
+      store.settleCompleted(id, fence, { executionReceiptId: receiptId, completionProofId: `ttr:${terminalId}` }).applied,
+    ).toBe(true);
+    const outcome = deriveNamedDrainOutcome(store, id, tick);
+    expect(outcome).toEqual({
+      kind: 'named_settled', state: 'completed', completionProofId: `ttr:${terminalId}`, executionReceiptId: receiptId,
+    });
+  });
+
+  it('deriveNamedDrainOutcome fails closed to settlement_evidence_incomplete when the receipt chain cannot be verified', () => {
+    // The schema makes a proof-less completed row unreachable; the derivation
+    // is the last line and must still refuse to call it settled on its own.
+    // A structural store stub models the impossible post-state directly.
+    const stub = {
+      operatorInspectObligation: () => ({
+        obligation: { state: 'completed', attempt_count: 1, claim_epoch: 1, completion_proof_id: null },
+        events: [],
+        receipts: [],
+      }),
+      dueObligationById: () => ({ due: null, state: 'completed', notDueReason: 'not_waiting' }),
+    } as unknown as CapabilityObligationStore;
+    const outcome = deriveNamedDrainOutcome(stub, 7, { processed: true, report: emptyReport() });
+    expect(outcome).toEqual({
+      kind: 'named_parked', state: 'completed', reason: 'settlement_evidence_incomplete', detail: null,
+    });
+  });
+
+  it('deriveNamedDrainOutcome classifies a requeued-under-backoff row as named_parked/backoff_pending', () => {
+    const id = seedObligation({ isGroup: false, deliveryJid: 'test-dm-target@lid', sourceInboundSeq: 8305, sourceMessageId: 'M-BACKOFF' });
+    db.raw
+      .prepare(
+        `UPDATE capability_obligations
+         SET next_attempt_at = datetime('now', '+3600 seconds') WHERE id = ?`,
+      )
+      .run(id);
+    const outcome = deriveNamedDrainOutcome(store, id, { processed: true, report: emptyReport() });
+    expect(outcome).toEqual({
+      kind: 'named_parked', state: 'waiting_capability', reason: 'backoff_pending', detail: null,
+    });
+  });
+
+  it('deriveNamedDrainOutcome reports named_not_found for a vanished row', () => {
+    const outcome = deriveNamedDrainOutcome(store, 424242, { processed: true, report: emptyReport() });
+    expect(outcome).toEqual({ kind: 'named_not_found' });
+  });
+});
+
 describe('hasAttestationCandidateIgnoringProvider (r22 drain-now pre-check)', () => {
   // The pre-check mirrors admission's FULL binding conjunction minus ONLY
   // provider_id/harness_type. Every other field participates and is
@@ -177,7 +404,7 @@ describe('hasAttestationCandidateIgnoringProvider (r22 drain-now pre-check)', ()
   // all of them).
   const FACTS = {
     hostId: 'test-host', runtimeUser: 'test-user', releaseSha: 'rel-live-1',
-    schemaVersion: 58, skillName: 'watch-skill', skillVersion: '1.2.3' as string | null,
+    schemaVersion: 59, skillName: 'watch-skill', skillVersion: '1.2.3' as string | null,
     skillDigest: 'skill-digest-1', resolverDigest: 'resolver-composite-1' as string | null,
     dependencyVersions: { 'yt-dlp': '2026.03.17' } as Record<string, string>,
     probeVersion: 'probe/1', canaryId: 'canary-1', mediaRoot: '/tmp/media-root',
