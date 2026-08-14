@@ -9603,6 +9603,20 @@ export class AgentRuntime implements Runtime {
     tracker?.shutdown();
     this.operationTrackers.delete(currentMapKey);
     this.cleanupPerChatCrashTurnState(currentMapKey);
+    const idleScheduledSession = isScheduledAgentJobMapKey(currentMapKey)
+      && crashContext === undefined
+      && journaledCrashSeq === undefined;
+    if (idleScheduledSession) {
+      this.chatQueues.get(currentMapKey)?.abortTurn();
+      this.chatQueues.delete(currentMapKey);
+      this.cleanupPerChatState(currentMapKey);
+      this.deleteOwnedPerChatSession(currentMapKey, session);
+      log.info(
+        { mapKey: currentMapKey },
+        'idle scheduled agent job session retired after provider exit',
+      );
+      return;
+    }
     if (chatJid && info) {
       this.emitCrashHealReport(
         chatJid,

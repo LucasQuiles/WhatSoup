@@ -663,6 +663,13 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
         chatJid: string;
         persistenceConversationKey?: string;
         notifyUser?: (msg: string) => void;
+        onCrash?: (info: {
+          exitCode: number | null;
+          signal: NodeJS.Signals | null;
+          sessionId: string | null;
+          dbRowId: number | null;
+          generationIdentity: { managerId: string; generation: number };
+        }) => void;
       }> = [];
       const createdSessions: Array<typeof mockSession> = [];
       (MockSessionManagerCtor as unknown as ReturnType<typeof vi.fn>).mockImplementation(function (
@@ -670,6 +677,13 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
           chatJid: string;
           persistenceConversationKey?: string;
           notifyUser?: (msg: string) => void;
+          onCrash?: (info: {
+            exitCode: number | null;
+            signal: NodeJS.Signals | null;
+            sessionId: string | null;
+            dbRowId: number | null;
+            generationIdentity: { managerId: string; generation: number };
+          }) => void;
           onEvent: (event: AgentEvent) => void;
         },
       ) {
@@ -697,6 +711,10 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       const inner = runtime as unknown as {
         _handleMessageInner(msg: IncomingMessage): Promise<void>;
         chatSessions: Map<string, typeof mockSession>;
+        sessionManagerIds: WeakMap<typeof mockSession, string>;
+        sessionOwnership: {
+          get(mapKey: string): { managerId: string; generation: number } | undefined;
+        };
       };
 
       void inner._handleMessageInner(makeMsg({
@@ -730,6 +748,20 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       );
       expect(mockQueue.enqueueText).not.toHaveBeenCalled();
       expect(mockQueue.flush).not.toHaveBeenCalled();
+
+      const scheduledMapKey = `${groupJid}::scheduled-agent-job`;
+      const scheduledSession = createdSessions[1]!;
+      const managerId = inner.sessionManagerIds.get(scheduledSession)!;
+      const generation = inner.sessionOwnership.get(scheduledMapKey)!.generation;
+      createdOptions[1]?.onCrash?.({
+        exitCode: 143,
+        signal: null,
+        sessionId: null,
+        dbRowId: 2015,
+        generationIdentity: { managerId, generation },
+      });
+      expect(inner.chatSessions.has(scheduledMapKey)).toBe(false);
+      expect(inner.chatSessions.has(groupJid)).toBe(true);
     });
 
     it('maps a journal failure to a refused dispatch instead of an unowned ack (#2144)', () => {
