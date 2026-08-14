@@ -1134,3 +1134,25 @@ the very hang it should report. It runs the #1765 past-due gauge (active, never-
 (`trigger_recurring_overdue`: active, fired before, `next_fire_at` more than
 `recurringOverdueGraceSeconds` past — default 900s). Both are fire-once/clear-once latched
 with restart-safe recovery markers.
+
+### 8.4 Durable notification-delivery handoff
+
+Notification dispatch is post-commit by design (a crash mid-send must not roll back the
+committed run result), which used to make a crash between COMMIT and `sendMessage` a silent
+at-most-once loss. The finalize transaction now stamps `notifyPending` on the run's
+`output_json` whenever dispatch will follow; successful dispatch and both classified failure
+paths (`notify_dispatch_failed`, `notify_forbidden_target`) clear it. Startup
+`reconcileDeliveryIntents` marks any surviving intent with the bounded class
+`notify_outcome_unknown` and NEVER re-sends: whether the message left the dead process is
+unknowable, and a duplicate send is a worse failure than a surfaced unknown. Execution state
+(`trigger_occurrences`) and delivery evidence (`deliveredWaMessageId` / notify error kinds)
+are independently queryable.
+
+### 8.5 Agent-job occurrence linkage
+
+`AgentJobContext` carries the durable `occurrenceId` of the dispatching claim, and the agent
+runtime embeds it in the journaled synthetic inbound's messageId
+(`agentjob-<triggerId>-<unixSeconds>-occ<occurrenceId>`). The #2144 turn journal and
+`trigger_occurrences` are therefore deterministically joinable — an accepted agent-job
+occurrence without a matching journaled owner is auditable incoherence rather than an
+unanswerable question.
