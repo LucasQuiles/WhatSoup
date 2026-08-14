@@ -107,6 +107,34 @@ class TestNoRestartWhenConnected:
         # The headline regression: model-probe degraded must not restart.
         assert _run_decision(_health("degraded")) == 0
 
+    def test_degraded_blocking_recovery_debt_no_restart(self):
+        assert _run_decision(_health("degraded", recovery_debt={
+            "open": True,
+            "service_blocking": True,
+            "attention": "urgent",
+        })) == 0
+
+    def test_healthy_retained_recovery_debt_no_restart(self):
+        assert _run_decision(_health("healthy", recovery_debt={
+            "open": True,
+            "service_blocking": False,
+            "attention": "routine",
+        })) == 0
+
+    def test_healthy_blocking_recovery_debt_is_health_unknown(self):
+        assert _run_decision(_health("healthy", recovery_debt={
+            "open": True,
+            "service_blocking": True,
+            "attention": "urgent",
+        })) == 6
+
+    def test_malformed_recovery_debt_is_health_unknown(self):
+        assert _run_decision(_health("healthy", recovery_debt={
+            "open": "yes",
+            "service_blocking": False,
+            "attention": "routine",
+        })) == 6
+
 
 class TestDatabaseCompatibilityDrainNoRestart:
     """A schema/recovery drain is intentionally alive for inspection. Restarting

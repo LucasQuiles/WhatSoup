@@ -36,6 +36,15 @@ function validJournal(overrides: Record<string, unknown> = {}): Record<string, u
   };
 }
 
+function recoveryDebt(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    open: true,
+    service_blocking: false,
+    attention: 'routine',
+    ...overrides,
+  };
+}
+
 function healthWithoutTransport(): Record<string, unknown> {
   const health = completeHealth();
   delete health.transport;
@@ -61,6 +70,53 @@ describe('startup notification release validator', () => {
       journal: validJournal(),
       probe: { outcome: 'passed' },
     })).toMatchObject({ exitCode: 0, outcome: 'accepted', issues: [] });
+  });
+
+  it('accepts healthy retained recovery debt without treating it as service degradation', () => {
+    expect(validateStartupNotificationRelease({
+      health: { ...completeHealth(), recovery_debt: recoveryDebt() },
+      journal: validJournal(),
+      probe: { outcome: 'passed' },
+    })).toMatchObject({ exitCode: 0, outcome: 'accepted', issues: [] });
+  });
+
+  it.each([
+    [
+      'healthy status with blocking debt',
+      recoveryDebt({ service_blocking: true, attention: 'urgent' }),
+      'recovery_debt_status_contradiction',
+    ],
+    [
+      'malformed present debt',
+      { open: 'yes', service_blocking: false, attention: 'routine' },
+      'recovery_debt_invalid',
+    ],
+  ])('rejects %s', (_label, debt, issue) => {
+    expect(validateStartupNotificationRelease({
+      health: { ...completeHealth(), recovery_debt: debt },
+      journal: validJournal(),
+      probe: { outcome: 'passed' },
+    })).toMatchObject({
+      exitCode: 1,
+      outcome: 'rejected',
+      issues: expect.arrayContaining([issue]),
+    });
+  });
+
+  it('treats degraded blocking recovery debt as coherent but not release-ready', () => {
+    expect(validateStartupNotificationRelease({
+      health: {
+        ...completeHealth(),
+        status: 'degraded',
+        recovery_debt: recoveryDebt({ service_blocking: true, attention: 'urgent' }),
+      },
+      journal: validJournal(),
+      probe: { outcome: 'passed' },
+    })).toMatchObject({
+      exitCode: 1,
+      outcome: 'rejected',
+      issues: expect.arrayContaining(['service_not_healthy']),
+    });
   });
 
   it.each([

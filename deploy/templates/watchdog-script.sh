@@ -598,6 +598,27 @@ turn_capability_raw = data.get("turn_capability")
 if turn_capability_raw is not None and not isinstance(turn_capability_raw, dict):
     print("untrusted turn capability object shape", file=sys.stderr)
     sys.exit(6)
+recovery_debt_raw = data.get("recovery_debt")
+if recovery_debt_raw is not None:
+    if not isinstance(recovery_debt_raw, dict):
+        print("untrusted recovery debt object shape", file=sys.stderr)
+        sys.exit(6)
+    recovery_open = recovery_debt_raw.get("open")
+    recovery_service_blocking = recovery_debt_raw.get("service_blocking")
+    recovery_attention = recovery_debt_raw.get("attention")
+    if type(recovery_open) is not bool or type(recovery_service_blocking) is not bool:
+        print("untrusted recovery debt fields", file=sys.stderr)
+        sys.exit(6)
+    expected_recovery_attention = (
+        "urgent" if recovery_service_blocking else "routine" if recovery_open else "none"
+    )
+    if (
+        recovery_attention != expected_recovery_attention
+        or (recovery_service_blocking and not recovery_open)
+        or (status == "healthy" and recovery_service_blocking)
+    ):
+        print("contradictory recovery debt fields", file=sys.stderr)
+        sys.exit(6)
 connected = whatsapp.get("connected") is True
 state = conn.get("state")
 last_pong = conn.get("last_pong_at")

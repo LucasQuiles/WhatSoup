@@ -63,6 +63,7 @@ from lib.state_files import (
     SENTINEL_HEARTBEAT,
 )
 from lib.state_root import q_loop_state_root, sentinel_state_root, state_root as _ssot_state_root
+from lib.classify_health import recovery_debt_issue
 
 
 def state_root() -> Path:
@@ -1394,6 +1395,9 @@ def health_reasons_from_payload(payload: dict, name: str) -> tuple[list[str], di
     bond_status = auth_bond.get("status") if isinstance(auth_bond, dict) else None
     bond_issues = auth_bond.get("issues") if isinstance(auth_bond, dict) else None
     reasons: list[str] = []
+    debt_issue = recovery_debt_issue(payload)
+    if debt_issue is not None:
+        reasons.append(debt_issue)
     if isinstance(actual_name, str) and actual_name != name:
         reasons.append(f"health_identity_mismatch actual={actual_name}")
     if health_status == "unhealthy":

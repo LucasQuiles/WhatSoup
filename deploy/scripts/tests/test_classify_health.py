@@ -29,8 +29,42 @@ def _tc(**over):
     return base
 
 
+def _debt(**over):
+    base = {
+        "open": True,
+        "service_blocking": False,
+        "attention": "routine",
+    }
+    base.update(over)
+    return base
+
+
 def test_healthy_fresh_usable_is_ok():
     assert classify({"status": "healthy", "turn_capability": _tc()}) == "ok"
+
+
+def test_healthy_retained_recovery_debt_is_ok():
+    assert classify({
+        "status": "healthy",
+        "turn_capability": _tc(),
+        "recovery_debt": _debt(),
+    }) == "ok"
+
+
+def test_healthy_blocking_recovery_debt_is_rejected_as_fields():
+    assert classify({
+        "status": "healthy",
+        "turn_capability": _tc(),
+        "recovery_debt": _debt(service_blocking=True, attention="urgent"),
+    }) == "fields"
+
+
+def test_malformed_recovery_debt_is_rejected_as_fields():
+    assert classify({
+        "status": "healthy",
+        "turn_capability": _tc(),
+        "recovery_debt": {"open": "yes", "service_blocking": False, "attention": "routine"},
+    }) == "fields"
 
 
 def test_healthy_but_stale_is_degraded():
@@ -46,6 +80,14 @@ def test_healthy_model_usable_null_is_degraded():
 
 def test_degraded_status_is_degraded():
     assert classify({"status": "degraded", "turn_capability": _tc()}) == "degraded"
+
+
+def test_degraded_blocking_recovery_debt_is_coherent():
+    assert classify({
+        "status": "degraded",
+        "turn_capability": _tc(),
+        "recovery_debt": _debt(service_blocking=True, attention="urgent"),
+    }) == "degraded"
 
 
 def test_missing_turn_capability_is_fields():

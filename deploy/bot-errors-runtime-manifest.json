@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-08-14T05:43:30Z",
+  "generatedAt": "2026-08-14T06:04:45Z",
   "scope": "bot-errors-runtime-scripts",
   "expectedHeadShaPolicy": "populated at deploy time by deploy step; absent here so committed state is observability-only",
   "files": [
@@ -89,7 +89,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "2ee50ada55c773194c9d25736e3413a3694ba75b65712a648ca6e37eba30b170",
+      "sha256": "8acf9c20f537ebbb811c3259ca1d8eb9abeed12a4aff8a8b0a9e48b3ebf7d403",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -158,7 +158,8 @@
         "BOT_ERRORS_HEALTH_BODY_MAX_FUTURE_SKEW_SECONDS",
         "validate_opencode_functional_jsonl",
         "opencode_functional_probe_env",
-        "effective_instance_provider_path"
+        "effective_instance_provider_path",
+        "health_recovery_debt_status_contradiction"
       ]
     },
     {
@@ -171,7 +172,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
-      "sha256": "68ea4ba13950e0954b9b7b772b7c2826d6d3caea8e3559bea59f08cd624eef53",
+      "sha256": "9cd6178db1b3082be172818cb5c7403197c1262e8e8f95c6b08fa9404f16379e",
       "mustContain": [
         "q_loop_state_root",
         "BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT",
@@ -181,7 +182,8 @@
         "refusing to trust critical file",
         "redact_watchdog_text",
         "browser_debug_problems",
-        "collector_reachability_evidence"
+        "collector_reachability_evidence",
+        "recovery_debt_issue"
       ]
     },
     {
@@ -362,9 +364,10 @@
     },
     {
       "path": "deploy/scripts/lib/classify_health.py",
-      "sha256": "782cad21c8fff5be8e57bda78b2429d2f115457705af116518e7555e8b7b2ab7",
+      "sha256": "bb41e782630eaaaf23fb19b5bc37d0d569b6fca1d997f119c1647c6b15606554",
       "mustContain": [
-        "def classify(d: object) -> str:"
+        "def classify(d: object) -> str:",
+        "def recovery_debt_issue(d: object) -> Optional[str]:"
       ]
     },
     {

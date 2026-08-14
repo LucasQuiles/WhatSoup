@@ -74,6 +74,28 @@ function reject(issues: string[]): StartupNotificationReleaseValidationResult {
   return { exitCode: 1, outcome: 'rejected', issues };
 }
 
+function recoveryDebtIssue(health: Record<string, unknown>): string | null {
+  if (!Object.hasOwn(health, 'recovery_debt')) return null;
+  const debt = health.recovery_debt;
+  if (!isRecord(debt)) return 'recovery_debt_invalid';
+  const open = debt.open;
+  const serviceBlocking = debt.service_blocking;
+  const attention = debt.attention;
+  if (
+    typeof open !== 'boolean'
+    || typeof serviceBlocking !== 'boolean'
+    || (attention !== 'none' && attention !== 'routine' && attention !== 'urgent')
+  ) return 'recovery_debt_invalid';
+  const expectedAttention = serviceBlocking ? 'urgent' : open ? 'routine' : 'none';
+  if (attention !== expectedAttention || (serviceBlocking && !open)) {
+    return 'recovery_debt_invalid';
+  }
+  if (health.status === 'healthy' && serviceBlocking) {
+    return 'recovery_debt_status_contradiction';
+  }
+  return null;
+}
+
 /**
  * Pure, one-shot acceptance check for a supplied /health response and the
  * startup-notify v1 journal. It deliberately does not contact a service,
@@ -102,6 +124,8 @@ export function validateStartupNotificationRelease(
   const issues: string[] = [];
   if (probe.outcome === 'failed') issues.push('probe_failed');
   if (input.health.status !== 'healthy') issues.push('service_not_healthy');
+  const debtIssue = recoveryDebtIssue(input.health);
+  if (debtIssue) issues.push(debtIssue);
   if (!hasStrictTransportReadiness(input.health.transport)) issues.push('transport_not_ready');
 
   const startupNotification = input.health.startupNotification;

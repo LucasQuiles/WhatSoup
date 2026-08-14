@@ -49,6 +49,7 @@ from lib.durable_json import (
 )
 from lib.state_files import DEADMAN_STATE, DISPATCHER_STATE, Q_LOOP_STATE
 from lib.state_root import DEFAULT_STATE_ROOT, q_loop_state_root, state_root, test_state_root
+from lib.classify_health import recovery_debt_issue
 
 
 BOT_ERRORS_JID = os.environ.get("BOT_ERRORS_JID", "").strip()
@@ -2783,6 +2784,9 @@ def health_probe_details(status: int, body: str, expected_name: str | None = Non
             add_marker("health_status_unknown")
     elif status == 200:
         add_marker("health_status_missing")
+    debt_issue = recovery_debt_issue(data)
+    if debt_issue is not None:
+        add_marker(f"health_{debt_issue}")
     if status == 200:
         generated_at = data.get("generated_at")
         generated_at_epoch = parse_iso_epoch(generated_at)
@@ -3121,6 +3125,8 @@ def format_health_probe(url: str, status: int, body: str = "", expected_name: st
         or "auth_bond_at_risk" in details
         or "physical_intervention_required" in details
         or "health_unhealthy" in details
+        or "health_recovery_debt_invalid" in details
+        or "health_recovery_debt_status_contradiction" in details
     ):
         prefix = "FAIL "
     elif (

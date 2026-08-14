@@ -4200,6 +4200,47 @@ print(m.probe_health(9092))
       expect(line).toContain('status=healthy');
       expect(line).toContain('instance_name=primary-bot');
     });
+
+    it('accepts healthy retained recovery debt without a general warning', () => {
+      const line = probeLine(200, healthyBody({
+        recovery_debt: {
+          open: true,
+          service_blocking: false,
+          attention: 'routine',
+        },
+      }), 'primary-bot');
+      expect(line).not.toMatch(/^(FAIL|WARN) /);
+    });
+
+    it.each([
+      [
+        'healthy blocking contradiction',
+        { open: true, service_blocking: true, attention: 'urgent' },
+        'health_recovery_debt_status_contradiction',
+      ],
+      [
+        'malformed present debt',
+        { open: 'yes', service_blocking: false, attention: 'routine' },
+        'health_recovery_debt_invalid',
+      ],
+    ])('rejects %s', (_label, debt, marker) => {
+      expect(probeLine(200, healthyBody({ recovery_debt: debt }), 'primary-bot'))
+        .toMatch(new RegExp(`^FAIL 200 .*${marker}`));
+    });
+
+    it('reports degraded blocking recovery debt through status without a contradiction marker', () => {
+      const line = probeLine(200, healthyBody({
+        status: 'degraded',
+        recovery_debt: {
+          open: true,
+          service_blocking: true,
+          attention: 'urgent',
+        },
+      }), 'primary-bot');
+      expect(line).toMatch(/^WARN 200 .*health_degraded/);
+      expect(line).not.toContain('health_recovery_debt_status_contradiction');
+      expect(line).not.toContain('health_recovery_debt_invalid');
+    });
   });
 
   it('fails daily health when local auth bond permissions are too open', () => {
