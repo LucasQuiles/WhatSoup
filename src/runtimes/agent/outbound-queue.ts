@@ -157,6 +157,13 @@ const CHUNK_TRUNCATION_NOTICE = '… [reply truncated]';
 export const TOOL_BATCH_DELAY_MS = 5 * MS_PER_SECOND;
 export const TOOL_BATCH_MAX_AGE_MS = 30 * MS_PER_SECOND;
 export const MIN_SEND_GAP_MS = 500;
+/**
+ * Upper bound on drain-to-idle rounds during a flush (F-01). Each round awaits a
+ * full drain generation; the benign late-enqueue race settles in ~2. A producer
+ * that never stops enqueuing during a flush would otherwise spin forever, so
+ * exceeding this bound is treated as a real anomaly and surfaced as a poison.
+ */
+export const MAX_FLUSH_DRAIN_ROUNDS = 1000;
 /** Re-assert composing every N ms — WA auto-clears the indicator on the recipient side after ~10-15s. */
 export const TYPING_REFRESH_MS = 8 * MS_PER_SECOND;
 /**
@@ -1028,8 +1035,10 @@ export class OutboundQueue implements IOutboundQueue {
   async enqueuePoll(sendFn: () => Promise<void>): Promise<void> {
     this.flushStreamBuffer();
     this.flushToolBuffer();
-    await this.chain;
-    this.assertDrainComplete();
+    // Same F-01 quiescence contract as flush(): drain to genuine idle before the
+    // poll send, so a late enqueue racing the chain snapshot is not misread as a
+    // poison.
+    await this.drainToIdle();
     await sendFn();
   }
 
@@ -1058,9 +1067,10 @@ export class OutboundQueue implements IOutboundQueue {
     this.flushStreamBuffer();
     this.flushToolBuffer();
     this.throwDrainFailure();
-    // Wait for the current chain to drain
-    await this.chain;
-    this.assertDrainComplete();
+    // Drain to genuine idle (F-01): awaiting a single chain snapshot then
+    // asserting could misread a legitimate late enqueue (a new drain started in
+    // the post-await window) as an impossible "pending send work" poison.
+    await this.drainToIdle();
     // All messages delivered — clear typing indicator and per-turn state
     this.stopTyping();
     this.friendlyProgressSent.clear();
@@ -1382,6 +1392,35 @@ export class OutboundQueue implements IOutboundQueue {
     if (this.drainFailure) throw this.drainFailure.error;
   }
 
+  /**
+   * Await successive send-chain snapshots until the queue is genuinely idle.
+   *
+   * F-01 (outbound-flush linearization race): awaiting a SINGLE snapshot of
+   * `this.chain` then calling `assertDrainComplete()` is a linearization bug. A
+   * late enqueue can start a new drain — reassigning `this.chain` and setting
+   * `sending` — in the window after the awaited drain set `sending=false` and
+   * before the caller's idle assertion runs. The stale assert misreads that
+   * legitimate new send as the impossible "pending send work" condition and
+   * permanently poisons the queue. Looping until the chain we awaited is still
+   * the installed one — with nothing sending or queued — drains all such late
+   * work exactly once and surfaces only a REAL drain failure.
+   */
+  private async drainToIdle(): Promise<void> {
+    for (let round = 0; round < MAX_FLUSH_DRAIN_ROUNDS; round++) {
+      const awaited = this.chain;
+      await awaited;
+      // A genuine send/durability failure stays sticky and loud.
+      this.throwDrainFailure();
+      if (this.chain === awaited && !this.sending && this.sendQueue.length === 0) {
+        return; // idle: the chain did not advance and no work remains
+      }
+    }
+    // The chain advanced on every round for the whole bound — a producer never
+    // stopped enqueuing during the flush. That is a real anomaly (not the benign
+    // late-enqueue race), so surface it rather than spin forever.
+    this.assertDrainComplete();
+  }
+
   private assertDrainComplete(): void {
     this.throwDrainFailure();
     if (this.sending || this.sendQueue.length > 0) {
@@ -1392,7 +1431,12 @@ export class OutboundQueue implements IOutboundQueue {
   }
 
   private assertEvidenceComplete(): void {
-    this.assertDrainComplete();
+    // F-01: completeTurnEvidence() calls this immediately after `await this.flush()`,
+    // which already drained the send chain to idle. Re-running the synthetic
+    // assertDrainComplete() here would re-introduce the same false poison for a
+    // legitimate enqueue landing in the post-flush microtask gap, so only a REAL
+    // drain failure propagates; leftover buffered work is still asserted below.
+    this.throwDrainFailure();
     if (
       this.toolBuffer.length > 0
       || this.streamBufferParts.length > 0
