@@ -135,9 +135,18 @@ export function clusterMemories(
   if (records.length === 0) return [];
 
   // Greedy first-match clustering is seed-order dependent; seed in ascending
-  // record-id order (plain code-unit compare, locale-free) so the partition is
-  // a pure function of the record SET, not of search-result arrival order (#2569).
-  const ordered = [...records].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  // (id, claim||text) order (plain code-unit compare, locale-free) so the
+  // partition is a pure function of the record SET, not of search-result
+  // arrival order (#2569). The claim||text tie-break totalizes the order for
+  // duplicate ids; records tied on both keys tokenize identically, so any
+  // residual tie is inert for the partition.
+  const sortKey = (r: { id: string; text: string; claim?: string }): string =>
+    `${r.id}\0${r.claim || r.text}`;
+  const ordered = [...records].sort((a, b) => {
+    const ka = sortKey(a);
+    const kb = sortKey(b);
+    return ka < kb ? -1 : ka > kb ? 1 : 0;
+  });
 
   const tokenize = (s: string) =>
     (s || '').toLowerCase().split(/\W+/).filter((t) => t.length > 2);

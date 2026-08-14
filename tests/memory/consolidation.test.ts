@@ -380,3 +380,27 @@ describe('clusterMemories order invariance (#2569)', () => {
     expect(input.map((r) => r.id)).toEqual(['x', 'b', 'a']);
   });
 });
+
+describe('clusterMemories duplicate-id tie-break (#2569 review finding A)', () => {
+  // A bare id sort is stable, so records sharing an id but differing in text
+  // kept arrival order and could still swap partitions. The (id, claim||text)
+  // tie-break totalizes the order; downstream consolidateCluster still rejects
+  // duplicate-id clusters as scope_invalid — this pins determinism only.
+  const dupA = { id: 'x', text: 'I live in London', claim: 'I live in London', createdAt: '2026-04-01', confidence: 0.9, evidence: '' };
+  const dupB = { id: 'x', text: 'I work at Acme', claim: 'I work at Acme', createdAt: '2026-04-02', confidence: 0.9, evidence: '' };
+  const other = { id: 'y', text: 'I work in London', claim: 'I work in London', createdAt: '2026-04-03', confidence: 0.9, evidence: '' };
+
+  function keyedPartition(clusters: MemoryCluster[]): string[][] {
+    return clusters
+      .map((cluster) => cluster.records.map((r) => `${r.id}:${r.text}`).sort())
+      .sort((left, right) => left[0].localeCompare(right[0]));
+  }
+
+  it('produces the same partition for duplicate-id records in any order', () => {
+    const forward = keyedPartition(clusterMemories([dupA, dupB, other]));
+    const swapped = keyedPartition(clusterMemories([dupB, other, dupA]));
+    const rotated = keyedPartition(clusterMemories([other, dupA, dupB]));
+    expect(swapped).toEqual(forward);
+    expect(rotated).toEqual(forward);
+  });
+});

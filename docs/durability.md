@@ -1573,15 +1573,20 @@ Three defects were proven against this shape (#2569):
 
 ### 10.2 Landed guards (this slice)
 
-**Order-invariant clustering.** `clusterMemories` seeds in ascending record-id order
-(plain code-unit compare) over a copy of the input, making the partition a pure function
-of the record set. Same set in, same partition out, regardless of search ranking drift.
+**Order-invariant clustering.** `clusterMemories` seeds in ascending
+`(id, claim||text)` order (plain code-unit compare, locale-free) over a copy of the
+input, making the partition a pure function of the record set — including under
+duplicate ids, where the text tie-break totalizes the order (records tied on both keys
+tokenize identically, so any residual tie is inert). Same set in, same partition out,
+regardless of search ranking drift.
 
 **Recursive-eligibility exclusion.** `runConsolidation` drops records carrying either
-promotion marker — the `durable:` id prefix or the `consolidated` confidence
-qualifier — before scoping. Exclusions are counted under the run's `skipped` counter and
-logged content-free (`consolidatedExcluded` count only). A consolidation run can no
-longer consume its own prior output.
+promotion marker — the `durable:` id prefix or the `consolidated` confidence qualifier
+(case-insensitive) — before scoping. Non-string ids pass through untouched so the
+downstream scope guard keeps owning that failure mode. Exclusions are counted under the
+run's `skipped` counter (which therefore accrues both exclusion reasons; the log fields
+`consolidatedExcluded` and `unscopedSkipped` keep the reasons distinct and content-free).
+A consolidation run can no longer consume its own prior output.
 
 These are live-safe defect fixes: no schema, store, or contract change.
 

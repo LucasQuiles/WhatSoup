@@ -929,4 +929,53 @@ describe('recursive eligibility guard (#2569)', () => {
     expect(upsertPayload).not.toContain('fact-consolidated');
     expect(upsertPayload).not.toContain('durable:0123456789abcdef');
   });
+
+  it('excludes a non-canonical qualifier casing and survives undefined ids (review findings B/C)', async () => {
+    const nowIso = new Date().toISOString();
+    const scoped = {
+      createdAt: nowIso,
+      confidence: 0.9,
+      chatJid: 'chat-1@g.us',
+      senderJid: 'sender-1@s.whatsapp.net',
+    };
+    const mockPinecone = makeMockPinecone([
+      {
+        id: 'rec-raw',
+        score: 0.9,
+        record: { id: 'rec-raw', text: 'Lives in London', claim: 'Lives in London', evidence: '', ...scoped },
+      },
+      {
+        // Qualifier casing must not bypass the guard.
+        id: 'fact-cased',
+        score: 0.85,
+        record: { id: 'fact-cased', text: 'Lives in London town', claim: 'Lives in London town', evidence: 'rec-0', confidenceQualifier: 'Consolidated', ...scoped },
+      },
+      {
+        // Undefined top-level id must not throw in the filter; the record-id
+        // marker still excludes it.
+        id: undefined,
+        score: 0.8,
+        record: { id: 'durable:fedcba9876543210', text: 'Lives around London', claim: 'Lives around London', evidence: 'rec-0', ...scoped },
+      },
+    ]);
+    const mockProvider = makeMockProvider({
+      durableKnowledge: [{ claim: 'User lives in London', promotionReason: 'repeat', confidence: 0.9, sourceRecordIds: ['rec-raw'] }],
+      discarded: [],
+    });
+
+    const result = await runConsolidation(
+      mockPinecone,
+      mockProvider,
+      { lookbackDays: 7, dryRun: false },
+    );
+
+    expect(result).toMatchObject({
+      status: 'completed',
+      counters: { recordsObserved: 1, skipped: 2, clustersAttempted: 1, writeConfirmed: 1 },
+    });
+    expect(mockProvider.generate).toHaveBeenCalledTimes(1);
+    const promptPayload = JSON.stringify(mockProvider.generate.mock.calls);
+    expect(promptPayload).not.toContain('fact-cased');
+    expect(promptPayload).not.toContain('durable:fedcba9876543210');
+  });
 });

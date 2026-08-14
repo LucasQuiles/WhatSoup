@@ -192,11 +192,15 @@ export async function runConsolidation(
   // Recursive-eligibility guard (#2569): promotion outputs are upserted as
   // ordinary records and re-enter the top-K selector on later runs. Both
   // promotion markers — the durable: id prefix and the consolidated
-  // confidence qualifier — exclude a record from serving as source material.
+  // confidence qualifier (case-insensitive) — exclude a record from serving as
+  // source material. Non-string ids pass through untouched so the downstream
+  // scope guard keeps owning that failure mode.
+  const isDurableId = (value: unknown): boolean =>
+    typeof value === 'string' && value.startsWith('durable:');
   const isConsolidatedOutput = (result: (typeof search.results)[number]): boolean =>
-    result.id.startsWith('durable:')
-    || result.record.id.startsWith('durable:')
-    || result.record.confidenceQualifier === 'consolidated';
+    isDurableId(result.id)
+    || isDurableId(result.record.id)
+    || (result.record.confidenceQualifier ?? '').toLowerCase() === 'consolidated';
   const recentMemories = withinWindow.filter((result) => !isConsolidatedOutput(result));
   const consolidatedExcluded = withinWindow.length - recentMemories.length;
   if (consolidatedExcluded > 0) {
@@ -226,9 +230,13 @@ export async function runConsolidation(
     senderJid: string;
     records: typeof records;
   }>();
+  // counters.skipped accrues both exclusion reasons (consolidated outputs
+  // above, unscoped records here); the log fields keep the reasons distinct.
+  let unscopedSkipped = 0;
   for (const record of records) {
     if (!record.chatJid || !record.senderJid) {
       counters.skipped += 1;
+      unscopedSkipped += 1;
       continue;
     }
     const key = scopeKey(record.chatJid, record.senderJid);
@@ -244,7 +252,7 @@ export async function runConsolidation(
   if (scopedRecords.size === 0) {
     log.info({
       recordCount: records.length,
-      unscopedSkipped: counters.skipped,
+      unscopedSkipped,
     }, 'No scoped memories to consolidate');
     progress('finalize', 'provider_response');
     return finish('no_work');
@@ -256,7 +264,7 @@ export async function runConsolidation(
     log.info({
       clusterCount: clusters.length,
       recordCount: group.records.length,
-      unscopedSkipped: counters.skipped,
+      unscopedSkipped,
     }, 'Clustered memories');
 
     for (const cluster of clusters) {
