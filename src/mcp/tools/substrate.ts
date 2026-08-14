@@ -17,7 +17,7 @@ import {
   assertMutableBeadFields, activityFeed,
 } from '../../core/substrate/beads.ts';
 import {
-  createTrigger, listTriggers, pauseTrigger, extendTrigger, prepareTrigger,
+  createTrigger, listTriggers, listTriggerRunsRedacted, pauseTrigger, extendTrigger, prepareTrigger,
 } from '../../core/substrate/triggers.ts';
 import { clearAlertSourceChecked } from '../../lib/emit-alert.ts';
 import {
@@ -565,6 +565,27 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
     handler: async (raw) => {
       const p = raw as { bead_id?: number; kind?: string; status?: 'active'|'paused'|'expired'|'cancelled' };
       return { triggers: listTriggers(deps.db, { beadId: p.bead_id, kind: p.kind as TriggerKind | undefined, status: p.status }) };
+    },
+  });
+
+  registry.register({
+    name: 'list_trigger_runs',
+    description: 'Redacted run history for a trigger or bead (#2566). Bounded fields only — status, timestamps, attempt, bounded error class, and delivery booleans; output content, summaries, error prose, and transport identifiers never cross this projection.',
+    scope: 'global', targetMode: 'caller-supplied', replayPolicy: 'read_only',
+    schema: z.object({
+      trigger_id: z.number().int().positive().optional(),
+      bead_id: z.number().int().positive().optional(),
+      limit: z.number().int().positive().max(200).optional(),
+    }).refine((p) => p.trigger_id != null || p.bead_id != null, {
+      message: 'trigger_id or bead_id is required',
+    }),
+    handler: async (raw) => {
+      const p = raw as { trigger_id?: number; bead_id?: number; limit?: number };
+      return {
+        runs: listTriggerRunsRedacted(deps.db, {
+          triggerId: p.trigger_id, beadId: p.bead_id, limit: p.limit,
+        }),
+      };
     },
   });
 

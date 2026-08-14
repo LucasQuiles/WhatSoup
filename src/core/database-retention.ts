@@ -46,6 +46,14 @@ export interface DatabaseRetentionConfig {
    * other field here — this default is just the fallback.
    */
   messageRetentionDays: number;
+  /**
+   * #2566 slice 4 — retention windows for trigger history. Terminal
+   * trigger_runs and terminal/stale trigger_occurrences past the window are
+   * pruned; running runs and running/claimed occurrences are NEVER pruned
+   * regardless of age (an unfinalized row is crash evidence, not history).
+   */
+  triggerRunDays: number;
+  triggerOccurrenceDays: number;
 }
 
 export interface DatabaseRetentionResult {
@@ -60,6 +68,8 @@ export interface DatabaseRetentionResult {
   metricsHourly: number;
   decryptionFailures: number;
   messages: number;
+  triggerRuns: number;
+  triggerOccurrences: number;
 }
 
 export interface DatabaseRetentionHealth {
@@ -84,6 +94,8 @@ export const DEFAULT_DATABASE_RETENTION: DatabaseRetentionConfig = {
   outboundSendDays: 30,
   outboundSendMaxRows: 10_000,
   messageRetentionDays: 30,
+  triggerRunDays: 30,
+  triggerOccurrenceDays: 30,
 };
 
 /**
@@ -375,6 +387,23 @@ export function runDatabaseRetention(
     // location moved.
     const messages = deleteOldMessages(db, retention.messageRetentionDays);
 
+    // #2566 slice 4 — trigger history. Terminal rows only: a running run or a
+    // running/claimed occurrence is crash evidence, not history, and is never
+    // pruned regardless of age. These timestamps are unix SECONDS (integer),
+    // so the cutoff is integer math, not datetime() strings.
+    const triggerRuns = changes(db.raw.prepare(`
+      DELETE FROM trigger_runs
+       WHERE status != 'running'
+         AND finished_at IS NOT NULL
+         AND finished_at < CAST(strftime('%s', 'now') AS INTEGER) - ?
+    `).run(Math.max(1, Math.floor(retention.triggerRunDays)) * 86_400));
+    const triggerOccurrences = changes(db.raw.prepare(`
+      DELETE FROM trigger_occurrences
+       WHERE state NOT IN ('claimed', 'running')
+         AND finished_at IS NOT NULL
+         AND finished_at < CAST(strftime('%s', 'now') AS INTEGER) - ?
+    `).run(Math.max(1, Math.floor(retention.triggerOccurrenceDays)) * 86_400));
+
     return {
       turnRecoveryJobs,
       turnTerminalRecords,
@@ -387,6 +416,8 @@ export function runDatabaseRetention(
       metricsHourly,
       decryptionFailures,
       messages,
+      triggerRuns,
+      triggerOccurrences,
     };
   });
   const total = Object.values(result).reduce((sum, count) => sum + count, 0);
