@@ -3799,6 +3799,8 @@ describe('POST /send — Authorization header check', () => {
         metricsHourly: 0,
         decryptionFailures: 0,
         messages: 0,
+        triggerRuns: 0,
+        triggerOccurrences: 0,
       },
     });
 
@@ -3852,6 +3854,46 @@ describe('POST /send — Authorization header check', () => {
       lastResult: null,
     });
     expect(body).not.toContain('CANARY-RETENTION-GETTER-FAILURE');
+  });
+
+  // #2566 slice 4 — occurrence-lifecycle gauges: counts and ages ONLY, never
+  // raw prompt/JID/SQL content (exact-byte projection discipline).
+  it('surfaces recurring-overdue, active-occurrence, and delivery-unknown gauges', async () => {
+    process.env.WHATSOUP_HEALTH_TOKEN = TEST_HEALTH_TOKEN;
+    const now = Math.floor(Date.now() / 1000);
+    const bead = db.raw.prepare(
+      `INSERT INTO beads (kind, title, owner_jid, status, created_at, updated_at)
+       VALUES ('watch', 'SECRET-GAUGE-TITLE', 'gauge-owner@s.whatsapp.net', 'active', ?, ?)`,
+    ).run(now, now);
+    const beadId = Number(bead.lastInsertRowid);
+    // Recurring-overdue: fired before, next_fire_at far past.
+    db.raw.prepare(
+      `INSERT INTO bead_triggers (bead_id, kind, spec_json, report_chat_jid, status, next_fire_at, last_fire_at, created_at, updated_at)
+       VALUES (?, 'schedule.cron', '{"expr":"0 8 * * *"}', 'SECRET-GAUGE-CHAT@g.us', 'active', ?, ?, ?, ?)`,
+    ).run(beadId, now - 90_000, now - 100_000, now, now);
+    const trig = db.raw.prepare(`SELECT id FROM bead_triggers WHERE bead_id = ?`).get(beadId) as { id: number };
+    // Active occurrence claimed 500s ago.
+    db.raw.prepare(
+      `INSERT INTO trigger_occurrences (trigger_id, bead_id, scheduled_for, attempt, state, lease_owner, lease_generation, lease_expires_at, claimed_at, started_at)
+       VALUES (?, ?, ?, 1, 'running', 'pid:gauge:aaaa', 1, ?, ?, ?)`,
+    ).run(trig.id, beadId, now - 500, now + 400, now - 500, now - 500);
+    // A run whose notification outcome is unknown.
+    db.raw.prepare(
+      `INSERT INTO trigger_runs (trigger_id, bead_id, status, started_at, finished_at, attempt, error_kind, metadata_json)
+       VALUES (?, ?, 'ok', ?, ?, 1, 'notify_outcome_unknown', '{}')`,
+    ).run(trig.id, beadId, now - 600, now - 600);
+
+    const { status, body } = await healthReq(port);
+    expect(status).toBe(200);
+    const gauges = JSON.parse(body).sqlite;
+    expect(gauges.recurring_overdue_triggers).toBe(1);
+    expect(gauges.active_trigger_occurrences).toBe(1);
+    expect(gauges.oldest_active_occurrence_age_s).toBeGreaterThanOrEqual(500);
+    expect(gauges.oldest_active_occurrence_age_s).toBeLessThan(600);
+    expect(gauges.notify_outcome_unknown_runs).toBe(1);
+    // Exact-byte discipline: no seeded content crosses the projection.
+    expect(body).not.toContain('SECRET-GAUGE-TITLE');
+    expect(body).not.toContain('SECRET-GAUGE-CHAT');
   });
 
   it('returns 401 when no WHATSOUP_HEALTH_TOKEN is set (fail-closed)', async () => {

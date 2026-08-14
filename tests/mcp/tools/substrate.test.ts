@@ -17,7 +17,7 @@ const EXPECTED_TOOLS = [
   'create_agent_job', 'create_watch', 'capture_task', 'capture_observation',
   'list_beads', 'get_activity', 'get_bead', 'update_bead', 'complete_bead', 'cancel_bead',
   'approve_proposal', 'reject_proposal',
-  'list_triggers', 'pause_trigger', 'extend_trigger',
+  'list_triggers', 'list_trigger_runs', 'pause_trigger', 'extend_trigger',
   'get_profile', 'list_entities', 'add_alias', 'merge_entities', 'forget_observation',
   'regenerate_vault',
 ];
@@ -27,7 +27,7 @@ const SENSITIVE_TOOLS = [
   'update_bead', 'complete_bead', 'cancel_bead', 'approve_proposal', 'reject_proposal',
   'pause_trigger', 'extend_trigger', 'add_alias', 'merge_entities', 'forget_observation',
 ];
-const READ_TOOLS = ['list_beads', 'get_activity', 'get_bead', 'list_triggers', 'get_profile', 'list_entities'];
+const READ_TOOLS = ['list_beads', 'get_activity', 'get_bead', 'list_triggers', 'list_trigger_runs', 'get_profile', 'list_entities'];
 
 const adminPhone = 'admin-user';
 const adminActor = `${adminPhone}@s.whatsapp.net`;
@@ -304,6 +304,38 @@ describe('substrate MCP tools', () => {
 
     expect(existsSync(join(vaultPath, 'Beads/cancelled', `task-${res.bead_id}.md`))).toBe(true);
     expect(existsSync(activeFile)).toBe(false);
+  });
+
+  // #2566 slice 4 — the run-history reader exposes bounded fields only.
+  it('list_trigger_runs returns redacted history and leaks no run content', async () => {
+    const res = parseResult(await registry.call('create_agent_job', {
+      prompt: 'history probe',
+      schedule: { kind: 'schedule.cron', expr: '0 8 * * *' },
+      report_chat: 'history-report@s.whatsapp.net',
+    }, adminSession));
+    // Seed a finished run carrying secrets in every prose/content field.
+    db.raw.prepare(
+      `INSERT INTO trigger_runs (trigger_id, bead_id, status, started_at, finished_at, duration_ms, attempt, output_summary, output_json, error_kind, error_message, metadata_json)
+       VALUES (?, ?, 'failed', 1000, 1001, 1000, 1, 'SECRET-SUMMARY', '{"deliveredWaMessageId":"SECRET-WAID","rows":["SECRET-ROW"]}', 'execute_throw', 'SECRET-ERROR-PROSE', '{}')`,
+    ).run(res.trigger_id, res.bead_id);
+
+    const out = await registry.call('list_trigger_runs', { trigger_id: res.trigger_id }, adminSession);
+    const parsed = parseResult(out);
+    expect(parsed.runs).toHaveLength(1);
+    expect(parsed.runs[0]).toMatchObject({
+      triggerId: res.trigger_id, beadId: res.bead_id, status: 'failed',
+      startedAt: 1000, finishedAt: 1001, durationMs: 1000, attempt: 1,
+      errorKind: 'execute_throw', delivered: true, notifyPending: false, throttled: false,
+    });
+    // Exact-byte redaction: no prose, content, or transport identifier crosses.
+    const wire = JSON.stringify(out);
+    expect(wire).not.toContain('SECRET-SUMMARY');
+    expect(wire).not.toContain('SECRET-WAID');
+    expect(wire).not.toContain('SECRET-ROW');
+    expect(wire).not.toContain('SECRET-ERROR-PROSE');
+    // Filter is required: an unfiltered call is rejected, not a table dump.
+    const bad = await registry.call('list_trigger_runs', {}, adminSession);
+    expect(bad.isError).toBe(true);
   });
 
   it('create_agent_job + list_triggers + pause_trigger', async () => {
