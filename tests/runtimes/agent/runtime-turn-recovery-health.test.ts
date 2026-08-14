@@ -166,6 +166,8 @@ describe('runtime turn finalization recovery health', () => {
       expect(runtime.getHealthSnapshot()).toMatchObject({
         status: 'healthy',
         details: {
+          degradedReasons: [],
+          recoveryDebtReasons: ['turn_recovery_terminal'],
           turnRecoveryOutstanding: 0,
           turnRecoveryBlockedUnsafe: 1,
           turnRecoveryOpenRecoveries: 0,
@@ -176,7 +178,7 @@ describe('runtime turn finalization recovery health', () => {
     }
   });
 
-  it('keeps blocked-unsafe informational while open catch-up independently degrades health', () => {
+  it('keeps blocked-unsafe and historical catch-up visible without degrading health', () => {
     const db = new Database(':memory:');
     db.open();
     try {
@@ -190,8 +192,10 @@ describe('runtime turn finalization recovery health', () => {
       runtime.setDurability(durability);
 
       expect(runtime.getHealthSnapshot()).toMatchObject({
-        status: 'degraded',
+        status: 'healthy',
         details: {
+          degradedReasons: [],
+          recoveryDebtReasons: ['turn_recovery_terminal', 'historical_turn_catchup'],
           turnRecoveryOutstanding: 0,
           turnRecoveryBlockedUnsafe: 3,
           turnRecoveryOpenRecoveries: 11,
@@ -202,7 +206,7 @@ describe('runtime turn finalization recovery health', () => {
     }
   });
 
-  it('degrades for exhausted work without treating it as admission-blocking', () => {
+  it('keeps exhausted terminal work visible without treating it as service-blocking', () => {
     const db = new Database(':memory:');
     db.open();
     try {
@@ -216,8 +220,10 @@ describe('runtime turn finalization recovery health', () => {
       runtime.setDurability(durability);
 
       expect(runtime.getHealthSnapshot()).toMatchObject({
-        status: 'degraded',
+        status: 'healthy',
         details: {
+          degradedReasons: [],
+          recoveryDebtReasons: ['turn_recovery_terminal'],
           turnRecoveryOutstanding: 0,
           turnRecoveryExhausted: 1,
           turnRecoveryOpenRecoveries: 0,
@@ -228,7 +234,7 @@ describe('runtime turn finalization recovery health', () => {
     }
   });
 
-  it('degrades while operator catch-up is open and returns healthy after closure', () => {
+  it('reports historical operator catch-up debt and clears it without changing healthy status', () => {
     const db = new Database(':memory:');
     db.open();
     try {
@@ -242,12 +248,20 @@ describe('runtime turn finalization recovery health', () => {
       runtime.setDurability(durability);
 
       expect(runtime.getHealthSnapshot()).toMatchObject({
-        status: 'degraded',
-        details: { turnRecoveryOpenRecoveries: 1 },
+        status: 'healthy',
+        details: {
+          degradedReasons: [],
+          recoveryDebtReasons: ['historical_turn_catchup'],
+          turnRecoveryOpenRecoveries: 1,
+        },
       });
       expect(runtime.getHealthSnapshot()).toMatchObject({
         status: 'healthy',
-        details: { turnRecoveryOpenRecoveries: 0 },
+        details: {
+          degradedReasons: [],
+          recoveryDebtReasons: [],
+          turnRecoveryOpenRecoveries: 0,
+        },
       });
     } finally {
       db.close();
@@ -312,6 +326,13 @@ describe('runtime turn finalization recovery health', () => {
       runtime.setDurability(durability);
 
       expect(runtime.getHealthSnapshot()).toMatchObject({ status: 'degraded', details });
+      expect(runtime.getHealthSnapshot().details.degradedReasons).toEqual(
+        expect.arrayContaining([
+          counts.corruptLinks > 0 || counts.orphanTransfers > 0
+            ? 'turn_recovery_integrity'
+            : 'turn_recovery_actionable',
+        ]),
+      );
     } finally {
       db.close();
     }

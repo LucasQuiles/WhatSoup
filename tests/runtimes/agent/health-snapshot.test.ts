@@ -324,6 +324,17 @@ function expectedTurnRecoveryDetails(): Record<string, number> {
     turnRecoveryCorruptLinks: 0,
     turnRecoveryOrphanTransfers: 0,
     turnRecoveryEchoConflicts: 0,
+    turnRecoveryBlockingOutstanding: 0,
+    turnRecoveryRetainedTerminal: 0,
+    turnRecoveryCorroboratedRetained: 0,
+  };
+}
+
+function expectedRecoveryClassificationDetails(): Record<string, unknown> {
+  return {
+    recoveryDebtReasons: [],
+    completedDeliveryIdentityBlocking: 0,
+    completedDeliveryIdentityRetained: 0,
   };
 }
 
@@ -444,6 +455,7 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
         turnFinalizationRetryAttempts: 0,
         turnFinalizationRetryRecoveries: 0,
         turnFinalizationRetryExhaustions: 0,
+        ...expectedRecoveryClassificationDetails(),
         ...expectedTurnQueueDetails(),
         ...expectedProviderExecutionDetails(),
         ...expectedTurnRecoveryDetails(),
@@ -492,6 +504,7 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
         turnFinalizationRetryAttempts: 0,
         turnFinalizationRetryRecoveries: 0,
         turnFinalizationRetryExhaustions: 0,
+        ...expectedRecoveryClassificationDetails(),
         ...expectedTurnQueueDetails(),
         ...expectedProviderExecutionDetails(),
         ...expectedTurnRecoveryDetails(),
@@ -743,6 +756,7 @@ describe('AgentRuntime.getHealthSnapshot — single-session shape', () => {
         turnFinalizationRetryAttempts: 0,
         turnFinalizationRetryRecoveries: 0,
         turnFinalizationRetryExhaustions: 0,
+        ...expectedRecoveryClassificationDetails(),
         ...expectedTurnQueueDetails(),
         ...expectedProviderExecutionDetails(),
         ...expectedTurnRecoveryDetails(),
