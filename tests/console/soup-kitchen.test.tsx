@@ -394,7 +394,17 @@ describe('KPI strip (mockup .kpis — 5 cards, k/v/d anatomy)', () => {
   it('coverage meta row carries the #1879/#1762 denominators', () => {
     renderPage({
       lines: [
-        makeLine({ name: 'a', status: 'online' }),
+        makeLine({
+          name: 'a',
+          status: 'online',
+          recoveryDebt: {
+            open: true,
+            serviceBlocking: false,
+            attention: 'routine',
+            reasons: ['historical_turn_catchup'],
+            total: 1,
+          },
+        }),
         makeLine({
           name: 'b',
           status: 'degraded',
@@ -407,6 +417,7 @@ describe('KPI strip (mockup .kpis — 5 cards, k/v/d anatomy)', () => {
     expect(meta).toMatch(/connectivity unknown 1 of 2/);
     expect(meta).toMatch(/metrics unavailable 1 of 2/);
     expect(meta).toMatch(/carried health 1 of 2/);
+    expect(meta).toMatch(/recovery debt 1 of 2/);
   });
 
   it('the meta row carries the #1925 observedAt marker — fresh when current, stale-flagged when carried', () => {

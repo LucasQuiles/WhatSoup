@@ -2,7 +2,11 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { jsonResponse, parseQueryString, parseIntParam } from '../../lib/http.ts';
 import { errorMessage } from '../../lib/error-message.ts';
 import type { FleetDiscovery, DiscoveredInstance } from '../discovery.ts';
-import type { HealthPoller, InstanceStatus } from '../health-poller.ts';
+import type {
+  FleetRecoveryDebtSummary,
+  HealthPoller,
+  InstanceStatus,
+} from '../health-poller.ts';
 import { inspectLatestLogFile, readTailLinesDetailed, type LogReadFailure } from '../log-utils.ts';
 import { normalizeTimestamp } from '../time-utils.ts';
 import type { FleetDbReader } from '../db-reader.ts';
@@ -43,6 +47,14 @@ type FeedDetail =
       confidence?: InstanceStatus['statusConfidence'];
       reason?: string;
       evidence?: string[];
+    }
+  | {
+      type: 'recovery_debt';
+      state: 'opened' | 'changed' | 'cleared';
+      serviceBlocking: boolean;
+      attention: FleetRecoveryDebtSummary['attention'];
+      reasons: string[];
+      total: number;
     }
   | { type: 'import'; table?: string; count?: number; skipped?: boolean }
   | { type: 'message'; direction: 'inbound' | 'outbound'; chatJid?: string; messageId?: string; preview?: string; senderName?: string; contentType?: string; conversationKey?: string }
@@ -336,7 +348,7 @@ export function parsePinoLine(line: string, ctx: ParseContext): FeedEvent | null
 }
 
 // ---------------------------------------------------------------------------
-// Health-change events (synthesized from poller status)
+// Health and recovery-debt change events (synthesized from poller status)
 //
 // #1882 residual (accepted): this comparison still runs at request time
 // against one process-global `previousStatuses` baseline, so a degrade/
@@ -355,6 +367,43 @@ export function parsePinoLine(line: string, ctx: ParseContext): FeedEvent | null
 // ---------------------------------------------------------------------------
 
 const previousStatuses = new Map<string, string>();
+const previousRecoveryDebt = new Map<string, FleetRecoveryDebtSummary>();
+const observedRecoveryDebtInstances = new Set<string>();
+
+function recoveryDebtFingerprint(summary: FleetRecoveryDebtSummary): string {
+  return JSON.stringify([
+    summary.open,
+    summary.serviceBlocking,
+    summary.attention,
+    summary.reasons,
+    summary.total,
+  ]);
+}
+
+function recoveryDebtEvent(
+  inst: DiscoveredInstance,
+  summary: FleetRecoveryDebtSummary,
+  state: 'opened' | 'changed' | 'cleared',
+  time: string,
+): FeedEvent {
+  return {
+    time,
+    mode: inst.type,
+    text: `${inst.name}: recovery debt ${state}`,
+    instance: inst.name,
+    provider: inst.provider,
+    component: 'recovery_debt',
+    level: 'info',
+    detail: {
+      type: 'recovery_debt',
+      state,
+      serviceBlocking: summary.serviceBlocking,
+      attention: summary.attention,
+      reasons: summary.reasons,
+      total: summary.total,
+    },
+  };
+}
 
 function healthStatusMessage(status: InstanceStatus['status'], error: string | null): string {
   if (status === 'online') return 'came online';
@@ -427,12 +476,39 @@ function synthesizeHealthEvents(
       }
     }
 
+    const currentDebt = poll.recoveryDebt;
+    const previousDebt = previousRecoveryDebt.get(inst.name);
+    const debtPreviouslyObserved = observedRecoveryDebtInstances.has(inst.name);
+    if (currentDebt) {
+      if (debtPreviouslyObserved) {
+        if (currentDebt.open) {
+          if (!previousDebt?.open) {
+            events.push(recoveryDebtEvent(inst, currentDebt, 'opened', now));
+          } else if (recoveryDebtFingerprint(previousDebt) !== recoveryDebtFingerprint(currentDebt)) {
+            events.push(recoveryDebtEvent(inst, currentDebt, 'changed', now));
+          }
+        } else if (previousDebt?.open) {
+          events.push(recoveryDebtEvent(inst, currentDebt, 'cleared', now));
+        }
+      }
+      // Establish or advance the request-time baseline. Debt that predates
+      // this process is retained without being stamped as opened now.
+      previousRecoveryDebt.set(inst.name, currentDebt);
+    }
+    observedRecoveryDebtInstances.add(inst.name);
+
     previousStatuses.set(inst.name, currStatus);
   }
 
   // Prune entries for instances no longer in discovery
   for (const name of previousStatuses.keys()) {
     if (!instances.has(name)) previousStatuses.delete(name);
+  }
+  for (const name of previousRecoveryDebt.keys()) {
+    if (!instances.has(name)) previousRecoveryDebt.delete(name);
+  }
+  for (const name of observedRecoveryDebtInstances) {
+    if (!instances.has(name)) observedRecoveryDebtInstances.delete(name);
   }
 
   return events;

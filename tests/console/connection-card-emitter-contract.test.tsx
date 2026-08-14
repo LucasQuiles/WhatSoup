@@ -196,6 +196,7 @@ function fakePoll(health: Record<string, unknown>, overrides: Partial<InstanceSt
     silencedUntil: null,
     activeAlertSources: [],
     ...overrides,
+    recoveryDebt: overrides.recoveryDebt ?? null,
   }
 }
 

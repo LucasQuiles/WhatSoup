@@ -212,7 +212,7 @@ export default function LineDetail() {
         </div>
 
         {/* Degradation causes */}
-        {line.health?.degradation_causes && line.health.degradation_causes.length > 0 && (
+        {line.status !== 'online' && line.health?.degradation_causes && line.health.degradation_causes.length > 0 && (
           <div className="flex flex-wrap gap-1 items-center">
             {line.health.degradation_causes.map((cause) => (
               <span key={cause} className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-surface-warn text-text-1" title={cause}>
@@ -220,6 +220,21 @@ export default function LineDetail() {
               </span>
             ))}
           </div>
+        )}
+
+        {line.recoveryDebt?.open && (
+          <details className="text-xs text-text-2 mt-1">
+            <summary className="cursor-pointer">
+              Recovery debt ({line.recoveryDebt.total})
+            </summary>
+            <div className="mt-1 font-mono">
+              {line.recoveryDebt.attention} attention
+              {line.recoveryDebt.serviceBlocking ? ' · service blocking' : ' · service available'}
+            </div>
+            <ul className="list-disc pl-4 mt-1">
+              {line.recoveryDebt.reasons.map((reason) => <li key={reason}>{reason}</li>)}
+            </ul>
+          </details>
         )}
 
         {/* Status evidence detail */}

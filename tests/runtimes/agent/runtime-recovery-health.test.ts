@@ -9,6 +9,13 @@ function input(
   completedDeliveryIdentity: Partial<RuntimeRecoveryHealthInput['completedDeliveryIdentity']> = {},
   finalization: Partial<RuntimeRecoveryHealthInput['finalization']> = {},
 ): RuntimeRecoveryHealthInput {
+  const blockingOutstanding = recovery.turnRecoveryBlockingOutstanding
+    ?? (recovery.turnRecoveryPending ?? 0)
+      + (recovery.turnRecoveryLiveClaimed ?? 0)
+      + (recovery.turnRecoveryExpiredClaimed ?? 0);
+  const retainedTerminal = recovery.turnRecoveryRetainedTerminal
+    ?? (recovery.turnRecoveryBlockedUnsafe ?? 0)
+      + (recovery.turnRecoveryExhausted ?? 0);
   return {
     finalization: {
       retainedRetries: 0,
@@ -32,6 +39,8 @@ function input(
       turnRecoveryEchoConflicts: 0,
       turnRecoveryCorroboratedRetained: 0,
       ...recovery,
+      turnRecoveryBlockingOutstanding: blockingOutstanding,
+      turnRecoveryRetainedTerminal: retainedTerminal,
     },
     completedDeliveryIdentity: {
       unresolvedCount: 0,

@@ -320,6 +320,25 @@ describe('Ops page fleet states', () => {
     expect(screen.getByText('2 Lines')).toBeDefined()
     expect(screen.getByText('2 online')).toBeDefined()
   })
+
+  it('keeps an online debt-only line healthy while surfacing recovery debt separately', () => {
+    renderOps({
+      lines: [makeLine({
+        status: 'online',
+        recoveryDebt: {
+          open: true,
+          serviceBlocking: false,
+          attention: 'routine',
+          reasons: ['historical_turn_catchup'],
+          total: 1,
+        },
+      })],
+    })
+
+    expect(screen.getByText('all healthy')).toBeDefined()
+    expect(screen.getByText('1 with recovery debt')).toBeDefined()
+    expect(screen.queryByText(/unhealthy/)).toBeNull()
+  })
 })
 
 // #1882 — the "all healthy" / "N unhealthy" headline must come from the
