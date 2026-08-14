@@ -185,7 +185,7 @@ describe('drainObligationNow (gated cold activation)', () => {
 
 describe('truthful named-drain outcomes (audit F2)', () => {
   const ATTESTED_BINDING: CapabilityAttestationBinding = {
-    hostId: 'test-host', runtimeUser: 'test-user', releaseSha: 'rel-live-1', schemaVersion: 59,
+    hostId: 'test-host', runtimeUser: 'test-user', releaseSha: 'rel-live-1', schemaVersion: 60,
     providerId: 'claude-cli', harnessType: 'persistent_session', contractVersion: 'c/1',
     capability: 'child_process_tools', skillName: 'watch-skill', skillVersion: '1.2.3',
     skillDigest: 'skill-digest-1', resolverDigest: 'resolver-composite-1',
@@ -404,7 +404,7 @@ describe('hasAttestationCandidateIgnoringProvider (r22 drain-now pre-check)', ()
   // all of them).
   const FACTS = {
     hostId: 'test-host', runtimeUser: 'test-user', releaseSha: 'rel-live-1',
-    schemaVersion: 59, skillName: 'watch-skill', skillVersion: '1.2.3' as string | null,
+    schemaVersion: 60, skillName: 'watch-skill', skillVersion: '1.2.3' as string | null,
     skillDigest: 'skill-digest-1', resolverDigest: 'resolver-composite-1' as string | null,
     dependencyVersions: { 'yt-dlp': '2026.03.17' } as Record<string, string>,
     probeVersion: 'probe/1', canaryId: 'canary-1', mediaRoot: '/tmp/media-root',

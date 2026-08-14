@@ -524,7 +524,8 @@ describe('durability-writer-guard — self-provisioned discovery (completeness b
       'outbound_sends_v26',
       'outbound_sends_v51',
       'inbound_events_v56',
-      'capability_obligations_v59',
+      'fact_export_queue_v59',
+      'capability_obligations_v60',
     ]);
     for (const entry of DISCOVERY_EXCLUSIONS) {
       expect(entry.reason.trim().length, `${entry.table} needs a reason`).toBeGreaterThan(0);

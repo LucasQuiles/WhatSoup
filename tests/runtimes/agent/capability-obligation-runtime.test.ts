@@ -132,7 +132,7 @@ const LIVE_FACTS: CapabilityObligationLiveFacts = {
   hostId: 'test-host',
   runtimeUser: 'test-user',
   releaseSha: 'relsha-live',
-  schemaVersion: 59,
+  schemaVersion: 60,
   providerId: 'claude-cli',
   harnessType: 'persistent_session',
 };

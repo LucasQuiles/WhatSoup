@@ -34,8 +34,8 @@ vi.mock('../../../../src/config.ts', () => ({
 import { Database } from '../../../../src/core/database.ts';
 import {
   enqueueFacts,
-  claimPendingFacts,
-  markFactsExported,
+  leasePendingFacts,
+  ackFacts,
   type ExportableFact,
 } from '../../../../src/runtimes/chat/enrichment/fact-export-queue.ts';
 
@@ -84,6 +84,8 @@ describe('fact_export_queue schema', () => {
     const colMap = new Map(cols.map((c) => [c.name, c]));
 
     expect(colMap.has('id')).toBe(true);
+    expect(colMap.has('fact_uid')).toBe(true);
+    expect(colMap.get('fact_uid')?.notnull).toBe(1);
     expect(colMap.has('fact_id')).toBe(true);
     expect(colMap.get('fact_id')?.notnull).toBe(1);
     expect(colMap.has('chat_jid')).toBe(true);
@@ -92,9 +94,18 @@ describe('fact_export_queue schema', () => {
     expect(colMap.has('namespace')).toBe(true);
     expect(colMap.has('payload_json')).toBe(true);
     expect(colMap.get('payload_json')?.notnull).toBe(1);
-    expect(colMap.has('status')).toBe(true);
+    expect(colMap.has('state')).toBe(true);
+    expect(colMap.has('lease_owner')).toBe(true);
+    expect(colMap.has('lease_expires_at')).toBe(true);
+    expect(colMap.has('attempt_count')).toBe(true);
+    expect(colMap.has('failure_code')).toBe(true);
+    expect(colMap.has('failure_stage')).toBe(true);
+    expect(colMap.has('next_attempt_at')).toBe(true);
+    expect(colMap.has('remote_record_id')).toBe(true);
     expect(colMap.has('created_at')).toBe(true);
     expect(colMap.has('exported_at')).toBe(true);
+    expect(colMap.has('acked_at')).toBe(true);
+    expect(colMap.has('status')).toBe(false);
   });
 
   it('fact_id has UNIQUE constraint', () => {
@@ -120,25 +131,33 @@ describe('fact_export_queue schema', () => {
   it('namespace defaults to whatsapp-facts', () => {
     db.raw
       .prepare(
-        `INSERT INTO fact_export_queue (fact_id, chat_jid, payload_json) VALUES (?, ?, ?)`,
+        `INSERT INTO fact_export_queue (fact_uid, fact_id, chat_jid, payload_json) VALUES (?, ?, ?, ?)`,
       )
-      .run('f1', 'test-chat@s.whatsapp.net', '{}');
+      .run('fe_test000000000000000001', 'f1', 'test-chat@s.whatsapp.net', '{}');
     const row = db.raw
       .prepare(`SELECT namespace FROM fact_export_queue WHERE fact_id = ?`)
       .get('f1') as { namespace: string };
     expect(row.namespace).toBe('whatsapp-facts');
   });
 
-  it('status defaults to pending', () => {
+  it('state defaults to pending and rejects values outside the state machine', () => {
     db.raw
       .prepare(
-        `INSERT INTO fact_export_queue (fact_id, chat_jid, payload_json) VALUES (?, ?, ?)`,
+        `INSERT INTO fact_export_queue (fact_uid, fact_id, chat_jid, payload_json) VALUES (?, ?, ?, ?)`,
       )
-      .run('f2', 'test-chat@s.whatsapp.net', '{}');
+      .run('fe_test000000000000000002', 'f2', 'test-chat@s.whatsapp.net', '{}');
     const row = db.raw
-      .prepare(`SELECT status FROM fact_export_queue WHERE fact_id = ?`)
-      .get('f2') as { status: string };
-    expect(row.status).toBe('pending');
+      .prepare(`SELECT state, attempt_count FROM fact_export_queue WHERE fact_id = ?`)
+      .get('f2') as { state: string; attempt_count: number };
+    expect(row.state).toBe('pending');
+    expect(row.attempt_count).toBe(0);
+
+    expect(() => db.raw
+      .prepare(
+        `INSERT INTO fact_export_queue (fact_uid, fact_id, chat_jid, payload_json, state) VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run('fe_test000000000000000003', 'f3', 'test-chat@s.whatsapp.net', '{}', 'in-flight'),
+    ).toThrow(/CHECK/);
   });
 });
 
@@ -161,19 +180,21 @@ describe('enqueueFacts', () => {
     expect(n.attempted).toBe(1);
 
     const row = db.raw
-      .prepare(`SELECT fact_id, chat_jid, sender_jid, namespace, status FROM fact_export_queue WHERE fact_id = ?`)
+      .prepare(`SELECT fact_id, fact_uid, chat_jid, sender_jid, namespace, state FROM fact_export_queue WHERE fact_id = ?`)
       .get('stable-id-1') as {
         fact_id: string;
+        fact_uid: string;
         chat_jid: string;
         sender_jid: string | null;
         namespace: string;
-        status: string;
+        state: string;
       };
     expect(row.fact_id).toBe('stable-id-1');
+    expect(row.fact_uid).toMatch(/^fe_[0-9a-f]{24}$/);
     expect(row.chat_jid).toBe('test-chat@s.whatsapp.net');
     expect(row.sender_jid).toBe('15550100001@s.whatsapp.net');
     expect(row.namespace).toBe('whatsapp-facts');
-    expect(row.status).toBe('pending');
+    expect(row.state).toBe('pending');
   });
 
   it('stores the full payload as JSON', () => {
@@ -250,25 +271,33 @@ describe('enqueueFacts', () => {
     const fact = makeFact({ factId: 'group-fact', senderJid: null });
     enqueueFacts(db, [fact]);
     const row = db.raw
-      .prepare(`SELECT fact_id, chat_jid, sender_jid, namespace, status FROM fact_export_queue WHERE fact_id = ?`)
+      .prepare(`SELECT fact_id, chat_jid, sender_jid, namespace, state FROM fact_export_queue WHERE fact_id = ?`)
       .get('group-fact') as {
         fact_id: string;
         chat_jid: string;
         sender_jid: string | null;
         namespace: string;
-        status: string;
+        state: string;
       };
     expect(row).toEqual({
       fact_id: 'group-fact',
       chat_jid: 'test-chat@s.whatsapp.net',
       sender_jid: null,
       namespace: 'whatsapp-facts',
-      status: 'pending',
+      state: 'pending',
     });
   });
 });
 
-describe('claimPendingFacts', () => {
+function uidOf(db: Database, factId: string): string {
+  return (db.raw
+    .prepare('SELECT fact_uid FROM fact_export_queue WHERE fact_id = ?')
+    .get(factId) as { fact_uid: string }).fact_uid;
+}
+
+const LEASE = { owner: 'test-worker', limit: 10, leaseSeconds: 300, nowUnixSec: 1000 };
+
+describe('leasePendingFacts', () => {
   let db: Database;
 
   beforeEach(() => {
@@ -289,13 +318,13 @@ describe('claimPendingFacts', () => {
     ];
     enqueueFacts(db, facts);
 
-    const claimed = claimPendingFacts(db, 2);
-    expect(claimed).toHaveLength(2);
-    expect(claimed[0].factId).toBe('c-1');
-    expect(claimed[1].factId).toBe('c-2');
+    const leased = leasePendingFacts(db, { ...LEASE, limit: 2 });
+    expect(leased).toHaveLength(2);
+    expect(leased[0].factUid).toBe(uidOf(db, 'c-1'));
+    expect(leased[1].factUid).toBe(uidOf(db, 'c-2'));
   });
 
-  it('returns parsed payload fields for each claimed row', () => {
+  it('returns parsed payload fields for each leased row', () => {
     enqueueFacts(db, [makeFact({
       factId: 'parsed-1',
       text: 'Payload echo',
@@ -304,15 +333,15 @@ describe('claimPendingFacts', () => {
       sourceMessagePks: [99],
     })]);
 
-    const claimed = claimPendingFacts(db, 10);
-    expect(claimed).toHaveLength(1);
-    expect(claimed[0].factId).toBe('parsed-1');
-    expect(claimed[0].chatJid).toBe('test-chat@s.whatsapp.net');
-    expect(claimed[0].namespace).toBe('whatsapp-facts');
-    expect(claimed[0].payload.text).toBe('Payload echo');
-    expect(claimed[0].payload.memoryType).toBe('self_fact');
-    expect(claimed[0].payload.confidence).toBe(0.77);
-    expect(claimed[0].payload.sourceMessagePks).toEqual([99]);
+    const leased = leasePendingFacts(db, LEASE);
+    expect(leased).toHaveLength(1);
+    expect(leased[0].factUid).toBe(uidOf(db, 'parsed-1'));
+    expect(leased[0].chatJid).toBe('test-chat@s.whatsapp.net');
+    expect(leased[0].namespace).toBe('whatsapp-facts');
+    expect(leased[0].payload.text).toBe('Payload echo');
+    expect(leased[0].payload.memoryType).toBe('self_fact');
+    expect(leased[0].payload.confidence).toBe(0.77);
+    expect(leased[0].payload.sourceMessagePks).toEqual([99]);
   });
 
   it('does NOT return already-exported rows', () => {
@@ -321,36 +350,38 @@ describe('claimPendingFacts', () => {
       makeFact({ factId: 'mixed-2' }),
       makeFact({ factId: 'mixed-3' }),
     ]);
-    markFactsExported(db, ['mixed-2']);
+    db.raw
+      .prepare(`UPDATE fact_export_queue SET state = 'exported' WHERE fact_id = 'mixed-2'`)
+      .run();
 
-    const claimed = claimPendingFacts(db, 10);
-    const claimedIds = claimed.map((c) => c.factId).sort();
-    expect(claimedIds).toEqual(['mixed-1', 'mixed-3']);
+    const leased = leasePendingFacts(db, LEASE);
+    const leasedUids = leased.map((c) => c.factUid).sort();
+    expect(leasedUids).toEqual([uidOf(db, 'mixed-1'), uidOf(db, 'mixed-3')].sort());
   });
 
-  it('does NOT mutate state — calling twice returns the same rows', () => {
-    enqueueFacts(db, [makeFact({ factId: 'readonly-1' }), makeFact({ factId: 'readonly-2' })]);
+  it('DOES mutate state — a second claimer sees nothing while leases are live', () => {
+    enqueueFacts(db, [makeFact({ factId: 'fenced-1' }), makeFact({ factId: 'fenced-2' })]);
 
-    const first = claimPendingFacts(db, 10);
-    const second = claimPendingFacts(db, 10);
-    expect(first.map((f) => f.factId).sort()).toEqual(['readonly-1', 'readonly-2']);
-    expect(second.map((f) => f.factId).sort()).toEqual(['readonly-1', 'readonly-2']);
+    const first = leasePendingFacts(db, LEASE);
+    const second = leasePendingFacts(db, { ...LEASE, owner: 'other-worker', nowUnixSec: 1001 });
+    expect(first).toHaveLength(2);
+    expect(second).toHaveLength(0);
   });
 
   it('returns an empty array when queue is empty', () => {
-    const claimed = claimPendingFacts(db, 10);
-    expect(claimed).toEqual([]);
+    const leased = leasePendingFacts(db, LEASE);
+    expect(leased).toEqual([]);
   });
 
   it('respects limit even when queue is larger', () => {
     const facts = Array.from({ length: 50 }, (_, i) => makeFact({ factId: `bulk-${i}` }));
     enqueueFacts(db, facts);
-    const claimed = claimPendingFacts(db, 5);
-    expect(claimed).toHaveLength(5);
+    const leased = leasePendingFacts(db, { ...LEASE, limit: 5 });
+    expect(leased).toHaveLength(5);
   });
 });
 
-describe('markFactsExported', () => {
+describe('ackFacts', () => {
   let db: Database;
 
   beforeEach(() => {
@@ -362,31 +393,31 @@ describe('markFactsExported', () => {
     db.close();
   });
 
-  it('marks rows as exported and sets exported_at', () => {
+  it('marks leased rows as exported and sets exported_at/acked_at', () => {
     enqueueFacts(db, [
       makeFact({ factId: 'exp-1' }),
       makeFact({ factId: 'exp-2' }),
     ]);
+    leasePendingFacts(db, LEASE);
 
-    markFactsExported(db, ['exp-1']);
+    const results = ackFacts(db, {
+      owner: LEASE.owner,
+      acks: [{ factUid: uidOf(db, 'exp-1'), outcome: 'exported' }],
+      nowUnixSec: 1001,
+    });
+    expect(results).toEqual([{ factUid: uidOf(db, 'exp-1'), result: 'acknowledged' }]);
 
     const row = db.raw
-      .prepare(`SELECT fact_id, status, exported_at FROM fact_export_queue WHERE fact_id = ?`)
-      .get('exp-1') as { fact_id: string; status: string; exported_at: string | null };
-    expect(row).toEqual({
-      fact_id: 'exp-1',
-      status: 'exported',
-      exported_at: expect.stringMatching(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/),
-    });
+      .prepare(`SELECT state, exported_at, acked_at FROM fact_export_queue WHERE fact_id = ?`)
+      .get('exp-1') as { state: string; exported_at: string | null; acked_at: number | null };
+    expect(row.state).toBe('exported');
+    expect(row.exported_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+    expect(row.acked_at).toBe(1001);
 
     const otherRow = db.raw
-      .prepare(`SELECT fact_id, status, exported_at FROM fact_export_queue WHERE fact_id = ?`)
-      .get('exp-2') as { fact_id: string; status: string; exported_at: string | null };
-    expect(otherRow).toEqual({
-      fact_id: 'exp-2',
-      status: 'pending',
-      exported_at: null,
-    });
+      .prepare(`SELECT state, exported_at FROM fact_export_queue WHERE fact_id = ?`)
+      .get('exp-2') as { state: string; exported_at: string | null };
+    expect(otherRow).toEqual({ state: 'leased', exported_at: null });
   });
 
   it('does NOT mutate payload_json', () => {
@@ -396,12 +427,17 @@ describe('markFactsExported', () => {
       confidence: 0.88,
     });
     enqueueFacts(db, [fact]);
+    leasePendingFacts(db, LEASE);
 
     const before = db.raw
       .prepare(`SELECT payload_json FROM fact_export_queue WHERE fact_id = ?`)
       .get('payload-untouched') as { payload_json: string };
 
-    markFactsExported(db, ['payload-untouched']);
+    ackFacts(db, {
+      owner: LEASE.owner,
+      acks: [{ factUid: uidOf(db, 'payload-untouched'), outcome: 'exported' }],
+      nowUnixSec: 1001,
+    });
 
     const after = db.raw
       .prepare(`SELECT payload_json FROM fact_export_queue WHERE fact_id = ?`)
@@ -410,34 +446,50 @@ describe('markFactsExported', () => {
     expect(after.payload_json).toBe(before.payload_json);
   });
 
-  it('is a no-op for an empty ID list', () => {
+  it('is a no-op for an empty ack list', () => {
     enqueueFacts(db, [makeFact({ factId: 'noop-1' })]);
-    markFactsExported(db, []);
+    const results = ackFacts(db, { owner: LEASE.owner, acks: [], nowUnixSec: 1001 });
+    expect(results).toEqual([]);
     const row = db.raw
-      .prepare(`SELECT status FROM fact_export_queue WHERE fact_id = ?`)
-      .get('noop-1') as { status: string };
-    expect(row.status).toBe('pending');
+      .prepare(`SELECT state FROM fact_export_queue WHERE fact_id = ?`)
+      .get('noop-1') as { state: string };
+    expect(row.state).toBe('pending');
   });
 
-  it('silently ignores unknown fact IDs', () => {
+  it('reports unknown fact uids explicitly instead of silently ignoring them', () => {
     enqueueFacts(db, [makeFact({ factId: 'known-1' })]);
-    markFactsExported(db, ['unknown-1', 'unknown-2']);
+    leasePendingFacts(db, LEASE);
+    const results = ackFacts(db, {
+      owner: LEASE.owner,
+      acks: [
+        { factUid: 'fe_unknown00000000000000001', outcome: 'exported' },
+        { factUid: 'fe_unknown00000000000000002', outcome: 'exported' },
+      ],
+      nowUnixSec: 1001,
+    });
+    expect(results.map((r) => r.result)).toEqual(['unknown', 'unknown']);
 
     const row = db.raw
-      .prepare(`SELECT status FROM fact_export_queue WHERE fact_id = ?`)
-      .get('known-1') as { status: string };
-    expect(row.status).toBe('pending');
+      .prepare(`SELECT state FROM fact_export_queue WHERE fact_id = ?`)
+      .get('known-1') as { state: string };
+    expect(row.state).toBe('leased');
   });
 
-  it('handles a large batch of IDs in one call', () => {
+  it('handles a large batch of acks in one call', () => {
     const facts = Array.from({ length: 30 }, (_, i) => makeFact({ factId: `batch-${i}` }));
     enqueueFacts(db, facts);
-    markFactsExported(db, facts.map((f) => f.factId));
+    const leased = leasePendingFacts(db, { ...LEASE, limit: 30 });
+    const results = ackFacts(db, {
+      owner: LEASE.owner,
+      acks: leased.map((l) => ({ factUid: l.factUid, outcome: 'exported' as const })),
+      nowUnixSec: 1001,
+    });
+    expect(results.every((r) => r.result === 'acknowledged')).toBe(true);
 
-    const pending = db.raw
-      .prepare(`SELECT COUNT(*) AS n FROM fact_export_queue WHERE status = 'pending'`)
+    const notExported = db.raw
+      .prepare(`SELECT COUNT(*) AS n FROM fact_export_queue WHERE state != 'exported'`)
       .get() as { n: number };
-    expect(pending.n).toBe(0);
+    expect(notExported.n).toBe(0);
   });
 });
 
@@ -556,7 +608,7 @@ describe('enqueueFacts — transactional accounting (T1)', () => {
   });
 });
 
-describe('claimPendingFacts — corrupted payload guard (T1)', () => {
+describe('leasePendingFacts — corrupted payload guard (T1)', () => {
   let db: Database;
 
   beforeEach(() => {
@@ -568,23 +620,19 @@ describe('claimPendingFacts — corrupted payload guard (T1)', () => {
     db.close();
   });
 
-  it('surfaces corrupted payload_json at log.error with fact_id, not silently returned as {}', () => {
+  it('surfaces corrupted payload_json at log.error with fact_uid, not silently returned as {}', () => {
     // Contract (T1 I-1 hard negative): corrupted payload_json rows MUST
-    // be omitted from the claimed result AND the quarantine MUST emit a
-    // log.error bearing the offending factId. This test asserts BOTH —
-    // no conditional-guard gating — so a regression that started
-    // returning `{}` payloads (the pre-T1 silent fallback) would make
-    // one of the assertions below fail rather than be skipped.
-
-    // Reset the shared logger spy so we only see errors from this test.
+    // be omitted from the leased result AND the quarantine MUST emit a
+    // log.error bearing the offending opaque factUid — never the
+    // identity-bearing fact_id and never payload prose.
     mockLogError.mockClear();
 
     // Insert a malformed row directly so the payload_json is not valid JSON.
     db.raw
       .prepare(
-        `INSERT INTO fact_export_queue (fact_id, chat_jid, payload_json) VALUES (?, ?, ?)`,
+        `INSERT INTO fact_export_queue (fact_uid, fact_id, chat_jid, payload_json) VALUES (?, ?, ?, ?)`,
       )
-      .run('corrupt-1', 'test-chat@s.whatsapp.net', '{this is not valid json');
+      .run('fe_corrupt00000000000000t1', 'corrupt-1', 'test-chat@s.whatsapp.net', '{this is not valid json');
 
     // A normally-structured row goes alongside so we verify the guard does
     // not nuke adjacent good rows.
@@ -594,40 +642,36 @@ describe('claimPendingFacts — corrupted payload guard (T1)', () => {
     // matching the implementation's conditional spread.
     const runId = process.env.MW_MIND_RUN_ID;
 
-    const claimed = claimPendingFacts(db, 10);
+    const leased = leasePendingFacts(db, LEASE);
 
     // Good row is returned with parsed payload.
-    const goodRow = claimed.find((c) => c.factId === 'healthy-1');
+    const goodRow = leased.find((c) => c.factUid === uidOf(db, 'healthy-1'));
     expect(goodRow).toMatchObject({
-      factId: 'healthy-1',
       payload: { text: 'Good payload' },
     });
 
-    // Hard negative: the corrupt row MUST NOT appear in the claimed result.
-    expect(claimed.find((c) => c.factId === 'corrupt-1')).toBeUndefined();
-    // And the claimed array MUST NOT contain ANY row with the corrupt fact_id
-    // under any shape (including a resurfaced empty-object payload).
-    expect(claimed.some((c) => c.factId === 'corrupt-1')).toBe(false);
+    // Hard negative: the corrupt row MUST NOT appear in the leased result.
+    expect(leased.some((c) => c.factUid === 'fe_corrupt00000000000000t1')).toBe(false);
 
     // Hard positive: the quarantine path MUST have emitted log.error with
-    // the offending factId — this is the audit-trail contract. Without it,
-    // operators have no way to triage corrupted rows.
+    // the offending factUid — this is the audit-trail contract.
     const errorCalls = mockLogError.mock.calls.filter((call) => {
       const [ctx] = call as [unknown, unknown];
       return (
         typeof ctx === 'object' &&
         ctx !== null &&
-        (ctx as Record<string, unknown>).factId === 'corrupt-1'
+        (ctx as Record<string, unknown>).factUid === 'fe_corrupt00000000000000t1'
       );
     });
     expect(errorCalls.length).toBeGreaterThan(0);
 
-    // Payload shape: every error call for this factId carries the row id
-    // too (so operators can SELECT on id), and carries runId iff the env
-    // var is present at call time.
+    // Every error call carries the row id (so operators can SELECT on id),
+    // carries runId iff the env var is present, and NEVER carries the
+    // legacy fact_id or payload content.
     for (const call of errorCalls) {
       const [ctx] = call as [Record<string, unknown>, string];
       expect(typeof ctx.rowId).toBe('number');
+      expect('factId' in ctx).toBe(false);
       if (runId) {
         expect(ctx.runId).toBe(runId);
       } else {
@@ -635,74 +679,67 @@ describe('claimPendingFacts — corrupted payload guard (T1)', () => {
       }
     }
 
-    // Additionally: the row must still exist in the DB so an operator
-    // can inspect it. Corrupt rows are quarantined (status flip), never
-    // deleted — the audit trail is the row plus the explicit log path.
+    // The row must still exist for operator triage — quarantined with an
+    // explicit failure code, never deleted.
     const stillThere = db.raw
-      .prepare(`SELECT fact_id FROM fact_export_queue WHERE fact_id = ?`)
-      .get('corrupt-1') as { fact_id: string } | undefined;
-    expect(stillThere?.fact_id).toBe('corrupt-1');
+      .prepare(`SELECT state, failure_code FROM fact_export_queue WHERE fact_id = ?`)
+      .get('corrupt-1') as { state: string; failure_code: string | null } | undefined;
+    expect(stillThere).toEqual({ state: 'quarantined', failure_code: 'payload_invalid' });
   });
 
   it('rejects payload_json that parses as JSON but fails zod validation', () => {
     // Contract (T1 I-1 hard negative): a syntactically-valid but
     // semantically-invalid payload (JSON object missing required fields)
-    // MUST be quarantined — omitted from the claimed result AND surfaced
-    // at log.error with the offending factId.
-
+    // MUST be quarantined — omitted from the leased result AND surfaced
+    // at log.error with the offending factUid.
     mockLogError.mockClear();
 
     db.raw
       .prepare(
-        `INSERT INTO fact_export_queue (fact_id, chat_jid, payload_json) VALUES (?, ?, ?)`,
+        `INSERT INTO fact_export_queue (fact_uid, fact_id, chat_jid, payload_json) VALUES (?, ?, ?, ?)`,
       )
-      .run('schema-bad-1', 'test-chat@s.whatsapp.net', '{"unexpected":"shape"}');
+      .run('fe_schemabad000000000000t1', 'schema-bad-1', 'test-chat@s.whatsapp.net', '{"unexpected":"shape"}');
 
     // Adjacent healthy row
     enqueueFacts(db, [makeFact({ factId: 'healthy-2', text: 'Fine' })]);
 
-    const runId = process.env.MW_MIND_RUN_ID;
-
-    const claimed = claimPendingFacts(db, 10);
+    const leased = leasePendingFacts(db, LEASE);
 
     // Healthy row is still returned
-    const healthy = claimed.find((c) => c.factId === 'healthy-2');
+    const healthy = leased.find((c) => c.factUid === uidOf(db, 'healthy-2'));
     expect(healthy).toMatchObject({
-      factId: 'healthy-2',
       payload: { text: 'Fine' },
     });
 
-    // Hard negative: the schema-bad row MUST NOT appear in the claimed result.
-    expect(claimed.find((c) => c.factId === 'schema-bad-1')).toBeUndefined();
-    expect(claimed.some((c) => c.factId === 'schema-bad-1')).toBe(false);
+    // Hard negative: the schema-bad row MUST NOT appear in the leased result.
+    expect(leased.some((c) => c.factUid === 'fe_schemabad000000000000t1')).toBe(false);
 
-    // Hard positive: the quarantine path MUST have emitted log.error
-    // bearing the offending factId and the zod issues array.
+    // Hard positive: log.error bears the factUid; zod issue details (which
+    // can embed payload-derived prose) are deliberately NOT logged.
     const errorCalls = mockLogError.mock.calls.filter((call) => {
       const [ctx] = call as [unknown, unknown];
       return (
         typeof ctx === 'object' &&
         ctx !== null &&
-        (ctx as Record<string, unknown>).factId === 'schema-bad-1'
+        (ctx as Record<string, unknown>).factUid === 'fe_schemabad000000000000t1'
       );
     });
     expect(errorCalls.length).toBeGreaterThan(0);
-
     for (const call of errorCalls) {
       const [ctx] = call as [Record<string, unknown>, string];
       expect(typeof ctx.rowId).toBe('number');
-      // zod failure path carries the issues array for operator triage.
-      expect(Array.isArray(ctx.issues)).toBe(true);
-      if (runId) {
-        expect(ctx.runId).toBe(runId);
-      } else {
-        expect('runId' in ctx).toBe(false);
-      }
+      expect('issues' in ctx).toBe(false);
+      expect('factId' in ctx).toBe(false);
     }
+
+    const row = db.raw
+      .prepare(`SELECT state, failure_code FROM fact_export_queue WHERE fact_id = ?`)
+      .get('schema-bad-1') as { state: string; failure_code: string | null };
+    expect(row).toEqual({ state: 'quarantined', failure_code: 'payload_invalid' });
   });
 });
 
-describe('claimPendingFacts — quarantine status persistence', () => {
+describe('leasePendingFacts — quarantine state persistence', () => {
   let db: Database;
 
   beforeEach(() => {
@@ -714,34 +751,34 @@ describe('claimPendingFacts — quarantine status persistence', () => {
     db.close();
   });
 
-  it('flips corrupt rows to status=quarantined so they stop occupying the pending queue head', () => {
+  it('flips corrupt rows to state=quarantined so they stop occupying the pending queue head', () => {
     // Failure mode this prevents: skipped-but-still-pending rows accumulate
     // at the head of the ORDER BY id queue; once `limit` corrupt rows pile
-    // up, every claimed batch is all garbage and export silently stops.
+    // up, every leased batch is all garbage and export silently stops.
     db.raw
-      .prepare(`INSERT INTO fact_export_queue (fact_id, chat_jid, payload_json) VALUES (?, ?, ?)`)
-      .run('corrupt-head', 'test-chat@s.whatsapp.net', '{broken');
+      .prepare(`INSERT INTO fact_export_queue (fact_uid, fact_id, chat_jid, payload_json) VALUES (?, ?, ?, ?)`)
+      .run('fe_corrupthead0000000000t1', 'corrupt-head', 'test-chat@s.whatsapp.net', '{broken');
     db.raw
-      .prepare(`INSERT INTO fact_export_queue (fact_id, chat_jid, payload_json) VALUES (?, ?, ?)`)
-      .run('schema-bad-head', 'test-chat@s.whatsapp.net', '{"unexpected":"shape"}');
+      .prepare(`INSERT INTO fact_export_queue (fact_uid, fact_id, chat_jid, payload_json) VALUES (?, ?, ?, ?)`)
+      .run('fe_schemabadhead00000000t1', 'schema-bad-head', 'test-chat@s.whatsapp.net', '{"unexpected":"shape"}');
     enqueueFacts(db, [makeFact({ factId: 'healthy-tail', text: 'Behind the corrupt rows' })]);
 
     // With limit=2 both slots are eaten by the corrupt head rows unless
     // they leave 'pending' after being observed once.
-    const first = claimPendingFacts(db, 2);
+    const first = leasePendingFacts(db, { ...LEASE, limit: 2 });
     expect(first).toEqual([]);
 
-    const statuses = db.raw
-      .prepare(`SELECT fact_id, status FROM fact_export_queue ORDER BY id`)
-      .all() as Array<{ fact_id: string; status: string }>;
-    expect(statuses).toEqual([
-      { fact_id: 'corrupt-head', status: 'quarantined' },
-      { fact_id: 'schema-bad-head', status: 'quarantined' },
-      { fact_id: 'healthy-tail', status: 'pending' },
+    const states = db.raw
+      .prepare(`SELECT fact_id, state FROM fact_export_queue ORDER BY id`)
+      .all() as Array<{ fact_id: string; state: string }>;
+    expect(states).toEqual([
+      { fact_id: 'corrupt-head', state: 'quarantined' },
+      { fact_id: 'schema-bad-head', state: 'quarantined' },
+      { fact_id: 'healthy-tail', state: 'pending' },
     ]);
 
-    // The second claim now reaches the healthy row instead of re-reading garbage.
-    const second = claimPendingFacts(db, 2);
-    expect(second.map((c) => c.factId)).toEqual(['healthy-tail']);
+    // The second lease now reaches the healthy row instead of re-reading garbage.
+    const second = leasePendingFacts(db, { ...LEASE, limit: 2, nowUnixSec: 1001 });
+    expect(second.map((c) => c.factUid)).toEqual([uidOf(db, 'healthy-tail')]);
   });
 });

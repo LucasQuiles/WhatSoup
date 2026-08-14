@@ -76,7 +76,7 @@ function expectedBinding(args: ApproveDrainArgs) {
   return buildCapabilityAttestationBinding({
     liveFacts: {
       hostId: args.hostId, runtimeUser: args.runtimeUser, releaseSha: args.releaseSha,
-      schemaVersion: 59, providerId: args.providerId, harnessType: resolveHarnessType(args.providerId),
+      schemaVersion: 60, providerId: args.providerId, harnessType: resolveHarnessType(args.providerId),
     },
     contractVersion: 'c/1', capability: 'child_process_tools', skill: SKILL, mediaRoot: args.mediaRoot,
   });

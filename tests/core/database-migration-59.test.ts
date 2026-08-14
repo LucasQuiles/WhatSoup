@@ -1,193 +1,117 @@
-/**
- * Migration 59 — capability-obligation post-merge-audit hotfix schema:
- * durable pre-spawn execution reservations (audit F1, Critical) and the
- * creation_reason honesty rebuild (audit F6 minimal: the code never observes
- * a typed deferral, so the schema no longer lets it claim one).
- */
 import { DatabaseSync } from 'node:sqlite';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-
-import { runMigration58 } from '../../src/core/database-migration-58.ts';
 import { runMigration59 } from '../../src/core/database-migration-59.ts';
-import { CURRENT_SCHEMA_MIGRATION, Database } from '../../src/core/database.ts';
 
-const DIGEST = 'a'.repeat(64);
+// Pre-58 shape: migration 20 created fact_export_queue with a free-form
+// status column and no lease/attempt/failure fields.
+const MIGRATION_20_SHAPE = `
+CREATE TABLE IF NOT EXISTS fact_export_queue (
+  id INTEGER PRIMARY KEY,
+  fact_id TEXT UNIQUE NOT NULL,
+  chat_jid TEXT NOT NULL,
+  sender_jid TEXT,
+  namespace TEXT NOT NULL DEFAULT 'whatsapp-facts',
+  payload_json TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  exported_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_fact_export_queue_pending ON fact_export_queue(status, id)
+  WHERE status = 'pending';
+`;
 
-function seedObligation(raw: DatabaseSync, creationReason: string, over: Record<string, unknown> = {}): number {
-  const params = {
-    source_inbound_seq: 1,
-    source_message_id: `m-${Math.random().toString(36).slice(2)}`,
-    conversation_key: 'conv-1',
-    delivery_jid: 'dest@s.whatsapp.net',
-    sender_jid: 'sender@s.whatsapp.net',
-    is_group: 0,
-    scope: 'per_chat',
-    replay_text: 'replay this',
-    contract_version: 'test/1',
-    required_capability: 'child_process_tools',
-    capability_params: '{}',
-    input_digest: DIGEST,
-    source_digest: DIGEST,
-    source_token: 'https://example.com/x',
-    state: 'waiting_capability',
-    creation_reason: creationReason,
-    ...over,
-  };
-  const cols = Object.keys(params);
-  const result = raw
-    .prepare(
-      `INSERT INTO capability_obligations (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`,
-    )
-    .run(...cols.map((c) => params[c as keyof typeof params] as never));
-  return Number(result.lastInsertRowid);
-}
-
-describe('migration 59 — execution reservations + creation_reason honesty rebuild', () => {
+describe('migration 59 fact export queue state machine', () => {
   let raw: DatabaseSync;
 
   beforeEach(() => {
     raw = new DatabaseSync(':memory:');
-    runMigration58(raw);
+    raw.exec(MIGRATION_20_SHAPE);
   });
 
-  afterEach(() => {
-    raw.close();
-  });
+  afterEach(() => raw.close());
 
-  it('registers as the current schema migration', () => {
-    expect(CURRENT_SCHEMA_MIGRATION).toBe(59);
-  });
+  function seedLegacy(factId: string, status: string): void {
+    raw.prepare(
+      `INSERT INTO fact_export_queue (fact_id, chat_jid, sender_jid, namespace, payload_json, status)
+       VALUES (?, 'legacy-chat@g.us', NULL, 'whatsapp-facts', '{}', ?)`,
+    ).run(factId, status);
+  }
 
-  it('reservation UNIQUE turns a duplicate (obligation, claim epoch, attempt) into a constraint failure', () => {
+  it('rebuilds the table with the explicit state machine and durability columns', () => {
     runMigration59(raw);
-    raw
-      .prepare(
-        `INSERT INTO capability_execution_reservations (obligation_id, claim_epoch, attempt_number, tool_use_id)
-         VALUES (1, 1, 1, 'capx-a')`,
-      )
-      .run();
-    expect(() =>
-      raw
-        .prepare(
-          `INSERT INTO capability_execution_reservations (obligation_id, claim_epoch, attempt_number, tool_use_id)
-           VALUES (1, 1, 1, 'capx-b')`,
-        )
-        .run(),
-    ).toThrow(/UNIQUE constraint failed: capability_execution_reservations/);
-    // a different attempt of the same claim reserves fine
-    raw
-      .prepare(
-        `INSERT INTO capability_execution_reservations (obligation_id, claim_epoch, attempt_number, tool_use_id)
-         VALUES (1, 1, 2, 'capx-c')`,
-      )
-      .run();
+    const cols = (raw.prepare("PRAGMA table_info('fact_export_queue')").all() as Array<{ name: string }>).map(c => c.name);
+    expect(cols).toEqual(expect.arrayContaining([
+      'fact_uid', 'fact_id', 'state', 'lease_owner', 'lease_expires_at',
+      'attempt_count', 'failure_code', 'failure_stage', 'next_attempt_at',
+      'remote_record_id', 'acked_at',
+    ]));
+    expect(cols).not.toContain('status');
+
+    // The state machine is schema-enforced.
+    expect(() => raw.prepare(
+      `INSERT INTO fact_export_queue (fact_uid, fact_id, chat_jid, payload_json, state)
+       VALUES ('fe_x', 'x', 'c@g.us', '{}', 'sprinting')`,
+    ).run()).toThrow(/CHECK/);
   });
 
-  it('reservations are append-only: UPDATE and DELETE are refused by trigger', () => {
+  it('maps known legacy statuses one-to-one and quarantines nothing silently', () => {
+    seedLegacy('f-pending', 'pending');
+    seedLegacy('f-exported', 'exported');
+    seedLegacy('f-quarantined', 'quarantined');
     runMigration59(raw);
-    raw
-      .prepare(
-        `INSERT INTO capability_execution_reservations (obligation_id, claim_epoch, attempt_number, tool_use_id)
-         VALUES (7, 1, 1, 'capx-x')`,
-      )
-      .run();
-    expect(() =>
-      raw.prepare('UPDATE capability_execution_reservations SET tool_use_id = ? WHERE obligation_id = 7').run('capx-y'),
-    ).toThrow(/append-only/);
-    expect(() =>
-      raw.prepare('DELETE FROM capability_execution_reservations WHERE obligation_id = 7').run(),
-    ).toThrow(/append-only/);
-  });
-
-  it('rebuild maps typed_deferral_signal rows to harness_capability_gap and preserves the rest verbatim', () => {
-    const id = seedObligation(raw, 'typed_deferral_signal');
-    const backfillId = seedObligation(raw, 'reviewed_backfill:RUN-1', {
-      source_message_id: 'm-backfill',
+    const states = Object.fromEntries(
+      (raw.prepare('SELECT fact_id, state FROM fact_export_queue').all() as Array<{ fact_id: string; state: string }>)
+        .map(r => [r.fact_id, r.state]),
+    );
+    expect(states).toEqual({
+      'f-pending': 'pending',
+      'f-exported': 'exported',
+      'f-quarantined': 'quarantined',
     });
-    runMigration59(raw);
-    const migrated = raw
-      .prepare('SELECT creation_reason, replay_text, source_digest FROM capability_obligations WHERE id = ?')
-      .get(id) as { creation_reason: string; replay_text: string; source_digest: string };
-    expect(migrated).toEqual({
-      creation_reason: 'harness_capability_gap',
-      replay_text: 'replay this',
-      source_digest: DIGEST,
-    });
-    const backfill = raw
-      .prepare('SELECT creation_reason FROM capability_obligations WHERE id = ?')
-      .get(backfillId) as { creation_reason: string };
-    expect(backfill).toEqual({ creation_reason: 'reviewed_backfill:RUN-1' });
   });
 
-  it('after the rebuild the old dishonest value is unrepresentable and the honest ones insert', () => {
+  it('gives unknown legacy statuses the explicit legacy_unclassified disposition', () => {
+    seedLegacy('f-weird', 'in-flight');
+    seedLegacy('f-empty', '');
     runMigration59(raw);
-    expect(() => seedObligation(raw, 'typed_deferral_signal')).toThrow(/CHECK|constraint/i);
-    seedObligation(raw, 'harness_capability_gap', { source_message_id: 'm-honest' });
-    seedObligation(raw, 'reviewed_backfill:RUN-2', { source_message_id: 'm-bf2' });
+    const rows = raw
+      .prepare("SELECT fact_id, state FROM fact_export_queue ORDER BY fact_id")
+      .all() as Array<{ fact_id: string; state: string }>;
+    expect(rows).toEqual([
+      { fact_id: 'f-empty', state: 'legacy_unclassified' },
+      { fact_id: 'f-weird', state: 'legacy_unclassified' },
+    ]);
   });
 
-  it('recreates the obligations guard triggers: creation-state gate still fires after the rebuild', () => {
+  it('backfills a salted opaque fact_uid for every legacy row', () => {
+    seedLegacy('legacy-chat@g.us:SENDER@s.whatsapp.net:abc123', 'pending');
+    seedLegacy('other-chat@g.us:group:def456', 'exported');
     runMigration59(raw);
-    expect(() =>
-      seedObligation(raw, 'harness_capability_gap', { source_message_id: 'm-bad-state', state: 'completed' }),
-    ).toThrow(/initial state only/);
-  });
-
-  it('is idempotent on retry and preserves rows', () => {
-    seedObligation(raw, 'typed_deferral_signal');
-    runMigration59(raw);
-    const before = raw.prepare('SELECT COUNT(*) AS n FROM capability_obligations').get() as { n: number };
-    expect(() => runMigration59(raw)).not.toThrow();
-    const after = raw.prepare('SELECT COUNT(*) AS n FROM capability_obligations').get() as { n: number };
-    expect(after).toEqual(before);
-  });
-
-  it('returns without error when the capability tables do not exist (legacy fixture)', () => {
-    const bare = new DatabaseSync(':memory:');
-    try {
-      expect(() => runMigration59(bare)).not.toThrow();
-      // the reservation table is still created so the executor's INSERT has a home
-      const t = bare
-        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='capability_execution_reservations'")
-        .get() as { name: string } | undefined;
-      expect(t).toEqual({ name: 'capability_execution_reservations' });
-    } finally {
-      bare.close();
+    const rows = raw
+      .prepare('SELECT fact_id, fact_uid FROM fact_export_queue')
+      .all() as Array<{ fact_id: string; fact_uid: string }>;
+    for (const row of rows) {
+      expect(row.fact_uid).toMatch(/^fe_[0-9a-f]{24}$/);
+      expect(row.fact_uid).not.toContain('g.us');
+      expect(row.fact_uid).not.toContain('abc123');
     }
+    expect(new Set(rows.map(r => r.fact_uid)).size).toBe(2);
+
+    // Salt is persisted so uid derivation is stable within this database.
+    const salt = raw
+      .prepare("SELECT value FROM fact_export_meta WHERE key = 'fact_uid_salt'")
+      .get() as { value: string } | undefined;
+    expect(salt?.value).toMatch(/^[0-9a-f]{32}$/);
   });
 
-  it('aborts before mutating when a pre-existing creation_reason is outside the known vocabulary', () => {
-    // Simulate a corrupted row: bypass the CHECK by rebuilding the constraint away is not possible,
-    // so use PRAGMA writable_schema-free approach: insert a reviewed_backfill row then UPDATE via
-    // direct trigger-free path is blocked; instead verify the pre-flight path with the two known
-    // values present — the abort arm is covered by the vocabulary filter unit-behavior below.
-    const id = seedObligation(raw, 'typed_deferral_signal');
-    expect(id).toBeGreaterThan(0);
-    // The identity-immutable trigger blocks creation_reason edits, so an out-of-vocabulary value
-    // cannot exist on a real migration-58 database; the pre-flight abort therefore guards only
-    // hand-edited databases. Assert the migration still succeeds on the representable state.
-    expect(() => runMigration59(raw)).not.toThrow();
-  });
-
-  it('full migration chain reaches v59 with the reservation table present', () => {
-    const db = new Database(':memory:');
-    try {
-      db.open();
-      const applied = db.raw
-        .prepare('SELECT MAX(version) AS v FROM schema_migrations')
-        .get() as { v: number };
-      expect(applied.v).toBe(59);
-      const t = db.raw
-        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='capability_execution_reservations'")
-        .get() as { name: string } | undefined;
-      expect(t).toEqual({ name: 'capability_execution_reservations' });
-      const obligations = db.raw
-        .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='capability_obligations'")
-        .get() as { sql: string };
-      expect(obligations.sql).toContain("'harness_capability_gap'");
-      expect(obligations.sql).not.toContain("'typed_deferral_signal'");
-    } finally {
-      db.close();
-    }
+  it('is idempotent', () => {
+    seedLegacy('f-pending', 'pending');
+    runMigration59(raw);
+    const salt1 = (raw.prepare("SELECT value FROM fact_export_meta WHERE key = 'fact_uid_salt'").get() as { value: string }).value;
+    runMigration59(raw);
+    const salt2 = (raw.prepare("SELECT value FROM fact_export_meta WHERE key = 'fact_uid_salt'").get() as { value: string }).value;
+    expect(salt2).toBe(salt1);
+    const count = (raw.prepare('SELECT COUNT(*) AS n FROM fact_export_queue').get() as { n: number }).n;
+    expect(count).toBe(1);
   });
 });

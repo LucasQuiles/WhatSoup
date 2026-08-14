@@ -30,7 +30,7 @@ afterEach(() => {
  * 'claimed' supplies one). */
 function seedFreshAttestation(): number {
   return recordCapabilityAttestation(db, {
-    hostId: 'h', runtimeUser: 'u', releaseSha: 'r', schemaVersion: 59,
+    hostId: 'h', runtimeUser: 'u', releaseSha: 'r', schemaVersion: 60,
     providerId: 'claude-cli', harnessType: 'persistent_session', contractVersion: 'c/1',
     capability: 'child_process_tools', skillName: 'watch', skillVersion: '1.0.0',
     skillDigest: 'sd', resolverDigest: 'rd', dependencyVersions: {}, probeVersion: 'p/1',
