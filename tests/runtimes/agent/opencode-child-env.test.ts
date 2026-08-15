@@ -117,7 +117,9 @@ describe('buildChildEnv — opencode-cli least-authority environment', () => {
 
     const env = buildChildEnv('gemini-cli');
 
-    expect(lookupCredentialMock.mock.calls).toEqual([['google']]);
+    // Keyring-first (#2192): one resolveApiKey per alias, both hitting the
+    // canonical 'google' service, so a keyring hit feeds both names.
+    expect(lookupCredentialMock.mock.calls).toEqual([['google'], ['google']]);
     expect(env.GOOGLE_API_KEY).toBe('keyring-google-key');
     expect(env.GEMINI_API_KEY).toBe('keyring-google-key');
   });
@@ -129,8 +131,10 @@ describe('buildChildEnv — opencode-cli least-authority environment', () => {
 
     const env = buildChildEnv('gemini-cli');
 
-    expect(lookupCredentialMock.mock.calls).toEqual([['google']]);
-    expect(env.GOOGLE_API_KEY).toBe('legacy-gemini-key');
+    // On a keyring miss each env var is the fallback for its OWN name only:
+    // the legacy alias keeps working, but is not mirrored onto GOOGLE_API_KEY.
+    expect(lookupCredentialMock.mock.calls).toEqual([['google'], ['google']]);
+    expect(env.GOOGLE_API_KEY).toBeUndefined();
     expect(env.GEMINI_API_KEY).toBe('legacy-gemini-key');
   });
 
