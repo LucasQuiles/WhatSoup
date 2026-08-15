@@ -82,6 +82,12 @@ export interface ClearAlertSourceOptions {
   requireDurableOutbox?: boolean;
 }
 
+// BOT_ERRORS_{JID,EXPECTED_JID,REQUIRE_EXPECTED} are config-published (#2192
+// slice 3a): config.ts resolves instance-config overrides and writes them back
+// to process.env at load (TMPDIR pattern), so these call-time reads see the
+// same bytes as the typed config fields without a lib→config import. The
+// group-JID shape and expected-JID pin validation stay here, where the
+// fail-closed warn-once semantics live.
 function requireExpectedJid(): boolean {
   const raw = process.env['BOT_ERRORS_REQUIRE_EXPECTED']?.trim().toLowerCase();
   return raw ? !['0', 'false', 'no', 'off'].includes(raw) : true;

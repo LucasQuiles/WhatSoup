@@ -28,8 +28,12 @@ const srcRoot = resolve(repoRoot, 'src');
 const ENV_ACCESS_PATTERN = /process\.env/;
 
 const ALLOWLIST: Record<string, number> = {
-  // SSOT env→typed-RuntimeConfig conversion seam; every read is instance-config→env→default.
-  'src/config.ts': 34,
+  // SSOT env→typed-RuntimeConfig conversion seam; every read is
+  // instance-config→env→default. Includes the bot-errors publish bridge
+  // (#2192 slice 3a): 3 conditional WRITES + 3 post-publish reads for
+  // BOT_ERRORS_{JID,EXPECTED_JID,REQUIRE_EXPECTED}, + the
+  // BOT_ERRORS_RUNTIME_TOOL_FAILURE_ALERTS read behind toolFailureAlertsEnabled.
+  'src/config.ts': 41,
   // param-default `env` seam (WHATSOUP_REPO_ROOT) — new typed-field candidate, not a bypass.
   'src/core/arc-binding-health.ts': 1,
   // build-time injected WHATSOUP_GIT_SHA / WHATSOUP_GIT_BRANCH (deploy hook, no typed source).
@@ -38,7 +42,9 @@ const ALLOWLIST: Record<string, number> = {
   'src/core/health-bind-guard.ts': 1,
   // bounded MCP key-list passthrough (.map over an explicit key list).
   'src/core/mcp-launcher.ts': 1,
-  // WHATSOUP_INTERNAL_JIDS / BOT_ERRORS_JID safety config — slice-3 typed field.
+  // WHATSOUP_INTERNAL_JIDS env-late; BOT_ERRORS_JID config-published (#2192
+  // slice 3a — config resolves the instance override and writes it back to
+  // process.env, so this call-time read needs no config import).
   'src/core/outbound-message-safety.ts': 2,
   // INSTANCE_CONFIG WRITE — multi-instance bootstrap protocol.
   'src/database-compatibility-config.ts': 1,
@@ -64,7 +70,9 @@ const ALLOWLIST: Record<string, number> = {
   // design: lib cannot import config, and config WRITES TMPDIR at load — the env
   // var is the sanctioned lib-side channel) — slice-3 typed outbox module.
   'src/lib/bot-errors-outbox.ts': 19,
-  // outbox/alert config (BOT_ERRORS_*, EMIT_ALERT_THROTTLE_MS, WHATSOUP_ALERT_SINK) — slice-3.
+  // BOT_ERRORS_{JID,EXPECTED_JID,REQUIRE_EXPECTED} config-published (#2192
+  // slice 3a — TMPDIR pattern; validation stays here). EMIT_ALERT_THROTTLE_MS
+  // + WHATSOUP_ALERT_SINK remain slice-3 (3b) candidates.
   'src/lib/emit-alert.ts': 8,
   // FLEET_HEALTH_VERIFY_GATE rollout enum (off/shadow/warn/enforce) — env-late
   // by design: lib cannot import config, and the dial must flip live without a
@@ -108,8 +116,6 @@ const ALLOWLIST: Record<string, number> = {
   'src/runtimes/agent/runtime.ts': 4,
   // positiveIntEnv dynamic-key helper + CLAUDE_CONFIG_DIR ambient (gemini keys migrated in slice-1).
   'src/runtimes/agent/session.ts': 2,
-  // BOT_ERRORS_RUNTIME_TOOL_FAILURE_ALERTS flag — slice-3 outbox/alert field.
-  'src/runtimes/agent/tool-failure-alert.ts': 1,
   // MW_MIND_RUN_ID external-subsystem per-run id (read 3×, same value).
   'src/runtimes/chat/enrichment/fact-export-queue.ts': 3,
   // transcription model/python path — slice-4 typed config.transcription.fasterWhisper.*.

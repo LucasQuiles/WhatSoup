@@ -51,6 +51,7 @@ function makeDeps(overrides: Partial<ToolFailureAlertDeps> = {}): ToolFailureAle
     instanceName: 'testinst',
     sessionScope: 'single',
     cwd: '/tmp/x',
+    toolFailureAlertsEnabled: true,
     resolveProvider: () => 'claude-cli',
     recentToolFailureAlerts: new Map<string, number>(),
     capDedupeMap: makeCap(1_000),
@@ -128,9 +129,11 @@ describe('maybeEmitToolFailureAlert', () => {
     expect(deps.recentToolFailureAlerts.size).toBe(3);
   });
 
-  it('is disabled by BOT_ERRORS_RUNTIME_TOOL_FAILURE_ALERTS=0', () => {
-    vi.stubEnv('BOT_ERRORS_RUNTIME_TOOL_FAILURE_ALERTS', '0');
-    const deps = makeDeps();
+  it('is disabled when toolFailureAlertsEnabled is false (config kill-switch via DI)', () => {
+    // The env var (BOT_ERRORS_RUNTIME_TOOL_FAILURE_ALERTS) is resolved by
+    // config.ts into config.toolFailureAlertsEnabled and threaded through
+    // deps — this module no longer reads process.env (#2192 slice 3a).
+    const deps = makeDeps({ toolFailureAlertsEnabled: false });
     maybeEmitToolFailureAlert(args(), deps);
     expect(deps.emitAlert).not.toHaveBeenCalled();
   });

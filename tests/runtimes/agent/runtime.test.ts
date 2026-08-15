@@ -270,6 +270,9 @@ const { mockConfig, mockSynthesizeSpeech, mockWriteTempFile } = vi.hoisted(() =>
     controlPeers: new Map<string, string>(),
     toolUpdateMode: 'full' as 'full' | 'minimal' | 'friendly',
     toolUpdateRedirectJid: null as string | null,
+    // Threaded into ToolFailureAlertDeps (#2192 slice 3a); the tool-failure
+    // emission assertions below depend on this being on.
+    toolFailureAlertsEnabled: true,
     textAggregateDelayMs: 2_000,
     startupNotifications: true,
     proactiveResumeOnStartup: true,

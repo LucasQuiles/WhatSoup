@@ -528,6 +528,34 @@ process.env.TMPDIR = processTmpDir;
 mkdirSync(join(mediaDir, '..', 'cache'), { recursive: true, mode: 0o700 });
 
 // ---------------------------------------------------------------------------
+// Bot-errors alert routing (#2192 slice 3a) — resolve, then PUBLISH back to
+// process.env (the TMPDIR/LOG_DIR pattern above): src/lib/emit-alert.ts and
+// src/core/outbound-message-safety.ts read these vars call-time and cannot
+// import config (ring rules), so the env var is the sanctioned lib-side
+// channel. The publish is instance-value-only — an env-sourced or absent
+// value leaves process.env byte-identical, because absence is load-bearing
+// (emit-alert fail-closes the legacy helper on a missing JID, and the
+// spawned legacy alert script inherits this environment).
+// ---------------------------------------------------------------------------
+const instanceBotErrorsJid = optionalString(instance?.botErrorsJid, 'botErrorsJid');
+if (instanceBotErrorsJid !== undefined) process.env.BOT_ERRORS_JID = instanceBotErrorsJid;
+const instanceBotErrorsExpectedJid = optionalString(instance?.botErrorsExpectedJid, 'botErrorsExpectedJid');
+if (instanceBotErrorsExpectedJid !== undefined) process.env.BOT_ERRORS_EXPECTED_JID = instanceBotErrorsExpectedJid;
+const instanceBotErrorsRequireExpected = optionalBoolean(instance?.botErrorsRequireExpected, 'botErrorsRequireExpected');
+if (instanceBotErrorsRequireExpected !== undefined) {
+  process.env.BOT_ERRORS_REQUIRE_EXPECTED = instanceBotErrorsRequireExpected ? '1' : '0';
+}
+// Post-publish reads: the typed fields and the env-reading sites see the same
+// bytes by construction. Parsing mirrors emit-alert.ts (trim; the require flag
+// treats 0/false/no/off as disabling, anything else — including unset — as on).
+const botErrorsJid = process.env.BOT_ERRORS_JID?.trim() || null;
+const botErrorsExpectedJid = process.env.BOT_ERRORS_EXPECTED_JID?.trim() || null;
+const rawBotErrorsRequireExpected = process.env.BOT_ERRORS_REQUIRE_EXPECTED?.trim().toLowerCase();
+const botErrorsRequireExpected = rawBotErrorsRequireExpected
+  ? !['0', 'false', 'no', 'off'].includes(rawBotErrorsRequireExpected)
+  : true;
+
+// ---------------------------------------------------------------------------
 // Model defaults — priority: instance.models > env vars > built-in defaults
 // ---------------------------------------------------------------------------
 const instanceModels = configSection(instance?.models, 'models');
@@ -1327,6 +1355,21 @@ export const config = {
   // One-message handoff notice flag (#2192 slice 2b).
   oneMessageHandoff: optionalBoolean(instance?.oneMessageHandoff, 'oneMessageHandoff')
     ?? process.env.WHATSOUP_ONE_MESSAGE_HANDOFF === '1',
+
+  // Bot-errors alert routing (#2192 slice 3a). Resolved AND published back to
+  // process.env in the pre-literal block above (search: "Bot-errors alert
+  // routing") so these typed fields and the env-reading lib/core sites cannot
+  // disagree. Validation (group-JID shape, expected-JID pin) stays in
+  // emit-alert.ts where the fail-closed warn-once semantics live.
+  botErrorsJid,
+  botErrorsExpectedJid,
+  botErrorsRequireExpected,
+  // Master switch for the runtime's per-tool-failure operator alerts,
+  // threaded to tool-failure-alert.ts via ToolFailureAlertDeps (param-DI from
+  // this grandfathered importer; the module itself reads no env). Inverted
+  // env semantics preserved: ON unless the env var is exactly '0'.
+  toolFailureAlertsEnabled: optionalBoolean(instance?.toolFailureAlertsEnabled, 'toolFailureAlertsEnabled')
+    ?? process.env.BOT_ERRORS_RUNTIME_TOOL_FAILURE_ALERTS !== '0',
 
   // GUI
   gui: optionalBoolean(instance?.gui, 'gui') ?? false,

@@ -336,7 +336,10 @@ export function classifyAssistantTextEgress(text: string): AssistantTextEgressDe
  *
  * Reads `process.env.BOT_ERRORS_JID` and `process.env.WHATSOUP_INTERNAL_JIDS` —
  * the only env dependencies in this otherwise pure module; kept here so
- * audience policy has a single home.
+ * audience policy has a single home. `BOT_ERRORS_JID` is config-published
+ * (#2192 slice 3a): config.ts resolves the instance-config override and writes
+ * it back to process.env at load, so this call-time read and the typed
+ * `config.botErrorsJid` field see the same bytes without a config import.
  *
  * `ctx` (T8-F1+F2, OPTIONAL — omitting it preserves the exact pre-F1+F2
  * behavior for every existing caller):
