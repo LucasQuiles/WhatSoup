@@ -33,14 +33,21 @@ const GROUP_JID_RE = /^\d+@g\.us$/;
  * suppressed at the legacy-spawn layer.  Only the legacy path is throttled;
  * the durable outbox path is unthrottled (the dispatcher handles dedup).
  *
- * Set EMIT_ALERT_THROTTLE_MS=0 to disable.  Values < 0 are treated as 0.
- * Default: 300_000 ms (5 min).
+ * Resolved at CALL time — never frozen at import — so the config publish
+ * (#2192 slice 3b: an instance-config `emitAlertThrottleMs` lands here via
+ * config.ts writing the env var at load) is honored regardless of module-eval
+ * order, and both throttle sites share one validated resolution (the prune
+ * path previously re-read the env without the finite guard, so a junk value
+ * meant entries never expired).
+ *
+ * Set EMIT_ALERT_THROTTLE_MS=0 to disable.  Values < 0 are treated as 0;
+ * non-finite values use the default.  Default: 300_000 ms (5 min).
  */
-const EMIT_ALERT_THROTTLE_MS = (() => {
+function emitAlertThrottleMs(): number {
   const raw = Number(process.env['EMIT_ALERT_THROTTLE_MS']);
   if (Number.isFinite(raw)) return Math.max(0, raw);
   return 300_000;
-})();
+}
 
 /** Maps `${instance}|${source}|${summary}` → epoch ms of first legacy spawn. */
 const alertThrottleMap = new Map<string, number>();
@@ -272,7 +279,7 @@ export function emitAlert(
     // #2434: throttle check WITHOUT recording — record only on success.
     const throttleKey = `${instance}|${source}|${summary}`;
     // Prune expired entries before checking.
-    const throttleWindow = Number(process.env['EMIT_ALERT_THROTTLE_MS'] ?? EMIT_ALERT_THROTTLE_MS);
+    const throttleWindow = emitAlertThrottleMs();
     const now = systemClock.now();
     for (const [key, recordedAt] of alertThrottleMap) {
       if (now - recordedAt > throttleWindow) alertThrottleMap.delete(key);
@@ -295,8 +302,7 @@ export function emitAlert(
     );
     // #2434: only record throttle on success, so a failed fallback retries.
     if (legacy.accepted) {
-      const throttleMs = Number(process.env['EMIT_ALERT_THROTTLE_MS'] ?? EMIT_ALERT_THROTTLE_MS);
-      const effectiveWindow = Number.isFinite(throttleMs) ? Math.max(0, throttleMs) : EMIT_ALERT_THROTTLE_MS;
+      const effectiveWindow = emitAlertThrottleMs();
       if (effectiveWindow > 0) alertThrottleMap.set(throttleKey, systemClock.now());
     }
     return {

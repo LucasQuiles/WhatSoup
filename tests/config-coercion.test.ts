@@ -38,6 +38,9 @@ const MANAGED_ENV = [
   'BOT_ERRORS_EXPECTED_JID',
   'BOT_ERRORS_REQUIRE_EXPECTED',
   'BOT_ERRORS_RUNTIME_TOOL_FAILURE_ALERTS',
+  // Slice 3b adds the throttle window and safe-shape flag to the same bridge.
+  'EMIT_ALERT_THROTTLE_MS',
+  'BOT_ERRORS_SAFE_SHAPE_CRED_PATH',
 ] as const;
 
 let savedEnv: Record<string, string | undefined>;
@@ -56,6 +59,8 @@ beforeEach(() => {
   delete process.env.BOT_ERRORS_EXPECTED_JID;
   delete process.env.BOT_ERRORS_REQUIRE_EXPECTED;
   delete process.env.BOT_ERRORS_RUNTIME_TOOL_FAILURE_ALERTS;
+  delete process.env.EMIT_ALERT_THROTTLE_MS;
+  delete process.env.BOT_ERRORS_SAFE_SHAPE_CRED_PATH;
   vi.resetModules();
 });
 
@@ -351,6 +356,55 @@ describe('bot-errors alert routing publish bridge (#2192 slice 3a)', () => {
       BOT_ERRORS_EXPECTED_JID: false,
       BOT_ERRORS_REQUIRE_EXPECTED: false,
     });
+  });
+
+  it('publishes an instance throttle window and the typed field agrees', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      emitAlertThrottleMs: 60_000,
+    }));
+    const { config } = await import('../src/config.ts');
+    expect(process.env.EMIT_ALERT_THROTTLE_MS).toBe('60000');
+    expect(config.emitAlertThrottleMs).toBe(60_000);
+  });
+
+  it('resolves the throttle from env without publishing: junk uses the default, negatives clamp to 0', async () => {
+    process.env.EMIT_ALERT_THROTTLE_MS = 'not-a-number';
+    const junk = await import('../src/config.ts');
+    expect(junk.config.emitAlertThrottleMs).toBe(300_000);
+    expect(process.env.EMIT_ALERT_THROTTLE_MS).toBe('not-a-number');
+
+    vi.resetModules();
+    process.env.EMIT_ALERT_THROTTLE_MS = '-5';
+    const negative = await import('../src/config.ts');
+    expect(negative.config.emitAlertThrottleMs).toBe(0);
+
+    vi.resetModules();
+    delete process.env.EMIT_ALERT_THROTTLE_MS;
+    const unset = await import('../src/config.ts');
+    expect(unset.config.emitAlertThrottleMs).toBe(300_000);
+    expect('EMIT_ALERT_THROTTLE_MS' in process.env).toBe(false);
+  });
+
+  it('publishes an instance safe-shape flag and parses env tokens without publishing them', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      botErrorsSafeShapeCredPath: true,
+    }));
+    const fromInstance = await import('../src/config.ts');
+    expect(process.env.BOT_ERRORS_SAFE_SHAPE_CRED_PATH).toBe('1');
+    expect(fromInstance.config.botErrorsSafeShapeCredPath).toBe(true);
+
+    vi.resetModules();
+    delete process.env.INSTANCE_CONFIG;
+    process.env.BOT_ERRORS_SAFE_SHAPE_CRED_PATH = 'yes';
+    const fromEnv = await import('../src/config.ts');
+    expect(fromEnv.config.botErrorsSafeShapeCredPath).toBe(true);
+    expect(process.env.BOT_ERRORS_SAFE_SHAPE_CRED_PATH).toBe('yes');
+
+    vi.resetModules();
+    delete process.env.BOT_ERRORS_SAFE_SHAPE_CRED_PATH;
+    const unset = await import('../src/config.ts');
+    expect(unset.config.botErrorsSafeShapeCredPath).toBe(false);
+    expect('BOT_ERRORS_SAFE_SHAPE_CRED_PATH' in process.env).toBe(false);
   });
 
   it('resolves toolFailureAlertsEnabled: default on, env kill-switch, instance precedence', async () => {

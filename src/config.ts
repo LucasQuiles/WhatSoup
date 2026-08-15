@@ -554,6 +554,23 @@ const rawBotErrorsRequireExpected = process.env.BOT_ERRORS_REQUIRE_EXPECTED?.tri
 const botErrorsRequireExpected = rawBotErrorsRequireExpected
   ? !['0', 'false', 'no', 'off'].includes(rawBotErrorsRequireExpected)
   : true;
+// #2192 slice 3b — same instance-value-only publish for the legacy-alert
+// throttle window (emit-alert.ts resolves it call-time) and the safe-shape
+// credential-path redaction flag (bot-errors-outbox.ts). Parsing mirrors each
+// reader exactly: throttle clamps negatives to 0 and falls back on non-finite;
+// safe-shape accepts 1/true/yes/on.
+const instanceEmitAlertThrottleMs = optionalFiniteNumber(instance?.emitAlertThrottleMs, 'emitAlertThrottleMs');
+if (instanceEmitAlertThrottleMs !== undefined) {
+  process.env.EMIT_ALERT_THROTTLE_MS = String(instanceEmitAlertThrottleMs);
+}
+const rawEmitAlertThrottleMs = Number(process.env.EMIT_ALERT_THROTTLE_MS);
+const emitAlertThrottleMs = Number.isFinite(rawEmitAlertThrottleMs) ? Math.max(0, rawEmitAlertThrottleMs) : 300_000;
+const instanceSafeShapeCredPath = optionalBoolean(instance?.botErrorsSafeShapeCredPath, 'botErrorsSafeShapeCredPath');
+if (instanceSafeShapeCredPath !== undefined) {
+  process.env.BOT_ERRORS_SAFE_SHAPE_CRED_PATH = instanceSafeShapeCredPath ? '1' : '0';
+}
+const rawSafeShapeCredPath = (process.env.BOT_ERRORS_SAFE_SHAPE_CRED_PATH ?? '').trim().toLowerCase();
+const botErrorsSafeShapeCredPath = ['1', 'true', 'yes', 'on'].includes(rawSafeShapeCredPath);
 
 // ---------------------------------------------------------------------------
 // Model defaults — priority: instance.models > env vars > built-in defaults
@@ -1370,6 +1387,10 @@ export const config = {
   // env semantics preserved: ON unless the env var is exactly '0'.
   toolFailureAlertsEnabled: optionalBoolean(instance?.toolFailureAlertsEnabled, 'toolFailureAlertsEnabled')
     ?? process.env.BOT_ERRORS_RUNTIME_TOOL_FAILURE_ALERTS !== '0',
+  // Legacy-alert throttle window + safe-shape credential redaction flag
+  // (#2192 slice 3b), resolved and published in the pre-literal block above.
+  emitAlertThrottleMs,
+  botErrorsSafeShapeCredPath,
 
   // GUI
   gui: optionalBoolean(instance?.gui, 'gui') ?? false,
