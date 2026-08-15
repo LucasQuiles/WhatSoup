@@ -289,10 +289,21 @@ function vitestStateDir(): string | null {
   return join(tmpdir(), 'whatsoup-vitest-bot-errors', workerId, String(process.pid), 'state');
 }
 
+// ENV-LATE BY DESIGN (#2192 slice 3c — do not migrate to config). The
+// explicit-override → vitest-isolate → homedir-default chain below is
+// load-bearing on ABSENCE: if config published BOT_ERRORS_STATE_DIR /
+// BOT_ERRORS_OUTBOX_DIR unconditionally, stateDir() would stop isolating test
+// traffic (the #2658/#2887 CI-drift class) and outboxPolicy() would stamp
+// every event 'explicit-*', breaking the dispatcher's test-provenance
+// backstop. Test-runner detection is lib-level logic; the deploy layer
+// (systemd Environment=, launchd plists, Python installers) is the
+// cross-process SSOT for these dirs — config would be a third source.
 function stateDir(): string {
   return process.env['BOT_ERRORS_STATE_DIR'] ?? vitestStateDir() ?? join(homedir(), '.local', 'state', 'bot-errors');
 }
 
+// BOT_ERRORS_WRITEFAIL_DIR: explicit-override-only escape hatch; the default
+// derives from stateDir(), so there is no config value to add (env-late).
 function writefailDirs(): string[] {
   const candidates = [
     process.env['BOT_ERRORS_WRITEFAIL_DIR'],
@@ -526,6 +537,8 @@ export function buildBotErrorsEvent(input: BotErrorsOutboxInput, eventId = rando
       node: process.version,
     },
     runtime: {
+      // Systemd per-invocation identity — set by the service manager for THIS
+      // process run; cannot be resolved at config load (env-late by design).
       invocationId: process.env['INVOCATION_ID'] ?? null,
       systemdExecPid: process.env['SYSTEMD_EXEC_PID'] ?? null,
       provenance: botErrorsRuntimeProvenance(),

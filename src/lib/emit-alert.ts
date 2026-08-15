@@ -186,6 +186,10 @@ function spawnLegacyAlert(args: string[], logContext: Record<string, unknown>, m
  * spawn. This lets an alert verifier observe operator-facing alerts (e.g.
  * `provider_fallback_activated`, `fallback_no_independent_provider`) at runtime
  * without paging a live operator. Opt-in only; unset in production.
+ *
+ * ENV-LATE BY DESIGN (#2192 slice 3c): the verifier injects this out-of-band
+ * at runtime (#2510) and it must flip without a restart or an instance-config
+ * edit — a typed config field would freeze the dial at load.
  */
 function alertSinkPath(): string | null {
   const raw = process.env['WHATSOUP_ALERT_SINK']?.trim();
