@@ -86,8 +86,10 @@ import { xdgDir } from './fleet/paths.ts';
 // executing this module's database, network, transport, health, or timer body.
 // Production bootstrap never sets this flag; deploy/preflight-check.sh sets it
 // only inside its throwaway import-closure subprocess.
+// env-allowed: preflight import probe sentinels; pre-config by design
 const preflightImportOnlyRequested = process.env.WHATSOUP_PREFLIGHT_IMPORT_ONLY === '1';
 const preflightImportOnlyAuthorized = preflightImportOnlyRequested
+  // env-allowed: preflight import probe sentinels; pre-config by design
   && process.env.WHATSOUP_PREFLIGHT_IMPORT_SENTINEL === 'restart-safety-link-probe-v1'
   && process.argv[1]?.endsWith('preflight-probe.ts') === true;
 if (preflightImportOnlyRequested && !preflightImportOnlyAuthorized) {
@@ -467,8 +469,9 @@ if (instanceType === 'agent') {
   const pinecone = new PineconeMemory();
   // Enrichment is queue-backed: the poller enqueues validated facts into
   // `fact_export_queue`. A deployment may provide an external bridge that
-  // drains pending rows and writes them to Pinecone; this process only proves
-  // queue admission, not remote export. Any instance with a configured
+  // leases due rows (leasePendingFacts), writes them to Pinecone, and
+  // acknowledges per-row outcomes (ackFacts); this process only proves queue
+  // admission, not remote export. Any instance with a configured
   // pineconeIndex participates, and the bridge owns target index/project
   // routing plus export acknowledgement.
   const enableEnrichment =
@@ -826,7 +829,7 @@ connectionManager.on('decryptionFailure', (data) => {
 // 7. Health server — delegates enrichment stats to runtime health snapshot
 const healthServer = startHealthServer({
   db,
-  scheduleAllowedRoot: process.env.WHATSOUP_SCHEDULE_ROOT,
+  scheduleAllowedRoot: config.scheduleRoot,
   connectionManager,
   startedAt,
   durability,
@@ -987,7 +990,7 @@ const mediaRetentionTimer = new MediaRetentionTimer(mediaBaseDir, db, {
 mediaRetentionTimer.start(config.mediaRetention.intervalHours * MS_PER_HOUR);
 
 const processTmpRetentionTimer = new ProcessTmpRetentionTimer(
-  process.env.TMPDIR ?? join(config.dataRoot, 'tmp'),
+  config.tmpDir,
   DEFAULT_PROCESS_TMP_RETENTION,
 );
 processTmpRetentionTimer.start(DEFAULT_PROCESS_TMP_RETENTION.intervalMs);

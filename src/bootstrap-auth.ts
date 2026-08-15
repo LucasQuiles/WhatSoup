@@ -1,4 +1,5 @@
 import { bootstrapCommon } from './bootstrap-common.ts';
+import { printErr } from './lib/cli-print.ts';
 import { errorMessage } from './lib/error-message.ts';
 
 export async function bootstrapAuth(): Promise<void> {
@@ -8,7 +9,7 @@ export async function bootstrapAuth(): Promise<void> {
 const isDirectRun = process.argv[1]?.endsWith('bootstrap-auth.ts');
 if (isDirectRun) {
   bootstrapAuth().catch((err) => {
-    console.error(errorMessage(err));
+    printErr(errorMessage(err));
     process.exit(1);
   });
 }

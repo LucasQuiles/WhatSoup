@@ -9,6 +9,9 @@ import { tmpdir } from 'node:os';
 
 vi.mock('../../src/config.ts', () => ({
   config: {
+    get healthBindAddress(): string {
+      return process.env.HEALTH_BIND_ADDRESS ?? '127.0.0.1';
+    },
     adminPhones: new Set(['15550100001']),
     dbPath: ':memory:',
     mediaDir: '/tmp/whatsoup-test-media-health-schedule/tmp',
@@ -19,6 +22,17 @@ vi.mock('../../src/config.ts', () => ({
   },
 }));
 vi.mock('../../src/logger.ts', async () => (await import('../helpers/logger-mock.ts')).loggerMock());
+
+const lookupCredentialMock = vi.hoisted(() => vi.fn(
+  (service: string) => service === 'whatsoup-health-token'
+    ? process.env.WHATSOUP_HEALTH_TOKEN ?? null
+    : null,
+));
+
+vi.mock('../../src/lib/keyring.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/lib/keyring.ts')>();
+  return { ...actual, lookupCredential: lookupCredentialMock };
+});
 
 import { Database } from '../../src/core/database.ts';
 import type { HealthDeps } from '../../src/core/health.ts';
@@ -104,6 +118,7 @@ describe('POST /schedule', () => {
   }
 
   beforeEach(() => {
+    lookupCredentialMock.mockClear();
     process.env.WHATSOUP_HEALTH_TOKEN = AUTH_TOKEN;
     db = makeDb();
     root = realpathSync(mkdtempSync(join(tmpdir(), 'sched-route-')));

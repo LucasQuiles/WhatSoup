@@ -40,7 +40,7 @@
 import type { DatabaseSync, SQLInputValue, StatementSync } from 'node:sqlite';
 import { basename, resolve, sep } from 'node:path';
 import { realpathSync, statSync, createReadStream } from 'node:fs';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { nowUnixSec } from './time.ts';
 import {
   dueTriggers, validateTriggerSpec, isSafeSqliteSql,
@@ -55,6 +55,7 @@ import { createChildLogger } from '../../logger.ts';
 import { errorMessage } from '../../lib/error-message.ts';
 import { fetchUrlGuarded, SsrfBlockedError, type GuardedFetchResult } from '../../lib/ssrf-fetch.ts';
 import { emitAlertChecked, clearAlertSourceChecked } from '../../lib/emit-alert.ts';
+import { TriggerLivenessObserver } from './trigger-liveness-observer.ts';
 import {
   clearRecoveryMarker,
   loadRecoveryMarkers,
@@ -205,6 +206,12 @@ export type UrlFetchFn = (url: string, opts: { maxBytes: number }) => Promise<Gu
 export interface AgentJobContext {
   beadId: number;
   triggerId: number;
+  /**
+   * #2566 slice 3 — durable occurrence identity of THIS dispatch. The runtime
+   * embeds it in the journaled synthetic inbound's messageId so the agent-job
+   * turn journal and trigger_occurrences are deterministically joinable.
+   */
+  occurrenceId: number;
   /** agent_job bead body — the prompt to run as a turn. */
   prompt: string;
   /** agent_job bead title — for logging / turn labelling. */
@@ -233,8 +240,41 @@ export type AgentJobDispatchFn = (ctx: AgentJobContext) => AgentJobDispatchResul
 export interface TriggerPollerOptions {
   /** How often to call dueTriggers. Default 30s. */
   intervalMs?: number;
+  /**
+   * #2566 — lease TTL for durable occurrence rows. An occurrence whose lease
+   * expires without a terminal state is swept to 'stale' on the next startup,
+   * never silently replayed. Default 900s.
+   */
+  occurrenceLeaseTtlSeconds?: number;
+  /**
+   * #2566 — lease owner token stamped on claimed occurrences. Default is a
+   * process-scoped random token; tests inject a fixed value.
+   */
+  occurrenceLeaseOwner?: string;
   /** Max triggers fetched per tick. Default 50. */
   batchSize?: number;
+  /**
+   * #2566 slice 2 — max concurrently executing non-side-effecting probe
+   * triggers (poll.sqlite/pinecone/file/url) per tick. Side-effecting kinds
+   * (poll.shell, schedule.*, event.message) always run strictly serially.
+   * Default 4.
+   */
+  maxConcurrentExecutors?: number;
+  /**
+   * #2566 slice 2 — upper bound (seconds) the run loop waits for a tick
+   * before re-arming the timer anyway. Stragglers keep running detached and
+   * finalize normally; the budget only protects the TIMER from a hung
+   * executor. Default 600s.
+   */
+  tickBudgetSeconds?: number;
+  /**
+   * #2566 slice 2 — per-execution timeout (seconds) for probe kinds only.
+   * A probe is read-only, so abandoning it is safe: the occurrence is
+   * finalized 'failed' with errorKind 'execution_timeout' and the pool slot
+   * is freed. Side-effecting kinds are never timed out here (whether their
+   * side effect happened is unknowable). Default 300s.
+   */
+  executionTimeoutSeconds?: number;
   /** Injectable clock for tests. Returns unix seconds. */
   now?: () => number;
   /** Injectable timers for tests. */
@@ -309,6 +349,17 @@ export interface TriggerPollerOptions {
    * alert). Tests inject a small value to exercise the watchdog deterministically.
    */
   triggerPastDueGraceSeconds?: number;
+  /**
+   * #2566 slice 2 — cadence of the independent liveness observer, which runs
+   * the past-due and recurring-overdue gauges on its OWN timer so they still
+   * fire when a tick hangs. Only started when `instance` is set. Default 60s.
+   */
+  observerIntervalMs?: number;
+  /**
+   * #2566 slice 2 — grace (seconds) before a previously-fired trigger with a
+   * stale next_fire_at is reported as recurring-overdue. Default 900s.
+   */
+  recurringOverdueGraceSeconds?: number;
 }
 
 interface SqliteSpec {
@@ -338,6 +389,13 @@ interface UrlTriggerSpec {
 
 /** Default top_k when a poll.pinecone spec omits it. */
 const PINECONE_DEFAULT_TOP_K = 5;
+
+/**
+ * #2566 slice 2 — trigger kinds with no side effects. Only these are eligible
+ * for the bounded concurrent pool and the execution timeout: abandoning a
+ * read-only probe is always safe, abandoning anything else is not.
+ */
+const PROBE_KINDS = new Set(['poll.sqlite', 'poll.pinecone', 'poll.file', 'poll.url']);
 
 /**
  * Enumerated `outputJson.reason` codes emitted by the trigger executors. Single source of truth to
@@ -449,6 +507,7 @@ export class TriggerPoller {
   private readonly stmtRecordDeliveredWaMessageId: StatementSync;
   private readonly stmtRecordNotifyDispatchFailed: StatementSync;
   private readonly stmtRecordNotifyForbiddenTarget: StatementSync;
+  private readonly stmtReconcileDeliveryIntents: StatementSync;
   private readonly stmtRecentErrorKinds: StatementSync;
   private readonly stmtRetireTriggerOnForbiddenTarget: StatementSync;
   private readonly stmtScheduleNextFire: StatementSync;
@@ -458,6 +517,15 @@ export class TriggerPoller {
   private readonly stmtInsertExpiryRun: StatementSync;
   private readonly stmtLookupBeadStatus: StatementSync;
   private readonly stmtReopenBead: StatementSync;
+  private readonly stmtClaimOccurrence: StatementSync;
+  private readonly stmtFinalizeOccurrence: StatementSync;
+  private readonly stmtSweepStaleOccurrences: StatementSync;
+  private readonly occurrenceLeaseTtlSeconds: number;
+  private readonly occurrenceLeaseOwner: string;
+  private readonly maxConcurrentExecutors: number;
+  private readonly tickBudgetSeconds: number;
+  private readonly executionTimeoutSeconds: number;
+  private readonly livenessObserver: TriggerLivenessObserver;
 
   constructor(db: DatabaseSync, messenger: Messenger, opts: TriggerPollerOptions = {}) {
     this.db = db;
@@ -540,16 +608,34 @@ export class TriggerPoller {
     );
     this.stmtRecordDeliveredWaMessageId = this.db.prepare(
       `UPDATE trigger_runs
-       SET output_json = json_set(COALESCE(output_json, '{}'), '$.deliveredWaMessageId', ?)
+       SET output_json = json_remove(
+         json_set(COALESCE(output_json, '{}'), '$.deliveredWaMessageId', ?),
+         '$.notifyPending')
        WHERE id = ?`,
     );
     this.stmtRecordNotifyDispatchFailed = this.db.prepare(
-      `UPDATE trigger_runs SET error_kind = 'notify_dispatch_failed'
+      `UPDATE trigger_runs
+       SET error_kind = 'notify_dispatch_failed',
+           output_json = json_remove(COALESCE(output_json, '{}'), '$.notifyPending')
        WHERE id = ? AND error_kind IS NULL`,
     );
     this.stmtRecordNotifyForbiddenTarget = this.db.prepare(
-      `UPDATE trigger_runs SET error_kind = 'notify_forbidden_target'
+      `UPDATE trigger_runs
+       SET error_kind = 'notify_forbidden_target',
+           output_json = json_remove(COALESCE(output_json, '{}'), '$.notifyPending')
        WHERE id = ? AND error_kind IS NULL`,
+    );
+    // #2566 slice 3 — startup delivery reconcile: a run that committed
+    // dispatch intent but has neither a delivery receipt nor a classified
+    // dispatch failure crashed inside the dispatch window. The outcome is
+    // UNKNOWABLE (the send may or may not have left the process), so the row
+    // is marked with the bounded class and is NEVER re-sent.
+    this.stmtReconcileDeliveryIntents = this.db.prepare(
+      `UPDATE trigger_runs
+       SET error_kind = 'notify_outcome_unknown'
+       WHERE json_extract(output_json, '$.notifyPending') = 1
+         AND json_extract(output_json, '$.deliveredWaMessageId') IS NULL
+         AND error_kind IS NULL`,
     );
     this.stmtRecentErrorKinds = this.db.prepare(
       `SELECT error_kind FROM trigger_runs
@@ -597,6 +683,42 @@ export class TriggerPoller {
        SET status = 'active', completed_at = NULL, cancelled_at = NULL, updated_at = ?
        WHERE id = ?`,
     );
+
+    // #2566 — durable occurrence lifecycle. The claim is committed BEFORE the
+    // executor runs; the finalize is fenced on (lease_owner, lease_generation)
+    // so a competing claimant can never have its state overwritten.
+    this.occurrenceLeaseTtlSeconds = opts.occurrenceLeaseTtlSeconds ?? 900;
+    this.occurrenceLeaseOwner = opts.occurrenceLeaseOwner
+      ?? `pid:${process.pid}:${randomBytes(4).toString('hex')}`;
+    this.maxConcurrentExecutors = opts.maxConcurrentExecutors ?? 4;
+    this.tickBudgetSeconds = opts.tickBudgetSeconds ?? 600;
+    this.executionTimeoutSeconds = opts.executionTimeoutSeconds ?? 300;
+    this.livenessObserver = new TriggerLivenessObserver(this.db, {
+      instance: opts.instance,
+      intervalMs: opts.observerIntervalMs,
+      recurringOverdueGraceSeconds: opts.recurringOverdueGraceSeconds,
+      now: this.nowFn,
+      setTimeoutImpl: this.setTimeoutImpl,
+      clearTimeoutImpl: this.clearTimeoutImpl,
+      pastDueCheck: (now) => this.checkPastDueTriggers(now),
+    });
+    this.stmtClaimOccurrence = this.db.prepare(
+      `INSERT INTO trigger_occurrences (
+         trigger_id, bead_id, scheduled_for, attempt, state,
+         lease_owner, lease_generation, lease_expires_at, claimed_at, started_at
+       ) VALUES (?, ?, ?, 1, 'running', ?, 1, ?, ?, ?)`,
+    );
+    this.stmtFinalizeOccurrence = this.db.prepare(
+      `UPDATE trigger_occurrences
+       SET state = ?, finished_at = ?
+       WHERE id = ? AND lease_owner = ? AND lease_generation = ?
+         AND state IN ('claimed','running')`,
+    );
+    this.stmtSweepStaleOccurrences = this.db.prepare(
+      `UPDATE trigger_occurrences
+       SET state = 'stale', stale_cause = 'lease_expired', finished_at = ?
+       WHERE state IN ('claimed','running') AND lease_expires_at IS NOT NULL AND lease_expires_at < ?`,
+    );
   }
 
   start(): void {
@@ -609,11 +731,54 @@ export class TriggerPoller {
     }
     this.stopped = false;
     log.info({ intervalMs: this.intervalMs, batchSize: this.batchSize }, 'trigger poller starting');
+    this.reconcileStaleOccurrences(this.nowFn());
+    this.reconcileDeliveryIntents(this.nowFn());
+    this.livenessObserver.start();
     this.scheduleNext();
+  }
+
+  /**
+   * #2566 slice 3 — startup delivery reconcile. At process start nothing is
+   * in flight, so every run still carrying dispatch intent without a receipt
+   * or a classified failure crashed inside the dispatch window. The outcome
+   * is unknowable; the row gets the bounded class 'notify_outcome_unknown'
+   * and is NEVER re-sent (whether the message left the old process cannot be
+   * proven, and a duplicate send is a worse failure than a surfaced unknown).
+   */
+  reconcileDeliveryIntents(now: number): void {
+    try {
+      const marked = this.stmtReconcileDeliveryIntents.run();
+      if (Number(marked.changes) > 0) {
+        log.warn(
+          { count: Number(marked.changes), reconciledAt: now },
+          'runs with unknown notification outcome marked (crashed inside the dispatch window)',
+        );
+      }
+    } catch (err) {
+      log.error({ err }, 'delivery-intent reconcile failed unexpectedly');
+    }
+  }
+
+  /**
+   * #2566 — restart reconciliation. Occurrences whose lease expired without a
+   * terminal state are marked 'stale' (bounded cause, no raw prose) and are
+   * NEVER silently replayed: whether a side effect happened is unknowable
+   * here, so replay policy belongs to a capability-aware layer, not startup.
+   */
+  reconcileStaleOccurrences(now: number): void {
+    try {
+      const swept = this.stmtSweepStaleOccurrences.run(now, now);
+      if (Number(swept.changes) > 0) {
+        log.warn({ count: Number(swept.changes) }, 'stale trigger occurrences swept (lease expired without terminal state)');
+      }
+    } catch (err) {
+      log.error({ err }, 'stale-occurrence sweep failed unexpectedly');
+    }
   }
 
   stop(): void {
     this.stopped = true;
+    this.livenessObserver.stop();
     if (this.timer !== null) {
       this.clearTimeoutImpl(this.timer);
       this.timer = null;
@@ -642,8 +807,33 @@ export class TriggerPoller {
       }
     }
     // 2. Due triggers — normal poll/schedule execution path.
+    //    #2566 slice 2: non-side-effecting probes run through a bounded pool
+    //    so one hung probe cannot starve unrelated due triggers; every
+    //    side-effecting kind stays strictly serial (ordering contract, and
+    //    replay/idempotency for those kinds is later-slice material).
     const due = dueTriggers(this.db, now, this.batchSize);
-    for (const t of due) {
+    const probes = due.filter((t) => PROBE_KINDS.has(t.kind));
+    const serial = due.filter((t) => !PROBE_KINDS.has(t.kind));
+    let nextProbe = 0;
+    const probeWorker = async (): Promise<void> => {
+      while (nextProbe < probes.length) {
+        const t = probes[nextProbe++];
+        try {
+          await this.processTrigger(t, now);
+          processed++;
+        } catch (err) {
+          log.error(
+            { err, triggerId: t.id, kind: t.kind },
+            'trigger run failed unexpectedly',
+          );
+        }
+      }
+    };
+    const workers = Array.from(
+      { length: Math.min(this.maxConcurrentExecutors, probes.length) },
+      () => probeWorker(),
+    );
+    for (const t of serial) {
       try {
         await this.processTrigger(t, now);
         processed++;
@@ -654,6 +844,7 @@ export class TriggerPoller {
         );
       }
     }
+    await Promise.all(workers);
     // 3. Backlog-growth alert (#1773 rem-3). Isolated in its own try/catch so
     //    a count-query failure can never disrupt trigger draining above —
     //    tickOnce's primary job is dueTriggers/expiry, not this alert.
@@ -790,10 +981,24 @@ export class TriggerPoller {
 
   private async tick(): Promise<void> {
     this.timer = null;
-    try {
-      await this.tickOnce();
-    } catch (err) {
+    // #2566 slice 2 — bounded await: the timer must survive a hung executor.
+    // Stragglers past the budget keep running detached and finalize normally
+    // (fenced); only the re-arm decision stops waiting for them.
+    const tickPromise = this.tickOnce().catch((err) => {
       log.error({ err }, 'unexpected error in tick — rescheduling');
+      return 0;
+    });
+    let budgetTimer: ReturnType<typeof setTimeout> | null = null;
+    const budget = new Promise<'budget'>((resolve) => {
+      budgetTimer = this.setTimeoutImpl(() => resolve('budget'), this.tickBudgetSeconds * 1000);
+    });
+    const raced = await Promise.race([tickPromise, budget]);
+    if (budgetTimer !== null) this.clearTimeoutImpl(budgetTimer);
+    if (raced === 'budget') {
+      log.warn(
+        { tickBudgetSeconds: this.tickBudgetSeconds },
+        'tick exceeded budget — re-arming timer with stragglers still in flight',
+      );
     }
     if (!this.stopped) this.scheduleNext();
   }
@@ -801,9 +1006,34 @@ export class TriggerPoller {
   private async processTrigger(t: TriggerRow, now: number): Promise<void> {
     // Terminal-at expiry is handled by the expiry sweep in tickOnce; dueTriggers
     // already filters out rows past terminal_at, so we should never see one here.
+
+    // #2566 — claim the occurrence DURABLY before invoking any executor. The
+    // committed row is the only evidence a crash or hang can leave behind, and
+    // UNIQUE(trigger_id, scheduled_for, attempt) makes the occurrence identity
+    // stable across processes: a second claim of the same occurrence is a
+    // conflict, not a rerun.
+    const scheduledFor = t.next_fire_at ?? now;
+    let occurrenceId: number;
+    try {
+      const claim = this.stmtClaimOccurrence.run(
+        t.id, t.bead_id, scheduledFor,
+        this.occurrenceLeaseOwner, now + this.occurrenceLeaseTtlSeconds, now, now,
+      );
+      occurrenceId = Number(claim.lastInsertRowid);
+    } catch (err) {
+      if (/UNIQUE/.test(errorMessage(err))) {
+        log.warn(
+          { triggerId: t.id, scheduledFor },
+          'trigger occurrence already claimed — skipping without executing',
+        );
+        return;
+      }
+      throw err;
+    }
+
     let outcome: ExecuteOutcome;
     try {
-      outcome = await this.executeTrigger(t);
+      outcome = await this.executeWithTimeout(t, occurrenceId);
     } catch (err) {
       outcome = {
         status: 'failed',
@@ -832,6 +1062,12 @@ export class TriggerPoller {
       }
     }
 
+    // #2566 slice 3 — durable dispatch intent: committed in the SAME finalize
+    // transaction as the run result, so a crash between COMMIT and the
+    // post-commit sendMessage leaves evidence instead of a silent loss.
+    if (shouldDispatchNotification) {
+      outcome.outputJson = { ...outcome.outputJson, notifyPending: true };
+    }
     const finishedAt = this.nowFn();
     let runId = 0;
     const postCommitActions: PostCommitActions = {};
@@ -840,6 +1076,14 @@ export class TriggerPoller {
       runId = this.insertRun(t, now);
       this.finishRun(runId, now, finishedAt, outcome, null);
       this.scheduleNextFire(t, now, outcome, postCommitActions);
+      // #2566 — fenced occurrence finalize: only the owner that claimed this
+      // occurrence (same lease owner AND generation) may commit its terminal
+      // state. A stolen/expired lease leaves the row for reconciliation
+      // instead of being silently overwritten.
+      this.stmtFinalizeOccurrence.run(
+        outcome.status, finishedAt, occurrenceId,
+        this.occurrenceLeaseOwner, 1,
+      );
       this.db.exec('COMMIT');
     } catch (err) {
       try { this.db.exec('ROLLBACK'); } catch { /* best effort */ }
@@ -914,7 +1158,42 @@ export class TriggerPoller {
     return this.notificationThrottleMinIntervalSec - elapsed;
   }
 
-  private async executeTrigger(t: TriggerRow): Promise<ExecuteOutcome> {
+  /**
+   * #2566 slice 2 — probe kinds race their executor against
+   * executionTimeoutSeconds. On timeout the occurrence is finalized 'failed'
+   * with the bounded class 'execution_timeout' and the pool slot frees; the
+   * abandoned promise is detached with its rejection swallowed, and the
+   * finalize state guard (state IN claimed/running) makes any late write a
+   * no-op. Side-effecting kinds pass through un-raced: whether their side
+   * effect happened is unknowable, so they are never abandoned.
+   */
+  private async executeWithTimeout(t: TriggerRow, occurrenceId: number): Promise<ExecuteOutcome> {
+    if (!PROBE_KINDS.has(t.kind)) return this.executeTrigger(t, occurrenceId);
+    const exec = this.executeTrigger(t, occurrenceId);
+    let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
+    const timeout = new Promise<'timeout'>((resolve) => {
+      timeoutTimer = this.setTimeoutImpl(() => resolve('timeout'), this.executionTimeoutSeconds * 1000);
+    });
+    try {
+      const raced = await Promise.race([exec, timeout]);
+      if (raced !== 'timeout') return raced as ExecuteOutcome;
+      exec.catch((err) => {
+        log.warn({ err, triggerId: t.id, kind: t.kind }, 'timed-out probe rejected after abandonment');
+      });
+      return {
+        status: 'failed',
+        fired: false,
+        outputSummary: `probe exceeded execution timeout (${this.executionTimeoutSeconds}s)`,
+        outputJson: {},
+        errorKind: 'execution_timeout',
+        errorMessage: `execution exceeded ${this.executionTimeoutSeconds}s`,
+      };
+    } finally {
+      if (timeoutTimer !== null) this.clearTimeoutImpl(timeoutTimer);
+    }
+  }
+
+  private async executeTrigger(t: TriggerRow, occurrenceId: number): Promise<ExecuteOutcome> {
     const kind = t.kind as TriggerKind;
     let spec: unknown;
     try {
@@ -968,7 +1247,7 @@ export class TriggerPoller {
       // prompt in the bead body was never executed.)
       const bead = this.lookupBead(t.bead_id);
       if (bead?.kind === 'agent_job') {
-        return this.dispatchAgentJob(t, bead);
+        return this.dispatchAgentJob(t, bead, occurrenceId);
       }
       return {
         status: 'ok',
@@ -1019,6 +1298,7 @@ export class TriggerPoller {
   private dispatchAgentJob(
     t: TriggerRow,
     bead: { title: string; body: string | null },
+    occurrenceId: number,
   ): ExecuteOutcome {
     const prompt = bead.body?.trim();
     if (!prompt) {
@@ -1042,7 +1322,7 @@ export class TriggerPoller {
     let result: AgentJobDispatchResult;
     try {
       result = this.agentJobDispatch({
-        beadId: t.bead_id, triggerId: t.id,
+        beadId: t.bead_id, triggerId: t.id, occurrenceId,
         prompt, title: bead.title, reportChatJid: t.report_chat_jid,
       });
     } catch (err) {

@@ -15,6 +15,8 @@ import { request } from 'node:http';
 
 vi.mock('../../src/config.ts', () => ({
   config: {
+    // #2192 s4b: provider-fallback tunables live on config (defaults mirror the retired IIFEs).
+    fallbackTunables: { noticeDedupMs: 1_800_000, primaryRecheckMs: 300_000, probeStallThreshold: 12, probeStallCeilingMultiple: 10 },
     botName: 'test-bot',
     instanceType: 'agent',
     healthPort: 0,
@@ -23,6 +25,17 @@ vi.mock('../../src/config.ts', () => ({
 }));
 
 vi.mock('../../src/logger.ts', async () => (await import('../helpers/logger-mock.ts')).loggerMock());
+
+const lookupCredentialMock = vi.hoisted(() => vi.fn(
+  (service: string) => service === 'whatsoup-health-token'
+    ? process.env.WHATSOUP_HEALTH_TOKEN ?? null
+    : null,
+));
+
+vi.mock('../../src/lib/keyring.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/lib/keyring.ts')>();
+  return { ...actual, lookupCredential: lookupCredentialMock };
+});
 
 import { Database } from '../../src/core/database.ts';
 import type { HealthDeps } from '../../src/core/health.ts';
@@ -100,6 +113,7 @@ describe('POST /poll-decision (D-4)', () => {
   let db: Database;
 
   beforeEach(() => {
+    lookupCredentialMock.mockClear();
     process.env.WHATSOUP_HEALTH_TOKEN = AUTH_TOKEN;
     db = createDb();
   });

@@ -46,6 +46,7 @@ export function spawnMcpProcess(
   const { command, args } = buildMcpLaunchCommand(scriptPath);
   const baseEnv = Object.fromEntries(
     BASE_ENV_KEYS
+      // env-allowed: bounded explicit-key env lookup; keys enumerated in-code
       .map((key) => [key, process.env[key]] as const)
       .filter(([, value]) => value !== undefined),
   ) as NodeJS.ProcessEnv;

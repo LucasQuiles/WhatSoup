@@ -169,7 +169,7 @@ export function registerAllTools(
   runModule('retention', true, () => retentionTools.registerRetentionTools(registry, { db }));
   runModule('status', true, () => statusTools.registerStatusTools(registry, { db, getSock }));
   runModule('scheduling', true, () => schedulingTools.registerSchedulingTools(registry, { db }));
-  runModule('audit', true, () => auditTools.registerOutboundAuditTools(registry, { writer: outboundSendsWriter }));
+  runModule('audit', true, () => auditTools.registerOutboundAuditTools(registry, { writer: outboundSendsWriter, db }));
   runModule('substrate', true, () => substrateTools.registerSubstrateTools(registry, {
     db: db.raw,
     dbWrapper: db,
@@ -216,6 +216,7 @@ export function registerAllTools(
   // is available; PineconeMemory.upsert enforces the non-q project guard.
   const memWriteApiKeyEnv =
     (memoryPinecone as { apiKeyEnv?: string } | undefined)?.apiKeyEnv ?? 'PINECONE_API_KEY';
+  // env-allowed: memory-write API key resolver; secret surface stays env-late
   if (config.pineconeIndex && process.env[memWriteApiKeyEnv]) {
     runModule('memory-write', false, (register) =>
       memoryWriteTools.registerMemoryWriteTools(register),

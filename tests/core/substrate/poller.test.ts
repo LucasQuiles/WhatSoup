@@ -1659,8 +1659,10 @@ describe('TriggerPoller — start/stop lifecycle', () => {
 
     await (poller as unknown as { tick(): Promise<void> }).tick();
 
-    expect(scheduled).toHaveLength(1);
-    expect(scheduled[0].ms).toBe(5_000);
+    // #2566 slice 2: tick() also arms (and clears) a tick-budget timer; the
+    // guarded behavior here is the 5s TICK re-arm surviving the failure.
+    const tickArms = scheduled.filter((s) => s.ms === 5_000);
+    expect(tickArms).toHaveLength(1);
   });
 });
 
@@ -2216,7 +2218,9 @@ describe('poller.ts uncovered-branch coverage', () => {
     fire();
     await new Promise<void>((resolve) => setImmediate(resolve));
     await new Promise<void>((resolve) => setImmediate(resolve));
-    expect(scheduled).toEqual([{ ms: 7_000 }, { ms: 7_000 }]);
+    // #2566 slice 2: tick() additionally arms (and clears) budget/probe-timeout
+    // timers; the guarded behavior is the pair of 7s TICK arms.
+    expect(scheduled.filter((s) => s.ms === 7_000)).toEqual([{ ms: 7_000 }, { ms: 7_000 }]);
 
     // lastRunAt proves tickOnce actually executed inside tick().
     expect(poller.lastRunAt).toBe(new Date(1_000_000_001 * 1000).toISOString());
@@ -2231,7 +2235,9 @@ describe('poller.ts uncovered-branch coverage', () => {
       await new Promise<void>((resolve) => setImmediate(resolve));
       await new Promise<void>((resolve) => setImmediate(resolve));
     }
-    expect(scheduled).toEqual([]);
+    // Auxiliary budget/timeout timers may arm-and-clear even after stop();
+    // the stopped gate specifically forbids a new TICK arm.
+    expect(scheduled.filter((s) => s.ms === 7_000)).toEqual([]);
   });
 });
 

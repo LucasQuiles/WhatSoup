@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-08-14T07:18:55Z",
+  "generatedAt": "2026-08-15T19:40:44Z",
   "scope": "bot-errors-runtime-scripts",
   "expectedHeadShaPolicy": "populated at deploy time by deploy step; absent here so committed state is observability-only",
   "files": [
@@ -457,7 +457,7 @@
     },
     {
       "path": "src/lib/bot-errors-outbox.ts",
-      "sha256": "53c4726f87b6e86ea4f41cc036dcb13cf039b934b104fde8eee82af2fb6b8440",
+      "sha256": "04b255310b696b9bb5d52c2a46de31d40936ba174be4c0c0bbbfcd797931230e",
       "mustContain": [
         "AUTHORIZATION_BEARER",
         "WHATSAPP_SERVICE_UNIT",
@@ -469,7 +469,7 @@
     },
     {
       "path": "src/lib/fault-taxonomy-registry.json",
-      "sha256": "619380dc602ab7c435c6be61c1d29391ac716daa060e0b514c612f4bff6b29ee",
+      "sha256": "f1a9bfeb1478f64ef83df4fc96985c512f84fb7d7393e325f5a0e2f649055792",
       "mustContain": [
         "whatsoup-fault-taxonomy-registry-v3",
         "runtimeAgentHealthSignals",

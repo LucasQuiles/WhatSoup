@@ -13,6 +13,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // ── Mock config + logger exactly like health.test.ts so health.ts imports ──
 vi.mock('../../src/config.ts', () => ({
   config: {
+    get healthBindAddress(): string {
+      return process.env.HEALTH_BIND_ADDRESS ?? '127.0.0.1';
+    },
     adminPhones: new Set(['15550100001']),
     controlPeers: new Map<string, string>(),
     dbPath: ':memory:',

@@ -279,14 +279,14 @@ describe('migration 56 — inbound_events.processing_status CHECK constraint', (
     const db = new Database(':memory:');
     try {
       db.open();
-      expect(CURRENT_SCHEMA_MIGRATION).toBe(56);
+      expect(CURRENT_SCHEMA_MIGRATION).toBe(60);
       expect(
         (
           db.raw
             .prepare('SELECT MAX(version) AS v FROM schema_migrations')
             .get() as { v: number }
         ).v,
-      ).toBe(56);
+      ).toBe(60);
       const sql = (
         db.raw
           .prepare(

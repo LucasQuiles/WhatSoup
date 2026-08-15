@@ -8,6 +8,8 @@ import { trackTmpDirs } from '../../helpers/tmp-dir.ts';
 
 const { mockConfig, mockRuntimeLogger } = vi.hoisted(() => ({
   mockConfig: {
+    // #2192 s4b: provider-fallback tunables live on config (defaults mirror the retired IIFEs).
+    fallbackTunables: { noticeDedupMs: 1_800_000, primaryRecheckMs: 300_000, probeStallThreshold: 12, probeStallCeilingMultiple: 10 },
     agentProvider: 'claude-cli',
     agentProviderConfig: undefined as Record<string, unknown> | undefined,
     agentFallbackProvider: undefined as string | undefined,

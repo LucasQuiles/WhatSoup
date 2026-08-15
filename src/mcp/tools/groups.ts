@@ -9,6 +9,7 @@ import { type SockToolConfig, registerSockTools } from './sock-tool-factory.ts';
 import { config } from '../../config.ts';
 import { applyOutboundIdentityGuard } from '../../core/outbound-identity/guard.ts';
 import { SqliteIdentityStore } from '../../core/outbound-identity/store.ts';
+import { EXTERNAL_EFFECT_CONTRACT_VERSION } from '../external-effect.ts';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- configs have heterogeneous ZodRawShape types; shared array requires any; expires 2026-12-31
 const groupConfigs: SockToolConfig<any>[] = [
@@ -17,6 +18,7 @@ const groupConfigs: SockToolConfig<any>[] = [
     description: 'List all WhatsApp groups the bot is a member of (global).',
     schema: z.object({}),
     replayPolicy: 'read_only',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'none' },
     call: async (_parsed, sock) => {
       // groupFetchAllParticipating returns Record<string, GroupMetadata>
       const groupMap = await sock.groupFetchAllParticipating();
@@ -30,6 +32,7 @@ const groupConfigs: SockToolConfig<any>[] = [
       jid: z.string(),
     }),
     replayPolicy: 'read_only',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'none' },
     call: async ({ jid }, sock) => {
       return sock.groupMetadata(jid);
     },
@@ -42,6 +45,7 @@ const groupConfigs: SockToolConfig<any>[] = [
       subject: z.string(),
     }),
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ jid, subject }, sock) => {
       await sock.groupUpdateSubject(jid, subject);
       return { success: true, jid, subject };
@@ -55,6 +59,7 @@ const groupConfigs: SockToolConfig<any>[] = [
       description: z.string().optional(),
     }),
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ jid, description }, sock) => {
       await sock.groupUpdateDescription(jid, description);
       return { success: true, jid };
@@ -70,6 +75,7 @@ const groupConfigs: SockToolConfig<any>[] = [
       action: z.enum(['add', 'remove', 'promote', 'demote']),
     }),
     replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ jid, participants, action }, sock) => {
       const result = await sock.groupParticipantsUpdate(jid, participants, action);
       return { success: true, jid, action, participants, result };
@@ -84,6 +90,7 @@ const groupConfigs: SockToolConfig<any>[] = [
       setting: z.enum(['announcement', 'not_announcement', 'locked', 'unlocked']),
     }),
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ jid, setting }, sock) => {
       await sock.groupSettingUpdate(jid, setting);
       return { success: true, jid, setting };
@@ -96,6 +103,7 @@ const groupConfigs: SockToolConfig<any>[] = [
       jid: z.string(),
     }),
     replayPolicy: 'read_only',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'none' },
     call: async ({ jid }, sock) => {
       const code = await sock.groupInviteCode(jid);
       const link = code ? `https://chat.whatsapp.com/${code}` : null;
@@ -110,6 +118,7 @@ const groupConfigs: SockToolConfig<any>[] = [
       participants: z.array(z.string()),
     }),
     replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ subject, participants }, sock) => {
       return sock.groupCreate(subject, participants);
     },
@@ -121,6 +130,7 @@ const groupConfigs: SockToolConfig<any>[] = [
       id: z.string(),
     }),
     replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ id }, sock) => {
       await sock.groupLeave(id);
       return { success: true, id };
@@ -133,6 +143,7 @@ const groupConfigs: SockToolConfig<any>[] = [
       jid: z.string(),
     }),
     replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ jid }, sock) => {
       const newCode = await sock.groupRevokeInvite(jid);
       return { jid, inviteCode: newCode ?? null };
@@ -145,6 +156,7 @@ const groupConfigs: SockToolConfig<any>[] = [
       code: z.string(),
     }),
     replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ code }, sock) => {
       const groupJid = await sock.groupAcceptInvite(code);
       return { code, groupJid: groupJid ?? null };
@@ -157,6 +169,7 @@ const groupConfigs: SockToolConfig<any>[] = [
       code: z.string(),
     }),
     replayPolicy: 'read_only',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'none' },
     call: async ({ code }, sock) => {
       return sock.groupGetInviteInfo(code);
     },
@@ -170,6 +183,7 @@ const groupConfigs: SockToolConfig<any>[] = [
       expiration: z.number(),
     }),
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ jid, expiration }, sock) => {
       await sock.groupToggleEphemeral(jid, expiration);
       return { success: true, jid, expiration };
@@ -184,6 +198,7 @@ const groupConfigs: SockToolConfig<any>[] = [
       mode: z.enum(['all_member_add', 'admin_add']),
     }),
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ jid, mode }, sock) => {
       await sock.groupMemberAddMode(jid, mode);
       return { success: true, jid, mode };
@@ -198,6 +213,7 @@ const groupConfigs: SockToolConfig<any>[] = [
       mode: z.enum(['on', 'off']),
     }),
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ jid, mode }, sock) => {
       await sock.groupJoinApprovalMode(jid, mode);
       return { success: true, jid, mode };
@@ -210,6 +226,7 @@ const groupConfigs: SockToolConfig<any>[] = [
       jid: z.string(),
     }),
     replayPolicy: 'read_only',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'none' },
     call: async ({ jid }, sock) => {
       const participants = await sock.groupRequestParticipantsList(jid);
       return { jid, participants };
@@ -225,6 +242,7 @@ const groupConfigs: SockToolConfig<any>[] = [
       action: z.enum(['approve', 'reject']),
     }),
     replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ jid, participants, action }, sock) => {
       const result = await sock.groupRequestParticipantsUpdate(jid, participants, action);
       return { success: true, jid, action, participants, result };
@@ -243,6 +261,7 @@ const groupConfigs: SockToolConfig<any>[] = [
       invitedJid: z.string(),
     }),
     replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ groupJid, invitedJid }, sock) => {
       await sock.groupRevokeInviteV4(groupJid, invitedJid);
       return { success: true, groupJid, invitedJid };
@@ -276,6 +295,7 @@ function makeSendGroupInvite(getSock: () => ExtendedBaileysSocket | null, db?: D
     scope: 'chat',
     targetMode: 'injected',
     replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     handler: async (params) => {
       const { chatJid, groupJid, inviteCode, inviteExpiration, groupName, jpegThumbnail, caption } = SendGroupInviteSchema.parse(params);
       if (!chatJid) throw new Error('chatJid is required in global sessions');

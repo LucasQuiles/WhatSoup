@@ -265,11 +265,16 @@ vi.mock('../../../src/runtimes/agent/outbound-queue.ts', () => ({
 // mockConfig is mutable so individual tests can override voiceReply for voice reply tests.
 const { mockConfig, mockSynthesizeSpeech, mockWriteTempFile } = vi.hoisted(() => {
   const mockConfig = {
+    // #2192 s4b: provider-fallback tunables live on config (defaults mirror the retired IIFEs).
+    fallbackTunables: { noticeDedupMs: 1_800_000, primaryRecheckMs: 300_000, probeStallThreshold: 12, probeStallCeilingMultiple: 10 },
     transport: 'baileys' as const,
     adminPhones: new Set<string>(['15550100001']),
     controlPeers: new Map<string, string>(),
     toolUpdateMode: 'full' as 'full' | 'minimal' | 'friendly',
     toolUpdateRedirectJid: null as string | null,
+    // Threaded into ToolFailureAlertDeps (#2192 slice 3a); the tool-failure
+    // emission assertions below depend on this being on.
+    toolFailureAlertsEnabled: true,
     textAggregateDelayMs: 2_000,
     startupNotifications: true,
     proactiveResumeOnStartup: true,

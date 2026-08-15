@@ -132,6 +132,17 @@ export const REGISTRY: DurabilityStatusEntry[] = [
     writerSites: ['src/core/substrate/poller.ts'], // finishRun() writes outcome.status
   },
   {
+    // #2566 slice 1 — pre-execution occurrence lifecycle. 'failed' is written
+    // by the fenced finalize (outcome.status); 'stale' by the startup
+    // lease-expiry sweep. 'claimed' is reserved for a future two-phase claim.
+    table: 'trigger_occurrences',
+    statusColumn: 'state',
+    vocabulary: ['claimed', 'running', 'ok', 'noop', 'failed', 'terminal_fired', 'stale'],
+    vocabularySource: 'sql-check',
+    terminalFailureValues: ['failed', 'stale'],
+    writerSites: ['src/core/substrate/poller.ts'], // stmtFinalizeOccurrence + stmtSweepStaleOccurrences
+  },
+  {
     table: 'auth_loss_signal',
     statusColumn: 'classifier',
     vocabulary: ['logged_out', 'weak_logged_out_signal'],
@@ -230,11 +241,14 @@ export const REGISTRY: DurabilityStatusEntry[] = [
   },
   {
     table: 'fact_export_queue',
-    statusColumn: 'status',
-    vocabulary: ['pending', 'quarantined', 'exported'],
-    vocabularySource: 'literal', // DDL has no CHECK; values are fact-export-queue.ts string literals
-    terminalFailureValues: ['quarantined'],
-    writerSites: ['src/runtimes/chat/enrichment/fact-export-queue.ts'],
+    statusColumn: 'state',
+    vocabulary: ['pending', 'leased', 'retry_wait', 'exported', 'quarantined', 'retry_exhausted', 'legacy_unclassified'],
+    vocabularySource: 'sql-check', // migration 58 rebuild enforces the state machine via CHECK
+    terminalFailureValues: ['quarantined', 'retry_exhausted'],
+    writerSites: [
+      'src/runtimes/chat/enrichment/fact-export-queue.ts',
+      'src/core/database-migration-59.ts',
+    ],
   },
   {
     table: 'decryption_failures',
@@ -324,6 +338,44 @@ export const REGISTRY: DurabilityStatusEntry[] = [
     terminalFailureValues: ['partial', 'failed', 'cancelled', 'abandoned'],
     writerSites: ['src/memory/consolidation-run-store.ts'],
   },
+  {
+    table: 'capability_obligations',
+    statusColumn: 'state',
+    vocabulary: [
+      'waiting_capability',
+      'waiting_approval',
+      'claimed',
+      'completed',
+      'exhausted',
+      'blocked_media',
+      'blocked_ambiguous',
+      'cancelled',
+    ],
+    vocabularySource: 'sql-check',
+    terminalFailureValues: ['exhausted', 'blocked_media', 'blocked_ambiguous'],
+    // requeueObligation exhaustion CASE, blockObligation/blockWaitingObligation,
+    // and reclaimExpiredClaims quarantine all write the bad-news states.
+    writerSites: ['src/core/capability-obligation-store.ts'],
+  },
+  {
+    table: 'capability_execution_receipts',
+    statusColumn: 'result_status',
+    vocabulary: ['ok', 'error'],
+    vocabularySource: 'sql-check',
+    terminalFailureValues: ['error'],
+    // recordExecutionReceipt persists the typed provider result, including 'error'.
+    writerSites: ['src/core/capability-obligation-store.ts'],
+  },
+  {
+    table: 'capability_attestations',
+    statusColumn: 'canary_result',
+    vocabulary: ['pass', 'fail'],
+    vocabularySource: 'sql-check',
+    terminalFailureValues: ['fail'],
+    // recordCapabilityAttestation persists the canary outcome verbatim; a 'fail'
+    // row is the durable bad-news record that blocks admission (D5).
+    writerSites: ['src/core/capability-attestation.ts'],
+  },
 ];
 
 /**
@@ -385,6 +437,9 @@ export const NON_STATUS_TABLES: Set<string> = new Set([
   'bead_events',
   'bead_triggers',
   'blocklist',
+  'capability_drain_approvals',
+  'capability_execution_reservations',
+  'capability_obligation_events',
   'chat_aliases',
   'chats',
   'contacts',
@@ -392,6 +447,7 @@ export const NON_STATUS_TABLES: Set<string> = new Set([
   'entities',
   'entity_aliases',
   'entity_observations',
+  'fact_export_meta',
   'groups',
   'heal_reports',
   'inbound_disposition_links',
@@ -543,6 +599,14 @@ export const DISCOVERY_EXCLUSIONS: DiscoveryExclusionEntry[] = [
   {
     table: 'inbound_events_v56',
     reason: 'migration-56 transient create-copy-drop-rename artifact; the rebuilt table persists only after being renamed to inbound_events.',
+  },
+  {
+    table: 'fact_export_queue_v59',
+    reason: 'migration-59 transient create-copy-drop-rename artifact; the rebuilt table persists only after being renamed to fact_export_queue.',
+  },
+  {
+    table: 'capability_obligations_v60',
+    reason: 'migration-60 transient create-copy-drop-rename artifact (src/core/database-migration-60.ts): the creation_reason CHECK rebuild copies into capability_obligations_v60, drops the old table, then renames v60 to capability_obligations — it never persists under its own name, so it never appears in migratedSchemaSnapshot().',
   },
 ];
 

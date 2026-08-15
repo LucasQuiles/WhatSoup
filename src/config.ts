@@ -1,10 +1,12 @@
 import { mkdirSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { homedir } from 'node:os';
+import { printErr } from './lib/cli-print.ts';
 import { normalizePhoneE164, normalizePhoneE164Wire } from './lib/phone.ts';
 import { asRecord, isNonEmptyString } from './lib/type-guards.ts';
 import { migrateLegacyMemoryConfig } from './config-memory-migration.ts';
 import type { Profile } from './core/profiles.ts';
+import { DEFAULT_BIND_ADDRESS } from './fleet/constants.ts';
 import { VALID_ACCESS_MODES, VALID_GROUP_SENDER_POLICIES, type AccessMode, type GroupSenderPolicy } from './instance-loader.ts';
 import { DEFAULT_TRANSPORT_ID, isTransportId, type TransportId } from './transport/registry.ts';
 import { DEFAULT_FLEET_PORT, DEFAULT_INSTANCE_HEALTH_PORT } from './fleet/constants.ts';
@@ -12,6 +14,7 @@ import { DEFAULT_TWILIO_SMS, DEFAULT_TWILIO_VOICE, type TwilioSmsConfig, type Tw
 import { DEFAULT_IMESSAGE, type ImessageConfig, type ImessageInboundMode } from './transport/imessage/types.ts';
 import { DEFAULT_SIGNAL, SIGNAL_UUID_RE, type SignalConfig, type SignalInboundMode } from './transport/signal/types.ts';
 import { canonicalizeImessageDirectIdentity } from './core/transport-refs.ts';
+import { parseCapabilityObligationsOptions } from './core/capability-contract.ts';
 import { normalizeFallbackEntriesFromAgentOptions } from './core/fallback-chain.ts';
 import {
   isProviderBoundaryMode,
@@ -525,6 +528,51 @@ process.env.TMPDIR = processTmpDir;
 mkdirSync(join(mediaDir, '..', 'cache'), { recursive: true, mode: 0o700 });
 
 // ---------------------------------------------------------------------------
+// Bot-errors alert routing (#2192 slice 3a) — resolve, then PUBLISH back to
+// process.env (the TMPDIR/LOG_DIR pattern above): src/lib/emit-alert.ts and
+// src/core/outbound-message-safety.ts read these vars call-time and cannot
+// import config (ring rules), so the env var is the sanctioned lib-side
+// channel. The publish is instance-value-only — an env-sourced or absent
+// value leaves process.env byte-identical, because absence is load-bearing
+// (emit-alert fail-closes the legacy helper on a missing JID, and the
+// spawned legacy alert script inherits this environment).
+// ---------------------------------------------------------------------------
+const instanceBotErrorsJid = optionalString(instance?.botErrorsJid, 'botErrorsJid');
+if (instanceBotErrorsJid !== undefined) process.env.BOT_ERRORS_JID = instanceBotErrorsJid;
+const instanceBotErrorsExpectedJid = optionalString(instance?.botErrorsExpectedJid, 'botErrorsExpectedJid');
+if (instanceBotErrorsExpectedJid !== undefined) process.env.BOT_ERRORS_EXPECTED_JID = instanceBotErrorsExpectedJid;
+const instanceBotErrorsRequireExpected = optionalBoolean(instance?.botErrorsRequireExpected, 'botErrorsRequireExpected');
+if (instanceBotErrorsRequireExpected !== undefined) {
+  process.env.BOT_ERRORS_REQUIRE_EXPECTED = instanceBotErrorsRequireExpected ? '1' : '0';
+}
+// Post-publish reads: the typed fields and the env-reading sites see the same
+// bytes by construction. Parsing mirrors emit-alert.ts (trim; the require flag
+// treats 0/false/no/off as disabling, anything else — including unset — as on).
+const botErrorsJid = process.env.BOT_ERRORS_JID?.trim() || null;
+const botErrorsExpectedJid = process.env.BOT_ERRORS_EXPECTED_JID?.trim() || null;
+const rawBotErrorsRequireExpected = process.env.BOT_ERRORS_REQUIRE_EXPECTED?.trim().toLowerCase();
+const botErrorsRequireExpected = rawBotErrorsRequireExpected
+  ? !['0', 'false', 'no', 'off'].includes(rawBotErrorsRequireExpected)
+  : true;
+// #2192 slice 3b — same instance-value-only publish for the legacy-alert
+// throttle window (emit-alert.ts resolves it call-time) and the safe-shape
+// credential-path redaction flag (bot-errors-outbox.ts). Parsing mirrors each
+// reader exactly: throttle clamps negatives to 0 and falls back on non-finite;
+// safe-shape accepts 1/true/yes/on.
+const instanceEmitAlertThrottleMs = optionalFiniteNumber(instance?.emitAlertThrottleMs, 'emitAlertThrottleMs');
+if (instanceEmitAlertThrottleMs !== undefined) {
+  process.env.EMIT_ALERT_THROTTLE_MS = String(instanceEmitAlertThrottleMs);
+}
+const rawEmitAlertThrottleMs = Number(process.env.EMIT_ALERT_THROTTLE_MS);
+const emitAlertThrottleMs = Number.isFinite(rawEmitAlertThrottleMs) ? Math.max(0, rawEmitAlertThrottleMs) : 300_000;
+const instanceSafeShapeCredPath = optionalBoolean(instance?.botErrorsSafeShapeCredPath, 'botErrorsSafeShapeCredPath');
+if (instanceSafeShapeCredPath !== undefined) {
+  process.env.BOT_ERRORS_SAFE_SHAPE_CRED_PATH = instanceSafeShapeCredPath ? '1' : '0';
+}
+const rawSafeShapeCredPath = (process.env.BOT_ERRORS_SAFE_SHAPE_CRED_PATH ?? '').trim().toLowerCase();
+const botErrorsSafeShapeCredPath = ['1', 'true', 'yes', 'on'].includes(rawSafeShapeCredPath);
+
+// ---------------------------------------------------------------------------
 // Model defaults — priority: instance.models > env vars > built-in defaults
 // ---------------------------------------------------------------------------
 const instanceModels = configSection(instance?.models, 'models');
@@ -607,11 +655,14 @@ const resolvedRateLimitWindowMs: number = (() => {
     return requireFiniteNumber(instance.rateLimitWindowMs, 'rateLimitWindowMs');
   }
   if (instance?.rateLimitNoticeWindowMs != null) {
-    // eslint-disable-next-line no-console -- startup deprecation warning before logger is available; legacy rateLimitNoticeWindowMs fallback is still supported (read at runtime.ts:176), so this nudge is retained, not scheduled for removal; expires 2026-12-31
-    console.warn(
-      '[config] DEPRECATION: rateLimitWindowMs not set — falling back to rateLimitNoticeWindowMs (%dms). ' +
+    // Startup deprecation nudge before the logger exists (config sets LOG_DIR,
+    // so importing the logger here would evaluate it too early); the legacy
+    // rateLimitNoticeWindowMs fallback is still supported (read at
+    // runtime.ts:176), so this nudge is retained, not scheduled for removal;
+    // expires 2026-12-31.
+    printErr(
+      `[config] DEPRECATION: rateLimitWindowMs not set — falling back to rateLimitNoticeWindowMs (${instance.rateLimitNoticeWindowMs}ms). ` +
         'Set rateLimitWindowMs explicitly to silence this warning.',
-      instance.rateLimitNoticeWindowMs,
     );
     return requireFiniteNumber(instance.rateLimitNoticeWindowMs, 'rateLimitNoticeWindowMs');
   }
@@ -635,8 +686,10 @@ const BUILTIN_KNOWLEDGE_PROFILE_NAMES = new Set([
 ]);
 
 function warnConfigDeprecation(payload: Record<string, unknown>, message: string): void {
-  // eslint-disable-next-line no-console -- startup deprecation warning before logger is available; expires 2026-10-26
-  console.warn(payload, message);
+  // Startup deprecation warning before the logger exists (same LOG_DIR
+  // evaluation-order constraint as above); payload stays pino-shaped so a
+  // later lazy-logger handoff can move this to the structured pipeline.
+  printErr(`${message} ${JSON.stringify(payload)}`);
 }
 
 function resolvePineconeNamespaces(source: Record<string, unknown> | undefined): PineconeNamespaceConfig {
@@ -1128,7 +1181,24 @@ function configModelRole(value: string, role: string): string {
   }
 }
 
+// Load-time capability-obligation validation mirrors configModelRole: a
+// malformed `enabled: true` body is a permanent config defect and must exit
+// EX_CONFIG(78) (stops the restart-flap), never a bare throw with exit 1.
+function configCapabilityObligations() {
+  try {
+    return parseCapabilityObligationsOptions(resolvedAgentOptions['capabilityObligations']);
+  } catch (err) {
+    throw new ConfigValidationError(
+      `agentOptions.capabilityObligations is enabled but malformed: ${errorMessage(err)}`,
+    );
+  }
+}
+
 export const config = {
+  // Capability-obligation replay (all-or-inert; default OFF). `enabled: true`
+  // with a malformed body fails startup as EX_CONFIG — never a partial activation.
+  capabilityObligations: configCapabilityObligations(),
+
   // NL-first routing aliases + per-sender preference store (owner-approved
   // PR-plan v2). Default false: flag off keeps behavior byte-identical —
   // /model,/why,/reset stay forwarded and no preference table is created.
@@ -1279,6 +1349,53 @@ export const config = {
 
   // Health
   healthPort: optionalFiniteNumber(instance?.healthPort, 'healthPort') ?? portEnv('HEALTH_PORT', DEFAULT_INSTANCE_HEALTH_PORT),
+  // R7a bind address, instance-config -> env -> loopback default (#2192). The
+  // non-loopback guard at startHealthServer still fail-fasts without opt-in.
+  healthBindAddress: optionalString(instance?.healthBindAddress, 'healthBindAddress')
+    ?? process.env.HEALTH_BIND_ADDRESS ?? '127.0.0.1',
+  // Fleet server bind, same chain; guard at fleet start() unchanged (#2192).
+  fleetBindAddress: optionalString(instance?.fleetBindAddress, 'fleetBindAddress')
+    ?? process.env.FLEET_BIND_ADDRESS ?? DEFAULT_BIND_ADDRESS,
+  // Allowed root for schedule files served by the health surface; undefined
+  // keeps today's unset behavior (#2192).
+  scheduleRoot: optionalString(instance?.scheduleRoot, 'scheduleRoot')
+    ?? process.env.WHATSOUP_SCHEDULE_ROOT,
+  // Auth-bond auto-restore, inverted env semantics preserved: ON unless the
+  // env var is exactly '0' (#2192 slice 2b).
+  authBondAutoRestore: optionalBoolean(instance?.authBondAutoRestore, 'authBondAutoRestore')
+    ?? process.env.WHATSOUP_AUTH_BOND_AUTO_RESTORE !== '0',
+  // Baileys protocol version pin, string passthrough (#2192 s4a). Parsing and
+  // validation stay call-time in parsePinnedBaileysVersion so a malformed
+  // value throws at connect (today's timing), not at config load.
+  baileysVersionPinned: optionalString(instance?.baileysVersionPinned, 'baileysVersionPinned')
+    ?? process.env.WHATSOUP_BAILEYS_VERSION,
+  // In-process EgressProxy fail-open. The identically named env var ALSO
+  // drives the out-of-band shell hook (deploy/hooks/agent-sandbox.sh) in
+  // manual deployments — this field owns only the in-process channel (#2192).
+  sandboxFailOpen: optionalBoolean(instance?.sandboxFailOpen, 'sandboxFailOpen')
+    ?? process.env.WHATSOUP_SANDBOX_FAIL_OPEN === '1',
+  // One-message handoff notice flag (#2192 slice 2b).
+  oneMessageHandoff: optionalBoolean(instance?.oneMessageHandoff, 'oneMessageHandoff')
+    ?? process.env.WHATSOUP_ONE_MESSAGE_HANDOFF === '1',
+
+  // Bot-errors alert routing (#2192 slice 3a). Resolved AND published back to
+  // process.env in the pre-literal block above (search: "Bot-errors alert
+  // routing") so these typed fields and the env-reading lib/core sites cannot
+  // disagree. Validation (group-JID shape, expected-JID pin) stays in
+  // emit-alert.ts where the fail-closed warn-once semantics live.
+  botErrorsJid,
+  botErrorsExpectedJid,
+  botErrorsRequireExpected,
+  // Master switch for the runtime's per-tool-failure operator alerts,
+  // threaded to tool-failure-alert.ts via ToolFailureAlertDeps (param-DI from
+  // this grandfathered importer; the module itself reads no env). Inverted
+  // env semantics preserved: ON unless the env var is exactly '0'.
+  toolFailureAlertsEnabled: optionalBoolean(instance?.toolFailureAlertsEnabled, 'toolFailureAlertsEnabled')
+    ?? process.env.BOT_ERRORS_RUNTIME_TOOL_FAILURE_ALERTS !== '0',
+  // Legacy-alert throttle window + safe-shape credential redaction flag
+  // (#2192 slice 3b), resolved and published in the pre-literal block above.
+  emitAlertThrottleMs,
+  botErrorsSafeShapeCredPath,
 
   // GUI
   gui: optionalBoolean(instance?.gui, 'gui') ?? false,
@@ -1423,6 +1540,51 @@ export const config = {
   agentFallbackProvider: resolvedFallbacks[0]?.provider,
   agentFallbackModel: resolvedFallbacks[0]?.model,
   agentFallbackDataPolicy: resolvedFallbacks[0]?.dataPolicy,
+
+  // Provider-fallback tunables (#2192 s4b) — instance-config
+  // (agentOptions.fallbackTunables.*) first, env second, defaults and clamps
+  // byte-identical to the retired runtime-tunables module-eval IIFEs. Those
+  // were module-eval and this is config-load: restart-to-change in both
+  // worlds, no live-flip regression. Consumed via RuntimeFallbackPort.
+  fallbackTunables: ((): { noticeDedupMs: number; primaryRecheckMs: number; probeStallThreshold: number; probeStallCeilingMultiple: number } => {
+    const section = configSection(resolvedAgentOptions['fallbackTunables'], 'agentOptions.fallbackTunables') ?? {};
+    const resolveTunable = (
+      instanceValue: number | undefined,
+      envKey: string,
+      fallback: number,
+      clamp?: { min: number; max: number; trunc?: boolean },
+    ): number => {
+      const raw = instanceValue ?? Number(process.env[envKey]);
+      if (!Number.isFinite(raw) || raw <= 0) return fallback;
+      const value = clamp?.trunc ? Math.trunc(raw) : raw;
+      return clamp ? Math.min(Math.max(value, clamp.min), clamp.max) : value;
+    };
+    return {
+      noticeDedupMs: resolveTunable(
+        optionalFiniteNumber(section['noticeDedupMs'], 'agentOptions.fallbackTunables.noticeDedupMs'),
+        'WHATSOUP_PROVIDER_FALLBACK_NOTICE_DEDUP_MS',
+        30 * MS_PER_MINUTE,
+      ),
+      primaryRecheckMs: resolveTunable(
+        optionalFiniteNumber(section['primaryRecheckMs'], 'agentOptions.fallbackTunables.primaryRecheckMs'),
+        'WHATSOUP_PROVIDER_FALLBACK_PRIMARY_RECHECK_MS',
+        5 * MS_PER_MINUTE,
+        { min: 30 * MS_PER_SECOND, max: 30 * MS_PER_MINUTE },
+      ),
+      probeStallThreshold: resolveTunable(
+        optionalFiniteNumber(section['probeStallThreshold'], 'agentOptions.fallbackTunables.probeStallThreshold'),
+        'WHATSOUP_PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD',
+        12,
+        { min: 3, max: 100, trunc: true },
+      ),
+      probeStallCeilingMultiple: resolveTunable(
+        optionalFiniteNumber(section['probeStallCeilingMultiple'], 'agentOptions.fallbackTunables.probeStallCeilingMultiple'),
+        'WHATSOUP_PROVIDER_FALLBACK_PROBE_STALL_CEILING_MULTIPLE',
+        10,
+        { min: 1, max: 1000, trunc: true },
+      ),
+    };
+  })(),
 
   // Voice (ElevenLabs TTS)
   elevenlabs: {

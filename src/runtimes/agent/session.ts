@@ -119,6 +119,7 @@ export const STALLED_OP_KILL_GRACE_MS = 180_000; // 3 min after a tool stalls
 // cannot run forever. Ceiling is env-tunable per instance for automation-heavy
 // deployments (WHATSOUP_LONG_OP_CEILING_MS).
 function positiveIntEnv(name: string, fallback: number): number {
+  // env-allowed: bounded explicit-key env lookup; keys enumerated in-code
   const raw = process.env[name];
   if (!raw?.trim()) return fallback;
   const n = Number.parseInt(raw, 10);
@@ -300,7 +301,7 @@ export function buildChildEnv(
 
   // Provider-specific credentials — each provider only receives the keys it
   // needs. Claude/Codex use resolveApiKey(); OpenCode resolves one selected
-  // service through lookupCredential(). Both paths are keyring-aware and avoid
+  // service through lookupCredential(). All paths are keyring-aware and avoid
   // copying the parent credential environment. See the Phase D security handoff.
   switch (provider) {
     case 'claude-cli':
@@ -318,8 +319,15 @@ export function buildChildEnv(
       }
       break;
     case 'gemini-cli':
-      if (process.env.GEMINI_API_KEY) env.GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-      if (process.env.GOOGLE_API_KEY) env.GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
+      // Keyring-first like the sibling cases (#2192): a configured 'google'
+      // credential feeds both aliases; each env var stays the observable
+      // fallback for its own name.
+      {
+        const geminiKey = resolveApiKey({ service: 'google', envVar: 'GEMINI_API_KEY' });
+        if (geminiKey) env.GEMINI_API_KEY = geminiKey;
+        const googleKey = resolveApiKey({ service: 'google', envVar: 'GOOGLE_API_KEY' });
+        if (googleKey) env.GOOGLE_API_KEY = googleKey;
+      }
       break;
     case 'opencode-cli': {
       const hasCustomEndpoint = opencodeUsesConfigModel(providerConfig);
@@ -1151,6 +1159,7 @@ export class SessionManager {
       }
 
       if (this.provider === 'claude-cli') {
+        // env-allowed: external-tool interop; must track the env the spawned claude CLI sees
         const claudeConfigDir = process.env['CLAUDE_CONFIG_DIR'] || join(homedir(), '.claude');
         const projectCwd = this.configuredCwd ?? homedir();
         const projectDirName = projectCwd.replace(/[^a-zA-Z0-9]/g, '-');

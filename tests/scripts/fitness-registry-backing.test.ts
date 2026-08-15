@@ -90,6 +90,7 @@ const collectedByVitest = (path: string): boolean =>
  * removed from this list — which is the good kind of failure.
  */
 const TAG_PATH_UNCOVERED_BLOCK_RULES: readonly string[] = [
+  'arch.env-read-justification',
   'arch.file-size',
   'arch.ring-boundaries',
   'arch.ssot-jid-construction',

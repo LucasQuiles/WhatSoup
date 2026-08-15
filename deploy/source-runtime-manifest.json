@@ -5,7 +5,7 @@
   "entrypoints": [
     {
       "path": "src/main.ts",
-      "sha256": "06284feb2059bc5a37b9b1b96c8ba0dd39d92e86ecd8006f6b5cd500cec38cb2",
+      "sha256": "21412e833c01baaf387244ccb3ffba746ecc1a80cae1f7b79780d1aeaef22db9",
       "mustContain": [
         "startHealthServer",
         "createConnection"
@@ -14,7 +14,7 @@
     },
     {
       "path": "src/bootstrap.ts",
-      "sha256": "71944b2d7eab217bbd7d829d88d45dbc0dbefd45644970352ddd664b75f8a1aa",
+      "sha256": "bc376bcddda749a112837496a83be5c220b53ae3e3af6c52a6917bba561801a1",
       "mustContain": [
         "bootstrapCommon"
       ],
@@ -41,7 +41,7 @@
     },
     {
       "path": "src/transport/connection.ts",
-      "sha256": "65c9333905101151a4d35d02c65929605eb762730ba179ef1e951cfeb8f3814d",
+      "sha256": "4d6b3e6b63d9f8491bd8b69f22020999f550f94bc7bb0f5f229f08e1afbe2707",
       "mustContain": [
         "decideDisconnectAction",
         "QR code received",
@@ -52,7 +52,7 @@
     },
     {
       "path": "src/transport/auth.ts",
-      "sha256": "71451a527002b9f19ae938c802714b83bbb66e3038c8de01526b57b976bab317",
+      "sha256": "9d3b7245372ddd86c505804c6ab614d24d71ae4a54319a71096de4642608e675",
       "mustContain": [
         "useMultiFileAuthState",
         "decideDisconnectAction"
@@ -71,7 +71,7 @@
     },
     {
       "path": "src/runtimes/agent/session.ts",
-      "sha256": "15b6fcac8a05f25bd17e4e44bf411e7df728452c2c58928b6db358e84245ead8",
+      "sha256": "911d359d844bb934db4421c6a2d7e16c1de0f904813503d577631b5c6b1a7285",
       "mustContain": [
         "composeWithExactLineDedup"
       ],

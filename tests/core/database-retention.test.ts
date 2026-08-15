@@ -65,12 +65,12 @@ describe('database retention', () => {
       )
     `).run(TOOL_INPUT_MARKER, TOOL_RESULT_MARKERS.success);
     db.raw.prepare(`
-      INSERT INTO fact_export_queue (fact_id, chat_jid, payload_json, status, created_at, exported_at)
-      VALUES ('fact-old', 'chat@g.us', '{}', 'exported', datetime('now', '-45 days'), datetime('now', '-40 days'))
+      INSERT INTO fact_export_queue (fact_uid, fact_id, chat_jid, payload_json, state, created_at, exported_at)
+      VALUES ('fe_retentionold000000000r1', 'fact-old', 'chat@g.us', '{}', 'exported', datetime('now', '-45 days'), datetime('now', '-40 days'))
     `).run();
     db.raw.prepare(`
-      INSERT INTO fact_export_queue (fact_id, chat_jid, payload_json, status, created_at, exported_at)
-      VALUES ('fact-young', 'chat@g.us', '{}', 'exported', datetime('now', '-6 days'), datetime('now', '-5 days'))
+      INSERT INTO fact_export_queue (fact_uid, fact_id, chat_jid, payload_json, state, created_at, exported_at)
+      VALUES ('fe_retentionyoung0000000r1', 'fact-young', 'chat@g.us', '{}', 'exported', datetime('now', '-6 days'), datetime('now', '-5 days'))
     `).run();
 
     const result = runDatabaseRetention(db, {
@@ -87,10 +87,13 @@ describe('database retention', () => {
       toolCalls: 1,
       outboundSends: 0,
       factExportQueue: 1,
+      factExportTerminal: 0,
       memoryConsolidationRuns: 0,
       metricsHourly: 0,
       decryptionFailures: 0,
       messages: 0,
+      triggerRuns: 0,
+      triggerOccurrences: 0,
     });
     expect(rowCount('inbound_events')).toBe(1);
     expect(rowCount('outbound_ops')).toBe(1);
@@ -288,6 +291,8 @@ describe('database retention', () => {
     const result = runDatabaseRetention(db, {
       ...DEFAULT_DATABASE_RETENTION,
       messageRetentionDays: 30,
+      triggerRunDays: 30,
+      triggerOccurrenceDays: 30,
     });
 
     expect(result.messages).toBe(1);
@@ -557,8 +562,8 @@ describe('database retention', () => {
       )
     `).run(TOOL_INPUT_MARKER);
     db.raw.prepare(`
-      INSERT INTO fact_export_queue (fact_id, chat_jid, payload_json, status, created_at)
-      VALUES ('fact-pending', 'chat@g.us', '{}', 'pending', datetime('now', '-60 days'))
+      INSERT INTO fact_export_queue (fact_uid, fact_id, chat_jid, payload_json, state, created_at)
+      VALUES ('fe_retentionpending00000r1', 'fact-pending', 'chat@g.us', '{}', 'pending', datetime('now', '-60 days'))
     `).run();
 
     const result = runDatabaseRetention(db, DEFAULT_DATABASE_RETENTION);
@@ -571,10 +576,13 @@ describe('database retention', () => {
       toolCalls: 0,
       outboundSends: 0,
       factExportQueue: 0,
+      factExportTerminal: 0,
       memoryConsolidationRuns: 0,
       metricsHourly: 0,
       decryptionFailures: 0,
       messages: 0,
+      triggerRuns: 0,
+      triggerOccurrences: 0,
     });
     expect(rowCount('inbound_events')).toBe(2);
     expect(rowCount('outbound_ops')).toBe(2);
@@ -973,6 +981,9 @@ describe('database retention', () => {
         outboundSendDays: 30,
         outboundSendMaxRows: 10_000,
         messageRetentionDays: 30,
+        triggerRunDays: 30,
+        triggerOccurrenceDays: 30,
+        factTerminalDays: 30,
       });
 
       expect(timer.getHealthSnapshot()).toEqual({
@@ -1030,6 +1041,9 @@ describe('database retention', () => {
         outboundSendDays: 30,
         outboundSendMaxRows: 10_000,
         messageRetentionDays: 30,
+        triggerRunDays: 30,
+        triggerOccurrenceDays: 30,
+        factTerminalDays: 30,
       });
       const emptyResult = {
         turnRecoveryJobs: 0,
@@ -1039,10 +1053,13 @@ describe('database retention', () => {
         toolCalls: 0,
         outboundSends: 0,
         factExportQueue: 0,
+        factExportTerminal: 0,
         memoryConsolidationRuns: 0,
         metricsHourly: 0,
         decryptionFailures: 0,
         messages: 0,
+        triggerRuns: 0,
+        triggerOccurrences: 0,
       };
       const runSpy = vi.spyOn(timer, 'runCleanup')
         .mockRejectedValueOnce(new Error('immediate-retention-failed'))

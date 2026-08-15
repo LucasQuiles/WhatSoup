@@ -132,6 +132,7 @@ function checkService(res: ServerResponse, raw: string | undefined): ServiceChec
 
 function envShadowed(service: string): boolean {
   const envKey = SERVICE_ENV_MAP[service];
+  // env-allowed: bounded credential-presence check; explicit env key guard
   return envKey !== undefined && Boolean(process.env[envKey]);
 }
 

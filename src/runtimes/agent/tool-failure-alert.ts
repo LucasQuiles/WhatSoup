@@ -44,6 +44,12 @@ export interface ToolFailureAlertDeps {
   instanceName: string;
   sessionScope: string;
   cwd: string | undefined;
+  /**
+   * Master switch (config.toolFailureAlertsEnabled — the typed front for
+   * BOT_ERRORS_RUNTIME_TOOL_FAILURE_ALERTS). Supplied by the runtime so this
+   * module stays env-free (#2192 slice 3a).
+   */
+  toolFailureAlertsEnabled: boolean;
   /** Effective provider label, resolved live exactly as the runtime computes it. */
   resolveProvider: () => string;
   /** Per-instance dedup map, owned by the caller and mutated in place. */
@@ -63,7 +69,7 @@ export interface ToolFailureAlertDeps {
  * deduplicated BOT ERRORS alert. Never throws into the caller.
  */
 export function maybeEmitToolFailureAlert(args: ToolFailureAlertArgs, deps: ToolFailureAlertDeps): void {
-  if (process.env['BOT_ERRORS_RUNTIME_TOOL_FAILURE_ALERTS'] === '0') return;
+  if (!deps.toolFailureAlertsEnabled) return;
 
   // Root-cause noise gate: a non-zero Bash exit (glob/grep no-match, failed
   // conditional, missing path) is reported by claude-cli as `is_error` but is

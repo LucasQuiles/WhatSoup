@@ -1,23 +1,23 @@
 /**
- * Console-usage budget ratchet — locks the raw console.* call count in src/ at
- * its current baseline so new occurrences are consciously introduced.
+ * Console-usage allowlist ratchet — pins the exact set of sanctioned raw
+ * console.* sites in src/ instead of a bare count ceiling (#2209).
  *
- * WhatSoup routes all operator-visible diagnostics through Pino (`src/logger.ts`)
- * and the bot-errors outbox. A raw `console.(log|warn|error|info|debug)(...)` in
- * production code bypasses that surface: it is invisible to the structured log
- * pipeline, unredacted (it can leak secrets the logger would scrub), and
- * unattributed (no level / instance / module metadata). This ratchet prevents
- * the raw count from growing silently; each migration to the logger / outbox
- * lowers the baseline.
+ * WhatSoup routes operator-visible diagnostics through Pino (`src/logger.ts`)
+ * and human-facing CLI text through the redacting seam `src/lib/cli-print.ts`.
+ * A raw console call in production code bypasses both surfaces: it is invisible
+ * to the structured log pipeline, unredacted (it can leak secrets the logger
+ * would scrub), and unattributed (no level / instance / module metadata).
  *
- * Baseline measured live on main b8e1cbc0d: 31 occurrences across 6 src/ files.
- * Per-method: error 25, log 4, warn 2 (info/debug 0). The dominant site is
- * `src/transport/auth.ts` (21 — the pre-Pino auth path); the remainder are
- * bootstrap/cli top-level fatal-error prints and the standalone fleet entrypoint.
+ * The only sanctioned survivors are the logger's own transport-failure
+ * fallbacks — the one place that cannot report through itself. Each survivor
+ * line must carry a `console-allowed:` justification marker on the same line
+ * or the line above, and the per-file counts are pinned exactly, so a new
+ * site, a moved site, or an unjustified site all fail closed.
  *
- * Follow-on cars migrate these sites to the logger / bot-errors outbox and
- * lower the baseline one file at a time. This car introduces the ratchet only
- * (no migrations, no eslint rule, no other ratchets touched).
+ * History: baseline 31 on main b8e1cbc0d; auth.ts's 21 sites migrated to
+ * process.stderr.write with structured log twins (#2930), 31 -> 10; the #2209
+ * sweep migrated the remaining CLI/bootstrap sites through cli-print and
+ * dropped the standalone duplicates, 10 -> 2.
  *
  * Companion: #2209.
  */
@@ -30,63 +30,95 @@ import { describe, expect, it } from 'vitest';
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const srcRoot = resolve(repoRoot, 'src');
 
-// Ratchet ceiling: the count may only stay the same or decrease.
-// To raise it, update this constant AND explain why in the commit message.
-// Baseline: 31, measured 2026-08-09 on main b8e1cbc0d (#2209).
-// 2026-08-09: auth.ts 21 sites migrated to process.stderr.write (dual-channel
-// pairing CLI; structured pipeline already served by log.* twins, #2930); 31→10.
-const CONSOLE_USAGE_BUDGET = 10;
+// Method-reference-aware: matches bare `console.error` handed off as a
+// callback as well as direct calls, so the whole class stays closed.
+const CONSOLE_METHOD_PATTERN = /\bconsole\.(log|warn|error|info|debug|trace)\b/;
+
+// The exact sanctioned raw-console surface, pinned per file. Changing this
+// list is a conscious act reviewed with the diff that motivates it.
+const ALLOWLIST: Record<string, number> = {
+  // Logger-internal transport-failure fallbacks: pino cannot self-report
+  // when its own sink fails to construct or errors asynchronously.
+  'src/logger.ts': 2,
+};
+
+const JUSTIFICATION_MARKER = 'console-allowed:';
 
 function collectSrcFiles(): string[] {
-  // Node 22+ readdirSync recursive (replaces the phantom-dep tinyglobby that #2909 purged).
   return readdirSync(srcRoot, { recursive: true, withFileTypes: true })
     .filter((d) => d.isFile() && d.name.endsWith('.ts'))
     .map((d) => resolve(d.parentPath || srcRoot, d.name));
 }
 
-interface CountResult {
-  file: string;
-  count: number;
+function isCommentLine(line: string): boolean {
+  const trimmed = line.trimStart();
+  return trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*');
 }
 
-function countConsoleCalls(): { total: number; byFile: CountResult[] } {
-  const files = collectSrcFiles();
-  const byFile: CountResult[] = [];
-  let total = 0;
-  for (const file of files) {
-    const src = readFileSync(file, 'utf8');
-    const matches = src.match(/console\.(log|warn|error|info|debug)\(/g);
-    if (matches && matches.length > 0) {
-      total += matches.length;
-      byFile.push({ file: file.replace(repoRoot + '/', ''), count: matches.length });
+interface ConsoleSite {
+  file: string;
+  line: number;
+  text: string;
+  justified: boolean;
+}
+
+function collectConsoleSites(): ConsoleSite[] {
+  const sites: ConsoleSite[] = [];
+  for (const file of collectSrcFiles()) {
+    const relative = file.replace(repoRoot + '/', '');
+    const lines = readFileSync(file, 'utf8').split('\n');
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      // Prose comments may legitimately mention the pattern; only code counts.
+      if (isCommentLine(line)) continue;
+      if (!CONSOLE_METHOD_PATTERN.test(line)) continue;
+      const justified =
+        line.includes(JUSTIFICATION_MARKER)
+        || (i > 0 && lines[i - 1].includes(JUSTIFICATION_MARKER));
+      sites.push({ file: relative, line: i + 1, text: line.trim(), justified });
     }
   }
-  byFile.sort((a, b) => b.count - a.count);
-  return { total, byFile };
+  return sites;
 }
 
-describe('console-usage budget ratchet', () => {
-  it('raw console.* call count in src/ does not exceed baseline (use the logger)', () => {
-    const { total, byFile } = countConsoleCalls();
-    const breakdown = byFile.map((r) => `  ${r.count}  ${r.file}`).join('\n');
-    if (total > CONSOLE_USAGE_BUDGET) {
-      // Use expect() with the breakdown as assertion message so failure output is actionable.
-      expect(
-        total,
-        `console.* count is ${total} (budget: ${CONSOLE_USAGE_BUDGET}).\n` +
-          'New occurrences should route through src/logger.ts (Pino) or the ' +
-          'bot-errors outbox rather than raw console.* — raw prints bypass ' +
-          'redaction, level metadata, and the operator log surface.\n\n' +
-          `Current breakdown:\n${breakdown}`,
-      ).toBeLessThanOrEqual(CONSOLE_USAGE_BUDGET);
+describe('console-usage allowlist ratchet', () => {
+  it('every raw console.* site in src/ is on the pinned allowlist', () => {
+    const sites = collectConsoleSites();
+    const byFile = new Map<string, ConsoleSite[]>();
+    for (const site of sites) {
+      const bucket = byFile.get(site.file) ?? [];
+      bucket.push(site);
+      byFile.set(site.file, bucket);
     }
-    // Explicit pass assertion (avoids js-no-expect test-integrity finding).
-    expect(total).toBeLessThanOrEqual(CONSOLE_USAGE_BUDGET);
+
+    const actual: Record<string, number> = {};
+    for (const [file, fileSites] of [...byFile.entries()].sort()) {
+      actual[file] = fileSites.length;
+    }
+
+    const detail = sites
+      .map((s) => `  ${s.file}:${s.line}  ${s.text.slice(0, 90)}`)
+      .join('\n');
+    expect(
+      actual,
+      'Raw console usage outside the pinned allowlist. Route operator '
+        + 'diagnostics through src/logger.ts (Pino) and human-facing CLI text '
+        + `through src/lib/cli-print.ts.\n\nCurrent sites:\n${detail}`,
+    ).toEqual(ALLOWLIST);
   });
 
-  it('counting methodology scans .ts files under src/ (no phantom deps)', () => {
-    const { total } = countConsoleCalls();
-    // Smoke check: if this ever returns 0, the file discovery is broken.
-    expect(total).toBeGreaterThan(0);
+  it('every allowed site carries a justification marker', () => {
+    const unjustified = collectConsoleSites().filter((s) => !s.justified);
+    expect(
+      unjustified.map((s) => `${s.file}:${s.line}`),
+      `Each sanctioned raw console site needs a "${JUSTIFICATION_MARKER}" `
+        + 'comment on the same line or the line above.',
+    ).toEqual([]);
+  });
+
+  it('counting methodology scans .ts files under src/ (smoke)', () => {
+    // If discovery ever returns zero sites the scanner itself is broken —
+    // the logger fallbacks are permanent residents.
+    expect(collectConsoleSites().length).toBeGreaterThan(0);
   });
 });

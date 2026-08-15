@@ -134,32 +134,46 @@ export function clusterMemories(
 ): MemoryCluster[] {
   if (records.length === 0) return [];
 
+  // Greedy first-match clustering is seed-order dependent; seed in ascending
+  // (id, claim||text) order (plain code-unit compare, locale-free) so the
+  // partition is a pure function of the record SET, not of search-result
+  // arrival order (#2569). The claim||text tie-break totalizes the order for
+  // duplicate ids; records tied on both keys tokenize identically, so any
+  // residual tie is inert for the partition.
+  const sortKey = (r: { id: string; text: string; claim?: string }): string =>
+    `${r.id}\0${r.claim || r.text}`;
+  const ordered = [...records].sort((a, b) => {
+    const ka = sortKey(a);
+    const kb = sortKey(b);
+    return ka < kb ? -1 : ka > kb ? 1 : 0;
+  });
+
   const tokenize = (s: string) =>
     (s || '').toLowerCase().split(/\W+/).filter((t) => t.length > 2);
 
   const assigned = new Set<number>();
   const clusters: MemoryCluster[] = [];
 
-  for (let i = 0; i < records.length; i++) {
+  for (let i = 0; i < ordered.length; i++) {
     if (assigned.has(i)) continue;
 
     const cluster: MemoryCluster = {
-      topic: records[i].claim || records[i].text.slice(0, 50),
-      records: [records[i]],
+      topic: ordered[i].claim || ordered[i].text.slice(0, 50),
+      records: [ordered[i]],
     };
     assigned.add(i);
 
-    const tokensI = new Set(tokenize(records[i].claim || records[i].text));
+    const tokensI = new Set(tokenize(ordered[i].claim || ordered[i].text));
 
-    for (let j = i + 1; j < records.length; j++) {
+    for (let j = i + 1; j < ordered.length; j++) {
       if (assigned.has(j)) continue;
-      const tokensJ = tokenize(records[j].claim || records[j].text);
+      const tokensJ = tokenize(ordered[j].claim || ordered[j].text);
       const tokensJSet = new Set(tokensJ);
       const overlap = [...tokensJSet].filter((t) => tokensI.has(t)).length;
       const jaccardish = overlap / Math.max(tokensI.size + tokensJSet.size - overlap, 1);
 
       if (jaccardish >= 0.3) {
-        cluster.records.push(records[j]);
+        cluster.records.push(ordered[j]);
         assigned.add(j);
       }
     }
@@ -178,7 +192,10 @@ export async function consolidateCluster(
   const clusterRecordIds = cluster.records.map((record) => record.id);
   if (
     clusterRecordIds.length === 0
-    || clusterRecordIds.some((id) => id.length === 0 || Buffer.byteLength(id, 'utf8') > MAX_SOURCE_ID_BYTES)
+    // typeof guards a runtime hole the types cannot see: a malformed search
+    // result can carry a non-string id, which must classify as scope_invalid
+    // rather than throw out of the run unclassified (#2569).
+    || clusterRecordIds.some((id) => typeof id !== 'string' || id.length === 0 || Buffer.byteLength(id, 'utf8') > MAX_SOURCE_ID_BYTES)
     || new Set(clusterRecordIds).size !== clusterRecordIds.length
   ) {
     return outcome('scope_invalid', {

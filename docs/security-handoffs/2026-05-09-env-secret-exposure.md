@@ -66,13 +66,34 @@ satisfy a scoped health-token lookup.
 
 **Phase F (W-6) is scoped.** D-3 (the `secrets.env` scope gap) is resolved: `secrets.env` folds into W-6, not W-5. PR #1806 adds `deploy/check-keyring-presence.sh` (pre-flight tooling) and migration notes on the `EnvironmentFile` line. The wrapper chain removal itself is terminal-phase work that depends on W-3 landing first.
 
-**Verification criterion.** PR #1805 implements the handoff's Verification § static guard: a filesystem-scanning fitness test that fails on direct reads of the five protected secret env vars outside resolver/test/dev allowlists. Negative-verified (adding a direct read correctly fails the guard).
+**Verification criterion.** PR #1805 implements the handoff's Verification § static guard. The 2026-07-21 alignment expands it from the original five variables to every mapped provider/runtime credential plus the supported Google aliases. The filesystem-scanning fitness test fails on direct reads outside resolver/test/dev allowlists.
 
 **Pattern adoption status.** Pattern A (closed-target-registry) is in flight via #1802 (baked into the typed `lookupCredentialTyped` API). Pattern B (reason-code taxonomy) merged in #1803. Patterns C (per-attempt resolution) and D (Crestodian) remain DEFER — out of scope for W-1..W-6.
 
 No migration code was changed by this re-grounding. The handoff stays OPEN.
 
 ## Finding
+
+**Implementation update (2026-07-21, scope corrected 2026-08-14):**
+`deploy/whatsoup` scrubs all mapped provider/runtime credential variables plus
+supported Google aliases before its first subprocess, then re-resolves from the
+secure store and exports the subset that process-level features need (chat LLM
+keys, Whisper's `OPENAI_API_KEY`, `PINECONE_API_KEY`, the instance health
+token) before exec-ing the runtime. What this delivers is an AMBIENT-INPUT
+scrub with ordering/provenance guarantees — inherited values can never shadow
+secure-store resolution — NOT removal of the same-UID process-environment
+exposure class this finding describes: the launcher-exported subset remains
+visible in the long-lived runtime environment, agent children still receive
+their provider keys via the child-env builder, and rotation of the exported
+subset requires an instance restart. Agent child creation and configured BYOK
+services additionally resolve at use. Standalone `deploy/preflight-check.sh`
+(`guard:restart-preflight`) is NOT an independent integrity oracle for a
+release export — it runs the release's own copy of the validators; the wrapper
+trust gate is the independent boundary. Managed launchd cutovers must invoke
+the launcher directly and remove the legacy wrapper chain. The finding below
+remains the live-state description for the residual exposure until a stronger
+isolation model lands and each host is verified with process-environment
+evidence.
 
 WhatSoup secrets can be exposed through process environments on a macOS runtime host.
 

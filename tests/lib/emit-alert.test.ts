@@ -1308,8 +1308,12 @@ describe('BOT ERRORS alert emission governance', () => {
   });
 });
 
-describe('emitAlert module initialization', () => {
-  it('honors a finite default throttle value captured at import time', async () => {
+describe('emitAlert throttle resolution', () => {
+  // #2192 slice 3b: the throttle window is resolved at CALL time (single
+  // validated getter), never frozen at import. This is load-bearing for the
+  // config publish bridge — config.ts may eval after this module in the ESM
+  // graph, and its published value must still be honored.
+  it('resolves the throttle at call time: an import-time env value does not echo after deletion', async () => {
     vi.clearAllMocks();
     loggerWarn.mockClear();
     process.env['EMIT_ALERT_THROTTLE_MS'] = '-5';
@@ -1323,10 +1327,13 @@ describe('emitAlert module initialization', () => {
     process.env['BOT_ERRORS_EXPECTED_JID'] = BOT_ERRORS_JID;
     delete process.env['EMIT_ALERT_THROTTLE_MS'];
 
+    // Import-time '-5' (clamp 0 = disabled) must NOT persist: with the var
+    // now deleted, call-time resolution applies the 300s default and the
+    // second identical alert is throttled. (The call-time '0'-disables case
+    // is pinned by the dedicated test above.)
     emitWithImportedThrottle('inst', 'src', 'summary', 'evidence 1');
     emitWithImportedThrottle('inst', 'src', 'summary', 'evidence 2');
-
-    expect(vi.mocked(spawn)).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(spawn)).toHaveBeenCalledTimes(1);
   });
 });
 

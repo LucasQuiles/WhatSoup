@@ -104,13 +104,13 @@ function insertPendingText(raw: DatabaseSync, chatJid = '15550100001@s.whatsapp.
   );
 }
 
-function readAlerts(sink: string, source: string): Array<Record<string, unknown>> {
+function readAlerts(sink: string, source: string, eventType = 'alert'): Array<Record<string, unknown>> {
   if (!existsSync(sink)) return [];
   return readFileSync(sink, 'utf8')
     .split('\n')
     .filter((l) => l.trim().length > 0)
     .map((l) => JSON.parse(l) as Record<string, unknown>)
-    .filter((e) => e['source'] === source);
+    .filter((e) => e['source'] === source && e['eventType'] === eventType);
 }
 
 function rowOf(db: Database, id: number): { status: string; retry_count: number; error: string | null } {
@@ -261,5 +261,108 @@ describe('MessageScheduler — link-awareness (#1779)', () => {
     expect(row.status).toBe('failed');
     expect(row.retry_count).toBe(3);
     expect(readAlerts(sink, 'scheduler_send_failed').length).toBe(1);
+  });
+});
+
+describe('MessageScheduler — durable de-link clear + restart reconciliation (#2415)', () => {
+  let db: Database;
+  let sinkDir: string;
+  let sink: string;
+  let markerDir: string;
+  let savedStateDir: string | undefined;
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'setTimeout', 'clearTimeout'] });
+    db = new Database(':memory:');
+    db.open();
+    sinkDir = mkdtempSync(join(tmpdir(), 'sched-clear-sink-'));
+    sink = join(sinkDir, 'alerts.jsonl');
+    markerDir = mkdtempSync(join(tmpdir(), 'sched-clear-markers-'));
+    savedStateDir = process.env['BOT_ERRORS_STATE_DIR'];
+    process.env['BOT_ERRORS_STATE_DIR'] = markerDir;
+    process.env['WHATSOUP_ALERT_SINK'] = sink;
+    process.env['EMIT_ALERT_THROTTLE_MS'] = '0';
+    resetEmitAlertThrottle();
+  });
+
+  afterEach(() => {
+    if (savedStateDir === undefined) delete process.env['BOT_ERRORS_STATE_DIR'];
+    else process.env['BOT_ERRORS_STATE_DIR'] = savedStateDir;
+    delete process.env['WHATSOUP_ALERT_SINK'];
+    delete process.env['EMIT_ALERT_THROTTLE_MS'];
+    rmSync(sinkDir, { recursive: true, force: true });
+    rmSync(markerDir, { recursive: true, force: true });
+    db.close();
+    vi.useRealTimers();
+  });
+
+  it('F1: emits exactly one durable clear on verified relink (alert then clear in the sink)', async () => {
+    insertPendingText(db.raw);
+    let linked = false;
+    const { conn } = makeConn({ getState: () => (linked ? BASE_SNAPSHOT : DELINKED) });
+    const scheduler = new MessageScheduler(db, conn, { intervalMs: 60_000, maxRetries: 3, instance: 'personal' });
+
+    await scheduler.tick(); // de-linked -> alert
+    expect(readAlerts(sink, 'scheduler_delinked_send_held').length).toBe(1);
+    expect(readAlerts(sink, 'scheduler_delinked_send_held', 'clear').length).toBe(0);
+
+    linked = true;
+    await scheduler.tick(); // re-linked -> clear
+    expect(readAlerts(sink, 'scheduler_delinked_send_held', 'clear').length).toBe(1);
+
+    await scheduler.tick(); // steady linked -> no duplicate clear
+    expect(readAlerts(sink, 'scheduler_delinked_send_held', 'clear').length).toBe(1);
+  });
+
+  it('F2: arms the latch only on accepted emission — a rejected enqueue retries next tick', async () => {
+    insertPendingText(db.raw);
+    const { conn } = makeConn({ getState: () => DELINKED });
+    const scheduler = new MessageScheduler(db, conn, { intervalMs: 60_000, maxRetries: 3, instance: 'personal' });
+
+    // Break the sink: point it into a nonexistent directory so the enqueue fails.
+    process.env['WHATSOUP_ALERT_SINK'] = join(sinkDir, 'missing-dir', 'alerts.jsonl');
+    await scheduler.tick();
+    expect(readAlerts(sink, 'scheduler_delinked_send_held').length).toBe(0);
+
+    // Restore the sink: the un-armed latch must retry and land the alert once.
+    process.env['WHATSOUP_ALERT_SINK'] = sink;
+    await scheduler.tick();
+    await scheduler.tick();
+    expect(readAlerts(sink, 'scheduler_delinked_send_held').length).toBe(1);
+  });
+
+  it('F3: a restart mid-episode restores clear authority via the marker (clear without re-page)', async () => {
+    insertPendingText(db.raw);
+    let linked = false;
+    const { conn } = makeConn({ getState: () => (linked ? BASE_SNAPSHOT : DELINKED) });
+    const first = new MessageScheduler(db, conn, { intervalMs: 60_000, maxRetries: 3, instance: 'personal' });
+    await first.tick(); // alert accepted + marker armed
+    expect(readAlerts(sink, 'scheduler_delinked_send_held').length).toBe(1);
+
+    // "Restart": a brand-new scheduler instance over the same marker store.
+    const second = new MessageScheduler(db, conn, { intervalMs: 60_000, maxRetries: 3, instance: 'personal' });
+    linked = true;
+    await second.tick();
+    expect(readAlerts(sink, 'scheduler_delinked_send_held', 'clear').length).toBe(1);
+    // No second page was ever needed to grant the clear authority.
+    expect(readAlerts(sink, 'scheduler_delinked_send_held').length).toBe(1);
+  });
+
+  it('F4: a rejected clear enqueue keeps the latch armed and retries on the next linked tick', async () => {
+    insertPendingText(db.raw);
+    let linked = false;
+    const { conn } = makeConn({ getState: () => (linked ? BASE_SNAPSHOT : DELINKED) });
+    const scheduler = new MessageScheduler(db, conn, { intervalMs: 60_000, maxRetries: 3, instance: 'personal' });
+    await scheduler.tick(); // alert
+    expect(readAlerts(sink, 'scheduler_delinked_send_held').length).toBe(1);
+
+    linked = true;
+    process.env['WHATSOUP_ALERT_SINK'] = join(sinkDir, 'missing-dir', 'alerts.jsonl');
+    await scheduler.tick(); // clear rejected -> stays latched
+    expect(readAlerts(sink, 'scheduler_delinked_send_held', 'clear').length).toBe(0);
+
+    process.env['WHATSOUP_ALERT_SINK'] = sink;
+    await scheduler.tick(); // retry lands exactly one clear
+    expect(readAlerts(sink, 'scheduler_delinked_send_held', 'clear').length).toBe(1);
   });
 });

@@ -4,6 +4,8 @@ import {
   validDeliveryCorroboratedSelectedOpsSql,
 } from './delivery-corroboration-sql.ts';
 import { allFromStatement } from '../lib/db-query.ts';
+import { CapabilityObligationStore } from './capability-obligation-store.ts';
+import type { CapabilityDecisionOutcome } from './capability-obligation-store.ts';
 import { emitAlertChecked, clearAlertSourceChecked } from '../lib/emit-alert.ts';
 import { gateQuarantineClear } from '../lib/fleet-health-gate.ts';
 import {
@@ -505,6 +507,8 @@ export class DurabilityEngine {
   private readonly statements: DurabilityStatements;
   private readonly recoveryEvidence: DurabilityRecoveryEvidence;
   private readonly turnRecovery: TurnRecoveryStore;
+  /** D4 (capability-obligation replay): joined into C3 via applyDecisionWithinCallerTransaction. */
+  readonly capabilityObligations: CapabilityObligationStore;
   private readonly sessionLifecycle: SessionLifecycleStore;
   private readonly confirmedOutboundProbe: (seconds: number) => boolean;
   constructor(db: Database) {
@@ -684,10 +688,11 @@ export class DurabilityEngine {
         `INSERT INTO tool_calls (
            conversation_key, session_checkpoint_id, tool_name, tool_group,
            tool_input, status, replay_policy, outcome_code,
-           retry_disposition, operator_action, evidence_coverage
+           retry_disposition, operator_action, evidence_coverage,
+           logical_turn_id, source_inbound_seq
          )
          VALUES (?, ?, ?, ?, ?, 'pending', ?, 'not_terminal',
-                 'not_applicable', 'none', 'complete')`,
+                 'not_applicable', 'none', 'complete', ?, ?)`,
       ),
       markToolExecuting: prepare(`UPDATE tool_calls SET status = 'executing' WHERE id = ?`),
       markToolComplete: prepare(
@@ -1150,6 +1155,7 @@ export class DurabilityEngine {
     this.turnRecovery = new TurnRecoveryStore(db, () => (
       this.statements.selectNow.get() as { now: string }
     ).now);
+    this.capabilityObligations = new CapabilityObligationStore(db);
     this.sessionLifecycle = new SessionLifecycleStore(db);
     this.confirmedOutboundProbe = makeConfirmedOutboundProbe(db.raw);
     // Pre-warm the immediate-transaction runner so lifecycle methods that call
@@ -1510,6 +1516,7 @@ export class DurabilityEngine {
       const result = this.runRecordTurnTerminal(normalized.terminal);
       let winnerMatchesRequest = result.applied;
       let recoveryJob: EnqueueTurnRecoveryJobResult | undefined;
+      let capabilityDecision: CapabilityDecisionOutcome | undefined;
       if (result.applied) {
         this.validateTerminalInboundProof(normalized);
         const deliveryOp = this.validateTerminalDeliveryProof(normalized.terminal);
@@ -1517,6 +1524,15 @@ export class DurabilityEngine {
           recoveryJob = this.turnRecovery.insertLinkedWithinCallerTransaction(
             result.recordId,
             normalized.recoveryJob,
+          );
+        }
+        if (normalized.capabilityDecision !== undefined) {
+          // D4: the typed capability-debt decision shares C3 atomicity — an
+          // audit/store failure here aborts the terminal record too. The
+          // duplicate-winner branch below is read-only, so a re-finalization
+          // can never apply the decision twice.
+          capabilityDecision = this.capabilityObligations.applyDecisionWithinCallerTransaction(
+            normalized.capabilityDecision,
           );
         }
         if (normalized.bookkeeping) this.runTurnBookkeeping(normalized.bookkeeping);
@@ -1571,6 +1587,7 @@ export class DurabilityEngine {
         replyGuaranteeDisarmed,
         effectiveReplyGuaranteeDisarmed,
         ...(recoveryJob === undefined ? {} : { recoveryJob }),
+        ...(capabilityDecision === undefined ? {} : { capabilityDecision }),
       };
     } catch (err) {
       log.error({
@@ -2046,6 +2063,8 @@ export class DurabilityEngine {
     toolGroup: string,
     replayPolicy: string,
     checkpointId?: number,
+    /** AS-04 turn correlation, captured at the single writer (registry.call). */
+    correlation?: { logicalTurnId: string; inboundSeq: number | null } | null,
   ): number {
     const result = this.statements.recordToolCall.run(
       conversationKey,
@@ -2054,6 +2073,8 @@ export class DurabilityEngine {
       normalizeToolDurabilityGroup(toolGroup),
       TOOL_INPUT_MARKER,
       replayPolicy,
+      correlation?.logicalTurnId ?? null,
+      correlation?.inboundSeq ?? null,
     );
     const id = Number(result.lastInsertRowid);
     log.debug({ id, toolName, replayPolicy }, 'recordToolCall');

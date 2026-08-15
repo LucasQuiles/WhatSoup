@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { createChildLogger } from '../../../logger.ts';
 import { config } from '../../../config.ts';
 import type { Database } from '../../../core/database.ts';
+import { deriveFactUid, getFactUidSalt } from '../../../core/fact-uid.ts';
 import type { ValidatedFact } from './validator.ts';
 
 const log = createChildLogger('enrichment');
@@ -94,17 +95,6 @@ export interface EnqueueFactsResult {
   failed: number;
 }
 
-/** Shape of a claimed row as returned to the caller (payload is parsed). */
-export interface ClaimedFact {
-  id: number;
-  factId: string;
-  chatJid: string;
-  senderJid: string | null;
-  namespace: string;
-  payload: Omit<ExportableFact, 'factId' | 'chatJid' | 'senderJid' | 'namespace'>;
-  createdAt: string;
-}
-
 /**
  * Zod schema for the payload_json column.
  *
@@ -145,6 +135,7 @@ export function enqueueFacts(
   db: Database,
   facts: ExportableFact[],
 ): EnqueueFactsResult {
+  // env-allowed: external-subsystem per-run id; interop channel by design
   const runId = process.env.MW_MIND_RUN_ID;
 
   if (facts.length === 0) {
@@ -153,10 +144,11 @@ export function enqueueFacts(
 
   const attempted = facts.length;
 
+  const salt = getFactUidSalt(db.raw);
   const stmt = db.raw.prepare(
     `INSERT OR IGNORE INTO fact_export_queue
-       (fact_id, chat_jid, sender_jid, namespace, payload_json)
-     VALUES (?, ?, ?, ?, ?)`,
+       (fact_uid, fact_id, chat_jid, sender_jid, namespace, payload_json)
+     VALUES (?, ?, ?, ?, ?, ?)`,
   );
 
   let inserted = 0;
@@ -184,6 +176,7 @@ export function enqueueFacts(
       };
 
       const result = stmt.run(
+        deriveFactUid(salt, fact.factId),
         fact.factId,
         fact.chatJid,
         fact.senderJid,
@@ -235,57 +228,105 @@ export function enqueueFacts(
   return { attempted, inserted, duplicates, failed: 0 };
 }
 
+/** Default lease-lifecycle tuning shared by lease, ack, and reconcile. */
+export const DEFAULT_FACT_EXPORT_MAX_ATTEMPTS = 8;
+export const DEFAULT_FACT_EXPORT_BACKOFF_BASE_SEC = 60;
+const BACKOFF_CAP_SEC = 3600;
+
+function backoffSeconds(baseSeconds: number, attemptCount: number): number {
+  if (baseSeconds <= 0) return 0;
+  const exp = Math.min(attemptCount - 1, 16);
+  return Math.min(baseSeconds * 2 ** Math.max(exp, 0), BACKOFF_CAP_SEC);
+}
+
 /**
- * Read up to `limit` rows in `pending` status, oldest-first. Valid rows are
- * NOT mutated — a deployment-provided bridge is responsible for calling
- * `markFactsExported` after Pinecone confirms the upsert.
- *
- * T1 hardening: corrupted payload_json rows are surfaced at log.error
- * (not silently hidden), omitted from the returned array, AND flipped to
- * status='quarantined'. Without the status write, skipped rows stay at the
- * head of the `ORDER BY id` pending queue and permanently occupy batch
- * slots — once `limit` corrupt rows accumulate, export silently stops.
- * Quarantined rows remain in the table for operator triage.
+ * Wire shape of a leased row. Deliberately carries the opaque `factUid` and
+ * NEVER the legacy identity-bearing `fact_id` — acknowledgements, readers,
+ * and logs all key on the uid (see core/fact-uid.ts).
  */
-export function claimPendingFacts(db: Database, limit: number): ClaimedFact[] {
+export interface LeasedFact {
+  id: number;
+  factUid: string;
+  chatJid: string;
+  senderJid: string | null;
+  namespace: string;
+  payload: Omit<ExportableFact, 'factId' | 'chatJid' | 'senderJid' | 'namespace'>;
+  createdAt: string;
+  attemptCount: number;
+}
+
+export interface LeaseOptions {
+  owner: string;
+  limit: number;
+  leaseSeconds: number;
+  nowUnixSec: number;
+}
+
+/**
+ * Atomically lease up to `limit` due rows (pending, or retry_wait whose
+ * backoff has elapsed), oldest-first. The single guarded UPDATE ... RETURNING
+ * transitions rows to `leased` with an owner and expiry and increments
+ * attempt_count, so two concurrent claimers can never hold the same row —
+ * this replaces the unfenced SELECT that #2567 proved returned the same row
+ * to every caller.
+ *
+ * Rows whose payload_json fails parse/schema validation are quarantined with
+ * failure_code='payload_invalid' (surfaced at log.error, no payload echoed)
+ * and omitted from the returned batch, so poison rows cannot occupy wire
+ * slots or wedge the queue head.
+ */
+export function leasePendingFacts(db: Database, opts: LeaseOptions): LeasedFact[] {
+  // env-allowed: external-subsystem per-run id; interop channel by design
   const runId = process.env.MW_MIND_RUN_ID;
 
   const rows = db.raw
     .prepare(
-      `SELECT id, fact_id, chat_jid, sender_jid, namespace, payload_json, created_at
-         FROM fact_export_queue
-        WHERE status = 'pending'
-        ORDER BY id
-        LIMIT ?`,
+      `UPDATE fact_export_queue
+          SET state = 'leased',
+              lease_owner = ?,
+              lease_expires_at = ?,
+              attempt_count = attempt_count + 1,
+              failure_code = NULL,
+              failure_stage = NULL,
+              next_attempt_at = NULL
+        WHERE id IN (
+          SELECT id FROM fact_export_queue
+           WHERE state = 'pending'
+              OR (state = 'retry_wait' AND next_attempt_at <= ?)
+           ORDER BY id
+           LIMIT ?)
+        RETURNING id, fact_uid, chat_jid, sender_jid, namespace, payload_json, created_at, attempt_count`,
     )
-    .all(limit) as Array<{
+    .all(opts.owner, opts.nowUnixSec + opts.leaseSeconds, opts.nowUnixSec, opts.limit) as Array<{
       id: number;
-      fact_id: string;
+      fact_uid: string;
       chat_jid: string;
       sender_jid: string | null;
       namespace: string;
       payload_json: string;
       created_at: string;
+      attempt_count: number;
     }>;
 
   const quarantineRow = db.raw.prepare(
-    `UPDATE fact_export_queue SET status = 'quarantined' WHERE id = ? AND status = 'pending'`,
+    `UPDATE fact_export_queue
+        SET state = 'quarantined',
+            failure_code = 'payload_invalid',
+            failure_stage = 'claim_validate',
+            lease_owner = NULL,
+            lease_expires_at = NULL
+      WHERE id = ?`,
   );
 
-  const claimed: ClaimedFact[] = [];
+  const leased: LeasedFact[] = [];
   for (const row of rows) {
     let parsed: unknown;
     try {
       parsed = JSON.parse(row.payload_json);
-    } catch (err) {
+    } catch {
       log.error(
-        {
-          err,
-          factId: row.fact_id,
-          rowId: row.id,
-          ...(runId ? { runId } : {}),
-        },
-        'claimPendingFacts: payload_json not valid JSON -- quarantining row',
+        { factUid: row.fact_uid, rowId: row.id, ...(runId ? { runId } : {}) },
+        'leasePendingFacts: payload_json not valid JSON -- quarantining row',
       );
       quarantineRow.run(row.id);
       continue;
@@ -294,51 +335,202 @@ export function claimPendingFacts(db: Database, limit: number): ClaimedFact[] {
     const validated = PayloadSchema.safeParse(parsed);
     if (!validated.success) {
       log.error(
-        {
-          factId: row.fact_id,
-          rowId: row.id,
-          issues: validated.error.issues,
-          ...(runId ? { runId } : {}),
-        },
-        'claimPendingFacts: payload_json failed schema validation -- quarantining row',
+        { factUid: row.fact_uid, rowId: row.id, ...(runId ? { runId } : {}) },
+        'leasePendingFacts: payload_json failed schema validation -- quarantining row',
       );
       quarantineRow.run(row.id);
       continue;
     }
 
-    claimed.push({
+    leased.push({
       id: row.id,
-      factId: row.fact_id,
+      factUid: row.fact_uid,
       chatJid: row.chat_jid,
       senderJid: row.sender_jid,
       namespace: row.namespace,
-      payload: validated.data as ClaimedFact['payload'],
+      payload: validated.data as LeasedFact['payload'],
       createdAt: row.created_at,
+      attemptCount: row.attempt_count,
     });
   }
-  return claimed;
+  return leased;
+}
+
+export type AckResultCode =
+  | 'acknowledged'
+  | 'already_terminal'
+  | 'lease_lost'
+  | 'unknown'
+  | 'write_failed';
+
+export interface FactAck {
+  factUid: string;
+  outcome: 'exported' | 'failed';
+  /** Stable machine failure code — never raw provider/error prose. */
+  failureCode?: string;
+  failureStage?: string;
+  retryable?: boolean;
+  remoteRecordId?: string;
+}
+
+export interface AckOptions {
+  owner: string;
+  acks: FactAck[];
+  nowUnixSec: number;
+  maxAttempts?: number;
+  backoffBaseSeconds?: number;
+}
+
+const TERMINAL_STATES = new Set(['exported', 'quarantined', 'retry_exhausted', 'legacy_unclassified']);
+
+/**
+ * Acknowledge leased rows with per-ID outcomes — the replacement for the
+ * void, error-suppressing markFactsExported. Every ack returns exactly one
+ * of: acknowledged, already_terminal, lease_lost, unknown, write_failed;
+ * partial failure is never silent.
+ *
+ * Success writes are fenced (`state='leased' AND lease_owner=?`), so a
+ * consumer whose lease expired and was re-issued cannot clobber the new
+ * owner. `remoteRecordId` stores the opaque idempotent remote ID for the
+ * crash-reconciliation window between remote write and local ack.
+ */
+export function ackFacts(db: Database, opts: AckOptions): Array<{ factUid: string; result: AckResultCode }> {
+  // env-allowed: external-subsystem per-run id; interop channel by design
+  const runId = process.env.MW_MIND_RUN_ID;
+  const maxAttempts = opts.maxAttempts ?? DEFAULT_FACT_EXPORT_MAX_ATTEMPTS;
+  const backoffBase = opts.backoffBaseSeconds ?? DEFAULT_FACT_EXPORT_BACKOFF_BASE_SEC;
+
+  const readRow = db.raw.prepare(
+    'SELECT state, lease_owner, attempt_count FROM fact_export_queue WHERE fact_uid = ?',
+  );
+  const ackExported = db.raw.prepare(
+    `UPDATE fact_export_queue
+        SET state = 'exported',
+            exported_at = datetime('now'),
+            acked_at = ?,
+            remote_record_id = ?,
+            lease_owner = NULL,
+            lease_expires_at = NULL
+      WHERE fact_uid = ? AND state = 'leased' AND lease_owner = ?`,
+  );
+  const ackFailed = db.raw.prepare(
+    `UPDATE fact_export_queue
+        SET state = ?,
+            failure_code = ?,
+            failure_stage = ?,
+            next_attempt_at = ?,
+            lease_owner = NULL,
+            lease_expires_at = NULL
+      WHERE fact_uid = ? AND state = 'leased' AND lease_owner = ?`,
+  );
+
+  const results: Array<{ factUid: string; result: AckResultCode }> = [];
+  for (const ack of opts.acks) {
+    try {
+      const row = readRow.get(ack.factUid) as
+        | { state: string; lease_owner: string | null; attempt_count: number }
+        | undefined;
+      if (!row) {
+        results.push({ factUid: ack.factUid, result: 'unknown' });
+        continue;
+      }
+      if (TERMINAL_STATES.has(row.state)) {
+        results.push({ factUid: ack.factUid, result: 'already_terminal' });
+        continue;
+      }
+      if (row.state !== 'leased' || row.lease_owner !== opts.owner) {
+        results.push({ factUid: ack.factUid, result: 'lease_lost' });
+        continue;
+      }
+
+      let changes: number;
+      if (ack.outcome === 'exported') {
+        changes = Number(
+          ackExported.run(opts.nowUnixSec, ack.remoteRecordId ?? null, ack.factUid, opts.owner).changes,
+        );
+      } else {
+        const exhausted = ack.retryable === false || row.attempt_count >= maxAttempts;
+        const nextState = exhausted ? 'retry_exhausted' : 'retry_wait';
+        const nextAttemptAt = exhausted
+          ? null
+          : opts.nowUnixSec + backoffSeconds(backoffBase, row.attempt_count);
+        changes = Number(
+          ackFailed.run(
+            nextState,
+            ack.failureCode ?? 'export_failed',
+            ack.failureStage ?? 'export',
+            nextAttemptAt,
+            ack.factUid,
+            opts.owner,
+          ).changes,
+        );
+      }
+      // The guarded UPDATE raced a competing transition (e.g. reconcile).
+      results.push({ factUid: ack.factUid, result: changes > 0 ? 'acknowledged' : 'lease_lost' });
+    } catch (err) {
+      log.error(
+        { err, factUid: ack.factUid, ...(runId ? { runId } : {}) },
+        'ackFacts: acknowledgement write failed',
+      );
+      results.push({ factUid: ack.factUid, result: 'write_failed' });
+    }
+  }
+  return results;
+}
+
+export interface ReconcileOptions {
+  nowUnixSec: number;
+  maxAttempts?: number;
+  backoffBaseSeconds?: number;
 }
 
 /**
- * Mark the given fact IDs as exported. Sets `status='exported'` and
- * `exported_at=datetime('now')`. Does not touch `payload_json`.
- * Unknown fact IDs are silently ignored.
+ * Crash/expiry reconciliation: every leased row whose lease has expired is
+ * returned to the retry lane (retry_wait with backoff) or, once attempts are
+ * exhausted, parked terminally as retry_exhausted. failure_code records
+ * 'lease_expired' so self-healing can distinguish a crashed consumer from a
+ * remote rejection. Idempotent; safe to run on every start() and tick.
  */
-export function markFactsExported(db: Database, factIds: string[]): void {
-  if (factIds.length === 0) return;
+export function reconcileExpiredLeases(
+  db: Database,
+  opts: ReconcileOptions,
+): { expired: number; exhausted: number } {
+  const maxAttempts = opts.maxAttempts ?? DEFAULT_FACT_EXPORT_MAX_ATTEMPTS;
+  const backoffBase = opts.backoffBaseSeconds ?? DEFAULT_FACT_EXPORT_BACKOFF_BASE_SEC;
 
-  const stmt = db.raw.prepare(
+  const rows = db.raw
+    .prepare(
+      `SELECT id, attempt_count FROM fact_export_queue
+        WHERE state = 'leased' AND lease_expires_at < ?
+        ORDER BY id`,
+    )
+    .all(opts.nowUnixSec) as Array<{ id: number; attempt_count: number }>;
+
+  const requeue = db.raw.prepare(
     `UPDATE fact_export_queue
-        SET status = 'exported',
-            exported_at = datetime('now')
-      WHERE fact_id = ? AND status = 'pending'`,
+        SET state = ?,
+            failure_code = 'lease_expired',
+            failure_stage = 'reconcile',
+            next_attempt_at = ?,
+            lease_owner = NULL,
+            lease_expires_at = NULL
+      WHERE id = ? AND state = 'leased'`,
   );
 
-  for (const id of factIds) {
-    try {
-      stmt.run(id);
-    } catch (err) {
-      log.error({ err, factId: id }, 'markFactsExported: single row update failed');
+  let expired = 0;
+  let exhausted = 0;
+  for (const row of rows) {
+    const isExhausted = row.attempt_count >= maxAttempts;
+    const nextAttemptAt = isExhausted
+      ? null
+      : opts.nowUnixSec + backoffSeconds(backoffBase, row.attempt_count);
+    const changes = Number(
+      requeue.run(isExhausted ? 'retry_exhausted' : 'retry_wait', nextAttemptAt, row.id).changes,
+    );
+    if (changes > 0) {
+      expired += 1;
+      if (isExhausted) exhausted += 1;
     }
   }
+  return { expired, exhausted };
 }

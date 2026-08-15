@@ -11,6 +11,7 @@ import type { Database } from '../../core/database.ts';
 import type { ToolRegistry } from '../registry.ts';
 import { createChildLogger } from '../../logger.ts';
 import { MS_PER_HOUR } from '../../lib/time-units.ts';
+import { EXTERNAL_EFFECT_CONTRACT_VERSION } from '../external-effect.ts';
 
 const log = createChildLogger('mcp:retention');
 
@@ -70,6 +71,7 @@ export function registerRetentionTools(registry: ToolRegistry, deps: RetentionDe
     scope: 'global',
     targetMode: 'caller-supplied',
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     schema: z.object({
       max_age_hours: z
         .number()

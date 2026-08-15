@@ -837,3 +837,145 @@ describe('runConsolidation', () => {
     expect(mockPinecone.upsert).not.toHaveBeenCalled();
   });
 });
+
+describe('recursive eligibility guard (#2569)', () => {
+  // Previously-promoted durable knowledge re-enters the top-K selector as an
+  // ordinary record (memoryType 'user_fact'), so a run can consume its own
+  // prior output as a source. Promoted records are identifiable by the
+  // 'durable:' id prefix and the 'consolidated' confidence qualifier; both
+  // markers must exclude a record from consolidation input.
+  function makeMockPinecone(searchResults: any[] = []) {
+    return {
+      searchDetailed: vi.fn().mockResolvedValue({
+        results: searchResults,
+        status: 'ok',
+        evidenceCoverage: 'provider_response',
+      }),
+      upsert: vi.fn().mockResolvedValue(undefined),
+    };
+  }
+
+  function makeMockProvider(consolidationResponse: any) {
+    return {
+      name: 'test-provider',
+      generate: vi.fn().mockResolvedValue({
+        content: JSON.stringify(consolidationResponse),
+        inputTokens: 100,
+        outputTokens: 50,
+        model: 'test',
+        durationMs: 100,
+      }),
+    };
+  }
+
+  it('excludes already-consolidated records from clustering and promotion', async () => {
+    const nowIso = new Date().toISOString();
+    const scoped = {
+      createdAt: nowIso,
+      confidence: 0.9,
+      chatJid: 'chat-1@g.us',
+      senderJid: 'sender-1@s.whatsapp.net',
+    };
+    const mockPinecone = makeMockPinecone([
+      {
+        id: 'rec-raw',
+        score: 0.9,
+        record: { id: 'rec-raw', text: 'Lives in London', claim: 'Lives in London', evidence: '', ...scoped },
+      },
+      {
+        // Promoted output carrying the consolidated qualifier under a plain id.
+        id: 'fact-consolidated',
+        score: 0.85,
+        record: { id: 'fact-consolidated', text: 'Lives in London town', claim: 'Lives in London town', evidence: 'rec-0', confidenceQualifier: 'consolidated', ...scoped },
+      },
+      {
+        // Legacy promoted output identifiable only by its id prefix.
+        id: 'durable:0123456789abcdef',
+        score: 0.8,
+        record: { id: 'durable:0123456789abcdef', text: 'Lives around London', claim: 'Lives around London', evidence: 'rec-0', ...scoped },
+      },
+    ]);
+    const mockProvider = makeMockProvider({
+      durableKnowledge: [{ claim: 'User lives in London', promotionReason: 'repeat', confidence: 0.9, sourceRecordIds: ['rec-raw'] }],
+      discarded: [],
+    });
+
+    const result = await runConsolidation(
+      mockPinecone,
+      mockProvider,
+      { lookbackDays: 7, dryRun: false },
+    );
+
+    expect(result).toMatchObject({
+      status: 'completed',
+      counters: {
+        recordsObserved: 1,
+        skipped: 2,
+        clustersAttempted: 1,
+        clustersCompleted: 1,
+        writeConfirmed: 1,
+      },
+    });
+
+    // Neither consolidated record may reach the model as source material.
+    expect(mockProvider.generate).toHaveBeenCalledTimes(1);
+    const promptPayload = JSON.stringify(mockProvider.generate.mock.calls);
+    expect(promptPayload).not.toContain('fact-consolidated');
+    expect(promptPayload).not.toContain('durable:0123456789abcdef');
+
+    // The promotion write consumes only the raw source.
+    expect(mockPinecone.upsert).toHaveBeenCalledTimes(1);
+    const upsertPayload = JSON.stringify(mockPinecone.upsert.mock.calls);
+    expect(upsertPayload).not.toContain('fact-consolidated');
+    expect(upsertPayload).not.toContain('durable:0123456789abcdef');
+  });
+
+  it('excludes a non-canonical qualifier casing and survives undefined ids (review findings B/C)', async () => {
+    const nowIso = new Date().toISOString();
+    const scoped = {
+      createdAt: nowIso,
+      confidence: 0.9,
+      chatJid: 'chat-1@g.us',
+      senderJid: 'sender-1@s.whatsapp.net',
+    };
+    const mockPinecone = makeMockPinecone([
+      {
+        id: 'rec-raw',
+        score: 0.9,
+        record: { id: 'rec-raw', text: 'Lives in London', claim: 'Lives in London', evidence: '', ...scoped },
+      },
+      {
+        // Qualifier casing must not bypass the guard.
+        id: 'fact-cased',
+        score: 0.85,
+        record: { id: 'fact-cased', text: 'Lives in London town', claim: 'Lives in London town', evidence: 'rec-0', confidenceQualifier: 'Consolidated', ...scoped },
+      },
+      {
+        // Undefined top-level id must not throw in the filter; the record-id
+        // marker still excludes it.
+        id: undefined,
+        score: 0.8,
+        record: { id: 'durable:fedcba9876543210', text: 'Lives around London', claim: 'Lives around London', evidence: 'rec-0', ...scoped },
+      },
+    ]);
+    const mockProvider = makeMockProvider({
+      durableKnowledge: [{ claim: 'User lives in London', promotionReason: 'repeat', confidence: 0.9, sourceRecordIds: ['rec-raw'] }],
+      discarded: [],
+    });
+
+    const result = await runConsolidation(
+      mockPinecone,
+      mockProvider,
+      { lookbackDays: 7, dryRun: false },
+    );
+
+    expect(result).toMatchObject({
+      status: 'completed',
+      counters: { recordsObserved: 1, skipped: 2, clustersAttempted: 1, writeConfirmed: 1 },
+    });
+    expect(mockProvider.generate).toHaveBeenCalledTimes(1);
+    const promptPayload = JSON.stringify(mockProvider.generate.mock.calls);
+    expect(promptPayload).not.toContain('fact-cased');
+    expect(promptPayload).not.toContain('durable:fedcba9876543210');
+  });
+});

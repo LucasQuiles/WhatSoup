@@ -6,6 +6,7 @@ import { writeBeadEvent } from './events.ts';
 import type { TriggerKind, TriggerRow, OnTerminal } from './types.ts';
 import { nextCronRun } from '../cron.ts';
 import { createChildLogger } from '../../logger.ts';
+import { queryAll } from '../../lib/db-query.ts';
 
 const log = createChildLogger('substrate.triggers');
 
@@ -316,6 +317,94 @@ export function countPastDueTriggers(
        AND next_fire_at IS NOT NULL
        AND next_fire_at < ?
        AND last_fire_at IS NULL`,
+  ).get(now - graceSeconds) as { c: number };
+  return row.c;
+}
+
+/**
+ * #2566 slice 4 — redacted trigger-run history row. Bounded fields ONLY:
+ * no output_summary, no error_message prose, no output_json content, no
+ * transport identifiers. Delivery evidence is reduced to booleans.
+ */
+export interface RedactedTriggerRun {
+  id: number;
+  triggerId: number;
+  beadId: number;
+  status: string;
+  startedAt: number;
+  finishedAt: number | null;
+  durationMs: number | null;
+  attempt: number;
+  errorKind: string | null;
+  delivered: boolean;
+  notifyPending: boolean;
+  throttled: boolean;
+}
+
+export interface ListTriggerRunsFilter {
+  triggerId?: number;
+  beadId?: number;
+  limit?: number;
+}
+
+/** Newest-first redacted run history for a trigger or bead. */
+export function listTriggerRunsRedacted(
+  db: DatabaseSync,
+  f: ListTriggerRunsFilter = {},
+): RedactedTriggerRun[] {
+  const w: string[] = [];
+  const b: SQLInputValue[] = [];
+  if (f.triggerId != null) { w.push('trigger_id = ?'); b.push(f.triggerId); }
+  if (f.beadId != null)    { w.push('bead_id = ?');    b.push(f.beadId); }
+  const limit = Math.min(Math.max(1, Math.floor(f.limit ?? 50)), 200);
+  const rows = queryAll<{
+    id: number; trigger_id: number; bead_id: number; status: string;
+    started_at: number; finished_at: number | null; duration_ms: number | null;
+    attempt: number; error_kind: string | null;
+    delivered: number; notify_pending: number; throttled: number;
+  }>(
+    db,
+    `SELECT id, trigger_id, bead_id, status, started_at, finished_at, duration_ms, attempt, error_kind,
+            json_extract(output_json, '$.deliveredWaMessageId') IS NOT NULL AS delivered,
+            COALESCE(json_extract(output_json, '$.notifyPending'), 0) AS notify_pending,
+            COALESCE(json_extract(output_json, '$.throttled'), 0) AS throttled
+       FROM trigger_runs
+       ${w.length ? 'WHERE ' + w.join(' AND ') : ''}
+       ORDER BY id DESC LIMIT ?`,
+    ...b, limit,
+  );
+  return rows.map((r) => ({
+    id: r.id, triggerId: r.trigger_id, beadId: r.bead_id, status: r.status,
+    startedAt: r.started_at, finishedAt: r.finished_at, durationMs: r.duration_ms,
+    attempt: r.attempt, errorKind: r.error_kind,
+    delivered: r.delivered === 1,
+    notifyPending: r.notify_pending === 1,
+    throttled: r.throttled === 1,
+  }));
+}
+
+/** Default grace before a previously-fired trigger counts as recurring-overdue. */
+export const DEFAULT_RECURRING_OVERDUE_GRACE_SEC = 900;
+
+/**
+ * #2566 slice 2 — recurring-overdue gauge: count active triggers that HAVE
+ * fired before (last_fire_at IS NOT NULL) but whose next_fire_at is more than
+ * `graceSeconds` in the past. The #1765 gauge above covers the never-fired
+ * case; together they partition "active with a stale next_fire_at" exactly.
+ * Prior-failure rows count too (deliberate superset of "after prior success"):
+ * a stalled firing path matters regardless of the last outcome.
+ */
+export function countRecurringOverdueTriggers(
+  db: DatabaseSync,
+  now: number = nowUnixSec(),
+  graceSeconds: number = DEFAULT_RECURRING_OVERDUE_GRACE_SEC,
+): number {
+  const row = db.prepare(
+    `SELECT COUNT(*) AS c FROM bead_triggers
+     WHERE status = 'active'
+       AND next_fire_at IS NOT NULL
+       AND next_fire_at < ?
+       AND last_fire_at IS NOT NULL`,
   ).get(now - graceSeconds) as { c: number };
   return row.c;
 }

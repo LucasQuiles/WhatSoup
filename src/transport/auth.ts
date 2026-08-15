@@ -85,7 +85,7 @@ async function startSocket(): Promise<void> {
 
   const { state } = await useMultiFileAuthState(config.authDir);
   const saveCreds = createAtomicCredsSaver(config.authDir, () => state.creds);
-  const resolvedVersion = await resolveBaileysVersion();
+  const resolvedVersion = await resolveBaileysVersion(config.baileysVersionPinned);
   log.info({ version: resolvedVersion.version, source: resolvedVersion.source }, 'using baileys web version');
   process.stderr.write(`Using Baileys web version ${baileysVersionLabel(resolvedVersion.version)} (${resolvedVersion.source})\n`);
 
@@ -118,6 +118,7 @@ async function startSocket(): Promise<void> {
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
+    // env-allowed: per-CLI-run mode selector and operator PII; env keeps it ephemeral
     if (qr && classifyPairNumber(process.env.WHATSOUP_PAIR_NUMBER).reason === 'unset') {
       // Emit raw QR for fleet SSE consumers (stdout = structured JSON only)
       process.stdout.write(JSON.stringify({ event: 'qr', data: qr }) + '\n');
@@ -211,6 +212,7 @@ async function startSocket(): Promise<void> {
   // unaffected). Deferred + single-fire so repeated connection updates never
   // request multiple codes; skipped when creds are already registered.
   const pgate = pairingGate({
+    // env-allowed: per-CLI-run mode selector and operator PII; env keeps it ephemeral
     rawNumber: process.env.WHATSOUP_PAIR_NUMBER,
     registered: Boolean(state.creds.registered),
     alreadyRequested: pairingRequested,
@@ -219,6 +221,7 @@ async function startSocket(): Promise<void> {
     pairingRequested = true;
     setTimeout(async () => {
       try {
+        // env-allowed: per-CLI-run mode selector and operator PII; env keeps it ephemeral
         const cls = classifyPairNumber(process.env.WHATSOUP_PAIR_NUMBER);
         if (!cls.ok) return;
         const code = await sock.requestPairingCode(cls.number);
@@ -240,6 +243,7 @@ async function startSocket(): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  // env-allowed: per-CLI-run mode selector and operator PII; env keeps it ephemeral
   const pairCls = classifyPairNumber(process.env.WHATSOUP_PAIR_NUMBER);
   if (pairCls.reason === 'invalid') {
     log.fatal('WHATSOUP_PAIR_NUMBER is set but not a valid number (expected 8-15 digits)');

@@ -6,6 +6,7 @@ import { WhatSoupError as AppError } from '../../../errors.ts';
 import { truncateForRerank } from '../../../lib/text-utils.ts';
 import { resolveApiKey } from '../../../lib/api-key-resolver.ts';
 import { isNonEmptyString } from '../../../lib/type-guards.ts';
+import { clearRecoveryMarker, loadRecoveryMarkers, setRecoveryMarker } from '../../../lib/recovery-authority-store.ts';
 import { emitAlertChecked, clearAlertSourceChecked } from '../../../lib/emit-alert.ts';
 import { CircuitBreaker } from '../../../core/circuit-breaker.ts';
 import { sleep, sleepWithAbort } from '../../../core/retry.ts';
@@ -80,12 +81,43 @@ function trackFailure(
     );
     if (accepted) {
       alertedOperations.add(operation);
+      // #2412 remainder: contributor membership is durable — a restart must
+      // restore clear authority for exactly these operations (marker grain =
+      // per-op so a post-restart partial recovery can never clear early).
+      try {
+        setRecoveryMarker(contributorMarkerKey(operation));
+      } catch (err) {
+        logger.warn({ err, operation }, 'pinecone: contributor marker write failed');
+      }
     }
   }
 }
 
 /** Track operations that have had alerts emitted, so we can clear on recovery. */
 const alertedOperations = new Set<MemoryOperation>();
+
+/** Durable per-contributor marker key (#2412): consumer-convention source:bot, op-suffixed. */
+function contributorMarkerKey(operation: MemoryOperation): string {
+  return `pinecone_degraded:${config.botName}#${operation}`;
+}
+
+/**
+ * Restore contributor membership from durable markers (#2412 remainder).
+ * Runs at module load so a restart mid-episode re-arms clear authority for
+ * exactly the previously-alerted operations, without re-paging the operator.
+ */
+function reconcileAlertedOperationsFromMarkers(): void {
+  const prefix = `pinecone_degraded:${config.botName}#`;
+  try {
+    for (const key of loadRecoveryMarkers()) {
+      if (key.startsWith(prefix)) alertedOperations.add(key.slice(prefix.length) as MemoryOperation);
+    }
+  } catch {
+    // intentional: marker store unreadable — treat as no prior incident
+    // (matches every other loadRecoveryMarkers consumer).
+  }
+}
+reconcileAlertedOperationsFromMarkers();
 
 function trackSuccess(operation: MemoryOperation): void {
   getBreaker(operation).recordSuccess();
@@ -95,13 +127,28 @@ function trackSuccess(operation: MemoryOperation): void {
   // a partial recovery must not drop the global incident while siblings
   // remain degraded.
   alertedOperations.delete(operation);
-  if (alertedOperations.size > 0) return;
+  if (alertedOperations.size > 0) {
+    // Non-final recovery: this contributor's durable marker retires with it;
+    // siblings keep theirs (restart still restores the remaining membership).
+    try {
+      clearRecoveryMarker(contributorMarkerKey(operation));
+    } catch (err) {
+      logger.warn({ err, operation }, 'pinecone: contributor marker clear failed');
+    }
+    return;
+  }
   // Final contributor recovered → clear the global source. If the durable
-  // clear enqueue fails, restore membership so a later retry can re-clear
-  // (retained clear authority, not an orphaned incident).
+  // clear enqueue fails, restore membership (and its marker) so a later
+  // retry can re-clear (retained clear authority, not an orphaned incident).
   const cleared = clearAlertSourceChecked(config.botName, 'pinecone_degraded');
   if (!cleared) {
     alertedOperations.add(operation);
+    return;
+  }
+  try {
+    clearRecoveryMarker(contributorMarkerKey(operation));
+  } catch (err) {
+    logger.warn({ err, operation }, 'pinecone: contributor marker clear failed');
   }
 }
 
@@ -116,11 +163,26 @@ function isBreakerOpen(operation: MemoryOperation): boolean {
  * dance. Mirrors the openai-whisper `_testing` precedent. Not for runtime use.
  */
 export const _testing = {
-  /** Clear all breaker + contributor state (test isolation across cases). */
-  reset(): void {
+  /**
+   * Clear all breaker + contributor state (test isolation across cases).
+   * keepMarkers=true simulates a process restart: in-memory state dies, the
+   * durable contributor markers survive for reconcileFromMarkers().
+   */
+  reset(opts: { keepMarkers?: boolean } = {}): void {
+    if (!opts.keepMarkers) {
+      for (const operation of alertedOperations) {
+        try {
+          clearRecoveryMarker(contributorMarkerKey(operation));
+        } catch {
+          // intentional: test-isolation cleanup is best-effort.
+        }
+      }
+    }
     (Object.keys(breakers) as MemoryOperation[]).forEach((key) => delete breakers[key]);
     alertedOperations.clear();
   },
+  /** Re-run the load-time durable-membership reconciliation (#2412 restart simulation). */
+  reconcileFromMarkers: reconcileAlertedOperationsFromMarkers,
   /** Read-only snapshot of currently-alerted contributor operations. */
   alertedOperations(): MemoryOperation[] {
     return [...alertedOperations];

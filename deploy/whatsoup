@@ -9,6 +9,13 @@ set -euo pipefail
 
 INSTANCE="${1:?Usage: whatsoup <instance-name>}"
 
+# Scrub INHERITED credential material before anything else runs, so ambient
+# wrapper/launchd/session values can never shadow the launcher's deliberate
+# keyring/file resolution below or leak into startup probes. The launcher's own
+# post-scrub resolution (chat API keys, instance health token) is intentional
+# and remains the single supplier of these variables to the child process.
+unset ANTHROPIC_API_KEY OPENAI_API_KEY DEEPSEEK_API_KEY KIMI_API_KEY MINIMAX_API_KEY ZAI_API_KEY XAI_API_KEY GROQ_API_KEY MISTRAL_API_KEY OPENROUTER_API_KEY GOOGLE_API_KEY GOOGLE_GENERATIVE_AI_API_KEY GEMINI_API_KEY FIREWORKS_API_KEY TOGETHER_API_KEY PINECONE_API_KEY ELEVENLABS_API_KEY WHATSOUP_HEALTH_TOKEN
+
 # POSIX-portable symlink resolution (readlink -f is GNU-only, unavailable on macOS)
 _resolve_symlinks() {
   local p="$1"
@@ -336,7 +343,10 @@ if [ "$INSTANCE_TYPE" = "chat" ]; then
       # `-w` last: security prompts for the value on stdin instead of taking it
       # on argv, where `ps -ww` would expose it host-wide (CRED-1).
       echo "  macOS:  security add-generic-password -U -s $name -a \$USER -w" >&2
-      echo "  Either: export $(echo "$name" | tr '[:lower:]' '[:upper:]')_API_KEY=YOUR_KEY" >&2
+      # Do NOT suggest an ambient env export here: this launcher scrubs
+      # inherited credential variables at startup, so an exported value can
+      # never satisfy this lookup — the secure store is the only supported path.
+      echo "  (An ambient 'export ...' cannot work: this launcher scrubs inherited credential variables at startup.)" >&2
       exit 1
     fi
   }

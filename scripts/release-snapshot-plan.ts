@@ -511,6 +511,61 @@ function git(cwd: string, args: string[]): string {
   return proc.stdout.trim();
 }
 
+function requireSourceTreeAtCommit(cwd: string, sourceCommit: string): void {
+  const proc = spawnSync('git', ['-C', cwd, 'diff', '--quiet', sourceCommit, '--'], {
+    encoding: 'utf8',
+    env: cleanGitEnv(),
+    timeout: 30_000,
+  });
+  if (proc.status === 0) return;
+  if (proc.status === 1) {
+    throw new Error(`source tree differs from requested commit ${sourceCommit}; commit or discard tracked drift before planning a release`);
+  }
+  throw new Error((proc.stderr || proc.error?.message || 'git source-tree comparison failed').trim());
+}
+
+function requirePlanMatchesCommit(
+  cwd: string,
+  sourceCommit: string,
+  files: readonly ReleaseSnapshotFile[],
+): void {
+  if (files.length === 0) return;
+  // One `git cat-file --batch` process for the whole plan — a per-file `git
+  // show` spawn is O(files) subprocesses and took ~1 minute on the real tree.
+  const totalBytes = files.reduce((sum, file) => sum + file.sizeBytes, 0);
+  const proc = spawnSync('git', ['-C', cwd, 'cat-file', '--batch'], {
+    env: cleanGitEnv(),
+    input: `${files.map((file) => `${sourceCommit}:${file.path}`).join('\n')}\n`,
+    maxBuffer: totalBytes + files.length * 256 + 1024,
+    timeout: 30_000,
+  });
+  if (proc.status !== 0) {
+    throw new Error((proc.stderr?.toString('utf8') || proc.error?.message || 'git cat-file batch read failed').trim());
+  }
+  const out = proc.stdout ?? Buffer.alloc(0);
+  let offset = 0;
+  for (const file of files) {
+    const headerEnd = out.indexOf(0x0a, offset);
+    if (headerEnd < 0) throw new Error(`git cat-file batch output truncated before ${file.path}`);
+    const header = out.subarray(offset, headerEnd).toString('utf8');
+    if (header.endsWith(' missing') || header.endsWith(' ambiguous')) {
+      throw new Error(`git blob read failed for ${file.path}`);
+    }
+    const declaredSize = Number(header.split(' ')[2]);
+    if (!Number.isSafeInteger(declaredSize) || declaredSize < 0) {
+      throw new Error(`git cat-file batch header unparseable at ${file.path}: ${header}`);
+    }
+    const bodyStart = headerEnd + 1;
+    const bodyEnd = bodyStart + declaredSize;
+    if (bodyEnd + 1 > out.length) throw new Error(`git cat-file batch output truncated at ${file.path}`);
+    const body = out.subarray(bodyStart, bodyEnd);
+    if (body.byteLength !== file.sizeBytes || sha256(body) !== file.sha256) {
+      throw new Error(`release plan bytes differ from requested commit ${sourceCommit}: ${file.path}`);
+    }
+    offset = bodyEnd + 1; // batch output terminates each object with a newline
+  }
+}
+
 function parseArgs(argv: string[]): ParsedArgs {
   const options: ParsedArgs = {
     sourceRef: 'HEAD',
@@ -606,8 +661,9 @@ export function run(
 
   const releaseRoot = options.releaseRoot;
   if (!releaseRoot) throw new Error('--release-root is required');
-  const sourceCommit = git(cwd, ['rev-parse', options.sourceRef]);
-  const trackedFiles = git(cwd, ['ls-files']).split(/\r?\n/).filter(Boolean);
+  const sourceCommit = git(cwd, ['rev-parse', '--verify', `${options.sourceRef}^{commit}`]);
+  requireSourceTreeAtCommit(cwd, sourceCommit);
+  const trackedFiles = git(cwd, ['ls-tree', '-r', '--name-only', sourceCommit]).split(/\r?\n/).filter(Boolean);
   const plan = createReleaseSnapshotPlan({
     sourceRoot: cwd,
     sourceRef: options.sourceRef,
@@ -618,6 +674,7 @@ export function run(
     buildTime: options.buildTime,
     trackedFiles,
   });
+  requirePlanMatchesCommit(cwd, sourceCommit, plan.manifest.files);
 
   if (options.json) {
     console.log(JSON.stringify(plan, null, 2));

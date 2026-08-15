@@ -48,6 +48,10 @@ import { runMigration53 as runMigration53Impl } from './database-migration-53.ts
 import { runMigration54 as runMigration54Impl } from './database-migration-54.ts';
 import { runMigration55 as runMigration55Impl } from './database-migration-55.ts';
 import { runMigration56 as runMigration56Impl } from './database-migration-56.ts';
+import { runMigration57 as runMigration57Impl } from './database-migration-57.ts';
+import { runMigration58 as runMigration58Impl } from './database-migration-58.ts';
+import { runMigration59 as runMigration59Impl } from './database-migration-59.ts';
+import { runMigration60 as runMigration60Impl } from './database-migration-60.ts';
 
 export { CURRENT_SCHEMA_MIGRATION } from './database-schema-version.ts';
 export {
@@ -831,6 +835,10 @@ const MIGRATIONS: Map<number, MigrationFn> = new Map([
   [54, runMigration54],
   [55, runMigration55],
   [56, runMigration56],
+  [57, runMigration57],
+  [58, runMigration58],
+  [59, runMigration59],
+  [60, runMigration60],
 ]);
 
 if (Math.max(...MIGRATIONS.keys()) !== CURRENT_SCHEMA_MIGRATION) {
@@ -1234,6 +1242,22 @@ function runMigration56(db: DatabaseSync): void {
   runMigration56Impl(db);
 }
 
+function runMigration57(db: DatabaseSync): void {
+  runMigration57Impl(db);
+}
+
+function runMigration58(db: DatabaseSync): void {
+  runMigration58Impl(db);
+}
+
+function runMigration59(db: DatabaseSync): void {
+  runMigration59Impl(db);
+}
+
+function runMigration60(db: DatabaseSync): void {
+  runMigration60Impl(db);
+}
+
 // #1774: total_input_tokens historically accumulated a turn's FULL
 // provider-reported input (base + cache_creation + cache_read_input_tokens).
 // cache_read is essentially the entire prior context re-read every turn, so
@@ -1456,6 +1480,11 @@ export class Database {
   private schemaCeilingRejection: DatabaseCompatibilityError | null = null;
   private connectionClosed = false;
   private writableReady = false;
+
+  /** The path this database was opened at (':memory:' for in-memory). */
+  get path(): string {
+    return this.dbPath;
+  }
 
   constructor(dbPath: string) {
     this.dbPath = dbPath;

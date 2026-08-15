@@ -127,7 +127,7 @@
     "verify:push:branch": "bash scripts/run-with-pinned-node.sh scripts/push-gate.ts branch",
     "verify:release": "bash scripts/run-with-pinned-node.sh scripts/push-gate.ts release",
     "verify:publish": "unset WHATSOUP_SKIP_DOC_DRIFT WHATSOUP_SKIP_PUBLIC_SURFACE_DRIFT WHATSOUP_SKIP_NODE_PIN_CHECK && npm run guard:claude-settings && npm run guard:agent-decision-polls && npm run guard:safeguard-diagnostics && npm run guard:publication:release && npm run verify:release",
-    "test": "vitest run",
+    "test": "bash scripts/run-with-pinned-node.sh scripts/full-suite-battery.ts",
     "test:design-guards": "npm test -- tests/scripts/theme-parity.test.ts tests/scripts/token-spec-drift.test.ts tests/scripts/contrast-matrix.test.ts tests/scripts/shadow-baseline.test.ts tests/scripts/shadow-frozen-inventory.test.ts tests/scripts/raw-form-control-inventory.test.ts tests/scripts/design-regression-guards.test.ts tests/scripts/design-metrics.test.ts tests/scripts/design-burndown-check.test.ts tests/scripts/color-semantics.test.ts tests/scripts/design-resilience-audit.test.ts tests/scripts/font-assets.test.ts tests/scripts/brand-assets.test.ts tests/scripts/design-lint-fixtures.test.ts --pool=forks",
     "test:bot-errors-health:hermeticity": "vitest run tests/scripts/bot-errors-health-check.test.ts -t \"macOS clock\" --pool=forks --fileParallelism=false --retry=0",
     "test:credential-probe-boundedness": "vitest run tests/deploy/credential-probe-boundedness.test.ts --pool=forks --fileParallelism=false --retry=0",

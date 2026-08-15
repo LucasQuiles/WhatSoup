@@ -329,7 +329,7 @@ describe('check-coverage-thresholds.mjs', () => {
   // ---------------------------------------------------------------------------
 
   describe('--strict flag', () => {
-    it('is wired into the root coverage:check gate after Vitest coverage generation', () => {
+    it('is wired into the root coverage:check gate after BOUNDED coverage generation', () => {
       const pkg = JSON.parse(readFileSync(ROOT_PACKAGE_JSON, 'utf8')) as {
         scripts: Record<string, string>;
       };
@@ -337,7 +337,11 @@ describe('check-coverage-thresholds.mjs', () => {
 
       expect(pkg.scripts['coverage:check']).toBe('bash scripts/run-coverage-check.sh');
       expect(wrapper).toContain('set -euo pipefail');
-      expect(wrapper).toContain('"$VITEST_BIN" run --coverage "$@"');
+      // Round-19 finding 5: the coverage full suite runs through the EXTERNALLY BOUNDED
+      // battery (a synchronous fixture that wedges a worker converts to a truthful non-zero
+      // exit instead of stalling this gate), forwarding --coverage and any extra args.
+      expect(wrapper).toContain('"$VITEST_BIN"'); // still guards the vitest binary's presence
+      expect(wrapper).toContain('scripts/full-suite-battery.ts --coverage "$@"');
       expect(wrapper).toContain('npm --prefix console run coverage:check -- --strict');
     });
 

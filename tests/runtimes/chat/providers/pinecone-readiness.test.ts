@@ -29,6 +29,10 @@ vi.mock('../../../../src/logger.ts', async () => {
   return { createChildLogger, default: { ...singleton } };
 });
 
+vi.mock('../../../../src/lib/keyring.ts', () => ({
+  lookupCredential: vi.fn(() => null),
+}));
+
 import { Pinecone } from '@pinecone-database/pinecone';
 import * as configModule from '../../../../src/config.ts';
 import {

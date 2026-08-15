@@ -185,6 +185,7 @@ function defaultReadKeychain(): string | null {
   // readKeychain/readFileStore/writeFileStore and never reach this default; any
   // suite that exercises the probe path with DEFAULT deps (real CLAUDE_CONFIG_DIR
   // fixtures) must not read a live credential nor write it to a tmp fixture dir.
+  // env-allowed: test-runner detection; must not read config (lib ring / eval-order)
   if (process.env.VITEST || process.env.NODE_ENV === 'test') return null;
   return readKeychainViaSecurity(defaultSecurityExec);
 }
@@ -250,6 +251,7 @@ export function ensureClaudeFileStoreCredential(
     const platform = deps.platform ?? process.platform;
     if (platform !== 'darwin') return { outcome: 'skipped-not-darwin' };
 
+    // env-allowed: test-runner detection plus DI seam; env-late by design
     const env = deps.env ?? process.env;
     const configDir = env.CLAUDE_CONFIG_DIR;
     if (!configDir) return { outcome: 'skipped-no-config-dir' };

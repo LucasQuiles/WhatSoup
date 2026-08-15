@@ -394,6 +394,20 @@ export const fitnessRules = [
     source: ['issue:2190'],
   },
   {
+    id: 'arch.env-read-justification',
+    title: 'Direct process.env access justification',
+    category: 'architecture',
+    rationale:
+      'src/config.ts is the typed RuntimeConfig SSOT (instance-config first, env second, default last); a direct process.env access anywhere else bypasses validation, typing, and the instance-config layer. The blocking authority is the suppression-immune lexical ratchet in tests/scripts/env-read-allowlist.test.ts (curated push-gate + full CI); the eslint ring is a warn-severity editor-latency mirror. Both consume the shared SSOT eslint-rules/env-read-allowlist.json; per-site env-allowed markers arrive with #2192 slice 5b.',
+    detect: 'ast',
+    rings: ['eslint', 'ci'],
+    severity: 'block',
+    implementedBy: ['tests/scripts/env-read-allowlist.test.ts'],
+    ratchet: true,
+    params: { baselinePath: 'eslint-rules/env-read-allowlist.json' },
+    source: ['issue:2192'],
+  },
+  {
     id: 'test.typecheck-all-required',
     title: 'Full typecheck required',
     category: 'test',

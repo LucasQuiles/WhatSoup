@@ -12,6 +12,7 @@ import { type SockToolConfig, registerSockTools } from './sock-tool-factory.ts';
 import { config } from '../../config.ts';
 import { applyOutboundIdentityGuard } from '../../core/outbound-identity/guard.ts';
 import { SqliteIdentityStore } from '../../core/outbound-identity/store.ts';
+import { EXTERNAL_EFFECT_CONTRACT_VERSION } from '../external-effect.ts';
 
 const log = createChildLogger('chat-operations');
 
@@ -56,6 +57,7 @@ const chatOperationSockConfigs: SockToolConfig<any>[] = [
     scope: 'chat',
     targetMode: 'injected',
     replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ chatJid, messages }, sock) => {
       await sock.chatModify({ clear: { messages } } as any, chatJid);
       log.info({ chatJid, count: messages.length }, 'chat cleared');
@@ -76,6 +78,7 @@ const chatOperationSockConfigs: SockToolConfig<any>[] = [
     scope: 'chat',
     targetMode: 'injected',
     replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ chatJid, last_message_key, last_message_timestamp }, sock) => {
       await sock.chatModify(
         {
@@ -100,6 +103,7 @@ const chatOperationSockConfigs: SockToolConfig<any>[] = [
     scope: 'chat',
     targetMode: 'injected',
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ chatJid, message_id, from_me, timestamp }, sock) => {
       await sock.chatModify(
         {
@@ -133,6 +137,7 @@ const chatOperationSockConfigs: SockToolConfig<any>[] = [
     scope: 'chat',
     targetMode: 'injected',
     replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ chatJid, name, description, start_time, end_time, location, call_link }, sock) => {
       const event: Record<string, unknown> = {
         name,
@@ -163,6 +168,7 @@ const chatOperationSockConfigs: SockToolConfig<any>[] = [
     scope: 'chat',
     targetMode: 'injected',
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ chatJid, read, last_message_key, last_message_timestamp }, sock) => {
       await sock.chatModify(
         {
@@ -182,6 +188,7 @@ const chatOperationSockConfigs: SockToolConfig<any>[] = [
       name: z.string(),
     }),
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ name }, sock) => {
       // Use the bot's own JID as the target; pushNameSetting is a self-setting
       const botJid = sock.user?.id ?? '';
@@ -205,6 +212,7 @@ const chatOperationSockConfigs: SockToolConfig<any>[] = [
       oldest_message_timestamp: z.number().optional(),
     }),
     replayPolicy: 'read_only',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ count, oldest_message_key, oldest_message_timestamp }, sock) => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any -- optional zod fields vs required Baileys params; expires 2026-12-31
       await sock.fetchMessageHistory(count, oldest_message_key as any, oldest_message_timestamp as any);
@@ -223,6 +231,7 @@ const chatOperationSockConfigs: SockToolConfig<any>[] = [
       }),
     }),
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ message_key }, sock) => {
       await sock.requestPlaceholderResend(message_key);
       log.info({ messageKey: message_key }, 'placeholder resend requested');
@@ -253,6 +262,7 @@ function makeSetDisappearingMessages(getSock: () => ExtendedBaileysSocket | null
     scope: 'global',
     targetMode: 'caller-supplied',
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     handler: async (params) => {
       const { jid, duration } = SetDisappearingMessagesSchema.parse(params);
       const sock = getSock();
@@ -278,6 +288,7 @@ function makeGetReactions(db: Database): ToolDeclaration {
     scope: 'global',
     targetMode: 'caller-supplied',
     replayPolicy: 'read_only',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'none' },
     handler: async (params, session) => {
       const { message_id } = GetReactionsSchema.parse(params);
       assertMessageConversationAccess(db, message_id, session, 'Message reactions');
@@ -307,6 +318,7 @@ function makeGetMessageReceipts(db: Database): ToolDeclaration {
     scope: 'global',
     targetMode: 'caller-supplied',
     replayPolicy: 'read_only',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'none' },
     handler: async (params, session) => {
       const { message_id } = GetReceiptsSchema.parse(params);
       assertMessageConversationAccess(db, message_id, session, 'Message receipts');

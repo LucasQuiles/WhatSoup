@@ -595,6 +595,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     authDir: config.authDir,
     stateRoot: config.stateRoot,
     instanceName: config.botName,
+    autoRestore: config.authBondAutoRestore,
     captureBlockReason: () => this.loggedOutAlertEmitted
       ? 'loggedOut/device-bond-lost state active; refusing to snapshot possibly poisoned credentials'
       : null,
@@ -853,7 +854,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
 
       const { state } = await useMultiFileAuthState(config.authDir);
       const saveCredsAtomically = createAtomicCredsSaver(config.authDir, () => state.creds);
-      const resolvedVersion = await resolveBaileysVersion();
+      const resolvedVersion = await resolveBaileysVersion(config.baileysVersionPinned);
       this.latestBaileysVersion = baileysVersionLabel(resolvedVersion.version);
       this.recordCredentialLifecycle('baileys_version', {
         baileysVersion: this.latestBaileysVersion,

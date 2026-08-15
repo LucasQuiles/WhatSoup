@@ -6,6 +6,7 @@ import type { ToolDeclaration } from '../types.ts';
 import type { ExtendedBaileysSocket } from '../types.ts';
 import { validateBase64Image } from '../../core/base64.ts';
 import { type SockToolConfig, registerSockTools } from './sock-tool-factory.ts';
+import { EXTERNAL_EFFECT_CONTRACT_VERSION } from '../external-effect.ts';
 
 const CATALOG_LIMIT_MAX = 100;
 const CatalogLimitSchema = z.number().int().positive().max(CATALOG_LIMIT_MAX);
@@ -19,6 +20,7 @@ const businessConfigs: SockToolConfig<any>[] = [
       jid: z.string(),
     }),
     replayPolicy: 'read_only',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'none' },
     call: async ({ jid }, sock) => {
       return sock.getBusinessProfile(jid);
     },
@@ -35,6 +37,7 @@ const businessConfigs: SockToolConfig<any>[] = [
       address: z.string().optional(),
     }),
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async (args, sock) => {
       await sock.updateBussinesProfile(args);
       return { success: true };
@@ -48,6 +51,7 @@ const businessConfigs: SockToolConfig<any>[] = [
       photo: z.string().describe('Base64-encoded image data for the cover photo.'),
     }),
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ photo }, sock) => {
       const cleanPhoto = validateBase64Image(photo);
       const buffer = Buffer.from(cleanPhoto, 'base64');
@@ -62,6 +66,7 @@ const businessConfigs: SockToolConfig<any>[] = [
       id: z.string().describe('Cover photo asset ID to remove.'),
     }),
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ id }, sock) => {
       await sock.removeCoverPhoto(id);
       return { success: true, id };
@@ -76,6 +81,7 @@ const businessConfigs: SockToolConfig<any>[] = [
       cursor: z.string().optional().describe('Pagination cursor from a previous response.'),
     }),
     replayPolicy: 'read_only',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'none' },
     call: async (args, sock) => {
       return sock.getCatalog({
         jid: args.jid,
@@ -92,6 +98,7 @@ const businessConfigs: SockToolConfig<any>[] = [
       limit: CatalogLimitSchema.optional().describe(`Max collections to return (max ${CATALOG_LIMIT_MAX}).`),
     }),
     replayPolicy: 'read_only',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'none' },
     call: async ({ jid, limit }, sock) => {
       return sock.getCollections(jid, limit);
     },
@@ -110,6 +117,7 @@ const businessConfigs: SockToolConfig<any>[] = [
       isHidden: z.boolean().optional(),
     }),
     replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async (args, sock) => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any -- zod-parsed args are a superset of ProductCreate; expires 2026-12-31
       return sock.productCreate(args as any);
@@ -131,6 +139,7 @@ const businessConfigs: SockToolConfig<any>[] = [
       isHidden: z.boolean().optional(),
     }),
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ productId, ...update }, sock) => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any -- zod-parsed update is a superset of ProductUpdate; expires 2026-12-31
       return sock.productUpdate(productId, update as any);
@@ -143,6 +152,7 @@ const businessConfigs: SockToolConfig<any>[] = [
       productIds: z.array(z.string()).describe('List of product IDs to delete.'),
     }),
     replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ productIds }, sock) => {
       const result = await sock.productDelete(productIds);
       return result ?? { success: true, deleted: productIds.length };
@@ -156,6 +166,7 @@ const businessConfigs: SockToolConfig<any>[] = [
       tokenBase64: z.string().describe('Order token in base64, received in the order message.'),
     }),
     replayPolicy: 'read_only',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'none' },
     call: async ({ orderId, tokenBase64 }, sock) => {
       return sock.getOrderDetails(orderId, tokenBase64);
     },
@@ -171,6 +182,7 @@ const businessConfigs: SockToolConfig<any>[] = [
       count: z.number().optional(),
     }),
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async (quickReply, sock) => {
       await sock.addOrEditQuickReply(quickReply);
       return { success: true, shortcut: quickReply.shortcut };
@@ -183,6 +195,7 @@ const businessConfigs: SockToolConfig<any>[] = [
       timestamp: z.string().describe('Timestamp identifier of the quick reply to remove.'),
     }),
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ timestamp }, sock) => {
       await sock.removeQuickReply(timestamp);
       return { success: true, timestamp };
@@ -222,6 +235,7 @@ const businessConfigs: SockToolConfig<any>[] = [
         .describe('Label definitions for add_label action.'),
     }),
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async (args, sock) => {
       switch (args.action) {
         case 'add_label': {

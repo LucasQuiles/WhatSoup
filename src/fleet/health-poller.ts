@@ -88,6 +88,7 @@ const PEM_PRIVATE_KEY_RE = /-----BEGIN [^-]+ PRIVATE KEY-----[\s\S]*?-----END [^
 type SilenceRegistryFailureObservation = Exclude<SilenceStoreReadResult, { readBasis: 'current' }>;
 
 function readNonNegativeEnvInt(name: string, fallback: number): number {
+  // env-allowed: bounded explicit-key env lookup; keys enumerated in-code
   const raw = process.env[name]?.trim();
   if (!raw) return fallback;
   const parsed = Number(raw);

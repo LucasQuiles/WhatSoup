@@ -39,6 +39,7 @@ import { formatMentions } from '../../core/mentions.ts';
 import type { MessageRow } from '../../core/messages.ts';
 import type { ResolutionStrategy } from '../../runtimes/agent/runtime.ts';
 import { errorMessage } from '../../lib/error-message.ts';
+import { EXTERNAL_EFFECT_CONTRACT_VERSION } from '../external-effect.ts';
 
 // ---------------------------------------------------------------------------
 // Error sanitization — prevent raw API/protocol errors from leaking to agents
@@ -241,6 +242,7 @@ export function registerMessagingTools(
     scope: 'chat',
     targetMode: 'injected',
     replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     schema: z.object({
       chatJid: z.string().optional(),
       to: z.string().optional().describe('Per-instance chat alias to resolve against this line database. Mutually exclusive with chatJid.'),
@@ -348,6 +350,7 @@ export function registerMessagingTools(
     scope: 'chat',
     targetMode: 'injected',
     replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     schema: z.object({
       chatJid: z.string(),
       messageId: z.string(),
@@ -401,6 +404,7 @@ export function registerMessagingTools(
     scope: 'chat',
     targetMode: 'injected',
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     schema: z.object({
       chatJid: z.string(),
       messageId: z.string().optional().describe('Message ID to react to. Omit to react to the most recent inbound message in the chat.'),
@@ -478,6 +482,7 @@ export function registerMessagingTools(
     scope: 'chat',
     targetMode: 'injected',
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     schema: z.object({
       chatJid: z.string(),
       messageId: z.string(),
@@ -531,6 +536,7 @@ export function registerMessagingTools(
     scope: 'chat',
     targetMode: 'injected',
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     schema: z.object({
       chatJid: z.string(),
       messageId: z.string(),
@@ -566,6 +572,7 @@ export function registerMessagingTools(
     scope: 'chat',
     targetMode: 'injected',
     replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     schema: z.object({
       chatJid: z.string(),
       latitude: z.number(),
@@ -609,6 +616,7 @@ export function registerMessagingTools(
     scope: 'chat',
     targetMode: 'injected',
     replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     schema: z.object({
       chatJid: z.string(),
       contacts: z
@@ -659,6 +667,7 @@ export function registerMessagingTools(
     scope: 'chat',
     targetMode: 'injected',
     replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     schema: z.object({
       chatJid: z.string().describe('Target WhatsApp chat JID. Injected automatically in chat-scoped sessions.'),
       question: z.string().describe('Poll question text. Keep it concise; send long context in a normal message before the poll.'),
@@ -782,6 +791,7 @@ export function registerMessagingTools(
     scope: 'chat',
     targetMode: 'injected',
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     schema: z.object({
       chatJid: z.string(),
       messageId: z.string(),

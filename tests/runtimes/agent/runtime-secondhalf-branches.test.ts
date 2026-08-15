@@ -214,6 +214,8 @@ vi.mock('../../../src/runtimes/agent/outbound-queue.ts', () => ({
 
 const { mockConfig } = vi.hoisted(() => ({
   mockConfig: {
+    // #2192 s4b: provider-fallback tunables live on config (defaults mirror the retired IIFEs).
+    fallbackTunables: { noticeDedupMs: 1_800_000, primaryRecheckMs: 300_000, probeStallThreshold: 12, probeStallCeilingMultiple: 10 },
     adminPhones: new Set<string>(['15550001']),
     controlPeers: new Map<string, string>(),
     toolUpdateMode: 'full' as const,
@@ -487,6 +489,7 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       expect(runtime.dispatchAgentJob({
         beadId: 1,
         triggerId: 2,
+        occurrenceId: 77,
         prompt: 'do work',
         title: 'scheduled work',
         reportChatJid: 'test@g.us',
@@ -502,6 +505,7 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       const result = runtime.dispatchAgentJob({
         beadId: 1,
         triggerId: 2,
+        occurrenceId: 77,
         prompt: 'do work',
         title: 'scheduled work',
         reportChatJid: 'test@g.us',
@@ -524,6 +528,7 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       const result = runtime.dispatchAgentJob({
         beadId: 5,
         triggerId: 9,
+        occurrenceId: 77,
         prompt: 'do work',
         title: 'scheduled work',
         reportChatJid: 'test@g.us',
@@ -554,6 +559,7 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       const result = runtime.dispatchAgentJob({
         beadId: 5,
         triggerId: 9,
+        occurrenceId: 77,
         prompt: 'do work',
         title: 'scheduled work',
         reportChatJid: 'test@g.us',

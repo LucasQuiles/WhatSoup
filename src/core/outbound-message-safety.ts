@@ -336,7 +336,10 @@ export function classifyAssistantTextEgress(text: string): AssistantTextEgressDe
  *
  * Reads `process.env.BOT_ERRORS_JID` and `process.env.WHATSOUP_INTERNAL_JIDS` —
  * the only env dependencies in this otherwise pure module; kept here so
- * audience policy has a single home.
+ * audience policy has a single home. `BOT_ERRORS_JID` is config-published
+ * (#2192 slice 3a): config.ts resolves the instance-config override and writes
+ * it back to process.env at load, so this call-time read and the typed
+ * `config.botErrorsJid` field see the same bytes without a config import.
  *
  * `ctx` (T8-F1+F2, OPTIONAL — omitting it preserves the exact pre-F1+F2
  * behavior for every existing caller):
@@ -361,6 +364,7 @@ const EMPTY_JID_SET: ReadonlySet<string> = new Set();
  * (cheap) so an env change takes effect on the next send without a restart.
  */
 function internalGroupJids(): ReadonlySet<string> {
+  // env-allowed: config-published or env-late routing var; call-time read needs no config import
   const raw = process.env['WHATSOUP_INTERNAL_JIDS']?.trim();
   if (!raw) return EMPTY_JID_SET;
   return new Set(raw.split(',').map((j) => j.trim()).filter(Boolean));
@@ -370,6 +374,7 @@ export function resolveOutboundAudience(
   chatJid: string,
   ctx?: OutboundAudienceContext,
 ): OutboundAudience {
+  // env-allowed: config-published or env-late routing var; call-time read needs no config import
   const opsJid = process.env['BOT_ERRORS_JID']?.trim();
   if (opsJid && chatJid === opsJid) return 'ops';
   if (internalGroupJids().has(chatJid)) return 'internal';

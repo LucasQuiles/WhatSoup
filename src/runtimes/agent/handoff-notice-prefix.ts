@@ -14,7 +14,6 @@ import { toConversationKey } from '../../core/conversation-key.ts';
 import type { Database } from '../../core/database.ts';
 import { createChildLogger } from '../../logger.ts';
 
-import { oneMessageHandoffEnabled } from './fallback-config.ts';
 import type { IOutboundQueue } from './outbound-queue.ts';
 import { consumeStandbyNotice, stashStandbyNotice } from './standby-notice.ts';
 
@@ -38,8 +37,8 @@ export function stashHandoffNotice(db: Database, chatJid: string, message: strin
  * fallback notice and the reply into one message. No-op when the flag is off or
  * no notice is pending. Never throws into the reply path.
  */
-export function withHandoffPrefix(db: Database, chatJid: string, text: string): string {
-  if (!oneMessageHandoffEnabled()) return text;
+export function withHandoffPrefix(enabled: boolean, db: Database, chatJid: string, text: string): string {
+  if (!enabled) return text;
   let prefix: string | null = null;
   try {
     prefix = consumeStandbyNotice(db, toConversationKey(chatJid));
@@ -57,8 +56,8 @@ export function withHandoffPrefix(db: Database, chatJid: string, text: string): 
  * defer to the next reply. Consume-once means this is a no-op when a reply
  * already prepended the notice this turn. Never throws into the turn.
  */
-export function flushPendingHandoffNotice(db: Database, queue: IOutboundQueue): void {
-  if (!oneMessageHandoffEnabled()) return;
+export function flushPendingHandoffNotice(enabled: boolean, db: Database, queue: IOutboundQueue): void {
+  if (!enabled) return;
   let pending: string | null = null;
   try {
     pending = consumeStandbyNotice(db, toConversationKey(queue.targetChatJid));

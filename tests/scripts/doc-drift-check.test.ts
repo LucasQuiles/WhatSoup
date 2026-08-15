@@ -97,8 +97,8 @@ describe('doc drift check', { timeout: 30_000 }, () => {
     writeFileSync(
       staleDoc,
       currentToolsDoc
-        .replace('| [substrate.ts](#substratets) | 21 |', '| [substrate.ts](#substratets) | 18 |')
-        .replace('| **Total** | **166** |', '| **Total** | **160** |'),
+        .replace('| [substrate.ts](#substratets) | 22 |', '| [substrate.ts](#substratets) | 18 |')
+        .replace('| **Total** | **168** |', '| **Total** | **160** |'),
       'utf8',
     );
 

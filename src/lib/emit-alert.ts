@@ -33,14 +33,22 @@ const GROUP_JID_RE = /^\d+@g\.us$/;
  * suppressed at the legacy-spawn layer.  Only the legacy path is throttled;
  * the durable outbox path is unthrottled (the dispatcher handles dedup).
  *
- * Set EMIT_ALERT_THROTTLE_MS=0 to disable.  Values < 0 are treated as 0.
- * Default: 300_000 ms (5 min).
+ * Resolved at CALL time — never frozen at import — so the config publish
+ * (#2192 slice 3b: an instance-config `emitAlertThrottleMs` lands here via
+ * config.ts writing the env var at load) is honored regardless of module-eval
+ * order, and both throttle sites share one validated resolution (the prune
+ * path previously re-read the env without the finite guard, so a junk value
+ * meant entries never expired).
+ *
+ * Set EMIT_ALERT_THROTTLE_MS=0 to disable.  Values < 0 are treated as 0;
+ * non-finite values use the default.  Default: 300_000 ms (5 min).
  */
-const EMIT_ALERT_THROTTLE_MS = (() => {
+function emitAlertThrottleMs(): number {
+  // env-allowed: lib cannot import config (ring rule); env is the sanctioned channel
   const raw = Number(process.env['EMIT_ALERT_THROTTLE_MS']);
   if (Number.isFinite(raw)) return Math.max(0, raw);
   return 300_000;
-})();
+}
 
 /** Maps `${instance}|${source}|${summary}` → epoch ms of first legacy spawn. */
 const alertThrottleMap = new Map<string, number>();
@@ -82,13 +90,22 @@ export interface ClearAlertSourceOptions {
   requireDurableOutbox?: boolean;
 }
 
+// BOT_ERRORS_{JID,EXPECTED_JID,REQUIRE_EXPECTED} are config-published (#2192
+// slice 3a): config.ts resolves instance-config overrides and writes them back
+// to process.env at load (TMPDIR pattern), so these call-time reads see the
+// same bytes as the typed config fields without a lib→config import. The
+// group-JID shape and expected-JID pin validation stay here, where the
+// fail-closed warn-once semantics live.
 function requireExpectedJid(): boolean {
+  // env-allowed: lib cannot import config (ring rule); env is the sanctioned channel
   const raw = process.env['BOT_ERRORS_REQUIRE_EXPECTED']?.trim().toLowerCase();
   return raw ? !['0', 'false', 'no', 'off'].includes(raw) : true;
 }
 
 function botErrorsJid(): string | null {
+  // env-allowed: lib cannot import config (ring rule); env is the sanctioned channel
   const jid = process.env['BOT_ERRORS_JID']?.trim();
+  // env-allowed: lib cannot import config (ring rule); env is the sanctioned channel
   const expected = process.env['BOT_ERRORS_EXPECTED_JID']?.trim();
   if (!jid) {
     if (!missingTargetWarned) {
@@ -173,13 +190,19 @@ function spawnLegacyAlert(args: string[], logContext: Record<string, unknown>, m
  * spawn. This lets an alert verifier observe operator-facing alerts (e.g.
  * `provider_fallback_activated`, `fallback_no_independent_provider`) at runtime
  * without paging a live operator. Opt-in only; unset in production.
+ *
+ * ENV-LATE BY DESIGN (#2192 slice 3c): the verifier injects this out-of-band
+ * at runtime (#2510) and it must flip without a restart or an instance-config
+ * edit — a typed config field would freeze the dial at load.
  */
 function alertSinkPath(): string | null {
+  // env-allowed: lib cannot import config (ring rule); env is the sanctioned channel
   const raw = process.env['WHATSOUP_ALERT_SINK']?.trim();
   return raw && raw.length > 0 ? raw : null;
 }
 
 // #2510: warn when capture-only sink is configured outside test/verifier context
+// env-allowed: test-runner detection; must not read config (lib ring / eval-order)
 if (!process.env['VITEST'] && alertSinkPath()) {
   log.warn(
     { alertSink: alertSinkPath() },
@@ -266,7 +289,7 @@ export function emitAlert(
     // #2434: throttle check WITHOUT recording — record only on success.
     const throttleKey = `${instance}|${source}|${summary}`;
     // Prune expired entries before checking.
-    const throttleWindow = Number(process.env['EMIT_ALERT_THROTTLE_MS'] ?? EMIT_ALERT_THROTTLE_MS);
+    const throttleWindow = emitAlertThrottleMs();
     const now = systemClock.now();
     for (const [key, recordedAt] of alertThrottleMap) {
       if (now - recordedAt > throttleWindow) alertThrottleMap.delete(key);
@@ -289,8 +312,7 @@ export function emitAlert(
     );
     // #2434: only record throttle on success, so a failed fallback retries.
     if (legacy.accepted) {
-      const throttleMs = Number(process.env['EMIT_ALERT_THROTTLE_MS'] ?? EMIT_ALERT_THROTTLE_MS);
-      const effectiveWindow = Number.isFinite(throttleMs) ? Math.max(0, throttleMs) : EMIT_ALERT_THROTTLE_MS;
+      const effectiveWindow = emitAlertThrottleMs();
       if (effectiveWindow > 0) alertThrottleMap.set(throttleKey, systemClock.now());
     }
     return {

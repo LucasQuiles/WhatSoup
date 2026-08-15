@@ -5,6 +5,7 @@ import { z } from 'zod';
 import type { ToolDeclaration } from '../types.ts';
 import type { ExtendedBaileysSocket } from '../types.ts';
 import { type SockToolConfig, registerSockTools } from './sock-tool-factory.ts';
+import { EXTERNAL_EFFECT_CONTRACT_VERSION } from '../external-effect.ts';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- configs have heterogeneous ZodRawShape types; shared array requires any; expires 2026-12-31
 const communityConfigs: SockToolConfig<any>[] = [
@@ -15,6 +16,7 @@ const communityConfigs: SockToolConfig<any>[] = [
       jid: z.string(),
     }),
     replayPolicy: 'read_only',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'none' },
     call: async ({ jid }, sock) => {
       return sock.communityMetadata(jid);
     },
@@ -27,6 +29,7 @@ const communityConfigs: SockToolConfig<any>[] = [
       body: z.string(),
     }),
     replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ subject, body }, sock) => {
       return sock.communityCreate(subject, body);
     },
@@ -40,6 +43,7 @@ const communityConfigs: SockToolConfig<any>[] = [
       parentJid: z.string(),
     }),
     replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ subject, participants, parentJid }, sock) => {
       return sock.communityCreateGroup(subject, participants, parentJid);
     },
@@ -51,6 +55,7 @@ const communityConfigs: SockToolConfig<any>[] = [
       id: z.string(),
     }),
     replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ id }, sock) => {
       await sock.communityLeave(id);
       return { success: true, id };
@@ -64,6 +69,7 @@ const communityConfigs: SockToolConfig<any>[] = [
       communityJid: z.string(),
     }),
     replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ groupJid, communityJid }, sock) => {
       return sock.communityLinkGroup(groupJid, communityJid);
     },
@@ -76,6 +82,7 @@ const communityConfigs: SockToolConfig<any>[] = [
       communityJid: z.string(),
     }),
     replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ groupJid, communityJid }, sock) => {
       return sock.communityUnlinkGroup(groupJid, communityJid);
     },
@@ -87,6 +94,7 @@ const communityConfigs: SockToolConfig<any>[] = [
       jid: z.string(),
     }),
     replayPolicy: 'read_only',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'none' },
     call: async ({ jid }, sock) => {
       return sock.communityFetchLinkedGroups(jid);
     },
@@ -100,6 +108,7 @@ const communityConfigs: SockToolConfig<any>[] = [
       action: z.enum(['add', 'remove', 'promote', 'demote']),
     }),
     replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ jid, participants, action }, sock) => {
       const result = await sock.communityParticipantsUpdate(jid, participants, action);
       return { success: true, jid, action, participants, result };
@@ -119,6 +128,7 @@ const communityConfigs: SockToolConfig<any>[] = [
     }),
     // revoke and accept are mutating — use the most conservative policy
     replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ jid, action = 'get', code }, sock) => {
       if (action === 'get') {
         const inviteCode = await sock.communityInviteCode(jid);
@@ -147,6 +157,7 @@ const communityConfigs: SockToolConfig<any>[] = [
       setting: z.enum(['announcement', 'not_announcement', 'locked', 'unlocked']),
     }),
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ jid, setting }, sock) => {
       await sock.communitySettingUpdate(jid, setting);
       return { success: true, jid, setting };
@@ -157,6 +168,7 @@ const communityConfigs: SockToolConfig<any>[] = [
     description: 'Fetch all communities the bot is participating in (global).',
     schema: z.object({}),
     replayPolicy: 'read_only',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'none' },
     call: async (_parsed, sock) => {
       const communityMap = await sock.communityFetchAllParticipating();
       const communities = Object.values(communityMap as Record<string, unknown>);
@@ -173,6 +185,7 @@ const communityConfigs: SockToolConfig<any>[] = [
       description: z.string().optional(),
     }),
     replayPolicy: 'safe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ jid, subject, description }, sock) => {
       if (subject === undefined && description === undefined) {
         throw new Error('At least one of subject or description must be provided');

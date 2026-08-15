@@ -18,6 +18,7 @@ export const repoRoot: string = path.resolve(
 );
 
 export function xdgDir(envKey: string, fallbackSuffix: string): string {
+  // env-allowed: bounded explicit-key env lookup; keys enumerated in-code
   const value = process.env[envKey];
   return value ? value : path.join(os.homedir(), fallbackSuffix);
 }

@@ -36,6 +36,7 @@ const log = createChildLogger('agent-runtime');
 
 // Env-resolved distill knobs (sweep cadence, growth threshold, verbatim window, budget).
 // Cluster-local — only the sweep coordinator reads these.
+// env-allowed: passes env into the pure resolver at the call boundary
 const HANDOFF_DISTILL_RESOLVED = resolveHandoffDistillConfig(process.env);
 const HANDOFF_DISTILL_SWEEP_MS = HANDOFF_DISTILL_RESOLVED.sweepMs;
 const HANDOFF_DISTILL_GROWTH_THRESHOLD = HANDOFF_DISTILL_RESOLVED.growthThreshold;
@@ -81,6 +82,7 @@ export class HandoffDistillCoordinator {
     if (!this.isEnabled()) return; // flag off → no runner, no timer
     if (this.timer) return; // already armed (idempotent)
 
+    // env-allowed: passes env into the pure resolver at the call boundary
     const resolved = resolveDistillModel(this.getModel(), process.env);
     if (!resolved) {
       // Enabled-but-inert: unknown model or no key. Don't arm — log once so the

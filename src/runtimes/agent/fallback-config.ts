@@ -10,11 +10,10 @@
  * delegator (it has direct test coverage) that forwards here.
  */
 import { lookupCredential, resolveProviderKeyService } from '../../lib/keyring.ts';
-
-/** Whether fallback notice and stand-in reply collapse into one user-facing message. */
-export function oneMessageHandoffEnabled(): boolean {
-  return process.env['WHATSOUP_ONE_MESSAGE_HANDOFF'] === '1';
-}
+// #2192: the one-message-handoff flag moved to config.oneMessageHandoff; the
+// runtime (composition-legal) supplies it to the notice-prefix helpers as an
+// explicit parameter, keeping this module and handoff-notice-prefix pure and
+// inside the ring rules (runtimes must not import src/config.ts).
 
 /**
  * Reasons whose failover borrows the auth-required control semantics: the

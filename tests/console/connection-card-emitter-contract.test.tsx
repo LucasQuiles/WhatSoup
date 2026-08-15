@@ -28,6 +28,9 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
 vi.mock('../../src/config.ts', () => ({
   config: {
+    get healthBindAddress(): string {
+      return process.env.HEALTH_BIND_ADDRESS ?? '127.0.0.1';
+    },
     adminPhones: new Set<string>(),
     dbPath: ':memory:',
     mediaDir: '/tmp/whatsoup-test-media-connection-card-emitter-contract.test.tsx/tmp',

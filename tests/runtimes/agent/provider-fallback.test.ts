@@ -34,6 +34,8 @@ vi.mock('../../../src/lib/emit-alert.ts', () => {
 // the factory closing over a not-yet-initialized top-level variable.
 vi.mock('../../../src/config.ts', () => {
   const config: Record<string, unknown> = {
+    // #2192 s4b: provider-fallback tunables live on config (defaults mirror the retired IIFEs).
+    fallbackTunables: { noticeDedupMs: 1_800_000, primaryRecheckMs: 300_000, probeStallThreshold: 12, probeStallCeilingMultiple: 10 },
     adminPhones: new Set<string>(),
     controlPeers: new Map<string, string>(),
     toolUpdateMode: 'full',
@@ -1449,15 +1451,16 @@ describe('one-message handoff collapse (real db)', () => {
     return { runtime, db };
   }
 
+  // #2192 slice 2b: the flag lives on config now; toggle the existing mutable
+  // config mock instead of the env var, same signature so call sites stand.
   function withFlag(value: '1' | undefined, fn: () => void): void {
-    const prev = process.env['WHATSOUP_ONE_MESSAGE_HANDOFF'];
-    if (value === undefined) delete process.env['WHATSOUP_ONE_MESSAGE_HANDOFF'];
-    else process.env['WHATSOUP_ONE_MESSAGE_HANDOFF'] = value;
+    const config = mockConfigRef();
+    const prev = config['oneMessageHandoff'];
+    config['oneMessageHandoff'] = value === '1';
     try {
       fn();
     } finally {
-      if (prev === undefined) delete process.env['WHATSOUP_ONE_MESSAGE_HANDOFF'];
-      else process.env['WHATSOUP_ONE_MESSAGE_HANDOFF'] = prev;
+      config['oneMessageHandoff'] = prev;
     }
   }
 

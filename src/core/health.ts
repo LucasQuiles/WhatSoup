@@ -1,8 +1,9 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomUUID } from 'node:crypto';
+import { systemClock } from '../lib/clock.ts';
 import { config } from '../config.ts';
 import { safeStringEqual } from '../lib/safe-compare.ts';
-import { lookupCredential } from '../lib/keyring.ts';
+import { lookupCredential, lookupEnvCredential } from '../lib/keyring.ts';
 import { createChildLogger } from '../logger.ts';
 import { CURRENT_SCHEMA_MIGRATION, type Database } from './database.ts';
 import { readArcBindingHealth, resolveArcRepoRoot } from './arc-binding-health.ts';
@@ -28,7 +29,7 @@ import { isRecord } from '../lib/type-guards.ts';
 import { MS_PER_SECOND, MS_PER_MINUTE } from '../lib/time-units.ts';
 import { getModelAdvisories } from '../lib/model-advisor.ts';
 import { enqueueScheduledMessage, type EnqueueMessageParams } from './schedule-enqueue.ts';
-import { countPastDueTriggers } from './substrate/triggers.ts';
+import { countPastDueTriggers, countRecurringOverdueTriggers } from './substrate/triggers.ts';
 import {
   AliasNotFoundError,
   MissingTargetError,
@@ -743,14 +744,63 @@ function classifyDisconnect(connectionState: ConnectionStateSnapshot): Disconnec
   return 'unknown_reconnect';
 }
 
-function requireAuth(req: IncomingMessage, res: ServerResponse): boolean {
+/**
+ * Per-server expected-token state for every protected health route.
+ *
+ * The instance-scoped lookup shells out to the platform keyring synchronously
+ * (a blocked/`security`-invisible keychain stalls the event loop up to the exec
+ * timeout), so it must not run once per request: a resolved token is cached for
+ * the server's lifetime — token rotation therefore requires an instance
+ * restart, matching the launcher's own launch-time resolution — and a miss is
+ * re-attempted at most every {@link HEALTH_TOKEN_MISS_RETRY_MS} so a transient
+ * keychain visibility failure cannot permanently lock out the control plane
+ * while a burst of unauthorized requests cannot serialize keyring stalls.
+ * Scoped to the server instance (created in {@link startHealthServer}), never
+ * module scope, so servers in one process cannot leak tokens across instances.
+ */
+interface HealthAuthState {
+  instanceName: string;
+  token?: string;
+  missAtMs?: number;
+}
+
+const HEALTH_TOKEN_MISS_RETRY_MS = 30_000;
+
+function resolveExpectedHealthToken(auth: HealthAuthState): string | undefined {
+  if (auth.token !== undefined) return auth.token;
+  // Precedence must match the launcher/fleet canon: `tokens.env` is canonical
+  // while it exists. The managed launcher resolves it (private file → scoped
+  // keychain → legacy) and exports the result as WHATSOUP_HEALTH_TOKEN after
+  // scrubbing any inherited value, and fleet discovery reads the same file —
+  // so the launcher-provenanced environment token is honored FIRST. A
+  // keychain-first order here would strand the whole fleet on 401s whenever a
+  // rotated tokens.env diverges from a stale scoped-keychain entry (the
+  // rotation script mirrors the keychain only with --mirror-keyring), and a
+  // restart would not fix it. QR-157: trim-then-check so a whitespace-only
+  // value cannot become an attacker-forgeable empty expected token.
+  const envToken = lookupEnvCredential('whatsoup-health-token');
+  if (envToken) {
+    auth.token = envToken;
+    return envToken;
+  }
+  const now = systemClock.now();
+  if (auth.missAtMs !== undefined && now - auth.missAtMs < HEALTH_TOKEN_MISS_RETRY_MS) {
+    return undefined;
+  }
+  // Scoped-keychain fallback: direct (non-managed) launches, and the
+  // post-migration end state once tokens.env is retired.
+  const token = lookupCredential('whatsoup-health-token', {
+    user: auth.instanceName,
+    skipMigrationFallbacks: true,
+  }) ?? undefined;
+  if (token !== undefined) auth.token = token;
+  else auth.missAtMs = now;
+  return token;
+}
+
+function requireAuth(req: IncomingMessage, res: ServerResponse, auth: HealthAuthState): boolean {
   const authHeader = (req.headers as Record<string, string | undefined>)['authorization'];
-  // Route through the shared credential resolver (W-2). lookupCredential checks
-  // the keyring first (when configured), falling back to WHATSOUP_HEALTH_TOKEN
-  // env var. This centralizes secret reads for the W-1 closed-registry gate
-  // and the future W-5 keyring migration off tokens.env.
-  const expectedToken = lookupCredential('whatsoup-health-token') ?? undefined;
-  if (!verifyBearer(authHeader, expectedToken)) {
+  if (!verifyBearer(authHeader, resolveExpectedHealthToken(auth))) {
     res.writeHead(401, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Unauthorized' }));
     return false;
@@ -766,14 +816,17 @@ function requireAuth(req: IncomingMessage, res: ServerResponse): boolean {
  * exposes privileged identity, location, lifecycle, exception, recent-event, and
  * credential fields. Unauthenticated callers receive a minimal versioned public
  * liveness envelope (see {@link HEALTH_PUBLIC_SCHEMA_VERSION}); only callers with
- * a valid bearer token proceed to the diagnostic body. This predicate keeps the
- * credential-resolution path identical to {@link requireAuth} without writing a
- * 401, so the `/health` handler can emit the public envelope on the same wire.
+ * a valid bearer token proceed to the diagnostic body. This predicate shares
+ * {@link resolveExpectedHealthToken} with {@link requireAuth} — the SAME
+ * instance-scoped cached resolution — so a token the mutation routes reject
+ * (e.g. a stale unscoped/legacy credential) can never authorize the diagnostic
+ * projection, and rotation can never leave GET and mutation routes honoring
+ * different credentials. It only skips the 401 side effect, so the `/health`
+ * handler can emit the public envelope on the same wire.
  */
-function hasHealthAuth(req: IncomingMessage): boolean {
+function hasHealthAuth(req: IncomingMessage, auth: HealthAuthState): boolean {
   const authHeader = (req.headers as Record<string, string | undefined>)['authorization'];
-  const expectedToken = lookupCredential('whatsoup-health-token') ?? undefined;
-  return verifyBearer(authHeader, expectedToken);
+  return verifyBearer(authHeader, resolveExpectedHealthToken(auth));
 }
 
 function agentCommandStatus(err: unknown): number {
@@ -802,6 +855,9 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
   // server instance: module scope would leak degradation across server
   // lifetimes that share an instance name (observed as cross-test pollution).
   const recentlyDegraded = new Set<string>();
+  // Shared by requireAuth and hasHealthAuth — one scoped, cached resolution
+  // path for every protected route on this server (see HealthAuthState).
+  const healthAuth: HealthAuthState = { instanceName: deps.instanceName };
   const chatResolver = createChatResolver({ db: deps.db.raw });
   const sendPipeline = createSendPipeline({
     resolver: chatResolver,
@@ -822,7 +878,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
     // ── POST /poll-decision — D-4 console approval queue: deliver a decision
     // to a pending poll through the runtime's own poll-resolution path ──
     if (req.url === '/poll-decision' && req.method === 'POST') {
-      if (!requireAuth(req, res)) return;
+      if (!requireAuth(req, res, healthAuth)) return;
 
       if (!deps.resolvePollDecision) {
         res.writeHead(503, { 'Content-Type': 'application/json' });
@@ -898,7 +954,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
 
     // ── POST /send — send a text message to any chat ──
     if (req.url === '/send' && req.method === 'POST') {
-      if (!requireAuth(req, res)) return;
+      if (!requireAuth(req, res, healthAuth)) return;
 
       const MAX_BODY_BYTES = 64 * 1024; // 64 KB
       let body = '';
@@ -959,7 +1015,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
     // delivers on its next tick (≤ ~60 s). Media is passed by FILE PATH (bounded to
     // deps.scheduleAllowedRoot), never inline bytes — a branded PDF exceeds the body cap.
     if (req.url === '/schedule' && req.method === 'POST') {
-      if (!requireAuth(req, res)) return;
+      if (!requireAuth(req, res, healthAuth)) return;
 
       const jsonHeaders = { 'Content-Type': 'application/json' };
       const MAX_BODY_BYTES = 64 * 1024; // 64 KB — JSON body references a file path, not bytes
@@ -1047,7 +1103,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       (async () => {
         const jsonHeaders = { 'Content-Type': 'application/json' };
 
-        if (!requireAuth(req, res)) return;
+        if (!requireAuth(req, res, healthAuth)) return;
 
         if (deps.instanceType !== 'agent' || !deps.runtime?.handleAgentCommand) {
           res.writeHead(409, jsonHeaders);
@@ -1136,7 +1192,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       (async () => {
         const jsonHeaders = { 'Content-Type': 'application/json' };
 
-        if (!requireAuth(req, res)) return;
+        if (!requireAuth(req, res, healthAuth)) return;
 
         let rawBody = '';
         try {
@@ -1235,7 +1291,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       (async () => {
         const jsonHeaders = { 'Content-Type': 'application/json' };
 
-        if (!requireAuth(req, res)) return;
+        if (!requireAuth(req, res, healthAuth)) return;
 
         // Parse body (with size limit matching /send)
         const MAX_BODY_BYTES = 64 * 1024;
@@ -1343,7 +1399,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       (async () => {
         const jsonHeaders = { 'Content-Type': 'application/json' };
 
-        if (!requireAuth(req, res)) return;
+        if (!requireAuth(req, res, healthAuth)) return;
 
         // Parse body (with size limit matching /access)
         const MAX_BODY_BYTES = 64 * 1024;
@@ -1410,7 +1466,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
 
     // ── GET /typing — return JIDs currently composing from presence cache ──
     if (req.url === '/typing' && req.method === 'GET') {
-      if (!requireAuth(req, res)) return;
+      if (!requireAuth(req, res, healthAuth)) return;
       const cache = deps.connectionManager.presenceCache;
       const composing: { jid: string; since: number }[] = [];
       // presenceCache.entries is private — expose via a method
@@ -1444,7 +1500,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       // only — to unauthenticated callers. No DB reads, no enrichment stats,
       // no auth-bond formatting, and no privileged fields touch the public
       // bytes. Authenticated callers proceed to the full diagnostic below.
-      if (!hasHealthAuth(req)) {
+      if (!hasHealthAuth(req, healthAuth)) {
         const cs = deps.connectionManager.getConnectionState();
         const publicConnected = isFullyConnected(cs);
         const publicRecovering =
@@ -1850,6 +1906,99 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         'failed to count past-due triggers',
       );
 
+      // #2566 slice 4 — occurrence-lifecycle gauges. Counts and ages ONLY:
+      // no title/prompt/JID/SQL content may cross this projection.
+      const recurringOverdueTriggers = safeDbQuery(
+        () => countRecurringOverdueTriggers(deps.db.raw),
+        0,
+        'failed to count recurring-overdue triggers',
+      );
+      const activeOccurrenceStats = safeDbQuery(
+        () => {
+          const row = deps.db.raw.prepare(
+            `SELECT COUNT(*) AS c, MIN(claimed_at) AS oldest
+               FROM trigger_occurrences WHERE state IN ('claimed','running')`,
+          ).get() as { c: number; oldest: number | null };
+          return {
+            count: row.c,
+            oldestAgeS: row.oldest == null
+              ? 0
+              : Math.max(0, systemClock.nowUnixSec() - row.oldest),
+          };
+        },
+        { count: 0, oldestAgeS: 0 },
+        'failed to read active trigger occurrences',
+      );
+      const notifyOutcomeUnknownRuns = safeDbQuery(
+        () => (deps.db.raw.prepare(
+          `SELECT COUNT(*) AS c FROM trigger_runs WHERE error_kind = 'notify_outcome_unknown'`,
+        ).get() as { c: number }).c,
+        0,
+        'failed to count unknown-notification-outcome runs',
+      );
+
+      // #2567 slice 2 — fact-export queue evidence. Counts, ages, and a
+      // DB-derived consumer_state ONLY: no fact text, JID, payload JSON, or
+      // legacy fact_id may cross this projection. consumer_missing = pending
+      // work past the grace window with zero lease/ack evidence — the state
+      // the pre-#2567 queue could never surface (health stayed green while a
+      // silent or absent bridge accumulated facts indefinitely).
+      const factExportStats = safeDbQuery(
+        () => {
+          const counts: Record<string, number> = {};
+          for (const row of deps.db.raw.prepare(
+            'SELECT state, COUNT(*) AS n FROM fact_export_queue GROUP BY state',
+          ).all() as Array<{ state: string; n: number }>) {
+            counts[row.state] = row.n;
+          }
+          const now = systemClock.nowUnixSec();
+          const oldestPending = (deps.db.raw.prepare(
+            `SELECT MIN(CAST(strftime('%s', created_at) AS INTEGER)) AS t
+               FROM fact_export_queue WHERE state = 'pending'`,
+          ).get() as { t: number | null }).t;
+          const latestAck = (deps.db.raw.prepare(
+            'SELECT MAX(acked_at) AS t FROM fact_export_queue',
+          ).get() as { t: number | null }).t;
+          const pending = counts.pending ?? 0;
+          const leased = counts.leased ?? 0;
+          const retryWait = counts.retry_wait ?? 0;
+          const oldestPendingAgeS = oldestPending == null ? 0 : Math.max(0, now - oldestPending);
+          const latestAckAgeS = latestAck == null ? null : Math.max(0, now - latestAck);
+          const EVIDENCE_FRESH_SEC = 3600;
+          const BACKLOG_THRESHOLD = 100;
+          let consumerState: 'idle' | 'current' | 'backlogged' | 'consumer_missing';
+          if (pending + leased + retryWait === 0) {
+            consumerState = 'idle';
+          } else if (leased > 0 || (latestAckAgeS != null && latestAckAgeS < EVIDENCE_FRESH_SEC)) {
+            consumerState = pending > BACKLOG_THRESHOLD ? 'backlogged' : 'current';
+          } else {
+            consumerState = oldestPendingAgeS > EVIDENCE_FRESH_SEC ? 'consumer_missing' : 'current';
+          }
+          return {
+            pending,
+            leased,
+            retryWait,
+            quarantined: counts.quarantined ?? 0,
+            retryExhausted: counts.retry_exhausted ?? 0,
+            legacyUnclassified: counts.legacy_unclassified ?? 0,
+            oldestPendingAgeS,
+            latestAckAgeS,
+            consumerState,
+          };
+        },
+        {
+          pending: 0, leased: 0, retryWait: 0, quarantined: 0, retryExhausted: 0,
+          legacyUnclassified: 0, oldestPendingAgeS: 0,
+          latestAckAgeS: null as number | null,
+          consumerState: 'idle' as 'idle' | 'current' | 'backlogged' | 'consumer_missing',
+        },
+        'failed to read fact export queue stats',
+      );
+      if (factExportStats.consumerState === 'consumer_missing') {
+        if (status === 'healthy') status = 'degraded';
+        statusReasons.push('fact_export_consumer_missing');
+      }
+
       // Provider-fallback observability (agent runtimes only). Surfaced in the
       // instance block so operators can see when a bot is running on its
       // fallback provider and when that window expires.
@@ -2147,6 +2296,19 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           pending_polls_total: pendingPollsTotal,
           pending_polls_readable: pendingPollsReadable,
           past_due_triggers: pastDueTriggers,
+          recurring_overdue_triggers: recurringOverdueTriggers,
+          active_trigger_occurrences: activeOccurrenceStats.count,
+          oldest_active_occurrence_age_s: activeOccurrenceStats.oldestAgeS,
+          notify_outcome_unknown_runs: notifyOutcomeUnknownRuns,
+          fact_export_pending: factExportStats.pending,
+          fact_export_leased: factExportStats.leased,
+          fact_export_retry_wait: factExportStats.retryWait,
+          fact_export_quarantined: factExportStats.quarantined,
+          fact_export_retry_exhausted: factExportStats.retryExhausted,
+          fact_export_legacy_unclassified: factExportStats.legacyUnclassified,
+          fact_export_oldest_pending_age_s: factExportStats.oldestPendingAgeS,
+          fact_export_latest_ack_age_s: factExportStats.latestAckAgeS,
+          fact_export_consumer_state: factExportStats.consumerState,
           probe_availability: probeAvailability,
         },
         access_control: {
@@ -2243,7 +2405,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
   // shutdown wiring needed in main.ts, which already calls healthServer.close().
   server.on('close', () => loopLagSampler.stop());
 
-  const healthHost = process.env.HEALTH_BIND_ADDRESS ?? '127.0.0.1';
+  const healthHost = config.healthBindAddress;
   // R7a: refuse a non-loopback bind without an explicit opt-in — the health server
   // exposes GET /health metadata and the token-gated POST /access endpoint, and a
   // remote plain-HTTP bind sends the health token over the wire. Mirrors the fleet guard.

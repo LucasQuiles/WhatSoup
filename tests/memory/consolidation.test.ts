@@ -343,3 +343,91 @@ describe('consolidateCluster', () => {
     expect(serializedLogs).not.toContain(forbiddenOutput);
   });
 });
+
+describe('clusterMemories order invariance (#2569)', () => {
+  // Greedy first-match clustering seeded in input order lets the same record
+  // set produce different partitions when only search-result order changes.
+  // The partition must be a pure function of the record SET.
+  const recordA = { id: 'a', text: 'alpha beta gamma delta', claim: 'alpha beta gamma delta', createdAt: '2026-04-01', confidence: 0.9, evidence: '' };
+  const recordB = { id: 'b', text: 'epsilon zeta eta theta', claim: 'epsilon zeta eta theta', createdAt: '2026-04-02', confidence: 0.9, evidence: '' };
+  // Bridges both seeds: sim(a,x) = sim(b,x) = 2/6 >= 0.3, sim(a,b) = 0.
+  const recordX = { id: 'x', text: 'alpha beta epsilon zeta', claim: 'alpha beta epsilon zeta', createdAt: '2026-04-03', confidence: 0.9, evidence: '' };
+
+  function partition(clusters: MemoryCluster[]): string[][] {
+    return clusters
+      .map((cluster) => cluster.records.map((r) => r.id).sort())
+      .sort((left, right) => left[0].localeCompare(right[0]));
+  }
+
+  it('produces the same partition regardless of input order', () => {
+    const forward = partition(clusterMemories([recordA, recordB, recordX]));
+    const reversed = partition(clusterMemories([recordX, recordB, recordA]));
+    const rotated = partition(clusterMemories([recordB, recordX, recordA]));
+    expect(reversed).toEqual(forward);
+    expect(rotated).toEqual(forward);
+  });
+
+  it('pins the deterministic partition for the bridge-record set', () => {
+    // Deterministic seed order is ascending record id: 'a' seeds first and
+    // captures the bridge record 'x'; 'b' clusters alone.
+    const clusters = clusterMemories([recordX, recordB, recordA]);
+    expect(partition(clusters)).toEqual([['a', 'x'], ['b']]);
+  });
+
+  it('does not mutate the caller-supplied records array', () => {
+    const input = [recordX, recordB, recordA];
+    clusterMemories(input);
+    expect(input.map((r) => r.id)).toEqual(['x', 'b', 'a']);
+  });
+});
+
+describe('clusterMemories duplicate-id tie-break (#2569 review finding A)', () => {
+  // A bare id sort is stable, so records sharing an id but differing in text
+  // kept arrival order and could still swap partitions. The (id, claim||text)
+  // tie-break totalizes the order; downstream consolidateCluster still rejects
+  // duplicate-id clusters as scope_invalid — this pins determinism only.
+  const dupA = { id: 'x', text: 'I live in London', claim: 'I live in London', createdAt: '2026-04-01', confidence: 0.9, evidence: '' };
+  const dupB = { id: 'x', text: 'I work at Acme', claim: 'I work at Acme', createdAt: '2026-04-02', confidence: 0.9, evidence: '' };
+  const other = { id: 'y', text: 'I work in London', claim: 'I work in London', createdAt: '2026-04-03', confidence: 0.9, evidence: '' };
+
+  function keyedPartition(clusters: MemoryCluster[]): string[][] {
+    return clusters
+      .map((cluster) => cluster.records.map((r) => `${r.id}:${r.text}`).sort())
+      .sort((left, right) => left[0].localeCompare(right[0]));
+  }
+
+  it('produces the same partition for duplicate-id records in any order', () => {
+    const forward = keyedPartition(clusterMemories([dupA, dupB, other]));
+    const swapped = keyedPartition(clusterMemories([dupB, other, dupA]));
+    const rotated = keyedPartition(clusterMemories([other, dupA, dupB]));
+    expect(swapped).toEqual(forward);
+    expect(rotated).toEqual(forward);
+  });
+});
+
+describe('consolidateCluster non-string id guard (#2569 crosscheck finding 4)', () => {
+  // A malformed search result can produce a cluster record whose id is
+  // undefined. The cluster-id guard must reject it as scope_invalid, not
+  // throw an uncaught TypeError that fails the whole run unclassified.
+  it('returns scope_invalid for a cluster containing a non-string id', async () => {
+    const provider = providerReturning({ durableKnowledge: [], discarded: [] });
+    const cluster = {
+      topic: 'test',
+      records: [{
+        id: undefined as unknown as string,
+        text: 'synthetic memory',
+        claim: 'synthetic memory',
+        createdAt: '2026-04-01',
+        confidence: 0.5,
+        evidence: '',
+      }],
+    };
+    const outcome = await consolidateCluster(provider, cluster);
+    expect(outcome).toMatchObject({
+      status: 'scope_invalid',
+      failureCode: 'invalid_request',
+      retryable: false,
+    });
+    expect(provider.generate).not.toHaveBeenCalled();
+  });
+});

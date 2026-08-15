@@ -57,6 +57,20 @@ function makeFixture({ violation, baselineCount }: FixtureOptions): string {
     '[]\n',
     'utf8',
   );
+  // Same for the env-read allowlist (#2192 slice 5a): its SSOT rejects empty
+  // rows[] by contract, so provision one placeholder row for a file that does
+  // not exist in the fixture — the fixture sources read no process.env.
+  writeFileSync(
+    path.join(dir, 'eslint-rules', 'env-read-allowlist.json'),
+    `${JSON.stringify({
+      rows: [{
+        file: 'src/__fixture_placeholder__.ts',
+        allowedUnmarkedSites: 1,
+        reason: 'fixture placeholder: the env allowlist must carry a non-empty rows[] by contract',
+      }],
+    })}\n`,
+    'utf8',
+  );
   writeFileSync(
     path.join(dir, 'docs', 'architecture', 'fitness-taxonomy.md'),
     `| rule | violations (baseline) |\n|------|--|\n| \`${RING_RULE_ID}\` | ${baselineCount} |\n`,

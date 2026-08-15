@@ -46,6 +46,22 @@ export interface DatabaseRetentionConfig {
    * other field here — this default is just the fallback.
    */
   messageRetentionDays: number;
+  /**
+   * #2566 slice 4 — retention windows for trigger history. Terminal
+   * trigger_runs and terminal/stale trigger_occurrences past the window are
+   * pruned; running runs and running/claimed occurrences are NEVER pruned
+   * regardless of age (an unfinalized row is crash evidence, not history).
+   */
+  triggerRunDays: number;
+  triggerOccurrenceDays: number;
+  /**
+   * #2567 slice 2 — retention window for TERMINAL fact-export rows
+   * (quarantined / retry_exhausted / legacy_unclassified). These carry full
+   * fact payloads and previously lived forever; recoverable states
+   * (pending / leased / retry_wait) are never pruned regardless of age.
+   * Exported rows have their own window (exportedFactDays).
+   */
+  factTerminalDays: number;
 }
 
 export interface DatabaseRetentionResult {
@@ -56,10 +72,13 @@ export interface DatabaseRetentionResult {
   toolCalls: number;
   outboundSends: number;
   factExportQueue: number;
+  factExportTerminal: number;
   memoryConsolidationRuns: number;
   metricsHourly: number;
   decryptionFailures: number;
   messages: number;
+  triggerRuns: number;
+  triggerOccurrences: number;
 }
 
 export interface DatabaseRetentionHealth {
@@ -84,6 +103,9 @@ export const DEFAULT_DATABASE_RETENTION: DatabaseRetentionConfig = {
   outboundSendDays: 30,
   outboundSendMaxRows: 10_000,
   messageRetentionDays: 30,
+  triggerRunDays: 30,
+  triggerOccurrenceDays: 30,
+  factTerminalDays: 30,
 };
 
 /**
@@ -307,9 +329,15 @@ export function runDatabaseRetention(
 
     const factExportQueue = changes(db.raw.prepare(`
       DELETE FROM fact_export_queue
-       WHERE status = 'exported'
+       WHERE state = 'exported'
          AND COALESCE(exported_at, created_at) < datetime('now', ?)
     `).run(factCutoff));
+
+    const factExportTerminal = changes(db.raw.prepare(`
+      DELETE FROM fact_export_queue
+       WHERE state IN ('quarantined', 'retry_exhausted', 'legacy_unclassified')
+         AND created_at < datetime('now', ?)
+    `).run(daysModifier(retention.factTerminalDays)));
 
     const memoryConsolidationMaxAgeMs =
       Math.max(1, Math.floor(retention.memoryConsolidationDays)) * 86_400_000;
@@ -375,6 +403,23 @@ export function runDatabaseRetention(
     // location moved.
     const messages = deleteOldMessages(db, retention.messageRetentionDays);
 
+    // #2566 slice 4 — trigger history. Terminal rows only: a running run or a
+    // running/claimed occurrence is crash evidence, not history, and is never
+    // pruned regardless of age. These timestamps are unix SECONDS (integer),
+    // so the cutoff is integer math, not datetime() strings.
+    const triggerRuns = changes(db.raw.prepare(`
+      DELETE FROM trigger_runs
+       WHERE status != 'running'
+         AND finished_at IS NOT NULL
+         AND finished_at < CAST(strftime('%s', 'now') AS INTEGER) - ?
+    `).run(Math.max(1, Math.floor(retention.triggerRunDays)) * 86_400));
+    const triggerOccurrences = changes(db.raw.prepare(`
+      DELETE FROM trigger_occurrences
+       WHERE state NOT IN ('claimed', 'running')
+         AND finished_at IS NOT NULL
+         AND finished_at < CAST(strftime('%s', 'now') AS INTEGER) - ?
+    `).run(Math.max(1, Math.floor(retention.triggerOccurrenceDays)) * 86_400));
+
     return {
       turnRecoveryJobs,
       turnTerminalRecords,
@@ -383,10 +428,13 @@ export function runDatabaseRetention(
       toolCalls,
       outboundSends,
       factExportQueue,
+      factExportTerminal,
       memoryConsolidationRuns,
       metricsHourly,
       decryptionFailures,
       messages,
+      triggerRuns,
+      triggerOccurrences,
     };
   });
   const total = Object.values(result).reduce((sum, count) => sum + count, 0);

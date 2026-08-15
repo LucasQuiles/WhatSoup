@@ -683,6 +683,305 @@ If `durability` is `undefined` (rare, test contexts only), the send proceeds wit
 
 ---
 
+### 5.7 Capability-Obligation Replay (Migrations 58–59)
+
+Off by default; activates only under `agentOptions.capabilityObligations.enabled === true`
+(see `docs/configuration.md`) and only for `per_chat` scope. When a managed-loop provider
+turn cannot fulfil a declared capability (e.g. a `/watch` YouTube or media download that
+needs a child process), the C3 terminal transaction records a `capability_obligations` row
+instead of silently dropping the request, and a supervisor replays it later.
+
+**Migration 59 (post-merge-audit hotfix).** Two schema changes ride migration 59: (a)
+`capability_execution_reservations` — an append-only durable pre-spawn reservation, UNIQUE on
+(obligation, claim epoch, attempt), committed BEFORE the resolver spawns so a duplicate
+`execute_capability` call is a typed refusal instead of a second external side effect; and (b) the
+`creation_reason` vocabulary is rebuilt to what creation actually observes:
+`harness_capability_gap` (derivation sees the input-shape match, the turn's tool-effect fold, and
+the serving harness class — never a model's typed deferral) alongside `reviewed_backfill:%`.
+`typed_deferral` is reserved for the future typed-deferral contract (mid-term M1); legacy
+`typed_deferral_signal` rows are mapped to `harness_capability_gap` during the rebuild.
+
+**The dispatch contract (operators read this first).** The replayed turn re-enters the
+*same* per-chat pipeline as a real inbound. Its prompt is NOT the bare original message: it
+is a deterministic envelope (`composeCapabilityObligationReplayPrompt`) that names the
+required capability and the EXACT source, and instructs the agent to call the
+`execute_capability` MCP tool. **If the agent does not call `execute_capability`, no receipt
+is written and the obligation quarantines (`blocked_ambiguous`) — fail-closed by design.**
+So the serving line's skill/prompt guidance MUST lead the agent to call the tool; a stuck
+obligation is most often a serving line whose harness never invokes it (wrong provider, or a
+skill that answers from memory). The obligation never completes off a conversational
+acknowledgement.
+
+**Trusted execution (why a stuck obligation is safe).** Execution receipts are written ONLY
+by the in-process `execute_capability` handler, which spawns the instance-declared resolver
+argv itself (shell-lessly), derives the observed source digest from its own observations
+(retained-media bytes hashed directly; the exact source string hashed for token sources),
+validates a typed outcome (exit 0 + minimum output), and refuses any source beginning with
+`-` (argv option-flag smuggling). No model-controlled text can forge a receipt or launder a
+wrong source: a digest mismatch or a wrong/failed resolver records an *error* receipt that
+can never complete the obligation.
+
+**Settlement.** An obligation completes only when a bound `ok` receipt (obligation + claim
+epoch + attempt + contract + input/source/media digests) coincides with the minted turn's
+terminal record showing echoed delivery (`delivery_kind='echoed'`, non-null delivery op) and
+a completion proof naming that exact terminal (`ttr:<id>`). A receipt without proven delivery
+quarantines rather than completing.
+
+**Group drains and backfill are gated.** Group-scoped obligations sit in `waiting_approval`
+until a destination-specific, digest-bound `capability_drain_approvals` row is consumed (the
+schema enforces the four live drain facts match). Historical backfill (`creation_reason LIKE
+'reviewed_backfill:%'`) drains only reviewer-confirmed rows through the same machine, under a
+separately approved manifest. Retained media is bounded (`retentionHorizonDays`, A-08):
+expired media is no longer claimable and is GC-eligible.
+
+**Operator tooling.** `scripts/capability-obligation-admin.ts` provides
+`inspect`/`list`/`cancel`/`adjudicate`. It refuses unless the target database is at exactly
+the current schema (it never migrates a live DB), previews by default (`cancel`/`adjudicate`
+mutate only with `--confirm`), and routes cancel/requeue through the SAME guarded state
+machine as the runtime (a `claimed` in-flight obligation is never operator-mutated). Every
+action records an `operator` audit event carrying the `--run-id` actor and `--idempotency-key`.
+
+**Readiness attestation producer (`scripts/capability-obligation-attest.ts`).** The supervisor
+claims nothing without an admissible D5 attestation, and the recording core had no caller until
+this front-door. It derives the live binding, runs a bounded NON-SENDING resolver canary, and
+records ONE attestation iff the canary passes. Recording is fail-closed on three observations
+(round-16..18): (a) the binding's media root must be a readable directory; (b) `--resolver-digest`
+is REQUIRED and the resolver artifact is **declared EXPLICITLY** on `execution`
+(`resolverArtifactPath` + `interpreted`) and verified by `verifyResolverArtifact` — NEVER inferred
+from argv (round-18 finding 1). The declared artifact's realpath must BE the token that executes
+(`command[0]` when not interpreted; EXACTLY `command[1]`, with no tokens between the interpreter
+and the script and no flag at `command[1]`, when interpreted), and an `interpreted:false` MISLABEL of
+an interpreter (a `watch-resolver`→node symlink declared "direct") is structurally REFUSED (round-19
+finding 2). `--resolver-digest` must equal the **COMPOSITE** digest (round-19 findings 1+2, extended in
+rounds 20-21) — the FOUR-part binding computed by the ONE exported `resolverCompositeDigest()`:
+the artifact CONTENT digest, the whole-DIRECTORY MANIFEST digest, the INTERPRETER content digest,
+and the canonical execution SHAPE/ENVELOPE (`canonicalExecutionIdentity()`), so the attested value
+binds all four (each part is detailed below). This refuses the two round-17 bypasses a reviewer proved (a `perl -eCODE`
+that verified a decoy while inline code ran; a symlink `watch-resolver`→node hashed as node while
+a script ran) — argv classification is unsound and was removed. (c) the probe evidence
+(stdout/stderr digests + byte counts + exit/signal + observed-source digest) is written to a
+`--receipt-out` file that is **fsynced, read-back-verified, and published NO-CLOBBER (`link()`, not
+`rename()`) BEFORE the attestation row is admitted** — so an admissible row IMPLIES its receipt was
+durably persisted first (round-17 finding 1) and a second run can never overwrite / destroy the
+first's evidence (round-18 finding 2). The receipt records probe evidence only and does NOT assert
+admission (admission = the row carrying the run's `nonce`). The **executor re-derives the COMPOSITE at the drain seam** and re-compares it to the admitted
+`resolver_digest` (`options.attestation.resolverDigest`), fail-closed to an error receipt: a same-path
+CONTENT swap (round-18 finding 1) OR a post-attest command-SHAPE change — injected `-e`, swapped
+interpreter, changed template (round-18 finding 2) — changes the live composite and is refused before
+any spawn. The executor then **content-addressed STAGES** the artifact (round-20 findings 1+3):
+it copies the artifact's WHOLE DIRECTORY into a fresh private staging root (`mkdtemp`, 0700,
+unpredictable, single-use), RE-HASHES the copy, compares the COPY's composite to the attested value,
+and executes the COPY — so a rename OR an in-place write to the original AFTER verification cannot
+substitute unverified bytes (the round-19 hardlink shared the inode AND re-resolved the path; a
+reviewer defeated both vectors). Staging the whole directory (not just the file) preserves
+sibling-module resolution (`require('./helper')`, a Python sibling import) that a single-file copy
+would break. The composite now binds FOUR things via ONE canonicalizer: (1) the artifact CONTENT
+digest; (2) the whole-DIRECTORY MANIFEST — a canonical `sha256` over the sorted `[relpath,
+sha256(bytes)]` of every regular file PLUS a `[relpath + '/', '']` marker for every directory
+(round-21 finding 3 — so an added or EMPTY directory also changes the manifest), so a post-attest
+SIBLING swap (overwrite `helper.cjs` after attestation) or an added directory changes the manifest
+and is refused; a SYMLINK or non-regular entry is refused fail-closed (a symlink survives the copy
+and can point at post-attest-mutable bytes), and file MODE is deliberately excluded (its `cpSync`
+preservation is not verified bit-identical, and a divergence would fail EVERY legitimate drain);
+(3) the INTERPRETER content digest (`command[0]` hashed when `interpreted`, executed from its
+verified realpath) — the interpreter must be an EXPLICIT path (a bare `node`/`python3` resolved via
+`$PATH` is unpinnable and is refused at config LOAD), and (round-21 finding 1) the interpreter and
+every ancestor directory must NOT be writable by a DIFFERENT untrusted actor (world-writable, or
+group-writable to a group this process is in) — a non-sticky writable path is refused because the
+interpreter is executed from its realpath (not staged) and a swap between hash and spawn would run
+unverified bytes; a sticky dir like `/tmp` is exempt, and a EUID-owned interpreter is the same-UID
+boundary (finding 4, below); (4) the canonical execution SHAPE + ENVELOPE (`command`, `interpreted`,
+`timeoutMs`, `minOutputBytes`). In direct mode (`interpreted:false`) EVERY token after the artifact
+must embed the bound `{source}` template AND must not be a flag (round-21 finding 2 — a renamed
+interpreter reads a flag such as `-c`/`-e`/`--eval` as "run the following as code", which would
+execute the inbound `{source}` as code; a bare non-`{source}` positional is also refused). RESIDUAL:
+a renamed interpreter that treats a POSITIONAL data token as code with no flag (e.g. `awk`) still
+executes `{source}` as code in direct mode — structural closure (source off argv, or the typed
+config contract) is owner-gated. On a composite mismatch the executor logs the staged directory's file list
+(`stagedManifestFiles`) so a stray file next to the resolver is diagnosable rather than opaque.
+
+> **⚠ ROUND-21 CORRECTION (this section previously OVERSTATED closure).** An adversarial audit
+> reopened THREE execution bypasses against `2bb3b74a`, disproving the prior "round-19 residuals
+> are closed at RUNTIME" claim: (1) the interpreter was hashed then executed from its MUTABLE
+> realpath — a user-writable interpreter swapped after staging executes unverified bytes with the
+> composite unchanged (verify ≠ execute); (2) a renamed interpreter declared `interpreted:false`
+> with `["-c","{source}"]` passed verification and ran the `{source}` DATA as shell code — the
+> finding-2b guard refused only BARE positional tokens, not flag-driven code; (3) the
+> whole-directory manifest entered only regular FILES, so an added/empty DIRECTORY did not change
+> the composite. A fourth: the staged COPY is private (0700) but a same-UID concurrent writer can
+> overwrite it between re-hash and spawn (POSIX has no portable `fexecve` in Node). Round-21
+> narrows (1) by refusing an interpreter path writable by a DIFFERENT untrusted actor
+> (world-writable, or non-sticky group-writable to a group this process is in) — an EUID-owned
+> interpreter is NOT refused; it is the ratified same-UID boundary (below) — (2) by requiring every direct-mode token to
+> contain `{source}` and not start with `-` (residual: a renamed interpreter that treats a
+> positional data token as code, e.g. awk — structural closure via stdin/file source or the typed
+> config contract is owner-gated), and (3) by binding directory entries in the manifest. The
+> same-UID staged-copy window (4) is an EXPLICIT owner-gated threat-model boundary, not a closure —
+> see the capability-debt issue draft. Do not restore any blanket "residuals closed" wording here
+> without a fresh adversarial pass.
+>
+> **OWNER RATIFICATION (2026-08-13, round 22):** the owner explicitly risk-accepted BOTH named
+> residuals as documented threat-model boundaries: (a) the **F4 same-UID staged-copy window**
+> (including the EUID-owned interpreter case — refusing EUID-writable interpreters would break
+> nvm/homebrew node and the entire suite; the trust boundary is a single trusted UID, and POSIX
+> Node has no portable `fexecve` to close it structurally), and (b) the **direct-mode
+> positional-code residual** (a renamed interpreter such as `awk` treating a positional data token
+> as code; structural closure via the typed config contract / source-off-argv stays a tracked
+> debt, not a blocker). These are ACCEPTED boundaries, not open defects: a reviewer reproducing
+> either shape is reproducing the documented threat model, not reopening a finding.
+
+**OPERATOR CONSTRAINT (hard requirement):** the resolver artifact MUST live in an
+ISOLATED directory containing ONLY the resolver and its intentional siblings — nothing else may be
+written next to it (no `.DS_Store`, editor swap file, `__pycache__`, log, db, or media), it must be
+symlink-free, and within the 64 MB staging bound; otherwise every subsequent drain fails closed as
+`resolver_digest_mismatch`. The remaining graduation debt is the CONFIG-CONTRACT half of Option C
+(a typed `{ interpreter, resolverArtifactPath, args }` execution struct replacing the `command`
+array) — **owner-gated** because it touches every deployment resolver config. The runtime half is
+NOT fully done: round-21 narrowed the reopened bypasses above, but the direct-mode positional-code
+residual and the same-UID staged-copy window remain (structural closure is the typed contract +
+source-off-argv, both owner-gated). NARROW CLAIM: a passing canary attests only that the verified resolver, run against
+`sha256(probeSource)`, exited 0 within bound and produced ≥ `minOutputBytes` — it is NOT proof of
+semantic processing; the fulfillment proof stays the D6 receipt + delivery chain. The attestation
+ROW has **no probe-evidence columns**: adding them is allocated migration 60 (58 and 59 are
+published), and any such migration bumps
+`CURRENT_SCHEMA_MIGRATION` *inside the attestation binding* — invalidating every computed digest and
+reopening AS-01 — so the evidence lives in the receipt file, correlated by `nonce`, as a deliberate
+deferral. (Design-spec deviation of record: the pinned Phase-2 spec §3.3 lists these as attestation
+row fields; migration-58 realizes them as the correlated receipt instead. Not an oversight — the
+spec's row-storage form graduates with the allocated migration 60.)
+
+**Group-drain approval is atomic.** `scripts/capability-obligation-approve-drain.ts` records the
+AS-08 approval AND drives the sole `waiting_approval → waiting_capability` transition in ONE store
+transaction (`recordAndConsumeGroupDrainApproval`, round-17 finding 3): a failure rolls back both
+the approval row and the state flip, so there is no orphan-approval window. "Armed" is still not
+"will drain" — the claim additionally requires a fresh admissible attestation.
+
+**Cold-obligation activation (round 22 — owner-authorized 2026-08-13, WIRED).**
+`src/runtimes/agent/capability-obligation-drain-now.ts` (`drainObligationNow`) is the gated
+activation core — it activates ONE named `waiting_capability` obligation's per-chat session and runs
+one tick, fail-closed, refusing a group without a live AS-08 approval and refusing ANY obligation
+with no plausible attestation candidate (the round-22 pre-activation gate in
+`hasAttestationCandidateIgnoringProvider`: every binding field except the pre-spawn-unknowable
+provider/harness pair must match a live attestation, or no session is ever created; the claim's
+exact-binding admission stays authoritative). The live adapter + operator trigger live in
+`src/runtimes/agent/capability-obligation-drain-now-service.ts`: the OPERATOR TRIGGER is a same-UID
+drop-file (`<db-dir>/capability-drain-now/<obligationId>.json`, written by the schema-guarded
+dry-run-default CLI `scripts/capability-obligation-drain-now.ts`) serviced at the start of the
+obligation runtime's single-flight scan tick — deliberately NOT a new network surface and NOT an
+agent-reachable MCP tool, so no autonomous session can invoke it; its trust boundary is the single
+trusted UID (the same owner-ratified F4 boundary as the staged-copy window). Requests are CONSUMED
+(atomic rename) before servicing — a crash loses a request (operator re-issues), never services it
+twice — expire after 15 minutes, are schema-validated (strict Zod, filename↔payload id match,
+symlinks refused), and bounded per cycle. The ACTIVATION closure reuses the proven proactive-resume
+recipe (capture ownership → fresh spawn → activate) with NONE of the resume side effects (no
+checkpoint resume, no missed-message injection, no continuation turn — the only turn that can enter
+is the minted obligation turn), and its reported post-condition is the SAME dispatch-target
+predicate the supervisor uses, never the session flag alone. AE1 is intact: proactive resume still
+excludes groups; with no request file the runtime never activates anything (executor-seam test).
+Operator procedures: `docs/runbooks/capability-obligation-operator.md` §3.
+
+**Verification-harness bound.** The full-suite battery runs under an externally bounded runner
+(`scripts/full-suite-battery.ts`), which spawns vitest as a detached PROCESS GROUP with a hard
+wall-clock bound and SIGKILLs the whole group on timeout AND on every close (so a grandchild cannot
+survive a clean exit — round-18 finding 3). This exists because a synchronous fixture
+`execFileSync('git', …)` (a starved `git hash-object` on `index.lock` under load) once wedged a
+worker for ~72 minutes: vitest's async per-test timeout structurally cannot interrupt a blocking
+synchronous call, so a hung fixture produced no truthful completion signal. Semantics
+(round-18..19): a timeout is **inconclusive** (exit 124), never reportable as a pass OR a code failure;
+a group kill that fails for a non-`ESRCH` reason (e.g. `EPERM`) is inconclusive (exit 125); a signalled
+child maps to `128 + signal`. On a bound firing AND on a wrapper `SIGTERM`/`SIGINT`, a terminal grace is
+armed **UNCONDITIONALLY** and is deliberately **NOT `.unref()`'d**, so a `close` that never arrives (an
+escaped descendant holding a stdio pipe after a successful kill) resolves INCONCLUSIVE (125) rather than
+letting the event loop drain to a FALSE exit 0 — the exact false-pass the battery exists to prevent
+(round-19 finding 4). The runner is wired into the platform verification path (round-18 finding 4;
+round-19 finding 5): the **canonical `npm test`** now runs THROUGH the bounded runner, so cutover
+(`scripts/cutover.sh` PRE-01 `npm test`), the Node CI `npm test` jobs, and the release/CI full-suite
+coverage gate (`scripts/run-coverage-check.sh`, invoked by `push-gate.ts`) are ALL bounded — not only an
+ad-hoc entry.
+
+**Backfill and AS-01 rehearsal (both owner-gated).**
+`scripts/capability-obligation-backfill-manifest.ts` is READ-ONLY: from reviewer-confirmed
+source identities it emits a digest-addressed manifest of the historical obligations that
+WOULD be reprocessed (ineligible entries reported, never dropped), for owner approval. The
+digest binds the DESTINATION (conversationKey/deliveryJid/isGroup), the SOURCE identity
+(sourceDigest + token/media hash+size), the EXACT reviewer-classified recovery job id, the
+reviewer's fulfilment classification, the replay-payload INPUT DIGEST (message text + prepared
+media class), and the reviewer's EVIDENCE-MATRIX digest (transcript + tool/delivery receipts +
+later-turn review) — so an approval cannot be reused for a different destination, a swapped
+source, a different job, a changed classification, an EDITED instruction, or a different
+evidence set. Only a reviewer
+`confirmed_unfulfilled` whose persisted job agrees on inbound/message/conversation/destination,
+is completed+`echo`, and has no sibling worker-fulfilment is eligible; echo-settlement is
+corroboration with VETO power, never the affirmative proof (the executor does NOT re-derive
+non-fulfilment from echo — that delivery/fulfilment conflation is the defect this feature
+corrects). A reviewer capability override makes historical AUDIO eligible (audio is excluded
+from the live contract by construction; incident-7795 shape). The human-readable manifest
+prints exactly the digest-bound fields (destination, job, classification, source) so the
+approver SEES what the approval commits to.
+`scripts/capability-obligation-backfill-execute.ts` is the owner-gated EXECUTOR. It RECOMPUTES
+the manifest digest over the descriptors it is about to run and REFUSES the whole run on
+mismatch (a descriptor altered after approval cannot execute). For each entry it re-verifies
+the reviewer classification + exact recovery job (selected BY ID, never latest-by-sequence),
+RE-COMPUTES the input digest from the CURRENT message (a WhatsApp edit to the replayed
+instruction after approval is skipped), retains+reverifies media, and is idempotent (a second
+run creates nothing). Atomicity is ALL-OR-NOTHING over the approved set: if ANY approved entry
+hard-fails (recovery/media/input reverify), the run commits NOTHING — there is no partial
+backfill. It persists the real recovery job id as `origin_recovery_job_id` and leaves the
+original recovery-job rows untouched. Concurrency is race-free: the executor holds ONE
+`BEGIN IMMEDIATE` write lock spanning the ENTIRE critical section — the WAL-aware file-set
+backup-verify, the authoritative re-run of the recovery + idempotency checks (the phase-1
+reads are advisory), and the commit — so no concurrent writer can interleave. Media retention
+(filesystem, content-addressed) runs BEFORE the lock, keeping the locked section fully
+synchronous. Its CLI (`runBackfillExecuteCli`) is dry-run by default; applying requires a
+schema guard, a fast-fail quiescence signal (a current writer is refused; NOTE this detects a
+live writer but does NOT prove the bot process is stopped, which stays operator-attested), a
+`--backup-path` that is a byte-exact SQLite FILE-SET (main||-wal) snapshot of THE TARGET at the
+current schema — verified UNDER the write lock, so a concurrent WAL-only commit (main file
+unchanged) is caught where a main-only check would miss it (a foreign or stale backup, or a
+target that changed since the backup, is refused), an `--expect-existing` precondition on the
+current backfill count, and a `--confirm <approvedDigest>` confirmation token equal to the
+manifest digest (holding the flag is not enough — the operator must hold the artifact).
+`scripts/capability-obligation-as01-rehearsal.ts` authors the old-binary/schema rehearsal: it
+reads the startup/schema-guard command from the OLD release's OWN `package.json` (never
+guessed); requires a real SQLite CLONE inside the designated sandbox using canonical realpath
+(a symlink to a live DB, a non-regular, or a non-SQLite file are refused); takes a COHERENT
+pre-migration snapshot via `VACUUM INTO` (SQLite reads its own snapshot and writes a fresh,
+defragmented file, so ALL committed content — including frames still in the WAL — is captured
+even under a concurrent reader; a `wal_checkpoint(TRUNCATE)`+main-copy would SILENTLY drop
+committed WAL data whenever a pinned reader forces the checkpoint to return `{busy:1,
+checkpointed:0}`); migrates it `startSchema→target` and HONORS the migration
+verdict — it proceeds ONLY when the migration is ok (integrity + read-only smoke + non-decreasing
+key-table row counts with the before→after delta reported + preserved trigger DEFINITIONS, name
+AND SQL + target schema == current); an `ok:false` migration never reaches the old binary. It
+then runs the DECISIVE old-binary check only under `--confirm --network-isolated`. That check
+CLASSIFIES the observation — `rejected_no_write` / `accepted` / `wrote_dangerous` /
+`inconclusive` — with a distinguishable exit code (0 pass, 1 inconclusive, 2 INCOMPLETE-when-
+skipped, 3 accepted-owner-decision, 4 wrote-dangerous), so a skipped or unclassifiable step can
+never read as a pass. The EXPECTED rejection has a STRICT contract: a non-zero exit (not a
+126/127 tooling code) carrying the `DatabaseCompatibilityError` class AND the `future_schema`
+reason together, with no write and no tooling-error signature (`npm ERR!` / missing script /
+module-not-found) — a tooling error that merely mentions the reason string is `inconclusive`,
+not a pass. The EXACT string/ceiling contract of the old binary is confirmable only at the
+owner-gated real run against the pinned old release. Write detection is WAL-AWARE: the file-set
+hash (main||-wal) makes a write the old binary lands in the write-ahead log visible, so a
+WAL-only write is classified `wrote_dangerous`, not a clean rejection. On the expected rejection
+it proves the coupled pre-migration RESTORE (candidate §5) — a CRASH-SAFE restore: write
+temp ← backup, fsync temp, integrity_check temp, then delete the clone's `-wal`/`-shm` BEFORE
+`rename()`ing the temp over the main file, then fsync the directory. The `-wal`/`-shm` are
+discarded FIRST, never after the rename (the r12 defect): a crash at any boundary then leaves a
+recoverable file-set — the un-restored migrated clone, or the restored backup — never a
+restored-backup main paired with a stale WAL that would replay the old binary's frames on the
+next open. The restored file-set must equal the backup and pass integrity_check. The old binary runs in a sandbox HOME + npm cache (never the operator's live
+config); in tests an INJECTED runner spawns the fake directly (the default `npm run` transport
+ships unit-untested by construction and is exercised only at the owner-gated real run). Network
+isolation is a fail-closed egress probe (a reachable network REFUSES the run) — isolation can be
+disproven, never proven, so `--network-isolated` stays an operator attestation the probe
+fails-closed against; no-SEND is guaranteed by construction (it never opens a WhatsApp session).
+Backfill EXECUTION,
+the DM drain, both group drains, and the old-binary rehearsal are separately owner-gated.
+
+---
+
 ## 6. Database Schema
 
 Migration 2 creates the original durability tables. Migrations 37 and 38 add terminal-decision
@@ -1095,3 +1394,270 @@ the work. Fully autonomous re-adoption is a deliberate later decision, not a def
   `TRACKED_UNREACHABLE` (`tests/scripts/orphan-reachability-guard.test.ts`) so the gap stays
   visible rather than silent.
 - **PR3** — CLI shim so operator-side scripts can register, plus the runbook.
+
+## 8. Trigger Occurrence Lifecycle (#2566)
+
+The trigger poller commits durable evidence of every execution BEFORE the executor runs, and
+isolates hung executors from unrelated work. Slices 1–2 of #2566 implement the claim/lease,
+concurrency, and liveness-observation layers documented here; delivery separation, replay policy,
+and retention are later slices and are NOT yet implemented.
+
+### 8.1 Fenced occurrence claim (migration 57)
+
+`trigger_occurrences` gives every scheduled execution a stable identity —
+`UNIQUE(trigger_id, scheduled_for, attempt)` — and a fenced lease (`lease_owner`,
+`lease_generation`, `lease_expires_at`). `processTrigger` claims the occurrence (state
+`running`) in its own committed transaction BEFORE invoking any executor: a crash or hang
+always leaves committed evidence, and a second claim of the same occurrence is a UNIQUE
+conflict that skips WITHOUT executing — restart cannot run the same occurrence twice. The
+terminal finalize runs inside the existing run transaction and is fenced three ways: same
+`lease_owner`, same `lease_generation`, AND current state in (`claimed`,`running`) — a stolen
+lease or an abandoned execution can never rewrite a terminal state. On startup,
+`reconcileStaleOccurrences` sweeps expired-lease claims to `stale` (`stale_cause=lease_expired`)
+and never replays them: whether a side effect happened is unknowable at startup, so replay
+policy belongs to a capability-aware later slice. `trigger_runs` is byte-unchanged alongside.
+
+### 8.2 Bounded concurrency and hang isolation
+
+Non-side-effecting probe kinds (`poll.sqlite`, `poll.pinecone`, `poll.file`, `poll.url`) run
+through a bounded pool (`maxConcurrentExecutors`, default 4); every side-effecting kind
+(`poll.shell`, `schedule.*`, `event.message`) stays strictly serial. Probes carry a
+per-execution timeout (`executionTimeoutSeconds`, default 300s) finalized as the bounded class
+`execution_timeout` — abandoning a read-only probe is always safe, and the finalize state
+guard makes any late write from the abandoned execution a no-op. The run loop awaits each tick
+under `tickBudgetSeconds` (default 600s) and re-arms the timer past stragglers, which keep
+running detached and finalize under their lease.
+
+### 8.3 Independent liveness observation
+
+`TriggerLivenessObserver` runs the liveness gauges on its OWN timer (`observerIntervalMs`,
+default 60s) so they still fire when a tick hangs — a watchdog inside `tickOnce` is starved by
+the very hang it should report. It runs the #1765 past-due gauge (active, never-fired, stale
+`next_fire_at`) via a poller-owned hook, and the recurring-overdue gauge
+(`trigger_recurring_overdue`: active, fired before, `next_fire_at` more than
+`recurringOverdueGraceSeconds` past — default 900s). Both are fire-once/clear-once latched
+with restart-safe recovery markers.
+
+### 8.4 Durable notification-delivery handoff
+
+Notification dispatch is post-commit by design (a crash mid-send must not roll back the
+committed run result), which used to make a crash between COMMIT and `sendMessage` a silent
+at-most-once loss. The finalize transaction now stamps `notifyPending` on the run's
+`output_json` whenever dispatch will follow; successful dispatch and both classified failure
+paths (`notify_dispatch_failed`, `notify_forbidden_target`) clear it. Startup
+`reconcileDeliveryIntents` marks any surviving intent with the bounded class
+`notify_outcome_unknown` and NEVER re-sends: whether the message left the dead process is
+unknowable, and a duplicate send is a worse failure than a surfaced unknown. Execution state
+(`trigger_occurrences`) and delivery evidence (`deliveredWaMessageId` / notify error kinds)
+are independently queryable.
+
+### 8.5 Agent-job occurrence linkage
+
+`AgentJobContext` carries the durable `occurrenceId` of the dispatching claim, and the agent
+runtime embeds it in the journaled synthetic inbound's messageId
+(`agentjob-<triggerId>-<unixSeconds>-occ<occurrenceId>`). The #2144 turn journal and
+`trigger_occurrences` are therefore deterministically joinable — an accepted agent-job
+occurrence without a matching journaled owner is auditable incoherence rather than an
+unanswerable question.
+
+### 8.6 History lifecycle, gauges, reader, and field audit
+
+**Retention.** `triggerRunDays` / `triggerOccurrenceDays` (default 30) ride the shared
+database-retention engine: terminal `trigger_runs` and terminal/stale `trigger_occurrences`
+past the window are deleted; running runs and running/claimed occurrences are NEVER pruned
+regardless of age. Retention failure is observable through the engine's existing
+`database_retention_failed` health path.
+
+**Gauges.** The health `sqlite` block surfaces `past_due_triggers`,
+`recurring_overdue_triggers`, `active_trigger_occurrences`,
+`oldest_active_occurrence_age_s`, and `notify_outcome_unknown_runs` — counts and ages only.
+
+**Reader.** `list_trigger_runs` (MCP, read-only) returns redacted history: status,
+timestamps, attempt, bounded error class, and delivery booleans. Output content, summaries,
+error prose, and transport identifiers never cross the projection; a trigger or bead filter
+is required.
+
+**Field audit (#2566 slice 4).** `trigger_runs.status='queued'` is reserved (runs insert
+directly as `running`); `trigger_runs.attempt` and `trigger_occurrences.attempt` are always
+1 today, reserved for retry lineage; `trigger_occurrences.state='claimed'` is reserved for
+a future two-phase claim (slice 1 claims directly to `running` in one commit). Each is kept
+in its CHECK vocabulary deliberately — removal would cost a migration for no behavioral
+win. `sweep_runs` remains reserved per its schema marker pending an owner ruling.
+
+## 9. Fact-Export Queue Lifecycle (#2567)
+
+The enrichment fact-export queue (`fact_export_queue`) is the durable handoff between the
+chat-runtime enrichment poller (producer) and a fact consumer that writes facts to the
+external memory store and acknowledges outcomes. Before #2567 the claim path was an
+unfenced SELECT, acknowledgement was a void call that swallowed errors, terminal payloads
+lived forever, and health stayed green with zero consumer evidence.
+
+### 9.1 State machine and fenced leases (migration 59)
+
+Migration 59 rebuilds the table with a CHECK-enforced state machine — `pending`,
+`leased`, `retry_wait`, `exported`, `quarantined`, `retry_exhausted`,
+`legacy_unclassified` — plus lease (`lease_owner`, `lease_expires_at`), attempt
+(`attempt_count`, `next_attempt_at`), failure (`failure_code`, `failure_stage`), and
+acknowledgement (`acked_at`, `remote_record_id`) columns. Every row carries an opaque
+salted `fact_uid` (salt in `fact_export_meta`); the identity-bearing legacy `fact_id`
+never crosses a wire, log, or observability surface. Known legacy statuses mapped
+one-to-one at migration; anything else parked terminally as `legacy_unclassified`.
+
+`leasePendingFacts` claims due rows atomically (single guarded `UPDATE...RETURNING`
+with owner, expiry, and attempt increment) — two concurrent claimers can never hold the
+same row. `ackFacts` returns one explicit outcome per id (`acknowledged`,
+`already_terminal`, `lease_lost`, `unknown`, `write_failed`) with fenced writes, capped
+exponential retry backoff, and terminal `retry_exhausted` parking; `remote_record_id`
+carries the idempotent remote id for the crash window between remote write and local
+acknowledgement. Poison payloads quarantine at lease time with
+`failure_code='payload_invalid'` and never occupy wire slots.
+
+### 9.2 Crash reconciliation
+
+`reconcileExpiredLeases` returns every expired lease to `retry_wait` (with backoff and
+`failure_code='lease_expired'`) or parks it as `retry_exhausted` once attempts are spent.
+The enrichment poller runs it at the top of every cycle — consumer-model neutral crash
+hygiene, so a crashed or vanished consumer's rows can never stay `leased` forever.
+Reconciliation failure is logged and never blocks enrichment.
+
+### 9.3 Retention, gauges, and reader
+
+**Retention.** Exported rows prune past `exportedFactDays`; terminal rows
+(`quarantined` / `retry_exhausted` / `legacy_unclassified`) prune past `factTerminalDays`
+(both 30d defaults, `factExportQueue` / `factExportTerminal` result counters).
+Recoverable states (`pending` / `leased` / `retry_wait`) are NEVER pruned regardless of
+age — unfinalized work is crash evidence, not history.
+
+**Gauges.** The health `sqlite` block surfaces per-state counts
+(`fact_export_pending` … `fact_export_legacy_unclassified`),
+`fact_export_oldest_pending_age_s`, `fact_export_latest_ack_age_s`, and a derived
+`fact_export_consumer_state` (`idle` / `current` / `backlogged` / `consumer_missing`).
+Pending work past the evidence window with no lease or acknowledgement activity degrades
+overall health with `fact_export_consumer_missing` — queue admission can no longer
+masquerade as durable external memory.
+
+**Reader.** `list_fact_export_queue` (MCP, read-only, audit module) returns the redacted
+summary plus bounded rows keyed by `fact_uid`. Fact text, payload JSON, chat/sender
+identities, the legacy `fact_id`, and lease owners never cross; failure codes are stable
+machine vocabulary, never provider or error prose.
+
+### 9.4 Consumer model (held)
+
+The in-process-drainer vs. external-consumer capability/heartbeat decision is
+architecture-owner gated (#2567). Everything above is deliberately neutral — both models
+require identical lease, acknowledgement, evidence, privacy, and health contracts. Until
+a consumer ships, the honest steady state for an enrichment-enabled instance with queue
+growth is `consumer_missing`, and that is exactly what health now reports.
+
+## 10. Memory Consolidation Source Lineage (#2569)
+
+### 10.1 Pipeline shape and the defects it had
+
+Consolidation promotes durable knowledge out of episodic memory:
+`MemoryConsolidationScheduler` (`src/memory/consolidation-scheduler.ts`) owns deadlines,
+durable run receipts, cancellation, and the post-stop write fence;
+`runConsolidation` (`src/memory/consolidation-cron.ts`) selects sources (fixed semantic
+query, top-100, unfiltered), scopes them by chat+sender, clusters them
+(`clusterMemories`, `src/memory/consolidation.ts`), sends each cluster to the model, and
+upserts promoted claims back to the remote store under
+`durable:<shortHash(scope + claim)>` ids with `confidenceQualifier: 'consolidated'`.
+
+Three defects were proven against this shape (#2569):
+
+1. **Recursive eligibility.** Promotion outputs are written as ordinary records
+   (`memoryType: 'user_fact'`), so later runs re-selected prior outputs — and previously
+   discarded records — as fresh source material. Nothing was ever marked consumed.
+2. **Order-dependent partition.** Greedy first-match clustering seeded in search-result
+   order: the same record set produced different cluster partitions (and therefore
+   different model inputs) when only arrival order changed. A bridge record arriving
+   first could merge two unrelated topics into one cluster.
+3. **Wording-keyed promotion identity.** The durable id hashes scope + claim text:
+   identical wording silently overwrites, while a wording variation for the same
+   sources mints a new durable record with no supersession link.
+
+### 10.2 Landed guards (this slice)
+
+**Order-invariant clustering.** `clusterMemories` seeds in ascending
+`(id, claim||text)` order (plain code-unit compare, locale-free) over a copy of the
+input, making the partition a pure function of the record set — including under
+duplicate ids, where the text tie-break totalizes the order (records tied on both keys
+tokenize identically, so any residual tie is inert). Same set in, same partition out,
+regardless of search ranking drift.
+
+**Recursive-eligibility exclusion.** `runConsolidation` drops records carrying either
+promotion marker — the `durable:` id prefix or the `consolidated` confidence qualifier
+(case-insensitive) — before scoping. Non-string ids pass through untouched;
+`consolidateCluster`'s cluster-id guard owns that failure mode and rejects such
+clusters as `scope_invalid` (the scope loop itself checks only chat/sender
+identity). Exclusions are counted under the
+run's `skipped` counter (which therefore accrues both exclusion reasons; the log fields
+`consolidatedExcluded` and `unscopedSkipped` keep the reasons distinct and content-free).
+A consolidation run can no longer consume its own prior output.
+
+These are live-safe defect fixes: no schema, store, or contract change.
+
+### 10.3 Durable lineage contract (designed; ledger slices owner-gated)
+
+Repeated promotion of the *same raw sources* and durable disposition need state. The
+designed contract mirrors the fact-export queue machinery (§9):
+
+- **Source ledger** (local SQLite): one row per selected source with states
+  `eligible → leased → consolidated | discarded_transient` plus `quarantined`,
+  `legacy_unclassified`, attempt accounting, and an opaque salted `source_uid`
+  (fact-uid pattern, §9). Selection becomes a deterministic paged reader over the
+  ledger; the semantic search demotes to discovery/admission.
+- **Fenced claim.** A run leases sources with a single guarded `UPDATE … RETURNING`
+  keyed to its run lease (§ scheduler receipts); expired leases reconcile back to
+  `eligible` at the next run boundary. Model-returned source ids outside the leased
+  cluster fail closed before any write.
+- **Disposition saga.** Remote upsert success marks sources `consolidated` and records
+  promotion↔source lineage edges keyed by opaque ids; discards persist with stable
+  reason codes, never prose. Write failure releases the lease with attempt++.
+- **Crash reconciliation.** Boot/run-boundary reconcile covers every window: expired
+  leases → `eligible`; a promotion written remotely but not locally recorded
+  (`pending_write`) → re-drive the same idempotent upsert while its sources stay
+  un-leasable; written-but-undispositioned sources → complete the disposition. The
+  promote-once guarantee lives in this replay, not in the happy path.
+- **Promotion identity.** Anchored on scope + a hash of the sorted source-set (not
+  claim wording); a claim-hash column distinguishes re-affirmation from wording
+  drift, and drift records supersession instead of minting an unlinked sibling.
+  Policy version rides as a column, not an identity input, so policy bumps do not
+  mint sibling records. Truncated-hash collisions (same id, different source-set)
+  fail the write closed and count under a stable `conflict` code — collision policy
+  is an owner decision.
+- **Legacy classification.** Existing `durable:*` records and unattributed sources get
+  an explicit migration disposition (`legacy_unclassified`) and never become
+  recursively eligible by default.
+- **Confidentiality.** As §9: raw identities, memory text, claims, evidence, model
+  output, and exceptions never cross into logs, health, alerts, or the redacted
+  operator reader; only opaque ids, states, counts, and stable failure codes do.
+- **Retention.** Terminal ledger states (`consolidated`, `discarded_transient`,
+  `quarantined`, `legacy_unclassified`) prune under the same bounded-retention
+  discipline §9 applies to the fact-export queue; windows are an owner decision.
+- **Why a local ledger.** When the provider circuit breaker is open, remote state can
+  be neither inspected nor repaired — a remote-metadata lifecycle strands its own
+  leases exactly when reconciliation is needed. The local ledger stays repairable
+  with the provider down. Scope-claim safety across the fleet assumes chat/sender
+  scopes do not collide across instances sharing an index — the same assumption
+  current scoping makes; the owner should confirm it for the fleet topology.
+- **`DurableKnowledge` disposition.** The existing `DurableKnowledge` interface
+  (`src/memory/types.ts`) has zero consumers; the ledger either becomes its
+  implementation or the type is deleted — it does not stay dead alongside the new
+  tables.
+
+**Architecture gate (owner).** The ledger places lifecycle state in local SQLite while
+knowledge text remains in the remote store — the process-state pattern §9 already
+established. The QR-004 memory-SSOT decision (closed epic #1445) and the ledger
+migration itself remain owner-gated; ledger slices do not land until that ADR is
+ratified on #2569.
+
+### 10.4 Boundaries
+
+#2568 owns run outcome integrity, deadlines/cancellation, durable run receipts, and
+consolidation health surfaces. #2567 owns the upstream fact-export queue and the opaque
+fact-uid convention this design reuses. #2569 owns which records a run may process and
+how derived knowledge remains attributable and idempotent. Whether the ledger's new
+counters extend the #2568 run-report/receipt contract or surface behind a separate
+ledger-local gauge is an open owner decision, alongside: the canonical state enum,
+legacy classification of unattributed sources (`legacy_unclassified` vs `eligible`),
+promotion-id collision policy, and retention windows.

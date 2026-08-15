@@ -80,8 +80,6 @@ import {
   MAX_RESIDENT_SESSIONS,
   SESSION_MIN_RESIDENCY_MS,
   MAX_TOOL_FAILURE_ALERT_DEDUP_KEYS,
-  PROVIDER_FALLBACK_NOTICE_DEDUP_MS,
-  PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD,
   diagnosticBundleEnabled,
   DIAGNOSTIC_BUNDLE_THROTTLE_MS,
   HANDOFF_STALE_MS,
@@ -176,7 +174,9 @@ import {
   createOperationTracker as createOperationTrackerForPort,
   getTracker as getTrackerForPort,
   sendDirect as sendDirectForPort,
+  sendDirectWithReceipt as sendDirectWithReceiptForPort,
   type ChatTransportPort,
+  type SendDirectOutcome,
 } from './chat-transport.ts';
 import { getRecentMessages, getMessagesSince, hasFromMeReplyAfter } from '../../core/messages.ts';
 import { toConversationKey, isGroupConversationKey, GLOBAL_CONVERSATION_KEY } from '../../core/conversation-key.ts';
@@ -247,6 +247,7 @@ import {
   QueuedDecisionConsumer,
 } from './pending-poll-health.ts';
 import { HandoffDistillCoordinator } from './handoff-distill-coordinator.ts';
+import { CapabilityObligationRuntime, maybeActivateCapabilityObligationRuntime, shutdownCapabilityObligationRuntimeSafely } from './capability-obligation-runtime.ts';
 import { handoffDistillerEnabled, handoffContextEnabled, handoffDistillModel } from './handoff-distill-config.ts';
 import { config } from '../../config.ts';
 import type { StartupNotificationEvent } from '../../core/startup-notification-controller.ts';
@@ -276,7 +277,6 @@ import { startMediaBridge, setMediaBridgeChat, type MediaBridge } from './media-
 import { WorkspaceSweeper, type WorkspaceResource } from './workspace-sweeper.ts';
 import {
   fallbackProviderConfigFor,
-  oneMessageHandoffEnabled,
 } from './fallback-config.ts';
 import {
   formatClockForUser,
@@ -798,7 +798,7 @@ export class AgentRuntime implements Runtime {
   // Consecutive failed recovery probes on the revert-timer EXTENSION path
   // (process-local, reset on deactivation — which a successful probe triggers).
   // Early-window standing probes do not count: nothing is extending yet.
-  // At PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD one fallback_recovery_stalled
+  // At config.fallbackTunables.probeStallThreshold one fallback_recovery_stalled
   // alert fires per stall episode; the window keeps extending regardless.
   private fallbackProbeAttempts = 0;
   // Epoch ms of the most recent recovery probe (either path); null until the
@@ -1023,6 +1023,7 @@ export class AgentRuntime implements Runtime {
       instanceName: this.instanceName,
       sessionScope: this.sessionScope,
       cwd: this.cwd,
+      toolFailureAlertsEnabled: config.toolFailureAlertsEnabled,
       resolveProvider: () => this.effectiveProvider || this.agentProvider || 'unknown-provider',
       recentToolFailureAlerts: this.recentToolFailureAlerts,
       capDedupeMap: (map) => this.capDedupeMap(map),
@@ -1706,6 +1707,8 @@ export class AgentRuntime implements Runtime {
   /** Owns bounded terminal retries and sticky affected-scope degradation. */
   private readonly runtimeTurnSupervisor: RuntimeTurnSupervisor<RuntimeTurnPostEffects>;
   private readonly turnRecoverySupervisor: TurnRecoverySupervisor;
+  /** Obligation replay drain; null unless opted in (all-or-inert). */
+  private capabilityObligationRuntime: CapabilityObligationRuntime | null = null;
   private readonly turnRecoveryDeadman: TurnRecoveryDeadman;
   private readonly runtimeTurnHost: RuntimeTurnCoordinatorPort & RuntimeResultHandlerPort;
   private readonly runtimeTurnCoordinator: RuntimeTurnCoordinator;
@@ -2540,6 +2543,7 @@ export class AgentRuntime implements Runtime {
     return {
       get db() { return runtime.db; },
       get instanceName() { return runtime.instanceName; },
+      get fallbackTunables() { return config.fallbackTunables; },
       get cwd() { return runtime.cwd; },
       get model() { return runtime.model; },
       get agentProvider() { return runtime.agentProvider; },
@@ -2711,6 +2715,7 @@ export class AgentRuntime implements Runtime {
       set singleTurnHadToolActivity(value) { runtime.singleTurnHadToolActivity = value; },
       get isFallbackWindowActive() { return runtime.isFallbackWindowActive; },
       managerIdFor: (session) => runtime.managerIdFor(session),
+      deriveCapabilityDecision: (context, session) => runtime.capabilityObligationRuntime?.deriveCapabilityDecision(context, session) ?? Promise.resolve(undefined),
       isShuttingDown: () => runtime.shutdownRequested,
       getActiveQueue: () => runtime.getActiveQueue(),
       getQueueForChat: (chatJid, mapKey) => runtime.getQueueForChat(chatJid, mapKey),
@@ -2845,6 +2850,20 @@ export class AgentRuntime implements Runtime {
     for (const q of this.chatQueues.values()) q.setDurability(engine);
     this.turnRecoverySupervisor.start(); // PRESTAGE-T4; idempotent
     this.turnRecoveryDeadman.start();
+
+    // Obligation replay: opt-in, per_chat only; the helper keeps ABSENT fields inert.
+    this.capabilityObligationRuntime = maybeActivateCapabilityObligationRuntime({
+      enabled: this.sessionScope === 'per_chat', alreadyActive: this.capabilityObligationRuntime !== null,
+      options: config.capabilityObligations, db: this.db, store: engine.capabilityObligations, registry: this.registry,
+      getDurability: () => this.durability, resolveMapKey: (jid) => this.resolvePerChatMapKey(jid),
+      perChatTurnContexts: () => this.perChatRuntimeTurnContexts, turnCoordinator: this.runtimeTurnCoordinator,
+      resolveDispatchTarget: (jid) => this.resolvePerChatDispatchTarget(jid),
+      requireSessionToolScopeKey: (sess) => this.requireSessionToolScopeKey(sess),
+      isDispatchTargetCurrent: (t) => this.isTurnRecoveryDispatchTargetCurrent(t),
+      getChatSession: (key) => this.chatSessions.get(key),
+      captureOwnedGeneration: (key, s) => this.captureOwnedPerChatGeneration(key, s),
+      activateSpawnedSession: (key, s, o) => this.activateSpawnedOwnedPerChatSession(key, s, o),
+    }) ?? this.capabilityObligationRuntime;
   }
 
   /**
@@ -3252,7 +3271,7 @@ export class AgentRuntime implements Runtime {
                   return { allowedEgress: Array.isArray(raw.allowedEgress) ? raw.allowedEgress.filter((e: unknown) => typeof e === 'string') : [] };
                 },
               },
-              failOpen: process.env['WHATSOUP_SANDBOX_FAIL_OPEN'] === '1',
+              failOpen: config.sandboxFailOpen,
               log: (event) => log.info(event, 'egress adjudication'),
             });
             log.info(
@@ -3807,7 +3826,8 @@ export class AgentRuntime implements Runtime {
    * as a fail-CLOSED dispatch (the schedule does not silently no-op).
    */
   dispatchAgentJob(ctx: {
-    beadId: number; triggerId: number; prompt: string; title: string; reportChatJid: string;
+    beadId: number; triggerId: number; occurrenceId: number;
+    prompt: string; title: string; reportChatJid: string;
   }): { dispatched: boolean; detail?: string } {
     try {
       this.db.assertWritableCompatibility();
@@ -3826,7 +3846,10 @@ export class AgentRuntime implements Runtime {
         };
       }
       const now = Math.floor(Date.now() / 1000);
-      const messageId = `agentjob-${ctx.triggerId}-${now}`;
+      // #2566 slice 3 — the occurrence id suffix makes the journaled inbound
+      // deterministically joinable to its trigger_occurrences row (the bare
+      // trigger-id + wall-clock prefix is kept for existing consumers).
+      const messageId = `agentjob-${ctx.triggerId}-${now}-occ${ctx.occurrenceId}`;
       const inboundSeq = this.durability.journalInbound(
         messageId,
         toConversationKey(ctx.reportChatJid),
@@ -5234,14 +5257,19 @@ export class AgentRuntime implements Runtime {
       return { scope: job.scope, managerId: this.managerIdFor(session), generation: 1, session };
     }
     if (job.scope !== 'per_chat') return null;
-    const mapKey = this.resolvePerChatMapKey(job.delivery_jid);
+    return this.resolvePerChatDispatchTarget(job.delivery_jid);
+  }
+
+  /** Shared by turn recovery and capability-obligation dispatch. */
+  private resolvePerChatDispatchTarget(deliveryJid: string): TurnRecoveryDispatchTarget | null {
+    const mapKey = this.resolvePerChatMapKey(deliveryJid);
     let session = this.chatSessions.get(mapKey);
     if (!session?.getStatus().active) {
       // #2169: cold per_chat turn recovery — create session proactively when
       // the in-memory session map has none (e.g. after cold restart before any
       // inbound message arrives for this conversation).
       if (!this.chatSessions.has(mapKey)) {
-        this.ensureSessionAndQueueSync(job.delivery_jid, mapKey);
+        this.ensureSessionAndQueueSync(deliveryJid, mapKey);
         session = this.chatSessions.get(mapKey);
       }
       if (!session?.getStatus().active) return null;
@@ -6765,6 +6793,7 @@ export class AgentRuntime implements Runtime {
     // -- that's a different, narrower race this stop() call does not (and
     // cannot) close by itself.
     this.turnRecoverySupervisor.stop();
+    this.capabilityObligationRuntime?.stop();
     if (this.queueSweepTimer) {
       clearInterval(this.queueSweepTimer);
       this.queueSweepTimer = null;
@@ -6887,6 +6916,8 @@ export class AgentRuntime implements Runtime {
     }
     const trErr = await shutdownTurnRecoverySupervisorSafely(this.turnRecoverySupervisor);
     if (trErr) shutdownFailures.push(trErr);
+    const coErr = await shutdownCapabilityObligationRuntimeSafely(this.capabilityObligationRuntime);
+    if (coErr) shutdownFailures.push(coErr);
     try {
       await this.runtimeTurnCoordinator.awaitUndispatchedCrashFinalizations();
     } catch (err) {
@@ -7592,6 +7623,15 @@ export class AgentRuntime implements Runtime {
     void sendDirectForPort(this.chatTransportHost, chatJid, text, bypassEchoGuard);
   }
 
+  /**
+   * Id-bearing direct send (#2981 car-B): returns the SendDirectOutcome
+   * envelope so reply-threading consumers (F2a #2121) can reference the sent
+   * message. The void shim above stays for the legacy fire-and-forget sites.
+   */
+  sendDirectWithReceipt(chatJid: string, text: string, bypassEchoGuard = false): Promise<SendDirectOutcome> {
+    return sendDirectWithReceiptForPort(this.chatTransportHost, chatJid, text, bypassEchoGuard);
+  }
+
   // ---------------------------------------------------------------------------
   // Routing + model preference (#1977 D1) — extracted to runtime-routing.ts.
   // The delegators below keep the runtime's externally-reached entry points
@@ -7995,9 +8035,13 @@ export class AgentRuntime implements Runtime {
           // creds from the same place as the model probe + turns (launchd keychain
           // unreadable; see RCA 2026-06-24). Omitted when unset → no change.
           env: {
+            // env-allowed: child-env forward; explicit per-var allow-list, not passthrough
             HOME: process.env['HOME'],
+            // env-allowed: ambient OS PATH contract for executable resolution
             PATH: process.env['PATH'],
+            // env-allowed: child-env forward; explicit per-var allow-list, not passthrough
             USER: process.env['USER'],
+            // env-allowed: external-tool interop; must track the env the spawned claude CLI sees
             ...(process.env['CLAUDE_CONFIG_DIR'] ? { CLAUDE_CONFIG_DIR: process.env['CLAUDE_CONFIG_DIR'] } : {}),
           },
         },
@@ -8030,7 +8074,7 @@ export class AgentRuntime implements Runtime {
   ): void {
     const now = Date.now();
     for (const [key, recordedAt] of this.recentProviderFallbackNotices) {
-      if (now - recordedAt > PROVIDER_FALLBACK_NOTICE_DEDUP_MS) {
+      if (now - recordedAt > config.fallbackTunables.noticeDedupMs) {
         this.recentProviderFallbackNotices.delete(key);
       }
     }
@@ -8078,7 +8122,7 @@ export class AgentRuntime implements Runtime {
     // other case (resend / blocked / missing creds) has no continuation coming,
     // so the notice is sent standalone as before. Stash failure falls back to
     // standalone — the notice is never lost.
-    const collapse = oneMessageHandoffEnabled()
+    const collapse = config.oneMessageHandoff
       && replay.replayScheduled
       && !replay.blockedByToolActivity
       && activation.keyPresent !== false;
@@ -8118,11 +8162,11 @@ export class AgentRuntime implements Runtime {
   }
 
   private withHandoffPrefix(chatJid: string, text: string): string {
-    return withHandoffPrefixImpl(this.db, chatJid, text);
+    return withHandoffPrefixImpl(config.oneMessageHandoff, this.db, chatJid, text);
   }
 
   private flushPendingHandoffNotice(queue: IOutboundQueue): void {
-    flushPendingHandoffNoticeImpl(this.db, queue);
+    flushPendingHandoffNoticeImpl(config.oneMessageHandoff, this.db, queue);
   }
 
   private recreatePerChatSessionForFallback(

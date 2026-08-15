@@ -46,6 +46,13 @@ vi.mock('../../../src/lib/emit-alert.ts', async (importOriginal) => ({
 }));
 
 import { createChildLogger } from '../../../src/logger.ts';
+
+// #2192 slice 2b: the one-message flag lives on the real config object now;
+// the two fallback tests flip the field directly (runtime-mutable despite the
+// readonly type) instead of the env var.
+import { config as runtimeConfig } from '../../../src/config.ts';
+
+const mutableRuntimeConfig = runtimeConfig as unknown as { oneMessageHandoff: boolean };
 const runtimeLogger = createChildLogger('test');
 
 
@@ -588,9 +595,9 @@ describe('runtime terminal coordinator integration', () => {
   it('terminalizes the same context with tracked notice evidence when fallback continuation send fails', async () => {
     const db = new Database(':memory:');
     db.open();
-    const priorOneMessage = process.env['WHATSOUP_ONE_MESSAGE_HANDOFF'];
+    const priorOneMessage = mutableRuntimeConfig.oneMessageHandoff;
     try {
-      process.env['WHATSOUP_ONE_MESSAGE_HANDOFF'] = '1';
+      mutableRuntimeConfig.oneMessageHandoff = true;
       ensureStandbyNoticeSchema(db);
       const { runtime, state } = makeRuntimeState(db, {
         sessionScope: 'per_chat',
@@ -664,8 +671,7 @@ describe('runtime terminal coordinator integration', () => {
         expect.anything(),
       );
     } finally {
-      if (priorOneMessage === undefined) delete process.env['WHATSOUP_ONE_MESSAGE_HANDOFF'];
-      else process.env['WHATSOUP_ONE_MESSAGE_HANDOFF'] = priorOneMessage;
+      mutableRuntimeConfig.oneMessageHandoff = priorOneMessage;
       db.close();
     }
   });
@@ -691,9 +697,9 @@ describe('runtime terminal coordinator integration', () => {
   it('clears a stashed continuation handoff when the fallback child crashes', async () => {
     const db = new Database(':memory:');
     db.open();
-    const priorOneMessage = process.env['WHATSOUP_ONE_MESSAGE_HANDOFF'];
+    const priorOneMessage = mutableRuntimeConfig.oneMessageHandoff;
     try {
-      process.env['WHATSOUP_ONE_MESSAGE_HANDOFF'] = '1';
+      mutableRuntimeConfig.oneMessageHandoff = true;
       ensureStandbyNoticeSchema(db);
       const { runtime, state } = makeRuntimeState(db, {
         sessionScope: 'per_chat',
@@ -727,8 +733,7 @@ describe('runtime terminal coordinator integration', () => {
 
       expect(peekStandbyNotice(db, toConversationKey(runtimeContext.identity.deliveryJid))).toBeNull();
     } finally {
-      if (priorOneMessage === undefined) delete process.env['WHATSOUP_ONE_MESSAGE_HANDOFF'];
-      else process.env['WHATSOUP_ONE_MESSAGE_HANDOFF'] = priorOneMessage;
+      mutableRuntimeConfig.oneMessageHandoff = priorOneMessage;
       db.close();
     }
   });

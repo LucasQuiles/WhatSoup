@@ -26,6 +26,7 @@ import {
   isTrustedInternalDmPeer,
 } from '../../core/outbound-message-safety.ts';
 import { isGroupJid } from '../../core/jid-constants.ts';
+import { EXTERNAL_EFFECT_CONTRACT_VERSION } from '../external-effect.ts';
 
 const log = createChildLogger('mcp:media');
 
@@ -112,6 +113,7 @@ export function registerMediaTools(
     scope: 'chat',
     targetMode: 'injected',
     replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     schema: z.object({
       chatJid: z.string(),
       filePath: z.string(),
@@ -248,6 +250,7 @@ export function registerMediaTools(
     scope: 'global',
     targetMode: 'caller-supplied',
     replayPolicy: 'read_only',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     schema: z.object({
       message_id: z.string().describe('The message ID to download media from'),
       quoted: z.boolean().optional().describe('When true, download media from the quoted message instead of the message itself.'),
@@ -398,6 +401,7 @@ export function registerMediaTools(
     scope: 'global',
     targetMode: 'caller-supplied',
     replayPolicy: 'read_only',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     schema: z.object({
       message_id: z.string().describe('The audio message ID to transcribe'),
     }),

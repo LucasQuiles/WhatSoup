@@ -833,6 +833,11 @@
       "owner": "src/core/substrate/poller.ts",
       "test": "tests/core/substrate/poller-past-due-alert.test.ts"
     },
+    "trigger_recurring_overdue": {
+      "disposition": "zero_recurring_overdue_observation_proves_recovery_with_marker_reconcile",
+      "owner": "src/core/substrate/trigger-liveness-observer.ts",
+      "test": "tests/core/substrate/trigger-liveness-observer.test.ts"
+    },
     "whisper_degraded": {
       "disposition": "breaker_degradation_cleared_by_probe_proven_success",
       "owner": "src/runtimes/chat/providers/transcription/openai-whisper.ts",

@@ -23,6 +23,11 @@ let whisperAlerted = false;
 // startup reconcile to at most one marker-store read per healthy process.
 let startupReconcileDone = false;
 let client: OpenAI | null = null;
+// Credential the cached client was constructed with. A rotation (K1→K2) must
+// rebuild the client: the availability gate re-resolves on every call, so a
+// cached K1 client after a K2 rotation would pass the gate yet authenticate
+// with the retired key.
+let clientApiKey: string | null = null;
 
 type OpenAIProviderConfig = { baseUrl?: string; apiKeyService?: string };
 
@@ -37,21 +42,25 @@ function resolveTranscriptionApiKey(): string {
   });
 }
 
-function getClient(): OpenAI {
+function getClient(apiKey: string): OpenAI {
   const providerConfig = transcriptionProviderConfig();
-  if (!client) {
-    client = providerConfig
-      ? new OpenAI({
-          baseURL: providerConfig.baseUrl,
-          apiKey: resolveTranscriptionApiKey() || undefined,
-        })
-      : new OpenAI();
+  if (!client || clientApiKey !== apiKey) {
+    client = new OpenAI({
+      ...(providerConfig?.baseUrl ? { baseURL: providerConfig.baseUrl } : {}),
+      apiKey,
+    });
+    clientApiKey = apiKey;
   }
   return client;
 }
 
 export async function transcribeWithOpenAI(buffer: Buffer, mimeType: string): Promise<string> {
-  if (!resolveTranscriptionApiKey()) {
+  // Resolve ONCE per call and thread the value through to the client: the
+  // availability gate and the client construction must observe the same
+  // credential, or a key disappearing (or rotating) between the two reads
+  // could build a client with a different key than the one just checked.
+  const apiKey = resolveTranscriptionApiKey();
+  if (!apiKey) {
     throw new Error('OPENAI_API_KEY not set');
   }
 
@@ -66,7 +75,7 @@ export async function transcribeWithOpenAI(buffer: Buffer, mimeType: string): Pr
   const startMs = Date.now();
 
   try {
-    const result = await getClient().audio.transcriptions.create(
+    const result = await getClient(apiKey).audio.transcriptions.create(
       { model: 'whisper-1', file },
       { signal: controller.signal },
     );
@@ -153,6 +162,7 @@ export const openAIWhisperProvider: TranscriptionProvider = {
 export const _testing = {
   reset(): void {
     client = null;
+    clientApiKey = null;
     whisperAlerted = false;
     startupReconcileDone = false;
     breaker.recordSuccess();
