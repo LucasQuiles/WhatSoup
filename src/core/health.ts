@@ -48,7 +48,7 @@ import { isProviderId } from '../lib/provider-ids.ts';
 import type { ConnectionRecentDisconnects, ConnectionStateSnapshot } from '../transport/connection.ts';
 import { readBody } from '../lib/http.ts';
 import { readWhatsoupGitBranch, readWhatsoupGitSha } from '../lib/git-env.ts';
-import { LoopLagSampler, LOOP_LAG_STARVATION_THRESHOLD_MS } from '../lib/loop-lag-sampler.ts';
+import { LoopLagSampler, LOOP_LAG_STARVATION_THRESHOLD_MS, LOOP_LAG_RAW_RECENT_LIMIT } from '../lib/loop-lag-sampler.ts';
 import type { ConsolidationHealth } from './memory-consolidation-contract.ts';
 import type { DatabaseRetentionHealth } from './database-retention.ts';
 import type { StartupNotificationHealth } from './startup-notification-controller.ts';
@@ -1549,6 +1549,12 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
             p95LagMs: loopLag.p95LagMs,
             sampleCount: loopLag.sampleCount,
             thresholdMs: LOOP_LAG_STARVATION_THRESHOLD_MS,
+            // #3253 provenance: this warning is emitted at health-request time,
+            // potentially long after the causal delayed callback — these fields
+            // say what the window was made of; raw_recent has the sample stream.
+            intervalSampleCount: loopLag.intervalSampleCount,
+            snapshotSampleCount: loopLag.snapshotSampleCount,
+            lagMaxMs: loopLag.maxLagMs,
           }, 'event loop starvation detected during health check');
           lastLoopLagWarningAtMs = warningNowMs;
         }
@@ -2324,6 +2330,26 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           locally_starved: loopLag.locallyStarved,
           starvation_threshold_ms: LOOP_LAG_STARVATION_THRESHOLD_MS,
           discontinuity_count: loopLag.discontinuityCount,
+          lag_min_ms: loopLag.minLagMs,
+          lag_median_ms: loopLag.medianLagMs,
+          lag_max_ms: loopLag.maxLagMs,
+          interval_sample_count: loopLag.intervalSampleCount,
+          snapshot_sample_count: loopLag.snapshotSampleCount,
+          elu_utilization: loopLag.lastEluUtilization,
+          cpu_delta_ms: loopLag.lastCpuDeltaMs,
+          // #3253: bounded content-free raw observation stream (timings +
+          // provenance only). Warning timestamps lag causal events by up to a
+          // full window, so correlation work reads THIS, not the warn log.
+          raw_recent: (loopLagSampler.rawSamples?.() ?? [])
+            .slice(-LOOP_LAG_RAW_RECENT_LIMIT)
+            .map((sample) => ({
+              at_ms: sample.atMs,
+              lag_ms: sample.lagMs,
+              source: sample.source,
+              discontinuity: sample.discontinuity,
+              elu_utilization: sample.eluUtilization,
+              cpu_delta_ms: sample.cpuDeltaMs,
+            })),
         },
         mcp_liveness: mcpLiveness
           ? {

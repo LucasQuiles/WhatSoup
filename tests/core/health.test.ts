@@ -6209,10 +6209,22 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
       locallyStarved: boolean;
       discontinuityCount: number;
     }) {
+      // The raw-instrumentation fields (#3253) default to empty/null so the
+      // existing scenario call sites stay focused on the starvation contract.
       return {
         start: vi.fn(),
         stop: vi.fn(),
-        snapshot: vi.fn().mockReturnValue(snapshot),
+        snapshot: vi.fn().mockReturnValue({
+          minLagMs: null,
+          medianLagMs: null,
+          maxLagMs: null,
+          intervalSampleCount: 0,
+          snapshotSampleCount: 0,
+          lastEluUtilization: null,
+          lastCpuDeltaMs: null,
+          ...snapshot,
+        }),
+        rawSamples: vi.fn().mockReturnValue([]),
       };
     }
 
@@ -6251,7 +6263,52 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
         locally_starved: true,
         starvation_threshold_ms: 250,
         discontinuity_count: 3,
+        lag_min_ms: null,
+        lag_median_ms: null,
+        lag_max_ms: null,
+        interval_sample_count: 0,
+        snapshot_sample_count: 0,
+        elu_utilization: null,
+        cpu_delta_ms: null,
+        raw_recent: [],
       });
+    });
+
+    it('serializes the bounded raw sample stream with provenance fields and truncates to the recent limit (#3253)', async () => {
+      const sampler = fakeLoopLagSampler({
+        sampleCount: 2,
+        p95LagMs: 12,
+        locallyStarved: false,
+        discontinuityCount: 0,
+      });
+      // 161 entries: one beyond LOOP_LAG_RAW_RECENT_LIMIT (160) — the oldest
+      // must be truncated, and each served entry must carry full provenance.
+      const entries = Array.from({ length: 161 }, (_, index) => ({
+        atMs: 500 * (index + 1),
+        lagMs: index === 1 ? 300 : 0,
+        source: index % 2 === 0 ? 'interval' : 'snapshot',
+        discontinuity: false,
+        eluUtilization: 0.25,
+        cpuDeltaMs: 1.5,
+      }));
+      sampler.rawSamples.mockReturnValue(entries);
+      const deps = makeDeps(db, { loopLagSampler: sampler as any });
+      ({ server, port } = await buildTestServer(deps));
+
+      const { status, body } = await healthReq(port);
+      expect(status).toBe(200);
+      const raw = JSON.parse(body).event_loop.raw_recent;
+      expect(raw).toHaveLength(160);
+      // Oldest entry (atMs 500) truncated; stream starts at the second sample.
+      expect(raw[0]).toEqual({
+        at_ms: 1000,
+        lag_ms: 300,
+        source: 'snapshot',
+        discontinuity: false,
+        elu_utilization: 0.25,
+        cpu_delta_ms: 1.5,
+      });
+      expect(raw[159].at_ms).toBe(500 * 161);
     });
 
     it('logs a warning when the sampler reports local starvation', async () => {
