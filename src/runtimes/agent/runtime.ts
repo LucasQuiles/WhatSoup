@@ -7802,20 +7802,33 @@ export class AgentRuntime implements Runtime {
    * like opencode kimi→glm differ only by model); with no window active the
    * primary comparison is provider-only.
    */
-  private sessionMatchesCurrentRoute(session: SessionManager): boolean {
+  private sessionMatchesCurrentRoute(session: SessionManager, chatJid?: string): boolean {
     const provider = typeof session.getProviderId === 'function' ? session.getProviderId() : null;
     if (provider === null) return true; // unattributable — never block on a guess
     const entry = this.effectiveFallbackEntry;
     if (entry) {
+      // Window active: anything not serving the armed entry is stale — a
+      // PRIMARY manager (would immediately re-hit the failed primary) or a
+      // dead prior chain entry after an advance.
       if (provider !== entry.provider) return false;
       if (entry.model === undefined) return true;
       const model = typeof session.getModelRef === 'function' ? session.getModelRef() : null;
       return model === null || model === entry.model;
     }
-    // No window: compare against the configured primary. An unset primary
-    // (possible in minimal configs and test harnesses) is unjudgeable — treat
-    // as current rather than wrongly retiring a healthy manager.
-    if (typeof this.agentProvider !== 'string' || this.agentProvider === '') return true;
+    // No window: retire ONLY a manager stranded on a CONFIGURED FALLBACK
+    // provider (the post-revert remnant this incident proved). Anything else —
+    // the primary, per-chat pinned providers, test scaffolds — is not this
+    // guard's to retire; being over-broad here blocked legitimate respawns.
+    if (!this.agentFallbacks.some((candidate) => candidate.provider === provider)) return true;
+    // A per-chat pin can legitimately route a chat onto a fallback-listed
+    // provider — honor the resolved route before declaring the manager stale.
+    if (chatJid) {
+      try {
+        if (this.resolveRouteForTurn(chatJid, undefined).provider === provider) return true;
+      } catch (err) {
+        log.debug({ err, chatJid }, 'route resolution failed during currency check — falling back to primary compare');
+      }
+    }
     return provider === this.agentProvider;
   }
 
@@ -7829,14 +7842,15 @@ export class AgentRuntime implements Runtime {
   private schedulePostTransitionRouteRecycles(): void {
     if (this.sessionScope === 'per_chat') {
       for (const [mapKey, session] of this.chatSessions) {
-        if (!this.sessionMatchesCurrentRoute(session)) {
+        const deliveryJid = this.chatQueues.get(mapKey)?.targetChatJid;
+        if (!this.sessionMatchesCurrentRoute(session, deliveryJid)) {
           this.pendingRecycle.add(mapKey);
           log.info({ mapKey, sessionProvider: session.getProviderId?.() }, 'route transition left manager stale — recycle pended');
         }
       }
       return;
     }
-    if (this.session && !this.sessionMatchesCurrentRoute(this.session)) {
+    if (this.session && !this.sessionMatchesCurrentRoute(this.session, this.activeChatJid ?? undefined)) {
       this.pendingRecycle.add(GLOBAL_TOOL_SCOPE_KEY);
       log.info({ sessionProvider: this.session.getProviderId?.() }, 'route transition left singleton manager stale — recycle pended');
     }
@@ -9375,7 +9389,7 @@ export class AgentRuntime implements Runtime {
     // resuming after a revert re-arms the dead backup. Pend the deferred
     // recycle instead: the next inbound detaches the stale manager at the
     // turn-idle boundary and rebuilds on the current route.
-    if (!this.sessionMatchesCurrentRoute(args.session)) {
+    if (!this.sessionMatchesCurrentRoute(args.session, args.chatJid)) {
       this.pendingRecycle.add(mapKey);
       log.info({
         mapKey,
