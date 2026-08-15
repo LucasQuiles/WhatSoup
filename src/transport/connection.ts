@@ -595,6 +595,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     authDir: config.authDir,
     stateRoot: config.stateRoot,
     instanceName: config.botName,
+    autoRestore: config.authBondAutoRestore,
     captureBlockReason: () => this.loggedOutAlertEmitted
       ? 'loggedOut/device-bond-lost state active; refusing to snapshot possibly poisoned credentials'
       : null,

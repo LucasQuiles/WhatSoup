@@ -29,7 +29,7 @@ const ENV_ACCESS_PATTERN = /process\.env/;
 
 const ALLOWLIST: Record<string, number> = {
   // SSOT env→typed-RuntimeConfig conversion seam; every read is instance-config→env→default.
-  'src/config.ts': 31,
+  'src/config.ts': 34,
   // param-default `env` seam (WHATSOUP_REPO_ROOT) — new typed-field candidate, not a bypass.
   'src/core/arc-binding-health.ts': 1,
   // build-time injected WHATSOUP_GIT_SHA / WHATSOUP_GIT_BRANCH (deploy hook, no typed source).
@@ -66,7 +66,9 @@ const ALLOWLIST: Record<string, number> = {
   'src/lib/bot-errors-outbox.ts': 19,
   // outbox/alert config (BOT_ERRORS_*, EMIT_ALERT_THROTTLE_MS, WHATSOUP_ALERT_SINK) — slice-3.
   'src/lib/emit-alert.ts': 8,
-  // FLEET_HEALTH_VERIFY_GATE single boolean — slice-2 typed field.
+  // FLEET_HEALTH_VERIFY_GATE rollout enum (off/shadow/warn/enforce) — env-late
+  // by design: lib cannot import config, and the dial must flip live without a
+  // restart during staged fleet rollouts.
   'src/lib/fleet-health-gate.ts': 1,
   // build-meta env lookup (bounded key list, git identity).
   'src/lib/git-env.ts': 2,
@@ -86,8 +88,6 @@ const ALLOWLIST: Record<string, number> = {
   'src/mcp/register-all.ts': 1,
   // whole-object process.env → resolveReleaseIdentity (build/release identity).
   'src/runtimes/agent/capability-obligation-runtime.ts': 1,
-  // WHATSOUP_ONE_MESSAGE_HANDOFF single boolean — slice-2 typed field.
-  'src/runtimes/agent/fallback-config.ts': 1,
   // exemplar pure resolver `env: Env = process.env` param-defaults — the idiom to extend.
   'src/runtimes/agent/handoff-distill-config.ts': 3,
   // passes env into the pure resolver at the call boundary (not a bypass).
@@ -104,8 +104,8 @@ const ALLOWLIST: Record<string, number> = {
   'src/runtimes/agent/runtime-tunables.ts': 6,
   // RESPONSE_REGISTRY_DISPATCH + DIAGNOSTIC_BUNDLE flags — slice-2/3 typed fields.
   'src/runtimes/agent/runtime-turn-result-handler.ts': 2,
-  // WHATSOUP_SANDBOX_FAIL_OPEN (slice-2) + child-env forward (HOME/PATH/USER/CLAUDE_CONFIG_DIR).
-  'src/runtimes/agent/runtime.ts': 5,
+  // child-env forward (HOME/PATH/USER/CLAUDE_CONFIG_DIR) for the auth-status probe.
+  'src/runtimes/agent/runtime.ts': 4,
   // positiveIntEnv dynamic-key helper + CLAUDE_CONFIG_DIR ambient (gemini keys migrated in slice-1).
   'src/runtimes/agent/session.ts': 2,
   // BOT_ERRORS_RUNTIME_TOOL_FAILURE_ALERTS flag — slice-3 outbox/alert field.
@@ -118,8 +118,6 @@ const ALLOWLIST: Record<string, number> = {
   'src/runtimes/chat/providers/transcription/local-audio.ts': 1,
   // transcription model/bin path — slice-4 typed config.transcription.whisperCpp.*.
   'src/runtimes/chat/providers/transcription/whisper-cpp.ts': 2,
-  // WHATSOUP_AUTH_BOND_AUTO_RESTORE single boolean — slice-2 typed field.
-  'src/transport/auth-bond.ts': 1,
   // WHATSOUP_PAIR_NUMBER transport pairing — slice-3 typed field.
   'src/transport/auth.ts': 4,
   // WHATSOUP_BAILEYS_VERSION param-default — slice-3 typed field.
