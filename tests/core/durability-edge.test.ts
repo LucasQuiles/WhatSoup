@@ -626,6 +626,184 @@ describe('DurabilityEngine edge coverage', () => {
     });
   });
 
+  // -------------------------------------------------------------------------
+  // auth_terminal recovery authority (#2413) — the critical escalation says
+  // authentication cannot be restored without a human. A confirmed outbound
+  // delivery implies a successful authenticated model completion (see
+  // makeConfirmedOutboundProbe), so a gate-approved quarantine clear is the
+  // genuine-recovery proof that retires the root alert. The clear is
+  // marker-gated: only an episode that durably escalated may clear.
+  // -------------------------------------------------------------------------
+
+  describe('auth_terminal recovery authority (#2413)', () => {
+    const MARKER = 'auth_terminal:Loops';
+    const markerPresent = () => loadRecoveryMarkers().has(MARKER);
+    const authTerminalClearCall = () => vi.mocked(clearAlertSource).mock.calls.filter(
+      (call) => (call as unknown[])[1] === 'auth_terminal',
+    );
+
+    it('persists a restart-safe marker when the escalation is durably accepted', () => {
+      gateQuarantineClear.mockImplementationOnce((
+        _botName: string,
+        opts: { emitEscalation: (evidence: string) => void },
+      ) => {
+        opts.emitEscalation('repair lane exhausted');
+        return { action: 'suppress_and_escalate', mode: 'warn', tripped: true, evidence: 'proof' };
+      });
+
+      engine.postConnectRecovery();
+
+      expect(markerPresent()).toBe(true);
+      // The escalating pass must never clear its own fresh root alert.
+      expect(authTerminalClearCall()).toHaveLength(0);
+    });
+
+    it('writes no marker when the escalation itself cannot be durably queued', () => {
+      gateQuarantineClear.mockImplementationOnce((
+        _botName: string,
+        opts: { emitEscalation: (evidence: string) => void },
+      ) => {
+        opts.emitEscalation('repair lane exhausted');
+        return { action: 'suppress_and_escalate', mode: 'warn', tripped: true, evidence: 'proof' };
+      });
+      emitAlert.mockReturnValueOnce(false);
+
+      expect(() => engine.postConnectRecovery()).toThrow(
+        'quarantine escalation could not be durably queued',
+      );
+      expect(markerPresent()).toBe(false);
+    });
+
+    it('a gate-approved clear retires the root alert and consumes the marker exactly once', () => {
+      setRecoveryMarker(MARKER);
+      gateQuarantineClear.mockImplementation((
+        _botName: string,
+        opts: { emitClear: () => void },
+      ) => {
+        opts.emitClear();
+        return { action: 'clear', mode: 'warn', tripped: false, evidence: 'proof' };
+      });
+
+      engine.postConnectRecovery();
+
+      expect(authTerminalClearCall()).toHaveLength(1);
+      expect(clearAlertSource).toHaveBeenCalledWith(
+        'Loops',
+        'auth_terminal',
+        expect.stringContaining('#2413'),
+        undefined,
+        QUARANTINE_CLEAR_OPTIONS,
+      );
+      expect(markerPresent()).toBe(false);
+
+      // Marker consumed: the next approved clear stays silent on the root.
+      clearAlertSource.mockClear();
+      engine.postConnectRecovery();
+      expect(authTerminalClearCall()).toHaveLength(0);
+    });
+
+    it('mode off is not recovery proof — root alert and marker are retained', () => {
+      setRecoveryMarker(MARKER);
+      gateQuarantineClear.mockImplementationOnce((
+        _botName: string,
+        opts: { emitClear: () => void },
+      ) => {
+        opts.emitClear();
+        return { action: 'clear', mode: 'off', tripped: false, evidence: 'mode=off' };
+      });
+
+      engine.postConnectRecovery();
+
+      expect(authTerminalClearCall()).toHaveLength(0);
+      expect(markerPresent()).toBe(true);
+    });
+
+    it('a shadow cosmetic clear is not recovery proof — root alert and marker are retained', () => {
+      setRecoveryMarker(MARKER);
+      gateQuarantineClear.mockImplementationOnce((
+        _botName: string,
+        opts: { emitClear: () => void },
+      ) => {
+        opts.emitClear(); // shadow never changes behavior — proof FAILED
+        return { action: 'clear_shadow', mode: 'shadow', tripped: false, evidence: 'proof failed' };
+      });
+
+      engine.postConnectRecovery();
+
+      expect(authTerminalClearCall()).toHaveLength(0);
+      expect(markerPresent()).toBe(true);
+    });
+
+    it('a rejected sibling quarantine clear aborts before the root clear and retains the marker', () => {
+      setRecoveryMarker(MARKER);
+      gateQuarantineClear.mockImplementationOnce((
+        _botName: string,
+        opts: { emitClear: () => void },
+      ) => {
+        opts.emitClear();
+        return { action: 'clear', mode: 'warn', tripped: false, evidence: 'proof' };
+      });
+      // Reject only the legacy sibling clear; the root clear is ordered after
+      // it and must never be attempted.
+      clearAlertSource.mockImplementation(
+        ((_botName: unknown, source: unknown) => source !== 'outbound_quarantined') as unknown as () => boolean,
+      );
+
+      expect(() => engine.postConnectRecovery()).toThrow(
+        'legacy quarantine clear could not be durably queued',
+      );
+      expect(authTerminalClearCall()).toHaveLength(0);
+      expect(markerPresent()).toBe(true);
+    });
+
+    it('never clears the root on an episode that did not escalate', () => {
+      gateQuarantineClear.mockImplementationOnce((
+        _botName: string,
+        opts: { emitClear: () => void },
+      ) => {
+        opts.emitClear();
+        return { action: 'clear', mode: 'warn', tripped: false, evidence: 'proof' };
+      });
+
+      engine.postConnectRecovery();
+
+      expect(authTerminalClearCall()).toHaveLength(0);
+    });
+
+    it('a rejected root clear keeps the marker and fails the pass for retry', () => {
+      setRecoveryMarker(MARKER);
+      gateQuarantineClear.mockImplementationOnce((
+        _botName: string,
+        opts: { emitClear: () => void },
+      ) => {
+        opts.emitClear();
+        return { action: 'clear', mode: 'warn', tripped: false, evidence: 'proof' };
+      });
+      // The shared mock is declared arg-less; widen to reject only the
+      // auth_terminal clear while sibling quarantine clears stay accepted.
+      clearAlertSource.mockImplementation(
+        ((_botName: unknown, source: unknown) => source !== 'auth_terminal') as unknown as () => boolean,
+      );
+
+      expect(() => engine.postConnectRecovery()).toThrow(
+        'auth_terminal root clear could not be durably queued',
+      );
+      expect(markerPresent()).toBe(true);
+      const run = db.raw.prepare(`
+        SELECT completed_at, notes
+        FROM recovery_runs
+        WHERE trigger = 'post_connect'
+        ORDER BY id DESC
+        LIMIT 1
+      `).get() as { completed_at: string | null; notes: string | null };
+      expect(run.completed_at).toBeNull();
+      expect(JSON.parse(run.notes ?? 'null')).toMatchObject({
+        status: 'incomplete',
+        failedPhases: ['verify_quarantine_clear'],
+      });
+    });
+  });
+
   it('logRecoveryRun swallows insertion failures', () => {
     db.raw.exec('DROP TABLE recovery_runs');
 
