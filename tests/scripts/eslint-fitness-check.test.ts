@@ -90,9 +90,14 @@ describe('eslint fitness wrapper — exit semantics', () => {
     // This spawns a real ESLint pass over the entire source tree. Under the
     // coverage-instrumented CI step (slower than the plain suite) with the
     // parallel vitest pool contending for CPU, the 60s budget was marginal and
-    // flaked intermittently (observed on main too). 180s gives durable headroom
-    // without masking a genuine hang.
-  }, 180_000);
+    // flaked intermittently (observed on main too); 180s restored headroom at
+    // the time, but the tree has since grown into it — a green 24.x run on
+    // 2026-08-15 measured this file at 174s of the 180s budget, and two
+    // consecutive CI rolls then timed out on a docs-only diff. 420s restores
+    // the same ~2.4x margin over the observed worst case without masking a
+    // genuine hang (a real wedge still fails the suite well inside its step
+    // timeout).
+  }, 420_000);
 });
 
 describe('eslint fitness wrapper — refuses a scan of zero files', () => {
