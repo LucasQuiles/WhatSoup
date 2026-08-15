@@ -39,6 +39,24 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 
+// #2192: gemini-cli resolves through the keyring-aware resolver now; tests pin
+// the env-fallback path, so the keyring must deterministically miss regardless
+// of what the developer machine's real credential store contains.
+vi.mock('../../../src/lib/keyring.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/lib/keyring.ts')>();
+  return {
+    ...actual,
+    // Pure env-lookup shim (same shape as session.test.ts): deterministic
+    // regardless of the developer machine's real credential store.
+    lookupCredential: vi.fn((service: string): string | null => {
+      const envVar = actual.SERVICE_ENV_MAP[service];
+      if (!envVar) return null;
+      const val = process.env[envVar];
+      return val && val.length > 0 ? val : null;
+    }),
+  };
+});
+
 // ─── Mocks (mirror session.test.ts so behaviour matches production wiring) ──────
 
 vi.mock('../../../src/logger.ts', async () => (await import('../../helpers/logger-mock.ts')).loggerMock());
@@ -201,7 +219,9 @@ describe('buildChildEnv — credential forwarding branches', () => {
   it('gemini-cli forwards both GEMINI_API_KEY and GOOGLE_API_KEY when present', async () => {
     await withEnv({ GEMINI_API_KEY: 'env-gemini', GOOGLE_API_KEY: 'env-google' }, () => {
       const env = buildChildEnv('gemini-cli');
-      expect(env.GEMINI_API_KEY).toBe('env-gemini');
+      // Keyring-first (#2192): the env-lookup shim resolves service 'google'
+      // to GOOGLE_API_KEY, so the keyring hit feeds BOTH aliases.
+      expect(env.GEMINI_API_KEY).toBe('env-google');
       expect(env.GOOGLE_API_KEY).toBe('env-google');
     });
   });

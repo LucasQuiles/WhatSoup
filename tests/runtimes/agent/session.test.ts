@@ -4305,7 +4305,10 @@ describe('buildChildEnv', () => {
     process.env.GOOGLE_API_KEY = 'google-key-xyz';
     try {
       const env = buildChildEnv('gemini-cli');
-      expect(env.GEMINI_API_KEY).toBe('gemini-key-xyz');
+      // Keyring-first (#2192): this file's keyring mock resolves service
+      // 'google' to GOOGLE_API_KEY, so the keyring hit feeds BOTH aliases;
+      // the per-var env fallback applies only on a keyring miss.
+      expect(env.GEMINI_API_KEY).toBe('google-key-xyz');
       expect(env.GOOGLE_API_KEY).toBe('google-key-xyz');
     } finally {
       if (savedG === undefined) delete process.env.GEMINI_API_KEY;

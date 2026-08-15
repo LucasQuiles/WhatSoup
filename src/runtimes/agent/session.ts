@@ -318,8 +318,15 @@ export function buildChildEnv(
       }
       break;
     case 'gemini-cli':
-      if (process.env.GEMINI_API_KEY) env.GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-      if (process.env.GOOGLE_API_KEY) env.GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
+      // Keyring-first like the sibling cases (#2192): a configured 'google'
+      // credential feeds both aliases; each env var stays the observable
+      // fallback for its own name.
+      {
+        const geminiKey = resolveApiKey({ service: 'google', envVar: 'GEMINI_API_KEY' });
+        if (geminiKey) env.GEMINI_API_KEY = geminiKey;
+        const googleKey = resolveApiKey({ service: 'google', envVar: 'GOOGLE_API_KEY' });
+        if (googleKey) env.GOOGLE_API_KEY = googleKey;
+      }
       break;
     case 'opencode-cli': {
       const hasCustomEndpoint = opencodeUsesConfigModel(providerConfig);
