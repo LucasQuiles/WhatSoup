@@ -1677,9 +1677,10 @@ A real send or drain failure poisons that outbound scope. Poison is monotonic an
 process-local: the first exact error is retained for in-process diagnosis, later
 operations observe the same failure, and there is no generic clear operation. Per-chat
 mode closes only the affected scope so unrelated chats continue. Shared and single modes
-poison their one active outbound lane. A controlled queue/process replacement removes the
-in-memory latch, but that is **not** delivery proof and does not authorize replay or
-resend; operators must preserve and evaluate the existing durable evidence separately.
+poison their one active outbound lane. In-process queue or session replacement does not
+remove the coordinator-owned latch; only process restart constructs a fresh registry.
+Restart is **not** delivery proof and does not authorize replay or resend, so operators
+must preserve and evaluate the existing durable evidence separately.
 
 Terminal classification distinguishes the failure that caused containment from its
 consequences. The active failed turn keeps its actual processor or `pre_dispatch_error`

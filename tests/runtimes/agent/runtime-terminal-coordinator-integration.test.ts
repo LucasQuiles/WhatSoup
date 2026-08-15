@@ -55,6 +55,22 @@ import { config as runtimeConfig } from '../../../src/config.ts';
 const mutableRuntimeConfig = runtimeConfig as unknown as { oneMessageHandoff: boolean };
 const runtimeLogger = createChildLogger('test');
 
+function queuedTurn(runtimeContext: RuntimeTurnContext): QueuedTurn {
+  return {
+    sourceMessageId: runtimeContext.replay.sourceMessageId,
+    receivedAtUnixSeconds: runtimeContext.replay.receivedAtUnixSeconds,
+    conversationKey: runtimeContext.identity.conversationKey,
+    chatJid: runtimeContext.identity.deliveryJid,
+    senderJid: runtimeContext.replay.senderJid,
+    senderName: runtimeContext.replay.senderName,
+    text: runtimeContext.replay.text,
+    isGroup: false,
+    contentType: 'text',
+    runtimeContext,
+    inboundSeq: runtimeContext.identity.inboundSeq ?? undefined,
+  };
+}
+
 
 beforeEach(() => {
   emitAlert.mockClear();
@@ -76,20 +92,8 @@ describe('runtime terminal coordinator integration', () => {
       const poisonError = new Error('shared outbound delivery failed');
       const outbound = queueStub('15550190080@s.whatsapp.net');
       vi.mocked(outbound.isPoisoned).mockReturnValue(true);
-      const runtimeContext = context('shared', GLOBAL_CONVERSATION_KEY, 80, 'turn-shared-after-poison');
-      const turn: QueuedTurn = {
-        sourceMessageId: runtimeContext.replay.sourceMessageId,
-        receivedAtUnixSeconds: runtimeContext.replay.receivedAtUnixSeconds,
-        conversationKey: runtimeContext.identity.conversationKey,
-        chatJid: runtimeContext.identity.deliveryJid,
-        senderJid: runtimeContext.replay.senderJid,
-        senderName: runtimeContext.replay.senderName,
-        text: runtimeContext.replay.text,
-        isGroup: false,
-        contentType: 'text',
-        runtimeContext,
-        inboundSeq: runtimeContext.identity.inboundSeq ?? undefined,
-      };
+      const runtimeContext = context('shared', 'different-shared-chat', 80, 'turn-shared-after-poison');
+      const turn = queuedTurn(runtimeContext);
 
       await expect(state.runtimeTurnCoordinator.observeOutboundQueueOperation(
         GLOBAL_CONVERSATION_KEY,
@@ -126,20 +130,7 @@ describe('runtime terminal coordinator integration', () => {
       vi.mocked(poisonedOutbound.flush).mockRejectedValue(poisonError);
 
       const makeTurn = (scope: string, seq: number, turnId: string): QueuedTurn => {
-        const runtimeContext = context('per_chat', scope, seq, turnId);
-        return {
-          sourceMessageId: runtimeContext.replay.sourceMessageId,
-          receivedAtUnixSeconds: runtimeContext.replay.receivedAtUnixSeconds,
-          conversationKey: runtimeContext.identity.conversationKey,
-          chatJid: runtimeContext.identity.deliveryJid,
-          senderJid: runtimeContext.replay.senderJid,
-          senderName: runtimeContext.replay.senderName,
-          text: runtimeContext.replay.text,
-          isGroup: false,
-          contentType: 'text',
-          runtimeContext,
-          inboundSeq: runtimeContext.identity.inboundSeq ?? undefined,
-        };
+        return queuedTurn(context('per_chat', scope, seq, turnId));
       };
 
       const active = makeTurn(poisonedScope, 81, 'turn-poison-active');
@@ -215,6 +206,97 @@ describe('runtime terminal coordinator integration', () => {
       ]));
       expect(terminals.filter((item) => item.logicalTurnId === 'turn-poison-pending')).toHaveLength(1);
       expect(terminals.filter((item) => item.logicalTurnId === 'turn-poison-next')).toHaveLength(1);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('keeps canonical poison across healthy queue replacement and clears it only with a new coordinator', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const { state } = makeRuntimeState(db, { sessionScope: 'per_chat' });
+      const durability = durabilityMock();
+      state.durability = durability;
+      const provisionalScope = 'replacement-scope@lid';
+      const canonicalScope = '15550190085@s.whatsapp.net';
+      const poisonError = new Error('replacement must not clear this failure');
+      const failedQueue = queueStub(provisionalScope);
+      vi.mocked(failedQueue.isPoisoned).mockReturnValue(true);
+
+      await expect(state.runtimeTurnCoordinator.observeOutboundQueueOperation(
+        provisionalScope,
+        failedQueue,
+        async () => { throw poisonError; },
+      )).rejects.toBe(poisonError);
+      state.runtimeTurnCoordinator.rekeyPerChatOutboundQueuePoisonScope(
+        provisionalScope,
+        canonicalScope,
+      );
+
+      const healthyReplacement = queueStub(canonicalScope);
+      expect(healthyReplacement.isPoisoned()).toBe(false);
+      state.chatQueues.set(canonicalScope, healthyReplacement);
+      expect(state.runtimeTurnCoordinator.enqueuePerChatRuntimeTurn(
+        provisionalScope,
+        queuedTurn(context('per_chat', provisionalScope, 85, 'turn-old-alias-after-replacement')),
+      )).toBe(false);
+      expect(state.runtimeTurnCoordinator.enqueuePerChatRuntimeTurn(
+        canonicalScope,
+        queuedTurn(context('per_chat', canonicalScope, 86, 'turn-canonical-after-replacement')),
+      )).toBe(false);
+      await state.runtimeTurnCoordinator.awaitRejectedRuntimeTurnFinalizations();
+
+      expect(state.runtimeTurnCoordinator.outboundQueuePoisonHealth()).toEqual({
+        outboundQueuePoisoned: true,
+        outboundQueuePoisonedScopes: 1,
+        activeAdmissionLaneBlocked: true,
+      });
+      expect(durability.finalizeTurnTerminal).toHaveBeenCalledTimes(2);
+
+      const restarted = makeRuntimeState(db, { sessionScope: 'per_chat' });
+      expect(restarted.state.runtimeTurnCoordinator.outboundQueuePoisonHealth()).toEqual({
+        outboundQueuePoisoned: false,
+        outboundQueuePoisonedScopes: 0,
+        activeAdmissionLaneBlocked: false,
+      });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('preserves active teardown ownership when poison containment overlaps it', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const { state } = makeRuntimeState(db, { sessionScope: 'per_chat' });
+      state.durability = durabilityMock();
+      const scope = 'teardown-owned-scope';
+      const owned = queuedTurn(context('per_chat', scope, 87, 'turn-owned-by-teardown'));
+      const turnQueue = new TurnQueue();
+      expect(turnQueue.enqueue(owned)).toBe(true);
+      const teardown = turnQueue.beginTeardown();
+      expect(teardown.pending).toEqual([owned]);
+      (state.perChatTurnQueues as unknown as Map<string, TurnQueue>).set(scope, turnQueue);
+
+      const poisonError = new Error('original outbound failure during teardown');
+      const failedQueue = queueStub(scope);
+      vi.mocked(failedQueue.isPoisoned).mockReturnValue(true);
+      await expect(state.runtimeTurnCoordinator.observeOutboundQueueOperation(
+        scope,
+        failedQueue,
+        async () => { throw poisonError; },
+      )).rejects.toBe(poisonError);
+
+      expect(state.runtimeTurnCoordinator.outboundQueuePoisonHealth()).toEqual({
+        outboundQueuePoisoned: true,
+        outboundQueuePoisonedScopes: 1,
+        activeAdmissionLaneBlocked: true,
+      });
+      expect(teardown.pending).toEqual([owned]);
+      expect(() => turnQueue.closeAndTakePendingTurns()).toThrow(/teardown.*active/i);
+      expect(state.durability.finalizeTurnTerminal).not.toHaveBeenCalled();
+      turnQueue.commitTeardown(teardown);
     } finally {
       db.close();
     }

@@ -1,3 +1,5 @@
+import { ScopeAliasMap } from './scope-alias-map.ts';
+
 export interface OutboundQueuePoisonHealth {
   outboundQueuePoisoned: boolean;
   outboundQueuePoisonedScopes: number;
@@ -11,17 +13,17 @@ export interface OutboundQueuePoisonHealth {
  */
 export class OutboundQueuePoisonRegistry {
   private readonly causes = new Map<string, unknown>();
-  private readonly aliases = new Map<string, string>();
+  private readonly scopeAliases = new ScopeAliasMap();
 
   record(scopeKey: string, error: unknown): boolean {
-    const canonical = this.resolve(scopeKey);
+    const canonical = this.scopeAliases.resolve(scopeKey);
     if (this.causes.has(canonical)) return false;
     this.causes.set(canonical, error);
     return true;
   }
 
   has(scopeKey: string): boolean {
-    return this.causes.has(this.resolve(scopeKey));
+    return this.causes.has(this.scopeAliases.resolve(scopeKey));
   }
 
   snapshot(): OutboundQueuePoisonHealth {
@@ -34,28 +36,13 @@ export class OutboundQueuePoisonRegistry {
   }
 
   rekey(fromScopeKey: string, toScopeKey: string): void {
-    const from = this.resolve(fromScopeKey);
-    const to = this.resolve(toScopeKey);
-    if (from === to) return;
-
-    this.aliases.set(fromScopeKey, to);
-    this.aliases.set(from, to);
+    const migration = this.scopeAliases.rekey(fromScopeKey, toScopeKey);
+    if (migration === null) return;
+    const { from, to } = migration;
     const sourceWasPoisoned = this.causes.has(from);
     if (!this.causes.has(to) && sourceWasPoisoned) {
       this.causes.set(to, this.causes.get(from));
     }
     if (sourceWasPoisoned) this.causes.delete(from);
-  }
-
-  private resolve(scopeKey: string): string {
-    let resolved = scopeKey;
-    const seen = new Set<string>();
-    while (!seen.has(resolved)) {
-      seen.add(resolved);
-      const next = this.aliases.get(resolved);
-      if (next === undefined) break;
-      resolved = next;
-    }
-    return resolved;
   }
 }

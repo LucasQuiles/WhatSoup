@@ -337,6 +337,14 @@
       "test": "tests/runtimes/agent/health-snapshot.test.ts"
     },
     {
+      "field": "outboundQueuePoisonedScopes",
+      "label": "runtime_agent_outbound_queue_poisoned_scopes",
+      "kind": "active_episode_count",
+      "currentHealthEffect": "positive_is_risk",
+      "owner": "src/runtimes/agent/runtime.ts",
+      "test": "tests/runtimes/agent/health-snapshot.test.ts"
+    },
+    {
       "field": "recentCrashes",
       "label": "runtime_agent_recent_crashes",
       "kind": "current_gauge",

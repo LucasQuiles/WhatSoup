@@ -1,6 +1,6 @@
 # Outbound Queue Quiescence and Poison Containment Implementation Plan
 
-**Status:** Active — implementation and local verification are complete; integration remains pending.
+**Status:** Active — core and adjacent integration are complete; final staged verification and independent review remain pending.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. Every production task also requires superpowers:test-driven-development, superpowers:test-integrity, and superpowers:verification-before-completion.
 
@@ -741,7 +741,152 @@ git add src/runtimes/agent/runtime.ts src/core/health.ts \
 git commit -m "fix(health): report active outbound queue poison"
 ```
 
-### Task 5: Document contracts, prove branch completeness, and open the reviewed PR
+### Task 5: Compensate adjacent health, lifecycle, and operator consumers
+
+**Files:**
+- Create: `src/runtimes/agent/scope-alias-map.ts`
+- Modify: `src/runtimes/agent/turn-queue-halt-latch.ts`
+- Modify: `src/runtimes/agent/outbound-queue-poison-registry.ts`
+- Modify: `src/lib/fault-taxonomy-registry.json`
+- Modify: `tests/core/failure-taxonomy-cross-contract.test.ts`
+- Modify: `tests/scripts/bot-errors-health-check.test.ts`
+- Modify: `deploy/scripts/tests/test_bot_errors_fault_taxonomy_registry.py`
+- Modify: `deploy/bot-errors-runtime-manifest.json`
+- Modify: `tests/runtimes/agent/lib/runtime-terminal-coordinator-harness.ts`
+- Modify: `tests/runtimes/agent/runtime-terminal-coordinator-integration.test.ts`
+- Modify: `tests/fleet/routes/lines.test.ts`
+- Modify: `tests/console/line-detail-tabs.test.tsx`
+- Modify: `docs/durability.md`
+- Modify: `docs/public-surface.md`
+- Modify: `docs/runbook.md`
+- Regenerate: `docs/work-index.json`
+- Regenerate: `docs/work-index.md`
+
+**Interfaces:**
+- Reuse: `runtimeAgentHealthSignals` as the sole numeric agent-health registry
+- Reuse: BOT ERRORS `positive_is_risk` classification and bounded evidence labels
+- Reuse: one internal scope-alias resolver for halt and poison registries
+- Preserve: process-local poison across every in-process queue/session replacement
+- Preserve: active teardown ownership without replacing the original outbound failure
+
+- [ ] **Step 1: Prove the missing operational-health registration RED**
+
+Add `outboundQueuePoisonedScopes` to the exact expected-field inventories in the
+TypeScript and Python taxonomy tests. Add a BOT ERRORS health-check case asserting that
+`outboundQueuePoisonedScopes: 1` produces `runtime_agent_at_risk` and bounded evidence
+`runtime_agent_outbound_queue_poisoned_scopes=1`.
+
+Run:
+
+```bash
+bash scripts/run-with-pinned-npm.sh test -- \
+  tests/core/failure-taxonomy-cross-contract.test.ts \
+  tests/scripts/bot-errors-health-check.test.ts \
+  --pool=forks --fileParallelism=false --retry=0
+python3 -m unittest deploy/scripts/tests/test_bot_errors_fault_taxonomy_registry.py
+```
+
+Expected: the exact inventories and BOT ERRORS evidence test fail because the canonical
+registry does not yet include the emitted runtime field. A Python runner mismatch is
+inconclusive rather than a passing result; use the repository's owning Python test command
+if `run-tokenomics-pytests.sh` does not accept a file argument.
+
+- [ ] **Step 2: Register the existing field instead of adding a parallel checker**
+
+Add one `runtimeAgentHealthSignals` entry:
+
+```json
+{
+  "field": "outboundQueuePoisonedScopes",
+  "label": "runtime_agent_outbound_queue_poisoned_scopes",
+  "kind": "active_episode_count",
+  "currentHealthEffect": "positive_is_risk",
+  "owner": "src/runtimes/agent/runtime.ts",
+  "test": "tests/runtimes/agent/health-snapshot.test.ts"
+}
+```
+
+Do not create another health registry, parser, severity branch, or alert source. The
+existing BOT ERRORS loop must discover and classify the field dynamically from this
+entry.
+
+- [ ] **Step 3: Prove queue replacement, restart, rekey, and teardown semantics**
+
+Add focused coordinator integration cases proving:
+
+- a healthy replacement queue does not clear a poisoned canonical scope;
+- `/new`, provider fallback, and ordinary queue replacement are therefore not recovery
+  proof and same-scope admission remains `scope_blocked_recovery`;
+- a newly constructed coordinator after process restart begins with an empty registry;
+- LID-to-canonical rekey keeps both aliases blocked and retains one aggregate scope;
+- poison observed while a `TurnQueue` teardown receipt owns pending turns rethrows the
+  original outbound error, keeps poison health active, and leaves the receipt's ownership
+  unchanged for exactly-once terminalization.
+
+Use the existing coordinator, registry, `TurnQueue.beginTeardown()`, and rejected-turn
+finalizer. Do not add a clear method, replacement callback, or another ownership map.
+
+- [ ] **Step 4: Correct the operator contract**
+
+State consistently that only process restart constructs a fresh poison registry. An
+in-process queue or session replacement does not clear it. Restart remains neither
+delivery proof nor replay authorization, and the operator must reconcile durable evidence
+before an approved restart.
+
+- [ ] **Step 5: Remove duplicate alias resolution without combining domain ownership**
+
+Extract the identical cycle-safe scope resolution and canonical rekey bookkeeping from
+`TurnQueueHaltLatch` and `OutboundQueuePoisonRegistry` into one small internal helper.
+Keep the halted-scope set and poison-cause map in their existing owners, retain both
+public APIs, and preserve first-cause and destination-collision behavior. Verify the two
+owning unit suites and coordinator integration, then run the strict multi-signal clone
+pipeline over `src/runtimes/agent` with no skipped or failed detectors.
+
+- [ ] **Step 6: Repin and run the existing operational guards**
+
+Update only the changed `src/lib/fault-taxonomy-registry.json` SHA-256 entry in
+`deploy/bot-errors-runtime-manifest.json`, then run:
+
+```bash
+bash scripts/run-with-pinned-npm.sh run guard:fault-taxonomy-coverage
+bash scripts/run-with-pinned-npm.sh run guard:bot-errors-runtime-manifest
+bash scripts/run-with-pinned-npm.sh run guard:source-runtime-drift
+bash scripts/run-with-pinned-npm.sh test -- \
+  tests/core/failure-taxonomy-cross-contract.test.ts \
+  tests/scripts/bot-errors-health-check.test.ts \
+  tests/scripts/check-bot-errors-runtime-manifest.test.ts \
+  tests/fleet/routes/lines.test.ts \
+  tests/console/line-detail-tabs.test.tsx \
+  --pool=forks --fileParallelism=false --retry=0
+python3 -m unittest deploy/scripts/tests/test_bot_errors_fault_taxonomy_registry.py
+```
+
+Expected: the registry/checker/manifest agree, fleet and console retain the bounded cause
+through their existing generic contracts, and no raw scope or error text reaches those
+consumers. If the exact console suite name has drifted, inventory the current owning test
+instead of creating a one-off test runner.
+
+- [ ] **Step 7: Commit the integration compensation**
+
+```bash
+git add src/lib/fault-taxonomy-registry.json \
+  src/runtimes/agent/scope-alias-map.ts \
+  src/runtimes/agent/turn-queue-halt-latch.ts \
+  src/runtimes/agent/outbound-queue-poison-registry.ts \
+  tests/core/failure-taxonomy-cross-contract.test.ts \
+  tests/scripts/bot-errors-health-check.test.ts \
+  deploy/scripts/tests/test_bot_errors_fault_taxonomy_registry.py \
+  deploy/bot-errors-runtime-manifest.json \
+  tests/runtimes/agent/lib/runtime-terminal-coordinator-harness.ts \
+  tests/runtimes/agent/runtime-terminal-coordinator-integration.test.ts \
+  tests/fleet/routes/lines.test.ts tests/console/line-detail-tabs.test.tsx \
+  docs/durability.md docs/public-surface.md docs/runbook.md \
+  docs/work-index.json docs/work-index.md \
+  docs/superpowers/plans/2026-08-14-outbound-queue-quiescence-containment.md
+git commit -m "fix(health): integrate outbound poison operations"
+```
+
+### Task 6: Document contracts, prove branch completeness, and open the reviewed PR
 
 **Files:**
 - Modify: `docs/durability.md`
@@ -761,7 +906,8 @@ Document all of the following exactly:
 
 - `flush`, poll, turn-evidence, and shutdown share one stable boundary;
 - post-closure content is rejected and cannot leak into a replacement queue epoch;
-- genuine poison is process-local and sticky until queue/process replacement;
+- genuine poison is process-local, survives in-process queue/session replacement, and
+  clears only when process restart constructs a fresh registry;
 - active turn versus pending/new turn failure classes differ intentionally;
 - `outboundQueuePoisoned` and `outboundQueuePoisonedScopes` expose aggregates only;
 - per-chat poison is degraded while shared/single poison is unhealthy;

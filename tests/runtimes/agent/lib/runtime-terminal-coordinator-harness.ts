@@ -102,6 +102,7 @@ export interface RuntimeState {
       outboundQueuePoisonedScopes: number;
       activeAdmissionLaneBlocked: boolean;
     };
+    rekeyPerChatOutboundQueuePoisonScope(fromScopeKey: string, toScopeKey: string): void;
     enqueueSharedRuntimeTurn(turn: QueuedTurn): boolean;
     enqueuePerChatRuntimeTurn(mapKey: string, turn: QueuedTurn): boolean;
     terminalizePerChatTurnQueueForKill(mapKey: string): Promise<void>;

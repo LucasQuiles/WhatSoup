@@ -466,13 +466,15 @@
     },
     {
       "path": "src/lib/fault-taxonomy-registry.json",
-      "sha256": "6eee8f068f39800a74b002c27ee47a52dfe86e5da7adffdf4fd02eb608e65df4",
+      "sha256": "1396001e0255c31e1063fa3e0a5204a86b76330d9794ac7d0747ba838e8b49de",
       "mustContain": [
         "whatsoup-fault-taxonomy-registry-v3",
         "runtimeAgentHealthSignals",
         "turnRecoveryBlockedUnsafe",
         "autoCompactActiveBackoffScopes",
-        "agent_outbound_queue_poisoned"
+        "agent_outbound_queue_poisoned",
+        "outboundQueuePoisonedScopes",
+        "runtime_agent_outbound_queue_poisoned_scopes"
       ]
     },
     {

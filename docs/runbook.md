@@ -667,10 +667,12 @@ its actual processor or `pre_dispatch_error` classification; pending and new tur
 because of containment use `scope_blocked_recovery`.
 
 Do not use a restart as proof that any message was delivered. Poison is a process-local,
-sticky containment latch, so queue/process replacement removes the latch but does not
-prove delivery, create an acknowledgement, or authorize replay/resend. There is no generic
-in-process clear. Recovery debt is separate and neither creates nor clears poison; inspect
-both signals independently before deciding whether a controlled restart is appropriate.
+sticky containment latch owned above individual queues, so `/new`, provider fallback, and
+ordinary in-process queue or session replacement do not remove it. Only process restart
+constructs a fresh registry, and that still does not prove delivery, create an
+acknowledgement, or authorize replay/resend. There is no generic in-process clear. Recovery
+debt is separate and neither creates nor clears poison; inspect both signals independently
+before deciding whether a controlled restart is appropriate.
 
 On `agent_respawn_failed` / auto-respawn exhaustion, do not delete the session, queue, or
 checkpoint to force green health. The runtime marks that manager exhausted and defers destructive
