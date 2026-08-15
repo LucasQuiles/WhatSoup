@@ -28,3 +28,17 @@ exactly one publication-hygiene edit (a home-relative reviewer path on the
   4cf33b1a475a448d4244495cab30c21a8bf149605c2f971f04804a7803c11c33
 - `s4-design.md` delegate original
   ef69e399e0ff864b6b8478d80a282a34e0e64d94bbbc46ab083d1ba1deaf16fa
+- `s5-design.md` landed (one publication-hygiene reword: the s4-report
+  citation on the "Prior-slice inputs" line now points at the in-repo copy)
+  068fa62587ccd6940eb982ec2e0a0a8457e156d7592186d7404b49e5a9632eeb
+- `s5-design.md` delegate original
+  b562c2bc7496169fa0cf7008646f0aa9e6f96ac7b4e8c109a2c40d7e56a6f2d8
+
+Post-landing corrections are appended to the records as clearly-marked
+CORRECTION notes (the scout text above them is preserved verbatim):
+`s4-design.md` §4 under-counted the Baileys-pin callers (auth.ts:88 was a
+second caller, converted in #3245), and its Car 2 recipe named the field
+path `agentOptions.fallbackTunables` where the landed field is top-level
+`config.fallbackTunables` sourced FROM `agentOptions.fallbackTunables`
+instance config (#3247). The landed-hash pins above cover the records as
+first landed; corrections change bytes after those pins by design.

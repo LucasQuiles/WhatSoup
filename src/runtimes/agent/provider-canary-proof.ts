@@ -210,10 +210,15 @@ function readBinaryVersion(entrypoint: string): string {
   }
   const env = Object.fromEntries(
     Object.entries({
+      // env-allowed: ambient OS PATH contract for executable resolution
       PATH: process.env.PATH,
+      // env-allowed: child-env forward; explicit per-var allow-list, not passthrough
       USER: process.env.USER,
+      // env-allowed: child-env forward; explicit per-var allow-list, not passthrough
       SHELL: process.env.SHELL,
+      // env-allowed: child-env forward; explicit per-var allow-list, not passthrough
       LANG: process.env.LANG,
+      // env-allowed: child-env forward; explicit per-var allow-list, not passthrough
       SYSTEMROOT: process.env.SYSTEMROOT,
       HOME: root,
       XDG_CONFIG_HOME: config,
@@ -237,6 +242,7 @@ function readBinaryVersion(entrypoint: string): string {
   }
 }
 
+// env-allowed: ambient OS PATH contract for executable resolution
 function resolveExecutable(binary: string, pathValue = process.env.PATH ?? ''): string {
   if (binary.includes('/')) {
     accessSync(binary, constants.X_OK);

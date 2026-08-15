@@ -34,6 +34,7 @@ export function resolveBinaryPath(binary: string): string | null {
     return isExecutable(candidate) ? candidate : null;
   }
 
+  // env-allowed: ambient OS PATH contract for executable resolution
   const pathDirs = (process.env.PATH ?? DEFAULT_EXECUTABLE_PATH).split(delimiter);
   for (const dir of pathDirs) {
     const candidate = resolve(dir || '.', binary);

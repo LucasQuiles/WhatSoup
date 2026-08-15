@@ -129,6 +129,7 @@ interface InstanceConfig {
 
 function pinProcessTmpDir(paths: InstancePaths): void {
   fs.mkdirSync(paths.tmpDir, { recursive: true, mode: 0o700 });
+  // env-allowed: TMPDIR publish-back pattern; config writes it at load, env is the lib-side channel
   process.env.TMPDIR = paths.tmpDir;
 }
 
@@ -199,5 +200,6 @@ export function loadInstance(name: string, opts?: { authOnly?: boolean }): void 
   // 7. Publish the validated config: typed store is the in-process SSOT
   // (#2206); the env var stays for the remaining compat consumers.
   setLoadedInstanceConfig(config as unknown as Record<string, unknown>);
+  // env-allowed: multi-instance bootstrap protocol; pre-config channel by design
   process.env.INSTANCE_CONFIG = JSON.stringify(config);
 }

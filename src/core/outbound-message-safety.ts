@@ -364,6 +364,7 @@ const EMPTY_JID_SET: ReadonlySet<string> = new Set();
  * (cheap) so an env change takes effect on the next send without a restart.
  */
 function internalGroupJids(): ReadonlySet<string> {
+  // env-allowed: config-published or env-late routing var; call-time read needs no config import
   const raw = process.env['WHATSOUP_INTERNAL_JIDS']?.trim();
   if (!raw) return EMPTY_JID_SET;
   return new Set(raw.split(',').map((j) => j.trim()).filter(Boolean));
@@ -373,6 +374,7 @@ export function resolveOutboundAudience(
   chatJid: string,
   ctx?: OutboundAudienceContext,
 ): OutboundAudience {
+  // env-allowed: config-published or env-late routing var; call-time read needs no config import
   const opsJid = process.env['BOT_ERRORS_JID']?.trim();
   if (opsJid && chatJid === opsJid) return 'ops';
   if (internalGroupJids().has(chatJid)) return 'internal';

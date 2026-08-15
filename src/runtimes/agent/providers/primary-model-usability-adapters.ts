@@ -272,8 +272,11 @@ function modelProbeEnv(
   }
   const proxyUrl = baseOpts ? `http://127.0.0.1:${baseOpts.egressProxyPort}` : undefined;
   return {
+    // env-allowed: child-env forward; explicit per-var allow-list, not passthrough
     HOME: process.env.HOME,
+    // env-allowed: ambient OS PATH contract for executable resolution
     PATH: process.env.PATH,
+    // env-allowed: child-env forward; explicit per-var allow-list, not passthrough
     USER: process.env.USER,
     NO_COLOR: '1',
     // Mirror buildBaseChildEnv: forward CLAUDE_CONFIG_DIR (if set) so the
@@ -283,6 +286,7 @@ function modelProbeEnv(
     // readable `.credentials.json` file store. Omitting it pinned rb-bot in
     // auth-required fallback even after a successful reauth. undefined is dropped
     // by the spawn layer when the var is unset → no change on hosts that omit it.
+    // env-allowed: external-tool interop; must track the env the spawned claude CLI sees
     ...(process.env.CLAUDE_CONFIG_DIR ? { CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR } : {}),
     // Egress proxy (#1607, F6): UPPER + lower case (curl reads lowercase for
     // plain HTTP; see child-env.ts / F4). Only present when opted in.

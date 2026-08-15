@@ -182,7 +182,9 @@ export function startDatabaseCompatibilityHealthServer(
           pid: process.pid,
           mode: 'inspection_only',
           socket_path: null,
+          // env-allowed: build-time injected git identity; deploy hook, no typed source
           commit: process.env.WHATSOUP_GIT_SHA ?? null,
+          // env-allowed: build-time injected git identity; deploy hook, no typed source
           branch: process.env.WHATSOUP_GIT_BRANCH ?? null,
         },
         whatsapp: {

@@ -159,6 +159,7 @@ export function detectKeyringBackend(): KeyringBackend {
     // storage to plaintext 0600 files is alarming and must be operator-visible.
     const probeErrored = !isProbeAbsentError(err);
 
+    // env-allowed: secret resolver surface; must stay env-late by contract
     if (probeErrored && process.env.REQUIRE_OS_KEYRING) {
       // Honor REQUIRE_OS_KEYRING: an errored downgrade is fatal here rather than
       // silently falling back to plaintext file storage. A genuinely-absent
@@ -219,6 +220,7 @@ export function lookupEnvCredential(service: string): string | null {
   if (!isValidCredentialService(service)) return null;
   const envKey = SERVICE_ENV_MAP[service];
   if (!envKey) return null;
+  // env-allowed: secret resolver surface; must stay env-late by contract
   const trimmed = process.env[envKey]?.trim();
   return trimmed ? trimmed : null;
 }
@@ -240,6 +242,7 @@ export function lookupCredential(service: string, options: CredentialLookupOptio
   const lookupEnv = (): string | null => {
     const envKey = SERVICE_ENV_MAP[service];
     if (!envKey) return null;
+    // env-allowed: secret resolver surface; must stay env-late by contract
     const envVal = process.env[envKey];
     // QR-157: trim FIRST, then check — a whitespace-only env var (`'   '`) is
     // truthy but trims to `''`. Returning that empty string is dangerous for
@@ -554,6 +557,7 @@ export function _setFileStoreDirForTests(dir: string | null): void {
 
 function fileStoreDir(): string {
   if (_fileStoreDirOverride) return _fileStoreDirOverride;
+  // env-allowed: ambient OS contract (XDG dirs); absence handling load-bearing
   const base = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config');
   return path.join(base, 'whatsoup', 'credentials');
 }
@@ -606,6 +610,7 @@ export function _setOpenCodeAuthDirForTests(dir: string | null): void {
 
 function openCodeAuthPath(): string {
   if (_openCodeAuthDirOverride) return path.join(_openCodeAuthDirOverride, 'auth.json');
+  // env-allowed: ambient OS contract (XDG dirs); absence handling load-bearing
   const base = process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share');
   return path.join(base, 'opencode', 'auth.json');
 }

@@ -18,6 +18,7 @@ const VALID_MODES: GateMode[] = ['off', 'shadow', 'warn', 'enforce'];
 
 /** Read the rollout mode from FLEET_HEALTH_VERIFY_GATE; default 'off' (current behavior). */
 export function gateMode(): GateMode {
+  // env-allowed: staged-rollout dial; must flip live without restart during fleet rollouts
   const raw = process.env['FLEET_HEALTH_VERIFY_GATE']?.trim().toLowerCase();
   return (VALID_MODES as string[]).includes(raw ?? '') ? (raw as GateMode) : 'off';
 }
