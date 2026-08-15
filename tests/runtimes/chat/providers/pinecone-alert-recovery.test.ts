@@ -38,6 +38,10 @@ vi.mock('../../../../src/config.ts', () => ({
 
 import type { MemoryOperation, MemoryOperationFailure } from '../../../../src/lib/memory-operation-telemetry.ts';
 import { _testing } from '../../../../src/runtimes/chat/providers/pinecone.ts';
+import { loadRecoveryMarkers } from '../../../../src/lib/recovery-authority-store.ts';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -129,5 +133,84 @@ describe('#2412 — durable enqueue governs membership', () => {
     expect(mockClearAlertSourceChecked).toHaveBeenCalledTimes(1);
     // …but because it failed, membership is retained for bounded retry.
     expect(_testing.alertedOperations()).toEqual(['search']);
+  });
+});
+
+describe('#2412 remainder — restart-durable contributor membership', () => {
+  let markerDir: string;
+  let savedStateDir: string | undefined;
+
+  const MARKER_PREFIX = 'pinecone_degraded:test-bot#';
+
+  function pineconeMarkers(): string[] {
+    return [...loadRecoveryMarkers()].filter((k) => k.startsWith(MARKER_PREFIX)).sort();
+  }
+
+  beforeEach(() => {
+    markerDir = mkdtempSync(join(tmpdir(), 'pinecone-markers-'));
+    savedStateDir = process.env['BOT_ERRORS_STATE_DIR'];
+    process.env['BOT_ERRORS_STATE_DIR'] = markerDir;
+    _testing.reset();
+    mockEmitAlertChecked.mockReturnValue(true);
+    mockClearAlertSourceChecked.mockReturnValue(true);
+  });
+
+  afterEach(() => {
+    _testing.reset();
+    if (savedStateDir === undefined) delete process.env['BOT_ERRORS_STATE_DIR'];
+    else process.env['BOT_ERRORS_STATE_DIR'] = savedStateDir;
+    rmSync(markerDir, { recursive: true, force: true });
+  });
+
+  it('R1: accepted contributors persist markers; restart restores membership; full recovery clears once', () => {
+    tripBreaker('search');
+    tripBreaker('upsert');
+    expect(pineconeMarkers()).toEqual([`${MARKER_PREFIX}search`, `${MARKER_PREFIX}upsert`]);
+
+    // "Restart": wipe in-memory state only, then run the load-time reconcile.
+    _testing.reset({ keepMarkers: true });
+    _testing.reconcileFromMarkers();
+    expect(_testing.alertedOperations().sort()).toEqual(['search', 'upsert']);
+
+    _testing.trackSuccess('search');
+    expect(mockClearAlertSourceChecked).not.toHaveBeenCalled();
+    _testing.trackSuccess('upsert');
+    expect(mockClearAlertSourceChecked).toHaveBeenCalledTimes(1);
+    expect(pineconeMarkers()).toEqual([]);
+  });
+
+  it('R2: restart mid-degraded — one recovered contributor must NOT clear while a restored sibling remains', () => {
+    tripBreaker('search');
+    tripBreaker('upsert');
+    _testing.reset({ keepMarkers: true });
+    _testing.reconcileFromMarkers();
+
+    _testing.trackSuccess('search');
+    expect(mockClearAlertSourceChecked).not.toHaveBeenCalled();
+    expect(_testing.alertedOperations()).toEqual(['upsert']);
+  });
+
+  it('R3: a rejected alert enqueue writes no marker (no phantom restart authority)', () => {
+    mockEmitAlertChecked.mockReturnValue(false);
+    tripBreaker('search');
+    expect(_testing.alertedOperations()).toEqual([]);
+    expect(pineconeMarkers()).toEqual([]);
+  });
+
+  it('R4: a rejected FINAL clear restores both membership and its marker', () => {
+    tripBreaker('search');
+    expect(pineconeMarkers()).toEqual([`${MARKER_PREFIX}search`]);
+    mockClearAlertSourceChecked.mockReturnValue(false);
+    _testing.trackSuccess('search');
+    expect(_testing.alertedOperations()).toEqual(['search']);
+    expect(pineconeMarkers()).toEqual([`${MARKER_PREFIX}search`]);
+  });
+
+  it('R5: non-final contributor recovery drops its own marker but keeps the siblings', () => {
+    tripBreaker('search');
+    tripBreaker('upsert');
+    _testing.trackSuccess('search');
+    expect(mockClearAlertSourceChecked).not.toHaveBeenCalled();
+    expect(pineconeMarkers()).toEqual([`${MARKER_PREFIX}upsert`]);
   });
 });
