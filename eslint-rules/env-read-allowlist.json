@@ -1,0 +1,225 @@
+{
+  "$comment": "SSOT for the process.env read ratchet (#2192 slice 5a). Consumed by tests/scripts/env-read-allowlist.test.ts (authoritative, lexical line-grain) and eslint-rules/require-env-justification.mjs (advisory warn mirror). Every migration car edits this file exactly as it edited the in-test literal before. allowedUnmarkedSites = the file's full pinned count until the 5b marker sweep flips per-site markers on.",
+  "rows": [
+    {
+      "file": "src/config.ts",
+      "allowedUnmarkedSites": 47,
+      "reason": "SSOT env\u2192typed-RuntimeConfig conversion seam; every read is instance-config\u2192env\u2192default. Includes the bot-errors publish bridge (#2192 slices 3a+3b): conditional WRITES + post-publish reads for BOT_ERRORS_{JID,EXPECTED_JID,REQUIRE_EXPECTED,SAFE_SHAPE_CRED_PATH} and EMIT_ALERT_THROTTLE_MS, + the BOT_ERRORS_RUNTIME_TOOL_FAILURE_ALERTS read behind toolFailureAlertsEnabled, + WHATSOUP_BAILEYS_VERSION absorbed as baileysVersionPinned (#2192 s4a \u2014 baileys-version.ts entry retired), + the four WHATSOUP_PROVIDER_FALLBACK_* tunables absorbed as fallbackTunables via one dynamic-key resolver line (#2192 s4b \u2014 runtime-tunables 6->2)."
+    },
+    {
+      "file": "src/core/arc-binding-health.ts",
+      "allowedUnmarkedSites": 1,
+      "reason": "param-default `env` seam (WHATSOUP_REPO_ROOT) \u2014 env-late by design (#2192 s4 verdict: deploy-wrapper assertion input; the resolver VALIDATES env-vs-module-location agreement, so config-sourcing it would be self-referential)."
+    },
+    {
+      "file": "src/core/database-compatibility-early.ts",
+      "allowedUnmarkedSites": 2,
+      "reason": "build-time injected WHATSOUP_GIT_SHA / WHATSOUP_GIT_BRANCH (deploy hook, no typed source)."
+    },
+    {
+      "file": "src/core/health-bind-guard.ts",
+      "allowedUnmarkedSites": 1,
+      "reason": "guard `env: \u2026 = process.env` DI seam \u2014 keeps the guard unit-testable."
+    },
+    {
+      "file": "src/core/mcp-launcher.ts",
+      "allowedUnmarkedSites": 1,
+      "reason": "bounded MCP key-list passthrough (.map over an explicit key list)."
+    },
+    {
+      "file": "src/core/outbound-message-safety.ts",
+      "allowedUnmarkedSites": 2,
+      "reason": "WHATSOUP_INTERNAL_JIDS env-late; BOT_ERRORS_JID config-published (#2192 slice 3a \u2014 config resolves the instance override and writes it back to process.env, so this call-time read needs no config import)."
+    },
+    {
+      "file": "src/database-compatibility-config.ts",
+      "allowedUnmarkedSites": 1,
+      "reason": "INSTANCE_CONFIG WRITE \u2014 multi-instance bootstrap protocol."
+    },
+    {
+      "file": "src/fleet/bind-guard.ts",
+      "allowedUnmarkedSites": 1,
+      "reason": "guard `env: \u2026 = process.env` DI seam \u2014 keeps the guard unit-testable."
+    },
+    {
+      "file": "src/fleet/health-poller.ts",
+      "allowedUnmarkedSites": 1,
+      "reason": "bounded poll-target env lookup (per-name)."
+    },
+    {
+      "file": "src/fleet/paths.ts",
+      "allowedUnmarkedSites": 1,
+      "reason": "bounded path env-key lookup."
+    },
+    {
+      "file": "src/fleet/platform.ts",
+      "allowedUnmarkedSites": 3,
+      "reason": "WHATSOUP_DOCKER_ENV + PATH ambient platform detection; WHATSOUP_NODE is env-late by design (#2192 s4 verdict: set by deploy wrappers in the GENERATING shell, host-level and pre-instance \u2014 a config import would couple the platform detector to config's load-time side effects)."
+    },
+    {
+      "file": "src/fleet/routes/credentials.ts",
+      "allowedUnmarkedSites": 1,
+      "reason": "bounded credential-presence env check (envKey !== undefined guard)."
+    },
+    {
+      "file": "src/fleet/routes/ops-auth.ts",
+      "allowedUnmarkedSites": 2,
+      "reason": "deliberate ops-token presence scan (Object.entries over process.env)."
+    },
+    {
+      "file": "src/fleet/silence-registry-episode-store.ts",
+      "allowedUnmarkedSites": 4,
+      "reason": "VITEST / VITEST_POOL_ID / VITEST_WORKER_ID test-runner detection."
+    },
+    {
+      "file": "src/instance-loader.ts",
+      "allowedUnmarkedSites": 2,
+      "reason": "TMPDIR + INSTANCE_CONFIG WRITES \u2014 multi-instance bootstrap protocol."
+    },
+    {
+      "file": "src/lib/api-key-resolver.ts",
+      "allowedUnmarkedSites": 2,
+      "reason": "secret resolver W-3 env fallback (process.env[opts.envVar]) \u2014 must stay env-late."
+    },
+    {
+      "file": "src/lib/bot-errors-outbox.ts",
+      "allowedUnmarkedSites": 19,
+      "reason": "outbox config group (BOT_ERRORS_*) + VITEST detection + TMPDIR (env-late by design: lib cannot import config, and config WRITES TMPDIR at load \u2014 the env var is the sanctioned lib-side channel). SAFE_SHAPE_CRED_PATH is config-published (#2192 slice 3b); the DIR/test/identity vars stay env-late (absence semantics feed vitest isolation + outbox provenance policy)."
+    },
+    {
+      "file": "src/lib/emit-alert.ts",
+      "allowedUnmarkedSites": 6,
+      "reason": "BOT_ERRORS_{JID,EXPECTED_JID,REQUIRE_EXPECTED} + EMIT_ALERT_THROTTLE_MS config-published (#2192 slices 3a+3b \u2014 TMPDIR pattern; validation and the call-time throttle getter stay here). WHATSOUP_ALERT_SINK stays env-late: verifier dial (#2510), injected out-of-band at runtime."
+    },
+    {
+      "file": "src/lib/fleet-health-gate.ts",
+      "allowedUnmarkedSites": 1,
+      "reason": "FLEET_HEALTH_VERIFY_GATE rollout enum (off/shadow/warn/enforce) \u2014 env-late by design: lib cannot import config, and the dial must flip live without a restart during staged fleet rollouts."
+    },
+    {
+      "file": "src/lib/git-env.ts",
+      "allowedUnmarkedSites": 2,
+      "reason": "build-meta env lookup (bounded key list, git identity)."
+    },
+    {
+      "file": "src/lib/instance-context.ts",
+      "allowedUnmarkedSites": 1,
+      "reason": "INSTANCE_CONFIG read \u2014 bootstrap protocol (pairs with config.ts:450)."
+    },
+    {
+      "file": "src/lib/keyring.ts",
+      "allowedUnmarkedSites": 5,
+      "reason": "secret resolver + REQUIRE_OS_KEYRING flag + XDG ambient \u2014 resolver stays env-late. Fifth site: lookupEnvCredential, the env-only read for values that are authoritative by contract (launcher-provenanced health token)."
+    },
+    {
+      "file": "src/lib/model-advisor.ts",
+      "allowedUnmarkedSites": 1,
+      "reason": "CLAUDE_CONFIG_DIR \u2014 env-late by design (#2192 s4 verdict: external-tool interop; must track the env the spawned claude CLI sees, and the vitest isolation setup deletes it \u2014 env is the sanctioned channel)."
+    },
+    {
+      "file": "src/lib/recovery-authority-store.ts",
+      "allowedUnmarkedSites": 3,
+      "reason": "env-late by design (#2192 slice 3c): BOT_ERRORS_STATE_DIR absence selects the XDG default (absence load-bearing); XDG_DATA_HOME is OS-ambient; WHATSOUP_INSTANCE is deploy-injected identity (systemd/launchd), never set in src."
+    },
+    {
+      "file": "src/logger.ts",
+      "allowedUnmarkedSites": 3,
+      "reason": "bootstrap-early logger (LOG_LEVEL/LOG_DIR/VITEST) \u2014 cannot import config (eval-order cycle)."
+    },
+    {
+      "file": "src/main.ts",
+      "allowedUnmarkedSites": 2,
+      "reason": "preflight import probe (2) \u2014 remaining after the slice-2 migrations."
+    },
+    {
+      "file": "src/mcp/register-all.ts",
+      "allowedUnmarkedSites": 1,
+      "reason": "memory-write API key resolver \u2014 must stay env-late (secret surface)."
+    },
+    {
+      "file": "src/runtimes/agent/capability-obligation-runtime.ts",
+      "allowedUnmarkedSites": 1,
+      "reason": "whole-object process.env \u2192 resolveReleaseIdentity (build/release identity)."
+    },
+    {
+      "file": "src/runtimes/agent/handoff-distill-config.ts",
+      "allowedUnmarkedSites": 3,
+      "reason": "exemplar pure resolver `env: Env = process.env` param-defaults \u2014 the idiom to extend."
+    },
+    {
+      "file": "src/runtimes/agent/handoff-distill-coordinator.ts",
+      "allowedUnmarkedSites": 2,
+      "reason": "passes env into the pure resolver at the call boundary (not a bypass)."
+    },
+    {
+      "file": "src/runtimes/agent/provider-canary-proof.ts",
+      "allowedUnmarkedSites": 6,
+      "reason": "child-env forward for canary probe (explicit allow-list of ambient vars)."
+    },
+    {
+      "file": "src/runtimes/agent/providers/child-env.ts",
+      "allowedUnmarkedSites": 35,
+      "reason": "child-env builder: explicit allow-list, not passthrough \u2014 highest-leak-risk seam."
+    },
+    {
+      "file": "src/runtimes/agent/providers/claude-filestore-heal.ts",
+      "allowedUnmarkedSites": 2,
+      "reason": "VITEST/NODE_ENV detection + `deps.env ?? process.env` DI seam."
+    },
+    {
+      "file": "src/runtimes/agent/providers/primary-model-usability-adapters.ts",
+      "allowedUnmarkedSites": 4,
+      "reason": "child-env forward (HOME/PATH/USER/CLAUDE_CONFIG_DIR) for usability adapters."
+    },
+    {
+      "file": "src/runtimes/agent/runtime-tunables.ts",
+      "allowedUnmarkedSites": 2,
+      "reason": "envPositiveInt dynamic-key helper (session/system tunables) + diagnosticBundleEnabled call-time flag. The four PROVIDER_FALLBACK_* tunables are config-absorbed (#2192 s4b \u2014 fallbackTunables)."
+    },
+    {
+      "file": "src/runtimes/agent/runtime-turn-result-handler.ts",
+      "allowedUnmarkedSites": 2,
+      "reason": "RESPONSE_REGISTRY_DISPATCH + DIAGNOSTIC_BUNDLE \u2014 env-late by design (#2192 s4 verdict: staged-rollout dial pair, live-flip semantics; the fleet-health-gate ground applies \u2014 transitional flags, typed-field investment would be throwaway)."
+    },
+    {
+      "file": "src/runtimes/agent/runtime.ts",
+      "allowedUnmarkedSites": 4,
+      "reason": "child-env forward (HOME/PATH/USER/CLAUDE_CONFIG_DIR) for the auth-status probe."
+    },
+    {
+      "file": "src/runtimes/agent/session.ts",
+      "allowedUnmarkedSites": 2,
+      "reason": "positiveIntEnv dynamic-key helper + CLAUDE_CONFIG_DIR ambient (gemini keys migrated in slice-1)."
+    },
+    {
+      "file": "src/runtimes/chat/enrichment/fact-export-queue.ts",
+      "allowedUnmarkedSites": 3,
+      "reason": "MW_MIND_RUN_ID external-subsystem per-run id (read 3\u00d7, same value)."
+    },
+    {
+      "file": "src/runtimes/chat/providers/transcription/faster-whisper.ts",
+      "allowedUnmarkedSites": 2,
+      "reason": "transcription model/python \u2014 env-late by design (#2192 s4 verdict: host-local toolchain; PYTHON absence drives the managed-venv auto-probe chain, so absence is load-bearing)."
+    },
+    {
+      "file": "src/runtimes/chat/providers/transcription/local-audio.ts",
+      "allowedUnmarkedSites": 1,
+      "reason": "PATH ambient executable lookup."
+    },
+    {
+      "file": "src/runtimes/chat/providers/transcription/whisper-cpp.ts",
+      "allowedUnmarkedSites": 2,
+      "reason": "transcription model/bin \u2014 env-late by design (#2192 s4 verdict: host-level model path + explicit binary override, ambient toolchain)."
+    },
+    {
+      "file": "src/transport/auth.ts",
+      "allowedUnmarkedSites": 4,
+      "reason": "WHATSOUP_PAIR_NUMBER \u2014 env-late by design (#2192 s4 verdict: per-CLI-run mode selector (QR vs pairing-code) + operator PII; a typed field would persist E.164 at rest and make an ephemeral per-run choice permanent)."
+    },
+    {
+      "file": "src/transport/imessage/imsg-rpc-relay.ts",
+      "allowedUnmarkedSites": 1,
+      "reason": "bounded relay env key lookup."
+    }
+  ]
+}

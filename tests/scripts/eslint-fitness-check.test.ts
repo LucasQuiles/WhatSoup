@@ -39,9 +39,10 @@ describe('eslint fitness config — registry drift', () => {
     expect(missing).toEqual([]);
   });
 
-  it('covers the eleven known eslint-ring rules', () => {
+  it('covers the fifteen known eslint-ring rules', () => {
     expect(eslintRingRuleIds).toEqual([
       'arch.approved-api-client',
+      'arch.env-read-justification',
       'arch.file-size',
       'arch.god-class',
       'arch.ring-boundaries',
@@ -64,6 +65,16 @@ describe('eslint fitness config — registry drift', () => {
     );
     expect(catchBlocks).toHaveLength(1);
     expect(catchBlocks[0]?.files).toEqual(['src/**/*.ts']);
+  });
+
+  it('scopes env-read justification to the src tree its allowlist scans', () => {
+    // The vitest authority (env-read-allowlist.test.ts) scans src/ exactly;
+    // the eslint mirror must not widen or narrow that scope (#2192 slice 5a).
+    const envBlocks = fitnessConfig.filter(
+      (block) => block.rules?.['fitness/require-env-justification'] !== undefined,
+    );
+    expect(envBlocks).toHaveLength(1);
+    expect(envBlocks[0]?.files).toEqual(['src/**/*.ts']);
   });
 });
 

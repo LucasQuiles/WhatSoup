@@ -38,7 +38,7 @@ describe('fitness rule registry', () => {
     const ids = fitnessRules.map((rule) => rule.id);
 
     expect(new Set(ids).size).toBe(ids.length);
-    expect(fitnessRules).toHaveLength(48);
+    expect(fitnessRules).toHaveLength(49);
 
     for (const rule of fitnessRules) {
       expect(rule.id).toMatch(/^[a-z]+\.[a-z0-9-]+$/);
@@ -111,6 +111,7 @@ describe('fitness rule registry', () => {
       'hygiene.no-whatsapp-copy-in-generic-ui',
       'hygiene.no-health-whatsapp-key-read',
       'hygiene.catch-justification',
+      'arch.env-read-justification',
       'arch.ring-boundaries',
       'arch.ssot-lid-reads',
       'arch.ssot-jid-construction',
