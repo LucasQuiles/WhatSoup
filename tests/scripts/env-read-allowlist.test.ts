@@ -30,10 +30,11 @@ const ENV_ACCESS_PATTERN = /process\.env/;
 const ALLOWLIST: Record<string, number> = {
   // SSOT env→typed-RuntimeConfig conversion seam; every read is
   // instance-config→env→default. Includes the bot-errors publish bridge
-  // (#2192 slice 3a): 3 conditional WRITES + 3 post-publish reads for
-  // BOT_ERRORS_{JID,EXPECTED_JID,REQUIRE_EXPECTED}, + the
-  // BOT_ERRORS_RUNTIME_TOOL_FAILURE_ALERTS read behind toolFailureAlertsEnabled.
-  'src/config.ts': 41,
+  // (#2192 slices 3a+3b): conditional WRITES + post-publish reads for
+  // BOT_ERRORS_{JID,EXPECTED_JID,REQUIRE_EXPECTED,SAFE_SHAPE_CRED_PATH} and
+  // EMIT_ALERT_THROTTLE_MS, + the BOT_ERRORS_RUNTIME_TOOL_FAILURE_ALERTS read
+  // behind toolFailureAlertsEnabled.
+  'src/config.ts': 45,
   // param-default `env` seam (WHATSOUP_REPO_ROOT) — new typed-field candidate, not a bypass.
   'src/core/arc-binding-health.ts': 1,
   // build-time injected WHATSOUP_GIT_SHA / WHATSOUP_GIT_BRANCH (deploy hook, no typed source).
@@ -68,12 +69,15 @@ const ALLOWLIST: Record<string, number> = {
   'src/lib/api-key-resolver.ts': 2,
   // outbox config group (BOT_ERRORS_*) + VITEST detection + TMPDIR (env-late by
   // design: lib cannot import config, and config WRITES TMPDIR at load — the env
-  // var is the sanctioned lib-side channel) — slice-3 typed outbox module.
+  // var is the sanctioned lib-side channel). SAFE_SHAPE_CRED_PATH is
+  // config-published (#2192 slice 3b); the DIR/test/identity vars stay env-late
+  // (absence semantics feed vitest isolation + outbox provenance policy).
   'src/lib/bot-errors-outbox.ts': 19,
-  // BOT_ERRORS_{JID,EXPECTED_JID,REQUIRE_EXPECTED} config-published (#2192
-  // slice 3a — TMPDIR pattern; validation stays here). EMIT_ALERT_THROTTLE_MS
-  // + WHATSOUP_ALERT_SINK remain slice-3 (3b) candidates.
-  'src/lib/emit-alert.ts': 8,
+  // BOT_ERRORS_{JID,EXPECTED_JID,REQUIRE_EXPECTED} + EMIT_ALERT_THROTTLE_MS
+  // config-published (#2192 slices 3a+3b — TMPDIR pattern; validation and the
+  // call-time throttle getter stay here). WHATSOUP_ALERT_SINK stays env-late:
+  // verifier dial (#2510), injected out-of-band at runtime.
+  'src/lib/emit-alert.ts': 6,
   // FLEET_HEALTH_VERIFY_GATE rollout enum (off/shadow/warn/enforce) — env-late
   // by design: lib cannot import config, and the dial must flip live without a
   // restart during staged fleet rollouts.

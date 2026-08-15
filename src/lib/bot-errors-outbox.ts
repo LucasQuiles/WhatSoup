@@ -197,6 +197,11 @@ const CRED_PATH_SAFE_PREFIXES = [
   'auth-bond-backups/',
 ] as const;
 
+// BOT_ERRORS_SAFE_SHAPE_CRED_PATH is config-published (#2192 slice 3b):
+// config.ts resolves an instance-config override and writes it back to
+// process.env at load, so this call-time read and the typed
+// config.botErrorsSafeShapeCredPath field see the same bytes without a
+// lib→config import. Parsing mirrors config's exactly.
 function safeShapeCredPathEnabled(): boolean {
   const raw = (process.env['BOT_ERRORS_SAFE_SHAPE_CRED_PATH'] ?? '').trim().toLowerCase();
   return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
