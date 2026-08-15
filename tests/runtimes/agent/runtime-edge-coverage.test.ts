@@ -89,6 +89,8 @@ const {
   }));
   const mockBuildDiagnosticProbes = vi.fn((_args?: unknown) => ({}));
   const mockConfig = {
+    // #2192 s4b: provider-fallback tunables live on config (defaults mirror the retired IIFEs).
+    fallbackTunables: { noticeDedupMs: 1_800_000, primaryRecheckMs: 300_000, probeStallThreshold: 12, probeStallCeilingMultiple: 10 },
     transport: 'baileys' as const,
     adminPhones: new Set<string>(),
     controlPeers: new Map<string, string>(),

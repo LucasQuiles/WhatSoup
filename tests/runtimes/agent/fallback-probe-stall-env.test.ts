@@ -1,18 +1,15 @@
 /**
- * WHATSOUP_PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD env tunability + clamping.
+ * config.fallbackTunables.probeStallThreshold end-to-end (#2192 s4b).
  *
- * The threshold is a module-level constant read at import time, so this file
- * sets the env var via vi.hoisted (before runtime.ts evaluates) and runs in
- * its own forked worker. Value '1' is below the [3, 100] clamp floor → the
- * effective threshold must be 3.
+ * The threshold now resolves at config load (instance-config first, env
+ * second, clamp [3, 100]) — clamp semantics are pinned in
+ * tests/config-coercion.test.ts. This file keeps the end-to-end contract:
+ * the runtime honors the config-resolved threshold (3 here) through a real
+ * stall episode.
  *
  * Harness mirrors fallback-probe-stall.test.ts (see that file for rationale).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-
-vi.hoisted(() => {
-  process.env['WHATSOUP_PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD'] = '1';
-});
 
 vi.mock('../../../src/lib/emit-alert.ts', () => {
   const emitAlert = vi.fn(() => true);
@@ -27,6 +24,8 @@ vi.mock('../../../src/lib/emit-alert.ts', () => {
 
 vi.mock('../../../src/config.ts', () => {
   const config: Record<string, unknown> = {
+    // #2192 s4b: provider-fallback tunables live on config (defaults mirror the retired IIFEs).
+    fallbackTunables: { noticeDedupMs: 1_800_000, primaryRecheckMs: 300_000, probeStallThreshold: 3, probeStallCeilingMultiple: 10 },
     adminPhones: new Set<string>(),
     controlPeers: new Map<string, string>(),
     toolUpdateMode: 'full',
@@ -121,7 +120,7 @@ describe('AgentRuntime — probe stall threshold env clamping', () => {
     vi.useRealTimers();
   });
 
-  it('clamps a sub-floor env value (1) up to 3: alert at attempt 3, not at 1 or 2', async () => {
+  it('honors the config-resolved threshold (3): alert at attempt 3, not at 1 or 2', async () => {
     const runtime = makeRuntime();
     const v = runtime as unknown as FallbackView;
     v.probePrimaryProviderRecovered = vi.fn(() => false);

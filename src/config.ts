@@ -1541,6 +1541,51 @@ export const config = {
   agentFallbackModel: resolvedFallbacks[0]?.model,
   agentFallbackDataPolicy: resolvedFallbacks[0]?.dataPolicy,
 
+  // Provider-fallback tunables (#2192 s4b) — instance-config
+  // (agentOptions.fallbackTunables.*) first, env second, defaults and clamps
+  // byte-identical to the retired runtime-tunables module-eval IIFEs. Those
+  // were module-eval and this is config-load: restart-to-change in both
+  // worlds, no live-flip regression. Consumed via RuntimeFallbackPort.
+  fallbackTunables: ((): { noticeDedupMs: number; primaryRecheckMs: number; probeStallThreshold: number; probeStallCeilingMultiple: number } => {
+    const section = configSection(resolvedAgentOptions['fallbackTunables'], 'agentOptions.fallbackTunables') ?? {};
+    const resolveTunable = (
+      instanceValue: number | undefined,
+      envKey: string,
+      fallback: number,
+      clamp?: { min: number; max: number; trunc?: boolean },
+    ): number => {
+      const raw = instanceValue ?? Number(process.env[envKey]);
+      if (!Number.isFinite(raw) || raw <= 0) return fallback;
+      const value = clamp?.trunc ? Math.trunc(raw) : raw;
+      return clamp ? Math.min(Math.max(value, clamp.min), clamp.max) : value;
+    };
+    return {
+      noticeDedupMs: resolveTunable(
+        optionalFiniteNumber(section['noticeDedupMs'], 'agentOptions.fallbackTunables.noticeDedupMs'),
+        'WHATSOUP_PROVIDER_FALLBACK_NOTICE_DEDUP_MS',
+        30 * MS_PER_MINUTE,
+      ),
+      primaryRecheckMs: resolveTunable(
+        optionalFiniteNumber(section['primaryRecheckMs'], 'agentOptions.fallbackTunables.primaryRecheckMs'),
+        'WHATSOUP_PROVIDER_FALLBACK_PRIMARY_RECHECK_MS',
+        5 * MS_PER_MINUTE,
+        { min: 30 * MS_PER_SECOND, max: 30 * MS_PER_MINUTE },
+      ),
+      probeStallThreshold: resolveTunable(
+        optionalFiniteNumber(section['probeStallThreshold'], 'agentOptions.fallbackTunables.probeStallThreshold'),
+        'WHATSOUP_PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD',
+        12,
+        { min: 3, max: 100, trunc: true },
+      ),
+      probeStallCeilingMultiple: resolveTunable(
+        optionalFiniteNumber(section['probeStallCeilingMultiple'], 'agentOptions.fallbackTunables.probeStallCeilingMultiple'),
+        'WHATSOUP_PROVIDER_FALLBACK_PROBE_STALL_CEILING_MULTIPLE',
+        10,
+        { min: 1, max: 1000, trunc: true },
+      ),
+    };
+  })(),
+
   // Voice (ElevenLabs TTS)
   elevenlabs: {
     defaultVoiceId: optionalString(elevenlabsSection?.defaultVoiceId, 'elevenlabs.defaultVoiceId') ?? 'pNInz6obpgDQGcFmaJgB',

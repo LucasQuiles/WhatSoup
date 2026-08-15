@@ -80,8 +80,6 @@ import {
   MAX_RESIDENT_SESSIONS,
   SESSION_MIN_RESIDENCY_MS,
   MAX_TOOL_FAILURE_ALERT_DEDUP_KEYS,
-  PROVIDER_FALLBACK_NOTICE_DEDUP_MS,
-  PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD,
   diagnosticBundleEnabled,
   DIAGNOSTIC_BUNDLE_THROTTLE_MS,
   HANDOFF_STALE_MS,
@@ -797,7 +795,7 @@ export class AgentRuntime implements Runtime {
   // Consecutive failed recovery probes on the revert-timer EXTENSION path
   // (process-local, reset on deactivation — which a successful probe triggers).
   // Early-window standing probes do not count: nothing is extending yet.
-  // At PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD one fallback_recovery_stalled
+  // At config.fallbackTunables.probeStallThreshold one fallback_recovery_stalled
   // alert fires per stall episode; the window keeps extending regardless.
   private fallbackProbeAttempts = 0;
   // Epoch ms of the most recent recovery probe (either path); null until the
@@ -2542,6 +2540,7 @@ export class AgentRuntime implements Runtime {
     return {
       get db() { return runtime.db; },
       get instanceName() { return runtime.instanceName; },
+      get fallbackTunables() { return config.fallbackTunables; },
       get cwd() { return runtime.cwd; },
       get model() { return runtime.model; },
       get agentProvider() { return runtime.agentProvider; },
@@ -8053,7 +8052,7 @@ export class AgentRuntime implements Runtime {
   ): void {
     const now = Date.now();
     for (const [key, recordedAt] of this.recentProviderFallbackNotices) {
-      if (now - recordedAt > PROVIDER_FALLBACK_NOTICE_DEDUP_MS) {
+      if (now - recordedAt > config.fallbackTunables.noticeDedupMs) {
         this.recentProviderFallbackNotices.delete(key);
       }
     }
