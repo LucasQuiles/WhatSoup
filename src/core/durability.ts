@@ -2526,6 +2526,17 @@ export class DurabilityEngine {
               'postConnectRecovery: quarantine escalation could not be durably queued',
             );
           }
+          // #2413: the accepted escalation outlives this process only via the
+          // durable marker — a later gate-approved clear proves recovery
+          // (confirmed outbound delivery, see makeConfirmedOutboundProbe) and
+          // retires the root alert. Same shape as #2394 below.
+          try {
+            setRecoveryMarker(`auth_terminal:${config.botName}`);
+          } catch {
+            // intentional: marker write is best-effort — the escalation itself
+            // was durably queued; a missing marker only latches the root alert
+            // until a future escalation re-arms it.
+          }
         },
         emitGateFailure: (evidence: string) => {
           const queued = emitAlertChecked(
@@ -2555,6 +2566,22 @@ export class DurabilityEngine {
       });
       log.info({ decision }, 'postConnectRecovery: quarantine-clear gate decision');
       if (quarantineClearRequested) {
+        // #2413: only a PROVEN clear may retire the auth_terminal root — the
+        // gate also invokes emitClear in mode 'off' (verification skipped,
+        // proves nothing) and on the shadow cosmetic path (proof evaluated
+        // and FAILED), so the flag alone is not recovery evidence. Action
+        // 'clear' in an active mode is the confirmed-outbound proof path.
+        // Additionally marker-gated: only an episode that durably escalated
+        // may clear; an unreadable store means no prior escalation.
+        const authTerminalProven = decision.action === 'clear' && decision.mode !== 'off';
+        const authTerminalMarkerKey = `auth_terminal:${config.botName}`;
+        let authTerminalOwned = false;
+        try {
+          authTerminalOwned = authTerminalProven
+            && loadRecoveryMarkers().has(authTerminalMarkerKey);
+        } catch {
+          // intentional: marker store unreadable — treat as no prior escalation.
+        }
         // Serialize the exact aggregate and supported outbox writes with the
         // normal database writers. Raw out-of-band SQLite mutation is not a
         // recovery proof and remains outside this instance-local contract.
@@ -2590,7 +2617,30 @@ export class DurabilityEngine {
           ) {
             throw new Error('postConnectRecovery: legacy quarantine clear could not be durably queued');
           }
+
+          // Last inside the transaction so a rejected sibling clear rolls the
+          // root clear back with it; the file-store marker is removed only
+          // after the transaction commits.
+          if (authTerminalOwned && !clearAlertSourceChecked(
+            config.botName,
+            'auth_terminal',
+            'quarantine verify gate approved clear with confirmed outbound proof (#2413)',
+            undefined,
+            { requireDurableOutbox: true },
+          )) {
+            throw new Error(
+              'postConnectRecovery: auth_terminal root clear could not be durably queued',
+            );
+          }
         });
+        if (authTerminalOwned) {
+          try {
+            clearRecoveryMarker(authTerminalMarkerKey);
+          } catch {
+            // intentional: marker removal is best-effort — a stale marker only
+            // causes one redundant idempotent clear on a later approved pass.
+          }
+        }
       }
       // #2394: reaching this point in an ACTIVE mode means the whole gate
       // transaction succeeded — probes ran, breaker state persisted, and
