@@ -337,6 +337,7 @@ def _run_rendered_unreachable_watchdog(
     launchd_snapshot: str,
     bot_health: dict | None = None,
     bot_http_code: int = 503,
+    credential_marker_present: bool = False,
 ) -> str:
     home = tmp_path / "home"
     home.mkdir(parents=True)
@@ -362,6 +363,14 @@ def _run_rendered_unreachable_watchdog(
     script = home / f"{bot_name}-watchdog"
     script.write_text(rendered, encoding="utf-8")
     script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    if credential_marker_present:
+        marker = (
+            home / "Library" / "Logs" / "whatsoup"
+            / f"{bot_name}-credential-dead.marker"
+        )
+        marker.parent.mkdir(parents=True)
+        marker.write_text("", encoding="utf-8")
+        marker.chmod(0o600)
 
     curl = binroot / "curl"
     bot_response = ""
@@ -428,12 +437,17 @@ class TestRenderedWatchdogLaunchdExitPolicy:
             bot_name=bot_name,
             launchd_snapshot="gui = {\n  state = running\n  last exit code = 0\n}",
             bot_health=body,
+            credential_marker_present=True,
         )
         log_text = (
             tmp_path / "home" / "Library" / "Logs" / "whatsoup"
             / f"{bot_name}-watchdog.log"
         ).read_text(encoding="utf-8")
         assert "kickstart" not in calls
+        assert (
+            tmp_path / "home" / "Library" / "Logs" / "whatsoup"
+            / f"{bot_name}-credential-dead.marker"
+        ).exists()
         assert "OUTBOUND-POISON" in log_text
         assert log_text.rstrip().endswith("OUTBOUND-POISON")
 
