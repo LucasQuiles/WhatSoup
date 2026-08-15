@@ -503,5 +503,3 @@ behavioral contract is documented at [docs/console-guide.md](console-guide.md) a
 - [docs/tools.md](tools.md) — canonical MCP tool reference (per-tool schemas)
 - [docs/runbook.md](runbook.md) — operator runbook
 - [README.md](../README.md) — README API table mirrors the HTTP routes here
-
-
