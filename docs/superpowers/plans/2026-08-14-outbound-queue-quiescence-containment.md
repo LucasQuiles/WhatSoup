@@ -1,6 +1,6 @@
 # Outbound Queue Quiescence and Poison Containment Implementation Plan
 
-**Status:** Active — core and adjacent integration are complete; final staged verification and independent review remain pending.
+**Status:** Active — implementation and scoped integration verification are complete; exact-head review and PR publication remain pending. Repository-wide release gates retain documented baseline/inconclusive debt below.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. Every production task also requires superpowers:test-driven-development, superpowers:test-integrity, and superpowers:verification-before-completion.
 
@@ -769,7 +769,7 @@ git commit -m "fix(health): report active outbound queue poison"
 - Preserve: process-local poison across every in-process queue/session replacement
 - Preserve: active teardown ownership without replacing the original outbound failure
 
-- [ ] **Step 1: Prove the missing operational-health registration RED**
+- [x] **Step 1: Prove the missing operational-health registration RED**
 
 Add `outboundQueuePoisonedScopes` to the exact expected-field inventories in the
 TypeScript and Python taxonomy tests. Add a BOT ERRORS health-check case asserting that
@@ -791,7 +791,7 @@ registry does not yet include the emitted runtime field. A Python runner mismatc
 inconclusive rather than a passing result; use the repository's owning Python test command
 if `run-tokenomics-pytests.sh` does not accept a file argument.
 
-- [ ] **Step 2: Register the existing field instead of adding a parallel checker**
+- [x] **Step 2: Register the existing field instead of adding a parallel checker**
 
 Add one `runtimeAgentHealthSignals` entry:
 
@@ -810,7 +810,7 @@ Do not create another health registry, parser, severity branch, or alert source.
 existing BOT ERRORS loop must discover and classify the field dynamically from this
 entry.
 
-- [ ] **Step 3: Prove queue replacement, restart, rekey, and teardown semantics**
+- [x] **Step 3: Prove queue replacement, restart, rekey, and teardown semantics**
 
 Add focused coordinator integration cases proving:
 
@@ -826,14 +826,14 @@ Add focused coordinator integration cases proving:
 Use the existing coordinator, registry, `TurnQueue.beginTeardown()`, and rejected-turn
 finalizer. Do not add a clear method, replacement callback, or another ownership map.
 
-- [ ] **Step 4: Correct the operator contract**
+- [x] **Step 4: Correct the operator contract**
 
 State consistently that only process restart constructs a fresh poison registry. An
 in-process queue or session replacement does not clear it. Restart remains neither
 delivery proof nor replay authorization, and the operator must reconcile durable evidence
 before an approved restart.
 
-- [ ] **Step 5: Remove duplicate alias resolution without combining domain ownership**
+- [x] **Step 5: Remove duplicate alias resolution without combining domain ownership**
 
 Extract the identical cycle-safe scope resolution and canonical rekey bookkeeping from
 `TurnQueueHaltLatch` and `OutboundQueuePoisonRegistry` into one small internal helper.
@@ -842,7 +842,7 @@ public APIs, and preserve first-cause and destination-collision behavior. Verify
 owning unit suites and coordinator integration, then run the strict multi-signal clone
 pipeline over `src/runtimes/agent` with no skipped or failed detectors.
 
-- [ ] **Step 6: Repin and run the existing operational guards**
+- [x] **Step 6: Repin and run the existing operational guards**
 
 Update only the changed `src/lib/fault-taxonomy-registry.json` SHA-256 entry in
 `deploy/bot-errors-runtime-manifest.json`, then run:
@@ -866,7 +866,7 @@ through their existing generic contracts, and no raw scope or error text reaches
 consumers. If the exact console suite name has drifted, inventory the current owning test
 instead of creating a one-off test runner.
 
-- [ ] **Step 7: Commit the integration compensation**
+- [x] **Step 7: Commit the integration compensation**
 
 ```bash
 git add src/lib/fault-taxonomy-registry.json \
@@ -900,7 +900,7 @@ git commit -m "fix(health): integrate outbound poison operations"
 - Public health: aggregate fields, per-chat degraded versus shared/single unhealthy
 - Runbook: diagnosis, restart limitation, no generic clear, no resend inference
 
-- [ ] **Step 1: Update operator and public contracts**
+- [x] **Step 1: Update operator and public contracts**
 
 Document all of the following exactly:
 
@@ -914,7 +914,7 @@ Document all of the following exactly:
 - recovery debt neither creates nor clears poison;
 - restart is not delivery proof and this change does not replay or resend backlog.
 
-- [ ] **Step 2: Regenerate publication classification and validate docs**
+- [x] **Step 2: Regenerate publication classification and validate docs**
 
 Run:
 
@@ -927,7 +927,7 @@ git diff --cached --check
 
 Expected: the publication audit is canonical and the staged documentation passes.
 
-- [ ] **Step 3: Run Test Integrity on every changed test**
+- [x] **Step 3: Run Test Integrity on every changed test**
 
 Run:
 
@@ -937,7 +937,7 @@ bash scripts/run-with-pinned-npm.sh run guard:test-integrity:required
 
 Expected: exit 0 with every changed test scanned. Missing tooling, partial scanning, or a skipped required lane remains inconclusive.
 
-- [ ] **Step 4: Run the complete affected suite**
+- [x] **Step 4: Run the complete affected suite**
 
 Run:
 
@@ -985,7 +985,16 @@ git diff --check
 
 Expected: every command exits 0. Do not collapse a failure into a combined shell command or call a masked result clean.
 
-- [ ] **Step 6: Compare final behavior with both candidate branches**
+Observed release-gate debt on 2026-08-15:
+
+- all three TypeScript typechecks and `guard:repo:branch-diff` exited 0;
+- `guard:publication:release` failed closed on 173 repository-wide files already marked
+  `PRIVATE-ARCHIVE`; deleting or relocating that project history is outside this fix;
+- `verify:release` reached step 40 of 43, then `coverage:check` hit its 1,200-second
+  watchdog (exit 124), was group-terminated, and left three steps unrun. This result is
+  inconclusive rather than a product-test failure and must not be reported as clean.
+
+- [x] **Step 6: Compare final behavior with both candidate branches**
 
 Run:
 
@@ -1005,7 +1014,13 @@ Review requirements:
 - No candidate branch is deleted in this task.
 - No upstream `main` behavior is dropped.
 
-- [ ] **Step 7: Commit documentation and final reviewed corrections**
+Observed: both candidate commits remain independently reachable and `git cherry` reports
+them as unmerged patches because the final branch deliberately supersedes them with a
+multi-commit design. Direct source and test inspection confirms the F-01 stable-boundary
+behavior and F-02 per-chat containment/isolation behavior in the rebased branch. No
+candidate branch was deleted.
+
+- [x] **Step 7: Commit documentation and final reviewed corrections**
 
 ```bash
 git add docs/durability.md docs/public-surface.md docs/runbook.md docs/publication-audit.md
