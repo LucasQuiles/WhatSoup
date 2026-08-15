@@ -85,7 +85,7 @@ async function startSocket(): Promise<void> {
 
   const { state } = await useMultiFileAuthState(config.authDir);
   const saveCreds = createAtomicCredsSaver(config.authDir, () => state.creds);
-  const resolvedVersion = await resolveBaileysVersion();
+  const resolvedVersion = await resolveBaileysVersion(config.baileysVersionPinned);
   log.info({ version: resolvedVersion.version, source: resolvedVersion.source }, 'using baileys web version');
   process.stderr.write(`Using Baileys web version ${baileysVersionLabel(resolvedVersion.version)} (${resolvedVersion.source})\n`);
 

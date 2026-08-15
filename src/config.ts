@@ -1364,6 +1364,11 @@ export const config = {
   // env var is exactly '0' (#2192 slice 2b).
   authBondAutoRestore: optionalBoolean(instance?.authBondAutoRestore, 'authBondAutoRestore')
     ?? process.env.WHATSOUP_AUTH_BOND_AUTO_RESTORE !== '0',
+  // Baileys protocol version pin, string passthrough (#2192 s4a). Parsing and
+  // validation stay call-time in parsePinnedBaileysVersion so a malformed
+  // value throws at connect (today's timing), not at config load.
+  baileysVersionPinned: optionalString(instance?.baileysVersionPinned, 'baileysVersionPinned')
+    ?? process.env.WHATSOUP_BAILEYS_VERSION,
   // In-process EgressProxy fail-open. The identically named env var ALSO
   // drives the out-of-band shell hook (deploy/hooks/agent-sandbox.sh) in
   // manual deployments — this field owns only the in-process channel (#2192).
