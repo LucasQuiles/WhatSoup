@@ -2854,6 +2854,7 @@ def local_event_exists(event_id: str, created_at: str = "") -> bool:
         root / "storm-collapsed",
         root / "suppressed",
         root / "quarantine",
+        root / "testleak",
         root / "writefail",
         root / "writefail-recovered",
         root / "writefail-quarantine",
