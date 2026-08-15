@@ -6285,6 +6285,7 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
       // must be truncated, and each served entry must carry full provenance.
       const entries = Array.from({ length: 161 }, (_, index) => ({
         atMs: 500 * (index + 1),
+        wallAtMs: 1_785_000_000_000 + 500 * (index + 1),
         lagMs: index === 1 ? 300 : 0,
         source: index % 2 === 0 ? 'interval' : 'snapshot',
         discontinuity: false,
@@ -6302,6 +6303,7 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
       // Oldest entry (atMs 500) truncated; stream starts at the second sample.
       expect(raw[0]).toEqual({
         at_ms: 1000,
+        wall_at_ms: 1_785_000_001_000,
         lag_ms: 300,
         source: 'snapshot',
         discontinuity: false,

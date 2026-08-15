@@ -10,16 +10,19 @@ import {
 // previous readings at start(), so the first observation already has deltas.
 function makeHarness() {
   let nowMs = 0;
+  let wallNowMs = 1_785_000_000_000;
   let elu = { idle: 0, active: 0 };
   let cpu = { user: 0, system: 0 };
   const sampler = new LoopLagSampler({
     now: () => nowMs,
+    wallNow: () => wallNowMs,
     eluReader: () => ({ ...elu }),
     cpuReader: () => ({ ...cpu }),
   });
   return {
     sampler,
     setNow: (ms: number) => { nowMs = ms; },
+    setWallNow: (ms: number) => { wallNowMs = ms; },
     setElu: (next: { idle: number; active: number }) => { elu = next; },
     setCpu: (next: { user: number; system: number }) => { cpu = next; },
   };
@@ -35,20 +38,41 @@ describe('LoopLagSampler — raw instrumentation (#3253)', () => {
 
     // Tick 1 fires on time.
     h.setNow(500);
+    h.setWallNow(1_785_000_000_500);
     vi.advanceTimersByTime(LOOP_LAG_SAMPLE_INTERVAL_MS);
     // Tick 2 fires 300ms late — THE causal event.
     h.setNow(1300);
+    h.setWallNow(1_785_000_001_300);
     vi.advanceTimersByTime(LOOP_LAG_SAMPLE_INTERVAL_MS);
     // A health request observes much later (the #3253 nine-second shape):
     // the warning-side observation lands seconds after the causal sample.
     h.setNow(10300);
+    h.setWallNow(1_785_000_010_300);
     const snap = h.sampler.snapshot();
 
     const ring = h.sampler.rawSamples();
     expect(ring).toHaveLength(3);
-    expect(ring[0]).toMatchObject({ atMs: 500, lagMs: 0, source: 'interval', discontinuity: false });
-    expect(ring[1]).toMatchObject({ atMs: 1300, lagMs: 300, source: 'interval', discontinuity: false });
-    expect(ring[2]).toMatchObject({ atMs: 10300, lagMs: 8500, source: 'snapshot', discontinuity: false });
+    expect(ring[0]).toMatchObject({
+      atMs: 500,
+      wallAtMs: 1_785_000_000_500,
+      lagMs: 0,
+      source: 'interval',
+      discontinuity: false,
+    });
+    expect(ring[1]).toMatchObject({
+      atMs: 1300,
+      wallAtMs: 1_785_000_001_300,
+      lagMs: 300,
+      source: 'interval',
+      discontinuity: false,
+    });
+    expect(ring[2]).toMatchObject({
+      atMs: 10300,
+      wallAtMs: 1_785_000_010_300,
+      lagMs: 8800,
+      source: 'snapshot',
+      discontinuity: false,
+    });
 
     // The window stats carry the source split and extremes the warn log lacks.
     expect(snap.sampleCount).toBe(3);
@@ -56,7 +80,7 @@ describe('LoopLagSampler — raw instrumentation (#3253)', () => {
     expect(snap.snapshotSampleCount).toBe(1);
     expect(snap.minLagMs).toBe(0);
     expect(snap.medianLagMs).toBe(300);
-    expect(snap.maxLagMs).toBe(8500);
+    expect(snap.maxLagMs).toBe(8800);
   });
 
   it('snapshot() between ticks observes nothing (pre-expected early return preserved)', () => {
@@ -66,6 +90,28 @@ describe('LoopLagSampler — raw instrumentation (#3253)', () => {
     const snap = h.sampler.snapshot();
     expect(snap.sampleCount).toBe(0);
     expect(h.sampler.rawSamples()).toHaveLength(0);
+  });
+
+  it('keeps the scheduled interval phase so ordinary timer jitter cannot become a phantom 500ms stall', () => {
+    const h = makeHarness();
+    h.sampler.start();
+
+    // setInterval remains scheduled at 500, 1000, 1500... even when a callback
+    // runs a little late. Rebasing the deadline to actual+500 would make the
+    // 1001ms callback look early, discard it, then report ~500ms at 1501ms.
+    h.setNow(502);
+    vi.advanceTimersByTime(LOOP_LAG_SAMPLE_INTERVAL_MS);
+    h.setNow(1001);
+    vi.advanceTimersByTime(LOOP_LAG_SAMPLE_INTERVAL_MS);
+    h.setNow(1501);
+    vi.advanceTimersByTime(LOOP_LAG_SAMPLE_INTERVAL_MS);
+
+    expect(h.sampler.rawSamples().map((sample) => sample.lagMs)).toEqual([2, 1, 1]);
+    expect(h.sampler.snapshot()).toMatchObject({
+      sampleCount: 3,
+      maxLagMs: 2,
+      locallyStarved: false,
+    });
   });
 
   it('bounds the raw ring and drops oldest first', () => {
