@@ -7812,6 +7812,10 @@ export class AgentRuntime implements Runtime {
       const model = typeof session.getModelRef === 'function' ? session.getModelRef() : null;
       return model === null || model === entry.model;
     }
+    // No window: compare against the configured primary. An unset primary
+    // (possible in minimal configs and test harnesses) is unjudgeable — treat
+    // as current rather than wrongly retiring a healthy manager.
+    if (typeof this.agentProvider !== 'string' || this.agentProvider === '') return true;
     return provider === this.agentProvider;
   }
 
