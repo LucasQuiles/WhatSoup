@@ -1782,7 +1782,8 @@ machine-readable disposition registry for sources that participate in fault clas
 | `fallback_recovery_stalled` | `src/runtimes/agent/runtime.ts` | Persisted fallback window plus current primary-provider recovery probe |
 | `provider_execution_queue_pressure` | `src/runtimes/agent/provider-execution-gate.ts` and `src/runtimes/agent/runtime.ts` | `runtime.agent.providerExecution`, exact OpenCode child lifetimes, and external processes sharing the XDG data root; recovery requires an idle gate |
 | `agent_reply_guarantee_breach` | `src/runtimes/agent/turn-finalizer.ts` | Exact terminal record, inbound failure class, delivery proof, and continuity-candidate row |
-| `release-drift` | `scripts/live-release-drift-alert.ts` | Release manifest, artifact tree, and running service provenance |
+| `release-drift` | `scripts/live-release-drift-alert.ts` through `scripts/live-release-observers.ts` | Release manifest, artifact tree, and running service provenance |
+| `release-currency` | `scripts/live-release-currency-alert.ts` through `scripts/live-release-observers.ts` | Exact deployed manifest commit and explicitly configured remote ref; differing commits are advisory and never alter runtime health |
 | `heartbeat-watchdog` | `deploy/scripts/bot-errors-heartbeat-watchdog.py` | Roster entry and current producer heartbeat; retired entries must not page |
 | `remote-claim-failed` | `deploy/scripts/bot-errors-collector.py` | Collector claim/lease state and target reachability |
 | `stale-autoclose` | `deploy/scripts/bot-errors-dispatcher.py` | Incident ledger transition and explicit source clear evidence |

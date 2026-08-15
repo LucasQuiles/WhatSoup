@@ -27,7 +27,7 @@ function runRenderer(args: string[], env: Record<string, string> = {}) {
 }
 
 describe('render-release-drift-launchd.sh', () => {
-  it('renders the release drift LaunchAgent with absolute paths and instance plist target', () => {
+  it('renders the release observers with separate drift and currency inputs', () => {
     const home = makeTmpRoot();
 
     const result = runRenderer([
@@ -42,12 +42,47 @@ describe('render-release-drift-launchd.sh', () => {
     expect(result.exitCode, result.stderr).toBe(0);
     expect(result.stdout).toContain('<string>com.whatsoup.release-drift-check</string>');
     expect(result.stdout).toContain(`${repoRoot}/scripts/run-with-pinned-node.sh`);
-    expect(result.stdout).toContain(`${repoRoot}/scripts/live-release-drift-alert.ts`);
+    expect(result.stdout).toContain(`${repoRoot}/scripts/live-release-observers.ts`);
     expect(result.stdout).toContain(`${home}/Library/LaunchAgents/com.whatsoup.sample-bot.plist`);
     expect(result.stdout).toContain('<string>--instance</string>\n    <string>sample-bot</string>');
+    expect(result.stdout).toContain('<string>--target-url</string>');
+    expect(result.stdout).toContain('<string>https://github.com/LucasQuiles/WhatSoup.git</string>');
+    expect(result.stdout).toContain('<string>--target-ref</string>');
+    expect(result.stdout).toContain('<string>refs/heads/main</string>');
+    expect(result.stdout).toContain('<string>--clear-on-ok</string>');
     expect(result.stdout).not.toContain('__WHATSOUP_REPO_ROOT__');
     expect(result.stdout).not.toContain('__HOME__');
     expect(result.stdout).not.toContain('__INSTANCE__');
+    expect(result.stdout).not.toContain('__TARGET_URL__');
+    expect(result.stdout).not.toContain('__TARGET_REF__');
+  });
+
+  it('renders an explicit reviewed remote and ref without shell interpolation', () => {
+    const home = makeTmpRoot();
+    const result = runRenderer([
+      '--instance', 'sample-bot',
+      '--repo-root', repoRoot,
+      '--home', home,
+      '--target-url', 'ssh://git@example.test/team/WhatSoup.git',
+      '--target-ref', 'refs/heads/release/stable',
+    ]);
+
+    expect(result.exitCode, result.stderr).toBe(0);
+    expect(result.stdout).toContain('<string>ssh://git@example.test/team/WhatSoup.git</string>');
+    expect(result.stdout).toContain('<string>refs/heads/release/stable</string>');
+  });
+
+  it('rejects unsafe target transports', () => {
+    const home = makeTmpRoot();
+    const result = runRenderer([
+      '--instance', 'sample-bot',
+      '--repo-root', repoRoot,
+      '--home', home,
+      '--target-url', 'ext::touch /tmp/unsafe',
+    ]);
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain('unsafe --target-url');
   });
 
   it('writes to an explicit non-live output path', () => {

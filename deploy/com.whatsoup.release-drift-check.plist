@@ -9,13 +9,16 @@
   <array>
     <string>/bin/bash</string>
     <string>__WHATSOUP_REPO_ROOT__/scripts/run-with-pinned-node.sh</string>
-    <string>__WHATSOUP_REPO_ROOT__/scripts/live-release-drift-alert.ts</string>
+    <string>__WHATSOUP_REPO_ROOT__/scripts/live-release-observers.ts</string>
     <string>--launchd-plist</string>
     <string>__HOME__/Library/LaunchAgents/com.whatsoup.__INSTANCE__.plist</string>
     <string>--instance</string>
     <string>__INSTANCE__</string>
-    <string>--source</string>
-    <string>release-drift</string>
+    <string>--target-url</string>
+    <string>__TARGET_URL__</string>
+    <string>--target-ref</string>
+    <string>__TARGET_REF__</string>
+    <string>--clear-on-ok</string>
   </array>
   <key>StartInterval</key>
   <integer>300</integer>
