@@ -2303,7 +2303,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
   // shutdown wiring needed in main.ts, which already calls healthServer.close().
   server.on('close', () => loopLagSampler.stop());
 
-  const healthHost = process.env.HEALTH_BIND_ADDRESS ?? '127.0.0.1';
+  const healthHost = config.healthBindAddress;
   // R7a: refuse a non-loopback bind without an explicit opt-in — the health server
   // exposes GET /health metadata and the token-gated POST /access endpoint, and a
   // remote plain-HTTP bind sends the health token over the wire. Mirrors the fleet guard.

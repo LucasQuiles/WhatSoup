@@ -29,15 +29,13 @@ const ENV_ACCESS_PATTERN = /process\.env/;
 
 const ALLOWLIST: Record<string, number> = {
   // SSOT env→typed-RuntimeConfig conversion seam; every read is instance-config→env→default.
-  'src/config.ts': 28,
+  'src/config.ts': 31,
   // param-default `env` seam (WHATSOUP_REPO_ROOT) — new typed-field candidate, not a bypass.
   'src/core/arc-binding-health.ts': 1,
   // build-time injected WHATSOUP_GIT_SHA / WHATSOUP_GIT_BRANCH (deploy hook, no typed source).
   'src/core/database-compatibility-early.ts': 2,
   // guard `env: … = process.env` DI seam — keeps the guard unit-testable.
   'src/core/health-bind-guard.ts': 1,
-  // HEALTH_BIND_ADDRESS — slice-2 typed-field candidate (PR #2315 diff is reusable).
-  'src/core/health.ts': 1,
   // bounded MCP key-list passthrough (.map over an explicit key list).
   'src/core/mcp-launcher.ts': 1,
   // WHATSOUP_INTERNAL_JIDS / BOT_ERRORS_JID safety config — slice-3 typed field.
@@ -48,8 +46,6 @@ const ALLOWLIST: Record<string, number> = {
   'src/fleet/bind-guard.ts': 1,
   // bounded poll-target env lookup (per-name).
   'src/fleet/health-poller.ts': 1,
-  // FLEET_BIND_ADDRESS — slice-2 typed-field candidate (PR #2315 diff is reusable).
-  'src/fleet/index.ts': 1,
   // bounded path env-key lookup.
   'src/fleet/paths.ts': 1,
   // WHATSOUP_DOCKER_ENV + WHATSOUP_NODE detection, PATH ambient — WHATSOUP_NODE is slice-3 typed.
@@ -60,13 +56,13 @@ const ALLOWLIST: Record<string, number> = {
   'src/fleet/routes/ops-auth.ts': 2,
   // VITEST / VITEST_POOL_ID / VITEST_WORKER_ID test-runner detection.
   'src/fleet/silence-registry-episode-store.ts': 4,
-  // FLEET_BIND_ADDRESS — slice-2 typed-field candidate (PR #2315 diff is reusable).
-  'src/fleet/standalone.ts': 1,
   // TMPDIR + INSTANCE_CONFIG WRITES — multi-instance bootstrap protocol.
   'src/instance-loader.ts': 2,
   // secret resolver W-3 env fallback (process.env[opts.envVar]) — must stay env-late.
   'src/lib/api-key-resolver.ts': 2,
-  // outbox config group (BOT_ERRORS_*) + VITEST detection + TMPDIR — slice-3 typed outbox module.
+  // outbox config group (BOT_ERRORS_*) + VITEST detection + TMPDIR (env-late by
+  // design: lib cannot import config, and config WRITES TMPDIR at load — the env
+  // var is the sanctioned lib-side channel) — slice-3 typed outbox module.
   'src/lib/bot-errors-outbox.ts': 19,
   // outbox/alert config (BOT_ERRORS_*, EMIT_ALERT_THROTTLE_MS, WHATSOUP_ALERT_SINK) — slice-3.
   'src/lib/emit-alert.ts': 8,
@@ -84,8 +80,8 @@ const ALLOWLIST: Record<string, number> = {
   'src/lib/recovery-authority-store.ts': 3,
   // bootstrap-early logger (LOG_LEVEL/LOG_DIR/VITEST) — cannot import config (eval-order cycle).
   'src/logger.ts': 3,
-  // preflight import probe (2) + WHATSOUP_SCHEDULE_ROOT (slice-2) + TMPDIR (slice-2, → config.tmpDir).
-  'src/main.ts': 4,
+  // preflight import probe (2) — remaining after the slice-2 migrations.
+  'src/main.ts': 2,
   // memory-write API key resolver — must stay env-late (secret surface).
   'src/mcp/register-all.ts': 1,
   // whole-object process.env → resolveReleaseIdentity (build/release identity).

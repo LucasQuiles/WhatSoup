@@ -827,7 +827,7 @@ connectionManager.on('decryptionFailure', (data) => {
 // 7. Health server — delegates enrichment stats to runtime health snapshot
 const healthServer = startHealthServer({
   db,
-  scheduleAllowedRoot: process.env.WHATSOUP_SCHEDULE_ROOT,
+  scheduleAllowedRoot: config.scheduleRoot,
   connectionManager,
   startedAt,
   durability,
@@ -988,7 +988,7 @@ const mediaRetentionTimer = new MediaRetentionTimer(mediaBaseDir, db, {
 mediaRetentionTimer.start(config.mediaRetention.intervalHours * MS_PER_HOUR);
 
 const processTmpRetentionTimer = new ProcessTmpRetentionTimer(
-  process.env.TMPDIR ?? join(config.dataRoot, 'tmp'),
+  config.tmpDir,
   DEFAULT_PROCESS_TMP_RETENTION,
 );
 processTmpRetentionTimer.start(DEFAULT_PROCESS_TMP_RETENTION.intervalMs);
