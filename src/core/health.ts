@@ -751,16 +751,50 @@ function classifyDisconnect(connectionState: ConnectionStateSnapshot): Disconnec
   return 'unknown_reconnect';
 }
 
-function requireAuth(req: IncomingMessage, res: ServerResponse, instanceName: string): boolean {
-  const authHeader = (req.headers as Record<string, string | undefined>)['authorization'];
+/**
+ * Per-server expected-token state for every protected health route.
+ *
+ * The instance-scoped lookup shells out to the platform keyring synchronously
+ * (a blocked/`security`-invisible keychain stalls the event loop up to the exec
+ * timeout), so it must not run once per request: a resolved token is cached for
+ * the server's lifetime — token rotation therefore requires an instance
+ * restart, matching the launcher's own launch-time resolution — and a miss is
+ * re-attempted at most every {@link HEALTH_TOKEN_MISS_RETRY_MS} so a transient
+ * keychain visibility failure cannot permanently lock out the control plane
+ * while a burst of unauthorized requests cannot serialize keyring stalls.
+ * Scoped to the server instance (created in {@link startHealthServer}), never
+ * module scope, so servers in one process cannot leak tokens across instances.
+ */
+interface HealthAuthState {
+  instanceName: string;
+  token?: string;
+  missAtMs?: number;
+}
+
+const HEALTH_TOKEN_MISS_RETRY_MS = 30_000;
+
+function resolveExpectedHealthToken(auth: HealthAuthState): string | undefined {
+  if (auth.token !== undefined) return auth.token;
+  const now = Date.now();
+  if (auth.missAtMs !== undefined && now - auth.missAtMs < HEALTH_TOKEN_MISS_RETRY_MS) {
+    return undefined;
+  }
   // Scope the canonical keyring lookup to this instance. During the staged
-  // migration, retain the per-process environment token as a fallback so a
-  // transient keychain visibility failure cannot lock out the control plane.
-  const expectedToken = lookupCredential('whatsoup-health-token', {
-    user: instanceName,
+  // migration, the scoped lookup retains the per-process environment token as
+  // a post-keyring fallback so a transient keychain visibility failure cannot
+  // lock out the control plane.
+  const token = lookupCredential('whatsoup-health-token', {
+    user: auth.instanceName,
     skipMigrationFallbacks: true,
   }) ?? undefined;
-  if (!verifyBearer(authHeader, expectedToken)) {
+  if (token !== undefined) auth.token = token;
+  else auth.missAtMs = now;
+  return token;
+}
+
+function requireAuth(req: IncomingMessage, res: ServerResponse, auth: HealthAuthState): boolean {
+  const authHeader = (req.headers as Record<string, string | undefined>)['authorization'];
+  if (!verifyBearer(authHeader, resolveExpectedHealthToken(auth))) {
     res.writeHead(401, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Unauthorized' }));
     return false;
@@ -776,14 +810,17 @@ function requireAuth(req: IncomingMessage, res: ServerResponse, instanceName: st
  * exposes privileged identity, location, lifecycle, exception, recent-event, and
  * credential fields. Unauthenticated callers receive a minimal versioned public
  * liveness envelope (see {@link HEALTH_PUBLIC_SCHEMA_VERSION}); only callers with
- * a valid bearer token proceed to the diagnostic body. This predicate keeps the
- * credential-resolution path identical to {@link requireAuth} without writing a
- * 401, so the `/health` handler can emit the public envelope on the same wire.
+ * a valid bearer token proceed to the diagnostic body. This predicate shares
+ * {@link resolveExpectedHealthToken} with {@link requireAuth} — the SAME
+ * instance-scoped cached resolution — so a token the mutation routes reject
+ * (e.g. a stale unscoped/legacy credential) can never authorize the diagnostic
+ * projection, and rotation can never leave GET and mutation routes honoring
+ * different credentials. It only skips the 401 side effect, so the `/health`
+ * handler can emit the public envelope on the same wire.
  */
-function hasHealthAuth(req: IncomingMessage): boolean {
+function hasHealthAuth(req: IncomingMessage, auth: HealthAuthState): boolean {
   const authHeader = (req.headers as Record<string, string | undefined>)['authorization'];
-  const expectedToken = lookupCredential('whatsoup-health-token') ?? undefined;
-  return verifyBearer(authHeader, expectedToken);
+  return verifyBearer(authHeader, resolveExpectedHealthToken(auth));
 }
 
 function agentCommandStatus(err: unknown): number {
@@ -812,6 +849,9 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
   // server instance: module scope would leak degradation across server
   // lifetimes that share an instance name (observed as cross-test pollution).
   const recentlyDegraded = new Set<string>();
+  // Shared by requireAuth and hasHealthAuth — one scoped, cached resolution
+  // path for every protected route on this server (see HealthAuthState).
+  const healthAuth: HealthAuthState = { instanceName: deps.instanceName };
   const chatResolver = createChatResolver({ db: deps.db.raw });
   const sendPipeline = createSendPipeline({
     resolver: chatResolver,
@@ -832,7 +872,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
     // ── POST /poll-decision — D-4 console approval queue: deliver a decision
     // to a pending poll through the runtime's own poll-resolution path ──
     if (req.url === '/poll-decision' && req.method === 'POST') {
-      if (!requireAuth(req, res, deps.instanceName)) return;
+      if (!requireAuth(req, res, healthAuth)) return;
 
       if (!deps.resolvePollDecision) {
         res.writeHead(503, { 'Content-Type': 'application/json' });
@@ -908,7 +948,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
 
     // ── POST /send — send a text message to any chat ──
     if (req.url === '/send' && req.method === 'POST') {
-      if (!requireAuth(req, res, deps.instanceName)) return;
+      if (!requireAuth(req, res, healthAuth)) return;
 
       const MAX_BODY_BYTES = 64 * 1024; // 64 KB
       let body = '';
@@ -969,7 +1009,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
     // delivers on its next tick (≤ ~60 s). Media is passed by FILE PATH (bounded to
     // deps.scheduleAllowedRoot), never inline bytes — a branded PDF exceeds the body cap.
     if (req.url === '/schedule' && req.method === 'POST') {
-      if (!requireAuth(req, res, deps.instanceName)) return;
+      if (!requireAuth(req, res, healthAuth)) return;
 
       const jsonHeaders = { 'Content-Type': 'application/json' };
       const MAX_BODY_BYTES = 64 * 1024; // 64 KB — JSON body references a file path, not bytes
@@ -1057,7 +1097,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       (async () => {
         const jsonHeaders = { 'Content-Type': 'application/json' };
 
-        if (!requireAuth(req, res, deps.instanceName)) return;
+        if (!requireAuth(req, res, healthAuth)) return;
 
         if (deps.instanceType !== 'agent' || !deps.runtime?.handleAgentCommand) {
           res.writeHead(409, jsonHeaders);
@@ -1146,7 +1186,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       (async () => {
         const jsonHeaders = { 'Content-Type': 'application/json' };
 
-        if (!requireAuth(req, res, deps.instanceName)) return;
+        if (!requireAuth(req, res, healthAuth)) return;
 
         let rawBody = '';
         try {
@@ -1245,7 +1285,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       (async () => {
         const jsonHeaders = { 'Content-Type': 'application/json' };
 
-        if (!requireAuth(req, res, deps.instanceName)) return;
+        if (!requireAuth(req, res, healthAuth)) return;
 
         // Parse body (with size limit matching /send)
         const MAX_BODY_BYTES = 64 * 1024;
@@ -1353,7 +1393,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       (async () => {
         const jsonHeaders = { 'Content-Type': 'application/json' };
 
-        if (!requireAuth(req, res, deps.instanceName)) return;
+        if (!requireAuth(req, res, healthAuth)) return;
 
         // Parse body (with size limit matching /access)
         const MAX_BODY_BYTES = 64 * 1024;
@@ -1420,7 +1460,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
 
     // ── GET /typing — return JIDs currently composing from presence cache ──
     if (req.url === '/typing' && req.method === 'GET') {
-      if (!requireAuth(req, res, deps.instanceName)) return;
+      if (!requireAuth(req, res, healthAuth)) return;
       const cache = deps.connectionManager.presenceCache;
       const composing: { jid: string; since: number }[] = [];
       // presenceCache.entries is private — expose via a method
@@ -1454,7 +1494,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       // only — to unauthenticated callers. No DB reads, no enrichment stats,
       // no auth-bond formatting, and no privileged fields touch the public
       // bytes. Authenticated callers proceed to the full diagnostic below.
-      if (!hasHealthAuth(req)) {
+      if (!hasHealthAuth(req, healthAuth)) {
         const cs = deps.connectionManager.getConnectionState();
         const publicConnected = isFullyConnected(cs);
         const publicRecovering =

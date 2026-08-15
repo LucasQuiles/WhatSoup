@@ -3540,6 +3540,98 @@ describe('GET /health — #2515 public/private liveness split', () => {
     expect(body).not.toContain('synthetic-instance-name-marker-2515');
     expect(body).not.toContain('whatsapp');
   });
+
+  // The file-default lookupCredential mock ignores lookup options, which is
+  // exactly how the unscoped-GET defect stayed invisible. These falsifiers use
+  // a scope-SENSITIVE mock and restore the default in finally (this file has
+  // no global mock reset).
+  const restoreDefaultLookupMock = (): void => {
+    lookupCredentialMock.mockImplementation(
+      (service: string) => service === 'whatsoup-health-token'
+        ? process.env.WHATSOUP_HEALTH_TOKEN ?? null
+        : null,
+    );
+  };
+
+  it('never grants the diagnostic to a token only the unscoped lookup knows (scope falsifier)', async () => {
+    try {
+      // Deliberately DIFFERENT scoped vs unscoped credentials: before the fix,
+      // GET auth resolved unscoped, so the stale unscoped token would have
+      // unlocked the full diagnostic projection here.
+      lookupCredentialMock.mockImplementation(
+        (service: string, options?: { user?: string }) =>
+          service === 'whatsoup-health-token'
+            ? (options?.user !== undefined ? 'scoped-secret-2515' : 'stale-unscoped-secret-2515')
+            : null,
+      );
+
+      const unscoped = await httpReq(port, '/health', 'GET', undefined, {
+        Authorization: 'Bearer stale-unscoped-secret-2515',
+      });
+      expect(unscoped.status).toBe(200);
+      expect(JSON.parse(unscoped.body).schema_version).toBe('health.public.v1');
+      expect(unscoped.body).not.toContain('synthetic-instance-name-marker-2515');
+
+      // The instance-scoped credential is the one token every protected route
+      // honors — GET diagnostic and mutation routes agree on it.
+      const scoped = await httpReq(port, '/health', 'GET', undefined, {
+        Authorization: 'Bearer scoped-secret-2515',
+      });
+      expect(scoped.status).toBe(200);
+      expect(JSON.parse(scoped.body).instance?.name).toBe('synthetic-instance-name-marker-2515');
+
+      const mutationUnscoped = await httpReq(port, '/send', 'POST', '{}', {
+        Authorization: 'Bearer stale-unscoped-secret-2515',
+      });
+      expect(mutationUnscoped.status).toBe(401);
+      const mutationScoped = await httpReq(port, '/send', 'POST', '{}', {
+        Authorization: 'Bearer scoped-secret-2515',
+      });
+      // Auth passes; the empty body fails later validation — anything but 401.
+      expect(mutationScoped.status).not.toBe(401);
+    } finally {
+      restoreDefaultLookupMock();
+    }
+  });
+
+  it('resolves the expected token once per server, not once per request (keyring stall bound)', async () => {
+    try {
+      lookupCredentialMock.mockClear();
+      lookupCredentialMock.mockImplementation(
+        (service: string, options?: { user?: string }) =>
+          service === 'whatsoup-health-token' && options?.user !== undefined
+            ? 'scoped-secret-cache-2515'
+            : null,
+      );
+
+      const first = await httpReq(port, '/health', 'GET', undefined, {
+        Authorization: 'Bearer scoped-secret-cache-2515',
+      });
+      expect(JSON.parse(first.body).instance?.name).toBe('synthetic-instance-name-marker-2515');
+      await httpReq(port, '/health', 'GET', undefined, {
+        Authorization: 'Bearer scoped-secret-cache-2515',
+      });
+      await httpReq(port, '/health', 'GET', undefined, {
+        Authorization: 'Bearer definitely-wrong',
+      });
+
+      // The scoped lookup shells out to the platform keyring synchronously, so
+      // it must run once per server lifetime — not on every request (and not
+      // again on unauthorized requests, which would let a request burst
+      // serialize keyring stalls).
+      const healthTokenLookups = lookupCredentialMock.mock.calls.filter(
+        ([service]) => service === 'whatsoup-health-token',
+      );
+      expect(healthTokenLookups).toEqual([
+        ['whatsoup-health-token', {
+          user: 'synthetic-instance-name-marker-2515',
+          skipMigrationFallbacks: true,
+        }],
+      ]);
+    } finally {
+      restoreDefaultLookupMock();
+    }
+  });
 });
 
 describe('POST /send — Authorization header check', () => {
