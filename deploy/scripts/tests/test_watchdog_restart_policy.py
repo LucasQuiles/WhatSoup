@@ -359,21 +359,16 @@ class TestOutboundPoisonNoAutomaticRestart:
         malformed["degradation_causes"] = None
         assert _run_decision(malformed, 503) == 1
 
-    @pytest.mark.parametrize(
-        "coexisting_cause",
-        [
-            "agent_session_inactive",
-            "turn_finalization_degraded",
-            "turn_recovery_degraded",
-            "event_loop_starved",
-        ],
-    )
-    def test_soft_coexisting_cause_does_not_clear_poison_containment(
-        self, coexisting_cause
-    ):
-        body = self._body()
-        body["degradation_causes"].append(coexisting_cause)
-        assert _run_decision(body, 503) == 7
+    def test_soft_coexisting_cause_does_not_clear_poison_containment(self):
+        def assert_contained(coexisting_cause):
+            body = self._body()
+            body["degradation_causes"].append(coexisting_cause)
+            assert _run_decision(body, 503) == 7, coexisting_cause
+
+        assert_contained("agent_session_inactive")
+        assert_contained("turn_finalization_degraded")
+        assert_contained("turn_recovery_degraded")
+        assert_contained("event_loop_starved")
 
     def test_malformed_or_mixed_poison_evidence_fails_closed(self):
         cases = [
@@ -564,36 +559,36 @@ class TestRenderedWatchdogLaunchdExitPolicy:
         assert "OUTBOUND-POISON" not in log_text
         assert log_text.rstrip().endswith("CREDENTIAL-DEAD")
 
-    @pytest.mark.parametrize("superseded", [False, True])
-    def test_poison_auth_error_current_vs_superseded_rendered_policy(
-        self, tmp_path, superseded
-    ):
-        bot_name = f"poisoned-auth-error-{'superseded' if superseded else 'current'}"
-        now_ms = int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000)
-        body = TestOutboundPoisonNoAutomaticRestart._body()
-        body["instance"]["name"] = bot_name
-        body["turn_capability"].update({
-            "last_turn_error_class": "auth-required",
-            "last_turn_error_at": now_ms - (1_000 if superseded else 0),
-            "last_successful_turn_at": now_ms if superseded else now_ms - 1_000,
-        })
-        if not superseded:
-            body["degradation_causes"].append("turn_capability_error")
+    def test_poison_auth_error_current_vs_superseded_rendered_policy(self, tmp_path):
+        for superseded in [False, True]:
+            bot_name = f"poisoned-auth-error-{'superseded' if superseded else 'current'}"
+            case_path = tmp_path / ("superseded" if superseded else "current")
+            case_path.mkdir()
+            now_ms = int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000)
+            body = TestOutboundPoisonNoAutomaticRestart._body()
+            body["instance"]["name"] = bot_name
+            body["turn_capability"].update({
+                "last_turn_error_class": "auth-required",
+                "last_turn_error_at": now_ms - (1_000 if superseded else 0),
+                "last_successful_turn_at": now_ms if superseded else now_ms - 1_000,
+            })
+            if not superseded:
+                body["degradation_causes"].append("turn_capability_error")
 
-        calls = _run_rendered_unreachable_watchdog(
-            tmp_path,
-            bot_name=bot_name,
-            launchd_snapshot="gui = {\n  state = running\n  last exit code = 0\n}",
-            bot_health=body,
-        )
-        log_dir = tmp_path / "home" / "Library" / "Logs" / "whatsoup"
-        log_text = (log_dir / f"{bot_name}-watchdog.log").read_text(encoding="utf-8")
-        marker = log_dir / f"{bot_name}-credential-dead.marker"
+            calls = _run_rendered_unreachable_watchdog(
+                case_path,
+                bot_name=bot_name,
+                launchd_snapshot="gui = {\n  state = running\n  last exit code = 0\n}",
+                bot_health=body,
+            )
+            log_dir = case_path / "home" / "Library" / "Logs" / "whatsoup"
+            log_text = (log_dir / f"{bot_name}-watchdog.log").read_text(encoding="utf-8")
+            marker = log_dir / f"{bot_name}-credential-dead.marker"
 
-        assert "kickstart" not in calls
-        assert marker.exists() is (not superseded)
-        expected_state = "OUTBOUND-POISON" if superseded else "CREDENTIAL-DEAD"
-        assert log_text.rstrip().endswith(expected_state)
+            assert "kickstart" not in calls, superseded
+            assert marker.exists() is (not superseded), superseded
+            expected_state = "OUTBOUND-POISON" if superseded else "CREDENTIAL-DEAD"
+            assert log_text.rstrip().endswith(expected_state), superseded
 
     def test_unreachable_bot_with_last_exit_78_is_not_kickstarted(self, tmp_path):
         calls = _run_rendered_unreachable_watchdog(
