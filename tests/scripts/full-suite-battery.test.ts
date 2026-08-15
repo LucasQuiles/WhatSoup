@@ -185,9 +185,9 @@ describe('runBoundedBattery (externally bounded full-suite runner)', () => {
 });
 
 describe('resolveBatteryTimeoutMs (round-20 gap: invalid FULL_SUITE_BATTERY_TIMEOUT_MS is a config error, not an instant timeout)', () => {
-  it('absent env → the 20-minute default', () => {
+  it('absent env → the 30-minute default', () => {
     const r = resolveBatteryTimeoutMs(undefined);
-    expect(r).toEqual({ ok: true, timeoutMs: 20 * 60 * 1000 });
+    expect(r).toEqual({ ok: true, timeoutMs: 30 * 60 * 1000 });
   });
   it('a valid positive number → that bound', () => {
     expect(resolveBatteryTimeoutMs('300000')).toEqual({ ok: true, timeoutMs: 300000 });
