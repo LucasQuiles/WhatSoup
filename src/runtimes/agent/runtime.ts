@@ -31,7 +31,7 @@ import {
   type ResponseWorkflow,
   type UserTemplateId,
 } from './response-registry.ts';
-import { autoSwitchNoticeMessage, renderUserMessage, providerUnknownTerminalNotice } from './response-templates.ts';
+import { autoSwitchNoticeMessage, renderUserMessage, providerUnknownTerminalNotice, renderFallbackAdvanceNotice } from './response-templates.ts';
 import { runDiagnosticBundle } from './diagnostic-bundle.ts';
 import { buildDiagnosticProbes } from './diagnostic-probes.ts';
 import {
@@ -2600,6 +2600,7 @@ export class AgentRuntime implements Runtime {
       probePrimaryProviderRecovered: (onEvidence, signal) =>
         runtime.probePrimaryProviderRecovered(onEvidence, signal),
       deactivateProviderFallback: (reason, receipt) => runtime.deactivateProviderFallback(reason, receipt),
+      schedulePostTransitionRouteRecycles: () => runtime.schedulePostTransitionRouteRecycles(),
     };
   }
 
@@ -4854,6 +4855,32 @@ export class AgentRuntime implements Runtime {
         } catch (err) {
           log.warn({ err, chatJid }, 'chat context assembly failed — proceeding without context');
         }
+      }
+      // Stand-in introduction (once per manager): the first turn a fallback
+      // stand-in serves must open by identifying itself and then CONTINUE the
+      // conversation — without this, users get an unexplained voice change and
+      // the stand-in answers as if the thread just started (#2121 shape,
+      // incident 2026-08-15). Prepended so the model reads WHO it is before
+      // the recent-context block it is asked to continue from.
+      if (
+        this.isFallbackWindowActive
+        && this.isCrossProviderSession(session)
+        && !this.introducedStandIns.has(session)
+      ) {
+        this.introducedStandIns.add(session);
+        const entry = this.effectiveFallbackEntry;
+        const standInCard = entry
+          ? modelCardLabel(entry.provider, entry.model)
+          : modelCardLabel(session.getProviderId(), undefined);
+        const primaryCard = modelCardLabel(this.agentProvider, this.model);
+        const reason = (this.fallbackWindow.armReason ?? 'a temporary failure').replace(/-/g, ' ');
+        const intro = [
+          '[Provider handoff — read before responding]',
+          `You are ${standInCard}, temporarily standing in for the primary model (${primaryCard}) because of ${reason}.`,
+          'In your first reply only: introduce yourself in one short sentence (say which model you are), then continue the ongoing conversation and any in-progress task from the context above as the same assistant.',
+          'Do not re-greet, do not restart the conversation, and do not claim capabilities you have not verified in this environment.',
+        ].join('\n');
+        contextPreamble = contextPreamble === null ? intro : `${intro}\n\n${contextPreamble}`;
       }
     }
 
@@ -7763,6 +7790,54 @@ export class AgentRuntime implements Runtime {
     return session.getProviderId() !== this.agentProvider;
   }
 
+  /**
+   * True when a live manager's FROZEN provider/model still matches the route a
+   * NEW session would resolve right now. A manager's provider is fixed at
+   * construction and the session-map hit never re-resolves the route, so after
+   * a fallback window transition (arm / chain advance / revert) existing
+   * managers can silently keep serving the OLD route — live-proven 2026-08-15:
+   * turns (including a fresh /new) kept arming the dead fallback for 7+
+   * minutes after "reverting to primary provider". Model is compared only
+   * against an active fallback entry's explicit model (same-provider chains
+   * like opencode kimi→glm differ only by model); with no window active the
+   * primary comparison is provider-only.
+   */
+  private sessionMatchesCurrentRoute(session: SessionManager): boolean {
+    const provider = typeof session.getProviderId === 'function' ? session.getProviderId() : null;
+    if (provider === null) return true; // unattributable — never block on a guess
+    const entry = this.effectiveFallbackEntry;
+    if (entry) {
+      if (provider !== entry.provider) return false;
+      if (entry.model === undefined) return true;
+      const model = typeof session.getModelRef === 'function' ? session.getModelRef() : null;
+      return model === null || model === entry.model;
+    }
+    return provider === this.agentProvider;
+  }
+
+  /**
+   * After a fallback window transition, mark every live manager whose frozen
+   * route went stale for the deferred route recycle (Task G machinery): the
+   * pending flag is consumed at the next turn-idle boundary, which detaches
+   * the idle manager so ensureSessionAndQueueSync rebuilds it on the current
+   * route. Never touches a busy manager — the consumption site enforces idle.
+   */
+  private schedulePostTransitionRouteRecycles(): void {
+    if (this.sessionScope === 'per_chat') {
+      for (const [mapKey, session] of this.chatSessions) {
+        if (!this.sessionMatchesCurrentRoute(session)) {
+          this.pendingRecycle.add(mapKey);
+          log.info({ mapKey, sessionProvider: session.getProviderId?.() }, 'route transition left manager stale — recycle pended');
+        }
+      }
+      return;
+    }
+    if (this.session && !this.sessionMatchesCurrentRoute(this.session)) {
+      this.pendingRecycle.add(GLOBAL_TOOL_SCOPE_KEY);
+      log.info({ sessionProvider: this.session.getProviderId?.() }, 'route transition left singleton manager stale — recycle pended');
+    }
+  }
+
   private get effectiveFallbackEntry(): AgentFallbackEntry | null {
     if (!this.isFallbackWindowActive) return null;
     return this.fallbackWindow.activeEntry ?? this.agentFallbacks[0] ?? null;
@@ -8375,11 +8450,17 @@ export class AgentRuntime implements Runtime {
           );
         })
         .catch((err) => {
-          if (err instanceof FallbackReplayInvalidatedError) {
-            const queue = this.getQueueForChat(args.chatJid, args.mapKey);
-            if (queue) this.notifyFailedFallbackReplay(queue, args.chatJid);
-          }
-          log.error({ err, chatJid: args.chatJid, mapKey: args.mapKey }, 'failed to replay unjournaled turn');
+          // ANY replay failure means the user's turn is definitively not being
+          // answered — always say so. The previous invalidated-only gate left
+          // generic errors (e.g. spawn refusals) as pure silence plus a log
+          // line (incident 2026-08-15).
+          const queue = this.getQueueForChat(args.chatJid, args.mapKey);
+          if (queue) this.notifyFailedFallbackReplay(queue, args.chatJid);
+          // errorMessage() explicitly: the log serializer reduces unknown Error
+          // subclasses to {errorClass} and drops the message — the incident
+          // journal recorded only {"errorClass":"Error"}, leaving the root
+          // cause unrecoverable from logs.
+          log.error({ err, errorMessage: errorMessage(err), chatJid: args.chatJid, mapKey: args.mapKey }, 'failed to replay unjournaled turn');
           emitAlertChecked(
             this.instanceName,
             'runtime_provider_fallback_replay_failed',
@@ -8472,8 +8553,13 @@ export class AgentRuntime implements Runtime {
       return;
     }
     this.notifyFailedFallbackReplay(queue, args.chatJid);
+    // errorMessage() explicitly: the log serializer reduces unknown Error
+    // subclasses to {errorClass} and drops the message — the 2026-08-15
+    // incident journal recorded only {"errorClass":"Error"} here, leaving the
+    // replay root cause unrecoverable from logs.
     log.error({
       err: error,
+      errorMessage: errorMessage(error),
       chatJid: args.chatJid,
       mapKey: args.mapKey,
       fallbackProvider: args.activation.fallbackProvider,
@@ -8917,7 +9003,7 @@ export class AgentRuntime implements Runtime {
             this.handlePerChatCrash(mapKey, chatJid, info, session);
           },
           notifyUser: (msg) => {
-            this.handleCrashNotify(msg, chatJid);
+            this.handleCrashNotify(msg, chatJid, session);
           },
           eventToolScopeKey: toolScopeKey,
         });
@@ -8957,7 +9043,7 @@ export class AgentRuntime implements Runtime {
           this.cleanupSharedCrashTurnState();
           this.emitCrashHealReport(chatJid, info, turnWasInFlight);
         },
-        notifyUser: (msg) => this.handleCrashNotify(msg),
+        notifyUser: (msg) => this.handleCrashNotify(msg, undefined, singletonSession),
       });
       this.session = singletonSession;
       log.info({ chatJid, shared: this.shared, sessionScope: this.sessionScope }, 'created shared/single session manager');
@@ -9061,6 +9147,58 @@ export class AgentRuntime implements Runtime {
     ) {
       log.debug({ mapKey: currentMapKey, state: owner.state }, 'duplicate or terminal crash callback dropped');
       return;
+    }
+
+    // MANAGED FALLBACK HANDOFF (incident 2026-08-15): a process failure of the
+    // ACTIVE fallback entry's session is chain evidence, not a plain crash —
+    // without this, a fallback whose account is suspended (connects, exits 1
+    // every turn, never emits a terminal result) pins the window forever while
+    // healthy entries wait behind it. recordFallbackTurnProcessFailure
+    // attributes the crash (null for primary/other sessions — those take the
+    // ordinary machinery below), marks the entry failed, and advances the
+    // window to the next eligible entry.
+    if (info) {
+      const processFailure = this.fallback.recordFallbackTurnProcessFailure(
+        session,
+        `process_exit code=${info.exitCode ?? 'null'} signal=${info.signal ?? 'none'}`
+          + (info.stderrPreview ? ` stderr=${info.stderrPreview.slice(-160)}` : ''),
+      );
+      if (processFailure) {
+        const noticeQueue = this.chatQueues.get(currentMapKey);
+        const deliveryJid = chatJid ?? noticeQueue?.targetChatJid;
+        let replayScheduled = false;
+        if (processFailure.advanced && processFailure.activation && deliveryJid) {
+          replayScheduled = this.scheduleFallbackReplay({
+            activation: processFailure.activation,
+            chatJid: deliveryJid,
+            mapKey: currentMapKey,
+            oldSession: session,
+          });
+        }
+        // The managed copy replaces the raw session-crash line: mark the
+        // session so the synchronous notifyUnexpectedExit that follows this
+        // callback is suppressed in handleCrashNotify.
+        this.managedCrashNotices.add(session);
+        noticeQueue?.enqueueText(renderFallbackAdvanceNotice({
+          fromCard: modelCardLabel(processFailure.fromProvider, processFailure.fromModel ?? undefined),
+          toCard: processFailure.advanced && processFailure.activation
+            ? modelCardLabel(processFailure.activation.fallbackProvider, processFailure.activation.fallbackModel)
+            : null,
+          replayScheduled,
+        }));
+        if (replayScheduled) {
+          // The replay flow owns the turn continuation AND the dead manager's
+          // disposal (discardPerChatSessionForFallback) — mirror the
+          // terminal-result activation path and skip the crash machinery.
+          // Later duplicate exit callbacks drop on the unmapped-manager guard.
+          log.info({
+            mapKey: currentMapKey,
+            fromProvider: processFailure.fromProvider,
+            fromModel: processFailure.fromModel,
+          }, 'fallback process failure handled as managed handoff — replay scheduled');
+          return;
+        }
+      }
     }
 
     const recoveryGeneration = owner.generation;
@@ -9222,6 +9360,24 @@ export class AgentRuntime implements Runtime {
       status.active ||
       status.pid !== null
     ) {
+      return;
+    }
+
+    // Route-currency guard: never resume a manager whose frozen provider/model
+    // no longer matches the route a new session would resolve — a PRIMARY
+    // manager auto-respawning into an active fallback window immediately
+    // re-hits the failed primary (2026-08-15: resumed claude re-hit its usage
+    // limit within seconds and re-extended the window), and a FALLBACK manager
+    // resuming after a revert re-arms the dead backup. Pend the deferred
+    // recycle instead: the next inbound detaches the stale manager at the
+    // turn-idle boundary and rebuilds on the current route.
+    if (!this.sessionMatchesCurrentRoute(args.session)) {
+      this.pendingRecycle.add(mapKey);
+      log.info({
+        mapKey,
+        sessionProvider: args.session.getProviderId?.(),
+        effectiveProvider: this.effectiveProvider,
+      }, 'auto-respawn skipped — manager route is stale; recycle pended');
       return;
     }
 
@@ -9457,7 +9613,37 @@ export class AgentRuntime implements Runtime {
    * any partial turn output that was already enqueued before the crash.
    * Falls back to a direct send if the queue is gone.
    */
-  private handleCrashNotify(msg: string, chatJid?: string): void {
+  /**
+   * Sessions whose latest crash was handled as a MANAGED fallback handoff
+   * (chain advance / single-entry preservation notice already sent). The
+   * session-layer notifyUnexpectedExit fires synchronously right after
+   * onCrash returns, so membership here suppresses exactly one raw
+   * "Agent session ended (exited with code N)" line per managed crash —
+   * users see the managed handoff copy instead of operator-flavored
+   * exit codes (incident 2026-08-15). WeakSet: a discarded manager's
+   * entry vanishes with it.
+   */
+  private readonly managedCrashNotices = new WeakSet<SessionManager>();
+
+  /**
+   * Stand-in managers that already received their one-shot handoff
+   * introduction block (see the fresh-spawn context assembly) — spawn-per-turn
+   * providers reuse the manager across turns, so without this the stand-in
+   * would re-introduce itself on every message.
+   */
+  private readonly introducedStandIns = new WeakSet<SessionManager>();
+
+  /** One-shot check-and-clear for the managed-crash suppression mark. */
+  private consumeManagedCrashNotice(session: SessionManager | undefined): boolean {
+    if (!session || !this.managedCrashNotices.has(session)) return false;
+    this.managedCrashNotices.delete(session);
+    return true;
+  }
+
+  private handleCrashNotify(msg: string, chatJid?: string, session?: SessionManager): void {
+    // A crash the fallback machinery already handled as a managed handoff has
+    // its user-facing copy sent by that path — drop the raw session-crash line.
+    if (this.consumeManagedCrashNotice(session)) return;
     // In per_chat mode, chatJid MUST be passed — this.queue is not set.
     // In single/shared mode, chatJid is optional (falls back to shared fields).
     const queue = chatJid ? this.getQueueForChat(chatJid) : this.queue;
