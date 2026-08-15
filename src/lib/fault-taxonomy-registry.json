@@ -125,6 +125,7 @@
         "turn_finalization_degraded",
         "turn_recovery_degraded",
         "provider_execution_pressure",
+        "agent_outbound_queue_poisoned",
         "agent_runtime_degraded_unclassified",
         "agent_runtime_unhealthy",
         "unclassified",

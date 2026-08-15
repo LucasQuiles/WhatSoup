@@ -332,6 +332,7 @@ export type HealthDegradationCause =
   | 'turn_finalization_degraded'
   | 'turn_recovery_degraded'
   | 'provider_execution_pressure'
+  | 'agent_outbound_queue_poisoned'
   | 'agent_runtime_degraded_unclassified'
   | 'agent_runtime_unhealthy'
   | 'chat_runtime_degraded'
@@ -371,6 +372,7 @@ const HEALTH_DEGRADATION_CAUSE_PRESENCE: Readonly<Record<HealthDegradationCause,
   turn_finalization_degraded: true,
   turn_recovery_degraded: true,
   provider_execution_pressure: true,
+  agent_outbound_queue_poisoned: true,
   agent_runtime_degraded_unclassified: true,
   agent_runtime_unhealthy: true,
   chat_runtime_degraded: true,
@@ -1609,6 +1611,10 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         ? normalizeChatEnrichmentCycle(runtimeSnapshot?.details ?? null)
         : null;
       const agentRuntimeStatus = deps.instanceType === 'agent' ? runtimeSnapshot?.status ?? null : null;
+      const poisonRuntimeReason = runtimeDegradedReasons(runtimeSnapshot?.details ?? null)
+        .includes('outbound_queue_poisoned')
+        ? ['runtime.outbound_queue_poisoned']
+        : [];
       const fallbackState = deps.runtime?.getFallbackState?.() ?? null;
       const healthyProviderFallbackCapacity = isHealthyProviderFallbackCapacity(fallbackState);
       const turnCapability = deps.instanceType === 'agent'
@@ -1746,7 +1752,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         statusReasons = [isRecoveringConnection ? 'connection_recovering' : 'connection_disconnected'];
       } else if (agentRuntimeStatus === 'unhealthy') {
         status = 'unhealthy';
-        statusReasons = ['agent_runtime_unhealthy'];
+        statusReasons = ['agent_runtime_unhealthy', ...poisonRuntimeReason];
       } else {
         if (authFailureIsDegraded) statusReasons.push(`auth_failure.${authFailureClass}`);
         if (enrichmentIsStale) statusReasons.push('enrichment_stale');
@@ -2131,6 +2137,12 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       }
       if (runtimeProviderExecution?.['pressureActive'] === true) {
         addDegradationCause('provider_execution_pressure');
+      }
+      if (
+        runtimeDetails?.['outboundQueuePoisoned'] === true
+        || positiveRuntimeCounter('outboundQueuePoisonedScopes')
+      ) {
+        addDegradationCause('agent_outbound_queue_poisoned');
       }
       if (
         agentRuntimeStatus === 'degraded'

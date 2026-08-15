@@ -350,7 +350,31 @@ function expectedTurnQueueDetails(): Record<string, unknown> {
   return {
     turnQueueHalted: false,
     turnQueueHaltedScopes: 0,
+    outboundQueuePoisoned: false,
+    outboundQueuePoisonedScopes: 0,
   };
+}
+
+async function poisonOutboundScope(
+  runtime: AgentRuntime,
+  scopeKey: string,
+  message: string,
+): Promise<void> {
+  const coordinator = (runtime as unknown as {
+    runtimeTurnCoordinator: {
+      observeOutboundQueueOperation<T>(
+        key: string,
+        queue: { isPoisoned(): boolean },
+        operation: () => Promise<T>,
+      ): Promise<T>;
+    };
+  }).runtimeTurnCoordinator;
+  const error = new Error(message);
+  await expect(coordinator.observeOutboundQueueOperation(
+    scopeKey,
+    { isPoisoned: () => true },
+    async () => { throw error; },
+  )).rejects.toBe(error);
 }
 
 function makeQueuedTurn(text: string) {
@@ -635,6 +659,53 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
       },
     });
   });
+
+  it('reports one and two poisoned per-chat scopes without serializing identities or causes', async () => {
+    await poisonOutboundScope(runtime, 'private-poison-scope-a', 'private poison cause a');
+    expect(runtime.getHealthSnapshot()).toMatchObject({
+      status: 'degraded',
+      details: {
+        outboundQueuePoisoned: true,
+        outboundQueuePoisonedScopes: 1,
+        degradedReasons: expect.arrayContaining(['outbound_queue_poisoned']),
+      },
+    });
+
+    await poisonOutboundScope(runtime, 'private-poison-scope-b', 'private poison cause b');
+    const snapshot = runtime.getHealthSnapshot();
+    expect(snapshot).toMatchObject({
+      status: 'degraded',
+      details: {
+        outboundQueuePoisoned: true,
+        outboundQueuePoisonedScopes: 2,
+      },
+    });
+    const serialized = JSON.stringify(snapshot.details);
+    expect(serialized).not.toContain('private-poison-scope');
+    expect(serialized).not.toContain('private poison cause');
+    expect(serialized).not.toContain('@s.whatsapp.net');
+  });
+
+  it.each(['shared', 'single'] as const)(
+    'reports a poisoned %s admission lane as unhealthy',
+    async (sessionScope) => {
+      const poisonedRuntime = new AgentRuntime(makeDb(), makeMessenger(), 'test', {
+        sessionScope,
+      });
+      await poisonOutboundScope(poisonedRuntime, '__global__', 'private global poison cause');
+
+      const snapshot = poisonedRuntime.getHealthSnapshot();
+      expect(snapshot).toMatchObject({
+        status: 'unhealthy',
+        details: {
+          outboundQueuePoisoned: true,
+          outboundQueuePoisonedScopes: 1,
+          degradedReasons: expect.arrayContaining(['outbound_queue_poisoned']),
+        },
+      });
+      expect(JSON.stringify(snapshot.details)).not.toContain('private global poison cause');
+    },
+  );
 
   it('recordTurnCapabilitySuccess refreshes primaryModelUsability, clearing staleness (#1884 follow-up)', () => {
     const staleCheckedAt = Date.now() - 31 * 60_000;

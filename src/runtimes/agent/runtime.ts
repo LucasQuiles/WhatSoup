@@ -6380,6 +6380,11 @@ export class AgentRuntime implements Runtime {
     const completedDeliveryIdentityDebt = completedDeliveryIdentityAdmissions.unresolvedCount > 0;
     const finalizationDegraded = runtimeTurnRecoveryIsDegraded(finalizationHealth, recoveryHealth);
     const turnQueueHealth = this.runtimeTurnCoordinator.turnQueueHaltHealth(this.sessionScope);
+    const poisonHealth = this.runtimeTurnCoordinator.outboundQueuePoisonHealth();
+    const publicPoisonHealth = {
+      outboundQueuePoisoned: poisonHealth.outboundQueuePoisoned,
+      outboundQueuePoisonedScopes: poisonHealth.outboundQueuePoisonedScopes,
+    };
     // CAR-20 (#2539): current-vs-historical poll-persistence health + offline-decision
     // retry state, surfaced in BOTH health branches below.
     const pollPersistenceHealth = this.pollPersistence.healthDetails();
@@ -6417,6 +6422,7 @@ export class AgentRuntime implements Runtime {
       turnFinalizationRetryRecoveries: finalizationHealth.retryRecoveries,
       turnFinalizationRetryExhaustions: finalizationHealth.retryExhaustions,
       ...turnQueueHealth,
+      ...publicPoisonHealth,
       ...recoveryHealth,
       ...fallbackState,
     };
@@ -6448,6 +6454,7 @@ export class AgentRuntime implements Runtime {
       if (finalizationDegraded) degradedReasons.push('turn_finalization_debt');
       if (completedDeliveryIdentityDebt) degradedReasons.push('completed_delivery_identity_debt');
       if (turnQueueHealth.turnQueueHalted) degradedReasons.push('turn_queue_halted');
+      if (poisonHealth.outboundQueuePoisoned) degradedReasons.push('outbound_queue_poisoned');
       if (providerExecution.pressureActive) degradedReasons.push('provider_execution_pressure');
       if (pollPersistenceHealth.degraded) degradedReasons.push('poll_persistence_failure');
       if (offlineDecisionRetry.exhausted) degradedReasons.push('offline_decision_retry_exhausted');
@@ -6477,12 +6484,13 @@ export class AgentRuntime implements Runtime {
     if (completedDeliveryIdentityDebt) degradedReasons.push('completed_delivery_identity_debt');
     if (providerExecution.pressureActive) degradedReasons.push('provider_execution_pressure');
     if (turnQueueHealth.turnQueueHalted) degradedReasons.push('turn_queue_halted');
+    if (poisonHealth.outboundQueuePoisoned) degradedReasons.push('outbound_queue_poisoned');
     if (pollPersistenceHealth.degraded) degradedReasons.push('poll_persistence_failure');
     if (offlineDecisionRetry.exhausted) degradedReasons.push('offline_decision_retry_exhausted');
     // A halted single/shared queue is the active admission path — unhealthy/503,
     // matching the public-surface contract; every other reason degrades only.
     const healthStatus: RuntimeHealth['status'] =
-      turnQueueHealth.turnQueueHalted
+      turnQueueHealth.turnQueueHalted || poisonHealth.activeAdmissionLaneBlocked
         ? 'unhealthy'
         : degradedReasons.length > 0
           ? 'degraded'

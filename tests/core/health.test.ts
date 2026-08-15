@@ -2052,6 +2052,71 @@ describe('GET /health', () => {
     db2.close();
   });
 
+  it('projects active outbound poison independently of historical recovery debt', async () => {
+    db.close();
+    const db2 = makeDb();
+    const fakeAgentRuntime = {
+      getHealthSnapshot: () => ({
+        status: 'degraded',
+        details: {
+          degradedReasons: ['outbound_queue_poisoned'],
+          outboundQueuePoisoned: true,
+          outboundQueuePoisonedScopes: 1,
+          turnRecoveryOutstanding: 0,
+          turnRecoveryOpenRecoveries: 0,
+        },
+      }),
+      getFallbackState: () => null,
+    };
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: fakeAgentRuntime as unknown as HealthDeps['runtime'],
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await healthReq(port);
+    expect(status).toBe(200);
+    const json = JSON.parse(body);
+    expect(json.status).toBe('degraded');
+    expect(json.status_reasons).toContain('runtime.outbound_queue_poisoned');
+    expect(json.degradation_causes).toContain('agent_outbound_queue_poisoned');
+    expect(json.runtime.agent).toMatchObject({
+      outboundQueuePoisoned: true,
+      outboundQueuePoisonedScopes: 1,
+    });
+    db2.close();
+  });
+
+  it('does not infer active outbound poison from historical recovery debt', async () => {
+    db.close();
+    const db2 = makeDb();
+    const fakeAgentRuntime = {
+      getHealthSnapshot: () => ({
+        status: 'degraded',
+        details: {
+          degradedReasons: ['turn_finalization_debt'],
+          outboundQueuePoisoned: false,
+          outboundQueuePoisonedScopes: 0,
+          turnRecoveryOutstanding: 2,
+        },
+      }),
+      getFallbackState: () => null,
+    };
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: fakeAgentRuntime as unknown as HealthDeps['runtime'],
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const { body } = await healthReq(port);
+    const json = JSON.parse(body);
+    expect(json.status_reasons).not.toContain('runtime.outbound_queue_poisoned');
+    expect(json.degradation_causes).not.toContain('agent_outbound_queue_poisoned');
+    db2.close();
+  });
+
   it('publishes turn-finalization recovery counters and degraded status', async () => {
     db.close();
     const db2 = makeDb();
@@ -2153,6 +2218,41 @@ describe('GET /health', () => {
     expect(json.runtime.agent.turnQueueHalted).toBe(true);
     expect(json.runtime.agent.turnQueueHaltedScopes).toBe(1);
     expect(json.runtime.agent.lastTurnErrorClass).toBe('auth-required');
+    db2.close();
+  });
+
+  it('retains the outbound poison reason when agent runtime health is unhealthy', async () => {
+    db.close();
+    const db2 = makeDb();
+    const fakeAgentRuntime = {
+      getHealthSnapshot: () => ({
+        status: 'unhealthy',
+        details: {
+          degradedReasons: ['outbound_queue_poisoned'],
+          outboundQueuePoisoned: true,
+          outboundQueuePoisonedScopes: 1,
+        },
+      }),
+      getFallbackState: () => null,
+    };
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: fakeAgentRuntime as unknown as HealthDeps['runtime'],
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await healthReq(port);
+    expect(status).toBe(503);
+    const json = JSON.parse(body);
+    expect(json.status_reasons).toEqual([
+      'agent_runtime_unhealthy',
+      'runtime.outbound_queue_poisoned',
+    ]);
+    expect(json.degradation_causes).toEqual(expect.arrayContaining([
+      'agent_runtime_unhealthy',
+      'agent_outbound_queue_poisoned',
+    ]));
     db2.close();
   });
 
