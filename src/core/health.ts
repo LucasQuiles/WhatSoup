@@ -2168,11 +2168,14 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         addDegradationCause('turn_finalization_degraded');
       }
       if (
-        positiveRuntimeCounter('turnRecoveryOutstanding')
-        || positiveRuntimeCounter('turnRecoveryExhausted')
-        || positiveRuntimeCounter('turnRecoveryOpenRecoveries')
-        || positiveRuntimeCounter('turnRecoveryCorruptLinks')
-        || positiveRuntimeCounter('turnRecoveryEchoConflicts')
+        agentRuntimeStatus === 'degraded'
+        && (
+          positiveRuntimeCounter('turnRecoveryOutstanding')
+          || positiveRuntimeCounter('turnRecoveryExhausted')
+          || positiveRuntimeCounter('turnRecoveryOpenRecoveries')
+          || positiveRuntimeCounter('turnRecoveryCorruptLinks')
+          || positiveRuntimeCounter('turnRecoveryEchoConflicts')
+        )
       ) {
         addDegradationCause('turn_recovery_degraded');
       }

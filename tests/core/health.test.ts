@@ -2608,6 +2608,7 @@ describe('GET /health', () => {
         reasons: ['historical_turn_catchup'],
       },
     });
+    expect(retained.degradation_causes).not.toContain('turn_recovery_degraded');
     expect(clear).toMatchObject({
       status: 'healthy',
       status_reasons: [],
