@@ -4226,6 +4226,8 @@ export class AgentRuntime implements Runtime {
               scopeKey: perChatMapKey ?? GLOBAL_TOOL_SCOPE_KEY,
               perChatMapKey: perChatMapKey ?? null,
               isTurnInFlight: () => this.isTurnInFlight(perChatMapKey ?? GLOBAL_TOOL_SCOPE_KEY),
+              isOutboundQueuePoisoned: () => this.runtimeTurnCoordinator
+                .isOutboundQueuePoisoned(perChatMapKey ?? GLOBAL_TOOL_SCOPE_KEY),
               getPerChatSession: () => this.chatSessions.get(perChatMapKey!),
               abortPerChatQueue: () => this.chatQueues.get(perChatMapKey!)
                 ?.abortTurn({ preserveEvidence: true }),

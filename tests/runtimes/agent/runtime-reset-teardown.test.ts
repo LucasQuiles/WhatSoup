@@ -883,6 +883,146 @@ describe('AgentRuntime reset teardown ownership', () => {
     expect(state.runtimeTurnCoordinator.hasPerChatTeardownPending(mapKey)).toBe(false);
   });
 
+  it('contains global poison that overlaps failed teardown rollback without dispatching restored work', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger);
+    const context = makeRuntimeTurnContext(
+      'singleton',
+      'test',
+      'test@s.whatsapp.net',
+      874,
+      'turn-global-poison-overlap-874',
+    );
+    const state = runtime as unknown as {
+      turnQueue: TurnQueue;
+      runtimeTurnCoordinator: {
+        terminalizeGlobalTurnForReset(): Promise<unknown>;
+        observeOutboundQueueOperation<T>(
+          scopeKey: string,
+          queue: IOutboundQueue,
+          operation: () => Promise<T>,
+        ): Promise<T>;
+        awaitRejectedRuntimeTurnFinalizations(): Promise<void>;
+        finalizeUndispatchedRuntimeTurn: ReturnType<typeof vi.fn>;
+      };
+    };
+    await runtime.start();
+    const runtimeQueue = new TurnQueue();
+    const pending = makeQueuedTurn({ inboundSeq: 874, runtimeContext: context });
+    expect(runtimeQueue.enqueue(pending)).toBe(true);
+    state.turnQueue = runtimeQueue;
+    let rejectTeardown!: (error: unknown) => void;
+    const finalizationStarted = new Promise<void>((resolve) => {
+      state.runtimeTurnCoordinator.finalizeUndispatchedRuntimeTurn = vi.fn()
+        .mockImplementationOnce(() => new Promise((_resolve, reject) => {
+          rejectTeardown = reject;
+          resolve();
+        }))
+        .mockResolvedValue({ kind: 'durable_failure_incident', mayAdvance: true });
+    });
+
+    const teardown = state.runtimeTurnCoordinator.terminalizeGlobalTurnForReset();
+    await finalizationStarted;
+    const poisonError = new Error('global outbound poison during teardown');
+    mockQueue.isPoisoned.mockReturnValue(true);
+    await expect(state.runtimeTurnCoordinator.observeOutboundQueueOperation(
+      '__global__',
+      mockQueue as unknown as IOutboundQueue,
+      async () => { throw poisonError; },
+    )).rejects.toBe(poisonError);
+    rejectTeardown(new Error('global durable finalization failed'));
+
+    await expect(teardown).rejects.toThrow('singleton/shared reset turn finalization failed');
+    await state.runtimeTurnCoordinator.awaitRejectedRuntimeTurnFinalizations();
+    const processor = vi.fn(async () => {});
+    runtimeQueue.setProcessor(processor);
+    await expect(runtimeQueue.idle()).rejects.toBe(poisonError);
+    expect(processor).not.toHaveBeenCalled();
+    expect(runtimeQueue.pending).toBe(0);
+    expect(state.runtimeTurnCoordinator.finalizeUndispatchedRuntimeTurn)
+      .toHaveBeenNthCalledWith(
+        2,
+        context,
+        undefined,
+        { kind: 'admission_rejected', class: 'scope_blocked_recovery' },
+      );
+    mockQueue.isPoisoned.mockReturnValue(false);
+  });
+
+  it('contains per-chat poison that overlaps failed teardown rollback without dispatching restored work', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+    const mapKey = 'test@s.whatsapp.net';
+    const context = makeRuntimeTurnContext(
+      'per_chat',
+      mapKey,
+      mapKey,
+      875,
+      'turn-per-chat-poison-overlap-875',
+    );
+    const state = runtime as unknown as {
+      perChatTurnQueues: Map<string, TurnQueue>;
+      runtimeTurnCoordinator: {
+        terminalizePerChatTurnQueueForKill(mapKey: string): Promise<unknown>;
+        observeOutboundQueueOperation<T>(
+          scopeKey: string,
+          queue: IOutboundQueue,
+          operation: () => Promise<T>,
+        ): Promise<T>;
+        awaitRejectedRuntimeTurnFinalizations(): Promise<void>;
+        finalizeUndispatchedRuntimeTurn: ReturnType<typeof vi.fn>;
+      };
+    };
+    await runtime.start();
+    const runtimeQueue = new TurnQueue();
+    const pending = makeQueuedTurn({
+      conversationKey: mapKey,
+      chatJid: mapKey,
+      inboundSeq: 875,
+      runtimeContext: context,
+    });
+    expect(runtimeQueue.enqueue(pending)).toBe(true);
+    state.perChatTurnQueues.set(mapKey, runtimeQueue);
+    let rejectTeardown!: (error: unknown) => void;
+    const finalizationStarted = new Promise<void>((resolve) => {
+      state.runtimeTurnCoordinator.finalizeUndispatchedRuntimeTurn = vi.fn()
+        .mockImplementationOnce(() => new Promise((_resolve, reject) => {
+          rejectTeardown = reject;
+          resolve();
+        }))
+        .mockResolvedValue({ kind: 'durable_failure_incident', mayAdvance: true });
+    });
+
+    const teardown = state.runtimeTurnCoordinator.terminalizePerChatTurnQueueForKill(mapKey);
+    await finalizationStarted;
+    const poisonError = new Error('per-chat outbound poison during teardown');
+    mockQueue.isPoisoned.mockReturnValue(true);
+    await expect(state.runtimeTurnCoordinator.observeOutboundQueueOperation(
+      mapKey,
+      mockQueue as unknown as IOutboundQueue,
+      async () => { throw poisonError; },
+    )).rejects.toBe(poisonError);
+    rejectTeardown(new Error('per-chat durable finalization failed'));
+
+    await expect(teardown).rejects.toThrow('kill-session runtime turn finalization failed');
+    await state.runtimeTurnCoordinator.awaitRejectedRuntimeTurnFinalizations();
+    const processor = vi.fn(async () => {});
+    runtimeQueue.setProcessor(processor);
+    await expect(runtimeQueue.idle()).rejects.toBe(poisonError);
+    expect(processor).not.toHaveBeenCalled();
+    expect(runtimeQueue.pending).toBe(0);
+    expect(state.runtimeTurnCoordinator.finalizeUndispatchedRuntimeTurn)
+      .toHaveBeenNthCalledWith(
+        2,
+        context,
+        undefined,
+        { kind: 'admission_rejected', class: 'scope_blocked_recovery' },
+      );
+    mockQueue.isPoisoned.mockReturnValue(false);
+  });
+
   it('interrupts an unsequenced per-chat turn owning the runtime queue on /new', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();

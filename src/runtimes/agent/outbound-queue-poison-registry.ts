@@ -26,6 +26,10 @@ export class OutboundQueuePoisonRegistry {
     return this.causes.has(this.scopeAliases.resolve(scopeKey));
   }
 
+  cause(scopeKey: string): unknown {
+    return this.causes.get(this.scopeAliases.resolve(scopeKey));
+  }
+
   snapshot(): OutboundQueuePoisonHealth {
     const count = this.causes.size;
     return {

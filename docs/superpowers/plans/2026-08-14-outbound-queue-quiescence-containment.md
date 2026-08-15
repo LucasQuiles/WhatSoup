@@ -1,6 +1,6 @@
 # Outbound Queue Quiescence and Poison Containment Implementation Plan
 
-**Status:** Active — implementation and scoped integration verification are complete; exact-head review and PR publication remain pending. Repository-wide release gates retain documented baseline/inconclusive debt below.
+**Status:** Active — implementation and review-driven consumer compensation are complete; final exact-head verification and PR publication remain pending. Repository-wide release gates retain documented baseline/inconclusive debt below.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. Every production task also requires superpowers:test-driven-development, superpowers:test-integrity, and superpowers:verification-before-completion.
 
@@ -18,7 +18,7 @@
 - Use canonical runtime scope keys. Never expose scope keys, JIDs, prompts, message content, provider output, or raw errors in public health.
 - `per_chat` poison blocks only that scope. `shared` and `single` poison block their only admission lane.
 - The active failed turn keeps its actual `pre_dispatch_error` or processor failure classification. Only later/newly removed pending turns use `scope_blocked_recovery`.
-- Do not add an unavailable-scope map to `TurnQueue`, a generic poison-clear operation, automatic replay, backlog sends, restart, deployment, migration, or watchdog-policy change.
+- Do not add an unavailable-scope map to `TurnQueue`, a generic poison-clear operation, automatic replay, backlog sends, restart, deployment, or migration. Impact review may compensate an existing watchdog consumer only to prevent automatic restart from erasing containment without delivery proof.
 - A caught, skipped, timed-out, filtered, masked, or environment-failed test is inconclusive, not passing evidence.
 - Use the SSH remote `git@github.com:LucasQuiles/WhatSoup.git`; public commits and PR text must contain no private host labels, local absolute user paths, model/vendor attribution, personal work email, or co-author trailers.
 
@@ -968,6 +968,26 @@ bash scripts/run-with-pinned-npm.sh test -- \
 ```
 
 Expected: all selected suites pass with no retry masking.
+
+- [x] **Step 4a: Close review-discovered recovery and consumer gaps**
+
+Review at exact head `521438cbce7adebcbc2d089e11c5de0ffef063c3` found three
+downstream hazards that the original owning-path suite did not cover:
+
+- poison overlapping an active teardown could be recorded while queue closure threw;
+  failed teardown rollback then reopened and dispatched the restored work;
+- shared/single poison intentionally returned unhealthy/503, but the launchd watchdog
+  treated that capability state as restart evidence and erased the process-local latch;
+- `/new` replaced an outbound queue while truthfully preserving poison, then misleadingly
+  acknowledged that a new session was starting even though the next turn remained blocked.
+
+The corrections reuse the existing `TurnQueue` halt, coordinator poison registry,
+rejection finalizer, `/new` host boundary, and watchdog quiescent-decision structure.
+RED/GREEN coverage now includes global and per-chat failed-teardown rollback, all three
+session-scope acknowledgements, queue replacement plus next-turn rejection, exact bounded
+watchdog acceptance, malformed/mixed fail-closed cases, and rendered-shell no-kickstart
+proof. The watchdog publishes `OUTBOUND-POISON`; it does not clear credential markers,
+restart, replay, or infer delivery.
 
 - [ ] **Step 5: Run static, repository, publication, and release gates**
 

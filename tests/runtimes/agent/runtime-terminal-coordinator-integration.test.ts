@@ -168,7 +168,7 @@ describe('runtime terminal coordinator integration', () => {
       expect(poisonedTurnQueue.enqueue(pending)).toBe(true);
       await vi.waitFor(() => expect(poisonedTurnQueue.activeTurn).toBe(active));
       releaseActive();
-      await poisonedTurnQueue.idle();
+      await expect(poisonedTurnQueue.idle()).rejects.toBe(poisonError);
 
       expect(state.runtimeTurnCoordinator.enqueuePerChatRuntimeTurn(poisonedScope, next)).toBe(false);
       const healthyProcessor = vi.fn(async () => {});

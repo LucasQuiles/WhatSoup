@@ -11,7 +11,7 @@ describe('OutboundQueuePoisonRegistry', () => {
     expect(registry.record('scope-a', first)).toBe(true);
     expect(registry.record('scope-a', later)).toBe(false);
     expect(registry.has('scope-a')).toBe(true);
-    expect((registry as unknown as { causes: Map<string, unknown> }).causes.get('scope-a')).toBe(first);
+    expect(registry.cause('scope-a')).toBe(first);
     expect(registry.snapshot()).toEqual({
       outboundQueuePoisoned: true,
       outboundQueuePoisonedScopes: 1,
@@ -42,9 +42,8 @@ describe('OutboundQueuePoisonRegistry', () => {
     expect(registry.has('source')).toBe(true);
     expect(registry.has('destination')).toBe(true);
     expect(registry.snapshot().outboundQueuePoisonedScopes).toBe(1);
-    expect(
-      (registry as unknown as { causes: Map<string, unknown> }).causes.get('destination'),
-    ).toBe(destinationCause);
+    expect(registry.cause('source')).toBe(destinationCause);
+    expect(registry.cause('destination')).toBe(destinationCause);
   });
 
   it('resolves alias cycles without hanging or widening the aggregate', () => {

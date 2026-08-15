@@ -2264,6 +2264,47 @@ describe('AgentRuntime', () => {
     expect(enqueuedTexts.some((t) => t.includes('new session'))).toBe(true);
   });
 
+  it('keeps poison admission blocked across /new replacement and reports recovery pending', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger);
+    const state = runtime as unknown as {
+      runtimeTurnCoordinator: {
+        observeOutboundQueueOperation<T>(
+          scopeKey: string,
+          queue: typeof mockQueue,
+          operation: () => Promise<T>,
+        ): Promise<T>;
+      };
+    };
+    await runtime.start();
+    const poisonError = new Error('sticky outbound poison before /new');
+    mockQueue.isPoisoned.mockReturnValue(true);
+    try {
+      await expect(state.runtimeTurnCoordinator.observeOutboundQueueOperation(
+        '__global__',
+        mockQueue,
+        async () => { throw poisonError; },
+      )).rejects.toBe(poisonError);
+      mockQueue.enqueueText.mockClear();
+      mockSession.sendTurn.mockClear();
+
+      await sendAndDrain(runtime, makeMsg({
+        content: '/new',
+        inboundSeq: 83,
+        senderJid: '15550100001@s.whatsapp.net',
+      }));
+      const ackTexts = mockQueue.enqueueText.mock.calls.map((args) => args[0] as string);
+      expect(ackTexts.some((text) => text.includes('delivery remains blocked'))).toBe(true);
+      expect(ackTexts.some((text) => text.includes('Starting new session'))).toBe(false);
+
+      await sendAndDrain(runtime, makeMsg({ content: 'next turn', inboundSeq: 84 }));
+      expect(mockSession.sendTurn).not.toHaveBeenCalled();
+    } finally {
+      mockQueue.isPoisoned.mockReturnValue(false);
+    }
+  });
+
   it('interrupts the active singleton turn on /new instead of bouncing (LCP un-cancelable-job fix)', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
@@ -2327,6 +2368,7 @@ describe('AgentRuntime', () => {
     let ackText = '';
     await runNewCommand({
       isTurnInFlight: vi.fn(() => true),
+      isOutboundQueuePoisoned: vi.fn(() => false),
       sessionScope: 'per_chat',
       getPerChatSession: vi.fn(() => ({})),
       abortPerChatQueue: vi.fn(),
@@ -2357,6 +2399,7 @@ describe('AgentRuntime', () => {
     let ackText = '';
     await runNewCommand({
       isTurnInFlight: vi.fn(() => true),
+      isOutboundQueuePoisoned: vi.fn(() => false),
       sessionScope: 'per_chat',
       getPerChatSession: vi.fn(() => ({})),
       abortPerChatQueue: vi.fn(),
@@ -2382,6 +2425,45 @@ describe('AgentRuntime', () => {
     expect(ackText).toContain('Interrupted the running task');
     expect(ackText).not.toContain('recovery pending');
     expect(ackText).toContain('starting new session');
+  });
+
+  it.each(['single', 'shared', 'per_chat'] as const)(
+    'ack says recovery pending when outbound poison survives an idle %s reset',
+    async (sessionScope) => {
+    let ackText = '';
+    const isOutboundQueuePoisoned = vi.fn(() => true);
+    await runNewCommand({
+      isTurnInFlight: vi.fn(() => false),
+      isOutboundQueuePoisoned,
+      sessionScope,
+      getPerChatSession: vi.fn(() => sessionScope === 'per_chat' ? {} : undefined),
+      abortPerChatQueue: vi.fn(),
+      terminalizeTurnForInterrupt: vi.fn(),
+      disposePerChatSession: vi.fn(),
+      scopeKey: '__global__',
+      perChatMapKey: sessionScope === 'per_chat' ? 'test@s.whatsapp.net' : null,
+      sendDirect(text: string) { ackText = text; },
+      getSingleSession: vi.fn(() => sessionScope === 'per_chat' ? null : {}),
+      shutdownSingleSession: vi.fn(),
+      retireTurnQueueAfterInterrupt: vi.fn(),
+      abortActiveQueue: vi.fn(),
+      shutdownOperationTracker: vi.fn(),
+      cleanupGlobalAutoCompactState: vi.fn(),
+      clearSingleScopeRefs: vi.fn(),
+      clearHandoffLatches: vi.fn(),
+      clearTurnHadVisibleOutput: vi.fn(),
+      resetOwnedPerChatSession: vi.fn(),
+      replaceOutboundQueue: vi.fn(),
+      abortChatQueue: vi.fn(),
+      resetSingleSession: vi.fn(),
+      shared: false,
+      sandboxPerChat: false,
+      chatJid: 'test@s.whatsapp.net',
+    } as never);
+    expect(ackText).toContain('recovery pending');
+    expect(ackText).toContain('delivery remains blocked');
+    expect(ackText).not.toContain('Starting new session');
+    expect(isOutboundQueuePoisoned).toHaveBeenCalledOnce();
   });
 
   // QR-108: /new is a clean reset — it must drop the one-message-handoff latches

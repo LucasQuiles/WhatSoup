@@ -421,9 +421,9 @@ transport and process liveness pass:
 
 **Final log states** (last line of
 `~/Library/Logs/whatsoup/<instance>-watchdog.log` per cycle): `ok`,
-`CREDENTIAL-DEAD`, `HEALTH-UNKNOWN`, `RESTARTED`, `RESTART-SUPPRESSED`,
+`OUTBOUND-POISON`, `CREDENTIAL-DEAD`, `HEALTH-UNKNOWN`, `RESTARTED`, `RESTART-SUPPRESSED`,
 `RESTART-FAILED`, `ERROR`, and `CREDENTIAL-UNKNOWN`. The line is chosen by an
-upgrade-only ladder — `CREDENTIAL-DEAD` > `HEALTH-UNKNOWN` >
+upgrade-only ladder — `OUTBOUND-POISON` > `CREDENTIAL-DEAD` > `HEALTH-UNKNOWN` >
 `RESTART-FAILED` > `RESTARTED` > `RESTART-SUPPRESSED` > `ERROR` >
 `CREDENTIAL-UNKNOWN` > `ok` — so untrusted diagnostic evidence cannot be
 masked by a restart outcome, a restart-worthy cycle never reports `ok`, a
@@ -443,6 +443,12 @@ path when no stronger credential, health-evidence, or restart outcome applies.
 
 **Operator notes:**
 
+- `OUTBOUND-POISON` → preserve the first outbound failure and durable turn
+  evidence, then reconcile delivery ownership before a controlled restart.
+  The watchdog accepts only the exact connected agent poison shape and does
+  not restart it because restart clears the process-local containment latch;
+  malformed, mixed hard-status, disconnected, and stale-pong evidence remains
+  restart-worthy or health-unknown under the existing fail-closed rules.
 - `CREDENTIAL-DEAD` → re-authenticate the provider on that host. Do not
   restart the bot to "fix" it; the watchdog deliberately never restarts on
   credential death.
@@ -673,6 +679,12 @@ constructs a fresh registry, and that still does not prove delivery, create an
 acknowledgement, or authorize replay/resend. There is no generic in-process clear. Recovery
 debt is separate and neither creates nor clears poison; inspect both signals independently
 before deciding whether a controlled restart is appropriate.
+
+On launchd hosts, the watchdog recognizes the exact connected shared/single poison health
+shape as `OUTBOUND-POISON` and suppresses automatic restart. This keeps the latch active
+until an operator has preserved and reconciled delivery evidence. A malformed signal, an
+additional hard status reason, transport disconnection, or stale pong does not receive this
+exception and continues through the ordinary fail-closed liveness policy.
 
 On `agent_respawn_failed` / auto-respawn exhaustion, do not delete the session, queue, or
 checkpoint to force green health. The runtime marks that manager exhausted and defers destructive

@@ -93,7 +93,10 @@ def _health(status: str, **overrides) -> dict:
             "model_usability_status": "usable",
         },
     }
-    body.update(_CONNECTED)
+    # Each adversarial case mutates its body in place; keep the shared fixture
+    # immutable so later rendered-shell tests do not inherit an earlier case's
+    # disconnected transport state.
+    body.update(json.loads(json.dumps(_CONNECTED)))
     if overrides:
         body.update(overrides)
     return body
@@ -261,11 +264,79 @@ class TestDatabaseCompatibilityDrainNoRestart:
         assert _run_decision(body, 503) == 6
 
 
+class TestOutboundPoisonNoAutomaticRestart:
+    @staticmethod
+    def _body() -> dict:
+        return _health(
+            "unhealthy",
+            instance={
+                "name": "test-agent",
+                "pid": 123,
+                "mode": "agent",
+                "fallbackReason": None,
+            },
+            status_reasons=[
+                "agent_runtime_unhealthy",
+                "runtime.outbound_queue_poisoned",
+            ],
+            degradation_causes=[
+                "agent_runtime_unhealthy",
+                "agent_outbound_queue_poisoned",
+            ],
+            runtime={
+                "agent": {
+                    "outboundQueuePoisoned": True,
+                    "outboundQueuePoisonedScopes": 1,
+                },
+            },
+            whatsapp={
+                "connected": True,
+                "connection": {
+                    "state": "connected",
+                    "last_pong_at": _iso_ago(5),
+                },
+            },
+        )
+
+    def test_exact_connected_poison_is_operator_required_not_restart_worthy(self):
+        assert _run_decision(self._body(), 503) == 7
+
+    def test_malformed_or_mixed_poison_evidence_fails_closed(self):
+        cases = [
+            (("status_reasons",), ["runtime.outbound_queue_poisoned"]),
+            (("status_reasons",), [
+                "agent_runtime_unhealthy",
+                "runtime.outbound_queue_poisoned",
+                "event_loop_starvation",
+            ]),
+            (("runtime", "agent", "outboundQueuePoisoned"), False),
+            (("runtime", "agent", "outboundQueuePoisonedScopes"), True),
+            (("runtime", "agent", "outboundQueuePoisonedScopes"), 0),
+            (("degradation_causes",), None),
+            (("instance", "name"), "another-agent"),
+            (("instance", "mode"), "chat"),
+            (("whatsapp", "connected"), False),
+            (("whatsapp", "connection", "state"), "reconnecting"),
+            (("whatsapp", "connection", "last_pong_at"), "2000-01-01T00:00:00Z"),
+        ]
+        for path, value in cases:
+            body = self._body()
+            target = body
+            for key in path[:-1]:
+                target = target[key]
+            target[path[-1]] = value
+            assert _run_decision(body, 503) == 1, (
+                f"malformed poison evidence must fail closed: path={path!r} value={value!r}"
+            )
+
+
 def _run_rendered_unreachable_watchdog(
     tmp_path: Path,
     *,
     bot_name: str,
     launchd_snapshot: str,
+    bot_health: dict | None = None,
+    bot_http_code: int = 503,
 ) -> str:
     home = tmp_path / "home"
     home.mkdir(parents=True)
@@ -293,11 +364,21 @@ def _run_rendered_unreachable_watchdog(
     script.chmod(script.stat().st_mode | stat.S_IEXEC)
 
     curl = binroot / "curl"
+    bot_response = ""
+    if bot_health is not None:
+        encoded_health = json.dumps(bot_health, separators=(",", ":"))
+        bot_response = (
+            "    printf '%s\\n%s' \"$BOT_HEALTH_JSON\" \"$BOT_HTTP_CODE\"; exit 0;;\n"
+        )
+    else:
+        bot_response = "    exit 7;;\n"
+        encoded_health = ""
     curl.write_text(
         "#!/bin/sh\n"
         'for arg in "$@"; do case "$arg" in\n'
-        "  *9999/health) exit 7;;\n"
-        "  *9998/*) printf 'ok'; exit 0;;\n"
+        "  *9999/health)\n"
+        + bot_response
+        + "  *9998/*) printf 'ok'; exit 0;;\n"
         "esac; done\n"
         "exit 7\n",
         encoding="utf-8",
@@ -321,7 +402,13 @@ def _run_rendered_unreachable_watchdog(
         shutil.rmtree(lock, ignore_errors=True)
     proc = subprocess.run(
         ["zsh", str(script)],
-        env=dict(os.environ, HOME=str(home), LAUNCHD_SNAPSHOT=launchd_snapshot),
+        env=dict(
+            os.environ,
+            HOME=str(home),
+            LAUNCHD_SNAPSHOT=launchd_snapshot,
+            BOT_HEALTH_JSON=encoded_health,
+            BOT_HTTP_CODE=str(bot_http_code),
+        ),
         capture_output=True,
         text=True,
         timeout=20,
@@ -332,6 +419,24 @@ def _run_rendered_unreachable_watchdog(
 
 @pytest.mark.skipif(shutil.which("zsh") is None, reason="zsh not available")
 class TestRenderedWatchdogLaunchdExitPolicy:
+    def test_connected_outbound_poison_warns_without_kickstart(self, tmp_path):
+        bot_name = "poisoned-agent"
+        body = TestOutboundPoisonNoAutomaticRestart._body()
+        body["instance"]["name"] = bot_name
+        calls = _run_rendered_unreachable_watchdog(
+            tmp_path,
+            bot_name=bot_name,
+            launchd_snapshot="gui = {\n  state = running\n  last exit code = 0\n}",
+            bot_health=body,
+        )
+        log_text = (
+            tmp_path / "home" / "Library" / "Logs" / "whatsoup"
+            / f"{bot_name}-watchdog.log"
+        ).read_text(encoding="utf-8")
+        assert "kickstart" not in calls
+        assert "OUTBOUND-POISON" in log_text
+        assert log_text.rstrip().endswith("OUTBOUND-POISON")
+
     def test_unreachable_bot_with_last_exit_78_is_not_kickstarted(self, tmp_path):
         calls = _run_rendered_unreachable_watchdog(
             tmp_path,

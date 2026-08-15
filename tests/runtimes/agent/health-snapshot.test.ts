@@ -214,6 +214,11 @@ vi.mock('../../../src/runtimes/agent/turn-queue.ts', () => {
       this.onHalt?.();
     }
 
+    haltAndTakePendingTurns(): never[] {
+      this.halt();
+      return this.closeAndTakePendingTurns();
+    }
+
     private closeEpoch = 0;
     private accepting = true;
     beginTeardown(): { pending: readonly never[]; closeEpoch: number; wasAccepting: boolean } {

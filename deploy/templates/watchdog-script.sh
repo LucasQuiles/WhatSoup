@@ -154,6 +154,7 @@ trap 'release_mutex "$LOCK"' EXIT
 # identical states keep the first writer.
 wd_rank() {
   case "$1" in
+    OUTBOUND-POISON) print 9 ;;
     CREDENTIAL-DEAD) print 8 ;;
     HEALTH-UNKNOWN) print 7 ;;
     RESTART-FAILED) print 6 ;;
@@ -709,6 +710,51 @@ RECOVERING_STATES = ("connecting", "reconnecting", "cooldown")
 pong_timestamp = evidence_timestamp(last_pong, "whatsapp pong")
 pong_age = None if pong_timestamp is None else now_timestamp - pong_timestamp
 
+# A connected agent whose only hard status reason is the process-local
+# outbound-poison latch is deliberately quiescent. Restarting would construct
+# a fresh registry and reopen admission without proving delivery or replay
+# ownership. Accept only the normal runtime's exact bounded signal; malformed,
+# mixed hard-status, disconnected, stale, or wrong-instance evidence continues
+# through the ordinary fail-closed restart policy.
+status_reasons = data.get("status_reasons")
+degradation_causes = data.get("degradation_causes")
+runtime_raw = data.get("runtime")
+runtime = runtime_raw if isinstance(runtime_raw, dict) else {}
+runtime_agent_raw = runtime.get("agent")
+runtime_agent = runtime_agent_raw if isinstance(runtime_agent_raw, dict) else {}
+poisoned_scopes = runtime_agent.get("outboundQueuePoisonedScopes")
+exact_outbound_poison = (
+    service_mode is None
+    and http_code == "503"
+    and status == "unhealthy"
+    and generated_is_fresh
+    and instance.get("name") == expected_instance_name
+    and type(instance.get("pid")) is int
+    and instance.get("pid") > 0
+    and instance.get("mode") == "agent"
+    and connected
+    and state == "connected"
+    and pong_age is not None
+    and pong_age <= STALE_PONG_SECONDS
+    and status_reasons == [
+        "agent_runtime_unhealthy",
+        "runtime.outbound_queue_poisoned",
+    ]
+    and isinstance(degradation_causes, list)
+    and all(isinstance(cause, str) for cause in degradation_causes)
+    and "agent_runtime_unhealthy" in degradation_causes
+    and "agent_outbound_queue_poisoned" in degradation_causes
+    and runtime_agent.get("outboundQueuePoisoned") is True
+    and type(poisoned_scopes) is int
+    and poisoned_scopes > 0
+)
+if exact_outbound_poison:
+    print(
+        "outbound queue poison: operator reconciliation required, not restarting",
+        file=sys.stderr,
+    )
+    sys.exit(7)
+
 # A bot that is disconnected but actively *recovering* (connecting/reconnecting/
 # cooldown) with FRESH liveness (a recent pong) is making progress on its own.
 # Restarting it interrupts the reconnect, resets the cold-start clock, and (on
@@ -814,7 +860,13 @@ if fallback_reason is not None:
 sys.exit(4)
 PY
   py_rc=$?
-  if [ "$py_rc" -eq 3 ]; then
+  if [ "$py_rc" -eq 7 ]; then
+    # The bot is connected but its active outbound lane is deliberately
+    # fail-closed. A restart would erase process-local containment without
+    # proving delivery, so retain credential state and require reconciliation.
+    log "OUTBOUND-POISON: delivery blocked — operator reconciliation required; restart suppressed"
+    wd_note OUTBOUND-POISON
+  elif [ "$py_rc" -eq 3 ]; then
     # marker: BOT_NAME-credential-dead.marker — deliberately no restart on this
     # branch (a restart cannot fix auth; see the exit-3 decision-block comment).
     log "CREDENTIAL-DEAD: claude credential unavailable — reauth required; restart suppressed"

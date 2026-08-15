@@ -127,6 +127,15 @@ export class TurnQueue {
     return this.queue.splice(0);
   }
 
+  haltAndTakePendingTurns(error: unknown): QueuedTurn[] {
+    // Latch the queue before checking teardown ownership. If a teardown owns
+    // the pending turns, its later rollback may restore them, but it must not
+    // be able to reopen and dispatch work after the external failure became
+    // sticky.
+    this.halt(error);
+    return this.closeAndTakePendingTurns();
+  }
+
   beginTeardown(): TurnQueueTeardownReceipt {
     if (this.activeTeardownReceipt) {
       throw new Error('Cannot overlap TurnQueue teardown transactions');

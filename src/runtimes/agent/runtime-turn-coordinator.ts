@@ -328,6 +328,10 @@ outboundQueuePoisonHealth(): OutboundQueuePoisonHealth {
   return this.outboundQueuePoisons.snapshot();
 }
 
+isOutboundQueuePoisoned(scopeKey: string): boolean {
+  return this.outboundQueuePoisons.has(scopeKey);
+}
+
 rekeyPerChatOutboundQueuePoisonScope(fromScopeKey: string, toScopeKey: string): void {
   this.outboundQueuePoisons.rekey(fromScopeKey, toScopeKey);
 }
@@ -376,16 +380,20 @@ enqueueSharedRuntimeTurn(turn: QueuedTurn): boolean {
 }
 
 private containOutboundQueuePoison(scopeKey: string, error: unknown): void {
-  if (!this.outboundQueuePoisons.record(scopeKey, error)) return;
+  this.outboundQueuePoisons.record(scopeKey, error);
+  const poisonCause = this.outboundQueuePoisons.cause(scopeKey);
   if (this.host.sessionScope === 'per_chat') this.turnQueueHalts.halt(scopeKey);
   const turnQueue = this.host.sessionScope === 'per_chat'
     ? this.host.perChatTurnQueues.get(scopeKey)
-    : this.host.sessionScope === 'shared'
-      ? this.host.turnQueue
-      : null;
-  for (const pending of turnQueue?.closeAndTakePendingTurns() ?? []) {
+    : this.host.turnQueue;
+  for (const pending of turnQueue?.haltAndTakePendingTurns(poisonCause) ?? []) {
     this.finalizeRejectedRuntimeTurn(pending, 'scope_blocked_recovery');
   }
+}
+
+private retryOutboundQueuePoisonContainment(scopeKey: string): void {
+  if (!this.outboundQueuePoisons.has(scopeKey)) return;
+  this.containOutboundQueuePoison(scopeKey, this.outboundQueuePoisons.cause(scopeKey));
 }
 
 hasGlobalTeardownPending(): boolean {
@@ -1222,6 +1230,16 @@ async terminalizeGlobalTurnForReset(): Promise<RuntimeTurnQueueTeardown> {
         'singleton/shared reset teardown rollback failed',
       );
     }
+    if (rollbackSucceeded) {
+      try {
+        this.retryOutboundQueuePoisonContainment(GLOBAL_CONVERSATION_KEY);
+      } catch (containmentError) {
+        failure = new AggregateError(
+          [failure, containmentError],
+          'singleton/shared reset poison containment retry failed',
+        );
+      }
+    }
     if (rollbackSucceeded && this.globalTeardown === state) {
       this.globalTeardown = null;
       state.resolveLifecycle();
@@ -1404,6 +1422,16 @@ async terminalizePerChatTurnQueueForKill(mapKey: string): Promise<RuntimeTurnQue
         failure = new AggregateError(
           [err, rollbackError],
           `per-chat reset teardown rollback failed for ${mapKey}`,
+        );
+      }
+    }
+    if (rollbackSucceeded) {
+      try {
+        this.retryOutboundQueuePoisonContainment(mapKey);
+      } catch (containmentError) {
+        failure = new AggregateError(
+          [failure, containmentError],
+          `per-chat reset poison containment retry failed for ${mapKey}`,
         );
       }
     }

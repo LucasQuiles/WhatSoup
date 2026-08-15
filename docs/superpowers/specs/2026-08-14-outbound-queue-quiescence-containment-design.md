@@ -2,7 +2,7 @@
 
 Date: 2026-08-14
 
-**Status:** Active — approved and implemented on the review branch; integration remains pending.
+**Status:** Active — implemented on the review branch; final release verification and PR publication remain pending.
 
 ## Problem
 
