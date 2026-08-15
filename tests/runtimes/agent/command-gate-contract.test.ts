@@ -182,6 +182,8 @@ vi.mock('../../../src/runtimes/agent/outbound-queue.ts', () => ({
 // with sibling suites).
 const { mockConfig } = vi.hoisted(() => {
   const mockConfig = {
+    // #2192 s4b: provider-fallback tunables live on config (defaults mirror the retired IIFEs).
+    fallbackTunables: { noticeDedupMs: 1_800_000, primaryRecheckMs: 300_000, probeStallThreshold: 12, probeStallCeilingMultiple: 10 },
   get healthBindAddress(): string {
     return process.env.HEALTH_BIND_ADDRESS ?? '127.0.0.1';
   },

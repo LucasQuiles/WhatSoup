@@ -41,6 +41,11 @@ const MANAGED_ENV = [
   // Slice 3b adds the throttle window and safe-shape flag to the same bridge.
   'EMIT_ALERT_THROTTLE_MS',
   'BOT_ERRORS_SAFE_SHAPE_CRED_PATH',
+  // s4b absorbs the provider-fallback tunables (clamps live at the config layer).
+  'WHATSOUP_PROVIDER_FALLBACK_NOTICE_DEDUP_MS',
+  'WHATSOUP_PROVIDER_FALLBACK_PRIMARY_RECHECK_MS',
+  'WHATSOUP_PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD',
+  'WHATSOUP_PROVIDER_FALLBACK_PROBE_STALL_CEILING_MULTIPLE',
 ] as const;
 
 let savedEnv: Record<string, string | undefined>;
@@ -61,6 +66,10 @@ beforeEach(() => {
   delete process.env.BOT_ERRORS_RUNTIME_TOOL_FAILURE_ALERTS;
   delete process.env.EMIT_ALERT_THROTTLE_MS;
   delete process.env.BOT_ERRORS_SAFE_SHAPE_CRED_PATH;
+  delete process.env.WHATSOUP_PROVIDER_FALLBACK_NOTICE_DEDUP_MS;
+  delete process.env.WHATSOUP_PROVIDER_FALLBACK_PRIMARY_RECHECK_MS;
+  delete process.env.WHATSOUP_PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD;
+  delete process.env.WHATSOUP_PROVIDER_FALLBACK_PROBE_STALL_CEILING_MULTIPLE;
   vi.resetModules();
 });
 
@@ -422,5 +431,54 @@ describe('bot-errors alert routing publish bridge (#2192 slice 3a)', () => {
     }));
     const third = await import('../src/config.ts');
     expect(third.config.toolFailureAlertsEnabled).toBe(true);
+  });
+});
+
+describe('provider-fallback tunables (#2192 s4b): instance-first, env-second, clamps at the config layer', () => {
+  it('resolves the four defaults when neither instance nor env set anything', async () => {
+    const { config } = await import('../src/config.ts');
+    expect(config.fallbackTunables).toEqual({
+      noticeDedupMs: 1_800_000,
+      primaryRecheckMs: 300_000,
+      probeStallThreshold: 12,
+      probeStallCeilingMultiple: 10,
+    });
+  });
+
+  it('applies the byte-identical clamps to env values (recheck floor, threshold trunc+floor, ceiling cap)', async () => {
+    process.env.WHATSOUP_PROVIDER_FALLBACK_PRIMARY_RECHECK_MS = '1000';
+    process.env.WHATSOUP_PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD = '1.9';
+    process.env.WHATSOUP_PROVIDER_FALLBACK_PROBE_STALL_CEILING_MULTIPLE = '5000';
+    const { config } = await import('../src/config.ts');
+    expect(config.fallbackTunables.primaryRecheckMs).toBe(30_000);
+    expect(config.fallbackTunables.probeStallThreshold).toBe(3);
+    expect(config.fallbackTunables.probeStallCeilingMultiple).toBe(1_000);
+  });
+
+  it('instance agentOptions.fallbackTunables wins over env and passes the same clamps', async () => {
+    process.env.WHATSOUP_PROVIDER_FALLBACK_NOTICE_DEDUP_MS = '60000';
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      agentOptions: { fallbackTunables: { noticeDedupMs: 120_000, primaryRecheckMs: 10_000_000 } },
+    }));
+    const { config } = await import('../src/config.ts');
+    expect(config.fallbackTunables.noticeDedupMs).toBe(120_000);
+    expect(config.fallbackTunables.primaryRecheckMs).toBe(1_800_000);
+  });
+
+  it('rejects a set-but-non-numeric instance tunable at startup', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      agentOptions: { fallbackTunables: { probeStallThreshold: 'many' } },
+    }));
+    await expect(import('../src/config.ts')).rejects.toThrow(
+      /agentOptions\.fallbackTunables\.probeStallThreshold must be a finite number/,
+    );
+  });
+
+  it('invalid env values (non-numeric, non-positive) fall back to the defaults', async () => {
+    process.env.WHATSOUP_PROVIDER_FALLBACK_NOTICE_DEDUP_MS = 'soon';
+    process.env.WHATSOUP_PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD = '-4';
+    const { config } = await import('../src/config.ts');
+    expect(config.fallbackTunables.noticeDedupMs).toBe(1_800_000);
+    expect(config.fallbackTunables.probeStallThreshold).toBe(12);
   });
 });

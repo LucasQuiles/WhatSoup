@@ -37,8 +37,10 @@ const ALLOWLIST: Record<string, number> = {
   // BOT_ERRORS_{JID,EXPECTED_JID,REQUIRE_EXPECTED,SAFE_SHAPE_CRED_PATH} and
   // EMIT_ALERT_THROTTLE_MS, + the BOT_ERRORS_RUNTIME_TOOL_FAILURE_ALERTS read
   // behind toolFailureAlertsEnabled, + WHATSOUP_BAILEYS_VERSION absorbed as
-  // baileysVersionPinned (#2192 s4a — baileys-version.ts entry retired).
-  'src/config.ts': 46,
+  // baileysVersionPinned (#2192 s4a — baileys-version.ts entry retired), + the
+  // four WHATSOUP_PROVIDER_FALLBACK_* tunables absorbed as fallbackTunables
+  // via one dynamic-key resolver line (#2192 s4b — runtime-tunables 6->2).
+  'src/config.ts': 47,
   // param-default `env` seam (WHATSOUP_REPO_ROOT) — env-late by design
   // (#2192 s4 verdict: deploy-wrapper assertion input; the resolver VALIDATES
   // env-vs-module-location agreement, so config-sourcing it would be
@@ -128,8 +130,10 @@ const ALLOWLIST: Record<string, number> = {
   'src/runtimes/agent/providers/claude-filestore-heal.ts': 2,
   // child-env forward (HOME/PATH/USER/CLAUDE_CONFIG_DIR) for usability adapters.
   'src/runtimes/agent/providers/primary-model-usability-adapters.ts': 4,
-  // WHATSOUP_PROVIDER_FALLBACK_* + DIAGNOSTIC_BUNDLE tunables — slice-3 typed fallback config.
-  'src/runtimes/agent/runtime-tunables.ts': 6,
+  // envPositiveInt dynamic-key helper (session/system tunables) +
+  // diagnosticBundleEnabled call-time flag. The four PROVIDER_FALLBACK_*
+  // tunables are config-absorbed (#2192 s4b — fallbackTunables).
+  'src/runtimes/agent/runtime-tunables.ts': 2,
   // RESPONSE_REGISTRY_DISPATCH + DIAGNOSTIC_BUNDLE — env-late by design
   // (#2192 s4 verdict: staged-rollout dial pair, live-flip semantics; the
   // fleet-health-gate ground applies — transitional flags, typed-field

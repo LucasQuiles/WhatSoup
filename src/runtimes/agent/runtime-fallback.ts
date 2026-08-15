@@ -63,10 +63,6 @@ import {
   DEFAULT_FALLBACK_WINDOW_MS,
   MAX_FALLBACK_WINDOW_MS,
   MIN_FALLBACK_WINDOW_MS,
-  PROVIDER_FALLBACK_NOTICE_DEDUP_MS,
-  PROVIDER_FALLBACK_PRIMARY_RECHECK_MS,
-  PROVIDER_FALLBACK_PROBE_STALL_CEILING_MULTIPLE,
-  PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD,
 } from './runtime-tunables.ts';
 import type { ProviderFallbackActivation, ProviderFallbackReason } from './runtime-turn-result-handler.ts';
 import type { ModelRouteEvent } from './route-events.ts';
@@ -144,9 +140,22 @@ const EMPTY_OUTPUT_ARM_STARTUP_GRACE_MS = MS_PER_MINUTE;
  * through the host so their instance-property stub / spy seams keep observing
  * every call, including in-cluster ones.
  */
+/**
+ * Provider-fallback tunables resolved by config (#2192 s4b) — instance-config
+ * first, env fallback, clamps applied at config load. Grouped as one object
+ * to keep the port surface flat.
+ */
+export interface RuntimeFallbackTunables {
+  readonly noticeDedupMs: number;
+  readonly primaryRecheckMs: number;
+  readonly probeStallThreshold: number;
+  readonly probeStallCeilingMultiple: number;
+}
+
 export interface RuntimeFallbackPort {
   readonly db: Database;
   readonly instanceName: string;
+  readonly fallbackTunables: RuntimeFallbackTunables;
   readonly cwd: string | undefined;
   readonly model: string | undefined;
   readonly agentProvider: string;
@@ -729,12 +738,12 @@ export class RuntimeFallbackCoordinator {
    * factory called from a single site) because it is invoked from three
    * independent call sites and must not spam one notice per turn during a
    * sustained auth-required episode. Mirrors the recentFallbackEmptyTurnAlerts
-   * prune→check→set→capDedupeMap idiom, reusing PROVIDER_FALLBACK_NOTICE_DEDUP_MS.
+   * prune→check→set→capDedupeMap idiom, reusing this.host.fallbackTunables.noticeDedupMs.
    */
   emitNoFallbackReauthNotice(queue: IOutboundQueue): void {
     const now = Date.now();
     for (const [key, recordedAt] of this.host.recentNoFallbackReauthNotices) {
-      if (now - recordedAt > PROVIDER_FALLBACK_NOTICE_DEDUP_MS) {
+      if (now - recordedAt > this.host.fallbackTunables.noticeDedupMs) {
         this.host.recentNoFallbackReauthNotices.delete(key);
       }
     }
@@ -798,11 +807,11 @@ export class RuntimeFallbackCoordinator {
       served: this.host.fallbackMetrics.turnsServed,
       empty: this.host.fallbackMetrics.turnsEmpty,
     }, 'fallback turn completed with zero visible output');
-    // Per-chat dedup: reuse PROVIDER_FALLBACK_NOTICE_DEDUP_MS window to avoid
+    // Per-chat dedup: reuse this.host.fallbackTunables.noticeDedupMs window to avoid
     // one alert per empty turn in a sustained silent-bot episode.
     const emptyAlertNow = Date.now();
     for (const [k, ts] of this.host.recentFallbackEmptyTurnAlerts) {
-      if (emptyAlertNow - ts > PROVIDER_FALLBACK_NOTICE_DEDUP_MS) this.host.recentFallbackEmptyTurnAlerts.delete(k);
+      if (emptyAlertNow - ts > this.host.fallbackTunables.noticeDedupMs) this.host.recentFallbackEmptyTurnAlerts.delete(k);
     }
     if (!this.host.recentFallbackEmptyTurnAlerts.has(queue.targetChatJid)) {
       this.host.recentFallbackEmptyTurnAlerts.set(queue.targetChatJid, emptyAlertNow);
@@ -1256,7 +1265,7 @@ export class RuntimeFallbackCoordinator {
     if (receipt) this.host.pendingPostRevertConfirmation = true;
     else clearAlertSourceChecked(this.host.instanceName, 'provider_fallback_activated', `reason=${reason} windowMs=${windowMs ?? 'unknown'}`);
     // H5: stall-incident open/closed = attempts>=threshold NOW, true for ANY reason — fixes admin-disable-mid-stall re-stranding it forever.
-    if (this.host.fallbackProbeAttempts >= PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD) clearAlertSourceChecked(this.host.instanceName, 'fallback_recovery_stalled', receiptEvidence ?? `reason=${reason} attempts=${this.host.fallbackProbeAttempts} recovery=unconfirmed episode=abandoned`);
+    if (this.host.fallbackProbeAttempts >= this.host.fallbackTunables.probeStallThreshold) clearAlertSourceChecked(this.host.instanceName, 'fallback_recovery_stalled', receiptEvidence ?? `reason=${reason} attempts=${this.host.fallbackProbeAttempts} recovery=unconfirmed episode=abandoned`);
     this.host.fallbackWindow.activeUntil = null;
     this.host.fallbackWindow.activatedAt = null;
     this.host.fallbackWindow.armReason = null;
@@ -1305,11 +1314,11 @@ export class RuntimeFallbackCoordinator {
       }
       this.host.fallbackProbeAttempts += 1;
       const now = Date.now();
-      const until = now + PROVIDER_FALLBACK_PRIMARY_RECHECK_MS;
+      const until = now + this.host.fallbackTunables.primaryRecheckMs;
       this.host.fallbackWindow.activeUntil = until;
       this.host.revertTimer = setTimeout(() => {
         this.handleFallbackRevertTimer();
-      }, PROVIDER_FALLBACK_PRIMARY_RECHECK_MS);
+      }, this.host.fallbackTunables.primaryRecheckMs);
       this.host.revertTimer.unref?.();
       try {
         saveFallbackState(this.host.db, {
@@ -1329,7 +1338,7 @@ export class RuntimeFallbackCoordinator {
       }
       // Stall alert at T, 2T, 3T ... up to the DUR-02 escalation ceiling, then no repeats (see stallAlertPlan) — counter resets only on deactivation, window keeps extending.
       const atts = this.host.fallbackProbeAttempts;
-      const plan = stallAlertPlan(atts, PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD, PROVIDER_FALLBACK_PROBE_STALL_CEILING_MULTIPLE);
+      const plan = stallAlertPlan(atts, this.host.fallbackTunables.probeStallThreshold, this.host.fallbackTunables.probeStallCeilingMultiple);
       if (plan.emit) {
         emitAlertChecked(this.host.instanceName, 'fallback_recovery_stalled', 'Primary provider recovery probe is stalled — fallback window extending indefinitely', `reason=${this.host.fallbackWindow.armReason ?? 'auth-required'} attempts=${atts} windowEnd=${new Date(until).toISOString()} primaryProvider=${this.host.agentProvider}${plan.ceiling ? ' ceiling=true' : ''}`);
       }
@@ -1375,7 +1384,7 @@ export class RuntimeFallbackCoordinator {
     if (!this.host.fallbackWindow.recoveryProbeRequired) return;
     if (
       this.host.fallbackWindow.activeUntil === null
-      || this.host.fallbackWindow.activeUntil - Date.now() <= PROVIDER_FALLBACK_PRIMARY_RECHECK_MS
+      || this.host.fallbackWindow.activeUntil - Date.now() <= this.host.fallbackTunables.primaryRecheckMs
     ) {
       return;
     }
@@ -1396,7 +1405,7 @@ export class RuntimeFallbackCoordinator {
         }
         this.scheduleFallbackPrimaryProbe();
       });
-    }, PROVIDER_FALLBACK_PRIMARY_RECHECK_MS);
+    }, this.host.fallbackTunables.primaryRecheckMs);
     this.host.fallbackPrimaryProbeTimer.unref?.();
   }
 

@@ -1,23 +1,19 @@
 /**
- * WHATSOUP_PROVIDER_FALLBACK_PROBE_STALL_CEILING_MULTIPLE env tunability
+ * config.fallbackTunables.probeStallCeilingMultiple pass-through
  * (DUR-02 bounded escalation).
  *
  * S5 (QUALITY-PASS-2120-transaction.md): the cadence table (T, 2T, ceiling,
  * post-ceiling silence) is now covered by pure `stallAlertPlan` unit tests in
  * fallback-recovery-transaction.test.ts, since threshold/ceilingMultiple are
  * ordinary parameters, not module-hidden env globals. This file is now ONLY
- * the thin env-clamp check: does runtime.ts actually read the env var and
- * pass the resulting value through to a real ceiling alert end-to-end.
+ * the thin pass-through check: does the runtime honor the config-resolved
+ * threshold/ceiling (#2192 s4b — instance-first/env-second resolution and
+ * clamps pinned in tests/config-coercion.test.ts) through to a real ceiling
+ * alert end-to-end.
  *
- * Harness mirrors fallback-probe-stall-env.test.ts (module-level constants
- * read at import time via vi.hoisted, own forked worker).
+ * Harness mirrors fallback-probe-stall-env.test.ts (own forked worker).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-
-vi.hoisted(() => {
-  process.env['WHATSOUP_PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD'] = '3';
-  process.env['WHATSOUP_PROVIDER_FALLBACK_PROBE_STALL_CEILING_MULTIPLE'] = '2';
-});
 
 vi.mock('../../../src/lib/emit-alert.ts', () => {
   const emitAlert = vi.fn(() => true);
@@ -32,6 +28,8 @@ vi.mock('../../../src/lib/emit-alert.ts', () => {
 
 vi.mock('../../../src/config.ts', () => {
   const config: Record<string, unknown> = {
+    // #2192 s4b: provider-fallback tunables live on config (defaults mirror the retired IIFEs).
+    fallbackTunables: { noticeDedupMs: 1_800_000, primaryRecheckMs: 300_000, probeStallThreshold: 3, probeStallCeilingMultiple: 2 },
     adminPhones: new Set<string>(),
     controlPeers: new Map<string, string>(),
     toolUpdateMode: 'full',
@@ -126,7 +124,7 @@ describe('AgentRuntime — probe stall escalation ceiling env clamping', () => {
     vi.useRealTimers();
   });
 
-  it('WHATSOUP_PROVIDER_FALLBACK_PROBE_STALL_CEILING_MULTIPLE=2 with threshold=3 reaches ceiling=true at attempt 6, end to end through real timers', async () => {
+  it('fallbackTunables.probeStallCeilingMultiple=2 with threshold=3 reaches ceiling=true at attempt 6, end to end through real timers', async () => {
     const runtime = makeRuntime();
     const v = runtime as unknown as FallbackView;
     v.probePrimaryProviderRecovered = vi.fn(() => false);
