@@ -90,11 +90,10 @@ describe('eslint fitness wrapper — exit semantics', () => {
     // This spawns a real ESLint pass over the entire source tree. Under the
     // coverage-instrumented CI step (slower than the plain suite) with the
     // parallel vitest pool contending for CPU, the 60s budget was marginal and
-    // flaked intermittently (observed on main too); 180s then flaked twice in
-    // one night (2026-08-15: main run on c62739110 and PR #3239's 24.x lane,
-    // while the sibling 25.x lane passed the identical tree). 360s gives
-    // durable headroom without masking a genuine hang — a real wedge still
-    // fails, just later.
+    // flaked intermittently (observed on main too); 180s then failed on both
+    // current main and this PR while their adjacent full-ring scans completed.
+    // A 360s per-test budget absorbs that measured contention; the separate
+    // 20-minute process-group battery remains the hard bound for a real wedge.
   }, 360_000);
 });
 
