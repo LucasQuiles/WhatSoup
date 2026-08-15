@@ -2,7 +2,9 @@
 
 Date: 2026-08-14
 
-**Status:** Active — implemented on the review branch; final release verification and PR publication remain pending.
+**Status:** Active — the original containment design is implemented on the review branch;
+the approved direct-send fail-closed amendment is specified here and awaits test-first
+implementation and review.
 
 ## Problem
 
@@ -34,6 +36,8 @@ pre-dispatch failures do not activate the existing halt latch.
    leaving them stranded.
 7. Cover `flush`, poll ordering, turn-evidence completion, and shutdown behavior with
    deterministic red/green tests.
+8. Make direct-send acceptance fail closed when the selected outbound queue is already
+   poisoned, without bypassing queue ordering or durability.
 
 ## Non-goals
 
@@ -43,6 +47,8 @@ pre-dispatch failures do not activate the existing halt latch.
 - Changing fleet aggregation, watchdog restart policy, or deployment tooling.
 - Automatically restarting a production instance.
 - Treating all historical continuity debt as current operational degradation.
+- Bypassing a poisoned queue for administrative, command, help, or recovery notices.
+- Claiming synchronous delivery proof for the normal asynchronous queue path.
 
 Those concerns require separate reviewable changes because their safety and ownership
 contracts differ from queue correctness.
@@ -78,6 +84,28 @@ and project a content-free operational-health signal.
 
 Decision: selected. This is the smallest boundary that closes the observed failure chain
 without mixing historical debt or fleet policy into the queue repair.
+
+### D. Direct-send behavior at a known poisoned queue
+
+Three contracts were considered for `sendDirectWithReceipt()` after the selected queue is
+known to be poisoned:
+
+1. keep enqueuing and report acceptance, even though the queue cannot drain;
+2. bypass the queue and call the messenger directly;
+3. reject the request synchronously with the existing unsuccessful outcome envelope.
+
+The first contract is false acceptance: `enqueueText()` is void, `drainQueue()` returns
+immediately while `drainFailure` is set, and the caller currently receives
+`{ accepted: true, messageId: null }` for work that cannot progress. The second contract
+breaks the queue's ordering, attribution, echo-guard, and durability ownership and can
+create duplicates when the failed head has ambiguous delivery state.
+
+Decision: select the third contract. A known poisoned queue returns
+`{ accepted: false, messageId: null }`, does not enqueue the text, and does not call the
+messenger directly. The boolean `sendDirect()` wrapper consequently returns `false`.
+The existing explicit `bypassEchoGuard=true` path is unchanged because it is a distinct,
+caller-selected transport contract evaluated before queue selection; this repair does not
+silently promote ordinary callers into that path.
 
 ## Queue contract
 
@@ -134,6 +162,21 @@ Add `isPoisoned(): boolean` to `IOutboundQueue` and `OutboundQueue`. It reports 
 mocks implementing `IOutboundQueue` must be updated or inherit a shared test helper.
 
 No raw error, chat identifier, or message text is returned by health.
+
+### Direct-send admission
+
+The direct-send queue path checks `queue.isPoisoned()` synchronously immediately before
+`enqueueText()`. JavaScript execution cannot interleave a promise callback between that
+check and the following synchronous enqueue, so an already-known poison cannot be accepted
+by this API. A send or durability failure that occurs after acceptance remains an
+asynchronous queue outcome and is intentionally not reclassified as a synchronous direct-
+send rejection.
+
+The rejection uses the existing `SendDirectOutcome` shape rather than adding a second
+result type or throwing. This preserves every caller's current error boundary while
+correcting the meaning of `accepted`: accepted means admitted into a queue that was not
+already known to be unable to drain. No message content, JID, or raw poison error is added
+to the outcome or logs.
 
 ## Runtime containment
 
@@ -268,6 +311,11 @@ duplicate. Nothing in this PR may blindly resend them or relabel them delivered.
 ### Compatibility and regression tests
 
 - Structural `IOutboundQueue` mocks compile with `isPoisoned()`.
+- A direct send against a poisoned queue returns `{ accepted: false, messageId: null }`,
+  does not call `enqueueText()`, and does not call the messenger.
+- The boolean direct-send wrapper returns `false` for the same known-poison case.
+- A healthy queue retains the existing asynchronous acceptance contract, and the explicit
+  bypass path retains its existing synchronous receipt contract.
 - Existing genuine-failure, retry, evidence, shutdown, queue-halt, health, and failure-
   taxonomy suites remain green.
 - The public-surface and durability documentation is updated in the same change.
@@ -318,6 +366,10 @@ The change is acceptable only when all of the following are proven on the exact 
 - already-admitted pending ownership is durably terminalized;
 - poison state appears in health with no identifiers or raw errors;
 - historical debt and current poison remain independent;
+- direct-send callers cannot receive a positive acceptance receipt for a queue that was
+  already poisoned at the synchronous admission boundary;
+- poison rejection neither appends more work to the queue nor bypasses it through the
+  messenger;
 - targeted tests, full affected suites, typecheck, repository guards, Test Integrity, and
   `verify:release` pass without masked failures;
 - current-main range comparison shows no dropped upstream behavior;
@@ -332,6 +384,7 @@ The change is acceptable only when all of the following are proven on the exact 
 | Existing turn-queue halt and rejection machinery can own containment. | Current runtime already exposes halt counts and typed admission classes. | Pending turns cannot be removed/finalized without a second ownership mechanism, or halt state cannot be projected without identifier leakage. |
 | Restart reconstructs process-local queue poison. | `drainFailure` is held only on the queue object. | Startup restores poison from durable state or reuses the old queue object. Restart delivery safety remains separately unproven. |
 | Automatic backlog replay is unsafe in this PR. | Admission rejection records contain no answer op and may represent already-applied external effects. | A separate replay contract proves effect dedupe, ordering, owner reassignment, and echoed completion for every eligible row. |
+| A synchronous poison check immediately before enqueue closes the known-poison false-acceptance gap. | `isPoisoned()` reads the same queue-local `drainFailure` that makes `drainQueue()` return without progress, and both operations execute in one JavaScript turn. | A deterministic test can interleave poison creation between the check and enqueue, or a queue reports unpoisoned while an already-stored `drainFailure` prevents draining. |
 
 ## Rollback
 
