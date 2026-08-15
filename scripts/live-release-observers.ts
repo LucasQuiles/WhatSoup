@@ -11,6 +11,7 @@ import {
   resolveReleasePathFromLaunchdPlist,
   type LiveReleaseDriftAlertResult,
 } from './live-release-drift-alert.ts';
+import { takeValue } from './lib/cli-args.ts';
 
 interface ParsedArgs {
   releasePath?: string;
@@ -49,10 +50,9 @@ function parseArgs(argv: string[]): ParsedArgs {
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     const next = (): string => {
-      const value = argv[index + 1];
-      if (!value) throw new Error(`${arg} requires a value`);
-      index += 1;
-      return value;
+      const taken = takeValue(argv, index, arg);
+      index = taken.index;
+      return taken.value;
     };
     if (arg === '--release') parsed.releasePath = next();
     else if (arg === '--launchd-plist') parsed.launchdPlistPath = next();

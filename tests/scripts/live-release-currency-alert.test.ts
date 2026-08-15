@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -61,6 +62,22 @@ function options(releasePath: string, resolveTarget: ReleaseTargetResolver) {
 }
 
 describe('live release currency alert', () => {
+  it('rejects another flag where --target-url requires a value', () => {
+    const releasePath = writeRelease();
+    const scriptPath = path.join(process.cwd(), 'scripts/live-release-currency-alert.ts');
+    const proc = spawnSync(process.execPath, [
+      '--disable-warning=ExperimentalWarning',
+      '--experimental-strip-types',
+      scriptPath,
+      '--release', releasePath,
+      '--target-url', '--json',
+      '--no-emit',
+    ], { cwd: process.cwd(), encoding: 'utf8' });
+
+    expect(proc.status).toBe(2);
+    expect(proc.stderr).toContain('the next argument is another flag (--json)');
+  });
+
   it('reports current only when exact full object IDs match', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-08-15T21:00:00.000Z'));

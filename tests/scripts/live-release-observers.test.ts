@@ -63,6 +63,22 @@ function runObserver(releasePath: string, fakeBin: string, fakeGit: string, targ
 }
 
 describe('live release observers', () => {
+  it('rejects another flag where --target-url requires a value', () => {
+    const { releasePath } = fixture();
+    const scriptPath = path.join(process.cwd(), 'scripts/live-release-observers.ts');
+    const proc = spawnSync(process.execPath, [
+      '--disable-warning=ExperimentalWarning',
+      '--experimental-strip-types',
+      scriptPath,
+      '--release', releasePath,
+      '--target-url', '--json',
+      '--no-emit',
+    ], { cwd: process.cwd(), encoding: 'utf8' });
+
+    expect(proc.status).toBe(2);
+    expect(proc.stderr).toContain('the next argument is another flag (--json)');
+  });
+
   it('reports integrity and exact currency as two independent green observations', () => {
     const { releasePath, fakeBin, fakeGit } = fixture();
     const proc = runObserver(releasePath, fakeBin, fakeGit, DEPLOYED);
