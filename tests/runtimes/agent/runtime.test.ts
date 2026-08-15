@@ -12172,7 +12172,7 @@ describe('AgentRuntime', () => {
       );
     });
 
-    it('still sends the poll if pre-poll detail flushing fails', async () => {
+    it('does not send the poll if a poisoned pre-poll detail flush fails', async () => {
       const { messenger, pollSends } = makePollMessenger({ waMessageId: 'POLL_AFTER_FLUSH_FAIL', hasSecret: true });
       const db = makeDb();
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
@@ -12187,6 +12187,7 @@ describe('AgentRuntime', () => {
       mockQueue.enqueueText.mockClear();
       mockQueue.flush.mockReset();
       mockQueue.flush.mockRejectedValueOnce(new Error('flush failed'));
+      mockQueue.isPoisoned.mockReturnValueOnce(true);
 
       capturedOnEventRef.current!({
         type: 'tool_use',
@@ -12205,10 +12206,12 @@ describe('AgentRuntime', () => {
         },
       });
 
-      await vi.waitFor(() => expect(pollSends.length).toBe(1));
-      expect(pollSends[0].values).toEqual(['Short', 'Long option', 'Other — propose a different option']);
+      await vi.waitFor(() => expect(mockQueue.flush).toHaveBeenCalledOnce());
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(pollSends).toHaveLength(0);
       expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
-        expect.objectContaining({ chatJid: pollSends[0].chatJid }),
+        expect.objectContaining({ chatJid: 'test@s.whatsapp.net' }),
         'failed to flush poll details before poll send',
       );
     });

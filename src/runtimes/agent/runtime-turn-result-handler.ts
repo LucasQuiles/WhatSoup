@@ -721,7 +721,7 @@ if (wasSilentCompact) host.clearSilentCompact(mapKey);
       host.pendingTurnText.delete(mapKey);
       host.pendingTurnActorJid.delete(mapKey);
     }
-    host.runtimeTurnCoordinator.flushUnownedRuntimeResult(queue, voice);
+    host.runtimeTurnCoordinator.flushUnownedRuntimeResult(queue, mapKey ?? GLOBAL_TOOL_SCOPE_KEY, voice);
   } else if (!isSystemResult && inboundSeq !== undefined && host.durability) {
     // Invariant violation: the journaled result should have carried an immutable
     // runtime turn context. The turn is nonetheless terminal — release the
@@ -1259,7 +1259,7 @@ if (wasSilentCompact) host.clearSilentCompact(GLOBAL_TOOL_SCOPE_KEY);
       host.runtimeTurnCoordinator.registerStuckScope(scopeKey);
     });
   } else if (isSystemResult || host.currentInboundSeq === undefined || host.durability === null) {
-    host.runtimeTurnCoordinator.flushUnownedRuntimeResult(queue, voice);
+    host.runtimeTurnCoordinator.flushUnownedRuntimeResult(queue, GLOBAL_TOOL_SCOPE_KEY, voice);
     host.currentTurnChatJid = null;
     host.currentTurnReplayText = null;
     host.currentTurnReplayActorJid = undefined;

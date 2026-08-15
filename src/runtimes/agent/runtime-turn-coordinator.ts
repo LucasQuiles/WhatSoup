@@ -340,14 +340,21 @@ async observeOutboundQueueOperation<T>(
   try {
     return await operation();
   } catch (error) {
-    if (queue.isPoisoned()) {
-      try {
-        this.containOutboundQueuePoison(scopeKey, error);
-      } catch (containmentError) {
-        log.error({ err: containmentError }, 'outbound queue poison containment failed');
-      }
-    }
+    this.observeOutboundQueueFailure(scopeKey, queue, error);
     throw error;
+  }
+}
+
+private observeOutboundQueueFailure(
+  scopeKey: string,
+  queue: IOutboundQueue,
+  error: unknown,
+): void {
+  if (!queue.isPoisoned()) return;
+  try {
+    this.containOutboundQueuePoison(scopeKey, error);
+  } catch (containmentError) {
+    log.error({ err: containmentError }, 'outbound queue poison containment failed');
   }
 }
 
@@ -815,14 +822,16 @@ private async performRuntimeTurnFinalization(args: {
     throw new Error('Runtime turn finalization requires durability');
   }
   const bookkeeping = this.turnFinalizationBookkeeping(args.context, args.session, args.event, args.attemptOutcome);
-  const answerEvidence = await collectRuntimeTurnAnswerEvidence(
-    args.queue,
-    args.context.identity.logicalTurnId,
-  );
   const scopeRef = args.mapKey === undefined
     ? undefined
     : this.host.perChatRuntimeTurnScopeRefs.get(args.context.identity.logicalTurnId)
       ?? { value: args.mapKey };
+  const scopeKey = scopeRef?.value ?? GLOBAL_CONVERSATION_KEY;
+  const answerEvidence = await collectRuntimeTurnAnswerEvidence(
+    args.queue,
+    args.context.identity.logicalTurnId,
+    (error) => this.observeOutboundQueueFailure(scopeKey, args.queue, error),
+  );
   const postEffects = this.createRuntimeTurnPostEffects({
     queue: args.queue,
     ...(scopeRef === undefined ? {} : { scopeRef }),
@@ -868,6 +877,7 @@ private async performRuntimeTurnFinalization(args: {
         refreshAnswerEvidence: () => collectRuntimeTurnAnswerEvidence(
           args.queue,
           args.context.identity.logicalTurnId,
+          (error) => this.observeOutboundQueueFailure(scopeKey, args.queue, error),
         ),
         bookkeeping,
         postEffects,
@@ -1673,9 +1683,10 @@ runRuntimeTurnAfterTerminalAction(
 
 flushUnownedRuntimeResult(
   queue: IOutboundQueue,
+  scopeKey: string,
   voice?: { chatJid: string; responseText: string; inboundContentType: string | null },
 ): void {
-  queue.flush()
+  this.observeOutboundQueueOperation(scopeKey, queue, () => queue.flush())
     .then(() => {
       if (
         voice &&
