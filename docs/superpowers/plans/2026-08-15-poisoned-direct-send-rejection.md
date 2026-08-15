@@ -75,7 +75,7 @@ it('T5: returns false without side effects for a known-poisoned queue', async ()
 Run:
 
 ```bash
-npx vitest run --pool=forks tests/runtimes/agent/chat-transport-send-direct.test.ts
+npm test -- tests/runtimes/agent/chat-transport-send-direct.test.ts --pool=forks
 ```
 
 Expected: exit 1; T5 receives `true`, B7 receives `{ accepted: true, messageId: null }`, and both observe `enqueueText` called once. Existing tests remain passing.
@@ -102,7 +102,7 @@ Update the adjacent comments so they state that a healthy queue accepts asynchro
 Run:
 
 ```bash
-npx vitest run --pool=forks tests/runtimes/agent/chat-transport-send-direct.test.ts
+npm test -- tests/runtimes/agent/chat-transport-send-direct.test.ts --pool=forks
 ```
 
 Expected: exit 0; 12 tests pass, including T5 and B7.
@@ -112,11 +112,12 @@ Expected: exit 0; 12 tests pass, including T5 and B7.
 Run:
 
 ```bash
-npx vitest run --pool=forks \
+npm test -- \
   tests/runtimes/agent/chat-transport-send-direct.test.ts \
   tests/runtimes/agent/outbound-queue.test.ts \
   tests/runtimes/agent/outbound-queue-flush-linearization.test.ts \
-  tests/runtimes/agent/outbound-queue-poison-registry.test.ts
+  tests/runtimes/agent/outbound-queue-poison-registry.test.ts \
+  --pool=forks
 ```
 
 Expected: exit 0 with all selected files and tests passing and no skipped or todo tests.
