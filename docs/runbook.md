@@ -655,6 +655,22 @@ journalctl --user -u whatsoup@chat-bot -n 100 | grep -i enrich
 **Common causes for agent instances:**
 - Recent session crashes — check `durability.quarantinedOutbound` and `recentCrashCount` in the health JSON
 - Sustained OpenCode contention — inspect `runtime.agent.providerExecution`; `pressureActive=true` means a queued turn has waited at least 30 seconds
+- Outbound queue poison — inspect `runtime.agent.outboundQueuePoisoned` and
+  `outboundQueuePoisonedScopes`; correlate `runtime.outbound_queue_poisoned` in
+  `status_reasons` with `agent_outbound_queue_poisoned` in `degradation_causes`
+
+When outbound queue poison is present, preserve the first failure log and the affected
+turn's durable evidence before intervening. In per-chat mode, only that chat scope is
+blocked and health remains degraded while other chats continue. In shared or single mode,
+the active outbound lane is blocked and health is unhealthy. The active failing turn keeps
+its actual processor or `pre_dispatch_error` classification; pending and new turns rejected
+because of containment use `scope_blocked_recovery`.
+
+Do not use a restart as proof that any message was delivered. Poison is a process-local,
+sticky containment latch, so queue/process replacement removes the latch but does not
+prove delivery, create an acknowledgement, or authorize replay/resend. There is no generic
+in-process clear. Recovery debt is separate and neither creates nor clears poison; inspect
+both signals independently before deciding whether a controlled restart is appropriate.
 
 On `agent_respawn_failed` / auto-respawn exhaustion, do not delete the session, queue, or
 checkpoint to force green health. The runtime marks that manager exhausted and defers destructive

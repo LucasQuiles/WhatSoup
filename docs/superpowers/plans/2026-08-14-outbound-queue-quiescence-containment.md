@@ -1,5 +1,7 @@
 # Outbound Queue Quiescence and Poison Containment Implementation Plan
 
+**Status:** Active — implementation and local verification are complete; integration remains pending.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. Every production task also requires superpowers:test-driven-development, superpowers:test-integrity, and superpowers:verification-before-completion.
 
 **Goal:** Make outbound queue completion linearizable, preserve sticky failure for genuine delivery faults, stop poisoned runtime scopes from admitting more turns, and expose active poison as a bounded current-health signal without replaying historical work.

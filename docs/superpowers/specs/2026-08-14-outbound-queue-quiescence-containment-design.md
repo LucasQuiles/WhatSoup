@@ -2,9 +2,7 @@
 
 Date: 2026-08-14
 
-## Status
-
-Approved for implementation on 2026-08-14.
+**Status:** Active — approved and implemented on the review branch; integration remains pending.
 
 ## Problem
 

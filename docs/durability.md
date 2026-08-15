@@ -1657,3 +1657,40 @@ counters extend the #2568 run-report/receipt contract or surface behind a separa
 ledger-local gauge is an open owner decision, alongside: the canonical state enum,
 legacy classification of unattributed sources (`legacy_unclassified` vs `eligible`),
 promotion-id collision policy, and retention windows.
+
+## 11. Outbound Queue Stable Boundary and Poison Containment
+
+An agent outbound queue has one completion boundary shared by `flush()`, poll delivery,
+turn-evidence collection, and shutdown. The boundary drains every accepted text, stream,
+tool-status, redirected tool-status, and poll send, then follows successive installed
+drain-chain snapshots until the queue is genuinely idle. A late enqueue accepted before
+closure therefore joins the same boundary instead of being mistaken for an impossible
+post-flush state.
+
+Shutdown first closes admission, drains work already accepted, and marks the queue closed
+at that stable boundary. New content after closure is rejected with
+`OUTBOUND_QUEUE_CLOSED`; it cannot leak into a replacement queue epoch. Turn evidence is
+frozen only after the same boundary, so evidence cannot claim completion while accepted
+outbound work is still draining.
+
+A real send or drain failure poisons that outbound scope. Poison is monotonic and
+process-local: the first exact error is retained for in-process diagnosis, later
+operations observe the same failure, and there is no generic clear operation. Per-chat
+mode closes only the affected scope so unrelated chats continue. Shared and single modes
+poison their one active outbound lane. A controlled queue/process replacement removes the
+in-memory latch, but that is **not** delivery proof and does not authorize replay or
+resend; operators must preserve and evaluate the existing durable evidence separately.
+
+Terminal classification distinguishes the failure that caused containment from its
+consequences. The active failed turn keeps its actual processor or `pre_dispatch_error`
+classification. Already-admitted pending turns removed from that scope, and later turns
+rejected before provider dispatch, terminalize as `scope_blocked_recovery`. They are not
+silently retained in memory or automatically replayed.
+
+Health exposes aggregates only: `outboundQueuePoisoned` and
+`outboundQueuePoisonedScopes`, plus the normalized reason
+`runtime.outbound_queue_poisoned` and degradation cause
+`agent_outbound_queue_poisoned`. It never serializes scope identities or error text.
+Per-chat poison is degraded because healthy scopes remain available; shared or single
+poison is unhealthy because the active lane is unavailable. Durable recovery debt is an
+independent signal: it neither creates nor clears outbound queue poison.
