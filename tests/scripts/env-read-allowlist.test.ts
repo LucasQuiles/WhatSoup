@@ -36,12 +36,6 @@ const ALLOWLIST: Record<string, number> = {
   'src/core/database-compatibility-early.ts': 2,
   // guard `env: … = process.env` DI seam — keeps the guard unit-testable.
   'src/core/health-bind-guard.ts': 1,
-  // launcher-provenanced WHATSOUP_HEALTH_TOKEN precedence seam: the managed
-  // launcher scrubs any inherited value, resolves the canonical tokens.env
-  // chain, and exports the result — the runtime must honor that exact value
-  // first or a stale scoped-keychain entry strands the fleet on 401s after a
-  // rotation. Env-late by design, not a typed-config candidate.
-  'src/core/health.ts': 1,
   // bounded MCP key-list passthrough (.map over an explicit key list).
   'src/core/mcp-launcher.ts': 1,
   // WHATSOUP_INTERNAL_JIDS / BOT_ERRORS_JID safety config — slice-3 typed field.
@@ -80,8 +74,10 @@ const ALLOWLIST: Record<string, number> = {
   'src/lib/git-env.ts': 2,
   // INSTANCE_CONFIG read — bootstrap protocol (pairs with config.ts:450).
   'src/lib/instance-context.ts': 1,
-  // secret resolver + REQUIRE_OS_KEYRING flag + XDG ambient — resolver stays env-late.
-  'src/lib/keyring.ts': 4,
+  // secret resolver + REQUIRE_OS_KEYRING flag + XDG ambient — resolver stays
+  // env-late. Fifth site: lookupEnvCredential, the env-only read for values
+  // that are authoritative by contract (launcher-provenanced health token).
+  'src/lib/keyring.ts': 5,
   // CLAUDE_CONFIG_DIR ambient Claude path (typed config.claudeConfigDir candidate, slice-4).
   'src/lib/model-advisor.ts': 1,
   // BOT_ERRORS_STATE_DIR + WHATSOUP_INSTANCE + XDG ambient — slice-3 typed outbox.

@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { systemClock } from '../lib/clock.ts';
 import { config } from '../config.ts';
 import { safeStringEqual } from '../lib/safe-compare.ts';
-import { lookupCredential } from '../lib/keyring.ts';
+import { lookupCredential, lookupEnvCredential } from '../lib/keyring.ts';
 import { createChildLogger } from '../logger.ts';
 import { CURRENT_SCHEMA_MIGRATION, type Database } from './database.ts';
 import { readArcBindingHealth, resolveArcRepoRoot } from './arc-binding-health.ts';
@@ -785,7 +785,7 @@ function resolveExpectedHealthToken(auth: HealthAuthState): string | undefined {
   // rotation script mirrors the keychain only with --mirror-keyring), and a
   // restart would not fix it. QR-157: trim-then-check so a whitespace-only
   // value cannot become an attacker-forgeable empty expected token.
-  const envToken = process.env.WHATSOUP_HEALTH_TOKEN?.trim();
+  const envToken = lookupEnvCredential('whatsoup-health-token');
   if (envToken) {
     auth.token = envToken;
     return envToken;
