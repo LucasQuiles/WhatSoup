@@ -14,7 +14,10 @@
  * Per-file reasons live on the allowlist entries; per-site env-allowed
  * justifications arrive with the final slice.
  *
- * Companion: #2192 (baseline audited at the #3235 landing tree).
+ * Companion: #2192 (baseline audited at the #3235 landing tree). The
+ * "#2192 slice 3c" / "#2192 s4 verdict" citations in the per-file reasons
+ * resolve to docs/reviews/2192-env-read-migration-20260815/ (s3/s4 design
+ * records with per-var grounds).
  */
 import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
