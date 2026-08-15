@@ -36,6 +36,12 @@ const ALLOWLIST: Record<string, number> = {
   'src/core/database-compatibility-early.ts': 2,
   // guard `env: … = process.env` DI seam — keeps the guard unit-testable.
   'src/core/health-bind-guard.ts': 1,
+  // launcher-provenanced WHATSOUP_HEALTH_TOKEN precedence seam: the managed
+  // launcher scrubs any inherited value, resolves the canonical tokens.env
+  // chain, and exports the result — the runtime must honor that exact value
+  // first or a stale scoped-keychain entry strands the fleet on 401s after a
+  // rotation. Env-late by design, not a typed-config candidate.
+  'src/core/health.ts': 1,
   // bounded MCP key-list passthrough (.map over an explicit key list).
   'src/core/mcp-launcher.ts': 1,
   // WHATSOUP_INTERNAL_JIDS / BOT_ERRORS_JID safety config — slice-3 typed field.

@@ -775,14 +775,27 @@ const HEALTH_TOKEN_MISS_RETRY_MS = 30_000;
 
 function resolveExpectedHealthToken(auth: HealthAuthState): string | undefined {
   if (auth.token !== undefined) return auth.token;
-  const now = Date.now();
+  // Precedence must match the launcher/fleet canon: `tokens.env` is canonical
+  // while it exists. The managed launcher resolves it (private file → scoped
+  // keychain → legacy) and exports the result as WHATSOUP_HEALTH_TOKEN after
+  // scrubbing any inherited value, and fleet discovery reads the same file —
+  // so the launcher-provenanced environment token is honored FIRST. A
+  // keychain-first order here would strand the whole fleet on 401s whenever a
+  // rotated tokens.env diverges from a stale scoped-keychain entry (the
+  // rotation script mirrors the keychain only with --mirror-keyring), and a
+  // restart would not fix it. QR-157: trim-then-check so a whitespace-only
+  // value cannot become an attacker-forgeable empty expected token.
+  const envToken = process.env.WHATSOUP_HEALTH_TOKEN?.trim();
+  if (envToken) {
+    auth.token = envToken;
+    return envToken;
+  }
+  const now = systemClock.now();
   if (auth.missAtMs !== undefined && now - auth.missAtMs < HEALTH_TOKEN_MISS_RETRY_MS) {
     return undefined;
   }
-  // Scope the canonical keyring lookup to this instance. During the staged
-  // migration, the scoped lookup retains the per-process environment token as
-  // a post-keyring fallback so a transient keychain visibility failure cannot
-  // lock out the control plane.
+  // Scoped-keychain fallback: direct (non-managed) launches, and the
+  // post-migration end state once tokens.env is retired.
   const token = lookupCredential('whatsoup-health-token', {
     user: auth.instanceName,
     skipMigrationFallbacks: true,
