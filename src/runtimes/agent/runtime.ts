@@ -174,7 +174,9 @@ import {
   createOperationTracker as createOperationTrackerForPort,
   getTracker as getTrackerForPort,
   sendDirect as sendDirectForPort,
+  sendDirectWithReceipt as sendDirectWithReceiptForPort,
   type ChatTransportPort,
+  type SendDirectOutcome,
 } from './chat-transport.ts';
 import { getRecentMessages, getMessagesSince, hasFromMeReplyAfter } from '../../core/messages.ts';
 import { toConversationKey, isGroupConversationKey, GLOBAL_CONVERSATION_KEY } from '../../core/conversation-key.ts';
@@ -7612,6 +7614,15 @@ export class AgentRuntime implements Runtime {
   // Tracking marker: #2981-SHIM-RUNTIME-SENDDIRECT
   private sendDirect(chatJid: string, text: string, bypassEchoGuard = false): void {
     void sendDirectForPort(this.chatTransportHost, chatJid, text, bypassEchoGuard);
+  }
+
+  /**
+   * Id-bearing direct send (#2981 car-B): returns the SendDirectOutcome
+   * envelope so reply-threading consumers (F2a #2121) can reference the sent
+   * message. The void shim above stays for the legacy fire-and-forget sites.
+   */
+  sendDirectWithReceipt(chatJid: string, text: string, bypassEchoGuard = false): Promise<SendDirectOutcome> {
+    return sendDirectWithReceiptForPort(this.chatTransportHost, chatJid, text, bypassEchoGuard);
   }
 
   // ---------------------------------------------------------------------------
