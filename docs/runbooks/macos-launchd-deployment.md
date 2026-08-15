@@ -123,10 +123,16 @@ Example wrapper chain:
 
 Current managed plists invoke `deploy/whatsoup <instance>` directly. That
 launcher scrubs inherited provider and health-token variables before the first
-subprocess; provider and health boundaries resolve secure-store credentials in
-process. The config may retain credential selector names such as
-`memory.pinecone.apiKeyEnv = "PINECONE_API_KEY"`, but the launcher does not
-inject their values.
+subprocess, then re-resolves the subset that process-level features need from
+the secure store and exports it into the runtime environment (Whisper's
+`OPENAI_API_KEY`, `PINECONE_API_KEY` for `knowledge_search`, chat LLM keys on
+`chat` instances, and the instance health token). The guarantee is provenance —
+exported values come only from the secure store, never from the inherited
+environment — not absence: the exported subset is visible in the runtime's
+same-UID process environment, and rotation requires an instance restart.
+Config credential selector names such as
+`memory.pinecone.apiKeyEnv = "PINECONE_API_KEY"` therefore resolve against
+launcher-provenanced values, never ambient ones.
 
 ## Instance Configs
 

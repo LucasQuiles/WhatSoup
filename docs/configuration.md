@@ -23,10 +23,17 @@ Both take precedence over built-in defaults.
 | `GEMINI_API_KEY` | string | Legacy direct-launch fallback for `gemini-cli`. Managed launches scrub it; store the credential under the canonical `google` service (the historical `gemini` keyring service remains a lookup fallback). It is never forwarded to unrelated providers. |
 
 The managed `deploy/whatsoup` launcher removes these protected names before it
-starts any subprocess. Provider boundaries resolve credentials from the
-configured secure store when the corresponding feature is exercised. Direct
-environment launches remain a compatibility surface, not the managed-fleet
-credential contract.
+starts any subprocess, then deliberately re-resolves from the secure store and
+exports into the runtime environment only the values that process-level
+features need (chat LLM keys on `chat` instances, `OPENAI_API_KEY` for Whisper,
+`PINECONE_API_KEY` for `knowledge_search`, and the instance health token). The
+enforced boundary is PROVENANCE and ORDERING — an inherited ambient value can
+never shadow the secure-store resolution — not absence: the exported subset
+remains visible in the runtime's same-UID process environment, and rotating it
+requires an instance restart. Provider boundaries additionally resolve
+credentials from the secure store at use (agent child creation, configured
+BYOK services). Direct environment launches remain a compatibility surface,
+not the managed-fleet credential contract.
 
 > **Instance-type summary:** no instance type receives provider keys from the
 managed launcher. Required credentials are validated when the selected provider

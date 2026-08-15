@@ -74,13 +74,26 @@ No migration code was changed by this re-grounding. The handoff stays OPEN.
 
 ## Finding
 
-**Implementation update (2026-07-21):** provider and scoped health lookups now
-occur at their in-process use boundaries, and `deploy/whatsoup` scrubs all
-mapped provider/runtime credential variables plus supported Google aliases
-before its first subprocess. Managed launchd
-cutovers must invoke that launcher directly and remove the legacy wrapper chain.
-The finding below remains the historical live-state description until each host
-has been cut over and independently verified with process-environment evidence.
+**Implementation update (2026-07-21, scope corrected 2026-08-14):**
+`deploy/whatsoup` scrubs all mapped provider/runtime credential variables plus
+supported Google aliases before its first subprocess, then re-resolves from the
+secure store and exports the subset that process-level features need (chat LLM
+keys, Whisper's `OPENAI_API_KEY`, `PINECONE_API_KEY`, the instance health
+token) before exec-ing the runtime. What this delivers is an AMBIENT-INPUT
+scrub with ordering/provenance guarantees — inherited values can never shadow
+secure-store resolution — NOT removal of the same-UID process-environment
+exposure class this finding describes: the launcher-exported subset remains
+visible in the long-lived runtime environment, agent children still receive
+their provider keys via the child-env builder, and rotation of the exported
+subset requires an instance restart. Agent child creation and configured BYOK
+services additionally resolve at use. Standalone `deploy/preflight-check.sh`
+(`guard:restart-preflight`) is NOT an independent integrity oracle for a
+release export — it runs the release's own copy of the validators; the wrapper
+trust gate is the independent boundary. Managed launchd cutovers must invoke
+the launcher directly and remove the legacy wrapper chain. The finding below
+remains the live-state description for the residual exposure until a stronger
+isolation model lands and each host is verified with process-environment
+evidence.
 
 WhatSoup secrets can be exposed through process environments on a macOS runtime host.
 

@@ -37,6 +37,11 @@ export function createOpenAIProvider(
   // Resolve at the provider boundary so the parent can migrate away from an
   // ambient OPENAI_API_KEY without changing endpoint or model selection.
   // Omitting baseURL still preserves the SDK's OPENAI_BASE_URL behavior.
+  // Resolution happens ONCE at provider construction (startup): the client is
+  // long-lived, so rotating the credential requires an instance restart. This
+  // is deliberate — re-resolving per request would put a synchronous keyring
+  // exec on the chat hot path. Contrast the agent HTTP providers (per-request
+  // resolution) and Whisper (per-call resolve + rebuild-on-change).
   const client = new OpenAI({
     ...(openaiProviderConfig?.baseUrl ? { baseURL: openaiProviderConfig.baseUrl } : {}),
     apiKey: resolveApiKey({
