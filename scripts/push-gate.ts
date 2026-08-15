@@ -72,6 +72,7 @@ export const CURATED_TEST_PATHS = [
   'tests/scripts/node-pin-consistency.test.ts',
   'tests/scripts/clock-budget.test.ts',
   'tests/scripts/console-usage-budget.test.ts',
+  'tests/scripts/env-read-allowlist.test.ts',
   'tests/scripts/db-read-prefix-budget.test.ts',
   'tests/scripts/expect-anything-budget.test.ts',
   'tests/scripts/fail-closed-gate-guard.test.ts',
