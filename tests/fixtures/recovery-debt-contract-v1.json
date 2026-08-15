@@ -1,0 +1,202 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "name": "retained recovery is valid",
+      "status": "healthy",
+      "expectedIssue": null,
+      "debt": {
+        "open": true,
+        "service_blocking": false,
+        "attention": "routine",
+        "reason": null,
+        "reasons": ["historical_turn_catchup"],
+        "continuity": { "readable": true, "open": 0, "unresolved": 0, "ambiguous": 0 },
+        "turn_recovery": { "readable": true, "blocking_outstanding": 0, "retained_terminal": 0, "open_catchups": 1, "corroborated_retained": 0 },
+        "completed_delivery_identity": { "readable": true, "blocking": 0, "retained": 0, "next_action": null },
+        "delivery": { "readable": true, "blocking_ambiguous": 0, "uncorroborated_ambiguous": 0, "corroborated_retained": 0, "oldest_uncorroborated_at": null }
+      }
+    },
+    {
+      "name": "fresh ambiguity is valid routine debt",
+      "status": "healthy",
+      "expectedIssue": null,
+      "debt": {
+        "open": true,
+        "service_blocking": false,
+        "attention": "routine",
+        "reason": null,
+        "reasons": ["uncorroborated_delivery_ambiguity"],
+        "continuity": { "readable": true, "open": 0, "unresolved": 0, "ambiguous": 0 },
+        "turn_recovery": { "readable": true, "blocking_outstanding": 0, "retained_terminal": 0, "open_catchups": 0, "corroborated_retained": 0 },
+        "completed_delivery_identity": { "readable": true, "blocking": 0, "retained": 0, "next_action": null },
+        "delivery": { "readable": true, "blocking_ambiguous": 0, "uncorroborated_ambiguous": 1, "corroborated_retained": 0, "oldest_uncorroborated_at": "2026-08-14 06:00:00" }
+      }
+    },
+    {
+      "name": "stale ambiguity is valid blocking debt",
+      "status": "degraded",
+      "expectedIssue": null,
+      "debt": {
+        "open": true,
+        "service_blocking": true,
+        "attention": "urgent",
+        "reason": null,
+        "reasons": ["uncorroborated_delivery_ambiguity"],
+        "continuity": { "readable": true, "open": 0, "unresolved": 0, "ambiguous": 0 },
+        "turn_recovery": { "readable": true, "blocking_outstanding": 0, "retained_terminal": 0, "open_catchups": 0, "corroborated_retained": 0 },
+        "completed_delivery_identity": { "readable": true, "blocking": 0, "retained": 0, "next_action": null },
+        "delivery": { "readable": true, "blocking_ambiguous": 1, "uncorroborated_ambiguous": 1, "corroborated_retained": 0, "oldest_uncorroborated_at": "2026-08-14 04:00:00" }
+      }
+    },
+    {
+      "name": "blocking count cannot be asserted nonblocking",
+      "status": "degraded",
+      "expectedIssue": "recovery_debt_invalid",
+      "debt": {
+        "open": true,
+        "service_blocking": false,
+        "attention": "routine",
+        "reason": null,
+        "reasons": ["uncorroborated_delivery_ambiguity"],
+        "continuity": { "readable": true, "open": 0, "unresolved": 0, "ambiguous": 0 },
+        "turn_recovery": { "readable": true, "blocking_outstanding": 0, "retained_terminal": 0, "open_catchups": 0, "corroborated_retained": 0 },
+        "completed_delivery_identity": { "readable": true, "blocking": 0, "retained": 0, "next_action": null },
+        "delivery": { "readable": true, "blocking_ambiguous": 1, "uncorroborated_ambiguous": 1, "corroborated_retained": 0, "oldest_uncorroborated_at": "2026-08-14 04:00:00" }
+      }
+    },
+    {
+      "name": "uncorroborated ambiguity requires an oldest timestamp",
+      "status": "healthy",
+      "expectedIssue": "recovery_debt_invalid",
+      "debt": {
+        "open": true,
+        "service_blocking": false,
+        "attention": "routine",
+        "reason": null,
+        "reasons": ["uncorroborated_delivery_ambiguity"],
+        "continuity": { "readable": true, "open": 0, "unresolved": 0, "ambiguous": 0 },
+        "turn_recovery": { "readable": true, "blocking_outstanding": 0, "retained_terminal": 0, "open_catchups": 0, "corroborated_retained": 0 },
+        "completed_delivery_identity": { "readable": true, "blocking": 0, "retained": 0, "next_action": null },
+        "delivery": { "readable": true, "blocking_ambiguous": 0, "uncorroborated_ambiguous": 1, "corroborated_retained": 0, "oldest_uncorroborated_at": null }
+      }
+    },
+    {
+      "name": "healthy status cannot carry blocking debt",
+      "status": "healthy",
+      "expectedIssue": "recovery_debt_status_contradiction",
+      "debt": {
+        "open": true,
+        "service_blocking": true,
+        "attention": "urgent",
+        "reason": null,
+        "reasons": ["turn_recovery_actionable"],
+        "continuity": { "readable": true, "open": 0, "unresolved": 0, "ambiguous": 0 },
+        "turn_recovery": { "readable": true, "blocking_outstanding": 1, "retained_terminal": 0, "open_catchups": 0, "corroborated_retained": 0 },
+        "completed_delivery_identity": { "readable": true, "blocking": 0, "retained": 0, "next_action": null },
+        "delivery": { "readable": true, "blocking_ambiguous": 0, "uncorroborated_ambiguous": 0, "corroborated_retained": 0, "oldest_uncorroborated_at": null }
+      }
+    },
+    {
+      "name": "ambiguity timestamp must be parseable",
+      "status": "healthy",
+      "expectedIssue": "recovery_debt_invalid",
+      "debt": {
+        "open": true,
+        "service_blocking": false,
+        "attention": "routine",
+        "reason": null,
+        "reasons": ["uncorroborated_delivery_ambiguity"],
+        "continuity": { "readable": true, "open": 0, "unresolved": 0, "ambiguous": 0 },
+        "turn_recovery": { "readable": true, "blocking_outstanding": 0, "retained_terminal": 0, "open_catchups": 0, "corroborated_retained": 0 },
+        "completed_delivery_identity": { "readable": true, "blocking": 0, "retained": 0, "next_action": null },
+        "delivery": { "readable": true, "blocking_ambiguous": 0, "uncorroborated_ambiguous": 1, "corroborated_retained": 0, "oldest_uncorroborated_at": "not-a-timestamp" }
+      }
+    },
+    {
+      "name": "nullable reason field is required",
+      "status": "healthy",
+      "expectedIssue": "recovery_debt_invalid",
+      "debt": {
+        "open": true,
+        "service_blocking": false,
+        "attention": "routine",
+        "reasons": ["historical_turn_catchup"],
+        "continuity": { "readable": true, "open": 0, "unresolved": 0, "ambiguous": 0 },
+        "turn_recovery": { "readable": true, "blocking_outstanding": 0, "retained_terminal": 0, "open_catchups": 1, "corroborated_retained": 0 },
+        "completed_delivery_identity": { "readable": true, "blocking": 0, "retained": 0, "next_action": null },
+        "delivery": { "readable": true, "blocking_ambiguous": 0, "uncorroborated_ambiguous": 0, "corroborated_retained": 0, "oldest_uncorroborated_at": null }
+      }
+    },
+    {
+      "name": "nullable next action field is required",
+      "status": "healthy",
+      "expectedIssue": "recovery_debt_invalid",
+      "debt": {
+        "open": true,
+        "service_blocking": false,
+        "attention": "routine",
+        "reason": null,
+        "reasons": ["historical_turn_catchup"],
+        "continuity": { "readable": true, "open": 0, "unresolved": 0, "ambiguous": 0 },
+        "turn_recovery": { "readable": true, "blocking_outstanding": 0, "retained_terminal": 0, "open_catchups": 1, "corroborated_retained": 0 },
+        "completed_delivery_identity": { "readable": true, "blocking": 0, "retained": 0 },
+        "delivery": { "readable": true, "blocking_ambiguous": 0, "uncorroborated_ambiguous": 0, "corroborated_retained": 0, "oldest_uncorroborated_at": null }
+      }
+    },
+    {
+      "name": "nullable oldest ambiguity field is required",
+      "status": "healthy",
+      "expectedIssue": "recovery_debt_invalid",
+      "debt": {
+        "open": true,
+        "service_blocking": false,
+        "attention": "routine",
+        "reason": null,
+        "reasons": ["historical_turn_catchup"],
+        "continuity": { "readable": true, "open": 0, "unresolved": 0, "ambiguous": 0 },
+        "turn_recovery": { "readable": true, "blocking_outstanding": 0, "retained_terminal": 0, "open_catchups": 1, "corroborated_retained": 0 },
+        "completed_delivery_identity": { "readable": true, "blocking": 0, "retained": 0, "next_action": null },
+        "delivery": { "readable": true, "blocking_ambiguous": 0, "uncorroborated_ambiguous": 0, "corroborated_retained": 0 }
+      }
+    },
+    {
+      "name": "counts must be JavaScript-safe integers",
+      "status": "healthy",
+      "expectedIssue": "recovery_debt_invalid",
+      "debt": {
+        "open": true,
+        "service_blocking": false,
+        "attention": "routine",
+        "reason": null,
+        "reasons": ["historical_turn_catchup"],
+        "continuity": { "readable": true, "open": 0, "unresolved": 0, "ambiguous": 0 },
+        "turn_recovery": { "readable": true, "blocking_outstanding": 0, "retained_terminal": 0, "open_catchups": 9007199254740992, "corroborated_retained": 0 },
+        "completed_delivery_identity": { "readable": true, "blocking": 0, "retained": 0, "next_action": null },
+        "delivery": { "readable": true, "blocking_ambiguous": 0, "uncorroborated_ambiguous": 0, "corroborated_retained": 0, "oldest_uncorroborated_at": null }
+      }
+    },
+    {
+      "name": "present null debt is malformed",
+      "status": "healthy",
+      "expectedIssue": "recovery_debt_invalid",
+      "debt": null
+    },
+    {
+      "name": "aggregate count must be a JavaScript-safe integer",
+      "status": "healthy",
+      "expectedIssue": "recovery_debt_invalid",
+      "debt": {
+        "open": true,
+        "service_blocking": false,
+        "attention": "routine",
+        "reason": null,
+        "reasons": ["turn_recovery_terminal", "historical_turn_catchup"],
+        "continuity": { "readable": true, "open": 0, "unresolved": 0, "ambiguous": 0 },
+        "turn_recovery": { "readable": true, "blocking_outstanding": 0, "retained_terminal": 9007199254740991, "open_catchups": 9007199254740991, "corroborated_retained": 0 },
+        "completed_delivery_identity": { "readable": true, "blocking": 0, "retained": 0, "next_action": null },
+        "delivery": { "readable": true, "blocking_ambiguous": 0, "uncorroborated_ambiguous": 0, "corroborated_retained": 0, "oldest_uncorroborated_at": null }
+      }
+    }
+  ]
+}

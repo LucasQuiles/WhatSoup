@@ -57,6 +57,7 @@ function fakeStatus(overrides: Partial<InstanceStatus> = {}): InstanceStatus {
     lastAlertAt: null,
     silencedUntil: null,
     activeAlertSources: [],
+    recoveryDebt: null,
     ...overrides,
   };
 }
@@ -141,6 +142,43 @@ describe('handleGetLines', () => {
     // not from poller's lastPollAt. With empty mock data, it may be null or a
     // mock-derived value depending on what dbReader.query returns.
     expect(body[0]).toHaveProperty('lastActive');
+  });
+
+  it('projects normalized recovery debt independently from raw health', () => {
+    const inst = fakeInstance({ name: 'debt-line' });
+    const recoveryDebt = {
+      open: true,
+      serviceBlocking: false,
+      attention: 'routine' as const,
+      reasons: ['historical_turn_catchup'],
+      gaugeTotal: 2,
+    };
+    const status = fakeStatus({
+      name: 'debt-line',
+      status: 'online',
+      health: { status: 'healthy', recovery_debt: { raw: 'producer-shape' } },
+      recoveryDebt,
+    });
+    const deps = makeDeps({
+      discovery: {
+        getInstances: vi.fn(() => new Map([['debt-line', inst]])),
+        getInstance: vi.fn(),
+      } as any,
+      healthPoller: {
+        getStatuses: vi.fn(() => new Map([['debt-line', status]])),
+        getStatus: vi.fn(() => status),
+      } as any,
+    });
+
+    const res = mockRes();
+    handleGetLines(mockReq(), res, deps);
+
+    expect(JSON.parse(res._body)[0]).toMatchObject({
+      name: 'debt-line',
+      status: 'online',
+      recoveryDebt,
+      health: { recovery_debt: { raw: 'producer-shape' } },
+    });
   });
 
   it('normalizes sqlite-style runtime timestamps for lastActive', () => {

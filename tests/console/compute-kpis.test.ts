@@ -38,6 +38,7 @@ function makeLine(overrides: Partial<LineInstance>): LineInstance {
 const zeroKpis = {
   connected: 0,
   needAttention: 0,
+  recoveryDebtLines: 0,
   unread: 0,
   agentSessions: 0,
   totalSent: 0,
@@ -57,6 +58,25 @@ describe('computeKpis', () => {
     const result = computeKpis([makeLine({ status: 'online' })]);
     expect(result.connected).toBe(1);
     expect(result.needAttention).toBe(0);
+  });
+
+  it('counts nonblocking recovery debt without changing needAttention', () => {
+    const result = computeKpis([makeLine({
+      status: 'online',
+      recoveryDebt: {
+        open: true,
+        serviceBlocking: false,
+        attention: 'routine',
+        reasons: ['historical_turn_catchup'],
+        gaugeTotal: 1,
+      },
+    })]);
+
+    expect(result).toMatchObject({
+      connected: 1,
+      needAttention: 0,
+      recoveryDebtLines: 1,
+    });
   });
 
   it('counts a degraded line as needAttention=1, not connected', () => {
@@ -209,6 +229,7 @@ describe('computeKpis', () => {
     expect(result).toEqual({
       connected: 2,
       needAttention: 1,
+      recoveryDebtLines: 0,
       unread: 2,
       agentSessions: 0,
       totalSent: 5,

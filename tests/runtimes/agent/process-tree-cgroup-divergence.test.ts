@@ -121,10 +121,10 @@ describe('emitCgroupDivergence (best-effort isolation)', () => {
   });
 });
 
-describe('#1869 killSessionTree cgroup extension (mock ps)', () => {
+describe('#1869 killSessionTree cgroup isolation (mock ps)', () => {
   const ROOT_PID = 51_001;
   const CHILD_PID = 51_002;
-  const DAEMON_PID = 99_999;
+  const SIBLING_SESSION_PID = 99_999;
   const START = 'Fri Jul 10 08:00:00 2026';
 
   let killSpy: ReturnType<typeof vi.spyOn>;
@@ -147,30 +147,30 @@ describe('#1869 killSessionTree cgroup extension (mock ps)', () => {
     killSpy.mockRestore();
   });
 
-  it('adds a reparented (PPID=1) daemon to the owned set and fires divergence', async () => {
-    const withDaemon = census([
+  it('observes but never signals a cgroup-only sibling session', async () => {
+    const withSibling = census([
       { pid: process.pid, ppid: 1, pgid: process.pid, command: 'test-runner' },
       { pid: ROOT_PID, ppid: process.pid, pgid: ROOT_PID, command: 'provider-root' },
       { pid: CHILD_PID, ppid: ROOT_PID, pgid: ROOT_PID, command: 'provider-child' },
-      // A process that reparented to PID 1 — NOT reachable via PPID descent from root
-      { pid: DAEMON_PID, ppid: 1, pgid: DAEMON_PID, command: 'reparented-daemon' },
+      // A different resident provider in the same service cgroup is not owned by ROOT_PID.
+      { pid: SIBLING_SESSION_PID, ppid: process.pid, pgid: SIBLING_SESSION_PID, command: 'sibling-provider' },
     ]);
     const selfOnly = census([
       { pid: process.pid, ppid: 1, pgid: process.pid, command: 'test-runner' },
     ]);
 
     execFileSyncMock
-      .mockReturnValueOnce(withDaemon) // entry: build owned + cgroup extension
-      .mockReturnValueOnce(withDaemon) // pre-signal resolution
+      .mockReturnValueOnce(withSibling) // entry: build PPID-owned tree
+      .mockReturnValueOnce(withSibling) // pre-signal resolution
       .mockReturnValueOnce(selfOnly);  // final: all owned processes exited
 
     const divergenceSink = vi.fn();
 
     await expect(killSessionTree(ROOT_PID, 'SIGKILL', {
-      generationMarker: 'test-catch-daemon',
+      generationMarker: 'test-preserve-sibling',
       killGraceMs: 0,
       onCgroupDivergence: divergenceSink,
-      readCgroupMemberPids: () => [ROOT_PID, CHILD_PID, DAEMON_PID],
+      readCgroupMemberPids: () => [ROOT_PID, CHILD_PID, SIBLING_SESSION_PID],
     })).resolves.toBeUndefined();
 
     // The divergence sink reports the off-tree PID that the PPID walk missed
@@ -181,8 +181,9 @@ describe('#1869 killSessionTree cgroup extension (mock ps)', () => {
       offTreeCount: 1,
     });
 
-    // The reparented daemon was added to the owned set and signaled
-    expect(killSpy).toHaveBeenCalledWith(DAEMON_PID, 'SIGKILL');
+    // Cgroup membership alone proves co-location, not ownership. Signaling the
+    // sibling reproduces the observed live cross-session crash during idle TTL.
+    expect(killSpy).not.toHaveBeenCalledWith(SIBLING_SESSION_PID, 'SIGKILL');
   });
 
   it('does NOT fire divergence when every cgroup member is already in the PPID tree', async () => {

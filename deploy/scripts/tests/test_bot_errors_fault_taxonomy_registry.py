@@ -21,6 +21,11 @@ EXPECTED_RUNTIME_AGENT_NUMERIC_HEALTH_FIELDS = (
     "autoCompactWorstCurrentBackoffTier",
     "turnFinalizationDegradedScopes",
     "turnRecoveryOutstanding",
+    "turnRecoveryBlockingOutstanding",
+    "turnRecoveryRetainedTerminal",
+    "turnRecoveryCorroboratedRetained",
+    "completedDeliveryIdentityBlocking",
+    "completedDeliveryIdentityRetained",
     "turnRecoveryPending",
     "turnRecoveryExpiredClaimed",
     "turnRecoveryBlockedUnsafe",
@@ -80,6 +85,24 @@ class FaultTaxonomyRegistryTest(unittest.TestCase):
         self.assertEqual(
             {entry["currentHealthEffect"] for entry in signals},
             {"positive_is_risk", "diagnostic_only"},
+        )
+        effects = {entry["field"]: entry["currentHealthEffect"] for entry in signals}
+        self.assertEqual(effects["turnRecoveryOutstanding"], "diagnostic_only")
+        self.assertEqual(effects["turnRecoveryBlockingOutstanding"], "positive_is_risk")
+        self.assertEqual(effects["turnRecoveryRetainedTerminal"], "diagnostic_only")
+        self.assertEqual(effects["turnRecoveryCorroboratedRetained"], "diagnostic_only")
+        self.assertEqual(effects["completedDeliveryIdentityBlocking"], "positive_is_risk")
+        self.assertEqual(effects["completedDeliveryIdentityRetained"], "diagnostic_only")
+
+    def test_recovery_debt_attention_is_non_paging_and_fleet_owned(self):
+        registry = _load_registry()
+        self.assertEqual(
+            registry["sourceDispositions"]["recovery_debt_attention"],
+            {
+                "disposition": "non_paging_operator_recovery_debt",
+                "owner": "src/fleet/health-poller.ts",
+                "test": "tests/fleet/health-poller.test.ts",
+            },
         )
 
     def test_terminal_auth_failure_classes_are_registered_and_aligned(self):

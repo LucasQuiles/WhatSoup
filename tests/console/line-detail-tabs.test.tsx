@@ -286,6 +286,37 @@ describe('LineDetail tablist (Tabs primitive)', () => {
   });
 });
 
+describe('LineDetail recovery debt separation', () => {
+  it('shows debt details without rendering operational cause chips for an online line', async () => {
+    await act(async () => {
+      renderLineDetail({
+        line: makeLine({
+          status: 'online',
+          health: {
+            status: 'healthy',
+            degradation_causes: ['historical_turn_catchup'],
+            uptime_seconds: 1,
+            messages_total: 0,
+            whatsapp: { connected: true, connection: { state: 'connected' } },
+            sqlite: { messages_total: 0, schema_version: 56 },
+          },
+          recoveryDebt: {
+            open: true,
+            serviceBlocking: false,
+            attention: 'routine',
+            reasons: ['historical_turn_catchup'],
+            gaugeTotal: 1,
+          },
+        }),
+      });
+    });
+
+    expect(screen.getByText('Recovery debt (1 aggregate signals)')).toBeDefined();
+    expect(screen.getByText('historical_turn_catchup')).toBeDefined();
+    expect(screen.queryByTitle('historical_turn_catchup')).toBeNull();
+  });
+});
+
 describe('LineDetail header — primitive buttons + overflow contract', () => {
   it('back/re-link-or-restart/delete render as soup buttons with accessible names', async () => {
     await act(async () => {

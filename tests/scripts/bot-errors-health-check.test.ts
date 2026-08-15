@@ -8,6 +8,21 @@ import { privateHostLabels } from '../../scripts/repo-hygiene-guard.ts';
 import { SERVICE_ENV_MAP as RUNTIME_SERVICE_ENV_MAP } from '../../src/lib/provider-key-service.ts';
 
 let tmpRoot = '';
+
+function canonicalRecoveryDebt(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    open: true,
+    service_blocking: false,
+    attention: 'routine',
+    reason: null,
+    reasons: ['historical_turn_catchup'],
+    continuity: { readable: true, open: 0, unresolved: 0, ambiguous: 0 },
+    turn_recovery: { readable: true, blocking_outstanding: 0, retained_terminal: 0, open_catchups: 1, corroborated_retained: 0 },
+    completed_delivery_identity: { readable: true, blocking: 0, retained: 0, next_action: null },
+    delivery: { readable: true, blocking_ambiguous: 0, uncorroborated_ambiguous: 0, corroborated_retained: 0, oldest_uncorroborated_at: null },
+    ...overrides,
+  };
+}
 const privateHostLabelFixture = ['nuc', 'les'].join('');
 const privateHostDomainFixture = `${privateHostLabelFixture}.${['qui', 'les'].join('')}.${['stu', 'dio'].join('')}`;
 const privateTailnetIpFixture = ['100', '91', '13', '7'].join('.');
@@ -4199,6 +4214,49 @@ print(m.probe_health(9092))
       expect(line).toMatch(/^200 http:\/\/127\.0\.0\.1:9090\/health /);
       expect(line).toContain('status=healthy');
       expect(line).toContain('instance_name=primary-bot');
+    });
+
+    it('accepts healthy retained recovery debt without a general warning', () => {
+      const line = probeLine(200, healthyBody({
+        recovery_debt: canonicalRecoveryDebt(),
+      }), 'primary-bot');
+      expect(line).not.toMatch(/^(FAIL|WARN) /);
+    });
+
+    it.each([
+      [
+        'healthy blocking contradiction',
+        canonicalRecoveryDebt({
+          service_blocking: true,
+          attention: 'urgent',
+          reasons: ['turn_recovery_actionable'],
+          turn_recovery: { readable: true, blocking_outstanding: 1, retained_terminal: 0, open_catchups: 0, corroborated_retained: 0 },
+        }),
+        'health_recovery_debt_status_contradiction',
+      ],
+      [
+        'malformed present debt',
+        { open: 'yes', service_blocking: false, attention: 'routine' },
+        'health_recovery_debt_invalid',
+      ],
+    ])('rejects %s', (_label, debt, marker) => {
+      expect(probeLine(200, healthyBody({ recovery_debt: debt }), 'primary-bot'))
+        .toMatch(new RegExp(`^FAIL 200 .*${marker}`));
+    });
+
+    it('reports degraded blocking recovery debt through status without a contradiction marker', () => {
+      const line = probeLine(200, healthyBody({
+        status: 'degraded',
+        recovery_debt: canonicalRecoveryDebt({
+          service_blocking: true,
+          attention: 'urgent',
+          reasons: ['turn_recovery_actionable'],
+          turn_recovery: { readable: true, blocking_outstanding: 1, retained_terminal: 0, open_catchups: 0, corroborated_retained: 0 },
+        }),
+      }), 'primary-bot');
+      expect(line).toMatch(/^WARN 200 .*health_degraded/);
+      expect(line).not.toContain('health_recovery_debt_status_contradiction');
+      expect(line).not.toContain('health_recovery_debt_invalid');
     });
   });
 

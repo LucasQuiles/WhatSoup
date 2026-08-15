@@ -1,5 +1,8 @@
 import { createHash } from 'node:crypto';
 import { createChildLogger } from '../logger.ts';
+import {
+  validDeliveryCorroboratedSelectedOpsSql,
+} from './delivery-corroboration-sql.ts';
 import { allFromStatement } from '../lib/db-query.ts';
 import { CapabilityObligationStore } from './capability-obligation-store.ts';
 import type { CapabilityDecisionOutcome } from './capability-obligation-store.ts';
@@ -491,6 +494,7 @@ type DurabilityStatements = {
   getQuarantineClearContributorCounts: PreparedStatement;
   getMaybeSentOutboundCount: PreparedStatement;
   getOldestMaybeSentSubmittedAt: PreparedStatement;
+  getMaybeSentDeliveryAmbiguityHealth: PreparedStatement;
   getRecentOutboundFailureEvidence: PreparedStatement;
   getLastRecoveryRunCompletedAt: PreparedStatement;
   getCompletedDeliveryIdentityAdmissionHealth: PreparedStatement;
@@ -1027,6 +1031,28 @@ export class DurabilityEngine {
       getOldestMaybeSentSubmittedAt: prepare(
         `SELECT MIN(${maybeSentDwellAtSql()}) as at FROM outbound_ops WHERE status = 'maybe_sent'`,
       ),
+      getMaybeSentDeliveryAmbiguityHealth: prepare(`
+        WITH valid_corroborated_selected AS (
+          ${validDeliveryCorroboratedSelectedOpsSql()}
+        )
+        SELECT
+          COALESCE(SUM(CASE
+            WHEN proof.selected_op_id IS NOT NULL THEN 0
+            ELSE 1
+          END), 0) AS uncorroborated_ambiguous,
+          COALESCE(SUM(CASE
+            WHEN proof.selected_op_id IS NOT NULL THEN 1
+            ELSE 0
+          END), 0) AS corroborated_retained,
+          MIN(CASE
+            WHEN proof.selected_op_id IS NULL
+            THEN ${maybeSentDwellAtSql('o.')}
+            ELSE NULL
+          END) AS oldest_uncorroborated_at
+        FROM outbound_ops o
+        LEFT JOIN valid_corroborated_selected proof ON proof.selected_op_id = o.id
+        WHERE o.status = 'maybe_sent'
+      `),
       getRecentOutboundFailureEvidence: prepare(
         `SELECT status, error
          FROM outbound_ops
@@ -2969,6 +2995,12 @@ export class DurabilityEngine {
     quarantinedOutbound: number;
     maybeSentOutbound: number;
     oldestMaybeSentAt: string | null;
+    deliveryAmbiguity: {
+      readable: true;
+      uncorroboratedAmbiguous: number;
+      corroboratedRetained: number;
+      oldestUncorroboratedAt: string | null;
+    };
     outboundFailureEvidence: OutboundFailureHealthProjection;
     outboundQuarantineDispositions: OutboundQuarantineDispositionHealthProjection;
     lastRecoveryAt: string | null;
@@ -2980,6 +3012,11 @@ export class DurabilityEngine {
     const oldestMaybeSent = this.statements.getOldestMaybeSentSubmittedAt.get() as
       | { at: string | null }
       | undefined;
+    const deliveryAmbiguity = this.statements.getMaybeSentDeliveryAmbiguityHealth.get() as {
+      uncorroborated_ambiguous: number;
+      corroborated_retained: number;
+      oldest_uncorroborated_at: string | null;
+    };
     const evidenceRows = this.statements.getRecentOutboundFailureEvidence.all() as Array<{
       status: string;
       error: string | null;
@@ -3087,6 +3124,12 @@ export class DurabilityEngine {
       quarantinedOutbound: quarantined.count,
       maybeSentOutbound: maybeSent.count,
       oldestMaybeSentAt: oldestMaybeSent?.at ?? null,
+      deliveryAmbiguity: {
+        readable: true,
+        uncorroboratedAmbiguous: deliveryAmbiguity.uncorroborated_ambiguous,
+        corroboratedRetained: deliveryAmbiguity.corroborated_retained,
+        oldestUncorroboratedAt: deliveryAmbiguity.oldest_uncorroborated_at,
+      },
       outboundFailureEvidence,
       outboundQuarantineDispositions,
       lastRecoveryAt: lastRecovery?.completed_at ?? null,

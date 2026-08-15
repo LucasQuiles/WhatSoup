@@ -1000,6 +1000,17 @@ Probe deadlines are cancellation boundaries, not detached result timers. A queue
 
 Agent `/health` also exposes a top-level `turn_capability` block derived from runtime state: `model_usable`, `model_usability_status`, `last_successful_turn_at`, `last_turn_error_class`, and `last_turn_error_at`. `model_usable` is `true` after a successful primary model probe, `false` after a configured primary model usability failure that requires operator attention, and `null` when no definitive probe result exists yet. A failed user turn records only the failure class (for example `model-unavailable` or `unknown-terminal`) and a timestamp; raw provider stderr/stdout is not surfaced. Top-level `/health.status` becomes `degraded` when the agent runtime reports degraded health, when `model_usable` is `false`, or when a user turn has a recorded error with no later successful user turn. A later successful user turn clears `last_turn_error_class` and `last_turn_error_at`.
 
+Authenticated normal-runtime health also separates current operational status from durable recovery
+debt. `status` and `status_reasons` answer whether the instance can safely serve work now;
+`recovery_debt` reports aggregate-only continuity, turn-recovery, completed-delivery identity, and
+delivery-ambiguity obligations. Readable retained history, including corroborated ambiguous delivery,
+can therefore produce `status: "healthy"` with `recovery_debt.open: true`,
+`service_blocking: false`, and routine attention. Unreadable evidence or an active blocking gauge
+fails closed as degraded/urgent. In the delivery category, `blocking_ambiguous` is the stale subset of
+`uncorroborated_ambiguous`; fresh ambiguity is visible but does not become a service outage before the
+dwell threshold. Operators must close obligations through their proof-bound workflows, never by
+editing or deleting durable rows to make health green.
+
 The `durability.outboundFailureEvidence` health block is a bounded,
 content-free projection of outbound failure envelopes: `sampledRows` covers at
 most the 500 newest rows and `groups` contains at most 20 aggregates by

@@ -106,6 +106,11 @@ describe('failure taxonomy cross-contract', () => {
       'autoCompactWorstCurrentBackoffTier',
       'turnFinalizationDegradedScopes',
       'turnRecoveryOutstanding',
+      'turnRecoveryBlockingOutstanding',
+      'turnRecoveryRetainedTerminal',
+      'turnRecoveryCorroboratedRetained',
+      'completedDeliveryIdentityBlocking',
+      'completedDeliveryIdentityRetained',
       'turnRecoveryPending',
       'turnRecoveryExpiredClaimed',
       'turnRecoveryBlockedUnsafe',
@@ -139,6 +144,28 @@ describe('failure taxonomy cross-contract', () => {
       ]));
     expect(new Set(RUNTIME_AGENT_HEALTH_SIGNALS.map((entry) => entry.currentHealthEffect)))
       .toEqual(new Set(['positive_is_risk', 'diagnostic_only']));
+    const effects = Object.fromEntries(RUNTIME_AGENT_HEALTH_SIGNALS.map((entry) => [
+      entry.field,
+      entry.currentHealthEffect,
+    ]));
+    expect(effects).toMatchObject({
+      turnRecoveryOutstanding: 'diagnostic_only',
+      turnRecoveryBlockingOutstanding: 'positive_is_risk',
+      turnRecoveryRetainedTerminal: 'diagnostic_only',
+      turnRecoveryCorroboratedRetained: 'diagnostic_only',
+      completedDeliveryIdentityBlocking: 'positive_is_risk',
+      completedDeliveryIdentityRetained: 'diagnostic_only',
+      turnRecoveryExhausted: 'diagnostic_only',
+      turnRecoveryOpenRecoveries: 'diagnostic_only',
+    });
+  });
+
+  it('registers recovery debt attention as a non-paging fleet-owned source', () => {
+    expect(registry.sourceDispositions['recovery_debt_attention']).toEqual({
+      disposition: 'non_paging_operator_recovery_debt',
+      owner: 'src/fleet/health-poller.ts',
+      test: 'tests/fleet/health-poller.test.ts',
+    });
   });
 
   it('matches every registered failure domain to its runtime owner', () => {

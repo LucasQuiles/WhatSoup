@@ -11562,9 +11562,12 @@ describe('AgentRuntime', () => {
       expect(runtime.popStartupNotificationEvent()).toBeNull();
       expect(runtime.getHealthSnapshot().details['proactiveResumeIdentityRejects']).toBe(1);
       expect(runtime.getHealthSnapshot()).toMatchObject({
-        status: 'degraded',
+        status: 'healthy',
         details: {
-          degradedReasons: expect.arrayContaining(['completed_delivery_identity_debt']),
+          degradedReasons: [],
+          recoveryDebtReasons: ['completed_delivery_identity_operator'],
+          completedDeliveryIdentityBlocking: 0,
+          completedDeliveryIdentityRetained: 1,
           completedDeliveryIdentityAdmissions: COMPLETED_DELIVERY_IDENTITY_DEBT_HEALTH,
         },
       });

@@ -10,8 +10,26 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { hostname } from 'node:os';
-import { HealthPoller, type InstanceHealth } from '../../src/fleet/health-poller.ts';
+import { readFileSync } from 'node:fs';
+import {
+  HealthPoller,
+  parseRecoveryDebtHealth,
+  type InstanceHealth,
+} from '../../src/fleet/health-poller.ts';
 import type { AlertEmissionResult } from '../../src/lib/emit-alert.ts';
+
+const recoveryDebtContract = JSON.parse(readFileSync(
+  new URL('../fixtures/recovery-debt-contract-v1.json', import.meta.url),
+  'utf8',
+)) as {
+  version: number;
+  cases: Array<{
+    name: string;
+    status: string;
+    expectedIssue: string | null;
+    debt: unknown;
+  }>;
+};
 
 // ---------------------------------------------------------------------------
 // Hoisted mocks — must mirror the existing test file so module resolution is
@@ -109,6 +127,138 @@ function onlineHealth(overrides: Record<string, unknown> = {}): Record<string, u
     },
   };
 }
+
+function recoveryDebt(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    open: true,
+    service_blocking: false,
+    attention: 'routine',
+    reason: null,
+    reasons: ['historical_turn_catchup'],
+    continuity: { readable: true, open: 0, unresolved: 0, ambiguous: 0 },
+    turn_recovery: {
+      readable: true,
+      blocking_outstanding: 0,
+      retained_terminal: 0,
+      open_catchups: 1,
+      corroborated_retained: 0,
+    },
+    completed_delivery_identity: {
+      readable: true,
+      blocking: 0,
+      retained: 0,
+      next_action: null,
+    },
+    delivery: {
+      readable: true,
+      blocking_ambiguous: 0,
+      uncorroborated_ambiguous: 0,
+      corroborated_retained: 0,
+      oldest_uncorroborated_at: null,
+    },
+    ...overrides,
+  };
+}
+
+describe('recovery debt parser contract', () => {
+  it('matches the versioned recovery-debt contract corpus', () => {
+    expect(recoveryDebtContract.version).toBe(1);
+    for (const contractCase of recoveryDebtContract.cases) {
+      const parsed = parseRecoveryDebtHealth({
+        status: contractCase.status,
+        recovery_debt: contractCase.debt,
+      });
+      expect(parsed.kind, contractCase.name).toBe(
+        contractCase.expectedIssue === null ? 'valid' : 'invalid',
+      );
+    }
+  });
+
+  it.each([
+    [
+      'non-canonical reason ordering',
+      recoveryDebt({
+        reasons: ['historical_turn_catchup', 'continuity_gap_open'],
+        reason: 'continuity_gap_open',
+        continuity: { readable: true, open: 1, unresolved: 1, ambiguous: 0 },
+      }),
+      'recovery_debt.reasons_order',
+    ],
+    [
+      'contradictory legacy continuity reason',
+      recoveryDebt({ reason: 'continuity_gap_open' }),
+      'recovery_debt.reason_contradiction',
+    ],
+    [
+      'unexplained service-blocking flag',
+      recoveryDebt({ service_blocking: true, attention: 'urgent' }),
+      'recovery_debt.service_blocking_contradiction',
+    ],
+    [
+      'blocking delivery gauge marked non-blocking',
+      recoveryDebt({
+        reasons: ['uncorroborated_delivery_ambiguity'],
+        delivery: {
+          readable: true,
+          blocking_ambiguous: 1,
+          uncorroborated_ambiguous: 1,
+          corroborated_retained: 0,
+          oldest_uncorroborated_at: '2026-08-14 05:09:26',
+        },
+      }),
+      'recovery_debt.service_blocking_contradiction',
+    ],
+  ])('rejects %s', (_label, debt, expectedError) => {
+    expect(parseRecoveryDebtHealth({ recovery_debt: debt })).toMatchObject({
+      kind: 'invalid',
+      errors: expect.arrayContaining([expectedError]),
+    });
+  });
+
+  it('accepts the canonical blocking delivery projection and normalizes its aggregate total', () => {
+    expect(parseRecoveryDebtHealth({
+      recovery_debt: recoveryDebt({
+        service_blocking: true,
+        attention: 'urgent',
+        reasons: ['uncorroborated_delivery_ambiguity', 'historical_turn_catchup'],
+        delivery: {
+          readable: true,
+          blocking_ambiguous: 1,
+          uncorroborated_ambiguous: 1,
+          corroborated_retained: 0,
+          oldest_uncorroborated_at: '2026-08-14 05:09:26',
+        },
+      }),
+    })).toEqual({
+      kind: 'valid',
+      summary: {
+        open: true,
+        serviceBlocking: true,
+        attention: 'urgent',
+        reasons: ['uncorroborated_delivery_ambiguity', 'historical_turn_catchup'],
+        gaugeTotal: 2,
+      },
+    });
+  });
+
+  it('accepts fresh uncorroborated ambiguity as routine debt', () => {
+    expect(parseRecoveryDebtHealth({
+      recovery_debt: recoveryDebt({
+        reasons: ['uncorroborated_delivery_ambiguity'],
+        delivery: {
+          readable: true,
+          blocking_ambiguous: 0,
+          uncorroborated_ambiguous: 1,
+          corroborated_retained: 0,
+          oldest_uncorroborated_at: '2026-08-14 05:09:26',
+        },
+      }),
+    })).toMatchObject({
+      kind: 'valid',
+      summary: { open: true, serviceBlocking: false, attention: 'routine' },
+    });
+  });
+});
 
 /** Build a minimal health payload that satisfies hasVerifiedRelinkRecovery. */
 function makeRelinkHealth(overrides: {

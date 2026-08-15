@@ -510,6 +510,12 @@ describe('DurabilityEngine — postConnectRecovery()', () => {
     expect(before['status']).toBe('maybe_sent');
     expect(before['submitted_at']).toBeNull();
     expect(health.oldestMaybeSentAt).not.toBe(before['created_at']);
+    expect(health.deliveryAmbiguity).toEqual({
+      readable: true,
+      uncorroboratedAmbiguous: 1,
+      corroboratedRetained: 0,
+      oldestUncorroboratedAt: health.oldestMaybeSentAt,
+    });
     expect(engine.reconcileLiveMaybeSent().outboundReconciled).toBe(0);
     expect(getOutbound(db, opId)['status']).toBe('maybe_sent');
   });

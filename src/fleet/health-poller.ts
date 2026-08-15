@@ -13,7 +13,11 @@ import type { BotErrorsCriticalAssetDiagnostic } from '../lib/bot-errors-outbox.
 import { asRecord, nonEmptyString, nonEmptyStringRaw } from '../lib/type-guards.ts';
 import { sqliteUtcToEpochMs } from '../lib/sqlite-time.ts';
 import { ALERT_THROTTLE_INTERVAL_MS, loadAlertThrottleDetailed, recordAlertThrottle } from './alert-throttle-store.ts';
-import { setRecoveryMarker, clearRecoveryMarker, loadRecoveryMarkers } from '../lib/recovery-authority-store.ts';
+import { loadRecoveryMarkers } from '../lib/recovery-authority-store.ts';
+import {
+  clearRecoveryMarkerObserved,
+  setRecoveryMarkerObserved,
+} from './recovery-marker-observability.ts';
 import * as silenceManager from './silence-manager.ts';
 import type { SilenceStoreReadResult } from './silence-manager.ts';
 import {
@@ -130,6 +134,248 @@ export interface InstanceStatus {
   lastAlertAt: string | null;
   silencedUntil: string | null;
   activeAlertSources: string[];
+  recoveryDebt: FleetRecoveryDebtSummary | null;
+}
+
+export interface FleetRecoveryDebtSummary {
+  open: boolean;
+  serviceBlocking: boolean;
+  attention: 'none' | 'routine' | 'urgent';
+  reasons: string[];
+  gaugeTotal: number;
+}
+
+export function recoveryDebtGaugeBucket(value: number): 'none' | 'one' | 'few' | 'several' | 'many' {
+  if (value <= 0) return 'none';
+  if (value === 1) return 'one';
+  if (value <= 4) return 'few';
+  if (value <= 9) return 'several';
+  return 'many';
+}
+
+export type RecoveryDebtParseResult =
+  | { kind: 'absent' }
+  | { kind: 'invalid'; errors: string[] }
+  | { kind: 'valid'; summary: FleetRecoveryDebtSummary };
+
+const RECOVERY_DEBT_REASON_ORDER = [
+  'continuity_gap_unreadable',
+  'continuity_gap_open',
+  'recovery_evidence_unreadable',
+  'delivery_evidence_unreadable',
+  'turn_finalization_active',
+  'turn_recovery_actionable',
+  'turn_recovery_integrity',
+  'turn_recovery_unclassified',
+  'completed_delivery_identity_unclassified',
+  'uncorroborated_delivery_ambiguity',
+  'turn_recovery_terminal',
+  'turn_recovery_quarantined',
+  'historical_turn_catchup',
+  'corroborated_delivery_retained',
+  'completed_delivery_identity_fresh_inbound',
+  'completed_delivery_identity_operator',
+] as const;
+const RECOVERY_DEBT_REASONS = new Set<string>(RECOVERY_DEBT_REASON_ORDER);
+const RECOVERY_DEBT_BLOCKING_REASONS = new Set([
+  'continuity_gap_unreadable',
+  'recovery_evidence_unreadable',
+  'delivery_evidence_unreadable',
+  'turn_finalization_active',
+  'turn_recovery_actionable',
+  'turn_recovery_integrity',
+  'turn_recovery_unclassified',
+  'completed_delivery_identity_unclassified',
+]);
+
+function recoveryDebtCount(value: unknown, errors: string[], field: string): number {
+  if (!Number.isSafeInteger(value) || (value as number) < 0) {
+    errors.push(field);
+    return 0;
+  }
+  return value as number;
+}
+
+function recoveryDebtReadable(
+  value: Record<string, unknown> | undefined,
+  errors: string[],
+  field: string,
+): boolean {
+  if (!value || typeof value['readable'] !== 'boolean') {
+    errors.push(`${field}.readable`);
+    return false;
+  }
+  return value['readable'];
+}
+
+export function parseRecoveryDebtHealth(health: Record<string, unknown>): RecoveryDebtParseResult {
+  if (!Object.hasOwn(health, 'recovery_debt')) return { kind: 'absent' };
+  const debt = asRecord(health['recovery_debt']);
+  if (!debt) return { kind: 'invalid', errors: ['recovery_debt'] };
+  const errors: string[] = [];
+  const open = debt['open'];
+  const serviceBlocking = debt['service_blocking'];
+  const attention = debt['attention'];
+  if (typeof open !== 'boolean') errors.push('recovery_debt.open');
+  if (typeof serviceBlocking !== 'boolean') errors.push('recovery_debt.service_blocking');
+  if (attention !== 'none' && attention !== 'routine' && attention !== 'urgent') {
+    errors.push('recovery_debt.attention');
+  }
+  const reasonsValue = debt['reasons'];
+  const reasons = Array.isArray(reasonsValue)
+    && reasonsValue.length <= 32
+    && reasonsValue.every((reason) => (
+      typeof reason === 'string'
+      && reason.length <= 96
+      && RECOVERY_DEBT_REASONS.has(reason)
+    ))
+    && new Set(reasonsValue).size === reasonsValue.length
+    ? reasonsValue as string[]
+    : [];
+  if (reasons !== reasonsValue) errors.push('recovery_debt.reasons');
+  if (
+    reasons.length > 0
+    && reasons.some((reason, index) => (
+      index > 0
+      && RECOVERY_DEBT_REASON_ORDER.indexOf(reason as typeof RECOVERY_DEBT_REASON_ORDER[number])
+        <= RECOVERY_DEBT_REASON_ORDER.indexOf(
+          reasons[index - 1] as typeof RECOVERY_DEBT_REASON_ORDER[number],
+        )
+    ))
+  ) errors.push('recovery_debt.reasons_order');
+
+  const continuity = asRecord(debt['continuity']);
+  const turnRecovery = asRecord(debt['turn_recovery']);
+  const completedIdentity = asRecord(debt['completed_delivery_identity']);
+  const delivery = asRecord(debt['delivery']);
+  const continuityReadable = recoveryDebtReadable(continuity, errors, 'recovery_debt.continuity');
+  const turnRecoveryReadable = recoveryDebtReadable(turnRecovery, errors, 'recovery_debt.turn_recovery');
+  const identityReadable = recoveryDebtReadable(
+    completedIdentity,
+    errors,
+    'recovery_debt.completed_delivery_identity',
+  );
+  const deliveryReadable = recoveryDebtReadable(delivery, errors, 'recovery_debt.delivery');
+  const counts = [
+    recoveryDebtCount(continuity?.['open'], errors, 'recovery_debt.continuity.open'),
+    recoveryDebtCount(continuity?.['unresolved'], errors, 'recovery_debt.continuity.unresolved'),
+    recoveryDebtCount(continuity?.['ambiguous'], errors, 'recovery_debt.continuity.ambiguous'),
+    recoveryDebtCount(
+      turnRecovery?.['blocking_outstanding'],
+      errors,
+      'recovery_debt.turn_recovery.blocking_outstanding',
+    ),
+    recoveryDebtCount(
+      turnRecovery?.['retained_terminal'],
+      errors,
+      'recovery_debt.turn_recovery.retained_terminal',
+    ),
+    recoveryDebtCount(
+      turnRecovery?.['open_catchups'],
+      errors,
+      'recovery_debt.turn_recovery.open_catchups',
+    ),
+    recoveryDebtCount(
+      turnRecovery?.['corroborated_retained'],
+      errors,
+      'recovery_debt.turn_recovery.corroborated_retained',
+    ),
+    recoveryDebtCount(
+      completedIdentity?.['blocking'],
+      errors,
+      'recovery_debt.completed_delivery_identity.blocking',
+    ),
+    recoveryDebtCount(
+      completedIdentity?.['retained'],
+      errors,
+      'recovery_debt.completed_delivery_identity.retained',
+    ),
+    recoveryDebtCount(
+      delivery?.['blocking_ambiguous'],
+      errors,
+      'recovery_debt.delivery.blocking_ambiguous',
+    ),
+    recoveryDebtCount(
+      delivery?.['uncorroborated_ambiguous'],
+      errors,
+      'recovery_debt.delivery.uncorroborated_ambiguous',
+    ),
+    recoveryDebtCount(
+      delivery?.['corroborated_retained'],
+      errors,
+      'recovery_debt.delivery.corroborated_retained',
+    ),
+  ];
+  const nextAction = completedIdentity?.['next_action'];
+  if (nextAction !== null && nextAction !== 'fresh_inbound' && nextAction !== 'operator') {
+    errors.push('recovery_debt.completed_delivery_identity.next_action');
+  }
+  const oldest = delivery?.['oldest_uncorroborated_at'];
+  const oldestMs = typeof oldest === 'string'
+    ? Date.parse(oldest.includes('T') ? oldest : `${oldest.replace(' ', 'T')}Z`)
+    : Number.NaN;
+  if (
+    oldest !== null
+    && (typeof oldest !== 'string' || !Number.isFinite(oldestMs))
+  ) errors.push('recovery_debt.delivery.oldest_uncorroborated_at');
+  if (counts[10]! > 0 && !Number.isFinite(oldestMs)) {
+    errors.push('recovery_debt.delivery.oldest_uncorroborated_at_missing');
+  }
+  if (counts[10] === 0 && oldest !== null) {
+    errors.push('recovery_debt.delivery.oldest_uncorroborated_at_contradiction');
+  }
+  if (counts[9]! > counts[10]!) {
+    errors.push('recovery_debt.delivery.blocking_ambiguous_contradiction');
+  }
+
+  const continuityReason = debt['reason'];
+  if (
+    continuityReason !== null
+    && continuityReason !== 'continuity_gap_open'
+    && continuityReason !== 'continuity_gap_unreadable'
+  ) errors.push('recovery_debt.reason');
+  const expectedContinuityReason = !continuityReadable
+    ? 'continuity_gap_unreadable'
+    : counts[0]! > 0
+      ? 'continuity_gap_open'
+      : null;
+  if (continuityReason !== expectedContinuityReason) {
+    errors.push('recovery_debt.reason_contradiction');
+  }
+
+  const gaugeTotal = counts.reduce((sum, value, index) => (
+    index === 9 ? sum : sum + value
+  ), 0);
+  if (!Number.isSafeInteger(gaugeTotal)) errors.push('recovery_debt.gauge_total');
+  const blockingEvidence = !continuityReadable
+    || !turnRecoveryReadable
+    || !identityReadable
+    || !deliveryReadable
+    || counts[3]! > 0
+    || counts[7]! > 0
+    || counts[9]! > 0
+    || reasons.some((reason) => RECOVERY_DEBT_BLOCKING_REASONS.has(reason));
+  const expectedOpen = gaugeTotal > 0 || reasons.length > 0 || serviceBlocking === true;
+  const expectedAttention = serviceBlocking === true ? 'urgent' : expectedOpen ? 'routine' : 'none';
+  if (open !== expectedOpen) errors.push('recovery_debt.open_contradiction');
+  if (typeof serviceBlocking === 'boolean' && serviceBlocking !== blockingEvidence) {
+    errors.push('recovery_debt.service_blocking_contradiction');
+  }
+  if (health['status'] === 'healthy' && serviceBlocking === true) {
+    errors.push('recovery_debt_status_contradiction');
+  }
+  if (attention !== expectedAttention) errors.push('recovery_debt.attention_contradiction');
+  if (errors.length > 0) return { kind: 'invalid', errors };
+  return {
+    kind: 'valid',
+    summary: {
+      open: open as boolean,
+      serviceBlocking: serviceBlocking as boolean,
+      attention: attention as FleetRecoveryDebtSummary['attention'],
+      reasons,
+      gaugeTotal,
+    },
+  };
 }
 
 export type StatusChangeCallback = (instance: string, newStatus: InstanceStatus['status'], oldStatus: InstanceStatus['status']) => void;
@@ -371,6 +617,7 @@ function classifyHealthSnapshot(
   const recentDisconnectLastReason = stringValue(recentDisconnects?.last_reason);
   const recentDisconnectLastStatusCode = nonNegativeIntegerValue(recentDisconnects?.last_status_code);
   const runtime = asRecord(health.runtime);
+  const recoveryDebt = parseRecoveryDebtHealth(health);
   const accountJidStatus = accountJid === null
     ? 'missing'
     : accountJid === 'not connected'
@@ -478,6 +725,7 @@ function classifyHealthSnapshot(
     typeErrors.push('whatsapp.connection.recent_disconnects.last_status_code');
   }
   if (health.runtime !== undefined && runtime === undefined) typeErrors.push('runtime');
+  if (recoveryDebt.kind === 'invalid') typeErrors.push(...recoveryDebt.errors);
 
   const baseEvidence = [
     evidenceField('health_status', healthStatus),
@@ -699,6 +947,7 @@ export class HealthPoller {
   private healthBodyDegradedPolls: Map<string, number> = new Map();
   private operationalFallbackReclassified: Set<string> = new Set();
   private reclassifiedHealthAlerts: Set<string> = new Set();
+  private recoveryDebtFingerprints: Map<string, string> = new Map();
   private unreachableAlerted: Set<string> = new Set();
   /**
    * Open alert-suppression episodes, keyed by the same `name:source` key the
@@ -818,6 +1067,9 @@ export class HealthPoller {
       const mName = marker.slice(0, sep);
       const mSource = marker.slice(sep + 1);
       const status = this.statuses.get(mName);
+      if (mSource === 'recovery_debt_attention') {
+        if (status?.recoveryDebt?.open !== false) continue;
+      }
       // Positive-recovery evidence required: a merely-absent alert source is
       // NOT proof of recovery on the first poll — a still-down instance has
       // not yet re-accumulated consecutive failures, so its source is absent
@@ -828,12 +1080,7 @@ export class HealthPoller {
           // scan retries the idempotent clear.
           continue;
         }
-        try {
-          clearRecoveryMarker(marker);
-        } catch {
-          // intentional: marker removal is best-effort — a stale marker only
-          // causes a redundant idempotent clear on the next startup scan.
-        }
+        clearRecoveryMarkerObserved(mName, mSource);
       }
     }
   }
@@ -1070,8 +1317,10 @@ export class HealthPoller {
             error: null,
             lastAlertAt: this.lastAlertAtFor(name, existing),
             silencedUntil: existing?.silencedUntil ?? null,
-            activeAlertSources: [],
+            activeAlertSources: existing?.activeAlertSources ?? [],
+            recoveryDebt: this.recoveryDebtSummaryForHealth(health, existing),
           });
+          this.observeRecoveryDebt(name, health);
         } catch (err) {
           this.updateFailure(name, (err as Error).message);
         }
@@ -1225,7 +1474,9 @@ export class HealthPoller {
           lastAlertAt: this.lastAlertAtFor(name, existing),
           silencedUntil: existing?.silencedUntil ?? null,
           activeAlertSources: existing?.activeAlertSources ?? [],
+          recoveryDebt: this.recoveryDebtSummaryForHealth(health, existing),
         });
+        this.observeRecoveryDebt(name, health);
         if (prevStatus !== 'online') {
           this.emitStatusChange(name, 'online', prevStatus);
         }
@@ -1246,6 +1497,7 @@ export class HealthPoller {
       if (!discoveredNames.has(name)) {
         this.endRecoveryClearWithholdingEpisodesForInstance(name);
         this.statuses.delete(name);
+        this.recoveryDebtFingerprints.delete(name);
         this.latestPollRequestIdByInstance.delete(name);
         this.targetPids.delete(name);
         this.resetHealthBodyDegradedDebounce(name);
@@ -1842,6 +2094,7 @@ export class HealthPoller {
       lastAlertAt: this.lastAlertAtFor(name, existing),
       silencedUntil: existing?.silencedUntil ?? null,
       activeAlertSources: existing?.activeAlertSources ?? [],
+      recoveryDebt: existing?.recoveryDebt ?? null,
     });
     this.endRecoveryClearWithholdingEpisodesForInstance(name);
 
@@ -1951,6 +2204,7 @@ export class HealthPoller {
       lastAlertAt: this.lastAlertAtFor(name, existing),
       silencedUntil: existing?.silencedUntil ?? null,
       activeAlertSources: existing?.activeAlertSources ?? [],
+      recoveryDebt: existing?.recoveryDebt ?? null,
     });
     this.endRecoveryClearWithholdingEpisodesForInstance(name);
 
@@ -2005,7 +2259,9 @@ export class HealthPoller {
       lastAlertAt: this.lastAlertAtFor(name, existing),
       silencedUntil: existing?.silencedUntil ?? null,
       activeAlertSources: existing?.activeAlertSources ?? [],
+      recoveryDebt: this.recoveryDebtSummaryForHealth(health, existing),
     });
+    this.observeRecoveryDebt(name, health);
 
     this.endRecoveryClearWithholdingEpisodesForInstance(name);
 
@@ -2220,6 +2476,13 @@ export class HealthPoller {
     if (sources.length === 0) return;
     const retainedSources: string[] = [];
     for (const source of sources) {
+      if (source === 'recovery_debt_attention') {
+        const debt: RecoveryDebtParseResult = currentHealth
+          ? parseRecoveryDebtHealth(currentHealth)
+          : { kind: 'absent' };
+        if (debt.kind !== 'valid' || debt.summary.open) retainedSources.push(source);
+        continue;
+      }
       if (source === currentAlertSource) {
         retainedSources.push(source);
         continue;
@@ -2243,12 +2506,7 @@ export class HealthPoller {
           continue;
         }
         // #3057: alert was durably cleared — remove the recovery-authority marker.
-        try {
-          clearRecoveryMarker(`${name}:${source}`);
-        } catch {
-          // intentional: marker removal is best-effort — a stale marker only
-          // causes a redundant idempotent clear on the next startup scan.
-        }
+        clearRecoveryMarkerObserved(name, source);
         if (source === 'instance_unreachable') this.unreachableAlerted.delete(name);
       } catch (err) {
         log.warn({ err, name, source }, 'failed to emit alert clear');
@@ -2457,6 +2715,73 @@ export class HealthPoller {
     status.activeAlertSources = [...status.activeAlertSources, source];
   }
 
+  private recoveryDebtSummaryForHealth(
+    health: Record<string, unknown>,
+    existing: InstanceStatus | undefined,
+  ): FleetRecoveryDebtSummary | null {
+    const parsed = parseRecoveryDebtHealth(health);
+    return parsed.kind === 'valid' ? parsed.summary : existing?.recoveryDebt ?? null;
+  }
+
+  private observeRecoveryDebt(name: string, health: Record<string, unknown>): void {
+    const parsed = parseRecoveryDebtHealth(health);
+    if (parsed.kind !== 'valid') return;
+    const source = 'recovery_debt_attention';
+    const summary = parsed.summary;
+    const fingerprint = JSON.stringify([
+      summary.open,
+      summary.serviceBlocking,
+      summary.attention,
+      summary.reasons,
+      recoveryDebtGaugeBucket(summary.gaugeTotal),
+    ]);
+    if (summary.open) {
+      const previousFingerprint = this.recoveryDebtFingerprints.get(name);
+      if (previousFingerprint === fingerprint) return;
+      if (previousFingerprint === undefined) {
+        try {
+          if (loadRecoveryMarkers().has(`${name}:${source}`)) {
+            this.recoveryDebtFingerprints.set(name, fingerprint);
+            this.trackActiveAlertSource(name, source, true);
+            return;
+          }
+        } catch (err) {
+          log.warn({ err, name, source }, 'recovery debt marker read failed');
+        }
+      }
+      const evidence = [
+        'recovery_debt_open=true',
+        `service_blocking=${String(summary.serviceBlocking)}`,
+        `attention=${summary.attention}`,
+        `reasons=${summary.reasons.join(',') || 'none'}`,
+        `aggregate_gauge_total=${summary.gaugeTotal}`,
+      ].join(' ');
+      const emitted = emitAlertChecked(
+        name,
+        source,
+        `whatsoup@${name} has retained recovery debt`,
+        evidence,
+        'info',
+      );
+      if (!emitted) return;
+      setRecoveryMarkerObserved(name, source);
+      this.recoveryDebtFingerprints.set(name, fingerprint);
+      this.trackActiveAlertSource(name, source, true);
+      return;
+    }
+
+    const hadOpenDebt = this.recoveryDebtFingerprints.has(name)
+      || this.hasConfirmedAlert(name, source);
+    if (!hadOpenDebt) return;
+    if (!clearAlertSourceChecked(name, source, 'recovery_debt_open=false')) return;
+    clearRecoveryMarkerObserved(name, source);
+    this.recoveryDebtFingerprints.delete(name);
+    const status = this.statuses.get(name);
+    if (status) {
+      status.activeAlertSources = status.activeAlertSources.filter((item) => item !== source);
+    }
+  }
+
   private hasConfirmedAlert(name: string, source: string): boolean {
     const status = this.statuses.get(name);
     return status?.activeAlertSources.includes(source) === true
@@ -2527,13 +2852,7 @@ export class HealthPoller {
     // #3057: persist a recovery-authority marker so the alert identity
     // survives restart — a new process reads it on cold start to emit the
     // idempotent clear if the instance has recovered.
-    try {
-      setRecoveryMarker(`${name}:${source}`);
-    } catch {
-      // intentional: marker write is best-effort — a missing marker means the
-      // next startup scan cannot reconcile this source, but the alert itself
-      // was already durably queued above.
-    }
+    setRecoveryMarkerObserved(name, source);
 
     if (existing) {
       const now = new Date().toISOString();

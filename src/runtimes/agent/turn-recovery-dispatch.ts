@@ -353,6 +353,9 @@ export interface TurnRecoveryHealthDetails {
   readonly turnRecoveryCorruptLinks: number;
   readonly turnRecoveryOrphanTransfers: number;
   readonly turnRecoveryEchoConflicts: number;
+  readonly turnRecoveryBlockingOutstanding: number;
+  readonly turnRecoveryRetainedTerminal: number;
+  readonly turnRecoveryCorroboratedRetained: number;
 }
 
 /** Pure projection of durability's supervisor counts (arch.file-size extraction). */
@@ -378,5 +381,9 @@ export function getTurnRecoveryHealthDetails(
     turnRecoveryCorruptLinks: counts.corruptLinks,
     turnRecoveryOrphanTransfers: counts.orphanTransfers ?? 0,
     turnRecoveryEchoConflicts: counts.echoConflicts ?? 0,
+    turnRecoveryBlockingOutstanding: counts.blockingOutstanding ?? counts.outstanding,
+    turnRecoveryRetainedTerminal: counts.retainedTerminal
+      ?? counts.blockedUnsafe + counts.exhausted,
+    turnRecoveryCorroboratedRetained: counts.corroboratedRetained ?? 0,
   };
 }

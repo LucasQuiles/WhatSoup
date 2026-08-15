@@ -517,6 +517,7 @@ export function enrichInstance(inst: DiscoveredInstance, poll: InstanceStatus | 
     messagesTotal: messagesTotal ?? 0,
     messagesToday: opts.messagesToday ?? messagesTotal ?? 0,
     health: h,
+    recoveryDebt: poll?.recoveryDebt ?? null,
     healthObservedAt: poll?.healthObservedAt ?? null,
     stale,
     heartbeat: buildHeartbeat(poll),

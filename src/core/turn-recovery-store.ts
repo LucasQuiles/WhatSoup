@@ -3,6 +3,10 @@ import { createHash } from 'node:crypto';
 import type { Database } from './database.ts';
 import { TURN_RECOVERY_MAX_TEXT_BYTES } from './turn-recovery-contract.ts';
 import { isNonEmptyString } from '../lib/type-guards.ts';
+import {
+  validDeliveryCorroborationForJobSql,
+  validDeliveryCorroborationForTerminalSql,
+} from './delivery-corroboration-sql.ts';
 
 export const TURN_RECOVERY_MAX_ID_BYTES = 2048;
 const TURN_RECOVERY_MAX_NAME_BYTES = 4096;
@@ -220,6 +224,12 @@ export interface TurnRecoverySupervisorCounts {
   echoConflicts: number;
   /** Pending operator catch-ups that lack an append-only closure link. */
   openRecoveries: number;
+  /** Pending/claimed work that can still be acted on automatically. */
+  blockingOutstanding?: number;
+  /** Terminal blocked/exhausted rows retained for operator audit. */
+  retainedTerminal?: number;
+  /** Pending/claimed rows made unclaimable by valid later-echo proof. */
+  corroboratedRetained?: number;
 }
 
 export function validatePositiveSafeInteger(value: number, label: string): void {
@@ -538,6 +548,7 @@ export class TurnRecoveryStore {
           AND state = 'pending'
           AND attempt_count < ${TURN_RECOVERY_MAX_ATTEMPTS}
           AND next_attempt_at <= datetime('now')
+          AND NOT ${validDeliveryCorroborationForJobSql('turn_recovery_jobs')}
         RETURNING *
       `),
       renewTurnRecoveryClaim: prepare(`
@@ -821,6 +832,7 @@ export class TurnRecoveryStore {
             j.state = 'pending'
             OR j.state = 'claimed'
           )
+          AND NOT ${validDeliveryCorroborationForJobSql('j')}
         ORDER BY j.id ASC
         LIMIT ?
       `),
@@ -834,6 +846,7 @@ export class TurnRecoveryStore {
             OR j.state = 'exhausted'
             OR (j.state = 'claimed' AND j.claim_expires_at <= datetime('now'))
           )
+          AND NOT ${validDeliveryCorroborationForJobSql('j')}
         ORDER BY j.id ASC
         LIMIT ?
       `),
@@ -912,7 +925,20 @@ export class TurnRecoveryStore {
           (SELECT count FROM orphan_transfers) AS orphan_transfers,
           COALESCE(SUM(CASE WHEN j.echo_conflict_at IS NOT NULL THEN 1 ELSE 0 END), 0)
             AS echo_conflicts,
-          (SELECT count FROM open_recoveries) AS open_recoveries
+          (SELECT count FROM open_recoveries) AS open_recoveries,
+          COALESCE(SUM(CASE
+            WHEN j.state IN ('pending', 'claimed')
+              AND NOT ${validDeliveryCorroborationForJobSql('j')}
+            THEN 1 ELSE 0
+          END), 0) + (SELECT count FROM orphan_transfers) AS blocking_outstanding,
+          COALESCE(SUM(CASE
+            WHEN j.state IN ('blocked_unsafe', 'exhausted') THEN 1 ELSE 0
+          END), 0) AS retained_terminal,
+          COALESCE(SUM(CASE
+            WHEN j.state IN ('pending', 'claimed')
+              AND ${validDeliveryCorroborationForJobSql('j')}
+            THEN 1 ELSE 0
+          END), 0) AS corroborated_retained
         FROM turn_recovery_jobs j
         LEFT JOIN turn_terminal_records t ON t.id = j.terminal_record_id
         LEFT JOIN inbound_events i ON i.seq = j.source_inbound_seq
@@ -929,12 +955,14 @@ export class TurnRecoveryStore {
           SELECT j.scope, j.conversation_key, j.id AS job_id
           FROM turn_recovery_jobs j
           WHERE j.state IN ('pending', 'claimed')
+            AND NOT ${validDeliveryCorroborationForJobSql('j')}
           UNION ALL
           SELECT t.scope, t.conversation_key, j.id AS job_id
           FROM turn_terminal_records t
           LEFT JOIN turn_recovery_jobs j ON j.terminal_record_id = t.id
           WHERE t.inbound_disposition = 'transferred_to_recovery_owner'
             AND j.id IS NULL
+            AND NOT ${validDeliveryCorroborationForTerminalSql('t')}
         ) outstanding
         WHERE outstanding.scope = ?
           AND (outstanding.scope <> 'per_chat' OR outstanding.conversation_key = ?)
@@ -1759,6 +1787,9 @@ export class TurnRecoveryStore {
       orphan_transfers: number;
       echo_conflicts: number;
       open_recoveries: number;
+      blocking_outstanding: number;
+      retained_terminal: number;
+      corroborated_retained: number;
     };
     return {
       outstanding: row.outstanding,
@@ -1772,6 +1803,9 @@ export class TurnRecoveryStore {
       orphanTransfers: row.orphan_transfers,
       echoConflicts: row.echo_conflicts,
       openRecoveries: row.open_recoveries,
+      blockingOutstanding: row.blocking_outstanding,
+      retainedTerminal: row.retained_terminal,
+      corroboratedRetained: row.corroborated_retained,
     };
   }
 

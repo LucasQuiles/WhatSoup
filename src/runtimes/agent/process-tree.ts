@@ -558,34 +558,16 @@ export function killSessionTree(
     owned = snapshotOwnedTree(rows, rootPid, options.generationMarker);
     preCensusAvailable = true;
 
-    // #1869: extend ownership with cgroup-based membership — catch processes that
-    // reparented off the PPID tree (e.g. double-forked workload daemons) and would
-    // otherwise be invisible to the PPID walk. Cross-reference the instance cgroup
-    // membership and add cgroup-only PIDs to the owned set.
+    // Cgroup membership proves only that a PID shares the WhatSoup service unit;
+    // it does not prove ownership by this provider session. A per-chat service
+    // hosts multiple sibling provider trees, so extending `owned` from the cgroup
+    // would let suspending one idle chat terminate every other resident chat.
+    // Keep cgroup divergence observational until an independently attributable
+    // session marker exists for reparented descendants.
     const cgroupPids = (options.readCgroupMemberPids ?? readServiceCgroupMemberPids)();
     if (cgroupPids !== null) {
-      // Compute divergence against the PRE-extension owned set so the telemetry
-      // captures the original gap (before reparented PIDs are absorbed).
       const divergence = computeCgroupDivergence(cgroupPids, owned, rootPid);
-
-      const ownedPids = new Set<number>(owned.map((o) => o.pid));
-      ownedPids.add(rootPid);
-      let addedCount = 0;
-      for (const cpid of cgroupPids) {
-        if (cpid === rootPid || cpid === process.pid) continue;
-        if (!ownedPids.has(cpid)) {
-          const row = uniqueRowForPid(rows, cpid);
-          if (row) {
-            owned.push({ ...row, depth: -1, generationMarker: options.generationMarker });
-            ownedPids.add(cpid);
-            addedCount += 1;
-          }
-        }
-      }
-
-      // #1869: surface the raw divergence count whenever the cgroup caught at
-      // least one reparented PID the PPID walk missed.
-      if (addedCount > 0) {
+      if (divergence.offTreeCount > 0) {
         try {
           options.onCgroupDivergence?.(divergence);
         } catch (err) {

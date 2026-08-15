@@ -11,6 +11,11 @@ import {
   readContinuityGapHealth,
   type ContinuityGapHealth,
 } from './continuity-gap-ledger.ts';
+import {
+  applyRecoveryProof,
+  evaluateRecoveryProof,
+  normalizeRecoveryDebt,
+} from './recovery-debt.ts';
 import { assertSafeHealthBind } from './health-bind-guard.ts';
 import { getMessageCount } from './messages.ts';
 import { getPendingCount, upsertAccess } from './access-list.ts';
@@ -225,18 +230,6 @@ function noteProbeSuccess(warnMsg: string): void {
   const cleared = probeErrorThrottle.onSuccess(warnMsg);
   if (cleared > 1) {
     log.info({ probe: warnMsg, clearedFailures: cleared }, 'health probe recovered after transient failures');
-  }
-}
-
-/** #2280: add degradation_silence_unproven when no active degradation reasons
- * exist but the instance was recently degraded. */
-export function addDegradationSilenceProof(
-  statusReasons: string[],
-  recentlyDegraded: Set<string>,
-  instanceName: string,
-): void {
-  if (statusReasons.length === 0 && recentlyDegraded.has(instanceName)) {
-    statusReasons.push('degradation_silence_unproven');
   }
 }
 
@@ -1701,9 +1694,11 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       // UTC datetimes for the active ambiguity episode or a fail-closed stale
       // sentinel, so normalize that bounded value before parsing.
       const durabilityStats = deps.durability?.getHealthStats() ?? null;
+      const oldestUncorroboratedMaybeSentAt =
+        durabilityStats?.deliveryAmbiguity?.oldestUncorroboratedAt ?? null;
       const oldestMaybeSentMs =
-        durabilityStats?.oldestMaybeSentAt != null && durabilityStats.oldestMaybeSentAt !== ''
-          ? Date.parse(durabilityStats.oldestMaybeSentAt.replace(' ', 'T') + 'Z')
+        oldestUncorroboratedMaybeSentAt !== '' && oldestUncorroboratedMaybeSentAt !== null
+          ? Date.parse(oldestUncorroboratedMaybeSentAt.replace(' ', 'T') + 'Z')
           : Number.NaN;
       const durabilityDebtIsDegraded =
         Number.isFinite(oldestMaybeSentMs)
@@ -1723,18 +1718,43 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         },
         'failed to read continuity gap ledger',
       );
-      const continuityIsDegraded = !continuity.readable || continuity.open > 0;
-      const recoveryDebt: {
-        open: boolean;
-        reason: 'continuity_gap_open' | 'continuity_gap_unreadable' | null;
-        continuity: typeof continuity;
-      } = {
-        open: continuityIsDegraded,
-        reason: continuityIsDegraded
-          ? (continuity.readable ? 'continuity_gap_open' : 'continuity_gap_unreadable')
-          : null,
-        continuity,
+      const zeroRuntimeRecoveryDetails = {
+        degradedReasons: [],
+        recoveryDebtReasons: [],
+        turnRecoveryBlockingOutstanding: 0,
+        turnRecoveryRetainedTerminal: 0,
+        turnRecoveryOpenRecoveries: 0,
+        turnRecoveryCorroboratedRetained: 0,
+        completedDeliveryIdentityBlocking: 0,
+        completedDeliveryIdentityRetained: 0,
+        completedDeliveryIdentityAdmissions: { nextAction: null },
       };
+      const zeroDeliveryAmbiguity = {
+        readable: true,
+        uncorroboratedAmbiguous: 0,
+        corroboratedRetained: 0,
+        oldestUncorroboratedAt: null,
+      };
+      const recoveryDebt = normalizeRecoveryDebt({
+        continuity,
+        runtime: deps.instanceType === 'agent'
+          ? {
+              readable: runtimeSnapshot !== null,
+              details: runtimeSnapshot?.details ?? null,
+            }
+          : { readable: true, details: zeroRuntimeRecoveryDetails },
+        durability: deps.durability
+          ? {
+              readable: durabilityStats !== null,
+              deliveryBlocking: durabilityDebtIsDegraded,
+              deliveryAmbiguity: durabilityStats?.deliveryAmbiguity ?? null,
+            }
+          : {
+              readable: true,
+              deliveryBlocking: false,
+              deliveryAmbiguity: zeroDeliveryAmbiguity,
+            },
+      });
 
       let status: 'healthy' | 'degraded' | 'unhealthy';
       let statusReasons: string[] = [];
@@ -1768,12 +1788,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         }
         if (turnCapabilityIsDegraded) statusReasons.push('turn_capability_degraded');
         if (loopLag.locallyStarved) statusReasons.push('event_loop_starvation');
-        if (durabilityDebtIsDegraded) statusReasons.push('durability_delivery_debt');
-        // #2280: silence from child processes is not proof of recovery.
-        // If statusReasons is empty but the instance was recently degraded,
-        // keep it degraded until explicit recovery evidence is observed.
-        addDegradationSilenceProof(statusReasons, recentlyDegraded, deps.instanceName);
-        if (statusReasons.length > 0) recentlyDegraded.add(deps.instanceName);
+        if (recoveryDebt.service_blocking) statusReasons.push('recovery_debt_blocking');
         status = statusReasons.length > 0 ? 'degraded' : 'healthy';
       }
 
@@ -1857,6 +1872,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         },
         0,
         'failed to read sqlite schema migration version',
+        probeAvailability, 'schema_migration',
       );
       const schemaReady = schemaMigrationLatest === CURRENT_SCHEMA_MIGRATION;
       const schemaIsFuture = schemaMigrationLatest > CURRENT_SCHEMA_MIGRATION;
@@ -2051,6 +2067,37 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         }
       }
 
+      if (status !== 'unhealthy') {
+        const modelEvidenceCurrent = deps.instanceType !== 'agent'
+          ? true
+          : turnCapability === null
+            ? null
+            : turnCapability.model_usable === null
+              || turnCapability.model_usable_stale === true
+              || turnCapability.model_usability_status === 'unknown'
+              ? null
+              : turnCapability.model_usable === true
+                && turnCapability.model_usability_status === 'usable';
+        const recoveryProof = evaluateRecoveryProof({
+          transportConnected: isConnected,
+          modelEvidenceCurrent,
+          runtimeReadable: deps.instanceType !== 'agent' || runtimeSnapshot !== null,
+          schemaReadable:
+            probeAvailability['schema_version'] === true
+            && probeAvailability['schema_migration'] === true
+            && schemaReady,
+          pendingPollsReadable,
+          recoveryDebt,
+        });
+        applyRecoveryProof(
+          statusReasons,
+          recentlyDegraded,
+          deps.instanceName,
+          recoveryProof,
+        );
+        status = statusReasons.length > 0 ? 'degraded' : 'healthy';
+      }
+
       const degradationCauses: HealthDegradationCause[] = [];
       const addDegradationCause = (cause: HealthDegradationCause): void => {
         if (!degradationCauses.includes(cause)) degradationCauses.push(cause);
@@ -2121,11 +2168,14 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         addDegradationCause('turn_finalization_degraded');
       }
       if (
-        positiveRuntimeCounter('turnRecoveryOutstanding')
-        || positiveRuntimeCounter('turnRecoveryExhausted')
-        || positiveRuntimeCounter('turnRecoveryOpenRecoveries')
-        || positiveRuntimeCounter('turnRecoveryCorruptLinks')
-        || positiveRuntimeCounter('turnRecoveryEchoConflicts')
+        agentRuntimeStatus === 'degraded'
+        && (
+          positiveRuntimeCounter('turnRecoveryOutstanding')
+          || positiveRuntimeCounter('turnRecoveryExhausted')
+          || positiveRuntimeCounter('turnRecoveryOpenRecoveries')
+          || positiveRuntimeCounter('turnRecoveryCorruptLinks')
+          || positiveRuntimeCounter('turnRecoveryEchoConflicts')
+        )
       ) {
         addDegradationCause('turn_recovery_degraded');
       }

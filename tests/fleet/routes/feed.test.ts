@@ -7,6 +7,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { parsePinoLine, handleGetFeed, type FeedDeps } from '../../../src/fleet/routes/feed.ts';
 import type { DiscoveredInstance } from '../../../src/fleet/discovery.ts';
+import type { FleetRecoveryDebtSummary, InstanceStatus } from '../../../src/fleet/health-poller.ts';
 import { mockReq, mockRes } from '../../helpers/http-mocks.ts';
 
 // ---------------------------------------------------------------------------
@@ -489,6 +490,168 @@ describe('parsePinoLine', () => {
 // ---------------------------------------------------------------------------
 
 describe('health transition events via handleGetFeed', () => {
+  it('does not fabricate an opened transition for debt already open at the first observation', () => {
+    const inst = fakeInstance({ name: 'preexisting-debt', type: 'agent' });
+    const instances = new Map([['preexisting-debt', inst]]);
+    const deps = makeDeps({
+      discovery: { getInstances: vi.fn(() => instances) } as any,
+      healthPoller: {
+        getStatus: vi.fn(() => ({
+          status: 'online',
+          error: null,
+          recoveryDebt: {
+            open: true,
+            serviceBlocking: false,
+            attention: 'routine',
+            reasons: ['historical_turn_catchup'],
+            gaugeTotal: 1,
+          },
+        })),
+      } as any,
+    });
+
+    const first = mockRes();
+    handleGetFeed(mockReq(), first, deps);
+    expect(JSON.parse(first._body).filter((event: any) => event.detail?.type === 'recovery_debt'))
+      .toHaveLength(0);
+  });
+
+  it('emits recovery debt open, change, and clear independently from health status', () => {
+    const inst = fakeInstance({ name: 'debt-feed', type: 'agent' });
+    const instances = new Map([['debt-feed', inst]]);
+    type FeedPoll = Pick<InstanceStatus, 'status' | 'error'> & {
+      recoveryDebt: FleetRecoveryDebtSummary | null;
+    };
+    const getStatus = vi.fn<() => FeedPoll>(() => ({
+      status: 'online',
+      error: null,
+      recoveryDebt: null,
+    }));
+    const deps = makeDeps({
+      discovery: { getInstances: vi.fn(() => instances) } as any,
+      healthPoller: { getStatus } as any,
+    });
+
+    handleGetFeed(mockReq(), mockRes(), deps);
+
+    getStatus.mockReturnValue({
+      status: 'online',
+      error: null,
+      recoveryDebt: {
+        open: true,
+        serviceBlocking: false,
+        attention: 'routine',
+        reasons: ['historical_turn_catchup'],
+        gaugeTotal: 1,
+      },
+    });
+    const openedRes = mockRes();
+    handleGetFeed(mockReq(), openedRes, deps);
+    const opened = JSON.parse(openedRes._body).find((event: any) => event.detail?.type === 'recovery_debt');
+    expect(opened).toMatchObject({
+      text: 'debt-feed: recovery debt opened',
+      level: 'info',
+      detail: {
+        type: 'recovery_debt',
+        state: 'opened',
+        serviceBlocking: false,
+        attention: 'routine',
+        reasons: ['historical_turn_catchup'],
+        gaugeTotal: 1,
+      },
+    });
+
+    getStatus.mockReturnValue({
+      status: 'online',
+      error: null,
+      recoveryDebt: {
+        open: true,
+        serviceBlocking: false,
+        attention: 'routine',
+        reasons: ['turn_recovery_terminal'],
+        gaugeTotal: 2,
+      },
+    });
+    const changedRes = mockRes();
+    handleGetFeed(mockReq(), changedRes, deps);
+    expect(JSON.parse(changedRes._body).find((event: any) => event.detail?.type === 'recovery_debt'))
+      .toMatchObject({ detail: { state: 'changed', gaugeTotal: 2 } });
+
+    getStatus.mockReturnValue({
+      status: 'online',
+      error: null,
+      recoveryDebt: {
+        open: true,
+        serviceBlocking: false,
+        attention: 'routine',
+        reasons: ['turn_recovery_terminal'],
+        gaugeTotal: 3,
+      },
+    });
+    const sameBucketRes = mockRes();
+    handleGetFeed(mockReq(), sameBucketRes, deps);
+    expect(JSON.parse(sameBucketRes._body).find((event: any) => event.detail?.type === 'recovery_debt'))
+      .toBeUndefined();
+
+    getStatus.mockReturnValue({
+      status: 'online',
+      error: null,
+      recoveryDebt: {
+        open: false,
+        serviceBlocking: false,
+        attention: 'none',
+        reasons: [],
+        gaugeTotal: 0,
+      },
+    });
+    const clearedRes = mockRes();
+    handleGetFeed(mockReq(), clearedRes, deps);
+    expect(JSON.parse(clearedRes._body).find((event: any) => event.detail?.type === 'recovery_debt'))
+      .toMatchObject({
+        text: 'debt-feed: recovery debt cleared',
+        detail: { state: 'cleared', attention: 'none', reasons: [], gaugeTotal: 0 },
+      });
+  });
+
+  it('orders operational recovery before retained debt context', () => {
+    const inst = fakeInstance({ name: 'recover-with-debt', type: 'chat' });
+    const instances = new Map([['recover-with-debt', inst]]);
+    type FeedPoll = Pick<InstanceStatus, 'status' | 'error'> & {
+      recoveryDebt: FleetRecoveryDebtSummary | null;
+    };
+    const getStatus = vi.fn<() => FeedPoll>(() => ({
+      status: 'degraded',
+      error: 'active blocker',
+      recoveryDebt: null,
+    }));
+    const deps = makeDeps({
+      discovery: { getInstances: vi.fn(() => instances) } as any,
+      healthPoller: { getStatus } as any,
+    });
+    handleGetFeed(mockReq(), mockRes(), deps);
+
+    getStatus.mockReturnValue({
+      status: 'online',
+      error: null,
+      recoveryDebt: {
+        open: true,
+        serviceBlocking: false,
+        attention: 'routine',
+        reasons: ['turn_recovery_terminal'],
+        gaugeTotal: 1,
+      },
+    });
+    const res = mockRes();
+    handleGetFeed(mockReq(), res, deps);
+
+    const transitions = JSON.parse(res._body).filter((event: any) => (
+      event.detail?.type === 'health' || event.detail?.type === 'recovery_debt'
+    ));
+    expect(transitions.map((event: any) => event.detail.type)).toEqual(['health', 'recovery_debt']);
+    expect(transitions[0].detail.status).toBe('online');
+    expect(transitions[1].detail.state).toBe('opened');
+  });
+
   it('emits structured health detail when instance goes unreachable', () => {
     const inst = fakeInstance({ name: 'alpha', type: 'agent' });
     const instances = new Map([['alpha', inst]]);

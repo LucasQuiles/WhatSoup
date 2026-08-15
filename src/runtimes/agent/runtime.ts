@@ -192,7 +192,8 @@ import {
 } from './runtime-turn-context.ts';
 import { resolveResumeIdentity, type PersistedResumeIdentity } from './resume-identity.ts';
 import type { FinalizeRuntimeTurnResult } from './turn-finalizer.ts';
-import { runtimeTurnRecoveryIsDegraded, RuntimeTurnSupervisor } from './runtime-turn-supervisor.ts';
+import { RuntimeTurnSupervisor } from './runtime-turn-supervisor.ts';
+import { classifyRuntimeRecoveryHealth } from './runtime-recovery-health.ts';
 import { CrashTracker } from './crash-tracker.ts';
 import { AutoCompactController, AUTO_COMPACT_RAPID_REARM_WINDOW_MS } from './auto-compact-controller.ts';
 import { ImageCoalescer } from './image-coalescer.ts';
@@ -6335,8 +6336,11 @@ export class AgentRuntime implements Runtime {
     const finalizationHealth = this.runtimeTurnSupervisor.health();
     const recoveryHealth = getTurnRecoveryHealthDetails(this.durability);
     const completedDeliveryIdentityAdmissions = this.completedDeliveryIdentityAdmissionHealth();
-    const completedDeliveryIdentityDebt = completedDeliveryIdentityAdmissions.unresolvedCount > 0;
-    const finalizationDegraded = runtimeTurnRecoveryIsDegraded(finalizationHealth, recoveryHealth);
+    const recoveryClassification = classifyRuntimeRecoveryHealth({
+      finalization: finalizationHealth,
+      recovery: recoveryHealth,
+      completedDeliveryIdentity: completedDeliveryIdentityAdmissions,
+    });
     const turnQueueHealth = this.runtimeTurnCoordinator.turnQueueHaltHealth(this.sessionScope);
     // CAR-20 (#2539): current-vs-historical poll-persistence health + offline-decision
     // retry state, surfaced in BOTH health branches below.
@@ -6357,6 +6361,11 @@ export class AgentRuntime implements Runtime {
       autoCompactWorstCurrentBackoffTier: autoCompactHealth.worstCurrentBackoffTier,
       proactiveResumeIdentityRejects: this.proactiveResumeIdentityRejects,
       completedDeliveryIdentityAdmissions,
+      recoveryDebtReasons: recoveryClassification.retainedReasons,
+      completedDeliveryIdentityBlocking:
+        recoveryClassification.completedDeliveryIdentityBlocking,
+      completedDeliveryIdentityRetained:
+        recoveryClassification.completedDeliveryIdentityRetained,
       restartLoopGuard: {
         enabled: config.restartLoopGuard.enabled,
         ...readRestartLoopGuardHealth(
@@ -6403,8 +6412,7 @@ export class AgentRuntime implements Runtime {
       if (recentCrashCount > 0) degradedReasons.push('recent_crashes');
       if (autoCompactHealth.activeBackoffScopes > 0) degradedReasons.push('auto_compact_backoff');
       if (fallbackState.fallbackActiveUntil !== null) degradedReasons.push('provider_fallback_active');
-      if (finalizationDegraded) degradedReasons.push('turn_finalization_debt');
-      if (completedDeliveryIdentityDebt) degradedReasons.push('completed_delivery_identity_debt');
+      degradedReasons.push(...recoveryClassification.blockingReasons);
       if (turnQueueHealth.turnQueueHalted) degradedReasons.push('turn_queue_halted');
       if (providerExecution.pressureActive) degradedReasons.push('provider_execution_pressure');
       if (pollPersistenceHealth.degraded) degradedReasons.push('poll_persistence_failure');
@@ -6431,8 +6439,7 @@ export class AgentRuntime implements Runtime {
     if (this.session !== null && status?.active === false) degradedReasons.push('session_inactive');
     if (autoCompactHealth.activeBackoffScopes > 0) degradedReasons.push('auto_compact_backoff');
     if (fallbackState.fallbackActiveUntil !== null) degradedReasons.push('provider_fallback_active');
-    if (finalizationDegraded) degradedReasons.push('turn_finalization_debt');
-    if (completedDeliveryIdentityDebt) degradedReasons.push('completed_delivery_identity_debt');
+    degradedReasons.push(...recoveryClassification.blockingReasons);
     if (providerExecution.pressureActive) degradedReasons.push('provider_execution_pressure');
     if (turnQueueHealth.turnQueueHalted) degradedReasons.push('turn_queue_halted');
     if (pollPersistenceHealth.degraded) degradedReasons.push('poll_persistence_failure');
