@@ -202,10 +202,11 @@ describe('reply guarantee daemon deployment artifacts', () => {
     // chains to drain-stuck-replies.mjs), matching the systemd unit's entrypoint.
     expect(plist).toContain('deploy/scripts/reply-guarantee-drain.sh');
     expect(plist).toMatch(/<key>RunAtLoad<\/key>\s*<false\/>/);
-    expect(service).toContain('Description=WhatSoup Reply Guarantee queue drain');
+    expect(service).toContain('Description=WhatSoup Reply Guarantee queue drain and durability observer');
     expect(service).toContain('ExecStart=%h/.local/bin/whatsoup-reply-guarantee-drain');
     expect(service).not.toContain('WHATSOUP_REPO_ROOT');
     expect(wrapper).toContain('drain-stuck-replies.mjs');
+    expect(wrapper).toContain('reply-guarantee-observer.py');
     expect(`${plist}\n${service}\n${wrapper}`).not.toMatch(/\/Users\/[^<\s]+|mwlab|anabot|nucles/i);
   });
 });

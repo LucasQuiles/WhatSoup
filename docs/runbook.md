@@ -1753,6 +1753,7 @@ Migration 51 removes old raw columns from the live schema, but migration success
 | Enrichment staleness | `health.enrichment.last_run` | Null or >15 min ago (chat instances only) |
 | Quarantined outbound ops | `health.durability.outboundQuarantineDispositions` | Any `delivery_ambiguous_unsafe` or `legacy_unclassified` group needs review; coarse count alone does not prove loss. |
 | Pending outbound | `health.durability.pendingOutbound` | >50 (queue buildup) |
+| Reply guarantee observer | `reply-guarantee-observer.py --json` | `active-breach` is operational; `recovery-debt` is advisory and must not flip runtime health; `inconclusive` requires user/profile/schema investigation |
 | Outbound audit readable | `health.outbound_sends.readable` | `false` |
 | Tool evidence readable | `health.tool_durability.readable` | `false` |
 | Tool evidence write loss | `health.tool_durability.runtime_write_losses.totalWriteLosses` | >0 |
@@ -1782,6 +1783,9 @@ machine-readable disposition registry for sources that participate in fault clas
 | `fallback_recovery_stalled` | `src/runtimes/agent/runtime.ts` | Persisted fallback window plus current primary-provider recovery probe |
 | `provider_execution_queue_pressure` | `src/runtimes/agent/provider-execution-gate.ts` and `src/runtimes/agent/runtime.ts` | `runtime.agent.providerExecution`, exact OpenCode child lifetimes, and external processes sharing the XDG data root; recovery requires an idle gate |
 | `agent_reply_guarantee_breach` | `src/runtimes/agent/turn-finalizer.ts` | Exact terminal record, inbound failure class, delivery proof, and continuity-candidate row |
+| `reply-guarantee-active-breach` | `deploy/scripts/reply-guarantee-observer.py` | Stale open inbound or due/expired recovery work from the normal read-only WAL-aware database view; preserve evidence before repair |
+| `reply-guarantee-recovery-debt` | `deploy/scripts/reply-guarantee-observer.py` | Historical continuity candidates, failed terminals, and blocked/exhausted recovery jobs; advisory only and never runtime degradation by itself |
+| `reply-guarantee-observer` | `deploy/scripts/reply-guarantee-observer.py` | Probe authority, target-user/GUI context, canonical data root, schema compatibility, and read-only SQLite access |
 | `release-drift` | `scripts/live-release-drift-alert.ts` | Release manifest, artifact tree, and running service provenance |
 | `heartbeat-watchdog` | `deploy/scripts/bot-errors-heartbeat-watchdog.py` | Roster entry and current producer heartbeat; retired entries must not page |
 | `remote-claim-failed` | `deploy/scripts/bot-errors-collector.py` | Collector claim/lease state and target reachability |
