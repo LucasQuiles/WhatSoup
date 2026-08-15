@@ -28,6 +28,7 @@ const gitChildEnvKeys = [
 export function cleanGitEnv(): NodeJS.ProcessEnv {
   return Object.fromEntries(
     gitChildEnvKeys
+      // env-allowed: build-meta env lookup; bounded key list for git identity
       .map((key) => [key, process.env[key]] as const)
       .filter(([, value]) => value !== undefined),
   ) as NodeJS.ProcessEnv;
@@ -36,6 +37,7 @@ export function cleanGitEnv(): NodeJS.ProcessEnv {
 const FULL_GIT_SHA_RE = /^[0-9a-f]{40}$/i;
 
 function readNonEmptyEnv(name: string): string | null {
+  // env-allowed: build-meta env lookup; bounded key list for git identity
   const value = process.env[name]?.trim();
   return value ? value : null;
 }

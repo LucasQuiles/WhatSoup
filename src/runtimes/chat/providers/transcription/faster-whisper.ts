@@ -10,10 +10,12 @@ const log = createChildLogger('faster-whisper');
 const SCRIPT_PATH = fileURLToPath(new URL('../../../../../scripts/transcribe-faster-whisper.py', import.meta.url));
 const VENV_ROOT = join(homedir(), '.local/share/whatsoup/transcription-venv');
 const MODEL_DIR = join(homedir(), '.local/share/whatsoup/models/faster-whisper');
+// env-allowed: host-local toolchain; absence drives the managed-venv auto-probe chain
 const DEFAULT_MODEL = process.env.WHATSOUP_FASTER_WHISPER_MODEL ?? 'large-v3-turbo';
 
 function resolvePython(): string | null {
   const candidates = [
+    // env-allowed: host-local toolchain; absence drives the managed-venv auto-probe chain
     process.env.WHATSOUP_FASTER_WHISPER_PYTHON,
     join(VENV_ROOT, 'bin/python3.12'),
     join(VENV_ROOT, 'bin/python3'),

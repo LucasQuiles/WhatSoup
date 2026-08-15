@@ -44,6 +44,7 @@ const GROUP_JID_RE = /^\d+@g\.us$/;
  * non-finite values use the default.  Default: 300_000 ms (5 min).
  */
 function emitAlertThrottleMs(): number {
+  // env-allowed: lib cannot import config (ring rule); env is the sanctioned channel
   const raw = Number(process.env['EMIT_ALERT_THROTTLE_MS']);
   if (Number.isFinite(raw)) return Math.max(0, raw);
   return 300_000;
@@ -96,12 +97,15 @@ export interface ClearAlertSourceOptions {
 // group-JID shape and expected-JID pin validation stay here, where the
 // fail-closed warn-once semantics live.
 function requireExpectedJid(): boolean {
+  // env-allowed: lib cannot import config (ring rule); env is the sanctioned channel
   const raw = process.env['BOT_ERRORS_REQUIRE_EXPECTED']?.trim().toLowerCase();
   return raw ? !['0', 'false', 'no', 'off'].includes(raw) : true;
 }
 
 function botErrorsJid(): string | null {
+  // env-allowed: lib cannot import config (ring rule); env is the sanctioned channel
   const jid = process.env['BOT_ERRORS_JID']?.trim();
+  // env-allowed: lib cannot import config (ring rule); env is the sanctioned channel
   const expected = process.env['BOT_ERRORS_EXPECTED_JID']?.trim();
   if (!jid) {
     if (!missingTargetWarned) {
@@ -186,13 +190,19 @@ function spawnLegacyAlert(args: string[], logContext: Record<string, unknown>, m
  * spawn. This lets an alert verifier observe operator-facing alerts (e.g.
  * `provider_fallback_activated`, `fallback_no_independent_provider`) at runtime
  * without paging a live operator. Opt-in only; unset in production.
+ *
+ * ENV-LATE BY DESIGN (#2192 slice 3c): the verifier injects this out-of-band
+ * at runtime (#2510) and it must flip without a restart or an instance-config
+ * edit — a typed config field would freeze the dial at load.
  */
 function alertSinkPath(): string | null {
+  // env-allowed: lib cannot import config (ring rule); env is the sanctioned channel
   const raw = process.env['WHATSOUP_ALERT_SINK']?.trim();
   return raw && raw.length > 0 ? raw : null;
 }
 
 // #2510: warn when capture-only sink is configured outside test/verifier context
+// env-allowed: test-runner detection; must not read config (lib ring / eval-order)
 if (!process.env['VITEST'] && alertSinkPath()) {
   log.warn(
     { alertSink: alertSinkPath() },

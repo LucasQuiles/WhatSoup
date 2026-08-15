@@ -62,6 +62,13 @@ function ruleEntriesFor(id) {
           { baselinePath: rule.params?.baselinePath ?? 'eslint-rules/catch-ratchet-baseline.json' },
         ],
       };
+    case 'arch.env-read-justification':
+      return {
+        'fitness/require-env-justification': [
+          'warn',
+          { baselinePath: rule.params?.baselinePath ?? 'eslint-rules/env-read-allowlist.json' },
+        ],
+      };
     case 'invariant.no-unsafe-type-escapes':
       return { 'fitness/unsafe-type-escape': 'warn' };
     case 'portability.fetch-timeout':
@@ -122,6 +129,22 @@ const config = [
         selector: 'LogicalExpression[operator="&&"] > BinaryExpression[operator="==="][right.value="string"]',
         message: 'Use isNonEmptyString() or asNonEmptyString() from src/lib/type-guards.ts instead of typeof x === "string" && x.length > 0 guards.',
       }],
+    },
+  },
+  {
+    // src only (NOT scripts): the env-read discipline mirrors the vitest
+    // ratchet at tests/scripts/env-read-allowlist.test.ts, whose scan root is
+    // src/ exactly — the eslint scope must match the authority's scope
+    // (#2192 slice 5a; scope pinned by the eslint-fitness-check scope test).
+    files: ['src/**/*.ts'],
+    linterOptions,
+    languageOptions: {
+      parser: tseslint.parser,
+      parserOptions: { ecmaVersion: 2024, sourceType: 'module' },
+    },
+    plugins,
+    rules: {
+      ...ruleEntriesFor('arch.env-read-justification'),
     },
   },
   {

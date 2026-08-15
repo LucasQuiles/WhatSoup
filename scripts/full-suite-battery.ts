@@ -227,8 +227,17 @@ export function buildVitestArgs(passthrough: readonly string[]): string[] {
 
 /** GNU sysexits EX_USAGE — signals an invalid battery CONFIGURATION, distinct from a test failure. */
 export const EX_USAGE = 64;
-/** Default wall-clock bound: 20 minutes (full suite ~8-10 min uncontended; absorbs load, never near the 72-min wedge). */
-export const DEFAULT_BATTERY_TIMEOUT_MS = 20 * 60 * 1000;
+/**
+ * Default wall-clock bound: 30 minutes. The original 20-minute bound was set
+ * when the full suite ran ~8-10 min uncontended; the tree grew into it — on
+ * 2026-08-15 a GREEN quality(24.x) coverage run measured wall=1193s of the
+ * 1200s bound (0.6% margin), and the next roll on an unrelated diff was
+ * SIGKILLed INCONCLUSIVE at the bound with zero failed tests. 30 minutes
+ * restores real headroom (~1.5x the observed worst green) while staying far
+ * inside the 60-minute job timeout, so a genuinely wedged fixture is still
+ * attributed by this battery, not the job killer.
+ */
+export const DEFAULT_BATTERY_TIMEOUT_MS = 30 * 60 * 1000;
 
 /**
  * Resolve the wall-clock bound from FULL_SUITE_BATTERY_TIMEOUT_MS (round-20 gap). An ABSENT

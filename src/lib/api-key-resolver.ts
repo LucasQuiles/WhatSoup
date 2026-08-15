@@ -87,6 +87,7 @@ export function resolveApiKey(opts: ResolveApiKeyOptions): string {
     // fallback OBSERVABLE: warn only when the env fallback actually yields a key
     // (the silent wrong-account case). An absent env yields '' → a visible
     // missing-key condition downstream, which needs no warning.
+    // env-allowed: secret resolver env fallback; must stay env-late by contract
     const envFallback = process.env[opts.envVar] ?? '';
     if (envFallback.length > 0) {
       log.warn(
@@ -102,5 +103,6 @@ export function resolveApiKey(opts: ResolveApiKeyOptions): string {
   if (!allowEnvFallback) {
     return '';
   }
+  // env-allowed: secret resolver env fallback; must stay env-late by contract
   return process.env[opts.envVar] ?? '';
 }

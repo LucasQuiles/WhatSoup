@@ -57,10 +57,12 @@ const AUTH_HELPER_ENV_KEYS = [
 function buildAuthHelperEnv(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const key of AUTH_HELPER_ENV_KEYS) {
+    // env-allowed: deliberate ops-token presence scan over process.env
     const value = process.env[key];
     if (value !== undefined) env[key] = value;
   }
   // Forward WHATSOUP_* config overrides (explicit prefix, not blanket inheritance)
+  // env-allowed: deliberate ops-token presence scan over process.env
   for (const [key, value] of Object.entries(process.env)) {
     if (key.startsWith('WHATSOUP_') && value !== undefined) env[key] = value;
   }

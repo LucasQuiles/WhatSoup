@@ -2,9 +2,10 @@
 // arch.file-size headroom — see docs/architecture/fitness-taxonomy.md "Growing
 // past a ceiling"). Module-evaluation-time env reads, no runtime state: the
 // import from runtime.ts preserves the original read timing exactly.
-import { MS_PER_SECOND, MS_PER_MINUTE, MS_PER_HOUR, MS_PER_DAY } from '../../lib/time-units.ts';
+import { MS_PER_MINUTE, MS_PER_HOUR, MS_PER_DAY } from '../../lib/time-units.ts';
 
 export const envPositiveInt = (key: string, fallback: number): number => {
+  // env-allowed: dynamic-key helper for session tunables; the counted seam by design
   const raw = Number(process.env[key]);
   return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : fallback;
 };
@@ -37,38 +38,18 @@ export const DEFAULT_FALLBACK_WINDOW_MS = 5 * MS_PER_HOUR; // 18_000_000 ms (5h)
 // revert almost immediately nor pin the fallback for an unreasonable span.
 export const MIN_FALLBACK_WINDOW_MS = MS_PER_MINUTE; // 1 minute
 export const MAX_FALLBACK_WINDOW_MS = MS_PER_DAY; // 24 hours
-export const PROVIDER_FALLBACK_NOTICE_DEDUP_MS = (() => {
-  const raw = Number(process.env['WHATSOUP_PROVIDER_FALLBACK_NOTICE_DEDUP_MS']);
-  return Number.isFinite(raw) && raw > 0 ? raw : 30 * MS_PER_MINUTE;
-})();
-export const PROVIDER_FALLBACK_PRIMARY_RECHECK_MS = (() => {
-  const raw = Number(process.env['WHATSOUP_PROVIDER_FALLBACK_PRIMARY_RECHECK_MS']);
-  if (!Number.isFinite(raw) || raw <= 0) return 5 * MS_PER_MINUTE;
-  return Math.min(Math.max(raw, 30 * MS_PER_SECOND), 30 * MS_PER_MINUTE);
-})();
+// The four WHATSOUP_PROVIDER_FALLBACK_* tunables (notice dedup, primary
+// recheck, probe-stall threshold, stall-ceiling multiple) moved to
+// config.fallbackTunables (#2192 s4b) — instance-config first, env fallback,
+// identical defaults and clamps — and reach consumers via RuntimeFallbackPort.
 // The primary model usability probe has its own longer CLI deadline in
 // primary-model-usability-adapters.ts; shorter binary presence checks keep
 // their 5 s preflight timeout in providers/binary-preflight.ts.
-// Consecutive failed recovery probes (revert-timer extension path) before a
-// single fallback_recovery_stalled alert is emitted. The cap only surfaces the
-// stall — the window keeps extending so the instance is never stranded on a
-// dead primary. One alert per stall episode; the counter resets on deactivation
-// (which a successful probe triggers).
-export const PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD = (() => {
-  const raw = Number(process.env['WHATSOUP_PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD']);
-  if (!Number.isFinite(raw) || raw <= 0) return 12;
-  return Math.min(Math.max(Math.trunc(raw), 3), 100);
-})();
-// Bounded-escalation ceiling multiple, passed to stallAlertPlan as a parameter (not a module-hidden global).
-export const PROVIDER_FALLBACK_PROBE_STALL_CEILING_MULTIPLE = (() => {
-  const raw = Number(process.env['WHATSOUP_PROVIDER_FALLBACK_PROBE_STALL_CEILING_MULTIPLE']);
-  if (!Number.isFinite(raw) || raw <= 0) return 10;
-  return Math.min(Math.max(Math.trunc(raw), 1), 1000);
-})();
 // Opt-in: on an arming provider failure (via the registry dispatcher), run the
 // best-effort diagnostic bundle and emit its findings to the alert outbox.
 // Fire-and-forget — never blocks, delays, or alters the turn's fallback path.
 export function diagnosticBundleEnabled(): boolean {
+  // env-allowed: staged-rollout dial; live-flip semantics, flag deletes at GA
   return process.env['WHATSOUP_DIAGNOSTIC_BUNDLE'] === '1';
 }
 // Guardrail: the diagnostic bundle probes the PRIMARY provider's health, which

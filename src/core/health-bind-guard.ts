@@ -21,6 +21,7 @@ const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', 'localhost']);
  */
 export function assertSafeHealthBind(
   host: string,
+  // env-allowed: pure-resolver param-default; the DI idiom, not a bypass
   env: Record<string, string | undefined> = process.env,
 ): void {
   if (LOOPBACK_HOSTS.has(host)) return;

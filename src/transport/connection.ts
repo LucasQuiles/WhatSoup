@@ -854,7 +854,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
 
       const { state } = await useMultiFileAuthState(config.authDir);
       const saveCredsAtomically = createAtomicCredsSaver(config.authDir, () => state.creds);
-      const resolvedVersion = await resolveBaileysVersion();
+      const resolvedVersion = await resolveBaileysVersion(config.baileysVersionPinned);
       this.latestBaileysVersion = baileysVersionLabel(resolvedVersion.version);
       this.recordCredentialLifecycle('baileys_version', {
         baileysVersion: this.latestBaileysVersion,

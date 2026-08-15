@@ -80,8 +80,6 @@ import {
   MAX_RESIDENT_SESSIONS,
   SESSION_MIN_RESIDENCY_MS,
   MAX_TOOL_FAILURE_ALERT_DEDUP_KEYS,
-  PROVIDER_FALLBACK_NOTICE_DEDUP_MS,
-  PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD,
   diagnosticBundleEnabled,
   DIAGNOSTIC_BUNDLE_THROTTLE_MS,
   HANDOFF_STALE_MS,
@@ -176,7 +174,9 @@ import {
   createOperationTracker as createOperationTrackerForPort,
   getTracker as getTrackerForPort,
   sendDirect as sendDirectForPort,
+  sendDirectWithReceipt as sendDirectWithReceiptForPort,
   type ChatTransportPort,
+  type SendDirectOutcome,
 } from './chat-transport.ts';
 import { getRecentMessages, getMessagesSince, hasFromMeReplyAfter } from '../../core/messages.ts';
 import { toConversationKey, isGroupConversationKey, GLOBAL_CONVERSATION_KEY } from '../../core/conversation-key.ts';
@@ -797,7 +797,7 @@ export class AgentRuntime implements Runtime {
   // Consecutive failed recovery probes on the revert-timer EXTENSION path
   // (process-local, reset on deactivation — which a successful probe triggers).
   // Early-window standing probes do not count: nothing is extending yet.
-  // At PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD one fallback_recovery_stalled
+  // At config.fallbackTunables.probeStallThreshold one fallback_recovery_stalled
   // alert fires per stall episode; the window keeps extending regardless.
   private fallbackProbeAttempts = 0;
   // Epoch ms of the most recent recovery probe (either path); null until the
@@ -2546,6 +2546,7 @@ export class AgentRuntime implements Runtime {
     return {
       get db() { return runtime.db; },
       get instanceName() { return runtime.instanceName; },
+      get fallbackTunables() { return config.fallbackTunables; },
       get cwd() { return runtime.cwd; },
       get model() { return runtime.model; },
       get agentProvider() { return runtime.agentProvider; },
@@ -7681,6 +7682,15 @@ export class AgentRuntime implements Runtime {
     void sendDirectForPort(this.chatTransportHost, chatJid, text, bypassEchoGuard);
   }
 
+  /**
+   * Id-bearing direct send (#2981 car-B): returns the SendDirectOutcome
+   * envelope so reply-threading consumers (F2a #2121) can reference the sent
+   * message. The void shim above stays for the legacy fire-and-forget sites.
+   */
+  sendDirectWithReceipt(chatJid: string, text: string, bypassEchoGuard = false): Promise<SendDirectOutcome> {
+    return sendDirectWithReceiptForPort(this.chatTransportHost, chatJid, text, bypassEchoGuard);
+  }
+
   // ---------------------------------------------------------------------------
   // Routing + model preference (#1977 D1) — extracted to runtime-routing.ts.
   // The delegators below keep the runtime's externally-reached entry points
@@ -8084,9 +8094,13 @@ export class AgentRuntime implements Runtime {
           // creds from the same place as the model probe + turns (launchd keychain
           // unreadable; see RCA 2026-06-24). Omitted when unset → no change.
           env: {
+            // env-allowed: child-env forward; explicit per-var allow-list, not passthrough
             HOME: process.env['HOME'],
+            // env-allowed: ambient OS PATH contract for executable resolution
             PATH: process.env['PATH'],
+            // env-allowed: child-env forward; explicit per-var allow-list, not passthrough
             USER: process.env['USER'],
+            // env-allowed: external-tool interop; must track the env the spawned claude CLI sees
             ...(process.env['CLAUDE_CONFIG_DIR'] ? { CLAUDE_CONFIG_DIR: process.env['CLAUDE_CONFIG_DIR'] } : {}),
           },
         },
@@ -8119,7 +8133,7 @@ export class AgentRuntime implements Runtime {
   ): void {
     const now = Date.now();
     for (const [key, recordedAt] of this.recentProviderFallbackNotices) {
-      if (now - recordedAt > PROVIDER_FALLBACK_NOTICE_DEDUP_MS) {
+      if (now - recordedAt > config.fallbackTunables.noticeDedupMs) {
         this.recentProviderFallbackNotices.delete(key);
       }
     }

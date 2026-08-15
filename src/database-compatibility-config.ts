@@ -39,6 +39,7 @@ export function configureDatabaseCompatibilityBootstrap(instanceName: string): v
   // Typed store is the in-process SSOT (#2206); the env var stays for the
   // remaining compat consumers. A conflicting second write now throws.
   setBootstrapInstanceContext({ name: instanceName, healthPort, paths });
+  // env-allowed: multi-instance bootstrap protocol; pre-config channel by design
   process.env.INSTANCE_CONFIG = JSON.stringify({
     name: instanceName,
     healthPort,

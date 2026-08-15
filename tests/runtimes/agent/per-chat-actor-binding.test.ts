@@ -102,6 +102,8 @@ vi.mock('../../../src/runtimes/agent/outbound-queue.ts', () => ({
 
 vi.mock('../../../src/config.ts', () => ({
   config: {
+    // #2192 s4b: provider-fallback tunables live on config (defaults mirror the retired IIFEs).
+    fallbackTunables: { noticeDedupMs: 1_800_000, primaryRecheckMs: 300_000, probeStallThreshold: 12, probeStallCeilingMultiple: 10 },
     adminPhones: new Set<string>(),
     controlPeers: new Map<string, string>(),
     toolUpdateMode: 'full',

@@ -235,6 +235,7 @@ export type ClaudeOAuthCredResult =
 
 /** Path to the claude-cli credentials file (honors CLAUDE_CONFIG_DIR like the CLI). */
 function claudeCredentialsPath(): string {
+  // env-allowed: external-tool interop; must track the env the spawned claude CLI sees
   const configDir = process.env['CLAUDE_CONFIG_DIR'] || join(homedir(), '.claude');
   return join(configDir, '.credentials.json');
 }

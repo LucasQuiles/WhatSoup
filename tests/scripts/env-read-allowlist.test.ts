@@ -11,10 +11,18 @@
  * Counting convention mirrors tests/scripts/console-usage-budget.test.ts:
  * one site = one non-comment source line containing a process.env access
  * (reads, writes, and whole-object param-default references all count).
- * Per-file reasons live on the allowlist entries; per-site env-allowed
- * justifications arrive with the final slice.
+ * Per-file pins and reasons live in eslint-rules/env-read-allowlist.json
+ * (the SSOT shared with the fitness/require-env-justification eslint
+ * mirror). Since slice 5b every counted site outside src/config.ts also
+ * carries a per-site `env-allowed:` justification (same line or the line
+ * above, floor >=16 chars / >=3 words); config.ts is the one file-level
+ * exemption — the seam IS the policy, ~50 identical justifications would
+ * be noise, and new config reads still trip the count pin.
  *
- * Companion: #2192 (baseline audited at the #3235 landing tree).
+ * Companion: #2192 (baseline audited at the #3235 landing tree). The
+ * "#2192 slice 3c" / "#2192 s4 verdict" citations in the per-file reasons
+ * resolve to docs/reviews/2192-env-read-migration-20260815/ (s3/s4 design
+ * records with per-var grounds).
  */
 import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -27,116 +35,35 @@ const srcRoot = resolve(repoRoot, 'src');
 
 const ENV_ACCESS_PATTERN = /process\.env/;
 
-const ALLOWLIST: Record<string, number> = {
-  // SSOT env→typed-RuntimeConfig conversion seam; every read is
-  // instance-config→env→default. Includes the bot-errors publish bridge
-  // (#2192 slices 3a+3b): conditional WRITES + post-publish reads for
-  // BOT_ERRORS_{JID,EXPECTED_JID,REQUIRE_EXPECTED,SAFE_SHAPE_CRED_PATH} and
-  // EMIT_ALERT_THROTTLE_MS, + the BOT_ERRORS_RUNTIME_TOOL_FAILURE_ALERTS read
-  // behind toolFailureAlertsEnabled.
-  'src/config.ts': 45,
-  // param-default `env` seam (WHATSOUP_REPO_ROOT) — new typed-field candidate, not a bypass.
-  'src/core/arc-binding-health.ts': 1,
-  // build-time injected WHATSOUP_GIT_SHA / WHATSOUP_GIT_BRANCH (deploy hook, no typed source).
-  'src/core/database-compatibility-early.ts': 2,
-  // guard `env: … = process.env` DI seam — keeps the guard unit-testable.
-  'src/core/health-bind-guard.ts': 1,
-  // bounded MCP key-list passthrough (.map over an explicit key list).
-  'src/core/mcp-launcher.ts': 1,
-  // WHATSOUP_INTERNAL_JIDS env-late; BOT_ERRORS_JID config-published (#2192
-  // slice 3a — config resolves the instance override and writes it back to
-  // process.env, so this call-time read needs no config import).
-  'src/core/outbound-message-safety.ts': 2,
-  // INSTANCE_CONFIG WRITE — multi-instance bootstrap protocol.
-  'src/database-compatibility-config.ts': 1,
-  // guard `env: … = process.env` DI seam — keeps the guard unit-testable.
-  'src/fleet/bind-guard.ts': 1,
-  // bounded poll-target env lookup (per-name).
-  'src/fleet/health-poller.ts': 1,
-  // bounded path env-key lookup.
-  'src/fleet/paths.ts': 1,
-  // WHATSOUP_DOCKER_ENV + WHATSOUP_NODE detection, PATH ambient — WHATSOUP_NODE is slice-3 typed.
-  'src/fleet/platform.ts': 3,
-  // bounded credential-presence env check (envKey !== undefined guard).
-  'src/fleet/routes/credentials.ts': 1,
-  // deliberate ops-token presence scan (Object.entries over process.env).
-  'src/fleet/routes/ops-auth.ts': 2,
-  // VITEST / VITEST_POOL_ID / VITEST_WORKER_ID test-runner detection.
-  'src/fleet/silence-registry-episode-store.ts': 4,
-  // TMPDIR + INSTANCE_CONFIG WRITES — multi-instance bootstrap protocol.
-  'src/instance-loader.ts': 2,
-  // secret resolver W-3 env fallback (process.env[opts.envVar]) — must stay env-late.
-  'src/lib/api-key-resolver.ts': 2,
-  // outbox config group (BOT_ERRORS_*) + VITEST detection + TMPDIR (env-late by
-  // design: lib cannot import config, and config WRITES TMPDIR at load — the env
-  // var is the sanctioned lib-side channel). SAFE_SHAPE_CRED_PATH is
-  // config-published (#2192 slice 3b); the DIR/test/identity vars stay env-late
-  // (absence semantics feed vitest isolation + outbox provenance policy).
-  'src/lib/bot-errors-outbox.ts': 19,
-  // BOT_ERRORS_{JID,EXPECTED_JID,REQUIRE_EXPECTED} + EMIT_ALERT_THROTTLE_MS
-  // config-published (#2192 slices 3a+3b — TMPDIR pattern; validation and the
-  // call-time throttle getter stay here). WHATSOUP_ALERT_SINK stays env-late:
-  // verifier dial (#2510), injected out-of-band at runtime.
-  'src/lib/emit-alert.ts': 6,
-  // FLEET_HEALTH_VERIFY_GATE rollout enum (off/shadow/warn/enforce) — env-late
-  // by design: lib cannot import config, and the dial must flip live without a
-  // restart during staged fleet rollouts.
-  'src/lib/fleet-health-gate.ts': 1,
-  // build-meta env lookup (bounded key list, git identity).
-  'src/lib/git-env.ts': 2,
-  // INSTANCE_CONFIG read — bootstrap protocol (pairs with config.ts:450).
-  'src/lib/instance-context.ts': 1,
-  // secret resolver + REQUIRE_OS_KEYRING flag + XDG ambient — resolver stays
-  // env-late. Fifth site: lookupEnvCredential, the env-only read for values
-  // that are authoritative by contract (launcher-provenanced health token).
-  'src/lib/keyring.ts': 5,
-  // CLAUDE_CONFIG_DIR ambient Claude path (typed config.claudeConfigDir candidate, slice-4).
-  'src/lib/model-advisor.ts': 1,
-  // BOT_ERRORS_STATE_DIR + WHATSOUP_INSTANCE + XDG ambient — slice-3 typed outbox.
-  'src/lib/recovery-authority-store.ts': 3,
-  // bootstrap-early logger (LOG_LEVEL/LOG_DIR/VITEST) — cannot import config (eval-order cycle).
-  'src/logger.ts': 3,
-  // preflight import probe (2) — remaining after the slice-2 migrations.
-  'src/main.ts': 2,
-  // memory-write API key resolver — must stay env-late (secret surface).
-  'src/mcp/register-all.ts': 1,
-  // whole-object process.env → resolveReleaseIdentity (build/release identity).
-  'src/runtimes/agent/capability-obligation-runtime.ts': 1,
-  // exemplar pure resolver `env: Env = process.env` param-defaults — the idiom to extend.
-  'src/runtimes/agent/handoff-distill-config.ts': 3,
-  // passes env into the pure resolver at the call boundary (not a bypass).
-  'src/runtimes/agent/handoff-distill-coordinator.ts': 2,
-  // child-env forward for canary probe (explicit allow-list of ambient vars).
-  'src/runtimes/agent/provider-canary-proof.ts': 6,
-  // child-env builder: explicit allow-list, not passthrough — highest-leak-risk seam.
-  'src/runtimes/agent/providers/child-env.ts': 35,
-  // VITEST/NODE_ENV detection + `deps.env ?? process.env` DI seam.
-  'src/runtimes/agent/providers/claude-filestore-heal.ts': 2,
-  // child-env forward (HOME/PATH/USER/CLAUDE_CONFIG_DIR) for usability adapters.
-  'src/runtimes/agent/providers/primary-model-usability-adapters.ts': 4,
-  // WHATSOUP_PROVIDER_FALLBACK_* + DIAGNOSTIC_BUNDLE tunables — slice-3 typed fallback config.
-  'src/runtimes/agent/runtime-tunables.ts': 6,
-  // RESPONSE_REGISTRY_DISPATCH + DIAGNOSTIC_BUNDLE flags — slice-2/3 typed fields.
-  'src/runtimes/agent/runtime-turn-result-handler.ts': 2,
-  // child-env forward (HOME/PATH/USER/CLAUDE_CONFIG_DIR) for the auth-status probe.
-  'src/runtimes/agent/runtime.ts': 4,
-  // positiveIntEnv dynamic-key helper + CLAUDE_CONFIG_DIR ambient (gemini keys migrated in slice-1).
-  'src/runtimes/agent/session.ts': 2,
-  // MW_MIND_RUN_ID external-subsystem per-run id (read 3×, same value).
-  'src/runtimes/chat/enrichment/fact-export-queue.ts': 3,
-  // transcription model/python path — slice-4 typed config.transcription.fasterWhisper.*.
-  'src/runtimes/chat/providers/transcription/faster-whisper.ts': 2,
-  // PATH ambient executable lookup.
-  'src/runtimes/chat/providers/transcription/local-audio.ts': 1,
-  // transcription model/bin path — slice-4 typed config.transcription.whisperCpp.*.
-  'src/runtimes/chat/providers/transcription/whisper-cpp.ts': 2,
-  // WHATSOUP_PAIR_NUMBER transport pairing — slice-3 typed field.
-  'src/transport/auth.ts': 4,
-  // WHATSOUP_BAILEYS_VERSION param-default — slice-3 typed field.
-  'src/transport/baileys-version.ts': 1,
-  // bounded relay env key lookup.
-  'src/transport/imessage/imsg-rpc-relay.ts': 1,
-};
+interface AllowlistRow {
+  readonly file: string;
+  readonly allowedUnmarkedSites: number;
+  readonly reason: string;
+}
+
+// SSOT shared with the eslint warn mirror (#2192 slice 5a):
+// eslint-rules/env-read-allowlist.json. This test stays the AUTHORITY — the
+// lexical line-grain scan below is suppression-immune by construction; the
+// eslint rule only mirrors these pins at editor latency. Fail closed on a
+// malformed SSOT: a corrupt file must never read as "nothing allowed" (empty
+// scan passes) nor as allow-everything.
+const allowlistPath = resolve(repoRoot, 'eslint-rules/env-read-allowlist.json');
+const allowlistRaw = JSON.parse(readFileSync(allowlistPath, 'utf8')) as { rows: AllowlistRow[] };
+if (!Array.isArray(allowlistRaw.rows) || allowlistRaw.rows.length === 0) {
+  throw new Error(`env-read-allowlist.json malformed: expected non-empty rows[] at ${allowlistPath}`);
+}
+for (const row of allowlistRaw.rows) {
+  if (
+    typeof row.file !== 'string' || row.file.length === 0
+    || !Number.isInteger(row.allowedUnmarkedSites) || row.allowedUnmarkedSites <= 0
+    || typeof row.reason !== 'string' || row.reason.length === 0
+  ) {
+    throw new Error(`env-read-allowlist.json malformed row: ${JSON.stringify(row)}`);
+  }
+}
+const ALLOWLIST: Record<string, number> = Object.fromEntries(
+  allowlistRaw.rows.map((row) => [row.file, row.allowedUnmarkedSites]),
+);
 
 function collectSrcFiles(): string[] {
   return readdirSync(srcRoot, { recursive: true, withFileTypes: true })
@@ -149,19 +76,50 @@ function isCommentLine(line: string): boolean {
   return trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*');
 }
 
-function collectEnvSites(): Map<string, number> {
-  const counts = new Map<string, number>();
+// The one file whose counted sites need no per-site markers (#2192 slice 5b):
+// the SSOT conversion seam itself. Everything else justifies every line.
+const FILE_LEVEL_EXEMPTIONS = new Set(['src/config.ts']);
+
+const MARKER_RE = /env-allowed:\s*(.+)/;
+
+function meetsMarkerFloor(text: string): boolean {
+  const match = MARKER_RE.exec(text);
+  if (!match) return false;
+  const reason = match[1].trim();
+  const words = reason.match(/[A-Za-z0-9][A-Za-z0-9'-]*/g) ?? [];
+  return reason.length >= 16 && words.length >= 3;
+}
+
+interface FileSites {
+  counted: number;
+  marked: number;
+  /** 1-indexed line numbers of counted sites with no floor-passing marker. */
+  unmarked: number[];
+}
+
+function collectEnvSiteDetail(): Map<string, FileSites> {
+  const detail = new Map<string, FileSites>();
   for (const file of collectSrcFiles()) {
     const relative = file.replace(repoRoot + '/', '');
     const lines = readFileSync(file, 'utf8').split('\n');
-    let count = 0;
-    for (const line of lines) {
+    const sites: FileSites = { counted: 0, marked: 0, unmarked: [] };
+    for (let i = 0; i < lines.length; i += 1) {
+      const line = lines[i]!;
       if (isCommentLine(line)) continue;
-      if (ENV_ACCESS_PATTERN.test(line)) count += 1;
+      if (!ENV_ACCESS_PATTERN.test(line)) continue;
+      sites.counted += 1;
+      const sameLine = meetsMarkerFloor(line);
+      const lineAbove = i > 0 && isCommentLine(lines[i - 1]!) && meetsMarkerFloor(lines[i - 1]!);
+      if (sameLine || lineAbove) sites.marked += 1;
+      else sites.unmarked.push(i + 1);
     }
-    if (count > 0) counts.set(relative, count);
+    if (sites.counted > 0) detail.set(relative, sites);
   }
-  return counts;
+  return detail;
+}
+
+function collectEnvSites(): Map<string, number> {
+  return new Map([...collectEnvSiteDetail()].map(([file, sites]) => [file, sites.counted]));
 }
 
 describe('process.env read allowlist ratchet', () => {
@@ -180,5 +138,36 @@ describe('process.env read allowlist ratchet', () => {
     // config.ts is the conversion layer and must always appear — if it ever
     // vanishes from the scan, the file discovery is broken, not the code.
     expect(collectEnvSites().get('src/config.ts')).toBeGreaterThan(0);
+  });
+
+  it('every counted site outside the config seam carries a floor-passing env-allowed marker (#2192 5b)', () => {
+    const offenders = Object.fromEntries(
+      [...collectEnvSiteDetail()]
+        .filter(([file]) => !FILE_LEVEL_EXEMPTIONS.has(file))
+        .filter(([, sites]) => sites.unmarked.length > 0)
+        .map(([file, sites]) => [file, sites.unmarked]),
+    );
+    expect(
+      offenders,
+      'Counted process.env sites without an env-allowed justification (same '
+        + 'line or the line above, >=16 chars / >=3 words). Add the marker in '
+        + 'the same reviewed diff — or route the value through src/config.ts.',
+    ).toEqual({});
+  });
+
+  it('cross-assertion: marked + unmarked equals the pinned count for every file', () => {
+    for (const [file, sites] of collectEnvSiteDetail()) {
+      expect(sites.marked + sites.unmarked.length, `${file} classifier drift`).toBe(sites.counted);
+      expect(ALLOWLIST[file], `${file} missing from SSOT`).toBe(sites.counted);
+    }
+  });
+
+  it('config.ts is the ONLY file-level exemption and genuinely relies on it', () => {
+    expect([...FILE_LEVEL_EXEMPTIONS]).toEqual(['src/config.ts']);
+    // The seam must actually have unmarked sites — if someone sweeps markers
+    // into config.ts, the exemption is dead code and this contract stales.
+    const seam = collectEnvSiteDetail().get('src/config.ts');
+    expect(seam).toBeDefined();
+    expect(seam!.unmarked.length).toBeGreaterThan(0);
   });
 });

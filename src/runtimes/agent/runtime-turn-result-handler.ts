@@ -72,6 +72,7 @@ export interface ProviderFallbackActivation {
 }
 
 function responseRegistryDispatchEnabled(): boolean {
+  // env-allowed: staged-rollout dial pair; live-flip semantics, flag deletes at GA
   return process.env['WHATSOUP_RESPONSE_REGISTRY_DISPATCH'] === '1';
 }
 
@@ -754,6 +755,7 @@ export interface ProviderFailureResultContext {
 }
 
 function diagnosticBundleEnabled(): boolean {
+  // env-allowed: staged-rollout dial pair; live-flip semantics, flag deletes at GA
   return process.env['WHATSOUP_DIAGNOSTIC_BUNDLE'] === '1';
 }
 

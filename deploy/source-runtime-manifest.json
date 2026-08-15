@@ -5,7 +5,7 @@
   "entrypoints": [
     {
       "path": "src/main.ts",
-      "sha256": "aaffd902c34ecdc25bba6f9716f81fc6dd13f3d0081967136d0db8bc833b012b",
+      "sha256": "21412e833c01baaf387244ccb3ffba746ecc1a80cae1f7b79780d1aeaef22db9",
       "mustContain": [
         "startHealthServer",
         "createConnection"
@@ -41,7 +41,7 @@
     },
     {
       "path": "src/transport/connection.ts",
-      "sha256": "5d108a52f6390236f4379d97235094f58e3f1d8225d9178b18c80f4ad5d63503",
+      "sha256": "4d6b3e6b63d9f8491bd8b69f22020999f550f94bc7bb0f5f229f08e1afbe2707",
       "mustContain": [
         "decideDisconnectAction",
         "QR code received",
@@ -52,7 +52,7 @@
     },
     {
       "path": "src/transport/auth.ts",
-      "sha256": "71451a527002b9f19ae938c802714b83bbb66e3038c8de01526b57b976bab317",
+      "sha256": "9d3b7245372ddd86c505804c6ab614d24d71ae4a54319a71096de4642608e675",
       "mustContain": [
         "useMultiFileAuthState",
         "decideDisconnectAction"
@@ -71,7 +71,7 @@
     },
     {
       "path": "src/runtimes/agent/session.ts",
-      "sha256": "fe93b6021b58e58fd15020089c5c17a8c2998bd2353ea0a36d2bd318a91b33f0",
+      "sha256": "911d359d844bb934db4421c6a2d7e16c1de0f904813503d577631b5c6b1a7285",
       "mustContain": [
         "composeWithExactLineDedup"
       ],

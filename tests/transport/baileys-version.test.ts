@@ -12,7 +12,6 @@ import {
 } from '../../src/transport/baileys-version.ts';
 
 afterEach(() => {
-  delete process.env['WHATSOUP_BAILEYS_VERSION'];
   vi.clearAllMocks();
 });
 
@@ -26,13 +25,24 @@ describe('baileys-version', () => {
   });
 
   it('uses a pinned Baileys version without calling the network resolver', async () => {
-    process.env['WHATSOUP_BAILEYS_VERSION'] = '2.3000.1021';
-
-    await expect(resolveBaileysVersion()).resolves.toEqual({
+    await expect(resolveBaileysVersion('2.3000.1021')).resolves.toEqual({
       version: [2, 3000, 1021],
       source: 'pinned',
     });
     expect(fetchLatestBaileysVersion).not.toHaveBeenCalled();
+  });
+
+  it('ignores ambient env — only the passed pin value matters (#2192 s4a)', async () => {
+    process.env['WHATSOUP_BAILEYS_VERSION'] = '9.9999.9999';
+    try {
+      await expect(resolveBaileysVersion()).resolves.toEqual({
+        version: [2, 2413, 1],
+        source: 'latest',
+      });
+    } finally {
+      delete process.env['WHATSOUP_BAILEYS_VERSION'];
+    }
+    expect(fetchLatestBaileysVersion).toHaveBeenCalledTimes(1);
   });
 
   it('formats version tuples for diagnostics', () => {

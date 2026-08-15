@@ -54,6 +54,7 @@ export interface ImsgRpcRelay {
 function allowedEnvironment(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const key of ALLOWED_ENV_KEYS) {
+    // env-allowed: bounded explicit-key env lookup; keys enumerated in-code
     const value = process.env[key];
     if (value !== undefined) env[key] = value;
   }

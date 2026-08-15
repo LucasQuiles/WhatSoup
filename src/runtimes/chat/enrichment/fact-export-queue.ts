@@ -135,6 +135,7 @@ export function enqueueFacts(
   db: Database,
   facts: ExportableFact[],
 ): EnqueueFactsResult {
+  // env-allowed: external-subsystem per-run id; interop channel by design
   const runId = process.env.MW_MIND_RUN_ID;
 
   if (facts.length === 0) {
@@ -275,6 +276,7 @@ export interface LeaseOptions {
  * slots or wedge the queue head.
  */
 export function leasePendingFacts(db: Database, opts: LeaseOptions): LeasedFact[] {
+  // env-allowed: external-subsystem per-run id; interop channel by design
   const runId = process.env.MW_MIND_RUN_ID;
 
   const rows = db.raw
@@ -393,6 +395,7 @@ const TERMINAL_STATES = new Set(['exported', 'quarantined', 'retry_exhausted', '
  * crash-reconciliation window between remote write and local ack.
  */
 export function ackFacts(db: Database, opts: AckOptions): Array<{ factUid: string; result: AckResultCode }> {
+  // env-allowed: external-subsystem per-run id; interop channel by design
   const runId = process.env.MW_MIND_RUN_ID;
   const maxAttempts = opts.maxAttempts ?? DEFAULT_FACT_EXPORT_MAX_ATTEMPTS;
   const backoffBase = opts.backoffBaseSeconds ?? DEFAULT_FACT_EXPORT_BACKOFF_BASE_SEC;
