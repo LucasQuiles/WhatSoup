@@ -177,30 +177,47 @@ export function getTracker(port: ChatTransportPort, mapKey?: string): OperationT
   return port.operationTracker;
 }
 
-export async function sendDirect(port: ChatTransportPort, chatJid: string, text: string, bypassEchoGuard = false): Promise<boolean> {
+/**
+ * Direct-send outcome envelope (#2981 car-B). `messageId` is the transport's
+ * sent-message id when the send is synchronously attributable (bypass and
+ * fallback paths return the messenger's SubmissionReceipt id); it is null on
+ * the queue path — the queue processes asynchronously and the outcome is
+ * deferred by design (car-A note below) — and on failure. F2a reply-threading
+ * (#2121) consumes this envelope.
+ */
+export interface SendDirectOutcome {
+  readonly accepted: boolean;
+  readonly messageId: string | null;
+}
+
+export async function sendDirectWithReceipt(port: ChatTransportPort, chatJid: string, text: string, bypassEchoGuard = false): Promise<SendDirectOutcome> {
   if (bypassEchoGuard) {
     // Bypass queue entirely — direct send for admin responses
     try {
-      await port.messenger.sendMessage(chatJid, text);
-      return true;
+      const receipt = await port.messenger.sendMessage(chatJid, text);
+      return { accepted: true, messageId: receipt.waMessageId };
     } catch (err) {
       log.error({ err }, 'sendDirect bypass failed');
-      return false;
+      return { accepted: false, messageId: null };
     }
   }
   const queue = port.getQueueForChat(chatJid);
   if (queue) {
-    // Queue path: enqueueText is void (queue processes async). Return true =
-    // accepted into queue. The actual send outcome is deferred to the queue's
+    // Queue path: enqueueText is void (queue processes async). Accepted =
+    // taken into queue. The actual send outcome is deferred to the queue's
     // own processing and is NOT observable here by design. #2981 car-A.
     queue.enqueueText(text);
-    return true;
+    return { accepted: true, messageId: null };
   }
   try {
-    await port.messenger.sendMessage(chatJid, text);
-    return true;
+    const receipt = await port.messenger.sendMessage(chatJid, text);
+    return { accepted: true, messageId: receipt.waMessageId };
   } catch (err) {
     log.error({ err }, 'sendDirect fallback failed');
-    return false;
+    return { accepted: false, messageId: null };
   }
+}
+
+export async function sendDirect(port: ChatTransportPort, chatJid: string, text: string, bypassEchoGuard = false): Promise<boolean> {
+  return (await sendDirectWithReceipt(port, chatJid, text, bypassEchoGuard)).accepted;
 }
