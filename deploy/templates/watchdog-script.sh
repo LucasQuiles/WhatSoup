@@ -752,6 +752,15 @@ def current_credential_dead_signal():
     return None
 
 
+def degradation_causes_contain_poison():
+    return (
+        isinstance(degradation_causes, list)
+        and all(isinstance(cause, str) for cause in degradation_causes)
+        and "agent_runtime_unhealthy" in degradation_causes
+        and "agent_outbound_queue_poisoned" in degradation_causes
+    )
+
+
 bounded_outbound_poison_transport = (
     service_mode is None
     and http_code == "503"
@@ -773,7 +782,11 @@ bounded_outbound_poison_transport = (
     and type(poisoned_scopes) is int
     and poisoned_scopes > 0
 )
-if bounded_outbound_poison_transport:
+contained_outbound_poison = (
+    bounded_outbound_poison_transport
+    and degradation_causes_contain_poison()
+)
+if contained_outbound_poison:
     # Provider credential death owns a durable marker and is independently
     # operator-actionable. It takes precedence only after this exact connected,
     # fresh transport proof, so disconnected or stale evidence still follows
@@ -785,17 +798,11 @@ if bounded_outbound_poison_transport:
             file=sys.stderr,
         )
         sys.exit(3)
-
-exact_outbound_poison = (
-    bounded_outbound_poison_transport
-    and isinstance(degradation_causes, list)
-    and len(degradation_causes) == 2
-    and all(isinstance(cause, str) for cause in degradation_causes)
-    and set(degradation_causes) == {
-        "agent_runtime_unhealthy",
-        "agent_outbound_queue_poisoned",
-    }
-)
+    print(
+        "outbound queue poison: operator reconciliation required, not restarting",
+        file=sys.stderr,
+    )
+    sys.exit(7)
 # A bot that is disconnected but actively *recovering* (connecting/reconnecting/
 # cooldown) with FRESH liveness (a recent pong) is making progress on its own.
 # Restarting it interrupts the reconnect, resets the cold-start clock, and (on
@@ -826,7 +833,7 @@ if not recovering_with_fresh_pong:
 if pong_age is not None and pong_age > STALE_PONG_SECONDS:
     reasons.append(f"last_pong_age={pong_age:.0f}s")
 
-if reasons and not exact_outbound_poison:
+if reasons:
     print("; ".join(reasons), file=sys.stderr)
     sys.exit(1)
 
@@ -849,16 +856,6 @@ credential_dead_signal = current_credential_dead_signal()
 if credential_dead_signal:
     print(f"CREDENTIAL-DEAD: {credential_dead_signal} — reauth required", file=sys.stderr)
     sys.exit(3)
-
-# A pure outbound-poison verdict suppresses automatic restart only after the
-# stronger provider-credential verdict above has had first refusal. Otherwise
-# a poisoned + credential-dead process would skip the durable credential marker.
-if exact_outbound_poison:
-    print(
-        "outbound queue poison: operator reconciliation required, not restarting",
-        file=sys.stderr,
-    )
-    sys.exit(7)
 
 # Recovery is the ONLY marker-clearing exit, so it additionally demands a
 # coherent, fresh response: HTTP 200 and a generated_at inside the drain

@@ -991,8 +991,10 @@ restart, replay, or infer delivery.
 
 Follow-up precedence review found that the first implementation classified poison before
 provider credential death. The final decision order preserves `CREDENTIAL-DEAD` and its
-marker when both signals are conclusive, and accepts `OUTBOUND-POISON` only for the exact
-pure-poison shape. Extra degradation causes fail closed through the ordinary restart path.
+marker when both signals are conclusive, and accepts `OUTBOUND-POISON` only when the
+bounded poison status, transport, freshness, and required cause evidence all agree.
+Coexisting degradation-only causes (including inactive-session and recovery/finalization
+debt) retain containment; malformed evidence or additional hard status reasons fail closed.
 
 - [ ] **Step 5: Run static, repository, publication, and release gates**
 
