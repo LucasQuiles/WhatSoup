@@ -139,7 +139,9 @@ value is intentionally insufficient for provider-progress corroboration.
 
 For launchd consumers of `http:health.status`, the exact connected shared/single
 outbound-poison shape maps to the watchdog's `OUTBOUND-POISON` operator-required
-state and suppresses automatic restart. Malformed or mixed hard-status evidence
+state and suppresses automatic restart. A simultaneous conclusive provider-
+credential failure retains `CREDENTIAL-DEAD` precedence and its durable marker.
+Malformed or mixed hard-status evidence
 and transport-liveness failures keep the ordinary fail-closed policy; the
 exception never treats restart as delivery, replay, or recovery proof.
 

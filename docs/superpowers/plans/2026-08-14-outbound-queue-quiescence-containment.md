@@ -989,6 +989,11 @@ watchdog acceptance, malformed/mixed fail-closed cases, and rendered-shell no-ki
 proof. The watchdog publishes `OUTBOUND-POISON`; it does not clear credential markers,
 restart, replay, or infer delivery.
 
+Follow-up precedence review found that the first implementation classified poison before
+provider credential death. The final decision order preserves `CREDENTIAL-DEAD` and its
+marker when both signals are conclusive, and accepts `OUTBOUND-POISON` only for the exact
+pure-poison shape. Extra degradation causes fail closed through the ordinary restart path.
+
 - [ ] **Step 5: Run static, repository, publication, and release gates**
 
 Run each command separately and preserve its exit status:

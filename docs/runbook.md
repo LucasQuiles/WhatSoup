@@ -446,7 +446,9 @@ path when no stronger credential, health-evidence, or restart outcome applies.
 - `OUTBOUND-POISON` → preserve the first outbound failure and durable turn
   evidence, then reconcile delivery ownership before a controlled restart.
   The watchdog accepts only the exact connected agent poison shape and does
-  not restart it because restart clears the process-local containment latch;
+  not restart it because restart clears the process-local containment latch.
+  A simultaneous conclusive provider-credential failure remains
+  `CREDENTIAL-DEAD` and creates or retains its marker before poison handling;
   malformed, mixed hard-status, disconnected, and stale-pong evidence remains
   restart-worthy or health-unknown under the existing fail-closed rules.
 - `CREDENTIAL-DEAD` → re-authenticate the provider on that host. Do not

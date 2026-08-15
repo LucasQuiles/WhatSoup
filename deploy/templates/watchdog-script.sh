@@ -723,7 +723,36 @@ runtime = runtime_raw if isinstance(runtime_raw, dict) else {}
 runtime_agent_raw = runtime.get("agent")
 runtime_agent = runtime_agent_raw if isinstance(runtime_agent_raw, dict) else {}
 poisoned_scopes = runtime_agent.get("outboundQueuePoisonedScopes")
-exact_outbound_poison = (
+turn_capability = turn_capability_raw if isinstance(turn_capability_raw, dict) else {}
+model_status = turn_capability.get("model_usability_status")
+model_usable = turn_capability.get("model_usable")
+model_usable_stale = turn_capability.get("model_usable_stale")
+last_success = turn_capability.get("last_successful_turn_at")
+last_error_class = turn_capability.get("last_turn_error_class")
+last_error = turn_capability.get("last_turn_error_at")
+fallback_reason = instance.get("fallbackReason")
+
+
+def current_credential_dead_signal():
+    success_time = evidence_timestamp(last_success, "last successful turn", "milliseconds")
+    error_time = evidence_timestamp(last_error, "last turn error", "milliseconds")
+    auth_error_superseded = (
+        last_error_class == "auth-required"
+        and success_time is not None
+        and error_time is not None
+        and success_time > error_time
+    )
+    auth_error_current = last_error_class == "auth-required" and not auth_error_superseded
+    if model_status == "credential-unavailable":
+        return "turn_capability.model_usability_status=credential-unavailable"
+    if fallback_reason == "auth-required":
+        return "instance.fallbackReason=auth-required"
+    if auth_error_current:
+        return "turn_capability.last_turn_error_class=auth-required with no later successful turn"
+    return None
+
+
+bounded_outbound_poison_transport = (
     service_mode is None
     and http_code == "503"
     and status == "unhealthy"
@@ -740,21 +769,33 @@ exact_outbound_poison = (
         "agent_runtime_unhealthy",
         "runtime.outbound_queue_poisoned",
     ]
-    and isinstance(degradation_causes, list)
-    and all(isinstance(cause, str) for cause in degradation_causes)
-    and "agent_runtime_unhealthy" in degradation_causes
-    and "agent_outbound_queue_poisoned" in degradation_causes
     and runtime_agent.get("outboundQueuePoisoned") is True
     and type(poisoned_scopes) is int
     and poisoned_scopes > 0
 )
-if exact_outbound_poison:
-    print(
-        "outbound queue poison: operator reconciliation required, not restarting",
-        file=sys.stderr,
-    )
-    sys.exit(7)
+if bounded_outbound_poison_transport:
+    # Provider credential death owns a durable marker and is independently
+    # operator-actionable. It takes precedence only after this exact connected,
+    # fresh transport proof, so disconnected or stale evidence still follows
+    # the ordinary liveness policy.
+    poison_credential_dead_signal = current_credential_dead_signal()
+    if poison_credential_dead_signal:
+        print(
+            f"CREDENTIAL-DEAD: {poison_credential_dead_signal} — reauth required",
+            file=sys.stderr,
+        )
+        sys.exit(3)
 
+exact_outbound_poison = (
+    bounded_outbound_poison_transport
+    and isinstance(degradation_causes, list)
+    and len(degradation_causes) == 2
+    and all(isinstance(cause, str) for cause in degradation_causes)
+    and set(degradation_causes) == {
+        "agent_runtime_unhealthy",
+        "agent_outbound_queue_poisoned",
+    }
+)
 # A bot that is disconnected but actively *recovering* (connecting/reconnecting/
 # cooldown) with FRESH liveness (a recent pong) is making progress on its own.
 # Restarting it interrupts the reconnect, resets the cold-start clock, and (on
@@ -785,11 +826,13 @@ if not recovering_with_fresh_pong:
 if pong_age is not None and pong_age > STALE_PONG_SECONDS:
     reasons.append(f"last_pong_age={pong_age:.0f}s")
 
-if reasons:
+if reasons and not exact_outbound_poison:
     print("; ".join(reasons), file=sys.stderr)
     sys.exit(1)
 
-# Provider credential state is evaluated only after liveness passes:
+# Provider credential state is evaluated only after liveness passes, except
+# when the bounded poison predicate above already proves fresh connected
+# transport and must preserve a stronger credential-dead verdict:
 #   exit 3 — dead: a current normalized auth-required signal. A restart cannot
 #       mint a credential (the 12-day mini11 outage logged "ok"); the shell
 #       logs CREDENTIAL-DEAD and creates/retains the marker.
@@ -802,37 +845,20 @@ if reasons:
 #       (fallbackReason non-null — presence, not value).
 # Exits 4/5 never restart and never touch the marker; the shell ORs exit 5
 # with marker presence to pick the CREDENTIAL-UNKNOWN final log state.
-turn_capability = turn_capability_raw if isinstance(turn_capability_raw, dict) else {}
-model_status = turn_capability.get("model_usability_status")
-model_usable = turn_capability.get("model_usable")
-model_usable_stale = turn_capability.get("model_usable_stale")
-last_success = turn_capability.get("last_successful_turn_at")
-last_error_class = turn_capability.get("last_turn_error_class")
-last_error = turn_capability.get("last_turn_error_at")
-fallback_reason = instance.get("fallbackReason")
-
-
-success_time = evidence_timestamp(last_success, "last successful turn", "milliseconds")
-error_time = evidence_timestamp(last_error, "last turn error", "milliseconds")
-auth_error_superseded = (
-    last_error_class == "auth-required"
-    and success_time is not None
-    and error_time is not None
-    and success_time > error_time
-)
-auth_error_current = last_error_class == "auth-required" and not auth_error_superseded
-credential_dead_signal = None
-if model_status == "credential-unavailable":
-    credential_dead_signal = "turn_capability.model_usability_status=credential-unavailable"
-elif fallback_reason == "auth-required":
-    credential_dead_signal = "instance.fallbackReason=auth-required"
-elif auth_error_current:
-    credential_dead_signal = (
-        "turn_capability.last_turn_error_class=auth-required with no later successful turn"
-    )
+credential_dead_signal = current_credential_dead_signal()
 if credential_dead_signal:
     print(f"CREDENTIAL-DEAD: {credential_dead_signal} — reauth required", file=sys.stderr)
     sys.exit(3)
+
+# A pure outbound-poison verdict suppresses automatic restart only after the
+# stronger provider-credential verdict above has had first refusal. Otherwise
+# a poisoned + credential-dead process would skip the durable credential marker.
+if exact_outbound_poison:
+    print(
+        "outbound queue poison: operator reconciliation required, not restarting",
+        file=sys.stderr,
+    )
+    sys.exit(7)
 
 # Recovery is the ONLY marker-clearing exit, so it additionally demands a
 # coherent, fresh response: HTTP 200 and a generated_at inside the drain

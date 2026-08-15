@@ -301,6 +301,28 @@ class TestOutboundPoisonNoAutomaticRestart:
     def test_exact_connected_poison_is_operator_required_not_restart_worthy(self):
         assert _run_decision(self._body(), 503) == 7
 
+    @pytest.mark.parametrize(
+        ("field_path", "value", "extra_cause"),
+        [
+            (
+                ("turn_capability", "model_usability_status"),
+                "credential-unavailable",
+                "model_unusable",
+            ),
+            (("instance", "fallbackReason"), "auth-required", "provider_fallback_active"),
+        ],
+    )
+    def test_poison_preserves_credential_dead_precedence(
+        self, field_path, value, extra_cause
+    ):
+        body = self._body()
+        target = body
+        for key in field_path[:-1]:
+            target = target[key]
+        target[field_path[-1]] = value
+        body["degradation_causes"].append(extra_cause)
+        assert _run_decision(body, 503) == 3
+
     def test_malformed_or_mixed_poison_evidence_fails_closed(self):
         cases = [
             (("status_reasons",), ["runtime.outbound_queue_poisoned"]),
@@ -313,6 +335,16 @@ class TestOutboundPoisonNoAutomaticRestart:
             (("runtime", "agent", "outboundQueuePoisonedScopes"), True),
             (("runtime", "agent", "outboundQueuePoisonedScopes"), 0),
             (("degradation_causes",), None),
+            (("degradation_causes",), [
+                "agent_runtime_unhealthy",
+                "agent_outbound_queue_poisoned",
+                "agent_session_inactive",
+            ]),
+            (("degradation_causes",), [
+                "agent_runtime_unhealthy",
+                "agent_outbound_queue_poisoned",
+                "event_loop_starved",
+            ]),
             (("instance", "name"), "another-agent"),
             (("instance", "mode"), "chat"),
             (("whatsapp", "connected"), False),
@@ -450,6 +482,43 @@ class TestRenderedWatchdogLaunchdExitPolicy:
         ).exists()
         assert "OUTBOUND-POISON" in log_text
         assert log_text.rstrip().endswith("OUTBOUND-POISON")
+
+    @pytest.mark.parametrize(
+        ("field_path", "value", "extra_cause"),
+        [
+            (
+                ("turn_capability", "model_usability_status"),
+                "credential-unavailable",
+                "model_unusable",
+            ),
+            (("instance", "fallbackReason"), "auth-required", "provider_fallback_active"),
+        ],
+    )
+    def test_poison_with_dead_provider_credential_creates_marker_without_kickstart(
+        self, tmp_path, field_path, value, extra_cause
+    ):
+        bot_name = "poisoned-credential-dead-agent"
+        body = TestOutboundPoisonNoAutomaticRestart._body()
+        body["instance"]["name"] = bot_name
+        target = body
+        for key in field_path[:-1]:
+            target = target[key]
+        target[field_path[-1]] = value
+        body["degradation_causes"].append(extra_cause)
+
+        calls = _run_rendered_unreachable_watchdog(
+            tmp_path,
+            bot_name=bot_name,
+            launchd_snapshot="gui = {\n  state = running\n  last exit code = 0\n}",
+            bot_health=body,
+        )
+        log_dir = tmp_path / "home" / "Library" / "Logs" / "whatsoup"
+        log_text = (log_dir / f"{bot_name}-watchdog.log").read_text(encoding="utf-8")
+
+        assert "kickstart" not in calls
+        assert (log_dir / f"{bot_name}-credential-dead.marker").exists()
+        assert "OUTBOUND-POISON" not in log_text
+        assert log_text.rstrip().endswith("CREDENTIAL-DEAD")
 
     def test_unreachable_bot_with_last_exit_78_is_not_kickstarted(self, tmp_path):
         calls = _run_rendered_unreachable_watchdog(
