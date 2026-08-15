@@ -35,9 +35,15 @@ credentials from the secure store at use (agent child creation, configured
 BYOK services). Direct environment launches remain a compatibility surface,
 not the managed-fleet credential contract.
 
-> **Instance-type summary:** no instance type receives provider keys from the
-managed launcher. Required credentials are validated when the selected provider
-or feature is used; passive instances do not use them.
+> **Instance-type summary:** the managed launcher exports a per-type,
+secure-store-provenanced subset into the runtime environment: `chat` instances
+receive `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and `PINECONE_API_KEY`
+(startup-fatal when missing); `agent` and `passive` instances receive
+`OPENAI_API_KEY` (Whisper) and `PINECONE_API_KEY` (`knowledge_search`) only
+when present in the store — passive instances leave them unused. `ANTHROPIC_API_KEY`
+is never exported to agent instances (it would override subscription billing).
+Required credentials are additionally validated when the selected provider or
+feature is used.
 
 ### Audio Transcription (local providers)
 
@@ -275,18 +281,26 @@ their existing mapped-environment compatibility order.
 The health-token fleet-discovery path is intentionally separate. Its
 account-specific file is
 `$XDG_CONFIG_HOME/whatsoup/instances/<instance>/tokens.env`, not a
-`credentials/<service>.key` file. Fleet discovery retains this private file
-while the runtime authorizes protected routes with the scoped
-`whatsoup-health-token` Keychain/`secret-tool` entry. The file is exactly one
+`credentials/<service>.key` file. The file is exactly one
 `WHATSOUP_HEALTH_TOKEN=<64-lowercase-hex>` assignment, owned by the current UID
 with mode `0600`, under a real owner-controlled directory that is not group- or
 world-writable.
 
-Protected health routes resolve `service=whatsoup-health-token` with
-`account=<instance name>` for each authorization check and do not consult the
-legacy shared service alias. A process-local `WHATSOUP_HEALTH_TOKEN` remains a
-compatibility fallback for direct non-managed launches; `deploy/whatsoup`
-scrubs it before any managed startup subprocess.
+`tokens.env` is CANONICAL while it exists, and every consumer agrees on it:
+fleet discovery reads the file directly; the managed launcher scrubs any
+inherited `WHATSOUP_HEALTH_TOKEN`, resolves the file (then the scoped Keychain/
+`secret-tool` entry, then the legacy shared alias) and exports the result; and
+protected health routes honor that launcher-provenanced environment token
+FIRST, falling back to the scoped `whatsoup-health-token` entry
+(`account=<instance name>`, no legacy alias) only when no environment token is
+present — direct non-managed launches and the post-migration end state once
+`tokens.env` is retired. A stale scoped-Keychain entry therefore cannot strand
+the fleet after a `tokens.env` rotation (`deploy/generate-health-tokens.sh
+--rotate` mirrors the Keychain only with `--mirror-keyring`). The expected
+token is resolved once per health server and cached — rotation takes effect on
+instance restart; on a resolution miss the server retries at most every 30
+seconds, so a transient Keychain visibility failure cannot lock out the
+control plane.
 
 ### Health Server
 
@@ -759,7 +773,7 @@ The default is a fixed HOME-relative template — it does not consult `LANG`/`LC
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `memory.pinecone.apiKeyEnv` | string | `PINECONE_API_KEY` | Credential selector and compatibility environment-variable name for this instance's Pinecone key. The runtime resolves the corresponding secure-store service at use time; the managed launcher does not inject the value. |
+| `memory.pinecone.apiKeyEnv` | string | `PINECONE_API_KEY` | Credential selector and compatibility environment-variable name for this instance's Pinecone key. The runtime resolves the corresponding secure-store service at use time; under the managed launcher the process-level `PINECONE_API_KEY` is launcher-provenanced (resolved from the secure store at launch after inherited values are scrubbed), so the compatibility name never carries an ambient value. |
 | `memory.pinecone.projectId` | string | env/unset | Optional short project slug guard (not the UUID-form project ID). If the listed index host does not include this slug, readiness returns `project_mismatch` and `knowledge_search` refuses to query. |
 | `memory.pinecone.expectedHostSuffix` | string | env/unset | Optional exact host suffix guard. Use this when two projects have the same index name and you need fail-closed routing. |
 | `memory.pinecone.index` | string | env/`whatsapp-bot` | Primary chat memory/entity index. |
