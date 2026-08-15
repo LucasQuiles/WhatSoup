@@ -35,7 +35,10 @@ const ALLOWLIST: Record<string, number> = {
   // EMIT_ALERT_THROTTLE_MS, + the BOT_ERRORS_RUNTIME_TOOL_FAILURE_ALERTS read
   // behind toolFailureAlertsEnabled.
   'src/config.ts': 45,
-  // param-default `env` seam (WHATSOUP_REPO_ROOT) — new typed-field candidate, not a bypass.
+  // param-default `env` seam (WHATSOUP_REPO_ROOT) — env-late by design
+  // (#2192 s4 verdict: deploy-wrapper assertion input; the resolver VALIDATES
+  // env-vs-module-location agreement, so config-sourcing it would be
+  // self-referential).
   'src/core/arc-binding-health.ts': 1,
   // build-time injected WHATSOUP_GIT_SHA / WHATSOUP_GIT_BRANCH (deploy hook, no typed source).
   'src/core/database-compatibility-early.ts': 2,
@@ -55,7 +58,10 @@ const ALLOWLIST: Record<string, number> = {
   'src/fleet/health-poller.ts': 1,
   // bounded path env-key lookup.
   'src/fleet/paths.ts': 1,
-  // WHATSOUP_DOCKER_ENV + WHATSOUP_NODE detection, PATH ambient — WHATSOUP_NODE is slice-3 typed.
+  // WHATSOUP_DOCKER_ENV + PATH ambient platform detection; WHATSOUP_NODE is
+  // env-late by design (#2192 s4 verdict: set by deploy wrappers in the
+  // GENERATING shell, host-level and pre-instance — a config import would
+  // couple the platform detector to config's load-time side effects).
   'src/fleet/platform.ts': 3,
   // bounded credential-presence env check (envKey !== undefined guard).
   'src/fleet/routes/credentials.ts': 1,
@@ -90,9 +96,13 @@ const ALLOWLIST: Record<string, number> = {
   // env-late. Fifth site: lookupEnvCredential, the env-only read for values
   // that are authoritative by contract (launcher-provenanced health token).
   'src/lib/keyring.ts': 5,
-  // CLAUDE_CONFIG_DIR ambient Claude path (typed config.claudeConfigDir candidate, slice-4).
+  // CLAUDE_CONFIG_DIR — env-late by design (#2192 s4 verdict: external-tool
+  // interop; must track the env the spawned claude CLI sees, and the vitest
+  // isolation setup deletes it — env is the sanctioned channel).
   'src/lib/model-advisor.ts': 1,
-  // BOT_ERRORS_STATE_DIR + WHATSOUP_INSTANCE + XDG ambient — slice-3 typed outbox.
+  // env-late by design (#2192 slice 3c): BOT_ERRORS_STATE_DIR absence selects
+  // the XDG default (absence load-bearing); XDG_DATA_HOME is OS-ambient;
+  // WHATSOUP_INSTANCE is deploy-injected identity (systemd/launchd), never set in src.
   'src/lib/recovery-authority-store.ts': 3,
   // bootstrap-early logger (LOG_LEVEL/LOG_DIR/VITEST) — cannot import config (eval-order cycle).
   'src/logger.ts': 3,
@@ -116,7 +126,10 @@ const ALLOWLIST: Record<string, number> = {
   'src/runtimes/agent/providers/primary-model-usability-adapters.ts': 4,
   // WHATSOUP_PROVIDER_FALLBACK_* + DIAGNOSTIC_BUNDLE tunables — slice-3 typed fallback config.
   'src/runtimes/agent/runtime-tunables.ts': 6,
-  // RESPONSE_REGISTRY_DISPATCH + DIAGNOSTIC_BUNDLE flags — slice-2/3 typed fields.
+  // RESPONSE_REGISTRY_DISPATCH + DIAGNOSTIC_BUNDLE — env-late by design
+  // (#2192 s4 verdict: staged-rollout dial pair, live-flip semantics; the
+  // fleet-health-gate ground applies — transitional flags, typed-field
+  // investment would be throwaway).
   'src/runtimes/agent/runtime-turn-result-handler.ts': 2,
   // child-env forward (HOME/PATH/USER/CLAUDE_CONFIG_DIR) for the auth-status probe.
   'src/runtimes/agent/runtime.ts': 4,
@@ -124,13 +137,18 @@ const ALLOWLIST: Record<string, number> = {
   'src/runtimes/agent/session.ts': 2,
   // MW_MIND_RUN_ID external-subsystem per-run id (read 3×, same value).
   'src/runtimes/chat/enrichment/fact-export-queue.ts': 3,
-  // transcription model/python path — slice-4 typed config.transcription.fasterWhisper.*.
+  // transcription model/python — env-late by design (#2192 s4 verdict:
+  // host-local toolchain; PYTHON absence drives the managed-venv auto-probe
+  // chain, so absence is load-bearing).
   'src/runtimes/chat/providers/transcription/faster-whisper.ts': 2,
   // PATH ambient executable lookup.
   'src/runtimes/chat/providers/transcription/local-audio.ts': 1,
-  // transcription model/bin path — slice-4 typed config.transcription.whisperCpp.*.
+  // transcription model/bin — env-late by design (#2192 s4 verdict:
+  // host-level model path + explicit binary override, ambient toolchain).
   'src/runtimes/chat/providers/transcription/whisper-cpp.ts': 2,
-  // WHATSOUP_PAIR_NUMBER transport pairing — slice-3 typed field.
+  // WHATSOUP_PAIR_NUMBER — env-late by design (#2192 s4 verdict: per-CLI-run
+  // mode selector (QR vs pairing-code) + operator PII; a typed field would
+  // persist E.164 at rest and make an ephemeral per-run choice permanent).
   'src/transport/auth.ts': 4,
   // WHATSOUP_BAILEYS_VERSION param-default — slice-3 typed field.
   'src/transport/baileys-version.ts': 1,

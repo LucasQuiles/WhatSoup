@@ -27,6 +27,18 @@ import { createChildLogger } from '../logger.ts';
  * Derive the state root directory for this instance.
  * Respects BOT_ERRORS_STATE_DIR for testing (see tests/lib/recovery-authority-store.test.ts),
  * otherwise mirrors the XDG_DATA_HOME pattern in keyring.ts and bot-errors-outbox.ts.
+ *
+ * ENV-LATE BY DESIGN (#2192 slice 3c): BOT_ERRORS_STATE_DIR's absence selects
+ * the XDG default (absence is load-bearing — see the stateDir() note in
+ * bot-errors-outbox.ts); XDG_DATA_HOME is OS-ambient; WHATSOUP_INSTANCE is
+ * deploy-injected instance identity (systemd/launchd Environment=), never set
+ * inside src, forwarded to children via the child-env allow-list. None of the
+ * three can move into config without a second source of truth.
+ *
+ * KNOWN INCONSISTENCY (flagged, out of slice scope): this default resolves
+ * under XDG .local/share/whatsoup/instances/<instance>, while
+ * bot-errors-outbox.ts defaults to ~/.local/state/bot-errors — the same
+ * override var lands in different fallback roots across the two readers.
  */
 function state_root(): string {
   const override = process.env['BOT_ERRORS_STATE_DIR'];
