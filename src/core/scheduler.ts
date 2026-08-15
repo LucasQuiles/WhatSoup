@@ -7,7 +7,8 @@ import type { SubmissionReceipt, OutboundMedia } from './types.ts';
 import { nextCronRun } from './cron.ts';
 import { nowUnixSec } from './substrate/time.ts';
 import { errorMessage } from '../lib/error-message.ts';
-import { emitAlertChecked } from '../lib/emit-alert.ts';
+import { clearAlertSourceChecked, emitAlertChecked } from '../lib/emit-alert.ts';
+import { clearRecoveryMarker, loadRecoveryMarkers, setRecoveryMarker } from '../lib/recovery-authority-store.ts';
 
 const log = createChildLogger('scheduler');
 
@@ -135,6 +136,20 @@ export class MessageScheduler {
     this.db = db;
     this.connection = connection;
     this.config = config;
+    // #2415: a restart mid-de-link-episode must restore clear authority
+    // without re-paging — the durable marker survives what the in-memory
+    // latch cannot (same restoration shape as ConnectionManager's markers).
+    if (config.instance) {
+      try {
+        this.deLinkAlertEmitted = loadRecoveryMarkers().has(this.deLinkMarkerKey());
+      } catch {
+        // intentional: marker store unreadable — treat as no prior incident.
+      }
+    }
+  }
+
+  private deLinkMarkerKey(): string {
+    return `scheduler_delinked_send_held:${this.config.instance}`;
   }
 
   start(): void {
@@ -482,8 +497,10 @@ export class MessageScheduler {
     );
 
     if (!this.deLinkAlertEmitted && this.config.instance) {
-      this.deLinkAlertEmitted = true;
-      emitAlertChecked(
+      // #2415: arm the latch (and its durable marker) only on ACCEPTED
+      // emission — a rejected enqueue must retry on the next tick, never
+      // strand the episode alert-less behind a pre-armed latch.
+      const accepted = emitAlertChecked(
         this.config.instance,
         'scheduler_delinked_send_held',
         `whatsoup@${this.config.instance} is DE-LINKED from WhatsApp (logged out) — holding ${ids.length} due scheduled send(s) until re-link; nothing dropped`,
@@ -495,12 +512,40 @@ export class MessageScheduler {
         ].join('\n'),
         'warning',
       );
+      if (accepted) {
+        this.deLinkAlertEmitted = true;
+        try {
+          setRecoveryMarker(this.deLinkMarkerKey());
+        } catch (err) {
+          // intentional: marker durability is best-effort; the in-memory
+          // latch still governs this process, only restart restoration degrades.
+          log.warn({ err }, 'scheduler: de-link recovery marker write failed');
+        }
+      }
     }
   }
 
-  /** Re-arm the de-link alert latch once the instance is linked again. */
+  /**
+   * Clear the de-link owner alert once the instance is linked again (#2415).
+   * The latch releases only on an ACCEPTED durable clear — a rejected enqueue
+   * keeps it armed so the next linked tick retries (no orphaned incident).
+   */
   private clearDeLinkLatch(): void {
     if (!this.deLinkAlertEmitted) return;
+    if (this.config.instance) {
+      const cleared = clearAlertSourceChecked(this.config.instance, 'scheduler_delinked_send_held');
+      if (!cleared) {
+        log.warn({ event: 'scheduler_relink_clear_rejected' }, 'scheduler: de-link clear enqueue rejected; retrying next linked tick');
+        return;
+      }
+      try {
+        clearRecoveryMarker(this.deLinkMarkerKey());
+      } catch (err) {
+        // intentional: marker cleanup is best-effort; a stale marker only
+        // re-arms clear authority on a future restart (idempotent clear).
+        log.warn({ err }, 'scheduler: de-link recovery marker clear failed');
+      }
+    }
     this.deLinkAlertEmitted = false;
     log.info({ event: 'scheduler_relinked' }, 'scheduler: instance re-linked; resuming scheduled sends');
   }
