@@ -55,13 +55,13 @@ describe('bootstrap.ts — isDirectRun auto-execute block', () => {
     await expect(import('../src/bootstrap.ts')).resolves.toBeDefined();
   });
 
-  it('calls console.error(err.message) + process.exit(1) when bootstrap() rejects with an Error', async () => {
+  it('prints err.message to stderr + process.exit(1) when bootstrap() rejects with an Error', async () => {
     vi.resetModules();
     // No argv[2] — bootstrapCommon throws "Usage: whatsoup …"
     process.argv = ['node', '/path/to/bootstrap.ts'];
 
     const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {}) as never);
-    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
 
     vi.doMock('../src/instance-loader.ts', () => ({ loadInstance: vi.fn() }));
     vi.doMock('../src/main.ts', () => ({}));
@@ -70,17 +70,17 @@ describe('bootstrap.ts — isDirectRun auto-execute block', () => {
     await import('../src/bootstrap.ts');
 
     // .catch() fires in a microtask after import; waitFor polls until spy called
-    await vi.waitFor(() => expect(consoleSpy).toHaveBeenCalled(), { timeout: 500 });
-    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('Usage: whatsoup'));
+    await vi.waitFor(() => expect(stderrSpy).toHaveBeenCalled(), { timeout: 500 });
+    expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining('Usage: whatsoup'));
     expect(exitSpy).toHaveBeenCalledWith(1);
   });
 
-  it('calls console.error(String(err)) when bootstrap() rejects with a non-Error value', async () => {
+  it('prints String(err) to stderr when bootstrap() rejects with a non-Error value', async () => {
     vi.resetModules();
     process.argv = ['node', '/path/to/bootstrap.ts', 'loops'];
 
     const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {}) as never);
-    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
 
     // loadInstance throws a non-Error to reach the `String(err)` branch
     vi.doMock('../src/instance-loader.ts', () => ({
@@ -91,8 +91,8 @@ describe('bootstrap.ts — isDirectRun auto-execute block', () => {
 
     await import('../src/bootstrap.ts');
 
-    await vi.waitFor(() => expect(consoleSpy).toHaveBeenCalled(), { timeout: 500 });
-    expect(consoleSpy).toHaveBeenCalledWith('plain string error');
+    await vi.waitFor(() => expect(stderrSpy).toHaveBeenCalled(), { timeout: 500 });
+    expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining('plain string error'));
     expect(exitSpy).toHaveBeenCalledWith(1);
   });
 
@@ -128,29 +128,29 @@ describe('bootstrap-auth.ts — isDirectRun auto-execute block', () => {
     await expect(import('../src/bootstrap-auth.ts')).resolves.toBeDefined();
   });
 
-  it('calls console.error(err.message) + process.exit(1) when bootstrapAuth() rejects with an Error', async () => {
+  it('prints err.message to stderr + process.exit(1) when bootstrapAuth() rejects with an Error', async () => {
     vi.resetModules();
     process.argv = ['node', '/path/to/bootstrap-auth.ts']; // no argv[2]
 
     const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {}) as never);
-    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
 
     vi.doMock('../src/instance-loader.ts', () => ({ loadInstance: vi.fn() }));
     vi.doMock('../src/transport/auth.ts', () => ({}));
 
     await import('../src/bootstrap-auth.ts');
 
-    await vi.waitFor(() => expect(consoleSpy).toHaveBeenCalled(), { timeout: 500 });
-    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('Usage: whatsoup-auth'));
+    await vi.waitFor(() => expect(stderrSpy).toHaveBeenCalled(), { timeout: 500 });
+    expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining('Usage: whatsoup-auth'));
     expect(exitSpy).toHaveBeenCalledWith(1);
   });
 
-  it('calls console.error(String(err)) when bootstrapAuth() rejects with a non-Error value', async () => {
+  it('prints String(err) to stderr when bootstrapAuth() rejects with a non-Error value', async () => {
     vi.resetModules();
     process.argv = ['node', '/path/to/bootstrap-auth.ts', 'personal'];
 
     const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {}) as never);
-    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
 
     vi.doMock('../src/instance-loader.ts', () => ({
       loadInstance: vi.fn(() => { throw 99; }),
@@ -159,8 +159,8 @@ describe('bootstrap-auth.ts — isDirectRun auto-execute block', () => {
 
     await import('../src/bootstrap-auth.ts');
 
-    await vi.waitFor(() => expect(consoleSpy).toHaveBeenCalled(), { timeout: 500 });
-    expect(consoleSpy).toHaveBeenCalledWith('99');
+    await vi.waitFor(() => expect(stderrSpy).toHaveBeenCalled(), { timeout: 500 });
+    expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining('99'));
     expect(exitSpy).toHaveBeenCalledWith(1);
   });
 

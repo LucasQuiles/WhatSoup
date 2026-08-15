@@ -9,6 +9,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { createFleetServer } from './index.ts';
 import { DEFAULT_BIND_ADDRESS, DEFAULT_FLEET_PORT } from './constants.ts';
 import { loadOrCreateFleetTokens } from './token-storage.ts';
+import { printErr } from '../lib/cli-print.ts';
 import { createChildLogger } from '../logger.ts';
 
 const log = createChildLogger('fleet-standalone');
@@ -20,8 +21,9 @@ const db = new DatabaseSync(':memory:');
 
 const tokens = await loadOrCreateFleetTokens();
 log.info({ tokenPrefix: tokens.active.slice(0, 8) }, 'fleet token generated');
-console.log(`Fleet token: ${tokens.active.slice(0, 8)}...`);
-console.log('Console unlock token: full value in ~/.config/whatsoup/fleet-tokens.json (field "active")');
+// Wording is redaction-stable on purpose: a "token:"-style colon or a literal
+// credential path would (correctly) be scrubbed by the print seam.
+printErr('The console unlock token is the "active" field in the fleet-tokens config file.');
 
 const server = createFleetServer({
   db,
@@ -41,5 +43,4 @@ log.info(
   { bindAddress: process.env.FLEET_BIND_ADDRESS ?? DEFAULT_BIND_ADDRESS, port },
   'fleet server listening',
 );
-console.log(`Fleet server listening on http://${process.env.FLEET_BIND_ADDRESS ?? DEFAULT_BIND_ADDRESS}:${port}`);
-console.log('Press Ctrl+C to stop');
+printErr('Press Ctrl+C to stop');

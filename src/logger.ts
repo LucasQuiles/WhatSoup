@@ -60,6 +60,7 @@ if (logDir && fileTransportEnabled) {
   } catch (err) {
     // #2513: log the rolling-file initialization failure so the operator
     // knows the configured file sink is absent (stdout-only fallback).
+    // console-allowed: pino transport construction failed — the logger cannot self-report
     console.error(`LOGGER: rolling-file sink failed: ${err}`);
     transport = undefined;
   }
@@ -69,6 +70,7 @@ if (logDir && fileTransportEnabled) {
 // worker failures are logged and do not terminate the process unobserved.
 if (transport) {
   transport.on('error', (err: unknown) => {
+    // console-allowed: async transport error handler — reporting through pino would recurse into the failing sink
     console.error(`LOGGER: rolling-file sink error: ${String(err)}`);
   });
 }

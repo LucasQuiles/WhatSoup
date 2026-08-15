@@ -1240,7 +1240,7 @@ describe('config — BYOK memory block', () => {
     delete process.env.INSTANCE_CONFIG;
     process.env.MW_MIND_EMBED_URL = 'http://127.0.0.1:9920/embed';
 
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const warnSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     try {
       const { config } = await import('../src/config.ts');
 
@@ -1258,19 +1258,18 @@ describe('config — memory env alias warnings', () => {
     delete process.env.KNOWLEDGE_EMBED_URL;
     process.env.MW_MIND_EMBED_URL = 'http://127.0.0.1:9920/embed';
 
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const warnSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     try {
       const { resolveMemoryConfig } = await import('../src/config.ts');
       resolveMemoryConfig(null);
 
-      expect(warnSpy.mock.calls).toContainEqual([
-        expect.objectContaining({
-          alias: 'MW_MIND_EMBED_URL',
-          canonical: 'memory.pinecone.embedUrl or KNOWLEDGE_EMBED_URL',
-          expires: '2026-10-26',
-        }),
-        'memory.pinecone.embedUrl is using a deprecated environment alias',
+      const aliasLines = [...new Set(warnSpy.mock.calls
+        .map((call) => String(call[0]))
+        .filter((line) => line.includes('"alias":"MW_MIND_EMBED_URL"')))];
+      expect(aliasLines).toEqual([
+        expect.stringContaining('memory.pinecone.embedUrl is using a deprecated environment alias'),
       ]);
+      expect(aliasLines[0]).toContain('"expires":"2026-10-26"');
     } finally {
       warnSpy.mockRestore();
     }
@@ -1281,22 +1280,22 @@ describe('config — memory env alias warnings', () => {
     process.env.KNOWLEDGE_EMBED_URL = 'http://127.0.0.1:9910/embed';
     process.env.MW_MIND_EMBED_URL = 'http://127.0.0.1:9920/embed';
 
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const warnSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     try {
       const { resolveMemoryConfig } = await import('../src/config.ts');
       resolveMemoryConfig(null);
 
-      expect(warnSpy.mock.calls).not.toContainEqual([
-        expect.objectContaining({ alias: 'MW_MIND_EMBED_URL' }),
-        expect.any(String),
-      ]);
+      const aliasLines = warnSpy.mock.calls
+        .map((call) => String(call[0]))
+        .filter((line) => line.includes('"alias":"MW_MIND_EMBED_URL"'));
+      expect(aliasLines).toEqual([]);
     } finally {
       warnSpy.mockRestore();
     }
   });
 
   it('warns when allowedIndexes references a built-in profile that is not declared', async () => {
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const warnSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     try {
       const { resolveMemoryConfig } = await import('../src/config.ts');
       resolveMemoryConfig({
@@ -1308,20 +1307,20 @@ describe('config — memory env alias warnings', () => {
         },
       });
 
-      expect(warnSpy.mock.calls).toContainEqual([
-        expect.objectContaining({
-          profile: 'mw-mind',
-          expires: '2026-10-26',
-        }),
-        'memory.pinecone.allowedIndexes references a built-in profile that is not declared in knowledgeProfiles',
+      const profileLines = [...new Set(warnSpy.mock.calls
+        .map((call) => String(call[0]))
+        .filter((line) => line.includes('"profile":"mw-mind"')))];
+      expect(profileLines).toEqual([
+        expect.stringContaining('references a built-in profile that is not declared in knowledgeProfiles'),
       ]);
+      expect(profileLines[0]).toContain('"expires":"2026-10-26"');
     } finally {
       warnSpy.mockRestore();
     }
   });
 
   it('does not warn when knowledgeProfiles declares the allowed built-in profile', async () => {
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const warnSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     try {
       const { resolveMemoryConfig } = await import('../src/config.ts');
       resolveMemoryConfig({
@@ -1335,10 +1334,10 @@ describe('config — memory env alias warnings', () => {
         },
       });
 
-      expect(warnSpy.mock.calls).not.toContainEqual([
-        expect.objectContaining({ profile: 'mw-mind' }),
-        expect.any(String),
-      ]);
+      const profileLines = warnSpy.mock.calls
+        .map((call) => String(call[0]))
+        .filter((line) => line.includes('"profile":"mw-mind"'));
+      expect(profileLines).toEqual([]);
     } finally {
       warnSpy.mockRestore();
     }
@@ -1647,7 +1646,7 @@ describe('config — rateLimitWindowMs migration (SP6)', () => {
   });
 
   it('falls back to rateLimitNoticeWindowMs with deprecation warning when rateLimitWindowMs is absent', async () => {
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const warnSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     try {
       process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
         rateLimitNoticeWindowMs: 900_000,
@@ -1655,8 +1654,9 @@ describe('config — rateLimitWindowMs migration (SP6)', () => {
       const { config } = await import('../src/config.ts');
       expect(config.rateLimitWindowMs).toBe(900_000);
       expect(warnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('DEPRECATION'),
-        900_000,
+        expect.stringContaining(
+          'DEPRECATION: rateLimitWindowMs not set — falling back to rateLimitNoticeWindowMs (900000ms)',
+        ),
       );
     } finally {
       warnSpy.mockRestore();

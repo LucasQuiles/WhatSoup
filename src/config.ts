@@ -1,6 +1,7 @@
 import { mkdirSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { homedir } from 'node:os';
+import { printErr } from './lib/cli-print.ts';
 import { normalizePhoneE164, normalizePhoneE164Wire } from './lib/phone.ts';
 import { asRecord, isNonEmptyString } from './lib/type-guards.ts';
 import { migrateLegacyMemoryConfig } from './config-memory-migration.ts';
@@ -608,11 +609,14 @@ const resolvedRateLimitWindowMs: number = (() => {
     return requireFiniteNumber(instance.rateLimitWindowMs, 'rateLimitWindowMs');
   }
   if (instance?.rateLimitNoticeWindowMs != null) {
-    // eslint-disable-next-line no-console -- startup deprecation warning before logger is available; legacy rateLimitNoticeWindowMs fallback is still supported (read at runtime.ts:176), so this nudge is retained, not scheduled for removal; expires 2026-12-31
-    console.warn(
-      '[config] DEPRECATION: rateLimitWindowMs not set — falling back to rateLimitNoticeWindowMs (%dms). ' +
+    // Startup deprecation nudge before the logger exists (config sets LOG_DIR,
+    // so importing the logger here would evaluate it too early); the legacy
+    // rateLimitNoticeWindowMs fallback is still supported (read at
+    // runtime.ts:176), so this nudge is retained, not scheduled for removal;
+    // expires 2026-12-31.
+    printErr(
+      `[config] DEPRECATION: rateLimitWindowMs not set — falling back to rateLimitNoticeWindowMs (${instance.rateLimitNoticeWindowMs}ms). ` +
         'Set rateLimitWindowMs explicitly to silence this warning.',
-      instance.rateLimitNoticeWindowMs,
     );
     return requireFiniteNumber(instance.rateLimitNoticeWindowMs, 'rateLimitNoticeWindowMs');
   }
@@ -636,8 +640,10 @@ const BUILTIN_KNOWLEDGE_PROFILE_NAMES = new Set([
 ]);
 
 function warnConfigDeprecation(payload: Record<string, unknown>, message: string): void {
-  // eslint-disable-next-line no-console -- startup deprecation warning before logger is available; expires 2026-10-26
-  console.warn(payload, message);
+  // Startup deprecation warning before the logger exists (same LOG_DIR
+  // evaluation-order constraint as above); payload stays pino-shaped so a
+  // later lazy-logger handoff can move this to the structured pipeline.
+  printErr(`${message} ${JSON.stringify(payload)}`);
 }
 
 function resolvePineconeNamespaces(source: Record<string, unknown> | undefined): PineconeNamespaceConfig {
