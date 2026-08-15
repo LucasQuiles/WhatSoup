@@ -565,12 +565,34 @@ def build_emit_argv(
     ]
 
 
+def build_clear_argv(*, host: str, instance: str, label: str) -> list[str]:
+    """Build the bot-errors-emit.py argv retiring a gui_session_monitor incident.
+
+    Pure (no subprocess), mirroring build_emit_argv. #2404: emitted only on a
+    verified-ok observation while the persisted `alerted` latch is armed — the
+    producer that opened the incident owns its clear.
+    """
+    return [
+        "--clear",
+        "--instance", instance,
+        "--source", EMIT_SOURCE,
+        "--summary", (
+            f"GUI-session monitor: verified ok for {instance} on {host} "
+            f"(agent {label}); incident cleared by producer-owned recovery proof"
+        ),
+        "--diagnostic", "gui_state=ok",
+        "--diagnostic", f"host={host}",
+        "--diagnostic", f"agent_label={label}",
+    ]
+
+
 @dataclass(frozen=True)
 class TargetOutcome:
     state: str
     new_state: dict
     emit_decision: "EmitDecision"
     emit_argv: "list[str] | None"
+    clear_argv: "list[str] | None"
 
 
 def run_target(*, target: dict, expected_user, probe, prior_state, threshold: int) -> TargetOutcome:
@@ -619,16 +641,29 @@ def run_target(*, target: dict, expected_user, probe, prior_state, threshold: in
             consecutive_failures=consecutive,
             threshold=threshold,
         )
+    # #2404: `alerted` is the persisted incident latch. This pure layer only
+    # carries it and proposes a clear; the caller arms/retires it gated on the
+    # emit subprocess actually being accepted (rc 0).
+    prior_alerted = bool(prior.get("alerted"))
+    clear_argv = None
+    if state == STATE_OK and prior_alerted:
+        clear_argv = build_clear_argv(
+            host=str(target.get("host", "")),
+            instance=str(target.get("instance", "")),
+            label=str(target.get("label", "")),
+        )
     new_state = {
         "consecutive_failures": consecutive,
         "last_state": state,
         "boot_id": persisted_boot_id,
+        "alerted": prior_alerted,
     }
     return TargetOutcome(
         state=state,
         new_state=new_state,
         emit_decision=decision,
         emit_argv=emit_argv,
+        clear_argv=clear_argv,
     )
 
 
@@ -1039,7 +1074,20 @@ def run_once(*, dry_run: bool) -> int:
               f"emit={outcome.emit_decision.should_emit}")
         if outcome.emit_argv is not None:
             rc = emit_event(outcome.emit_argv, dry_run=dry_run)
-            if rc != 0:
+            if rc == 0:
+                # #2404: latch armed only on ACCEPTED emission — a rejected
+                # alert opened no durable incident, so there is nothing to
+                # clear later.
+                state[key]["alerted"] = True
+            else:
+                exit_code = 1
+        if outcome.clear_argv is not None:
+            rc = emit_event(outcome.clear_argv, dry_run=dry_run)
+            if rc == 0:
+                state[key]["alerted"] = False
+            else:
+                # #2404: rejected clear retains the latch — the next verified-
+                # ok pass retries the producer-owned clear.
                 exit_code = 1
     if not dry_run:
         save_state(state)
