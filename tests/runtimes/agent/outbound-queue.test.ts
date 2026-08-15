@@ -2877,8 +2877,8 @@ describe('OutboundQueue', () => {
       expect(calls[0]).toBe('z'.repeat(4000));
     });
 
-    it('shutdown clears a toolTimer that was re-armed while flush was awaiting the send chain', async () => {      const { messenger, calls } = makeMessenger();
-      const queue = new OutboundQueue(messenger, CHAT_JID);
+    it('shutdown rejects a tool update that arrives after closure begins', async () => {
+      const { calls } = makeMessenger();
 
       // Block the first (and only) send so the chain stays pending while we
       // re-arm a tool timer mid-flush.
@@ -2898,13 +2898,9 @@ describe('OutboundQueue', () => {
       // Let the send start (chain becomes pending).
       await vi.advanceTimersByTimeAsync(0);
 
-      // Begin shutdown — flush() runs flushToolBuffer() synchronously (no tool
-      // buffer yet) then awaits the still-pending chain. While it is awaiting,
-      // arm a fresh tool timer. The defensive clear at shutdown line 562 is the
-      // only thing that cleans it up.
+      // Begin shutdown while the accepted text is still in flight. Output that
+      // arrives after this boundary belongs to a retired queue epoch.
       const shutdownPromise = blockingQueue.shutdown();
-      // Re-arm the tool timer AFTER flushToolBuffer ran but BEFORE the chain
-      // resolves — i.e. while flush() is in its `await this.chain`.
       blockingQueue.enqueueToolUpdate({ category: 'running', detail: 'late update' });
       await vi.advanceTimersByTimeAsync(0);
 
@@ -2914,22 +2910,13 @@ describe('OutboundQueue', () => {
       await vi.advanceTimersByTimeAsync(0);
       await shutdownPromise;
 
-      // The in-flight text send was delivered; the late tool update was NOT
-      // re-flushed by shutdown (shutdown's defensive clear only clears the
-      // toolTimer, it does not re-flush). Exactly one message reached the
-      // messenger from the send chain.
+      // The in-flight text send is delivered; post-closure tool output is not.
       expect(calls).toEqual(['in-flight send that holds the chain open']);
       expect(blockingMessenger.sendMessage).toHaveBeenCalledTimes(1);
 
-      // The late enqueueToolUpdate also armed the 30s max-age timer, which
-      // shutdown's defensive clear does NOT touch. Drain it so no timer leaks
-      // (this also confirms shutdown's toolTimer clear left no duplicate work).
       await vi.advanceTimersByTimeAsync(TOOL_BATCH_MAX_AGE_MS);
-      // The max-age flush now delivers the late tool-status update.
-      expect(calls).toEqual([
-        'in-flight send that holds the chain open',
-        '🔧 Running:\n  • late update',
-      ]);
+      expect(calls).toEqual(['in-flight send that holds the chain open']);
+      expect(blockingQueue.hasPendingWork()).toBe(false);
     });
   });
 

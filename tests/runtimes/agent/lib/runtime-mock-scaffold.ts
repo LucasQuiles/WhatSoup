@@ -241,6 +241,7 @@ export function makeQueueMock(targetChatJid: string): IOutboundQueue {
     enqueueProgressUpdate: vi.fn(),
     indicateTyping: vi.fn(),
     flush: vi.fn(async () => {}),
+    isPoisoned: vi.fn(() => false),
     shutdown: vi.fn(async () => {}),
     abortTurn: vi.fn(),
     endTurn: vi.fn(),

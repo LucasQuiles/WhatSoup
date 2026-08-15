@@ -295,6 +295,7 @@ export function queueStub(chatJid: string): IOutboundQueue {
     hasPendingPoll: vi.fn(() => false),
     setPollPending: vi.fn(),
     flush: vi.fn(async () => {}),
+    isPoisoned: vi.fn(() => false),
     shutdown: vi.fn(async () => {}),
     abortTurn: vi.fn(),
     updateDeliveryJid: vi.fn(),
