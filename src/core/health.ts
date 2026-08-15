@@ -2344,6 +2344,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
             .slice(-LOOP_LAG_RAW_RECENT_LIMIT)
             .map((sample) => ({
               at_ms: sample.atMs,
+              wall_at_ms: sample.wallAtMs,
               lag_ms: sample.lagMs,
               source: sample.source,
               discontinuity: sample.discontinuity,
