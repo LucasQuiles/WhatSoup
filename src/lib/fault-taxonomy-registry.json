@@ -848,6 +848,11 @@
       "owner": "src/runtimes/agent/runtime.ts",
       "test": "tests/runtimes/agent/fallback-usage-limit-cascade.test.ts"
     },
+    "fallback_chain_entry_unhealthy": {
+      "disposition": "once_per_canary_health_transition_until_entry_recovers",
+      "owner": "src/runtimes/agent/runtime-fallback.ts",
+      "test": "tests/runtimes/agent/fallback-chain-canary.test.ts"
+    },
     "fallback_recovery_stalled": {
       "disposition": "recovery_probe_stall_notice_until_probe_succeeds_and_window_reverts",
       "owner": "src/runtimes/agent/runtime.ts",

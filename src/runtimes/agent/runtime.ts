@@ -3217,6 +3217,9 @@ export class AgentRuntime implements Runtime {
     // table unconditionally is inert when the flag is off.
     ensureHandoffArtifactSchema(this.db);
     this.fallback.restorePersistedFallbackWindow();
+    // Periodic real-completion canary over the chain (no-op unless
+    // WHATSOUP_FALLBACK_CANARY_MS > 0) — see fallback-canary-config.ts.
+    this.fallback.startChainCanary();
     backfillSessionProvider(this.db, this.agentProvider ?? 'claude-cli');
     if (config.nlRouting) {
       // Additive + idempotent; gated so flag-off leaves the DB untouched.
@@ -6836,6 +6839,7 @@ export class AgentRuntime implements Runtime {
       this.fallbackPrimaryProbeTimer = null;
     }
     if (this.periodicUsabilityProbeTimer) { clearTimeout(this.periodicUsabilityProbeTimer); this.periodicUsabilityProbeTimer = null; }
+    this.fallback.stopChainCanary();
     this.fallbackWindow.activeUntil = null;
     this.fallbackWindow.activatedAt = null;
     this.fallbackWindow.armReason = null;
