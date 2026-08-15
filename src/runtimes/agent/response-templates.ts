@@ -112,6 +112,33 @@ export function renderUserMessage(id: UserTemplateId, ctx: RenderContext): strin
   }
 }
 
+export interface FallbackAdvanceNoticeView {
+  /** Preformatted card of the entry that just failed, e.g. "OpenCode / kimi/kimi-k3". */
+  fromCard: string;
+  /** Card of the replacement entry, or null when the chain has no alternate. */
+  toCard: string | null;
+  /** True when the interrupted turn is being replayed on the replacement. */
+  replayScheduled: boolean;
+}
+
+/**
+ * Managed notice for a fallback entry whose turn PROCESS failed (non-zero
+ * exit / fatal spawn) mid-window. This is what the user sees INSTEAD of the
+ * raw "Agent session ended (exited with code N)" crash line — the crash is a
+ * managed handoff, not a dead end, so the copy names the dead model, names
+ * its replacement, and states exactly what happens to the interrupted turn.
+ */
+export function renderFallbackAdvanceNotice(view: FallbackAdvanceNoticeView): string {
+  if (view.toCard === null) {
+    return `_The backup model (${view.fromCard}) is unavailable and no alternate backup is configured. `
+      + `I'll keep retrying and follow up — an operator has been notified._`;
+  }
+  const continuation = view.replayScheduled
+    ? "I'll continue your last message there."
+    : 'Please resend your last message.';
+  return `_The backup model (${view.fromCard}) is unavailable. Switching to ${view.toCard}. ${continuation}_`;
+}
+
 export function autoSwitchNoticeMessage(notice: AutoSwitchNoticeView): string {
   const source = notice.from ? ` from ${notice.from}` : '';
   const reason = notice.reason === 'high-demand'

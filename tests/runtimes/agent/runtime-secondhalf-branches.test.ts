@@ -1336,6 +1336,43 @@ describe('fresh-spawn context preamble (P4 — effect-free by construction)', ()
     expect(sent.applicationContext[0]).not.toContain('Bearer [REDACTED]');
     expect(sent.userText).toBe('Continue');
   });
+
+  it('prepends a one-shot stand-in introduction for a cross-provider session during an active fallback window', async () => {
+    const agentConfig = mockConfig as typeof mockConfig & {
+      agentFallbacks?: Array<{ provider: string; model?: string }>;
+    };
+    agentConfig.agentFallbacks = [{ provider: 'opencode-cli', model: 'glm/glm-5.2' }];
+    const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger, 'test');
+    await runtime.start();
+    expect(runtime.forceFallback()).toMatchObject({ ok: true });
+    vi.mocked(mockSession.getProviderId).mockReturnValue('opencode-cli');
+    vi.mocked(getRecentMessages).mockReturnValue(recentRows() as ReturnType<typeof getRecentMessages>);
+
+    await runtime.handleMessage(makeMsg({ chatJid, senderJid: chatJid, content: 'Continue' }));
+    await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledTimes(1));
+
+    const sent = (vi.mocked(mockSession.sendTurn).mock.calls[0] as unknown as [{
+      applicationContext: string[];
+      userText: string;
+    }])[0];
+    // Intro leads, identifies the stand-in, and instructs continuation; the
+    // recent-context block follows in the same preamble entry so the model
+    // reads WHO it is before the thread it must continue.
+    expect(sent.applicationContext[0]).toMatch(/^\[Provider handoff — read before responding\]\n/);
+    expect(sent.applicationContext[0]).toContain('glm/glm-5.2');
+    expect(sent.applicationContext[0]).toContain('introduce yourself');
+    expect(sent.applicationContext[0]).toContain('[Recent chat context — read before responding]');
+    expect(sent.userText).toBe('Continue');
+
+    // One-shot per manager: the manager is marked introduced, so the next
+    // fresh-spawn turn skips the handoff block. (Asserted via the mark rather
+    // than a second dispatched turn — the mocked session never completes its
+    // provider turn, so a second inbound would queue behind it forever.)
+    const introduced = (runtime as unknown as {
+      introducedStandIns: WeakSet<object>;
+    }).introducedStandIns;
+    expect(introduced.has(mockSession as unknown as object)).toBe(true);
+  });
 });
 
 describe('AgentRuntime route recycle publication and shutdown ownership', () => {
