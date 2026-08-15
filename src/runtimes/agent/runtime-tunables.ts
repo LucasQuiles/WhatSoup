@@ -5,6 +5,7 @@
 import { MS_PER_MINUTE, MS_PER_HOUR, MS_PER_DAY } from '../../lib/time-units.ts';
 
 export const envPositiveInt = (key: string, fallback: number): number => {
+  // env-allowed: dynamic-key helper for session tunables; the counted seam by design
   const raw = Number(process.env[key]);
   return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : fallback;
 };
@@ -48,6 +49,7 @@ export const MAX_FALLBACK_WINDOW_MS = MS_PER_DAY; // 24 hours
 // best-effort diagnostic bundle and emit its findings to the alert outbox.
 // Fire-and-forget — never blocks, delays, or alters the turn's fallback path.
 export function diagnosticBundleEnabled(): boolean {
+  // env-allowed: staged-rollout dial; live-flip semantics, flag deletes at GA
   return process.env['WHATSOUP_DIAGNOSTIC_BUNDLE'] === '1';
 }
 // Guardrail: the diagnostic bundle probes the PRIMARY provider's health, which

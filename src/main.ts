@@ -86,8 +86,10 @@ import { xdgDir } from './fleet/paths.ts';
 // executing this module's database, network, transport, health, or timer body.
 // Production bootstrap never sets this flag; deploy/preflight-check.sh sets it
 // only inside its throwaway import-closure subprocess.
+// env-allowed: preflight import probe sentinels; pre-config by design
 const preflightImportOnlyRequested = process.env.WHATSOUP_PREFLIGHT_IMPORT_ONLY === '1';
 const preflightImportOnlyAuthorized = preflightImportOnlyRequested
+  // env-allowed: preflight import probe sentinels; pre-config by design
   && process.env.WHATSOUP_PREFLIGHT_IMPORT_SENTINEL === 'restart-safety-link-probe-v1'
   && process.argv[1]?.endsWith('preflight-probe.ts') === true;
 if (preflightImportOnlyRequested && !preflightImportOnlyAuthorized) {

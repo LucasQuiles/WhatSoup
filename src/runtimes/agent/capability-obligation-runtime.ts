@@ -690,6 +690,7 @@ export function buildObligationLiveFacts(providerId: string): CapabilityObligati
   return {
     hostId: hostname(),
     runtimeUser: userInfo().username,
+    // env-allowed: whole-object release identity input; build and release provenance
     releaseSha: resolveReleaseIdentity(process.cwd(), process.env),
     schemaVersion: CURRENT_SCHEMA_MIGRATION,
     providerId,

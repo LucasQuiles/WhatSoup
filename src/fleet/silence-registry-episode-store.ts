@@ -59,13 +59,17 @@ export interface SilenceRegistryEpisodeStorePort {
 }
 
 function runningUnderVitest(): boolean {
+  // env-allowed: test-runner detection; must not read config (lib ring / eval-order)
   return process.env['VITEST'] === 'true'
+    // env-allowed: test-runner detection; must not read config (lib ring / eval-order)
     || process.env['VITEST_POOL_ID'] !== undefined
+    // env-allowed: test-runner detection; must not read config (lib ring / eval-order)
     || process.env['VITEST_WORKER_ID'] !== undefined;
 }
 
 function defaultStateRoot(): string {
   if (runningUnderVitest()) {
+    // env-allowed: test-runner detection; must not read config (lib ring / eval-order)
     const worker = process.env['VITEST_POOL_ID'] ?? process.env['VITEST_WORKER_ID'] ?? 'main';
     return join(tmpdir(), 'whatsoup-vitest-silence-registry-episodes', worker, String(process.pid));
   }

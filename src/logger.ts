@@ -2,6 +2,7 @@ import pino from 'pino';
 import { join } from 'node:path';
 import { sanitizingLogHook } from './lib/log-sanitizer.ts';
 
+// env-allowed: bootstrap-early logger; cannot import config (eval-order cycle)
 const level = process.env.LOG_LEVEL ?? 'info';
 
 // Pino's default serializers only cover the `err` key (WhatSoup's own
@@ -34,9 +35,11 @@ export const errorLikeSerializers = {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- pino.transport() returns a Writable stream exposing runtime .on()/.end() methods that are not in pino's TypeScript definitions; needed for shutdown flush expires 2026-12-31
 let transport: any;
 
+// env-allowed: bootstrap-early logger; cannot import config (eval-order cycle)
 const logDir = process.env.LOG_DIR;
 // Vitest removes its per-file HOME after each suite. Starting pino's worker
 // transport there races that teardown, so Vitest stays stdout-only.
+// env-allowed: test-runner detection; must not read config (lib ring / eval-order)
 const fileTransportEnabled = !process.env.VITEST;
 if (logDir && fileTransportEnabled) {
   try {

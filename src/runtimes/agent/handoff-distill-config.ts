@@ -130,16 +130,19 @@ export function resolveHandoffDistillConfig(env: Env): HandoffDistillConfig {
 // so existing callers are behavior-identical; the env param keeps them testable.
 
 /** Whether the background handoff distiller sweep is enabled. */
+// env-allowed: pure-resolver param-default; the DI idiom, not a bypass
 export function handoffDistillerEnabled(env: Env = process.env): boolean {
   return env['WHATSOUP_HANDOFF_DISTILLER'] === '1';
 }
 
 /** Whether handoff context injection is enabled. */
+// env-allowed: pure-resolver param-default; the DI idiom, not a bypass
 export function handoffContextEnabled(env: Env = process.env): boolean {
   return env['WHATSOUP_HANDOFF_CONTEXT'] === '1';
 }
 
 /** The configured handoff distill model id, or null when unset. */
+// env-allowed: pure-resolver param-default; the DI idiom, not a bypass
 export function handoffDistillModel(env: Env = process.env): string | null {
   return env['WHATSOUP_HANDOFF_DISTILL_MODEL']?.trim() || null;
 }

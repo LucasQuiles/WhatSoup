@@ -32,6 +32,7 @@ export interface ArcBindingHealthMissing {
 export type ArcBindingHealth = ArcBindingHealthLoaded | ArcBindingHealthMissing;
 
 export function resolveArcRepoRoot(
+  // env-allowed: deploy-wrapper assertion input; resolver validates env vs module location
   env: { WHATSOUP_REPO_ROOT?: string } = process.env,
   reviewedRoot: string | null = SOURCE_REPO_ROOT,
 ): string | null {

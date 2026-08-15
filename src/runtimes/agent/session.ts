@@ -119,6 +119,7 @@ export const STALLED_OP_KILL_GRACE_MS = 180_000; // 3 min after a tool stalls
 // cannot run forever. Ceiling is env-tunable per instance for automation-heavy
 // deployments (WHATSOUP_LONG_OP_CEILING_MS).
 function positiveIntEnv(name: string, fallback: number): number {
+  // env-allowed: bounded explicit-key env lookup; keys enumerated in-code
   const raw = process.env[name];
   if (!raw?.trim()) return fallback;
   const n = Number.parseInt(raw, 10);
@@ -1158,6 +1159,7 @@ export class SessionManager {
       }
 
       if (this.provider === 'claude-cli') {
+        // env-allowed: external-tool interop; must track the env the spawned claude CLI sees
         const claudeConfigDir = process.env['CLAUDE_CONFIG_DIR'] || join(homedir(), '.claude');
         const projectCwd = this.configuredCwd ?? homedir();
         const projectDirName = projectCwd.replace(/[^a-zA-Z0-9]/g, '-');

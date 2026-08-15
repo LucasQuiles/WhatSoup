@@ -13,7 +13,11 @@
  * (reads, writes, and whole-object param-default references all count).
  * Per-file pins and reasons live in eslint-rules/env-read-allowlist.json
  * (the SSOT shared with the fitness/require-env-justification eslint
- * mirror); per-site env-allowed justifications arrive with slice 5b.
+ * mirror). Since slice 5b every counted site outside src/config.ts also
+ * carries a per-site `env-allowed:` justification (same line or the line
+ * above, floor >=16 chars / >=3 words); config.ts is the one file-level
+ * exemption — the seam IS the policy, ~50 identical justifications would
+ * be noise, and new config reads still trip the count pin.
  *
  * Companion: #2192 (baseline audited at the #3235 landing tree). The
  * "#2192 slice 3c" / "#2192 s4 verdict" citations in the per-file reasons
@@ -72,19 +76,50 @@ function isCommentLine(line: string): boolean {
   return trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*');
 }
 
-function collectEnvSites(): Map<string, number> {
-  const counts = new Map<string, number>();
+// The one file whose counted sites need no per-site markers (#2192 slice 5b):
+// the SSOT conversion seam itself. Everything else justifies every line.
+const FILE_LEVEL_EXEMPTIONS = new Set(['src/config.ts']);
+
+const MARKER_RE = /env-allowed:\s*(.+)/;
+
+function meetsMarkerFloor(text: string): boolean {
+  const match = MARKER_RE.exec(text);
+  if (!match) return false;
+  const reason = match[1].trim();
+  const words = reason.match(/[A-Za-z0-9][A-Za-z0-9'-]*/g) ?? [];
+  return reason.length >= 16 && words.length >= 3;
+}
+
+interface FileSites {
+  counted: number;
+  marked: number;
+  /** 1-indexed line numbers of counted sites with no floor-passing marker. */
+  unmarked: number[];
+}
+
+function collectEnvSiteDetail(): Map<string, FileSites> {
+  const detail = new Map<string, FileSites>();
   for (const file of collectSrcFiles()) {
     const relative = file.replace(repoRoot + '/', '');
     const lines = readFileSync(file, 'utf8').split('\n');
-    let count = 0;
-    for (const line of lines) {
+    const sites: FileSites = { counted: 0, marked: 0, unmarked: [] };
+    for (let i = 0; i < lines.length; i += 1) {
+      const line = lines[i]!;
       if (isCommentLine(line)) continue;
-      if (ENV_ACCESS_PATTERN.test(line)) count += 1;
+      if (!ENV_ACCESS_PATTERN.test(line)) continue;
+      sites.counted += 1;
+      const sameLine = meetsMarkerFloor(line);
+      const lineAbove = i > 0 && isCommentLine(lines[i - 1]!) && meetsMarkerFloor(lines[i - 1]!);
+      if (sameLine || lineAbove) sites.marked += 1;
+      else sites.unmarked.push(i + 1);
     }
-    if (count > 0) counts.set(relative, count);
+    if (sites.counted > 0) detail.set(relative, sites);
   }
-  return counts;
+  return detail;
+}
+
+function collectEnvSites(): Map<string, number> {
+  return new Map([...collectEnvSiteDetail()].map(([file, sites]) => [file, sites.counted]));
 }
 
 describe('process.env read allowlist ratchet', () => {
@@ -103,5 +138,36 @@ describe('process.env read allowlist ratchet', () => {
     // config.ts is the conversion layer and must always appear — if it ever
     // vanishes from the scan, the file discovery is broken, not the code.
     expect(collectEnvSites().get('src/config.ts')).toBeGreaterThan(0);
+  });
+
+  it('every counted site outside the config seam carries a floor-passing env-allowed marker (#2192 5b)', () => {
+    const offenders = Object.fromEntries(
+      [...collectEnvSiteDetail()]
+        .filter(([file]) => !FILE_LEVEL_EXEMPTIONS.has(file))
+        .filter(([, sites]) => sites.unmarked.length > 0)
+        .map(([file, sites]) => [file, sites.unmarked]),
+    );
+    expect(
+      offenders,
+      'Counted process.env sites without an env-allowed justification (same '
+        + 'line or the line above, >=16 chars / >=3 words). Add the marker in '
+        + 'the same reviewed diff — or route the value through src/config.ts.',
+    ).toEqual({});
+  });
+
+  it('cross-assertion: marked + unmarked equals the pinned count for every file', () => {
+    for (const [file, sites] of collectEnvSiteDetail()) {
+      expect(sites.marked + sites.unmarked.length, `${file} classifier drift`).toBe(sites.counted);
+      expect(ALLOWLIST[file], `${file} missing from SSOT`).toBe(sites.counted);
+    }
+  });
+
+  it('config.ts is the ONLY file-level exemption and genuinely relies on it', () => {
+    expect([...FILE_LEVEL_EXEMPTIONS]).toEqual(['src/config.ts']);
+    // The seam must actually have unmarked sites — if someone sweeps markers
+    // into config.ts, the exemption is dead code and this contract stales.
+    const seam = collectEnvSiteDetail().get('src/config.ts');
+    expect(seam).toBeDefined();
+    expect(seam!.unmarked.length).toBeGreaterThan(0);
   });
 });

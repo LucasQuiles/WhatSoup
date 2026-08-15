@@ -203,6 +203,7 @@ const CRED_PATH_SAFE_PREFIXES = [
 // config.botErrorsSafeShapeCredPath field see the same bytes without a
 // lib→config import. Parsing mirrors config's exactly.
 function safeShapeCredPathEnabled(): boolean {
+  // env-allowed: lib cannot import config (ring rule); env is the sanctioned channel
   const raw = (process.env['BOT_ERRORS_SAFE_SHAPE_CRED_PATH'] ?? '').trim().toLowerCase();
   return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
 }
@@ -275,16 +276,21 @@ function nowIso(): string {
 }
 
 function runningUnderVitest(): boolean {
+  // env-allowed: test-runner detection; must not read config (lib ring / eval-order)
   return process.env['VITEST'] === 'true'
+    // env-allowed: test-runner detection; must not read config (lib ring / eval-order)
     || process.env['VITEST_POOL_ID'] !== undefined
+    // env-allowed: test-runner detection; must not read config (lib ring / eval-order)
     || process.env['VITEST_WORKER_ID'] !== undefined;
 }
 
 function vitestStateDir(): string | null {
+  // env-allowed: lib cannot import config (ring rule); env is the sanctioned channel
   if (process.env['BOT_ERRORS_ALLOW_LIVE_IN_TESTS'] === '1' || !runningUnderVitest()) {
     return null;
   }
 
+  // env-allowed: test-runner detection; must not read config (lib ring / eval-order)
   const workerId = safeSegment(process.env['VITEST_POOL_ID'] ?? process.env['VITEST_WORKER_ID'] ?? 'main');
   return join(tmpdir(), 'whatsoup-vitest-bot-errors', workerId, String(process.pid), 'state');
 }
@@ -299,6 +305,7 @@ function vitestStateDir(): string | null {
 // (systemd Environment=, launchd plists, Python installers) is the
 // cross-process SSOT for these dirs — config would be a third source.
 function stateDir(): string {
+  // env-allowed: lib cannot import config (ring rule); env is the sanctioned channel
   return process.env['BOT_ERRORS_STATE_DIR'] ?? vitestStateDir() ?? join(homedir(), '.local', 'state', 'bot-errors');
 }
 
@@ -306,15 +313,18 @@ function stateDir(): string {
 // derives from stateDir(), so there is no config value to add (env-late).
 function writefailDirs(): string[] {
   const candidates = [
+    // env-allowed: lib cannot import config (ring rule); env is the sanctioned channel
     process.env['BOT_ERRORS_WRITEFAIL_DIR'],
     join(stateDir(), 'writefail'),
     join(homedir(), '.bot-errors-writefail'),
+    // env-allowed: TMPDIR publish-back pattern; config writes it at load, env is the lib-side channel
     join(process.env['TMPDIR'] ?? '/tmp', 'bot-errors-writefail'),
   ].filter((value): value is string => Boolean(value));
   return [...new Set(candidates)];
 }
 
 export function botErrorsOutboxDir(): string {
+  // env-allowed: lib cannot import config (ring rule); env is the sanctioned channel
   return process.env['BOT_ERRORS_OUTBOX_DIR'] ?? join(stateDir(), 'outbox');
 }
 
@@ -338,6 +348,7 @@ const STRONG_TEST_SIGNAL_KEYS = [
 ] as const;
 
 function envValue(key: string): string | undefined {
+  // env-allowed: lib cannot import config (ring rule); env is the sanctioned channel
   return asNonEmptyString(process.env[key]);
 }
 
@@ -347,6 +358,7 @@ function strongTestSignals(): string[] {
 
 function provenanceSignals(): string[] {
   const signals = strongTestSignals();
+  // env-allowed: test-runner detection; must not read config (lib ring / eval-order)
   if ((process.env['NODE_ENV'] ?? '').trim().toLowerCase() === 'test') signals.push('NODE_ENV');
   return [...new Set(signals)].sort();
 }
@@ -362,7 +374,9 @@ function provenanceSignals(): string[] {
  * `vitestStateDir()`, and its escape hatch is `BOT_ERRORS_ALLOW_LIVE_IN_TESTS`.
  */
 function outboxPolicy(): 'explicit-outbox' | 'explicit-state' | 'test-default' | 'default' {
+  // env-allowed: lib cannot import config (ring rule); env is the sanctioned channel
   if (process.env['BOT_ERRORS_OUTBOX_DIR'] !== undefined) return 'explicit-outbox';
+  // env-allowed: lib cannot import config (ring rule); env is the sanctioned channel
   if (process.env['BOT_ERRORS_STATE_DIR'] !== undefined) return 'explicit-state';
   if (vitestStateDir() !== null) return 'test-default';
   return 'default';
@@ -539,7 +553,9 @@ export function buildBotErrorsEvent(input: BotErrorsOutboxInput, eventId = rando
     runtime: {
       // Systemd per-invocation identity — set by the service manager for THIS
       // process run; cannot be resolved at config load (env-late by design).
+      // env-allowed: systemd per-invocation identity; cannot resolve at config load
       invocationId: process.env['INVOCATION_ID'] ?? null,
+      // env-allowed: systemd per-invocation identity; cannot resolve at config load
       systemdExecPid: process.env['SYSTEMD_EXEC_PID'] ?? null,
       provenance: botErrorsRuntimeProvenance(),
     },
@@ -562,8 +578,11 @@ export function writeBotErrorsEvent(input: BotErrorsOutboxInput): BotErrorsOutbo
   // vitest, the resolved path MUST be under tmpdir — never the repo root
   // or homedir. Prevents the recurring src/main.ts sha256 drift caused by
   // a sandbox fallback writing into the working tree (#2658, #2887 CI).
+  // env-allowed: lib cannot import config (ring rule); env is the sanctioned channel
   if (process.env['BOT_ERRORS_OUTBOX_DIR'] === undefined
+      // env-allowed: lib cannot import config (ring rule); env is the sanctioned channel
       && process.env['BOT_ERRORS_STATE_DIR'] === undefined
+      // env-allowed: lib cannot import config (ring rule); env is the sanctioned channel
       && process.env['BOT_ERRORS_TEST_ISOLATED'] === '1'
       && runningUnderVitest()) {
     const resolved = join(outbox, 'guard');

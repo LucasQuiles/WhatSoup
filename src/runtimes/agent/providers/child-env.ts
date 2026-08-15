@@ -54,10 +54,12 @@ export interface BuildBaseChildEnvOptions {
 }
 
 function isFailClosedEnabled(): boolean {
+  // env-allowed: child-env forward; explicit per-var allow-list, not passthrough
   return process.env[FAILCLOSED_FLAG] === '1';
 }
 
 function isConfigRootIsolationEnabled(): boolean {
+  // env-allowed: child-env forward; explicit per-var allow-list, not passthrough
   return process.env[CONFIG_ROOT_ISOLATION_FLAG] === '1';
 }
 
@@ -89,8 +91,10 @@ export function buildBaseChildEnv(opts?: BuildBaseChildEnvOptions): NodeJS.Proce
   const failClosed = isFailClosedEnabled();
   const allowM365 = failClosed
     ? opts?.allowM365Mutations === true
+      // env-allowed: child-env forward; explicit per-var allow-list, not passthrough
       ? process.env.ALLOW_M365_MUTATIONS
       : undefined
+    // env-allowed: child-env forward; explicit per-var allow-list, not passthrough
     : process.env.ALLOW_M365_MUTATIONS;
   const configRoots = childConfigRoots(opts);
   const egressProxyPort =
@@ -103,18 +107,29 @@ export function buildBaseChildEnv(opts?: BuildBaseChildEnvOptions): NodeJS.Proce
   return Object.fromEntries(
     Object.entries({
       // System essentials
+      // env-allowed: ambient OS PATH contract for executable resolution
       PATH: process.env.PATH,
+      // env-allowed: child-env forward; explicit per-var allow-list, not passthrough
       HOME: configRoots?.home ?? process.env.HOME,
+      // env-allowed: child-env forward; explicit per-var allow-list, not passthrough
       USER: process.env.USER,
+      // env-allowed: child-env forward; explicit per-var allow-list, not passthrough
       SHELL: process.env.SHELL,
+      // env-allowed: child-env forward; explicit per-var allow-list, not passthrough
       LANG: process.env.LANG,
+      // env-allowed: child-env forward; explicit per-var allow-list, not passthrough
       TERM: process.env.TERM,
       // Node.js
+      // env-allowed: child-env forward; explicit per-var allow-list, not passthrough
       NODE_PATH: process.env.NODE_PATH,
       // XDG dirs (Linux)
+      // env-allowed: ambient OS contract (XDG dirs); absence handling load-bearing
       XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR,
+      // env-allowed: ambient OS contract (XDG dirs); absence handling load-bearing
       XDG_CONFIG_HOME: configRoots?.xdgConfig ?? process.env.XDG_CONFIG_HOME,
+      // env-allowed: ambient OS contract (XDG dirs); absence handling load-bearing
       XDG_DATA_HOME: configRoots?.xdgData ?? process.env.XDG_DATA_HOME,
+      // env-allowed: TMPDIR publish-back pattern; config writes it at load, env is the lib-side channel
       TMPDIR: process.env.TMPDIR,
       // claude config dir. Forward-if-set only (undefined is stripped below), so
       // hosts that don't set it see zero change. Required on launchd-managed
@@ -124,6 +139,7 @@ export function buildBaseChildEnv(opts?: BuildBaseChildEnvOptions): NodeJS.Proce
       // read the file-based OAuth creds instead of 401-ing. Without this
       // forward, a per-instance plist setting never reaches the child env (this
       // builder is an explicit allow-list, not a process.env passthrough).
+      // env-allowed: external-tool interop; must track the env the spawned claude CLI sees
       CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR,
       // Per-instance overrides can set ALLOW_M365_MUTATIONS=1 to bypass
       // external M365 read-only hooks; most instances do not set it and
@@ -133,14 +149,22 @@ export function buildBaseChildEnv(opts?: BuildBaseChildEnvOptions): NodeJS.Proce
       // suppressed unless agentOptions.allowM365Mutations === true.
       ALLOW_M365_MUTATIONS: allowM365,
       // Sudo support
+      // env-allowed: child-env forward; explicit per-var allow-list, not passthrough
       SUDO_ASKPASS: process.env.SUDO_ASKPASS,
       // Tokenomics pilot controls: forward only operator-provided values.
+      // env-allowed: child-env forward; explicit per-var allow-list, not passthrough
       ENABLE_TOOL_SEARCH: process.env.ENABLE_TOOL_SEARCH,
+      // env-allowed: child-env forward; explicit per-var allow-list, not passthrough
       TOKENOMICS_BOT: process.env.TOKENOMICS_BOT,
+      // env-allowed: child-env forward; explicit per-var allow-list, not passthrough
       BASH_MAX_OUTPUT_LENGTH: process.env.BASH_MAX_OUTPUT_LENGTH,
+      // env-allowed: child-env forward; explicit per-var allow-list, not passthrough
       MAX_MCP_OUTPUT_TOKENS: process.env.MAX_MCP_OUTPUT_TOKENS,
+      // env-allowed: child-env forward; explicit per-var allow-list, not passthrough
       CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS: process.env.CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS,
+      // env-allowed: child-env forward; explicit per-var allow-list, not passthrough
       CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT: process.env.CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT,
+      // env-allowed: child-env forward; explicit per-var allow-list, not passthrough
       CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: process.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE,
       // Reply Guarantee Protocol hook context. These are explicit instance
       // fields, not inherited parent env, so child sessions only see the socket
@@ -179,16 +203,27 @@ export function buildOpenCodeBaseChildEnv(opts?: BuildBaseChildEnvOptions): Node
 
   return Object.fromEntries(
     Object.entries({
+      // env-allowed: ambient OS PATH contract for executable resolution
       PATH: process.env.PATH,
+      // env-allowed: child-env forward; explicit per-var allow-list, not passthrough
       HOME: configRoots?.home ?? process.env.HOME,
+      // env-allowed: child-env forward; explicit per-var allow-list, not passthrough
       USER: process.env.USER,
+      // env-allowed: child-env forward; explicit per-var allow-list, not passthrough
       SHELL: process.env.SHELL,
+      // env-allowed: child-env forward; explicit per-var allow-list, not passthrough
       LANG: process.env.LANG,
+      // env-allowed: child-env forward; explicit per-var allow-list, not passthrough
       TERM: process.env.TERM,
+      // env-allowed: child-env forward; explicit per-var allow-list, not passthrough
       NODE_PATH: process.env.NODE_PATH,
+      // env-allowed: ambient OS contract (XDG dirs); absence handling load-bearing
       XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR,
+      // env-allowed: ambient OS contract (XDG dirs); absence handling load-bearing
       XDG_CONFIG_HOME: configRoots?.xdgConfig ?? process.env.XDG_CONFIG_HOME,
+      // env-allowed: ambient OS contract (XDG dirs); absence handling load-bearing
       XDG_DATA_HOME: configRoots?.xdgData ?? process.env.XDG_DATA_HOME,
+      // env-allowed: TMPDIR publish-back pattern; config writes it at load, env is the lib-side channel
       TMPDIR: process.env.TMPDIR,
       WHATSOUP_INSTANCE: opts?.whatsoupInstance,
       WHATSOUP_MCP_SOCKET: opts?.whatsoupMcpSocket,

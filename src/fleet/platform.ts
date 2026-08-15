@@ -38,6 +38,7 @@ export function detectPlatform(): Platform {
   if (_cachedPlatform !== undefined) return _cachedPlatform;
 
   // Docker detection — env var takes priority over all OS-specific checks
+  // env-allowed: host-level generating-shell platform detection; pre-instance by design
   if (process.env[WHATSOUP_DOCKER_ENV] === '1') {
     _cachedPlatform = 'docker';
     return _cachedPlatform;
@@ -147,9 +148,11 @@ export function buildPlist(name: string): string {
   const logDir = path.join(xdgConfig, 'whatsoup', 'instances', name);
   const tmpDir = tmpRoot(name);
   const wrapper = path.join(os.homedir(), '.local', 'bin', 'whatsoup');
+  // env-allowed: ambient OS PATH contract for executable resolution
   const envPath = process.env.PATH ?? (process.platform === 'darwin'
   ? '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin'
   : '/usr/local/bin:/usr/bin:/bin');
+  // env-allowed: host-level generating-shell platform detection; pre-instance by design
   const whatsoupNode = process.env.WHATSOUP_NODE;
 
   return [

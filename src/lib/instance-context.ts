@@ -72,6 +72,7 @@ export function setLoadedInstanceConfig(config: Record<string, unknown>): void {
 }
 
 function readEnvFallback(): Record<string, unknown> | null {
+  // env-allowed: multi-instance bootstrap protocol; pre-config channel by design
   const encoded = process.env.INSTANCE_CONFIG;
   if (!encoded) return null;
   let parsed: unknown;

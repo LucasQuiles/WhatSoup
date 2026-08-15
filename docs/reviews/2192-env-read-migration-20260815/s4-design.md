@@ -135,3 +135,20 @@ Net: 21 in-scope pinned lines → 16; 10 in-scope file entries → 9.
 2. **docs/configuration.md stale anchors** for WHATSOUP_PAIR_NUMBER and WHATSOUP_NODE (§9 Car 3).
 3. **openai-whisper.ts:30 double-cast**: `config.transcriptionOpenAIProviderConfig as OpenAIProviderConfig | undefined` — config types the field as `Record<string, unknown>` and the consumer re-casts. Future transcription typing should define the shape config-side rather than extend the cast pattern.
 4. **Ratchet blind spot:** `envPositiveInt` (runtime-tunables.ts:8) mediates ~8 WHATSOUP_* session/system vars that never appear in the per-line allowlist count — by design (the helper is the single counted seam) but worth naming in the final slice's per-site justification pass.
+
+---
+
+## CORRECTIONS (appended post-landing; scout text above preserved verbatim)
+
+1. **§4 "Baileys pin — single-caller param-DI; zero spread" under-counted.**
+   `resolveBaileysVersion()` had TWO src callers at survey time:
+   `transport/connection.ts:857` AND `transport/auth.ts:88` (both grandfathered
+   config importers). Car s4a (#3245) converted both; the 3245 adversarial
+   review independently confirmed the second conversion was required for a
+   complete retirement.
+2. **§5 Car 2 field path.** The recipe names `agentOptions.fallbackTunables.*`
+   as the config field; the landed shape (#3247) is a top-level
+   `config.fallbackTunables` grouped object RESOLVED FROM the
+   `agentOptions.fallbackTunables.*` instance-config section — consistent with
+   how other agentOptions-sourced values surface flat on config
+   (agentProvider, agentFallbacks).
