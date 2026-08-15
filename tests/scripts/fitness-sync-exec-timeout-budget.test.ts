@@ -23,10 +23,10 @@ import { runEslintFitness } from '../../scripts/eslint-fitness-check.ts';
  * carries the timeout, then update the pinned lines.
  */
 const SPREAD_CARRIED_TIMEOUT_SITES = [
-  'src/lib/keyring.ts:481',
-  'src/lib/keyring.ts:505',
-  'src/lib/keyring.ts:737',
-  'src/lib/keyring.ts:778',
+  'src/lib/keyring.ts:500',
+  'src/lib/keyring.ts:524',
+  'src/lib/keyring.ts:756',
+  'src/lib/keyring.ts:797',
 ];
 
 describe('portability.sync-exec-timeout warning budget', () => {
