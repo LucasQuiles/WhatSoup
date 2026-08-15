@@ -79,7 +79,20 @@ function makeBuffer(): Buffer {
 }
 
 function installOpenAIMock(): void {
-  vi.mocked(OpenAI).mockImplementation(function (this: Record<string, unknown>) {
+  vi.mocked(OpenAI).mockImplementation(function (
+    this: Record<string, unknown>,
+    opts?: { apiKey?: string },
+  ) {
+    // Mirror the real SDK's fail-closed construction contract: an absent
+    // apiKey falls back to OPENAI_API_KEY, and a miss on both throws
+    // (verified against the installed SDK: "OpenAIError: Missing credentials.
+    // Please pass an apiKey, or set OPENAI_API_KEY"). A permissive mock
+    // constructor here would let a fail-open regression pass silently.
+    if (opts?.apiKey === undefined && !process.env.OPENAI_API_KEY) {
+      throw new Error(
+        'Missing credentials. Please pass an apiKey, or set the OPENAI_API_KEY environment variable.',
+      );
+    }
     this.audio = {
       transcriptions: { create: mockTranscriptionsCreate },
     };
@@ -424,7 +437,7 @@ describe('getClient — transcriptionOptions.openaiProviderConfig', () => {
     expect(openAIWhisperProvider.isAvailable()).toBe(false);
   });
 
-  it('does not pass an empty apiKey string if a configured key disappears before lazy client construction', async () => {
+  it('threads the availability-checked key into client construction (single resolve, no race window)', async () => {
     delete process.env.OPENAI_API_KEY;
     mockConfig.transcriptionOpenAIProviderConfig = {
       baseUrl: 'https://transcribe.example.com/openai/v1',
@@ -433,16 +446,42 @@ describe('getClient — transcriptionOptions.openaiProviderConfig', () => {
     mockResolveApiKey
       .mockReturnValueOnce('initial-key')
       .mockReturnValueOnce('');
-    mockTranscriptionsCreate.mockResolvedValueOnce({ text: 'race-safe' });
+    mockTranscriptionsCreate.mockResolvedValueOnce({ text: 'single-read' });
 
-    await transcribeWithOpenAI(makeBuffer(), 'audio/ogg');
+    const result = await transcribeWithOpenAI(makeBuffer(), 'audio/ogg');
 
+    expect(result).toBe('single-read');
+    // ONE resolution per call: the availability gate and the constructor
+    // observe the same credential. The '' queued for a hypothetical second
+    // read is never consumed, and the client is built with the checked key —
+    // never undefined (which the fail-closed mock constructor would throw on,
+    // exactly like the real SDK).
+    expect(mockResolveApiKey).toHaveBeenCalledTimes(1);
     expect(vi.mocked(OpenAI).mock.calls).toEqual([
       [{
         baseURL: 'https://transcribe.example.com/openai/v1',
-        apiKey: undefined,
+        apiKey: 'initial-key',
       }],
     ]);
+  });
+
+  it('rebuilds the client when the resolved credential rotates between calls', async () => {
+    delete process.env.OPENAI_API_KEY;
+    mockConfig.transcriptionOpenAIProviderConfig = { apiKeyService: 'groq' };
+    mockResolveApiKey.mockReturnValue('key-one');
+    mockTranscriptionsCreate.mockResolvedValue({ text: 'ok' });
+
+    await transcribeWithOpenAI(makeBuffer(), 'audio/ogg');
+    await transcribeWithOpenAI(makeBuffer(), 'audio/ogg');
+    // Same key: one construction, client reused.
+    expect(vi.mocked(OpenAI)).toHaveBeenCalledTimes(1);
+
+    mockResolveApiKey.mockReturnValue('key-two');
+    await transcribeWithOpenAI(makeBuffer(), 'audio/ogg');
+
+    // Rotated key: the cached K1 client must NOT serve a K2-checked call.
+    expect(vi.mocked(OpenAI)).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(OpenAI).mock.calls[1]).toEqual([{ apiKey: 'key-two' }]);
   });
 });
 
