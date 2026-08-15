@@ -919,7 +919,7 @@
       "test": "tests/runtimes/agent/runtime-turn-coordinator.test.ts"
     },
     "auth_terminal": {
-      "disposition": "human_required_quarantine_escalation_awaiting_physical_repair",
+      "disposition": "human_required_quarantine_escalation_cleared_by_gate_proven_outbound_delivery",
       "owner": "src/core/durability.ts",
       "test": "tests/core/durability-edge.test.ts"
     },
