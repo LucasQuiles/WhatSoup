@@ -4,7 +4,7 @@ Date: 2026-08-14
 
 ## Status
 
-Approved design direction; written specification awaiting owner review before implementation.
+Approved for implementation on 2026-08-14.
 
 ## Problem
 
