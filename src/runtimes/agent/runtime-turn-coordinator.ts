@@ -15,6 +15,11 @@ import {
   type TurnRejectReason,
 } from './turn-queue.ts';
 import { TurnQueueHaltLatch, type TurnQueueHaltHealth } from './turn-queue-halt-latch.ts';
+import {
+  OutboundQueuePoisonRegistry,
+  type OutboundQueuePoisonHealth,
+} from './outbound-queue-poison-registry.ts';
+import { GLOBAL_CONVERSATION_KEY } from '../../core/conversation-key.ts';
 import type { SessionManager } from './session.ts';
 import { config } from '../../config.ts';
 import { collectRuntimeTurnAnswerEvidence } from './runtime-turn-finalization.ts';
@@ -190,6 +195,7 @@ export function reconcileStuckScopes(instanceName: string): void {
 export interface RuntimeTurnCoordinatorPort {
   readonly durability: DurabilityEngine | null;
   readonly instanceName: string;
+  readonly sessionScope: 'single' | 'shared' | 'per_chat';
   readonly runtimeTurnSupervisor: RuntimeTurnSupervisor<RuntimeTurnPostEffects>;
   readonly sessionOwnership: SessionOwnershipRegistry;
   readonly recoveryManagerId: string;
@@ -292,6 +298,7 @@ export interface RuntimeTurnCoordinatorPort {
 export class RuntimeTurnCoordinator {
   private readonly host: RuntimeTurnCoordinatorPort;
   private readonly turnQueueHalts = new TurnQueueHaltLatch();
+  private readonly outboundQueuePoisons = new OutboundQueuePoisonRegistry();
   private readonly activeFinalizations = new Map<string, Promise<FinalizeRuntimeTurnResult>>();
   private readonly cancelledUndispatchedTurnIds = new Set<string>();
   private readonly undispatchedCrashFinalizations = new Map<string, Promise<void>>();
@@ -315,6 +322,63 @@ turnQueueHaltHealth(sessionScope: 'single' | 'shared' | 'per_chat'): TurnQueueHa
 }
 rekeyPerChatTurnQueueHaltScope(fromScopeKey: string, toScopeKey: string): void {
   this.turnQueueHalts.rekey(fromScopeKey, toScopeKey);
+}
+
+outboundQueuePoisonHealth(): OutboundQueuePoisonHealth {
+  return this.outboundQueuePoisons.snapshot();
+}
+
+rekeyPerChatOutboundQueuePoisonScope(fromScopeKey: string, toScopeKey: string): void {
+  this.outboundQueuePoisons.rekey(fromScopeKey, toScopeKey);
+}
+
+async observeOutboundQueueOperation<T>(
+  scopeKey: string,
+  queue: IOutboundQueue,
+  operation: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    if (queue.isPoisoned()) {
+      try {
+        this.containOutboundQueuePoison(scopeKey, error);
+      } catch (containmentError) {
+        log.error({ err: containmentError }, 'outbound queue poison containment failed');
+      }
+    }
+    throw error;
+  }
+}
+
+rejectRuntimeTurnIfOutboundQueuePoisoned(scopeKey: string, turn: QueuedTurn): boolean {
+  if (!this.outboundQueuePoisons.has(scopeKey)) return false;
+  this.finalizeRejectedRuntimeTurn(turn, 'scope_blocked_recovery');
+  return true;
+}
+
+enqueueSharedRuntimeTurn(turn: QueuedTurn): boolean {
+  if (this.host.isShuttingDown?.() === true) {
+    this.finalizeRejectedRuntimeTurn(turn, 'queue_closed');
+    return false;
+  }
+  if (this.rejectRuntimeTurnIfOutboundQueuePoisoned(GLOBAL_CONVERSATION_KEY, turn)) {
+    return false;
+  }
+  return this.host.turnQueue.enqueue(turn);
+}
+
+private containOutboundQueuePoison(scopeKey: string, error: unknown): void {
+  if (!this.outboundQueuePoisons.record(scopeKey, error)) return;
+  if (this.host.sessionScope === 'per_chat') this.turnQueueHalts.halt(scopeKey);
+  const turnQueue = this.host.sessionScope === 'per_chat'
+    ? this.host.perChatTurnQueues.get(scopeKey)
+    : this.host.sessionScope === 'shared'
+      ? this.host.turnQueue
+      : null;
+  for (const pending of turnQueue?.closeAndTakePendingTurns() ?? []) {
+    this.finalizeRejectedRuntimeTurn(pending, 'scope_blocked_recovery');
+  }
 }
 
 hasGlobalTeardownPending(): boolean {
@@ -1657,6 +1721,9 @@ enqueuePerChatRuntimeTurn(mapKey: string, turn: QueuedTurn): boolean {
   if (this.host.isShuttingDown?.() === true) {
     // Shutdown-time admission rejection is a closed queue (#1750).
     this.finalizeRejectedRuntimeTurn(turn, 'queue_closed');
+    return false;
+  }
+  if (this.rejectRuntimeTurnIfOutboundQueuePoisoned(mapKey, turn)) {
     return false;
   }
   if (this.turnQueueHalts.has(mapKey)) {

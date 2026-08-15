@@ -2646,6 +2646,7 @@ export class AgentRuntime implements Runtime {
     return {
       db: runtime.db,
       instanceName: runtime.instanceName,
+      get sessionScope() { return runtime.sessionScope; },
       shared: runtime.shared,
       runtimeTurnSupervisor: runtime.runtimeTurnSupervisor,
       sessionOwnership: runtime.sessionOwnership,

@@ -7,7 +7,7 @@ import {
   type RuntimeTurnContext,
 } from '../../../src/runtimes/agent/runtime-turn-context.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
-import type { QueuedTurn } from '../../../src/runtimes/agent/turn-queue.ts';
+import { TurnQueue, type QueuedTurn } from '../../../src/runtimes/agent/turn-queue.ts';
 import {
   ensureStandbyNoticeSchema,
   peekStandbyNotice,
@@ -66,6 +66,160 @@ afterEach(() => {
 });
 
 describe('runtime terminal coordinator integration', () => {
+  it('rethrows the original shared outbound failure and blocks later shared admission', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const { state } = makeRuntimeState(db, { shared: true });
+      const durability = durabilityMock();
+      state.durability = durability;
+      const poisonError = new Error('shared outbound delivery failed');
+      const outbound = queueStub('15550190080@s.whatsapp.net');
+      vi.mocked(outbound.isPoisoned).mockReturnValue(true);
+      const runtimeContext = context('shared', GLOBAL_CONVERSATION_KEY, 80, 'turn-shared-after-poison');
+      const turn: QueuedTurn = {
+        sourceMessageId: runtimeContext.replay.sourceMessageId,
+        receivedAtUnixSeconds: runtimeContext.replay.receivedAtUnixSeconds,
+        conversationKey: runtimeContext.identity.conversationKey,
+        chatJid: runtimeContext.identity.deliveryJid,
+        senderJid: runtimeContext.replay.senderJid,
+        senderName: runtimeContext.replay.senderName,
+        text: runtimeContext.replay.text,
+        isGroup: false,
+        contentType: 'text',
+        runtimeContext,
+        inboundSeq: runtimeContext.identity.inboundSeq ?? undefined,
+      };
+
+      await expect(state.runtimeTurnCoordinator.observeOutboundQueueOperation(
+        GLOBAL_CONVERSATION_KEY,
+        outbound,
+        async () => { throw poisonError; },
+      )).rejects.toBe(poisonError);
+      expect(state.runtimeTurnCoordinator.enqueueSharedRuntimeTurn(turn)).toBe(false);
+      await state.runtimeTurnCoordinator.awaitRejectedRuntimeTurnFinalizations();
+
+      expect(durability.finalizeTurnTerminal).toHaveBeenCalledWith(expect.objectContaining({
+        terminal: expect.objectContaining({
+          logicalTurnId: 'turn-shared-after-poison',
+          attemptFailureClass: 'scope_blocked_recovery',
+        }),
+      }));
+    } finally {
+      db.close();
+    }
+  });
+
+  it('contains outbound queue poison to one scope and durably rejects pending admissions', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const { state } = makeRuntimeState(db, { sessionScope: 'per_chat' });
+      const durability = durabilityMock();
+      state.durability = durability;
+      state.replyGuarantee = replyGuaranteeMock();
+      const poisonedScope = 'poisoned-scope';
+      const healthyScope = 'healthy-scope';
+      const poisonError = new Error('outbound delivery failed');
+      const poisonedOutbound = queueStub('15550190081@s.whatsapp.net');
+      vi.mocked(poisonedOutbound.isPoisoned).mockReturnValue(true);
+      vi.mocked(poisonedOutbound.flush).mockRejectedValue(poisonError);
+
+      const makeTurn = (scope: string, seq: number, turnId: string): QueuedTurn => {
+        const runtimeContext = context('per_chat', scope, seq, turnId);
+        return {
+          sourceMessageId: runtimeContext.replay.sourceMessageId,
+          receivedAtUnixSeconds: runtimeContext.replay.receivedAtUnixSeconds,
+          conversationKey: runtimeContext.identity.conversationKey,
+          chatJid: runtimeContext.identity.deliveryJid,
+          senderJid: runtimeContext.replay.senderJid,
+          senderName: runtimeContext.replay.senderName,
+          text: runtimeContext.replay.text,
+          isGroup: false,
+          contentType: 'text',
+          runtimeContext,
+          inboundSeq: runtimeContext.identity.inboundSeq ?? undefined,
+        };
+      };
+
+      const active = makeTurn(poisonedScope, 81, 'turn-poison-active');
+      const pending = makeTurn(poisonedScope, 82, 'turn-poison-pending');
+      const next = makeTurn(poisonedScope, 83, 'turn-poison-next');
+      const healthy = makeTurn(healthyScope, 84, 'turn-healthy');
+      let releaseActive!: () => void;
+      const activeGate = new Promise<void>((resolve) => { releaseActive = resolve; });
+      const poisonedProcessor = vi.fn(async () => {
+        await activeGate;
+        await state.runtimeTurnCoordinator.observeOutboundQueueOperation(
+          poisonedScope,
+          poisonedOutbound,
+          () => poisonedOutbound.flush(),
+        );
+      });
+      const poisonedTurnQueue = new TurnQueue({
+        onReject: (turn, reason) => state.runtimeTurnCoordinator.finalizeRejectedRuntimeTurn(turn, reason),
+        onProcessorError: (turn, error) => (
+          state.runtimeTurnCoordinator as unknown as {
+            finalizePerChatProcessorError(
+              mapKey: string,
+              failed: QueuedTurn,
+              cause: unknown,
+            ): Promise<void>;
+          }
+        ).finalizePerChatProcessorError(poisonedScope, turn, error),
+      });
+      poisonedTurnQueue.setProcessor(poisonedProcessor);
+      (state.perChatTurnQueues as unknown as Map<string, TurnQueue>)
+        .set(poisonedScope, poisonedTurnQueue);
+      state.perChatTurnQueueKeys.set(poisonedTurnQueue, { value: poisonedScope });
+
+      expect(poisonedTurnQueue.enqueue(active)).toBe(true);
+      expect(poisonedTurnQueue.enqueue(pending)).toBe(true);
+      await vi.waitFor(() => expect(poisonedTurnQueue.activeTurn).toBe(active));
+      releaseActive();
+      await poisonedTurnQueue.idle();
+
+      expect(state.runtimeTurnCoordinator.enqueuePerChatRuntimeTurn(poisonedScope, next)).toBe(false);
+      const healthyProcessor = vi.fn(async () => {});
+      const healthyQueue = new TurnQueue();
+      healthyQueue.setProcessor(healthyProcessor);
+      (state.perChatTurnQueues as unknown as Map<string, TurnQueue>).set(healthyScope, healthyQueue);
+      expect(state.runtimeTurnCoordinator.enqueuePerChatRuntimeTurn(healthyScope, healthy)).toBe(true);
+      await healthyQueue.idle();
+      await state.runtimeTurnCoordinator.awaitRejectedRuntimeTurnFinalizations();
+
+      expect(poisonedOutbound.flush).toHaveBeenCalledTimes(1);
+      expect(poisonedProcessor).toHaveBeenCalledTimes(1);
+      expect(healthyProcessor).toHaveBeenCalledTimes(1);
+      expect(state.runtimeTurnCoordinator.outboundQueuePoisonHealth()).toEqual({
+        outboundQueuePoisoned: true,
+        outboundQueuePoisonedScopes: 1,
+        activeAdmissionLaneBlocked: true,
+      });
+      const terminals = durability.finalizeTurnTerminal.mock.calls.map(([arg]) => (
+        arg as { terminal: { logicalTurnId: string; attemptFailureClass?: string | null } }
+      ).terminal);
+      expect(terminals).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          logicalTurnId: 'turn-poison-active',
+          attemptFailureClass: 'pre_dispatch_error',
+        }),
+        expect.objectContaining({
+          logicalTurnId: 'turn-poison-pending',
+          attemptFailureClass: 'scope_blocked_recovery',
+        }),
+        expect.objectContaining({
+          logicalTurnId: 'turn-poison-next',
+          attemptFailureClass: 'scope_blocked_recovery',
+        }),
+      ]));
+      expect(terminals.filter((item) => item.logicalTurnId === 'turn-poison-pending')).toHaveLength(1);
+      expect(terminals.filter((item) => item.logicalTurnId === 'turn-poison-next')).toHaveLength(1);
+    } finally {
+      db.close();
+    }
+  });
+
   const fallbackActivation = () => ({
     primaryProvider: 'claude-cli',
     fallbackProvider: 'codex-cli',

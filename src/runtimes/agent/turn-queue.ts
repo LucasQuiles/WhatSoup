@@ -32,7 +32,11 @@ export interface QueuedTurn {
  * the finalizer can stamp a distinct failure_class rather than collapsing every
  * reject to 'unknown'. The names are a subset of core AdmissionRejectClass.
  */
-export type TurnRejectReason = 'queue_closed' | 'queue_halted' | 'queue_full';
+export type TurnRejectReason =
+  | 'queue_closed'
+  | 'queue_halted'
+  | 'queue_full'
+  | 'scope_blocked_recovery';
 
 export interface TurnQueueOpts {
   maxDepth?: number;
