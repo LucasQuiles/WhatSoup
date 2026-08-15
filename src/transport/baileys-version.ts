@@ -12,7 +12,7 @@ export function baileysVersionLabel(version: readonly number[]): string {
   return version.join('.');
 }
 
-export function parsePinnedBaileysVersion(raw: string | undefined = process.env['WHATSOUP_BAILEYS_VERSION']): BaileysVersionTuple | null {
+export function parsePinnedBaileysVersion(raw: string | undefined): BaileysVersionTuple | null {
   const value = raw?.trim();
   if (!value) return null;
 
@@ -35,8 +35,8 @@ export function parsePinnedBaileysVersion(raw: string | undefined = process.env[
   return [parsed[0]!, parsed[1]!, parsed[2]!];
 }
 
-export async function resolveBaileysVersion(): Promise<ResolvedBaileysVersion> {
-  const pinned = parsePinnedBaileysVersion();
+export async function resolveBaileysVersion(pinnedRaw?: string): Promise<ResolvedBaileysVersion> {
+  const pinned = parsePinnedBaileysVersion(pinnedRaw);
   if (pinned) {
     return { version: pinned, source: 'pinned' };
   }

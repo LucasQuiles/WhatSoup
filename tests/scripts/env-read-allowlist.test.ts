@@ -36,8 +36,9 @@ const ALLOWLIST: Record<string, number> = {
   // (#2192 slices 3a+3b): conditional WRITES + post-publish reads for
   // BOT_ERRORS_{JID,EXPECTED_JID,REQUIRE_EXPECTED,SAFE_SHAPE_CRED_PATH} and
   // EMIT_ALERT_THROTTLE_MS, + the BOT_ERRORS_RUNTIME_TOOL_FAILURE_ALERTS read
-  // behind toolFailureAlertsEnabled.
-  'src/config.ts': 45,
+  // behind toolFailureAlertsEnabled, + WHATSOUP_BAILEYS_VERSION absorbed as
+  // baileysVersionPinned (#2192 s4a — baileys-version.ts entry retired).
+  'src/config.ts': 46,
   // param-default `env` seam (WHATSOUP_REPO_ROOT) — env-late by design
   // (#2192 s4 verdict: deploy-wrapper assertion input; the resolver VALIDATES
   // env-vs-module-location agreement, so config-sourcing it would be
@@ -153,8 +154,6 @@ const ALLOWLIST: Record<string, number> = {
   // mode selector (QR vs pairing-code) + operator PII; a typed field would
   // persist E.164 at rest and make an ephemeral per-run choice permanent).
   'src/transport/auth.ts': 4,
-  // WHATSOUP_BAILEYS_VERSION param-default — slice-3 typed field.
-  'src/transport/baileys-version.ts': 1,
   // bounded relay env key lookup.
   'src/transport/imessage/imsg-rpc-relay.ts': 1,
 };
