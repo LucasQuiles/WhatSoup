@@ -873,6 +873,11 @@
       "owner": "src/runtimes/agent/runtime-turn-coordinator.ts",
       "test": "tests/runtimes/agent/runtime-turn-coordinator.test.ts"
     },
+    "gui_session_monitor": {
+      "disposition": "threshold_gated_gui_outage_cleared_by_verified_ok_producer_latch",
+      "owner": "deploy/scripts/bot-errors-gui-session-monitor.py",
+      "test": "deploy/scripts/tests/test_bot_errors_gui_session_monitor.py"
+    },
     "auth_terminal": {
       "disposition": "human_required_quarantine_escalation_cleared_by_gate_proven_outbound_delivery",
       "owner": "src/core/durability.ts",

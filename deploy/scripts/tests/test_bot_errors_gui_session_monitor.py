@@ -2507,3 +2507,129 @@ class TestSaveStateRootRefusal:
         monkeypatch.setattr(mod, "state_path", lambda: link / "state.json")
         with pytest.raises(RuntimeError, match="non-directory GUI monitor state root"):
             mod.save_state({"k": "v"})
+
+
+# --- #2404: producer-owned clear lifecycle ---------------------------------
+# The monitor durably opens a gui_session_monitor incident but the healthy
+# branch only resets the local failure counter — no same-source clear is ever
+# emitted, so the incident outlives verified recovery. The lifecycle contract:
+# a persisted per-target `alerted` latch armed ONLY on an accepted alert
+# emission (rc 0), a clear emitted on a verified-ok observation ONLY while the
+# latch is armed (a never-alerted target must not emit an orphan clear), and
+# the latch retired ONLY on an accepted clear emission (a rejected clear
+# retries on the next healthy pass).
+
+
+_HEALTHY_PROBE = {
+    "console_owner": "alice", "agent_state": "running",
+    "console_ok": True, "agent_ok": True, "boot_id": None, "error": None,
+}
+_BROKEN_PROBE = {
+    "console_owner": "root", "agent_state": "running",
+    "console_ok": True, "agent_ok": True, "boot_id": None, "error": None,
+}
+_TARGET = {"host": "botbox", "instance": "x-bot", "label": "com.whatsoup.x-bot"}
+
+
+class TestClearLifecycle2404:
+    def test_build_clear_argv_is_clear_shaped(self, mod):
+        argv = mod.build_clear_argv(host="botbox", instance="x-bot", label="com.whatsoup.x-bot")
+        assert "--clear" in argv
+        assert argv[argv.index("--source") + 1] == "gui_session_monitor"
+        assert argv[argv.index("--instance") + 1] == "x-bot"
+        joined = " ".join(argv)
+        assert "botbox" in joined and "com.whatsoup.x-bot" in joined
+
+    def test_run_target_ok_with_latch_returns_clear_argv(self, mod):
+        outcome = mod.run_target(
+            target=_TARGET, expected_user="alice", probe=_HEALTHY_PROBE,
+            prior_state={"consecutive_failures": 3, "last_state": "gui_session_absent", "alerted": True},
+            threshold=2,
+        )
+        assert outcome.state == mod.STATE_OK
+        assert outcome.clear_argv is not None
+        assert "--clear" in outcome.clear_argv
+        # Retiring the latch is the caller's rc-gated job — the pure layer
+        # must carry it forward unchanged.
+        assert outcome.new_state["alerted"] is True
+
+    def test_run_target_ok_without_latch_emits_no_orphan_clear(self, mod):
+        outcome = mod.run_target(
+            target=_TARGET, expected_user="alice", probe=_HEALTHY_PROBE,
+            prior_state={"consecutive_failures": 0, "last_state": "ok"},
+            threshold=2,
+        )
+        assert outcome.state == mod.STATE_OK
+        assert outcome.clear_argv is None
+        assert outcome.new_state["alerted"] is False
+
+    def test_run_target_non_ok_carries_latch_unchanged(self, mod):
+        outcome = mod.run_target(
+            target=_TARGET, expected_user="alice", probe=_BROKEN_PROBE,
+            prior_state={"consecutive_failures": 0, "last_state": "ok", "alerted": True},
+            threshold=5,
+        )
+        assert outcome.state != mod.STATE_OK
+        assert outcome.clear_argv is None
+        assert outcome.new_state["alerted"] is True
+
+    def _wire(self, mod, monkeypatch, tmp_path, *, prior, probe, emit_rc):
+        fleet_file = tmp_path / "fleet.json"
+        fleet_file.write_text(_minimal_fleet_json(), encoding="utf-8")
+        monkeypatch.setattr(mod, "fleet_path", lambda: fleet_file)
+        monkeypatch.setattr(mod, "load_state", lambda: {"botbox/com.whatsoup.x-bot": prior})
+        monkeypatch.setattr(mod, "resolve_expected_user", lambda host: "alice")
+        monkeypatch.setattr(mod, "probe_host", lambda host, user, label: probe)
+        saved = {}
+        monkeypatch.setattr(mod, "save_state", lambda s: saved.update(s))
+        emitted = []
+        monkeypatch.setattr(
+            mod, "emit_event", lambda argv, dry_run: (emitted.append(argv), emit_rc)[1],
+        )
+        return saved, emitted
+
+    def test_run_once_arms_latch_only_on_accepted_emit(self, mod, monkeypatch, tmp_path):
+        prior = {"consecutive_failures": 1, "last_state": "gui_session_absent"}
+        saved, emitted = self._wire(
+            mod, monkeypatch, tmp_path, prior=prior, probe=_BROKEN_PROBE, emit_rc=0,
+        )
+        assert mod.run_once(dry_run=False) == 0
+        assert len(emitted) == 1
+        assert saved["botbox/com.whatsoup.x-bot"]["alerted"] is True
+
+    def test_run_once_rejected_emit_leaves_latch_unarmed(self, mod, monkeypatch, tmp_path):
+        prior = {"consecutive_failures": 1, "last_state": "gui_session_absent"}
+        saved, emitted = self._wire(
+            mod, monkeypatch, tmp_path, prior=prior, probe=_BROKEN_PROBE, emit_rc=1,
+        )
+        assert mod.run_once(dry_run=False) == 1
+        assert len(emitted) == 1
+        assert saved["botbox/com.whatsoup.x-bot"]["alerted"] is False
+
+    def test_run_once_accepted_clear_retires_latch(self, mod, monkeypatch, tmp_path):
+        prior = {"consecutive_failures": 3, "last_state": "gui_session_absent", "alerted": True}
+        saved, emitted = self._wire(
+            mod, monkeypatch, tmp_path, prior=prior, probe=_HEALTHY_PROBE, emit_rc=0,
+        )
+        assert mod.run_once(dry_run=False) == 0
+        assert len(emitted) == 1
+        assert "--clear" in emitted[0]
+        assert saved["botbox/com.whatsoup.x-bot"]["alerted"] is False
+
+    def test_run_once_rejected_clear_retains_latch_for_retry(self, mod, monkeypatch, tmp_path):
+        prior = {"consecutive_failures": 3, "last_state": "gui_session_absent", "alerted": True}
+        saved, emitted = self._wire(
+            mod, monkeypatch, tmp_path, prior=prior, probe=_HEALTHY_PROBE, emit_rc=1,
+        )
+        assert mod.run_once(dry_run=False) == 1
+        assert len(emitted) == 1
+        assert saved["botbox/com.whatsoup.x-bot"]["alerted"] is True
+
+    def test_run_once_healthy_never_alerted_emits_nothing(self, mod, monkeypatch, tmp_path):
+        prior = {"consecutive_failures": 0, "last_state": "ok"}
+        saved, emitted = self._wire(
+            mod, monkeypatch, tmp_path, prior=prior, probe=_HEALTHY_PROBE, emit_rc=0,
+        )
+        assert mod.run_once(dry_run=False) == 0
+        assert emitted == []
+        assert saved["botbox/com.whatsoup.x-bot"]["alerted"] is False
