@@ -7,7 +7,8 @@
 
 import { DatabaseSync } from 'node:sqlite';
 import { createFleetServer } from './index.ts';
-import { DEFAULT_BIND_ADDRESS, DEFAULT_FLEET_PORT } from './constants.ts';
+import { DEFAULT_FLEET_PORT } from './constants.ts';
+import { config } from '../config.ts';
 import { loadOrCreateFleetTokens } from './token-storage.ts';
 import { printErr } from '../lib/cli-print.ts';
 import { createChildLogger } from '../logger.ts';
@@ -40,7 +41,7 @@ const server = createFleetServer({
 
 server.start(port);
 log.info(
-  { bindAddress: process.env.FLEET_BIND_ADDRESS ?? DEFAULT_BIND_ADDRESS, port },
+  { bindAddress: config.fleetBindAddress, port },
   'fleet server listening',
 );
 printErr('Press Ctrl+C to stop');

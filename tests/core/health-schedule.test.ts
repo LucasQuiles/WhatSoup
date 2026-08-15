@@ -9,6 +9,9 @@ import { tmpdir } from 'node:os';
 
 vi.mock('../../src/config.ts', () => ({
   config: {
+    get healthBindAddress(): string {
+      return process.env.HEALTH_BIND_ADDRESS ?? '127.0.0.1';
+    },
     adminPhones: new Set(['15550100001']),
     dbPath: ':memory:',
     mediaDir: '/tmp/whatsoup-test-media-health-schedule/tmp',

@@ -182,6 +182,9 @@ vi.mock('../../../src/runtimes/agent/outbound-queue.ts', () => ({
 // with sibling suites).
 const { mockConfig } = vi.hoisted(() => {
   const mockConfig = {
+  get healthBindAddress(): string {
+    return process.env.HEALTH_BIND_ADDRESS ?? '127.0.0.1';
+  },
     adminPhones: new Set<string>(['15550100001']),
     controlPeers: new Map<string, string>(),
     toolUpdateMode: 'full' as 'full' | 'minimal' | 'friendly',

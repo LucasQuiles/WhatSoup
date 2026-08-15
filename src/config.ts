@@ -6,6 +6,7 @@ import { normalizePhoneE164, normalizePhoneE164Wire } from './lib/phone.ts';
 import { asRecord, isNonEmptyString } from './lib/type-guards.ts';
 import { migrateLegacyMemoryConfig } from './config-memory-migration.ts';
 import type { Profile } from './core/profiles.ts';
+import { DEFAULT_BIND_ADDRESS } from './fleet/constants.ts';
 import { VALID_ACCESS_MODES, VALID_GROUP_SENDER_POLICIES, type AccessMode, type GroupSenderPolicy } from './instance-loader.ts';
 import { DEFAULT_TRANSPORT_ID, isTransportId, type TransportId } from './transport/registry.ts';
 import { DEFAULT_FLEET_PORT, DEFAULT_INSTANCE_HEALTH_PORT } from './fleet/constants.ts';
@@ -1303,6 +1304,17 @@ export const config = {
 
   // Health
   healthPort: optionalFiniteNumber(instance?.healthPort, 'healthPort') ?? portEnv('HEALTH_PORT', DEFAULT_INSTANCE_HEALTH_PORT),
+  // R7a bind address, instance-config -> env -> loopback default (#2192). The
+  // non-loopback guard at startHealthServer still fail-fasts without opt-in.
+  healthBindAddress: optionalString(instance?.healthBindAddress, 'healthBindAddress')
+    ?? process.env.HEALTH_BIND_ADDRESS ?? '127.0.0.1',
+  // Fleet server bind, same chain; guard at fleet start() unchanged (#2192).
+  fleetBindAddress: optionalString(instance?.fleetBindAddress, 'fleetBindAddress')
+    ?? process.env.FLEET_BIND_ADDRESS ?? DEFAULT_BIND_ADDRESS,
+  // Allowed root for schedule files served by the health surface; undefined
+  // keeps today's unset behavior (#2192).
+  scheduleRoot: optionalString(instance?.scheduleRoot, 'scheduleRoot')
+    ?? process.env.WHATSOUP_SCHEDULE_ROOT,
 
   // GUI
   gui: optionalBoolean(instance?.gui, 'gui') ?? false,

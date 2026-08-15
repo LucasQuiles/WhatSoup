@@ -25,6 +25,12 @@ vi.mock('../../src/config.ts', () => ({
     botName: 'WhatSoup',
     accessMode: 'allowlist',
     healthPort: 9999, // won't actually be used (tests override)
+    // Getter, not a literal: the R7a bind tests mutate HEALTH_BIND_ADDRESS at
+    // runtime and re-import health.ts; the real config reads env at its own
+    // eval, which a fresh-import test observes through this same chain (#2192).
+    get healthBindAddress(): string {
+      return process.env.HEALTH_BIND_ADDRESS ?? '127.0.0.1';
+    },
     models: {
       conversation: 'claude-opus-4-5',
       extraction: 'claude-haiku-4-5',
