@@ -1022,6 +1022,7 @@ export class AgentRuntime implements Runtime {
       instanceName: this.instanceName,
       sessionScope: this.sessionScope,
       cwd: this.cwd,
+      toolFailureAlertsEnabled: config.toolFailureAlertsEnabled,
       resolveProvider: () => this.effectiveProvider || this.agentProvider || 'unknown-provider',
       recentToolFailureAlerts: this.recentToolFailureAlerts,
       capDedupeMap: (map) => this.capDedupeMap(map),

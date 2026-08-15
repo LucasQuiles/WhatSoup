@@ -32,6 +32,12 @@ const MANAGED_ENV = [
   // homedir() honors $HOME on POSIX — the XDG-ignore test points it at the
   // per-test tmpdir so the fallback root never touches the real home.
   'HOME',
+  // config.ts PUBLISHES the bot-errors routing vars when instance-config sets
+  // them (#2192 slice 3a); save/restore so a publish in one test cannot leak.
+  'BOT_ERRORS_JID',
+  'BOT_ERRORS_EXPECTED_JID',
+  'BOT_ERRORS_REQUIRE_EXPECTED',
+  'BOT_ERRORS_RUNTIME_TOOL_FAILURE_ALERTS',
 ] as const;
 
 let savedEnv: Record<string, string | undefined>;
@@ -45,6 +51,11 @@ beforeEach(() => {
   process.env.WHATSOUP_STATE_DIR = path.join(tmpDir, 'state');
   delete process.env.INSTANCE_CONFIG;
   delete process.env.MAX_TOKENS;
+  // Ambient deployment values would shadow the resolution chains under test.
+  delete process.env.BOT_ERRORS_JID;
+  delete process.env.BOT_ERRORS_EXPECTED_JID;
+  delete process.env.BOT_ERRORS_REQUIRE_EXPECTED;
+  delete process.env.BOT_ERRORS_RUNTIME_TOOL_FAILURE_ALERTS;
   vi.resetModules();
 });
 
@@ -283,5 +294,79 @@ describe('instance path validation', () => {
     await expect(import('../src/config.ts')).rejects.toThrow(
       /paths\.authDir/,
     );
+  });
+});
+
+describe('bot-errors alert routing publish bridge (#2192 slice 3a)', () => {
+  // Synthetic group JID (repo convention: 111111… prefix — the hygiene guard
+  // rejects real-shaped 120363… group JIDs in added lines).
+  const JID = '111111100000000001@g.us';
+
+  it('publishes instance-config values to process.env and the typed fields agree', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      botErrorsJid: JID,
+      botErrorsExpectedJid: JID,
+      botErrorsRequireExpected: false,
+    }));
+    const { config } = await import('../src/config.ts');
+    // The publish is the whole point: emit-alert.ts and
+    // outbound-message-safety.ts read these env vars call-time and must see
+    // the instance override.
+    expect(process.env.BOT_ERRORS_JID).toBe(JID);
+    expect(process.env.BOT_ERRORS_EXPECTED_JID).toBe(JID);
+    expect(process.env.BOT_ERRORS_REQUIRE_EXPECTED).toBe('0');
+    expect(config.botErrorsJid).toBe(JID);
+    expect(config.botErrorsExpectedJid).toBe(JID);
+    expect(config.botErrorsRequireExpected).toBe(false);
+  });
+
+  it('falls back to env values without rewriting them', async () => {
+    process.env.BOT_ERRORS_JID = JID;
+    process.env.BOT_ERRORS_REQUIRE_EXPECTED = 'off';
+    const { config } = await import('../src/config.ts');
+    expect(config.botErrorsJid).toBe(JID);
+    expect(config.botErrorsExpectedJid).toBeNull();
+    expect(config.botErrorsRequireExpected).toBe(false);
+    // Env-sourced resolution must not publish: absence semantics elsewhere in
+    // the family are load-bearing, so config only writes what instance-config
+    // explicitly set.
+    expect(process.env.BOT_ERRORS_EXPECTED_JID).toBeUndefined();
+    expect(process.env.BOT_ERRORS_REQUIRE_EXPECTED).toBe('off');
+  });
+
+  it('leaves unset vars unset (no "undefined" strings) and defaults the fields', async () => {
+    const { config } = await import('../src/config.ts');
+    expect(config.botErrorsJid).toBeNull();
+    expect(config.botErrorsExpectedJid).toBeNull();
+    expect(config.botErrorsRequireExpected).toBe(true);
+    // Exact absence, not just undefined-valued: a broken publish would write
+    // the string "undefined" (or an empty value), and `in` also catches a
+    // present-but-undefined key that a plain value read cannot distinguish.
+    expect({
+      BOT_ERRORS_JID: 'BOT_ERRORS_JID' in process.env,
+      BOT_ERRORS_EXPECTED_JID: 'BOT_ERRORS_EXPECTED_JID' in process.env,
+      BOT_ERRORS_REQUIRE_EXPECTED: 'BOT_ERRORS_REQUIRE_EXPECTED' in process.env,
+    }).toEqual({
+      BOT_ERRORS_JID: false,
+      BOT_ERRORS_EXPECTED_JID: false,
+      BOT_ERRORS_REQUIRE_EXPECTED: false,
+    });
+  });
+
+  it('resolves toolFailureAlertsEnabled: default on, env kill-switch, instance precedence', async () => {
+    const first = await import('../src/config.ts');
+    expect(first.config.toolFailureAlertsEnabled).toBe(true);
+
+    vi.resetModules();
+    process.env.BOT_ERRORS_RUNTIME_TOOL_FAILURE_ALERTS = '0';
+    const second = await import('../src/config.ts');
+    expect(second.config.toolFailureAlertsEnabled).toBe(false);
+
+    vi.resetModules();
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      toolFailureAlertsEnabled: true,
+    }));
+    const third = await import('../src/config.ts');
+    expect(third.config.toolFailureAlertsEnabled).toBe(true);
   });
 });
