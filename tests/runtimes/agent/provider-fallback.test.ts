@@ -1449,15 +1449,16 @@ describe('one-message handoff collapse (real db)', () => {
     return { runtime, db };
   }
 
+  // #2192 slice 2b: the flag lives on config now; toggle the existing mutable
+  // config mock instead of the env var, same signature so call sites stand.
   function withFlag(value: '1' | undefined, fn: () => void): void {
-    const prev = process.env['WHATSOUP_ONE_MESSAGE_HANDOFF'];
-    if (value === undefined) delete process.env['WHATSOUP_ONE_MESSAGE_HANDOFF'];
-    else process.env['WHATSOUP_ONE_MESSAGE_HANDOFF'] = value;
+    const config = mockConfigRef();
+    const prev = config['oneMessageHandoff'];
+    config['oneMessageHandoff'] = value === '1';
     try {
       fn();
     } finally {
-      if (prev === undefined) delete process.env['WHATSOUP_ONE_MESSAGE_HANDOFF'];
-      else process.env['WHATSOUP_ONE_MESSAGE_HANDOFF'] = prev;
+      config['oneMessageHandoff'] = prev;
     }
   }
 

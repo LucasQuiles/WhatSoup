@@ -565,7 +565,7 @@ export class AuthBondGuard {
     this.now = options.now ?? (() => new Date());
     this.keepBackups = options.keepBackups ?? DEFAULT_KEEP_BACKUPS;
     this.maxHistoryFiles = Math.max(2, options.maxHistoryFiles ?? DEFAULT_MAX_HISTORY_FILES);
-    this.autoRestore = options.autoRestore ?? process.env['WHATSOUP_AUTH_BOND_AUTO_RESTORE'] !== '0';
+    this.autoRestore = options.autoRestore ?? true;
     this.captureAttempts = Math.max(1, options.captureAttempts ?? DEFAULT_CAPTURE_ATTEMPTS);
     this.captureRetryDelayMs = Math.max(0, options.captureRetryDelayMs ?? DEFAULT_CAPTURE_RETRY_DELAY_MS);
     this.captureBlockReason = options.captureBlockReason ?? (() => null);

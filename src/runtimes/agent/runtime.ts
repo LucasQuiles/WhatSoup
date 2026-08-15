@@ -276,7 +276,6 @@ import { startMediaBridge, setMediaBridgeChat, type MediaBridge } from './media-
 import { WorkspaceSweeper, type WorkspaceResource } from './workspace-sweeper.ts';
 import {
   fallbackProviderConfigFor,
-  oneMessageHandoffEnabled,
 } from './fallback-config.ts';
 import {
   formatClockForUser,
@@ -3269,7 +3268,7 @@ export class AgentRuntime implements Runtime {
                   return { allowedEgress: Array.isArray(raw.allowedEgress) ? raw.allowedEgress.filter((e: unknown) => typeof e === 'string') : [] };
                 },
               },
-              failOpen: process.env['WHATSOUP_SANDBOX_FAIL_OPEN'] === '1',
+              failOpen: config.sandboxFailOpen,
               log: (event) => log.info(event, 'egress adjudication'),
             });
             log.info(
@@ -8101,7 +8100,7 @@ export class AgentRuntime implements Runtime {
     // other case (resend / blocked / missing creds) has no continuation coming,
     // so the notice is sent standalone as before. Stash failure falls back to
     // standalone — the notice is never lost.
-    const collapse = oneMessageHandoffEnabled()
+    const collapse = config.oneMessageHandoff
       && replay.replayScheduled
       && !replay.blockedByToolActivity
       && activation.keyPresent !== false;
@@ -8141,11 +8140,11 @@ export class AgentRuntime implements Runtime {
   }
 
   private withHandoffPrefix(chatJid: string, text: string): string {
-    return withHandoffPrefixImpl(this.db, chatJid, text);
+    return withHandoffPrefixImpl(config.oneMessageHandoff, this.db, chatJid, text);
   }
 
   private flushPendingHandoffNotice(queue: IOutboundQueue): void {
-    flushPendingHandoffNoticeImpl(this.db, queue);
+    flushPendingHandoffNoticeImpl(config.oneMessageHandoff, this.db, queue);
   }
 
   private recreatePerChatSessionForFallback(

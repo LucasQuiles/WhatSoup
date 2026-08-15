@@ -1315,6 +1315,18 @@ export const config = {
   // keeps today's unset behavior (#2192).
   scheduleRoot: optionalString(instance?.scheduleRoot, 'scheduleRoot')
     ?? process.env.WHATSOUP_SCHEDULE_ROOT,
+  // Auth-bond auto-restore, inverted env semantics preserved: ON unless the
+  // env var is exactly '0' (#2192 slice 2b).
+  authBondAutoRestore: optionalBoolean(instance?.authBondAutoRestore, 'authBondAutoRestore')
+    ?? process.env.WHATSOUP_AUTH_BOND_AUTO_RESTORE !== '0',
+  // In-process EgressProxy fail-open. The identically named env var ALSO
+  // drives the out-of-band shell hook (deploy/hooks/agent-sandbox.sh) in
+  // manual deployments — this field owns only the in-process channel (#2192).
+  sandboxFailOpen: optionalBoolean(instance?.sandboxFailOpen, 'sandboxFailOpen')
+    ?? process.env.WHATSOUP_SANDBOX_FAIL_OPEN === '1',
+  // One-message handoff notice flag (#2192 slice 2b).
+  oneMessageHandoff: optionalBoolean(instance?.oneMessageHandoff, 'oneMessageHandoff')
+    ?? process.env.WHATSOUP_ONE_MESSAGE_HANDOFF === '1',
 
   // GUI
   gui: optionalBoolean(instance?.gui, 'gui') ?? false,

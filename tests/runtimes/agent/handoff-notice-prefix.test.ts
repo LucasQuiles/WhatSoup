@@ -12,6 +12,13 @@ const { createChildLogger, _logSingleton } = vi.hoisted(() => {
   return { createChildLogger, _logSingleton };
 });
 
+// #2192 slice 2b: the flag is an explicit parameter now; a local toggle
+// replaces the former vi.stubEnv env toggles.
+let handoffEnabled = false;
+function setOneMessageHandoff(on: boolean): void {
+  handoffEnabled = on;
+}
+
 vi.mock('../../../src/logger.ts', async () => {
   const { hoistedLoggerMock } = await import('../../helpers/logger-mock.ts');
   hoistedLoggerMock(_logSingleton);
@@ -55,6 +62,7 @@ function fakeQueue(targetChatJid: string): { queue: IOutboundQueue; enqueued: st
 }
 
 afterEach(() => {
+  setOneMessageHandoff(false);
   vi.unstubAllEnvs();
   vi.restoreAllMocks();
   for (const p of paths.splice(0)) {
@@ -97,30 +105,30 @@ describe('withHandoffPrefix', () => {
     const db = freshDb();
     stashHandoffNotice(db, CHAT, 'NOTICE', NOW);
     // Flag off → no consume, notice stays pending.
-    expect(withHandoffPrefix(db, CHAT, 'answer')).toBe('answer');
+    expect(withHandoffPrefix(handoffEnabled, db, CHAT, 'answer')).toBe('answer');
     expect(peekStandbyNotice(db, toConversationKey(CHAT))).toBe('NOTICE');
     db.close();
   });
 
   it('prepends and consumes the pending notice exactly once when the flag is on', () => {
-    vi.stubEnv('WHATSOUP_ONE_MESSAGE_HANDOFF', '1');
+    setOneMessageHandoff(true);
     const db = freshDb();
     stashHandoffNotice(db, CHAT, 'NOTICE', NOW);
-    expect(withHandoffPrefix(db, CHAT, 'answer')).toBe('NOTICE\n\nanswer');
+    expect(withHandoffPrefix(handoffEnabled, db, CHAT, 'answer')).toBe('NOTICE\n\nanswer');
     // Consume-once: a second reply gets the bare text.
-    expect(withHandoffPrefix(db, CHAT, 'again')).toBe('again');
+    expect(withHandoffPrefix(handoffEnabled, db, CHAT, 'again')).toBe('again');
     db.close();
   });
 
   it('returns the text unchanged when no notice is pending (flag on)', () => {
-    vi.stubEnv('WHATSOUP_ONE_MESSAGE_HANDOFF', '1');
+    setOneMessageHandoff(true);
     const db = freshDb();
-    expect(withHandoffPrefix(db, CHAT, 'answer')).toBe('answer');
+    expect(withHandoffPrefix(handoffEnabled, db, CHAT, 'answer')).toBe('answer');
     db.close();
   });
 
   it('returns the text unchanged (never throws) when consume fails, flag on', () => {
-    vi.stubEnv('WHATSOUP_ONE_MESSAGE_HANDOFF', '1');
+    setOneMessageHandoff(true);
     const db = freshDb();
     stashHandoffNotice(db, CHAT, 'NOTICE', NOW);
     const realPrepare = db.raw.prepare.bind(db.raw);
@@ -130,7 +138,7 @@ describe('withHandoffPrefix', () => {
         return realPrepare(sql);
       }) as never,
     );
-    expect(withHandoffPrefix(db, CHAT, 'answer')).toBe('answer');
+    expect(withHandoffPrefix(handoffEnabled, db, CHAT, 'answer')).toBe('answer');
     db.close();
   });
 });
@@ -140,38 +148,38 @@ describe('flushPendingHandoffNotice', () => {
     const db = freshDb();
     stashHandoffNotice(db, CHAT, 'NOTICE', NOW);
     const q = fakeQueue(CHAT);
-    flushPendingHandoffNotice(db, q.queue);
+    flushPendingHandoffNotice(handoffEnabled, db, q.queue);
     expect(q.enqueued).toEqual([]);
     expect(peekStandbyNotice(db, toConversationKey(CHAT))).toBe('NOTICE');
     db.close();
   });
 
   it('enqueues a still-pending notice standalone when the flag is on', () => {
-    vi.stubEnv('WHATSOUP_ONE_MESSAGE_HANDOFF', '1');
+    setOneMessageHandoff(true);
     const db = freshDb();
     stashHandoffNotice(db, CHAT, 'NOTICE', NOW);
     const q = fakeQueue(CHAT);
-    flushPendingHandoffNotice(db, q.queue);
+    flushPendingHandoffNotice(handoffEnabled, db, q.queue);
     expect(q.enqueued).toEqual(['NOTICE']);
     db.close();
   });
 
   it('is a no-op when nothing is pending (flag on)', () => {
-    vi.stubEnv('WHATSOUP_ONE_MESSAGE_HANDOFF', '1');
+    setOneMessageHandoff(true);
     const db = freshDb();
     const q = fakeQueue(CHAT);
-    flushPendingHandoffNotice(db, q.queue);
+    flushPendingHandoffNotice(handoffEnabled, db, q.queue);
     expect(q.enqueued).toEqual([]);
     db.close();
   });
 
   it('does not double-send: a reply that already prefixed the notice leaves flush a no-op', () => {
-    vi.stubEnv('WHATSOUP_ONE_MESSAGE_HANDOFF', '1');
+    setOneMessageHandoff(true);
     const db = freshDb();
     stashHandoffNotice(db, CHAT, 'NOTICE', NOW);
-    expect(withHandoffPrefix(db, CHAT, 'answer')).toBe('NOTICE\n\nanswer');
+    expect(withHandoffPrefix(handoffEnabled, db, CHAT, 'answer')).toBe('NOTICE\n\nanswer');
     const q = fakeQueue(CHAT);
-    flushPendingHandoffNotice(db, q.queue);
+    flushPendingHandoffNotice(handoffEnabled, db, q.queue);
     expect(q.enqueued).toEqual([]);
     db.close();
   });
