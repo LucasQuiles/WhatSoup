@@ -211,6 +211,8 @@ export interface RuntimeFallbackPort {
     signal?: AbortSignal,
   ): Promise<boolean>;
   deactivateProviderFallback(reason: string, receipt?: FallbackRecoveryReceipt | null): void;
+  /** Pend deferred route recycles for live managers left stale by a window transition. */
+  schedulePostTransitionRouteRecycles(): void;
 }
 
 export class RuntimeFallbackCoordinator {
@@ -872,6 +874,74 @@ export class RuntimeFallbackCoordinator {
     }
   }
 
+  /**
+   * Advance the chain when the ACTIVE fallback entry's turn PROCESS fails
+   * (non-zero exit or fatal spawn). Fleet incident 2026-08-15: a
+   * billing-suspended provider account CONNECTS and then exits 1 on every
+   * turn WITHOUT emitting a terminal result — the spawn-per-turn exit handler
+   * discards the buffered result on a non-zero exit, so neither the
+   * text-classified advance path nor the empty-output advance path
+   * (recordFallbackTurnOutcome) ever runs, and the window pins forever on a
+   * dead entry while healthy entries wait behind it in the chain. Metadata
+   * preflights cannot catch this class of failure (the suspended account's
+   * models endpoint still returns 200), so the only reliable evidence is the
+   * turn outcome itself.
+   *
+   * A process failure is decisive evidence against the entry, so advance on
+   * the FIRST failure: failedKeys stops this window re-selecting the dead
+   * entry, and the terminal path's single-fallback preservation keeps the
+   * current entry when no alternate exists.
+   *
+   * Returns null when the crash is not attributable to the active fallback
+   * entry (no window, primary-provider session, provider mismatch) so the
+   * caller runs the ordinary crash machinery unchanged.
+   */
+  recordFallbackTurnProcessFailure(
+    session: SessionManager | null,
+    evidence: string,
+  ): {
+    advanced: boolean;
+    activation: ProviderFallbackActivation | null;
+    fromProvider: string;
+    fromModel: string | null;
+  } | null {
+    if (!this.host.isFallbackWindowActive || !this.host.fallbackWindow.activeEntry) return null;
+    const from = this.host.fallbackWindow.activeEntry;
+    const fromKey = this.host.fallbackChain.entryKey(from);
+    const advanceReason = isProviderFallbackReason(this.host.fallbackWindow.armReason)
+      ? this.host.fallbackWindow.armReason
+      : 'auth-required';
+    const resetAt = this.host.fallbackWindow.resetAt !== null
+      ? new Date(this.host.fallbackWindow.resetAt)
+      : null;
+    // Attribution gate: markActiveFallbackFailed only matches a session that is
+    // actually serving the active entry's provider — a PRIMARY session crashing
+    // during a window returns null here and takes the normal crash path. The
+    // duplicate call inside activateProviderFallbackAfterTerminalResult below
+    // is idempotent (failedKeys.has guard) and returns the same key.
+    if (this.markActiveFallbackFailed(session, advanceReason, evidence) === null) return null;
+    const activation = this.activateProviderFallbackAfterTerminalResult(
+      resetAt,
+      advanceReason,
+      session,
+      evidence,
+    );
+    const to = this.host.fallbackWindow.activeEntry;
+    const advanced = activation !== null
+      && to !== null
+      && this.host.fallbackChain.entryKey(to) !== fromKey;
+    if (advanced) {
+      log.warn({
+        deadProvider: from.provider,
+        deadModel: from.model,
+        advancedTo: to?.provider,
+        advancedModel: to?.model,
+        evidence: evidence.slice(0, 160),
+      }, 'advanced fallback chain past process-failing entry');
+    }
+    return { advanced, activation, fromProvider: from.provider, fromModel: from.model ?? null };
+  }
+
   /** Arm (or move) the fallback window to `until`, schedule the revert timer,
    *  and persist best-effort so a restart mid-window resumes on fallback.
    *  Pass `activatedAt` explicitly when restoring to preserve the original
@@ -984,6 +1054,13 @@ export class RuntimeFallbackCoordinator {
     // environment, and per-turn usage-limit extensions would otherwise
     // re-spawn every probe and re-fire every pre-flight alert — an
     // unthrottled storm under sustained load.
+    // Route currency: an arm (fresh, extension after advance, or restore) can
+    // change the route NEW sessions resolve — any live manager still frozen on
+    // the previous route (the primary, or a dead chain entry after an advance)
+    // must be recycled at its next idle boundary or it keeps serving the old
+    // provider indefinitely (live-proven 2026-08-15, see
+    // schedulePostTransitionRouteRecycles).
+    this.host.schedulePostTransitionRouteRecycles();
     if (!firstArm) return true;
     // Pre-flight: check key presence and probe validity; never blocks or reverts
     // the window — fail-open on anything except a definitive 401/403.
@@ -1290,6 +1367,12 @@ export class RuntimeFallbackCoordinator {
       primaryProvider: this.host.agentProvider,
       reason,
     }, 'reverting to primary provider');
+    // Route currency: the revert changes the route NEW sessions resolve, but a
+    // live manager frozen on the fallback provider keeps serving it — /new
+    // resets INSIDE the same manager and auto-respawn re-spawns the same
+    // object, so without this recycle the dead fallback kept receiving turns
+    // for 7+ minutes after this very log line on 2026-08-15.
+    this.host.schedulePostTransitionRouteRecycles();
     this.host.fallbackMetrics.recordRevert();
   }
 
