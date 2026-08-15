@@ -15,16 +15,35 @@ Both take precedence over built-in defaults.
 
 | Variable | Type | Description |
 |----------|------|-------------|
-| `ANTHROPIC_API_KEY` | string | Anthropic API key. Required for `chat` instances — the `whatsoup` launcher hard-fails on startup if missing (`deploy/whatsoup:101`). **Not set** for `agent`/`passive` instances — the wrapper script explicitly unsets it so the agent runtime uses its subscription billing path instead of the API. |
-| `OPENAI_API_KEY` | string | OpenAI API key. **Required for `chat` instances** — the launcher hard-fails on startup if missing (`deploy/whatsoup:102`). Used as the fallback key for OpenAI chat completions and Whisper transcription when the instance does not configure an `apiKeyService`; a configured `chatOptions.openaiProviderConfig.apiKeyService` or `transcriptionOptions.openaiProviderConfig.apiKeyService` resolves through `resolveApiKey()` first. For `agent` instances it is soft-optional (used for Whisper voice-note transcription when present); `passive` instances do not call any LLM APIs directly. |
+| `ANTHROPIC_API_KEY` | string | Compatibility fallback for Anthropic API access. Managed launches scrub it before startup and resolve the canonical `anthropic` credential from secure storage at use time. Agent instances use their configured CLI subscription/native-auth path unless an API provider is selected. |
+| `OPENAI_API_KEY` | string | Compatibility fallback for OpenAI chat completions and Whisper transcription. Managed launches scrub it before startup; the runtime resolves the canonical `openai` credential, or an explicit per-instance `apiKeyService`, from secure storage at use time. |
 | `OPENAI_BASE_URL` | string | **Legacy/fallback** process-wide override for the OpenAI SDK's endpoint — it governs bare `new OpenAI()` clients. Superseded for `chat` instances' chat completions by per-instance [`chatOptions.openaiProviderConfig.baseUrl`](#custom-endpoint-for-chat-instances-chatoptionsopenaiproviderconfig) and for Whisper transcription by per-instance [`transcriptionOptions.openaiProviderConfig.baseUrl`](#custom-endpoint-for-whisper-transcription-transcriptionoptionsopenaiproviderconfig). Instances that configure neither field still get the legacy bare SDK behavior. |
-| `PINECONE_API_KEY` | string | Default Pinecone API key env var. Instances can point at a different BYOK env var with `memory.pinecone.apiKeyEnv`. **Required for `chat` instances** — the launcher hard-fails on startup if missing (`deploy/whatsoup:103`), and `loadContext` is invoked per inbound message (`src/runtimes/chat/runtime.ts:201`) so a missing key burns the 5s timeout on every message. Soft-optional for `agent` instances (needed only when the instance declares `pineconeAllowedIndexes` for the `knowledge_search` MCP tool). |
-| `GEMINI_API_KEY` | string | Google Gemini API key. Forwarded into the agent subprocess environment only when `agentOptions.provider` is `gemini-cli` (`src/runtimes/agent/session.ts:193`); `GOOGLE_API_KEY` is forwarded alongside it when present. Not consulted by `claude-cli`/`codex-cli`/`opencode-cli` agents, or by `chat`/`passive` instances. An operator running a `gemini-cli` agent line must set it — without it the Gemini CLI has no credential. |
+| `PINECONE_API_KEY` | string | Compatibility fallback and default credential selector for Pinecone. Managed launches scrub the variable; runtime Pinecone paths resolve the canonical `pinecone` credential, or the configured BYOK service, from secure storage at use time. It is needed only when the instance uses Pinecone-backed memory or `knowledge_search`. |
+| `GOOGLE_API_KEY` | string | Canonical Google provider compatibility variable. Managed launches scrub it and resolve the `google` credential from secure storage at Gemini child creation. The resolved value is supplied to the Gemini child under both supported CLI aliases. |
+| `GEMINI_API_KEY` | string | Legacy direct-launch fallback for `gemini-cli`. Managed launches scrub it; store the credential under the canonical `google` service (the historical `gemini` keyring service remains a lookup fallback). It is never forwarded to unrelated providers. |
 
-These three keys are loaded from GNOME Keyring by the `whatsoup` wrapper script and exported
-before the process starts. They are never written to disk.
+The managed `deploy/whatsoup` launcher removes these protected names before it
+starts any subprocess, then deliberately re-resolves from the secure store and
+exports into the runtime environment only the values that process-level
+features need (chat LLM keys on `chat` instances, `OPENAI_API_KEY` for Whisper,
+`PINECONE_API_KEY` for `knowledge_search`, and the instance health token). The
+enforced boundary is PROVENANCE and ORDERING — an inherited ambient value can
+never shadow the secure-store resolution — not absence: the exported subset
+remains visible in the runtime's same-UID process environment, and rotating it
+requires an instance restart. Provider boundaries additionally resolve
+credentials from the secure store at use (agent child creation, configured
+BYOK services). Direct environment launches remain a compatibility surface,
+not the managed-fleet credential contract.
 
-> **Instance-type summary:** `chat` instances require **all three** keys (Anthropic, OpenAI, Pinecone) — startup aborts otherwise. `agent` instances require none at the launcher level; OpenAI and Pinecone are loaded best-effort and used only when the corresponding feature is exercised. `passive` instances require none.
+> **Instance-type summary:** the managed launcher exports a per-type,
+secure-store-provenanced subset into the runtime environment: `chat` instances
+receive `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and `PINECONE_API_KEY`
+(startup-fatal when missing); `agent` and `passive` instances receive
+`OPENAI_API_KEY` (Whisper) and `PINECONE_API_KEY` (`knowledge_search`) only
+when present in the store — passive instances leave them unused. `ANTHROPIC_API_KEY`
+is never exported to agent instances (it would override subscription billing).
+Required credentials are additionally validated when the selected provider or
+feature is used.
 
 ### Audio Transcription (local providers)
 
@@ -253,17 +272,35 @@ each regular, non-symlinked `.key` file must be owned by that user with mode
 consult this unscoped file store: they use the account-specific Keychain or
 `secret-tool` entry before any allowed environment or OpenCode fallback.
 
-The health-token launch path is intentionally separate. Its transitional,
+Default OpenAI, Anthropic, and Pinecone runtime lookups deliberately bypass the
+unscoped helper's environment-first step. They check the canonical secure
+credential sources first, then use the conventional environment variable only
+as an observable compatibility fallback. Explicit `apiKeyService` routes keep
+their existing mapped-environment compatibility order.
+
+The health-token fleet-discovery path is intentionally separate. Its
 account-specific file is
 `$XDG_CONFIG_HOME/whatsoup/instances/<instance>/tokens.env`, not a
-`credentials/<service>.key` file. `deploy/whatsoup` preserves an already-loaded
-`WHATSOUP_HEALTH_TOKEN`, then reads this per-instance file, then checks the
-scoped `whatsoup-health-token` Keychain/`secret-tool` entry, and finally the
-legacy shared entry. A present unsafe file fails startup; only an absent file
-falls back. The file is exactly one
+`credentials/<service>.key` file. The file is exactly one
 `WHATSOUP_HEALTH_TOKEN=<64-lowercase-hex>` assignment, owned by the current UID
 with mode `0600`, under a real owner-controlled directory that is not group- or
 world-writable.
+
+`tokens.env` is CANONICAL while it exists, and every consumer agrees on it:
+fleet discovery reads the file directly; the managed launcher scrubs any
+inherited `WHATSOUP_HEALTH_TOKEN`, resolves the file (then the scoped Keychain/
+`secret-tool` entry, then the legacy shared alias) and exports the result; and
+protected health routes honor that launcher-provenanced environment token
+FIRST, falling back to the scoped `whatsoup-health-token` entry
+(`account=<instance name>`, no legacy alias) only when no environment token is
+present — direct non-managed launches and the post-migration end state once
+`tokens.env` is retired. A stale scoped-Keychain entry therefore cannot strand
+the fleet after a `tokens.env` rotation (`deploy/generate-health-tokens.sh
+--rotate` mirrors the Keychain only with `--mirror-keyring`). The expected
+token is resolved once per health server and cached — rotation takes effect on
+instance restart; on a resolution miss the server retries at most every 30
+seconds, so a transient Keychain visibility failure cannot lock out the
+control plane.
 
 ### Health Server
 
@@ -737,7 +774,7 @@ The default is a fixed HOME-relative template — it does not consult `LANG`/`LC
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `memory.pinecone.apiKeyEnv` | string | `PINECONE_API_KEY` | Name of the environment variable that holds this instance's Pinecone key. This is the BYOK boundary: the key is still injected by wrappers/keychains, but the instance decides which env var to read. |
+| `memory.pinecone.apiKeyEnv` | string | `PINECONE_API_KEY` | Credential selector and compatibility environment-variable name for this instance's Pinecone key. The runtime resolves the corresponding secure-store service at use time; under the managed launcher the process-level `PINECONE_API_KEY` is launcher-provenanced (resolved from the secure store at launch after inherited values are scrubbed), so the compatibility name never carries an ambient value. |
 | `memory.pinecone.projectId` | string | env/unset | Optional short project slug guard (not the UUID-form project ID). If the listed index host does not include this slug, readiness returns `project_mismatch` and `knowledge_search` refuses to query. |
 | `memory.pinecone.expectedHostSuffix` | string | env/unset | Optional exact host suffix guard. Use this when two projects have the same index name and you need fail-closed routing. |
 | `memory.pinecone.index` | string | env/`whatsapp-bot` | Primary chat memory/entity index. |
@@ -1520,12 +1557,12 @@ env var (QR-218 PR-2):
 `https://api.openai.com/v1` when omitted); `apiKeyService` names the keyring
 service that authenticates it, resolved via the same `resolveApiKey()`
 precedence the agent HTTP providers use (`src/lib/api-key-resolver.ts`):
-service-env-var-first, then platform keyring, then the conventional
-`OPENAI_API_KEY` env var as a final fallback — logging the QR-104 isolation
-warning when that last hop actually yields a key. An instance that sets
-neither field constructs the OpenAI client exactly as before (bare
-`new OpenAI()`), so `OPENAI_BASE_URL` remains fully backward-compatible for
-chat instances that configure nothing.
+an explicit service keeps its mapped-env/private-store/keyring order, then the
+conventional `OPENAI_API_KEY` fallback. With no explicit service, the canonical
+`openai` secure sources are checked before that separately observed env
+fallback. The final fallback logs the QR-104 isolation warning when it yields a
+key. An instance that sets neither field still honors `OPENAI_BASE_URL` through
+the SDK, while its credential is resolved explicitly at client construction.
 
 **Console:** Chat instances expose these fields in the Add Line wizard's
 Model step and in the line configuration edit dialog as **Custom OpenAI
@@ -1578,7 +1615,7 @@ consumes `baseUrl` as the OpenAI SDK's `baseURL` option and resolves
 `apiKeyService` with `resolveApiKey({ envVar: "OPENAI_API_KEY" })`. A
 keyring-only config is active: `isAvailable()` consults the resolved key, not
 only `process.env.OPENAI_API_KEY`. When `transcriptionOptions` is unset, the
-provider preserves the legacy bare `new OpenAI()` construction, so
+provider resolves the canonical `openai` secure sources first;
 `OPENAI_BASE_URL` and `OPENAI_API_KEY` remain backward-compatible fallbacks.
 
 **Validation:** `transcriptionOptions.openaiProviderConfig` uses the same

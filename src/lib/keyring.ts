@@ -205,6 +205,25 @@ function isSecretToolUsageHelpExit(err: unknown): boolean {
 }
 
 /**
+ * Read a mapped credential from the process environment ONLY — no private
+ * file, no platform keyring, no migration fallbacks. For call sites where the
+ * environment value is authoritative BY CONTRACT rather than a fallback: the
+ * canonical example is the launcher-provenanced WHATSOUP_HEALTH_TOKEN — the
+ * managed launcher scrubs any inherited value and exports its own tokens.env
+ * resolution, so the runtime must honor that exact value before consulting
+ * any store (a store-first order can diverge from the fleet's file-canonical
+ * token after a rotation). Trim-then-check per QR-157: a whitespace-only
+ * value yields null, never an empty (forgeable) credential.
+ */
+export function lookupEnvCredential(service: string): string | null {
+  if (!isValidCredentialService(service)) return null;
+  const envKey = SERVICE_ENV_MAP[service];
+  if (!envKey) return null;
+  const trimmed = process.env[envKey]?.trim();
+  return trimmed ? trimmed : null;
+}
+
+/**
  * Look up a credential by service name.
  *
  * Resolution order:

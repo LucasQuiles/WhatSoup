@@ -300,7 +300,7 @@ export function buildChildEnv(
 
   // Provider-specific credentials — each provider only receives the keys it
   // needs. Claude/Codex use resolveApiKey(); OpenCode resolves one selected
-  // service through lookupCredential(). Both paths are keyring-aware and avoid
+  // service through lookupCredential(). All paths are keyring-aware and avoid
   // copying the parent credential environment. See the Phase D security handoff.
   switch (provider) {
     case 'claude-cli':

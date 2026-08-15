@@ -82,8 +82,10 @@ const ALLOWLIST: Record<string, number> = {
   'src/lib/git-env.ts': 2,
   // INSTANCE_CONFIG read — bootstrap protocol (pairs with config.ts:450).
   'src/lib/instance-context.ts': 1,
-  // secret resolver + REQUIRE_OS_KEYRING flag + XDG ambient — resolver stays env-late.
-  'src/lib/keyring.ts': 4,
+  // secret resolver + REQUIRE_OS_KEYRING flag + XDG ambient — resolver stays
+  // env-late. Fifth site: lookupEnvCredential, the env-only read for values
+  // that are authoritative by contract (launcher-provenanced health token).
+  'src/lib/keyring.ts': 5,
   // CLAUDE_CONFIG_DIR ambient Claude path (typed config.claudeConfigDir candidate, slice-4).
   'src/lib/model-advisor.ts': 1,
   // BOT_ERRORS_STATE_DIR + WHATSOUP_INSTANCE + XDG ambient — slice-3 typed outbox.

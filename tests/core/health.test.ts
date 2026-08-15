@@ -49,6 +49,17 @@ vi.mock('../../src/config.ts', () => ({
 // pollute healthLogger and make its call history meaningless.
 const healthLogger = vi.hoisted(() => ({} as Record<string, ReturnType<typeof vi.fn>>));
 
+const lookupCredentialMock = vi.hoisted(() => vi.fn(
+  (service: string) => service === 'whatsoup-health-token'
+    ? process.env.WHATSOUP_HEALTH_TOKEN ?? null
+    : null,
+));
+
+vi.mock('../../src/lib/keyring.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/lib/keyring.ts')>();
+  return { ...actual, lookupCredential: lookupCredentialMock };
+});
+
 vi.mock('../../src/logger.ts', async () => {
   const { componentLoggerMock, loggerMock } = await import('../helpers/logger-mock.ts');
   const { log, createChildLogger } = componentLoggerMock('health', () => loggerMock().createChildLogger());
@@ -3529,6 +3540,223 @@ describe('GET /health — #2515 public/private liveness split', () => {
     expect(body).not.toContain('synthetic-instance-name-marker-2515');
     expect(body).not.toContain('whatsapp');
   });
+
+  // The file-default lookupCredential mock ignores lookup options, which is
+  // exactly how the unscoped-GET defect stayed invisible. These falsifiers use
+  // a scope-SENSITIVE mock and restore the default in finally (this file has
+  // no global mock reset).
+  const restoreDefaultLookupMock = (): void => {
+    lookupCredentialMock.mockImplementation(
+      (service: string) => service === 'whatsoup-health-token'
+        ? process.env.WHATSOUP_HEALTH_TOKEN ?? null
+        : null,
+    );
+  };
+
+  it('never grants the diagnostic to a token only the unscoped lookup knows (scope falsifier)', async () => {
+    try {
+      // No launcher-provenanced env token: exercise the scoped-keychain
+      // fallback path directly.
+      delete process.env.WHATSOUP_HEALTH_TOKEN;
+      // Deliberately DIFFERENT scoped vs unscoped credentials: before the fix,
+      // GET auth resolved unscoped, so the stale unscoped token would have
+      // unlocked the full diagnostic projection here.
+      lookupCredentialMock.mockImplementation(
+        (service: string, options?: { user?: string }) =>
+          service === 'whatsoup-health-token'
+            ? (options?.user !== undefined ? 'scoped-secret-2515' : 'stale-unscoped-secret-2515')
+            : null,
+      );
+
+      const unscoped = await httpReq(port, '/health', 'GET', undefined, {
+        Authorization: 'Bearer stale-unscoped-secret-2515',
+      });
+      expect(unscoped.status).toBe(200);
+      expect(JSON.parse(unscoped.body).schema_version).toBe('health.public.v1');
+      expect(unscoped.body).not.toContain('synthetic-instance-name-marker-2515');
+
+      // The instance-scoped credential is the one token every protected route
+      // honors — GET diagnostic and mutation routes agree on it.
+      const scoped = await httpReq(port, '/health', 'GET', undefined, {
+        Authorization: 'Bearer scoped-secret-2515',
+      });
+      expect(scoped.status).toBe(200);
+      expect(JSON.parse(scoped.body).instance?.name).toBe('synthetic-instance-name-marker-2515');
+
+      const mutationUnscoped = await httpReq(port, '/send', 'POST', '{}', {
+        Authorization: 'Bearer stale-unscoped-secret-2515',
+      });
+      expect(mutationUnscoped.status).toBe(401);
+      const mutationScoped = await httpReq(port, '/send', 'POST', '{}', {
+        Authorization: 'Bearer scoped-secret-2515',
+      });
+      // Auth passes; the empty body fails later validation — anything but 401.
+      expect(mutationScoped.status).not.toBe(401);
+    } finally {
+      restoreDefaultLookupMock();
+    }
+  });
+
+  it('resolves the expected token once per server, not once per request (keyring stall bound)', async () => {
+    try {
+      delete process.env.WHATSOUP_HEALTH_TOKEN;
+      lookupCredentialMock.mockClear();
+      lookupCredentialMock.mockImplementation(
+        (service: string, options?: { user?: string }) =>
+          service === 'whatsoup-health-token' && options?.user !== undefined
+            ? 'scoped-secret-cache-2515'
+            : null,
+      );
+
+      const first = await httpReq(port, '/health', 'GET', undefined, {
+        Authorization: 'Bearer scoped-secret-cache-2515',
+      });
+      expect(JSON.parse(first.body).instance?.name).toBe('synthetic-instance-name-marker-2515');
+      await httpReq(port, '/health', 'GET', undefined, {
+        Authorization: 'Bearer scoped-secret-cache-2515',
+      });
+      await httpReq(port, '/health', 'GET', undefined, {
+        Authorization: 'Bearer definitely-wrong',
+      });
+
+      // The scoped lookup shells out to the platform keyring synchronously, so
+      // it must run once per server lifetime — not on every request (and not
+      // again on unauthorized requests, which would let a request burst
+      // serialize keyring stalls).
+      const healthTokenLookups = lookupCredentialMock.mock.calls.filter(
+        ([service]) => service === 'whatsoup-health-token',
+      );
+      expect(healthTokenLookups).toEqual([
+        ['whatsoup-health-token', {
+          user: 'synthetic-instance-name-marker-2515',
+          skipMigrationFallbacks: true,
+        }],
+      ]);
+    } finally {
+      restoreDefaultLookupMock();
+    }
+  });
+
+  it('honors the launcher-provenanced env token over a divergent stale keychain entry (rotation falsifier)', async () => {
+    try {
+      // The rotation stranding scenario: tokens.env rotated to F (launcher
+      // exported it; fleet discovery reads the same file and sends F) while
+      // the scoped keychain still holds stale K. Keychain-first precedence
+      // would 401 the entire fleet, and a restart would not fix it.
+      process.env.WHATSOUP_HEALTH_TOKEN = 'rotated-file-token-F';
+      lookupCredentialMock.mockClear();
+      lookupCredentialMock.mockImplementation(
+        (service: string, options?: { user?: string }) =>
+          service === 'whatsoup-health-token' && options?.user !== undefined
+            ? 'stale-keychain-token-K'
+            : null,
+      );
+
+      const fleet = await httpReq(port, '/health', 'GET', undefined, {
+        Authorization: 'Bearer rotated-file-token-F',
+      });
+      expect(JSON.parse(fleet.body).instance?.name).toBe('synthetic-instance-name-marker-2515');
+
+      // The stale keychain value must not authorize anything.
+      const stale = await httpReq(port, '/health', 'GET', undefined, {
+        Authorization: 'Bearer stale-keychain-token-K',
+      });
+      expect(JSON.parse(stale.body).schema_version).toBe('health.public.v1');
+      const staleMutation = await httpReq(port, '/send', 'POST', '{}', {
+        Authorization: 'Bearer stale-keychain-token-K',
+      });
+      expect(staleMutation.status).toBe(401);
+
+      // Env-first: with a launcher-provenanced token present, the keychain is
+      // never consulted at all.
+      expect(lookupCredentialMock.mock.calls.filter(
+        ([service]) => service === 'whatsoup-health-token',
+      )).toEqual([]);
+    } finally {
+      process.env.WHATSOUP_HEALTH_TOKEN = TEST_HEALTH_TOKEN;
+      restoreDefaultLookupMock();
+    }
+  });
+
+  it('bounds miss retries and discovers a late-arriving credential after the window', async () => {
+    try {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      delete process.env.WHATSOUP_HEALTH_TOKEN;
+      lookupCredentialMock.mockClear();
+      lookupCredentialMock.mockImplementation(() => null);
+      const tokenLookups = (): number => lookupCredentialMock.mock.calls
+        .filter(([service]) => service === 'whatsoup-health-token').length;
+      const attempt = () => httpReq(port, '/health', 'GET', undefined, {
+        Authorization: 'Bearer late-token-2515',
+      });
+
+      // Repeated misses inside the retry window: exactly one keyring lookup.
+      let res = await attempt();
+      expect(JSON.parse(res.body).schema_version).toBe('health.public.v1');
+      await attempt();
+      await attempt();
+      expect(tokenLookups()).toBe(1);
+
+      // The credential appears, but inside the window the negative cache holds.
+      lookupCredentialMock.mockImplementation(
+        (service: string, options?: { user?: string }) =>
+          service === 'whatsoup-health-token' && options?.user !== undefined
+            ? 'late-token-2515'
+            : null,
+      );
+      res = await attempt();
+      expect(JSON.parse(res.body).schema_version).toBe('health.public.v1');
+      expect(tokenLookups()).toBe(1);
+
+      // Past the 30s bound the resolver re-consults and discovers it — a
+      // transient keychain visibility failure cannot lock out the control
+      // plane until restart.
+      vi.setSystemTime(Date.now() + 31_000);
+      res = await attempt();
+      expect(JSON.parse(res.body).instance?.name).toBe('synthetic-instance-name-marker-2515');
+      expect(tokenLookups()).toBe(2);
+    } finally {
+      vi.useRealTimers();
+      restoreDefaultLookupMock();
+    }
+  });
+
+  it('does not share cached tokens across server instances', async () => {
+    try {
+      delete process.env.WHATSOUP_HEALTH_TOKEN;
+      lookupCredentialMock.mockImplementation(
+        (service: string, options?: { user?: string }) =>
+          service === 'whatsoup-health-token' && options?.user !== undefined
+            ? `token-for-${options.user}`
+            : null,
+      );
+
+      const first = await httpReq(port, '/health', 'GET', undefined, {
+        Authorization: 'Bearer token-for-synthetic-instance-name-marker-2515',
+      });
+      expect(JSON.parse(first.body).instance?.name).toBe('synthetic-instance-name-marker-2515');
+
+      const { server: otherServer, port: otherPort } = await buildTestServer(
+        makeDeps(db, { instanceName: 'other-instance-2515' }),
+      );
+      try {
+        // The second server resolves ITS OWN scoped token…
+        const own = await httpReq(otherPort, '/health', 'GET', undefined, {
+          Authorization: 'Bearer token-for-other-instance-2515',
+        });
+        expect(JSON.parse(own.body).instance?.name).toBe('other-instance-2515');
+        // …and the first server's cached token must not authorize against it.
+        const crossed = await httpReq(otherPort, '/health', 'GET', undefined, {
+          Authorization: 'Bearer token-for-synthetic-instance-name-marker-2515',
+        });
+        expect(JSON.parse(crossed.body).schema_version).toBe('health.public.v1');
+      } finally {
+        await new Promise<void>((resolve) => otherServer.close(() => resolve()));
+      }
+    } finally {
+      restoreDefaultLookupMock();
+    }
+  });
 });
 
 describe('POST /send — Authorization header check', () => {
@@ -3539,6 +3767,7 @@ describe('POST /send — Authorization header check', () => {
 
   beforeEach(async () => {
     db = makeDb();
+    lookupCredentialMock.mockClear();
     delete process.env.WHATSOUP_HEALTH_TOKEN;
     deps = makeDeps(db, {
       profiles: createProfileRegistry({
@@ -3590,6 +3819,14 @@ describe('POST /send — Authorization header check', () => {
     });
     expect(status).toBe(200);
     expect(JSON.parse(body).ok).toBe(true);
+    // Launcher-provenanced env token is the canonical source (tokens.env
+    // chain): when it is present the scoped keychain must NOT be consulted —
+    // a stale keychain entry diverging from a rotated tokens.env would
+    // otherwise strand the fleet on 401s.
+    expect(lookupCredentialMock).not.toHaveBeenCalledWith('whatsoup-health-token', {
+      user: 'WhatSoup',
+      skipMigrationFallbacks: true,
+    });
   });
 
   it('audits a successful health send exactly once', async () => {

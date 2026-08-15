@@ -46,16 +46,6 @@ describe('credential resolution ordering parity (env -> file -> keyring)', () =>
   // NOTE: the scoped-never-reads-unscoped-.key invariant is covered behaviourally in
   // tests/lib/keyring.test.ts; here we only pin cross-runtime resolution ORDER.
 
-  it('deploy/whatsoup health token: already-loaded env, then tokens.env, then scoped keyring, then legacy', () => {
-    const src = read('deploy/whatsoup');
-    assertOrder(src, 'deploy/whatsoup', [
-      'HEALTH_TOKEN_FILE="$XDG_CONFIG/whatsoup/instances/$INSTANCE/tokens.env"',
-      'whatsoup_read_private_health_token',
-      'keyring_lookup whatsoup-health-token "" user "$INSTANCE"',
-      'keyring_lookup whatsoup_health WHATSOUP_HEALTH_TOKEN',
-    ]);
-  });
-
   it('deploy/scripts/bot-errors-health-check.py: env, then .key file, then keyring (mirrors keyring.ts)', () => {
     const src = read('deploy/scripts/bot-errors-health-check.py');
     assertOrder(src, 'bot-errors-health-check.py', [

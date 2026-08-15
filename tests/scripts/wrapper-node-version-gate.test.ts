@@ -128,14 +128,35 @@ function runWrapper(opts: {
     wrapperOverride,
   } = opts;
 
+  // The wrapper scrubs inherited credential env vars before anything else
+  // runs, so the dummy env keys below can no longer satisfy the chat-instance
+  // credential gate through the env seam. Post-scrub the SECURE STORE is the
+  // only credential source, so stub the Linux store binary on PATH
+  // (`secret-tool`; the Darwin path routes through $NODE's
+  // read-keychain-secret helper, which the fake node already answers).
+  // Without this, a runner with no keyring backend exits 1 in fail_if_empty
+  // before ever reaching the version-gate exec under test.
+  const storeStubDir = makeTmpDir('whatsoup-gate-store-stub-');
+  writeExecutable(
+    path.join(storeStubDir, 'secret-tool'),
+    [
+      '#!/usr/bin/env bash',
+      '# `secret-tool lookup service <name> [user <account>]` → non-empty stub',
+      'if [ "${1:-}" = "lookup" ]; then printf "test-key\\n"; exit 0; fi',
+      'exit 1',
+      '',
+    ].join('\n'),
+  );
+
   const result = spawnSync('bash', [wrapperOverride ?? wrapperPath, instanceName], {
     encoding: 'utf8',
     env: {
-      // Minimal safe environment for bash
-      PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
+      // Minimal safe environment for bash, with the store stub first on PATH.
+      PATH: `${storeStubDir}${path.delimiter}${process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin'}`,
       USER: process.env['USER'] ?? 'testuser',
       HOME: home,
-      // Prevent any real keyring lookups from blocking
+      // Inert past the launcher scrub; kept so a pre-scrub regression that
+      // starts trusting ambient credentials again is still observable.
       ANTHROPIC_API_KEY: 'test-key',
       OPENAI_API_KEY: 'test-key',
       PINECONE_API_KEY: 'test-key',

@@ -58,6 +58,8 @@ const DENIED_PARENT_ENV = {
   GITHUB_TOKEN: 'test-github-token',
   GH_TOKEN: 'test-gh-token',
   OPENCODE_API_KEY: 'test-opencode-key',
+  GEMINI_API_KEY: 'parent-gemini-key',
+  GOOGLE_GENERATIVE_AI_API_KEY: 'parent-google-generative-key',
   UNKNOWN_VENDOR_SECRET_TOKEN: 'test-unknown-secret',
   ...Object.fromEntries(PROVIDER_CREDENTIAL_KEYS.map((key) => [key, `parent-${key}`])),
 } as const;
@@ -104,6 +106,51 @@ describe('buildChildEnv — opencode-cli least-authority environment', () => {
       ZAI_API_KEY: 'test-glm-key',
     });
     expect(lookupCredentialMock.mock.calls).toEqual([['glm']]);
+  });
+
+  it('resolves Gemini credentials from the keyring at child creation', () => {
+    process.env.GOOGLE_API_KEY = 'inherited-google-key';
+    process.env.GEMINI_API_KEY = 'inherited-gemini-key';
+    lookupCredentialMock.mockImplementation((service) =>
+      service === 'google' ? 'keyring-google-key' : null,
+    );
+
+    const env = buildChildEnv('gemini-cli');
+
+    // Keyring-first (#2192): one resolveApiKey per alias, both hitting the
+    // canonical 'google' service, so a keyring hit feeds both names.
+    expect(lookupCredentialMock.mock.calls).toEqual([['google'], ['google']]);
+    expect(env.GOOGLE_API_KEY).toBe('keyring-google-key');
+    expect(env.GEMINI_API_KEY).toBe('keyring-google-key');
+  });
+
+  it('preserves direct-launch compatibility for the legacy Gemini env alias', () => {
+    delete process.env.GOOGLE_API_KEY;
+    process.env.GEMINI_API_KEY = 'legacy-gemini-key';
+    lookupCredentialMock.mockReturnValue(null);
+
+    const env = buildChildEnv('gemini-cli');
+
+    // On a keyring miss each env var is the fallback for its OWN name only:
+    // the legacy alias keeps working, but is not mirrored onto GOOGLE_API_KEY.
+    expect(lookupCredentialMock.mock.calls).toEqual([['google'], ['google']]);
+    expect(env.GOOGLE_API_KEY).toBeUndefined();
+    expect(env.GEMINI_API_KEY).toBe('legacy-gemini-key');
+  });
+
+  it('omits Gemini aliases when secure and compatibility resolution miss', () => {
+    delete process.env.GOOGLE_API_KEY;
+    delete process.env.GEMINI_API_KEY;
+    lookupCredentialMock.mockReturnValue(null);
+
+    const env = buildChildEnv('gemini-cli');
+
+    const presentAliases = Object.keys(env).filter((name) => [
+      'GOOGLE_API_KEY',
+      'GEMINI_API_KEY',
+      'GOOGLE_GENERATIVE_AI_API_KEY',
+    ].includes(name));
+    expect(presentAliases).toEqual([]);
   });
 
   it.each(MODEL_CREDENTIAL_CASES)(

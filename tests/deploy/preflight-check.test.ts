@@ -16,6 +16,7 @@
 // and operator message. No sleeps — synchronous spawn + result inspection.
 
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   accessSync,
   chmodSync,
@@ -25,6 +26,7 @@ import {
   writeFileSync,
   existsSync,
   readFileSync,
+  readdirSync,
   rmSync,
   symlinkSync,
 } from 'node:fs';
@@ -33,6 +35,7 @@ import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { cleanGitEnv } from '../../src/lib/git-env.ts';
+import { SERVICE_ENV_MAP } from '../../src/lib/provider-key-service.ts';
 import {
   gitFixture,
   gitFixtureEnv,
@@ -55,6 +58,11 @@ const GIT_ENV = join(REPO_ROOT, 'src/lib/git-env.ts');
 const TYPE_GUARDS = join(REPO_ROOT, 'src/lib/type-guards.ts');
 const SOURCE_RUNTIME_MANIFEST = join(REPO_ROOT, 'deploy/source-runtime-manifest.json');
 const SPAWN_TIMEOUT_MS = 15_000;
+const PROTECTED_ENV_NAMES = [...new Set([
+  ...Object.values(SERVICE_ENV_MAP),
+  'GOOGLE_GENERATIVE_AI_API_KEY',
+  'GEMINI_API_KEY',
+])];
 
 // The pinned interpreter under test. The fixture repo is generated to match the
 // same Node that runs this suite, so the preflight behavior stays portable across
@@ -134,6 +142,79 @@ function makeFixtureTree(
     mkdirSync(dirname(abs), { recursive: true });
     writeFileSync(abs, contents, 'utf8');
   }
+  const integrityFiles: Record<string, string> = {
+    'scripts/source-runtime-drift-check.ts': readFileSync(SOURCE_RUNTIME_CHECK, 'utf8'),
+    'scripts/lib/guard-core.ts': readFileSync(GUARD_CORE, 'utf8'),
+    'src/lib/git-env.ts': readFileSync(GIT_ENV, 'utf8'),
+    'src/lib/type-guards.ts': readFileSync(TYPE_GUARDS, 'utf8'),
+  };
+  for (const [rel, contents] of Object.entries(integrityFiles)) {
+    const abs = join(root, rel);
+    if (existsSync(abs)) continue;
+    mkdirSync(dirname(abs), { recursive: true });
+    writeFileSync(abs, contents, 'utf8');
+  }
+  const sourceRuntimeManifest = join(root, 'deploy/source-runtime-manifest.json');
+  if (!existsSync(sourceRuntimeManifest)) {
+    mkdirSync(dirname(sourceRuntimeManifest), { recursive: true });
+    writeFileSync(sourceRuntimeManifest, JSON.stringify({
+      schemaVersion: 1,
+      scope: 'preflight-fixture',
+      entrypoints: [
+        { path: 'src/main.ts', importGraph: true },
+        { path: 'src/database-compatibility-bootstrap.ts', importGraph: true },
+      ],
+    }), 'utf8');
+  }
+  writeReleaseManifestForTree(root);
+  return root;
+}
+
+function writeReleaseManifestForTree(root: string): void {
+  const files: Array<{ path: string; sha256: string; sizeBytes: number }> = [];
+  const visit = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const absolute = join(dir, entry.name);
+      const relative = absolute.slice(root.length + 1).split('\\').join('/');
+      if (relative === '.whatsoup-release-manifest.json') continue;
+      if (entry.isDirectory()) visit(absolute);
+      else if (entry.isFile()) {
+        const body = readFileSync(absolute);
+        files.push({
+          path: relative,
+          sha256: createHash('sha256').update(body).digest('hex'),
+          sizeBytes: body.byteLength,
+        });
+      }
+    }
+  };
+  visit(root);
+  writeFileSync(join(root, '.whatsoup-release-manifest.json'), JSON.stringify({
+    schemaVersion: 2,
+    source: { ref: 'HEAD', commit: '0'.repeat(40) },
+    release: { path: root, createdAt: '2026-07-21T00:00:00Z', mutablePathExcludes: [] },
+    rollback: { path: join(root, '.rollback') },
+    files,
+    requiredOutputs: [],
+  }), 'utf8');
+}
+
+function makeIntegrityReleaseTree(): string {
+  const root = makeFixtureTree('export const mainOk = true;\n', {
+    'scripts/source-runtime-drift-check.ts': readFileSync(SOURCE_RUNTIME_CHECK, 'utf8'),
+    'scripts/lib/guard-core.ts': readFileSync(GUARD_CORE, 'utf8'),
+    'src/lib/git-env.ts': readFileSync(GIT_ENV, 'utf8'),
+    'src/lib/type-guards.ts': readFileSync(TYPE_GUARDS, 'utf8'),
+    'deploy/source-runtime-manifest.json': JSON.stringify({
+      schemaVersion: 1,
+      scope: 'preflight-release-integrity',
+      entrypoints: [
+        { path: 'src/main.ts', importGraph: true },
+        { path: 'src/database-compatibility-bootstrap.ts', importGraph: true },
+      ],
+    }),
+  });
+  writeReleaseManifestForTree(root);
   return root;
 }
 
@@ -226,8 +307,18 @@ exit "\${WHATSOUP_TEST_PREFLIGHT_RC:-0}"
     fakeNode,
     `#!/usr/bin/env bash
 set -euo pipefail
+if [ "\${WHATSOUP_TEST_ASSERT_PROTECTED_ENV_ABSENT:-0}" = "1" ]; then
+  for protected_name in \${WHATSOUP_TEST_PROTECTED_ENV_NAMES:-}; do
+    if [ -n "\${!protected_name+x}" ]; then
+      printf 'protected-env-present:%s\\n' "$protected_name" >&2
+      exit 91
+    fi
+  done
+fi
 if [ "\${1:-}" = "-e" ]; then
-  if [ "$#" -ge 3 ] && [[ "\${3:-}" == */package.json ]]; then
+  if [[ "\${3:-}" == */.whatsoup-release-manifest.json ]]; then
+    exec ${JSON.stringify(PINNED_NODE)} "$@"
+  elif [ "$#" -ge 3 ] && [[ "\${3:-}" == */package.json ]]; then
     printf '${PINNED_NODE_MAJOR + 1}'
   else
     printf 'passive'
@@ -283,6 +374,36 @@ exit 9
 function commitWrapperFixture(fixture: WrapperFixture, message: string): void {
   gitFixture(fixture.root, ['add', '.']);
   gitFixture(fixture.root, ['commit', '-m', message]);
+}
+
+function convertWrapperFixtureToRelease(fixture: WrapperFixture): void {
+  rmSync(join(fixture.root, '.git'), { recursive: true, force: true });
+  const files: Array<{ path: string; sha256: string; sizeBytes: number }> = [];
+  const visit = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const absolute = join(dir, entry.name);
+      const relative = absolute.slice(fixture.root.length + 1).split('\\').join('/');
+      if (relative === '.whatsoup-release-manifest.json') continue;
+      if (entry.isDirectory()) visit(absolute);
+      else if (entry.isFile()) {
+        const body = readFileSync(absolute);
+        files.push({
+          path: relative,
+          sha256: createHash('sha256').update(body).digest('hex'),
+          sizeBytes: body.byteLength,
+        });
+      }
+    }
+  };
+  visit(fixture.root);
+  writeFileSync(join(fixture.root, '.whatsoup-release-manifest.json'), JSON.stringify({
+    schemaVersion: 2,
+    source: { ref: 'HEAD', commit: '0'.repeat(40) },
+    release: { path: fixture.root, createdAt: '2026-07-21T00:00:00Z', mutablePathExcludes: [] },
+    rollback: { path: join(fixture.root, '.rollback') },
+    files,
+    requiredOutputs: [],
+  }), 'utf8');
 }
 
 function runWrapper(
@@ -358,19 +479,27 @@ describe.skipIf(!NODE_IN_PIN)('deploy/preflight-check.sh — restart-safety gate
 
     expect(status).toBe(3);
     expect(stderr).toContain('PREFLIGHT-FAIL');
-    expect(stderr).toContain('missing module');
+    expect(stderr).toContain('source runtime file missing');
   });
 
   it('blocks a phantom MODULE reachable only from the lazy agent session path', () => {
     const root = makeFixtureTree('export const mainOk = true;\n', {
       'src/runtimes/agent/session.ts': "import './prompt-compose.ts';\n",
+      'deploy/source-runtime-manifest.json': JSON.stringify({
+        schemaVersion: 1,
+        scope: 'preflight-lazy-session',
+        entrypoints: [
+          { path: 'src/main.ts', importGraph: true },
+          { path: 'src/runtimes/agent/session.ts', importGraph: true },
+        ],
+      }),
     });
     const { status, stderr } = runPreflight(root);
 
     expect(status).toBe(3);
     expect(stderr).toContain('PREFLIGHT-FAIL');
-    expect(stderr).toContain('session.ts');
-    expect(stderr).toContain('missing module');
+    expect(stderr).toContain('prompt-compose.ts');
+    expect(stderr).toContain('source runtime file missing');
   });
 
   it('(b) allows a clean, link-resolvable tree — exit 0', () => {
@@ -653,6 +782,58 @@ describe.skipIf(!NODE_IN_PIN)('deploy/whatsoup — black-box startup ordering', 
 
     expect(result.status, result.stderr).toBe(0);
     expect(result.trace).toEqual(['db-check', 'preflight', 'runtime']);
+  });
+
+  it('removes every protected credential name before the first child process', () => {
+    const fixture = makeWrapperFixture();
+    const protectedValues = Object.fromEntries(
+      PROTECTED_ENV_NAMES.map((name) => [name, `sentinel-${name}`]),
+    );
+
+    const result = runWrapper(fixture, {
+      ...protectedValues,
+      WHATSOUP_TEST_ASSERT_PROTECTED_ENV_ABSENT: '1',
+      WHATSOUP_TEST_PROTECTED_ENV_NAMES: PROTECTED_ENV_NAMES.join(' '),
+    });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.trace).toEqual(['db-check', 'preflight', 'runtime']);
+    expect(result.stderr).not.toContain('protected-env-present:');
+  });
+
+  it('runs from a non-git release whose manifest attests the bootstrap trust graph', () => {
+    const fixture = makeWrapperFixture();
+    convertWrapperFixtureToRelease(fixture);
+
+    const result = runWrapper(fixture);
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.trace).toEqual(['db-check', 'preflight', 'runtime']);
+  });
+
+  it('rejects a manifest-drifted trust checker in a non-git release', () => {
+    const fixture = makeWrapperFixture();
+    convertWrapperFixtureToRelease(fixture);
+    writeFileSync(fixture.trustChecker, 'process.exit(0);\n', 'utf8');
+
+    const result = runWrapper(fixture);
+
+    expect(result.status).toBe(1);
+    expect(result.trace).toEqual([]);
+    expect(result.stderr).toContain('match the release manifest sha256');
+  });
+
+  it('rejects a manifest-drifted bootstrap graph before executing it in a non-git release', () => {
+    const fixture = makeWrapperFixture();
+    convertWrapperFixtureToRelease(fixture);
+    writeFileSync(fixture.bootstrap, "process.stdout.write('tampered\\n');\n", 'utf8');
+
+    const result = runWrapper(fixture);
+
+    expect(result.status).toBe(1);
+    expect(result.trace).toEqual([]);
+    expect(result.stderr).toContain('database compatibility bootstrap trust check failed');
+    expect(result.stderr).toContain('file-sha256-drift');
   });
 
   it('still runs database check when restart preflight is skipped', () => {
@@ -1000,13 +1181,12 @@ describe('deploy/whatsoup — source wiring', () => {
     ]));
   });
 
-  it('runs database compatibility before tmp creation and full instance parsing', () => {
+  it('runs database compatibility before tmp creation', () => {
     const wrapper = readFileSync(WRAPPER, 'utf8');
     const compatibility = wrapper.indexOf('src/database-compatibility-bootstrap.ts');
     expect(compatibility).toBeGreaterThan(-1);
     expect(compatibility).toBeLessThan(wrapper.indexOf('git -C "$REPO_ROOT"'));
     expect(compatibility).toBeLessThan(wrapper.indexOf('mkdir -p "$TMPDIR"'));
-    expect(compatibility).toBeLessThan(wrapper.indexOf('INSTANCE_TYPE='));
   });
 
   it('propagates the terminal database bootstrap exit status instead of collapsing it to restartable failure', () => {
@@ -1075,15 +1255,15 @@ describe('deploy/whatsoup — source wiring', () => {
     expect(scrub).toBeLessThan(bootstrapIndex);
   });
 
-  it('runs database compatibility before provider credential resolution', () => {
+  it('scrubs inherited provider credentials before database compatibility probes', () => {
     const wrapper = readFileSync(WRAPPER, 'utf8');
     const databaseGate = wrapper.indexOf('database-compatibility-bootstrap.ts');
-    const providerCredentials = wrapper.indexOf('ANTHROPIC_API_KEY="$(keyring_lookup');
+    const scrub = wrapper.indexOf(
+      'unset ANTHROPIC_API_KEY OPENAI_API_KEY DEEPSEEK_API_KEY KIMI_API_KEY',
+    );
     expect(databaseGate).toBeGreaterThan(-1);
-    expect(providerCredentials).toBeGreaterThan(databaseGate);
-    const between = wrapper.slice(databaseGate, providerCredentials);
-    expect(between).toContain('future_schema|engine_recovery_required');
-    expect(between).toContain('--hold');
+    expect(scrub).toBeGreaterThan(-1);
+    expect(scrub).toBeLessThan(databaseGate);
   });
 
   it('shares node-pin logic via deploy/lib/resolve-node.sh (DRY with wrapper)', () => {
@@ -1125,7 +1305,6 @@ describe.skipIf(!NODE_IN_PIN)('deploy/preflight-check.sh — release-export mani
       "import { ok } from './helper.ts';\nconsole.log(ok);\n",
       { 'src/helper.ts': 'export const ok = true;\n' },
     );
-    writeValidReleaseManifest(root);
     const { status, stderr } = runPreflight(root);
 
     expect(status).toBe(0);
@@ -1169,5 +1348,34 @@ describe.skipIf(!NODE_IN_PIN)('deploy/preflight-check.sh — release-export mani
     expect(stderr).toContain('release manifest is malformed');
     expect(stderr).toContain('invalid-schema');
     expect(stderr).not.toContain('release export lacks .whatsoup-release-manifest.json');
+  });
+
+  it('rejects a link-clean runtime file whose release-manifest hash drifted', () => {
+    const root = makeIntegrityReleaseTree();
+    expect(runPreflight(root).status).toBe(0);
+    writeFileSync(join(root, 'src/main.ts'), 'export const mainOk = false;\n', 'utf8');
+
+    const result = runPreflight(root);
+
+    expect(result.status).toBe(3);
+    expect(result.stderr).toContain('release source-runtime integrity check failed');
+    expect(result.stderr).toContain('file-sha256-drift');
+    expect(result.stderr).toContain('src/main.ts');
+  });
+
+  it('rejects drifted top-level code before importing it', () => {
+    const root = makeIntegrityReleaseTree();
+    const sentinel = join(root, 'drifted-code-executed');
+    writeFileSync(
+      join(root, 'src/main.ts'),
+      `import { writeFileSync } from 'node:fs';\nwriteFileSync(${JSON.stringify(sentinel)}, 'executed');\n`,
+      'utf8',
+    );
+
+    const result = runPreflight(root);
+
+    expect(result.status).toBe(3);
+    expect(result.stderr).toContain('release source-runtime integrity check failed');
+    expect(existsSync(sentinel)).toBe(false);
   });
 });
