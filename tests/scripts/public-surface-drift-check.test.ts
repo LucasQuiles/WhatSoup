@@ -109,11 +109,11 @@ describe('public surface drift check', () => {
     const normalizedRunbook = runbook.replaceAll(/\s+/g, ' ');
     const healthStatusRow = registry
       .split('\n')
-      .find((line) => line.includes('`http:health.status`'));
+      .find((line) => line.startsWith('| `http:health.status` |'));
 
     expect(normalizedHealthSection).toContain('Inspection-only startup binds to `127.0.0.1`');
     expect(normalizedHealthSection).toContain('canonical instance `healthPort`');
-    expect(healthStatusRow).toContain('`src/core/health.ts:1490`');
+    expect(healthStatusRow).toContain('`src/core/health.ts:1492`');
     expect(healthStatusRow).toContain('`src/core/database-compatibility-early.ts:172`');
     expect(healthStatusRow).toContain('`service_mode: "inspection_only"`');
     expect(healthStatusRow).toContain('`startup_block`');

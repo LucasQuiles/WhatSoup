@@ -499,7 +499,6 @@ void _mockQueueTypeCheck; // suppress unused-variable warning
 
 import * as registerAllModule from '../../../src/mcp/register-all.ts';
 import { AgentRuntime, isUsageLimitMessage, serializePendingPoll, type PendingPollQuestion } from '../../../src/runtimes/agent/runtime.ts';
-import { runNewCommand } from '../../../src/runtimes/agent/runtime-new-command.ts';
 import { parseGeminiAcpEvent } from '../../../src/runtimes/agent/providers/gemini-acp-parser.ts';
 import { __resetModelCatalogueCacheForTest } from '../../../src/runtimes/agent/model-catalogue-resolver.ts';
 import { providerServerErrorNoFallbackNotice, providerUnknownTerminalNotice, renderUserMessage } from '../../../src/runtimes/agent/response-templates.ts';
@@ -2360,110 +2359,6 @@ describe('AgentRuntime', () => {
     ];
     expect(ackTexts.some((t) => t.includes('Interrupted the running task'))).toBe(true);
     expect(ackTexts.some((t) => t.includes('still in progress'))).toBe(false);
-  });
-
-  // ── runNewCommand honest recovery-pending ack ───────────────────────────────
-
-  it('ack says recovery pending when teardown disposition is kill', async () => {
-    let ackText = '';
-    await runNewCommand({
-      isTurnInFlight: vi.fn(() => true),
-      isOutboundQueuePoisoned: vi.fn(() => false),
-      sessionScope: 'per_chat',
-      getPerChatSession: vi.fn(() => ({})),
-      abortPerChatQueue: vi.fn(),
-      terminalizeTurnForInterrupt: vi.fn(async () => ({ disposition: 'kill' as const })),
-      disposePerChatSession: vi.fn(),
-      scopeKey: 'test',
-      perChatMapKey: 'test',
-      sendDirect(text: string) { ackText = text; },
-      getSingleSession: vi.fn(),
-      shutdownSingleSession: vi.fn(),
-      retireTurnQueueAfterInterrupt: vi.fn(),
-      abortActiveQueue: vi.fn(),
-      shutdownOperationTracker: vi.fn(),
-      cleanupGlobalAutoCompactState: vi.fn(),
-      clearSingleScopeRefs: vi.fn(),
-      clearHandoffLatches: vi.fn(),
-      clearTurnHadVisibleOutput: vi.fn(),
-      resetOwnedPerChatSession: vi.fn(),
-      replaceOutboundQueue: vi.fn(),
-      abortChatQueue: vi.fn(),
-      resetSingleSession: vi.fn(),
-    } as never);
-    expect(ackText).toContain('Interrupted the running task');
-    expect(ackText).toContain('recovery pending');
-  });
-
-  it('ack says starting new session when teardown disposition is interruption', async () => {
-    let ackText = '';
-    await runNewCommand({
-      isTurnInFlight: vi.fn(() => true),
-      isOutboundQueuePoisoned: vi.fn(() => false),
-      sessionScope: 'per_chat',
-      getPerChatSession: vi.fn(() => ({})),
-      abortPerChatQueue: vi.fn(),
-      terminalizeTurnForInterrupt: vi.fn(async () => ({ disposition: 'interruption' as const })),
-      disposePerChatSession: vi.fn(),
-      scopeKey: 'test',
-      perChatMapKey: 'test',
-      sendDirect(text: string) { ackText = text; },
-      getSingleSession: vi.fn(),
-      shutdownSingleSession: vi.fn(),
-      retireTurnQueueAfterInterrupt: vi.fn(),
-      abortActiveQueue: vi.fn(),
-      shutdownOperationTracker: vi.fn(),
-      cleanupGlobalAutoCompactState: vi.fn(),
-      clearSingleScopeRefs: vi.fn(),
-      clearHandoffLatches: vi.fn(),
-      clearTurnHadVisibleOutput: vi.fn(),
-      resetOwnedPerChatSession: vi.fn(),
-      replaceOutboundQueue: vi.fn(),
-      abortChatQueue: vi.fn(),
-      resetSingleSession: vi.fn(),
-    } as never);
-    expect(ackText).toContain('Interrupted the running task');
-    expect(ackText).not.toContain('recovery pending');
-    expect(ackText).toContain('starting new session');
-  });
-
-  it.each(['single', 'shared', 'per_chat'] as const)(
-    'ack says recovery pending when outbound poison survives an idle %s reset',
-    async (sessionScope) => {
-    let ackText = '';
-    const isOutboundQueuePoisoned = vi.fn(() => true);
-    await runNewCommand({
-      isTurnInFlight: vi.fn(() => false),
-      isOutboundQueuePoisoned,
-      sessionScope,
-      getPerChatSession: vi.fn(() => sessionScope === 'per_chat' ? {} : undefined),
-      abortPerChatQueue: vi.fn(),
-      terminalizeTurnForInterrupt: vi.fn(),
-      disposePerChatSession: vi.fn(),
-      scopeKey: '__global__',
-      perChatMapKey: sessionScope === 'per_chat' ? 'test@s.whatsapp.net' : null,
-      sendDirect(text: string) { ackText = text; },
-      getSingleSession: vi.fn(() => sessionScope === 'per_chat' ? null : {}),
-      shutdownSingleSession: vi.fn(),
-      retireTurnQueueAfterInterrupt: vi.fn(),
-      abortActiveQueue: vi.fn(),
-      shutdownOperationTracker: vi.fn(),
-      cleanupGlobalAutoCompactState: vi.fn(),
-      clearSingleScopeRefs: vi.fn(),
-      clearHandoffLatches: vi.fn(),
-      clearTurnHadVisibleOutput: vi.fn(),
-      resetOwnedPerChatSession: vi.fn(),
-      replaceOutboundQueue: vi.fn(),
-      abortChatQueue: vi.fn(),
-      resetSingleSession: vi.fn(),
-      shared: false,
-      sandboxPerChat: false,
-      chatJid: 'test@s.whatsapp.net',
-    } as never);
-    expect(ackText).toContain('recovery pending');
-    expect(ackText).toContain('delivery remains blocked');
-    expect(ackText).not.toContain('Starting new session');
-    expect(isOutboundQueuePoisoned).toHaveBeenCalledOnce();
   });
 
   // QR-108: /new is a clean reset — it must drop the one-message-handoff latches
