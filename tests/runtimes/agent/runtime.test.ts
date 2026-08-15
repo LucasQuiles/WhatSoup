@@ -2265,7 +2265,7 @@ describe('AgentRuntime', () => {
     expect(enqueuedTexts.some((t) => t.includes('new session'))).toBe(true);
   });
 
-  it('keeps poison admission blocked across /new replacement and reports recovery pending', async () => {
+  it('keeps poison admission blocked across /new replacement without falsely acknowledging through the poisoned queue', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger);
@@ -2296,7 +2296,7 @@ describe('AgentRuntime', () => {
         senderJid: '15550100001@s.whatsapp.net',
       }));
       const ackTexts = mockQueue.enqueueText.mock.calls.map((args) => args[0] as string);
-      expect(ackTexts.some((text) => text.includes('delivery remains blocked'))).toBe(true);
+      expect(ackTexts.some((text) => text.includes('delivery remains blocked'))).toBe(false);
       expect(ackTexts.some((text) => text.includes('Starting new session'))).toBe(false);
 
       await sendAndDrain(runtime, makeMsg({ content: 'next turn', inboundSeq: 84 }));
