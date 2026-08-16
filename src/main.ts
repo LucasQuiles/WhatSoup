@@ -133,8 +133,13 @@ function acquireLock(): void {
     if (err.reason === 'active') {
       log.fatal({ pid: err.existingPid, path: err.lockPath }, 'another instance is already running');
     } else {
+      // Print the reclaim-decision inputs: a fail-closed `stale` under a
+      // supervisor is diagnosable ONLY from these (which boot id was missing/
+      // mismatched, whether the opt-in was armed, whether a reclaim already
+      // ran). The 2026-08-16 q crash-loop lacked them and could only be
+      // resolved by manually deleting the lock, unexplained.
       log.fatal(
-        { pid: err.existingPid, path: err.lockPath, reason: err.reason },
+        { pid: err.existingPid, path: err.lockPath, reason: err.reason, decision: err.decision ?? null },
         'lock file requires manual removal before startup',
       );
     }
