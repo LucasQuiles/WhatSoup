@@ -176,7 +176,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
-      "sha256": "68ea4ba13950e0954b9b7b772b7c2826d6d3caea8e3559bea59f08cd624eef53",
+      "sha256": "3c245cf5b3583c1a0ff886e89f0c097a582d5c9a32f6af821ee75ab9ec041277",
       "mustContain": [
         "q_loop_state_root",
         "BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT",
@@ -186,7 +186,12 @@
         "refusing to trust critical file",
         "redact_watchdog_text",
         "browser_debug_problems",
-        "collector_reachability_evidence"
+        "collector_reachability_evidence",
+        "health_body_is_disclosed",
+        "health_body_not_disclosed",
+        "probe_unauthorized",
+        "instance_health_token",
+        "PUBLIC_HEALTH_SCHEMA_PREFIX"
       ]
     },
     {

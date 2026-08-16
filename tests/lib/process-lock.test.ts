@@ -143,9 +143,76 @@ describe('process lock ownership', () => {
     expect(isProcessLockError(err)).toBe(true);
     if (!isProcessLockError(err)) throw new Error('expected process lock error');
     expect(err.reason).toBe('stale');
+    // Reclaim-decision forensics travel on the error so a fail-closed boot can
+    // log WHY reclaim did not apply (2026-08-16 q crash-loop was undiagnosable
+    // without them).
+    expect(err.decision).toEqual({
+      lockBootId: 'boot-current',
+      currentBootId: 'boot-current',
+      holderAlive: false,
+      reclaimDeadSameBootArmed: false,
+      afterReclaimAttempt: false,
+    });
     expect(JSON.parse(readFileSync(lockPath, 'utf8'))).toMatchObject({
       pid: 33333,
       token: 'stale-token',
+    });
+  });
+
+  it('an ACTIVE holder error carries the decision with holderAlive=true', () => {
+    const lockPath = makeLockPath();
+    writeFileSync(lockPath, JSON.stringify({
+      pid: 33333,
+      token: 'live-token',
+      startedAt: '2026-06-13T00:00:00.000Z',
+      bootId: 'boot-a',
+    }));
+
+    const err = catchError(() => acquireProcessLock(lockPath, {
+      pid: 44444,
+      token: 'new-token',
+      bootId: 'boot-b',
+      isProcessAlive: () => true,
+      reclaimDeadSameBoot: true,
+    }));
+
+    expect(isProcessLockError(err)).toBe(true);
+    if (!isProcessLockError(err)) throw new Error('expected process lock error');
+    expect(err.reason).toBe('active');
+    expect(err.decision).toEqual({
+      lockBootId: 'boot-a',
+      currentBootId: 'boot-b',
+      holderAlive: true,
+      reclaimDeadSameBootArmed: true,
+      afterReclaimAttempt: false,
+    });
+  });
+
+  it('a bootId-less legacy lock fails closed with the missing id visible in the decision', () => {
+    const lockPath = makeLockPath();
+    writeFileSync(lockPath, JSON.stringify({
+      pid: 33333,
+      token: 'legacy-token',
+      startedAt: '2026-06-13T00:00:00.000Z',
+    }));
+
+    const err = catchError(() => acquireProcessLock(lockPath, {
+      pid: 44444,
+      token: 'new-token',
+      bootId: 'boot-current',
+      isProcessAlive: () => false,
+      reclaimDeadSameBoot: true,
+    }));
+
+    expect(isProcessLockError(err)).toBe(true);
+    if (!isProcessLockError(err)) throw new Error('expected process lock error');
+    expect(err.reason).toBe('stale');
+    expect(err.decision).toEqual({
+      lockBootId: null,
+      currentBootId: 'boot-current',
+      holderAlive: false,
+      reclaimDeadSameBootArmed: true,
+      afterReclaimAttempt: false,
     });
   });
 
