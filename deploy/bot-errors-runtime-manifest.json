@@ -477,7 +477,7 @@
     },
     {
       "path": "src/lib/fault-taxonomy-registry.json",
-      "sha256": "6b484e9cc39e1151b95a8e6b2ac25714c4e700bf87b57c975b830ec01e3976ac",
+      "sha256": "bb6a805252e78933c1d4362438f3b4395deffb7f795267e3813556f54001a2dd",
       "mustContain": [
         "whatsoup-fault-taxonomy-registry-v3",
         "runtimeAgentHealthSignals",
