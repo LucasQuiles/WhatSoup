@@ -365,8 +365,10 @@ export class FleetWebSocketServer {
         });
         this.recordOutcome('write_accepted');
       } catch (err) {
-        // Unified with the async path: one failed outcome, terminate, throttled log.
-        log.warn({ err: errorMessage(err) }, 'ws_broadcast_failed');
+        // Unified with the async path: one failed outcome, terminate, and ONLY
+        // the throttled token — a per-throw err-carrying warn here was the one
+        // unthrottled log site left in the lifecycle (#3284 review).
+        log.debug({ err: errorMessage(err) }, 'ws_sync_send_error_detail');
         this.dropClient(client, 'failed', 'ws_sync_send_failed');
       }
     }

@@ -37,7 +37,13 @@ export interface WsConnectedEvent {
   timestamp: number;
 }
 
-export type WsEvent = WsInvalidationEvent | WsTypingEvent | WsConnectedEvent;
+/** Stream identity envelope stamped by servers ≥ #2519 draft-1 (additive). */
+export interface WsStreamEnvelope {
+  streamGeneration?: string;
+  sequence?: number;
+}
+
+export type WsEvent = (WsInvalidationEvent | WsTypingEvent | WsConnectedEvent) & WsStreamEnvelope;
 
 const INVALIDATION_TYPES = new Set<WsInvalidationEvent['type']>([
   'instance_status',
@@ -62,9 +68,15 @@ export function parseWsEvent(data: unknown): WsEvent | null {
 
   if (!isRecord(parsed) || typeof parsed.type !== 'string') return null;
 
+  const envelope: WsStreamEnvelope = {};
+  if (isNonEmptyString(parsed.stream_generation)) envelope.streamGeneration = parsed.stream_generation;
+  if (typeof parsed.sequence === 'number' && Number.isFinite(parsed.sequence)) {
+    envelope.sequence = parsed.sequence;
+  }
+
   if (parsed.type === 'connected') {
     return typeof parsed.timestamp === 'number' && Number.isFinite(parsed.timestamp)
-      ? { type: 'connected', timestamp: parsed.timestamp }
+      ? { type: 'connected', timestamp: parsed.timestamp, ...envelope }
       : null;
   }
 
@@ -84,6 +96,7 @@ export function parseWsEvent(data: unknown): WsEvent | null {
       jid: parsed.jid,
       composing: parsed.composing,
       since: parsed.since,
+      ...envelope,
     };
   }
 
@@ -91,9 +104,10 @@ export function parseWsEvent(data: unknown): WsEvent | null {
     return null;
   }
 
-  const event: WsInvalidationEvent = {
+  const event: WsInvalidationEvent & WsStreamEnvelope = {
     type: parsed.type as WsInvalidationEvent['type'],
     instance: parsed.instance,
+    ...envelope,
   };
   if (typeof parsed.conversationKey === 'string') event.conversationKey = parsed.conversationKey;
   if (typeof parsed.lid === 'string') event.lid = parsed.lid;
@@ -167,6 +181,62 @@ export function getInvalidationKeys(event: WsInvalidationEvent): QueryKey[] {
     default:
       return [];
   }
+}
+
+// ---------------------------------------------------------------------------
+// Stream gap detection (#2519) — pure helpers, no React dependencies.
+// ---------------------------------------------------------------------------
+
+/** Last verified position in the server's frame stream. */
+export interface StreamCursor {
+  generation: string | null;
+  sequence: number | null;
+}
+
+export type StreamGap = 'unverifiable' | 'generation_changed' | 'sequence_gap';
+
+/** Every realtime-owned query family. A detected gap invalidates ALL of these:
+ * partial invalidation is exactly the staleness class #2519 documents. The
+ * closure test pins this list against getInvalidationKeys' families. */
+export const REALTIME_OWNED_QUERY_KEYS: QueryKey[] = [
+  ['lines'],
+  ['provider-status'],
+  ['feed'],
+  ['messages'],
+  ['chats'],
+  ['search'],
+  ['logs'],
+  ['access'],
+  ['lid-mappings'],
+  ['typing'],
+];
+
+/** Judge a reconnect hello against the last verified cursor.
+ *
+ * First-ever connection: nothing could have been missed — no gap. After that,
+ * a hello without a verifiable envelope, from a different generation, or at a
+ * different sequence than last seen all mean displayed data cannot be assumed
+ * current (fail toward reconciliation, never toward "restored").
+ */
+export function detectHelloGap(cursor: StreamCursor, hello: WsStreamEnvelope): StreamGap | null {
+  if (cursor.generation === null) return null;
+  if (typeof hello.streamGeneration !== 'string' || typeof hello.sequence !== 'number') {
+    return 'unverifiable';
+  }
+  if (hello.streamGeneration !== cursor.generation) return 'generation_changed';
+  if (hello.sequence !== cursor.sequence) return 'sequence_gap';
+  return null;
+}
+
+/** Judge an in-stream frame against the cursor. Legacy frames without an
+ * envelope (or before any envelope was seen) are tolerated — gap detection
+ * simply stays unavailable for them. */
+export function detectFrameGap(cursor: StreamCursor, frame: WsStreamEnvelope): StreamGap | null {
+  if (typeof frame.streamGeneration !== 'string' || typeof frame.sequence !== 'number') return null;
+  if (cursor.generation === null || cursor.sequence === null) return null;
+  if (frame.streamGeneration !== cursor.generation) return 'generation_changed';
+  if (frame.sequence !== cursor.sequence + 1) return 'sequence_gap';
+  return null;
 }
 
 // ---------------------------------------------------------------------------
