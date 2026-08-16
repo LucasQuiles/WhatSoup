@@ -42,19 +42,26 @@ def test_deadman_suppressed_is_info():
     assert _mod._deadman_delivery_level("suppressed_cooldown") == "info"
 
 
+def _advance_with_direct_status(status: str) -> dict:
+    state: dict = {}
+    _mod.advance_deadman_episode(
+        state,
+        {"service_inactive": "systemctl reports inactive"},
+        now_epoch=1_000,
+        cooldown_seconds=600,
+        attempt_onset=lambda _episode: {"direct_whatsapp": status, "email_fallback": False},
+        attempt_recovery=lambda _episode: {"direct_whatsapp": status, "email_fallback": False},
+    )
+    return state
+
+
 def test_deadman_rejected_count_increments():
-    state = {}
-    status = "failed"
-    if status in ("failed", "rejected_unconfirmed"):
-        state["lastRejectedCount"] = (int(state.get("lastRejectedCount") or 0)) + 1
+    state = _advance_with_direct_status("failed")
     assert state.get("lastRejectedCount") == 1
 
 
 def test_deadman_rejected_count_unchanged_on_sent():
-    state = {}
-    status = "sent"
-    if status in ("failed", "rejected_unconfirmed"):
-        state["lastRejectedCount"] = (int(state.get("lastRejectedCount") or 0)) + 1
+    state = _advance_with_direct_status("sent")
     assert state.get("lastRejectedCount") is None
 
 

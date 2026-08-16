@@ -733,6 +733,11 @@
       "owner": "deploy/scripts/bot-errors-dispatcher.py",
       "test": "deploy/scripts/tests/test_bot_errors_relay_flap_coalesce.py"
     },
+    "required_tools": {
+      "disposition": "predicate_scoped_inventory_lifecycle_cleared_only_by_trustworthy_observation",
+      "owner": "deploy/scripts/bot-errors-health-check.py",
+      "test": "deploy/scripts/tests/test_bot_errors_health_check_tool_inventory.py"
+    },
     "silence_registry_unavailable": {
       "disposition": "operator_control_plane_unavailable_requires_fresh_read",
       "owner": "src/fleet/health-poller.ts",
