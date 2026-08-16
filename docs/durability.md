@@ -1636,10 +1636,10 @@ designed contract mirrors the fact-export queue machinery (§9):
   with the provider down. Scope-claim safety across the fleet assumes chat/sender
   scopes do not collide across instances sharing an index — the same assumption
   current scoping makes; the owner should confirm it for the fleet topology.
-- **`DurableKnowledge` disposition.** The existing `DurableKnowledge` interface
-  (`src/memory/types.ts`) has zero consumers; the ledger either becomes its
-  implementation or the type is deleted — it does not stay dead alongside the new
-  tables.
+- **`DurableKnowledge` disposition.** Resolved: the interface had zero consumers
+  and was removed from `src/memory/types.ts` (#2569 contract item 13). If the
+  ledger lands, its schema is authored fresh rather than reviving the dead type
+  (see `docs/architecture/adr-qr004-memory-consolidation-ssot.md`).
 
 **Architecture gate (owner).** The ledger places lifecycle state in local SQLite while
 knowledge text remains in the remote store — the process-state pattern §9 already
