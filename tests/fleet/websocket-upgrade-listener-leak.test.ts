@@ -102,7 +102,7 @@ describe('FleetWebSocketServer upgrade-listener lifecycle (#2292 L6)', () => {
     }) as typeof httpServer.removeListener;
 
     // Put a client in the set so "cleared" and "not yet cleared" differ.
-    (ws as unknown as { clients: Set<unknown> }).clients.add({ close() {} });
+    (ws as unknown as { clients: Map<unknown, unknown> }).clients.set({ close() {} }, { missedPongs: 0, backpressuredSinceMs: null });
     expect(ws.clientCount).toBe(1);
 
     ws.close();

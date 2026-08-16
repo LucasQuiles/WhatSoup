@@ -85,11 +85,85 @@ export interface FleetWsAuthDeps {
   verifyLegacyToken: (token: string) => boolean;
 }
 
+// ---------------------------------------------------------------------------
+// Client lifecycle (#2521)
+// ---------------------------------------------------------------------------
+
+/** Per-client lifecycle bookkeeping. Values are bounded counters/marks only. */
+interface WsClientRecord {
+  /** Heartbeat pings sent since the last pong receipt. */
+  missedPongs: number;
+  /** Monotonic mark when bufferedAmount first exceeded the budget; null while under. */
+  backpressuredSinceMs: number | null;
+}
+
+/** Bounded per-attempt delivery outcomes (#2521). */
+type WsDeliveryOutcome =
+  | 'broadcast_attempted'
+  | 'write_accepted'
+  | 'failed'
+  | 'dropped'
+  | 'client_unresponsive'
+  | 'client_evicted_backpressure';
+
+export interface FleetWsLifecycleOptions {
+  /** Interval between heartbeat ping sweeps. */
+  heartbeatIntervalMs?: number;
+  /** Missed-pong budget; a client at/over budget on a sweep is terminated. */
+  missedPongBudget?: number;
+  /** Per-client bufferedAmount budget in bytes; above it no frames are enqueued. */
+  maxBufferedBytes?: number;
+  /** How long a client may stay above the buffer budget before eviction. */
+  backpressureGraceMs?: number;
+  /** Rolling window for the aggregate outcome counters. */
+  outcomeWindowMs?: number;
+  /** Minimum spacing between logs of the same lifecycle token. */
+  logThrottleMs?: number;
+  /** Monotonic clock; injectable for deterministic tests. */
+  monotonicNow?: () => number;
+}
+
+/** Aggregate, bounded health projection — no identities, addresses, or payloads. */
+export interface FleetWsHealthSnapshot {
+  clientCount: number;
+  live: number;
+  awaitingPong: number;
+  backpressured: number;
+  heartbeatAgeMs: number | null;
+  recentOutcomes: Record<WsDeliveryOutcome, number>;
+}
+
+const OUTCOME_TOKENS: readonly WsDeliveryOutcome[] = [
+  'broadcast_attempted',
+  'write_accepted',
+  'failed',
+  'dropped',
+  'client_unresponsive',
+  'client_evicted_backpressure',
+];
+
+function emptyOutcomeCounts(): Record<WsDeliveryOutcome, number> {
+  return Object.fromEntries(OUTCOME_TOKENS.map((token) => [token, 0])) as Record<WsDeliveryOutcome, number>;
+}
+
 export class FleetWebSocketServer {
   private wss: WebSocketServer;
-  private clients = new Set<WebSocket>();
+  private clients = new Map<WebSocket, WsClientRecord>();
   private authDeps: FleetWsAuthDeps;
   private legacyWarningEmitted = false;
+  private readonly heartbeatIntervalMs: number;
+  private readonly missedPongBudget: number;
+  private readonly maxBufferedBytes: number;
+  private readonly backpressureGraceMs: number;
+  private readonly outcomeWindowMs: number;
+  private readonly logThrottleMs: number;
+  private readonly monotonicNow: () => number;
+  private heartbeatTimer: NodeJS.Timeout | null = null;
+  private lastHeartbeatAtMs: number | null = null;
+  private outcomeWindowStartMs: number;
+  private outcomeCounts = emptyOutcomeCounts();
+  private readonly lastLogAtMs = new Map<string, number>();
+  private readonly suppressedLogCounts = new Map<string, number>();
   /**
    * Kept so `close()` can detach it (#2292 L6). The listener lives on the
    * SHARED httpServer, which outlives this object: without a reference there
@@ -101,9 +175,17 @@ export class FleetWebSocketServer {
   private readonly httpServer: HttpServer;
   private readonly onUpgrade: (req: IncomingMessage, socket: Duplex, head: Buffer) => void;
 
-  constructor(httpServer: HttpServer, authDeps: FleetWsAuthDeps) {
+  constructor(httpServer: HttpServer, authDeps: FleetWsAuthDeps, options: FleetWsLifecycleOptions = {}) {
     this.authDeps = authDeps;
     this.httpServer = httpServer;
+    this.heartbeatIntervalMs = options.heartbeatIntervalMs ?? 30_000;
+    this.missedPongBudget = options.missedPongBudget ?? 2;
+    this.maxBufferedBytes = options.maxBufferedBytes ?? 1_048_576;
+    this.backpressureGraceMs = options.backpressureGraceMs ?? 60_000;
+    this.outcomeWindowMs = options.outcomeWindowMs ?? 300_000;
+    this.logThrottleMs = options.logThrottleMs ?? 30_000;
+    this.monotonicNow = options.monotonicNow ?? (() => performance.now());
+    this.outcomeWindowStartMs = this.monotonicNow();
     this.wss = new WebSocketServer({ noServer: true });
 
     // Handle upgrade requests with auth
@@ -122,43 +204,162 @@ export class FleetWebSocketServer {
     httpServer.on('upgrade', this.onUpgrade);
 
     this.wss.on('connection', (ws: WebSocket) => {
-      this.clients.add(ws);
-      log.info({ clients: this.clients.size }, 'ws_client_connected');
-
-      ws.on('close', () => {
-        this.clients.delete(ws);
-        log.info({ clients: this.clients.size }, 'ws_client_disconnected');
-      });
-
-      ws.on('error', (err) => {
-        log.warn({ err: err.message }, 'ws_client_error');
-        this.clients.delete(ws);
-      });
-
-      // Send initial hello so client knows connection is live
-      ws.send(JSON.stringify({ type: 'connected', timestamp: Date.now() }));
+      this.adoptClient(ws);
     });
+
+    this.heartbeatTimer = setInterval(() => this.heartbeatSweep(), this.heartbeatIntervalMs);
+    this.heartbeatTimer.unref?.();
   }
 
-  /** Broadcast an event to all connected clients. */
+  /** Adopt a socket into lifecycle tracking (single path for real and test clients). */
+  private adoptClient(ws: WebSocket): void {
+    this.clients.set(ws, { missedPongs: 0, backpressuredSinceMs: null });
+    log.info({ clients: this.clients.size }, 'ws_client_connected');
+
+    ws.on('pong', () => {
+      const record = this.clients.get(ws);
+      if (record) record.missedPongs = 0;
+    });
+
+    ws.on('close', () => {
+      this.clients.delete(ws);
+      log.info({ clients: this.clients.size }, 'ws_client_disconnected');
+    });
+
+    ws.on('error', (err) => {
+      log.warn({ err: err.message }, 'ws_client_error');
+      this.clients.delete(ws);
+    });
+
+    // Send initial hello so client knows connection is live; a failed local
+    // write is a delivery outcome like any other, not a silent no-op.
+    try {
+      ws.send(JSON.stringify({ type: 'connected', timestamp: Date.now() }), (err) => {
+        if (err) this.dropClient(ws, 'failed', 'ws_hello_send_failed');
+      });
+    } catch {
+      this.dropClient(ws, 'failed', 'ws_hello_send_failed');
+    }
+  }
+
+  /** One heartbeat sweep: terminate clients past the missed-pong budget, ping the rest. */
+  private heartbeatSweep(): void {
+    for (const [ws, record] of this.clients) {
+      if (record.missedPongs >= this.missedPongBudget) {
+        this.dropClient(ws, 'client_unresponsive', 'ws_client_unresponsive');
+        continue;
+      }
+      record.missedPongs += 1;
+      try {
+        ws.ping();
+      } catch {
+        this.dropClient(ws, 'failed', 'ws_ping_failed');
+      }
+    }
+    this.lastHeartbeatAtMs = this.monotonicNow();
+  }
+
+  /** Remove a client, record one bounded outcome, and terminate the transport. */
+  private dropClient(ws: WebSocket, outcome: WsDeliveryOutcome, logToken: string): void {
+    if (!this.clients.delete(ws)) return;
+    this.recordOutcome(outcome);
+    this.throttledWarn(logToken);
+    try {
+      ws.terminate();
+    } catch (err) {
+      // The transport is already gone; removal from the set is what matters.
+      log.debug({ err: errorMessage(err) }, 'ws_terminate_after_drop_failed');
+    }
+  }
+
+  private recordOutcome(outcome: WsDeliveryOutcome): void {
+    const now = this.monotonicNow();
+    if (now - this.outcomeWindowStartMs > this.outcomeWindowMs) {
+      this.outcomeCounts = emptyOutcomeCounts();
+      this.outcomeWindowStartMs = now;
+    }
+    this.outcomeCounts[outcome] += 1;
+  }
+
+  /** Rate-bounded warn: at most one log per token per window; suppressed count carried. */
+  private throttledWarn(token: string): void {
+    const now = this.monotonicNow();
+    const last = this.lastLogAtMs.get(token);
+    if (last !== undefined && now - last < this.logThrottleMs) {
+      this.suppressedLogCounts.set(token, (this.suppressedLogCounts.get(token) ?? 0) + 1);
+      return;
+    }
+    const suppressed = this.suppressedLogCounts.get(token) ?? 0;
+    this.suppressedLogCounts.set(token, 0);
+    this.lastLogAtMs.set(token, now);
+    log.warn({ suppressedSinceLast: suppressed }, token);
+  }
+
+  /** Broadcast an event to all connected clients (#2521 delivery contract).
+
+  Per client: a buffer over budget means NO further frames (dropped outcome,
+  eviction after the grace window); otherwise the send's asynchronous
+  completion is observed and a failed write terminates exactly that client.
+  Neither write acceptance nor local completion is projected to remote
+  application receipt. */
   broadcast(event: WsEvent): void {
     if (this.clients.size === 0) return;
     const data = JSON.stringify(event);
-    for (const client of this.clients) {
-      if (client.readyState === WebSocket.OPEN) {
-        try {
-          client.send(data);
-        } catch (err) {
-          this.clients.delete(client);
-          log.warn({ err: errorMessage(err) }, 'ws_broadcast_failed');
+    this.recordOutcome('broadcast_attempted');
+    for (const [client, record] of this.clients) {
+      if (client.readyState !== WebSocket.OPEN) continue;
+      if (client.bufferedAmount > this.maxBufferedBytes) {
+        record.backpressuredSinceMs ??= this.monotonicNow();
+        this.recordOutcome('dropped');
+        if (this.monotonicNow() - record.backpressuredSinceMs > this.backpressureGraceMs) {
+          this.dropClient(client, 'client_evicted_backpressure', 'ws_client_backpressure_evicted');
+        } else {
+          this.throttledWarn('ws_client_backpressured');
         }
+        continue;
+      }
+      record.backpressuredSinceMs = null;
+      try {
+        client.send(data, (err) => {
+          if (err) this.dropClient(client, 'failed', 'ws_async_send_failed');
+        });
+        this.recordOutcome('write_accepted');
+      } catch (err) {
+        this.clients.delete(client);
+        this.recordOutcome('failed');
+        log.warn({ err: errorMessage(err) }, 'ws_broadcast_failed');
       }
     }
   }
 
-  /** Number of connected clients. */
+  /** Raw tracked-socket count. NOT deliverable/live coverage — a half-open or
+  backpressured client still counts here; use healthSnapshot() for the
+  lifecycle breakdown. */
   get clientCount(): number {
     return this.clients.size;
+  }
+
+  /** Aggregate, bounded lifecycle projection (#2521): counts and ages only. */
+  healthSnapshot(): FleetWsHealthSnapshot {
+    let awaitingPong = 0;
+    let backpressured = 0;
+    for (const record of this.clients.values()) {
+      if (record.backpressuredSinceMs !== null) backpressured += 1;
+      else if (record.missedPongs > 0) awaitingPong += 1;
+    }
+    const now = this.monotonicNow();
+    if (now - this.outcomeWindowStartMs > this.outcomeWindowMs) {
+      this.outcomeCounts = emptyOutcomeCounts();
+      this.outcomeWindowStartMs = now;
+    }
+    return {
+      clientCount: this.clients.size,
+      live: this.clients.size - awaitingPong - backpressured,
+      awaitingPong,
+      backpressured,
+      heartbeatAgeMs: this.lastHeartbeatAtMs === null ? null : now - this.lastHeartbeatAtMs,
+      recentOutcomes: { ...this.outcomeCounts },
+    };
   }
 
   /** Gracefully close all connections. */
@@ -166,7 +367,11 @@ export class FleetWebSocketServer {
     // Detach FIRST: an upgrade arriving mid-close would otherwise be handed to
     // a WebSocketServer that is about to be (or already is) closed.
     this.httpServer.removeListener('upgrade', this.onUpgrade);
-    for (const client of this.clients) {
+    if (this.heartbeatTimer !== null) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+    for (const client of this.clients.keys()) {
       client.close(1001, 'server shutting down');
     }
     this.clients.clear();
