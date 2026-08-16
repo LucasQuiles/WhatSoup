@@ -96,7 +96,7 @@ vi.mock('../../../src/runtimes/agent/providers/binary-preflight.ts', () => ({
 import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
 import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
-import { probeChainEntryCompletion } from '../../../src/runtimes/agent/providers/chain-entry-canary.ts';
+import { classifyCanaryFailure, probeChainEntryCompletion } from '../../../src/runtimes/agent/providers/chain-entry-canary.ts';
 import { resolveFallbackCanaryConfig } from '../../../src/runtimes/agent/fallback-canary-config.ts';
 
 // ─── probeChainEntryCompletion unit coverage (injected spawn) ────────────────
@@ -126,6 +126,7 @@ describe('probeChainEntryCompletion', () => {
     child.emit('close', 0, null);
     const result = await p;
     expect(result.evidence).toBeNull();
+    expect(result.failureClass).toBeNull();
     expect(result.status).toBe('ok');
   });
 
@@ -141,6 +142,7 @@ describe('probeChainEntryCompletion', () => {
     expect(result.evidence).toContain('exit=1');
     expect(result.evidence).not.toContain('ak-testtok99');
     expect(result.evidence).not.toContain('tok.value.here');
+    expect(result.failureClass).toBe('auth');
   });
 
   it('classifies a hung child as timeout and kills it', async () => {
@@ -223,7 +225,7 @@ function makeRuntime(chain: FallbackEntry[]): AgentRuntime {
   });
 }
 
-type CanaryRecord = { status: string; evidence: string | null; durationMs: number; checkedAt: number };
+type CanaryRecord = { status: string; evidence: string | null; failureClass: string | null; durationMs: number; checkedAt: number };
 
 type RuntimeView = {
   activateProviderFallback(
@@ -236,7 +238,7 @@ type RuntimeView = {
     chainCanaryConfig: { trustMs: number };
   };
   fallbackChain: { entryKey(entry: FallbackEntry): string };
-  getFallbackState(): { fallbackChain: Array<FallbackEntry & { canary?: { status: string } | null }> };
+  getFallbackState(): { fallbackChain: Array<FallbackEntry & { canary?: { status: string; failureClass?: string | null } | null }> };
 };
 
 function v(runtime: AgentRuntime): RuntimeView {
@@ -247,6 +249,7 @@ function seedCanary(rv: RuntimeView, entry: FallbackEntry, status: string, ageMs
   rv.fallback.chainCanary.set(rv.fallbackChain.entryKey(entry), {
     status,
     evidence: status === 'ok' ? null : 'exit=1 account suspended',
+    failureClass: status === 'ok' ? null : 'auth',
     durationMs: 100,
     checkedAt: Date.now() - ageMs,
   });
@@ -301,5 +304,46 @@ describe('canary-consulted window selection', () => {
     // Entry without evidence keeps its exact pre-canary shape (additive-only).
     expect(Object.keys(state.fallbackChain[1] ?? {})).not.toContain('canary');
     expect(state.fallbackChain[0]?.canary?.status).toBe('failed');
+    expect(state.fallbackChain[0]?.canary?.failureClass).toBe('auth');
+  });
+
+  // The canary's raw tail is unbounded third-party prose (the 2026-08-16 live
+  // sweep captured a z.ai request id + JSON responseBody). /health must carry
+  // the bounded class ONLY.
+  it('never renders the raw provider tail on the /health chain view', () => {
+    const rv = v(makeRuntime(CHAIN));
+    rv.fallback.chainCanary.set(rv.fallbackChain.entryKey(CHAIN[0]!), {
+      status: 'failed',
+      evidence: 'exit=1 {"error":{"code":"1310"}} requestId=8570bca1f4d34f94cf1',
+      failureClass: 'quota',
+      durationMs: 100,
+      checkedAt: Date.now(),
+    });
+
+    const rendered = JSON.stringify(rv.getFallbackState().fallbackChain);
+    expect(rendered).not.toContain('8570bca1f4d34f94cf1');
+    expect(rendered).not.toContain('1310');
+    expect(rendered).not.toContain('evidence');
+    expect(rendered).toContain('quota');
+  });
+});
+
+// Bounded classification over the REAL provider strings observed on the fleet.
+describe('classifyCanaryFailure', () => {
+  it.each([
+    ['exit=1 {"error":{"code":"1310","message":"Weekly Limit Exhausted"}}', 'quota'],
+    ['exit=1 HTTP 429 too many requests', 'quota'],
+    ['exit=1 account <org-a7ef048d> is suspended due to insufficient balance, please recharge', 'auth'],
+    ['exit=1 401 unauthorized: invalid api key', 'auth'],
+    ['no completion within 90000ms', 'timeout'],
+    ['Error: spawn opencode ENOENT', 'spawn'],
+    ['exit=0 signal=none (no output)', 'empty'],
+    ['exit=2 signal=none something nobody has seen before', 'unknown'],
+  ])('classifies %j as %s', (raw, expected) => {
+    expect(classifyCanaryFailure(raw)).toBe(expected);
+  });
+
+  it('prefers quota over auth when a quota message also carries a 4xx', () => {
+    expect(classifyCanaryFailure('exit=1 403 forbidden: monthly quota exceeded')).toBe('quota');
   });
 });
