@@ -198,15 +198,21 @@ describe('FleetWebSocketServer', () => {
       send: vi.fn(),
       close: vi.fn(),
     };
-    const clients = (wsServer as unknown as { clients: Set<{ readyState: number; send: (data: string) => void; close: () => void }> }).clients;
-    clients.add(failingClient);
-    clients.add(healthyClient);
+    const clients = (wsServer as unknown as {
+      clients: Map<
+        { readyState: number; send: (data: string) => void; close: () => void },
+        { missedPongs: number; backpressuredSinceMs: number | null }
+      >;
+    }).clients;
+    const freshRecord = () => ({ missedPongs: 0, backpressuredSinceMs: null });
+    clients.set(failingClient, freshRecord());
+    clients.set(healthyClient, freshRecord());
 
     const event: WsEvent = { type: 'feed_event', instance: 'test-line' };
     expect(() => wsServer.broadcast(event)).not.toThrow();
 
-    expect(failingClient.send).toHaveBeenCalledWith(JSON.stringify(event));
-    expect(healthyClient.send).toHaveBeenCalledWith(JSON.stringify(event));
+    expect(failingClient.send).toHaveBeenCalledWith(JSON.stringify(event), expect.any(Function));
+    expect(healthyClient.send).toHaveBeenCalledWith(JSON.stringify(event), expect.any(Function));
     expect(clients.has(failingClient)).toBe(false);
     expect(clients.has(healthyClient)).toBe(true);
   });
