@@ -68,17 +68,47 @@ export interface AcquireProcessLockOptions {
   beforeReclaimUnlink?: () => void;
 }
 
+/**
+ * Reclaim-decision inputs captured at throw time. A fail-closed `stale`
+ * result has exactly four possible causes — holder alive, unknown boot ids,
+ * same-boot without the opt-in, or a second EEXIST after a reclaim — and the
+ * 2026-08-16 q crash-loop was only diagnosable by manually deleting the lock
+ * because none of those inputs were surfaced. Attached to the error so boot
+ * logging can print the full decision without re-reading (and racing) the
+ * lock file.
+ */
+export interface ProcessLockDecision {
+  /** bootId recorded in the existing lock, null when absent/corrupt. */
+  lockBootId: string | null;
+  /** The acquiring process's own boot identity, null when unresolvable. */
+  currentBootId: string | null;
+  /** Whether the existing holder pid answered the liveness probe. */
+  holderAlive: boolean;
+  /** Whether reclaimDeadSameBoot was armed for this acquisition. */
+  reclaimDeadSameBootArmed: boolean;
+  /** True when this throw happened AFTER a reclaim already ran once —
+   *  i.e. a second EEXIST followed the identity-checked unlink. */
+  afterReclaimAttempt: boolean;
+}
+
 export class ProcessLockError extends Error {
   readonly reason: ProcessLockErrorReason;
   readonly lockPath: string;
   readonly existingPid?: number;
+  readonly decision?: ProcessLockDecision;
 
-  constructor(reason: ProcessLockErrorReason, lockPath: string, existingPid?: number) {
+  constructor(
+    reason: ProcessLockErrorReason,
+    lockPath: string,
+    existingPid?: number,
+    decision?: ProcessLockDecision,
+  ) {
     super(`process lock ${reason}: ${lockPath}`);
     this.name = 'ProcessLockError';
     this.reason = reason;
     this.lockPath = lockPath;
     this.existingPid = existingPid;
+    this.decision = decision;
   }
 }
 
@@ -239,6 +269,13 @@ export function acquireProcessLock(lockPath: string, options: AcquireProcessLock
 
         const existing = readProcessLockPayload(lockPath);
         if (!existing) throw new ProcessLockError('corrupt', lockPath);
+        const decisionOf = (holderAlive: boolean): ProcessLockDecision => ({
+          lockBootId: existing.bootId ?? null,
+          currentBootId: payload.bootId ?? null,
+          holderAlive,
+          reclaimDeadSameBootArmed: options.reclaimDeadSameBoot === true,
+          afterReclaimAttempt: reclaimed,
+        });
 
         // Liveness beats boot id, deliberately. A live holder is NEVER evicted,
         // even when the lock's bootId differs from ours. This preserves the
@@ -250,7 +287,7 @@ export function acquireProcessLock(lockPath: string, options: AcquireProcessLock
         // prior-boot lock whose PID was recycled by an unrelated live process
         // stays fail-closed — a rare, alerting, operator-recoverable brick (see
         // docs/runbook.md §5.6). Do not reorder this below the bootId check.
-        if (isProcessAlive(existing.pid)) throw new ProcessLockError('active', lockPath, existing.pid);
+        if (isProcessAlive(existing.pid)) throw new ProcessLockError('active', lockPath, existing.pid, decisionOf(true));
 
         // The holder pid is dead. Singleton-service callers reclaim ONLY when
         // both boot ids are known and differ. Short, retry-safe coordination
@@ -265,7 +302,7 @@ export function acquireProcessLock(lockPath: string, options: AcquireProcessLock
         const reclaimable = fromPreviousBoot
           || (options.reclaimDeadSameBoot === true && fromSameBoot);
         if (reclaimed || !reclaimable) {
-          throw new ProcessLockError('stale', lockPath, existing.pid);
+          throw new ProcessLockError('stale', lockPath, existing.pid, decisionOf(false));
         }
 
         reclaimed = true;
