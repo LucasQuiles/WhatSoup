@@ -28,7 +28,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "ed3866a8c2e0a3e6242cc8436de10efdadb744c91d0809fa988594329ec37c30",
+      "sha256": "793ec8f8f6083229e9cfd786b50f9f81123a7fdfca7cdce60f22946072bdd74e",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -47,7 +47,10 @@
         "quarantine_untrusted_entry",
         "malformed delivery.nextAttemptAtEpoch",
         "persist changed incident state",
-        "malformed delivery.attempts"
+        "malformed delivery.attempts",
+        "load_degradation_cause_dispositions",
+        "degradation_causes_from_event",
+        "degradationCauseDispositions"
       ]
     },
     {
@@ -477,7 +480,7 @@
     },
     {
       "path": "src/lib/fault-taxonomy-registry.json",
-      "sha256": "bb6a805252e78933c1d4362438f3b4395deffb7f795267e3813556f54001a2dd",
+      "sha256": "bdf31cf50bc1b0e2ae94989903449546c34c143964b6ca64e216375b30858e47",
       "mustContain": [
         "whatsoup-fault-taxonomy-registry-v3",
         "runtimeAgentHealthSignals",

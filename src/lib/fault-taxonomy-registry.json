@@ -626,308 +626,308 @@
       "test": "tests/scripts/bot-errors-health-check.test.ts"
     }
   },
-    "degradationCauseDispositions": {
-      "schemaVersion": 1,
-      "unknownCauseFallback": "outage_visible",
-      "dispositions": {
-        "provider_fallback_active": {
-          "family": "provider_fallback",
-          "impactTier": "hold",
-          "notification": "warning",
-          "rootOwner": "agent_provider_fallback_chain",
-          "clearPredicate": "fallback window closed or fallback proven productive per the poller's exact operational-fallback predicate",
-          "requiresCorroborationBeforePaging": false
-        },
-        "fallback_chain_exhausted": {
-          "family": "provider_fallback",
-          "impactTier": "page",
-          "notification": "critical",
-          "rootOwner": "agent_provider_fallback_chain",
-          "clearPredicate": "a fallback entry serves a successful turn or the primary provider recovers",
-          "requiresCorroborationBeforePaging": false
-        },
-        "fallback_entry_failures": {
-          "family": "provider_fallback",
-          "impactTier": "hold",
-          "notification": "warning",
-          "rootOwner": "agent_provider_fallback_chain",
-          "clearPredicate": "cause absent from the next accepted health body degradation vector",
-          "requiresCorroborationBeforePaging": false
-        },
-        "primary_model_unusable": {
-          "family": "provider_fallback",
-          "impactTier": "hold",
-          "notification": "warning",
-          "rootOwner": "agent_provider_fallback_chain",
-          "clearPredicate": "primary model usability probe passes or the fallback is proven productive",
-          "requiresCorroborationBeforePaging": false
-        },
-        "model_unusable": {
-          "family": "provider_fallback",
-          "impactTier": "page",
-          "notification": "critical",
-          "rootOwner": "agent_provider_fallback_chain",
-          "clearPredicate": "model usability probe passes on the serving provider",
-          "requiresCorroborationBeforePaging": false
-        },
-        "turn_capability_error": {
-          "family": "turn_capability",
-          "impactTier": "page",
-          "notification": "critical",
-          "rootOwner": "agent_turn_pipeline",
-          "clearPredicate": "cause absent from the next accepted health body degradation vector",
-          "requiresCorroborationBeforePaging": false
-        },
-        "primary_model_evidence_stale": {
-          "family": "provider_fallback",
-          "impactTier": "hold",
-          "notification": "warning",
-          "rootOwner": "agent_provider_fallback_chain",
-          "clearPredicate": "cause absent from the next accepted health body degradation vector",
-          "requiresCorroborationBeforePaging": false
-        },
-        "turn_capability_evidence_stale": {
-          "family": "turn_capability",
-          "impactTier": "hold",
-          "notification": "warning",
-          "rootOwner": "agent_turn_pipeline",
-          "clearPredicate": "cause absent from the next accepted health body degradation vector",
-          "requiresCorroborationBeforePaging": false
-        },
-        "auth_bond_degraded": {
-          "family": "auth_transport",
-          "impactTier": "page",
-          "notification": "critical",
-          "rootOwner": "whatsapp_auth_bond",
-          "clearPredicate": "cause absent from the next accepted health body degradation vector",
-          "requiresCorroborationBeforePaging": false
-        },
-        "transport_disconnected": {
-          "family": "auth_transport",
-          "impactTier": "page",
-          "notification": "critical",
-          "rootOwner": "whatsapp_transport_link",
-          "clearPredicate": "transport reconnected and a subsequent health body omits the cause",
-          "requiresCorroborationBeforePaging": false
-        },
-        "enrichment_stale": {
-          "family": "enrichment",
-          "impactTier": "hold",
-          "notification": "warning",
-          "rootOwner": "message_enrichment_pipeline",
-          "clearPredicate": "cause absent from the next accepted health body degradation vector",
-          "requiresCorroborationBeforePaging": false
-        },
-        "enrichment_runtime_degraded": {
-          "family": "enrichment",
-          "impactTier": "hold",
-          "notification": "warning",
-          "rootOwner": "message_enrichment_pipeline",
-          "clearPredicate": "cause absent from the next accepted health body degradation vector",
-          "requiresCorroborationBeforePaging": false
-        },
-        "memory_readiness_degraded": {
-          "family": "memory",
-          "impactTier": "hold",
-          "notification": "warning",
-          "rootOwner": "memory_subsystem",
-          "clearPredicate": "cause absent from the next accepted health body degradation vector",
-          "requiresCorroborationBeforePaging": false
-        },
-        "memory_context_degraded": {
-          "family": "memory",
-          "impactTier": "hold",
-          "notification": "warning",
-          "rootOwner": "memory_subsystem",
-          "clearPredicate": "cause absent from the next accepted health body degradation vector",
-          "requiresCorroborationBeforePaging": false
-        },
-        "memory_consolidation_degraded": {
-          "family": "memory",
-          "impactTier": "hold",
-          "notification": "warning",
-          "rootOwner": "memory_subsystem",
-          "clearPredicate": "cause absent from the next accepted health body degradation vector",
-          "requiresCorroborationBeforePaging": false
-        },
-        "connection_churn": {
-          "family": "auth_transport",
-          "impactTier": "hold",
-          "notification": "warning",
-          "rootOwner": "whatsapp_transport_link",
-          "clearPredicate": "cause absent from the next accepted health body degradation vector",
-          "requiresCorroborationBeforePaging": false
-        },
-        "outbound_flood": {
-          "family": "auth_transport",
-          "impactTier": "hold",
-          "notification": "warning",
-          "rootOwner": "whatsapp_transport_link",
-          "clearPredicate": "cause absent from the next accepted health body degradation vector",
-          "requiresCorroborationBeforePaging": false
-        },
-        "event_loop_starved": {
-          "family": "event_loop",
-          "impactTier": "hold",
-          "notification": "warning",
-          "rootOwner": "node_event_loop",
-          "clearPredicate": "corroborated starvation signal absent for a full sampling window",
-          "requiresCorroborationBeforePaging": true
-        },
-        "durability_debt": {
-          "family": "durability",
-          "impactTier": "hold",
-          "notification": "warning",
-          "rootOwner": "durability_engine",
-          "clearPredicate": "cause absent from the next accepted health body degradation vector",
-          "requiresCorroborationBeforePaging": false
-        },
-        "durability_evidence_unreadable": {
-          "family": "durability",
-          "impactTier": "page",
-          "notification": "critical",
-          "rootOwner": "durability_engine",
-          "clearPredicate": "durability evidence readable and clean on a subsequent cycle",
-          "requiresCorroborationBeforePaging": false
-        },
-        "database_retention_failed": {
-          "family": "durability",
-          "impactTier": "page",
-          "notification": "critical",
-          "rootOwner": "durability_engine",
-          "clearPredicate": "retention job completes without failure",
-          "requiresCorroborationBeforePaging": false
-        },
-        "continuity_gap_unreadable": {
-          "family": "continuity",
-          "impactTier": "page",
-          "notification": "critical",
-          "rootOwner": "continuity_ledger",
-          "clearPredicate": "cause absent from the next accepted health body degradation vector",
-          "requiresCorroborationBeforePaging": false
-        },
-        "continuity_gap_open": {
-          "family": "continuity",
-          "impactTier": "hold",
-          "notification": "warning",
-          "rootOwner": "continuity_ledger",
-          "clearPredicate": "cause absent from the next accepted health body degradation vector",
-          "requiresCorroborationBeforePaging": false
-        },
-        "schema_future": {
-          "family": "schema",
-          "impactTier": "page",
-          "notification": "critical",
-          "rootOwner": "database_schema",
-          "clearPredicate": "schema migration completes and readiness probe passes",
-          "requiresCorroborationBeforePaging": false
-        },
-        "schema_not_ready": {
-          "family": "schema",
-          "impactTier": "page",
-          "notification": "critical",
-          "rootOwner": "database_schema",
-          "clearPredicate": "schema migration completes and readiness probe passes",
-          "requiresCorroborationBeforePaging": false
-        },
-        "pending_polls_unreadable": {
-          "family": "polls",
-          "impactTier": "page",
-          "notification": "critical",
-          "rootOwner": "poll_bridge",
-          "clearPredicate": "cause absent from the next accepted health body degradation vector",
-          "requiresCorroborationBeforePaging": false
-        },
-        "agent_recent_crashes": {
-          "family": "agent_runtime",
-          "impactTier": "page",
-          "notification": "critical",
-          "rootOwner": "agent_runtime_supervisor",
-          "clearPredicate": "cause absent from the next accepted health body degradation vector",
-          "requiresCorroborationBeforePaging": false
-        },
-        "agent_auto_compact_backoff": {
-          "family": "agent_runtime",
-          "impactTier": "hold",
-          "notification": "warning",
-          "rootOwner": "agent_runtime_supervisor",
-          "clearPredicate": "cause absent from the next accepted health body degradation vector",
-          "requiresCorroborationBeforePaging": false
-        },
-        "agent_session_inactive": {
-          "family": "agent_runtime",
-          "impactTier": "page",
-          "notification": "critical",
-          "rootOwner": "agent_runtime_supervisor",
-          "clearPredicate": "cause absent from the next accepted health body degradation vector",
-          "requiresCorroborationBeforePaging": false
-        },
-        "turn_finalization_degraded": {
-          "family": "turn_capability",
-          "impactTier": "hold",
-          "notification": "warning",
-          "rootOwner": "agent_turn_pipeline",
-          "clearPredicate": "cause absent from the next accepted health body degradation vector",
-          "requiresCorroborationBeforePaging": false
-        },
-        "turn_recovery_degraded": {
-          "family": "turn_capability",
-          "impactTier": "page",
-          "notification": "critical",
-          "rootOwner": "agent_turn_pipeline",
-          "clearPredicate": "cause absent from the next accepted health body degradation vector",
-          "requiresCorroborationBeforePaging": false
-        },
-        "provider_execution_pressure": {
-          "family": "provider_fallback",
-          "impactTier": "page",
-          "notification": "critical",
-          "rootOwner": "agent_provider_fallback_chain",
-          "clearPredicate": "cause absent from the next accepted health body degradation vector",
-          "requiresCorroborationBeforePaging": false
-        },
-        "agent_runtime_degraded_unclassified": {
-          "family": "agent_runtime",
-          "impactTier": "page",
-          "notification": "critical",
-          "rootOwner": "agent_runtime_supervisor",
-          "clearPredicate": "runtime recovers or a classified cause replaces the unclassified marker",
-          "requiresCorroborationBeforePaging": false
-        },
-        "agent_runtime_unhealthy": {
-          "family": "agent_runtime",
-          "impactTier": "page",
-          "notification": "critical",
-          "rootOwner": "agent_runtime_supervisor",
-          "clearPredicate": "cause absent from the next accepted health body degradation vector",
-          "requiresCorroborationBeforePaging": false
-        },
-        "unclassified": {
-          "family": "sentinel",
-          "impactTier": "page",
-          "notification": "critical",
-          "rootOwner": "health_classifier",
-          "clearPredicate": "health body returns healthy or names a classified cause",
-          "requiresCorroborationBeforePaging": false
-        },
-        "chat_runtime_degraded": {
-          "family": "mode_specific",
-          "impactTier": "hold",
-          "notification": "warning",
-          "rootOwner": "chat_runtime",
-          "clearPredicate": "cause absent from the next accepted health body degradation vector",
-          "requiresCorroborationBeforePaging": false
-        },
-        "passive_runtime_degraded": {
-          "family": "mode_specific",
-          "impactTier": "hold",
-          "notification": "warning",
-          "rootOwner": "passive_runtime",
-          "clearPredicate": "cause absent from the next accepted health body degradation vector",
-          "requiresCorroborationBeforePaging": false
-        }
+  "degradationCauseDispositions": {
+    "schemaVersion": 1,
+    "unknownCauseFallback": "outage_visible",
+    "dispositions": {
+      "provider_fallback_active": {
+        "family": "provider_fallback",
+        "impactTier": "hold",
+        "notification": "warning",
+        "rootOwner": "agent_provider_fallback_chain",
+        "clearPredicate": "fallback window closed or fallback proven productive per the poller's exact operational-fallback predicate",
+        "requiresCorroborationBeforePaging": false
+      },
+      "fallback_chain_exhausted": {
+        "family": "provider_fallback",
+        "impactTier": "page",
+        "notification": "critical",
+        "rootOwner": "agent_provider_fallback_chain",
+        "clearPredicate": "a fallback entry serves a successful turn or the primary provider recovers",
+        "requiresCorroborationBeforePaging": false
+      },
+      "fallback_entry_failures": {
+        "family": "provider_fallback",
+        "impactTier": "hold",
+        "notification": "warning",
+        "rootOwner": "agent_provider_fallback_chain",
+        "clearPredicate": "cause absent from the next accepted health body degradation vector",
+        "requiresCorroborationBeforePaging": false
+      },
+      "primary_model_unusable": {
+        "family": "provider_fallback",
+        "impactTier": "hold",
+        "notification": "warning",
+        "rootOwner": "agent_provider_fallback_chain",
+        "clearPredicate": "primary model usability probe passes or the fallback is proven productive",
+        "requiresCorroborationBeforePaging": false
+      },
+      "model_unusable": {
+        "family": "provider_fallback",
+        "impactTier": "page",
+        "notification": "critical",
+        "rootOwner": "agent_provider_fallback_chain",
+        "clearPredicate": "model usability probe passes on the serving provider",
+        "requiresCorroborationBeforePaging": false
+      },
+      "turn_capability_error": {
+        "family": "turn_capability",
+        "impactTier": "page",
+        "notification": "critical",
+        "rootOwner": "agent_turn_pipeline",
+        "clearPredicate": "cause absent from the next accepted health body degradation vector",
+        "requiresCorroborationBeforePaging": false
+      },
+      "primary_model_evidence_stale": {
+        "family": "provider_fallback",
+        "impactTier": "hold",
+        "notification": "warning",
+        "rootOwner": "agent_provider_fallback_chain",
+        "clearPredicate": "cause absent from the next accepted health body degradation vector",
+        "requiresCorroborationBeforePaging": false
+      },
+      "turn_capability_evidence_stale": {
+        "family": "turn_capability",
+        "impactTier": "hold",
+        "notification": "warning",
+        "rootOwner": "agent_turn_pipeline",
+        "clearPredicate": "cause absent from the next accepted health body degradation vector",
+        "requiresCorroborationBeforePaging": false
+      },
+      "auth_bond_degraded": {
+        "family": "auth_transport",
+        "impactTier": "page",
+        "notification": "critical",
+        "rootOwner": "whatsapp_auth_bond",
+        "clearPredicate": "cause absent from the next accepted health body degradation vector",
+        "requiresCorroborationBeforePaging": false
+      },
+      "transport_disconnected": {
+        "family": "auth_transport",
+        "impactTier": "page",
+        "notification": "critical",
+        "rootOwner": "whatsapp_transport_link",
+        "clearPredicate": "transport reconnected and a subsequent health body omits the cause",
+        "requiresCorroborationBeforePaging": false
+      },
+      "enrichment_stale": {
+        "family": "enrichment",
+        "impactTier": "hold",
+        "notification": "warning",
+        "rootOwner": "message_enrichment_pipeline",
+        "clearPredicate": "cause absent from the next accepted health body degradation vector",
+        "requiresCorroborationBeforePaging": false
+      },
+      "enrichment_runtime_degraded": {
+        "family": "enrichment",
+        "impactTier": "hold",
+        "notification": "warning",
+        "rootOwner": "message_enrichment_pipeline",
+        "clearPredicate": "cause absent from the next accepted health body degradation vector",
+        "requiresCorroborationBeforePaging": false
+      },
+      "memory_readiness_degraded": {
+        "family": "memory",
+        "impactTier": "hold",
+        "notification": "warning",
+        "rootOwner": "memory_subsystem",
+        "clearPredicate": "cause absent from the next accepted health body degradation vector",
+        "requiresCorroborationBeforePaging": false
+      },
+      "memory_context_degraded": {
+        "family": "memory",
+        "impactTier": "hold",
+        "notification": "warning",
+        "rootOwner": "memory_subsystem",
+        "clearPredicate": "cause absent from the next accepted health body degradation vector",
+        "requiresCorroborationBeforePaging": false
+      },
+      "memory_consolidation_degraded": {
+        "family": "memory",
+        "impactTier": "hold",
+        "notification": "warning",
+        "rootOwner": "memory_subsystem",
+        "clearPredicate": "cause absent from the next accepted health body degradation vector",
+        "requiresCorroborationBeforePaging": false
+      },
+      "connection_churn": {
+        "family": "auth_transport",
+        "impactTier": "hold",
+        "notification": "warning",
+        "rootOwner": "whatsapp_transport_link",
+        "clearPredicate": "cause absent from the next accepted health body degradation vector",
+        "requiresCorroborationBeforePaging": false
+      },
+      "outbound_flood": {
+        "family": "auth_transport",
+        "impactTier": "hold",
+        "notification": "warning",
+        "rootOwner": "whatsapp_transport_link",
+        "clearPredicate": "cause absent from the next accepted health body degradation vector",
+        "requiresCorroborationBeforePaging": false
+      },
+      "event_loop_starved": {
+        "family": "event_loop",
+        "impactTier": "hold",
+        "notification": "warning",
+        "rootOwner": "node_event_loop",
+        "clearPredicate": "corroborated starvation signal absent for a full sampling window",
+        "requiresCorroborationBeforePaging": true
+      },
+      "durability_debt": {
+        "family": "durability",
+        "impactTier": "hold",
+        "notification": "warning",
+        "rootOwner": "durability_engine",
+        "clearPredicate": "cause absent from the next accepted health body degradation vector",
+        "requiresCorroborationBeforePaging": false
+      },
+      "durability_evidence_unreadable": {
+        "family": "durability",
+        "impactTier": "page",
+        "notification": "critical",
+        "rootOwner": "durability_engine",
+        "clearPredicate": "durability evidence readable and clean on a subsequent cycle",
+        "requiresCorroborationBeforePaging": false
+      },
+      "database_retention_failed": {
+        "family": "durability",
+        "impactTier": "page",
+        "notification": "critical",
+        "rootOwner": "durability_engine",
+        "clearPredicate": "retention job completes without failure",
+        "requiresCorroborationBeforePaging": false
+      },
+      "continuity_gap_unreadable": {
+        "family": "continuity",
+        "impactTier": "page",
+        "notification": "critical",
+        "rootOwner": "continuity_ledger",
+        "clearPredicate": "cause absent from the next accepted health body degradation vector",
+        "requiresCorroborationBeforePaging": false
+      },
+      "continuity_gap_open": {
+        "family": "continuity",
+        "impactTier": "hold",
+        "notification": "warning",
+        "rootOwner": "continuity_ledger",
+        "clearPredicate": "cause absent from the next accepted health body degradation vector",
+        "requiresCorroborationBeforePaging": false
+      },
+      "schema_future": {
+        "family": "schema",
+        "impactTier": "page",
+        "notification": "critical",
+        "rootOwner": "database_schema",
+        "clearPredicate": "schema migration completes and readiness probe passes",
+        "requiresCorroborationBeforePaging": false
+      },
+      "schema_not_ready": {
+        "family": "schema",
+        "impactTier": "page",
+        "notification": "critical",
+        "rootOwner": "database_schema",
+        "clearPredicate": "schema migration completes and readiness probe passes",
+        "requiresCorroborationBeforePaging": false
+      },
+      "pending_polls_unreadable": {
+        "family": "polls",
+        "impactTier": "page",
+        "notification": "critical",
+        "rootOwner": "poll_bridge",
+        "clearPredicate": "cause absent from the next accepted health body degradation vector",
+        "requiresCorroborationBeforePaging": false
+      },
+      "agent_recent_crashes": {
+        "family": "agent_runtime",
+        "impactTier": "page",
+        "notification": "critical",
+        "rootOwner": "agent_runtime_supervisor",
+        "clearPredicate": "cause absent from the next accepted health body degradation vector",
+        "requiresCorroborationBeforePaging": false
+      },
+      "agent_auto_compact_backoff": {
+        "family": "agent_runtime",
+        "impactTier": "hold",
+        "notification": "warning",
+        "rootOwner": "agent_runtime_supervisor",
+        "clearPredicate": "cause absent from the next accepted health body degradation vector",
+        "requiresCorroborationBeforePaging": false
+      },
+      "agent_session_inactive": {
+        "family": "agent_runtime",
+        "impactTier": "page",
+        "notification": "critical",
+        "rootOwner": "agent_runtime_supervisor",
+        "clearPredicate": "cause absent from the next accepted health body degradation vector",
+        "requiresCorroborationBeforePaging": false
+      },
+      "turn_finalization_degraded": {
+        "family": "turn_capability",
+        "impactTier": "hold",
+        "notification": "warning",
+        "rootOwner": "agent_turn_pipeline",
+        "clearPredicate": "cause absent from the next accepted health body degradation vector",
+        "requiresCorroborationBeforePaging": false
+      },
+      "turn_recovery_degraded": {
+        "family": "turn_capability",
+        "impactTier": "page",
+        "notification": "critical",
+        "rootOwner": "agent_turn_pipeline",
+        "clearPredicate": "cause absent from the next accepted health body degradation vector",
+        "requiresCorroborationBeforePaging": false
+      },
+      "provider_execution_pressure": {
+        "family": "provider_fallback",
+        "impactTier": "page",
+        "notification": "critical",
+        "rootOwner": "agent_provider_fallback_chain",
+        "clearPredicate": "cause absent from the next accepted health body degradation vector",
+        "requiresCorroborationBeforePaging": false
+      },
+      "agent_runtime_degraded_unclassified": {
+        "family": "agent_runtime",
+        "impactTier": "page",
+        "notification": "critical",
+        "rootOwner": "agent_runtime_supervisor",
+        "clearPredicate": "runtime recovers or a classified cause replaces the unclassified marker",
+        "requiresCorroborationBeforePaging": false
+      },
+      "agent_runtime_unhealthy": {
+        "family": "agent_runtime",
+        "impactTier": "page",
+        "notification": "critical",
+        "rootOwner": "agent_runtime_supervisor",
+        "clearPredicate": "cause absent from the next accepted health body degradation vector",
+        "requiresCorroborationBeforePaging": false
+      },
+      "unclassified": {
+        "family": "sentinel",
+        "impactTier": "page",
+        "notification": "critical",
+        "rootOwner": "health_classifier",
+        "clearPredicate": "health body returns healthy or names a classified cause",
+        "requiresCorroborationBeforePaging": false
+      },
+      "chat_runtime_degraded": {
+        "family": "mode_specific",
+        "impactTier": "hold",
+        "notification": "warning",
+        "rootOwner": "chat_runtime",
+        "clearPredicate": "cause absent from the next accepted health body degradation vector",
+        "requiresCorroborationBeforePaging": false
+      },
+      "passive_runtime_degraded": {
+        "family": "mode_specific",
+        "impactTier": "hold",
+        "notification": "warning",
+        "rootOwner": "passive_runtime",
+        "clearPredicate": "cause absent from the next accepted health body degradation vector",
+        "requiresCorroborationBeforePaging": false
       }
-    },
+    }
+  },
   "sourceDispositions": {
     "agent_turn_admission_rejected": {
       "disposition": "undispatched_journaled_turn_requires_owner_resend_no_automatic_replay",
@@ -940,7 +940,7 @@
       "test": "tests/runtimes/agent/turn-finalizer.test.ts"
     },
     "health_body_degraded": {
-      "disposition": "transient_when_connected_else_outage",
+      "disposition": "cause_aware_hold_class_held_while_connected_else_visible_outage",
       "owner": "deploy/scripts/bot-errors-dispatcher.py",
       "test": "deploy/scripts/tests/test_bot_errors_transient_tiering.py"
     },

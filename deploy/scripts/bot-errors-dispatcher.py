@@ -344,6 +344,71 @@ MAINTENANCE_ENABLED = env_flag("BOT_ERRORS_MAINTENANCE_WINDOWS", True)
 TRANSIENT_TIERING_ENABLED = env_flag("BOT_ERRORS_TRANSIENT_TIERING", True)
 TRANSIENT_PROMOTE_SECONDS = positive_env_int("BOT_ERRORS_TRANSIENT_PROMOTE_SECONDS", 30 * 60)
 
+# #2409 — cause-aware disposition for health_body_degraded. The producer emits a
+# bounded degradation-cause vector; the registered per-cause policy decides
+# whether a connected degradation is a soft-fault hold or a visible outage.
+DEGRADATION_DISPOSITIONS_PATH = Path(__file__).resolve().parents[2] / "src" / "lib" / "fault-taxonomy-registry.json"
+_DEGRADATION_DISPOSITIONS_CACHE: dict[str, Any] = {"loaded": False, "value": None}
+_DEGRADATION_CAUSE_TOKEN_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+_DEGRADATION_CAUSES_EVIDENCE_RE = re.compile(r"(?:^|\s)degradation_causes=([^\s]*)")
+
+
+def load_degradation_cause_dispositions() -> dict[str, str] | None:
+    """{cause: impactTier} from the registry, or None on ANY integrity failure.
+
+    None means the policy cannot be trusted; the caller must fail toward
+    visibility (outage), never toward a blanket hold.
+    """
+    if _DEGRADATION_DISPOSITIONS_CACHE["loaded"]:
+        return _DEGRADATION_DISPOSITIONS_CACHE["value"]
+    value: dict[str, str] | None = None
+    try:
+        with DEGRADATION_DISPOSITIONS_PATH.open("r", encoding="utf-8") as handle:
+            registry = json.load(handle)
+        block = registry.get("degradationCauseDispositions") if isinstance(registry, dict) else None
+        dispositions = block.get("dispositions") if isinstance(block, dict) else None
+        if isinstance(dispositions, dict) and dispositions:
+            parsed: dict[str, str] = {}
+            for cause, entry in dispositions.items():
+                tier = entry.get("impactTier") if isinstance(entry, dict) else None
+                if not isinstance(cause, str) or tier not in ("page", "hold"):
+                    parsed = {}
+                    break
+                parsed[cause] = tier
+            value = parsed or None
+    except Exception:  # noqa: BLE001 - unreadable/malformed policy must classify visible, not crash.
+        value = None
+    _DEGRADATION_DISPOSITIONS_CACHE["loaded"] = True
+    _DEGRADATION_DISPOSITIONS_CACHE["value"] = value
+    return value
+
+
+def degradation_causes_from_event(event: dict[str, Any]) -> list[str] | None:
+    """Bounded cause tokens from the event, or None when absent/malformed.
+
+    Structured diagnostics outrank evidence parsing: a present-but-invalid
+    diagnostics vector is malformed (None), never silently ignored. Evidence
+    parsing takes the LAST degradation_causes= reading (multi-poll evidence,
+    same last-wins rule as whatsapp_connected=).
+    """
+    diagnostics = event.get("diagnostics") if isinstance(event.get("diagnostics"), dict) else {}
+    structured = diagnostics.get("degradationCauses")
+    if structured is not None:
+        if (
+            isinstance(structured, list)
+            and structured
+            and all(isinstance(c, str) and _DEGRADATION_CAUSE_TOKEN_RE.match(c) for c in structured)
+        ):
+            return list(structured)
+        return None
+    tokens = _DEGRADATION_CAUSES_EVIDENCE_RE.findall(str(event.get("evidence") or ""))
+    if not tokens:
+        return None
+    causes = [c for c in tokens[-1].split(",") if c]
+    if not causes or not all(_DEGRADATION_CAUSE_TOKEN_RE.match(c) for c in causes):
+        return None
+    return causes
+
 # Pattern H — relay-host flap coalescing. The collector emits a relay_host_down
 # (warning) when a peer probe misses and a paired relay_host_recovered (info) when
 # it returns. Observed flaps recover in ~6 min — one missed probe interval, not an
@@ -1438,9 +1503,11 @@ def classify_failure_mode(event: dict[str, Any]) -> str:
     if source.endswith("_online_ssh_timeout"):
         return "transient"
 
-    # Health body briefly degraded while the WhatsApp link stayed connected: the
-    # bond never dropped and the app self-recovers — transient. This is the
-    # observed ``health_body_degraded`` recurring false-positive class.
+    # Health body degraded (#2409): the connected bond is one input, not the
+    # impact classifier. Every cause in the producer's vector must carry a
+    # registered hold-class disposition for the event to be held; a page-class
+    # cause, an absent/malformed/unknown vector, or an untrusted policy all
+    # classify outage (fail toward visibility).
     if source == "health_body_degraded":
         connected = diagnostics.get("whatsappConnected")
         if connected is None:
@@ -1452,8 +1519,17 @@ def classify_failure_mode(event: dict[str, Any]) -> str:
             connected = _truthy_token(tokens[-1]) if tokens else False
         else:
             connected = bool(connected)
-        if connected:
+        if not connected:
+            return "outage"
+        causes = degradation_causes_from_event(event)
+        if not causes:
+            return "outage"
+        dispositions = load_degradation_cause_dispositions()
+        if dispositions is None:
+            return "outage"
+        if all(dispositions.get(cause) == "hold" for cause in causes):
             return "transient"
+        return "outage"
 
     # Operator-confirmed transient source names (provider rate-limit/fallback,
     # model-unknown) via BOT_ERRORS_TRANSIENT_SOURCES.

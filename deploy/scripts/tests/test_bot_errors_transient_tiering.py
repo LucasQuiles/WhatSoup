@@ -68,7 +68,7 @@ def _alert(
     machine: str = _MACHINE,
     instance: str = _INSTANCE,
     severity: str = "critical",
-    evidence: str = "status=degraded polls=3 whatsapp_connected=true connection_state=connected",
+    evidence: str = "status=degraded polls=3 whatsapp_connected=true connection_state=connected degradation_causes=enrichment_stale",
     diagnostics: dict | None = None,
 ) -> dict:
     evt = {
@@ -106,8 +106,10 @@ def _key(mod, event) -> str:
 # classify_failure_mode
 # ---------------------------------------------------------------------------
 
-def test_classify_health_body_degraded_connected_is_transient():
+def test_classify_health_body_degraded_connected_hold_class_is_transient():
     mod = _load()
+    # Connected bond + only hold-class causes -> held (the pre-#2409 behavior
+    # survives ONLY for hold-class cause vectors).
     assert mod.classify_failure_mode(_alert()) == "transient"
 
 
@@ -126,7 +128,10 @@ def test_classify_health_body_degraded_no_connection_field_is_outage():
 
 def test_classify_health_body_degraded_connected_via_diagnostics():
     mod = _load()
-    evt = _alert(evidence="status=degraded", diagnostics={"whatsappConnected": True})
+    evt = _alert(
+        evidence="status=degraded",
+        diagnostics={"whatsappConnected": True, "degradationCauses": ["enrichment_stale"]},
+    )
     assert mod.classify_failure_mode(evt) == "transient"
 
 
@@ -439,5 +444,135 @@ def test_multi_poll_evidence_last_reading_wins(tmp_path):
     evt = _alert(evidence="whatsapp_connected=true poll=1 whatsapp_connected=false poll=2")
     assert mod.classify_failure_mode(evt) == "outage"
     # Earlier =false, later =true: recovered by the last poll -> transient.
-    evt2 = _alert(evidence="whatsapp_connected=false poll=1 whatsapp_connected=true poll=2")
+    evt2 = _alert(
+        evidence="whatsapp_connected=false poll=1 whatsapp_connected=true poll=2 degradation_causes=enrichment_stale"
+    )
     assert mod.classify_failure_mode(evt2) == "transient"
+
+
+# ---------------------------------------------------------------------------
+# #2409 Car 7b: cause-aware disposition (fail toward visibility)
+# ---------------------------------------------------------------------------
+
+def test_connected_page_class_cause_is_outage():
+    mod = _load()
+    evt = _alert(
+        evidence="status=degraded whatsapp_connected=true degradation_causes=provider_execution_pressure"
+    )
+    assert mod.classify_failure_mode(evt) == "outage", (
+        "a user-impacting cause must not be downgraded merely because transport is connected"
+    )
+
+
+def test_connected_fallback_exhausted_is_outage():
+    mod = _load()
+    evt = _alert(
+        evidence="status=degraded whatsapp_connected=true degradation_causes=fallback_chain_exhausted"
+    )
+    assert mod.classify_failure_mode(evt) == "outage"
+
+
+def test_mixed_hold_and_page_causes_page_dominates():
+    mod = _load()
+    evt = _alert(
+        evidence=(
+            "status=degraded whatsapp_connected=true "
+            "degradation_causes=enrichment_stale,turn_recovery_degraded,memory_context_degraded"
+        )
+    )
+    assert mod.classify_failure_mode(evt) == "outage"
+
+
+def test_unknown_cause_token_fails_visible():
+    mod = _load()
+    evt = _alert(
+        evidence="status=degraded whatsapp_connected=true degradation_causes=totally_new_cause"
+    )
+    assert mod.classify_failure_mode(evt) == "outage"
+
+
+def test_empty_cause_vector_fails_visible():
+    mod = _load()
+    evt = _alert(evidence="status=degraded whatsapp_connected=true degradation_causes=")
+    assert mod.classify_failure_mode(evt) == "outage"
+
+
+def test_missing_cause_vector_fails_visible():
+    mod = _load()
+    evt = _alert(evidence="status=degraded whatsapp_connected=true connection_state=connected")
+    assert mod.classify_failure_mode(evt) == "outage", (
+        "an absent cause vector proves nothing about impact; fail toward visibility"
+    )
+
+
+def test_registry_unavailable_fails_visible(monkeypatch):
+    mod = _load()
+    mod.DEGRADATION_DISPOSITIONS_PATH = mod.Path("/nonexistent/fault-taxonomy-registry.json")
+    mod._DEGRADATION_DISPOSITIONS_CACHE["loaded"] = False
+    evt = _alert()
+    assert mod.classify_failure_mode(evt) == "outage", (
+        "a missing or unreadable disposition registry must not silently blanket-hold"
+    )
+
+
+def test_operational_fallback_trio_stays_held_regression_pin():
+    mod = _load()
+    evt = _alert(
+        evidence=(
+            "status=degraded whatsapp_connected=true degradation_causes="
+            "provider_fallback_active,primary_model_unusable,primary_model_evidence_stale"
+        )
+    )
+    assert mod.classify_failure_mode(evt) == "transient", (
+        "the proven operational-fallback family is hold-class; the cause-aware path must never re-page it"
+    )
+
+
+def test_event_loop_starved_alone_stays_held():
+    mod = _load()
+    evt = _alert(
+        evidence="status=degraded whatsapp_connected=true degradation_causes=event_loop_starved"
+    )
+    assert mod.classify_failure_mode(evt) == "transient", (
+        "event_loop_starved requires corroboration before paging; single-signal stays hold"
+    )
+
+
+def test_structured_diagnostics_causes_take_precedence():
+    mod = _load()
+    evt = _alert(
+        evidence="status=degraded whatsapp_connected=true degradation_causes=enrichment_stale",
+        diagnostics={"whatsappConnected": True, "degradationCauses": ["provider_execution_pressure"]},
+    )
+    assert mod.classify_failure_mode(evt) == "outage", (
+        "structured diagnostics outrank evidence-token parsing"
+    )
+
+
+def test_malformed_structured_causes_fail_visible():
+    mod = _load()
+    evt = _alert(
+        evidence="status=degraded whatsapp_connected=true degradation_causes=enrichment_stale",
+        diagnostics={"whatsappConnected": True, "degradationCauses": [42]},
+    )
+    assert mod.classify_failure_mode(evt) == "outage", (
+        "a malformed structured vector must not silently fall back to evidence parsing"
+    )
+
+
+def test_multi_poll_cause_vector_last_reading_wins():
+    mod = _load()
+    evt = _alert(
+        evidence=(
+            "degradation_causes=provider_execution_pressure poll=1 whatsapp_connected=true "
+            "degradation_causes=enrichment_stale poll=2"
+        )
+    )
+    assert mod.classify_failure_mode(evt) == "transient"
+    evt2 = _alert(
+        evidence=(
+            "degradation_causes=enrichment_stale poll=1 whatsapp_connected=true "
+            "degradation_causes=provider_execution_pressure poll=2"
+        )
+    )
+    assert mod.classify_failure_mode(evt2) == "outage"
