@@ -141,6 +141,15 @@ export function advanceCollectorState(
         next_started_at_ms: response.process.started_at_ms,
       },
     });
+    return {
+      state: {
+        instance: state.instance,
+        process: response.process,
+        cursor: 0,
+        seenKeys: [],
+      },
+      records,
+    };
   }
   if (response.gap !== null) {
     records.push({

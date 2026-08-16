@@ -97,7 +97,11 @@ describe('advanceCollectorState', () => {
     expect(changed.records.filter((record) => record.recordType === 'gap')).toEqual([
       expect.objectContaining({ kind: 'process_changed' }),
     ]);
-    expect(changed.records.filter((record) => record.recordType === 'sample')).toHaveLength(1);
+    expect(changed.records.filter((record) => record.recordType === 'sample')).toHaveLength(0);
+    expect(changed.state.cursor).toBe(0);
+
+    const refetched = advanceCollectorState(changed.state, decodeLoopLagSamplesResponse(changedBody), '2026-08-15T00:00:30.001Z');
+    expect(refetched.records.filter((record) => record.recordType === 'sample')).toHaveLength(1);
   });
 });
 
