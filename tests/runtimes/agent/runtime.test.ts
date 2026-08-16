@@ -90,7 +90,9 @@ const { mockSession, mockQueue, capturedSessionManagerOptsRef, capturedOnEventRe
     enqueueText: vi.fn(),
     getSenderToken: () => 'mock-sender-token',
     enqueueStreamingText: vi.fn(),
-    enqueueResultText: vi.fn(),
+    enqueueResultText: vi.fn((_text: string, _role?: 'answer' | 'lifecycle' | 'status') => true),
+    commitStreamingText: vi.fn(),
+    discardPreToolAssistantText: vi.fn(),
     enqueueToolUpdate: vi.fn(),
     enqueueProgressUpdate: vi.fn(),
     indicateTyping: vi.fn(),
@@ -713,6 +715,9 @@ describe('AgentRuntime', () => {
       lifecycleOpIds: [],
       statusOpIds: [],
     }));
+    mockQueue.enqueueResultText.mockReset().mockReturnValue(true);
+    mockQueue.commitStreamingText.mockReset();
+    mockQueue.discardPreToolAssistantText.mockReset();
     mockQueue.abortTurn.mockReset();
     mockGetActiveSession.mockReturnValue(null);
     mockGetResumableSessionForChat.mockReturnValue(null);
@@ -10997,6 +11002,47 @@ describe('AgentRuntime', () => {
       );
     });
 
+    it('minimal mode voices committed assistant text but excludes a suppressed result summary', async () => {
+      mockConfig.voiceReply = 'always';
+      mockConfig.toolUpdateMode = 'minimal';
+      mockSynthesizeSpeech.mockResolvedValue({
+        buffer: Buffer.from('audio-bytes'),
+        duration: 3,
+        mimeType: 'audio/mpeg',
+      });
+      mockSession.getStatus.mockReturnValue({ active: true, pid: 1, sessionId: 's1', startedAt: new Date().toISOString(), messageCount: 0, lastMessageAt: null });
+      const pendingCommits: Array<() => void> = [];
+      mockQueue.enqueueStreamingText.mockImplementation(
+        (_text: string, _role?: string, onCommit?: () => void) => {
+          if (onCommit) pendingCommits.push(onCommit);
+        },
+      );
+      mockQueue.commitStreamingText.mockImplementation(() => {
+        pendingCommits.splice(0).forEach((commit) => commit());
+      });
+      mockQueue.enqueueResultText.mockReturnValue(false);
+
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger);
+      await runtime.start();
+      await sendAndDrain(runtime, makeMsg({ content: 'hello', contentType: 'text' }));
+
+      capturedOnEventRef.current?.({ type: 'assistant_text', text: 'Workbook updated and verified.' });
+      capturedOnEventRef.current?.({ type: 'result', text: 'Internal duplicate result summary.' });
+
+      await vi.waitFor(() => {
+        expect(mockSynthesizeSpeech).toHaveBeenCalledWith(
+          'Workbook updated and verified.',
+          expect.objectContaining({ voiceId: 'test-voice-id', modelId: 'eleven_multilingual_v2', stability: 0.5, similarityBoost: 0.75 }),
+        );
+      }, { timeout: 500 });
+      expect(mockSynthesizeSpeech).not.toHaveBeenCalledWith(
+        expect.stringContaining('Internal duplicate result summary'),
+        expect.objectContaining({ voiceId: 'test-voice-id', modelId: 'eleven_multilingual_v2', stability: 0.5, similarityBoost: 0.75 }),
+      );
+    });
+
     it('synthesizes voice when voiceReply is "when_received" and inbound is audio', async () => {
       mockConfig.voiceReply = 'when_received';
       mockSynthesizeSpeech.mockResolvedValue({
@@ -13165,7 +13211,8 @@ describe('AgentRuntime', () => {
       expect(injected).toContain('Directive:');
     });
 
-    it('sends polls in group chats and registers AskUser poll suppression', async () => {
+    it('preserves minimal-mode decision text before a bridged AskUser poll', async () => {
+      mockConfig.toolUpdateMode = 'minimal';
       const { messenger, pollSends } = makePollMessenger({ waMessageId: 'POLL_GROUP', hasSecret: true });
       const db = makeDb();
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
@@ -13184,6 +13231,18 @@ describe('AgentRuntime', () => {
         }
       ).handleEventWithContext.bind(runtime);
 
+      handleEventWithContext(
+        {
+          type: 'assistant_text',
+          text: 'Choose the option that best fits.',
+        },
+        groupQueue,
+        mockSession,
+        undefined,
+        undefined,
+        'group-map-key',
+        'group-map-key',
+      );
       handleEventWithContext(
         {
           type: 'tool_use',
@@ -13213,6 +13272,12 @@ describe('AgentRuntime', () => {
       await Promise.resolve();
 
       expect(pollSends).toHaveLength(1);
+      expect(groupQueue.enqueueStreamingText).toHaveBeenCalledWith(
+        'Choose the option that best fits.',
+        'answer',
+        expect.any(Function),
+      );
+      expect(groupQueue.discardPreToolAssistantText).not.toHaveBeenCalled();
       // enqueueToolUpdate should NOT have been called — poll bridge short-circuits normal handling
       expect(groupQueue.enqueueToolUpdate).toHaveBeenCalledTimes(0);
     });

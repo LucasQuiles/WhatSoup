@@ -1998,6 +1998,120 @@ describe('OutboundQueue', () => {
     expect(calls).toHaveLength(callCountBefore); // no new message added
   });
 
+  it('minimal mode drops buffered pre-tool narration and still delivers the terminal result', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setToolUpdateMode('minimal');
+
+    const onCommit = vi.fn();
+    queue.enqueueStreamingText('Let me inspect the workbook before I continue.', 'answer', onCommit);
+    queue.discardPreToolAssistantText();
+    queue.enqueueToolUpdate({ category: 'reading', detail: 'workbook.xlsx' });
+    queue.enqueueResultText('Workbook updated and verified.');
+    await vi.runAllTimersAsync();
+
+    expect(calls).toEqual(['Workbook updated and verified.']);
+    expect(onCommit).not.toHaveBeenCalled();
+  });
+
+  it('minimal mode keeps buffered terminal assistant text and suppresses a duplicate result summary', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setToolUpdateMode('minimal');
+
+    const onCommit = vi.fn();
+    queue.enqueueStreamingText('Workbook updated and verified.', 'answer', onCommit);
+    expect(queue.enqueueResultText('Internal duplicate result summary.')).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(calls).toHaveLength(0);
+
+    const flushPromise = queue.flush();
+    await vi.runAllTimersAsync();
+    await flushPromise;
+
+    expect(calls).toEqual(['Workbook updated and verified.']);
+    expect(onCommit).toHaveBeenCalledOnce();
+  });
+
+  it('minimal mode preserves buffered assistant text across a tool-error status update', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setToolUpdateMode('minimal');
+    const onCommit = vi.fn();
+
+    queue.enqueueStreamingText('The requested file is unavailable.', 'answer', onCommit);
+    queue.enqueueToolUpdate({ category: 'error', detail: 'read failed' });
+    await queue.flush();
+
+    expect(calls).toEqual(['The requested file is unavailable.']);
+    expect(onCommit).toHaveBeenCalledOnce();
+  });
+
+  it('drops provisional minimal-mode text without committing runtime state on crash abort', () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setToolUpdateMode('minimal');
+    const onCommit = vi.fn();
+
+    queue.enqueueStreamingText('I am still inspecting the files.', 'answer', onCommit);
+    queue.abortTurn();
+
+    expect(calls).toEqual([]);
+    expect(onCommit).not.toHaveBeenCalled();
+    expect(queue.hasPendingWork()).toBe(false);
+  });
+
+  it('minimal mode discards each narration cycle but commits the final answer once', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setToolUpdateMode('minimal');
+    const firstCommit = vi.fn();
+    const secondCommit = vi.fn();
+    const finalCommit = vi.fn();
+
+    queue.enqueueStreamingText('I will inspect the files.', 'answer', firstCommit);
+    queue.discardPreToolAssistantText();
+    queue.enqueueToolUpdate({ category: 'reading', detail: 'files' });
+    queue.enqueueStreamingText('I will compare the results.', 'answer', secondCommit);
+    queue.discardPreToolAssistantText();
+    queue.enqueueToolUpdate({ category: 'searching', detail: 'results' });
+    queue.enqueueStreamingText('The comparison is complete.', 'answer', finalCommit);
+    queue.commitStreamingText();
+    await queue.flush();
+
+    expect(calls).toEqual(['The comparison is complete.']);
+    expect(firstCommit).not.toHaveBeenCalled();
+    expect(secondCommit).not.toHaveBeenCalled();
+    expect(finalCommit).toHaveBeenCalledOnce();
+  });
+
+  it('minimal mode flushes a buffered decision prompt before its poll', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setToolUpdateMode('minimal');
+
+    queue.enqueueStreamingText('Which workbook should I update?');
+    await queue.enqueuePoll(async () => {
+      calls.push('POLL');
+    });
+
+    expect(calls).toEqual(['Which workbook should I update?', 'POLL']);
+    await queue.flush();
+  });
+
+  it('friendly mode preserves buffered assistant text across a tool boundary', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setToolUpdateMode('friendly');
+
+    queue.enqueueStreamingText('I am checking the workbook now.');
+    queue.enqueueToolUpdate({ category: 'reading', detail: 'workbook.xlsx' });
+    await vi.runAllTimersAsync();
+
+    expect(calls).toContain('I am checking the workbook now.');
+  });
+
   // ─── minimal mode category suppression ───────────────────────────────────
 
   it('shouldShowMinimal: friendly knowledge search is suppressed in minimal mode', async () => {

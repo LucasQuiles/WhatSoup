@@ -492,7 +492,7 @@ into place during deployment.
 | `chatAliases` | object | no | `{}` | Per-instance alias map used by send surfaces. Keys are aliases such as `ops` or `support`; values are raw WhatsApp JIDs. Seeded into the instance's `chat_aliases` table at startup. |
 | `autoRespondGroups` | string[] | no | `[]` | Group JIDs (e.g. `120363...@g.us`) the bot auto-responds to without an `@mention`. At startup each JID is seeded into `access_list` as `allowed` (insert-only-when-absent: a group that already has any `allowed`/`blocked`/`pending` row is left untouched, so an explicit decision is never overridden). Non-string and blank entries are dropped. Skipped entirely when `accessMode` is `self_only`, which rejects all group messages at the policy layer. The durable, source-reproducible equivalent of a hand-inserted group access grant. |
 | `profiles` | object | no | `{}` | Per-instance send decoration policies. Keys are profile names; values can define `prefix`, `tag`, and `linkPreview`. Loaded from private instance config at startup. |
-| `toolUpdateMode` | string | no | `full` | Controls what the user sees during agent tool execution. `full`: elapsed time and technical details. `friendly`: plain-language status, one-time per tool. `minimal`: typing indicator only, brief text for warnings. |
+| `toolUpdateMode` | string | no | `full` | Controls what the user sees during agent tool execution. `full`: elapsed time and technical details. `friendly`: plain-language status, one-time per tool. `minimal`: typing indicator only during tools; pre-tool assistant narration is suppressed and the terminal answer is preserved. |
 | `echoGuard` | object | no | `{ enabled: true, groupCooldownMs: 1000 }` | Suppresses outbound echo loops in group chats. When enabled, group messages sent within `groupCooldownMs` of a prior send are suppressed. DMs are never affected. In-memory state, resets on restart. |
 | `operationTracker` | object | no | see defaults | Per-tool progress reporting and stall detection. All sub-fields optional; unset fields use platform defaults. See [operationTracker](#operationtracker). |
 | `agentOptions` | object | agent only | — | Agent-specific settings. Required fields vary by `sessionScope`. See [agentOptions](#agentoptions). |
@@ -873,6 +873,11 @@ The operation tracker detects and recovers from stuck operations regardless of t
 | `full` | Elapsed time every 30s | "taking longer than expected" (threshold notice, no live clock) | "still working — this is taking a while" (threshold notice, no live clock) |
 | `friendly` | One-time "working on something" per tool | Plain-language "still working on it..." | "still working — this is taking a while" |
 | `minimal` | Typing indicator only | Typing indicator only | Typing indicator only |
+
+In `minimal` mode, streamed assistant text remains buffered until the next turn
+boundary. A normal tool call discards that buffer as pre-tool narration; a
+terminal result flushes it as the answer. Poll prompts are not normal tool
+status and remain visible so the user can make the requested decision.
 
 ### `agentOptions`
 

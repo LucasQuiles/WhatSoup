@@ -92,6 +92,7 @@ interface QueuedOutboundChunk {
 
 interface BufferedStreamPart {
   readonly text: string;
+  readonly onCommit?: () => void;
   readonly role: OutboundMessageRole;
   readonly turnId: string | undefined;
   readonly turnEvidenceEpoch: number | undefined;
@@ -345,9 +346,13 @@ export interface IOutboundQueue {
   lastActivity?: number;
   enqueueText(text: string, role?: OutboundMessageRole): void;
   /** Enqueue streaming text delta — aggregated with debounce to prevent per-token message spam from streaming providers. */
-  enqueueStreamingText(text: string, role?: OutboundMessageRole): void;
+  enqueueStreamingText(text: string, role?: OutboundMessageRole, onCommit?: () => void): void;
+  /** Commit buffered streaming text at the outbound-queue delivery boundary. */
+  commitStreamingText(): void;
+  /** Drop provisional assistant narration when a real tool call follows it in minimal mode. */
+  discardPreToolAssistantText(): void;
   /** Enqueue result/summary text. In minimal mode, suppressed if the turn already sent visible output. */
-  enqueueResultText(text: string, role?: OutboundMessageRole): void;
+  enqueueResultText(text: string, role?: OutboundMessageRole): boolean;
   enqueueToolUpdate(update: ToolUpdate): void;
   enqueueProgressUpdate(event: ProgressEvent, instanceName: string): void;
   /** Set the tool update display mode. 'minimal' hides technical details, 'friendly' shows all in plain language. */
@@ -763,12 +768,19 @@ export class OutboundQueue implements IOutboundQueue {
    * Use this for `assistant_text` events from streaming providers (codex-cli, gemini-cli)
    * that emit per-token or per-line deltas. Text is buffered and flushed after
    * TEXT_AGGREGATE_DELAY_MS of silence, producing batched messages instead of spam.
+   * Minimal mode holds the buffer until a turn boundary: a following tool call
+   * proves the text was pre-tool narration and discards it, while a terminal
+   * result flushes the final answer without exposing intermediate planning.
    */
-  enqueueStreamingText(text: string, role: OutboundMessageRole = 'answer'): void {
+  enqueueStreamingText(
+    text: string,
+    role: OutboundMessageRole = 'answer',
+    onCommit?: () => void,
+  ): void {
     if (!text) return;
-    this.turnHasVisibleText = true;
-    this.streamBufferParts.push({ text, ...this.snapshotAttribution(role) });
+    this.streamBufferParts.push({ text, onCommit, ...this.snapshotAttribution(role) });
     this.startTyping();
+    if (this.toolUpdateMode === 'minimal') return;
     if (this.streamTimer) clearTimeout(this.streamTimer);
     this.streamTimer = setTimeout(() => {
       this.flushStreamBuffer();
@@ -786,10 +798,12 @@ export class OutboundQueue implements IOutboundQueue {
     let group: BufferedStreamPart[] = [];
     const flushGroup = (): void => {
       if (group.length === 0) return;
-      const { text: _firstText, ...attribution } = group[0];
+      const { text: _firstText, onCommit: _firstOnCommit, ...attribution } = group[0];
       const text = group.map((part) => part.text).join('');
       if (text.trim() !== '') {
+        this.turnHasVisibleText = true;
         this.enqueuePreparedText(text, attribution);
+        for (const part of group) part.onCommit?.();
       }
       group = [];
     };
@@ -803,19 +817,41 @@ export class OutboundQueue implements IOutboundQueue {
     flushGroup();
   }
 
+  commitStreamingText(): void {
+    this.flushStreamBuffer();
+  }
+
+  discardPreToolAssistantText(): void {
+    if (this.toolUpdateMode !== 'minimal') return;
+    if (this.streamBufferParts.length === 0) return;
+    if (this.streamTimer) {
+      clearTimeout(this.streamTimer);
+      this.streamTimer = null;
+    }
+    const partCount = this.streamBufferParts.length;
+    const characterCount = this.streamBufferParts.reduce((total, part) => total + part.text.length, 0);
+    this.streamBufferParts = [];
+    log.info(
+      { chatJid: this.deliveryJid, partCount, characterCount },
+      'minimal mode suppressed buffered assistant text at tool boundary',
+    );
+  }
+
   /**
    * Enqueue the result/summary text from a completed turn.
    * In minimal mode, suppresses the text if the turn already produced visible
    * output — Claude Code often appends an internal task summary ("Done — I sent
    * the message and asked for...") that shouldn't reach non-technical users.
    */
-  enqueueResultText(text: string, role: OutboundMessageRole = 'answer'): void {
-    if (!isNonEmptyString(text)) return;
-    if (this.toolUpdateMode === 'minimal' && this.turnHasVisibleText) {
+  enqueueResultText(text: string, role: OutboundMessageRole = 'answer'): boolean {
+    if (!isNonEmptyString(text)) return false;
+    const hasBufferedVisibleText = this.streamBufferParts.some((part) => part.text.trim() !== '');
+    if (this.toolUpdateMode === 'minimal' && (this.turnHasVisibleText || hasBufferedVisibleText)) {
       // Suppress — the user already got the real response during the turn
-      return;
+      return false;
     }
     this.enqueueText(text, role);
+    return true;
   }
 
   /**

@@ -33,12 +33,27 @@ export class ControlQueue implements IOutboundQueue {
   }
 
   /** No-op aggregation — control sessions buffer all text via enqueueText. */
-  enqueueStreamingText(text: string, _role: OutboundMessageRole = 'answer'): void {
+  enqueueStreamingText(
+    text: string,
+    _role: OutboundMessageRole = 'answer',
+    onCommit?: () => void,
+  ): void {
     this.log.push(text);
+    onCommit?.();
   }
 
-  enqueueResultText(text: string, _role: OutboundMessageRole = 'answer'): void {
+  commitStreamingText(): void {
+    // intentional no-op: control text commits synchronously
+  }
+
+  discardPreToolAssistantText(): void {
+    // intentional no-op: control sessions preserve their local transcript
+  }
+
+  enqueueResultText(text: string, _role: OutboundMessageRole = 'answer'): boolean {
+    if (text.trim() === '') return false;
     this.log.push(text);
+    return true;
   }
 
   enqueueToolUpdate(update: ToolUpdate): void {
