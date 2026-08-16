@@ -1456,16 +1456,8 @@ def controller_log_fallback(line: str) -> None:
 
 
 def _deadman_delivery_level(delivery_status: str) -> str:
-    """Return 'warning' for non-accepted deliveries, 'info' otherwise (#2425)."""
-    return "warning" if delivery_status in (
-        "failed",
-        "rejected_unconfirmed",
-        "rejected",
-        "outcome_unknown",
-        "timed_out",
-        "unavailable",
-        "pending_exhausted",
-    ) else "info"
+    """Return 'info' only for proven-ok delivery statuses; anything else is 'warning' (#2425)."""
+    return "info" if delivery_status in ("sent", "suppressed_cooldown") else "warning"
 
 
 def append_deadman_log(
@@ -2461,7 +2453,14 @@ def wait_for_response(reader: Any, expected_id: int, timeout: float) -> dict[str
     raise RuntimeError("timeout waiting for JSON-RPC response")
 
 
-def json_rpc(socket_path: str, method: str, params: dict[str, Any] | None = None, timeout: float = 12.0) -> dict[str, Any]:
+def json_rpc(
+    socket_path: str,
+    method: str,
+    params: dict[str, Any] | None = None,
+    timeout: float = 12.0,
+    *,
+    initialize_sink: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     if not os.path.exists(socket_path):
         raise RuntimeError(f"socket missing: {socket_path}")
     init_id = int(time.time() * 1000)
@@ -2483,7 +2482,9 @@ def json_rpc(socket_path: str, method: str, params: dict[str, Any] | None = None
                 },
             }) + "\n")
             writer.flush()
-            wait_for_response(reader, init_id, timeout)
+            init_result = wait_for_response(reader, init_id, timeout)
+            if initialize_sink is not None and isinstance(init_result, dict):
+                initialize_sink.update(init_result)
             writer.write(json.dumps({"jsonrpc": "2.0", "id": call_id, "method": method, "params": params or {}}) + "\n")
             writer.flush()
             return wait_for_response(reader, call_id, timeout)
@@ -6904,12 +6905,54 @@ class _MalformedInventory(ValueError):
     """A tools/list response arrived but its payload shape is untrustworthy (#2408)."""
 
 
+class _ProtocolMismatch(RuntimeError):
+    """The initialize handshake contradicts the expected runtime contract (#2408)."""
+
+
+EXPECTED_TOOL_PROTOCOL_VERSION = "2024-11-05"
+
+
+def _bounded_tool_contract(handshake: dict[str, Any]) -> dict[str, Any]:
+    """Reduce an initialize response to three bounded identity fields (#2408)."""
+
+    def _token(value: Any) -> str | None:
+        return value[:64] if isinstance(value, str) else None
+
+    server_info = handshake.get("serverInfo")
+    server = server_info if isinstance(server_info, dict) else {}
+    return {
+        "protocolVersion": _token(handshake.get("protocolVersion")),
+        "serverName": _token(server.get("name")),
+        "serverVersion": _token(server.get("version")),
+    }
+
+
+def _validate_tool_contract(contract: dict[str, Any], profile_contract: dict[str, Any] | None) -> None:
+    """Fail closed when the verified handshake contradicts expectations (#2408).
+
+    A drifted protocol version always mismatches. A profile-bound contract
+    additionally requires the handshake identity it names; unknown identity
+    under a profile contract fails closed instead of borrowing the default
+    expectation set as observed truth.
+    """
+    observed_protocol = contract.get("protocolVersion")
+    if observed_protocol is not None and observed_protocol != EXPECTED_TOOL_PROTOCOL_VERSION:
+        raise _ProtocolMismatch("initialize protocolVersion drifted from the expected contract")
+    if profile_contract:
+        expected_name = profile_contract.get("serverName")
+        expected_protocol = profile_contract.get("protocolVersion") or EXPECTED_TOOL_PROTOCOL_VERSION
+        if contract.get("serverName") != expected_name or observed_protocol != expected_protocol:
+            raise _ProtocolMismatch("initialize identity does not match the profile-bound tool contract")
+
+
 def _classify_tool_probe_error(exc: BaseException) -> str:
     """Map a tools/list probe exception to a bounded outcome token (#2408).
 
     Raw exception text must never reach probe evidence: transport errors can
     embed socket paths and RPC errors can embed server internals.
     """
+    if isinstance(exc, _ProtocolMismatch):
+        return "protocol_mismatch"
     if isinstance(exc, (_MalformedInventory, json.JSONDecodeError)):
         return "inventory_malformed"
     message = str(exc)
@@ -6928,12 +6971,14 @@ def _tool_probe(
     missing: list[str] | None = None,
     observed_count: int | None = None,
     attempts: str | None = None,
+    contract: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "outcome": outcome,
         "missing": list(missing or []),
         "observedCount": observed_count,
         "attempts": attempts,
+        "contract": contract,
     }
 
 
@@ -6978,6 +7023,9 @@ def tool_inventory(profile: dict[str, Any]) -> tuple[list[str], dict[str, Any]]:
         attempts = 1
     retry_delay = max(0, env_int("BOT_ERRORS_TOOL_LIST_RETRY_DELAY_SECONDS", 3))
     sequence_parts = dry_sequence.split(";") if dry_sequence is not None else []
+    raw_profile_contract = profile.get("toolContract")
+    profile_contract = raw_profile_contract if isinstance(raw_profile_contract, dict) else None
+    contract_holder: dict[str, Any] = {"value": None}
 
     def load_names(attempt_index: int) -> list[str]:
         if dry_sequence is not None:
@@ -6985,13 +7033,28 @@ def tool_inventory(profile: dict[str, Any]) -> tuple[list[str], dict[str, Any]]:
             return parse_tool_names(raw)
         if dry_names is not None:
             return parse_tool_names(dry_names)
-        result = json_rpc(SOCKET_PATH, "tools/list", {})
+        handshake: dict[str, Any] = {}
+        result = json_rpc(SOCKET_PATH, "tools/list", {}, initialize_sink=handshake)
+        contract = _bounded_tool_contract(handshake)
+        contract_holder["value"] = contract
+        _validate_tool_contract(contract, profile_contract)
         tools = result.get("tools")
         if not isinstance(tools, list) or any(
             not isinstance(tool, dict) or not isinstance(tool.get("name"), str) for tool in tools
         ):
             raise _MalformedInventory("tools/list payload shape is not a well-formed inventory")
         return sorted(tool["name"] for tool in tools)
+
+    def expected_tools() -> list[str]:
+        # A profile-bound contract selects expectations only after the
+        # handshake identity it names has been verified (load_names raises
+        # _ProtocolMismatch otherwise), so reaching this with a profile
+        # contract means the identity matched.
+        if profile_contract and dry_sequence is None and dry_names is None:
+            required = profile_contract.get("requiredTools")
+            if isinstance(required, list) and all(isinstance(name, str) for name in required):
+                return sorted(set(required))
+        return REQUIRED_TOOLS
 
     last_error: BaseException | None = None
     observed_lines: list[str] | None = None
@@ -7000,16 +7063,27 @@ def tool_inventory(profile: dict[str, Any]) -> tuple[list[str], dict[str, Any]]:
     for attempt in range(1, attempts + 1):
         try:
             names = load_names(attempt - 1)
-            missing = [name for name in REQUIRED_TOOLS if name and name not in names]
+            expected = expected_tools()
+            missing = [name for name in expected if name and name not in names]
             prefix = "FAIL " if missing else ""
             retry_note = f" attempts={attempt}/{attempts}" if attempts > 1 else ""
             lines = [
                 f"{prefix}tools personal: count={len(names)} required_missing={','.join(missing) if missing else 'none'}{retry_note}",
-                f"tools personal required_present={','.join(name for name in REQUIRED_TOOLS if name in names)}",
+                f"tools personal required_present={','.join(name for name in expected if name in names)}",
             ]
+            contract = contract_holder["value"]
+            if isinstance(contract, dict) and any(value for value in contract.values()):
+                lines.append(
+                    "tools personal contract: "
+                    f"protocol={contract.get('protocolVersion') or 'unknown'} "
+                    f"server={contract.get('serverName') or 'unknown'}/{contract.get('serverVersion') or 'unknown'}"
+                )
             if not missing:
                 return lines, _tool_probe(
-                    "inventory_ok", observed_count=len(names), attempts=f"{attempt}/{attempts}"
+                    "inventory_ok",
+                    observed_count=len(names),
+                    attempts=f"{attempt}/{attempts}",
+                    contract=contract_holder["value"],
                 )
             observed_lines = lines
             observed_missing = missing
@@ -7027,11 +7101,12 @@ def tool_inventory(profile: dict[str, Any]) -> tuple[list[str], dict[str, Any]]:
             missing=observed_missing,
             observed_count=observed_count,
             attempts=f"{attempts}/{attempts}",
+            contract=contract_holder["value"],
         )
     outcome = _classify_tool_probe_error(last_error) if last_error is not None else "probe_error"
     return (
         [f"tools personal: FAIL probe outcome={outcome} attempts={attempts}/{attempts}"],
-        _tool_probe(outcome, attempts=f"{attempts}/{attempts}"),
+        _tool_probe(outcome, attempts=f"{attempts}/{attempts}", contract=contract_holder["value"]),
     )
 
 

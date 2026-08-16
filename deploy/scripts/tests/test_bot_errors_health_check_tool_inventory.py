@@ -246,3 +246,160 @@ def test_daily_sections_for_healthy_outcomes_are_silent(mod):
 
 def test_bounded_service_status_keeps_darwin_process_fallback_token(mod):
     assert mod._bounded_service_status("active_process_fallback") == "active_process_fallback"
+
+
+# ===========================================================================
+# Runtime contract binding from the initialize handshake (#2408 slice 6b)
+# ===========================================================================
+
+def _handshake_rpc(handshake, tools):
+    def rpc(*_args, initialize_sink=None, **_kwargs):
+        if initialize_sink is not None:
+            initialize_sink.update(handshake)
+        return {"tools": tools}
+
+    return rpc
+
+
+_FULL_TOOLS = [{"name": "send_message"}, {"name": "list_chats"}]
+_GOOD_HANDSHAKE = {
+    "protocolVersion": "2024-11-05",
+    "serverInfo": {"name": "whatsoup", "version": "0.1.0"},
+}
+
+
+def test_contract_captured_from_initialize_handshake(mod):
+    lines, probe = _run(mod, _handshake_rpc(_GOOD_HANDSHAKE, _FULL_TOOLS))
+    assert probe["outcome"] == "inventory_ok"
+    assert probe["contract"] == {
+        "protocolVersion": "2024-11-05",
+        "serverName": "whatsoup",
+        "serverVersion": "0.1.0",
+    }
+    assert any("contract: protocol=2024-11-05 server=whatsoup/0.1.0" in line for line in lines)
+
+
+def test_protocol_version_drift_is_protocol_mismatch_not_missing(mod):
+    drifted = {"protocolVersion": "2099-01-01", "serverInfo": {"name": "whatsoup", "version": "9.9.9"}}
+    lines, probe = _run(mod, _handshake_rpc(drifted, _FULL_TOOLS))
+    assert probe["outcome"] == "protocol_mismatch"
+    assert probe["missing"] == []
+    assert probe["contract"]["protocolVersion"] == "2099-01-01"
+    assert "required_missing=" not in "\n".join(lines)
+
+
+def test_profile_tool_contract_selects_expectations_on_identity_match(mod):
+    profile = {
+        "toolContract": {
+            "serverName": "whatsoup",
+            "protocolVersion": "2024-11-05",
+            "requiredTools": ["send_message", "extra_tool"],
+        }
+    }
+    mod.json_rpc = _handshake_rpc(_GOOD_HANDSHAKE, _FULL_TOOLS)
+    lines, probe = mod.tool_inventory(profile)
+    assert probe["outcome"] == "inventory_missing"
+    assert probe["missing"] == ["extra_tool"], "expectations must come from the matched contract, not the default set"
+    assert any("required_missing=extra_tool" in line for line in lines)
+
+
+def test_profile_tool_contract_identity_mismatch_fails_closed(mod):
+    profile = {
+        "toolContract": {
+            "serverName": "whatsoup",
+            "protocolVersion": "2024-11-05",
+            "requiredTools": ["send_message", "extra_tool"],
+        }
+    }
+    other = {"protocolVersion": "2024-11-05", "serverInfo": {"name": "other-server", "version": "0.1.0"}}
+    mod.json_rpc = _handshake_rpc(other, _FULL_TOOLS)
+    lines, probe = mod.tool_inventory(profile)
+    assert probe["outcome"] == "protocol_mismatch"
+    assert probe["missing"] == []
+    assert "required_missing=" not in "\n".join(lines)
+
+
+def test_unknown_identity_without_profile_contract_keeps_observed_inventory(mod):
+    lines, probe = _run(mod, _handshake_rpc({}, [{"name": "send_message"}]))
+    assert probe["outcome"] == "inventory_missing"
+    assert probe["missing"] == ["list_chats"]
+    assert probe["contract"] == {"protocolVersion": None, "serverName": None, "serverVersion": None}
+
+
+def test_unknown_identity_with_profile_contract_fails_closed(mod):
+    profile = {
+        "toolContract": {
+            "serverName": "whatsoup",
+            "protocolVersion": "2024-11-05",
+            "requiredTools": ["send_message"],
+        }
+    }
+    mod.json_rpc = _handshake_rpc({}, _FULL_TOOLS)
+    lines, probe = mod.tool_inventory(profile)
+    assert probe["outcome"] == "protocol_mismatch"
+    assert probe["missing"] == []
+
+
+def test_real_socket_initialize_sink_captures_handshake(mod, tmp_path, monkeypatch):
+    import socket as socket_module
+    import tempfile
+    import threading
+
+    # AF_UNIX sun_path is capped (~104 bytes on darwin); pytest tmp_path is too
+    # deep, so the socket lives in a short mkdtemp dir cleaned up below.
+    short_dir = tempfile.mkdtemp(prefix="ti-")
+    socket_path = str(Path(short_dir) / "probe.sock")
+    server = socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM)
+    server.bind(socket_path)
+    server.listen(1)
+
+    def serve_once():
+        conn, _addr = server.accept()
+        with conn:
+            reader = conn.makefile("r", encoding="utf-8", newline="\n")
+            writer = conn.makefile("w", encoding="utf-8", newline="\n")
+            init_req = json.loads(reader.readline())
+            writer.write(json.dumps({
+                "jsonrpc": "2.0",
+                "id": init_req["id"],
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "serverInfo": {"name": "whatsoup", "version": "0.1.0"},
+                },
+            }) + "\n")
+            writer.flush()
+            call_req = json.loads(reader.readline())
+            writer.write(json.dumps({
+                "jsonrpc": "2.0",
+                "id": call_req["id"],
+                "result": {"tools": [{"name": "send_message"}]},
+            }) + "\n")
+            writer.flush()
+
+    thread = threading.Thread(target=serve_once, daemon=True)
+    thread.start()
+    try:
+        sink: dict = {}
+        result = mod.json_rpc(socket_path, "tools/list", {}, timeout=5.0, initialize_sink=sink)
+        thread.join(timeout=5)
+    finally:
+        server.close()
+        import shutil
+
+        shutil.rmtree(short_dir, ignore_errors=True)
+    assert result == {"tools": [{"name": "send_message"}]}
+    assert sink["protocolVersion"] == "2024-11-05"
+    assert sink["serverInfo"] == {"name": "whatsoup", "version": "0.1.0"}
+
+
+# ===========================================================================
+# Delivery-level classifier: info only for proven-ok statuses (Car 5 nit)
+# ===========================================================================
+
+def test_delivery_level_info_only_for_proven_ok_statuses(mod):
+    assert mod._deadman_delivery_level("sent") == "info"
+    assert mod._deadman_delivery_level("suppressed_cooldown") == "info"
+    assert mod._deadman_delivery_level("failed") == "warning"
+    assert mod._deadman_delivery_level("outcome_unknown") == "warning"
+    assert mod._deadman_delivery_level("not_attempted") == "warning"
+    assert mod._deadman_delivery_level("garbage-token") == "warning"
