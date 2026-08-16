@@ -3697,8 +3697,16 @@ def flap_storm_event(key: str, entry: dict[str, Any], severity: str, now: int) -
     }
 
 
-def flap_resolve_event(key: str, entry: dict[str, Any], now: int) -> dict[str, Any]:
-    """One terminal 'resolved after N flaps over Tm' summary (info)."""
+def flap_resolve_event(key: str, entry: dict[str, Any], now: int,
+                       underlying_open: bool = False) -> dict[str, Any]:
+    """One terminal storm-close summary (info).
+
+    Two honest endings (reliability 4.3): the source went genuinely quiet
+    ('stable after N flaps'), or the trip traffic drained while the underlying
+    incident is STILL OPEN — a persistent condition, not a recovery. The
+    second wording hands off to the still-open digests so fixing the flap
+    inflation never makes steady degradation read as resolved.
+    """
     fields = incident_event_fields_from_key(key)
     underlying = str(fields.get("alertSource") or fields.get("source") or "unknown")
     cumulative = int(entry.get("cumulativeCount") or 0)
@@ -3713,6 +3721,9 @@ def flap_resolve_event(key: str, entry: dict[str, Any], now: int) -> dict[str, A
         f"flap_duration_minutes={minutes}",
         f"flap_first_seen={iso_from_epoch(first)}",
     ]
+    if underlying_open:
+        additions.append("persistent_overdue=true")
+        additions.append("underlying_incident_open=true")
     return {
         **new_event_fields("observation", "info"),
         "id": f"flap-resolved-{safe_segment(key)}-{now}",
@@ -3720,7 +3731,12 @@ def flap_resolve_event(key: str, entry: dict[str, Any], now: int) -> dict[str, A
         **fields,
         "source": "flap_storm_resolved",
         "alertSource": underlying,
-        "summary": f"Flap storm resolved: {underlying} stable after {cumulative} flaps over {minutes}m",
+        "summary": (
+            f"Flap storm closed: {underlying} re-emit churn ended after {cumulative} trips over {minutes}m — "
+            "underlying incident STILL OPEN (persistent condition; tracked by still-open digests)"
+            if underlying_open
+            else f"Flap storm resolved: {underlying} stable after {cumulative} flaps over {minutes}m"
+        ),
         "evidence": "\n".join(additions),
         "diagnostics": {
             "dispatchLog": str(state_paths()["logs"] / "dispatch.jsonl"),
@@ -3762,6 +3778,16 @@ def flap_scan_outbox(paths: dict[str, Path], incident: IncidentStateCycle | None
         if not is_incident_alert(event) or is_incident_clear(event):
             continue
         if str(event.get("source") or "") == "flap_storm":
+            continue
+        # Reliability 4.3 (the ml-bot immortal-storm defect): a re-NOTIFICATION
+        # of an unchanged open condition (poller re-emit through its throttle,
+        # fresh id each time) is not an occurrence and must not trip the flap
+        # window — counting it inflated cumulative forever and refreshed
+        # lastTripAt faster than FLAP_STABLE_SECONDS, so the storm could never
+        # resolve. Only the EMITTER knows re-emit vs fresh occurrence, so it
+        # stamps `renotify: true`; per-occurrence sources (e.g. outbound
+        # quarantines — genuine bursts) never carry the flag and keep tripping.
+        if event.get("renotify") is True:
             continue
         key = incident_key(event)
         try:
@@ -3818,11 +3844,14 @@ def sweep_flap_storms(paths: dict[str, Path], incident: IncidentStateCycle | Non
             continue
         try:
             if flap_should_resolve(entry, now):
-                send_whatsapp(format_event(flap_resolve_event(str(key), entry, now)))
+                open_incidents = incident_state.get("openIncidents")
+                underlying_open = isinstance(open_incidents, dict) and isinstance(open_incidents.get(key), dict)
+                send_whatsapp(format_event(flap_resolve_event(str(key), entry, now, underlying_open)))
                 append_dispatch_log(paths, {
                     "type": "flap_storm_resolved",
                     "incidentKey": key,
                     "cumulativeCount": entry.get("cumulativeCount"),
+                    "underlyingOpen": underlying_open,
                 })
                 flap_state.pop(key, None)
                 resolved += 1

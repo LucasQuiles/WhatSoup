@@ -36,7 +36,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "d7772675e4b0b077fde9440f76b6b59ef4abf295d6c34b65503c3c59d22f6919",
+      "sha256": "b359163c1ea9bc4d75d96b0eb440483e61352289b61a6212ca3562f12875946a",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -504,7 +504,7 @@
     },
     {
       "path": "src/lib/bot-errors-outbox.ts",
-      "sha256": "04b255310b696b9bb5d52c2a46de31d40936ba174be4c0c0bbbfcd797931230e",
+      "sha256": "4a0215bdf4a7ad9223beeabb7268a3f1bd1c16eabd979234b0e81aee51ea2ffc",
       "mustContain": [
         "AUTHORIZATION_BEARER",
         "WHATSAPP_SERVICE_UNIT",
