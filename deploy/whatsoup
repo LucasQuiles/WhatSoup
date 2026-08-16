@@ -14,6 +14,17 @@ INSTANCE="${1:?Usage: whatsoup <instance-name>}"
 # keyring/file resolution below or leak into startup probes. The launcher's own
 # post-scrub resolution (chat API keys, instance health token) is intentional
 # and remains the single supplier of these variables to the child process.
+#
+# Handoff-distiller exception: the distiller calls its cheap summarizer model
+# out-of-band from the WhatSoup process and resolves its key from the
+# provider's conventional env var (src/runtimes/agent/handoff-distill-model.ts).
+# Those vars arrive via the service EnvironmentFile and would die in this scrub,
+# so capture the three distill-capable provider keys into private variables
+# first; the agent branch below re-exports exactly the one the configured
+# distill model needs, only when the distiller is enabled.
+_DISTILL_CAPTURE_DEEPSEEK="${DEEPSEEK_API_KEY:-}"
+_DISTILL_CAPTURE_MINIMAX="${MINIMAX_API_KEY:-}"
+_DISTILL_CAPTURE_ZAI="${ZAI_API_KEY:-}"
 unset ANTHROPIC_API_KEY OPENAI_API_KEY DEEPSEEK_API_KEY KIMI_API_KEY MINIMAX_API_KEY ZAI_API_KEY XAI_API_KEY GROQ_API_KEY MISTRAL_API_KEY OPENROUTER_API_KEY GOOGLE_API_KEY GOOGLE_GENERATIVE_AI_API_KEY GEMINI_API_KEY FIREWORKS_API_KEY TOGETHER_API_KEY PINECONE_API_KEY ELEVENLABS_API_KEY WHATSOUP_HEALTH_TOKEN
 
 # POSIX-portable symlink resolution (readlink -f is GNU-only, unavailable on macOS)
@@ -373,6 +384,29 @@ else
   if [ -n "$PINECONE_API_KEY" ]; then
     export PINECONE_API_KEY
   fi
+
+  # Handoff distiller (WHATSOUP_HANDOFF_DISTILL_MODEL): restore exactly the ONE
+  # provider key the configured distill model resolves against, from the value
+  # captured before the credential scrub above. Keyring first (consistent with
+  # every other restore here), captured EnvironmentFile value as the fallback.
+  # No distill model configured → nothing is restored and the scrub stands.
+  case "${WHATSOUP_HANDOFF_DISTILL_MODEL:-}" in
+    deepseek*)
+      DEEPSEEK_API_KEY="$(keyring_lookup deepseek DEEPSEEK_API_KEY)"
+      [ -z "$DEEPSEEK_API_KEY" ] && DEEPSEEK_API_KEY="$_DISTILL_CAPTURE_DEEPSEEK"
+      [ -n "$DEEPSEEK_API_KEY" ] && export DEEPSEEK_API_KEY
+      ;;
+    minimax*|MiniMax*)
+      MINIMAX_API_KEY="$(keyring_lookup minimax MINIMAX_API_KEY)"
+      [ -z "$MINIMAX_API_KEY" ] && MINIMAX_API_KEY="$_DISTILL_CAPTURE_MINIMAX"
+      [ -n "$MINIMAX_API_KEY" ] && export MINIMAX_API_KEY
+      ;;
+    glm*|zai*|z.ai*)
+      ZAI_API_KEY="$(keyring_lookup zai ZAI_API_KEY)"
+      [ -z "$ZAI_API_KEY" ] && ZAI_API_KEY="$_DISTILL_CAPTURE_ZAI"
+      [ -n "$ZAI_API_KEY" ] && export ZAI_API_KEY
+      ;;
+  esac
 fi
 
 # Health server auth token — used by POST /heal and POST /send on all instances.
