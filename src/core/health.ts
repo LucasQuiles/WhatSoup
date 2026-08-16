@@ -48,7 +48,17 @@ import { isProviderId } from '../lib/provider-ids.ts';
 import type { ConnectionRecentDisconnects, ConnectionStateSnapshot } from '../transport/connection.ts';
 import { readBody } from '../lib/http.ts';
 import { readWhatsoupGitBranch, readWhatsoupGitSha } from '../lib/git-env.ts';
-import { LoopLagSampler, LOOP_LAG_STARVATION_THRESHOLD_MS, LOOP_LAG_RAW_RECENT_LIMIT } from '../lib/loop-lag-sampler.ts';
+import {
+  LoopLagSampler,
+  LOOP_LAG_RAW_RECENT_LIMIT,
+  LOOP_LAG_SAMPLE_INTERVAL_MS,
+  LOOP_LAG_STARVATION_THRESHOLD_MS,
+} from '../lib/loop-lag-sampler.ts';
+import {
+  LOOP_LAG_SAMPLES_MAX_RESPONSE_BYTES,
+  buildLoopLagSamplesResponse,
+  parseLoopLagSamplesQuery,
+} from './loop-lag-samples-endpoint.ts';
 import type { ConsolidationHealth } from './memory-consolidation-contract.ts';
 import type { DatabaseRetentionHealth } from './database-retention.ts';
 import type { StartupNotificationHealth } from './startup-notification-controller.ts';
@@ -1484,6 +1494,39 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ composing }));
+      return;
+    }
+
+    const requestUrl = new URL(req.url ?? '/', 'http://localhost');
+    if (requestUrl.pathname === '/health/event-loop-samples' && req.method === 'GET') {
+      if (!requireAuth(req, res, healthAuth)) return;
+      const query = parseLoopLagSamplesQuery(requestUrl);
+      if (!query.ok) {
+        res.writeHead(query.status, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: query.code }));
+        return;
+      }
+      const page = loopLagSampler.rawSamplePage({
+        ...(query.after === undefined ? {} : { after: query.after }),
+        limit: query.limit,
+      });
+      const body = JSON.stringify(buildLoopLagSamplesResponse({
+        generatedAt: systemClock.nowIso(),
+        process: {
+          pid: process.pid,
+          startedAtMs: deps.startedAt,
+          commit: readWhatsoupGitSha(),
+        },
+        cadenceMs: LOOP_LAG_SAMPLE_INTERVAL_MS,
+        page,
+      }));
+      if (Buffer.byteLength(body) >= LOOP_LAG_SAMPLES_MAX_RESPONSE_BYTES) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'loop_lag_samples_response_too_large' }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(body);
       return;
     }
 
