@@ -23,6 +23,8 @@ import {
   readRestartLoopGuardHealth,
   restartLoopGuardPath,
   RESTART_LOOP_GUARD_DEFAULTS,
+  RESTART_THRASH_DEFAULTS,
+  RELAUNCH_TRACK_HARD_CAP,
 } from '../../../src/runtimes/agent/restart-loop-guard.ts';
 import { Database } from '../../../src/core/database.ts';
 
@@ -192,6 +194,9 @@ describe('restart-loop guard', () => {
           bootsTotal: 0,
           checksPerformed: 0,
           lastCheckAt: null,
+          relaunchesInWindow: 0,
+          cleanRestartThrash: false,
+          thrashWindowMs: RESTART_THRASH_DEFAULTS.windowMs,
         });
     });
 
@@ -280,6 +285,97 @@ describe('restart-loop guard', () => {
       // ...and a subsequent boot increments from the default rather than NaN.
       markBootInProgress(statePath, 2_000);
       expect(readRestartLoopGuardHealth(statePath, DEFAULT_WINDOW, 2_100).bootsTotal).toBe(1);
+    });
+  });
+
+  describe('clean-restart thrash detector (detect + surface, does not trip the breaker)', () => {
+    /** One clean restart cycle: boot marker + graceful clean exit. This is what an
+     *  external supervisor's `kickstart -k` produces — and what the crash breaker,
+     *  by design, is blind to (markCleanExit wipes boots[] every cycle). */
+    function cleanRestart(now: number) {
+      markBootInProgress(statePath, now);
+      markCleanExit(statePath);
+    }
+
+    it('ana-bot cadence (~69s clean-SIGTERM loop) surfaces as thrash while the breaker stays blind', () => {
+      let t = 10_000_000;
+      for (let i = 0; i < 10; i++) { cleanRestart(t); t += 69_000; } // ~52/h cadence
+      const h = readRestartLoopGuardHealth(statePath, DEFAULT_WINDOW, t);
+      // The resume-replay breaker is BLIND to clean restarts — this is the bug the
+      // detector exists to cover (ana-bot/mini1: ~1900 clean boots, bootsInWindow:0).
+      expect(h.bootsInWindow).toBe(0);
+      expect(h.tripped).toBe(false);
+      // ...but the thrash detector makes the loop VISIBLE.
+      expect(h.relaunchesInWindow).toBeGreaterThanOrEqual(RESTART_THRASH_DEFAULTS.threshold);
+      expect(h.cleanRestartThrash).toBe(true);
+    });
+
+    it('rb-bot cadence (~361s cooldown-throttled loop) surfaces as thrash', () => {
+      let t = 30_000_000;
+      for (let i = 0; i < 10; i++) { cleanRestart(t); t += 361_000; } // ~10/h cadence
+      const h = readRestartLoopGuardHealth(statePath, DEFAULT_WINDOW, t - 361_000);
+      expect(h.relaunchesInWindow).toBeGreaterThanOrEqual(RESTART_THRASH_DEFAULTS.threshold);
+      expect(h.cleanRestartThrash).toBe(true);
+    });
+
+    it('q cadence (~50min restart) is NOT thrash', () => {
+      const t = 20_000_000;
+      cleanRestart(t);
+      cleanRestart(t + 3_000_000); // ~50 min later — at most 2 land in the 1h window
+      const h = readRestartLoopGuardHealth(statePath, DEFAULT_WINDOW, t + 3_000_000);
+      expect(h.relaunchesInWindow).toBeLessThan(RESTART_THRASH_DEFAULTS.threshold);
+      expect(h.cleanRestartThrash).toBe(false);
+    });
+
+    it('a normal deploy bounce (a few quick restarts, then quiet) is NOT thrash', () => {
+      let t = 40_000_000;
+      for (let i = 0; i < 4; i++) { cleanRestart(t); t += 20_000; } // rollout settles after 4
+      const h = readRestartLoopGuardHealth(statePath, DEFAULT_WINDOW, t);
+      expect(h.relaunchesInWindow).toBe(4);
+      expect(h.cleanRestartThrash).toBe(false);
+    });
+
+    it('clean exits do NOT wipe the relaunch track (unlike boots[]) — the core invariant', () => {
+      let t = 50_000_000;
+      for (let i = 0; i < 5; i++) { cleanRestart(t); t += 1_000; }
+      const h = readRestartLoopGuardHealth(statePath, DEFAULT_WINDOW, t);
+      expect(h.bootsInWindow).toBe(0);      // boots[] wiped on every clean exit
+      expect(h.relaunchesInWindow).toBe(5); // relaunches[] survived all 5 clean exits
+    });
+
+    it('relaunches age out of the thrash window', () => {
+      let t = 70_000_000;
+      for (let i = 0; i < 10; i++) { cleanRestart(t); t += 60_000; }
+      const h = readRestartLoopGuardHealth(statePath, DEFAULT_WINDOW, t + RESTART_THRASH_DEFAULTS.windowMs + 1);
+      expect(h.relaunchesInWindow).toBe(0);
+      expect(h.cleanRestartThrash).toBe(false);
+    });
+
+    it('back-compat: a legacy v1 file without `relaunches` loads as [] and then accrues', () => {
+      writeFileSync(statePath, JSON.stringify({ v: 1, bootInProgress: false, boots: [], lastTripAt: null }));
+      chmodSync(statePath, 0o600);
+      const h0 = readRestartLoopGuardHealth(statePath, DEFAULT_WINDOW, 1_000);
+      expect(h0.relaunchesInWindow).toBe(0);
+      expect(h0.cleanRestartThrash).toBe(false);
+      markBootInProgress(statePath, 2_000);
+      expect(readRestartLoopGuardHealth(statePath, DEFAULT_WINDOW, 2_100).relaunchesInWindow).toBe(1);
+    });
+
+    it('a present-but-malformed `relaunches` fails closed (state preserved, not reinitialized)', () => {
+      const source = JSON.stringify({ v: 1, bootInProgress: false, boots: [], lastTripAt: null, relaunches: [1_000, 'bad'] }) + '\n';
+      writeFileSync(statePath, source, 'utf8');
+      chmodSync(statePath, 0o600);
+      expect(markBootInProgress(statePath, 2_000)).toBe(false);
+      expect(readFileSync(statePath, 'utf8')).toBe(source); // untouched — fail-open preserve
+    });
+
+    it('the relaunch track is hard-capped (bounds growth even with all boots in-window)', () => {
+      let t = 60_000_000;
+      const boots = RELAUNCH_TRACK_HARD_CAP + 40;
+      for (let i = 0; i < boots; i++) { markBootInProgress(statePath, t); t += 1_000; } // all within 1h
+      const onDisk = JSON.parse(readFileSync(statePath, 'utf8'));
+      expect(onDisk.relaunches.length).toBeLessThanOrEqual(RELAUNCH_TRACK_HARD_CAP);
+      expect(readRestartLoopGuardHealth(statePath, DEFAULT_WINDOW, t).cleanRestartThrash).toBe(true);
     });
   });
 });

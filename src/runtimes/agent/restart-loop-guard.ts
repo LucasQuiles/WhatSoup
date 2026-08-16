@@ -41,6 +41,31 @@ const log = createChildLogger('restart-loop-guard');
  *  operator restart (or two) never trips it. */
 export const RESTART_LOOP_GUARD_DEFAULTS = { maxRestarts: 3, windowMs: 300_000 } as const;
 
+/**
+ * Clean-restart THRASH detector — a DETECT-AND-SURFACE signal, separate from the
+ * resume-replay breaker above (which it must not disturb).
+ *
+ * The breaker only counts UNCLEAN (crash) boots and deliberately resets on a clean
+ * exit — an operator/supervisor stop must never trip it. But an AUTOMATED supervisor
+ * issuing rapid *clean* SIGTERMs (a watchdog `kickstart` loop) is indistinguishable
+ * from a legitimate restart at the process level: every cycle runs markCleanExit,
+ * which wipes `boots[]`, so the breaker reads `bootsInWindow: 0` and the thrash runs
+ * INVISIBLE (observed live: ana-bot/mini1 ~69s clean-SIGTERM loop from a rogue
+ * watchdog — ~1900 boots, breaker never tripped). The app cannot refuse an external
+ * relaunch, so this does NOT trip anything: it maintains a separate `relaunches[]`
+ * track that markCleanExit does NOT wipe, surfaced in health so the bot-errors
+ * pipeline can page a clean-restart thrash loop instead of it running silent.
+ *
+ * Threshold chosen from real fleet cadences over a 1h window: ana-bot ~69s ⇒ ~52/h
+ * (fires), rb-bot ~361s ⇒ ~10/h (fires), q ~50min ⇒ ~1/h (quiet), a normal
+ * deploy/rollout bounce (a few restarts then quiet) ⇒ well under 8/h (quiet).
+ */
+export const RESTART_THRASH_DEFAULTS = { threshold: 8, windowMs: 3_600_000 } as const;
+
+/** Hard cap on the persisted relaunch track — bounds file growth independent of the
+ *  time prune (a backward clock jump can make the time cutoff a no-op). */
+export const RELAUNCH_TRACK_HARD_CAP = 128;
+
 export const RESTART_LOOP_GUARD_FILENAME = 'restart-loop-guard.json';
 
 interface RestartLoopGuardState {
@@ -62,6 +87,12 @@ interface RestartLoopGuardState {
   bootsTotal: number;
   checksPerformed: number;
   lastCheckAt: number | null;
+  /**
+   * epoch-ms of recent boots (clean OR crash), pruned to RESTART_THRASH_DEFAULTS.windowMs.
+   * UNLIKE `boots`, markCleanExit does NOT clear this — that is the whole point: it makes
+   * a clean-restart thrash loop (which resets `boots` every cycle) visible in health.
+   */
+  relaunches: number[];
 }
 
 export interface RestartLoopGuardTrip {
@@ -78,6 +109,12 @@ export interface RestartLoopGuardHealth extends RestartLoopGuardTrip {
   /** Monotonic: crash-recovery decisions the breaker actually made — "asked N, allowed all N". */
   checksPerformed: number;
   lastCheckAt: number | null;
+  /** Boots (clean OR crash) within the thrash window — visible even when `boots` reset on clean exit. */
+  relaunchesInWindow: number;
+  /** true when relaunchesInWindow >= thrash threshold: a rapid relaunch loop (external-supervisor thrash). */
+  cleanRestartThrash: boolean;
+  /** The window `relaunchesInWindow` was computed over (distinct from the resume-breaker `windowMs`). */
+  thrashWindowMs: number;
 }
 
 /** Canonical state-file location inside an instance state root. */
@@ -86,7 +123,7 @@ export function restartLoopGuardPath(stateRoot: string): string {
 }
 
 function freshState(): RestartLoopGuardState {
-  return { v: 1, bootInProgress: false, boots: [], lastTripAt: null, bootsTotal: 0, checksPerformed: 0, lastCheckAt: null };
+  return { v: 1, bootInProgress: false, boots: [], lastTripAt: null, bootsTotal: 0, checksPerformed: 0, lastCheckAt: null, relaunches: [] };
 }
 
 function isNonNegativeFiniteNumber(value: unknown): value is number {
@@ -122,7 +159,18 @@ function parseV1State(data: Record<string, unknown>): RestartLoopGuardState | nu
   const bootsTotal = legacyCounterField(data.bootsTotal);
   const checksPerformed = legacyCounterField(data.checksPerformed);
   const lastCheckAt = data.lastCheckAt === undefined ? null : nullableTimestampField(data.lastCheckAt);
-  if (lastTripAt === undefined || bootsTotal === null || checksPerformed === null || lastCheckAt === undefined) {
+  // Back-compat: every v:1 file written before the thrash track lacks `relaunches`.
+  // Absent => [] (must NOT reject: that fails the guard open fleet-wide on the first
+  // boot after deploy); present-but-malformed => reject (fail closed, like `boots`).
+  let relaunches: number[] | null;
+  if (data.relaunches === undefined) {
+    relaunches = [];
+  } else if (Array.isArray(data.relaunches) && data.relaunches.every((t) => typeof t === 'number' && Number.isFinite(t))) {
+    relaunches = data.relaunches;
+  } else {
+    relaunches = null;
+  }
+  if (lastTripAt === undefined || bootsTotal === null || checksPerformed === null || lastCheckAt === undefined || relaunches === null) {
     return null;
   }
   return {
@@ -135,6 +183,7 @@ function parseV1State(data: Record<string, unknown>): RestartLoopGuardState | nu
     bootsTotal,
     checksPerformed,
     lastCheckAt,
+    relaunches,
   };
 }
 
@@ -188,6 +237,16 @@ export function markBootInProgress(statePath: string, now = systemClock.now()): 
   // Prune opportunistically so the file cannot grow unbounded across crashes.
   const cutoff = now - RESTART_LOOP_GUARD_DEFAULTS.windowMs;
   state.boots = state.boots.filter((t) => t >= cutoff);
+  // Clean-restart thrash track: record EVERY boot and prune to the thrash window.
+  // markCleanExit intentionally leaves this intact, so a clean-SIGTERM thrash loop
+  // (which resets `boots` each cycle) still accumulates here and surfaces in health.
+  const thrashCutoff = now - RESTART_THRASH_DEFAULTS.windowMs;
+  const relaunches = (state.relaunches ?? []).filter((t) => t >= thrashCutoff);
+  relaunches.push(now);
+  // Hard cap independent of the time prune (bounds growth on a backward clock jump).
+  state.relaunches = relaunches.length > RELAUNCH_TRACK_HARD_CAP
+    ? relaunches.slice(-RELAUNCH_TRACK_HARD_CAP)
+    : relaunches;
   saveState(statePath, state);
   return wasInterrupted;
 }
@@ -204,6 +263,8 @@ export function markCleanExit(statePath: string): void {
   const { state } = loaded;
   state.bootInProgress = false;
   state.boots = [];
+  // state.relaunches is deliberately NOT cleared: it must survive clean exits so a
+  // clean-restart thrash loop (every cycle of which runs THIS function) stays visible.
   saveState(statePath, state);
 }
 
@@ -263,11 +324,19 @@ export function readRestartLoopGuardHealth(
 ): RestartLoopGuardHealth {
   const loaded = loadState(statePath);
   if (loaded.status === 'journal_unreadable' || loaded.state === null) {
-    return { bootsInWindow: 0, tripped: false, lastTripAt: null, windowMs, bootsTotal: 0, checksPerformed: 0, lastCheckAt: null };
+    return {
+      bootsInWindow: 0, tripped: false, lastTripAt: null, windowMs,
+      bootsTotal: 0, checksPerformed: 0, lastCheckAt: null,
+      relaunchesInWindow: 0, cleanRestartThrash: false, thrashWindowMs: RESTART_THRASH_DEFAULTS.windowMs,
+    };
   }
   const { state } = loaded;
   const cutoff = now - Math.max(1, windowMs);
   const bootsInWindow = state.boots.filter((t) => t >= cutoff).length;
+  // Thrash detection uses its OWN (constant) window — matching markBootInProgress's
+  // prune — so the surfaced count never diverges from the persisted track.
+  const thrashCutoff = now - Math.max(1, RESTART_THRASH_DEFAULTS.windowMs);
+  const relaunchesInWindow = (state.relaunches ?? []).filter((t) => t >= thrashCutoff).length;
   return {
     bootsInWindow,
     tripped: bootsInWindow >= RESTART_LOOP_GUARD_DEFAULTS.maxRestarts,
@@ -276,5 +345,8 @@ export function readRestartLoopGuardHealth(
     bootsTotal: counterField(state.bootsTotal),
     checksPerformed: counterField(state.checksPerformed),
     lastCheckAt: typeof state.lastCheckAt === 'number' && Number.isFinite(state.lastCheckAt) ? state.lastCheckAt : null,
+    relaunchesInWindow,
+    cleanRestartThrash: relaunchesInWindow >= RESTART_THRASH_DEFAULTS.threshold,
+    thrashWindowMs: RESTART_THRASH_DEFAULTS.windowMs,
   };
 }
