@@ -163,7 +163,7 @@ describe('FleetWebSocketServer', () => {
     const msgPromise = waitForMessage(ws);
     wsServer.broadcast(event);
     const received = await msgPromise;
-    expect(received).toEqual(event);
+    expect(received).toMatchObject(event);
     ws.close();
   });
 
@@ -182,7 +182,7 @@ describe('FleetWebSocketServer', () => {
     const msgPromise = waitForMessage(ws);
     wsServer.broadcast(event);
     const received = await msgPromise;
-    expect(received).toEqual(event);
+    expect(received).toMatchObject(event);
     ws.close();
   });
 
@@ -211,8 +211,11 @@ describe('FleetWebSocketServer', () => {
     const event: WsEvent = { type: 'feed_event', instance: 'test-line' };
     expect(() => wsServer.broadcast(event)).not.toThrow();
 
-    expect(failingClient.send).toHaveBeenCalledWith(JSON.stringify(event), expect.any(Function));
-    expect(healthyClient.send).toHaveBeenCalledWith(JSON.stringify(event), expect.any(Function));
+    const firstCall = failingClient.send.mock.calls[0] as unknown as [string, unknown] | undefined;
+    const sentFrame = JSON.parse(firstCall?.[0] ?? '{}') as Record<string, unknown>;
+    expect(sentFrame).toMatchObject(event);
+    expect(sentFrame.schema_version).toBe(1);
+    expect(healthyClient.send).toHaveBeenCalledWith(expect.any(String), expect.any(Function));
     expect(clients.has(failingClient)).toBe(false);
     expect(clients.has(healthyClient)).toBe(true);
   });

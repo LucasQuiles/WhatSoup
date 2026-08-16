@@ -12,12 +12,14 @@
 //     can spot tooling that hasn't migrated yet.
 
 import { WebSocketServer, WebSocket } from 'ws';
+import { randomUUID } from 'node:crypto';
 import type { Server as HttpServer, IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { URL } from 'node:url';
 import { createChildLogger } from '../logger.ts';
 import type { TicketStore } from './ws-ticket.ts';
 import { errorMessage } from '../lib/error-message.ts';
+import { systemClock } from '../lib/clock.ts';
 
 const log = createChildLogger('fleet:ws');
 
@@ -95,6 +97,8 @@ interface WsClientRecord {
   missedPongs: number;
   /** Monotonic mark when bufferedAmount first exceeded the budget; null while under. */
   backpressuredSinceMs: number | null;
+  /** True once at least one pong has been received (liveness CONFIRMED, not assumed). */
+  confirmedLive: boolean;
 }
 
 /** Bounded per-attempt delivery outcomes (#2521). */
@@ -126,7 +130,10 @@ export interface FleetWsLifecycleOptions {
 /** Aggregate, bounded health projection — no identities, addresses, or payloads. */
 export interface FleetWsHealthSnapshot {
   clientCount: number;
-  live: number;
+  /** Clients that have answered at least one ping and have none outstanding. */
+  confirmedLive: number;
+  /** Adopted clients that have never answered a ping yet (liveness unproven). */
+  unconfirmed: number;
   awaitingPong: number;
   backpressured: number;
   heartbeatAgeMs: number | null;
@@ -160,6 +167,12 @@ export class FleetWebSocketServer {
   private readonly monotonicNow: () => number;
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private lastHeartbeatAtMs: number | null = null;
+  /** Stream identity (#2519 draft-1): a fresh generation per server instance, a
+  monotonic per-frame sequence. Clients detect restarts (generation change) and
+  gaps (non-contiguous sequence) instead of assuming a reopened socket is
+  current. */
+  private readonly streamGeneration = randomUUID();
+  private sequence = 0;
   private outcomeWindowStartMs: number;
   private outcomeCounts = emptyOutcomeCounts();
   private readonly lastLogAtMs = new Map<string, number>();
@@ -213,12 +226,15 @@ export class FleetWebSocketServer {
 
   /** Adopt a socket into lifecycle tracking (single path for real and test clients). */
   private adoptClient(ws: WebSocket): void {
-    this.clients.set(ws, { missedPongs: 0, backpressuredSinceMs: null });
+    this.clients.set(ws, { missedPongs: 0, backpressuredSinceMs: null, confirmedLive: false });
     log.info({ clients: this.clients.size }, 'ws_client_connected');
 
     ws.on('pong', () => {
       const record = this.clients.get(ws);
-      if (record) record.missedPongs = 0;
+      if (record) {
+        record.missedPongs = 0;
+        record.confirmedLive = true;
+      }
     });
 
     ws.on('close', () => {
@@ -232,11 +248,24 @@ export class FleetWebSocketServer {
     });
 
     // Send initial hello so client knows connection is live; a failed local
-    // write is a delivery outcome like any other, not a silent no-op.
+    // write is a delivery outcome like any other, not a silent no-op. The hello
+    // carries the stream identity receipt (#2519): generation plus the sequence
+    // already emitted, so the client knows exactly where the stream stands and
+    // can demand reconciliation instead of assuming a reopened socket is current.
     try {
-      ws.send(JSON.stringify({ type: 'connected', timestamp: Date.now() }), (err) => {
-        if (err) this.dropClient(ws, 'failed', 'ws_hello_send_failed');
-      });
+      ws.send(
+        JSON.stringify({
+          type: 'connected',
+          timestamp: Date.now(),
+          schema_version: 1,
+          stream_generation: this.streamGeneration,
+          sequence: this.sequence,
+        }),
+        (err) => {
+          if (err) this.dropClient(ws, 'failed', 'ws_hello_send_failed');
+          else this.recordOutcome('write_accepted');
+        },
+      );
     } catch {
       this.dropClient(ws, 'failed', 'ws_hello_send_failed');
     }
@@ -304,11 +333,22 @@ export class FleetWebSocketServer {
   application receipt. */
   broadcast(event: WsEvent): void {
     if (this.clients.size === 0) return;
-    const data = JSON.stringify(event);
+    this.sequence += 1;
+    const data = JSON.stringify({
+      ...event,
+      schema_version: 1,
+      stream_generation: this.streamGeneration,
+      sequence: this.sequence,
+      emitted_at: systemClock.now(),
+    });
     this.recordOutcome('broadcast_attempted');
     for (const [client, record] of this.clients) {
       if (client.readyState !== WebSocket.OPEN) continue;
       if (client.bufferedAmount > this.maxBufferedBytes) {
+        // The grace window measures CONTINUOUS over-budget time: any under-budget
+        // broadcast resets it. An oscillating client therefore evades eviction —
+        // deliberately: oscillation means the buffer is draining, and over-budget
+        // frames are dropped (never queued), so there is no unbounded growth.
         record.backpressuredSinceMs ??= this.monotonicNow();
         this.recordOutcome('dropped');
         if (this.monotonicNow() - record.backpressuredSinceMs > this.backpressureGraceMs) {
@@ -325,9 +365,9 @@ export class FleetWebSocketServer {
         });
         this.recordOutcome('write_accepted');
       } catch (err) {
-        this.clients.delete(client);
-        this.recordOutcome('failed');
+        // Unified with the async path: one failed outcome, terminate, throttled log.
         log.warn({ err: errorMessage(err) }, 'ws_broadcast_failed');
+        this.dropClient(client, 'failed', 'ws_sync_send_failed');
       }
     }
   }
@@ -339,26 +379,30 @@ export class FleetWebSocketServer {
     return this.clients.size;
   }
 
-  /** Aggregate, bounded lifecycle projection (#2521): counts and ages only. */
+  /** Aggregate, bounded lifecycle projection (#2521): counts and ages only.
+  The outcome counters use a tumbling epoch window; an expired window is
+  PRESENTED as empty here without mutating state (writes own the reset). */
   healthSnapshot(): FleetWsHealthSnapshot {
     let awaitingPong = 0;
     let backpressured = 0;
+    let confirmedLive = 0;
+    let unconfirmed = 0;
     for (const record of this.clients.values()) {
       if (record.backpressuredSinceMs !== null) backpressured += 1;
       else if (record.missedPongs > 0) awaitingPong += 1;
+      else if (record.confirmedLive) confirmedLive += 1;
+      else unconfirmed += 1;
     }
     const now = this.monotonicNow();
-    if (now - this.outcomeWindowStartMs > this.outcomeWindowMs) {
-      this.outcomeCounts = emptyOutcomeCounts();
-      this.outcomeWindowStartMs = now;
-    }
+    const windowExpired = now - this.outcomeWindowStartMs > this.outcomeWindowMs;
     return {
       clientCount: this.clients.size,
-      live: this.clients.size - awaitingPong - backpressured,
+      confirmedLive,
+      unconfirmed,
       awaitingPong,
       backpressured,
       heartbeatAgeMs: this.lastHeartbeatAtMs === null ? null : now - this.lastHeartbeatAtMs,
-      recentOutcomes: { ...this.outcomeCounts },
+      recentOutcomes: windowExpired ? emptyOutcomeCounts() : { ...this.outcomeCounts },
     };
   }
 
