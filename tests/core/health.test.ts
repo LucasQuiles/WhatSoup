@@ -6404,47 +6404,58 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
         snapshot_sample_count: 0,
         elu_utilization: null,
         cpu_delta_ms: null,
-        raw_recent: [],
+        raw_samples: {
+          available: true,
+          schema_version: 'health.event-loop-samples.v1',
+          path: '/health/event-loop-samples',
+          oldest_sequence: null,
+          latest_sequence: null,
+        },
       });
     });
 
-    it('serializes the bounded raw sample stream with provenance fields and truncates to the recent limit (#3253)', async () => {
+    it('keeps raw samples out of diagnostic health and exposes only bounded discovery metadata', async () => {
       const sampler = fakeLoopLagSampler({
         sampleCount: 2,
         p95LagMs: 12,
         locallyStarved: false,
         discontinuityCount: 0,
       });
-      // 161 entries: one beyond LOOP_LAG_RAW_RECENT_LIMIT (160) — the oldest
-      // must be truncated, and each served entry must carry full provenance.
-      const entries = Array.from({ length: 161 }, (_, index) => ({
-        atMs: 500 * (index + 1),
-        wallAtMs: 1_785_000_000_000 + 500 * (index + 1),
-        lagMs: index === 1 ? 300 : 0,
-        source: index % 2 === 0 ? 'interval' : 'snapshot',
-        discontinuity: false,
-        eluUtilization: 0.25,
-        cpuDeltaMs: 1.5,
-      }));
-      sampler.rawSamples.mockReturnValue(entries);
+      sampler.rawSamplePage.mockReturnValue({
+        oldestSequence: 2,
+        latestSequence: 161,
+        nextAfter: 161,
+        truncated: true,
+        gap: null,
+        samples: [{
+          sequence: 161,
+          atMs: 80_500,
+          wallAtMs: 1_785_000_080_500,
+          lagMs: 0,
+          source: 'interval',
+          discontinuity: false,
+          eluUtilization: 0.25,
+          cpuDeltaMs: 1.5,
+        }],
+      });
       const deps = makeDeps(db, { loopLagSampler: sampler as any });
       ({ server, port } = await buildTestServer(deps));
 
       const { status, body } = await healthReq(port);
       expect(status).toBe(200);
-      const raw = JSON.parse(body).event_loop.raw_recent;
-      expect(raw).toHaveLength(160);
-      // Oldest entry (atMs 500) truncated; stream starts at the second sample.
-      expect(raw[0]).toEqual({
-        at_ms: 1000,
-        wall_at_ms: 1_785_000_001_000,
-        lag_ms: 300,
-        source: 'snapshot',
-        discontinuity: false,
-        elu_utilization: 0.25,
-        cpu_delta_ms: 1.5,
+      const eventLoop = JSON.parse(body).event_loop;
+      expect(eventLoop).not.toHaveProperty('raw_recent');
+      expect(eventLoop.raw_samples).toEqual({
+        available: true,
+        schema_version: 'health.event-loop-samples.v1',
+        path: '/health/event-loop-samples',
+        oldest_sequence: 2,
+        latest_sequence: 161,
       });
-      expect(raw[159].at_ms).toBe(500 * 161);
+      expect(JSON.stringify(eventLoop.raw_samples)).not.toContain('at_ms');
+      expect(Buffer.byteLength(body), `diagnostic health body was ${Buffer.byteLength(body)} bytes`)
+        .toBeLessThan(65_536);
+      expect(sampler.rawSamplePage).toHaveBeenCalledExactlyOnceWith({ limit: 1 });
     });
 
     it('logs a warning when the sampler reports local starvation', async () => {

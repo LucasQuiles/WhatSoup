@@ -345,6 +345,16 @@ describe('watchdog decision block — malformed evidence is HEALTH-UNKNOWN', () 
 });
 
 describe('watchdog shell wiring — exit 3 routes to marker + log, never restart', () => {
+  it('keeps the diagnostic ceiling below the observed raw-in-band projection', () => {
+    const ceiling = Number(template.match(/exceeds (\d+) bytes/)?.[1]);
+    const largestObservedDiagnostic = 48_639;
+    const maximumRawEndpointBody = 32 * 1024;
+
+    expect(ceiling).toBe(65_536);
+    expect(largestObservedDiagnostic).toBeLessThan(ceiling);
+    expect(largestObservedDiagnostic + maximumRawEndpointBody).toBeGreaterThan(ceiling);
+  });
+
   it('captures the decision exit code instead of `|| restart_label`', () => {
     expect(template).not.toMatch(/PY\s*\|\|\s*restart_label/);
     expect(template).toMatch(/py_rc=\$\?/);
