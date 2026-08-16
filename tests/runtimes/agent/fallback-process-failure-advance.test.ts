@@ -204,6 +204,23 @@ type RuntimeView = {
   pendingTurnText: Map<string, string>;
   pendingTurnActorJid: Map<string, string | undefined>;
   scheduleFallbackReplay(args: unknown): boolean;
+  finalizeRuntimeCrash(
+    context: unknown,
+    queue: unknown,
+    session: unknown,
+    mapKey?: string,
+  ): void;
+  runtimeTurnCoordinator: {
+    finalizeRuntimeCrash(
+      context: unknown,
+      queue: unknown,
+      session: unknown,
+      mapKey?: string,
+    ): void;
+  };
+  perChatRuntimeTurnContexts: Map<string, unknown[]>;
+  perChatTurnText: Map<string, string>;
+  operationTrackers: Map<string, { shutdown(): void }>;
 };
 
 function v(runtime: AgentRuntime): RuntimeView {
@@ -493,5 +510,134 @@ describe('unjournaled fallback replay failure', () => {
     expect(queue.enqueueText).toHaveBeenCalledWith(
       expect.stringContaining('backup model could not continue'),
     );
+  });
+});
+
+// ─── Stale-route crash attribution (live 2026-08-15 round 2) ──────────────────
+//
+// Chain entries can share one provider and differ only by model. A session
+// spawned under a PRIOR entry can still be running when the chain advances
+// (another chat's in-flight turn); when that stale session later exits
+// non-zero, the failure is evidence against ITS OWN model — not the current
+// entry. Live shape: a glm session spawned pre-advance crashed 82s after the
+// chain moved to deepseek, provider-only attribution marked never-tried
+// deepseek failed, and the chain wrapped back to already-dead kimi.
+
+describe('stale-route session crash attribution', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-15T20:00:00Z'));
+    vi.mocked(emitAlert).mockClear();
+    lookupCredentialMock.mockReturnValue('present-key');
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('a crash of a PRIOR entry\'s still-running session is not charged to the CURRENT entry', () => {
+    const runtime = makeRuntime([
+      { provider: 'opencode-cli', model: 'kimi/kimi-k3' },
+      { provider: 'opencode-cli', model: 'glm/glm-5.2' },
+      { provider: 'opencode-cli', model: 'deepseek/deepseek-v4-pro' },
+    ]);
+    const { rv, owner } = armIncidentShape(runtime);
+
+    // Legitimate advance: the active kimi session crashes → glm.
+    rv.handlePerChatCrash(CHAT, CHAT, crashInfo(owner));
+    expect(rv.fallbackWindow.activeEntry?.model).toBe('glm/glm-5.2');
+    expect(rv.fallbackChain.failedKeys.size).toBe(1);
+
+    // Another chat's session, spawned while kimi was still the active entry,
+    // exits non-zero AFTER the advance. Same provider, different model.
+    const staleKey = `${CHAT}#stale`;
+    const staleSession = makeFallbackSession('opencode-cli', 'kimi/kimi-k3');
+    rv.setOwnedPerChatSession(staleKey, staleSession);
+    const staleOwner = rv.sessionOwnership.get(staleKey)!;
+    rv.chatQueues.set(staleKey, makeFakeQueue(CHAT));
+    vi.mocked(emitAlert).mockClear();
+
+    rv.handlePerChatCrash(staleKey, CHAT, crashInfo(staleOwner));
+
+    // glm was never tried — it must remain the active entry, unmarked.
+    expect(rv.fallbackWindow.activeEntry?.model).toBe('glm/glm-5.2');
+    expect(rv.fallbackChain.failedKeys.size).toBe(1);
+    expect(alertsFor('fallback_provider_failed')).toHaveLength(0);
+  });
+});
+
+// ─── Managed replay must release the crashed physical turn ────────────────────
+//
+// The dispatch promise of a journaled per-chat turn parks on its runtime
+// completion (sendTurnPerChat awaits completion.promise), and the TurnQueue's
+// active slot clears only when that promise settles. The terminal-result
+// activation path gets the settling finalization from the terminal result
+// itself; a process crash has none — so the managed-handoff branch must
+// finalize the crashed physical turn when it takes ownership, or the chat
+// wedges forever behind it. Live 2026-08-15: every replay session armed with
+// message_count=0 and later inbounds queued unserved until a service restart.
+// Coordinator-level finalization specifically: the runtime wrapper would
+// cancel the replay continuation that scheduleFallbackReplay just claimed.
+
+describe('managed replay releases the crashed physical turn', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-15T20:00:00Z'));
+    vi.mocked(emitAlert).mockClear();
+    lookupCredentialMock.mockReturnValue('present-key');
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function armWedgeShape() {
+    const runtime = makeRuntime([
+      { provider: 'opencode-cli', model: 'kimi/kimi-k3' },
+      { provider: 'opencode-cli', model: 'glm/glm-5.2' },
+    ]);
+    const pieces = armIncidentShape(runtime);
+    pieces.rv.pendingTurnText.set(CHAT, 'compare this to our existing tools');
+    vi.spyOn(
+      pieces.rv as unknown as { scheduleFallbackReplay(args: unknown): boolean },
+      'scheduleFallbackReplay',
+    ).mockReturnValue(true);
+    const coordFinalize = vi
+      .spyOn(pieces.rv.runtimeTurnCoordinator, 'finalizeRuntimeCrash')
+      .mockImplementation(() => {});
+    const wrapperFinalize = vi
+      .spyOn(pieces.rv as unknown as RuntimeView, 'finalizeRuntimeCrash')
+      .mockImplementation(() => {});
+    return { ...pieces, coordFinalize, wrapperFinalize };
+  }
+
+  it('finalizes the crashed published turn context at the coordinator level, never the continuation-cancelling wrapper', () => {
+    const { rv, owner, queue, session, coordFinalize, wrapperFinalize } = armWedgeShape();
+    const publishedContext = { identity: { logicalTurnId: 'lt-1' } };
+    rv.perChatRuntimeTurnContexts.set(CHAT, [publishedContext]);
+    rv.perChatTurnText.set(CHAT, '');
+    const tracker = { shutdown: vi.fn() };
+    rv.operationTrackers.set(CHAT, tracker);
+    const stateBefore = rv.sessionOwnership.get(CHAT)!.state;
+
+    rv.handlePerChatCrash(CHAT, CHAT, crashInfo(owner));
+
+    expect(coordFinalize).toHaveBeenCalledTimes(1);
+    expect(coordFinalize).toHaveBeenCalledWith(publishedContext, queue, session, CHAT);
+    expect(wrapperFinalize).not.toHaveBeenCalled();
+    // Physical-turn state is released; the replay path owns what remains.
+    expect(tracker.shutdown).toHaveBeenCalledTimes(1);
+    expect(rv.operationTrackers.has(CHAT)).toBe(false);
+    expect(rv.perChatTurnText.has(CHAT)).toBe(false);
+    // Mirrors the terminal-result path: the manager is discarded by the
+    // replay flow, never marked recoverable_dead by the crash machinery.
+    expect(rv.sessionOwnership.get(CHAT)!.state).toBe(stateBefore);
+  });
+
+  it('finalizes with an undefined context when the crashed turn was unjournaled so queue evidence still aborts', () => {
+    const { rv, owner, queue, session, coordFinalize } = armWedgeShape();
+
+    rv.handlePerChatCrash(CHAT, CHAT, crashInfo(owner));
+
+    expect(coordFinalize).toHaveBeenCalledTimes(1);
+    expect(coordFinalize).toHaveBeenCalledWith(undefined, queue, session, CHAT);
   });
 });

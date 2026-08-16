@@ -303,6 +303,14 @@ export class RuntimeFallbackCoordinator {
     const sessionProvider = typeof session.getProviderId === 'function' ? session.getProviderId() : null;
     if (sessionProvider !== null) {
       if (sessionProvider !== this.host.fallbackWindow.activeEntry.provider) return null;
+      // Chain entries can share one provider and differ only by model. A
+      // session spawned under a PRIOR entry can still be running when the
+      // chain advances (another chat's in-flight turn); its later failure is
+      // evidence against ITS OWN model, not the current entry. Null model ref
+      // stays attributable — never block on a guess.
+      const entryModel = this.host.fallbackWindow.activeEntry.model;
+      const sessionModel = typeof session.getModelRef === 'function' ? session.getModelRef() : null;
+      if (entryModel !== undefined && sessionModel !== null && sessionModel !== entryModel) return null;
     } else {
       const sessionId = session.getStatus().sessionId;
       if (!sessionId?.startsWith(`${this.host.fallbackWindow.activeEntry.provider}-`)) return null;
