@@ -202,4 +202,44 @@ describe('failure taxonomy cross-contract', () => {
       expect(() => normalizeFinalizeTurnTerminalParams(persistence)).not.toThrow();
     }
   });
+
+  it('binds a closed disposition policy to every health degradation cause (#2409)', () => {
+    const policy = (registry as Record<string, any>).degradationCauseDispositions;
+    expect(policy).toBeDefined();
+    expect(policy.unknownCauseFallback).toBe('outage_visible');
+    const dispositions = policy.dispositions as Record<string, {
+      family?: string;
+      impactTier?: string;
+      notification?: string;
+      rootOwner?: string;
+      clearPredicate?: string;
+      requiresCorroborationBeforePaging?: boolean;
+    }>;
+    expect(sorted(Object.keys(dispositions))).toEqual(sorted(HEALTH_DEGRADATION_CAUSES));
+    const families = new Set<string>();
+    for (const [cause, entry] of Object.entries(dispositions)) {
+      expect(['page', 'hold'], `${cause} impactTier`).toContain(entry.impactTier);
+      expect(['critical', 'warning'], `${cause} notification`).toContain(entry.notification);
+      expect(entry.impactTier === 'page' ? 'critical' : 'warning', `${cause} tier/notification coherence`)
+        .toBe(entry.notification);
+      expect(typeof entry.family, `${cause} family`).toBe('string');
+      expect((entry.family ?? '').length, `${cause} family nonempty`).toBeGreaterThan(0);
+      families.add(entry.family!);
+      expect(typeof entry.rootOwner, `${cause} rootOwner`).toBe('string');
+      expect((entry.rootOwner ?? '').length, `${cause} rootOwner nonempty`).toBeGreaterThan(0);
+      expect(typeof entry.clearPredicate, `${cause} clearPredicate`).toBe('string');
+      expect((entry.clearPredicate ?? '').length, `${cause} clearPredicate nonempty`).toBeGreaterThan(0);
+      expect(typeof entry.requiresCorroborationBeforePaging, `${cause} corroboration flag`).toBe('boolean');
+      if (entry.impactTier === 'page') {
+        expect(entry.requiresCorroborationBeforePaging, `${cause}: a page-tier cause must already be trustworthy`)
+          .toBe(false);
+      }
+    }
+    expect(dispositions.event_loop_starved?.requiresCorroborationBeforePaging).toBe(true);
+    expect(dispositions.event_loop_starved?.impactTier).toBe('hold');
+    expect(dispositions.transport_disconnected?.impactTier).toBe('page');
+    expect(dispositions.unclassified?.impactTier).toBe('page');
+    expect(dispositions.provider_fallback_active?.impactTier).toBe('hold');
+    expect(families.size).toBeGreaterThanOrEqual(10);
+  });
 });
