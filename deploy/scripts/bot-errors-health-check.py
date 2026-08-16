@@ -1538,7 +1538,15 @@ def save_deadman_state(state: dict[str, Any]) -> None:
 
 DEADMAN_PENDING_MAX_ATTEMPTS = 8
 
-_DEADMAN_SERVICE_STATUS_TOKENS = ("active", "inactive", "failed", "activating", "deactivating", "reloading")
+_DEADMAN_SERVICE_STATUS_TOKENS = (
+    "active",
+    "inactive",
+    "failed",
+    "activating",
+    "deactivating",
+    "reloading",
+    "active_process_fallback",
+)
 
 
 def _bounded_service_status(status: str) -> str:
@@ -1812,7 +1820,7 @@ def advance_deadman_episode(
             onset["state"] = "pending"
             onset.setdefault("pendingSinceEpoch", now_epoch)
             onset["attemptCount"] = (int_or_none(onset.get("attemptCount")) or 0) + 1
-        if outcome.get("direct_whatsapp") in ("failed", "rejected_unconfirmed"):
+        if outcome.get("direct_whatsapp") == "failed":
             deadman_state["lastRejectedCount"] = (int(deadman_state.get("lastRejectedCount") or 0)) + 1
         logs.append((
             {
@@ -6882,13 +6890,88 @@ def plugin_inventory(profile: dict[str, Any]) -> list[str]:
     return lines
 
 
-def tool_inventory(profile: dict[str, Any]) -> tuple[list[str], list[str]]:
+TOOL_PROBE_FAILURE_OUTCOMES = (
+    "probe_config_missing",
+    "transport_unreachable",
+    "rpc_error",
+    "protocol_mismatch",
+    "inventory_malformed",
+    "probe_error",
+)
+
+
+class _MalformedInventory(ValueError):
+    """A tools/list response arrived but its payload shape is untrustworthy (#2408)."""
+
+
+def _classify_tool_probe_error(exc: BaseException) -> str:
+    """Map a tools/list probe exception to a bounded outcome token (#2408).
+
+    Raw exception text must never reach probe evidence: transport errors can
+    embed socket paths and RPC errors can embed server internals.
+    """
+    if isinstance(exc, (_MalformedInventory, json.JSONDecodeError)):
+        return "inventory_malformed"
+    message = str(exc)
+    if message.startswith("rpc error:"):
+        return "rpc_error"
+    if isinstance(exc, (TimeoutError, ConnectionError, OSError)):
+        return "transport_unreachable"
+    if "socket missing" in message or "socket closed" in message or "timeout waiting" in message:
+        return "transport_unreachable"
+    return "probe_error"
+
+
+def _tool_probe(
+    outcome: str,
+    *,
+    missing: list[str] | None = None,
+    observed_count: int | None = None,
+    attempts: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "outcome": outcome,
+        "missing": list(missing or []),
+        "observedCount": observed_count,
+        "attempts": attempts,
+    }
+
+
+def required_tools_daily_sections(probe: dict[str, Any]) -> tuple[str | None, str | None, str | None]:
+    """(fail_line, failure_entry, summary_override) for the daily report (#2408).
+
+    Observed absence keeps the historical "missing required tools" wording;
+    a failed probe is reported as unobserved inventory and never borrows the
+    expected set as observed truth.
+    """
+    outcome = probe.get("outcome")
+    missing = [name for name in (probe.get("missing") or []) if isinstance(name, str)]
+    if outcome == "inventory_missing" and missing:
+        joined = ",".join(missing)
+        return (
+            f"FAIL required_tools: required_missing={joined}",
+            f"required tools missing: {joined}",
+            f"BOT ERRORS daily health found issues: missing required tools {joined}",
+        )
+    if outcome in TOOL_PROBE_FAILURE_OUTCOMES:
+        return (
+            f"FAIL required_tools_probe: outcome={outcome}",
+            f"required tools inventory unobserved: {outcome}",
+            f"BOT ERRORS daily health found issues: required-tools inventory unobserved ({outcome})",
+        )
+    return (None, None, None)
+
+
+def tool_inventory(profile: dict[str, Any]) -> tuple[list[str], dict[str, Any]]:
     if not profile_bool(profile, "expectPersonalTools", True):
-        return ["tools personal: skipped by health profile"], []
+        return ["tools personal: skipped by health profile"], _tool_probe("skipped")
     dry_sequence = os.environ.get("BOT_ERRORS_DRY_TOOL_NAMES_SEQUENCE")
     dry_names = os.environ.get("BOT_ERRORS_DRY_TOOL_NAMES")
     if dry_sequence is None and dry_names is None and not SOCKET_PATH:
-        return ["tools personal: FAIL BOT_ERRORS_SOCKET_PATH is not configured"], REQUIRED_TOOLS
+        return (
+            ["tools personal: FAIL BOT_ERRORS_SOCKET_PATH is not configured"],
+            _tool_probe("probe_config_missing"),
+        )
 
     attempts = max(1, env_int("BOT_ERRORS_TOOL_LIST_ATTEMPTS", 3))
     if dry_names is not None and dry_sequence is None:
@@ -6903,12 +6986,17 @@ def tool_inventory(profile: dict[str, Any]) -> tuple[list[str], list[str]]:
         if dry_names is not None:
             return parse_tool_names(dry_names)
         result = json_rpc(SOCKET_PATH, "tools/list", {})
-        tools = result.get("tools", [])
-        return sorted(t.get("name") for t in tools if isinstance(t, dict) and isinstance(t.get("name"), str))
+        tools = result.get("tools")
+        if not isinstance(tools, list) or any(
+            not isinstance(tool, dict) or not isinstance(tool.get("name"), str) for tool in tools
+        ):
+            raise _MalformedInventory("tools/list payload shape is not a well-formed inventory")
+        return sorted(tool["name"] for tool in tools)
 
-    last_error: Exception | None = None
-    last_lines: list[str] | None = None
-    last_missing: list[str] = REQUIRED_TOOLS
+    last_error: BaseException | None = None
+    observed_lines: list[str] | None = None
+    observed_missing: list[str] = []
+    observed_count: int | None = None
     for attempt in range(1, attempts + 1):
         try:
             names = load_names(attempt - 1)
@@ -6920,21 +7008,31 @@ def tool_inventory(profile: dict[str, Any]) -> tuple[list[str], list[str]]:
                 f"tools personal required_present={','.join(name for name in REQUIRED_TOOLS if name in names)}",
             ]
             if not missing:
-                return lines, []
-            last_lines = lines
-            last_missing = missing
-        except Exception as exc:
+                return lines, _tool_probe(
+                    "inventory_ok", observed_count=len(names), attempts=f"{attempt}/{attempts}"
+                )
+            observed_lines = lines
+            observed_missing = missing
+            observed_count = len(names)
+        except Exception as exc:  # noqa: BLE001 - every probe fault becomes a bounded outcome, never observed absence.
             last_error = exc
-            if attempt == attempts:
-                return [f"tools personal: FAIL {exc} attempts={attempt}/{attempts}"], REQUIRED_TOOLS
         if attempt < attempts:
             time.sleep(retry_delay)
 
-    if last_lines is not None:
-        return last_lines, last_missing
-    if last_error is not None:
-        return [f"tools personal: FAIL {last_error} attempts={attempts}/{attempts}"], REQUIRED_TOOLS
-    return ["tools personal: FAIL unknown tool inventory error"], REQUIRED_TOOLS
+    if observed_lines is not None:
+        # A successfully observed subset outranks a later probe failure: the
+        # difference below is genuinely observed evidence.
+        return observed_lines, _tool_probe(
+            "inventory_missing",
+            missing=observed_missing,
+            observed_count=observed_count,
+            attempts=f"{attempts}/{attempts}",
+        )
+    outcome = _classify_tool_probe_error(last_error) if last_error is not None else "probe_error"
+    return (
+        [f"tools personal: FAIL probe outcome={outcome} attempts={attempts}/{attempts}"],
+        _tool_probe(outcome, attempts=f"{attempts}/{attempts}"),
+    )
 
 
 def queue_inventory() -> list[str]:
@@ -7215,7 +7313,8 @@ def record_daily_health_receipt(event_path: Path, severity: str) -> None:
 
 def daily() -> int:
     profile = load_health_profile()
-    tool_lines, missing_required_tools = tool_inventory(profile)
+    tool_lines, tool_probe = tool_inventory(profile)
+    tool_fail_line, tool_failure_entry, tool_summary_override = required_tools_daily_sections(tool_probe)
     dispatcher_line = service_health_line(
         "dispatcher_service",
         DISPATCHER_SERVICE,
@@ -7261,20 +7360,20 @@ def daily() -> int:
         *clock_inventory(),
         *tool_lines,
     ]
-    if missing_required_tools:
-        lines.insert(0, f"FAIL required_tools: required_missing={','.join(missing_required_tools)}")
+    if tool_fail_line:
+        lines.insert(0, tool_fail_line)
     failures = [
         line for line in lines
         if line.startswith("FAIL ") or " FAIL " in line or line.startswith("config ") and "invalid JSON" in line
     ]
-    if missing_required_tools:
-        failures.append(f"required tools missing: {','.join(missing_required_tools)}")
+    if tool_failure_entry:
+        failures.append(tool_failure_entry)
     warnings = [line for line in lines if line.startswith("WARN ") or " WARN " in line]
     severity = daily_summary_severity(failures, warnings)
     evidence = "\n".join(lines)
     critical_asset = critical_asset_from_health_evidence(evidence) if severity != "info" else None
-    if missing_required_tools:
-        summary = f"BOT ERRORS daily health found issues: missing required tools {','.join(missing_required_tools)}"
+    if tool_summary_override:
+        summary = tool_summary_override
     else:
         summary = (
             daily_summary_from_critical_asset(critical_asset)

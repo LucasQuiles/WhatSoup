@@ -90,7 +90,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "da50503592566ee0ef180a997aae066af77e2f0709ec8beee5199b42af8010ed",
+      "sha256": "e6ebffcc07bd1999deb650fe8ba43fe27d503fda664fef0cd0bb833187fac4d3",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -161,7 +161,9 @@
         "opencode_functional_probe_env",
         "effective_instance_provider_path",
         "advance_deadman_episode",
-        "email_fallback_outcome"
+        "email_fallback_outcome",
+        "required_tools_daily_sections",
+        "_classify_tool_probe_error"
       ]
     },
     {
