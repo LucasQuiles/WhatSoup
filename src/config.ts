@@ -15,7 +15,7 @@ import { DEFAULT_IMESSAGE, type ImessageConfig, type ImessageInboundMode } from 
 import { DEFAULT_SIGNAL, SIGNAL_UUID_RE, type SignalConfig, type SignalInboundMode } from './transport/signal/types.ts';
 import { canonicalizeImessageDirectIdentity } from './core/transport-refs.ts';
 import { parseCapabilityObligationsOptions } from './core/capability-contract.ts';
-import { normalizeFallbackEntriesFromAgentOptions } from './core/fallback-chain.ts';
+import { normalizeFallbackDiscoveryFromAgentOptions, normalizeFallbackEntriesFromAgentOptions } from './core/fallback-chain.ts';
 import {
   isProviderBoundaryMode,
   isProviderDataPolicy,
@@ -1540,6 +1540,12 @@ export const config = {
   agentFallbackProvider: resolvedFallbacks[0]?.provider,
   agentFallbackModel: resolvedFallbacks[0]?.model,
   agentFallbackDataPolicy: resolvedFallbacks[0]?.dataPolicy,
+
+  // Discovery-mode fallback (R6) — read from agentOptions.fallbackDiscovery.
+  // When present (mode:"auto"), the runtime DERIVES the chain per host from
+  // the gateway's credential-aware model catalogue; config admission rejects
+  // combining it with a non-empty fallbacks list. Null = static-list behavior.
+  agentFallbackDiscovery: normalizeFallbackDiscoveryFromAgentOptions(resolvedAgentOptions),
 
   // Provider-fallback tunables (#2192 s4b) — instance-config
   // (agentOptions.fallbackTunables.*) first, env second, defaults and clamps

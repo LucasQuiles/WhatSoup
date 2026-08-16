@@ -60,7 +60,7 @@ import {
   buildProviderCrashMetadata,
 } from './provider-crash-diagnostics.ts';
 import { lookupCredential, resolveProviderKeyService, SERVICE_ENV_MAP } from '../../lib/keyring.ts';
-import { PROVIDER_API_KEY_SERVICES } from '../../lib/provider-key-service.ts';
+import { isKeylessOpenCodeRoute, PROVIDER_API_KEY_SERVICES } from '../../lib/provider-key-service.ts';
 import { resolveApiKey } from '../../lib/api-key-resolver.ts';
 import { killSessionTree } from './process-tree.ts';
 import { sha256File, type ProviderAdmission } from './provider-canary-proof.ts';
@@ -351,6 +351,11 @@ export function buildChildEnv(
         }
         selectedService = endpointServiceRaw;
       }
+
+      // Free-tier gateway models (`opencode/<model>`) run keyless: there is no
+      // credential to select or forward, so the mapped-service requirement
+      // below must not apply to them.
+      if (selectedService === null && isKeylessOpenCodeRoute(provider, model)) break;
 
       if (selectedService === null) {
         const modelService = resolveProviderKeyService(provider, model);

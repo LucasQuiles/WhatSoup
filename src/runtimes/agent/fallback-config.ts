@@ -10,6 +10,7 @@
  * delegator (it has direct test coverage) that forwards here.
  */
 import { lookupCredential, resolveProviderKeyService } from '../../lib/keyring.ts';
+import { isKeylessOpenCodeRoute } from '../../lib/provider-key-service.ts';
 // #2192: the one-message-handoff flag moved to config.oneMessageHandoff; the
 // runtime (composition-legal) supplies it to the notice-prefix helpers as an
 // explicit parameter, keeping this module and handoff-notice-prefix pure and
@@ -60,6 +61,9 @@ export function fallbackKeyPresent(
   agentProvider: string,
   agentProviderConfig: Record<string, unknown> | undefined,
 ): boolean | null {
+  // Free-tier gateway models run keyless — nothing to check, same contract as
+  // an unmapped service. buildChildEnv skips credential selection for these.
+  if (isKeylessOpenCodeRoute(provider, model)) return null;
   const service = resolveProviderKeyService(
     provider,
     model,

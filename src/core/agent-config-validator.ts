@@ -23,7 +23,7 @@
 // see src/runtimes/agent/providers/index.ts and issue #447.
 import { homedir } from 'node:os';
 import { PROVIDER_IDS } from '../runtimes/agent/providers/index.ts';
-import { PROVIDER_API_KEY_SERVICES, SERVICE_ENV_MAP, resolveProviderKeyService } from '../lib/provider-key-service.ts';
+import { PROVIDER_API_KEY_SERVICES, SERVICE_ENV_MAP, isKeylessOpenCodeRoute, resolveProviderKeyService } from '../lib/provider-key-service.ts';
 import { isNonEmptyString, isRecord } from '../lib/type-guards.ts';
 import { isSamePhysicalDirectory } from '../lib/home-path.ts';
 import { resolveAgentModel } from './agent-model.ts';
@@ -751,6 +751,10 @@ function validateCommandSurfaceConfig(
  * fallback's credential route is ALWAYS the model prefix.
  */
 function opencodeModelPrefixResolvesToService(model: unknown): boolean {
+  // Free-tier gateway models (`opencode/<model>`) are a legitimate KEYLESS
+  // route: buildChildEnv skips credential selection for them, so the
+  // mapped-service requirement this predicate mirrors does not apply.
+  if (isKeylessOpenCodeRoute('opencode-cli', model)) return true;
   const service = resolveProviderKeyService('opencode-cli', model);
   return service !== null && PROVIDER_API_KEY_SERVICES.has(service) && Boolean(SERVICE_ENV_MAP[service]);
 }
@@ -1060,6 +1064,75 @@ function validateAgentOptions(
       if (isSameAsPrimaryFallbackEntry(entry, raw)) {
         return err(field, `${field} matches the primary provider/model pair`);
       }
+    }
+  }
+
+  // fallbackDiscovery (R6): discovery mode DERIVES the chain per host from the
+  // gateway's credential-aware model catalogue. Mutually exclusive with any
+  // operator-specified chain (non-empty fallbacks[] or the legacy pair) — a
+  // silent merge would hide which source actually orders the ladder.
+  if (opts['fallbackDiscovery'] !== undefined) {
+    const field = 'agentOptions.fallbackDiscovery';
+    if (!isRecord(opts['fallbackDiscovery'])) {
+      return err(field, `${field} must be an object`);
+    }
+    const discovery = opts['fallbackDiscovery'];
+    if (discovery['mode'] !== 'auto') {
+      return err(`${field}.mode`, `${field}.mode must be "auto"`);
+    }
+    if (Array.isArray(opts['fallbacks']) && opts['fallbacks'].length > 0) {
+      return err(
+        field,
+        `${field} cannot be combined with a non-empty agentOptions.fallbacks list — discovery derives the chain; use fallbackDiscovery.preferModels / excludeProviders to steer it`,
+      );
+    }
+    if (
+      opts['fallbackProvider'] !== undefined
+      || opts['fallbackModel'] !== undefined
+      || opts['fallbackDataPolicy'] !== undefined
+    ) {
+      return err(
+        field,
+        `${field} cannot be combined with agentOptions.fallbackProvider, agentOptions.fallbackModel, or agentOptions.fallbackDataPolicy`,
+      );
+    }
+    const maxEntries = discovery['maxEntries'];
+    if (maxEntries !== undefined) {
+      if (
+        typeof maxEntries !== 'number'
+        || !Number.isInteger(maxEntries)
+        || maxEntries < 1
+        || maxEntries > 4
+      ) {
+        return err(`${field}.maxEntries`, `${field}.maxEntries must be an integer between 1 and 4`);
+      }
+    }
+    const preferModels = discovery['preferModels'];
+    if (preferModels !== undefined) {
+      if (!isRecord(preferModels)) {
+        return err(`${field}.preferModels`, `${field}.preferModels must be an object mapping catalogue provider to model id`);
+      }
+      for (const [pinProvider, pinModel] of Object.entries(preferModels)) {
+        if (!isNonEmptyString(pinModel)) {
+          return err(
+            `${field}.preferModels`,
+            `${field}.preferModels[${JSON.stringify(pinProvider)}] must be a non-empty model id string`,
+          );
+        }
+      }
+    }
+    const excludeProviders = discovery['excludeProviders'];
+    if (excludeProviders !== undefined) {
+      if (
+        !Array.isArray(excludeProviders)
+        || excludeProviders.some((value) => !isNonEmptyString(value))
+      ) {
+        return err(`${field}.excludeProviders`, `${field}.excludeProviders must be an array of non-empty provider prefixes`);
+      }
+    }
+    const includeFreeTier = discovery['includeFreeTier'];
+    if (includeFreeTier !== undefined && typeof includeFreeTier !== 'boolean') {
+      return err(`${field}.includeFreeTier`, `${field}.includeFreeTier must be a boolean`);
     }
   }
 

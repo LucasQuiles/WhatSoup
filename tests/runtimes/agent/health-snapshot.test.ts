@@ -310,6 +310,9 @@ function expectedFallbackDetails(): Record<string, unknown> {
       contextInjection: false,
       model: null,
     },
+    // Static-list mode (no fallbackDiscovery config) reports null — the
+    // discovery block only populates for mode:"auto" instances (R6).
+    fallbackDiscovery: null,
   };
 }
 
