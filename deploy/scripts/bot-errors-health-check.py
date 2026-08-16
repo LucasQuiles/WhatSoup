@@ -47,7 +47,7 @@ from lib.durable_json import (
     publish_state_json,
     require_advance,
 )
-from lib.state_files import DEADMAN_STATE, DISPATCHER_STATE, Q_LOOP_STATE
+from lib.state_files import DEADMAN_STATE, DISPATCHER_STATE, Q_LOOP_STATE, TOOL_INVENTORY_STATE
 from lib.state_root import DEFAULT_STATE_ROOT, q_loop_state_root, state_root, test_state_root
 
 
@@ -2156,6 +2156,27 @@ def critical_asset_from_health_evidence(evidence: str) -> dict[str, Any] | None:
         asset_kind = "source_repository"
         operator_action = "Repair source update access or switch the host to an approved controlled distributor; do not rely on stale local code."
         clear_requirement = "daily-health clear after the enforced source_update probe reaches the configured remote/ref"
+    elif "fail required_tools_probe:" in lower:
+        # Instance stays "unknown" so critical_asset_instance never overrides the
+        # event instance: the companion clear keys on the default instance, and
+        # an override here would orphan the open incident on a sibling key.
+        instance = "unknown"
+        code = "MCP_TOOL_INVENTORY_UNOBSERVED"
+        recoverability = "operator_recoverable"
+        confidence = "probable"
+        domain = "tool_observability"
+        asset_kind = "mcp_tool_inventory"
+        operator_action = "Inspect the personal MCP socket configuration, transport, and protocol contract; do not treat required tools as missing until a trustworthy inventory observation succeeds."
+        clear_requirement = "daily-health clear after a successful well-formed tools/list observation"
+    elif "fail required_tools:" in lower:
+        instance = "unknown"
+        code = "MCP_REQUIRED_TOOLS_MISSING"
+        recoverability = "operator_recoverable"
+        confidence = "confirmed"
+        domain = "tool_availability"
+        asset_kind = "mcp_tool_inventory"
+        operator_action = "Restore or register the missing required MCP tools on the personal runtime; the absence was observed by a successful inventory response."
+        clear_requirement = "daily-health clear after a successful inventory observes every required tool"
 
     if code is None:
         return None
@@ -6982,6 +7003,154 @@ def _tool_probe(
     }
 
 
+REQUIRED_TOOLS_ALERT_SOURCE = "required_tools"
+
+
+def tool_inventory_state_path() -> Path:
+    return state_root() / TOOL_INVENTORY_STATE
+
+
+def load_tool_inventory_state() -> dict[str, Any]:
+    path = tool_inventory_state_path()
+    fresh: dict[str, Any] = {"schemaVersion": 1, "lastTrustworthy": None, "openCondition": None}
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return fresh
+    except Exception as exc:  # noqa: BLE001 - a corrupt record must not block the probe lifecycle.
+        return {**fresh, "loadError": str(exc)[:240]}
+    if not isinstance(loaded, dict):
+        return {**fresh, "loadError": "tool inventory state root was not an object"}
+    loaded["schemaVersion"] = 1
+    if not isinstance(loaded.get("lastTrustworthy"), dict):
+        loaded["lastTrustworthy"] = None
+    if not isinstance(loaded.get("openCondition"), dict):
+        loaded["openCondition"] = None
+    return loaded
+
+
+def save_tool_inventory_state(state: dict[str, Any]) -> None:
+    root = state_root()
+    ensure_private_dir(root)
+    target = _durable_target(tool_inventory_state_path())
+    observation = observe_json(target)
+    publication_operation = operation_id(
+        target,
+        state,
+        component="health_check.tool_inventory_state",
+        predecessor=observation.version,
+    )
+    publication = publish_state_json(
+        target,
+        state,
+        component="health_check.tool_inventory_state",
+        operation_id=publication_operation,
+        expected=observation.version,
+        generation=(observation.version.generation or 0) + 1,
+    )
+    require_advance(publication)
+
+
+def _tool_inventory_trustworthy_record(probe: dict[str, Any], now_epoch: int) -> dict[str, Any]:
+    contract = probe.get("contract")
+    return {
+        "observedAtEpoch": now_epoch,
+        "observedCount": int_or_none(probe.get("observedCount")),
+        "missing": [name for name in (probe.get("missing") or []) if isinstance(name, str)],
+        "contract": contract if isinstance(contract, dict) else None,
+    }
+
+
+def _last_trustworthy_inventory_line(state: dict[str, Any], now_epoch: int) -> str:
+    record = state.get("lastTrustworthy")
+    if not isinstance(record, dict):
+        return "tools personal last-trustworthy: none"
+    age = max(0, now_epoch - (int_or_none(record.get("observedAtEpoch")) or 0))
+    observed = int_or_none(record.get("observedCount"))
+    missing = ",".join(name for name in (record.get("missing") or []) if isinstance(name, str)) or "none"
+    return (
+        "tools personal last-trustworthy: "
+        f"age={age}s observed={observed if observed is not None else 'unknown'} missing={missing}"
+    )
+
+
+def required_tools_lifecycle(
+    state: dict[str, Any],
+    probe: dict[str, Any],
+    now_epoch: int,
+) -> tuple[bool, list[tuple[str, str, str, str]], list[str]]:
+    """Advance the required-tools predicate lifecycle from one probe result (#2408).
+
+    Returns (dirty, companion_events, extra_evidence_lines). Companion events
+    carry the predicate's own alert/clear so its incident lifecycle stays
+    independent of aggregate daily-health siblings; the durable openCondition
+    marker makes the clear exactly-once across runs and restarts, and
+    lastTrustworthy is rewritten only by a successful well-formed inventory
+    observation — never by a failed probe.
+    """
+    outcome = str(probe.get("outcome") or "")
+    events: list[tuple[str, str, str, str]] = []
+    extra: list[str] = []
+    dirty = False
+    if outcome == "skipped":
+        return dirty, events, extra
+    open_condition = state.get("openCondition") if isinstance(state.get("openCondition"), dict) else None
+
+    if outcome == "inventory_missing" or outcome in TOOL_PROBE_FAILURE_OUTCOMES:
+        if outcome == "inventory_missing":
+            missing = [name for name in (probe.get("missing") or []) if isinstance(name, str)]
+            joined = ",".join(missing)
+            kind = "inventory_missing"
+            fail_line = f"FAIL required_tools: required_missing={joined}"
+            summary = f"BOT ERRORS required tools missing: {joined}"
+            trustworthy = _tool_inventory_trustworthy_record(probe, now_epoch)
+            if state.get("lastTrustworthy") != trustworthy:
+                state["lastTrustworthy"] = trustworthy
+                dirty = True
+        else:
+            kind = "probe_failure"
+            fail_line = f"FAIL required_tools_probe: outcome={outcome}"
+            summary = f"BOT ERRORS required-tools inventory unobserved ({outcome})"
+        if open_condition is None:
+            state["openCondition"] = {
+                "alertSource": REQUIRED_TOOLS_ALERT_SOURCE,
+                "kind": kind,
+                "outcome": outcome,
+                "openedAtEpoch": now_epoch,
+            }
+            dirty = True
+        elif open_condition.get("kind") != kind or open_condition.get("outcome") != outcome:
+            open_condition["kind"] = kind
+            open_condition["outcome"] = outcome
+            dirty = True
+        evidence_lines = [fail_line]
+        if kind == "probe_failure":
+            trust_line = _last_trustworthy_inventory_line(state, now_epoch)
+            evidence_lines.append(trust_line)
+            extra.append(trust_line)
+        events.append(("alert", "critical", summary, "\n".join(evidence_lines)))
+        return dirty, events, extra
+
+    if outcome == "inventory_ok":
+        trustworthy = _tool_inventory_trustworthy_record(probe, now_epoch)
+        if state.get("lastTrustworthy") != trustworthy:
+            state["lastTrustworthy"] = trustworthy
+            dirty = True
+        if open_condition is not None:
+            state["openCondition"] = None
+            dirty = True
+            observed = int_or_none(probe.get("observedCount"))
+            events.append((
+                "clear",
+                "info",
+                "BOT ERRORS required tools verified",
+                f"required_tools: verified observed={observed if observed is not None else 'unknown'} required_missing=none",
+            ))
+        return dirty, events, extra
+
+    return dirty, events, extra
+
+
 def required_tools_daily_sections(probe: dict[str, Any]) -> tuple[str | None, str | None, str | None]:
     """(fail_line, failure_entry, summary_override) for the daily report (#2408).
 
@@ -7390,6 +7559,10 @@ def daily() -> int:
     profile = load_health_profile()
     tool_lines, tool_probe = tool_inventory(profile)
     tool_fail_line, tool_failure_entry, tool_summary_override = required_tools_daily_sections(tool_probe)
+    tool_state = load_tool_inventory_state()
+    tool_state_dirty, tool_events, tool_extra_lines = required_tools_lifecycle(
+        tool_state, tool_probe, current_epoch()
+    )
     dispatcher_line = service_health_line(
         "dispatcher_service",
         DISPATCHER_SERVICE,
@@ -7434,6 +7607,7 @@ def daily() -> int:
         *instance_db_inventory(),
         *clock_inventory(),
         *tool_lines,
+        *tool_extra_lines,
     ]
     if tool_fail_line:
         lines.insert(0, tool_fail_line)
@@ -7473,6 +7647,21 @@ def daily() -> int:
             event_type=source_event_type,
         )
         print(source_path)
+    for tool_event_type, tool_severity, tool_summary, tool_evidence in tool_events:
+        tool_path = outbox_event(
+            tool_summary,
+            tool_evidence,
+            severity=tool_severity,
+            source="daily-health",
+            event_type=tool_event_type,
+            alert_source=REQUIRED_TOOLS_ALERT_SOURCE,
+        )
+        print(tool_path)
+    if tool_state_dirty:
+        # Emit-before-save: a crash between the clear emission and this save can
+        # only replay the clear next run, where the incident pop is a no-op; the
+        # reverse order could lose the pending clear forever.
+        save_tool_inventory_state(tool_state)
     return 0
 
 

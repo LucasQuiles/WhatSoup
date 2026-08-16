@@ -90,7 +90,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "2fc817baead92a006814f252ebfce8b11b60e2002c005e1e25211e4a8450b335",
+      "sha256": "d9073be0b1fe107aaeb7d0c068d4ab2d21c7c80491fb65e1c6136050550a001c",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -165,7 +165,11 @@
         "required_tools_daily_sections",
         "_classify_tool_probe_error",
         "_validate_tool_contract",
-        "initialize_sink"
+        "initialize_sink",
+        "required_tools_lifecycle",
+        "save_tool_inventory_state",
+        "MCP_TOOL_INVENTORY_UNOBSERVED",
+        "MCP_REQUIRED_TOOLS_MISSING"
       ]
     },
     {
@@ -434,7 +438,7 @@
     },
     {
       "path": "deploy/scripts/lib/state_files.py",
-      "sha256": "4bbcac85853544d51588d38cfb8f6d1946dcd03f6dc2e00b3849176febaf553c",
+      "sha256": "be1c46610812c11b0bc3f5058be32bcb718117d7f2779858aa38114452d060e3",
       "mustContain": [
         "Single source of truth for bot-errors state filenames"
       ]
@@ -473,7 +477,7 @@
     },
     {
       "path": "src/lib/fault-taxonomy-registry.json",
-      "sha256": "52d76390199b697d02e30faf14fc6ff039adfd7718543219146d5ba989dc74fa",
+      "sha256": "6b484e9cc39e1151b95a8e6b2ac25714c4e700bf87b57c975b830ec01e3976ac",
       "mustContain": [
         "whatsoup-fault-taxonomy-registry-v3",
         "runtimeAgentHealthSignals",

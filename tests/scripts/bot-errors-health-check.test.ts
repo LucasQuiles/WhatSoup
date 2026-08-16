@@ -256,7 +256,9 @@ describe('bot-errors-health-check', () => {
       env: {
         ...process.env,
         HOME: home,
+        BOT_ERRORS_STATE_DIR: join(tmpRoot, 'state'),
         BOT_ERRORS_DRY_TOOL_NAMES: 'send_message',
+        BOT_ERRORS_REQUIRED_TOOLS: 'send_message',
         BOT_ERRORS_HEALTH_PROFILE_JSON: JSON.stringify({
           role: 'test-zero-byte',
           expectDispatcher: false,
@@ -1569,14 +1571,26 @@ print(json.dumps(samples, sort_keys=True))
 
     const outbox = join(tmpRoot, 'outbox');
     const files = dataEntries(outbox);
-    expect(files).toHaveLength(1);
-    const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
-      severity: string;
-      evidence: string;
-    };
-    expect(event.severity).toBe('critical');
-    expect(event.evidence).toContain('FAIL personal_socket: <unset> exists=False');
-    expect(event.evidence).toContain('tools personal: FAIL BOT_ERRORS_SOCKET_PATH is not configured');
+    expect(files).toHaveLength(2);
+    const events = files.map((file) =>
+      JSON.parse(readFileSync(join(outbox, file), 'utf8')) as {
+        severity: string;
+        evidence: string;
+        alertSource?: string;
+        criticalAsset?: { failure?: { code?: string; confidence?: string } };
+      },
+    );
+    const aggregate = events.find((event) => event.alertSource !== 'required_tools');
+    expect(aggregate?.severity).toBe('critical');
+    expect(aggregate?.evidence).toContain('FAIL personal_socket: <unset> exists=False');
+    expect(aggregate?.evidence).toContain('tools personal: FAIL BOT_ERRORS_SOCKET_PATH is not configured');
+    const companion = events.find((event) => event.alertSource === 'required_tools');
+    expect(companion).toBeDefined();
+    expect(companion?.evidence).toContain('FAIL required_tools_probe: outcome=probe_config_missing');
+    expect(companion?.evidence).toContain('last-trustworthy: none');
+    expect(companion?.evidence).not.toContain('required_missing=');
+    expect(companion?.criticalAsset?.failure?.code).toBe('MCP_TOOL_INVENTORY_UNOBSERVED');
+    expect(companion?.criticalAsset?.failure?.confidence).toBe('probable');
   });
 
   it('fails daily health when expected supervision services are inactive', () => {
@@ -1973,16 +1987,89 @@ print(json.dumps({"result": m.json_rpc(${JSON.stringify(socket)}, "tools/list", 
 
     const outbox = join(tmpRoot, 'outbox');
     const files = dataEntries(outbox);
-    expect(files).toHaveLength(1);
-    const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
-      severity: string;
-      summary: string;
-      evidence: string;
+    expect(files).toHaveLength(2);
+    const events = files.map((file) =>
+      JSON.parse(readFileSync(join(outbox, file), 'utf8')) as {
+        severity: string;
+        summary: string;
+        evidence: string;
+        instance?: string;
+        alertSource?: string;
+        criticalAsset?: { asset?: { kind?: string }; failure?: { code?: string; confidence?: string } };
+      },
+    );
+    const aggregate = events.find((event) => event.summary.includes('missing required tools'));
+    expect(aggregate).toBeDefined();
+    expect(aggregate?.severity).not.toBe('info');
+    expect(aggregate?.evidence).toContain('FAIL tools personal');
+    expect(aggregate?.evidence).toContain('required_missing=missing_tool');
+    const companion = events.find((event) => event.alertSource === 'required_tools');
+    expect(companion).toBeDefined();
+    expect(companion?.severity).toBe('critical');
+    expect(companion?.evidence).toContain('FAIL required_tools: required_missing=missing_tool');
+    expect(companion?.criticalAsset?.asset?.kind).toBe('mcp_tool_inventory');
+    expect(companion?.criticalAsset?.failure?.code).toBe('MCP_REQUIRED_TOOLS_MISSING');
+    expect(companion?.criticalAsset?.failure?.confidence).toBe('confirmed');
+    expect(companion?.instance ?? 'bot-errors-health').toBe('bot-errors-health');
+  });
+
+  it('clears the required-tools predicate exactly once after recovery', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-'));
+    const baseEnv = {
+      ...process.env,
+      HOME: tmpRoot,
+      BOT_ERRORS_STATE_DIR: tmpRoot,
+      BOT_ERRORS_REQUIRED_TOOLS: 'send_message,missing_tool',
+      BOT_ERRORS_HEALTH_PROFILE_JSON: JSON.stringify({
+        role: 'tool-lifecycle-test',
+        expectDispatcher: false,
+        expectQLoop: false,
+        expectPersonalSocket: false,
+        expectConfigInventory: false,
+        expectPluginInventory: false,
+      }),
     };
-    expect(event.severity).not.toBe('info');
-    expect(event.summary).toContain('missing required tools missing_tool');
-    expect(event.evidence).toContain('FAIL tools personal');
-    expect(event.evidence).toContain('required_missing=missing_tool');
+    const outbox = join(tmpRoot, 'outbox');
+    const readNew = (before: Set<string>) =>
+      dataEntries(outbox)
+        .filter((file) => !before.has(file))
+        .map((file) => JSON.parse(readFileSync(join(outbox, file), 'utf8')) as {
+          eventType: string;
+          severity: string;
+          alertSource?: string;
+          evidence: string;
+        });
+
+    execFileSync('python3', ['deploy/scripts/bot-errors-health-check.py', '--daily'], {
+      cwd: process.cwd(),
+      env: { ...baseEnv, BOT_ERRORS_DRY_TOOL_NAMES: 'send_message' },
+    });
+    let seen = new Set(dataEntries(outbox));
+    expect(
+      [...seen].some((file) => {
+        const event = JSON.parse(readFileSync(join(outbox, file), 'utf8')) as { alertSource?: string };
+        return event.alertSource === 'required_tools';
+      }),
+    ).toBe(true);
+
+    execFileSync('python3', ['deploy/scripts/bot-errors-health-check.py', '--daily'], {
+      cwd: process.cwd(),
+      env: { ...baseEnv, BOT_ERRORS_DRY_TOOL_NAMES: 'send_message,missing_tool' },
+    });
+    const recoveryEvents = readNew(seen);
+    const clears = recoveryEvents.filter((event) => event.alertSource === 'required_tools');
+    expect(clears).toHaveLength(1);
+    expect(clears[0]?.eventType).toBe('clear');
+    expect(clears[0]?.severity).toBe('info');
+    expect(clears[0]?.evidence).toContain('required_missing=none');
+
+    seen = new Set(dataEntries(outbox));
+    execFileSync('python3', ['deploy/scripts/bot-errors-health-check.py', '--daily'], {
+      cwd: process.cwd(),
+      env: { ...baseEnv, BOT_ERRORS_DRY_TOOL_NAMES: 'send_message,missing_tool' },
+    });
+    const steadyEvents = readNew(seen);
+    expect(steadyEvents.filter((event) => event.alertSource === 'required_tools')).toHaveLength(0);
   });
 
   it('retries personal tool inventory before raising a missing-tool alert', () => {
