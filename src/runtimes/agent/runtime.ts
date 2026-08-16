@@ -8365,6 +8365,15 @@ export class AgentRuntime implements Runtime {
     mapKey?: string;
     oldSession: SessionManager | null;
     hadToolActivity?: boolean;
+    /**
+     * Dispatch the replay as a FRESH turn even when the crashed turn's
+     * journaled context is still published. The continuation path assumes the
+     * result-driven state a terminal result leaves behind ("keep evidence,
+     * FIFO slot, completion owned until the fallback result") — a process
+     * crash produces none of it, and the crash path finalizes the context
+     * asynchronously, so reading it here would race that finalization.
+     */
+    forceFresh?: boolean;
   }): boolean {
     // QR-103: never replay a turn that ALREADY delivered a visible reply — the
     // fallback replay would send a SECOND full answer (user gets both the primary
@@ -8411,9 +8420,11 @@ export class AgentRuntime implements Runtime {
     );
     if (!replayTargetSafe) return false;
 
-    const runtimeContext = args.mapKey !== undefined
-      ? this.perChatRuntimeTurnContexts.get(args.mapKey)?.[0]
-      : this.currentRuntimeTurnContext;
+    const runtimeContext = args.forceFresh
+      ? undefined
+      : args.mapKey !== undefined
+        ? this.perChatRuntimeTurnContexts.get(args.mapKey)?.[0]
+        : this.currentRuntimeTurnContext;
     if (runtimeContext) {
       if (
         runtimeContext.replay.text !== replayText
@@ -9184,30 +9195,28 @@ export class AgentRuntime implements Runtime {
       if (processFailure) {
         const noticeQueue = this.chatQueues.get(currentMapKey);
         const deliveryJid = chatJid ?? noticeQueue?.targetChatJid;
-        let replayScheduled = false;
-        if (processFailure.advanced && processFailure.activation && deliveryJid) {
-          replayScheduled = this.scheduleFallbackReplay({
-            activation: processFailure.activation,
-            chatJid: deliveryJid,
-            mapKey: currentMapKey,
-            oldSession: session,
-          });
-        }
         // The managed copy replaces the raw session-crash line: mark the
         // session so the synchronous notifyUnexpectedExit that follows this
         // callback is suppressed in handleCrashNotify.
         this.managedCrashNotices.add(session);
-        if (replayScheduled) {
-          // Release the crashed PHYSICAL turn before anything else: a
-          // journaled turn's dispatch promise parks on its runtime completion,
-          // and the TurnQueue's active slot clears only when that settles. The
-          // terminal-result path this branch mirrors gets the settling
-          // finalization from the terminal result itself; a process crash has
-          // none, so skipping it wedges the chat forever behind the dead turn
-          // (live 2026-08-15: replay sessions armed with message_count=0 and
-          // later inbounds queued unserved until a service restart).
-          // Coordinator-level finalization specifically — the runtime wrapper
-          // would cancel the continuation scheduleFallbackReplay just claimed.
+        if (processFailure.advanced && processFailure.activation && deliveryJid) {
+          // Managed handoff = finalize the crashed turn FULLY, then re-dispatch
+          // the interrupted text as a FRESH turn on the advanced route. The
+          // journaled-continuation replay is a terminal-result instrument: that
+          // path deliberately keeps the crashed turn's evidence, FIFO slot, and
+          // completion open "until the fallback result" — state only a terminal
+          // result's processing prepares. A process crash produces none of it,
+          // so a continuation replay here either parks pre-spawn on the dirty
+          // physical turn state or dies against the crash finalization (both
+          // observed live 2026-08-15: replay sessions armed with
+          // message_count=0, later inbounds queued unserved until restart).
+          //
+          // Captured BEFORE cleanup wipes the streamed-text evidence: a crashed
+          // turn that already delivered visible output must not be replayed
+          // (QR-103 double-answer rule) — threaded through the schedule gate
+          // via hadToolActivity, which ORs into the same delivered-reply check.
+          const crashTurnDeliveredOutput =
+            (this.perChatTurnText.get(currentMapKey)?.trim() ?? '') !== '';
           const managedPublishedContexts = this.perChatRuntimeTurnContexts.get(currentMapKey) ?? [];
           const managedPublishedContext = managedPublishedContexts.length === 1
             ? managedPublishedContexts[0]
@@ -9232,7 +9241,11 @@ export class AgentRuntime implements Runtime {
               managedScopeRef,
             );
           } else {
-            this.runtimeTurnCoordinator.finalizeRuntimeCrash(
+            // The wrapper's continuation cancel is a no-op here — the fresh
+            // dispatch below never claims one — and its synchronous
+            // queue.abortTurn clears the crashed turn's outbound evidence
+            // before the replacement turn begins its own.
+            this.finalizeRuntimeCrash(
               managedPublishedContext,
               this.chatQueues.get(currentMapKey),
               session,
@@ -9243,26 +9256,39 @@ export class AgentRuntime implements Runtime {
           managedTracker?.shutdown();
           this.operationTrackers.delete(currentMapKey);
           this.cleanupPerChatCrashTurnState(currentMapKey);
-        }
-        noticeQueue?.enqueueText(renderFallbackAdvanceNotice({
-          fromCard: modelCardLabel(processFailure.fromProvider, processFailure.fromModel ?? undefined),
-          toCard: processFailure.advanced && processFailure.activation
-            ? modelCardLabel(processFailure.activation.fallbackProvider, processFailure.activation.fallbackModel)
-            : null,
-          replayScheduled,
-        }));
-        if (replayScheduled) {
-          // The replay flow owns the LOGICAL turn continuation AND the dead
-          // manager's disposal (discardPerChatSessionForFallback) — mirror
-          // the terminal-result activation path past this point. Later
+          const replayScheduled = this.scheduleFallbackReplay({
+            activation: processFailure.activation,
+            chatJid: deliveryJid,
+            mapKey: currentMapKey,
+            oldSession: session,
+            hadToolActivity: crashTurnDeliveredOutput,
+            forceFresh: true,
+          });
+          noticeQueue?.enqueueText(renderFallbackAdvanceNotice({
+            fromCard: modelCardLabel(processFailure.fromProvider, processFailure.fromModel ?? undefined),
+            toCard: modelCardLabel(
+              processFailure.activation.fallbackProvider,
+              processFailure.activation.fallbackModel,
+            ),
+            replayScheduled,
+          }));
+          // The crashed turn is finalized and the replacement dispatch (when
+          // scheduled) owns the dead manager's disposal + recreation — the
+          // respawn/heal machinery below must not touch this manager. Later
           // duplicate exit callbacks drop on the unmapped-manager guard.
           log.info({
             mapKey: currentMapKey,
             fromProvider: processFailure.fromProvider,
             fromModel: processFailure.fromModel,
-          }, 'fallback process failure handled as managed handoff — replay scheduled');
+            replayScheduled,
+          }, 'fallback process failure handled as managed handoff');
           return;
         }
+        noticeQueue?.enqueueText(renderFallbackAdvanceNotice({
+          fromCard: modelCardLabel(processFailure.fromProvider, processFailure.fromModel ?? undefined),
+          toCard: null,
+          replayScheduled: false,
+        }));
       }
     }
 

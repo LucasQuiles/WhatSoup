@@ -565,20 +565,21 @@ describe('stale-route session crash attribution', () => {
   });
 });
 
-// ─── Managed replay must release the crashed physical turn ────────────────────
+// ─── Managed handoff finalizes the crashed turn and re-dispatches FRESH ───────
 //
 // The dispatch promise of a journaled per-chat turn parks on its runtime
-// completion (sendTurnPerChat awaits completion.promise), and the TurnQueue's
-// active slot clears only when that promise settles. The terminal-result
-// activation path gets the settling finalization from the terminal result
-// itself; a process crash has none — so the managed-handoff branch must
-// finalize the crashed physical turn when it takes ownership, or the chat
-// wedges forever behind it. Live 2026-08-15: every replay session armed with
-// message_count=0 and later inbounds queued unserved until a service restart.
-// Coordinator-level finalization specifically: the runtime wrapper would
-// cancel the replay continuation that scheduleFallbackReplay just claimed.
+// completion, and the TurnQueue's active slot clears only when that promise
+// settles. The terminal-result activation path keeps the crashed turn OPEN
+// through a claimed continuation because the replay's RESULT finalizes it — a
+// design that assumes the per-turn state a terminal result's processing
+// prepares. A process crash produces none of it, so the managed branch must
+// instead finalize the crashed turn fully (wrapper-level crash finalization +
+// turn-state cleanup) and dispatch the replacement as a FRESH turn
+// (forceFresh), never a continuation. Live 2026-08-15: continuation replays
+// either armed sessions with message_count=0 that never dispatched (wedging
+// the chat until restart) or died silently before recreating the session.
 
-describe('managed replay releases the crashed physical turn', () => {
+describe('managed handoff finalizes the crashed turn and re-dispatches fresh', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-08-15T20:00:00Z'));
@@ -596,21 +597,20 @@ describe('managed replay releases the crashed physical turn', () => {
     ]);
     const pieces = armIncidentShape(runtime);
     pieces.rv.pendingTurnText.set(CHAT, 'compare this to our existing tools');
-    vi.spyOn(
-      pieces.rv as unknown as { scheduleFallbackReplay(args: unknown): boolean },
-      'scheduleFallbackReplay',
-    ).mockReturnValue(true);
-    const coordFinalize = vi
-      .spyOn(pieces.rv.runtimeTurnCoordinator, 'finalizeRuntimeCrash')
-      .mockImplementation(() => {});
+    const replaySpy = vi
+      .spyOn(
+        pieces.rv as unknown as { scheduleFallbackReplay(args: unknown): boolean },
+        'scheduleFallbackReplay',
+      )
+      .mockReturnValue(true);
     const wrapperFinalize = vi
       .spyOn(pieces.rv as unknown as RuntimeView, 'finalizeRuntimeCrash')
       .mockImplementation(() => {});
-    return { ...pieces, coordFinalize, wrapperFinalize };
+    return { ...pieces, replaySpy, wrapperFinalize };
   }
 
-  it('finalizes the crashed published turn context at the coordinator level, never the continuation-cancelling wrapper', () => {
-    const { rv, owner, queue, session, coordFinalize, wrapperFinalize } = armWedgeShape();
+  it('finalizes the crashed published context via the wrapper, cleans turn state, then schedules a forceFresh replay', () => {
+    const { rv, owner, queue, session, replaySpy, wrapperFinalize } = armWedgeShape();
     const publishedContext = { identity: { logicalTurnId: 'lt-1' } };
     rv.perChatRuntimeTurnContexts.set(CHAT, [publishedContext]);
     rv.perChatTurnText.set(CHAT, '');
@@ -620,24 +620,40 @@ describe('managed replay releases the crashed physical turn', () => {
 
     rv.handlePerChatCrash(CHAT, CHAT, crashInfo(owner));
 
-    expect(coordFinalize).toHaveBeenCalledTimes(1);
-    expect(coordFinalize).toHaveBeenCalledWith(publishedContext, queue, session, CHAT);
-    expect(wrapperFinalize).not.toHaveBeenCalled();
-    // Physical-turn state is released; the replay path owns what remains.
+    expect(wrapperFinalize).toHaveBeenCalledTimes(1);
+    expect(wrapperFinalize).toHaveBeenCalledWith(publishedContext, queue, session, CHAT);
     expect(tracker.shutdown).toHaveBeenCalledTimes(1);
     expect(rv.operationTrackers.has(CHAT)).toBe(false);
     expect(rv.perChatTurnText.has(CHAT)).toBe(false);
-    // Mirrors the terminal-result path: the manager is discarded by the
-    // replay flow, never marked recoverable_dead by the crash machinery.
+    expect(replaySpy).toHaveBeenCalledTimes(1);
+    const args = replaySpy.mock.calls[0]![0] as {
+      forceFresh?: boolean;
+      hadToolActivity?: boolean;
+    };
+    expect(args.forceFresh).toBe(true);
+    expect(args.hadToolActivity).toBe(false);
+    // The replacement dispatch owns the dead manager's replacement — the
+    // crash machinery never marks it recoverable_dead.
     expect(rv.sessionOwnership.get(CHAT)!.state).toBe(stateBefore);
   });
 
   it('finalizes with an undefined context when the crashed turn was unjournaled so queue evidence still aborts', () => {
-    const { rv, owner, queue, session, coordFinalize } = armWedgeShape();
+    const { rv, owner, queue, session, wrapperFinalize } = armWedgeShape();
 
     rv.handlePerChatCrash(CHAT, CHAT, crashInfo(owner));
 
-    expect(coordFinalize).toHaveBeenCalledTimes(1);
-    expect(coordFinalize).toHaveBeenCalledWith(undefined, queue, session, CHAT);
+    expect(wrapperFinalize).toHaveBeenCalledTimes(1);
+    expect(wrapperFinalize).toHaveBeenCalledWith(undefined, queue, session, CHAT);
+  });
+
+  it('a crashed turn that already streamed visible output is not replayed (QR-103 double-answer rule)', () => {
+    const { rv, owner, replaySpy } = armWedgeShape();
+    rv.perChatTurnText.set(CHAT, 'partial streamed answer the user already saw');
+
+    rv.handlePerChatCrash(CHAT, CHAT, crashInfo(owner));
+
+    expect(replaySpy).toHaveBeenCalledTimes(1);
+    const args = replaySpy.mock.calls[0]![0] as { hadToolActivity?: boolean };
+    expect(args.hadToolActivity).toBe(true);
   });
 });
