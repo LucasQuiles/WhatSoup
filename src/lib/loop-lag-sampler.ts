@@ -106,7 +106,7 @@ export class LoopLagSampler {
   private timer: NodeJS.Timeout | null = null;
   private window: WindowSample[] = [];
   private rawRing: RawLoopLagSample[] = [];
-  private expectedAtMs: number | null = null;
+  private lastIntervalAtMs: number | null = null;
   private discontinuityCount = 0;
   private prevElu: EluReading | null = null;
   private prevCpu: CpuReading | null = null;
@@ -128,7 +128,7 @@ export class LoopLagSampler {
   start(): void {
     if (this.timer !== null) return;
     this.resetWindow();
-    this.expectedAtMs = this.now() + LOOP_LAG_SAMPLE_INTERVAL_MS;
+    this.lastIntervalAtMs = this.now();
     this.prevElu = this.eluReader();
     this.prevCpu = this.cpuReader();
     this.timer = setInterval(() => this.sample(), LOOP_LAG_SAMPLE_INTERVAL_MS);
@@ -141,6 +141,7 @@ export class LoopLagSampler {
       this.timer = null;
     }
     this.resetWindow();
+    this.lastIntervalAtMs = null;
     this.prevElu = null;
     this.prevCpu = null;
     // The raw ring deliberately survives stop(): it is the forensic record.
@@ -219,18 +220,27 @@ export class LoopLagSampler {
   }
 
   private observe(source: LoopLagObservationSource): void {
+    const baselineAtMs = this.lastIntervalAtMs;
+    if (baselineAtMs === null) return;
     const actualAtMs = this.now();
-    const expectedAtMs = this.expectedAtMs;
-    if (expectedAtMs === null || actualAtMs < expectedAtMs) return;
 
-    const lagMs = Math.max(0, actualAtMs - expectedAtMs);
-    // setInterval keeps its original schedule. Keep our deadline on that same
-    // phase and advance past every elapsed slot. Rebasing to actualAtMs caused
-    // a slightly-late callback to make the next scheduled callback look early;
-    // that callback was discarded and the following one became a phantom
-    // ~500ms lag sample (#3253).
-    const elapsedSlots = Math.floor(lagMs / LOOP_LAG_SAMPLE_INTERVAL_MS) + 1;
-    const nextExpectedAtMs = expectedAtMs + elapsedSlots * LOOP_LAG_SAMPLE_INTERVAL_MS;
+    // Node re-arms an interval timer from each fire's own processing time (ms
+    // granularity), so every fire lands slightly past the previous one and the
+    // schedule never returns to its original phase. Measuring against any
+    // fixed expected-time grid therefore accumulates that per-fire wake
+    // latency into phantom starvation on an idle loop (the #3253 canary
+    // rollback), while rebasing a deadline to actual+interval made on-schedule
+    // fires look early and dropped them into phantom ~500ms samples (the
+    // original #3253 signature). Lag is therefore how overdue an observation
+    // is relative to the LAST interval fire only — no absolute grid at all.
+    // Snapshots observe only a genuinely overdue interval (strictly positive):
+    // recording lag-0 samples on every health request would dilute the window
+    // with zeros under frequent polling and mask real starvation. Interval
+    // fires always record — discarding "early" fires is the phantom mechanism.
+    const overdueMs = actualAtMs - baselineAtMs - LOOP_LAG_SAMPLE_INTERVAL_MS;
+    if (source === 'snapshot' && overdueMs <= 0) return;
+
+    const lagMs = Math.max(0, overdueMs);
     const eluUtilization = this.readEluDelta();
     const cpuDeltaMs = this.readCpuDelta();
     this.lastEluUtilization = eluUtilization;
@@ -256,7 +266,11 @@ export class LoopLagSampler {
       this.window.push({ lagMs, source });
     }
     if (this.window.length > LOOP_LAG_WINDOW_SAMPLES) this.window.shift();
-    this.expectedAtMs = nextExpectedAtMs;
+    this.lastIntervalAtMs = source === 'interval'
+      ? actualAtMs
+      // A recorded snapshot consumed the overdue span; measure only residual
+      // delay from here so the next interval fire cannot double-count it.
+      : actualAtMs - LOOP_LAG_SAMPLE_INTERVAL_MS;
   }
 
   private pushRaw(sample: RawLoopLagSample): void {
@@ -327,7 +341,6 @@ export class LoopLagSampler {
 
   private resetWindow(): void {
     this.window = [];
-    this.expectedAtMs = null;
   }
 }
 

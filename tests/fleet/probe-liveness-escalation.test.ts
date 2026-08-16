@@ -8,10 +8,10 @@ import {
   LoopLagSampler,
 } from '../../src/lib/loop-lag-sampler.ts';
 
-function samplerExpectedAtMs(sampler: LoopLagSampler): number {
-  const expectedAtMs = (sampler as unknown as { expectedAtMs: number | null }).expectedAtMs;
-  if (expectedAtMs === null) throw new Error('sampler is not running');
-  return expectedAtMs;
+function samplerDueAtMs(sampler: LoopLagSampler): number {
+  const lastIntervalAtMs = (sampler as unknown as { lastIntervalAtMs: number | null }).lastIntervalAtMs;
+  if (lastIntervalAtMs === null) throw new Error('sampler is not running');
+  return lastIntervalAtMs + LOOP_LAG_SAMPLE_INTERVAL_MS;
 }
 
 const alertFns = vi.hoisted(() => ({
@@ -63,22 +63,25 @@ describe('LoopLagSampler', () => {
   }
 
   function recordLag(sampler: LoopLagSampler, lagMs: number): void {
-    nowMs = samplerExpectedAtMs(sampler) + lagMs;
+    nowMs = samplerDueAtMs(sampler) + lagMs;
     vi.advanceTimersByTime(LOOP_LAG_SAMPLE_INTERVAL_MS);
   }
 
-  it('samples every 500ms and ignores callbacks earlier than the monotonic expectation', () => {
+  it('samples every 500ms; a fire arriving before its due point records zero lag rather than being discarded', () => {
     const sampler = createSampler();
     sampler.start();
 
     vi.advanceTimersByTime(LOOP_LAG_SAMPLE_INTERVAL_MS - 1);
     expect(sampler.snapshot().sampleCount).toBe(0);
 
+    // The callback runs while the injected monotonic clock still reads 100 —
+    // earlier than its due point. Discarding such fires was the phantom
+    // ~500ms sample mechanism (#3253); they record as zero lag instead.
     nowMs = 100;
     vi.advanceTimersByTime(1);
     expect(sampler.snapshot()).toMatchObject({
-      sampleCount: 0,
-      p95LagMs: null,
+      sampleCount: 1,
+      p95LagMs: 0,
       locallyStarved: false,
     });
 
@@ -193,28 +196,39 @@ describe('LoopLagSampler', () => {
   });
 
   it.each(['timer-first', 'snapshot-first'] as const)(
-    'produces the same empty window after consuming one physical discontinuity %s',
+    'consumes one physical discontinuity exactly once %s',
     (order) => {
       const sampler = createSampler();
       sampler.start();
       nowMs += LOOP_LAG_SAMPLE_INTERVAL_MS + 10_001;
 
-      let snapshot;
       if (order === 'timer-first') {
         vi.advanceTimersByTime(LOOP_LAG_SAMPLE_INTERVAL_MS);
-        snapshot = sampler.snapshot();
+        // The fire consumed the discontinuity; the snapshot adds nothing.
+        expect(sampler.snapshot()).toMatchObject({
+          sampleCount: 0,
+          p95LagMs: null,
+          locallyStarved: false,
+          discontinuityCount: 1,
+        });
       } else {
-        snapshot = sampler.snapshot();
+        // The snapshot consumes the discontinuity once...
+        expect(sampler.snapshot()).toMatchObject({
+          sampleCount: 0,
+          p95LagMs: null,
+          locallyStarved: false,
+          discontinuityCount: 1,
+        });
+        // ...and the fire then lands exactly at its re-based due point,
+        // recording a single zero-lag sample — never a second discontinuity.
         vi.advanceTimersByTime(LOOP_LAG_SAMPLE_INTERVAL_MS);
+        expect(sampler.snapshot()).toMatchObject({
+          sampleCount: 1,
+          p95LagMs: 0,
+          locallyStarved: false,
+          discontinuityCount: 1,
+        });
       }
-
-      expect(snapshot).toMatchObject({
-        sampleCount: 0,
-        p95LagMs: null,
-        locallyStarved: false,
-        discontinuityCount: 1,
-      });
-      expect(sampler.snapshot()).toEqual(snapshot);
       sampler.stop();
     },
   );
@@ -476,7 +490,7 @@ describe('HealthPoller probe liveness', () => {
     await poller.start();
     for (let index = 0; index < LOOP_LAG_WINDOW_SAMPLES - 1; index += 1) {
       const lagMs = index >= LOOP_LAG_WINDOW_SAMPLES - 1 - priorHighSamples ? 300 : 0;
-      samplerNowMs = samplerExpectedAtMs(sampler) + lagMs;
+      samplerNowMs = samplerDueAtMs(sampler) + lagMs;
       vi.advanceTimersByTime(LOOP_LAG_SAMPLE_INTERVAL_MS);
     }
 
@@ -577,7 +591,7 @@ describe('HealthPoller probe liveness', () => {
 
     await poller.start();
     for (let index = 0; index < LOOP_LAG_WINDOW_SAMPLES; index += 1) {
-      samplerNowMs = samplerExpectedAtMs(sampler) + 300;
+      samplerNowMs = samplerDueAtMs(sampler) + 300;
       vi.advanceTimersByTime(LOOP_LAG_SAMPLE_INTERVAL_MS);
     }
     expect(sampler.snapshot().locallyStarved).toBe(true);
