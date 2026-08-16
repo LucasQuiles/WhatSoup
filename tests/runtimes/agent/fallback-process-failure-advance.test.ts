@@ -656,4 +656,69 @@ describe('managed handoff finalizes the crashed turn and re-dispatches fresh', (
     const args = replaySpy.mock.calls[0]![0] as { hadToolActivity?: boolean };
     expect(args.hadToolActivity).toBe(true);
   });
+
+  it('gates the replay dispatch on the advance notice drain (queue-poison race, live 2026-08-16)', () => {
+    const { rv, owner, replaySpy } = armWedgeShape();
+
+    rv.handlePerChatCrash(CHAT, CHAT, crashInfo(owner));
+
+    const args = replaySpy.mock.calls[0]![0] as { preDispatch?: unknown };
+    expect(args.preDispatch).toBeInstanceOf(Promise);
+  });
+});
+
+// ─── Replay dispatch honors the preDispatch gate ──────────────────────────────
+//
+// The replay's pre-spawn queue flush racing an advance notice still draining
+// under send pacing trips the outbound queue's completed-with-pending-work
+// invariant, which POISONS the queue (sticky drainFailure; recovery only by
+// queue replacement). The dispatch must not touch session or queue until the
+// caller-provided gate resolves.
+
+describe('replay dispatch preDispatch gate', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-15T20:00:00Z'));
+    vi.mocked(emitAlert).mockClear();
+    lookupCredentialMock.mockReturnValue('present-key');
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('does not begin the replay until the gate resolves', async () => {
+    const runtime = makeRuntime([
+      { provider: 'opencode-cli', model: 'kimi/kimi-k3' },
+    ]);
+    const rv = v(runtime);
+    const activation = rv.activateProviderFallback(null, 'usage-limit');
+    expect(activation).not.toBeNull();
+    rv.chatQueues.set(CHAT, makeFakeQueue(CHAT));
+    rv.pendingTurnText.set(CHAT, 'compare this to our existing tools');
+    const replayImpl = vi
+      .spyOn(
+        rv as unknown as { replayTurnOnFallback(args: unknown): Promise<void> },
+        'replayTurnOnFallback',
+      )
+      .mockResolvedValue(undefined);
+
+    let releaseGate!: () => void;
+    const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
+    const scheduled = rv.scheduleFallbackReplay({
+      activation,
+      chatJid: CHAT,
+      mapKey: CHAT,
+      oldSession: makeFallbackSession(),
+      forceFresh: true,
+      preDispatch: gate,
+    });
+    expect(scheduled).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(replayImpl).not.toHaveBeenCalled();
+
+    releaseGate();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(replayImpl).toHaveBeenCalledTimes(1);
+  });
 });

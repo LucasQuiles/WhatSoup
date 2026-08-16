@@ -8374,6 +8374,14 @@ export class AgentRuntime implements Runtime {
      * asynchronously, so reading it here would race that finalization.
      */
     forceFresh?: boolean;
+    /**
+     * Awaited before the replay dispatch touches the session or queue. The
+     * managed-crash caller resolves it with the advance notice's outbound
+     * flush: the replay's own pre-spawn flush racing a notice still draining
+     * under send pacing trips the queue's completed-with-pending-work
+     * invariant, which POISONS the per-chat queue (live 2026-08-16).
+     */
+    preDispatch?: Promise<void>;
   }): boolean {
     // QR-103: never replay a turn that ALREADY delivered a visible reply — the
     // fallback replay would send a SECOND full answer (user gets both the primary
@@ -8538,10 +8546,12 @@ export class AgentRuntime implements Runtime {
       oldSession: SessionManager | null;
       runtimeContext?: RuntimeTurnContext;
       routeOverride?: ResolvedReplayRoute;
+      preDispatch?: Promise<void>;
     },
     replayText: string,
     actorJid: string | undefined,
   ): Promise<void> {
+    if (args.preDispatch) await args.preDispatch;
     await this.replayTurnOnFallback({
       chatJid: args.chatJid,
       mapKey: args.mapKey,
@@ -9256,6 +9266,14 @@ export class AgentRuntime implements Runtime {
           managedTracker?.shutdown();
           this.operationTrackers.delete(currentMapKey);
           this.cleanupPerChatCrashTurnState(currentMapKey);
+          // The replay dispatch holds on this gate until the advance notice
+          // below has fully drained: its pre-spawn queue flush racing a notice
+          // still pacing out trips the completed-with-pending-work invariant
+          // and poisons the per-chat queue (live 2026-08-16).
+          let releaseReplayDispatch!: () => void;
+          const noticeDrained = new Promise<void>((resolve) => {
+            releaseReplayDispatch = resolve;
+          });
           const replayScheduled = this.scheduleFallbackReplay({
             activation: processFailure.activation,
             chatJid: deliveryJid,
@@ -9263,6 +9281,7 @@ export class AgentRuntime implements Runtime {
             oldSession: session,
             hadToolActivity: crashTurnDeliveredOutput,
             forceFresh: true,
+            preDispatch: noticeDrained,
           });
           noticeQueue?.enqueueText(renderFallbackAdvanceNotice({
             fromCard: modelCardLabel(processFailure.fromProvider, processFailure.fromModel ?? undefined),
@@ -9272,6 +9291,13 @@ export class AgentRuntime implements Runtime {
             ),
             replayScheduled,
           }));
+          void Promise.resolve(noticeQueue?.flush())
+            .catch((flushErr: unknown) => {
+              // A failed notice flush must not strand the replay — its own
+              // dispatch path reports queue failures with a user notice.
+              log.debug({ err: flushErr, mapKey: currentMapKey }, 'advance notice flush failed before replay dispatch');
+            })
+            .finally(releaseReplayDispatch);
           // The crashed turn is finalized and the replacement dispatch (when
           // scheduled) owns the dead manager's disposal + recreation — the
           // respawn/heal machinery below must not touch this manager. Later
