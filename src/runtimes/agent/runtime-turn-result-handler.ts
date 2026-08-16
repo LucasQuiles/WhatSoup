@@ -286,6 +286,10 @@ const clearReplayOnSuccess = attemptOutcome.kind === 'completed'
   && (event.text === null || fallbackReasonForResultText(event.text) === null);
 let voice: { chatJid: string; responseText: string; inboundContentType: string | null } | undefined;
 try {
+// Commit provisional minimal-mode assistant text before terminal-result policy
+// decides whether the result summary is a duplicate. Commit callbacks keep
+// replay, liveness, visible-output, and voice state aligned with actual delivery.
+queue.commitStreamingText?.();
 // R1: flush any held first-line marker buffer for this chat at turn
 // end — a marker-only / no-newline reply registers its intent here and
 // delivers whatever remains. No-op when nothing was held.
@@ -544,11 +548,15 @@ if (event.text && (!hasPendingPoll || terminalFailureDuringPoll)) {
       }
       queue.enqueueText(providerUnknownTerminalNotice());
     } else {
-      queue.enqueueResultText(host.withHandoffPrefix(queue.targetChatJid, event.text));
-      host.runtimeTurnCoordinator.markRuntimeTurnReplayUnsafe(mapKey);
-      // Accumulate result text for voice reply (SP4)
-      if (mapKey !== undefined) {
-        host.perChatTurnText.set(mapKey, (host.perChatTurnText.get(mapKey) ?? '') + event.text);
+      const accepted = queue.enqueueResultText(
+        host.withHandoffPrefix(queue.targetChatJid, event.text),
+      ) !== false;
+      if (accepted) {
+        host.runtimeTurnCoordinator.markRuntimeTurnReplayUnsafe(mapKey);
+        // Accumulate result text for voice reply (SP4)
+        if (mapKey !== undefined) {
+          host.perChatTurnText.set(mapKey, (host.perChatTurnText.get(mapKey) ?? '') + event.text);
+        }
       }
     }
   }
@@ -866,6 +874,9 @@ const attemptOutcome = classifiedOutcome.kind === 'completed'
 let voice: { chatJid: string; responseText: string; inboundContentType: string | null } | undefined;
 let isSystemResult = false;
 try {
+// See the scoped path: make provisional text visible atomically with queue
+// commitment before evaluating terminal-result duplication.
+queue.commitStreamingText?.();
 // R1: flush any held first-line marker buffer at turn end (see the
 // per-chat handler) — registers a marker-only / no-newline intent and
 // delivers whatever remains. No-op when nothing was held.
@@ -1135,11 +1146,15 @@ if (event.text) {
       host.recordFallbackTurnOutcome(queue, host.turnHadVisibleOutput, turnHadToolWork, host.session);
       return;
     } else {
-      queue.enqueueResultText(host.withHandoffPrefix(queue.targetChatJid, event.text));
-      host.runtimeTurnCoordinator.markRuntimeTurnReplayUnsafe();
-      host.turnHadVisibleOutput = true;
-      // Accumulate result text for voice reply (SP4)
-      host.currentTurnAssistantText += event.text;
+      const accepted = queue.enqueueResultText(
+        host.withHandoffPrefix(queue.targetChatJid, event.text),
+      ) !== false;
+      if (accepted) {
+        host.runtimeTurnCoordinator.markRuntimeTurnReplayUnsafe();
+        host.turnHadVisibleOutput = true;
+        // Accumulate result text for voice reply (SP4)
+        host.currentTurnAssistantText += event.text;
+      }
     }
   }
 }

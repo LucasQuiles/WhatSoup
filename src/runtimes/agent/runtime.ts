@@ -2066,21 +2066,6 @@ export class AgentRuntime implements Runtime {
     return event.text;
   }
 
-  /** Keep runtime-visible and voice-reply state aligned with the minimal-mode
-   * queue when a tool call proves buffered assistant text was pre-tool narration. */
-  private discardMinimalPreToolAssistantState(mapKey?: string): void {
-    if (config.toolUpdateMode !== 'minimal') return;
-    if (mapKey !== undefined) {
-      if ((this.perChatTurnText.get(mapKey)?.trim() ?? '') !== '') {
-        this.perChatTurnText.delete(mapKey);
-      }
-      return;
-    }
-    if (this.currentTurnAssistantText.trim() === '') return;
-    this.currentTurnAssistantText = '';
-    this.turnHadVisibleOutput = false;
-  }
-
   private gateAssistantTextForOutbound(
     text: string,
     queue: IOutboundQueue,
@@ -6207,18 +6192,36 @@ export class AgentRuntime implements Runtime {
           this.logAmbientProviderFailureOutcome(providerFailureCheck.ambient, normalizedText, queue.targetChatJid, gatedText !== null);
           normalizedText = gatedText;
           if (!normalizedText) break;
-          queue.enqueueStreamingText(normalizedText);
-          if (mapKey !== undefined && this.pendingSystemResults.count(mapKey) === 0) {
-            this.runtimeTurnCoordinator.markRuntimeTurnReplayUnsafe(mapKey);
-          }
-          // Reply-guarantee: visible output reached the user, so reset the
-          // silence window for this chat. The "still working" fallback then
-          // only fires after a full window of TRUE silence, not while a long
-          // turn is actively streaming replies.
-          this.replyGuarantee?.notifyActivity(queue.targetChatJid);
-          // Accumulate assistant text for voice reply (SP4)
-          if (mapKey !== undefined) {
-            this.perChatTurnText.set(mapKey, (this.perChatTurnText.get(mapKey) ?? '') + normalizedText);
+          const markReplayUnsafe = mapKey !== undefined
+            && this.pendingSystemResults.count(mapKey) === 0;
+          if (config.toolUpdateMode === 'minimal') {
+            const committedText = normalizedText;
+            queue.enqueueStreamingText(committedText, 'answer', () => {
+              if (markReplayUnsafe) {
+                this.runtimeTurnCoordinator.markRuntimeTurnReplayUnsafe(mapKey);
+              }
+              this.replyGuarantee?.notifyActivity(queue.targetChatJid);
+              if (mapKey !== undefined) {
+                this.perChatTurnText.set(
+                  mapKey,
+                  (this.perChatTurnText.get(mapKey) ?? '') + committedText,
+                );
+              }
+            });
+          } else {
+            queue.enqueueStreamingText(normalizedText);
+            if (markReplayUnsafe) {
+              this.runtimeTurnCoordinator.markRuntimeTurnReplayUnsafe(mapKey);
+            }
+            // Reply-guarantee: visible output reached the user, so reset the
+            // silence window for this chat. The "still working" fallback then
+            // only fires after a full window of TRUE silence, not while a long
+            // turn is actively streaming replies.
+            this.replyGuarantee?.notifyActivity(queue.targetChatJid);
+            // Accumulate assistant text for voice reply (SP4)
+            if (mapKey !== undefined) {
+              this.perChatTurnText.set(mapKey, (this.perChatTurnText.get(mapKey) ?? '') + normalizedText);
+            }
           }
         }
         break;
@@ -6238,6 +6241,8 @@ export class AgentRuntime implements Runtime {
           if (contexts?.[0]) contexts[0] = markRuntimeTurnReplayUnsafe(contexts[0]);
         }
 
+        queue.discardPreToolAssistantText?.();
+
         // AskUserQuestion → WhatsApp poll bridge (per_chat mode).
         // Shared mode is excluded — see handleEvent tool_use case for rationale.
         if (event.toolName === 'AskUserQuestion' && mapKey !== undefined) {
@@ -6255,7 +6260,6 @@ export class AgentRuntime implements Runtime {
         this.turnHadToolActivity.add(toolScopeKey);
         {
           const toolUpdate = buildToolUpdate(event.toolName, event.toolInput ?? {});
-          this.discardMinimalPreToolAssistantState(mapKey);
           queue.enqueueToolUpdate(toolUpdate);
           tracker?.onToolStart(event.toolId, event.toolName, toolUpdate.category);
         }
@@ -10189,17 +10193,30 @@ export class AgentRuntime implements Runtime {
           this.logAmbientProviderFailureOutcome(providerFailureCheck.ambient, normalizedText, sharedChatJid, gatedText !== null);
           normalizedText = gatedText;
           if (!normalizedText) break;
-          queue.enqueueStreamingText(normalizedText);
-          this.turnHadVisibleOutput = true;
-          if (this.pendingSystemResults.count(GLOBAL_TOOL_SCOPE_KEY) === 0) {
-            this.runtimeTurnCoordinator.markRuntimeTurnReplayUnsafe();
+          const markReplayUnsafe = this.pendingSystemResults.count(GLOBAL_TOOL_SCOPE_KEY) === 0;
+          if (config.toolUpdateMode === 'minimal') {
+            const committedText = normalizedText;
+            queue.enqueueStreamingText(committedText, 'answer', () => {
+              this.turnHadVisibleOutput = true;
+              if (markReplayUnsafe) {
+                this.runtimeTurnCoordinator.markRuntimeTurnReplayUnsafe();
+              }
+              this.replyGuarantee?.notifyActivity(queue.targetChatJid);
+              this.currentTurnAssistantText += committedText;
+            });
+          } else {
+            queue.enqueueStreamingText(normalizedText);
+            this.turnHadVisibleOutput = true;
+            if (markReplayUnsafe) {
+              this.runtimeTurnCoordinator.markRuntimeTurnReplayUnsafe();
+            }
+            // Reply-guarantee: visible output reached the user — reset the silence
+            // window so the "still working" fallback only fires after a full window
+            // of TRUE silence, not while a long turn is actively streaming replies.
+            this.replyGuarantee?.notifyActivity(queue.targetChatJid);
+            // Accumulate text for voice reply (SP4)
+            this.currentTurnAssistantText += normalizedText;
           }
-          // Reply-guarantee: visible output reached the user — reset the silence
-          // window so the "still working" fallback only fires after a full window
-          // of TRUE silence, not while a long turn is actively streaming replies.
-          this.replyGuarantee?.notifyActivity(queue.targetChatJid);
-          // Accumulate text for voice reply (SP4)
-          this.currentTurnAssistantText += normalizedText;
         }
         break;
 
@@ -10217,6 +10234,8 @@ export class AgentRuntime implements Runtime {
           this.currentRuntimeTurnContext = markRuntimeTurnReplayUnsafe(this.currentRuntimeTurnContext);
         }
 
+        queue.discardPreToolAssistantText?.();
+
         // AskUserQuestion → Poll bridge is NOT supported in shared mode.
         // Shared mode's turn lifecycle (currentTurnChatJid, turnQueue) makes
         // safe answer injection non-trivial — currentTurnChatJid is cleared
@@ -10232,7 +10251,6 @@ export class AgentRuntime implements Runtime {
         this.singleTurnHadToolActivity = true;
         {
           const toolUpdate = buildToolUpdate(event.toolName, event.toolInput ?? {});
-          this.discardMinimalPreToolAssistantState();
           queue.enqueueToolUpdate(toolUpdate);
           tracker?.onToolStart(event.toolId, event.toolName, toolUpdate.category);
         }
