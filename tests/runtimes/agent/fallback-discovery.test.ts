@@ -9,6 +9,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   deriveFallbackChainFromCatalog,
+  isNonChatCatalogModel,
   type CandidateEvidence,
 } from '../../../src/runtimes/agent/fallback-discovery.ts';
 
@@ -178,5 +179,65 @@ describe('deriveFallbackChainFromCatalog', () => {
     const { entries, basis } = derive({ policy: { maxEntries: 4, includeFreeTier: false } });
     expect(entries.some((e) => e.model.startsWith('opencode/'))).toBe(false);
     expect(basis.some((c) => c.freeTier)).toBe(false);
+  });
+});
+
+// Live 2026-08-16 finding: credentialed gateways list EVERY model a key
+// unlocks; the newest-per-provider pick then lands on embeddings (openai tail
+// = text-embedding-ada-002) or video generators (google tail = veo-3.1-*) —
+// models that can never serve a text turn.
+describe('non-chat catalogue filtering', () => {
+  const OPENAI_TAIL = [
+    'openai/gpt-5.2', 'openai/o3', 'openai/o3-pro',
+    'openai/gpt-image-2', 'openai/gpt-realtime-2.1',
+    'openai/text-embedding-3-large', 'openai/text-embedding-ada-002',
+  ];
+  const GOOGLE_TAIL = [
+    'google/gemini-3.1-pro', 'google/gemma-4-31b-it',
+    'google/imagen-4-ultra', 'google/lyria-3-pro-preview',
+    'google/veo-3.1-lite-generate-preview',
+  ];
+
+  it('classifies the observed live non-chat families', () => {
+    for (const id of [
+      'openai/text-embedding-ada-002', 'openai/gpt-image-2', 'openai/gpt-realtime-2.1',
+      'google/veo-3.1-lite-generate-preview', 'google/imagen-4-ultra', 'google/lyria-3-pro-preview',
+      'openai/whisper-1', 'openai/tts-1-hd', 'openai/dall-e-3', 'openai/gpt-4o-audio-preview',
+    ]) {
+      expect(isNonChatCatalogModel(id), id).toBe(true);
+    }
+    for (const id of [
+      'deepseek/deepseek-v4-pro', 'glm/glm-5.2', 'google/gemma-4-31b-it',
+      'google/gemini-3.1-pro', 'openai/o3-pro', 'opencode/nemotron-3.5-lightning-free',
+    ]) {
+      expect(isNonChatCatalogModel(id), id).toBe(false);
+    }
+  });
+
+  it('the newest-per-provider pick skips a non-chat catalogue tail (openai embeddings)', () => {
+    const { entries } = derive({ catalogIds: OPENAI_TAIL, policy: { maxEntries: 1, includeFreeTier: false } });
+    expect(entries).toEqual([{ provider: GATEWAY, model: 'openai/o3-pro' }]);
+  });
+
+  it('the newest-per-provider pick skips video/music generators (google veo/lyria tail)', () => {
+    const { entries } = derive({ catalogIds: GOOGLE_TAIL, policy: { maxEntries: 1, includeFreeTier: false } });
+    expect(entries).toEqual([{ provider: GATEWAY, model: 'google/gemma-4-31b-it' }]);
+  });
+
+  it('a provider whose ids are ALL non-chat yields no candidate at all', () => {
+    const { entries, basis } = derive({
+      catalogIds: ['openai/text-embedding-3-large', 'openai/text-embedding-ada-002', 'deepseek/deepseek-v4-pro'],
+      policy: { maxEntries: 4, includeFreeTier: false },
+    });
+    expect(basis.some((c) => c.catalogProvider === 'openai')).toBe(false);
+    expect(entries).toEqual([{ provider: GATEWAY, model: 'deepseek/deepseek-v4-pro' }]);
+  });
+
+  it('an operator preferModels pin BYPASSES the heuristic (explicit intent wins)', () => {
+    const { entries } = derive({
+      catalogIds: OPENAI_TAIL,
+      policy: { maxEntries: 1, includeFreeTier: false, preferModels: { openai: 'openai/gpt-realtime-2.1' } },
+    });
+    expect(entries).toEqual([{ provider: GATEWAY, model: 'openai/gpt-realtime-2.1' }]);
   });
 });
