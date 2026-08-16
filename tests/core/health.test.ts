@@ -6209,12 +6209,158 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
       locallyStarved: boolean;
       discontinuityCount: number;
     }) {
+      // The raw-instrumentation fields (#3253) default to empty/null so the
+      // existing scenario call sites stay focused on the starvation contract.
       return {
         start: vi.fn(),
         stop: vi.fn(),
-        snapshot: vi.fn().mockReturnValue(snapshot),
+        snapshot: vi.fn().mockReturnValue({
+          minLagMs: null,
+          medianLagMs: null,
+          maxLagMs: null,
+          intervalSampleCount: 0,
+          snapshotSampleCount: 0,
+          lastEluUtilization: null,
+          lastCpuDeltaMs: null,
+          ...snapshot,
+        }),
+        rawSamples: vi.fn().mockReturnValue([]),
+        rawSamplePage: vi.fn().mockReturnValue({
+          oldestSequence: null,
+          latestSequence: null,
+          nextAfter: 0,
+          truncated: false,
+          gap: null,
+          samples: [],
+        }),
       };
     }
+
+    describe('GET /health/event-loop-samples', () => {
+      it('requires privileged health auth with no public-envelope fallback', async () => {
+        const sampler = fakeLoopLagSampler({
+          sampleCount: 0,
+          p95LagMs: null,
+          locallyStarved: false,
+          discontinuityCount: 0,
+        });
+        ({ server, port } = await buildTestServer(makeDeps(db, { loopLagSampler: sampler as any })));
+
+        const missing = await httpReq(port, '/health/event-loop-samples', 'GET');
+        const invalid = await httpReq(
+          port,
+          '/health/event-loop-samples',
+          'GET',
+          undefined,
+          { Authorization: 'Bearer wrong-token' },
+        );
+
+        expect(missing.status).toBe(401);
+        expect(invalid.status).toBe(401);
+        expect(missing.body).toBe(JSON.stringify({ error: 'Unauthorized' }));
+        expect(missing.body).not.toContain('samples');
+        expect(sampler.rawSamplePage).not.toHaveBeenCalled();
+      });
+
+      it('returns one authenticated immutable page without sampling the loop', async () => {
+        const sampler = fakeLoopLagSampler({
+          sampleCount: 0,
+          p95LagMs: null,
+          locallyStarved: false,
+          discontinuityCount: 0,
+        });
+        sampler.rawSamplePage.mockReturnValue({
+          oldestSequence: 5,
+          latestSequence: 5,
+          nextAfter: 5,
+          truncated: false,
+          gap: null,
+          samples: [{
+            sequence: 5,
+            atMs: 2_500,
+            wallAtMs: 1_785_000_002_500,
+            lagMs: 2.1254,
+            source: 'interval',
+            discontinuity: false,
+            eluUtilization: 0.25,
+            cpuDeltaMs: 1.5,
+          }],
+        });
+        const startedAt = 1_785_000_000_000;
+        ({ server, port } = await buildTestServer(makeDeps(db, {
+          loopLagSampler: sampler as any,
+          startedAt,
+        })));
+
+        const response = await httpReq(
+          port,
+          '/health/event-loop-samples?after=4&limit=1',
+          'GET',
+          undefined,
+          { Authorization: `Bearer ${TEST_HEALTH_TOKEN}` },
+        );
+        const body = JSON.parse(response.body);
+
+        expect(response.status).toBe(200);
+        expect(sampler.rawSamplePage).toHaveBeenCalledExactlyOnceWith({ after: 4, limit: 1 });
+        expect(sampler.snapshot).not.toHaveBeenCalled();
+        expect(body).toMatchObject({
+          schema_version: 'health.event-loop-samples.v1',
+          process: { pid: process.pid, started_at_ms: startedAt },
+          cadence_ms: 500,
+          oldest_sequence: 5,
+          latest_sequence: 5,
+          next_after: 5,
+          truncated: false,
+          gap: null,
+        });
+        expect(body.samples).toEqual([{
+          sequence: 5,
+          at_ms: 2_500,
+          wall_at_ms: 1_785_000_002_500,
+          lag_ms: 2.125,
+          source: 'interval',
+          discontinuity: false,
+          elu_utilization: 0.25,
+          cpu_delta_ms: 1.5,
+        }]);
+      });
+
+      it('fails closed on malformed, repeated, or unknown query parameters', async () => {
+        const sampler = fakeLoopLagSampler({
+          sampleCount: 0,
+          p95LagMs: null,
+          locallyStarved: false,
+          discontinuityCount: 0,
+        });
+        ({ server, port } = await buildTestServer(makeDeps(db, { loopLagSampler: sampler as any })));
+        const headers = { Authorization: `Bearer ${TEST_HEALTH_TOKEN}` };
+
+        for (const [query, code] of [
+          ['?after=-1', 'invalid_after'],
+          ['?limit=1&limit=2', 'repeated_query_parameter'],
+          ['?debug=true', 'unknown_query_parameter'],
+        ] as const) {
+          const response = await httpReq(
+            port,
+            `/health/event-loop-samples${query}`,
+            'GET',
+            undefined,
+            headers,
+          );
+          expect(response.status, query).toBe(400);
+          expect(JSON.parse(response.body), query).toEqual({ error: code });
+        }
+        expect(sampler.rawSamplePage).not.toHaveBeenCalled();
+      });
+
+      it('does not route non-GET methods or near-match paths', async () => {
+        ({ server, port } = await buildTestServer(makeDeps(db)));
+        const headers = { Authorization: `Bearer ${TEST_HEALTH_TOKEN}` };
+        expect((await httpReq(port, '/health/event-loop-samples', 'POST', '', headers)).status).toBe(404);
+        expect((await httpReq(port, '/health/event-loop-samples/', 'GET', undefined, headers)).status).toBe(404);
+      });
+    });
 
     it('exposes a well-shaped event_loop block with the real sampler by default', async () => {
       ({ server, port } = await buildTestServer(makeDeps(db)));
@@ -6251,7 +6397,65 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
         locally_starved: true,
         starvation_threshold_ms: 250,
         discontinuity_count: 3,
+        lag_min_ms: null,
+        lag_median_ms: null,
+        lag_max_ms: null,
+        interval_sample_count: 0,
+        snapshot_sample_count: 0,
+        elu_utilization: null,
+        cpu_delta_ms: null,
+        raw_samples: {
+          available: true,
+          schema_version: 'health.event-loop-samples.v1',
+          path: '/health/event-loop-samples',
+          oldest_sequence: null,
+          latest_sequence: null,
+        },
       });
+    });
+
+    it('keeps raw samples out of diagnostic health and exposes only bounded discovery metadata', async () => {
+      const sampler = fakeLoopLagSampler({
+        sampleCount: 2,
+        p95LagMs: 12,
+        locallyStarved: false,
+        discontinuityCount: 0,
+      });
+      sampler.rawSamplePage.mockReturnValue({
+        oldestSequence: 2,
+        latestSequence: 161,
+        nextAfter: 161,
+        truncated: true,
+        gap: null,
+        samples: [{
+          sequence: 161,
+          atMs: 80_500,
+          wallAtMs: 1_785_000_080_500,
+          lagMs: 0,
+          source: 'interval',
+          discontinuity: false,
+          eluUtilization: 0.25,
+          cpuDeltaMs: 1.5,
+        }],
+      });
+      const deps = makeDeps(db, { loopLagSampler: sampler as any });
+      ({ server, port } = await buildTestServer(deps));
+
+      const { status, body } = await healthReq(port);
+      expect(status).toBe(200);
+      const eventLoop = JSON.parse(body).event_loop;
+      expect(eventLoop).not.toHaveProperty('raw_recent');
+      expect(eventLoop.raw_samples).toEqual({
+        available: true,
+        schema_version: 'health.event-loop-samples.v1',
+        path: '/health/event-loop-samples',
+        oldest_sequence: 2,
+        latest_sequence: 161,
+      });
+      expect(JSON.stringify(eventLoop.raw_samples)).not.toContain('at_ms');
+      expect(Buffer.byteLength(body), `diagnostic health body was ${Buffer.byteLength(body)} bytes`)
+        .toBeLessThan(65_536);
+      expect(sampler.rawSamplePage).toHaveBeenCalledExactlyOnceWith({ limit: 1 });
     });
 
     it('logs a warning when the sampler reports local starvation', async () => {

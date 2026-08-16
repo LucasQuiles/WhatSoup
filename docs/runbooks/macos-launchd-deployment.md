@@ -388,6 +388,22 @@ reset the retained lag window and are not themselves starvation samples.
 Exactly 10 seconds remains a retained sample; local starvation still requires a
 full window whose nearest-rank p95 is strictly greater than 250 ms.
 
+For a release that changes loop-lag evidence, do not restore automated
+supervision until all of these canary checks pass:
+
+1. Measure the authenticated `/health` body and require fewer than 65,536 bytes.
+2. Request `/health/event-loop-samples?after=0&limit=160` with the scoped token
+   and require fewer than 32 KiB plus schema `health.event-loop-samples.v1`.
+3. Rehearse one local collector capture using the private token-file path and a
+   private output path; require a `run_completed` record and interpret any
+   nonzero exit as incomplete evidence.
+4. After restart, require a real served turn before interpreting whether local
+   starvation cleared. Startup model usability and an idle health response do
+   not reproduce the affected traffic condition.
+
+See [Loop-Lag Forensic Collector](loop-lag-forensic-collector.md) for invocation,
+retention, cursor gaps, and exit semantics.
+
 ## Worktree Discipline
 
 - Run tests from the same checkout used by the plist unless deliberately

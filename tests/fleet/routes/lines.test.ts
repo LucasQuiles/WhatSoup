@@ -509,7 +509,21 @@ describe('handleGetLine', () => {
 
   it('returns full detail with dbStats for known instance', async () => {
     const inst = fakeInstance({ name: 'gamma', type: 'passive', socketPath: '/state/gamma/whatsoup.sock' });
-    const status = fakeStatus({ name: 'gamma' });
+    const status = fakeStatus({
+      name: 'gamma',
+      health: {
+        uptime: 1234,
+        event_loop: {
+          raw_samples: {
+            available: true,
+            schema_version: 'health.event-loop-samples.v1',
+            path: '/health/event-loop-samples',
+            oldest_sequence: 1,
+            latest_sequence: 12,
+          },
+        },
+      },
+    });
 
     const deps = makeDeps({
       discovery: {
@@ -531,7 +545,9 @@ describe('handleGetLine', () => {
     expect(body.type).toBe('passive');
     expect(body.socketPath).toBe('/state/gamma/whatsoup.sock');
     expect(body.status).toBe('online');
-    expect(body.health).toEqual({ uptime: 1234 });
+    expect(body.health).toEqual(status.health);
+    expect(JSON.stringify(body.health)).not.toContain('raw_recent');
+    expect(JSON.stringify(body.health)).not.toContain('"samples":[');
     expect(body.dbStats).toEqual({ messageCount: 100, chatCount: 5, pendingAccess: 2 });
   });
 

@@ -48,7 +48,17 @@ import { isProviderId } from '../lib/provider-ids.ts';
 import type { ConnectionRecentDisconnects, ConnectionStateSnapshot } from '../transport/connection.ts';
 import { readBody } from '../lib/http.ts';
 import { readWhatsoupGitBranch, readWhatsoupGitSha } from '../lib/git-env.ts';
-import { LoopLagSampler, LOOP_LAG_STARVATION_THRESHOLD_MS } from '../lib/loop-lag-sampler.ts';
+import {
+  LoopLagSampler,
+  LOOP_LAG_SAMPLE_INTERVAL_MS,
+  LOOP_LAG_STARVATION_THRESHOLD_MS,
+} from '../lib/loop-lag-sampler.ts';
+import {
+  LOOP_LAG_SAMPLES_MAX_RESPONSE_BYTES,
+  LOOP_LAG_SAMPLES_SCHEMA_VERSION,
+  buildLoopLagSamplesResponse,
+  parseLoopLagSamplesQuery,
+} from './loop-lag-samples-endpoint.ts';
 import type { ConsolidationHealth } from './memory-consolidation-contract.ts';
 import type { DatabaseRetentionHealth } from './database-retention.ts';
 import type { StartupNotificationHealth } from './startup-notification-controller.ts';
@@ -1487,6 +1497,39 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       return;
     }
 
+    const requestUrl = new URL(req.url ?? '/', 'http://localhost');
+    if (requestUrl.pathname === '/health/event-loop-samples' && req.method === 'GET') {
+      if (!requireAuth(req, res, healthAuth)) return;
+      const query = parseLoopLagSamplesQuery(requestUrl);
+      if (!query.ok) {
+        res.writeHead(query.status, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: query.code }));
+        return;
+      }
+      const page = loopLagSampler.rawSamplePage({
+        ...(query.after === undefined ? {} : { after: query.after }),
+        limit: query.limit,
+      });
+      const body = JSON.stringify(buildLoopLagSamplesResponse({
+        generatedAt: systemClock.nowIso(),
+        process: {
+          pid: process.pid,
+          startedAtMs: deps.startedAt,
+          commit: readWhatsoupGitSha(),
+        },
+        cadenceMs: LOOP_LAG_SAMPLE_INTERVAL_MS,
+        page,
+      }));
+      if (Buffer.byteLength(body) >= LOOP_LAG_SAMPLES_MAX_RESPONSE_BYTES) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'loop_lag_samples_response_too_large' }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(body);
+      return;
+    }
+
     if (req.url !== '/health' || req.method !== 'GET') {
       res.writeHead(404);
       res.end();
@@ -1538,6 +1581,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       // this reflects lag accumulated up to the moment the request arrived, not
       // lag this handler's own (synchronous) work might introduce.
       const loopLag = loopLagSampler.snapshot();
+      const loopLagRawPage = loopLagSampler.rawSamplePage({ limit: 1 });
       if (loopLag.locallyStarved) {
         const warningNowMs = loopLagWarningNow();
         if (
@@ -1549,6 +1593,13 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
             p95LagMs: loopLag.p95LagMs,
             sampleCount: loopLag.sampleCount,
             thresholdMs: LOOP_LAG_STARVATION_THRESHOLD_MS,
+            // #3253 provenance: this warning is emitted at health-request time,
+            // potentially long after the causal delayed callback — these fields
+            // say what the window was made of; the dedicated authenticated
+            // sample endpoint has the causal stream.
+            intervalSampleCount: loopLag.intervalSampleCount,
+            snapshotSampleCount: loopLag.snapshotSampleCount,
+            lagMaxMs: loopLag.maxLagMs,
           }, 'event loop starvation detected during health check');
           lastLoopLagWarningAtMs = warningNowMs;
         }
@@ -2324,6 +2375,20 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           locally_starved: loopLag.locallyStarved,
           starvation_threshold_ms: LOOP_LAG_STARVATION_THRESHOLD_MS,
           discontinuity_count: loopLag.discontinuityCount,
+          lag_min_ms: loopLag.minLagMs,
+          lag_median_ms: loopLag.medianLagMs,
+          lag_max_ms: loopLag.maxLagMs,
+          interval_sample_count: loopLag.intervalSampleCount,
+          snapshot_sample_count: loopLag.snapshotSampleCount,
+          elu_utilization: loopLag.lastEluUtilization,
+          cpu_delta_ms: loopLag.lastCpuDeltaMs,
+          raw_samples: {
+            available: true,
+            schema_version: LOOP_LAG_SAMPLES_SCHEMA_VERSION,
+            path: '/health/event-loop-samples',
+            oldest_sequence: loopLagRawPage.oldestSequence,
+            latest_sequence: loopLagRawPage.latestSequence,
+          },
         },
         mcp_liveness: mcpLiveness
           ? {

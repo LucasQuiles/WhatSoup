@@ -446,7 +446,19 @@ describe('HealthPoller', () => {
 
   // Test 2: remote instance polled via fetch
   it('remote instance polled via fetch', async () => {
-    const remoteHealth = makeOnlineHealth({ uptime_seconds: 100 });
+    const remoteHealth = makeOnlineHealth({
+      uptime_seconds: 100,
+      event_loop: {
+        lag_p95_ms: 2.3,
+        raw_samples: {
+          available: true,
+          schema_version: 'health.event-loop-samples.v1',
+          path: '/health/event-loop-samples',
+          oldest_sequence: 1,
+          latest_sequence: 12,
+        },
+      },
+    });
     mockFetch.mockResolvedValue({
       ok: true,
       json: () => Promise.resolve(remoteHealth),
@@ -466,6 +478,7 @@ describe('HealthPoller', () => {
     expect(status).toBeDefined();
     expect(status!.status).toBe('online');
     expect(status!.health).toEqual(remoteHealth);
+    expect(JSON.stringify(status!.health)).not.toContain('raw_recent');
     expect(status!.consecutiveFailures).toBe(0);
     expect(mockFetch).toHaveBeenCalledWith(
       'http://127.0.0.1:9100/health',
