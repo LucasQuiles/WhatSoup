@@ -3014,7 +3014,10 @@ def relay_writefail(remote_host: str, remote_root: str, record: dict[str, Any]) 
         append_log({"type": "harvest_poison", "remote": remote_host, "path": str(path), "reason": "root"})
         return path, "poison"
     event = crumb.get("event")
-    if crumb.get("kind") != "outbox_write_failure" or not isinstance(event, dict) or not isinstance(event.get("id"), str):
+    if crumb.get("kind") != "outbox_write_failure" or not isinstance(event, dict) or not isinstance(event.get("id"), str) or not event.get("id"):
+        # #2427: an EMPTY nested id is poison too — it would flow through
+        # local_event_exists('') and the idless fallback into the same
+        # non-convergent retry path the ordinary-relay ingress gate rejects.
         path = write_harvest_quarantine(remote_host, remote_root, record, "missing outbox_write_failure event.id")
         append_log({"type": "harvest_poison", "remote": remote_host, "path": str(path), "reason": "schema"})
         return path, "poison"
@@ -3082,7 +3085,19 @@ def relay_event(remote_host: str, remote_root: str, record: dict[str, Any]) -> P
     event = json.loads(record["payload"])
     if not isinstance(event, dict):
         raise ValueError("remote event root must be an object")
-    event_id = str(event.get("id") or "")
+    # #2427 identity ingress gate: without a stable nonempty string id,
+    # local_event_exists('') can never converge acknowledgement retries and
+    # the idless filename fallback mints a fresh identity per write — every
+    # reoffer would create another outbox copy with a reset delivery budget.
+    # Reject-and-ack: quarantine via the payload-sha-keyed harvest surface
+    # (idempotent across retries) and return like the duplicate path so the
+    # caller acknowledges the claim and it cannot lease-loop.
+    raw_id = event.get("id")
+    if not isinstance(raw_id, str) or not raw_id:
+        path = write_harvest_quarantine(remote_host, remote_root, record, "missing or empty event id")
+        append_log({"type": "harvest_poison", "remote": remote_host, "path": str(path), "reason": "identity"})
+        return path
+    event_id = raw_id
     if local_event_exists(event_id, str(event.get("createdAt") or "")):
         append_log({"type": "duplicate_already_local", "remote": remote_host, "eventId": event_id, "remoteClaim": record["claim"]})
         return state_root() / "sent" / f"existing-{safe_segment(event_id)}"
