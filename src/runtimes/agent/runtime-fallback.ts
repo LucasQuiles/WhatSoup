@@ -12,7 +12,7 @@
 
 import { join, resolve } from 'node:path';
 import type { Database } from '../../core/database.ts';
-import type { AgentFallbackEntry } from '../../core/fallback-chain.ts';
+import type { AgentFallbackDiscoveryConfig, AgentFallbackEntry } from '../../core/fallback-chain.ts';
 import { sleep } from '../../core/retry.ts';
 import { clearAlertSourceChecked, emitAlertChecked } from '../../lib/emit-alert.ts';
 import { errorMessage } from '../../lib/error-message.ts';
@@ -53,7 +53,12 @@ import {
   calculatePeriodicProbeDelay,
   formatPrimaryModelUsabilityEvidence,
 } from './primary-readiness-probe.ts';
-import { probeFallbackBinary, probeModelCatalog } from './providers/binary-preflight.ts';
+import { listModelCatalog, probeFallbackBinary, probeModelCatalog } from './providers/binary-preflight.ts';
+import {
+  deriveFallbackChainFromCatalog,
+  type CandidateEvidence,
+  type DiscoveredCandidate,
+} from './fallback-discovery.ts';
 import { verifyFallbackCredential } from './providers/credential-verify.ts';
 import type { OpencodeProviderConfig } from './providers/mcp-bridge.ts';
 import { createPrimaryModelProbeAdapters } from './providers/primary-model-usability-adapters.ts';
@@ -93,6 +98,27 @@ const log = createChildLogger('agent-runtime');
  * {@link AgentRuntime.maybeArmFallbackAfterEmptyPrimaryTurn}.
  */
 const EMPTY_OUTPUT_FALLBACK_THRESHOLD = 2;
+
+/**
+ * The gateway provider discovery derives chains through — the one whose
+ * credential-aware `<binary> models` catalogue is the discovery source (v1
+ * scope, matching the canary's opencode-only probe scope).
+ */
+const DISCOVERY_GATEWAY_PROVIDER = 'opencode-cli';
+
+/**
+ * A discovery snapshot older than this is re-derived (fire-and-forget) when a
+ * fallback window arms — the moment the chain is about to matter is exactly
+ * when a rotted catalogue read must not steer it.
+ */
+const DISCOVERY_STALE_MS = 60 * MS_PER_MINUTE;
+
+/**
+ * Canary probe cap per sweep over the discovered candidate basis (design
+ * bound: ≤5 one-token completions per sweep). Candidates past the cap keep
+ * their prior evidence until a later sweep reaches them.
+ */
+const CHAIN_CANARY_DISCOVERY_SWEEP_CAP = 5;
 
 /**
  * Consecutive unclassified-terminal PRIMARY user turns that force a provider
@@ -165,6 +191,8 @@ export interface RuntimeFallbackPort {
   readonly agentProvider: string;
   readonly agentProviderConfig: Record<string, unknown> | undefined;
   readonly agentFallbacks: AgentFallbackEntry[];
+  readonly agentFallbackDiscovery: AgentFallbackDiscoveryConfig | null;
+  readonly modelCatalogueListFn: typeof listModelCatalog | undefined;
   readonly allowM365Mutations: boolean | undefined;
   readonly runtimeBootPerfMs: number;
   readonly globalMcpSocketPath: string | null;
@@ -627,6 +655,12 @@ export class RuntimeFallbackCoordinator {
     fallbackRestoredFromPersist: boolean;
     turnErrorCounts: Record<string, number>;
     handoffDistiller: { enabled: boolean; contextInjection: boolean; model: string | null };
+    fallbackDiscovery: {
+      mode: 'auto';
+      lastDerivedAt: number | null;
+      catalogueSize: number | null;
+      candidates: Array<{ model: string; evidence: CandidateEvidence; freeTier: boolean; selected: boolean }>;
+    } | null;
   } {
     const active = this.host.isFallbackWindowActive;
     const fallbackEntry = active ? this.host.effectiveFallbackEntry : null;
@@ -671,6 +705,19 @@ export class RuntimeFallbackCoordinator {
         contextInjection: handoffContextEnabled(),
         model: handoffDistillModel(),
       },
+      fallbackDiscovery: this.host.agentFallbackDiscovery
+        ? {
+            mode: 'auto' as const,
+            lastDerivedAt: this.lastDiscovery?.at ?? null,
+            catalogueSize: this.lastDiscovery?.catalogueSize ?? null,
+            candidates: (this.lastDiscovery?.basis ?? []).map((c) => ({
+              model: c.model,
+              evidence: c.evidence,
+              freeTier: c.freeTier,
+              selected: c.selected,
+            })),
+          }
+        : null,
     };
   }
 
@@ -1021,7 +1068,7 @@ export class RuntimeFallbackCoordinator {
     if (this.chainCanarySweepInFlight) return;
     this.chainCanarySweepInFlight = true;
     try {
-      for (const entry of this.host.agentFallbacks) {
+      for (const entry of this.chainCanarySweepEntries()) {
         const key = this.host.fallbackChain.entryKey(entry);
         if (entry.provider !== 'opencode-cli') {
           // v1 scope: only the CLI transport the estate's chains use. Recorded
@@ -1079,24 +1126,195 @@ export class RuntimeFallbackCoordinator {
           log.info({ provider: entry.provider, model: entry.model }, 'fallback chain entry canary recovered');
         }
       }
+      // Discovery mode: sweep evidence just changed — re-rank the chain on it
+      // (mid-window this re-orders only the not-yet-tried remainder).
+      if (this.host.agentFallbackDiscovery) {
+        await this.refreshDiscoveredFallbackChain('canary-sweep');
+      }
     } finally {
       this.chainCanarySweepInFlight = false;
     }
   }
 
+  /**
+   * Canary evidence for `key` projected onto the discovery evidence axis,
+   * honoring the trust TTL in BOTH directions: stale results (ok or failed)
+   * decay to 'unknown' so neither a lapsed success nor a lapsed failure keeps
+   * steering selection/derivation.
+   */
+  private chainCanaryEvidence(key: string): CandidateEvidence {
+    const record = this.chainCanary.get(key);
+    if (record === undefined) return 'unknown';
+    if (systemClock.now() - record.checkedAt > this.chainCanaryConfig.trustMs) return 'unknown';
+    if (record.status === 'ok') return 'ok';
+    if (record.status === 'failed' || record.status === 'timeout') return 'dead';
+    return 'unknown';
+  }
+
   /** Fresh failure evidence for `key`, honoring the trust TTL. */
   private chainCanaryDead(key: string): boolean {
-    const record = this.chainCanary.get(key);
-    if (record === undefined) return false;
-    if (record.status !== 'failed' && record.status !== 'timeout') return false;
-    return systemClock.now() - record.checkedAt <= this.chainCanaryConfig.trustMs;
+    return this.chainCanaryEvidence(key) === 'dead';
+  }
+
+  // ── Discovery-mode chain derivation (R6, owner directive 2026-08-15) ──
+  // The chain is DERIVED per host/user/deployment from the gateway's
+  // credential-aware model catalogue (`<binary> models`) instead of a
+  // hardcoded list. The derivation is pure (fallback-discovery.ts); this
+  // block owns the runtime lifecycle: boot derivation, staleness refresh at
+  // window arm, evidence-driven re-rank after each canary sweep, and the
+  // in-place mutation of host.agentFallbacks that every downstream consumer
+  // (selection, canary, exhaustion, restore membership, /health) reads live.
+
+  private lastDiscovery: { at: number; catalogueSize: number; basis: DiscoveredCandidate[] } | null = null;
+  private discoveryRefreshInFlight = false;
+
+  /**
+   * Re-derive the discovered fallback chain from the live model catalogue.
+   * No-op unless discovery mode is configured. Honest degrade: an unavailable
+   * catalogue NEVER wipes a previously derived (or restored) chain — the
+   * current chain stands until the catalogue can be read again; the
+   * `fallback_discovery_empty` alert fires only when the instance is actually
+   * left without a ladder.
+   */
+  async refreshDiscoveredFallbackChain(trigger: 'boot' | 'window-arm' | 'canary-sweep'): Promise<void> {
+    const discovery = this.host.agentFallbackDiscovery;
+    if (!discovery) return;
+    if (this.discoveryRefreshInFlight) return;
+    this.discoveryRefreshInFlight = true;
+    try {
+      const binary = getProviderBinary(DISCOVERY_GATEWAY_PROVIDER);
+      const listing = binary
+        ? await (this.host.modelCatalogueListFn ?? listModelCatalog)(binary)
+        : ({ status: 'unavailable', reason: 'spawn-error' } as const);
+      if (listing.status !== 'ok') {
+        log.warn({ trigger, reason: listing.reason }, 'fallback discovery: model catalogue unavailable — keeping current chain');
+        if (this.host.agentFallbacks.length === 0) {
+          emitAlertChecked(
+            this.host.instanceName,
+            'fallback_discovery_empty',
+            'Fallback discovery has no chain',
+            `trigger=${trigger} catalogue=${listing.reason} entries=0`,
+          );
+        }
+        return;
+      }
+      const derived = deriveFallbackChainFromCatalog({
+        catalogIds: listing.ids,
+        gatewayProvider: DISCOVERY_GATEWAY_PROVIDER,
+        primary: { provider: this.host.agentProvider, model: this.host.model ?? null },
+        policy: {
+          ...(discovery.maxEntries !== undefined ? { maxEntries: discovery.maxEntries } : {}),
+          ...(discovery.preferModels !== undefined ? { preferModels: discovery.preferModels } : {}),
+          ...(discovery.excludeProviders !== undefined ? { excludeProviders: discovery.excludeProviders } : {}),
+          ...(discovery.includeFreeTier !== undefined ? { includeFreeTier: discovery.includeFreeTier } : {}),
+        },
+        evidenceFor: (modelId) => this.discoveredCandidateEvidence(modelId),
+      });
+      this.applyDiscoveredChain(derived.entries);
+      this.lastDiscovery = { at: systemClock.now(), catalogueSize: listing.ids.length, basis: derived.basis };
+      log.info({
+        trigger,
+        catalogueSize: listing.ids.length,
+        chain: this.host.agentFallbacks.map((entry) => `${entry.provider}:${entry.model ?? 'default'}`),
+        basis: derived.basis.map((c) => ({ model: c.model, evidence: c.evidence, freeTier: c.freeTier, selected: c.selected })),
+      }, 'fallback chain discovered');
+      if (this.host.agentFallbacks.length === 0) {
+        emitAlertChecked(
+          this.host.instanceName,
+          'fallback_discovery_empty',
+          'Fallback discovery derived an empty chain',
+          `trigger=${trigger} catalogueSize=${listing.ids.length} candidates=${derived.basis.length}`,
+        );
+      } else {
+        clearAlertSourceChecked(
+          this.host.instanceName,
+          'fallback_discovery_empty',
+          `recoveryProof=chain_derived entries=${this.host.agentFallbacks.length}`,
+        );
+      }
+    } finally {
+      this.discoveryRefreshInFlight = false;
+    }
+  }
+
+  /**
+   * Install a derived chain into host.agentFallbacks IN PLACE (ports hold the
+   * array by reference). Mid-window the re-derivation NEVER swaps the ACTIVE
+   * entry and never drops entries already tried this window — their failed
+   * keys drive exhaustion — so only the not-yet-tried remainder is re-ranked;
+   * window semantics are unchanged.
+   */
+  private applyDiscoveredChain(derived: { provider: string; model: string }[]): void {
+    const chain = this.host.fallbackChain;
+    const active = this.host.isFallbackWindowActive ? this.host.fallbackWindow.activeEntry : null;
+    const keep: AgentFallbackEntry[] = [];
+    const keepKeys = new Set<string>();
+    if (active) {
+      for (const entry of this.host.agentFallbacks) {
+        const key = chain.entryKey(entry);
+        if (keepKeys.has(key)) continue;
+        if (key === chain.entryKey(active) || chain.failedKeys.has(key)) {
+          keep.push(entry);
+          keepKeys.add(key);
+        }
+      }
+      const activeKey = chain.entryKey(active);
+      if (!keepKeys.has(activeKey)) {
+        keep.unshift({ ...active });
+        keepKeys.add(activeKey);
+      }
+    }
+    const next = derived.filter((entry) => !keepKeys.has(chain.entryKey(entry)));
+    this.host.agentFallbacks.splice(0, this.host.agentFallbacks.length, ...keep, ...next);
+  }
+
+  /**
+   * Evidence oracle for the derivation: window-scoped failure records first
+   * (an entry that already failed THIS window is dead for re-ranking purposes),
+   * then fresh canary evidence.
+   */
+  private discoveredCandidateEvidence(modelId: string): CandidateEvidence {
+    const key = this.host.fallbackChain.entryKey({ provider: DISCOVERY_GATEWAY_PROVIDER, model: modelId });
+    if (this.host.isFallbackWindowActive && this.host.fallbackChain.failedKeys.has(key)) return 'dead';
+    return this.chainCanaryEvidence(key);
+  }
+
+  /**
+   * The entry set a canary sweep probes. Static chains sweep the configured
+   * entries. Discovery mode sweeps the last derivation's full CANDIDATE basis
+   * (capped) — not just the selected chain — so a dead-excluded candidate can
+   * prove recovery and re-enter the ladder at the next derivation instead of
+   * waiting for its failure evidence to lapse.
+   */
+  private chainCanarySweepEntries(): AgentFallbackEntry[] {
+    if (!this.host.agentFallbackDiscovery || this.lastDiscovery === null) {
+      return this.host.agentFallbacks;
+    }
+    return this.lastDiscovery.basis
+      .slice(0, CHAIN_CANARY_DISCOVERY_SWEEP_CAP)
+      .map((candidate) => ({ provider: DISCOVERY_GATEWAY_PROVIDER, model: candidate.model }));
   }
 
   /** Arm (or move) the fallback window to `until`, schedule the revert timer,
    *  and persist best-effort so a restart mid-window resumes on fallback.
    *  Pass `activatedAt` explicitly when restoring to preserve the original
    *  time, and `opts.restored` so a resumed window is not re-counted. */
+  /**
+   * Discovery mode: re-derive a stale (or never-completed) catalogue snapshot
+   * fire-and-forget — the caller proceeds on the current chain (never blocks
+   * on a spawn); the refresh re-ranks the untried remainder.
+   */
+  private kickStaleDiscoveryRefresh(trigger: 'window-arm'): void {
+    if (
+      this.host.agentFallbackDiscovery
+      && (this.lastDiscovery === null || systemClock.now() - this.lastDiscovery.at > DISCOVERY_STALE_MS)
+    ) {
+      void this.refreshDiscoveredFallbackChain(trigger);
+    }
+  }
+
   armFallbackWindow(until: number, reason: string, activatedAt: number = Date.now(), opts?: { restored?: boolean }): boolean {
+    this.kickStaleDiscoveryRefresh('window-arm');
     const selection = this.selectFallbackEntryForWindow(reason);
     if (!selection) return false;
     const fallbackEntry = selection.entry;
@@ -1390,6 +1608,12 @@ export class RuntimeFallbackCoordinator {
     resetAt: Date | null,
     reason: ProviderFallbackReason = 'usage-limit',
   ): ProviderFallbackActivation | null {
+    // Discovery mode: kick a stale/absent snapshot BEFORE the empty-chain
+    // guard below — a failed boot derivation leaves the chain empty, and this
+    // activation attempt is the signal that a ladder is needed NOW. The kick
+    // is fire-and-forget: this activation honestly reports the current chain
+    // (possibly none); the refreshed chain serves the next attempt.
+    this.kickStaleDiscoveryRefresh('window-arm');
     if (this.host.agentFallbacks.length === 0) return null;
 
     const now = Date.now();

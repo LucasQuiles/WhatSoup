@@ -116,11 +116,6 @@ const TRACKED_UNREACHABLE: readonly TrackedEntry[] = [
   // Other unwired modules surfaced by this guard's first run:
   { path: 'src/fleet/provider-parity.ts', issue: '#1867', reason: 'provider-parity report module is test-only-wired; parity guard undeployed (#1867)' },
   { path: 'src/core/recovery-catchup-closure.ts', issue: '#1871', reason: 'recovery-catchup closure is test-only-wired; not imported by any runtime recovery root — needs wiring or removal (surfaced by this guard)' },
-  // R6 dynamic-catalogue fallback discovery (2026-08-15 incident lane): the
-  // pure derivation core lands reviewed+test-wired on its own; the wiring PR
-  // (config schema + boot/arm-time derivation, stacked on the chain-canary
-  // evidence branch) is its runtime importer and graduates this entry.
-  { path: 'src/runtimes/agent/fallback-discovery.ts', issue: '#3256 lane (R6)', reason: 'R6 discovery core lands pure and test-wired by design; the boot/arm-time wiring PR stacked on the chain-canary branch is its runtime importer' },
   // Durable background work (Work Ledger + Results Outbox). PR1a lands the schema
   // and store DELIBERATELY unwired so it can be reviewed and verified on its own;
   // PR1b adds the registration write-path at the worker spawn sites and the

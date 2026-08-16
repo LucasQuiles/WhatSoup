@@ -58,6 +58,7 @@ import { sendTracked } from '../../core/durability.ts';
 import { classifyErrorForInbound } from '../../core/inbound-failure-class.ts';
 import {
   normalizeFallbackEntriesFromAgentOptions,
+  type AgentFallbackDiscoveryConfig,
   type AgentFallbackEntry,
 } from '../../core/fallback-chain.ts';
 import {
@@ -688,7 +689,11 @@ export class AgentRuntime implements Runtime {
   private readonly providerBoundaryMode: ProviderBoundaryMode;
   // Automatic provider fallback (claude-cli → opencode-cli etc.) on usage limit.
   // The legacy scalar pair is normalized as entry zero for compatibility.
+  // Discovery mode (R6): the array starts empty and the fallback coordinator
+  // derives + maintains its contents IN PLACE from the gateway's model
+  // catalogue — the reference must stay stable (ports hold it by identity).
   private readonly agentFallbacks: AgentFallbackEntry[];
+  private readonly agentFallbackDiscovery: AgentFallbackDiscoveryConfig | null;
   private readonly replyGuaranteeTimeoutMs: number;
   private readonly registry: ToolRegistry;
   /** Coordinate snapshot for numbered-drill stability (D16/D17) — the exact
@@ -2302,6 +2307,7 @@ export class AgentRuntime implements Runtime {
           fallbackDataPolicy: config.agentFallbackDataPolicy,
         });
     this.agentFallbacks = configuredFallbacks.map((entry) => ({ ...entry }));
+    this.agentFallbackDiscovery = config.agentFallbackDiscovery ?? null;
     this.registry = new ToolRegistry();
     this.registerAllTools();
     this.perChatMcpSocketManager = new PerChatMcpSocketManager({
@@ -2548,6 +2554,8 @@ export class AgentRuntime implements Runtime {
       get agentProvider() { return runtime.agentProvider; },
       get agentProviderConfig() { return runtime.agentProviderConfig; },
       get agentFallbacks() { return runtime.agentFallbacks; },
+      get agentFallbackDiscovery() { return runtime.agentFallbackDiscovery; },
+      get modelCatalogueListFn() { return runtime.modelCatalogueListFn; },
       get allowM365Mutations() { return runtime.allowM365Mutations; },
       get runtimeBootPerfMs() { return runtime.runtimeBootPerfMs; },
       get globalMcpSocketPath() { return runtime.globalMcpSocketPath; },
@@ -3220,6 +3228,12 @@ export class AgentRuntime implements Runtime {
     // Periodic real-completion canary over the chain (no-op unless
     // WHATSOUP_FALLBACK_CANARY_MS > 0) — see fallback-canary-config.ts.
     this.fallback.startChainCanary();
+    // Discovery mode (R6): derive the chain from the live model catalogue
+    // BEFORE the MCP-config write below iterates the chain. Awaited but
+    // bounded (the catalogue probe carries its own kill-timer) and honest-
+    // degrading — an unavailable catalogue leaves the chain empty + alerted,
+    // never fails boot.
+    await this.fallback.refreshDiscoveredFallbackChain('boot');
     backfillSessionProvider(this.db, this.agentProvider ?? 'claude-cli');
     if (config.nlRouting) {
       // Additive + idempotent; gated so flag-off leaves the DB untouched.
