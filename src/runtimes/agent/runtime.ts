@@ -70,6 +70,7 @@ import {
   DEFAULT_REPLY_GUARANTEE_TIMEOUT_MS,
   ReplyGuaranteeManager,
 } from '../../core/reply-guarantee.ts';
+import { systemClock } from '../../lib/clock.ts';
 import { clearAlertSourceChecked, emitAlertChecked } from '../../lib/emit-alert.ts';
 import { lookupCredential, resolveProviderKeyService } from '../../lib/keyring.ts';
 import { MS_PER_SECOND, MS_PER_MINUTE, MS_PER_HOUR, MS_PER_DAY } from '../../lib/time-units.ts';
@@ -9244,9 +9245,10 @@ export class AgentRuntime implements Runtime {
         const noticeQueue = this.chatQueues.get(currentMapKey);
         const deliveryJid = chatJid ?? noticeQueue?.targetChatJid;
         // The managed copy replaces the raw session-crash line: mark the
-        // session so the synchronous notifyUnexpectedExit that follows this
-        // callback is suppressed in handleCrashNotify.
-        this.managedCrashNotices.add(session);
+        // session so the notifyUnexpectedExit that follows this callback —
+        // and any same-episode echo (e.g. the pended route recycle's
+        // teardown) — is suppressed in handleCrashNotify.
+        this.managedCrashNotices.set(session, systemClock.now());
         if (processFailure.advanced && processFailure.activation && deliveryJid) {
           // Managed handoff = finalize the crashed turn FULLY, then re-dispatch
           // the interrupted text as a FRESH turn on the advanced route. The
@@ -9770,15 +9772,21 @@ export class AgentRuntime implements Runtime {
    */
   /**
    * Sessions whose latest crash was handled as a MANAGED fallback handoff
-   * (chain advance / single-entry preservation notice already sent). The
-   * session-layer notifyUnexpectedExit fires synchronously right after
-   * onCrash returns, so membership here suppresses exactly one raw
-   * "Agent session ended (exited with code N)" line per managed crash —
-   * users see the managed handoff copy instead of operator-flavored
-   * exit codes (incident 2026-08-15). WeakSet: a discarded manager's
+   * (chain advance / single-entry preservation notice already sent), mapped
+   * to the mark time. Raw "Agent session ended (exited with code N)" lines
+   * from such a session are suppressed for a short EPISODE WINDOW rather
+   * than one-shot-consumed: the session layer can emit more than one exit
+   * notification for the same crash episode — observed live 2026-08-16
+   * (round-5 cascade): the pended post-transition route recycle tore the
+   * crashed manager down ~600ms after its managed notice, and the teardown's
+   * second exit notification leaked the raw line past the already-consumed
+   * one-shot mark. Window-scoped suppression swallows every echo of the
+   * same episode while a genuinely new crash of the (respawned) manager
+   * minutes later still notifies normally. WeakMap: a discarded manager's
    * entry vanishes with it.
    */
-  private readonly managedCrashNotices = new WeakSet<SessionManager>();
+  private readonly managedCrashNotices = new WeakMap<SessionManager, number>();
+  private static readonly MANAGED_CRASH_SUPPRESS_WINDOW_MS = 5_000;
 
   /**
    * Stand-in managers that already received their one-shot handoff
@@ -9788,17 +9796,19 @@ export class AgentRuntime implements Runtime {
    */
   private readonly introducedStandIns = new WeakSet<SessionManager>();
 
-  /** One-shot check-and-clear for the managed-crash suppression mark. */
-  private consumeManagedCrashNotice(session: SessionManager | undefined): boolean {
-    if (!session || !this.managedCrashNotices.has(session)) return false;
-    this.managedCrashNotices.delete(session);
-    return true;
+  /** Whether `session` is inside its managed-crash suppression window. */
+  private managedCrashNoticeActive(session: SessionManager | undefined): boolean {
+    if (!session) return false;
+    const markedAt = this.managedCrashNotices.get(session);
+    if (markedAt === undefined) return false;
+    return systemClock.now() - markedAt <= AgentRuntime.MANAGED_CRASH_SUPPRESS_WINDOW_MS;
   }
 
   private handleCrashNotify(msg: string, chatJid?: string, session?: SessionManager): void {
     // A crash the fallback machinery already handled as a managed handoff has
-    // its user-facing copy sent by that path — drop the raw session-crash line.
-    if (this.consumeManagedCrashNotice(session)) return;
+    // its user-facing copy sent by that path — drop the raw session-crash line
+    // (and every same-episode echo of it; see managedCrashNotices).
+    if (this.managedCrashNoticeActive(session)) return;
     // In per_chat mode, chatJid MUST be passed — this.queue is not set.
     // In single/shared mode, chatJid is optional (falls back to shared fields).
     const queue = chatJid ? this.getQueueForChat(chatJid) : this.queue;
