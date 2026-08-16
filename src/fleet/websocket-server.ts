@@ -170,9 +170,12 @@ export class FleetWebSocketServer {
   /** Stream identity (#2519 draft-1): a fresh generation per server instance, a
   monotonic per-frame sequence. Clients detect restarts (generation change) and
   gaps (non-contiguous sequence) instead of assuming a reopened socket is
-  current. */
+  current. Draft-2 splits the counter: `durableSequence` moves only for
+  non-ephemeral frames (typing is exempt), so a client can attribute a gap to
+  durable loss versus missed typing indicators and reconcile proportionally. */
   private readonly streamGeneration = randomUUID();
   private sequence = 0;
+  private durableSequence = 0;
   private outcomeWindowStartMs: number;
   private outcomeCounts = emptyOutcomeCounts();
   private readonly lastLogAtMs = new Map<string, number>();
@@ -260,6 +263,7 @@ export class FleetWebSocketServer {
           schema_version: 1,
           stream_generation: this.streamGeneration,
           sequence: this.sequence,
+          durable_sequence: this.durableSequence,
         }),
         (err) => {
           if (err) this.dropClient(ws, 'failed', 'ws_hello_send_failed');
@@ -334,11 +338,13 @@ export class FleetWebSocketServer {
   broadcast(event: WsEvent): void {
     if (this.clients.size === 0) return;
     this.sequence += 1;
+    if (event.type !== 'typing_update') this.durableSequence += 1;
     const data = JSON.stringify({
       ...event,
       schema_version: 1,
       stream_generation: this.streamGeneration,
       sequence: this.sequence,
+      durable_sequence: this.durableSequence,
       emitted_at: systemClock.now(),
     });
     this.recordOutcome('broadcast_attempted');

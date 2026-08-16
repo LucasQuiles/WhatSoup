@@ -352,6 +352,40 @@ describe('websocket client lifecycle (#2521)', () => {
     h.cleanup();
   });
 
+  it('typing frames advance the raw sequence but never durable_sequence', () => {
+    // #2519 draft-2: a gap composed only of typing frames must be attributable
+    // as ephemeral, so the durable counter may move only for durable frames.
+    const h = makeHarness();
+    const client = new FakeClient();
+    h.adopt(client);
+    h.server.broadcast({ type: 'instance_status', instance: 'synthetic-a' });
+    h.server.broadcast({ type: 'typing_update', instance: 'synthetic-a', jid: 'synthetic-jid', composing: true, since: 1 });
+    h.server.broadcast({ type: 'typing_update', instance: 'synthetic-a', jid: 'synthetic-jid', composing: false, since: 2 });
+    h.server.broadcast({ type: 'feed_event', instance: 'synthetic-a' });
+    const frames = client.sent.slice(1).map((raw) => JSON.parse(raw) as Record<string, unknown>);
+    expect(frames.map((f) => [f.sequence, f.durable_sequence])).toEqual([
+      [1, 1],
+      [2, 1],
+      [3, 1],
+      [4, 2],
+    ]);
+    h.cleanup();
+  });
+
+  it('the hello receipt declares the durable position alongside the raw sequence', () => {
+    const h = makeHarness();
+    const early = new FakeClient();
+    h.adopt(early);
+    h.server.broadcast({ type: 'instance_status', instance: 'synthetic-a' });
+    h.server.broadcast({ type: 'typing_update', instance: 'synthetic-a', jid: 'synthetic-jid', composing: true, since: 1 });
+    const late = new FakeClient();
+    h.adopt(late);
+    const hello = JSON.parse(late.sent[0] ?? '{}') as Record<string, unknown>;
+    expect(hello.sequence).toBe(2);
+    expect(hello.durable_sequence, 'hello must state the durable position too').toBe(1);
+    h.cleanup();
+  });
+
   it('distinct server instances mint distinct stream generations', () => {
     const h1 = makeHarness();
     const h2 = makeHarness();

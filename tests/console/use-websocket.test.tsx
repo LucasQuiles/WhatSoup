@@ -737,6 +737,100 @@ describe('RealtimeProvider — stream gap reconciliation', () => {
     expect(keys, 'nothing was missed: proven-current reconnect must not storm refetches').not.toContain('["logs"]');
   });
 
+  function helloDurable(generation: string, sequence: number, durable: number): string {
+    return JSON.stringify({
+      type: 'connected',
+      timestamp: 1_723_800_000_000,
+      schema_version: 1,
+      stream_generation: generation,
+      sequence,
+      durable_sequence: durable,
+    });
+  }
+
+  it('a disconnect spanning only typing frames reconciles the typing cache, not every family', async () => {
+    // The draft-2 falsifier: typing frames advance the raw sequence, so a
+    // reconnect after a typing burst used to read as a full sequence gap and
+    // storm every realtime-owned family. With the durable counter unchanged,
+    // only the typing snapshot needs refetching.
+    const qc = buildQueryClient();
+    const invalidateSpy = vi.spyOn(qc, 'invalidateQueries');
+    await renderProvider(qc);
+    await flush();
+    act(() => {
+      wsRegistry[0].simulateOpen();
+      wsRegistry[0].simulateMessage(helloDurable('gen-a', 4, 2));
+    });
+    act(() => {
+      wsRegistry[0].simulateClose();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_100);
+    });
+    invalidateSpy.mockClear();
+    act(() => {
+      wsRegistry[1].simulateOpen();
+      wsRegistry[1].simulateMessage(helloDurable('gen-a', 9, 2));
+    });
+    const keys = invalidateSpy.mock.calls.map((call) => JSON.stringify(call[0]?.queryKey));
+    expect(keys, 'a typing-only gap must refetch the typing snapshot').toContain('["typing"]');
+    expect(keys, 'a typing-only gap must not storm durable families').not.toContain('["logs"]');
+    expect(keys).not.toContain('["messages"]');
+  });
+
+  it('a disconnect spanning durable frames still reconciles every realtime-owned family', async () => {
+    const qc = buildQueryClient();
+    const invalidateSpy = vi.spyOn(qc, 'invalidateQueries');
+    await renderProvider(qc);
+    await flush();
+    act(() => {
+      wsRegistry[0].simulateOpen();
+      wsRegistry[0].simulateMessage(helloDurable('gen-a', 4, 2));
+    });
+    act(() => {
+      wsRegistry[0].simulateClose();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_100);
+    });
+    invalidateSpy.mockClear();
+    act(() => {
+      wsRegistry[1].simulateOpen();
+      wsRegistry[1].simulateMessage(helloDurable('gen-a', 9, 5));
+    });
+    const keys = invalidateSpy.mock.calls.map((call) => JSON.stringify(call[0]?.queryKey));
+    expect(keys, 'durable loss keeps the full reconciliation contract').toContain('["logs"]');
+    expect(keys).toContain('["messages"]');
+  });
+
+  it('an in-stream typing frame that does not advance durable is contiguous, not a gap', async () => {
+    const qc = buildQueryClient();
+    const invalidateSpy = vi.spyOn(qc, 'invalidateQueries');
+    await renderProvider(qc);
+    await flush();
+    act(() => {
+      wsRegistry[0].simulateOpen();
+      wsRegistry[0].simulateMessage(helloDurable('gen-a', 4, 2));
+    });
+    invalidateSpy.mockClear();
+    act(() => {
+      wsRegistry[0].simulateMessage(JSON.stringify({
+        type: 'typing_update',
+        instance: 'synthetic-a',
+        jid: 'synthetic-jid',
+        composing: true,
+        since: 1,
+        schema_version: 1,
+        stream_generation: 'gen-a',
+        sequence: 5,
+        durable_sequence: 2,
+      }));
+    });
+    const keys = invalidateSpy.mock.calls.map((call) => JSON.stringify(call[0]?.queryKey));
+    expect(keys, 'a contiguous typing frame must not trigger any reconciliation').not.toContain('["logs"]');
+    expect(keys).not.toContain('["typing"]');
+  });
+
   it('an unverifiable hello after a verified session reconciles', async () => {
     const qc = buildQueryClient();
     const invalidateSpy = vi.spyOn(qc, 'invalidateQueries');

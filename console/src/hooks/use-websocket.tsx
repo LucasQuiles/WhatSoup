@@ -54,7 +54,7 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Last verified stream position (#2519). Survives reconnects so the next
   // hello can prove whether anything was missed while the socket was down.
-  const streamCursor = useRef<StreamCursor>({ generation: null, sequence: null });
+  const streamCursor = useRef<StreamCursor>({ generation: null, sequence: null, durableSequence: null });
 
   useEffect(() => {
     let cancelled = false;
@@ -90,6 +90,17 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
         }
       };
 
+      const reconcileGap = (gap: ReturnType<typeof detectHelloGap>) => {
+        if (gap === null) return;
+        if (gap === 'ephemeral_gap') {
+          // Only typing frames were missed (durable chain intact): refetch the
+          // typing snapshot instead of storming every realtime-owned family.
+          queryClient.invalidateQueries({ queryKey: ['typing'] });
+          return;
+        }
+        reconcileRealtimeCaches();
+      };
+
       ws.onmessage = (msg) => {
         const event: WsEvent | null = parseWsEvent(msg.data);
         if (!event) return;
@@ -100,22 +111,22 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
           // generation change, a sequence advance while away, or an
           // unverifiable envelope all require reconciliation before the UI
           // may treat caches as current again.
-          if (detectHelloGap(streamCursor.current, event) !== null) {
-            reconcileRealtimeCaches();
-          }
+          reconcileGap(detectHelloGap(streamCursor.current, event));
           streamCursor.current = {
             generation: typeof event.streamGeneration === 'string' ? event.streamGeneration : null,
             sequence: typeof event.sequence === 'number' ? event.sequence : null,
+            durableSequence: typeof event.durableSequence === 'number' ? event.durableSequence : null,
           };
           return;
         }
 
-        const frameGap = detectFrameGap(streamCursor.current, event);
-        if (frameGap !== null) {
-          reconcileRealtimeCaches();
-        }
+        reconcileGap(detectFrameGap(streamCursor.current, event, event.type === 'typing_update'));
         if (typeof event.streamGeneration === 'string' && typeof event.sequence === 'number') {
-          streamCursor.current = { generation: event.streamGeneration, sequence: event.sequence };
+          streamCursor.current = {
+            generation: event.streamGeneration,
+            sequence: event.sequence,
+            durableSequence: typeof event.durableSequence === 'number' ? event.durableSequence : null,
+          };
         }
 
         if (event.type === 'typing_update') {
