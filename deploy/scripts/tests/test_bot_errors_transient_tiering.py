@@ -576,3 +576,141 @@ def test_multi_poll_cause_vector_last_reading_wins():
         )
     )
     assert mod.classify_failure_mode(evt2) == "outage"
+
+# ---------------------------------------------------------------------------
+# #2409 Car 7c: policy-family matrix + inhibition contract + registry-shape pins
+# ---------------------------------------------------------------------------
+
+_HOLD_FAMILY_REPRESENTATIVES = {
+    "provider_fallback": "provider_fallback_active",
+    "auth_transport": "connection_churn",
+    "enrichment": "enrichment_stale",
+    "memory": "memory_context_degraded",
+    "event_loop": "event_loop_starved",
+    "durability": "durability_debt",
+    "continuity": "continuity_gap_open",
+    "agent_runtime": "agent_auto_compact_backoff",
+    "mode_specific": "chat_runtime_degraded",
+    "turn_capability": "turn_finalization_degraded",
+}
+
+_PAGE_FAMILY_REPRESENTATIVES = {
+    "provider_fallback": "provider_execution_pressure",
+    "turn_capability": "turn_recovery_degraded",
+    "auth_transport": "auth_bond_degraded",
+    "durability": "durability_evidence_unreadable",
+    "continuity": "continuity_gap_unreadable",
+    "schema": "schema_not_ready",
+    "polls": "pending_polls_unreadable",
+    "agent_runtime": "agent_recent_crashes",
+    "sentinel": "unclassified",
+}
+
+
+def _cause_alert(cause: str) -> dict:
+    return _alert(
+        evidence=f"status=degraded whatsapp_connected=true degradation_causes={cause}"
+    )
+
+
+def test_hold_family_representatives_are_held_end_to_end(tmp_path):
+    mod = _load()
+    for family, cause in _HOLD_FAMILY_REPRESENTATIVES.items():
+        state = _empty_state()
+        evt = _cause_alert(cause)
+        reason = mod.apply_transient_tiering(evt, state, _key(mod, evt), 1_000)
+        assert reason is not None, f"{family}/{cause} must be held inside the soft window"
+        assert evt["severity"] == "warning", f"{family}/{cause} held tier must be warning"
+        assert _key(mod, evt) in state["transientState"], f"{family}/{cause} must record hold state"
+
+
+def test_page_family_representatives_are_never_tiered(tmp_path):
+    mod = _load()
+    for family, cause in _PAGE_FAMILY_REPRESENTATIVES.items():
+        state = _empty_state()
+        evt = _cause_alert(cause)
+        reason = mod.apply_transient_tiering(evt, state, _key(mod, evt), 1_000)
+        assert reason is None, f"{family}/{cause} must page immediately (no hold)"
+        assert evt["severity"] == "critical", f"{family}/{cause} severity must not be downgraded"
+        assert "transientState" not in state or _key(mod, evt) not in state.get("transientState", {}), (
+            f"{family}/{cause} must not create hold bookkeeping"
+        )
+
+
+def test_event_loop_starved_recovery_before_promotion_is_silent(tmp_path):
+    mod = _load()
+    state = _empty_state()
+    evt = _cause_alert("event_loop_starved")
+    key = _key(mod, evt)
+    assert mod.apply_transient_tiering(evt, state, key, 1_000) is not None
+    clear = _clear(evidence="status=healthy whatsapp_connected=true")
+    silent = mod.resolve_transient_on_clear(clear, state, key)
+    assert silent is not None, "a held single-signal starvation that recovers must clear silently"
+    assert key not in state.get("transientState", {})
+
+
+def test_registry_empty_dispositions_block_fails_visible(tmp_path):
+    mod = _load()
+    registry_path = tmp_path / "fault-taxonomy-registry.json"
+    registry_path.write_text('{"degradationCauseDispositions": {"dispositions": {}}}', encoding="utf-8")
+    mod.DEGRADATION_DISPOSITIONS_PATH = registry_path
+    mod._DEGRADATION_DISPOSITIONS_CACHE["loaded"] = False
+    assert mod.classify_failure_mode(_cause_alert("enrichment_stale")) == "outage", (
+        "an empty dispositions block is an untrusted policy; fail toward visibility"
+    )
+
+
+def test_registry_bad_tier_entry_fails_visible(tmp_path):
+    mod = _load()
+    registry_path = tmp_path / "fault-taxonomy-registry.json"
+    registry_path.write_text(
+        '{"degradationCauseDispositions": {"dispositions": {"enrichment_stale": {"impactTier": "sideways"}}}}',
+        encoding="utf-8",
+    )
+    mod.DEGRADATION_DISPOSITIONS_PATH = registry_path
+    mod._DEGRADATION_DISPOSITIONS_CACHE["loaded"] = False
+    assert mod.classify_failure_mode(_cause_alert("enrichment_stale")) == "outage", (
+        "a malformed tier poisons the whole policy; fail toward visibility"
+    )
+
+
+def test_inhibition_seed_pins_aggregate_symptom_edges():
+    mod = _load()
+    assert "health_body_degraded" in mod.SUPERSEDED_SOURCES_BY_ALERT_SOURCE["instance_logged_out"]
+    assert "health_body_degraded" in mod.SUPERSEDED_SOURCES_BY_ALERT_SOURCE["whatsapp_device_bond_lost"]
+
+
+def test_open_root_inhibits_aggregate_symptom_preserving_member_state(tmp_path, monkeypatch):
+    monkeypatch.setenv("BOT_ERRORS_INHIBITION_ENABLED", "1")
+    mod = _load()
+    state = _empty_state()
+    evt = _cause_alert("provider_execution_pressure")
+    scope = mod.incident_scope(evt)
+    root_key = f"{scope}|instance_logged_out"
+    state["openIncidents"][root_key] = {"status": "open", "openedAt": 900}
+    found = mod.stronger_open_incident_for(evt, state)
+    assert found is not None, "an open logged-out root must inhibit the aggregate symptom"
+    stronger_key, record = found
+    assert stronger_key == root_key
+    mod.mark_suppressed_by_stronger(evt, stronger_key, record, 1_000)
+    assert record["suppressedCount"] == 1
+    assert "provider_execution_pressure" in str(record.get("lastSuppressedSymptomEvidence") or ""), (
+        "the suppressed aggregate's cause vector must be preserved on the root record"
+    )
+
+
+def test_open_root_tracks_suppressed_aggregate_clear(tmp_path, monkeypatch):
+    monkeypatch.setenv("BOT_ERRORS_INHIBITION_ENABLED", "1")
+    mod = _load()
+    state = _empty_state()
+    clear = _clear(evidence="status=healthy whatsapp_connected=true")
+    scope = mod.incident_scope(clear)
+    root_key = f"{scope}|instance_logged_out"
+    state["openIncidents"][root_key] = {"status": "open", "openedAt": 900}
+    found = mod.stronger_open_incident_for(clear, state)
+    assert found is not None
+    stronger_key, record = found
+    mod.mark_suppressed_by_stronger(clear, stronger_key, record, 1_000)
+    assert record["suppressedClearCount"] == 1, (
+        "a suppressed aggregate clear must be tracked so member recovery is never silently lost"
+    )

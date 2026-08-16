@@ -1507,7 +1507,9 @@ def classify_failure_mode(event: dict[str, Any]) -> str:
     # impact classifier. Every cause in the producer's vector must carry a
     # registered hold-class disposition for the event to be held; a page-class
     # cause, an absent/malformed/unknown vector, or an untrusted policy all
-    # classify outage (fail toward visibility).
+    # classify outage (fail toward visibility). This branch returns for the
+    # source unconditionally, so the BOT_ERRORS_TRANSIENT_SOURCES escape below
+    # deliberately cannot re-hold a disconnected or page-class degradation.
     if source == "health_body_degraded":
         connected = diagnostics.get("whatsappConnected")
         if connected is None:
