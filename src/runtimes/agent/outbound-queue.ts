@@ -157,6 +157,13 @@ const CHUNK_TRUNCATION_NOTICE = '… [reply truncated]';
 export const TOOL_BATCH_DELAY_MS = 5 * MS_PER_SECOND;
 export const TOOL_BATCH_MAX_AGE_MS = 30 * MS_PER_SECOND;
 export const MIN_SEND_GAP_MS = 500;
+
+/** flush() quiescence loop: re-await cadence and cap. The cap bounds patience
+ *  so a genuinely stuck drain still reaches the poisoning assert; each spin
+ *  also awaits the live chain, so real forward progress (paced sends) never
+ *  burns spins at the polling cadence alone. */
+export const FLUSH_QUIESCENCE_SPIN_MS = 25;
+export const FLUSH_QUIESCENCE_MAX_SPINS = 200;
 /** Re-assert composing every N ms — WA auto-clears the indicator on the recipient side after ~10-15s. */
 export const TYPING_REFRESH_MS = 8 * MS_PER_SECOND;
 /**
@@ -1060,6 +1067,23 @@ export class OutboundQueue implements IOutboundQueue {
     this.throwDrainFailure();
     // Wait for the current chain to drain
     await this.chain;
+    // A concurrent producer can enqueue between the chain settling and the
+    // assertion below: its drainQueue() flips `sending` synchronously and
+    // chains a NEW segment this await never covered, so a single-shot assert
+    // poisons a HEALTHY, actively-draining queue (live 2026-08-16: the
+    // managed-handoff replay's pre-spawn flush interleaved with the advance
+    // notice drain — sticky drainFailure, chat outbound dead until restart).
+    // Re-await until quiescent; the spin cap preserves stuck-queue detection
+    // (a queue that never drains still reaches the poisoning assert).
+    for (
+      let spin = 0;
+      (this.sending || this.sendQueue.length > 0) && spin < FLUSH_QUIESCENCE_MAX_SPINS;
+      spin++
+    ) {
+      await new Promise<void>((resolve) => setTimeout(resolve, FLUSH_QUIESCENCE_SPIN_MS));
+      await this.chain;
+      this.throwDrainFailure();
+    }
     this.assertDrainComplete();
     // All messages delivered — clear typing indicator and per-turn state
     this.stopTyping();
@@ -1385,7 +1409,10 @@ export class OutboundQueue implements IOutboundQueue {
   private assertDrainComplete(): void {
     this.throwDrainFailure();
     if (this.sending || this.sendQueue.length > 0) {
-      const error = new Error('Outbound queue flush completed with pending send work');
+      const error = new Error(
+        'Outbound queue flush completed with pending send work'
+          + ` (sending=${this.sending} queued=${this.sendQueue.length})`,
+      );
       this.drainFailure = { error };
       throw error;
     }

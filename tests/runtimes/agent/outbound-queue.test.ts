@@ -655,6 +655,34 @@ describe('OutboundQueue', () => {
     expect(calls[0]).toContain('  • update 2');
   });
 
+  it('flush interleaved with a concurrent producer waits for quiescence instead of poisoning the queue', async () => {
+    // Live 2026-08-16: the managed-handoff replay's pre-spawn flush ran while
+    // the advance notice was still pacing out; a concurrent enqueue between
+    // the chain settling and the single-shot assert flipped `sending`, the
+    // assert threw, and the sticky drainFailure killed every later send in
+    // the chat until a service restart. flush() must re-await until quiescent.
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+
+    // The exact window: flush() on an idle queue parks on the already-settled
+    // chain, so its continuation (the assert) is queued as a microtask; the
+    // producer's enqueue in the same tick flips `sending` synchronously via
+    // drainQueue() before that continuation runs.
+    const flushPromise = queue.flush();
+    queue.enqueueText('replacement turn output');
+
+    await vi.runAllTimersAsync();
+    await expect(flushPromise).resolves.toBeUndefined();
+
+    expect(calls).toEqual(['replacement turn output']);
+    // The queue stays healthy: a later enqueue+flush still delivers.
+    queue.enqueueText('later turn');
+    const flush2 = queue.flush();
+    await vi.runAllTimersAsync();
+    await expect(flush2).resolves.toBeUndefined();
+    expect(calls).toEqual(['replacement turn output', 'later turn']);
+  });
+
   // ─── Grouped flush logic ───────────────────────────────────────────────────
 
   it('groups updates by category with header and bullets', async () => {
