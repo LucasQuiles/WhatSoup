@@ -17,6 +17,11 @@
       "reason": "build-time injected WHATSOUP_GIT_SHA / WHATSOUP_GIT_BRANCH (deploy hook, no typed source)."
     },
     {
+      "file": "src/core/durability.ts",
+      "allowedUnmarkedSites": 1,
+      "reason": "WHATSOUP_IDENTITY_ADMISSION_EXPIRY_SECONDS operational bound for the reliability-4.1 admission terminalization sweep; resolved once at module load, env-allowed marker on site."
+    },
+    {
       "file": "src/core/health-bind-guard.ts",
       "allowedUnmarkedSites": 1,
       "reason": "guard `env: \u2026 = process.env` DI seam \u2014 keeps the guard unit-testable."

@@ -20,7 +20,7 @@ import {
   type AttestationSkillIdentity,
 } from '../../src/core/capability-attestation.ts';
 import { CapabilityObligationStore } from '../../src/core/capability-obligation-store.ts';
-import { Database } from '../../src/core/database.ts';
+import { CURRENT_SCHEMA_MIGRATION, Database } from '../../src/core/database.ts';
 import { withTransaction } from '../../src/core/db-tx.ts';
 import { resolveHarnessType } from '../../src/runtimes/agent/capability-obligation-runtime.ts';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
@@ -76,7 +76,11 @@ function expectedBinding(args: ApproveDrainArgs) {
   return buildCapabilityAttestationBinding({
     liveFacts: {
       hostId: args.hostId, runtimeUser: args.runtimeUser, releaseSha: args.releaseSha,
-      schemaVersion: 60, providerId: args.providerId, harnessType: resolveHarnessType(args.providerId),
+      // Must track the LIVE schema: approveDrain builds its binding from the real
+      // CURRENT_SCHEMA_MIGRATION, so a pinned literal silently diverges the digest
+      // on every migration bump.
+      schemaVersion: CURRENT_SCHEMA_MIGRATION, providerId: args.providerId,
+      harnessType: resolveHarnessType(args.providerId),
     },
     contractVersion: 'c/1', capability: 'child_process_tools', skill: SKILL, mediaRoot: args.mediaRoot,
   });

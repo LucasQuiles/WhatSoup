@@ -4097,6 +4097,7 @@ describe('POST /send — Authorization header check', () => {
         messages: 0,
         triggerRuns: 0,
         triggerOccurrences: 0,
+        identityAdmissionsExpired: 0,
       },
     });
 

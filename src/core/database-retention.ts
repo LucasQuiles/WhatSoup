@@ -2,6 +2,7 @@ import { createChildLogger } from '../logger.ts';
 import { MS_PER_DAY } from '../lib/time-units.ts';
 import type { Database } from './database.ts';
 import { withTransaction } from './db-tx.ts';
+import { expireOverdueCompletedDeliveryIdentityAdmissions } from './durability.ts';
 import { deleteOldMessages } from './messages.ts';
 import { maintainOutboundSends } from './outbound-sends.ts';
 import { systemClock } from '../lib/clock.ts';
@@ -79,6 +80,9 @@ export interface DatabaseRetentionResult {
   messages: number;
   triggerRuns: number;
   triggerOccurrences: number;
+  /** Reliability 4.1: quarantined identity admissions terminalized (state
+   * transition with preserved receipt — not deletions). */
+  identityAdmissionsExpired: number;
 }
 
 export interface DatabaseRetentionHealth {
@@ -420,6 +424,13 @@ export function runDatabaseRetention(
          AND finished_at < CAST(strftime('%s', 'now') AS INTEGER) - ?
     `).run(Math.max(1, Math.floor(retention.triggerOccurrenceDays)) * 86_400));
 
+    // Reliability 4.1: terminalize overdue completed-delivery identity
+    // admissions on the retention cadence (mirrors #2384's poller-hosted
+    // proposal sweep — the sweep lives with the cadence owner). This is a
+    // state TRANSITION with a preserved receipt, not a deletion: the row
+    // survives as the audit record; only the permanent-degraded floor lifts.
+    const identityAdmissionsExpired = expireOverdueCompletedDeliveryIdentityAdmissions(db.raw).expired;
+
     return {
       turnRecoveryJobs,
       turnTerminalRecords,
@@ -435,6 +446,7 @@ export function runDatabaseRetention(
       messages,
       triggerRuns,
       triggerOccurrences,
+      identityAdmissionsExpired,
     };
   });
   const total = Object.values(result).reduce((sum, count) => sum + count, 0);

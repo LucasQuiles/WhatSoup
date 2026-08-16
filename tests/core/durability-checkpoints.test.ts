@@ -515,6 +515,9 @@ describe('DurabilityEngine — session checkpoints', () => {
         oldestTransitionAt: '2026-06-10 09:55:00',
         maximumAttempts: 1,
         nextAction: 'operator',
+        // Reliability 4.1 dual counters: lifetime terminalized count rides
+        // alongside the active count; zero here — nothing expired yet.
+        expiredCount: 0,
       });
     });
   });
