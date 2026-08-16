@@ -557,6 +557,9 @@ describe('emitAlert', () => {
       instance: 'whatsoup-prod',
       source: 'agent_respawn_failed',
     });
+    // Reliability 4.3: an ordinary occurrence alert must NOT carry the
+    // renotify marker — its absence is what lets the flap detector count it.
+    expect(readOnlyEvent()).not.toHaveProperty('renotify');
     expect(result).toMatchObject({
       ok: true,
       channel: 'outbox',
@@ -1858,5 +1861,48 @@ describe('observeAlertEmission strict capture handling (#2510)', () => {
       { instance: 'inst', source: 'src', operation: 'alert' },
     );
     expect(ok).toBe(true);
+  });
+});
+
+describe('renotify marker (reliability 4.3 — flap trip honesty)', () => {
+  let tmpRoot: string;
+  let outboxDir: string;
+
+  beforeEach(() => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'emit-alert-renotify-'));
+    outboxDir = join(tmpRoot, 'state', 'outbox');
+    process.env['BOT_ERRORS_STATE_DIR'] = join(tmpRoot, 'state');
+    process.env['LOG_DIR'] = join(tmpRoot, 'logs');
+    process.env['NODE_ENV'] = 'test';
+    delete process.env['BOT_ERRORS_ALERT_SINK'];
+    resetEmitAlertThrottle();
+  });
+
+  afterEach(() => {
+    rmSync(tmpRoot, { recursive: true, force: true });
+  });
+
+  function readEvent(): Record<string, unknown> {
+    const files = readdirSync(outboxDir).filter((f) => f.endsWith('.json'));
+    expect(files).toHaveLength(1);
+    return JSON.parse(readFileSync(join(outboxDir, files[0]!), 'utf8')) as Record<string, unknown>;
+  }
+
+  it('stamps renotify:true when the emitter marks a re-notification of an unchanged condition', () => {
+    // The poller re-emits an unchanged open condition through its throttle
+    // with a FRESH id each time; only the emitter knows it is a re-emit, so
+    // the marker rides the event and the flap detector skips it for trips.
+    const result = emitAlert(
+      'ml-bot', 'health_body_degraded', 'health is degraded', 'still degraded',
+      'critical', undefined, { renotify: true },
+    );
+    expect(result.status).toBe('durably_queued');
+    expect(readEvent()).toMatchObject({ renotify: true });
+  });
+
+  it('omits the field entirely when renotify is false or unset (back-compat shape)', () => {
+    emitAlert('ml-bot', 'health_body_degraded', 'health is degraded', 'first detection',
+      'critical', undefined, { renotify: false });
+    expect(readEvent()).not.toHaveProperty('renotify');
   });
 });

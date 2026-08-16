@@ -1326,6 +1326,54 @@ def dry_local_health_status(value: Any) -> tuple[int, str | None]:
         return 0, f"invalid dry local health status={value!r}"
 
 
+# /health answers HTTP 200 on both legs. With a valid instance health token it
+# returns the privileged diagnostic body; without one it returns a public
+# envelope carrying neither `whatsapp` nor `instance`. Verified live 2026-08-16
+# against a single production process: the unauthenticated legs reported
+# status "healthy" while the privileged body of that same process reported
+# "degraded" with a populated degradation_causes vector.
+PUBLIC_HEALTH_SCHEMA_PREFIX = "health.public."
+
+
+def instance_health_token(name: str) -> str | None:
+    """Resolve the instance health token so the probe reads the real body.
+
+    Env override first (deployments that inject per-instance secrets), then the
+    on-host instance tokens file. The watchdog probes 127.0.0.1, so it always
+    runs on the host that owns this file.
+    """
+    override = os.environ.get(f"BOT_ERRORS_HEALTH_TOKEN_{name.replace('-', '_').upper()}")
+    if override:
+        return override.strip() or None
+    shared = os.environ.get("WHATSOUP_HEALTH_TOKEN")
+    if shared:
+        return shared.strip() or None
+    path = Path.home() / ".config" / "whatsoup" / "instances" / name / "tokens.env"
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.startswith("WHATSOUP_HEALTH_TOKEN="):
+                return line.split("=", 1)[1].strip() or None
+    except OSError:
+        return None
+    return None
+
+
+def health_body_is_disclosed(payload: Any) -> bool:
+    """True only for the privileged diagnostic body.
+
+    Fail-closed: anything unrecognised counts as NOT disclosed. Every field this
+    watchdog classifies on (`whatsapp.connected`, `connection.auth_failure_class`,
+    `auth_bond.status`) lives under `whatsapp`, which the public envelope omits
+    entirely — so its absence is the deterministic discriminator.
+    """
+    if not isinstance(payload, dict):
+        return False
+    schema = payload.get("schema_version")
+    if isinstance(schema, str) and schema.startswith(PUBLIC_HEALTH_SCHEMA_PREFIX):
+        return False
+    return isinstance(payload.get("whatsapp"), dict)
+
+
 def local_health_http_response(name: str, port: int) -> tuple[int, str, str]:
     url = f"http://127.0.0.1:{port}/health"
     dry = dry_local_health_responses()
@@ -1344,7 +1392,11 @@ def local_health_http_response(name: str, port: int) -> tuple[int, str, str]:
         if isinstance(entry, str):
             status, status_error = dry_local_health_status(os.environ.get("BOT_ERRORS_DRY_LOCAL_HEALTH_STATUS", "200"))
             return status, status_error or entry, url
-    req = Request(url, method="GET")
+    headers = {}
+    token = instance_health_token(name)
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = Request(url, method="GET", headers=headers)
     attempts = local_health_retries() + 1
     last_failure: tuple[int, str, str] = (0, "no attempts", url)
     for attempt in range(attempts):
@@ -1382,6 +1434,21 @@ def health_reasons_from_payload(payload: dict, name: str) -> tuple[list[str], di
     surfaced as a token regardless of the HTTP status. Returns ([], {}) when the
     telemetry is clean (healthy instance).
     """
+    if not health_body_is_disclosed(payload):
+        # Do NOT fall through. The classifier below reads `whatsapp.connected`,
+        # which is absent here, so it would emit `connected=none` — a confident
+        # claim that this bot lost its WhatsApp bond, pointing the operator at a
+        # physical QR re-pair, when the truth is only that the probe was not
+        # authorized. Misattribution is worse than silence: name the real defect
+        # and say plainly that the bond and runtime are UNOBSERVED.
+        return (
+            [
+                "health_body_not_disclosed=public_envelope",
+                "probe_unauthorized=instance_health_token_missing_or_invalid",
+                "bond_and_runtime=unobserved",
+            ],
+            {"connection": {}, "bond_status": None},
+        )
     instance = payload.get("instance") if isinstance(payload.get("instance"), dict) else {}
     actual_name = instance.get("name") if isinstance(instance, dict) else None
     whatsapp = payload.get("whatsapp") if isinstance(payload.get("whatsapp"), dict) else {}
