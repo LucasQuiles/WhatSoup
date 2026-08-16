@@ -58,6 +58,11 @@ export interface ConsolidationPinecone {
   ): Promise<void>;
 }
 
+/** Confidence qualifier stamped on promotion outputs and filtered out of
+ * source selection. One owner for both sides: a value written but not
+ * filtered would silently re-admit outputs as source material. */
+const CONSOLIDATED_QUALIFIER = 'consolidated';
+
 function scopeKey(chatJid: string, senderJid: string): string {
   return `${chatJid}\0${senderJid}`;
 }
@@ -153,7 +158,27 @@ export async function runConsolidation(
   try {
     search = await pinecone.searchDetailed(
       'facts about people preferences locations interests',
-      {},
+      // Eligibility filtering happens provider-side, BEFORE top-K (#2569).
+      // Prior promotion outputs are ordinary records that outrank fresh
+      // observations on this query, so excluding them only after retrieval
+      // let them consume every selection slot — eligible sources the search
+      // never returned cannot be recovered by any post-filter. The id-prefix
+      // marker has no metadata field to filter on, so the retrieval-side
+      // guard below still owns it.
+      //
+      // The $exists arm is load-bearing, not belt-and-braces: metadata
+      // rejects nulls, so a record written without a qualifier has no key at
+      // all, and $ne is documented as matching records that HAVE a differing
+      // value. A bare $ne would therefore risk excluding every
+      // qualifier-less record — starving legacy sources instead of prior
+      // outputs, the exact inverse of the defect this fixes. The explicit
+      // absent-field arm is correct under either reading of $ne.
+      {
+        $or: [
+          { confidence_qualifier: { $exists: false } },
+          { confidence_qualifier: { $ne: CONSOLIDATED_QUALIFIER } },
+        ],
+      },
       100,
       options.traceId,
       options.signal,
@@ -200,7 +225,7 @@ export async function runConsolidation(
   const isConsolidatedOutput = (result: (typeof search.results)[number]): boolean =>
     isDurableId(result.id)
     || isDurableId(result.record.id)
-    || (result.record.confidenceQualifier ?? '').toLowerCase() === 'consolidated';
+    || (result.record.confidenceQualifier ?? '').toLowerCase() === CONSOLIDATED_QUALIFIER;
   const recentMemories = withinWindow.filter((result) => !isConsolidatedOutput(result));
   const consolidatedExcluded = withinWindow.length - recentMemories.length;
   if (consolidatedExcluded > 0) {
@@ -356,7 +381,7 @@ export async function runConsolidation(
             claim: durable.claim,
             evidence: durable.sourceRecordIds.join(', '),
             warrant: durable.promotionReason,
-            confidenceQualifier: 'consolidated',
+            confidenceQualifier: CONSOLIDATED_QUALIFIER,
             contradicts: '',
           }], {
             operation: 'memory_write',
