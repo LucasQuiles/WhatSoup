@@ -77,7 +77,9 @@ const {
   const mockQueue = {
     enqueueText: vi.fn(),
     getSenderToken: () => 'mock-sender-token',
-    enqueueStreamingText: vi.fn(),
+    enqueueStreamingText: vi.fn((_text: string, _role?: string, _onCommit?: () => void) => {}),
+    commitStreamingText: vi.fn(),
+    discardPreToolAssistantText: vi.fn(),
     enqueueResultText: vi.fn(),
     enqueueToolUpdate: vi.fn(),
     enqueueProgressUpdate: vi.fn(),
@@ -218,7 +220,7 @@ const { mockConfig } = vi.hoisted(() => ({
     fallbackTunables: { noticeDedupMs: 1_800_000, primaryRecheckMs: 300_000, probeStallThreshold: 12, probeStallCeilingMultiple: 10 },
     adminPhones: new Set<string>(['15550001']),
     controlPeers: new Map<string, string>(),
-    toolUpdateMode: 'full' as const,
+    toolUpdateMode: 'full' as 'full' | 'minimal' | 'friendly',
     toolUpdateRedirectJid: null as string | null,
     textAggregateDelayMs: 2_000,
     stateRoot: '/tmp/whatsoup-test-state-secondhalf',
@@ -256,6 +258,10 @@ import {
   type PendingPollQuestion,
   type PollVote,
 } from '../../../src/runtimes/agent/runtime.ts';
+import {
+  makeRuntimeTurnContext,
+  publishSingletonTestOwner,
+} from './lib/runtime-mock-scaffold.ts';
 
 // ─── Local helpers (mirror sibling suite) ───────────────────────────────────
 
@@ -441,11 +447,112 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
     mockSession.getDbRowId.mockReturnValue(null);
     mockGetMessagesSince.mockReturnValue([]);
     mockGetActiveSession.mockReturnValue(null);
+    mockConfig.toolUpdateMode = 'full';
   });
 
   afterEach(() => {
     vi.runOnlyPendingTimers();
     vi.useRealTimers();
+  });
+
+  describe('minimal-mode delivery boundaries', () => {
+    const mapKey = 'minimal@s.whatsapp.net';
+    type ScopedView = {
+      handleEventWithContext: (
+        event: AgentEvent, queue: IOutboundQueue, session: typeof mockSession,
+        conversationKey?: string, inboundSeq?: number, mapKey?: string, toolScopeKey?: string,
+      ) => void;
+      perChatTurnText: Map<string, string>;
+      replyGuarantee: { notifyActivity: ReturnType<typeof vi.fn> } | null;
+      runtimeTurnCoordinator: { markRuntimeTurnReplayUnsafe: (key?: string) => void };
+    };
+
+    it('commits per-chat replay, liveness, and voice state only with queued text', () => {
+      mockConfig.toolUpdateMode = 'minimal';
+      const state = new AgentRuntime(makeDb(), makeMessenger().messenger, 'test', {
+        sessionScope: 'per_chat',
+      }) as unknown as ScopedView;
+      const notifyActivity = vi.fn();
+      const markUnsafe = vi.spyOn(state.runtimeTurnCoordinator, 'markRuntimeTurnReplayUnsafe');
+      state.replyGuarantee = { notifyActivity };
+      state.handleEventWithContext(
+        { type: 'assistant_text', text: 'The workbook is ready.' }, mockQueue, mockSession,
+        undefined, undefined, mapKey, mapKey,
+      );
+
+      expect(state.perChatTurnText.get(mapKey) ?? '').toBe('');
+      expect(markUnsafe).not.toHaveBeenCalled();
+      expect(notifyActivity).not.toHaveBeenCalled();
+      const commit = mockQueue.enqueueStreamingText.mock.calls.at(-1)?.[2];
+      expect(commit).toBeTypeOf('function');
+      commit?.();
+      expect(state.perChatTurnText.get(mapKey)).toBe('The workbook is ready.');
+      expect(markUnsafe).toHaveBeenCalledWith(mapKey);
+      expect(notifyActivity).toHaveBeenCalledWith(mockQueue.targetChatJid);
+    });
+
+    it('discards only at normal tools and preserves provisional text across tool errors', () => {
+      mockConfig.toolUpdateMode = 'minimal';
+      const state = new AgentRuntime(makeDb(), makeMessenger().messenger, 'test', {
+        sessionScope: 'per_chat',
+      }) as unknown as ScopedView;
+      state.handleEventWithContext(
+        { type: 'assistant_text', text: 'I will inspect it.' }, mockQueue, mockSession,
+        undefined, undefined, mapKey, mapKey,
+      );
+      state.handleEventWithContext(
+        { type: 'tool_use', toolId: 'read-1', toolName: 'Read', toolInput: {} },
+        mockQueue, mockSession, undefined, undefined, mapKey, mapKey,
+      );
+      expect(mockQueue.discardPreToolAssistantText).toHaveBeenCalledOnce();
+
+      mockQueue.discardPreToolAssistantText.mockClear();
+      state.handleEventWithContext(
+        { type: 'assistant_text', text: 'The file is unavailable.' }, mockQueue, mockSession,
+        undefined, undefined, mapKey, mapKey,
+      );
+      state.handleEventWithContext(
+        { type: 'tool_result', toolId: 'untracked-error', toolName: 'Read', content: 'missing', isError: true },
+        mockQueue, mockSession, undefined, undefined, mapKey, mapKey,
+      );
+      expect(mockQueue.discardPreToolAssistantText).not.toHaveBeenCalled();
+      expect(mockQueue.enqueueToolUpdate).toHaveBeenCalledWith(expect.objectContaining({ category: 'error' }));
+      expect(mockQueue.enqueueStreamingText.mock.calls.at(-1)?.[2]).toBeTypeOf('function');
+    });
+
+    it('keeps shared text provisional until a normal tool discards it', () => {
+      mockConfig.toolUpdateMode = 'minimal';
+      const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger);
+      const state = runtime as unknown as {
+        handleEvent: (session: typeof mockSession, event: AgentEvent) => void;
+        queue: IOutboundQueue;
+        currentTurnAssistantText: string;
+        turnHadVisibleOutput: boolean;
+        currentRuntimeTurnContext: ReturnType<typeof makeRuntimeTurnContext> | null;
+        replyGuarantee: { notifyActivity: ReturnType<typeof vi.fn> } | null;
+      };
+      const notifyActivity = vi.fn();
+      state.queue = mockQueue;
+      state.replyGuarantee = { notifyActivity };
+      state.currentRuntimeTurnContext = makeRuntimeTurnContext(
+        'singleton', 'test@s.whatsapp.net', mockQueue.targetChatJid, 1, 'minimal-shared',
+      );
+      publishSingletonTestOwner(runtime, mockSession, mockQueue.targetChatJid);
+
+      state.handleEvent(mockSession, { type: 'assistant_text', text: 'I will inspect the files.' });
+      expect(state.currentTurnAssistantText).toBe('');
+      expect(state.turnHadVisibleOutput).toBe(false);
+      expect(state.currentRuntimeTurnContext.replay.replaySafe).toBe(true);
+      expect(notifyActivity).not.toHaveBeenCalled();
+
+      state.handleEvent(mockSession, {
+        type: 'tool_use', toolId: 'read-shared', toolName: 'Read', toolInput: {},
+      });
+      expect(state.currentRuntimeTurnContext.replay.replaySafe).toBe(false);
+      expect(mockQueue.discardPreToolAssistantText).toHaveBeenCalledOnce();
+      expect(notifyActivity).not.toHaveBeenCalled();
+    });
+
   });
 
   describe('database compatibility admission', () => {
@@ -1416,6 +1523,8 @@ describe('AgentRuntime route recycle publication and shutdown ownership', () => 
       enqueueText: vi.fn(),
       getSenderToken: () => 'mock-sender-token',
       enqueueStreamingText: vi.fn(),
+      commitStreamingText: vi.fn(),
+      discardPreToolAssistantText: vi.fn(),
       enqueueResultText: vi.fn(),
       enqueueToolUpdate: vi.fn(),
       enqueueProgressUpdate: vi.fn(),

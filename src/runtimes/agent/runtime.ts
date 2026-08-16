@@ -6241,8 +6241,6 @@ export class AgentRuntime implements Runtime {
           if (contexts?.[0]) contexts[0] = markRuntimeTurnReplayUnsafe(contexts[0]);
         }
 
-        queue.discardPreToolAssistantText?.();
-
         // AskUserQuestion → WhatsApp poll bridge (per_chat mode).
         // Shared mode is excluded — see handleEvent tool_use case for rationale.
         if (event.toolName === 'AskUserQuestion' && mapKey !== undefined) {
@@ -6255,6 +6253,8 @@ export class AgentRuntime implements Runtime {
             break; // skip normal tool_use handling — poll sent instead
           }
         }
+
+        queue.discardPreToolAssistantText?.();
 
         this.getToolNames(toolScopeKey).set(event.toolId, event.toolName);
         this.turnHadToolActivity.add(toolScopeKey);

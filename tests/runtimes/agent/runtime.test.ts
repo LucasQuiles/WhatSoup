@@ -90,7 +90,7 @@ const { mockSession, mockQueue, capturedSessionManagerOptsRef, capturedOnEventRe
     enqueueText: vi.fn(),
     getSenderToken: () => 'mock-sender-token',
     enqueueStreamingText: vi.fn(),
-    enqueueResultText: vi.fn(() => true),
+    enqueueResultText: vi.fn((_text: string, _role?: 'answer' | 'lifecycle' | 'status') => true),
     commitStreamingText: vi.fn(),
     discardPreToolAssistantText: vi.fn(),
     enqueueToolUpdate: vi.fn(),
@@ -5085,159 +5085,6 @@ describe('AgentRuntime', () => {
     capturedOnEventRef.current!({ type: 'assistant_text', text: 'Hello there!' });
 
     expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith('Hello there!');
-  });
-
-  it('minimal mode keeps per-chat text provisional until the queue commits it', async () => {
-    mockConfig.toolUpdateMode = 'minimal';
-    const db = makeDb();
-    const { messenger } = makeMessenger();
-    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
-    const mapKey = 'test@s.whatsapp.net';
-    const state = runtime as unknown as {
-      perChatTurnText: Map<string, string>;
-      perChatRuntimeTurnContexts: Map<string, Array<{ replay: { replaySafe: boolean } }>>;
-    };
-    const replyGuarantee = { notifyActivity: vi.fn(), disarm: vi.fn() };
-
-    await runtime.start();
-    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hi' }), mapKey);
-    (runtime as unknown as { replyGuarantee: typeof replyGuarantee }).replyGuarantee = replyGuarantee;
-    state.perChatRuntimeTurnContexts.set(mapKey, [makeRuntimeTurnContext(
-      'per_chat', mapKey, mapKey, 1, 'minimal-per-chat-commit',
-    )]);
-
-    capturedOnEventRef.current!({
-      type: 'assistant_text',
-      text: 'I found 12 matching files and will inspect their contents next.',
-    });
-    expect(state.perChatTurnText.get(mapKey) ?? '').toBe('');
-    expect(state.perChatRuntimeTurnContexts.get(mapKey)?.[0]?.replay.replaySafe).toBe(true);
-    expect(replyGuarantee.notifyActivity).not.toHaveBeenCalled();
-
-    const onCommit = mockQueue.enqueueStreamingText.mock.calls.at(-1)?.[2] as (() => void) | undefined;
-    expect(onCommit).toBeTypeOf('function');
-    onCommit!();
-
-    expect(state.perChatTurnText.get(mapKey)).toContain('12 matching files');
-    expect(state.perChatRuntimeTurnContexts.get(mapKey)?.[0]?.replay.replaySafe).toBe(false);
-    expect(replyGuarantee.notifyActivity).toHaveBeenCalledWith(mapKey);
-  });
-
-  it('minimal mode discards per-chat provisional narration at a normal tool boundary', async () => {
-    mockConfig.toolUpdateMode = 'minimal';
-    const db = makeDb();
-    const { messenger } = makeMessenger();
-    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
-    const mapKey = 'test@s.whatsapp.net';
-    const state = runtime as unknown as {
-      perChatTurnText: Map<string, string>;
-      perChatRuntimeTurnContexts: Map<string, Array<{ replay: { replaySafe: boolean } }>>;
-    };
-    const replyGuarantee = { notifyActivity: vi.fn(), disarm: vi.fn() };
-
-    await runtime.start();
-    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hi' }), mapKey);
-    (runtime as unknown as { replyGuarantee: typeof replyGuarantee }).replyGuarantee = replyGuarantee;
-    state.perChatRuntimeTurnContexts.set(mapKey, [makeRuntimeTurnContext(
-      'per_chat', mapKey, mapKey, 1, 'minimal-per-chat-tool',
-    )]);
-
-    capturedOnEventRef.current!({
-      type: 'assistant_text',
-      text: 'I found 12 matching files and will inspect their contents next.',
-    });
-
-    capturedOnEventRef.current!({
-      type: 'tool_use',
-      toolId: 'tool-minimal-per-chat',
-      toolName: 'Read',
-      toolInput: { file_path: '/tmp/input.txt' },
-    });
-
-    expect(state.perChatTurnText.get(mapKey) ?? '').toBe('');
-    expect(state.perChatRuntimeTurnContexts.get(mapKey)?.[0]?.replay.replaySafe).toBe(false);
-    expect(replyGuarantee.notifyActivity).not.toHaveBeenCalled();
-    expect(mockQueue.discardPreToolAssistantText).toHaveBeenCalledOnce();
-  });
-
-  it('minimal mode does not classify an untracked tool error as a narration boundary', async () => {
-    mockConfig.toolUpdateMode = 'minimal';
-    const db = makeDb();
-    const { messenger } = makeMessenger();
-    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
-    const mapKey = 'test@s.whatsapp.net';
-    const state = runtime as unknown as { perChatTurnText: Map<string, string> };
-    const replyGuarantee = { notifyActivity: vi.fn(), disarm: vi.fn() };
-
-    await runtime.start();
-    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hi' }), mapKey);
-    (runtime as unknown as { replyGuarantee: typeof replyGuarantee }).replyGuarantee = replyGuarantee;
-
-    capturedOnEventRef.current!({
-      type: 'assistant_text',
-      text: 'The requested file is unavailable.',
-    });
-    capturedOnEventRef.current!({
-      type: 'tool_result',
-      toolId: 'untracked-minimal-error',
-      toolName: 'Read',
-      content: 'File not found',
-      isError: true,
-    });
-
-    expect(mockQueue.discardPreToolAssistantText).not.toHaveBeenCalled();
-    expect(mockQueue.enqueueToolUpdate).toHaveBeenCalledWith(expect.objectContaining({
-      category: 'error',
-    }));
-    expect(state.perChatTurnText.get(mapKey) ?? '').toBe('');
-    expect(replyGuarantee.notifyActivity).not.toHaveBeenCalled();
-    expect(mockQueue.enqueueStreamingText.mock.calls.at(-1)?.[2]).toBeTypeOf('function');
-  });
-
-  it('minimal mode keeps shared text provisional and discards it at a normal tool boundary', async () => {
-    mockConfig.toolUpdateMode = 'minimal';
-    const db = makeDb();
-    const { messenger } = makeMessenger();
-    const runtime = new AgentRuntime(db, messenger);
-    const state = runtime as unknown as {
-      currentTurnAssistantText: string;
-      turnHadVisibleOutput: boolean;
-      currentRuntimeTurnContext: { replay: { replaySafe: boolean } } | null;
-    };
-    const replyGuarantee = { notifyActivity: vi.fn(), disarm: vi.fn() };
-
-    await runtime.start();
-    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hi' }));
-    (runtime as unknown as { replyGuarantee: typeof replyGuarantee }).replyGuarantee = replyGuarantee;
-    state.currentRuntimeTurnContext = makeRuntimeTurnContext(
-      'singleton',
-      'test@s.whatsapp.net',
-      'test@s.whatsapp.net',
-      1,
-      'minimal-shared',
-    );
-
-    capturedOnEventRef.current!({
-      type: 'assistant_text',
-      text: 'I found 12 matching files and will inspect their contents next.',
-    });
-    expect(state.currentTurnAssistantText).toBe('');
-    expect(state.turnHadVisibleOutput).toBe(false);
-    expect(state.currentRuntimeTurnContext?.replay.replaySafe).toBe(true);
-    expect(replyGuarantee.notifyActivity).not.toHaveBeenCalled();
-
-    capturedOnEventRef.current!({
-      type: 'tool_use',
-      toolId: 'tool-minimal-shared',
-      toolName: 'Read',
-      toolInput: { file_path: '/tmp/input.txt' },
-    });
-
-    expect(state.currentTurnAssistantText).toBe('');
-    expect(state.turnHadVisibleOutput).toBe(false);
-    expect(state.currentRuntimeTurnContext?.replay.replaySafe).toBe(false);
-    expect(replyGuarantee.notifyActivity).not.toHaveBeenCalled();
-    expect(mockQueue.discardPreToolAssistantText).toHaveBeenCalledOnce();
   });
 
   it('suppresses internal assistant_text narration before it reaches WhatsApp', async () => {
@@ -11187,12 +11034,12 @@ describe('AgentRuntime', () => {
       await vi.waitFor(() => {
         expect(mockSynthesizeSpeech).toHaveBeenCalledWith(
           'Workbook updated and verified.',
-          expect.anything(),
+          expect.objectContaining({ voiceId: 'test-voice-id', modelId: 'eleven_multilingual_v2', stability: 0.5, similarityBoost: 0.75 }),
         );
       }, { timeout: 500 });
       expect(mockSynthesizeSpeech).not.toHaveBeenCalledWith(
         expect.stringContaining('Internal duplicate result summary'),
-        expect.anything(),
+        expect.objectContaining({ voiceId: 'test-voice-id', modelId: 'eleven_multilingual_v2', stability: 0.5, similarityBoost: 0.75 }),
       );
     });
 
@@ -13364,7 +13211,8 @@ describe('AgentRuntime', () => {
       expect(injected).toContain('Directive:');
     });
 
-    it('sends polls in group chats and registers AskUser poll suppression', async () => {
+    it('preserves minimal-mode decision text before a bridged AskUser poll', async () => {
+      mockConfig.toolUpdateMode = 'minimal';
       const { messenger, pollSends } = makePollMessenger({ waMessageId: 'POLL_GROUP', hasSecret: true });
       const db = makeDb();
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
@@ -13383,6 +13231,18 @@ describe('AgentRuntime', () => {
         }
       ).handleEventWithContext.bind(runtime);
 
+      handleEventWithContext(
+        {
+          type: 'assistant_text',
+          text: 'Choose the option that best fits.',
+        },
+        groupQueue,
+        mockSession,
+        undefined,
+        undefined,
+        'group-map-key',
+        'group-map-key',
+      );
       handleEventWithContext(
         {
           type: 'tool_use',
@@ -13412,6 +13272,12 @@ describe('AgentRuntime', () => {
       await Promise.resolve();
 
       expect(pollSends).toHaveLength(1);
+      expect(groupQueue.enqueueStreamingText).toHaveBeenCalledWith(
+        'Choose the option that best fits.',
+        'answer',
+        expect.any(Function),
+      );
+      expect(groupQueue.discardPreToolAssistantText).not.toHaveBeenCalled();
       // enqueueToolUpdate should NOT have been called — poll bridge short-circuits normal handling
       expect(groupQueue.enqueueToolUpdate).toHaveBeenCalledTimes(0);
     });
