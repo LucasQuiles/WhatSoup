@@ -44,7 +44,11 @@ import {
 } from './fallback-state-db.ts';
 import { handoffContextEnabled, handoffDistillModel, handoffDistillerEnabled } from './handoff-distill-config.ts';
 import { CHAIN_CANARY_PROMPT, resolveFallbackCanaryConfig, type FallbackCanaryConfig } from './fallback-canary-config.ts';
-import { probeChainEntryCompletion, type ChainEntryCanaryResult } from './providers/chain-entry-canary.ts';
+import {
+  probeChainEntryCompletion,
+  type ChainEntryCanaryFailureClass,
+  type ChainEntryCanaryResult,
+} from './providers/chain-entry-canary.ts';
 import { buildOpenCodeRunArgs } from './providers/opencode-execution-profile.ts';
 import type { IOutboundQueue } from './outbound-queue.ts';
 import {
@@ -648,7 +652,7 @@ export class RuntimeFallbackCoordinator {
     activeFallbackEntry: AgentFallbackEntry | null;
     fallbackChain: Array<AgentFallbackEntry & {
       eligible: boolean | null;
-      canary?: { status: string; checkedAt: number; evidence: string | null } | null;
+      canary?: { status: string; checkedAt: number; failureClass: ChainEntryCanaryFailureClass | null } | null;
     }>;
     fallbackChainExhausted: boolean;
     failedEntryCount: number;
@@ -692,8 +696,11 @@ export class RuntimeFallbackCoordinator {
           // Additive-only: entries without canary evidence keep their exact
           // pre-canary shape so existing snapshot assertions stay byte-stable.
           const record = this.chainCanary.get(this.host.fallbackChain.entryKey(entry));
+          // `failureClass` is a CLOSED set; the raw provider tail stays in
+          // debug logs (it carries unbounded third-party prose — request ids,
+          // JSON bodies, account status). /health must stay content-free.
           return record
-            ? { ...entry, canary: { status: record.status, checkedAt: record.checkedAt, evidence: record.evidence } }
+            ? { ...entry, canary: { status: record.status, checkedAt: record.checkedAt, failureClass: record.failureClass ?? null } }
             : entry;
         }),
       fallbackChainExhausted: this.host.fallbackChain.isExhausted(this.host.agentFallbacks),
@@ -1074,7 +1081,7 @@ export class RuntimeFallbackCoordinator {
           // v1 scope: only the CLI transport the estate's chains use. Recorded
           // as unknown so /health distinguishes "not probed" from "healthy".
           if (!this.chainCanary.has(key)) {
-            this.chainCanary.set(key, { status: 'unknown', evidence: null, durationMs: 0, checkedAt: systemClock.now() });
+            this.chainCanary.set(key, { status: 'unknown', evidence: null, failureClass: null, durationMs: 0, checkedAt: systemClock.now() });
           }
           continue;
         }
@@ -1114,9 +1121,10 @@ export class RuntimeFallbackCoordinator {
             'fallback_chain_entry_unhealthy',
             'Fallback chain entry failed its real-completion canary',
             `provider=${entry.provider} model=${entry.model ?? 'default'} status=${result.status}`
-              + ` trigger=${trigger}${result.evidence ? ` evidence=${result.evidence.slice(0, 200)}` : ''}`,
+              + ` trigger=${trigger}${result.failureClass ? ` failureClass=${result.failureClass}` : ''}`,
           );
-          log.warn({ provider: entry.provider, model: entry.model, status: result.status, evidence: result.evidence }, 'fallback chain entry canary failed');
+          log.warn({ provider: entry.provider, model: entry.model, status: result.status, failureClass: result.failureClass }, 'fallback chain entry canary failed');
+          log.debug({ provider: entry.provider, model: entry.model, evidence: result.evidence }, 'fallback chain entry canary raw failure tail');
         } else if (result.status === 'ok' && previous !== undefined && previous.status !== 'ok' && previous.status !== 'unknown') {
           clearAlertSourceChecked(
             this.host.instanceName,
