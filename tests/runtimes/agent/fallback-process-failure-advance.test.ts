@@ -423,7 +423,7 @@ describe('managed crash notice suppression', () => {
     vi.useRealTimers();
   });
 
-  it('suppresses exactly one raw session-ended line after a managed fallback crash', () => {
+  it('suppresses the raw session-ended line AND same-episode echoes after a managed fallback crash', () => {
     const runtime = makeRuntime([
       { provider: 'opencode-cli', model: 'kimi/kimi-k3' },
       { provider: 'opencode-cli', model: 'glm/glm-5.2' },
@@ -442,8 +442,20 @@ describe('managed crash notice suppression', () => {
     );
     expect(queue.enqueueText).not.toHaveBeenCalled();
 
-    // One-shot: a LATER crash of the same manager without managed handling
-    // notifies normally.
+    // Same-episode ECHO (observed live 2026-08-16: the pended route recycle
+    // tore the crashed manager down ~600ms later and its teardown emitted a
+    // second exit notification) — still suppressed inside the window.
+    vi.advanceTimersByTime(600);
+    rv.handleCrashNotify(
+      'Agent session ended (exited with code 1). Send any message to start a new session.',
+      CHAT,
+      session,
+    );
+    expect(queue.enqueueText).not.toHaveBeenCalled();
+
+    // A genuinely NEW crash of the same (respawned) manager after the episode
+    // window, without managed handling, notifies normally.
+    vi.advanceTimersByTime(10_000);
     rv.handleCrashNotify(
       'Agent session ended (exited with code 137). Send any message to start a new session.',
       CHAT,
