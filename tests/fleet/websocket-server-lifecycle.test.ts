@@ -338,6 +338,20 @@ describe('websocket client lifecycle (#2521)', () => {
     h.cleanup();
   });
 
+  it('all clients observe the same sequence for one broadcast', () => {
+    const h = makeHarness();
+    const first = new FakeClient();
+    const second = new FakeClient();
+    h.adopt(first);
+    h.adopt(second);
+    h.server.broadcast({ type: 'instance_status', instance: 'synthetic-a' });
+    const f1 = JSON.parse(first.sent.at(-1) ?? '{}') as Record<string, unknown>;
+    const f2 = JSON.parse(second.sent.at(-1) ?? '{}') as Record<string, unknown>;
+    expect(f1.sequence, 'sequence is per-broadcast, never per-client').toBe(f2.sequence);
+    expect(f1.sequence).toBe(1);
+    h.cleanup();
+  });
+
   it('distinct server instances mint distinct stream generations', () => {
     const h1 = makeHarness();
     const h2 = makeHarness();

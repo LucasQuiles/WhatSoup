@@ -152,11 +152,25 @@ describe('parseWsEvent', () => {
     const enveloped =
       '{"type":"log_entry","instance":"q","schema_version":1,' +
       '"stream_generation":"11111111-2222-4333-8444-555555555555","sequence":7,"emitted_at":1723800000000}';
-    expect(parseWsEvent(enveloped)).toEqual({ type: 'log_entry', instance: 'q' });
+    expect(parseWsEvent(enveloped)).toEqual({
+      type: 'log_entry',
+      instance: 'q',
+      streamGeneration: '11111111-2222-4333-8444-555555555555',
+      sequence: 7,
+    });
     const envelopedHello =
       '{"type":"connected","timestamp":1723800000000,"schema_version":1,' +
       '"stream_generation":"11111111-2222-4333-8444-555555555555","sequence":0}';
-    expect(parseWsEvent(envelopedHello)).toEqual({ type: 'connected', timestamp: 1723800000000 });
+    expect(parseWsEvent(envelopedHello)).toEqual({
+      type: 'connected',
+      timestamp: 1723800000000,
+      streamGeneration: '11111111-2222-4333-8444-555555555555',
+      sequence: 0,
+    });
+    const envelopedTyping =
+      '{"type":"typing_update","instance":"q","jid":"123@s.whatsapp.net","composing":true,"since":5,' +
+      '"schema_version":1,"stream_generation":"11111111-2222-4333-8444-555555555555","sequence":9,"emitted_at":1}';
+    expect(parseWsEvent(envelopedTyping)).toMatchObject({ type: 'typing_update', instance: 'q', sequence: 9 });
   });
 
   it('rejects invalid event payload shapes', () => {

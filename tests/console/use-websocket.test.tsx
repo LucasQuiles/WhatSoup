@@ -670,3 +670,125 @@ describe('useRealtime hook', () => {
     expect(getConnected()).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Stream gap reconciliation (#2519)
+// ---------------------------------------------------------------------------
+
+describe('RealtimeProvider — stream gap reconciliation', () => {
+  function hello(generation: string, sequence: number): string {
+    return JSON.stringify({
+      type: 'connected',
+      timestamp: 1_723_800_000_000,
+      schema_version: 1,
+      stream_generation: generation,
+      sequence,
+    });
+  }
+
+  it('a reconnect onto a new generation invalidates every realtime-owned family', async () => {
+    const qc = buildQueryClient();
+    const invalidateSpy = vi.spyOn(qc, 'invalidateQueries');
+    await renderProvider(qc);
+    await flush();
+    act(() => {
+      wsRegistry[0].simulateOpen();
+      wsRegistry[0].simulateMessage(hello('gen-a', 4));
+    });
+    act(() => {
+      wsRegistry[0].simulateClose();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_100);
+    });
+    invalidateSpy.mockClear();
+    act(() => {
+      wsRegistry[1].simulateOpen();
+      wsRegistry[1].simulateMessage(hello('gen-b', 0));
+    });
+    const keys = invalidateSpy.mock.calls.map((call) => JSON.stringify(call[0]?.queryKey));
+    expect(keys, 'the #2519 falsifier: a gapped reconnect must reconcile logs').toContain('["logs"]');
+    expect(keys).toContain('["chats"]');
+    expect(keys).toContain('["access"]');
+    expect(keys).toContain('["messages"]');
+  });
+
+  it('a reconnect onto the same generation and sequence stays quiet', async () => {
+    const qc = buildQueryClient();
+    const invalidateSpy = vi.spyOn(qc, 'invalidateQueries');
+    await renderProvider(qc);
+    await flush();
+    act(() => {
+      wsRegistry[0].simulateOpen();
+      wsRegistry[0].simulateMessage(hello('gen-a', 4));
+    });
+    act(() => {
+      wsRegistry[0].simulateClose();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_100);
+    });
+    invalidateSpy.mockClear();
+    act(() => {
+      wsRegistry[1].simulateOpen();
+      wsRegistry[1].simulateMessage(hello('gen-a', 4));
+    });
+    const keys = invalidateSpy.mock.calls.map((call) => JSON.stringify(call[0]?.queryKey));
+    expect(keys, 'nothing was missed: proven-current reconnect must not storm refetches').not.toContain('["logs"]');
+  });
+
+  it('an unverifiable hello after a verified session reconciles', async () => {
+    const qc = buildQueryClient();
+    const invalidateSpy = vi.spyOn(qc, 'invalidateQueries');
+    await renderProvider(qc);
+    await flush();
+    act(() => {
+      wsRegistry[0].simulateOpen();
+      wsRegistry[0].simulateMessage(hello('gen-a', 4));
+    });
+    act(() => {
+      wsRegistry[0].simulateClose();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_100);
+    });
+    invalidateSpy.mockClear();
+    act(() => {
+      wsRegistry[1].simulateOpen();
+      wsRegistry[1].simulateMessage(JSON.stringify({ type: 'connected', timestamp: 1 }));
+    });
+    const keys = invalidateSpy.mock.calls.map((call) => JSON.stringify(call[0]?.queryKey));
+    expect(keys, 'an envelope-less hello proves nothing: fail toward reconciliation').toContain('["logs"]');
+  });
+
+  it('a non-contiguous frame sequence forces reconciliation mid-stream', async () => {
+    const qc = buildQueryClient();
+    const invalidateSpy = vi.spyOn(qc, 'invalidateQueries');
+    await renderProvider(qc);
+    await flush();
+    act(() => {
+      wsRegistry[0].simulateOpen();
+      wsRegistry[0].simulateMessage(hello('gen-a', 4));
+      wsRegistry[0].simulateMessage(JSON.stringify({
+        type: 'feed_event',
+        instance: 'synthetic-a',
+        schema_version: 1,
+        stream_generation: 'gen-a',
+        sequence: 5,
+      }));
+    });
+    invalidateSpy.mockClear();
+    act(() => {
+      wsRegistry[0].simulateMessage(JSON.stringify({
+        type: 'feed_event',
+        instance: 'synthetic-a',
+        schema_version: 1,
+        stream_generation: 'gen-a',
+        sequence: 9,
+      }));
+    });
+    const keys = invalidateSpy.mock.calls.map((call) => JSON.stringify(call[0]?.queryKey));
+    expect(keys, 'frames 6-8 were lost: every realtime family must reconcile').toContain('["logs"]');
+    expect(keys).toContain('["chats"]');
+  });
+});
