@@ -2066,6 +2066,21 @@ export class AgentRuntime implements Runtime {
     return event.text;
   }
 
+  /** Keep runtime-visible and voice-reply state aligned with the minimal-mode
+   * queue when a tool call proves buffered assistant text was pre-tool narration. */
+  private discardMinimalPreToolAssistantState(mapKey?: string): void {
+    if (config.toolUpdateMode !== 'minimal') return;
+    if (mapKey !== undefined) {
+      if ((this.perChatTurnText.get(mapKey)?.trim() ?? '') !== '') {
+        this.perChatTurnText.delete(mapKey);
+      }
+      return;
+    }
+    if (this.currentTurnAssistantText.trim() === '') return;
+    this.currentTurnAssistantText = '';
+    this.turnHadVisibleOutput = false;
+  }
+
   private gateAssistantTextForOutbound(
     text: string,
     queue: IOutboundQueue,
@@ -6240,6 +6255,7 @@ export class AgentRuntime implements Runtime {
         this.turnHadToolActivity.add(toolScopeKey);
         {
           const toolUpdate = buildToolUpdate(event.toolName, event.toolInput ?? {});
+          this.discardMinimalPreToolAssistantState(mapKey);
           queue.enqueueToolUpdate(toolUpdate);
           tracker?.onToolStart(event.toolId, event.toolName, toolUpdate.category);
         }
@@ -10216,6 +10232,7 @@ export class AgentRuntime implements Runtime {
         this.singleTurnHadToolActivity = true;
         {
           const toolUpdate = buildToolUpdate(event.toolName, event.toolInput ?? {});
+          this.discardMinimalPreToolAssistantState();
           queue.enqueueToolUpdate(toolUpdate);
           tracker?.onToolStart(event.toolId, event.toolName, toolUpdate.category);
         }

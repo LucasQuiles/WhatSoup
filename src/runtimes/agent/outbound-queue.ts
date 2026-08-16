@@ -763,12 +763,15 @@ export class OutboundQueue implements IOutboundQueue {
    * Use this for `assistant_text` events from streaming providers (codex-cli, gemini-cli)
    * that emit per-token or per-line deltas. Text is buffered and flushed after
    * TEXT_AGGREGATE_DELAY_MS of silence, producing batched messages instead of spam.
+   * Minimal mode holds the buffer until a turn boundary: a following tool call
+   * proves the text was pre-tool narration and discards it, while a terminal
+   * result flushes the final answer without exposing intermediate planning.
    */
   enqueueStreamingText(text: string, role: OutboundMessageRole = 'answer'): void {
     if (!text) return;
-    this.turnHasVisibleText = true;
     this.streamBufferParts.push({ text, ...this.snapshotAttribution(role) });
     this.startTyping();
+    if (this.toolUpdateMode === 'minimal') return;
     if (this.streamTimer) clearTimeout(this.streamTimer);
     this.streamTimer = setTimeout(() => {
       this.flushStreamBuffer();
@@ -789,6 +792,7 @@ export class OutboundQueue implements IOutboundQueue {
       const { text: _firstText, ...attribution } = group[0];
       const text = group.map((part) => part.text).join('');
       if (text.trim() !== '') {
+        this.turnHasVisibleText = true;
         this.enqueuePreparedText(text, attribution);
       }
       group = [];
@@ -803,6 +807,21 @@ export class OutboundQueue implements IOutboundQueue {
     flushGroup();
   }
 
+  private discardStreamBufferAtMinimalToolBoundary(): void {
+    if (this.streamBufferParts.length === 0) return;
+    if (this.streamTimer) {
+      clearTimeout(this.streamTimer);
+      this.streamTimer = null;
+    }
+    const partCount = this.streamBufferParts.length;
+    const characterCount = this.streamBufferParts.reduce((total, part) => total + part.text.length, 0);
+    this.streamBufferParts = [];
+    log.info(
+      { chatJid: this.deliveryJid, partCount, characterCount },
+      'minimal mode suppressed buffered assistant text at tool boundary',
+    );
+  }
+
   /**
    * Enqueue the result/summary text from a completed turn.
    * In minimal mode, suppresses the text if the turn already produced visible
@@ -811,7 +830,8 @@ export class OutboundQueue implements IOutboundQueue {
    */
   enqueueResultText(text: string, role: OutboundMessageRole = 'answer'): void {
     if (!isNonEmptyString(text)) return;
-    if (this.toolUpdateMode === 'minimal' && this.turnHasVisibleText) {
+    const hasBufferedVisibleText = this.streamBufferParts.some((part) => part.text.trim() !== '');
+    if (this.toolUpdateMode === 'minimal' && (this.turnHasVisibleText || hasBufferedVisibleText)) {
       // Suppress — the user already got the real response during the turn
       return;
     }
@@ -828,6 +848,7 @@ export class OutboundQueue implements IOutboundQueue {
    */
   enqueueToolUpdate(update: ToolUpdate): void {
     if (this.toolUpdateMode === 'minimal') {
+      this.discardStreamBufferAtMinimalToolBoundary();
       this.startTyping();
       return;
     }

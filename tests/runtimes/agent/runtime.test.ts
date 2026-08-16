@@ -5082,6 +5082,66 @@ describe('AgentRuntime', () => {
     expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith('Hello there!');
   });
 
+  it('minimal mode clears per-chat pre-tool narration from turn-visible state', async () => {
+    mockConfig.toolUpdateMode = 'minimal';
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+    const mapKey = 'test@s.whatsapp.net';
+    const state = runtime as unknown as {
+      perChatTurnText: Map<string, string>;
+    };
+
+    await runtime.start();
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hi' }), mapKey);
+
+    capturedOnEventRef.current!({
+      type: 'assistant_text',
+      text: 'I found 12 matching files and will inspect their contents next.',
+    });
+    expect(state.perChatTurnText.get(mapKey)).toContain('12 matching files');
+
+    capturedOnEventRef.current!({
+      type: 'tool_use',
+      toolId: 'tool-minimal-per-chat',
+      toolName: 'Read',
+      toolInput: { file_path: '/tmp/input.txt' },
+    });
+
+    expect(state.perChatTurnText.has(mapKey)).toBe(false);
+  });
+
+  it('minimal mode clears shared pre-tool narration from visible and voice state', async () => {
+    mockConfig.toolUpdateMode = 'minimal';
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger);
+    const state = runtime as unknown as {
+      currentTurnAssistantText: string;
+      turnHadVisibleOutput: boolean;
+    };
+
+    await runtime.start();
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hi' }));
+
+    capturedOnEventRef.current!({
+      type: 'assistant_text',
+      text: 'I found 12 matching files and will inspect their contents next.',
+    });
+    expect(state.currentTurnAssistantText).toContain('12 matching files');
+    expect(state.turnHadVisibleOutput).toBe(true);
+
+    capturedOnEventRef.current!({
+      type: 'tool_use',
+      toolId: 'tool-minimal-shared',
+      toolName: 'Read',
+      toolInput: { file_path: '/tmp/input.txt' },
+    });
+
+    expect(state.currentTurnAssistantText).toBe('');
+    expect(state.turnHadVisibleOutput).toBe(false);
+  });
+
   it('suppresses internal assistant_text narration before it reaches WhatsApp', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();

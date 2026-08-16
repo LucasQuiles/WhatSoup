@@ -1998,6 +1998,63 @@ describe('OutboundQueue', () => {
     expect(calls).toHaveLength(callCountBefore); // no new message added
   });
 
+  it('minimal mode drops buffered pre-tool narration and still delivers the terminal result', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setToolUpdateMode('minimal');
+
+    queue.enqueueStreamingText('Let me inspect the workbook before I continue.');
+    queue.enqueueToolUpdate({ category: 'reading', detail: 'workbook.xlsx' });
+    queue.enqueueResultText('Workbook updated and verified.');
+    await vi.runAllTimersAsync();
+
+    expect(calls).toEqual(['Workbook updated and verified.']);
+  });
+
+  it('minimal mode keeps buffered terminal assistant text and suppresses a duplicate result summary', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setToolUpdateMode('minimal');
+
+    queue.enqueueStreamingText('Workbook updated and verified.');
+    queue.enqueueResultText('Internal duplicate result summary.');
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(calls).toHaveLength(0);
+
+    const flushPromise = queue.flush();
+    await vi.runAllTimersAsync();
+    await flushPromise;
+
+    expect(calls).toEqual(['Workbook updated and verified.']);
+  });
+
+  it('minimal mode flushes a buffered decision prompt before its poll', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setToolUpdateMode('minimal');
+
+    queue.enqueueStreamingText('Which workbook should I update?');
+    await queue.enqueuePoll(async () => {
+      calls.push('POLL');
+    });
+
+    expect(calls).toEqual(['Which workbook should I update?', 'POLL']);
+    await queue.flush();
+  });
+
+  it('friendly mode preserves buffered assistant text across a tool boundary', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setToolUpdateMode('friendly');
+
+    queue.enqueueStreamingText('I am checking the workbook now.');
+    queue.enqueueToolUpdate({ category: 'reading', detail: 'workbook.xlsx' });
+    await vi.runAllTimersAsync();
+
+    expect(calls).toContain('I am checking the workbook now.');
+  });
+
   // ─── minimal mode category suppression ───────────────────────────────────
 
   it('shouldShowMinimal: friendly knowledge search is suppressed in minimal mode', async () => {
