@@ -1881,6 +1881,56 @@ describe('GET /health', () => {
     db2.close();
   });
 
+  it('names frozen completed-delivery identity debt instead of agent_runtime_degraded_unclassified', async () => {
+    // ml-bot/mini8 (2026-08-16): five bots sat permanently degraded with the
+    // REAL reason (completed_delivery_identity_debt) visible only in
+    // status_reasons while degradation_causes — the field alerts and flap
+    // detection key on — fell through to agent_runtime_degraded_unclassified.
+    // The signal existed and was dropped from the field that matters. This
+    // pins the mapping rule so the debt is a NAMED cause.
+    db.close();
+    const db2 = makeDb();
+    const fakeAgentRuntime = {
+      getHealthSnapshot: () => ({
+        status: 'degraded',
+        details: {
+          recentCrashes: 0,
+          autoCompactActiveBackoffScopes: 0,
+          turnFinalizationRetainedRetries: 0,
+          turnFinalizationDegradedScopes: 0,
+          turnRecoveryOutstanding: 0,
+          turnRecoveryExhausted: 0,
+          turnRecoveryOpenRecoveries: 0,
+          turnRecoveryCorruptLinks: 0,
+          turnRecoveryEchoConflicts: 0,
+          providerExecution: { pressureActive: false },
+          // the live ml-bot shape: frozen debt, nothing else wrong
+          completedDeliveryIdentityAdmissions: {
+            unresolvedCount: 11,
+            oldestTransitionAt: '2026-08-12T05:34:35.000Z',
+            maximumAttempts: 1,
+            nextAction: 'fresh_inbound',
+          },
+        },
+      }),
+      getFallbackState: () => null,
+    };
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: fakeAgentRuntime as unknown as HealthDeps['runtime'],
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const { body } = await healthReq(port);
+    const json = JSON.parse(body);
+    expect(json.status).toBe('degraded');
+    expect(json.degradation_causes).toContain('delivery_identity_debt');
+    // the named cause replaces the unclassified fall-through — never both
+    expect(json.degradation_causes).not.toContain('agent_runtime_degraded_unclassified');
+    db2.close();
+  });
+
   it('threads #1392 modelUsableStale/modelUsableCheckedAt into runtime.agent and top-level turn_capability (F1)', async () => {
     // Regression for the half-deployed #1392: the freshness fields were exposed on
     // instance.turnCapability (via getFallbackState) but dropped from the core/health.ts
