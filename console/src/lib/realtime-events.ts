@@ -37,15 +37,22 @@ export interface WsConnectedEvent {
   timestamp: number;
 }
 
-/** Stream identity envelope stamped by servers ≥ #2519 draft-1 (additive). */
+/** Stream identity envelope stamped by servers ≥ #2519 draft-1 (additive).
+ * Draft-2 adds `durableSequence`: the count of non-ephemeral frames emitted.
+ * Typing frames advance `sequence` but not `durableSequence`, so the two
+ * counters together attribute a gap to durable loss vs missed typing only. */
 export interface WsStreamEnvelope {
   streamGeneration?: string;
   sequence?: number;
+  durableSequence?: number;
 }
 
 export type WsEvent = (WsInvalidationEvent | WsTypingEvent | WsConnectedEvent) & WsStreamEnvelope;
 
-const INVALIDATION_TYPES = new Set<WsInvalidationEvent['type']>([
+/** Every event type that maps to query invalidations. Exported so the
+ * realtime-owned closure test derives its coverage from this registry instead
+ * of a manual literal a new event type could silently dodge. */
+export const INVALIDATION_TYPES = new Set<WsInvalidationEvent['type']>([
   'instance_status',
   'message_received',
   'chat_updated',
@@ -72,6 +79,9 @@ export function parseWsEvent(data: unknown): WsEvent | null {
   if (isNonEmptyString(parsed.stream_generation)) envelope.streamGeneration = parsed.stream_generation;
   if (typeof parsed.sequence === 'number' && Number.isFinite(parsed.sequence)) {
     envelope.sequence = parsed.sequence;
+  }
+  if (typeof parsed.durable_sequence === 'number' && Number.isFinite(parsed.durable_sequence)) {
+    envelope.durableSequence = parsed.durable_sequence;
   }
 
   if (parsed.type === 'connected') {
@@ -187,13 +197,19 @@ export function getInvalidationKeys(event: WsInvalidationEvent): QueryKey[] {
 // Stream gap detection (#2519) — pure helpers, no React dependencies.
 // ---------------------------------------------------------------------------
 
-/** Last verified position in the server's frame stream. */
+/** Last verified position in the server's frame stream. `durableSequence`
+ * stays null against pre-durable servers; gap judgment then falls back to the
+ * raw-sequence rule. */
 export interface StreamCursor {
   generation: string | null;
   sequence: number | null;
+  durableSequence: number | null;
 }
 
-export type StreamGap = 'unverifiable' | 'generation_changed' | 'sequence_gap';
+/** `ephemeral_gap`: the durable chain is intact but raw sequence shows missed
+ * frames — only typing frames were lost, so only the typing cache needs
+ * reconciliation. Every other gap class demands the full realtime-owned set. */
+export type StreamGap = 'unverifiable' | 'generation_changed' | 'sequence_gap' | 'ephemeral_gap';
 
 /** Every realtime-owned query family. A detected gap invalidates ALL of these:
  * partial invalidation is exactly the staleness class #2519 documents. The
@@ -224,17 +240,35 @@ export function detectHelloGap(cursor: StreamCursor, hello: WsStreamEnvelope): S
     return 'unverifiable';
   }
   if (hello.streamGeneration !== cursor.generation) return 'generation_changed';
+  if (typeof hello.durableSequence === 'number' && cursor.durableSequence !== null) {
+    if (hello.durableSequence !== cursor.durableSequence) return 'sequence_gap';
+    if (hello.sequence === cursor.sequence) return null;
+    // Raw regression is never explainable by missed typing frames: fail full.
+    return cursor.sequence !== null && hello.sequence > cursor.sequence ? 'ephemeral_gap' : 'sequence_gap';
+  }
   if (hello.sequence !== cursor.sequence) return 'sequence_gap';
   return null;
 }
 
 /** Judge an in-stream frame against the cursor. Legacy frames without an
  * envelope (or before any envelope was seen) are tolerated — gap detection
- * simply stays unavailable for them. */
-export function detectFrameGap(cursor: StreamCursor, frame: WsStreamEnvelope): StreamGap | null {
+ * simply stays unavailable for them.
+ *
+ * `ephemeral` declares the FRAME's own class (typing frames do not advance
+ * durable_sequence). The judge needs it because an ephemeral frame carrying an
+ * advanced durable position proves a durable frame was dropped, while a
+ * durable frame advancing by exactly one is just its own arrival. */
+export function detectFrameGap(cursor: StreamCursor, frame: WsStreamEnvelope, ephemeral = false): StreamGap | null {
   if (typeof frame.streamGeneration !== 'string' || typeof frame.sequence !== 'number') return null;
   if (cursor.generation === null || cursor.sequence === null) return null;
   if (frame.streamGeneration !== cursor.generation) return 'generation_changed';
+  if (typeof frame.durableSequence === 'number' && cursor.durableSequence !== null) {
+    const expectedDurable = cursor.durableSequence + (ephemeral ? 0 : 1);
+    if (frame.durableSequence !== expectedDurable) return 'sequence_gap';
+    if (frame.sequence === cursor.sequence + 1) return null;
+    // Raw at/behind the cursor is a stream-integrity violation, not typing loss.
+    return frame.sequence > cursor.sequence + 1 ? 'ephemeral_gap' : 'sequence_gap';
+  }
   if (frame.sequence !== cursor.sequence + 1) return 'sequence_gap';
   return null;
 }
