@@ -19,6 +19,7 @@ import { errorMessage } from '../../lib/error-message.ts';
 import { lookupCredential, resolveProviderKeyService } from '../../lib/keyring.ts';
 import { MS_PER_MINUTE } from '../../lib/time-units.ts';
 import { createChildLogger } from '../../logger.ts';
+import { systemClock } from '../../lib/clock.ts';
 import { classifyProviderFailure } from './failure-taxonomy.ts';
 import {
   fallbackKeyPresent as fallbackKeyPresentFor,
@@ -42,6 +43,9 @@ import {
   saveFallbackState,
 } from './fallback-state-db.ts';
 import { handoffContextEnabled, handoffDistillModel, handoffDistillerEnabled } from './handoff-distill-config.ts';
+import { CHAIN_CANARY_PROMPT, resolveFallbackCanaryConfig, type FallbackCanaryConfig } from './fallback-canary-config.ts';
+import { probeChainEntryCompletion, type ChainEntryCanaryResult } from './providers/chain-entry-canary.ts';
+import { buildOpenCodeRunArgs } from './providers/opencode-execution-profile.ts';
 import type { IOutboundQueue } from './outbound-queue.ts';
 import {
   buildPrimaryProbeAdapterDeps,
@@ -229,6 +233,17 @@ export class RuntimeFallbackCoordinator {
     }
 
     const requireIndependentProvider = fallbackRequiresIndependentProbe(reason);
+    // Canary consult (fail-open): skip entries with FRESH real-completion
+    // failure evidence — but only when at least one otherwise-viable candidate
+    // has no such evidence. If every candidate looks canary-dead the evidence
+    // is disregarded entirely, so a stale or wrong sweep can never strand the
+    // chain below its pre-canary floor.
+    const applyCanary = this.host.agentFallbacks.some((candidate) => {
+      if (requireIndependentProvider && candidate.provider === this.host.agentProvider) return false;
+      const candidateKey = this.host.fallbackChain.entryKey(candidate);
+      if (this.host.fallbackChain.failedKeys.has(candidateKey)) return false;
+      return !this.chainCanaryDead(candidateKey);
+    });
     let firstEligibleIndex = -1;
     let firstIndependentIndex = -1;
     const state: Array<AgentFallbackEntry & { eligible: boolean }> = [];
@@ -239,6 +254,12 @@ export class RuntimeFallbackCoordinator {
         continue;
       }
       if (this.host.fallbackChain.failedKeys.has(this.host.fallbackChain.entryKey(entry))) {
+        state.push({ ...entry, eligible: false });
+        continue;
+      }
+      if (applyCanary && this.chainCanaryDead(this.host.fallbackChain.entryKey(entry))) {
+        // Fresh evidence this entry cannot serve a completion — pass over it
+        // exactly like a failed key. No credential alert churn for a skip.
         state.push({ ...entry, eligible: false });
         continue;
       }
@@ -597,7 +618,10 @@ export class RuntimeFallbackCoordinator {
     primaryModelUsability: RuntimePrimaryModelUsability | null;
     turnCapability: RuntimeTurnCapability;
     activeFallbackEntry: AgentFallbackEntry | null;
-    fallbackChain: Array<AgentFallbackEntry & { eligible: boolean | null }>;
+    fallbackChain: Array<AgentFallbackEntry & {
+      eligible: boolean | null;
+      canary?: { status: string; checkedAt: number; evidence: string | null } | null;
+    }>;
     fallbackChainExhausted: boolean;
     failedEntryCount: number;
     fallbackRestoredFromPersist: boolean;
@@ -629,7 +653,15 @@ export class RuntimeFallbackCoordinator {
       primaryModelUsability: this.host.primaryModelUsability ? { ...this.host.primaryModelUsability } : null,
       turnCapability: this.host.getTurnCapability(),
       activeFallbackEntry: fallbackEntry ? { ...fallbackEntry } : null,
-      fallbackChain: this.host.fallbackChain.snapshot(this.host.agentFallbacks, this.host.idleFallbackEligibilityResolver),
+      fallbackChain: this.host.fallbackChain.snapshot(this.host.agentFallbacks, this.host.idleFallbackEligibilityResolver)
+        .map((entry) => {
+          // Additive-only: entries without canary evidence keep their exact
+          // pre-canary shape so existing snapshot assertions stay byte-stable.
+          const record = this.chainCanary.get(this.host.fallbackChain.entryKey(entry));
+          return record
+            ? { ...entry, canary: { status: record.status, checkedAt: record.checkedAt, evidence: record.evidence } }
+            : entry;
+        }),
       fallbackChainExhausted: this.host.fallbackChain.isExhausted(this.host.agentFallbacks),
       failedEntryCount: this.host.fallbackChain.failedKeys.size,
       fallbackRestoredFromPersist: this.host.fallbackWindowRestored,
@@ -948,6 +980,116 @@ export class RuntimeFallbackCoordinator {
       }, 'advanced fallback chain past process-failing entry');
     }
     return { advanced, activation, fromProvider: from.provider, fromModel: from.model ?? null };
+  }
+
+  // ── Chain canary (R4-shape out-of-band probes; fleet incident 2026-08-15) ──
+  // Metadata preflights cannot see account-level death (a billing-suspended
+  // account's models endpoint returns 200); only a real completion can. The
+  // canary issues a tiny completion per configured opencode-cli entry on an
+  // interval, records per-entry evidence, alerts on health transitions, and
+  // lets window selection skip entries with FRESH failure evidence (fail-open:
+  // if every candidate has failure evidence, the canary is disregarded so a
+  // stale sweep can never strand the chain).
+
+  private readonly chainCanaryConfig: FallbackCanaryConfig = resolveFallbackCanaryConfig();
+  private readonly chainCanary = new Map<string, ChainEntryCanaryResult & { checkedAt: number }>();
+  private chainCanaryTimer: ReturnType<typeof setInterval> | null = null;
+  private chainCanarySweepInFlight = false;
+
+  /** Arm the periodic canary. No-op unless WHATSOUP_FALLBACK_CANARY_MS > 0. */
+  startChainCanary(): void {
+    if (this.chainCanaryConfig.intervalMs <= 0 || this.chainCanaryTimer) return;
+    this.chainCanaryTimer = setInterval(() => {
+      void this.runChainCanarySweep('scheduled');
+    }, this.chainCanaryConfig.intervalMs);
+    this.chainCanaryTimer.unref?.();
+    // First sweep shortly after boot so /health has evidence without waiting a
+    // full interval; delayed so startup work settles first.
+    setTimeout(() => { void this.runChainCanarySweep('startup'); }, 30_000).unref?.();
+    log.info({ intervalMs: this.chainCanaryConfig.intervalMs }, 'fallback chain canary armed');
+  }
+
+  stopChainCanary(): void {
+    if (this.chainCanaryTimer) {
+      clearInterval(this.chainCanaryTimer);
+      this.chainCanaryTimer = null;
+    }
+  }
+
+  /** Probe every canary-capable chain entry sequentially; record + alert transitions. */
+  async runChainCanarySweep(trigger: string): Promise<void> {
+    if (this.chainCanarySweepInFlight) return;
+    this.chainCanarySweepInFlight = true;
+    try {
+      for (const entry of this.host.agentFallbacks) {
+        const key = this.host.fallbackChain.entryKey(entry);
+        if (entry.provider !== 'opencode-cli') {
+          // v1 scope: only the CLI transport the estate's chains use. Recorded
+          // as unknown so /health distinguishes "not probed" from "healthy".
+          if (!this.chainCanary.has(key)) {
+            this.chainCanary.set(key, { status: 'unknown', evidence: null, durationMs: 0, checkedAt: systemClock.now() });
+          }
+          continue;
+        }
+        const binary = getProviderBinary(entry.provider);
+        if (!binary) continue;
+        const providerConfig = fallbackProviderConfigFor(entry.provider, this.host.agentProvider, this.host.agentProviderConfig);
+        let env: NodeJS.ProcessEnv;
+        try {
+          env = buildChildEnv(
+            entry.provider,
+            {
+              allowM365Mutations: this.host.allowM365Mutations,
+              whatsoupInstance: this.host.instanceName,
+              whatsoupMcpSocket: this.host.globalMcpSocketPath ?? undefined,
+            },
+            entry.model,
+            providerConfig,
+          );
+        } catch (err) {
+          log.warn({ err: errorMessage(err), provider: entry.provider, model: entry.model }, 'chain canary env build failed — entry skipped');
+          continue;
+        }
+        const args = buildOpenCodeRunArgs({ providerConfig, model: entry.model });
+        const previous = this.chainCanary.get(key);
+        const result = await probeChainEntryCompletion(
+          binary,
+          args,
+          CHAIN_CANARY_PROMPT,
+          env,
+          this.chainCanaryConfig.timeoutMs,
+        );
+        this.chainCanary.set(key, { ...result, checkedAt: systemClock.now() });
+        const wasHealthy = previous === undefined || previous.status === 'ok' || previous.status === 'unknown';
+        if (result.status !== 'ok' && wasHealthy) {
+          emitAlertChecked(
+            this.host.instanceName,
+            'fallback_chain_entry_unhealthy',
+            'Fallback chain entry failed its real-completion canary',
+            `provider=${entry.provider} model=${entry.model ?? 'default'} status=${result.status}`
+              + ` trigger=${trigger}${result.evidence ? ` evidence=${result.evidence.slice(0, 200)}` : ''}`,
+          );
+          log.warn({ provider: entry.provider, model: entry.model, status: result.status, evidence: result.evidence }, 'fallback chain entry canary failed');
+        } else if (result.status === 'ok' && previous !== undefined && previous.status !== 'ok' && previous.status !== 'unknown') {
+          clearAlertSourceChecked(
+            this.host.instanceName,
+            'fallback_chain_entry_unhealthy',
+            `recoveryProof=canary_completion provider=${entry.provider} model=${entry.model ?? 'default'}`,
+          );
+          log.info({ provider: entry.provider, model: entry.model }, 'fallback chain entry canary recovered');
+        }
+      }
+    } finally {
+      this.chainCanarySweepInFlight = false;
+    }
+  }
+
+  /** Fresh failure evidence for `key`, honoring the trust TTL. */
+  private chainCanaryDead(key: string): boolean {
+    const record = this.chainCanary.get(key);
+    if (record === undefined) return false;
+    if (record.status !== 'failed' && record.status !== 'timeout') return false;
+    return systemClock.now() - record.checkedAt <= this.chainCanaryConfig.trustMs;
   }
 
   /** Arm (or move) the fallback window to `until`, schedule the revert timer,

@@ -142,6 +142,11 @@
       "reason": "whole-object process.env \u2192 resolveReleaseIdentity (build/release identity)."
     },
     {
+      "file": "src/runtimes/agent/fallback-canary-config.ts",
+      "allowedUnmarkedSites": 1,
+      "reason": "pure resolver `env: Env = process.env` param-default (handoff-distill-config idiom)."
+    },
+    {
       "file": "src/runtimes/agent/handoff-distill-config.ts",
       "allowedUnmarkedSites": 3,
       "reason": "exemplar pure resolver `env: Env = process.env` param-defaults \u2014 the idiom to extend."
