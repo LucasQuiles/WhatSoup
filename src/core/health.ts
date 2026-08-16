@@ -341,6 +341,7 @@ export type HealthDegradationCause =
   | 'agent_session_inactive'
   | 'turn_finalization_degraded'
   | 'turn_recovery_degraded'
+  | 'delivery_identity_debt'
   | 'provider_execution_pressure'
   | 'agent_runtime_degraded_unclassified'
   | 'agent_runtime_unhealthy'
@@ -380,6 +381,7 @@ const HEALTH_DEGRADATION_CAUSE_PRESENCE: Readonly<Record<HealthDegradationCause,
   agent_session_inactive: true,
   turn_finalization_degraded: true,
   turn_recovery_degraded: true,
+  delivery_identity_debt: true,
   provider_execution_pressure: true,
   agent_runtime_degraded_unclassified: true,
   agent_runtime_unhealthy: true,
@@ -2183,12 +2185,24 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       if (runtimeProviderExecution?.['pressureActive'] === true) {
         addDegradationCause('provider_execution_pressure');
       }
+      // Frozen completed-delivery identity debt pinned five bots at permanently
+      // degraded while the cause fell through to _unclassified — the real
+      // reason lived only in status_reasons, invisible to alerts/flap keying
+      // (fleet-flapping root-cause, 2026-08-16). Name it.
+      const identityAdmissions = runtimeDetails?.['completedDeliveryIdentityAdmissions'] as
+        | Record<string, unknown>
+        | undefined;
+      const identityDebtCount = identityAdmissions?.['unresolvedCount'];
+      if (typeof identityDebtCount === 'number' && Number.isFinite(identityDebtCount) && identityDebtCount > 0) {
+        addDegradationCause('delivery_identity_debt');
+      }
       if (
         agentRuntimeStatus === 'degraded'
         && !fallbackWindowActive
         && !degradationCauses.some((cause) => cause.startsWith('agent_')
           || cause === 'turn_finalization_degraded'
           || cause === 'turn_recovery_degraded'
+          || cause === 'delivery_identity_debt'
           || cause === 'provider_execution_pressure')
       ) {
         addDegradationCause('agent_runtime_degraded_unclassified');

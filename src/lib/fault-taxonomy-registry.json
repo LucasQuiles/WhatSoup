@@ -124,6 +124,7 @@
         "agent_session_inactive",
         "turn_finalization_degraded",
         "turn_recovery_degraded",
+        "delivery_identity_debt",
         "provider_execution_pressure",
         "agent_runtime_degraded_unclassified",
         "agent_runtime_unhealthy",
@@ -875,6 +876,14 @@
         "impactTier": "page",
         "notification": "critical",
         "rootOwner": "agent_turn_pipeline",
+        "clearPredicate": "cause absent from the next accepted health body degradation vector",
+        "requiresCorroborationBeforePaging": false
+      },
+      "delivery_identity_debt": {
+        "family": "durability",
+        "impactTier": "hold",
+        "notification": "warning",
+        "rootOwner": "durability_engine",
         "clearPredicate": "cause absent from the next accepted health body degradation vector",
         "requiresCorroborationBeforePaging": false
       },
