@@ -90,7 +90,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "e6ebffcc07bd1999deb650fe8ba43fe27d503fda664fef0cd0bb833187fac4d3",
+      "sha256": "2fc817baead92a006814f252ebfce8b11b60e2002c005e1e25211e4a8450b335",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -163,7 +163,9 @@
         "advance_deadman_episode",
         "email_fallback_outcome",
         "required_tools_daily_sections",
-        "_classify_tool_probe_error"
+        "_classify_tool_probe_error",
+        "_validate_tool_contract",
+        "initialize_sink"
       ]
     },
     {
