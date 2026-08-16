@@ -131,7 +131,8 @@ describe('websocket client lifecycle (#2521)', () => {
     expect(healthy.terminated).toBe(false);
     expect(healthy.pingCount).toBe(6);
     const snapshot = h.server.healthSnapshot();
-    expect(snapshot.live).toBe(1);
+    expect(snapshot.confirmedLive, 'a ponging client is CONFIRMED live').toBe(1);
+    expect(snapshot.unconfirmed).toBe(0);
     expect(snapshot.awaitingPong).toBe(0);
     expect(snapshot.recentOutcomes.client_unresponsive).toBe(0);
     h.cleanup();
@@ -258,7 +259,7 @@ describe('websocket client lifecycle (#2521)', () => {
     h.adopt(new FakeClient());
     const snapshot = h.server.healthSnapshot();
     expect(Object.keys(snapshot).sort()).toEqual(
-      ['awaitingPong', 'backpressured', 'clientCount', 'heartbeatAgeMs', 'live', 'recentOutcomes'].sort(),
+      ['awaitingPong', 'backpressured', 'clientCount', 'confirmedLive', 'heartbeatAgeMs', 'recentOutcomes', 'unconfirmed'].sort(),
     );
     const flat = JSON.stringify(snapshot);
     expect(flat).not.toContain('synthetic');
@@ -267,5 +268,88 @@ describe('websocket client lifecycle (#2521)', () => {
       expect(value).toBeTypeOf('number');
     }
     h.cleanup();
+  });
+
+  it('a freshly adopted client is unconfirmed until its first pong', () => {
+    const h = makeHarness();
+    const fresh = new FakeClient();
+    h.adopt(fresh);
+    expect(h.server.healthSnapshot().unconfirmed, 'liveness is proven by pong receipt, never assumed').toBe(1);
+    expect(h.server.healthSnapshot().confirmedLive).toBe(0);
+    fresh.emit('pong');
+    expect(h.server.healthSnapshot().confirmedLive).toBe(1);
+    expect(h.server.healthSnapshot().unconfirmed).toBe(0);
+    h.cleanup();
+  });
+
+  it('healthSnapshot does not mutate the outcome window on read', () => {
+    const h = makeHarness({ outcomeWindowMs: 1_000 });
+    const client = new FakeClient();
+    h.adopt(client);
+    h.server.broadcast({ type: 'instance_status', instance: 'synthetic-a' });
+    expect(h.server.healthSnapshot().recentOutcomes.write_accepted).toBe(1);
+    h.clock.nowMs = 2_000; // past the window
+    expect(h.server.healthSnapshot().recentOutcomes.write_accepted).toBe(0);
+    h.clock.nowMs = 0; // rewind: state must be untouched by the reads above
+    expect(h.server.healthSnapshot().recentOutcomes.write_accepted, 'a read must not reset counters').toBe(1);
+    h.cleanup();
+  });
+
+  it('a synchronous send throw terminates the transport like any other drop', () => {
+    const h = makeHarness();
+    const thrower = new FakeClient();
+    h.adopt(thrower);
+    thrower.throwOnSend = true;
+    h.server.broadcast({ type: 'instance_status', instance: 'synthetic-a' });
+    expect(thrower.terminated, 'sync-throwing sockets must be terminated, not just forgotten').toBe(true);
+    h.cleanup();
+  });
+
+  it('every broadcast frame carries the stream envelope with a contiguous sequence', () => {
+    const h = makeHarness();
+    const client = new FakeClient();
+    h.adopt(client);
+    h.server.broadcast({ type: 'instance_status', instance: 'synthetic-a' });
+    h.server.broadcast({ type: 'feed_event', instance: 'synthetic-a' });
+    const frames = client.sent.slice(1).map((raw) => JSON.parse(raw) as Record<string, unknown>);
+    expect(frames).toHaveLength(2);
+    for (const frame of frames) {
+      expect(frame.schema_version).toBe(1);
+      expect(frame.stream_generation).toBeTypeOf('string');
+      expect(frame.emitted_at).toBeTypeOf('number');
+    }
+    expect(frames[1]?.sequence).toBe((frames[0]?.sequence as number) + 1);
+    expect(frames[0]?.stream_generation).toBe(frames[1]?.stream_generation);
+    h.cleanup();
+  });
+
+  it('the hello receipt declares the generation and the already-emitted sequence', () => {
+    const h = makeHarness();
+    const early = new FakeClient();
+    h.adopt(early);
+    h.server.broadcast({ type: 'instance_status', instance: 'synthetic-a' });
+    const late = new FakeClient();
+    h.adopt(late);
+    const hello = JSON.parse(late.sent[0] ?? '{}') as Record<string, unknown>;
+    expect(hello.type).toBe('connected');
+    expect(hello.schema_version).toBe(1);
+    expect(hello.stream_generation).toBeTypeOf('string');
+    expect(hello.sequence, 'hello must state where the stream already stands').toBe(1);
+    h.cleanup();
+  });
+
+  it('distinct server instances mint distinct stream generations', () => {
+    const h1 = makeHarness();
+    const h2 = makeHarness();
+    const c1 = new FakeClient();
+    const c2 = new FakeClient();
+    h1.adopt(c1);
+    h2.adopt(c2);
+    const g1 = (JSON.parse(c1.sent[0] ?? '{}') as Record<string, unknown>).stream_generation;
+    const g2 = (JSON.parse(c2.sent[0] ?? '{}') as Record<string, unknown>).stream_generation;
+    expect(g1).toBeTypeOf('string');
+    expect(g1).not.toBe(g2);
+    h1.cleanup();
+    h2.cleanup();
   });
 });

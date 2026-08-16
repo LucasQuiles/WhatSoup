@@ -145,6 +145,20 @@ describe('parseWsEvent', () => {
     });
   });
 
+  it('tolerates additive stream-envelope fields from newer servers (#2519)', () => {
+    // The server stamps schema_version/stream_generation/sequence/emitted_at on
+    // every frame; a deployed console that predates gap detection must keep
+    // parsing the known shape and ignoring the extras.
+    const enveloped =
+      '{"type":"log_entry","instance":"q","schema_version":1,' +
+      '"stream_generation":"11111111-2222-4333-8444-555555555555","sequence":7,"emitted_at":1723800000000}';
+    expect(parseWsEvent(enveloped)).toEqual({ type: 'log_entry', instance: 'q' });
+    const envelopedHello =
+      '{"type":"connected","timestamp":1723800000000,"schema_version":1,' +
+      '"stream_generation":"11111111-2222-4333-8444-555555555555","sequence":0}';
+    expect(parseWsEvent(envelopedHello)).toEqual({ type: 'connected', timestamp: 1723800000000 });
+  });
+
   it('rejects invalid event payload shapes', () => {
     expect(parseWsEvent('{"type":"connected","timestamp":"soon"}')).toBeNull();
     expect(parseWsEvent('{"type":"message_received","instance":""}')).toBeNull();
