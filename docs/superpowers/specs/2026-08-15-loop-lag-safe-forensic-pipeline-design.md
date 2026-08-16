@@ -1,6 +1,6 @@
 # Loop-Lag Safe Forensic Pipeline Design
 
-**Status:** Approved for planning
+**Status:** Approved with implementation conditions C1-C6
 **Date:** 2026-08-15
 **Issue:** #3253
 
@@ -392,3 +392,12 @@ Rollout order:
   health behavior regresses.
 - Full verification and CI pass on the exact final head; masked or interrupted
   checks remain explicitly inconclusive.
+
+## 12. Approved Conditions
+
+- **C1:** The production wall clock defaults to `systemClock.now()`; the clock-budget ratchet is required.
+- **C2:** An empty page with no cursor returns `next_after: 0`; with a cursor it preserves that cursor.
+- **C3:** Page samples and cursor metadata derive from one immutable ring copy.
+- **C4:** The physical ring spans about 180 seconds, but the supported gap-free interval ceiling is 150 seconds. Larger configured intervals are documented as gap-guaranteed by the operating contract because the final margin belongs to jitter, request latency, and page draining.
+- **C5:** The raw-sampling producer commit must not merge or deploy with `raw_recent` still embedded in `/health`; endpoint extraction and aggregate-only health land in the same PR.
+- **C6:** Rollout verification names all six file-scope ratchets explicitly: `clock-budget`, `env-read-allowlist`, `secret-env-read-guard`, `fitness-file-size-warning-budget`, `fitness-sync-exec-timeout-budget`, and `public-surface-drift-check`.

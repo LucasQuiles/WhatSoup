@@ -123,6 +123,9 @@ export async function run(argv = process.argv.slice(2), deps: RunDeps = {}): Pro
         collect: {
           required: ['--instance', '--base-url', '--token-file', '--output', '--format=json'],
           modes: ['--once', '--interval-ms + --duration-ms'],
+          interval_ms: { minimum: 1_000, maximum: 300_000, gap_free_ceiling: 150_000 },
+          limit: { minimum: 1, maximum: 160, default: 160 },
+          max_output_bytes: { minimum: 1, default: DEFAULT_MAX_OUTPUT_BYTES },
         },
       },
       record_schema_version: 1,

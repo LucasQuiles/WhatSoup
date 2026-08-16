@@ -505,7 +505,7 @@ PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH" \
     tests/lib/private-fs.test.ts
 
 PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH" \
-  npm run loop-lag-samples:schema >/tmp/whatsoup-loop-lag-schema.json
+  npm --silent run loop-lag-samples:schema >/tmp/whatsoup-loop-lag-schema.json
 node -e 'const x=require("/tmp/whatsoup-loop-lag-schema.json"); if (!x.effects || !x.exit_codes) process.exit(1)'
 ```
 
