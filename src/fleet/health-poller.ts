@@ -2478,6 +2478,18 @@ export class HealthPoller {
     severity: 'critical' | 'error' | 'warning' | 'info' = 'critical',
     criticalAsset?: BotErrorsCriticalAssetDiagnostic,
   ): boolean {
+    // Reliability 4.3: an emit while this source is ALREADY active for the
+    // instance is a re-NOTIFICATION of an unchanged open condition, not a
+    // fresh occurrence. The marker rides the event so the dispatcher's flap
+    // detector skips renotify traffic for trip counting (the ml-bot
+    // immortal-storm defect: throttled re-emits with fresh ids counted as
+    // flap trips forever). Deliberately the activeAlertSources leg ONLY —
+    // never the persisted throttle store, which survives recovery clears and
+    // would mark a genuine re-open (a real flap transition) as a re-emit. A
+    // recovery clear / supersede drops the active source, so open→clear→open
+    // cycles still count as occurrences. Computed BEFORE the emit —
+    // trackActiveAlertSource marks the source active afterwards.
+    const renotify = this.statuses.get(name)?.activeAlertSources.includes(source) === true;
     // Critical-severity alerts bypass silence (operator must see them even on a
     // silenced instance) but keep the throttle guard (15min rate-limit prevents
     // storm if a critical source flaps). Only instance_logged_out bypasses BOTH.
@@ -2509,7 +2521,12 @@ export class HealthPoller {
       : evidence;
     let result: AlertEmissionResult;
     try {
-      result = emitAlert(name, source, summary, throttleEvidence, severity, criticalAsset);
+      // The renotify option is appended only when set: call arity stays 6 for
+      // the common occurrence path (mock-arity-stable), and the single call
+      // node keeps the emission-governance scanner's fail-closed status
+      // decision adjacency intact.
+      result = emitAlert(name, source, summary, throttleEvidence, severity, criticalAsset,
+        ...(renotify ? [{ renotify: true }] as const : []));
     } catch (err) {
       log.warn({ err, name, source }, 'alert emission threw before durable acceptance');
       return false;

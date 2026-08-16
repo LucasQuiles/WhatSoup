@@ -222,6 +222,7 @@ function captureToAlertSink(
     evidence: string;
     severity: BotErrorsSeverity;
     criticalAsset?: BotErrorsCriticalAssetDiagnostic;
+    renotify?: boolean;
   },
 ): AlertEmissionResult {
   try {
@@ -272,16 +273,18 @@ export function emitAlert(
   evidence: string,
   severity: BotErrorsSeverity = 'critical',
   criticalAsset?: BotErrorsCriticalAssetDiagnostic,
+  opts?: { renotify?: boolean },
 ): AlertEmissionResult {
   // Issue #2386: confine evidence and summary to bounded metadata BEFORE
   // any sink dispatch. This ensures the legacy fallback path, dry-run sink,
   // and durable outbox all receive the same safe representation.
+  const renotify = opts?.renotify === true;
   const sink = alertSinkPath();
   if (sink) {
-    return captureToAlertSink(sink, { eventType: 'alert', instance, source, summary, evidence, severity, criticalAsset });
+    return captureToAlertSink(sink, { eventType: 'alert', instance, source, summary, evidence, severity, criticalAsset, renotify });
   }
   try {
-    const outbox = writeBotErrorsEvent({ eventType: 'alert', instance, source, summary, evidence, severity, criticalAsset });
+    const outbox = writeBotErrorsEvent({ eventType: 'alert', instance, source, summary, evidence, severity, criticalAsset, renotify });
     return { ok: true, channel: 'outbox', status: 'durably_queued', outbox };
   } catch (err) {
     const reason = errorMessage(err);

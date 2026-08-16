@@ -3359,6 +3359,10 @@ describe('HealthPoller', () => {
     await vi.advanceTimersByTimeAsync(1_000);
 
     expect(poller.getStatus('remote-1')!.statusConfidence).toBe('confirmed');
+    // Reliability 4.3: the weak→explicit upgrade re-emits while the
+    // instance_logged_out source is still continuously active — the SAME open
+    // condition at higher confidence, not a fresh occurrence — so the emit
+    // carries the renotify marker and the flap detector must not count it.
     expect(alertFns.emitAlert).toHaveBeenCalledWith(
       'remote-1',
       'instance_logged_out',
@@ -3366,6 +3370,7 @@ describe('HealthPoller', () => {
       expect.stringContaining('last_status_code=401'),
       'critical',
       serverRevokedAssetMatcher(),
+      { renotify: true },
     );
 
     poller.stop();

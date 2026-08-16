@@ -62,6 +62,14 @@ export interface BotErrorsOutboxInput {
   evidence?: string;
   severity?: BotErrorsSeverity;
   criticalAsset?: BotErrorsCriticalAssetDiagnostic;
+  /**
+   * Reliability 4.3: true marks a re-NOTIFICATION of an unchanged open
+   * condition (e.g. the health poller re-emitting a still-degraded instance
+   * through its throttle). The dispatcher's flap detector skips renotify
+   * events for trip counting — only the emitter knows re-emit vs fresh
+   * occurrence, so the marker must ride the event. Omitted when false.
+   */
+  renotify?: boolean;
 }
 
 export interface BotErrorsOutboxWrite {
@@ -540,6 +548,9 @@ export function buildBotErrorsEvent(input: BotErrorsOutboxInput, eventId = rando
     createdAt,
     instance,
     source,
+    // Additive, absent-by-default (back-compat shape): present only when the
+    // emitter explicitly marks a re-notification. See BotErrorsOutboxInput.
+    ...(input.renotify === true ? { renotify: true } : {}),
     summary: confinedSummary,
     evidence: confinedEvidence,
     // Issue #2386: strip absolute paths and raw process arguments. Keep
