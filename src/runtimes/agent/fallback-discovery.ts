@@ -46,6 +46,31 @@ export const DEFAULT_DISCOVERY_POLICY: FallbackDiscoveryPolicy = {
 /** Catalogue provider prefix whose models run without operator credentials. */
 const FREE_TIER_PREFIX = 'opencode';
 
+/**
+ * Model-name tokens that mark a catalogue id as NON-CHAT — embeddings, image/
+ * video/music generation, speech, moderation, rerankers, realtime-audio.
+ * Gateways list every model a credential unlocks, and the newest-per-provider
+ * pick has no modality signal, so without this filter a chain candidate can be
+ * a model that cannot serve a text turn at all (observed live 2026-08-16:
+ * openai's pick was `text-embedding-ada-002`; google's would be
+ * `veo-3.1-lite-generate-preview`, a VIDEO model). Substring heuristic on the
+ * model segment; deliberately over-excludes — a wrongly excluded fringe chat
+ * model costs one candidate, while a wrongly included non-chat model is a
+ * guaranteed-dead fallback rung. Operator `preferModels` pins BYPASS the
+ * filter (explicit intent beats the heuristic).
+ */
+const NON_CHAT_MODEL_TOKENS = [
+  'embed', 'imagen', 'veo-', 'lyria', 'tts', 'dall-e', 'image', 'whisper',
+  'moderation', 'realtime', 'transcribe', 'rerank', 'audio',
+] as const;
+
+/** True when a catalogue id's model segment matches a non-chat token. */
+export function isNonChatCatalogModel(modelId: string): boolean {
+  const slash = modelId.indexOf('/');
+  const modelSegment = (slash >= 0 ? modelId.slice(slash + 1) : modelId).toLowerCase();
+  return NON_CHAT_MODEL_TOKENS.some((token) => modelSegment.includes(token));
+}
+
 export interface DiscoveredCandidate {
   catalogProvider: string;
   model: string;
@@ -80,12 +105,17 @@ export function deriveFallbackChainFromCatalog(opts: {
   const excluded = new Set(policy.excludeProviders);
 
   // Group catalogue ids by provider prefix, preserving catalogue order.
+  // Non-chat models (embeddings, image/video/speech generation, …) are
+  // dropped here so BOTH the newest-per-provider pick and the free-tier tail
+  // only ever consider ids that can serve a text turn — unless the operator
+  // pinned one explicitly, which always wins over the heuristic.
   const groups = new Map<string, string[]>();
   for (const id of opts.catalogIds) {
     const slash = id.indexOf('/');
     if (slash <= 0 || slash === id.length - 1) continue; // malformed id
     const catalogProvider = id.slice(0, slash);
     if (excluded.has(catalogProvider)) continue;
+    if (isNonChatCatalogModel(id) && policy.preferModels[catalogProvider] !== id) continue;
     const group = groups.get(catalogProvider);
     if (group) group.push(id);
     else groups.set(catalogProvider, [id]);
