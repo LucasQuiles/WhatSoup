@@ -336,9 +336,13 @@ export class FleetWebSocketServer {
   Neither write acceptance nor local completion is projected to remote
   application receipt. */
   broadcast(event: WsEvent): void {
-    if (this.clients.size === 0) return;
+    // Counters track EMITTED events, not deliveries: they must advance even
+    // with zero clients connected, or a later reconnect hello declares the
+    // stale position and the client's gap judgment misses everything emitted
+    // during the empty window. Only serialization and delivery are skipped.
     this.sequence += 1;
     if (event.type !== 'typing_update') this.durableSequence += 1;
+    if (this.clients.size === 0) return;
     const data = JSON.stringify({
       ...event,
       schema_version: 1,

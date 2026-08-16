@@ -386,6 +386,28 @@ describe('websocket client lifecycle (#2521)', () => {
     h.cleanup();
   });
 
+  it('events broadcast with zero clients still advance the stream counters', () => {
+    // The zero-client blind spot (banked from the #3288 review): if the
+    // counters freeze while no client is connected, a later reconnect hello
+    // declares the OLD position and the client's gap judgment reads "nothing
+    // missed" for durable events that genuinely occurred. Counters must track
+    // emitted events, not deliveries.
+    const h = makeHarness();
+    h.server.broadcast({ type: 'instance_status', instance: 'synthetic-a' });
+    h.server.broadcast({ type: 'typing_update', instance: 'synthetic-a', jid: 'synthetic-jid', composing: true, since: 1 });
+    const client = new FakeClient();
+    h.adopt(client);
+    const hello = JSON.parse(client.sent[0] ?? '{}') as Record<string, unknown>;
+    expect(hello.sequence, 'hello must reflect events emitted while no client was connected').toBe(2);
+    expect(hello.durable_sequence).toBe(1);
+    // The newly adopted client stays contiguous from its hello position.
+    h.server.broadcast({ type: 'feed_event', instance: 'synthetic-a' });
+    const frame = JSON.parse(client.sent.at(-1) ?? '{}') as Record<string, unknown>;
+    expect(frame.sequence).toBe(3);
+    expect(frame.durable_sequence).toBe(2);
+    h.cleanup();
+  });
+
   it('distinct server instances mint distinct stream generations', () => {
     const h1 = makeHarness();
     const h2 = makeHarness();
