@@ -2632,6 +2632,37 @@ def remote_ack(host: str, claim: str, remote_root: str, action: str, timeout: in
     return proc.stdout.strip()
 
 
+REMOTE_CLAIM_STAT_SCRIPT = r"""
+import sys
+from pathlib import Path
+print("present" if Path(sys.argv[1]).exists() else "absent")
+"""
+
+
+def remote_claim_exists(host: str, claim: str, timeout: int) -> bool:
+    """#2427: read-only remote probe — does the claim file still exist?
+
+    After an ack-phase failure: claim PRESENT means the acknowledgement
+    genuinely failed (conservative requeue path). Claim ABSENT means either
+    the ack archived it to relayed/ or lease recovery returned it to the
+    remote outbox — absence does not discriminate the two, but in both cases
+    the already-durable local record makes reconciling safe (a reoffer
+    dedupes). Raises on probe failure so the caller can stay conservative.
+    """
+    proc = subprocess.run(
+        remote_python_command(host, [claim]),
+        input=REMOTE_CLAIM_STAT_SCRIPT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"ssh claim-stat {host} failed rc={proc.returncode}: {proc.stderr.strip()[:500]}")
+    return proc.stdout.strip() == "present"
+
+
 def remote_writefail_ack(host: str, claim: str, remote_root: str, action: str, timeout: int) -> str:
     proc = subprocess.run(
         remote_python_command(host, [claim, remote_root, action]),
@@ -3773,18 +3804,18 @@ def _run_once_with_state(
                     recovery_evidence,
                 )
         for record in records:
-            try:
-                local_path = relay_event(host, remote_root, record)
-                ack_path = remote_ack(host, str(record["claim"]), remote_root, "ack", timeout)
-                append_log({
-                    "type": "relayed",
-                    "remote": remote,
-                    "remoteClaim": record["claim"],
-                    "remoteAckPath": ack_path,
-                    "localPath": str(local_path),
-                })
-                processed += 1
-            except Exception as exc:  # noqa: BLE001
+            # #2427: the local durable write and the remote acknowledgement
+            # are separate failure domains. A relay_event failure means the
+            # claim was never consumed (requeue is correct); an ack-phase
+            # failure AFTER the local write may be pure response loss — the
+            # remote may have already archived the claim — so it gets a
+            # read-only existence probe before any requeue or alert.
+            # (Bounded residual, documented not engineered: a lease expiring
+            # DURING the sub-second local publish can hand the claim to a
+            # second collector; the durable-publish-before-ack ordering plus
+            # dedupe converges the record on the next offer.)
+            def _relay_record_failed(exc: Exception) -> None:
+                nonlocal outbox_relay_failed, failed, best_effort_failures
                 outbox_relay_failed = True
                 failed += 1
                 if is_best_effort:
@@ -3802,6 +3833,47 @@ def _run_once_with_state(
                     state,
                     alert_cooldown,
                 )
+
+            try:
+                local_path = relay_event(host, remote_root, record)
+            except Exception as exc:  # noqa: BLE001
+                _relay_record_failed(exc)
+                continue
+            try:
+                ack_path = remote_ack(host, str(record["claim"]), remote_root, "ack", timeout)
+            except Exception as exc:  # noqa: BLE001
+                claim_absent = False
+                try:
+                    claim_absent = not remote_claim_exists(host, str(record["claim"]), timeout)
+                except Exception:  # noqa: BLE001
+                    # Probe unreachable — indistinguishable from a failed
+                    # ack; stay conservative (requeue + alert as before).
+                    pass
+                if claim_absent:
+                    # Claim absent ⇒ either the ack archived it, or lease
+                    # recovery already returned it to the remote outbox. In
+                    # BOTH cases the local record is durable and any reoffer
+                    # dedupes to it, so marking processed is safe — but
+                    # absence alone does not prove the ack landed; the
+                    # dedupe inventory is the backstop, not a redundancy.
+                    append_log({
+                        "type": "ack_response_lost_claim_absent",
+                        "remote": remote,
+                        "remoteClaim": record["claim"],
+                        "localPath": str(local_path),
+                    })
+                    processed += 1
+                else:
+                    _relay_record_failed(exc)
+                continue
+            append_log({
+                "type": "relayed",
+                "remote": remote,
+                "remoteClaim": record["claim"],
+                "remoteAckPath": ack_path,
+                "localPath": str(local_path),
+            })
+            processed += 1
         if not outbox_claim_failed and not outbox_relay_failed:
             remote_record = remote_state.setdefault(remote, {})
             remote_record["lastDrainAt"] = int(time.time())
