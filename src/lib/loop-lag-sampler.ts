@@ -40,6 +40,21 @@ export interface RawLoopLagSample {
   readonly cpuDeltaMs: number | null;
 }
 
+export interface RawLoopLagSampleGap {
+  readonly kind: 'cursor_evicted';
+  readonly after: number;
+  readonly firstAvailableSequence: number;
+}
+
+export interface RawLoopLagSamplePage {
+  readonly oldestSequence: number | null;
+  readonly latestSequence: number | null;
+  readonly nextAfter: number;
+  readonly truncated: boolean;
+  readonly gap: RawLoopLagSampleGap | null;
+  readonly samples: readonly RawLoopLagSample[];
+}
+
 export interface LoopLagSnapshot {
   sampleCount: number;
   p95LagMs: number | null;
@@ -159,6 +174,47 @@ export class LoopLagSampler {
   /** Bounded raw observation stream, oldest first. Survives window resets and stop(). */
   rawSamples(): readonly RawLoopLagSample[] {
     return [...this.rawRing];
+  }
+
+  /** Immutable cursor projection derived from exactly one bounded-ring copy. */
+  rawSamplePage(options: { readonly after?: number; readonly limit: number }): RawLoopLagSamplePage {
+    const { after, limit } = options;
+    if (after !== undefined && (!Number.isSafeInteger(after) || after < 0)) {
+      throw new RangeError('after must be a non-negative safe integer');
+    }
+    if (!Number.isInteger(limit) || limit < 1 || limit > 160) {
+      throw new RangeError('limit must be an integer from 1 through 160');
+    }
+
+    const ring = [...this.rawRing];
+    const oldestSequence = ring[0]?.sequence ?? null;
+    const latestSequence = ring.at(-1)?.sequence ?? null;
+    const eligible = after === undefined
+      ? ring
+      : ring.filter((sample) => sample.sequence > after);
+    const selected = after === undefined
+      ? eligible.slice(-limit)
+      : eligible.slice(0, limit);
+    const samples = Object.freeze(selected.map((sample) => Object.freeze({ ...sample })));
+    const lastReturned = samples.at(-1)?.sequence;
+    const gap = after !== undefined
+      && oldestSequence !== null
+      && after < oldestSequence - 1
+      ? Object.freeze({
+          kind: 'cursor_evicted' as const,
+          after,
+          firstAvailableSequence: oldestSequence,
+        })
+      : null;
+
+    return Object.freeze({
+      oldestSequence,
+      latestSequence,
+      nextAfter: lastReturned ?? after ?? 0,
+      truncated: eligible.length > selected.length,
+      gap,
+      samples,
+    });
   }
 
   private sample(): void {

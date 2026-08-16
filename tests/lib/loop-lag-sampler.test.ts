@@ -266,3 +266,106 @@ describe('LoopLagSampler — raw instrumentation (#3253)', () => {
     });
   });
 });
+
+describe('LoopLagSampler — raw sample page', () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  function record(h: ReturnType<typeof makeHarness>, count: number): void {
+    for (let sequence = 1; sequence <= count; sequence++) {
+      h.setNow(sequence * LOOP_LAG_SAMPLE_INTERVAL_MS);
+      h.setWallNow(1_785_000_000_000 + sequence * LOOP_LAG_SAMPLE_INTERVAL_MS);
+      vi.advanceTimersByTime(LOOP_LAG_SAMPLE_INTERVAL_MS);
+    }
+  }
+
+  it('pins empty-page cursors with and without an input cursor', () => {
+    const h = makeHarness();
+    expect(h.sampler.rawSamplePage({ limit: 160 })).toEqual({
+      oldestSequence: null,
+      latestSequence: null,
+      nextAfter: 0,
+      truncated: false,
+      gap: null,
+      samples: [],
+    });
+    expect(h.sampler.rawSamplePage({ after: 41, limit: 160 })).toMatchObject({
+      oldestSequence: null,
+      latestSequence: null,
+      nextAfter: 41,
+      truncated: false,
+      gap: null,
+      samples: [],
+    });
+  });
+
+  it('returns the newest no-cursor page oldest-first', () => {
+    const h = makeHarness();
+    h.sampler.start();
+    record(h, 5);
+
+    const page = h.sampler.rawSamplePage({ limit: 3 });
+    expect(page).toMatchObject({
+      oldestSequence: 1,
+      latestSequence: 5,
+      nextAfter: 5,
+      truncated: true,
+      gap: null,
+    });
+    expect(page.samples.map((sample) => sample.sequence)).toEqual([3, 4, 5]);
+  });
+
+  it('returns the oldest matching cursor page and reports exact truncation', () => {
+    const h = makeHarness();
+    h.sampler.start();
+    record(h, 5);
+
+    const first = h.sampler.rawSamplePage({ after: 1, limit: 2 });
+    expect(first.samples.map((sample) => sample.sequence)).toEqual([2, 3]);
+    expect(first.nextAfter).toBe(3);
+    expect(first.truncated).toBe(true);
+
+    const last = h.sampler.rawSamplePage({ after: first.nextAfter, limit: 2 });
+    expect(last.samples.map((sample) => sample.sequence)).toEqual([4, 5]);
+    expect(last.nextAfter).toBe(5);
+    expect(last.truncated).toBe(false);
+  });
+
+  it('reports cursor eviction only when the missing cursor range is real', () => {
+    const h = makeHarness();
+    h.sampler.start();
+    record(h, LOOP_LAG_RAW_RING_SAMPLES + 2);
+
+    const oldest = 3;
+    expect(h.sampler.rawSamplePage({ after: 1, limit: 2 }).gap).toEqual({
+      kind: 'cursor_evicted',
+      after: 1,
+      firstAvailableSequence: oldest,
+    });
+    expect(h.sampler.rawSamplePage({ after: oldest - 1, limit: 2 }).gap).toBeNull();
+  });
+
+  it('returns a detached immutable page that later observations cannot change', () => {
+    const h = makeHarness();
+    h.sampler.start();
+    record(h, 2);
+    const page = h.sampler.rawSamplePage({ limit: 2 });
+
+    h.setNow(3 * LOOP_LAG_SAMPLE_INTERVAL_MS);
+    vi.advanceTimersByTime(LOOP_LAG_SAMPLE_INTERVAL_MS);
+
+    expect(page.latestSequence).toBe(2);
+    expect(page.samples.map((sample) => sample.sequence)).toEqual([1, 2]);
+    expect(Object.isFrozen(page.samples)).toBe(true);
+    expect(page.samples.every((sample) => Object.isFrozen(sample))).toBe(true);
+  });
+
+  it('rejects unsafe cursors and limits at the sampler boundary', () => {
+    const h = makeHarness();
+    expect(() => h.sampler.rawSamplePage({ after: -1, limit: 1 })).toThrow(/after/);
+    expect(() => h.sampler.rawSamplePage({ after: Number.MAX_SAFE_INTEGER + 1, limit: 1 })).toThrow(/after/);
+    expect(() => h.sampler.rawSamplePage({ limit: 0 })).toThrow(/limit/);
+    expect(() => h.sampler.rawSamplePage({ limit: 161 })).toThrow(/limit/);
+    expect(() => h.sampler.rawSamplePage({ limit: 1.5 })).toThrow(/limit/);
+  });
+});
