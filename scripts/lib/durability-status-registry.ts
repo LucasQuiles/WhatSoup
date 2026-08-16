@@ -608,6 +608,10 @@ export const DISCOVERY_EXCLUSIONS: DiscoveryExclusionEntry[] = [
     table: 'capability_obligations_v60',
     reason: 'migration-60 transient create-copy-drop-rename artifact (src/core/database-migration-60.ts): the creation_reason CHECK rebuild copies into capability_obligations_v60, drops the old table, then renames v60 to capability_obligations — it never persists under its own name, so it never appears in migratedSchemaSnapshot().',
   },
+  {
+    table: 'completed_delivery_identity_admissions_v61',
+    reason: "migration-61 transient create-copy-drop-rename artifact (src/core/database-migration-61.ts): the state-CHECK widening (adds the terminal 'expired' state, reliability 4.1) copies into completed_delivery_identity_admissions_v61, drops the old table, then renames v61 back — it never persists under its own name.",
+  },
 ];
 
 /** Derived: table names with a registered status-writer entry. */

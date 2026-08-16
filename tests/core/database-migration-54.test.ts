@@ -151,7 +151,7 @@ describe('migration 54 completed-delivery identity admissions', () => {
     const db = new Database(':memory:');
     db.open();
     try {
-      expect(CURRENT_SCHEMA_MIGRATION).toBe(60);
+      expect(CURRENT_SCHEMA_MIGRATION).toBe(61);
       expect(db.raw.prepare(
         'SELECT version FROM schema_migrations WHERE version = 53',
       ).get()).toEqual({ version: 53 });
@@ -170,6 +170,8 @@ describe('migration 54 completed-delivery identity admissions', () => {
         'created_at',
         'last_transition_at',
         'resolved_at',
+        // migration 61 (reliability 4.1): terminalization receipt stamp
+        'expired_at',
       ]);
       for (const forbidden of ['conversation_key', 'session_id', 'delivery_jid', 'error']) {
         expect(names).not.toContain(forbidden);

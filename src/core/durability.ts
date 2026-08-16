@@ -151,6 +151,71 @@ export interface CompletedDeliveryIdentityAdmissionHealth {
   oldestTransitionAt: string | null;
   maximumAttempts: number;
   nextAction: 'fresh_inbound' | 'operator' | null;
+  /**
+   * Reliability 4.1 dual counters: `unresolvedCount` above is the ACTIVE
+   * count (drives /health degraded; clears when the condition genuinely
+   * clears), while `expiredCount` is the monotonic LIFETIME count of
+   * admissions terminalized by the overdue sweep — the audit record of debt
+   * that aged past the bound. Never conflate the two: health keys off the
+   * active count only.
+   */
+  expiredCount: number;
+}
+
+/**
+ * Reliability 4.1 — bound after which a quarantined completed-delivery
+ * identity admission is terminalized by the overdue sweep (mirrors the #2384
+ * overdue-proposal lifecycle). A `fresh_inbound`-owned admission whose peer
+ * never writes again would otherwise pin /health degraded forever (the
+ * frozen-debt permanent floor: five bots, oldest debt 4+ days, 2026-08-16).
+ * Seven days is deliberately far past every observed genuine resolution
+ * while still bounding the floor. Env-overridable for drills.
+ */
+export const IDENTITY_ADMISSION_EXPIRY_SECONDS = (() => {
+  // env-allowed: operational bound, resolved once at module load
+  const raw = process.env['WHATSOUP_IDENTITY_ADMISSION_EXPIRY_SECONDS'];
+  const parsed = raw === undefined ? NaN : Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 7 * 86_400;
+})();
+
+export interface ExpireIdentityAdmissionsResult {
+  /** Rows transitioned quarantined → expired by this call. */
+  expired: number;
+}
+
+/**
+ * Reliability 4.1 — bounded TERMINALIZATION of overdue identity admissions.
+ *
+ * Quarantined admissions whose `last_transition_at` is older than
+ * `boundSeconds` move to the terminal 'expired' state with a mandatory
+ * `expired_at` stamp. The row is the RECEIPT: target, reason, created_at and
+ * last_transition_at are preserved — debt is auditable, never erased. Like
+ * #2384's `expireOverdueProposals` the sweep is bounded (`limit` rows per
+ * call), batched, and restartable (all state in SQLite). Resolution paths
+ * (operator, resolving fresh inbound) win any race: they only act on
+ * state='quarantined' rows and the UPDATE below only touches
+ * state='quarantined' rows, so a concurrently-resolved admission is simply
+ * not matched.
+ */
+export function expireOverdueCompletedDeliveryIdentityAdmissions(
+  db: DatabaseSync,
+  boundSeconds: number = IDENTITY_ADMISSION_EXPIRY_SECONDS,
+  limit: number = 100,
+): ExpireIdentityAdmissionsResult {
+  const result = db.prepare(`
+    UPDATE completed_delivery_identity_admissions
+    SET state = 'expired',
+        expired_at = datetime('now'),
+        last_transition_at = datetime('now')
+    WHERE id IN (
+      SELECT id FROM completed_delivery_identity_admissions
+      WHERE state = 'quarantined'
+        AND last_transition_at < datetime('now', ?)
+      ORDER BY last_transition_at ASC
+      LIMIT ?
+    )
+  `).run(`-${Math.max(1, Math.floor(boundSeconds))} seconds`, limit);
+  return { expired: Number(result.changes) };
 }
 
 const log = createChildLogger('durability');
@@ -1097,17 +1162,18 @@ export class DurabilityEngine {
         `SELECT completed_at FROM recovery_runs ORDER BY id DESC LIMIT 1`,
       ),
       getCompletedDeliveryIdentityAdmissionHealth: prepare(`
-        SELECT COUNT(*) AS unresolved_count,
-               MIN(last_transition_at) AS oldest_transition_at,
-               MAX(attempts) AS maximum_attempts,
+        SELECT COUNT(*) FILTER (WHERE state = 'quarantined') AS unresolved_count,
+               MIN(last_transition_at) FILTER (WHERE state = 'quarantined') AS oldest_transition_at,
+               MAX(attempts) FILTER (WHERE state = 'quarantined') AS maximum_attempts,
                CASE
-                 WHEN MAX(CASE WHEN next_action = 'operator' THEN 1 ELSE 0 END) = 1
+                 WHEN MAX(CASE WHEN state = 'quarantined' AND next_action = 'operator' THEN 1 ELSE 0 END) = 1
                    THEN 'operator'
-                 WHEN COUNT(*) > 0 THEN 'fresh_inbound'
+                 WHEN COUNT(*) FILTER (WHERE state = 'quarantined') > 0 THEN 'fresh_inbound'
                  ELSE NULL
-               END AS next_action
+               END AS next_action,
+               COUNT(*) FILTER (WHERE state = 'expired') AS expired_count
         FROM completed_delivery_identity_admissions
-        WHERE state = 'quarantined'
+        WHERE state IN ('quarantined', 'expired')
       `),
       // #1789 companion fix: this INSERT sets completed_at at write time but
       // (until now) never set status, so under migration 45's
@@ -3142,6 +3208,7 @@ export class DurabilityEngine {
       oldest_transition_at: string | null;
       maximum_attempts: number | bigint | null;
       next_action: string | null;
+      expired_count: number | bigint;
     };
     const nextAction = row.next_action === 'fresh_inbound' || row.next_action === 'operator'
       ? row.next_action
@@ -3151,6 +3218,7 @@ export class DurabilityEngine {
       oldestTransitionAt: row.oldest_transition_at,
       maximumAttempts: row.maximum_attempts === null ? 0 : Number(row.maximum_attempts),
       nextAction,
+      expiredCount: Number(row.expired_count),
     };
   }
 

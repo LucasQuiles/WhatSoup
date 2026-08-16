@@ -94,6 +94,7 @@ describe('database retention', () => {
       messages: 0,
       triggerRuns: 0,
       triggerOccurrences: 0,
+      identityAdmissionsExpired: 0,
     });
     expect(rowCount('inbound_events')).toBe(1);
     expect(rowCount('outbound_ops')).toBe(1);
@@ -583,6 +584,7 @@ describe('database retention', () => {
       messages: 0,
       triggerRuns: 0,
       triggerOccurrences: 0,
+      identityAdmissionsExpired: 0,
     });
     expect(rowCount('inbound_events')).toBe(2);
     expect(rowCount('outbound_ops')).toBe(2);
@@ -1060,6 +1062,7 @@ describe('database retention', () => {
         messages: 0,
         triggerRuns: 0,
         triggerOccurrences: 0,
+        identityAdmissionsExpired: 0,
       };
       const runSpy = vi.spyOn(timer, 'runCleanup')
         .mockRejectedValueOnce(new Error('immediate-retention-failed'))
