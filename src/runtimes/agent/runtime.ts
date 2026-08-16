@@ -9197,6 +9197,53 @@ export class AgentRuntime implements Runtime {
         // session so the synchronous notifyUnexpectedExit that follows this
         // callback is suppressed in handleCrashNotify.
         this.managedCrashNotices.add(session);
+        if (replayScheduled) {
+          // Release the crashed PHYSICAL turn before anything else: a
+          // journaled turn's dispatch promise parks on its runtime completion,
+          // and the TurnQueue's active slot clears only when that settles. The
+          // terminal-result path this branch mirrors gets the settling
+          // finalization from the terminal result itself; a process crash has
+          // none, so skipping it wedges the chat forever behind the dead turn
+          // (live 2026-08-15: replay sessions armed with message_count=0 and
+          // later inbounds queued unserved until a service restart).
+          // Coordinator-level finalization specifically — the runtime wrapper
+          // would cancel the continuation scheduleFallbackReplay just claimed.
+          const managedPublishedContexts = this.perChatRuntimeTurnContexts.get(currentMapKey) ?? [];
+          const managedPublishedContext = managedPublishedContexts.length === 1
+            ? managedPublishedContexts[0]
+            : undefined;
+          const managedTurnQueue = this.perChatTurnQueues.get(currentMapKey);
+          const managedActiveTurn = managedTurnQueue?.activeTurn;
+          const managedActiveContext = managedActiveTurn?.runtimeContext;
+          const managedJournaledSeq = this.perChatInboundSeqQueue.get(currentMapKey)?.[0];
+          const managedUndispatchedContext = managedPublishedContexts.length === 0
+            && managedActiveContext?.identity.scope === 'per_chat'
+            && managedActiveTurn?.inboundSeq !== undefined
+            && managedActiveContext.identity.inboundSeq === managedActiveTurn.inboundSeq
+            && managedJournaledSeq === managedActiveTurn.inboundSeq
+            ? managedActiveContext
+            : undefined;
+          if (managedUndispatchedContext) {
+            const managedScopeRef = managedTurnQueue
+              ? this.perChatTurnQueueKeys.get(managedTurnQueue) ?? { value: currentMapKey }
+              : { value: currentMapKey };
+            this.runtimeTurnCoordinator.terminalizeUndispatchedRuntimeCrash(
+              managedUndispatchedContext,
+              managedScopeRef,
+            );
+          } else {
+            this.runtimeTurnCoordinator.finalizeRuntimeCrash(
+              managedPublishedContext,
+              this.chatQueues.get(currentMapKey),
+              session,
+              currentMapKey,
+            );
+          }
+          const managedTracker = this.operationTrackers.get(currentMapKey);
+          managedTracker?.shutdown();
+          this.operationTrackers.delete(currentMapKey);
+          this.cleanupPerChatCrashTurnState(currentMapKey);
+        }
         noticeQueue?.enqueueText(renderFallbackAdvanceNotice({
           fromCard: modelCardLabel(processFailure.fromProvider, processFailure.fromModel ?? undefined),
           toCard: processFailure.advanced && processFailure.activation
@@ -9205,10 +9252,10 @@ export class AgentRuntime implements Runtime {
           replayScheduled,
         }));
         if (replayScheduled) {
-          // The replay flow owns the turn continuation AND the dead manager's
-          // disposal (discardPerChatSessionForFallback) — mirror the
-          // terminal-result activation path and skip the crash machinery.
-          // Later duplicate exit callbacks drop on the unmapped-manager guard.
+          // The replay flow owns the LOGICAL turn continuation AND the dead
+          // manager's disposal (discardPerChatSessionForFallback) — mirror
+          // the terminal-result activation path past this point. Later
+          // duplicate exit callbacks drop on the unmapped-manager guard.
           log.info({
             mapKey: currentMapKey,
             fromProvider: processFailure.fromProvider,
