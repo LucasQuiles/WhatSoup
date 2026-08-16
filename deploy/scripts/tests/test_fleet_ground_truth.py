@@ -281,3 +281,61 @@ def test_flow_query_selects_no_content_column():
     q = fgt.FLOW_QUERY.lower()
     assert "content" not in q
     assert "is_from_me" in q and "timestamp" in q
+
+
+# ---------------------------------------------------------------------------
+# Health-split guard (#2515): /health answers 200 both authenticated and not.
+# The public envelope reported status "healthy" on a production instance at
+# 2026-08-16T20:58Z while the SAME process's privileged body reported
+# "degraded" with degradation_causes ["turn_recovery_degraded"]. Both bodies
+# below are the real captured shapes (operator evidence archive).
+# A panel that renders a clean picture from the public envelope reproduces
+# exactly the blindness it exists to prevent, so absence of disclosure must
+# fail CLOSED: bond/model UNOBSERVED plus an explicit verdict.
+
+def _health_public_envelope(status: str = "healthy"):
+    return {
+        "schema_version": "health.public.v1",
+        "status": status,
+        "generated_at": "2026-08-16T20:58:10.682Z",
+        "generated_at_ms": NOW_MS,
+        "startupNotification": {"state": "disabled", "policy": "disabled"},
+    }
+
+
+def test_public_envelope_is_not_read_as_a_health_verdict():
+    p = _panel(health=_health_public_envelope())
+    # It must NOT derive axes from a body that discloses none.
+    assert "bond" not in p["axes"]
+    assert "model" not in p["axes"]
+    assert "status" not in p["axes"], (
+        "the public envelope's status must never surface as the panel status"
+    )
+    assert set(["bond", "model"]).issubset(set(p["unobserved"]))
+    names = [v["verdict"] for v in p["verdicts"]]
+    assert "health_body_not_disclosed" in names
+
+
+def test_public_envelope_healthy_never_yields_a_clean_panel():
+    """The specific live failure: envelope says healthy, truth was degraded."""
+    p = _panel(health=_health_public_envelope(status="healthy"))
+    assert p["verdicts"], "a non-disclosing answer must never render zero verdicts"
+    assert p["axes"]["health_envelope"]["disclosed"] is False
+    assert p["axes"]["health_envelope"]["reported_status"] == "healthy"
+
+
+def test_disclosure_check_is_fail_closed_on_unknown_shapes():
+    # No schema_version and no whatsapp block -> not disclosed.
+    assert fgt.health_body_is_disclosed({"status": "healthy"}) is False
+    assert fgt.health_body_is_disclosed({}) is False
+    # Privileged body (carries the whatsapp diagnostic block) -> disclosed.
+    assert fgt.health_body_is_disclosed(_health_ok()) is True
+    assert fgt.health_body_is_disclosed(_health_logged_out()) is True
+
+
+def test_privileged_body_still_produces_its_verdicts():
+    """Regression guard: the new gate must not swallow real diagnostic bodies."""
+    p = _panel(health=_health_logged_out())
+    names = [v["verdict"] for v in p["verdicts"]]
+    assert "health_body_not_disclosed" not in names
+    assert "needs_physical_repair" in names

@@ -276,7 +276,7 @@
     },
     {
       "path": "deploy/scripts/fleet-ground-truth.py",
-      "sha256": "17a795e493efc72ecd4f69f04f4e56da2bcb0ac30fd0e35d11e16bacdc3b7669",
+      "sha256": "e20f4c687ee0da5c1796cf3d90eb7dbb1f5edf704a3fa84bb8d829dbed08247d",
       "mustContain": [
         "needs_physical_repair",
         "restart_will_not_fix",
@@ -290,7 +290,10 @@
         "unobserved",
         "PROBE_FRESH_MS",
         "FLOW_QUERY",
-        "is_from_me"
+        "is_from_me",
+        "health_body_not_disclosed",
+        "health_body_is_disclosed",
+        "PUBLIC_SCHEMA_PREFIX"
       ]
     },
     {

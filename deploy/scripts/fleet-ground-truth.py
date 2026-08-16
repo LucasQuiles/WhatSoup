@@ -75,9 +75,34 @@ FLOW_QUERY = (
 )
 
 
+# /health answers 200 on BOTH legs: with a valid instance token it returns the
+# privileged diagnostic body, and WITHOUT one it returns a public envelope whose
+# status field is hardcoded-shaped and can read "healthy" while the privileged
+# body of the same process reads "degraded" (live-confirmed 2026-08-16 on a
+# production instance via a valid/bogus/absent three-leg compare against one
+# process; raw bodies held in the operator evidence archive, not in this repo).
+# The panel must never
+# mistake a non-disclosing answer for a clean one, so detect the envelope and
+# mark the axes UNOBSERVED rather than deriving all-None axes from it.
+PUBLIC_SCHEMA_PREFIX = "health.public."
+
+
 def _verdict(axis: str, verdict: str, because: str, evidence_ms: dict) -> dict:
     return {"axis": axis, "verdict": verdict, "because": because,
             "evidence_ms": evidence_ms}
+
+
+def health_body_is_disclosed(health: dict) -> bool:
+    """True only for the privileged diagnostic body.
+
+    Fail-closed: an unrecognised shape counts as NOT disclosed. Both axes this
+    panel derives read `whatsapp` / `instance`, which the public envelope omits
+    entirely, so its absence is the deterministic discriminator.
+    """
+    schema = health.get("schema_version")
+    if isinstance(schema, str) and schema.startswith(PUBLIC_SCHEMA_PREFIX):
+        return False
+    return "whatsapp" in health
 
 
 def _bond_axis(health: dict, now_ms: int, verdicts: list) -> dict:
@@ -226,7 +251,28 @@ def build_panel(*, host: str, instance: str, now_ms: int,
     axes: dict[str, Any] = {}
     unobserved: list[str] = []
 
-    if health:
+    if health and not health_body_is_disclosed(health):
+        # Answered, but not with the diagnostic body. Its status field is NOT a
+        # fleet health verdict; treating it as one is the #2515 health-split
+        # trap. Report the axes as unobserved and say so loudly.
+        unobserved.extend(["bond", "model"])
+        axes["health_envelope"] = {
+            "disclosed": False,
+            "schema_version": health.get("schema_version"),
+            "reported_status": health.get("status"),
+        }
+        verdicts.append(_verdict(
+            "health", "health_body_not_disclosed",
+            "the endpoint answered with the PUBLIC envelope, not the privileged "
+            "diagnostic body — its status field is NOT a health verdict and must "
+            "not be read as one (the public envelope reports healthy on a bot "
+            "whose privileged body reports degraded; live-confirmed on a "
+            "production instance 2026-08-16). Bond and model are UNOBSERVED "
+            "here, not clean. Re-run "
+            "with a valid instance health token.",
+            {"observed_at_ms": health.get("generated_at_ms")},
+        ))
+    elif health:
         axes["bond"] = _bond_axis(health, now_ms, verdicts)
         axes["model"] = _model_axis(health, now_ms, verdicts)
         axes["status"] = health.get("status")
