@@ -5,6 +5,14 @@
   "expectedHeadShaPolicy": "populated at deploy time by deploy step; absent here so committed state is observability-only",
   "files": [
     {
+      "path": "deploy/lib/runtime-path.sh",
+      "sha256": "6f20ad080462e10fc81d1fbb60ce8898be0dfde35bae99e744271c786c4a90ae",
+      "mustContain": [
+        "whatsoup_effective_runtime_path",
+        "whatsoup_export_runtime_path"
+      ]
+    },
+    {
       "path": "deploy/scripts/bot-errors-collector.py",
       "sha256": "ec6b691244aac8254137f2d9af15161aae907840a6a784f3f818cd80afb03021",
       "mustContain": [
@@ -60,15 +68,6 @@
         "publish_event_json",
         "refusing to use private directory through symlink",
         "outbox_write_failure"
-      ]
-    },
-    {
-      "path": "deploy/scripts/lib/queue_age.py",
-      "sha256": "cc96f2b9738a27a570f03415129360df86e88ac8ef4f7456164958713b30631a",
-      "mustContain": [
-        "event_file_age_seconds",
-        "scan_directory",
-        "parse_queue_threshold"
       ]
     },
     {
@@ -176,14 +175,6 @@
       ]
     },
     {
-      "path": "deploy/lib/runtime-path.sh",
-      "sha256": "6f20ad080462e10fc81d1fbb60ce8898be0dfde35bae99e744271c786c4a90ae",
-      "mustContain": [
-        "whatsoup_effective_runtime_path",
-        "whatsoup_export_runtime_path"
-      ]
-    },
-    {
       "path": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
       "sha256": "68ea4ba13950e0954b9b7b772b7c2826d6d3caea8e3559bea59f08cd624eef53",
       "mustContain": [
@@ -281,6 +272,25 @@
       "mustContain": [
         "_inventory_findings",
         "DURABLE_PUBLISHERS"
+      ]
+    },
+    {
+      "path": "deploy/scripts/fleet-ground-truth.py",
+      "sha256": "17a795e493efc72ecd4f69f04f4e56da2bcb0ac30fd0e35d11e16bacdc3b7669",
+      "mustContain": [
+        "needs_physical_repair",
+        "restart_will_not_fix",
+        "credential_unavailable_genuine",
+        "model_verdict_stale_suspect_probe",
+        "model_verdict_outdated_by_flow",
+        "serving_as_of",
+        "latent_while_idle",
+        "persistent_steady_condition",
+        "genuine_burst",
+        "unobserved",
+        "PROBE_FRESH_MS",
+        "FLOW_QUERY",
+        "is_from_me"
       ]
     },
     {
@@ -424,6 +434,15 @@
       ]
     },
     {
+      "path": "deploy/scripts/lib/queue_age.py",
+      "sha256": "cc96f2b9738a27a570f03415129360df86e88ac8ef4f7456164958713b30631a",
+      "mustContain": [
+        "event_file_age_seconds",
+        "scan_directory",
+        "parse_queue_threshold"
+      ]
+    },
+    {
       "path": "deploy/scripts/lib/sentinel_pin.py",
       "sha256": "4edd3c96fa28128567a01d698dc6a8e72a738d681a04269457c4ebb3e593b0b6",
       "mustContain": [
@@ -452,6 +471,15 @@
       "mustContain": [
         "Single source of truth for bot-errors state-root resolution",
         "BOT_ERRORS_Q_LOOP_STATE_DIR"
+      ]
+    },
+    {
+      "path": "deploy/scripts/patch-incident-state.py",
+      "sha256": "99021a3c213121381baff843668f11c480d6767c0e75acbc3732ceb83239cf71",
+      "mustContain": [
+        "open_controller_state",
+        "session.save(payload, result.capability)",
+        "dispatcher_bootstrap_state"
       ]
     },
     {
@@ -486,15 +514,6 @@
         "runtimeAgentHealthSignals",
         "turnRecoveryBlockedUnsafe",
         "autoCompactActiveBackoffScopes"
-      ]
-    },
-    {
-      "path": "deploy/scripts/patch-incident-state.py",
-      "sha256": "99021a3c213121381baff843668f11c480d6767c0e75acbc3732ceb83239cf71",
-      "mustContain": [
-        "open_controller_state",
-        "session.save(payload, result.capability)",
-        "dispatcher_bootstrap_state"
       ]
     }
   ]
