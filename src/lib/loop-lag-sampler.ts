@@ -11,9 +11,6 @@ export const LOOP_LAG_DISCONTINUITY_THRESHOLD_MS =
 // (timings and provenance only), so it can sit in the authenticated health doc
 // without privacy review per entry.
 export const LOOP_LAG_RAW_RING_SAMPLES = 360;
-// How many ring entries the health doc serves. ~80s of samples, so a poller
-// reading every 60s stitches a gap-free raw stream with overlap.
-export const LOOP_LAG_RAW_RECENT_LIMIT = 160;
 
 /**
  * Where an observation was taken. The warning that consumers log fires at
