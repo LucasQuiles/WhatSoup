@@ -2843,23 +2843,47 @@ def local_record_event_identity(path: Path) -> tuple[str | None, str]:
     return None, ""
 
 
+# #2427: the single source of truth for every LOCAL directory that can hold
+# an authoritative per-event lifecycle record. local_event_exists derives its
+# scan candidates from this tuple (plus the env-aware outbox entry), and the
+# matrix guard (tests/test_bot_errors_collector_terminal_inventory_matrix.py)
+# cross-checks it against dispatcher state_paths() so a dispatcher-side
+# directory addition can no longer silently escape dedupe coverage (the
+# dead-letter and testleak resurrection defects). The identity parser
+# (local_record_event_identity) covers both record shapes: raw event files
+# (top-level id) and nested terminal wrappers ({"event": {...}}).
+#
+# Deliberately NOT here: the acknowledged-claim archive relayed/ lives on the
+# REMOTE host (REMOTE_ACK_SCRIPT moves claims under the remote root), so no
+# local scan can cover it — the ack-retry reconciliation remainder of #2427
+# owns that surface. Dispatcher dirs without per-event records (locks, logs,
+# storm-manifests, state files) carry documented exemptions in the matrix.
+LOCAL_EVENT_LIFECYCLE_DIR_NAMES = (
+    "processing",
+    "sent",
+    "storm-collapsed",
+    "suppressed",
+    "quarantine",
+    "testleak",
+    "writefail",
+    "writefail-recovered",
+    "writefail-quarantine",
+    "dead-letter",
+)
+
+
+def local_event_candidate_dirs() -> list[Path]:
+    root = state_root()
+    return [
+        Path(os.environ.get("BOT_ERRORS_OUTBOX_DIR", root / "outbox")),
+        *(root / name for name in LOCAL_EVENT_LIFECYCLE_DIR_NAMES),
+    ]
+
+
 def local_event_exists(event_id: str, created_at: str = "") -> bool:
     if not event_id:
         return False
-    root = state_root()
-    candidates = [
-        Path(os.environ.get("BOT_ERRORS_OUTBOX_DIR", root / "outbox")),
-        root / "processing",
-        root / "sent",
-        root / "storm-collapsed",
-        root / "suppressed",
-        root / "quarantine",
-        root / "testleak",
-        root / "writefail",
-        root / "writefail-recovered",
-        root / "writefail-quarantine",
-        root / "dead-letter",
-    ]
+    candidates = local_event_candidate_dirs()
     seen: set[Path] = set()
     for directory in candidates:
         try:
