@@ -72,7 +72,7 @@ export type FetchPageResult =
   | { readonly ok: true; readonly response: LoopLagSamplesResponse }
   | {
       readonly ok: false;
-      readonly kind: 'authentication_failed' | 'endpoint_unsupported' | 'http_5xx' | 'request_failed';
+      readonly kind: 'authentication_failed' | 'token_file_rejected' | 'endpoint_unsupported' | 'http_5xx' | 'request_failed';
       readonly retryable: boolean;
       readonly status?: number;
     };
@@ -195,7 +195,12 @@ export async function fetchLoopLagSamplePage(
   } = { fetch, readToken: readPrivateHealthTokenFileSync },
 ): Promise<FetchPageResult> {
   const baseUrl = validateLoopbackBaseUrl(input.baseUrl);
-  const token = deps.readToken(input.tokenFile);
+  let token: CanonicalHealthToken | null;
+  try {
+    token = deps.readToken(input.tokenFile);
+  } catch {
+    return { ok: false, kind: 'token_file_rejected', retryable: false };
+  }
   if (token === null) return { ok: false, kind: 'authentication_failed', retryable: false };
   const endpoint = new URL('/health/event-loop-samples', baseUrl);
   if (input.after !== undefined) endpoint.searchParams.set('after', String(input.after));

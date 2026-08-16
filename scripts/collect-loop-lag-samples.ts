@@ -5,6 +5,7 @@ import { pathToFileURL } from 'node:url';
 
 import { readPrivateHealthTokenFileSync } from '../src/fleet/health-token-file.ts';
 import { systemClock } from '../src/lib/clock.ts';
+import { LOOP_LAG_RAW_RING_SAMPLES } from '../src/lib/loop-lag-sampler.ts';
 import {
   appendPrivateJsonLineSync,
   readPrivateFileSync,
@@ -176,6 +177,7 @@ export async function run(argv = process.argv.slice(2), deps: RunDeps = {}): Pro
   let terminal: ExitCode | null = null;
   const startedMs = nowMs();
   let nextPollMs = startedMs;
+  const maxPagesPerPoll = Math.ceil(LOOP_LAG_RAW_RING_SAMPLES / config.limit) + 1;
 
   do {
     const observedAt = nowIso();
@@ -193,7 +195,7 @@ export async function run(argv = process.argv.slice(2), deps: RunDeps = {}): Pro
     }
     let pollHadSuccess = false;
     let pageAttempts = 0;
-    while (pageAttempts < 5) {
+    while (pageAttempts < maxPagesPerPoll) {
       pageAttempts += 1;
       const result = await fetchLoopLagSamplePage({
         baseUrl: config.baseUrl,
@@ -219,7 +221,8 @@ export async function run(argv = process.argv.slice(2), deps: RunDeps = {}): Pro
           terminal = 6;
           break;
         }
-        if (result.kind === 'authentication_failed') terminal = 3;
+        if (result.kind === 'token_file_rejected') terminal = 2;
+        else if (result.kind === 'authentication_failed') terminal = 3;
         else if (result.kind === 'endpoint_unsupported') terminal = 4;
         else if (config.once && !pollHadSuccess) terminal = 5;
         break;
@@ -255,7 +258,7 @@ export async function run(argv = process.argv.slice(2), deps: RunDeps = {}): Pro
       if (!processChanged && !result.response.truncated) break;
     }
     if (pollHadSuccess) successfulPolls += 1;
-    if (pageAttempts === 5 && terminal === null) {
+    if (pageAttempts === maxPagesPerPoll && terminal === null) {
       partial = true;
       failedPolls += 1;
       try {
@@ -283,9 +286,10 @@ export async function run(argv = process.argv.slice(2), deps: RunDeps = {}): Pro
     ?? (successfulPolls === 0 ? 5 : partial ? 1 : 0);
   const outcome = exitCode === 0 ? 'complete'
     : exitCode === 1 ? 'partial'
-      : exitCode === 3 ? 'authentication_failed'
-        : exitCode === 4 ? 'endpoint_unsupported'
-          : 'no_successful_poll';
+      : exitCode === 2 ? 'invalid'
+        : exitCode === 3 ? 'authentication_failed'
+          : exitCode === 4 ? 'endpoint_unsupported'
+            : 'no_successful_poll';
   const summary = {
     ok: exitCode === 0,
     outcome,

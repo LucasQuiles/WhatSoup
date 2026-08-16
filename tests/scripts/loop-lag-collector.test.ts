@@ -139,4 +139,14 @@ describe('fetchLoopLagSamplePage', () => {
     expect(result).toEqual({ ok: false, kind, retryable, status });
     expect(JSON.stringify(result)).not.toContain('secret response');
   });
+
+  it('classifies an unsafe token file before network access', async () => {
+    const fetchMock = vi.fn();
+    const result = await fetchLoopLagSamplePage(
+      { baseUrl: 'http://localhost:9091', tokenFile: '/private/token', limit: 1 },
+      { fetch: fetchMock, readToken: () => { throw new Error('unsafe token file'); } },
+    );
+    expect(result).toEqual({ ok: false, kind: 'token_file_rejected', retryable: false });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 });

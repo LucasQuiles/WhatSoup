@@ -134,6 +134,35 @@ describe('collect-loop-lag-samples collect', () => {
     expect(code).toBe(6);
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it('drains every truncated page even when limit is one', async () => {
+    const { tokenFile, output } = fixture();
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const after = Number(new URL(String(input)).searchParams.get('after'));
+      const sequence = after + 1;
+      return new Response(JSON.stringify({
+        ...endpointBody(),
+        latest_sequence: 6,
+        next_after: sequence,
+        truncated: sequence < 6,
+        samples: [{ ...endpointBody().samples[0], sequence }],
+      }), { status: 200 });
+    });
+    const stdout: string[] = [];
+    const code = await run([
+      'collect', '--instance', 'line-a', '--base-url', 'http://localhost:9091',
+      '--token-file', tokenFile, '--output', output, '--once', '--limit', '1', '--format', 'json',
+    ], {
+      stdout: (text) => stdout.push(text),
+      stderr: vi.fn(),
+      fetch: fetchMock,
+      nowIso: () => '2026-08-15T00:00:10.000Z',
+      randomUuid: () => '00000000-0000-4000-8000-000000000001',
+    });
+    expect(code).toBe(0);
+    expect(fetchMock).toHaveBeenCalledTimes(6);
+    expect(JSON.parse(stdout[0]!)).toMatchObject({ sample_count: 6, next_after: 6 });
+  });
 });
 
 describe('appendBoundedCollectorRecord', () => {
