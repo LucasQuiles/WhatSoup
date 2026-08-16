@@ -161,7 +161,87 @@ describe('collect-loop-lag-samples collect', () => {
     });
     expect(code).toBe(0);
     expect(fetchMock).toHaveBeenCalledTimes(6);
-    expect(JSON.parse(stdout[0]!)).toMatchObject({ sample_count: 6, next_after: 6 });
+    expect(JSON.parse(stdout[0]!)).toMatchObject({
+      sample_count: 6,
+      first_sequence: 1,
+      last_sequence: 6,
+      next_after: 6,
+      process: endpointBody().process,
+    });
+  });
+
+  it('maps an incompatible success body to terminal endpoint_unsupported', async () => {
+    const { tokenFile, output } = fixture();
+    const stdout: string[] = [];
+    const code = await run([
+      'collect', '--instance', 'line-a', '--base-url', 'http://localhost:9091',
+      '--token-file', tokenFile, '--output', output, '--once', '--format', 'json',
+    ], {
+      stdout: (text) => stdout.push(text),
+      stderr: vi.fn(),
+      fetch: vi.fn().mockResolvedValue(new Response(JSON.stringify({
+        ...endpointBody(),
+        schema_version: 'future.v2',
+      }))),
+      nowIso: () => '2026-08-15T00:00:10.000Z',
+      randomUuid: () => '00000000-0000-4000-8000-000000000001',
+    });
+    expect(code).toBe(4);
+    expect(JSON.parse(stdout[0]!)).toMatchObject({ outcome: 'endpoint_unsupported' });
+  });
+
+  it('recovers the terminal process and zero cursor even when the new process emitted no sample', async () => {
+    const { tokenFile, output } = fixture();
+    const oldProcess = endpointBody().process;
+    const newProcess = { pid: 43, started_at_ms: oldProcess.started_at_ms + 1_000, commit: 'b'.repeat(40) };
+    const priorRows = [
+      {
+        schema_version: 1,
+        record_type: 'sample',
+        run_id: 'prior',
+        observed_at: '2026-08-15T00:00:00.000Z',
+        instance: 'line-a',
+        process: oldProcess,
+        sample: endpointBody().samples[0],
+      },
+      {
+        schema_version: 1,
+        record_type: 'run_completed',
+        run_id: 'prior',
+        observed_at: '2026-08-15T00:00:01.000Z',
+        instance: 'line-a',
+        ok: false,
+        outcome: 'partial',
+        successful_polls: 1,
+        failed_polls: 0,
+        sample_count: 0,
+        gap_count: 1,
+        first_sequence: null,
+        last_sequence: null,
+        next_after: 0,
+        process: newProcess,
+      },
+    ];
+    writeFileSync(output, `${priorRows.map((row) => JSON.stringify(row)).join('\n')}\n`, { mode: 0o600 });
+    chmodSync(output, 0o600);
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      ...endpointBody(),
+      process: newProcess,
+    })));
+    const code = await run([
+      'collect', '--instance', 'line-a', '--base-url', 'http://localhost:9091',
+      '--token-file', tokenFile, '--output', output, '--once', '--format', 'json',
+    ], {
+      stdout: vi.fn(),
+      stderr: vi.fn(),
+      fetch: fetchMock,
+      nowIso: () => '2026-08-15T00:00:10.000Z',
+      randomUuid: () => '00000000-0000-4000-8000-000000000002',
+    });
+    expect(code).toBe(0);
+    expect(String(fetchMock.mock.calls[0]![0])).toContain('after=0');
+    const currentRows = readFileSync(output, 'utf8').trimEnd().split('\n').map((line) => JSON.parse(line));
+    expect(currentRows.filter((row) => row.record_type === 'gap' && row.kind === 'process_changed')).toHaveLength(0);
   });
 });
 

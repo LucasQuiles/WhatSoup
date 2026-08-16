@@ -172,6 +172,8 @@ export async function run(argv = process.argv.slice(2), deps: RunDeps = {}): Pro
   let successfulPolls = 0;
   let failedPolls = 0;
   let sampleCount = 0;
+  let firstSequence: number | null = null;
+  let lastSequence: number | null = null;
   let gapCount = 0;
   let partial = false;
   let terminal: ExitCode | null = null;
@@ -236,7 +238,11 @@ export async function run(argv = process.argv.slice(2), deps: RunDeps = {}): Pro
       );
       try {
         for (const record of transition.records) {
-          if (record.recordType === 'sample') sampleCount += 1;
+          if (record.recordType === 'sample') {
+            sampleCount += 1;
+            firstSequence ??= record.sample.sequence;
+            lastSequence = record.sample.sequence;
+          }
           else {
             gapCount += 1;
             partial = true;
@@ -297,7 +303,10 @@ export async function run(argv = process.argv.slice(2), deps: RunDeps = {}): Pro
     failed_polls: failedPolls,
     sample_count: sampleCount,
     gap_count: gapCount,
+    first_sequence: firstSequence,
+    last_sequence: lastSequence,
     next_after: state.cursor ?? 0,
+    process: state.process,
   };
   try {
     appendBoundedCollectorRecord(config.output, baseRecord('run_completed', runId, nowIso(), config.instance, summary), config.maxOutputBytes);
@@ -389,25 +398,51 @@ function recoverCollectorState(filePath: string, instance: string, maxBytes: num
   const rows = contents.slice(0, -1).split('\n').map(parseCollectorLine);
   let state = initialCollectorState(instance);
   for (const row of rows) {
-    if (row.instance !== instance || row.record_type !== 'sample') continue;
-    const process = row.process;
-    const sample = row.sample;
-    if (typeof process !== 'object' || process === null || typeof sample !== 'object' || sample === null) {
-      throw new Error('loop-lag evidence tail is malformed');
+    if (row.instance !== instance) continue;
+    if (row.record_type === 'sample') {
+      const process = parsePersistedProcess(row.process);
+      const sample = row.sample;
+      const sequence = typeof sample === 'object' && sample !== null
+        ? (sample as { sequence?: unknown }).sequence
+        : undefined;
+      if (process === null || !Number.isSafeInteger(sequence) || (sequence as number) < 1) {
+        throw new Error('loop-lag evidence tail is malformed');
+      }
+      state = { instance, process, cursor: sequence as number, seenKeys: [] };
+    } else if (row.record_type === 'run_completed') {
+      const process = row.process === null ? null : parsePersistedProcess(row.process);
+      const nextAfter = row.next_after;
+      if (
+        (row.process !== null && process === null)
+        || !Number.isSafeInteger(nextAfter)
+        || (nextAfter as number) < 0
+        || (process === null && nextAfter !== 0)
+      ) {
+        throw new Error('loop-lag evidence tail is malformed');
+      }
+      state = { instance, process, cursor: nextAfter as number, seenKeys: [] };
     }
-    const p = process as { pid?: unknown; started_at_ms?: unknown; commit?: unknown };
-    const s = sample as { sequence?: unknown };
-    if (!Number.isSafeInteger(p.pid) || !Number.isFinite(p.started_at_ms) || !Number.isSafeInteger(s.sequence)) {
-      throw new Error('loop-lag evidence tail is malformed');
-    }
-    state = {
-      instance,
-      process: { pid: p.pid as number, started_at_ms: p.started_at_ms as number, commit: typeof p.commit === 'string' ? p.commit : null },
-      cursor: s.sequence as number,
-      seenKeys: [],
-    };
   }
   return state;
+}
+
+function parsePersistedProcess(value: unknown): CollectorState['process'] {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+  const process = value as { pid?: unknown; started_at_ms?: unknown; commit?: unknown };
+  const commitValid = process.commit === null
+    || (typeof process.commit === 'string' && /^[0-9a-f]{40}$/.test(process.commit));
+  if (
+    !Number.isSafeInteger(process.pid)
+    || (process.pid as number) < 1
+    || !Number.isFinite(process.started_at_ms)
+    || (process.started_at_ms as number) < 0
+    || !commitValid
+  ) return null;
+  return {
+    pid: process.pid as number,
+    started_at_ms: process.started_at_ms as number,
+    commit: process.commit as string | null,
+  };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {

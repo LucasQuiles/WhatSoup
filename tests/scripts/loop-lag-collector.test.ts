@@ -149,4 +149,40 @@ describe('fetchLoopLagSamplePage', () => {
     expect(result).toEqual({ ok: false, kind: 'token_file_rejected', retryable: false });
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it('classifies an incompatible success body as terminal endpoint_unsupported', async () => {
+    const result = await fetchLoopLagSamplePage(
+      { baseUrl: 'http://localhost:9091', tokenFile: '/private/token', limit: 1 },
+      {
+        fetch: vi.fn().mockResolvedValue(new Response(JSON.stringify(response({ schema_version: 'future.v2' })))),
+        readToken: () => 'd'.repeat(64) as never,
+      },
+    );
+    expect(result).toEqual({ ok: false, kind: 'endpoint_unsupported', retryable: false, status: 200 });
+  });
+
+  it('stops reading and rejects a success body at the 32 KiB boundary', async () => {
+    let pulls = 0;
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulls += 1;
+        controller.enqueue(new Uint8Array(16 * 1024));
+        if (pulls === 10) controller.close();
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const result = await fetchLoopLagSamplePage(
+      { baseUrl: 'http://localhost:9091', tokenFile: '/private/token', limit: 1 },
+      {
+        fetch: vi.fn().mockResolvedValue(new Response(body)),
+        readToken: () => 'd'.repeat(64) as never,
+      },
+    );
+    expect(result).toEqual({ ok: false, kind: 'endpoint_unsupported', retryable: false, status: 200 });
+    expect(cancelled).toBe(true);
+    expect(pulls).toBeLessThan(10);
+  });
 });

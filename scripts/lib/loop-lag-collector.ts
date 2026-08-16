@@ -206,31 +206,67 @@ export async function fetchLoopLagSamplePage(
   if (input.after !== undefined) endpoint.searchParams.set('after', String(input.after));
   endpoint.searchParams.set('limit', String(input.limit));
 
+  let result: Response;
   try {
-    const result = await deps.fetch(endpoint.href, {
+    result = await deps.fetch(endpoint.href, {
       method: 'GET',
       redirect: 'error',
       headers: { Authorization: `Bearer ${token}` },
       signal: AbortSignal.timeout(5_000),
     });
-    if (result.status === 401) {
-      return { ok: false, kind: 'authentication_failed', retryable: false, status: result.status };
-    }
-    if (result.status === 404) {
-      return { ok: false, kind: 'endpoint_unsupported', retryable: false, status: result.status };
-    }
-    if (result.status >= 500) {
-      return { ok: false, kind: 'http_5xx', retryable: true, status: result.status };
-    }
-    if (!result.ok) {
-      return { ok: false, kind: 'request_failed', retryable: false, status: result.status };
-    }
-    const body = await result.text();
-    if (Buffer.byteLength(body) >= LOOP_LAG_SAMPLES_MAX_RESPONSE_BYTES) {
-      return { ok: false, kind: 'endpoint_unsupported', retryable: false, status: result.status };
-    }
-    return { ok: true, response: decodeLoopLagSamplesResponse(JSON.parse(body)) };
   } catch {
     return { ok: false, kind: 'request_failed', retryable: true };
   }
+  if (result.status === 401) {
+    return { ok: false, kind: 'authentication_failed', retryable: false, status: result.status };
+  }
+  if (result.status === 404) {
+    return { ok: false, kind: 'endpoint_unsupported', retryable: false, status: result.status };
+  }
+  if (result.status >= 500) {
+    return { ok: false, kind: 'http_5xx', retryable: true, status: result.status };
+  }
+  if (!result.ok) {
+    return { ok: false, kind: 'request_failed', retryable: false, status: result.status };
+  }
+
+  let boundedBody: { readonly ok: true; readonly text: string } | { readonly ok: false };
+  try {
+    boundedBody = await readBoundedResponseBody(result, LOOP_LAG_SAMPLES_MAX_RESPONSE_BYTES);
+  } catch {
+    return { ok: false, kind: 'request_failed', retryable: true };
+  }
+  if (!boundedBody.ok) {
+    return { ok: false, kind: 'endpoint_unsupported', retryable: false, status: result.status };
+  }
+  try {
+    return { ok: true, response: decodeLoopLagSamplesResponse(JSON.parse(boundedBody.text)) };
+  } catch {
+    return { ok: false, kind: 'endpoint_unsupported', retryable: false, status: result.status };
+  }
+}
+
+async function readBoundedResponseBody(
+  response: Response,
+  exclusiveMaxBytes: number,
+): Promise<{ readonly ok: true; readonly text: string } | { readonly ok: false }> {
+  if (response.body === null) return { ok: true, text: '' };
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    totalBytes += value.byteLength;
+    if (totalBytes >= exclusiveMaxBytes) {
+      try {
+        await reader.cancel();
+      } catch {
+        // The body is already rejected; cancellation failure cannot make it admissible.
+      }
+      return { ok: false };
+    }
+    chunks.push(value);
+  }
+  return { ok: true, text: Buffer.concat(chunks, totalBytes).toString('utf8') };
 }
