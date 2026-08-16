@@ -1,5 +1,7 @@
 import { performance as nodePerformance } from 'node:perf_hooks';
 
+import { systemClock } from './clock.ts';
+
 export const LOOP_LAG_SAMPLE_INTERVAL_MS = 500;
 export const LOOP_LAG_WINDOW_SAMPLES = 20;
 export const LOOP_LAG_STARVATION_THRESHOLD_MS = 250;
@@ -22,6 +24,8 @@ export const LOOP_LAG_RAW_RECENT_LIMIT = 160;
 export type LoopLagObservationSource = 'interval' | 'snapshot';
 
 export interface RawLoopLagSample {
+  /** Process-local cursor allocated once per accepted observation. */
+  readonly sequence: number;
   /** Monotonic observation time (same clock as `now`). */
   readonly atMs: number;
   /** Unix epoch observation time for correlation with timestamped runtime logs. */
@@ -96,6 +100,7 @@ export class LoopLagSampler {
   private prevCpu: CpuReading | null = null;
   private lastEluUtilization: number | null = null;
   private lastCpuDeltaMs: number | null = null;
+  private nextRawSequence = 1;
   private readonly now: () => number;
   private readonly wallNow: () => number;
   private readonly eluReader: () => EluReading | null;
@@ -103,7 +108,7 @@ export class LoopLagSampler {
 
   constructor(options: LoopLagSamplerOptions = {}) {
     this.now = options.now ?? (() => performance.now());
-    this.wallNow = options.wallNow ?? (() => Date.now());
+    this.wallNow = options.wallNow ?? (() => systemClock.now());
     this.eluReader = options.eluReader ?? defaultEluReader;
     this.cpuReader = options.cpuReader ?? defaultCpuReader;
   }
@@ -179,6 +184,7 @@ export class LoopLagSampler {
     this.lastCpuDeltaMs = cpuDeltaMs;
     const discontinuity = lagMs > LOOP_LAG_DISCONTINUITY_THRESHOLD_MS;
     this.pushRaw({
+      sequence: this.allocateRawSequence(),
       atMs: actualAtMs,
       wallAtMs: this.wallNow(),
       lagMs,
@@ -205,25 +211,49 @@ export class LoopLagSampler {
     if (this.rawRing.length > LOOP_LAG_RAW_RING_SAMPLES) this.rawRing.shift();
   }
 
+  private allocateRawSequence(): number {
+    if (!Number.isSafeInteger(this.nextRawSequence) || this.nextRawSequence < 1) {
+      throw new Error('loop-lag raw sample sequence exhausted');
+    }
+    const sequence = this.nextRawSequence;
+    this.nextRawSequence += 1;
+    return sequence;
+  }
+
   private readEluDelta(): number | null {
     const current = this.eluReader();
     if (current === null) return null;
+    if (!finiteNonNegative(current.active) || !finiteNonNegative(current.idle)) {
+      this.prevElu = null;
+      return null;
+    }
     const previous = this.prevElu;
     this.prevElu = current;
     if (previous === null) return null;
     const active = current.active - previous.active;
     const idle = current.idle - previous.idle;
     const span = active + idle;
-    return span > 0 ? active / span : null;
+    if (!finiteNonNegative(active) || !finiteNonNegative(idle) || !finiteNonNegative(span) || span === 0) {
+      return null;
+    }
+    const utilization = active / span;
+    return Number.isFinite(utilization) && utilization >= 0 && utilization <= 1
+      ? utilization
+      : null;
   }
 
   private readCpuDelta(): number | null {
     const current = this.cpuReader();
     if (current === null) return null;
+    if (!finiteNonNegative(current.user) || !finiteNonNegative(current.system)) {
+      this.prevCpu = null;
+      return null;
+    }
     const previous = this.prevCpu;
     this.prevCpu = current;
     if (previous === null) return null;
-    return (current.user - previous.user + current.system - previous.system) / 1000;
+    const deltaMs = (current.user - previous.user + current.system - previous.system) / 1000;
+    return finiteNonNegative(deltaMs) ? deltaMs : null;
   }
 
   private percentile95(samples: readonly number[]): number | null {
@@ -246,4 +276,8 @@ export class LoopLagSampler {
     this.window = [];
     this.expectedAtMs = null;
   }
+}
+
+function finiteNonNegative(value: number): boolean {
+  return Number.isFinite(value) && value >= 0;
 }

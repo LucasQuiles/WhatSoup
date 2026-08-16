@@ -124,8 +124,44 @@ describe('LoopLagSampler — raw instrumentation (#3253)', () => {
     }
     const ring = h.sampler.rawSamples();
     expect(ring).toHaveLength(LOOP_LAG_RAW_RING_SAMPLES);
+    expect(ring[0]!.sequence).toBe(41);
+    expect(ring.at(-1)!.sequence).toBe(total);
     expect(ring[0]!.atMs).toBe(41 * LOOP_LAG_SAMPLE_INTERVAL_MS);
     expect(ring.at(-1)!.atMs).toBe(total * LOOP_LAG_SAMPLE_INTERVAL_MS);
+  });
+
+  it('allocates process-local sequence once per accepted observation across stop/start', () => {
+    const h = makeHarness();
+    h.sampler.start();
+    h.setNow(500);
+    vi.advanceTimersByTime(LOOP_LAG_SAMPLE_INTERVAL_MS);
+    h.setNow(1_000);
+    vi.advanceTimersByTime(LOOP_LAG_SAMPLE_INTERVAL_MS);
+    h.sampler.stop();
+    h.sampler.start();
+    h.setNow(1_500);
+    vi.advanceTimersByTime(LOOP_LAG_SAMPLE_INTERVAL_MS);
+
+    expect(h.sampler.rawSamples().map((sample) => sample.sequence)).toEqual([1, 2, 3]);
+
+    const fresh = makeHarness();
+    fresh.sampler.start();
+    fresh.setNow(500);
+    vi.advanceTimersByTime(LOOP_LAG_SAMPLE_INTERVAL_MS);
+    expect(fresh.sampler.rawSamples()[0]!.sequence).toBe(1);
+  });
+
+  it('uses wall time only as correlation metadata, never for lag math', () => {
+    const h = makeHarness();
+    h.sampler.start();
+    h.setWallNow(9_999_999_999_999);
+    h.setNow(510);
+    vi.advanceTimersByTime(LOOP_LAG_SAMPLE_INTERVAL_MS);
+
+    expect(h.sampler.rawSamples()[0]).toMatchObject({
+      wallAtMs: 9_999_999_999_999,
+      lagMs: 10,
+    });
   });
 
   it('a discontinuity resets the window but is retained in the ring with its flag', () => {
@@ -174,6 +210,37 @@ describe('LoopLagSampler — raw instrumentation (#3253)', () => {
     const snap = h.sampler.snapshot();
     expect(snap.lastEluUtilization).toBeCloseTo(0, 5);
     expect(snap.lastCpuDeltaMs).toBeCloseTo(0, 5);
+  });
+
+  it('normalizes negative, non-finite, and out-of-range resource deltas to null', () => {
+    const cases = [
+      {
+        elu: { idle: 100, active: -200 },
+        cpu: { user: -1, system: 0 },
+      },
+      {
+        elu: { idle: -50, active: 100 },
+        cpu: { user: Number.POSITIVE_INFINITY, system: 0 },
+      },
+      {
+        elu: { idle: Number.NaN, active: 1 },
+        cpu: { user: Number.NaN, system: 0 },
+      },
+    ];
+
+    for (const [index, testCase] of cases.entries()) {
+      const h = makeHarness();
+      h.sampler.start();
+      h.setElu(testCase.elu);
+      h.setCpu(testCase.cpu);
+      h.setNow(500);
+      vi.advanceTimersByTime(LOOP_LAG_SAMPLE_INTERVAL_MS);
+      expect(h.sampler.rawSamples()[0], `case ${index}`).toMatchObject({
+        eluUtilization: null,
+        cpuDeltaMs: null,
+      });
+      h.sampler.stop();
+    }
   });
 
   it('the ring survives stop() while the window does not', () => {
