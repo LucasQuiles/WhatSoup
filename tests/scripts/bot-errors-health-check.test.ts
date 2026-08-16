@@ -7530,14 +7530,19 @@ print(m.probe_health(9092))
     expect(readJsonl(directLog)).toHaveLength(1);
 
     const deadmanStatePath = join(tmpRoot, 'deadman-state.json');
-    const stateDoc = JSON.parse(readFileSync(deadmanStatePath, 'utf8')) as {
-      incidents: Record<string, { firstSeenAtEpoch: number; lastSentAtEpoch: number; lastSentAt: string; sentCount: number; suppressed: number }>;
+    type EpisodeState = {
+      episode: {
+        openedAtEpoch: number;
+        members: Record<string, { firstSeenAtEpoch: number }>;
+        onset: { lastAcceptedAtEpoch: number; sentCount: number; suppressed: number };
+      };
     };
-    const incidentKey = Object.keys(stateDoc.incidents)[0]!;
-    expect(stateDoc.incidents[incidentKey]!.firstSeenAtEpoch).toBe(baseEpoch);
-    expect(stateDoc.incidents[incidentKey]!.lastSentAtEpoch).toBe(baseEpoch);
-    expect(stateDoc.incidents[incidentKey]!.sentCount).toBe(1);
-    expect(stateDoc.incidents[incidentKey]!.suppressed).toBe(2);
+    const stateDoc = JSON.parse(readFileSync(deadmanStatePath, 'utf8')) as EpisodeState;
+    expect(stateDoc.episode.openedAtEpoch).toBe(baseEpoch);
+    expect(stateDoc.episode.members['service_inactive']!.firstSeenAtEpoch).toBe(baseEpoch);
+    expect(stateDoc.episode.onset.lastAcceptedAtEpoch).toBe(baseEpoch);
+    expect(stateDoc.episode.onset.sentCount).toBe(1);
+    expect(stateDoc.episode.onset.suppressed).toBe(2);
 
     utimesSync(dispatcherState, new Date((baseEpoch + 61) * 1000), new Date((baseEpoch + 61) * 1000));
     const afterCooldown = runDeadman(tmpRoot, { ...env, BOT_ERRORS_DRY_NOW_EPOCH: String(baseEpoch + 61) });
@@ -7547,13 +7552,12 @@ print(m.probe_health(9092))
     expect(directMessages).toHaveLength(2);
     expect(String(directMessages[1]!['text'])).toContain('suppressed_since_last_send: 2');
 
-    const updatedState = JSON.parse(readFileSync(deadmanStatePath, 'utf8')) as {
-      incidents: Record<string, { firstSeenAtEpoch: number; lastSentAtEpoch: number; sentCount: number; suppressed: number }>;
-    };
-    expect(updatedState.incidents[incidentKey]!.firstSeenAtEpoch).toBe(baseEpoch);
-    expect(updatedState.incidents[incidentKey]!.lastSentAtEpoch).toBe(baseEpoch + 61);
-    expect(updatedState.incidents[incidentKey]!.sentCount).toBe(2);
-    expect(updatedState.incidents[incidentKey]!.suppressed).toBe(0);
+    const updatedState = JSON.parse(readFileSync(deadmanStatePath, 'utf8')) as EpisodeState;
+    expect(updatedState.episode.openedAtEpoch).toBe(baseEpoch);
+    expect(updatedState.episode.members['service_inactive']!.firstSeenAtEpoch).toBe(baseEpoch);
+    expect(updatedState.episode.onset.lastAcceptedAtEpoch).toBe(baseEpoch + 61);
+    expect(updatedState.episode.onset.sentCount).toBe(2);
+    expect(updatedState.episode.onset.suppressed).toBe(0);
   });
 
   it('falls back to email when deadman direct WhatsApp send fails', () => {
@@ -7587,11 +7591,16 @@ print(m.probe_health(9092))
     expect(fallbackArgs).toContain('BOT ERRORS DEADMAN - dispatcher supervision failed');
 
     const stateDoc = JSON.parse(readFileSync(join(tmpRoot, 'deadman-state.json'), 'utf8')) as {
-      incidents: Record<string, { lastSendStatus: { direct_whatsapp: string; email_fallback: string } }>;
+      episode: {
+        onset: {
+          deliveredKind: string;
+          lastAttempt: { direct_whatsapp: string; email_fallback: string };
+        };
+      };
     };
-    const incident = Object.values(stateDoc.incidents)[0]!;
-    expect(incident.lastSendStatus.direct_whatsapp).toBe('failed');
-    expect(incident.lastSendStatus.email_fallback).toBe('accepted_unconfirmed');
+    expect(stateDoc.episode.onset.lastAttempt.direct_whatsapp).toBe('failed');
+    expect(stateDoc.episode.onset.lastAttempt.email_fallback).toBe('accepted_unconfirmed');
+    expect(stateDoc.episode.onset.deliveredKind).toBe('accepted_unconfirmed');
   });
 
   it('sends a single deadman recovery clear when the supervised path is healthy again', () => {
@@ -7635,11 +7644,13 @@ print(m.probe_health(9092))
     expect(String(directMessages[1]!['text'])).toContain('BOT ERRORS DEADMAN RECOVERY');
 
     const deadmanState = JSON.parse(readFileSync(join(tmpRoot, 'deadman-state.json'), 'utf8')) as {
-      incidents: Record<string, { status: string; resolvedAt: string }>;
+      episode: unknown;
+      lastResolvedEpisode: { status: string; resolvedAt: string; resolution: string };
     };
-    const incident = Object.values(deadmanState.incidents)[0]!;
-    expect(incident.status).toBe('resolved');
-    expect(incident.resolvedAt).toMatch(/Z$/);
+    expect(deadmanState.episode).toBeNull();
+    expect(deadmanState.lastResolvedEpisode.status).toBe('resolved');
+    expect(deadmanState.lastResolvedEpisode.resolvedAt).toMatch(/Z$/);
+    expect(deadmanState.lastResolvedEpisode.resolution).toBe('recovery_accepted');
 
     utimesSync(dispatcherState, new Date((baseEpoch + 5) * 1000), new Date((baseEpoch + 5) * 1000));
     const recoveredAgain = runDeadman(tmpRoot, {

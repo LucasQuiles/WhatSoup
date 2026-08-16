@@ -1456,8 +1456,16 @@ def controller_log_fallback(line: str) -> None:
 
 
 def _deadman_delivery_level(delivery_status: str) -> str:
-    """Return 'warning' for failed/rejected_unconfirmed deliveries, 'info' otherwise (#2425)."""
-    return "warning" if delivery_status in ("failed", "rejected_unconfirmed") else "info"
+    """Return 'warning' for non-accepted deliveries, 'info' otherwise (#2425)."""
+    return "warning" if delivery_status in (
+        "failed",
+        "rejected_unconfirmed",
+        "rejected",
+        "outcome_unknown",
+        "timed_out",
+        "unavailable",
+        "pending_exhausted",
+    ) else "info"
 
 
 def append_deadman_log(
@@ -1528,9 +1536,364 @@ def save_deadman_state(state: dict[str, Any]) -> None:
     require_advance(publication)
 
 
-def deadman_incident_key(problems: list[str]) -> str:
-    payload = "\n".join(sorted(problems))
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:20]
+DEADMAN_PENDING_MAX_ATTEMPTS = 8
+
+_DEADMAN_SERVICE_STATUS_TOKENS = ("active", "inactive", "failed", "activating", "deactivating", "reloading")
+
+
+def _bounded_service_status(status: str) -> str:
+    if status in _DEADMAN_SERVICE_STATUS_TOKENS:
+        return status
+    if status.startswith(("unavailable:", "timeout:", "rc=")):
+        return status
+    return "unknown"
+
+
+def _classify_direct_send_error(exc: BaseException) -> str:
+    """Map a send_direct exception to a bounded token safe for durable state (#2425)."""
+    if isinstance(exc, TimeoutError):
+        return "timeout"
+    if isinstance(exc, ConnectionRefusedError):
+        return "connection_refused"
+    message = str(exc)
+    if "socket missing" in message:
+        return "socket_missing"
+    if message.startswith("send_message returned error"):
+        return "send_error"
+    if "BOT_ERRORS" in message:
+        return "target_invalid"
+    return "other"
+
+
+def _deadman_attempt_delivery(text: str, email_subject: str, *, context: str) -> dict[str, Any]:
+    """Attempt direct WhatsApp then email fallback; return a typed durable outcome (#2425).
+
+    direct_whatsapp: sent | failed | outcome_unknown | not_attempted. A timeout
+    is outcome_unknown because the request may have been accepted before the
+    deadline (#2424 owns disambiguating ambiguous acceptance); every other
+    exception is a proven rejection. email_fallback: accepted_unconfirmed |
+    rejected | timed_out | unavailable | not_attempted.
+    """
+    outcome: dict[str, Any] = {
+        "direct_whatsapp": "not_attempted",
+        "email_fallback": "not_attempted",
+        "email_channel": "resend",
+    }
+    try:
+        send_direct(text)
+        outcome["direct_whatsapp"] = "sent"
+        print(f"notifier direct_whatsapp=sent {context}")
+    except TimeoutError as exc:
+        outcome["direct_whatsapp"] = "outcome_unknown"
+        outcome["direct_error"] = _classify_direct_send_error(exc)
+        print(f"notifier direct_whatsapp=outcome_unknown {context} error={outcome['direct_error']}")
+    except Exception as exc:  # noqa: BLE001 - every rejection shape must land in the durable outcome.
+        outcome["direct_whatsapp"] = "failed"
+        outcome["direct_error"] = _classify_direct_send_error(exc)
+        print(f"notifier direct_whatsapp=failed {context} error={outcome['direct_error']}")
+    if outcome["direct_whatsapp"] != "sent":
+        outcome["email_fallback"] = email_fallback_outcome(email_subject, text)
+        print(f"notifier email_fallback={outcome['email_fallback']} channel=resend {context}")
+    return outcome
+
+
+def _deadman_outcome_accepted_kind(outcome: dict[str, Any]) -> str | None:
+    if outcome.get("direct_whatsapp") == "sent":
+        return "accepted"
+    if outcome.get("email_fallback") == "accepted_unconfirmed":
+        return "accepted_unconfirmed"
+    return None
+
+
+def _deadman_new_episode(now_epoch: int) -> dict[str, Any]:
+    return {
+        "status": "open",
+        "episodeId": f"ep-{now_epoch}",
+        "openedAtEpoch": now_epoch,
+        "openedAt": epoch_to_iso(now_epoch),
+        "revision": 0,
+        "members": {},
+        "onset": {"state": "pending", "attemptCount": 0, "sentCount": 0, "suppressed": 0},
+    }
+
+
+def migrate_deadman_state(state: dict[str, Any], now_epoch: int) -> None:
+    """Adopt schemaVersion 1 open incidents into the episode model, in place (#2425).
+
+    Legacy incident records stay in the state and are marked resolved once the
+    adopting episode's recovery notice is accepted, so an upgrade never
+    orphans a previously-open supervision record. Adoption counts as a
+    delivered onset when any legacy incident recorded a send, anchoring the
+    cooldown at the newest legacy send instead of re-paging on upgrade.
+    """
+    if isinstance(state.get("episode"), dict) and state["episode"].get("status") == "open":
+        state["schemaVersion"] = 2
+        return
+    incidents = state.get("incidents")
+    open_legacy = (
+        [record for record in incidents.values() if isinstance(record, dict) and record.get("status") == "open"]
+        if isinstance(incidents, dict)
+        else []
+    )
+    if not open_legacy:
+        state["schemaVersion"] = 2
+        return
+    adopted = _deadman_new_episode(now_epoch)
+    adopted["adoptedLegacyIncidents"] = len(open_legacy)
+    sent_epochs = [
+        epoch for epoch in (int_or_none(record.get("lastSentAtEpoch")) for record in open_legacy) if epoch is not None
+    ]
+    if sent_epochs:
+        adopted["onset"] = {
+            "state": "delivered",
+            "deliveredKind": "accepted",
+            "attemptCount": 0,
+            "sentCount": sum(int_or_none(record.get("sentCount")) or 0 for record in open_legacy),
+            "suppressed": 0,
+            "lastAcceptedAtEpoch": max(sent_epochs),
+            "lastAcceptedAt": epoch_to_iso(max(sent_epochs)),
+            "lastAcceptedRevision": 0,
+        }
+    state["episode"] = adopted
+    state["schemaVersion"] = 2
+
+
+def _resolve_deadman_episode(
+    deadman_state: dict[str, Any],
+    episode: dict[str, Any],
+    now_epoch: int,
+    *,
+    resolution: str,
+    outcome: dict[str, Any] | None,
+) -> None:
+    episode["status"] = "resolved"
+    episode["resolvedAtEpoch"] = now_epoch
+    episode["resolvedAt"] = epoch_to_iso(now_epoch)
+    episode["resolution"] = resolution
+    if outcome is not None:
+        episode["lastRecoveryStatus"] = outcome
+    incidents = deadman_state.get("incidents")
+    if isinstance(incidents, dict):
+        for record in incidents.values():
+            if isinstance(record, dict) and record.get("status") == "open":
+                record["status"] = "resolved"
+                record["resolvedAtEpoch"] = now_epoch
+    deadman_state["lastResolvedEpisode"] = episode
+    deadman_state["episode"] = None
+
+
+def advance_deadman_episode(
+    deadman_state: dict[str, Any],
+    active_members: dict[str, dict[str, Any]],
+    *,
+    now_epoch: int,
+    cooldown_seconds: int,
+    attempt_onset: Any,
+    attempt_recovery: Any,
+) -> dict[str, Any]:
+    """Advance the single deadman supervision episode (#2425); mutates state in place.
+
+    Lifecycle rules: sent count and cooldown advance only on an accepted
+    delivery (direct sent, or email accepted_unconfirmed); a fully rejected
+    notification retains durable pending state and retries with a bounded
+    budget; member identities are stable problem codes, so detail churn never
+    mints a new episode; a recovery notice is owed only when the onset was
+    delivered (or the episode adopted legacy incidents) and resolves the
+    episode only once accepted. Returns {"exitCode", "dirty", "logs", ...}.
+    """
+    logs: list[tuple[dict[str, Any], str]] = []
+    episode = deadman_state.get("episode")
+    if not isinstance(episode, dict) or episode.get("status") != "open":
+        episode = None
+
+    if active_members:
+        if episode is None:
+            episode = _deadman_new_episode(now_epoch)
+            deadman_state["episode"] = episode
+        if deadman_state.get("loadError"):
+            episode["stateLoadError"] = deadman_state.get("loadError")
+        members = episode.setdefault("members", {})
+        onset = episode.setdefault("onset", {"state": "pending", "attemptCount": 0, "sentCount": 0, "suppressed": 0})
+        revision = int_or_none(episode.get("revision")) or 0
+        changed = False
+        for code, detail in active_members.items():
+            member = members.get(code)
+            if not isinstance(member, dict):
+                members[code] = {
+                    "status": "active",
+                    "firstSeenAtEpoch": now_epoch,
+                    "firstSeenAt": epoch_to_iso(now_epoch),
+                    "lastSeenAtEpoch": now_epoch,
+                    "detail": detail,
+                }
+                changed = True
+                continue
+            if member.get("status") != "active":
+                member["status"] = "active"
+                member["reactivatedAtEpoch"] = now_epoch
+                changed = True
+            member["lastSeenAtEpoch"] = now_epoch
+            member["detail"] = detail
+        for code, member in members.items():
+            if code in active_members or not isinstance(member, dict) or member.get("status") != "active":
+                continue
+            member["status"] = "recovered"
+            member["recoveredAtEpoch"] = now_epoch
+            member["recoveredAt"] = epoch_to_iso(now_epoch)
+            changed = True
+        if changed:
+            revision += 1
+            episode["revision"] = revision
+            onset["attemptCount"] = 0
+            if onset.get("state") == "exhausted":
+                onset["state"] = "pending"
+        episode.pop("recovery", None)
+
+        last_accepted = int_or_none(onset.get("lastAcceptedAtEpoch"))
+        accepted_revision = int_or_none(onset.get("lastAcceptedRevision"))
+        remaining = 0 if last_accepted is None else max(0, cooldown_seconds - (now_epoch - last_accepted))
+        in_cooldown = remaining > 0 and accepted_revision == revision
+        member_codes = sorted(
+            code for code, member in members.items() if isinstance(member, dict) and member.get("status") == "active"
+        )
+        base_log: dict[str, Any] = {
+            "type": "deadman",
+            "episode_id": episode.get("episodeId"),
+            "revision": revision,
+            "members": member_codes,
+            "cooldown_seconds": cooldown_seconds,
+        }
+
+        if onset.get("state") == "delivered" and in_cooldown:
+            onset["suppressed"] = (int_or_none(onset.get("suppressed")) or 0) + 1
+            logs.append((
+                {
+                    **base_log,
+                    "direct_whatsapp": "suppressed_cooldown",
+                    "cooldown_remaining_seconds": remaining,
+                    "suppressed": onset["suppressed"],
+                },
+                "info",
+            ))
+            return {
+                "exitCode": 2,
+                "dirty": True,
+                "logs": logs,
+                "delivery": "suppressed_cooldown",
+                "suppressed": onset["suppressed"],
+                "cooldown_remaining_seconds": remaining,
+            }
+        if onset.get("state") == "exhausted":
+            return {"exitCode": 2, "dirty": True, "logs": logs, "delivery": "pending_exhausted_hold"}
+        if (int_or_none(onset.get("attemptCount")) or 0) >= DEADMAN_PENDING_MAX_ATTEMPTS:
+            onset["state"] = "exhausted"
+            onset["exhaustedAtEpoch"] = now_epoch
+            logs.append((
+                {**base_log, "direct_whatsapp": "pending_exhausted", "attempt_count": onset.get("attemptCount")},
+                "warning",
+            ))
+            return {"exitCode": 2, "dirty": True, "logs": logs, "delivery": "pending_exhausted"}
+
+        outcome = attempt_onset(episode)
+        onset["lastAttempt"] = outcome
+        onset["lastAttemptAtEpoch"] = now_epoch
+        kind = _deadman_outcome_accepted_kind(outcome)
+        if kind:
+            onset["state"] = "delivered"
+            onset["deliveredKind"] = kind
+            onset["sentCount"] = (int_or_none(onset.get("sentCount")) or 0) + 1
+            onset["suppressed"] = 0
+            onset["attemptCount"] = 0
+            onset["lastAcceptedAtEpoch"] = now_epoch
+            onset["lastAcceptedAt"] = epoch_to_iso(now_epoch)
+            onset["lastAcceptedRevision"] = revision
+            onset.pop("pendingSinceEpoch", None)
+        else:
+            onset["state"] = "pending"
+            onset.setdefault("pendingSinceEpoch", now_epoch)
+            onset["attemptCount"] = (int_or_none(onset.get("attemptCount")) or 0) + 1
+        if outcome.get("direct_whatsapp") in ("failed", "rejected_unconfirmed"):
+            deadman_state["lastRejectedCount"] = (int(deadman_state.get("lastRejectedCount") or 0)) + 1
+        logs.append((
+            {
+                **base_log,
+                **outcome,
+                "onset_state": onset["state"],
+                "attempt_count": int_or_none(onset.get("attemptCount")) or 0,
+                "sent_count": int_or_none(onset.get("sentCount")) or 0,
+            },
+            _deadman_delivery_level(outcome.get("direct_whatsapp", "")),
+        ))
+        return {
+            "exitCode": 2,
+            "dirty": True,
+            "logs": logs,
+            "delivery": outcome.get("direct_whatsapp"),
+            "onset_state": onset["state"],
+        }
+
+    # No active problems.
+    if episode is None:
+        return {"exitCode": 0, "dirty": False, "logs": logs, "delivery": "ok"}
+    members = episode.setdefault("members", {})
+    onset = episode.setdefault("onset", {"state": "pending", "attemptCount": 0, "sentCount": 0, "suppressed": 0})
+    revision = int_or_none(episode.get("revision")) or 0
+    changed = False
+    for member in members.values():
+        if isinstance(member, dict) and member.get("status") == "active":
+            member["status"] = "recovered"
+            member["recoveredAtEpoch"] = now_epoch
+            member["recoveredAt"] = epoch_to_iso(now_epoch)
+            changed = True
+    if changed:
+        revision += 1
+        episode["revision"] = revision
+    base_log = {"type": "deadman_recovery", "episode_id": episode.get("episodeId"), "revision": revision}
+    recovery_owed = (int_or_none(onset.get("sentCount")) or 0) > 0 or bool(episode.get("adoptedLegacyIncidents"))
+    if not recovery_owed:
+        # Never-delivered episodes resolve quietly: the owner was never paged,
+        # so there is nothing to declare recovered (marker-gated clear).
+        _resolve_deadman_episode(deadman_state, episode, now_epoch, resolution="self_healed_before_delivery", outcome=None)
+        logs.append(({**base_log, "delivery": "not_required"}, "info"))
+        return {"exitCode": 0, "dirty": True, "logs": logs, "delivery": "recovery_not_required"}
+    recovery = episode.get("recovery")
+    if not isinstance(recovery, dict):
+        recovery = {"state": "pending", "attemptCount": 0, "pendingSinceEpoch": now_epoch}
+        episode["recovery"] = recovery
+    if recovery.get("state") == "exhausted":
+        return {"exitCode": 0, "dirty": changed, "logs": logs, "delivery": "recovery_exhausted_hold"}
+    if (int_or_none(recovery.get("attemptCount")) or 0) >= DEADMAN_PENDING_MAX_ATTEMPTS:
+        recovery["state"] = "exhausted"
+        recovery["exhaustedAtEpoch"] = now_epoch
+        logs.append((
+            {**base_log, "delivery": "pending_exhausted", "attempt_count": recovery.get("attemptCount")},
+            "warning",
+        ))
+        return {"exitCode": 0, "dirty": True, "logs": logs, "delivery": "recovery_pending_exhausted"}
+    outcome = attempt_recovery(episode)
+    recovery["lastAttempt"] = outcome
+    recovery["lastAttemptAtEpoch"] = now_epoch
+    kind = _deadman_outcome_accepted_kind(outcome)
+    if kind:
+        recovery["state"] = "delivered"
+        recovery["deliveredKind"] = kind
+        _resolve_deadman_episode(
+            deadman_state, episode, now_epoch, resolution=f"recovery_{kind}", outcome=outcome
+        )
+        deadman_state["lastRecoveryResult"] = "success" if outcome.get("direct_whatsapp") == "sent" else "failed"
+    else:
+        recovery["state"] = "pending"
+        recovery["attemptCount"] = (int_or_none(recovery.get("attemptCount")) or 0) + 1
+    logs.append((
+        {
+            **base_log,
+            **outcome,
+            "recovery_state": recovery.get("state"),
+            "attempt_count": int_or_none(recovery.get("attemptCount")) or 0,
+        },
+        _deadman_delivery_level(outcome.get("direct_whatsapp", "")),
+    ))
+    return {"exitCode": 0, "dirty": True, "logs": logs, "delivery": outcome.get("direct_whatsapp")}
 
 
 def epoch_to_iso(epoch: int | float | None) -> str | None:
@@ -2146,10 +2509,17 @@ def send_direct(text: str) -> None:
         raise RuntimeError(f"send_message returned error: {result}")
 
 
-def email_fallback(subject: str, body: str) -> bool:
+def email_fallback_outcome(subject: str, body: str) -> str:
+    """Typed email delivery outcome (#2425).
+
+    accepted_unconfirmed: the fallback binary exited 0 (relay accepted; final
+    delivery unproven). rejected: proven non-zero exit. timed_out: the binary
+    ran past its budget, so acceptance is unknown but unproven. unavailable:
+    the binary is missing, non-executable, or failed to spawn.
+    """
     fallback = Path(EMAIL_FALLBACK)
     if not fallback.exists() or not os.access(fallback, os.X_OK):
-        return False
+        return "unavailable"
     try:
         proc = subprocess.run(
             [str(fallback), "--subject", subject, "--body", body],
@@ -2159,9 +2529,15 @@ def email_fallback(subject: str, body: str) -> bool:
             timeout=20,
             check=False,
         )
-    except (subprocess.TimeoutExpired, OSError):
-        return False
-    return proc.returncode == 0
+    except subprocess.TimeoutExpired:
+        return "timed_out"
+    except OSError:
+        return "unavailable"
+    return "accepted_unconfirmed" if proc.returncode == 0 else "rejected"
+
+
+def email_fallback(subject: str, body: str) -> bool:
+    return email_fallback_outcome(subject, body) == "accepted_unconfirmed"
 
 
 def systemctl_is_active(unit: str) -> str:
@@ -6934,10 +7310,61 @@ def daily() -> int:
         outcome=outcome,
     ),
 )
+def _deadman_member_line(code: str, member: dict[str, Any]) -> str:
+    detail = member.get("detail") if isinstance(member.get("detail"), dict) else {}
+    rendered = " ".join(f"{key}={value}" for key, value in sorted(detail.items()))
+    return f"  > problem: {code}" + (f" {rendered}" if rendered else "")
+
+
+def _deadman_onset_text(episode: dict[str, Any], cooldown_seconds: int) -> str:
+    onset = episode.get("onset") if isinstance(episode.get("onset"), dict) else {}
+    members = episode.get("members") if isinstance(episode.get("members"), dict) else {}
+    active = {
+        code: member
+        for code, member in sorted(members.items())
+        if isinstance(member, dict) and member.get("status") == "active"
+    }
+    return "\n".join([
+        "BOT ERRORS DEADMAN - dispatcher supervision failed",
+        f"  > machine: {socket.gethostname()}",
+        f"  > created: {now_iso()}",
+        f"  > episode: {episode.get('episodeId')} revision={episode.get('revision')}",
+        f"  > cooldown_seconds: {cooldown_seconds}",
+        f"  > suppressed_since_last_send: {int_or_none(onset.get('suppressed')) or 0}",
+        *[_deadman_member_line(code, member) for code, member in active.items()],
+        "  > evidence: deadman controller log + deadman state under the bot-errors state root",
+        "  > notifier: direct_whatsapp primary; email_fallback=resend when direct WhatsApp/socket fails",
+        "  > requested_action: Q investigate dispatcher, queue, personal line, and email fallback.",
+    ])
+
+
+def _deadman_recovery_text(episode: dict[str, Any]) -> str:
+    onset = episode.get("onset") if isinstance(episode.get("onset"), dict) else {}
+    members = episode.get("members") if isinstance(episode.get("members"), dict) else {}
+    recovered = sorted(
+        code for code, member in members.items() if isinstance(member, dict) and member.get("status") == "recovered"
+    )
+    lines = [
+        "BOT ERRORS DEADMAN RECOVERY - dispatcher supervision restored",
+        f"  > machine: {socket.gethostname()}",
+        f"  > created: {now_iso()}",
+        f"  > episode: {episode.get('episodeId')} revision={episode.get('revision')}",
+        f"  > opened: {episode.get('openedAt') or 'unknown'}",
+        f"  > prior_last_sent: {onset.get('lastAcceptedAt') or 'unknown'}",
+        f"  > suppressed_duplicates: {int_or_none(onset.get('suppressed')) or 0}",
+        *[f"  > recovered_member: {code}" for code in recovered],
+    ]
+    adopted = episode.get("adoptedLegacyIncidents")
+    if adopted:
+        lines.append(f"  > adopted_legacy_incidents: {adopted}")
+    lines.append("  > evidence: deadman controller log + deadman state under the bot-errors state root")
+    return "\n".join(lines)
+
+
 def deadman(max_state_age: int, restart_grace: int, cooldown_seconds: int) -> int:
     root = state_root()
     state = root / DISPATCHER_STATE
-    problems: list[str] = []
+    active_members: dict[str, dict[str, Any]] = {}
     state_age = None
     cycle_completed_at = None
     now_epoch = current_epoch()
@@ -6958,176 +7385,80 @@ def deadman(max_state_age: int, restart_grace: int, cooldown_seconds: int) -> in
         if service_state_change_age is not None and service_state_change_age <= restart_grace:
             grace_reason = f"service_state_change_age_seconds={service_state_change_age}"
         else:
-            problems.append(f"{DISPATCHER_SERVICE} is not active (status={service_status})")
+            active_members["service_inactive"] = {"status": _bounded_service_status(service_status)}
     elif service_uptime is not None and service_uptime <= restart_grace:
         grace_reason = f"service_uptime_seconds={service_uptime}"
     if not state.exists():
         if not grace_reason:
-            problems.append(f"dispatcher state missing: {state}")
+            active_members["state_missing"] = {}
     elif cycle_completed_at is None:
         # State exists but has no cycleCompletedAt — the last cycle did not
         # complete (crash between start and end). Treat as stale unless the
         # state file was just written by the crash handler (within grace).
         if state_age is not None and state_age > restart_grace and not grace_reason:
-            problems.append("dispatcher state stale: last cycle did not complete")
+            active_members["cycle_incomplete"] = {"state_age_seconds": state_age}
     elif cycle_completed_at > max_state_age:
         if not grace_reason:
-            problems.append(f"dispatcher state stale: cycle age_seconds={cycle_completed_at}")
+            active_members["cycle_stale"] = {"cycle_age_seconds": cycle_completed_at}
     if not SOCKET_PATH or not Path(SOCKET_PATH).exists():
-        problems.append(f"personal socket missing: {SOCKET_PATH or '<unset>'}")
+        active_members["socket_missing"] = {}
 
     deadman_state = load_deadman_state()
-    incidents = deadman_state.setdefault("incidents", {})
-    if not isinstance(incidents, dict):
-        incidents = {}
-        deadman_state["incidents"] = incidents
+    migrate_deadman_state(deadman_state, now_epoch)
 
-    if not problems:
-        open_incidents = [
-            (key, record)
-            for key, record in incidents.items()
-            if isinstance(record, dict) and record.get("status") == "open"
-        ]
-        recovery_outcomes: list[dict[str, Any]] = []
-        for key, record in open_incidents:
-            suppressed = int_or_none(record.get("suppressed")) or 0
-            prior_problems = record.get("problems") if isinstance(record.get("problems"), list) else []
-            text = "\n".join([
-                "BOT ERRORS DEADMAN RECOVERY - dispatcher supervision restored",
-                f"  > machine: {socket.gethostname()}",
-                f"  > created: {now_iso()}",
-                f"  > incident_key: {key}",
-                f"  > prior_last_sent: {record.get('lastSentAt') or 'unknown'}",
-                f"  > suppressed_duplicates: {suppressed}",
-                *[f"  > resolved_problem: {problem}" for problem in prior_problems if isinstance(problem, str)],
-                f"  > deadman_state: {deadman_state_path()}",
-            ])
-            outcome = {
-                "type": "deadman_recovery",
-                "incident_key": key,
-                "direct_whatsapp": "not_attempted",
-                "email_fallback": "not_attempted",
-            }
-            try:
-                send_direct(text)
-                outcome["direct_whatsapp"] = "sent"
-                print(f"notifier direct_whatsapp=sent recovery incident_key={key}")
-            except Exception as exc:
-                outcome["direct_whatsapp"] = "failed"
-                outcome["direct_error"] = str(exc)
-                print(f"notifier direct_whatsapp=failed recovery incident_key={key} error={exc}")
-                ok = email_fallback("BOT ERRORS deadman recovered", text)
-                outcome["email_fallback"] = "accepted_unconfirmed" if ok else "failed"
-                print(f"notifier email_fallback={'accepted_unconfirmed' if ok else 'failed'} recovery incident_key={key} channel=resend")
-            record["status"] = "resolved"
-            record["resolvedAtEpoch"] = current_epoch()
-            record["resolvedAt"] = epoch_to_iso(record["resolvedAtEpoch"])
-            record["lastRecoveryStatus"] = outcome
-            recovery_outcomes.append(dict(outcome))
-            deadman_state["lastRecoveryResult"] = "success" if outcome.get("direct_whatsapp") == "sent" else "failed"
-        if open_incidents:
-            save_deadman_state(deadman_state)
-            for outcome in recovery_outcomes:
-                append_deadman_log(outcome)
+    onset_text = {"value": None}
+
+    def attempt_onset(episode: dict[str, Any]) -> dict[str, Any]:
+        text = _deadman_onset_text(episode, cooldown_seconds)
+        onset_text["value"] = text
+        return _deadman_attempt_delivery(
+            text,
+            "BOT ERRORS deadman failed",
+            context=f"episode={episode.get('episodeId')}",
+        )
+
+    def attempt_recovery(episode: dict[str, Any]) -> dict[str, Any]:
+        return _deadman_attempt_delivery(
+            _deadman_recovery_text(episode),
+            "BOT ERRORS deadman recovered",
+            context=f"recovery episode={episode.get('episodeId')}",
+        )
+
+    result = advance_deadman_episode(
+        deadman_state,
+        active_members,
+        now_epoch=now_epoch,
+        cooldown_seconds=cooldown_seconds,
+        attempt_onset=attempt_onset,
+        attempt_recovery=attempt_recovery,
+    )
+    if result["dirty"]:
+        save_deadman_state(deadman_state)
+    for payload, level in result["logs"]:
+        append_deadman_log(payload, level=level)
+
+    delivery = result.get("delivery")
+    if delivery == "suppressed_cooldown":
+        print(
+            "notifier direct_whatsapp=suppressed_cooldown "
+            f"cooldown_remaining_seconds={result.get('cooldown_remaining_seconds')} "
+            f"suppressed={result.get('suppressed')}"
+        )
+    elif delivery in ("pending_exhausted", "pending_exhausted_hold"):
+        print("notifier delivery=pending_exhausted (bounded retry budget spent; re-arms on membership change)")
+    elif delivery in ("recovery_pending_exhausted", "recovery_exhausted_hold"):
+        print("deadman ok (recovery notice exhausted; episode retained pending delivery)")
+    elif delivery == "recovery_not_required":
+        print("deadman ok (episode self-healed before any delivered notification)")
+    elif result["exitCode"] == 0:
         if grace_reason:
             state_detail = state_age if state_age is not None else "missing"
             print(f"deadman grace ok: service={service_status} {grace_reason} dispatcher_state_age_seconds={state_detail}")
         else:
             print("deadman ok")
-        return 0
-
-    incident_key = deadman_incident_key(problems)
-    record = incidents.get(incident_key)
-    if not isinstance(record, dict):
-        record = {
-            "status": "open",
-            "incidentKey": incident_key,
-            "problems": problems,
-            "firstSeenAtEpoch": now_epoch,
-            "firstSeenAt": epoch_to_iso(now_epoch),
-            "sentCount": 0,
-            "suppressed": 0,
-        }
-        incidents[incident_key] = record
-    record["status"] = "open"
-    record["problems"] = problems
-    record["lastSeenAtEpoch"] = now_epoch
-    record["lastSeenAt"] = epoch_to_iso(now_epoch)
-    record["cooldownSeconds"] = cooldown_seconds
-    if deadman_state.get("loadError"):
-        record["stateLoadError"] = deadman_state.get("loadError")
-
-    last_sent_epoch = int_or_none(record.get("lastSentAtEpoch"))
-    remaining = 0 if last_sent_epoch is None else max(0, cooldown_seconds - (now_epoch - last_sent_epoch))
-    if last_sent_epoch is not None and remaining > 0:
-        record["suppressed"] = (int_or_none(record.get("suppressed")) or 0) + 1
-        save_deadman_state(deadman_state)
-        outcome = {
-            "type": "deadman",
-            "incident_key": incident_key,
-            "problems": problems,
-            "direct_whatsapp": "suppressed_cooldown",
-            "cooldown_seconds": cooldown_seconds,
-            "cooldown_remaining_seconds": remaining,
-            "suppressed": record["suppressed"],
-        }
-        append_deadman_log(outcome)
-        print(
-            "notifier direct_whatsapp=suppressed_cooldown "
-            f"incident_key={incident_key} cooldown_remaining_seconds={remaining} "
-            f"suppressed={record['suppressed']}"
-        )
-        return 2
-
-    suppressed_since_last = int_or_none(record.get("suppressed")) or 0
-    text = "\n".join([
-        "BOT ERRORS DEADMAN - dispatcher supervision failed",
-        f"  > machine: {socket.gethostname()}",
-        f"  > created: {now_iso()}",
-        f"  > incident_key: {incident_key}",
-        f"  > cooldown_seconds: {cooldown_seconds}",
-        f"  > suppressed_since_last_send: {suppressed_since_last}",
-        *[f"  > problem: {problem}" for problem in problems],
-        f"  > logs: {dispatcher_log_hint()}",
-        f"  > deadman_log: {state_root() / 'logs/deadman.jsonl'}",
-        f"  > deadman_state: {deadman_state_path()}",
-        "  > notifier: direct_whatsapp primary; email_fallback=resend when direct WhatsApp/socket fails",
-        "  > requested_action: Q investigate dispatcher, queue, personal line, and email fallback.",
-    ])
-    outcome = {
-        "type": "deadman",
-        "incident_key": incident_key,
-        "problems": problems,
-        "direct_whatsapp": "not_attempted",
-        "email_fallback": "not_attempted",
-        "email_channel": "resend",
-        "cooldown_seconds": cooldown_seconds,
-        "suppressed_since_last_send": suppressed_since_last,
-    }
-    try:
-        send_direct(text)
-        outcome["direct_whatsapp"] = "sent"
-        print("notifier direct_whatsapp=sent")
-    except Exception as exc:
-        outcome["direct_whatsapp"] = "failed"
-        outcome["direct_error"] = str(exc)
-        print(f"notifier direct_whatsapp=failed error={exc}")
-        ok = email_fallback("BOT ERRORS deadman failed", text)
-        outcome["email_fallback"] = "accepted_unconfirmed" if ok else "failed"
-        print(f"notifier email_fallback={'accepted_unconfirmed' if ok else 'failed'} channel=resend")
-    record["lastSentAtEpoch"] = now_epoch
-    record["lastSentAt"] = epoch_to_iso(now_epoch)
-    record["lastSendStatus"] = outcome
-    record["sentCount"] = (int_or_none(record.get("sentCount")) or 0) + 1
-    record["suppressed"] = 0
-    if outcome.get("direct_whatsapp") in ("failed", "rejected_unconfirmed"):
-        deadman_state["lastRejectedCount"] = (int(deadman_state.get("lastRejectedCount") or 0)) + 1
-    save_deadman_state(deadman_state)
-    delivery_status = outcome.get("direct_whatsapp", "")
-    log_level = "warning" if delivery_status in ("failed", "rejected_unconfirmed") else "info"
-    append_deadman_log(outcome, level=log_level)
-    print(text)
-    return 2
+    if onset_text["value"]:
+        print(onset_text["value"])
+    return result["exitCode"]
 
 
 def main() -> int:

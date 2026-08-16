@@ -90,7 +90,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "2ee50ada55c773194c9d25736e3413a3694ba75b65712a648ca6e37eba30b170",
+      "sha256": "da50503592566ee0ef180a997aae066af77e2f0709ec8beee5199b42af8010ed",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -159,7 +159,9 @@
         "BOT_ERRORS_HEALTH_BODY_MAX_FUTURE_SKEW_SECONDS",
         "validate_opencode_functional_jsonl",
         "opencode_functional_probe_env",
-        "effective_instance_provider_path"
+        "effective_instance_provider_path",
+        "advance_deadman_episode",
+        "email_fallback_outcome"
       ]
     },
     {
@@ -467,7 +469,7 @@
     },
     {
       "path": "src/lib/fault-taxonomy-registry.json",
-      "sha256": "5394032bbedb04c2d1b926edfc9daaa303e7c98da7ef07f231e77f07977c4b9c",
+      "sha256": "52d76390199b697d02e30faf14fc6ff039adfd7718543219146d5ba989dc74fa",
       "mustContain": [
         "whatsoup-fault-taxonomy-registry-v3",
         "runtimeAgentHealthSignals",

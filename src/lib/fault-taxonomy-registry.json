@@ -878,6 +878,11 @@
       "owner": "src/runtimes/agent/runtime-turn-coordinator.ts",
       "test": "tests/runtimes/agent/runtime-turn-coordinator.test.ts"
     },
+    "dispatcher_deadman": {
+      "disposition": "episode_scoped_supervision_pager_advanced_only_by_accepted_delivery_with_bounded_pending_retry",
+      "owner": "deploy/scripts/bot-errors-health-check.py",
+      "test": "deploy/scripts/tests/test_bot_errors_health_check_deadman_episode.py"
+    },
     "gui_session_monitor": {
       "disposition": "threshold_gated_gui_outage_cleared_by_verified_ok_producer_latch",
       "owner": "deploy/scripts/bot-errors-gui-session-monitor.py",
