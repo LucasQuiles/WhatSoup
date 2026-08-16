@@ -2851,6 +2851,15 @@ def local_outbox_path(event: dict[str, Any], remote_host: str) -> Path:
 
 
 def idless_event_filename_token(event: dict[str, Any], remote_host: str) -> str:
+    """Filename token for an event without a stable id.
+
+    #2427: the remote-relay path can no longer reach this — relay_event's
+    identity ingress gate quarantines id-less remote events before
+    local_outbox_path runs. The remaining callers are LOCAL collector-authored
+    writers (meta alerts, storm summaries): single-write, no acknowledgement
+    retry, so the fresh nanosecond token cannot cause retry-convergence
+    duplicates there.
+    """
     try:
         payload = json.dumps(event, sort_keys=True, separators=(",", ":"), default=str)
     except Exception:
