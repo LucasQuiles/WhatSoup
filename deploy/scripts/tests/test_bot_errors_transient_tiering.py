@@ -654,23 +654,28 @@ def test_registry_empty_dispositions_block_fails_visible(tmp_path):
     registry_path = tmp_path / "fault-taxonomy-registry.json"
     registry_path.write_text('{"degradationCauseDispositions": {"dispositions": {}}}', encoding="utf-8")
     mod.DEGRADATION_DISPOSITIONS_PATH = registry_path
-    mod._DEGRADATION_DISPOSITIONS_CACHE["loaded"] = False
     assert mod.classify_failure_mode(_cause_alert("enrichment_stale")) == "outage", (
         "an empty dispositions block is an untrusted policy; fail toward visibility"
     )
 
 
-def test_registry_bad_tier_entry_fails_visible(tmp_path):
+def test_registry_poisoned_sibling_entry_fails_the_whole_policy(tmp_path):
+    # Discriminating shape (from the #3281 review): the probed cause carries a
+    # VALID hold tier, and only a SIBLING entry is malformed. This classifies
+    # outage solely because the loader poisons the whole policy on any bad
+    # tier — the classifier's per-cause hold check cannot mask it, so a loader
+    # that started accepting arbitrary tiers turns this RED.
     mod = _load()
     registry_path = tmp_path / "fault-taxonomy-registry.json"
     registry_path.write_text(
-        '{"degradationCauseDispositions": {"dispositions": {"enrichment_stale": {"impactTier": "sideways"}}}}',
+        '{"degradationCauseDispositions": {"dispositions": {'
+        '"enrichment_stale": {"impactTier": "hold"}, '
+        '"bogus_cause": {"impactTier": "sideways"}}}}',
         encoding="utf-8",
     )
     mod.DEGRADATION_DISPOSITIONS_PATH = registry_path
-    mod._DEGRADATION_DISPOSITIONS_CACHE["loaded"] = False
     assert mod.classify_failure_mode(_cause_alert("enrichment_stale")) == "outage", (
-        "a malformed tier poisons the whole policy; fail toward visibility"
+        "one malformed sibling tier must poison the whole policy, not just its own entry"
     )
 
 
@@ -680,8 +685,7 @@ def test_inhibition_seed_pins_aggregate_symptom_edges():
     assert "health_body_degraded" in mod.SUPERSEDED_SOURCES_BY_ALERT_SOURCE["whatsapp_device_bond_lost"]
 
 
-def test_open_root_inhibits_aggregate_symptom_preserving_member_state(tmp_path, monkeypatch):
-    monkeypatch.setenv("BOT_ERRORS_INHIBITION_ENABLED", "1")
+def test_open_root_inhibits_aggregate_symptom_preserving_member_state(tmp_path):
     mod = _load()
     state = _empty_state()
     evt = _cause_alert("provider_execution_pressure")
@@ -699,8 +703,7 @@ def test_open_root_inhibits_aggregate_symptom_preserving_member_state(tmp_path, 
     )
 
 
-def test_open_root_tracks_suppressed_aggregate_clear(tmp_path, monkeypatch):
-    monkeypatch.setenv("BOT_ERRORS_INHIBITION_ENABLED", "1")
+def test_open_root_tracks_suppressed_aggregate_clear(tmp_path):
     mod = _load()
     state = _empty_state()
     clear = _clear(evidence="status=healthy whatsapp_connected=true")
