@@ -23,6 +23,24 @@ function globalSession(): SessionContext {
   return { tier: 'global' };
 }
 
+/**
+ * S5 (2026-08-17): `logout` is a `sensitive` tool, so reaching its handler now
+ * requires BOTH an actor identity and an installed authorizer that grants it.
+ * `globalSession()` deliberately has no `actorJid` and must stay that way — it is
+ * what the fail-closed tests rely on.
+ */
+const ADMIN_ACTOR = '15550000009@s.whatsapp.net';
+
+function adminSession(): SessionContext {
+  return { tier: 'global', actorJid: ADMIN_ACTOR };
+}
+
+/** Grant sensitive tools to ADMIN_ACTOR only. */
+function grantSensitive(target: ToolRegistry): ToolRegistry {
+  target.setSensitiveToolAuthorizer((session) => session.actorJid === ADMIN_ACTOR);
+  return target;
+}
+
 function chatSession(conversationKey: string): SessionContext {
   return { tier: 'chat-scoped', conversationKey, deliveryJid: `${conversationKey}@s.whatsapp.net` };
 }
@@ -47,6 +65,9 @@ describe('advanced tools', () => {
     mockSock = makeMockSock();
     registry = new ToolRegistry();
     registerAdvancedTools(() => mockSock, (tool) => registry.register(tool));
+    // Only consulted for tools declared `sensitive` (today: `logout` alone), so
+    // this does not alter any other tool's path through the registry.
+    grantSensitive(registry);
   });
 
   // -------------------------------------------------------------------------
@@ -81,10 +102,26 @@ describe('advanced tools', () => {
     expect(tools.find((t) => t.name === name)).toBeUndefined();
   });
 
-  it.each(globalTools)('%s is rejected when called from chat-scoped session', async (name) => {
-    const result = await registry.call(name, {}, chatSession('111'));
+  // `logout` is excluded deliberately: as a `sensitive` tool its gate fires BEFORE
+  // scope enforcement, and for a session that cannot see the tool the reply is
+  // byte-identical to a nonexistent one — so call() does not become an existence
+  // oracle. That is a strictly stronger rejection, asserted on its own below
+  // rather than weakened into this shared expectation.
+  it.each(globalTools.filter((name) => name !== 'logout'))(
+    '%s is rejected when called from chat-scoped session',
+    async (name) => {
+      const result = await registry.call(name, {}, chatSession('111'));
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toMatch(/not available in a chat-scoped session/);
+    },
+  );
+
+  it('logout is rejected from a chat-scoped session without revealing it exists', async () => {
+    const result = await registry.call('logout', {}, chatSession('111'));
     expect(result.isError).toBe(true);
-    expect(result.content[0].text).toMatch(/not available in a chat-scoped session/);
+    expect(result.content[0].text).toBe('Unknown tool: logout');
+    // The scope-specific wording would confirm the tool exists; it must not appear.
+    expect(result.content[0].text).not.toMatch(/not available in a chat-scoped session/);
   });
 
   it.each(chatScopedTools)('%s is registered in global session', (name) => {
@@ -567,20 +604,22 @@ describe('advanced tools', () => {
   // logout
   // -------------------------------------------------------------------------
 
+  // S5: these exercise the HANDLER, so they must clear the sensitive gate first —
+  // hence adminSession(). The gate itself is pinned in tests/mcp/logout-gate.test.ts.
   describe('logout', () => {
     it('calls sock.logout with no message', async () => {
-      const result = await registry.call('logout', {}, globalSession());
+      const result = await registry.call('logout', {}, adminSession());
       expect(result.isError).toBeUndefined();
       expect((mockSock as any).logout).toHaveBeenCalledWith(undefined);
     });
 
     it('calls sock.logout with optional message', async () => {
-      await registry.call('logout', { msg: 'signing off' }, globalSession());
+      await registry.call('logout', { msg: 'signing off' }, adminSession());
       expect((mockSock as any).logout).toHaveBeenCalledWith('signing off');
     });
 
     it('returns loggedOut: true', async () => {
-      const result = await registry.call('logout', {}, globalSession());
+      const result = await registry.call('logout', {}, adminSession());
       const data = JSON.parse(result.content[0].text) as { loggedOut: boolean };
       expect(data.loggedOut).toBe(true);
     });
@@ -594,9 +633,22 @@ describe('advanced tools', () => {
     it('errors when sock is null', async () => {
       const nullRegistry = new ToolRegistry();
       registerAdvancedTools(() => null, (tool) => nullRegistry.register(tool));
-      const result = await nullRegistry.call('logout', {}, globalSession());
+      grantSensitive(nullRegistry);
+      const result = await nullRegistry.call('logout', {}, adminSession());
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toMatch(/not connected/);
+    });
+
+    it('is refused for an authorized actor when no authorizer is installed', async () => {
+      // Regression guard for the gate's interaction with THIS registry, not just
+      // the isolated one in logout-gate.test.ts: without an installed authorizer
+      // even ADMIN_ACTOR must not reach sock.logout().
+      const ungated = new ToolRegistry();
+      registerAdvancedTools(() => mockSock, (tool) => ungated.register(tool));
+      const result = await ungated.call('logout', {}, adminSession());
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).not.toMatch(/not connected/);
+      expect((mockSock as any).logout).not.toHaveBeenCalled();
     });
   });
 

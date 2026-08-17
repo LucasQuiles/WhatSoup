@@ -187,6 +187,12 @@ const advancedConfigs: SockToolConfig<any>[] = [
     // Those arrived as inbound CB:stream:error carrying conflict
     // type=device_removed; this call cannot produce that node.
     sensitive: true,
+    // S1: the registry writes an actor receipt to the bond-actor ledger before
+    // this handler runs, so the terminal bond event that follows a successful
+    // removal can name what asked for it. Written BEFORE the request because a
+    // receipt written afterwards is lost exactly when the request succeeds and
+    // the socket dies.
+    bondEffect: 'requests_device_removal',
     replayPolicy: 'unsafe',
     externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ msg }, sock) => {

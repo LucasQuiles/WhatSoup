@@ -22,6 +22,7 @@ import {
   type SessionContext,
 } from './types.ts';
 import { errorMessage } from '../lib/error-message.ts';
+import { bondActorLedger } from '../transport/bond-actor-receipt.ts';
 import { isNonEmptyString } from '../lib/type-guards.ts';
 import { type Clock, systemClock } from '../lib/clock.ts';
 import {
@@ -693,6 +694,45 @@ export class ToolRegistry {
       } catch {
         this.recordDurabilityWriteLoss('execute', name);
       }
+    }
+
+    // --- S1 actor receipt (bond-revocation programme, 2026-08-17) ---
+    //
+    // Written here and nowhere else: past every admission and authorization gate,
+    // after the durability row exists, and BEFORE the handler can touch the
+    // socket. A receipt written after the call is lost precisely when a removal
+    // request succeeds and the socket dies.
+    //
+    // Both records are deliberate and distinct. The removal request is the
+    // discriminator — its ABSENCE on a terminal bond event is the durable form of
+    // the reasoning that excluded `logout` for the `q` revocation. The generic
+    // action is temporal context only, and the receipt labels it as such, so a
+    // read-only tool that merely happened to precede a revocation can never be
+    // read as its cause.
+    //
+    // This is best-effort by construction: attribution must never be able to fail
+    // a tool call that authorization already admitted.
+    try {
+      const actorReceipt = {
+        route: 'mcp' as const,
+        action: `mcp_tool:${name}`,
+        actorIdentity: session.actorJid ?? null,
+        requestId: durabilityId === undefined ? null : `durability:${durabilityId}`,
+      };
+      if (tool.bondEffect === 'requests_device_removal') {
+        bondActorLedger.recordBondRemovalRequest(actorReceipt);
+      } else {
+        bondActorLedger.recordControlPlaneAction({
+          ...actorReceipt,
+          effect: tool.externalEffect?.kind === 'external'
+            ? 'external'
+            : tool.externalEffect?.kind === 'none'
+              ? 'read_only'
+              : 'unknown',
+        });
+      }
+    } catch (err) {
+      log.warn({ err, tool: name }, 'failed to record bond actor receipt');
     }
 
     // #1753 rem-2: this call is "in flight" for the duration of tool.handler()

@@ -18,11 +18,15 @@
  * actorJid, or a throwing authorizer all deny), so `sensitive: true` alone
  * delivers the default-disable this requires; no bespoke gate is introduced.
  */
-import { describe, it, expect } from 'vitest';
+import { beforeAll, describe, it, expect } from 'vitest';
 import { Database } from '../../src/core/database.ts';
 import { ADMIN_REQUIRED_DENIAL, ToolRegistry } from '../../src/mcp/registry.ts';
 import { PresenceCache } from '../../src/transport/presence-cache.ts';
 import { registerAllTools } from '../../src/mcp/register-all.ts';
+import {
+  bondActorLedger,
+  resolveBondOwnerEvidence,
+} from '../../src/transport/bond-actor-receipt.ts';
 import type { ConnectionManager } from '../../src/transport/connection.ts';
 import type { SessionContext, ToolDeclaration } from '../../src/mcp/types.ts';
 
@@ -38,8 +42,25 @@ function makeConnection(): ConnectionManager {
   } as unknown as ConnectionManager;
 }
 
-/** Build the real registry and capture every declaration as it registers. */
+/**
+ * Build the real registry once and capture every declaration as it registers.
+ *
+ * MEMOIZED deliberately. registerAllTools() installs 165 tools and applies the
+ * full migration chain; doing that per test pushed several cases past the 10s
+ * per-test timeout, and a timed-out run is inconclusive rather than red — it
+ * would have destroyed the mutation evidence these tests exist to produce.
+ * Registration is deterministic and the declarations are only read, so one build
+ * serves every case. Tests that need to vary authorizer state build a fresh
+ * ToolRegistry around the cached declaration instead (see hostRealLogout).
+ *
+ * The database is intentionally left open: the memoized registry outlives any one
+ * test, and closing it under a live registry would make handler-reaching calls
+ * fail for a reason unrelated to what is under test.
+ */
+let realRegistryCache: { registry: ToolRegistry; captured: ToolDeclaration[] } | null = null;
+
 function buildRealRegistry(): { registry: ToolRegistry; captured: ToolDeclaration[] } {
+  if (realRegistryCache) return realRegistryCache;
   const db = new Database(':memory:');
   db.open();
   const registry = new ToolRegistry();
@@ -50,9 +71,35 @@ function buildRealRegistry(): { registry: ToolRegistry; captured: ToolDeclaratio
     origRegister(tool);
   };
   registerAllTools(registry, makeConnection(), db);
-  db.raw.close();
-  return { registry, captured };
+  realRegistryCache = { registry, captured };
+  return realRegistryCache;
 }
+
+/**
+ * Re-register the REAL captured declaration into a fresh registry.
+ *
+ * registerAllTools() installs the instance admin predicate, and
+ * setSensitiveToolAuthorizer() throws on a second install by design, so the
+ * authorizer states cannot be varied on the production registry. Re-hosting the
+ * genuine declaration keeps these tests bound to the shipped tool rather than a
+ * hand-written stand-in.
+ */
+function hostRealLogout(): ToolRegistry {
+  const { captured } = buildRealRegistry();
+  const logout = captured.find((t) => t.name === 'logout');
+  expect(logout, 'the logout tool must still be registered').toBeDefined();
+  const registry = new ToolRegistry();
+  registry.register(logout!);
+  return registry;
+}
+
+// Pay the one-time registration cost outside any test's budget. Charged to the
+// first test it would exceed the 10s per-test timeout on its own, and a timeout
+// is inconclusive — it cannot be distinguished from a real failure, which would
+// silently void the mutation evidence.
+beforeAll(() => {
+  buildRealRegistry();
+}, 120_000);
 
 describe('S5 — logout is a gated, device-removing tool', () => {
   it('is declared sensitive', () => {
@@ -64,21 +111,6 @@ describe('S5 — logout is a gated, device-removing tool', () => {
     expect(logout, 'the logout tool must still be registered').toBeDefined();
     expect(logout!.sensitive).toBe(true);
   });
-
-  // The gate-state tests below re-register the REAL captured declaration into a
-  // fresh registry. registerAllTools() installs the instance admin predicate and
-  // setSensitiveToolAuthorizer() throws on a second install by design, so the
-  // authorizer states cannot be varied on the production registry. Re-hosting the
-  // genuine declaration keeps these tests bound to the shipped tool rather than a
-  // hand-written stand-in.
-  function hostRealLogout(): ToolRegistry {
-    const { captured } = buildRealRegistry();
-    const logout = captured.find((t) => t.name === 'logout');
-    expect(logout, 'the logout tool must still be registered').toBeDefined();
-    const registry = new ToolRegistry();
-    registry.register(logout!);
-    return registry;
-  }
 
   it('denies the call fail-closed when no authorizer is installed', async () => {
     // The production default before an instance installs its admin predicate.
@@ -119,12 +151,87 @@ describe('S5 — logout is a gated, device-removing tool', () => {
   });
 });
 
+describe('S1 — logout writes an actor receipt before it can reach the socket', () => {
+  it('declares itself a device-removal path', () => {
+    const { captured } = buildRealRegistry();
+    const logout = captured.find((t) => t.name === 'logout');
+    expect(logout, 'the logout tool must still be registered').toBeDefined();
+    expect(logout!.bondEffect).toBe('requests_device_removal');
+    // Exactly one tool may claim this: it is a factual marker, not a severity
+    // label, and a second claimant would mean the taxonomy has drifted.
+    expect(captured.filter((t) => t.bondEffect === 'requests_device_removal').map((t) => t.name))
+      .toEqual(['logout']);
+  });
+
+  it('records the removal request, and the socket failure proves ordering', async () => {
+    bondActorLedger.reset();
+    const registry = hostRealLogout();
+    registry.setSensitiveToolAuthorizer(() => true);
+    const res = await registry.call('logout', {}, ADMIN);
+
+    // The harness socket is null, so the handler throws AFTER admission. That is
+    // the ordering proof: the receipt exists even though the call never reached
+    // WhatsApp, which is the property that matters when a real removal succeeds
+    // and takes the socket down with it.
+    expect(res.isError).toBe(true);
+    const evidence = resolveBondOwnerEvidence(bondActorLedger);
+    expect(evidence.status).toBe('consulted');
+    if (evidence.status !== 'consulted') return;
+    expect(evidence.bondRemovalRequest).not.toBeNull();
+    expect(evidence.bondRemovalRequest!.action).toBe('mcp_tool:logout');
+    expect(evidence.bondRemovalRequest!.route).toBe('mcp');
+    expect(evidence.actorClass).toBe('operator');
+  });
+
+  it('does not let an ordinary tool call forge a removal request', async () => {
+    bondActorLedger.reset();
+    const { registry } = buildRealRegistry();
+    // list_chats is read-only and reaches the same seam. It must land in the
+    // temporal-context slot and leave the discriminator untouched.
+    await registry.call('list_chats', {}, ADMIN);
+    const evidence = resolveBondOwnerEvidence(bondActorLedger);
+    expect(evidence.status).toBe('consulted');
+    if (evidence.status !== 'consulted') return;
+    expect(evidence.bondRemovalRequest).toBeNull();
+    expect(evidence.actorClass).toBe('unattributed');
+    expect(evidence.lastControlPlaneAction?.action).toBe('mcp_tool:list_chats');
+    expect(evidence.causalRelation).toBe('temporal_only');
+  });
+});
+
 describe('S5 — the sock-tool factory propagates the sensitive flag', () => {
   // Regression guard for the root cause found while landing S5: SockToolConfig
   // had no `sensitive` field and makeSockTool never copied it, so no tool built
   // through this factory could be gated at all. Setting the flag was silently
   // discarded — the config array is typed SockToolConfig<any>[], which disables
   // excess-property checking, so TypeScript did not reject it either.
+  it('forwards no field that is not part of ToolDeclaration', () => {
+    // The counterpart risk to the sensitive bug. makeSockTool now forwards config
+    // fields by rest-spread instead of a whitelist, which makes silently DROPPING
+    // a field impossible — at the cost of making silently FORWARDING one possible.
+    // TypeScript cannot catch that: the config arrays are typed
+    // `SockToolConfig<any>[]`, so excess-property checking is off and a stray key
+    // in any config literal would ride onto the declaration unnoticed.
+    //
+    // This closes the trade permanently: a config-only member must be
+    // destructured out in makeSockTool, and if someone forgets, this turns red.
+    const ALLOWED = new Set([
+      'name', 'description', 'schema', 'scope', 'targetMode', 'replayPolicy',
+      'core', 'sensitive', 'bondEffect', 'group', 'externalEffect', 'handler',
+    ]);
+    const { captured } = buildRealRegistry();
+    // Non-vacuity: a trivially small or empty capture would assert nothing.
+    expect(captured.length).toBeGreaterThan(100);
+    const leaked = captured.flatMap((tool) =>
+      Object.keys(tool)
+        .filter((key) => !ALLOWED.has(key))
+        .map((key) => `${tool.name}.${key}`),
+    );
+    expect(leaked).toEqual([]);
+    // And the spread must not have swallowed `call`, the one config-only member.
+    expect(captured.some((t) => 'call' in t)).toBe(false);
+  });
+
   it('copies sensitive: true onto the built declaration', () => {
     const { captured } = buildRealRegistry();
     const sockBuilt = captured.filter((t) => t.sensitive === true);

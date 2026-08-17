@@ -17,6 +17,7 @@ import {
   jidNormalizedUser,
 } from '@whiskeysockets/baileys';
 import { shortHash } from '../lib/short-hash.ts';
+import { resolveBondOwnerEvidence } from './bond-actor-receipt.ts';
 import { isRecord } from '../lib/type-guards.ts';
 import { createTypingStartGuard, type TypingStartGuard } from '../lib/typing-start-guard.ts';
 import { appendPrivateJsonLineSync, readFreshMarkerSync, writePrivateJsonMarkerSync } from '../lib/private-fs.ts';
@@ -1377,9 +1378,16 @@ export class ConnectionManager extends EventEmitter implements Messenger {
             .slice(-50)
             .map(event => this.sanitizeLifecycleEventForBondEvent(event)),
         },
-        ownerEvidence: {
-          status: 'not_recorded',
-        },
+        // S1: who or what asked for it. Until 2026-08-17 this was the literal
+        // `{ status: 'not_recorded' }` — no type, no consumer, written on every
+        // event, so a revoked bond could never be attributed.
+        //
+        // Resolution CANNOT throw (see resolveBondOwnerEvidence): the catch below
+        // is the only handler for this whole payload, so a throwing receipt would
+        // discard the terminal record this programme exists to capture. It
+        // degrades to `status: 'unavailable'` instead — which is a distinct state
+        // from `unattributed`, never a substitute for it.
+        ownerEvidence: resolveBondOwnerEvidence(),
       };
       appendPrivateJsonLineSync(eventPath, payload);
     } catch (err) {
