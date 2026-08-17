@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+// S2 (2026-08-17): the mock now carries `isLatest`, because the resolver no longer
+// discards it. A result WITHOUT `isLatest` resolves to `source: 'unknown'` — an
+// absent success signal is not a success — which the dedicated fallback/unknown
+// cases in tests/transport/effective-client-receipt.test.ts cover in full.
 vi.mock('@whiskeysockets/baileys', () => ({
-  fetchLatestBaileysVersion: vi.fn().mockResolvedValue({ version: [2, 2413, 1] }),
+  fetchLatestBaileysVersion: vi.fn().mockResolvedValue({ version: [2, 2413, 1], isLatest: true }),
 }));
 
 import { fetchLatestBaileysVersion } from '@whiskeysockets/baileys';
@@ -19,7 +23,9 @@ describe('baileys-version', () => {
   it('uses the fetched Baileys version by default', async () => {
     await expect(resolveBaileysVersion()).resolves.toEqual({
       version: [2, 2413, 1],
-      source: 'latest',
+      source: 'live_fetch',
+      isLatest: true,
+      fetchErrorClass: null,
     });
     expect(fetchLatestBaileysVersion).toHaveBeenCalledTimes(1);
   });
@@ -28,6 +34,8 @@ describe('baileys-version', () => {
     await expect(resolveBaileysVersion('2.3000.1021')).resolves.toEqual({
       version: [2, 3000, 1021],
       source: 'pinned',
+      isLatest: null,
+      fetchErrorClass: null,
     });
     expect(fetchLatestBaileysVersion).not.toHaveBeenCalled();
   });
@@ -37,7 +45,9 @@ describe('baileys-version', () => {
     try {
       await expect(resolveBaileysVersion()).resolves.toEqual({
         version: [2, 2413, 1],
-        source: 'latest',
+        source: 'live_fetch',
+        isLatest: true,
+        fetchErrorClass: null,
       });
     } finally {
       delete process.env['WHATSOUP_BAILEYS_VERSION'];

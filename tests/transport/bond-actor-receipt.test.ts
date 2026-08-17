@@ -79,6 +79,10 @@ vi.mock('../../src/lib/emit-alert.ts', () => ({
 
 import { shortHash } from '../../src/lib/short-hash.ts';
 import {
+  buildEffectiveClientReceipt,
+  effectiveClientRegistry,
+} from '../../src/transport/effective-client-receipt.ts';
+import {
   bondActorLedger,
   createBondActorLedger,
   resolveBondOwnerEvidence,
@@ -258,6 +262,61 @@ describe('S1 — the receipt is joined onto the persisted bond event', () => {
     expect(receipt.bondRemovalRequest).not.toBeNull();
     expect(receipt.bondRemovalRequest!.action).toBe('mcp_tool:logout');
     expect(receipt.actorClass).toBe('operator');
+  });
+
+  it('carries the S2 effective-client receipt, describing the socket that was built', () => {
+    // The join for S2. Before it, a bond event recorded the protocol tuple as a
+    // bare label and nothing else about the client — so identical tuples across a
+    // revocation boundary were not evidence of identical client behaviour.
+    effectiveClientRegistry.reset();
+    effectiveClientRegistry.record(
+      buildEffectiveClientReceipt(
+        { version: [2, 3000, 1043857760], generateHighQualityLinkPreview: false },
+        {
+          version: [2, 3000, 1043857760],
+          source: 'bundled_fallback',
+          isLatest: false,
+          fetchErrorClass: 'TypeError',
+        },
+        'connection',
+      ),
+    );
+    mockConfig.dataRoot = DATA_ROOT;
+    const manager = new ConnectionManager();
+    (manager as unknown as {
+      recordCredentialLifecycle: (event: string, detail?: unknown) => void;
+    }).recordCredentialLifecycle('device_bond_lost');
+    const events = readBondEvents();
+    const client = events[events.length - 1].effectiveClient as {
+      status: string;
+      receipt?: Record<string, unknown>;
+    };
+    expect(client.status).toBe('recorded');
+    expect(client.receipt!['protocolVersion']).toBe('2.3000.1043857760');
+    // The honest provenance must survive the join — a failed fetch must not read
+    // as `latest` on the durable record.
+    expect(client.receipt!['protocolVersionSource']).toBe('bundled_fallback');
+    expect(client.receipt!['protocolVersionIsLatest']).toBe(false);
+    // And the silently inherited library defaults must be visible as such.
+    expect(client.receipt!['syncFullHistory']).toEqual({
+      value: true,
+      provenance: 'library_default',
+    });
+  });
+
+  it('records effectiveClient as unavailable — not synthesised — with no socket built', () => {
+    effectiveClientRegistry.reset();
+    mockConfig.dataRoot = DATA_ROOT;
+    const manager = new ConnectionManager();
+    (manager as unknown as {
+      recordCredentialLifecycle: (event: string, detail?: unknown) => void;
+    }).recordCredentialLifecycle('device_bond_lost');
+    const events = readBondEvents();
+    expect(events[events.length - 1].effectiveClient).toEqual({
+      status: 'unavailable',
+      version: 1,
+      reason: 'not_recorded',
+    });
   });
 
   it('still writes the bond event when the receipt resolver throws', () => {

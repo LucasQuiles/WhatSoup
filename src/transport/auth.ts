@@ -26,6 +26,10 @@ import { redactAuthCliText } from './auth-cli-redaction.ts';
 import { createAtomicCredsSaver } from './atomic-auth-save.ts';
 import { installThirdPartyConsoleRedaction } from './third-party-console-redaction.ts';
 import { baileysVersionLabel, resolveBaileysVersion } from './baileys-version.ts';
+import {
+  buildEffectiveClientReceipt,
+  effectiveClientRegistry,
+} from './effective-client-receipt.ts';
 import { errorMessage } from '../lib/error-message.ts';
 import { classifyPairNumber, maskPairingCode, pairingEmissionLine, pairingGate } from './pairing.ts';
 
@@ -92,7 +96,11 @@ async function startSocket(): Promise<void> {
   // Suppress Baileys internals (handshake material, signal keys, etc.)
   const baileysLogger = { level: 'silent', trace: () => {}, debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, child: () => baileysLogger } as any;
 
-  const sock = makeWASocket({
+  // S2: the pairing CLI is the SECOND, independent socket path, and it does not
+  // match the runtime one — it hard-codes generateHighQualityLinkPreview: false
+  // where connection.ts passes the configured value. Both must emit a receipt or
+  // a bond paired here and run there has an unrecorded client difference.
+  const socketConfig = {
     version: resolvedVersion.version,
     logger: baileysLogger,
     auth: {
@@ -100,7 +108,11 @@ async function startSocket(): Promise<void> {
       keys: makeCacheableSignalKeyStore(state.keys, baileysLogger),
     },
     generateHighQualityLinkPreview: false,
-  });
+  };
+  effectiveClientRegistry.record(
+    buildEffectiveClientReceipt(socketConfig, resolvedVersion, 'pairing_cli'),
+  );
+  const sock = makeWASocket(socketConfig);
 
   // #2165: `saveCreds()` rejects on a real write failure (full disk, EACCES).
   // Passing it straight to `.on` discards the returned promise, so that

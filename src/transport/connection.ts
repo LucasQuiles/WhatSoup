@@ -18,6 +18,11 @@ import {
 } from '@whiskeysockets/baileys';
 import { shortHash } from '../lib/short-hash.ts';
 import { resolveBondOwnerEvidence } from './bond-actor-receipt.ts';
+import {
+  buildEffectiveClientReceipt,
+  effectiveClientRegistry,
+  resolveEffectiveClientEvidence,
+} from './effective-client-receipt.ts';
 import { isRecord } from '../lib/type-guards.ts';
 import { createTypingStartGuard, type TypingStartGuard } from '../lib/typing-start-guard.ts';
 import { appendPrivateJsonLineSync, readFreshMarkerSync, writePrivateJsonMarkerSync } from '../lib/private-fs.ts';
@@ -866,7 +871,11 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       const baileysLogger = this.log.child({ component: 'baileys' });
       (baileysLogger as any).level = 'error';
 
-      const sock = makeWASocket({
+      // S2: build the config ONCE, derive the receipt FROM it, then construct the
+      // socket. Deriving rather than assembling a parallel description is what makes
+      // receipt/socket drift structurally impossible — the same lesson as the
+      // sock-tool factory whitelist that silently dropped `sensitive`.
+      const socketConfig = {
         version: resolvedVersion.version,
         logger: baileysLogger as any,
         auth: {
@@ -874,7 +883,11 @@ export class ConnectionManager extends EventEmitter implements Messenger {
           keys: makeCacheableSignalKeyStore(state.keys, baileysLogger as any),
         },
         generateHighQualityLinkPreview: config.generateHighQualityLinkPreview,
-      });
+      };
+      effectiveClientRegistry.record(
+        buildEffectiveClientReceipt(socketConfig, resolvedVersion, 'connection'),
+      );
+      const sock = makeWASocket(socketConfig);
 
       // PR-F: install the outbound governor at the socket seam by IN-PLACE
       // override of sock.sendMessage (SS1 — NOT a Proxy: the guards below and in
@@ -1388,6 +1401,10 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         // degrades to `status: 'unavailable'` instead — which is a distinct state
         // from `unattributed`, never a substitute for it.
         ownerEvidence: resolveBondOwnerEvidence(),
+        // S2: what the client actually was. Structured fields only — never evidence
+        // text, which #2386 confines before the durable operator plane. Cannot
+        // throw, for the same reason ownerEvidence cannot (see above).
+        effectiveClient: resolveEffectiveClientEvidence(),
       };
       appendPrivateJsonLineSync(eventPath, payload);
     } catch (err) {
