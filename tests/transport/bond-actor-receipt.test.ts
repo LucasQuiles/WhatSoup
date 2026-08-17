@@ -78,6 +78,7 @@ vi.mock('../../src/lib/emit-alert.ts', () => ({
 }));
 
 import { shortHash } from '../../src/lib/short-hash.ts';
+import { systemClock } from '../../src/lib/clock.ts';
 import {
   buildEffectiveClientReceipt,
   effectiveClientRegistry,
@@ -150,6 +151,30 @@ describe('S1 — the bond actor ledger', () => {
     // route + actor identity => operator, and the raw route survives alongside
     // the derived class so the mapping stays auditable.
     expect(evidence.actorClass).toBe('operator');
+  });
+
+  it('uses systemClock for default record and resolve timestamps', () => {
+    const recordedAt = Date.UTC(2026, 7, 17, 4, 36, 39);
+    const resolvedAt = recordedAt + 1_250;
+    const now = vi.spyOn(systemClock, 'now')
+      .mockReturnValueOnce(recordedAt)
+      .mockReturnValueOnce(resolvedAt);
+    const ledger = createBondActorLedger();
+
+    ledger.recordBondRemovalRequest({
+      route: 'mcp',
+      action: 'mcp_tool:logout',
+      actorIdentity: ACTOR_JID,
+      requestId: 'durability:clock',
+    });
+    const evidence = resolveBondOwnerEvidence(ledger);
+
+    expect(now).toHaveBeenCalledTimes(2);
+    expect(evidence.status).toBe('consulted');
+    if (evidence.status !== 'consulted') return;
+    expect(evidence.resolvedAt).toBe('2026-08-17T04:36:40.250Z');
+    expect(evidence.bondRemovalRequest?.requestedAt).toBe('2026-08-17T04:36:39.000Z');
+    expect(evidence.bondRemovalRequest?.ageMs).toBe(1_250);
   });
 
   it('derives api, not operator, when a route has no actor identity', () => {

@@ -17,6 +17,7 @@ import {
 } from '@whiskeysockets/baileys';
 import qrcodeTerminal from 'qrcode-terminal';
 import { config } from '../config.ts';
+import { systemClock } from '../lib/clock.ts';
 // createChildLogger must be imported after config.ts in source order — config.ts sets
 // process.env.LOG_DIR at its own module top level, and logger.ts reads it once at import
 // time (see src/config.ts:421-422). No transitive dependency enforces this ordering.
@@ -179,7 +180,7 @@ async function startSocket(): Promise<void> {
       // pairing must not fail because bookkeeping did.
       const generation = writeAuthGenerationReceipt({
         accountJid: rawId ?? null,
-        createdAtMs: Date.now(),
+        createdAtMs: systemClock.now(),
         source: 'pairing_cli',
         // THE PROCESS-BOUNDARY CARRIER. This CLI exits moments from now; the
         // in-memory effectiveClientRegistry dies with it and the daemon that reads

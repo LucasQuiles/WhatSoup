@@ -39,6 +39,7 @@
 // it" for the live fleet — read it as "no reporting surface recorded it".
 
 import { shortHash } from '../lib/short-hash.ts';
+import { systemClock } from '../lib/clock.ts';
 
 /**
  * The control-plane surface that initiated an action. OBSERVABLE: it is the code
@@ -173,14 +174,14 @@ export class BondActorLedger {
    * device. Call this BEFORE issuing the request: a receipt written afterwards
    * is lost precisely when the request succeeds and the socket dies.
    */
-  recordBondRemovalRequest(input: BondRemovalRequestInput, nowMs: number = Date.now()): void {
+  recordBondRemovalRequest(input: BondRemovalRequestInput, nowMs: number = systemClock.now()): void {
     this.removalRequest = { input, atMs: nowMs };
     // A removal request is also the most recent control-plane action.
     this.lastAction = { input: { ...input, effect: 'external' }, atMs: nowMs };
   }
 
   /** Record any admitted control-plane action. Temporal context only. */
-  recordControlPlaneAction(input: ControlPlaneActionInput, nowMs: number = Date.now()): void {
+  recordControlPlaneAction(input: ControlPlaneActionInput, nowMs: number = systemClock.now()): void {
     this.lastAction = { input, atMs: nowMs };
   }
 
@@ -190,7 +191,7 @@ export class BondActorLedger {
     this.lastAction = null;
   }
 
-  resolve(nowMs: number = Date.now()): BondOwnerEvidence {
+  resolve(nowMs: number = systemClock.now()): BondOwnerEvidence {
     const removal = this.removalRequest;
     const action = this.lastAction;
     const removalActorHash = removal ? hashOrNull(removal.input.actorIdentity) : null;
@@ -267,7 +268,7 @@ const UNAVAILABLE_LEDGER_ABSENT: BondOwnerEvidence = Object.freeze({
  */
 export function resolveBondOwnerEvidence(
   ledger: BondActorLedger | null = bondActorLedger,
-  nowMs: number = Date.now(),
+  nowMs: number = systemClock.now(),
 ): BondOwnerEvidence {
   try {
     if (!ledger) return UNAVAILABLE_LEDGER_ABSENT;
