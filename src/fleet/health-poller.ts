@@ -107,21 +107,27 @@ const BAILEYS_PROTOCOL_VERSION_RE = /^(\d{1,4})\.(\d{1,6})\.(\d{1,12})$/;
  * anything else. Only a bare three-part numeric triple is accepted, so free
  * text and version-like strings carrying extra content are refused.
  *
- * Acceptance MUST agree with the canonical transport contract in
+ * This accepts a BOUNDED SUBSET of the canonical transport contract in
  * `src/transport/baileys-version.ts` (`parsePinnedBaileysVersion`), which takes
- * any three dot-separated safe non-negative integers. An earlier revision added
- * a digit-shape test here to tell a version from a dotted phone number; that
- * created a second, disagreeing contract which rejected transport-valid
- * `2.2413.1` and the documented pin `2.3000.1021` while accepting phone-shaped
- * `1.41555.50123`. Shape cannot separate the two, so the test is gone. Safety
- * is instead structural: `pushProtocolVersionEvidence` emits the parsed integer
- * components as separate fields and never re-renders a dotted numeric run, so
- * no phone-shaped string can reach the evidence text through this path and no
- * redaction exception is needed.
+ * any three dot-separated safe non-negative integers with no ceilings. The
+ * subset is deliberate — the ceilings below are input hygiene for an
+ * alert-emission path — but it is NOT parity, and must not be described as
+ * parity. Known divergences, all transport-accepted and refused here:
+ * `99999.1.1`, `2.9999999.1`, `2.3000.9999999999999`.
  *
- * The bounds below are input hygiene for an alert-emission path, not a
- * classifier: they refuse absurd or oversized input rather than trying to infer
- * what the value means.
+ * An earlier revision went further and added a digit-shape test to tell a
+ * version from a dotted phone number. That was wrong in both directions: it
+ * rejected transport-valid `2.2413.1` and the documented pin `2.3000.1021`
+ * while accepting phone-shaped `1.41555.50123`. Shape cannot separate the two,
+ * so the test is gone.
+ *
+ * What splitting into components does and does NOT buy: emitting integers
+ * rather than a rejoined dotted string stops the generic dotted-run redactor
+ * from mangling a legitimate version. It does NOT sanitise the value and does
+ * NOT establish provenance — `1.2.14155550123` still yields
+ * `..._patch=14155550123`. Only a trusted, runtime-validated socket-version
+ * receipt propagated from transport can provide that, and this function is not
+ * one. Treat it as a reader of a health string, nothing stronger.
  */
 export function parseBaileysProtocolVersion(value: unknown): BaileysProtocolVersion | null {
   if (typeof value !== 'string') return null;
@@ -1612,10 +1618,13 @@ export class HealthPoller {
    * carries exactly 15 digits across dotted groups — so it was rendered as
    * `[REDACTED_PHONE]` in every alert. That is the one field a client-protocol
    * revocation investigation needs most, and it was destroyed at emission
-   * (verified live: four bond revocations all reported the version as
-   * `[REDACTED_PHONE]`). The Python redactor already carries a dotted-version
-   * exemption; this TypeScript path never received it, so the two sides had
-   * drifted despite being nominally parity-checked.
+   * (verified live: seven bond revocations all reported the version as
+   * `[REDACTED_PHONE]`). The Python redactor carries a dotted-version exemption
+   * — `deploy/scripts/lib/bot_errors_redaction.py`, `total_digits > 15 or
+   * longest_run >= 5`, confirmed by running it against the real evidence string
+   * on both current main and the deployed build — while this TypeScript path
+   * never received it, so the two sides had drifted despite being nominally
+   * parity-checked.
    *
    * The fix is deliberately NOT a numeric-redaction loophole. Widening the
    * phone rule would weaken it for every field. Instead this parses the raw
@@ -1641,11 +1650,17 @@ export class HealthPoller {
       return;
     }
     // Emitted as integer components, deliberately NOT re-joined into a dotted
-    // string. A dotted numeric run in evidence text is indistinguishable from a
-    // phone number to the generic redactor; keeping the components separate
-    // means the value survives redaction on its own structure rather than on a
-    // shape exception. See parseBaileysProtocolVersion for why shape-based
-    // discrimination was removed.
+    // string, so the generic dotted-run redactor cannot mangle a legitimate
+    // version. This is a redaction-survival measure ONLY — it does not sanitise
+    // the value or establish provenance. See parseBaileysProtocolVersion.
+    //
+    // KNOWN LIMIT (#2386): everything pushed onto `evidence` is confined by
+    // emitAlert -> buildBotErrorsEvent -> confineAlertContent into
+    // {failureClass, length, correlationDigest} before it reaches the durable
+    // outbox, so these fields are NOT operator-visible through that path. Only
+    // a typed, allowlisted diagnostic field in the outbox schema — ideally the
+    // socket-version receipt — makes the version durable. Until that exists,
+    // this improves in-process evidence and nothing downstream of confinement.
     evidence.push(`baileys_protocol_version_major=${parsed.major}`);
     evidence.push(`baileys_protocol_version_minor=${parsed.minor}`);
     evidence.push(`baileys_protocol_version_patch=${parsed.patch}`);
