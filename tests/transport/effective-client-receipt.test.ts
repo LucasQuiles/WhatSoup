@@ -116,7 +116,7 @@ describe('S2 — honest protocol-version provenance', () => {
 });
 
 describe('S2 — the receipt describes the socket that was actually built', () => {
-  it('reads the tuple off the config, not off the resolver', () => {
+  it('does not attach resolver provenance to a different config tuple', () => {
     // If a call site ever passes something other than the resolved tuple, the
     // receipt must show what the SOCKET got. This is the whole reason the receipt
     // is derived from the config object rather than assembled in parallel.
@@ -124,8 +124,10 @@ describe('S2 — the receipt describes the socket that was actually built', () =
     const receipt = buildEffectiveClientReceipt(config, RESOLVED, 'connection');
     expect(receipt.protocolVersion).toBe('9.9.9');
     expect(receipt.protocolVersionTuple).toEqual([9, 9, 9]);
-    // …while resolver provenance still travels with it.
-    expect(receipt.protocolVersionSource).toBe('live_fetch');
+    expect(receipt.protocolVersionResolverMatch).toBe(false);
+    expect(receipt.protocolVersionSource).toBe('unknown');
+    expect(receipt.protocolVersionIsLatest).toBeNull();
+    expect(receipt.protocolVersionFetchErrorClass).toBeNull();
   });
 
   it('marks inherited library defaults as library_default, not as a blank', () => {

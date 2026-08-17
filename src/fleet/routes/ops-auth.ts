@@ -51,7 +51,7 @@ const ALLOWED_SSE_EVENTS = new Set(['qr', 'connected', 'error']);
  */
 const AUTH_HELPER_ENV_KEYS = [
   'PATH', 'HOME', 'USER', 'SHELL', 'LANG', 'LC_ALL', 'TERM',
-  'NODE_PATH', 'XDG_RUNTIME_DIR', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'TMPDIR',
+  'NODE_PATH', 'XDG_RUNTIME_DIR', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME', 'TMPDIR',
 ] as const;
 
 function buildAuthHelperEnv(): NodeJS.ProcessEnv {
@@ -160,9 +160,8 @@ export async function handleAuth(
     return;
   }
 
-  // Auth bootstrap is an admin-only operation that needs full environment access
-  // for WhatsApp pairing (QR code flow). This is not a user-facing agent session
-  // and does not process untrusted input, so full env inheritance is acceptable.
+  // Auth bootstrap is an admin-only operation, but it still receives only the
+  // explicit allowlist above plus WHATSOUP_* configuration overrides.
   // Resolve bootstrap-auth against the repo root, not `process.cwd()`.
   // Under systemd the fleet unit ships with no `WorkingDirectory=`, so cwd
   // is the service user's `$HOME` and a relative script path ENOENTs (#419).

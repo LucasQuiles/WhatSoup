@@ -76,6 +76,8 @@ export interface EffectiveClientReceipt {
   /** The exact tuple handed to makeWASocket, read back from the config object. */
   protocolVersion: string;
   protocolVersionTuple: readonly [number, number, number];
+  /** Whether the applied tuple is the tuple whose resolver provenance follows. */
+  protocolVersionResolverMatch: boolean;
   /** Honest resolver provenance — see BaileysVersionSource. */
   protocolVersionSource: BaileysVersionSource;
   protocolVersionIsLatest: boolean | null;
@@ -141,14 +143,19 @@ export function buildEffectiveClientReceipt(
     Number(tupleSource[1] ?? 0),
     Number(tupleSource[2] ?? 0),
   ];
+  const protocolVersionResolverMatch =
+    tuple[0] === resolved.version[0] &&
+    tuple[1] === resolved.version[1] &&
+    tuple[2] === resolved.version[2];
   return {
     version: 1,
     callSite,
     protocolVersion: tuple.join('.'),
     protocolVersionTuple: tuple,
-    protocolVersionSource: resolved.source,
-    protocolVersionIsLatest: resolved.isLatest,
-    protocolVersionFetchErrorClass: resolved.fetchErrorClass,
+    protocolVersionResolverMatch,
+    protocolVersionSource: protocolVersionResolverMatch ? resolved.source : 'unknown',
+    protocolVersionIsLatest: protocolVersionResolverMatch ? resolved.isLatest : null,
+    protocolVersionFetchErrorClass: protocolVersionResolverMatch ? resolved.fetchErrorClass : null,
     browser: field<readonly string[] | null>(config.browser, OBSERVED_LIBRARY_DEFAULTS.browser),
     syncFullHistory: field(config.syncFullHistory, OBSERVED_LIBRARY_DEFAULTS.syncFullHistory),
     markOnlineOnConnect: field(
