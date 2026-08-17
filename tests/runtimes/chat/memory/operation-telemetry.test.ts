@@ -197,6 +197,22 @@ describe('memory operation telemetry', () => {
       },
       // $or carrying a non-array.
       { $or: { confidence_qualifier: { $exists: false } } },
+      // $exists must be exactly false, not merely falsy. A refactor to a
+      // truthiness check would silently admit 0, '', and null as "absent".
+      {
+        $or: [
+          { confidence_qualifier: { $exists: 0 } },
+          { confidence_qualifier: { $ne: 'x' } },
+        ],
+      },
+      // Arms reachable only through the prototype chain serialize as {}, so
+      // the filter actually sent is not the audited one.
+      {
+        $or: [
+          Object.create({ confidence_qualifier: { $exists: false } }),
+          Object.create({ confidence_qualifier: { $ne: 'x' } }),
+        ],
+      },
     ];
     for (const filters of nearMisses) {
       expect(classifyMemoryFilter(filters), JSON.stringify(filters)).toEqual({
@@ -204,6 +220,62 @@ describe('memory operation telemetry', () => {
         filterShape: 'unknown',
       });
     }
+  });
+
+  it('degrades a hostile filter to unknown instead of throwing', () => {
+    // classifyMemoryFilter sits on the telemetry path: if it throws, it takes
+    // the operation's observability down with it. A field that cannot be read
+    // is an unrecognized shape, not a crash.
+    const thrower = {};
+    Object.defineProperty(thrower, 'confidence_qualifier', {
+      get() {
+        throw new Error('SYNTHETIC_PRIVATE_GETTER_MARKER');
+      },
+      enumerable: true,
+    });
+    const sparse: unknown[] = [];
+    sparse.length = 2;
+
+    expect(
+      classifyMemoryFilter({
+        $or: [{ confidence_qualifier: { $exists: false } }, thrower],
+      }),
+    ).toEqual({ scopeKind: 'global', filterShape: 'unknown' });
+    expect(classifyMemoryFilter({ $or: sparse })).toEqual({
+      scopeKind: 'global',
+      filterShape: 'unknown',
+    });
+  });
+
+  it('keeps the excluded operand out of the emitted envelope', () => {
+    // The whole point of the allowlist: the shape is named, the value never
+    // travels. Scanned over the serialized envelope rather than asserted
+    // field-by-field, so a future field addition cannot reintroduce a leak.
+    const operand = 'SYNTHETIC_PRIVATE_QUALIFIER_MARKER';
+    const event = buildMemoryOperationEvent(
+      {
+        operationId: 'a'.repeat(32),
+        operation: 'search',
+        ...classifyMemoryFilter({
+          $or: [
+            { confidence_qualifier: { $exists: false } },
+            { confidence_qualifier: { $ne: operand } },
+          ],
+        }),
+      },
+      {
+        stage: 'request',
+        status: 'completed',
+        failureCode: 'none',
+        retryable: false,
+        attempt: 0,
+        resultCount: 3,
+        evidenceCoverage: 'provider_response',
+      },
+    );
+
+    expect(event.filter_shape).toBe('qualifier_exclusion');
+    expect(JSON.stringify(event)).not.toContain(operand);
   });
 
   it('buckets scores into bounded aggregate counts', () => {
