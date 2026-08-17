@@ -60,6 +60,7 @@ export type MemoryFilterShape =
   | 'sender_eq'
   | 'memory_type_eq'
   | 'source_ne'
+  | 'qualifier_exclusion'
   | 'mixed'
   | 'unknown';
 
@@ -259,6 +260,83 @@ function hasExactOperator(value: unknown, operator: '$eq' | '$ne'): boolean {
   }
 }
 
+const QUALIFIER_FIELD = 'confidence_qualifier';
+
+function isAbsenceAssertion(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+  try {
+    const keys = Object.keys(value);
+    if (keys.length !== 1 || keys[0] !== '$exists') {
+      return false;
+    }
+  } catch {
+    return false;
+  }
+  return readBoundedField(value, '$exists') === false;
+}
+
+/**
+ * Recognizes the one audited disjunction: consolidation's source-eligibility
+ * filter, which skips prior promotion outputs while keeping records that carry
+ * no qualifier at all (#2569).
+ *
+ * Deliberately pinned to that exact shape rather than walking `$or` generically.
+ * This module is a privacy allowlist, and 'unknown' is its alarm bucket — it
+ * means a filter shape reached the provider that nobody has audited. A general
+ * `$or` walker would let unreviewed filters describe themselves as reviewed,
+ * the inverse of what the bucket exists for.
+ *
+ * Matching is operand-blind: it keys on the operators, never the excluded
+ * value. Renaming the qualifier cannot silently demote the shape back to
+ * 'unknown', and no filter value can reach the telemetry envelope.
+ *
+ * It describes the object it is HANDED, and assumes that object is a literal
+ * or JSON-derived value — which every filter in this repo is. Against an
+ * exotic object whose reads are not stable (a mutating getter, a `toJSON`
+ * that emits something else), the shape named here can differ from the shape
+ * the provider is ultimately sent. That is a description gap, not a filter
+ * bug, and it is unreachable for the literal inputs this path receives.
+ */
+function isQualifierExclusion(value: unknown): boolean {
+  if (!Array.isArray(value) || value.length !== 2) {
+    return false;
+  }
+  let sawAbsent = false;
+  let sawExclusion = false;
+  // The whole walk is guarded, iteration included: this runs on the telemetry
+  // path, so an input that throws while being described must degrade to
+  // 'unknown' rather than take the operation's observability down with it.
+  try {
+    for (const arm of value) {
+      if (typeof arm !== 'object' || arm === null) {
+        return false;
+      }
+      const armKeys = Object.keys(arm);
+      if (armKeys.length !== 1 || armKeys[0] !== QUALIFIER_FIELD) {
+        return false;
+      }
+      const condition = readBoundedField(arm, QUALIFIER_FIELD);
+      if (hasExactOperator(condition, '$ne')) {
+        sawExclusion = true;
+        continue;
+      }
+      if (isAbsenceAssertion(condition)) {
+        sawAbsent = true;
+        continue;
+      }
+      return false;
+    }
+  } catch {
+    return false;
+  }
+  // Both arms are required. Two exclusion arms and no absence arm is a
+  // different filter that drops qualifier-less records -- the exact starvation
+  // #2569 exists to prevent -- so it must not describe itself as audited.
+  return sawAbsent && sawExclusion;
+}
+
 export function classifyMemoryFilter(filters: unknown): {
   scopeKind: MemoryScopeKind;
   filterShape: MemoryFilterShape;
@@ -294,6 +372,11 @@ export function classifyMemoryFilter(filters: unknown): {
   }
   if (key === 'source' && hasExactOperator(value, '$ne')) {
     return { scopeKind: 'entity', filterShape: 'source_ne' };
+  }
+  // Scope stays 'global': the eligibility filter excludes a class of records,
+  // it does not narrow the search to a chat, sender, or entity.
+  if (key === '$or' && isQualifierExclusion(value)) {
+    return { scopeKind: 'global', filterShape: 'qualifier_exclusion' };
   }
   return { scopeKind: 'global', filterShape: 'unknown' };
 }

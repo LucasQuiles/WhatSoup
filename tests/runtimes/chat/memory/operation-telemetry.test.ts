@@ -103,6 +103,242 @@ describe('memory operation telemetry', () => {
     ).toEqual({ scopeKind: 'global', filterShape: 'unknown' });
   });
 
+  it('names the consolidation eligibility filter instead of bucketing it as unknown', () => {
+    // The exact shape consolidation source selection sends provider-side
+    // (#2569): exclude prior promotion outputs, keep qualifier-less records.
+    expect(
+      classifyMemoryFilter({
+        $or: [
+          { confidence_qualifier: { $exists: false } },
+          { confidence_qualifier: { $ne: 'consolidated' } },
+        ],
+      }),
+    ).toEqual({ scopeKind: 'global', filterShape: 'qualifier_exclusion' });
+    // Arm order is a caller detail, not a different filter.
+    expect(
+      classifyMemoryFilter({
+        $or: [
+          { confidence_qualifier: { $ne: 'consolidated' } },
+          { confidence_qualifier: { $exists: false } },
+        ],
+      }),
+    ).toEqual({ scopeKind: 'global', filterShape: 'qualifier_exclusion' });
+    // Operand-blind: the classifier keys on the OPERATOR, never the excluded
+    // value. Renaming the qualifier must not silently demote the shape back to
+    // 'unknown', and no filter value may reach the envelope.
+    expect(
+      classifyMemoryFilter({
+        $or: [
+          { confidence_qualifier: { $exists: false } },
+          {
+            confidence_qualifier: {
+              $ne: 'SYNTHETIC_PRIVATE_QUALIFIER_MARKER',
+            },
+          },
+        ],
+      }),
+    ).toEqual({ scopeKind: 'global', filterShape: 'qualifier_exclusion' });
+  });
+
+  it('keeps unaudited disjunctions in the unknown alarm bucket', () => {
+    // 'unknown' means "a filter shape reached the provider that this allowlist
+    // has never audited". A generic $or walker would let unreviewed filters
+    // describe themselves as reviewed — the inverse of what the bucket is for.
+    // Every near-miss below must therefore stay unknown.
+    const nearMisses: unknown[] = [
+      // A different field entirely.
+      { $or: [{ source: { $exists: false } }, { source: { $ne: 'x' } }] },
+      // Arms disagree on which field they constrain.
+      {
+        $or: [
+          { confidence_qualifier: { $exists: false } },
+          { source: { $ne: 'x' } },
+        ],
+      },
+      // Presence arm asserts the wrong polarity — this excludes legacy records
+      // rather than keeping them, the defect #2569 exists to prevent.
+      {
+        $or: [
+          { confidence_qualifier: { $exists: true } },
+          { confidence_qualifier: { $ne: 'x' } },
+        ],
+      },
+      // Equality, not exclusion: selects prior outputs instead of skipping them.
+      {
+        $or: [
+          { confidence_qualifier: { $exists: false } },
+          { confidence_qualifier: { $eq: 'x' } },
+        ],
+      },
+      // An extra arm on another field widens the match past what was reviewed.
+      {
+        $or: [
+          { confidence_qualifier: { $exists: false } },
+          { confidence_qualifier: { $ne: 'x' } },
+          { source: { $ne: 'y' } },
+        ],
+      },
+      // A third arm on the SAME field is a different filter — it excludes two
+      // qualifiers, not one. This case pins the arity bound specifically: the
+      // field check above cannot reject it, so only the two-arm bound can.
+      {
+        $or: [
+          { confidence_qualifier: { $exists: false } },
+          { confidence_qualifier: { $ne: 'x' } },
+          { confidence_qualifier: { $ne: 'y' } },
+        ],
+      },
+      // Two exclusion arms and no absence arm. This is the semantically
+      // dangerous near-miss: such a filter DROPS qualifier-less records, the
+      // exact starvation #2569 exists to prevent, so it must never describe
+      // itself as the audited shape. Nothing else in this list fails when the
+      // absence requirement is dropped from the recognizer.
+      {
+        $or: [
+          { confidence_qualifier: { $ne: 'x' } },
+          { confidence_qualifier: { $ne: 'y' } },
+        ],
+      },
+      // Both arms identical — no exclusion is actually applied.
+      {
+        $or: [
+          { confidence_qualifier: { $exists: false } },
+          { confidence_qualifier: { $exists: false } },
+        ],
+      },
+      // $or carrying a non-array.
+      { $or: { confidence_qualifier: { $exists: false } } },
+      // $exists must be exactly false, not merely falsy. A refactor to a
+      // truthiness check would silently admit 0, '', and null as "absent".
+      {
+        $or: [
+          { confidence_qualifier: { $exists: 0 } },
+          { confidence_qualifier: { $ne: 'x' } },
+        ],
+      },
+      // Arms reachable only through the prototype chain serialize as {}, so
+      // the filter actually sent is not the audited one.
+      {
+        $or: [
+          Object.create({ confidence_qualifier: { $exists: false } }),
+          Object.create({ confidence_qualifier: { $ne: 'x' } }),
+        ],
+      },
+    ];
+    for (const filters of nearMisses) {
+      expect(classifyMemoryFilter(filters), JSON.stringify(filters)).toEqual({
+        scopeKind: 'global',
+        filterShape: 'unknown',
+      });
+    }
+  });
+
+  it('does not let a polluted prototype forge the audited shape', () => {
+    // readBoundedField reads through Reflect.get, which walks the prototype
+    // chain, so a polluted Object.prototype makes EVERY arm look like it
+    // carries the qualifier. The own-key pin is the only thing that stops it.
+    //
+    // The plain foreign-field near-miss above does not exercise that pin: with
+    // a clean prototype the lookup simply returns undefined, so it stays
+    // 'unknown' for an unrelated reason. This case fails without the pin and
+    // passes with it, which is what makes the pin's role actually tested.
+    const proto = Object.prototype as unknown as Record<string, unknown>;
+    try {
+      Object.defineProperty(proto, 'confidence_qualifier', {
+        value: { $exists: false },
+        configurable: true,
+        enumerable: false,
+        writable: true,
+      });
+      expect(
+        classifyMemoryFilter({
+          $or: [
+            { source: { $ne: 'SYNTHETIC_PRIVATE_SOURCE_MARKER' } },
+            { confidence_qualifier: { $ne: 'consolidated' } },
+          ],
+        }),
+      ).toEqual({ scopeKind: 'global', filterShape: 'unknown' });
+    } finally {
+      delete proto.confidence_qualifier;
+    }
+    // Cleanup must be complete, or every later test runs against a polluted
+    // prototype and this file starts lying about the rest of the suite.
+    expect('confidence_qualifier' in {}).toBe(false);
+  });
+
+  it('degrades a hostile filter to unknown instead of throwing', () => {
+    // classifyMemoryFilter sits on the telemetry path: if it throws, it takes
+    // the operation's observability down with it. A field that cannot be read
+    // is an unrecognized shape, not a crash.
+    const thrower = {};
+    Object.defineProperty(thrower, 'confidence_qualifier', {
+      get() {
+        throw new Error('SYNTHETIC_PRIVATE_GETTER_MARKER');
+      },
+      enumerable: true,
+    });
+    const sparse: unknown[] = [];
+    sparse.length = 2;
+    // Iteration itself can throw, not just field reads. Without the walk being
+    // guarded this escapes classifyMemoryFilter and breaks the contract the
+    // rest of this test asserts.
+    const brokenIterable: unknown[] = [
+      { confidence_qualifier: { $exists: false } },
+      { confidence_qualifier: { $ne: 'consolidated' } },
+    ];
+    Object.defineProperty(brokenIterable, Symbol.iterator, {
+      get(): never {
+        throw new Error('SYNTHETIC_PRIVATE_ITERATOR_MARKER');
+      },
+      configurable: true,
+    });
+
+    expect(
+      classifyMemoryFilter({
+        $or: [{ confidence_qualifier: { $exists: false } }, thrower],
+      }),
+    ).toEqual({ scopeKind: 'global', filterShape: 'unknown' });
+    expect(classifyMemoryFilter({ $or: sparse })).toEqual({
+      scopeKind: 'global',
+      filterShape: 'unknown',
+    });
+    expect(classifyMemoryFilter({ $or: brokenIterable })).toEqual({
+      scopeKind: 'global',
+      filterShape: 'unknown',
+    });
+  });
+
+  it('keeps the excluded operand out of the emitted envelope', () => {
+    // The whole point of the allowlist: the shape is named, the value never
+    // travels. Scanned over the serialized envelope rather than asserted
+    // field-by-field, so a future field addition cannot reintroduce a leak.
+    const operand = 'SYNTHETIC_PRIVATE_QUALIFIER_MARKER';
+    const event = buildMemoryOperationEvent(
+      {
+        operationId: 'a'.repeat(32),
+        operation: 'search',
+        ...classifyMemoryFilter({
+          $or: [
+            { confidence_qualifier: { $exists: false } },
+            { confidence_qualifier: { $ne: operand } },
+          ],
+        }),
+      },
+      {
+        stage: 'request',
+        status: 'completed',
+        failureCode: 'none',
+        retryable: false,
+        attempt: 0,
+        resultCount: 3,
+        evidenceCoverage: 'provider_response',
+      },
+    );
+
+    expect(event.filter_shape).toBe('qualifier_exclusion');
+    expect(JSON.stringify(event)).not.toContain(operand);
+  });
+
   it('buckets scores into bounded aggregate counts', () => {
     expect(bucketMemoryScores([0.9, 0.75, 0.74, 0.4, 0.39, Number.NaN])).toEqual(
       {

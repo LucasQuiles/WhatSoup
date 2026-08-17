@@ -9,6 +9,7 @@ vi.mock('../../src/logger.ts', async () => {
   return { createChildLogger };
 });
 
+import { classifyMemoryFilter } from '../../src/lib/memory-operation-telemetry.ts';
 import { runConsolidation } from '../../src/memory/consolidation-cron.ts';
 
 describe('runConsolidation', () => {
@@ -1148,6 +1149,14 @@ describe('pre-selection eligibility filtering (#2569)', () => {
         { confidence_qualifier: { $ne: 'consolidated' } },
       ],
     });
+    // Couples the producer to the telemetry allowlist. 'unknown' is that
+    // allowlist's alarm bucket — it means a filter shape reached the provider
+    // that nobody has audited — so this deliberate, reviewed filter must never
+    // sit in it.
+    expect(
+      classifyMemoryFilter(filters),
+      'a changed filter STRUCTURE must be re-classified in src/lib/memory-operation-telemetry.ts, not merely re-baselined on the assertion above (an operand-only change is caught there instead, since classification is operand-blind)',
+    ).toEqual({ scopeKind: 'global', filterShape: 'qualifier_exclusion' });
   });
 
   it('records written before the qualifier existed are not starved by the filter', async () => {
