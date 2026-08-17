@@ -121,6 +121,27 @@ describe('MemoryConsolidationScheduler', () => {
     await scheduler.stop();
   });
 
+  it('threads the injected clock through into the run report (#2200)', async () => {
+    // Injecting a clock into the scheduler is only half the guarantee: the
+    // report itself is stamped inside runConsolidation, which keeps its own
+    // `options.now ?? Date.now` time source. If the scheduler does not pass
+    // its clock down, a caller can pin time and still get wall-clock
+    // timestamps back — an injection that stops at the boundary and quietly
+    // reports real time.
+    const PINNED_MS = 1_700_000_000_000;
+    const PINNED_ISO = new Date(PINNED_MS).toISOString();
+    const scheduler = createScheduler({ clock: fakeClock(PINNED_MS) });
+
+    const report = await scheduler.runOnce('manual');
+
+    expect(
+      { attemptedAt: report.attemptedAt, completedAt: report.completedAt },
+      'run report timestamps came from the wall clock, so the scheduler clock is not threaded into runConsolidation',
+    ).toEqual({ attemptedAt: PINNED_ISO, completedAt: PINNED_ISO });
+
+    await scheduler.stop();
+  });
+
   it('abandons interrupted receipts, runs immediately, and keeps the interval alive', async () => {
     const interrupted = store.beginRun({
       source: 'manual',

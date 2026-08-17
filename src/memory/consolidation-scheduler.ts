@@ -212,6 +212,11 @@ export class MemoryConsolidationScheduler {
       dryRun: this.config.dryRun,
       runId: active.handle.runId,
       signal: active.controller.signal,
+      // The report is stamped inside runConsolidation, which keeps its own
+      // `options.now ?? Date.now`. Without this the injection would stop at
+      // the scheduler boundary: a caller could pin time and still get
+      // wall-clock timestamps back in the report (#2200).
+      now: () => this.clock.now(),
       isWriteAllowed: () =>
         this.activeRun === active && !active.controller.signal.aborted,
       onProgress: (stage, counters, evidenceCoverage) => {

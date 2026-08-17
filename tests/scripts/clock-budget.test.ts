@@ -22,12 +22,24 @@
  * thunk) to systemClock.now(); live count dropped 329→328.
  *
  * Slice (2026-08-17, #2200): migrated memory/consolidation-scheduler.ts (8
- * call sites) to an injected Clock defaulting to systemClock; live count
- * dropped 328→320. This clears the whole src/memory/ subtree — it now has
- * zero raw Date.now() sites. Chosen as constructor injection rather than a
- * bare systemClock.now() swap because #2200 names these tests as
- * "already-flaky": injection is what makes the scheduler drivable to a known
- * instant, which a direct swap would not have achieved.
+ * call sites) to an injected Clock defaulting to systemClock, and threaded
+ * that clock into runConsolidation so the run report is stamped from it too.
+ * Chosen as constructor injection rather than a bare systemClock.now() swap
+ * because #2200 names these tests as "already-flaky": injection is what makes
+ * the scheduler drivable to a known instant, which a direct swap would not
+ * have achieved. src/memory/ is now clear of all three patterns below.
+ *
+ * That slice also found the ratchet was measuring the wrong thing twice over:
+ *
+ *   1. It counted raw text, so comments naming the pattern scored as call
+ *      sites — documenting the migration RAISED the number the ratchet bounds.
+ *      Comments are now stripped, which revealed the real code-only count was
+ *      308, not 328: twelve of the recorded "debt" was prose.
+ *   2. It matched only `Date.now()`, so the same debt reached by other syntax
+ *      was invisible — 9 bare `Date.now` references (no call parens) and 105
+ *      bare `new Date()` wall-clock reads, all live in src/ while the budget
+ *      read clean. Each now has its own budget, so the debt cannot move
+ *      sideways while the headline number falls.
  *
  * Companion: #2200 slice 1.
  */
@@ -42,7 +54,10 @@ const srcRoot = resolve(repoRoot, 'src');
 
 // Ratchet ceiling: the count may only stay the same or decrease.
 // Lower this constant when a migration slice removes Date.now() call sites.
-const CLOCK_BUDGET = 320;
+const CLOCK_BUDGET = 308;
+// Same debt, different syntax — each dodged the call-site count entirely.
+const DATE_NOW_REF_BUDGET = 9;
+const BARE_NEW_DATE_BUDGET = 105;
 
 // src/lib/clock.ts is the ONE file allowed to call Date.now() (it wraps it).
 const EXEMPT_FILE = 'src/lib/clock.ts';
@@ -54,22 +69,41 @@ function collectSrcFiles(): string[] {
     .filter((f) => !f.endsWith(EXEMPT_FILE));
 }
 
-interface DateNowSite {
+interface PatternSite {
   file: string;
   line: number;
   count: number;
 }
 
-function countDateNow(): { total: number; sites: DateNowSite[] } {
+/**
+ * Strips comments before counting.
+ *
+ * The count is a debt metric, and prose is not debt. Counting raw text meant a
+ * comment explaining the migration registered as a new call site — so
+ * DOCUMENTING the rule raised the number the rule bounds. That is a perverse
+ * incentive, and it is how this slice first "failed" its own ratchet.
+ *
+ * Deliberately naive about comment-like sequences inside string literals: the
+ * counted patterns do not appear inside strings anywhere in src/, and a
+ * conservative strip is strictly better than scoring prose. The `[^:]` guard
+ * keeps `https://` URLs from being treated as line comments.
+ */
+function stripComments(src: string): string {
+  return src
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/(^|[^:])\/\/.*$/gm, '$1');
+}
+
+function countPattern(pattern: RegExp): { total: number; sites: PatternSite[] } {
   const files = collectSrcFiles();
-  const sites: DateNowSite[] = [];
+  const sites: PatternSite[] = [];
   let total = 0;
   for (const file of files) {
-    const src = readFileSync(file, 'utf8');
+    const src = stripComments(readFileSync(file, 'utf8'));
     const lines = src.split('\n');
     let fileCount = 0;
     for (let i = 0; i < lines.length; i++) {
-      const matches = lines[i].match(/Date\.now\(\)/g);
+      const matches = lines[i].match(pattern);
       if (matches) fileCount += matches.length;
     }
     if (fileCount > 0) {
@@ -84,20 +118,68 @@ function countDateNow(): { total: number; sites: DateNowSite[] } {
   return { total, sites };
 }
 
+function assertBudget(
+  label: string,
+  pattern: RegExp,
+  budget: number,
+  guidance: string,
+): void {
+  const { total, sites } = countPattern(pattern);
+  const breakdown = sites.map((s) => `  ${s.file}: ${s.count}`).join('\n');
+  expect(
+    total,
+    `${total} ${label} in src/ (baseline ${budget}); ${guidance}:\n${breakdown}`,
+  ).toBeLessThanOrEqual(budget);
+}
+
 describe('clock budget ratchet', () => {
   it('raw Date.now() count in src/ does not exceed baseline (use systemClock)', () => {
-    const { total, sites } = countDateNow();
-    if (total > CLOCK_BUDGET) {
-      const breakdown = sites
-        .map((s) => `  ${s.file}: ${s.count}`)
-        .join('\n');
-      expect(
-        total,
-        `${total} Date.now() calls in src/ (baseline ${CLOCK_BUDGET}); ` +
-          `new sites should use systemClock.now() from src/lib/clock.ts:\n${breakdown}`,
-      ).toBeLessThanOrEqual(CLOCK_BUDGET);
-    }
-    // Explicit pass assertion (avoids js-no-expect test-integrity finding).
-    expect(total).toBeLessThanOrEqual(CLOCK_BUDGET);
+    assertBudget(
+      'Date.now() calls',
+      /Date\.now\(\)/g,
+      CLOCK_BUDGET,
+      'new sites should use systemClock.now() from src/lib/clock.ts',
+    );
+  });
+
+  // The three budgets below bound the SAME debt reached by different syntax.
+  // Bounding only Date.now() let the debt move sideways: a bare `Date.now`
+  // reference has no call parens and a `new Date()` is a wall-clock read with
+  // no `Date.now` in it at all, so neither was ever counted. Both were found
+  // live in src/ while the original budget read clean.
+  it('bare Date.now references do not exceed baseline (they dodge the call-site count)', () => {
+    assertBudget(
+      'bare Date.now references',
+      /Date\.now(?!\s*\()/g,
+      DATE_NOW_REF_BUDGET,
+      'pass a Clock or default to systemClock.now() instead of handing out Date.now',
+    );
+  });
+
+  it('bare new Date() count in src/ does not exceed baseline', () => {
+    // Empty parens only: `new Date(nowMs)` derives from an explicit argument
+    // and is not a wall-clock read, so it must not be counted.
+    assertBudget(
+      'bare new Date() wall-clock reads',
+      /new Date\(\)/g,
+      BARE_NEW_DATE_BUDGET,
+      'use systemClock.nowIso() (or derive from an explicit epoch) instead',
+    );
+  });
+
+  it('counts code, not prose', () => {
+    // Regression pin for the perverse incentive this slice hit: before comment
+    // stripping, a comment naming the pattern counted as a call site, so
+    // documenting the migration raised the number the ratchet bounds.
+    const stripped = stripComments(
+      ['// mentions Date.now() in prose', '/* and new Date() here */', 'const a = 1;'].join('\n'),
+    );
+    expect(stripped).not.toContain('Date.now()');
+    expect(stripped).not.toContain('new Date()');
+    expect(stripped).toContain('const a = 1;');
+    // A real call site still counts.
+    expect(stripComments('const t = Date.now();')).toContain('Date.now()');
+    // Protocol-relative URLs are not line comments.
+    expect(stripComments("const u = 'https://x.example';")).toContain('https://x.example');
   });
 });
