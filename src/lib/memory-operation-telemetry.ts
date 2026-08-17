@@ -291,6 +291,13 @@ function isAbsenceAssertion(value: unknown): boolean {
  * Matching is operand-blind: it keys on the operators, never the excluded
  * value. Renaming the qualifier cannot silently demote the shape back to
  * 'unknown', and no filter value can reach the telemetry envelope.
+ *
+ * It describes the object it is HANDED, and assumes that object is a literal
+ * or JSON-derived value — which every filter in this repo is. Against an
+ * exotic object whose reads are not stable (a mutating getter, a `toJSON`
+ * that emits something else), the shape named here can differ from the shape
+ * the provider is ultimately sent. That is a description gap, not a filter
+ * bug, and it is unreachable for the literal inputs this path receives.
  */
 function isQualifierExclusion(value: unknown): boolean {
   if (!Array.isArray(value) || value.length !== 2) {
@@ -298,30 +305,35 @@ function isQualifierExclusion(value: unknown): boolean {
   }
   let sawAbsent = false;
   let sawExclusion = false;
-  for (const arm of value) {
-    if (typeof arm !== 'object' || arm === null) {
+  // The whole walk is guarded, iteration included: this runs on the telemetry
+  // path, so an input that throws while being described must degrade to
+  // 'unknown' rather than take the operation's observability down with it.
+  try {
+    for (const arm of value) {
+      if (typeof arm !== 'object' || arm === null) {
+        return false;
+      }
+      const armKeys = Object.keys(arm);
+      if (armKeys.length !== 1 || armKeys[0] !== QUALIFIER_FIELD) {
+        return false;
+      }
+      const condition = readBoundedField(arm, QUALIFIER_FIELD);
+      if (hasExactOperator(condition, '$ne')) {
+        sawExclusion = true;
+        continue;
+      }
+      if (isAbsenceAssertion(condition)) {
+        sawAbsent = true;
+        continue;
+      }
       return false;
     }
-    let armKeys: string[];
-    try {
-      armKeys = Object.keys(arm);
-    } catch {
-      return false;
-    }
-    if (armKeys.length !== 1 || armKeys[0] !== QUALIFIER_FIELD) {
-      return false;
-    }
-    const condition = readBoundedField(arm, QUALIFIER_FIELD);
-    if (hasExactOperator(condition, '$ne')) {
-      sawExclusion = true;
-      continue;
-    }
-    if (isAbsenceAssertion(condition)) {
-      sawAbsent = true;
-      continue;
-    }
+  } catch {
     return false;
   }
+  // Both arms are required. Two exclusion arms and no absence arm is a
+  // different filter that drops qualifier-less records -- the exact starvation
+  // #2569 exists to prevent -- so it must not describe itself as audited.
   return sawAbsent && sawExclusion;
 }
 

@@ -188,6 +188,17 @@ describe('memory operation telemetry', () => {
           { confidence_qualifier: { $ne: 'y' } },
         ],
       },
+      // Two exclusion arms and no absence arm. This is the semantically
+      // dangerous near-miss: such a filter DROPS qualifier-less records, the
+      // exact starvation #2569 exists to prevent, so it must never describe
+      // itself as the audited shape. Nothing else in this list fails when the
+      // absence requirement is dropped from the recognizer.
+      {
+        $or: [
+          { confidence_qualifier: { $ne: 'x' } },
+          { confidence_qualifier: { $ne: 'y' } },
+        ],
+      },
       // Both arms identical — no exclusion is actually applied.
       {
         $or: [
@@ -268,6 +279,19 @@ describe('memory operation telemetry', () => {
     });
     const sparse: unknown[] = [];
     sparse.length = 2;
+    // Iteration itself can throw, not just field reads. Without the walk being
+    // guarded this escapes classifyMemoryFilter and breaks the contract the
+    // rest of this test asserts.
+    const brokenIterable: unknown[] = [
+      { confidence_qualifier: { $exists: false } },
+      { confidence_qualifier: { $ne: 'consolidated' } },
+    ];
+    Object.defineProperty(brokenIterable, Symbol.iterator, {
+      get(): never {
+        throw new Error('SYNTHETIC_PRIVATE_ITERATOR_MARKER');
+      },
+      configurable: true,
+    });
 
     expect(
       classifyMemoryFilter({
@@ -275,6 +299,10 @@ describe('memory operation telemetry', () => {
       }),
     ).toEqual({ scopeKind: 'global', filterShape: 'unknown' });
     expect(classifyMemoryFilter({ $or: sparse })).toEqual({
+      scopeKind: 'global',
+      filterShape: 'unknown',
+    });
+    expect(classifyMemoryFilter({ $or: brokenIterable })).toEqual({
       scopeKind: 'global',
       filterShape: 'unknown',
     });
