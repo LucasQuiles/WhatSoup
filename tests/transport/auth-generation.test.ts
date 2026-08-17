@@ -17,14 +17,10 @@
  * reports `no_receipt_written`. That is correct, not a gap — backfilling it from
  * timestamps is the derivation this module refuses.
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, readFileSync, writeFileSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-
-vi.mock('../../src/config.ts', () => ({
-  config: { stateRoot: null, authDir: '/tmp/wa-s3-auth' },
-}));
 
 import {
   resolveAuthGenerationEvidence,
@@ -33,6 +29,7 @@ import {
 import { buildEffectiveClientReceipt } from '../../src/transport/effective-client-receipt.ts';
 
 const ACCOUNT_JID = '15550000002@s.whatsapp.net';
+const AUTH_DIR = '/tmp/wa-s3-auth';
 
 let stateRoot: string;
 
@@ -86,7 +83,7 @@ describe('S3 — writing the generation receipt', () => {
       accountJid: ACCOUNT_JID,
       createdAtMs,
       stateRoot,
-      authDir: '/tmp/wa-s3-auth',
+      authDir: AUTH_DIR,
     });
     expect(receipt).not.toBeNull();
     expect(receipt!.bondCreatedAt).toBe('2026-08-17T04:36:39.000Z');
@@ -108,11 +105,13 @@ describe('S3 — writing the generation receipt', () => {
       accountJid: ACCOUNT_JID,
       createdAtMs: Date.UTC(2026, 5, 29, 10, 17, 48),
       stateRoot,
+      authDir: AUTH_DIR,
     });
     const second = writeAuthGenerationReceipt({
       accountJid: ACCOUNT_JID,
       createdAtMs: Date.UTC(2026, 7, 17, 4, 36, 39),
       stateRoot,
+      authDir: AUTH_DIR,
     });
     expect(first!.generationId).not.toBe(second!.generationId);
     // Same account, so the identity digest is stable across generations.
@@ -120,7 +119,12 @@ describe('S3 — writing the generation receipt', () => {
   });
 
   it('never stores a raw JID', () => {
-    writeAuthGenerationReceipt({ accountJid: ACCOUNT_JID, createdAtMs: Date.now(), stateRoot });
+    writeAuthGenerationReceipt({
+      accountJid: ACCOUNT_JID,
+      createdAtMs: Date.now(),
+      stateRoot,
+      authDir: AUTH_DIR,
+    });
     const raw = readFileSync(join(stateRoot, 'auth-generation.json'), 'utf8');
     expect(raw).not.toContain(ACCOUNT_JID);
     expect(raw).not.toContain('15550000002');
@@ -133,7 +137,7 @@ describe('S3 — writing the generation receipt', () => {
       accountJid: 'unknown',
       createdAtMs: Date.UTC(2026, 7, 17, 4, 36, 39),
       stateRoot,
-      authDir: '/tmp/wa-s3-auth',
+      authDir: AUTH_DIR,
     });
     expect(receipt).toEqual({
       version: 1,
@@ -148,7 +152,12 @@ describe('S3 — writing the generation receipt', () => {
 
   it('returns null instead of throwing when there is nowhere to write', () => {
     expect(
-      writeAuthGenerationReceipt({ accountJid: ACCOUNT_JID, createdAtMs: Date.now(), stateRoot: null }),
+      writeAuthGenerationReceipt({
+        accountJid: ACCOUNT_JID,
+        createdAtMs: Date.now(),
+        stateRoot: null,
+        authDir: AUTH_DIR,
+      }),
     ).toBeNull();
   });
 });

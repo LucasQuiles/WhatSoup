@@ -182,6 +182,8 @@ async function startSocket(): Promise<void> {
         accountJid: rawId ?? null,
         createdAtMs: systemClock.now(),
         source: 'pairing_cli',
+        stateRoot: config.stateRoot,
+        authDir: config.authDir,
         // THE PROCESS-BOUNDARY CARRIER. This CLI exits moments from now; the
         // in-memory effectiveClientRegistry dies with it and the daemon that reads
         // receipts is a different process entirely. Persisting the pairing client

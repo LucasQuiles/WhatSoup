@@ -1414,7 +1414,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         // it was not observed at pairing — never derived from directory birth,
         // creds mtime, or process uptime. Every bond paired before S3 reports
         // `no_receipt_written`, which is the honest answer, not a bug.
-        authGeneration: resolveAuthGenerationEvidence(),
+        authGeneration: resolveAuthGenerationEvidence(config.stateRoot),
       };
       appendPrivateJsonLineSync(eventPath, payload);
     } catch (err) {

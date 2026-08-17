@@ -31,7 +31,6 @@
 // Backfilling the current fleet from timestamps is precisely the derivation this
 // module forbids. An honest `null` is the correct answer for pre-existing bonds.
 
-import { config } from '../config.ts';
 import {
   projectEffectiveClientReceipt,
   type EffectiveClientReceipt,
@@ -115,13 +114,13 @@ export function writeAuthGenerationReceipt(args: {
   accountJid: string | null;
   createdAtMs: number;
   source?: AuthGenerationSource;
-  stateRoot?: string | null;
-  authDir?: string;
+  stateRoot: string | null;
+  authDir: string;
   /** The client that established this generation. Persisted across the process boundary. */
   pairingClient?: EffectiveClientReceipt | null;
 }): AuthGenerationReceipt | null {
   try {
-    const stateRoot = args.stateRoot ?? config.stateRoot ?? null;
+    const stateRoot = args.stateRoot;
     if (!stateRoot) return null;
     const bondCreatedAt = new Date(args.createdAtMs).toISOString();
     const identityDigest =
@@ -134,7 +133,7 @@ export function writeAuthGenerationReceipt(args: {
       bondCreatedAt,
       source: args.source ?? 'pairing_cli',
       identityDigest,
-      authRootHash: shortHash(args.authDir ?? config.authDir, DIGEST_LENGTH),
+      authRootHash: shortHash(args.authDir, DIGEST_LENGTH),
       pairingClient: args.pairingClient ?? null,
     };
     // `v: 1` is the envelope readPrivateV1JournalSync validates.
@@ -198,9 +197,7 @@ const UNAVAILABLE_THREW: AuthGenerationEvidence = Object.freeze({
  * only handler is a `log.warn`, so a throwing receptor would discard the terminal
  * record this programme exists to capture.
  */
-export function resolveAuthGenerationEvidence(
-  stateRoot: string | null = config.stateRoot ?? null,
-): AuthGenerationEvidence {
+export function resolveAuthGenerationEvidence(stateRoot: string | null): AuthGenerationEvidence {
   try {
     if (!stateRoot) return unavailable('no_receipt_written');
     const read = readPrivateV1JournalSync(journalPathFor(stateRoot), JOURNAL_LABEL);
