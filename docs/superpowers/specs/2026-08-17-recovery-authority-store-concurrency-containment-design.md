@@ -1,6 +1,6 @@
 # Recovery-Authority Store Concurrency Containment Design
 
-**Status:** architecture approved; implementation remains gated on written-spec review
+**Status:** architecture and implementation plan approved; implementation in progress
 
 **Canonical design baseline:** `8c66317823f213f49fd6fd254d79bf77790bbca1`
 
@@ -191,14 +191,37 @@ primitive's approved reclaim path fails closed immediately with bounded
 classification. The store never unlinks an unreadable, ambiguous, or live lock
 on its own.
 
-Live-holder contention waits synchronously for at most 2,000 milliseconds,
-polling every 10 milliseconds. The deadline uses a monotonic clock. The wait is
-bounded because an unbounded synchronous wait would wedge the runtime event
-loop and convert a durability repair into a responsiveness outage.
+Live-holder contention uses a cooperative synchronous wait budget of 500
+milliseconds, polling every 10 milliseconds. The deadline uses a monotonic
+clock. The budget bounds time spent waiting on a live holder; total call latency
+can exceed 500 milliseconds because temporary-lock preparation happens before
+the wait and the final filesystem attempt is synchronous. No deterministic wall
+clock ceiling is claimed across filesystem or `fsync` stalls.
+
+The 500-millisecond budget is evidence-based rather than an assumed round
+number. A local 100-transaction measurement of the exact private JSON writer
+reported p50 15.230 ms, p95 49.092 ms, p99 68.973 ms, and max 87.914 ms. That
+leaves several high-percentile transaction windows for an ordinary holder to
+finish while reducing the former proposal's worst-case event-loop stall by
+75%. The observed local envelope is therefore roughly 588 milliseconds (the
+500-millisecond cooperative budget plus the measured maximum transaction), not
+a portability guarantee.
 
 The constants are not operator configuration in this increment. The protected
 transaction consists only of one bounded local read, mutation, fsync, and
-rename; normal contention should settle far below the deadline.
+rename; normal local contention should settle far below the deadline. Any
+future increase requires fresh transaction-cost evidence and an explicit
+responsiveness review.
+
+The prerequisite process-lock change uses one discriminated read result for an
+observed lock: `missing`, `corrupt`, or `valid`. The previous nullable reader
+collapsed a normal release between atomic-link conflict and lock read into
+`corrupt`. A follow-up `existsSync()` check would introduce another race and is
+not an acceptable classifier. Missing retries acquisition, corrupt remains
+fail-closed, and valid follows the existing holder policy. The bounded wait is
+strictly opt-in; callers that omit it retain the existing immediate active,
+stale, and corrupt behavior. Tests create the release/replacement interleavings
+at the real `node:fs` read boundary and add no production-only timing seam.
 
 If the deadline expires:
 
@@ -302,14 +325,18 @@ No retry flag may turn a failing attempt into a passing acceptance run.
 
 The production diff should remain limited to:
 
+- `src/lib/process-lock.ts`, for the opt-in bounded wait and single-read lock
+  classification prerequisite;
 - `src/lib/recovery-authority-store.ts`;
+- the process-lock tests;
 - the existing sequential store tests; and
 - the real-process concurrency test.
 
-The store gains imports from existing `src/lib` primitives; those primitives
-do not require implementation changes. There is no database migration, config
-schema change, launcher change, API change, producer change, consumer change,
-or deployment-path change.
+The store gains imports from existing `src/lib` primitives. The process-lock
+primitive changes only through an optional wait argument and preserves the
+existing public reader's nullable result. No-wait consumers retain their former
+behavior. There is no database migration, config schema change, launcher
+change, producer change, consumer change, or deployment-path change.
 
 All current callers retain the same synchronous `void` mutator API and
 `Set<string>` loader API. Existing marker files remain readable. New files are
@@ -398,6 +425,11 @@ The next design increment owns the issues intentionally excluded here:
 - explicit `loadRecoveryMarkers()` unavailable/corrupt status instead of the
   current empty-set collapse; and
 - central marker-key construction and parsing.
+
+Until that typed status exists, a corrupt or unreadable marker file still makes
+`clearRecoveryMarker()` return without publication. This containment preserves
+that behavior intentionally; it must not be mistaken for successful clear
+authority or rediscovered as a new concurrency defect.
 
 That increment must begin with a read-only fleet inventory and migration design.
 It must not reinterpret this containment's unchanged path as the canonical
