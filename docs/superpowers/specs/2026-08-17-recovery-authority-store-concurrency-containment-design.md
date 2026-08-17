@@ -195,11 +195,12 @@ Live-holder contention uses a cooperative synchronous wait budget of 500
 milliseconds, polling every 10 milliseconds. The deadline uses a monotonic
 clock. The budget bounds time spent waiting on a live holder; total call latency
 can exceed 500 milliseconds because temporary-lock preparation happens before
-the wait and the final filesystem attempt is synchronous. No deterministic wall
-clock ceiling is claimed across filesystem or `fsync` stalls.
+the wait and one terminal atomic acquisition attempt follows deadline expiry.
+If that attempt still observes a live holder, acquisition fails `active`. No
+deterministic wall clock ceiling is claimed across filesystem or `fsync` stalls.
 
 The 500-millisecond budget is evidence-based rather than an assumed round
-number. A local 100-transaction measurement of the exact private JSON writer
+number. A local 1,000-transaction measurement of the exact private JSON writer
 reported p50 15.230 ms, p95 49.092 ms, p99 68.973 ms, and max 87.914 ms. That
 leaves several high-percentile transaction windows for an ordinary holder to
 finish while reducing the former proposal's worst-case event-loop stall by
@@ -313,7 +314,10 @@ only. It cannot replace this behavioral proof.
 
 The finished tests must be shown to discriminate these regressions:
 
-- restore the fixed `.tmp` writer: set/set fails;
+- replace the private writer with the former fixed `.tmp` writer: the POSIX
+  `0600` publication contract fails. Set/set is expected to remain GREEN while
+  the transaction lock remains intact, so it is not evidence for this writer
+  substitution;
 - keep unique temporary files but remove transaction serialization: final
   marker-set conservation fails;
 - bypass the transaction in `clearRecoveryMarker()`: set/clear fails; and

@@ -348,8 +348,8 @@ await new Promise<void>((resolve, reject) => {
     const [clearReceipt, setReceipt] = await Promise.all([clearing.result, adding.result]);
     expectSuccessfulReceipt(clearReceipt);
     expectSuccessfulReceipt(setReceipt);
-    expect(adding.events).toContain('lock-contended');
     expect(readMarkersFromDisk()).toEqual({ 'source-b:inst-b': true });
+    expect(adding.events).toContain('lock-contended');
     expect(orphanStoreArtifacts()).toEqual([]);
   });
 

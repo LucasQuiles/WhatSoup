@@ -10,6 +10,9 @@
 
 **Approved design:** `docs/superpowers/specs/2026-08-17-recovery-authority-store-concurrency-containment-design.md`
 
+**Review status:** execution evidence amended this plan after its prior review.
+Revalidate the amended plan before publication.
+
 ## Global Constraints
 
 - Begin from `fix/recovery-authority-store-concurrency`; preserve the existing untracked falsifier until Task 2 replaces it deliberately.
@@ -75,6 +78,8 @@ Expected: no overlapping open PR; rebase succeeds; the untracked concurrency tes
 In `tests/lib/process-lock.test.ts`, add tests for the exact new contract:
 
 ```ts
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import type {
   AcquireProcessLockOptions,
   ProcessLockHandle,
@@ -90,29 +95,38 @@ function fixedIdentity(token: string, pid: number): AcquireProcessLockOptions {
   };
 }
 
+function withPatchedReadFileSync<T>(
+  replacement: (original: typeof fs.readFileSync) => typeof fs.readFileSync,
+  action: () => T,
+): T {
+  const original = fs.readFileSync;
+  fs.readFileSync = replacement(original);
+  syncBuiltinESMExports();
+  try {
+    return action();
+  } finally {
+    fs.readFileSync = original;
+    syncBuiltinESMExports();
+  }
+}
+
 it('retries when the conflicting lock is released between EEXIST and payload read', () => {
   const lockPath = makeLockPath();
-  const held = acquireProcessLock(lockPath, {
-    pid: 11111,
-    token: 'held',
-    bootId: 'boot-current',
-    isProcessAlive: () => true,
-  });
-
+  const held = acquireProcessLock(lockPath, fixedIdentity('held', 11111));
   let released = false;
-  const acquired = acquireProcessLock(lockPath, {
-    pid: 22222,
-    token: 'next',
-    bootId: 'boot-current',
-    isProcessAlive: () => true,
-    afterLinkConflict: () => {
-      if (!released) {
+
+  const acquired = withPatchedReadFileSync(
+    (original) => ((...args: Parameters<typeof fs.readFileSync>) => {
+      if (String(args[0]) === lockPath && !released) {
         released = true;
         expect(releaseProcessLock(held)).toBe(true);
       }
-    },
-  });
+      return Reflect.apply(original, fs, args);
+    }) as typeof fs.readFileSync,
+    () => acquireProcessLock(lockPath, fixedIdentity('next', 22222)),
+  );
 
+  expect(released).toBe(true);
   expect(acquired.token).toBe('next');
   expect(releaseProcessLock(acquired)).toBe(true);
 });
@@ -121,16 +135,29 @@ it('classifies a replacement holder as active rather than corrupt', () => {
   const lockPath = makeLockPath();
   const held = acquireProcessLock(lockPath, fixedIdentity('held', 11111));
   let replacement: ProcessLockHandle | undefined;
+  let interleaved = false;
 
-  const error = catchError(() => acquireProcessLock(lockPath, {
-    ...fixedIdentity('next', 22222),
-    afterLinkConflict: () => {
-      if (replacement) return;
+  const error = withPatchedReadFileSync(
+    (original) => ((...args: Parameters<typeof fs.readFileSync>) => {
+      if (String(args[0]) !== lockPath || interleaved) {
+        return Reflect.apply(original, fs, args);
+      }
+      interleaved = true;
       expect(releaseProcessLock(held)).toBe(true);
+      let missingError: unknown;
+      try {
+        Reflect.apply(original, fs, args);
+      } catch (error) {
+        missingError = error;
+      }
+      expect((missingError as NodeJS.ErrnoException).code).toBe('ENOENT');
       replacement = acquireProcessLock(lockPath, fixedIdentity('replacement', 33333));
-    },
-  }));
+      throw missingError;
+    }) as typeof fs.readFileSync,
+    () => catchError(() => acquireProcessLock(lockPath, fixedIdentity('next', 22222))),
+  );
 
+  expect(interleaved).toBe(true);
   expect(isProcessLockError(error)).toBe(true);
   if (!isProcessLockError(error)) throw new Error('expected ProcessLockError');
   expect(error.reason).toBe('active');
@@ -197,7 +224,10 @@ PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH" \
   npx vitest run --pool=forks --retry=0 tests/lib/process-lock.test.ts
 ```
 
-Expected: RED because `wait`, `afterLinkConflict`, and the release-race retry do not exist. The old release-race path reports `ProcessLockError('corrupt')`.
+Expected: RED because `wait` and the release-race retry do not exist. The tests
+patch the real `node:fs` read boundary and synchronize named builtin exports;
+they add no production-only timing seam. The old release-race path reports
+`ProcessLockError('corrupt')`.
 
 - [ ] **Step 4: Implement one-temp bounded waiting and release-race distinction**
 
@@ -214,8 +244,6 @@ export interface ProcessLockWaitOptions {
 export interface AcquireProcessLockOptions {
   // existing fields remain
   wait?: ProcessLockWaitOptions;
-  /** Test/diagnostic seam after linkSync reports EEXIST, before payload read. */
-  afterLinkConflict?: () => void;
 }
 ```
 
@@ -227,36 +255,59 @@ function sleepSync(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
-function validatedWait(options: ProcessLockWaitOptions | undefined): {
+interface ValidatedProcessLockWait {
   deadlineMs: number;
   pollMs: number;
   now: () => number;
   sleep: (ms: number) => void;
-} | null {
+}
+
+function validatedWait(options: ProcessLockWaitOptions | undefined): ValidatedProcessLockWait | null {
   if (!options) return null;
-  if (!Number.isFinite(options.timeoutMs) || !Number.isInteger(options.timeoutMs) || options.timeoutMs < 0) {
-    throw new RangeError('process lock wait timeoutMs must be a non-negative integer');
+  if (!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 0) {
+    throw new RangeError('process lock wait timeoutMs must be a non-negative safe integer');
   }
-  if (!Number.isFinite(options.pollMs) || !Number.isInteger(options.pollMs) || options.pollMs < 1) {
-    throw new RangeError('process lock wait pollMs must be a positive integer');
+  if (!Number.isSafeInteger(options.pollMs) || options.pollMs < 1) {
+    throw new RangeError('process lock wait pollMs must be a positive safe integer');
   }
-  const now = options.monotonicNow ?? (() => performance.now());
-  const startedAtMs = now();
+  const rawNow = options.monotonicNow ?? (() => performance.now());
+  const rawSleep = options.sleep ?? sleepSync;
+  const startedAtMs = rawNow();
   if (!Number.isFinite(startedAtMs)) {
     throw new RangeError('process lock wait monotonic clock must return a finite number');
   }
+  const deadlineMs = startedAtMs + options.timeoutMs;
+  let lastObservedMs = startedAtMs;
+  const now = (): number => {
+    const currentMs = rawNow();
+    if (!Number.isFinite(currentMs)) {
+      throw new RangeError('process lock wait monotonic clock must return a finite number');
+    }
+    if (currentMs < lastObservedMs) {
+      throw new RangeError('process lock wait monotonic clock must not move backwards');
+    }
+    lastObservedMs = currentMs;
+    return currentMs;
+  };
   return {
-    deadlineMs: startedAtMs + options.timeoutMs,
+    deadlineMs,
     pollMs: options.pollMs,
     now,
-    sleep: options.sleep ?? sleepSync,
+    sleep: (ms) => {
+      const beforeSleepMs = lastObservedMs;
+      rawSleep(ms);
+      if (now() <= beforeSleepMs) {
+        throw new RangeError('process lock wait monotonic clock must advance after sleep');
+      }
+    },
   };
 }
 ```
 
-Validate every later `wait.now()` result before deadline arithmetic as well; a
-custom clock that becomes non-finite must throw the same `RangeError` rather
-than turning a bounded wait into an unbounded loop. Compute `wait` once after
+Validate every later `wait.now()` result before deadline arithmetic as well. A
+custom clock that becomes non-finite, moves backward, or fails to advance after
+the injected sleep must throw a named `RangeError` rather than turning a bounded
+wait into an unbounded loop. Compute `wait` once after
 the one temp payload has been written and fsynced but before the acquisition
 loop. That preserves the stated policy: at most 500 ms of cooperative waiting
 plus temp preparation and the terminal synchronous attempt. The global
@@ -305,13 +356,12 @@ export function readProcessLockPayload(lockPath: string): ProcessLockPayload | n
 }
 ```
 
-Create the temp payload once, as today. In the existing `EEXIST` branch, call
-the seam and consume that one-read classification:
+Create the temp payload once, as today. In the existing `EEXIST` branch,
+consume that one-read classification:
 
 ```ts
 const wait = validatedWait(options.wait);
 
-options.afterLinkConflict?.();
 const observed = readProcessLockResult(lockPath);
 if (observed.status === 'missing') continue;
 if (observed.status === 'corrupt') throw new ProcessLockError('corrupt', lockPath);
@@ -322,20 +372,25 @@ When the existing holder is live, wait only when the opt-in budget remains, reus
 
 ```ts
 if (isProcessAlive(existing.pid)) {
-  if (wait) {
+  if (wait && !terminalWaitAttempted) {
     const currentMs = wait.now();
-    if (!Number.isFinite(currentMs)) {
-      throw new RangeError('process lock wait monotonic clock must return a finite number');
-    }
     const remainingMs = wait.deadlineMs - currentMs;
     if (remainingMs > 0) {
       wait.sleep(Math.min(wait.pollMs, remainingMs));
       continue;
     }
+    terminalWaitAttempted = true;
+    continue;
   }
   throw new ProcessLockError('active', lockPath, existing.pid, decisionOf(true));
 }
 ```
+
+Initialize `terminalWaitAttempted` to false beside the existing reclaim flags.
+The deadline transition returns to the atomic `linkSync` once; if that terminal
+attempt still observes a live holder it throws `active`. This is required
+because throwing from the pre-deadline holder observation can reject a lock
+that was released before the atomic link was retried.
 
 Do not change behavior for callers that omit `wait`. Do not delete an existing corrupt lock. Keep the outer `finally` cleanup so the one temp payload is removed on success or terminal failure.
 
@@ -916,7 +971,11 @@ Expected: all tests pass without retry or timing warnings.
 
 Perform each mutation one at a time with `apply_patch`, run the named test, capture RED, then apply the exact inverse patch before the next mutation:
 
-1. Replace `writePrivateJsonMarkerSync()` in the transaction with the former fixed `path + '.tmp'` write/rename. Expected: set/set fails with collision or incomplete conservation.
+1. Replace `writePrivateJsonMarkerSync()` in the transaction with the former
+   fixed `path + '.tmp'` write/rename. Expected: set/set remains GREEN because
+   the transaction lock serializes writers; the POSIX `0600` publication test
+   fails (`0644` observed locally). This proves the private-writer contract
+   without falsely claiming a temp collision can occur under an intact lock.
 2. Move lock acquisition after `markersForMutation()`. Expected: set/set or set/clear fails because stale reads occur outside the lock.
 3. Make `clearRecoveryMarker()` bypass `mutateRecoveryMarkers()`. Expected: behavioral set/clear fails and final state loses B.
 
