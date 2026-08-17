@@ -2,7 +2,7 @@ import fs, { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSy
 import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   acquireProcessLock,
   getCurrentBootId,
@@ -540,6 +540,86 @@ describe('process lock bounded waiting', () => {
 
     expect(error).toBeInstanceOf(RangeError);
     expect((error as Error).message).toBe(message);
+    expect(readProcessLockPayload(lockPath)?.token).toBe('held');
+    expect(releaseProcessLock(held)).toBe(true);
+  });
+
+  // Every wait test above injects `monotonicNow`, which left the DEFAULT
+  // performance.now() clock unexercised — and the only production caller of
+  // `wait` (recovery-authority-store.ts) injects nothing. These three pin that
+  // default path under each clock mode the suite can run in.
+  it('classifies real contention as active on the default performance.now() clock', () => {
+    const lockPath = makeLockPath();
+    const held = acquireProcessLock(lockPath, fixedIdentity('held', 11111));
+
+    const error = catchError(() => acquireProcessLock(lockPath, {
+      ...fixedIdentity('next', 22222),
+      wait: { timeoutMs: 40, pollMs: 10 },
+    }));
+
+    expect(isProcessLockError(error)).toBe(true);
+    if (!isProcessLockError(error)) throw new Error('expected process lock error');
+    expect(error.reason).toBe('active');
+    expect(error.existingPid).toBe(11111);
+    expect(readProcessLockPayload(lockPath)?.token).toBe('held');
+    expect(releaseProcessLock(held)).toBe(true);
+  });
+
+  it('keeps the default clock usable when fake timers leave performance real', () => {
+    const lockPath = makeLockPath();
+    const held = acquireProcessLock(lockPath, fixedIdentity('held', 11111));
+
+    vi.useFakeTimers({ toFake: ['setTimeout', 'setInterval', 'Date'] });
+    try {
+      const error = catchError(() => acquireProcessLock(lockPath, {
+        ...fixedIdentity('next', 22222),
+        wait: { timeoutMs: 40, pollMs: 10 },
+      }));
+
+      expect(isProcessLockError(error)).toBe(true);
+      if (!isProcessLockError(error)) throw new Error('expected process lock error');
+      expect(error.reason).toBe('active');
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(readProcessLockPayload(lockPath)?.token).toBe('held');
+    expect(releaseProcessLock(held)).toBe(true);
+  });
+
+  it('degrades to a RangeError when fake timers also freeze performance.now()', () => {
+    // Vitest's default `toFake` is every supported timer except nextTick and
+    // queueMicrotask, so a bare vi.useFakeTimers() freezes performance.now():
+    // Atomics.wait still sleeps for real, but the clock never moves, so the
+    // clock-advance guard fires instead of the ProcessLockError that callers
+    // classify with isProcessLockError(). Recorded deliberately rather than left
+    // to be rediscovered — a suite needing this path must exclude 'performance'
+    // from toFake (test above) or inject wait.monotonicNow.
+    //
+    // If this ever stops throwing, the wait gained a clock-independent bound.
+    // That is a design decision to take explicitly — it would also retire the
+    // 'does not advance after sleep' case above — not a silent improvement.
+    const lockPath = makeLockPath();
+    const held = acquireProcessLock(lockPath, fixedIdentity('held', 11111));
+
+    vi.useFakeTimers();
+    try {
+      const error = catchError(() => acquireProcessLock(lockPath, {
+        ...fixedIdentity('next', 22222),
+        wait: { timeoutMs: 40, pollMs: 10 },
+      }));
+
+      expect(error).toBeInstanceOf(RangeError);
+      expect((error as Error).message).toBe(
+        'process lock wait monotonic clock must advance after sleep',
+      );
+      // The concrete cost: the store's handler cannot recognise this, so a real
+      // `active` contention is reported as lock_unavailable.
+      expect(isProcessLockError(error)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+
     expect(readProcessLockPayload(lockPath)?.token).toBe('held');
     expect(releaseProcessLock(held)).toBe(true);
   });
