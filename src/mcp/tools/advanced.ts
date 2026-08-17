@@ -171,6 +171,22 @@ const advancedConfigs: SockToolConfig<any>[] = [
     schema: z.object({
       msg: z.string().optional().describe('Optional logout message'),
     }),
+    // S5 (bond-revocation programme, 2026-08-17). This is the only WhatSoup
+    // path that intentionally requests removal of its own companion device:
+    // sock.logout() sends an outbound `remove-companion-device
+    // reason=user_initiated` iq, then ends the socket with a locally
+    // constructed loggedOut Boom. Recovering from it needs a physical relink.
+    //
+    // It shipped ungated and was grandfathered "pending per-tool review"
+    // beside read-only tools such as list_chats. The R1 gate is fail-closed by
+    // construction — no authorizer, no actorJid, or a throwing authorizer all
+    // deny — so this flag alone default-disables the call until an instance
+    // installs its admin predicate. Pinned by tests/mcp/logout-gate.test.ts.
+    //
+    // NOTE: this is NOT the path that produced the fleet's seven revocations.
+    // Those arrived as inbound CB:stream:error carrying conflict
+    // type=device_removed; this call cannot produce that node.
+    sensitive: true,
     replayPolicy: 'unsafe',
     externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ msg }, sock) => {

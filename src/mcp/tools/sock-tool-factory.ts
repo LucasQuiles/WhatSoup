@@ -15,6 +15,17 @@ export interface SockToolConfig<T extends z.ZodRawShape> {
   replayPolicy?: 'safe' | 'unsafe' | 'read_only';
   /** D2 external-effect declaration, copied verbatim onto the built ToolDeclaration. */
   externalEffect?: ExternalEffectDeclaration;
+  /**
+   * R1 sensitive-tool flag, copied verbatim onto the built ToolDeclaration.
+   *
+   * Until 2026-08-17 this field did not exist here and `makeSockTool` did not
+   * copy it, which made every tool built through this factory structurally
+   * incapable of being gated — setting `sensitive: true` on a config was
+   * silently discarded rather than rejected, because the config array is typed
+   * `SockToolConfig<any>[]` and excess-property checking does not apply. The
+   * `logout` gate (S5) is the first consumer; see tests/mcp/logout-gate.test.ts.
+   */
+  sensitive?: boolean;
   /** Given parsed params and a live socket, call the sock method and return the result. */
   call: (parsed: z.infer<z.ZodObject<T>>, sock: ExtendedBaileysSocket) => Promise<unknown>;
 }
@@ -35,6 +46,7 @@ export function makeSockTool<T extends z.ZodRawShape>(
     targetMode: config.targetMode ?? 'caller-supplied',
     replayPolicy: config.replayPolicy,
     externalEffect: config.externalEffect,
+    sensitive: config.sensitive,
     handler: async (params) => {
       const parsed = config.schema.parse(params);
       const sock = getSock();
