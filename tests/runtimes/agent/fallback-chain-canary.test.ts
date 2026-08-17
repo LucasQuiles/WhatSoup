@@ -320,11 +320,18 @@ describe('canary-consulted window selection', () => {
       checkedAt: Date.now(),
     });
 
-    const rendered = JSON.stringify(rv.getFallbackState().fallbackChain);
-    expect(rendered).not.toContain('8570bca1f4d34f94cf1');
-    expect(rendered).not.toContain('1310');
-    expect(rendered).not.toContain('evidence');
-    expect(rendered).toContain('quota');
+    // Assert STRUCTURALLY, not by substring: the rendered chain carries a
+    // 13-digit `checkedAt`, so matching a short numeric like '1310' against
+    // the whole JSON would spuriously fail whenever the timestamp happens to
+    // contain those digits.
+    const canary = rv.getFallbackState().fallbackChain[0]?.canary;
+    expect(canary).toBeDefined();
+    expect(Object.keys(canary ?? {}).sort()).toEqual(['checkedAt', 'failureClass', 'status']);
+    expect(canary?.failureClass).toBe('quota');
+    // Belt and braces: the raw tail's distinctive request id must not appear
+    // anywhere in the rendered view (long enough that collision is impossible).
+    expect(JSON.stringify(rv.getFallbackState().fallbackChain))
+      .not.toContain('8570bca1f4d34f94cf1');
   });
 });
 
