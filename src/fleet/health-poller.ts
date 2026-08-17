@@ -104,9 +104,24 @@ const BAILEYS_PROTOCOL_VERSION_RE = /^(\d{1,4})\.(\d{1,6})\.(\d{1,12})$/;
 
 /**
  * Parse a raw protocol-version value into bounded integers, or null when it is
- * anything else. Deliberately strict: only a bare three-part numeric triple is
- * accepted, so free text, phone numbers, and version-like strings carrying
- * extra content are all refused.
+ * anything else. Only a bare three-part numeric triple is accepted, so free
+ * text and version-like strings carrying extra content are refused.
+ *
+ * Acceptance MUST agree with the canonical transport contract in
+ * `src/transport/baileys-version.ts` (`parsePinnedBaileysVersion`), which takes
+ * any three dot-separated safe non-negative integers. An earlier revision added
+ * a digit-shape test here to tell a version from a dotted phone number; that
+ * created a second, disagreeing contract which rejected transport-valid
+ * `2.2413.1` and the documented pin `2.3000.1021` while accepting phone-shaped
+ * `1.41555.50123`. Shape cannot separate the two, so the test is gone. Safety
+ * is instead structural: `pushProtocolVersionEvidence` emits the parsed integer
+ * components as separate fields and never re-renders a dotted numeric run, so
+ * no phone-shaped string can reach the evidence text through this path and no
+ * redaction exception is needed.
+ *
+ * The bounds below are input hygiene for an alert-emission path, not a
+ * classifier: they refuse absurd or oversized input rather than trying to infer
+ * what the value means.
  */
 export function parseBaileysProtocolVersion(value: unknown): BaileysProtocolVersion | null {
   if (typeof value !== 'string') return null;
@@ -125,19 +140,6 @@ export function parseBaileysProtocolVersion(value: unknown): BaileysProtocolVers
   if (major > BAILEYS_VERSION_MAX_MAJOR) return null;
   if (minor > BAILEYS_VERSION_MAX_MINOR) return null;
   if (patch > BAILEYS_VERSION_MAX_PATCH) return null;
-  // A dotted phone number is also three bounded numeric groups: `212.555.0181`
-  // parses as 212/555/181 and would otherwise render unredacted. Today this
-  // only reads a runtime-produced library value, but the parser must be safe
-  // for any caller, so apply the same shape test the Python redactor uses to
-  // separate a version from a dotted phone — a real protocol version carries a
-  // long build segment (>= 5 digits) or more than 15 digits overall, while a
-  // phone is 10-15 digits in short (<= 4 digit) groups. This keeps the two
-  // implementations in agreement, which is the parity the emitting side had
-  // silently lost.
-  const groups = [match[1], match[2], match[3]] as const;
-  const totalDigits = groups.reduce((sum, group) => sum + group.length, 0);
-  const longestGroup = Math.max(...groups.map((group) => group.length));
-  if (totalDigits <= 15 && longestGroup < 5) return null;
   return { major, minor, patch };
 }
 const BEARER_SECRET_RE = /\b(Bearer\s+)[A-Za-z0-9._~+/=-]{12,}/gi;
@@ -1630,14 +1632,23 @@ export class HealthPoller {
   private pushProtocolVersionEvidence(evidence: string[], value: unknown): void {
     const parsed = parseBaileysProtocolVersion(value);
     if (parsed === null) {
-      // Absence is reported, never silently dropped: an investigation must be
-      // able to tell "no version seen" from "version not captured".
-      evidence.push('baileys_protocol_version=unobserved');
+      // Never silently dropped, and never collapsed: an investigation must be
+      // able to tell "the host reported no version" from "the host reported
+      // something we could not parse". A single `unobserved` bucket hid that
+      // difference and made a capture bug look like an absent field.
+      const status = value === undefined || value === null ? 'absent' : 'malformed';
+      evidence.push(`baileys_protocol_version=${status}`);
       return;
     }
-    evidence.push(
-      `baileys_protocol_version=${parsed.major}.${parsed.minor}.${parsed.patch}`,
-    );
+    // Emitted as integer components, deliberately NOT re-joined into a dotted
+    // string. A dotted numeric run in evidence text is indistinguishable from a
+    // phone number to the generic redactor; keeping the components separate
+    // means the value survives redaction on its own structure rather than on a
+    // shape exception. See parseBaileysProtocolVersion for why shape-based
+    // discrimination was removed.
+    evidence.push(`baileys_protocol_version_major=${parsed.major}`);
+    evidence.push(`baileys_protocol_version_minor=${parsed.minor}`);
+    evidence.push(`baileys_protocol_version_patch=${parsed.patch}`);
   }
 
   private pushEvidenceField(evidence: string[], key: string, value: unknown, maxLength = 120): void {
