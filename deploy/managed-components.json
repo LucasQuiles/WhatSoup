@@ -175,9 +175,9 @@
         "template": "deploy/com.whatsoup.reply-guarantee.plist",
         "install_path": "~/Library/LaunchAgents/com.whatsoup.reply-guarantee.plist",
         "schedule": "StartInterval 60s",
-        "run_at_load": true,
+        "run_at_load": false,
         "keep_alive": false,
-        "purpose": "Drains the stuck-replies queue every 60 seconds, ensuring reply-guarantee delivery even if the bot's in-process retry path was interrupted.",
+        "purpose": "Drains hook-local stuck replies and independently observes WAL-backed durable reply obligations every 60 seconds; recovery debt remains advisory while stale open work is operational.",
         "node_pin_required": true,
         "node_pin_note": "Template corrected from origin/main: /usr/bin/env node replaced with pinned absolute path. The ambient Homebrew node tracks major upgrades silently \u2014 see mini7 incident 2026-05-27/2026-06-09 in docs/runbooks/macos-host-setup.md.",
         "probe": "launchctl print gui/$(id -u)/com.whatsoup.reply-guarantee"

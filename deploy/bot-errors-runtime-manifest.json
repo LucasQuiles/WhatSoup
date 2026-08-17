@@ -442,6 +442,17 @@
       ]
     },
     {
+      "path": "deploy/scripts/reply-guarantee-observer.py",
+      "sha256": "b8ebd1ff2f06932495f192ef83dfb79a5a8a4d65dd8cba86ade108c7f1f939ca",
+      "mustContain": [
+        "sqlite-uri-mode-ro",
+        "reply-guarantee-active-breach",
+        "reply-guarantee-recovery-debt",
+        "reply-guarantee-observer",
+        "broad failed-row replay is unsafe"
+      ]
+    },
+    {
       "path": "deploy/scripts/lib/queue_age.py",
       "sha256": "cc96f2b9738a27a570f03415129360df86e88ac8ef4f7456164958713b30631a",
       "mustContain": [
@@ -468,9 +479,10 @@
     },
     {
       "path": "deploy/scripts/lib/state_files.py",
-      "sha256": "be1c46610812c11b0bc3f5058be32bcb718117d7f2779858aa38114452d060e3",
+      "sha256": "30d6857e8344b3099ad0f01a9c91fde61600dba4811494ab5d099c99846bac7d",
       "mustContain": [
-        "Single source of truth for bot-errors state filenames"
+        "Single source of truth for bot-errors state filenames",
+        "REPLY_GUARANTEE_OBSERVER_STATE"
       ]
     },
     {
@@ -516,7 +528,7 @@
     },
     {
       "path": "src/lib/fault-taxonomy-registry.json",
-      "sha256": "40a65d99d7856fe2c5e9284ce478456b706aabf7043b3fb8c50492bf2cf0a2f9",
+      "sha256": "69bf1f103a4df72b96ed2bfd3a9e6373feb6fdc501b8a23e8ad72a0274f9dbeb",
       "mustContain": [
         "whatsoup-fault-taxonomy-registry-v3",
         "runtimeAgentHealthSignals",

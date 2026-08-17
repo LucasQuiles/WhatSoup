@@ -948,6 +948,21 @@
       "owner": "src/runtimes/agent/turn-finalizer.ts",
       "test": "tests/runtimes/agent/turn-finalizer.test.ts"
     },
+    "reply-guarantee-active-breach": {
+      "disposition": "operational_stale_reply_work_requires_evidence_preserving_repair",
+      "owner": "deploy/scripts/reply-guarantee-observer.py",
+      "test": "deploy/scripts/tests/test_reply_guarantee_observer.py"
+    },
+    "reply-guarantee-observer": {
+      "disposition": "probe_inconclusive_requires_user_context_schema_or_database_repair",
+      "owner": "deploy/scripts/reply-guarantee-observer.py",
+      "test": "deploy/scripts/tests/test_reply_guarantee_observer.py"
+    },
+    "reply-guarantee-recovery-debt": {
+      "disposition": "advisory_historical_reply_debt_requires_operator_audit_no_automatic_replay",
+      "owner": "deploy/scripts/reply-guarantee-observer.py",
+      "test": "deploy/scripts/tests/test_reply_guarantee_observer.py"
+    },
     "health_body_degraded": {
       "disposition": "cause_aware_hold_class_held_while_connected_else_visible_outage",
       "owner": "deploy/scripts/bot-errors-dispatcher.py",

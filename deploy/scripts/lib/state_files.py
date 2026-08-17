@@ -26,6 +26,7 @@ DEADMAN_STATE = "deadman-state.json"
 TOOL_INVENTORY_STATE = "tool-inventory-state.json"
 GUI_SESSION_MONITOR_STATE = "gui-session-monitor-state.json"
 RUNTIME_STALENESS_STATE = "runtime-staleness-state.json"
+REPLY_GUARANTEE_OBSERVER_STATE = "reply-guarantee-observer-state.json"
 
 # Sentinel component (written under fleet-sentinel root; read cross-component by watchdog)
 SENTINEL_HEARTBEAT = "sentinel-heartbeat.json"
