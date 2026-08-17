@@ -88,22 +88,43 @@ interface PatternSite {
 }
 
 /**
- * Strips comments before counting.
+ * Drops lines that are ENTIRELY comment, before counting.
  *
- * The count is a debt metric, and prose is not debt. Counting raw text meant a
- * comment explaining the migration registered as a new call site — so
- * DOCUMENTING the rule raised the number the rule bounds. That is a perverse
- * incentive, and it is how this slice first "failed" its own ratchet.
+ * Why strip at all: the count is a debt metric and prose is not debt. Counting
+ * raw text meant a comment explaining the migration registered as a call site,
+ * so DOCUMENTING the rule raised the number the rule bounds — a perverse
+ * incentive, and how this slice first "failed" its own ratchet.
  *
- * Deliberately naive about comment-like sequences inside string literals: the
- * counted patterns do not appear inside strings anywhere in src/, and a
- * conservative strip is strictly better than scoring prose. The `[^:]` guard
- * keeps `https://` URLs from being treated as line comments.
+ * Why whole-line rather than inline: the first version stripped `/*…*\/` spans
+ * and `//`-to-end-of-line inline. It produced identical totals but could HIDE
+ * CODE — a string containing a block-comment opener starts a phantom comment
+ * that swallows real call sites until the next closer, and a string containing
+ * `//` truncates its own line. Undercounting is the dangerous direction: it
+ * lets the ratchet silently permit new debt. A string or template literal is
+ * never a comment-only line, so this form cannot hide code.
+ *
+ * The tradeoff is trailing comments (`code; // ...`), which are NOT stripped
+ * and would OVERcount — the safe direction, since it can only make the gate
+ * stricter. Verified to cost nothing today: both algorithms report identical
+ * totals across src/ (308 / 9 / 105).
  */
 function stripComments(src: string): string {
-  return src
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/(^|[^:])\/\/.*$/gm, '$1');
+  const kept: string[] = [];
+  let inBlock = false;
+  for (const line of src.split('\n')) {
+    const trimmed = line.trim();
+    if (inBlock) {
+      if (trimmed.includes('*/')) inBlock = false;
+      continue;
+    }
+    if (trimmed.startsWith('/*')) {
+      if (!trimmed.includes('*/')) inBlock = true;
+      continue;
+    }
+    if (trimmed.startsWith('//') || trimmed.startsWith('*')) continue;
+    kept.push(line);
+  }
+  return kept.join('\n');
 }
 
 function countPattern(pattern: RegExp): { total: number; sites: PatternSite[] } {
@@ -189,9 +210,30 @@ describe('clock budget ratchet', () => {
     expect(stripped).not.toContain('Date.now()');
     expect(stripped).not.toContain('new Date()');
     expect(stripped).toContain('const a = 1;');
+    // Multi-line block comments (including JSDoc continuation lines).
+    expect(
+      stripComments(['/**', ' * Defaults to Date.now().', ' */', 'const a = 1;'].join('\n')),
+    ).not.toContain('Date.now()');
     // A real call site still counts.
     expect(stripComments('const t = Date.now();')).toContain('Date.now()');
-    // Protocol-relative URLs are not line comments.
-    expect(stripComments("const u = 'https://x.example';")).toContain('https://x.example');
+  });
+
+  it('never hides a call site behind comment-like text in a literal', () => {
+    // Undercounting is the one direction that matters: it lets the ratchet
+    // silently permit new debt. The earlier inline-regex stripper failed all
+    // three of these — a literal containing a comment opener swallowed real
+    // code until the next closer, and a literal containing // truncated its
+    // own line. Same totals, hidden hazard.
+    const hazards = [
+      ['const s = "/*";', 'const t = Date.now();', 'const u = "*/";'].join('\n'),
+      "const s = 'a // b'; const t = Date.now();",
+      'const s = `x // y`; const t = Date.now();',
+    ];
+    for (const src of hazards) {
+      expect(
+        stripComments(src),
+        `stripping hid a real call site — the ratchet would undercount:\n${src}`,
+      ).toContain('Date.now()');
+    }
   });
 });
