@@ -518,7 +518,69 @@ describe('DurabilityEngine — session checkpoints', () => {
         // Reliability 4.1 dual counters: lifetime terminalized count rides
         // alongside the active count; zero here — nothing expired yet.
         expiredCount: 0,
+        // Both fixture rows are stamped 2026-06-10, far past the stranded
+        // bound relative to now, so both count as stranded rather than
+        // in-flight. This is the distinction the raw unresolvedCount cannot
+        // make.
+        strandedCount: 2,
       });
+    });
+
+    // The distinction unresolvedCount cannot make. A live census on
+    // 2026-08-16 found an instance reporting unresolvedCount 45 of which only
+    // 35 were genuinely stuck; the rest were hours old and resolved normally
+    // (measured resolution latencies on that fleet spanned 0 to ~23.8h).
+    // Alerting on the raw count therefore over-reports on any busy instance.
+    it('counts only admissions past the stranded bound, not fresh in-flight ones', () => {
+      const insert = (targetId: number, transitionAt: string) => db.raw.prepare(`
+        INSERT INTO completed_delivery_identity_admissions (
+          target_kind, target_id, state, reason, attempts, owner, next_action,
+          last_transition_at
+        ) VALUES ('checkpoint', ?, 'quarantined', 'missing', 1, 'fresh_inbound',
+                  'fresh_inbound', ?)
+      `).run(targetId, transitionAt);
+
+      // Two rows well past the bound, two created "just now".
+      insert(201, '2026-06-10 09:00:00');
+      insert(202, '2026-06-10 10:00:00');
+      const fresh = new Date().toISOString().replace('T', ' ').slice(0, 19);
+      insert(203, fresh);
+      insert(204, fresh);
+
+      const health = engine.getCompletedDeliveryIdentityAdmissionHealth();
+      expect(health.unresolvedCount).toBe(4);
+      expect(health.strandedCount).toBe(2);
+      // The two fresh rows are pending, NOT debt — that is the whole point.
+      expect(health.unresolvedCount - health.strandedCount).toBe(2);
+    });
+
+    it('reports zero stranded when every admission is inside the bound', () => {
+      const fresh = new Date().toISOString().replace('T', ' ').slice(0, 19);
+      db.raw.prepare(`
+        INSERT INTO completed_delivery_identity_admissions (
+          target_kind, target_id, state, reason, attempts, owner, next_action,
+          last_transition_at
+        ) VALUES ('checkpoint', 205, 'quarantined', 'missing', 1, 'fresh_inbound',
+                  'fresh_inbound', ?)
+      `).run(fresh);
+
+      const health = engine.getCompletedDeliveryIdentityAdmissionHealth();
+      expect(health.unresolvedCount).toBe(1);
+      expect(health.strandedCount).toBe(0);
+    });
+
+    it('honours an explicit stranded bound so drills can widen or narrow it', () => {
+      db.raw.prepare(`
+        INSERT INTO completed_delivery_identity_admissions (
+          target_kind, target_id, state, reason, attempts, owner, next_action,
+          last_transition_at
+        ) VALUES ('checkpoint', 206, 'quarantined', 'missing', 1, 'fresh_inbound',
+                  'fresh_inbound', datetime('now', '-3 hours'))
+      `).run();
+
+      // A 3h-old row: stranded under a 1h bound, in-flight under a 24h bound.
+      expect(engine.getCompletedDeliveryIdentityAdmissionHealth(3600).strandedCount).toBe(1);
+      expect(engine.getCompletedDeliveryIdentityAdmissionHealth(86_400).strandedCount).toBe(0);
     });
   });
 

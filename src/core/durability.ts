@@ -160,6 +160,25 @@ export interface CompletedDeliveryIdentityAdmissionHealth {
    * active count only.
    */
   expiredCount: number;
+  /**
+   * Of `unresolvedCount`, how many are old enough that self-resolution is no
+   * longer plausible.
+   *
+   * `unresolvedCount` alone cannot distinguish debt that is genuinely stuck
+   * from rows created minutes ago that will clear on the next inbound. A live
+   * census on 2026-08-16 measured this directly: one instance reported
+   * `unresolvedCount: 45`, but only 35 predated the observed resolution
+   * window — the other 10 were hours old and resolved normally, while a peer
+   * instance's rows resolved with latencies spanning 0 to 1428 minutes. An
+   * alert keyed on the raw count therefore over-reports on every busy
+   * instance, and an operator cannot tell which number needs action.
+   *
+   * This is the actionable middle of a three-stage lifecycle:
+   * in-flight (< bound) -> STRANDED (bound .. expiry) -> expired (terminalized).
+   * Without it the only signals are "immediately, including noise" or "after
+   * the seven-day expiry", which is far too late to act on.
+   */
+  strandedCount: number;
 }
 
 /**
@@ -176,6 +195,26 @@ export const IDENTITY_ADMISSION_EXPIRY_SECONDS = (() => {
   const raw = process.env['WHATSOUP_IDENTITY_ADMISSION_EXPIRY_SECONDS'];
   const parsed = raw === undefined ? NaN : Number(raw);
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 7 * 86_400;
+})();
+
+/**
+ * Age past which a still-quarantined admission is reported as STRANDED — old
+ * enough that self-resolution via `fresh_inbound` is no longer plausible.
+ *
+ * Empirically grounded rather than picked: a 2026-08-16 census of an instance
+ * with 87 admissions (45 quarantined / 42 resolved) measured genuine
+ * resolution latencies spanning 0 to 1428 minutes (~23.8h). Forty-eight hours
+ * is ~2x that observed maximum, so a row crossing it has outlived every
+ * resolution actually seen in production and is reported as stuck rather than
+ * pending. Deliberately far BELOW `IDENTITY_ADMISSION_EXPIRY_SECONDS` (7d):
+ * stranded is the early actionable warning, expiry is the terminal sweep.
+ * Env-overridable for drills.
+ */
+export const IDENTITY_ADMISSION_STRANDED_SECONDS = (() => {
+  // env-allowed: operational bound, resolved once at module load
+  const raw = process.env['WHATSOUP_IDENTITY_ADMISSION_STRANDED_SECONDS'];
+  const parsed = raw === undefined ? NaN : Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 2 * 86_400;
 })();
 
 export interface ExpireIdentityAdmissionsResult {
@@ -1171,7 +1210,11 @@ export class DurabilityEngine {
                  WHEN COUNT(*) FILTER (WHERE state = 'quarantined') > 0 THEN 'fresh_inbound'
                  ELSE NULL
                END AS next_action,
-               COUNT(*) FILTER (WHERE state = 'expired') AS expired_count
+               COUNT(*) FILTER (WHERE state = 'expired') AS expired_count,
+               COUNT(*) FILTER (
+                 WHERE state = 'quarantined'
+                   AND last_transition_at < datetime('now', ?)
+               ) AS stranded_count
         FROM completed_delivery_identity_admissions
         WHERE state IN ('quarantined', 'expired')
       `),
@@ -3202,13 +3245,20 @@ export class DurabilityEngine {
     return counts;
   }
 
-  getCompletedDeliveryIdentityAdmissionHealth(): CompletedDeliveryIdentityAdmissionHealth {
-    const row = this.statements.getCompletedDeliveryIdentityAdmissionHealth.get() as {
+  getCompletedDeliveryIdentityAdmissionHealth(
+    strandedBoundSeconds: number = IDENTITY_ADMISSION_STRANDED_SECONDS,
+  ): CompletedDeliveryIdentityAdmissionHealth {
+    // SQLite modifier form; negative offset selects rows OLDER than the bound.
+    const strandedModifier = `-${Math.max(0, Math.floor(strandedBoundSeconds))} seconds`;
+    const row = this.statements.getCompletedDeliveryIdentityAdmissionHealth.get(
+      strandedModifier,
+    ) as {
       unresolved_count: number | bigint;
       oldest_transition_at: string | null;
       maximum_attempts: number | bigint | null;
       next_action: string | null;
       expired_count: number | bigint;
+      stranded_count: number | bigint;
     };
     const nextAction = row.next_action === 'fresh_inbound' || row.next_action === 'operator'
       ? row.next_action
@@ -3219,6 +3269,7 @@ export class DurabilityEngine {
       maximumAttempts: row.maximum_attempts === null ? 0 : Number(row.maximum_attempts),
       nextAction,
       expiredCount: Number(row.expired_count),
+      strandedCount: Number(row.stranded_count),
     };
   }
 
