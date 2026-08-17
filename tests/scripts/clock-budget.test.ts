@@ -22,8 +22,12 @@
  * thunk) to systemClock.now(); live count dropped 329→328.
  *
  * Slice (2026-08-17, #2200): migrated memory/consolidation-scheduler.ts (8
- * call sites) to an injected Clock defaulting to systemClock, and threaded
- * that clock into runConsolidation so the run report is stamped from it too.
+ * syntactic call sites, 7 of them effective — ConsolidationRunStore
+ * .requestCancellation takes its nowMs as `_nowMs` and discards it, so one
+ * migrated site feeds a value nothing reads) to an injected Clock defaulting
+ * to systemClock, and threaded that clock into runConsolidation so the run
+ * report — and the completion receipt derived from it — are stamped from it
+ * too.
  * Chosen as constructor injection rather than a bare systemClock.now() swap
  * because #2200 names these tests as "already-flaky": injection is what makes
  * the scheduler drivable to a known instant, which a direct swap would not
@@ -40,6 +44,14 @@
  *      bare `new Date()` wall-clock reads, all live in src/ while the budget
  *      read clean. Each now has its own budget, so the debt cannot move
  *      sideways while the headline number falls.
+ *
+ * Deliberately NOT bounded, with reasons rather than by omission:
+ *   - `new Date(explicitMs)` — derives from an argument, not the wall clock.
+ *   - `Date.parse(str)` (52 in src/) — parses a supplied string; the value
+ *     comes from the caller, so it inherits whatever clock produced it.
+ *   - `performance.now()` (10 in src/) — a monotonic duration timer, not a
+ *     wall-clock reading, and not substitutable by systemClock.
+ * Bounding these would flag correct code and train people to ignore the gate.
  *
  * Companion: #2200 slice 1.
  */

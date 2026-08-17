@@ -142,6 +142,48 @@ describe('MemoryConsolidationScheduler', () => {
     await scheduler.stop();
   });
 
+  it('stamps a COMPLETED run receipt from the injected clock (#2200)', async () => {
+    // The completion path is the scheduler's primary observable, and it is
+    // stamped separately from the abandon path: finalizeRun receives
+    // Date.parse(report.completedAt), so the receipt inherits whatever time
+    // source produced the report. Asserting only the abandon path (above)
+    // would leave the path that actually matters unproven — a falsifier
+    // narrower than the claim it appears to support.
+    const PINNED_MS = 1_700_000_000_000;
+    const scheduler = createScheduler({ clock: fakeClock(PINNED_MS) });
+
+    await scheduler.runOnce('manual');
+
+    const row = db.raw.prepare(`
+      SELECT status, attempted_at, completed_at, success_at
+      FROM memory_consolidation_runs
+      ORDER BY attempted_at DESC, run_id DESC LIMIT 1
+    `).get() as {
+      status: string;
+      attempted_at: number;
+      completed_at: number;
+      success_at: number | null;
+    };
+
+    // 'no_work' is the terminal status for an empty corpus — the finalize path
+    // that stamps the receipt is identical.
+    expect(row.status).toBe('no_work');
+    expect(
+      {
+        attempted_at: row.attempted_at,
+        completed_at: row.completed_at,
+        success_at: row.success_at,
+      },
+      'completion receipt carries wall-clock time, so the clock is not threaded through the completion path',
+    ).toEqual({
+      attempted_at: PINNED_MS,
+      completed_at: PINNED_MS,
+      success_at: PINNED_MS,
+    });
+
+    await scheduler.stop();
+  });
+
   it('abandons interrupted receipts, runs immediately, and keeps the interval alive', async () => {
     const interrupted = store.beginRun({
       source: 'manual',

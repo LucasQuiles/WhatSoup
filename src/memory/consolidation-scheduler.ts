@@ -61,6 +61,15 @@ export class MemoryConsolidationScheduler {
     store: ConsolidationRunStore,
     // Injectable so timing behaviour can be driven to a known instant (#2200).
     // Optional and defaulted, so this slice changes no existing call site.
+    //
+    // Scope of the guarantee: this clock governs TIMESTAMPS. Fencing still runs
+    // on real setTimeout/setInterval, so the two can disagree under test — a
+    // suite that pins the clock while advancing fake timers can observe a
+    // fenced run with durationMs 0, or a deadline that never fires when only
+    // the clock advances. Not reachable in production, where systemClock and
+    // the timer wheel read the same wall clock. Routing fencing through the
+    // clock as well is a larger change than this slice, and is deliberately
+    // left out rather than half-done.
     clock: Clock = systemClock,
   ) {
     this.pinecone = pinecone;
