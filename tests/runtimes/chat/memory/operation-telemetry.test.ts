@@ -103,6 +103,109 @@ describe('memory operation telemetry', () => {
     ).toEqual({ scopeKind: 'global', filterShape: 'unknown' });
   });
 
+  it('names the consolidation eligibility filter instead of bucketing it as unknown', () => {
+    // The exact shape consolidation source selection sends provider-side
+    // (#2569): exclude prior promotion outputs, keep qualifier-less records.
+    expect(
+      classifyMemoryFilter({
+        $or: [
+          { confidence_qualifier: { $exists: false } },
+          { confidence_qualifier: { $ne: 'consolidated' } },
+        ],
+      }),
+    ).toEqual({ scopeKind: 'global', filterShape: 'qualifier_exclusion' });
+    // Arm order is a caller detail, not a different filter.
+    expect(
+      classifyMemoryFilter({
+        $or: [
+          { confidence_qualifier: { $ne: 'consolidated' } },
+          { confidence_qualifier: { $exists: false } },
+        ],
+      }),
+    ).toEqual({ scopeKind: 'global', filterShape: 'qualifier_exclusion' });
+    // Operand-blind: the classifier keys on the OPERATOR, never the excluded
+    // value. Renaming the qualifier must not silently demote the shape back to
+    // 'unknown', and no filter value may reach the envelope.
+    expect(
+      classifyMemoryFilter({
+        $or: [
+          { confidence_qualifier: { $exists: false } },
+          {
+            confidence_qualifier: {
+              $ne: 'SYNTHETIC_PRIVATE_QUALIFIER_MARKER',
+            },
+          },
+        ],
+      }),
+    ).toEqual({ scopeKind: 'global', filterShape: 'qualifier_exclusion' });
+  });
+
+  it('keeps unaudited disjunctions in the unknown alarm bucket', () => {
+    // 'unknown' means "a filter shape reached the provider that this allowlist
+    // has never audited". A generic $or walker would let unreviewed filters
+    // describe themselves as reviewed — the inverse of what the bucket is for.
+    // Every near-miss below must therefore stay unknown.
+    const nearMisses: unknown[] = [
+      // A different field entirely.
+      { $or: [{ source: { $exists: false } }, { source: { $ne: 'x' } }] },
+      // Arms disagree on which field they constrain.
+      {
+        $or: [
+          { confidence_qualifier: { $exists: false } },
+          { source: { $ne: 'x' } },
+        ],
+      },
+      // Presence arm asserts the wrong polarity — this excludes legacy records
+      // rather than keeping them, the defect #2569 exists to prevent.
+      {
+        $or: [
+          { confidence_qualifier: { $exists: true } },
+          { confidence_qualifier: { $ne: 'x' } },
+        ],
+      },
+      // Equality, not exclusion: selects prior outputs instead of skipping them.
+      {
+        $or: [
+          { confidence_qualifier: { $exists: false } },
+          { confidence_qualifier: { $eq: 'x' } },
+        ],
+      },
+      // An extra arm on another field widens the match past what was reviewed.
+      {
+        $or: [
+          { confidence_qualifier: { $exists: false } },
+          { confidence_qualifier: { $ne: 'x' } },
+          { source: { $ne: 'y' } },
+        ],
+      },
+      // A third arm on the SAME field is a different filter — it excludes two
+      // qualifiers, not one. This case pins the arity bound specifically: the
+      // field check above cannot reject it, so only the two-arm bound can.
+      {
+        $or: [
+          { confidence_qualifier: { $exists: false } },
+          { confidence_qualifier: { $ne: 'x' } },
+          { confidence_qualifier: { $ne: 'y' } },
+        ],
+      },
+      // Both arms identical — no exclusion is actually applied.
+      {
+        $or: [
+          { confidence_qualifier: { $exists: false } },
+          { confidence_qualifier: { $exists: false } },
+        ],
+      },
+      // $or carrying a non-array.
+      { $or: { confidence_qualifier: { $exists: false } } },
+    ];
+    for (const filters of nearMisses) {
+      expect(classifyMemoryFilter(filters), JSON.stringify(filters)).toEqual({
+        scopeKind: 'global',
+        filterShape: 'unknown',
+      });
+    }
+  });
+
   it('buckets scores into bounded aggregate counts', () => {
     expect(bucketMemoryScores([0.9, 0.75, 0.74, 0.4, 0.39, Number.NaN])).toEqual(
       {

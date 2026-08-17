@@ -60,6 +60,7 @@ export type MemoryFilterShape =
   | 'sender_eq'
   | 'memory_type_eq'
   | 'source_ne'
+  | 'qualifier_exclusion'
   | 'mixed'
   | 'unknown';
 
@@ -259,6 +260,71 @@ function hasExactOperator(value: unknown, operator: '$eq' | '$ne'): boolean {
   }
 }
 
+const QUALIFIER_FIELD = 'confidence_qualifier';
+
+function isAbsenceAssertion(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+  try {
+    const keys = Object.keys(value);
+    if (keys.length !== 1 || keys[0] !== '$exists') {
+      return false;
+    }
+  } catch {
+    return false;
+  }
+  return readBoundedField(value, '$exists') === false;
+}
+
+/**
+ * Recognizes the one audited disjunction: consolidation's source-eligibility
+ * filter, which skips prior promotion outputs while keeping records that carry
+ * no qualifier at all (#2569).
+ *
+ * Deliberately pinned to that exact shape rather than walking `$or` generically.
+ * This module is a privacy allowlist, and 'unknown' is its alarm bucket — it
+ * means a filter shape reached the provider that nobody has audited. A general
+ * `$or` walker would let unreviewed filters describe themselves as reviewed,
+ * the inverse of what the bucket exists for.
+ *
+ * Matching is operand-blind: it keys on the operators, never the excluded
+ * value. Renaming the qualifier cannot silently demote the shape back to
+ * 'unknown', and no filter value can reach the telemetry envelope.
+ */
+function isQualifierExclusion(value: unknown): boolean {
+  if (!Array.isArray(value) || value.length !== 2) {
+    return false;
+  }
+  let sawAbsent = false;
+  let sawExclusion = false;
+  for (const arm of value) {
+    if (typeof arm !== 'object' || arm === null) {
+      return false;
+    }
+    let armKeys: string[];
+    try {
+      armKeys = Object.keys(arm);
+    } catch {
+      return false;
+    }
+    if (armKeys.length !== 1 || armKeys[0] !== QUALIFIER_FIELD) {
+      return false;
+    }
+    const condition = readBoundedField(arm, QUALIFIER_FIELD);
+    if (hasExactOperator(condition, '$ne')) {
+      sawExclusion = true;
+      continue;
+    }
+    if (isAbsenceAssertion(condition)) {
+      sawAbsent = true;
+      continue;
+    }
+    return false;
+  }
+  return sawAbsent && sawExclusion;
+}
+
 export function classifyMemoryFilter(filters: unknown): {
   scopeKind: MemoryScopeKind;
   filterShape: MemoryFilterShape;
@@ -294,6 +360,11 @@ export function classifyMemoryFilter(filters: unknown): {
   }
   if (key === 'source' && hasExactOperator(value, '$ne')) {
     return { scopeKind: 'entity', filterShape: 'source_ne' };
+  }
+  // Scope stays 'global': the eligibility filter excludes a class of records,
+  // it does not narrow the search to a chat, sender, or entity.
+  if (key === '$or' && isQualifierExclusion(value)) {
+    return { scopeKind: 'global', filterShape: 'qualifier_exclusion' };
   }
   return { scopeKind: 'global', filterShape: 'unknown' };
 }
