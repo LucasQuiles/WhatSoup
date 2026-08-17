@@ -23,6 +23,7 @@ import {
   effectiveClientRegistry,
   resolveEffectiveClientEvidence,
 } from './effective-client-receipt.ts';
+import { resolveAuthGenerationEvidence } from './auth-generation.ts';
 import { isRecord } from '../lib/type-guards.ts';
 import { createTypingStartGuard, type TypingStartGuard } from '../lib/typing-start-guard.ts';
 import { appendPrivateJsonLineSync, readFreshMarkerSync, writePrivateJsonMarkerSync } from '../lib/private-fs.ts';
@@ -884,10 +885,14 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         },
         generateHighQualityLinkPreview: config.generateHighQualityLinkPreview,
       };
+      // Record AFTER makeWASocket returns. Recording first would log an ATTEMPTED
+      // configuration as an effective client whenever the constructor throws, which
+      // is a false positive in the one direction that matters: a bond event would
+      // then name a client that never existed.
+      const sock = makeWASocket(socketConfig);
       effectiveClientRegistry.record(
         buildEffectiveClientReceipt(socketConfig, resolvedVersion, 'connection'),
       );
-      const sock = makeWASocket(socketConfig);
 
       // PR-F: install the outbound governor at the socket seam by IN-PLACE
       // override of sock.sendMessage (SS1 — NOT a Proxy: the guards below and in
@@ -1405,6 +1410,11 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         // text, which #2386 confines before the durable operator plane. Cannot
         // throw, for the same reason ownerEvidence cannot (see above).
         effectiveClient: resolveEffectiveClientEvidence(),
+        // S3: WHICH generation died. `bondCreatedAt` is null with a reason whenever
+        // it was not observed at pairing — never derived from directory birth,
+        // creds mtime, or process uptime. Every bond paired before S3 reports
+        // `no_receipt_written`, which is the honest answer, not a bug.
+        authGeneration: resolveAuthGenerationEvidence(),
       };
       appendPrivateJsonLineSync(eventPath, payload);
     } catch (err) {

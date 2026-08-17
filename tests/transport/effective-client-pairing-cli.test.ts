@@ -14,10 +14,12 @@
  * existing auth-cli tests do, and then asserts the registry was populated by the
  * real code path.
  *
- * It also pins the divergence that motivates S2: the pairing CLI hard-codes
- * `generateHighQualityLinkPreview: false` while `connection.ts` passes the
- * configured value, so a bond paired here and run there has presented at least one
- * different client property with nothing recording it.
+ * It also pins the FORM of divergence that motivates S2: the pairing CLI hard-codes
+ * `generateHighQualityLinkPreview: false` while `connection.ts` passes the configured
+ * value. The two are independently maintained and can drift on any field with nothing
+ * detecting it — though for `q` the observed values agree, since the runtime config
+ * defaults that field to false too. The gap being closed is the missing record, not a
+ * demonstrated difference.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -160,6 +162,19 @@ describe('S2 — pairing CLI effective-client receipt', () => {
     // Silently inherited library defaults, visible as such.
     expect(receipt!.syncFullHistory).toEqual({ value: true, provenance: 'library_default' });
     expect(receipt!.markOnlineOnConnect).toEqual({ value: true, provenance: 'library_default' });
+  });
+
+  it('records NOTHING when socket construction fails', async () => {
+    // The ordering falsifier. Recording before makeWASocket() returns would log an
+    // ATTEMPTED configuration as an effective client, so a later bond event would
+    // name a client that never existed. Both orderings agree on the happy path —
+    // only a throwing constructor separates them.
+    mocks.makeWASocket.mockImplementation(() => {
+      throw new Error('socket construction failed');
+    });
+    const receipt = await runPairingCliAndReadReceipt();
+    expect(mocks.makeWASocket, 'construction must have been attempted').toHaveBeenCalledTimes(1);
+    expect(receipt, 'a failed construction must not leave an effective-client receipt').toBeNull();
   });
 
   it('carries honest provenance — a failed fetch is not reported as latest', async () => {

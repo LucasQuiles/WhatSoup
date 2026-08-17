@@ -10,7 +10,7 @@
 // client behaviour, which is why "the tuple did not change" refuted less than it
 // appeared to.
 //
-// TWO INDEPENDENT SOCKET PATHS construct a client, and they do not agree:
+// TWO INDEPENDENT SOCKET PATHS construct a client, and nothing reconciles them:
 //
 //   src/transport/connection.ts  the runtime connection
 //   src/transport/auth.ts        the pairing CLI
@@ -20,9 +20,14 @@
 // hard-codes `false`. Neither passes `browser`, `syncFullHistory`, or
 // `markOnlineOnConnect`, so both silently inherit the library defaults — which in
 // the installed dependency are `Browsers.macOS('Chrome')`, `syncFullHistory: true`
-// and `markOnlineOnConnect: true` (`lib/Defaults/index.js`). A bond paired through
-// the CLI and then run by the daemon has therefore presented at least one
-// materially different client property, and nothing recorded it.
+// and `markOnlineOnConnect: true` (`lib/Defaults/index.js`).
+//
+// PRECISELY: the two paths are independently maintained and CAN diverge on any
+// field, with nothing detecting it. They are not currently known to diverge for
+// `q` — the runtime config defaults `generateHighQualityLinkPreview` to false, `q`
+// does not override it, and the pairing CLI passes false, so on the one field that
+// differs in FORM the observed values AGREE. The defect is the unreconciled
+// structure plus the total absence of a record, not a demonstrated difference.
 //
 // DESIGN RULE, learned from the sock-tool factory defect fixed earlier the same
 // day: the receipt is derived FROM the very object handed to `makeWASocket`, never
@@ -32,6 +37,12 @@
 //   const socketConfig = { version, logger, auth, ... };
 //   const receipt = buildEffectiveClientReceipt(socketConfig, resolved, 'connection');
 //   const sock = makeWASocket(socketConfig);
+//
+// SCOPE — what this receipt does NOT record. The design also named the Baileys
+// package/build hash, automatic session recreation, and transaction settings. None
+// of those are captured here, so this is a PARTIAL client identity, not the whole
+// of it. Treat an equal receipt across two connections as "these recorded fields
+// matched", never as "the clients were identical".
 //
 // PRIVACY: this records CONFIGURATION, not credentials. `auth` is never read
 // beyond noting whether it was supplied. Nothing here can carry key material, a

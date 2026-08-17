@@ -30,6 +30,7 @@ import {
   buildEffectiveClientReceipt,
   effectiveClientRegistry,
 } from './effective-client-receipt.ts';
+import { writeAuthGenerationReceipt } from './auth-generation.ts';
 import { errorMessage } from '../lib/error-message.ts';
 import { classifyPairNumber, maskPairingCode, pairingEmissionLine, pairingGate } from './pairing.ts';
 
@@ -109,10 +110,17 @@ async function startSocket(): Promise<void> {
     },
     generateHighQualityLinkPreview: false,
   };
-  effectiveClientRegistry.record(
-    buildEffectiveClientReceipt(socketConfig, resolvedVersion, 'pairing_cli'),
-  );
+  // Recorded AFTER construction — see the note at the connection.ts call site. The
+  // in-memory record is only useful within THIS short-lived CLI process; the value
+  // that has to survive is persisted with the generation receipt below, once
+  // pairing actually succeeds.
   const sock = makeWASocket(socketConfig);
+  const pairingClientReceipt = buildEffectiveClientReceipt(
+    socketConfig,
+    resolvedVersion,
+    'pairing_cli',
+  );
+  effectiveClientRegistry.record(pairingClientReceipt);
 
   // #2165: `saveCreds()` rejects on a real write failure (full disk, EACCES).
   // Passing it straight to `.on` discards the returned promise, so that
@@ -164,6 +172,31 @@ async function startSocket(): Promise<void> {
         process.exit(1);
         return;
       }
+      // S3: a bond generation now exists, and this is the only moment its creation
+      // instant is OBSERVED rather than derivable. Written after saveCreds()
+      // resolved — a generation whose credentials never landed is not a
+      // generation — and before the fleet activation signal below. Never throws:
+      // pairing must not fail because bookkeeping did.
+      const generation = writeAuthGenerationReceipt({
+        accountJid: rawId ?? null,
+        createdAtMs: Date.now(),
+        source: 'pairing_cli',
+        // THE PROCESS-BOUNDARY CARRIER. This CLI exits moments from now; the
+        // in-memory effectiveClientRegistry dies with it and the daemon that reads
+        // receipts is a different process entirely. Persisting the pairing client
+        // here, under the generation it established, is what actually crosses the
+        // boundary.
+        pairingClient: pairingClientReceipt,
+      });
+      if (generation) {
+        log.info({ generationId: generation.generationId, bondCreatedAt: generation.bondCreatedAt },
+          'recorded auth generation receipt');
+      } else {
+        // Not fatal, but it must not pass silently: without this receipt the next
+        // terminal event can only report bond age as unavailable.
+        log.warn('could not record auth generation receipt; bond age will be unavailable');
+      }
+
       // Fleet activation treats this as a persisted credential success signal.
       // It must not start the managed instance while a failed save is still
       // possible, because the instance would otherwise race its auth material.

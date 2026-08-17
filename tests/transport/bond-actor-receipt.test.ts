@@ -319,6 +319,25 @@ describe('S1 — the receipt is joined onto the persisted bond event', () => {
     });
   });
 
+  it('carries the S3 auth-generation receipt, null-with-reason for a pre-S3 bond', () => {
+    // Every bond in the fleet today lands on `no_receipt_written`, because the
+    // receipt is created at pairing. That is the honest answer — backfilling it
+    // from the auth directory's mtime or process uptime is named as a failure
+    // criterion in the plan, and the unowned quarantine artifacts make it tempting.
+    mockConfig.dataRoot = DATA_ROOT;
+    const manager = new ConnectionManager();
+    (manager as unknown as {
+      recordCredentialLifecycle: (event: string, detail?: unknown) => void;
+    }).recordCredentialLifecycle('device_bond_lost');
+    const events = readBondEvents();
+    const gen = events[events.length - 1].authGeneration as Record<string, unknown>;
+    expect(gen['status']).toBe('unavailable');
+    expect(gen['reason']).toBe('no_receipt_written');
+    // The field must be present and explicitly null, not absent — an absent field
+    // reads as "not implemented" and invites a derived value later.
+    expect(gen).toHaveProperty('bondCreatedAt', null);
+  });
+
   it('still writes the bond event when the receipt resolver throws', () => {
     // THE fault-isolation test. persistBondEvent builds its whole payload inside
     // one try/catch whose only handler is a log.warn, so an exception raised
