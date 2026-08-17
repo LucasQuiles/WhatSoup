@@ -10,7 +10,31 @@ const STORE = fileURLToPath(new URL('../../src/lib/recovery-authority-store.ts',
 const MARKER_FILE = 'recovery-authority.json';
 const CHILD_TIMEOUT_MS = 10_000;
 const CHILD_KILL_GRACE_MS = 1_000;
-const LOCAL_OPERATION_ENVELOPE_MS = 588;
+/** The store's bounded lock wait (RECOVERY_AUTHORITY_LOCK_WAIT_MS in recovery-authority-store.ts). */
+const STORE_LOCK_WAIT_MS = 500;
+
+/**
+ * Scheduling allowance on top of the nominal wait.
+ *
+ * `operationElapsedMs` is measured inside the child around the store call only,
+ * so process boot is NOT included. What is included is the bounded wait itself:
+ * roughly fifty sequential 10ms Atomics.wait sleeps (pollMs = 10). Every wake-up
+ * can overshoot when the host is oversubscribed — this suite alone fans out 16
+ * children on a 14-core box — and that overshoot accumulates across all fifty
+ * polls.
+ *
+ * The previous ceiling was 588ms: the 500ms wait plus an 88ms allowance taken
+ * from a max-of-1000-iterations measurement of a single uncontended operation.
+ * That allowance is smaller than one run's accumulated poll jitter, so the
+ * assertion was non-deterministic — 3 pass / 2 fail over five identical runs of
+ * the same test on the same commit, observing 594.3, 636.1, 719.0 and 852.4ms.
+ *
+ * This bound keeps the assertion's actual purpose — proving the wait is BOUNDED
+ * rather than unbounded or hung — while declining to be a microbenchmark. A
+ * genuinely stuck operation still fails via the child watchdog (CHILD_TIMEOUT_MS).
+ */
+const SCHEDULING_ALLOWANCE_MS = 1_500;
+const LOCAL_OPERATION_ENVELOPE_MS = STORE_LOCK_WAIT_MS + SCHEDULING_ALLOWANCE_MS;
 
 interface ChildReceipt {
   code: number | null;
@@ -30,7 +54,10 @@ interface RunningChild {
 }
 
 interface ChildWatchdogOptions {
+  /** Bounds the child's OPERATION, measured from readiness (see spawnBoundedChild). */
   timeoutMs?: number;
+  /** Bounds fixture setup — process boot and the readiness handshake — independently. */
+  readyTimeoutMs?: number;
   killGraceMs?: number;
   stateDirOverride?: string;
 }
@@ -88,6 +115,7 @@ function terminateChildTree(child: ChildProcess, signal: NodeJS.Signals): void {
 
 function spawnBoundedChild(file: string, options: ChildWatchdogOptions = {}): RunningChild {
   const timeoutMs = options.timeoutMs ?? CHILD_TIMEOUT_MS;
+  const readyTimeoutMs = options.readyTimeoutMs ?? CHILD_TIMEOUT_MS;
   const killGraceMs = options.killGraceMs ?? CHILD_KILL_GRACE_MS;
   const child = spawn(process.execPath, [
     '--disable-warning=ExperimentalWarning',
@@ -107,11 +135,16 @@ function spawnBoundedChild(file: string, options: ChildWatchdogOptions = {}): Ru
   const events: string[] = [];
   let readyResolve!: () => void;
   const readySignal = new Promise<void>((resolve) => { readyResolve = resolve; });
+  // Assigned once the watchdog exists; see the re-arm rationale in the result promise.
+  let rearmWatchdogFromReadiness: () => void = () => undefined;
 
   child.stdout!.on('data', (chunk) => { stdout += String(chunk); });
   child.stderr!.on('data', (chunk) => { stderr += String(chunk); });
   child.on('message', (message) => {
-    if (message === 'ready') readyResolve();
+    if (message === 'ready') {
+      rearmWatchdogFromReadiness();
+      readyResolve();
+    }
     if (typeof message === 'string') events.push(message);
     if (
       typeof message === 'object'
@@ -131,11 +164,28 @@ function spawnBoundedChild(file: string, options: ChildWatchdogOptions = {}): Ru
     let timedOut = false;
     let forceKill: NodeJS.Timeout | undefined;
     let finished = false;
-    const watchdog = setTimeout(() => {
+    const trip = (): void => {
       timedOut = true;
       terminateChildTree(child, 'SIGTERM');
       forceKill = setTimeout(() => terminateChildTree(child, 'SIGKILL'), killGraceMs);
-    }, timeoutMs);
+    };
+    // Two separate budgets. At spawn the timer bounds FIXTURE SETUP — process
+    // boot and the readiness handshake — using readyTimeoutMs, so a child that
+    // never boots is still reaped. On readiness it is re-armed with timeoutMs,
+    // which bounds the OPERATION alone.
+    //
+    // Arming the operation budget at spawn conflated the two: a test that
+    // deliberately sets a short operation budget (the SIGTERM-reap case uses
+    // 100ms) killed the child while Node was still starting, so the child died
+    // from a SIGTERM it had not yet installed a handler for and the test failed
+    // its own fixture ("child exited before readiness") instead of exercising
+    // the reap path it exists to prove.
+    let watchdog = setTimeout(trip, readyTimeoutMs);
+    rearmWatchdogFromReadiness = (): void => {
+      if (finished) return;
+      clearTimeout(watchdog);
+      watchdog = setTimeout(trip, timeoutMs);
+    };
     const finish = (receipt: ChildReceipt): void => {
       if (finished) return;
       finished = true;
@@ -167,7 +217,7 @@ function spawnBoundedChild(file: string, options: ChildWatchdogOptions = {}): Ru
         throw new Error(`child exited before readiness: ${JSON.stringify(receipt)}`);
       }),
     ]),
-    timeoutMs,
+    readyTimeoutMs,
     'child readiness',
   );
 

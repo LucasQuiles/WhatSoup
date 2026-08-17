@@ -25,6 +25,47 @@ Revalidate the amended plan before publication.
 - The local starvation threshold is 250 ms. One isolated stall does not alone set the 20-sample p95 starvation signal, but repeated marker mutations can. The implementation must expose timeout/failure evidence and must not claim it eliminates event-loop risk.
 - A 16-process probe of a naive retry loop produced 1/16 success at 100 ms, 4/16 at 250 ms, and 13/16 at 500 ms. At 1,000–2,000 ms, nine children failed because `acquireProcessLock()` classified a normal release-between-`EEXIST`-and-read race as `corrupt`. Task 1 fixes that prerequisite before marker-store locking.
 - If the improved one-temp wait cannot produce 16/16 successful writers and all 16 markers in 10 consecutive runs within the 500 ms wait ceiling, stop. Do not ship synchronous containment and do not increase the ceiling; reopen the approved design to choose typed path separation, per-marker files, or another non-global serialization architecture.
+
+  > **⛔ HARD STOP TRIGGERED — 2026-08-17. This lane does not ship.**
+  >
+  > Observed on `1b48a3fe2` after two harness defects were corrected: **15/16 writers**,
+  > with one child exiting code 1 on `ProcessLockError: process lock active` having waited
+  > the full 500 ms — **deterministic across 3/3 runs**. That is below the 16/16 bar, so the
+  > condition above applies verbatim: the ceiling was not raised and synchronous containment
+  > is not shipped.
+  >
+  > Consistent with, not contradicted by, the 13/16-at-500 ms probe recorded above.
+  >
+  > *Why raising the ceiling would not have helped:* the lock is polling-based with no FIFO
+  > or starvation protection. Each handoff costs up to a full `pollMs` (10 ms) before any
+  > waiter observes the release, and an individual waiter can lose the race repeatedly. The
+  > dominant cost is handoff latency × N, not the critical section, so the pressure grows
+  > with contention and a larger ceiling only defers the same starvation.
+  >
+  > *Evidence limit:* the measurement host is loaded (load 43–48 across 14 cores) and cannot
+  > be made quiet, so the 10-consecutive-run acceptance was not executed. An idle-host pass
+  > would demonstrate favourable scheduling, not the architecture's concurrency guarantee
+  > under realistic contention.
+  >
+  > **Decision (owner, 2026-08-17): reopen the design as one durable file per marker.**
+  > Supporting evidence: the on-disk shape is not an external contract — all 12 production
+  > consumers use only `loadRecoveryMarkers` / `setRecoveryMarker` / `clearRecoveryMarker`,
+  > and no production code, script, or runbook reads `recovery-authority.json` directly
+  > (only test fixtures do). Markers are independent by key (`<source>:<botName>`) with no
+  > cross-key invariant, and consumers consume the result as `.has(key)`. A single object
+  > therefore imposes **false sharing**: the 16-way race writes 16 *distinct* keys that
+  > serialize on one lock for no semantic reason. Per-marker files make that contention
+  > structurally impossible rather than merely wider, and `writeAtomicPrivateFileSync`
+  > already supplies per-file atomicity.
+  >
+  > This supersedes the "Preserve … the truthy-key JSON object schema" and "do not migrate
+  > markers" constraints above **for the successor lane only**; both remained in force for
+  > every commit on this branch.
+  >
+  > Carried forward to the successor lane: `loadRecoveryMarkers()` becomes a directory
+  > enumeration; a one-time read-both migration path is required; test fixtures that write
+  > the aggregate object need updating; and the 2,000 ms test allowance below is retained
+  > for now and revisited there.
 - Every child process must have a watchdog. Timeout, signal, malformed receipt, masked exit, partial run, or empty output is inconclusive and cannot authorize GREEN.
 - Use Node 24.15.0 locally. Node 25 evidence comes from GitHub quality jobs on the exact published SHA.
 - No push, PR creation, workflow rerun, merge, deployment, service restart, or live marker mutation is authorized by Tasks 1-4.
