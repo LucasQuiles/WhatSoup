@@ -22,6 +22,16 @@ import Path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
 import { createChildLogger } from '../logger.ts';
+import {
+  forceEnsurePrivateDirectorySync,
+  writePrivateJsonMarkerSync,
+} from './private-fs.ts';
+import {
+  acquireProcessLock,
+  isProcessLockError,
+  releaseProcessLock,
+  type ProcessLockHandle,
+} from './process-lock.ts';
 
 /**
  * Derive the state root directory for this instance.
@@ -51,6 +61,8 @@ function state_root(): string {
 }
 
 const MARKER_FILE = 'recovery-authority.json';
+const RECOVERY_AUTHORITY_LOCK_WAIT_MS = 500;
+const RECOVERY_AUTHORITY_LOCK_POLL_MS = 10;
 const log = createChildLogger('recovery-authority-store');
 
 function markerPath(): string {
@@ -60,18 +72,6 @@ function markerPath(): string {
 /** Parse markers from an already-read JSON object, returning truthy-key set. */
 function parseMarkerJson(raw: Record<string, unknown>): Set<string> {
   return new Set(Object.keys(raw).filter((k) => raw[k] === true));
-}
-
-/**
- * Atomically write a markers map to disk via temp-file + rename.
- * Uses a `.tmp` suffix in the same directory to keep the rename on the same
- * filesystem, guaranteeing atomic replacement.
- */
-function atomicWriteMarkers(markers: Map<string, boolean>): void {
-  const path = markerPath();
-  const tmp = path + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(Object.fromEntries(markers), null, 2));
-  fs.renameSync(tmp, path);
 }
 
 /** Restore the set of source keys that had an alert when the process died. */
@@ -92,48 +92,110 @@ export function loadRecoveryMarkers(): Set<string> {
   return new Set();
 }
 
-/** Write a marker indicating *source* has an active alert. */
-export function setRecoveryMarker(source: string): void {
+type MarkerReadFailure = 'empty' | 'skip';
+
+function markersForMutation(path: string, onFailure: MarkerReadFailure): Map<string, boolean> | null {
   const markers = new Map<string, boolean>();
   try {
-    const raw: unknown = JSON.parse(fs.readFileSync(markerPath(), 'utf-8'));
+    const raw: unknown = JSON.parse(fs.readFileSync(path, 'utf-8'));
     if (typeof raw === 'object' && raw !== null && !Array.isArray(raw)) {
       const parsed = parseMarkerJson(raw as Record<string, unknown>);
       for (const k of parsed) markers.set(k, true);
     }
   } catch {
-    // intentional: marker file missing or unreadable — start fresh; the
-    // atomic write below re-establishes it from this call's marker alone.
+    return onFailure === 'empty' ? markers : null;
   }
-  markers.set(source, true);
-  atomicWriteMarkers(markers);
+  return markers;
 }
 
-/**
- * Remove a marker (alert cleared). No-op if the marker never existed.
- *
- * When the set becomes empty this writes an empty object instead of deleting
- * the file, closing the delete-on-empty race: a concurrent writer that adds a
- * marker between our read and our write will still have its data preserved by
- * the atomic write (last-writer-wins on the same file).
- */
-export function clearRecoveryMarker(source: string): void {
-  const markers = new Map<string, boolean>();
+function mutationErrorCode(error: unknown): string {
+  return typeof error === 'object' && error !== null && 'code' in error
+    ? String((error as NodeJS.ErrnoException).code ?? 'unknown')
+    : 'unknown';
+}
+
+function mutateRecoveryMarkers(operation: 'set' | 'clear', source: string): void {
+  const startedAtMs = performance.now();
+  const path = markerPath();
+
   try {
-    const raw: unknown = JSON.parse(fs.readFileSync(markerPath(), 'utf-8'));
-    if (typeof raw === 'object' && raw !== null && !Array.isArray(raw)) {
-      const parsed = parseMarkerJson(raw as Record<string, unknown>);
-      for (const k of parsed) markers.set(k, true);
+    forceEnsurePrivateDirectorySync(Path.dirname(path), 'recovery authority state');
+  } catch (error) {
+    log.warn({
+      operation,
+      reason: 'mutation_failed',
+      code: mutationErrorCode(error),
+      elapsedMs: Math.round(performance.now() - startedAtMs),
+    }, 'recovery authority mutation failed');
+    throw error;
+  }
+
+  let lock: ProcessLockHandle;
+  try {
+    lock = acquireProcessLock(`${path}.lock`, {
+      reclaimDeadSameBoot: true,
+      wait: {
+        timeoutMs: RECOVERY_AUTHORITY_LOCK_WAIT_MS,
+        pollMs: RECOVERY_AUTHORITY_LOCK_POLL_MS,
+      },
+    });
+  } catch (error) {
+    const reason = isProcessLockError(error)
+      ? (error.reason === 'active' ? 'lock_timeout' : `lock_${error.reason}`)
+      : 'lock_unavailable';
+    log.warn({
+      operation,
+      reason,
+      elapsedMs: Math.round(performance.now() - startedAtMs),
+    }, 'recovery authority mutation not accepted');
+    throw error;
+  }
+
+  let mutationFailed = false;
+  try {
+    const markers = markersForMutation(path, operation === 'set' ? 'empty' : 'skip');
+    if (markers === null) return;
+    if (operation === 'set') markers.set(source, true);
+    else markers.delete(source);
+    writePrivateJsonMarkerSync(path, Object.fromEntries(markers), {
+      label: 'recovery authority markers',
+    });
+  } catch (error) {
+    mutationFailed = true;
+    log.warn({
+      operation,
+      reason: 'mutation_failed',
+      code: mutationErrorCode(error),
+      elapsedMs: Math.round(performance.now() - startedAtMs),
+    }, 'recovery authority mutation failed');
+    throw error;
+  } finally {
+    try {
+      if (!releaseProcessLock(lock)) {
+        log.error({
+          operation,
+          reason: 'lock_release_lost_ownership',
+          elapsedMs: Math.round(performance.now() - startedAtMs),
+        }, 'recovery authority lock release lost ownership');
+      }
+    } catch (error) {
+      log.error({
+        operation,
+        reason: 'lock_release_failed',
+        code: mutationErrorCode(error),
+        elapsedMs: Math.round(performance.now() - startedAtMs),
+      }, 'recovery authority lock release failed');
+      if (!mutationFailed) throw error;
     }
-  } catch {
-    // intentional: marker file missing or unreadable — there is nothing to
-    // clear, and writing an empty object here would clobber a concurrent set.
-    return;
   }
-  markers.delete(source);
-  if (markers.size === 0) {
-    atomicWriteMarkers(markers); // writes {} — never unlink the file.
-  } else {
-    atomicWriteMarkers(markers);
-  }
+}
+
+/** Write a marker indicating *source* has an active alert. */
+export function setRecoveryMarker(source: string): void {
+  mutateRecoveryMarkers('set', source);
+}
+
+/** Remove a marker indicating *source* no longer has an active alert. */
+export function clearRecoveryMarker(source: string): void {
+  mutateRecoveryMarkers('clear', source);
 }
