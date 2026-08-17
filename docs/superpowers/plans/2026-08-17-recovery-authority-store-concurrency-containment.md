@@ -1015,7 +1015,73 @@ git commit -m "test(reliability): distinguish recovery marker concurrency"
 
 **Files:**
 
-- Verify only; no expected production edits.
+- `tests/setup/bot-errors-vitest-isolation.ts` — per-test marker-store isolation (see the amendment below).
+- `tests/lib/process-lock.test.ts` — default-clock contention coverage (see the amendment below).
+- No production edits: `src/` is untouched by Task 4.
+
+**Amendment (2026-08-17).** Task 4 was written verify-only. Step 1 surfaced a real,
+reproducible consumer regression that required two test-side corrections, recorded here so
+the final blast radius is not audited as unexplained extra change.
+
+- **Failure census.** Step 1 on `145b2d62b` failed **6 files / 22 tests / 1 error**, in two
+  classes that must not be conflated:
+  - **6 genuine marker-leak failures** — health-poller ×1, connection-auth-bond-edge ×3,
+    reconnect ×2 (`no alert emitted`, `called 0 times`, `expected true to be false`). These
+    are what the isolation correction repairs.
+  - **16 load-induced timeouts** — heal ×6, durability-edge ×6, poller-past-due-alert ×4
+    (`Test/Hook timed out in 10000ms`). All 16 pass **unchanged** at raised timeouts under
+    *higher* load (heal 51/51, durability-edge 46/46, poller-past-due-alert 10/10), and the
+    same file on the same commit ran 289.6s in-batch vs 84.9s alone, so they were never
+    evidence about this branch.
+
+  The isolation correction is credited with **6**, never 22.
+
+- **Root cause.** This setup file *names* `BOT_ERRORS_STATE_DIR` but never creates it, so
+  every pre-repair marker write failed ENOENT and was swallowed. Once the repaired store
+  creates its own directory (`recovery-authority-store.ts:122`), markers persist and leak
+  between tests inside one worker; consumers restore alert ownership at construction
+  (`connection.ts:738`, `scheduler.ts:144`, `health-poller.ts:809`) and suppress an alert a
+  later test expects. Proven **intra-file**, not cross-file: the file alone still fails 3,
+  while the single failing test alone passes. The suite was green because the store was
+  broken.
+
+- **Correction: named-not-created per-test isolation.** A `beforeEach` points
+  `BOT_ERRORS_STATE_DIR` at a sequence-keyed path under the already-owned `isolatedHome`.
+  The directory is **named, not created** — the store materialises it on first write — so
+  no per-test `mkdtemp` is added and cleanup rides the existing ownership-token-guarded
+  teardown plus its `process.once('exit')` fallback. No vitest internal (`ctx.task.id`) is
+  relied on. Marker keys, `state_root()`, and every production API are unchanged.
+
+- **Default-clock coverage.** `acquireProcessLock`'s `wait` defaults its clock to
+  `performance.now()`, and every pre-existing wait test injected `monotonicNow`, leaving
+  the default path — the only one the store uses — unexercised in-process. Three cases now
+  pin it: real contention → `ProcessLockError('active')`; fake timers excluding
+  `performance` → the same; bare `vi.useFakeTimers()` → the deliberately specified
+  `RangeError`, with `isProcessLockError() === false` recorded as its concrete cost.
+  Store-level real-clock contention was **already** covered by
+  `tests/lib/recovery-authority-store-concurrency.test.ts:356` (child process, real timers,
+  500–588ms envelope), so this adds the fake-timer mode only.
+
+- **Retained contract.** The clock-advance `RangeError` is deliberate and pinned at
+  `tests/lib/process-lock.test.ts:521-525`. Replacing it with accumulated-sleep accounting
+  would retire a tested contract and is **deferred to its own design decision**, not taken
+  in this lane.
+
+**Expanded final blast radius** (Task 4 adds the last two entries):
+
+- `docs/publication-audit.md`
+- `docs/superpowers/plans/2026-08-17-recovery-authority-store-concurrency-containment.md`
+- `docs/superpowers/specs/2026-08-17-recovery-authority-store-concurrency-containment-design.md`
+- `src/lib/process-lock.ts`
+- `src/lib/recovery-authority-store.ts`
+- `tests/lib/recovery-authority-store.test.ts`
+- `tests/lib/recovery-authority-store-concurrency.test.ts`
+- `tests/lib/process-lock.test.ts`
+- `tests/setup/bot-errors-vitest-isolation.ts`
+
+Unchanged: configuration, migrations, launchers, recovery-marker consumers, marker-key
+construction, state-root selection, public API signatures, and `loadRecoveryMarkers()`
+failure semantics.
 
 **Interfaces:**
 

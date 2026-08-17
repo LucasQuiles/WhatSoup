@@ -1,4 +1,4 @@
-import { afterAll } from 'vitest';
+import { afterAll, beforeEach } from 'vitest';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, relative, sep } from 'node:path';
 import {
@@ -98,3 +98,26 @@ process.env['BOT_ERRORS_STATE_DIR'] = join(
   String(process.pid),
   'state',
 );
+
+// Per-TEST marker-store isolation.
+//
+// The recovery-authority store persists alert markers under
+// BOT_ERRORS_STATE_DIR, and consumers restore alert ownership from them at
+// construction (connection.ts:738, scheduler.ts:144, health-poller.ts:809).
+// A worker-wide directory therefore lets an early test's marker suppress a
+// later test's expected alert — an order-dependent false green that only
+// surfaced once the store learned to create its own directory. The worker-level
+// path above stays as the import-time default; every test then gets its own.
+//
+// Named, not created: the store materialises the directory on first write, so
+// tests that never touch markers cost nothing and this adds no per-test mkdtemp
+// or cleanup obligation. The path sits under the owned isolatedHome, so the
+// existing ownership-token-guarded teardown — including the process-exit
+// fallback for bailed workers — removes every one of them.
+const perTestMarkerRoot = join(isolatedHome, '.local', 'state', 'whatsoup-test-markers');
+let perTestMarkerSeq = 0;
+
+beforeEach(() => {
+  perTestMarkerSeq += 1;
+  process.env['BOT_ERRORS_STATE_DIR'] = join(perTestMarkerRoot, String(perTestMarkerSeq), 'state');
+});
