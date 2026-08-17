@@ -21,6 +21,14 @@
  * timing-math call site — createInboundDebouncer default clock object now
  * thunk) to systemClock.now(); live count dropped 329→328.
  *
+ * Slice (2026-08-17, #2200): migrated memory/consolidation-scheduler.ts (8
+ * call sites) to an injected Clock defaulting to systemClock; live count
+ * dropped 328→320. This clears the whole src/memory/ subtree — it now has
+ * zero raw Date.now() sites. Chosen as constructor injection rather than a
+ * bare systemClock.now() swap because #2200 names these tests as
+ * "already-flaky": injection is what makes the scheduler drivable to a known
+ * instant, which a direct swap would not have achieved.
+ *
  * Companion: #2200 slice 1.
  */
 import { readdirSync, readFileSync } from 'node:fs';
@@ -34,7 +42,7 @@ const srcRoot = resolve(repoRoot, 'src');
 
 // Ratchet ceiling: the count may only stay the same or decrease.
 // Lower this constant when a migration slice removes Date.now() call sites.
-const CLOCK_BUDGET = 328;
+const CLOCK_BUDGET = 320;
 
 // src/lib/clock.ts is the ONE file allowed to call Date.now() (it wraps it).
 const EXEMPT_FILE = 'src/lib/clock.ts';
