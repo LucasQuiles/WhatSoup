@@ -148,12 +148,22 @@ describe('TurnRecoverySupervisor — BRICK-LAB-shaped regression', () => {
     budgetMs = 10_000,
     stepMs = 50,
   ): Promise<void> {
-    for (let elapsed = 0; elapsed <= budgetMs; elapsed += stepMs) {
+    // Advance at most `budgetMs` in total. The final step is clamped to the
+    // remainder so the helper cannot overshoot its own stated bound for a
+    // `stepMs` that does not divide `budgetMs` — a helper that advertises a
+    // limit and then exceeds it is the same class of lie this suite exists to
+    // remove.
+    let advancedMs = 0;
+    while (advancedMs < budgetMs) {
       if (condition()) return;
-      await vi.advanceTimersByTimeAsync(stepMs);
+      const step = Math.min(stepMs, budgetMs - advancedMs);
+      await vi.advanceTimersByTimeAsync(step);
+      advancedMs += step;
     }
     if (condition()) return;
-    throw new Error(`${what} did not occur within ${budgetMs}ms of fake time`);
+    throw new Error(
+      `${what} did not occur within ${budgetMs}ms of fake time (advanced ${advancedMs}ms)`,
+    );
   }
 
   /**
@@ -262,6 +272,30 @@ describe('TurnRecoverySupervisor — BRICK-LAB-shaped regression', () => {
       throw new Error('Runtime turn scope is blocked by outstanding durable recovery');
     }
   }
+
+  it('advanceUntil never advances past the budget it advertises, for any step size', async () => {
+    vi.useFakeTimers();
+    try {
+      // A step that does NOT divide the budget is the case an `elapsed <= budget`
+      // loop gets wrong: it takes one step too many and overshoots the bound it
+      // just claimed in its own error message.
+      const start = Date.now();
+      let thrown: Error | null = null;
+      await advanceUntil(() => false, 'never-satisfied condition', 1_000, 300)
+        .catch((err: Error) => { thrown = err; });
+      const advanced = Date.now() - start;
+
+      expect(thrown).not.toBeNull();
+      expect(thrown!.message).toContain('never-satisfied condition');
+      expect(advanced).toBeLessThanOrEqual(1_000);
+
+      // And it must actually exhaust the budget rather than give up early —
+      // otherwise "not observed" would be indistinguishable from "not waited".
+      expect(advanced).toBe(1_000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
   it('claims and replays the crashed source exactly once while four followers stay blocked, then flips admission open on completion — no duplicate replay dispatch', async () => {
     const { jobId, conversationKey, deliveryJid, sourceInboundSeq } = crashOneSourceTurn();
@@ -560,9 +594,14 @@ describe('TurnRecoverySupervisor — BRICK-LAB-shaped regression', () => {
       const supervisor = new TurnRecoverySupervisor({
         instanceName: 'brick-instance',
         durability: () => durability,
-        // leaseSeconds=3 -> renewal interval = max(1000, 1500) = 1500ms, so
-        // the first renewal fires with 1500ms of margin before the 3000ms
-        // lease would otherwise expire.
+        // leaseSeconds=3 requests a 3000ms lease, but do NOT read the
+        // schedule off that nominal figure: the store records the expiry with
+        // SQLite's `datetime('now', ?)`, which truncates to whole seconds, so
+        // the lease actually held is up to ~1s shorter (measured 2773ms on one
+        // local run). Production schedules the first renewal at half the
+        // RECORDED remaining time, so the real margin varies run to run.
+        // `leaseDeadlines()` reads that recorded value; assert against it
+        // rather than against 3000/1500.
         leaseSeconds: 3,
         freshOwnerIdentity: (): TurnRecoveryOwnerIdentity => ({
           logicalTurnId: 'brick-recovery-owner-lease',
