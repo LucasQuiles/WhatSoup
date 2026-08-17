@@ -1155,7 +1155,7 @@ describe('pre-selection eligibility filtering (#2569)', () => {
     // sit in it.
     expect(
       classifyMemoryFilter(filters),
-      'a changed eligibility filter must be re-classified in src/lib/memory-operation-telemetry.ts, not merely re-baselined on the assertion above',
+      'a changed filter STRUCTURE must be re-classified in src/lib/memory-operation-telemetry.ts, not merely re-baselined on the assertion above (an operand-only change is caught there instead, since classification is operand-blind)',
     ).toEqual({ scopeKind: 'global', filterShape: 'qualifier_exclusion' });
   });
 

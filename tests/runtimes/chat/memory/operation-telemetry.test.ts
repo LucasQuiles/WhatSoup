@@ -222,6 +222,39 @@ describe('memory operation telemetry', () => {
     }
   });
 
+  it('does not let a polluted prototype forge the audited shape', () => {
+    // readBoundedField reads through Reflect.get, which walks the prototype
+    // chain, so a polluted Object.prototype makes EVERY arm look like it
+    // carries the qualifier. The own-key pin is the only thing that stops it.
+    //
+    // The plain foreign-field near-miss above does not exercise that pin: with
+    // a clean prototype the lookup simply returns undefined, so it stays
+    // 'unknown' for an unrelated reason. This case fails without the pin and
+    // passes with it, which is what makes the pin's role actually tested.
+    const proto = Object.prototype as unknown as Record<string, unknown>;
+    try {
+      Object.defineProperty(proto, 'confidence_qualifier', {
+        value: { $exists: false },
+        configurable: true,
+        enumerable: false,
+        writable: true,
+      });
+      expect(
+        classifyMemoryFilter({
+          $or: [
+            { source: { $ne: 'SYNTHETIC_PRIVATE_SOURCE_MARKER' } },
+            { confidence_qualifier: { $ne: 'consolidated' } },
+          ],
+        }),
+      ).toEqual({ scopeKind: 'global', filterShape: 'unknown' });
+    } finally {
+      delete proto.confidence_qualifier;
+    }
+    // Cleanup must be complete, or every later test runs against a polluted
+    // prototype and this file starts lying about the rest of the suite.
+    expect('confidence_qualifier' in {}).toBe(false);
+  });
+
   it('degrades a hostile filter to unknown instead of throwing', () => {
     // classifyMemoryFilter sits on the telemetry path: if it throws, it takes
     // the operation's observability down with it. A field that cannot be read
