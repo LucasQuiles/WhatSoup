@@ -87,6 +87,76 @@ describe('TurnRecoverySupervisor — BRICK-LAB-shaped regression', () => {
   });
 
   /**
+   * Deadlines derived from the lease the store ACTUALLY wrote for this claim.
+   *
+   * Read it straight after the claim (the guard arms synchronously inside
+   * `scanOnce()`, and a later renewal overwrites the row), so the assertion is
+   * anchored to the real lease rather than to wall-clock arithmetic.
+   *
+   * `abortMarginMs` mirrors production's
+   * `min(15_000, max(250, floor(leaseMs / 4)))` in
+   * turn-recovery-supervisor.ts. Mirrored deliberately: this suite exists to
+   * pin the temporal invariant, so a silent change to the margin SHOULD fail
+   * here rather than quietly widen the window a replay may run past its lease.
+   */
+  function leaseDeadlines(
+    jobId: number,
+    leaseSeconds: number,
+  ): { expiresAtMs: number; safetyDeadlineMs: number } {
+    const recorded = durability.getTurnRecoveryJob(jobId)?.claim_expires_at;
+    if (!recorded) throw new Error('expected a claimed job carrying a lease expiry');
+    const expiresAtMs = Date.parse(`${recorded.replace(' ', 'T')}Z`);
+    if (!Number.isFinite(expiresAtMs)) throw new Error(`unparseable lease expiry: ${recorded}`);
+    const leaseMs = leaseSeconds * 1_000;
+    const abortMarginMs = Math.min(15_000, Math.max(250, Math.floor(leaseMs / 4)));
+    return { expiresAtMs, safetyDeadlineMs: expiresAtMs - abortMarginMs };
+  }
+
+  /**
+   * Advance fake time in bounded steps until `condition` holds.
+   *
+   * The lease guard's schedule is derived from `claim_expires_at`, which the
+   * store writes with SQLite's OWN clock (`datetime('now', ?)` in
+   * turn-recovery-store.ts) — a clock vitest's fake timers do not control,
+   * compared against a faked `Date.now()`. A hardcoded
+   * `advanceTimersByTimeAsync(N)` therefore encodes a silent assumption that
+   * the two clocks stay close enough for the whole renewal/abort schedule to
+   * land inside N. When that assumption breaks the guard's timers simply never
+   * come due: the job is claimed and dispatched, nothing is renewed, nothing
+   * is aborted, and the assertion fails as a bare "0 calls" with no clue why.
+   *
+   * An A/B under induced skew proves the mechanism: with a 3s skew the old
+   * hardcoded 2_600ms advance fails with `Number of calls: 0` while the
+   * condition-based wait passes. That signature matches the quality (25.x)
+   * failure of 2026-08-16, where this test logged ZERO renewal attempts and
+   * the passing lane logged three, with no other supervisor log line
+   * differing. What delayed that particular CI process is NOT established —
+   * the mechanism is proven, the original trigger remains unknown.
+   *
+   * Waiting on the observable the test actually asserts removes the timing
+   * constant entirely, and the exhausted budget throws a named error instead
+   * of leaving a misleading assertion failure. Callers still pin the temporal
+   * invariant via `leaseDeadlines`, so this cannot degrade "before the safety
+   * deadline" into "eventually".
+   *
+   * NB: `vi.useFakeTimers()` also fakes `process.hrtime`, so a busy-wait loop
+   * can never terminate here — induce real delay with `Atomics.wait`.
+   */
+  async function advanceUntil(
+    condition: () => boolean,
+    what: string,
+    budgetMs = 10_000,
+    stepMs = 50,
+  ): Promise<void> {
+    for (let elapsed = 0; elapsed <= budgetMs; elapsed += stepMs) {
+      if (condition()) return;
+      await vi.advanceTimersByTimeAsync(stepMs);
+    }
+    if (condition()) return;
+    throw new Error(`${what} did not occur within ${budgetMs}ms of fake time`);
+  }
+
+  /**
    * Crashes one source turn (the BRICK queue-SLA alert) durably transferred to
    * recovery, with its original selected-delivery op already resolved to a
    * terminal outbound state (quarantined) — representing the predecessor
@@ -471,10 +541,14 @@ describe('TurnRecoverySupervisor — BRICK-LAB-shaped regression', () => {
       const { jobId, conversationKey, sourceInboundSeq } = crashOneSourceTurn({ suffix: 'lease' });
       const originalRenew = durability.renewTurnRecoveryClaim.bind(durability);
       const renewSpy = vi.spyOn(durability, 'renewTurnRecoveryClaim');
-      renewSpy.mockImplementation((renewJobId, owner, fence, options) => ({
-        ...originalRenew(renewJobId, owner, fence, options),
-        claimExpiresAt: new Date(Date.now() + 3_000).toISOString(),
-      }));
+      const renewAtMs: number[] = [];
+      renewSpy.mockImplementation((renewJobId, owner, fence, options) => {
+        renewAtMs.push(Date.now());
+        return {
+          ...originalRenew(renewJobId, owner, fence, options),
+          claimExpiresAt: new Date(Date.now() + 3_000).toISOString(),
+        };
+      });
 
       // Deferred, not a real setTimeout: the dispatch "completes" only when
       // this test explicitly releases it, after fake time has been advanced
@@ -503,10 +577,13 @@ describe('TurnRecoverySupervisor — BRICK-LAB-shaped regression', () => {
       });
 
       const scanPromise = supervisor.scanOnce();
-      // Flush the synchronous claim -> dispatchReplay() call chain so the
-      // renewal interval is armed before advancing fake time past it.
-      await vi.advanceTimersByTimeAsync(0);
-      await vi.advanceTimersByTimeAsync(2_000);
+      const lease = leaseDeadlines(jobId, 3);
+      await advanceUntil(() => renewSpy.mock.calls.length >= 1, 'first lease renewal');
+
+      // Renewal must land with margin INSIDE the lease it holds, not merely
+      // "eventually" — otherwise the claim could lapse mid-replay and a second
+      // owner could pick the same job up.
+      expect(renewAtMs[0]).toBeLessThanOrEqual(lease.safetyDeadlineMs);
       expect(renewSpy).toHaveBeenCalled();
       expect(supervisor.health().leaseRenewals).toBeGreaterThanOrEqual(1);
       expect(supervisor.health().leaseRenewalFailures).toBe(0);
@@ -526,16 +603,21 @@ describe('TurnRecoverySupervisor — BRICK-LAB-shaped regression', () => {
   it('retries a transient renewal failure and resumes successful renewal while dispatch remains pending', async () => {
     vi.useFakeTimers();
     try {
-      const { sourceInboundSeq } = crashOneSourceTurn({ suffix: 'lease-transient' });
+      const { jobId, sourceInboundSeq } = crashOneSourceTurn({ suffix: 'lease-transient' });
       const originalRenew = durability.renewTurnRecoveryClaim.bind(durability);
+      const renewAtMs: number[] = [];
       const renewSpy = vi.spyOn(durability, 'renewTurnRecoveryClaim')
         .mockImplementationOnce(() => {
+          renewAtMs.push(Date.now());
           throw new Error('temporary store availability failure');
         })
-        .mockImplementation((jobId, owner, fence, options) => ({
-          ...originalRenew(jobId, owner, fence, options),
-          claimExpiresAt: new Date(Date.now() + 3_000).toISOString(),
-        }));
+        .mockImplementation((renewJobId, owner, fence, options) => {
+          renewAtMs.push(Date.now());
+          return {
+            ...originalRenew(renewJobId, owner, fence, options),
+            claimExpiresAt: new Date(Date.now() + 3_000).toISOString(),
+          };
+        });
       let resolveDispatch: () => void = () => {};
       const dispatchGate = new Promise<void>((resolve) => { resolveDispatch = resolve; });
       const supervisor = new TurnRecoverySupervisor({
@@ -555,7 +637,13 @@ describe('TurnRecoverySupervisor — BRICK-LAB-shaped regression', () => {
       });
 
       const scan = supervisor.scanOnce();
-      await vi.advanceTimersByTimeAsync(1_800);
+      const lease = leaseDeadlines(jobId, 3);
+      await advanceUntil(() => renewSpy.mock.calls.length >= 2, 'renewal retry after transient failure');
+
+      // Both the failed attempt and the retry that recovers it must fall inside
+      // the safety margin — a retry that slips past it has already lost the lease.
+      expect(renewAtMs[0]).toBeLessThanOrEqual(lease.safetyDeadlineMs);
+      expect(renewAtMs[1]).toBeLessThanOrEqual(lease.safetyDeadlineMs);
 
       expect(renewSpy).toHaveBeenCalledTimes(2);
       expect(supervisor.health()).toMatchObject({
@@ -578,7 +666,11 @@ describe('TurnRecoverySupervisor — BRICK-LAB-shaped regression', () => {
       vi.spyOn(durability, 'renewTurnRecoveryClaim').mockImplementation(() => {
         throw new TurnRecoveryClaimFenceError('claim owner changed');
       });
-      const abort = vi.fn(async () => true);
+      let abortAtMs: number | null = null;
+      const abort = vi.fn(async () => {
+        abortAtMs ??= Date.now();
+        return true;
+      });
       const supervisor = new TurnRecoverySupervisor({
         instanceName: 'brick-instance',
         durability: () => durability,
@@ -600,7 +692,14 @@ describe('TurnRecoverySupervisor — BRICK-LAB-shaped regression', () => {
       });
 
       const scan = supervisor.scanOnce();
-      await vi.advanceTimersByTimeAsync(2_000);
+      const lease = leaseDeadlines(jobId, 3);
+      await advanceUntil(() => abort.mock.calls.length > 0, 'cooperative replay abort');
+
+      // "Before expiry" is the invariant this test is named for: the guard must
+      // give up its replay with margin to spare, not merely at some point.
+      expect(abortAtMs).not.toBeNull();
+      expect(abortAtMs!).toBeLessThanOrEqual(lease.safetyDeadlineMs);
+      expect(abortAtMs!).toBeLessThan(lease.expiresAtMs);
       const result = await scan;
 
       expect(abort).toHaveBeenCalledWith('claim_fence_lost');
@@ -625,7 +724,11 @@ describe('TurnRecoverySupervisor — BRICK-LAB-shaped regression', () => {
       });
       let resolveAbort: (proven: boolean) => void = () => {};
       const abortGate = new Promise<boolean>((resolve) => { resolveAbort = resolve; });
-      const abort = vi.fn(async () => abortGate);
+      let abortAtMs: number | null = null;
+      const abort = vi.fn(async () => {
+        abortAtMs ??= Date.now();
+        return abortGate;
+      });
       let resolveDispatch: () => void = () => {};
       const dispatchGate = new Promise<void>((resolve) => { resolveDispatch = resolve; });
       const supervisor = new TurnRecoverySupervisor({
@@ -645,7 +748,14 @@ describe('TurnRecoverySupervisor — BRICK-LAB-shaped regression', () => {
       });
 
       const scan = supervisor.scanOnce();
-      await vi.advanceTimersByTimeAsync(2_600);
+      const lease = leaseDeadlines(jobId, 3);
+      await advanceUntil(() => abort.mock.calls.length > 0, 'cooperative replay abort');
+
+      // "Before expiry" is the invariant this test is named for: the guard must
+      // give up its replay with margin to spare, not merely at some point.
+      expect(abortAtMs).not.toBeNull();
+      expect(abortAtMs!).toBeLessThanOrEqual(lease.safetyDeadlineMs);
+      expect(abortAtMs!).toBeLessThan(lease.expiresAtMs);
       expect(abort).toHaveBeenCalledWith('renewal_unavailable');
       expect(durability.getTurnRecoveryJob(jobId)?.state).toBe('claimed');
       let scanSettled = false;
@@ -682,7 +792,11 @@ describe('TurnRecoverySupervisor — BRICK-LAB-shaped regression', () => {
       vi.spyOn(durability, 'renewTurnRecoveryClaim').mockImplementation(() => {
         throw new TurnRecoveryClaimFenceError('claim owner changed');
       });
-      const abort = vi.fn(async () => false);
+      let abortAtMs: number | null = null;
+      const abort = vi.fn(async () => {
+        abortAtMs ??= Date.now();
+        return false;
+      });
       const supervisor = new TurnRecoverySupervisor({
         instanceName: 'brick-instance',
         durability: () => durability,
@@ -699,7 +813,14 @@ describe('TurnRecoverySupervisor — BRICK-LAB-shaped regression', () => {
       });
 
       const scan = supervisor.scanOnce();
-      await vi.advanceTimersByTimeAsync(2_000);
+      const lease = leaseDeadlines(jobId, 3);
+      await advanceUntil(() => abort.mock.calls.length > 0, 'cooperative replay abort');
+
+      // "Before expiry" is the invariant this test is named for: the guard must
+      // give up its replay with margin to spare, not merely at some point.
+      expect(abortAtMs).not.toBeNull();
+      expect(abortAtMs!).toBeLessThanOrEqual(lease.safetyDeadlineMs);
+      expect(abortAtMs!).toBeLessThan(lease.expiresAtMs);
       const result = await scan;
 
       expect(result).toMatchObject({ claimed: 1, completed: 0, requeued: 0 });
