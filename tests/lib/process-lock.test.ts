@@ -435,6 +435,36 @@ describe('process lock bounded waiting', () => {
     expect(releaseProcessLock(held)).toBe(true);
   });
 
+  it('makes a terminal link attempt when the observed holder releases at the deadline', () => {
+    const lockPath = makeLockPath();
+    const held = acquireProcessLock(lockPath, fixedIdentity('held', 11111));
+    let clockReads = 0;
+    let releasedAtDeadline = false;
+
+    const acquired = acquireProcessLock(lockPath, {
+      ...fixedIdentity('next', 22222),
+      wait: {
+        timeoutMs: 25,
+        pollMs: 10,
+        monotonicNow: () => {
+          clockReads += 1;
+          if (clockReads === 2) {
+            releasedAtDeadline = releaseProcessLock(held);
+            return 25;
+          }
+          return 0;
+        },
+        sleep: () => {
+          throw new Error('deadline path must not sleep');
+        },
+      },
+    });
+
+    expect(releasedAtDeadline).toBe(true);
+    expect(acquired.token).toBe('next');
+    expect(releaseProcessLock(acquired)).toBe(true);
+  });
+
   it.each([
     { field: 'timeoutMs', timeoutMs: -1, pollMs: 10 },
     { field: 'timeoutMs', timeoutMs: Number.POSITIVE_INFINITY, pollMs: 10 },

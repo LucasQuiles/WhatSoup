@@ -348,6 +348,7 @@ export function acquireProcessLock(lockPath: string, options: AcquireProcessLock
     let reclaimed = false;
     let reclaimedPreviousBoot = false;
     let reclaimedDeadSameBoot = false;
+    let terminalWaitAttempted = false;
     for (;;) {
       try {
         linkSync(tempPath, lockPath);
@@ -379,13 +380,15 @@ export function acquireProcessLock(lockPath: string, options: AcquireProcessLock
         // stays fail-closed — a rare, alerting, operator-recoverable brick (see
         // docs/runbook.md §5.6). Do not reorder this below the bootId check.
         if (isProcessAlive(existing.pid)) {
-          if (wait) {
+          if (wait && !terminalWaitAttempted) {
             const currentMs = wait.now();
             const remainingMs = wait.deadlineMs - currentMs;
             if (remainingMs > 0) {
               wait.sleep(Math.min(wait.pollMs, remainingMs));
               continue;
             }
+            terminalWaitAttempted = true;
+            continue;
           }
           throw new ProcessLockError('active', lockPath, existing.pid, decisionOf(true));
         }
