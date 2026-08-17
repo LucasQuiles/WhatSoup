@@ -196,17 +196,21 @@ describe('S1 — logout records an actor receipt at the socket dispatch seam', (
     expect(evidence.status).toBe('consulted');
     if (evidence.status !== 'consulted') return;
     expect(evidence.bondRemovalRequest).toBeNull();
+    expect(evidence.actorClass).toBe('unattributed');
   });
 
   it('records at the live socket seam immediately before sock.logout', async () => {
     bondActorLedger.reset();
+    let observedAtLogout: { action: string; route: string } | null = null;
     socketState.current = {
       logout: async () => {
         const atDispatch = resolveBondOwnerEvidence(bondActorLedger);
-        expect(atDispatch.status).toBe('consulted');
-        if (atDispatch.status !== 'consulted') return;
-        expect(atDispatch.bondRemovalRequest?.action).toBe('mcp_tool:logout');
-        expect(atDispatch.bondRemovalRequest?.route).toBe('mcp');
+        if (atDispatch.status === 'consulted' && atDispatch.bondRemovalRequest) {
+          observedAtLogout = {
+            action: atDispatch.bondRemovalRequest.action,
+            route: atDispatch.bondRemovalRequest.route,
+          };
+        }
         throw new Error('socket disconnected after dispatch');
       },
     } as unknown as ExtendedBaileysSocket;
@@ -217,6 +221,7 @@ describe('S1 — logout records an actor receipt at the socket dispatch seam', (
 
     socketState.current = null;
     expect(res.isError).toBe(true);
+    expect(observedAtLogout).toEqual({ action: 'mcp_tool:logout', route: 'mcp' });
     const evidence = resolveBondOwnerEvidence(bondActorLedger);
     expect(evidence.status).toBe('consulted');
     if (evidence.status !== 'consulted') return;

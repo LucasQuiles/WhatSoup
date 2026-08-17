@@ -160,6 +160,8 @@ describe('S2 — the receipt describes the socket that was actually built', () =
     expect(receipt.protocolVersionSource).toBe('live_fetch');
     expect(receipt.protocolVersionIsLatest).toBe(true);
     expect(receipt.protocolVersionFetchErrorClass).toBeNull();
+    expect(receipt.protocolVersionTuple).toEqual([2, 3000, 1043857760]);
+    expect(receipt.protocolVersion).toBe('2.3000.1043857760');
   });
 
   it('does not attach resolver provenance to a different config tuple', () => {

@@ -183,6 +183,17 @@ describe('S3 — the refusals', () => {
     });
   });
 
+  it('reports malformed when a valid runtime connection receipt is stored as the pairing client', () => {
+    writeGenerationWithPairingClient({ ...VALID_PAIRING_CLIENT, callSite: 'connection' });
+
+    expect(resolveAuthGenerationEvidence(stateRoot)).toEqual({
+      status: 'unavailable',
+      version: 1,
+      reason: 'malformed',
+      bondCreatedAt: null,
+    });
+  });
+
   it('reports malformed for oversized pairing-client strings', () => {
     writeGenerationWithPairingClient({
       ...VALID_PAIRING_CLIENT,

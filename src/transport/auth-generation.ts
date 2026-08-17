@@ -160,7 +160,11 @@ function validate(value: Record<string, unknown>): AuthGenerationReceipt | null 
   const projectedPairingClient = pairingClient === null || pairingClient === undefined
     ? null
     : projectEffectiveClientReceipt(pairingClient);
-  if (pairingClient !== null && pairingClient !== undefined && !projectedPairingClient) {
+  if (
+    pairingClient !== null &&
+    pairingClient !== undefined &&
+    (!projectedPairingClient || projectedPairingClient.callSite !== 'pairing_cli')
+  ) {
     return null;
   }
   return {
