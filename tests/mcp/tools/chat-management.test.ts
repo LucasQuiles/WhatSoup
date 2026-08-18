@@ -4,6 +4,7 @@ import { ToolRegistry } from '../../../src/mcp/registry.ts';
 import { registerChatManagementTools } from '../../../src/mcp/tools/chat-management.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
 import type { WhatsAppSocket } from '../../../src/transport/connection.ts';
+import { fakeClock } from '../../../src/lib/clock.ts';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -814,6 +815,23 @@ describe('chat-management tools', () => {
         globalSession(),
       );
       expect(mockSock.chatModify).toHaveBeenCalledWith({ mute: null }, '111@s.whatsapp.net');
+    });
+
+    it('drives the default mute window from the injected clock, not the wall clock (fails if reverted to free nowUnixSec)', async () => {
+      const t0ms = 2_000_000_000_000; // distinctive future epoch (2033-05-18)
+      const clockRegistry = new ToolRegistry();
+      registerChatManagementTools(db, () => mockSock, (tool) => clockRegistry.register(tool), fakeClock(t0ms));
+
+      await clockRegistry.call(
+        'mute_chat',
+        { jid: '111@s.whatsapp.net', mute: true },
+        globalSession(),
+      );
+
+      expect(mockSock.chatModify).toHaveBeenCalledWith(
+        { mute: Math.floor(t0ms / 1000) + 8 * 3600 },
+        '111@s.whatsapp.net',
+      );
     });
   });
 

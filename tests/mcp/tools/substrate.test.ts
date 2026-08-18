@@ -9,6 +9,7 @@ import { registerSubstrateTools } from '../../../src/mcp/tools/substrate.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
 import { createBead, getBead } from '../../../src/core/substrate/beads.ts';
 import { captureObservation, upsertEntity } from '../../../src/core/substrate/entities.ts';
+import { fakeClock, type Clock } from '../../../src/lib/clock.ts';
 
 function tmpFile() { return join(tmpdir(), `sub-${randomBytes(8).toString('hex')}.db`); }
 function tmpDir() { return join(tmpdir(), `sub-vault-${randomBytes(8).toString('hex')}`); }
@@ -50,6 +51,7 @@ function registerDefaultTools(
     dbWrapper?: Database;
     observationConfidenceMin?: number;
     enableUrlWatch?: boolean;
+    clock?: Clock;
   } = {},
 ) {
   registerSubstrateTools(registry, {
@@ -65,7 +67,7 @@ function registerDefaultTools(
       sweep: { beadProposeMin: 0.55, beadUpdateMin: 0.8, lookbackHours: 48, reviewByDays: 7 },
       watchTtl: { defaultHours: 24, maxHours: 72 },
     },
-  });
+  }, overrides.clock);
 }
 
 describe('substrate MCP tools', () => {
@@ -425,6 +427,23 @@ describe('substrate MCP tools', () => {
       ttl_hours: 200,
     }, adminSession));
     expect(res.terminal_at - now).toBeLessThanOrEqual(72 * 3600 + 5);
+  });
+
+  it('create_watch derives terminal_at from the injected clock, not the wall clock (fails if reverted to free nowUnixSec)', async () => {
+    // +1000s ahead of the wall clock keeps requestedTerminalAt below
+    // prepareTrigger's internal max-TTL clamp (72h), so the injected `now`
+    // survives to the stored terminal_at instead of being clamped away.
+    const t0ms = Date.now() + 1_000_000;
+    const r2 = new ToolRegistry();
+    registerDefaultTools(r2, db, vaultPath, { clock: fakeClock(t0ms) });
+
+    const res = parseResult(await r2.call('create_watch', {
+      source: 'poll.email',
+      criteria: { source: 'gmail', sender: 'sender-example-invalid' },
+      report_chat: 'watch-report@s.whatsapp.net',
+    }, adminSession));
+
+    expect(res.terminal_at).toBe(Math.floor(t0ms / 1000) + 24 * 3600);
   });
 
   it('extend_trigger updates terminal_at within policy', async () => {
