@@ -5,7 +5,7 @@
   "entrypoints": [
     {
       "path": "src/main.ts",
-      "sha256": "9fa8094038a71839d0611ef2e37df666510c068aa531a34204f793ecaf73e50c",
+      "sha256": "4686b229a249aa7e6404711be18d6cdecef00d654b3e0bf1a8d2f2bfb4598503",
       "mustContain": [
         "startHealthServer",
         "createConnection"
@@ -52,7 +52,7 @@
     },
     {
       "path": "src/transport/auth.ts",
-      "sha256": "91adc561c4153bf7dea4b8538d6502365a6cf3c9835ba609c081bd2bd8a89f55",
+      "sha256": "fbe1e9877298c4456ee5fe1fc100cf69e3d12d21c95537bca4d196c66e79e95f",
       "mustContain": [
         "useMultiFileAuthState",
         "decideDisconnectAction"

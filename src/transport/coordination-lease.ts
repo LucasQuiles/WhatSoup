@@ -36,8 +36,13 @@
 
 import { closeSync, existsSync, openSync, readFileSync, unlinkSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
+import { hostname } from 'node:os';
+import { execFileSync } from 'node:child_process';
 import { appendPrivateJsonLineSync, ensurePrivateDirectorySync, writeAtomicPrivateFileSync } from '../lib/private-fs.ts';
+import { getCurrentBootId } from '../lib/process-lock.ts';
+import { systemClock } from '../lib/clock.ts';
 import {
+  parseAccountScopeId,
   parseCoordinationLease,
   type AccountScopeIdV1,
   type CoordinationLeaseMode,
@@ -45,6 +50,70 @@ import {
 } from './auth-custody-contracts.ts';
 
 const TAKEOVER_LOG_FILENAME = 'coordination-lease-takeovers.ndjson';
+
+/**
+ * Resolve the configured account scope. Absent stays absent (the lease
+ * machinery is inert for legacy instances); a PRESENT but malformed value
+ * throws at config load — a typo must never silently disable coordination.
+ */
+export function resolveConfiguredAccountScope(raw: unknown): AccountScopeIdV1 | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  const parsed = typeof raw === 'string' ? parseAccountScopeId(raw) : null;
+  if (parsed === null) {
+    throw new Error(
+      'accountScopeId is configured but malformed: expected an opaque "scope:" identifier ' +
+      '([a-z0-9-], 4-59 chars after the prefix, at least one letter; never a path, JID, or phone number)',
+    );
+  }
+  return parsed;
+}
+
+/**
+ * Probe a process's birth identity, defeating same-boot PID reuse. Linux
+ * reads /proc/<pid>/stat starttime; darwin asks ps for lstart. null = cannot
+ * be established (callers must treat the owner as unknown, fail closed).
+ */
+export function probeProcessBirthToken(pid: number): string | null {
+  try {
+    if (process.platform === 'linux') {
+      const stat = readFileSync(`/proc/${pid}/stat`, 'utf-8');
+      const closeParen = stat.lastIndexOf(')');
+      if (closeParen === -1) return null;
+      const fields = stat.slice(closeParen + 2).split(' ');
+      const starttime = fields[19];
+      return starttime && starttime.length > 0 ? `linux-start:${starttime}` : null;
+    }
+    if (process.platform === 'darwin') {
+      const out = execFileSync('ps', ['-p', String(pid), '-o', 'lstart='], {
+        encoding: 'utf-8',
+        timeout: 5_000,
+      }).trim();
+      return out.length > 0 ? `darwin-lstart:${out}` : null;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** Production probes. EPERM means alive-but-not-ours — that is ALIVE. */
+export function defaultLeaseProbes(): LeaseProbes {
+  return {
+    hostId: hostname(),
+    bootId: getCurrentBootId(),
+    pid: process.pid,
+    birthToken: probeProcessBirthToken,
+    pidAlive: pid => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch (err) {
+        return (err as NodeJS.ErrnoException).code === 'EPERM';
+      }
+    },
+    nowMs: () => systemClock.now(),
+  };
+}
 
 export interface LeaseProbes {
   hostId: string;

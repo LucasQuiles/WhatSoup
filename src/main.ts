@@ -78,6 +78,7 @@ import { buildMemoryReadinessLogFields } from './lib/memory-operation-telemetry.
 import { shutdownExitCode } from './main-shutdown-policy.ts';
 import { markCleanExit, restartLoopGuardPath } from './runtimes/agent/restart-loop-guard.ts';
 import { formatClockForUser } from './runtimes/agent/runtime-presentation.ts';
+import { acquireCoordinationLease, defaultLeaseProbes, releaseCoordinationLease, renewCoordinationLease } from './transport/coordination-lease.ts';
 import { acquireProcessLock, isProcessLockError, releaseProcessLock, type ProcessLockHandle } from './lib/process-lock.ts';
 import { createServiceManager } from './fleet/platform.ts';
 import { xdgDir } from './fleet/paths.ts';
@@ -128,6 +129,7 @@ function acquireLock(): void {
       log.warn({ path: config.lockPath }, 'reclaimed a stale lock left by a dead same-boot predecessor');
     }
     log.info({ path: config.lockPath }, 'lock acquired');
+    acquireAccountScopeLease();
   } catch (err: unknown) {
     if (!isProcessLockError(err)) throw err;
     if (err.reason === 'active') {
@@ -147,7 +149,78 @@ function acquireLock(): void {
   }
 }
 
+// --- Account-scope coordination lease (q-canary lane, T4) ---
+//
+// When an account scope is configured, the runtime owns the fenced scope
+// lease for its process lifetime: a pairing coordinator racing this startup
+// acquires the same lease and exactly one wins. Without a configured scope
+// the lease machinery is inert (legacy instances). The heartbeat renewal is
+// best-effort; a live verified owner is never evicted on a stale heartbeat.
+
+let scopeLease: import('./transport/auth-custody-contracts.ts').CoordinationLeaseV1 | null = null;
+let scopeLeaseRenewTimer: NodeJS.Timeout | null = null;
+const SCOPE_LEASE_TTL_MS = 5 * 60_000;
+
+function acquireAccountScopeLease(): void {
+  if (config.accountScopeId === undefined) return;
+  const scopeId = config.accountScopeId;
+  const probes = defaultLeaseProbes();
+  const result = acquireCoordinationLease({
+    stateRoot: config.stateRoot,
+    scopeId,
+    operationId: `runtime-start-${probes.pid}-${probes.nowMs()}`,
+    mode: 'runtime_start',
+    ttlMs: SCOPE_LEASE_TTL_MS,
+    probes,
+  });
+  if (!result.ok) {
+    log.fatal(
+      { refusal: result.refusal, scopeId },
+      'account-scope lease unavailable at startup; another owner (runtime or pairing) holds this scope',
+    );
+    process.exit(1);
+  }
+  scopeLease = result.lease;
+  if (result.takeover !== null) {
+    log.warn({ takeover: result.takeover }, 'account-scope lease reclaimed at startup');
+  }
+  scopeLeaseRenewTimer = setInterval(() => {
+    if (scopeLease === null) return;
+    const renewed = renewCoordinationLease({
+      stateRoot: config.stateRoot,
+      scopeId,
+      lease: scopeLease,
+      ttlMs: SCOPE_LEASE_TTL_MS,
+      probes: defaultLeaseProbes(),
+    });
+    if (renewed.ok) {
+      scopeLease = renewed.lease;
+    } else {
+      // Losing the lease mid-run means a fenced successor exists; log loudly
+      // but do not tear down mid-flight work from a timer callback.
+      log.error({ refusal: renewed.refusal }, 'account-scope lease renewal failed');
+    }
+  }, Math.floor(SCOPE_LEASE_TTL_MS / 3));
+  scopeLeaseRenewTimer.unref();
+  log.info({ scopeId, fencingToken: scopeLease.fencingToken }, 'account-scope lease acquired');
+}
+
+function releaseAccountScopeLease(): void {
+  if (scopeLeaseRenewTimer !== null) {
+    clearInterval(scopeLeaseRenewTimer);
+    scopeLeaseRenewTimer = null;
+  }
+  if (scopeLease === null || config.accountScopeId === undefined) return;
+  releaseCoordinationLease({
+    stateRoot: config.stateRoot,
+    scopeId: config.accountScopeId,
+    lease: scopeLease,
+  });
+  scopeLease = null;
+}
+
 function releaseLock(): void {
+  releaseAccountScopeLease();
   if (!lockHandle) return;
   const released = releaseProcessLock(lockHandle);
   if (!released) {

@@ -9,6 +9,8 @@ import {
   releaseCoordinationLease,
   forceTakeoverCoordinationLease,
   coordinationLeasePath,
+  defaultLeaseProbes,
+  resolveConfiguredAccountScope,
   type LeaseProbes,
 } from '../../src/transport/coordination-lease.ts';
 import { parseCoordinationLease, parseAccountScopeId } from '../../src/transport/auth-custody-contracts.ts';
@@ -214,6 +216,36 @@ describe('renew and release', () => {
     expect(releaseCoordinationLease({ stateRoot: root, scopeId: SCOPE, lease: acquired.lease })).toEqual({ ok: true });
     const again = acquireCoordinationLease(baseArgs({ operationId: 'op-lease-0003' }));
     expect(again.ok).toBe(true);
+  });
+});
+
+describe('resolveConfiguredAccountScope', () => {
+  it('returns undefined when unset and the parsed scope when valid', () => {
+    expect(resolveConfiguredAccountScope(undefined)).toBeUndefined();
+    expect(resolveConfiguredAccountScope('scope:line-a-wa')).toBe('scope:line-a-wa');
+  });
+
+  it('throws loudly on a malformed configured scope (never silently disables)', () => {
+    expect(() => resolveConfiguredAccountScope('line-a')).toThrow(/accountScopeId/);
+    expect(() => resolveConfiguredAccountScope(42)).toThrow(/accountScopeId/);
+  });
+});
+
+describe('defaultLeaseProbes', () => {
+  it('identifies this process: live pid, non-null birth token, stable across calls', () => {
+    const real = defaultLeaseProbes();
+    expect(real.pid).toBe(process.pid);
+    expect(real.pidAlive(process.pid)).toBe(true);
+    const birth = real.birthToken(process.pid);
+    expect(typeof birth).toBe('string');
+    expect((birth as string).length).toBeGreaterThan(0);
+    expect(real.birthToken(process.pid)).toBe(birth);
+  });
+
+  it('treats EPERM as alive and a reaped pid as dead', () => {
+    const real = defaultLeaseProbes();
+    expect(real.pidAlive(1)).toBe(true);
+    expect(real.pidAlive(deadPid())).toBe(false);
   });
 });
 

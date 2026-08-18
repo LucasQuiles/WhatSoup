@@ -5,6 +5,7 @@ import { printErr } from './lib/cli-print.ts';
 import { normalizePhoneE164, normalizePhoneE164Wire } from './lib/phone.ts';
 import { asRecord, isNonEmptyString } from './lib/type-guards.ts';
 import { migrateLegacyMemoryConfig } from './config-memory-migration.ts';
+import { resolveConfiguredAccountScope } from './transport/coordination-lease.ts';
 import type { Profile } from './core/profiles.ts';
 import { DEFAULT_BIND_ADDRESS } from './fleet/constants.ts';
 import { VALID_ACCESS_MODES, VALID_GROUP_SENDER_POLICIES, type AccessMode, type GroupSenderPolicy } from './instance-loader.ts';
@@ -1364,6 +1365,14 @@ export const config = {
   // env var is exactly '0' (#2192 slice 2b).
   authBondAutoRestore: optionalBoolean(instance?.authBondAutoRestore, 'authBondAutoRestore')
     ?? process.env.WHATSOUP_AUTH_BOND_AUTO_RESTORE !== '0',
+  // Opaque account-scope identity for the fenced coordination lease. Absent
+  // keeps the lease machinery inert (legacy instances); a present but
+  // malformed value throws HERE at config load rather than silently
+  // disabling coordination.
+  accountScopeId: resolveConfiguredAccountScope(
+    optionalString(instance?.accountScopeId, 'accountScopeId')
+      ?? process.env.WHATSOUP_ACCOUNT_SCOPE_ID,
+  ),
   // Baileys protocol version pin, string passthrough (#2192 s4a). Parsing and
   // validation stay call-time in parsePinnedBaileysVersion so a malformed
   // value throws at connect (today's timing), not at config load.

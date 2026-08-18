@@ -34,6 +34,7 @@ import {
 import { writeAuthGenerationReceipt } from './auth-generation.ts';
 import { errorMessage } from '../lib/error-message.ts';
 import { classifyPairNumber, maskPairingCode, pairingEmissionLine, pairingGate } from './pairing.ts';
+import { acquireCoordinationLease, defaultLeaseProbes, releaseCoordinationLease } from './coordination-lease.ts';
 
 const log = createChildLogger('auth-cli');
 
@@ -56,6 +57,41 @@ if (existsSync(lockPath)) {
     `         (do not use legacy launchctl stop for a KeepAlive job)\n`,
   );
   process.exit(1);
+}
+
+// ---------------------------------------------------------------------------
+// Account-scope coordination lease (q-canary lane, T4)
+//
+// When an account scope is configured, pairing must OWN the fenced lease for
+// its whole run: a runtime starting concurrently acquires the same lease and
+// exactly one wins. The legacy existence check above stays as defense in
+// depth; it detects a running bot but holds nothing. Without a configured
+// scope the lease machinery is inert (legacy instances).
+// ---------------------------------------------------------------------------
+
+if (config.accountScopeId !== undefined) {
+  const scopeId = config.accountScopeId;
+  const probes = defaultLeaseProbes();
+  const leaseResult = acquireCoordinationLease({
+    stateRoot: config.stateRoot,
+    scopeId,
+    operationId: `pairing-cli-${probes.pid}-${probes.nowMs()}`,
+    mode: 'pairing',
+    ttlMs: 10 * 60_000,
+    probes,
+  });
+  if (!leaseResult.ok) {
+    log.fatal({ refusal: leaseResult.refusal }, 'account-scope lease unavailable; refusing pairing');
+    process.stderr.write(
+      `Pairing refused: the account-scope coordination lease is ${leaseResult.refusal}.\n` +
+      `Stop the owning process (or use the owner-authorized takeover) and retry.\n`,
+    );
+    process.exit(1);
+  }
+  const heldLease = leaseResult.lease;
+  process.once('exit', () => {
+    releaseCoordinationLease({ stateRoot: config.stateRoot, scopeId, lease: heldLease });
+  });
 }
 
 // ---------------------------------------------------------------------------
