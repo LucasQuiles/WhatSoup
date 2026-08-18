@@ -173,8 +173,13 @@ describe('S2 — pairing CLI effective-client receipt', () => {
       throw new Error('socket construction failed');
     });
     const receipt = await runPairingCliAndReadReceipt();
-    expect(mocks.makeWASocket, 'construction must have been attempted').toHaveBeenCalledTimes(1);
-    expect(receipt, 'a failed construction must not leave an effective-client receipt').toBeNull();
+    expect({
+      constructionAttempts: mocks.makeWASocket.mock.calls.length,
+      recordedReceipt: receipt,
+    }).toEqual({
+      constructionAttempts: 1,
+      recordedReceipt: null,
+    });
   });
 
   it('carries honest provenance — a failed fetch is not reported as latest', async () => {

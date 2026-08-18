@@ -154,16 +154,42 @@ describe('S1 — the bond actor ledger', () => {
 
   it('derives api, not operator, when a route has no actor identity', () => {
     const ledger = createBondActorLedger();
-    ledger.recordBondRemovalRequest({
-      route: 'fleet_api',
-      action: 'fleet:auth_delete',
-      actorIdentity: null,
-      requestId: null,
+    const recordedAt = Date.UTC(2026, 7, 17, 4, 36, 39);
+    const resolvedAt = recordedAt + 1_250;
+    ledger.recordBondRemovalRequest(
+      {
+        route: 'fleet_api',
+        action: 'fleet:auth_delete',
+        actorIdentity: null,
+        requestId: null,
+      },
+      recordedAt,
+    );
+    const evidence = resolveBondOwnerEvidence(ledger, resolvedAt);
+    expect(evidence).toEqual({
+      status: 'consulted',
+      version: 1,
+      resolvedAt: '2026-08-17T04:36:40.250Z',
+      actorClass: 'api',
+      bondRemovalRequest: {
+        route: 'fleet_api',
+        action: 'fleet:auth_delete',
+        requestIdHash: null,
+        actorIdentityHash: null,
+        requestedAt: '2026-08-17T04:36:39.000Z',
+        ageMs: 1_250,
+      },
+      lastControlPlaneAction: {
+        route: 'fleet_api',
+        action: 'fleet:auth_delete',
+        effect: 'external',
+        requestIdHash: null,
+        actorIdentityHash: null,
+        observedAt: '2026-08-17T04:36:39.000Z',
+        ageMs: 1_250,
+      },
+      causalRelation: 'temporal_only',
     });
-    const evidence = resolveBondOwnerEvidence(ledger);
-    if (evidence.status !== 'consulted') throw new Error('expected consulted');
-    expect(evidence.actorClass).toBe('api');
-    expect(evidence.bondRemovalRequest!.actorIdentityHash).toBeNull();
   });
 
   it('keeps generic control-plane traffic out of the removal-request field', () => {

@@ -107,10 +107,19 @@ describe('S3 — writing the generation receipt', () => {
     // That must not be hashed into something that looks like an identity.
     const receipt = writeAuthGenerationReceipt({
       accountJid: 'unknown',
-      createdAtMs: Date.now(),
+      createdAtMs: Date.UTC(2026, 7, 17, 4, 36, 39),
       stateRoot,
+      authDir: '/tmp/wa-s3-auth',
     });
-    expect(receipt!.identityDigest).toBeNull();
+    expect(receipt).toEqual({
+      version: 1,
+      generationId: '830d02211ffbd42e6db239d1',
+      bondCreatedAt: '2026-08-17T04:36:39.000Z',
+      source: 'pairing_cli',
+      identityDigest: null,
+      authRootHash: 'd7abebfe1631ab1eb9be',
+      pairingClient: null,
+    });
   });
 
   it('returns null instead of throwing when there is nowhere to write', () => {
@@ -138,10 +147,12 @@ describe('S3 — the refusals', () => {
     // was never written. Collapsing them would turn "never recorded" into "lost".
     writeReceiptFixture('{ this is not json');
     const evidence = resolveAuthGenerationEvidence(stateRoot);
-    expect(evidence.status).toBe('unavailable');
-    if (evidence.status !== 'unavailable') return;
-    expect(evidence.reason).toBe('unreadable');
-    expect(evidence.bondCreatedAt).toBeNull();
+    expect(evidence).toEqual({
+      status: 'unavailable',
+      version: 1,
+      reason: 'unreadable',
+      bondCreatedAt: null,
+    });
   });
 
   it('reports malformed for a valid envelope with an unusable timestamp', () => {
@@ -149,10 +160,12 @@ describe('S3 — the refusals', () => {
       JSON.stringify({ v: 1, generationId: 'g1', bondCreatedAt: 'not-a-date', source: 'pairing_cli', authRootHash: 'h' }),
     );
     const evidence = resolveAuthGenerationEvidence(stateRoot);
-    expect(evidence.status).toBe('unavailable');
-    if (evidence.status !== 'unavailable') return;
-    expect(evidence.reason).toBe('malformed');
-    expect(evidence.bondCreatedAt).toBeNull();
+    expect(evidence).toEqual({
+      status: 'unavailable',
+      version: 1,
+      reason: 'malformed',
+      bondCreatedAt: null,
+    });
   });
 
   it('rejects a receipt whose source is not a recognised establishment path', () => {
@@ -204,10 +217,12 @@ describe('S3 — the refusals', () => {
     );
     chmodSync(path, 0o644);
     const evidence = resolveAuthGenerationEvidence(stateRoot);
-    expect(evidence.status).toBe('unavailable');
-    if (evidence.status !== 'unavailable') return;
-    expect(evidence.reason).toBe('unreadable');
-    expect(evidence.bondCreatedAt).toBeNull();
+    expect(evidence).toEqual({
+      status: 'unavailable',
+      version: 1,
+      reason: 'unreadable',
+      bondCreatedAt: null,
+    });
   });
 
   it('degrades to resolver_threw rather than propagating', () => {
@@ -215,9 +230,11 @@ describe('S3 — the refusals', () => {
     // one try/catch whose only handler is a log.warn, so a throwing receptor would
     // discard the terminal bond event itself.
     const evidence = resolveAuthGenerationEvidence({} as unknown as string);
-    expect(evidence.status).toBe('unavailable');
-    if (evidence.status !== 'unavailable') return;
-    expect(['resolver_threw', 'unreadable', 'no_receipt_written']).toContain(evidence.reason);
-    expect(evidence.bondCreatedAt).toBeNull();
+    expect(evidence).toEqual({
+      status: 'unavailable',
+      version: 1,
+      reason: 'resolver_threw',
+      bondCreatedAt: null,
+    });
   });
 });

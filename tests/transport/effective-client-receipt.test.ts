@@ -99,9 +99,12 @@ describe('S2 — honest protocol-version provenance', () => {
     // A missing success signal is NOT a success. This branch is exactly where the
     // old code said `latest`.
     vi.mocked(fetchLatestBaileysVersion).mockResolvedValue({ version: [2, 2413, 1] } as never);
-    const resolved = await resolveBaileysVersion();
-    expect(resolved.source).toBe('unknown');
-    expect(resolved.isLatest).toBeNull();
+    await expect(resolveBaileysVersion()).resolves.toEqual({
+      version: [2, 2413, 1],
+      source: 'unknown',
+      isLatest: null,
+      fetchErrorClass: null,
+    });
   });
 
   it('does not touch the network for a pinned version', async () => {
@@ -122,12 +125,22 @@ describe('S2 — the receipt describes the socket that was actually built', () =
     // is derived from the config object rather than assembled in parallel.
     const config: SocketConfigLike = { version: [9, 9, 9] };
     const receipt = buildEffectiveClientReceipt(config, RESOLVED, 'connection');
-    expect(receipt.protocolVersion).toBe('9.9.9');
-    expect(receipt.protocolVersionTuple).toEqual([9, 9, 9]);
-    expect(receipt.protocolVersionResolverMatch).toBe(false);
-    expect(receipt.protocolVersionSource).toBe('unknown');
-    expect(receipt.protocolVersionIsLatest).toBeNull();
-    expect(receipt.protocolVersionFetchErrorClass).toBeNull();
+    expect(receipt).toEqual({
+      version: 1,
+      callSite: 'connection',
+      protocolVersion: '9.9.9',
+      protocolVersionTuple: [9, 9, 9],
+      protocolVersionResolverMatch: false,
+      protocolVersionSource: 'unknown',
+      protocolVersionIsLatest: null,
+      protocolVersionFetchErrorClass: null,
+      browser: { value: OBSERVED_LIBRARY_DEFAULTS.browser, provenance: 'library_default' },
+      syncFullHistory: { value: true, provenance: 'library_default' },
+      markOnlineOnConnect: { value: true, provenance: 'library_default' },
+      generateHighQualityLinkPreview: { value: false, provenance: 'library_default' },
+      authSupplied: false,
+      keyStoreCacheable: false,
+    });
   });
 
   it('marks inherited library defaults as library_default, not as a blank', () => {
