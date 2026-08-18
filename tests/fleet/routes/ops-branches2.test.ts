@@ -412,3 +412,75 @@ describe('handleConfigUpdate: transport immutability + per-transport admin IDs',
     expect(merged.adminPhones).toEqual(['15551230006']);
   });
 });
+
+// ---------------------------------------------------------------------------
+// handleAuth: legacy SSE connected → service-start branch arms (q-canary lane)
+// ---------------------------------------------------------------------------
+describe('handleAuth: connected → start-after-auth SSE arms', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('qr + pairing_code + connected then close(0) starts the service and emits connected', async () => {
+    const startAfterAuthFire = vi.fn((_n: string, cb?: (e: Error | null) => void) => cb?.(null));
+    const deps = makeDeps<any>({
+      discovery: { getInstance: vi.fn(() => fakeInstance({ name: 'auth-arm-1' })), scan: vi.fn() },
+      serviceManager: { startAfterAuthFire },
+    });
+    const req = mockReq({ method: 'POST' });
+    const res = mockSseRes();
+    const pending = handleAuth(req, res, deps, { name: 'auth-arm-1' });
+    await vi.waitFor(() => expect(vi.mocked(spawn)).toHaveBeenCalledTimes(1));
+    const child = vi.mocked(spawn).mock.results[0]!.value as {
+      stdout: { emit: (e: string, c: Buffer) => void };
+      stderr: { emit: (e: string, c: Buffer) => void };
+      emit: (e: string, code: number) => void;
+    };
+
+    child.stdout.emit('data', Buffer.from(JSON.stringify({ event: 'qr', data: { code: 'q' } }) + '\n'));
+    child.stdout.emit('data', Buffer.from(JSON.stringify({ event: 'pairing_code', code: 'ABCD1234' }) + '\n'));
+    child.stderr.emit('data', Buffer.from('some helper log line\n'));
+    child.stdout.emit('data', Buffer.from(JSON.stringify({ event: 'connected' }) + '\n'));
+    child.emit('close', 0);
+    await pending;
+
+    expect(startAfterAuthFire).toHaveBeenCalledWith('auth-arm-1', expect.any(Function));
+    // The legacy SSE route only forwards qr/connected/error; pairing_code is
+    // filtered here (it is the saga route's event). The connected chunk is
+    // emitted only after service activation succeeds.
+    expect(res._chunks.some((c) => c.includes('qr'))).toBe(true);
+    expect(res._chunks.some((c) => c.includes('connected'))).toBe(true);
+  });
+
+  it('close with a nonzero code emits an auth-failed error', async () => {
+    const deps = depsFor(fakeInstance({ name: 'auth-arm-2' }));
+    const req = mockReq({ method: 'POST' });
+    const res = mockSseRes();
+    const pending = handleAuth(req, res, deps, { name: 'auth-arm-2' });
+    await vi.waitFor(() => expect(vi.mocked(spawn)).toHaveBeenCalledTimes(1));
+    const child = vi.mocked(spawn).mock.results[0]!.value as { emit: (e: string, code: number) => void };
+    child.emit('close', 1);
+    await pending;
+    expect(res._chunks.some((c) => c.includes('error'))).toBe(true);
+  });
+
+  it('a service-start failure after connected surfaces the could-not-start error', async () => {
+    const startAfterAuthFire = vi.fn((_n: string, cb?: (e: Error | null) => void) => cb?.(new Error('start failed')));
+    const deps = makeDeps<any>({
+      discovery: { getInstance: vi.fn(() => fakeInstance({ name: 'auth-arm-3' })), scan: vi.fn() },
+      serviceManager: { startAfterAuthFire },
+    });
+    const req = mockReq({ method: 'POST' });
+    const res = mockSseRes();
+    const pending = handleAuth(req, res, deps, { name: 'auth-arm-3' });
+    await vi.waitFor(() => expect(vi.mocked(spawn)).toHaveBeenCalledTimes(1));
+    const child = vi.mocked(spawn).mock.results[0]!.value as {
+      stdout: { emit: (e: string, c: Buffer) => void };
+      emit: (e: string, code: number) => void;
+    };
+    child.stdout.emit('data', Buffer.from(JSON.stringify({ event: 'connected' }) + '\n'));
+    child.emit('close', 0);
+    await pending;
+    expect(res._chunks.some((c) => c.includes('could not start'))).toBe(true);
+  });
+});

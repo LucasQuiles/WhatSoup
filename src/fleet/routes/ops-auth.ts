@@ -546,7 +546,9 @@ export async function handlePairingApply(
   }
 }
 
-function buildSagaEffects(
+// Exported for focused effect-level tests (the spawn/service-control seams are
+// otherwise only reachable through a live pairing).
+export function buildSagaEffects(
   name: string,
   deps: OpsDeps,
   paths: { stateRoot: string; authDir: string },

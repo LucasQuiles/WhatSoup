@@ -3,10 +3,12 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
+  handleAuth,
   handlePairingPreflight,
   handlePairingApply,
   handlePairingStatus,
 } from '../../../src/fleet/routes/ops-auth.ts';
+import { readPairingOperationRecord } from '../../../src/transport/pairing-saga.ts';
 import type { OpsDeps } from '../../../src/fleet/routes/ops.ts';
 import { makeDeps, mockReq, mockRes } from '../../helpers/http-mocks.ts';
 import { appendLatchTransition } from '../../../src/transport/terminal-latch.ts';
@@ -311,5 +313,102 @@ describe('pairing route scope and credential-shape branches', () => {
       { name: 'test-line' },
     );
     expect(res._status).toBe(500);
+  });
+});
+
+describe('legacy handleAuth gate for scoped instances', () => {
+  it('409s a scoped instance toward the pairing saga', async () => {
+    const configPath = writeInstanceConfig({ accountScopeId: SCOPE });
+    const res = mockRes();
+    await handleAuth(
+      mockReq({ method: 'GET', url: '/api/lines/test-line/auth', headers: authedHeaders() }),
+      res as never,
+      depsFor(configPath),
+      { name: 'test-line' },
+    );
+    expect(res._status).toBe(409);
+    expect(res._body).toContain('pairing saga');
+  });
+
+  it('409s a scoped instance with a malformed accountScopeId', async () => {
+    const configPath = writeInstanceConfig({ accountScopeId: 'not a scope' });
+    const res = mockRes();
+    await handleAuth(
+      mockReq({ method: 'GET', url: '/api/lines/test-line/auth', headers: authedHeaders() }),
+      res as never,
+      depsFor(configPath),
+      { name: 'test-line' },
+    );
+    expect(res._status).toBe(409);
+    expect(res._body).toContain('malformed');
+  });
+});
+
+describe('handlePairingApply body validation permutations', () => {
+  async function apply(body: unknown) {
+    const configPath = writeInstanceConfig({ accountScopeId: SCOPE });
+    const res = mockRes();
+    await handlePairingApply(
+      mockReq({
+        method: 'POST',
+        url: '/api/lines/test-line/pairing/apply',
+        headers: authedHeaders(),
+        body: typeof body === 'string' ? body : JSON.stringify(body),
+      }),
+      res as never,
+      depsFor(configPath),
+      { name: 'test-line' },
+    );
+    return res;
+  }
+
+  it('rejects a missing method', async () => {
+    const res = await apply({ idempotencyKey: 'op-1', authorizationId: 'a', expectedLatchRevision: 0, expectedCurrentGenerationId: null });
+    expect(res._status).toBe(400);
+    expect(res._body).toContain('method');
+  });
+
+  it('rejects an invalid method', async () => {
+    const res = await apply({ idempotencyKey: 'op-1', authorizationId: 'a', method: 'sms', expectedLatchRevision: 0, expectedCurrentGenerationId: null });
+    expect(res._status).toBe(400);
+  });
+
+  it('rejects a non-integer / negative expectedLatchRevision', async () => {
+    const res = await apply({ idempotencyKey: 'op-1', authorizationId: 'a', method: 'qr', expectedLatchRevision: -1, expectedCurrentGenerationId: null });
+    expect(res._status).toBe(400);
+    const res2 = await apply({ idempotencyKey: 'op-1', authorizationId: 'a', method: 'qr', expectedLatchRevision: 1.5, expectedCurrentGenerationId: null });
+    expect(res2._status).toBe(400);
+  });
+
+  it('rejects an empty-string expectedCurrentGenerationId (undefined sentinel)', async () => {
+    const res = await apply({ idempotencyKey: 'op-1', authorizationId: 'a', method: 'pairing_code', expectedLatchRevision: 0, expectedCurrentGenerationId: '' });
+    expect(res._status).toBe(400);
+  });
+
+  it('accepts a string expectedCurrentGenerationId shape (reaches the saga, stale-generation refusal)', async () => {
+    const res = await apply({ idempotencyKey: 'op-1', authorizationId: 'a', method: 'pairing_code', expectedLatchRevision: 0, expectedCurrentGenerationId: 'gen-x' });
+    // No latch, current generation is null; a non-null expectation is a stale
+    // precondition, threaded through as a 409 (not a 400 validation error).
+    expect(res._status).toBe(409);
+  });
+});
+
+describe('handlePairingStatus operation-record arms', () => {
+  it('surfaces journal_unreadable when the operation journal cannot be read', async () => {
+    const configPath = writeInstanceConfig({ accountScopeId: SCOPE });
+    const journalPath = join(stateRoot, 'pairing-operations.ndjson');
+    writeFileSync(journalPath, 'placeholder\n', { mode: 0o600 });
+    const { chmodSync } = await import('node:fs');
+    chmodSync(journalPath, 0o000);
+    const res = mockRes();
+    await handlePairingStatus(
+      mockReq({ method: 'GET', url: '/api/lines/test-line/pairing/status?idempotencyKey=op-1', headers: authedHeaders() }),
+      res as never,
+      depsFor(configPath),
+      { name: 'test-line' },
+    );
+    chmodSync(journalPath, 0o600);
+    expect(res._status).toBe(200);
+    expect(JSON.parse(res._body).operation).toEqual({ state: 'journal_unreadable' });
   });
 });

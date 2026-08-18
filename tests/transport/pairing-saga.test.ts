@@ -553,6 +553,13 @@ describe('pairingPreflight — fail-closed reporting branches', () => {
     expect(plan.lease).toEqual({ status: 'corrupt' });
   });
 
+  it('reports lease corrupt (never vacant) when the state dir cannot be scanned', () => {
+    chmodSync(stateRoot, 0o000);
+    const plan = pairingPreflight({ stateRoot, authDir });
+    chmodSync(stateRoot, 0o700);
+    expect(plan.lease).toEqual({ status: 'corrupt' });
+  });
+
   it('reports a held lease with its mode', () => {
     const acquired = acquireCoordinationLease({
       stateRoot,

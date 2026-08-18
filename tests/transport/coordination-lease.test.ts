@@ -371,3 +371,32 @@ describe('coordination-lease — renew/release/takeover edge branches', () => {
     expect(existsSync(`${coordinationLeasePath(root, SCOPE)}.reclaim`)).toBe(false);
   });
 });
+
+describe('coordination-lease — reclaim guard contention', () => {
+  function deadHolderLease() {
+    const first = acquireCoordinationLease(baseArgs());
+    if (!first.ok) throw new Error('fixture acquire failed');
+    const dead = deadPid();
+    writeFileSync(coordinationLeasePath(root, SCOPE), JSON.stringify({ ...first.lease, pid: dead }));
+  }
+
+  it('refuses reclaim while a FRESH reclaim guard is held by another racer', () => {
+    deadHolderLease();
+    // Simulate a concurrent reclaimer holding the guard right now.
+    writeFileSync(`${coordinationLeasePath(root, SCOPE)}.reclaim`, JSON.stringify({ pid: 999999, at: T0 }));
+    // Fixed-clock probes read the guard's real mtime as not-yet-stale.
+    const result = acquireCoordinationLease(baseArgs({ operationId: 'op-blocked' }));
+    expect(result).toEqual({ ok: false, refusal: 'lease_race_lost' });
+  });
+
+  it('reaps a STALE reclaim guard and completes the reclaim', () => {
+    deadHolderLease();
+    writeFileSync(`${coordinationLeasePath(root, SCOPE)}.reclaim`, JSON.stringify({ pid: 999999, at: 0 }));
+    // Probes whose clock is far past the guard's real mtime -> guard is stale.
+    const futureProbes = probes({ nowMs: () => Date.now() + 10 * 60_000 });
+    const result = acquireCoordinationLease(baseArgs({ operationId: 'op-after-reap', probes: futureProbes }));
+    if (!result.ok) throw new Error(`unexpected refusal: ${result.refusal}`);
+    expect(result.lease.fencingToken).toBe(2);
+    expect(existsSync(`${coordinationLeasePath(root, SCOPE)}.reclaim`)).toBe(false);
+  });
+});
