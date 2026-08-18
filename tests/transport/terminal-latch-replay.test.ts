@@ -2,7 +2,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-const emitAlertMock = vi.hoisted(() => vi.fn(() => true));
+const emitAlertMock = vi.hoisted(() => vi.fn((...args: unknown[]) => {
+  void args;
+  return true;
+}));
 const clearAlertSourceMock = vi.hoisted(() => vi.fn(() => true));
 const { testAuthDir, testDataRoot, testRoot, testStateRoot } = vi.hoisted(() => {
   const testRoot = `/tmp/wa-test-latch-replay-${process.pid}`;
