@@ -373,6 +373,8 @@ function readInstanceAccountScope(configPath: string): AccountScopeIdV1 | null |
   try {
     parsed = JSON.parse(readFileSync(configPath, 'utf-8')) as Record<string, unknown>;
   } catch {
+    // intentional: absent or unparseable config reads as no scope - legacy
+    // instances predate the field and discovery owns config-error reporting.
     return null;
   }
   const raw = parsed.accountScopeId;
@@ -546,6 +548,8 @@ function buildSagaEffects(
         await deps.serviceManager.stop(name);
         return true;
       } catch {
+        // intentional: a failed stop maps to the saga's closed
+        // service_stop_unverified refusal rather than an exception.
         return false;
       }
     },
@@ -616,7 +620,8 @@ function buildSagaEffects(
                 lastPairingEvents.set(name, { event: 'connected', data: null, at: new Date(systemClock.now()).toISOString() });
               }
             } catch {
-              // Non-JSON stdout noise from the helper is ignored by design.
+              // by design: non-JSON stdout noise from the helper is ignored -
+              // only the typed qr/pairing_code/connected events matter here.
             }
           }
         });

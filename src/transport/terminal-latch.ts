@@ -364,9 +364,9 @@ export function appendLatchTransition(stateRoot: string, transitionValue: unknow
       try {
         unlinkSync(lockPath);
       } catch {
-        // The lock file vanishing underneath us changes nothing about the
-        // append that already happened; leaving this best-effort keeps the
-        // failure surface of the cleanup path out of the caller's result.
+        // intentional: the lock file vanishing underneath us changes nothing
+        // about the append that already happened; best-effort cleanup keeps
+        // this failure surface out of the caller's result.
       }
     }
   }

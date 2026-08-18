@@ -137,6 +137,8 @@ export function readPairingOperationRecord(
       label: 'pairing operations journal',
     });
   } catch {
+    // intentional: an unreadable journal reads as no record - the saga then
+    // re-validates every precondition from primary state before acting.
     return null;
   }
   if (raw === null) return null;
@@ -147,6 +149,8 @@ export function readPairingOperationRecord(
     try {
       parsedLine = JSON.parse(line);
     } catch {
+      // intentional: a torn journal tail row is skipped; the journal is
+      // append-only evidence and a partial line must not wedge reads.
       continue;
     }
     if (typeof parsedLine !== 'object' || parsedLine === null) continue;
@@ -283,8 +287,8 @@ export async function executePairingSaga(
       try {
         chmodSync(quarantinePath, 0o500);
       } catch {
-        // Read-only is defense in depth, not an immutability claim; the
-        // custody digest above is the integrity anchor.
+        // intentional: read-only is defense in depth, not an immutability
+        // claim - the custody digest above is the integrity anchor.
       }
       custody = {
         priorTreeDigest: priorDigest.digest,
@@ -371,8 +375,8 @@ function quarantineIncomplete(paths: PairingSagaPaths, nowMs: number): void {
   try {
     if (readdirSync(paths.authDir).length === 0) return;
   } catch {
-    // Unreadable incomplete tree: still move it aside so nothing can
-    // present it as active auth.
+    // intentional: an unreadable incomplete tree is still moved aside so
+    // nothing can present it as active auth.
   }
   const failedPath = `${paths.authDir}.failed.${timestampTag(nowMs)}`;
   renameSync(paths.authDir, failedPath);
@@ -412,12 +416,16 @@ export function pairingPreflight(paths: PairingSagaPaths): PairingPreflightPlan 
         });
         parsed = raw === null ? null : parseCoordinationLease(JSON.parse(raw));
       } catch {
+        // intentional: an unreadable lease file surfaces as 'corrupt' in the
+        // preflight plan below rather than as an exception.
         parsed = null;
       }
       lease = parsed === null ? { status: 'corrupt' } : { status: 'held', mode: parsed.mode };
       break;
     }
   } catch {
+    // intentional: a lease directory that cannot be scanned reads as
+    // 'corrupt' in the plan - fail closed, never vacant.
     lease = { status: 'corrupt' };
   }
 
@@ -442,6 +450,8 @@ function readLastOperationTail(
       label: 'pairing operations journal',
     });
   } catch {
+    // intentional: an unreadable journal yields no tail row for the
+    // side-effect-free preflight plan.
     return null;
   }
   if (raw === null) return null;
@@ -455,6 +465,8 @@ function readLastOperationTail(
         tail = { idempotencyKey: operation.idempotencyKey, state: operation.state };
       }
     } catch {
+      // intentional: unreadable rows are skipped while scanning for the tail;
+      // the operation journal is append-only evidence.
       continue;
     }
   }
