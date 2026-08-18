@@ -5,7 +5,7 @@
   "entrypoints": [
     {
       "path": "src/main.ts",
-      "sha256": "3b2ee0985bae9ed4b19d18d05dc54e8ec1dfebdf40cb53bc2c909bc718c5da50",
+      "sha256": "91e78d82979f25d0a694e6edf027ea0e00cee7ba12c4370f1143792d1bcdfcf2",
       "mustContain": [
         "startHealthServer",
         "createConnection"
@@ -41,7 +41,7 @@
     },
     {
       "path": "src/transport/connection.ts",
-      "sha256": "ba686ea12a11f11103473d03ab2ff3c5cf4e01d683bb1e4d2a80c7a9510df0cd",
+      "sha256": "4faa2ddc088c89dc8bc805b72abda58d0703fbeed69efa92e7d753241b763e94",
       "mustContain": [
         "decideDisconnectAction",
         "QR code received",
