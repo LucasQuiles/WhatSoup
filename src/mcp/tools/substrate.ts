@@ -25,7 +25,7 @@ import {
   getProfile, listEntities, addAlias, resolveEntityRef,
 } from '../../core/substrate/entities.ts';
 import { errorResult } from '../types.ts';
-import { nowUnixSec } from '../../core/substrate/time.ts';
+import { type Clock, systemClock } from '../../lib/clock.ts';
 import type { EntityRef, TriggerKind } from '../../core/substrate/types.ts';
 import { regenerateVault, projectBead, projectEntity, removeEntityProjection } from '../../core/substrate/vault.ts';
 import { EXTERNAL_EFFECT_CONTRACT_VERSION } from '../external-effect.ts';
@@ -172,7 +172,13 @@ function toEntityRef(r: z.infer<typeof EntityRefSchema>): EntityRef {
   };
 }
 
-export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDeps): void {
+export function registerSubstrateTools(
+  registry: ToolRegistry,
+  deps: SubstrateDeps,
+  // Injectable so create_watch TTL can be driven to a known instant (#2200).
+  // Optional and defaulted, so this slice changes no existing call site.
+  clock: Clock = systemClock,
+): void {
   // R1: the central sensitive-tool gate rides the same admin predicate as
   // the in-handler assertAdmin checks below (which remain as defense in
   // depth).
@@ -275,7 +281,7 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
         log.warn({ source: p.source }, 'create_watch rejected: url watch is disabled');
         throw new Error('url watch is disabled. Set advanced.enableUrlWatch: true in instance config to enable poll.url watches.');
       }
-      const now = nowUnixSec();
+      const now = clock.nowUnixSec();
       const ttlHours = Math.min(p.ttl_hours ?? deps.memory.watchTtl.defaultHours, deps.memory.watchTtl.maxHours);
       const requestedTerminalAt = now + Math.round(ttlHours * 3600);
       const triggerArgs = {

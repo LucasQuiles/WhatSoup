@@ -10,7 +10,7 @@ import type { Database } from '../../core/database.ts';
 import type { ExtendedBaileysSocket } from '../types.ts';
 import { type MessageRow, rowToMessage } from '../../core/messages.ts';
 import { createChildLogger } from '../../logger.ts';
-import { nowUnixSec } from '../../core/substrate/time.ts';
+import { type Clock, systemClock } from '../../lib/clock.ts';
 import { escapeSqlLikePattern } from '../../lib/sql-like.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
 import { DOMAIN_PERSONAL, DOMAIN_LID, DOMAIN_GROUP } from '../../core/jid-constants.ts';
@@ -543,7 +543,7 @@ function makeForwardMessage(db: Database, getSock: () => ExtendedBaileysSocket |
 // ---------------------------------------------------------------------------
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- configs have heterogeneous ZodRawShape types; shared array requires any; expires 2026-12-31
-const chatManagementSockConfigs: SockToolConfig<any>[] = [
+const makeChatManagementSockConfigs = (clock: Clock): SockToolConfig<any>[] => [
   {
     name: 'archive_chat',
     description: 'Archive or unarchive a WhatsApp chat (global).',
@@ -585,7 +585,7 @@ const chatManagementSockConfigs: SockToolConfig<any>[] = [
     externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ jid, mute, until }, sock) => {
       if (mute) {
-        const muteEndTime = until ?? (nowUnixSec() + 8 * 3600); // default 8h
+        const muteEndTime = until ?? (clock.nowUnixSec() + 8 * 3600); // default 8h
         await sock.chatModify({ mute: muteEndTime }, jid);
       } else {
         await sock.chatModify({ mute: null }, jid);
@@ -643,11 +643,15 @@ export function registerChatManagementTools(
   db: Database,
   getSock: () => ExtendedBaileysSocket | null,
   register: (tool: ToolDeclaration) => void,
+  // Injectable so mute_chat's default duration can be driven to a known
+  // instant (#2200). Optional and defaulted, so this slice changes no
+  // existing call site.
+  clock: Clock = systemClock,
 ): void {
   register(makeListMessages(db));
   register(makeGetMessageContext(db));
   register(makeListChats(db));
   register(makeGetChat(db));
   register(makeForwardMessage(db, getSock));
-  registerSockTools(getSock, chatManagementSockConfigs, register);
+  registerSockTools(getSock, makeChatManagementSockConfigs(clock), register);
 }
