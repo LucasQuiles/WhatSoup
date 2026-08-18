@@ -225,6 +225,49 @@ describe('appendPrivateJsonLineSync', () => {
     expect(() => appendPrivateJsonLineSync(target, { event: 'blocked' })).toThrow(/symlink/);
     expect(readFileSync(outside, 'utf-8')).toBe('unchanged\n');
   });
+
+  it('fsyncs the parent directory on first creation but not on a later append', async () => {
+    // Durability: on create, the file fsync flushes the data, but the directory
+    // entry linking the filename to the inode is separate metadata — a crash
+    // between the two can leave a named-but-unlinked inode and lose the whole
+    // forensic file. fsyncDirectory opens the directory path and fsyncs its
+    // descriptor. A plain append to an existing file does not touch the
+    // directory entry, so that extra work must be skipped there. Falsifier:
+    // deleting `if (willCreate) fsyncDirectory(dir)` makes the create assertion
+    // fail (0 dir opens).
+    const root = makeTmp();
+    const dir = join(root, 'priv');
+    const target = join(dir, 'events.ndjson');
+
+    const dirOpens: string[] = [];
+    vi.resetModules();
+    vi.doMock('node:fs', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('node:fs')>();
+      return {
+        ...actual,
+        openSync: vi.fn((path: string, ...rest: unknown[]) => {
+          if (path === dir) dirOpens.push(path);
+          return (actual.openSync as (...a: unknown[]) => number)(path, ...rest);
+        }),
+      };
+    });
+    const { appendPrivateJsonLineSync: appendMocked } = await import('../../src/lib/private-fs.ts');
+
+    appendMocked(target, { event: 'create', count: 1 });
+    expect(dirOpens.length).toBeGreaterThanOrEqual(1); // parent dir fsynced on create
+
+    dirOpens.length = 0;
+    appendMocked(target, { event: 'extend', count: 2 });
+    expect(dirOpens.length).toBe(0); // no dir fsync on a plain append
+
+    // Regression: both lines present, file stays 0600.
+    expect(statSync(target).mode & 0o777).toBe(0o600);
+    const lines = readFileSync(target, 'utf-8').trimEnd().split('\n').map((line) => JSON.parse(line));
+    expect(lines).toEqual([
+      { event: 'create', count: 1 },
+      { event: 'extend', count: 2 },
+    ]);
+  });
 });
 
 describe('two-algorithm split: assert-first vs mkdir-then-force-chmod', () => {
