@@ -18,15 +18,15 @@ The **Inconsistencies** section lists missing or stale index entries compared wi
 scoped markdown files currently on disk.
 
 **Repo:** `WhatSoup`
-**Total entries:** 118
+**Total entries:** 119
 
 ## Totals
 
 | Dimension | Breakdown |
 |---|---|
-| Kind | handoff=8, plan=59, review=4, spec=46, state=1 |
-| Status | active=29, closed=4, completed=35, deferred=7, pending=15, unknown=28 |
-| Status source | body-marker=100, fallback=17, state-md-status=1 |
+| Kind | handoff=8, plan=59, review=4, spec=47, state=1 |
+| Status | active=30, closed=4, completed=35, deferred=7, pending=15, unknown=28 |
+| Status source | body-marker=101, fallback=17, state-md-status=1 |
 
 ## Inconsistencies
 
@@ -34,7 +34,7 @@ scoped markdown files currently on disk.
 
 ## Synthesis
 
-### Active (29)
+### Active (30)
 
 | Path | Kind | Topic | Status source |
 |------|------|-------|---------------|
@@ -62,6 +62,7 @@ scoped markdown files currently on disk.
 | `docs/superpowers/specs/2026-07-28-turn-recovery-safety-design.md` | spec | turn-recovery-safety-design | body-marker |
 | `docs/superpowers/specs/2026-07-29-launchd-restart-policy-2682-design.md` | spec | launchd-restart-policy-2682-design | body-marker |
 | `docs/superpowers/specs/2026-08-03-watchdog-auth-required-contract-design.md` | spec | watchdog-auth-required-contract-design | body-marker |
+| `docs/superpowers/specs/2026-08-16-recovery-blocked-follower-lifecycle-design.md` | spec | recovery-blocked-follower-lifecycle-design | body-marker |
 | `docs/superpowers/specs/kill-session-transactional-cancellation/design.md` | spec | design | body-marker |
 | `docs/superpowers/specs/kill-session-transactional-cancellation/requirements.md` | spec | requirements | body-marker |
 | `docs/superpowers/specs/provider-event-lifecycle/design.md` | spec | design | body-marker |
@@ -227,7 +228,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/reviews/2026-07-09-wall-to-wall-audit-pr-briefs.md` | review | completed | body-marker | wall-to-wall-audit-pr-briefs | 2026-07-10 |  |
 | `docs/superpowers/reviews/2026-07-24-r13-r15-tech-debt-review-map.md` | review | completed | body-marker | r13-r15-tech-debt-review-map | 2026-07-24 |  |
 
-### docs/superpowers/specs  _(40 entries)_
+### docs/superpowers/specs  _(41 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
@@ -271,6 +272,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/specs/2026-08-06-host-setup-portability-and-macos-reconciliation-design.md` | spec | unknown | body-marker | host-setup-portability-and-macos-reconciliation-design | 2026-08-06 |  |
 | `docs/superpowers/specs/2026-08-07-fallback-continuity-design.md` | spec | unknown | body-marker | fallback-continuity-design | 2026-08-12 |  |
 | `docs/superpowers/specs/2026-08-15-loop-lag-safe-forensic-pipeline-design.md` | spec | unknown | body-marker | loop-lag-safe-forensic-pipeline-design | 2026-08-16 |  |
+| `docs/superpowers/specs/2026-08-16-recovery-blocked-follower-lifecycle-design.md` | spec | active | body-marker | recovery-blocked-follower-lifecycle-design | 2026-08-16 |  |
 
 ### docs/superpowers/specs/kill-session-transactional-cancellation  _(3 entries)_
 
@@ -291,4 +293,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-08-16T21:54:04Z from commit `0a59570cbb5428a46f3a16ee3d38ce20c9e1853a`
+- Generated at 2026-08-17T00:31:03Z from commit `ab696da823c5abb89b89969c08ecbcc4fc9c59aa`
