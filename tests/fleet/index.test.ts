@@ -489,6 +489,58 @@ describe('fleet server -- runtime token rotation', () => {
 });
 
 // ---------------------------------------------------------------------------
+// WS connected hello wiring (#2522) — proves the *composition*: that
+// createFleetServer actually wires the realtime poller's health snapshot into
+// the hello (index.ts calls setRealtimePollerHealth), not merely that the
+// transport method exists. websocket-server.test.ts exercises the method in
+// isolation; this exercises the production path. Reverting ONLY the
+// setRealtimePollerHealth call in index.ts leaves realtime_poller null here
+// while every transport test stays green — the exact gap this closes.
+// ---------------------------------------------------------------------------
+
+describe('fleet server -- WS connected hello wiring (#2522)', () => {
+  it('createFleetServer wires the realtime poller health snapshot into the hello', async () => {
+    const ticketRes = await fetch(`${baseUrl}/api/ws-ticket`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${FLEET_TOKEN}` },
+    });
+    expect(ticketRes.status).toBe(200);
+    const { ticket } = await ticketRes.json() as { ticket: string };
+
+    // First frame on a fresh socket is always the `connected` hello (the server
+    // sends it immediately in the connection handler, before any broadcast).
+    const hello = await new Promise<Record<string, unknown>>((resolve, reject) => {
+      const wsUrl = baseUrl.replace(/^http/, 'ws');
+      const ws = new WebSocket(`${wsUrl}/ws?ticket=${encodeURIComponent(ticket)}`);
+      const timeout = setTimeout(() => {
+        ws.terminate();
+        reject(new Error('timed out waiting for WS connected hello'));
+      }, 5000);
+      ws.once('message', (data) => {
+        clearTimeout(timeout);
+        ws.close();
+        resolve(JSON.parse(data.toString()) as Record<string, unknown>);
+      });
+      ws.once('error', (err) => {
+        clearTimeout(timeout);
+        reject(err);
+      });
+    });
+
+    // WIRING, not transport: the field must be a real snapshot object. A
+    // reverted index.ts (setRealtimePollerHealth never called) yields null.
+    expect(hello.realtime_poller).not.toBeNull();
+    expect(hello.realtime_poller).toBeTypeOf('object');
+
+    // Field-shape only (NOT a whole-object toEqual) so this stays green as the
+    // snapshot gains fields.
+    const rp = hello.realtime_poller as { schemaVersion?: unknown; lifecycle?: unknown };
+    expect(rp.schemaVersion).toBe(1);
+    expect(['starting', 'current', 'partial', 'late', 'stalled', 'failed', 'stopped']).toContain(rp.lifecycle);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Route matching against the real 49-entry table (representative coverage)
 // ---------------------------------------------------------------------------
 
