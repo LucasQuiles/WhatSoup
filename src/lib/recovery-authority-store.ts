@@ -247,8 +247,14 @@ function migrateLegacyMarkers(): void {
   } finally {
     try {
       releaseProcessLock(lock);
-    } catch {
-      /* release failure must not fail a best-effort migration */
+    } catch (error) {
+      // A failed release must not fail a best-effort migration, but it must not be
+      // silent either: the lock file is now stale and the next acquirer pays the
+      // reclaim path, so an operator needs the signal.
+      log.warn(
+        { reason: 'legacy_lock_release_failed', code: mutationErrorCode(error) },
+        'could not release the legacy recovery marker lock after migration',
+      );
     }
   }
 }
@@ -268,8 +274,14 @@ function markerPayload(source: string): Record<string, unknown> {
 export function loadRecoveryMarkers(): Set<string> {
   try {
     migrateLegacyMarkers();
-  } catch {
-    /* never let migration break the read path */
+  } catch (error) {
+    // Migration is opportunistic and must never break a read, but swallowing this
+    // silently would hide a permanently stuck upgrade: reads keep unioning both
+    // planes and look correct while the legacy file never goes away.
+    log.warn(
+      { reason: 'legacy_migration_unavailable', code: mutationErrorCode(error) },
+      'legacy recovery marker migration threw; continuing with a union read',
+    );
   }
   const markers = readMarkerDirectory();
   for (const source of readLegacyMarkers()) markers.add(source);
