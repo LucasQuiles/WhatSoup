@@ -44,7 +44,11 @@ export interface SockToolConfig<T extends z.ZodRawShape> {
   /** S1 device-removal marker, forwarded verbatim. See ToolDeclaration.bondEffect. */
   bondEffect?: ToolDeclaration['bondEffect'];
   /** Given parsed params and a live socket, call the sock method and return the result. */
-  call: (parsed: z.infer<z.ZodObject<T>>, sock: ExtendedBaileysSocket) => Promise<unknown>;
+  call: (
+    parsed: z.infer<z.ZodObject<T>>,
+    sock: ExtendedBaileysSocket,
+    recordBondEffectDispatch?: () => void,
+  ) => Promise<unknown>;
 }
 
 /**
@@ -70,11 +74,11 @@ export function makeSockTool<T extends z.ZodRawShape>(
     ...declarationFields,
     scope: scope ?? 'global',
     targetMode: targetMode ?? 'caller-supplied',
-    handler: async (params) => {
+    handler: async (params, _session, recordBondEffectDispatch) => {
       const parsed = config.schema.parse(params);
       const sock = getSock();
       if (!sock) throw new Error('WhatsApp is not connected');
-      return call(parsed, sock);
+      return call(parsed, sock, recordBondEffectDispatch);
     },
   };
 }

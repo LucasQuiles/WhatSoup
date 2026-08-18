@@ -109,12 +109,158 @@ export const OBSERVED_LIBRARY_DEFAULTS = Object.freeze({
 
 /** The subset of makeWASocket config this receipt reads. */
 export interface SocketConfigLike {
-  version?: readonly number[];
+  version: readonly [number, number, number];
   browser?: readonly string[];
   syncFullHistory?: boolean;
   markOnlineOnConnect?: boolean;
   generateHighQualityLinkPreview?: boolean;
   auth?: { creds?: unknown; keys?: unknown } | undefined;
+}
+
+const RECEIPT_KEYS = new Set([
+  'version',
+  'callSite',
+  'protocolVersion',
+  'protocolVersionTuple',
+  'protocolVersionResolverMatch',
+  'protocolVersionSource',
+  'protocolVersionIsLatest',
+  'protocolVersionFetchErrorClass',
+  'browser',
+  'syncFullHistory',
+  'markOnlineOnConnect',
+  'generateHighQualityLinkPreview',
+  'authSupplied',
+  'keyStoreCacheable',
+]);
+const FIELD_KEYS = new Set(['value', 'provenance']);
+const MAX_RECEIPT_STRING_LENGTH = 256;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function hasExactKeys(value: Record<string, unknown>, expected: ReadonlySet<string>): boolean {
+  const keys = Object.keys(value);
+  return keys.length === expected.size && keys.every((key) => expected.has(key));
+}
+
+function isBoundedString(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= MAX_RECEIPT_STRING_LENGTH;
+}
+
+function projectBooleanField(value: unknown, libraryDefault: boolean): ReceiptField<boolean> | null {
+  if (!isRecord(value) || !hasExactKeys(value, FIELD_KEYS)) return null;
+  const fieldValue = value['value'];
+  const provenance = value['provenance'];
+  if (typeof fieldValue !== 'boolean') return null;
+  if (provenance !== 'explicit' && provenance !== 'library_default') return null;
+  if (provenance === 'library_default' && fieldValue !== libraryDefault) return null;
+  return { value: fieldValue, provenance };
+}
+
+function projectBrowserField(value: unknown): ReceiptField<readonly string[] | null> | null {
+  if (!isRecord(value) || !hasExactKeys(value, FIELD_KEYS)) return null;
+  const fieldValue = value['value'];
+  const provenance = value['provenance'];
+  if (provenance !== 'explicit' && provenance !== 'library_default') return null;
+  if (
+    fieldValue !== null &&
+    (!Array.isArray(fieldValue) ||
+      fieldValue.length !== 3 ||
+      !fieldValue.every(isBoundedString))
+  ) return null;
+  if (
+    provenance === 'library_default' &&
+    (!Array.isArray(fieldValue) ||
+      fieldValue.some((part, index) => part !== OBSERVED_LIBRARY_DEFAULTS.browser[index]))
+  ) return null;
+  return { value: fieldValue === null ? null : [...fieldValue], provenance };
+}
+
+/**
+ * Validate and project persisted effective-client data into its bounded owned shape.
+ * Unknown keys are rejected rather than stripped so a future or corrupted nested
+ * payload cannot be mistaken for the contract this process understands.
+ */
+export function projectEffectiveClientReceipt(value: unknown): EffectiveClientReceipt | null {
+  if (!isRecord(value) || !hasExactKeys(value, RECEIPT_KEYS)) return null;
+  if (value['version'] !== 1) return null;
+  const callSite = value['callSite'];
+  if (callSite !== 'connection' && callSite !== 'pairing_cli') return null;
+
+  let tuple: readonly [number, number, number];
+  try {
+    tuple = requireAppliedVersionTuple(value['protocolVersionTuple']);
+  } catch {
+    return null;
+  }
+  const protocolVersion = value['protocolVersion'];
+  if (!isBoundedString(protocolVersion) || protocolVersion !== tuple.join('.')) return null;
+
+  const resolverMatch = value['protocolVersionResolverMatch'];
+  if (typeof resolverMatch !== 'boolean') return null;
+  const source = value['protocolVersionSource'];
+  if (!['pinned', 'live_fetch', 'bundled_fallback', 'unknown'].includes(source as string)) return null;
+  const isLatest = value['protocolVersionIsLatest'];
+  const fetchErrorClass = value['protocolVersionFetchErrorClass'];
+  const provenanceConsistent = resolverMatch
+    ? (source === 'pinned' && isLatest === null && fetchErrorClass === null) ||
+      (source === 'live_fetch' && isLatest === true && fetchErrorClass === null) ||
+      (source === 'bundled_fallback' && isLatest === false && isBoundedString(fetchErrorClass)) ||
+      (source === 'unknown' && isLatest === null && fetchErrorClass === null)
+    : source === 'unknown' && isLatest === null && fetchErrorClass === null;
+  if (!provenanceConsistent) return null;
+
+  const browser = projectBrowserField(value['browser']);
+  const syncFullHistory = projectBooleanField(
+    value['syncFullHistory'],
+    OBSERVED_LIBRARY_DEFAULTS.syncFullHistory,
+  );
+  const markOnlineOnConnect = projectBooleanField(
+    value['markOnlineOnConnect'],
+    OBSERVED_LIBRARY_DEFAULTS.markOnlineOnConnect,
+  );
+  const generateHighQualityLinkPreview = projectBooleanField(
+    value['generateHighQualityLinkPreview'],
+    OBSERVED_LIBRARY_DEFAULTS.generateHighQualityLinkPreview,
+  );
+  if (!browser || !syncFullHistory || !markOnlineOnConnect || !generateHighQualityLinkPreview) {
+    return null;
+  }
+  if (typeof value['authSupplied'] !== 'boolean' || typeof value['keyStoreCacheable'] !== 'boolean') {
+    return null;
+  }
+
+  return {
+    version: 1,
+    callSite,
+    protocolVersion,
+    protocolVersionTuple: tuple,
+    protocolVersionResolverMatch: resolverMatch,
+    protocolVersionSource: source as BaileysVersionSource,
+    protocolVersionIsLatest: isLatest as boolean | null,
+    protocolVersionFetchErrorClass: fetchErrorClass as string | null,
+    browser,
+    syncFullHistory,
+    markOnlineOnConnect,
+    generateHighQualityLinkPreview,
+    authSupplied: value['authSupplied'],
+    keyStoreCacheable: value['keyStoreCacheable'],
+  };
+}
+
+function requireAppliedVersionTuple(value: unknown): readonly [number, number, number] {
+  if (
+    !Array.isArray(value) ||
+    value.length !== 3 ||
+    !value.every((part) =>
+      typeof part === 'number' && Number.isSafeInteger(part) && part >= 0
+    )
+  ) {
+    throw new TypeError('effective client receipt requires an exact three-integer version tuple');
+  }
+  return [value[0] as number, value[1] as number, value[2] as number];
 }
 
 function field<T>(supplied: T | undefined, fallback: T): ReceiptField<T> {
@@ -137,12 +283,7 @@ export function buildEffectiveClientReceipt(
   // Read the tuple back off the config, NOT off `resolved` — if a call site ever
   // passes something other than the resolved tuple, the receipt must show what the
   // socket got, not what the resolver said.
-  const tupleSource = config.version ?? resolved.version;
-  const tuple: readonly [number, number, number] = [
-    Number(tupleSource[0] ?? 0),
-    Number(tupleSource[1] ?? 0),
-    Number(tupleSource[2] ?? 0),
-  ];
+  const tuple = requireAppliedVersionTuple(config.version);
   const protocolVersionResolverMatch =
     tuple[0] === resolved.version[0] &&
     tuple[1] === resolved.version[1] &&

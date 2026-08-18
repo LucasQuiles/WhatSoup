@@ -119,6 +119,49 @@ describe('S2 — honest protocol-version provenance', () => {
 });
 
 describe('S2 — the receipt describes the socket that was actually built', () => {
+  it('rejects an omitted applied tuple instead of substituting resolver output', () => {
+    expect(() =>
+      buildEffectiveClientReceipt({} as SocketConfigLike, RESOLVED, 'connection'),
+    ).toThrow('exact three-integer version tuple');
+  });
+
+  it('rejects a short applied tuple instead of padding it', () => {
+    expect(() =>
+      buildEffectiveClientReceipt(
+        { version: [2, 3000] } as unknown as SocketConfigLike,
+        RESOLVED,
+        'connection',
+      ),
+    ).toThrow('exact three-integer version tuple');
+  });
+
+  it.each([
+    ['string', ['2', 3000, 1]],
+    ['NaN', [2, Number.NaN, 1]],
+    ['non-integer', [2, 3000.5, 1]],
+  ])('rejects a %s applied tuple member without coercion', (_label, version) => {
+    expect(() =>
+      buildEffectiveClientReceipt(
+        { version } as unknown as SocketConfigLike,
+        RESOLVED,
+        'connection',
+      ),
+    ).toThrow('exact three-integer version tuple');
+  });
+
+  it('attaches resolver provenance to an exact matching applied tuple', () => {
+    const receipt = buildEffectiveClientReceipt(
+      { version: [2, 3000, 1043857760] },
+      RESOLVED,
+      'connection',
+    );
+
+    expect(receipt.protocolVersionResolverMatch).toBe(true);
+    expect(receipt.protocolVersionSource).toBe('live_fetch');
+    expect(receipt.protocolVersionIsLatest).toBe(true);
+    expect(receipt.protocolVersionFetchErrorClass).toBeNull();
+  });
+
   it('does not attach resolver provenance to a different config tuple', () => {
     // If a call site ever passes something other than the resolved tuple, the
     // receipt must show what the SOCKET got. This is the whole reason the receipt

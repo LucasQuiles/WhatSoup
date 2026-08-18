@@ -30,6 +30,7 @@ import {
   resolveAuthGenerationEvidence,
   writeAuthGenerationReceipt,
 } from '../../src/transport/auth-generation.ts';
+import { buildEffectiveClientReceipt } from '../../src/transport/effective-client-receipt.ts';
 
 const ACCOUNT_JID = '15550000002@s.whatsapp.net';
 
@@ -53,6 +54,29 @@ function writeReceiptFixture(body: string): string {
   writeFileSync(path, body, 'utf8');
   chmodSync(path, 0o600);
   return path;
+}
+
+const VALID_PAIRING_CLIENT = buildEffectiveClientReceipt(
+  { version: [2, 3000, 1043857760] },
+  {
+    version: [2, 3000, 1043857760],
+    source: 'live_fetch',
+    isLatest: true,
+    fetchErrorClass: null,
+  },
+  'pairing_cli',
+);
+
+function writeGenerationWithPairingClient(pairingClient: unknown): void {
+  writeReceiptFixture(JSON.stringify({
+    v: 1,
+    generationId: 'generation-1',
+    bondCreatedAt: '2026-08-17T04:36:39.000Z',
+    source: 'pairing_cli',
+    identityDigest: 'identity-digest',
+    authRootHash: 'auth-root-hash',
+    pairingClient,
+  }));
 }
 
 describe('S3 — writing the generation receipt', () => {
@@ -130,6 +154,63 @@ describe('S3 — writing the generation receipt', () => {
 });
 
 describe('S3 — the refusals', () => {
+  it('round-trips a strictly valid persisted pairing client', () => {
+    writeGenerationWithPairingClient(VALID_PAIRING_CLIENT);
+
+    const evidence = resolveAuthGenerationEvidence(stateRoot);
+
+    expect(evidence.status).toBe('recorded');
+    if (evidence.status !== 'recorded') return;
+    expect(evidence.receipt.pairingClient).toEqual(VALID_PAIRING_CLIENT);
+    expect(evidence.receipt.pairingClient).not.toBe(VALID_PAIRING_CLIENT);
+  });
+
+  it.each([
+    ['contradictory tuple', { protocolVersionTuple: [9, 9, 9] }],
+    ['contradictory source', { protocolVersionResolverMatch: false }],
+    ['bad call site', { callSite: 'background_worker' }],
+    ['bad receipt version', { version: 2 }],
+  ])('reports malformed for a pairing client with %s', (_label, change) => {
+    writeGenerationWithPairingClient({ ...VALID_PAIRING_CLIENT, ...change });
+
+    const evidence = resolveAuthGenerationEvidence(stateRoot);
+
+    expect(evidence).toEqual({
+      status: 'unavailable',
+      version: 1,
+      reason: 'malformed',
+      bondCreatedAt: null,
+    });
+  });
+
+  it('reports malformed for oversized pairing-client strings', () => {
+    writeGenerationWithPairingClient({
+      ...VALID_PAIRING_CLIENT,
+      browser: {
+        ...VALID_PAIRING_CLIENT.browser,
+        value: ['x'.repeat(1025), 'Chrome', '1'],
+        provenance: 'explicit',
+      },
+    });
+
+    expect(resolveAuthGenerationEvidence(stateRoot)).toMatchObject({
+      status: 'unavailable',
+      reason: 'malformed',
+    });
+  });
+
+  it('reports malformed for unknown nested pairing-client keys', () => {
+    writeGenerationWithPairingClient({
+      ...VALID_PAIRING_CLIENT,
+      browser: { ...VALID_PAIRING_CLIENT.browser, credentials: { arbitrary: true } },
+    });
+
+    expect(resolveAuthGenerationEvidence(stateRoot)).toMatchObject({
+      status: 'unavailable',
+      reason: 'malformed',
+    });
+  });
+
   it('reports no_receipt_written with a null age for a pre-existing bond', () => {
     // Every bond in the fleet today lands here. The temptation is to fill this in
     // from the auth directory's mtime; the plan names that as a failure criterion.

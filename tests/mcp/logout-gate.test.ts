@@ -28,15 +28,21 @@ import {
   resolveBondOwnerEvidence,
 } from '../../src/transport/bond-actor-receipt.ts';
 import type { ConnectionManager } from '../../src/transport/connection.ts';
-import type { SessionContext, ToolDeclaration } from '../../src/mcp/types.ts';
+import type {
+  ExtendedBaileysSocket,
+  SessionContext,
+  ToolDeclaration,
+} from '../../src/mcp/types.ts';
 
 const ADMIN: SessionContext = { tier: 'global', actorJid: '15550000001@s.whatsapp.net' };
+
+const socketState: { current: ExtendedBaileysSocket | null } = { current: null };
 
 function makeConnection(): ConnectionManager {
   return {
     contactsDir: { contacts: new Map(), getLidMappings: () => undefined },
     presenceCache: new PresenceCache(),
-    getSocket: () => null,
+    getSocket: () => socketState.current,
     sendRaw: async () => ({ waMessageId: null }),
     sendMedia: async () => ({ waMessageId: null }),
   } as unknown as ConnectionManager;
@@ -151,7 +157,7 @@ describe('S5 — logout is a gated, device-removing tool', () => {
   });
 });
 
-describe('S1 — logout writes an actor receipt before it can reach the socket', () => {
+describe('S1 — logout records an actor receipt at the socket dispatch seam', () => {
   it('declares itself a device-removal path', () => {
     const { captured } = buildRealRegistry();
     const logout = captured.find((t) => t.name === 'logout');
@@ -163,23 +169,58 @@ describe('S1 — logout writes an actor receipt before it can reach the socket',
       .toEqual(['logout']);
   });
 
-  it('records the removal request, and the socket failure proves ordering', async () => {
+  it('does not record a removal request when socket acquisition fails', async () => {
     bondActorLedger.reset();
+    socketState.current = null;
     const registry = hostRealLogout();
     registry.setSensitiveToolAuthorizer(() => true);
     const res = await registry.call('logout', {}, ADMIN);
 
-    // The harness socket is null, so the handler throws AFTER admission. That is
-    // the ordering proof: the receipt exists even though the call never reached
-    // WhatsApp, which is the property that matters when a real removal succeeds
-    // and takes the socket down with it.
     expect(res.isError).toBe(true);
     const evidence = resolveBondOwnerEvidence(bondActorLedger);
     expect(evidence.status).toBe('consulted');
     if (evidence.status !== 'consulted') return;
-    expect(evidence.bondRemovalRequest).not.toBeNull();
-    expect(evidence.bondRemovalRequest!.action).toBe('mcp_tool:logout');
-    expect(evidence.bondRemovalRequest!.route).toBe('mcp');
+    expect(evidence.bondRemovalRequest).toBeNull();
+    expect(evidence.actorClass).toBe('unattributed');
+  });
+
+  it('does not record a removal request when schema validation rejects the call', async () => {
+    bondActorLedger.reset();
+    const registry = hostRealLogout();
+    registry.setSensitiveToolAuthorizer(() => true);
+
+    const res = await registry.call('logout', { msg: 42 }, ADMIN);
+
+    expect(res.isError).toBe(true);
+    const evidence = resolveBondOwnerEvidence(bondActorLedger);
+    expect(evidence.status).toBe('consulted');
+    if (evidence.status !== 'consulted') return;
+    expect(evidence.bondRemovalRequest).toBeNull();
+  });
+
+  it('records at the live socket seam immediately before sock.logout', async () => {
+    bondActorLedger.reset();
+    socketState.current = {
+      logout: async () => {
+        const atDispatch = resolveBondOwnerEvidence(bondActorLedger);
+        expect(atDispatch.status).toBe('consulted');
+        if (atDispatch.status !== 'consulted') return;
+        expect(atDispatch.bondRemovalRequest?.action).toBe('mcp_tool:logout');
+        expect(atDispatch.bondRemovalRequest?.route).toBe('mcp');
+        throw new Error('socket disconnected after dispatch');
+      },
+    } as unknown as ExtendedBaileysSocket;
+    const registry = hostRealLogout();
+    registry.setSensitiveToolAuthorizer(() => true);
+
+    const res = await registry.call('logout', {}, ADMIN);
+
+    socketState.current = null;
+    expect(res.isError).toBe(true);
+    const evidence = resolveBondOwnerEvidence(bondActorLedger);
+    expect(evidence.status).toBe('consulted');
+    if (evidence.status !== 'consulted') return;
+    expect(evidence.bondRemovalRequest?.action).toBe('mcp_tool:logout');
     expect(evidence.actorClass).toBe('operator');
   });
 

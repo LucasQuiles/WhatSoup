@@ -32,7 +32,10 @@
 // module forbids. An honest `null` is the correct answer for pre-existing bonds.
 
 import { config } from '../config.ts';
-import type { EffectiveClientReceipt } from './effective-client-receipt.ts';
+import {
+  projectEffectiveClientReceipt,
+  type EffectiveClientReceipt,
+} from './effective-client-receipt.ts';
 import { shortHash } from '../lib/short-hash.ts';
 import {
   privateJournalPath,
@@ -153,11 +156,13 @@ function validate(value: Record<string, unknown>): AuthGenerationReceipt | null 
   if (source !== 'pairing_cli') return null;
   if (typeof authRootHash !== 'string' || authRootHash.length === 0) return null;
   const identityDigest = value['identityDigest'];
-  // The persisted pairing client is carried through opaquely: this module owns the
-  // generation contract, not the client contract, and re-validating a foreign shape
-  // here would duplicate ownership. A structurally wrong value surfaces to the
-  // reader as-is rather than silently becoming null.
   const pairingClient = value['pairingClient'];
+  const projectedPairingClient = pairingClient === null || pairingClient === undefined
+    ? null
+    : projectEffectiveClientReceipt(pairingClient);
+  if (pairingClient !== null && pairingClient !== undefined && !projectedPairingClient) {
+    return null;
+  }
   return {
     version: 1,
     generationId,
@@ -165,10 +170,7 @@ function validate(value: Record<string, unknown>): AuthGenerationReceipt | null 
     source,
     identityDigest: typeof identityDigest === 'string' ? identityDigest : null,
     authRootHash,
-    pairingClient:
-      pairingClient && typeof pairingClient === 'object' && !Array.isArray(pairingClient)
-        ? (pairingClient as EffectiveClientReceipt)
-        : null,
+    pairingClient: projectedPairingClient,
   };
 }
 
