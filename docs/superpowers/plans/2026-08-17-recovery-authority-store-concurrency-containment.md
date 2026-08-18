@@ -1,5 +1,9 @@
 # Recovery-Authority Store Concurrency Containment Implementation Plan
 
+**Status:** completed — this lane hit the hard-stop criterion recorded below and the
+synchronous containment was NOT shipped; the successor (one durable file per marker) landed
+instead. Read the HARD STOP and SUCCESSOR LANDED blocks before reusing anything here.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Preserve every accepted recovery-marker mutation across concurrent WhatSoup processes without retaining the fixed-temp collision or introducing an unbounded synchronous event-loop stall.

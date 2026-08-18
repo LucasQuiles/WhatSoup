@@ -1,6 +1,8 @@
 # Recovery-Authority Store Concurrency Containment Design
 
-**Status:** architecture and implementation plan approved; implementation in progress
+**Status:** completed — superseded in approach by the per-marker redesign (the synchronous
+containment this document specifies hit its own hard-stop criterion and was not shipped; see
+the plan's HARD STOP and SUCCESSOR LANDED blocks)
 
 **Canonical design baseline:** `8c66317823f213f49fd6fd254d79bf77790bbca1`
 

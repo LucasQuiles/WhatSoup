@@ -18,15 +18,15 @@ The **Inconsistencies** section lists missing or stale index entries compared wi
 scoped markdown files currently on disk.
 
 **Repo:** `WhatSoup`
-**Total entries:** 124
+**Total entries:** 126
 
 ## Totals
 
 | Dimension | Breakdown |
 |---|---|
-| Kind | handoff=8, plan=62, review=4, spec=49, state=1 |
-| Status | active=32, closed=4, completed=35, deferred=7, pending=15, unknown=31 |
-| Status source | body-marker=104, fallback=19, state-md-status=1 |
+| Kind | handoff=8, plan=63, review=4, spec=50, state=1 |
+| Status | active=32, closed=4, completed=37, deferred=7, pending=15, unknown=31 |
+| Status source | body-marker=106, fallback=19, state-md-status=1 |
 
 ## Inconsistencies
 
@@ -160,7 +160,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/handoffs/2026-07-16-boundary-core-history-mining.md` | handoff | pending | body-marker | boundary-core-history-mining | 2026-07-16 |  |
 | `docs/superpowers/handoffs/2026-07-28-incident-control-plane-finder-report.md` | handoff | unknown | fallback | incident-control-plane-finder-report | 2026-07-28 |  |
 
-### docs/superpowers/plans  _(62 entries)_
+### docs/superpowers/plans  _(63 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
@@ -225,6 +225,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/plans/2026-08-14-outbound-queue-quiescence-containment.md` | plan | active | body-marker | outbound-queue-quiescence-containment | 2026-08-20 |  |
 | `docs/superpowers/plans/2026-08-15-loop-lag-safe-forensic-pipeline.md` | plan | unknown | fallback | loop-lag-safe-forensic-pipeline | 2026-08-16 |  |
 | `docs/superpowers/plans/2026-08-15-poisoned-direct-send-rejection.md` | plan | unknown | fallback | poisoned-direct-send-rejection | 2026-08-20 |  |
+| `docs/superpowers/plans/2026-08-17-recovery-authority-store-concurrency-containment.md` | plan | completed | body-marker | recovery-authority-store-concurrency-containment | 2026-08-21 |  |
 | `docs/superpowers/plans/2026-08-21-anonymous-health-projection-ceiling.md` | plan | unknown | fallback | anonymous-health-projection-ceiling | 2026-08-21 |  |
 
 ### docs/superpowers/reviews  _(4 entries)_
@@ -236,7 +237,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/reviews/2026-07-09-wall-to-wall-audit-pr-briefs.md` | review | completed | body-marker | wall-to-wall-audit-pr-briefs | 2026-07-10 |  |
 | `docs/superpowers/reviews/2026-07-24-r13-r15-tech-debt-review-map.md` | review | completed | body-marker | r13-r15-tech-debt-review-map | 2026-07-24 |  |
 
-### docs/superpowers/specs  _(43 entries)_
+### docs/superpowers/specs  _(44 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
@@ -282,6 +283,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/specs/2026-08-14-outbound-queue-quiescence-containment-design.md` | spec | active | body-marker | outbound-queue-quiescence-containment-design | 2026-08-20 |  |
 | `docs/superpowers/specs/2026-08-15-loop-lag-safe-forensic-pipeline-design.md` | spec | unknown | body-marker | loop-lag-safe-forensic-pipeline-design | 2026-08-16 |  |
 | `docs/superpowers/specs/2026-08-16-recovery-blocked-follower-lifecycle-design.md` | spec | active | body-marker | recovery-blocked-follower-lifecycle-design | 2026-08-16 |  |
+| `docs/superpowers/specs/2026-08-17-recovery-authority-store-concurrency-containment-design.md` | spec | completed | body-marker | recovery-authority-store-concurrency-containment-design | 2026-08-21 |  |
 | `docs/superpowers/specs/2026-08-21-anonymous-health-projection-ceiling-design.md` | spec | unknown | body-marker | anonymous-health-projection-ceiling-design | 2026-08-21 |  |
 
 ### docs/superpowers/specs/kill-session-transactional-cancellation  _(3 entries)_
@@ -303,4 +305,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-08-21T09:22:06Z from commit `1aceca351369db7f3f5caf7c88d4133d8930d4a9`
+- Generated at 2026-08-22T03:25:37Z from commit `6343732469d0c781dc68f8f2749aa4328f8ba69c`
