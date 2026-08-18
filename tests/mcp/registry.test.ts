@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { z } from 'zod';
 import { ToolRegistry } from '../../src/mcp/registry.ts';
 import { toolError, type ToolDeclaration, type SessionContext } from '../../src/mcp/types.ts';
+import { fakeClock } from '../../src/lib/clock.ts';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -985,5 +986,42 @@ describe('ToolRegistry.getInFlightCallStats', () => {
     gates.forEach((release) => release());
     await Promise.all([first, second]);
     expect(registry.getInFlightCallStats().pendingCount).toBe(0);
+  });
+
+  it('reads both the startedAt stamp and the default now from the injected clock (#2200)', async () => {
+    // The point of the clock slice is determinism, not just a lower raw count:
+    // both the in-flight start capture and the age computation must consult the
+    // injected Clock. Advance it a known delta and assert the age equals that
+    // delta exactly — a wall-clock read would report ~0 (or negative).
+    const clock = fakeClock(1_000_000);
+    const clocked = new ToolRegistry(clock);
+    let releaseHandler!: () => void;
+    const gate = new Promise<void>((resolve) => { releaseHandler = resolve; });
+    clocked.register(
+      makeTool({
+        name: 'clocked_slow',
+        scope: 'global',
+        schema: z.object({}),
+        handler: async () => {
+          await gate;
+          return { ok: true };
+        },
+      }),
+    );
+
+    const callPromise = clocked.call('clocked_slow', {}, makeSession());
+    await Promise.resolve();
+    await Promise.resolve();
+
+    clock.advance(500);
+    const stats = clocked.getInFlightCallStats();
+    expect(stats.pendingCount).toBe(1);
+    expect(
+      stats.oldestCallAgeMs,
+      'in-flight age read the wall clock instead of the injected Clock',
+    ).toBe(500);
+
+    releaseHandler();
+    await callPromise;
   });
 });

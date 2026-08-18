@@ -53,6 +53,13 @@
  *     wall-clock reading, and not substitutable by systemClock.
  * Bounding these would flag correct code and train people to ignore the gate.
  *
+ * Slice (2026-08-18, #2200): migrated the src/mcp/ subtree — registry.ts (7),
+ * tools/knowledge.ts (3), socket-server.ts (1), tools/retention.ts (1), and
+ * tools/memory-write.ts (1 bare new Date()) — to an injected Clock defaulting
+ * to systemClock. 12 Date.now() + 1 bare new Date() sites removed, clearing
+ * the whole src/mcp/ subtree: it now has zero raw sites of all three patterns.
+ * CLOCK_BUDGET lowered 308 -> 296; BARE_NEW_DATE_BUDGET lowered 105 -> 104.
+ *
  * Companion: #2200 slice 1.
  */
 import { readdirSync, readFileSync } from 'node:fs';
@@ -66,10 +73,10 @@ const srcRoot = resolve(repoRoot, 'src');
 
 // Ratchet ceiling: the count may only stay the same or decrease.
 // Lower this constant when a migration slice removes Date.now() call sites.
-const CLOCK_BUDGET = 308;
+const CLOCK_BUDGET = 296;
 // Same debt, different syntax — each dodged the call-site count entirely.
 const DATE_NOW_REF_BUDGET = 9;
-const BARE_NEW_DATE_BUDGET = 105;
+const BARE_NEW_DATE_BUDGET = 104;
 
 // src/lib/clock.ts is the ONE file allowed to call Date.now() (it wraps it).
 const EXEMPT_FILE = 'src/lib/clock.ts';

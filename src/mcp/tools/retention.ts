@@ -11,6 +11,7 @@ import type { Database } from '../../core/database.ts';
 import type { ToolRegistry } from '../registry.ts';
 import { createChildLogger } from '../../logger.ts';
 import { MS_PER_HOUR } from '../../lib/time-units.ts';
+import { type Clock, systemClock } from '../../lib/clock.ts';
 import { EXTERNAL_EFFECT_CONTRACT_VERSION } from '../external-effect.ts';
 
 const log = createChildLogger('mcp:retention');
@@ -27,8 +28,14 @@ export interface RetentionDeps {
 // Dry-run scan — count files that would be deleted without touching them
 // ---------------------------------------------------------------------------
 
-function scanDir(dir: string, maxAgeMs: number): { count: number; bytes: number } {
-  const now = Date.now();
+function scanDir(
+  dir: string,
+  maxAgeMs: number,
+  // Injectable so expiry can be driven to a known instant (#2200). Optional
+  // and defaulted, so this slice changes no existing call site.
+  clock: Clock = systemClock,
+): { count: number; bytes: number } {
+  const now = clock.now();
   let count = 0;
   let bytes = 0;
   let entries;
@@ -56,7 +63,14 @@ function scanDir(dir: string, maxAgeMs: number): { count: number; bytes: number 
 // Registration
 // ---------------------------------------------------------------------------
 
-export function registerRetentionTools(registry: ToolRegistry, deps: RetentionDeps): void {
+export function registerRetentionTools(
+  registry: ToolRegistry,
+  deps: RetentionDeps,
+  // Injectable so the dry-run expiry scan can be driven to a known instant
+  // (#2200). Optional and defaulted, so this slice changes no existing call
+  // site.
+  clock: Clock = systemClock,
+): void {
   const { db } = deps;
 
   // Base media directory: config.mediaDir resolves to .../media/tmp; base is one level up
@@ -95,8 +109,8 @@ export function registerRetentionTools(registry: ToolRegistry, deps: RetentionDe
       const cacheMaxAgeMs = config.mediaRetention.cacheHours * MS_PER_HOUR;
 
       if (dryRun) {
-        const tmpScan   = scanDir(join(baseMediaDir, 'tmp'),   tempMaxAgeMs);
-        const cacheScan = scanDir(join(baseMediaDir, 'cache'), cacheMaxAgeMs);
+        const tmpScan   = scanDir(join(baseMediaDir, 'tmp'),   tempMaxAgeMs, clock);
+        const cacheScan = scanDir(join(baseMediaDir, 'cache'), cacheMaxAgeMs, clock);
         const total = { count: tmpScan.count + cacheScan.count, bytes: tmpScan.bytes + cacheScan.bytes };
         log.info({ dryRun: true, ...total }, 'cleanup_media: dry-run scan complete');
         return {

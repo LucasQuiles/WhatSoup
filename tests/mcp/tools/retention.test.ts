@@ -6,6 +6,7 @@ import { config } from '../../../src/config.ts';
 import { Database } from '../../../src/core/database.ts';
 import { ToolRegistry } from '../../../src/mcp/registry.ts';
 import { registerRetentionTools } from '../../../src/mcp/tools/retention.ts';
+import { fakeClock } from '../../../src/lib/clock.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
 
 function globalSession(): SessionContext {
@@ -144,5 +145,30 @@ describe('retention tools', () => {
     expect(body.deleted).toBe(0);
     expect(body.dry_run).toBe(false);
     expect(existsSync(filePath)).toBe(true);
+  });
+
+  it('stamps the dry-run expiry scan from the injected clock, not the wall clock (#2200)', async () => {
+    // Pinning a far-past epoch makes wall-clock leakage unmistakable: a file 1h
+    // older than the pinned clock is NOT expired at the pinned instant, but IS
+    // ~3 years expired on the real 2026 wall clock — so consulting the wrong
+    // clock flips the scan's deleted count from 0 to 1.
+    const PINNED_MS = 1_700_000_000_000; // 2023-11-14T22:13:20Z
+    const oneHourMs = 60 * 60 * 1000;
+
+    const filePath = join(tempRoot, 'tmp', 'clock-pinned.jpg');
+    writeFileSync(filePath, Buffer.from('x'));
+    const oneHourBeforePinned = new Date(PINNED_MS - oneHourMs);
+    utimesSync(filePath, oneHourBeforePinned, oneHourBeforePinned);
+
+    const clockedRegistry = new ToolRegistry();
+    registerRetentionTools(clockedRegistry, { db }, fakeClock(PINNED_MS));
+
+    const result = await clockedRegistry.call('cleanup_media', { dry_run: true }, globalSession());
+    expect(result.isError).toBeUndefined();
+    const body = JSON.parse(result.content[0].text) as { deleted: number; dry_run: boolean };
+    expect(
+      body.deleted,
+      'dry-run expiry used the wall clock, so the injected Clock is not consulted',
+    ).toBe(0);
   });
 });

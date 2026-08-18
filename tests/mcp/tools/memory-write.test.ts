@@ -14,13 +14,14 @@ vi.mock('../../../src/logger.ts', async () => {
 
 import { registerMemoryWriteTools, type MemoryWriter } from '../../../src/mcp/tools/memory-write.ts';
 import type { ToolDeclaration, SessionContext } from '../../../src/mcp/types.ts';
+import { fakeClock } from '../../../src/lib/clock.ts';
 
-function setup(opts: { upsert?: MemoryWriter['upsert'] } = {}) {
+function setup(opts: { upsert?: MemoryWriter['upsert']; clock?: ReturnType<typeof fakeClock> } = {}) {
   const tools: ToolDeclaration[] = [];
   const register = (t: ToolDeclaration) => tools.push(t);
   const upsert = vi.fn(opts.upsert ?? (async () => {}));
   const writer: MemoryWriter = { upsert };
-  registerMemoryWriteTools(register, () => writer);
+  registerMemoryWriteTools(register, () => writer, opts.clock);
   const tool = tools.find((t) => t.name === 'memory_write')!;
   return { tool, upsert };
 }
@@ -69,6 +70,27 @@ describe('memory_write tool', () => {
       operationId: (res as { operation_id: string }).operation_id,
       operation: 'memory_write',
     });
+  });
+
+  it('stamps record timestamps from the injected clock, not the wall clock (#2200)', async () => {
+    // The point of the clock slice is determinism, not just a lower raw count:
+    // a write path that reads new Date() directly cannot be driven to a known
+    // instant. Pinning a far-past epoch makes wall-clock leakage unmistakable —
+    // no real clock can produce it (and this suite runs in 2026).
+    const PINNED_MS = 1_700_000_000_000; // 2023-11-14T22:13:20Z
+    const PINNED_ISO = new Date(PINNED_MS).toISOString();
+    const { tool, upsert } = setup({ clock: fakeClock(PINNED_MS) });
+
+    await tool.handler(
+      { chatJid: '12345@s.whatsapp.net', text: 'clock-pinned fact', memory_type: 'preference' },
+      chatSession(),
+    );
+
+    const r = (upsert.mock.calls[0] as [MemoryRecord[]])[0][0];
+    expect(
+      { createdAt: r.createdAt, updatedAt: r.updatedAt },
+      'record timestamps came from the wall clock, so the injected Clock is not actually consulted',
+    ).toEqual({ createdAt: PINNED_ISO, updatedAt: PINNED_ISO });
   });
 
   it('QR-082: REJECTS a self_fact write from a chat-scoped session (global-identity poisoning guard)', async () => {
