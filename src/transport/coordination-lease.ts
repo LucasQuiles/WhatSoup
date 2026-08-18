@@ -34,7 +34,7 @@
 // max(tombstone, existing lease) + 1. The O_EXCL lease create is the
 // single-winner arbiter between racing acquirers.
 
-import { closeSync, existsSync, openSync, readFileSync, unlinkSync, writeSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readFileSync, statSync, unlinkSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 import { hostname } from 'node:os';
 import { execFileSync } from 'node:child_process';
@@ -267,43 +267,110 @@ function assessHolder(leasePath: string, probes: LeaseProbes): HolderVerdict {
   return { verdict: 'live_owner' };
 }
 
+// The reclaim path (assess → unlink → exclusive create) is not atomic: two
+// racers that both assessed a dead holder could each unlink the other's fresh
+// lease and both "win" with the SAME fencing token. A guard file serializes
+// the whole reclaim critical section; anything older than this is a crashed
+// reclaimer's leftover and may be broken.
+const RECLAIM_GUARD_STALE_MS = 30_000;
+
+function reclaimGuardPath(stateRoot: string, scopeId: AccountScopeIdV1): string {
+  return `${coordinationLeasePath(stateRoot, scopeId)}.reclaim`;
+}
+
+function acquireReclaimGuard(guardPath: string, probes: LeaseProbes): boolean {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    let fd: number | null = null;
+    try {
+      fd = openSync(guardPath, 'wx', 0o600);
+      writeSync(fd, JSON.stringify({ pid: probes.pid, at: probes.nowMs() }));
+      return true;
+    } catch {
+      // intentional: the guard already exists (or the directory refused the
+      // create) — fall through to the staleness check below.
+    } finally {
+      if (fd !== null) closeSync(fd);
+    }
+    try {
+      const age = probes.nowMs() - statSync(guardPath).mtimeMs;
+      if (age <= RECLAIM_GUARD_STALE_MS) return false;
+      unlinkSync(guardPath);
+    } catch {
+      // intentional: a guard that vanished or cannot be assessed means the
+      // race is live — refuse rather than reclaim blind.
+      return false;
+    }
+  }
+  return false;
+}
+
 export function acquireCoordinationLease(args: AcquireLeaseArgs): AcquireLeaseResult {
   ensurePrivateDirectorySync(args.stateRoot);
   const leasePath = coordinationLeasePath(args.stateRoot, args.scopeId);
 
   let takeover: TakeoverReceipt | null = null;
   let priorToken = 0;
+  let guardPath: string | null = null;
 
-  if (existsSync(leasePath)) {
-    const assessment = assessHolder(leasePath, args.probes);
-    if (assessment.verdict === 'corrupt') return { ok: false, refusal: 'lease_corrupt' };
-    if (assessment.verdict === 'unknown') return { ok: false, refusal: 'owner_unknown' };
-    if (assessment.verdict === 'live_owner') return { ok: false, refusal: 'held_by_live_owner' };
-    priorToken = assessment.holder.fencingToken;
-    takeover = {
-      reason: assessment.reason,
-      priorFencingToken: assessment.holder.fencingToken,
-      priorPid: assessment.holder.pid,
-      at: new Date(args.probes.nowMs()).toISOString(),
-      operationId: args.operationId,
-      ownerAuthorizationId: null,
-    };
-    try {
-      unlinkSync(leasePath);
-    } catch {
-      return { ok: false, refusal: 'io_error' };
+  try {
+    if (existsSync(leasePath)) {
+      const assessment = assessHolder(leasePath, args.probes);
+      if (assessment.verdict === 'corrupt') return { ok: false, refusal: 'lease_corrupt' };
+      if (assessment.verdict === 'unknown') return { ok: false, refusal: 'owner_unknown' };
+      if (assessment.verdict === 'live_owner') return { ok: false, refusal: 'held_by_live_owner' };
+      guardPath = reclaimGuardPath(args.stateRoot, args.scopeId);
+      if (!acquireReclaimGuard(guardPath, args.probes)) {
+        guardPath = null;
+        return { ok: false, refusal: 'lease_race_lost' };
+      }
+      // Re-assess UNDER the guard: the state may have changed while racing
+      // for it (a racer may have already reclaimed and now be the owner).
+      if (existsSync(leasePath)) {
+        const reassessed = assessHolder(leasePath, args.probes);
+        if (reassessed.verdict === 'corrupt') return { ok: false, refusal: 'lease_corrupt' };
+        if (reassessed.verdict === 'unknown') return { ok: false, refusal: 'owner_unknown' };
+        if (reassessed.verdict === 'live_owner') return { ok: false, refusal: 'held_by_live_owner' };
+        priorToken = reassessed.holder.fencingToken;
+        takeover = {
+          reason: reassessed.reason,
+          priorFencingToken: reassessed.holder.fencingToken,
+          priorPid: reassessed.holder.pid,
+          at: new Date(args.probes.nowMs()).toISOString(),
+          operationId: args.operationId,
+          ownerAuthorizationId: null,
+        };
+        try {
+          unlinkSync(leasePath);
+        } catch {
+          return { ok: false, refusal: 'io_error' };
+        }
+      }
+    }
+
+    const fencingToken = Math.max(readTombstoneToken(args.stateRoot, args.scopeId), priorToken) + 1;
+    const lease = buildLease(args, fencingToken);
+    if (lease === null) return { ok: false, refusal: 'owner_unknown' };
+    if (!writeLeaseExclusive(leasePath, lease)) {
+      // Another acquirer won the O_EXCL race between our unlink/read and write.
+      return { ok: false, refusal: 'lease_race_lost' };
+    }
+    // Verify-after-write: our write must still be the lease on disk. Belt and
+    // braces under the guard; load-bearing if a guard-less writer slips in.
+    const onDisk = readCoordinationLease(args.stateRoot, args.scopeId);
+    if (onDisk === null || onDisk.operationId !== lease.operationId || onDisk.fencingToken !== lease.fencingToken) {
+      return { ok: false, refusal: 'lease_race_lost' };
+    }
+    if (takeover !== null) appendTakeoverReceipt(args.stateRoot, args.scopeId, takeover);
+    return { ok: true, lease, takeover };
+  } finally {
+    if (guardPath !== null) {
+      try {
+        unlinkSync(guardPath);
+      } catch {
+        // intentional: the stale-age fallback reaps a leaked guard file.
+      }
     }
   }
-
-  const fencingToken = Math.max(readTombstoneToken(args.stateRoot, args.scopeId), priorToken) + 1;
-  const lease = buildLease(args, fencingToken);
-  if (lease === null) return { ok: false, refusal: 'owner_unknown' };
-  if (!writeLeaseExclusive(leasePath, lease)) {
-    // Another acquirer won the O_EXCL race between our unlink/read and write.
-    return { ok: false, refusal: 'lease_race_lost' };
-  }
-  if (takeover !== null) appendTakeoverReceipt(args.stateRoot, args.scopeId, takeover);
-  return { ok: true, lease, takeover };
 }
 
 export type RenewLeaseResult =

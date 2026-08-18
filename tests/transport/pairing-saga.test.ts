@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { mkdtempSync } from 'node:fs';
@@ -110,6 +110,14 @@ function baseRequest(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function mustRecord(key: string) {
+  const record = readPairingOperationRecord(stateRoot, key);
+  if (record === null || record === 'journal_unreadable') {
+    throw new Error(`no readable operation record for ${key}`);
+  }
+  return record;
+}
+
 function writeRevokedTree(): string {
   mkdirSync(authDir, { recursive: true, mode: 0o700 });
   writeFileSync(join(authDir, 'creds.json'), '{"me":{"id":"revoked"}}');
@@ -206,8 +214,7 @@ describe('executePairingSaga - happy path over a latched revoked tree', () => {
     // startService was NOT requested (install-without-activate default).
     expect(log.calls).not.toContain('startService');
 
-    const record = readPairingOperationRecord(stateRoot, 'pairing-op-0001');
-    expect(record?.operation.state).toBe('receipt_persisted');
+    expect(mustRecord('pairing-op-0001').operation.state).toBe('receipt_persisted');
   });
 
   it('activates (and only then) when startService is requested and succeeds', async () => {
@@ -221,9 +228,9 @@ describe('executePairingSaga - happy path over a latched revoked tree', () => {
     );
     if (!outcome.ok) throw new Error(`saga failed: ${outcome.errorClass}`);
     expect(log.calls).toContain('startService');
-    const record = readPairingOperationRecord(stateRoot, 'pairing-op-0001');
-    expect(record?.operation.state).toBe('activated');
-    expect(record?.operation.resultGenerationId).toBe(outcome.generationId);
+    const record = mustRecord('pairing-op-0001');
+    expect(record.operation.state).toBe('activated');
+    expect(record.operation.resultGenerationId).toBe(outcome.generationId);
   });
 
   it('handles an already-quarantined (absent) active tree', async () => {
@@ -281,7 +288,7 @@ describe('executePairingSaga - refusals and faults', () => {
     const outcome = await executePairingSaga(baseRequest(), { stateRoot, authDir }, effects);
     expect(outcome).toEqual({ ok: false, errorClass: 'verification_failed', refusal: 'service_stop_unverified' });
     expect(existsSync(join(authDir, 'creds.json'))).toBe(true);
-    expect(readPairingOperationRecord(stateRoot, 'pairing-op-0001')?.operation.state).toBe('failed');
+    expect(mustRecord('pairing-op-0001').operation.state).toBe('failed');
   });
 
   it('fails with lease_unavailable when a live owner holds the scope', async () => {
@@ -321,7 +328,7 @@ describe('executePairingSaga - refusals and faults', () => {
     expect(resolveAuthGenerationEvidenceV2(stateRoot).status).toBe('unavailable');
     expect(log.calls).not.toContain('startService');
     expect(log.calls).toContain('releaseLease');
-    expect(readPairingOperationRecord(stateRoot, 'pairing-op-0001')?.operation.state).toBe('failed');
+    expect(mustRecord('pairing-op-0001').operation.state).toBe('failed');
   });
 
   it('a receipt-persistence failure is a pairing failure: incomplete tree quarantined, no activation', async () => {
@@ -342,7 +349,7 @@ describe('executePairingSaga - refusals and faults', () => {
       refusal: 'generation_receipt_unpersisted',
     });
     expect(log.calls).not.toContain('startService');
-    expect(readPairingOperationRecord(stateRoot, 'pairing-op-0001')?.operation.state).toBe('failed');
+    expect(mustRecord('pairing-op-0001').operation.state).toBe('failed');
   });
 
   it('replaying a terminal operation with identical parameters returns the recorded outcome without re-running', async () => {
@@ -412,5 +419,169 @@ describe('pairingPreflight', () => {
         lease: { status: 'vacant' },
       }),
     );
+  });
+});
+
+describe('executePairingSaga — refusal and custody edge branches', () => {
+  it('refuses an invalid scope id before touching anything', async () => {
+    const { effects, log } = makeEffects();
+    const outcome = await executePairingSaga(baseRequest({ scopeId: 'not-a-scope' }) as never, { stateRoot, authDir }, effects);
+    expect(outcome).toEqual({ ok: false, errorClass: 'authorization_invalid', refusal: 'scope_invalid' });
+    expect(log.calls).toEqual([]);
+  });
+
+  it('refuses an empty authorization id before touching anything', async () => {
+    const { effects, log } = makeEffects();
+    const outcome = await executePairingSaga(baseRequest({ authorizationId: '' }) as never, { stateRoot, authDir }, effects);
+    expect(outcome).toEqual({ ok: false, errorClass: 'authorization_invalid', refusal: 'authorization_required' });
+    expect(log.calls).toEqual([]);
+  });
+
+  it('refuses when the latch journal is corrupt', async () => {
+    writeFileSync(join(stateRoot, 'terminal-latch.journal.ndjson'), 'garbage{{{\n', { mode: 0o600 });
+    const { effects, log } = makeEffects();
+    const outcome = await executePairingSaga(baseRequest() as never, { stateRoot, authDir }, effects);
+    expect(outcome).toEqual({ ok: false, errorClass: 'verification_failed', refusal: 'latch_state_corrupt' });
+    expect(log.calls).toEqual([]);
+  });
+
+  it('replays a recorded failure as operation_already_failed without re-running', async () => {
+    const revokedDigest = writeRevokedTree();
+    expect(appendLatchTransition(stateRoot, latchCreated(revokedDigest)).ok).toBe(true);
+    const failing = makeEffects({ runPairingHelper: async () => ({ ok: false, errorClass: 'pairing_timeout' }) });
+    const first = await executePairingSaga(baseRequest({ expectedLatchRevision: 1 }) as never, { stateRoot, authDir }, failing.effects);
+    expect(first.ok).toBe(false);
+
+    const replay = makeEffects();
+    const second = await executePairingSaga(baseRequest({ expectedLatchRevision: 1 }) as never, { stateRoot, authDir }, replay.effects);
+    expect(second).toEqual({ ok: false, errorClass: 'pairing_timeout', refusal: 'operation_already_failed' });
+    expect(replay.log.calls).toEqual([]);
+  });
+
+  it('fails closed when the operation journal exists but cannot be read (idempotency must not silently vanish)', async () => {
+    const revokedDigest = writeRevokedTree();
+    expect(appendLatchTransition(stateRoot, latchCreated(revokedDigest)).ok).toBe(true);
+    const journalPath = join(stateRoot, 'pairing-operations.ndjson');
+    writeFileSync(journalPath, 'placeholder\n', { mode: 0o600 });
+    chmodSync(journalPath, 0o000);
+    const { effects, log } = makeEffects();
+    const outcome = await executePairingSaga(baseRequest({ expectedLatchRevision: 1 }) as never, { stateRoot, authDir }, effects);
+    chmodSync(journalPath, 0o600);
+    expect(outcome).toEqual({ ok: false, errorClass: 'verification_failed', refusal: 'operation_journal_unreadable' });
+    expect(log.calls).toEqual([]);
+  });
+
+  it('refuses an unreadable active tree without quarantining it', async () => {
+    const revokedDigest = writeRevokedTree();
+    expect(appendLatchTransition(stateRoot, latchCreated(revokedDigest)).ok).toBe(true);
+    chmodSync(authDir, 0o000);
+    const { effects } = makeEffects();
+    const outcome = await executePairingSaga(baseRequest({ expectedLatchRevision: 1 }) as never, { stateRoot, authDir }, effects);
+    chmodSync(authDir, 0o700);
+    expect(outcome).toEqual({ ok: false, errorClass: 'quarantine_failed', refusal: 'active_tree_unreadable' });
+    expect(existsSync(join(authDir, 'creds.json'))).toBe(true);
+  });
+
+  it('a supersede transition whose operation id was already used refuses supersession but keeps the fresh tree', async () => {
+    const revokedDigest = writeRevokedTree();
+    const created = latchCreated(revokedDigest);
+    const collided = { ...created, operationId: 'pairing-op-0031.supersede' };
+    expect(appendLatchTransition(stateRoot, collided).ok).toBe(true);
+    const { effects } = makeEffects();
+    const outcome = await executePairingSaga(
+      baseRequest({ idempotencyKey: 'pairing-op-0031', expectedLatchRevision: 1 }) as never,
+      { stateRoot, authDir },
+      effects,
+    );
+    expect(outcome).toEqual({ ok: false, errorClass: 'verification_failed', refusal: 'latch_supersession_refused' });
+    expect(existsSync(join(authDir, 'creds.json'))).toBe(true);
+    expect(readTerminalLatchJournal(stateRoot).status).toBe('active');
+  });
+
+  it('a service start failure after receipt persistence refuses activation but keeps the paired generation', async () => {
+    const revokedDigest = writeRevokedTree();
+    expect(appendLatchTransition(stateRoot, latchCreated(revokedDigest)).ok).toBe(true);
+    const { effects } = makeEffects({ startService: async () => false });
+    const outcome = await executePairingSaga(
+      baseRequest({ expectedLatchRevision: 1, startService: true }) as never,
+      { stateRoot, authDir },
+      effects,
+    );
+    expect(outcome).toEqual({ ok: false, errorClass: 'verification_failed', refusal: 'service_start_unverified' });
+    expect(resolveAuthGenerationEvidenceV2(stateRoot).status).toBe('recorded_v2');
+    expect(readTerminalLatchJournal(stateRoot).status).toBe('superseded');
+  });
+
+  it('an incomplete pairing that wrote nothing leaves no failed-quarantine sibling', async () => {
+    const revokedDigest = writeRevokedTree();
+    expect(appendLatchTransition(stateRoot, latchCreated(revokedDigest)).ok).toBe(true);
+    const { effects } = makeEffects({ runPairingHelper: async () => ({ ok: false, errorClass: 'unknown' }) });
+    const outcome = await executePairingSaga(baseRequest({ expectedLatchRevision: 1 }) as never, { stateRoot, authDir }, effects);
+    expect(outcome.ok).toBe(false);
+    expect(readdirSync(root).filter(name => name.includes('.failed.'))).toEqual([]);
+  });
+
+  it('journal reads skip torn, non-object, foreign-version, and foreign-key rows', async () => {
+    const revokedDigest = writeRevokedTree();
+    expect(appendLatchTransition(stateRoot, latchCreated(revokedDigest)).ok).toBe(true);
+    const { effects } = makeEffects();
+    const outcome = await executePairingSaga(baseRequest({ expectedLatchRevision: 1 }) as never, { stateRoot, authDir }, effects);
+    expect(outcome.ok).toBe(true);
+
+    const journalPath = join(stateRoot, 'pairing-operations.ndjson');
+    const rows = readFileSync(journalPath, 'utf-8').trimEnd().split('\n');
+    const lastRow = JSON.parse(rows[rows.length - 1]!) as { operation: { idempotencyKey: string } };
+    const foreign = { ...lastRow, operation: { ...lastRow.operation, idempotencyKey: 'pairing-op-other' } };
+    writeFileSync(
+      journalPath,
+      ['torn{{{', '"just-a-string"', JSON.stringify({ v: 99, paramsDigest: 'x' }), JSON.stringify(foreign), ...rows].join('\n') + '\n',
+      { mode: 0o600 },
+    );
+    const record = readPairingOperationRecord(stateRoot, 'pairing-op-0001');
+    expect(record).not.toBeNull();
+    expect(record).not.toBe('journal_unreadable');
+    if (record === null || record === 'journal_unreadable') throw new Error('unreachable');
+    expect(record.operation.idempotencyKey).toBe('pairing-op-0001');
+    expect(record.operation.state).toBe('receipt_persisted');
+  });
+});
+
+describe('pairingPreflight — fail-closed reporting branches', () => {
+  it('reports a corrupt lease file as corrupt, never vacant', () => {
+    writeFileSync(join(stateRoot, 'coordination-lease.line-a-wa.json'), 'not json', { mode: 0o600 });
+    const plan = pairingPreflight({ stateRoot, authDir });
+    expect(plan.lease).toEqual({ status: 'corrupt' });
+  });
+
+  it('reports a held lease with its mode', () => {
+    const acquired = acquireCoordinationLease({
+      stateRoot,
+      scopeId: SCOPE,
+      operationId: 'op-preflight-held',
+      mode: 'pairing',
+      ttlMs: 60_000,
+      probes: probes(),
+    });
+    expect(acquired.ok).toBe(true);
+    const plan = pairingPreflight({ stateRoot, authDir });
+    expect(plan.lease).toEqual({ status: 'held', mode: 'pairing' });
+  });
+
+  it('reports the journal tail operation while skipping torn rows, and null for an unreadable journal', async () => {
+    const revokedDigest = writeRevokedTree();
+    expect(appendLatchTransition(stateRoot, latchCreated(revokedDigest)).ok).toBe(true);
+    const { effects } = makeEffects();
+    const outcome = await executePairingSaga(baseRequest({ expectedLatchRevision: 1 }) as never, { stateRoot, authDir }, effects);
+    expect(outcome.ok).toBe(true);
+
+    const journalPath = join(stateRoot, 'pairing-operations.ndjson');
+    appendFileSync(journalPath, 'torn{{{\n');
+    let plan = pairingPreflight({ stateRoot, authDir });
+    expect(plan.lastOperation).toEqual({ idempotencyKey: 'pairing-op-0001', state: 'receipt_persisted' });
+
+    chmodSync(journalPath, 0o000);
+    plan = pairingPreflight({ stateRoot, authDir });
+    chmodSync(journalPath, 0o600);
+    expect(plan.lastOperation).toBeNull();
   });
 });

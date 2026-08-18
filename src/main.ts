@@ -320,9 +320,17 @@ function acquireAccountScopeLease(): void {
     });
     if (renewed.ok) {
       scopeLease = renewed.lease;
+    } else if (renewed.refusal === 'fencing_token_mismatch' || renewed.refusal === 'lease_missing') {
+      // Another actor provably owns (or released) the scope. A fence that
+      // only logs does not fence: continuing to run means a dual writer on
+      // the account's auth tree. Shut down through the normal signal path so
+      // locks release cleanly; our stale lease token cannot clobber the
+      // successor's on release (release compares fencing tokens).
+      log.fatal({ refusal: renewed.refusal }, 'account-scope lease lost to a fenced successor; shutting down');
+      process.kill(process.pid, 'SIGTERM');
     } else {
-      // Losing the lease mid-run means a fenced successor exists; log loudly
-      // but do not tear down mid-flight work from a timer callback.
+      // A corrupt lease file proves nothing about ownership either way; keep
+      // running and keep reporting rather than tearing down mid-flight work.
       log.error({ refusal: renewed.refusal }, 'account-scope lease renewal failed');
     }
   }, Math.floor(SCOPE_LEASE_TTL_MS / 3));

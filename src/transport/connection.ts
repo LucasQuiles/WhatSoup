@@ -2600,6 +2600,11 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       : null;
     if (stateRoot === null) return null;
     const latchState = readTerminalLatchJournal(stateRoot);
+    // The overwhelmingly common case — no latch was ever recorded — must not
+    // pay for a full credential-tree digest (sha256 over every pre-key file)
+    // on every connect attempt, especially during reconnect storms. The same
+    // goes for an owner-released latch: both allow regardless of tree state.
+    if (latchState.status === 'missing' || latchState.status === 'released') return null;
     const activeTree = observeActiveTree(config.authDir);
     const evidence = resolveAuthGenerationEvidenceV2(stateRoot);
     const activationEvidence = evidence.status === 'recorded_v2'

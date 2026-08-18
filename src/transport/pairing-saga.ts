@@ -128,7 +128,7 @@ function paramsDigestOf(request: PairingSagaRequest): string {
 export function readPairingOperationRecord(
   stateRoot: string,
   idempotencyKey: string,
-): PairingOperationRecord | null {
+): PairingOperationRecord | null | 'journal_unreadable' {
   if (!existsSync(operationsJournalPath(stateRoot))) return null;
   let raw: string | null;
   try {
@@ -137,11 +137,13 @@ export function readPairingOperationRecord(
       label: 'pairing operations journal',
     });
   } catch {
-    // intentional: an unreadable journal reads as no record - the saga then
-    // re-validates every precondition from primary state before acting.
-    return null;
+    // A journal that EXISTS but cannot be read must fail closed: reading it
+    // as "no record" would silently disable idempotent replay and the
+    // crash-interlock, letting a retried completed operation quarantine a
+    // valid credential tree and open a fresh registration.
+    return 'journal_unreadable';
   }
-  if (raw === null) return null;
+  if (raw === null) return 'journal_unreadable';
   let latest: PairingOperationRecord | null = null;
   for (const line of raw.split('\n')) {
     if (line.length === 0) continue;
@@ -189,6 +191,9 @@ export async function executePairingSaga(
 
   // Idempotency and crash posture come from the durable operation journal.
   const existing = readPairingOperationRecord(paths.stateRoot, request.idempotencyKey);
+  if (existing === 'journal_unreadable') {
+    return { ok: false, errorClass: 'verification_failed', refusal: 'operation_journal_unreadable' };
+  }
   if (existing !== null) {
     if (existing.paramsDigest !== paramsDigest) {
       return { ok: false, errorClass: 'verification_failed', refusal: 'parameter_drift' };

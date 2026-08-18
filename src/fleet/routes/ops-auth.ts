@@ -389,6 +389,14 @@ function rejectNonHeaderAuthOrCrossSite(req: IncomingMessage, res: ServerRespons
     jsonResponse(res, 401, { error: 'pairing routes require header-borne Bearer credentials' });
     return false;
   }
+  // The global gate accepts a legacy ?token= query credential; a Bearer-shaped
+  // header alone does not prove the header is what authenticated. Refuse the
+  // URL-borne form outright so these mutations cannot ride a loggable token.
+  const query = parseQueryString(req.url);
+  if (typeof query.token === 'string') {
+    jsonResponse(res, 403, { error: 'pairing routes refuse URL-borne token credentials; use the Authorization header' });
+    return false;
+  }
   const fetchSite = req.headers['sec-fetch-site'];
   if (typeof fetchSite === 'string' && fetchSite === 'cross-site') {
     jsonResponse(res, 403, { error: 'cross-site pairing requests are refused' });
@@ -451,7 +459,11 @@ export async function handlePairingStatus(
   jsonResponse(res, 200, {
     scopeId: scope,
     plan: pairingPreflight(paths),
-    operation: operation === null ? null : { state: operation.operation.state, generationId: operation.generationId, custody: operation.custody },
+    operation: operation === null
+      ? null
+      : operation === 'journal_unreadable'
+        ? { state: 'journal_unreadable' }
+        : { state: operation.operation.state, generationId: operation.generationId, custody: operation.custody },
     lastEvent: lastPairingEvents.get(params.name) ?? null,
   });
 }
@@ -476,36 +488,38 @@ export async function handlePairingApply(
     jsonResponse(res, 409, { error: 'pairing saga requires a configured accountScopeId; legacy instances use the SSE auth flow' });
     return;
   }
+  // Reserve the in-flight slot in the same synchronous section as the check:
+  // an `await` between has() and add() would let two concurrent applies both
+  // pass the guard and run sagas concurrently.
   if (authInFlight.has(params.name)) {
     jsonResponse(res, 409, { error: 'auth already in progress for this instance' });
     return;
   }
-
-  let body: Record<string, unknown>;
-  try {
-    body = JSON.parse(await readBody(req)) as Record<string, unknown>;
-  } catch {
-    jsonResponse(res, 400, { error: 'apply requires a JSON body' });
-    return;
-  }
-  const idempotencyKey = typeof body.idempotencyKey === 'string' && body.idempotencyKey.length > 0 ? body.idempotencyKey : null;
-  const authorizationId = typeof body.authorizationId === 'string' && body.authorizationId.length > 0 ? body.authorizationId : null;
-  const method = body.method === 'qr' || body.method === 'pairing_code' ? body.method : null;
-  const expectedLatchRevision = typeof body.expectedLatchRevision === 'number' && Number.isInteger(body.expectedLatchRevision) && body.expectedLatchRevision >= 0
-    ? body.expectedLatchRevision
-    : null;
-  const expectedCurrentGenerationId = body.expectedCurrentGenerationId === null || body.expectedCurrentGenerationId === undefined
-    ? null
-    : typeof body.expectedCurrentGenerationId === 'string' && body.expectedCurrentGenerationId.length > 0
-      ? body.expectedCurrentGenerationId
-      : undefined;
-  if (idempotencyKey === null || authorizationId === null || method === null || expectedLatchRevision === null || expectedCurrentGenerationId === undefined) {
-    jsonResponse(res, 400, { error: 'apply requires idempotencyKey, authorizationId, method (qr|pairing_code), expectedLatchRevision, and expectedCurrentGenerationId (string or null)' });
-    return;
-  }
-
   authInFlight.add(params.name);
   try {
+    let body: Record<string, unknown>;
+    try {
+      body = JSON.parse(await readBody(req)) as Record<string, unknown>;
+    } catch {
+      jsonResponse(res, 400, { error: 'apply requires a JSON body' });
+      return;
+    }
+    const idempotencyKey = typeof body.idempotencyKey === 'string' && body.idempotencyKey.length > 0 ? body.idempotencyKey : null;
+    const authorizationId = typeof body.authorizationId === 'string' && body.authorizationId.length > 0 ? body.authorizationId : null;
+    const method = body.method === 'qr' || body.method === 'pairing_code' ? body.method : null;
+    const expectedLatchRevision = typeof body.expectedLatchRevision === 'number' && Number.isInteger(body.expectedLatchRevision) && body.expectedLatchRevision >= 0
+      ? body.expectedLatchRevision
+      : null;
+    const expectedCurrentGenerationId = body.expectedCurrentGenerationId === null || body.expectedCurrentGenerationId === undefined
+      ? null
+      : typeof body.expectedCurrentGenerationId === 'string' && body.expectedCurrentGenerationId.length > 0
+        ? body.expectedCurrentGenerationId
+        : undefined;
+    if (idempotencyKey === null || authorizationId === null || method === null || expectedLatchRevision === null || expectedCurrentGenerationId === undefined) {
+      jsonResponse(res, 400, { error: 'apply requires idempotencyKey, authorizationId, method (qr|pairing_code), expectedLatchRevision, and expectedCurrentGenerationId (string or null)' });
+      return;
+    }
+
     const paths = pairingPathsFor(instance);
     const outcome = await executePairingSaga(
       {
@@ -581,6 +595,9 @@ function buildSagaEffects(
         // helper adopts exactly this lease instead of acquiring its own.
         env.WHATSOUP_PAIRING_LEASE_OP = input.lease.operationId;
         env.WHATSOUP_PAIRING_LEASE_FENCING = String(input.lease.fencingToken);
+        // A stale 'connected' from a PREVIOUS helper run must never validate
+        // this one's exit; success evidence starts empty for every run.
+        lastPairingEvents.delete(name);
         const child = spawn(process.execPath, [
           '--experimental-strip-types',
           path.join(repoRoot, 'src', 'bootstrap-auth.ts'),
@@ -624,6 +641,13 @@ function buildSagaEffects(
               // only the typed qr/pairing_code/connected events matter here.
             }
           }
+        });
+        // Drain stderr: the helper logs freely there, and an unread pipe
+        // eventually blocks the child on backpressure until the timeout kills
+        // a pairing that was otherwise proceeding.
+        child.stderr?.on('data', (chunk: Buffer) => {
+          const text = chunk.toString('utf-8').trim();
+          if (text) log.info({ instance: name, stderr: text.slice(0, 200) }, 'pairing helper stderr');
         });
         child.on('exit', code => {
           const last = lastPairingEvents.get(name);

@@ -619,7 +619,11 @@ describe('decideConnectActivation', () => {
       basis: 'no_latch_recorded',
     });
     expect(
-      decideConnectActivation({ status: 'released', revision: 2, latch: LATCH }, freshTree, recorded),
+      decideConnectActivation(
+        { status: 'released', revision: 2, latch: LATCH, ownerAuthorizationId: 'owner-auth-0001' },
+        freshTree,
+        recorded,
+      ),
     ).toEqual({ allow: true, basis: 'owner_released' });
     const active: LatchJournalState = { status: 'active', revision: 1, latch: LATCH };
     expect(decideConnectActivation(active, { status: 'unreadable' }, recorded)).toEqual({
