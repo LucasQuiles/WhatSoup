@@ -1089,6 +1089,11 @@
       "owner": "src/transport/connection.ts",
       "test": "tests/transport/auth-bond.test.ts"
     },
+    "terminal_auth_latch_hold": {
+      "disposition": "terminal_latch_holds_activation_until_owner_authorized_supersession",
+      "owner": "src/transport/connection.ts",
+      "test": "tests/transport/terminal-latch-replay.test.ts"
+    },
     "connection_exhausted": {
       "disposition": "retry_exhaustion_cleared_by_stable_socket_window",
       "owner": "src/transport/connection.ts",
