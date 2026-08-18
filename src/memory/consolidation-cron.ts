@@ -1,3 +1,4 @@
+import { systemClock } from '../lib/clock.ts';
 import { shortHash } from '../lib/short-hash.ts';
 import {
   classifyMemoryOperationFailure,
@@ -91,7 +92,11 @@ export async function runConsolidation(
   provider: LLMProvider,
   options: ConsolidationOptions,
 ): Promise<ConsolidationRunReport> {
-  const now = options.now ?? Date.now;
+  // Defaults to the clock SSOT rather than a bare Date.now reference (#2200).
+  // A reference has no call parens, so the budget ratchet's Date.now() match
+  // never counted it — the debt was invisible to the very guard meant to bound
+  // it, not exempt from it.
+  const now = options.now ?? (() => systemClock.now());
   const startedAtMs = now();
   const attemptedAt = new Date(startedAtMs).toISOString();
   const counters = emptyConsolidationCounters();
