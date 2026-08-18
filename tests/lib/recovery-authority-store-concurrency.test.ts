@@ -8,6 +8,7 @@ import { acquireProcessLock, releaseProcessLock } from '../../src/lib/process-lo
 
 const STORE = fileURLToPath(new URL('../../src/lib/recovery-authority-store.ts', import.meta.url));
 const MARKER_FILE = 'recovery-authority.json';
+const MARKER_DIR = 'recovery-authority.d';
 const CHILD_TIMEOUT_MS = 10_000;
 const CHILD_KILL_GRACE_MS = 1_000;
 /** The store's bounded lock wait (RECOVERY_AUTHORITY_LOCK_WAIT_MS in recovery-authority-store.ts). */
@@ -233,7 +234,17 @@ function spawnBoundedChild(file: string, options: ChildWatchdogOptions = {}): Ru
   };
 }
 
-function expectSuccessfulReceipt(receipt: ChildReceipt): void {
+/**
+ * A clean child exit.
+ *
+ * `expectEnvelope` must be false whenever the FIXTURE — not the store — governs how
+ * long the operation takes. The envelope bounds the store's own bounded wait; a child
+ * that the test deliberately suspends (e.g. blocked mid-read until the parent releases
+ * it) measures orchestration latency instead, which grows with host load and has no
+ * defensible ceiling. Asserting it there is the same microbenchmark mistake the 588ms
+ * ceiling made: it fails on a loaded box while proving nothing about the store.
+ */
+function expectSuccessfulReceipt(receipt: ChildReceipt, expectEnvelope = true): void {
   expect(receipt).toMatchObject({
     code: 0,
     signal: null,
@@ -243,31 +254,77 @@ function expectSuccessfulReceipt(receipt: ChildReceipt): void {
   });
   expect(receipt.operationElapsedMs).not.toBeNull();
   expect(receipt.operationElapsedMs).toBeGreaterThanOrEqual(0);
-  expect(receipt.operationElapsedMs).toBeLessThanOrEqual(LOCAL_OPERATION_ENVELOPE_MS);
+  if (expectEnvelope) {
+    expect(receipt.operationElapsedMs).toBeLessThanOrEqual(LOCAL_OPERATION_ENVELOPE_MS);
+  }
 }
 
 function parseJsonLogs(stdout: string): Array<Record<string, unknown>> {
   return stdout.trim().split('\n').filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
 }
 
+/** The PRE-REDESIGN aggregate file. Only migration and clear-during-migration touch it. */
 function markerPath(): string {
   return join(stateDir, MARKER_FILE);
 }
 
-function readMarkersFromDisk(): Record<string, unknown> {
-  if (!fs.existsSync(markerPath())) return {};
-  const raw: unknown = JSON.parse(fs.readFileSync(markerPath(), 'utf8'));
-  return typeof raw === 'object' && raw !== null && !Array.isArray(raw)
-    ? raw as Record<string, unknown>
-    : {};
+function markerDirPath(): string {
+  return join(stateDir, MARKER_DIR);
 }
 
+/** Mirrors the store's on-disk name encoder so tests can address a single marker. */
+function encodeMarkerKey(source: string): string {
+  return encodeURIComponent(source).replace(
+    /[.!~*'()]/g,
+    (c) => `%${c.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0')}`,
+  );
+}
+
+/** Seed a pre-redesign aggregate file, putting the store into the migration window. */
+function seedLegacyMarkers(keys: string[]): void {
+  fs.writeFileSync(
+    markerPath(),
+    JSON.stringify(Object.fromEntries(keys.map((k) => [k, true]))),
+    'utf8',
+  );
+}
+
+/**
+ * Every marker visible on disk, as a `{ key: true }` map.
+ *
+ * Unions the per-marker directory with any legacy aggregate file, matching the
+ * store's own read semantics during the migration window.
+ */
+function readMarkersFromDisk(): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (fs.existsSync(markerDirPath())) {
+    for (const entry of fs.readdirSync(markerDirPath())) {
+      if (!entry.endsWith('.json')) continue;
+      out[decodeURIComponent(entry.slice(0, -'.json'.length))] = true;
+    }
+  }
+  if (fs.existsSync(markerPath())) {
+    const raw: unknown = JSON.parse(fs.readFileSync(markerPath(), 'utf8'));
+    if (typeof raw === 'object' && raw !== null && !Array.isArray(raw)) {
+      for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+        if (v === true) out[k] = true;
+      }
+    }
+  }
+  return out;
+}
+
+/** Temp/lock leftovers in EITHER plane — a clean run must leave none. */
 function orphanStoreArtifacts(): string[] {
-  return fs.readdirSync(stateDir).filter((name) =>
+  const legacyOrphans = fs.readdirSync(stateDir).filter((name) =>
     name === `${MARKER_FILE}.tmp`
     || name === `${MARKER_FILE}.lock`
     || (name.startsWith(`.${MARKER_FILE}.`) && name.endsWith('.tmp')),
   );
+  const dirOrphans = fs.existsSync(markerDirPath())
+    ? fs.readdirSync(markerDirPath()).filter((name) => name.endsWith('.tmp') || name.endsWith('.lock'))
+    : [];
+  return [...legacyOrphans, ...dirOrphans];
 }
 
 function writeChildScript(name: string, body: string): string {
@@ -351,8 +408,14 @@ await new Promise(() => undefined);
     expect(orphanStoreArtifacts()).toEqual([]);
   });
 
-  it('does not let a clear erase a concurrently added marker', async () => {
-    fs.writeFileSync(markerPath(), JSON.stringify({ 'source-a:inst-a': true }), 'utf8');
+  it('lets a set proceed unblocked while a clear holds the migration lock', async () => {
+    // Pre-redesign this proved a LOST UPDATE could not happen: clear read the whole
+    // aggregate, set added a key, and clear wrote back — erasing it unless serialised.
+    // Per-marker files make that class of bug structurally impossible, so the stronger
+    // property is asserted instead: the setter never even contends. It is pinned during
+    // the MIGRATION WINDOW (legacy file present) because that is the only remaining
+    // situation where clear takes a lock at all.
+    seedLegacyMarkers(['source-a:inst-a']);
     const clearReadReleasePath = join(stateDir, 'release-clear-read');
     const clearScript = writeChildScript('clear.ts', `
 import fs from 'node:fs';
@@ -396,26 +459,36 @@ await new Promise<void>((resolve, reject) => {
     fs.writeFileSync(clearReadReleasePath, 'release', { flag: 'wx' });
 
     const [clearReceipt, setReceipt] = await Promise.all([clearing.result, adding.result]);
-    expectSuccessfulReceipt(clearReceipt);
+    // The clearing child is held mid-read by the fixture until the parent releases it,
+    // so its elapsed time is orchestration, not store latency — no envelope.
+    expectSuccessfulReceipt(clearReceipt, false);
+    // The setter IS envelope-checked: nothing blocks it, which is the point.
     expectSuccessfulReceipt(setReceipt);
     expect(readMarkersFromDisk()).toEqual({ 'source-b:inst-b': true });
-    expect(adding.events).toContain('lock-contended');
+    // The starvation fix, asserted directly: the setter writes its own path, so it
+    // never touches the lock the clear is holding. Before the redesign this same
+    // assertion was `toContain` — the contention WAS the design.
+    expect(adding.events).not.toContain('lock-contended');
     expect(orphanStoreArtifacts()).toEqual([]);
   });
 
+  // The lock survives ONLY inside the migration window, where clear must still
+  // serialise against the shared aggregate file. These three tests therefore pin its
+  // failure modes on `clear` with a legacy file seeded; `set` no longer locks at all.
   it('records a bounded lock-timeout classification without marker identity', async () => {
     const lockPath = `${markerPath()}.lock`;
-    const held = acquireProcessLock(lockPath);
     const source = 'private-timeout-source:private-instance';
+    seedLegacyMarkers([source]);
+    const held = acquireProcessLock(lockPath);
     const file = writeChildScript('lock-timeout.ts', `
-const { setRecoveryMarker } = await import(${JSON.stringify(STORE)});
+const { clearRecoveryMarker } = await import(${JSON.stringify(STORE)});
 process.send?.('ready');
 await new Promise<void>((resolve) => process.once('message', (message) => {
   if (message === 'go') resolve();
 }));
 const startedAtMs = performance.now();
 try {
-  setRecoveryMarker(${JSON.stringify(source)});
+  clearRecoveryMarker(${JSON.stringify(source)});
 } catch {
   const elapsedMs = performance.now() - startedAtMs;
   await new Promise<void>((resolve, reject) => {
@@ -439,7 +512,7 @@ try {
     const record = parseJsonLogs(receipt.stdout).find((entry) => entry['reason'] === 'lock_timeout');
     expect(record).toMatchObject({
       component: 'recovery-authority-store',
-      operation: 'set',
+      operation: 'clear',
       reason: 'lock_timeout',
       msg: 'recovery authority mutation not accepted',
     });
@@ -451,6 +524,7 @@ try {
   it('records release ownership loss without deleting the replacement lock', async () => {
     const lockPath = `${markerPath()}.lock`;
     const source = 'private-release-source:private-instance';
+    seedLegacyMarkers([source]);
     const file = writeChildScript('release-ownership-loss.ts', `
 import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
@@ -467,13 +541,13 @@ fs.readFileSync = ((path, ...args) => {
   return value;
 }) as typeof fs.readFileSync;
 syncBuiltinESMExports();
-const { setRecoveryMarker } = await import(${JSON.stringify(STORE)});
+const { clearRecoveryMarker } = await import(${JSON.stringify(STORE)});
 process.send?.('ready');
 await new Promise<void>((resolve) => process.once('message', (message) => {
   if (message === 'go') resolve();
 }));
 const startedAtMs = performance.now();
-setRecoveryMarker(${JSON.stringify(source)});
+clearRecoveryMarker(${JSON.stringify(source)});
 const elapsedMs = performance.now() - startedAtMs;
 await new Promise<void>((resolve, reject) => {
   if (!process.send) return reject(new Error('IPC channel unavailable'));
@@ -494,7 +568,7 @@ await new Promise<void>((resolve, reject) => {
     const record = parseJsonLogs(receipt.stdout).find((entry) => entry['reason'] === 'lock_release_lost_ownership');
     expect(record).toMatchObject({
       component: 'recovery-authority-store',
-      operation: 'set',
+      operation: 'clear',
       reason: 'lock_release_lost_ownership',
       msg: 'recovery authority lock release lost ownership',
     });
@@ -508,6 +582,7 @@ await new Promise<void>((resolve, reject) => {
   it('records a lock-release failure while preserving the authoritative lock', async () => {
     const lockPath = `${markerPath()}.lock`;
     const source = 'private-release-error-source:private-instance';
+    seedLegacyMarkers([source]);
     const file = writeChildScript('release-error.ts', `
 import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
@@ -522,14 +597,14 @@ fs.unlinkSync = ((path) => {
   return originalUnlink(path);
 }) as typeof fs.unlinkSync;
 syncBuiltinESMExports();
-const { setRecoveryMarker } = await import(${JSON.stringify(STORE)});
+const { clearRecoveryMarker } = await import(${JSON.stringify(STORE)});
 process.send?.('ready');
 await new Promise<void>((resolve) => process.once('message', (message) => {
   if (message === 'go') resolve();
 }));
 const startedAtMs = performance.now();
 try {
-  setRecoveryMarker(${JSON.stringify(source)});
+  clearRecoveryMarker(${JSON.stringify(source)});
 } catch {
   const elapsedMs = performance.now() - startedAtMs;
   await new Promise<void>((resolve, reject) => {
@@ -552,7 +627,7 @@ try {
     const record = parseJsonLogs(receipt.stdout).find((entry) => entry['reason'] === 'lock_release_failed');
     expect(record).toMatchObject({
       component: 'recovery-authority-store',
-      operation: 'set',
+      operation: 'clear',
       reason: 'lock_release_failed',
       code: 'EACCES',
       msg: 'recovery authority lock release failed',

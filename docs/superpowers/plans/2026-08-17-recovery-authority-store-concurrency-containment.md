@@ -66,6 +66,42 @@ Revalidate the amended plan before publication.
   > enumeration; a one-time read-both migration path is required; test fixtures that write
   > the aggregate object need updating; and the 2,000 ms test allowance below is retained
   > for now and revisited there.
+
+  > **✅ SUCCESSOR LANDED — 2026-08-17 (owner: "resume the successor design now").**
+  >
+  > One durable file per marker under `recovery-authority.d/`. `set` is a single atomic
+  > temp-file + rename and `clear` a single unlink on a path no other key touches, so the
+  > read-modify-write that forced serialization is gone and **the steady-state store takes
+  > no lock at all**. `loadRecoveryMarkers()` is a directory enumeration unioned with any
+  > legacy aggregate file, which is migrated on the startup scan and then removed.
+  >
+  > *Starvation result:* the 16-writer fan-out now passes **16/16, 3/3 consecutive runs** at
+  > load 17 — the same test that failed deterministically 15/16 across 3/3 runs before.
+  > Full consumer set: **270/270 across 10 files**, typecheck clean, lint 0 errors.
+  >
+  > *Migration race closed deliberately.* A key present ONLY in the legacy file could be
+  > cleared (a no-op unlink) and then resurrected by a later migration materializing it from
+  > the aggregate. `clear` therefore takes the legacy lock **while that file exists** and
+  > removes the key from both planes under it, unlinking the per-marker file only after the
+  > lock is held. Pinned by `does NOT resurrect a marker cleared while only the legacy file
+  > held it`. This is the sole surviving use of the lock, and it disappears once migrated.
+  >
+  > *Other decisions made here:* corrupt legacy bytes are never deleted by migration (the
+  > pre-redesign store preserved them, and migration must not discard what it could not
+  > read); one undecodable directory entry is skipped with a warning rather than zeroing
+  > every other producer's marker, which under the old single-file layout was a legitimate
+  > "no markers" but here would be a far worse failure; and marker filenames percent-encode
+  > everything outside `[A-Za-z0-9_-]`, so no key can produce `.`/`..`, traverse, or collide
+  > with the `.lock`/`.tmp` suffixes — pinned by round-trip and hostile-key tests.
+  >
+  > *Test-envelope correction:* `expectSuccessfulReceipt` no longer applies the timing
+  > envelope to a child the FIXTURE deliberately suspends. That elapsed time measures
+  > orchestration, not the store, and grows with host load — the same microbenchmark mistake
+  > the original 588 ms ceiling made.
+  >
+  > Still open, unchanged: the 2,000 ms allowance review and accumulated-sleep wait
+  > accounting in `process-lock.ts`. The store no longer depends on that path in steady
+  > state, so neither blocks this lane.
 - Every child process must have a watchdog. Timeout, signal, malformed receipt, masked exit, partial run, or empty output is inconclusive and cannot authorize GREEN.
 - Use Node 24.15.0 locally. Node 25 evidence comes from GitHub quality jobs on the exact published SHA.
 - No push, PR creation, workflow rerun, merge, deployment, service restart, or live marker mutation is authorized by Tasks 1-4.
