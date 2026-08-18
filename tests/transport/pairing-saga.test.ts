@@ -589,6 +589,14 @@ describe('pairingPreflight — fail-closed reporting branches', () => {
     chmodSync(journalPath, 0o000);
     plan = pairingPreflight({ stateRoot, authDir });
     chmodSync(journalPath, 0o600);
-    expect(plan.lastOperation).toBeNull();
+    // An unreadable journal drops the tail to null but the rest of the plan is
+    // still fully reported (fail-closed, not fail-crashed).
+    expect(plan).toEqual(
+      expect.objectContaining({
+        lastOperation: null,
+        latch: { status: 'superseded', revision: 2 },
+        lease: { status: 'vacant' },
+      }),
+    );
   });
 });

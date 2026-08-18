@@ -231,9 +231,11 @@ describe('readRestoreCandidateEvidence', () => {
     const backupPath = join(root, 'backup-empty');
     mkdirSync(backupPath, { recursive: true });
     const evidence = readRestoreCandidateEvidence(backupPath);
-    expect(evidence.manifest).toBe('missing');
-    expect(evidence.generationReceipt).toBe('missing');
-    expect(evidence.observedTreeDigest).toBeNull();
+    expect(evidence).toEqual({
+      manifest: 'missing',
+      generationReceipt: 'missing',
+      observedTreeDigest: null,
+    });
   });
 
   it('reports corrupt manifest/receipt json as corrupt', () => {
