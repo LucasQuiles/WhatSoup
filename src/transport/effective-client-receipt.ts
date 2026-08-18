@@ -53,6 +53,7 @@
 // `{failureClass, length, correlationDigest}` unconditionally before the durable
 // operator plane (#2386), so an evidence-string carrier would be silently dropped.
 
+import { isRecord } from '../lib/type-guards.ts';
 import type { BaileysVersionSource, ResolvedBaileysVersion } from './baileys-version.ts';
 
 /** Which of the two socket construction paths built this client. */
@@ -135,10 +136,6 @@ const RECEIPT_KEYS = new Set([
 ]);
 const FIELD_KEYS = new Set(['value', 'provenance']);
 const MAX_RECEIPT_STRING_LENGTH = 256;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
 
 function hasExactKeys(value: Record<string, unknown>, expected: ReadonlySet<string>): boolean {
   const keys = Object.keys(value);

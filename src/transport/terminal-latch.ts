@@ -32,6 +32,7 @@ import {
   readPrivateFileSync,
   fsyncDirectory,
 } from '../lib/private-fs.ts';
+import { isRecord } from '../lib/type-guards.ts';
 import {
   parseAccountScopeId,
   type AccountScopeIdV1,
@@ -111,13 +112,6 @@ export type LatchAppendResult =
 
 export function terminalLatchJournalPath(stateRoot: string): string {
   return join(stateRoot, JOURNAL_FILENAME);
-}
-
-// Local closed-parser primitives. Deliberately duplicated from the sibling
-// contract module rather than exported: each contract file stays self-contained
-// and its public API stays exactly its schemas.
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function hasExactKeys(record: Record<string, unknown>, keys: readonly string[]): boolean {

@@ -12,6 +12,8 @@
 // below make those inferences structurally unrepresentable rather than merely
 // discouraged.
 
+import { isRecord } from '../lib/type-guards.ts';
+
 const SCOPE_PREFIX = 'scope:';
 const SCOPE_TAIL_RE = /^[a-z0-9-]{4,59}$/;
 const HEX64_RE = /^[0-9a-f]{64}$/;
@@ -124,10 +126,6 @@ export interface PairingOperationV1 {
   updatedAt: string;
   errorClass: PairingErrorClass | null;
   resultGenerationId: string | null;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function hasExactKeys(record: Record<string, unknown>, keys: readonly string[]): boolean {
