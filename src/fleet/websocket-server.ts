@@ -20,6 +20,7 @@ import { createChildLogger } from '../logger.ts';
 import type { TicketStore } from './ws-ticket.ts';
 import { errorMessage } from '../lib/error-message.ts';
 import { systemClock } from '../lib/clock.ts';
+import type { RealtimePollerHealthSnapshot } from './realtime-event-poller.ts';
 
 const log = createChildLogger('fleet:ws');
 
@@ -181,6 +182,14 @@ export class FleetWebSocketServer {
   private readonly lastLogAtMs = new Map<string, number>();
   private readonly suppressedLogCounts = new Map<string, number>();
   /**
+   * Late-bound accessor for the realtime event poller's health snapshot
+   * (#2522). The poller is constructed AFTER this server in index.ts, so the
+   * accessor is wired post-construction and read only at hello time — never a
+   * live poll on connect. Null means "not wired"; the hello then carries an
+   * explicit `realtime_poller: null` receipt rather than omitting the field.
+   */
+  private getRealtimePollerHealth: (() => RealtimePollerHealthSnapshot | null) | null = null;
+  /**
    * Kept so `close()` can detach it (#2292 L6). The listener lives on the
    * SHARED httpServer, which outlives this object: without a reference there
    * is nothing to remove, so a closed server stayed subscribed to 'upgrade',
@@ -264,6 +273,7 @@ export class FleetWebSocketServer {
           stream_generation: this.streamGeneration,
           sequence: this.sequence,
           durable_sequence: this.durableSequence,
+          realtime_poller: this.getRealtimePollerHealth?.() ?? null,
         }),
         (err) => {
           if (err) this.dropClient(ws, 'failed', 'ws_hello_send_failed');
@@ -416,6 +426,16 @@ export class FleetWebSocketServer {
       heartbeatAgeMs: this.lastHeartbeatAtMs === null ? null : now - this.lastHeartbeatAtMs,
       recentOutcomes: windowExpired ? emptyOutcomeCounts() : { ...this.outcomeCounts },
     };
+  }
+
+  /**
+   * Wire the realtime event poller's health accessor (#2522). Late-bound: the
+   * poller is constructed after this server, so index.ts calls this once the
+   * poller exists. The getter is invoked only at hello time; a null getter
+   * (never wired) yields `realtime_poller: null` in the hello.
+   */
+  setRealtimePollerHealth(getter: () => RealtimePollerHealthSnapshot | null): void {
+    this.getRealtimePollerHealth = getter;
   }
 
   /** Gracefully close all connections. */
