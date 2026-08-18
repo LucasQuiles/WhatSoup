@@ -34,8 +34,9 @@ function probes(overrides: Partial<LeaseProbes> = {}): LeaseProbes {
       try {
         process.kill(pid, 0);
         return true;
-      } catch {
-        return false;
+      } catch (err) {
+        // EPERM means the process exists but is not ours - that is ALIVE.
+        return (err as NodeJS.ErrnoException).code === 'EPERM';
       }
     },
     nowMs: () => T0,
@@ -130,6 +131,20 @@ describe('acquireCoordinationLease', () => {
     const second = acquireCoordinationLease(baseArgs({
       operationId: 'op-lease-0002',
       probes: probes({ birthToken: () => null }),
+    }));
+    expect(second).toEqual({ ok: false, refusal: 'owner_unknown' });
+  });
+
+  it('fails closed when a LIVE holder pid cannot be birth-probed (owner_unknown, never reclaim)', () => {
+    const first = acquireCoordinationLease(baseArgs());
+    if (!first.ok) throw new Error('fixture acquire failed');
+    // Rewrite the holder as pid 1 (alive, not ours); the probe can identify
+    // our own birth token but not pid 1's.
+    const holder = { ...first.lease, pid: 1, processBirthToken: 'birth-init' };
+    writeFileSync(coordinationLeasePath(root, SCOPE), JSON.stringify(holder));
+    const second = acquireCoordinationLease(baseArgs({
+      operationId: 'op-lease-0002',
+      probes: probes({ birthToken: pid => (pid === process.pid ? 'birth-self' : null) }),
     }));
     expect(second).toEqual({ ok: false, refusal: 'owner_unknown' });
   });
