@@ -391,9 +391,12 @@ export function parsePairingOperation(value: unknown): PairingOperationV1 | null
 // from every non-terminal state so a crash never needs an illegal transition to
 // record what happened.
 const PAIRING_FORWARD_EDGES: Readonly<Record<PairingOperationState, readonly PairingOperationState[]>> = {
-  requested: ['lease_acquired'],
-  lease_acquired: ['service_stopped'],
-  service_stopped: ['quarantined'],
+  // Stop BEFORE acquiring: a running runtime holds the scope lease as a live
+  // owner, so acquisition can only succeed after its stop releases it. The
+  // coordinator then races any concurrent restart for the lease (T4.3).
+  requested: ['service_stopped'],
+  service_stopped: ['lease_acquired'],
+  lease_acquired: ['quarantined'],
   quarantined: ['pairing'],
   pairing: ['receipt_persisted'],
   receipt_persisted: ['activated'],

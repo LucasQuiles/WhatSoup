@@ -309,8 +309,8 @@ describe('isPairingStateTransitionAllowed', () => {
   it('allows the forward saga path', () => {
     const path = [
       'requested',
-      'lease_acquired',
       'service_stopped',
+      'lease_acquired',
       'quarantined',
       'pairing',
       'receipt_persisted',
