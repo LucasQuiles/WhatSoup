@@ -36,7 +36,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "b359163c1ea9bc4d75d96b0eb440483e61352289b61a6212ca3562f12875946a",
+      "sha256": "b272f414158f8f8eeeb043dd30c94976a8a64b1e5d5c049ea01a3a2da270bf6f",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -58,7 +58,9 @@
         "malformed delivery.attempts",
         "load_degradation_cause_dispositions",
         "degradation_causes_from_event",
-        "degradationCauseDispositions"
+        "degradationCauseDispositions",
+        "autocloseHoldReleasedAt",
+        "autocloseHoldReleasedReason"
       ]
     },
     {

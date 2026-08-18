@@ -3991,6 +3991,13 @@ def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = N
                                     "heldSeconds": held_seconds,
                                 })
                             else:
+                                # Same sticky-flag correction as the recovery
+                                # gate below: the hold has lapsed, so record that
+                                # rather than leaving a write-once True that reads
+                                # as a live hold forever.
+                                record["autocloseHeldForLiveness"] = False
+                                record["autocloseHoldReleasedAt"] = current
+                                record["autocloseHoldReleasedReason"] = "liveness_cap_reached"
                                 append_dispatch_log(paths, {
                                     "type": "autoclose_liveness_hold_cap_reached",
                                     "incidentKey": key,
@@ -4052,6 +4059,18 @@ def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = N
                                 # recovery. Close, but tag it distinctly so it is
                                 # auditable and never read as a verified recovery.
                                 record["autocloseBoundedUnverified"] = True
+                                # The hold is OVER. Say so explicitly rather than
+                                # leaving the sticky True behind: these flags were
+                                # write-once, so a record could assert
+                                # "held for recovery" indefinitely after the cap
+                                # released it, and a reader (human or tool) has no
+                                # way to tell a live hold from an expired one. An
+                                # operator reading such a record on 2026-08-16
+                                # concluded an incident was still being held when
+                                # the hold had lapsed three days earlier.
+                                record["autocloseHeldForRecovery"] = False
+                                record["autocloseHoldReleasedAt"] = current
+                                record["autocloseHoldReleasedReason"] = "cap_reached"
                                 append_dispatch_log(paths, {
                                     "type": "autoclose_bounded_unverified_cap_reached",
                                     "incidentKey": key,

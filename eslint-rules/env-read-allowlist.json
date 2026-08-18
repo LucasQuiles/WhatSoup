@@ -18,8 +18,8 @@
     },
     {
       "file": "src/core/durability.ts",
-      "allowedUnmarkedSites": 1,
-      "reason": "WHATSOUP_IDENTITY_ADMISSION_EXPIRY_SECONDS operational bound for the reliability-4.1 admission terminalization sweep; resolved once at module load, env-allowed marker on site."
+      "allowedUnmarkedSites": 2,
+      "reason": "WHATSOUP_IDENTITY_ADMISSION_EXPIRY_SECONDS (terminalization sweep bound) and WHATSOUP_IDENTITY_ADMISSION_STRANDED_SECONDS (earlier stranded-reporting bound) \u2014 both reliability-4.1 operational bounds, each resolved once at module load with an env-allowed marker on site."
     },
     {
       "file": "src/core/health-bind-guard.ts",
