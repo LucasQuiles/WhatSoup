@@ -215,11 +215,21 @@ describe('scheduling tools', () => {
 
     const result = await clockRegistry.call(
       'schedule_message',
-      { chatJid: CHAT_ALPHA_JID, scheduled_at: 1_000_000_000 + 3600, text: 'future-of-2001' },
+      { chatJid: CHAT_ALPHA_JID, scheduled_at: Math.floor(pastEpochMs / 1000) + 3600, text: 'future-of-2001' },
       globalSession(scratchDir),
     );
 
     expect(result.isError).toBeUndefined();
+
+    // Observable proof the injected clock (not the wall clock) decided the
+    // "future" check: the row is persisted with the timestamp derived from
+    // fakeClock's epoch — floor(pastEpochMs/1000) + 3600 — and exists at all.
+    // Reverted code reads the real 2026 wall clock and throws "scheduled_at
+    // must be a future UTC unix timestamp", so no row is inserted.
+    const row = db.raw.prepare(
+      'SELECT scheduled_at FROM scheduled_messages WHERE id = 1',
+    ).get() as { scheduled_at: number };
+    expect(row.scheduled_at).toBe(Math.floor(pastEpochMs / 1000) + 3600);
   });
 
   it('schedule_message validates local media paths and size', async () => {
