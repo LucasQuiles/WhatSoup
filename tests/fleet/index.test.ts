@@ -509,22 +509,20 @@ describe('fleet server -- WS connected hello wiring (#2522)', () => {
 
     // First frame on a fresh socket is always the `connected` hello (the server
     // sends it immediately in the connection handler, before any broadcast).
+    // No manual timer: a missing hello hangs the await, and the per-test timeout
+    // on `it` fails the test — the same hang→failure behaviour the timer was
+    // providing, without the js-sleep-in-test surface the guard rejects.
     const hello = await new Promise<Record<string, unknown>>((resolve, reject) => {
       const wsUrl = baseUrl.replace(/^http/, 'ws');
       const ws = new WebSocket(`${wsUrl}/ws?ticket=${encodeURIComponent(ticket)}`);
-      const timeout = setTimeout(() => {
-        ws.terminate();
-        reject(new Error('timed out waiting for WS connected hello'));
-      }, 5000);
       ws.once('message', (data) => {
-        clearTimeout(timeout);
         ws.close();
         resolve(JSON.parse(data.toString()) as Record<string, unknown>);
       });
-      ws.once('error', (err) => {
-        clearTimeout(timeout);
-        reject(err);
-      });
+      ws.once('error', reject);
+      // A clean close without a hello (a wiring bug's failure shape) emits no
+      // error event — name it and fail fast rather than hanging to the timeout.
+      ws.once('close', () => reject(new Error('socket closed before connected hello')));
     });
 
     // WIRING, not transport: the field must be a real snapshot object. A
@@ -537,7 +535,7 @@ describe('fleet server -- WS connected hello wiring (#2522)', () => {
     const rp = hello.realtime_poller as { schemaVersion?: unknown; lifecycle?: unknown };
     expect(rp.schemaVersion).toBe(1);
     expect(['starting', 'current', 'partial', 'late', 'stalled', 'failed', 'stopped']).toContain(rp.lifecycle);
-  });
+  }, 10_000);
 });
 
 // ---------------------------------------------------------------------------
