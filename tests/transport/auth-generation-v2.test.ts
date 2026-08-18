@@ -6,6 +6,8 @@ import {
   computeCredentialTreeDigest,
   persistAuthGenerationReceiptV2,
   resolveAuthGenerationEvidenceV2,
+  readRestoreCandidateEvidence,
+  observeActiveTree,
 } from '../../src/transport/auth-generation-v2.ts';
 import { writeAuthGenerationReceipt } from '../../src/transport/auth-generation.ts';
 
@@ -211,5 +213,104 @@ describe('resolveAuthGenerationEvidenceV2', () => {
       reason: 'no_receipt_written',
       bondCreatedAt: null,
     });
+  });
+});
+
+describe('computeCredentialTreeDigest — bounds and nesting', () => {
+  it('walks nested subdirectories (path is part of identity)', () => {
+    mkdirSync(join(authDir, 'keys', 'app-state', 'nested'), { recursive: true });
+    writeFileSync(join(authDir, 'keys', 'app-state', 'nested', 'k.json'), '{"deep":1}');
+    const result = computeCredentialTreeDigest(authDir);
+    if (!result.ok) throw new Error(`unexpected failure: ${result.failure}`);
+    expect(result.fileCount).toBeGreaterThanOrEqual(3);
+  });
+});
+
+describe('readRestoreCandidateEvidence', () => {
+  it('reports missing manifest/receipt and no tree as missing/null', () => {
+    const backupPath = join(root, 'backup-empty');
+    mkdirSync(backupPath, { recursive: true });
+    const evidence = readRestoreCandidateEvidence(backupPath);
+    expect(evidence.manifest).toBe('missing');
+    expect(evidence.generationReceipt).toBe('missing');
+    expect(evidence.observedTreeDigest).toBeNull();
+  });
+
+  it('reports corrupt manifest/receipt json as corrupt', () => {
+    const backupPath = join(root, 'backup-corrupt');
+    mkdirSync(backupPath, { recursive: true });
+    writeFileSync(join(backupPath, 'candidate-manifest.v2.json'), '{bad');
+    writeFileSync(join(backupPath, 'generation-receipt.v2.json'), 'nope');
+    const evidence = readRestoreCandidateEvidence(backupPath);
+    expect(evidence.manifest).toBe('corrupt');
+    expect(evidence.generationReceipt).toBe('corrupt');
+  });
+
+  it('reports a well-formed manifest/receipt and the backup tree digest', () => {
+    const backupPath = join(root, 'backup-good');
+    mkdirSync(join(backupPath, 'auth'), { recursive: true });
+    writeFileSync(join(backupPath, 'auth', 'creds.json'), '{"me":{"id":"backup"}}');
+    const treeDigest = computeCredentialTreeDigest(join(backupPath, 'auth'));
+    if (!treeDigest.ok) throw new Error('backup tree digest failed');
+    const manifest = {
+      v: 2,
+      snapshotId: 'snap-b1',
+      sourceGenerationId: 'gen-b1',
+      credentialTreeDigest: treeDigest.digest,
+      snapshotAt: '2026-08-18T10:00:00.000Z',
+      inventoryDigest: '2'.repeat(64),
+    };
+    const receipt = {
+      v: 2,
+      scopeId: 'scope:line-a-wa',
+      generationId: 'gen-b1',
+      operationId: 'op-b1',
+      credentialTreeDigest: treeDigest.digest,
+      createdAt: '2026-08-18T10:00:00.000Z',
+      persistedAt: '2026-08-18T10:00:01.000Z',
+      effectiveClient: null,
+      actorOperationId: null,
+      advisoryAuthRootHash: null,
+    };
+    writeFileSync(join(backupPath, 'candidate-manifest.v2.json'), JSON.stringify(manifest));
+    writeFileSync(join(backupPath, 'generation-receipt.v2.json'), JSON.stringify(receipt));
+    const evidence = readRestoreCandidateEvidence(backupPath);
+    expect(evidence.manifest).toEqual(manifest);
+    expect(evidence.observedTreeDigest).toBe(treeDigest.digest);
+  });
+});
+
+describe('observeActiveTree', () => {
+  it('reports missing for an absent dir and an empty dir, digest for a populated one', () => {
+    expect(observeActiveTree(join(root, 'nope'))).toEqual({ status: 'missing' });
+    const empty = join(root, 'empty');
+    mkdirSync(empty, { recursive: true });
+    expect(observeActiveTree(empty)).toEqual({ status: 'missing' });
+    const obs = observeActiveTree(authDir);
+    expect(obs.status).toBe('digest');
+  });
+
+  it('reports unreadable when the tree cannot be read', () => {
+    const locked = join(root, 'locked');
+    mkdirSync(locked, { recursive: true });
+    writeFileSync(join(locked, 'creds.json'), '{"x":1}');
+    chmodSync(locked, 0o000);
+    const obs = observeActiveTree(locked);
+    chmodSync(locked, 0o700);
+    expect(obs.status).toBe('unreadable');
+  });
+});
+
+describe('resolveAuthGenerationEvidenceV2 — unreadable and threw branches', () => {
+  it('reports unavailable/unreadable when the journal cannot be read', () => {
+    const result = persistAuthGenerationReceiptV2(persistArgs());
+    if (!result.ok) throw new Error(`unexpected failure: ${result.failure}`);
+    const journalPath = join(stateRoot, 'auth-generation.v2.json');
+    chmodSync(journalPath, 0o000);
+    const evidence = resolveAuthGenerationEvidenceV2(stateRoot);
+    chmodSync(journalPath, 0o600);
+    expect(evidence.status).toBe('unavailable');
+    if (evidence.status !== 'unavailable') throw new Error('unreachable');
+    expect(['unreadable', 'resolver_threw']).toContain(evidence.reason);
   });
 });

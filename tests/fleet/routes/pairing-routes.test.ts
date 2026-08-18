@@ -239,3 +239,77 @@ describe('handlePairingStatus', () => {
     expect(body.plan.latch).toEqual({ status: 'missing', revision: 0 });
   });
 });
+
+describe('pairing route scope and credential-shape branches', () => {
+  it('preflight 500s on a present-but-malformed accountScopeId', async () => {
+    const configPath = writeInstanceConfig({ accountScopeId: 'not-a-scope' });
+    const res = mockRes();
+    await handlePairingPreflight(
+      mockReq({ method: 'POST', url: '/api/lines/test-line/pairing/preflight', headers: authedHeaders() }),
+      res as never,
+      depsFor(configPath),
+      { name: 'test-line' },
+    );
+    expect(res._status).toBe(500);
+    expect(res._body).toContain('malformed');
+  });
+
+  it('preflight 409s for a legacy instance with no accountScopeId', async () => {
+    const configPath = writeInstanceConfig({});
+    const res = mockRes();
+    await handlePairingPreflight(
+      mockReq({ method: 'POST', url: '/api/lines/test-line/pairing/preflight', headers: authedHeaders() }),
+      res as never,
+      depsFor(configPath),
+      { name: 'test-line' },
+    );
+    expect(res._status).toBe(409);
+  });
+
+  it('refuses a URL-borne token credential even with a Bearer header', async () => {
+    const configPath = writeInstanceConfig({ accountScopeId: SCOPE });
+    const res = mockRes();
+    await handlePairingApply(
+      mockReq({
+        method: 'POST',
+        url: '/api/lines/test-line/pairing/apply?token=root-secret',
+        headers: authedHeaders(),
+        body: JSON.stringify({ idempotencyKey: 'op-1', authorizationId: 'a', method: 'pairing_code', expectedLatchRevision: 0, expectedCurrentGenerationId: null }),
+      }),
+      res as never,
+      depsFor(configPath),
+      { name: 'test-line' },
+    );
+    expect(res._status).toBe(403);
+    expect(res._body).toContain('URL-borne token');
+  });
+
+  it('status 409s for a legacy instance with no accountScopeId', async () => {
+    const configPath = writeInstanceConfig({});
+    const res = mockRes();
+    await handlePairingStatus(
+      mockReq({ method: 'GET', url: '/api/lines/test-line/pairing/status', headers: authedHeaders() }),
+      res as never,
+      depsFor(configPath),
+      { name: 'test-line' },
+    );
+    expect(res._status).toBe(409);
+  });
+
+  it('apply 500s on a present-but-malformed accountScopeId', async () => {
+    const configPath = writeInstanceConfig({ accountScopeId: 'bad scope value' });
+    const res = mockRes();
+    await handlePairingApply(
+      mockReq({
+        method: 'POST',
+        url: '/api/lines/test-line/pairing/apply',
+        headers: authedHeaders(),
+        body: JSON.stringify({ idempotencyKey: 'op-1', authorizationId: 'a', method: 'pairing_code', expectedLatchRevision: 0, expectedCurrentGenerationId: null }),
+      }),
+      res as never,
+      depsFor(configPath),
+      { name: 'test-line' },
+    );
+    expect(res._status).toBe(500);
+  });
+});

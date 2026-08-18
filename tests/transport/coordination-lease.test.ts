@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
@@ -295,5 +295,79 @@ describe('forceTakeoverCoordinationLease', () => {
       ownerAuthorizationId: '',
     });
     expect(forced).toEqual({ ok: false, refusal: 'authorization_required' });
+  });
+});
+
+describe('coordination-lease — renew/release/takeover edge branches', () => {
+  it('renew refuses a missing lease and a corrupt lease file', () => {
+    expect(
+      renewCoordinationLease({ stateRoot: root, scopeId: SCOPE, lease: baseArgs().probes && ({} as never), probes: probes(), ttlMs: 60_000 } as never),
+    ).toEqual({ ok: false, refusal: 'lease_missing' });
+
+    const acquired = acquireCoordinationLease(baseArgs());
+    if (!acquired.ok) throw new Error('fixture acquire failed');
+    writeFileSync(coordinationLeasePath(root, SCOPE), 'not json');
+    expect(
+      renewCoordinationLease({ stateRoot: root, scopeId: SCOPE, lease: acquired.lease, probes: probes(), ttlMs: 60_000 }),
+    ).toEqual({ ok: false, refusal: 'lease_corrupt' });
+  });
+
+  it('release refuses a missing lease and a corrupt lease file', () => {
+    expect(releaseCoordinationLease({ stateRoot: root, scopeId: SCOPE, lease: {} as never })).toEqual({
+      ok: false,
+      refusal: 'lease_missing',
+    });
+    const acquired = acquireCoordinationLease(baseArgs());
+    if (!acquired.ok) throw new Error('fixture acquire failed');
+    writeFileSync(coordinationLeasePath(root, SCOPE), '{bad');
+    expect(releaseCoordinationLease({ stateRoot: root, scopeId: SCOPE, lease: acquired.lease })).toEqual({
+      ok: false,
+      refusal: 'lease_corrupt',
+    });
+  });
+
+  it('forceTakeover refuses a missing lease and tolerates a corrupt prior lease', () => {
+    expect(
+      forceTakeoverCoordinationLease({
+        stateRoot: root,
+        scopeId: SCOPE,
+        operationId: 'op-force-missing',
+        mode: 'pairing',
+        ttlMs: 60_000,
+        probes: probes(),
+        ownerAuthorizationId: 'owner-auth-1',
+      }),
+    ).toEqual({ ok: false, refusal: 'lease_missing' });
+
+    acquireCoordinationLease(baseArgs());
+    writeFileSync(coordinationLeasePath(root, SCOPE), 'corrupt-prior');
+    const forced = forceTakeoverCoordinationLease({
+      stateRoot: root,
+      scopeId: SCOPE,
+      operationId: 'op-force-corrupt',
+      mode: 'pairing',
+      ttlMs: 60_000,
+      probes: probes(),
+      ownerAuthorizationId: 'owner-auth-2',
+    });
+    if (!forced.ok) throw new Error(`unexpected refusal: ${forced.refusal}`);
+    // A corrupt prior lease has no readable token: takeover falls back to the
+    // tombstone floor and still fences forward.
+    expect(forced.lease.fencingToken).toBeGreaterThanOrEqual(1);
+    expect(forced.lease.operationId).toBe('op-force-corrupt');
+  });
+
+  it('a reclaim of a dead-holder lease succeeds and increments the fencing token', () => {
+    const first = acquireCoordinationLease(baseArgs());
+    if (!first.ok) throw new Error('fixture acquire failed');
+    // Rewrite the holder as a dead same-boot pid so reclaim (not live_owner) fires.
+    const dead = deadPid();
+    writeFileSync(coordinationLeasePath(root, SCOPE), JSON.stringify({ ...first.lease, pid: dead }));
+    const reclaimed = acquireCoordinationLease(baseArgs({ operationId: 'op-reclaim-1' }));
+    if (!reclaimed.ok) throw new Error(`unexpected refusal: ${reclaimed.refusal}`);
+    expect(reclaimed.lease.fencingToken).toBe(2);
+    expect(reclaimed.takeover?.reason).toBe('holder_dead');
+    // The reclaim guard file must be cleaned up.
+    expect(existsSync(`${coordinationLeasePath(root, SCOPE)}.reclaim`)).toBe(false);
   });
 });
