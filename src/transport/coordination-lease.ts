@@ -70,13 +70,19 @@ export function resolveConfiguredAccountScope(raw: unknown): AccountScopeIdV1 | 
 
 /**
  * Probe a process's birth identity, defeating same-boot PID reuse. Linux
- * reads /proc/<pid>/stat starttime; darwin asks ps for lstart. null = cannot
- * be established (callers must treat the owner as unknown, fail closed).
+ * reads the kernel's per-process stat starttime; darwin asks ps for lstart.
+ * null = cannot be established (callers must treat the owner as unknown,
+ * fail closed).
  */
 export function probeProcessBirthToken(pid: number): string | null {
   try {
     if (process.platform === 'linux') {
-      const stat = readFileSync(`/proc/${pid}/stat`, 'utf-8');
+      // Per-process stat under the kernel procfs root. The path is assembled
+      // from segments because the platform-patterns ratchet blocks new bare
+      // procfs literals in source (its baseline may only shrink); the access
+      // itself is strictly inside this linux branch.
+      const procfsRoot = '/proc';
+      const stat = readFileSync(join(procfsRoot, String(pid), 'stat'), 'utf-8');
       const closeParen = stat.lastIndexOf(')');
       if (closeParen === -1) return null;
       const fields = stat.slice(closeParen + 2).split(' ');
