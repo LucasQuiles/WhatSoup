@@ -7,6 +7,7 @@ import { Database } from '../../../src/core/database.ts';
 import { ToolRegistry } from '../../../src/mcp/registry.ts';
 import { registerSchedulingTools } from '../../../src/mcp/tools/scheduling.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
+import { fakeClock } from '../../../src/lib/clock.ts';
 
 const CHAT_ALPHA_KEY = 'alpha-chat';
 const CHAT_ALPHA_JID = `${CHAT_ALPHA_KEY}@s.whatsapp.net`;
@@ -202,6 +203,33 @@ describe('scheduling tools', () => {
     );
     expect(emptyResult.isError).toBe(true);
     expect(emptyResult.content[0].text).toMatch(/Provide text/);
+  });
+
+  it('schedule_message derives "future" from the injected clock, not the wall clock (fails if reverted to free nowUnixSec)', async () => {
+    // 2001-09-09T01:46:40Z — firmly in the wall-clock past (2026). With the
+    // injected clock, scheduled_at (1h later) is "future" relative to it and
+    // is accepted; reverted code reads the real 2026 clock and rejects it.
+    const pastEpochMs = 1_000_000_000_000;
+    const clockRegistry = new ToolRegistry();
+    registerSchedulingTools(clockRegistry, { db }, fakeClock(pastEpochMs));
+
+    const result = await clockRegistry.call(
+      'schedule_message',
+      { chatJid: CHAT_ALPHA_JID, scheduled_at: Math.floor(pastEpochMs / 1000) + 3600, text: 'future-of-2001' },
+      globalSession(scratchDir),
+    );
+
+    expect(result.isError).toBeUndefined();
+
+    // Observable proof the injected clock (not the wall clock) decided the
+    // "future" check: the row is persisted with the timestamp derived from
+    // fakeClock's epoch — floor(pastEpochMs/1000) + 3600 — and exists at all.
+    // Reverted code reads the real 2026 wall clock and throws "scheduled_at
+    // must be a future UTC unix timestamp", so no row is inserted.
+    const row = db.raw.prepare(
+      'SELECT scheduled_at FROM scheduled_messages WHERE id = 1',
+    ).get() as { scheduled_at: number };
+    expect(row.scheduled_at).toBe(Math.floor(pastEpochMs / 1000) + 3600);
   });
 
   it('schedule_message validates local media paths and size', async () => {
