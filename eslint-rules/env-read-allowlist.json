@@ -3,8 +3,8 @@
   "rows": [
     {
       "file": "src/config.ts",
-      "allowedUnmarkedSites": 47,
-      "reason": "SSOT env\u2192typed-RuntimeConfig conversion seam; every read is instance-config\u2192env\u2192default. Includes the bot-errors publish bridge (#2192 slices 3a+3b): conditional WRITES + post-publish reads for BOT_ERRORS_{JID,EXPECTED_JID,REQUIRE_EXPECTED,SAFE_SHAPE_CRED_PATH} and EMIT_ALERT_THROTTLE_MS, + the BOT_ERRORS_RUNTIME_TOOL_FAILURE_ALERTS read behind toolFailureAlertsEnabled, + WHATSOUP_BAILEYS_VERSION absorbed as baileysVersionPinned (#2192 s4a \u2014 baileys-version.ts entry retired), + the four WHATSOUP_PROVIDER_FALLBACK_* tunables absorbed as fallbackTunables via one dynamic-key resolver line (#2192 s4b \u2014 runtime-tunables 6->2)."
+      "allowedUnmarkedSites": 48,
+      "reason": "SSOT env\u2192typed-RuntimeConfig conversion seam; every read is instance-config\u2192env\u2192default. Includes the bot-errors publish bridge (#2192 slices 3a+3b): conditional WRITES + post-publish reads for BOT_ERRORS_{JID,EXPECTED_JID,REQUIRE_EXPECTED,SAFE_SHAPE_CRED_PATH} and EMIT_ALERT_THROTTLE_MS, + the BOT_ERRORS_RUNTIME_TOOL_FAILURE_ALERTS read behind toolFailureAlertsEnabled, + WHATSOUP_BAILEYS_VERSION absorbed as baileysVersionPinned (#2192 s4a \u2014 baileys-version.ts entry retired), + the four WHATSOUP_PROVIDER_FALLBACK_* tunables absorbed as fallbackTunables via one dynamic-key resolver line (#2192 s4b \u2014 runtime-tunables 6->2), + WHATSOUP_ACCOUNT_SCOPE_ID absorbed as accountScopeId (q-canary lane: instance-config\u2192env\u2192absent, validated by resolveConfiguredAccountScope)."
     },
     {
       "file": "src/core/arc-binding-health.ts",
@@ -223,8 +223,8 @@
     },
     {
       "file": "src/transport/auth.ts",
-      "allowedUnmarkedSites": 4,
-      "reason": "WHATSOUP_PAIR_NUMBER \u2014 env-late by design (#2192 s4 verdict: per-CLI-run mode selector (QR vs pairing-code) + operator PII; a typed field would persist E.164 at rest and make an ephemeral per-run choice permanent)."
+      "allowedUnmarkedSites": 6,
+      "reason": "WHATSOUP_PAIR_NUMBER \u2014 env-late by design (#2192 s4 verdict: per-CLI-run mode selector (QR vs pairing-code) + operator PII; a typed field would persist E.164 at rest and make an ephemeral per-run choice permanent). + WHATSOUP_PAIRING_LEASE_{OP,FENCING} \u2014 env-late by design (q-canary lane: per-spawn delegated coordination-lease handoff from the fleet pairing coordinator to the helper child; a typed config field would persist an ephemeral single-operation capability at rest)."
     },
     {
       "file": "src/transport/imessage/imsg-rpc-relay.ts",
