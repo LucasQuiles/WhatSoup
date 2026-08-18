@@ -78,6 +78,12 @@ export interface LatchTransitionV1 {
   revision: number;
   expectedPriorRevision: number;
   at: string;
+  /**
+   * Single-use token naming the operator/saga action that produced this
+   * transition. The journal refuses a replayed operation id, so an apply
+   * command retried with the same id cannot double-append.
+   */
+  operationId: string;
   ownerAuthorizationId: string | null;
   latch: TerminalLatchV1 | null;
   supersededByGenerationId: string | null;
@@ -99,6 +105,7 @@ export type LatchAppendResult =
         | 'journal_lock_held'
         | 'journal_corrupt'
         | 'revision_conflict'
+        | 'operation_replayed'
         | 'invalid_transition';
     };
 
@@ -179,7 +186,7 @@ export function parseTerminalLatch(value: unknown): TerminalLatchV1 | null {
 
 const TRANSITION_KEYS = [
   'v', 'scopeId', 'kind', 'revision', 'expectedPriorRevision', 'at',
-  'ownerAuthorizationId', 'latch', 'supersededByGenerationId',
+  'operationId', 'ownerAuthorizationId', 'latch', 'supersededByGenerationId',
 ] as const;
 
 export function parseLatchTransition(value: unknown): LatchTransitionV1 | null {
@@ -190,7 +197,11 @@ export function parseLatchTransition(value: unknown): LatchTransitionV1 | null {
   const revision = nonNegativeInt(value.revision);
   const expectedPriorRevision = nonNegativeInt(value.expectedPriorRevision);
   const atMs = isoInstantMs(value.at);
-  if (scopeId === null || kind === null || revision === null || expectedPriorRevision === null || atMs === null) {
+  const operationId = boundedToken(value.operationId);
+  if (
+    scopeId === null || kind === null || revision === null || expectedPriorRevision === null ||
+    atMs === null || operationId === null
+  ) {
     return null;
   }
   if (revision !== expectedPriorRevision + 1) return null;
@@ -229,6 +240,7 @@ export function parseLatchTransition(value: unknown): LatchTransitionV1 | null {
     revision,
     expectedPriorRevision,
     at: value.at as string,
+    operationId,
     ownerAuthorizationId,
     latch,
     supersededByGenerationId,
@@ -326,6 +338,11 @@ export function appendLatchTransition(stateRoot: string, transitionValue: unknow
     if (state.revision !== transition.expectedPriorRevision) {
       return { ok: false, refusal: 'revision_conflict' };
     }
+    const usedOperationIds = collectOperationIds(stateRoot);
+    if (usedOperationIds === null) return { ok: false, refusal: 'journal_corrupt' };
+    if (usedOperationIds.has(transition.operationId)) {
+      return { ok: false, refusal: 'operation_replayed' };
+    }
     if (applyTransition(state, transition) === null) {
       return { ok: false, refusal: 'invalid_transition' };
     }
@@ -346,6 +363,34 @@ export function appendLatchTransition(stateRoot: string, transitionValue: unknow
       }
     }
   }
+}
+
+/** All operation ids ever appended; null when the journal is unreadable/corrupt. */
+function collectOperationIds(stateRoot: string): Set<string> | null {
+  let raw: string | null;
+  try {
+    raw = readPrivateFileSync(terminalLatchJournalPath(stateRoot), {
+      maxBytes: MAX_JOURNAL_BYTES,
+      label: 'terminal-latch journal',
+    });
+  } catch {
+    return null;
+  }
+  if (raw === null) return new Set();
+  if (!raw.endsWith('\n')) return null;
+  const ids = new Set<string>();
+  for (const line of raw.slice(0, -1).split('\n')) {
+    let parsedLine: unknown;
+    try {
+      parsedLine = JSON.parse(line);
+    } catch {
+      return null;
+    }
+    const transition = parseLatchTransition(parsedLine);
+    if (transition === null) return null;
+    ids.add(transition.operationId);
+  }
+  return ids;
 }
 
 export interface RestoreCandidateEvidence {

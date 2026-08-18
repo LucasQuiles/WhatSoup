@@ -34,13 +34,15 @@ const LATCH: TerminalLatchV1 = {
 };
 
 function createdTransition(overrides: Partial<LatchTransitionV1> = {}): LatchTransitionV1 {
+  const revision = overrides.revision ?? 1;
   return {
     v: 1,
     scopeId: SCOPE,
     kind: 'latch_created',
-    revision: 1,
-    expectedPriorRevision: 0,
+    revision,
+    expectedPriorRevision: revision - 1,
     at: '2026-08-18T12:00:00.000Z',
+    operationId: `latch-op-${revision}`,
     ownerAuthorizationId: null,
     latch: LATCH,
     supersededByGenerationId: null,
@@ -119,7 +121,15 @@ describe('parseTerminalLatch / parseLatchTransition', () => {
   });
 
   it('rejects a transition whose revision is not expectedPriorRevision + 1', () => {
-    expect(parseLatchTransition(createdTransition({ revision: 3 }))).toBeNull();
+    expect(
+      parseLatchTransition(createdTransition({ revision: 3, expectedPriorRevision: 0 })),
+    ).toBeNull();
+  });
+
+  it('rejects a transition without an operation id', () => {
+    const { operationId: _drop, ...rest } = createdTransition();
+    expect(parseLatchTransition(rest)).toBeNull();
+    expect(parseLatchTransition(createdTransition({ operationId: '' }))).toBeNull();
   });
 });
 
@@ -284,6 +294,20 @@ describe('appendLatchTransition', () => {
     } finally {
       closeSync(fd);
     }
+  });
+
+  it('refuses replaying an operation id that already appended (single-use)', () => {
+    expect(appendLatchTransition(stateRoot, createdTransition()).ok).toBe(true);
+    const released = {
+      ...createdTransition({ kind: 'owner_released', revision: 2, expectedPriorRevision: 1 }),
+      operationId: 'latch-op-1',
+      latch: null,
+      ownerAuthorizationId: 'owner-auth-0001',
+    };
+    expect(appendLatchTransition(stateRoot, released)).toEqual({
+      ok: false,
+      refusal: 'operation_replayed',
+    });
   });
 
   it('refuses a transition whose scope does not match the active latch scope', () => {
