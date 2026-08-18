@@ -369,7 +369,7 @@ describe('terminal-latch enforcement at the connect seam (production constructor
     expect(vi.mocked(makeWASocket)).toHaveBeenCalledTimes(1);
   });
 
-  it('a SUPERSEDED latch with a tree that does not match the bound receipt refuses activation', async () => {
+  it('a SUPERSEDED latch still activates after routine credential rotation of the fresh generation', async () => {
     const revokedDigest = await establishRevokedGenerationWithBackup();
     const append = appendLatchTransition(testStateRoot, createdTransition(revokedDigest));
     expect(append.ok).toBe(true);
@@ -401,8 +401,55 @@ describe('terminal-latch enforcement at the connect seam (production constructor
     });
     expect(superseded.ok).toBe(true);
 
-    // The tree drifts AFTER the receipt was bound: reconciliation must refuse.
-    writeFileSync(join(testAuthDir, 'creds.json'), JSON.stringify({ me: { id: 'drifted' } }));
+    // The session layer rewrites creds on every connection: the tree digest
+    // drifts from the pairing-time receipt immediately. Rotation within the
+    // superseding generation must NOT re-brick the line.
+    writeFileSync(join(testAuthDir, 'creds.json'), JSON.stringify({ me: { id: '15551230005:2@s.whatsapp.net' } }));
+
+    const { mockSock } = makeMockSocket();
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+    const restarted = new ConnectionManager();
+    await restarted.connect();
+    expect(vi.mocked(makeWASocket)).toHaveBeenCalledTimes(1);
+  });
+
+  it('a SUPERSEDED latch refuses activation if the REVOKED tree reappears', async () => {
+    const revokedDigest = await establishRevokedGenerationWithBackup();
+    const savedRevokedTree = `${testAuthDir}.saved-revoked`;
+    const append = appendLatchTransition(testStateRoot, createdTransition(revokedDigest));
+    expect(append.ok).toBe(true);
+
+    renameSync(testAuthDir, savedRevokedTree);
+    writeValidTestAuth('15551230005:1@s.whatsapp.net');
+    const persisted = persistAuthGenerationReceiptV2({
+      scopeId: SCOPE,
+      operationId: 'op-fresh-generation',
+      authDir: testAuthDir,
+      stateRoot: testStateRoot,
+      createdAtMs: Date.parse('2026-08-18T15:00:00.000Z'),
+      persistedAtMs: Date.parse('2026-08-18T15:00:01.000Z'),
+      effectiveClient: null,
+      actorOperationId: null,
+    });
+    if (!persisted.ok) throw new Error(`fixture persist failed: ${persisted.failure}`);
+    const superseded = appendLatchTransition(testStateRoot, {
+      v: 1,
+      scopeId: SCOPE,
+      kind: 'generation_superseded',
+      revision: 2,
+      expectedPriorRevision: 1,
+      at: '2026-08-18T15:00:02.000Z',
+      operationId: 'op-supersede-1',
+      ownerAuthorizationId: null,
+      latch: null,
+      supersededByGenerationId: persisted.receipt.generationId,
+    });
+    expect(superseded.ok).toBe(true);
+
+    // The exact revoked generation coming back (e.g. a copy-back mistake or
+    // an out-of-band restore) is refused even though the latch is superseded.
+    rmSync(testAuthDir, { recursive: true, force: true });
+    renameSync(savedRevokedTree, testAuthDir);
 
     const restarted = new ConnectionManager();
     await restarted.connect();

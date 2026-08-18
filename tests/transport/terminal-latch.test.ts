@@ -8,6 +8,7 @@ import {
   readTerminalLatchJournal,
   appendLatchTransition,
   decideRestoreFromCandidate,
+  decideConnectActivation,
   terminalLatchJournalPath,
   type TerminalLatchV1,
   type LatchTransitionV1,
@@ -537,5 +538,101 @@ describe('decideRestoreFromCandidate', () => {
         }
       }
     }
+  });
+});
+
+describe('decideConnectActivation', () => {
+  const supersededState: LatchJournalState = {
+    status: 'superseded',
+    revision: 2,
+    latch: LATCH,
+    supersededByGenerationId: 'gen-fresh-1',
+  };
+  const receipt = {
+    generationId: 'gen-fresh-1',
+    credentialTreeDigest: FRESH_DIGEST,
+  } as AuthGenerationReceiptV2;
+  const recorded = { status: 'recorded_v2', receipt } as const;
+  const freshTree = { status: 'digest', digest: FRESH_DIGEST } as const;
+
+  it('allows the exactly-bound superseding tree', () => {
+    expect(decideConnectActivation(supersededState, freshTree, recorded)).toEqual({
+      allow: true,
+      basis: 'bound_superseding_generation',
+    });
+  });
+
+  it('allows a rotated tree of the superseding generation (creds are rewritten every session)', () => {
+    const rotated = { status: 'digest', digest: 'a'.repeat(64) } as const;
+    expect(decideConnectActivation(supersededState, rotated, recorded)).toEqual({
+      allow: true,
+      basis: 'superseding_generation_rotated',
+    });
+  });
+
+  it('refuses the revoked digest even after supersession', () => {
+    const revoked = { status: 'digest', digest: REVOKED_DIGEST } as const;
+    expect(decideConnectActivation(supersededState, revoked, recorded)).toEqual({
+      allow: false,
+      refusal: 'revoked_material_present',
+    });
+  });
+
+  it('refuses a superseded latch with no v2 receipt', () => {
+    expect(
+      decideConnectActivation(supersededState, { status: 'digest', digest: 'a'.repeat(64) }, { status: 'unavailable' }),
+    ).toEqual({ allow: false, refusal: 'superseded_generation_unbound' });
+    expect(
+      decideConnectActivation(supersededState, { status: 'digest', digest: 'a'.repeat(64) }, { status: 'legacy_v1' }),
+    ).toEqual({ allow: false, refusal: 'superseded_generation_unbound' });
+  });
+
+  it('refuses a receipt naming a different generation than the supersession', () => {
+    const foreign = { ...receipt, generationId: 'gen-other' } as AuthGenerationReceiptV2;
+    expect(
+      decideConnectActivation(
+        supersededState,
+        { status: 'digest', digest: 'a'.repeat(64) },
+        { status: 'recorded_v2', receipt: foreign },
+      ),
+    ).toEqual({ allow: false, refusal: 'superseded_generation_unbound' });
+  });
+
+  it('refuses missing and unreadable trees after supersession', () => {
+    expect(decideConnectActivation(supersededState, { status: 'missing' }, recorded)).toEqual({
+      allow: false,
+      refusal: 'superseded_generation_unbound',
+    });
+    expect(decideConnectActivation(supersededState, { status: 'unreadable' }, recorded)).toEqual({
+      allow: false,
+      refusal: 'active_tree_unreadable',
+    });
+  });
+
+  it('covers the non-superseded arms: corrupt refuses, missing and released allow, active refuses by tree state', () => {
+    expect(decideConnectActivation({ status: 'corrupt' }, freshTree, recorded)).toEqual({
+      allow: false,
+      refusal: 'latch_state_corrupt',
+    });
+    expect(decideConnectActivation({ status: 'missing', revision: 0 }, freshTree, recorded)).toEqual({
+      allow: true,
+      basis: 'no_latch_recorded',
+    });
+    expect(
+      decideConnectActivation({ status: 'released', revision: 2, latch: LATCH }, freshTree, recorded),
+    ).toEqual({ allow: true, basis: 'owner_released' });
+    const active: LatchJournalState = { status: 'active', revision: 1, latch: LATCH };
+    expect(decideConnectActivation(active, { status: 'unreadable' }, recorded)).toEqual({
+      allow: false,
+      refusal: 'active_tree_unreadable',
+    });
+    expect(decideConnectActivation(active, { status: 'digest', digest: REVOKED_DIGEST }, recorded)).toEqual({
+      allow: false,
+      refusal: 'revoked_material_present',
+    });
+    expect(decideConnectActivation(active, freshTree, recorded)).toEqual({
+      allow: false,
+      refusal: 'supersession_required',
+    });
   });
 });

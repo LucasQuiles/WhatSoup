@@ -487,7 +487,14 @@ export type ConnectActivationEvidence =
   | { status: 'unavailable' };
 
 export type ConnectActivationDecision =
-  | { allow: true; basis: 'no_latch_recorded' | 'owner_released' | 'bound_superseding_generation' }
+  | {
+      allow: true;
+      basis:
+        | 'no_latch_recorded'
+        | 'owner_released'
+        | 'bound_superseding_generation'
+        | 'superseding_generation_rotated';
+    }
   | {
       allow: false;
       refusal:
@@ -502,8 +509,10 @@ export type ConnectActivationDecision =
  * The connect-boundary decision. While a latch is ACTIVE nothing activates:
  * the presence of a receipted newer tree is necessary but NOT sufficient — the
  * `generation_superseded` transition must have committed (never authorize by
- * timestamp alone). After supersession, activation requires the active tree,
- * its V2 receipt, and the superseding generation id to reconcile exactly.
+ * timestamp alone). After supersession, activation requires a readable
+ * non-revoked tree and a V2 receipt for exactly the superseding generation;
+ * the tree digest may rotate past the receipt (credentials are rewritten on
+ * every session) but the latched revoked digest is refused forever.
  */
 export function decideConnectActivation(
   latchState: LatchJournalState,
@@ -524,13 +533,21 @@ export function decideConnectActivation(
     return { allow: false, refusal: 'supersession_required' };
   }
   // superseded
-  if (activeTree.status !== 'digest') return { allow: false, refusal: 'superseded_generation_unbound' };
+  if (activeTree.status === 'unreadable') return { allow: false, refusal: 'active_tree_unreadable' };
+  if (activeTree.status === 'missing') return { allow: false, refusal: 'superseded_generation_unbound' };
+  if (activeTree.digest === latchState.latch.latchedCredentialTreeDigest) {
+    return { allow: false, refusal: 'revoked_material_present' };
+  }
   if (evidence.status !== 'recorded_v2') return { allow: false, refusal: 'superseded_generation_unbound' };
   if (evidence.receipt.generationId !== latchState.supersededByGenerationId) {
     return { allow: false, refusal: 'superseded_generation_unbound' };
   }
-  if (evidence.receipt.credentialTreeDigest !== activeTree.digest) {
-    return { allow: false, refusal: 'superseded_generation_unbound' };
+  if (evidence.receipt.credentialTreeDigest === activeTree.digest) {
+    return { allow: true, basis: 'bound_superseding_generation' };
   }
-  return { allow: true, basis: 'bound_superseding_generation' };
+  // The session layer rewrites credentials on every connection, so the byte
+  // digest drifts from the pairing-time receipt immediately after first use.
+  // The binding that endures is the generation id; the refusal that endures
+  // is the latched revoked digest above.
+  return { allow: true, basis: 'superseding_generation_rotated' };
 }
