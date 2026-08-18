@@ -367,3 +367,35 @@ describe('directory-enumeration failure semantics', () => {
     },
   );
 });
+
+describe('marker payload timestamp comes from the injectable clock', () => {
+  // Own block, and its own teardown, so restoring this spy cannot change the
+  // teardown of the ~30 tests above it — the rest of this file is inside a frozen
+  // verification set.
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('stamps setAt from systemClock.nowIso(), not a direct wall-clock read', async () => {
+    // The payload's `setAt` had no coverage at all, so a bare `new Date()` here was
+    // invisible to every test in this file — it surfaced only when the repo-wide
+    // clock ratchet (tests/scripts/clock-budget.test.ts, #2200) counted it. src/ has
+    // ONE sanctioned wall-clock reader, src/lib/clock.ts, and stamping through it is
+    // what makes this value drivable to a known instant instead of untestable.
+    const { systemClock } = await import('../../src/lib/clock.ts');
+    const FROZEN = '2026-01-02T03:04:05.678Z';
+    const nowIso = vi.spyOn(systemClock, 'nowIso').mockReturnValue(FROZEN);
+
+    const { setRecoveryMarker } = await store();
+    setRecoveryMarker('clock:bot');
+
+    const payload = JSON.parse(readFileSync(markerFile('clock:bot'), 'utf8')) as Record<string, unknown>;
+    // The exact stubbed value: a real `new Date()` would produce today's timestamp,
+    // which can never equal FROZEN, so this assertion cannot pass vacuously.
+    expect(payload['setAt']).toBe(FROZEN);
+    expect(payload['source']).toBe('clock:bot');
+    // And the clock was actually consulted — pins REACHED-THE-CLOCK, so a future
+    // refactor cannot satisfy the equality above by hard-coding or omitting setAt.
+    expect(nowIso).toHaveBeenCalled();
+  });
+});

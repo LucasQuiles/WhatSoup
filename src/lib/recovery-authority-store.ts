@@ -37,6 +37,7 @@ import Path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
 import { createChildLogger } from '../logger.ts';
+import { systemClock } from './clock.ts';
 import {
   forceEnsurePrivateDirectorySync,
   writePrivateJsonMarkerSync,
@@ -260,7 +261,11 @@ function migrateLegacyMarkers(): void {
 }
 
 function markerPayload(source: string): Record<string, unknown> {
-  return { source, setAt: new Date().toISOString() };
+  // Stamped through the Clock SSOT (#2200) rather than a direct `new Date()`: this
+  // value is only ever read by an operator inspecting the file, but src/ has exactly
+  // one sanctioned wall-clock reader, and going through it is what makes the stamp
+  // drivable to a known instant in tests instead of untestable.
+  return { source, setAt: systemClock.nowIso() };
 }
 
 /**
