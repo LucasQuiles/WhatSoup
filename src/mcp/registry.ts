@@ -23,6 +23,7 @@ import {
 } from './types.ts';
 import { errorMessage } from '../lib/error-message.ts';
 import { isNonEmptyString } from '../lib/type-guards.ts';
+import { type Clock, systemClock } from '../lib/clock.ts';
 import {
   classifyThrownToolFailure,
   normalizeToolDurabilityGroup,
@@ -239,6 +240,7 @@ export interface McpLivenessSnapshot {
 
 export class ToolRegistry {
   private readonly tools = new Map<string, ToolDeclaration>();
+  private readonly clock: Clock;
   private durability: DurabilityEngine | undefined;
   private sensitiveAuthorizer: ((session: SessionContext) => boolean) | null = null;
   // #1753 rem-2: every call() invocation registers itself here for the
@@ -265,8 +267,23 @@ export class ToolRegistry {
   // metadata — it never affects listTools() output or call() authorization.
   private currentGroup: string | undefined;
 
+  constructor(
+    // Injectable so timing behaviour can be driven to a known instant (#2200).
+    // Optional and defaulted, so this slice changes no existing call site.
+    //
+    // Scope of the guarantee: this clock governs TIMESTAMPS (in-flight call age,
+    // durability loss timestamps, and tool-call duration). Any asynchronous
+    // gap between the `start` capture and the duration read still elapses on the
+    // real timer wheel, so under a pinned clock a fast handler reports
+    // durationMs 0 — not reachable in production, where systemClock and the
+    // timer wheel read the same wall clock.
+    clock: Clock = systemClock,
+  ) {
+    this.clock = clock;
+  }
+
   /** Oldest in-flight tool call's age + pending count (#1753 rem-2). */
-  getInFlightCallStats(now: number = Date.now()): McpLivenessSnapshot {
+  getInFlightCallStats(now: number = this.clock.now()): McpLivenessSnapshot {
     if (this.inFlightCalls.size === 0) {
       return { pendingCount: 0, oldestCallAgeMs: null, oldestCallTool: null };
     }
@@ -301,7 +318,7 @@ export class ToolRegistry {
   }
 
   private recordDurabilityWriteLoss(stage: ToolDurabilityWriteStage, toolName: string): void {
-    const now = Date.now();
+    const now = this.clock.now();
     this.durabilityWriteLosses = Math.min(Number.MAX_SAFE_INTEGER, this.durabilityWriteLosses + 1);
     this.durabilityWriteLossesByStage[stage] = Math.min(
       Number.MAX_SAFE_INTEGER,
@@ -468,7 +485,7 @@ export class ToolRegistry {
       };
     }
 
-    const start = Date.now();
+    const start = this.clock.now();
     const replayPolicy = tool.replayPolicy ?? 'unsafe';
     const durabilityKey = session.conversationKey
       || (session.tier === 'global' ? GLOBAL_CONVERSATION_KEY : '');
@@ -511,7 +528,7 @@ export class ToolRegistry {
       if (durabilityId === undefined) return;
       const completion: ToolCompletionEvidence = {
         isError: true,
-        durationMs: Date.now() - start,
+        durationMs: this.clock.now() - start,
         failure: {
           failureCode,
           failureStage,
@@ -690,9 +707,9 @@ export class ToolRegistry {
         const isError = isToolErrorPayload(result);
         const returnedErrorEvidence = getToolErrorEvidence(result);
         const text = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
-        log.info({ tool: name, durationMs: Date.now() - start }, 'tool call complete');
+        log.info({ tool: name, durationMs: this.clock.now() - start }, 'tool call complete');
         if (durabilityId !== undefined) {
-          const durationMs = Date.now() - start;
+          const durationMs = this.clock.now() - start;
           try {
             this.durability!.markToolComplete(
               durabilityId,
@@ -721,7 +738,7 @@ export class ToolRegistry {
         };
       } catch (err) {
         const message = errorMessage(err);
-        const durationMs = Date.now() - start;
+        const durationMs = this.clock.now() - start;
         log.error({ tool: name, durationMs }, 'tool handler threw');
         if (durabilityId !== undefined) {
           try {

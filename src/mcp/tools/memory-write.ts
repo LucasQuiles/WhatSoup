@@ -17,6 +17,7 @@
 
 import { z } from 'zod';
 import { shortHash } from '../../lib/short-hash.ts';
+import { type Clock, systemClock } from '../../lib/clock.ts';
 import {
   classifyMemoryOperationFailure,
   createMemoryOperationContext,
@@ -73,6 +74,9 @@ function stableId(chatKey: string, memoryType: string, text: string): string {
 export function registerMemoryWriteTools(
   register: (tool: ToolDeclaration) => void,
   makeWriter: () => MemoryWriter = () => new PineconeMemory(),
+  // Injectable so record timestamps can be driven to a known instant (#2200).
+  // Optional and defaulted, so this slice changes no existing call site.
+  clock: Clock = systemClock,
 ): void {
   let writer: MemoryWriter | null = null;
   const getWriter = (): MemoryWriter => (writer ??= makeWriter());
@@ -135,7 +139,7 @@ export function registerMemoryWriteTools(
         scopeKind: 'batch',
         filterShape: 'none',
       });
-      const now = new Date().toISOString();
+      const now = clock.nowIso();
       const record: MemoryRecord = {
         id: stableId(rawChat, memoryType, p.text),
         text: p.text,

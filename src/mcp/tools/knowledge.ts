@@ -7,6 +7,7 @@ import { Pinecone } from '@pinecone-database/pinecone';
 import { createChildLogger } from '../../logger.ts';
 import { truncateForRerank } from '../../lib/text-utils.ts';
 import { isNonEmptyString } from '../../lib/type-guards.ts';
+import { type Clock, systemClock } from '../../lib/clock.ts';
 import { routeQuery } from '../../runtimes/chat/memory/query-router.ts';
 import { config } from '../../config.ts';
 import type { KnowledgeProfileConfig } from '../../config.ts';
@@ -266,6 +267,9 @@ export function createPineconeWatchSearch(
 export function registerKnowledgeTools(
   allowedIndexes: string[],
   register: (tool: ToolDeclaration) => void,
+  // Injectable so search duration can be driven to a known instant (#2200).
+  // Optional and defaulted, so this slice changes no existing call site.
+  clock: Clock = systemClock,
 ): void {
   if (allowedIndexes.length === 0) return;
 
@@ -329,7 +333,7 @@ export function registerKnowledgeTools(
 
       const { index: indexName, query, top_k, namespace: nsOverride } = parsed.data;
       const profile = memoryConfig.knowledgeProfiles[indexName]!;
-      const startMs = Date.now();
+      const startMs = clock.now();
 
       // Determine which namespaces to search.
       //
@@ -492,7 +496,7 @@ export function registerKnowledgeTools(
           return true;
         });
 
-        const durationMs = Date.now() - startMs;
+        const durationMs = clock.now() - startMs;
         // PII hygiene: the raw query text may contain personal details
         // (names, phone numbers, addresses) and must NOT land in the INFO
         // stream that ships to aggregated log surfaces. The query prefix is
@@ -548,7 +552,7 @@ export function registerKnowledgeTools(
           formatted,
         };
       } catch (err) {
-        const durationMs = Date.now() - startMs;
+        const durationMs = clock.now() - startMs;
         const message = errorMessage(err);
         log.error({ err, index: indexName, query: query.slice(0, 80), durationMs }, 'knowledge search failed');
 

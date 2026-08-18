@@ -5,6 +5,7 @@ import { lstat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { createChildLogger } from '../logger.ts';
 import { toConversationKey } from '../core/conversation-key.ts';
+import { type Clock, systemClock } from '../lib/clock.ts';
 import type { ToolRegistry } from './registry.ts';
 import { makeConversationBinding, type SessionContext } from './types.ts';
 
@@ -65,6 +66,7 @@ export class WhatSoupSocketServer {
   private readonly socketPath: string;
   private readonly registry: ToolRegistry;
   private readonly baseSession: SessionContext;
+  private readonly clock: Clock;
   /** Per-connection isolated sessions. Cleaned up on disconnect. */
   private readonly connectionSessions = new Map<number, SessionContext>();
   /** Active client sockets. Destroyed on stop() so FDs do not leak. */
@@ -86,10 +88,15 @@ export class WhatSoupSocketServer {
     registry: ToolRegistry,
     session: SessionContext,
     actorResolver?: () => string | undefined,
+    // Injectable so error-id timestamps can be driven to a known instant
+    // (#2200). Optional and defaulted, so this slice changes no existing call
+    // site.
+    clock: Clock = systemClock,
   ) {
     this.socketPath = socketPath;
     this.registry = registry;
     this.baseSession = session;
+    this.clock = clock;
     // Binding objects are immutable by contract (types.ts): enforce it at the
     // trust boundary so every per-request shallow snapshot below can safely
     // share the reference — a rekey REPLACES the object, never mutates it.
@@ -517,7 +524,7 @@ export class WhatSoupSocketServer {
           };
       }
     } catch (err) {
-      const errorId = `E${Date.now().toString(36).toUpperCase()}`;
+      const errorId = `E${this.clock.now().toString(36).toUpperCase()}`;
       log.error({ err, method: req.method, errorId }, 'unhandled error in request handler');
       return {
         jsonrpc: '2.0',
