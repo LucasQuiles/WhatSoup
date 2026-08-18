@@ -19,6 +19,7 @@ vi.mock('../../src/logger.ts', () => {
 
 import { FleetWebSocketServer } from '../../src/fleet/websocket-server.ts';
 import type { WsEvent } from '../../src/fleet/websocket-server.ts';
+import type { RealtimePollerHealthSnapshot } from '../../src/fleet/realtime-event-poller.ts';
 import { createTicketStore, type TicketStore } from '../../src/fleet/ws-ticket.ts';
 import { waitForMessage as waitForMessageHelper } from '../helpers/wait-for.ts';
 
@@ -130,6 +131,42 @@ describe('FleetWebSocketServer', () => {
     const msg = await firstMessage;
     expect(msg).toMatchObject({ type: 'connected' });
     expect(wsServer.clientCount).toBe(1);
+    ws.close();
+  });
+
+  it('hello carries realtime_poller null when the accessor is never wired (#2522)', async () => {
+    await startServer();
+    const { ws, firstMessage } = await connectWithTicket();
+    const msg = (await firstMessage) as Record<string, unknown>;
+    expect(msg).toHaveProperty('realtime_poller');
+    expect(msg.realtime_poller).toBeNull();
+    ws.close();
+  });
+
+  it('hello carries the realtime poller health snapshot once wired (#2522)', async () => {
+    await startServer();
+    const snapshot: RealtimePollerHealthSnapshot = {
+      schemaVersion: 1,
+      generation: 'gen-1',
+      lifecycle: 'current',
+      cycleSequence: 1,
+      inFlightAgeMs: null,
+      lastCompletedAgeMs: 0,
+      lastFullyObservedAgeMs: 0,
+      lastRecoveredAgeMs: null,
+      durationBucket: 'under_interval',
+      scheduledTicks: 1,
+      completedCycles: 1,
+      skippedOverlaps: 0,
+      consecutiveFailedCycles: 0,
+      expectedSources: 1,
+      observedSources: 1,
+      unavailableSources: 0,
+    };
+    wsServer.setRealtimePollerHealth(() => snapshot);
+    const { ws, firstMessage } = await connectWithTicket();
+    const msg = (await firstMessage) as Record<string, unknown>;
+    expect(msg.realtime_poller).toEqual(snapshot);
     ws.close();
   });
 

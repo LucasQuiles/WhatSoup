@@ -1036,6 +1036,10 @@ export function createFleetServer(deps: FleetDeps) {
   // Realtime event poller — snapshot-diff for messages/access/typing
   const realtimePoller = new FleetRealtimeEventPoller({ discovery, dbReader, realtime });
 
+  // Wire the poller's health snapshot into the WS hello (#2522). Late-bound:
+  // wsServer precedes realtimePoller, so expose the accessor once it exists.
+  wsServer.setRealtimePollerHealth(() => realtimePoller.healthSnapshot());
+
   return {
     server,
     discovery,
