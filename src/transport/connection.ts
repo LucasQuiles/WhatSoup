@@ -24,6 +24,8 @@ import {
   resolveEffectiveClientEvidence,
 } from './effective-client-receipt.ts';
 import { resolveAuthGenerationEvidence } from './auth-generation.ts';
+import { decideConnectActivation, readTerminalLatchJournal, type ConnectActivationDecision } from './terminal-latch.ts';
+import { observeActiveTree, resolveAuthGenerationEvidenceV2 } from './auth-generation-v2.ts';
 import { isRecord } from '../lib/type-guards.ts';
 import { createTypingStartGuard, type TypingStartGuard } from '../lib/typing-start-guard.ts';
 import { appendPrivateJsonLineSync, readFreshMarkerSync, writePrivateJsonMarkerSync } from '../lib/private-fs.ts';
@@ -150,7 +152,8 @@ export type CredentialLifecycleEventName =
   | 'auth_snapshot_skipped'
   | 'auth_snapshot_captured'
   | 'auth_snapshot_failed'
-  | 'device_bond_lost';
+  | 'device_bond_lost'
+  | 'terminal_latch_hold';
 
 export interface CredentialLifecycleEvent {
   at: string;
@@ -855,6 +858,24 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       }
       if (preflight.status === 'invalid') {
         this.emitLocalAuthBondFailureAlert('connect-preflight', preflight);
+      }
+
+      // Terminal-latch activation gate. While a terminal revocation latch is
+      // active — or superseded but not reconciled with the active tree's V2
+      // receipt — this process must not open a socket on the credential
+      // material it has. The hold is durable (journal on disk), so it survives
+      // restarts and applies identically to systemd, watchdog, fleet-API,
+      // console, and direct starts: they all run this code.
+      const latchRefusal = this.evaluateTerminalLatchActivation();
+      if (latchRefusal !== null) {
+        this.recordCredentialLifecycle('terminal_latch_hold', { note: latchRefusal.refusal });
+        this.log.error(
+          { refusal: latchRefusal.refusal },
+          'terminal auth latch holds this instance: refusing socket activation',
+        );
+        this.emitTerminalLatchHoldAlert(latchRefusal);
+        this.setConnectionState('disconnected');
+        return;
       }
 
       installThirdPartyConsoleRedaction();
@@ -2563,6 +2584,49 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     if (snapshot.backup.lastCaptureError) return false;
     if (snapshot.backup.lastRestoreError) return false;
     return true;
+  }
+
+  /**
+   * Evaluate the terminal-latch activation decision for this instance.
+   * Returns null when activation may proceed, else the refusal.
+   */
+  private evaluateTerminalLatchActivation(): Extract<ConnectActivationDecision, { allow: false }> | null {
+    // No state root → no journal can exist → legacy behavior. Production
+    // config always resolves stateRoot; this guard keeps the gate inert for
+    // partial test fixtures rather than converting their absence into a
+    // spurious hold.
+    const stateRoot = typeof config.stateRoot === 'string' && config.stateRoot.length > 0
+      ? config.stateRoot
+      : null;
+    if (stateRoot === null) return null;
+    const latchState = readTerminalLatchJournal(stateRoot);
+    const activeTree = observeActiveTree(config.authDir);
+    const evidence = resolveAuthGenerationEvidenceV2(stateRoot);
+    const activationEvidence = evidence.status === 'recorded_v2'
+      ? evidence
+      : evidence.status === 'legacy_v1'
+        ? { status: 'legacy_v1' as const }
+        : { status: 'unavailable' as const };
+    const decision = decideConnectActivation(latchState, activeTree, activationEvidence);
+    return decision.allow ? null : decision;
+  }
+
+  private emitTerminalLatchHoldAlert(decision: Extract<ConnectActivationDecision, { allow: false }>): void {
+    const evidence = [
+      `refusal: ${decision.refusal}`,
+      'operator_note: a terminal credential-revocation latch holds this instance; activation requires an owner-authorized fresh pairing whose generation receipt supersedes the latch. Never restore or copy revoked auth material into the active directory.',
+    ].join('\n');
+    try {
+      emitAlertChecked(
+        config.botName,
+        'terminal_auth_latch_hold',
+        `TERMINAL AUTH LATCH: whatsoup@${config.botName} held from activation (${decision.refusal})`,
+        evidence,
+        'critical',
+      );
+    } catch (err) {
+      this.log.error({ err }, 'failed to enqueue terminal auth latch hold alert');
+    }
   }
 
   private emitLocalAuthBondFailureAlert(reason: string, snapshot: AuthBondSnapshot): void {

@@ -21,6 +21,8 @@ import { DEFAULT_FRESH_INVALID_GRACE_MS } from '../lib/auth-bond-policy.ts';
 import { forceEnsurePrivateDirectorySync, fsyncDirectory, privateWriteError } from '../lib/private-fs.ts';
 import { shortHash } from '../lib/short-hash.ts';
 import { errorMessage } from '../lib/error-message.ts';
+import { decideRestoreFromCandidate, readTerminalLatchJournal } from './terminal-latch.ts';
+import { readRestoreCandidateEvidence } from './auth-generation-v2.ts';
 
 export type AuthBondStatus = 'present' | 'missing' | 'invalid';
 
@@ -545,6 +547,7 @@ export class AuthBondGuard {
   private readonly captureBlockReason: () => string | null;
   private readonly freshInvalidGraceMs: number;
   private readonly root: string;
+  private readonly stateRoot: string;
   private readonly historyRoot: string;
   private readonly stagingRoot: string;
   private readonly latestManifestPath: string;
@@ -573,6 +576,7 @@ export class AuthBondGuard {
     const stateRoot = options.stateRoot && options.stateRoot.trim() !== ''
       ? options.stateRoot
       : join(dirname(options.authDir), '..', 'state');
+    this.stateRoot = stateRoot;
     this.root = join(stateRoot, 'auth-bond-backups', this.instanceName);
     this.historyRoot = join(this.root, 'history');
     this.stagingRoot = join(this.root, 'staging');
@@ -828,6 +832,29 @@ export class AuthBondGuard {
         source: latestBackupPath,
         snapshot: this.inspect(),
         error: backupError,
+      };
+    }
+
+    // Terminal-latch gate: while a terminal revocation latch is active, restore
+    // authority comes only from the CANDIDATE's own manifest + V2 generation
+    // receipt (exact digest binding). Unbound legacy backups, the exact revoked
+    // tree, and corrupt/ambiguous state all refuse — before any mutation.
+    const latchState = readTerminalLatchJournal(this.stateRoot);
+    const latchDecision = decideRestoreFromCandidate(
+      latchState,
+      readRestoreCandidateEvidence(latestBackupPath!),
+    );
+    if (!latchDecision.allow) {
+      const error = `terminal_latch_refused:${latchDecision.refusal}`;
+      this.lastRestoreAt = this.now().toISOString();
+      this.lastRestoreSource = latestBackupPath;
+      this.lastRestoreError = error;
+      return {
+        attempted: true,
+        restored: false,
+        source: latestBackupPath,
+        snapshot: this.inspect(),
+        error,
       };
     }
 

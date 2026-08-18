@@ -253,6 +253,13 @@ export function parseLatchTransition(value: unknown): LatchTransitionV1 | null {
  * and corrupt refuses everything downstream while preserving the bytes.
  */
 export function readTerminalLatchJournal(stateRoot: string): LatchJournalState {
+  // An absent journal FILE is 'missing' regardless of parent-directory state:
+  // instances that never latched must keep their legacy behavior even on
+  // unhardened state roots. Only a PRESENT journal that cannot be read or
+  // parsed is 'corrupt' (fail closed).
+  if (!existsSync(terminalLatchJournalPath(stateRoot))) {
+    return { status: 'missing', revision: 0 };
+  }
   let raw: string | null;
   try {
     raw = readPrivateFileSync(terminalLatchJournalPath(stateRoot), {
@@ -367,6 +374,7 @@ export function appendLatchTransition(stateRoot: string, transitionValue: unknow
 
 /** All operation ids ever appended; null when the journal is unreadable/corrupt. */
 function collectOperationIds(stateRoot: string): Set<string> | null {
+  if (!existsSync(terminalLatchJournalPath(stateRoot))) return new Set();
   let raw: string | null;
   try {
     raw = readPrivateFileSync(terminalLatchJournalPath(stateRoot), {
@@ -472,4 +480,63 @@ export function decideRestoreFromCandidate(
   }
 
   return { allow: true, basis: 'candidate_bound_newer_generation' };
+}
+
+export type ActiveTreeObservation =
+  | { status: 'digest'; digest: string }
+  | { status: 'missing' }
+  | { status: 'unreadable' };
+
+export type ConnectActivationEvidence =
+  | { status: 'recorded_v2'; receipt: AuthGenerationReceiptV2 }
+  | { status: 'legacy_v1' }
+  | { status: 'unavailable' };
+
+export type ConnectActivationDecision =
+  | { allow: true; basis: 'no_latch_recorded' | 'owner_released' | 'bound_superseding_generation' }
+  | {
+      allow: false;
+      refusal:
+        | 'latch_state_corrupt'
+        | 'active_tree_unreadable'
+        | 'revoked_material_present'
+        | 'supersession_required'
+        | 'superseded_generation_unbound';
+    };
+
+/**
+ * The connect-boundary decision. While a latch is ACTIVE nothing activates:
+ * the presence of a receipted newer tree is necessary but NOT sufficient — the
+ * `generation_superseded` transition must have committed (never authorize by
+ * timestamp alone). After supersession, activation requires the active tree,
+ * its V2 receipt, and the superseding generation id to reconcile exactly.
+ */
+export function decideConnectActivation(
+  latchState: LatchJournalState,
+  activeTree: ActiveTreeObservation,
+  evidence: ConnectActivationEvidence,
+): ConnectActivationDecision {
+  if (latchState.status === 'corrupt') return { allow: false, refusal: 'latch_state_corrupt' };
+  if (latchState.status === 'missing') return { allow: true, basis: 'no_latch_recorded' };
+  if (latchState.status === 'released') return { allow: true, basis: 'owner_released' };
+  if (latchState.status === 'active') {
+    if (activeTree.status === 'unreadable') return { allow: false, refusal: 'active_tree_unreadable' };
+    if (
+      activeTree.status === 'digest' &&
+      activeTree.digest === latchState.latch.latchedCredentialTreeDigest
+    ) {
+      return { allow: false, refusal: 'revoked_material_present' };
+    }
+    return { allow: false, refusal: 'supersession_required' };
+  }
+  // superseded
+  if (activeTree.status !== 'digest') return { allow: false, refusal: 'superseded_generation_unbound' };
+  if (evidence.status !== 'recorded_v2') return { allow: false, refusal: 'superseded_generation_unbound' };
+  if (evidence.receipt.generationId !== latchState.supersededByGenerationId) {
+    return { allow: false, refusal: 'superseded_generation_unbound' };
+  }
+  if (evidence.receipt.credentialTreeDigest !== activeTree.digest) {
+    return { allow: false, refusal: 'superseded_generation_unbound' };
+  }
+  return { allow: true, basis: 'bound_superseding_generation' };
 }
