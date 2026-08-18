@@ -155,6 +155,20 @@ export interface AcquireLeaseArgs {
   probes: LeaseProbes;
 }
 
+/** Parse the on-disk lease for a scope; null when absent or unparseable. */
+export function readCoordinationLease(
+  stateRoot: string,
+  scopeId: AccountScopeIdV1,
+): CoordinationLeaseV1 | null {
+  const leasePath = coordinationLeasePath(stateRoot, scopeId);
+  if (!existsSync(leasePath)) return null;
+  try {
+    return parseCoordinationLease(JSON.parse(readFileSync(leasePath, 'utf-8')));
+  } catch {
+    return null;
+  }
+}
+
 export function coordinationLeasePath(stateRoot: string, scopeId: AccountScopeIdV1): string {
   return join(stateRoot, `coordination-lease.${scopeFileTag(scopeId)}.json`);
 }

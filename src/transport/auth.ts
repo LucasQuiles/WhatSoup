@@ -34,7 +34,7 @@ import {
 import { writeAuthGenerationReceipt } from './auth-generation.ts';
 import { errorMessage } from '../lib/error-message.ts';
 import { classifyPairNumber, maskPairingCode, pairingEmissionLine, pairingGate } from './pairing.ts';
-import { acquireCoordinationLease, defaultLeaseProbes, releaseCoordinationLease } from './coordination-lease.ts';
+import { acquireCoordinationLease, defaultLeaseProbes, readCoordinationLease, releaseCoordinationLease } from './coordination-lease.ts';
 
 const log = createChildLogger('auth-cli');
 
@@ -71,27 +71,52 @@ if (existsSync(lockPath)) {
 
 if (config.accountScopeId !== undefined) {
   const scopeId = config.accountScopeId;
-  const probes = defaultLeaseProbes();
-  const leaseResult = acquireCoordinationLease({
-    stateRoot: config.stateRoot,
-    scopeId,
-    operationId: `pairing-cli-${probes.pid}-${probes.nowMs()}`,
-    mode: 'pairing',
-    ttlMs: 10 * 60_000,
-    probes,
-  });
-  if (!leaseResult.ok) {
-    log.fatal({ refusal: leaseResult.refusal }, 'account-scope lease unavailable; refusing pairing');
-    process.stderr.write(
-      `Pairing refused: the account-scope coordination lease is ${leaseResult.refusal}.\n` +
-      `Stop the owning process (or use the owner-authorized takeover) and retry.\n`,
-    );
-    process.exit(1);
+  // Delegated handoff (T4.3): when the pairing COORDINATOR already owns the
+  // scope lease, it hands this helper the exact lease identity via env. The
+  // helper adopts that lease (verifying it against the on-disk record) rather
+  // than acquiring its own - acquiring would deadlock against the live
+  // coordinator. Adoption never releases: the coordinator owns the lifecycle.
+  // env-allowed: delegated pairing-lease handoff from the fleet coordinator
+  const delegatedOp = process.env.WHATSOUP_PAIRING_LEASE_OP;
+  // env-allowed: delegated pairing-lease handoff from the fleet coordinator
+  const delegatedFencing = process.env.WHATSOUP_PAIRING_LEASE_FENCING;
+  if (delegatedOp !== undefined || delegatedFencing !== undefined) {
+    const onDisk = readCoordinationLease(config.stateRoot, scopeId);
+    if (
+      onDisk === null ||
+      onDisk.mode !== 'pairing' ||
+      onDisk.operationId !== delegatedOp ||
+      String(onDisk.fencingToken) !== delegatedFencing
+    ) {
+      log.fatal(
+        { delegatedOp, delegatedFencing },
+        'delegated pairing lease does not match the on-disk lease; refusing pairing',
+      );
+      process.exit(1);
+    }
+  } else {
+    const probes = defaultLeaseProbes();
+    const leaseResult = acquireCoordinationLease({
+      stateRoot: config.stateRoot,
+      scopeId,
+      operationId: `pairing-cli-${probes.pid}-${probes.nowMs()}`,
+      mode: 'pairing',
+      ttlMs: 10 * 60_000,
+      probes,
+    });
+    if (!leaseResult.ok) {
+      log.fatal({ refusal: leaseResult.refusal }, 'account-scope lease unavailable; refusing pairing');
+      process.stderr.write(
+        `Pairing refused: the account-scope coordination lease is ${leaseResult.refusal}.\n` +
+        `Stop the owning process (or use the owner-authorized takeover) and retry.\n`,
+      );
+      process.exit(1);
+    }
+    const heldLease = leaseResult.lease;
+    process.once('exit', () => {
+      releaseCoordinationLease({ stateRoot: config.stateRoot, scopeId, lease: heldLease });
+    });
   }
-  const heldLease = leaseResult.lease;
-  process.once('exit', () => {
-    releaseCoordinationLease({ stateRoot: config.stateRoot, scopeId, lease: heldLease });
-  });
 }
 
 // ---------------------------------------------------------------------------

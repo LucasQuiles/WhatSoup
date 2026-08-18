@@ -23,6 +23,7 @@ import { handlePutCredential, handleDeleteCredential, handleVerifyCredential, ha
 import { handleGetSilences, handleAddSilence, handleRemoveSilence } from './routes/silence.ts';
 import { handleGetChats, handleGetMessages, handleSearchMessages, handleGetAccess, handleGetLogs, handleGetTyping, handleCheckExists, handleCheckDirectory } from './routes/data.ts';
 import { handleSend, handleAccessUpdate, handleSaveContact, handleRestart, handleStop, handleConfigUpdate, handleCreateLine, handleDeleteLine, handleAuth, handleMarkRead } from './routes/ops.ts';
+import { handlePairingPreflight, handlePairingApply, handlePairingStatus } from './routes/ops-auth.ts';
 import { handleGetFeed } from './routes/feed.ts';
 import { handleGetMetrics } from './routes/metrics.ts';
 import { handleGetFleetMetrics } from './routes/fleet-metrics.ts';
@@ -163,6 +164,9 @@ type RouteParamsByHandler = {
   checkExists: NameRouteParams;
   checkDirectory: EmptyRouteParams;
   auth: NameRouteParams;
+  pairingPreflight: NameRouteParams;
+  pairingApply: NameRouteParams;
+  pairingStatus: NameRouteParams;
   getVersion: EmptyRouteParams;
   update: EmptyRouteParams;
   getLidMappings: EmptyRouteParams;
@@ -233,6 +237,9 @@ const NAME_ROUTE_HANDLERS = new Set<NamedRouteKey>([
   'deleteLine',
   'checkExists',
   'auth',
+  'pairingPreflight',
+  'pairingApply',
+  'pairingStatus',
   'getScheduled',
   'cancelScheduled',
   'getGroups',
@@ -300,6 +307,9 @@ const handlers: { [K in RouteKey]: RouteHandler<K> } = {
   checkExists:  (req, res, deps, params) => handleCheckExists(req, res, deps, params),
   checkDirectory: (req, res) => handleCheckDirectory(req, res),
   auth:         (req, res, deps, params) => handleAuth(req, res, deps, params),
+  pairingPreflight: (req, res, deps, params) => handlePairingPreflight(req, res, deps, params),
+  pairingApply:     (req, res, deps, params) => handlePairingApply(req, res, deps, params),
+  pairingStatus:    (req, res, deps, params) => handlePairingStatus(req, res, deps, params),
   getVersion:   (_req, res, deps, _params) => handleGetVersion(_req, res, deps.updateChecker),
   update:       (req, res, deps, _params) => handleUpdate(req, res, deps.updateChecker, repoRoot),
   getLidMappings:  (_req, res, deps, _params) => handleGetLidMappings(_req, res, deps),
@@ -393,6 +403,9 @@ const ROUTES = [
   { method: 'POST',  path: /^\/api\/lines\/(?<name>[^/]+)\/stop$/, handler: 'stop' },
   { method: 'PATCH', path: /^\/api\/lines\/(?<name>[^/]+)\/config$/, handler: 'configUpdate' },
   { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/auth$/, handler: 'auth' },
+  { method: 'POST',  path: /^\/api\/lines\/(?<name>[^/]+)\/pairing\/preflight$/, handler: 'pairingPreflight' },
+  { method: 'POST',  path: /^\/api\/lines\/(?<name>[^/]+)\/pairing\/apply$/, handler: 'pairingApply' },
+  { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/pairing\/status$/, handler: 'pairingStatus' },
   { method: 'GET',    path: /^\/api\/lines\/(?<name>[^/]+)\/scheduled$/, handler: 'getScheduled' },
   { method: 'POST',   path: /^\/api\/lines\/(?<name>[^/]+)\/scheduled$/, handler: 'createScheduled' },
   { method: 'DELETE', path: /^\/api\/lines\/(?<name>[^/]+)\/scheduled$/, handler: 'cancelScheduled' },
