@@ -43,6 +43,31 @@ describe('Claude CLI informational stream events', () => {
     expect(parseEvents(line(malformed))).toEqual([{ type: 'unknown', raw: malformed }]);
   });
 
+  it('treats tool_progress as inert tool-execution telemetry (Claude CLI 2.x)', () => {
+    // Claude CLI >= 2.1.x streams `tool_progress` envelopes while an MCP tool runs
+    // (e.g. downloading a large media attachment). They carry no model output — the
+    // request is a separate `tool_use` and the outcome a separate `tool_result` — so
+    // the deployed 4fc1e7ff parser classified them `unknown` -> `ambiguous_event`,
+    // flooding rejections on every tool-heavy turn. They are inert progress telemetry.
+    expect(
+      parseEvents(
+        line({
+          type: 'tool_progress',
+          tool_use_id: 'sanitized-tool-use',
+          progress: 0.5,
+          uuid: 'sanitized-uuid',
+          session_id: 'sanitized-session',
+        }),
+      ),
+    ).toEqual([
+      {
+        type: 'ignored',
+        blockType: 'tool_progress',
+        reason: 'tool-execution progress telemetry, no runtime side effects',
+      },
+    ]);
+  });
+
   it('treats system thinking-token estimates as inert model telemetry', () => {
     expect(
       parseEvents(
