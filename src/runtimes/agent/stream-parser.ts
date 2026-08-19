@@ -15,10 +15,19 @@ const parserLog = createChildLogger('stream-parser');
 // process so a steady stream of the same type warns once, not 256×/hour. The
 // key space is bounded (a small set of type strings), so the dedupe set is too.
 const observedUnclassified = new Set<string>();
+// Hard cardinality cap: a hostile or buggy provider emitting many distinct type strings
+// must not grow this set without bound. Once the cap is reached, further novel types are
+// neither tracked nor warned (already-observed keys still dedupe what they hold).
+const MAX_OBSERVED_UNCLASSIFIED = 128;
 
 /** Reset the per-process unclassified-type dedupe (tests only). */
 export function _resetStreamParserObservability(): void {
   observedUnclassified.clear();
+}
+
+/** Snapshot the observed unclassified keys, id-only (tests only). */
+export function _observedUnclassifiedKeys(): readonly string[] {
+  return [...observedUnclassified];
 }
 
 function observeUnclassified(
@@ -27,8 +36,9 @@ function observeUnclassified(
 ): void {
   const key = `${classification}:${blockType}`;
   if (observedUnclassified.has(key)) return;
+  if (observedUnclassified.size >= MAX_OBSERVED_UNCLASSIFIED) return;
   observedUnclassified.add(key);
-  // id-only: `blockType` is a type discriminant, never payload content or fields.
+  // id-only: `blockType` is a bounded type discriminant, never payload content or fields.
   parserLog.warn({ classification, blockType }, 'stream-parser: unclassified provider event (id-only)');
 }
 
@@ -38,6 +48,7 @@ export const IGNORED_BLOCK_REASONS = {
   thinking_tokens: 'model-internal token estimate, no runtime side effects',
   rate_limit_event: 'provider rate-limit telemetry, no runtime side effects',
   tool_progress: 'tool-execution progress telemetry, no runtime side effects',
+  api_retry: 'provider API retry telemetry, no runtime side effects',
   tool_reference: 'tool-discovery metadata, no runtime side effects',
   text: 'user-originated context, no provider output side effects',
   image: 'user-originated media, no provider output side effects',
@@ -129,11 +140,61 @@ function asRecord(value: unknown): JsonRecord | null {
     : null;
 }
 
+// Strict discriminant charset: a lowercase ascii word, bounded length. Anything outside
+// it (control chars, bidi marks, punctuation, unicode, oversized) collapses to a safe
+// placeholder so the observability key space stays legible and bounded.
+const SAFE_DISCRIMINANT = /^[a-z][a-z0-9_]{0,39}$/;
+function boundedDiscriminant(value: unknown): string {
+  return typeof value === 'string' && SAFE_DISCRIMINANT.test(value) ? value : '<unsafe>';
+}
+
 function describeBlockType(block: unknown): string {
   const record = asRecord(block);
   if (record === null) return '<non-object>';
   if (!Object.hasOwn(record, 'type')) return '<missing>';
-  return typeof record['type'] === 'string' ? record['type'] : '<invalid>';
+  const type = record['type'];
+  if (typeof type !== 'string') return '<invalid>';
+  // Surface the system SUBTYPE (bounded) so an unknown system event is diagnosable in
+  // production instead of collapsing to an opaque 'system'. Type/subtype only — never
+  // any other envelope field.
+  if (type === 'system' && record['subtype'] !== undefined) {
+    return `system:${boundedDiscriminant(record['subtype'])}`;
+  }
+  return type;
+}
+
+// Documented Claude CLI 2.1.x system/api_retry error categories (closed enum).
+const API_RETRY_ERROR_CATEGORIES = new Set<string>([
+  'authentication_failed', 'oauth_org_not_allowed', 'billing_error', 'rate_limit',
+  'overloaded', 'invalid_request', 'model_not_found', 'server_error', 'unknown',
+  'max_output_tokens',
+]);
+
+function isSafeNonNegativeInt(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+// Full-schema validation for Claude CLI 2.1.x `{"type":"system","subtype":"api_retry"}`:
+// safe nonnegative integer counters with a coherent attempt range (attempt <= max_retries),
+// an HTTP-range-or-null error_status, a documented error category, and present session
+// identifiers. Anything outside the documented shape stays fail-closed (`unknown`).
+function isInertApiRetry(event: JsonRecord): boolean {
+  const attempt = event['attempt'];
+  const maxRetries = event['max_retries'];
+  const errorStatus = event['error_status'];
+  const error = event['error'];
+  return (
+    isSafeNonNegativeInt(attempt)
+    && isSafeNonNegativeInt(maxRetries)
+    && isSafeNonNegativeInt(event['retry_delay_ms'])
+    && attempt <= maxRetries
+    && (errorStatus === null
+      || (typeof errorStatus === 'number' && Number.isInteger(errorStatus)
+        && errorStatus >= 0 && errorStatus <= 599))
+    && typeof error === 'string' && API_RETRY_ERROR_CATEGORIES.has(error)
+    && isNonEmptyString(event['uuid'])
+    && isNonEmptyString(event['session_id'])
+  );
 }
 
 function unknownBlock(block: unknown): AgentEvent {
@@ -371,6 +432,14 @@ export function parseEvents(line: string): AgentEvent[] {
       && typeof event['estimated_tokens_delta'] === 'number'
     ) {
       return [ignoredBlock('thinking_tokens', 'thinking_tokens')];
+    }
+    // Claude CLI 2.1.x `api_retry`: documented, side-effect-free retry telemetry emitted
+    // when an API request hits a retryable error before the CLI auto-retries. Classify it
+    // inert ONLY when the full documented envelope validates; any malformed, out-of-range,
+    // or unknown field stays fail-closed. This recognizes a real protocol event — it does
+    // NOT assert api_retry caused any particular historically-observed rejection.
+    if (subtype === 'api_retry') {
+      return isInertApiRetry(event) ? [ignoredBlock('api_retry', 'api_retry')] : [unknownEvent(parsed)];
     }
     if (typeof subtype === 'string' && subtype.startsWith('hook')) {
       return [{ type: 'ignored' }];
