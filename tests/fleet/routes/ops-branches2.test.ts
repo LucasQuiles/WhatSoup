@@ -484,3 +484,46 @@ describe('handleAuth: connected → start-after-auth SSE arms', () => {
     expect(res._chunks.some((c) => c.includes('could not start'))).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// handleAuth: client-disconnect and wall-clock timeout arms (q-canary lane)
+// ---------------------------------------------------------------------------
+describe('handleAuth: disconnect and timeout restore arms', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('restores the stopped instance when the client disconnects before connected', async () => {
+    const deps = depsFor(fakeInstance({ name: 'auth-arm-4' }));
+    const req = mockReq({ method: 'POST' });
+    const res = mockSseRes();
+    const pending = handleAuth(req, res, deps, { name: 'auth-arm-4' });
+    await vi.waitFor(() => expect(vi.mocked(spawn)).toHaveBeenCalledTimes(1));
+    const child = vi.mocked(spawn).mock.results[0]!.value as { kill: (s?: string) => boolean };
+
+    // Browser closes the SSE stream before any 'connected' signal.
+    (req as unknown as { emit: (e: string) => void }).emit('close');
+    await pending;
+    expect(child.kill).toHaveBeenCalled();
+  });
+
+  it('kills the helper and emits a timeout error when the wall-clock timeout fires', async () => {
+    vi.useFakeTimers();
+    try {
+      const deps = depsFor(fakeInstance({ name: 'auth-arm-5' }));
+      const req = mockReq({ method: 'POST' });
+      const res = mockSseRes();
+      const pending = handleAuth(req, res, deps, { name: 'auth-arm-5' });
+      await vi.waitFor(() => expect(vi.mocked(spawn)).toHaveBeenCalledTimes(1));
+      const child = vi.mocked(spawn).mock.results[0]!.value as { kill: (s?: string) => boolean };
+
+      // Advance past AUTH_TIMEOUT_MS (5 min) with no 'connected' signal.
+      await vi.advanceTimersByTimeAsync(5 * 60_000 + 10);
+      expect(child.kill).toHaveBeenCalled();
+      expect(res._chunks.some((c) => c.includes('timed out') || c.includes('error'))).toBe(true);
+      await pending;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
