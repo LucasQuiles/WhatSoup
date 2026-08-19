@@ -1,7 +1,8 @@
 // src/core/substrate/triggers.ts
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
 import { z } from 'zod';
-import { nowUnixSec, clampTtl } from './time.ts';
+import { clampTtl } from './time.ts';
+import { type Clock, systemClock } from '../../lib/clock.ts';
 import { writeBeadEvent } from './events.ts';
 import type { TriggerKind, TriggerRow, OnTerminal } from './types.ts';
 import { nextCronRun } from '../cron.ts';
@@ -173,9 +174,9 @@ function computeNextFireAt(
   return now;
 }
 
-export function prepareTrigger(args: CreateTriggerArgs): PreparedTrigger {
+export function prepareTrigger(args: CreateTriggerArgs, clock: Clock = systemClock): PreparedTrigger {
   const validated = validateTriggerSpec(args.kind, args.spec);
-  const now = nowUnixSec();
+  const now = clock.nowUnixSec();
   const terminalAt = args.kind.startsWith('poll.')
     ? clampTtl(now, args.requestedTerminalAt ?? null, args.maxTtlHours ?? 24)
     : (args.requestedTerminalAt ?? null);
@@ -184,8 +185,8 @@ export function prepareTrigger(args: CreateTriggerArgs): PreparedTrigger {
   return { validated, now, terminalAt, nextFireAt };
 }
 
-export function createTrigger(db: DatabaseSync, args: CreateTriggerArgs): TriggerRow {
-  const { validated, now, terminalAt, nextFireAt } = prepareTrigger(args);
+export function createTrigger(db: DatabaseSync, args: CreateTriggerArgs, clock: Clock = systemClock): TriggerRow {
+  const { validated, now, terminalAt, nextFireAt } = prepareTrigger(args, clock);
   db.exec('BEGIN');
   try {
     // QR-046: dedupe_key is an idempotency key. It is stored + indexed
@@ -245,10 +246,10 @@ export function listTriggers(db: DatabaseSync, f: ListTriggersFilter = {}): Trig
   return db.prepare(sql).all(...b) as unknown as TriggerRow[];
 }
 
-export function pauseTrigger(db: DatabaseSync, id: number, args: { actor: string }): void {
+export function pauseTrigger(db: DatabaseSync, id: number, args: { actor: string }, clock: Clock = systemClock): void {
   const t = db.prepare(`SELECT bead_id FROM bead_triggers WHERE id = ?`).get(id) as { bead_id: number } | undefined;
   if (!t) throw new Error(`trigger ${id} not found`);
-  const now = nowUnixSec();
+  const now = clock.nowUnixSec();
   db.exec('BEGIN');
   try {
     db.prepare(`UPDATE bead_triggers SET status='paused', next_fire_at=NULL, updated_at=? WHERE id=?`).run(now, id);
@@ -257,8 +258,8 @@ export function pauseTrigger(db: DatabaseSync, id: number, args: { actor: string
   } catch (err) { try { db.exec('ROLLBACK'); } catch { /* best effort */ } throw err; }
 }
 
-export function extendTrigger(db: DatabaseSync, id: number, args: { until: number; maxTtlHours: number; actor: string }): void {
-  const now = nowUnixSec();
+export function extendTrigger(db: DatabaseSync, id: number, args: { until: number; maxTtlHours: number; actor: string }, clock: Clock = systemClock): void {
+  const now = clock.nowUnixSec();
   if (args.until <= now) throw new Error(`extendTrigger: until must be in the future`);
   const t = db.prepare(`SELECT bead_id, status FROM bead_triggers WHERE id = ?`).get(id) as { bead_id: number; status?: string } | undefined;
   if (!t) throw new Error(`trigger ${id} not found`);
@@ -308,16 +309,18 @@ export const DEFAULT_TRIGGER_PAST_DUE_GRACE_SEC = 86_400;
  */
 export function countPastDueTriggers(
   db: DatabaseSync,
-  now: number = nowUnixSec(),
+  now?: number,
   graceSeconds: number = DEFAULT_TRIGGER_PAST_DUE_GRACE_SEC,
+  clock: Clock = systemClock,
 ): number {
+  const cutoff = (now ?? clock.nowUnixSec()) - graceSeconds;
   const row = db.prepare(
     `SELECT COUNT(*) AS c FROM bead_triggers
      WHERE status = 'active'
        AND next_fire_at IS NOT NULL
        AND next_fire_at < ?
        AND last_fire_at IS NULL`,
-  ).get(now - graceSeconds) as { c: number };
+  ).get(cutoff) as { c: number };
   return row.c;
 }
 
@@ -396,15 +399,17 @@ export const DEFAULT_RECURRING_OVERDUE_GRACE_SEC = 900;
  */
 export function countRecurringOverdueTriggers(
   db: DatabaseSync,
-  now: number = nowUnixSec(),
+  now?: number,
   graceSeconds: number = DEFAULT_RECURRING_OVERDUE_GRACE_SEC,
+  clock: Clock = systemClock,
 ): number {
+  const cutoff = (now ?? clock.nowUnixSec()) - graceSeconds;
   const row = db.prepare(
     `SELECT COUNT(*) AS c FROM bead_triggers
      WHERE status = 'active'
        AND next_fire_at IS NOT NULL
        AND next_fire_at < ?
        AND last_fire_at IS NOT NULL`,
-  ).get(now - graceSeconds) as { c: number };
+  ).get(cutoff) as { c: number };
   return row.c;
 }

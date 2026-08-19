@@ -10,6 +10,7 @@ import {
   activityFeed, countOverdueProposals,
 } from '../../../src/core/substrate/beads.ts';
 import { upsertEntity, captureObservation, forgetObservation } from '../../../src/core/substrate/entities.ts';
+import { fakeClock } from '../../../src/lib/clock.ts';
 
 function tmpFile() { return join(tmpdir(), `sub-${randomBytes(8).toString('hex')}.db`); }
 
@@ -28,6 +29,17 @@ describe('beads core', () => {
     const events = db.raw.prepare(`SELECT event_type, actor FROM bead_events WHERE bead_id = ?`).all(bead.id) as Array<{ event_type: string; actor: string }>;
     expect(events[0].event_type).toBe('status_change');
     expect(events[0].actor).toBe('inline');
+  });
+
+  it('createBead persists created_at from the injected clock, not the wall clock (fails if reverted to free nowUnixSec)', () => {
+    const t0ms = 2_000_000_000_000; // distinctive future epoch (2033-05-18)
+    const bead = createBead(db.raw, {
+      kind: 'task', title: 'clocked', ownerJid: 'mw', actor: 'user',
+    }, fakeClock(t0ms));
+    const row = db.raw.prepare('SELECT created_at FROM beads WHERE id = ?').get(bead.id) as { created_at: number };
+    // Persisted created_at must derive from fakeClock's epoch. Reverted code
+    // reads the real 2026 wall clock and stores ~1.7e9, not floor(t0ms/1000).
+    expect(row.created_at).toBe(Math.floor(t0ms / 1000));
   });
 
   it('CHECK rejects unknown kind', () => {

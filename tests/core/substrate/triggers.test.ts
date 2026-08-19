@@ -12,6 +12,7 @@ import {
   countPastDueTriggers, DEFAULT_TRIGGER_PAST_DUE_GRACE_SEC,
 } from '../../../src/core/substrate/triggers.ts';
 import { nextCronRun } from '../../../src/core/cron.ts';
+import { fakeClock } from '../../../src/lib/clock.ts';
 
 function tmpFile() { return join(tmpdir(), `sub-${randomBytes(8).toString('hex')}.db`); }
 
@@ -38,6 +39,19 @@ describe('triggers core', () => {
     expect(t.next_fire_at).not.toBeNull();
     const kinds = (db.raw.prepare('SELECT event_type FROM bead_events WHERE bead_id = ?').all(bead.id) as Array<{ event_type: string }>).map(e => e.event_type);
     expect(kinds).toContain('trigger_created');
+  });
+
+  it('createTrigger persists created_at from the injected clock, not the wall clock (fails if reverted to free nowUnixSec)', () => {
+    const bead = createBead(db.raw, { kind: 'watch', title: 'clocked', ownerJid: 'mw', actor: 'user' });
+    const t0ms = 2_000_000_000_000; // distinctive future epoch (2033-05-18)
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'poll.email', spec: { source: 'gmail' },
+      reportChatJid: 'c', actor: 'user',
+    }, fakeClock(t0ms));
+    const row = db.raw.prepare('SELECT created_at FROM bead_triggers WHERE id = ?').get(t.id) as { created_at: number };
+    // Persisted created_at must derive from fakeClock's epoch. Reverted code
+    // reads the real 2026 wall clock and stores ~1.7e9, not floor(t0ms/1000).
+    expect(row.created_at).toBe(Math.floor(t0ms / 1000));
   });
 
   it('QR-046: dedupe_key makes createTrigger idempotent for a LIVE (kind, dedupe_key)', () => {
