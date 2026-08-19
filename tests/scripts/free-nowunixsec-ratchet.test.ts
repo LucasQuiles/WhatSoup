@@ -19,15 +19,32 @@
  *   - src/lib/clock.ts           — Clock interface + SystemClock/FakeClock
  *     nowUnixSec() method impls.
  *
- * The match uses a PCRE negative lookbehind `(?<!\.)` so method calls
- * (`clock.nowUnixSec()`, `systemClock.nowUnixSec()`, `this.clock.nowUnixSec()`)
- * are NOT counted as free sites. That lookbehind is load-bearing: a POSIX ERE
- * engine silently ignores `(?<!…)` and would then count every method call as a
- * free site — a ratchet that always reads zero (or always reads wrong) is
- * worse than no ratchet. Because this test runs under Node's V8 RegExp, which
- * supports lookbehind natively, the pattern evaluates correctly; the
- * `lookbehind is live` test below self-checks that before any count is trusted,
- * so a future engine/port that drops lookbehind cannot silently pass.
+ * The match uses a PCRE negative lookbehind `(?<!(?:clock|systemClock|fakeClock)\.)`
+ * so Clock method calls (`clock.nowUnixSec()`, `systemClock.nowUnixSec()`,
+ * `this.clock.nowUnixSec()`) are NOT counted as free sites, while a
+ * namespace-qualified free call — `time.nowUnixSec()`, i.e. `import * as time
+ * from './time.ts'` — IS counted. The distinction is WHICH symbol the dot
+ * follows, not whether a dot is present: a dot after one of the three Clock
+ * receiver identifiers is a method call; a dot after the time module namespace
+ * (or any identifier that is NOT a Clock receiver) is a free call.
+ *
+ * The separation is by receiver NAME, not by type — a static regex cannot know
+ * that an identifier is a `Clock`. The whitelist `clock`, `systemClock`,
+ * `fakeClock` is the canonical set of Clock receivers in src/ (verified at the
+ * time of writing); an unknown receiver name (`myClock.nowUnixSec()`,
+ * `fc.nowUnixSec()`) is therefore flagged as a free site. That is the
+ * fail-closed direction: a false positive is loud and trivial to fix (rename
+ * to the conventional `clock`, or extend the whitelist), whereas silently
+ * exempting an unknown name would re-open the exact escape hatch this ratchet
+ * closes.
+ *
+ * That lookbehind is load-bearing: a POSIX ERE engine silently ignores
+ * `(?<!…)` and would then count every method call as a free site — a ratchet
+ * that always reads zero (or always reads wrong) is worse than no ratchet.
+ * Because this test runs under Node's V8 RegExp, which supports lookbehind
+ * natively, the pattern evaluates correctly; the `lookbehind is live` test
+ * below self-checks that before any count is trusted, so a future engine/port
+ * that drops lookbehind cannot silently pass.
  */
 import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -52,11 +69,14 @@ function collectSrcFiles(): string[] {
     .filter((f) => !EXEMPT_PATHS.has(f));
 }
 
-// PCRE negative lookbehind: a free call site is `nowUnixSec(` NOT preceded by
-// a `.` (which would make it a method call). The lookbehind is the ONLY
-// mechanism distinguishing free from method — no `[^.]` prefix that a POSIX
-// engine might also mangle.
-const FREE_NOW_UNIX_SEC = /(?<!\.)nowUnixSec\(/g;
+// PCRE negative lookbehind: a free call site is `nowUnixSec(` that is NOT a
+// method call on a Clock receiver. The three Clock receiver identifiers that
+// can legitimately precede `.nowUnixSec(` are whitelisted; a dot before any
+// OTHER identifier (e.g. the `time` module namespace) is a namespace-qualified
+// free call and must still match. The lookbehind is the ONLY mechanism
+// distinguishing free from method — no `[^.]` prefix that a POSIX engine might
+// also mangle.
+const FREE_NOW_UNIX_SEC = /(?<!(?:clock|systemClock|fakeClock)\.)nowUnixSec\(/g;
 
 /**
  * Split source into its code lines with ORIGINAL 1-based line numbers,
@@ -111,14 +131,20 @@ function findFreeCallSites(): FreeSite[] {
 }
 
 describe('free nowUnixSec() ratchet', () => {
-  it('the lookbehind is live: method calls are not free sites', () => {
-    // If the engine silently ignored `(?<!\.)` — as POSIX ERE does — the
-    // method call below would match and the ratchet would false-positive on
-    // legitimate code. The bare call is the positive control: a real free site
-    // MUST match.
+  it('the lookbehind is live: method calls are not free sites, namespace calls are', () => {
+    // If the engine silently ignored `(?<!…)` — as POSIX ERE does — the method
+    // call below would match and the ratchet would false-positive on legitimate
+    // code. The bare call is the positive control: a real free site MUST match.
     expect('const t = nowUnixSec();'.match(FREE_NOW_UNIX_SEC)).not.toBeNull();
+    // Namespace-qualified free call (`import * as time from './time.ts'`): the
+    // dot follows the module namespace, NOT a Clock receiver, so it MUST match.
+    // This is the escape hatch the ratchet previously missed.
+    expect('const t = time.nowUnixSec();'.match(FREE_NOW_UNIX_SEC)).not.toBeNull();
+    // Clock method calls: the dot follows a Clock receiver identifier, so they
+    // MUST NOT be counted as free sites.
     expect('const t = clock.nowUnixSec();'.match(FREE_NOW_UNIX_SEC)).toBeNull();
     expect('const t = systemClock.nowUnixSec();'.match(FREE_NOW_UNIX_SEC)).toBeNull();
+    expect('const t = fakeClock.nowUnixSec();'.match(FREE_NOW_UNIX_SEC)).toBeNull();
     expect('const t = this.clock.nowUnixSec();'.match(FREE_NOW_UNIX_SEC)).toBeNull();
   });
 
