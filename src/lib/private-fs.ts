@@ -17,6 +17,7 @@ import {
   fsyncSync,
   ftruncateSync,
   lstatSync,
+  existsSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -400,6 +401,15 @@ export function appendPrivateJsonLineSync(filePath: string, value: unknown): voi
   chmodSync(dir, 0o700);
   assertWritablePrivateFileSync(filePath, 'event log');
 
+  // Whether the append will CREATE the file (new directory entry) or extend an
+  // existing one. On creation — including post-rotation recreation — the file
+  // fsync below flushes the data, but the directory entry that links the
+  // filename to the inode is separate metadata; a crash between the two can
+  // leave a named-but-unlinked inode, losing the whole forensic file. We fsync
+  // the parent directory in that case. A plain append to an existing file does
+  // not touch the directory entry, so the extra dir fsync is skipped there.
+  const willCreate = !existsSync(filePath);
+
   const flags = constants.O_WRONLY |
     constants.O_CREAT |
     constants.O_APPEND |
@@ -418,6 +428,8 @@ export function appendPrivateJsonLineSync(filePath: string, value: unknown): voi
   } finally {
     if (fd !== null) closeSync(fd);
   }
+
+  if (willCreate) fsyncDirectory(dir);
 }
 
 /**

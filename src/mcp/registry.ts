@@ -22,6 +22,7 @@ import {
   type SessionContext,
 } from './types.ts';
 import { errorMessage } from '../lib/error-message.ts';
+import { bondActorLedger } from '../transport/bond-actor-receipt.ts';
 import { isNonEmptyString } from '../lib/type-guards.ts';
 import { type Clock, systemClock } from '../lib/clock.ts';
 import {
@@ -695,6 +696,45 @@ export class ToolRegistry {
       }
     }
 
+    // --- S1 actor receipt (bond-revocation programme, 2026-08-17) ---
+    //
+    // Generic actions are written here, past every admission and authorization
+    // gate. Device removal is different: the handler receives a one-way callback
+    // and invokes it at the closest practical socket seam, after its own parsing
+    // and socket acquisition but BEFORE dispatch. A receipt written after the
+    // call is lost precisely when a removal request succeeds and the socket dies;
+    // one written here falsely labels pre-dispatch failures as requests.
+    //
+    // Both records are deliberate and distinct. The removal request is the
+    // discriminator — its ABSENCE on a terminal bond event is the durable form of
+    // the reasoning that excluded `logout` for the `q` revocation. The generic
+    // action is temporal context only, and the receipt labels it as such, so a
+    // read-only tool that merely happened to precede a revocation can never be
+    // read as its cause.
+    //
+    // This is best-effort by construction: attribution must never be able to fail
+    // a tool call that authorization already admitted.
+    const actorReceipt = {
+      route: 'mcp' as const,
+      action: `mcp_tool:${name}`,
+      actorIdentity: session.actorJid ?? null,
+      requestId: durabilityId === undefined ? null : `durability:${durabilityId}`,
+    };
+    try {
+      if (tool.bondEffect !== 'requests_device_removal') {
+        bondActorLedger.recordControlPlaneAction({
+          ...actorReceipt,
+          effect: tool.externalEffect?.kind === 'external'
+            ? 'external'
+            : tool.externalEffect?.kind === 'none'
+              ? 'read_only'
+              : 'unknown',
+        });
+      }
+    } catch (err) {
+      log.warn({ err, tool: name }, 'failed to record bond actor receipt');
+    }
+
     // #1753 rem-2: this call is "in flight" for the duration of tool.handler()
     // specifically — the durability bookkeeping above/below is synchronous and
     // cannot hang, so the async gap between registering and deregistering here
@@ -703,7 +743,16 @@ export class ToolRegistry {
     this.inFlightCalls.set(callId, { tool: name, startedAt: start });
     try {
       try {
-        const result = await tool.handler(effectiveParams, session);
+        const recordBondEffectDispatch = tool.bondEffect === 'requests_device_removal'
+          ? () => {
+              try {
+                bondActorLedger.recordBondRemovalRequest(actorReceipt);
+              } catch (err) {
+                log.warn({ err, tool: name }, 'failed to record bond effect dispatch');
+              }
+            }
+          : undefined;
+        const result = await tool.handler(effectiveParams, session, recordBondEffectDispatch);
         const isError = isToolErrorPayload(result);
         const returnedErrorEvidence = getToolErrorEvidence(result);
         const text = typeof result === 'string' ? result : JSON.stringify(result, null, 2);

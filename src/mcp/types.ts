@@ -105,6 +105,19 @@ export interface ToolDeclaration {
    */
   sensitive?: boolean;
   /**
+   * S1 (bond-revocation programme, 2026-08-17). Marks a tool that intentionally
+   * asks WhatsApp to remove this companion device. The registry writes an actor
+   * receipt to the bond-actor ledger through the handler's dispatch callback at
+   * the closest practical seam before the socket request, so the resulting
+   * terminal bond event can name what asked for it without misclassifying a
+   * pre-dispatch validation or socket-acquisition failure.
+   *
+   * Exactly one tool carries this today (`logout`). It is deliberately NOT a
+   * general "dangerous" flag: `sensitive` already gates authorization. This says
+   * something narrower and factual — the call requests device removal.
+   */
+  bondEffect?: 'requests_device_removal';
+  /**
    * Functional group tag (QR-017 / #1976 — progressive-disclosure taxonomy).
    * OPTIONAL and backward-compatible: untagged tools remain valid. Populated
    * at the registration seam (ToolRegistry.withModule, driven by
@@ -131,7 +144,11 @@ export interface ToolDeclaration {
    * creation. See src/mcp/external-effect.ts.
    */
   externalEffect?: import('./external-effect.ts').ExternalEffectDeclaration;
-  handler: (params: Record<string, unknown>, session: SessionContext) => Promise<unknown>;
+  handler: (
+    params: Record<string, unknown>,
+    session: SessionContext,
+    recordBondEffectDispatch?: () => void,
+  ) => Promise<unknown>;
 }
 
 export interface ToolCallResult {

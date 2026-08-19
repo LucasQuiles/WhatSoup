@@ -19,10 +19,14 @@ const LinkStep: FC<LinkStepProps> = ({ lineName, onComplete, alreadyLinked = fal
   const [errorMsg, setErrorMsg] = useState('')
   const [retryKey, setRetryKey] = useState(0)
   const [qrAge, setQrAge] = useState(0)
+  // Pairing is a credential mutation: it stops the service and opens a fresh
+  // WhatsApp registration. It must NEVER fire as a mount side effect - the
+  // operator explicitly begins it (q-canary lane, T5.8).
+  const [started, setStarted] = useState(false)
   const qrTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  const retryCountRef = useRef(0)
 
   useEffect(() => {
+    if (!started && !alreadyLinked) return
     let es: EventSource | null = null
     let cancelled = false
 
@@ -91,19 +95,14 @@ const LinkStep: FC<LinkStepProps> = ({ lineName, onComplete, alreadyLinked = fal
       })
 
       // Native connection errors — fires on 401, network failure, etc.
+      // No automatic retry: each pairing attempt is an explicit operator
+      // action (a silent retry loop re-fires a service-stopping mutation).
       source.onerror = () => {
         if (cancelled || es !== source) return
         source.close()
         clearQrTimer()
-        retryCountRef.current++
-        if (retryCountRef.current >= 5) {
-          setStatus('error')
-          setErrorMsg('Unable to connect to the authentication server after multiple attempts.')
-          return
-        }
-        // EventSource reconnects reuse the original URL. Since SSE tickets are
-        // single-use, own the retry loop here so each attempt gets a fresh one.
-        void openEventSource()
+        setStatus('error')
+        setErrorMsg('Lost the connection to the authentication server. Use Retry to start a new pairing attempt.')
       }
     }
 
@@ -118,13 +117,13 @@ const LinkStep: FC<LinkStepProps> = ({ lineName, onComplete, alreadyLinked = fal
       if (es) es.close()
       clearQrTimer()
     }
-  }, [alreadyLinked, lineName, retryKey])
+  }, [alreadyLinked, lineName, retryKey, started])
 
   const handleRetry = useCallback(() => {
     setStatus('waiting')
     setQrValue('')
     setErrorMsg('')
-    retryCountRef.current = 0
+    setStarted(true)
     setRetryKey((k) => k + 1)
   }, [])
 
@@ -174,6 +173,27 @@ const LinkStep: FC<LinkStepProps> = ({ lineName, onComplete, alreadyLinked = fal
         </div>
         <Button variant="primary" onClick={handleRetry}>
           Try Again
+        </Button>
+      </div>
+    )
+  }
+
+  // Explicit start gate: pairing stops the service and opens a fresh
+  // WhatsApp registration, so it begins only on an operator action.
+  if (!started) {
+    return (
+      <div
+        className="flex flex-col items-center text-center gap-[var(--sp-4)] py-[var(--sp-6)] px-0"
+      >
+        <div className="flex flex-col gap-[var(--sp-1)]">
+          <span className="c-heading text-lg">Ready to pair</span>
+          <span className="c-body text-text-2">
+            Starting pairing stops <strong>{lineName}</strong> and opens a new WhatsApp
+            link session. Begin when you are ready to scan.
+          </span>
+        </div>
+        <Button variant="primary" onClick={() => setStarted(true)}>
+          Begin Pairing
         </Button>
       </div>
     )

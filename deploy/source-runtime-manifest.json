@@ -5,7 +5,7 @@
   "entrypoints": [
     {
       "path": "src/main.ts",
-      "sha256": "9fa8094038a71839d0611ef2e37df666510c068aa531a34204f793ecaf73e50c",
+      "sha256": "91e78d82979f25d0a694e6edf027ea0e00cee7ba12c4370f1143792d1bcdfcf2",
       "mustContain": [
         "startHealthServer",
         "createConnection"
@@ -41,7 +41,7 @@
     },
     {
       "path": "src/transport/connection.ts",
-      "sha256": "4d6b3e6b63d9f8491bd8b69f22020999f550f94bc7bb0f5f229f08e1afbe2707",
+      "sha256": "4faa2ddc088c89dc8bc805b72abda58d0703fbeed69efa92e7d753241b763e94",
       "mustContain": [
         "decideDisconnectAction",
         "QR code received",
@@ -52,7 +52,7 @@
     },
     {
       "path": "src/transport/auth.ts",
-      "sha256": "9d3b7245372ddd86c505804c6ab614d24d71ae4a54319a71096de4642608e675",
+      "sha256": "c51f89b15f3408cf6d4bb5b2107cd1340967795b0aa96ce1041470ff82357b59",
       "mustContain": [
         "useMultiFileAuthState",
         "decideDisconnectAction"

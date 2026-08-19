@@ -78,6 +78,7 @@ import { buildMemoryReadinessLogFields } from './lib/memory-operation-telemetry.
 import { shutdownExitCode } from './main-shutdown-policy.ts';
 import { markCleanExit, restartLoopGuardPath } from './runtimes/agent/restart-loop-guard.ts';
 import { formatClockForUser } from './runtimes/agent/runtime-presentation.ts';
+import { acquireCoordinationLease, defaultLeaseProbes, releaseCoordinationLease, renewCoordinationLease } from './transport/coordination-lease.ts';
 import { acquireProcessLock, isProcessLockError, releaseProcessLock, type ProcessLockHandle } from './lib/process-lock.ts';
 import { createServiceManager } from './fleet/platform.ts';
 import { xdgDir } from './fleet/paths.ts';
@@ -147,7 +148,40 @@ function acquireLock(): void {
   }
 }
 
+// --- Account-scope coordination lease (q-canary lane, T4) ---
+//
+// When an account scope is configured, the runtime owns the fenced scope
+// lease for its process lifetime: a pairing coordinator racing this startup
+// acquires the same lease and exactly one wins. Without a configured scope
+// the lease machinery is inert (legacy instances). The heartbeat renewal is
+// best-effort; a live verified owner is never evicted on a stale heartbeat.
+//
+// Acquisition happens after the database compatibility gate: the lease only
+// needs to precede auth/socket activity, and an incompatible database must
+// fail fast without claiming the account scope. Only the state and release
+// path live here — release must be safe from the gate's drain path, before
+// acquisition is ever reachable.
+
+let scopeLease: import('./transport/auth-custody-contracts.ts').CoordinationLeaseV1 | null = null;
+let scopeLeaseRenewTimer: NodeJS.Timeout | null = null;
+const SCOPE_LEASE_TTL_MS = 5 * 60_000;
+
+function releaseAccountScopeLease(): void {
+  if (scopeLeaseRenewTimer !== null) {
+    clearInterval(scopeLeaseRenewTimer);
+    scopeLeaseRenewTimer = null;
+  }
+  if (scopeLease === null || config.accountScopeId === undefined) return;
+  releaseCoordinationLease({
+    stateRoot: config.stateRoot,
+    scopeId: config.accountScopeId,
+    lease: scopeLease,
+  });
+  scopeLease = null;
+}
+
 function releaseLock(): void {
+  releaseAccountScopeLease();
   if (!lockHandle) return;
   const released = releaseProcessLock(lockHandle);
   if (!released) {
@@ -248,6 +282,63 @@ if (databaseStartup.mode === 'drained') {
   }
   process.exit(shutdownExitCode(drainSignal));
 }
+
+// Defined below the compatibility gate on purpose: the ordering contract in
+// tests/core/database-compatibility-health.test.ts pins that no timer starts
+// before the gate, and the renewal interval here is the first one.
+function acquireAccountScopeLease(): void {
+  if (config.accountScopeId === undefined) return;
+  const scopeId = config.accountScopeId;
+  const probes = defaultLeaseProbes();
+  const result = acquireCoordinationLease({
+    stateRoot: config.stateRoot,
+    scopeId,
+    operationId: `runtime-start-${probes.pid}-${probes.nowMs()}`,
+    mode: 'runtime_start',
+    ttlMs: SCOPE_LEASE_TTL_MS,
+    probes,
+  });
+  if (!result.ok) {
+    log.fatal(
+      { refusal: result.refusal, scopeId },
+      'account-scope lease unavailable at startup; another owner (runtime or pairing) holds this scope',
+    );
+    process.exit(1);
+  }
+  scopeLease = result.lease;
+  if (result.takeover !== null) {
+    log.warn({ takeover: result.takeover }, 'account-scope lease reclaimed at startup');
+  }
+  scopeLeaseRenewTimer = setInterval(() => {
+    if (scopeLease === null) return;
+    const renewed = renewCoordinationLease({
+      stateRoot: config.stateRoot,
+      scopeId,
+      lease: scopeLease,
+      ttlMs: SCOPE_LEASE_TTL_MS,
+      probes: defaultLeaseProbes(),
+    });
+    if (renewed.ok) {
+      scopeLease = renewed.lease;
+    } else if (renewed.refusal === 'fencing_token_mismatch' || renewed.refusal === 'lease_missing') {
+      // Another actor provably owns (or released) the scope. A fence that
+      // only logs does not fence: continuing to run means a dual writer on
+      // the account's auth tree. Shut down through the normal signal path so
+      // locks release cleanly; our stale lease token cannot clobber the
+      // successor's on release (release compares fencing tokens).
+      log.fatal({ refusal: renewed.refusal }, 'account-scope lease lost to a fenced successor; shutting down');
+      process.kill(process.pid, 'SIGTERM');
+    } else {
+      // A corrupt lease file proves nothing about ownership either way; keep
+      // running and keep reporting rather than tearing down mid-flight work.
+      log.error({ refusal: renewed.refusal }, 'account-scope lease renewal failed');
+    }
+  }, Math.floor(SCOPE_LEASE_TTL_MS / 3));
+  scopeLeaseRenewTimer.unref();
+  log.info({ scopeId, fencingToken: scopeLease.fencingToken }, 'account-scope lease acquired');
+}
+acquireAccountScopeLease();
+
 const db = databaseStartup.db;
 const memoryConsolidationRunStore = new ConsolidationRunStore(db);
 try {

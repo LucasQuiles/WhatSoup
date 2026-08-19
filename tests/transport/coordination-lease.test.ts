@@ -1,0 +1,402 @@
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { spawnSync } from 'node:child_process';
+import {
+  acquireCoordinationLease,
+  renewCoordinationLease,
+  releaseCoordinationLease,
+  forceTakeoverCoordinationLease,
+  coordinationLeasePath,
+  defaultLeaseProbes,
+  resolveConfiguredAccountScope,
+  type LeaseProbes,
+} from '../../src/transport/coordination-lease.ts';
+import { parseCoordinationLease, parseAccountScopeId } from '../../src/transport/auth-custody-contracts.ts';
+
+const SCOPE = parseAccountScopeId('scope:line-a-wa')!;
+const T0 = Date.parse('2026-08-18T18:00:00.000Z');
+
+let root: string;
+
+function deadPid(): number {
+  const child = spawnSync('true');
+  if (typeof child.pid !== 'number') throw new Error('fixture child pid unavailable');
+  return child.pid;
+}
+
+function probes(overrides: Partial<LeaseProbes> = {}): LeaseProbes {
+  return {
+    hostId: 'host-a',
+    bootId: 'boot-current',
+    pid: process.pid,
+    birthToken: () => 'birth-self',
+    pidAlive: pid => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch (err) {
+        // EPERM means the process exists but is not ours - that is ALIVE.
+        return (err as NodeJS.ErrnoException).code === 'EPERM';
+      }
+    },
+    nowMs: () => T0,
+    ...overrides,
+  };
+}
+
+function baseArgs(overrides: Record<string, unknown> = {}) {
+  return {
+    stateRoot: root,
+    scopeId: SCOPE,
+    operationId: 'op-lease-0001',
+    mode: 'pairing' as const,
+    ttlMs: 60_000,
+    probes: probes(),
+    ...overrides,
+  };
+}
+
+beforeEach(() => {
+  root = mkdtempSync(join(tmpdir(), 'coord-lease-test-'));
+});
+
+afterEach(() => {
+  rmSync(root, { recursive: true, force: true });
+});
+
+describe('acquireCoordinationLease', () => {
+  it('acquires a fresh lease with fencing token 1 and a parseable V1 payload', () => {
+    const result = acquireCoordinationLease(baseArgs());
+    if (!result.ok) throw new Error(`unexpected refusal: ${result.refusal}`);
+    expect(result.lease.fencingToken).toBe(1);
+    expect(result.lease.mode).toBe('pairing');
+    const onDisk = JSON.parse(readFileSync(coordinationLeasePath(root, SCOPE), 'utf-8'));
+    expect(parseCoordinationLease(onDisk)).toEqual(result.lease);
+  });
+
+  it('refuses while a live verified owner holds the lease, even with a stale heartbeat', () => {
+    const first = acquireCoordinationLease(baseArgs());
+    if (!first.ok) throw new Error('fixture acquire failed');
+    // Second coordinator, later clock: the first owner's heartbeat is stale
+    // but the owner process (this test process) is alive with a matching
+    // birth token - takeover must refuse.
+    const second = acquireCoordinationLease(baseArgs({
+      operationId: 'op-lease-0002',
+      probes: probes({ nowMs: () => T0 + 10 * 60_000 }),
+    }));
+    expect(second).toEqual({ ok: false, refusal: 'held_by_live_owner' });
+  });
+
+  it('reclaims from a dead same-boot holder with an incremented fencing token and a takeover receipt', () => {
+    const first = acquireCoordinationLease(baseArgs());
+    if (!first.ok) throw new Error('fixture acquire failed');
+    const lease = JSON.parse(readFileSync(coordinationLeasePath(root, SCOPE), 'utf-8'));
+    lease.pid = deadPid();
+    writeFileSync(coordinationLeasePath(root, SCOPE), JSON.stringify(lease));
+
+    const second = acquireCoordinationLease(baseArgs({ operationId: 'op-lease-0002' }));
+    if (!second.ok) throw new Error(`unexpected refusal: ${second.refusal}`);
+    expect(second.lease.fencingToken).toBe(2);
+    expect(second.takeover).toEqual(
+      expect.objectContaining({ reason: 'holder_dead', priorFencingToken: 1 }),
+    );
+  });
+
+  it('reclaims across a boot change', () => {
+    const first = acquireCoordinationLease(baseArgs());
+    if (!first.ok) throw new Error('fixture acquire failed');
+    const second = acquireCoordinationLease(baseArgs({
+      operationId: 'op-lease-0002',
+      probes: probes({ bootId: 'boot-after-reboot' }),
+    }));
+    if (!second.ok) throw new Error(`unexpected refusal: ${second.refusal}`);
+    expect(second.lease.fencingToken).toBe(2);
+    expect(second.takeover?.reason).toBe('boot_changed');
+  });
+
+  it('reclaims a reused PID whose birth token no longer matches', () => {
+    const first = acquireCoordinationLease(baseArgs());
+    if (!first.ok) throw new Error('fixture acquire failed');
+    const second = acquireCoordinationLease(baseArgs({
+      operationId: 'op-lease-0002',
+      probes: probes({ birthToken: pid => (pid === process.pid ? 'birth-DIFFERENT' : 'birth-self') }),
+    }));
+    if (!second.ok) throw new Error(`unexpected refusal: ${second.refusal}`);
+    expect(second.takeover?.reason).toBe('pid_reused');
+  });
+
+  it('fails closed when the birth token cannot be probed for a live holder', () => {
+    const first = acquireCoordinationLease(baseArgs());
+    if (!first.ok) throw new Error('fixture acquire failed');
+    const second = acquireCoordinationLease(baseArgs({
+      operationId: 'op-lease-0002',
+      probes: probes({ birthToken: () => null }),
+    }));
+    expect(second).toEqual({ ok: false, refusal: 'owner_unknown' });
+  });
+
+  it('fails closed when a LIVE holder pid cannot be birth-probed (owner_unknown, never reclaim)', () => {
+    const first = acquireCoordinationLease(baseArgs());
+    if (!first.ok) throw new Error('fixture acquire failed');
+    // Rewrite the holder as pid 1 (alive, not ours); the probe can identify
+    // our own birth token but not pid 1's.
+    const holder = { ...first.lease, pid: 1, processBirthToken: 'birth-init' };
+    writeFileSync(coordinationLeasePath(root, SCOPE), JSON.stringify(holder));
+    const second = acquireCoordinationLease(baseArgs({
+      operationId: 'op-lease-0002',
+      probes: probes({ birthToken: pid => (pid === process.pid ? 'birth-self' : null) }),
+    }));
+    expect(second).toEqual({ ok: false, refusal: 'owner_unknown' });
+  });
+
+  it('fails closed on a remote-host lease', () => {
+    const first = acquireCoordinationLease(baseArgs());
+    if (!first.ok) throw new Error('fixture acquire failed');
+    const second = acquireCoordinationLease(baseArgs({
+      operationId: 'op-lease-0002',
+      probes: probes({ hostId: 'host-b' }),
+    }));
+    expect(second).toEqual({ ok: false, refusal: 'owner_unknown' });
+  });
+
+  it('fails closed on a corrupt lease file and preserves the bytes', () => {
+    writeFileSync(coordinationLeasePath(root, SCOPE), 'not json');
+    const result = acquireCoordinationLease(baseArgs());
+    expect(result).toEqual({ ok: false, refusal: 'lease_corrupt' });
+    expect(readFileSync(coordinationLeasePath(root, SCOPE), 'utf-8')).toBe('not json');
+  });
+
+  it('keeps fencing tokens monotonic across clean release/re-acquire cycles', () => {
+    const first = acquireCoordinationLease(baseArgs());
+    if (!first.ok) throw new Error('fixture acquire failed');
+    expect(releaseCoordinationLease({ stateRoot: root, scopeId: SCOPE, lease: first.lease })).toEqual({ ok: true });
+    const second = acquireCoordinationLease(baseArgs({ operationId: 'op-lease-0002' }));
+    if (!second.ok) throw new Error('re-acquire failed');
+    expect(second.lease.fencingToken).toBe(2);
+  });
+});
+
+describe('renew and release', () => {
+  it('renew extends the heartbeat only for the exact fencing token holder', () => {
+    const acquired = acquireCoordinationLease(baseArgs());
+    if (!acquired.ok) throw new Error('fixture acquire failed');
+    const renewed = renewCoordinationLease({
+      stateRoot: root,
+      scopeId: SCOPE,
+      lease: acquired.lease,
+      probes: probes({ nowMs: () => T0 + 30_000 }),
+      ttlMs: 60_000,
+    });
+    if (!renewed.ok) throw new Error(`unexpected refusal: ${renewed.refusal}`);
+    expect(Date.parse(renewed.lease.renewedAt)).toBe(T0 + 30_000);
+    expect(renewed.lease.fencingToken).toBe(1);
+
+    const stale = renewCoordinationLease({
+      stateRoot: root,
+      scopeId: SCOPE,
+      lease: { ...acquired.lease, fencingToken: 99 },
+      probes: probes({ nowMs: () => T0 + 31_000 }),
+      ttlMs: 60_000,
+    });
+    expect(stale).toEqual({ ok: false, refusal: 'fencing_token_mismatch' });
+  });
+
+  it('release refuses a non-owner and removes the lease for the owner', () => {
+    const acquired = acquireCoordinationLease(baseArgs());
+    if (!acquired.ok) throw new Error('fixture acquire failed');
+    expect(
+      releaseCoordinationLease({
+        stateRoot: root,
+        scopeId: SCOPE,
+        lease: { ...acquired.lease, fencingToken: 99 },
+      }),
+    ).toEqual({ ok: false, refusal: 'fencing_token_mismatch' });
+    expect(releaseCoordinationLease({ stateRoot: root, scopeId: SCOPE, lease: acquired.lease })).toEqual({ ok: true });
+    const again = acquireCoordinationLease(baseArgs({ operationId: 'op-lease-0003' }));
+    expect(again.ok).toBe(true);
+  });
+});
+
+describe('resolveConfiguredAccountScope', () => {
+  it('returns undefined when unset and the parsed scope when valid', () => {
+    expect(resolveConfiguredAccountScope(undefined)).toBeUndefined();
+    expect(resolveConfiguredAccountScope('scope:line-a-wa')).toBe('scope:line-a-wa');
+  });
+
+  it('throws loudly on a malformed configured scope (never silently disables)', () => {
+    expect(() => resolveConfiguredAccountScope('line-a')).toThrow(/accountScopeId/);
+    expect(() => resolveConfiguredAccountScope(42)).toThrow(/accountScopeId/);
+  });
+});
+
+describe('defaultLeaseProbes', () => {
+  it('identifies this process: live pid, non-null birth token, stable across calls', () => {
+    const real = defaultLeaseProbes();
+    expect(real.pid).toBe(process.pid);
+    expect(real.pidAlive(process.pid)).toBe(true);
+    const birth = real.birthToken(process.pid);
+    expect(typeof birth).toBe('string');
+    expect((birth as string).length).toBeGreaterThan(0);
+    expect(real.birthToken(process.pid)).toBe(birth);
+  });
+
+  it('treats EPERM as alive and a reaped pid as dead', () => {
+    const real = defaultLeaseProbes();
+    expect(real.pidAlive(1)).toBe(true);
+    expect(real.pidAlive(deadPid())).toBe(false);
+  });
+});
+
+describe('forceTakeoverCoordinationLease', () => {
+  it('is the only path past owner_unknown and writes a durable takeover receipt', () => {
+    const first = acquireCoordinationLease(baseArgs());
+    if (!first.ok) throw new Error('fixture acquire failed');
+    // A holder written by another host is owner_unknown to normal acquisition.
+    const remoteHolder = { ...first.lease, hostId: 'host-b' };
+    writeFileSync(coordinationLeasePath(root, SCOPE), JSON.stringify(remoteHolder));
+    expect(acquireCoordinationLease(baseArgs({ operationId: 'op-lease-0002' }))).toEqual({
+      ok: false,
+      refusal: 'owner_unknown',
+    });
+    const forced = forceTakeoverCoordinationLease({
+      stateRoot: root,
+      scopeId: SCOPE,
+      operationId: 'op-lease-0002',
+      mode: 'pairing',
+      ttlMs: 60_000,
+      probes: probes(),
+      ownerAuthorizationId: 'owner-auth-0042',
+    });
+    if (!forced.ok) throw new Error(`unexpected refusal: ${forced.refusal}`);
+    expect(forced.lease.fencingToken).toBe(2);
+    const receiptRaw = readFileSync(join(root, 'coordination-lease-takeovers.ndjson'), 'utf-8');
+    const receipts = receiptRaw.trimEnd().split('\n').map(line => JSON.parse(line));
+    expect(receipts.at(-1)).toEqual(
+      expect.objectContaining({
+        ownerAuthorizationId: 'owner-auth-0042',
+        reason: 'owner_authorized_takeover',
+        priorFencingToken: 1,
+      }),
+    );
+  });
+
+  it('refuses without an owner authorization id', () => {
+    const first = acquireCoordinationLease(baseArgs());
+    if (!first.ok) throw new Error('fixture acquire failed');
+    const forced = forceTakeoverCoordinationLease({
+      stateRoot: root,
+      scopeId: SCOPE,
+      operationId: 'op-lease-0002',
+      mode: 'pairing',
+      ttlMs: 60_000,
+      probes: probes(),
+      ownerAuthorizationId: '',
+    });
+    expect(forced).toEqual({ ok: false, refusal: 'authorization_required' });
+  });
+});
+
+describe('coordination-lease — renew/release/takeover edge branches', () => {
+  it('renew refuses a missing lease and a corrupt lease file', () => {
+    expect(
+      renewCoordinationLease({ stateRoot: root, scopeId: SCOPE, lease: baseArgs().probes && ({} as never), probes: probes(), ttlMs: 60_000 } as never),
+    ).toEqual({ ok: false, refusal: 'lease_missing' });
+
+    const acquired = acquireCoordinationLease(baseArgs());
+    if (!acquired.ok) throw new Error('fixture acquire failed');
+    writeFileSync(coordinationLeasePath(root, SCOPE), 'not json');
+    expect(
+      renewCoordinationLease({ stateRoot: root, scopeId: SCOPE, lease: acquired.lease, probes: probes(), ttlMs: 60_000 }),
+    ).toEqual({ ok: false, refusal: 'lease_corrupt' });
+  });
+
+  it('release refuses a missing lease and a corrupt lease file', () => {
+    expect(releaseCoordinationLease({ stateRoot: root, scopeId: SCOPE, lease: {} as never })).toEqual({
+      ok: false,
+      refusal: 'lease_missing',
+    });
+    const acquired = acquireCoordinationLease(baseArgs());
+    if (!acquired.ok) throw new Error('fixture acquire failed');
+    writeFileSync(coordinationLeasePath(root, SCOPE), '{bad');
+    expect(releaseCoordinationLease({ stateRoot: root, scopeId: SCOPE, lease: acquired.lease })).toEqual({
+      ok: false,
+      refusal: 'lease_corrupt',
+    });
+  });
+
+  it('forceTakeover refuses a missing lease and tolerates a corrupt prior lease', () => {
+    expect(
+      forceTakeoverCoordinationLease({
+        stateRoot: root,
+        scopeId: SCOPE,
+        operationId: 'op-force-missing',
+        mode: 'pairing',
+        ttlMs: 60_000,
+        probes: probes(),
+        ownerAuthorizationId: 'owner-auth-1',
+      }),
+    ).toEqual({ ok: false, refusal: 'lease_missing' });
+
+    acquireCoordinationLease(baseArgs());
+    writeFileSync(coordinationLeasePath(root, SCOPE), 'corrupt-prior');
+    const forced = forceTakeoverCoordinationLease({
+      stateRoot: root,
+      scopeId: SCOPE,
+      operationId: 'op-force-corrupt',
+      mode: 'pairing',
+      ttlMs: 60_000,
+      probes: probes(),
+      ownerAuthorizationId: 'owner-auth-2',
+    });
+    if (!forced.ok) throw new Error(`unexpected refusal: ${forced.refusal}`);
+    // A corrupt prior lease has no readable token: takeover falls back to the
+    // tombstone floor and still fences forward.
+    expect(forced.lease.fencingToken).toBeGreaterThanOrEqual(1);
+    expect(forced.lease.operationId).toBe('op-force-corrupt');
+  });
+
+  it('a reclaim of a dead-holder lease succeeds and increments the fencing token', () => {
+    const first = acquireCoordinationLease(baseArgs());
+    if (!first.ok) throw new Error('fixture acquire failed');
+    // Rewrite the holder as a dead same-boot pid so reclaim (not live_owner) fires.
+    const dead = deadPid();
+    writeFileSync(coordinationLeasePath(root, SCOPE), JSON.stringify({ ...first.lease, pid: dead }));
+    const reclaimed = acquireCoordinationLease(baseArgs({ operationId: 'op-reclaim-1' }));
+    if (!reclaimed.ok) throw new Error(`unexpected refusal: ${reclaimed.refusal}`);
+    expect(reclaimed.lease.fencingToken).toBe(2);
+    expect(reclaimed.takeover?.reason).toBe('holder_dead');
+    // The reclaim guard file must be cleaned up.
+    expect(existsSync(`${coordinationLeasePath(root, SCOPE)}.reclaim`)).toBe(false);
+  });
+});
+
+describe('coordination-lease — reclaim guard contention', () => {
+  function deadHolderLease() {
+    const first = acquireCoordinationLease(baseArgs());
+    if (!first.ok) throw new Error('fixture acquire failed');
+    const dead = deadPid();
+    writeFileSync(coordinationLeasePath(root, SCOPE), JSON.stringify({ ...first.lease, pid: dead }));
+  }
+
+  it('refuses reclaim while a FRESH reclaim guard is held by another racer', () => {
+    deadHolderLease();
+    // Simulate a concurrent reclaimer holding the guard right now.
+    writeFileSync(`${coordinationLeasePath(root, SCOPE)}.reclaim`, JSON.stringify({ pid: 999999, at: T0 }));
+    // Fixed-clock probes read the guard's real mtime as not-yet-stale.
+    const result = acquireCoordinationLease(baseArgs({ operationId: 'op-blocked' }));
+    expect(result).toEqual({ ok: false, refusal: 'lease_race_lost' });
+  });
+
+  it('reaps a STALE reclaim guard and completes the reclaim', () => {
+    deadHolderLease();
+    writeFileSync(`${coordinationLeasePath(root, SCOPE)}.reclaim`, JSON.stringify({ pid: 999999, at: 0 }));
+    // Probes whose clock is far past the guard's real mtime -> guard is stale.
+    const futureProbes = probes({ nowMs: () => Date.now() + 10 * 60_000 });
+    const result = acquireCoordinationLease(baseArgs({ operationId: 'op-after-reap', probes: futureProbes }));
+    if (!result.ok) throw new Error(`unexpected refusal: ${result.refusal}`);
+    expect(result.lease.fencingToken).toBe(2);
+    expect(existsSync(`${coordinationLeasePath(root, SCOPE)}.reclaim`)).toBe(false);
+  });
+});

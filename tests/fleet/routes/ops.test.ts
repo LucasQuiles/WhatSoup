@@ -3001,6 +3001,37 @@ describe('ops.ts handleAuth uncovered-branch coverage', () => {
     vi.mocked(fs.existsSync).mockImplementation(actualExistsSync);
   });
 
+  it('forwards XDG_STATE_HOME to the pairing helper', async () => {
+    const previousStateHome = process.env.XDG_STATE_HOME;
+    process.env.XDG_STATE_HOME = '/custom/xdg-state';
+    const child = fakeChildProcess();
+    vi.mocked(spawn).mockReturnValue(child as any);
+    const deps = depsFor({
+      discovery: {
+        getInstance: vi.fn(() => fakeInstance({ name: 'test-line' })),
+        scan: vi.fn(),
+      } as any,
+    });
+
+    try {
+      await handleAuth(
+        mockReq({ method: 'POST', body: '', url: '/api/lines/test-line/auth' }),
+        mockSseRes(),
+        deps,
+        { name: 'test-line' },
+      );
+
+      const spawnOptions = vi.mocked(spawn).mock.calls.at(-1)?.[2] as
+        | { env?: NodeJS.ProcessEnv }
+        | undefined;
+      expect(spawnOptions?.env?.XDG_STATE_HOME).toBe('/custom/xdg-state');
+    } finally {
+      child.emit('exit', 1);
+      if (previousStateHome === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = previousStateHome;
+    }
+  });
+
   it('skips non-JSON stdout lines without emitting an SSE event (line 1360)', async () => {
     const inst = fakeInstance({ name: 'test-line' });
     const child = fakeChildProcess();

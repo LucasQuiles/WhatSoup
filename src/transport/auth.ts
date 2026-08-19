@@ -17,6 +17,7 @@ import {
 } from '@whiskeysockets/baileys';
 import qrcodeTerminal from 'qrcode-terminal';
 import { config } from '../config.ts';
+import { systemClock } from '../lib/clock.ts';
 // createChildLogger must be imported after config.ts in source order — config.ts sets
 // process.env.LOG_DIR at its own module top level, and logger.ts reads it once at import
 // time (see src/config.ts:421-422). No transitive dependency enforces this ordering.
@@ -26,8 +27,14 @@ import { redactAuthCliText } from './auth-cli-redaction.ts';
 import { createAtomicCredsSaver } from './atomic-auth-save.ts';
 import { installThirdPartyConsoleRedaction } from './third-party-console-redaction.ts';
 import { baileysVersionLabel, resolveBaileysVersion } from './baileys-version.ts';
+import {
+  buildEffectiveClientReceipt,
+  effectiveClientRegistry,
+} from './effective-client-receipt.ts';
+import { writeAuthGenerationReceipt } from './auth-generation.ts';
 import { errorMessage } from '../lib/error-message.ts';
 import { classifyPairNumber, maskPairingCode, pairingEmissionLine, pairingGate } from './pairing.ts';
+import { acquireCoordinationLease, defaultLeaseProbes, readCoordinationLease, releaseCoordinationLease } from './coordination-lease.ts';
 
 const log = createChildLogger('auth-cli');
 
@@ -50,6 +57,66 @@ if (existsSync(lockPath)) {
     `         (do not use legacy launchctl stop for a KeepAlive job)\n`,
   );
   process.exit(1);
+}
+
+// ---------------------------------------------------------------------------
+// Account-scope coordination lease (q-canary lane, T4)
+//
+// When an account scope is configured, pairing must OWN the fenced lease for
+// its whole run: a runtime starting concurrently acquires the same lease and
+// exactly one wins. The legacy existence check above stays as defense in
+// depth; it detects a running bot but holds nothing. Without a configured
+// scope the lease machinery is inert (legacy instances).
+// ---------------------------------------------------------------------------
+
+if (config.accountScopeId !== undefined) {
+  const scopeId = config.accountScopeId;
+  // Delegated handoff (T4.3): when the pairing COORDINATOR already owns the
+  // scope lease, it hands this helper the exact lease identity via env. The
+  // helper adopts that lease (verifying it against the on-disk record) rather
+  // than acquiring its own - acquiring would deadlock against the live
+  // coordinator. Adoption never releases: the coordinator owns the lifecycle.
+  // env-allowed: delegated pairing-lease handoff from the fleet coordinator
+  const delegatedOp = process.env.WHATSOUP_PAIRING_LEASE_OP;
+  // env-allowed: delegated pairing-lease handoff from the fleet coordinator
+  const delegatedFencing = process.env.WHATSOUP_PAIRING_LEASE_FENCING;
+  if (delegatedOp !== undefined || delegatedFencing !== undefined) {
+    const onDisk = readCoordinationLease(config.stateRoot, scopeId);
+    if (
+      onDisk === null ||
+      onDisk.mode !== 'pairing' ||
+      onDisk.operationId !== delegatedOp ||
+      String(onDisk.fencingToken) !== delegatedFencing
+    ) {
+      log.fatal(
+        { delegatedOp, delegatedFencing },
+        'delegated pairing lease does not match the on-disk lease; refusing pairing',
+      );
+      process.exit(1);
+    }
+  } else {
+    const probes = defaultLeaseProbes();
+    const leaseResult = acquireCoordinationLease({
+      stateRoot: config.stateRoot,
+      scopeId,
+      operationId: `pairing-cli-${probes.pid}-${probes.nowMs()}`,
+      mode: 'pairing',
+      ttlMs: 10 * 60_000,
+      probes,
+    });
+    if (!leaseResult.ok) {
+      log.fatal({ refusal: leaseResult.refusal }, 'account-scope lease unavailable; refusing pairing');
+      process.stderr.write(
+        `Pairing refused: the account-scope coordination lease is ${leaseResult.refusal}.\n` +
+        `Stop the owning process (or use the owner-authorized takeover) and retry.\n`,
+      );
+      process.exit(1);
+    }
+    const heldLease = leaseResult.lease;
+    process.once('exit', () => {
+      releaseCoordinationLease({ stateRoot: config.stateRoot, scopeId, lease: heldLease });
+    });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -92,7 +159,11 @@ async function startSocket(): Promise<void> {
   // Suppress Baileys internals (handshake material, signal keys, etc.)
   const baileysLogger = { level: 'silent', trace: () => {}, debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, child: () => baileysLogger } as any;
 
-  const sock = makeWASocket({
+  // S2: the pairing CLI is the SECOND, independent socket path, and it does not
+  // match the runtime one — it hard-codes generateHighQualityLinkPreview: false
+  // where connection.ts passes the configured value. Both must emit a receipt or
+  // a bond paired here and run there has an unrecorded client difference.
+  const socketConfig = {
     version: resolvedVersion.version,
     logger: baileysLogger,
     auth: {
@@ -100,7 +171,18 @@ async function startSocket(): Promise<void> {
       keys: makeCacheableSignalKeyStore(state.keys, baileysLogger),
     },
     generateHighQualityLinkPreview: false,
-  });
+  };
+  // Recorded AFTER construction — see the note at the connection.ts call site. The
+  // in-memory record is only useful within THIS short-lived CLI process; the value
+  // that has to survive is persisted with the generation receipt below, once
+  // pairing actually succeeds.
+  const sock = makeWASocket(socketConfig);
+  const pairingClientReceipt = buildEffectiveClientReceipt(
+    socketConfig,
+    resolvedVersion,
+    'pairing_cli',
+  );
+  effectiveClientRegistry.record(pairingClientReceipt);
 
   // #2165: `saveCreds()` rejects on a real write failure (full disk, EACCES).
   // Passing it straight to `.on` discards the returned promise, so that
@@ -152,6 +234,33 @@ async function startSocket(): Promise<void> {
         process.exit(1);
         return;
       }
+      // S3: a bond generation now exists, and this is the only moment its creation
+      // instant is OBSERVED rather than derivable. Written after saveCreds()
+      // resolved — a generation whose credentials never landed is not a
+      // generation — and before the fleet activation signal below. Never throws:
+      // pairing must not fail because bookkeeping did.
+      const generation = writeAuthGenerationReceipt({
+        accountJid: rawId ?? null,
+        createdAtMs: systemClock.now(),
+        source: 'pairing_cli',
+        stateRoot: config.stateRoot,
+        authDir: config.authDir,
+        // THE PROCESS-BOUNDARY CARRIER. This CLI exits moments from now; the
+        // in-memory effectiveClientRegistry dies with it and the daemon that reads
+        // receipts is a different process entirely. Persisting the pairing client
+        // here, under the generation it established, is what actually crosses the
+        // boundary.
+        pairingClient: pairingClientReceipt,
+      });
+      if (generation) {
+        log.info({ generationId: generation.generationId, bondCreatedAt: generation.bondCreatedAt },
+          'recorded auth generation receipt');
+      } else {
+        // Not fatal, but it must not pass silently: without this receipt the next
+        // terminal event can only report bond age as unavailable.
+        log.warn('could not record auth generation receipt; bond age will be unavailable');
+      }
+
       // Fleet activation treats this as a persisted credential success signal.
       // It must not start the managed instance while a failed save is still
       // possible, because the instance would otherwise race its auth material.

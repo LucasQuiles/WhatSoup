@@ -199,6 +199,10 @@ async function advanceIdentityToLink(typeName: RegExp = /passive/i): Promise<voi
 }
 
 async function completeLinkStep(): Promise<void> {
+  // Pairing no longer fires on mount (q-canary T5.8): the operator begins it.
+  await act(async () => {
+    fireEvent.click(await screen.findByRole('button', { name: /begin pairing/i }))
+  })
   await waitFor(() => expect(wizardEventSources).toHaveLength(1))
   await act(async () => {
     wizardEventSources[0].emit('connected')
@@ -486,6 +490,9 @@ describe('AddLineWizard — footer absent on step 1 (Link)', () => {
     const nextBtn = screen.getByRole('button', { name: /next/i })
     await act(async () => { fireEvent.click(nextBtn) })
     await waitFor(() => expect(mockCreateLine).toHaveBeenCalledTimes(1))
+    await act(async () => {
+      fireEvent.click(await screen.findByRole('button', { name: /begin pairing/i }))
+    })
     await waitFor(() => expect(wizardEventSources).toHaveLength(1))
 
     await act(async () => {

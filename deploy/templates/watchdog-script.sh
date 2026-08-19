@@ -343,6 +343,18 @@ restart_label() {
     wd_note RESTART-SUPPRESSED
     return 0
   fi
+  # Account-scope coordination lease (q-canary lane, T4): while a PAIRING
+  # coordinator holds the scope lease, a watchdog kick would race the pairing
+  # and can clobber a fresh auth generation mid-write. Decline; the runtime's
+  # own in-process acquisition stays authoritative for every other start path.
+  local lease_file
+  for lease_file in "$HOME_DIR/.local/state/whatsoup/instances/BOT_NAME"/coordination-lease.*.json(N); do
+    if [ -r "$lease_file" ] && grep -q '"mode":"pairing"' "$lease_file" 2>/dev/null; then
+      log "$job_label restart declined: pairing coordination lease held ($lease_file)"
+      wd_note RESTART-SUPPRESSED
+      return 0
+    fi
+  done
   # Serialize the cooldown-check/kickstart critical section per label: the
   # fleet console's label is shared by every bot watchdog on the host, and
   # same-cadence watchdogs would otherwise pass the cooldown check together
