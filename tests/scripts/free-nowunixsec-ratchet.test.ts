@@ -161,6 +161,16 @@ describe('free nowUnixSec() ratchet', () => {
     expect(kept[0].line).toBe(3);
   });
 
+  it('the scanned source corpus is non-empty (a zero-file scan must fail, not pass vacuously)', () => {
+    // Vacuity guard: "zero free sites" is only a meaningful claim if we actually
+    // scanned some source. If collectSrcFiles() ever returns an empty list —
+    // srcRoot resolving somewhere empty, a filter regression, a dropped
+    // `recursive` flag on a future Node — the ratchet below would still compare
+    // `[]` against `[]` and pass, manufacturing false confidence. Pin the corpus
+    // non-empty so a vacuous scan fails loudly instead of silently passing.
+    expect(collectSrcFiles().length).toBeGreaterThan(0);
+  });
+
   it('src/ has exactly zero free nowUnixSec() call sites', () => {
     const sites = findFreeCallSites();
     expect(
