@@ -7,7 +7,7 @@ import { readdirSync, statSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { createChildLogger } from '../logger.ts';
 import type { Database } from './database.ts';
-import { nowUnixSec } from './substrate/time.ts';
+import { type Clock, systemClock } from '../lib/clock.ts';
 import { MS_PER_HOUR, MS_PER_WEEK } from '../lib/time-units.ts';
 
 const log = createChildLogger('media:retention');
@@ -133,8 +133,14 @@ export async function runCleanup(
  * Delete failed scheduled messages older than `maxAgeDays` days.
  * Returns the number of rows deleted.
  */
-export function purgeFailedScheduledMessages(db: Database, maxAgeDays = 7): number {
-  const cutoff = nowUnixSec() - maxAgeDays * 24 * 60 * 60;
+export function purgeFailedScheduledMessages(
+  db: Database,
+  maxAgeDays = 7,
+  // Injectable so the purge cutoff can be driven to a known instant (#2200).
+  // Optional and defaulted, so this slice changes no existing call site.
+  clock: Clock = systemClock,
+): number {
+  const cutoff = clock.nowUnixSec() - maxAgeDays * 24 * 60 * 60;
   const result = db.raw
     .prepare(`DELETE FROM scheduled_messages WHERE status = 'failed' AND created_at < ?`)
     .run(cutoff);
