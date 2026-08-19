@@ -640,3 +640,92 @@ describe('decideConnectActivation', () => {
     });
   });
 });
+
+describe('parser bounds — pure edge arms', () => {
+  const validCreated = createdTransition();
+
+  it('rejects non-integer, negative, and non-numeric revisions', () => {
+    expect(parseLatchTransition({ ...validCreated, revision: 1.5, expectedPriorRevision: 0.5 })).toBeNull();
+    expect(parseLatchTransition({ ...validCreated, revision: -1, expectedPriorRevision: -2 })).toBeNull();
+    expect(parseLatchTransition({ ...validCreated, revision: '1' as unknown as number })).toBeNull();
+  });
+
+  it('rejects non-string and unparseable timestamps', () => {
+    expect(parseLatchTransition({ ...validCreated, at: 123 as unknown as string })).toBeNull();
+    expect(parseLatchTransition({ ...validCreated, at: 'not-a-date' })).toBeNull();
+    expect(parseLatchTransition({ ...validCreated, at: '' })).toBeNull();
+  });
+
+  it('rejects an over-long operation id and an empty one', () => {
+    expect(parseLatchTransition({ ...validCreated, operationId: 'x'.repeat(129) })).toBeNull();
+    expect(parseLatchTransition({ ...validCreated, operationId: '' })).toBeNull();
+  });
+
+  it('rejects a latch whose latchedGenerationId is present but malformed', () => {
+    expect(parseTerminalLatch({ ...LATCH, latchedGenerationId: 'x'.repeat(129) })).toBeNull();
+    expect(parseTerminalLatch({ ...LATCH, latchedGenerationId: 42 as unknown as string })).toBeNull();
+  });
+
+  it('rejects a created transition whose embedded latch is itself malformed', () => {
+    expect(parseLatchTransition({ ...validCreated, latch: { ...LATCH, reason: 'nope' } })).toBeNull();
+  });
+
+  it('rejects owner_released with a malformed ownerAuthorizationId and superseded with a malformed id', () => {
+    const released = {
+      ...createdTransition({ kind: 'owner_released', revision: 2, expectedPriorRevision: 1 }),
+      latch: null,
+      ownerAuthorizationId: 'x'.repeat(129),
+    };
+    expect(parseLatchTransition(released)).toBeNull();
+    const superseded = {
+      ...createdTransition({ kind: 'generation_superseded', revision: 2, expectedPriorRevision: 1 }),
+      latch: null,
+      supersededByGenerationId: 'y'.repeat(129),
+    };
+    expect(parseLatchTransition(superseded)).toBeNull();
+  });
+
+  it('rejects a created transition whose latch scope disagrees with the transition scope', () => {
+    const otherScope = parseAccountScopeId('scope:line-b-wa')!;
+    expect(parseLatchTransition({ ...validCreated, latch: { ...LATCH, scopeId: otherScope } })).toBeNull();
+  });
+});
+
+describe('readTerminalLatchJournal — journal corruption arms', () => {
+  it('is corrupt when the journal does not end with a newline', () => {
+    appendLatchTransition(stateRoot, createdTransition());
+    const path = terminalLatchJournalPath(stateRoot);
+    const bytes = readFileSync(path, 'utf-8');
+    writeFileSync(path, bytes.slice(0, -1)); // strip trailing newline
+    expect(readTerminalLatchJournal(stateRoot)).toEqual({ status: 'corrupt' });
+  });
+
+  it('is corrupt when a transition revision does not match its 1-based line position', () => {
+    const path = terminalLatchJournalPath(stateRoot);
+    const bad = createdTransition({ revision: 2, expectedPriorRevision: 1 }); // should be revision 1 on line 1
+    writeFileSync(path, JSON.stringify(bad) + '\n', { mode: 0o600 });
+    expect(readTerminalLatchJournal(stateRoot)).toEqual({ status: 'corrupt' });
+  });
+
+  it('is corrupt when a later line switches to a different scope', () => {
+    const path = terminalLatchJournalPath(stateRoot);
+    const otherScope = parseAccountScopeId('scope:line-b-wa')!;
+    const line1 = createdTransition();
+    const line2 = {
+      ...createdTransition({ kind: 'owner_released', revision: 2, expectedPriorRevision: 1 }),
+      scopeId: otherScope,
+      latch: null,
+      ownerAuthorizationId: 'owner-auth-1',
+    };
+    writeFileSync(path, JSON.stringify(line1) + '\n' + JSON.stringify(line2) + '\n', { mode: 0o600 });
+    expect(readTerminalLatchJournal(stateRoot)).toEqual({ status: 'corrupt' });
+  });
+
+  it('is corrupt when two latch_created transitions stack without a release/supersede', () => {
+    const path = terminalLatchJournalPath(stateRoot);
+    const line1 = createdTransition();
+    const line2 = createdTransition({ revision: 2, expectedPriorRevision: 1 });
+    writeFileSync(path, JSON.stringify(line1) + '\n' + JSON.stringify(line2) + '\n', { mode: 0o600 });
+    expect(readTerminalLatchJournal(stateRoot)).toEqual({ status: 'corrupt' });
+  });
+});
