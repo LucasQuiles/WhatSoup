@@ -37,6 +37,7 @@ export const IGNORED_BLOCK_REASONS = {
   redacted_thinking: 'model-internal redacted reasoning, no side effects',
   thinking_tokens: 'model-internal token estimate, no runtime side effects',
   rate_limit_event: 'provider rate-limit telemetry, no runtime side effects',
+  tool_progress: 'tool-execution progress telemetry, no runtime side effects',
   tool_reference: 'tool-discovery metadata, no runtime side effects',
   text: 'user-originated context, no provider output side effects',
   image: 'user-originated media, no provider output side effects',
@@ -408,6 +409,14 @@ export function parseEvents(line: string): AgentEvent[] {
     return rateLimitInfo?.['status'] === 'allowed'
       ? [ignoredBlock('rate_limit_event', 'rate_limit_event')]
       : [unknownEvent(parsed)];
+  }
+  if (topType === 'tool_progress') {
+    // Tool-execution progress telemetry (Claude CLI >= 2.1.x, streamed while an MCP
+    // tool runs — e.g. a large media download). The tool request (tool_use) and its
+    // outcome (tool_result) are separate events, so a progress envelope carries no
+    // model output or runtime side effect. Classify it inert rather than unknown so
+    // it stops flooding ambiguous_event rejections on every tool-heavy turn.
+    return [ignoredBlock('tool_progress', 'tool_progress')];
   }
 
   return [unknownEvent(parsed)];
