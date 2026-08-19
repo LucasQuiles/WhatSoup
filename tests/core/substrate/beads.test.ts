@@ -263,6 +263,20 @@ describe('beads core', () => {
     expect(JSON.parse(sc.payload_json)).toMatchObject({ from: 'active', to: 'cancelled', note: 'dropped' });
   });
 
+  it('coalesces an explicit null transition `at` to the injected clock (matches main)', () => {
+    const bead = createBead(db.raw, { kind: 'task', title: 't', ownerJid: 'mw', actor: 'user' });
+    const t0ms = 2_000_000_000_000; // distinctive future epoch (2033-05-18)
+    completeBead(db.raw, bead.id, {
+      actor: 'user',
+      at: null as unknown as number,
+    }, fakeClock(t0ms));
+    const r = getBead(db.raw, bead.id)!;
+    // main's `const at = args.at ?? nowUnixSec()` coalesces an explicit null to
+    // the clock time, so completed_at equals the fake clock seconds rather than
+    // a preserved NULL (which the NOT NULL column would reject).
+    expect(r.bead.completed_at).toBe(Math.floor(t0ms / 1000));
+  });
+
   it('cancelBead on an already-terminal bead throws terminal', () => {
     const bead = createBead(db.raw, { kind: 'task', title: 't', ownerJid: 'mw', actor: 'user' });
     cancelBead(db.raw, bead.id, { actor: 'user' });

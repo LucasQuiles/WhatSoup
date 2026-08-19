@@ -178,18 +178,22 @@ describe('writeBeadEvent', () => {
     expect(id3).toBeGreaterThan(id2);
   });
 
-  it('passes an explicit null `at` through rather than coalescing to the clock', () => {
+  it('coalesces an explicit null `at` to the injected clock (matches main)', () => {
     const beadId = insertParentBead(db);
-    // An explicit null must be preserved (exact-undefined semantics, matching
-    // the normalized form in time.ts), NOT coalesced: the NOT NULL created_at
-    // column rejects it. A `??` coalesce would substitute the clock time and
-    // the insert would silently succeed.
-    expect(() => writeBeadEvent(db.raw, {
+    const t0ms = 2_000_000_000_000; // distinctive future epoch (2033-05-18)
+    // main's `const at = args.at ?? nowUnixSec()` coalesces an explicit null to
+    // the clock time, so the insert succeeds and created_at equals the fake
+    // clock seconds (floor(t0ms/1000) = 2_000_000_000), not a preserved NULL.
+    const rowId = writeBeadEvent(db.raw, {
       beadId,
       eventType: 'noted',
       actor: 'tester',
       at: null as unknown as number,
-    }, fakeClock(2_000_000_000_000))).toThrow();
+    }, fakeClock(t0ms));
+    const row = db.raw
+      .prepare('SELECT created_at FROM bead_events WHERE id = ?')
+      .get(rowId) as { created_at: number };
+    expect(row.created_at).toBe(Math.floor(t0ms / 1000));
   });
 
   it('derives the default `at` from the injected clock, not the wall clock (fails if reverted to free nowUnixSec)', () => {

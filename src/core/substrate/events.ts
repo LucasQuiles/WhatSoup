@@ -17,7 +17,7 @@ export function writeBeadEvent(
   // existing call site.
   clock: Clock = systemClock,
 ): number {
-  const at = args.at === undefined ? clock.nowUnixSec() : args.at;
+  const at = args.at ?? clock.nowUnixSec();
   const info = db
     .prepare(
       `INSERT INTO bead_events (bead_id, event_type, payload_json, actor, source_message_pk, created_at)

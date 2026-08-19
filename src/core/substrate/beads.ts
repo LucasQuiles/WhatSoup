@@ -261,7 +261,7 @@ function transition(
   if (allowedFrom && !allowedFrom.includes(current.status)) {
     throw new Error(`cannot transition from ${current.status} to ${toStatus}`);
   }
-  const at = args.at === undefined ? clock.nowUnixSec() : args.at;
+  const at = args.at ?? clock.nowUnixSec();
   const sets: string[] = ['status = ?', 'updated_at = ?'];
   const binds: SQLInputValue[] = [toStatus, at];
   if (toStatus === 'completed') { sets.push('completed_at = ?'); binds.push(at); }
