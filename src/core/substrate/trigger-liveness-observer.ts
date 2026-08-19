@@ -7,7 +7,7 @@
 // in-tick past-due check (both paths are latched and idempotent); this timer
 // is the guarantee that the gauges still run when a tick hangs.
 import type { DatabaseSync } from 'node:sqlite';
-import { nowUnixSec } from './time.ts';
+import { systemClock } from '../../lib/clock.ts';
 import {
   countRecurringOverdueTriggers,
   DEFAULT_RECURRING_OVERDUE_GRACE_SEC,
@@ -74,7 +74,7 @@ export class TriggerLivenessObserver {
     this.intervalMs = opts.intervalMs ?? DEFAULT_OBSERVER_INTERVAL_MS;
     this.recurringOverdueGraceSeconds =
       opts.recurringOverdueGraceSeconds ?? DEFAULT_RECURRING_OVERDUE_GRACE_SEC;
-    this.nowFn = opts.now ?? nowUnixSec;
+    this.nowFn = opts.now ?? systemClock.nowUnixSec;
     this.setTimeoutImpl = opts.setTimeoutImpl ?? setTimeout;
     this.clearTimeoutImpl = opts.clearTimeoutImpl ?? clearTimeout;
     this.pastDueCheck = opts.pastDueCheck;
