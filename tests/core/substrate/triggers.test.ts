@@ -468,4 +468,16 @@ describe('countPastDueTriggers (#1765)', () => {
     db.raw.prepare(`UPDATE bead_triggers SET next_fire_at = NULL WHERE id = ?`).run(t.id);
     expect(countPastDueTriggers(db.raw, NOW, GRACE)).toBe(0);
   });
+
+  it('preserves an explicit null `now` (default-parameter, not coalesce)', () => {
+    activeTrigger(NOW - GRACE - 1000);
+    const t0ms = 2_000_000_000_000; // distinctive future epoch (2033-05-18)
+    // main's `now: number = nowUnixSec()` preserves an explicit null: the cutoff
+    // becomes null - grace (null coerces to 0) = -86400, which matches no
+    // positive next_fire_at (count 0). A `??` coalesce would substitute the
+    // clock (well after the stale next_fire_at) and count the trigger.
+    expect(countPastDueTriggers(db.raw, null as unknown as number, GRACE, fakeClock(t0ms))).toBe(0);
+    // Sanity: the same stale trigger IS past-due against a real cutoff.
+    expect(countPastDueTriggers(db.raw, Math.floor(t0ms / 1000), GRACE)).toBe(1);
+  });
 });

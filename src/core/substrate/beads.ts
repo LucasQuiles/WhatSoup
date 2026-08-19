@@ -181,7 +181,7 @@ export function listBeads(db: DatabaseSync, f: ListBeadsFilter = {}, clock: Cloc
  * live instance — well past the 200-row default limit).
  */
 export function countOverdueProposals(db: DatabaseSync, now?: number, clock: Clock = systemClock): number {
-  const cutoff = now ?? clock.nowUnixSec();
+  const cutoff = now === undefined ? clock.nowUnixSec() : now;
   const row = db.prepare(
     `SELECT COUNT(*) AS c FROM beads WHERE ${OVERDUE_PROPOSAL_WHERE}`,
   ).get(cutoff) as { c: number };
@@ -261,7 +261,7 @@ function transition(
   if (allowedFrom && !allowedFrom.includes(current.status)) {
     throw new Error(`cannot transition from ${current.status} to ${toStatus}`);
   }
-  const at = args.at ?? clock.nowUnixSec();
+  const at = args.at === undefined ? clock.nowUnixSec() : args.at;
   const sets: string[] = ['status = ?', 'updated_at = ?'];
   const binds: SQLInputValue[] = [toStatus, at];
   if (toStatus === 'completed') { sets.push('completed_at = ?'); binds.push(at); }

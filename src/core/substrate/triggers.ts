@@ -313,7 +313,7 @@ export function countPastDueTriggers(
   graceSeconds: number = DEFAULT_TRIGGER_PAST_DUE_GRACE_SEC,
   clock: Clock = systemClock,
 ): number {
-  const cutoff = (now ?? clock.nowUnixSec()) - graceSeconds;
+  const cutoff = (now === undefined ? clock.nowUnixSec() : now) - graceSeconds;
   const row = db.prepare(
     `SELECT COUNT(*) AS c FROM bead_triggers
      WHERE status = 'active'
@@ -403,7 +403,7 @@ export function countRecurringOverdueTriggers(
   graceSeconds: number = DEFAULT_RECURRING_OVERDUE_GRACE_SEC,
   clock: Clock = systemClock,
 ): number {
-  const cutoff = (now ?? clock.nowUnixSec()) - graceSeconds;
+  const cutoff = (now === undefined ? clock.nowUnixSec() : now) - graceSeconds;
   const row = db.prepare(
     `SELECT COUNT(*) AS c FROM bead_triggers
      WHERE status = 'active'

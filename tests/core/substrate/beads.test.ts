@@ -345,6 +345,22 @@ describe('beads core', () => {
     expect(countOverdueProposals(db.raw, now - 2000)).toBe(0);
   });
 
+  it('countOverdueProposals preserves an explicit null `now` (default-parameter, not coalesce)', () => {
+    // A past-due proposal that WOULD match if null were coalesced to the clock.
+    createBead(db.raw, {
+      kind: 'task', title: 'overdue-null-now', ownerJid: 'mw', actor: 'user',
+      status: 'proposed', reviewByAt: 1_000_000_000, confidence: 0.6, proposalReason: 'inline',
+    });
+    const t0ms = 2_000_000_000_000; // distinctive future epoch (2033-05-18)
+    // main's `now: number = nowUnixSec()` preserves an explicit null: the query
+    // binds NULL, and `review_by_at < NULL` matches no rows (count 0). A `??`
+    // coalesce would substitute the clock and return 1.
+    expect(countOverdueProposals(db.raw, null as unknown as number, fakeClock(t0ms))).toBe(0);
+    // Sanity: the same proposal IS overdue against a real cutoff, so the 0 above
+    // is specifically null-preservation, not an empty table.
+    expect(countOverdueProposals(db.raw, Math.floor(t0ms / 1000))).toBe(1);
+  });
+
   it('activityFeed with no owner filter returns bead events across owners', () => {
     const a = createBead(db.raw, { kind: 'task', title: 'a', ownerJid: 'mw', actor: 'user' });
     const b = createBead(db.raw, { kind: 'task', title: 'b', ownerJid: 'other', actor: 'user' });
