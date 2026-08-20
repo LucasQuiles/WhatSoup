@@ -167,11 +167,24 @@ export function useTyping() {
 /** Global activity feed. */
 export function useFeed() {
   const { connected } = useRealtime();
-  return useQuery({
+  const poll = connected ? false : POLL_FEED;
+  const query = useQuery({
     queryKey: ['feed'],
     queryFn: () => api.getFeed(),
-    refetchInterval: connected ? false : POLL_FEED,
+    refetchInterval: poll,
   });
+  // #2519: promoted onto the #1925 freshness contract (useLines idiom).
+  // Poll-aware while polling is active (2 missed intervals); the METRICS
+  // default when WS-connected — the server invalidates ['feed'] on every
+  // fleet event (use-websocket), so dataUpdatedAt tracks realtime pushes.
+  return {
+    ...query,
+    freshness: queryFreshness({
+      dataUpdatedAt: query.dataUpdatedAt,
+      refetchFailed: query.isRefetchError,
+      ...(poll ? { staleAfterMs: 2 * poll } : {}),
+    }),
+  };
 }
 
 /** Provider catalog (display names + capability flags). Static — long stale time. */
