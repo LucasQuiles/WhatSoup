@@ -93,6 +93,7 @@ import { seedChatAliases } from '../../src/core/chats-resolver.ts';
 import { createProfileRegistry } from '../../src/core/profiles.ts';
 import { createOutboundSendsWriter } from '../../src/core/outbound-sends.ts';
 import type { HealthDeps } from '../../src/core/health.ts';
+import { HEALTH_DEGRADATION_CAUSE_REASON_TWINS, NO_REASON_TWIN } from '../../src/core/health-degradation-cause-twins.ts';
 import type { StartupNotificationHealth } from '../../src/core/startup-notification-controller.ts';
 import type { ConnectionManager } from '../../src/transport/connection.ts';
 import { emptyConnectionStateSnapshot } from '../../src/transport/twilio/connection-snapshot.ts';
@@ -1975,6 +1976,49 @@ describe('GET /health', () => {
     expect(json.turn_capability.model_usable_freshness_ms).toBe(68 * 60_000);
     expect(json.runtime.agent.turnCapability.periodicProbeBackoffMultiple).toBe(2);
     expect(json.runtime.agent.turnCapability.modelUsableFreshnessMs).toBe(68 * 60_000);
+    db2.close();
+  });
+
+  it('emits turn_recovery_degraded and its registered reason twin runtime.turn_finalization_debt for the same condition', async () => {
+    // One condition (runtimeTurnRecoveryIsDegraded) reaches the wire under two
+    // names. The cause->reason registry makes that cross-reference explicit;
+    // this pins that the live emission still matches the registry.
+    db.close();
+    const db2 = makeDb();
+    const fakeAgentRuntime = {
+      getHealthSnapshot: () => ({
+        status: 'degraded',
+        details: {
+          degradedReasons: ['turn_finalization_debt'],
+          recentCrashes: 0,
+          autoCompactActiveBackoffScopes: 0,
+          turnFinalizationRetainedRetries: 0,
+          turnFinalizationDegradedScopes: 0,
+          turnRecoveryOutstanding: 1,
+          turnRecoveryExhausted: 0,
+          turnRecoveryOpenRecoveries: 0,
+          turnRecoveryCorruptLinks: 0,
+          turnRecoveryEchoConflicts: 0,
+          providerExecution: { pressureActive: false },
+        },
+      }),
+      getFallbackState: () => null,
+    };
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: fakeAgentRuntime as unknown as HealthDeps['runtime'],
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const { body } = await healthReq(port);
+    const json = JSON.parse(body);
+    expect(json.status).toBe('degraded');
+    expect(json.degradation_causes).toContain('turn_recovery_degraded');
+    expect(json.status_reasons).toContain('runtime.turn_finalization_debt');
+    const twins = HEALTH_DEGRADATION_CAUSE_REASON_TWINS.turn_recovery_degraded;
+    expect(twins).not.toBe(NO_REASON_TWIN);
+    expect((twins as readonly string[]).some((reason) => json.status_reasons.includes(reason))).toBe(true);
     db2.close();
   });
 
