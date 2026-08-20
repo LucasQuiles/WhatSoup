@@ -865,6 +865,14 @@
         "clearPredicate": "cause absent from the next accepted health body degradation vector",
         "requiresCorroborationBeforePaging": false
       },
+      "agent_outbound_queue_poisoned": {
+        "family": "agent_runtime",
+        "impactTier": "hold",
+        "notification": "warning",
+        "rootOwner": "agent_runtime_supervisor",
+        "clearPredicate": "cause absent from the next accepted health body degradation vector",
+        "requiresCorroborationBeforePaging": false
+      },
       "agent_session_inactive": {
         "family": "agent_runtime",
         "impactTier": "page",
