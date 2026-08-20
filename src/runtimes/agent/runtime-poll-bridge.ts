@@ -85,6 +85,11 @@ export interface RuntimePollBridgePort {
   readonly adminPhones: Set<string>;
   readonly internalPeerJids: Set<string>;
   readonly pollResolution: { defaultStrategy: string; defaultTimeoutMs: number };
+  observeOutboundQueueOperation<T>(
+    scopeKey: string,
+    queue: IOutboundQueue,
+    operation: () => Promise<T>,
+  ): Promise<T>;
   getQueueForChat(chatJid: string, mapKey?: string): IOutboundQueue | null;
   sendDirect(chatJid: string, text: string): void;
   deletePendingPollQuestions(mapKey: string): void;
@@ -710,10 +715,11 @@ export class RuntimePollBridgeCoordinator {
           // Long option details should arrive before the poll so the user can read
           // context first instead of scrolling back after the tap target appears.
           try {
-            await queue.flush();
+            await this.host.observeOutboundQueueOperation(mapKey, queue, () => queue.flush());
             detailFlushedQuestionIndexes.add(index);
           } catch (err) {
             log.warn({ err, chatJid }, 'failed to flush poll details before poll send');
+            throw err;
           }
           if (!this.host.pendingPolls.shouldContinueSend(mapKey, pending)) return;
         }
@@ -738,7 +744,11 @@ export class RuntimePollBridgeCoordinator {
 
     const pollQueue = this.host.getQueueForChat(chatJid, mapKey);
     if (pollQueue) {
-      await pollQueue.enqueuePoll(sendPollLoop);
+      await this.host.observeOutboundQueueOperation(
+        mapKey,
+        pollQueue,
+        () => pollQueue.enqueuePoll(sendPollLoop),
+      );
       pollQueue.setPollPending(true);
     } else {
       await sendPollLoop();

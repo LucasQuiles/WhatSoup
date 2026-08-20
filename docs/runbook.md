@@ -421,9 +421,9 @@ transport and process liveness pass:
 
 **Final log states** (last line of
 `~/Library/Logs/whatsoup/<instance>-watchdog.log` per cycle): `ok`,
-`CREDENTIAL-DEAD`, `HEALTH-UNKNOWN`, `RESTARTED`, `RESTART-SUPPRESSED`,
+`OUTBOUND-POISON`, `CREDENTIAL-DEAD`, `HEALTH-UNKNOWN`, `RESTARTED`, `RESTART-SUPPRESSED`,
 `RESTART-FAILED`, `ERROR`, and `CREDENTIAL-UNKNOWN`. The line is chosen by an
-upgrade-only ladder — `CREDENTIAL-DEAD` > `HEALTH-UNKNOWN` >
+upgrade-only ladder — `OUTBOUND-POISON` > `CREDENTIAL-DEAD` > `HEALTH-UNKNOWN` >
 `RESTART-FAILED` > `RESTARTED` > `RESTART-SUPPRESSED` > `ERROR` >
 `CREDENTIAL-UNKNOWN` > `ok` — so untrusted diagnostic evidence cannot be
 masked by a restart outcome, a restart-worthy cycle never reports `ok`, a
@@ -443,6 +443,14 @@ path when no stronger credential, health-evidence, or restart outcome applies.
 
 **Operator notes:**
 
+- `OUTBOUND-POISON` → preserve the first outbound failure and durable turn
+  evidence, then reconcile delivery ownership before a controlled restart.
+  The watchdog accepts only the exact connected agent poison shape and does
+  not restart it because restart clears the process-local containment latch.
+  A simultaneous conclusive provider-credential failure remains
+  `CREDENTIAL-DEAD` and creates or retains its marker before poison handling;
+  malformed, mixed hard-status, disconnected, and stale-pong evidence remains
+  restart-worthy or health-unknown under the existing fail-closed rules.
 - `CREDENTIAL-DEAD` → re-authenticate the provider on that host. Do not
   restart the bot to "fix" it; the watchdog deliberately never restarts on
   credential death.
@@ -655,6 +663,30 @@ journalctl --user -u whatsoup@chat-bot -n 100 | grep -i enrich
 **Common causes for agent instances:**
 - Recent session crashes — check `durability.quarantinedOutbound` and `recentCrashCount` in the health JSON
 - Sustained OpenCode contention — inspect `runtime.agent.providerExecution`; `pressureActive=true` means a queued turn has waited at least 30 seconds
+- Outbound queue poison — inspect `runtime.agent.outboundQueuePoisoned` and
+  `outboundQueuePoisonedScopes`; correlate `runtime.outbound_queue_poisoned` in
+  `status_reasons` with `agent_outbound_queue_poisoned` in `degradation_causes`
+
+When outbound queue poison is present, preserve the first failure log and the affected
+turn's durable evidence before intervening. In per-chat mode, only that chat scope is
+blocked and health remains degraded while other chats continue. In shared or single mode,
+the active outbound lane is blocked and health is unhealthy. The active failing turn keeps
+its actual processor or `pre_dispatch_error` classification; pending and new turns rejected
+because of containment use `scope_blocked_recovery`.
+
+Do not use a restart as proof that any message was delivered. Poison is a process-local,
+sticky containment latch owned above individual queues, so `/new`, provider fallback, and
+ordinary in-process queue or session replacement do not remove it. Only process restart
+constructs a fresh registry, and that still does not prove delivery, create an
+acknowledgement, or authorize replay/resend. There is no generic in-process clear. Recovery
+debt is separate and neither creates nor clears poison; inspect both signals independently
+before deciding whether a controlled restart is appropriate.
+
+On launchd hosts, the watchdog recognizes the exact connected shared/single poison health
+shape as `OUTBOUND-POISON` and suppresses automatic restart. This keeps the latch active
+until an operator has preserved and reconciled delivery evidence. A malformed signal, an
+additional hard status reason, transport disconnection, or stale pong does not receive this
+exception and continues through the ordinary fail-closed liveness policy.
 
 On `agent_respawn_failed` / auto-respawn exhaustion, do not delete the session, queue, or
 checkpoint to force green health. The runtime marks that manager exhausted and defers destructive

@@ -93,7 +93,10 @@ def _health(status: str, **overrides) -> dict:
             "model_usability_status": "usable",
         },
     }
-    body.update(_CONNECTED)
+    # Each adversarial case mutates its body in place; keep the shared fixture
+    # immutable so later rendered-shell tests do not inherit an earlier case's
+    # disconnected transport state.
+    body.update(json.loads(json.dumps(_CONNECTED)))
     if overrides:
         body.update(overrides)
     return body
@@ -261,11 +264,149 @@ class TestDatabaseCompatibilityDrainNoRestart:
         assert _run_decision(body, 503) == 6
 
 
+class TestOutboundPoisonNoAutomaticRestart:
+    @staticmethod
+    def _body() -> dict:
+        return _health(
+            "unhealthy",
+            instance={
+                "name": "test-agent",
+                "pid": 123,
+                "mode": "agent",
+                "fallbackReason": None,
+            },
+            status_reasons=[
+                "agent_runtime_unhealthy",
+                "runtime.outbound_queue_poisoned",
+            ],
+            degradation_causes=[
+                "agent_runtime_unhealthy",
+                "agent_outbound_queue_poisoned",
+            ],
+            runtime={
+                "agent": {
+                    "outboundQueuePoisoned": True,
+                    "outboundQueuePoisonedScopes": 1,
+                },
+            },
+            whatsapp={
+                "connected": True,
+                "connection": {
+                    "state": "connected",
+                    "last_pong_at": _iso_ago(5),
+                },
+            },
+        )
+
+    def test_exact_connected_poison_is_operator_required_not_restart_worthy(self):
+        assert _run_decision(self._body(), 503) == 7
+
+    @pytest.mark.parametrize(
+        ("field_path", "value", "extra_cause"),
+        [
+            (
+                ("turn_capability", "model_usability_status"),
+                "credential-unavailable",
+                "model_unusable",
+            ),
+            (("instance", "fallbackReason"), "auth-required", "provider_fallback_active"),
+        ],
+    )
+    def test_poison_preserves_credential_dead_precedence(
+        self, field_path, value, extra_cause
+    ):
+        body = self._body()
+        target = body
+        for key in field_path[:-1]:
+            target = target[key]
+        target[field_path[-1]] = value
+        if field_path == ("turn_capability", "model_usability_status"):
+            body["turn_capability"]["model_usable"] = False
+        body["degradation_causes"].append(extra_cause)
+        assert _run_decision(body, 503) == 3
+
+    def test_poison_preserves_current_auth_error_but_not_superseded_error(self):
+        now_ms = int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000)
+        current = self._body()
+        current["turn_capability"].update({
+            "last_turn_error_class": "auth-required",
+            "last_turn_error_at": now_ms,
+            "last_successful_turn_at": now_ms - 1_000,
+        })
+        current["degradation_causes"].append("turn_capability_error")
+        assert _run_decision(current, 503) == 3
+
+        superseded = self._body()
+        superseded["turn_capability"].update({
+            "last_turn_error_class": "auth-required",
+            "last_turn_error_at": now_ms - 1_000,
+            "last_successful_turn_at": now_ms,
+        })
+        assert _run_decision(superseded, 503) == 7
+
+    def test_credential_signal_with_soft_co_causes_retains_credential_precedence(self):
+        body = self._body()
+        body["instance"]["fallbackReason"] = "auth-required"
+        body["degradation_causes"].extend([
+            "provider_fallback_active",
+            "event_loop_starved",
+        ])
+        assert _run_decision(body, 503) == 3
+
+    def test_credential_signal_does_not_mask_malformed_poison_causes(self):
+        malformed = self._body()
+        malformed["turn_capability"]["model_usability_status"] = "credential-unavailable"
+        malformed["degradation_causes"] = None
+        assert _run_decision(malformed, 503) == 1
+
+    def test_soft_coexisting_cause_does_not_clear_poison_containment(self):
+        def assert_contained(coexisting_cause):
+            body = self._body()
+            body["degradation_causes"].append(coexisting_cause)
+            assert _run_decision(body, 503) == 7, coexisting_cause
+
+        assert_contained("agent_session_inactive")
+        assert_contained("turn_finalization_degraded")
+        assert_contained("turn_recovery_degraded")
+        assert_contained("event_loop_starved")
+
+    def test_malformed_or_mixed_poison_evidence_fails_closed(self):
+        cases = [
+            (("status_reasons",), ["runtime.outbound_queue_poisoned"]),
+            (("status_reasons",), [
+                "agent_runtime_unhealthy",
+                "runtime.outbound_queue_poisoned",
+                "event_loop_starvation",
+            ]),
+            (("runtime", "agent", "outboundQueuePoisoned"), False),
+            (("runtime", "agent", "outboundQueuePoisonedScopes"), True),
+            (("runtime", "agent", "outboundQueuePoisonedScopes"), 0),
+            (("degradation_causes",), None),
+            (("instance", "name"), "another-agent"),
+            (("instance", "mode"), "chat"),
+            (("whatsapp", "connected"), False),
+            (("whatsapp", "connection", "state"), "reconnecting"),
+            (("whatsapp", "connection", "last_pong_at"), "2000-01-01T00:00:00Z"),
+        ]
+        for path, value in cases:
+            body = self._body()
+            target = body
+            for key in path[:-1]:
+                target = target[key]
+            target[path[-1]] = value
+            assert _run_decision(body, 503) == 1, (
+                f"malformed poison evidence must fail closed: path={path!r} value={value!r}"
+            )
+
+
 def _run_rendered_unreachable_watchdog(
     tmp_path: Path,
     *,
     bot_name: str,
     launchd_snapshot: str,
+    bot_health: dict | None = None,
+    bot_http_code: int = 503,
+    credential_marker_present: bool = False,
 ) -> str:
     home = tmp_path / "home"
     home.mkdir(parents=True)
@@ -291,13 +432,31 @@ def _run_rendered_unreachable_watchdog(
     script = home / f"{bot_name}-watchdog"
     script.write_text(rendered, encoding="utf-8")
     script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    if credential_marker_present:
+        marker = (
+            home / "Library" / "Logs" / "whatsoup"
+            / f"{bot_name}-credential-dead.marker"
+        )
+        marker.parent.mkdir(parents=True)
+        marker.write_text("", encoding="utf-8")
+        marker.chmod(0o600)
 
     curl = binroot / "curl"
+    bot_response = ""
+    if bot_health is not None:
+        encoded_health = json.dumps(bot_health, separators=(",", ":"))
+        bot_response = (
+            "    printf '%s\\n%s' \"$BOT_HEALTH_JSON\" \"$BOT_HTTP_CODE\"; exit 0;;\n"
+        )
+    else:
+        bot_response = "    exit 7;;\n"
+        encoded_health = ""
     curl.write_text(
         "#!/bin/sh\n"
         'for arg in "$@"; do case "$arg" in\n'
-        "  *9999/health) exit 7;;\n"
-        "  *9998/*) printf 'ok'; exit 0;;\n"
+        "  *9999/health)\n"
+        + bot_response
+        + "  *9998/*) printf 'ok'; exit 0;;\n"
         "esac; done\n"
         "exit 7\n",
         encoding="utf-8",
@@ -321,7 +480,13 @@ def _run_rendered_unreachable_watchdog(
         shutil.rmtree(lock, ignore_errors=True)
     proc = subprocess.run(
         ["zsh", str(script)],
-        env=dict(os.environ, HOME=str(home), LAUNCHD_SNAPSHOT=launchd_snapshot),
+        env=dict(
+            os.environ,
+            HOME=str(home),
+            LAUNCHD_SNAPSHOT=launchd_snapshot,
+            BOT_HEALTH_JSON=encoded_health,
+            BOT_HTTP_CODE=str(bot_http_code),
+        ),
         capture_output=True,
         text=True,
         timeout=20,
@@ -332,6 +497,99 @@ def _run_rendered_unreachable_watchdog(
 
 @pytest.mark.skipif(shutil.which("zsh") is None, reason="zsh not available")
 class TestRenderedWatchdogLaunchdExitPolicy:
+    def test_connected_outbound_poison_warns_without_kickstart(self, tmp_path):
+        bot_name = "poisoned-agent"
+        body = TestOutboundPoisonNoAutomaticRestart._body()
+        body["instance"]["name"] = bot_name
+        calls = _run_rendered_unreachable_watchdog(
+            tmp_path,
+            bot_name=bot_name,
+            launchd_snapshot="gui = {\n  state = running\n  last exit code = 0\n}",
+            bot_health=body,
+            credential_marker_present=True,
+        )
+        log_text = (
+            tmp_path / "home" / "Library" / "Logs" / "whatsoup"
+            / f"{bot_name}-watchdog.log"
+        ).read_text(encoding="utf-8")
+        assert "kickstart" not in calls
+        assert (
+            tmp_path / "home" / "Library" / "Logs" / "whatsoup"
+            / f"{bot_name}-credential-dead.marker"
+        ).exists()
+        assert "OUTBOUND-POISON" in log_text
+        assert log_text.rstrip().endswith("OUTBOUND-POISON")
+
+    @pytest.mark.parametrize(
+        ("field_path", "value", "extra_cause"),
+        [
+            (
+                ("turn_capability", "model_usability_status"),
+                "credential-unavailable",
+                "model_unusable",
+            ),
+            (("instance", "fallbackReason"), "auth-required", "provider_fallback_active"),
+        ],
+    )
+    def test_poison_with_dead_provider_credential_creates_marker_without_kickstart(
+        self, tmp_path, field_path, value, extra_cause
+    ):
+        bot_name = "poisoned-credential-dead-agent"
+        body = TestOutboundPoisonNoAutomaticRestart._body()
+        body["instance"]["name"] = bot_name
+        target = body
+        for key in field_path[:-1]:
+            target = target[key]
+        target[field_path[-1]] = value
+        if field_path == ("turn_capability", "model_usability_status"):
+            body["turn_capability"]["model_usable"] = False
+        body["degradation_causes"].append(extra_cause)
+
+        calls = _run_rendered_unreachable_watchdog(
+            tmp_path,
+            bot_name=bot_name,
+            launchd_snapshot="gui = {\n  state = running\n  last exit code = 0\n}",
+            bot_health=body,
+        )
+        log_dir = tmp_path / "home" / "Library" / "Logs" / "whatsoup"
+        log_text = (log_dir / f"{bot_name}-watchdog.log").read_text(encoding="utf-8")
+
+        assert "kickstart" not in calls
+        assert (log_dir / f"{bot_name}-credential-dead.marker").exists()
+        assert "OUTBOUND-POISON" not in log_text
+        assert log_text.rstrip().endswith("CREDENTIAL-DEAD")
+
+    def test_poison_auth_error_current_vs_superseded_rendered_policy(self, tmp_path):
+        for superseded in [False, True]:
+            bot_name = f"poisoned-auth-error-{'superseded' if superseded else 'current'}"
+            case_path = tmp_path / ("superseded" if superseded else "current")
+            case_path.mkdir()
+            now_ms = int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000)
+            body = TestOutboundPoisonNoAutomaticRestart._body()
+            body["instance"]["name"] = bot_name
+            body["turn_capability"].update({
+                "last_turn_error_class": "auth-required",
+                "last_turn_error_at": now_ms - (1_000 if superseded else 0),
+                "last_successful_turn_at": now_ms if superseded else now_ms - 1_000,
+            })
+            if not superseded:
+                body["degradation_causes"].append("turn_capability_error")
+
+            calls = _run_rendered_unreachable_watchdog(
+                case_path,
+                bot_name=bot_name,
+                launchd_snapshot="gui = {\n  state = running\n  last exit code = 0\n}",
+                bot_health=body,
+            )
+            log_dir = case_path / "home" / "Library" / "Logs" / "whatsoup"
+            log_text = (log_dir / f"{bot_name}-watchdog.log").read_text(encoding="utf-8")
+            marker = log_dir / f"{bot_name}-credential-dead.marker"
+
+            assert "kickstart" not in calls, superseded
+            assert marker.exists() is (not superseded), superseded
+            expected_state = "OUTBOUND-POISON" if superseded else "CREDENTIAL-DEAD"
+            assert log_text.rstrip().endswith(expected_state), superseded
+
     def test_unreachable_bot_with_last_exit_78_is_not_kickstarted(self, tmp_path):
         calls = _run_rendered_unreachable_watchdog(
             tmp_path,

@@ -1411,7 +1411,11 @@ export class AgentRuntime implements Runtime {
       if (queue.hasPendingWork?.() === true) continue;
 
       log.debug({ chatJid, idleMs }, 'evicting idle outbound queue');
-      void queue.shutdown().catch((err) => {
+      void this.observeOutboundQueueOperation(
+        GLOBAL_TOOL_SCOPE_KEY,
+        queue,
+        () => queue.shutdown(),
+      ).catch((err) => {
         log.warn({ err, chatJid }, 'idle outbound queue shutdown failed');
       });
       this.outboundQueues.delete(chatJid);
@@ -2639,6 +2643,8 @@ export class AgentRuntime implements Runtime {
       get adminPhones() { return config.adminPhones; },
       get internalPeerJids() { return config.internalPeerJids; },
       get pollResolution() { return config.pollResolution; },
+      observeOutboundQueueOperation: (scopeKey, queue, operation) =>
+        runtime.observeOutboundQueueOperation(scopeKey, queue, operation),
       getQueueForChat: (chatJid, mapKey) => runtime.getQueueForChat(chatJid, mapKey),
       sendDirect: (chatJid, text) => runtime.sendDirect(chatJid, text),
       deletePendingPollQuestions: (mapKey) => runtime.deletePendingPollQuestions(mapKey),
@@ -2657,6 +2663,7 @@ export class AgentRuntime implements Runtime {
     return {
       db: runtime.db,
       instanceName: runtime.instanceName,
+      get sessionScope() { return runtime.sessionScope; },
       shared: runtime.shared,
       runtimeTurnSupervisor: runtime.runtimeTurnSupervisor,
       sessionOwnership: runtime.sessionOwnership,
@@ -2778,6 +2785,14 @@ export class AgentRuntime implements Runtime {
       usageLimitNotice: () => runtime.fallback.usageLimitNotice(),
       kickDiagnosticBundle: (workflow, providerText) => runtime.kickDiagnosticBundle(workflow, providerText),
     } satisfies RuntimeTurnCoordinatorPort & RuntimeResultHandlerPort;
+  }
+
+  private observeOutboundQueueOperation<T>(
+    scopeKey: string,
+    queue: IOutboundQueue,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    return this.runtimeTurnCoordinator.observeOutboundQueueOperation(scopeKey, queue, operation);
   }
 
   private registerAllTools(): void {
@@ -2975,6 +2990,7 @@ export class AgentRuntime implements Runtime {
       const lidKey = `${conversationKey}@lid`;
       const canonical = canonicalizeChatJid(newJid, this.db);
       this.runtimeTurnCoordinator.rekeyPerChatTurnQueueHaltScope(lidKey, canonical);
+      this.runtimeTurnCoordinator.rekeyPerChatOutboundQueuePoisonScope(lidKey, canonical);
       if (this.chatSessions.has(lidKey)) {
         if (canonical !== lidKey && !this.chatSessions.has(canonical)) {
           const legacyProviderTurn = this.legacyProviderTurnOwners.get(lidKey);
@@ -4230,6 +4246,8 @@ export class AgentRuntime implements Runtime {
               scopeKey: perChatMapKey ?? GLOBAL_TOOL_SCOPE_KEY,
               perChatMapKey: perChatMapKey ?? null,
               isTurnInFlight: () => this.isTurnInFlight(perChatMapKey ?? GLOBAL_TOOL_SCOPE_KEY),
+              isOutboundQueuePoisoned: () => this.runtimeTurnCoordinator
+                .isOutboundQueuePoisoned(perChatMapKey ?? GLOBAL_TOOL_SCOPE_KEY),
               getPerChatSession: () => this.chatSessions.get(perChatMapKey!),
               abortPerChatQueue: () => this.chatQueues.get(perChatMapKey!)
                 ?.abortTurn({ preserveEvidence: true }),
@@ -4538,7 +4556,7 @@ export class AgentRuntime implements Runtime {
         session: this.session!,
         toolScopeKey: GLOBAL_TOOL_SCOPE_KEY,
       });
-      this.turnQueue.enqueue({
+      this.runtimeTurnCoordinator.enqueueSharedRuntimeTurn({
         sourceMessageId: msg.messageId,
         receivedAtUnixSeconds: receivedAtUnixSeconds(msg),
         conversationKey: journalConversationKey,
@@ -4828,7 +4846,13 @@ export class AgentRuntime implements Runtime {
       // Without this, text in the 2-second stream debounce buffer is lost when
       // the child process is killed, because the stream parser stops emitting events.
       const queue = this.getQueueForChat(chatJid, effectiveMapKey);
-      if (queue) await queue.flush();
+      if (queue) {
+        await this.observeOutboundQueueOperation(
+          effectiveMapKey ?? GLOBAL_TOOL_SCOPE_KEY,
+          queue,
+          () => queue.flush(),
+        );
+      }
       if (dispatchCancelled()) return;
 
       // Shut down old session first to prevent zombie processes.
@@ -4999,6 +5023,26 @@ export class AgentRuntime implements Runtime {
         session: this.session!,
         toolScopeKey: GLOBAL_TOOL_SCOPE_KEY,
       });
+      if (context && this.runtimeTurnCoordinator.rejectRuntimeTurnIfOutboundQueuePoisoned(
+        GLOBAL_TOOL_SCOPE_KEY,
+        {
+          sourceMessageId: source.sourceMessageId,
+          receivedAtUnixSeconds: source.receivedAtUnixSeconds,
+          conversationKey: source.conversationKey,
+          chatJid,
+          senderJid: source.senderJid,
+          senderName: source.senderName,
+          text,
+          isGroup: source.isGroup,
+          ...(source.groupName === undefined ? {} : { groupName: source.groupName }),
+          contentType: source.contentType,
+          runtimeContext: context,
+          inboundSeq,
+        },
+      )) {
+        await this.runtimeTurnCoordinator.awaitRejectedRuntimeTurnFinalizations();
+        return;
+      }
       this.pendingSingletonRuntimeTurnContext = context;
     }
     let legacyOwner: LegacyProviderTurnOwner | null = null;
@@ -5102,7 +5146,7 @@ export class AgentRuntime implements Runtime {
             if (queue) {
               queue.enqueueText('I am waiting for the poll vote itself. Tap an option in the poll, or type the option label if WhatsApp does not send the vote.');
               try {
-                await queue.flush();
+                await this.observeOutboundQueueOperation(mapKey, queue, () => queue.flush());
               } catch (err) {
                 log.error({ err, chatJid: pendingPoll.chatJid }, 'failed to flush pending poll status clarification');
               }
@@ -6264,7 +6308,8 @@ export class AgentRuntime implements Runtime {
             // Suppression state (suppressedAskUserToolIds) is registered synchronously
             // inside handleAskUserQuestionAsPoll before any async work, so tool_result
             // suppression is guaranteed even though we fire-and-forget the async poll send.
-            void this.handleAskUserQuestionAsPoll(questions, event.toolId, mapKey, queue);
+            void this.handleAskUserQuestionAsPoll(questions, event.toolId, mapKey, queue)
+              .catch((err) => log.error({ err, mapKey }, 'AskUserQuestion poll send aborted'));
             break; // skip normal tool_use handling — poll sent instead
           }
         }
@@ -6403,6 +6448,11 @@ export class AgentRuntime implements Runtime {
     const completedDeliveryIdentityDebt = completedDeliveryIdentityAdmissions.unresolvedCount > 0;
     const finalizationDegraded = runtimeTurnRecoveryIsDegraded(finalizationHealth, recoveryHealth);
     const turnQueueHealth = this.runtimeTurnCoordinator.turnQueueHaltHealth(this.sessionScope);
+    const poisonHealth = this.runtimeTurnCoordinator.outboundQueuePoisonHealth();
+    const publicPoisonHealth = {
+      outboundQueuePoisoned: poisonHealth.outboundQueuePoisoned,
+      outboundQueuePoisonedScopes: poisonHealth.outboundQueuePoisonedScopes,
+    };
     // CAR-20 (#2539): current-vs-historical poll-persistence health + offline-decision
     // retry state, surfaced in BOTH health branches below.
     const pollPersistenceHealth = this.pollPersistence.healthDetails();
@@ -6440,6 +6490,7 @@ export class AgentRuntime implements Runtime {
       turnFinalizationRetryRecoveries: finalizationHealth.retryRecoveries,
       turnFinalizationRetryExhaustions: finalizationHealth.retryExhaustions,
       ...turnQueueHealth,
+      ...publicPoisonHealth,
       ...recoveryHealth,
       ...fallbackState,
     };
@@ -6471,6 +6522,7 @@ export class AgentRuntime implements Runtime {
       if (finalizationDegraded) degradedReasons.push('turn_finalization_debt');
       if (completedDeliveryIdentityDebt) degradedReasons.push('completed_delivery_identity_debt');
       if (turnQueueHealth.turnQueueHalted) degradedReasons.push('turn_queue_halted');
+      if (poisonHealth.outboundQueuePoisoned) degradedReasons.push('outbound_queue_poisoned');
       if (providerExecution.pressureActive) degradedReasons.push('provider_execution_pressure');
       if (pollPersistenceHealth.degraded) degradedReasons.push('poll_persistence_failure');
       if (offlineDecisionRetry.exhausted) degradedReasons.push('offline_decision_retry_exhausted');
@@ -6500,12 +6552,13 @@ export class AgentRuntime implements Runtime {
     if (completedDeliveryIdentityDebt) degradedReasons.push('completed_delivery_identity_debt');
     if (providerExecution.pressureActive) degradedReasons.push('provider_execution_pressure');
     if (turnQueueHealth.turnQueueHalted) degradedReasons.push('turn_queue_halted');
+    if (poisonHealth.outboundQueuePoisoned) degradedReasons.push('outbound_queue_poisoned');
     if (pollPersistenceHealth.degraded) degradedReasons.push('poll_persistence_failure');
     if (offlineDecisionRetry.exhausted) degradedReasons.push('offline_decision_retry_exhausted');
     // A halted single/shared queue is the active admission path — unhealthy/503,
     // matching the public-surface contract; every other reason degrades only.
     const healthStatus: RuntimeHealth['status'] =
-      turnQueueHealth.turnQueueHalted
+      turnQueueHealth.turnQueueHalted || poisonHealth.activeAdmissionLaneBlocked
         ? 'unhealthy'
         : degradedReasons.length > 0
           ? 'degraded'
@@ -7002,7 +7055,11 @@ export class AgentRuntime implements Runtime {
         this.deleteOwnedPerChatSession(mapKey, session);
       }
       for (const [chatJid, queue] of this.chatQueues) {
-        try { await queue.shutdown(); } catch (err) { log.warn({ err, chatJid }, 'per_chat queue shutdown failed'); }
+        try {
+          await this.observeOutboundQueueOperation(chatJid, queue, () => queue.shutdown());
+        } catch (err) {
+          log.warn({ err, chatJid }, 'per_chat queue shutdown failed');
+        }
       }
       this.chatQueues.clear();
       for (const mapKey of perChatKeys) {
@@ -7016,7 +7073,11 @@ export class AgentRuntime implements Runtime {
       // Shutdown all per-chat outbound queues
       for (const [chatJid, queue] of this.outboundQueues) {
         try {
-          await queue.shutdown();
+          await this.observeOutboundQueueOperation(
+            GLOBAL_TOOL_SCOPE_KEY,
+            queue,
+            () => queue.shutdown(),
+          );
         } catch (err) {
           log.warn({ err, chatJid }, 'queue shutdown failed — pending messages may be lost');
         }
@@ -7025,7 +7086,12 @@ export class AgentRuntime implements Runtime {
     } else if (!preserveRuntimeTurnState) {
       if (this.queue) {
         try {
-          await this.queue.shutdown();
+          const queue = this.queue;
+          await this.observeOutboundQueueOperation(
+            GLOBAL_TOOL_SCOPE_KEY,
+            queue,
+            () => queue.shutdown(),
+          );
         } catch (err) {
           log.warn({ err }, 'queue shutdown failed — pending messages may be lost');
         }
@@ -9814,7 +9880,11 @@ export class AgentRuntime implements Runtime {
     const queue = chatJid ? this.getQueueForChat(chatJid) : this.queue;
     if (queue) {
       queue.enqueueText(msg);
-      queue.flush().catch((err) => log.error({ err }, 'flush after crash failed'));
+      const scopeKey = this.sessionScope === 'per_chat' && chatJid
+        ? this.resolvePerChatMapKey(chatJid)
+        : GLOBAL_TOOL_SCOPE_KEY;
+      this.observeOutboundQueueOperation(scopeKey, queue, () => queue.flush())
+        .catch((err) => log.error({ err }, 'flush after crash failed'));
     } else {
       const target = chatJid ?? this.activeChatJid;
       if (target) {

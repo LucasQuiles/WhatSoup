@@ -105,6 +105,10 @@ export class ControlQueue implements IOutboundQueue {
     // intentional no-op
   }
 
+  isPoisoned(): boolean {
+    return false;
+  }
+
   /** Clear evidence ownership; control queues have no timers or send resources. */
   async shutdown(): Promise<void> {
     this.activeTurnId = undefined;

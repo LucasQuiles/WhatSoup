@@ -126,6 +126,7 @@
         "turn_recovery_degraded",
         "delivery_identity_debt",
         "provider_execution_pressure",
+        "agent_outbound_queue_poisoned",
         "agent_runtime_degraded_unclassified",
         "agent_runtime_unhealthy",
         "unclassified",
@@ -334,6 +335,14 @@
       "label": "runtime_agent_session_count",
       "kind": "current_gauge",
       "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/runtime.ts",
+      "test": "tests/runtimes/agent/health-snapshot.test.ts"
+    },
+    {
+      "field": "outboundQueuePoisonedScopes",
+      "label": "runtime_agent_outbound_queue_poisoned_scopes",
+      "kind": "active_episode_count",
+      "currentHealthEffect": "positive_is_risk",
       "owner": "src/runtimes/agent/runtime.ts",
       "test": "tests/runtimes/agent/health-snapshot.test.ts"
     },

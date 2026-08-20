@@ -45,6 +45,15 @@ export interface TurnDeliveryEvidence {
   readonly statusOpIds: readonly number[];
 }
 
+export class OutboundQueueClosedError extends Error {
+  readonly code = 'OUTBOUND_QUEUE_CLOSED';
+
+  constructor() {
+    super('Outbound queue is closed');
+    this.name = 'OutboundQueueClosedError';
+  }
+}
+
 export interface OutboundQueueOptions {
   /** Immutable durable attribution for every outbound operation owned by this queue. */
   readonly conversationKey: string;
@@ -396,6 +405,8 @@ export interface IOutboundQueue {
   setDurability(engine: DurabilityEngine): void;
   /** Whether the queue still has buffered, in-flight, or typing work that should block eviction. */
   hasPendingWork?(): boolean;
+  /** Whether a genuine send or durability failure has permanently poisoned this queue. */
+  isPoisoned(): boolean;
   /**
    * Turn-end choke point. Called unconditionally when a `result` event is
    * received, so the typing indicator is cleared even on early-return branches
@@ -479,6 +490,9 @@ export class OutboundQueue implements IOutboundQueue {
   private chain: Promise<void> = Promise.resolve();
   /** Sticky drain failure. A poisoned queue is never retried in-place. */
   private drainFailure: { readonly error: unknown } | undefined;
+  private lifecycle: 'open' | 'closing' | 'closed' = 'open';
+  private shutdownPromise: Promise<void> | undefined;
+  private postClosureWarningEmitted = false;
   /** One shared signal that can preempt an already-running send attempt at shutdown. */
   private readonly shutdownDeadlineSignal: Promise<typeof OUTBOUND_SHUTDOWN_DEADLINE>;
   private resolveShutdownDeadlineSignal: (() => void) | null = null;
@@ -612,16 +626,17 @@ export class OutboundQueue implements IOutboundQueue {
     active: MutableTurnDeliveryEvidence,
   ): Promise<TurnDeliveryEvidence> {
     try {
-      await this.flush();
-      this.assertEvidenceComplete();
-      if (this.activeTurnEvidence !== active) {
-        throw new Error(`Turn evidence for ${active.turnId} was invalidated before flush completed`);
-      }
+      return await this.atStableBoundary(() => {
+        this.completeFlushPresentation();
+        if (this.activeTurnEvidence !== active) {
+          throw new Error(`Turn evidence for ${active.turnId} was invalidated before flush completed`);
+        }
 
-      const completed = OutboundQueue.freezeTurnEvidence(active);
-      this.activeTurnEvidence = undefined;
-      this.completedTurnEvidence = completed;
-      return completed;
+        const completed = OutboundQueue.freezeTurnEvidence(active);
+        this.activeTurnEvidence = undefined;
+        this.completedTurnEvidence = completed;
+        return completed;
+      });
     } finally {
       if (this.turnEvidenceFlush?.evidence === active) {
         this.turnEvidenceFlush = undefined;
@@ -721,6 +736,7 @@ export class OutboundQueue implements IOutboundQueue {
   /** Enqueue a text message for immediate sending (after pacing). */
   enqueueText(text: string, role: OutboundMessageRole = 'answer'): void {
     if (!isNonEmptyString(text)) return;
+    if (this.rejectPostClosureEnqueue()) return;
     const attribution = this.snapshotAttribution(role);
     // Flush any pending streaming buffer first to maintain ordering
     this.flushStreamBuffer();
@@ -778,6 +794,7 @@ export class OutboundQueue implements IOutboundQueue {
     onCommit?: () => void,
   ): void {
     if (!text) return;
+    if (this.rejectPostClosureEnqueue()) return;
     this.streamBufferParts.push({ text, onCommit, ...this.snapshotAttribution(role) });
     this.startTyping();
     if (this.toolUpdateMode === 'minimal') return;
@@ -845,6 +862,7 @@ export class OutboundQueue implements IOutboundQueue {
    */
   enqueueResultText(text: string, role: OutboundMessageRole = 'answer'): boolean {
     if (!isNonEmptyString(text)) return false;
+    if (this.rejectPostClosureEnqueue()) return false;
     const hasBufferedVisibleText = this.streamBufferParts.some((part) => part.text.trim() !== '');
     if (this.toolUpdateMode === 'minimal' && (this.turnHasVisibleText || hasBufferedVisibleText)) {
       // Suppress — the user already got the real response during the turn
@@ -863,6 +881,7 @@ export class OutboundQueue implements IOutboundQueue {
    * The typing indicator remains active while work is in progress.
    */
   enqueueToolUpdate(update: ToolUpdate): void {
+    if (this.rejectPostClosureEnqueue()) return;
     if (this.toolUpdateMode === 'minimal') {
       this.startTyping();
       return;
@@ -892,6 +911,7 @@ export class OutboundQueue implements IOutboundQueue {
   }
 
   enqueueProgressUpdate(event: ProgressEvent, instanceName: string): void {
+    if (this.rejectPostClosureEnqueue()) return;
     const name = instanceName;
 
     switch (event.type) {
@@ -1061,6 +1081,7 @@ export class OutboundQueue implements IOutboundQueue {
 
   /** Start the composing indicator immediately without queuing any content. */
   indicateTyping(): void {
+    if (this.rejectPostClosureEnqueue()) return;
     this.startTyping();
   }
 
@@ -1069,11 +1090,8 @@ export class OutboundQueue implements IOutboundQueue {
    * Ensures any in-progress text messages are delivered before the poll arrives.
    */
   async enqueuePoll(sendFn: () => Promise<void>): Promise<void> {
-    this.flushStreamBuffer();
-    this.flushToolBuffer();
-    await this.chain;
-    this.assertDrainComplete();
-    await sendFn();
+    if (this.lifecycle !== 'open') throw new OutboundQueueClosedError();
+    await this.atStableBoundary(sendFn);
   }
 
   hasPendingPoll(): boolean {
@@ -1129,14 +1147,16 @@ export class OutboundQueue implements IOutboundQueue {
   }
 
   /** Flush pending messages and clear all timers. */
-  async shutdown(): Promise<void> {
-    await this.flush();
-    this.activeTurnEvidence = undefined;
-    this.completedTurnEvidence = undefined;
-    if (this.toolTimer !== null) {
-      clearTimeout(this.toolTimer);
-      this.toolTimer = null;
-    }
+  shutdown(): Promise<void> {
+    if (this.shutdownPromise) return this.shutdownPromise;
+    this.lifecycle = 'closing';
+    this.shutdownPromise = this.atStableBoundary(() => {
+      this.completeFlushPresentation();
+      this.activeTurnEvidence = undefined;
+      this.completedTurnEvidence = undefined;
+      this.lifecycle = 'closed';
+    });
+    return this.shutdownPromise;
   }
 
   /**
@@ -1182,9 +1202,58 @@ export class OutboundQueue implements IOutboundQueue {
       || this.streamTimer !== null;
   }
 
+  isPoisoned(): boolean {
+    return this.drainFailure !== undefined;
+  }
+
   /** Retarget subsequent sends without changing durable conversation attribution. */
   updateDeliveryJid(jid: string): void {
     this.deliveryJid = jid;
+  }
+
+  private rejectPostClosureEnqueue(): boolean {
+    if (this.lifecycle === 'open') return false;
+    if (!this.postClosureWarningEmitted) {
+      this.postClosureWarningEmitted = true;
+      log.warn(
+        { queueState: this.lifecycle },
+        'outbound enqueue rejected after queue closure',
+      );
+    }
+    return true;
+  }
+
+  private completeFlushPresentation(): void {
+    this.stopTyping();
+    this.friendlyProgressSent.clear();
+    this.recentProgressTextAt.clear();
+    this.turnHasVisibleText = false;
+  }
+
+  private async atStableBoundary<T>(complete: () => T | Promise<T>): Promise<T> {
+    for (;;) {
+      this.flushStreamBuffer();
+      this.flushToolBuffer();
+      this.throwDrainFailure();
+      const observedChain = this.chain;
+      await observedChain;
+      this.throwDrainFailure();
+
+      if (
+        observedChain !== this.chain
+        || this.sending
+        || this.sendQueue.length > 0
+        || this.streamBufferParts.length > 0
+        || this.toolBuffer.length > 0
+        || this.streamTimer !== null
+        || this.toolTimer !== null
+        || this.toolMaxAgeTimer !== null
+      ) {
+        continue;
+      }
+
+      return complete();
+    }
   }
 
   // ─── Private helpers ──────────────────────────────────────────────────────
@@ -1333,8 +1402,12 @@ export class OutboundQueue implements IOutboundQueue {
         statusText,
         resolveOutboundAudience(redirectJid),
       ).text;
-      this.messenger.sendMessage(redirectJid, safeStatusText).catch((err) => {
-        log.warn({ err, target: redirectJid, textLength: safeStatusText.length }, 'tool-status redirect send failed');
+      this.chain = this.chain.then(async () => {
+        try {
+          await this.messenger.sendMessage(redirectJid, safeStatusText);
+        } catch (err) {
+          log.warn({ err, target: redirectJid, textLength: safeStatusText.length }, 'tool-status redirect send failed');
+        }
       });
       return;
     }
@@ -1468,7 +1541,6 @@ export class OutboundQueue implements IOutboundQueue {
       throw error;
     }
   }
-
   private async sendWithPacing(chunk: QueuedOutboundChunk): Promise<void> {
     const now = Date.now();
     const elapsed = now - this.lastSentAt;

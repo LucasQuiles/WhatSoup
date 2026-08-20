@@ -4959,6 +4959,13 @@ print(m.probe_health(9092))
       });
       expect(recovery).toMatch(/^WARN 200 /);
       expect(recovery).toContain('runtime_agent_at_risk');
+
+      const outboundPoison = probeRuntimeAgent({
+        outboundQueuePoisonedScopes: 1,
+      });
+      expect(outboundPoison).toMatch(/^WARN 200 /);
+      expect(outboundPoison).toContain('runtime_agent_at_risk');
+      expect(outboundPoison).toContain('runtime_agent_outbound_queue_poisoned_scopes=1');
     });
 
     it('warns visibly without inferring field severity when the registry is unavailable', () => {

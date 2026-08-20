@@ -181,9 +181,10 @@ export function getTracker(port: ChatTransportPort, mapKey?: string): OperationT
  * Direct-send outcome envelope (#2981 car-B). `messageId` is the transport's
  * sent-message id when the send is synchronously attributable (bypass and
  * fallback paths return the messenger's SubmissionReceipt id); it is null on
- * the queue path — the queue processes asynchronously and the outcome is
- * deferred by design (car-A note below) — and on failure. F2a reply-threading
- * (#2121) consumes this envelope.
+ * the healthy queue path — the queue processes asynchronously and the outcome
+ * is deferred by design (car-A note below) — and on failure. A known poisoned
+ * queue rejects synchronously without enqueue or messenger bypass. F2a
+ * reply-threading (#2121) consumes this envelope.
  */
 export interface SendDirectOutcome {
   readonly accepted: boolean;
@@ -203,9 +204,15 @@ export async function sendDirectWithReceipt(port: ChatTransportPort, chatJid: st
   }
   const queue = port.getQueueForChat(chatJid);
   if (queue) {
-    // Queue path: enqueueText is void (queue processes async). Accepted =
-    // taken into queue. The actual send outcome is deferred to the queue's
-    // own processing and is NOT observable here by design. #2981 car-A.
+    // A known poisoned queue cannot drain. Reject instead of falsely
+    // accepting more work or bypassing queue ordering and durability.
+    if (queue.isPoisoned()) {
+      return { accepted: false, messageId: null };
+    }
+    // Healthy queue path: enqueueText is void (queue processes async).
+    // Accepted = taken into queue. The actual send outcome is deferred to
+    // the queue's own processing and is NOT observable here by design.
+    // #2981 car-A.
     queue.enqueueText(text);
     return { accepted: true, messageId: null };
   }

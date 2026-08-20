@@ -30,6 +30,7 @@ export interface RuntimeState {
     activeTurn: QueuedTurn | null;
     idle(): Promise<void>;
   }>;
+  perChatTurnQueueKeys: WeakMap<object, { value: string }>;
   currentRuntimeTurnContext: RuntimeTurnContext | null;
   currentInboundSeq?: number;
   currentTurnChatJid: string | null;
@@ -91,9 +92,24 @@ export interface RuntimeState {
     awaitActiveFinalizations(): Promise<void>;
     beginRuntimeTurnEvidence(queue: IOutboundQueue, context: RuntimeTurnContext): void;
     consumeRuntimeTurnContinuationDeferral(context: RuntimeTurnContext): boolean;
+    observeOutboundQueueOperation<T>(
+      scopeKey: string,
+      queue: IOutboundQueue,
+      operation: () => Promise<T>,
+    ): Promise<T>;
+    outboundQueuePoisonHealth(): {
+      outboundQueuePoisoned: boolean;
+      outboundQueuePoisonedScopes: number;
+      activeAdmissionLaneBlocked: boolean;
+    };
+    rekeyPerChatOutboundQueuePoisonScope(fromScopeKey: string, toScopeKey: string): void;
+    enqueueSharedRuntimeTurn(turn: QueuedTurn): boolean;
     enqueuePerChatRuntimeTurn(mapKey: string, turn: QueuedTurn): boolean;
     terminalizePerChatTurnQueueForKill(mapKey: string): Promise<void>;
-    finalizeRejectedRuntimeTurn(turn: QueuedTurn): void;
+    finalizeRejectedRuntimeTurn(
+      turn: QueuedTurn,
+      reason?: 'queue_closed' | 'queue_halted' | 'queue_full' | 'scope_blocked_recovery',
+    ): void;
     awaitRejectedRuntimeTurnFinalizations(): Promise<void>;
     retryRuntimeTurnFinalizations(): Promise<{
       attempted: number;
@@ -295,6 +311,7 @@ export function queueStub(chatJid: string): IOutboundQueue {
     hasPendingPoll: vi.fn(() => false),
     setPollPending: vi.fn(),
     flush: vi.fn(async () => {}),
+    isPoisoned: vi.fn(() => false),
     shutdown: vi.fn(async () => {}),
     abortTurn: vi.fn(),
     updateDeliveryJid: vi.fn(),
