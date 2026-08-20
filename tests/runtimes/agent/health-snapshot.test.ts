@@ -303,6 +303,8 @@ function expectedFallbackDetails(): Record<string, unknown> {
       lastTurnErrorClass: null,
       lastTurnErrorAt: null,
       periodicProbeExpected: false,
+      periodicProbeBackoffMultiple: 1,
+      modelUsableFreshnessMs: 30 * 60_000,
     },
     activeFallbackEntry: null,
     fallbackChain: [],

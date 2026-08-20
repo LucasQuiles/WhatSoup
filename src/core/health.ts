@@ -302,6 +302,13 @@ interface HealthTurnCapability {
    *  When true, stale model-usability evidence on an idle bot is NOT benign —
    *  the periodic probe should have refreshed it. */
   periodic_probe_expected: boolean | null;
+  /** Scheduler backoff multiple the runtime derived the freshness window from
+   *  (1 when the periodic probe is not armed). */
+  periodic_probe_backoff_multiple: number | null;
+  /** Freshness window (ms) `model_usable_stale` was judged against — the
+   *  scheduler-derived deadline while the periodic probe is armed, the flat
+   *  30min otherwise. Lets a reader see WHICH window produced a stale flag. */
+  model_usable_freshness_ms: number | null;
 }
 
 const HEALTH_MODEL_USABILITY_STATUSES = new Set([
@@ -448,6 +455,8 @@ function normalizeAgentTurnCapability(details: Record<string, unknown> | null): 
     last_turn_error_class: normalizeEnumStringOrNull(raw.lastTurnErrorClass, HEALTH_TURN_ERROR_CLASSES),
     last_turn_error_at: normalizeNumberOrNull(raw.lastTurnErrorAt),
     periodic_probe_expected: normalizeBooleanOrNull(raw.periodicProbeExpected),
+    periodic_probe_backoff_multiple: normalizeNumberOrNull(raw.periodicProbeBackoffMultiple),
+    model_usable_freshness_ms: normalizeNumberOrNull(raw.modelUsableFreshnessMs),
   };
 }
 
@@ -556,6 +565,9 @@ function agentRuntimeDetailsForHealth(
           lastSuccessfulTurnSessionCurrent: turnCapability.last_successful_turn_session_current,
           lastTurnErrorClass: turnCapability.last_turn_error_class,
           lastTurnErrorAt: turnCapability.last_turn_error_at,
+          periodicProbeExpected: turnCapability.periodic_probe_expected,
+          periodicProbeBackoffMultiple: turnCapability.periodic_probe_backoff_multiple,
+          modelUsableFreshnessMs: turnCapability.model_usable_freshness_ms,
         }
       : null,
   };
@@ -610,7 +622,10 @@ const HEALTH_PUBLIC_SCHEMA_VERSION = 'health.public.v1';
 // probe failed to fire — the OAuth may have expired between probe cycles — so
 // the evidence is NOT benign. The function degrades in that case regardless of
 // turn activity. An idle primary with expired OAuth must go non-green without a
-// user turn.
+// user turn. `model_usable_stale` itself is judged by the runtime against the
+// scheduler-derived window (`model_usable_freshness_ms`, see
+// expectedProbeDeadlineMs in primary-readiness-probe.ts), so "stale" here
+// already means "older than the scheduler could legitimately leave it".
 export const MODEL_STALE_RELIANCE_MS = 30 * MS_PER_MINUTE; // 30 minutes
 
 export function modelEvidenceStaleWhileRelied(

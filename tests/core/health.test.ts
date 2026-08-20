@@ -1931,6 +1931,53 @@ describe('GET /health', () => {
     db2.close();
   });
 
+  it('threads periodic-probe scheduler inputs (backoff multiple, freshness window) into turn_capability', async () => {
+    // The runtime now derives model_usable_stale from the probe scheduler's
+    // expected deadline instead of a flat 30 minutes. The inputs to that
+    // decision must be visible on the wire so an operator reading a stale flag
+    // can see WHICH window it was judged against.
+    db.close();
+    const db2 = makeDb();
+    const checkedAt = 1_782_349_406_162;
+    const fakeAgentRuntime = {
+      getHealthSnapshot: () => ({
+        status: 'healthy',
+        details: {
+          active: true,
+          turnCapability: {
+            modelUsable: true,
+            modelUsableStale: false,
+            modelUsableCheckedAt: checkedAt,
+            modelUsabilityStatus: 'usable',
+            lastSuccessfulTurnAt: null,
+            lastTurnErrorClass: null,
+            lastTurnErrorAt: null,
+            periodicProbeExpected: true,
+            periodicProbeBackoffMultiple: 2,
+            modelUsableFreshnessMs: 68 * 60_000,
+          },
+        },
+      }),
+      getFallbackState: () => null,
+    };
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: fakeAgentRuntime as unknown as HealthDeps['runtime'],
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await healthReq(port);
+    expect(status).toBe(200);
+    const json = JSON.parse(body);
+    expect(json.turn_capability.periodic_probe_expected).toBe(true);
+    expect(json.turn_capability.periodic_probe_backoff_multiple).toBe(2);
+    expect(json.turn_capability.model_usable_freshness_ms).toBe(68 * 60_000);
+    expect(json.runtime.agent.turnCapability.periodicProbeBackoffMultiple).toBe(2);
+    expect(json.runtime.agent.turnCapability.modelUsableFreshnessMs).toBe(68 * 60_000);
+    db2.close();
+  });
+
   it('threads #1392 modelUsableStale/modelUsableCheckedAt into runtime.agent and top-level turn_capability (F1)', async () => {
     // Regression for the half-deployed #1392: the freshness fields were exposed on
     // instance.turnCapability (via getFallbackState) but dropped from the core/health.ts
@@ -2970,6 +3017,8 @@ describe('GET /health', () => {
       model_usable_checked_at: null,
       model_usability_status: 'model-unavailable',
       periodic_probe_expected: null,
+      periodic_probe_backoff_multiple: null,
+      model_usable_freshness_ms: null,
       last_successful_turn_at: null,
       last_successful_turn_provider: null,
       last_successful_turn_session_current: null,
@@ -3012,6 +3061,8 @@ describe('GET /health', () => {
       model_usable_checked_at: null,
       model_usability_status: 'usable',
       periodic_probe_expected: null,
+      periodic_probe_backoff_multiple: null,
+      model_usable_freshness_ms: null,
       last_successful_turn_at: 1_781_316_030_000,
       last_successful_turn_provider: null,
       last_successful_turn_session_current: null,
@@ -3060,6 +3111,8 @@ describe('GET /health', () => {
       model_usable_checked_at: null,
       model_usability_status: 'unknown',
       periodic_probe_expected: null,
+      periodic_probe_backoff_multiple: null,
+      model_usable_freshness_ms: null,
       last_successful_turn_at: null,
       last_successful_turn_provider: null,
       last_successful_turn_session_current: null,
@@ -3510,6 +3563,8 @@ describe('GET /health', () => {
       model_usable_checked_at: null,
       model_usability_status: null,
       periodic_probe_expected: null,
+      periodic_probe_backoff_multiple: null,
+      model_usable_freshness_ms: null,
       last_successful_turn_at: null,
       last_successful_turn_provider: null,
       last_successful_turn_session_current: null,
@@ -3526,6 +3581,9 @@ describe('GET /health', () => {
       lastSuccessfulTurnSessionCurrent: null,
       lastTurnErrorClass: null,
       lastTurnErrorAt: 1_781_316_000_000,
+      periodicProbeExpected: null,
+      periodicProbeBackoffMultiple: null,
+      modelUsableFreshnessMs: null,
     });
     expect(body).not.toContain(rawProviderText);
     db2.close();
@@ -5943,6 +6001,8 @@ describe('GET /health — normalizeBooleanOrNull and normalizeNumberOrNull non-t
       model_usable_checked_at: null,
       model_usability_status: 'usable',
       periodic_probe_expected: null,
+      periodic_probe_backoff_multiple: null,
+      model_usable_freshness_ms: null,
       last_successful_turn_at: null,
       last_successful_turn_provider: null,
       last_successful_turn_session_current: null,
@@ -6239,6 +6299,8 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
       model_usable_checked_at: null,
       model_usability_status: 'usable',
       periodic_probe_expected: null,
+      periodic_probe_backoff_multiple: null,
+      model_usable_freshness_ms: null,
       last_successful_turn_at: 1_700_000_000_000,
       last_successful_turn_provider: 'claude-cli',
       last_successful_turn_session_current: true,

@@ -305,7 +305,11 @@ import {
   type PrimaryModelUsabilityResult,
 } from './providers/primary-model-usability.ts';
 import { createPrimaryModelProbeAdapters } from './providers/primary-model-usability-adapters.ts';
-import { buildPrimaryProbeAdapterDeps } from './primary-readiness-probe.ts';
+import {
+  buildPrimaryProbeAdapterDeps,
+  expectedProbeDeadlineMs,
+  periodicProbeBackoffMultiple,
+} from './primary-readiness-probe.ts';
 import { ensureClaudeFileStoreCredential } from './providers/claude-filestore-heal.ts';
 import {
   resolveFallbackRecoveryDecision,
@@ -494,6 +498,25 @@ export function deriveModelUsable(
       : { modelUsable: null, modelUsableStale: true, modelUsableCheckedAt };
   }
   return { modelUsable: null, modelUsableStale: false, modelUsableCheckedAt };
+}
+
+/**
+ * Freshness window for `deriveModelUsable`. While the periodic primary-readiness
+ * probe is armed the evidence can legitimately be as old as the scheduler's
+ * next fire (interval × backoff, plus the full jitter band and a grace), so the
+ * window follows the scheduler via `expectedProbeDeadlineMs`; a flat 30min
+ * window declared it stale for up to 3 minutes every cycle and for the back
+ * half of every backoff>=2 cycle (the canary `turn_capability_evidence_stale`
+ * flap). With no periodic probe armed the flat window is preserved unchanged.
+ * Pure + exported for direct unit testing.
+ */
+export function resolveModelUsabilityFreshnessMs(
+  periodicProbeExpected: boolean,
+  backoffMultiple: number,
+): number {
+  return periodicProbeExpected
+    ? expectedProbeDeadlineMs(backoffMultiple)
+    : MODEL_USABILITY_FRESHNESS_MS;
 }
 // ---------------------------------------------------------------------------
 // AskUserQuestion → Poll formatting / resolution helpers
@@ -8062,9 +8085,22 @@ export class AgentRuntime implements Runtime {
     return current.isEvidenceBindingCurrent(binding);
   }
 
+  /** The freshness window the live verdict is judged against: scheduler-derived
+   *  while the periodic probe is armed, the flat 30min otherwise. */
+  private modelUsabilityFreshnessMs(): number {
+    return resolveModelUsabilityFreshnessMs(
+      this.periodicUsabilityProbeTimer !== null,
+      periodicProbeBackoffMultiple(this.periodicUsabilityProbeBackoff),
+    );
+  }
+
   private getTurnCapability(): RuntimeTurnCapability {
     const usability = this.primaryModelUsability;
-    const { modelUsable, modelUsableStale, modelUsableCheckedAt } = deriveModelUsable(usability, Date.now());
+    const periodicProbeExpected = this.periodicUsabilityProbeTimer !== null;
+    const backoffMultiple = periodicProbeBackoffMultiple(this.periodicUsabilityProbeBackoff);
+    const modelUsableFreshnessMs = this.modelUsabilityFreshnessMs();
+    const { modelUsable, modelUsableStale, modelUsableCheckedAt } =
+      deriveModelUsable(usability, Date.now(), modelUsableFreshnessMs);
     return {
       modelUsable,
       modelUsableStale,
@@ -8075,7 +8111,9 @@ export class AgentRuntime implements Runtime {
       lastSuccessfulTurnSessionCurrent: this.lastSuccessfulTurnSessionCurrent(),
       lastTurnErrorClass: this.turnCapabilityTracker.lastTurnErrorClass,
       lastTurnErrorAt: this.turnCapabilityTracker.lastTurnErrorAt,
-      periodicProbeExpected: this.periodicUsabilityProbeTimer !== null,
+      periodicProbeExpected,
+      periodicProbeBackoffMultiple: backoffMultiple,
+      modelUsableFreshnessMs,
     };
   }
 
@@ -8105,7 +8143,7 @@ export class AgentRuntime implements Runtime {
       clearAlertSourceChecked(this.instanceName, 'provider_fallback_activated', 'reason=post-revert-turn-success');
       this.pendingPostRevertConfirmation = false;
     }
-    const wasStale = deriveModelUsable(this.primaryModelUsability, Date.now()).modelUsableStale;
+    const wasStale = deriveModelUsable(this.primaryModelUsability, Date.now(), this.modelUsabilityFreshnessMs()).modelUsableStale;
     this.fallback.recordPrimaryModelUsability({ status: 'usable', provider: this.agentProvider, model: this.model ?? null, reason: 'turn-success' }, 'manual');
     if (wasStale) log.info({ provider: this.agentProvider, model: this.model ?? null }, 'primary model usability refreshed by turn success after going stale');
   }
