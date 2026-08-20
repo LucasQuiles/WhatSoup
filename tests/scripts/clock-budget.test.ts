@@ -152,8 +152,21 @@ function stripComments(src: string): string {
   return kept.join('\n');
 }
 
-function countPattern(pattern: RegExp): { total: number; sites: PatternSite[] } {
-  const files = collectSrcFiles();
+function countPattern(
+  pattern: RegExp,
+  files: string[] = collectSrcFiles(),
+): { total: number; sites: PatternSite[] } {
+  // Fail-closed (defect 2): a validator matching ZERO records must FAIL, not
+  // pass vacuously. An empty corpus means the glob lost src/ entirely —
+  // renamed root, dropped `recursive` flag, filter regression — and every
+  // budget would compare 0 against its ceiling and read "clean" out of
+  // nothing. Companion tripwire: the corpus-non-empty it() above.
+  if (files.length === 0) {
+    throw new Error(
+      `clock budget ratchet scanned ZERO files for ${pattern} — vacuous corpus ` +
+        `(srcRoot moved? collectSrcFiles regression?); a ratchet over no records must fail, not pass`,
+    );
+  }
   const sites: PatternSite[] = [];
   let total = 0;
   for (const file of files) {
@@ -223,6 +236,23 @@ describe('clock budget ratchet', () => {
       BARE_NEW_DATE_BUDGET,
       'use systemClock.nowIso() (or derive from an explicit epoch) instead',
     );
+  });
+
+  it('the scanned corpus is non-empty (a zero-file scan must fail, not pass vacuously)', () => {
+    // Tripwire modelled on free-nowunixsec-ratchet.test.ts:164 — if srcRoot
+    // ever resolves somewhere empty or collectSrcFiles regresses, every
+    // budget below would compare zero against its ceiling and read clean.
+    expect(collectSrcFiles().length).toBeGreaterThan(0);
+  });
+
+  it('a ratchet handed an empty corpus FAILS rather than passing vacuously', () => {
+    // Defect 2, red against current machinery: countPattern has no
+    // corpus-non-empty guard, so a glob matching ZERO files (srcRoot moved,
+    // `recursive` flag dropped, filter regression) yields total 0 and the
+    // budgets pass 0 <= 296 — 'clean' manufactured out of nothing. Handed
+    // the empty corpus, the machinery MUST throw. Today it does not, which
+    // is exactly the vacuous pass this test pins shut.
+    expect(() => countPattern(/Date\.now\(\)/g, [])).toThrow(/ZERO/);
   });
 
   it('counts code, not prose', () => {
