@@ -165,6 +165,41 @@ and either an explicit reviewed release path or the active bot plist's
 tracks future re-cuts. It must remain read-only: no apply, re-cut, plist
 mutation, restart, cleanup, WhatsApp turn, or credential change.
 
+### Release currency is a separate observation
+
+The scheduled macOS release observer also runs
+`scripts/live-release-currency-alert.ts` through
+`scripts/live-release-observers.ts`. Currency compares the active release
+manifest's full source commit to an explicitly rendered remote branch ref. It
+does not use the host's ordinary source checkout and it does not change runtime
+health or readiness.
+
+Currency has three states: `current`, `target-differs`, and `inconclusive`.
+`target-differs` intentionally does not claim behind, ahead, or divergence and
+does not authorize deploying the target. Review the approved release and its
+required capabilities before any rollout; capability admission remains a
+separate contract. Missing manifests, unsafe remote transports, malformed refs,
+network failures, timeouts, and malformed remote output are inconclusive rather
+than silently current.
+
+Render the observer with an explicit reviewed target when it is not the default
+public WhatSoup `main` ref:
+
+```bash
+bash deploy/scripts/render-release-drift-launchd.sh \
+  --instance <instance> \
+  --repo-root "$PWD" \
+  --home "$HOME" \
+  --target-url https://github.com/<owner>/<repo>.git \
+  --target-ref refs/heads/<approved-branch> \
+  --output /tmp/com.whatsoup.release-drift-check.plist
+```
+
+The same schedule emits integrity findings under `release-drift` and currency
+findings under `release-currency`. `--clear-on-ok` clears each source only from
+its own successful observation. Installing or updating the rendered job remains
+a separately approved live-host mutation.
+
 ## Pinned npm toolchain in `verify:release`
 
 The `verify:release` npm script routes all `npm ci`, `run typecheck`, `test`,

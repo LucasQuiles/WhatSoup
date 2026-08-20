@@ -867,14 +867,19 @@ describe('deploy launchd timer plists', () => {
     expect(plist).toContain('deploy/scripts/reply-guarantee-drain.sh');
   });
 
-  it('release-drift-check plist runs the manifest drift alert wrapper on an interval', () => {
+  it('release-drift-check plist runs independent drift and currency observers on an interval', () => {
     const plist = fs.readFileSync(releaseDriftPlist, 'utf8');
     expect(plist).toContain('<string>com.whatsoup.release-drift-check</string>');
     expect(plist).toContain('scripts/run-with-pinned-node.sh');
-    expect(plist).toContain('scripts/live-release-drift-alert.ts');
+    expect(plist).toContain('scripts/live-release-observers.ts');
     expect(plist).toContain('--launchd-plist');
     expect(plist).toContain('com.whatsoup.__INSTANCE__.plist');
     expect(plist).toContain('<string>__INSTANCE__</string>');
+    expect(plist).toContain('<string>--target-url</string>');
+    expect(plist).toContain('<string>__TARGET_URL__</string>');
+    expect(plist).toContain('<string>--target-ref</string>');
+    expect(plist).toContain('<string>__TARGET_REF__</string>');
+    expect(plist).toContain('<string>--clear-on-ok</string>');
     expect(plist).toMatch(/<key>StartInterval<\/key>\s*<integer>300<\/integer>/);
   });
 
