@@ -7,6 +7,40 @@ export WHATSOUP_CAPABILITY_ROOT
 
 # shellcheck source=deploy/lib/host-capabilities.sh
 . "$WHATSOUP_CAPABILITY_ROOT/deploy/lib/host-capabilities.sh"
+# shellcheck source=deploy/lib/bounded-exec.sh
+. "$WHATSOUP_CAPABILITY_ROOT/deploy/lib/bounded-exec.sh"
+
+# Budgets (seconds) for the three unbounded network steps. A stalled mirror or a
+# held dpkg lock must fail fast and legibly instead of silently inheriting the
+# 60-minute CI job cap. Defaults are deliberately loose enough that a slow-but-live
+# mirror still succeeds; override to tune for an unusually slow mirror, or (in tests)
+# to a sub-second value so the fail-fast path is provable without sleeping for minutes.
+WHATSOUP_APT_UPDATE_TIMEOUT="${WHATSOUP_APT_UPDATE_TIMEOUT:-300}"
+WHATSOUP_PKG_INSTALL_TIMEOUT="${WHATSOUP_PKG_INSTALL_TIMEOUT:-600}"
+WHATSOUP_PIP_INSTALL_TIMEOUT="${WHATSOUP_PIP_INSTALL_TIMEOUT:-600}"
+
+# whatsoup_bounded_install <seconds> <label> <command> [args...]
+#
+# Runs a network install step under whatsoup_run_bounded so a stalled mirror or a
+# held package-manager lock fails fast and legibly. A timeout is reported with a
+# distinct exit status (124, matching GNU timeout) and a "TIMEOUT" log line, so the
+# next person debugging can tell a hang from a genuine install failure at a glance.
+# Stdout is routed to stderr so the --json receipt on stdout stays clean.
+whatsoup_bounded_install() {
+  budget="$1"
+  label="$2"
+  shift 2
+
+  rc=0
+  whatsoup_run_bounded "$budget" "$@" >&2 || rc=$?
+  if [ "$rc" -eq 124 ]; then
+    echo "host dependency installer: TIMEOUT after ${budget}s waiting on: $label" >&2
+    exit 124
+  elif [ "$rc" -ne 0 ]; then
+    echo "host dependency installer: command failed (exit $rc): $label" >&2
+    exit "$rc"
+  fi
+}
 
 usage() {
   cat >&2 <<'USAGE'
@@ -159,14 +193,14 @@ $packages
 EOF
 case "$manager" in
   brew)
-    brew install "${package_args[@]}" >&2 || exit 1
+    whatsoup_bounded_install "$WHATSOUP_PKG_INSTALL_TIMEOUT" "brew install" brew install "${package_args[@]}"
     ;;
   apt)
-    sudo apt-get update >&2 || exit 1
-    sudo apt-get install -y "${package_args[@]}" >&2 || exit 1
+    whatsoup_bounded_install "$WHATSOUP_APT_UPDATE_TIMEOUT" "apt-get update" sudo apt-get update
+    whatsoup_bounded_install "$WHATSOUP_PKG_INSTALL_TIMEOUT" "apt-get install" sudo apt-get install -y "${package_args[@]}"
     ;;
   pacman)
-    sudo pacman -S --needed --noconfirm "${package_args[@]}" >&2 || exit 1
+    whatsoup_bounded_install "$WHATSOUP_PKG_INSTALL_TIMEOUT" "pacman install" sudo pacman -S --needed --noconfirm "${package_args[@]}"
     ;;
 esac
 
@@ -194,7 +228,7 @@ if [ "$profile" = "quality" ] || [ "$profile" = "release" ]; then
     echo "host dependency installer: managed venv did not create an executable Python" >&2
     exit 1
   }
-  "$venv_python" -m pip install pytest pytest-cov hypothesis ruff==0.15.10 >&2 || exit 1
+  whatsoup_bounded_install "$WHATSOUP_PIP_INSTALL_TIMEOUT" "pip install" "$venv_python" -m pip install pytest pytest-cov hypothesis ruff==0.15.10
 fi
 
 if ! PATH="$(whatsoup_quality_venv_root)/bin:$PATH" \
