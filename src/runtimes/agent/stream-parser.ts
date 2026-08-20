@@ -16,18 +16,32 @@ const parserLog = createChildLogger('stream-parser');
 // key space is bounded (a small set of type strings), so the dedupe set is too.
 const observedUnclassified = new Set<string>();
 // Hard cardinality cap: a hostile or buggy provider emitting many distinct type strings
-// must not grow this set without bound. Once the cap is reached, further novel types are
-// neither tracked nor warned (already-observed keys still dedupe what they hold).
+// must not grow this set without bound.
 const MAX_OBSERVED_UNCLASSIFIED = 128;
+// Saturation telemetry: preserving the memory bound above must not let observability go
+// SILENTLY dark. 128 syntactically-valid distinct types exhaust the set just as a hostile
+// stream would; once saturated, novel types can no longer be recorded — so count the
+// novel-but-unrecordable drops (saturating at MAX_SAFE_INTEGER, never overflowing) and warn
+// only at power-of-two milestones (1, 2, 4, 8, ...) for bounded log volume. No LRU eviction:
+// evicting to admit new types would let an unbounded type stream log without bound.
+let suppressedNovelEventCount = 0;
+let nextSuppressionNotifyAt = 1;
 
-/** Reset the per-process unclassified-type dedupe (tests only). */
+/** Reset the per-process unclassified-type dedupe + saturation telemetry (tests only). */
 export function _resetStreamParserObservability(): void {
   observedUnclassified.clear();
+  suppressedNovelEventCount = 0;
+  nextSuppressionNotifyAt = 1;
 }
 
 /** Snapshot the observed unclassified keys, id-only (tests only). */
 export function _observedUnclassifiedKeys(): readonly string[] {
   return [...observedUnclassified];
+}
+
+/** Count of novel unclassified events dropped after the set saturated (tests only). */
+export function _suppressedNovelEventCount(): number {
+  return suppressedNovelEventCount;
 }
 
 function observeUnclassified(
@@ -36,7 +50,20 @@ function observeUnclassified(
 ): void {
   const key = `${classification}:${blockType}`;
   if (observedUnclassified.has(key)) return;
-  if (observedUnclassified.size >= MAX_OBSERVED_UNCLASSIFIED) return;
+  if (observedUnclassified.size >= MAX_OBSERVED_UNCLASSIFIED) {
+    // Saturated — cannot record this novel type. Do NOT vanish silently: count the drop
+    // (saturating, never overflowing) and warn only at power-of-two milestones.
+    if (suppressedNovelEventCount < Number.MAX_SAFE_INTEGER) suppressedNovelEventCount += 1;
+    if (suppressedNovelEventCount >= nextSuppressionNotifyAt) {
+      // id-only: `blockType` is a bounded discriminant; the count conveys saturation pressure.
+      parserLog.warn(
+        { classification, blockType, suppressedNovelEventCount },
+        'stream-parser: unclassified-event observability saturated (id-only, power-of-two sampled)',
+      );
+      nextSuppressionNotifyAt *= 2;
+    }
+    return;
+  }
   observedUnclassified.add(key);
   // id-only: `blockType` is a bounded type discriminant, never payload content or fields.
   parserLog.warn({ classification, blockType }, 'stream-parser: unclassified provider event (id-only)');
@@ -160,7 +187,10 @@ function describeBlockType(block: unknown): string {
   if (type === 'system' && record['subtype'] !== undefined) {
     return `system:${boundedDiscriminant(record['subtype'])}`;
   }
-  return type;
+  // Bound the top-level type too (not just the system subtype): this is the dominant
+  // unclassified path, and an unbounded raw type would defeat the key-space bound —
+  // storing/logging arbitrary-length, control/bidi, or sentinel-forging strings.
+  return boundedDiscriminant(type);
 }
 
 // Documented Claude CLI 2.1.x system/api_retry error categories (closed enum).
@@ -190,7 +220,7 @@ function isInertApiRetry(event: JsonRecord): boolean {
     && attempt <= maxRetries
     && (errorStatus === null
       || (typeof errorStatus === 'number' && Number.isInteger(errorStatus)
-        && errorStatus >= 0 && errorStatus <= 599))
+        && errorStatus >= 100 && errorStatus <= 599))
     && typeof error === 'string' && API_RETRY_ERROR_CATEGORIES.has(error)
     && isNonEmptyString(event['uuid'])
     && isNonEmptyString(event['session_id'])
