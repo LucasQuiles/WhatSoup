@@ -95,41 +95,59 @@ interface PatternSite {
 }
 
 /**
- * Drops lines that are ENTIRELY comment, before counting.
+ * Drops comment content, keeping code — including code that follows a
+ * block-comment closer ON THE SAME LINE.
  *
  * Why strip at all: the count is a debt metric and prose is not debt. Counting
  * raw text meant a comment explaining the migration registered as a call site,
  * so DOCUMENTING the rule raised the number the rule bounds — a perverse
  * incentive, and how this slice first "failed" its own ratchet.
  *
- * Why whole-line rather than inline: the first version stripped `/*…*\/` spans
- * and `//`-to-end-of-line inline. It produced identical totals but could HIDE
- * CODE — a string containing a block-comment opener starts a phantom comment
- * that swallows real call sites until the next closer, and a string containing
- * `//` truncates its own line. Undercounting is the dangerous direction: it
- * lets the ratchet silently permit new debt. A string or template literal is
- * never a comment-only line, so this form cannot hide code.
- *
- * The tradeoff is trailing comments (`code; // ...`), which are NOT stripped
- * and would OVERcount — the safe direction, since it can only make the gate
- * stricter. Verified to cost nothing today: both algorithms report identical
- * totals across src/ (308 / 9 / 105).
+ * Policy (fail-closed in the undercount direction): block-comment spans are
+ * consumed ONLY when they begin the (remaining) line, and whatever follows the
+ * closer on that line is KEPT and counted. A line that opens and closes
+ * (`/* n *\/ const t = …`), a closer line of an open block (`more *\/ const t…`),
+ * and close-then-reopen (`/* a *\/ /* b`) are all handled; the old whole-line
+ * drop hid code in the first two shapes. Comment spans that start MID-line
+ * (after real code) are NOT consumed — trailing comments are kept and would
+ * OVERcount, the safe direction. A string or template literal therefore still
+ * never starts a phantom comment unless the line's first non-space characters
+ * are literally `/*` (the multi-line template caveat is inherited unchanged
+ * from the whole-line policy).
  */
 function stripComments(src: string): string {
   const kept: string[] = [];
   let inBlock = false;
   for (const line of src.split('\n')) {
-    const trimmed = line.trim();
-    if (inBlock) {
-      if (trimmed.includes('*/')) inBlock = false;
-      continue;
+    let text = line;
+    for (;;) {
+      const trimmed = text.trim();
+      if (inBlock) {
+        const closer = trimmed.indexOf('*/');
+        if (closer === -1) break; // whole remainder is comment
+        inBlock = false;
+        text = trimmed.slice(closer + 2); // keep any code after the closer
+        if (text.trim() === '') break;
+        continue;
+      }
+      if (trimmed.startsWith('/*')) {
+        const closer = trimmed.indexOf('*/');
+        if (closer === -1) {
+          inBlock = true; // opens a block that continues past this line
+          break;
+        }
+        text = trimmed.slice(closer + 2); // keep any code after the closer
+        if (text.trim() === '') break;
+        continue;
+      }
+      if (trimmed.startsWith('//')) break;
+      // A `*`-prefixed line OUTSIDE a block is code — an operator
+      // continuation such as `  * Date.now();` (harvested from orphan
+      // f06dec747). Inside a block it is comment interior, consumed by the
+      // inBlock branch above.
+      kept.push(text); // code line, or the code remainder after consumed spans
+      break;
     }
-    if (trimmed.startsWith('/*')) {
-      if (!trimmed.includes('*/')) inBlock = true;
-      continue;
-    }
-    if (trimmed.startsWith('//') || trimmed.startsWith('*')) continue;
-    kept.push(line);
   }
   return kept.join('\n');
 }
@@ -235,6 +253,10 @@ describe('clock budget ratchet', () => {
       ['const s = "/*";', 'const t = Date.now();', 'const u = "*/";'].join('\n'),
       "const s = 'a // b'; const t = Date.now();",
       'const s = `x // y`; const t = Date.now();',
+      // Harvested from preserved orphan f06dec747 (2026-08-17, not on main):
+      // a `*`-prefixed line OUTSIDE a block comment is an operator
+      // continuation, not a JSDoc line — the whole-line stripper dropped it.
+      'const x = a\n  * Date.now();',
     ];
     for (const src of hazards) {
       expect(
@@ -242,5 +264,32 @@ describe('clock budget ratchet', () => {
         `stripping hid a real call site — the ratchet would undercount:\n${src}`,
       ).toContain('Date.now()');
     }
+  });
+
+  it('same-line block-comment close does not hide code after the closer', () => {
+    // A line that both opens and closes a block comment, or that closes an
+    // open block, can still carry real code after the closer. The old
+    // stripper dropped the whole line either way, hiding call sites —
+    // undercount, the one dangerous direction. Both shapes confirmed by a
+    // lead-side differential harness.
+    expect(
+      stripComments('/* n */ const t = Date.now();'),
+      'opener+closer on one line hid trailing code',
+    ).toContain('Date.now()');
+    expect(
+      stripComments(['/* explain', '   more */ const t = Date.now();'].join('\n')),
+      'closer line of an open block hid trailing code',
+    ).toContain('Date.now()');
+    // Close-and-reopen on one line: the reopened comment must stay a comment
+    // (its prose must NOT leak into the kept code as a false call site).
+    expect(
+      stripComments(
+        ['/* a */ /* reopened', 'prose naming Date.now()', '*/', 'const t = 1;'].join('\n'),
+      ),
+      'reopened comment leaked prose into code',
+    ).not.toContain('Date.now()');
+    expect(
+      stripComments(['/* a */ /* reopened', 'prose naming Date.now()', '*/', 'const t = 1;'].join('\n')),
+    ).toContain('const t = 1;');
   });
 });
