@@ -69,10 +69,24 @@ const LEGACY_NO_FRESHNESS = new Set([
   'useLines', // pre-#1925 (the D-3 PR promotes it onto the contract)
   'useLine', 'useChats', 'useMessages', 'useAccess',
   'useTyping', 'useProviders', 'useProviderStatus',
+  // #2519 scope-gap backfill (pre-#1925 hook whose file the guard never scanned —
+  // not a new exemption of the "new hooks must carry queryFreshness" kind).
+  // Grandfathered with rationale per owner adjudication: an aged version check
+  // costs a delayed update toast, never stale-data-rendered-as-live, and the
+  // payload already carries the server-stamped checkedAt.
+  'useUpdateCheck',
 ])
 
 describe('freshness contract — data hooks carry queryFreshness (#1925/#1934)', () => {
-  const hookFiles = ['console/src/hooks/use-fleet.ts', 'console/src/hooks/use-metrics.ts']
+  // #2519: use-update-check.ts joined the scanned set in the same commit that
+  // grandfathered useUpdateCheck — either change alone is decorative (an
+  // exemption for an unscanned file is an inert diff; scope without the
+  // exemption fails the guard, by design).
+  const hookFiles = [
+    'console/src/hooks/use-fleet.ts',
+    'console/src/hooks/use-metrics.ts',
+    'console/src/hooks/use-update-check.ts',
+  ]
 
   function exportedQueryHooks(src: string): Array<{ name: string; body: string }> {
     const out: Array<{ name: string; body: string }> = []
