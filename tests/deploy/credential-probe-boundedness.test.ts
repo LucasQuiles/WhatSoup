@@ -343,3 +343,40 @@ describe.each([
     expect(Date.now() - started).toBeLessThan(15_000);
   });
 });
+
+describe('whatsoup_run_bounded hard-kills a child that ignores SIGTERM', () => {
+  const hasTimeoutOrGtimeout = (() => {
+    const res = spawnSync(
+      'bash',
+      ['-c', 'command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1'],
+      { encoding: 'utf8' },
+    );
+    return res.status === 0;
+  })();
+
+  // The defect lives in the timeout/gtimeout delegation branches; the pure-shell
+  // watchdog already hard-kills at the budget. On a host with neither binary that
+  // branch is unreachable, so there is nothing for this test to exercise.
+  it.skipIf(!hasTimeoutOrGtimeout)(
+    'bounds the wall clock, not just the return code',
+    () => {
+      // Bare `timeout Ns` sends SIGTERM at the budget and then WAITS for the child
+      // to exit, so a child that ignores SIGTERM runs to its own completion yet
+      // still yields 124 — the wrapper reports a timeout it never enforced. A
+      // `sleep` child dies on SIGTERM, so a sleep-based test goes green against
+      // the bug and certifies nothing: the child must ignore SIGTERM for the
+      // assertion to mean anything.
+      const started = Date.now();
+      const res = runSnippet(
+        'whatsoup_run_bounded 1 bash -c \'trap "" TERM; sleep 30\'; echo "rc=$?"',
+      );
+      const wall = Date.now() - started;
+
+      expect(res.stdout).toContain('rc=124');
+      // budget 1s + kill grace 2s => ~3s. The broken bare-timeout path would
+      // block for the child's full 30s. Under 10s proves the child was actually
+      // killed, not merely reported as timed out.
+      expect(wall).toBeLessThan(10_000);
+    },
+  );
+});

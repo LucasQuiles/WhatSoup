@@ -27,13 +27,38 @@ whatsoup_run_bounded() {
   local budget="$1"
   shift
 
+  # SIGKILL grace (seconds) after SIGTERM, for the timeout/gtimeout branches only.
+  # Bare GNU `timeout` sends SIGTERM at the budget and then WAITS for the child to
+  # exit, so a child that ignores or survives SIGTERM lets the wrapper wait with it
+  # forever: `timeout 2s bash -c 'trap "" TERM; sleep 20'` returns 124 only after
+  # the child has already run the full 20s (measured). `-k` follows SIGTERM with
+  # SIGKILL after this grace, so the wall clock is actually bounded, not merely
+  # reported as timed-out.
+  #
+  # The grace scales with the budget: a short credential probe (3-5s) must fail
+  # fast, while a long package install (300-600s) needs a real window after SIGTERM
+  # to release a dpkg lock or flush a mirror transfer before SIGKILL — SIGKILLing a
+  # package manager mid-`dpkg` can leave a broken install worse than the hang this
+  # helper exists to stop. Floor 2s, ceiling 30s.
+  local rc grace
+  grace=$(( budget / 10 ))
+  [ "$grace" -lt 2 ] && grace=2
+  [ "$grace" -gt 30 ] && grace=30
+
   if command -v timeout >/dev/null 2>&1; then
-    timeout "${budget}s" "$@"
-    return $?
+    timeout -k "${grace}s" "${budget}s" "$@"
+    rc=$?
+    # `timeout` exits 137 (128+SIGKILL) when it had to escalate past SIGTERM to
+    # SIGKILL; fold that back into the documented 124 budget-exhausted exit so
+    # callers distinguish "timed out" from "failed", never which signal ended it.
+    [ "$rc" -eq 137 ] && rc=124
+    return "$rc"
   fi
   if command -v gtimeout >/dev/null 2>&1; then
-    gtimeout "${budget}s" "$@"
-    return $?
+    gtimeout -k "${grace}s" "${budget}s" "$@"
+    rc=$?
+    [ "$rc" -eq 137 ] && rc=124
+    return "$rc"
   fi
 
   # Portable fallback. The watchdog's stdout/stderr are detached so a caller
@@ -58,7 +83,7 @@ whatsoup_run_bounded() {
   ) >/dev/null 2>&1 &
   local watchdog_pid=$!
 
-  local rc=0
+  rc=0
   wait "$cmd_pid" 2>/dev/null || rc=$?
 
   kill -9 "$watchdog_pid" 2>/dev/null

@@ -97,7 +97,17 @@ function fixture(platform: 'Darwin' | 'Linux' = 'Darwin'): Fixture {
   versionTool(bin, 'rg', 'ripgrep 14.1.1');
   versionTool(bin, 'zsh', 'zsh 5.9');
   versionTool(bin, 'shellcheck', 'ShellCheck 0.11.0');
-  versionTool(bin, platform === 'Darwin' ? 'gtimeout' : 'timeout', 'timeout 9.7');
+  // GNU timeout in miniature: `--version` answers the capability probe; any other
+  // argv is `timeout [-k <grace>] <duration> <command...>`, which this fake
+  // collapses to just the command (it does not bound — whatsoup_run_bounded's own
+  // bounding is covered by credential-probe-boundedness.test.ts; here the fake only
+  // needs to let the installer's wrapped commands reach their ledger-writing targets).
+  executable(join(bin, platform === 'Darwin' ? 'gtimeout' : 'timeout'), [
+    'if [ "${1:-}" = "--version" ]; then printf "%s\\n" "timeout (GNU coreutils) 9.7"; exit 0; fi',
+    'if [ "${1:-}" = "-k" ]; then shift 2; fi',
+    'shift',
+    '"$@"',
+  ].join('\n'));
   if (platform === 'Linux') versionTool(bin, 'flock', 'flock 2.40');
 
   executable(join(bin, 'python3.12'), [
@@ -300,5 +310,55 @@ describe('explicit host dependency installer', () => {
 
     expect(result.status).toBe(1);
     expect(ledger(fx).length).toBeGreaterThan(0);
+  });
+
+  it('kills a stalled install command fast and reports a distinguishable timeout', () => {
+    const fx = fixture('Linux');
+    // Swap the delegating fake timeout for the real GNU timeout so a stalled
+    // child is actually killed after the budget, and shrink the update budget so
+    // the test proves the fail-fast path without sleeping for the 300s default.
+    unlinkSync(join(fx.bin, 'timeout'));
+    symlinkSync(resolveHostTool('timeout'), join(fx.bin, 'timeout'));
+    symlinkSync(resolveHostTool('sleep'), join(fx.bin, 'sleep'));
+    executable(join(fx.bin, 'apt-get'), 'sleep 300');
+    fx.env.WHATSOUP_APT_UPDATE_TIMEOUT = '1';
+
+    const started = Date.now();
+    const result = runInstaller(fx, [
+      '--profile',
+      'quality',
+      '--manager',
+      'apt',
+      '--apply',
+      '--yes',
+    ]);
+    const wall = Date.now() - started;
+
+    // 124 (GNU timeout), not 1 — the next person debugging can tell a hang from a
+    // genuine install failure. And it must fail fast, not ride to the job cap.
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(124);
+    expect(result.stderr).toContain('TIMEOUT');
+    expect(result.stderr).toContain('apt-get update');
+    expect(result.stderr).not.toContain('command failed');
+    expect(wall).toBeLessThan(15_000);
+  });
+
+  it('reports a genuine install failure as a failure, not a timeout', () => {
+    const fx = fixture('Linux');
+    executable(join(fx.bin, 'apt-get'), 'exit 1');
+
+    const result = runInstaller(fx, [
+      '--profile',
+      'quality',
+      '--manager',
+      'apt',
+      '--apply',
+      '--yes',
+    ]);
+
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(1);
+    expect(result.stderr).toContain('command failed');
+    expect(result.stderr).toContain('apt-get update');
+    expect(result.stderr).not.toContain('TIMEOUT');
   });
 });
