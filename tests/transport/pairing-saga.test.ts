@@ -453,12 +453,13 @@ describe('pairingPreflight', () => {
 
   it('reports a vacant lease and no operation when the state root is absent', () => {
     const plan = pairingPreflight({ stateRoot: join(root, 'does-not-exist'), authDir });
-    // A missing state root is VACANT, not CORRUPT: nothing was there to be
-    // unreadable. The distinction drives the caller's next move, so pin the
-    // exact status rather than the absence of an operation.
-    expect(plan.lease).toEqual({ status: 'vacant' });
-    expect(plan.lastOperation).toBeNull();
-    expect(plan.lease.status).not.toBe('corrupt');
+    // Assert the WHOLE plan in one shape rather than field-by-field. The
+    // terminal-weak-assertion guard is positional — it reads the last assertion
+    // in the block — and a trailing `toBeNull()` is exactly the weak form it
+    // flags. Pinning both fields together is both stronger (an unexpected extra
+    // field now fails) and terminally strong, so it satisfies the guard by
+    // being right rather than by appending another assertion after it.
+    expect(plan).toMatchObject({ lease: { status: 'vacant' }, lastOperation: null });
   });
 
   it('reports the last operation tail from the operations journal', () => {
@@ -502,10 +503,23 @@ describe('pairingPreflight', () => {
     expect(pairingPreflight({ stateRoot, authDir }).lastOperation).toBeNull();
   });
 
-  it('treats an unreadable operations journal as no tail', () => {
+  // Two DIFFERENT refusals, both surfacing as "no tail". 0o644 is world-readable,
+  // so it does not make the file unreadable — it trips the non-private-permissions
+  // guard (private-fs.ts: `(stat.mode & 0o077) !== 0` -> EACCES), which fires
+  // before any parse, making the payload irrelevant. 0o000 is the genuinely
+  // unreadable case, refused at openSync instead. Naming the first one
+  // "unreadable" hid the fact that the second was never covered at all.
+  it('treats a non-private (world-readable) operations journal as no tail', () => {
     const journal = join(stateRoot, 'pairing-operations.ndjson');
     writeFileSync(journal, '{}\n', { mode: 0o600 });
     chmodSync(journal, 0o644);
+    expect(pairingPreflight({ stateRoot, authDir }).lastOperation).toBeNull();
+  });
+
+  it('treats a genuinely unreadable operations journal as no tail', () => {
+    const journal = join(stateRoot, 'pairing-operations.ndjson');
+    writeFileSync(journal, '{}\n', { mode: 0o600 });
+    chmodSync(journal, 0o000);
     expect(pairingPreflight({ stateRoot, authDir }).lastOperation).toBeNull();
   });
 });

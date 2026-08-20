@@ -438,8 +438,19 @@ describe('acquire error paths', () => {
     });
   });
 
-  it('treats an invalid tombstone as token 0 so fencing starts fresh', () => {
-    writeFileSync(tombstoneFile(), JSON.stringify({ lastFencingToken: -1 }));
+  // The sanitiser (readTombstoneToken) accepts only positive INTEGERS; anything
+  // else must floor to 0 so fencing restarts at 1. -1 is the one value that
+  // proves nothing: sanitised (-1 -> 0), returned raw (Math.max(-1, 0) = 0), and
+  // "tombstone never read at all" (0) are indistinguishable — all three yield
+  // fencingToken 1. Use values that MOVE the token when unsanitised: 5.5 is a
+  // number but not an integer, "5" is not a number at all. Either one inflates
+  // the token to 6 if the guard is dropped, so these cases fail against a
+  // missing sanitiser where -1 passed against one.
+  it.each([
+    ['a non-integer token', 5.5],
+    ['a string token', '5'],
+  ])('treats %s as token 0 so fencing starts fresh', (_label, lastFencingToken) => {
+    writeFileSync(tombstoneFile(), JSON.stringify({ lastFencingToken }));
     const result = acquireCoordinationLease(baseArgs());
     if (!result.ok) throw new Error('fixture acquire failed');
     expect(result.lease.fencingToken).toBe(1);

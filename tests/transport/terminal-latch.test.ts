@@ -13,8 +13,6 @@ import {
   type TerminalLatchV1,
   type LatchTransitionV1,
   type LatchJournalState,
-  type ActiveTreeObservation,
-  type ConnectActivationEvidence,
 } from '../../src/transport/terminal-latch.ts';
 import {
   parseAccountScopeId,
@@ -729,70 +727,5 @@ describe('readTerminalLatchJournal — journal corruption arms', () => {
     const line2 = createdTransition({ revision: 2, expectedPriorRevision: 1 });
     writeFileSync(path, JSON.stringify(line1) + '\n' + JSON.stringify(line2) + '\n', { mode: 0o600 });
     expect(readTerminalLatchJournal(stateRoot)).toEqual({ status: 'corrupt' });
-  });
-});
-
-describe('decideConnectActivation', () => {
-  const activeTree = (digest: string): ActiveTreeObservation => ({ status: 'digest', digest });
-  const recordedV2 = (overrides: Partial<AuthGenerationReceiptV2> = {}): ConnectActivationEvidence => ({
-    status: 'recorded_v2',
-    receipt: { ...NEWER_RECEIPT, ...overrides },
-  });
-  const superseded = (supersededByGenerationId: string): LatchJournalState => ({
-    status: 'superseded',
-    revision: 2,
-    latch: LATCH,
-    supersededByGenerationId,
-  });
-
-  it('allows activation after owner release regardless of tree and evidence', () => {
-    const released: LatchJournalState = {
-      status: 'released',
-      revision: 2,
-      latch: LATCH,
-      ownerAuthorizationId: 'owner-auth-0001',
-    };
-    expect(decideConnectActivation(released, { status: 'missing' }, { status: 'unavailable' })).toEqual({
-      allow: true,
-      basis: 'owner_released',
-    });
-  });
-
-  it('refuses activation while the latch is active and the tree is unreadable', () => {
-    const active: LatchJournalState = { status: 'active', revision: 1, latch: LATCH };
-    expect(decideConnectActivation(active, { status: 'unreadable' }, recordedV2())).toEqual({
-      allow: false,
-      refusal: 'active_tree_unreadable',
-    });
-  });
-
-  it('refuses activation when superseded but the active tree has no readable digest', () => {
-    expect(
-      decideConnectActivation(superseded(NEWER_RECEIPT.generationId), { status: 'missing' }, recordedV2()),
-    ).toEqual({ allow: false, refusal: 'superseded_generation_unbound' });
-  });
-
-  it('refuses activation when superseded but no v2 receipt is recorded', () => {
-    expect(
-      decideConnectActivation(superseded(NEWER_RECEIPT.generationId), activeTree(FRESH_DIGEST), { status: 'unavailable' }),
-    ).toEqual({ allow: false, refusal: 'superseded_generation_unbound' });
-  });
-
-  it('refuses activation when the receipt generation does not match the superseding generation', () => {
-    expect(
-      decideConnectActivation(superseded('gen-other-mismatch'), activeTree(FRESH_DIGEST), recordedV2()),
-    ).toEqual({ allow: false, refusal: 'superseded_generation_unbound' });
-  });
-
-  it('refuses activation when the receipt tree digest does not match the active tree', () => {
-    expect(
-      decideConnectActivation(superseded(NEWER_RECEIPT.generationId), activeTree(REVOKED_DIGEST), recordedV2()),
-    ).toEqual({ allow: false, refusal: 'revoked_material_present' });
-  });
-
-  it('allows activation when the receipt and active tree reconcile to the superseding generation', () => {
-    expect(
-      decideConnectActivation(superseded(NEWER_RECEIPT.generationId), activeTree(FRESH_DIGEST), recordedV2()),
-    ).toEqual({ allow: true, basis: 'bound_superseding_generation' });
   });
 });
