@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -10,6 +9,7 @@ import {
   createReleaseSnapshotDriftReport,
   type ReleaseSnapshotDriftReport,
 } from './release-snapshot-plan.ts';
+import { emitReleaseAlert, type ReleaseAlertEmitResult } from './lib/live-release-alert.ts';
 
 export interface LiveReleaseDriftAlertOptions {
   repoRoot: string;
@@ -58,29 +58,6 @@ const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const REPO_ROOT = path.resolve(path.dirname(SCRIPT_PATH), '..');
 const DEFAULT_SOURCE = 'release-drift';
 const DEFAULT_INSTANCE = 'release-bot';
-const EMIT_ENV_KEYS = [
-  'BOT_ERRORS_ALLOW_TEST_LIVE_OUTBOX',
-  'BOT_ERRORS_DRY_PLATFORM_RELEASE',
-  'BOT_ERRORS_DRY_PLATFORM_SYSTEM',
-  'BOT_ERRORS_DRY_SYS_PLATFORM',
-  'BOT_ERRORS_LIVE_OUTBOX_DIR',
-  'BOT_ERRORS_OUTBOX_DIR',
-  'BOT_ERRORS_STATE_DIR',
-  'BOT_ERRORS_WRITEFAIL_DIR',
-  'HOME',
-  'INVOCATION_ID',
-  'JEST_WORKER_ID',
-  'LOG_DIR',
-  'NODE_ENV',
-  'PATH',
-  'PYTEST_CURRENT_TEST',
-  'SYSTEMD_EXEC_PID',
-  'SYSTEMD_UNIT',
-  'TMPDIR',
-  'VITEST',
-  'VITEST_WORKER_ID',
-  'WSL_DISTRO_NAME',
-] as const;
 
 function usage(): string {
   return [
@@ -178,63 +155,29 @@ function alertEvidence(report: ReleaseSnapshotDriftReport): string {
   }, null, 2);
 }
 
-function emitEnvironment(): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {};
-  for (const key of EMIT_ENV_KEYS) {
-    const value = process.env[key];
-    if (value !== undefined) env[key] = value;
-  }
-  return env;
-}
-
 function runEmit(
   options: LiveReleaseDriftAlertOptions,
   report: ReleaseSnapshotDriftReport,
   eventType: 'alert' | 'clear',
-): SpawnSyncReturns<string> {
-  const args = [
-    options.emitHelper,
-    '--instance',
-    options.instance,
-    '--source',
-    options.source,
-    '--summary',
-    alertSummary(report),
-    '--evidence',
-    alertEvidence(report),
-    '--diagnostic',
-    `release=${report.releasePath}`,
-    '--diagnostic',
-    `manifest=${report.manifestPath}`,
-  ];
-  if (eventType === 'clear') {
-    args.push('--clear');
-  } else {
-    args.push('--severity', 'critical');
-  }
-  return spawnSync(options.python, args, {
-    cwd: options.repoRoot,
-    encoding: 'utf8',
-    env: emitEnvironment(),
-    maxBuffer: 1024 * 1024,
-    timeout: 60_000,
-  });
-}
-
-function normalizeSpawnStatus(proc: SpawnSyncReturns<string>): number | null {
-  return proc.status ?? (proc.error ? 1 : null);
+): ReleaseAlertEmitResult {
+  return emitReleaseAlert(options, {
+    summary: alertSummary(report),
+    evidence: alertEvidence(report),
+    diagnostics: [`release=${report.releasePath}`, `manifest=${report.manifestPath}`],
+    severity: 'critical',
+  }, eventType);
 }
 
 export function checkLiveReleaseDrift(options: LiveReleaseDriftAlertOptions): LiveReleaseDriftAlertResult {
   const report = createReleaseSnapshotDriftReport(options.releasePath, options.manifestPath);
   const alertKind: 'alert' | 'clear' | null = report.ok ? (options.clearOnOk ? 'clear' : null) : 'alert';
-  let emitResult: SpawnSyncReturns<string> | null = null;
+  let emitResult: ReleaseAlertEmitResult | null = null;
   if (alertKind && options.emit) {
     emitResult = runEmit(options, report, alertKind);
   }
   return {
     check: 'live-release-drift-alert',
-    ok: report.ok && (!emitResult || normalizeSpawnStatus(emitResult) === 0),
+    ok: report.ok && (!emitResult || emitResult.status === 0),
     releasePath: report.releasePath,
     manifestPath: report.manifestPath,
     source: report.source,
@@ -243,9 +186,9 @@ export function checkLiveReleaseDrift(options: LiveReleaseDriftAlertOptions): Li
       required: alertKind !== null,
       attempted: Boolean(emitResult),
       kind: alertKind,
-      status: emitResult ? normalizeSpawnStatus(emitResult) : null,
+      status: emitResult?.status ?? null,
       stdout: emitResult?.stdout ?? '',
-      stderr: emitResult?.stderr || emitResult?.error?.message || '',
+      stderr: emitResult?.stderr ?? '',
     },
   };
 }
