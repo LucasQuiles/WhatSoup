@@ -41,7 +41,7 @@ import type { DatabaseSync, SQLInputValue, StatementSync } from 'node:sqlite';
 import { basename, resolve, sep } from 'node:path';
 import { realpathSync, statSync, createReadStream } from 'node:fs';
 import { createHash, randomBytes } from 'node:crypto';
-import { nowUnixSec } from './time.ts';
+import { systemClock } from '../../lib/clock.ts';
 import {
   dueTriggers, validateTriggerSpec, isSafeSqliteSql,
   countPastDueTriggers, DEFAULT_TRIGGER_PAST_DUE_GRACE_SEC,
@@ -532,7 +532,7 @@ export class TriggerPoller {
     this.messenger = messenger;
     this.intervalMs = opts.intervalMs ?? DEFAULT_INTERVAL_MS;
     this.batchSize = opts.batchSize ?? DEFAULT_BATCH_SIZE;
-    this.nowFn = opts.now ?? nowUnixSec;
+    this.nowFn = opts.now ?? systemClock.nowUnixSec;
     this.setTimeoutImpl = opts.setTimeoutImpl ?? setTimeout;
     this.clearTimeoutImpl = opts.clearTimeoutImpl ?? clearTimeout;
     this.maxConsecutiveFailures = opts.maxConsecutiveFailures ?? MAX_CONSECUTIVE_FAILURES;

@@ -5,7 +5,7 @@ import { createChildLogger } from '../logger.ts';
 import type { Database } from './database.ts';
 import type { SubmissionReceipt, OutboundMedia } from './types.ts';
 import { nextCronRun } from './cron.ts';
-import { nowUnixSec } from './substrate/time.ts';
+import { type Clock, systemClock } from '../lib/clock.ts';
 import { errorMessage } from '../lib/error-message.ts';
 import { clearAlertSourceChecked, emitAlertChecked } from '../lib/emit-alert.ts';
 import { clearRecoveryMarker, loadRecoveryMarkers, setRecoveryMarker } from '../lib/recovery-authority-store.ts';
@@ -117,6 +117,7 @@ export class MessageScheduler {
   private db: Database;
   private connection: SchedulerConnection;
   private config: { intervalMs: number; maxRetries: number; instance?: string };
+  private readonly clock: Clock;
 
   /**
    * #1779 latch: true once the de-linked-hold owner alert has fired for the
@@ -132,10 +133,16 @@ export class MessageScheduler {
     db: Database,
     connection: SchedulerConnection,
     config: { intervalMs: number; maxRetries: number; instance?: string },
+    // Injectable so fire-time timestamps (send_started_at / sent_at and
+    // recurring next_run_at anchoring) can be driven to a known instant
+    // (#2200). Optional and defaulted, so this slice changes no existing call
+    // site.
+    clock: Clock = systemClock,
   ) {
     this.db = db;
     this.connection = connection;
     this.config = config;
+    this.clock = clock;
     // #2415: a restart mid-de-link-episode must restore clear authority
     // without re-paging — the durable marker survives what the in-memory
     // latch cannot (same restoration shape as ConnectionManager's markers).
@@ -192,7 +199,7 @@ export class MessageScheduler {
         timezone: string | null;
       }>;
     for (const row of recurringUncertain) {
-      const now = nowUnixSec();
+      const now = this.clock.nowUnixSec();
       let nextRun: number | null = null;
       try {
         nextRun = advanceRecurringRun(row.recurrence, row.next_run_at ?? now, now, row.timezone ?? 'UTC').nextRun;
@@ -248,7 +255,7 @@ export class MessageScheduler {
   }
 
   async tick(): Promise<void> {
-    const now = nowUnixSec();
+    const now = this.clock.nowUnixSec();
 
     // #1779 — assess transport link state up front. Clearing the de-link alert
     // latch here, BEFORE the empty-candidates early return, re-arms it on
@@ -310,7 +317,7 @@ export class MessageScheduler {
       .all(...ids) as unknown as ScheduledRow[];
 
     for (const row of rows) {
-      const sendStartedAt = nowUnixSec();
+      const sendStartedAt = this.clock.nowUnixSec();
       const marked = this.db.raw
         .prepare(
           `UPDATE scheduled_messages
@@ -327,7 +334,7 @@ export class MessageScheduler {
         continue;
       }
 
-      const sentAt = nowUnixSec();
+      const sentAt = this.clock.nowUnixSec();
       try {
         this.persistConfirmedSend(row, sentAt, sendStartedAt);
       } catch (err) {
@@ -602,7 +609,7 @@ export class MessageScheduler {
         let skippedOccurrences = 0;
         let skippedOccurrencesCapped = false;
         try {
-          const now = nowUnixSec();
+          const now = this.clock.nowUnixSec();
           const advanced = advanceRecurringRun(
             row.recurrence,
             row.next_run_at ?? now,

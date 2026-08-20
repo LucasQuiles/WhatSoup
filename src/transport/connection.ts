@@ -41,7 +41,7 @@ import {
 } from '../lib/recovery-authority-store.ts';
 import type { BotErrorsCriticalAssetDiagnostic } from '../lib/bot-errors-outbox.ts';
 import { WhatSoupError } from '../errors.ts';
-import { normalizeUnixTimestampSeconds, nowUnixSec } from '../core/substrate/time.ts';
+import { normalizeUnixTimestampSeconds } from '../core/substrate/time.ts';
 import type { Messenger, IncomingMessage, OutboundMedia, SendOptions, SubmissionReceipt, TypingState } from '../core/types.ts';
 import { toConversationKey } from '../core/conversation-key.ts';
 import { bareNumber, isLidJid } from '../core/jid-constants.ts';

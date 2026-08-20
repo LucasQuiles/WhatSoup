@@ -20,6 +20,7 @@ import { createTrigger } from '../../../src/core/substrate/triggers.ts';
 import { TriggerPoller } from '../../../src/core/substrate/poller.ts';
 import { TriggerLivenessObserver } from '../../../src/core/substrate/trigger-liveness-observer.ts';
 import { emitAlertChecked, clearAlertSourceChecked } from '../../../src/lib/emit-alert.ts';
+import { fakeClock } from '../../../src/lib/clock.ts';
 import type { Messenger, SubmissionReceipt } from '../../../src/core/types.ts';
 
 function tmpFile() { return join(tmpdir(), `observer-${randomBytes(8).toString('hex')}.db`); }
@@ -130,5 +131,24 @@ describe('TriggerLivenessObserver (#2566 slice 2)', () => {
     const clears = vi.mocked(clearAlertSourceChecked).mock.calls;
     expect(clears).toHaveLength(1);
     expect(clears[0][1]).toBe('trigger_recurring_overdue');
+  });
+
+  it('falsifier: injected fakeClock drives runOnce() default now (fails if nowFn falls back to systemClock)', () => {
+    const t0ms = 4_100_000_000_000; // distinctive future epoch (~2099)
+    const clock = fakeClock(t0ms);
+    const pastDueCheck = vi.fn<(now: number) => void>();
+    const observer = new TriggerLivenessObserver(db.raw, {
+      now: () => clock.nowUnixSec(),
+      pastDueCheck,
+    });
+
+    // No argument -> runOnce() must take its `now` from this.nowFn(), which
+    // must be the injected clock. The observable `now` handed to the past-due
+    // hook must equal floor(t0ms/1000); a revert to systemClock.nowUnixSec
+    // would hand the hook ~1.7e9 (2026 wall clock) instead.
+    observer.runOnce();
+
+    expect(pastDueCheck).toHaveBeenCalledTimes(1);
+    expect(pastDueCheck).toHaveBeenCalledWith(clock.nowUnixSec());
   });
 });

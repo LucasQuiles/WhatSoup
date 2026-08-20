@@ -1,6 +1,6 @@
 // src/core/substrate/entities.ts
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
-import { nowUnixSec } from './time.ts';
+import { type Clock, systemClock } from '../../lib/clock.ts';
 import type {
   EntityKind, AliasKind, EntityRef, EntityRow, ObservationRow, ObservationSourceKind,
 } from './types.ts';
@@ -11,7 +11,14 @@ export interface UpsertEntityArgs {
   metadata?: Record<string, unknown>;
 }
 
-export function upsertEntity(db: DatabaseSync, args: UpsertEntityArgs): EntityRow {
+export function upsertEntity(
+  db: DatabaseSync,
+  args: UpsertEntityArgs,
+  // Injectable so a persisted entity's created_at/updated_at can be driven to
+  // a known instant (#2200). Optional and defaulted, so this slice changes no
+  // existing call site.
+  clock: Clock = systemClock,
+): EntityRow {
   // Atomicity: the check-then-insert runs inside BEGIN IMMEDIATE so concurrent
   // writers (same process under future async refactor, or cross-process via
   // fleet orchestration) cannot interleave between the SELECT and INSERT. Node
@@ -19,7 +26,7 @@ export function upsertEntity(db: DatabaseSync, args: UpsertEntityArgs): EntityRo
   // serializes cross-process writes, but the explicit transaction makes the
   // invariant load-bearing — surviving any future `await` insertion into this
   // path.
-  const now = nowUnixSec();
+  const now = clock.nowUnixSec();
   db.exec('BEGIN IMMEDIATE');
   try {
     if (args.contactJid) {
@@ -53,8 +60,8 @@ export interface AddAliasArgs {
   entityId: number; alias: string; aliasKind: AliasKind; source?: string;
 }
 
-export function addAlias(db: DatabaseSync, args: AddAliasArgs): void {
-  const now = nowUnixSec();
+export function addAlias(db: DatabaseSync, args: AddAliasArgs, clock: Clock = systemClock): void {
+  const now = clock.nowUnixSec();
   try {
     db.prepare(
       `INSERT INTO entity_aliases (entity_id, alias, alias_kind, source, created_at)
@@ -101,7 +108,11 @@ export interface CaptureObservationArgs {
   metadata?: Record<string, unknown>;
 }
 
-export function captureObservation(db: DatabaseSync, args: CaptureObservationArgs): ObservationRow {
+export function captureObservation(
+  db: DatabaseSync,
+  args: CaptureObservationArgs,
+  clock: Clock = systemClock,
+): ObservationRow {
   let entity = resolveEntityRef(db, args.entityRef);
   if (!entity) {
     if (!args.entityRef.canonicalName || !args.entityRef.kind) {
@@ -112,7 +123,7 @@ export function captureObservation(db: DatabaseSync, args: CaptureObservationArg
       canonicalName: args.entityRef.canonicalName,
       contactJid: args.entityRef.contactJid ?? null,
       groupJid: args.entityRef.groupJid ?? null,
-    });
+    }, clock);
   }
   // QR-040 (defense in depth, write side): a caller-supplied
   // supersedesObservationId may only target an observation belonging to the
@@ -134,7 +145,7 @@ export function captureObservation(db: DatabaseSync, args: CaptureObservationArg
       );
     }
   }
-  const now = nowUnixSec();
+  const now = clock.nowUnixSec();
   const info = db.prepare(
     `INSERT INTO entity_observations (
        entity_id, kind, text, confidence, source_message_pk, source_kind,
@@ -153,7 +164,7 @@ export function forgetObservation(db: DatabaseSync, id: number, reason: string):
   db.prepare(`UPDATE entity_observations SET forgotten = 1, forgotten_reason = ? WHERE id = ?`).run(reason, id);
 }
 
-export function mergeEntities(db: DatabaseSync, args: { fromId: number; intoId: number }): void {
+export function mergeEntities(db: DatabaseSync, args: { fromId: number; intoId: number }, clock: Clock = systemClock): void {
   if (args.fromId === args.intoId) throw new Error('mergeEntities: cannot merge into self');
   const into = db
     .prepare(`SELECT id, merged_into_id FROM entities WHERE id = ?`)
@@ -171,7 +182,7 @@ export function mergeEntities(db: DatabaseSync, args: { fromId: number; intoId: 
     .prepare(`SELECT id FROM entities WHERE id = ?`)
     .get(args.fromId) as { id: number } | undefined;
   if (!from) throw new Error(`mergeEntities: fromId ${args.fromId} not found`);
-  const now = nowUnixSec();
+  const now = clock.nowUnixSec();
   db.prepare(`UPDATE entities SET merged_into_id = ?, updated_at = ? WHERE id = ?`).run(args.intoId, now, args.fromId);
 }
 

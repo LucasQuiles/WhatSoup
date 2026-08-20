@@ -9,6 +9,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { singletonLoggerMock } from '../helpers/logger-mock.ts';
 import { Database } from '../../src/core/database.ts';
 import { MessageScheduler } from '../../src/core/scheduler.ts';
+import { fakeClock } from '../../src/lib/clock.ts';
 import type { ConnectionManager } from '../../src/transport/connection.ts';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -156,6 +157,32 @@ describe('MessageScheduler — tick()', () => {
       .prepare('SELECT status FROM scheduled_messages WHERE id = ?')
       .get(id) as { status: string };
     expect(row.status).toBe('sent');
+  });
+
+  it('persists sent_at from the injected clock, not the wall clock (fails if reverted to free nowUnixSec)', async () => {
+    const t0ms = 2_000_000_000_000; // distinctive future epoch (2033-05-18)
+    const fakeNowSec = Math.floor(t0ms / 1000);
+    const id = insertScheduledMessage(db.raw, {
+      scheduledAt: fakeNowSec - 60, // due under fakeClock, future under the real wall clock
+      status: 'pending',
+    });
+
+    const scheduler = new MessageScheduler(
+      db,
+      conn as ConnectionManager,
+      { intervalMs: 60_000, maxRetries: 3 },
+      fakeClock(t0ms),
+    );
+    await scheduler.tick();
+
+    const row = db.raw
+      .prepare('SELECT status, sent_at FROM scheduled_messages WHERE id = ?')
+      .get(id) as { status: string; sent_at: number };
+    expect(row.status).toBe('sent');
+    // Persisted sent_at must derive from fakeClock's epoch. Reverted code reads
+    // the real 2026 wall clock, treats the future scheduled_at as not-yet-due
+    // (row stays pending, sent_at NULL) and never reaches the ~2e9 value.
+    expect(row.sent_at).toBe(fakeNowSec);
   });
 
   it('does not resend a one-shot when the first post-send settlement attempt fails', async () => {

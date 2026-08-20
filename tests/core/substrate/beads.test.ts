@@ -10,6 +10,7 @@ import {
   activityFeed, countOverdueProposals,
 } from '../../../src/core/substrate/beads.ts';
 import { upsertEntity, captureObservation, forgetObservation } from '../../../src/core/substrate/entities.ts';
+import { fakeClock } from '../../../src/lib/clock.ts';
 
 function tmpFile() { return join(tmpdir(), `sub-${randomBytes(8).toString('hex')}.db`); }
 
@@ -28,6 +29,17 @@ describe('beads core', () => {
     const events = db.raw.prepare(`SELECT event_type, actor FROM bead_events WHERE bead_id = ?`).all(bead.id) as Array<{ event_type: string; actor: string }>;
     expect(events[0].event_type).toBe('status_change');
     expect(events[0].actor).toBe('inline');
+  });
+
+  it('createBead persists created_at from the injected clock, not the wall clock (fails if reverted to free nowUnixSec)', () => {
+    const t0ms = 2_000_000_000_000; // distinctive future epoch (2033-05-18)
+    const bead = createBead(db.raw, {
+      kind: 'task', title: 'clocked', ownerJid: 'mw', actor: 'user',
+    }, fakeClock(t0ms));
+    const row = db.raw.prepare('SELECT created_at FROM beads WHERE id = ?').get(bead.id) as { created_at: number };
+    // Persisted created_at must derive from fakeClock's epoch. Reverted code
+    // reads the real 2026 wall clock and stores ~1.7e9, not floor(t0ms/1000).
+    expect(row.created_at).toBe(Math.floor(t0ms / 1000));
   });
 
   it('CHECK rejects unknown kind', () => {
@@ -251,6 +263,20 @@ describe('beads core', () => {
     expect(JSON.parse(sc.payload_json)).toMatchObject({ from: 'active', to: 'cancelled', note: 'dropped' });
   });
 
+  it('coalesces an explicit null transition `at` to the injected clock (matches main)', () => {
+    const bead = createBead(db.raw, { kind: 'task', title: 't', ownerJid: 'mw', actor: 'user' });
+    const t0ms = 2_000_000_000_000; // distinctive future epoch (2033-05-18)
+    completeBead(db.raw, bead.id, {
+      actor: 'user',
+      at: null as unknown as number,
+    }, fakeClock(t0ms));
+    const r = getBead(db.raw, bead.id)!;
+    // main's `const at = args.at ?? nowUnixSec()` coalesces an explicit null to
+    // the clock time, so completed_at equals the fake clock seconds rather than
+    // a preserved NULL (which the NOT NULL column would reject).
+    expect(r.bead.completed_at).toBe(Math.floor(t0ms / 1000));
+  });
+
   it('cancelBead on an already-terminal bead throws terminal', () => {
     const bead = createBead(db.raw, { kind: 'task', title: 't', ownerJid: 'mw', actor: 'user' });
     cancelBead(db.raw, bead.id, { actor: 'user' });
@@ -331,6 +357,22 @@ describe('beads core', () => {
 
     expect(countOverdueProposals(db.raw, now)).toBe(1);
     expect(countOverdueProposals(db.raw, now - 2000)).toBe(0);
+  });
+
+  it('countOverdueProposals preserves an explicit null `now` (default-parameter, not coalesce)', () => {
+    // A past-due proposal that WOULD match if null were coalesced to the clock.
+    createBead(db.raw, {
+      kind: 'task', title: 'overdue-null-now', ownerJid: 'mw', actor: 'user',
+      status: 'proposed', reviewByAt: 1_000_000_000, confidence: 0.6, proposalReason: 'inline',
+    });
+    const t0ms = 2_000_000_000_000; // distinctive future epoch (2033-05-18)
+    // main's `now: number = nowUnixSec()` preserves an explicit null: the query
+    // binds NULL, and `review_by_at < NULL` matches no rows (count 0). A `??`
+    // coalesce would substitute the clock and return 1.
+    expect(countOverdueProposals(db.raw, null as unknown as number, fakeClock(t0ms))).toBe(0);
+    // Sanity: the same proposal IS overdue against a real cutoff, so the 0 above
+    // is specifically null-preservation, not an empty table.
+    expect(countOverdueProposals(db.raw, Math.floor(t0ms / 1000))).toBe(1);
   });
 
   it('activityFeed with no owner filter returns bead events across owners', () => {
