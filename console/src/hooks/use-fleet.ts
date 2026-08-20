@@ -146,12 +146,28 @@ export function useAccess(name: string) {
 /** Structured logs for a line. */
 export function useLogs(name: string) {
   const { connected } = useRealtime();
-  return useQuery({
+  const poll = connected ? false : POLL_LOGS;
+  const query = useQuery({
     queryKey: ['logs', name],
     queryFn: () => api.getLogs(name),
-    refetchInterval: connected ? false : POLL_LOGS,
+    refetchInterval: poll,
     enabled: !!name,
   });
+  // #2519: promoted onto the #1925 freshness contract (useLines idiom).
+  // ⚠ Unlike ['feed']/['typing'], the WS layer never invalidates ['logs']:
+  // a connected tab fetches once on mount and then ages. That aged data is
+  // exactly what the contract exists to label — stale surfaces the gap
+  // instead of hiding it (stale only labels, never hides). Poll-aware
+  // threshold while polling; METRICS default (120s) when connected, where
+  // hitting it is a true "not a current observation" signal.
+  return {
+    ...query,
+    freshness: queryFreshness({
+      dataUpdatedAt: query.dataUpdatedAt,
+      refetchFailed: query.isRefetchError,
+      ...(poll ? { staleAfterMs: 2 * poll } : {}),
+    }),
+  };
 }
 
 /** Typing indicators from all instances. */

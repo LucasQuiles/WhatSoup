@@ -67,7 +67,7 @@ describe('PDR-3 fail-closed read pairing — every dbReader call has an error ch
  *  new hooks must carry queryFreshness. */
 const LEGACY_NO_FRESHNESS = new Set([
   'useLines', // pre-#1925 (the D-3 PR promotes it onto the contract)
-  'useLine', 'useChats', 'useMessages', 'useLogs', 'useAccess',
+  'useLine', 'useChats', 'useMessages', 'useAccess',
   'useTyping', 'useProviders', 'useProviderStatus', 'useKpis',
 ])
 
