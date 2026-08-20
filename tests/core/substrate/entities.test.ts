@@ -8,6 +8,7 @@ import {
   upsertEntity, addAlias, captureObservation, forgetObservation,
   mergeEntities, getProfile, listEntities, resolveEntityRef,
 } from '../../../src/core/substrate/entities.ts';
+import { fakeClock } from '../../../src/lib/clock.ts';
 
 function tmpFile() { return join(tmpdir(), `sub-${randomBytes(8).toString('hex')}.db`); }
 
@@ -20,6 +21,15 @@ describe('entities core', () => {
     const a = upsertEntity(db.raw, { kind: 'person', canonicalName: 'Alex' });
     const b = upsertEntity(db.raw, { kind: 'person', canonicalName: 'Alex' });
     expect(a.id).toBe(b.id);
+  });
+
+  it('upsertEntity persists created_at from the injected clock, not the wall clock (fails if reverted to free nowUnixSec)', () => {
+    const t0ms = 2_000_000_000_000; // distinctive future epoch (2033-05-18)
+    const e = upsertEntity(db.raw, { kind: 'person', canonicalName: 'Clocked' }, fakeClock(t0ms));
+    const row = db.raw.prepare('SELECT created_at FROM entities WHERE id = ?').get(e.id) as { created_at: number };
+    // Persisted created_at must derive from fakeClock's epoch. Reverted code
+    // reads the real 2026 wall clock and stores ~1.7e9, not floor(t0ms/1000).
+    expect(row.created_at).toBe(Math.floor(t0ms / 1000));
   });
 
   it('upsertEntity with contact_jid collapses duplicates to same row', () => {

@@ -18,6 +18,7 @@ import { Database } from '../../../src/core/database.ts';
 import { createBead } from '../../../src/core/substrate/beads.ts';
 import { createTrigger } from '../../../src/core/substrate/triggers.ts';
 import { TriggerPoller, toBindArgs } from '../../../src/core/substrate/poller.ts';
+import { fakeClock } from '../../../src/lib/clock.ts';
 import type { Messenger, SubmissionReceipt } from '../../../src/core/types.ts';
 
 function tmpFile() { return join(tmpdir(), `poller-${randomBytes(8).toString('hex')}.db`); }
@@ -84,6 +85,33 @@ describe('TriggerPoller — poll.sqlite', () => {
     const refreshed = db.raw.prepare(`SELECT next_fire_at, last_fire_at FROM bead_triggers WHERE id = ?`).get(t.id) as { next_fire_at: number; last_fire_at: number };
     expect(refreshed.next_fire_at).toBe(1_000_000_001 + 60);
     expect(refreshed.last_fire_at).toBe(1_000_000_001);
+  });
+
+  it('falsifier: injected fakeClock drives the persisted fire timestamps (fails if systemClock leaks in)', async () => {
+    const t0ms = 4_100_000_000_000; // distinctive future epoch (~2099)
+    const clock = fakeClock(t0ms);
+    const { messenger } = makeMessenger();
+    const bead = createBead(db.raw, { kind: 'watch', title: 'w', ownerJid: 'mw', actor: 'u' }, clock);
+    db.raw.exec(`CREATE TABLE probes (id INTEGER PRIMARY KEY, label TEXT)`);
+    db.raw.prepare(`INSERT INTO probes (label) VALUES ('hit')`).run();
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'poll.sqlite',
+      spec: { sql: `SELECT id, label FROM probes`, fire_when: 'rows_returned' },
+      reportChatJid: 'admin@s.whatsapp.net',
+      intervalSeconds: 60, nextFireAt: clock.nowUnixSec() - 1,
+      actor: 'u',
+    }, clock);
+
+    const poller = new TriggerPoller(db.raw, messenger, { now: () => clock.nowUnixSec() });
+    const processed = await poller.tickOnce();
+
+    expect(processed).toBe(1);
+    const refreshed = db.raw.prepare(`SELECT next_fire_at, last_fire_at FROM bead_triggers WHERE id = ?`).get(t.id) as { next_fire_at: number; last_fire_at: number };
+    // Persisted fire timestamps must derive from the injected fakeClock epoch.
+    // If the poller ignored opts.now and used systemClock.nowUnixSec, it would
+    // store the real 2026 wall clock (~1.7e9), not floor(t0ms/1000) = 4.1e9.
+    expect(refreshed.last_fire_at).toBe(clock.nowUnixSec());
+    expect(refreshed.next_fire_at).toBe(clock.nowUnixSec() + 60);
   });
 
   it('continues when recording a post-dispatch receipt fails', async () => {

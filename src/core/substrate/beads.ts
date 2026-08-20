@@ -1,6 +1,6 @@
 // src/core/substrate/beads.ts
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
-import { nowUnixSec } from './time.ts';
+import { type Clock, systemClock } from '../../lib/clock.ts';
 import { writeBeadEvent } from './events.ts';
 import type { BeadKind, BeadStatus, BeadRow, BeadEventRow, ActivityFeedRow } from './types.ts';
 import { createChildLogger } from '../../logger.ts';
@@ -84,8 +84,8 @@ function clampBody(body: string | null | undefined): string | null {
   return slice + TRUNCATE_MARKER;
 }
 
-export function createBead(db: DatabaseSync, args: CreateBeadArgs): BeadRow {
-  const now = nowUnixSec();
+export function createBead(db: DatabaseSync, args: CreateBeadArgs, clock: Clock = systemClock): BeadRow {
+  const now = clock.nowUnixSec();
   const status: BeadStatus = args.status ?? 'active';
   db.exec('BEGIN');
   try {
@@ -154,13 +154,13 @@ export interface ListBeadsFilter {
  */
 const OVERDUE_PROPOSAL_WHERE = `status = 'proposed' AND review_by_at IS NOT NULL AND review_by_at < ?`;
 
-export function listBeads(db: DatabaseSync, f: ListBeadsFilter = {}): BeadRow[] {
+export function listBeads(db: DatabaseSync, f: ListBeadsFilter = {}, clock: Clock = systemClock): BeadRow[] {
   const w: string[] = [];
   const b: SQLInputValue[] = [];
   if (f.ownerJid) { w.push('owner_jid = ?'); b.push(f.ownerJid); }
   if (f.kind)     { w.push('kind = ?');      b.push(f.kind); }
   if (f.reviewOverdue) {
-    w.push(OVERDUE_PROPOSAL_WHERE); b.push(nowUnixSec());
+    w.push(OVERDUE_PROPOSAL_WHERE); b.push(clock.nowUnixSec());
   } else if (f.status) {
     w.push('status = ?'); b.push(f.status);
   }
@@ -180,10 +180,11 @@ export function listBeads(db: DatabaseSync, f: ListBeadsFilter = {}): BeadRow[] 
  * backlog exceeds listBeads' page size (683 proposals were observed on one
  * live instance — well past the 200-row default limit).
  */
-export function countOverdueProposals(db: DatabaseSync, now: number = nowUnixSec()): number {
+export function countOverdueProposals(db: DatabaseSync, now?: number, clock: Clock = systemClock): number {
+  const cutoff = now === undefined ? clock.nowUnixSec() : now;
   const row = db.prepare(
     `SELECT COUNT(*) AS c FROM beads WHERE ${OVERDUE_PROPOSAL_WHERE}`,
-  ).get(now) as { c: number };
+  ).get(cutoff) as { c: number };
   return row.c;
 }
 
@@ -195,11 +196,11 @@ export interface UpdateBeadArgs {
   actor: string;
 }
 
-export function updateBead(db: DatabaseSync, id: number, args: UpdateBeadArgs): void {
+export function updateBead(db: DatabaseSync, id: number, args: UpdateBeadArgs, clock: Clock = systemClock): void {
   const current = db.prepare(`SELECT * FROM beads WHERE id = ?`).get(id) as unknown as BeadRow | undefined;
   if (!current) throw new Error(`bead ${id} not found`);
   assertMutableBeadFields(args.fields as Record<string, unknown>);
-  const now = nowUnixSec();
+  const now = clock.nowUnixSec();
   const sets: string[] = ['updated_at = ?'];
   const binds: SQLInputValue[] = [now];
   const changed: Record<string, { from: unknown; to: unknown }> = {};
@@ -250,6 +251,7 @@ function transition(
   db: DatabaseSync, id: number, toStatus: BeadStatus,
   args: TransitionArgs, extra: Record<string, unknown> = {},
   allowedFrom?: BeadStatus[],
+  clock: Clock = systemClock,
 ): void {
   const current = db.prepare(`SELECT * FROM beads WHERE id = ?`).get(id) as unknown as BeadRow | undefined;
   if (!current) throw new Error(`bead ${id} not found`);
@@ -259,7 +261,7 @@ function transition(
   if (allowedFrom && !allowedFrom.includes(current.status)) {
     throw new Error(`cannot transition from ${current.status} to ${toStatus}`);
   }
-  const at = args.at ?? nowUnixSec();
+  const at = args.at ?? clock.nowUnixSec();
   const sets: string[] = ['status = ?', 'updated_at = ?'];
   const binds: SQLInputValue[] = [toStatus, at];
   if (toStatus === 'completed') { sets.push('completed_at = ?'); binds.push(at); }
@@ -281,23 +283,23 @@ function transition(
   } catch (err) { try { db.exec('ROLLBACK'); } catch { /* best effort */ } throw err; }
 }
 
-export function completeBead(db: DatabaseSync, id: number, args: TransitionArgs): void {
-  transition(db, id, 'completed', args);
+export function completeBead(db: DatabaseSync, id: number, args: TransitionArgs, clock: Clock = systemClock): void {
+  transition(db, id, 'completed', args, {}, undefined, clock);
 }
-export function cancelBead(db: DatabaseSync, id: number, args: TransitionArgs): void {
-  transition(db, id, 'cancelled', args);
+export function cancelBead(db: DatabaseSync, id: number, args: TransitionArgs, clock: Clock = systemClock): void {
+  transition(db, id, 'cancelled', args, {}, undefined, clock);
 }
-export function approveProposal(db: DatabaseSync, id: number, args: TransitionArgs): void {
+export function approveProposal(db: DatabaseSync, id: number, args: TransitionArgs, clock: Clock = systemClock): void {
   const s = db.prepare(`SELECT status FROM beads WHERE id = ?`).get(id) as { status: BeadStatus } | undefined;
   if (!s) throw new Error(`bead ${id} not found`);
   if (s.status !== 'proposed') throw new Error(`bead ${id} is not proposed (status=${s.status})`);
-  transition(db, id, 'active', args, {}, ['proposed']);
+  transition(db, id, 'active', args, {}, ['proposed'], clock);
 }
-export function rejectProposal(db: DatabaseSync, id: number, args: TransitionArgs): void {
+export function rejectProposal(db: DatabaseSync, id: number, args: TransitionArgs, clock: Clock = systemClock): void {
   const s = db.prepare(`SELECT status FROM beads WHERE id = ?`).get(id) as { status: BeadStatus } | undefined;
   if (!s) throw new Error(`bead ${id} not found`);
   if (s.status !== 'proposed') throw new Error(`bead ${id} is not proposed (status=${s.status})`);
-  transition(db, id, 'cancelled', args, args.reason ? { rejection_reason: args.reason } : {}, ['proposed']);
+  transition(db, id, 'cancelled', args, args.reason ? { rejection_reason: args.reason } : {}, ['proposed'], clock);
 }
 
 /**
@@ -345,7 +347,7 @@ export interface ExpireOverdueResult {
  * the bead_events payload — only the bounded reason code and from/to status.
  *
  * @param db        open database handle
- * @param now       unix-seconds cutoff (typically nowUnixSec())
+ * @param now       unix-seconds cutoff (typically systemClock.nowUnixSec())
  * @param graceSeconds  additional grace past review_by_at before expiry (default 86400 = 24h)
  * @param limit     max rows to expire per call (default 100 — bounded, batched)
  * @returns         { expired, skipped } counts for observability

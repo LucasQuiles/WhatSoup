@@ -3,6 +3,8 @@
 // stranded in src/fleet/time-utils.ts, forcing core/transport/mcp callers to
 // import upward across the fleet ring boundary).
 
+import { type Clock, systemClock } from '../../lib/clock.ts';
+
 const UNIX_MILLISECONDS_THRESHOLD = 100_000_000_000;
 
 /** Current time as Unix seconds. */
@@ -11,10 +13,17 @@ export function nowUnixSec(): number {
 }
 
 /** Normalize a Unix timestamp-like value to epoch seconds. */
-export function normalizeUnixTimestampSeconds(value: unknown, fallback = nowUnixSec()): number {
-  if (value == null || value === '') return fallback;
+export function normalizeUnixTimestampSeconds(
+  value: unknown,
+  fallback?: number,
+  // Injectable so the absent-value fallback can be driven to a known instant
+  // (#2200). Optional and defaulted, so no existing call site changes behavior.
+  clock: Clock = systemClock,
+): number {
+  const resolvedFallback = fallback === undefined ? clock.nowUnixSec() : fallback;
+  if (value == null || value === '') return resolvedFallback;
   const numeric = typeof value === 'bigint' ? Number(value) : Number(value);
-  if (!Number.isFinite(numeric)) return fallback;
+  if (!Number.isFinite(numeric)) return resolvedFallback;
   const whole = Math.floor(numeric);
   return whole >= UNIX_MILLISECONDS_THRESHOLD ? Math.floor(whole / 1000) : whole;
 }
