@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# The observer runs from an immutable release tree; Python writing
+# __pycache__/.pyc there pollutes the release and later trips the
+# release-drift check. Never emit bytecode from any python lane here.
+export PYTHONDONTWRITEBYTECODE=1
+
 resolve_symlinks() {
   local path="$1"
   while [ -L "$path" ]; do
@@ -40,16 +45,49 @@ fi
 
 OBSERVER_READY=1
 OBSERVER_STATUS=0
+
+# Resolve the observer's Python interpreter through the repository's canonical
+# capability contract (deploy/lib/host-capabilities.sh) rather than an implicit
+# `command -v python3`, which under a minimal launchd PATH can select Apple's
+# Python 3.9 — below the declared >= 3.12 baseline. The resolver prefers the
+# managed quality-venv, then python3.12/3.13/3.14/python3, and whatsoup_probe_python
+# gates the version. An absent or below-baseline interpreter is an execution-context
+# problem, not a reply-drain workload breach, so classify it as inconclusive
+# (status 2) and skip the observer instead of letting it crash and be reported as a
+# bot failure (status 1). The observer itself uses the 3.9-safe timezone.utc idiom,
+# so this gate enforces the declared support-job policy, not an accidental import.
+WHATSOUP_CAPABILITY_ROOT="$REPO_ROOT"
+export WHATSOUP_CAPABILITY_ROOT
+# shellcheck source=deploy/lib/host-capabilities.sh
+. "$REPO_ROOT/deploy/lib/host-capabilities.sh"
+
+CAP_STATUS=available
+CAP_VERSION=""
+CAP_PATH=""
+CAP_DETAIL=""
+CAP_VISIBILITY=""
 if [ -n "${WHATSOUP_PYTHON:-}" ]; then
-  PYTHON="$WHATSOUP_PYTHON"
-elif ! PYTHON="$(command -v python3)"; then
-  echo "FATAL: python3 not found. Set WHATSOUP_PYTHON to an executable Python path." >&2
-  PYTHON=""
-  OBSERVER_READY=0
-  OBSERVER_STATUS=2
+  # Explicit pin is still gated against the declared >= 3.12 contract.
+  CAP_PATH="$WHATSOUP_PYTHON"
+  CAP_VISIBILITY=pinned
+  if [ -x "$CAP_PATH" ]; then
+    whatsoup_probe_python
+  else
+    CAP_STATUS=missing
+    CAP_DETAIL=executable-not-found
+  fi
+elif whatsoup_resolve_python312; then
+  whatsoup_probe_python
+else
+  CAP_STATUS=missing
+  CAP_DETAIL=executable-not-found
 fi
-if [ ! -x "$PYTHON" ]; then
-  echo "FATAL: Python executable not found at $PYTHON. Set WHATSOUP_PYTHON." >&2
+
+PYTHON=""
+if [ "$CAP_STATUS" = "available" ]; then
+  PYTHON="$CAP_PATH"
+else
+  echo "INCONCLUSIVE: reply-guarantee observer interpreter does not satisfy the declared Python >= 3.12 capability contract (status=${CAP_STATUS} detail=${CAP_DETAIL:-none} version=${CAP_VERSION:-unknown} visibility=${CAP_VISIBILITY:-none} path=${CAP_PATH:-none}). Classifying as inconclusive rather than a reply-drain failure; provide a managed quality-venv or python3.12+ interpreter, or set WHATSOUP_PYTHON. See deploy/lib/host-capabilities.sh." >&2
   OBSERVER_READY=0
   OBSERVER_STATUS=2
 fi

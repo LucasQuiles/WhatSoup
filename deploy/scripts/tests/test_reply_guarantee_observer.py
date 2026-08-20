@@ -454,10 +454,79 @@ def test_any_inconclusive_instance_makes_fleet_result_inconclusive(tmp_path: Pat
     assert {item["state"] for item in result["instances"]} == {"active-breach", "inconclusive"}
 
 
+def _find_python39() -> str | None:
+    candidates = ["/usr/bin/python3", "python3.9"]
+    for cand in candidates:
+        path = cand if cand.startswith("/") else shutil.which(cand)
+        if not path or not os.path.exists(path):
+            continue
+        out = subprocess.run([path, "--version"], capture_output=True, text=True, check=False)
+        if (out.stdout + out.stderr).strip().startswith("Python 3.9"):
+            return path
+    return None
+
+
+def test_observer_avoids_python_311_only_utc_symbol() -> None:
+    # The observer runs under whatever interpreter a host provides. It must use the
+    # 3.9-compatible `timezone.utc` idiom, not the 3.11+ `datetime.UTC` symbol, so an
+    # older-but-present interpreter does not crash it on import.
+    src = _SCRIPT.read_text(encoding="utf-8")
+    assert "import UTC" not in src, "observer must not use the 3.11+ datetime.UTC symbol"
+
+
+@pytest.mark.skipif(_find_python39() is None, reason="no Python 3.9 interpreter available")
+def test_observer_imports_under_python39() -> None:
+    py39 = _find_python39()
+    assert py39 is not None
+    completed = subprocess.run(
+        [py39, str(_SCRIPT), "--help"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
 def _fake_executable(path: Path, status_env: str) -> Path:
     path.write_text(f"#!/bin/bash\nexit \"${{{status_env}:-0}}\"\n", encoding="utf-8")
     path.chmod(0o700)
     return path
+
+
+def _fake_python(path: Path, version: str, *, body: str = "exit 0") -> Path:
+    # Fake interpreter for the capability contract: `--version` prints the given
+    # version string (consumed by whatsoup_probe_python); any other invocation
+    # (the observer run) executes `body`. Mirrors how the wrapper gates via the
+    # canonical host-capabilities resolver rather than a bespoke probe.
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "#!/bin/bash\n"
+        f'if [ "$1" = "--version" ]; then echo "Python {version}"; exit 0; fi\n'
+        f"{body}\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o700)
+    return path
+
+
+def _fake_capable_python(path: Path, status_env: str) -> Path:
+    # A capability-satisfying interpreter (>= 3.12); the observer invocation
+    # carries the injected status so the exit-code-composition tests stay honest
+    # under a capable interpreter, independent of the capability gate.
+    return _fake_python(path, "3.12.9", body=f'exit "${{{status_env}:-0}}"')
+
+
+def _fake_incapable_python(path: Path) -> Path:
+    # Emulates Apple Python 3.9: below the declared >= 3.12 baseline. The observer
+    # must never be run against it.
+    return _fake_python(
+        path,
+        "3.9.6",
+        body='echo "OBSERVER_SHOULD_NOT_RUN" >&2\nexit 1',
+    )
 
 
 def _wrapper_status(
@@ -466,7 +535,7 @@ def _wrapper_status(
     observer_status: int,
 ) -> int:
     fake_node = _fake_executable(tmp_path / "node", "FAKE_DRAIN_STATUS")
-    fake_python = _fake_executable(tmp_path / "python3", "FAKE_OBSERVER_STATUS")
+    fake_python = _fake_capable_python(tmp_path / "python3", "FAKE_OBSERVER_STATUS")
     env = {
         **os.environ,
         "WHATSOUP_NODE": str(fake_node),
@@ -487,6 +556,106 @@ def _wrapper_status(
     )
 
     return completed.returncode
+
+
+def test_wrapper_classifies_incapable_pinned_interpreter_as_inconclusive(tmp_path: Path) -> None:
+    # A pinned interpreter below the declared >= 3.12 baseline (e.g. Apple Python
+    # 3.9) is an execution-context capability problem, not a reply-drain workload
+    # breach. The wrapper must report inconclusive (exit 2), not workload failure
+    # (exit 1), must not run the observer against it, and must surface structured
+    # capability evidence (status/version) rather than a bare verdict.
+    fake_node = _fake_executable(tmp_path / "node", "FAKE_DRAIN_STATUS")
+    fake_python = _fake_incapable_python(tmp_path / "python3")
+    completed = subprocess.run(
+        ["bash", str(_WRAPPER)],
+        env={
+            **os.environ,
+            "WHATSOUP_NODE": str(fake_node),
+            "WHATSOUP_PYTHON": str(fake_python),
+            "FAKE_DRAIN_STATUS": "0",
+        },
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert completed.returncode == 2, completed.stderr
+    assert "OBSERVER_SHOULD_NOT_RUN" not in completed.stderr
+    assert "status=incompatible" in completed.stderr
+    assert "3.9.6" in completed.stderr
+
+
+def test_wrapper_discovers_capable_interpreter_via_managed_venv(tmp_path: Path) -> None:
+    # With no WHATSOUP_PYTHON pin, the wrapper must resolve through the canonical
+    # host-capabilities contract (managed quality-venv first), not trust whatever
+    # `python3` an ambient launchd PATH yields. A capable managed-venv interpreter
+    # must be selected and the observer run against it.
+    record = tmp_path / "which_ran_observer"
+    venv_python = _fake_python(
+        tmp_path / "venv" / "bin" / "python",
+        "3.12.9",
+        body=f'echo VENV_OBSERVER_RAN >> "{record}"\nexit 0',
+    )
+    assert venv_python.exists()
+    fake_node = _fake_executable(tmp_path / "node", "FAKE_DRAIN_STATUS")
+    env = {
+        **os.environ,
+        "WHATSOUP_NODE": str(fake_node),
+        "FAKE_DRAIN_STATUS": "0",
+        "WHATSOUP_QUALITY_VENV": str(tmp_path / "venv"),
+    }
+    env.pop("WHATSOUP_PYTHON", None)
+
+    completed = subprocess.run(
+        ["bash", str(_WRAPPER)],
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+    ran = record.read_text(encoding="utf-8") if record.exists() else ""
+    assert "VENV_OBSERVER_RAN" in ran, (completed.stderr, ran)
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_wrapper_disables_bytecode_writes_for_observer(tmp_path: Path) -> None:
+    # The observer runs from an immutable release tree. Python must not write
+    # __pycache__/.pyc files there (that pollution later trips the release-drift
+    # check), so the wrapper must run the observer with PYTHONDONTWRITEBYTECODE=1.
+    record = tmp_path / "observer_env"
+    fake_python = _fake_python(
+        tmp_path / "python3",
+        "3.12.9",
+        body=f'echo "PYTHONDONTWRITEBYTECODE=${{PYTHONDONTWRITEBYTECODE:-UNSET}}" > "{record}"\nexit 0',
+    )
+    fake_node = _fake_executable(tmp_path / "node", "FAKE_DRAIN_STATUS")
+    env = {
+        **os.environ,
+        "WHATSOUP_NODE": str(fake_node),
+        "WHATSOUP_PYTHON": str(fake_python),
+        "FAKE_DRAIN_STATUS": "0",
+    }
+    env.pop("PYTHONDONTWRITEBYTECODE", None)
+
+    subprocess.run(
+        ["bash", str(_WRAPPER)],
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert record.read_text(encoding="utf-8").strip() == "PYTHONDONTWRITEBYTECODE=1"
 
 
 def test_wrapper_succeeds_when_both_lanes_succeed(tmp_path: Path) -> None:
@@ -519,9 +688,7 @@ def test_wrapper_integrates_observer_without_masking_failures() -> None:
 
 
 def test_wrapper_runs_observer_when_node_lane_is_unavailable(tmp_path: Path) -> None:
-    fake_python = tmp_path / "python3"
-    fake_python.write_text("#!/bin/bash\necho OBSERVER_RAN\nexit 0\n", encoding="utf-8")
-    fake_python.chmod(0o700)
+    fake_python = _fake_python(tmp_path / "python3", "3.12.9", body="echo OBSERVER_RAN\nexit 0")
 
     completed = subprocess.run(
         ["bash", str(_WRAPPER)],

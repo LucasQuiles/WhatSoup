@@ -10,7 +10,7 @@ import re
 import sqlite3
 import subprocess
 import sys
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -78,7 +78,7 @@ SOURCE_SEVERITIES = {
 
 
 def _utc_sqlite(now: datetime) -> str:
-    normalized = now.astimezone(UTC)
+    normalized = now.astimezone(timezone.utc)
     return normalized.strftime("%Y-%m-%d %H:%M:%S")
 
 
@@ -631,7 +631,7 @@ def main(argv: list[str] | None = None) -> int:
     result = observe_instances(
         args.data_root,
         instance=args.instance,
-        now=datetime.now(UTC),
+        now=datetime.now(timezone.utc),
         stale_seconds=args.stale_seconds,
     )
     emitted = not args.emit or _emit(args.repo_root, result)

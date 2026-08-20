@@ -445,7 +445,7 @@
     },
     {
       "path": "deploy/scripts/reply-guarantee-observer.py",
-      "sha256": "b8ebd1ff2f06932495f192ef83dfb79a5a8a4d65dd8cba86ade108c7f1f939ca",
+      "sha256": "cd4d10c51bb85c0ccf083764cdd8f4a9a2c2cba1c413f5ca3fe77a065221cb09",
       "mustContain": [
         "sqlite-uri-mode-ro",
         "reply-guarantee-active-breach",
