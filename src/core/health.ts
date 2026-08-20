@@ -239,14 +239,31 @@ function noteProbeSuccess(warnMsg: string): void {
 }
 
 /** #2280: add degradation_silence_unproven when no active degradation reasons
- * exist but the instance was recently degraded. */
+ * exist but the instance was recently degraded. Returns true when the silence
+ * latch fired, so the caller can raise the matching degradation cause (the
+ * `status_reasons` <-> `degradation_causes` symmetry) instead of letting the
+ * catch-all 'unclassified' cause absorb it. */
 export function addDegradationSilenceProof(
   statusReasons: string[],
   recentlyDegraded: Set<string>,
   instanceName: string,
-): void {
+): boolean {
   if (statusReasons.length === 0 && recentlyDegraded.has(instanceName)) {
     statusReasons.push('degradation_silence_unproven');
+    return true;
+  }
+  return false;
+}
+
+/** Symmetric to the `degradation_causes` catch-all net (non-healthy status with
+ * no cause => 'unclassified'): a non-healthy status must always carry at least
+ * one `status_reason`. Defensive — every current status-mutation site already
+ * pushes a reason, so no live path reaches emit with a non-healthy status and
+ * an empty reason list, but this guarantees the invariant survives future
+ * refactors that add a status transition without a companion reason. */
+export function ensureStatusReasonFloor(status: string, statusReasons: string[]): void {
+  if (status !== 'healthy' && statusReasons.length === 0) {
+    statusReasons.push('unclassified');
   }
 }
 
@@ -347,6 +364,9 @@ export type HealthDegradationCause =
   | 'agent_runtime_unhealthy'
   | 'chat_runtime_degraded'
   | 'passive_runtime_degraded'
+  // #2280: the silence latch (degraded because recovery was never proven) is a
+  // distinct classification, not the catch-all below.
+  | 'degradation_silence_unproven'
   | 'unclassified';
 
 const HEALTH_DEGRADATION_CAUSE_PRESENCE: Readonly<Record<HealthDegradationCause, true>> = {
@@ -387,6 +407,7 @@ const HEALTH_DEGRADATION_CAUSE_PRESENCE: Readonly<Record<HealthDegradationCause,
   agent_runtime_unhealthy: true,
   chat_runtime_degraded: true,
   passive_runtime_degraded: true,
+  degradation_silence_unproven: true,
   unclassified: true,
 };
 
@@ -1791,6 +1812,9 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
 
       let status: 'healthy' | 'degraded' | 'unhealthy';
       let statusReasons: string[] = [];
+      // #2280: set when the silence latch keeps the instance degraded, so the
+      // degradation-cause assembly below can raise a matching typed cause.
+      let silenceUnprovenLatched = false;
       if (authFailureIsUnhealthy) {
         status = 'unhealthy';
         statusReasons = [`auth_failure.${authFailureClass}`];
@@ -1825,7 +1849,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         // #2280: silence from child processes is not proof of recovery.
         // If statusReasons is empty but the instance was recently degraded,
         // keep it degraded until explicit recovery evidence is observed.
-        addDegradationSilenceProof(statusReasons, recentlyDegraded, deps.instanceName);
+        silenceUnprovenLatched = addDegradationSilenceProof(statusReasons, recentlyDegraded, deps.instanceName);
         if (statusReasons.length > 0) recentlyDegraded.add(deps.instanceName);
         status = statusReasons.length > 0 ? 'degraded' : 'healthy';
       }
@@ -2213,9 +2237,16 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       if (deps.instanceType !== 'agent' && runtimeSnapshot?.status !== undefined && runtimeSnapshot.status !== 'healthy') {
         addDegradationCause(deps.instanceType === 'chat' ? 'chat_runtime_degraded' : 'passive_runtime_degraded');
       }
+      // #2280 symmetry: the silence latch is a status_reason; give it a matching
+      // degradation cause so it classifies distinctly instead of being absorbed
+      // by the catch-all 'unclassified' net below.
+      if (silenceUnprovenLatched) addDegradationCause('degradation_silence_unproven');
       if (status !== 'healthy' && degradationCauses.length === 0) {
         addDegradationCause('unclassified');
       }
+      // Symmetric floor for status_reasons (mirrors the degradation_causes net
+      // above): a non-healthy status must always carry at least one reason.
+      ensureStatusReasonFloor(status, statusReasons);
 
       const body = JSON.stringify({
         status,

@@ -6685,3 +6685,102 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Degradation-classification symmetry.
+//
+// The health body carries two parallel classifications: `degradation_causes`
+// (typed) and `status_reasons` (free-form). Two asymmetries between them:
+//
+//   1. `degradation_causes` has a catch-all safety net (non-healthy + no cause
+//      => 'unclassified'); `status_reasons` had none, so a non-healthy status
+//      could theoretically emit `status_reasons: []`. Closed by the exported
+//      `ensureStatusReasonFloor` helper (mirrors the causes net).
+//   2. The #2280 silence latch pushes a `status_reason`
+//      ('degradation_silence_unproven') with no matching degradation cause, so a
+//      silence-latched-but-otherwise-quiet instance classified as the catch-all
+//      'unclassified' cause instead of naming the silence latch. Closed by a
+//      dedicated 'degradation_silence_unproven' cause raised from the same latch.
+// ---------------------------------------------------------------------------
+describe('degradation classification symmetry', () => {
+  describe('ensureStatusReasonFloor (asymmetry 1 — status_reasons safety net)', () => {
+    it('adds an unclassified catch-all when a degraded status carries no reasons', async () => {
+      const { ensureStatusReasonFloor } = await import('../../src/core/health.ts');
+      const reasons: string[] = [];
+      ensureStatusReasonFloor('degraded', reasons);
+      expect(reasons).toEqual(['unclassified']);
+    });
+
+    it('applies the same floor to an unhealthy status', async () => {
+      const { ensureStatusReasonFloor } = await import('../../src/core/health.ts');
+      const reasons: string[] = [];
+      ensureStatusReasonFloor('unhealthy', reasons);
+      expect(reasons).toEqual(['unclassified']);
+    });
+
+    it('never adds a reason to a healthy status', async () => {
+      const { ensureStatusReasonFloor } = await import('../../src/core/health.ts');
+      const reasons: string[] = [];
+      ensureStatusReasonFloor('healthy', reasons);
+      expect(reasons).toEqual([]);
+    });
+
+    it('leaves an already-populated reason list untouched', async () => {
+      const { ensureStatusReasonFloor } = await import('../../src/core/health.ts');
+      const reasons = ['enrichment_stale'];
+      ensureStatusReasonFloor('degraded', reasons);
+      expect(reasons).toEqual(['enrichment_stale']);
+    });
+  });
+
+  describe('silence-latch degradation cause (asymmetry 2 — #2280)', () => {
+    let db: Database;
+    let prevToken: string | undefined;
+
+    beforeEach(() => {
+      prevToken = process.env.WHATSOUP_HEALTH_TOKEN;
+      process.env.WHATSOUP_HEALTH_TOKEN = TEST_HEALTH_TOKEN;
+      db = makeDb();
+    });
+
+    afterEach(() => {
+      db.close();
+      if (prevToken === undefined) delete process.env.WHATSOUP_HEALTH_TOKEN;
+      else process.env.WHATSOUP_HEALTH_TOKEN = prevToken;
+    });
+
+    it('classifies a silence-latched degradation with a dedicated cause, not unclassified', async () => {
+      // A single server instance holds the recently-degraded set across
+      // requests, which is what arms the #2280 latch.
+      let enrichmentRuntimeDegraded = true;
+      const deps = makeDeps(db, {
+        getEnrichmentStats: () => ({
+          lastRun: null,
+          unprocessed: 0,
+          runtimeDegraded: enrichmentRuntimeDegraded,
+        }),
+      });
+      const { server, port } = await buildTestServer(deps);
+      try {
+        // Request 1: a real degradation signal seeds recentlyDegraded.
+        const first = JSON.parse((await healthReq(port)).body);
+        expect(first.status).toBe('degraded');
+        expect(first.status_reasons).toContain('enrichment_runtime_degraded');
+
+        // Request 2: every live signal is quiet, but the silence latch keeps
+        // the instance degraded because recovery was never proven.
+        enrichmentRuntimeDegraded = false;
+        const second = JSON.parse((await healthReq(port)).body);
+        expect(second.status).toBe('degraded');
+        expect(second.status_reasons).toContain('degradation_silence_unproven');
+
+        // The classification must name the silence latch, not collapse to the
+        // catch-all — that is the asymmetry this fix closes.
+        expect(second.degradation_causes).toContain('degradation_silence_unproven');
+        expect(second.degradation_causes).not.toContain('unclassified');
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    });
+  });
+});
