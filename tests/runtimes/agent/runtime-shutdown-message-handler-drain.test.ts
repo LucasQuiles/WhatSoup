@@ -97,6 +97,8 @@ describe('AgentRuntime.shutdown — bounded message-handler drain', () => {
 
     await vi.advanceTimersByTimeAsync(RUNTIME_TURN_SHUTDOWN_FINALIZATION_TIMEOUT_MS + SLACK_MS);
     expect(flag.settled).toBe(true);
+    // The control run must have shut down CLEANLY, not settled via a masked rejection.
+    expect(await shutdown).toBeNull();
     expect(messageHandlerReceipts()).toEqual([]);
   });
 });

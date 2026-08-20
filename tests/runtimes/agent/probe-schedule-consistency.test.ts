@@ -224,7 +224,9 @@ describe('AgentRuntime periodic probe — cadence and window reset together on a
     expect(state.periodicUsabilityProbeDueAt).toBe(systemClock.now() + 33 * MINUTE);
     const shutdown = runtime.shutdown().then(() => null, (error: unknown) => error);
     await vi.advanceTimersByTimeAsync(3_000);
-    await shutdown;
+    // A rejection here would be converted to a value by the harness wrapper;
+    // prove shutdown actually resolved.
+    expect(await shutdown).toBeNull();
     expect(state.periodicUsabilityProbeTimer).toBeNull();
     // With no timer armed the snapshot falls back to the flat window and carries no due instant.
     const tc = turnCapability();
@@ -263,7 +265,9 @@ describe('AgentRuntime periodic probe — no post-shutdown resurrection', () => 
 
     const shutdown = runtime.shutdown().then(() => null, (error: unknown) => error);
     await vi.advanceTimersByTimeAsync(3_000);
-    await shutdown;
+    // A rejection here would be converted to a value by the harness wrapper;
+    // prove shutdown actually resolved.
+    expect(await shutdown).toBeNull();
     expect(state.periodicUsabilityProbeTimer).toBeNull();
     expect(state.periodicUsabilityProbeDueAt).toBeNull();
     vi.mocked(clearAlertSourceChecked).mockClear();
@@ -284,7 +288,9 @@ describe('AgentRuntime periodic probe — no post-shutdown resurrection', () => 
     const { runtime, state } = makeRuntimeState<ProbeState>(db);
     const shutdown = runtime.shutdown().then(() => null, (error: unknown) => error);
     await vi.advanceTimersByTimeAsync(3_000);
-    await shutdown;
+    // A rejection here would be converted to a value by the harness wrapper;
+    // prove shutdown actually resolved.
+    expect(await shutdown).toBeNull();
 
     state.fallback.scheduleNextPeriodicUsabilityProbe();
     expect({
