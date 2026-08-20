@@ -253,7 +253,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-tree-provenance.py",
-      "sha256": "1bf143838818901aa206f2af04033f5fe7abb74ca2839e30ab932dda56a71475",
+      "sha256": "fb19de0a00dc98673c9b4230f005004906eb23b6206eb8167f9e1a574c647ee7",
       "mustContain": [
         "tree_provenance_inventory",
         "def redact_ref",
