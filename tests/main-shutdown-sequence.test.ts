@@ -89,8 +89,12 @@ describe('runShutdownSequence', () => {
       }),
     });
     const outcome = await runShutdownSequence(p);
-    expect(outcome.cause).toBe('message_handlers_deadline');
-    expect(outcome.blockers).toBe(3);
+    expect(outcome).toEqual<ShutdownSequenceOutcome>({
+      complete: false,
+      failedPhase: 'runtime',
+      cause: 'message_handlers_deadline',
+      blockers: 3,
+    });
     expect(p.shutdownTransport).toHaveBeenCalledTimes(1);
   });
 
@@ -159,9 +163,12 @@ describe('runShutdownSequence', () => {
     });
     const outcome = await runShutdownSequence(p);
     expect(p.markCleanExit).not.toHaveBeenCalled();
-    expect(outcome.complete).toBe(false);
-    expect(outcome.failedPhase).toBe('transport');
-    expect(outcome.cause).toBe('transport_phase_failed');
+    expect(outcome).toEqual<ShutdownSequenceOutcome>({
+      complete: false,
+      failedPhase: 'transport',
+      cause: 'transport_phase_failed',
+      blockers: null,
+    });
     expect(shutdownExitCode('SIGTERM', outcome)).toBe(1);
     expect(incompleteReceipts(log)[0]).toMatchObject({ phase: 'transport', transportTeardown: 'failed', exit: 1 });
   });
@@ -189,8 +196,12 @@ describe('runShutdownSequence', () => {
     expect(p.shutdownRuntime).toHaveBeenCalledTimes(1);
     expect(p.shutdownTransport).toHaveBeenCalledTimes(1);
     expect(p.markCleanExit).not.toHaveBeenCalled();
-    expect(outcome.failedPhase).toBe('auxiliaries');
-    expect(outcome.cause).toBe('auxiliaries_phase_failed');
+    expect(outcome).toEqual<ShutdownSequenceOutcome>({
+      complete: false,
+      failedPhase: 'auxiliaries',
+      cause: 'auxiliaries_phase_failed',
+      blockers: null,
+    });
     expect(shutdownExitCode('SIGTERM', outcome)).toBe(1);
     // the per-item failure names the auxiliary, content-free, exactly once
     const named = log.error.mock.calls.filter((call) =>
