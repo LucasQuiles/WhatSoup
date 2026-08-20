@@ -12,6 +12,22 @@
 
 import { systemClock, type Clock } from '../../lib/clock.ts';
 
+/**
+ * Typed, content-free failure the runtime records when the drain times out,
+ * so the process-level shutdown policy (src/main-shutdown-policy.ts) can name
+ * the cause and carry the blocker count into its exit receipt without parsing
+ * message text. Never carries handler payloads, JIDs, or bodies.
+ */
+export class MessageHandlerDrainTimeoutError extends Error {
+  readonly blockers: number;
+
+  constructor(blockers: number) {
+    super(`message handlers did not drain before the shutdown deadline (blockers=${blockers})`);
+    this.name = 'MessageHandlerDrainTimeoutError';
+    this.blockers = blockers;
+  }
+}
+
 export interface MessageHandlerDrainResult {
   /** True when the deadline elapsed with at least one handler still pending. */
   readonly timedOut: boolean;

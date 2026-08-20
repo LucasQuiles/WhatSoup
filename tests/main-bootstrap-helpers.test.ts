@@ -614,7 +614,12 @@ async function importMainWithMocks(options: {
     isProcessLockError: mocks.isProcessLockError,
     releaseProcessLock: mocks.releaseProcessLock,
   }));
-  vi.doMock('../src/main-shutdown-policy.ts', () => ({ shutdownExitCode: mocks.shutdownExitCode }));
+  // The real runShutdownSequence runs (it is the orchestration under test
+  // elsewhere); only the exit-code policy is observed through the mock.
+  vi.doMock('../src/main-shutdown-policy.ts', async (importOriginal) => ({
+    ...await importOriginal<typeof import('../src/main-shutdown-policy.ts')>(),
+    shutdownExitCode: mocks.shutdownExitCode,
+  }));
   vi.doMock('../src/fleet/platform.ts', () => ({ createServiceManager: mocks.createServiceManager }));
 
   await import('../src/main.ts');
@@ -2053,7 +2058,10 @@ describe('main.ts — uncovered helpers and signal paths', () => {
         expect.objectContaining({ err: expect.any(Error) }),
         'failed to start',
       );
-      expect(h.shutdownExitCode).toHaveBeenCalledWith('startupError');
+      expect(h.shutdownExitCode).toHaveBeenCalledWith(
+        'startupError',
+        expect.objectContaining({ complete: expect.any(Boolean) }),
+      );
       expect(exitSpy).toHaveBeenCalled();
     });
   });

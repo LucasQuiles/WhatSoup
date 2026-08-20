@@ -10,7 +10,10 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { systemClock } from '../../../src/lib/clock.ts';
-import { drainMessageHandlersForShutdown } from '../../../src/runtimes/agent/shutdown-message-handler-drain.ts';
+import {
+  MessageHandlerDrainTimeoutError,
+  drainMessageHandlersForShutdown,
+} from '../../../src/runtimes/agent/shutdown-message-handler-drain.ts';
 
 const START = 1_786_000_000_000;
 
@@ -78,5 +81,73 @@ describe('drainMessageHandlersForShutdown', () => {
     const drain = drainMessageHandlersForShutdown([], systemClock.now() + 2_000);
     expect(await drain).toEqual({ timedOut: false, blockers: 0, settled: [] });
     expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe('drainMessageHandlersForShutdown — late settlement is a distinct outcome per kind', () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ now: START });
+  });
+
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+  });
+
+  function deferred() {
+    let resolve!: () => void;
+    let reject!: (reason: unknown) => void;
+    const promise = new Promise<void>((res, rej) => { resolve = res; reject = rej; });
+    return { promise, resolve, reject };
+  }
+
+  it('a handler that RESOLVES after the deadline: counted as a blocker at the deadline, result never revised', async () => {
+    const late = deferred();
+    const drain = drainMessageHandlersForShutdown([late.promise], systemClock.now() + 1_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+    const result = await drain;
+    expect(result).toEqual({ timedOut: true, blockers: 1, settled: [] });
+
+    late.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    await expect(late.promise).resolves.toBeUndefined();
+    expect(result).toEqual({ timedOut: true, blockers: 1, settled: [] });
+  });
+
+  it('a handler that REJECTS after the deadline: counted as a blocker at the deadline, rejection observed, never unhandled', async () => {
+    const late = deferred();
+    const drain = drainMessageHandlersForShutdown([late.promise], systemClock.now() + 1_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+    const result = await drain;
+    expect(result).toEqual({ timedOut: true, blockers: 1, settled: [] });
+
+    late.reject(new Error('late failure'));
+    await vi.advanceTimersByTimeAsync(0);
+    await expect(late.promise).rejects.toThrow('late failure');
+    expect(result).toEqual({ timedOut: true, blockers: 1, settled: [] });
+  });
+
+  it('before the deadline, a resolved and a rejected handler are reported as distinct outcomes', async () => {
+    const ok = deferred();
+    const bad = deferred();
+    const drain = drainMessageHandlersForShutdown([ok.promise, bad.promise], systemClock.now() + 1_000);
+    ok.resolve();
+    bad.reject(new Error('handler failed'));
+    await vi.advanceTimersByTimeAsync(0);
+    const result = await drain;
+    expect(result.timedOut).toBe(false);
+    expect(result.blockers).toBe(0);
+    expect(result.settled[0]).toEqual({ status: 'fulfilled', value: undefined });
+    expect(result.settled[1]).toMatchObject({ status: 'rejected', reason: expect.objectContaining({ message: 'handler failed' }) });
+  });
+});
+
+describe('MessageHandlerDrainTimeoutError', () => {
+  it('is a typed, content-free Error carrying only the blocker count', () => {
+    const error = new MessageHandlerDrainTimeoutError(2);
+    expect(error).toBeInstanceOf(Error);
+    expect(error.name).toBe('MessageHandlerDrainTimeoutError');
+    expect(error.blockers).toBe(2);
+    expect(error.message).not.toMatch(/@s\.whatsapp\.net|@g\.us|@lid/);
   });
 });

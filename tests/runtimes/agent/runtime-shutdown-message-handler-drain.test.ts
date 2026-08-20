@@ -27,6 +27,7 @@ vi.mock('../../../src/lib/emit-alert.ts', async (importOriginal) => ({
 import { Database } from '../../../src/core/database.ts';
 import { createChildLogger } from '../../../src/logger.ts';
 import { RUNTIME_TURN_SHUTDOWN_FINALIZATION_TIMEOUT_MS } from '../../../src/runtimes/agent/runtime-turn-coordinator.ts';
+import { MessageHandlerDrainTimeoutError } from '../../../src/runtimes/agent/shutdown-message-handler-drain.ts';
 import { makeRuntimeState, type RuntimeState } from './lib/runtime-terminal-coordinator-harness.ts';
 
 const runtimeLogger = createChildLogger('test') as unknown as Record<'info' | 'warn' | 'error' | 'debug', ReturnType<typeof vi.fn>>;
@@ -74,6 +75,11 @@ describe('AgentRuntime.shutdown — bounded message-handler drain', () => {
 
     await vi.advanceTimersByTimeAsync(RUNTIME_TURN_SHUTDOWN_FINALIZATION_TIMEOUT_MS + SLACK_MS);
     expect(flag.settled).toBe(true);
+
+    // The rejection main.ts sees is typed so the exit policy can name the cause.
+    const rejection = await shutdown;
+    expect(rejection).toBeInstanceOf(MessageHandlerDrainTimeoutError);
+    expect((rejection as MessageHandlerDrainTimeoutError).blockers).toBe(1);
 
     const receipts = messageHandlerReceipts();
     expect(receipts).toHaveLength(1);

@@ -310,7 +310,10 @@ import {
   expectedProbeDeadlineMs,
   periodicProbeBackoffMultiple,
 } from './primary-readiness-probe.ts';
-import { drainMessageHandlersForShutdown } from './shutdown-message-handler-drain.ts';
+import {
+  MessageHandlerDrainTimeoutError,
+  drainMessageHandlersForShutdown,
+} from './shutdown-message-handler-drain.ts';
 import { ensureClaudeFileStoreCredential } from './providers/claude-filestore-heal.ts';
 import {
   resolveFallbackRecoveryDecision,
@@ -6996,9 +6999,7 @@ export class AgentRuntime implements Runtime {
           { phase: 'message_handlers', blockers: drain.blockers, timedOut: true },
           'message handlers did not drain before the shutdown deadline',
         );
-        shutdownFailures.push(new Error(
-          `message handlers did not drain before the shutdown deadline (blockers=${drain.blockers})`,
-        ));
+        shutdownFailures.push(new MessageHandlerDrainTimeoutError(drain.blockers));
         preserveRuntimeTurnState = true;
       }
       const rejectedMessageHandlers = drain.settled.filter(
