@@ -215,6 +215,7 @@ export interface RuntimeFallbackPort {
   periodicUsabilityProbeTimer: ReturnType<typeof setTimeout> | null;
   periodicUsabilityProbeBackoff: number;
   periodicUsabilityProbeDueAt: number | null;
+  readonly shutdownRequested: boolean;
   fallbackProbeAttempts: number;
   fallbackLastProbeAt: number | null;
   fallbackWindowRestored: boolean;
@@ -1905,6 +1906,9 @@ export class RuntimeFallbackCoordinator {
   }
 
   scheduleNextPeriodicUsabilityProbe(): void {
+    // Never arm after shutdown began: a probe that resolves post-shutdown must
+    // not resurrect the periodic loop (round-3 finding 1).
+    if (this.host.shutdownRequested) return;
     if (this.host.periodicUsabilityProbeTimer) clearTimeout(this.host.periodicUsabilityProbeTimer);
     const now = Date.now();
     const delay = calculatePeriodicProbeDelay(this.host.periodicUsabilityProbeBackoff, this.host.primaryModelUsability?.checkedAt ?? null, now);
@@ -1920,6 +1924,13 @@ export class RuntimeFallbackCoordinator {
     result: PrimaryModelUsabilityResult,
     trigger: 'startup' | 'manual' | 'periodic',
   ): void {
+    if (this.host.shutdownRequested) {
+      // A probe started before shutdown resolved after it. Drop the result
+      // whole: no evidence mutation, no alert emission or clear, no timer —
+      // shutdown() already cleared the periodic loop and health is torn down.
+      log.debug({ trigger, status: result.status }, 'primary model usability result dropped after shutdown');
+      return;
+    }
     this.host.primaryModelUsability = {
       ...result,
       checkedAt: Date.now(),

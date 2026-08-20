@@ -38,7 +38,18 @@ vi.mock('../../../src/lib/emit-alert.ts', async (importOriginal) => ({
   clearAlertSourceChecked: vi.fn(() => ({ ok: true, channel: 'outbox', status: 'durably_queued' })),
 }));
 
+// The dispatch path is real in the resurrection tests below; only the probe
+// ITSELF is a controllable pending promise so a result can arrive after
+// shutdown without spawning a provider.
+const probeControl = vi.hoisted(() => ({ resolvers: [] as Array<(result: unknown) => void> }));
+
+vi.mock('../../../src/runtimes/agent/providers/primary-model-usability.ts', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../../src/runtimes/agent/providers/primary-model-usability.ts')>(),
+  probePrimaryModelUsability: vi.fn(() => new Promise((resolve) => { probeControl.resolvers.push(resolve); })),
+}));
+
 import { Database } from '../../../src/core/database.ts';
+import { clearAlertSourceChecked } from '../../../src/lib/emit-alert.ts';
 import { systemClock } from '../../../src/lib/clock.ts';
 import {
   PERIODIC_PROBE_EVIDENCE_CEILING_MS,
@@ -71,6 +82,7 @@ type ProbeState = RuntimeState & {
   fallback: {
     recordPrimaryModelUsability(result: PrimaryModelUsabilityResult, trigger: ProbeTrigger): void;
     schedulePrimaryModelUsabilityProbe(trigger: ProbeTrigger): void;
+    scheduleNextPeriodicUsabilityProbe(): void;
   };
 };
 
@@ -222,5 +234,62 @@ describe('AgentRuntime periodic probe — cadence and window reset together on a
       nextProbeDueAt: tc.nextProbeDueAt,
       modelUsableFreshnessMs: tc.modelUsableFreshnessMs,
     }).toEqual({ dueAt: null, periodicProbeExpected: false, nextProbeDueAt: null, modelUsableFreshnessMs: 30 * MINUTE });
+  });
+});
+
+describe('AgentRuntime periodic probe — no post-shutdown resurrection', () => {
+  let db: Database;
+
+  beforeEach(() => {
+    vi.useFakeTimers({ now: START });
+    probeControl.resolvers.length = 0;
+    db = new Database(':memory:');
+    db.open();
+  });
+
+  afterEach(() => {
+    db.close();
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('a probe resolving after shutdown neither re-arms the timer nor mutates evidence nor emits clears', async () => {
+    const { runtime, state } = makeRuntimeState<ProbeState>(db);
+    state.fallback.schedulePrimaryModelUsabilityProbe('periodic');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(state.primaryModelUsability?.probeInFlight).toBe(true);
+    const evidenceBefore = state.primaryModelUsability;
+
+    const shutdown = runtime.shutdown().then(() => null, (error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(3_000);
+    await shutdown;
+    expect(state.periodicUsabilityProbeTimer).toBeNull();
+    expect(state.periodicUsabilityProbeDueAt).toBeNull();
+    vi.mocked(clearAlertSourceChecked).mockClear();
+
+    // The pre-shutdown probe finally resolves — it must be dropped whole.
+    probeControl.resolvers.at(-1)?.(USABLE);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect({
+      timer: state.periodicUsabilityProbeTimer,
+      dueAt: state.periodicUsabilityProbeDueAt,
+      evidence: state.primaryModelUsability,
+      alertClears: vi.mocked(clearAlertSourceChecked).mock.calls.length,
+    }).toEqual({ timer: null, dueAt: null, evidence: evidenceBefore, alertClears: 0 });
+  });
+
+  it('scheduleNextPeriodicUsabilityProbe after shutdown never arms a timer or a due instant', async () => {
+    const { runtime, state } = makeRuntimeState<ProbeState>(db);
+    const shutdown = runtime.shutdown().then(() => null, (error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(3_000);
+    await shutdown;
+
+    state.fallback.scheduleNextPeriodicUsabilityProbe();
+    expect({
+      timer: state.periodicUsabilityProbeTimer,
+      dueAt: state.periodicUsabilityProbeDueAt,
+    }).toEqual({ timer: null, dueAt: null });
   });
 });

@@ -2621,6 +2621,7 @@ export class AgentRuntime implements Runtime {
       set periodicUsabilityProbeBackoff(value) { runtime.periodicUsabilityProbeBackoff = value; },
       get periodicUsabilityProbeDueAt() { return runtime.periodicUsabilityProbeDueAt; },
       set periodicUsabilityProbeDueAt(value) { runtime.periodicUsabilityProbeDueAt = value; },
+      get shutdownRequested() { return runtime.shutdownRequested; },
       get fallbackProbeAttempts() { return runtime.fallbackProbeAttempts; },
       set fallbackProbeAttempts(value) { runtime.fallbackProbeAttempts = value; },
       get fallbackLastProbeAt() { return runtime.fallbackLastProbeAt; },
