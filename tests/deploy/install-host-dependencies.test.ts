@@ -17,6 +17,8 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 
+import { fakeTimeoutBody } from './fake-timeout-helper.ts';
+
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const installer = join(repoRoot, 'deploy/scripts/install-host-dependencies.sh');
 const roots: string[] = [];
@@ -97,17 +99,13 @@ function fixture(platform: 'Darwin' | 'Linux' = 'Darwin'): Fixture {
   versionTool(bin, 'rg', 'ripgrep 14.1.1');
   versionTool(bin, 'zsh', 'zsh 5.9');
   versionTool(bin, 'shellcheck', 'ShellCheck 0.11.0');
-  // GNU timeout in miniature: `--version` answers the capability probe; any other
-  // argv is `timeout [-k <grace>] <duration> <command...>`, which this fake
-  // collapses to just the command (it does not bound — whatsoup_run_bounded's own
-  // bounding is covered by credential-probe-boundedness.test.ts; here the fake only
-  // needs to let the installer's wrapped commands reach their ledger-writing targets).
-  executable(join(bin, platform === 'Darwin' ? 'gtimeout' : 'timeout'), [
-    'if [ "${1:-}" = "--version" ]; then printf "%s\\n" "timeout (GNU coreutils) 9.7"; exit 0; fi',
-    'if [ "${1:-}" = "-k" ]; then shift 2; fi',
-    'shift',
-    '"$@"',
-  ].join('\n'));
+  // GNU timeout in miniature, shared with the health-token-wrapper tests via
+  // fakeTimeoutBody(): `--version` answers the capability probe; any other argv is
+  // `timeout [-k <grace>] <duration> <command...>`, which the fake collapses to just
+  // the command (it does not bound — whatsoup_run_bounded's own bounding is covered
+  // by credential-probe-boundedness.test.ts; here the fake only needs to let the
+  // installer's wrapped commands reach their ledger-writing targets).
+  executable(join(bin, platform === 'Darwin' ? 'gtimeout' : 'timeout'), fakeTimeoutBody());
   if (platform === 'Linux') versionTool(bin, 'flock', 'flock 2.40');
 
   executable(join(bin, 'python3.12'), [
