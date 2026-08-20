@@ -8,6 +8,7 @@ import {
   renewCoordinationLease,
   releaseCoordinationLease,
   forceTakeoverCoordinationLease,
+  readCoordinationLease,
   coordinationLeasePath,
   defaultLeaseProbes,
   resolveConfiguredAccountScope,
@@ -398,5 +399,124 @@ describe('coordination-lease — reclaim guard contention', () => {
     if (!result.ok) throw new Error(`unexpected refusal: ${result.refusal}`);
     expect(result.lease.fencingToken).toBe(2);
     expect(existsSync(`${coordinationLeasePath(root, SCOPE)}.reclaim`)).toBe(false);
+  });
+});
+
+function tombstoneFile(): string {
+  // Mirrors the private tombstonePath in coordination-lease.ts: the scope id
+  // prefix colon is the only filesystem-hostile byte, mapped to '_'.
+  return join(root, 'coordination-lease.scope_line-a-wa.last-token.json');
+}
+
+describe('readCoordinationLease', () => {
+  it('returns null when the lease is absent', () => {
+    expect(readCoordinationLease(root, SCOPE)).toBeNull();
+  });
+
+  it('returns the parsed lease when present and valid', () => {
+    const acquired = acquireCoordinationLease(baseArgs());
+    if (!acquired.ok) throw new Error('fixture acquire failed');
+    expect(readCoordinationLease(root, SCOPE)).toEqual(acquired.lease);
+  });
+
+  it('returns null when present but unparseable', () => {
+    writeFileSync(coordinationLeasePath(root, SCOPE), 'not json');
+    expect(readCoordinationLease(root, SCOPE)).toBeNull();
+  });
+});
+
+describe('acquire error paths', () => {
+  it('fails closed on a parseable-but-invalid lease payload', () => {
+    writeFileSync(coordinationLeasePath(root, SCOPE), JSON.stringify({ v: 999 }));
+    expect(acquireCoordinationLease(baseArgs())).toEqual({ ok: false, refusal: 'lease_corrupt' });
+  });
+
+  it('fails closed when the self birth token cannot be probed on a fresh acquire', () => {
+    expect(acquireCoordinationLease(baseArgs({ probes: probes({ birthToken: () => null }) }))).toEqual({
+      ok: false,
+      refusal: 'owner_unknown',
+    });
+  });
+
+  it('treats an invalid tombstone as token 0 so fencing starts fresh', () => {
+    writeFileSync(tombstoneFile(), JSON.stringify({ lastFencingToken: -1 }));
+    const result = acquireCoordinationLease(baseArgs());
+    if (!result.ok) throw new Error('fixture acquire failed');
+    expect(result.lease.fencingToken).toBe(1);
+  });
+});
+
+describe('renew and release error paths', () => {
+  it('renew refuses when the lease file is missing', () => {
+    const acquired = acquireCoordinationLease(baseArgs());
+    if (!acquired.ok) throw new Error('fixture acquire failed');
+    rmSync(coordinationLeasePath(root, SCOPE));
+    expect(
+      renewCoordinationLease({
+        stateRoot: root,
+        scopeId: SCOPE,
+        lease: acquired.lease,
+        probes: probes(),
+        ttlMs: 60_000,
+      }),
+    ).toEqual({ ok: false, refusal: 'lease_missing' });
+  });
+
+  it('renew refuses when the on-disk lease parses to null', () => {
+    const acquired = acquireCoordinationLease(baseArgs());
+    if (!acquired.ok) throw new Error('fixture acquire failed');
+    writeFileSync(coordinationLeasePath(root, SCOPE), JSON.stringify({ v: 999 }));
+    expect(
+      renewCoordinationLease({
+        stateRoot: root,
+        scopeId: SCOPE,
+        lease: acquired.lease,
+        probes: probes(),
+        ttlMs: 60_000,
+      }),
+    ).toEqual({ ok: false, refusal: 'lease_corrupt' });
+  });
+
+  it('release refuses when the lease file is missing', () => {
+    const acquired = acquireCoordinationLease(baseArgs());
+    if (!acquired.ok) throw new Error('fixture acquire failed');
+    rmSync(coordinationLeasePath(root, SCOPE));
+    expect(releaseCoordinationLease({ stateRoot: root, scopeId: SCOPE, lease: acquired.lease })).toEqual({
+      ok: false,
+      refusal: 'lease_missing',
+    });
+  });
+
+  it('release refuses when the on-disk lease parses to null', () => {
+    const acquired = acquireCoordinationLease(baseArgs());
+    if (!acquired.ok) throw new Error('fixture acquire failed');
+    writeFileSync(coordinationLeasePath(root, SCOPE), JSON.stringify({ v: 999 }));
+    expect(releaseCoordinationLease({ stateRoot: root, scopeId: SCOPE, lease: acquired.lease })).toEqual({
+      ok: false,
+      refusal: 'lease_corrupt',
+    });
+  });
+});
+
+describe('forceTakeover error paths', () => {
+  it('refuses when no lease exists', () => {
+    expect(
+      forceTakeoverCoordinationLease({ ...baseArgs(), ownerAuthorizationId: 'owner-auth-1' }),
+    ).toEqual({ ok: false, refusal: 'lease_missing' });
+  });
+
+  it('falls back to the tombstone token and a null prior pid on a corrupt lease', () => {
+    writeFileSync(coordinationLeasePath(root, SCOPE), 'not json');
+    writeFileSync(tombstoneFile(), JSON.stringify({ lastFencingToken: 5 }));
+    const forced = forceTakeoverCoordinationLease({ ...baseArgs(), ownerAuthorizationId: 'owner-auth-1' });
+    if (!forced.ok) throw new Error(`unexpected refusal: ${forced.refusal}`);
+    expect(forced.lease.fencingToken).toBe(6);
+    const receipts = readFileSync(join(root, 'coordination-lease-takeovers.ndjson'), 'utf-8')
+      .trimEnd()
+      .split('\n')
+      .map(line => JSON.parse(line));
+    expect(receipts.at(-1)).toEqual(
+      expect.objectContaining({ priorPid: null, priorFencingToken: 5 }),
+    );
   });
 });
