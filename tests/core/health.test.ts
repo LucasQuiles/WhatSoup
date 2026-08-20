@@ -1956,6 +1956,7 @@ describe('GET /health', () => {
             periodicProbeExpected: true,
             periodicProbeBackoffMultiple: 2,
             modelUsableFreshnessMs: 68 * 60_000,
+            nextProbeDueAt: 1_782_353_006_162,
           },
         },
       }),
@@ -1974,6 +1975,8 @@ describe('GET /health', () => {
     expect(json.turn_capability.periodic_probe_expected).toBe(true);
     expect(json.turn_capability.periodic_probe_backoff_multiple).toBe(2);
     expect(json.turn_capability.model_usable_freshness_ms).toBe(68 * 60_000);
+    expect(json.turn_capability.next_probe_due_at).toBe(1_782_353_006_162);
+    expect(json.runtime.agent.turnCapability.nextProbeDueAt).toBe(1_782_353_006_162);
     expect(json.runtime.agent.turnCapability.periodicProbeBackoffMultiple).toBe(2);
     expect(json.runtime.agent.turnCapability.modelUsableFreshnessMs).toBe(68 * 60_000);
     db2.close();
@@ -3063,6 +3066,7 @@ describe('GET /health', () => {
       periodic_probe_expected: null,
       periodic_probe_backoff_multiple: null,
       model_usable_freshness_ms: null,
+      next_probe_due_at: null,
       last_successful_turn_at: null,
       last_successful_turn_provider: null,
       last_successful_turn_session_current: null,
@@ -3107,6 +3111,7 @@ describe('GET /health', () => {
       periodic_probe_expected: null,
       periodic_probe_backoff_multiple: null,
       model_usable_freshness_ms: null,
+      next_probe_due_at: null,
       last_successful_turn_at: 1_781_316_030_000,
       last_successful_turn_provider: null,
       last_successful_turn_session_current: null,
@@ -3157,6 +3162,7 @@ describe('GET /health', () => {
       periodic_probe_expected: null,
       periodic_probe_backoff_multiple: null,
       model_usable_freshness_ms: null,
+      next_probe_due_at: null,
       last_successful_turn_at: null,
       last_successful_turn_provider: null,
       last_successful_turn_session_current: null,
@@ -3609,6 +3615,7 @@ describe('GET /health', () => {
       periodic_probe_expected: null,
       periodic_probe_backoff_multiple: null,
       model_usable_freshness_ms: null,
+      next_probe_due_at: null,
       last_successful_turn_at: null,
       last_successful_turn_provider: null,
       last_successful_turn_session_current: null,
@@ -3628,6 +3635,7 @@ describe('GET /health', () => {
       periodicProbeExpected: null,
       periodicProbeBackoffMultiple: null,
       modelUsableFreshnessMs: null,
+      nextProbeDueAt: null,
     });
     expect(body).not.toContain(rawProviderText);
     db2.close();
@@ -6047,6 +6055,7 @@ describe('GET /health — normalizeBooleanOrNull and normalizeNumberOrNull non-t
       periodic_probe_expected: null,
       periodic_probe_backoff_multiple: null,
       model_usable_freshness_ms: null,
+      next_probe_due_at: null,
       last_successful_turn_at: null,
       last_successful_turn_provider: null,
       last_successful_turn_session_current: null,
@@ -6345,6 +6354,7 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
       periodic_probe_expected: null,
       periodic_probe_backoff_multiple: null,
       model_usable_freshness_ms: null,
+      next_probe_due_at: null,
       last_successful_turn_at: 1_700_000_000_000,
       last_successful_turn_provider: 'claude-cli',
       last_successful_turn_session_current: true,

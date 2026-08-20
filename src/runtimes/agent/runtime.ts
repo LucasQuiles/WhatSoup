@@ -307,6 +307,7 @@ import {
 import { createPrimaryModelProbeAdapters } from './providers/primary-model-usability-adapters.ts';
 import {
   buildPrimaryProbeAdapterDeps,
+  expectedProbeDeadlineFromDueMs,
   expectedProbeDeadlineMs,
   periodicProbeBackoffMultiple,
 } from './primary-readiness-probe.ts';
@@ -517,10 +518,17 @@ export function deriveModelUsable(
 export function resolveModelUsabilityFreshnessMs(
   periodicProbeExpected: boolean,
   backoffMultiple: number,
+  schedule: { nextProbeDueAt: number | null; checkedAt: number | null } | null = null,
 ): number {
-  return periodicProbeExpected
-    ? expectedProbeDeadlineMs(backoffMultiple)
-    : MODEL_USABILITY_FRESHNESS_MS;
+  if (!periodicProbeExpected) return MODEL_USABILITY_FRESHNESS_MS;
+  // The armed timer's due instant is the source of truth when known: cadence
+  // and window can then never diverge (a manual probe that resets the backoff
+  // re-arms the timer and moves this instant with it). The scheduler formula
+  // is the fallback only while no due instant has been recorded.
+  if (schedule !== null && schedule.nextProbeDueAt !== null && schedule.checkedAt !== null) {
+    return expectedProbeDeadlineFromDueMs(schedule.nextProbeDueAt, schedule.checkedAt);
+  }
+  return expectedProbeDeadlineMs(backoffMultiple);
 }
 // ---------------------------------------------------------------------------
 // AskUserQuestion → Poll formatting / resolution helpers
@@ -827,6 +835,8 @@ export class AgentRuntime implements Runtime {
   private revertTimer: ReturnType<typeof setTimeout> | null = null;
   private fallbackPrimaryProbeTimer: ReturnType<typeof setTimeout> | null = null;
   private periodicUsabilityProbeTimer: ReturnType<typeof setTimeout> | null = null; private periodicUsabilityProbeBackoff = 0;
+  /** Epoch ms the armed periodic probe timer is due (same clock as checkedAt); null while no timer is armed. */
+  private periodicUsabilityProbeDueAt: number | null = null;
   // Consecutive failed recovery probes on the revert-timer EXTENSION path
   // (process-local, reset on deactivation — which a successful probe triggers).
   // Early-window standing probes do not count: nothing is extending yet.
@@ -2609,6 +2619,8 @@ export class AgentRuntime implements Runtime {
       set periodicUsabilityProbeTimer(value) { runtime.periodicUsabilityProbeTimer = value; },
       get periodicUsabilityProbeBackoff() { return runtime.periodicUsabilityProbeBackoff; },
       set periodicUsabilityProbeBackoff(value) { runtime.periodicUsabilityProbeBackoff = value; },
+      get periodicUsabilityProbeDueAt() { return runtime.periodicUsabilityProbeDueAt; },
+      set periodicUsabilityProbeDueAt(value) { runtime.periodicUsabilityProbeDueAt = value; },
       get fallbackProbeAttempts() { return runtime.fallbackProbeAttempts; },
       set fallbackProbeAttempts(value) { runtime.fallbackProbeAttempts = value; },
       get fallbackLastProbeAt() { return runtime.fallbackLastProbeAt; },
@@ -6954,6 +6966,7 @@ export class AgentRuntime implements Runtime {
       this.fallbackPrimaryProbeTimer = null;
     }
     if (this.periodicUsabilityProbeTimer) { clearTimeout(this.periodicUsabilityProbeTimer); this.periodicUsabilityProbeTimer = null; }
+    this.periodicUsabilityProbeDueAt = null;
     this.fallback.stopChainCanary();
     this.fallbackWindow.activeUntil = null;
     this.fallbackWindow.activatedAt = null;
@@ -8110,6 +8123,10 @@ export class AgentRuntime implements Runtime {
     return resolveModelUsabilityFreshnessMs(
       this.periodicUsabilityProbeTimer !== null,
       periodicProbeBackoffMultiple(this.periodicUsabilityProbeBackoff),
+      {
+        nextProbeDueAt: this.periodicUsabilityProbeDueAt,
+        checkedAt: this.primaryModelUsability?.checkedAt ?? null,
+      },
     );
   }
 
@@ -8133,6 +8150,7 @@ export class AgentRuntime implements Runtime {
       periodicProbeExpected,
       periodicProbeBackoffMultiple: backoffMultiple,
       modelUsableFreshnessMs,
+      nextProbeDueAt: this.periodicUsabilityProbeDueAt,
     };
   }
 

@@ -305,6 +305,7 @@ function expectedFallbackDetails(): Record<string, unknown> {
       periodicProbeExpected: false,
       periodicProbeBackoffMultiple: 1,
       modelUsableFreshnessMs: 30 * 60_000,
+      nextProbeDueAt: null,
     },
     activeFallbackEntry: null,
     fallbackChain: [],

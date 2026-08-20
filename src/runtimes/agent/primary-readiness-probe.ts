@@ -88,6 +88,22 @@ export function expectedProbeDeadlineMs(backoffMultiple: number, rateLimitRemain
 export const PERIODIC_PROBE_EVIDENCE_CEILING_MS = expectedProbeDeadlineMs(PERIODIC_PROBE_BACKOFF_MAX_MULTIPLE);
 
 /**
+ * Freshness window when the armed timer's due instant is KNOWN: the evidence
+ * stays fresh until the probe is actually due, plus grace — measured from the
+ * evidence's own `checkedAt` so `deriveModelUsable` can compare ages. A manual
+ * or startup probe that refreshes `checkedAt` without moving the due instant
+ * therefore shrinks the remaining window instead of restarting it, and a due
+ * instant already in the past leaves only the grace. Ceiling-bound like the
+ * formula so a wedged scheduler still goes stale.
+ */
+export function expectedProbeDeadlineFromDueMs(nextProbeDueAt: number, checkedAt: number): number {
+  return Math.min(
+    PERIODIC_PROBE_EVIDENCE_CEILING_MS,
+    Math.max(nextProbeDueAt - checkedAt, 0) + PERIODIC_PROBE_EVIDENCE_GRACE_MS,
+  );
+}
+
+/**
  * Calculate the delay for the next periodic primary-readiness probe.
  *
  * Single-flight, rate-limit, jitter, and backoff are all encoded in the

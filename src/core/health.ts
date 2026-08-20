@@ -309,6 +309,9 @@ interface HealthTurnCapability {
    *  scheduler-derived deadline while the periodic probe is armed, the flat
    *  30min otherwise. Lets a reader see WHICH window produced a stale flag. */
   model_usable_freshness_ms: number | null;
+  /** Epoch ms the armed periodic probe is due (null while none is armed);
+   *  the freshness window is derived from it whenever it is known. */
+  next_probe_due_at: number | null;
 }
 
 const HEALTH_MODEL_USABILITY_STATUSES = new Set([
@@ -526,6 +529,7 @@ function normalizeAgentTurnCapability(details: Record<string, unknown> | null): 
     periodic_probe_expected: normalizeBooleanOrNull(raw.periodicProbeExpected),
     periodic_probe_backoff_multiple: normalizeNumberOrNull(raw.periodicProbeBackoffMultiple),
     model_usable_freshness_ms: normalizeNumberOrNull(raw.modelUsableFreshnessMs),
+    next_probe_due_at: normalizeNumberOrNull(raw.nextProbeDueAt),
   };
 }
 
@@ -637,6 +641,7 @@ function agentRuntimeDetailsForHealth(
           periodicProbeExpected: turnCapability.periodic_probe_expected,
           periodicProbeBackoffMultiple: turnCapability.periodic_probe_backoff_multiple,
           modelUsableFreshnessMs: turnCapability.model_usable_freshness_ms,
+          nextProbeDueAt: turnCapability.next_probe_due_at,
         }
       : null,
   };

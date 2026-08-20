@@ -38,6 +38,10 @@ export interface RuntimeTurnCapabilityHealth {
    *  the flat MODEL_USABILITY_FRESHNESS_MS. Surfaced so a stale flag can be
    *  read against the window that produced it. */
   modelUsableFreshnessMs?: number | null;
+  /** Epoch ms the armed periodic probe is due to fire (same clock as
+   *  `modelUsableCheckedAt`); null while no periodic timer is armed. The
+   *  freshness window is derived from it whenever it is known. */
+  nextProbeDueAt?: number | null;
 }
 
 export interface AgentCommandRequest {
