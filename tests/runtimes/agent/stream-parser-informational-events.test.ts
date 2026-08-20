@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import {
   _observedUnclassifiedKeys,
   _resetStreamParserObservability,
+  _suppressedNovelEventCount,
   parseEvents,
 } from '../../../src/runtimes/agent/stream-parser.ts';
 
@@ -227,6 +228,8 @@ describe('Claude CLI informational stream events', () => {
       ['fractional error_status', { ...validApiRetry, error_status: 429.5 }],
       ['string error_status', { ...validApiRetry, error_status: '429' }],
       ['out-of-range error_status', { ...validApiRetry, error_status: 700 }],
+      ['sub-HTTP error_status (0)', { ...validApiRetry, error_status: 0 }],
+      ['sub-HTTP error_status (99)', { ...validApiRetry, error_status: 99 }],
       ['blank uuid', { ...validApiRetry, uuid: '' }],
       ['blank session_id', { ...validApiRetry, session_id: '' }],
     ];
@@ -254,6 +257,29 @@ describe('Claude CLI informational stream events', () => {
     it('caps dedupe cardinality so a hostile type stream cannot grow the set unbounded', () => {
       for (let i = 0; i < 400; i++) parseEvents(line({ type: `unknown_type_${i}` }));
       expect(_observedUnclassifiedKeys().length).toBeLessThanOrEqual(128);
+    });
+
+    it('charset-bounds a hostile or oversized TOP-LEVEL type, not just the system subtype', () => {
+      parseEvents(line({ type: 'BAD top!\u202Eevil' })); // control/bidi in top-level type
+      parseEvents(line({ type: 'x'.repeat(200) })); // oversized top-level type
+      parseEvents(line({ type: 'system:api_retry' })); // sentinel-forgery attempt (colon → not charset)
+      const keys = _observedUnclassifiedKeys();
+      // Every hostile top-level type collapses to the same bounded placeholder key.
+      expect(keys).toContain('unknown:<unsafe>');
+      expect(keys.every((k) => k.length < 80)).toBe(true);
+      // A forged top-level "system:api_retry" must NOT collide with the real subtype key.
+      expect(keys).not.toContain('unknown:system:api_retry');
+    });
+
+    it('emits saturating suppression telemetry instead of silently dropping the 129th valid type', () => {
+      for (let i = 0; i < 128; i++) parseEvents(line({ type: `safe_type_${i}` }));
+      expect(_observedUnclassifiedKeys().length).toBe(128);
+      expect(_suppressedNovelEventCount()).toBe(0);
+      // A 129th legitimate, bounded type cannot be recorded (set saturated) — but it must
+      // NOT vanish silently: the saturation counter advances (the memory bound is preserved).
+      parseEvents(line({ type: 'a_legit_129th_type' }));
+      expect(_observedUnclassifiedKeys().length).toBe(128);
+      expect(_suppressedNovelEventCount()).toBe(1);
     });
   });
 
