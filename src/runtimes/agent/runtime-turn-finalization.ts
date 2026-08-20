@@ -25,11 +25,13 @@ export interface FinalizeQueuedRuntimeTurnParams {
 export async function collectRuntimeTurnAnswerEvidence(
   queue: RuntimeTurnEvidenceQueue,
   turnId: string,
+  onFlushError?: (error: unknown) => void,
 ): Promise<RuntimeAnswerEvidence> {
   try {
     const evidence = await queue.flushTurnEvidence(turnId);
     return { kind: 'ready', opIds: evidence.answerOpIds };
-  } catch {
+  } catch (error) {
+    onFlushError?.(error);
     return { kind: 'failed' };
   }
 }
