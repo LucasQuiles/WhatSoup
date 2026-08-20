@@ -123,6 +123,15 @@ const EXPECTED_FILE_SIZE_WARNING_FILES = [
   'tests/fleet/health-poller.test.ts',
   'tests/fleet/index.test.ts',
   'tests/fleet/routes/feed.test.ts',
+  // #3242's outbound-poison containment added one console-consumer case to this
+  // suite — it asserts the bounded poison evidence reaches the line payload AND
+  // that the private scope name never does — taking it from 1959 to ~2008 lines,
+  // just over the 2000-line arch.file-size warn budget. The case reuses this
+  // suite's shared fakeInstance/fakeStatus/makeDeps harness, so extracting it
+  // would duplicate that harness to save eight lines of a redaction assertion.
+  // Grandfathered per the project norm for large cohesive route suites
+  // (cf. feed.test.ts above and ops.test.ts below).
+  'tests/fleet/routes/lines.test.ts',
   'tests/fleet/routes/ops.test.ts',
   // #2548's replay-outcome test matrix (all-succeed / one-fails-mid-loop)
   // reuses this suite's shared importMainWithMocks bootstrap-mock harness,

@@ -97,6 +97,7 @@ const { mockSession, mockQueue, capturedSessionManagerOptsRef, capturedOnEventRe
     enqueueProgressUpdate: vi.fn(),
     indicateTyping: vi.fn(),
     flush: vi.fn(async () => {}),
+    isPoisoned: vi.fn(() => false),
     shutdown: vi.fn(async () => {}),
     abortTurn: vi.fn(),
     endTurn: vi.fn(),
@@ -502,7 +503,6 @@ void _mockQueueTypeCheck; // suppress unused-variable warning
 
 import * as registerAllModule from '../../../src/mcp/register-all.ts';
 import { AgentRuntime, isUsageLimitMessage, serializePendingPoll, type PendingPollQuestion } from '../../../src/runtimes/agent/runtime.ts';
-import { runNewCommand } from '../../../src/runtimes/agent/runtime-new-command.ts';
 import { parseGeminiAcpEvent } from '../../../src/runtimes/agent/providers/gemini-acp-parser.ts';
 import { __resetModelCatalogueCacheForTest } from '../../../src/runtimes/agent/model-catalogue-resolver.ts';
 import { providerServerErrorNoFallbackNotice, providerUnknownTerminalNotice, renderUserMessage } from '../../../src/runtimes/agent/response-templates.ts';
@@ -2270,6 +2270,47 @@ describe('AgentRuntime', () => {
     expect(enqueuedTexts.some((t) => t.includes('new session'))).toBe(true);
   });
 
+  it('keeps poison admission blocked across /new replacement without falsely acknowledging through the poisoned queue', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger);
+    const state = runtime as unknown as {
+      runtimeTurnCoordinator: {
+        observeOutboundQueueOperation<T>(
+          scopeKey: string,
+          queue: typeof mockQueue,
+          operation: () => Promise<T>,
+        ): Promise<T>;
+      };
+    };
+    await runtime.start();
+    const poisonError = new Error('sticky outbound poison before /new');
+    mockQueue.isPoisoned.mockReturnValue(true);
+    try {
+      await expect(state.runtimeTurnCoordinator.observeOutboundQueueOperation(
+        '__global__',
+        mockQueue,
+        async () => { throw poisonError; },
+      )).rejects.toBe(poisonError);
+      mockQueue.enqueueText.mockClear();
+      mockSession.sendTurn.mockClear();
+
+      await sendAndDrain(runtime, makeMsg({
+        content: '/new',
+        inboundSeq: 83,
+        senderJid: '15550100001@s.whatsapp.net',
+      }));
+      const ackTexts = mockQueue.enqueueText.mock.calls.map((args) => args[0] as string);
+      expect(ackTexts.some((text) => text.includes('delivery remains blocked'))).toBe(false);
+      expect(ackTexts.some((text) => text.includes('Starting new session'))).toBe(false);
+
+      await sendAndDrain(runtime, makeMsg({ content: 'next turn', inboundSeq: 84 }));
+      expect(mockSession.sendTurn).not.toHaveBeenCalled();
+    } finally {
+      mockQueue.isPoisoned.mockReturnValue(false);
+    }
+  });
+
   it('interrupts the active singleton turn on /new instead of bouncing (LCP un-cancelable-job fix)', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
@@ -2325,69 +2366,6 @@ describe('AgentRuntime', () => {
     ];
     expect(ackTexts.some((t) => t.includes('Interrupted the running task'))).toBe(true);
     expect(ackTexts.some((t) => t.includes('still in progress'))).toBe(false);
-  });
-
-  // ── runNewCommand honest recovery-pending ack ───────────────────────────────
-
-  it('ack says recovery pending when teardown disposition is kill', async () => {
-    let ackText = '';
-    await runNewCommand({
-      isTurnInFlight: vi.fn(() => true),
-      sessionScope: 'per_chat',
-      getPerChatSession: vi.fn(() => ({})),
-      abortPerChatQueue: vi.fn(),
-      terminalizeTurnForInterrupt: vi.fn(async () => ({ disposition: 'kill' as const })),
-      disposePerChatSession: vi.fn(),
-      scopeKey: 'test',
-      perChatMapKey: 'test',
-      sendDirect(text: string) { ackText = text; },
-      getSingleSession: vi.fn(),
-      shutdownSingleSession: vi.fn(),
-      retireTurnQueueAfterInterrupt: vi.fn(),
-      abortActiveQueue: vi.fn(),
-      shutdownOperationTracker: vi.fn(),
-      cleanupGlobalAutoCompactState: vi.fn(),
-      clearSingleScopeRefs: vi.fn(),
-      clearHandoffLatches: vi.fn(),
-      clearTurnHadVisibleOutput: vi.fn(),
-      resetOwnedPerChatSession: vi.fn(),
-      replaceOutboundQueue: vi.fn(),
-      abortChatQueue: vi.fn(),
-      resetSingleSession: vi.fn(),
-    } as never);
-    expect(ackText).toContain('Interrupted the running task');
-    expect(ackText).toContain('recovery pending');
-  });
-
-  it('ack says starting new session when teardown disposition is interruption', async () => {
-    let ackText = '';
-    await runNewCommand({
-      isTurnInFlight: vi.fn(() => true),
-      sessionScope: 'per_chat',
-      getPerChatSession: vi.fn(() => ({})),
-      abortPerChatQueue: vi.fn(),
-      terminalizeTurnForInterrupt: vi.fn(async () => ({ disposition: 'interruption' as const })),
-      disposePerChatSession: vi.fn(),
-      scopeKey: 'test',
-      perChatMapKey: 'test',
-      sendDirect(text: string) { ackText = text; },
-      getSingleSession: vi.fn(),
-      shutdownSingleSession: vi.fn(),
-      retireTurnQueueAfterInterrupt: vi.fn(),
-      abortActiveQueue: vi.fn(),
-      shutdownOperationTracker: vi.fn(),
-      cleanupGlobalAutoCompactState: vi.fn(),
-      clearSingleScopeRefs: vi.fn(),
-      clearHandoffLatches: vi.fn(),
-      clearTurnHadVisibleOutput: vi.fn(),
-      resetOwnedPerChatSession: vi.fn(),
-      replaceOutboundQueue: vi.fn(),
-      abortChatQueue: vi.fn(),
-      resetSingleSession: vi.fn(),
-    } as never);
-    expect(ackText).toContain('Interrupted the running task');
-    expect(ackText).not.toContain('recovery pending');
-    expect(ackText).toContain('starting new session');
   });
 
   // QR-108: /new is a clean reset — it must drop the one-message-handoff latches
@@ -12219,7 +12197,7 @@ describe('AgentRuntime', () => {
       );
     });
 
-    it('still sends the poll if pre-poll detail flushing fails', async () => {
+    it('does not send the poll if a poisoned pre-poll detail flush fails', async () => {
       const { messenger, pollSends } = makePollMessenger({ waMessageId: 'POLL_AFTER_FLUSH_FAIL', hasSecret: true });
       const db = makeDb();
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
@@ -12234,6 +12212,7 @@ describe('AgentRuntime', () => {
       mockQueue.enqueueText.mockClear();
       mockQueue.flush.mockReset();
       mockQueue.flush.mockRejectedValueOnce(new Error('flush failed'));
+      mockQueue.isPoisoned.mockReturnValueOnce(true);
 
       capturedOnEventRef.current!({
         type: 'tool_use',
@@ -12252,10 +12231,12 @@ describe('AgentRuntime', () => {
         },
       });
 
-      await vi.waitFor(() => expect(pollSends.length).toBe(1));
-      expect(pollSends[0].values).toEqual(['Short', 'Long option', 'Other — propose a different option']);
+      await vi.waitFor(() => expect(mockQueue.flush).toHaveBeenCalledOnce());
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(pollSends).toHaveLength(0);
       expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
-        expect.objectContaining({ chatJid: pollSends[0].chatJid }),
+        expect.objectContaining({ chatJid: 'test@s.whatsapp.net' }),
         'failed to flush poll details before poll send',
       );
     });

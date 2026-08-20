@@ -12,6 +12,7 @@ REGISTRY = ROOT / "src" / "lib" / "fault-taxonomy-registry.json"
 EXPECTED_RUNTIME_AGENT_NUMERIC_HEALTH_FIELDS = (
     "activeSessions",
     "sessionCount",
+    "outboundQueuePoisonedScopes",
     "recentCrashes",
     "pollPersistenceErrors",
     "autoCompactIneffective",
