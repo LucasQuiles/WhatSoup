@@ -112,11 +112,23 @@ describe('resolveModelUsabilityFreshnessMs + deriveModelUsable (pure, fakeClock)
   });
 });
 
+type ProbeTimerHandle = ReturnType<typeof setTimeout>;
+
 type ProbeState = RuntimeState & {
   primaryModelUsability: RuntimePrimaryModelUsability | null;
-  periodicUsabilityProbeTimer: ReturnType<typeof setTimeout> | null;
+  periodicUsabilityProbeTimer: ProbeTimerHandle | null;
   periodicUsabilityProbeBackoff: number;
 };
+
+/**
+ * Stand-in for an armed periodic-probe timer. The runtime observes only the
+ * handle's nullness (`periodicUsabilityProbeTimer !== null`); arming the real
+ * scheduler would dispatch a live provider probe once the fake clock crosses
+ * the interval, which is outside what these snapshot tests exercise.
+ */
+function armedProbeTimerHandle(): ProbeTimerHandle {
+  return { armed: true } as unknown as ProbeTimerHandle;
+}
 
 describe('AgentRuntime health snapshot — turnCapability follows the probe scheduler', () => {
   let db: Database;
@@ -141,7 +153,7 @@ describe('AgentRuntime health snapshot — turnCapability follows the probe sche
   it('armed timer + backoff counter 1 (multiple 2): 60m-old usable evidence reads green, not stale', () => {
     const { runtime, state } = makeRuntimeState<ProbeState>(db);
     state.primaryModelUsability = usableEvidence(systemClock.now());
-    state.periodicUsabilityProbeTimer = setTimeout(() => {}, 24 * 60 * MINUTE);
+    state.periodicUsabilityProbeTimer = armedProbeTimerHandle();
     state.periodicUsabilityProbeBackoff = 1;
     vi.advanceTimersByTime(60 * MINUTE);
 
@@ -157,7 +169,7 @@ describe('AgentRuntime health snapshot — turnCapability follows the probe sche
   it('armed timer + backoff counter 0: 30m+1s-old usable evidence reads green, not stale', () => {
     const { runtime, state } = makeRuntimeState<ProbeState>(db);
     state.primaryModelUsability = usableEvidence(systemClock.now());
-    state.periodicUsabilityProbeTimer = setTimeout(() => {}, 24 * 60 * MINUTE);
+    state.periodicUsabilityProbeTimer = armedProbeTimerHandle();
     state.periodicUsabilityProbeBackoff = 0;
     vi.advanceTimersByTime(30 * MINUTE + 1_000);
 
@@ -170,7 +182,7 @@ describe('AgentRuntime health snapshot — turnCapability follows the probe sche
   it('armed timer: evidence older than the scheduler deadline goes stale', () => {
     const { runtime, state } = makeRuntimeState<ProbeState>(db);
     state.primaryModelUsability = usableEvidence(systemClock.now());
-    state.periodicUsabilityProbeTimer = setTimeout(() => {}, 24 * 60 * MINUTE);
+    state.periodicUsabilityProbeTimer = armedProbeTimerHandle();
     state.periodicUsabilityProbeBackoff = 0;
     vi.advanceTimersByTime(expectedProbeDeadlineMs(1) + 1);
 
