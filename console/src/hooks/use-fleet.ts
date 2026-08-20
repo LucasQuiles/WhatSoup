@@ -146,12 +146,34 @@ export function useAccess(name: string) {
 /** Structured logs for a line. */
 export function useLogs(name: string) {
   const { connected } = useRealtime();
-  return useQuery({
+  const poll = connected ? false : POLL_LOGS;
+  const query = useQuery({
     queryKey: ['logs', name],
     queryFn: () => api.getLogs(name),
-    refetchInterval: connected ? false : POLL_LOGS,
+    refetchInterval: poll,
     enabled: !!name,
   });
+  // #2519: promoted onto the #1925 freshness contract (useLines idiom).
+  // Poll-aware threshold while polling; METRICS default (120s) when connected.
+  // ⚠ The 120s connected fallback conflates QUIET with STALE. ['logs'] *is*
+  // WS-invalidated — realtime-events.ts maps log_entry -> [['logs', instance]]
+  // and ['logs'] is in REALTIME_OWNED_QUERY_KEYS — so a connected tab refreshes
+  // within ~2s of any new entry. What ages is a line that is simply quiet: no
+  // new entries means no invalidation, dataUpdatedAt freezes, and at 120s the
+  // METRICS default labels current data stale. That backstop is still wanted
+  // (a silently dead socket emits no gap event, so agedOut is the only
+  // mid-connection tripwire) — it is just imprecise, and shared with useFeed.
+  // Inert today: no component reads this .freshness. Before the first consumer
+  // ships, add a connected backstop poll (POLL_LINES_WS_BACKSTOP idiom) so the
+  // signal tracks poll health rather than event silence.
+  return {
+    ...query,
+    freshness: queryFreshness({
+      dataUpdatedAt: query.dataUpdatedAt,
+      refetchFailed: query.isRefetchError,
+      ...(poll ? { staleAfterMs: 2 * poll } : {}),
+    }),
+  };
 }
 
 /** Typing indicators from all instances. */
@@ -167,11 +189,24 @@ export function useTyping() {
 /** Global activity feed. */
 export function useFeed() {
   const { connected } = useRealtime();
-  return useQuery({
+  const poll = connected ? false : POLL_FEED;
+  const query = useQuery({
     queryKey: ['feed'],
     queryFn: () => api.getFeed(),
-    refetchInterval: connected ? false : POLL_FEED,
+    refetchInterval: poll,
   });
+  // #2519: promoted onto the #1925 freshness contract (useLines idiom).
+  // Poll-aware while polling is active (2 missed intervals); the METRICS
+  // default when WS-connected — the server invalidates ['feed'] on every
+  // fleet event (use-websocket), so dataUpdatedAt tracks realtime pushes.
+  return {
+    ...query,
+    freshness: queryFreshness({
+      dataUpdatedAt: query.dataUpdatedAt,
+      refetchFailed: query.isRefetchError,
+      ...(poll ? { staleAfterMs: 2 * poll } : {}),
+    }),
+  };
 }
 
 /** Provider catalog (display names + capability flags). Static — long stale time. */
