@@ -15,15 +15,15 @@ markers and re-run the command — the result is a fixed point, so the resolutio
 rather than a hand-count. `docs/work-index.{json,md}` has the same property via
 `npm run work-index:regen`.
 
-**Total classification rows:** 373
+**Total classification rows:** 376
 
 | Classification | Count |
 |---|---:|
 | PUBLIC | 198 |
-| PRIVATE-ARCHIVE | 175 |
+| PRIVATE-ARCHIVE | 178 |
 | SANITIZE | 0 |
 | DELETE | 0 |
-| Total | 373 |
+| Total | 376 |
 
 | Path | Classification | Rationale |
 |---|---|---|
@@ -145,7 +145,9 @@ rather than a hand-count. `docs/work-index.{json,md}` has the same property via
 | `docs/superpowers/plans/2026-08-03-watchdog-auth-required-contract.md` | PRIVATE-ARCHIVE | Internal watchdog credential-contract implementation plan; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/plans/2026-08-06-host-setup-portability.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/plans/2026-08-07-fallback-continuity.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/plans/2026-08-14-outbound-queue-quiescence-containment.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/plans/2026-08-15-loop-lag-safe-forensic-pipeline.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/plans/2026-08-15-poisoned-direct-send-rejection.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/reviews/2026-04-07-anti-echo-review-handoff.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/reviews/2026-05-31-bot-errors-tool-call-audit.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/reviews/2026-07-09-wall-to-wall-audit-pr-briefs.md` | PRIVATE-ARCHIVE | Internal copy-ready PR briefs from the audit; retained in the repository but excluded from public publication by default. |
@@ -189,6 +191,7 @@ rather than a hand-count. `docs/work-index.{json,md}` has the same property via
 | `docs/superpowers/specs/2026-08-03-watchdog-auth-required-contract-design.md` | PRIVATE-ARCHIVE | Internal watchdog signal, marker-lifecycle, and staged rollout design; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/2026-08-06-host-setup-portability-and-macos-reconciliation-design.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/2026-08-07-fallback-continuity-design.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/specs/2026-08-14-outbound-queue-quiescence-containment-design.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/2026-08-15-loop-lag-safe-forensic-pipeline-design.md` | PRIVATE-ARCHIVE | Internal event-loop evidence transport and collection design; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/2026-08-16-recovery-blocked-follower-lifecycle-design.md` | PRIVATE-ARCHIVE | Internal durable replay, checkpoint-integrity, health, and staged fleet-rollout design; sanitized incident evidence only, retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/kill-session-transactional-cancellation/design.md` | PRIVATE-ARCHIVE | Internal targeted-cancellation protocol design; retained in the repository but excluded from public publication by default. |

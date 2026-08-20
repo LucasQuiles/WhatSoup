@@ -97,6 +97,7 @@ describe('failure taxonomy cross-contract', () => {
     const expectedFields = [
       'activeSessions',
       'sessionCount',
+      'outboundQueuePoisonedScopes',
       'recentCrashes',
       'pollPersistenceErrors',
       'autoCompactIneffective',

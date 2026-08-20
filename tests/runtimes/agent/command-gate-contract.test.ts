@@ -67,6 +67,7 @@ const { mockSession, mockQueue, capturedOnEventRef } = vi.hoisted(() => {
   };
   const mockQueue = {
     enqueueText: vi.fn(),
+    isPoisoned: vi.fn(() => false),
     getSenderToken: () => 'mock-sender-token',
     enqueueStreamingText: vi.fn(),
     enqueueResultText: vi.fn(),

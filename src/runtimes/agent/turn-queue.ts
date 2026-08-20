@@ -32,7 +32,11 @@ export interface QueuedTurn {
  * the finalizer can stamp a distinct failure_class rather than collapsing every
  * reject to 'unknown'. The names are a subset of core AdmissionRejectClass.
  */
-export type TurnRejectReason = 'queue_closed' | 'queue_halted' | 'queue_full';
+export type TurnRejectReason =
+  | 'queue_closed'
+  | 'queue_halted'
+  | 'queue_full'
+  | 'scope_blocked_recovery';
 
 export interface TurnQueueOpts {
   maxDepth?: number;
@@ -121,6 +125,15 @@ export class TurnQueue {
     this.accepting = false;
     this.closeEpoch += 1;
     return this.queue.splice(0);
+  }
+
+  haltAndTakePendingTurns(error: unknown): QueuedTurn[] {
+    // Latch the queue before checking teardown ownership. If a teardown owns
+    // the pending turns, its later rollback may restore them, but it must not
+    // be able to reopen and dispatch work after the external failure became
+    // sticky.
+    this.halt(error);
+    return this.closeAndTakePendingTurns();
   }
 
   beginTeardown(): TurnQueueTeardownReceipt {

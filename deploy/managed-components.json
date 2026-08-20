@@ -191,7 +191,7 @@
         "schedule": "StartInterval 300s",
         "run_at_load": false,
         "keep_alive": false,
-        "purpose": "Runs the manifest-backed release drift checker against the active bot plist WorkingDirectory and queues BOT ERRORS only when a release diverges from reviewed source.",
+        "purpose": "Runs independent manifest-backed release integrity and release-currency observers against the active bot plist WorkingDirectory. Integrity drift and target-ref difference use separate BOT ERRORS sources and do not alter runtime health.",
         "node_pin_required": true,
         "probe": "launchctl print gui/$(id -u)/com.whatsoup.release-drift-check"
       },

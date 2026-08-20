@@ -179,7 +179,9 @@ export const COMMAND_REGISTRY = [
     venue: 'any', // group-permitting by design (admin may /new in a group); venue is enforced inline via sessionScope/isGroup, not the venue axis
     visibility: 'end-user',
     errorClasses: ['not-authorized', 'internal'],
-    renderContract: { asOf: false }, // immediate ack ("Starting new session"), no state read
+    // Immediate outcome acknowledgement, including the same-operation
+    // process-local poison latch when delivery recovery remains pending.
+    renderContract: { asOf: false },
   },
   {
     name: 'status',

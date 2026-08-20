@@ -143,6 +143,55 @@ describe('handleGetLines', () => {
     expect(body[0]).toHaveProperty('lastActive');
   });
 
+  it('preserves bounded outbound-poison health evidence for console consumers', () => {
+    const inst = fakeInstance({ name: 'poisoned-line' });
+    const status = fakeStatus({
+      name: 'poisoned-line',
+      status: 'degraded',
+      statusReason: 'health_body_degraded',
+      statusEvidence: [
+        'health_status=degraded',
+        'degradation_causes=agent_outbound_queue_poisoned',
+      ],
+      health: {
+        status: 'degraded',
+        degradation_causes: ['agent_outbound_queue_poisoned'],
+        runtime: {
+          agent: {
+            outboundQueuePoisoned: true,
+            outboundQueuePoisonedScopes: 1,
+          },
+        },
+      },
+    });
+    const deps = makeDeps({
+      discovery: {
+        getInstances: vi.fn(() => new Map([['poisoned-line', inst]])),
+        getInstance: vi.fn(),
+      } as any,
+      healthPoller: {
+        getStatuses: vi.fn(() => new Map([['poisoned-line', status]])),
+        getStatus: vi.fn(),
+      } as any,
+    });
+
+    const res = mockRes();
+    handleGetLines(mockReq(), res, deps);
+    const [line] = JSON.parse(res._body);
+
+    expect(line.health.degradation_causes).toEqual(['agent_outbound_queue_poisoned']);
+    expect(line.health.runtime.agent).toMatchObject({
+      outboundQueuePoisoned: true,
+      outboundQueuePoisonedScopes: 1,
+    });
+    expect(line.statusEvidence).toEqual([
+      'health_status=degraded',
+      'degradation_causes=agent_outbound_queue_poisoned',
+    ]);
+    expect(JSON.stringify(line)).not.toContain('private-poison-scope');
+    expect(JSON.stringify(line)).not.toContain('private outbound failure');
+  });
+
   it('normalizes sqlite-style runtime timestamps for lastActive', () => {
     const inst = fakeInstance({ name: 'alpha' });
     const status = fakeStatus({

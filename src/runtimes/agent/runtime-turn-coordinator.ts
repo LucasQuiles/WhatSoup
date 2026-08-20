@@ -15,6 +15,11 @@ import {
   type TurnRejectReason,
 } from './turn-queue.ts';
 import { TurnQueueHaltLatch, type TurnQueueHaltHealth } from './turn-queue-halt-latch.ts';
+import {
+  OutboundQueuePoisonRegistry,
+  type OutboundQueuePoisonHealth,
+} from './outbound-queue-poison-registry.ts';
+import { GLOBAL_CONVERSATION_KEY } from '../../core/conversation-key.ts';
 import type { SessionManager } from './session.ts';
 import { config } from '../../config.ts';
 import { collectRuntimeTurnAnswerEvidence } from './runtime-turn-finalization.ts';
@@ -190,6 +195,7 @@ export function reconcileStuckScopes(instanceName: string): void {
 export interface RuntimeTurnCoordinatorPort {
   readonly durability: DurabilityEngine | null;
   readonly instanceName: string;
+  readonly sessionScope: 'single' | 'shared' | 'per_chat';
   readonly runtimeTurnSupervisor: RuntimeTurnSupervisor<RuntimeTurnPostEffects>;
   readonly sessionOwnership: SessionOwnershipRegistry;
   readonly recoveryManagerId: string;
@@ -292,6 +298,7 @@ export interface RuntimeTurnCoordinatorPort {
 export class RuntimeTurnCoordinator {
   private readonly host: RuntimeTurnCoordinatorPort;
   private readonly turnQueueHalts = new TurnQueueHaltLatch();
+  private readonly outboundQueuePoisons = new OutboundQueuePoisonRegistry();
   private readonly activeFinalizations = new Map<string, Promise<FinalizeRuntimeTurnResult>>();
   private readonly cancelledUndispatchedTurnIds = new Set<string>();
   private readonly undispatchedCrashFinalizations = new Map<string, Promise<void>>();
@@ -315,6 +322,78 @@ turnQueueHaltHealth(sessionScope: 'single' | 'shared' | 'per_chat'): TurnQueueHa
 }
 rekeyPerChatTurnQueueHaltScope(fromScopeKey: string, toScopeKey: string): void {
   this.turnQueueHalts.rekey(fromScopeKey, toScopeKey);
+}
+
+outboundQueuePoisonHealth(): OutboundQueuePoisonHealth {
+  return this.outboundQueuePoisons.snapshot();
+}
+
+isOutboundQueuePoisoned(scopeKey: string): boolean {
+  return this.outboundQueuePoisons.has(scopeKey);
+}
+
+rekeyPerChatOutboundQueuePoisonScope(fromScopeKey: string, toScopeKey: string): void {
+  this.outboundQueuePoisons.rekey(fromScopeKey, toScopeKey);
+}
+
+async observeOutboundQueueOperation<T>(
+  scopeKey: string,
+  queue: IOutboundQueue,
+  operation: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    this.observeOutboundQueueFailure(scopeKey, queue, error);
+    throw error;
+  }
+}
+
+private observeOutboundQueueFailure(
+  scopeKey: string,
+  queue: IOutboundQueue,
+  error: unknown,
+): void {
+  if (!queue.isPoisoned()) return;
+  try {
+    this.containOutboundQueuePoison(scopeKey, error);
+  } catch (containmentError) {
+    log.error({ err: containmentError }, 'outbound queue poison containment failed');
+  }
+}
+
+rejectRuntimeTurnIfOutboundQueuePoisoned(scopeKey: string, turn: QueuedTurn): boolean {
+  if (!this.outboundQueuePoisons.has(scopeKey)) return false;
+  this.finalizeRejectedRuntimeTurn(turn, 'scope_blocked_recovery');
+  return true;
+}
+
+enqueueSharedRuntimeTurn(turn: QueuedTurn): boolean {
+  if (this.host.isShuttingDown?.() === true) {
+    this.finalizeRejectedRuntimeTurn(turn, 'queue_closed');
+    return false;
+  }
+  if (this.rejectRuntimeTurnIfOutboundQueuePoisoned(GLOBAL_CONVERSATION_KEY, turn)) {
+    return false;
+  }
+  return this.host.turnQueue.enqueue(turn);
+}
+
+private containOutboundQueuePoison(scopeKey: string, error: unknown): void {
+  this.outboundQueuePoisons.record(scopeKey, error);
+  const poisonCause = this.outboundQueuePoisons.cause(scopeKey);
+  if (this.host.sessionScope === 'per_chat') this.turnQueueHalts.halt(scopeKey);
+  const turnQueue = this.host.sessionScope === 'per_chat'
+    ? this.host.perChatTurnQueues.get(scopeKey)
+    : this.host.turnQueue;
+  for (const pending of turnQueue?.haltAndTakePendingTurns(poisonCause) ?? []) {
+    this.finalizeRejectedRuntimeTurn(pending, 'scope_blocked_recovery');
+  }
+}
+
+private retryOutboundQueuePoisonContainment(scopeKey: string): void {
+  if (!this.outboundQueuePoisons.has(scopeKey)) return;
+  this.containOutboundQueuePoison(scopeKey, this.outboundQueuePoisons.cause(scopeKey));
 }
 
 hasGlobalTeardownPending(): boolean {
@@ -751,14 +830,16 @@ private async performRuntimeTurnFinalization(args: {
     throw new Error('Runtime turn finalization requires durability');
   }
   const bookkeeping = this.turnFinalizationBookkeeping(args.context, args.session, args.event, args.attemptOutcome);
-  const answerEvidence = await collectRuntimeTurnAnswerEvidence(
-    args.queue,
-    args.context.identity.logicalTurnId,
-  );
   const scopeRef = args.mapKey === undefined
     ? undefined
     : this.host.perChatRuntimeTurnScopeRefs.get(args.context.identity.logicalTurnId)
       ?? { value: args.mapKey };
+  const scopeKey = scopeRef?.value ?? GLOBAL_CONVERSATION_KEY;
+  const answerEvidence = await collectRuntimeTurnAnswerEvidence(
+    args.queue,
+    args.context.identity.logicalTurnId,
+    (error) => this.observeOutboundQueueFailure(scopeKey, args.queue, error),
+  );
   const postEffects = this.createRuntimeTurnPostEffects({
     queue: args.queue,
     ...(scopeRef === undefined ? {} : { scopeRef }),
@@ -804,6 +885,7 @@ private async performRuntimeTurnFinalization(args: {
         refreshAnswerEvidence: () => collectRuntimeTurnAnswerEvidence(
           args.queue,
           args.context.identity.logicalTurnId,
+          (error) => this.observeOutboundQueueFailure(scopeKey, args.queue, error),
         ),
         bookkeeping,
         postEffects,
@@ -1148,6 +1230,16 @@ async terminalizeGlobalTurnForReset(): Promise<RuntimeTurnQueueTeardown> {
         'singleton/shared reset teardown rollback failed',
       );
     }
+    if (rollbackSucceeded) {
+      try {
+        this.retryOutboundQueuePoisonContainment(GLOBAL_CONVERSATION_KEY);
+      } catch (containmentError) {
+        failure = new AggregateError(
+          [failure, containmentError],
+          'singleton/shared reset poison containment retry failed',
+        );
+      }
+    }
     if (rollbackSucceeded && this.globalTeardown === state) {
       this.globalTeardown = null;
       state.resolveLifecycle();
@@ -1330,6 +1422,16 @@ async terminalizePerChatTurnQueueForKill(mapKey: string): Promise<RuntimeTurnQue
         failure = new AggregateError(
           [err, rollbackError],
           `per-chat reset teardown rollback failed for ${mapKey}`,
+        );
+      }
+    }
+    if (rollbackSucceeded) {
+      try {
+        this.retryOutboundQueuePoisonContainment(mapKey);
+      } catch (containmentError) {
+        failure = new AggregateError(
+          [failure, containmentError],
+          `per-chat reset poison containment retry failed for ${mapKey}`,
         );
       }
     }
@@ -1609,9 +1711,10 @@ runRuntimeTurnAfterTerminalAction(
 
 flushUnownedRuntimeResult(
   queue: IOutboundQueue,
+  scopeKey: string,
   voice?: { chatJid: string; responseText: string; inboundContentType: string | null },
 ): void {
-  queue.flush()
+  this.observeOutboundQueueOperation(scopeKey, queue, () => queue.flush())
     .then(() => {
       if (
         voice &&
@@ -1657,6 +1760,9 @@ enqueuePerChatRuntimeTurn(mapKey: string, turn: QueuedTurn): boolean {
   if (this.host.isShuttingDown?.() === true) {
     // Shutdown-time admission rejection is a closed queue (#1750).
     this.finalizeRejectedRuntimeTurn(turn, 'queue_closed');
+    return false;
+  }
+  if (this.rejectRuntimeTurnIfOutboundQueuePoisoned(mapKey, turn)) {
     return false;
   }
   if (this.turnQueueHalts.has(mapKey)) {
