@@ -444,6 +444,15 @@
       ]
     },
     {
+      "path": "deploy/scripts/lib/health_reader.py",
+      "sha256": "fa15a5fe4a5293dca5f6cfbee6b79059d1a7aac50adaaf61d4c7ac9aca48584d",
+      "mustContain": [
+        "def classify_projection(payload: Any, *, token_sent: bool) -> str:",
+        "def health_body_is_disclosed(payload: Any) -> bool:",
+        "def instance_health_token(name: str) -> Optional[str]:"
+      ]
+    },
+    {
       "path": "deploy/scripts/reply-guarantee-observer.py",
       "sha256": "cd4d10c51bb85c0ccf083764cdd8f4a9a2c2cba1c413f5ca3fe77a065221cb09",
       "mustContain": [
