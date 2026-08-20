@@ -310,6 +310,7 @@ import {
   expectedProbeDeadlineMs,
   periodicProbeBackoffMultiple,
 } from './primary-readiness-probe.ts';
+import { drainMessageHandlersForShutdown } from './shutdown-message-handler-drain.ts';
 import { ensureClaudeFileStoreCredential } from './providers/claude-filestore-heal.ts';
 import {
   resolveFallbackRecoveryDecision,
@@ -6978,12 +6979,29 @@ export class AgentRuntime implements Runtime {
     }
     this.pendingSystemResults.clear();
     if (!preserveRuntimeTurnState) {
-      const messageHandlers = await Promise.allSettled(
+      // E20 slice 1 (#3315): the handler join is bounded by the SAME absolute
+      // deadline the coordinator above and the recycle lifecycle below honor.
+      // A handler that never settles no longer pins shutdown until main.ts's
+      // hard kill; it is counted, receipted content-free, and left to E20
+      // proper (which will abort it). Turn state is preserved because the
+      // blockers may still be mid-turn.
+      const drain = await drainMessageHandlersForShutdown(
         [...this.activeMessageHandlers].filter(
           (handler) => !this.routeRecycleCommandWork.has(handler),
         ),
+        shutdownDeadlineAt,
       );
-      const rejectedMessageHandlers = messageHandlers.filter(
+      if (drain.timedOut) {
+        log.warn(
+          { phase: 'message_handlers', blockers: drain.blockers, timedOut: true },
+          'message handlers did not drain before the shutdown deadline',
+        );
+        shutdownFailures.push(new Error(
+          `message handlers did not drain before the shutdown deadline (blockers=${drain.blockers})`,
+        ));
+        preserveRuntimeTurnState = true;
+      }
+      const rejectedMessageHandlers = drain.settled.filter(
         (item): item is PromiseRejectedResult => item.status === 'rejected',
       );
       if (rejectedMessageHandlers.length > 0) {
