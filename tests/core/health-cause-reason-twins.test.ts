@@ -17,11 +17,12 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { HEALTH_DEGRADATION_CAUSES } from '../../src/core/health.ts';
 import {
+  HEALTH_DEGRADATION_CAUSES,
   HEALTH_DEGRADATION_CAUSE_REASON_TWINS,
+  HEALTH_DEGRADATION_CAUSE_REGISTRY,
   NO_REASON_TWIN,
-} from '../../src/core/health-degradation-cause-twins.ts';
+} from '../../src/core/health.ts';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 
@@ -43,6 +44,18 @@ describe('HEALTH_DEGRADATION_CAUSE_REASON_TWINS — cause -> status_reason cross
   it('is total: exactly one entry per registered degradation cause, no extras', () => {
     expect(Object.keys(HEALTH_DEGRADATION_CAUSE_REASON_TWINS).sort())
       .toEqual([...HEALTH_DEGRADATION_CAUSES].sort());
+  });
+
+  it('is a derived view of the production cause registry, not a second table', () => {
+    // The registry is what health.ts derives HEALTH_DEGRADATION_CAUSES from at
+    // module load, so the cross-reference lives in the production import graph
+    // (orphan-reachability guard, invariant C) rather than beside it.
+    expect(Object.keys(HEALTH_DEGRADATION_CAUSE_REGISTRY).sort())
+      .toEqual([...HEALTH_DEGRADATION_CAUSES].sort());
+    for (const cause of HEALTH_DEGRADATION_CAUSES) {
+      expect(HEALTH_DEGRADATION_CAUSE_REASON_TWINS[cause], cause)
+        .toBe(HEALTH_DEGRADATION_CAUSE_REGISTRY[cause].reasonTwins);
+    }
   });
 
   it('every entry is either a non-empty reason list or the explicit no_reason_twin annotation', () => {

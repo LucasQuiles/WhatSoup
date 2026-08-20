@@ -377,52 +377,121 @@ export type HealthDegradationCause =
   | 'degradation_silence_unproven'
   | 'unclassified';
 
-const HEALTH_DEGRADATION_CAUSE_PRESENCE: Readonly<Record<HealthDegradationCause, true>> = {
-  provider_fallback_active: true,
-  fallback_chain_exhausted: true,
-  fallback_entry_failures: true,
-  primary_model_unusable: true,
-  model_unusable: true,
-  turn_capability_error: true,
-  primary_model_evidence_stale: true,
-  turn_capability_evidence_stale: true,
-  auth_bond_degraded: true,
-  transport_disconnected: true,
-  enrichment_stale: true,
-  enrichment_runtime_degraded: true,
-  memory_readiness_degraded: true,
-  memory_context_degraded: true,
-  memory_consolidation_degraded: true,
-  connection_churn: true,
-  outbound_flood: true,
-  event_loop_starved: true,
-  durability_debt: true,
-  durability_evidence_unreadable: true,
-  database_retention_failed: true,
-  continuity_gap_unreadable: true,
-  continuity_gap_open: true,
-  schema_future: true,
-  schema_not_ready: true,
-  pending_polls_unreadable: true,
-  agent_recent_crashes: true,
-  agent_auto_compact_backoff: true,
-  agent_session_inactive: true,
-  turn_finalization_degraded: true,
-  turn_recovery_degraded: true,
-  delivery_identity_debt: true,
-  provider_execution_pressure: true,
-  agent_outbound_queue_poisoned: true,
-  agent_runtime_degraded_unclassified: true,
-  agent_runtime_unhealthy: true,
-  chat_runtime_degraded: true,
-  passive_runtime_degraded: true,
-  degradation_silence_unproven: true,
-  unclassified: true,
+/**
+ * Annotation for a cause whose condition the `status_reasons` vector genuinely
+ * never names (it only ever reaches the wire as a cause). Using it is a reviewed
+ * choice: tests/core/health-cause-reason-twins pins the exact annotated set.
+ */
+export const NO_REASON_TWIN = 'no_reason_twin';
+
+/**
+ * `status_reasons` twins of a degradation cause: exact reason literals,
+ * `runtime.<reason>` for the agent-runtime degradedReasons passthrough, or a
+ * `prefix*` family where the reason carries a classifier suffix
+ * (`auth_failure.<class>`, `memory_readiness_<state>`).
+ */
+export type HealthDegradationCauseReasonTwins = readonly string[] | typeof NO_REASON_TWIN;
+
+export interface HealthDegradationCauseRegistryEntry {
+  readonly reasonTwins: HealthDegradationCauseReasonTwins;
+}
+
+/**
+ * The degradation-cause registry: one entry per `HealthDegradationCause` (a
+ * Record over the union, so totality is a compile-time fact). `HEALTH_DEGRADATION_CAUSES`
+ * is derived from its keys. Each entry names the `status_reasons` twin(s) the
+ * SAME condition pushes — /health reports degradation under two vocabularies
+ * (ordered reasons supporting the aggregate status; typed causes that alerts
+ * and flap detection key on) and several conditions reach the wire under
+ * different names in the two, the clearest being runtimeTurnRecoveryIsDegraded:
+ * `runtime.turn_finalization_debt` as a reason, `turn_recovery_degraded` as a
+ * cause. `ensureStatusReasonFloor` (#3316) only guarantees a reason EXISTS;
+ * this is the cross-reference that says which one. Live strings are never
+ * renamed here — add, never rename.
+ */
+export const HEALTH_DEGRADATION_CAUSE_REGISTRY: Readonly<
+  Record<HealthDegradationCause, HealthDegradationCauseRegistryEntry>
+> = {
+  // provider fallback — the window surfaces as an agent-runtime degradedReason;
+  // chain exhaustion and entry failures widen the cause vector only (they feed
+  // turn_capability_degraded indirectly via healthyProviderFallbackCapacity).
+  provider_fallback_active: { reasonTwins: ['runtime.provider_fallback_active'] },
+  fallback_chain_exhausted: { reasonTwins: NO_REASON_TWIN },
+  fallback_entry_failures: { reasonTwins: NO_REASON_TWIN },
+  // turn capability — every model/evidence/error condition folds into the one
+  // turn_capability_degraded reason (turnCapabilityIsDegraded).
+  primary_model_unusable: { reasonTwins: ['turn_capability_degraded'] },
+  model_unusable: { reasonTwins: ['turn_capability_degraded'] },
+  turn_capability_error: { reasonTwins: ['turn_capability_degraded'] },
+  primary_model_evidence_stale: { reasonTwins: ['turn_capability_degraded'] },
+  turn_capability_evidence_stale: { reasonTwins: ['turn_capability_degraded'] },
+  // transport / auth
+  auth_bond_degraded: { reasonTwins: ['auth_failure.*'] },
+  transport_disconnected: { reasonTwins: ['connection_disconnected', 'connection_recovering'] },
+  // enrichment / memory
+  enrichment_stale: { reasonTwins: ['enrichment_stale'] },
+  enrichment_runtime_degraded: { reasonTwins: ['enrichment_runtime_degraded'] },
+  memory_readiness_degraded: { reasonTwins: ['memory_readiness_*'] },
+  memory_context_degraded: { reasonTwins: ['memory_context_*'] },
+  memory_consolidation_degraded: { reasonTwins: ['memory_consolidation_*'] },
+  connection_churn: { reasonTwins: ['connection_churn'] },
+  outbound_flood: { reasonTwins: ['outbound_flood'] },
+  // process / durability / storage — continuity gaps reach the body and the
+  // cause vector only; the reason vector has never carried them.
+  event_loop_starved: { reasonTwins: ['event_loop_starvation'] },
+  durability_debt: { reasonTwins: ['durability_delivery_debt'] },
+  durability_evidence_unreadable: { reasonTwins: ['durability_evidence_unreadable'] },
+  database_retention_failed: { reasonTwins: ['database_retention_failed'] },
+  continuity_gap_unreadable: { reasonTwins: NO_REASON_TWIN },
+  continuity_gap_open: { reasonTwins: NO_REASON_TWIN },
+  schema_future: { reasonTwins: ['schema_future'] },
+  schema_not_ready: { reasonTwins: ['schema_not_ready'] },
+  pending_polls_unreadable: { reasonTwins: ['pending_polls_unreadable'] },
+  // agent runtime — each cause is keyed from a runtime detail counter whose
+  // companion degradedReason reaches the reason vector as `runtime.<reason>`.
+  // runtimeTurnRecoveryIsDegraded pushes ONE reason for finalization debt AND
+  // recovery debt; the cause vector splits the same predicate into two names.
+  agent_recent_crashes: { reasonTwins: ['runtime.recent_crashes'] },
+  agent_auto_compact_backoff: { reasonTwins: ['runtime.auto_compact_backoff'] },
+  agent_session_inactive: { reasonTwins: ['runtime.session_inactive'] },
+  turn_finalization_degraded: { reasonTwins: ['runtime.turn_finalization_debt'] },
+  turn_recovery_degraded: { reasonTwins: ['runtime.turn_finalization_debt'] },
+  delivery_identity_debt: { reasonTwins: ['runtime.completed_delivery_identity_debt'] },
+  provider_execution_pressure: { reasonTwins: ['runtime.provider_execution_pressure'] },
+  // #3321: poisoned outbound queue scopes (successor to PR #3242) - the runtime
+  // pushes the companion degradedReason while the containment latch is up.
+  agent_outbound_queue_poisoned: { reasonTwins: ['runtime.outbound_queue_poisoned'] },
+  // the fall-through when the agent runtime is degraded for a reason no named
+  // cause covers: the degradedReasons without a cause of their own, plus the
+  // bare marker used when the runtime reported no reasons at all.
+  agent_runtime_degraded_unclassified: {
+    reasonTwins: [
+      'runtime.turn_queue_halted',
+      'runtime.poll_persistence_failure',
+      'runtime.offline_decision_retry_exhausted',
+      'agent_runtime_degraded',
+    ],
+  },
+  agent_runtime_unhealthy: { reasonTwins: ['agent_runtime_unhealthy'] },
+  chat_runtime_degraded: { reasonTwins: ['runtime_degraded', 'runtime_unhealthy'] },
+  passive_runtime_degraded: { reasonTwins: ['runtime_degraded', 'runtime_unhealthy'] },
+  // the two symmetric floors
+  degradation_silence_unproven: { reasonTwins: ['degradation_silence_unproven'] },
+  unclassified: { reasonTwins: ['unclassified'] },
 };
 
 export const HEALTH_DEGRADATION_CAUSES = Object.freeze(
-  Object.keys(HEALTH_DEGRADATION_CAUSE_PRESENCE),
+  Object.keys(HEALTH_DEGRADATION_CAUSE_REGISTRY),
 ) as readonly HealthDegradationCause[];
+
+/** Derived cause -> status_reason twins view of the registry above. */
+export const HEALTH_DEGRADATION_CAUSE_REASON_TWINS: Readonly<
+  Record<HealthDegradationCause, HealthDegradationCauseReasonTwins>
+> = Object.freeze(
+  Object.fromEntries(
+    HEALTH_DEGRADATION_CAUSES.map((cause) => [cause, HEALTH_DEGRADATION_CAUSE_REGISTRY[cause].reasonTwins]),
+  ),
+) as Readonly<Record<HealthDegradationCause, HealthDegradationCauseReasonTwins>>;
 
 function normalizeBooleanOrNull(value: unknown): boolean | null {
   return typeof value === 'boolean' ? value : null;

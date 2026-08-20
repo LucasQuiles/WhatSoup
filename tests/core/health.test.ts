@@ -93,7 +93,7 @@ import { seedChatAliases } from '../../src/core/chats-resolver.ts';
 import { createProfileRegistry } from '../../src/core/profiles.ts';
 import { createOutboundSendsWriter } from '../../src/core/outbound-sends.ts';
 import type { HealthDeps } from '../../src/core/health.ts';
-import { HEALTH_DEGRADATION_CAUSE_REASON_TWINS, NO_REASON_TWIN } from '../../src/core/health-degradation-cause-twins.ts';
+import { HEALTH_DEGRADATION_CAUSE_REASON_TWINS, NO_REASON_TWIN } from '../../src/core/health.ts';
 import type { StartupNotificationHealth } from '../../src/core/startup-notification-controller.ts';
 import type { ConnectionManager } from '../../src/transport/connection.ts';
 import { emptyConnectionStateSnapshot } from '../../src/transport/twilio/connection-snapshot.ts';
