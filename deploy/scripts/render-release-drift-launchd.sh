@@ -8,6 +8,8 @@ repo_root="${WHATSOUP_REPO_ROOT:-$default_repo_root}"
 home_dir="${HOME:?}"
 instance=""
 output=""
+target_url="${WHATSOUP_RELEASE_TARGET_URL:-https://github.com/LucasQuiles/WhatSoup.git}"
+target_ref="${WHATSOUP_RELEASE_TARGET_REF:-refs/heads/main}"
 
 usage() {
   cat >&2 <<'USAGE'
@@ -21,6 +23,8 @@ Options:
   --repo-root <path>   Absolute WhatSoup repo path (default: script repo)
   --home <path>        Absolute home directory (default: $HOME)
   --output <path>      Absolute non-live path to write instead of stdout
+  --target-url <url>   Explicit HTTPS/SSH Git remote used for currency observation
+  --target-ref <ref>   Full refs/heads/... target (default: refs/heads/main)
   --help              Show this help
 USAGE
 }
@@ -57,6 +61,14 @@ while [[ $# -gt 0 ]]; do
       output="$(take_value "$1" "${2:-}")"
       shift 2
       ;;
+    --target-url)
+      target_url="$(take_value "$1" "${2:-}")"
+      shift 2
+      ;;
+    --target-ref)
+      target_ref="$(take_value "$1" "${2:-}")"
+      shift 2
+      ;;
     --help)
       usage
       exit 0
@@ -78,6 +90,12 @@ if [[ "$home_dir" != /* ]]; then
 fi
 if [[ ! "$instance" =~ ^[A-Za-z0-9._-]+$ ]]; then
   fail "unsafe --instance: use only letters, digits, dot, underscore, and dash"
+fi
+if [[ ! "$target_url" =~ ^https://[A-Za-z0-9._~:/@%+-]+$ && ! "$target_url" =~ ^ssh://[A-Za-z0-9._~:/@%+-]+$ && ! "$target_url" =~ ^git@[A-Za-z0-9.-]+:[A-Za-z0-9._~/%+-]+$ ]]; then
+  fail "unsafe --target-url: use a credential-free HTTPS or SSH Git URL"
+fi
+if [[ ! "$target_ref" =~ ^refs/heads/[A-Za-z0-9][A-Za-z0-9._/-]*$ || "$target_ref" == *..* || "$target_ref" == *//* || "$target_ref" == */ || "$target_ref" == *. ]]; then
+  fail "unsafe --target-ref: use a full refs/heads/... name"
 fi
 
 template="$repo_root/deploy/com.whatsoup.release-drift-check.plist"
@@ -104,16 +122,20 @@ escape_sed_replacement() {
 repo_root_replacement="$(escape_sed_replacement "$repo_root")"
 home_replacement="$(escape_sed_replacement "$home_dir")"
 instance_replacement="$(escape_sed_replacement "$instance")"
+target_url_replacement="$(escape_sed_replacement "$target_url")"
+target_ref_replacement="$(escape_sed_replacement "$target_ref")"
 
 rendered="$(
   sed \
     -e "s|__WHATSOUP_REPO_ROOT__|$repo_root_replacement|g" \
     -e "s|__HOME__|$home_replacement|g" \
     -e "s|__INSTANCE__|$instance_replacement|g" \
+    -e "s|__TARGET_URL__|$target_url_replacement|g" \
+    -e "s|__TARGET_REF__|$target_ref_replacement|g" \
     "$template"
 )"
 
-if grep -Eq '__WHATSOUP_REPO_ROOT__|__HOME__|__INSTANCE__' <<<"$rendered"; then
+if grep -Eq '__WHATSOUP_REPO_ROOT__|__HOME__|__INSTANCE__|__TARGET_URL__|__TARGET_REF__' <<<"$rendered"; then
   fail "rendered plist still contains unresolved placeholders"
 fi
 
