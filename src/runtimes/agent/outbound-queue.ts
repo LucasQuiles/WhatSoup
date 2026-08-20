@@ -1116,27 +1116,46 @@ export class OutboundQueue implements IOutboundQueue {
   /** Flush all pending messages (tool buffer + send queue) immediately. */
   async flush(): Promise<void> {
     this.lastActivity = Date.now();
-    this.flushStreamBuffer();
-    this.flushToolBuffer();
-    this.throwDrainFailure();
-    // Wait for the current chain to drain
-    await this.chain;
-    // A concurrent producer can enqueue between the chain settling and the
-    // assertion below: its drainQueue() flips `sending` synchronously and
-    // chains a NEW segment this await never covered, so a single-shot assert
-    // poisons a HEALTHY, actively-draining queue (live 2026-08-16: the
-    // managed-handoff replay's pre-spawn flush interleaved with the advance
-    // notice drain — sticky drainFailure, chat outbound dead until restart).
-    // Re-await until quiescent; the spin cap preserves stuck-queue detection
-    // (a queue that never drains still reaches the poisoning assert).
-    for (
-      let spin = 0;
-      (this.sending || this.sendQueue.length > 0) && spin < FLUSH_QUIESCENCE_MAX_SPINS;
-      spin++
-    ) {
-      await new Promise<void>((resolve) => setTimeout(resolve, FLUSH_QUIESCENCE_SPIN_MS));
-      await this.chain;
+    // Wait for the current chain to drain. A concurrent producer can enqueue
+    // between the chain settling and the assertion below: its drainQueue()
+    // flips `sending` synchronously and chains a NEW segment this await never
+    // covered, so a single-shot assert poisons a HEALTHY, actively-draining
+    // queue (live 2026-08-16: the managed-handoff replay's pre-spawn flush
+    // interleaved with the advance notice drain — sticky drainFailure, chat
+    // outbound dead until restart).
+    //
+    // #3242's containment guarantee adds a second requirement a send-queue-only
+    // spin cannot satisfy: a late STREAM/TOOL buffer enqueued during flush
+    // never touches sendQueue — it parks in streamBufferParts/toolBuffer behind
+    // a debounce timer — so it must be re-flushed every pass, exactly what
+    // atStableBoundary() does. Reconcile the two by re-flushing the buffers
+    // each pass while keeping #3269's spin cap, which still bounds a livelocked
+    // queue so it reaches the poisoning assert instead of spinning forever.
+    // Poison is re-thrown immediately after each await (before any timer), so a
+    // genuine drain failure rejects flush() promptly rather than waiting out a
+    // spin tick.
+    for (let spin = 0; spin < FLUSH_QUIESCENCE_MAX_SPINS; spin++) {
+      this.flushStreamBuffer();
+      this.flushToolBuffer();
       this.throwDrainFailure();
+      const observedChain = this.chain;
+      await observedChain;
+      this.throwDrainFailure();
+
+      if (
+        observedChain === this.chain
+        && !this.sending
+        && this.sendQueue.length === 0
+        && this.streamBufferParts.length === 0
+        && this.toolBuffer.length === 0
+        && this.streamTimer === null
+        && this.toolTimer === null
+        && this.toolMaxAgeTimer === null
+      ) {
+        break;
+      }
+
+      await new Promise<void>((resolve) => setTimeout(resolve, FLUSH_QUIESCENCE_SPIN_MS));
     }
     this.assertDrainComplete();
     // All messages delivered — clear typing indicator and per-turn state

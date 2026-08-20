@@ -263,4 +263,31 @@ describe('OutboundQueue stable completion boundary', () => {
     expect(queue.isPoisoned()).toBe(true);
     await expect(queue.flush()).rejects.toBe(realError);
   });
+
+  it('a stuck queue still reaches the poisoning assert instead of hanging forever', async () => {
+    const messenger: Messenger = {
+      sendMessage: vi.fn(async () => ({ waMessageId: null })),
+      sendMedia: vi.fn(async () => ({ waMessageId: null })),
+      setTyping: vi.fn(async () => undefined),
+    };
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    // Simulate a queue whose head chunk never drains: pending send work with an
+    // already-settled chain. No drain segment will ever shift it, so the queue
+    // can never reach quiescence — the bounded spin must still reach the
+    // poisoning assert instead of spinning forever.
+    (queue as unknown as { sendQueue: Array<{ text: string }> }).sendQueue = [{ text: 'stuck' }];
+
+    const completion = queue.flush().then(
+      () => ({ kind: 'resolved' as const }),
+      (error: unknown) => ({ kind: 'rejected' as const, error }),
+    );
+    await vi.runAllTimersAsync();
+
+    const result = await completion;
+    expect(result).toMatchObject({ kind: 'rejected' });
+    expect((result as { error: Error }).error).toMatchObject({
+      message: expect.stringContaining('pending send work'),
+    });
+    expect(queue.isPoisoned()).toBe(true);
+  });
 });
