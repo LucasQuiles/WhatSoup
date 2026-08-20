@@ -3,6 +3,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
+import { fakeTimeoutBody } from './fake-timeout-helper.ts';
 
 const tmp = trackTmpDirs('');
 
@@ -63,7 +64,7 @@ function runKeyringLookupProbe(
 
   writeExecutable(path.join(binDir, 'uname'), `#!/usr/bin/env bash\nprintf '%s\\n' '${platform}'\n`);
   writeExecutable(path.join(binDir, 'security'), `#!/usr/bin/env bash\nprintf 'security %s\\n' "$*" >> "$LOG_PATH"\nif [ "$SCENARIO" = "canonical-hit" ] && [ "$1" = "find-generic-password" ] && [ "$3" = "whatsoup-health-token" ] && [ "$5" = "test-instance" ]; then\n  printf 'canonical-secret\\n'\n  exit 0\nfi\nif [ "$SCENARIO" = "canonical-miss-legacy-hit" ] && [ "$1" = "find-generic-password" ] && [ "$3" = "whatsoup_health" ]; then\n  printf 'legacy-keyring-token\\n'\n  exit 0\nfi\nexit 1\n`);
-  writeExecutable(path.join(binDir, 'timeout'), `#!/usr/bin/env bash\nprintf 'timeout %s\\n' "$*" >> "$LOG_PATH"\nif [ "\${1:-}" = "-k" ]; then shift 2; fi\nshift\nexec "$@"\n`);
+  writeExecutable(path.join(binDir, 'timeout'), `#!/usr/bin/env bash\n${fakeTimeoutBody()}\n`);
   writeExecutable(path.join(binDir, 'secret-tool'), `#!/usr/bin/env bash\nprintf 'secret-tool %s\\n' "$*" >> "$LOG_PATH"\nif [ "$SCENARIO" = "canonical-hit" ] && [ "$1" = "lookup" ] && [ "$3" = "whatsoup-health-token" ] && [ "$4" = "user" ] && [ "$5" = "test-instance" ]; then\n  printf 'canonical-secret\\n'\n  exit 0\nfi\nif [ "$SCENARIO" = "canonical-miss-legacy-hit" ] && [ "$1" = "lookup" ] && [ "$3" = "whatsoup_health" ]; then\n  printf 'legacy-keyring-token\\n'\n  exit 0\nfi\nexit 1\n`);
 
   const scriptPath = path.join(tmpDir, 'probe.sh');
@@ -146,7 +147,7 @@ function runHealthTokenFileProbe(
 
   writeExecutable(path.join(binDir, 'uname'), `#!/usr/bin/env bash\nprintf '%s\\n' '${platform}'\n`);
   writeExecutable(path.join(binDir, 'security'), `#!/usr/bin/env bash\nprintf 'security %s\\n' "$*" >> "$LOG_PATH"\nif [ "$SCENARIO" = "keyring-hang" ] && [ "\${3:-}" = "whatsoup-health-token" ]; then sleep 30; fi\nif { [ "$SCENARIO" = "keyring-hit" ] || [ "$SCENARIO" = "keyring-only" ]; } && [ "$3" = "whatsoup-health-token" ]; then printf '%s\\n' '${'c'.repeat(64)}'; exit 0; fi\nif [ "$SCENARIO" = "legacy-hit" ] && [ "$3" = "whatsoup_health" ]; then printf '%s\\n' '${'d'.repeat(64)}'; exit 0; fi\nexit 1\n`);
-  writeExecutable(path.join(binDir, 'timeout'), `#!/usr/bin/env bash\nprintf 'timeout %s\\n' "$*" >> "$LOG_PATH"\nif [ "\${1:-}" = "-k" ]; then shift 2; fi\nshift\nexec "$@"\n`);
+  writeExecutable(path.join(binDir, 'timeout'), `#!/usr/bin/env bash\n${fakeTimeoutBody()}\n`);
   writeExecutable(path.join(binDir, 'secret-tool'), `#!/usr/bin/env bash\nprintf 'secret-tool %s\\n' "$*" >> "$LOG_PATH"\nif { [ "$SCENARIO" = "keyring-hit" ] || [ "$SCENARIO" = "keyring-only" ]; } && [ "$3" = "whatsoup-health-token" ]; then printf '%s\\n' '${'c'.repeat(64)}'; exit 0; fi\nif [ "$SCENARIO" = "legacy-hit" ] && [ "$3" = "whatsoup_health" ]; then printf '%s\\n' '${'d'.repeat(64)}'; exit 0; fi\nexit 1\n`);
   writeExecutable(path.join(binDir, 'stat'), `#!/usr/bin/env bash
 set -euo pipefail
@@ -421,7 +422,7 @@ describe('health token shell wrappers', () => {
     writeExecutable(path.join(binDir, 'uname'), `#!/usr/bin/env bash\nprintf '%s\\n' 'Linux'\n`);
     writeExecutable(path.join(binDir, 'security'), `#!/usr/bin/env bash\nprintf 'security %s\\n' "$*" >> "$LOG_PATH"\nexit 1\n`);
     writeExecutable(path.join(binDir, 'secret-tool'), `#!/usr/bin/env bash\nprintf 'secret-tool %s\\n' "$*" >> "$LOG_PATH"\nexit 1\n`);
-    writeExecutable(path.join(binDir, 'timeout'), `#!/usr/bin/env bash\nprintf 'timeout %s\\n' "$*" >> "$LOG_PATH"\nif [ "\${1:-}" = "-k" ]; then shift 2; fi\nshift\nexec "$@"\n`);
+    writeExecutable(path.join(binDir, 'timeout'), `#!/usr/bin/env bash\n${fakeTimeoutBody()}\n`);
 
     const start = source.indexOf('# Health server auth token');
     const end = source.indexOf('exec "$NODE"', start);
