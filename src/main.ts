@@ -1325,23 +1325,25 @@ async function shutdown(signal: string): Promise<void> {
     // records the failure, the clean-exit mark is withheld, and the exit code
     // below goes nonzero. See runShutdownSequence for the receipt contract.
     outcome = await runShutdownSequence({
-      stopAuxiliaries: async () => {
-        clearTimeout(metricsBackfillTimeout);
-        clearInterval(metricsInterval);
-        clearInterval(retentionInterval);
-        mediaRetentionTimer.stop();
-        processTmpRetentionTimer.stop();
-        databaseRetentionTimer.stop();
-        await memoryConsolidationScheduler?.stop();
-        clearInterval(echoTimeoutInterval);
-        clearInterval(stuckInboundInterval);
-        clearInterval(lidReconcileInterval);
-        if (degradationInterval) clearInterval(degradationInterval);
-        startupNotificationController?.stop();
-        messageScheduler.stop();
-        triggerPoller.stop();
-        healthServer.close();
-      },
+      // Each auxiliary stop is isolated by the sequence: one throwing stop
+      // skips none of the rest (round-3 finding 3).
+      auxiliaries: [
+        { name: 'metrics-backfill-timeout', stop: () => clearTimeout(metricsBackfillTimeout) },
+        { name: 'metrics-interval', stop: () => clearInterval(metricsInterval) },
+        { name: 'retention-interval', stop: () => clearInterval(retentionInterval) },
+        { name: 'media-retention-timer', stop: () => mediaRetentionTimer.stop() },
+        { name: 'process-tmp-retention-timer', stop: () => processTmpRetentionTimer.stop() },
+        { name: 'database-retention-timer', stop: () => databaseRetentionTimer.stop() },
+        { name: 'memory-consolidation-scheduler', stop: async () => { await memoryConsolidationScheduler?.stop(); } },
+        { name: 'echo-timeout-interval', stop: () => clearInterval(echoTimeoutInterval) },
+        { name: 'stuck-inbound-interval', stop: () => clearInterval(stuckInboundInterval) },
+        { name: 'lid-reconcile-interval', stop: () => clearInterval(lidReconcileInterval) },
+        { name: 'degradation-interval', stop: () => { if (degradationInterval) clearInterval(degradationInterval); } },
+        { name: 'startup-notification-controller', stop: () => startupNotificationController?.stop() },
+        { name: 'message-scheduler', stop: () => messageScheduler.stop() },
+        { name: 'trigger-poller', stop: () => triggerPoller.stop() },
+        { name: 'health-server', stop: () => { healthServer.close(); } },
+      ],
       // Flush runtime queue before closing transport so queued messages can be delivered
       // runtime.shutdown() stops enrichment poller internally
       shutdownRuntime: () => runtime.shutdown(),

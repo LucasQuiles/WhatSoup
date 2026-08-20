@@ -12,7 +12,7 @@
  *  - T1 characterization: a 'suspended' checkpoint stays resumable across an
  *    aborted resume (the store-level window the guard closes)
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -27,6 +27,7 @@ import {
   RELAUNCH_TRACK_HARD_CAP,
 } from '../../../src/runtimes/agent/restart-loop-guard.ts';
 import { Database } from '../../../src/core/database.ts';
+import * as privateJournal from '../../../src/lib/private-journal.ts';
 
 const { maxRestarts: DEFAULT_MAX, windowMs: DEFAULT_WINDOW } = RESTART_LOOP_GUARD_DEFAULTS;
 
@@ -434,5 +435,50 @@ describe('T1 — characterization: suspended checkpoint stays resumable across a
       `UPDATE session_checkpoints SET session_status = 'ended' WHERE conversation_key = 'conv-1'`,
     ).run();
     expect(resumableKeys()).not.toContain('conv-1');
+  });
+});
+
+describe('markCleanExit persistence contract (round 3)', () => {
+  let dir: string;
+  let statePath: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'ws-restart-loop-guard-mce-'));
+    statePath = restartLoopGuardPath(dir);
+  });
+
+  afterEach(() => {
+    chmodSync(dir, 0o700);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('reports persisted: true after clearing a real journal', () => {
+    markBootInProgress(statePath, 1_000);
+    expect(markCleanExit(statePath)).toEqual({ persisted: true });
+  });
+
+  it('a missing journal is a designed no-op, not a persistence failure (chat/passive instances)', () => {
+    expect(markCleanExit(statePath)).toEqual({ persisted: true, reason: 'no_journal' });
+  });
+
+  it('an unreadable journal cannot prove the crash marker was cleared', () => {
+    writeFileSync(statePath, 'not json{', 'utf8');
+    chmodSync(statePath, 0o600);
+    expect(markCleanExit(statePath)).toEqual({ persisted: false, reason: 'journal_unreadable' });
+  });
+
+  it('a failed write reports persisted: false with the typed reason', () => {
+    // Permission fixtures cannot fail the atomic writer as the owner (it
+    // force-repairs directory modes and replaces the file by rename), so the
+    // persistence boundary itself is stubbed to throw.
+    markBootInProgress(statePath, 1_000);
+    const write = vi.spyOn(privateJournal, 'writePrivateJournalSync').mockImplementation(() => {
+      throw new Error('disk full');
+    });
+    try {
+      expect(markCleanExit(statePath)).toEqual({ persisted: false, reason: 'write_failed' });
+    } finally {
+      write.mockRestore();
+    }
   });
 });

@@ -257,15 +257,28 @@ export function markBootInProgress(statePath: string, now = systemClock.now()): 
  * the loop, so the crash-cycle count restarts. lastTripAt is retained for
  * health surfacing. No-op on any error.
  */
-export function markCleanExit(statePath: string): void {
+/**
+ * Whether the clean-exit mark actually reached disk. The guard itself stays
+ * fail-open (never throws, never wedges an instance), but the CALLER must be
+ * able to tell a persisted mark from a dropped one: an unpersisted mark means
+ * the next boot will count as crash-interrupted, so the process-level shutdown
+ * policy treats it as an incomplete shutdown rather than exiting 0 (round 3).
+ * 'no_journal' is the designed chat/passive no-op: nothing existed to clear.
+ */
+export type MarkCleanExitResult =
+  | { persisted: true; reason?: 'no_journal' }
+  | { persisted: false; reason: 'journal_unreadable' | 'write_failed' };
+
+export function markCleanExit(statePath: string): MarkCleanExitResult {
   const loaded = loadState(statePath);
-  if (loaded.status === 'journal_unreadable' || loaded.state === null) return;
+  if (loaded.status === 'journal_unreadable') return { persisted: false, reason: 'journal_unreadable' };
+  if (loaded.state === null) return { persisted: true, reason: 'no_journal' };
   const { state } = loaded;
   state.bootInProgress = false;
   state.boots = [];
   // state.relaunches is deliberately NOT cleared: it must survive clean exits so a
   // clean-restart thrash loop (every cycle of which runs THIS function) stays visible.
-  saveState(statePath, state);
+  return saveState(statePath, state) ? { persisted: true } : { persisted: false, reason: 'write_failed' };
 }
 
 /**

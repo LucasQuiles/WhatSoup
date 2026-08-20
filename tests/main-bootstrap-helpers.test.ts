@@ -497,7 +497,7 @@ async function importMainWithMocks(options: {
     isProcessLockError,
     releaseProcessLock,
     flushLogger: vi.fn(async () => {}),
-    shutdownExitCode: vi.fn(() => 0),
+    shutdownExitCode: vi.fn((_signal: string, _outcome?: { complete: boolean }): 0 | 1 => 0),
     recordStartupBoot,
     settleStartupNotification,
     startupNotifyPath,
@@ -614,12 +614,15 @@ async function importMainWithMocks(options: {
     isProcessLockError: mocks.isProcessLockError,
     releaseProcessLock: mocks.releaseProcessLock,
   }));
-  // The real runShutdownSequence runs (it is the orchestration under test
-  // elsewhere); only the exit-code policy is observed through the mock.
-  vi.doMock('../src/main-shutdown-policy.ts', async (importOriginal) => ({
-    ...await importOriginal<typeof import('../src/main-shutdown-policy.ts')>(),
-    shutdownExitCode: mocks.shutdownExitCode,
-  }));
+  // The real runShutdownSequence and the REAL exit-code policy run; the
+  // vi.fn wrapper only observes the calls, so the SIGTERM path can assert
+  // process.exit received the policy's actual nonzero code on an incomplete
+  // shutdown rather than a mock's constant.
+  vi.doMock('../src/main-shutdown-policy.ts', async (importOriginal) => {
+    const original = await importOriginal<typeof import('../src/main-shutdown-policy.ts')>();
+    mocks.shutdownExitCode.mockImplementation(original.shutdownExitCode);
+    return { ...original, shutdownExitCode: mocks.shutdownExitCode };
+  });
   vi.doMock('../src/fleet/platform.ts', () => ({ createServiceManager: mocks.createServiceManager }));
 
   await import('../src/main.ts');
@@ -654,8 +657,11 @@ describe('main.ts — uncovered helpers and signal paths', () => {
   });
 
   const flushMicrotasks = async () => {
-    await Promise.resolve();
-    await Promise.resolve();
+    // The shutdown sequence now isolates every auxiliary stop behind its own
+    // await (round-3 finding 3), so reaching the finally block takes more
+    // interleaved microtask turns than the old two. Pure microtask flushing
+    // only: setImmediate would hang under suites running fake timers.
+    for (let i = 0; i < 80; i += 1) await Promise.resolve();
   };
 
   // ── A. resolveTilde ────────────────────────────────────────────────────────
@@ -826,7 +832,9 @@ describe('main.ts — uncovered helpers and signal paths', () => {
       // finally block still runs
       expect(h.db.close).toHaveBeenCalledOnce();
       expect(h.flushLogger).toHaveBeenCalledOnce();
-      expect(exitSpy).toHaveBeenCalled();
+      // an incomplete shutdown must exit NONZERO even for an operator signal
+      expect(h.shutdownExitCode).toHaveBeenCalledWith('SIGTERM', expect.objectContaining({ complete: false }));
+      expect(exitSpy).toHaveBeenCalledWith(1);
     });
 
     it('shutdown() logs error and still flushes when db.close() throws', async () => {
