@@ -154,12 +154,18 @@ export function useLogs(name: string) {
     enabled: !!name,
   });
   // #2519: promoted onto the #1925 freshness contract (useLines idiom).
-  // ⚠ Unlike ['feed']/['typing'], the WS layer never invalidates ['logs']:
-  // a connected tab fetches once on mount and then ages. That aged data is
-  // exactly what the contract exists to label — stale surfaces the gap
-  // instead of hiding it (stale only labels, never hides). Poll-aware
-  // threshold while polling; METRICS default (120s) when connected, where
-  // hitting it is a true "not a current observation" signal.
+  // Poll-aware threshold while polling; METRICS default (120s) when connected.
+  // ⚠ The 120s connected fallback conflates QUIET with STALE. ['logs'] *is*
+  // WS-invalidated — realtime-events.ts maps log_entry -> [['logs', instance]]
+  // and ['logs'] is in REALTIME_OWNED_QUERY_KEYS — so a connected tab refreshes
+  // within ~2s of any new entry. What ages is a line that is simply quiet: no
+  // new entries means no invalidation, dataUpdatedAt freezes, and at 120s the
+  // METRICS default labels current data stale. That backstop is still wanted
+  // (a silently dead socket emits no gap event, so agedOut is the only
+  // mid-connection tripwire) — it is just imprecise, and shared with useFeed.
+  // Inert today: no component reads this .freshness. Before the first consumer
+  // ships, add a connected backstop poll (POLL_LINES_WS_BACKSTOP idiom) so the
+  // signal tracks poll health rather than event silence.
   return {
     ...query,
     freshness: queryFreshness({
