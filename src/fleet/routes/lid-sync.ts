@@ -35,18 +35,22 @@ export function handleGetLidMappings(
     const allMappings: Array<{ lid: string; phone_jid: string; instance: string }> = [];
     const observations: LidMappingObservation[] = [];
     const seen = new Set<string>();
+    const readErrors: string[] = [];
 
     for (const inst of instances) {
       const result = deps.dbReader.query(inst.name, inst.dbPath, (db: DatabaseSync) => {
         return readLidMappings(db);
       });
-      if (result.ok) {
-        for (const mapping of result.data) {
-          observations.push({ ...mapping, instance: inst.name });
-          if (!seen.has(mapping.lid)) {
-            seen.add(mapping.lid);
-            allMappings.push({ lid: mapping.lid, phone_jid: mapping.phone_jid, instance: inst.name });
-          }
+      if (!result.ok) {
+        // PDR-3: a read failure must surface as failure, never as fake-normal data.
+        readErrors.push(inst.name);
+        continue;
+      }
+      for (const mapping of result.data) {
+        observations.push({ ...mapping, instance: inst.name });
+        if (!seen.has(mapping.lid)) {
+          seen.add(mapping.lid);
+          allMappings.push({ lid: mapping.lid, phone_jid: mapping.phone_jid, instance: inst.name });
         }
       }
     }
@@ -59,6 +63,8 @@ export function handleGetLidMappings(
       unified,
       conflicts,
       conflict_count: conflicts.length,
+      read_errors: readErrors,
+      read_error_count: readErrors.length,
     });
   } catch (err) {
     log.error({ err }, 'L5: failed to export LID mappings');
@@ -77,20 +83,26 @@ export async function handleSyncLidMappings(
 
     // Collect every instance's observation so the write seam can compare
     // cross-instance freshness without discarding timestamps.
+    const readErrors: string[] = [];
     const observations: FleetMappingInput[] = [];
     for (const inst of instances) {
       const result = deps.dbReader.query(inst.name, inst.dbPath, (db: DatabaseSync) => {
         return readLidMappings(db);
       });
-      if (result.ok) {
-        for (const mapping of result.data) {
-          observations.push({
-            lid: mapping.lid,
-            phone_jid: mapping.phone_jid,
-            updated_at: mapping.updated_at,
-            source_instance: inst.name,
-          });
-        }
+      if (!result.ok) {
+        // PDR-3: surface the read failure per-instance (pinned sync semantics skip
+        // unreadable peers with visible markers rather than aborting the broadcast).
+        log.error({ instance: inst.name }, 'L5: LID sync — instance read failed; excluded from observations');
+        readErrors.push(inst.name);
+        continue;
+      }
+      for (const mapping of result.data) {
+        observations.push({
+          lid: mapping.lid,
+          phone_jid: mapping.phone_jid,
+          updated_at: mapping.updated_at,
+          source_instance: inst.name,
+        });
       }
     }
 
@@ -170,7 +182,7 @@ export async function handleSyncLidMappings(
 
     const totalMappings = observations.length;
     log.info({ totalMappings, results, details, skippedInstances }, 'L5: cross-instance LID sync completed');
-    jsonResponse(res, 200, { totalMappings, results, details, skippedInstances });
+    jsonResponse(res, 200, { totalMappings, results, details, skippedInstances, readErrors });
   } catch (err) {
     log.error({ err }, 'L5: failed to sync LID mappings');
     jsonResponse(res, 500, { error: 'internal error' });
