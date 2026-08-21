@@ -2,6 +2,7 @@ import { lstatSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
+import { SQLITE_BUSY_TIMEOUT_MS } from '../src/lib/sqlite-constants.ts';
 
 const TERMINAL_OUTBOUND_STATUSES = [
   'echoed',
@@ -120,7 +121,7 @@ export function inspectRestartSafety(dbPath: string): RestartSafetyVerdict {
   const absolute = assertExistingRegularDatabase(dbPath);
   const db = new DatabaseSync(absolute, {
     readOnly: true,
-    timeout: 5_000,
+    timeout: SQLITE_BUSY_TIMEOUT_MS,
     enableForeignKeyConstraints: false,
   });
   try {
