@@ -19,6 +19,7 @@
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { isRecord } from '../../src/lib/type-guards.ts';
 import { pyJsonStringify } from './fleet-roster-inventory.ts';
@@ -65,8 +66,11 @@ export interface ObservationContract {
   authorityTiers: string[];
 }
 
-export function defaultContractDir(cwd = process.cwd()): string {
-  return path.join(cwd, 'deploy', 'observation-plane');
+export function defaultContractDir(): string {
+  // Module-anchored (lib/ -> scripts/ -> <repo root>), mirroring Python's
+  // `default_contract_dir` — the default must never depend on process.cwd().
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  return path.join(here, '..', '..', 'deploy', 'observation-plane');
 }
 
 /** Mirrors `observation_contract.py:contract_identity` — the five parsed
@@ -75,7 +79,7 @@ export function contractIdentity(docs: Record<string, unknown>): Record<string, 
   if (!isRecord(docs)) {
     throw new ObservationContractPortError('contract docs must be a mapping');
   }
-  const missing = CONTRACT_FILE_NAMES.filter((name) => !(name in docs));
+  const missing = CONTRACT_FILE_NAMES.filter((name) => !Object.hasOwn(docs, name));
   if (missing.length > 0) {
     throw new ObservationContractPortError(`missing contract document(s): ${missing.join(', ')}`);
   }
@@ -89,10 +93,59 @@ export function contractIdentity(docs: Record<string, unknown>): Record<string, 
   return { files };
 }
 
+// Digest domain (req-obs-02): the digest is defined only over values both
+// encoders serialize byte-identically. Floats are out (JS String(1e-7) vs
+// Python repr(1e-07)), integers stop at the safe-integer boundary, and object
+// KEYS must stay inside the BMP (JS sorts keys by UTF-16 code unit, Python by
+// code point — the orders disagree beyond it). String VALUES are
+// unrestricted: surrogate escaping is parity-proven by the lockstep suite.
+// Known parse asymmetry, deliberate: the raw literal `1.0` normalizes to the
+// integer 1 under JSON.parse (accepted) but stays a float under Python
+// json.loads (rejected) — one side fails closed; identical raw bytes can
+// never yield two DIFFERENT digests.
+const MAX_DIGEST_INT = 2 ** 53 - 1;
+
+function assertDigestDomain(value: unknown, at: string): void {
+  if (value === null || value === undefined || typeof value === 'boolean') return;
+  if (typeof value === 'number') {
+    if (!Number.isInteger(value) || Math.abs(value) > MAX_DIGEST_INT) {
+      throw new ObservationContractPortError(
+        `digest domain violation at ${at}: numbers must be integers with |n| <= 2**53-1 ` +
+          '(other numbers do not serialize identically across the Python/TS encoders)',
+      );
+    }
+    return;
+  }
+  if (typeof value === 'string') return;
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => assertDigestDomain(item, `${at}[${index}]`));
+    return;
+  }
+  if (isRecord(value)) {
+    for (const [key, item] of Object.entries(value)) {
+      for (const ch of key) {
+        if ((ch.codePointAt(0) ?? 0) > 0xffff) {
+          throw new ObservationContractPortError(
+            `digest domain violation at ${at}: object keys must be BMP-only strings ` +
+              '(key sort order diverges across encoders beyond the BMP)',
+          );
+        }
+      }
+      assertDigestDomain(item, `${at}.${key}`);
+    }
+    return;
+  }
+  throw new ObservationContractPortError(
+    `digest domain violation at ${at}: unsupported value type ${typeof value}`,
+  );
+}
+
 /** `sha256(json.dumps(contract_identity(docs), sort_keys=True, separators=(",",":")))`,
  * identical call shape to the Python side. */
 export function contractDigest(docs: Record<string, unknown>): string {
-  const material = pyJsonStringify(contractIdentity(docs));
+  const identity = contractIdentity(docs);
+  assertDigestDomain(identity, 'contract');
+  const material = pyJsonStringify(identity);
   return createHash('sha256').update(Buffer.from(material, 'utf8')).digest('hex');
 }
 
@@ -135,7 +188,7 @@ function buildSurfaces(
         throw new ObservationContractPortError(`malformed projection row in ${surfaceName}`);
       }
       const legacyValue = row['legacy_value'];
-      if (legacyValue in rows) {
+      if (Object.hasOwn(rows, legacyValue)) {
         throw new ObservationContractPortError(`duplicate projection row ${surfaceName}: ${legacyValue}`);
       }
       if (!domain.includes(legacyValue)) {
@@ -151,7 +204,7 @@ function buildSurfaces(
       rows[legacyValue] = { ...row } as ProjectionRow;
     }
     for (const member of domain) {
-      if (!(member in rows)) {
+      if (!Object.hasOwn(rows, member)) {
         throw new ObservationContractPortError(`surface ${surfaceName} is not total: missing row for ${member}`);
       }
     }
@@ -174,7 +227,7 @@ function buildKeyed(
       throw new ObservationContractPortError(`${what} entry missing ${key}`);
     }
     const id = entry[key];
-    if (id in keyed) {
+    if (Object.hasOwn(keyed, id)) {
       throw new ObservationContractPortError(`duplicate ${key} in ${what}: ${id}`);
     }
     keyed[id] = { ...entry };
@@ -259,34 +312,33 @@ export function projectOutcome(
   surface: string,
   rawValue: string,
 ): ProjectionRow {
-  const table = contract.surfaces[surface];
-  if (!table) {
+  // Object.hasOwn everywhere: inherited names (toString/constructor/...) must
+  // behave as ordinary unknown keys, exactly like Python's dict lookups.
+  if (!Object.hasOwn(contract.surfaces, surface)) {
     throw new ObservationContractPortError(`unknown legacy surface: ${surface}`);
   }
-  const row = table.rows[rawValue];
-  if (!row) {
+  const table = contract.surfaces[surface]!;
+  if (!Object.hasOwn(table.rows, rawValue)) {
     throw new ObservationContractPortError(
       `legacy value outside the declared domain of ${surface}: ${rawValue}`,
     );
   }
-  return row;
+  return table.rows[rawValue]!;
 }
 
 export function claimRow(contract: ObservationContract, claimId: string): Record<string, unknown> {
-  const row = contract.claims[claimId];
-  if (!row) {
+  if (!Object.hasOwn(contract.claims, claimId)) {
     throw new ObservationContractPortError(`unknown claim: ${claimId}`);
   }
-  return row;
+  return contract.claims[claimId]!;
 }
 
 export function adapterRow(
   contract: ObservationContract,
   adapterId: string,
 ): Record<string, unknown> {
-  const row = contract.adapters[adapterId];
-  if (!row) {
+  if (!Object.hasOwn(contract.adapters, adapterId)) {
     throw new ObservationContractPortError(`unknown adapter: ${adapterId}`);
   }
-  return row;
+  return contract.adapters[adapterId]!;
 }

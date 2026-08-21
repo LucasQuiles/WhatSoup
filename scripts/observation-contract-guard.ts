@@ -11,6 +11,7 @@ import { pathToFileURL } from 'node:url';
 import { Ajv2020 } from 'ajv/dist/2020.js';
 
 import { isRecord } from '../src/lib/type-guards.ts';
+import { contractDigest } from './lib/observation-contract.ts';
 
 export const CONTRACT_DIR = 'deploy/observation-plane';
 
@@ -18,6 +19,7 @@ export type ObservationContractFindingCode =
   | 'contract-unreadable'
   | 'schema-compile-error'
   | 'canonical-vocab-mismatch'
+  | 'digest-domain-violation'
   | 'projection-domain-incomplete'
   | 'projection-domain-extra'
   | 'projection-duplicate-row'
@@ -160,6 +162,21 @@ export function checkObservationContract(cwd = process.cwd()): ObservationContra
   const registryDoc = readJson(cwd, 'adapter-registry.json', findings);
   if (!isRecord(schemaDoc) || !isRecord(catalogDoc) || !isRecord(projectionsDoc) || !isRecord(latticeDoc) || !isRecord(registryDoc)) {
     return { ok: false, findings, counts };
+  }
+
+  // Governed contract data must stay inside the cross-language digest domain
+  // (req-obs-02): the reader's contractDigest enforces it and both readers
+  // must accept the exact bytes this guard admits.
+  try {
+    contractDigest({
+      'adapter-registry.json': registryDoc,
+      'authority-lattice.json': latticeDoc,
+      'claim-catalog.json': catalogDoc,
+      'envelope.schema.json': schemaDoc,
+      'outcome-projections.json': projectionsDoc,
+    });
+  } catch (err) {
+    findings.push({ code: 'digest-domain-violation', message: (err as Error).message });
   }
 
   const ajv = new Ajv2020({ allErrors: true, strict: true });

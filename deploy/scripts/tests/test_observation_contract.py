@@ -161,6 +161,60 @@ def test_build_contract_rejects_structural_faults() -> None:
         _mod.build_contract(bad_vocab)
 
 
+def test_digest_domain_rejects_non_integer_numbers() -> None:
+    # Cross-language digest parity holds only where both encoders agree.
+    # Python repr(1e-07) != JS String(1e-7), so floats are outside the digest
+    # domain and must fail closed instead of silently diverging.
+    mutated = copy.deepcopy(_committed_docs())
+    mutated["authority-lattice.json"]["drift_epsilon"] = 1e-7
+    with pytest.raises(_mod.ObservationContractError):
+        _mod.contract_digest(mutated)
+
+
+def test_digest_domain_rejects_unsafe_range_integers() -> None:
+    # Above 2**53-1 JS loses integer precision on parse, so the digest domain
+    # ends at the safe-integer boundary on both sides.
+    mutated = copy.deepcopy(_committed_docs())
+    mutated["authority-lattice.json"]["counter"] = 2**53
+    with pytest.raises(_mod.ObservationContractError):
+        _mod.contract_digest(mutated)
+    boundary = copy.deepcopy(_committed_docs())
+    boundary["authority-lattice.json"]["counter"] = 2**53 - 1
+    assert len(_mod.contract_digest(boundary)) == 64
+
+
+def test_digest_domain_rejects_non_bmp_object_keys() -> None:
+    # Python sorts keys by code point, JS by UTF-16 code unit; the orders
+    # disagree once a key leaves the BMP, so such keys are outside the domain.
+    mutated = copy.deepcopy(_committed_docs())
+    mutated["authority-lattice.json"]["\U00010000"] = True
+    with pytest.raises(_mod.ObservationContractError):
+        _mod.contract_digest(mutated)
+
+
+def test_digest_domain_keeps_non_bmp_string_values() -> None:
+    # String VALUES are order-insensitive and surrogate-escape identically on
+    # both sides (proven by the lockstep non-ASCII case), so they stay in.
+    mutated = copy.deepcopy(_committed_docs())
+    mutated["authority-lattice.json"]["description"] = "lockstep \U0001F9EA"
+    assert len(_mod.contract_digest(mutated)) == 64
+
+
+def test_lookups_fail_closed_on_prototype_chain_names() -> None:
+    # Parity pin for the TS port: names that exist on Object.prototype in JS
+    # must behave as ordinary unknown keys on both sides.
+    contract = _mod.load_contract()
+    for name in ("toString", "constructor", "__proto__"):
+        with pytest.raises(_mod.ObservationContractError):
+            _mod.claim_row(contract, name)
+        with pytest.raises(_mod.ObservationContractError):
+            _mod.adapter_row(contract, name)
+        with pytest.raises(_mod.ObservationContractError):
+            _mod.project_outcome(contract, name, "x")
+        with pytest.raises(_mod.ObservationContractError):
+            _mod.project_outcome(contract, "probe_report_verdict", name)
+
+
 def test_load_contract_missing_file_fails_closed(tmp_path: Path) -> None:
     for name in _mod.CONTRACT_FILE_NAMES:
         if name == "claim-catalog.json":

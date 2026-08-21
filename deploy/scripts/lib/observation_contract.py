@@ -68,10 +68,57 @@ def contract_identity(docs: dict) -> dict:
     return {"files": {name: docs[name] for name in CONTRACT_FILE_NAMES}}
 
 
+# Digest domain (req-obs-02): the digest is defined only over values both
+# encoders serialize byte-identically. Floats are out (repr(1e-07) here vs
+# String(1e-7) in JS), integers stop at the JS safe-integer boundary, and
+# object KEYS must stay inside the BMP (Python sorts keys by code point, JS by
+# UTF-16 code unit — the orders disagree beyond it). String VALUES are
+# unrestricted: surrogate escaping is parity-proven by the lockstep suite.
+# Known parse asymmetry, deliberate: the raw literal ``1.0`` stays a float
+# here (rejected) but normalizes to the integer 1 under JS ``JSON.parse``
+# (accepted) — one side fails closed; identical raw bytes can never yield two
+# DIFFERENT digests.
+_MAX_DIGEST_INT = 2**53 - 1
+
+
+def _assert_digest_domain(value: Any, at: str) -> None:
+    if value is None or isinstance(value, bool):
+        return
+    if isinstance(value, int):
+        if abs(value) > _MAX_DIGEST_INT:
+            raise ObservationContractError(
+                f"digest domain violation at {at}: integers must satisfy |n| <= 2**53-1"
+            )
+        return
+    if isinstance(value, float):
+        raise ObservationContractError(
+            f"digest domain violation at {at}: numbers must be integers (floats do not "
+            "serialize identically across the Python/TS encoders)"
+        )
+    if isinstance(value, str):
+        return
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            _assert_digest_domain(item, f"{at}[{index}]")
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if not isinstance(key, str) or any(ord(ch) > 0xFFFF for ch in key):
+                raise ObservationContractError(
+                    f"digest domain violation at {at}: object keys must be BMP-only strings "
+                    "(key sort order diverges across encoders beyond the BMP)"
+                )
+            _assert_digest_domain(item, f"{at}.{key}")
+        return
+    raise ObservationContractError(
+        f"digest domain violation at {at}: unsupported value type {type(value).__name__}"
+    )
+
+
 def contract_digest(docs: dict) -> str:
-    material = json.dumps(
-        contract_identity(docs), sort_keys=True, separators=(",", ":")
-    ).encode("utf-8")
+    identity = contract_identity(docs)
+    _assert_digest_domain(identity, "contract")
+    material = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(material).hexdigest()
 
 

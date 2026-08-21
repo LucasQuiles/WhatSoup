@@ -7,8 +7,11 @@ import { describe, expect, it } from 'vitest';
 import {
   CONTRACT_FILE_NAMES,
   ObservationContractPortError,
+  adapterRow,
   buildObservationContract,
+  claimRow,
   contractDigest,
+  defaultContractDir,
   loadObservationContract,
   projectOutcome,
 } from '../../../scripts/lib/observation-contract.ts';
@@ -143,6 +146,172 @@ except oc.ObservationContractError:
       docs,
     );
     expect(pyResult).toBe('failed-closed');
+  });
+
+  it('fails closed identically on prototype-chain lookup keys', () => {
+    // JS inherits toString/constructor/__proto__ on every plain object; the
+    // reader's lookups must treat them as ordinary unknown keys, exactly like
+    // Python — never return an inherited function, never throw a raw TypeError.
+    const docs = loadCommittedDocs();
+    const contract = buildObservationContract(docs);
+    for (const key of ['toString', 'constructor', '__proto__']) {
+      expect(() => claimRow(contract, key)).toThrow(ObservationContractPortError);
+      expect(() => adapterRow(contract, key)).toThrow(ObservationContractPortError);
+      expect(() => projectOutcome(contract, key, 'x')).toThrow(ObservationContractPortError);
+      expect(() => projectOutcome(contract, 'probe_report_verdict', key)).toThrow(
+        ObservationContractPortError,
+      );
+    }
+    const pyResult = python(
+      `
+contract = oc.build_contract(docs)
+failed = 0
+for key in ("toString", "constructor", "__proto__"):
+    for probe in (
+        lambda: oc.claim_row(contract, key),
+        lambda: oc.adapter_row(contract, key),
+        lambda: oc.project_outcome(contract, key, "x"),
+        lambda: oc.project_outcome(contract, "probe_report_verdict", key),
+    ):
+        try:
+            probe()
+        except oc.ObservationContractError:
+            failed += 1
+sys.stdout.write(str(failed))
+`,
+      docs,
+    );
+    expect(pyResult).toBe('12');
+  });
+
+  it('rejects a domain member named after a prototype key when its row is missing', () => {
+    // Build-side hole: `member in rows` is true for 'toString' via the
+    // prototype chain, so a non-total table could slip through on the TS side.
+    const docs = loadCommittedDocs();
+    const mutated = JSON.parse(JSON.stringify(docs)) as Record<string, unknown>;
+    const projections = mutated['outcome-projections.json'] as {
+      surfaces: Record<string, { domain: string[] }>;
+    };
+    projections.surfaces['probe_report_verdict']!.domain.push('toString');
+
+    expect(() => buildObservationContract(mutated)).toThrow(ObservationContractPortError);
+    const pyResult = python(
+      `
+try:
+    oc.build_contract(docs)
+    sys.stdout.write("no-error")
+except oc.ObservationContractError:
+    sys.stdout.write("failed-closed")
+`,
+      mutated,
+    );
+    expect(pyResult).toBe('failed-closed');
+  });
+
+  it('rejects non-integer numbers from the digest domain identically', () => {
+    // Python repr(1e-07) and JS String(1e-7) disagree, so floats are outside
+    // the digest domain: both sides must fail closed instead of diverging.
+    const docs = loadCommittedDocs();
+    const mutated = JSON.parse(JSON.stringify(docs)) as Record<string, unknown>;
+    (mutated['authority-lattice.json'] as Record<string, unknown>)['drift_epsilon'] = 1e-7;
+
+    expect(() => contractDigest(mutated)).toThrow(ObservationContractPortError);
+    const pyResult = python(
+      `
+try:
+    oc.contract_digest(docs)
+    sys.stdout.write("no-error")
+except oc.ObservationContractError:
+    sys.stdout.write("failed-closed")
+`,
+      mutated,
+    );
+    expect(pyResult).toBe('failed-closed');
+  });
+
+  it('rejects unsafe-range integers from the digest domain identically', () => {
+    const docs = loadCommittedDocs();
+    const mutated = JSON.parse(JSON.stringify(docs)) as Record<string, unknown>;
+    (mutated['authority-lattice.json'] as Record<string, unknown>)['counter'] = 2 ** 53;
+
+    expect(() => contractDigest(mutated)).toThrow(ObservationContractPortError);
+    const pyResult = python(
+      `
+try:
+    oc.contract_digest(docs)
+    sys.stdout.write("no-error")
+except oc.ObservationContractError:
+    sys.stdout.write("failed-closed")
+`,
+      mutated,
+    );
+    expect(pyResult).toBe('failed-closed');
+
+    const boundary = JSON.parse(JSON.stringify(docs)) as Record<string, unknown>;
+    (boundary['authority-lattice.json'] as Record<string, unknown>)['counter'] = 2 ** 53 - 1;
+    const tsDigest = contractDigest(boundary);
+    const pyDigest = python('sys.stdout.write(oc.contract_digest(docs))', boundary);
+    expect(tsDigest).toBe(pyDigest);
+  });
+
+  it('rejects non-BMP object keys from the digest domain identically', () => {
+    // Key ordering is code-point-sorted in Python and code-unit-sorted in JS;
+    // the orders disagree beyond the BMP, so such keys must fail closed.
+    const docs = loadCommittedDocs();
+    const mutated = JSON.parse(JSON.stringify(docs)) as Record<string, unknown>;
+    (mutated['authority-lattice.json'] as Record<string, unknown>)['\u{10000}'] = true;
+
+    expect(() => contractDigest(mutated)).toThrow(ObservationContractPortError);
+    const pyResult = python(
+      `
+try:
+    oc.contract_digest(docs)
+    sys.stdout.write("no-error")
+except oc.ObservationContractError:
+    sys.stdout.write("failed-closed")
+`,
+      mutated,
+    );
+    expect(pyResult).toBe('failed-closed');
+  });
+
+  it('fails closed on the raw literal "1.0" on the side that preserves floatness', () => {
+    // Parse asymmetry, documented: JSON.parse("1.0") normalizes to the
+    // integer 1 (inside the domain), while Python json.loads keeps a float
+    // (outside the domain). Identical raw bytes therefore never produce two
+    // DIFFERENT digests — Python fails closed, TS digests the normalized int.
+    const docs = loadCommittedDocs();
+    const mutated = JSON.parse(JSON.stringify(docs)) as Record<string, unknown>;
+    (mutated['authority-lattice.json'] as Record<string, unknown>)['ratio'] = JSON.parse('1.0');
+    const asInt = JSON.parse(JSON.stringify(docs)) as Record<string, unknown>;
+    (asInt['authority-lattice.json'] as Record<string, unknown>)['ratio'] = 1;
+
+    expect(contractDigest(mutated)).toBe(contractDigest(asInt));
+    const pyResult = python(
+      `
+docs["authority-lattice.json"]["ratio"] = json.loads("1.0")
+try:
+    oc.contract_digest(docs)
+    sys.stdout.write("no-error")
+except oc.ObservationContractError:
+    sys.stdout.write("failed-closed")
+`,
+      docs,
+    );
+    expect(pyResult).toBe('failed-closed');
+  });
+
+  it('anchors the TS default contract dir to the module, not the cwd', () => {
+    // Python's default_contract_dir is module-anchored; the TS default must
+    // resolve the same directory from ANY working directory.
+    const expected = path.join(repoRoot, 'deploy', 'observation-plane');
+    const before = process.cwd();
+    try {
+      process.chdir(path.parse(before).root);
+      expect(path.resolve(defaultContractDir())).toBe(path.resolve(expected));
+    } finally {
+      process.chdir(before);
+    }
   });
 
   it('rejects a non-total projection table identically at build time', () => {
