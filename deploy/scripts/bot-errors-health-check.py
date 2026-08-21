@@ -32,7 +32,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
 from lib.bot_errors_envelope import new_event_fields
-from lib.health_reader import classify_projection, health_body_is_disclosed, instance_health_token
+from lib.health_reader import classify_projection, health_body_is_disclosed, instance_health_token, is_public_envelope
 from lib.controller_log import (
     ControllerLogContext,
     controller_cycle,
@@ -3179,6 +3179,8 @@ def health_probe_details(status: int, body: str, expected_name: str | None = Non
     append_evidence_field(details, "health_projection", health_projection)
     if token_sent and health_projection == "unobserved":
         add_marker("health_token_rejected")
+    if is_public_envelope(data):
+        return " ".join(details)
     whatsapp = data.get("whatsapp") if isinstance(data.get("whatsapp"), dict) else {}
     connection = whatsapp.get("connection") if isinstance(whatsapp.get("connection"), dict) else {}
 
@@ -3523,8 +3525,12 @@ def health_probe_details(status: int, body: str, expected_name: str | None = Non
 def format_health_probe(url: str, status: int, body: str = "", expected_name: str | None = None, token_sent: bool = False) -> str:
     details = health_probe_details(status, body, expected_name, token_sent)
     suffix = f" {details}" if details else ""
+    non_diagnostic_public = (
+        "health_projection=public" in details
+        or "health_token_rejected" in details
+    )
     if (
-        status >= 500
+        (status >= 500 and not non_diagnostic_public)
         or "health_probe_auth_failed" in details
         or "health_identity_mismatch" in details
         or "health_identity_missing" in details
@@ -3565,6 +3571,8 @@ def probe_health(port: int, expected_name: str | None = None) -> str:
         dry_status = int(os.environ.get("BOT_ERRORS_DRY_HEALTH_STATUS", "503"))
         return format_health_probe(url, dry_status, dry_body, expected_name)
     token = instance_health_token(expected_name) if expected_name else None
+    if expected_name and not token:
+        return f"WARN unobserved {url} health_token_missing health_projection=unobserved"
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     req = Request(url, method="GET", headers=headers)
     token_sent = bool(token)

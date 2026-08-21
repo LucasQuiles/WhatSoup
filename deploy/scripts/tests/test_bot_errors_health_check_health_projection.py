@@ -94,6 +94,20 @@ def test_probe_health_sends_resolved_bearer(monkeypatch) -> None:
     assert seen.get("auth") == "Bearer tok-123"
 
 
+def test_probe_health_missing_token_is_explicitly_unobserved_without_http(monkeypatch) -> None:
+    monkeypatch.delenv("WHATSOUP_HEALTH_TOKEN", raising=False)
+
+    def unexpected_urlopen(*_args, **_kwargs):
+        raise AssertionError("missing-token probe must not fall back to the public endpoint")
+
+    monkeypatch.setattr(_mod, "urlopen", unexpected_urlopen)
+    line = _mod.probe_health(9099, "primary-bot")
+
+    assert line.startswith("WARN")
+    assert "health_token_missing" in line
+    assert "health_projection=unobserved" in line
+
+
 def test_token_rejected_is_warn_not_identity_fail(monkeypatch) -> None:
     _freeze_body_age(monkeypatch)
     monkeypatch.setenv("WHATSOUP_HEALTH_TOKEN", "tok-123")
@@ -107,5 +121,38 @@ def test_token_rejected_is_warn_not_identity_fail(monkeypatch) -> None:
     line = _mod.probe_health(9099, "primary-bot")
     assert "health_identity_missing" not in line
     assert not line.startswith("FAIL")
+    assert "health_token_rejected" in line
+    assert line.startswith("WARN")
+
+
+def test_public_503_without_token_is_not_promoted_to_workload_failure(monkeypatch) -> None:
+    _freeze_body_age(monkeypatch)
+    body = json.dumps({**json.loads(PUBLIC_BODY), "status": "unhealthy"})
+
+    line = _mod.format_health_probe(
+        "http://127.0.0.1:9099/health",
+        503,
+        body,
+        "primary-bot",
+        False,
+    )
+
+    assert "health_projection=public" in line
+    assert not line.startswith("FAIL")
+
+
+def test_token_rejected_public_503_is_monitoring_warning_not_workload_failure(monkeypatch) -> None:
+    _freeze_body_age(monkeypatch)
+    body = json.dumps({**json.loads(PUBLIC_BODY), "status": "unhealthy"})
+
+    line = _mod.format_health_probe(
+        "http://127.0.0.1:9099/health",
+        503,
+        body,
+        "primary-bot",
+        True,
+    )
+
+    assert "health_projection=unobserved" in line
     assert "health_token_rejected" in line
     assert line.startswith("WARN")
