@@ -5,7 +5,7 @@
   "entrypoints": [
     {
       "path": "src/main.ts",
-      "sha256": "17abb23520ede49943be8c3864bfae39177d8385dff60c90b8898ae6e291a3e3",
+      "sha256": "3113ad3a4b613295bf8925fa2030f98d1f8beb35722c2d820374e5abc21775fa",
       "mustContain": [
         "startHealthServer",
         "createConnection"
@@ -26,6 +26,16 @@
       "mustContain": [
         "databaseCompatibilityBootstrap",
         "checkLoadedInstanceDatabase"
+      ],
+      "importGraph": true
+    },
+    {
+      "path": "scripts/restart-safety-preflight.ts",
+      "sha256": "db750d0afcfae76c15c124b0194a5d88ae52b7b768378839da5b92c20713b48b",
+      "mustContain": [
+        "safeNonterminal",
+        "missing_database",
+        "initial_database_create"
       ],
       "importGraph": true
     },
