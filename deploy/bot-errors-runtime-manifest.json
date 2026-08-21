@@ -444,6 +444,16 @@
       ]
     },
     {
+      "path": "deploy/scripts/lib/observation_contract.py",
+      "sha256": "b34434bbeaa89edecdd34930b5dc3634a0bba3747b3be3a62ffb5644e2c546c3",
+      "mustContain": [
+        "contract_digest",
+        "build_contract",
+        "project_outcome",
+        "ObservationContractError"
+      ]
+    },
+    {
       "path": "deploy/scripts/reply-guarantee-observer.py",
       "sha256": "cd4d10c51bb85c0ccf083764cdd8f4a9a2c2cba1c413f5ca3fe77a065221cb09",
       "mustContain": [
