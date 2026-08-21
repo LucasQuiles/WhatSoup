@@ -2,7 +2,7 @@
 
 **PR:** #3332
 
-**Status:** approved design — implementation remains gated on written-spec review
+**Status:** approved and written-spec-confirmed — implementation planned
 
 **Canonical design baseline:** `066041258e0c1f43338f9e2a8e12c0ebf4934e59`
 
@@ -74,6 +74,12 @@ therefore WARN, not FAIL.
 debt. This remains visible even at HTTP 200 and even if no other warning marker
 is present.
 
+Anonymous 401/403 responses are also WARN-class configuration evidence: the
+endpoint requires authentication, and the missing or rejected token must be
+repaired, but the response is not a workload failure. The early authority
+return must therefore prevent `health_probe_auth_failed` from being derived
+from an anonymous body.
+
 ## Behavior Matrix
 
 | Observation | Required result |
@@ -81,6 +87,7 @@ is present.
 | Anonymous public 200/503 | Existing liveness-only behavior; never a body-derived workload verdict |
 | Anonymous diagnostic-shaped 200 | WARN with projection/disclosure markers; no privileged or verdict-bearing markers |
 | Anonymous diagnostic-shaped 503 | WARN, not FAIL; same marker ceiling as anonymous 200 |
+| Anonymous diagnostic-shaped 401/403 | WARN, not FAIL; auth-required endpoint plus token/configuration debt, with no body-derived workload verdict |
 | Token missing | Probe still occurs; WARN when the endpoint answers |
 | Token sent but rejected | Existing WARN-class unobserved behavior remains |
 | Authenticated diagnostic response | Existing status, freshness, identity, auth, database, provider, and runtime evaluation remains |
@@ -111,12 +118,14 @@ Add regression coverage before production edits:
    `health_unauthenticated_disclosure` and no verdict-bearing or privileged
    markers.
 2. Anonymous diagnostic-shaped 503 emits WARN, not FAIL, with the same ceiling.
-3. The RED run must fail on the current exact PR head for the expected prefix
+3. Anonymous diagnostic-shaped 401 and 403 emit WARN, not FAIL, and do not emit
+   `health_probe_auth_failed` or other body-derived verdict markers.
+4. The RED run must fail on the current exact PR head for the expected prefix
    and leaked markers.
-4. After the minimal two-site repair, rerun the focused Python projection
+5. After the minimal two-site repair, rerun the focused Python projection
    tests, the complete TypeScript BOT ERRORS health suite, deploy Python tests,
    the BOT ERRORS runtime-manifest guard, and required Test Integrity.
-5. Re-run the connection-refused/down-detection test explicitly to prove the
+6. Re-run the connection-refused/down-detection test explicitly to prove the
    repair did not mask true-down evidence.
 
 No passing result may be carried across a changed PR head without exact
