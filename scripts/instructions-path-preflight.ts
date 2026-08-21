@@ -5,7 +5,7 @@ import { pathToFileURL } from 'node:url';
 import {
   validateAgentInstructionsPath,
   type AgentInstructionsPathFailureReason,
-} from '../src/core/agent-instructions-path.ts';
+} from './lib/agent-instructions-path.ts';
 import { isRecord } from '../src/lib/type-guards.ts';
 
 export interface InstructionsPathPreflightResult {

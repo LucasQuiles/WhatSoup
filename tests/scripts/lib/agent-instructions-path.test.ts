@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { validateAgentInstructionsPath } from '../../src/core/agent-instructions-path.ts';
+import { validateAgentInstructionsPath } from '../../../scripts/lib/agent-instructions-path.ts';
 
 const roots: string[] = [];
 
