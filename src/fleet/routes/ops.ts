@@ -48,6 +48,7 @@ import { privateWriteError, writePrivateFileSync } from '../../lib/private-fs.ts
 import { errorMessage } from '../../lib/error-message.ts';
 import { projectError, validationError, mutationError, serviceActionError, configValidationError } from '../response-error-projection.ts';
 import { NAME_MAX_LENGTH, NAME_RE, validateInstanceName } from './instance-name.ts';
+import { writeInitialDatabaseCreateMarker } from '../../core/initial-database-marker.ts';
 
 function deepMergeRecords(
   base: Record<string, unknown>,
@@ -1184,6 +1185,7 @@ export async function handleCreateLine(
     fs.mkdirSync(path.join(dataRoot(name), 'logs'), { recursive: true, mode: 0o700 });
     fs.mkdirSync(path.join(dataRoot(name), 'media', 'tmp'), { recursive: true, mode: 0o700 });
     fs.mkdirSync(stateRoot(name), { recursive: true, mode: 0o700 });
+    writeInitialDatabaseCreateMarker(dataRoot(name), name);
 
     // --- Write config.json ---
     writePrivateFileSync(path.join(configDir, 'config.json'), JSON.stringify(config, null, 2) + '\n', { exclusive: true });
