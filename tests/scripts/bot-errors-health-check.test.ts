@@ -4243,8 +4243,38 @@ print(m.probe_health(9092))
         .toMatch(/^FAIL 200 .*health_generated_at_future_skew/);
     });
 
-    it('rejects a health body missing instance identity when a name is configured', () => {
+    // Register F01: identity is asserted only on a DISCLOSED (diagnostic)
+    // body. The public liveness envelope and ambiguous undisclosed bodies
+    // leave identity unobserved — never failed. The previous test here
+    // fossilized the wrong cross-component contract (it required a
+    // public-shaped body to FAIL with health_identity_missing).
+    it('leaves identity unobserved on the public liveness envelope instead of failing it', () => {
+      const body = JSON.stringify({
+        schema_version: 'health.public.v1',
+        status: 'healthy',
+        generated_at: new Date().toISOString(),
+        startupNotification: { state: 'sent' },
+      });
+      const line = probeLine(200, body, 'primary-bot');
+      expect(line).not.toMatch(/health_identity_missing/);
+      expect(line).not.toMatch(/^FAIL/);
+      expect(line).toMatch(/health_projection=public/);
+    });
+
+    it('leaves identity unobserved on an ambiguous undisclosed body instead of failing it', () => {
       const body = JSON.stringify({ status: 'healthy', generated_at: new Date().toISOString() });
+      const line = probeLine(200, body, 'primary-bot');
+      expect(line).not.toMatch(/health_identity_missing/);
+      expect(line).not.toMatch(/^FAIL/);
+    });
+
+    it('still rejects a DISCLOSED body missing instance identity when a name is configured', () => {
+      const body = JSON.stringify({
+        status: 'healthy',
+        generated_at: new Date().toISOString(),
+        whatsapp: { connected: true, connection: { state: 'connected' } },
+        instance: {},
+      });
       expect(probeLine(200, body, 'primary-bot')).toMatch(/^FAIL 200 .*health_identity_missing/);
     });
 

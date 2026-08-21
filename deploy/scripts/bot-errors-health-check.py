@@ -32,6 +32,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
 from lib.bot_errors_envelope import new_event_fields
+from lib.health_reader import classify_projection, health_body_is_disclosed, instance_health_token
 from lib.controller_log import (
     ControllerLogContext,
     controller_cycle,
@@ -3151,7 +3152,7 @@ def rustdesk_inventory(profile: dict[str, Any]) -> list[str]:
     return lines
 
 
-def health_probe_details(status: int, body: str, expected_name: str | None = None) -> str:
+def health_probe_details(status: int, body: str, expected_name: str | None = None, token_sent: bool = False) -> str:
     details: list[str] = []
     def add_marker(marker: str) -> None:
         if marker not in details:
@@ -3170,6 +3171,14 @@ def health_probe_details(status: int, body: str, expected_name: str | None = Non
             return " ".join(details)
     if data is None or not isinstance(data, dict):
         return ""
+    # Register F01: record which projection the evidence came from. The public
+    # liveness envelope proves transport only; a token that was sent but still
+    # produced the public projection was rejected — monitoring-config debt,
+    # never a workload verdict.
+    health_projection = classify_projection(data, token_sent=token_sent)
+    append_evidence_field(details, "health_projection", health_projection)
+    if token_sent and health_projection == "unobserved":
+        add_marker("health_token_rejected")
     whatsapp = data.get("whatsapp") if isinstance(data.get("whatsapp"), dict) else {}
     connection = whatsapp.get("connection") if isinstance(whatsapp.get("connection"), dict) else {}
 
@@ -3311,7 +3320,7 @@ def health_probe_details(status: int, body: str, expected_name: str | None = Non
     append_evidence_field(details, "instance_fallback_recovery_probe_required", instance_meta.get("fallbackRecoveryProbeRequired"))
     if provider_fallback_active(instance_provider, instance_effective_provider, instance_fallback_active_until):
         add_marker("runtime_agent_fallback_active")
-    if status == 200 and expected_name and not instance_name:
+    if status == 200 and expected_name and not instance_name and health_body_is_disclosed(data):
         add_marker("health_identity_missing")
         append_evidence_field(details, "expected_instance", expected_name)
     if expected_name and instance_name and instance_name != expected_name:
@@ -3511,8 +3520,8 @@ def health_probe_details(status: int, body: str, expected_name: str | None = Non
     return " ".join(details)
 
 
-def format_health_probe(url: str, status: int, body: str = "", expected_name: str | None = None) -> str:
-    details = health_probe_details(status, body, expected_name)
+def format_health_probe(url: str, status: int, body: str = "", expected_name: str | None = None, token_sent: bool = False) -> str:
+    details = health_probe_details(status, body, expected_name, token_sent)
     suffix = f" {details}" if details else ""
     if (
         status >= 500
@@ -3541,6 +3550,7 @@ def format_health_probe(url: str, status: int, body: str = "", expected_name: st
         or "auth_bond_restore_canary_failed" in details
         or "auth_bond_backup_age_warning" in details
         or "node_version_drift" in details
+        or "health_token_rejected" in details
     ):
         prefix = "WARN "
     else:
@@ -3554,14 +3564,17 @@ def probe_health(port: int, expected_name: str | None = None) -> str:
     if dry_body is not None:
         dry_status = int(os.environ.get("BOT_ERRORS_DRY_HEALTH_STATUS", "503"))
         return format_health_probe(url, dry_status, dry_body, expected_name)
-    req = Request(url, method="GET")
+    token = instance_health_token(expected_name) if expected_name else None
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    req = Request(url, method="GET", headers=headers)
+    token_sent = bool(token)
     try:
         with urlopen(req, timeout=HEALTH_PROBE_TIMEOUT_SECONDS) as response:
             body = response.read(64 * 1024).decode("utf-8", errors="replace")
-            return format_health_probe(url, response.status, body, expected_name)
+            return format_health_probe(url, response.status, body, expected_name, token_sent)
     except HTTPError as exc:
         body = exc.read(64 * 1024).decode("utf-8", errors="replace")
-        return format_health_probe(url, exc.code, body, expected_name)
+        return format_health_probe(url, exc.code, body, expected_name, token_sent)
     except URLError as exc:
         return f"FAIL {url} {exc.reason}"
     except Exception as exc:
