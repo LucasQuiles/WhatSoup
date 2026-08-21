@@ -17,7 +17,7 @@
 //
 // Repo-hygiene reserved IDs only.
 
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi, onTestFinished } from 'vitest';
 import type { Database } from '../../../src/core/database.ts';
 import type { Messenger, IncomingMessage } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
@@ -659,6 +659,17 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
 
     it('uses a different provider session for a scheduled turn than the interactive group session', async () => {
       const { SessionManager: MockSessionManagerCtor } = await import('../../../src/runtimes/agent/session.ts');
+      // The ctor override below replaces the shared singleton double with
+      // per-construction objects. It MUST NOT leak past this test: later tests
+      // assert identity against the canonical `mockSession` singleton (e.g. the
+      // stand-in-introduction WeakSet mark), and the file-level beforeEach's
+      // vi.clearAllMocks() clears CALLS, not implementations. onTestFinished
+      // restores the canonical implementation even when this test fails.
+      const mockedSessionCtor = MockSessionManagerCtor as unknown as ReturnType<typeof vi.fn>;
+      const canonicalSessionCtor = mockedSessionCtor.getMockImplementation();
+      onTestFinished(() => {
+        mockedSessionCtor.mockImplementation(canonicalSessionCtor);
+      });
       const createdOptions: Array<{
         chatJid: string;
         persistenceConversationKey?: string;
