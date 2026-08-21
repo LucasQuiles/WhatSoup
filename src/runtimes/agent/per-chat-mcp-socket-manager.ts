@@ -11,6 +11,7 @@ import { createConnection } from 'node:net';
 import { join } from 'node:path';
 import { toConversationKey } from '../../core/conversation-key.ts';
 import type { ToolRegistry } from '../../mcp/registry.ts';
+import type { SessionContext } from '../../mcp/types.ts';
 import { WhatSoupSocketServer } from '../../mcp/socket-server.ts';
 import { perChatActorSession } from './per-chat-actor-session.ts';
 
@@ -72,7 +73,11 @@ export class PerChatMcpSocketManager {
     this.options = options;
   }
 
-  acquire(conversationIdentity: string, deliveryJid: string): {
+  acquire(
+    conversationIdentity: string,
+    deliveryJid: string,
+    purpose?: SessionContext['purpose'],
+  ): {
     socketPath: string;
     ready: Promise<void>;
   } {
@@ -82,7 +87,7 @@ export class PerChatMcpSocketManager {
       return {
         socketPath,
         ready: barrier.ready.then(async () => {
-          const replacement = this.acquire(conversationIdentity, deliveryJid);
+          const replacement = this.acquire(conversationIdentity, deliveryJid, purpose);
           if (replacement.socketPath !== socketPath) {
             throw new Error('actor MCP socket path changed across teardown');
           }
@@ -112,6 +117,8 @@ export class PerChatMcpSocketManager {
         deliveryJid,
         this.options.allowedRoot,
         this.options.conversationBound,
+        deliveryJid,
+        purpose,
       ),
       () => this.options.resolveActor(identity.value),
     );

@@ -139,6 +139,10 @@ const EXPECTED_FILE_SIZE_WARNING_FILES = [
   // duplicate that harness; grandfathered per the project norm for large
   // cohesive test files (cf. the agent runtime/session twins below).
   'tests/main-bootstrap-helpers.test.ts',
+  // 2026-08-21 scheduled-isolation port (#3341 lane): the session-separation case (+120 lines)
+  // rides this file's SessionManager harness; extraction would duplicate the harness. Deliberate,
+  // recorded addition, same shape as the /model drill-down entry above.
+  'tests/runtimes/agent/runtime-secondhalf-branches.test.ts',
   // The two-level /model drill-down (Slice 2) added the drill handler cases
   // (bare->L1, brand->L2, leaf pin, recency both orderings, L1/L2 degrade, L2
   // discovery, cap) beside the Slice-1 selector suite, taking this file just

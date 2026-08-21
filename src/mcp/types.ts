@@ -51,6 +51,8 @@ export interface ConversationBinding {
 
 export interface SessionContext {
   tier: SessionTier;
+  /** Narrow runtime purpose used for fail-closed tool restrictions. */
+  purpose?: 'scheduled-agent-job';
   /** Canonical conversation identity — for reads, queries, scope checks */
   conversationKey?: string;
   /** Current raw JID alias — for sends, replies, reactions */

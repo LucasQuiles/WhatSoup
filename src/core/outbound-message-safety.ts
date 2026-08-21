@@ -259,6 +259,7 @@ const ACK_FILLER_PATTERNS: readonly RegExp[] = [
 ];
 
 const INTERNAL_NARRATION_OPENERS: readonly RegExp[] = [
+  /^the\b.{0,120}\b(?:closeout|turn)\b.{0,160}\b(?:turn receipt|delivery_pending|session log)\b/i,
   /^now\b.{0,160}\b(?:add|wire|rebuild|update|run|send|read|check|pull|load|implement|smoke|verify|workbook|sheet|script|command|tool|delete|revoke|entryrows|weekemployeetotals)\b/i,
   /^let me\b(?!\s+know\b).{0,160}\b(?:implement|close|pull|send|verify|revoke|delete|wire|load|check|read|run)\b/i,
   /^i(?:'|’)?ll\s+(?:silently\s+)?(?:check|record|confirm|inspect|look|verify)\b.{0,180}\b(?:gate|state|surface|surfacing|tool|thread|message|target|preflight)\b/i,
