@@ -28,6 +28,8 @@
 - Modify: `deploy/scripts/tests/test_bot_errors_health_check_health_projection.py`
 - Modify: `deploy/scripts/bot-errors-health-check.py:3155-3197`
 - Modify: `deploy/scripts/bot-errors-health-check.py:3539-3579`
+- Modify: `deploy/bot-errors-runtime-manifest.json`
+- Modify: `tests/scripts/bot-errors-health-check.test.ts`
 
 **Interfaces:**
 - Consumes: `classify_projection(payload, token_sent=bool) -> str`, `health_body_is_disclosed(payload) -> bool`
@@ -191,12 +193,23 @@ Expected: 3 passed.
 
 - [ ] **Step 8: Run the complete affected health suites**
 
+Before running the complete suite, replace the
+`deploy/scripts/bot-errors-health-check.py` manifest entry's `sha256` with
+the exact output of:
+
+```bash
+shasum -a 256 deploy/scripts/bot-errors-health-check.py
+```
+
+Do not change the pinned path or remove any `mustContain` marker.
+
 Run:
 
 ```bash
 /opt/homebrew/bin/python3.12 -m pytest -q deploy/scripts/tests
-. "\$HOME/.nvm/nvm.sh" && nvm use --silent >/dev/null
-test "\$(node -v)" = "v24.15.0"
+NODE_BIN="$HOME/.nvm/versions/node/v$(tr -d '[:space:]' < .nvmrc)/bin"
+test -x "$NODE_BIN/node" && export PATH="$NODE_BIN:$PATH"
+test "$(node -v)" = "v24.15.0"
 npx vitest run \
   tests/scripts/bot-errors-health-check.test.ts \
   --pool=forks --fileParallelism=false --retry=0
@@ -206,12 +219,19 @@ npm run guard:test-integrity:required
 
 Expected: deploy Python, all 161+ TypeScript health tests, 41-file manifest guard, and Test Integrity all PASS with zero new or drifted findings.
 
+If an existing TypeScript fixture is intended to exercise authenticated diagnostic
+status or freshness evaluation, pass `tokenSent=true` explicitly. Do not weaken the
+anonymous projection ceiling to preserve a fixture that accidentally relied on the
+helper's `tokenSent=false` default.
+
 - [ ] **Step 9: Commit the health repair**
 
 ```bash
 git add \
+  deploy/bot-errors-runtime-manifest.json \
   deploy/scripts/bot-errors-health-check.py \
-  deploy/scripts/tests/test_bot_errors_health_check_health_projection.py
+  deploy/scripts/tests/test_bot_errors_health_check_health_projection.py \
+  tests/scripts/bot-errors-health-check.test.ts
 git commit -m "fix(bot-errors): contain anonymous health verdicts"
 ```
 
@@ -232,8 +252,9 @@ git commit -m "fix(bot-errors): contain anonymous health verdicts"
 Run:
 
 ```bash
-. "\$HOME/.nvm/nvm.sh" && nvm use --silent >/dev/null
-test "\$(node -v)" = "v24.15.0"
+NODE_BIN="$HOME/.nvm/versions/node/v$(tr -d '[:space:]' < .nvmrc)/bin"
+test -x "$NODE_BIN/node" && export PATH="$NODE_BIN:$PATH"
+test "$(node -v)" = "v24.15.0"
 npm audit --json
 ```
 
@@ -247,8 +268,9 @@ expected exit 0, proving production dependencies are not affected.
 Run:
 
 ```bash
-. "\$HOME/.nvm/nvm.sh" && nvm use --silent >/dev/null
-test "\$(node -v)" = "v24.15.0"
+NODE_BIN="$HOME/.nvm/versions/node/v$(tr -d '[:space:]' < .nvmrc)/bin"
+test -x "$NODE_BIN/node" && export PATH="$NODE_BIN:$PATH"
+test "$(node -v)" = "v24.15.0"
 npm audit fix --package-lock-only --ignore-scripts
 ```
 
@@ -271,8 +293,9 @@ Expected: only transitive patched-version/integrity/resolution updates needed fo
 Run:
 
 ```bash
-. "\$HOME/.nvm/nvm.sh" && nvm use --silent >/dev/null
-test "\$(node -v)" = "v24.15.0"
+NODE_BIN="$HOME/.nvm/versions/node/v$(tr -d '[:space:]' < .nvmrc)/bin"
+test -x "$NODE_BIN/node" && export PATH="$NODE_BIN:$PATH"
+test "$(node -v)" = "v24.15.0"
 npm ci
 npm audit --json
 npm audit --omit=dev --json
@@ -287,8 +310,9 @@ Expected: install exits 0; both audits report zero vulnerabilities; the dependen
 Run:
 
 ```bash
-. "\$HOME/.nvm/nvm.sh" && nvm use --silent >/dev/null
-test "\$(node -v)" = "v24.15.0"
+NODE_BIN="$HOME/.nvm/versions/node/v$(tr -d '[:space:]' < .nvmrc)/bin"
+test -x "$NODE_BIN/node" && export PATH="$NODE_BIN:$PATH"
+test "$(node -v)" = "v24.15.0"
 npm run typecheck
 npm run guard:lint:src
 npm run guard:node-pin-consistency
@@ -328,8 +352,9 @@ Expected: only the approved spec/publication audit, two-site Python repair/tests
 - [ ] **Step 2: Run the branch release gate**
 
 ```bash
-. "\$HOME/.nvm/nvm.sh" && nvm use --silent >/dev/null
-test "\$(node -v)" = "v24.15.0"
+NODE_BIN="$HOME/.nvm/versions/node/v$(tr -d '[:space:]' < .nvmrc)/bin"
+test -x "$NODE_BIN/node" && export PATH="$NODE_BIN:$PATH"
+test "$(node -v)" = "v24.15.0"
 npm run verify:release
 ```
 
@@ -338,8 +363,9 @@ Expected: exit 0. Any masked, skipped-required, interrupted, or partial run is i
 - [ ] **Step 3: Re-run security and focused behavior gates after the release gate**
 
 ```bash
-. "\$HOME/.nvm/nvm.sh" && nvm use --silent >/dev/null
-test "\$(node -v)" = "v24.15.0"
+NODE_BIN="$HOME/.nvm/versions/node/v$(tr -d '[:space:]' < .nvmrc)/bin"
+test -x "$NODE_BIN/node" && export PATH="$NODE_BIN:$PATH"
+test "$(node -v)" = "v24.15.0"
 npm audit --json
 /opt/homebrew/bin/python3.12 -m pytest -q \
   deploy/scripts/tests/test_bot_errors_health_check_health_projection.py
