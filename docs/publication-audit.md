@@ -15,15 +15,15 @@ markers and re-run the command — the result is a fixed point, so the resolutio
 rather than a hand-count. `docs/work-index.{json,md}` has the same property via
 `npm run work-index:regen`.
 
-**Total classification rows:** 394
+**Total classification rows:** 395
 
 | Classification | Count |
 |---|---:|
 | PUBLIC | 198 |
-| PRIVATE-ARCHIVE | 196 |
+| PRIVATE-ARCHIVE | 197 |
 | SANITIZE | 0 |
 | DELETE | 0 |
-| Total | 394 |
+| Total | 395 |
 
 | Path | Classification | Rationale |
 |---|---|---|
@@ -148,6 +148,7 @@ rather than a hand-count. `docs/work-index.{json,md}` has the same property via
 | `docs/superpowers/plans/2026-08-14-outbound-queue-quiescence-containment.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/plans/2026-08-15-loop-lag-safe-forensic-pipeline.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/plans/2026-08-15-poisoned-direct-send-rejection.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/plans/2026-08-21-anonymous-health-projection-ceiling.md` | PRIVATE-ARCHIVE | Internal TDD and dependency-advisory remediation plan with sanitized synthetic evidence; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/reviews/2026-04-07-anti-echo-review-handoff.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/reviews/2026-05-31-bot-errors-tool-call-audit.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/reviews/2026-07-09-wall-to-wall-audit-pr-briefs.md` | PRIVATE-ARCHIVE | Internal copy-ready PR briefs from the audit; retained in the repository but excluded from public publication by default. |
