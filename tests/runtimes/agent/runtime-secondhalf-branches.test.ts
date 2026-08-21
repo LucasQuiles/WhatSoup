@@ -668,7 +668,7 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       const mockedSessionCtor = MockSessionManagerCtor as unknown as ReturnType<typeof vi.fn>;
       const canonicalSessionCtor = mockedSessionCtor.getMockImplementation();
       onTestFinished(() => {
-        mockedSessionCtor.mockImplementation(canonicalSessionCtor);
+        if (canonicalSessionCtor) mockedSessionCtor.mockImplementation(canonicalSessionCtor);
       });
       const createdOptions: Array<{
         chatJid: string;
