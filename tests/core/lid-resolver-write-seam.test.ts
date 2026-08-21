@@ -15,6 +15,7 @@ import { Database } from '../../src/core/database.ts';
 import {
   writeLidMapping,
   importLidMappings,
+  readLidMappings,
   type FleetMappingInput,
 } from '../../src/core/lid-resolver.ts';
 
@@ -55,6 +56,23 @@ function currentUpdatedAt(db: Database, lid: string): string | undefined {
 function recentTimestamp(): string {
   return new Date(Date.now() - 60 * 1000).toISOString();
 }
+
+describe('readLidMappings — canonical L5 read seam', () => {
+  it('returns every mapping with its observation timestamp', () => {
+    const db = freshDb();
+    try {
+      db.raw
+        .prepare('INSERT INTO lid_mappings (lid, phone_jid, updated_at) VALUES (?, ?, ?)')
+        .run('12345', PHONE_A, '2026-05-01T00:00:00Z');
+
+      expect(readLidMappings(db.raw)).toEqual([
+        { lid: '12345', phone_jid: PHONE_A, updated_at: '2026-05-01T00:00:00Z' },
+      ]);
+    } finally {
+      db.close();
+    }
+  });
+});
 
 // ─── writeLidMapping — basic semantics ───────────────────────────────────────
 
