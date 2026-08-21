@@ -53,7 +53,7 @@ function makeConnection(): ConnectionManager {
 const sharedDb = new Database(':memory:');
 sharedDb.open();
 
-function advertised(session: SessionContext): ToolDeclaration[] {
+function advertised(session: SessionContext): ReturnType<ToolRegistry['listTools']> {
   const registry = new ToolRegistry();
   registerAllTools(registry, makeConnection(), sharedDb);
   return registry.listTools(session);
