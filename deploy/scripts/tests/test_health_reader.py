@@ -36,9 +36,12 @@ def test_is_public_envelope() -> None:
     assert health_reader.is_public_envelope(None) is False
 
 
-def test_classify_projection_diagnostic() -> None:
+def test_classify_projection_diagnostic_requires_token() -> None:
+    # Authority-lattice public-projection ceiling: a diagnostic-SHAPED body
+    # obtained WITHOUT authentication must never gain diagnostic authority —
+    # anyone can shape a body; only the accepted token proves the projection.
     assert health_reader.classify_projection(DISCLOSED, token_sent=True) == "diagnostic"
-    assert health_reader.classify_projection(DISCLOSED, token_sent=False) == "diagnostic"
+    assert health_reader.classify_projection(DISCLOSED, token_sent=False) == "unobserved"
 
 
 def test_classify_projection_public_only_without_token() -> None:

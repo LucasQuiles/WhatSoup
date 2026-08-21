@@ -94,7 +94,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "492730e570fa78ac85a257bf6f1c63e413fcf50d3568928697493132362b3648",
+      "sha256": "c962fa30223bf3feef267274640115846fb1be49b99e5c7fd3cc7f3897e4c5eb",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -445,7 +445,7 @@
     },
     {
       "path": "deploy/scripts/lib/health_reader.py",
-      "sha256": "fa15a5fe4a5293dca5f6cfbee6b79059d1a7aac50adaaf61d4c7ac9aca48584d",
+      "sha256": "dd3350e5bcea11bc7ecc405dd9bdba957cb4d5bc70bc94f519f114c4508be59d",
       "mustContain": [
         "def classify_projection(payload: Any, *, token_sent: bool) -> str:",
         "def health_body_is_disclosed(payload: Any) -> bool:",

@@ -59,9 +59,32 @@ def test_public_envelope_never_yields_identity_missing(monkeypatch) -> None:
 
 
 def test_diagnostic_body_without_name_still_flags_identity_missing(monkeypatch) -> None:
+    # token_sent=True: identity is only assertable under the AUTHENTICATED
+    # diagnostic projection.
     _freeze_body_age(monkeypatch)
-    details = _mod.health_probe_details(200, DIAGNOSTIC_BODY_NO_NAME, "primary-bot")
+    details = _mod.health_probe_details(200, DIAGNOSTIC_BODY_NO_NAME, "primary-bot", True)
     assert "health_identity_missing" in details
+
+
+def test_anonymous_diagnostic_shaped_body_hits_projection_ceiling(monkeypatch) -> None:
+    # Authority-lattice ceiling: an UNAUTHENTICATED diagnostic-shaped body is
+    # invalid evidence for privileged claims — identity/auth/DB/provider fields
+    # must not be evaluated from it, and it must not fail the workload.
+    _freeze_body_age(monkeypatch)
+    body = json.dumps(
+        {
+            "status": "healthy",
+            "generated_at": "2026-08-20T00:00:00Z",
+            "whatsapp": {"connected": True, "connection": {"state": "connected"}},
+            "instance": {"name": "other-bot"},
+        }
+    )
+    line = _mod.format_health_probe("http://127.0.0.1:9099/health", 200, body, "primary-bot", False)
+    assert "health_identity_mismatch" not in line
+    assert "health_identity_missing" not in line
+    assert "health_projection=unobserved" in line
+    assert "health_unauthenticated_disclosure" in line
+    assert not line.startswith("FAIL")
 
 
 class _FakeResponse:
@@ -102,6 +125,8 @@ def test_probe_health_missing_token_still_probes_and_warns(monkeypatch) -> None:
     # public reading and never a workload FAIL.
     _freeze_body_age(monkeypatch)
     monkeypatch.delenv("WHATSOUP_HEALTH_TOKEN", raising=False)
+    monkeypatch.delenv("BOT_ERRORS_HEALTH_TOKEN_PRIMARY_BOT", raising=False)
+    monkeypatch.setenv("HOME", "/nonexistent-home-for-token-isolation")
     seen: dict[str, object] = {}
 
     def fake_urlopen(req, timeout=None):
@@ -120,6 +145,8 @@ def test_probe_health_missing_token_still_probes_and_warns(monkeypatch) -> None:
 
 def test_probe_health_missing_token_connection_refused_stays_legacy_fail(monkeypatch) -> None:
     monkeypatch.delenv("WHATSOUP_HEALTH_TOKEN", raising=False)
+    monkeypatch.delenv("BOT_ERRORS_HEALTH_TOKEN_PRIMARY_BOT", raising=False)
+    monkeypatch.setenv("HOME", "/nonexistent-home-for-token-isolation")
 
     def refused_urlopen(req, timeout=None):
         raise _mod.URLError("Connection refused")
@@ -179,3 +206,18 @@ def test_token_rejected_public_503_is_monitoring_warning_not_workload_failure(mo
     assert "health_projection=unobserved" in line
     assert "health_token_rejected" in line
     assert line.startswith("WARN")
+
+
+def test_dry_injected_body_is_authorized_diagnostic_evidence(monkeypatch) -> None:
+    # BOT_ERRORS_DRY_HEALTH_RESPONSE_JSON is operator-supplied fixture content,
+    # not an anonymous network read: it evaluates under the diagnostic
+    # projection (identity checks apply) without any token in the environment.
+    _freeze_body_age(monkeypatch)
+    monkeypatch.delenv("WHATSOUP_HEALTH_TOKEN", raising=False)
+    monkeypatch.delenv("BOT_ERRORS_HEALTH_TOKEN_PRIMARY_BOT", raising=False)
+    monkeypatch.setenv("BOT_ERRORS_DRY_HEALTH_RESPONSE_JSON", DIAGNOSTIC_BODY_NO_NAME)
+    monkeypatch.setenv("BOT_ERRORS_DRY_HEALTH_STATUS", "200")
+    line = _mod.probe_health(9099, "primary-bot")
+    assert "health_projection=diagnostic" in line
+    assert "health_unauthenticated_disclosure" not in line
+    assert "health_identity_missing" in line

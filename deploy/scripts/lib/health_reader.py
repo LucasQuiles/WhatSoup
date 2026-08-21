@@ -85,15 +85,21 @@ def is_public_envelope(payload: Any) -> bool:
 def classify_projection(payload: Any, *, token_sent: bool) -> str:
     """Classify a parsed /health body into ``diagnostic`` | ``public`` | ``unobserved``.
 
-    A missing or rejected token can never yield an authenticated verdict:
+    A missing or rejected token can never yield an authenticated verdict, and
+    a diagnostic-SHAPED body obtained WITHOUT authentication never gains
+    diagnostic authority (the public-projection ceiling in the authority
+    lattice — anyone can shape a body; only the accepted token proves the
+    projection):
 
-      - disclosed body                         -> ``diagnostic``
+      - disclosed body, a token WAS sent       -> ``diagnostic``
+      - disclosed body, no token was sent      -> ``unobserved`` (invalid evidence
+        for privileged claims; also a server-side disclosure anomaly)
       - public envelope, no token was sent     -> ``public`` (liveness only)
       - public envelope, a token WAS sent      -> ``unobserved`` (token rejected)
       - anything else (None/unparsed/unknown)  -> ``unobserved``
     """
     if health_body_is_disclosed(payload):
-        return "diagnostic"
+        return "diagnostic" if token_sent else "unobserved"
     if is_public_envelope(payload):
         return "unobserved" if token_sent else "public"
     return "unobserved"
