@@ -36,6 +36,11 @@ const BASELINE: Readonly<Record<string, readonly string[]>> = {
     'src/lib/provider-ids.ts',
     'src/lib/provider-key-service.ts',
   ],
+  // time-units is the same pure-constant crossing class as provider-ids:
+  // the #2207 SSOT migration must not fork a second constants source in console.
+  'console/src/hooks/use-fleet.ts': ['src/lib/time-units.ts'],
+  'console/src/hooks/use-update-check.ts': ['src/lib/time-units.ts'],
+  'console/src/lib/freshness.ts': ['src/lib/time-units.ts'],
 };
 
 function walkConsoleFiles(dir: string): string[] {
