@@ -182,4 +182,27 @@ describe('push-gate manifest registry (#2224)', () => {
       delete process.env.WHATSOUP_TEST_PASSTHROUGH_PROBE;
     }
   });
+
+  it('every env var a gate step reads survives the child allowlist', async () => {
+    const { pushGateChildEnv } = await import('../../scripts/push-gate.ts');
+    const source = readFileSync('scripts/full-suite-battery.ts', 'utf8');
+    const envNames = [...source.matchAll(/process\.env\.([A-Za-z0-9_]+)/g)].map((match) => match[1]);
+
+    expect(envNames.length, 'no process.env reads found — scan is vacuous').toBeGreaterThan(0);
+
+    for (const envName of envNames) {
+      const wasPresent = Object.prototype.hasOwnProperty.call(process.env, envName);
+      const priorValue = process.env[envName];
+      process.env[envName] = 'reachability-probe';
+      try {
+        expect(
+          pushGateChildEnv()[envName],
+          `scripts/full-suite-battery.ts reads ${envName}, but pushGateChildEnv() strips it`,
+        ).toBe('reachability-probe');
+      } finally {
+        if (wasPresent) process.env[envName] = priorValue;
+        else delete process.env[envName];
+      }
+    }
+  });
 });

@@ -33,6 +33,7 @@ import { startHealthServer } from './core/health.ts';
 import { createStartupNotificationJournalPort, startupNotifyPath } from './core/startup-notify.ts';
 import { StartupNotificationController } from './core/startup-notification-controller.ts';
 import { openDatabaseForStartup } from './core/database-compatibility-health.ts';
+import { clearInitialDatabaseCreateMarker } from './core/initial-database-marker.ts';
 import {
   closeDatabaseCompatibilityHealthServer,
   waitForDatabaseCompatibilityDrain,
@@ -81,7 +82,7 @@ import { formatClockForUser } from './runtimes/agent/runtime-presentation.ts';
 import { acquireCoordinationLease, defaultLeaseProbes, releaseCoordinationLease, renewCoordinationLease } from './transport/coordination-lease.ts';
 import { acquireProcessLock, isProcessLockError, releaseProcessLock, type ProcessLockHandle } from './lib/process-lock.ts';
 import { createServiceManager } from './fleet/platform.ts';
-import { xdgDir } from './fleet/paths.ts';
+import { dataRoot, xdgDir } from './fleet/paths.ts';
 
 // The restart-safety probe must link the complete static import graph without
 // executing this module's database, network, transport, health, or timer body.
@@ -282,6 +283,7 @@ if (databaseStartup.mode === 'drained') {
   }
   process.exit(shutdownExitCode(drainSignal));
 }
+clearInitialDatabaseCreateMarker(dataRoot(config.botName), config.botName);
 
 // Defined below the compatibility gate on purpose: the ordering contract in
 // tests/core/database-compatibility-health.test.ts pins that no timer starts

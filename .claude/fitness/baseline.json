@@ -17,7 +17,7 @@
       ]
     },
     "arch.ssot-lid-reads": {
-      "violationCount": 6
+      "violationCount": 4
     },
     "arch.ssot-jid-construction": {
       "violationCount": 6

@@ -288,6 +288,29 @@ else
   fi
 fi
 
+# --- restart-safety ledger preflight (begin)
+if [ "${WHATSOUP_SKIP_PREFLIGHT:-}" != "1" ]; then
+  RESTART_SAFETY_PREFLIGHT_TS="$REPO_ROOT/scripts/restart-safety-preflight.ts"
+  if [ -L "$RESTART_SAFETY_PREFLIGHT_TS" ] || [ ! -f "$RESTART_SAFETY_PREFLIGHT_TS" ]; then
+    echo "FATAL: unsafe or missing restart-safety ledger preflight: $RESTART_SAFETY_PREFLIGHT_TS" >&2
+    exit 78
+  fi
+  RESTART_SAFETY_DATA_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/whatsoup/instances/$INSTANCE"
+  if ! "$NODE" \
+    --disable-warning=ExperimentalWarning \
+    --experimental-strip-types \
+    "$RESTART_SAFETY_PREFLIGHT_TS" \
+    --db "$RESTART_SAFETY_DATA_ROOT/bot.db" \
+    --instance "$INSTANCE" \
+    --initial-marker "$RESTART_SAFETY_DATA_ROOT/.initial-database-create-approved" \
+    --json; then
+    echo "FATAL: restart-safety ledger preflight blocked instance '$INSTANCE'" >&2
+    exit 78
+  fi
+  unset RESTART_SAFETY_PREFLIGHT_TS RESTART_SAFETY_DATA_ROOT
+fi
+# --- restart-safety ledger preflight (end)
+
 # Expose checkout version metadata to the running instance so /health can report
 # the code that was launched. Best-effort only: git failure must not block startup.
 if git -C "$REPO_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
