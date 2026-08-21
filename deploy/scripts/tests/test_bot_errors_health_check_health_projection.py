@@ -94,18 +94,41 @@ def test_probe_health_sends_resolved_bearer(monkeypatch) -> None:
     assert seen.get("auth") == "Bearer tok-123"
 
 
-def test_probe_health_missing_token_is_explicitly_unobserved_without_http(monkeypatch) -> None:
+def test_probe_health_missing_token_still_probes_and_warns(monkeypatch) -> None:
+    # The anonymous attempt MUST still happen: a DOWN on-demand agent is detected
+    # via connection-refused on this very path (see the on-demand agent test in
+    # tests/scripts/bot-errors-health-check.test.ts). Missing-token semantics are
+    # expressed as a WARN marker + truthful projection evidence, never a silent
+    # public reading and never a workload FAIL.
+    _freeze_body_age(monkeypatch)
     monkeypatch.delenv("WHATSOUP_HEALTH_TOKEN", raising=False)
+    seen: dict[str, object] = {}
 
-    def unexpected_urlopen(*_args, **_kwargs):
-        raise AssertionError("missing-token probe must not fall back to the public endpoint")
+    def fake_urlopen(req, timeout=None):
+        seen["auth"] = req.get_header("Authorization")
+        return _FakeResponse(PUBLIC_BODY)
 
-    monkeypatch.setattr(_mod, "urlopen", unexpected_urlopen)
+    monkeypatch.setattr(_mod, "urlopen", fake_urlopen)
     line = _mod.probe_health(9099, "primary-bot")
 
+    assert seen["auth"] is None
     assert line.startswith("WARN")
     assert "health_token_missing" in line
-    assert "health_projection=unobserved" in line
+    assert "health_projection=public" in line
+    assert not line.startswith("FAIL")
+
+
+def test_probe_health_missing_token_connection_refused_stays_legacy_fail(monkeypatch) -> None:
+    monkeypatch.delenv("WHATSOUP_HEALTH_TOKEN", raising=False)
+
+    def refused_urlopen(req, timeout=None):
+        raise _mod.URLError("Connection refused")
+
+    monkeypatch.setattr(_mod, "urlopen", refused_urlopen)
+    line = _mod.probe_health(9099, "primary-bot")
+
+    assert line.startswith("FAIL")
+    assert "Connection refused" in line
 
 
 def test_token_rejected_is_warn_not_identity_fail(monkeypatch) -> None:

@@ -3152,7 +3152,7 @@ def rustdesk_inventory(profile: dict[str, Any]) -> list[str]:
     return lines
 
 
-def health_probe_details(status: int, body: str, expected_name: str | None = None, token_sent: bool = False) -> str:
+def health_probe_details(status: int, body: str, expected_name: str | None = None, token_sent: bool = False, token_missing: bool = False) -> str:
     details: list[str] = []
     def add_marker(marker: str) -> None:
         if marker not in details:
@@ -3179,6 +3179,8 @@ def health_probe_details(status: int, body: str, expected_name: str | None = Non
     append_evidence_field(details, "health_projection", health_projection)
     if token_sent and health_projection == "unobserved":
         add_marker("health_token_rejected")
+    if token_missing:
+        add_marker("health_token_missing")
     if is_public_envelope(data):
         return " ".join(details)
     whatsapp = data.get("whatsapp") if isinstance(data.get("whatsapp"), dict) else {}
@@ -3522,8 +3524,8 @@ def health_probe_details(status: int, body: str, expected_name: str | None = Non
     return " ".join(details)
 
 
-def format_health_probe(url: str, status: int, body: str = "", expected_name: str | None = None, token_sent: bool = False) -> str:
-    details = health_probe_details(status, body, expected_name, token_sent)
+def format_health_probe(url: str, status: int, body: str = "", expected_name: str | None = None, token_sent: bool = False, token_missing: bool = False) -> str:
+    details = health_probe_details(status, body, expected_name, token_sent, token_missing)
     suffix = f" {details}" if details else ""
     non_diagnostic_public = (
         "health_projection=public" in details
@@ -3557,6 +3559,7 @@ def format_health_probe(url: str, status: int, body: str = "", expected_name: st
         or "auth_bond_backup_age_warning" in details
         or "node_version_drift" in details
         or "health_token_rejected" in details
+        or "health_token_missing" in details
     ):
         prefix = "WARN "
     else:
@@ -3571,18 +3574,20 @@ def probe_health(port: int, expected_name: str | None = None) -> str:
         dry_status = int(os.environ.get("BOT_ERRORS_DRY_HEALTH_STATUS", "503"))
         return format_health_probe(url, dry_status, dry_body, expected_name)
     token = instance_health_token(expected_name) if expected_name else None
-    if expected_name and not token:
-        return f"WARN unobserved {url} health_token_missing health_projection=unobserved"
+    # A missing token must not skip the probe: connection-refused on this very
+    # attempt is how a DOWN on-demand agent is detected. The anonymous response
+    # is marked health_token_missing and stays non-diagnostic.
+    token_missing = bool(expected_name) and not token
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     req = Request(url, method="GET", headers=headers)
     token_sent = bool(token)
     try:
         with urlopen(req, timeout=HEALTH_PROBE_TIMEOUT_SECONDS) as response:
             body = response.read(64 * 1024).decode("utf-8", errors="replace")
-            return format_health_probe(url, response.status, body, expected_name, token_sent)
+            return format_health_probe(url, response.status, body, expected_name, token_sent, token_missing)
     except HTTPError as exc:
         body = exc.read(64 * 1024).decode("utf-8", errors="replace")
-        return format_health_probe(url, exc.code, body, expected_name, token_sent)
+        return format_health_probe(url, exc.code, body, expected_name, token_sent, token_missing)
     except URLError as exc:
         return f"FAIL {url} {exc.reason}"
     except Exception as exc:
