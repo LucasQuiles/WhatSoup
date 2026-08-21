@@ -3181,15 +3181,15 @@ def health_probe_details(status: int, body: str, expected_name: str | None = Non
         add_marker("health_token_rejected")
     if token_missing:
         add_marker("health_token_missing")
-    if not token_sent and health_projection != "diagnostic":
-        # Authority-lattice ceiling: an UNAUTHENTICATED body never earns the
-        # diagnostic projection, so it may contribute liveness-only fields —
-        # no identity/auth/DB/provider field may be evaluated from it. A
-        # diagnostic-SHAPED body here also means the server disclosed to an
-        # unauthenticated client (config anomaly worth surfacing as evidence).
-        # Authenticated reads keep their legacy field evaluation even when the
-        # body shape is not the canonical disclosure (health_token_rejected
-        # already marks the public-shaped rejection case).
+    if health_projection != "diagnostic":
+        # Authority-lattice ceiling: only the DIAGNOSTIC projection (disclosed
+        # body reached with an accepted token) may contribute identity/auth/
+        # DB/provider fields. Every other projection — anonymous reads,
+        # rejected tokens, unrecognised body shapes — contributes liveness-only
+        # fields, regardless of whether a token was attempted. A disclosed
+        # shape inside this branch is only reachable unauthenticated (disclosed
+        # + token classifies diagnostic) and means the server disclosed to an
+        # anonymous client — a config anomaly surfaced as evidence.
         if health_body_is_disclosed(data):
             add_marker("health_unauthenticated_disclosure")
         data = {k: data[k] for k in ("schema_version", "status", "generated_at") if k in data}
@@ -3584,10 +3584,15 @@ def probe_health(port: int, expected_name: str | None = None) -> str:
     dry_body = os.environ.get("BOT_ERRORS_DRY_HEALTH_RESPONSE_JSON")
     if dry_body is not None:
         dry_status = int(os.environ.get("BOT_ERRORS_DRY_HEALTH_STATUS", "503"))
-        # An operator-injected dry body is AUTHORIZED diagnostic evidence by
-        # definition (no network read happened; the fixture was supplied
-        # deliberately), so it evaluates under the diagnostic projection.
-        return format_health_probe(url, dry_status, dry_body, expected_name, True)
+        # A dry-injected body is fixture CONTENT, not proof of authentication:
+        # it evaluates under whatever authority the environment actually
+        # resolves (the same token path as a live read), so an unauthenticated
+        # injection can never manufacture diagnostic authority.
+        dry_token = instance_health_token(expected_name) if expected_name else None
+        dry_token_missing = bool(expected_name) and not dry_token
+        return format_health_probe(
+            url, dry_status, dry_body, expected_name, bool(dry_token), dry_token_missing
+        )
     token = instance_health_token(expected_name) if expected_name else None
     # A missing token must not skip the probe: connection-refused on this very
     # attempt is how a DOWN on-demand agent is detected. The anonymous response

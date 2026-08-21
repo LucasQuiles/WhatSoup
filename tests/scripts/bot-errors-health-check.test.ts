@@ -3,15 +3,9 @@ import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative, sep } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { privateHostLabels } from '../../scripts/repo-hygiene-guard.ts';
 import { SERVICE_ENV_MAP as RUNTIME_SERVICE_ENV_MAP } from '../../src/lib/provider-key-service.ts';
-
-// The fixture /health servers in this file model AUTHENTICATED instances: the
-// daily probe only earns the diagnostic projection when it sends a token
-// (authority-lattice ceiling), so every child run inherits this fixture token
-// via `...process.env`. Anonymous-path tests pass token flags explicitly.
-process.env.WHATSOUP_HEALTH_TOKEN ??= 'fixture-health-token';
 
 let tmpRoot = '';
 const privateHostLabelFixture = ['nuc', 'les'].join('');
@@ -22,11 +16,19 @@ const secondParkedAddressFixture = ['50', '112', '20', '134'].join('.');
 
 beforeEach(() => {
   process.env['BOT_ERRORS_DRY_ACTIVE_WHATSOUP_SERVICES'] = '';
+  // The fixture /health bodies in this file model AUTHENTICATED instances:
+  // the daily probe only earns the diagnostic projection when a token
+  // resolves (authority-lattice ceiling), so every child run inherits this
+  // per-test fixture token via `...process.env`. Anonymous-path tests pass
+  // token flags explicitly. Scoped here (not module scope) so nothing leaks
+  // to other test files sharing the worker.
+  vi.stubEnv('WHATSOUP_HEALTH_TOKEN', 'fixture-health-token');
 });
 
 afterEach(() => {
   if (tmpRoot) rmSync(tmpRoot, { recursive: true, force: true });
   tmpRoot = '';
+  vi.unstubAllEnvs();
   delete process.env['BOT_ERRORS_DRY_ACTIVE_WHATSOUP_SERVICES'];
 });
 
@@ -4323,6 +4325,23 @@ print(m.probe_health(9092))
       expect(line).toMatch(/health_unauthenticated_disclosure/);
     });
 
+    it('never evaluates identity from an AUTHENTICATED non-diagnostic body', () => {
+      // The ceiling binds to the projection, not to whether a token was
+      // attempted: a 200 body that is neither the disclosed diagnostic shape
+      // nor the public envelope stays unobserved even when authenticated, so
+      // identity fields inside it carry no verdict authority.
+      const body = JSON.stringify({
+        status: 'healthy',
+        generated_at: new Date().toISOString(),
+        instance: { name: 'other-bot' },
+      });
+      const line = probeLine(200, body, 'primary-bot', true);
+      expect(line).not.toMatch(/health_identity_mismatch/);
+      expect(line).not.toMatch(/^FAIL/);
+      expect(line).toMatch(/health_projection=unobserved/);
+      expect(line).toMatch(/health_token_rejected/);
+    });
+
     it('keeps an instance identity mismatch as a failure', () => {
       expect(probeLine(200, healthyBody({ instance: { name: 'other-bot' } }), 'primary-bot', true))
         .toMatch(/^FAIL 200 .*health_identity_mismatch/);
@@ -6319,6 +6338,9 @@ print(m.probe_health(9092))
       'import json',
       `m.current_epoch = lambda: ${now}`,
       'def evidence(snapshot):',
+      '    # The producer always emits the whatsapp block; without it the body',
+      '    # is non-diagnostic and the projection ceiling strips its fields.',
+      '    snapshot.setdefault("whatsapp", {"connected": True})',
       '    line = m.health_probe_details(200, json.dumps(snapshot), "agent-alpha", True)',
       '    return m.provider_live_session_from_health("claude-cli", line, 1800)',
       'progressing = evidence({',
@@ -6428,6 +6450,7 @@ print(m.probe_health(9092))
       'snapshot = {',
       '  "status": "healthy",',
       '  "generated_at": "2026-06-12T02:59:58Z",',
+      '  "whatsapp": {"connected": True},',
       '  "runtime": {"agent": {',
       '    "activeSessions": 1, "lastSessionStatus": "active",',
       '    "lastSessionStartedAt": "2026-06-12T00:00:00Z",',
@@ -6460,6 +6483,7 @@ print(m.probe_health(9092))
       '  "status": "healthy",',
       '  "generated_at": "2026-06-12T02:59:58Z",',
       '  "instance": {"provider": "instance-provider-token-do-not-emit", "effectiveProvider": "instance-effective-token-do-not-emit"},',
+      '  "whatsapp": {"connected": True},',
       '  "runtime": {"agent": {',
       '    "activeSessions": 1, "lastSessionStatus": "active",',
       '    "primaryProvider": "primary-provider-token-do-not-emit",',
