@@ -15,15 +15,15 @@ markers and re-run the command — the result is a fixed point, so the resolutio
 rather than a hand-count. `docs/work-index.{json,md}` has the same property via
 `npm run work-index:regen`.
 
-**Total classification rows:** 376
+**Total classification rows:** 393
 
 | Classification | Count |
 |---|---:|
 | PUBLIC | 198 |
-| PRIVATE-ARCHIVE | 178 |
+| PRIVATE-ARCHIVE | 195 |
 | SANITIZE | 0 |
 | DELETE | 0 |
-| Total | 376 |
+| Total | 393 |
 
 | Path | Classification | Rationale |
 |---|---|---|
@@ -202,6 +202,23 @@ rather than a hand-count. `docs/work-index.{json,md}` has the same property via
 | `docs/superpowers/specs/provider-event-lifecycle/provider-contract-claude-code-2.1.207.json` | PRIVATE-ARCHIVE | Sanitized provider schema/correlation evidence; retained for internal conformance review and excluded from public publication by default. |
 | `docs/superpowers/specs/provider-event-lifecycle/requirements.md` | PRIVATE-ARCHIVE | Internal protocol requirements; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/provider-event-lifecycle/tasks.md` | PRIVATE-ARCHIVE | Internal implementation plan; retained in the repository but excluded from public publication by default. |
+| `docs/triage/CLUSTER-agent-safety.md` | PRIVATE-ARCHIVE | Internal wave-2 triage catalog: a cluster grouping plus per-issue summaries, tracking (not closing) internal issue numbers; retained in the repository but excluded from public publication by default. |
+| `docs/triage/CLUSTER-console-observability.md` | PRIVATE-ARCHIVE | Internal wave-2 triage catalog: a cluster grouping plus per-issue summaries, tracking (not closing) internal issue numbers; retained in the repository but excluded from public publication by default. |
+| `docs/triage/CLUSTER-console-transport.md` | PRIVATE-ARCHIVE | Internal wave-2 triage catalog: a cluster grouping plus per-issue summaries, tracking (not closing) internal issue numbers; retained in the repository but excluded from public publication by default. |
+| `docs/triage/CLUSTER-database-migration.md` | PRIVATE-ARCHIVE | Internal wave-2 triage catalog: a cluster grouping plus per-issue summaries, tracking (not closing) internal issue numbers; retained in the repository but excluded from public publication by default. |
+| `docs/triage/CLUSTER-durability-memory.md` | PRIVATE-ARCHIVE | Internal wave-2 triage catalog: a cluster grouping plus per-issue summaries, tracking (not closing) internal issue numbers; retained in the repository but excluded from public publication by default. |
+| `docs/triage/CLUSTER-fleet-observability.md` | PRIVATE-ARCHIVE | Internal wave-2 triage catalog: a cluster grouping plus per-issue summaries, tracking (not closing) internal issue numbers; retained in the repository but excluded from public publication by default. |
+| `docs/triage/CLUSTER-health-collapse.md` | PRIVATE-ARCHIVE | Internal wave-2 triage catalog: a cluster grouping plus per-issue summaries, tracking (not closing) internal issue numbers; retained in the repository but excluded from public publication by default. |
+| `docs/triage/CLUSTER-observability-gaps.md` | PRIVATE-ARCHIVE | Internal wave-2 triage catalog: a cluster grouping plus per-issue summaries, tracking (not closing) internal issue numbers; retained in the repository but excluded from public publication by default. |
+| `docs/triage/CLUSTER-portability-fixes.md` | PRIVATE-ARCHIVE | Internal wave-2 triage catalog: a cluster grouping plus per-issue summaries, tracking (not closing) internal issue numbers; retained in the repository but excluded from public publication by default. |
+| `docs/triage/CLUSTER-portability-sweep.md` | PRIVATE-ARCHIVE | Internal wave-2 triage catalog: a cluster grouping plus per-issue summaries, tracking (not closing) internal issue numbers; retained in the repository but excluded from public publication by default. |
+| `docs/triage/CLUSTER-portability-test.md` | PRIVATE-ARCHIVE | Internal wave-2 triage catalog: a cluster grouping plus per-issue summaries, tracking (not closing) internal issue numbers; retained in the repository but excluded from public publication by default. |
+| `docs/triage/CLUSTER-qr-design.md` | PRIVATE-ARCHIVE | Internal wave-2 triage catalog: a cluster grouping plus per-issue summaries, tracking (not closing) internal issue numbers; retained in the repository but excluded from public publication by default. |
+| `docs/triage/CLUSTER-reliability-misc.md` | PRIVATE-ARCHIVE | Internal wave-2 triage catalog: a cluster grouping plus per-issue summaries, tracking (not closing) internal issue numbers; retained in the repository but excluded from public publication by default. |
+| `docs/triage/CLUSTER-salvage-work.md` | PRIVATE-ARCHIVE | Internal wave-2 triage catalog: a cluster grouping plus per-issue summaries, tracking (not closing) internal issue numbers; retained in the repository but excluded from public publication by default. |
+| `docs/triage/CLUSTER-tech-debt-drssot-2.md` | PRIVATE-ARCHIVE | Internal wave-2 triage catalog: a cluster grouping plus per-issue summaries, tracking (not closing) internal issue numbers; retained in the repository but excluded from public publication by default. |
+| `docs/triage/CLUSTER-tech-debt-drssot.md` | PRIVATE-ARCHIVE | Internal wave-2 triage catalog: a cluster grouping plus per-issue summaries, tracking (not closing) internal issue numbers; retained in the repository but excluded from public publication by default. |
+| `docs/triage/CLUSTER-transport-fragility.md` | PRIVATE-ARCHIVE | Internal wave-2 triage catalog: a cluster grouping plus per-issue summaries, tracking (not closing) internal issue numbers; retained in the repository but excluded from public publication by default. |
 | `docs/triage/README.md` | PUBLIC | Sanitized operator contract for deterministic issue evidence, dry-run, confirmation, and recovery; complete issue bodies and private runtime identifiers are forbidden. |
 | `docs/triage/open-issue-priority-clusters-20260728.json` | PUBLIC | Sealed numeric-only P0/P1 projection containing issue numbers, reviewed cluster identifiers, source bindings, and aggregate counts; titles, bodies, paths, ownership details, and pull-request content are excluded. |
 | `docs/triage/open-issue-priority-clusters-20260728.md` | PUBLIC | Deterministic view of the sealed numeric-only P0/P1 projection; it exposes no fields beyond the reviewed JSON projection. |
