@@ -15,15 +15,15 @@ markers and re-run the command — the result is a fixed point, so the resolutio
 rather than a hand-count. `docs/work-index.{json,md}` has the same property via
 `npm run work-index:regen`.
 
-**Total classification rows:** 393
+**Total classification rows:** 394
 
 | Classification | Count |
 |---|---:|
 | PUBLIC | 198 |
-| PRIVATE-ARCHIVE | 195 |
+| PRIVATE-ARCHIVE | 196 |
 | SANITIZE | 0 |
 | DELETE | 0 |
-| Total | 393 |
+| Total | 394 |
 
 | Path | Classification | Rationale |
 |---|---|---|
@@ -194,6 +194,7 @@ rather than a hand-count. `docs/work-index.{json,md}` has the same property via
 | `docs/superpowers/specs/2026-08-14-outbound-queue-quiescence-containment-design.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/2026-08-15-loop-lag-safe-forensic-pipeline-design.md` | PRIVATE-ARCHIVE | Internal event-loop evidence transport and collection design; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/2026-08-16-recovery-blocked-follower-lifecycle-design.md` | PRIVATE-ARCHIVE | Internal durable replay, checkpoint-integrity, health, and staged fleet-rollout design; sanitized incident evidence only, retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/specs/2026-08-21-anonymous-health-projection-ceiling-design.md` | PRIVATE-ARCHIVE | Internal health-authority security remediation design with sanitized synthetic evidence; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/kill-session-transactional-cancellation/design.md` | PRIVATE-ARCHIVE | Internal targeted-cancellation protocol design; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/kill-session-transactional-cancellation/requirements.md` | PRIVATE-ARCHIVE | Internal targeted-cancellation protocol requirements; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/kill-session-transactional-cancellation/tasks.md` | PRIVATE-ARCHIVE | Internal targeted-cancellation implementation plan; retained in the repository but excluded from public publication by default. |
