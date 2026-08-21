@@ -6,6 +6,7 @@ is performed.
 from __future__ import annotations
 
 import copy
+import hashlib
 import importlib.util
 import json
 import os
@@ -44,6 +45,19 @@ def _load_roster_lib():
 _roster_lib = _load_roster_lib()
 
 
+def _load_pin_lib():
+    spec = importlib.util.spec_from_file_location(
+        "sentinel_pin", Path(__file__).resolve().parents[1] / "lib" / "sentinel_pin.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_pin_lib = _load_pin_lib()
+
+
 def _write_json(path: Path, payload: dict) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     path.parent.chmod(0o700)
@@ -76,6 +90,7 @@ def _config(tmp_path: Path, hosts_path: Path, **kwargs):
     return _mod.SentinelConfig(
         state_dir=tmp_path / "state",
         hosts_path=hosts_path,
+        runtime_root=kwargs.get("runtime_root", _mod.REPO_ROOT),
         oracle_path=kwargs.get("oracle_path"),
         action_outbox_dir=kwargs.get("action_outbox_dir", tmp_path / "state" / "actions"),
         action_outbox_retention=kwargs.get("action_outbox_retention", 500),
@@ -258,11 +273,13 @@ def test_json_and_private_directory_helpers_fail_closed(tmp_path: Path):
         _mod.ensure_private_dir(regular_file)
 
 
-def test_healthy_host_writes_ack_and_resets_open_state(tmp_path: Path):
+def test_healthy_host_writes_ack_and_resets_open_state(tmp_path: Path, monkeypatch):
     hb = _heartbeat(tmp_path / "host-a-hb.json", healthy=True, mtime=1000.0)
     ack = tmp_path / "acks" / "host-a.json"
     hosts = _hosts_file(tmp_path, [{"host": "host-a", "heartbeatPath": str(hb), "ackPath": str(ack)}])
-    config = _config(tmp_path, hosts)
+    release_root, release_manifest, release_digest = _release_tree(tmp_path, _PROVENANCE_TEST_COMMIT)
+    monkeypatch.setenv("BOT_ERRORS_RUNTIME_MANIFEST", str(release_manifest))
+    config = _config(tmp_path, hosts, runtime_root=release_root)
     _write_json(
         _mod.state_path(config),
         {"schemaVersion": 1, "hosts": {"host-a": {"alertState": "open", "lastClass": "out_of_rotation", "consecutive": 2}}},
@@ -300,6 +317,13 @@ def test_healthy_host_writes_ack_and_resets_open_state(tmp_path: Path):
         "observedInstanceCount": 0,
         "problemInstanceCount": 0,
         "unknownInstanceCount": 0,
+        "sourceCommit": _PROVENANCE_TEST_COMMIT,
+        "sourceProvenance": {
+            "status": "verified",
+            "reason": "verified",
+            "manifestDigest": release_digest,
+            "mismatchCount": 0,
+        },
         "metrics": {
             "hostsEvaluated": 1,
             "healCandidates": 0,
@@ -2362,7 +2386,7 @@ def _fleet_roster_file(tmp_path: Path, hosts: list[dict]) -> Path:
     return _write_json(tmp_path / "expected-fleet.json", {"schemaVersion": 1, "hosts": hosts})
 
 
-def test_central_heartbeat_binds_roster_digest_epoch_and_counts(tmp_path: Path):
+def test_central_heartbeat_binds_roster_digest_epoch_and_counts(tmp_path: Path, monkeypatch):
     """#1875: the heartbeat binds a roster digest+epoch and reports expected /
     observed / problem / unknown counts for hosts AND runtime-relevant instances."""
     hb_a = _heartbeat(tmp_path / "a-hb.json", healthy=True, mtime=1000.0)
@@ -2389,7 +2413,9 @@ def test_central_heartbeat_binds_roster_digest_epoch_and_counts(tmp_path: Path):
             },
         ],
     )
-    config = _config(tmp_path, roster)
+    release_root, release_manifest, _release_digest = _release_tree(tmp_path, _PROVENANCE_TEST_COMMIT)
+    monkeypatch.setenv("BOT_ERRORS_RUNTIME_MANIFEST", str(release_manifest))
+    config = _config(tmp_path, roster, runtime_root=release_root)
     probes = {
         "host-a": {"reachable": True, "healthy": True, "class": "healthy"},
         "host-b": {"reachable": True, "healthy": True, "class": "healthy"},
@@ -2410,6 +2436,10 @@ def test_central_heartbeat_binds_roster_digest_epoch_and_counts(tmp_path: Path):
     assert heartbeat["problemInstanceCount"] == 0
     assert heartbeat["unknownInstanceCount"] == 0
     assert heartbeat["healthy"] is True
+    # #1876: green aggregate carries the verified source commit of the
+    # evaluating generation, bound to the runtime-manifest owner.
+    assert heartbeat["sourceCommit"] == _PROVENANCE_TEST_COMMIT
+    assert heartbeat["sourceProvenance"]["status"] == "verified"
 
 
 def test_unknown_host_is_explicit_and_blocks_green(tmp_path: Path):
@@ -2531,6 +2561,338 @@ def test_p1_run_once_result_and_heartbeat_carry_metrics(tmp_path: Path):
     # Persisted to the central heartbeat so it is observable off-host.
     heartbeat = json.loads(_mod.heartbeat_path(config).read_text(encoding="utf-8"))
     assert heartbeat["metrics"]["hostsEvaluated"] == 1
+
+
+# ===========================================================================
+# TESTS: #1876 — aggregate source-commit provenance
+# ===========================================================================
+# The central heartbeat must carry the immutable source commit of the
+# evaluating generation, bound to the ONE existing provenance owner: the
+# runtime manifest contract (BOT_ERRORS_RUNTIME_MANIFEST env override, else
+# <runtime_root>/deploy/bot-errors-runtime-manifest.json) whose
+# expected_head_sha the deployer stamps at deploy time and whose per-file
+# sha256 table binds the bytes actually being evaluated. Detection
+# (evaluate_source_provenance), decision (save_central_heartbeat green gate),
+# and reporting (heartbeat fields) are tested separately. Git is never
+# consulted: a non-Git release snapshot carries the same owner manifest.
+
+_PROVENANCE_TEST_COMMIT = "c" * 40
+
+
+def _release_tree(tmp_path: Path, head_sha: str | None = None, *, mutate_path: str | None = None):
+    """Build a self-consistent NON-Git release snapshot under tmp_path.
+
+    Copies every file in the committed runtime-manifest table from this
+    worktree and writes a manifest whose sha256 table is built FROM THE COPIED
+    BYTES (so verification passes regardless of dev-tree dirt — no hardcoded
+    hashes). ``mutate_path`` drifts that file's on-disk bytes after its table
+    entry is fixed, manufacturing a claimed-commit vs evaluating-bytes
+    mismatch. Returns (root, manifest_path, expected_manifest_digest).
+    """
+    table = json.loads(
+        (_mod.REPO_ROOT / "deploy" / "bot-errors-runtime-manifest.json").read_text(encoding="utf-8")
+    )["files"]
+    root = tmp_path / "release"
+    entries = []
+    for item in table:
+        rel = item["path"]
+        original = (_mod.REPO_ROOT / rel).read_bytes()
+        payload = original + b"\n# synthetic drift\n" if mutate_path == rel else original
+        dst = root / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_bytes(payload)
+        entries.append({"path": rel, "sha256": hashlib.sha256(original).hexdigest()})
+    manifest: dict = {"schemaVersion": 1, "files": entries}
+    if head_sha is not None:
+        manifest["expected_head_sha"] = head_sha
+    manifest_path = tmp_path / "release-manifest.json"
+    _write_json(manifest_path, manifest)
+    digest = _pin_lib.compute_manifest_digest({entry["path"]: entry["sha256"] for entry in entries})
+    return root, manifest_path, digest
+
+
+def _run_once_green_fleet(config):
+    return _mod.run_once(
+        config,
+        _deps(1010.0, {"host-a": {"reachable": True, "healthy": True, "class": "healthy"}}),
+    )
+
+
+def test_source_provenance_verified_binds_commit_and_manifest_digest(tmp_path: Path):
+    """A stamped manifest whose file table matches the evaluating bytes yields
+    status=verified, the stamped commit as sourceCommit, and the #2478
+    manifest digest binding the whole table to that generation."""
+    root, manifest_path, digest = _release_tree(tmp_path, _PROVENANCE_TEST_COMMIT)
+    result = _mod.evaluate_source_provenance(root, manifest_path)
+    assert result["status"] == "verified"
+    assert result["sourceCommit"] == _PROVENANCE_TEST_COMMIT
+    assert result["manifestDigest"] == digest
+    assert result["mismatchCount"] == 0
+    assert result["reason"] == "verified"
+
+
+def test_source_provenance_resolves_owner_env_and_default_paths(tmp_path: Path, monkeypatch):
+    """Owner resolution mirrors bot-errors-health-check's contract:
+    BOT_ERRORS_RUNTIME_MANIFEST overrides; the default is the evaluating
+    tree's own deploy/bot-errors-runtime-manifest.json — which is exactly how
+    a non-Git release snapshot carries provenance with no Git and no env."""
+    root, manifest_path, _digest = _release_tree(tmp_path, _PROVENANCE_TEST_COMMIT)
+    monkeypatch.setenv("BOT_ERRORS_RUNTIME_MANIFEST", str(manifest_path))
+    assert _mod.evaluate_source_provenance(root)["status"] == "verified"
+    monkeypatch.delenv("BOT_ERRORS_RUNTIME_MANIFEST", raising=False)
+    default_path = root / "deploy" / "bot-errors-runtime-manifest.json"
+    default_path.write_text(manifest_path.read_text(encoding="utf-8"), encoding="utf-8")
+    assert _mod.evaluate_source_provenance(root)["sourceCommit"] == _PROVENANCE_TEST_COMMIT
+
+
+def test_source_provenance_missing_manifest_is_unavailable_and_blocks_green(tmp_path: Path, monkeypatch):
+    """Absent provenance authority is an explicit unknown: the aggregate
+    cannot be green and the heartbeat reports a bounded cause — the field is
+    never silently omitted while claiming health."""
+    hb = _heartbeat(tmp_path / "host-a-hb.json", healthy=True, mtime=1000.0)
+    hosts = _hosts_file(tmp_path, [{"host": "host-a", "heartbeatPath": str(hb)}])
+    release_root, _manifest, _digest = _release_tree(tmp_path, _PROVENANCE_TEST_COMMIT)
+    monkeypatch.setenv("BOT_ERRORS_RUNTIME_MANIFEST", str(tmp_path / "absent-manifest.json"))
+    config = _config(tmp_path, hosts, runtime_root=release_root)
+    _run_once_green_fleet(config)
+
+    heartbeat = json.loads(_mod.heartbeat_path(config).read_text(encoding="utf-8"))
+    assert heartbeat["healthy"] is False
+    assert heartbeat["sourceCommit"] is None
+    assert heartbeat["sourceProvenance"]["status"] == "unavailable"
+    assert heartbeat["sourceProvenance"]["reason"] == "manifest_missing"
+    assert heartbeat["sourceProvenance"]["manifestDigest"] is None
+    assert "source_provenance=unavailable" in heartbeat["nonGreenReason"]
+
+
+def test_source_provenance_unstamped_manifest_blocks_green(tmp_path: Path, monkeypatch):
+    """A loadable but unstamped manifest (expected_head_sha absent or JSON
+    null — the committed dev state) is explicit non-green, not silent green."""
+    hb = _heartbeat(tmp_path / "host-a-hb.json", healthy=True, mtime=1000.0)
+    hosts = _hosts_file(tmp_path, [{"host": "host-a", "heartbeatPath": str(hb)}])
+    release_root, manifest_path, digest = _release_tree(tmp_path, None)
+    monkeypatch.setenv("BOT_ERRORS_RUNTIME_MANIFEST", str(manifest_path))
+    config = _config(tmp_path, hosts, runtime_root=release_root)
+    _run_once_green_fleet(config)
+
+    heartbeat = json.loads(_mod.heartbeat_path(config).read_text(encoding="utf-8"))
+    assert heartbeat["healthy"] is False
+    assert heartbeat["sourceCommit"] is None
+    assert heartbeat["sourceProvenance"]["status"] == "unstamped"
+    assert heartbeat["sourceProvenance"]["reason"] == "expected_head_sha_absent"
+    # The digest still reports WHICH file table was evaluated.
+    assert heartbeat["sourceProvenance"]["manifestDigest"] == digest
+    assert "source_provenance=unstamped" in heartbeat["nonGreenReason"]
+
+
+def test_source_provenance_null_expected_head_sha_is_unstamped(tmp_path: Path):
+    root, manifest_path, _digest = _release_tree(tmp_path, "c" * 40)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["expected_head_sha"] = None
+    _write_json(manifest_path, manifest)
+    result = _mod.evaluate_source_provenance(root, manifest_path)
+    assert result["status"] == "unstamped"
+    assert result["reason"] == "expected_head_sha_absent"
+    assert result["sourceCommit"] is None
+
+
+@pytest.mark.parametrize(
+    "bad_commit",
+    ["HEAD", "main", "feature/x", "a" * 12, "b" * 64, "C" * 40, ""],
+)
+def test_source_provenance_malformed_object_ids_never_emitted(tmp_path: Path, monkeypatch, bad_commit):
+    """Unsupported/malformed object ids (branch names, short ids, sha256-table
+    ids, uppercase, empty) are rejected by the owner's loader and can never be
+    emitted as source truth or produce a green aggregate."""
+    root, manifest_path, _digest = _release_tree(tmp_path, bad_commit)
+    detection = _mod.evaluate_source_provenance(root, manifest_path)
+    assert detection["status"] == "malformed"
+    assert detection["sourceCommit"] is None
+    assert detection["reason"] == "runtime_manifest_malformed"
+
+    hb = _heartbeat(tmp_path / "host-a-hb.json", healthy=True, mtime=1000.0)
+    hosts = _hosts_file(tmp_path, [{"host": "host-a", "heartbeatPath": str(hb)}])
+    monkeypatch.setenv("BOT_ERRORS_RUNTIME_MANIFEST", str(manifest_path))
+    config = _config(tmp_path, hosts, runtime_root=root)
+    _run_once_green_fleet(config)
+    heartbeat = json.loads(_mod.heartbeat_path(config).read_text(encoding="utf-8"))
+    assert heartbeat["healthy"] is False
+    assert heartbeat["sourceCommit"] is None
+    assert heartbeat["sourceProvenance"]["status"] == "malformed"
+    assert "source_provenance=malformed" in heartbeat["nonGreenReason"]
+
+
+def test_source_provenance_byte_mismatch_blocks_green(tmp_path: Path, monkeypatch):
+    """A claimed commit whose attested bytes do not match the evaluating tree
+    cannot be green: the sentinel hashes its own runtime surface against the
+    manifest table before attesting the commit."""
+    hb = _heartbeat(tmp_path / "host-a-hb.json", healthy=True, mtime=1000.0)
+    hosts = _hosts_file(tmp_path, [{"host": "host-a", "heartbeatPath": str(hb)}])
+    release_root, manifest_path, _digest = _release_tree(
+        tmp_path, _PROVENANCE_TEST_COMMIT, mutate_path="deploy/scripts/lib/state_files.py"
+    )
+    detection = _mod.evaluate_source_provenance(release_root, manifest_path)
+    assert detection["status"] == "mismatch"
+    assert detection["sourceCommit"] is None
+    assert detection["mismatchCount"] == 1
+    assert detection["reason"] == "evaluating_bytes_mismatch"
+    assert detection["manifestDigest"] is not None
+
+    monkeypatch.setenv("BOT_ERRORS_RUNTIME_MANIFEST", str(manifest_path))
+    config = _config(tmp_path, hosts, runtime_root=release_root)
+    _run_once_green_fleet(config)
+    heartbeat = json.loads(_mod.heartbeat_path(config).read_text(encoding="utf-8"))
+    assert heartbeat["healthy"] is False
+    assert heartbeat["sourceCommit"] is None
+    assert heartbeat["sourceProvenance"]["status"] == "mismatch"
+    assert heartbeat["sourceProvenance"]["mismatchCount"] == 1
+    assert "source_provenance=mismatch" in heartbeat["nonGreenReason"]
+
+
+def test_source_provenance_non_git_release_tree_never_shells_git(tmp_path: Path, monkeypatch):
+    """Non-Git release snapshots follow the supported owner (its manifest)
+    rather than shelling out to Git — provenance detection must complete with
+    subprocess.run forbidden."""
+    root, manifest_path, _digest = _release_tree(tmp_path, _PROVENANCE_TEST_COMMIT)
+    assert not (root / ".git").exists()
+
+    def forbid_git(*_args, **_kwargs):
+        raise AssertionError("source provenance must not shell out to git")
+
+    monkeypatch.setattr(_mod.subprocess, "run", forbid_git)
+    result = _mod.evaluate_source_provenance(root, manifest_path)
+    assert result["status"] == "verified"
+    assert result["sourceCommit"] == _PROVENANCE_TEST_COMMIT
+
+
+def test_source_provenance_symlinked_manifest_refused(tmp_path: Path):
+    """A symlinked provenance manifest is refused (fail-closed), mirroring the
+    sentinel's symlink posture for every other evaluated signal file."""
+    root, manifest_path, _digest = _release_tree(tmp_path, _PROVENANCE_TEST_COMMIT)
+    link = tmp_path / "linked-manifest.json"
+    link.symlink_to(manifest_path)
+    result = _mod.evaluate_source_provenance(root, link)
+    assert result["status"] == "unavailable"
+    assert result["reason"] == "manifest_symlink"
+    assert result["sourceCommit"] is None
+
+
+def test_source_provenance_evaluation_error_is_unavailable(tmp_path: Path, monkeypatch):
+    """Unexpected detection failures fail closed to unavailable — never to
+    green, never to an unbounded raw error in the heartbeat."""
+    root, manifest_path, _digest = _release_tree(tmp_path, _PROVENANCE_TEST_COMMIT)
+
+    def boom(_path):
+        raise OSError("disk i/o")
+
+    monkeypatch.setattr(_mod.sentinel_pin, "load_pin", boom)
+    result = _mod.evaluate_source_provenance(root, manifest_path)
+    assert result["status"] == "unavailable"
+    assert result["reason"] == "evaluation_error"
+    assert result["sourceCommit"] is None
+
+
+def _provenance_result(provenance: object) -> dict:
+    result = {
+        "sweepStartedAt": "2026-01-01T00:00:00Z",
+        "sweepDurationSeconds": 0,
+        "checkedAt": "2026-01-01T00:00:01Z",
+        "controllerHost": "central-test",
+        "fleetAction": "none",
+        "hosts": [{"host": "host-a", "healthy": True, "class": "healthy"}],
+        "actionEvents": [],
+        "rosterEpoch": 12345,
+        "metrics": {"hostsEvaluated": 1},
+    }
+    if provenance != "__absent__":
+        result["sourceProvenance"] = provenance
+    return result
+
+
+_ROSTER_INVENTORY = {
+    "digest": "d" * 64,
+    "expectedHosts": ["host-a"],
+    "expectedHostCount": 1,
+    "runtimeInstancesByHost": {},
+    "expectedInstanceCount": 0,
+}
+
+_VERIFIED_PROVENANCE = {
+    "status": "verified",
+    "sourceCommit": _PROVENANCE_TEST_COMMIT,
+    "reason": "verified",
+    "manifestDigest": "e" * 64,
+    "mismatchCount": 0,
+}
+
+
+def test_save_central_heartbeat_green_requires_verified_provenance(tmp_path: Path):
+    """Decision layer: roster-bound, problem-free aggregate WITH verified
+    provenance is green and carries sourceCommit exactly."""
+    hosts = _hosts_file(tmp_path, [{"host": "host-a"}])
+    config = _config(tmp_path, hosts)
+    result = _provenance_result(_VERIFIED_PROVENANCE)
+    result["rosterInventory"] = _ROSTER_INVENTORY
+    _mod.save_central_heartbeat(config, result)
+    heartbeat = json.loads(_mod.heartbeat_path(config).read_text(encoding="utf-8"))
+    assert heartbeat["healthy"] is True
+    assert heartbeat["sourceCommit"] == _PROVENANCE_TEST_COMMIT
+    assert heartbeat["sourceProvenance"] == {
+        "status": "verified",
+        "reason": "verified",
+        "manifestDigest": "e" * 64,
+        "mismatchCount": 0,
+    }
+    assert "nonGreenReason" not in heartbeat
+
+
+@pytest.mark.parametrize(
+    "provenance",
+    [
+        # claimed-verified but the commit is not a valid immutable object id
+        {"status": "verified", "sourceCommit": "HEAD", "reason": "verified", "manifestDigest": "e" * 64, "mismatchCount": 0},
+        {"status": "verified", "sourceCommit": "a" * 12, "reason": "verified", "manifestDigest": "e" * 64, "mismatchCount": 0},
+        {"status": "verified", "sourceCommit": None, "reason": "verified", "manifestDigest": "e" * 64, "mismatchCount": 0},
+        {"status": "verified", "reason": "verified", "manifestDigest": "e" * 64, "mismatchCount": 0},
+        # non-verified statuses with a (bogus) commit attached
+        {"status": "mismatch", "sourceCommit": _PROVENANCE_TEST_COMMIT, "reason": "evaluating_bytes_mismatch", "manifestDigest": "e" * 64, "mismatchCount": 3},
+        {"status": "unavailable", "sourceCommit": None, "reason": "manifest_missing", "manifestDigest": None, "mismatchCount": None},
+        {"status": "unstamped", "sourceCommit": None, "reason": "expected_head_sha_absent", "manifestDigest": "e" * 64, "mismatchCount": None},
+        {"status": "malformed", "sourceCommit": None, "reason": "runtime_manifest_malformed", "manifestDigest": None, "mismatchCount": None},
+        # structurally bogus provenance must not crash or leak
+        {"status": 123, "reason": 7, "manifestDigest": None, "mismatchCount": None},
+        # provenance evaluation entirely absent from the result
+        "__absent__",
+    ],
+)
+def test_save_central_heartbeat_non_verified_provenance_is_not_green(tmp_path: Path, provenance):
+    hosts = _hosts_file(tmp_path, [{"host": "host-a"}])
+    config = _config(tmp_path, hosts)
+    result = _provenance_result(provenance)
+    result["rosterInventory"] = _ROSTER_INVENTORY
+    _mod.save_central_heartbeat(config, result)
+    heartbeat = json.loads(_mod.heartbeat_path(config).read_text(encoding="utf-8"))
+    assert heartbeat["healthy"] is False, f"provenance={provenance!r} must not be green"
+    assert heartbeat["sourceCommit"] is None, f"provenance={provenance!r} must not emit a commit"
+    status = heartbeat["sourceProvenance"]["status"]
+    assert status in {"verified", "unavailable", "malformed", "unstamped", "mismatch"}
+    assert f"source_provenance={status}" in heartbeat["nonGreenReason"]
+    assert heartbeat["nonGreenReason"].startswith("aggregate_health_false")
+
+
+def test_save_central_heartbeat_preserves_roster_binding_gate(tmp_path: Path):
+    """#1875/#2432 no-regression: roster binding remains an independent green
+    gate — verified provenance cannot green a roster-blind aggregate."""
+    hosts = _hosts_file(tmp_path, [{"host": "host-a"}])
+    config = _config(tmp_path, hosts)
+    result = _provenance_result(_VERIFIED_PROVENANCE)
+    result["rosterInventory"] = None  # roster-blind
+    _mod.save_central_heartbeat(config, result)
+    heartbeat = json.loads(_mod.heartbeat_path(config).read_text(encoding="utf-8"))
+    assert heartbeat["healthy"] is False
+    assert heartbeat["rosterDigest"] is None
+    assert "roster_bound=False" in heartbeat["nonGreenReason"]
+    assert "source_provenance=verified" in heartbeat["nonGreenReason"]
 
 
 # ===========================================================================
