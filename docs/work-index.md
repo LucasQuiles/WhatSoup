@@ -18,15 +18,15 @@ The **Inconsistencies** section lists missing or stale index entries compared wi
 scoped markdown files currently on disk.
 
 **Repo:** `WhatSoup`
-**Total entries:** 122
+**Total entries:** 124
 
 ## Totals
 
 | Dimension | Breakdown |
 |---|---|
-| Kind | handoff=8, plan=61, review=4, spec=48, state=1 |
-| Status | active=32, closed=4, completed=35, deferred=7, pending=15, unknown=29 |
-| Status source | body-marker=103, fallback=18, state-md-status=1 |
+| Kind | handoff=8, plan=62, review=4, spec=49, state=1 |
+| Status | active=32, closed=4, completed=35, deferred=7, pending=15, unknown=31 |
+| Status source | body-marker=104, fallback=19, state-md-status=1 |
 
 ## Inconsistencies
 
@@ -71,7 +71,7 @@ scoped markdown files currently on disk.
 | `docs/superpowers/specs/provider-event-lifecycle/requirements.md` | spec | requirements | body-marker |
 | `docs/superpowers/specs/provider-event-lifecycle/tasks.md` | spec | tasks | body-marker |
 
-### Unknown-status — triage needed (29)
+### Unknown-status — triage needed (31)
 
 | Path | Kind | Topic | Last Mod |
 |------|------|-------|----------|
@@ -90,7 +90,8 @@ scoped markdown files currently on disk.
 | `docs/superpowers/plans/2026-08-06-host-setup-portability.md` | plan | host-setup-portability | 2026-08-06 |
 | `docs/superpowers/plans/2026-08-07-fallback-continuity.md` | plan | fallback-continuity | 2026-08-12 |
 | `docs/superpowers/plans/2026-08-15-loop-lag-safe-forensic-pipeline.md` | plan | loop-lag-safe-forensic-pipeline | 2026-08-16 |
-| `docs/superpowers/plans/2026-08-15-poisoned-direct-send-rejection.md` | plan | poisoned-direct-send-rejection | 2026-08-15 |
+| `docs/superpowers/plans/2026-08-15-poisoned-direct-send-rejection.md` | plan | poisoned-direct-send-rejection | 2026-08-20 |
+| `docs/superpowers/plans/2026-08-21-anonymous-health-projection-ceiling.md` | plan | anonymous-health-projection-ceiling | 2026-08-21 |
 | `docs/superpowers/specs/2026-07-11-turn-lifecycle-fitness-extraction-design.md` | spec | turn-lifecycle-fitness-extraction-design | 2026-07-11 |
 | `docs/superpowers/specs/2026-07-17-macos-credential-durability-design.md` | spec | macos-credential-durability-design | 2026-07-17 |
 | `docs/superpowers/specs/2026-07-23-agent-reliability-remediation-design.md` | spec | agent-reliability-remediation-design | 2026-07-27 |
@@ -104,6 +105,7 @@ scoped markdown files currently on disk.
 | `docs/superpowers/specs/2026-08-06-host-setup-portability-and-macos-reconciliation-design.md` | spec | host-setup-portability-and-macos-reconciliation-design | 2026-08-06 |
 | `docs/superpowers/specs/2026-08-07-fallback-continuity-design.md` | spec | fallback-continuity-design | 2026-08-12 |
 | `docs/superpowers/specs/2026-08-15-loop-lag-safe-forensic-pipeline-design.md` | spec | loop-lag-safe-forensic-pipeline-design | 2026-08-16 |
+| `docs/superpowers/specs/2026-08-21-anonymous-health-projection-ceiling-design.md` | spec | anonymous-health-projection-ceiling-design | 2026-08-21 |
 
 ### Cross-tree topic clusters (4)
 
@@ -158,7 +160,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/handoffs/2026-07-16-boundary-core-history-mining.md` | handoff | pending | body-marker | boundary-core-history-mining | 2026-07-16 |  |
 | `docs/superpowers/handoffs/2026-07-28-incident-control-plane-finder-report.md` | handoff | unknown | fallback | incident-control-plane-finder-report | 2026-07-28 |  |
 
-### docs/superpowers/plans  _(61 entries)_
+### docs/superpowers/plans  _(62 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
@@ -220,9 +222,10 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/plans/2026-08-03-watchdog-auth-required-contract.md` | plan | active | body-marker | watchdog-auth-required-contract | 2026-08-04 |  |
 | `docs/superpowers/plans/2026-08-06-host-setup-portability.md` | plan | unknown | fallback | host-setup-portability | 2026-08-06 |  |
 | `docs/superpowers/plans/2026-08-07-fallback-continuity.md` | plan | unknown | fallback | fallback-continuity | 2026-08-12 |  |
-| `docs/superpowers/plans/2026-08-14-outbound-queue-quiescence-containment.md` | plan | active | body-marker | outbound-queue-quiescence-containment | 2026-08-15 |  |
+| `docs/superpowers/plans/2026-08-14-outbound-queue-quiescence-containment.md` | plan | active | body-marker | outbound-queue-quiescence-containment | 2026-08-20 |  |
 | `docs/superpowers/plans/2026-08-15-loop-lag-safe-forensic-pipeline.md` | plan | unknown | fallback | loop-lag-safe-forensic-pipeline | 2026-08-16 |  |
-| `docs/superpowers/plans/2026-08-15-poisoned-direct-send-rejection.md` | plan | unknown | fallback | poisoned-direct-send-rejection | 2026-08-15 |  |
+| `docs/superpowers/plans/2026-08-15-poisoned-direct-send-rejection.md` | plan | unknown | fallback | poisoned-direct-send-rejection | 2026-08-20 |  |
+| `docs/superpowers/plans/2026-08-21-anonymous-health-projection-ceiling.md` | plan | unknown | fallback | anonymous-health-projection-ceiling | 2026-08-21 |  |
 
 ### docs/superpowers/reviews  _(4 entries)_
 
@@ -233,7 +236,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/reviews/2026-07-09-wall-to-wall-audit-pr-briefs.md` | review | completed | body-marker | wall-to-wall-audit-pr-briefs | 2026-07-10 |  |
 | `docs/superpowers/reviews/2026-07-24-r13-r15-tech-debt-review-map.md` | review | completed | body-marker | r13-r15-tech-debt-review-map | 2026-07-24 |  |
 
-### docs/superpowers/specs  _(42 entries)_
+### docs/superpowers/specs  _(43 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
@@ -276,9 +279,10 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/specs/2026-08-03-watchdog-auth-required-contract-design.md` | spec | active | body-marker | watchdog-auth-required-contract-design | 2026-08-12 |  |
 | `docs/superpowers/specs/2026-08-06-host-setup-portability-and-macos-reconciliation-design.md` | spec | unknown | body-marker | host-setup-portability-and-macos-reconciliation-design | 2026-08-06 |  |
 | `docs/superpowers/specs/2026-08-07-fallback-continuity-design.md` | spec | unknown | body-marker | fallback-continuity-design | 2026-08-12 |  |
-| `docs/superpowers/specs/2026-08-14-outbound-queue-quiescence-containment-design.md` | spec | active | body-marker | outbound-queue-quiescence-containment-design | 2026-08-15 |  |
+| `docs/superpowers/specs/2026-08-14-outbound-queue-quiescence-containment-design.md` | spec | active | body-marker | outbound-queue-quiescence-containment-design | 2026-08-20 |  |
 | `docs/superpowers/specs/2026-08-15-loop-lag-safe-forensic-pipeline-design.md` | spec | unknown | body-marker | loop-lag-safe-forensic-pipeline-design | 2026-08-16 |  |
 | `docs/superpowers/specs/2026-08-16-recovery-blocked-follower-lifecycle-design.md` | spec | active | body-marker | recovery-blocked-follower-lifecycle-design | 2026-08-16 |  |
+| `docs/superpowers/specs/2026-08-21-anonymous-health-projection-ceiling-design.md` | spec | unknown | body-marker | anonymous-health-projection-ceiling-design | 2026-08-21 |  |
 
 ### docs/superpowers/specs/kill-session-transactional-cancellation  _(3 entries)_
 
@@ -299,4 +303,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-08-20T02:02:47Z from commit `a61d4386c2583114a631153698e9a30f62db5471`
+- Generated at 2026-08-21T09:22:06Z from commit `1aceca351369db7f3f5caf7c88d4133d8930d4a9`
