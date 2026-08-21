@@ -30,6 +30,18 @@ export interface RuntimeTurnCapabilityHealth {
    *  it, so staleness means the probe failed to fire, not that the bot is
    *  naturally idle. Default false for backward compatibility. */
   periodicProbeExpected?: boolean;
+  /** Scheduler backoff multiple (1, 2, 4) the freshness window was derived from
+   *  when the periodic probe is armed; 1 when it is not. */
+  periodicProbeBackoffMultiple?: number | null;
+  /** The freshness window (ms) `modelUsableStale` was judged against: the
+   *  scheduler-derived deadline while the periodic probe is armed, otherwise
+   *  the flat MODEL_USABILITY_FRESHNESS_MS. Surfaced so a stale flag can be
+   *  read against the window that produced it. */
+  modelUsableFreshnessMs?: number | null;
+  /** Epoch ms the armed periodic probe is due to fire (same clock as
+   *  `modelUsableCheckedAt`); null while no periodic timer is armed. The
+   *  freshness window is derived from it whenever it is known. */
+  nextProbeDueAt?: number | null;
 }
 
 export interface AgentCommandRequest {
