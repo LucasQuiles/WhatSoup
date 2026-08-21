@@ -309,7 +309,7 @@ except oc.ObservationContractError:
       expect(digestFor(raw)).toBe(zero);
       expect(pyDigestFor(raw)).toBe(zero);
     }
-    for (const raw of ['1e-7', '0.5', '9007199254740992', '1e100']) {
+    for (const raw of ['1e-7', '0.5', '9007199254740992', '1e100', '1e400']) {
       expect(() => digestFor(raw)).toThrow(ObservationContractPortError);
       expect(pyDigestFor(raw)).toBe('failed-closed');
     }

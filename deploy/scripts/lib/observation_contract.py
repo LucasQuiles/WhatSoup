@@ -197,6 +197,11 @@ def build_contract(docs: dict) -> dict:
     document sets without touching the committed files.
     """
     digest = contract_digest(docs)  # also validates presence/shape of every doc
+    # Build the returned structure from the NORMALIZED documents so Python
+    # consumers see the same values a TS consumer sees after JSON.parse
+    # (integral floats already canonicalized to int) — req-obs-02 covers the
+    # returned contract data, not only the digest bytes.
+    docs = _normalize_for_digest(contract_identity(docs), "contract")["files"]
     projections = docs["outcome-projections.json"]
     canonical_list = _string_list(
         projections.get("canonical_outcomes"), "canonical_outcomes"

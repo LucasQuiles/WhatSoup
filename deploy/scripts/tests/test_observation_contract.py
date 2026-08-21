@@ -211,6 +211,63 @@ def test_digest_domain_normalizes_integral_floats_to_integers() -> None:
     neg_zero["authority-lattice.json"]["ratio"] = json.loads("-0.0")
     assert _mod.contract_digest(neg_zero) == _mod.contract_digest(zero)
 
+    # Normalization never mutates caller-owned input.
+    assert isinstance(as_float["authority-lattice.json"]["ratio"], float)
+
+
+def test_digest_domain_handles_booleans_before_integers() -> None:
+    # bool subclasses int in Python; booleans must encode as true/false, never
+    # collapse into the integer domain.
+    as_bool = copy.deepcopy(_committed_docs())
+    as_bool["authority-lattice.json"]["flag"] = True
+    as_int = copy.deepcopy(_committed_docs())
+    as_int["authority-lattice.json"]["flag"] = 1
+    assert _mod.contract_digest(as_bool) != _mod.contract_digest(as_int)
+
+
+def test_build_contract_returns_normalized_documents() -> None:
+    # req-obs-02 applies to the RETURNED contract data, not only the digest:
+    # a Python consumer must see the same integer a TS consumer sees after
+    # JSON.parse, in docs, claims, adapters, and projection rows alike.
+    mutated = copy.deepcopy(_committed_docs())
+    mutated["authority-lattice.json"]["ratio"] = json.loads("1.0")
+    first_claim = mutated["claim-catalog.json"]["claims"][0]
+    first_claim["parity_probe"] = json.loads("2.0")
+    surface = mutated["outcome-projections.json"]["surfaces"]["probe_report_verdict"]
+    surface["rows"][0]["parity_probe"] = json.loads("3.0")
+
+    contract = _mod.build_contract(mutated)
+    ratio = contract["docs"]["authority-lattice.json"]["ratio"]
+    assert isinstance(ratio, int) and not isinstance(ratio, bool)
+    claim = contract["claims"][first_claim["claim_id"]]
+    assert isinstance(claim["parity_probe"], int)
+    row = _mod.project_outcome(
+        contract, "probe_report_verdict", surface["rows"][0]["legacy_value"]
+    )
+    assert isinstance(row["parity_probe"], int)
+
+
+def test_load_contract_normalizes_raw_decimal_literals(tmp_path: Path) -> None:
+    # The loader path itself must normalize raw bytes: a contract file
+    # containing the literal 1.0 loads to the same contract (and digest) as
+    # one containing 1.
+    for name in _mod.CONTRACT_FILE_NAMES:
+        (tmp_path / name).write_text(
+            (_CONTRACT_DIR / name).read_text(encoding="utf-8"), encoding="utf-8"
+        )
+    lattice_text = (_CONTRACT_DIR / "authority-lattice.json").read_text(encoding="utf-8")
+    assert lattice_text.lstrip().startswith("{")
+    (tmp_path / "authority-lattice.json").write_text(
+        lattice_text.replace("{", '{"ratio": 1.0, ', 1), encoding="utf-8"
+    )
+    contract = _mod.load_contract(tmp_path)
+    ratio = contract["docs"]["authority-lattice.json"]["ratio"]
+    assert isinstance(ratio, int) and not isinstance(ratio, bool)
+
+    as_int = copy.deepcopy(_committed_docs())
+    as_int["authority-lattice.json"]["ratio"] = 1
+    assert contract["digest"] == _mod.contract_digest(as_int)
+
 
 def test_digest_domain_rejects_unsafe_and_fractional_numbers_nested() -> None:
     # The bound applies after normalization and at any depth.
@@ -223,6 +280,11 @@ def test_digest_domain_rejects_unsafe_and_fractional_numbers_nested() -> None:
     frac["authority-lattice.json"]["nested"] = [{"deep": 0.5}]
     with pytest.raises(_mod.ObservationContractError):
         _mod.contract_digest(frac)
+
+    nonfinite = copy.deepcopy(_committed_docs())
+    nonfinite["authority-lattice.json"]["nested"] = [{"deep": json.loads("1e400")}]
+    with pytest.raises(_mod.ObservationContractError):
+        _mod.contract_digest(nonfinite)
 
 
 def test_digest_domain_rejects_nested_non_bmp_object_keys() -> None:
