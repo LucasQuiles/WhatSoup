@@ -31,7 +31,7 @@
     },
     {
       "path": "scripts/restart-safety-preflight.ts",
-      "sha256": "db750d0afcfae76c15c124b0194a5d88ae52b7b768378839da5b92c20713b48b",
+      "sha256": "ff1883eeaa62f51264b58dd23cf65cc460c183a71707ad2f6e977c0bccd0fabd",
       "mustContain": [
         "safeNonterminal",
         "missing_database",
