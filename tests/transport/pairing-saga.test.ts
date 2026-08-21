@@ -420,6 +420,108 @@ describe('pairingPreflight', () => {
       }),
     );
   });
+
+  it('reports a held lease when a live coordination lease is present', () => {
+    const held = acquireCoordinationLease({
+      stateRoot,
+      scopeId: SCOPE,
+      operationId: 'lease-holder',
+      mode: 'pairing',
+      ttlMs: 60_000,
+      probes: probes(),
+    });
+    expect(held.ok).toBe(true);
+    const plan = pairingPreflight({ stateRoot, authDir });
+    expect(plan.lease).toEqual({ status: 'held', mode: 'pairing' });
+  });
+
+  it('reports a corrupt lease when a lease file is not valid JSON', () => {
+    writeFileSync(join(stateRoot, 'coordination-lease.bogus.json'), 'not-json\n', { mode: 0o600 });
+    expect(pairingPreflight({ stateRoot, authDir }).lease).toEqual({ status: 'corrupt' });
+  });
+
+  it('reports a corrupt lease when a lease file is valid JSON but not a lease', () => {
+    writeFileSync(join(stateRoot, 'coordination-lease.bogus.json'), '{}\n', { mode: 0o600 });
+    expect(pairingPreflight({ stateRoot, authDir }).lease).toEqual({ status: 'corrupt' });
+  });
+
+  it('reports a corrupt lease when the state root cannot be scanned', () => {
+    rmSync(stateRoot, { recursive: true, force: true });
+    writeFileSync(stateRoot, 'not a directory', { mode: 0o600 });
+    expect(pairingPreflight({ stateRoot, authDir }).lease).toEqual({ status: 'corrupt' });
+  });
+
+  it('reports a vacant lease and no operation when the state root is absent', () => {
+    const plan = pairingPreflight({ stateRoot: join(root, 'does-not-exist'), authDir });
+    // Assert the WHOLE plan in one shape rather than field-by-field. The
+    // terminal-weak-assertion guard is positional — it reads the last assertion
+    // in the block — and a trailing `toBeNull()` is exactly the weak form it
+    // flags. Pinning both fields together is both stronger (an unexpected extra
+    // field now fails) and terminally strong, so it satisfies the guard by
+    // being right rather than by appending another assertion after it.
+    expect(plan).toMatchObject({ lease: { status: 'vacant' }, lastOperation: null });
+  });
+
+  it('reports the last operation tail from the operations journal', () => {
+    const row = {
+      v: 1,
+      paramsDigest: 'a'.repeat(64),
+      generationId: null,
+      custody: null,
+      operation: {
+        v: 1,
+        idempotencyKey: 'pairing-op-0001',
+        host: 'host-a',
+        instance: 'line-a',
+        scopeId: 'scope:line-a-wa',
+        expectedCurrentGenerationId: null,
+        method: 'pairing_code',
+        authorizationId: 'auth-g4-0001',
+        state: 'receipt_persisted',
+        fencingToken: 1,
+        requestedAt: '2026-08-18T18:00:00.000Z',
+        updatedAt: '2026-08-18T18:00:00.000Z',
+        errorClass: null,
+        resultGenerationId: null,
+      },
+    };
+    writeFileSync(join(stateRoot, 'pairing-operations.ndjson'), JSON.stringify(row) + '\n', { mode: 0o600 });
+    expect(pairingPreflight({ stateRoot, authDir }).lastOperation).toEqual({
+      idempotencyKey: 'pairing-op-0001',
+      state: 'receipt_persisted',
+    });
+  });
+
+  it('skips blank and corrupt journal rows when scanning for the operation tail', () => {
+    const journal = [
+      '',
+      'this is not json',
+      JSON.stringify({ v: 1, paramsDigest: 'x', generationId: null, custody: null, operation: { bogus: true } }),
+      '',
+    ].join('\n');
+    writeFileSync(join(stateRoot, 'pairing-operations.ndjson'), journal, { mode: 0o600 });
+    expect(pairingPreflight({ stateRoot, authDir }).lastOperation).toBeNull();
+  });
+
+  // Two DIFFERENT refusals, both surfacing as "no tail". 0o644 is world-readable,
+  // so it does not make the file unreadable — it trips the non-private-permissions
+  // guard (private-fs.ts: `(stat.mode & 0o077) !== 0` -> EACCES), which fires
+  // before any parse, making the payload irrelevant. 0o000 is the genuinely
+  // unreadable case, refused at openSync instead. Naming the first one
+  // "unreadable" hid the fact that the second was never covered at all.
+  it('treats a non-private (world-readable) operations journal as no tail', () => {
+    const journal = join(stateRoot, 'pairing-operations.ndjson');
+    writeFileSync(journal, '{}\n', { mode: 0o600 });
+    chmodSync(journal, 0o644);
+    expect(pairingPreflight({ stateRoot, authDir }).lastOperation).toBeNull();
+  });
+
+  it('treats a genuinely unreadable operations journal as no tail', () => {
+    const journal = join(stateRoot, 'pairing-operations.ndjson');
+    writeFileSync(journal, '{}\n', { mode: 0o600 });
+    chmodSync(journal, 0o000);
+    expect(pairingPreflight({ stateRoot, authDir }).lastOperation).toBeNull();
+  });
 });
 
 describe('executePairingSaga — refusal and custody edge branches', () => {
