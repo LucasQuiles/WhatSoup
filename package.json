@@ -73,6 +73,7 @@
     "reconcile-launchd-restart-policy": "bash scripts/run-with-pinned-node.sh scripts/reconcile-launchd-restart-policy.ts",
     "guard:hardcoded-tmpdir": "bash scripts/run-with-pinned-node.sh scripts/check-hardcoded-tmpdir.ts",
     "guard:fleet-bot-hardening-parity": "bash scripts/run-with-pinned-node.sh scripts/check-fleet-bot-hardening-parity.ts",
+    "guard:observation-contract": "bash scripts/run-with-pinned-node.sh scripts/observation-contract-guard.ts",
     "guard:bot-errors-runtime-manifest": "bash scripts/run-with-pinned-node.sh scripts/check-bot-errors-runtime-manifest.ts",
     "guard:bot-errors-critical-surface": "bash scripts/run-with-pinned-node.sh scripts/bot-errors-critical-surface-audit.ts",
     "guard:deployer-static": "bash deploy/scripts/whatsoup-bot-errors-deploy.sh verify \"$PWD\"",

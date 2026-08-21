@@ -283,6 +283,8 @@ jobs:
 
       - name: Fleet bot-hardening parity guard
         run: npm run guard:fleet-bot-hardening-parity
+      - name: Observation contract guard
+        run: npm run guard:observation-contract
 
       - name: Simulation matrix guard
         run: npm run guard:bot-errors-simulation-matrix
