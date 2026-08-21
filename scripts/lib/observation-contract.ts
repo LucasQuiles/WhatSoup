@@ -94,15 +94,15 @@ export function contractIdentity(docs: Record<string, unknown>): Record<string, 
 }
 
 // Digest domain (req-obs-02): the digest is defined only over values both
-// encoders serialize byte-identically. Floats are out (JS String(1e-7) vs
-// Python repr(1e-07)), integers stop at the safe-integer boundary, and object
-// KEYS must stay inside the BMP (JS sorts keys by UTF-16 code unit, Python by
-// code point — the orders disagree beyond it). String VALUES are
+// encoders accept AND serialize byte-identically. Numbers must be integral
+// with |n| <= 2**53-1 — JSON.parse normalizes integral literals (1.0, 1e0,
+// -0) to integers before any reader code runs, and the Python side
+// canonicalizes integral floats to the same integers, so every raw numeric
+// form lands on one digest or fails closed on BOTH sides (JS String(1e-7)
+// vs Python repr(1e-07) would otherwise diverge). Object KEYS must stay
+// inside the BMP (JS sorts keys by UTF-16 code unit, Python by code point —
+// the orders disagree beyond it, at any nesting depth). String VALUES are
 // unrestricted: surrogate escaping is parity-proven by the lockstep suite.
-// Known parse asymmetry, deliberate: the raw literal `1.0` normalizes to the
-// integer 1 under JSON.parse (accepted) but stays a float under Python
-// json.loads (rejected) — one side fails closed; identical raw bytes can
-// never yield two DIFFERENT digests.
 const MAX_DIGEST_INT = 2 ** 53 - 1;
 
 function assertDigestDomain(value: unknown, at: string): void {

@@ -275,28 +275,62 @@ except oc.ObservationContractError:
     expect(pyResult).toBe('failed-closed');
   });
 
-  it('fails closed on the raw literal "1.0" on the side that preserves floatness', () => {
-    // Parse asymmetry, documented: JSON.parse("1.0") normalizes to the
-    // integer 1 (inside the domain), while Python json.loads keeps a float
-    // (outside the domain). Identical raw bytes therefore never produce two
-    // DIFFERENT digests — Python fails closed, TS digests the normalized int.
+  it('accepts and rejects the same raw numeric literals on both sides (acceptance parity)', () => {
+    // req-obs-02 demands identical ACCEPTANCE, not merely divergence-freedom.
+    // JS JSON.parse normalizes integral literals (1.0, 1e0, -0) to integers
+    // before any reader code runs; Python canonicalizes integral floats to the
+    // same integers, so every raw form lands on one digest — or both sides
+    // fail closed.
+    const docs = loadCommittedDocs();
+    const digestFor = (raw: string): string => {
+      const mutated = JSON.parse(JSON.stringify(docs)) as Record<string, unknown>;
+      (mutated['authority-lattice.json'] as Record<string, unknown>)['ratio'] = JSON.parse(raw);
+      return contractDigest(mutated);
+    };
+    const pyDigestFor = (raw: string): string =>
+      python(
+        `
+docs["authority-lattice.json"]["ratio"] = json.loads(${JSON.stringify(raw)})
+try:
+    sys.stdout.write(oc.contract_digest(docs))
+except oc.ObservationContractError:
+    sys.stdout.write("failed-closed")
+`,
+        docs,
+      );
+
+    const canonical = digestFor('1');
+    for (const raw of ['1', '1.0', '1e0']) {
+      expect(digestFor(raw)).toBe(canonical);
+      expect(pyDigestFor(raw)).toBe(canonical);
+    }
+    const zero = digestFor('0');
+    for (const raw of ['0', '-0', '-0.0']) {
+      expect(digestFor(raw)).toBe(zero);
+      expect(pyDigestFor(raw)).toBe(zero);
+    }
+    for (const raw of ['1e-7', '0.5', '9007199254740992', '1e100']) {
+      expect(() => digestFor(raw)).toThrow(ObservationContractPortError);
+      expect(pyDigestFor(raw)).toBe('failed-closed');
+    }
+  });
+
+  it('rejects nested non-BMP object keys identically', () => {
     const docs = loadCommittedDocs();
     const mutated = JSON.parse(JSON.stringify(docs)) as Record<string, unknown>;
-    (mutated['authority-lattice.json'] as Record<string, unknown>)['ratio'] = JSON.parse('1.0');
-    const asInt = JSON.parse(JSON.stringify(docs)) as Record<string, unknown>;
-    (asInt['authority-lattice.json'] as Record<string, unknown>)['ratio'] = 1;
-
-    expect(contractDigest(mutated)).toBe(contractDigest(asInt));
+    (mutated['authority-lattice.json'] as Record<string, unknown>)['nested'] = [
+      { '\u{10000}': true },
+    ];
+    expect(() => contractDigest(mutated)).toThrow(ObservationContractPortError);
     const pyResult = python(
       `
-docs["authority-lattice.json"]["ratio"] = json.loads("1.0")
 try:
     oc.contract_digest(docs)
     sys.stdout.write("no-error")
 except oc.ObservationContractError:
     sys.stdout.write("failed-closed")
 `,
-      docs,
+      mutated,
     );
     expect(pyResult).toBe('failed-closed');
   });

@@ -69,55 +69,62 @@ def contract_identity(docs: dict) -> dict:
 
 
 # Digest domain (req-obs-02): the digest is defined only over values both
-# encoders serialize byte-identically. Floats are out (repr(1e-07) here vs
-# String(1e-7) in JS), integers stop at the JS safe-integer boundary, and
-# object KEYS must stay inside the BMP (Python sorts keys by code point, JS by
-# UTF-16 code unit — the orders disagree beyond it). String VALUES are
+# encoders accept AND serialize byte-identically. Numbers must be integral
+# with |n| <= 2**53-1 — JS ``JSON.parse`` normalizes integral literals
+# (``1.0``, ``1e0``, ``-0``) to integers before any reader code runs, so this
+# side canonicalizes integral floats to the same integers; non-integral or
+# out-of-range numbers fail closed on BOTH sides (repr(1e-07) here vs
+# String(1e-7) in JS would otherwise diverge). Object KEYS must stay inside
+# the BMP (Python sorts keys by code point, JS by UTF-16 code unit — the
+# orders disagree beyond it, at any nesting depth). String VALUES are
 # unrestricted: surrogate escaping is parity-proven by the lockstep suite.
-# Known parse asymmetry, deliberate: the raw literal ``1.0`` stays a float
-# here (rejected) but normalizes to the integer 1 under JS ``JSON.parse``
-# (accepted) — one side fails closed; identical raw bytes can never yield two
-# DIFFERENT digests.
 _MAX_DIGEST_INT = 2**53 - 1
 
 
-def _assert_digest_domain(value: Any, at: str) -> None:
+def _normalize_for_digest(value: Any, at: str) -> Any:
+    """Return ``value`` with integral floats canonicalized to int, or raise
+    :class:`ObservationContractError` for anything outside the digest domain."""
     if value is None or isinstance(value, bool):
-        return
+        return value
     if isinstance(value, int):
         if abs(value) > _MAX_DIGEST_INT:
             raise ObservationContractError(
                 f"digest domain violation at {at}: integers must satisfy |n| <= 2**53-1"
             )
-        return
+        return value
     if isinstance(value, float):
-        raise ObservationContractError(
-            f"digest domain violation at {at}: numbers must be integers (floats do not "
-            "serialize identically across the Python/TS encoders)"
-        )
+        if not value.is_integer():
+            raise ObservationContractError(
+                f"digest domain violation at {at}: numbers must be integral (fractional "
+                "values do not serialize identically across the Python/TS encoders)"
+            )
+        as_int = int(value)
+        if abs(as_int) > _MAX_DIGEST_INT:
+            raise ObservationContractError(
+                f"digest domain violation at {at}: integers must satisfy |n| <= 2**53-1"
+            )
+        return as_int
     if isinstance(value, str):
-        return
+        return value
     if isinstance(value, list):
-        for index, item in enumerate(value):
-            _assert_digest_domain(item, f"{at}[{index}]")
-        return
+        return [_normalize_for_digest(item, f"{at}[{index}]") for index, item in enumerate(value)]
     if isinstance(value, dict):
+        normalized: dict = {}
         for key, item in value.items():
             if not isinstance(key, str) or any(ord(ch) > 0xFFFF for ch in key):
                 raise ObservationContractError(
                     f"digest domain violation at {at}: object keys must be BMP-only strings "
                     "(key sort order diverges across encoders beyond the BMP)"
                 )
-            _assert_digest_domain(item, f"{at}.{key}")
-        return
+            normalized[key] = _normalize_for_digest(item, f"{at}.{key}")
+        return normalized
     raise ObservationContractError(
         f"digest domain violation at {at}: unsupported value type {type(value).__name__}"
     )
 
 
 def contract_digest(docs: dict) -> str:
-    identity = contract_identity(docs)
-    _assert_digest_domain(identity, "contract")
+    identity = _normalize_for_digest(contract_identity(docs), "contract")
     material = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(material).hexdigest()
 

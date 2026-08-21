@@ -192,6 +192,46 @@ def test_digest_domain_rejects_non_bmp_object_keys() -> None:
         _mod.contract_digest(mutated)
 
 
+def test_digest_domain_normalizes_integral_floats_to_integers() -> None:
+    # Acceptance parity (req-obs-02): JS JSON.parse normalizes 1.0/1e0/-0 to
+    # integers before any reader code runs, so Python must accept the same
+    # values and canonicalize them to the same integer encoding.
+    base = copy.deepcopy(_committed_docs())
+    base["authority-lattice.json"]["ratio"] = 1
+    as_float = copy.deepcopy(_committed_docs())
+    as_float["authority-lattice.json"]["ratio"] = json.loads("1.0")
+    as_exp = copy.deepcopy(_committed_docs())
+    as_exp["authority-lattice.json"]["ratio"] = json.loads("1e0")
+    assert _mod.contract_digest(as_float) == _mod.contract_digest(base)
+    assert _mod.contract_digest(as_exp) == _mod.contract_digest(base)
+
+    zero = copy.deepcopy(_committed_docs())
+    zero["authority-lattice.json"]["ratio"] = 0
+    neg_zero = copy.deepcopy(_committed_docs())
+    neg_zero["authority-lattice.json"]["ratio"] = json.loads("-0.0")
+    assert _mod.contract_digest(neg_zero) == _mod.contract_digest(zero)
+
+
+def test_digest_domain_rejects_unsafe_and_fractional_numbers_nested() -> None:
+    # The bound applies after normalization and at any depth.
+    huge = copy.deepcopy(_committed_docs())
+    huge["authority-lattice.json"]["nested"] = [{"deep": json.loads("1e100")}]
+    with pytest.raises(_mod.ObservationContractError):
+        _mod.contract_digest(huge)
+
+    frac = copy.deepcopy(_committed_docs())
+    frac["authority-lattice.json"]["nested"] = [{"deep": 0.5}]
+    with pytest.raises(_mod.ObservationContractError):
+        _mod.contract_digest(frac)
+
+
+def test_digest_domain_rejects_nested_non_bmp_object_keys() -> None:
+    mutated = copy.deepcopy(_committed_docs())
+    mutated["authority-lattice.json"]["nested"] = [{"\U00010000": True}]
+    with pytest.raises(_mod.ObservationContractError):
+        _mod.contract_digest(mutated)
+
+
 def test_digest_domain_keeps_non_bmp_string_values() -> None:
     # String VALUES are order-insensitive and surrogate-escape identically on
     # both sides (proven by the lockstep non-ASCII case), so they stay in.
