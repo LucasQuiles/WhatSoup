@@ -3203,6 +3203,14 @@ def health_probe_details(status: int, body: str, expected_name: str | None = Non
     elif status != 200 and status < 500:
         add_marker("health_unexpected_status")
 
+    if health_projection != "diagnostic":
+        # Body-field verdicts (status text, freshness, identity, auth-bond,
+        # provider, runtime) exist only under the diagnostic projection; every
+        # other projection has already contributed its markers above. The
+        # status-code markers stay: the HTTP status is transport evidence
+        # regardless of body authenticity.
+        return " ".join(details)
+
     status_text = data.get("status")
     if isinstance(status_text, str) and status_text:
         append_evidence_field(details, "status", status_text)
@@ -3539,12 +3547,16 @@ def health_probe_details(status: int, body: str, expected_name: str | None = Non
 def format_health_probe(url: str, status: int, body: str = "", expected_name: str | None = None, token_sent: bool = False, token_missing: bool = False) -> str:
     details = health_probe_details(status, body, expected_name, token_sent, token_missing)
     suffix = f" {details}" if details else ""
-    non_diagnostic_public = (
+    # A 5xx is a workload failure only when the evidence projection is
+    # diagnostic (or unknown, e.g. a malformed body): public and unobserved
+    # projections cap at monitoring-debt WARNs. health_token_rejected always
+    # co-occurs with health_projection=unobserved.
+    non_diagnostic_evidence = (
         "health_projection=public" in details
-        or "health_token_rejected" in details
+        or "health_projection=unobserved" in details
     )
     if (
-        (status >= 500 and not non_diagnostic_public)
+        (status >= 500 and not non_diagnostic_evidence)
         or "health_probe_auth_failed" in details
         or "health_identity_mismatch" in details
         or "health_identity_missing" in details

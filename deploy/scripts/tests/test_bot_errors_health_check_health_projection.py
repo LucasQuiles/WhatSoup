@@ -110,6 +110,47 @@ def test_authenticated_nondiagnostic_body_hits_projection_ceiling(monkeypatch) -
     assert line.startswith("WARN")
 
 
+def test_anonymous_disclosed_unhealthy_body_never_fails_workload(monkeypatch) -> None:
+    # An ANONYMOUS diagnostic-shaped body reporting status=unhealthy must not
+    # fail the workload — neither via the 5xx rule (503) nor via the
+    # status-field rule (200). Unobserved evidence yields WARN monitoring
+    # debt, never a workload verdict.
+    _freeze_body_age(monkeypatch)
+    body = json.dumps(
+        {
+            "status": "unhealthy",
+            "generated_at": "2026-08-20T00:00:00Z",
+            "whatsapp": {"connected": False, "connection": {"state": "close"}},
+            "instance": {"name": "primary-bot"},
+        }
+    )
+    for status in (503, 200):
+        line = _mod.format_health_probe(
+            "http://127.0.0.1:9099/health", status, body, "primary-bot", False, True
+        )
+        assert "health_unhealthy" not in line
+        assert "health_projection=unobserved" in line
+        assert "health_unauthenticated_disclosure" in line
+        assert line.startswith("WARN")
+
+
+def test_token_rejected_5xx_unhealthy_body_stays_warn(monkeypatch) -> None:
+    # Token sent, non-diagnostic 503 body carrying status=unhealthy: the 5xx
+    # rule and the status-field rule must both defer to the projection.
+    _freeze_body_age(monkeypatch)
+    body = json.dumps(
+        {
+            "status": "unhealthy",
+            "generated_at": "2026-08-20T00:00:00Z",
+            "instance": {"name": "primary-bot"},
+        }
+    )
+    line = _mod.format_health_probe("http://127.0.0.1:9099/health", 503, body, "primary-bot", True)
+    assert "health_unhealthy" not in line
+    assert "health_token_rejected" in line
+    assert line.startswith("WARN")
+
+
 class _FakeResponse:
     status = 200
 

@@ -4242,13 +4242,15 @@ print(m.probe_health(9092))
     });
 
     it('rejects a stale generated_at health body instead of reporting green', () => {
-      expect(probeLine(200, healthyBody({ generated_at: '2000-01-01T00:00:00Z' }), 'primary-bot'))
+      // Body-field validation is a diagnostic-projection concern (round 4):
+      // these freshness/status checks run on authenticated disclosed bodies.
+      expect(probeLine(200, healthyBody({ generated_at: '2000-01-01T00:00:00Z' }), 'primary-bot', true))
         .toMatch(/^FAIL 200 .*health_generated_at_stale/);
     });
 
     it('rejects a future-skewed generated_at health body instead of reporting green', () => {
       const future = new Date(Date.now() + 60 * 60 * 1000).toISOString();
-      expect(probeLine(200, healthyBody({ generated_at: future }), 'primary-bot'))
+      expect(probeLine(200, healthyBody({ generated_at: future }), 'primary-bot', true))
         .toMatch(/^FAIL 200 .*health_generated_at_future_skew/);
     });
 
@@ -4288,25 +4290,30 @@ print(m.probe_health(9092))
     });
 
     it('flags a health body missing generated_at as inconclusive, never green', () => {
-      const body = JSON.stringify({ status: 'healthy', instance: { name: 'primary-bot' } });
-      expect(probeLine(200, body, 'primary-bot')).toMatch(/^WARN 200 .*health_generated_at_missing/);
+      const body = JSON.stringify({
+        status: 'healthy',
+        whatsapp: { connected: true, connection: { state: 'connected' } },
+        instance: { name: 'primary-bot' },
+      });
+      expect(probeLine(200, body, 'primary-bot', true)).toMatch(/^WARN 200 .*health_generated_at_missing/);
     });
 
     it('flags an unparseable generated_at as inconclusive, never green', () => {
-      expect(probeLine(200, healthyBody({ generated_at: 'not-a-timestamp' }), 'primary-bot'))
+      expect(probeLine(200, healthyBody({ generated_at: 'not-a-timestamp' }), 'primary-bot', true))
         .toMatch(/^WARN 200 .*health_generated_at_unparseable/);
     });
 
     it('flags a missing status field as inconclusive, never green', () => {
       const body = JSON.stringify({
         generated_at: new Date().toISOString(),
+        whatsapp: { connected: true, connection: { state: 'connected' } },
         instance: { name: 'primary-bot' },
       });
-      expect(probeLine(200, body, 'primary-bot')).toMatch(/^WARN 200 .*health_status_missing/);
+      expect(probeLine(200, body, 'primary-bot', true)).toMatch(/^WARN 200 .*health_status_missing/);
     });
 
     it('flags an unknown status value as inconclusive, never green', () => {
-      expect(probeLine(200, healthyBody({ status: 'spinning' }), 'primary-bot'))
+      expect(probeLine(200, healthyBody({ status: 'spinning' }), 'primary-bot', true))
         .toMatch(/^WARN 200 .*health_status_unknown/);
     });
 
@@ -4323,6 +4330,24 @@ print(m.probe_health(9092))
       expect(line).not.toMatch(/^FAIL/);
       expect(line).toMatch(/health_projection=unobserved/);
       expect(line).toMatch(/health_unauthenticated_disclosure/);
+    });
+
+    it('never fails the workload from an anonymous diagnostic-shaped unhealthy body', () => {
+      // The status field and the 5xx rule are workload verdicts only under
+      // the diagnostic projection; anonymous disclosure yields markers, not
+      // failure.
+      const body = JSON.stringify({
+        status: 'unhealthy',
+        generated_at: new Date().toISOString(),
+        whatsapp: { connected: false, connection: { state: 'close' } },
+        instance: { name: 'primary-bot' },
+      });
+      for (const status of [503, 200]) {
+        const line = probeLine(status, body, 'primary-bot');
+        expect(line).not.toMatch(/^FAIL/);
+        expect(line).not.toMatch(/health_unhealthy/);
+        expect(line).toMatch(/health_projection=unobserved/);
+      }
     });
 
     it('never evaluates identity from an AUTHENTICATED non-diagnostic body', () => {
