@@ -33,7 +33,8 @@ export interface RestartSafetyVerdict {
     | 'safe_nonterminal_outbound'
     | 'unknown_outbound_state'
     | 'initial_database_create'
-    | 'missing_database';
+    | 'missing_database'
+    | 'preflight_error';
   quickCheck: 'ok' | 'not_applicable';
   outbound: {
     maxId: number;
