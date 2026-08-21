@@ -1,0 +1,42 @@
+{
+  "schema": "whatsoup.observation-envelope",
+  "schema_version": "0.1",
+  "envelope_id": "env-fixture-0006",
+  "run_id": "run-fixture-0001",
+  "subject": {
+    "canonical_subject_id": "mini8/ml-bot",
+    "binding": {
+      "authority": "alias_map",
+      "confidence": "mapped"
+    },
+    "raw": {
+      "host_label": "Mini8",
+      "instance_label": "ml-bot"
+    }
+  },
+  "claim_id": "incident.recovery_observed",
+  "adapter_id": "legacy-events",
+  "outcome": "inconclusive",
+  "unobserved_reason": "source_unavailable",
+  "projection": {
+    "scope": "diagnostic",
+    "authorization": "token_sent_accepted"
+  },
+  "times": {
+    "observed_at": "2026-08-20T22:05:00Z",
+    "source_at": "2026-08-20T22:01:00Z"
+  },
+  "authority": {
+    "tier": "authenticated_diagnostic",
+    "confidence": "ambiguous"
+  },
+  "legacy": {
+    "surface": "bot_errors_event",
+    "raw_value": "incident_recovery",
+    "raw_detail": "eventType=clear clearRequirement_checked=false",
+    "lossy": true
+  },
+  "limitations": [
+    "recovery ANNOUNCED only: recovery_observed never implies recovery_gate_satisfied or recovery_verified (legacy_false_recovery axis)"
+  ]
+}

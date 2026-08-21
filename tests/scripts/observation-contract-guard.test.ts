@@ -33,7 +33,7 @@ describe('observation contract guard', () => {
     expect(result.ok).toBe(true);
     expect(result.counts.claims).toBeGreaterThanOrEqual(20);
     expect(result.counts.adapters).toBeGreaterThanOrEqual(10);
-    expect(result.counts.surfaces).toBe(7);
+    expect(result.counts.surfaces).toBe(8);
     expect(result.counts.validFixtures).toBeGreaterThanOrEqual(5);
     expect(result.counts.invalidFixtures).toBeGreaterThanOrEqual(6);
   });
@@ -63,6 +63,30 @@ describe('observation contract guard', () => {
     const result = checkObservationContract(root);
     expect(result.ok).toBe(false);
     expect(result.findings.map((f) => f.code)).toContain('projection-domain-incomplete');
+  });
+
+  it('rejects a schema legacy surface with no projection table (C1 closure)', () => {
+    const root = makeRoot();
+    patchJson(root, 'outcome-projections.json', (data) => {
+      delete data.surfaces.bot_errors_event;
+    });
+    const result = checkObservationContract(root);
+    expect(result.ok).toBe(false);
+    expect(result.findings.map((f) => f.code)).toContain('legacy-surface-unknown');
+  });
+
+  it('rejects a projection table for a surface the schema enum does not admit', () => {
+    const root = makeRoot();
+    patchJson(root, 'outcome-projections.json', (data) => {
+      data.surfaces.rogue_surface = {
+        source: 'test',
+        domain: ['x'],
+        rows: [{ legacy_value: 'x', canonical: 'pass', lossy: false }],
+      };
+    });
+    const result = checkObservationContract(root);
+    expect(result.ok).toBe(false);
+    expect(result.findings.map((f) => f.code)).toContain('legacy-surface-unknown');
   });
 
   it('rejects an adapter declaring a claim the catalog does not define', () => {
