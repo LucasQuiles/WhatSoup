@@ -47,6 +47,7 @@ from lib.durable_json import (  # noqa: E402
 )
 from lib.state_files import FLEET_SENTINEL_STATE, SENTINEL_HEARTBEAT  # noqa: E402
 from lib.state_root import sentinel_state_root  # noqa: E402
+from lib import sentinel_pin  # noqa: E402
 
 DEFAULT_HEARTBEAT_MAX_AGE_SECONDS = 45 * 60
 DEFAULT_HYSTERESIS_CYCLES = 2
@@ -157,6 +158,10 @@ class SentinelConfig:
     tier2_token_ttl_seconds: int = DEFAULT_TIER2_TOKEN_TTL_SECONDS
     action_outbox_retention: int = DEFAULT_ACTION_OUTBOX_RETENTION
     q_host: str = DEFAULT_Q_HOST
+    # The tree this process actually evaluates (its own script location by
+    # default). Source-provenance detection hashes this tree against the
+    # runtime-manifest owner's file table (#1876).
+    runtime_root: Path = REPO_ROOT
 
 
 @dataclass(frozen=True)
@@ -574,6 +579,89 @@ def _host_observation_bucket(observed_class: str) -> str:
     return "problem"
 
 
+SOURCE_PROVENANCE_STATUSES = ("verified", "unavailable", "malformed", "unstamped", "mismatch")
+
+
+def is_source_commit_id(value: object) -> bool:
+    """True for the repository's accepted immutable source-commit object id:
+    a lowercase 40-char hex SHA-1 git object id — exactly the shape the
+    runtime-manifest owner (``sentinel_pin.load_pin``, the deployer's ``pin``
+    mode, and the approved-heads ledger) stamps and validates as
+    ``expected_head_sha``."""
+    return sentinel_pin._is_lower_hex(value, 40)
+
+
+def resolve_runtime_manifest_path(runtime_root: Path) -> Path:
+    """Resolve the source-provenance SSOT: the same host-local runtime-manifest
+    contract ``bot-errors-health-check.py`` reads (``BOT_ERRORS_RUNTIME_MANIFEST``
+    env override; default: the evaluating tree's own
+    ``deploy/bot-errors-runtime-manifest.json``). The deployer stamps that
+    manifest's ``expected_head_sha`` at deploy time — with the checkout's HEAD
+    on Git-backed hosts and with the shipped source SHA on non-Git release
+    snapshots — so it is the one owner that works for both tree kinds."""
+    raw = os.environ.get("BOT_ERRORS_RUNTIME_MANIFEST", "").strip()
+    return Path(raw).expanduser() if raw else runtime_root / "deploy" / "bot-errors-runtime-manifest.json"
+
+
+def evaluate_source_provenance(runtime_root: Path, manifest_path: Optional[Path] = None) -> dict:
+    """DETECTION ONLY (no decision, no state writes) for #1876.
+
+    Binds the heartbeat's ``sourceCommit`` to the evaluating generation's bytes:
+
+    1. resolve the runtime-manifest owner (see resolve_runtime_manifest_path);
+    2. load it with the owner's loader (``sentinel_pin.load_pin``), which
+       strictly validates ``expected_head_sha`` as a lowercase 40-char object
+       id — malformed/unsupported ids never reach the heartbeat;
+    3. re-hash the pinned runtime surface under ``runtime_root``
+       (``sentinel_pin.verify_bundle``: confined, symlink-refusing opens), so a
+       claimed commit whose attested bytes differ from the tree the sentinel is
+       actually evaluating is a mismatch, not an attestation.
+
+    Returns a bounded, privacy-safe record (statuses in
+    SOURCE_PROVENANCE_STATUSES; fixed reason tokens — no repository paths, host
+    identities, or dirty-file names). ``sourceCommit`` is set ONLY when every
+    step verifies. Git is never invoked: a non-Git release snapshot carries the
+    same owner manifest, so provenance follows the owner, not a checkout."""
+    resolved = manifest_path or resolve_runtime_manifest_path(runtime_root)
+    record: dict = {
+        "status": "unavailable",
+        "sourceCommit": None,
+        "reason": "manifest_missing",
+        "manifestDigest": None,
+        "mismatchCount": None,
+    }
+    if os.path.islink(resolved):
+        record["reason"] = "manifest_symlink"
+        return record
+    if not resolved.is_file():
+        return record
+    try:
+        pin = sentinel_pin.load_pin(resolved)
+    except sentinel_pin.PinLoadError:
+        record["status"] = "malformed"
+        record["reason"] = "runtime_manifest_malformed"
+        return record
+    except Exception:
+        record["reason"] = "evaluation_error"
+        return record
+    record["manifestDigest"] = pin.manifest_digest
+    if not pin.head_sha:
+        record["status"] = "unstamped"
+        record["reason"] = "expected_head_sha_absent"
+        return record
+    bytes_ok, mismatches = sentinel_pin.verify_bundle(runtime_root, pin)
+    if not bytes_ok:
+        record["status"] = "mismatch"
+        record["reason"] = "evaluating_bytes_mismatch"
+        record["mismatchCount"] = len(mismatches)
+        return record
+    record["status"] = "verified"
+    record["reason"] = "verified"
+    record["sourceCommit"] = pin.head_sha
+    record["mismatchCount"] = 0
+    return record
+
+
 def save_central_heartbeat(config: SentinelConfig, result: dict) -> str:
     hosts = result.get("hosts") if isinstance(result.get("hosts"), list) else []
     problem_hosts = [
@@ -589,6 +677,33 @@ def save_central_heartbeat(config: SentinelConfig, result: dict) -> str:
     # supervised the intended roster (not a truncated/wrong-path one). #1875.
     inventory = result.get("rosterInventory") if isinstance(result.get("rosterInventory"), dict) else None
     roster_epoch_val = result.get("rosterEpoch")
+
+    # #1876: aggregate source-commit provenance. Detection ran in run_once
+    # (evaluate_source_provenance); this is the DECISION (green gate) plus
+    # REPORTING (bounded heartbeat fields). The aggregate is authoritative
+    # green only with present, verified, well-formed provenance:
+    # unavailable / malformed / unstamped / byte-mismatched provenance is
+    # explicit non-green — the field is never omitted while claiming health.
+    provenance = result.get("sourceProvenance")
+    provenance = provenance if isinstance(provenance, dict) else {}
+    provenance_status = provenance.get("status")
+    provenance_status = (
+        provenance_status
+        if isinstance(provenance_status, str) and provenance_status in SOURCE_PROVENANCE_STATUSES
+        else "unavailable"
+    )
+    claimed_commit = provenance.get("sourceCommit")
+    provenance_ok = provenance_status == "verified" and is_source_commit_id(claimed_commit)
+    provenance_reason = provenance.get("reason")
+    provenance_reason = provenance_reason if isinstance(provenance_reason, str) and provenance_reason else "unspecified"
+    provenance_digest = provenance.get("manifestDigest")
+    provenance_digest = provenance_digest if sentinel_pin._is_lower_hex(provenance_digest, 64) else None
+    mismatch_count = provenance.get("mismatchCount")
+    mismatch_count = (
+        mismatch_count
+        if isinstance(mismatch_count, int) and not isinstance(mismatch_count, bool) and mismatch_count >= 0
+        else None
+    )
 
     class_by_host: dict[str, str] = {}
     for host in hosts:
@@ -638,7 +753,7 @@ def save_central_heartbeat(config: SentinelConfig, result: dict) -> str:
     # reported explicitly below for the watchdog and operators.
     roster_bound = bool(roster_digest_val) and expected_host_count > 0
     base_healthy = result.get("fleetAction") == "none" and not problem_hosts and not attention_events
-    healthy = bool(base_healthy and roster_bound)
+    healthy = bool(base_healthy and roster_bound and provenance_ok)
 
     payload = {
         "schemaVersion": 1,
@@ -653,6 +768,13 @@ def save_central_heartbeat(config: SentinelConfig, result: dict) -> str:
         "problemHostCount": len(problem_hosts),
         "rosterDigest": roster_digest_val if roster_digest_val else None,
         "rosterEpoch": roster_epoch_val if isinstance(roster_epoch_val, int) and not isinstance(roster_epoch_val, bool) else None,
+        "sourceCommit": claimed_commit if provenance_ok else None,
+        "sourceProvenance": {
+            "status": provenance_status,
+            "reason": provenance_reason,
+            "manifestDigest": provenance_digest,
+            "mismatchCount": mismatch_count,
+        },
         "expectedHostCount": expected_host_count,
         "observedHostCount": observed_host_count,
         "unknownHostCount": unknown_host_count,
@@ -666,7 +788,9 @@ def save_central_heartbeat(config: SentinelConfig, result: dict) -> str:
     # watchdog can create a durable problem (otherwise aggregate health
     # false + fleetAction=none passes the watchdog silently).
     if not healthy and result.get("fleetAction") == "none":
-        payload["nonGreenReason"] = f"aggregate_health_false roster_bound={roster_bound}"
+        payload["nonGreenReason"] = (
+            f"aggregate_health_false roster_bound={roster_bound} source_provenance={provenance_status}"
+        )
     path = heartbeat_path(config)
     target = _durable_target(path)
     observation = observe_json(target)
@@ -1825,6 +1949,10 @@ def run_once(config: SentinelConfig, deps: Optional[SentinelDeps] = None) -> dic
     except RosterError:
         roster_inventory_data = None
         roster_epoch_value = None
+    # #1876: detect the evaluating generation's source provenance (bounded,
+    # privacy-safe, owner-bound) here; the aggregate green decision and
+    # heartbeat reporting consume it in save_central_heartbeat.
+    source_provenance = evaluate_source_provenance(config.runtime_root)
     state = load_state(config)
     state["schemaVersion"] = 1
     state["updatedAt"] = now_iso(now)
@@ -1934,6 +2062,7 @@ def run_once(config: SentinelConfig, deps: Optional[SentinelDeps] = None) -> dic
             "cycleSeq": state["cycleSeq"],
             "rosterInventory": roster_inventory_data,
             "rosterEpoch": roster_epoch_value,
+            "sourceProvenance": source_provenance,
         }
         result["heartbeatPath"] = save_central_heartbeat(config, result)
         return result
