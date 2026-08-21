@@ -2173,3 +2173,17 @@ rm -rf docker/ docker-compose.yml .dockerignore .env.example .env
 ```
 
 Volumes persist until explicitly removed with `docker volume rm`.
+
+## Restart-safety preflight blocked a start
+
+`deploy/whatsoup` exits `78` when `scripts/restart-safety-preflight.ts` blocks a boot. Recovery:
+
+- `reason=missing_database` without the `initial-database-create` marker: an instance DB is expected but
+  absent — restore the DB from the host backup path before restarting; creating a fresh DB silently
+  abandons undelivered outbound state.
+- `reason=unknown_outbound_state` / `unsafe` debt: inspect the outbound table via the read-only preflight
+  (`--json`) before deciding; a forced start is `WHATSOUP_SKIP_PREFLIGHT=1` and must be treated as an
+  operator decision, not a default.
+- `reason=preflight_error`: the preflight itself failed (fail-closed). The verdict JSON carries the error;
+  a read-only `node:sqlite` open on a hot WAL is verified supported, so a live writer alone does not
+  explain it — check file permissions and disk state, then rerun.

@@ -291,6 +291,7 @@ function makeWrapperFixture(): WrapperFixture {
   );
   writeFileSync(bootstrap, "process.stdout.write('ready\\n');\n", 'utf8');
   writeFileSync(join(src, 'bootstrap.ts'), 'process.exit(0);\n', 'utf8');
+  writeFileSync(join(scripts, 'restart-safety-preflight.ts'), 'process.exit(0);\n', 'utf8');
   const instanceConfig = join(configHome, 'whatsoup', 'instances', 'q-bot');
   mkdirSync(instanceConfig, { recursive: true });
   writeFileSync(join(instanceConfig, 'config.json'), JSON.stringify({ type: 'passive' }), 'utf8');
@@ -349,6 +350,9 @@ if [[ "$*" == *src/bootstrap.ts* ]]; then
 fi
 if [[ "$*" == *scripts/source-runtime-drift-check.ts* ]]; then
   exec ${JSON.stringify(PINNED_NODE)} "$@"
+fi
+if [[ "$*" == *scripts/restart-safety-preflight.ts* ]]; then
+  exit "\${WHATSOUP_TEST_RESTART_SAFETY_RC:-0}"
 fi
 exit 9
 `,
