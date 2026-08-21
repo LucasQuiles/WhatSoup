@@ -7,6 +7,7 @@ import {
   type AgentInstructionsPathFailureReason,
 } from './lib/agent-instructions-path.ts';
 import { isRecord } from '../src/lib/type-guards.ts';
+import { takeValue } from './lib/cli-args.ts';
 
 export interface InstructionsPathPreflightResult {
   schemaVersion: 1;
@@ -80,8 +81,8 @@ function parseArgs(argv: string[]): CliArgs {
   let json = false;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
-    if (arg === '--config') configPath = argv[++index] ?? '';
-    else if (arg === '--home') homeDirectory = argv[++index] ?? '';
+    if (arg === '--config') ({ value: configPath, index } = takeValue(argv, index));
+    else if (arg === '--home') ({ value: homeDirectory, index } = takeValue(argv, index));
     else if (arg === '--json') json = true;
     else throw new Error(`unknown argument: ${arg}`);
   }
