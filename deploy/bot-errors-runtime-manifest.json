@@ -444,6 +444,16 @@
       ]
     },
     {
+      "path": "deploy/scripts/lib/observation_contract.py",
+      "sha256": "7257b3b1d078ec21b5714c6744b5983bc229c0464d4a4143ed1695fec96796f2",
+      "mustContain": [
+        "contract_digest",
+        "build_contract",
+        "project_outcome",
+        "ObservationContractError"
+      ]
+    },
+    {
       "path": "deploy/scripts/lib/health_reader.py",
       "sha256": "dd3350e5bcea11bc7ecc405dd9bdba957cb4d5bc70bc94f519f114c4508be59d",
       "mustContain": [
