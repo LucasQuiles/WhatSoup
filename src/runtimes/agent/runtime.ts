@@ -305,7 +305,16 @@ import {
   type PrimaryModelUsabilityResult,
 } from './providers/primary-model-usability.ts';
 import { createPrimaryModelProbeAdapters } from './providers/primary-model-usability-adapters.ts';
-import { buildPrimaryProbeAdapterDeps } from './primary-readiness-probe.ts';
+import {
+  buildPrimaryProbeAdapterDeps,
+  expectedProbeDeadlineFromDueMs,
+  expectedProbeDeadlineMs,
+  periodicProbeBackoffMultiple,
+} from './primary-readiness-probe.ts';
+import {
+  MessageHandlerDrainTimeoutError,
+  drainMessageHandlersForShutdown,
+} from './shutdown-message-handler-drain.ts';
 import { ensureClaudeFileStoreCredential } from './providers/claude-filestore-heal.ts';
 import {
   resolveFallbackRecoveryDecision,
@@ -494,6 +503,32 @@ export function deriveModelUsable(
       : { modelUsable: null, modelUsableStale: true, modelUsableCheckedAt };
   }
   return { modelUsable: null, modelUsableStale: false, modelUsableCheckedAt };
+}
+
+/**
+ * Freshness window for `deriveModelUsable`. While the periodic primary-readiness
+ * probe is armed the evidence can legitimately be as old as the scheduler's
+ * next fire (interval × backoff, plus the full jitter band and a grace), so the
+ * window follows the scheduler via `expectedProbeDeadlineMs`; a flat 30min
+ * window declared it stale for up to 3 minutes every cycle and for the back
+ * half of every backoff>=2 cycle (the canary `turn_capability_evidence_stale`
+ * flap). With no periodic probe armed the flat window is preserved unchanged.
+ * Pure + exported for direct unit testing.
+ */
+export function resolveModelUsabilityFreshnessMs(
+  periodicProbeExpected: boolean,
+  backoffMultiple: number,
+  schedule: { nextProbeDueAt: number | null; checkedAt: number | null } | null = null,
+): number {
+  if (!periodicProbeExpected) return MODEL_USABILITY_FRESHNESS_MS;
+  // The armed timer's due instant is the source of truth when known: cadence
+  // and window can then never diverge (a manual probe that resets the backoff
+  // re-arms the timer and moves this instant with it). The scheduler formula
+  // is the fallback only while no due instant has been recorded.
+  if (schedule !== null && schedule.nextProbeDueAt !== null && schedule.checkedAt !== null) {
+    return expectedProbeDeadlineFromDueMs(schedule.nextProbeDueAt, schedule.checkedAt);
+  }
+  return expectedProbeDeadlineMs(backoffMultiple);
 }
 // ---------------------------------------------------------------------------
 // AskUserQuestion → Poll formatting / resolution helpers
@@ -800,6 +835,8 @@ export class AgentRuntime implements Runtime {
   private revertTimer: ReturnType<typeof setTimeout> | null = null;
   private fallbackPrimaryProbeTimer: ReturnType<typeof setTimeout> | null = null;
   private periodicUsabilityProbeTimer: ReturnType<typeof setTimeout> | null = null; private periodicUsabilityProbeBackoff = 0;
+  /** Epoch ms the armed periodic probe timer is due (same clock as checkedAt); null while no timer is armed. */
+  private periodicUsabilityProbeDueAt: number | null = null;
   // Consecutive failed recovery probes on the revert-timer EXTENSION path
   // (process-local, reset on deactivation — which a successful probe triggers).
   // Early-window standing probes do not count: nothing is extending yet.
@@ -2582,6 +2619,9 @@ export class AgentRuntime implements Runtime {
       set periodicUsabilityProbeTimer(value) { runtime.periodicUsabilityProbeTimer = value; },
       get periodicUsabilityProbeBackoff() { return runtime.periodicUsabilityProbeBackoff; },
       set periodicUsabilityProbeBackoff(value) { runtime.periodicUsabilityProbeBackoff = value; },
+      get periodicUsabilityProbeDueAt() { return runtime.periodicUsabilityProbeDueAt; },
+      set periodicUsabilityProbeDueAt(value) { runtime.periodicUsabilityProbeDueAt = value; },
+      get shutdownRequested() { return runtime.shutdownRequested; },
       get fallbackProbeAttempts() { return runtime.fallbackProbeAttempts; },
       set fallbackProbeAttempts(value) { runtime.fallbackProbeAttempts = value; },
       get fallbackLastProbeAt() { return runtime.fallbackLastProbeAt; },
@@ -6927,6 +6967,7 @@ export class AgentRuntime implements Runtime {
       this.fallbackPrimaryProbeTimer = null;
     }
     if (this.periodicUsabilityProbeTimer) { clearTimeout(this.periodicUsabilityProbeTimer); this.periodicUsabilityProbeTimer = null; }
+    this.periodicUsabilityProbeDueAt = null;
     this.fallback.stopChainCanary();
     this.fallbackWindow.activeUntil = null;
     this.fallbackWindow.activatedAt = null;
@@ -6955,12 +6996,27 @@ export class AgentRuntime implements Runtime {
     }
     this.pendingSystemResults.clear();
     if (!preserveRuntimeTurnState) {
-      const messageHandlers = await Promise.allSettled(
+      // E20 slice 1 (#3315): the handler join is bounded by the SAME absolute
+      // deadline the coordinator above and the recycle lifecycle below honor.
+      // A handler that never settles no longer pins shutdown until main.ts's
+      // hard kill; it is counted, receipted content-free, and left to E20
+      // proper (which will abort it). Turn state is preserved because the
+      // blockers may still be mid-turn.
+      const drain = await drainMessageHandlersForShutdown(
         [...this.activeMessageHandlers].filter(
           (handler) => !this.routeRecycleCommandWork.has(handler),
         ),
+        shutdownDeadlineAt,
       );
-      const rejectedMessageHandlers = messageHandlers.filter(
+      if (drain.timedOut) {
+        log.warn(
+          { phase: 'message_handlers', blockers: drain.blockers, timedOut: true },
+          'message handlers did not drain before the shutdown deadline',
+        );
+        shutdownFailures.push(new MessageHandlerDrainTimeoutError(drain.blockers));
+        preserveRuntimeTurnState = true;
+      }
+      const rejectedMessageHandlers = drain.settled.filter(
         (item): item is PromiseRejectedResult => item.status === 'rejected',
       );
       if (rejectedMessageHandlers.length > 0) {
@@ -8062,9 +8118,26 @@ export class AgentRuntime implements Runtime {
     return current.isEvidenceBindingCurrent(binding);
   }
 
+  /** The freshness window the live verdict is judged against: scheduler-derived
+   *  while the periodic probe is armed, the flat 30min otherwise. */
+  private modelUsabilityFreshnessMs(): number {
+    return resolveModelUsabilityFreshnessMs(
+      this.periodicUsabilityProbeTimer !== null,
+      periodicProbeBackoffMultiple(this.periodicUsabilityProbeBackoff),
+      {
+        nextProbeDueAt: this.periodicUsabilityProbeDueAt,
+        checkedAt: this.primaryModelUsability?.checkedAt ?? null,
+      },
+    );
+  }
+
   private getTurnCapability(): RuntimeTurnCapability {
     const usability = this.primaryModelUsability;
-    const { modelUsable, modelUsableStale, modelUsableCheckedAt } = deriveModelUsable(usability, Date.now());
+    const periodicProbeExpected = this.periodicUsabilityProbeTimer !== null;
+    const backoffMultiple = periodicProbeBackoffMultiple(this.periodicUsabilityProbeBackoff);
+    const modelUsableFreshnessMs = this.modelUsabilityFreshnessMs();
+    const { modelUsable, modelUsableStale, modelUsableCheckedAt } =
+      deriveModelUsable(usability, Date.now(), modelUsableFreshnessMs);
     return {
       modelUsable,
       modelUsableStale,
@@ -8075,7 +8148,10 @@ export class AgentRuntime implements Runtime {
       lastSuccessfulTurnSessionCurrent: this.lastSuccessfulTurnSessionCurrent(),
       lastTurnErrorClass: this.turnCapabilityTracker.lastTurnErrorClass,
       lastTurnErrorAt: this.turnCapabilityTracker.lastTurnErrorAt,
-      periodicProbeExpected: this.periodicUsabilityProbeTimer !== null,
+      periodicProbeExpected,
+      periodicProbeBackoffMultiple: backoffMultiple,
+      modelUsableFreshnessMs,
+      nextProbeDueAt: this.periodicUsabilityProbeDueAt,
     };
   }
 
@@ -8105,7 +8181,7 @@ export class AgentRuntime implements Runtime {
       clearAlertSourceChecked(this.instanceName, 'provider_fallback_activated', 'reason=post-revert-turn-success');
       this.pendingPostRevertConfirmation = false;
     }
-    const wasStale = deriveModelUsable(this.primaryModelUsability, Date.now()).modelUsableStale;
+    const wasStale = deriveModelUsable(this.primaryModelUsability, Date.now(), this.modelUsabilityFreshnessMs()).modelUsableStale;
     this.fallback.recordPrimaryModelUsability({ status: 'usable', provider: this.agentProvider, model: this.model ?? null, reason: 'turn-success' }, 'manual');
     if (wasStale) log.info({ provider: this.agentProvider, model: this.model ?? null }, 'primary model usability refreshed by turn success after going stale');
   }
