@@ -32,6 +32,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
 from lib.bot_errors_envelope import new_event_fields
+from lib.health_reader import classify_projection, health_body_is_disclosed, instance_health_token, is_public_envelope
 from lib.controller_log import (
     ControllerLogContext,
     controller_cycle,
@@ -3151,7 +3152,7 @@ def rustdesk_inventory(profile: dict[str, Any]) -> list[str]:
     return lines
 
 
-def health_probe_details(status: int, body: str, expected_name: str | None = None) -> str:
+def health_probe_details(status: int, body: str, expected_name: str | None = None, token_sent: bool = False, token_missing: bool = False) -> str:
     details: list[str] = []
     def add_marker(marker: str) -> None:
         if marker not in details:
@@ -3170,6 +3171,30 @@ def health_probe_details(status: int, body: str, expected_name: str | None = Non
             return " ".join(details)
     if data is None or not isinstance(data, dict):
         return ""
+    # Register F01: record which projection the evidence came from. The public
+    # liveness envelope proves transport only; a token that was sent but still
+    # produced the public projection was rejected — monitoring-config debt,
+    # never a workload verdict.
+    health_projection = classify_projection(data, token_sent=token_sent)
+    append_evidence_field(details, "health_projection", health_projection)
+    if token_sent and health_projection == "unobserved":
+        add_marker("health_token_rejected")
+    if token_missing:
+        add_marker("health_token_missing")
+    if health_projection != "diagnostic":
+        # Authority-lattice ceiling: only the DIAGNOSTIC projection (disclosed
+        # body reached with an accepted token) may contribute identity/auth/
+        # DB/provider fields. Every other projection — anonymous reads,
+        # rejected tokens, unrecognised body shapes — contributes liveness-only
+        # fields, regardless of whether a token was attempted. A disclosed
+        # shape inside this branch is only reachable unauthenticated (disclosed
+        # + token classifies diagnostic) and means the server disclosed to an
+        # anonymous client — a config anomaly surfaced as evidence.
+        if health_body_is_disclosed(data):
+            add_marker("health_unauthenticated_disclosure")
+        data = {k: data[k] for k in ("schema_version", "status", "generated_at") if k in data}
+    if is_public_envelope(data):
+        return " ".join(details)
     whatsapp = data.get("whatsapp") if isinstance(data.get("whatsapp"), dict) else {}
     connection = whatsapp.get("connection") if isinstance(whatsapp.get("connection"), dict) else {}
 
@@ -3177,6 +3202,14 @@ def health_probe_details(status: int, body: str, expected_name: str | None = Non
         add_marker("health_probe_auth_failed")
     elif status != 200 and status < 500:
         add_marker("health_unexpected_status")
+
+    if health_projection != "diagnostic":
+        # Body-field verdicts (status text, freshness, identity, auth-bond,
+        # provider, runtime) exist only under the diagnostic projection; every
+        # other projection has already contributed its markers above. The
+        # status-code markers stay: the HTTP status is transport evidence
+        # regardless of body authenticity.
+        return " ".join(details)
 
     status_text = data.get("status")
     if isinstance(status_text, str) and status_text:
@@ -3311,7 +3344,7 @@ def health_probe_details(status: int, body: str, expected_name: str | None = Non
     append_evidence_field(details, "instance_fallback_recovery_probe_required", instance_meta.get("fallbackRecoveryProbeRequired"))
     if provider_fallback_active(instance_provider, instance_effective_provider, instance_fallback_active_until):
         add_marker("runtime_agent_fallback_active")
-    if status == 200 and expected_name and not instance_name:
+    if status == 200 and expected_name and not instance_name and health_body_is_disclosed(data):
         add_marker("health_identity_missing")
         append_evidence_field(details, "expected_instance", expected_name)
     if expected_name and instance_name and instance_name != expected_name:
@@ -3511,11 +3544,19 @@ def health_probe_details(status: int, body: str, expected_name: str | None = Non
     return " ".join(details)
 
 
-def format_health_probe(url: str, status: int, body: str = "", expected_name: str | None = None) -> str:
-    details = health_probe_details(status, body, expected_name)
+def format_health_probe(url: str, status: int, body: str = "", expected_name: str | None = None, token_sent: bool = False, token_missing: bool = False) -> str:
+    details = health_probe_details(status, body, expected_name, token_sent, token_missing)
     suffix = f" {details}" if details else ""
+    # A 5xx is a workload failure only when the evidence projection is
+    # diagnostic (or unknown, e.g. a malformed body): public and unobserved
+    # projections cap at monitoring-debt WARNs. health_token_rejected always
+    # co-occurs with health_projection=unobserved.
+    non_diagnostic_evidence = (
+        "health_projection=public" in details
+        or "health_projection=unobserved" in details
+    )
     if (
-        status >= 500
+        (status >= 500 and not non_diagnostic_evidence)
         or "health_probe_auth_failed" in details
         or "health_identity_mismatch" in details
         or "health_identity_missing" in details
@@ -3541,6 +3582,8 @@ def format_health_probe(url: str, status: int, body: str = "", expected_name: st
         or "auth_bond_restore_canary_failed" in details
         or "auth_bond_backup_age_warning" in details
         or "node_version_drift" in details
+        or "health_token_rejected" in details
+        or "health_token_missing" in details
     ):
         prefix = "WARN "
     else:
@@ -3553,15 +3596,30 @@ def probe_health(port: int, expected_name: str | None = None) -> str:
     dry_body = os.environ.get("BOT_ERRORS_DRY_HEALTH_RESPONSE_JSON")
     if dry_body is not None:
         dry_status = int(os.environ.get("BOT_ERRORS_DRY_HEALTH_STATUS", "503"))
-        return format_health_probe(url, dry_status, dry_body, expected_name)
-    req = Request(url, method="GET")
+        # A dry-injected body is fixture CONTENT, not proof of authentication:
+        # it evaluates under whatever authority the environment actually
+        # resolves (the same token path as a live read), so an unauthenticated
+        # injection can never manufacture diagnostic authority.
+        dry_token = instance_health_token(expected_name) if expected_name else None
+        dry_token_missing = bool(expected_name) and not dry_token
+        return format_health_probe(
+            url, dry_status, dry_body, expected_name, bool(dry_token), dry_token_missing
+        )
+    token = instance_health_token(expected_name) if expected_name else None
+    # A missing token must not skip the probe: connection-refused on this very
+    # attempt is how a DOWN on-demand agent is detected. The anonymous response
+    # is marked health_token_missing and stays non-diagnostic.
+    token_missing = bool(expected_name) and not token
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    req = Request(url, method="GET", headers=headers)
+    token_sent = bool(token)
     try:
         with urlopen(req, timeout=HEALTH_PROBE_TIMEOUT_SECONDS) as response:
             body = response.read(64 * 1024).decode("utf-8", errors="replace")
-            return format_health_probe(url, response.status, body, expected_name)
+            return format_health_probe(url, response.status, body, expected_name, token_sent, token_missing)
     except HTTPError as exc:
         body = exc.read(64 * 1024).decode("utf-8", errors="replace")
-        return format_health_probe(url, exc.code, body, expected_name)
+        return format_health_probe(url, exc.code, body, expected_name, token_sent, token_missing)
     except URLError as exc:
         return f"FAIL {url} {exc.reason}"
     except Exception as exc:

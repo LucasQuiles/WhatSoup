@@ -94,7 +94,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "d9073be0b1fe107aaeb7d0c068d4ab2d21c7c80491fb65e1c6136050550a001c",
+      "sha256": "a885121c826709e99941d2251e272175fd5d23b5abb1a1ccd8a0aef4e0ccb0e0",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -178,7 +178,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
-      "sha256": "3c245cf5b3583c1a0ff886e89f0c097a582d5c9a32f6af821ee75ab9ec041277",
+      "sha256": "9ea3a6e0e964f27a1e105b095750491bf4410599759a48acda12bd098c05965b",
       "mustContain": [
         "q_loop_state_root",
         "BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT",
@@ -283,7 +283,7 @@
     },
     {
       "path": "deploy/scripts/fleet-ground-truth.py",
-      "sha256": "e20f4c687ee0da5c1796cf3d90eb7dbb1f5edf704a3fa84bb8d829dbed08247d",
+      "sha256": "95754b92081bed28f73b2ab3411e2343e94d396b73cf7e3410fef09c5f0d3035",
       "mustContain": [
         "needs_physical_repair",
         "restart_will_not_fix",
@@ -441,6 +441,15 @@
         "DurabilityProof",
         "require_all_advance",
         "O_NOFOLLOW"
+      ]
+    },
+    {
+      "path": "deploy/scripts/lib/health_reader.py",
+      "sha256": "dd3350e5bcea11bc7ecc405dd9bdba957cb4d5bc70bc94f519f114c4508be59d",
+      "mustContain": [
+        "def classify_projection(payload: Any, *, token_sent: bool) -> str:",
+        "def health_body_is_disclosed(payload: Any) -> bool:",
+        "def instance_health_token(name: str) -> Optional[str]:"
       ]
     },
     {

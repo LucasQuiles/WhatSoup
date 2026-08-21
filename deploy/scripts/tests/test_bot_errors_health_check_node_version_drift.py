@@ -156,7 +156,7 @@ class TestHealthProbeDetailsDrift:
         return the same (no-marker) result.
         """
         monkeypatch.setattr(_mod, "read_nvmrc_pin", lambda: "24.15.0")
-        details = health_probe_details(200, _health_body("v22.0.0"))
+        details = health_probe_details(200, _health_body("v22.0.0"), token_sent=True)
         assert "node_version_drift" in details
         assert "running=22.0.0" in details
         assert "pinned=24.15.0" in details
@@ -164,7 +164,7 @@ class TestHealthProbeDetailsDrift:
     def test_no_drift_marker_when_running_matches_pin(self, monkeypatch):
         """Match -> no drift marker in details (regression guard)."""
         monkeypatch.setattr(_mod, "read_nvmrc_pin", lambda: "24.15.0")
-        details = health_probe_details(200, _health_body("24.15.0"))
+        details = health_probe_details(200, _health_body("24.15.0"), token_sent=True)
         assert "node_version_drift" not in details
 
     def test_no_drift_marker_when_running_version_absent(self, monkeypatch):
@@ -175,13 +175,13 @@ class TestHealthProbeDetailsDrift:
         drift marker.
         """
         monkeypatch.setattr(_mod, "read_nvmrc_pin", lambda: "24.15.0")
-        details = health_probe_details(200, _health_body(None))
+        details = health_probe_details(200, _health_body(None), token_sent=True)
         assert "node_version_drift" not in details
 
     def test_no_drift_marker_when_nvmrc_unreadable(self, monkeypatch):
         """No pin baseline available -> no drift assertion -> no marker."""
         monkeypatch.setattr(_mod, "read_nvmrc_pin", lambda: "")
-        details = health_probe_details(200, _health_body("v22.0.0"))
+        details = health_probe_details(200, _health_body("v22.0.0"), token_sent=True)
         assert "node_version_drift" not in details
 
 
@@ -199,7 +199,7 @@ class TestFormatHealthProbeDrift:
         """
         monkeypatch.setattr(_mod, "read_nvmrc_pin", lambda: "24.15.0")
         line = format_health_probe(
-            "http://127.0.0.1:58000/health", 200, _health_body("v22.0.0")
+            "http://127.0.0.1:58000/health", 200, _health_body("v22.0.0"), token_sent=True
         )
         assert line.startswith("WARN ")
         assert "node_version_drift" in line
@@ -208,7 +208,7 @@ class TestFormatHealthProbeDrift:
         """Match -> no WARN prefix from node drift (may still be healthy)."""
         monkeypatch.setattr(_mod, "read_nvmrc_pin", lambda: "24.15.0")
         line = format_health_probe(
-            "http://127.0.0.1:58000/health", 200, _health_body("24.15.0")
+            "http://127.0.0.1:58000/health", 200, _health_body("24.15.0"), token_sent=True
         )
         # A matched version must not contribute a WARN prefix on its own. (Other
         # WARN causes in the same body are independent; this fixture has none.)

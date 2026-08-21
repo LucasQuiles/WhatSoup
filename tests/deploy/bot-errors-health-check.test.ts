@@ -56,6 +56,10 @@ describe('bot-errors-health-check daily event classification', () => {
       env: {
         ...process.env,
         HOME: tmpRoot,
+        // The fixture models an AUTHENTICATED instance: dry bodies resolve
+        // authority through the same token path as a live read, and bond-loss
+        // fields carry a verdict only under the diagnostic projection.
+        WHATSOUP_HEALTH_TOKEN: 'fixture-health-token',
         BOT_ERRORS_STATE_DIR: tmpRoot,
         BOT_ERRORS_DRY_CLOCK_STATUS: 'synced',
         BOT_ERRORS_DRY_DISK_FREE_BYTES: String(10 * 1024 * 1024 * 1024),
@@ -124,6 +128,8 @@ describe('bot-errors-health-check daily event classification', () => {
       env: {
         ...process.env,
         HOME: tmpRoot,
+        // Authenticated fixture: see the bond-loss test above.
+        WHATSOUP_HEALTH_TOKEN: 'fixture-health-token',
         BOT_ERRORS_STATE_DIR: tmpRoot,
         BOT_ERRORS_DRY_CLOCK_STATUS: 'synced',
         BOT_ERRORS_DRY_DISK_FREE_BYTES: String(10 * 1024 * 1024 * 1024),

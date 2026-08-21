@@ -46,6 +46,15 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Optional
 
+_SCRIPT_DIR = Path(__file__).resolve().parent
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
+from lib.health_reader import (  # noqa: E402
+    PUBLIC_HEALTH_SCHEMA_PREFIX as PUBLIC_SCHEMA_PREFIX,
+    health_body_is_disclosed,
+    instance_health_token as read_instance_token,
+)
+
 HOUR_MS = 3_600_000
 DAY_MS = 24 * HOUR_MS
 
@@ -84,25 +93,17 @@ FLOW_QUERY = (
 # The panel must never
 # mistake a non-disclosing answer for a clean one, so detect the envelope and
 # mark the axes UNOBSERVED rather than deriving all-None axes from it.
-PUBLIC_SCHEMA_PREFIX = "health.public."
+# PUBLIC_SCHEMA_PREFIX / health_body_is_disclosed / read_instance_token are the
+# shared lib/health_reader implementations (imported above): one discriminator
+# for every consumer. The shared check is stricter than the old local copy —
+# it requires `whatsapp` to be a dict (not merely a present key) and the token
+# resolver honours the BOT_ERRORS_HEALTH_TOKEN_<NAME>/WHATSOUP_HEALTH_TOKEN
+# env overrides the other consumers already honour.
 
 
 def _verdict(axis: str, verdict: str, because: str, evidence_ms: dict) -> dict:
     return {"axis": axis, "verdict": verdict, "because": because,
             "evidence_ms": evidence_ms}
-
-
-def health_body_is_disclosed(health: dict) -> bool:
-    """True only for the privileged diagnostic body.
-
-    Fail-closed: an unrecognised shape counts as NOT disclosed. Both axes this
-    panel derives read `whatsapp` / `instance`, which the public envelope omits
-    entirely, so its absence is the deterministic discriminator.
-    """
-    schema = health.get("schema_version")
-    if isinstance(schema, str) and schema.startswith(PUBLIC_SCHEMA_PREFIX):
-        return False
-    return "whatsapp" in health
 
 
 def _bond_axis(health: dict, now_ms: int, verdicts: list) -> dict:
@@ -304,17 +305,6 @@ def build_panel(*, host: str, instance: str, now_ms: int,
 
 # ---------------------------------------------------------------------------
 # I/O adapters (thin; run on the bot host so tokens never leave it)
-
-def read_instance_token(instance: str) -> Optional[str]:
-    path = Path.home() / ".config" / "whatsoup" / "instances" / instance / "tokens.env"
-    try:
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if line.startswith("WHATSOUP_HEALTH_TOKEN="):
-                return line.split("=", 1)[1].strip()
-    except OSError:
-        return None
-    return None
-
 
 def fetch_local_health(port: int, token: str, timeout: float = 8.0) -> dict:
     req = urllib.request.Request(

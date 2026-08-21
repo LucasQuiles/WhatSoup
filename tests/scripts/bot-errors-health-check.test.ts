@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative, sep } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { privateHostLabels } from '../../scripts/repo-hygiene-guard.ts';
 import { SERVICE_ENV_MAP as RUNTIME_SERVICE_ENV_MAP } from '../../src/lib/provider-key-service.ts';
 
@@ -16,11 +16,19 @@ const secondParkedAddressFixture = ['50', '112', '20', '134'].join('.');
 
 beforeEach(() => {
   process.env['BOT_ERRORS_DRY_ACTIVE_WHATSOUP_SERVICES'] = '';
+  // The fixture /health bodies in this file model AUTHENTICATED instances:
+  // the daily probe only earns the diagnostic projection when a token
+  // resolves (authority-lattice ceiling), so every child run inherits this
+  // per-test fixture token via `...process.env`. Anonymous-path tests pass
+  // token flags explicitly. Scoped here (not module scope) so nothing leaks
+  // to other test files sharing the worker.
+  vi.stubEnv('WHATSOUP_HEALTH_TOKEN', 'fixture-health-token');
 });
 
 afterEach(() => {
   if (tmpRoot) rmSync(tmpRoot, { recursive: true, force: true });
   tmpRoot = '';
+  vi.unstubAllEnvs();
   delete process.env['BOT_ERRORS_DRY_ACTIVE_WHATSOUP_SERVICES'];
 });
 
@@ -4206,11 +4214,12 @@ print(m.probe_health(9092))
   });
 
   describe('health body validation (#1878)', () => {
-    function probeLine(status: number, body: string, expectedName?: string): string {
+    function probeLine(status: number, body: string, expectedName?: string, tokenSent = false): string {
       const nameArg = expectedName === undefined ? 'None' : JSON.stringify(expectedName);
+      const tokenArg = tokenSent ? 'True' : 'False';
       return python([
         importHealthModulePrelude(),
-        `print(m.format_health_probe('http://127.0.0.1:9090/health', ${status}, ${JSON.stringify(body)}, ${nameArg}))`,
+        `print(m.format_health_probe('http://127.0.0.1:9090/health', ${status}, ${JSON.stringify(body)}, ${nameArg}, ${tokenArg}))`,
       ].join('\n'));
     }
 
@@ -4233,41 +4242,78 @@ print(m.probe_health(9092))
     });
 
     it('rejects a stale generated_at health body instead of reporting green', () => {
-      expect(probeLine(200, healthyBody({ generated_at: '2000-01-01T00:00:00Z' }), 'primary-bot'))
+      // Body-field validation is a diagnostic-projection concern (round 4):
+      // these freshness/status checks run on authenticated disclosed bodies.
+      expect(probeLine(200, healthyBody({ generated_at: '2000-01-01T00:00:00Z' }), 'primary-bot', true))
         .toMatch(/^FAIL 200 .*health_generated_at_stale/);
     });
 
     it('rejects a future-skewed generated_at health body instead of reporting green', () => {
       const future = new Date(Date.now() + 60 * 60 * 1000).toISOString();
-      expect(probeLine(200, healthyBody({ generated_at: future }), 'primary-bot'))
+      expect(probeLine(200, healthyBody({ generated_at: future }), 'primary-bot', true))
         .toMatch(/^FAIL 200 .*health_generated_at_future_skew/);
     });
 
-    it('rejects a health body missing instance identity when a name is configured', () => {
+    // Register F01: identity is asserted only on a DISCLOSED (diagnostic)
+    // body. The public liveness envelope and ambiguous undisclosed bodies
+    // leave identity unobserved — never failed. The previous test here
+    // fossilized the wrong cross-component contract (it required a
+    // public-shaped body to FAIL with health_identity_missing).
+    it('leaves identity unobserved on the public liveness envelope instead of failing it', () => {
+      const body = JSON.stringify({
+        schema_version: 'health.public.v1',
+        status: 'healthy',
+        generated_at: new Date().toISOString(),
+        startupNotification: { state: 'sent' },
+      });
+      const line = probeLine(200, body, 'primary-bot');
+      expect(line).not.toMatch(/health_identity_missing/);
+      expect(line).not.toMatch(/^FAIL/);
+      expect(line).toMatch(/health_projection=public/);
+    });
+
+    it('leaves identity unobserved on an ambiguous undisclosed body instead of failing it', () => {
       const body = JSON.stringify({ status: 'healthy', generated_at: new Date().toISOString() });
-      expect(probeLine(200, body, 'primary-bot')).toMatch(/^FAIL 200 .*health_identity_missing/);
+      const line = probeLine(200, body, 'primary-bot');
+      expect(line).not.toMatch(/health_identity_missing/);
+      expect(line).not.toMatch(/^FAIL/);
+    });
+
+    it('still rejects a DISCLOSED body missing instance identity when a name is configured', () => {
+      const body = JSON.stringify({
+        status: 'healthy',
+        generated_at: new Date().toISOString(),
+        whatsapp: { connected: true, connection: { state: 'connected' } },
+        instance: {},
+      });
+      expect(probeLine(200, body, 'primary-bot', true)).toMatch(/^FAIL 200 .*health_identity_missing/);
     });
 
     it('flags a health body missing generated_at as inconclusive, never green', () => {
-      const body = JSON.stringify({ status: 'healthy', instance: { name: 'primary-bot' } });
-      expect(probeLine(200, body, 'primary-bot')).toMatch(/^WARN 200 .*health_generated_at_missing/);
+      const body = JSON.stringify({
+        status: 'healthy',
+        whatsapp: { connected: true, connection: { state: 'connected' } },
+        instance: { name: 'primary-bot' },
+      });
+      expect(probeLine(200, body, 'primary-bot', true)).toMatch(/^WARN 200 .*health_generated_at_missing/);
     });
 
     it('flags an unparseable generated_at as inconclusive, never green', () => {
-      expect(probeLine(200, healthyBody({ generated_at: 'not-a-timestamp' }), 'primary-bot'))
+      expect(probeLine(200, healthyBody({ generated_at: 'not-a-timestamp' }), 'primary-bot', true))
         .toMatch(/^WARN 200 .*health_generated_at_unparseable/);
     });
 
     it('flags a missing status field as inconclusive, never green', () => {
       const body = JSON.stringify({
         generated_at: new Date().toISOString(),
+        whatsapp: { connected: true, connection: { state: 'connected' } },
         instance: { name: 'primary-bot' },
       });
-      expect(probeLine(200, body, 'primary-bot')).toMatch(/^WARN 200 .*health_status_missing/);
+      expect(probeLine(200, body, 'primary-bot', true)).toMatch(/^WARN 200 .*health_status_missing/);
     });
 
     it('flags an unknown status value as inconclusive, never green', () => {
-      expect(probeLine(200, healthyBody({ status: 'spinning' }), 'primary-bot'))
+      expect(probeLine(200, healthyBody({ status: 'spinning' }), 'primary-bot', true))
         .toMatch(/^WARN 200 .*health_status_unknown/);
     });
 
@@ -4275,13 +4321,59 @@ print(m.probe_health(9092))
       expect(probeLine(404, healthyBody(), 'primary-bot')).toMatch(/^FAIL 404 .*health_unexpected_status/);
     });
 
+    it('never grants an ANONYMOUS diagnostic-shaped body diagnostic authority', () => {
+      // Authority-lattice public-projection ceiling: without the token, a
+      // diagnostic-shaped body is invalid evidence for identity/auth/DB/
+      // provider claims — it must neither fail nor pass privileged checks.
+      const line = probeLine(200, healthyBody({ instance: { name: 'other-bot' } }), 'primary-bot');
+      expect(line).not.toMatch(/health_identity_mismatch/);
+      expect(line).not.toMatch(/^FAIL/);
+      expect(line).toMatch(/health_projection=unobserved/);
+      expect(line).toMatch(/health_unauthenticated_disclosure/);
+    });
+
+    it('never fails the workload from an anonymous diagnostic-shaped unhealthy body', () => {
+      // The status field and the 5xx rule are workload verdicts only under
+      // the diagnostic projection; anonymous disclosure yields markers, not
+      // failure.
+      const body = JSON.stringify({
+        status: 'unhealthy',
+        generated_at: new Date().toISOString(),
+        whatsapp: { connected: false, connection: { state: 'close' } },
+        instance: { name: 'primary-bot' },
+      });
+      for (const status of [503, 200]) {
+        const line = probeLine(status, body, 'primary-bot');
+        expect(line).not.toMatch(/^FAIL/);
+        expect(line).not.toMatch(/health_unhealthy/);
+        expect(line).toMatch(/health_projection=unobserved/);
+      }
+    });
+
+    it('never evaluates identity from an AUTHENTICATED non-diagnostic body', () => {
+      // The ceiling binds to the projection, not to whether a token was
+      // attempted: a 200 body that is neither the disclosed diagnostic shape
+      // nor the public envelope stays unobserved even when authenticated, so
+      // identity fields inside it carry no verdict authority.
+      const body = JSON.stringify({
+        status: 'healthy',
+        generated_at: new Date().toISOString(),
+        instance: { name: 'other-bot' },
+      });
+      const line = probeLine(200, body, 'primary-bot', true);
+      expect(line).not.toMatch(/health_identity_mismatch/);
+      expect(line).not.toMatch(/^FAIL/);
+      expect(line).toMatch(/health_projection=unobserved/);
+      expect(line).toMatch(/health_token_rejected/);
+    });
+
     it('keeps an instance identity mismatch as a failure', () => {
-      expect(probeLine(200, healthyBody({ instance: { name: 'other-bot' } }), 'primary-bot'))
+      expect(probeLine(200, healthyBody({ instance: { name: 'other-bot' } }), 'primary-bot', true))
         .toMatch(/^FAIL 200 .*health_identity_mismatch/);
     });
 
     it('accepts a fresh canonical healthy body with matching identity', () => {
-      const line = probeLine(200, healthyBody(), 'primary-bot');
+      const line = probeLine(200, healthyBody(), 'primary-bot', true);
       expect(line).not.toMatch(/^(FAIL|WARN) /);
       expect(line).toMatch(/^200 http:\/\/127\.0\.0\.1:9090\/health /);
       expect(line).toContain('status=healthy');
@@ -4911,7 +5003,7 @@ print(m.probe_health(9092))
         ...(registryPath === undefined
           ? []
           : [`m.RUNTIME_AGENT_HEALTH_SIGNAL_REGISTRY_PATH = Path(${JSON.stringify(registryPath)})`]),
-        `print(m.format_health_probe('http://127.0.0.1:9090/health', 200, ${JSON.stringify(body)}, 'synthetic-bot'))`,
+        `print(m.format_health_probe('http://127.0.0.1:9090/health', 200, ${JSON.stringify(body)}, 'synthetic-bot', True))`,
       ].join('\n'));
     }
 
@@ -6271,7 +6363,10 @@ print(m.probe_health(9092))
       'import json',
       `m.current_epoch = lambda: ${now}`,
       'def evidence(snapshot):',
-      '    line = m.health_probe_details(200, json.dumps(snapshot), "agent-alpha")',
+      '    # The producer always emits the whatsapp block; without it the body',
+      '    # is non-diagnostic and the projection ceiling strips its fields.',
+      '    snapshot.setdefault("whatsapp", {"connected": True})',
+      '    line = m.health_probe_details(200, json.dumps(snapshot), "agent-alpha", True)',
       '    return m.provider_live_session_from_health("claude-cli", line, 1800)',
       'progressing = evidence({',
       '    "status": "healthy",',
@@ -6380,6 +6475,7 @@ print(m.probe_health(9092))
       'snapshot = {',
       '  "status": "healthy",',
       '  "generated_at": "2026-06-12T02:59:58Z",',
+      '  "whatsapp": {"connected": True},',
       '  "runtime": {"agent": {',
       '    "activeSessions": 1, "lastSessionStatus": "active",',
       '    "lastSessionStartedAt": "2026-06-12T00:00:00Z",',
@@ -6387,7 +6483,7 @@ print(m.probe_health(9092))
       '    "turnCapability": {"lastSuccessfulTurnAt": 1781233140000, "lastSuccessfulTurnProvider": "claude-cli", "lastSuccessfulTurnSessionCurrent": True},',
       '  }},',
       '}',
-      'line = m.health_probe_details(200, json.dumps(snapshot), "agent-alpha")',
+      'line = m.health_probe_details(200, json.dumps(snapshot), "agent-alpha", True)',
       'result = m.provider_live_session_from_health("claude-cli", line, 1800)',
       'print(json.dumps({"line": line, "fragments": result["fragments"]}))',
     ].join('\n'))) as { line: string; fragments: string[] };
@@ -6412,6 +6508,7 @@ print(m.probe_health(9092))
       '  "status": "healthy",',
       '  "generated_at": "2026-06-12T02:59:58Z",',
       '  "instance": {"provider": "instance-provider-token-do-not-emit", "effectiveProvider": "instance-effective-token-do-not-emit"},',
+      '  "whatsapp": {"connected": True},',
       '  "runtime": {"agent": {',
       '    "activeSessions": 1, "lastSessionStatus": "active",',
       '    "primaryProvider": "primary-provider-token-do-not-emit",',
@@ -6420,7 +6517,7 @@ print(m.probe_health(9092))
       '    "turnCapability": {"lastSuccessfulTurnAt": 1781233140000, "lastSuccessfulTurnProvider": "successful-provider-token-do-not-emit", "lastSuccessfulTurnSessionCurrent": True},',
       '  }},',
       '}',
-      'line = m.health_probe_details(200, json.dumps(snapshot), "agent-alpha")',
+      'line = m.health_probe_details(200, json.dumps(snapshot), "agent-alpha", True)',
       'result = m.provider_live_session_from_health("claude-cli", line, 1800)',
       'print(json.dumps({"line": line, "fragments": result["fragments"], "fresh": result["fresh"]}))',
     ].join('\n'))) as { line: string; fragments: string[]; fresh: boolean };

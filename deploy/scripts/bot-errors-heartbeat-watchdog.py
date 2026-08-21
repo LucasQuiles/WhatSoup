@@ -27,6 +27,11 @@ from lib.bot_errors_daily_health import daily_health_host_from_payload, normaliz
 from lib.bot_errors_envelope import new_event_fields
 from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
 from lib.bot_errors_roster import RosterError, load_roster  # noqa: E402
+from lib.health_reader import (  # noqa: E402,F401 — PUBLIC_HEALTH_SCHEMA_PREFIX re-exported for consumers/tests
+    PUBLIC_HEALTH_SCHEMA_PREFIX,
+    health_body_is_disclosed,
+    instance_health_token,
+)
 from lib.queue_age import parse_queue_threshold, scan_directory, threshold_met
 from lib.controller_log import (
     ControllerLogContext,
@@ -1332,46 +1337,10 @@ def dry_local_health_status(value: Any) -> tuple[int, str | None]:
 # against a single production process: the unauthenticated legs reported
 # status "healthy" while the privileged body of that same process reported
 # "degraded" with a populated degradation_causes vector.
-PUBLIC_HEALTH_SCHEMA_PREFIX = "health.public."
-
-
-def instance_health_token(name: str) -> str | None:
-    """Resolve the instance health token so the probe reads the real body.
-
-    Env override first (deployments that inject per-instance secrets), then the
-    on-host instance tokens file. The watchdog probes 127.0.0.1, so it always
-    runs on the host that owns this file.
-    """
-    override = os.environ.get(f"BOT_ERRORS_HEALTH_TOKEN_{name.replace('-', '_').upper()}")
-    if override:
-        return override.strip() or None
-    shared = os.environ.get("WHATSOUP_HEALTH_TOKEN")
-    if shared:
-        return shared.strip() or None
-    path = Path.home() / ".config" / "whatsoup" / "instances" / name / "tokens.env"
-    try:
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if line.startswith("WHATSOUP_HEALTH_TOKEN="):
-                return line.split("=", 1)[1].strip() or None
-    except OSError:
-        return None
-    return None
-
-
-def health_body_is_disclosed(payload: Any) -> bool:
-    """True only for the privileged diagnostic body.
-
-    Fail-closed: anything unrecognised counts as NOT disclosed. Every field this
-    watchdog classifies on (`whatsapp.connected`, `connection.auth_failure_class`,
-    `auth_bond.status`) lives under `whatsapp`, which the public envelope omits
-    entirely — so its absence is the deterministic discriminator.
-    """
-    if not isinstance(payload, dict):
-        return False
-    schema = payload.get("schema_version")
-    if isinstance(schema, str) and schema.startswith(PUBLIC_HEALTH_SCHEMA_PREFIX):
-        return False
-    return isinstance(payload.get("whatsapp"), dict)
+# The discriminator (PUBLIC_HEALTH_SCHEMA_PREFIX), the token resolver
+# (instance_health_token), and the projection check (health_body_is_disclosed)
+# are the shared implementations in lib/health_reader.py — one discriminator
+# for every consumer, imported at the top of this file.
 
 
 def local_health_http_response(name: str, port: int) -> tuple[int, str, str]:
