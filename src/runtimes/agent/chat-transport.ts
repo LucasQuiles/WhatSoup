@@ -18,6 +18,7 @@ import type { IOutboundQueue } from './outbound-queue.ts';
 import { OperationTracker, type ProgressEvent } from './operation-tracker.ts';
 import type { PerChatMcpSocketManager } from './per-chat-mcp-socket-manager.ts';
 import { isProviderId, providerUsesWhatSoupMcp } from './providers/index.ts';
+import { isScheduledAgentJobMapKey } from './scheduled-agent-job-isolation.ts';
 
 /**
  * Structurally derived from OperationTracker's own constructor rather than
@@ -82,11 +83,12 @@ export function wirePerChatActorSocket(
   port: ChatTransportPort,
   chatJid: string,
   provider: string,
+  mapKeyOverride?: string,
 ):
   | { mcpSocketPath?: string; providerTransitionReady: Promise<void> }
   | undefined {
   if (port.sessionScope !== 'per_chat' || port.sandboxPerChat) return undefined;
-  const mapKey = port.resolvePerChatMapKey(chatJid);
+  const mapKey = mapKeyOverride ?? port.resolvePerChatMapKey(chatJid);
   if (!isProviderId(provider)) {
     throw new Error(`unrecognized provider MCP capability: ${provider}`);
   }
@@ -96,7 +98,10 @@ export function wirePerChatActorSocket(
         port.perChatMcpSocketManager.providerTransitionReady(mapKey),
     };
   }
-  const { socketPath, ready } = port.perChatMcpSocketManager.acquire(mapKey, chatJid);
+  const scheduled = isScheduledAgentJobMapKey(mapKey);
+  const { socketPath, ready } = scheduled
+    ? port.perChatMcpSocketManager.acquire(mapKey, chatJid, 'scheduled-agent-job')
+    : port.perChatMcpSocketManager.acquire(mapKey, chatJid);
   return { mcpSocketPath: socketPath, providerTransitionReady: ready };
 }
 

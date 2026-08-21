@@ -106,6 +106,7 @@ vi.mock('../../../src/runtimes/agent/providers/binary-preflight.ts', () => ({
 // ─── Imports after mocks ──────────────────────────────────────────────────────
 
 import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
+import { resolveAgentTurnMapKey } from '../../../src/runtimes/agent/scheduled-agent-job-isolation.ts';
 import { Database } from '../../../src/core/database.ts';
 import { storeMessageIfNew, type StoreMessageInput } from '../../../src/core/messages.ts';
 import type { Messenger } from '../../../src/core/types.ts';
@@ -203,6 +204,21 @@ function makeRuntime(): RuntimeInternals {
 describe('egress gate origin-chat reply evidence', () => {
   beforeEach(() => {
     db.raw.prepare('DELETE FROM messages').run();
+  });
+
+  it('suppresses all plain assistant text from an isolated scheduled turn', () => {
+    const runtime = makeRuntime();
+    const scheduledMapKey = resolveAgentTurnMapKey(ORIGIN_KEY, true);
+
+    const result = runtime.gateAssistantTextForOutbound(
+      'The closeout is delivered and the turn receipt recorded. Now the session log.',
+      makeFakeQueue(ORIGIN_JID),
+      42,
+      scheduledMapKey,
+    );
+
+    expect(result).toBeNull();
+    expect(runtime.perChatTurnSuppressedReplySatisfaction.has(scheduledMapKey)).toBe(true);
   });
 
   it('send_verification WITHOUT an origin-chat reply does NOT satisfy the reply guarantee (per-chat)', () => {
