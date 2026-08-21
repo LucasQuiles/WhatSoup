@@ -292,6 +292,31 @@ export function checkObservationContract(cwd = process.cwd()): ObservationContra
   }
   counts.surfaces = surfaces.size;
 
+  // Legacy-surface closure: the schema's legacy.surface enum and the projection
+  // tables must name exactly the same surfaces. An enum member without a table is
+  // admitted evidence no projection can canonicalize; a table without an enum
+  // member canonicalizes evidence the schema refuses to admit.
+  const legacyProp = isRecord(props.legacy) ? props.legacy : {};
+  const legacyProps = isRecord(legacyProp.properties) ? legacyProp.properties : {};
+  const surfaceProp = isRecord(legacyProps.surface) ? legacyProps.surface : {};
+  const schemaSurfaces = new Set(stringArray(surfaceProp.enum));
+  for (const surface of schemaSurfaces) {
+    if (!surfaces.has(surface)) {
+      findings.push({
+        code: 'legacy-surface-unknown',
+        message: `schema legacy.surface enum admits '${surface}' but outcome-projections.json has no table for it`,
+      });
+    }
+  }
+  for (const surface of surfaces.keys()) {
+    if (!schemaSurfaces.has(surface)) {
+      findings.push({
+        code: 'legacy-surface-unknown',
+        message: `outcome-projections.json defines table '${surface}' but the schema legacy.surface enum does not admit it`,
+      });
+    }
+  }
+
   // Fixtures.
   const fixtureDir = (kind: 'valid' | 'invalid'): string[] => {
     try {

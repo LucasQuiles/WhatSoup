@@ -106,6 +106,15 @@
         { "legacy_value": "true", "canonical": "pass", "lossy": false },
         { "legacy_value": "false", "canonical": "inconclusive", "lossy": true, "note": "false spans benign CAS supersession through real IO faults; the durability/confinement/authority/error_class tuple in raw_detail decides fail vs infra_error at the adapter" }
       ]
+    },
+    "bot_errors_event": {
+      "source": "deploy/scripts/lib/bot_errors_envelope.py EVENT_KINDS (v2 queue-event envelope eventKind)",
+      "domain": ["incident_alert", "incident_recovery", "observation"],
+      "rows": [
+        { "legacy_value": "incident_alert", "canonical": "fail", "lossy": true, "note": "an alert event asserts an incident at NOTIFICATION authority only - the BOT ERRORS channel is a notification sink, never evidence authority (channel audit); the adapter caps authority at declared_intent and demotes to inconclusive unless the underlying evidence is independently established" },
+        { "legacy_value": "incident_recovery", "canonical": "inconclusive", "lossy": true, "note": "a recovery ANNOUNCEMENT establishes at most incident.recovery_observed; recovery_verified requires recovery_gate_satisfied in the same generation - announced-clear read as verified is the legacy_false_recovery axis" },
+        { "legacy_value": "observation", "canonical": "inconclusive", "lossy": true, "note": "generic observation transport; the wrapped claim's verdict must come from raw_detail, never from the event kind" }
+      ]
     }
   }
 }
