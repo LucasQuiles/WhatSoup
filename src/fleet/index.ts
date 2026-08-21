@@ -41,11 +41,9 @@ import {
   handleGetGroupRequests, handleGroupRequestsUpdate,
 } from './routes/mcp-proxy.ts';
 import { UpdateChecker } from './update-checker.ts';
-import { compareLidUpdatedAt, importLidMappings, type FleetMappingInput } from '../core/lid-resolver.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import { FleetWebSocketServer } from './websocket-server.ts';
 import type { FleetRealtimePublisher } from './realtime-publisher.ts';
-import { publishLidConflict } from './realtime-publisher.ts';
 import { FleetRealtimeEventPoller } from './realtime-event-poller.ts';
 import {
   loadOrCreateFleetTokens as loadOrCreateFleetTokensImpl,
@@ -68,12 +66,7 @@ export const HTTP_LEGACY_QUERY_TOKEN_REMOVAL_DATE = '2026-06-30';
 export { DEFAULT_FLEET_PORT } from './constants.ts';
 import { assertSafeFleetBind } from './bind-guard.ts';
 import { config } from '../config.ts';
-import {
-  type LidMappingObservation,
-  type UnifiedLidMapping,
-  type ConflictingLidMapping,
-  buildConflictExplicitLidMappings,
-} from './lid-conflict-resolution.ts';
+import { handleGetLidMappings, handleSyncLidMappings } from './routes/lid-sync.ts';
 import {
   createConsoleSessionStore,
   buildSessionCookie,
@@ -433,184 +426,6 @@ const ROUTES = [
   { method: 'GET',   path: /^\/api\/lid-mappings$/, handler: 'getLidMappings' },
   { method: 'POST',  path: /^\/api\/lid-mappings\/sync$/, handler: 'syncLidMappings' },
 ] as const satisfies ReadonlyArray<{ method: string; path: RegExp; handler: RouteKey }>;
-
-
-// ---------------------------------------------------------------------------
-// L5: Cross-instance LID mapping sync handlers
-// ---------------------------------------------------------------------------
-// Pure conflict-resolution algorithm extracted to ./lid-conflict-resolution.ts (#2238).
-
-/** GET /api/lid-mappings — export all LID mappings from all instances. */
-function handleGetLidMappings(_req: IncomingMessage, res: ServerResponse, deps: RouteDeps): void {
-  try {
-    const instances = [...deps.discovery.getInstances().values()];
-    const allMappings: Array<{ lid: string; phone_jid: string; instance: string }> = [];
-    const observations: LidMappingObservation[] = [];
-    const seen = new Set<string>();
-
-    for (const inst of instances) {
-      const result = deps.dbReader.query(inst.name, inst.dbPath, (db: DatabaseSync) => {
-        return db.prepare('SELECT lid, phone_jid, updated_at FROM lid_mappings').all() as Array<{
-          lid: string;
-          phone_jid: string;
-          updated_at: string;
-        }>;
-      });
-      if (result.ok) {
-        for (const m of result.data) {
-          observations.push({ ...m, instance: inst.name });
-          if (!seen.has(m.lid)) {
-            seen.add(m.lid);
-            allMappings.push({ lid: m.lid, phone_jid: m.phone_jid, instance: inst.name });
-          }
-        }
-      }
-    }
-
-    const { unified, conflicts } = buildConflictExplicitLidMappings(observations);
-
-    jsonResponse(res, 200, {
-      mappings: allMappings,
-      count: allMappings.length,
-      unified,
-      conflicts,
-      conflict_count: conflicts.length,
-    });
-  } catch (err) {
-    log.error({ err }, 'L5: failed to export LID mappings');
-    jsonResponse(res, 500, { error: 'internal error' });
-  }
-}
-
-/** POST /api/lid-mappings/sync — broadcast LID mappings to all instances. */
-async function handleSyncLidMappings(_req: IncomingMessage, res: ServerResponse, deps: RouteDeps): Promise<void> {
-  try {
-    const instances = [...deps.discovery.getInstances().values()];
-
-    // Step 1: collect every instance's (lid, phone_jid, updated_at) so the
-    // freshness gate in writeLidMapping can compare cross-instance observation
-    // times correctly. The pre-#251 path used a Map<lid,phone> which silently
-    // dropped staleness signal.
-    const observations: FleetMappingInput[] = [];
-    for (const inst of instances) {
-      const result = deps.dbReader.query(inst.name, inst.dbPath, (db: DatabaseSync) => {
-        return db
-          .prepare('SELECT lid, phone_jid, updated_at FROM lid_mappings')
-          .all() as Array<{ lid: string; phone_jid: string; updated_at: string }>;
-      });
-      if (result.ok) {
-        for (const m of result.data) {
-          observations.push({
-            lid: m.lid,
-            phone_jid: m.phone_jid,
-            updated_at: m.updated_at,
-            source_instance: inst.name,
-          });
-        }
-      }
-    }
-
-    // Step 2: write into every instance via the unified seam (strict freshness
-    // gate on L5). Keep `results` backward-compatible as imported-count/-1 and
-    // expose richer counters separately.
-    const results: Record<string, number> = {};
-    const details: Record<
-      string,
-      {
-        imported: number;
-        flipped: number;
-        noop: number;
-        conflicts: number;
-        skipped?: boolean;
-        reason?: string;
-        schemaVersion?: number;
-        error?: string;
-      }
-    > = {};
-    const skippedInstances: Array<{ instance: string; schemaVersion: number; required: number; reason: string }> = [];
-    for (const inst of instances) {
-      const writeResult = deps.dbReader.queryWrite(inst.name, inst.dbPath, (rawDb: DatabaseSync) => {
-        const schemaVersion = readSchemaMigrationVersion(rawDb);
-        if (schemaVersion < 25) {
-          return {
-            imported: 0,
-            flipped: 0,
-            noop: 0,
-            conflicts: [],
-            skipped: true,
-            reason: 'schema_migration_below_25',
-            schemaVersion,
-          } as const;
-        }
-
-        // Build a minimal Database-shaped facade so importLidMappings can
-        // operate on the underlying raw handle without us instantiating a
-        // full Database instance against a path we don't own here.
-        const dbFacade = { raw: rawDb } as unknown as import('../core/database.ts').Database;
-        return { ...importLidMappings(dbFacade, observations), schemaVersion };
-      });
-      if (writeResult.ok) {
-        const r = writeResult.data;
-        results[inst.name] = r.imported;
-        details[inst.name] = {
-          imported: r.imported,
-          flipped: r.flipped,
-          noop: r.noop,
-          conflicts: r.conflicts.length,
-          schemaVersion: r.schemaVersion,
-          ...(r.skipped ? { skipped: true, reason: r.reason } : {}),
-        };
-        // Surface every freshness-rejected write so consoles can refetch
-        // the mappings panel (#251). `r.conflicts` is the array of writes
-        // that lost the gate on this peer.
-        if (!r.skipped) {
-          for (const c of r.conflicts) {
-            publishLidConflict(deps.realtime, inst.name, c.lid);
-          }
-        }
-        if (r.skipped) {
-          skippedInstances.push({
-            instance: inst.name,
-            schemaVersion: r.schemaVersion,
-            required: 25,
-            reason: r.reason,
-          });
-        }
-      } else {
-        results[inst.name] = -1;
-        details[inst.name] = {
-          imported: 0,
-          flipped: 0,
-          noop: 0,
-          conflicts: 0,
-          error: writeResult.error,
-        };
-      }
-    }
-
-    const totalMappings = observations.length;
-    log.info({ totalMappings, results, details, skippedInstances }, 'L5: cross-instance LID sync completed');
-    jsonResponse(res, 200, { totalMappings, results, details, skippedInstances });
-  } catch (err) {
-    log.error({ err }, 'L5: failed to sync LID mappings');
-    jsonResponse(res, 500, { error: 'internal error' });
-  }
-}
-
-function readSchemaMigrationVersion(rawDb: DatabaseSync): number {
-  try {
-    const row = rawDb
-      .prepare('SELECT MAX(version) AS version FROM schema_migrations')
-      .get() as { version: number | null } | undefined;
-    return typeof row?.version === 'number' ? row.version : 0;
-  } catch (err) {
-    const message = (err as Error).message;
-    if (message.includes('no such table: schema_migrations')) {
-      return 0;
-    }
-    throw err;
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Server factory
