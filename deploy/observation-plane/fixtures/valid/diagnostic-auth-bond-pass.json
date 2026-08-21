@@ -1,0 +1,26 @@
+{
+  "schema": "whatsoup.observation-envelope",
+  "schema_version": "0.1",
+  "envelope_id": "env-fixture-0001",
+  "run_id": "run-fixture-0001",
+  "subject": {
+    "canonical_subject_id": "mini11/ph-bot",
+    "binding": { "authority": "roster", "confidence": "exact" },
+    "raw": { "host_label": "mini11", "instance_label": "ph-bot" }
+  },
+  "claim_id": "auth_bond.status",
+  "adapter_id": "auth-health",
+  "outcome": "pass",
+  "values": { "observed": { "present": true, "value": "present" } },
+  "execution_context": {
+    "uid": 501,
+    "launch_surface": "launchd_agent",
+    "runtime_identity": { "kind": "python", "version": "3.12.13" }
+  },
+  "projection": { "scope": "diagnostic", "authorization": "token_sent_accepted" },
+  "generations": { "process_pid": 97340, "process_started_at": "2026-08-20T12:00:00Z" },
+  "times": { "observed_at": "2026-08-20T22:00:00Z", "source_at": "2026-08-20T22:00:00Z" },
+  "authority": { "tier": "authenticated_diagnostic", "confidence": "confirmed" },
+  "evidence_refs": [ { "kind": "event_id", "ref": "health-1755727200-97340" } ],
+  "limitations": ["proves auth-bond presence for this process generation only"]
+}

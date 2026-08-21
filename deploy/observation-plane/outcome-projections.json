@@ -1,0 +1,111 @@
+{
+  "schema": "whatsoup.observation-outcome-projections",
+  "schema_version": "0.1",
+  "description": "Read-side projection tables: one table per legacy verdict surface, each row legacy_value -> {canonical, lossy}. Producers change ZERO in shadow; the shadow runner applies these tables when wrapping legacy conclusions. Losslessness is structural: every projected envelope carries legacy.{surface,raw_value,raw_detail} verbatim, so canonical is a projection and nothing is destroyed. The guard checks each table is TOTAL over its declared domain and that every canonical value is in the closed outcome vocabulary. An input outside the declared domain is unsupported/invalid_evidence at the adapter, NEVER a silent default.",
+  "canonical_outcomes": [
+    "pass",
+    "fail",
+    "inconclusive",
+    "context_mismatch",
+    "stale",
+    "unsupported",
+    "not_applicable",
+    "invalid_evidence",
+    "infra_error"
+  ],
+  "surfaces": {
+    "probe_report_verdict": {
+      "source": "tools/agent-runtime-probes/bot_errors_probe_observation.py report_verdict",
+      "domain": ["valid", "inconclusive", "invalid"],
+      "rows": [
+        { "legacy_value": "valid", "canonical": "pass", "lossy": false },
+        { "legacy_value": "inconclusive", "canonical": "inconclusive", "lossy": false },
+        { "legacy_value": "invalid", "canonical": "invalid_evidence", "lossy": false, "note": "F22: legacy strict_exit_code collapses this with inconclusive at the process boundary; the envelope preserves the split" }
+      ]
+    },
+    "health_poller_classification": {
+      "source": "src/fleet/health-poller.ts classifyHealthSnapshot (status x confidence)",
+      "domain": [
+        "online|confirmed", "online|inferred", "online|ambiguous",
+        "degraded|confirmed", "degraded|inferred", "degraded|ambiguous",
+        "logged_out|confirmed", "logged_out|inferred", "logged_out|ambiguous"
+      ],
+      "rows": [
+        { "legacy_value": "online|confirmed", "canonical": "pass", "lossy": false },
+        { "legacy_value": "online|inferred", "canonical": "inconclusive", "lossy": true, "note": "inferred online is not a confirmed pass" },
+        { "legacy_value": "online|ambiguous", "canonical": "inconclusive", "lossy": false },
+        { "legacy_value": "degraded|confirmed", "canonical": "fail", "lossy": true, "note": "the legacy poller emits this from a PUBLIC body (health_body_degraded); adapter must cross-check projection.scope — public scope demotes to inconclusive per the claim's min_projection" },
+        { "legacy_value": "degraded|inferred", "canonical": "inconclusive", "lossy": false },
+        { "legacy_value": "degraded|ambiguous", "canonical": "inconclusive", "lossy": false, "note": "includes health_body_incomplete on public bodies" },
+        { "legacy_value": "logged_out|confirmed", "canonical": "fail", "lossy": false },
+        { "legacy_value": "logged_out|inferred", "canonical": "inconclusive", "lossy": true },
+        { "legacy_value": "logged_out|ambiguous", "canonical": "inconclusive", "lossy": false }
+      ]
+    },
+    "watchdog_wd_rank": {
+      "source": "deploy/templates/watchdog-script.sh wd_rank result vocabulary",
+      "domain": [
+        "OUTBOUND-POISON", "CREDENTIAL-DEAD", "HEALTH-UNKNOWN", "RESTART-FAILED",
+        "RESTARTED", "RESTART-SUPPRESSED", "ERROR", "CREDENTIAL-UNKNOWN", "ok"
+      ],
+      "rows": [
+        { "legacy_value": "OUTBOUND-POISON", "canonical": "fail", "lossy": false },
+        { "legacy_value": "CREDENTIAL-DEAD", "canonical": "fail", "lossy": false },
+        { "legacy_value": "HEALTH-UNKNOWN", "canonical": "inconclusive", "lossy": false },
+        { "legacy_value": "RESTART-FAILED", "canonical": "infra_error", "lossy": false },
+        { "legacy_value": "RESTARTED", "canonical": "not_applicable", "lossy": true, "note": "an ACTION record, not an observation; F21 context (single un-retried curl can trigger it) preserved via raw_value" },
+        { "legacy_value": "RESTART-SUPPRESSED", "canonical": "not_applicable", "lossy": true, "note": "action record" },
+        { "legacy_value": "ERROR", "canonical": "infra_error", "lossy": false },
+        { "legacy_value": "CREDENTIAL-UNKNOWN", "canonical": "inconclusive", "lossy": false },
+        { "legacy_value": "ok", "canonical": "pass", "lossy": false }
+      ]
+    },
+    "host_doctor_outcome": {
+      "source": "deploy/scripts/whatsoup-host-doctor.sh outcome vocabulary",
+      "domain": ["pass", "compatibility_only", "blocked", "inconclusive"],
+      "rows": [
+        { "legacy_value": "pass", "canonical": "pass", "lossy": false },
+        { "legacy_value": "compatibility_only", "canonical": "pass", "lossy": true, "note": "node ran under compatibility policy; caveat preserved in raw_value" },
+        { "legacy_value": "blocked", "canonical": "fail", "lossy": false, "note": "a required capability is missing/incompatible — a true negative for the capability claim (diverges from an earlier design sketch that proposed context_mismatch)" },
+        { "legacy_value": "inconclusive", "canonical": "inconclusive", "lossy": false }
+      ]
+    },
+    "fleet_ground_truth_verdict": {
+      "source": "deploy/scripts/fleet-ground-truth.py verdict enum",
+      "domain": [
+        "needs_physical_repair", "credential_unavailable_genuine", "model_verdict_stale_suspect_probe",
+        "model_verdict_outdated_by_flow", "latent_while_idle", "serving_as_of",
+        "genuine_burst", "persistent_steady_condition", "health_body_not_disclosed"
+      ],
+      "rows": [
+        { "legacy_value": "needs_physical_repair", "canonical": "fail", "lossy": false },
+        { "legacy_value": "credential_unavailable_genuine", "canonical": "fail", "lossy": true, "note": "F16 risk: legacy can promote a fresh wrong-context probe; adapter must verify context equivalence before accepting" },
+        { "legacy_value": "model_verdict_stale_suspect_probe", "canonical": "stale", "lossy": false },
+        { "legacy_value": "model_verdict_outdated_by_flow", "canonical": "stale", "lossy": true, "note": "superseded-by-flow; the flow evidence itself lands as a separate envelope" },
+        { "legacy_value": "latent_while_idle", "canonical": "inconclusive", "lossy": false },
+        { "legacy_value": "serving_as_of", "canonical": "pass", "lossy": false },
+        { "legacy_value": "genuine_burst", "canonical": "fail", "lossy": true, "note": "flap-axis: bursty restart pattern judged genuine" },
+        { "legacy_value": "persistent_steady_condition", "canonical": "fail", "lossy": true, "note": "flap-axis: persistent condition" },
+        { "legacy_value": "health_body_not_disclosed", "canonical": "inconclusive", "lossy": false, "note": "unobserved privileged body; projection.scope records public/unobserved" }
+      ]
+    },
+    "parity_guard": {
+      "source": "scripts/check-fleet-bot-hardening-parity.ts result booleans",
+      "domain": ["runtimeParity|true", "runtimeParity|false", "sourceAnchorParity|true", "sourceAnchorParity|false"],
+      "rows": [
+        { "legacy_value": "runtimeParity|true", "canonical": "pass", "lossy": true, "note": "F19: today this is declared_parity — rows may omit receipt/releaseIdentity/inventoryBinding and still read green; authority tier stays declared_intent until receipts are required" },
+        { "legacy_value": "runtimeParity|false", "canonical": "fail", "lossy": false },
+        { "legacy_value": "sourceAnchorParity|true", "canonical": "pass", "lossy": false },
+        { "legacy_value": "sourceAnchorParity|false", "canonical": "fail", "lossy": false }
+      ]
+    },
+    "durable_advance_allowed": {
+      "source": "deploy/scripts/lib/durable_json.py PublicationResult.advance_allowed",
+      "domain": ["true", "false"],
+      "rows": [
+        { "legacy_value": "true", "canonical": "pass", "lossy": false },
+        { "legacy_value": "false", "canonical": "inconclusive", "lossy": true, "note": "false spans benign CAS supersession through real IO faults; the durability/confinement/authority/error_class tuple in raw_detail decides fail vs infra_error at the adapter" }
+      ]
+    }
+  }
+}

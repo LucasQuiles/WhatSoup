@@ -1,0 +1,36 @@
+{
+  "schema": "whatsoup.observation-authority-lattice",
+  "schema_version": "0.1",
+  "description": "Evidence ordering policy (register F16). Comparison is lexicographic over the ordering axes: claim authority first, then context equivalence, then runtime generation, then freshness. Freshness is LAST: a fresh observation from an unproven or unequal context can never override a context-equal higher-tier observation. Contradictions that policy does not explicitly resolve remain visible in the DecisionRecord — they are never collapsed.",
+  "ordering": ["claim_authority", "context_equivalence", "runtime_generation", "freshness"],
+  "tiers": [
+    { "tier": "functional_turn", "rank": 5, "meaning": "a real provider turn / real delivery acknowledgement in the serving context" },
+    { "tier": "serving_context_canary", "rank": 4, "meaning": "an exact-path canary executed in a context proven equal to the serving context (F15 receipts, environment-faithful)" },
+    { "tier": "authenticated_diagnostic", "rank": 3, "meaning": "privileged runtime diagnostics (diagnostic health projection, live PID provenance)" },
+    { "tier": "credential_visibility", "rank": 2, "meaning": "credential/file/keychain visibility in a NAMED context; proves presence in that context only" },
+    { "tier": "configured_presence", "rank": 1, "meaning": "configuration declares it; proves intent, not function" },
+    { "tier": "declared_intent", "rank": 0, "meaning": "roster/manifest declaration; discovery input only" }
+  ],
+  "rules": [
+    { "id": "freshness_never_outranks_context", "rule": "A fresh lower-tier or context-unequal observation cannot override a context-equal higher-tier observation; it may only OPEN A CONTRADICTION, which stays visible." },
+    { "id": "context_unproven_is_not_failure", "rule": "Evidence whose execution context cannot be proven equivalent to the serving context classifies inconclusive or context_mismatch, never fail (F15/F16)." },
+    { "id": "public_projection_ceiling", "rule": "public projection scope supports transport liveness only; it can never support an identity, auth-bond, provider, release, or recovery verdict (F01 family)." },
+    { "id": "configured_is_not_observed", "rule": "configured/requested/resolved values never satisfy an observed claim (F10/F18); runtime_observed requires live-process or receipt-bound evidence." },
+    { "id": "generation_bound", "rule": "Evidence does not survive process restart, redeploy, credential re-pair, config change, or roster-generation change for claims bound to those generations (F02/F19)." },
+    { "id": "alias_never_merges", "rule": "Subjects with binding.authority=unresolved never merge with any other subject and never contribute to another subject's coverage denominator." },
+    { "id": "recovery_gate", "rule": "incident.recovery_verified requires incident.recovery_gate_satisfied=pass in the same process+credential generation; any clear-requirement mismatch withholds recovery authority regardless of announcements." },
+    { "id": "administrative_close_is_not_recovery", "rule": "administratively_aged_out closes bookkeeping, not the underlying claim; it never produces recovery_observed or recovery_verified." },
+    { "id": "notification_is_not_evidence", "rule": "Chat/alert notifications (BOT ERRORS channel) are transport, never evidence authority; only acked outbox/state artifacts and direct observations count." }
+  ],
+  "provider_credential_lattice": [
+    "provider.functional_turn",
+    "serving_context_canary",
+    "provider.diagnostic_status",
+    "credential.visibility_in_context",
+    "configured_presence"
+  ],
+  "context_equivalence": {
+    "compares": ["uid", "home_digest", "config_root_digest", "launch_surface", "runtime_identity.path_digest"],
+    "rule": "Contexts are equivalent only when every compared field present on BOTH sides matches; a field present on one side only leaves equivalence UNPROVEN (inconclusive), not unequal."
+  }
+}

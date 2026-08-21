@@ -1,0 +1,18 @@
+{
+  "schema": "whatsoup.observation-envelope",
+  "schema_version": "0.1",
+  "envelope_id": "env-bad-0004",
+  "run_id": "run-fixture-0001",
+  "subject": {
+    "canonical_subject_id": "mini11/ph-bot",
+    "binding": { "authority": "roster", "confidence": "exact" },
+    "raw": { "host_label": "mini11" }
+  },
+  "claim_id": "identity.instance_name",
+  "adapter_id": "auth-health",
+  "outcome": "fail",
+  "projection": { "scope": "public", "authorization": "no_token" },
+  "times": { "observed_at": "2026-08-20T22:00:00Z" },
+  "authority": { "tier": "authenticated_diagnostic", "confidence": "confirmed" },
+  "limitations": ["a public body must never yield an identity verdict"]
+}

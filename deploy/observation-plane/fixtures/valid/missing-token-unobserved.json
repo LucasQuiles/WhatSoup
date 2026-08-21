@@ -1,0 +1,19 @@
+{
+  "schema": "whatsoup.observation-envelope",
+  "schema_version": "0.1",
+  "envelope_id": "env-fixture-0003",
+  "run_id": "run-fixture-0001",
+  "subject": {
+    "canonical_subject_id": "mini7/rb-bot",
+    "binding": { "authority": "roster", "confidence": "exact" },
+    "raw": { "host_label": "mini7", "instance_label": "rb-bot" }
+  },
+  "claim_id": "auth_bond.status",
+  "adapter_id": "auth-health",
+  "outcome": "inconclusive",
+  "unobserved_reason": "missing_token",
+  "projection": { "scope": "unobserved", "authorization": "no_token" },
+  "times": { "observed_at": "2026-08-20T22:02:00Z" },
+  "authority": { "tier": "authenticated_diagnostic", "confidence": "ambiguous" },
+  "limitations": ["no token resolvable: operator action is provision the token; NOT a workload verdict"]
+}
