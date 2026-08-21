@@ -240,7 +240,7 @@ export const EX_USAGE = 64;
 export const DEFAULT_BATTERY_TIMEOUT_MS = 30 * 60 * 1000;
 
 /**
- * Resolve the wall-clock bound from FULL_SUITE_BATTERY_TIMEOUT_MS (round-20 gap). An ABSENT
+ * Resolve the wall-clock bound from WHATSOUP_FULL_SUITE_BATTERY_TIMEOUT_MS (round-20 gap). An ABSENT
  * env var uses the default. A PRESENT but non-finite-or-non-positive value is a CONFIGURATION
  * ERROR, never a 0ms bound: `Number('abc')` is NaN, `Number('')` is 0, `Number('-1')` is
  * negative, and `setTimeout` with any of those fires (or is clamped to fire) immediately — a
@@ -253,18 +253,18 @@ export function resolveBatteryTimeoutMs(raw: string | undefined): { ok: true; ti
   if (!Number.isFinite(n) || n <= 0) {
     return {
       ok: false,
-      message: `FULL_SUITE_BATTERY_TIMEOUT_MS="${raw}" is not a positive finite number of milliseconds — refusing to run with an invalid bound (it would fire an immediate, misleading timeout).`,
+      message: `WHATSOUP_FULL_SUITE_BATTERY_TIMEOUT_MS="${raw}" is not a positive finite number of milliseconds — refusing to run with an invalid bound (it would fire an immediate, misleading timeout).`,
     };
   }
   // round-21: setTimeout's delay is a 32-bit signed int; a value ABOVE 2^31-1 (TIMEOUT_MAX)
   // overflows and Node CLAMPS it to 1ms — the exact misleading-instant-timeout this guard exists
-  // to prevent (FULL_SUITE_BATTERY_TIMEOUT_MS=2147483648 was accepted, then fired at 1ms). Require
+  // to prevent (WHATSOUP_FULL_SUITE_BATTERY_TIMEOUT_MS=2147483648 was accepted, then fired at 1ms). Require
   // an integer within [1, TIMEOUT_MAX]; a fractional or over-max value is a config error, not a bound.
   const TIMEOUT_MAX = 2_147_483_647; // 2^31 - 1, Node's setTimeout maximum
   if (!Number.isInteger(n) || n > TIMEOUT_MAX) {
     return {
       ok: false,
-      message: `FULL_SUITE_BATTERY_TIMEOUT_MS="${raw}" must be an integer in [1, ${TIMEOUT_MAX}] ms — a larger or fractional value overflows setTimeout's 32-bit delay and is clamped to ~1ms (a misleading instant timeout).`,
+      message: `WHATSOUP_FULL_SUITE_BATTERY_TIMEOUT_MS="${raw}" must be an integer in [1, ${TIMEOUT_MAX}] ms — a larger or fractional value overflows setTimeout's 32-bit delay and is clamped to ~1ms (a misleading instant timeout).`,
     };
   }
   return { ok: true, timeoutMs: n };
@@ -273,10 +273,10 @@ export function resolveBatteryTimeoutMs(raw: string | undefined): { ok: true; ti
 const invokedPath = process.argv[1] ? new URL(`file://${process.argv[1]}`).href : '';
 if (import.meta.url === invokedPath || (process.argv[1] ?? '').endsWith('full-suite-battery.ts')) {
   void (async () => {
-    // Override the default bound with FULL_SUITE_BATTERY_TIMEOUT_MS. An invalid value is a
+    // Override the default bound with WHATSOUP_FULL_SUITE_BATTERY_TIMEOUT_MS. An invalid value is a
     // config error (EX_USAGE), not a silent immediate timeout. Extra args after `--` pass
     // through to vitest.
-    const timeoutResolution = resolveBatteryTimeoutMs(process.env.FULL_SUITE_BATTERY_TIMEOUT_MS);
+    const timeoutResolution = resolveBatteryTimeoutMs(process.env.WHATSOUP_FULL_SUITE_BATTERY_TIMEOUT_MS);
     if (!timeoutResolution.ok) {
       process.stderr.write(`full-suite-battery: CONFIG ERROR — ${timeoutResolution.message}\n`);
       process.exit(EX_USAGE);
