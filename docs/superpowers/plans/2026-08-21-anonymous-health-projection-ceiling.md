@@ -241,11 +241,12 @@ git commit -m "fix(bot-errors): contain anonymous health verdicts"
 
 **Files:**
 - Modify: `package-lock.json`
-- Do not modify: `package.json`
+- Modify: `tools/whatsoup_guard/package-lock.json`
+- Do not modify: `package.json`, `tools/whatsoup_guard/package.json`
 
 **Interfaces:**
 - Consumes: npm lockfile transitive graph under Node.js 24.15.0
-- Produces: patched transitive versions `brace-expansion@1.1.18`, `brace-expansion@5.0.9`, and `nanoid@3.3.18` with no direct dependency changes
+- Produces: patched transitive versions `brace-expansion@1.1.18`, `brace-expansion@5.0.9`, and `nanoid@3.3.18` in every audited package graph, with no direct dependency changes
 
 - [ ] **Step 1: Capture the failing audit under the pinned runtime**
 
@@ -262,6 +263,8 @@ Expected: exit 1 with exactly two high-severity transitive development-tool find
 `brace-expansion` (GHSA-mh99-v99m-4gvg and GHSA-rgw5-rvv9-x895) and
 `nanoid` (GHSA-2v37-7h3g-55p8). Also run `npm audit --omit=dev --json`;
 expected exit 0, proving production dependencies are not affected.
+Also run `npm --prefix tools/whatsoup_guard audit --json`; expected exit 1 with
+the same transitive `nanoid` advisory.
 
 - [ ] **Step 2: Apply a lockfile-only non-breaking remediation**
 
@@ -272,6 +275,7 @@ NODE_BIN="$HOME/.nvm/versions/node/v$(tr -d '[:space:]' < .nvmrc)/bin"
 test -x "$NODE_BIN/node" && export PATH="$NODE_BIN:$PATH"
 test "$(node -v)" = "v24.15.0"
 npm audit fix --package-lock-only --ignore-scripts
+npm --prefix tools/whatsoup_guard audit fix --package-lock-only --ignore-scripts
 ```
 
 Do not use `--force`. Do not accept changes to `package.json`.
@@ -281,8 +285,8 @@ Do not use `--force`. Do not accept changes to `package.json`.
 Run:
 
 ```bash
-git diff -- package-lock.json
-git diff --exit-code -- package.json
+git diff -- package-lock.json tools/whatsoup_guard/package-lock.json
+git diff --exit-code -- package.json tools/whatsoup_guard/package.json
 ```
 
 Expected: only transitive patched-version/integrity/resolution updates needed for
@@ -300,6 +304,9 @@ npm ci
 npm audit --json
 npm audit --omit=dev --json
 npm ls brace-expansion nanoid --all
+npm --prefix tools/whatsoup_guard ci
+npm --prefix tools/whatsoup_guard audit --json
+npm --prefix tools/whatsoup_guard ls nanoid --all
 ```
 
 Expected: install exits 0; both audits report zero vulnerabilities; the dependency tree contains no
@@ -316,6 +323,8 @@ test "$(node -v)" = "v24.15.0"
 npm run typecheck
 npm run guard:lint:src
 npm run guard:node-pin-consistency
+npm --prefix tools/whatsoup_guard run typecheck
+npm --prefix tools/whatsoup_guard test
 ```
 
 Expected: all commands PASS.
@@ -323,7 +332,7 @@ Expected: all commands PASS.
 - [ ] **Step 6: Commit the advisory remediation**
 
 ```bash
-git add package-lock.json
+git add package-lock.json tools/whatsoup_guard/package-lock.json
 git commit -m "chore(deps): patch transitive audit findings"
 ```
 
@@ -335,7 +344,7 @@ git commit -m "chore(deps): patch transitive audit findings"
 - Verify only: all files changed since `066041258e0c1f43338f9e2a8e12c0ebf4934e59`
 
 **Interfaces:**
-- Consumes: the two implementation commits from Tasks 1 and 2
+- Consumes: the implementation and generated-artifact commits from Tasks 1 and 2
 - Produces: a local, reviewable commit range with exact verification receipts; no remote mutation
 
 - [ ] **Step 1: Verify the final diff and commit metadata**
