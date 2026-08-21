@@ -1,0 +1,18 @@
+{
+  "schema": "whatsoup.observation-envelope",
+  "schema_version": "0.1",
+  "envelope_id": "env-bad-0005",
+  "run_id": "run-fixture-0001",
+  "subject": {
+    "canonical_subject_id": "unknown.host-9c1d",
+    "binding": { "authority": "unresolved", "confidence": "ambiguous" },
+    "raw": { "host_label": "Unknown-Host-9C1D" }
+  },
+  "claim_id": "incident.still_open",
+  "adapter_id": "legacy-events",
+  "outcome": "pass",
+  "projection": { "scope": "not_applicable", "authorization": "not_applicable" },
+  "times": { "observed_at": "2026-08-20T22:00:00Z" },
+  "authority": { "tier": "declared_intent", "confidence": "ambiguous" },
+  "limitations": ["an unresolved alias may not carry a pass/fail verdict"]
+}
