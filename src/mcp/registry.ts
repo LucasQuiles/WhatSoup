@@ -66,6 +66,22 @@ const log = createChildLogger('ToolRegistry');
 // notes in per-chat agents.
 export const CONVERSATION_SAFE_GLOBAL_TOOLS: ReadonlySet<string> = new Set(['transcribe_audio']);
 
+/** Scheduled background turns may publish a fresh update, but may not rewrite
+ * or remove chat history. This is enforced at discovery and call time. */
+export const SCHEDULED_AGENT_JOB_FORBIDDEN_TOOLS: ReadonlySet<string> = new Set([
+  'edit_message',
+  'delete_message',
+  'delete_message_for_me',
+  'clear_chat',
+  'delete_chat',
+  'set_disappearing_messages',
+]);
+
+function scheduledAgentJobMaySee(tool: ToolDeclaration, session: SessionContext): boolean {
+  return session.purpose !== 'scheduled-agent-job'
+    || !SCHEDULED_AGENT_JOB_FORBIDDEN_TOOLS.has(tool.name);
+}
+
 /** Eligibility of a tool for a conversation-bound session (list AND call). */
 function conversationBoundMaySee(tool: ToolDeclaration): boolean {
   return tool.scope === 'chat' || CONVERSATION_SAFE_GLOBAL_TOOLS.has(tool.name);
@@ -76,6 +92,7 @@ function conversationBoundMaySee(tool: ToolDeclaration): boolean {
  *  get a typed admin_required denial; hidden-listing sessions keep the
  *  non-disclosing "Unknown tool" reply). */
 function sessionWouldList(tool: ToolDeclaration, session: SessionContext): boolean {
+  if (!scheduledAgentJobMaySee(tool, session)) return false;
   if (session.tier === 'chat-scoped' && tool.scope === 'global') return false;
   if (conversationBoundKey(session) !== undefined && !conversationBoundMaySee(tool)) return false;
   return true;
@@ -555,6 +572,10 @@ export class ToolRegistry {
         isError: true,
       };
     };
+
+    if (!scheduledAgentJobMaySee(tool, session)) {
+      return reject(`Unknown tool: ${name}`, 'authorization_denied', 'authorization');
+    }
 
     // --- R1 sensitive-tool gate (central, authoritative; in-handler
     // assertAdmin checks remain as defense in depth) ---

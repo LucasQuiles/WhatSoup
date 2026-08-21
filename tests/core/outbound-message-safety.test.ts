@@ -306,6 +306,17 @@ describe('evaluateOutboundMessageSafety', () => {
 });
 
 describe('classifyAssistantTextEgress', () => {
+  it.each([
+    'The closeout is delivered and the turn receipt recorded (exit 1 is the expected delivery_pending path). Now the session log.',
+    'The closeout is delivered and the turn receipt recorded. Now the session log.',
+  ])('suppresses scheduled-turn receipt and session-log narration: %s', (text) => {
+    expect(classifyAssistantTextEgress(text)).toEqual({
+      action: 'suppress',
+      reason: 'internal_narration',
+      satisfiesReplyGuarantee: false,
+    });
+  });
+
   it('suppresses internal work narration without satisfying the reply guarantee', () => {
     const decision = classifyAssistantTextEgress('Now rebuild the workbook with the new trace columns.');
 

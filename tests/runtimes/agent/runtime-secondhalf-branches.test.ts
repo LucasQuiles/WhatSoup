@@ -17,11 +17,12 @@
 //
 // Repo-hygiene reserved IDs only.
 
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi, onTestFinished } from 'vitest';
 import type { Database } from '../../../src/core/database.ts';
 import type { Messenger, IncomingMessage } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
 import type { IOutboundQueue } from '../../../src/runtimes/agent/outbound-queue.ts';
+import { toConversationKey } from '../../../src/core/conversation-key.ts';
 import type {
   MarkSystemTurnInput,
   PendingSystemTurnSnapshot,
@@ -654,6 +655,124 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       // The synthetic turn carries the durable seq, and the ack names it.
       expect(handleMessage.mock.calls[0]?.[0]).toMatchObject({ inboundSeq: 77, isSyntheticJob: true });
       expect(result).toEqual({ dispatched: true, detail: expect.stringContaining('inbound seq 77') });
+    });
+
+    it('uses a different provider session for a scheduled turn than the interactive group session', async () => {
+      const { SessionManager: MockSessionManagerCtor } = await import('../../../src/runtimes/agent/session.ts');
+      // The ctor override below replaces the shared singleton double with
+      // per-construction objects. It MUST NOT leak past this test: later tests
+      // assert identity against the canonical `mockSession` singleton (e.g. the
+      // stand-in-introduction WeakSet mark), and the file-level beforeEach's
+      // vi.clearAllMocks() clears CALLS, not implementations. onTestFinished
+      // restores the canonical implementation even when this test fails.
+      const mockedSessionCtor = MockSessionManagerCtor as unknown as ReturnType<typeof vi.fn>;
+      const canonicalSessionCtor = mockedSessionCtor.getMockImplementation();
+      onTestFinished(() => {
+        if (canonicalSessionCtor) mockedSessionCtor.mockImplementation(canonicalSessionCtor);
+      });
+      const createdOptions: Array<{
+        chatJid: string;
+        persistenceConversationKey?: string;
+        notifyUser?: (msg: string) => void;
+        onCrash?: (info: {
+          exitCode: number | null;
+          signal: NodeJS.Signals | null;
+          sessionId: string | null;
+          dbRowId: number | null;
+          generationIdentity: { managerId: string; generation: number };
+        }) => void;
+      }> = [];
+      const createdSessions: Array<typeof mockSession> = [];
+      (MockSessionManagerCtor as unknown as ReturnType<typeof vi.fn>).mockImplementation(function (
+        opts: {
+          chatJid: string;
+          persistenceConversationKey?: string;
+          notifyUser?: (msg: string) => void;
+          onCrash?: (info: {
+            exitCode: number | null;
+            signal: NodeJS.Signals | null;
+            sessionId: string | null;
+            dbRowId: number | null;
+            generationIdentity: { managerId: string; generation: number };
+          }) => void;
+          onEvent: (event: AgentEvent) => void;
+        },
+      ) {
+        const session = {
+          ...mockSession,
+          getStatus: vi.fn(() => ({
+            active: false,
+            pid: null,
+            sessionId: null,
+            startedAt: null,
+            messageCount: 0,
+            lastMessageAt: null,
+          })),
+          spawnSession: vi.fn(async () => {}),
+          sendTurn: vi.fn(async () => {}),
+          bindGenerationOwnership: vi.fn(),
+        };
+        createdOptions.push(opts);
+        createdSessions.push(session);
+        return session;
+      });
+      const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger, 'test', {
+        sessionScope: 'per_chat',
+      });
+      const inner = runtime as unknown as {
+        _handleMessageInner(msg: IncomingMessage): Promise<void>;
+        chatSessions: Map<string, typeof mockSession>;
+        sessionManagerIds: WeakMap<typeof mockSession, string>;
+        sessionOwnership: {
+          get(mapKey: string): { managerId: string; generation: number } | undefined;
+        };
+      };
+
+      void inner._handleMessageInner(makeMsg({
+        chatJid: groupJid,
+        senderJid: dmJid,
+        isGroup: true,
+        content: 'interactive question',
+      }));
+      await vi.waitFor(() => expect(createdOptions).toHaveLength(1));
+      void inner._handleMessageInner(makeMsg({
+        messageId: 'agentjob-5-1',
+        chatJid: groupJid,
+        senderJid: 'admin@s.whatsapp.net',
+        senderName: 'Scheduled job',
+        isGroup: true,
+        isSyntheticJob: true,
+        content: 'scheduled check',
+      }));
+      await vi.waitFor(() => expect(createdOptions).toHaveLength(2));
+
+      expect(inner.chatSessions.size).toBe(2);
+      expect(new Set(createdSessions).size).toBe(2);
+      expect(createdOptions.map((opts) => opts.chatJid)).toEqual([groupJid, groupJid]);
+      expect(createdOptions[0]?.persistenceConversationKey).toBe(toConversationKey(groupJid));
+      expect(createdOptions[1]?.persistenceConversationKey).toBe(`${groupJid}::scheduled-agent-job`);
+
+      mockQueue.enqueueText.mockClear();
+      mockQueue.flush.mockClear();
+      createdOptions[1]?.notifyUser?.(
+        'Agent session ended (exited with code 143). Send any message to start a new session.',
+      );
+      expect(mockQueue.enqueueText).not.toHaveBeenCalled();
+      expect(mockQueue.flush).not.toHaveBeenCalled();
+
+      const scheduledMapKey = `${groupJid}::scheduled-agent-job`;
+      const scheduledSession = createdSessions[1]!;
+      const managerId = inner.sessionManagerIds.get(scheduledSession)!;
+      const generation = inner.sessionOwnership.get(scheduledMapKey)!.generation;
+      createdOptions[1]?.onCrash?.({
+        exitCode: 143,
+        signal: null,
+        sessionId: null,
+        dbRowId: 2015,
+        generationIdentity: { managerId, generation },
+      });
+      expect(inner.chatSessions.has(scheduledMapKey)).toBe(false);
+      expect(inner.chatSessions.has(groupJid)).toBe(true);
     });
 
     it('maps a journal failure to a refused dispatch instead of an unowned ack (#2144)', () => {

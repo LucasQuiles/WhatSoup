@@ -232,6 +232,8 @@ export interface SessionManagerOptions {
   db: Database;
   messenger: Messenger;
   chatJid: string;
+  /** Durable conversation identity for this provider session. Defaults to the delivery chat. */
+  persistenceConversationKey?: string;
   onEvent: (event: AgentEvent) => void;
   instanceName?: string;
   onResumeFailed?: () => void;
@@ -796,7 +798,7 @@ export class SessionManager {
     this.db = opts.db;
     this.messenger = opts.messenger;
     this.chatJid = opts.chatJid;
-    this.conversationKey = toConversationKey(opts.chatJid);
+    this.conversationKey = opts.persistenceConversationKey ?? toConversationKey(opts.chatJid);
     this.onEvent = opts.onEvent;
     this.instanceName = opts.instanceName ?? 'personal';
     this.onResumeFailed = opts.onResumeFailed;
