@@ -2,7 +2,7 @@
 
 **PR:** #3332
 
-**Status:** approved and written-spec-confirmed — implementation planned
+**Status:** IMPLEMENTED on PR #3332 (round-4 head `e789ba635`, two-site repair; verified by executed falsifier — anonymous trio WARN, zero verdict-marker leakage, controls intact). This record is design provenance.
 
 **Canonical design baseline:** `066041258e0c1f43338f9e2a8e12c0ebf4934e59`
 
