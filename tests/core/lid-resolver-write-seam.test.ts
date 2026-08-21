@@ -515,3 +515,83 @@ describe('importLidMappings — 2-instance fleet convergence', () => {
     expect(currentPhone(dbA, 'X')).toBe(currentPhone(dbB, 'X'));
   });
 });
+
+// ─── L5 seam contract — reader output is writer input (#2238) ────────────────
+//
+// The fleet sync route (src/fleet/routes/lid-sync.ts handleSyncLidMappings)
+// builds its observation union EXACTLY as readLidMappings(<instance>).map(tag
+// source_instance). These tests pin that contract at the unit seam — if either
+// half of the seam drifts (reader shape, writer expectations), convergence
+// breaks here first, not in a live fleet sync.
+
+describe('L5 seam contract — readLidMappings output feeds importLidMappings', () => {
+  let dbA: Database;
+  let dbB: Database;
+
+  beforeEach(() => {
+    dbA = freshDb();
+    dbB = freshDb();
+  });
+
+  afterEach(() => {
+    dbA.close();
+    dbB.close();
+  });
+
+  it('converges both instances when the union is built exactly as the fleet sync route builds it', () => {
+    // Diverged observations: A saw lid=Y→phoneA at T1; B saw lid=Y→phoneB at T2>T1.
+    dbA.raw
+      .prepare('INSERT INTO lid_mappings (lid, phone_jid, updated_at) VALUES (?, ?, ?)')
+      .run('Y', PHONE_A, '2026-02-01T00:00:00Z');
+    dbB.raw
+      .prepare('INSERT INTO lid_mappings (lid, phone_jid, updated_at) VALUES (?, ?, ?)')
+      .run('Y', PHONE_B, '2026-06-01T00:00:00Z');
+
+    // The route's observation collection shape: readLidMappings per instance,
+    // tagged with source_instance — no hand-built rows.
+    const observations: FleetMappingInput[] = [
+      ...readLidMappings(dbA.raw).map((mapping) => ({ ...mapping, source_instance: 'A' })),
+      ...readLidMappings(dbB.raw).map((mapping) => ({ ...mapping, source_instance: 'B' })),
+    ];
+    expect(observations).toHaveLength(2);
+
+    const resA = importLidMappings(dbA, observations);
+    const resB = importLidMappings(dbB, observations);
+
+    // Both converge on B's fresher observation; the stale observer's row is
+    // reported as a conflict attributed to its instance through the reader-built
+    // union (not a hand-crafted one).
+    expect(currentPhone(dbA, 'Y')).toBe(PHONE_B);
+    expect(currentPhone(dbB, 'Y')).toBe(PHONE_B);
+    expect(currentUpdatedAt(dbA, 'Y')).toBe('2026-06-01T00:00:00Z');
+    expect(resA.flipped).toBe(1);
+    expect(resB.conflicts.some((c) => c.source_instance === 'A')).toBe(true);
+
+    // Re-importing the same union is convergence-stable: no further flips.
+    const resA2 = importLidMappings(dbA, observations);
+    expect(resA2.flipped).toBe(0);
+    expect(currentPhone(dbA, 'Y')).toBe(PHONE_B);
+  });
+
+  it('an empty fleet syncs as a no-op through the same seam', () => {
+    expect(readLidMappings(dbA.raw)).toEqual([]);
+    const observations: FleetMappingInput[] = readLidMappings(dbA.raw).map((mapping) => ({
+      ...mapping,
+      source_instance: 'A',
+    }));
+    const res = importLidMappings(dbB, observations);
+    expect(res).toMatchObject({ imported: 0, flipped: 0, noop: 0, conflicts: [] });
+  });
+
+  it('readLidMappings fails closed on a non-text synchronization field', () => {
+    // SQLite is dynamically typed. TEXT-affinity columns silently coerce
+    // numeric bindings to text (an INTEGER 42 arrives as '42'), so the only
+    // value class that survives insertion as a genuine non-text is a BLOB.
+    // The canonical read seam must throw on it rather than propagate a
+    // non-string timestamp into fleet convergence.
+    dbA.raw
+      .prepare('INSERT INTO lid_mappings (lid, phone_jid, updated_at) VALUES (?, ?, ?)')
+      .run('Z', PHONE_A, new Uint8Array([1, 2, 3]));
+    expect(() => readLidMappings(dbA.raw)).toThrowError(/non-text synchronization field/);
+  });
+});
