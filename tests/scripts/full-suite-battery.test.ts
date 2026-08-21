@@ -184,7 +184,7 @@ describe('runBoundedBattery (externally bounded full-suite runner)', () => {
   }, 30_000);
 });
 
-describe('resolveBatteryTimeoutMs (round-20 gap: invalid FULL_SUITE_BATTERY_TIMEOUT_MS is a config error, not an instant timeout)', () => {
+describe('resolveBatteryTimeoutMs (round-20 gap: invalid WHATSOUP_FULL_SUITE_BATTERY_TIMEOUT_MS is a config error, not an instant timeout)', () => {
   it('absent env → the 30-minute default', () => {
     const r = resolveBatteryTimeoutMs(undefined);
     expect(r).toEqual({ ok: true, timeoutMs: 30 * 60 * 1000 });
@@ -195,14 +195,14 @@ describe('resolveBatteryTimeoutMs (round-20 gap: invalid FULL_SUITE_BATTERY_TIME
   it.each(['abc', '', 'NaN', '0', '-1', 'Infinity'])('rejects %j as a config error (would fire an immediate misleading timeout)', (raw) => {
     const r = resolveBatteryTimeoutMs(raw);
     expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.message).toContain('FULL_SUITE_BATTERY_TIMEOUT_MS');
+    if (!r.ok) expect(r.message).toContain('WHATSOUP_FULL_SUITE_BATTERY_TIMEOUT_MS');
   });
   // round-21 finding 6: setTimeout's 32-bit delay overflows above 2^31-1 and Node CLAMPS it to
   // ~1ms — a value that PASSES the finite/positive check but fires an instant misleading timeout.
   it.each(['2147483648', '9999999999', '2.5'])('rejects %j (> 2^31-1 or fractional → setTimeout overflow/clamp)', (raw) => {
     const r = resolveBatteryTimeoutMs(raw);
     expect(r.ok).toBe(false); // revert the upper-bound fix → 2147483648 accepted → RED
-    if (!r.ok) expect(r.message).toContain('FULL_SUITE_BATTERY_TIMEOUT_MS');
+    if (!r.ok) expect(r.message).toContain('WHATSOUP_FULL_SUITE_BATTERY_TIMEOUT_MS');
   });
   it('accepts exactly 2^31-1 (the setTimeout maximum) as the boundary', () => {
     expect(resolveBatteryTimeoutMs('2147483647')).toEqual({ ok: true, timeoutMs: 2147483647 });
