@@ -102,6 +102,7 @@ const SCOPE_MAP: Record<string, ScopeEntry> = {
   'doc-drift': { class: 'probe-nonzero', reason: 'reads cwd docs/ manifests; ENOENT -> non-zero', probe: { via: 'cwd' } },
   'doc-tally': { class: 'probe-nonzero', reason: 'reads cwd docs/ index; missing -> non-zero', probe: { via: 'cwd' } },
   'public-surface-drift': { class: 'probe-nonzero', reason: 'reads cwd docs/public-surface.md; ENOENT -> non-zero', probe: { via: 'cwd' } },
+  'observation-contract': { class: 'probe-nonzero', reason: 'reads cwd deploy/observation-plane contract data; contract-unreadable -> non-zero', probe: { via: 'cwd' } },
   'work-index': { class: 'probe-nonzero', reason: 'reads cwd work-index; ENOENT -> non-zero', probe: { via: 'cwd' } },
   'harness-maintenance': { class: 'probe-nonzero', reason: 'reads cwd deploy/managed-components.json; ENOENT -> non-zero', probe: { via: 'cwd' } },
   'agent-iteration-review': { class: 'probe-nonzero', reason: 'requires an artifact path; absent -> non-zero usage error', probe: { via: 'cwd' } },

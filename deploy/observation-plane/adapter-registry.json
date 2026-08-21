@@ -1,0 +1,134 @@
+{
+  "schema": "whatsoup.observation-adapter-registry",
+  "schema_version": "0.1",
+  "description": "Closed allowlist of bounded adapters. Each wraps an EXISTING implementation (evolve, don't replace); none is a generic plugin surface. can_establish/cannot_establish are guard-cross-checked against claim-catalog.json. An adapter may only emit envelopes for claims it declares; emitting an undeclared claim is a new_system_defect. status=gated adapters cannot run until their gate receipt exists.",
+  "adapters": [
+    {
+      "adapter_id": "auth-health",
+      "wraps": ["deploy/scripts/lib/health_reader.py"],
+      "platforms": ["darwin", "linux"],
+      "privilege": "instance health token (per-instance tokens.env or env override)",
+      "prerequisites": ["shared authenticated health reader available on main", "instance token resolvable"],
+      "projection_scope": "diagnostic",
+      "can_establish": ["transport.http_liveness", "identity.instance_name", "auth_bond.status", "db.durability_status", "provider.diagnostic_status", "incident.recovery_observed", "incident.recovery_gate_satisfied", "incident.recovery_verified"],
+      "cannot_establish": ["provider.functional_turn", "release.executing_release", "credential.visibility_in_context"],
+      "status": "gated",
+      "gate": "blocked until the shared health reader lands on main"
+    },
+    {
+      "adapter_id": "public-liveness",
+      "wraps": ["deploy/scripts/lib/health_reader.py (no-token path)"],
+      "platforms": ["darwin", "linux"],
+      "privilege": "none",
+      "prerequisites": [],
+      "projection_scope": "public",
+      "can_establish": ["transport.http_liveness"],
+      "cannot_establish": ["identity.instance_name", "auth_bond.status", "provider.diagnostic_status", "db.durability_status", "release.executing_release", "incident.recovery_observed"],
+      "status": "gated",
+      "gate": "blocked until the shared health reader lands on main (same reader)"
+    },
+    {
+      "adapter_id": "supervision",
+      "wraps": ["launchctl print (darwin)", "systemctl --user show (linux)"],
+      "platforms": ["darwin", "linux"],
+      "privilege": "same-user service manager read",
+      "prerequisites": ["service manager reachable in the probed session"],
+      "projection_scope": "not_applicable",
+      "can_establish": ["service.supervision_state", "component.conformance"],
+      "cannot_establish": ["transport.http_liveness", "auth_bond.status", "release.executing_release"],
+      "status": "available"
+    },
+    {
+      "adapter_id": "runtime-provenance",
+      "wraps": ["deploy/scripts/receipts/capture_runtime_receipt.py (schema/digest reference)", "scripts/lib/fleet-receipt-digest.ts", "live PID cmd/cwd/openfiles readers"],
+      "platforms": ["darwin", "linux"],
+      "privilege": "same-user process inspection",
+      "prerequisites": ["target process visible to the probing user"],
+      "projection_scope": "not_applicable",
+      "can_establish": ["release.executing_release"],
+      "cannot_establish": ["release.configured_target", "release.tree_conformance"],
+      "status": "available",
+      "note": "receipt PUBLICATION is deferred to a later phase; in shadow this adapter observes live PIDs and validates any receipt bytes it is handed, writing nothing"
+    },
+    {
+      "adapter_id": "interpreter-capability",
+      "wraps": ["deploy/lib/host-capabilities.sh (whatsoup_resolve_python312, whatsoup_probe_python, CAP_* vocabulary)"],
+      "platforms": ["darwin", "linux"],
+      "privilege": "none",
+      "prerequisites": [],
+      "projection_scope": "not_applicable",
+      "can_establish": ["runtime.interpreter_capability"],
+      "cannot_establish": ["pins.role_consistency"],
+      "status": "available"
+    },
+    {
+      "adapter_id": "credential-visibility",
+      "wraps": ["context-labeled keychain/file-store readers (claude-filestore-heal.ts lineage)"],
+      "platforms": ["darwin", "linux"],
+      "privilege": "same-user credential store read; NEVER credential values — presence/mtime/digest only",
+      "prerequisites": ["execution context captured and labeled"],
+      "projection_scope": "not_applicable",
+      "can_establish": ["credential.visibility_in_context"],
+      "cannot_establish": ["provider.functional_turn", "provider.diagnostic_status", "auth_bond.status"],
+      "status": "available"
+    },
+    {
+      "adapter_id": "provider-turn",
+      "wraps": ["bot-errors-health-check.py provider_probe_inventory (functional turn)", "runtime model-usability state (read-side)"],
+      "platforms": ["darwin", "linux"],
+      "privilege": "instance user's provider CLI",
+      "prerequisites": ["serving-context receipt available for context labeling"],
+      "projection_scope": "not_applicable",
+      "can_establish": ["provider.functional_turn"],
+      "cannot_establish": ["delivery.provider_ack"],
+      "status": "available",
+      "note": "distinct from the MCP-transport canary (provider-canary-runner.ts), which proves transport bring-up only and is NOT a claim in this catalog's provider_functional family"
+    },
+    {
+      "adapter_id": "delivery-ack",
+      "wraps": ["transport-level latest_provider_ack_at seam (not yet landed)"],
+      "platforms": ["darwin", "linux"],
+      "privilege": "diagnostic health read",
+      "prerequisites": ["transport-level ack seam landed"],
+      "projection_scope": "diagnostic",
+      "can_establish": ["delivery.provider_ack"],
+      "cannot_establish": [],
+      "status": "producer_pending",
+      "gate": "blocked until the transport-level ack seam lands"
+    },
+    {
+      "adapter_id": "release-drift",
+      "wraps": ["release-drift checker", "deploy/managed-components.json", "deploy/bot-errors-runtime-manifest.json + guard", "deploy/source-runtime-manifest.json"],
+      "platforms": ["darwin", "linux"],
+      "privilege": "filesystem read of release trees",
+      "prerequisites": [],
+      "projection_scope": "not_applicable",
+      "can_establish": ["release.configured_target", "release.tree_conformance", "component.conformance", "pins.role_consistency"],
+      "cannot_establish": ["release.executing_release"],
+      "status": "available"
+    },
+    {
+      "adapter_id": "plugin-policy",
+      "wraps": ["runtime settings/workspace resolution semantics (src/core/workspace.ts enabledPlugins override)"],
+      "platforms": ["darwin", "linux"],
+      "privilege": "instance config read",
+      "prerequisites": [],
+      "projection_scope": "not_applicable",
+      "can_establish": ["plugin.effective_policy"],
+      "cannot_establish": [],
+      "status": "available"
+    },
+    {
+      "adapter_id": "legacy-events",
+      "wraps": ["acked/processed BOT ERRORS outbox event files (read-only, never the claim path)", "daily-health-receipt.json (generation-aware read)", "launchctl/systemd last-exit"],
+      "platforms": ["darwin", "linux"],
+      "privilege": "state-root read",
+      "prerequisites": ["dispatcher isolation proven by a sentinel test (shadow store never watched or delivered)"],
+      "projection_scope": "not_applicable",
+      "can_establish": ["incident.opened", "incident.still_open", "incident.administratively_aged_out", "incident.recovery_observed", "incident.recovery_gate_satisfied"],
+      "cannot_establish": ["incident.recovery_verified"],
+      "status": "available",
+      "note": "privacy boundary at ingestion: closed classes, timestamps, digests, bounded summaries only — raw bodies/paths/JIDs never enter the shadow store; chat notifications are NEVER read as evidence"
+    }
+  ]
+}
