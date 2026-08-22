@@ -421,6 +421,121 @@ sys.stdout.write(f"{type(value).__name__}:{value}")
     expect(pyResult).toBe('int:0');
   });
 
+  it('rejects an unsupported schema_version identically at build time', () => {
+    const docs = loadCommittedDocs();
+    const mutated = JSON.parse(JSON.stringify(docs)) as Record<string, unknown>;
+    (mutated['claim-catalog.json'] as Record<string, unknown>)['schema_version'] = '999';
+
+    expect(() => buildObservationContract(mutated)).toThrow(ObservationContractPortError);
+    const pyResult = python(
+      `
+try:
+    oc.build_contract(docs)
+    sys.stdout.write("no-error")
+except oc.ObservationContractError:
+    sys.stdout.write("failed-closed")
+`,
+      mutated,
+    );
+    expect(pyResult).toBe('failed-closed');
+  });
+
+  it('rejects an unknown min_projection identically at build time', () => {
+    // "diagnotic" must never silently weaken projection authority.
+    const docs = loadCommittedDocs();
+    const mutated = JSON.parse(JSON.stringify(docs)) as Record<string, unknown>;
+    const claims = (mutated['claim-catalog.json'] as { claims: Array<Record<string, unknown>> })
+      .claims;
+    claims[0]!['min_projection'] = 'diagnotic';
+
+    expect(() => buildObservationContract(mutated)).toThrow(ObservationContractPortError);
+    const pyResult = python(
+      `
+try:
+    oc.build_contract(docs)
+    sys.stdout.write("no-error")
+except oc.ObservationContractError:
+    sys.stdout.write("failed-closed")
+`,
+      mutated,
+    );
+    expect(pyResult).toBe('failed-closed');
+  });
+
+  it('rejects a BOM-prefixed contract document identically at load time', () => {
+    // TextDecoder strips a leading BOM by default; Python's json rejects the
+    // same bytes. The BOM is outside the accepted byte domain on BOTH sides.
+    const dir = tmp.make('bom');
+    for (const name of CONTRACT_FILE_NAMES) {
+      writeFileSync(path.join(dir, name), readFileSync(path.join(contractDir, name)));
+    }
+    const target = path.join(dir, 'authority-lattice.json');
+    writeFileSync(target, Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), readFileSync(target)]));
+
+    expect(() => loadObservationContract(dir)).toThrow(ObservationContractPortError);
+    const pyResult = execFileSync('python3', ['-c', `
+import sys
+from pathlib import Path
+sys.path.insert(0, ${JSON.stringify(libDir)})
+import observation_contract as oc
+try:
+    oc.load_contract(Path(${JSON.stringify(dir)}))
+    sys.stdout.write("no-error")
+except oc.ObservationContractError:
+    sys.stdout.write("failed-closed")
+`], { encoding: 'utf8' }).trim();
+    expect(pyResult).toBe('failed-closed');
+  });
+
+  it('returns defensive copies from lookups on both sides', () => {
+    // Digest-bound state must not be mutable through the lookup API.
+    const docs = loadCommittedDocs();
+    const contract = buildObservationContract(docs);
+    const row = claimRow(contract, 'identity.instance_name');
+    const original = row['min_projection'];
+    row['min_projection'] = 'public';
+    expect(claimRow(contract, 'identity.instance_name')['min_projection']).toBe(original);
+
+    const pyResult = python(
+      `
+contract = oc.build_contract(docs)
+row = oc.claim_row(contract, "identity.instance_name")
+original = row["min_projection"]
+row["min_projection"] = "public"
+sys.stdout.write(str(oc.claim_row(contract, "identity.instance_name")["min_projection"] == original))
+`,
+      docs,
+    );
+    expect(pyResult).toBe('True');
+  });
+
+  it('freezes the TS contract and rejects non-JSON programmatic values', () => {
+    // TS-only guarantees aligning the programmatic surface to the parsed-JSON
+    // domain: undefined and sparse arrays cannot come from JSON.parse and
+    // must not enter the digest; returned structure is deep-frozen.
+    const docs = loadCommittedDocs();
+
+    const withUndefined = JSON.parse(JSON.stringify(docs)) as Record<string, unknown>;
+    (withUndefined['authority-lattice.json'] as Record<string, unknown>)['x'] = undefined;
+    expect(() => contractDigest(withUndefined)).toThrow(ObservationContractPortError);
+
+    const withSparse = JSON.parse(JSON.stringify(docs)) as Record<string, unknown>;
+    const sparse = [1, 2, 3];
+    delete sparse[1];
+    (withSparse['authority-lattice.json'] as Record<string, unknown>)['xs'] = sparse;
+    expect(() => contractDigest(withSparse)).toThrow(ObservationContractPortError);
+
+    const contract = buildObservationContract(docs);
+    expect(Object.isFrozen(contract)).toBe(true);
+    expect(() => {
+      (contract.canonicalOutcomes as string[]).push('tampered');
+    }).toThrow();
+    expect(() => {
+      (contract.claims['identity.instance_name'] as Record<string, unknown>)['min_projection'] =
+        'public';
+    }).toThrow();
+  });
+
   it('anchors the TS default contract dir to the module, not the cwd', () => {
     // Python's default_contract_dir is module-anchored; the TS default must
     // resolve the same directory from ANY working directory.

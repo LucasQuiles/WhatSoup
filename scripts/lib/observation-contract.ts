@@ -34,6 +34,24 @@ export const CONTRACT_FILE_NAMES = [
 
 export type ContractFileName = (typeof CONTRACT_FILE_NAMES)[number];
 
+/** The only contract version these readers understand — enforced at build
+ * time (not only by the guard). Mirrors `SUPPORTED_SCHEMA_VERSION` in
+ * `deploy/scripts/lib/observation_contract.py`. */
+export const SUPPORTED_CONTRACT_SCHEMA_VERSION = '0.1';
+
+/** Data documents that carry schema_version (the envelope schema file is a
+ * JSON Schema; its version field describes the ENVELOPE). */
+const VERSIONED_DOCS = [
+  'adapter-registry.json',
+  'authority-lattice.json',
+  'claim-catalog.json',
+  'outcome-projections.json',
+] as const;
+
+/** Closed minimum-projection vocabulary; a typo must never weaken projection
+ * authority. Mirrors `MIN_PROJECTIONS` on the Python side. */
+export const MIN_PROJECTIONS = new Set(['diagnostic', 'public', 'not_applicable']);
+
 /** Raised when the contract set cannot be read or is structurally invalid.
  * Callers treat this as fail-closed (mirrors Python's
  * `ObservationContractError`). */
@@ -110,7 +128,14 @@ const MAX_DIGEST_INT = 2 ** 53 - 1;
  * `__proto__` are ordinary own keys, exactly as in a Python dict). Throws
  * for anything outside the domain. */
 function normalizeForDigest(value: unknown, at: string): unknown {
-  if (value === null || value === undefined || typeof value === 'boolean') return value;
+  if (value === undefined) {
+    // undefined cannot come from JSON.parse; encoding it as null would give
+    // two different programmatic values one digest.
+    throw new ObservationContractPortError(
+      `digest domain violation at ${at}: undefined is outside the parsed-JSON domain`,
+    );
+  }
+  if (value === null || typeof value === 'boolean') return value;
   if (typeof value === 'number') {
     if (!Number.isInteger(value) || Math.abs(value) > MAX_DIGEST_INT) {
       throw new ObservationContractPortError(
@@ -122,7 +147,16 @@ function normalizeForDigest(value: unknown, at: string): unknown {
   }
   if (typeof value === 'string') return value;
   if (Array.isArray(value)) {
-    return value.map((item, index) => normalizeForDigest(item, `${at}[${index}]`));
+    const normalized: unknown[] = [];
+    for (let index = 0; index < value.length; index += 1) {
+      if (!(index in value)) {
+        throw new ObservationContractPortError(
+          `digest domain violation at ${at}[${index}]: sparse arrays are outside the parsed-JSON domain`,
+        );
+      }
+      normalized.push(normalizeForDigest(value[index], `${at}[${index}]`));
+    }
+    return normalized;
   }
   if (isRecord(value)) {
     const normalized = Object.create(null) as Record<string, unknown>;
@@ -253,6 +287,15 @@ export function buildObservationContract(docs: Record<string, unknown>): Observa
       files: Record<string, Record<string, unknown>>;
     }
   ).files;
+  for (const name of VERSIONED_DOCS) {
+    const version = (docs[name] as Record<string, unknown>)['schema_version'];
+    if (version !== SUPPORTED_CONTRACT_SCHEMA_VERSION) {
+      throw new ObservationContractPortError(
+        `unsupported schema_version in ${name}: ${String(version)} ` +
+          `(supported: ${SUPPORTED_CONTRACT_SCHEMA_VERSION})`,
+      );
+    }
+  }
   const projections = docs['outcome-projections.json'] as Record<string, unknown>;
   const canonicalList = stringArray(projections['canonical_outcomes'], 'canonical_outcomes');
   if (canonicalList.length === 0 || new Set(canonicalList).size !== canonicalList.length) {
@@ -263,6 +306,15 @@ export function buildObservationContract(docs: Record<string, unknown>): Observa
   const catalog = docs['claim-catalog.json'] as Record<string, unknown>;
   const registry = docs['adapter-registry.json'] as Record<string, unknown>;
   const claims = buildKeyed(catalog['claims'], 'claim_id', 'claim catalog');
+  for (const [claimId, claim] of Object.entries(claims)) {
+    const minProjection = claim['min_projection'];
+    if (typeof minProjection !== 'string' || !MIN_PROJECTIONS.has(minProjection)) {
+      throw new ObservationContractPortError(
+        `claim ${claimId}: min_projection ${String(minProjection)} outside the closed ` +
+          `vocabulary [${[...MIN_PROJECTIONS].sort().join(', ')}]`,
+      );
+    }
+  }
   const adapters = buildKeyed(registry['adapters'], 'adapter_id', 'adapter registry');
   const lattice = docs['authority-lattice.json'] as Record<string, unknown>;
   const rawTiers = lattice['tiers'];
@@ -283,7 +335,7 @@ export function buildObservationContract(docs: Record<string, unknown>): Observa
   for (const name of CONTRACT_FILE_NAMES) {
     typedDocs[name] = docs[name] as Record<string, unknown>;
   }
-  return {
+  return deepFreeze({
     digest,
     docs: typedDocs,
     canonicalOutcomes: canonicalList,
@@ -291,7 +343,20 @@ export function buildObservationContract(docs: Record<string, unknown>): Observa
     claims,
     adapters,
     authorityTiers: tiers,
-  };
+  });
+}
+
+/** Digest-bound state is immutable: a consumer must never be able to change
+ * evaluated policy out from under the digest that names it. Lookups hand out
+ * defensive copies instead. */
+function deepFreeze<T>(value: T): T {
+  if (value !== null && (typeof value === 'object' || typeof value === 'function')) {
+    for (const key of Object.getOwnPropertyNames(value)) {
+      deepFreeze((value as Record<string, unknown>)[key]);
+    }
+    Object.freeze(value);
+  }
+  return value;
 }
 
 /** Read the five contract files and build the contract, fail-closed. */
@@ -304,7 +369,11 @@ export function loadObservationContract(contractDir?: string): ObservationContra
     try {
       // Strict fatal decode: Node's lossy 'utf8' mode would silently replace
       // malformed sequences with U+FFFD while Python rejects the same bytes.
-      raw = new TextDecoder('utf-8', { fatal: true }).decode(readFileSync(filePath));
+      // ignoreBOM keeps a leading BOM in the output so JSON.parse rejects it,
+      // exactly like Python's json (TextDecoder strips it by default).
+      raw = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(
+        readFileSync(filePath),
+      );
     } catch (err) {
       throw new ObservationContractPortError(
         `cannot read contract document ${filePath}: ${(err as Error).message}`,
@@ -339,14 +408,15 @@ export function projectOutcome(
       `legacy value outside the declared domain of ${surface}: ${rawValue}`,
     );
   }
-  return table.rows[rawValue]!;
+  // Defensive copy: digest-bound state must not be mutable through lookups.
+  return structuredClone(table.rows[rawValue]!);
 }
 
 export function claimRow(contract: ObservationContract, claimId: string): Record<string, unknown> {
   if (!Object.hasOwn(contract.claims, claimId)) {
     throw new ObservationContractPortError(`unknown claim: ${claimId}`);
   }
-  return contract.claims[claimId]!;
+  return structuredClone(contract.claims[claimId]!);
 }
 
 export function adapterRow(
@@ -356,5 +426,5 @@ export function adapterRow(
   if (!Object.hasOwn(contract.adapters, adapterId)) {
     throw new ObservationContractPortError(`unknown adapter: ${adapterId}`);
   }
-  return contract.adapters[adapterId]!;
+  return structuredClone(contract.adapters[adapterId]!);
 }

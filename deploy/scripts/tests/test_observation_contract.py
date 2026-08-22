@@ -328,6 +328,50 @@ def test_load_contract_missing_file_fails_closed(tmp_path: Path) -> None:
         _mod.load_contract(tmp_path)
 
 
+def test_build_contract_rejects_unsupported_schema_version() -> None:
+    # Version enforcement must live in the READERS, not only the guard: a
+    # runtime consumer must never interpret an unsupported contract version.
+    mutated = copy.deepcopy(_committed_docs())
+    mutated["claim-catalog.json"]["schema_version"] = "999"
+    with pytest.raises(_mod.ObservationContractError):
+        _mod.build_contract(mutated)
+
+
+def test_build_contract_rejects_unknown_or_missing_min_projection() -> None:
+    # min_projection is a closed, REQUIRED vocabulary: a typo like
+    # "diagnotic" or a missing value must never weaken projection authority.
+    typo = copy.deepcopy(_committed_docs())
+    typo["claim-catalog.json"]["claims"][0]["min_projection"] = "diagnotic"
+    with pytest.raises(_mod.ObservationContractError):
+        _mod.build_contract(typo)
+
+    missing = copy.deepcopy(_committed_docs())
+    del missing["claim-catalog.json"]["claims"][0]["min_projection"]
+    with pytest.raises(_mod.ObservationContractError):
+        _mod.build_contract(missing)
+
+
+def test_lookups_return_defensive_copies() -> None:
+    # Digest-bound state must not be mutable through the lookup API: a caller
+    # mutating a returned row must not poison later reads.
+    contract = _mod.load_contract()
+    row = _mod.claim_row(contract, "identity.instance_name")
+    original = row["min_projection"]
+    row["min_projection"] = "public"
+    assert _mod.claim_row(contract, "identity.instance_name")["min_projection"] == original
+
+
+def test_load_contract_rejects_bom_prefixed_document(tmp_path: Path) -> None:
+    # A UTF-8 BOM is not part of the accepted byte domain: Python's json
+    # rejects it, and the TS loader must not silently strip it.
+    for name in _mod.CONTRACT_FILE_NAMES:
+        (tmp_path / name).write_bytes((_CONTRACT_DIR / name).read_bytes())
+    target = tmp_path / "authority-lattice.json"
+    target.write_bytes(b"\xef\xbb\xbf" + target.read_bytes())
+    with pytest.raises(_mod.ObservationContractError):
+        _mod.load_contract(tmp_path)
+
+
 def test_load_contract_invalid_utf8_fails_closed(tmp_path: Path) -> None:
     # Invalid bytes must raise the contract error, never leak a raw
     # UnicodeDecodeError, and never be lossily replaced (the TS side must

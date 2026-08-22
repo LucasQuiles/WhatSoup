@@ -11,7 +11,11 @@ import { pathToFileURL } from 'node:url';
 import { Ajv2020 } from 'ajv/dist/2020.js';
 
 import { isRecord } from '../src/lib/type-guards.ts';
-import { contractDigest } from './lib/observation-contract.ts';
+import {
+  MIN_PROJECTIONS,
+  SUPPORTED_CONTRACT_SCHEMA_VERSION,
+  buildObservationContract,
+} from './lib/observation-contract.ts';
 
 export const CONTRACT_DIR = 'deploy/observation-plane';
 
@@ -22,6 +26,9 @@ export type ObservationContractFindingCode =
   | 'digest-domain-violation'
   | 'unsupported-schema-version'
   | 'malformed-entry'
+  | 'reader-rejected'
+  | 'authority-overlap'
+  | 'requires-cycle'
   | 'projection-domain-incomplete'
   | 'projection-domain-extra'
   | 'projection-duplicate-row'
@@ -77,8 +84,9 @@ function readJson(root: string, rel: string, findings: ObservationContractFindin
   let raw: string;
   try {
     // Strict fatal decode, matching both contract readers: lossy 'utf8' mode
-    // would admit bytes the Python reader rejects.
-    raw = new TextDecoder('utf-8', { fatal: true }).decode(readFileSync(abs));
+    // would admit bytes the Python reader rejects, and a silently stripped
+    // BOM would admit bytes Python's json rejects.
+    raw = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(readFileSync(abs));
   } catch (err) {
     findings.push({ code: 'contract-unreadable', message: `${rel}: ${(err as Error).message}` });
     return undefined;
@@ -188,11 +196,12 @@ export function checkObservationContract(cwd = process.cwd()): ObservationContra
     return { ok: false, findings, counts };
   }
 
-  // Governed contract data must stay inside the cross-language digest domain
-  // (req-obs-02): the reader's contractDigest enforces it and both readers
-  // must accept the exact bytes this guard admits.
+  // The strict reader is the structural authority: the guard must never
+  // bless a byte set either reader rejects (req-obs-02). Its rejection —
+  // digest domain, schema_version, min_projection vocabulary, totality,
+  // duplicates — becomes a finding here.
   try {
-    contractDigest({
+    buildObservationContract({
       'adapter-registry.json': registryDoc,
       'authority-lattice.json': latticeDoc,
       'claim-catalog.json': catalogDoc,
@@ -200,12 +209,15 @@ export function checkObservationContract(cwd = process.cwd()): ObservationContra
       'outcome-projections.json': projectionsDoc,
     });
   } catch (err) {
-    findings.push({ code: 'digest-domain-violation', message: (err as Error).message });
+    const message = (err as Error).message;
+    findings.push({
+      code: message.includes('digest domain violation') ? 'digest-domain-violation' : 'reader-rejected',
+      message,
+    });
   }
 
   // Data documents must carry a supported schema_version — an unknown version
   // means the guard's checks may not describe the document's semantics.
-  const SUPPORTED_SCHEMA_VERSION = '0.1';
   const versioned: Array<[string, Record<string, unknown>]> = [
     ['adapter-registry.json', registryDoc],
     ['authority-lattice.json', latticeDoc],
@@ -213,10 +225,10 @@ export function checkObservationContract(cwd = process.cwd()): ObservationContra
     ['outcome-projections.json', projectionsDoc],
   ];
   for (const [rel, doc] of versioned) {
-    if (doc.schema_version !== SUPPORTED_SCHEMA_VERSION) {
+    if (doc.schema_version !== SUPPORTED_CONTRACT_SCHEMA_VERSION) {
       findings.push({
         code: 'unsupported-schema-version',
-        message: `${rel}: schema_version ${String(doc.schema_version)} != supported ${SUPPORTED_SCHEMA_VERSION}`,
+        message: `${rel}: schema_version ${String(doc.schema_version)} != supported ${SUPPORTED_CONTRACT_SCHEMA_VERSION}`,
       });
     }
   }
@@ -264,6 +276,12 @@ export function checkObservationContract(cwd = process.cwd()): ObservationContra
       if (claims.has(entry.claim_id)) {
         findings.push({ code: 'duplicate-claim', message: entry.claim_id });
         continue;
+      }
+      if (typeof entry.min_projection !== 'string' || !MIN_PROJECTIONS.has(entry.min_projection)) {
+        findings.push({
+          code: 'malformed-entry',
+          message: `claim ${entry.claim_id}: min_projection ${String(entry.min_projection)} outside the closed vocabulary`,
+        });
       }
       claims.set(entry.claim_id, {
         claimId: entry.claim_id,
@@ -325,7 +343,35 @@ export function checkObservationContract(cwd = process.cwd()): ObservationContra
         findings.push({ code: 'unknown-claim-reference', message: `${adapter.adapterId}: ${claimId}` });
       }
     }
+    const cannot = new Set(adapter.cannotEstablish);
+    for (const claimId of adapter.canEstablish) {
+      if (cannot.has(claimId)) {
+        findings.push({
+          code: 'authority-overlap',
+          message: `${adapter.adapterId}: ${claimId} appears in both can_establish and cannot_establish`,
+        });
+      }
+    }
   }
+
+  // Claim requirements must be acyclic (a claim requiring itself included).
+  const visiting = new Set<string>();
+  const settled = new Set<string>();
+  const visit = (claimId: string): void => {
+    if (settled.has(claimId)) return;
+    if (visiting.has(claimId)) {
+      findings.push({ code: 'requires-cycle', message: `claim requirement cycle through ${claimId}` });
+      settled.add(claimId);
+      return;
+    }
+    visiting.add(claimId);
+    for (const required of claims.get(claimId)?.requires ?? []) {
+      if (claims.has(required)) visit(required);
+    }
+    visiting.delete(claimId);
+    settled.add(claimId);
+  };
+  for (const claimId of claims.keys()) visit(claimId);
 
   // Projection tables: total over declared domain, closed canonical values.
   const surfaces = new Map<string, Set<string>>();

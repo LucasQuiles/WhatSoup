@@ -21,6 +21,7 @@ reject cannot be silently half-read here.
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 from pathlib import Path
@@ -33,6 +34,25 @@ CONTRACT_FILE_NAMES = (
     "envelope.schema.json",
     "outcome-projections.json",
 )
+
+# The only contract version these readers understand. Enforced at build time
+# (not only by the guard): a runtime consumer must never interpret an
+# unsupported future contract version. Mirrored by
+# SUPPORTED_CONTRACT_SCHEMA_VERSION in scripts/lib/observation-contract.ts.
+SUPPORTED_SCHEMA_VERSION = "0.1"
+
+# Data documents that carry schema_version (the envelope schema documents the
+# ENVELOPE's version field; the document itself is a JSON Schema).
+_VERSIONED_DOCS = (
+    "adapter-registry.json",
+    "authority-lattice.json",
+    "claim-catalog.json",
+    "outcome-projections.json",
+)
+
+# Closed minimum-projection vocabulary (see envelope projection.scope; a
+# MINIMUM of "unobserved" is meaningless). A typo must never weaken authority.
+MIN_PROJECTIONS = frozenset({"diagnostic", "public", "not_applicable"})
 
 
 class ObservationContractError(RuntimeError):
@@ -202,6 +222,13 @@ def build_contract(docs: dict) -> dict:
     # (integral floats already canonicalized to int) — req-obs-02 covers the
     # returned contract data, not only the digest bytes.
     docs = _normalize_for_digest(contract_identity(docs), "contract")["files"]
+    for name in _VERSIONED_DOCS:
+        version = docs[name].get("schema_version")
+        if version != SUPPORTED_SCHEMA_VERSION:
+            raise ObservationContractError(
+                f"unsupported schema_version in {name}: {version!r} "
+                f"(supported: {SUPPORTED_SCHEMA_VERSION})"
+            )
     projections = docs["outcome-projections.json"]
     canonical_list = _string_list(
         projections.get("canonical_outcomes"), "canonical_outcomes"
@@ -211,6 +238,12 @@ def build_contract(docs: dict) -> dict:
     canonical = set(canonical_list)
     surfaces = _build_surfaces(projections, canonical)
     claims = _build_keyed(docs["claim-catalog.json"].get("claims"), "claim_id", "claim catalog")
+    for claim_id, claim in claims.items():
+        if claim.get("min_projection") not in MIN_PROJECTIONS:
+            raise ObservationContractError(
+                f"claim {claim_id}: min_projection {claim.get('min_projection')!r} "
+                f"outside the closed vocabulary {sorted(MIN_PROJECTIONS)}"
+            )
     adapters = _build_keyed(
         docs["adapter-registry.json"].get("adapters"), "adapter_id", "adapter registry"
     )
@@ -278,14 +311,16 @@ def project_outcome(contract: dict, surface: str, raw_value: str) -> dict:
         raise ObservationContractError(
             f"legacy value outside the declared domain of {surface}: {raw_value}"
         )
-    return rows[raw_value]
+    # Defensive copy: digest-bound state must not be mutable through lookups.
+    return copy.deepcopy(rows[raw_value])
 
 
 def _keyed_lookup(contract: dict, table: str, key: str, what: str) -> dict:
     rows = contract.get(table)
     if not isinstance(rows, dict) or key not in rows:
         raise ObservationContractError(f"unknown {what}: {key}")
-    return rows[key]
+    # Defensive copy: digest-bound state must not be mutable through lookups.
+    return copy.deepcopy(rows[key])
 
 
 def claim_row(contract: dict, claim_id: str) -> dict:
