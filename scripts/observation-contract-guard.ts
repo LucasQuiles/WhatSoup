@@ -13,6 +13,7 @@ import { Ajv2020 } from 'ajv/dist/2020.js';
 import { isRecord } from '../src/lib/type-guards.ts';
 import {
   MIN_PROJECTION_VALUES,
+  ObservationContractPortError,
   SUPPORTED_CONTRACT_SCHEMA_VERSION,
   buildObservationContract,
 } from './lib/observation-contract.ts';
@@ -209,7 +210,17 @@ export function checkObservationContract(cwd = process.cwd()): ObservationContra
       'outcome-projections.json': projectionsDoc,
     });
   } catch (err) {
-    const message = (err as Error).message;
+    // Round 8: catch ONLY the reader's documented error class. An unqualified
+    // `catch (err)` here labelled ANY throw `reader-rejected`, so a genuine
+    // reader BUG (TypeError, RangeError) was indistinguishable from a
+    // contract-data defect — the guard would report a green-looking "the data
+    // is bad" finding while the real fault was in our own code. Measured in
+    // round 7: the pre-fix guard converted a raw TypeError into a finding, so
+    // the guard-path test passed while the reader was demonstrably broken.
+    // Anything that is not an ObservationContractPortError is a harness
+    // failure and must propagate, not be recorded as a contract finding.
+    if (!(err instanceof ObservationContractPortError)) throw err;
+    const message = err.message;
     findings.push({
       code: message.includes('digest domain violation') ? 'digest-domain-violation' : 'reader-rejected',
       message,
