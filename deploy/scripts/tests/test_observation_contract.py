@@ -351,6 +351,21 @@ def test_build_contract_rejects_unknown_or_missing_min_projection() -> None:
         _mod.build_contract(missing)
 
 
+def test_contract_state_is_recursively_immutable() -> None:
+    # Copy-on-read accessors are not enough: the returned contract itself must
+    # refuse direct mutation, or evaluated policy can drift from the digest.
+    contract = _mod.load_contract()
+    with pytest.raises(TypeError):
+        contract["claims"]["auth_bond.status"]["min_projection"] = "public"
+    with pytest.raises(TypeError):
+        contract["claims"]["extra"] = {}
+    surface = contract["surfaces"]["probe_report_verdict"]
+    member = surface["domain"][0]
+    with pytest.raises(TypeError):
+        surface["rows"][member]["canonical"] = "fail"
+    assert _mod.claim_row(contract, "auth_bond.status")["min_projection"] == "diagnostic"
+
+
 def test_lookups_return_defensive_copies() -> None:
     # Digest-bound state must not be mutable through the lookup API: a caller
     # mutating a returned row must not poison later reads.

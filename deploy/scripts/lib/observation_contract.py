@@ -21,10 +21,11 @@ reject cannot be silently half-read here.
 """
 from __future__ import annotations
 
-import copy
 import hashlib
 import json
+from collections.abc import Mapping
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Optional
 
 CONTRACT_FILE_NAMES = (
@@ -210,7 +211,7 @@ def _build_keyed(entries: Any, key: str, what: str) -> dict[str, dict]:
     return keyed
 
 
-def build_contract(docs: dict) -> dict:
+def build_contract(docs: dict) -> Mapping:
     """Validate the parsed contract documents and return the lookup structure.
 
     Pure function over parsed docs so the lockstep test can exercise mutated
@@ -257,18 +258,42 @@ def build_contract(docs: dict) -> dict:
         if tier["tier"] in tiers:
             raise ObservationContractError(f"duplicate authority tier: {tier['tier']}")
         tiers.append(tier["tier"])
-    return {
-        "digest": digest,
-        "docs": {name: docs[name] for name in CONTRACT_FILE_NAMES},
-        "canonical_outcomes": canonical_list,
-        "surfaces": surfaces,
-        "claims": claims,
-        "adapters": adapters,
-        "authority_tiers": tiers,
-    }
+    return _deep_freeze(
+        {
+            "digest": digest,
+            "docs": {name: docs[name] for name in CONTRACT_FILE_NAMES},
+            "canonical_outcomes": canonical_list,
+            "surfaces": surfaces,
+            "claims": claims,
+            "adapters": adapters,
+            "authority_tiers": tiers,
+        }
+    )
 
 
-def load_contract(contract_dir: Optional[Path] = None) -> dict:
+def _deep_freeze(value: Any) -> Any:
+    """Recursively immutable view: dicts become read-only mapping proxies over
+    private copies, lists become tuples. Digest-bound state must refuse direct
+    mutation (mirrors the TS deepFreeze) or evaluated policy could drift from
+    the digest that names it."""
+    if isinstance(value, dict):
+        return MappingProxyType({key: _deep_freeze(item) for key, item in value.items()})
+    if isinstance(value, list):
+        return tuple(_deep_freeze(item) for item in value)
+    return value
+
+
+def _thaw(value: Any) -> Any:
+    """Plain mutable JSON-shaped copy of a frozen subtree — what the lookup
+    accessors hand out, so callers may annotate without touching the store."""
+    if isinstance(value, Mapping):
+        return {key: _thaw(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw(item) for item in value]
+    return value
+
+
+def load_contract(contract_dir: Optional[Path] = None) -> Mapping:
     """Read the five contract files from ``contract_dir`` and build the contract.
 
     Raises :class:`ObservationContractError` on any read/parse/structure fault.
@@ -296,7 +321,7 @@ def load_contract(contract_dir: Optional[Path] = None) -> dict:
     return build_contract(docs)
 
 
-def project_outcome(contract: dict, surface: str, raw_value: str) -> dict:
+def project_outcome(contract: Mapping, surface: str, raw_value: str) -> dict:
     """Project one legacy verdict to its canonical row, or raise.
 
     An unknown surface or a value outside the declared domain raises — the
@@ -304,7 +329,7 @@ def project_outcome(contract: dict, surface: str, raw_value: str) -> dict:
     itself; nothing here defaults.
     """
     surfaces = contract.get("surfaces")
-    if not isinstance(surfaces, dict) or surface not in surfaces:
+    if not isinstance(surfaces, Mapping) or surface not in surfaces:
         raise ObservationContractError(f"unknown legacy surface: {surface}")
     rows = surfaces[surface]["rows"]
     if raw_value not in rows:
@@ -312,20 +337,20 @@ def project_outcome(contract: dict, surface: str, raw_value: str) -> dict:
             f"legacy value outside the declared domain of {surface}: {raw_value}"
         )
     # Defensive copy: digest-bound state must not be mutable through lookups.
-    return copy.deepcopy(rows[raw_value])
+    return _thaw(rows[raw_value])
 
 
-def _keyed_lookup(contract: dict, table: str, key: str, what: str) -> dict:
+def _keyed_lookup(contract: Mapping, table: str, key: str, what: str) -> dict:
     rows = contract.get(table)
-    if not isinstance(rows, dict) or key not in rows:
+    if not isinstance(rows, Mapping) or key not in rows:
         raise ObservationContractError(f"unknown {what}: {key}")
     # Defensive copy: digest-bound state must not be mutable through lookups.
-    return copy.deepcopy(rows[key])
+    return _thaw(rows[key])
 
 
-def claim_row(contract: dict, claim_id: str) -> dict:
+def claim_row(contract: Mapping, claim_id: str) -> dict:
     return _keyed_lookup(contract, "claims", claim_id, "claim")
 
 
-def adapter_row(contract: dict, adapter_id: str) -> dict:
+def adapter_row(contract: Mapping, adapter_id: str) -> dict:
     return _keyed_lookup(contract, "adapters", adapter_id, "adapter")

@@ -8,6 +8,7 @@ import { trackTmpDirs } from '../../helpers/tmp-dir.ts';
 
 import {
   CONTRACT_FILE_NAMES,
+  MIN_PROJECTION_VALUES,
   ObservationContractPortError,
   adapterRow,
   buildObservationContract,
@@ -534,6 +535,45 @@ sys.stdout.write(str(oc.claim_row(contract, "identity.instance_name")["min_proje
       (contract.claims['identity.instance_name'] as Record<string, unknown>)['min_projection'] =
         'public';
     }).toThrow();
+  });
+
+  it('denies direct mutation of digest-bound state on both sides', () => {
+    const docs = loadCommittedDocs();
+    const contract = buildObservationContract(docs);
+    expect(() => {
+      (contract.claims['auth_bond.status'] as Record<string, unknown>)['min_projection'] =
+        'public';
+    }).toThrow();
+
+    const pyResult = python(
+      `
+contract = oc.build_contract(docs)
+try:
+    contract["claims"]["auth_bond.status"]["min_projection"] = "public"
+    sys.stdout.write("mutated")
+except TypeError:
+    sys.stdout.write("denied")
+`,
+      docs,
+    );
+    expect(pyResult).toBe('denied');
+  });
+
+  it('exports only immutable authority vocabulary objects', () => {
+    // A mutable exported Set would let any importer widen the accepted
+    // vocabulary (MIN_PROJECTIONS.add('diagnotic')) and poison validation.
+    expect(Object.isFrozen(MIN_PROJECTION_VALUES)).toBe(true);
+    expect(() => {
+      (MIN_PROJECTION_VALUES as unknown as string[]).push('diagnotic');
+    }).toThrow();
+    expect(Object.isFrozen(CONTRACT_FILE_NAMES)).toBe(true);
+
+    const docs = loadCommittedDocs();
+    const mutated = JSON.parse(JSON.stringify(docs)) as Record<string, unknown>;
+    (mutated['claim-catalog.json'] as { claims: Array<Record<string, unknown>> }).claims[0]![
+      'min_projection'
+    ] = 'diagnotic';
+    expect(() => buildObservationContract(mutated)).toThrow(ObservationContractPortError);
   });
 
   it('anchors the TS default contract dir to the module, not the cwd', () => {

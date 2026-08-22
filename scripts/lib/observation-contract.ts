@@ -24,13 +24,13 @@ import { fileURLToPath } from 'node:url';
 import { isRecord } from '../../src/lib/type-guards.ts';
 import { pyJsonStringify } from './fleet-roster-inventory.ts';
 
-export const CONTRACT_FILE_NAMES = [
+export const CONTRACT_FILE_NAMES = Object.freeze([
   'adapter-registry.json',
   'authority-lattice.json',
   'claim-catalog.json',
   'envelope.schema.json',
   'outcome-projections.json',
-] as const;
+] as const);
 
 export type ContractFileName = (typeof CONTRACT_FILE_NAMES)[number];
 
@@ -49,8 +49,15 @@ const VERSIONED_DOCS = [
 ] as const;
 
 /** Closed minimum-projection vocabulary; a typo must never weaken projection
- * authority. Mirrors `MIN_PROJECTIONS` on the Python side. */
-export const MIN_PROJECTIONS = new Set(['diagnostic', 'public', 'not_applicable']);
+ * authority. Mirrors `MIN_PROJECTIONS` on the Python side. Exported as a
+ * FROZEN tuple — a mutable exported Set would let any importer widen the
+ * accepted vocabulary; the lookup set below stays private. */
+export const MIN_PROJECTION_VALUES = Object.freeze([
+  'diagnostic',
+  'public',
+  'not_applicable',
+] as const);
+const minProjectionLookup = new Set<string>(MIN_PROJECTION_VALUES);
 
 /** Raised when the contract set cannot be read or is structurally invalid.
  * Callers treat this as fail-closed (mirrors Python's
@@ -308,10 +315,10 @@ export function buildObservationContract(docs: Record<string, unknown>): Observa
   const claims = buildKeyed(catalog['claims'], 'claim_id', 'claim catalog');
   for (const [claimId, claim] of Object.entries(claims)) {
     const minProjection = claim['min_projection'];
-    if (typeof minProjection !== 'string' || !MIN_PROJECTIONS.has(minProjection)) {
+    if (typeof minProjection !== 'string' || !minProjectionLookup.has(minProjection)) {
       throw new ObservationContractPortError(
         `claim ${claimId}: min_projection ${String(minProjection)} outside the closed ` +
-          `vocabulary [${[...MIN_PROJECTIONS].sort().join(', ')}]`,
+          `vocabulary [${[...MIN_PROJECTION_VALUES].sort().join(', ')}]`,
       );
     }
   }

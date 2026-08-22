@@ -12,7 +12,7 @@ import { Ajv2020 } from 'ajv/dist/2020.js';
 
 import { isRecord } from '../src/lib/type-guards.ts';
 import {
-  MIN_PROJECTIONS,
+  MIN_PROJECTION_VALUES,
   SUPPORTED_CONTRACT_SCHEMA_VERSION,
   buildObservationContract,
 } from './lib/observation-contract.ts';
@@ -277,7 +277,7 @@ export function checkObservationContract(cwd = process.cwd()): ObservationContra
         findings.push({ code: 'duplicate-claim', message: entry.claim_id });
         continue;
       }
-      if (typeof entry.min_projection !== 'string' || !MIN_PROJECTIONS.has(entry.min_projection)) {
+      if (typeof entry.min_projection !== 'string' || !MIN_PROJECTION_VALUES.includes(entry.min_projection as (typeof MIN_PROJECTION_VALUES)[number])) {
         findings.push({
           code: 'malformed-entry',
           message: `claim ${entry.claim_id}: min_projection ${String(entry.min_projection)} outside the closed vocabulary`,
