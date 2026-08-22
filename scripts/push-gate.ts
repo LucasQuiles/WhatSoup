@@ -49,6 +49,7 @@ export const CURATED_TEST_PATHS = [
   'tests/scripts/pre-push-alignment.test.ts',
   'tests/scripts/pre-push-guard.test.ts',
   'tests/scripts/observation-contract-guard.test.ts',
+  'tests/scripts/lib/observation-contract-lockstep.test.ts',
   'tests/scripts/pr-metadata-guard.test.ts',
   'tests/scripts/ci-control-ref-policy.test.ts',
   'tests/scripts/ci-control-classifier.test.ts',

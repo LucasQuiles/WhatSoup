@@ -13,6 +13,7 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+from types import MappingProxyType
 
 import pytest
 
@@ -326,6 +327,358 @@ def test_load_contract_missing_file_fails_closed(tmp_path: Path) -> None:
         )
     with pytest.raises(_mod.ObservationContractError):
         _mod.load_contract(tmp_path)
+
+
+def test_build_contract_rejects_unsupported_schema_version() -> None:
+    # Version enforcement must live in the READERS, not only the guard: a
+    # runtime consumer must never interpret an unsupported contract version.
+    mutated = copy.deepcopy(_committed_docs())
+    mutated["claim-catalog.json"]["schema_version"] = "999"
+    with pytest.raises(_mod.ObservationContractError):
+        _mod.build_contract(mutated)
+
+
+def test_build_contract_rejects_unknown_or_missing_min_projection() -> None:
+    # min_projection is a closed, REQUIRED vocabulary: a typo like
+    # "diagnotic" or a missing value must never weaken projection authority.
+    typo = copy.deepcopy(_committed_docs())
+    typo["claim-catalog.json"]["claims"][0]["min_projection"] = "diagnotic"
+    with pytest.raises(_mod.ObservationContractError):
+        _mod.build_contract(typo)
+
+    missing = copy.deepcopy(_committed_docs())
+    del missing["claim-catalog.json"]["claims"][0]["min_projection"]
+    with pytest.raises(_mod.ObservationContractError):
+        _mod.build_contract(missing)
+
+
+def test_contract_state_is_recursively_immutable() -> None:
+    # Copy-on-read accessors are not enough: the returned contract itself must
+    # refuse direct mutation, or evaluated policy can drift from the digest.
+    contract = _mod.load_contract()
+    with pytest.raises(TypeError):
+        contract["claims"]["auth_bond.status"]["min_projection"] = "public"
+    with pytest.raises(TypeError):
+        contract["claims"]["extra"] = {}
+    surface = contract["surfaces"]["probe_report_verdict"]
+    member = surface["domain"][0]
+    with pytest.raises(TypeError):
+        surface["rows"][member]["canonical"] = "fail"
+    assert _mod.claim_row(contract, "auth_bond.status")["min_projection"] == "diagnostic"
+
+
+def test_required_claim_fields_are_mandatory() -> None:
+    # Closed-world authority model (deploy/observation-plane/README.md): a claim
+    # missing governed authority metadata must NEVER load.
+    for field in (
+        "family",
+        "subject_kind",
+        "authority_tier",
+        "generation_binding",
+        "staleness_rule",
+        "producing_adapters",
+        "cannot_establish",
+    ):
+        mutated = copy.deepcopy(_committed_docs())
+        del mutated["claim-catalog.json"]["claims"][0][field]
+        with pytest.raises(_mod.ObservationContractError):
+            _mod.build_contract(mutated)
+
+
+def test_required_adapter_fields_are_mandatory() -> None:
+    for field in (
+        "wraps",
+        "platforms",
+        "privilege",
+        "prerequisites",
+        "projection_scope",
+        "can_establish",
+        "cannot_establish",
+        "status",
+    ):
+        mutated = copy.deepcopy(_committed_docs())
+        del mutated["adapter-registry.json"]["adapters"][0][field]
+        with pytest.raises(_mod.ObservationContractError):
+            _mod.build_contract(mutated)
+
+
+def test_authority_vocabularies_are_closed() -> None:
+    cases = [
+        ("claim-catalog.json", "claims", "authority_tier", "nonexistent_tier"),
+        ("claim-catalog.json", "claims", "generation_binding", "proccess"),
+        ("adapter-registry.json", "adapters", "projection_scope", "diagnotic"),
+        ("adapter-registry.json", "adapters", "status", "availble"),
+    ]
+    for doc, key, field, bad in cases:
+        mutated = copy.deepcopy(_committed_docs())
+        mutated[doc][key][0][field] = bad
+        with pytest.raises(_mod.ObservationContractError):
+            _mod.build_contract(mutated)
+
+
+def test_staleness_rule_shape_is_validated() -> None:
+    for bad in ("not-a-mapping", {}, {"kind": 7}, {"kind": "fixed_window", "window_seconds": "soon"}):
+        mutated = copy.deepcopy(_committed_docs())
+        mutated["claim-catalog.json"]["claims"][0]["staleness_rule"] = bad
+        with pytest.raises(_mod.ObservationContractError):
+            _mod.build_contract(mutated)
+
+
+# `window_seconds` is CONDITIONAL on `kind`: required-and-positive for
+# fixed_window, prohibited for every other declared kind. Mirrored case-for-case
+# by the lockstep suite, which asserts the TS reader reaches the same verdict.
+_STALENESS_REJECTED = (
+    # Presence, not non-null: an explicit null must fail here exactly as it
+    # does in TS, where `null !== undefined`.
+    {"kind": "event_bound", "window_seconds": None},
+    {"kind": "event_bound", "window_seconds": 3600},
+    {"kind": "scheduler_deadline", "window_seconds": 3600},
+    {"kind": "fixed_window"},
+    {"kind": "fixed_window", "window_seconds": 0},
+    {"kind": "fixed_window", "window_seconds": -1},
+    {"kind": "fixed_window", "window_seconds": 2**53},
+    {"kind": "fixed_window", "window_seconds": 86400.5},
+    {"kind": "fixed_window", "window_seconds": True},
+    {"kind": "fixed-window", "window_seconds": 86400},
+    {"kind": "FIXED_WINDOW", "window_seconds": 86400},
+    {"kind": "bounded"},
+    {"kind": "event_bound", "surprise": 1},
+    {"kind": "event_bound", "note": 7},
+)
+_STALENESS_ACCEPTED = (
+    {"kind": "fixed_window", "window_seconds": 1},
+    {"kind": "fixed_window", "window_seconds": 2**53 - 1},
+    # Integral float: JSON `86400.0` parses to a Python float but to the
+    # integer 86400 in JS. build_contract normalizes before validating, so both
+    # readers accept it and return the same integer. This case cannot travel
+    # the lockstep channel (json.dumps/JSON.stringify collapse it), so its
+    # parity is pinned here.
+    {"kind": "fixed_window", "window_seconds": 86400.0},
+    {"kind": "event_bound", "note": "ok"},
+    {"kind": "event_bound"},
+    {"kind": "scheduler_deadline"},
+    {"kind": "fixed_window", "window_seconds": 86400, "note": "n"},
+)
+
+
+@pytest.mark.parametrize("rule", _STALENESS_REJECTED)
+def test_staleness_rule_boundaries_fail_closed(rule: object) -> None:
+    mutated = copy.deepcopy(_committed_docs())
+    mutated["claim-catalog.json"]["claims"][0]["staleness_rule"] = rule
+    with pytest.raises(_mod.ObservationContractError):
+        _mod.build_contract(mutated)
+
+
+@pytest.mark.parametrize("rule", _STALENESS_ACCEPTED)
+def test_staleness_rule_boundaries_accept_declared_shapes(rule: dict) -> None:
+    mutated = copy.deepcopy(_committed_docs())
+    claim_id = mutated["claim-catalog.json"]["claims"][0]["claim_id"]
+    mutated["claim-catalog.json"]["claims"][0]["staleness_rule"] = rule
+    built = _mod.build_contract(mutated)["claims"][claim_id]["staleness_rule"]
+    assert built["kind"] == rule["kind"]
+    if "window_seconds" in rule:
+        # Integral floats are canonicalized to int before validation, so the
+        # returned value is the same integer a TS consumer sees.
+        assert isinstance(built["window_seconds"], int)
+        assert built["window_seconds"] == int(rule["window_seconds"])
+    else:
+        assert "window_seconds" not in built
+
+
+# Governed scalar fields and where they live. A malformed value for any of
+# these must stay inside ObservationContractError: both readers already
+# REJECTED these inputs, but they escaped as raw TypeError (`x in frozenset`
+# on an unhashable dict/list), so a caller could not classify the evidence.
+_GOVERNED_SCALARS = (
+    ("claim-catalog.json", "claims", "min_projection"),
+    ("claim-catalog.json", "claims", "authority_tier"),
+    ("claim-catalog.json", "claims", "generation_binding"),
+    ("adapter-registry.json", "adapters", "projection_scope"),
+    ("adapter-registry.json", "adapters", "status"),
+)
+_WRONG_TYPES = (
+    ("null", None),
+    ("object", {"a": 1}),
+    ("array", [1]),
+    ("bool", True),
+    ("number", 5),
+    ("invalid_string", "definitely-not-a-declared-value"),
+)
+
+
+@pytest.mark.parametrize("doc,coll,field", _GOVERNED_SCALARS)
+@pytest.mark.parametrize("label,value", _WRONG_TYPES)
+def test_malformed_governed_scalar_stays_in_error_taxonomy(
+    doc: str, coll: str, field: str, label: str, value: object
+) -> None:
+    mutated = copy.deepcopy(_committed_docs())
+    mutated[doc][coll][0][field] = value
+    # Exact class, not "raises Exception": a raw TypeError here would still be
+    # a rejection but an UNCLASSIFIABLE one.
+    with pytest.raises(_mod.ObservationContractError):
+        _mod.build_contract(mutated)
+
+
+@pytest.mark.parametrize("doc,coll,field", _GOVERNED_SCALARS)
+@pytest.mark.parametrize("label,value", _WRONG_TYPES)
+def test_caller_classifies_malformed_evidence_as_invalid_evidence(
+    doc: str, coll: str, field: str, label: str, value: object
+) -> None:
+    """Caller-level proof of the taxonomy: a consumer that catches ONLY the
+    documented error class must be able to classify every malformed input as
+    invalid_evidence. Deliberately no bare `except Exception` — if the reader
+    raises anything else the exception propagates and this test fails."""
+    mutated = copy.deepcopy(_committed_docs())
+    mutated[doc][coll][0][field] = value
+
+    def classify(docs: dict) -> str:
+        try:
+            _mod.build_contract(docs)
+        except _mod.ObservationContractError:
+            return "invalid_evidence"
+        return "pass"
+
+    assert classify(mutated) == "invalid_evidence", f"{doc}.{field} = {label}"
+
+
+def test_describe_value_never_raises_on_governed_shapes() -> None:
+    cases = [
+        (None, "null"),
+        (True, "true"),
+        (False, "false"),
+        ("x", '"x"'),
+        (5, "5"),
+        ({"a": 1}, "object"),
+        ([1], "array"),
+    ]
+    for value, expected in cases:
+        assert _mod._describe_value(value) == expected
+    # A null-prototype-equivalent mapping (no __str__ of its own) is the shape
+    # that broke the TS side; the Python formatter must name it structurally.
+    assert _mod._describe_value(MappingProxyType({"a": 1})) == "object"
+    # Non-ASCII must render as JSON.stringify does, not as \\uXXXX escapes —
+    # the default ensure_ascii=True would silently break the mirror claim.
+    assert _mod._describe_value("café-é") == '"café-é"'
+
+
+def test_committed_staleness_rules_are_inside_the_closed_vocabulary() -> None:
+    # The tightening must not reject the data it governs.
+    contract = _mod.build_contract(_committed_docs())
+    for claim_id, claim in contract["claims"].items():
+        rule = claim["staleness_rule"]
+        assert rule["kind"] in _mod.STALENESS_KINDS, claim_id
+        if rule["kind"] == "fixed_window":
+            assert isinstance(rule["window_seconds"], int)
+            assert rule["window_seconds"] > 0, claim_id
+        else:
+            assert "window_seconds" not in rule, claim_id
+
+
+def test_claim_adapter_producer_symmetry_is_enforced() -> None:
+    # A claim naming a producer the adapter does not declare (and vice versa)
+    # breaks the closed-world model in either direction.
+    forward = copy.deepcopy(_committed_docs())
+    claim = forward["claim-catalog.json"]["claims"][0]
+    producer = claim["producing_adapters"][0]
+    for adapter in forward["adapter-registry.json"]["adapters"]:
+        if adapter["adapter_id"] == producer:
+            adapter["can_establish"] = [
+                c for c in adapter["can_establish"] if c != claim["claim_id"]
+            ]
+    with pytest.raises(_mod.ObservationContractError):
+        _mod.build_contract(forward)
+
+    reverse = copy.deepcopy(_committed_docs())
+    claim = reverse["claim-catalog.json"]["claims"][0]
+    claim["producing_adapters"] = [
+        a for a in claim["producing_adapters"] if a != claim["producing_adapters"][0]
+    ]
+    with pytest.raises(_mod.ObservationContractError):
+        _mod.build_contract(reverse)
+
+
+def test_unknown_cross_references_fail_closed() -> None:
+    unknown_producer = copy.deepcopy(_committed_docs())
+    unknown_producer["claim-catalog.json"]["claims"][0]["producing_adapters"] = ["no-such-adapter"]
+    with pytest.raises(_mod.ObservationContractError):
+        _mod.build_contract(unknown_producer)
+
+    unknown_claim = copy.deepcopy(_committed_docs())
+    unknown_claim["adapter-registry.json"]["adapters"][0]["can_establish"] = ["no.such_claim"]
+    with pytest.raises(_mod.ObservationContractError):
+        _mod.build_contract(unknown_claim)
+
+
+def test_contract_snapshot_is_plain_json_and_detached() -> None:
+    # The frozen contract itself is not JSON-serializable (mapping proxies);
+    # the official snapshot operation returns a plain, mutable, detached copy.
+    contract = _mod.load_contract()
+    snapshot = _mod.contract_snapshot(contract)
+    serialized = json.dumps(snapshot, sort_keys=True)
+    assert len(serialized) > 0
+    snapshot["digest"] = "tampered"
+    assert contract["digest"] != "tampered"
+    assert isinstance(snapshot["docs"], dict)
+    assert isinstance(snapshot["canonical_outcomes"], list)
+
+
+def test_lookups_return_defensive_copies() -> None:
+    # Digest-bound state must not be mutable through the lookup API: a caller
+    # mutating a returned row must not poison later reads.
+    contract = _mod.load_contract()
+    row = _mod.claim_row(contract, "identity.instance_name")
+    original = row["min_projection"]
+    row["min_projection"] = "public"
+    assert _mod.claim_row(contract, "identity.instance_name")["min_projection"] == original
+
+
+def test_load_contract_rejects_bom_prefixed_document(tmp_path: Path) -> None:
+    # A UTF-8 BOM is not part of the accepted byte domain: Python's json
+    # rejects it, and the TS loader must not silently strip it.
+    for name in _mod.CONTRACT_FILE_NAMES:
+        (tmp_path / name).write_bytes((_CONTRACT_DIR / name).read_bytes())
+    target = tmp_path / "authority-lattice.json"
+    target.write_bytes(b"\xef\xbb\xbf" + target.read_bytes())
+    with pytest.raises(_mod.ObservationContractError):
+        _mod.load_contract(tmp_path)
+
+
+def test_load_contract_invalid_utf8_fails_closed(tmp_path: Path) -> None:
+    # Invalid bytes must raise the contract error, never leak a raw
+    # UnicodeDecodeError, and never be lossily replaced (the TS side must
+    # reject the same bytes rather than decode with U+FFFD).
+    for name in _mod.CONTRACT_FILE_NAMES:
+        (tmp_path / name).write_bytes((_CONTRACT_DIR / name).read_bytes())
+    raw = (tmp_path / "authority-lattice.json").read_bytes()
+    brace = raw.index(b"{")
+    (tmp_path / "authority-lattice.json").write_bytes(
+        raw[: brace + 1] + b'"probe": "' + bytes([0xC3, 0x28]) + b'", ' + raw[brace + 1 :]
+    )
+    with pytest.raises(_mod.ObservationContractError):
+        _mod.load_contract(tmp_path)
+
+
+def test_dunder_proto_identifiers_are_ordinary_keys() -> None:
+    # Parity pin: __proto__ has no special meaning in Python dicts; the TS
+    # port must treat it as an ordinary own key too (null-prototype
+    # accumulators), neither polluting nor dropping it.
+    docs = copy.deepcopy(_committed_docs())
+    docs["adapter-registry.json"]["adapters"].append(
+        {
+            "adapter_id": "__proto__",
+            "wraps": ["probe fixture"],
+            "platforms": ["darwin"],
+            "privilege": "none",
+            "prerequisites": [],
+            "projection_scope": "not_applicable",
+            "can_establish": [],
+            "cannot_establish": [],
+            "status": "producer_pending",
+        }
+    )
+    contract = _mod.build_contract(docs)
+    row = _mod.adapter_row(contract, "__proto__")
+    assert row["adapter_id"] == "__proto__"
 
 
 def test_load_contract_malformed_json_fails_closed(tmp_path: Path) -> None:

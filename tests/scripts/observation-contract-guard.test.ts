@@ -43,6 +43,155 @@ describe('observation contract guard', () => {
     expect(names).toContain('guard:observation-contract');
   });
 
+  it('rejects an unsupported schema_version on any data document', () => {
+    const root = makeRoot();
+    patchJson(root, 'claim-catalog.json', (data) => {
+      data.schema_version = '999';
+    });
+    const result = checkObservationContract(root);
+    expect(result.ok).toBe(false);
+    expect(result.findings.map((f) => f.code)).toContain('unsupported-schema-version');
+  });
+
+  it('rejects malformed registry members instead of silently filtering them', () => {
+    const root = makeRoot();
+    patchJson(root, 'adapter-registry.json', (data) => {
+      data.adapters[0].can_establish.push(42);
+    });
+    const result = checkObservationContract(root);
+    expect(result.ok).toBe(false);
+    expect(result.findings.map((f) => f.code)).toContain('malformed-entry');
+  });
+
+  it('rejects contract bytes that are not valid UTF-8', () => {
+    const root = makeRoot();
+    const p = path.join(root, CONTRACT_DIR, 'authority-lattice.json');
+    const raw = readFileSync(p);
+    const brace = raw.indexOf(0x7b);
+    writeFileSync(
+      p,
+      Buffer.concat([
+        raw.subarray(0, brace + 1),
+        Buffer.from('"probe": "', 'utf8'),
+        Buffer.from([0xc3, 0x28]),
+        Buffer.from('", ', 'utf8'),
+        raw.subarray(brace + 1),
+      ]),
+    );
+    const result = checkObservationContract(root);
+    expect(result.ok).toBe(false);
+    expect(result.findings.map((f) => f.code)).toContain('contract-unreadable');
+  });
+
+  it('converts reader rejections into findings (duplicate authority tier)', () => {
+    // The guard must never bless a structure the strict readers reject.
+    const root = makeRoot();
+    patchJson(root, 'authority-lattice.json', (data) => {
+      data.tiers.push({ ...data.tiers[0] });
+    });
+    const result = checkObservationContract(root);
+    expect(result.ok).toBe(false);
+    expect(result.findings.map((f) => f.code)).toContain('reader-rejected');
+  });
+
+  it('converts reader rejections into findings (empty adapter id)', () => {
+    const root = makeRoot();
+    patchJson(root, 'adapter-registry.json', (data) => {
+      data.adapters.push({ adapter_id: '', can_establish: [], cannot_establish: [] });
+    });
+    const result = checkObservationContract(root);
+    expect(result.ok).toBe(false);
+    expect(result.findings.map((f) => f.code)).toContain('reader-rejected');
+  });
+
+  it('rejects an unknown min_projection value', () => {
+    const root = makeRoot();
+    patchJson(root, 'claim-catalog.json', (data) => {
+      data.claims[0].min_projection = 'diagnotic';
+    });
+    const result = checkObservationContract(root);
+    expect(result.ok).toBe(false);
+    expect(result.findings.map((f) => f.code)).toContain('malformed-entry');
+  });
+
+  it('reports malformed governed scalars as findings instead of crashing (guard-path parity)', () => {
+    // Round 7 parity fence — NOT a falsifier, and deliberately recorded as
+    // such. This test passes both before and after the round-7 fix, because
+    // the guard's reader call is wrapped in an UNQUALIFIED `catch (err)` that
+    // converts any throw — ObservationContractPortError or raw TypeError alike
+    // — into a `reader-rejected` finding. So the taxonomy defect's blast radius
+    // was the DIRECT-READER path only; the guard path was already structured.
+    // What this fence buys: the guard keeps reporting these as findings after
+    // the reader's error class changed, and it pins the guard-vs-reader parity
+    // the lockstep matrix asserts on the direct path.
+    // (That the guard cannot distinguish a contract defect from a reader BUG is
+    // a separate masking concern — registered, not fixed here.)
+    const cases: Array<[string, (data: Record<string, never>) => void]> = [
+      ['min_projection', (d) => {
+        (d as never as { claims: Array<Record<string, unknown>> }).claims[0]!['min_projection'] = { a: 1 };
+      }],
+      ['authority_tier', (d) => {
+        (d as never as { claims: Array<Record<string, unknown>> }).claims[0]!['authority_tier'] = [1];
+      }],
+      ['generation_binding', (d) => {
+        (d as never as { claims: Array<Record<string, unknown>> }).claims[0]!['generation_binding'] = { a: 1 };
+      }],
+    ];
+    for (const [field, mutate] of cases) {
+      const root = makeRoot();
+      patchJson(root, 'claim-catalog.json', mutate as (data: Record<string, never>) => void);
+      const result = checkObservationContract(root);
+      expect(result.ok, field).toBe(false);
+      const codes = result.findings.map((f) => f.code);
+      expect(codes.some((c) => c === 'reader-rejected' || c === 'malformed-entry'), `${field}: ${codes.join(',')}`).toBe(true);
+    }
+
+    for (const [field, value] of [
+      ['projection_scope', { a: 1 }],
+      ['status', [1]],
+    ] as Array<[string, unknown]>) {
+      const root = makeRoot();
+      patchJson(root, 'adapter-registry.json', (data) => {
+        (data as never as { adapters: Array<Record<string, unknown>> }).adapters[0]![field] = value;
+      });
+      const result = checkObservationContract(root);
+      expect(result.ok, field).toBe(false);
+      const codes = result.findings.map((f) => f.code);
+      expect(codes.some((c) => c === 'reader-rejected' || c === 'malformed-entry'), `${field}: ${codes.join(',')}`).toBe(true);
+    }
+  });
+
+  it('rejects overlapping can_establish/cannot_establish on one adapter', () => {
+    const root = makeRoot();
+    patchJson(root, 'adapter-registry.json', (data) => {
+      const adapter = data.adapters[0];
+      adapter.cannot_establish.push(adapter.can_establish[0]);
+    });
+    const result = checkObservationContract(root);
+    expect(result.ok).toBe(false);
+    expect(result.findings.map((f) => f.code)).toContain('authority-overlap');
+  });
+
+  it('rejects a claim requirement cycle', () => {
+    const root = makeRoot();
+    patchJson(root, 'claim-catalog.json', (data) => {
+      const first = data.claims[0];
+      first.requires = [...(first.requires ?? []), first.claim_id];
+    });
+    const result = checkObservationContract(root);
+    expect(result.ok).toBe(false);
+    expect(result.findings.map((f) => f.code)).toContain('requires-cycle');
+  });
+
+  it('rejects a BOM-prefixed contract document', () => {
+    const root = makeRoot();
+    const p = path.join(root, CONTRACT_DIR, 'claim-catalog.json');
+    writeFileSync(p, Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), readFileSync(p)]));
+    const result = checkObservationContract(root);
+    expect(result.ok).toBe(false);
+    expect(result.findings.map((f) => f.code)).toContain('contract-unreadable');
+  });
+
   it('rejects a canonical outcome missing from the envelope schema enum', () => {
     const root = makeRoot();
     patchJson(root, 'outcome-projections.json', (data) => {

@@ -24,15 +24,281 @@ import { fileURLToPath } from 'node:url';
 import { isRecord } from '../../src/lib/type-guards.ts';
 import { pyJsonStringify } from './fleet-roster-inventory.ts';
 
-export const CONTRACT_FILE_NAMES = [
+export const CONTRACT_FILE_NAMES = Object.freeze([
   'adapter-registry.json',
   'authority-lattice.json',
   'claim-catalog.json',
   'envelope.schema.json',
   'outcome-projections.json',
-] as const;
+] as const);
 
 export type ContractFileName = (typeof CONTRACT_FILE_NAMES)[number];
+
+/** The only contract version these readers understand — enforced at build
+ * time (not only by the guard). Mirrors `SUPPORTED_SCHEMA_VERSION` in
+ * `deploy/scripts/lib/observation_contract.py`. */
+export const SUPPORTED_CONTRACT_SCHEMA_VERSION = '0.1';
+
+/** Data documents that carry schema_version (the envelope schema file is a
+ * JSON Schema; its version field describes the ENVELOPE). */
+const VERSIONED_DOCS = [
+  'adapter-registry.json',
+  'authority-lattice.json',
+  'claim-catalog.json',
+  'outcome-projections.json',
+] as const;
+
+/** Closed minimum-projection vocabulary; a typo must never weaken projection
+ * authority. Mirrors `MIN_PROJECTIONS` on the Python side. Exported as a
+ * FROZEN tuple — a mutable exported Set would let any importer widen the
+ * accepted vocabulary; the lookup set below stays private. */
+export const MIN_PROJECTION_VALUES = Object.freeze([
+  'diagnostic',
+  'public',
+  'not_applicable',
+] as const);
+const minProjectionLookup = new Set<string>(MIN_PROJECTION_VALUES);
+
+// Closed-world authority model (deploy/observation-plane/README.md): every
+// governed field below is MANDATORY and every vocabulary is closed. Mirrors
+// REQUIRED_CLAIM_FIELDS / REQUIRED_ADAPTER_FIELDS / GENERATION_BINDINGS /
+// PROJECTION_SCOPES / ADAPTER_STATUSES on the Python side.
+const REQUIRED_CLAIM_FIELDS = Object.freeze([
+  'claim_id',
+  'family',
+  'subject_kind',
+  'min_projection',
+  'authority_tier',
+  'generation_binding',
+  'staleness_rule',
+  'producing_adapters',
+  'cannot_establish',
+] as const);
+const REQUIRED_ADAPTER_FIELDS = Object.freeze([
+  'adapter_id',
+  'wraps',
+  'platforms',
+  'privilege',
+  'prerequisites',
+  'projection_scope',
+  'can_establish',
+  'cannot_establish',
+  'status',
+] as const);
+const generationBindings = new Set(['none', 'config', 'process', 'credential', 'process+credential']);
+// Closed staleness vocabulary. `window_seconds` is CONDITIONAL on the kind:
+// only a fixed_window rule carries (and requires) an explicit window. An
+// event_bound or scheduler_deadline rule derives freshness from the producer,
+// so a window on one of those would describe a bound nothing enforces.
+// Mirrors STALENESS_KINDS / _WINDOWED_STALENESS_KINDS / _STALENESS_KEYS in
+// deploy/scripts/lib/observation_contract.py.
+const stalenessKinds = new Set(['event_bound', 'scheduler_deadline', 'fixed_window']);
+const windowedStalenessKinds = new Set(['fixed_window']);
+const stalenessKeys = new Set(['kind', 'window_seconds', 'note']);
+const projectionScopes = new Set(['diagnostic', 'public', 'not_applicable']);
+const adapterStatuses = new Set(['available', 'gated', 'producer_pending']);
+
+// Error-message formatter that CANNOT itself throw.
+//
+// The failure this exists for: a NULL-PROTOTYPE object — exactly what
+// normalizeForDigest builds, so it reaches this path on every
+// malformed-authority rejection — has no `toString`/`Symbol.toPrimitive`, so
+// `String(value)` raises `TypeError: Cannot convert object to primitive
+// value`. That escaped the documented ObservationContractPortError taxonomy
+// while still REPORTING a rejection, leaving callers unable to classify the
+// evidence as invalid_evidence.
+//
+// The symbol branch is defensive, not a fix for a throw in the old code:
+// `String(sym)` is explicitly permitted and returns "Symbol(x)". It is
+// IMPLICIT coercion (`${sym}`, `'' + sym`) that throws — which is what an
+// inlined template literal here would do. Naming symbols structurally keeps
+// that hazard out of reach if this helper is ever inlined.
+//
+// Mirrors _describe_value in deploy/scripts/lib/observation_contract.py,
+// including non-ASCII handling (that side passes ensure_ascii=False so both
+// readers render a malformed string identically).
+function describeValue(value: unknown): string {
+  if (value === null) return 'null';
+  const kind = typeof value;
+  if (kind === 'string') return JSON.stringify(value);
+  if (kind === 'symbol') return 'symbol';
+  if (kind === 'object') return Array.isArray(value) ? 'array' : 'object';
+  if (kind === 'function') return 'function';
+  return String(value as number | boolean | bigint | undefined);
+}
+
+function stringListField(value: unknown, what: string): string[] {
+  if (!Array.isArray(value) || !value.every((item): item is string => typeof item === 'string')) {
+    throw new ObservationContractPortError(`${what} must be a list of strings`);
+  }
+  return value;
+}
+
+function validateAuthorityMetadata(
+  claims: Record<string, Record<string, unknown>>,
+  adapters: Record<string, Record<string, unknown>>,
+  tiers: string[],
+): void {
+  const tierSet = new Set(tiers);
+  for (const [claimId, claim] of Object.entries(claims)) {
+    for (const field of REQUIRED_CLAIM_FIELDS) {
+      if (!Object.hasOwn(claim, field)) {
+        throw new ObservationContractPortError(`claim ${claimId}: missing required field ${field}`);
+      }
+    }
+    if (typeof claim['authority_tier'] !== 'string' || !tierSet.has(claim['authority_tier'])) {
+      throw new ObservationContractPortError(
+        `claim ${claimId}: authority_tier ${describeValue(claim['authority_tier'])} is not a declared lattice tier`,
+      );
+    }
+    if (
+      typeof claim['generation_binding'] !== 'string' ||
+      !generationBindings.has(claim['generation_binding'])
+    ) {
+      throw new ObservationContractPortError(
+        `claim ${claimId}: generation_binding ${describeValue(claim['generation_binding'])} outside the closed vocabulary`,
+      );
+    }
+    const rule = claim['staleness_rule'];
+    if (!isRecord(rule)) {
+      throw new ObservationContractPortError(`claim ${claimId}: staleness_rule must be an object`);
+    }
+    const undeclared = Object.keys(rule)
+      .filter((key) => !stalenessKeys.has(key))
+      .sort();
+    if (undeclared.length > 0) {
+      throw new ObservationContractPortError(
+        `claim ${claimId}: staleness_rule has undeclared propert(ies) ${JSON.stringify(undeclared)} ` +
+          `(declared: ${JSON.stringify([...stalenessKeys].sort())})`,
+      );
+    }
+    const kind = rule['kind'];
+    if (typeof kind !== 'string' || !stalenessKinds.has(kind)) {
+      throw new ObservationContractPortError(
+        `claim ${claimId}: staleness_rule.kind ${describeValue(kind)} outside the closed vocabulary`,
+      );
+    }
+    if (Object.hasOwn(rule, 'note') && typeof rule['note'] !== 'string') {
+      throw new ObservationContractPortError(
+        `claim ${claimId}: staleness_rule.note must be a string when present`,
+      );
+    }
+    // Presence, not non-undefined: an explicit `"window_seconds": null` must
+    // fail here exactly as it does on the Python side.
+    const hasWindow = Object.hasOwn(rule, 'window_seconds');
+    if (windowedStalenessKinds.has(kind)) {
+      if (!hasWindow) {
+        throw new ObservationContractPortError(
+          `claim ${claimId}: staleness_rule.kind ${JSON.stringify(kind)} requires window_seconds`,
+        );
+      }
+      const window = rule['window_seconds'];
+      if (typeof window !== 'number' || !Number.isSafeInteger(window) || window <= 0) {
+        throw new ObservationContractPortError(
+          `claim ${claimId}: staleness_rule.window_seconds must be a positive integer <= 2**53-1`,
+        );
+      }
+    } else if (hasWindow) {
+      throw new ObservationContractPortError(
+        `claim ${claimId}: staleness_rule.kind ${JSON.stringify(kind)} prohibits window_seconds`,
+      );
+    }
+    stringListField(claim['producing_adapters'], `claim ${claimId} producing_adapters`);
+    stringListField(claim['cannot_establish'], `claim ${claimId} cannot_establish`);
+  }
+
+  for (const [adapterId, adapter] of Object.entries(adapters)) {
+    for (const field of REQUIRED_ADAPTER_FIELDS) {
+      if (!Object.hasOwn(adapter, field)) {
+        throw new ObservationContractPortError(
+          `adapter ${adapterId}: missing required field ${field}`,
+        );
+      }
+    }
+    if (
+      typeof adapter['projection_scope'] !== 'string' ||
+      !projectionScopes.has(adapter['projection_scope'])
+    ) {
+      throw new ObservationContractPortError(
+        `adapter ${adapterId}: projection_scope ${describeValue(adapter['projection_scope'])} outside the closed vocabulary`,
+      );
+    }
+    if (typeof adapter['status'] !== 'string' || !adapterStatuses.has(adapter['status'])) {
+      throw new ObservationContractPortError(
+        `adapter ${adapterId}: status ${describeValue(adapter['status'])} outside the closed vocabulary`,
+      );
+    }
+    for (const field of ['wraps', 'platforms', 'prerequisites', 'can_establish', 'cannot_establish']) {
+      stringListField(adapter[field], `adapter ${adapterId} ${field}`);
+    }
+    if (typeof adapter['privilege'] !== 'string' || adapter['privilege'].length === 0) {
+      throw new ObservationContractPortError(
+        `adapter ${adapterId}: privilege must be a non-empty string`,
+      );
+    }
+    const cannot = new Set(stringListField(adapter['cannot_establish'], `adapter ${adapterId}`));
+    for (const claimId of stringListField(adapter['can_establish'], `adapter ${adapterId}`)) {
+      if (cannot.has(claimId)) {
+        throw new ObservationContractPortError(
+          `adapter ${adapterId}: ${claimId} appears in both can_establish and cannot_establish`,
+        );
+      }
+    }
+  }
+
+  // Cross-references resolve, and producer relationships are symmetric in BOTH
+  // directions.
+  for (const [claimId, claim] of Object.entries(claims)) {
+    for (const other of stringListField(claim['cannot_establish'], `claim ${claimId}`)) {
+      if (!Object.hasOwn(claims, other)) {
+        throw new ObservationContractPortError(
+          `claim ${claimId}: cannot_establish references unknown claim ${other}`,
+        );
+      }
+    }
+    for (const adapterId of stringListField(claim['producing_adapters'], `claim ${claimId}`)) {
+      if (!Object.hasOwn(adapters, adapterId)) {
+        throw new ObservationContractPortError(
+          `claim ${claimId}: producing_adapters references unknown adapter ${adapterId}`,
+        );
+      }
+      const canEstablish = stringListField(
+        adapters[adapterId]!['can_establish'],
+        `adapter ${adapterId}`,
+      );
+      if (!canEstablish.includes(claimId)) {
+        throw new ObservationContractPortError(
+          `claim ${claimId}: producer ${adapterId} does not declare it in can_establish`,
+        );
+      }
+    }
+  }
+  for (const [adapterId, adapter] of Object.entries(adapters)) {
+    for (const claimId of stringListField(adapter['can_establish'], `adapter ${adapterId}`)) {
+      if (!Object.hasOwn(claims, claimId)) {
+        throw new ObservationContractPortError(
+          `adapter ${adapterId}: can_establish references unknown claim ${claimId}`,
+        );
+      }
+      const producers = stringListField(
+        claims[claimId]!['producing_adapters'],
+        `claim ${claimId}`,
+      );
+      if (!producers.includes(adapterId)) {
+        throw new ObservationContractPortError(
+          `adapter ${adapterId}: claim ${claimId} does not name it in producing_adapters`,
+        );
+      }
+    }
+    for (const claimId of stringListField(adapter['cannot_establish'], `adapter ${adapterId}`)) {
+      if (!Object.hasOwn(claims, claimId)) {
+        throw new ObservationContractPortError(
+          `adapter ${adapterId}: cannot_establish references unknown claim ${claimId}`,
+        );
+      }
+    }
+  }
+}
 
 /** Raised when the contract set cannot be read or is structurally invalid.
  * Callers treat this as fail-closed (mirrors Python's
@@ -64,6 +330,50 @@ export interface ObservationContract {
   claims: Record<string, Record<string, unknown>>;
   adapters: Record<string, Record<string, unknown>>;
   authorityTiers: string[];
+}
+
+/** Recursive readonly JSON value. Contract payloads are typed as this rather
+ * than `unknown` so that DIRECT payload mutation is a compile error —
+ * assignment (TS2542) and `payload.push(...)` (TS2339) both fail. Mutation
+ * behind `Array.isArray` narrowing still compiles (TypeScript widens even
+ * readonly arrays there); the runtime `deepFreeze` is the authority on that
+ * path, as documented on `ObservationContractView` below. */
+export type ReadonlyJsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | readonly ReadonlyJsonValue[]
+  | { readonly [key: string]: ReadonlyJsonValue };
+
+export type ReadonlyJsonObject = { readonly [key: string]: ReadonlyJsonValue };
+
+export interface ProjectionRowView {
+  readonly legacy_value: string;
+  readonly canonical: string;
+  readonly lossy: boolean;
+  readonly [extra: string]: ReadonlyJsonValue;
+}
+
+export interface ContractSurfaceView {
+  readonly domain: readonly string[];
+  readonly rows: { readonly [legacyValue: string]: ProjectionRowView };
+}
+
+/** What the builders return: digest-bound state, immutable at runtime via
+ * `deepFreeze` and — for direct declared-property and payload-property
+ * writes — at the type level too. Known type-level limit: `Array.isArray`
+ * is unsound for readonly arrays, so a `.push` behind that guard still
+ * compiles; the runtime freeze rejects it (pinned by the lockstep suite).
+ * Use `contractSnapshot` or the lookup accessors for mutable copies. */
+export interface ObservationContractView {
+  readonly digest: string;
+  readonly docs: { readonly [K in ContractFileName]: ReadonlyJsonObject };
+  readonly canonicalOutcomes: readonly string[];
+  readonly surfaces: { readonly [surfaceName: string]: ContractSurfaceView };
+  readonly claims: { readonly [claimId: string]: ReadonlyJsonObject };
+  readonly adapters: { readonly [adapterId: string]: ReadonlyJsonObject };
+  readonly authorityTiers: readonly string[];
 }
 
 export function defaultContractDir(): string {
@@ -105,8 +415,19 @@ export function contractIdentity(docs: Record<string, unknown>): Record<string, 
 // unrestricted: surrogate escaping is parity-proven by the lockstep suite.
 const MAX_DIGEST_INT = 2 ** 53 - 1;
 
-function assertDigestDomain(value: unknown, at: string): void {
-  if (value === null || value === undefined || typeof value === 'boolean') return;
+/** Returns `value` rebuilt inside the digest domain: -0 canonicalized to 0
+ * and every object rebuilt with a null prototype (so identifiers like
+ * `__proto__` are ordinary own keys, exactly as in a Python dict). Throws
+ * for anything outside the domain. */
+function normalizeForDigest(value: unknown, at: string): unknown {
+  if (value === undefined) {
+    // undefined cannot come from JSON.parse; encoding it as null would give
+    // two different programmatic values one digest.
+    throw new ObservationContractPortError(
+      `digest domain violation at ${at}: undefined is outside the parsed-JSON domain`,
+    );
+  }
+  if (value === null || typeof value === 'boolean') return value;
   if (typeof value === 'number') {
     if (!Number.isInteger(value) || Math.abs(value) > MAX_DIGEST_INT) {
       throw new ObservationContractPortError(
@@ -114,14 +435,23 @@ function assertDigestDomain(value: unknown, at: string): void {
           '(other numbers do not serialize identically across the Python/TS encoders)',
       );
     }
-    return;
+    return value === 0 ? 0 : value;
   }
-  if (typeof value === 'string') return;
+  if (typeof value === 'string') return value;
   if (Array.isArray(value)) {
-    value.forEach((item, index) => assertDigestDomain(item, `${at}[${index}]`));
-    return;
+    const normalized: unknown[] = [];
+    for (let index = 0; index < value.length; index += 1) {
+      if (!(index in value)) {
+        throw new ObservationContractPortError(
+          `digest domain violation at ${at}[${index}]: sparse arrays are outside the parsed-JSON domain`,
+        );
+      }
+      normalized.push(normalizeForDigest(value[index], `${at}[${index}]`));
+    }
+    return normalized;
   }
   if (isRecord(value)) {
+    const normalized = Object.create(null) as Record<string, unknown>;
     for (const [key, item] of Object.entries(value)) {
       for (const ch of key) {
         if ((ch.codePointAt(0) ?? 0) > 0xffff) {
@@ -131,9 +461,9 @@ function assertDigestDomain(value: unknown, at: string): void {
           );
         }
       }
-      assertDigestDomain(item, `${at}.${key}`);
+      normalized[key] = normalizeForDigest(item, `${at}.${key}`);
     }
-    return;
+    return normalized;
   }
   throw new ObservationContractPortError(
     `digest domain violation at ${at}: unsupported value type ${typeof value}`,
@@ -143,8 +473,7 @@ function assertDigestDomain(value: unknown, at: string): void {
 /** `sha256(json.dumps(contract_identity(docs), sort_keys=True, separators=(",",":")))`,
  * identical call shape to the Python side. */
 export function contractDigest(docs: Record<string, unknown>): string {
-  const identity = contractIdentity(docs);
-  assertDigestDomain(identity, 'contract');
+  const identity = normalizeForDigest(contractIdentity(docs), 'contract');
   const material = pyJsonStringify(identity);
   return createHash('sha256').update(Buffer.from(material, 'utf8')).digest('hex');
 }
@@ -164,7 +493,10 @@ function buildSurfaces(
   if (!isRecord(rawSurfaces) || Object.keys(rawSurfaces).length === 0) {
     throw new ObservationContractPortError('outcome-projections surfaces must be a non-empty object');
   }
-  const surfaces: Record<string, ContractSurface> = {};
+  // Null-prototype accumulators: untrusted identifiers (surface names, legacy
+  // values, claim/adapter ids) must become ordinary own keys — a plain {}
+  // would let '__proto__' silently rewire the table instead.
+  const surfaces = Object.create(null) as Record<string, ContractSurface>;
   for (const [surfaceName, surface] of Object.entries(rawSurfaces)) {
     if (!isRecord(surface)) {
       throw new ObservationContractPortError(`surface must be an object: ${surfaceName}`);
@@ -177,7 +509,7 @@ function buildSurfaces(
     if (!Array.isArray(rawRows)) {
       throw new ObservationContractPortError(`surface ${surfaceName} rows must be a list`);
     }
-    const rows: Record<string, ProjectionRow> = {};
+    const rows = Object.create(null) as Record<string, ProjectionRow>;
     for (const row of rawRows) {
       if (
         !isRecord(row) ||
@@ -221,7 +553,7 @@ function buildKeyed(
   if (!Array.isArray(entries) || entries.length === 0) {
     throw new ObservationContractPortError(`${what} must be a non-empty list`);
   }
-  const keyed: Record<string, Record<string, unknown>> = {};
+  const keyed = Object.create(null) as Record<string, Record<string, unknown>>;
   for (const entry of entries) {
     if (!isRecord(entry) || typeof entry[key] !== 'string' || entry[key].length === 0) {
       throw new ObservationContractPortError(`${what} entry missing ${key}`);
@@ -237,8 +569,25 @@ function buildKeyed(
 
 /** Ported from `observation_contract.py:build_contract` — pure over parsed
  * docs so the lockstep test can exercise mutated document sets. */
-export function buildObservationContract(docs: Record<string, unknown>): ObservationContract {
+export function buildObservationContract(docs: Record<string, unknown>): ObservationContractView {
   const digest = contractDigest(docs); // also validates presence/shape of every doc
+  // Build the returned structure from the NORMALIZED documents (mirrors the
+  // Python side): req-obs-02 covers returned data, so consumers on both sides
+  // must see identical values (-0 -> 0) inside prototype-safe records.
+  docs = (
+    normalizeForDigest(contractIdentity(docs), 'contract') as {
+      files: Record<string, Record<string, unknown>>;
+    }
+  ).files;
+  for (const name of VERSIONED_DOCS) {
+    const version = (docs[name] as Record<string, unknown>)['schema_version'];
+    if (version !== SUPPORTED_CONTRACT_SCHEMA_VERSION) {
+      throw new ObservationContractPortError(
+        `unsupported schema_version in ${name}: ${describeValue(version)} ` +
+          `(supported: ${SUPPORTED_CONTRACT_SCHEMA_VERSION})`,
+      );
+    }
+  }
   const projections = docs['outcome-projections.json'] as Record<string, unknown>;
   const canonicalList = stringArray(projections['canonical_outcomes'], 'canonical_outcomes');
   if (canonicalList.length === 0 || new Set(canonicalList).size !== canonicalList.length) {
@@ -249,6 +598,15 @@ export function buildObservationContract(docs: Record<string, unknown>): Observa
   const catalog = docs['claim-catalog.json'] as Record<string, unknown>;
   const registry = docs['adapter-registry.json'] as Record<string, unknown>;
   const claims = buildKeyed(catalog['claims'], 'claim_id', 'claim catalog');
+  for (const [claimId, claim] of Object.entries(claims)) {
+    const minProjection = claim['min_projection'];
+    if (typeof minProjection !== 'string' || !minProjectionLookup.has(minProjection)) {
+      throw new ObservationContractPortError(
+        `claim ${claimId}: min_projection ${describeValue(minProjection)} outside the closed ` +
+          `vocabulary [${[...MIN_PROJECTION_VALUES].sort().join(', ')}]`,
+      );
+    }
+  }
   const adapters = buildKeyed(registry['adapters'], 'adapter_id', 'adapter registry');
   const lattice = docs['authority-lattice.json'] as Record<string, unknown>;
   const rawTiers = lattice['tiers'];
@@ -265,11 +623,12 @@ export function buildObservationContract(docs: Record<string, unknown>): Observa
     }
     tiers.push(tier['tier']);
   }
-  const typedDocs = {} as Record<ContractFileName, Record<string, unknown>>;
+  validateAuthorityMetadata(claims, adapters, tiers);
+  const typedDocs = Object.create(null) as Record<ContractFileName, Record<string, unknown>>;
   for (const name of CONTRACT_FILE_NAMES) {
     typedDocs[name] = docs[name] as Record<string, unknown>;
   }
-  return {
+  return deepFreeze({
     digest,
     docs: typedDocs,
     canonicalOutcomes: canonicalList,
@@ -277,18 +636,67 @@ export function buildObservationContract(docs: Record<string, unknown>): Observa
     claims,
     adapters,
     authorityTiers: tiers,
+  }) as ObservationContractView;
+}
+
+/** Canonical cross-language interchange shape of a contract snapshot: one
+ * snake_case key set, byte-identical between `contractSnapshot` here and
+ * Python's `contract_snapshot` under canonical JSON encoding. */
+export interface ObservationContractSnapshot {
+  digest: string;
+  docs: Record<ContractFileName, Record<string, unknown>>;
+  canonical_outcomes: string[];
+  surfaces: Record<string, ContractSurface>;
+  claims: Record<string, Record<string, unknown>>;
+  adapters: Record<string, Record<string, unknown>>;
+  authority_tiers: string[];
+}
+
+/** Plain JSON-compatible, mutable, detached deep copy of the whole contract
+ * in the canonical interchange shape — the official cross-language snapshot
+ * operation (Python: `contract_snapshot`). The frozen view itself stays the
+ * digest authority; in-language field idioms stop at this boundary. */
+export function contractSnapshot(contract: ObservationContractView): ObservationContractSnapshot {
+  const plain = structuredClone(contract) as ObservationContract;
+  return {
+    digest: plain.digest,
+    docs: plain.docs,
+    canonical_outcomes: plain.canonicalOutcomes,
+    surfaces: plain.surfaces,
+    claims: plain.claims,
+    adapters: plain.adapters,
+    authority_tiers: plain.authorityTiers,
   };
 }
 
+/** Digest-bound state is immutable: a consumer must never be able to change
+ * evaluated policy out from under the digest that names it. Lookups hand out
+ * defensive copies instead. */
+function deepFreeze<T>(value: T): T {
+  if (value !== null && (typeof value === 'object' || typeof value === 'function')) {
+    for (const key of Object.getOwnPropertyNames(value)) {
+      deepFreeze((value as Record<string, unknown>)[key]);
+    }
+    Object.freeze(value);
+  }
+  return value;
+}
+
 /** Read the five contract files and build the contract, fail-closed. */
-export function loadObservationContract(contractDir?: string): ObservationContract {
+export function loadObservationContract(contractDir?: string): ObservationContractView {
   const resolved = contractDir ?? defaultContractDir();
   const docs: Record<string, unknown> = {};
   for (const name of CONTRACT_FILE_NAMES) {
     const filePath = path.join(resolved, name);
     let raw: string;
     try {
-      raw = readFileSync(filePath, 'utf8');
+      // Strict fatal decode: Node's lossy 'utf8' mode would silently replace
+      // malformed sequences with U+FFFD while Python rejects the same bytes.
+      // ignoreBOM keeps a leading BOM in the output so JSON.parse rejects it,
+      // exactly like Python's json (TextDecoder strips it by default).
+      raw = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(
+        readFileSync(filePath),
+      );
     } catch (err) {
       throw new ObservationContractPortError(
         `cannot read contract document ${filePath}: ${(err as Error).message}`,
@@ -308,7 +716,7 @@ export function loadObservationContract(contractDir?: string): ObservationContra
 /** Project one legacy verdict to its canonical row, or throw — nothing here
  * defaults (mirrors `observation_contract.py:project_outcome`). */
 export function projectOutcome(
-  contract: ObservationContract,
+  contract: ObservationContractView,
   surface: string,
   rawValue: string,
 ): ProjectionRow {
@@ -323,22 +731,26 @@ export function projectOutcome(
       `legacy value outside the declared domain of ${surface}: ${rawValue}`,
     );
   }
-  return table.rows[rawValue]!;
+  // Defensive copy: digest-bound state must not be mutable through lookups.
+  return structuredClone(table.rows[rawValue]!) as ProjectionRow;
 }
 
-export function claimRow(contract: ObservationContract, claimId: string): Record<string, unknown> {
+export function claimRow(
+  contract: ObservationContractView,
+  claimId: string,
+): Record<string, unknown> {
   if (!Object.hasOwn(contract.claims, claimId)) {
     throw new ObservationContractPortError(`unknown claim: ${claimId}`);
   }
-  return contract.claims[claimId]!;
+  return structuredClone(contract.claims[claimId]!) as Record<string, unknown>;
 }
 
 export function adapterRow(
-  contract: ObservationContract,
+  contract: ObservationContractView,
   adapterId: string,
 ): Record<string, unknown> {
   if (!Object.hasOwn(contract.adapters, adapterId)) {
     throw new ObservationContractPortError(`unknown adapter: ${adapterId}`);
   }
-  return contract.adapters[adapterId]!;
+  return structuredClone(contract.adapters[adapterId]!) as Record<string, unknown>;
 }
