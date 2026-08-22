@@ -394,6 +394,26 @@ def node_version_drift_marker(running_version, pinned_version: str):
     return f"node_version_drift running={running} pinned={pinned}"
 
 
+def health_port_authority_drift_marker(profile_port, live_port):
+    """Return a health_port_authority_drift FAIL discriminator when the
+    health-profile port and the LIVE instance-config healthPort disagree
+    (#2342), or None when either side is absent or they agree.
+
+    The authority that wins is runtime_config — the live config.json port the
+    instance actually binds. A stale profile port must NOT be probed: probing
+    it pages endpoint/daemon outage against the wrong address. Callers pass
+    already-normalized int-or-None ports (bools rejected).
+    """
+    if profile_port is None or live_port is None:
+        return None
+    if profile_port == live_port:
+        return None
+    return (
+        f"health_port_authority_drift profile={profile_port} live={live_port} "
+        f"authority=runtime_config probe=inhibited"
+    )
+
+
 PROVIDER_EVIDENCE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 RUNTIME_PROVIDER_IDS = frozenset({
     "claude-cli",
@@ -6733,20 +6753,40 @@ def config_inventory(profile: dict[str, Any]) -> list[str]:
                 continue
             kind = data.get("type", "unknown")
             enabled = data.get("enabled", True)
-            port = item.get("healthPort", data.get("healthPort"))
+            profile_port = item.get("healthPort")
+            if isinstance(profile_port, bool) or not isinstance(profile_port, int):
+                profile_port = None
+            live_port = data.get("healthPort")
+            if isinstance(live_port, bool) or not isinstance(live_port, int):
+                live_port = None
+            drift_marker = health_port_authority_drift_marker(profile_port, live_port)
+            if drift_marker is not None:
+                # #2342: classify authority drift, inhibit the misaddressed
+                # outage probe. Do not probe the stale profile port and do not
+                # silently switch — the winning authority (runtime_config) is
+                # recorded in the marker line.
+                lines.append(f"FAIL config {name}: {drift_marker}")
+                probe_port = None
+            elif profile_port is not None:
+                probe_port = profile_port
+                if live_port is None:
+                    lines.append(f"config {name}: health_port authority=profile")
+            else:
+                probe_port = live_port
+            display_port = live_port if drift_marker is not None else probe_port
             socket_path = item.get("socketPath", data.get("socketPath"))
             service = item.get("service")
             lines.append(
                 f"config {name}: expected={expectation} type={kind} enabled={enabled} "
-                f"mode={mode:o} healthPort={port}"
+                f"mode={mode:o} healthPort={display_port}"
             )
             if service:
                 service_name = str(service)
                 lines.append(f"service {name}: {service_is_active(service_name)} ({service_name})")
                 lines.append(f"service_enabled {name}: {service_enabled(service_name)}")
             health_probe_line: str | None = None
-            if isinstance(port, int):
-                probe = probe_health(port, name)
+            if isinstance(probe_port, int):
+                probe = probe_health(probe_port, name)
                 health_probe_line = probe
                 if expectation == "on_demand":
                     lines.append(f"health {name}: on_demand_ok {probe.replace('FAIL ', 'down ')}")
