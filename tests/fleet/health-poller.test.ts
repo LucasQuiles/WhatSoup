@@ -1445,6 +1445,147 @@ describe('HealthPoller', () => {
     poller.stop();
   });
 
+  // ---- structured protocol-version capture, exercised through the real
+  // emission path (bond-revocation investigation, 2026-08-17).
+  //
+  // A parser-only suite cannot prove the field is wired: deleting the
+  // pushProtocolVersionEvidence call in appendLifecycleEvidence left the
+  // dedicated suite fully green. These three tests go through HealthPoller and
+  // assert on the evidence string actually handed to emitAlert, so removing
+  // that call turns them red.
+
+  it('emits the protocol version as integer components in real logged-out evidence', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({
+        status: 'unhealthy',
+        whatsapp: {
+          connected: false,
+          connection: {
+            state: 'disconnected',
+            auth_failure_class: 'serverside_logout_irreversible',
+            last_status_code: 401,
+            last_disconnect_reason: 'loggedOut',
+            reconnect_phase: 'backoff',
+            reconnect_attempts: 0,
+          },
+          credential_lifecycle: { latestBaileysVersion: '2.3000.1043857760' },
+        },
+      }),
+    });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}));
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    for (const component of [
+      'baileys_protocol_version_major=2',
+      'baileys_protocol_version_minor=3000',
+      'baileys_protocol_version_patch=1043857760',
+    ]) {
+      expect(alertFns.emitAlert).toHaveBeenCalledWith(
+        'remote-1',
+        'instance_logged_out',
+        'whatsoup@remote-1 appears logged out',
+        expect.stringContaining(component),
+        'critical',
+        serverRevokedAssetMatcher(),
+      );
+    }
+
+    // The whole point of the change: the version must NOT be swallowed by the
+    // generic phone redactor, which is what `[REDACTED_PHONE]` indicated.
+    const evidence = alertFns.emitAlert.mock.calls
+      .filter((call: unknown[]) => call[1] === 'instance_logged_out')
+      .map((call: unknown[]) => String(call[3]))
+      .join('\n');
+    expect(evidence).not.toContain('baileys_protocol_version=absent');
+    expect(evidence).not.toContain('baileys_protocol_version=malformed');
+
+    poller.stop();
+  });
+
+  it('reports an unparseable protocol version as malformed, not absent', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({
+        status: 'unhealthy',
+        whatsapp: {
+          connected: false,
+          connection: {
+            state: 'disconnected',
+            auth_failure_class: 'serverside_logout_irreversible',
+            last_status_code: 401,
+            last_disconnect_reason: 'loggedOut',
+            reconnect_phase: 'backoff',
+            reconnect_attempts: 0,
+          },
+          credential_lifecycle: { latestBaileysVersion: 'not-a-version' },
+        },
+      }),
+    });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}));
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(alertFns.emitAlert).toHaveBeenCalledWith(
+      'remote-1',
+      'instance_logged_out',
+      'whatsoup@remote-1 appears logged out',
+      expect.stringContaining('baileys_protocol_version=malformed'),
+      'critical',
+      serverRevokedAssetMatcher(),
+    );
+
+    poller.stop();
+  });
+
+  it('reports a missing protocol version as absent, not malformed', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({
+        status: 'unhealthy',
+        whatsapp: {
+          connected: false,
+          connection: {
+            state: 'disconnected',
+            auth_failure_class: 'serverside_logout_irreversible',
+            last_status_code: 401,
+            last_disconnect_reason: 'loggedOut',
+            reconnect_phase: 'backoff',
+            reconnect_attempts: 0,
+          },
+          credential_lifecycle: { lastOpenAt: '2026-08-17T00:00:00.000Z' },
+        },
+      }),
+    });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}));
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(alertFns.emitAlert).toHaveBeenCalledWith(
+      'remote-1',
+      'instance_logged_out',
+      'whatsoup@remote-1 appears logged out',
+      expect.stringContaining('baileys_protocol_version=absent'),
+      'critical',
+      serverRevokedAssetMatcher(),
+    );
+
+    poller.stop();
+  });
+
   it('classifies pairing_required as critical physical-intervention evidence', async () => {
     silenceManager.isInstanceSilenced.mockReturnValue(true);
     mockFetch.mockResolvedValue({

@@ -77,6 +77,77 @@ const ALERT_SOURCES_SUPERSEDED_BY_LOGGED_OUT = new Set([
 const KEYED_PHONE_RE = /\b(phone|phone[_-]?number|msisdn|line)(\s*[:=]\s*|\s+)(\+?\d{10,16})\b/gi;
 const CONTEXT_PHONE_RE = /\b(for)(\s+)(\+?\d{10,16})\b/gi;
 const PHONE_LIKE_RE = /(^|[^\w])(\+?(?:\d[\d\s().-]{8,}\d))(?![\w])/g;
+
+/**
+ * Structured WhatsApp protocol version. Each component is a bounded
+ * non-negative integer, so a rendered `major.minor.patch` string is a pure
+ * function of validated numbers rather than pass-through text.
+ */
+export interface BaileysProtocolVersion {
+  major: number;
+  minor: number;
+  patch: number;
+}
+
+/**
+ * Component ceilings. Observed production versions look like `2.3000.1043857760`
+ * (patch is a build counter), so the patch bound is generous while still
+ * bounding length; major/minor stay small. These exist to REFUSE malformed or
+ * oversized input, not to normalise it — a value outside the bounds is not a
+ * protocol version and must be reported unobserved rather than rendered.
+ */
+const BAILEYS_VERSION_MAX_MAJOR = 9_999;
+const BAILEYS_VERSION_MAX_MINOR = 999_999;
+const BAILEYS_VERSION_MAX_PATCH = 999_999_999_999;
+/** Exactly three dot-separated digit groups; no signs, spaces, or suffixes. */
+const BAILEYS_PROTOCOL_VERSION_RE = /^(\d{1,4})\.(\d{1,6})\.(\d{1,12})$/;
+
+/**
+ * Parse a raw protocol-version value into bounded integers, or null when it is
+ * anything else. Only a bare three-part numeric triple is accepted, so free
+ * text and version-like strings carrying extra content are refused.
+ *
+ * This accepts a BOUNDED SUBSET of the canonical transport contract in
+ * `src/transport/baileys-version.ts` (`parsePinnedBaileysVersion`), which takes
+ * any three dot-separated safe non-negative integers with no ceilings. The
+ * subset is deliberate — the ceilings below are input hygiene for an
+ * alert-emission path — but it is NOT parity, and must not be described as
+ * parity. Known divergences, all transport-accepted and refused here:
+ * `99999.1.1`, `2.9999999.1`, `2.3000.9999999999999`.
+ *
+ * An earlier revision went further and added a digit-shape test to tell a
+ * version from a dotted phone number. That was wrong in both directions: it
+ * rejected transport-valid `2.2413.1` and the documented pin `2.3000.1021`
+ * while accepting phone-shaped `1.41555.50123`. Shape cannot separate the two,
+ * so the test is gone.
+ *
+ * What splitting into components does and does NOT buy: emitting integers
+ * rather than a rejoined dotted string stops the generic dotted-run redactor
+ * from mangling a legitimate version. It does NOT sanitise the value and does
+ * NOT establish provenance — `1.2.14155550123` still yields
+ * `..._patch=14155550123`. Only a trusted, runtime-validated socket-version
+ * receipt propagated from transport can provide that, and this function is not
+ * one. Treat it as a reader of a health string, nothing stronger.
+ */
+export function parseBaileysProtocolVersion(value: unknown): BaileysProtocolVersion | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  // Bound the input before regex work so a pathological string cannot be
+  // scanned at length.
+  if (trimmed.length === 0 || trimmed.length > 32) return null;
+  const match = BAILEYS_PROTOCOL_VERSION_RE.exec(trimmed);
+  if (match === null) return null;
+  const major = Number(match[1]);
+  const minor = Number(match[2]);
+  const patch = Number(match[3]);
+  if (!Number.isSafeInteger(major) || !Number.isSafeInteger(minor) || !Number.isSafeInteger(patch)) {
+    return null;
+  }
+  if (major > BAILEYS_VERSION_MAX_MAJOR) return null;
+  if (minor > BAILEYS_VERSION_MAX_MINOR) return null;
+  if (patch > BAILEYS_VERSION_MAX_PATCH) return null;
+  return { major, minor, patch };
+}
 const BEARER_SECRET_RE = /\b(Bearer\s+)[A-Za-z0-9._~+/=-]{12,}/gi;
 const KEYED_SECRET_RE = /\b(token|secret|password|passphrase|api[_-]?key|client[_-]?secret|access[_-]?token|refresh[_-]?token|authorization|cookie)=([^\s,;]+)/gi;
 const PEM_PRIVATE_KEY_RE = /-----BEGIN [^-]+ PRIVATE KEY-----[\s\S]*?-----END [^-]+ PRIVATE KEY-----/g;
@@ -1443,6 +1514,7 @@ export class HealthPoller {
 
   private appendLifecycleEvidence(evidence: string[], lifecycle: Record<string, unknown> | null): void {
     if (!lifecycle) return;
+    this.pushProtocolVersionEvidence(evidence, lifecycle['latestBaileysVersion']);
     this.pushEvidenceField(evidence, 'baileys_version', lifecycle['latestBaileysVersion']);
     this.pushEvidenceField(evidence, 'lifecycle_connect_started_at', lifecycle['connectStartedAt']);
     this.pushEvidenceField(evidence, 'lifecycle_last_open_at', lifecycle['lastOpenAt']);
@@ -1536,6 +1608,62 @@ export class HealthPoller {
       evidence.push(`auth_bond_backup_last_restore_source_present=${String(typeof restoreSource === 'string' && restoreSource.length > 0)}`);
       this.pushEvidenceField(evidence, 'auth_bond_backup_last_restore_error', backup['last_restore_error'] ?? backup['lastRestoreError'], 180);
     }
+  }
+
+  /**
+   * Emit the WhatsApp protocol version as a STRUCTURED, validated field.
+   *
+   * The generic evidence redactor treats a dotted run of 10-15 digits as a
+   * phone number, and a real protocol version such as `2.3000.1043857760`
+   * carries exactly 15 digits across dotted groups — so it was rendered as
+   * `[REDACTED_PHONE]` in every alert. That is the one field a client-protocol
+   * revocation investigation needs most, and it was destroyed at emission
+   * (verified live: seven bond revocations all reported the version as
+   * `[REDACTED_PHONE]`). The Python redactor carries a dotted-version exemption
+   * — `deploy/scripts/lib/bot_errors_redaction.py`, `total_digits > 15 or
+   * longest_run >= 5`, confirmed by running it against the real evidence string
+   * on both current main and the deployed build — while this TypeScript path
+   * never received it, so the two sides had drifted despite being nominally
+   * parity-checked.
+   *
+   * The fix is deliberately NOT a numeric-redaction loophole. Widening the
+   * phone rule would weaken it for every field. Instead this parses the raw
+   * value into three BOUNDED INTEGERS and re-renders the string from those
+   * integers. The emitted text is therefore a pure function of validated
+   * numbers and cannot carry attacker- or peer-controlled content, so it does
+   * not need — and must not get — a text-redaction exemption. Anything that
+   * does not parse as a bounded triple is refused and reported as unobserved,
+   * never passed through.
+   *
+   * The raw `baileys_version` field continues to flow through the ordinary
+   * redactor unchanged; generic text redaction is untouched.
+   */
+  private pushProtocolVersionEvidence(evidence: string[], value: unknown): void {
+    const parsed = parseBaileysProtocolVersion(value);
+    if (parsed === null) {
+      // Never silently dropped, and never collapsed: an investigation must be
+      // able to tell "the host reported no version" from "the host reported
+      // something we could not parse". A single `unobserved` bucket hid that
+      // difference and made a capture bug look like an absent field.
+      const status = value === undefined || value === null ? 'absent' : 'malformed';
+      evidence.push(`baileys_protocol_version=${status}`);
+      return;
+    }
+    // Emitted as integer components, deliberately NOT re-joined into a dotted
+    // string, so the generic dotted-run redactor cannot mangle a legitimate
+    // version. This is a redaction-survival measure ONLY — it does not sanitise
+    // the value or establish provenance. See parseBaileysProtocolVersion.
+    //
+    // KNOWN LIMIT (#2386): everything pushed onto `evidence` is confined by
+    // emitAlert -> buildBotErrorsEvent -> confineAlertContent into
+    // {failureClass, length, correlationDigest} before it reaches the durable
+    // outbox, so these fields are NOT operator-visible through that path. Only
+    // a typed, allowlisted diagnostic field in the outbox schema — ideally the
+    // socket-version receipt — makes the version durable. Until that exists,
+    // this improves in-process evidence and nothing downstream of confinement.
+    evidence.push(`baileys_protocol_version_major=${parsed.major}`);
+    evidence.push(`baileys_protocol_version_minor=${parsed.minor}`);
+    evidence.push(`baileys_protocol_version_patch=${parsed.patch}`);
   }
 
   private pushEvidenceField(evidence: string[], key: string, value: unknown, maxLength = 120): void {
