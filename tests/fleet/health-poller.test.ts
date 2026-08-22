@@ -104,6 +104,9 @@ function makeOperationalFallbackHealth(overrides: {
   providerExecutionActive?: boolean;
   providerExecutionPending?: number;
   providerExecutionOldestWaitMs?: number;
+  providerExecutionActiveAgeMs?: number;
+  providerExecutionActivePhase?: string;
+  providerExecutionProgressAgeMs?: number;
   recoveryOutstanding?: number;
   recoveryBlockedUnsafe?: number;
   recoveryQuarantinedDelivery?: number;
@@ -142,6 +145,9 @@ function makeOperationalFallbackHealth(overrides: {
           active: overrides.providerExecutionActive ?? false,
           pending: overrides.providerExecutionPending ?? 0,
           oldestWaitMs: overrides.providerExecutionOldestWaitMs ?? 0,
+          activeAgeMs: overrides.providerExecutionActiveAgeMs ?? 0,
+          activePhase: overrides.providerExecutionActivePhase ?? 'executing',
+          progressAgeMs: overrides.providerExecutionProgressAgeMs ?? 0,
           pressureActive: overrides.pressureActive ?? false,
         },
         turnRecoveryOutstanding: overrides.recoveryOutstanding ?? 0,
@@ -688,6 +694,9 @@ describe('HealthPoller', () => {
         providerExecutionActive: true,
         providerExecutionPending: 4,
         providerExecutionOldestWaitMs: 87_000,
+        providerExecutionActiveAgeMs: 91_000,
+        providerExecutionActivePhase: 'terminalizing',
+        providerExecutionProgressAgeMs: 43_000,
         recoveryBlockedUnsafe: 6,
         recoveryQuarantinedDelivery: 1,
         controlPeerConfigured: false,
@@ -710,6 +719,9 @@ describe('HealthPoller', () => {
     expect(alertEvidence).toContain('provider_execution_active=true');
     expect(alertEvidence).toContain('provider_execution_pending=4');
     expect(alertEvidence).toContain('provider_execution_oldest_wait_ms=87000');
+    expect(alertEvidence).toContain('provider_execution_active_age_ms=91000');
+    expect(alertEvidence).toContain('provider_execution_active_phase=terminalizing');
+    expect(alertEvidence).toContain('provider_execution_progress_age_ms=43000');
     expect(alertEvidence).toContain('turn_recovery_blocked_unsafe=6');
     expect(alertEvidence).toContain('turn_recovery_quarantined_delivery=1');
     expect(alertEvidence).toContain('control_peer_configured=false');

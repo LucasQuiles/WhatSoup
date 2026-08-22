@@ -1806,6 +1806,9 @@ export class HealthPoller {
     const providerExecutionActive = providerExecution?.['active'];
     const providerExecutionPending = this.readNumber(providerExecution?.['pending']);
     const providerExecutionOldestWaitMs = this.readNumber(providerExecution?.['oldestWaitMs']);
+    const providerExecutionActiveAgeMs = this.readNumber(providerExecution?.['activeAgeMs']);
+    const providerExecutionActivePhase = providerExecution?.['activePhase'];
+    const providerExecutionProgressAgeMs = this.readNumber(providerExecution?.['progressAgeMs']);
     const providerPressure = providerExecution?.['pressureActive'];
     const recoveryOutstanding = this.readNumber(runtimeAgent?.['turnRecoveryOutstanding']);
     const recoveryBlockedUnsafe = this.readNumber(runtimeAgent?.['turnRecoveryBlockedUnsafe']);
@@ -1872,6 +1875,9 @@ export class HealthPoller {
       `provider_execution_active=${String(providerExecutionActive ?? 'unknown')}`,
       `provider_execution_pending=${providerExecutionPending === null ? 'unknown' : String(providerExecutionPending)}`,
       `provider_execution_oldest_wait_ms=${providerExecutionOldestWaitMs === null ? 'unknown' : String(providerExecutionOldestWaitMs)}`,
+      `provider_execution_active_age_ms=${providerExecutionActiveAgeMs === null ? 'unknown' : String(providerExecutionActiveAgeMs)}`,
+      `provider_execution_active_phase=${providerExecutionActivePhase ?? 'unknown'}`,
+      `provider_execution_progress_age_ms=${providerExecutionProgressAgeMs === null ? 'unknown' : String(providerExecutionProgressAgeMs)}`,
       `provider_execution_pressure_active=${String(providerPressure ?? 'unknown')}`,
       `turn_recovery_outstanding=${recoveryOutstanding === null ? 'unknown' : String(recoveryOutstanding)}`,
       `turn_recovery_blocked_unsafe=${recoveryBlockedUnsafe === null ? 'unknown' : String(recoveryBlockedUnsafe)}`,
