@@ -366,6 +366,19 @@ def test_contract_state_is_recursively_immutable() -> None:
     assert _mod.claim_row(contract, "auth_bond.status")["min_projection"] == "diagnostic"
 
 
+def test_contract_snapshot_is_plain_json_and_detached() -> None:
+    # The frozen contract itself is not JSON-serializable (mapping proxies);
+    # the official snapshot operation returns a plain, mutable, detached copy.
+    contract = _mod.load_contract()
+    snapshot = _mod.contract_snapshot(contract)
+    serialized = json.dumps(snapshot, sort_keys=True)
+    assert len(serialized) > 0
+    snapshot["digest"] = "tampered"
+    assert contract["digest"] != "tampered"
+    assert isinstance(snapshot["docs"], dict)
+    assert isinstance(snapshot["canonical_outcomes"], list)
+
+
 def test_lookups_return_defensive_copies() -> None:
     # Digest-bound state must not be mutable through the lookup API: a caller
     # mutating a returned row must not poison later reads.

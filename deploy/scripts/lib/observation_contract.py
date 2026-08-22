@@ -293,6 +293,14 @@ def _thaw(value: Any) -> Any:
     return value
 
 
+def contract_snapshot(contract: Mapping) -> dict:
+    """Plain JSON-compatible, mutable, detached deep copy of the whole
+    contract — the official cross-language snapshot operation (TS:
+    ``contractSnapshot``). The frozen contract itself stays the digest
+    authority and is not JSON-serializable by design."""
+    return _thaw(contract)
+
+
 def load_contract(contract_dir: Optional[Path] = None) -> Mapping:
     """Read the five contract files from ``contract_dir`` and build the contract.
 

@@ -14,6 +14,7 @@ import {
   buildObservationContract,
   claimRow,
   contractDigest,
+  contractSnapshot,
   defaultContractDir,
   loadObservationContract,
   projectOutcome,
@@ -574,6 +575,53 @@ except TypeError:
       'min_projection'
     ] = 'diagnotic';
     expect(() => buildObservationContract(mutated)).toThrow(ObservationContractPortError);
+  });
+
+  it('produces byte-identical whole-contract snapshots on both sides', () => {
+    // The frozen/proxied contract representations differ across languages;
+    // the official snapshot operation must return plain JSON-compatible
+    // copies with identical canonical bytes.
+    const docs = loadCommittedDocs();
+    const contract = buildObservationContract(docs);
+    const snapshot = contractSnapshot(contract);
+    // Plain JSON-compatible: serializes without error, mutable, detached.
+    const serialized = JSON.stringify(snapshot);
+    expect(serialized.length).toBeGreaterThan(0);
+    (snapshot as { digest: string }).digest = 'tampered';
+    expect(contract.digest).not.toBe('tampered');
+
+    const tsCanonical = execFileSync('python3', ['-c', `
+import sys, json
+data = json.loads(sys.stdin.read())
+sys.stdout.write(json.dumps(data, sort_keys=True, separators=(",", ":")))
+`], { input: JSON.stringify(contractSnapshot(contract)), encoding: 'utf8' }).trim();
+    const pyCanonical = python(
+      `
+contract = oc.build_contract(docs)
+snapshot = oc.contract_snapshot(contract)
+json.dumps(snapshot)  # plain JSON-compatible on this side too
+sys.stdout.write(json.dumps(snapshot, sort_keys=True, separators=(",", ":")))
+`,
+      docs,
+    );
+    expect(tsCanonical).toBe(pyCanonical);
+  });
+
+  it('rejects direct contract mutation at the type level', () => {
+    const docs = loadCommittedDocs();
+    const contract = buildObservationContract(docs);
+    expect(() => {
+      // @ts-expect-error -- deliberate negative assertion: digest-bound state is deep-readonly at compile time; expires 2099-12-31
+      contract.digest = 'tampered';
+    }).toThrow();
+    expect(() => {
+      // @ts-expect-error -- deliberate negative assertion: frozen array cannot be pushed to; expires 2099-12-31
+      contract.canonicalOutcomes.push('tampered');
+    }).toThrow();
+    expect(() => {
+      // @ts-expect-error -- deliberate negative assertion: nested claim rows are readonly; expires 2099-12-31
+      contract.claims['identity.instance_name']['min_projection'] = 'public';
+    }).toThrow();
   });
 
   it('anchors the TS default contract dir to the module, not the cwd', () => {

@@ -91,6 +91,19 @@ export interface ObservationContract {
   authorityTiers: string[];
 }
 
+/** Deep-readonly mapped type so the compile-time API matches the runtime
+ * deep-freeze — consumer writes fail at typecheck, not first at runtime. */
+export type DeepReadonly<T> = T extends (infer U)[]
+  ? readonly DeepReadonly<U>[]
+  : T extends object
+    ? { readonly [K in keyof T]: DeepReadonly<T[K]> }
+    : T;
+
+/** What the builders return: digest-bound state, immutable at both the type
+ * level and (via deepFreeze) at runtime. Use `contractSnapshot` or the lookup
+ * accessors for mutable copies. */
+export type ObservationContractView = DeepReadonly<ObservationContract>;
+
 export function defaultContractDir(): string {
   // Module-anchored (lib/ -> scripts/ -> <repo root>), mirroring Python's
   // `default_contract_dir` — the default must never depend on process.cwd().
@@ -284,7 +297,7 @@ function buildKeyed(
 
 /** Ported from `observation_contract.py:build_contract` — pure over parsed
  * docs so the lockstep test can exercise mutated document sets. */
-export function buildObservationContract(docs: Record<string, unknown>): ObservationContract {
+export function buildObservationContract(docs: Record<string, unknown>): ObservationContractView {
   const digest = contractDigest(docs); // also validates presence/shape of every doc
   // Build the returned structure from the NORMALIZED documents (mirrors the
   // Python side): req-obs-02 covers returned data, so consumers on both sides
@@ -350,7 +363,37 @@ export function buildObservationContract(docs: Record<string, unknown>): Observa
     claims,
     adapters,
     authorityTiers: tiers,
-  });
+  }) as ObservationContractView;
+}
+
+/** Canonical cross-language interchange shape of a contract snapshot: one
+ * snake_case key set, byte-identical between `contractSnapshot` here and
+ * Python's `contract_snapshot` under canonical JSON encoding. */
+export interface ObservationContractSnapshot {
+  digest: string;
+  docs: Record<ContractFileName, Record<string, unknown>>;
+  canonical_outcomes: string[];
+  surfaces: Record<string, ContractSurface>;
+  claims: Record<string, Record<string, unknown>>;
+  adapters: Record<string, Record<string, unknown>>;
+  authority_tiers: string[];
+}
+
+/** Plain JSON-compatible, mutable, detached deep copy of the whole contract
+ * in the canonical interchange shape — the official cross-language snapshot
+ * operation (Python: `contract_snapshot`). The frozen view itself stays the
+ * digest authority; in-language field idioms stop at this boundary. */
+export function contractSnapshot(contract: ObservationContractView): ObservationContractSnapshot {
+  const plain = structuredClone(contract) as ObservationContract;
+  return {
+    digest: plain.digest,
+    docs: plain.docs,
+    canonical_outcomes: plain.canonicalOutcomes,
+    surfaces: plain.surfaces,
+    claims: plain.claims,
+    adapters: plain.adapters,
+    authority_tiers: plain.authorityTiers,
+  };
 }
 
 /** Digest-bound state is immutable: a consumer must never be able to change
@@ -367,7 +410,7 @@ function deepFreeze<T>(value: T): T {
 }
 
 /** Read the five contract files and build the contract, fail-closed. */
-export function loadObservationContract(contractDir?: string): ObservationContract {
+export function loadObservationContract(contractDir?: string): ObservationContractView {
   const resolved = contractDir ?? defaultContractDir();
   const docs: Record<string, unknown> = {};
   for (const name of CONTRACT_FILE_NAMES) {
@@ -400,7 +443,7 @@ export function loadObservationContract(contractDir?: string): ObservationContra
 /** Project one legacy verdict to its canonical row, or throw — nothing here
  * defaults (mirrors `observation_contract.py:project_outcome`). */
 export function projectOutcome(
-  contract: ObservationContract,
+  contract: ObservationContractView,
   surface: string,
   rawValue: string,
 ): ProjectionRow {
@@ -416,22 +459,25 @@ export function projectOutcome(
     );
   }
   // Defensive copy: digest-bound state must not be mutable through lookups.
-  return structuredClone(table.rows[rawValue]!);
+  return structuredClone(table.rows[rawValue]!) as ProjectionRow;
 }
 
-export function claimRow(contract: ObservationContract, claimId: string): Record<string, unknown> {
+export function claimRow(
+  contract: ObservationContractView,
+  claimId: string,
+): Record<string, unknown> {
   if (!Object.hasOwn(contract.claims, claimId)) {
     throw new ObservationContractPortError(`unknown claim: ${claimId}`);
   }
-  return structuredClone(contract.claims[claimId]!);
+  return structuredClone(contract.claims[claimId]!) as Record<string, unknown>;
 }
 
 export function adapterRow(
-  contract: ObservationContract,
+  contract: ObservationContractView,
   adapterId: string,
 ): Record<string, unknown> {
   if (!Object.hasOwn(contract.adapters, adapterId)) {
     throw new ObservationContractPortError(`unknown adapter: ${adapterId}`);
   }
-  return structuredClone(contract.adapters[adapterId]!);
+  return structuredClone(contract.adapters[adapterId]!) as Record<string, unknown>;
 }
