@@ -1472,11 +1472,26 @@ export class TurnRecoveryStore {
     return this.statements.reclaimDeadDeliveryRecoveryJob.run(jobId).changes === 1;
   }
 
-  reassignPendingTurnRecoveryJob(
+  /**
+   * `reassignPendingTurnRecoveryJob` and `reassignBlockedTurnRecoveryJob` ran
+   * the identical epoch-fenced reassignment: same argument validation, same
+   * source/owner identity guards, same idempotent-replay short circuit, same
+   * nine-argument statement call. Only the required state, the prepared
+   * statement and two messages differed. Parameterising keeps every guard,
+   * ordering and message byte-identical while leaving exactly ONE place to
+   * change the fencing rules, which are safety-critical.
+   */
+  private reassignTurnRecoveryJobInState(
     jobId: number,
     currentOwner: TurnRecoveryOwnerIdentity,
     newOwner: TurnRecoveryOwnerIdentity,
     fence: TurnRecoveryAssignmentFence,
+    spec: {
+      requiredState: InternalTurnRecoveryJobRow['state'];
+      statement: PreparedStatement;
+      wrongStateMessage: string;
+      fenceLostMessage: string;
+    },
   ): ReassignTurnRecoveryJobResult {
     validatePositiveSafeInteger(jobId, 'Recovery job ID');
     validateTurnRecoveryOwnerIdentity(currentOwner);
@@ -1492,7 +1507,7 @@ export class TurnRecoveryStore {
       throw new Error('Recovery source and assigned owner identities must differ');
     }
     if (
-      current.state === 'pending' &&
+      current.state === spec.requiredState &&
       current.assigned_owner_logical_turn_id === newOwner.logicalTurnId &&
       current.assigned_owner_manager_id === newOwner.managerId &&
       current.assigned_owner_generation === newOwner.generation &&
@@ -1513,10 +1528,10 @@ export class TurnRecoveryStore {
     ) {
       throw new Error('Recovery job may only be changed by its assigned recovery owner');
     }
-    if (current.state !== 'pending') {
-      throw new Error('Only pending recovery work can be reassigned');
+    if (current.state !== spec.requiredState) {
+      throw new Error(spec.wrongStateMessage);
     }
-    const row = this.statements.reassignTurnRecoveryJob.get(
+    const row = spec.statement.get(
       newOwner.logicalTurnId,
       newOwner.managerId,
       newOwner.generation,
@@ -1527,7 +1542,7 @@ export class TurnRecoveryStore {
       fence.claimEpoch,
       fence.assignmentEpoch,
     ) as InternalTurnRecoveryJobRow | undefined;
-    if (!row) throw new Error('Recovery reassignment lost its pending epoch fence');
+    if (!row) throw new Error(spec.fenceLostMessage);
     return {
       applied: true,
       jobId,
@@ -1536,68 +1551,32 @@ export class TurnRecoveryStore {
     };
   }
 
+  reassignPendingTurnRecoveryJob(
+    jobId: number,
+    currentOwner: TurnRecoveryOwnerIdentity,
+    newOwner: TurnRecoveryOwnerIdentity,
+    fence: TurnRecoveryAssignmentFence,
+  ): ReassignTurnRecoveryJobResult {
+    return this.reassignTurnRecoveryJobInState(jobId, currentOwner, newOwner, fence, {
+      requiredState: 'pending',
+      statement: this.statements.reassignTurnRecoveryJob,
+      wrongStateMessage: 'Only pending recovery work can be reassigned',
+      fenceLostMessage: 'Recovery reassignment lost its pending epoch fence',
+    });
+  }
+
   reassignBlockedTurnRecoveryJob(
     jobId: number,
     currentOwner: TurnRecoveryOwnerIdentity,
     newOwner: TurnRecoveryOwnerIdentity,
     fence: TurnRecoveryAssignmentFence,
   ): ReassignTurnRecoveryJobResult {
-    validatePositiveSafeInteger(jobId, 'Recovery job ID');
-    validateTurnRecoveryOwnerIdentity(currentOwner);
-    validateTurnRecoveryOwnerIdentity(newOwner);
-    validateRecoveryAssignmentFence(fence);
-    const current = this.getInternalTurnRecoveryJob(jobId);
-    if (!current) throw new Error('Recovery job does not exist');
-    if (
-      current.source_logical_turn_id === newOwner.logicalTurnId &&
-      current.source_manager_id === newOwner.managerId &&
-      current.source_generation === newOwner.generation
-    ) {
-      throw new Error('Recovery source and assigned owner identities must differ');
-    }
-    if (
-      current.state === 'blocked_unsafe' &&
-      current.assigned_owner_logical_turn_id === newOwner.logicalTurnId &&
-      current.assigned_owner_manager_id === newOwner.managerId &&
-      current.assigned_owner_generation === newOwner.generation &&
-      current.claim_epoch === fence.claimEpoch &&
-      current.assignment_epoch === fence.assignmentEpoch + 1
-    ) {
-      return {
-        applied: false,
-        jobId,
-        assignedOwner: newOwner,
-        assignmentEpoch: current.assignment_epoch,
-      };
-    }
-    if (
-      current.assigned_owner_logical_turn_id !== currentOwner.logicalTurnId ||
-      current.assigned_owner_manager_id !== currentOwner.managerId ||
-      current.assigned_owner_generation !== currentOwner.generation
-    ) {
-      throw new Error('Recovery job may only be changed by its assigned recovery owner');
-    }
-    if (current.state !== 'blocked_unsafe') {
-      throw new Error('Only blocked unsafe recovery work can use blocked reassignment');
-    }
-    const row = this.statements.reassignBlockedTurnRecoveryJob.get(
-      newOwner.logicalTurnId,
-      newOwner.managerId,
-      newOwner.generation,
-      jobId,
-      currentOwner.logicalTurnId,
-      currentOwner.managerId,
-      currentOwner.generation,
-      fence.claimEpoch,
-      fence.assignmentEpoch,
-    ) as InternalTurnRecoveryJobRow | undefined;
-    if (!row) throw new Error('Blocked recovery reassignment lost its epoch fence');
-    return {
-      applied: true,
-      jobId,
-      assignedOwner: newOwner,
-      assignmentEpoch: row.assignment_epoch,
-    };
+    return this.reassignTurnRecoveryJobInState(jobId, currentOwner, newOwner, fence, {
+      requiredState: 'blocked_unsafe',
+      statement: this.statements.reassignBlockedTurnRecoveryJob,
+      wrongStateMessage: 'Only blocked unsafe recovery work can use blocked reassignment',
+      fenceLostMessage: 'Blocked recovery reassignment lost its epoch fence',
+    });
   }
 
   promoteBlockedTurnRecoveryJob(
