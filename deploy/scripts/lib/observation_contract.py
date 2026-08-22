@@ -85,6 +85,16 @@ REQUIRED_ADAPTER_FIELDS = (
 GENERATION_BINDINGS = frozenset(
     {"none", "config", "process", "credential", "process+credential"}
 )
+# Closed staleness vocabulary. `window_seconds` is CONDITIONAL on the kind:
+# only a fixed_window rule carries (and requires) an explicit window. An
+# event_bound or scheduler_deadline rule derives freshness from the producer,
+# so a window on one of those would describe a bound nothing enforces —
+# fail closed rather than let it read as an enforced freshness limit.
+STALENESS_KINDS = frozenset({"event_bound", "scheduler_deadline", "fixed_window"})
+_WINDOWED_STALENESS_KINDS = frozenset({"fixed_window"})
+# Declared property set: an undeclared key is rejected rather than ignored, so
+# a misspelled window (`window_secs`) cannot silently disable the bound.
+_STALENESS_KEYS = frozenset({"kind", "window_seconds", "note"})
 PROJECTION_SCOPES = frozenset({"diagnostic", "public", "not_applicable"})
 ADAPTER_STATUSES = frozenset({"available", "gated", "producer_pending"})
 
@@ -322,14 +332,50 @@ def _validate_authority_metadata(claims: dict, adapters: dict, tiers: list[str])
                 f"the closed vocabulary {sorted(GENERATION_BINDINGS)}"
             )
         rule = claim["staleness_rule"]
-        if not isinstance(rule, Mapping) or not isinstance(rule.get("kind"), str) or not rule["kind"]:
+        if not isinstance(rule, Mapping):
             raise ObservationContractError(
-                f"claim {claim_id}: staleness_rule must be an object with a non-empty string kind"
+                f"claim {claim_id}: staleness_rule must be an object"
             )
-        window = rule.get("window_seconds")
-        if window is not None and (isinstance(window, bool) or not isinstance(window, int)):
+        undeclared = sorted(set(rule) - _STALENESS_KEYS)
+        if undeclared:
             raise ObservationContractError(
-                f"claim {claim_id}: staleness_rule.window_seconds must be an integer when present"
+                f"claim {claim_id}: staleness_rule has undeclared propert(ies) {undeclared} "
+                f"(declared: {sorted(_STALENESS_KEYS)})"
+            )
+        kind = rule.get("kind")
+        if not isinstance(kind, str) or kind not in STALENESS_KINDS:
+            raise ObservationContractError(
+                f"claim {claim_id}: staleness_rule.kind {kind!r} outside the closed "
+                f"vocabulary {sorted(STALENESS_KINDS)}"
+            )
+        if "note" in rule and not isinstance(rule["note"], str):
+            raise ObservationContractError(
+                f"claim {claim_id}: staleness_rule.note must be a string when present"
+            )
+        # Presence, not non-null: an explicit ``"window_seconds": null`` is a
+        # declared window of no value and must fail on BOTH sides. Testing
+        # ``.get(...) is not None`` here would accept it while the TS reader
+        # (where ``null !== undefined``) rejects it — a divergent boundary.
+        has_window = "window_seconds" in rule
+        if kind in _WINDOWED_STALENESS_KINDS:
+            if not has_window:
+                raise ObservationContractError(
+                    f"claim {claim_id}: staleness_rule.kind {kind!r} requires window_seconds"
+                )
+            window = rule["window_seconds"]
+            if isinstance(window, bool) or not isinstance(window, int):
+                raise ObservationContractError(
+                    f"claim {claim_id}: staleness_rule.window_seconds must be an integer"
+                )
+            if window <= 0 or window > _MAX_DIGEST_INT:
+                raise ObservationContractError(
+                    f"claim {claim_id}: staleness_rule.window_seconds must be a positive "
+                    f"integer <= 2**53-1 (got {window})"
+                )
+        elif has_window:
+            raise ObservationContractError(
+                f"claim {claim_id}: staleness_rule.kind {kind!r} prohibits window_seconds "
+                f"(only {sorted(_WINDOWED_STALENESS_KINDS)} carry an explicit window)"
             )
         _string_list(claim["producing_adapters"], f"claim {claim_id} producing_adapters")
         _string_list(claim["cannot_establish"], f"claim {claim_id} cannot_establish")

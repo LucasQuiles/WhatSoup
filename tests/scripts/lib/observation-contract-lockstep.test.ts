@@ -703,6 +703,67 @@ except oc.ObservationContractError:
     }
   });
 
+  it('closes the staleness-rule vocabulary and window policy identically', () => {
+    // `window_seconds` is CONDITIONAL on `kind`: required-and-positive for
+    // fixed_window, prohibited for every other declared kind. Each case is
+    // asserted immediately below, at, and above the boundary, and BOTH readers
+    // must land on the same verdict — an accept/reject split here is a
+    // divergent contract, not a cosmetic difference.
+    //
+    // The integral-float case (`86400.0`) cannot ride this channel:
+    // JSON.stringify collapses it to `86400` before Python ever sees it, so
+    // its parity is asserted in deploy/scripts/tests/test_observation_contract.py.
+    const docs = loadCommittedDocs();
+    const cases: Array<[string, unknown, 'accept' | 'reject']> = [
+      ['null window on event_bound', { kind: 'event_bound', window_seconds: null }, 'reject'],
+      ['window prohibited on event_bound', { kind: 'event_bound', window_seconds: 3600 }, 'reject'],
+      ['window prohibited on scheduler_deadline', { kind: 'scheduler_deadline', window_seconds: 3600 }, 'reject'],
+      ['fixed_window missing window', { kind: 'fixed_window' }, 'reject'],
+      ['fixed_window zero', { kind: 'fixed_window', window_seconds: 0 }, 'reject'],
+      ['fixed_window negative', { kind: 'fixed_window', window_seconds: -1 }, 'reject'],
+      ['fixed_window one (lower bound)', { kind: 'fixed_window', window_seconds: 1 }, 'accept'],
+      ['fixed_window max safe integer', { kind: 'fixed_window', window_seconds: Number.MAX_SAFE_INTEGER }, 'accept'],
+      ['fixed_window above safe integer', { kind: 'fixed_window', window_seconds: Number.MAX_SAFE_INTEGER + 1 }, 'reject'],
+      ['fixed_window fractional', { kind: 'fixed_window', window_seconds: 86400.5 }, 'reject'],
+      ['fixed_window boolean', { kind: 'fixed_window', window_seconds: true }, 'reject'],
+      ['fixed_window string', { kind: 'fixed_window', window_seconds: '86400' }, 'reject'],
+      ['hyphenated kind', { kind: 'fixed-window', window_seconds: 86400 }, 'reject'],
+      ['uppercased kind', { kind: 'FIXED_WINDOW', window_seconds: 86400 }, 'reject'],
+      ['kind outside the closed vocabulary', { kind: 'bounded' }, 'reject'],
+      ['undeclared property', { kind: 'event_bound', surprise: 1 }, 'reject'],
+      ['non-string note', { kind: 'event_bound', note: 7 }, 'reject'],
+      ['string note', { kind: 'event_bound', note: 'ok' }, 'accept'],
+      ['bare event_bound', { kind: 'event_bound' }, 'accept'],
+      ['bare scheduler_deadline', { kind: 'scheduler_deadline' }, 'accept'],
+      ['fixed_window with note', { kind: 'fixed_window', window_seconds: 86400, note: 'n' }, 'accept'],
+    ];
+
+    for (const [label, rule, want] of cases) {
+      const mutated = JSON.parse(JSON.stringify(docs)) as Record<string, unknown>;
+      (mutated['claim-catalog.json'] as { claims: Array<Record<string, unknown>> }).claims[0]![
+        'staleness_rule'
+      ] = rule;
+
+      if (want === 'reject') {
+        expect(() => buildObservationContract(mutated), label).toThrow(ObservationContractPortError);
+      } else {
+        expect(() => buildObservationContract(mutated), label).not.toThrow();
+      }
+
+      const pyResult = python(
+        `
+try:
+    oc.build_contract(docs)
+    sys.stdout.write("no-error")
+except oc.ObservationContractError:
+    sys.stdout.write("failed-closed")
+`,
+        mutated,
+      );
+      expect(pyResult, label).toBe(want === 'reject' ? 'failed-closed' : 'no-error');
+    }
+  });
+
   it('anchors the TS default contract dir to the module, not the cwd', () => {
     // Python's default_contract_dir is module-anchored; the TS default must
     // resolve the same directory from ANY working directory.

@@ -86,6 +86,15 @@ const REQUIRED_ADAPTER_FIELDS = Object.freeze([
   'status',
 ] as const);
 const generationBindings = new Set(['none', 'config', 'process', 'credential', 'process+credential']);
+// Closed staleness vocabulary. `window_seconds` is CONDITIONAL on the kind:
+// only a fixed_window rule carries (and requires) an explicit window. An
+// event_bound or scheduler_deadline rule derives freshness from the producer,
+// so a window on one of those would describe a bound nothing enforces.
+// Mirrors STALENESS_KINDS / _WINDOWED_STALENESS_KINDS / _STALENESS_KEYS in
+// deploy/scripts/lib/observation_contract.py.
+const stalenessKinds = new Set(['event_bound', 'scheduler_deadline', 'fixed_window']);
+const windowedStalenessKinds = new Set(['fixed_window']);
+const stalenessKeys = new Set(['kind', 'window_seconds', 'note']);
 const projectionScopes = new Set(['diagnostic', 'public', 'not_applicable']);
 const adapterStatuses = new Set(['available', 'gated', 'producer_pending']);
 
@@ -122,15 +131,47 @@ function validateAuthorityMetadata(
       );
     }
     const rule = claim['staleness_rule'];
-    if (!isRecord(rule) || typeof rule['kind'] !== 'string' || rule['kind'].length === 0) {
+    if (!isRecord(rule)) {
+      throw new ObservationContractPortError(`claim ${claimId}: staleness_rule must be an object`);
+    }
+    const undeclared = Object.keys(rule)
+      .filter((key) => !stalenessKeys.has(key))
+      .sort();
+    if (undeclared.length > 0) {
       throw new ObservationContractPortError(
-        `claim ${claimId}: staleness_rule must be an object with a non-empty string kind`,
+        `claim ${claimId}: staleness_rule has undeclared propert(ies) ${JSON.stringify(undeclared)} ` +
+          `(declared: ${JSON.stringify([...stalenessKeys].sort())})`,
       );
     }
-    const window = rule['window_seconds'];
-    if (window !== undefined && (typeof window !== 'number' || !Number.isInteger(window))) {
+    const kind = rule['kind'];
+    if (typeof kind !== 'string' || !stalenessKinds.has(kind)) {
       throw new ObservationContractPortError(
-        `claim ${claimId}: staleness_rule.window_seconds must be an integer when present`,
+        `claim ${claimId}: staleness_rule.kind ${JSON.stringify(kind)} outside the closed vocabulary`,
+      );
+    }
+    if (Object.hasOwn(rule, 'note') && typeof rule['note'] !== 'string') {
+      throw new ObservationContractPortError(
+        `claim ${claimId}: staleness_rule.note must be a string when present`,
+      );
+    }
+    // Presence, not non-undefined: an explicit `"window_seconds": null` must
+    // fail here exactly as it does on the Python side.
+    const hasWindow = Object.hasOwn(rule, 'window_seconds');
+    if (windowedStalenessKinds.has(kind)) {
+      if (!hasWindow) {
+        throw new ObservationContractPortError(
+          `claim ${claimId}: staleness_rule.kind ${JSON.stringify(kind)} requires window_seconds`,
+        );
+      }
+      const window = rule['window_seconds'];
+      if (typeof window !== 'number' || !Number.isSafeInteger(window) || window <= 0) {
+        throw new ObservationContractPortError(
+          `claim ${claimId}: staleness_rule.window_seconds must be a positive integer <= 2**53-1`,
+        );
+      }
+    } else if (hasWindow) {
+      throw new ObservationContractPortError(
+        `claim ${claimId}: staleness_rule.kind ${JSON.stringify(kind)} prohibits window_seconds`,
       );
     }
     stringListField(claim['producing_adapters'], `claim ${claimId} producing_adapters`);

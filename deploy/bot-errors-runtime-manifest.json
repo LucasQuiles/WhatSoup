@@ -445,7 +445,7 @@
     },
     {
       "path": "deploy/scripts/lib/observation_contract.py",
-      "sha256": "ba66533c296ba08b532e3758501d9b7e54a1d5685301d09587d5ded06c285666",
+      "sha256": "8e57426900dcc1231752660d346bed54e879561e7b4eaa09995a89407311d535",
       "mustContain": [
         "contract_digest",
         "build_contract",

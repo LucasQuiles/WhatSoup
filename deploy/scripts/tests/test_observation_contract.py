@@ -416,11 +416,85 @@ def test_authority_vocabularies_are_closed() -> None:
 
 
 def test_staleness_rule_shape_is_validated() -> None:
-    for bad in ("not-a-mapping", {}, {"kind": 7}, {"kind": "bounded", "window_seconds": "soon"}):
+    for bad in ("not-a-mapping", {}, {"kind": 7}, {"kind": "fixed_window", "window_seconds": "soon"}):
         mutated = copy.deepcopy(_committed_docs())
         mutated["claim-catalog.json"]["claims"][0]["staleness_rule"] = bad
         with pytest.raises(_mod.ObservationContractError):
             _mod.build_contract(mutated)
+
+
+# `window_seconds` is CONDITIONAL on `kind`: required-and-positive for
+# fixed_window, prohibited for every other declared kind. Mirrored case-for-case
+# by the lockstep suite, which asserts the TS reader reaches the same verdict.
+_STALENESS_REJECTED = (
+    # Presence, not non-null: an explicit null must fail here exactly as it
+    # does in TS, where `null !== undefined`.
+    {"kind": "event_bound", "window_seconds": None},
+    {"kind": "event_bound", "window_seconds": 3600},
+    {"kind": "scheduler_deadline", "window_seconds": 3600},
+    {"kind": "fixed_window"},
+    {"kind": "fixed_window", "window_seconds": 0},
+    {"kind": "fixed_window", "window_seconds": -1},
+    {"kind": "fixed_window", "window_seconds": 2**53},
+    {"kind": "fixed_window", "window_seconds": 86400.5},
+    {"kind": "fixed_window", "window_seconds": True},
+    {"kind": "fixed-window", "window_seconds": 86400},
+    {"kind": "FIXED_WINDOW", "window_seconds": 86400},
+    {"kind": "bounded"},
+    {"kind": "event_bound", "surprise": 1},
+    {"kind": "event_bound", "note": 7},
+)
+_STALENESS_ACCEPTED = (
+    {"kind": "fixed_window", "window_seconds": 1},
+    {"kind": "fixed_window", "window_seconds": 2**53 - 1},
+    # Integral float: JSON `86400.0` parses to a Python float but to the
+    # integer 86400 in JS. build_contract normalizes before validating, so both
+    # readers accept it and return the same integer. This case cannot travel
+    # the lockstep channel (json.dumps/JSON.stringify collapse it), so its
+    # parity is pinned here.
+    {"kind": "fixed_window", "window_seconds": 86400.0},
+    {"kind": "event_bound", "note": "ok"},
+    {"kind": "event_bound"},
+    {"kind": "scheduler_deadline"},
+    {"kind": "fixed_window", "window_seconds": 86400, "note": "n"},
+)
+
+
+@pytest.mark.parametrize("rule", _STALENESS_REJECTED)
+def test_staleness_rule_boundaries_fail_closed(rule: object) -> None:
+    mutated = copy.deepcopy(_committed_docs())
+    mutated["claim-catalog.json"]["claims"][0]["staleness_rule"] = rule
+    with pytest.raises(_mod.ObservationContractError):
+        _mod.build_contract(mutated)
+
+
+@pytest.mark.parametrize("rule", _STALENESS_ACCEPTED)
+def test_staleness_rule_boundaries_accept_declared_shapes(rule: dict) -> None:
+    mutated = copy.deepcopy(_committed_docs())
+    claim_id = mutated["claim-catalog.json"]["claims"][0]["claim_id"]
+    mutated["claim-catalog.json"]["claims"][0]["staleness_rule"] = rule
+    built = _mod.build_contract(mutated)["claims"][claim_id]["staleness_rule"]
+    assert built["kind"] == rule["kind"]
+    if "window_seconds" in rule:
+        # Integral floats are canonicalized to int before validation, so the
+        # returned value is the same integer a TS consumer sees.
+        assert isinstance(built["window_seconds"], int)
+        assert built["window_seconds"] == int(rule["window_seconds"])
+    else:
+        assert "window_seconds" not in built
+
+
+def test_committed_staleness_rules_are_inside_the_closed_vocabulary() -> None:
+    # The tightening must not reject the data it governs.
+    contract = _mod.build_contract(_committed_docs())
+    for claim_id, claim in contract["claims"].items():
+        rule = claim["staleness_rule"]
+        assert rule["kind"] in _mod.STALENESS_KINDS, claim_id
+        if rule["kind"] == "fixed_window":
+            assert isinstance(rule["window_seconds"], int)
+            assert rule["window_seconds"] > 0, claim_id
+        else:
+            assert "window_seconds" not in rule, claim_id
 
 
 def test_claim_adapter_producer_symmetry_is_enforced() -> None:
