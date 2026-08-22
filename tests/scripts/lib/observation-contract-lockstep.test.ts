@@ -624,6 +624,29 @@ sys.stdout.write(json.dumps(snapshot, sort_keys=True, separators=(",", ":")))
     }).toThrow();
   });
 
+  it('holds the Array.isArray narrowing escape at runtime (documented type-level limit)', () => {
+    // Boundary of the compile-time guarantee, pinned deliberately:
+    // `Array.isArray` is unsound for readonly arrays — it narrows even a
+    // `readonly T[]` to a mutable array, so a `.push` behind that guard
+    // type-checks no matter how the payload is typed. deepFreeze is the
+    // authority on this path: the write throws at runtime.
+    const contract = buildObservationContract(loadCommittedDocs());
+    const producers = contract.claims['identity.instance_name']!['producing_adapters'];
+    expect(Array.isArray(producers)).toBe(true);
+    if (Array.isArray(producers)) {
+      expect(() => producers.push('tampered')).toThrow();
+    }
+    const docClaims = contract.docs['claim-catalog.json']['claims'];
+    if (Array.isArray(docClaims)) {
+      expect(() => docClaims.push({ claim_id: 'tampered' })).toThrow();
+    }
+    // Lookups and the snapshot are the sanctioned mutable paths.
+    expect(Array.isArray(contractSnapshot(contract).docs['claim-catalog.json']['claims'])).toBe(
+      true,
+    );
+    expect(claimRow(contract, 'identity.instance_name')['producing_adapters']).toEqual(producers);
+  });
+
   it('anchors the TS default contract dir to the module, not the cwd', () => {
     // Python's default_contract_dir is module-anchored; the TS default must
     // resolve the same directory from ANY working directory.

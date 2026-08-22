@@ -91,18 +91,47 @@ export interface ObservationContract {
   authorityTiers: string[];
 }
 
-/** Deep-readonly mapped type so the compile-time API matches the runtime
- * deep-freeze — consumer writes fail at typecheck, not first at runtime. */
-export type DeepReadonly<T> = T extends (infer U)[]
-  ? readonly DeepReadonly<U>[]
-  : T extends object
-    ? { readonly [K in keyof T]: DeepReadonly<T[K]> }
-    : T;
+/** Recursive readonly JSON value. Contract payloads are typed as this rather
+ * than `unknown`, because `unknown` loses immutability through ordinary
+ * narrowing: `if (Array.isArray(v)) v.push(...)` type-checks against
+ * `unknown` but not against `readonly ReadonlyJsonValue[]`. */
+export type ReadonlyJsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | readonly ReadonlyJsonValue[]
+  | { readonly [key: string]: ReadonlyJsonValue };
 
-/** What the builders return: digest-bound state, immutable at both the type
- * level and (via deepFreeze) at runtime. Use `contractSnapshot` or the lookup
- * accessors for mutable copies. */
-export type ObservationContractView = DeepReadonly<ObservationContract>;
+export type ReadonlyJsonObject = { readonly [key: string]: ReadonlyJsonValue };
+
+export interface ProjectionRowView {
+  readonly legacy_value: string;
+  readonly canonical: string;
+  readonly lossy: boolean;
+  readonly [extra: string]: ReadonlyJsonValue;
+}
+
+export interface ContractSurfaceView {
+  readonly domain: readonly string[];
+  readonly rows: { readonly [legacyValue: string]: ProjectionRowView };
+}
+
+/** What the builders return: digest-bound state, immutable at runtime via
+ * `deepFreeze` and — for direct declared-property and payload-property
+ * writes — at the type level too. Known type-level limit: `Array.isArray`
+ * is unsound for readonly arrays, so a `.push` behind that guard still
+ * compiles; the runtime freeze rejects it (pinned by the lockstep suite).
+ * Use `contractSnapshot` or the lookup accessors for mutable copies. */
+export interface ObservationContractView {
+  readonly digest: string;
+  readonly docs: { readonly [K in ContractFileName]: ReadonlyJsonObject };
+  readonly canonicalOutcomes: readonly string[];
+  readonly surfaces: { readonly [surfaceName: string]: ContractSurfaceView };
+  readonly claims: { readonly [claimId: string]: ReadonlyJsonObject };
+  readonly adapters: { readonly [adapterId: string]: ReadonlyJsonObject };
+  readonly authorityTiers: readonly string[];
+}
 
 export function defaultContractDir(): string {
   // Module-anchored (lib/ -> scripts/ -> <repo root>), mirroring Python's
