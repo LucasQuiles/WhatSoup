@@ -132,6 +132,20 @@ Production hosts can wrap the same read-only drift check with
 a BOT ERRORS event only when drift or checker failure is observed. Clean checks
 do not emit by default; use `--clear-on-ok` only for a deliberate recovery proof.
 
+Every invocation of `live-release-drift-alert.ts` prints exactly one structured
+JSON log record to stdout (in addition to `--json` printing the full result).
+The record is content-free: `schemaVersion`, `observedAt` (UTC),
+`invocationId`, a bounded `outcome` (`passed` / `drift` / `checker_failed` /
+`emit_failed`), `issueKinds` counts, a stable `conditionFingerprint`
+(domain-separated hash of the issue-kind set plus the manifest identity
+digest), `desiredReleaseDigest` / `observedReleaseDigest`, the `alert`
+emit status, and a `correlationDigest` — a domain-separated hash of the
+BOT ERRORS event id that can be joined against the emitted event without
+printing the id itself. Absolute paths, release names, instance labels, and
+issue messages never appear in the record. A persistent condition therefore
+produces one identical, deduplicable record shape per invocation instead of
+unbounded prose.
+
 Example one-shot command:
 
 ```bash
@@ -153,6 +167,17 @@ bash deploy/scripts/render-release-drift-launchd.sh \
   --home "$HOME" \
   --output /tmp/com.whatsoup.release-drift-check.plist
 ```
+
+The rendered job invokes `deploy/scripts/run-release-drift-schedule.sh`, which
+rotates the launchd log sink (`~/Library/Logs/whatsoup/release-drift-check.log`
+and `.err.log`) before exec'ing the observers under the pinned Node runtime.
+Rotation is size-bounded: a file over the cap (default 5242880 bytes) is
+archived with `mv`+`gzip` and at most five gzipped generations are kept per
+file (`--max-log-bytes` / `--keep-rotated-logs` on the renderer override both).
+Rotation failure is fail-visible — a `release-drift-log-rotation-failed`
+marker on stderr and a nonzero wrapper status when the log directory cannot be
+written — but it never skips the observation itself, and unrotated evidence is
+preserved in place.
 
 The renderer substitutes install-time placeholders only. It refuses direct
 writes into `~/Library/LaunchAgents`; copying the staged plist there and loading

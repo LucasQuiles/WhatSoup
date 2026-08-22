@@ -6,6 +6,8 @@ export interface ReleaseAlertEmitOptions {
   source: string;
   emitHelper: string;
   python: string;
+  /** Pre-generated event id; when omitted the helper mints a uuid4 itself. */
+  eventId?: string;
 }
 export interface ReleaseAlertEmitPayload {
   summary: string;
@@ -18,6 +20,8 @@ export interface ReleaseAlertEmitResult {
   status: number | null;
   stdout: string;
   stderr: string;
+  /** The event id passed to (or minted by) the helper; null when no attempt was made. */
+  eventId: string | null;
 }
 
 const EMIT_ENV_KEYS = [
@@ -66,6 +70,7 @@ export function emitReleaseAlert(
     '--evidence', payload.evidence,
   ];
   for (const diagnostic of payload.diagnostics) args.push('--diagnostic', diagnostic);
+  if (options.eventId) args.push('--event-id', options.eventId);
   if (eventType === 'clear') args.push('--clear');
   else args.push('--severity', payload.severity);
 
@@ -80,5 +85,6 @@ export function emitReleaseAlert(
     status: proc.status ?? (proc.error ? 1 : null),
     stdout: proc.stdout ?? '',
     stderr: proc.stderr || proc.error?.message || '',
+    eventId: options.eventId ?? null,
   };
 }

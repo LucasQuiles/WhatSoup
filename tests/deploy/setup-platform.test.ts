@@ -870,9 +870,9 @@ describe('deploy launchd timer plists', () => {
   it('release-drift-check plist runs independent drift and currency observers on an interval', () => {
     const plist = fs.readFileSync(releaseDriftPlist, 'utf8');
     expect(plist).toContain('<string>com.whatsoup.release-drift-check</string>');
-    expect(plist).toContain('scripts/run-with-pinned-node.sh');
-    expect(plist).toContain('scripts/live-release-observers.ts');
-    expect(plist).toContain('--launchd-plist');
+    // The schedule wrapper owns the pinned-node exec and pre-observer rotation (#2458).
+    expect(plist).toContain('deploy/scripts/run-release-drift-schedule.sh');
+    expect(plist).toContain('<string>--launchd-plist</string>');
     expect(plist).toContain('com.whatsoup.__INSTANCE__.plist');
     expect(plist).toContain('<string>__INSTANCE__</string>');
     expect(plist).toContain('<string>--target-url</string>');
@@ -880,6 +880,10 @@ describe('deploy launchd timer plists', () => {
     expect(plist).toContain('<string>--target-ref</string>');
     expect(plist).toContain('<string>__TARGET_REF__</string>');
     expect(plist).toContain('<string>--clear-on-ok</string>');
+    expect(plist).toContain('<string>--max-log-bytes</string>');
+    expect(plist).toContain('<string>__MAX_LOG_BYTES__</string>');
+    expect(plist).toContain('<string>--keep-rotated-logs</string>');
+    expect(plist).toContain('<string>__KEEP_ROTATED_LOGS__</string>');
     expect(plist).toMatch(/<key>StartInterval<\/key>\s*<integer>300<\/integer>/);
   });
 
