@@ -328,6 +328,34 @@ def test_load_contract_missing_file_fails_closed(tmp_path: Path) -> None:
         _mod.load_contract(tmp_path)
 
 
+def test_load_contract_invalid_utf8_fails_closed(tmp_path: Path) -> None:
+    # Invalid bytes must raise the contract error, never leak a raw
+    # UnicodeDecodeError, and never be lossily replaced (the TS side must
+    # reject the same bytes rather than decode with U+FFFD).
+    for name in _mod.CONTRACT_FILE_NAMES:
+        (tmp_path / name).write_bytes((_CONTRACT_DIR / name).read_bytes())
+    raw = (tmp_path / "authority-lattice.json").read_bytes()
+    brace = raw.index(b"{")
+    (tmp_path / "authority-lattice.json").write_bytes(
+        raw[: brace + 1] + b'"probe": "' + bytes([0xC3, 0x28]) + b'", ' + raw[brace + 1 :]
+    )
+    with pytest.raises(_mod.ObservationContractError):
+        _mod.load_contract(tmp_path)
+
+
+def test_dunder_proto_identifiers_are_ordinary_keys() -> None:
+    # Parity pin: __proto__ has no special meaning in Python dicts; the TS
+    # port must treat it as an ordinary own key too (null-prototype
+    # accumulators), neither polluting nor dropping it.
+    docs = copy.deepcopy(_committed_docs())
+    docs["adapter-registry.json"]["adapters"].append(
+        {"adapter_id": "__proto__", "can_establish": [], "cannot_establish": []}
+    )
+    contract = _mod.build_contract(docs)
+    row = _mod.adapter_row(contract, "__proto__")
+    assert row["adapter_id"] == "__proto__"
+
+
 def test_load_contract_malformed_json_fails_closed(tmp_path: Path) -> None:
     for name in _mod.CONTRACT_FILE_NAMES:
         (tmp_path / name).write_text(

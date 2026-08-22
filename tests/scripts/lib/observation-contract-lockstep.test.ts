@@ -1,8 +1,10 @@
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+
+import { trackTmpDirs } from '../../helpers/tmp-dir.ts';
 
 import {
   CONTRACT_FILE_NAMES,
@@ -36,6 +38,7 @@ import {
 const repoRoot = fileURLToPath(new URL('../../..', import.meta.url));
 const libDir = path.join(repoRoot, 'deploy/scripts/lib');
 const contractDir = path.join(repoRoot, 'deploy/observation-plane');
+const tmp = trackTmpDirs('whatsoup-obs-lockstep-');
 
 function loadCommittedDocs(): Record<string, unknown> {
   const docs: Record<string, unknown> = {};
@@ -333,6 +336,89 @@ except oc.ObservationContractError:
       mutated,
     );
     expect(pyResult).toBe('failed-closed');
+  });
+
+  it('rejects invalid UTF-8 contract bytes identically at load time', () => {
+    // Node's lossy 'utf8' decode replaces malformed sequences with U+FFFD;
+    // Python raises. Both loaders must fail closed on the SAME bytes with
+    // their contract error — never a raw decode exception, never acceptance.
+    const dir = tmp.make('utf8');
+    for (const name of CONTRACT_FILE_NAMES) {
+      writeFileSync(path.join(dir, name), readFileSync(path.join(contractDir, name)));
+    }
+    const target = path.join(dir, 'authority-lattice.json');
+    const raw = readFileSync(target);
+    const brace = raw.indexOf(0x7b);
+    writeFileSync(
+      target,
+      Buffer.concat([
+        raw.subarray(0, brace + 1),
+        Buffer.from('"probe": "', 'utf8'),
+        Buffer.from([0xc3, 0x28]),
+        Buffer.from('", ', 'utf8'),
+        raw.subarray(brace + 1),
+      ]),
+    );
+
+    expect(() => loadObservationContract(dir)).toThrow(ObservationContractPortError);
+    const pyResult = execFileSync('python3', ['-c', `
+import sys
+from pathlib import Path
+sys.path.insert(0, ${JSON.stringify(libDir)})
+import observation_contract as oc
+try:
+    oc.load_contract(Path(${JSON.stringify(dir)}))
+    sys.stdout.write("no-error")
+except oc.ObservationContractError:
+    sys.stdout.write("failed-closed")
+`], { encoding: 'utf8' }).trim();
+    expect(pyResult).toBe('failed-closed');
+  });
+
+  it('builds __proto__ identifiers as ordinary own keys identically', () => {
+    // Python dicts give __proto__ no special meaning; the TS accumulators
+    // must not let it pollute a prototype or vanish from the table.
+    const docs = loadCommittedDocs();
+    const mutated = JSON.parse(JSON.stringify(docs)) as Record<string, unknown>;
+    (mutated['adapter-registry.json'] as { adapters: unknown[] }).adapters.push(
+      JSON.parse('{"adapter_id": "__proto__", "can_establish": [], "cannot_establish": []}'),
+    );
+    const contract = buildObservationContract(mutated);
+    expect(Object.hasOwn(contract.adapters, '__proto__')).toBe(true);
+    expect(adapterRow(contract, '__proto__')['adapter_id']).toBe('__proto__');
+
+    const pyResult = python(
+      `
+contract = oc.build_contract(docs)
+row = oc.adapter_row(contract, "__proto__")
+sys.stdout.write(row["adapter_id"])
+`,
+      mutated,
+    );
+    expect(pyResult).toBe('__proto__');
+  });
+
+  it('returns canonically normalized documents on both sides (raw -0)', () => {
+    // Digest parity alone is not enough: returned data must match too.
+    // Python normalizes -0.0 to int 0; TS must return 0, not negative zero.
+    const docs = loadCommittedDocs();
+    const mutated = JSON.parse(JSON.stringify(docs)) as Record<string, unknown>;
+    (mutated['authority-lattice.json'] as Record<string, unknown>)['ratio'] = JSON.parse('-0');
+    const contract = buildObservationContract(mutated);
+    const ratio = (contract.docs['authority-lattice.json'] as Record<string, unknown>)['ratio'];
+    expect(Object.is(ratio, -0)).toBe(false);
+    expect(ratio).toBe(0);
+
+    const pyResult = python(
+      `
+docs["authority-lattice.json"]["ratio"] = json.loads("-0.0")
+contract = oc.build_contract(docs)
+value = contract["docs"]["authority-lattice.json"]["ratio"]
+sys.stdout.write(f"{type(value).__name__}:{value}")
+`,
+      mutated,
+    );
+    expect(pyResult).toBe('int:0');
   });
 
   it('anchors the TS default contract dir to the module, not the cwd', () => {

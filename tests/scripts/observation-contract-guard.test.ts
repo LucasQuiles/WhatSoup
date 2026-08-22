@@ -43,6 +43,46 @@ describe('observation contract guard', () => {
     expect(names).toContain('guard:observation-contract');
   });
 
+  it('rejects an unsupported schema_version on any data document', () => {
+    const root = makeRoot();
+    patchJson(root, 'claim-catalog.json', (data) => {
+      data.schema_version = '999';
+    });
+    const result = checkObservationContract(root);
+    expect(result.ok).toBe(false);
+    expect(result.findings.map((f) => f.code)).toContain('unsupported-schema-version');
+  });
+
+  it('rejects malformed registry members instead of silently filtering them', () => {
+    const root = makeRoot();
+    patchJson(root, 'adapter-registry.json', (data) => {
+      data.adapters[0].can_establish.push(42);
+    });
+    const result = checkObservationContract(root);
+    expect(result.ok).toBe(false);
+    expect(result.findings.map((f) => f.code)).toContain('malformed-entry');
+  });
+
+  it('rejects contract bytes that are not valid UTF-8', () => {
+    const root = makeRoot();
+    const p = path.join(root, CONTRACT_DIR, 'authority-lattice.json');
+    const raw = readFileSync(p);
+    const brace = raw.indexOf(0x7b);
+    writeFileSync(
+      p,
+      Buffer.concat([
+        raw.subarray(0, brace + 1),
+        Buffer.from('"probe": "', 'utf8'),
+        Buffer.from([0xc3, 0x28]),
+        Buffer.from('", ', 'utf8'),
+        raw.subarray(brace + 1),
+      ]),
+    );
+    const result = checkObservationContract(root);
+    expect(result.ok).toBe(false);
+    expect(result.findings.map((f) => f.code)).toContain('contract-unreadable');
+  });
+
   it('rejects a canonical outcome missing from the envelope schema enum', () => {
     const root = makeRoot();
     patchJson(root, 'outcome-projections.json', (data) => {

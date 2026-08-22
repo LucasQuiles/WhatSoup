@@ -20,6 +20,8 @@ export type ObservationContractFindingCode =
   | 'schema-compile-error'
   | 'canonical-vocab-mismatch'
   | 'digest-domain-violation'
+  | 'unsupported-schema-version'
+  | 'malformed-entry'
   | 'projection-domain-incomplete'
   | 'projection-domain-extra'
   | 'projection-duplicate-row'
@@ -74,7 +76,9 @@ function readJson(root: string, rel: string, findings: ObservationContractFindin
   const abs = path.join(root, CONTRACT_DIR, rel);
   let raw: string;
   try {
-    raw = readFileSync(abs, 'utf8');
+    // Strict fatal decode, matching both contract readers: lossy 'utf8' mode
+    // would admit bytes the Python reader rejects.
+    raw = new TextDecoder('utf-8', { fatal: true }).decode(readFileSync(abs));
   } catch (err) {
     findings.push({ code: 'contract-unreadable', message: `${rel}: ${(err as Error).message}` });
     return undefined;
@@ -89,6 +93,26 @@ function readJson(root: string, rel: string, findings: ObservationContractFindin
 
 function stringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
+}
+
+/** Like stringArray, but a malformed member is a FINDING, not a silent skip —
+ * filtering would let a tampered registry read as clean. */
+function strictStringArray(
+  value: unknown,
+  what: string,
+  findings: ObservationContractFinding[],
+): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) {
+    findings.push({ code: 'malformed-entry', message: `${what}: expected a list` });
+    return [];
+  }
+  const out: string[] = [];
+  for (const item of value) {
+    if (typeof item === 'string') out.push(item);
+    else findings.push({ code: 'malformed-entry', message: `${what}: non-string member ${String(item)}` });
+  }
+  return out;
 }
 
 function hasDotDotSegment(ref: string): boolean {
@@ -179,6 +203,24 @@ export function checkObservationContract(cwd = process.cwd()): ObservationContra
     findings.push({ code: 'digest-domain-violation', message: (err as Error).message });
   }
 
+  // Data documents must carry a supported schema_version — an unknown version
+  // means the guard's checks may not describe the document's semantics.
+  const SUPPORTED_SCHEMA_VERSION = '0.1';
+  const versioned: Array<[string, Record<string, unknown>]> = [
+    ['adapter-registry.json', registryDoc],
+    ['authority-lattice.json', latticeDoc],
+    ['claim-catalog.json', catalogDoc],
+    ['outcome-projections.json', projectionsDoc],
+  ];
+  for (const [rel, doc] of versioned) {
+    if (doc.schema_version !== SUPPORTED_SCHEMA_VERSION) {
+      findings.push({
+        code: 'unsupported-schema-version',
+        message: `${rel}: schema_version ${String(doc.schema_version)} != supported ${SUPPORTED_SCHEMA_VERSION}`,
+      });
+    }
+  }
+
   const ajv = new Ajv2020({ allErrors: true, strict: true });
   let validate: ((data: unknown) => boolean) & { errors?: unknown[] | null };
   try {
@@ -215,7 +257,10 @@ export function checkObservationContract(cwd = process.cwd()): ObservationContra
   const claims = new Map<string, ClaimRow>();
   if (Array.isArray(catalogDoc.claims)) {
     for (const entry of catalogDoc.claims) {
-      if (!isRecord(entry) || typeof entry.claim_id !== 'string') continue;
+      if (!isRecord(entry) || typeof entry.claim_id !== 'string') {
+        findings.push({ code: 'malformed-entry', message: 'claim catalog: entry missing claim_id' });
+        continue;
+      }
       if (claims.has(entry.claim_id)) {
         findings.push({ code: 'duplicate-claim', message: entry.claim_id });
         continue;
@@ -224,9 +269,9 @@ export function checkObservationContract(cwd = process.cwd()): ObservationContra
         claimId: entry.claim_id,
         minProjection: typeof entry.min_projection === 'string' ? entry.min_projection : 'not_applicable',
         authorityTier: typeof entry.authority_tier === 'string' ? entry.authority_tier : '',
-        producingAdapters: stringArray(entry.producing_adapters),
-        requires: stringArray(entry.requires),
-        cannotEstablish: stringArray(entry.cannot_establish),
+        producingAdapters: strictStringArray(entry.producing_adapters, `claim ${entry.claim_id} producing_adapters`, findings),
+        requires: strictStringArray(entry.requires, `claim ${entry.claim_id} requires`, findings),
+        cannotEstablish: strictStringArray(entry.cannot_establish, `claim ${entry.claim_id} cannot_establish`, findings),
       });
     }
   }
@@ -236,15 +281,18 @@ export function checkObservationContract(cwd = process.cwd()): ObservationContra
   const adapters = new Map<string, AdapterRow>();
   if (Array.isArray(registryDoc.adapters)) {
     for (const entry of registryDoc.adapters) {
-      if (!isRecord(entry) || typeof entry.adapter_id !== 'string') continue;
+      if (!isRecord(entry) || typeof entry.adapter_id !== 'string') {
+        findings.push({ code: 'malformed-entry', message: 'adapter registry: entry missing adapter_id' });
+        continue;
+      }
       if (adapters.has(entry.adapter_id)) {
         findings.push({ code: 'duplicate-adapter', message: entry.adapter_id });
         continue;
       }
       adapters.set(entry.adapter_id, {
         adapterId: entry.adapter_id,
-        canEstablish: stringArray(entry.can_establish),
-        cannotEstablish: stringArray(entry.cannot_establish),
+        canEstablish: strictStringArray(entry.can_establish, `adapter ${entry.adapter_id} can_establish`, findings),
+        cannotEstablish: strictStringArray(entry.cannot_establish, `adapter ${entry.adapter_id} cannot_establish`, findings),
       });
     }
   }
@@ -283,8 +331,11 @@ export function checkObservationContract(cwd = process.cwd()): ObservationContra
   const surfaces = new Map<string, Set<string>>();
   const surfacesDoc = isRecord(projectionsDoc.surfaces) ? projectionsDoc.surfaces : {};
   for (const [surfaceName, surface] of Object.entries(surfacesDoc)) {
-    if (!isRecord(surface)) continue;
-    const domain = stringArray(surface.domain);
+    if (!isRecord(surface)) {
+      findings.push({ code: 'malformed-entry', message: `surface ${surfaceName}: not an object` });
+      continue;
+    }
+    const domain = strictStringArray(surface.domain, `surface ${surfaceName} domain`, findings);
     surfaces.set(surfaceName, new Set(domain));
     const seen = new Set<string>();
     const rows = Array.isArray(surface.rows) ? surface.rows : [];

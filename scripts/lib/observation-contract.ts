@@ -105,8 +105,12 @@ export function contractIdentity(docs: Record<string, unknown>): Record<string, 
 // unrestricted: surrogate escaping is parity-proven by the lockstep suite.
 const MAX_DIGEST_INT = 2 ** 53 - 1;
 
-function assertDigestDomain(value: unknown, at: string): void {
-  if (value === null || value === undefined || typeof value === 'boolean') return;
+/** Returns `value` rebuilt inside the digest domain: -0 canonicalized to 0
+ * and every object rebuilt with a null prototype (so identifiers like
+ * `__proto__` are ordinary own keys, exactly as in a Python dict). Throws
+ * for anything outside the domain. */
+function normalizeForDigest(value: unknown, at: string): unknown {
+  if (value === null || value === undefined || typeof value === 'boolean') return value;
   if (typeof value === 'number') {
     if (!Number.isInteger(value) || Math.abs(value) > MAX_DIGEST_INT) {
       throw new ObservationContractPortError(
@@ -114,14 +118,14 @@ function assertDigestDomain(value: unknown, at: string): void {
           '(other numbers do not serialize identically across the Python/TS encoders)',
       );
     }
-    return;
+    return value === 0 ? 0 : value;
   }
-  if (typeof value === 'string') return;
+  if (typeof value === 'string') return value;
   if (Array.isArray(value)) {
-    value.forEach((item, index) => assertDigestDomain(item, `${at}[${index}]`));
-    return;
+    return value.map((item, index) => normalizeForDigest(item, `${at}[${index}]`));
   }
   if (isRecord(value)) {
+    const normalized = Object.create(null) as Record<string, unknown>;
     for (const [key, item] of Object.entries(value)) {
       for (const ch of key) {
         if ((ch.codePointAt(0) ?? 0) > 0xffff) {
@@ -131,9 +135,9 @@ function assertDigestDomain(value: unknown, at: string): void {
           );
         }
       }
-      assertDigestDomain(item, `${at}.${key}`);
+      normalized[key] = normalizeForDigest(item, `${at}.${key}`);
     }
-    return;
+    return normalized;
   }
   throw new ObservationContractPortError(
     `digest domain violation at ${at}: unsupported value type ${typeof value}`,
@@ -143,8 +147,7 @@ function assertDigestDomain(value: unknown, at: string): void {
 /** `sha256(json.dumps(contract_identity(docs), sort_keys=True, separators=(",",":")))`,
  * identical call shape to the Python side. */
 export function contractDigest(docs: Record<string, unknown>): string {
-  const identity = contractIdentity(docs);
-  assertDigestDomain(identity, 'contract');
+  const identity = normalizeForDigest(contractIdentity(docs), 'contract');
   const material = pyJsonStringify(identity);
   return createHash('sha256').update(Buffer.from(material, 'utf8')).digest('hex');
 }
@@ -164,7 +167,10 @@ function buildSurfaces(
   if (!isRecord(rawSurfaces) || Object.keys(rawSurfaces).length === 0) {
     throw new ObservationContractPortError('outcome-projections surfaces must be a non-empty object');
   }
-  const surfaces: Record<string, ContractSurface> = {};
+  // Null-prototype accumulators: untrusted identifiers (surface names, legacy
+  // values, claim/adapter ids) must become ordinary own keys — a plain {}
+  // would let '__proto__' silently rewire the table instead.
+  const surfaces = Object.create(null) as Record<string, ContractSurface>;
   for (const [surfaceName, surface] of Object.entries(rawSurfaces)) {
     if (!isRecord(surface)) {
       throw new ObservationContractPortError(`surface must be an object: ${surfaceName}`);
@@ -177,7 +183,7 @@ function buildSurfaces(
     if (!Array.isArray(rawRows)) {
       throw new ObservationContractPortError(`surface ${surfaceName} rows must be a list`);
     }
-    const rows: Record<string, ProjectionRow> = {};
+    const rows = Object.create(null) as Record<string, ProjectionRow>;
     for (const row of rawRows) {
       if (
         !isRecord(row) ||
@@ -221,7 +227,7 @@ function buildKeyed(
   if (!Array.isArray(entries) || entries.length === 0) {
     throw new ObservationContractPortError(`${what} must be a non-empty list`);
   }
-  const keyed: Record<string, Record<string, unknown>> = {};
+  const keyed = Object.create(null) as Record<string, Record<string, unknown>>;
   for (const entry of entries) {
     if (!isRecord(entry) || typeof entry[key] !== 'string' || entry[key].length === 0) {
       throw new ObservationContractPortError(`${what} entry missing ${key}`);
@@ -239,6 +245,14 @@ function buildKeyed(
  * docs so the lockstep test can exercise mutated document sets. */
 export function buildObservationContract(docs: Record<string, unknown>): ObservationContract {
   const digest = contractDigest(docs); // also validates presence/shape of every doc
+  // Build the returned structure from the NORMALIZED documents (mirrors the
+  // Python side): req-obs-02 covers returned data, so consumers on both sides
+  // must see identical values (-0 -> 0) inside prototype-safe records.
+  docs = (
+    normalizeForDigest(contractIdentity(docs), 'contract') as {
+      files: Record<string, Record<string, unknown>>;
+    }
+  ).files;
   const projections = docs['outcome-projections.json'] as Record<string, unknown>;
   const canonicalList = stringArray(projections['canonical_outcomes'], 'canonical_outcomes');
   if (canonicalList.length === 0 || new Set(canonicalList).size !== canonicalList.length) {
@@ -265,7 +279,7 @@ export function buildObservationContract(docs: Record<string, unknown>): Observa
     }
     tiers.push(tier['tier']);
   }
-  const typedDocs = {} as Record<ContractFileName, Record<string, unknown>>;
+  const typedDocs = Object.create(null) as Record<ContractFileName, Record<string, unknown>>;
   for (const name of CONTRACT_FILE_NAMES) {
     typedDocs[name] = docs[name] as Record<string, unknown>;
   }
@@ -288,7 +302,9 @@ export function loadObservationContract(contractDir?: string): ObservationContra
     const filePath = path.join(resolved, name);
     let raw: string;
     try {
-      raw = readFileSync(filePath, 'utf8');
+      // Strict fatal decode: Node's lossy 'utf8' mode would silently replace
+      // malformed sequences with U+FFFD while Python rejects the same bytes.
+      raw = new TextDecoder('utf-8', { fatal: true }).decode(readFileSync(filePath));
     } catch (err) {
       throw new ObservationContractPortError(
         `cannot read contract document ${filePath}: ${(err as Error).message}`,

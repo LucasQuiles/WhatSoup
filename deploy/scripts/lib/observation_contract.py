@@ -246,6 +246,12 @@ def load_contract(contract_dir: Optional[Path] = None) -> dict:
         path = resolved / name
         try:
             text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            # Strict decode is deliberate: the TS loader rejects the same
+            # bytes fatally instead of lossily replacing them with U+FFFD.
+            raise ObservationContractError(
+                f"contract document is not valid UTF-8: {path}"
+            ) from exc
         except OSError as exc:
             raise ObservationContractError(
                 f"cannot read contract document {path}: {type(exc).__name__}"
