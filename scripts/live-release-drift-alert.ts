@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -21,6 +22,37 @@ export interface LiveReleaseDriftAlertOptions {
   emitHelper: string;
   python: string;
   clearOnOk: boolean;
+  /** Injected clock for deterministic observedAt in tests. */
+  now?: () => Date;
+}
+
+export type LiveReleaseDriftOutcome = 'passed' | 'drift' | 'checker_failed' | 'emit_failed';
+
+/**
+ * Content-free (#2458): one JSON record per invocation. No absolute paths,
+ * release basenames, instance labels, PIDs, raw manifest content, or issue
+ * messages — only counts, digests, and bounded enums.
+ */
+export interface LiveReleaseDriftLogRecord {
+  schemaVersion: 1;
+  check: 'live-release-drift-alert';
+  observedAt: string;
+  invocationId: string;
+  ok: boolean;
+  outcome: LiveReleaseDriftOutcome;
+  issueKinds: Record<string, number>;
+  /** Domain-separated hash of the issue-kind set + release identity digest. */
+  conditionFingerprint: string;
+  desiredReleaseDigest: string;
+  observedReleaseDigest: string;
+  alert: {
+    required: boolean;
+    attempted: boolean;
+    kind: 'alert' | 'clear' | null;
+    status: number | null;
+  };
+  /** sha256 over a domain separator + the emitted BOT ERRORS event id; never the id itself. */
+  correlationDigest: string | null;
 }
 
 export interface LiveReleaseDriftAlertResult {
@@ -30,6 +62,7 @@ export interface LiveReleaseDriftAlertResult {
   manifestPath: string;
   source: ReleaseSnapshotDriftReport['source'];
   issues: ReleaseSnapshotDriftReport['issues'];
+  record: LiveReleaseDriftLogRecord;
   alert: {
     required: boolean;
     attempted: boolean;
@@ -160,12 +193,71 @@ function runEmit(
   report: ReleaseSnapshotDriftReport,
   eventType: 'alert' | 'clear',
 ): ReleaseAlertEmitResult {
-  return emitReleaseAlert(options, {
+  return emitReleaseAlert({ ...options, eventId: randomUUID() }, {
     summary: alertSummary(report),
     evidence: alertEvidence(report),
     diagnostics: [`release=${report.releasePath}`, `manifest=${report.manifestPath}`],
     severity: 'critical',
   }, eventType);
+}
+
+const CONDITION_FINGERPRINT_DOMAIN = 'whatsoup-release-drift-condition-v1';
+const CORRELATION_DIGEST_DOMAIN = 'whatsoup-release-drift-correlation-v1';
+
+function domainDigest(domain: string, value: string): string {
+  return createHash('sha256').update(`${domain}|${value}`).digest('hex');
+}
+
+function desiredReleaseDigest(manifestPath: string): string {
+  try {
+    return domainDigest('whatsoup-release-drift-manifest-v1', readFileSync(manifestPath, 'utf8'));
+  } catch {
+    return 'unknown';
+  }
+}
+
+function countIssueKinds(issues: ReleaseSnapshotDriftReport['issues']): Record<string, number> {
+  const issueKinds: Record<string, number> = {};
+  for (const issue of issues) issueKinds[issue.kind] = (issueKinds[issue.kind] ?? 0) + 1;
+  return issueKinds;
+}
+
+function buildLogRecord(input: {
+  report: Pick<ReleaseSnapshotDriftReport, 'ok' | 'issues' | 'manifestPath'>;
+  alertKind: 'alert' | 'clear' | null;
+  emitResult: ReleaseAlertEmitResult | null;
+  emitFailedOutcome: boolean;
+  now: () => Date;
+}): LiveReleaseDriftLogRecord {
+  const issueKinds = countIssueKinds(input.report.issues);
+  const desired = desiredReleaseDigest(input.report.manifestPath);
+  // The observed tree identity is only attestable when verification passed.
+  const observed = input.report.ok && desired !== 'unknown' ? desired : 'unknown';
+  const kindSet = Object.keys(issueKinds).sort().join(',');
+  const outcome: LiveReleaseDriftOutcome = input.emitFailedOutcome
+    ? 'emit_failed'
+    : input.report.ok ? 'passed' : 'drift';
+  return {
+    schemaVersion: 1,
+    check: 'live-release-drift-alert',
+    observedAt: input.now().toISOString(),
+    invocationId: randomUUID(),
+    ok: input.report.ok && (!input.emitResult || input.emitResult.status === 0),
+    outcome,
+    issueKinds,
+    conditionFingerprint: domainDigest(CONDITION_FINGERPRINT_DOMAIN, `${kindSet}|${desired}`),
+    desiredReleaseDigest: desired,
+    observedReleaseDigest: observed,
+    alert: {
+      required: input.alertKind !== null,
+      attempted: Boolean(input.emitResult),
+      kind: input.alertKind,
+      status: input.emitResult?.status ?? null,
+    },
+    correlationDigest: input.emitResult?.eventId && input.emitResult.status === 0
+      ? domainDigest(CORRELATION_DIGEST_DOMAIN, input.emitResult.eventId)
+      : null,
+  };
 }
 
 export function checkLiveReleaseDrift(options: LiveReleaseDriftAlertOptions): LiveReleaseDriftAlertResult {
@@ -175,6 +267,8 @@ export function checkLiveReleaseDrift(options: LiveReleaseDriftAlertOptions): Li
   if (alertKind && options.emit) {
     emitResult = runEmit(options, report, alertKind);
   }
+  const emitFailedOutcome = Boolean(emitResult && emitResult.status !== 0);
+  const record = buildLogRecord({ report, alertKind, emitResult, emitFailedOutcome, now: options.now ?? (() => new Date()) });
   return {
     check: 'live-release-drift-alert',
     ok: report.ok && (!emitResult || emitResult.status === 0),
@@ -182,6 +276,7 @@ export function checkLiveReleaseDrift(options: LiveReleaseDriftAlertOptions): Li
     manifestPath: report.manifestPath,
     source: report.source,
     issues: report.issues,
+    record,
     alert: {
       required: alertKind !== null,
       attempted: Boolean(emitResult),
@@ -210,17 +305,35 @@ function toOptions(parsed: ParsedArgs): LiveReleaseDriftAlertOptions {
 
 export function run(argv: string[] = process.argv.slice(2)): LiveReleaseDriftAlertResult {
   const parsed = parseArgs(argv);
-  const result = checkLiveReleaseDrift(toOptions(parsed));
+  let result: LiveReleaseDriftAlertResult;
+  try {
+    result = checkLiveReleaseDrift(toOptions(parsed));
+  } catch (error) {
+    // Checker failure (unreadable/invalid manifest, bad paths): still exactly one
+    // structured record, no error-message leakage (messages embed paths).
+    void error;
+    const record: LiveReleaseDriftLogRecord = {
+      schemaVersion: 1,
+      check: 'live-release-drift-alert',
+      observedAt: new Date().toISOString(),
+      invocationId: randomUUID(),
+      ok: false,
+      outcome: 'checker_failed',
+      issueKinds: {},
+      conditionFingerprint: domainDigest(CONDITION_FINGERPRINT_DOMAIN, 'checker_failed'),
+      desiredReleaseDigest: 'unknown',
+      observedReleaseDigest: 'unknown',
+      alert: { required: false, attempted: false, kind: null, status: null },
+      correlationDigest: null,
+    };
+    console.log(JSON.stringify(record));
+    process.exitCode = 2;
+    return { check: 'live-release-drift-alert', ok: false, releasePath: '', manifestPath: '', source: null, issues: [], record, alert: { ...record.alert, stdout: '', stderr: '' } };
+  }
   if (parsed.json) {
     console.log(JSON.stringify(result, null, 2));
-  } else if (result.ok) {
-    console.log(`release drift alert check passed: ${result.releasePath}`);
   } else {
-    console.error(`release drift alert check failed: ${result.releasePath}`);
-    for (const issue of result.issues) console.error(`${issue.kind}: ${issue.path ?? '<release>'} ${issue.message}`);
-    if (result.alert.attempted && result.alert.status !== 0) {
-      console.error(`BOT ERRORS emit failed: ${result.alert.stderr || result.alert.stdout || 'unknown error'}`);
-    }
+    console.log(JSON.stringify(result.record));
   }
   if (!result.ok) process.exitCode = result.issues.length > 0 ? 1 : 2;
   return result;
