@@ -55,6 +55,39 @@ _VERSIONED_DOCS = (
 # MINIMUM of "unobserved" is meaningless). A typo must never weaken authority.
 MIN_PROJECTIONS = frozenset({"diagnostic", "public", "not_applicable"})
 
+# Closed-world authority model (deploy/observation-plane/README.md): every
+# governed field below is MANDATORY, and every vocabulary is closed. Missing
+# or misspelled authority metadata must fail closed — a claim whose authority
+# tier, generation binding, or staleness rule is absent cannot be ranked, and
+# an adapter whose projection scope or status is absent cannot be bounded.
+REQUIRED_CLAIM_FIELDS = (
+    "claim_id",
+    "family",
+    "subject_kind",
+    "min_projection",
+    "authority_tier",
+    "generation_binding",
+    "staleness_rule",
+    "producing_adapters",
+    "cannot_establish",
+)
+REQUIRED_ADAPTER_FIELDS = (
+    "adapter_id",
+    "wraps",
+    "platforms",
+    "privilege",
+    "prerequisites",
+    "projection_scope",
+    "can_establish",
+    "cannot_establish",
+    "status",
+)
+GENERATION_BINDINGS = frozenset(
+    {"none", "config", "process", "credential", "process+credential"}
+)
+PROJECTION_SCOPES = frozenset({"diagnostic", "public", "not_applicable"})
+ADAPTER_STATUSES = frozenset({"available", "gated", "producer_pending"})
+
 
 class ObservationContractError(RuntimeError):
     """Raised when the contract set cannot be read or is structurally invalid.
@@ -258,6 +291,7 @@ def build_contract(docs: dict) -> Mapping:
         if tier["tier"] in tiers:
             raise ObservationContractError(f"duplicate authority tier: {tier['tier']}")
         tiers.append(tier["tier"])
+    _validate_authority_metadata(claims, adapters, tiers)
     return _deep_freeze(
         {
             "digest": digest,
@@ -269,6 +303,98 @@ def build_contract(docs: dict) -> Mapping:
             "authority_tiers": tiers,
         }
     )
+
+
+def _validate_authority_metadata(claims: dict, adapters: dict, tiers: list[str]) -> None:
+    """Enforce the closed-world authority model over the built tables."""
+    tier_set = set(tiers)
+    for claim_id, claim in claims.items():
+        for field in REQUIRED_CLAIM_FIELDS:
+            if field not in claim:
+                raise ObservationContractError(f"claim {claim_id}: missing required field {field}")
+        if claim["authority_tier"] not in tier_set:
+            raise ObservationContractError(
+                f"claim {claim_id}: authority_tier {claim['authority_tier']!r} is not a declared lattice tier"
+            )
+        if claim["generation_binding"] not in GENERATION_BINDINGS:
+            raise ObservationContractError(
+                f"claim {claim_id}: generation_binding {claim['generation_binding']!r} outside "
+                f"the closed vocabulary {sorted(GENERATION_BINDINGS)}"
+            )
+        rule = claim["staleness_rule"]
+        if not isinstance(rule, Mapping) or not isinstance(rule.get("kind"), str) or not rule["kind"]:
+            raise ObservationContractError(
+                f"claim {claim_id}: staleness_rule must be an object with a non-empty string kind"
+            )
+        window = rule.get("window_seconds")
+        if window is not None and (isinstance(window, bool) or not isinstance(window, int)):
+            raise ObservationContractError(
+                f"claim {claim_id}: staleness_rule.window_seconds must be an integer when present"
+            )
+        _string_list(claim["producing_adapters"], f"claim {claim_id} producing_adapters")
+        _string_list(claim["cannot_establish"], f"claim {claim_id} cannot_establish")
+
+    for adapter_id, adapter in adapters.items():
+        for field in REQUIRED_ADAPTER_FIELDS:
+            if field not in adapter:
+                raise ObservationContractError(
+                    f"adapter {adapter_id}: missing required field {field}"
+                )
+        if adapter["projection_scope"] not in PROJECTION_SCOPES:
+            raise ObservationContractError(
+                f"adapter {adapter_id}: projection_scope {adapter['projection_scope']!r} outside "
+                f"the closed vocabulary {sorted(PROJECTION_SCOPES)}"
+            )
+        if adapter["status"] not in ADAPTER_STATUSES:
+            raise ObservationContractError(
+                f"adapter {adapter_id}: status {adapter['status']!r} outside the closed "
+                f"vocabulary {sorted(ADAPTER_STATUSES)}"
+            )
+        for field in ("wraps", "platforms", "prerequisites", "can_establish", "cannot_establish"):
+            _string_list(adapter[field], f"adapter {adapter_id} {field}")
+        if not isinstance(adapter["privilege"], str) or not adapter["privilege"]:
+            raise ObservationContractError(f"adapter {adapter_id}: privilege must be a non-empty string")
+        overlap = set(adapter["can_establish"]) & set(adapter["cannot_establish"])
+        if overlap:
+            raise ObservationContractError(
+                f"adapter {adapter_id}: {sorted(overlap)} appear in both can_establish and cannot_establish"
+            )
+
+    # Cross-references resolve, and producer relationships are symmetric in
+    # BOTH directions: a claim's producer must declare the claim, and an
+    # adapter's establishable claim must name the adapter as a producer.
+    for claim_id, claim in claims.items():
+        for other in claim["cannot_establish"]:
+            if other not in claims:
+                raise ObservationContractError(
+                    f"claim {claim_id}: cannot_establish references unknown claim {other}"
+                )
+        for adapter_id in claim["producing_adapters"]:
+            adapter = adapters.get(adapter_id)
+            if adapter is None:
+                raise ObservationContractError(
+                    f"claim {claim_id}: producing_adapters references unknown adapter {adapter_id}"
+                )
+            if claim_id not in adapter["can_establish"]:
+                raise ObservationContractError(
+                    f"claim {claim_id}: producer {adapter_id} does not declare it in can_establish"
+                )
+    for adapter_id, adapter in adapters.items():
+        for claim_id in adapter["can_establish"]:
+            claim = claims.get(claim_id)
+            if claim is None:
+                raise ObservationContractError(
+                    f"adapter {adapter_id}: can_establish references unknown claim {claim_id}"
+                )
+            if adapter_id not in claim["producing_adapters"]:
+                raise ObservationContractError(
+                    f"adapter {adapter_id}: claim {claim_id} does not name it in producing_adapters"
+                )
+        for claim_id in adapter["cannot_establish"]:
+            if claim_id not in claims:
+                raise ObservationContractError(
+                    f"adapter {adapter_id}: cannot_establish references unknown claim {claim_id}"
+                )
 
 
 def _deep_freeze(value: Any) -> Any:

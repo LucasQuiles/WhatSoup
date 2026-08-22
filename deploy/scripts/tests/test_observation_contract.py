@@ -366,6 +366,98 @@ def test_contract_state_is_recursively_immutable() -> None:
     assert _mod.claim_row(contract, "auth_bond.status")["min_projection"] == "diagnostic"
 
 
+def test_required_claim_fields_are_mandatory() -> None:
+    # Closed-world authority model (deploy/observation-plane/README.md): a claim
+    # missing governed authority metadata must NEVER load.
+    for field in (
+        "family",
+        "subject_kind",
+        "authority_tier",
+        "generation_binding",
+        "staleness_rule",
+        "producing_adapters",
+        "cannot_establish",
+    ):
+        mutated = copy.deepcopy(_committed_docs())
+        del mutated["claim-catalog.json"]["claims"][0][field]
+        with pytest.raises(_mod.ObservationContractError):
+            _mod.build_contract(mutated)
+
+
+def test_required_adapter_fields_are_mandatory() -> None:
+    for field in (
+        "wraps",
+        "platforms",
+        "privilege",
+        "prerequisites",
+        "projection_scope",
+        "can_establish",
+        "cannot_establish",
+        "status",
+    ):
+        mutated = copy.deepcopy(_committed_docs())
+        del mutated["adapter-registry.json"]["adapters"][0][field]
+        with pytest.raises(_mod.ObservationContractError):
+            _mod.build_contract(mutated)
+
+
+def test_authority_vocabularies_are_closed() -> None:
+    cases = [
+        ("claim-catalog.json", "claims", "authority_tier", "nonexistent_tier"),
+        ("claim-catalog.json", "claims", "generation_binding", "proccess"),
+        ("adapter-registry.json", "adapters", "projection_scope", "diagnotic"),
+        ("adapter-registry.json", "adapters", "status", "availble"),
+    ]
+    for doc, key, field, bad in cases:
+        mutated = copy.deepcopy(_committed_docs())
+        mutated[doc][key][0][field] = bad
+        with pytest.raises(_mod.ObservationContractError):
+            _mod.build_contract(mutated)
+
+
+def test_staleness_rule_shape_is_validated() -> None:
+    for bad in ("not-a-mapping", {}, {"kind": 7}, {"kind": "bounded", "window_seconds": "soon"}):
+        mutated = copy.deepcopy(_committed_docs())
+        mutated["claim-catalog.json"]["claims"][0]["staleness_rule"] = bad
+        with pytest.raises(_mod.ObservationContractError):
+            _mod.build_contract(mutated)
+
+
+def test_claim_adapter_producer_symmetry_is_enforced() -> None:
+    # A claim naming a producer the adapter does not declare (and vice versa)
+    # breaks the closed-world model in either direction.
+    forward = copy.deepcopy(_committed_docs())
+    claim = forward["claim-catalog.json"]["claims"][0]
+    producer = claim["producing_adapters"][0]
+    for adapter in forward["adapter-registry.json"]["adapters"]:
+        if adapter["adapter_id"] == producer:
+            adapter["can_establish"] = [
+                c for c in adapter["can_establish"] if c != claim["claim_id"]
+            ]
+    with pytest.raises(_mod.ObservationContractError):
+        _mod.build_contract(forward)
+
+    reverse = copy.deepcopy(_committed_docs())
+    claim = reverse["claim-catalog.json"]["claims"][0]
+    claim["producing_adapters"] = [
+        a for a in claim["producing_adapters"] if a != claim["producing_adapters"][0]
+    ]
+    with pytest.raises(_mod.ObservationContractError):
+        _mod.build_contract(reverse)
+
+
+def test_unknown_cross_references_fail_closed() -> None:
+    unknown_producer = copy.deepcopy(_committed_docs())
+    unknown_producer["claim-catalog.json"]["claims"][0]["producing_adapters"] = ["no-such-adapter"]
+    with pytest.raises(_mod.ObservationContractError):
+        _mod.build_contract(unknown_producer)
+
+    unknown_claim = copy.deepcopy(_committed_docs())
+    unknown_claim["adapter-registry.json"]["adapters"][0]["can_establish"] = ["no.such_claim"]
+    with pytest.raises(_mod.ObservationContractError):
+        _mod.build_contract(unknown_claim)
+
+
 def test_contract_snapshot_is_plain_json_and_detached() -> None:
     # The frozen contract itself is not JSON-serializable (mapping proxies);
     # the official snapshot operation returns a plain, mutable, detached copy.
@@ -421,7 +513,17 @@ def test_dunder_proto_identifiers_are_ordinary_keys() -> None:
     # accumulators), neither polluting nor dropping it.
     docs = copy.deepcopy(_committed_docs())
     docs["adapter-registry.json"]["adapters"].append(
-        {"adapter_id": "__proto__", "can_establish": [], "cannot_establish": []}
+        {
+            "adapter_id": "__proto__",
+            "wraps": ["probe fixture"],
+            "platforms": ["darwin"],
+            "privilege": "none",
+            "prerequisites": [],
+            "projection_scope": "not_applicable",
+            "can_establish": [],
+            "cannot_establish": [],
+            "status": "producer_pending",
+        }
     )
     contract = _mod.build_contract(docs)
     row = _mod.adapter_row(contract, "__proto__")

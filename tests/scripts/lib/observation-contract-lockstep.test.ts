@@ -383,7 +383,11 @@ except oc.ObservationContractError:
     const docs = loadCommittedDocs();
     const mutated = JSON.parse(JSON.stringify(docs)) as Record<string, unknown>;
     (mutated['adapter-registry.json'] as { adapters: unknown[] }).adapters.push(
-      JSON.parse('{"adapter_id": "__proto__", "can_establish": [], "cannot_establish": []}'),
+      JSON.parse(
+        '{"adapter_id": "__proto__", "wraps": ["probe fixture"], "platforms": ["darwin"],' +
+          ' "privilege": "none", "prerequisites": [], "projection_scope": "not_applicable",' +
+          ' "can_establish": [], "cannot_establish": [], "status": "producer_pending"}',
+      ),
     );
     const contract = buildObservationContract(mutated);
     expect(Object.hasOwn(contract.adapters, '__proto__')).toBe(true);
@@ -645,6 +649,58 @@ sys.stdout.write(json.dumps(snapshot, sort_keys=True, separators=(",", ":")))
       true,
     );
     expect(claimRow(contract, 'identity.instance_name')['producing_adapters']).toEqual(producers);
+  });
+
+  it('rejects missing or invalid authority metadata identically', () => {
+    // Closed-world authority model: both readers must refuse a contract whose
+    // governed authority fields are absent, misspelled, or asymmetric.
+    const docs = loadCommittedDocs();
+    const mutations: Array<[string, (d: Record<string, unknown>) => void]> = [
+      ['missing claim.authority_tier', (d) => {
+        delete (d['claim-catalog.json'] as { claims: Array<Record<string, unknown>> }).claims[0]!['authority_tier'];
+      }],
+      ['missing claim.staleness_rule', (d) => {
+        delete (d['claim-catalog.json'] as { claims: Array<Record<string, unknown>> }).claims[0]!['staleness_rule'];
+      }],
+      ['bad claim.generation_binding', (d) => {
+        (d['claim-catalog.json'] as { claims: Array<Record<string, unknown>> }).claims[0]!['generation_binding'] = 'proccess';
+      }],
+      ['bad adapter.projection_scope', (d) => {
+        (d['adapter-registry.json'] as { adapters: Array<Record<string, unknown>> }).adapters[0]!['projection_scope'] = 'diagnotic';
+      }],
+      ['missing adapter.status', (d) => {
+        delete (d['adapter-registry.json'] as { adapters: Array<Record<string, unknown>> }).adapters[0]!['status'];
+      }],
+      ['producer asymmetry', (d) => {
+        const claims = (d['claim-catalog.json'] as { claims: Array<Record<string, unknown>> }).claims;
+        const claim = claims[0]!;
+        const producer = (claim['producing_adapters'] as string[])[0]!;
+        for (const adapter of (d['adapter-registry.json'] as { adapters: Array<Record<string, unknown>> }).adapters) {
+          if (adapter['adapter_id'] === producer) {
+            adapter['can_establish'] = (adapter['can_establish'] as string[]).filter(
+              (c) => c !== claim['claim_id'],
+            );
+          }
+        }
+      }],
+    ];
+
+    for (const [label, mutate] of mutations) {
+      const mutated = JSON.parse(JSON.stringify(docs)) as Record<string, unknown>;
+      mutate(mutated);
+      expect(() => buildObservationContract(mutated), label).toThrow(ObservationContractPortError);
+      const pyResult = python(
+        `
+try:
+    oc.build_contract(docs)
+    sys.stdout.write("no-error")
+except oc.ObservationContractError:
+    sys.stdout.write("failed-closed")
+`,
+        mutated,
+      );
+      expect(pyResult, label).toBe('failed-closed');
+    }
   });
 
   it('anchors the TS default contract dir to the module, not the cwd', () => {

@@ -59,6 +59,177 @@ export const MIN_PROJECTION_VALUES = Object.freeze([
 ] as const);
 const minProjectionLookup = new Set<string>(MIN_PROJECTION_VALUES);
 
+// Closed-world authority model (deploy/observation-plane/README.md): every
+// governed field below is MANDATORY and every vocabulary is closed. Mirrors
+// REQUIRED_CLAIM_FIELDS / REQUIRED_ADAPTER_FIELDS / GENERATION_BINDINGS /
+// PROJECTION_SCOPES / ADAPTER_STATUSES on the Python side.
+const REQUIRED_CLAIM_FIELDS = Object.freeze([
+  'claim_id',
+  'family',
+  'subject_kind',
+  'min_projection',
+  'authority_tier',
+  'generation_binding',
+  'staleness_rule',
+  'producing_adapters',
+  'cannot_establish',
+] as const);
+const REQUIRED_ADAPTER_FIELDS = Object.freeze([
+  'adapter_id',
+  'wraps',
+  'platforms',
+  'privilege',
+  'prerequisites',
+  'projection_scope',
+  'can_establish',
+  'cannot_establish',
+  'status',
+] as const);
+const generationBindings = new Set(['none', 'config', 'process', 'credential', 'process+credential']);
+const projectionScopes = new Set(['diagnostic', 'public', 'not_applicable']);
+const adapterStatuses = new Set(['available', 'gated', 'producer_pending']);
+
+function stringListField(value: unknown, what: string): string[] {
+  if (!Array.isArray(value) || !value.every((item): item is string => typeof item === 'string')) {
+    throw new ObservationContractPortError(`${what} must be a list of strings`);
+  }
+  return value;
+}
+
+function validateAuthorityMetadata(
+  claims: Record<string, Record<string, unknown>>,
+  adapters: Record<string, Record<string, unknown>>,
+  tiers: string[],
+): void {
+  const tierSet = new Set(tiers);
+  for (const [claimId, claim] of Object.entries(claims)) {
+    for (const field of REQUIRED_CLAIM_FIELDS) {
+      if (!Object.hasOwn(claim, field)) {
+        throw new ObservationContractPortError(`claim ${claimId}: missing required field ${field}`);
+      }
+    }
+    if (typeof claim['authority_tier'] !== 'string' || !tierSet.has(claim['authority_tier'])) {
+      throw new ObservationContractPortError(
+        `claim ${claimId}: authority_tier ${String(claim['authority_tier'])} is not a declared lattice tier`,
+      );
+    }
+    if (
+      typeof claim['generation_binding'] !== 'string' ||
+      !generationBindings.has(claim['generation_binding'])
+    ) {
+      throw new ObservationContractPortError(
+        `claim ${claimId}: generation_binding ${String(claim['generation_binding'])} outside the closed vocabulary`,
+      );
+    }
+    const rule = claim['staleness_rule'];
+    if (!isRecord(rule) || typeof rule['kind'] !== 'string' || rule['kind'].length === 0) {
+      throw new ObservationContractPortError(
+        `claim ${claimId}: staleness_rule must be an object with a non-empty string kind`,
+      );
+    }
+    const window = rule['window_seconds'];
+    if (window !== undefined && (typeof window !== 'number' || !Number.isInteger(window))) {
+      throw new ObservationContractPortError(
+        `claim ${claimId}: staleness_rule.window_seconds must be an integer when present`,
+      );
+    }
+    stringListField(claim['producing_adapters'], `claim ${claimId} producing_adapters`);
+    stringListField(claim['cannot_establish'], `claim ${claimId} cannot_establish`);
+  }
+
+  for (const [adapterId, adapter] of Object.entries(adapters)) {
+    for (const field of REQUIRED_ADAPTER_FIELDS) {
+      if (!Object.hasOwn(adapter, field)) {
+        throw new ObservationContractPortError(
+          `adapter ${adapterId}: missing required field ${field}`,
+        );
+      }
+    }
+    if (
+      typeof adapter['projection_scope'] !== 'string' ||
+      !projectionScopes.has(adapter['projection_scope'])
+    ) {
+      throw new ObservationContractPortError(
+        `adapter ${adapterId}: projection_scope ${String(adapter['projection_scope'])} outside the closed vocabulary`,
+      );
+    }
+    if (typeof adapter['status'] !== 'string' || !adapterStatuses.has(adapter['status'])) {
+      throw new ObservationContractPortError(
+        `adapter ${adapterId}: status ${String(adapter['status'])} outside the closed vocabulary`,
+      );
+    }
+    for (const field of ['wraps', 'platforms', 'prerequisites', 'can_establish', 'cannot_establish']) {
+      stringListField(adapter[field], `adapter ${adapterId} ${field}`);
+    }
+    if (typeof adapter['privilege'] !== 'string' || adapter['privilege'].length === 0) {
+      throw new ObservationContractPortError(
+        `adapter ${adapterId}: privilege must be a non-empty string`,
+      );
+    }
+    const cannot = new Set(stringListField(adapter['cannot_establish'], `adapter ${adapterId}`));
+    for (const claimId of stringListField(adapter['can_establish'], `adapter ${adapterId}`)) {
+      if (cannot.has(claimId)) {
+        throw new ObservationContractPortError(
+          `adapter ${adapterId}: ${claimId} appears in both can_establish and cannot_establish`,
+        );
+      }
+    }
+  }
+
+  // Cross-references resolve, and producer relationships are symmetric in BOTH
+  // directions.
+  for (const [claimId, claim] of Object.entries(claims)) {
+    for (const other of stringListField(claim['cannot_establish'], `claim ${claimId}`)) {
+      if (!Object.hasOwn(claims, other)) {
+        throw new ObservationContractPortError(
+          `claim ${claimId}: cannot_establish references unknown claim ${other}`,
+        );
+      }
+    }
+    for (const adapterId of stringListField(claim['producing_adapters'], `claim ${claimId}`)) {
+      if (!Object.hasOwn(adapters, adapterId)) {
+        throw new ObservationContractPortError(
+          `claim ${claimId}: producing_adapters references unknown adapter ${adapterId}`,
+        );
+      }
+      const canEstablish = stringListField(
+        adapters[adapterId]!['can_establish'],
+        `adapter ${adapterId}`,
+      );
+      if (!canEstablish.includes(claimId)) {
+        throw new ObservationContractPortError(
+          `claim ${claimId}: producer ${adapterId} does not declare it in can_establish`,
+        );
+      }
+    }
+  }
+  for (const [adapterId, adapter] of Object.entries(adapters)) {
+    for (const claimId of stringListField(adapter['can_establish'], `adapter ${adapterId}`)) {
+      if (!Object.hasOwn(claims, claimId)) {
+        throw new ObservationContractPortError(
+          `adapter ${adapterId}: can_establish references unknown claim ${claimId}`,
+        );
+      }
+      const producers = stringListField(
+        claims[claimId]!['producing_adapters'],
+        `claim ${claimId}`,
+      );
+      if (!producers.includes(adapterId)) {
+        throw new ObservationContractPortError(
+          `adapter ${adapterId}: claim ${claimId} does not name it in producing_adapters`,
+        );
+      }
+    }
+    for (const claimId of stringListField(adapter['cannot_establish'], `adapter ${adapterId}`)) {
+      if (!Object.hasOwn(claims, claimId)) {
+        throw new ObservationContractPortError(
+          `adapter ${adapterId}: cannot_establish references unknown claim ${claimId}`,
+        );
+      }
+    }
+  }
+}
+
 /** Raised when the contract set cannot be read or is structurally invalid.
  * Callers treat this as fail-closed (mirrors Python's
  * `ObservationContractError`). */
@@ -92,9 +263,11 @@ export interface ObservationContract {
 }
 
 /** Recursive readonly JSON value. Contract payloads are typed as this rather
- * than `unknown`, because `unknown` loses immutability through ordinary
- * narrowing: `if (Array.isArray(v)) v.push(...)` type-checks against
- * `unknown` but not against `readonly ReadonlyJsonValue[]`. */
+ * than `unknown` so that DIRECT payload mutation is a compile error —
+ * assignment (TS2542) and `payload.push(...)` (TS2339) both fail. Mutation
+ * behind `Array.isArray` narrowing still compiles (TypeScript widens even
+ * readonly arrays there); the runtime `deepFreeze` is the authority on that
+ * path, as documented on `ObservationContractView` below. */
 export type ReadonlyJsonValue =
   | string
   | number
@@ -380,6 +553,7 @@ export function buildObservationContract(docs: Record<string, unknown>): Observa
     }
     tiers.push(tier['tier']);
   }
+  validateAuthorityMetadata(claims, adapters, tiers);
   const typedDocs = Object.create(null) as Record<ContractFileName, Record<string, unknown>>;
   for (const name of CONTRACT_FILE_NAMES) {
     typedDocs[name] = docs[name] as Record<string, unknown>;
