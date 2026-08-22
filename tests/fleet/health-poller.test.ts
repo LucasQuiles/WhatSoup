@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { hostname } from 'node:os';
 import { HealthPoller, type InstanceHealth } from '../../src/fleet/health-poller.ts';
 import type { AlertEmissionResult } from '../../src/lib/emit-alert.ts';
+import { usePerTestBotErrorsMarkerIsolation } from '../../tests/setup/bot-errors-vitest-isolation.ts';
 
 const alertFns = vi.hoisted(() => ({
   emitAlert: vi.fn((): AlertEmissionResult => ({
@@ -312,6 +313,8 @@ function relinkVerifiedAssetMatcher() {
     }),
   });
 }
+
+usePerTestBotErrorsMarkerIsolation();
 
 describe('HealthPoller', () => {
   let mockFetch: ReturnType<typeof vi.fn>;
