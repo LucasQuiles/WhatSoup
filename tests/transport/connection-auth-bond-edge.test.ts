@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AuthBondCaptureResult, AuthBondRestoreResult, AuthBondSnapshot } from '../../src/transport/auth-bond.ts';
+import { usePerTestBotErrorsMarkerIsolation } from '../../tests/setup/bot-errors-vitest-isolation.ts';
 
 type AuthBondSnapshotOverrides = Partial<Omit<AuthBondSnapshot, 'authDir' | 'creds' | 'backup'>> & {
   authDir?: Partial<AuthBondSnapshot['authDir']>;
@@ -241,6 +242,8 @@ beforeEach(() => {
   mockAuth.restore = null;
   mockAuth.capture = null;
 });
+
+usePerTestBotErrorsMarkerIsolation();
 
 describe('ConnectionManager auth-bond edge coverage', () => {
   it('records a successful auth-bond restore before creating the socket', async () => {
