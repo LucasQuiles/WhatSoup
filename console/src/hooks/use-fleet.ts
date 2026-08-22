@@ -18,6 +18,7 @@ import {
   shareLinesByName,
   shareMessagesByPk,
 } from '../lib/structural-sharing.js';
+import { MS_PER_MINUTE, MS_PER_SECOND } from '../../../src/lib/time-units.ts';
 import type { ChatItem, LineInstance, Message } from '../types.js';
 import { useRealtime } from './use-websocket.js';
 export { computeKpis };
@@ -42,7 +43,7 @@ const POLL_FEED = 5000;
  * status transitions promptly — this interval only backstops freshness for
  * everything else in the payload.
  */
-const POLL_LINES_WS_BACKSTOP = 15_000;
+const POLL_LINES_WS_BACKSTOP = 15 * MS_PER_SECOND;
 
 // ---------------------------------------------------------------------------
 // Query option factories (static — no hook dependency)
@@ -214,7 +215,7 @@ export function useProviders() {
   return useQuery({
     queryKey: ['providers'],
     queryFn: () => api.getProviders(),
-    staleTime: 5 * 60_000,
+    staleTime: 5 * MS_PER_MINUTE,
   });
 }
 
