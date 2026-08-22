@@ -242,6 +242,181 @@ describe('ProviderExecutionGate', () => {
       abortedWaits: aborted.size,
     });
   });
+
+  // #2340: content-free active-holder age, phase, and progress freshness.
+  it('exposes holder age, phase, and progress freshness from admit through idle reset', async () => {
+    let now = 1_000;
+    const gate = new ProviderExecutionGate({ now: () => now });
+
+    const lease = await gate.acquire();
+    expect(gate.snapshot()).toMatchObject({
+      active: true,
+      activeAgeMs: 0,
+      activePhase: 'queued_to_spawn',
+      progressAgeMs: 0,
+    });
+
+    now = 1_500;
+    lease.setPhase('executing');
+    expect(gate.snapshot()).toMatchObject({
+      activeAgeMs: 500,
+      activePhase: 'executing',
+      progressAgeMs: 500,
+    });
+
+    now = 2_000;
+    lease.markProgress();
+    expect(gate.snapshot()).toMatchObject({
+      activeAgeMs: 1_000,
+      activePhase: 'executing',
+      progressAgeMs: 0,
+    });
+
+    lease.release();
+    expect(gate.snapshot()).toMatchObject({
+      active: false,
+      activeAgeMs: 0,
+      activePhase: 'executing',
+      progressAgeMs: 0,
+    });
+  });
+
+  it('resets holder freshness for the FIFO successor and ignores stale lease calls', async () => {
+    let now = 5_000;
+    const gate = new ProviderExecutionGate({ now: () => now });
+
+    const first = await gate.acquire();
+    now = 6_000;
+    first.setPhase('terminalizing');
+    const secondPromise = gate.acquire();
+
+    now = 9_000;
+    first.release();
+    const second = await secondPromise;
+    expect(gate.snapshot()).toMatchObject({
+      active: true,
+      activeAgeMs: 0,
+      activePhase: 'queued_to_spawn',
+      progressAgeMs: 0,
+    });
+
+    // The released lease's generation is superseded: its calls must be no-ops
+    // and must not touch the successor's phase or freshness.
+    first.markProgress();
+    first.setPhase('cleanup');
+    expect(gate.snapshot()).toMatchObject({
+      activeAgeMs: 0,
+      activePhase: 'queued_to_spawn',
+      progressAgeMs: 0,
+    });
+
+    now = 9_100;
+    second.markProgress();
+    second.setPhase('executing');
+    expect(gate.snapshot()).toMatchObject({
+      activeAgeMs: 100,
+      activePhase: 'executing',
+      progressAgeMs: 0,
+    });
+    second.release();
+    expect(gate.snapshot()).toMatchObject({ active: false, activePhase: 'executing' });
+  });
+
+  it('distinguishes stalled-vs-advancing holders with identical queue counters (#2340 falsifier)', async () => {
+    let nowAdvancing = 1_000;
+    let nowStalled = 1_000;
+    const advancingGate = new ProviderExecutionGate({ now: () => nowAdvancing });
+    const stalledGate = new ProviderExecutionGate({ now: () => nowStalled });
+
+    const advancingLease = await advancingGate.acquire();
+    const stalledLease = await stalledGate.acquire();
+    advancingGate.acquire();
+    stalledGate.acquire();
+    expect(advancingGate.snapshot()).toMatchObject({ pending: 1, totalWaits: 1 });
+    expect(stalledGate.snapshot()).toMatchObject({ pending: 1, totalWaits: 1 });
+
+    advancingLease.setPhase('executing');
+    stalledLease.setPhase('terminalizing');
+    nowAdvancing = 2_000;
+    advancingLease.markProgress();
+    nowAdvancing = 60_000;
+    nowStalled = 60_000;
+
+    const advancing = advancingGate.snapshot();
+    const stalled = stalledGate.snapshot();
+    // Identical legacy counters — the states the issue calls indistinguishable.
+    expect(advancing.pending).toBe(stalled.pending);
+    expect(advancing.oldestWaitMs).toBe(stalled.oldestWaitMs);
+    expect(advancing.totalWaits).toBe(stalled.totalWaits);
+    expect(advancing.pressureActive).toBe(stalled.pressureActive);
+    // But the holder freshness now separates them.
+    expect(advancing.activePhase).toBe('executing');
+    expect(stalled.activePhase).toBe('terminalizing');
+    expect(advancing.activeAgeMs).toBe(59_000);
+    expect(stalled.activeAgeMs).toBe(59_000);
+    expect(advancing.progressAgeMs).toBe(58_000);
+    expect(stalled.progressAgeMs).toBe(59_000);
+
+    advancingLease.release();
+    stalledLease.release();
+  });
+
+  // #2340 spec item 1: the full 4-value phase lifecycle, each step with
+  // fresh progress, on a real gate under an injected clock.
+  it('walks the full holder phase lifecycle with fresh progress at each step', async () => {
+    let now = 10_000;
+    const gate = new ProviderExecutionGate({ now: () => now });
+    const lease = await gate.acquire();
+
+    // queued_to_spawn: admitted but the holder has not reported starting.
+    expect(gate.snapshot()).toMatchObject({ activePhase: 'queued_to_spawn', progressAgeMs: 0 });
+
+    now = 11_000;
+    lease.setPhase('executing');
+    lease.markProgress();
+    expect(gate.snapshot()).toMatchObject({
+      activePhase: 'executing',
+      activeAgeMs: 1_000,
+      progressAgeMs: 0,
+    });
+
+    now = 12_000;
+    lease.setPhase('terminalizing');
+    expect(gate.snapshot()).toMatchObject({ activePhase: 'terminalizing', progressAgeMs: 1_000 });
+
+    now = 13_000;
+    lease.setPhase('cleanup');
+    lease.markProgress();
+    expect(gate.snapshot()).toMatchObject({ activePhase: 'cleanup', progressAgeMs: 0, activeAgeMs: 3_000 });
+
+    lease.release();
+    expect(gate.snapshot()).toMatchObject({ active: false, activePhase: 'executing', activeAgeMs: 0 });
+  });
+
+  it('enriches pressure evidence with content-free holder freshness labels', async () => {
+    vi.useFakeTimers();
+    try {
+      emitAlertMock.mockClear();
+      clearAlertMock.mockClear();
+      const gate = createProviderExecutionGate('pressure-freshness');
+      const first = await gate.acquire({
+        work: { kind: 'turn', scopeHash: 'aaaaaaaaaaaa' },
+      });
+      gate.acquire({ work: { kind: 'probe', scopeHash: 'bbbbbbbbbbbb' } });
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(emitAlertMock).toHaveBeenCalledTimes(1);
+      const evidence = emitAlertMock.mock.calls[0]?.[3] as string;
+      expect(evidence).toContain('active_age_ms=30000');
+      expect(evidence).toContain('active_phase=queued_to_spawn');
+      expect(evidence).toContain('progress_age_ms=30000');
+
+      first.release();
+      await vi.advanceTimersByTimeAsync(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 // #2394 (source 4): recovery-authority marker wiring for the pressure alert.
