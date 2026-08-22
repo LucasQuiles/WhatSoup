@@ -556,6 +556,9 @@ def test_describe_value_never_raises_on_governed_shapes() -> None:
     # A null-prototype-equivalent mapping (no __str__ of its own) is the shape
     # that broke the TS side; the Python formatter must name it structurally.
     assert _mod._describe_value(MappingProxyType({"a": 1})) == "object"
+    # Non-ASCII must render as JSON.stringify does, not as \\uXXXX escapes —
+    # the default ensure_ascii=True would silently break the mirror claim.
+    assert _mod._describe_value("café-é") == '"café-é"'
 
 
 def test_committed_staleness_rules_are_inside_the_closed_vocabulary() -> None:

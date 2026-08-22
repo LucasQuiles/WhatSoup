@@ -820,6 +820,22 @@ except oc.ObservationContractError:
     }
   });
 
+  it('describes a malformed value identically in both readers, including non-ASCII', () => {
+    // Round 7b. The reader comments claim the two describe helpers "name a
+    // malformed value the same way"; this enforces it rather than asserting it
+    // in prose. Python's json.dumps defaults to ensure_ascii=True, which would
+    // render "café" as "café" where JSON.stringify yields "café" — a
+    // silent divergence in the message a caller logs.
+    const samples = ['café-é', 'plain', 'quote"inside', 'éü'];
+    for (const sample of samples) {
+      const py = python(
+        `sys.stdout.write(oc._describe_value(${JSON.stringify(sample)}))`,
+        loadCommittedDocs(),
+      );
+      expect(py, sample).toBe(JSON.stringify(sample));
+    }
+  });
+
   it('anchors the TS default contract dir to the module, not the cwd', () => {
     // Python's default_contract_dir is module-anchored; the TS default must
     // resolve the same directory from ANY working directory.

@@ -98,15 +98,25 @@ const stalenessKeys = new Set(['kind', 'window_seconds', 'note']);
 const projectionScopes = new Set(['diagnostic', 'public', 'not_applicable']);
 const adapterStatuses = new Set(['available', 'gated', 'producer_pending']);
 
-// Error-message formatter that CANNOT itself throw. `String(value)` is unsafe
-// here for two reasons that both occur in practice: a null-prototype object
-// (which is exactly what normalizeForDigest builds, so it reaches this path on
-// every malformed-authority rejection) has no `toString`/`Symbol.toPrimitive`
-// and raises `TypeError: Cannot convert object to primitive value`, and
-// `String(symbol)` throws outright. Either one would escape the documented
-// ObservationContractPortError taxonomy while REPORTING a rejection — callers
-// could no longer classify the evidence as invalid_evidence.
-// Mirrors _describe_value in deploy/scripts/lib/observation_contract.py.
+// Error-message formatter that CANNOT itself throw.
+//
+// The failure this exists for: a NULL-PROTOTYPE object — exactly what
+// normalizeForDigest builds, so it reaches this path on every
+// malformed-authority rejection — has no `toString`/`Symbol.toPrimitive`, so
+// `String(value)` raises `TypeError: Cannot convert object to primitive
+// value`. That escaped the documented ObservationContractPortError taxonomy
+// while still REPORTING a rejection, leaving callers unable to classify the
+// evidence as invalid_evidence.
+//
+// The symbol branch is defensive, not a fix for a throw in the old code:
+// `String(sym)` is explicitly permitted and returns "Symbol(x)". It is
+// IMPLICIT coercion (`${sym}`, `'' + sym`) that throws — which is what an
+// inlined template literal here would do. Naming symbols structurally keeps
+// that hazard out of reach if this helper is ever inlined.
+//
+// Mirrors _describe_value in deploy/scripts/lib/observation_contract.py,
+// including non-ASCII handling (that side passes ensure_ascii=False so both
+// readers render a malformed string identically).
 function describeValue(value: unknown): string {
   if (value === null) return 'null';
   const kind = typeof value;

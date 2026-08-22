@@ -103,14 +103,16 @@ def _describe_value(value: Any) -> str:
     """Describe a rejected value for an error message without ever raising.
 
     Mirrors ``describeValue`` in scripts/lib/observation-contract.ts so both
-    readers name a malformed value the same way.
+    readers name a malformed value the same way. ``ensure_ascii=False`` is
+    required for that parity to hold: the default would render a non-ASCII
+    string as ``"caf\\u00e9"`` where ``JSON.stringify`` yields ``"café"``.
     """
     if value is None:
         return "null"
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, str):
-        return json.dumps(value)
+        return json.dumps(value, ensure_ascii=False)
     if isinstance(value, (int, float)):
         return repr(value)
     if isinstance(value, (list, tuple)):
