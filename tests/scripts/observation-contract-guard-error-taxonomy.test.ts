@@ -51,9 +51,8 @@ describe('observation contract guard — error taxonomy', () => {
     // stays undefined and every assertion below fails: the
     // absorbed-vs-propagated distinction is what this asserts.
     let caught: unknown = undefined;
-    let returned: unknown = undefined;
     try {
-      returned = checkObservationContract(repoRoot);
+      checkObservationContract(repoRoot);
     } catch (err) {
       caught = err;
     }
@@ -63,9 +62,5 @@ describe('observation contract guard — error taxonomy', () => {
       'a non-contract reader error must propagate as a harness failure, not become a contract finding',
     ).toBe(injectedReaderBug);
     expect(caught, 'the propagated error must keep its own class').toBeInstanceOf(RangeError);
-    expect(
-      returned,
-      'checkObservationContract must not return a value when the reader itself is broken',
-    ).toBeUndefined();
   });
 });
