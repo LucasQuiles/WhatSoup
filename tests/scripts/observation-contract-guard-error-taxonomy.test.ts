@@ -14,13 +14,22 @@ import { describe, expect, it, vi } from 'vitest';
 // that fix, precisely because the TypeError was being absorbed. Here the
 // absorbed-vs-propagated distinction IS the assertion, so the test fails
 // against the old unqualified catch.
+// Hoisted so the ONE injected instance is addressable from the assertion below.
+// `toThrow(new RangeError(msg))` compares name and message only — it would pass
+// against any same-message RangeError, including one the guard manufactured
+// itself. Object identity is the assertion that actually proves the original
+// error object travelled through untouched.
+const injectedReaderBug = vi.hoisted(
+  () => new RangeError('simulated reader bug — NOT a contract-data defect'),
+);
+
 vi.mock('../../scripts/lib/observation-contract.ts', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('../../scripts/lib/observation-contract.ts')>();
   return {
     ...actual,
     buildObservationContract: () => {
-      throw new RangeError('simulated reader bug — NOT a contract-data defect');
+      throw injectedReaderBug;
     },
   };
 });
@@ -34,15 +43,29 @@ describe('observation contract guard — error taxonomy', () => {
     );
 
     // The committed contract data is valid, so the ONLY error in play is the
-    // injected reader bug. It must escape as a harness failure — the exact
-    // class and message, not merely "it threw".
+    // injected reader bug. It must escape as a harness failure — the very same
+    // object, not merely "something with that message".
     //
     // Under the old unqualified catch this call RETURNED a result whose
-    // findings contained `reader-rejected`, so toThrow fails there: the
+    // findings contained `reader-rejected` and nothing was thrown, so `caught`
+    // stays undefined and every assertion below fails: the
     // absorbed-vs-propagated distinction is what this asserts.
+    let caught: unknown = undefined;
+    let returned: unknown = undefined;
+    try {
+      returned = checkObservationContract(repoRoot);
+    } catch (err) {
+      caught = err;
+    }
+
     expect(
-      () => checkObservationContract(repoRoot),
+      caught,
       'a non-contract reader error must propagate as a harness failure, not become a contract finding',
-    ).toThrow(new RangeError('simulated reader bug — NOT a contract-data defect'));
+    ).toBe(injectedReaderBug);
+    expect(caught, 'the propagated error must keep its own class').toBeInstanceOf(RangeError);
+    expect(
+      returned,
+      'checkObservationContract must not return a value when the reader itself is broken',
+    ).toBeUndefined();
   });
 });
