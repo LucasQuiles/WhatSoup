@@ -10,6 +10,8 @@ instance=""
 output=""
 target_url="${WHATSOUP_RELEASE_TARGET_URL:-https://github.com/LucasQuiles/WhatSoup.git}"
 target_ref="${WHATSOUP_RELEASE_TARGET_REF:-refs/heads/main}"
+max_log_bytes="${WHATSOUP_RELEASE_DRIFT_MAX_LOG_BYTES:-5242880}"
+keep_rotated_logs="${WHATSOUP_RELEASE_DRIFT_KEEP_ROTATED_LOGS:-5}"
 
 usage() {
   cat >&2 <<'USAGE'
@@ -25,6 +27,8 @@ Options:
   --output <path>      Absolute non-live path to write instead of stdout
   --target-url <url>   Explicit HTTPS/SSH Git remote used for currency observation
   --target-ref <ref>   Full refs/heads/... target (default: refs/heads/main)
+  --max-log-bytes <n>  Rotation cap per log file in bytes (default: 5242880)
+  --keep-rotated-logs <n>  Gzipped generations kept per log file (default: 5)
   --help              Show this help
 USAGE
 }
@@ -69,6 +73,14 @@ while [[ $# -gt 0 ]]; do
       target_ref="$(take_value "$1" "${2:-}")"
       shift 2
       ;;
+    --max-log-bytes)
+      max_log_bytes="$(take_value "$1" "${2:-}")"
+      shift 2
+      ;;
+    --keep-rotated-logs)
+      keep_rotated_logs="$(take_value "$1" "${2:-}")"
+      shift 2
+      ;;
     --help)
       usage
       exit 0
@@ -97,6 +109,12 @@ fi
 if [[ ! "$target_ref" =~ ^refs/heads/[A-Za-z0-9][A-Za-z0-9._/-]*$ || "$target_ref" == *..* || "$target_ref" == *//* || "$target_ref" == */ || "$target_ref" == *. ]]; then
   fail "unsafe --target-ref: use a full refs/heads/... name"
 fi
+if [[ ! "$max_log_bytes" =~ ^[0-9]+$ || "$max_log_bytes" -le 0 ]]; then
+  fail "unsafe --max-log-bytes: use a positive integer byte cap"
+fi
+if [[ ! "$keep_rotated_logs" =~ ^[0-9]+$ || "$keep_rotated_logs" -le 0 ]]; then
+  fail "unsafe --keep-rotated-logs: use a positive integer generation count"
+fi
 
 template="$repo_root/deploy/com.whatsoup.release-drift-check.plist"
 if [[ ! -f "$template" ]]; then
@@ -124,6 +142,8 @@ home_replacement="$(escape_sed_replacement "$home_dir")"
 instance_replacement="$(escape_sed_replacement "$instance")"
 target_url_replacement="$(escape_sed_replacement "$target_url")"
 target_ref_replacement="$(escape_sed_replacement "$target_ref")"
+max_log_bytes_replacement="$(escape_sed_replacement "$max_log_bytes")"
+keep_rotated_logs_replacement="$(escape_sed_replacement "$keep_rotated_logs")"
 
 rendered="$(
   sed \
@@ -132,10 +152,12 @@ rendered="$(
     -e "s|__INSTANCE__|$instance_replacement|g" \
     -e "s|__TARGET_URL__|$target_url_replacement|g" \
     -e "s|__TARGET_REF__|$target_ref_replacement|g" \
+    -e "s|__MAX_LOG_BYTES__|$max_log_bytes_replacement|g" \
+    -e "s|__KEEP_ROTATED_LOGS__|$keep_rotated_logs_replacement|g" \
     "$template"
 )"
 
-if grep -Eq '__WHATSOUP_REPO_ROOT__|__HOME__|__INSTANCE__|__TARGET_URL__|__TARGET_REF__' <<<"$rendered"; then
+if grep -Eq '__WHATSOUP_REPO_ROOT__|__HOME__|__INSTANCE__|__TARGET_URL__|__TARGET_REF__|__MAX_LOG_BYTES__|__KEEP_ROTATED_LOGS__' <<<"$rendered"; then
   fail "rendered plist still contains unresolved placeholders"
 fi
 

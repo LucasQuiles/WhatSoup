@@ -1,7 +1,8 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import fs, { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   acquireProcessLock,
   getCurrentBootId,
@@ -9,6 +10,10 @@ import {
   readProcessLockPayload,
   releaseProcessLock,
   resolveBootId,
+} from '../../src/lib/process-lock.ts';
+import type {
+  AcquireProcessLockOptions,
+  ProcessLockHandle,
 } from '../../src/lib/process-lock.ts';
 
 let tmpRoot = '';
@@ -29,6 +34,31 @@ function catchError(fn: () => unknown): unknown {
     return undefined;
   } catch (err) {
     return err;
+  }
+}
+
+function fixedIdentity(token: string, pid: number): AcquireProcessLockOptions {
+  return {
+    pid,
+    token,
+    now: new Date('2026-08-17T00:00:00.000Z'),
+    bootId: 'boot-current',
+    isProcessAlive: () => true,
+  };
+}
+
+function withPatchedReadFileSync<T>(
+  replacement: (original: typeof fs.readFileSync) => typeof fs.readFileSync,
+  action: () => T,
+): T {
+  const original = fs.readFileSync;
+  fs.readFileSync = replacement(original);
+  syncBuiltinESMExports();
+  try {
+    return action();
+  } finally {
+    fs.readFileSync = original;
+    syncBuiltinESMExports();
   }
 }
 
@@ -262,6 +292,336 @@ describe('process lock ownership', () => {
     if (!isProcessLockError(err)) throw new Error('expected process lock error');
     expect(err.reason).toBe('corrupt');
     expect(readFileSync(lockPath, 'utf8')).toBe('not-json');
+  });
+
+  it('fails closed on truncated lock bytes instead of deleting them', () => {
+    const lockPath = makeLockPath();
+    const truncated = '{"pid":33333,"token":"partial"';
+    writeFileSync(lockPath, truncated);
+
+    const error = catchError(() => acquireProcessLock(lockPath, fixedIdentity('next', 44444)));
+
+    expect(isProcessLockError(error)).toBe(true);
+    if (!isProcessLockError(error)) throw new Error('expected process lock error');
+    expect(error.reason).toBe('corrupt');
+    expect(readFileSync(lockPath, 'utf8')).toBe(truncated);
+  });
+
+  // @skip-env Windows does not provide POSIX permission bits for this unreadable-file boundary.
+  it.runIf(process.platform !== 'win32')('fails closed on an unreadable lock instead of deleting it', () => {
+    const lockPath = makeLockPath();
+    writeFileSync(lockPath, JSON.stringify({
+      pid: 33333,
+      token: 'unreadable',
+      startedAt: '2026-08-17T00:00:00.000Z',
+      bootId: 'boot-current',
+    }));
+    chmodSync(lockPath, 0o000);
+
+    try {
+      const error = catchError(() => acquireProcessLock(lockPath, fixedIdentity('next', 44444)));
+      expect(isProcessLockError(error)).toBe(true);
+      if (!isProcessLockError(error)) throw new Error('expected process lock error');
+      expect(error.reason).toBe('corrupt');
+      expect(existsSync(lockPath)).toBe(true);
+    } finally {
+      chmodSync(lockPath, 0o600);
+    }
+  });
+});
+
+describe('process lock bounded waiting', () => {
+  it('retries when the conflicting lock is released between EEXIST and payload read', () => {
+    const lockPath = makeLockPath();
+    const held = acquireProcessLock(lockPath, fixedIdentity('held', 11111));
+    let released = false;
+
+    const acquired = withPatchedReadFileSync(
+      (original) => ((...args: Parameters<typeof fs.readFileSync>) => {
+        if (String(args[0]) === lockPath && !released) {
+          released = true;
+          expect(releaseProcessLock(held)).toBe(true);
+        }
+        return Reflect.apply(original, fs, args);
+      }) as typeof fs.readFileSync,
+      () => acquireProcessLock(lockPath, fixedIdentity('next', 22222)),
+    );
+
+    expect(released).toBe(true);
+    expect(acquired.token).toBe('next');
+    expect(releaseProcessLock(acquired)).toBe(true);
+  });
+
+  it('classifies a replacement holder as active rather than corrupt', () => {
+    const lockPath = makeLockPath();
+    const held = acquireProcessLock(lockPath, fixedIdentity('held', 11111));
+    let replacement: ProcessLockHandle | undefined;
+    let interleaved = false;
+
+    const error = withPatchedReadFileSync(
+      (original) => ((...args: Parameters<typeof fs.readFileSync>) => {
+        if (String(args[0]) !== lockPath || interleaved) {
+          return Reflect.apply(original, fs, args);
+        }
+        interleaved = true;
+        expect(releaseProcessLock(held)).toBe(true);
+        let missingError: unknown;
+        try {
+          Reflect.apply(original, fs, args);
+        } catch (error) {
+          missingError = error;
+        }
+        expect((missingError as NodeJS.ErrnoException).code).toBe('ENOENT');
+        replacement = acquireProcessLock(lockPath, fixedIdentity('replacement', 33333));
+        throw missingError;
+      }) as typeof fs.readFileSync,
+      () => catchError(() => acquireProcessLock(lockPath, fixedIdentity('next', 22222))),
+    );
+
+    expect(interleaved).toBe(true);
+    expect(isProcessLockError(error)).toBe(true);
+    if (!isProcessLockError(error)) throw new Error('expected process lock error');
+    expect(error.reason).toBe('active');
+    expect(error.existingPid).toBe(33333);
+    expect(replacement).toBeDefined();
+    expect(releaseProcessLock(replacement!)).toBe(true);
+  });
+
+  it('waits with one acquisition payload and succeeds after a live holder releases', () => {
+    const lockPath = makeLockPath();
+    const held = acquireProcessLock(lockPath, fixedIdentity('held', 11111));
+    let nowMs = 0;
+    let sleeps = 0;
+
+    const acquired = acquireProcessLock(lockPath, {
+      ...fixedIdentity('next', 22222),
+      wait: {
+        timeoutMs: 500,
+        pollMs: 10,
+        monotonicNow: () => nowMs,
+        sleep: (ms) => {
+          sleeps += 1;
+          nowMs += ms;
+          if (sleeps === 1) expect(releaseProcessLock(held)).toBe(true);
+        },
+      },
+    });
+
+    expect(sleeps).toBe(1);
+    expect(acquired.token).toBe('next');
+    expect(releaseProcessLock(acquired)).toBe(true);
+  });
+
+  it('bounds live-holder waiting and preserves the holder on timeout', () => {
+    const lockPath = makeLockPath();
+    const held = acquireProcessLock(lockPath, fixedIdentity('held', 11111));
+    let nowMs = 0;
+
+    const error = catchError(() => acquireProcessLock(lockPath, {
+      ...fixedIdentity('next', 22222),
+      wait: {
+        timeoutMs: 25,
+        pollMs: 10,
+        monotonicNow: () => nowMs,
+        sleep: (ms) => { nowMs += ms; },
+      },
+    }));
+
+    expect(isProcessLockError(error)).toBe(true);
+    if (!isProcessLockError(error)) throw new Error('expected process lock error');
+    expect(error.reason).toBe('active');
+    expect(nowMs).toBe(25);
+    expect(readProcessLockPayload(lockPath)?.token).toBe('held');
+    expect(releaseProcessLock(held)).toBe(true);
+  });
+
+  it('makes a terminal link attempt when the observed holder releases at the deadline', () => {
+    const lockPath = makeLockPath();
+    const held = acquireProcessLock(lockPath, fixedIdentity('held', 11111));
+    let clockReads = 0;
+    let releasedAtDeadline = false;
+
+    const acquired = acquireProcessLock(lockPath, {
+      ...fixedIdentity('next', 22222),
+      wait: {
+        timeoutMs: 25,
+        pollMs: 10,
+        monotonicNow: () => {
+          clockReads += 1;
+          if (clockReads === 2) {
+            releasedAtDeadline = releaseProcessLock(held);
+            return 25;
+          }
+          return 0;
+        },
+        sleep: () => {
+          throw new Error('deadline path must not sleep');
+        },
+      },
+    });
+
+    expect(releasedAtDeadline).toBe(true);
+    expect(acquired.token).toBe('next');
+    expect(releaseProcessLock(acquired)).toBe(true);
+  });
+
+  it.each([
+    { field: 'timeoutMs', timeoutMs: -1, pollMs: 10 },
+    { field: 'timeoutMs', timeoutMs: Number.POSITIVE_INFINITY, pollMs: 10 },
+    { field: 'timeoutMs', timeoutMs: 1.5, pollMs: 10 },
+    { field: 'timeoutMs', timeoutMs: Number.MAX_VALUE, pollMs: 10 },
+    { field: 'pollMs', timeoutMs: 10, pollMs: 0 },
+    { field: 'pollMs', timeoutMs: 10, pollMs: Number.NaN },
+    { field: 'pollMs', timeoutMs: 10, pollMs: 1.5 },
+    { field: 'pollMs', timeoutMs: 10, pollMs: Number.MAX_VALUE },
+  ])('rejects invalid $field wait options', ({ timeoutMs, pollMs }) => {
+    const lockPath = makeLockPath();
+
+    expect(() => acquireProcessLock(lockPath, {
+      ...fixedIdentity('next', 22222),
+      wait: { timeoutMs, pollMs },
+    })).toThrow(RangeError);
+    expect(existsSync(lockPath)).toBe(false);
+    expect(readdirSync(tmpRoot)).toEqual([]);
+  });
+
+  it('rejects a wait clock that starts or becomes non-finite', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'whatsoup-process-lock-'));
+    const firstPath = join(tmpRoot, 'first.lock');
+    expect(() => acquireProcessLock(firstPath, {
+      ...fixedIdentity('first', 11111),
+      wait: { timeoutMs: 10, pollMs: 1, monotonicNow: () => Number.NaN },
+    })).toThrow(RangeError);
+    expect(readdirSync(tmpRoot)).toEqual([]);
+
+    const secondPath = join(tmpRoot, 'second.lock');
+    const held = acquireProcessLock(secondPath, fixedIdentity('held', 22222));
+    let reads = 0;
+    const error = catchError(() => acquireProcessLock(secondPath, {
+      ...fixedIdentity('next', 33333),
+      wait: {
+        timeoutMs: 10,
+        pollMs: 1,
+        monotonicNow: () => (++reads === 1 ? 0 : Number.POSITIVE_INFINITY),
+        sleep: () => undefined,
+      },
+    }));
+
+    expect(error).toBeInstanceOf(RangeError);
+    expect(readProcessLockPayload(secondPath)?.token).toBe('held');
+    expect(releaseProcessLock(held)).toBe(true);
+  });
+
+  it.each([
+    {
+      name: 'moves backwards',
+      readings: [10, 9, Number.POSITIVE_INFINITY],
+      message: 'process lock wait monotonic clock must not move backwards',
+    },
+    {
+      name: 'does not advance after sleep',
+      readings: [10, 10, 10, Number.POSITIVE_INFINITY],
+      message: 'process lock wait monotonic clock must advance after sleep',
+    },
+  ])('rejects a wait clock that $name', ({ readings, message }) => {
+    const lockPath = makeLockPath();
+    const held = acquireProcessLock(lockPath, fixedIdentity('held', 11111));
+    let index = 0;
+
+    const error = catchError(() => acquireProcessLock(lockPath, {
+      ...fixedIdentity('next', 22222),
+      wait: {
+        timeoutMs: 25,
+        pollMs: 10,
+        monotonicNow: () => readings[Math.min(index++, readings.length - 1)]!,
+        sleep: () => undefined,
+      },
+    }));
+
+    expect(error).toBeInstanceOf(RangeError);
+    expect((error as Error).message).toBe(message);
+    expect(readProcessLockPayload(lockPath)?.token).toBe('held');
+    expect(releaseProcessLock(held)).toBe(true);
+  });
+
+  // Every wait test above injects `monotonicNow`, which left the DEFAULT
+  // performance.now() clock unexercised — and the only production caller of
+  // `wait` (recovery-authority-store.ts) injects nothing. These three pin that
+  // default path under each clock mode the suite can run in.
+  it('classifies real contention as active on the default performance.now() clock', () => {
+    const lockPath = makeLockPath();
+    const held = acquireProcessLock(lockPath, fixedIdentity('held', 11111));
+
+    const error = catchError(() => acquireProcessLock(lockPath, {
+      ...fixedIdentity('next', 22222),
+      wait: { timeoutMs: 40, pollMs: 10 },
+    }));
+
+    expect(isProcessLockError(error)).toBe(true);
+    if (!isProcessLockError(error)) throw new Error('expected process lock error');
+    expect(error.reason).toBe('active');
+    expect(error.existingPid).toBe(11111);
+    expect(readProcessLockPayload(lockPath)?.token).toBe('held');
+    expect(releaseProcessLock(held)).toBe(true);
+  });
+
+  it('keeps the default clock usable when fake timers leave performance real', () => {
+    const lockPath = makeLockPath();
+    const held = acquireProcessLock(lockPath, fixedIdentity('held', 11111));
+
+    vi.useFakeTimers({ toFake: ['setTimeout', 'setInterval', 'Date'] });
+    try {
+      const error = catchError(() => acquireProcessLock(lockPath, {
+        ...fixedIdentity('next', 22222),
+        wait: { timeoutMs: 40, pollMs: 10 },
+      }));
+
+      expect(isProcessLockError(error)).toBe(true);
+      if (!isProcessLockError(error)) throw new Error('expected process lock error');
+      expect(error.reason).toBe('active');
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(readProcessLockPayload(lockPath)?.token).toBe('held');
+    expect(releaseProcessLock(held)).toBe(true);
+  });
+
+  it('degrades to a RangeError when fake timers also freeze performance.now()', () => {
+    // Vitest's default `toFake` is every supported timer except nextTick and
+    // queueMicrotask, so a bare vi.useFakeTimers() freezes performance.now():
+    // Atomics.wait still sleeps for real, but the clock never moves, so the
+    // clock-advance guard fires instead of the ProcessLockError that callers
+    // classify with isProcessLockError(). Recorded deliberately rather than left
+    // to be rediscovered — a suite needing this path must exclude 'performance'
+    // from toFake (test above) or inject wait.monotonicNow.
+    //
+    // If this ever stops throwing, the wait gained a clock-independent bound.
+    // That is a design decision to take explicitly — it would also retire the
+    // 'does not advance after sleep' case above — not a silent improvement.
+    const lockPath = makeLockPath();
+    const held = acquireProcessLock(lockPath, fixedIdentity('held', 11111));
+
+    vi.useFakeTimers();
+    try {
+      const error = catchError(() => acquireProcessLock(lockPath, {
+        ...fixedIdentity('next', 22222),
+        wait: { timeoutMs: 40, pollMs: 10 },
+      }));
+
+      expect(error).toBeInstanceOf(RangeError);
+      expect((error as Error).message).toBe(
+        'process lock wait monotonic clock must advance after sleep',
+      );
+      // The concrete cost: the store's handler cannot recognise this, so a real
+      // `active` contention is reported as lock_unavailable.
+      expect(isProcessLockError(error)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(readProcessLockPayload(lockPath)?.token).toBe('held');
+    expect(releaseProcessLock(held)).toBe(true);
   });
 });
 

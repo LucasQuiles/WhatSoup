@@ -8,8 +8,7 @@
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
-    <string>__WHATSOUP_REPO_ROOT__/scripts/run-with-pinned-node.sh</string>
-    <string>__WHATSOUP_REPO_ROOT__/scripts/live-release-observers.ts</string>
+    <string>__WHATSOUP_REPO_ROOT__/deploy/scripts/run-release-drift-schedule.sh</string>
     <string>--launchd-plist</string>
     <string>__HOME__/Library/LaunchAgents/com.whatsoup.__INSTANCE__.plist</string>
     <string>--instance</string>
@@ -19,6 +18,10 @@
     <string>--target-ref</string>
     <string>__TARGET_REF__</string>
     <string>--clear-on-ok</string>
+    <string>--max-log-bytes</string>
+    <string>__MAX_LOG_BYTES__</string>
+    <string>--keep-rotated-logs</string>
+    <string>__KEEP_ROTATED_LOGS__</string>
   </array>
   <key>StartInterval</key>
   <integer>300</integer>

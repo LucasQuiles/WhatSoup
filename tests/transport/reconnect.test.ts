@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Readable } from 'node:stream';
 import { chmodSync, lstatSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { usePerTestBotErrorsMarkerIsolation } from '../../tests/setup/bot-errors-vitest-isolation.ts';
 
 const emitAlertMock = vi.hoisted(() => vi.fn(() => true));
 const clearAlertSourceMock = vi.hoisted(() => vi.fn(() => true));
@@ -226,6 +227,8 @@ afterEach(async () => {
 // ---------------------------------------------------------------------------
 // T26d — Reconnect Resilience Tests
 // ---------------------------------------------------------------------------
+
+usePerTestBotErrorsMarkerIsolation();
 
 describe('ConnectionManager — backoff sequence', () => {
   it('first disconnect schedules reconnect with 1s backoff', async () => {
