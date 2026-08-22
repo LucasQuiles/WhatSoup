@@ -98,6 +98,25 @@ const stalenessKeys = new Set(['kind', 'window_seconds', 'note']);
 const projectionScopes = new Set(['diagnostic', 'public', 'not_applicable']);
 const adapterStatuses = new Set(['available', 'gated', 'producer_pending']);
 
+// Error-message formatter that CANNOT itself throw. `String(value)` is unsafe
+// here for two reasons that both occur in practice: a null-prototype object
+// (which is exactly what normalizeForDigest builds, so it reaches this path on
+// every malformed-authority rejection) has no `toString`/`Symbol.toPrimitive`
+// and raises `TypeError: Cannot convert object to primitive value`, and
+// `String(symbol)` throws outright. Either one would escape the documented
+// ObservationContractPortError taxonomy while REPORTING a rejection — callers
+// could no longer classify the evidence as invalid_evidence.
+// Mirrors _describe_value in deploy/scripts/lib/observation_contract.py.
+function describeValue(value: unknown): string {
+  if (value === null) return 'null';
+  const kind = typeof value;
+  if (kind === 'string') return JSON.stringify(value);
+  if (kind === 'symbol') return 'symbol';
+  if (kind === 'object') return Array.isArray(value) ? 'array' : 'object';
+  if (kind === 'function') return 'function';
+  return String(value as number | boolean | bigint | undefined);
+}
+
 function stringListField(value: unknown, what: string): string[] {
   if (!Array.isArray(value) || !value.every((item): item is string => typeof item === 'string')) {
     throw new ObservationContractPortError(`${what} must be a list of strings`);
@@ -119,7 +138,7 @@ function validateAuthorityMetadata(
     }
     if (typeof claim['authority_tier'] !== 'string' || !tierSet.has(claim['authority_tier'])) {
       throw new ObservationContractPortError(
-        `claim ${claimId}: authority_tier ${String(claim['authority_tier'])} is not a declared lattice tier`,
+        `claim ${claimId}: authority_tier ${describeValue(claim['authority_tier'])} is not a declared lattice tier`,
       );
     }
     if (
@@ -127,7 +146,7 @@ function validateAuthorityMetadata(
       !generationBindings.has(claim['generation_binding'])
     ) {
       throw new ObservationContractPortError(
-        `claim ${claimId}: generation_binding ${String(claim['generation_binding'])} outside the closed vocabulary`,
+        `claim ${claimId}: generation_binding ${describeValue(claim['generation_binding'])} outside the closed vocabulary`,
       );
     }
     const rule = claim['staleness_rule'];
@@ -146,7 +165,7 @@ function validateAuthorityMetadata(
     const kind = rule['kind'];
     if (typeof kind !== 'string' || !stalenessKinds.has(kind)) {
       throw new ObservationContractPortError(
-        `claim ${claimId}: staleness_rule.kind ${JSON.stringify(kind)} outside the closed vocabulary`,
+        `claim ${claimId}: staleness_rule.kind ${describeValue(kind)} outside the closed vocabulary`,
       );
     }
     if (Object.hasOwn(rule, 'note') && typeof rule['note'] !== 'string') {
@@ -191,12 +210,12 @@ function validateAuthorityMetadata(
       !projectionScopes.has(adapter['projection_scope'])
     ) {
       throw new ObservationContractPortError(
-        `adapter ${adapterId}: projection_scope ${String(adapter['projection_scope'])} outside the closed vocabulary`,
+        `adapter ${adapterId}: projection_scope ${describeValue(adapter['projection_scope'])} outside the closed vocabulary`,
       );
     }
     if (typeof adapter['status'] !== 'string' || !adapterStatuses.has(adapter['status'])) {
       throw new ObservationContractPortError(
-        `adapter ${adapterId}: status ${String(adapter['status'])} outside the closed vocabulary`,
+        `adapter ${adapterId}: status ${describeValue(adapter['status'])} outside the closed vocabulary`,
       );
     }
     for (const field of ['wraps', 'platforms', 'prerequisites', 'can_establish', 'cannot_establish']) {
@@ -554,7 +573,7 @@ export function buildObservationContract(docs: Record<string, unknown>): Observa
     const version = (docs[name] as Record<string, unknown>)['schema_version'];
     if (version !== SUPPORTED_CONTRACT_SCHEMA_VERSION) {
       throw new ObservationContractPortError(
-        `unsupported schema_version in ${name}: ${String(version)} ` +
+        `unsupported schema_version in ${name}: ${describeValue(version)} ` +
           `(supported: ${SUPPORTED_CONTRACT_SCHEMA_VERSION})`,
       );
     }
@@ -573,7 +592,7 @@ export function buildObservationContract(docs: Record<string, unknown>): Observa
     const minProjection = claim['min_projection'];
     if (typeof minProjection !== 'string' || !minProjectionLookup.has(minProjection)) {
       throw new ObservationContractPortError(
-        `claim ${claimId}: min_projection ${String(minProjection)} outside the closed ` +
+        `claim ${claimId}: min_projection ${describeValue(minProjection)} outside the closed ` +
           `vocabulary [${[...MIN_PROJECTION_VALUES].sort().join(', ')}]`,
       );
     }

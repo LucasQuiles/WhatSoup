@@ -99,6 +99,27 @@ PROJECTION_SCOPES = frozenset({"diagnostic", "public", "not_applicable"})
 ADAPTER_STATUSES = frozenset({"available", "gated", "producer_pending"})
 
 
+def _describe_value(value: Any) -> str:
+    """Describe a rejected value for an error message without ever raising.
+
+    Mirrors ``describeValue`` in scripts/lib/observation-contract.ts so both
+    readers name a malformed value the same way.
+    """
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, str):
+        return json.dumps(value)
+    if isinstance(value, (int, float)):
+        return repr(value)
+    if isinstance(value, (list, tuple)):
+        return "array"
+    if isinstance(value, Mapping):
+        return "object"
+    return type(value).__name__
+
+
 class ObservationContractError(RuntimeError):
     """Raised when the contract set cannot be read or is structurally invalid.
 
@@ -283,9 +304,13 @@ def build_contract(docs: dict) -> Mapping:
     surfaces = _build_surfaces(projections, canonical)
     claims = _build_keyed(docs["claim-catalog.json"].get("claims"), "claim_id", "claim catalog")
     for claim_id, claim in claims.items():
-        if claim.get("min_projection") not in MIN_PROJECTIONS:
+        min_projection = claim.get("min_projection")
+        # Type BEFORE membership: `x in frozenset` raises TypeError on an
+        # unhashable dict/list, which would escape ObservationContractError and
+        # leave callers unable to classify the evidence as invalid_evidence.
+        if not isinstance(min_projection, str) or min_projection not in MIN_PROJECTIONS:
             raise ObservationContractError(
-                f"claim {claim_id}: min_projection {claim.get('min_projection')!r} "
+                f"claim {claim_id}: min_projection {_describe_value(min_projection)} "
                 f"outside the closed vocabulary {sorted(MIN_PROJECTIONS)}"
             )
     adapters = _build_keyed(
@@ -322,14 +347,18 @@ def _validate_authority_metadata(claims: dict, adapters: dict, tiers: list[str])
         for field in REQUIRED_CLAIM_FIELDS:
             if field not in claim:
                 raise ObservationContractError(f"claim {claim_id}: missing required field {field}")
-        if claim["authority_tier"] not in tier_set:
+        if not isinstance(claim["authority_tier"], str) or claim["authority_tier"] not in tier_set:
             raise ObservationContractError(
-                f"claim {claim_id}: authority_tier {claim['authority_tier']!r} is not a declared lattice tier"
+                f"claim {claim_id}: authority_tier {_describe_value(claim['authority_tier'])} "
+                f"is not a declared lattice tier"
             )
-        if claim["generation_binding"] not in GENERATION_BINDINGS:
+        if (
+            not isinstance(claim["generation_binding"], str)
+            or claim["generation_binding"] not in GENERATION_BINDINGS
+        ):
             raise ObservationContractError(
-                f"claim {claim_id}: generation_binding {claim['generation_binding']!r} outside "
-                f"the closed vocabulary {sorted(GENERATION_BINDINGS)}"
+                f"claim {claim_id}: generation_binding {_describe_value(claim['generation_binding'])} "
+                f"outside the closed vocabulary {sorted(GENERATION_BINDINGS)}"
             )
         rule = claim["staleness_rule"]
         if not isinstance(rule, Mapping):
@@ -386,15 +415,18 @@ def _validate_authority_metadata(claims: dict, adapters: dict, tiers: list[str])
                 raise ObservationContractError(
                     f"adapter {adapter_id}: missing required field {field}"
                 )
-        if adapter["projection_scope"] not in PROJECTION_SCOPES:
+        if (
+            not isinstance(adapter["projection_scope"], str)
+            or adapter["projection_scope"] not in PROJECTION_SCOPES
+        ):
             raise ObservationContractError(
-                f"adapter {adapter_id}: projection_scope {adapter['projection_scope']!r} outside "
-                f"the closed vocabulary {sorted(PROJECTION_SCOPES)}"
+                f"adapter {adapter_id}: projection_scope {_describe_value(adapter['projection_scope'])} "
+                f"outside the closed vocabulary {sorted(PROJECTION_SCOPES)}"
             )
-        if adapter["status"] not in ADAPTER_STATUSES:
+        if not isinstance(adapter["status"], str) or adapter["status"] not in ADAPTER_STATUSES:
             raise ObservationContractError(
-                f"adapter {adapter_id}: status {adapter['status']!r} outside the closed "
-                f"vocabulary {sorted(ADAPTER_STATUSES)}"
+                f"adapter {adapter_id}: status {_describe_value(adapter['status'])} outside the "
+                f"closed vocabulary {sorted(ADAPTER_STATUSES)}"
             )
         for field in ("wraps", "platforms", "prerequisites", "can_establish", "cannot_establish"):
             _string_list(adapter[field], f"adapter {adapter_id} {field}")

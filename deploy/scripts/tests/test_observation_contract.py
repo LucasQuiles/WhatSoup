@@ -13,6 +13,7 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+from types import MappingProxyType
 
 import pytest
 
@@ -482,6 +483,79 @@ def test_staleness_rule_boundaries_accept_declared_shapes(rule: dict) -> None:
         assert built["window_seconds"] == int(rule["window_seconds"])
     else:
         assert "window_seconds" not in built
+
+
+# Governed scalar fields and where they live. A malformed value for any of
+# these must stay inside ObservationContractError: both readers already
+# REJECTED these inputs, but they escaped as raw TypeError (`x in frozenset`
+# on an unhashable dict/list), so a caller could not classify the evidence.
+_GOVERNED_SCALARS = (
+    ("claim-catalog.json", "claims", "min_projection"),
+    ("claim-catalog.json", "claims", "authority_tier"),
+    ("claim-catalog.json", "claims", "generation_binding"),
+    ("adapter-registry.json", "adapters", "projection_scope"),
+    ("adapter-registry.json", "adapters", "status"),
+)
+_WRONG_TYPES = (
+    ("null", None),
+    ("object", {"a": 1}),
+    ("array", [1]),
+    ("bool", True),
+    ("number", 5),
+    ("invalid_string", "definitely-not-a-declared-value"),
+)
+
+
+@pytest.mark.parametrize("doc,coll,field", _GOVERNED_SCALARS)
+@pytest.mark.parametrize("label,value", _WRONG_TYPES)
+def test_malformed_governed_scalar_stays_in_error_taxonomy(
+    doc: str, coll: str, field: str, label: str, value: object
+) -> None:
+    mutated = copy.deepcopy(_committed_docs())
+    mutated[doc][coll][0][field] = value
+    # Exact class, not "raises Exception": a raw TypeError here would still be
+    # a rejection but an UNCLASSIFIABLE one.
+    with pytest.raises(_mod.ObservationContractError):
+        _mod.build_contract(mutated)
+
+
+@pytest.mark.parametrize("doc,coll,field", _GOVERNED_SCALARS)
+@pytest.mark.parametrize("label,value", _WRONG_TYPES)
+def test_caller_classifies_malformed_evidence_as_invalid_evidence(
+    doc: str, coll: str, field: str, label: str, value: object
+) -> None:
+    """Caller-level proof of the taxonomy: a consumer that catches ONLY the
+    documented error class must be able to classify every malformed input as
+    invalid_evidence. Deliberately no bare `except Exception` — if the reader
+    raises anything else the exception propagates and this test fails."""
+    mutated = copy.deepcopy(_committed_docs())
+    mutated[doc][coll][0][field] = value
+
+    def classify(docs: dict) -> str:
+        try:
+            _mod.build_contract(docs)
+        except _mod.ObservationContractError:
+            return "invalid_evidence"
+        return "pass"
+
+    assert classify(mutated) == "invalid_evidence", f"{doc}.{field} = {label}"
+
+
+def test_describe_value_never_raises_on_governed_shapes() -> None:
+    cases = [
+        (None, "null"),
+        (True, "true"),
+        (False, "false"),
+        ("x", '"x"'),
+        (5, "5"),
+        ({"a": 1}, "object"),
+        ([1], "array"),
+    ]
+    for value, expected in cases:
+        assert _mod._describe_value(value) == expected
+    # A null-prototype-equivalent mapping (no __str__ of its own) is the shape
+    # that broke the TS side; the Python formatter must name it structurally.
+    assert _mod._describe_value(MappingProxyType({"a": 1})) == "object"
 
 
 def test_committed_staleness_rules_are_inside_the_closed_vocabulary() -> None:

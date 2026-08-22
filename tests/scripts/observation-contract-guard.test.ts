@@ -114,6 +114,53 @@ describe('observation contract guard', () => {
     expect(result.findings.map((f) => f.code)).toContain('malformed-entry');
   });
 
+  it('reports malformed governed scalars as findings instead of crashing (guard-path parity)', () => {
+    // Round 7 parity fence — NOT a falsifier, and deliberately recorded as
+    // such. This test passes both before and after the round-7 fix, because
+    // the guard's reader call is wrapped in an UNQUALIFIED `catch (err)` that
+    // converts any throw — ObservationContractPortError or raw TypeError alike
+    // — into a `reader-rejected` finding. So the taxonomy defect's blast radius
+    // was the DIRECT-READER path only; the guard path was already structured.
+    // What this fence buys: the guard keeps reporting these as findings after
+    // the reader's error class changed, and it pins the guard-vs-reader parity
+    // the lockstep matrix asserts on the direct path.
+    // (That the guard cannot distinguish a contract defect from a reader BUG is
+    // a separate masking concern — registered, not fixed here.)
+    const cases: Array<[string, (data: Record<string, never>) => void]> = [
+      ['min_projection', (d) => {
+        (d as never as { claims: Array<Record<string, unknown>> }).claims[0]!['min_projection'] = { a: 1 };
+      }],
+      ['authority_tier', (d) => {
+        (d as never as { claims: Array<Record<string, unknown>> }).claims[0]!['authority_tier'] = [1];
+      }],
+      ['generation_binding', (d) => {
+        (d as never as { claims: Array<Record<string, unknown>> }).claims[0]!['generation_binding'] = { a: 1 };
+      }],
+    ];
+    for (const [field, mutate] of cases) {
+      const root = makeRoot();
+      patchJson(root, 'claim-catalog.json', mutate as (data: Record<string, never>) => void);
+      const result = checkObservationContract(root);
+      expect(result.ok, field).toBe(false);
+      const codes = result.findings.map((f) => f.code);
+      expect(codes.some((c) => c === 'reader-rejected' || c === 'malformed-entry'), `${field}: ${codes.join(',')}`).toBe(true);
+    }
+
+    for (const [field, value] of [
+      ['projection_scope', { a: 1 }],
+      ['status', [1]],
+    ] as Array<[string, unknown]>) {
+      const root = makeRoot();
+      patchJson(root, 'adapter-registry.json', (data) => {
+        (data as never as { adapters: Array<Record<string, unknown>> }).adapters[0]![field] = value;
+      });
+      const result = checkObservationContract(root);
+      expect(result.ok, field).toBe(false);
+      const codes = result.findings.map((f) => f.code);
+      expect(codes.some((c) => c === 'reader-rejected' || c === 'malformed-entry'), `${field}: ${codes.join(',')}`).toBe(true);
+    }
+  });
+
   it('rejects overlapping can_establish/cannot_establish on one adapter', () => {
     const root = makeRoot();
     patchJson(root, 'adapter-registry.json', (data) => {

@@ -764,6 +764,62 @@ except oc.ObservationContractError:
     }
   });
 
+  it('keeps malformed governed scalars inside the documented error class in both readers', () => {
+    // Round 7. Both readers already REJECTED these inputs, but the rejection
+    // escaped the documented taxonomy as a raw TypeError:
+    //   Python — `x in frozenset` raises on an unhashable dict/list, before any
+    //            type check ran.
+    //   TS     — `String(value)` on a NULL-PROTOTYPE object (exactly what
+    //            normalizeForDigest builds) throws "Cannot convert object to
+    //            primitive value"; arrays survived because they keep
+    //            Array.prototype. That asymmetry made the two readers disagree
+    //            on WHICH inputs escaped.
+    // A caller cannot classify evidence as invalid_evidence if the reader can
+    // raise an uncategorized crash, so the exact class is the assertion.
+    const docs = loadCommittedDocs();
+    const fields: Array<[string, string, string]> = [
+      ['claim-catalog.json', 'claims', 'min_projection'],
+      ['claim-catalog.json', 'claims', 'authority_tier'],
+      ['claim-catalog.json', 'claims', 'generation_binding'],
+      ['adapter-registry.json', 'adapters', 'projection_scope'],
+      ['adapter-registry.json', 'adapters', 'status'],
+    ];
+    const wrongTypes: Array<[string, unknown]> = [
+      ['null', null],
+      ['object', { a: 1 }],
+      ['array', [1]],
+      ['bool', true],
+      ['number', 5],
+      ['invalid_string', 'definitely-not-a-declared-value'],
+    ];
+
+    for (const [doc, coll, field] of fields) {
+      for (const [label, value] of wrongTypes) {
+        const mutated = JSON.parse(JSON.stringify(docs)) as Record<string, unknown>;
+        (mutated[doc] as Record<string, Array<Record<string, unknown>>>)[coll]![0]![field] = value;
+        const where = `${doc}:${field}=${label}`;
+
+        // Exact class — `toThrow()` alone would pass on the TypeError this fixes.
+        expect(() => buildObservationContract(mutated), where).toThrow(ObservationContractPortError);
+
+        // Python must reach the same verdict through its own documented class.
+        // `except oc.ObservationContractError` deliberately does NOT catch
+        // TypeError, so an escape surfaces as a non-zero exit, not "failed-closed".
+        const pyResult = python(
+          `
+try:
+    oc.build_contract(docs)
+    sys.stdout.write("no-error")
+except oc.ObservationContractError:
+    sys.stdout.write("failed-closed")
+`,
+          mutated,
+        );
+        expect(pyResult, where).toBe('failed-closed');
+      }
+    }
+  });
+
   it('anchors the TS default contract dir to the module, not the cwd', () => {
     // Python's default_contract_dir is module-anchored; the TS default must
     // resolve the same directory from ANY working directory.
