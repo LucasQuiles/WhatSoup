@@ -94,7 +94,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "a885121c826709e99941d2251e272175fd5d23b5abb1a1ccd8a0aef4e0ccb0e0",
+      "sha256": "3e23db7a12fe7a94aff9b23679219ea0f460a5ff883c1953aadf72d39eaad6d7",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -178,7 +178,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
-      "sha256": "9ea3a6e0e964f27a1e105b095750491bf4410599759a48acda12bd098c05965b",
+      "sha256": "13d857a68f91acabd0afe591732f2d0acd5d091c4c27c1effab89fcb0afed1ab",
       "mustContain": [
         "q_loop_state_root",
         "BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT",

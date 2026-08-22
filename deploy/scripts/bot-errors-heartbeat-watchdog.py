@@ -101,6 +101,14 @@ KNOWN_WATCHDOG_CHECKS: frozenset[str] = frozenset({
 })
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+# Live instance-config tree (the runtime_config health-port authority). The
+# watchdog derives expected instances from the health profile; when a live
+# config.json disagrees on healthPort, the profile port is stale (#2342) and
+# probing it pages outage against the wrong address.
+INSTANCE_CONFIG_ROOT = Path(
+    os.environ.get("WHATSOUP_INSTANCE_CONFIG_ROOT")
+    or Path.home() / ".config" / "whatsoup" / "instances"
+)
 TERMINAL_AUTH_FAILURE_CLASSES = {"pairing_required", "serverside_logout_irreversible"}
 CONTROLLER_LOG_CONTEXT = ControllerLogContext("heartbeat_watchdog")
 
@@ -1486,6 +1494,22 @@ def local_instance_health_problems(
             continue
         name = str(item["name"])
         evaluated.add(name)
+        # #2342 health-port authority drift: profile port vs live config.json.
+        # A live healthPort that disagrees with the profile means the profile
+        # port is stale — classify the drift and inhibit the probe instead of
+        # paging outage against the misaddressed port. Missing live config (or
+        # missing live port) is a profile-only asset: probe the profile port.
+        live_cfg = load_json(INSTANCE_CONFIG_ROOT / name / "config.json")
+        live_port = live_cfg.get("healthPort") if live_cfg else None
+        if isinstance(live_port, bool) or not isinstance(live_port, int):
+            live_port = None
+        if live_port is not None and port != live_port:
+            problems[f"local_health:{name}"] = (
+                f"local health probe inhibited: instance={name} "
+                f"health_port_authority_drift profile={port} live={live_port} "
+                f"authority=runtime_config"
+            )
+            continue
         status, body, url = local_health_http_response(name, port)
         key = f"local_health:{name}"
         # Parse the telemetry REGARDLESS of status code. A server-side logout
