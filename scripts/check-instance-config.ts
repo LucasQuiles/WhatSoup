@@ -505,6 +505,45 @@ export function checkHealthProfiles(
 }
 
 // ---------------------------------------------------------------------------
+// Cross-source health-port authority parity (#2342).
+// The two surfaces above are scanned independently; this check joins them by
+// instance name. A health-profile healthPort that disagrees with the same
+// instance's live config.json healthPort is authority drift: the runtime binds
+// the live port (authority=runtime_config), and the profile value is stale —
+// exactly the condition daily health once probed to a false endpoint-outage.
+// A profile port with no live counterpart is NOT drift (remote/profile-only
+// asset); a live port with no profile entry is invisible here by construction.
+// ---------------------------------------------------------------------------
+
+export function checkHealthPortParity(
+  instanceResult: CheckResult,
+  healthResult: CheckResult,
+): ConfigFinding[] {
+  const livePorts = new Map<string, number>();
+  for (const scanned of instanceResult.scanned) {
+    if (typeof scanned.healthPort === 'number') {
+      livePorts.set(scanned.instance, scanned.healthPort);
+    }
+  }
+  const findings: ConfigFinding[] = [];
+  for (const scanned of healthResult.scanned) {
+    if (typeof scanned.healthPort !== 'number') continue;
+    const live = livePorts.get(scanned.instance);
+    if (live === undefined || live === scanned.healthPort) continue;
+    findings.push({
+      instance: scanned.instance,
+      filePath: scanned.filePath,
+      category: 'B-port',
+      field: 'healthPort',
+      message:
+        `health-port authority drift profile=${scanned.healthPort} live=${live} ` +
+        `authority=runtime_config (health profile disagrees with live instance config.json)`,
+    });
+  }
+  return findings;
+}
+
+// ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
 
@@ -581,7 +620,11 @@ export function run(
         const healthResult = checkHealthProfiles(defaultHealthProfilesRoot(cwd), options);
         return {
           scanned: [...instanceResult.scanned, ...healthResult.scanned],
-          findings: [...instanceResult.findings, ...healthResult.findings],
+          findings: [
+            ...instanceResult.findings,
+            ...healthResult.findings,
+            ...checkHealthPortParity(instanceResult, healthResult),
+          ],
         };
       })();
   const scope = args.explicitRoot
