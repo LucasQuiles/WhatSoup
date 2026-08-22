@@ -552,14 +552,14 @@ describe('#2394 recovery-authority-store wiring (model-currency + live-scan)', (
     if (tmpRoot) rmSync(tmpRoot, { recursive: true, force: true });
   });
 
-  /** Read the marker file as a Set of present-keys (empty if file absent). */
+  /**
+   * Read present marker keys through the store's own API. The store owns its
+   * on-disk layout (the legacy single-file read-modify-write was replaced by
+   * per-key files); asserting through loadRecoveryMarkers keeps these tests
+   * pinned to BEHAVIOR (marker present/absent) rather than to a storage shape.
+   */
   function readMarkers(): Set<string> {
-    try {
-      const raw = JSON.parse(readFileSync(join(tmpRoot, 'recovery-authority.json'), 'utf-8'));
-      return new Set(Object.keys(raw).filter((k) => raw[k] === true));
-    } catch {
-      return new Set();
-    }
+    return loadRecoveryMarkers();
   }
 
   // T1 — model-currency restart-recovery (RED on main: zero clears emitted).
