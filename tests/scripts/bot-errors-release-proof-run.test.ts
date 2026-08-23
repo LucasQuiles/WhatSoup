@@ -42,6 +42,8 @@ function makeFixture(mode: string | null, opts: { flockRc?: number; noDetectors?
   return { home, bin, bundle, ledger, modeFile, stateDir };
 }
 
+const USAGE_LINE = 'usage: bot-errors-release-proof-run.sh tree|runtime-staleness';
+
 function runRunner(fx: Fixture, args: string[], extraEnv: Record<string, string> = {}) {
   return spawnSync('bash', [RUNNER, ...args], {
     encoding: 'utf8',
@@ -125,9 +127,20 @@ describe('bot-errors-release-proof-run.sh', () => {
     expect(res.stderr).toContain('missing mode file');
   });
 
+  // Exact rejection contract, asserted per stream rather than on a concatenation.
+  // A `toContain` over `stdout + stderr` cannot tell which stream carried the text,
+  // and would still pass if the runner leaked diagnostics to stdout or dispatched a
+  // detector before rejecting.
+  function expectRejected(fx: Fixture, component: string): void {
+    const res = runRunner(fx, [component]);
+    expect(res.status).toBe(2);
+    expect(res.stdout).toBe('');
+    expect((res.stderr ?? '').trim()).toBe(`${USAGE_LINE}`);
+    expect(ledgerLines(fx)).toEqual([]);
+  }
+
   it('unknown component → exit 2', () => {
-    const fx = makeFixture('observe');
-    expect(runRunner(fx, ['everything']).status).toBe(2);
+    expectRejected(makeFixture('observe'), 'everything');
   });
 
   // #2481 LOCKOUT: `health-invariants` was removed because it asserted a
@@ -137,14 +150,9 @@ describe('bot-errors-release-proof-run.sh', () => {
   // still pass if this component were reintroduced, so it is named explicitly
   // here. #2481 owns the real versioned release-capability admission contract.
   it('health-invariants stays removed → exit 2, never dispatches', () => {
-    const fx = makeFixture('observe');
-    const res = runRunner(fx, ['health-invariants']);
-    expect(res.status).toBe(2);
-    expect(`${res.stdout ?? ''}${res.stderr ?? ''}`).toContain(
-      'usage: bot-errors-release-proof-run.sh tree|runtime-staleness',
-    );
-    expect(ledgerLines(fx)).toEqual([]);
+    expectRejected(makeFixture('observe'), 'health-invariants');
   });
+
 
   it('zero or two components → exit 2', () => {
     const fx = makeFixture('observe');
