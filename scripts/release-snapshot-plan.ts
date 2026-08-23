@@ -24,6 +24,10 @@ export const DEFAULT_RELEASE_MUTABLE_EXCLUDES = [
   '**/*.sqlite3',
   '**/auth/**',
   '**/tokens.env',
+  // CPython writes bytecode caches beside deploy/scripts helpers at runtime; they are
+  // mutable by nature and must never count as release drift.
+  '**/__pycache__/**',
+  '**/*.pyc',
   RELEASE_MANIFEST_FILE,
 ] as const;
 
