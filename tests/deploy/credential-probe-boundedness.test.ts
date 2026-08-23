@@ -274,7 +274,12 @@ function runSnippet(snippet: string, opts: { withoutTimeout?: boolean } = {}) {
     // Absolute bash path: the shim PATH deliberately omits everything except the
     // few utilities the fallback branch needs, so `bash` itself is not on it.
     const bash = resolveBinary('bash') ?? 'bash';
-    return spawnSync(bash, ['-c', `. "${repoRoot}/${BOUNDED_LIB}"\n${snippet}`], {
+    return spawnSync(bash, [
+      '-c',
+      `. "$1"\n${snippet}`,
+      'bounded-lib',
+      `${repoRoot}/${BOUNDED_LIB}`,
+    ], {
       encoding: 'utf8',
       env,
       cwd: repoRoot,
