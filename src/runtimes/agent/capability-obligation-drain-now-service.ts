@@ -58,13 +58,14 @@ import { dirname, join } from 'node:path';
 import { z } from 'zod';
 
 import { systemClock } from '../../lib/clock.ts';
+import { MS_PER_WEEK } from '../../lib/time-units.ts';
 import type { DrainNowResult, NamedDrainOutcome } from './capability-obligation-drain-now.ts';
 
 export const DRAIN_NOW_REQUEST_DIRNAME = 'capability-drain-now';
 export const DRAIN_NOW_REQUEST_TTL_SECONDS = 900;
 export const DRAIN_NOW_MAX_FUTURE_SKEW_SECONDS = 300;
 export const DRAIN_NOW_MAX_REQUESTS_PER_CYCLE = 3;
-const CONSUMED_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+const CONSUMED_RETENTION_MS = MS_PER_WEEK;
 const CONSUMED_PRUNE_PER_CYCLE = 20;
 
 const REQUEST_FILENAME_RE = /^(\d{1,10})\.json$/;
