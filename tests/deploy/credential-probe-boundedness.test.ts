@@ -270,21 +270,31 @@ function runSnippet(snippet: string, opts: { withoutTimeout?: boolean } = {}) {
     env = { ...env, PATH: shimDir };
   }
 
+  // The snippet runs from a script on disk, never through `bash -c`. Moving the
+  // library path into a positional argument was the #66 fix, and it did NOT clear
+  // the query: CodeQL reopened the identical line as #76, because the `-c` program
+  // string is itself the sink — a cwd-derived value reaching that call is flagged
+  // whichever argv slot carries it. The sibling whatsoup-health-token-wrapper test
+  // closed #75 for good by dropping `-c` and invoking a script file, while still
+  // passing a cwd-derived path positionally; that is the shape reproduced here.
+  //
+  // `$0` shifts from 'bounded-lib' to the script path. deploy/lib/bounded-exec.sh
+  // reads neither `$0` nor `BASH_SOURCE`, so nothing observes the difference.
+  const scriptDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bounded-snippet-'));
+  const scriptPath = path.join(scriptDir, 'snippet.sh');
+  fs.writeFileSync(scriptPath, `. "$1"\n${snippet}\n`, 'utf8');
+
   try {
     // Absolute bash path: the shim PATH deliberately omits everything except the
     // few utilities the fallback branch needs, so `bash` itself is not on it.
     const bash = resolveBinary('bash') ?? 'bash';
-    return spawnSync(bash, [
-      '-c',
-      `. "$1"\n${snippet}`,
-      'bounded-lib',
-      `${repoRoot}/${BOUNDED_LIB}`,
-    ], {
+    return spawnSync(bash, [scriptPath, path.join(repoRoot, BOUNDED_LIB)], {
       encoding: 'utf8',
       env,
       cwd: repoRoot,
     });
   } finally {
+    fs.rmSync(scriptDir, { recursive: true, force: true });
     if (shimDir) fs.rmSync(shimDir, { recursive: true, force: true });
   }
 }
