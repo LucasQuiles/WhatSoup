@@ -91,6 +91,16 @@ describe('substrate MCP tools', () => {
     for (const name of EXPECTED_TOOLS) expect(names).toContain(name);
   });
 
+  it('every listed tool exports an MCP-valid object inputSchema (regression: list_trigger_runs refine wrapper dropped the whole tool list in strict MCP clients)', () => {
+    const listed = registry.listTools(adminSession);
+    const offenders = listed.filter(t => t.inputSchema.type !== 'object').map(t => t.name);
+    expect(offenders).toEqual([]);
+    const runs = listed.find(t => t.name === 'list_trigger_runs');
+    expect(runs?.inputSchema.type).toBe('object');
+    expect(Object.keys((runs?.inputSchema.properties as Record<string, unknown>) ?? {}).sort())
+      .toEqual(['bead_id', 'limit', 'trigger_id']);
+  });
+
   it('R1: sensitive tools are LISTED (call-gate model) while read-only tools are never flagged sensitive', () => {
     // Listing is not the gate; every admin + read-only tool is visible.
     const names = registry.listTools(guestSession).map(t => t.name);

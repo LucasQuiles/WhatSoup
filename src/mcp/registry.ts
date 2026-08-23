@@ -1,14 +1,17 @@
 import {
   z,
-  ZodType,
-  ZodString,
-  ZodNumber,
-  ZodBoolean,
-  ZodOptional,
   ZodArray,
+  ZodBoolean,
+  ZodDefault,
+  ZodEffects,
   ZodEnum,
+  ZodNullable,
+  ZodNumber,
   ZodObject,
+  ZodOptional,
   ZodRecord,
+  ZodString,
+  ZodType,
 } from 'zod';
 import { toConversationKey, GLOBAL_CONVERSATION_KEY } from '../core/conversation-key.ts';
 import { createChildLogger } from '../logger.ts';
@@ -129,6 +132,23 @@ function zodToJsonSchema(schema: ZodType): JsonSchema {
 
   if (schema instanceof ZodOptional) {
     // Unwrap and mark the inner type while preserving descriptions attached after .optional().
+    return withZodDescription(schema, zodToJsonSchema(schema.unwrap()));
+  }
+
+  if (schema instanceof ZodEffects) {
+    // .refine() / .superRefine() / .transform() / .preprocess() wrap the schema in ZodEffects.
+    // The MCP input contract is the INNER shape; refinements are enforced at call time by
+    // registry.call()'s parse. Falling through to the `{}` fallback here made a single
+    // refine-wrapped tool (list_trigger_runs, #3227) invalidate the whole tools/list for
+    // strict MCP clients (any tool whose inputSchema.type !== "object" invalidates the list).
+    return withZodDescription(schema, zodToJsonSchema(schema.innerType()));
+  }
+
+  if (schema instanceof ZodDefault) {
+    return withZodDescription(schema, zodToJsonSchema(schema.removeDefault()));
+  }
+
+  if (schema instanceof ZodNullable) {
     return withZodDescription(schema, zodToJsonSchema(schema.unwrap()));
   }
 
