@@ -47,9 +47,33 @@ function extractVersionExposureBlock(source: string): string {
   return source.slice(start, end);
 }
 
+const PROBE_SCRIPT =
+  '#!/bin/bash\n. "$1"; PATH="$2"; whatsoup_effective_runtime_path "/fixture/user-root" "/fixture/node/bin/node" "/loaded/bin"\n';
+
 function writeExecutable(filePath: string, contents: string): void {
   fs.writeFileSync(filePath, contents, 'utf8');
   fs.chmodSync(filePath, 0o700);
+}
+
+/**
+ * Runs the runtime-PATH probe from a script on disk.
+ *
+ * The body is NOT passed via `bash -c`: CodeQL's
+ * js/shell-command-injection-from-environment models a `-c` program built near
+ * cwd-derived values as an injection sink, and positional arguments alone do not
+ * clear it (alert #75). Invoking a script file matches the query's
+ * indirect-command model, and mirrors the TMPDIR probe in this same file.
+ *
+ * Single definition on purpose: the `. "$1"` quoting is load bearing, and two
+ * copies would let a one-site quoting regression slip past a mutation that only
+ * altered the other copy.
+ */
+function runRuntimePathProbe(root: string, helperPath: string, binDir: string): string {
+  const probePath = path.join(root, 'runtime-path-probe.sh');
+  writeExecutable(probePath, PROBE_SCRIPT);
+  return execFileSync('/bin/bash', [probePath, helperPath, binDir], {
+    encoding: 'utf8',
+  }).trim();
 }
 
 function runKeyringLookupProbe(
@@ -655,25 +679,11 @@ describe('health token shell wrappers', () => {
     fs.mkdirSync(binDir, { recursive: true });
     writeExecutable(path.join(binDir, 'dirname'), `#!/bin/sh\n/usr/bin/touch '${marker}'\nprintf '/shadowed\\n'\n`);
 
-    // The probe body lives in a script on disk rather than a `bash -c` program
-    // string. Passing the helper and PATH as positional arguments is not enough:
-    // CodeQL's js/shell-command-injection-from-environment still models a `-c`
-    // program built near cwd-derived values as an injection sink (alert #75).
-    // Invoking a script file matches the indirect-command model, and mirrors the
-    // TMPDIR probe in this same file, which is not flagged.
-    const probePath = path.join(root, 'runtime-path-probe.sh');
-    fs.writeFileSync(
-      probePath,
-      '#!/bin/bash\n. "$1"; PATH="$2"; whatsoup_effective_runtime_path "/fixture/user-root" "/fixture/node/bin/node" "/loaded/bin"\n',
-      'utf8',
+    const output = runRuntimePathProbe(
+      root,
+      path.resolve('deploy/lib/runtime-path.sh'),
+      binDir,
     );
-    fs.chmodSync(probePath, 0o700);
-
-    const output = execFileSync(
-      '/bin/bash',
-      [probePath, path.resolve('deploy/lib/runtime-path.sh'), binDir],
-      { encoding: 'utf8' },
-    ).trim();
 
     expect(output).toBe('/fixture/user-root/.local/bin:/fixture/node/bin:/loaded/bin');
     expect(fs.existsSync(marker)).toBe(false);
@@ -691,17 +701,7 @@ describe('health token shell wrappers', () => {
     const helperPath = path.join(root, 'runtime path.sh');
     fs.copyFileSync(path.resolve('deploy/lib/runtime-path.sh'), helperPath);
 
-    const probePath = path.join(root, 'probe.sh');
-    fs.writeFileSync(
-      probePath,
-      '#!/bin/bash\n. "$1"; PATH="$2"; whatsoup_effective_runtime_path "/fixture/user-root" "/fixture/node/bin/node" "/loaded/bin"\n',
-      'utf8',
-    );
-    fs.chmodSync(probePath, 0o700);
-
-    const output = execFileSync('/bin/bash', [probePath, helperPath, binDir], {
-      encoding: 'utf8',
-    }).trim();
+    const output = runRuntimePathProbe(root, helperPath, binDir);
 
     expect(output).toBe('/fixture/user-root/.local/bin:/fixture/node/bin:/loaded/bin');
   });
