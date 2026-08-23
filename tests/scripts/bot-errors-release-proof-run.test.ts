@@ -135,7 +135,9 @@ describe('bot-errors-release-proof-run.sh', () => {
     const res = runRunner(fx, [component]);
     expect(res.status).toBe(2);
     expect(res.stdout).toBe('');
-    expect((res.stderr ?? '').trim()).toBe(`${USAGE_LINE}`);
+    // Byte-exact, not line-exact: `.trim()` would accept leading/trailing noise
+    // (a stray banner line, an extra blank line) around the usage text.
+    expect(res.stderr).toBe(`${USAGE_LINE}\n`);
     expect(ledgerLines(fx)).toEqual([]);
   }
 
@@ -151,6 +153,18 @@ describe('bot-errors-release-proof-run.sh', () => {
   // here. #2481 owns the real versioned release-capability admission contract.
   it('health-invariants stays removed → exit 2, never dispatches', () => {
     expectRejected(makeFixture('observe'), 'health-invariants');
+  });
+
+  // Structural companion to the behavioural lockout above. A behavioural fixture
+  // only proves the DEFAULT path rejects the component; an environment-gated
+  // reintroduction (a case arm guarded by an env var, say) can leave the default
+  // rejecting while still exposing the component when that variable is set. This
+  // asserts the string is absent from the runner source entirely, so no gated
+  // arm can hide behind a green default.
+  it('health-invariants appears nowhere in the runner source', () => {
+    const source = readFileSync(RUNNER, 'utf8');
+    expect(source).not.toContain('health-invariants');
+    expect(source).not.toContain('turnCapabilityEvidence');
   });
 
 
