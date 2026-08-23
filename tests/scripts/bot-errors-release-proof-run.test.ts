@@ -130,6 +130,22 @@ describe('bot-errors-release-proof-run.sh', () => {
     expect(runRunner(fx, ['everything']).status).toBe(2);
   });
 
+  // #2481 LOCKOUT: `health-invariants` was removed because it asserted a
+  // `turnCapabilityEvidence` field no runtime in src/ emits, no service unit
+  // invoked it, and its own fixture manufactured the only value that made it
+  // pass. The generic unknown-component test above uses 'everything' and would
+  // still pass if this component were reintroduced, so it is named explicitly
+  // here. #2481 owns the real versioned release-capability admission contract.
+  it('health-invariants stays removed → exit 2, never dispatches', () => {
+    const fx = makeFixture('observe');
+    const res = runRunner(fx, ['health-invariants']);
+    expect(res.status).toBe(2);
+    expect(`${res.stdout ?? ''}${res.stderr ?? ''}`).toContain(
+      'usage: bot-errors-release-proof-run.sh tree|runtime-staleness',
+    );
+    expect(ledgerLines(fx)).toEqual([]);
+  });
+
   it('zero or two components → exit 2', () => {
     const fx = makeFixture('observe');
     expect(runRunner(fx, []).status).toBe(2);
