@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   buildSelfMentionStripPatterns,
+  buildSelfMentionStripPatternsCached,
   stripSelfMentions,
   stripSelfMentionsFrom,
 } from '../../src/lib/self-mention-strip.ts';
@@ -209,5 +210,38 @@ describe('realistic inbound scenarios', () => {
   it('handles a message with only the mention token', () => {
     const identifiers = ['bot'];
     expect(stripSelfMentionsFrom('@bot', identifiers)).toBe('');
+  });
+});
+
+describe('stripSelfMentionsFrom identity-keyed pattern cache', () => {
+  it('returns the same pattern instances for repeated identical identity inputs', () => {
+    // Proves the cache exists (a rebuild would mint fresh RegExp objects).
+    const a1 = buildSelfMentionStripPatternsCached(['15550000001']);
+    const a2 = buildSelfMentionStripPatternsCached(['15550000001']);
+    expect(a1).toBe(a2);
+  });
+
+  it('invalidates when the identity changes: patterns for B differ from A and strip B, not A', () => {
+    // Behavioral proof, not reference equality: strip text containing BOTH
+    // identities with B's cached set and require only B's tokens to go.
+    const withA = buildSelfMentionStripPatternsCached(['15550000001']);
+    const text = '@15550000001 hello @15559999999 world';
+    expect(stripSelfMentions(text, withA)).toBe('hello @15559999999 world');
+
+    // Identity change (reconnect / re-pair): same call path, new identity.
+    const withB = buildSelfMentionStripPatternsCached(['15559999999']);
+    expect(withB).not.toBe(withA);
+    // The B set must actually match B's tokens — a stale (never-invalidating)
+    // cache would still strip A's token and leave B's.
+    expect(stripSelfMentions('@15550000001 hello @15559999999 world', withB))
+      .toBe('@15550000001 hello world');
+  });
+
+  it('distinguishes identities differing only in order or case (de-dup discipline preserved)', () => {
+    const direct = buildSelfMentionStripPatternsCached(['BOT', 'bot2']);
+    const reordered = buildSelfMentionStripPatternsCached(['bot2', 'BOT']);
+    // Same identity SET must strip identically even if cached under different keys.
+    expect(stripSelfMentions('hi @bot @bot2', direct)).toBe('hi');
+    expect(stripSelfMentions('hi @bot @bot2', reordered)).toBe('hi');
   });
 });
