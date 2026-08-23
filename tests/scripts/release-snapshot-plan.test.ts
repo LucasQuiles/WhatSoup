@@ -140,6 +140,31 @@ describe('release snapshot planning', () => {
     ]);
   });
 
+  it('ignores Python bytecode caches written by release-local helper scripts', () => {
+    // Helper scripts under deploy/scripts import deploy/scripts/lib at runtime and CPython
+    // writes __pycache__/*.pyc beside them. Those caches are mutable by nature; treating
+    // them as extra-file drift made the release-drift check flag a healthy release.
+    const sourceRoot = makeFixtureSource();
+    const releaseRoot = path.join(tmpRoot, 'releases');
+    const plan = createReleaseSnapshotPlan({
+      sourceRoot,
+      sourceRef: 'main',
+      sourceCommit: 'abc123def4567890',
+      releaseRoot,
+      buildTime: '2026-06-13T06:00:00.000Z',
+      trackedFiles: ['package.json', 'src/main.ts'],
+    });
+    const releasePath = plan.manifest.release.path;
+    mkdirSync(path.join(releasePath, 'src'), { recursive: true });
+    writeFileSync(path.join(releasePath, 'package.json'), readFileSync(path.join(sourceRoot, 'package.json')));
+    writeFileSync(path.join(releasePath, 'src/main.ts'), readFileSync(path.join(sourceRoot, 'src/main.ts')));
+    mkdirSync(path.join(releasePath, 'deploy/scripts/lib/__pycache__'), { recursive: true });
+    writeFileSync(path.join(releasePath, 'deploy/scripts/lib/__pycache__/state_root.cpython-314.pyc'), 'bytecode\n', 'utf8');
+    writeFileSync(path.join(releasePath, 'deploy/scripts/stray.pyc'), 'bytecode\n', 'utf8');
+
+    expect(collectReleaseSnapshotDrift(releasePath, plan.manifest)).toEqual([]);
+  });
+
   it('flags a declared required build output that is absent from the release', () => {
     // A release that ships without its built console assets (untracked by git,
     // so never in the file manifest) previously drifted CLEAN — the packaging
