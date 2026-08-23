@@ -617,7 +617,7 @@ export class ChatRuntime implements Runtime {
       } else {
       log.error({ traceId, err: primaryErr }, 'primary provider failed — retrying after delay');
 
-      await new Promise((resolve) => setTimeout(resolve, jitteredDelay(config.apiRetryDelayMs, 0)));
+      await sleep(jitteredDelay(config.apiRetryDelayMs, 0));
 
       try {
         log.info({ step: 'retry', provider: this.primaryProvider.name, model: conversationModel, attempt: 2, elapsed_ms: Date.now() - llmStart, traceId }, 'llm_attempt');

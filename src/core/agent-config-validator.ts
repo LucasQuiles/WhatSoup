@@ -577,31 +577,39 @@ function validateProviderConfigShape(
  * NOT reuse validateAgentOptions or import anything agent-specific — chat and
  * agent config are independent shapes.
  */
-function validateChatOptions(raw: Record<string, unknown>): ValidationError | null {
-  const chatOpts = raw['chatOptions'];
-  if (chatOpts === undefined || chatOpts === null) {
+/**
+ * chatOptions and transcriptionOptions carry the identical OpenAI-compatible
+ * endpoint/key shape, so both validate through one parameterised pass. The
+ * option key supplies every error path, which keeps the two messages exactly
+ * as they were while removing the second copy of the walk.
+ */
+function validateOpenAiProviderOptions(
+  raw: Record<string, unknown>,
+  optionsKey: 'chatOptions' | 'transcriptionOptions',
+): ValidationError | null {
+  const value = raw[optionsKey];
+  if (value === undefined || value === null) {
     return null;
   }
-  if (typeof chatOpts !== 'object' || Array.isArray(chatOpts)) {
-    return err('chatOptions', 'chatOptions must be an object');
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    return err(optionsKey, `${optionsKey} must be an object`);
   }
-  const opts = chatOpts as Record<string, unknown>;
+  const opts = value as Record<string, unknown>;
 
   const providerConfig = opts['openaiProviderConfig'];
   if (providerConfig === undefined || providerConfig === null) {
     return null;
   }
+  const providerPath = `${optionsKey}.openaiProviderConfig`;
   if (typeof providerConfig !== 'object' || Array.isArray(providerConfig)) {
-    return err(
-      'chatOptions.openaiProviderConfig',
-      'chatOptions.openaiProviderConfig must be an object when provided',
-    );
+    return err(providerPath, `${providerPath} must be an object when provided`);
   }
 
-  return validateProviderConfigShape(
-    providerConfig as Record<string, unknown>,
-    'chatOptions.openaiProviderConfig',
-  );
+  return validateProviderConfigShape(providerConfig as Record<string, unknown>, providerPath);
+}
+
+function validateChatOptions(raw: Record<string, unknown>): ValidationError | null {
+  return validateOpenAiProviderOptions(raw, 'chatOptions');
 }
 
 /**
@@ -610,30 +618,7 @@ function validateChatOptions(raw: Record<string, unknown>): ValidationError | nu
  * OpenAI config, without inheriting agent-only providerConfig rules.
  */
 function validateTranscriptionOptions(raw: Record<string, unknown>): ValidationError | null {
-  const transcriptionOpts = raw['transcriptionOptions'];
-  if (transcriptionOpts === undefined || transcriptionOpts === null) {
-    return null;
-  }
-  if (typeof transcriptionOpts !== 'object' || Array.isArray(transcriptionOpts)) {
-    return err('transcriptionOptions', 'transcriptionOptions must be an object');
-  }
-  const opts = transcriptionOpts as Record<string, unknown>;
-
-  const providerConfig = opts['openaiProviderConfig'];
-  if (providerConfig === undefined || providerConfig === null) {
-    return null;
-  }
-  if (typeof providerConfig !== 'object' || Array.isArray(providerConfig)) {
-    return err(
-      'transcriptionOptions.openaiProviderConfig',
-      'transcriptionOptions.openaiProviderConfig must be an object when provided',
-    );
-  }
-
-  return validateProviderConfigShape(
-    providerConfig as Record<string, unknown>,
-    'transcriptionOptions.openaiProviderConfig',
-  );
+  return validateOpenAiProviderOptions(raw, 'transcriptionOptions');
 }
 
 const COMMAND_SURFACE_VERBOSITIES: ReadonlySet<string> = new Set(['terse', 'normal']);
