@@ -95,6 +95,15 @@ def test_production_inventory_has_no_collector_findings() -> None:
         if finding.get("script") == "deploy/scripts/bot-errors-collector.py"
     ]
 
-    assert result.returncode in {0, 1}
-    assert report["status"] in {"pass", "violation"}
+    # Fail-closed. `status in {"pass", "violation"}` was a tautology -- those are the
+    # only two values the guard emits (check-bot-errors-durable-writers.py: status =
+    # "violation" if findings else "pass"), so it passed for a violating run exactly as
+    # readily as a clean one. Same for `returncode in {0, 1}`. The approved baseline for
+    # the production inventory is ZERO findings; assert that, not the value domain.
+    assert report["findings"] == [], (
+        f"production inventory must have no durable-writer findings, got "
+        f"{len(report['findings'])}: {report['findings']}"
+    )
+    assert report["status"] == "pass", f'expected status "pass", got {report["status"]!r}'
+    assert result.returncode == 0, f"expected rc=0 for a clean inventory, got {result.returncode}"
     assert collector_findings == []

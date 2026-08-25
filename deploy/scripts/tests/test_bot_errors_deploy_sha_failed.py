@@ -12,6 +12,7 @@ Run from the repo root.
 from __future__ import annotations
 
 import os
+import re
 import stat as stat_mod
 import subprocess
 import sys
@@ -24,6 +25,20 @@ _DEPLOY_SH = Path(__file__).resolve().parents[1] / "whatsoup-bot-errors-deploy.s
 # deploy/scripts/tests/test_*.py → parents: [0]=tests, [1]=scripts, [2]=deploy, [3]=repo_root
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
+
+def _managed_files() -> list[str]:
+    """The FILES array from the deploy script -- the same list do_verify() walks.
+
+    Parsed rather than duplicated so the two cannot drift. The emptiness check is the
+    point: without it a broken parse yields 0 expected against 0 observed and the
+    assertion passes while proving nothing.
+    """
+    text = _DEPLOY_SH.read_text()
+    block = re.search(r"^FILES=\(\n(.*?)^\)$", text, re.M | re.S)
+    assert block, f"could not locate the FILES=( ... ) array in {_DEPLOY_SH}"
+    entries = re.findall(r'^\s*"([^"]+)"\s*$', block.group(1), re.M)
+    assert entries, f"parsed the FILES array in {_DEPLOY_SH} but found no entries"
+    return entries
 
 def _bash_verify(root: Path) -> subprocess.CompletedProcess:
     return subprocess.run(
@@ -157,8 +172,12 @@ def test_matching_files_still_emit_match_not_sha_error(tmp_path: Path):
     assert "SHA_ERROR" not in stdout, (
         f"No SHA_ERROR expected for clean readable files, got:\n{stdout}"
     )
-    # Every managed file should be MATCH
+    # Every managed file should be MATCH. Derive the expected count from the deploy
+    # script's own FILES array rather than hard-coding it: a literal silently breaks on
+    # every add/remove of a managed file, which is drift the test exists to catch.
+    managed = _managed_files()
     match_lines = [l for l in stdout.splitlines() if "MATCH" in l]
-    assert len(match_lines) == 18, (
-        f"Expected 18 MATCH lines for clean repo root, got {len(match_lines)}:\n{stdout}"
+    assert len(match_lines) == len(managed), (
+        f"Expected {len(managed)} MATCH lines (one per FILES entry in "
+        f"{_DEPLOY_SH.name}), got {len(match_lines)}:\n{stdout}"
     )
