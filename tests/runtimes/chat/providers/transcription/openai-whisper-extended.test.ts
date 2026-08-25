@@ -50,6 +50,7 @@ vi.mock('openai', () => {
 
 vi.mock('../../../../../src/lib/emit-alert.ts', () => ({
   emitAlertChecked: mockEmitAlertChecked,
+  emitObservationChecked: vi.fn(() => true),
   clearAlertSourceChecked: mockClearAlertSourceChecked,
 }));
 

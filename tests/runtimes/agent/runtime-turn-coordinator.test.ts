@@ -8,6 +8,7 @@ const emitAlertChecked = vi.hoisted(() => vi.fn(() => true));
 
 vi.mock('../../../src/lib/emit-alert.ts', () => ({
   emitAlertChecked,
+  emitObservationChecked: vi.fn(() => true),
 }));
 
 function context() {

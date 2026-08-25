@@ -24,7 +24,7 @@ import type {
 
 const emitAlertMock = vi.hoisted(() => vi.fn());
 
-vi.mock('../../../src/lib/emit-alert.ts', () => ({
+vi.mock('../../../src/lib/emit-alert.ts', () => ({ emitObservationChecked: vi.fn(() => true),
   emitAlert: emitAlertMock,
   emitAlertChecked: (...args: unknown[]) => {
     const result = emitAlertMock(...args) as AlertEmissionResult;

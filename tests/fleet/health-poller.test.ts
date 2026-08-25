@@ -38,6 +38,7 @@ function failedAlertResult(): AlertEmissionResult {
 vi.mock('../../src/lib/emit-alert.ts', () => ({
   ...alertFns,
   emitAlertChecked: alertFns.emitAlert,
+  emitObservationChecked: vi.fn(() => true),
   clearAlertSourceChecked: alertFns.clearAlertSource,
 }));
 

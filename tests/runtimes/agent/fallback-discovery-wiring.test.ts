@@ -33,6 +33,7 @@ const { emitAlertMock, clearAlertSourceMock, canaryProbeMock } = vi.hoisted(() =
 vi.mock('../../../src/lib/emit-alert.ts', () => ({
   emitAlert: emitAlertMock,
   emitAlertChecked: emitAlertMock,
+  emitObservationChecked: vi.fn(() => true),
   clearAlertSource: clearAlertSourceMock,
   clearAlertSourceChecked: clearAlertSourceMock,
 }));

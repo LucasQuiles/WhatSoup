@@ -92,7 +92,7 @@ vi.mock('../../src/transport/auth-bond.ts', () => ({
   }),
 }));
 
-vi.mock('../../src/lib/emit-alert.ts', () => ({
+vi.mock('../../src/lib/emit-alert.ts', () => ({ emitObservationChecked: vi.fn(() => true),
   emitAlertChecked: vi.fn((...args: unknown[]) => {
     alertCalls.push(args);
     return true;

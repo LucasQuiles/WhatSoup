@@ -67,6 +67,7 @@ vi.mock('../../../src/core/durability.ts', () => ({
 vi.mock('../../../src/lib/emit-alert.ts', () => ({
   emitAlert: vi.fn(),
   emitAlertChecked: vi.fn(() => true),
+  emitObservationChecked: vi.fn(() => true),
   clearAlertSource: vi.fn(),
   clearAlertSourceChecked: vi.fn(() => true),
 }));

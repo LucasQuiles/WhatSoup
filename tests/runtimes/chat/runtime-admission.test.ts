@@ -16,6 +16,7 @@ vi.mock('../../../src/lib/model-advisor.ts', () => ({
 vi.mock('../../../src/lib/emit-alert.ts', () => ({
   clearAlertSourceChecked: vi.fn(),
   emitAlertChecked: vi.fn(),
+  emitObservationChecked: vi.fn(() => true),
 }));
 
 function makeMessage(overrides: Partial<IncomingMessage> = {}): IncomingMessage {
