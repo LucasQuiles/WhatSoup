@@ -1335,6 +1335,11 @@
       "owner": "src/runtimes/agent/runtime.ts",
       "test": "tests/core/heal-fallback-prerequisite-2399.test.ts"
     },
+    "provider_context_overflow": {
+      "disposition": "warning_session_killed_recovers_on_next_message_with_budgeted_context",
+      "owner": "src/runtimes/agent/runtime-turn-result-handler.ts",
+      "test": "tests/runtimes/agent/runtime-turn-result-handler-context-overflow.test.ts"
+    },
     "provider_execution_queue_pressure": {
       "disposition": "sustained_queue_pressure_cleared_by_idle_gate_with_startup_marker_reconcile",
       "owner": "src/runtimes/agent/provider-execution-gate.ts",
