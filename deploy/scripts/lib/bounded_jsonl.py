@@ -237,6 +237,30 @@ def _sync_parent(parent_fd: int) -> None:
     os.fsync(parent_fd)
 
 
+def _sync_grandparent(parent: Path) -> None:
+    """Persist a newly created parent directory's own name.
+
+    fsync on the parent fd durably records what is INSIDE the parent. The parent's
+    directory entry lives in the grandparent, so when mkdir() has just created the
+    parent, a crash before the grandparent is synced can leave the fsynced record
+    inside a directory that no longer exists. Only called on the create path; a
+    pre-existing parent is already durable.
+    """
+    try:
+        grandparent_fd = os.open(
+            parent.parent,
+            os.O_DIRECTORY | os.O_RDONLY | os.O_NOFOLLOW,
+        )
+    except OSError:
+        return
+    try:
+        os.fsync(grandparent_fd)
+    except OSError:
+        pass
+    finally:
+        os.close(grandparent_fd)
+
+
 def _sync_file(fd: int) -> None:
     os.fsync(fd)
 
@@ -519,8 +543,13 @@ def _is_private_regular(entry: os.stat_result) -> bool:
 
 def _open_parent(path: Path) -> tuple[int | None, BoundedJsonlResult | None]:
     parent = path.parent
+    parent_created = False
     try:
-        parent.mkdir(mode=0o700, exist_ok=True)
+        try:
+            parent.mkdir(mode=0o700)
+            parent_created = True
+        except FileExistsError:
+            pass
         parent_fd = os.open(
             parent,
             os.O_DIRECTORY | os.O_RDONLY | os.O_NOFOLLOW,
@@ -560,6 +589,8 @@ def _open_parent(path: Path) -> tuple[int | None, BoundedJsonlResult | None]:
             oversized_record=False,
             failure_class="unsafe_parent",
         )
+    if parent_created:
+        _sync_grandparent(parent)
     return parent_fd, None
 
 
