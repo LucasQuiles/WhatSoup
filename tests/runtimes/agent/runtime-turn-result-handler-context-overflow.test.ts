@@ -7,7 +7,7 @@ import {
   type RuntimeResultHandlerPort,
 } from '../../../src/runtimes/agent/runtime-turn-result-handler.ts';
 
-const emitAlertChecked = vi.hoisted(() => vi.fn(() => true));
+const emitAlertChecked = vi.hoisted(() => vi.fn((..._args: unknown[]) => true));
 
 vi.mock('../../../src/lib/emit-alert.ts', () => ({
   emitAlertChecked,
@@ -39,7 +39,7 @@ describe('context-overflow kill path emits a fleet-visible alert', () => {
 
   it('emits provider_context_overflow (warning) before killing the session', () => {
     const ctx = makeCtx('Error: prompt is too long for the context window');
-    dispatchProviderFailureResult(host, ctx);
+    dispatchProviderFailureResult(host, ctx, () => null);
     expect(emitAlertChecked).toHaveBeenCalledTimes(1);
     const [instance, source, , , severity] = emitAlertChecked.mock.calls[0]!;
     expect(instance).toBe('test-bot');
@@ -52,7 +52,7 @@ describe('context-overflow kill path emits a fleet-visible alert', () => {
 
   it('does NOT emit for the policy-block kill path (overflow-specific signal)', () => {
     const ctx = makeCtx('This request violates our policy.');
-    dispatchProviderFailureResult(host, ctx);
+    dispatchProviderFailureResult(host, ctx, () => null);
     expect(emitAlertChecked).not.toHaveBeenCalled();
   });
 });
