@@ -36,8 +36,9 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "b272f414158f8f8eeeb043dd30c94976a8a64b1e5d5c049ea01a3a2da270bf6f",
+      "sha256": "eb96eb50bdb957a7644a7b084f829352cc108da6e69e207ec1b8e148c811e81d",
       "mustContain": [
+        "append_bounded_jsonl",
         "append_private_jsonl",
         "refusing to use private directory through symlink",
         "whatsapp_auth_bond_local_failure",
@@ -94,7 +95,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "3e23db7a12fe7a94aff9b23679219ea0f460a5ff883c1953aadf72d39eaad6d7",
+      "sha256": "e3f0970d3cbad21c54c4ca8c05010568a026a557585fa825c14fe9e5ae530d4d",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -178,8 +179,9 @@
     },
     {
       "path": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
-      "sha256": "13d857a68f91acabd0afe591732f2d0acd5d091c4c27c1effab89fcb0afed1ab",
+      "sha256": "9024170d82105c780ac2f655db2ed07f2e9f24e75819e098dc12abc30d35cfbc",
       "mustContain": [
+        "append_bounded_jsonl",
         "q_loop_state_root",
         "BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT",
         "critical_file_problem",
@@ -275,10 +277,12 @@
     },
     {
       "path": "deploy/scripts/check-bot-errors-durable-writers.py",
-      "sha256": "940633b92316a20d8c154f4ab27364e4c628cf9aa1175654ea1714e435771e8b",
+      "sha256": "a07d6b8e25871e530040ea2e389ffd77a6d4896997aa0739a63ee09b4a45d2af",
       "mustContain": [
         "_inventory_findings",
-        "DURABLE_PUBLISHERS"
+        "DURABLE_PUBLISHERS",
+        "SHARED_PUBLISHER_KEYS",
+        "require_bounded_jsonl_commit"
       ]
     },
     {
@@ -348,6 +352,19 @@
       "sha256": "438146338f7ceac8c0ecda8d7c6a7fb13fe88a0749bad1accf39ad92e4370da0",
       "mustContain": [
         "Shared helpers for manifest-tracked BOT ERRORS deploy scripts"
+      ]
+    },
+    {
+      "path": "deploy/scripts/lib/bounded_jsonl.py",
+      "sha256": "f8ffcc59ed23437a34b4fcf623ac230fe6033def261a7f0ddfadb46e55557fb1",
+      "mustContain": [
+        "append_bounded_jsonl",
+        "require_bounded_jsonl_commit",
+        ".bounded-jsonl.lock",
+        ".bounded-jsonl.compact.tmp",
+        "_replace_relative",
+        "compact_replace",
+        "O_NOFOLLOW"
       ]
     },
     {

@@ -24,6 +24,10 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from lib.bot_errors_daily_health import daily_health_host_from_payload, normalize_hub_host
+from lib.bounded_jsonl import (
+    append_bounded_jsonl,
+    require_bounded_jsonl_commit,
+)
 from lib.bot_errors_envelope import new_event_fields
 from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
 from lib.bot_errors_roster import RosterError, load_roster  # noqa: E402
@@ -509,35 +513,6 @@ def controller_log_fallback(line: str) -> None:
 MAX_HEARTBEAT_JSONL_BYTES = positive_env_int("BOT_ERRORS_HEARTBEAT_JSONL_MAX_BYTES", 50 * 1024 * 1024)
 
 
-def _trim_jsonl(path: Path, max_bytes: int) -> None:
-    """Trim oldest records from a JSONL file when it exceeds max_bytes."""
-    if not path.exists():
-        return
-    try:
-        size = path.stat().st_size
-    except OSError:
-        return
-    if size <= max_bytes:
-        return
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
-    except Exception:
-        return
-    kept: list[str] = []
-    total = 0
-    for line in reversed(lines):
-        encoded = line.encode("utf-8")
-        total += len(encoded)
-        kept.append(line)
-        if total > max_bytes:
-            if len(kept) > 1:
-                kept.pop()
-            break
-    kept.reverse()
-    if len(kept) < len(lines):
-        path.write_text("".join(kept), encoding="utf-8")
-
-
 def append_log(
     kind: str,
     payload: dict[str, Any],
@@ -553,11 +528,17 @@ def append_log(
         outcome=outcome,
         durability_class="diagnostic_best_effort",
         details=metadata_only_controller_details(redacted_watchdog_payload(payload)),
-        append_record=lambda record: append_private_jsonl(path, record),
+        append_record=lambda record: require_bounded_jsonl_commit(
+            append_bounded_jsonl(
+                path,
+                record,
+                component="heartbeat_watchdog.heartbeat_log",
+                max_bytes=MAX_HEARTBEAT_JSONL_BYTES,
+            )
+        ),
         persist_health=persist_controller_log_health,
         emit_fallback=controller_log_fallback,
     )
-    _trim_jsonl(path, MAX_HEARTBEAT_JSONL_BYTES)
     return result
 
 

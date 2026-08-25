@@ -11,17 +11,45 @@ const durableWriterGuard = join(repoRoot, 'deploy/scripts/check-bot-errors-durab
 const testPython = resolveTestPython();
 const fixtureDirs: string[] = [];
 
+const boundedJsonlBinding = {
+  publisher: 'append_bounded_jsonl',
+  consumer: 'require_bounded_jsonl_commit',
+  module: 'lib.bounded_jsonl',
+  path: 'deploy/scripts/lib/bounded_jsonl.py',
+};
+
+const boundedJsonlModule = [
+  'def append_bounded_jsonl(path, record, *, component, max_bytes, lock_timeout_seconds=5.0):',
+  '    return object()',
+  '',
+  'def require_bounded_jsonl_commit(result):',
+  '    return None',
+  '',
+].join('\n');
+
+function writeBoundedJsonlModule(root: string, source = boundedJsonlModule): void {
+  mkdirSync(join(root, 'deploy/scripts/lib'), { recursive: true });
+  writeFileSync(join(root, boundedJsonlBinding.path), source);
+}
+
+function writeInventory(root: string, inventory: Record<string, unknown>): void {
+  writeFileSync(
+    join(root, 'deploy/bot-errors-durable-writer-inventory.json'),
+    `${JSON.stringify(inventory, null, 2)}\n`,
+  );
+}
+
 function pythonFixture(source: string): string {
   const root = mkdtempSync(join(tmpdir(), 'bot-errors-durable-writer-'));
   fixtureDirs.push(root);
   const script = 'deploy/scripts/fixture.py';
   mkdirSync(join(root, 'deploy/scripts'), { recursive: true });
   writeFileSync(join(root, script), `${source.trim()}\n`);
-  writeFileSync(
-    join(root, 'deploy/bot-errors-durable-writer-inventory.json'),
-    `${JSON.stringify({
-      schema_version: 1,
-      helper_generation: 1,
+  writeBoundedJsonlModule(root);
+  writeInventory(root, {
+      schema_version: 2,
+      helper_generation: 2,
+      shared_publishers: [boundedJsonlBinding],
       principal_scripts: [script],
       cooperating_scripts: [],
       embedded_publishers: [],
@@ -37,8 +65,7 @@ function pythonFixture(source: string): string {
         result_consumer: 'publish',
         fault_test_ids: ['state.no-advance-unproven'],
       }],
-    }, null, 2)}\n`,
-  );
+  });
   return root;
 }
 
@@ -48,11 +75,11 @@ function embeddedFixture(source: string, resultPolicy = 'require_advance'): stri
   const script = 'deploy/scripts/fixture.py';
   mkdirSync(join(root, 'deploy/scripts'), { recursive: true });
   writeFileSync(join(root, script), `REMOTE_SCRIPT = ${JSON.stringify(`${source.trim()}\n`)}\n`);
-  writeFileSync(
-    join(root, 'deploy/bot-errors-durable-writer-inventory.json'),
-    `${JSON.stringify({
-      schema_version: 1,
-      helper_generation: 1,
+  writeBoundedJsonlModule(root);
+  writeInventory(root, {
+      schema_version: 2,
+      helper_generation: 2,
+      shared_publishers: [boundedJsonlBinding],
       principal_scripts: [script],
       cooperating_scripts: [],
       embedded_publishers: ['fixture.REMOTE_SCRIPT.publish'],
@@ -68,12 +95,65 @@ function embeddedFixture(source: string, resultPolicy = 'require_advance'): stri
         result_consumer: 'REMOTE_SCRIPT.publish',
         fault_test_ids: ['event.no-advance-unproven'],
       }],
-    }, null, 2)}\n`,
-  );
+  });
   return root;
 }
 
-function runDurableWriterGuard(root: string): { status: number | null; code: string | null; stderr: string } {
+function boundedJsonlFixture(
+  source: string,
+  options: { moduleSource?: string | null } = {},
+): string {
+  const root = mkdtempSync(join(tmpdir(), 'bot-errors-bounded-jsonl-writer-'));
+  fixtureDirs.push(root);
+  const script = 'deploy/scripts/fixture.py';
+  mkdirSync(join(root, 'deploy/scripts'), { recursive: true });
+  writeFileSync(join(root, script), `${source.trim()}\n`);
+  if (options.moduleSource !== null) {
+    writeBoundedJsonlModule(root, options.moduleSource ?? boundedJsonlModule);
+  }
+  writeInventory(root, {
+    schema_version: 2,
+    helper_generation: 2,
+    shared_publishers: [boundedJsonlBinding],
+    principal_scripts: [script],
+    cooperating_scripts: [],
+    embedded_publishers: [],
+    diagnostic_only_weaker_callers: [],
+    callers: [{
+      site_id: 'fixture-bounded-jsonl',
+      script,
+      function: 'publish',
+      logical_publication: 'fixture.jsonl',
+      kind: 'diagnostic_jsonl_append',
+      operation_identity_source: 'bounded_jsonl.record_sha256.evidence_only.v1',
+      result_policy: 'require_bounded_jsonl_commit',
+      result_consumer: 'publish',
+      fault_test_ids: [
+        'jsonl.serialization',
+        'jsonl.lock-concurrency',
+        'jsonl.post-replace-unproven',
+      ],
+    }],
+  });
+  return root;
+}
+
+function mutateInventory(
+  root: string,
+  mutate: (inventory: Record<string, any>) => void,
+): void {
+  const inventoryPath = join(root, 'deploy/bot-errors-durable-writer-inventory.json');
+  const inventory = JSON.parse(readFileSync(inventoryPath, 'utf8')) as Record<string, any>;
+  mutate(inventory);
+  writeInventory(root, inventory);
+}
+
+function runDurableWriterGuard(root: string): {
+  status: number | null;
+  code: string | null;
+  codes: string[];
+  stderr: string;
+} {
   const result = spawnSync(
     testPython,
     [
@@ -87,13 +167,16 @@ function runDurableWriterGuard(root: string): { status: number | null; code: str
     { cwd: repoRoot, encoding: 'utf8' },
   );
   let code: string | null = null;
+  let codes: string[] = [];
   try {
     const parsed = JSON.parse(result.stdout) as { findings?: Array<{ code?: string }> };
     code = parsed.findings?.[0]?.code ?? null;
+    codes = parsed.findings?.flatMap((finding) => finding.code === undefined ? [] : [finding.code]) ?? [];
   } catch {
     code = null;
+    codes = [];
   }
-  return { status: result.status, code, stderr: result.stderr };
+  return { status: result.status, code, codes, stderr: result.stderr };
 }
 
 afterEach(() => {
@@ -128,6 +211,20 @@ const protectedAppendScripts = [
   'deploy/scripts/bot-errors-heartbeat-watchdog.py',
   'deploy/scripts/bot-errors-q-loop.py',
 ];
+
+const exactBoundedJsonlCaller = `
+from lib.bounded_jsonl import append_bounded_jsonl, require_bounded_jsonl_commit
+
+def publish(target, payload):
+    require_bounded_jsonl_commit(
+        append_bounded_jsonl(
+            target,
+            payload,
+            component="fixture.jsonl",
+            max_bytes=512,
+        )
+    )
+`;
 
 describe('BOT ERRORS Python atomic write guard', () => {
   it('rejects a durable result that is discarded', () => {
@@ -635,7 +732,7 @@ def publish(target, payload, op_id, expected):
       inventory.callers[0].function = 'elsewhere';
     }, 'inventory-call-missing'],
     ['mixed helper generation', (inventory: { helper_generation: number }) => {
-      inventory.helper_generation = 2;
+      inventory.helper_generation = 1;
     }, 'inventory-invalid'],
     ['best-effort policy', (inventory: { callers: Array<Record<string, unknown>> }) => {
       inventory.callers[0].result_policy = 'best_effort';
@@ -667,6 +764,433 @@ def publish(target, payload, op_id, expected):
       status: 1,
       code: expectedCode,
     });
+  });
+
+  it('bounded JSONL rejects an inventory missing shared_publishers', () => {
+    const fixture = boundedJsonlFixture(exactBoundedJsonlCaller);
+    mutateInventory(fixture, (inventory) => {
+      delete inventory.shared_publishers;
+    });
+
+    expect(runDurableWriterGuard(fixture)).toMatchObject({
+      status: 1,
+      code: 'inventory-invalid',
+    });
+  });
+
+  it('bounded JSONL rejects a malformed shared publisher binding', () => {
+    const fixture = boundedJsonlFixture(exactBoundedJsonlCaller);
+    mutateInventory(fixture, (inventory) => {
+      inventory.shared_publishers[0].module = 'lib.not_bounded_jsonl';
+    });
+
+    expect(runDurableWriterGuard(fixture)).toMatchObject({
+      status: 1,
+      code: 'inventory-invalid',
+    });
+  });
+
+  it('bounded JSONL rejects a duplicate shared publisher binding', () => {
+    const fixture = boundedJsonlFixture(exactBoundedJsonlCaller);
+    mutateInventory(fixture, (inventory) => {
+      inventory.shared_publishers.push({ ...inventory.shared_publishers[0] });
+    });
+
+    expect(runDurableWriterGuard(fixture)).toMatchObject({
+      status: 1,
+      code: 'inventory-invalid',
+    });
+  });
+
+  it('bounded JSONL rejects a missing bound module', () => {
+    const fixture = boundedJsonlFixture(exactBoundedJsonlCaller, { moduleSource: null });
+
+    expect(runDurableWriterGuard(fixture)).toMatchObject({
+      status: 1,
+      code: 'shared-publisher-module-missing',
+    });
+  });
+
+  it.each([
+    [
+      'publisher definition',
+      'def require_bounded_jsonl_commit(result):\n    return None\n',
+    ],
+    [
+      'consumer definition',
+      'def append_bounded_jsonl(path, record, *, component, max_bytes):\n    return object()\n',
+    ],
+  ])('bounded JSONL rejects a module missing the %s', (_label, moduleSource) => {
+    const fixture = boundedJsonlFixture(exactBoundedJsonlCaller, { moduleSource });
+
+    expect(runDurableWriterGuard(fixture)).toMatchObject({
+      status: 1,
+      code: 'shared-publisher-definition-missing',
+    });
+  });
+
+  it('bounded JSONL rejects imports from a wrong module', () => {
+    const fixture = boundedJsonlFixture(`
+from lib.not_bounded_jsonl import append_bounded_jsonl, require_bounded_jsonl_commit
+
+def publish(target, payload):
+    require_bounded_jsonl_commit(append_bounded_jsonl(
+        target,
+        payload,
+        component="fixture.jsonl",
+        max_bytes=512,
+    ))
+`);
+
+    expect(runDurableWriterGuard(fixture)).toMatchObject({
+      status: 1,
+      code: 'shared-publisher-binding-invalid',
+    });
+  });
+
+  it.each([
+    [
+      'publisher alias',
+      `from lib.bounded_jsonl import append_bounded_jsonl as append_record, require_bounded_jsonl_commit
+
+def publish(target, payload):
+    require_bounded_jsonl_commit(append_record(target, payload, component="fixture.jsonl", max_bytes=512))`,
+    ],
+    [
+      'consumer alias',
+      `from lib.bounded_jsonl import append_bounded_jsonl, require_bounded_jsonl_commit as require_commit
+
+def publish(target, payload):
+    require_commit(append_bounded_jsonl(target, payload, component="fixture.jsonl", max_bytes=512))`,
+    ],
+  ])('bounded JSONL rejects an import %s', (_label, source) => {
+    const fixture = boundedJsonlFixture(source);
+
+    expect(runDurableWriterGuard(fixture)).toMatchObject({
+      status: 1,
+      code: 'shared-publisher-binding-invalid',
+    });
+  });
+
+  it('bounded JSONL rejects a qualified publisher call', () => {
+    const fixture = boundedJsonlFixture(`
+import lib.bounded_jsonl as bounded_jsonl
+
+def publish(target, payload):
+    bounded_jsonl.require_bounded_jsonl_commit(bounded_jsonl.append_bounded_jsonl(
+        target,
+        payload,
+        component="fixture.jsonl",
+        max_bytes=512,
+    ))
+`);
+
+    expect(runDurableWriterGuard(fixture)).toMatchObject({
+      status: 1,
+      code: 'shared-publisher-binding-invalid',
+    });
+  });
+
+  it.each([
+    [
+      'direct reflective invocation',
+      `def unregistered(target, payload):
+    globals()["require_bounded_jsonl_commit"](
+        globals()["append_bounded_jsonl"](
+            target,
+            payload,
+            component="fixture.reflective",
+            max_bytes=512,
+        )
+    )`,
+    ],
+    [
+      'reflective rebinding',
+      `def unregistered(target, payload):
+    publisher = globals()["append_bounded_jsonl"]
+    consumer = globals()["require_bounded_jsonl_commit"]
+    consumer(publisher(
+        target,
+        payload,
+        component="fixture.reflective",
+        max_bytes=512,
+    ))`,
+    ],
+    [
+      'computed reflective rebinding',
+      `def unregistered(target, payload):
+    publisher = globals()["append_" + "bounded_jsonl"]
+    consumer = globals()["require_" + "bounded_jsonl_commit"]
+    consumer(publisher(
+        target,
+        payload,
+        component="fixture.reflective",
+        max_bytes=512,
+    ))`,
+    ],
+  ])('bounded JSONL rejects %s of the canonical names', (_label, source) => {
+    const fixture = boundedJsonlFixture(`${exactBoundedJsonlCaller}\n${source}`);
+
+    expect(runDurableWriterGuard(fixture)).toMatchObject({
+      status: 1,
+      code: 'shared-publisher-binding-invalid',
+    });
+  });
+
+  it.each([
+    [
+      'publisher local function',
+      `from lib.bounded_jsonl import append_bounded_jsonl, require_bounded_jsonl_commit
+
+def publish(target, payload):
+    def append_bounded_jsonl(path, record, *, component, max_bytes):
+        return object()
+    require_bounded_jsonl_commit(append_bounded_jsonl(target, payload, component="fixture.jsonl", max_bytes=512))`,
+    ],
+    [
+      'consumer local function',
+      `from lib.bounded_jsonl import append_bounded_jsonl, require_bounded_jsonl_commit
+
+def publish(target, payload):
+    def require_bounded_jsonl_commit(result):
+        return None
+    require_bounded_jsonl_commit(append_bounded_jsonl(target, payload, component="fixture.jsonl", max_bytes=512))`,
+    ],
+    [
+      'publisher parameter',
+      `from lib.bounded_jsonl import append_bounded_jsonl, require_bounded_jsonl_commit
+
+def publish(target, payload, append_bounded_jsonl=append_bounded_jsonl):
+    require_bounded_jsonl_commit(append_bounded_jsonl(target, payload, component="fixture.jsonl", max_bytes=512))`,
+    ],
+    [
+      'consumer parameter',
+      `from lib.bounded_jsonl import append_bounded_jsonl, require_bounded_jsonl_commit
+
+def publish(target, payload, require_bounded_jsonl_commit=require_bounded_jsonl_commit):
+    require_bounded_jsonl_commit(append_bounded_jsonl(target, payload, component="fixture.jsonl", max_bytes=512))`,
+    ],
+    [
+      'publisher assignment',
+      `from lib.bounded_jsonl import append_bounded_jsonl, require_bounded_jsonl_commit
+
+def publish(target, payload):
+    append_bounded_jsonl = lambda *args, **kwargs: object()
+    require_bounded_jsonl_commit(append_bounded_jsonl(target, payload, component="fixture.jsonl", max_bytes=512))`,
+    ],
+    [
+      'consumer assignment',
+      `from lib.bounded_jsonl import append_bounded_jsonl, require_bounded_jsonl_commit
+
+def publish(target, payload):
+    require_bounded_jsonl_commit = lambda result: None
+    require_bounded_jsonl_commit(append_bounded_jsonl(target, payload, component="fixture.jsonl", max_bytes=512))`,
+    ],
+  ])('bounded JSONL rejects %s shadowing', (_label, source) => {
+    const fixture = boundedJsonlFixture(source);
+
+    expect(runDurableWriterGuard(fixture)).toMatchObject({
+      status: 1,
+      code: 'shared-publisher-binding-invalid',
+    });
+  });
+
+  it('bounded JSONL rejects a nonliteral component', () => {
+    const fixture = boundedJsonlFixture(`
+from lib.bounded_jsonl import append_bounded_jsonl, require_bounded_jsonl_commit
+
+COMPONENT = "fixture.jsonl"
+
+def publish(target, payload):
+    require_bounded_jsonl_commit(append_bounded_jsonl(
+        target,
+        payload,
+        component=COMPONENT,
+        max_bytes=512,
+    ))
+`);
+
+    expect(runDurableWriterGuard(fixture)).toMatchObject({
+      status: 1,
+      code: 'component-not-literal',
+    });
+  });
+
+  it('bounded JSONL rejects a correct caller absent from inventory', () => {
+    const fixture = boundedJsonlFixture(`
+from lib.bounded_jsonl import append_bounded_jsonl, require_bounded_jsonl_commit
+
+def publish(target, payload):
+    require_bounded_jsonl_commit(append_bounded_jsonl(
+        target, payload, component="fixture.jsonl", max_bytes=512,
+    ))
+
+def unregistered(target, payload):
+    require_bounded_jsonl_commit(append_bounded_jsonl(
+        target, payload, component="fixture.other", max_bytes=512,
+    ))
+`);
+
+    expect(runDurableWriterGuard(fixture)).toMatchObject({
+      status: 1,
+      code: 'publisher-uninventoried',
+    });
+  });
+
+  it('bounded JSONL rejects an inventory naming a different function', () => {
+    const fixture = boundedJsonlFixture(exactBoundedJsonlCaller);
+    mutateInventory(fixture, (inventory) => {
+      inventory.callers[0].function = 'elsewhere';
+    });
+
+    expect(runDurableWriterGuard(fixture)).toMatchObject({
+      status: 1,
+      code: 'inventory-call-missing',
+    });
+  });
+
+  it('bounded JSONL rejects a discarded publisher result', () => {
+    const fixture = boundedJsonlFixture(`
+from lib.bounded_jsonl import append_bounded_jsonl, require_bounded_jsonl_commit
+
+def publish(target, payload):
+    append_bounded_jsonl(target, payload, component="fixture.jsonl", max_bytes=512)
+`);
+
+    expect(runDurableWriterGuard(fixture)).toMatchObject({
+      status: 1,
+      code: 'result-unconsumed',
+    });
+  });
+
+  it('bounded JSONL rejects an unread publisher result', () => {
+    const fixture = boundedJsonlFixture(`
+from lib.bounded_jsonl import append_bounded_jsonl, require_bounded_jsonl_commit
+
+def publish(target, payload):
+    result = append_bounded_jsonl(target, payload, component="fixture.jsonl", max_bytes=512)
+`);
+
+    expect(runDurableWriterGuard(fixture)).toMatchObject({
+      status: 1,
+      code: 'result-unconsumed',
+    });
+  });
+
+  it('bounded JSONL rejects a result overwritten before consumption', () => {
+    const fixture = boundedJsonlFixture(`
+from lib.bounded_jsonl import append_bounded_jsonl, require_bounded_jsonl_commit
+
+def publish(target, payload):
+    result = append_bounded_jsonl(target, payload, component="fixture.jsonl", max_bytes=512)
+    result = "overwritten"
+    require_bounded_jsonl_commit(result)
+`);
+
+    expect(runDurableWriterGuard(fixture)).toMatchObject({
+      status: 1,
+      code: 'result-unconsumed',
+    });
+  });
+
+  it('bounded JSONL rejects consumption only inside an uncalled nested function', () => {
+    const fixture = boundedJsonlFixture(`
+from lib.bounded_jsonl import append_bounded_jsonl, require_bounded_jsonl_commit
+
+def publish(target, payload):
+    result = append_bounded_jsonl(target, payload, component="fixture.jsonl", max_bytes=512)
+    def never_called():
+        require_bounded_jsonl_commit(result)
+`);
+
+    expect(runDurableWriterGuard(fixture)).toMatchObject({
+      status: 1,
+      code: 'result-unconsumed',
+    });
+  });
+
+  it('bounded JSONL rejects an unrelated object method named like the consumer', () => {
+    const fixture = boundedJsonlFixture(`
+from lib.bounded_jsonl import append_bounded_jsonl, require_bounded_jsonl_commit
+
+def publish(target, payload, telemetry):
+    telemetry.require_bounded_jsonl_commit(append_bounded_jsonl(
+        target, payload, component="fixture.jsonl", max_bytes=512,
+    ))
+`);
+
+    expect(runDurableWriterGuard(fixture)).toMatchObject({
+      status: 1,
+      code: 'result-unconsumed',
+    });
+  });
+
+  it('bounded JSONL rejects an inline writer beside a valid shared call', () => {
+    const fixture = boundedJsonlFixture(`
+import json
+from lib.bounded_jsonl import append_bounded_jsonl, require_bounded_jsonl_commit
+
+def hidden_inline_writer(target, payload):
+    target.write_text(json.dumps(payload), encoding="utf-8")
+
+def publish(target, payload):
+    require_bounded_jsonl_commit(append_bounded_jsonl(
+        target, payload, component="fixture.jsonl", max_bytes=512,
+    ))
+`);
+
+    expect(runDurableWriterGuard(fixture)).toMatchObject({
+      status: 1,
+      code: 'inline-writer',
+    });
+  });
+
+  it.each([
+    ['kind', 'kind', 'state_replace_expected'],
+    ['identity', 'operation_identity_source', 'durable_json.operation_id.v1'],
+    ['consumer policy', 'result_policy', 'require_advance'],
+  ])('bounded JSONL rejects a mismatched closed %s', (_label, field, value) => {
+    const fixture = boundedJsonlFixture(exactBoundedJsonlCaller);
+    mutateInventory(fixture, (inventory) => {
+      inventory.callers[0][field] = value;
+    });
+
+    expect(runDurableWriterGuard(fixture)).toMatchObject({
+      status: 1,
+      code: 'inventory-invalid',
+    });
+  });
+
+  it('bounded JSONL accepts the exact bound import and direct consumer', () => {
+    const fixture = boundedJsonlFixture(exactBoundedJsonlCaller);
+
+    expect(runDurableWriterGuard(fixture)).toMatchObject({
+      status: 0,
+      code: null,
+    });
+  });
+
+  it('checked-in durable writer estate has zero findings', () => {
+    const result = spawnSync(
+      testPython,
+      [
+        durableWriterGuard,
+        '--root',
+        repoRoot,
+        '--inventory',
+        'deploy/bot-errors-durable-writer-inventory.json',
+        '--json',
+      ],
+      { cwd: repoRoot, encoding: 'utf8' },
+    );
+    const parsed = JSON.parse(result.stdout) as {
+      status: string;
+      findings: Array<Record<string, unknown>>;
+    };
+
+    expect(result.status).toBe(0);
+    expect(parsed.status).toBe('pass');
+    expect(parsed.findings).toEqual([]);
   });
 
   it.each(durablePublisherScripts)('%s consumes shared durable publication outcomes', (script) => {

@@ -26,6 +26,9 @@ for line in open(sys.argv[1], encoding="utf-8"):
         print(stripped.strip('"').split(":", 1)[0])
 PY
 
+[ "$(grep -cx 'deploy/scripts/lib/bounded_jsonl.py' "$files_list" || true)" = "1" ] \
+  || fail "bounded_jsonl.py must appear exactly once in FILES"
+
 prepare_old_root() {
   local root="$1"
   rm -rf "$root"

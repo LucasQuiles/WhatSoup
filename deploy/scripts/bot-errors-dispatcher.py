@@ -30,6 +30,10 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from lib.bot_errors_daily_health import daily_health_host_from_payload
+from lib.bounded_jsonl import (
+    append_bounded_jsonl,
+    require_bounded_jsonl_commit,
+)
 from lib.bot_errors_envelope import EnvelopeError, classify_event, new_event_fields, normalize_event
 from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
 from lib.controller_log import (
@@ -778,37 +782,6 @@ def controller_log_fallback(line: str) -> None:
 MAX_DISPATCH_JSONL_BYTES = positive_env_int("BOT_ERRORS_DISPATCH_JSONL_MAX_BYTES", 50 * 1024 * 1024)
 
 
-def _trim_jsonl(path: Path, max_bytes: int) -> None:
-    """Trim oldest records from a JSONL file when it exceeds max_bytes."""
-    if not path.exists():
-        return
-    try:
-        size = path.stat().st_size
-    except OSError:
-        return
-    if size <= max_bytes:
-        return
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
-    except Exception:
-        return
-    kept: list[str] = []
-    total = 0
-    for line in reversed(lines):
-        encoded = line.encode("utf-8")
-        total += len(encoded)
-        kept.append(line)
-        if total > max_bytes:
-            if len(kept) > 1:
-                # Remove the record that pushed total over — newer records
-                # at the front of `kept` (appended since reversed) survive.
-                kept.pop()
-            break
-    kept.reverse()
-    if len(kept) < len(lines):
-        path.write_text("".join(kept), encoding="utf-8")
-
-
 def append_dispatch_log(
     paths: dict[str, Path],
     payload: dict[str, Any],
@@ -829,11 +802,17 @@ def append_dispatch_log(
         outcome=outcome,
         durability_class="diagnostic_best_effort",
         details=metadata_only_controller_details(details),
-        append_record=lambda record: append_private_jsonl(log_path, record),
+        append_record=lambda record: require_bounded_jsonl_commit(
+            append_bounded_jsonl(
+                log_path,
+                record,
+                component="dispatcher.dispatch_log",
+                max_bytes=MAX_DISPATCH_JSONL_BYTES,
+            )
+        ),
         persist_health=lambda record: persist_controller_log_health(paths, record),
         emit_fallback=controller_log_fallback,
     )
-    _trim_jsonl(log_path, MAX_DISPATCH_JSONL_BYTES)
     return result
 
 
