@@ -277,7 +277,7 @@
     },
     {
       "path": "deploy/scripts/check-bot-errors-durable-writers.py",
-      "sha256": "1014fec96c93e934399b70fdc8078be6f5d8131049251dd5102f57bc0ca69284",
+      "sha256": "a07d6b8e25871e530040ea2e389ffd77a6d4896997aa0739a63ee09b4a45d2af",
       "mustContain": [
         "_inventory_findings",
         "DURABLE_PUBLISHERS",

@@ -922,7 +922,7 @@ def main(argv: list[str]) -> int:
         result = {"status": "inconclusive", "findings": [], "reason": type(exc).__name__}
         print(json.dumps(result, sort_keys=True))
         return 2
-    status = "violation" if findings else "ok"
+    status = "violation" if findings else "pass"
     print(json.dumps({"status": status, "findings": findings}, sort_keys=True))
     return 1 if findings else 0
 

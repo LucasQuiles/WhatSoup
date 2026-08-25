@@ -1189,7 +1189,7 @@ def publish(target, payload):
     };
 
     expect(result.status).toBe(0);
-    expect(parsed.status).toBe('ok');
+    expect(parsed.status).toBe('pass');
     expect(parsed.findings).toEqual([]);
   });
 
