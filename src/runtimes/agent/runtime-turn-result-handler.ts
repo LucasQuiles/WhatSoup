@@ -505,6 +505,13 @@ if (event.text && (!hasPendingPoll || terminalFailureDuringPoll)) {
   if (providerFailureKind === 'context-overflow') {
     recordTurnFailure(providerFailureKind);
     log.warn({ chatJid: queue.targetChatJid, textPreview: providerPreview(event.text, 300) }, 'prompt too long — killing session');
+    emitAlertChecked(
+      host.instanceName,
+      'provider_context_overflow',
+      'Context overflow killed the session (respawns on next message)',
+      providerPreview(event.text, 300),
+      'warning',
+    );
     queue.enqueueText(contextOverflowNotice());
     shutdownSessionQuietly(session);
     return;
@@ -806,6 +813,13 @@ const textPreview = providerPreview(providerText, 300);
 if (!wf.fallback.arms) {
   if (wf.userTemplate === 'context-overflow') {
     log.warn({ chatJid: logChatJid, textPreview }, 'prompt too long — killing session');
+    emitAlertChecked(
+      host.instanceName,
+      'provider_context_overflow',
+      'Context overflow killed the session (respawns on next message)',
+      textPreview,
+      'warning',
+    );
     queue.enqueueText(contextOverflowNotice());
   } else {
     log.error({ chatJid: logChatJid, textPreview }, 'suppressed provider policy-block message from result — session will be killed');
@@ -1090,6 +1104,13 @@ if (event.text) {
   if (providerFailureKind === 'context-overflow') {
     recordTurnFailure(providerFailureKind);
     log.warn({ chatJid: host.shared ? host.currentTurnChatJid : host.activeChatJid, textPreview: providerPreview(event.text, 300) }, 'prompt too long — killing session');
+    emitAlertChecked(
+      host.instanceName,
+      'provider_context_overflow',
+      'Context overflow killed the session (respawns on next message)',
+      providerPreview(event.text, 300),
+      'warning',
+    );
     queue.enqueueText(contextOverflowNotice());
     shutdownSessionQuietly(host.session);
     return;
