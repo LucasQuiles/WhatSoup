@@ -82,7 +82,7 @@ export interface AlertEmissionResult {
 export interface AlertEmissionContext {
   instance: string;
   source: string;
-  operation?: 'alert' | 'clear';
+  operation?: 'alert' | 'clear' | 'observation';
 }
 
 export interface ClearAlertSourceOptions {
@@ -215,7 +215,7 @@ if (!process.env['VITEST'] && alertSinkPath()) {
 function captureToAlertSink(
   sink: string,
   input: {
-    eventType: 'alert' | 'clear';
+    eventType: 'alert' | 'clear' | 'observation';
     instance: string;
     source: string;
     summary: string;
@@ -326,6 +326,50 @@ export function emitAlert(
       outboxError: reason,
     };
   }
+}
+
+/**
+ * One-shot observation emission. Unlike emitAlert, an observation opens no
+ * incident and therefore needs no clear — use it for self-recovering
+ * one-shot events (e.g. a context-overflow session kill that respawns on
+ * the next message), so the telemetry can never join the still-open/stale
+ * renotify carpet. Best-effort: no legacy-subprocess fallback on outbox
+ * failure, because a lost observation loses one data point, not an incident.
+ */
+export function emitObservation(
+  instance: string,
+  source: string,
+  summary: string,
+  evidence: string,
+  severity: BotErrorsSeverity = 'info',
+): AlertEmissionResult {
+  const sink = alertSinkPath();
+  if (sink) {
+    return captureToAlertSink(sink, { eventType: 'observation', instance, source, summary, evidence, severity });
+  }
+  try {
+    const outbox = writeBotErrorsEvent({ eventType: 'observation', instance, source, summary, evidence, severity });
+    return { ok: true, channel: 'outbox', status: 'durably_queued', outbox };
+  } catch (err) {
+    const reason = errorMessage(err);
+    log.warn({ instance, source, err: reason }, 'bot-errors observation outbox write failed');
+    return { ok: false, channel: 'none', status: 'failed', outboxError: reason };
+  }
+}
+
+export function emitObservationChecked(
+  instance: string,
+  source: string,
+  summary: string,
+  evidence: string,
+  severity: BotErrorsSeverity = 'info',
+  strict?: boolean,
+): boolean {
+  return observeAlertEmission(
+    emitObservation(instance, source, summary, evidence, severity),
+    { instance, source, operation: 'observation' },
+    strict,
+  );
 }
 
 /**

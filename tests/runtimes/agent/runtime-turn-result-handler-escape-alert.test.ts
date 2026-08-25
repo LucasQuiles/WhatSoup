@@ -11,6 +11,7 @@ const emitAlertChecked = vi.hoisted(() => vi.fn(() => true));
 
 vi.mock('../../../src/lib/emit-alert.ts', () => ({
   emitAlertChecked,
+  emitObservationChecked: vi.fn(() => true),
   emitAlert: vi.fn(() => ({ status: 'durably_queued' })),
 }));
 

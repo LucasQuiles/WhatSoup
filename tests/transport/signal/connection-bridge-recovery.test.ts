@@ -15,6 +15,7 @@ const clearAlertSource = vi.hoisted(() => vi.fn(() => true));
 vi.mock('../../../src/lib/emit-alert.ts', () => ({
   emitAlert,
   emitAlertChecked: emitAlert,
+  emitObservationChecked: vi.fn(() => true),
   clearAlertSource,
   clearAlertSourceChecked: clearAlertSource,
 }));

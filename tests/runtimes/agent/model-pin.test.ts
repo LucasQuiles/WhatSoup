@@ -170,6 +170,7 @@ vi.mock('../../../src/runtimes/agent/process-tree.ts', () => ({
 vi.mock('../../../src/lib/emit-alert.ts', () => ({
   emitAlert: mockEmitAlert,
   emitAlertChecked: mockEmitAlert,
+  emitObservationChecked: vi.fn(() => true),
   clearAlertSource: mockClearAlertSource,
   clearAlertSourceChecked: mockClearAlertSource,
 }));

@@ -21,6 +21,7 @@ import { randomBytes } from 'node:crypto';
 
 vi.mock('../../../src/lib/emit-alert.ts', () => ({
   emitAlertChecked: vi.fn(),
+  emitObservationChecked: vi.fn(() => true),
 }));
 
 import { Database } from '../../../src/core/database.ts';

@@ -43,6 +43,7 @@ const silenceManager = vi.hoisted(() => ({ isInstanceSilenced: vi.fn(() => false
 vi.mock('../../src/lib/emit-alert.ts', () => ({
   ...alertFns,
   emitAlertChecked: alertFns.emitAlert,
+  emitObservationChecked: vi.fn(() => true),
   clearAlertSourceChecked: alertFns.clearAlertSource,
 }));
 vi.mock('../../src/fleet/alert-throttle-store.ts', () => ({

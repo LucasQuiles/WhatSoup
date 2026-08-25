@@ -33,6 +33,7 @@ const { logger } = vi.hoisted(() => ({ logger: {} as Record<string, ReturnType<t
 vi.mock('../../src/lib/emit-alert.ts', () => ({
   emitAlert: alertFns.emitAlert,
   emitAlertChecked: alertFns.emitAlert,
+  emitObservationChecked: vi.fn(() => true),
   clearAlertSourceChecked: alertFns.clearAlertSource,
 }));
 vi.mock('../../src/fleet/alert-throttle-store.ts', () => ({

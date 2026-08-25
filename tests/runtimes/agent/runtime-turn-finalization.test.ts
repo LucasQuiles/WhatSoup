@@ -8,7 +8,7 @@ import { createRuntimeTurnContext } from '../../../src/runtimes/agent/runtime-tu
 
 const emitAlert = vi.hoisted(() => vi.fn());
 
-vi.mock('../../../src/lib/emit-alert.ts', () => ({
+vi.mock('../../../src/lib/emit-alert.ts', () => ({ emitObservationChecked: vi.fn(() => true),
   emitAlert,
 }));
 

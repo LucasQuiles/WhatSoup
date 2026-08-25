@@ -20,7 +20,7 @@ import { unlinkSync, existsSync } from 'node:fs';
 vi.mock('../../../src/lib/emit-alert.ts', () => {
   const emitAlertChecked = vi.fn(() => true);
   const clearAlertSourceChecked = vi.fn(() => true);
-  return { emitAlertChecked, clearAlertSourceChecked };
+  return { emitAlertChecked, clearAlertSourceChecked, emitObservationChecked: vi.fn(() => true) };
 });
 
 import { Database } from '../../../src/core/database.ts';

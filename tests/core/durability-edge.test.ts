@@ -26,6 +26,7 @@ const QUARANTINE_CLEAR_OPTIONS = { requireDurableOutbox: true };
 vi.mock('../../src/lib/emit-alert.ts', () => ({
   emitAlert,
   emitAlertChecked: emitAlert,
+  emitObservationChecked: vi.fn(() => true),
   clearAlertSource,
   clearAlertSourceChecked: clearAlertSource,
 }));
