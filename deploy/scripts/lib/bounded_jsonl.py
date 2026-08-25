@@ -246,17 +246,12 @@ def _sync_grandparent(parent: Path) -> None:
     inside a directory that no longer exists. Only called on the create path; a
     pre-existing parent is already durable.
     """
-    try:
-        grandparent_fd = os.open(
-            parent.parent,
-            os.O_DIRECTORY | os.O_RDONLY | os.O_NOFOLLOW,
-        )
-    except OSError:
-        return
+    grandparent_fd = os.open(
+        parent.parent,
+        os.O_DIRECTORY | os.O_RDONLY | os.O_NOFOLLOW,
+    )
     try:
         os.fsync(grandparent_fd)
-    except OSError:
-        pass
     finally:
         os.close(grandparent_fd)
 
@@ -590,7 +585,27 @@ def _open_parent(path: Path) -> tuple[int | None, BoundedJsonlResult | None]:
             failure_class="unsafe_parent",
         )
     if parent_created:
-        _sync_grandparent(parent)
+        # A failed grandparent sync means the newly created parent's own directory
+        # entry is not durable. Reporting ordinary success here would be a fail-open:
+        # the caller would treat an unproven directory as committed. Both the open
+        # and the fsync propagate (matching _sync_parent/_sync_file, which never
+        # swallow), and the decision is made here at the caller.
+        try:
+            _sync_grandparent(parent)
+        except OSError:
+            os.close(parent_fd)
+            return None, _result(
+                component="invalid",
+                status="not_mutated",
+                method="none",
+                stage="parent_sync",
+                record_sha256=None,
+                bytes_before=None,
+                bytes_after=None,
+                compacted=False,
+                oversized_record=False,
+                failure_class="io_error",
+            )
     return parent_fd, None
 
 
