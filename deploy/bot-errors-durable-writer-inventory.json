@@ -1,6 +1,14 @@
 {
-  "schema_version": 1,
-  "helper_generation": 1,
+  "schema_version": 2,
+  "helper_generation": 2,
+  "shared_publishers": [
+    {
+      "publisher": "append_bounded_jsonl",
+      "consumer": "require_bounded_jsonl_commit",
+      "module": "lib.bounded_jsonl",
+      "path": "deploy/scripts/lib/bounded_jsonl.py"
+    }
+  ],
   "principal_scripts": [
     "deploy/scripts/bot-errors-collector.py",
     "deploy/scripts/bot-errors-dispatcher.py",
@@ -243,6 +251,79 @@
       "result_policy": "explicit_advance_check",
       "result_consumer": "persist_controller_log_health",
       "fault_test_ids": ["diagnostic.serialization", "diagnostic.result-inspection"]
+    },
+    {
+      "site_id": "dispatcher-dispatch-log",
+      "script": "deploy/scripts/bot-errors-dispatcher.py",
+      "function": "append_dispatch_log",
+      "logical_publication": "dispatcher.dispatch_log",
+      "kind": "diagnostic_jsonl_append",
+      "operation_identity_source": "bounded_jsonl.record_sha256.evidence_only.v1",
+      "result_policy": "require_bounded_jsonl_commit",
+      "result_consumer": "append_dispatch_log",
+      "fault_test_ids": [
+        "jsonl.serialization",
+        "jsonl.lock-concurrency",
+        "jsonl.retention",
+        "jsonl.post-replace-unproven",
+        "jsonl.unsafe-entry",
+        "jsonl.adapter"
+      ]
+    },
+    {
+      "site_id": "dispatcher-claimed-event-normalize",
+      "script": "deploy/scripts/bot-errors-dispatcher.py",
+      "function": "process_one",
+      "logical_publication": "dispatcher.claimed_event_normalize",
+      "kind": "state_replace_expected",
+      "operation_identity_source": "durable_json.operation_id.v1",
+      "result_policy": "explicit_advance_check",
+      "result_consumer": "process_one",
+      "fault_test_ids": ["state.serialization", "state.predecessor-reconcile", "state.no-advance-unproven"]
+    },
+    {
+      "site_id": "dispatcher-dead-letter-meta-clear",
+      "script": "deploy/scripts/bot-errors-dispatcher.py",
+      "function": "queue_dead_letter_meta_alert",
+      "logical_publication": "dispatcher.dead_letter_meta_clear",
+      "kind": "event_create_once",
+      "operation_identity_source": "durable_json.operation_id.v1",
+      "result_policy": "require_advance",
+      "result_consumer": "queue_dead_letter_meta_alert",
+      "fault_test_ids": ["event.serialization", "event.identity-reconcile", "event.no-advance-unproven"]
+    },
+    {
+      "site_id": "dispatcher-storm-manifest-superseding",
+      "script": "deploy/scripts/bot-errors-dispatcher.py",
+      "function": "collapse_storm_group",
+      "logical_publication": "dispatcher.storm_manifest_superseding",
+      "kind": "state_replace_expected",
+      "operation_identity_source": "durable_json.operation_id.v1",
+      "result_policy": "aggregate_all",
+      "result_consumer": "collapse_storm_group",
+      "fault_test_ids": ["state.serialization", "state.predecessor-reconcile", "state.no-advance-unproven"]
+    },
+    {
+      "site_id": "dispatcher-storm-digest-superseding",
+      "script": "deploy/scripts/bot-errors-dispatcher.py",
+      "function": "collapse_storm_group",
+      "logical_publication": "dispatcher.storm_digest_superseding",
+      "kind": "event_create_once",
+      "operation_identity_source": "durable_json.operation_id.v1",
+      "result_policy": "aggregate_all",
+      "result_consumer": "collapse_storm_group",
+      "fault_test_ids": ["event.serialization", "event.identity-reconcile", "event.no-advance-unproven"]
+    },
+    {
+      "site_id": "dispatcher-storm-digest-refresh",
+      "script": "deploy/scripts/bot-errors-dispatcher.py",
+      "function": "collapse_storm_group",
+      "logical_publication": "dispatcher.storm_digest_refresh",
+      "kind": "state_replace_expected",
+      "operation_identity_source": "durable_json.operation_id.v1",
+      "result_policy": "aggregate_all",
+      "result_consumer": "collapse_storm_group",
+      "fault_test_ids": ["state.serialization", "state.predecessor-reconcile", "state.no-advance-unproven"]
     },
     {
       "site_id": "dispatcher-incident-state",
@@ -608,6 +689,28 @@
       "fault_test_ids": ["diagnostic.serialization", "diagnostic.result-inspection"]
     },
     {
+      "site_id": "health-check-tool-inventory-state",
+      "script": "deploy/scripts/bot-errors-health-check.py",
+      "function": "save_tool_inventory_state",
+      "logical_publication": "health_check.tool_inventory_state",
+      "kind": "state_replace_expected",
+      "operation_identity_source": "durable_json.operation_id.v1",
+      "result_policy": "require_advance",
+      "result_consumer": "save_tool_inventory_state",
+      "fault_test_ids": ["state.serialization", "state.predecessor-reconcile", "state.no-advance-unproven"]
+    },
+    {
+      "site_id": "health-check-daily-health-receipt",
+      "script": "deploy/scripts/bot-errors-health-check.py",
+      "function": "record_daily_health_receipt",
+      "logical_publication": "health_check.daily_health_receipt",
+      "kind": "state_replace_expected",
+      "operation_identity_source": "durable_json.operation_id.v1",
+      "result_policy": "require_advance",
+      "result_consumer": "record_daily_health_receipt",
+      "fault_test_ids": ["state.serialization", "state.predecessor-reconcile", "state.no-advance-unproven"]
+    },
+    {
       "site_id": "health-deadman-state",
       "script": "deploy/scripts/bot-errors-health-check.py",
       "function": "save_deadman_state",
@@ -652,15 +755,22 @@
       "fault_test_ids": ["diagnostic.serialization", "diagnostic.result-inspection"]
     },
     {
-      "site_id": "watchdog-state",
+      "site_id": "heartbeat-watchdog-heartbeat-log",
       "script": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
-      "function": "save_state",
-      "logical_publication": "heartbeat_watchdog.state",
-      "kind": "state_replace_expected",
-      "operation_identity_source": "durable_json.operation_id.v1",
-      "result_policy": "require_advance",
-      "result_consumer": "save_state",
-      "fault_test_ids": ["state.serialization", "state.predecessor-reconcile", "state.no-advance-unproven"]
+      "function": "append_log",
+      "logical_publication": "heartbeat_watchdog.heartbeat_log",
+      "kind": "diagnostic_jsonl_append",
+      "operation_identity_source": "bounded_jsonl.record_sha256.evidence_only.v1",
+      "result_policy": "require_bounded_jsonl_commit",
+      "result_consumer": "append_log",
+      "fault_test_ids": [
+        "jsonl.serialization",
+        "jsonl.lock-concurrency",
+        "jsonl.retention",
+        "jsonl.post-replace-unproven",
+        "jsonl.unsafe-entry",
+        "jsonl.adapter"
+      ]
     },
     {
       "site_id": "watchdog-outbox-event",

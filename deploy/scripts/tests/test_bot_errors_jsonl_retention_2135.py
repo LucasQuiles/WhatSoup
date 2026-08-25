@@ -1,27 +1,20 @@
-"""Tests for #2135: bounded JSONL retention for controller diagnostics.
-
-fails-before:  dispatch.jsonl / heartbeat-watchdog.jsonl grow unbounded (pure
-               append, no size/age checks).
-passes-after:  _trim_jsonl fires after append when the file exceeds
-               MAX_{DISPATCH,HEARTBEAT}_JSONL_BYTES and keeps only the
-               newest records fitting under the threshold.
-
-No regression: files under the max_bytes threshold are untouched.
-Env override:  BOT_ERRORS_DISPATCH_JSONL_MAX_BYTES changes the threshold.
-"""
+"""Tests for #2135: append-plus-retention through the fenced JSONL helper."""
 
 from __future__ import annotations
 
 import importlib.util
-import json
+import os
 from pathlib import Path
+import sys
+import uuid
 
-
-# ---------------------------------------------------------------------------
-# Helper: load the watchdog module
-# ---------------------------------------------------------------------------
 
 _SCRIPT_ROOT = Path(__file__).resolve().parents[1]
+_TEST_ROOT = Path(__file__).resolve().parent
+if str(_TEST_ROOT) not in sys.path:
+    sys.path.insert(0, str(_TEST_ROOT))
+
+from bounded_jsonl_test_support import line_bytes, load_bounded_jsonl, read_records
 
 
 def _load_watchdog():
@@ -29,10 +22,10 @@ def _load_watchdog():
         "bot_errors_watchdog_2135",
         _SCRIPT_ROOT / "bot-errors-heartbeat-watchdog.py",
     )
-    mod = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(mod)
-    return mod
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _load_dispatcher():
@@ -40,112 +33,97 @@ def _load_dispatcher():
         "bot_errors_dispatcher_2135",
         _SCRIPT_ROOT / "bot-errors-dispatcher.py",
     )
-    mod = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(mod)
-    return mod
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
-def _write_jsonl(path: Path, records: list[dict]) -> Path:
-    lines = [json.dumps(r, sort_keys=True) + "\n" for r in records]
-    path.write_text("".join(lines), encoding="utf-8")
-    return path
+def _module():
+    return load_bounded_jsonl(f"bounded_jsonl_retention_{uuid.uuid4().hex}")
 
 
-def _jsonl_bytes(path: Path) -> int:
-    return path.stat().st_size
+def _append(module, path: Path, record: dict, max_bytes: int):
+    return module.append_bounded_jsonl(
+        path,
+        record,
+        component="fixture.retention",
+        max_bytes=max_bytes,
+    )
 
 
-def _jsonl_count(path: Path) -> int:
-    return len(path.read_text(encoding="utf-8").splitlines())
+class TestAppendPlusRetention:
+    def test_under_threshold_preserves_prefix_and_appends(self, tmp_path: Path) -> None:
+        module = _module()
+        target = tmp_path / "diagnostic.jsonl"
+        existing = b'{"legacy":  1}\n'
+        incoming = {"id": "incoming"}
+        target.write_bytes(existing)
 
+        result = _append(module, target, incoming, 4096)
 
-# ---------------------------------------------------------------------------
-# _trim_jsonl unit tests
-# ---------------------------------------------------------------------------
+        assert result.status == "committed"
+        assert result.method == "append"
+        assert target.read_bytes() == existing + line_bytes(incoming)
 
+    def test_over_threshold_keeps_newest_ordered_suffix(self, tmp_path: Path) -> None:
+        module = _module()
+        target = tmp_path / "diagnostic.jsonl"
+        existing = [{"id": index, "payload": "x" * 64} for index in range(10)]
+        incoming = {"id": 10, "payload": "y" * 64}
+        target.write_bytes(b"".join(line_bytes(record) for record in existing))
+        expected = [existing[-1], incoming]
+        max_bytes = sum(len(line_bytes(record)) for record in expected)
 
-class TestTrimJsonl:
-    """_trim_jsonl removes oldest records when the file exceeds max_bytes."""
+        result = _append(module, target, incoming, max_bytes)
 
-    def test_file_under_threshold_is_untouched(self, tmp_path: Path):
-        """No-regression: a small file is not modified."""
-        mod = _load_watchdog()
-        path = tmp_path / "test.jsonl"
-        records = [{"i": i, "data": "x" * 100} for i in range(10)]
-        _write_jsonl(path, records)
-        original = _jsonl_bytes(path)
+        assert result.status == "committed"
+        assert result.method == "compact_replace"
+        assert read_records(target) == expected
+        assert target.stat().st_size <= max_bytes
 
-        mod._trim_jsonl(path, original * 2)
+    def test_empty_file_becomes_one_committed_record(self, tmp_path: Path) -> None:
+        module = _module()
+        target = tmp_path / "diagnostic.jsonl"
+        target.write_bytes(b"")
+        incoming = {"id": "incoming"}
 
-        assert _jsonl_bytes(path) == original, "file must not change when under threshold"
-        assert _jsonl_count(path) == 10, "all records must survive"
+        result = _append(module, target, incoming, 4096)
 
-    def test_trim_removes_oldest_when_over_threshold(self, tmp_path: Path):
-        """When file exceeds max_bytes, oldest records are removed."""
-        mod = _load_watchdog()
-        path = tmp_path / "test.jsonl"
-        records = [{"i": i, "data": "x" * 1000} for i in range(200)]
-        _write_jsonl(path, records)
-        total = _jsonl_bytes(path)
+        assert result.status == "committed"
+        assert target.read_bytes() == line_bytes(incoming)
 
-        threshold = total // 3
-        mod._trim_jsonl(path, threshold)
+    def test_missing_file_becomes_one_private_committed_record(self, tmp_path: Path) -> None:
+        module = _module()
+        target = tmp_path / "diagnostic.jsonl"
+        incoming = {"id": "incoming"}
 
-        assert _jsonl_bytes(path) <= threshold, (
-            f"file must be <= {threshold} bytes after trim"
-        )
-        remaining = _jsonl_count(path)
-        assert 1 <= remaining < 200, f"some records should remain ({remaining})"
+        result = _append(module, target, incoming, 4096)
 
-        lines = path.read_text(encoding="utf-8").splitlines()
-        for line in lines:
-            record = json.loads(line)
-            assert record["i"] >= 200 - remaining, (
-                f"old record i={record['i']} survived but should have been trimmed"
-            )
+        assert result.status == "committed"
+        assert target.read_bytes() == line_bytes(incoming)
+        assert target.stat().st_mode & 0o777 == 0o600
 
-    def test_empty_file_is_untouched(self, tmp_path: Path):
-        """An empty file is not modified."""
-        mod = _load_watchdog()
-        path = tmp_path / "test.jsonl"
-        path.write_text("", encoding="utf-8")
+    def test_oversized_incoming_record_survives_alone(self, tmp_path: Path) -> None:
+        module = _module()
+        target = tmp_path / "diagnostic.jsonl"
+        target.write_bytes(line_bytes({"id": "old"}))
+        incoming = {"id": "oversized", "payload": "z" * 1000}
 
-        mod._trim_jsonl(path, 1000)
-        assert path.read_text(encoding="utf-8") == "", "empty file must stay empty"
+        result = _append(module, target, incoming, 64)
 
-    def test_nonexistent_file_is_safe(self, tmp_path: Path):
-        """A nonexistent path does not cause an error."""
-        mod = _load_watchdog()
-        path = tmp_path / "nonexistent.jsonl"
+        assert result.status == "committed"
+        assert result.oversized_record is True
+        assert target.read_bytes() == line_bytes(incoming)
 
-        mod._trim_jsonl(path, 1000)
-
-        assert not path.exists(), "trim must not create a missing file"
-
-    def test_trim_single_record_preserves_it(self, tmp_path: Path):
-        """A single record larger than threshold is preserved."""
-        mod = _load_watchdog()
-        path = tmp_path / "test.jsonl"
-        large = {"data": "x" * 100000}
-        _write_jsonl(path, [large])
-
-        mod._trim_jsonl(path, 100)
-
-        assert _jsonl_count(path) == 1, "at least one record must survive"
-        assert json.loads(path.read_text(encoding="utf-8")) == large
-
-    def test_env_override_dispatch_max_bytes(self):
-        """BOT_ERRORS_DISPATCH_JSONL_MAX_BYTES env var overrides the default."""
-        import os
+    def test_env_override_dispatch_max_bytes(self) -> None:
         os.environ["BOT_ERRORS_DISPATCH_JSONL_MAX_BYTES"] = "10485760"
         try:
-            mod = _load_dispatcher()
-            assert mod.MAX_DISPATCH_JSONL_BYTES == 10 * 1024 * 1024
+            module = _load_dispatcher()
+            assert module.MAX_DISPATCH_JSONL_BYTES == 10 * 1024 * 1024
         finally:
             os.environ.pop("BOT_ERRORS_DISPATCH_JSONL_MAX_BYTES", None)
 
-    def test_heartbeat_default_is_separate(self):
-        """The heartbeat watchdog has its own threshold independent from dispatcher."""
-        mod = _load_watchdog()
-        assert mod.MAX_HEARTBEAT_JSONL_BYTES == 50 * 1024 * 1024
+    def test_heartbeat_default_is_separate(self) -> None:
+        module = _load_watchdog()
+        assert module.MAX_HEARTBEAT_JSONL_BYTES == 50 * 1024 * 1024

@@ -49,6 +49,7 @@ FILES=(
   "deploy/scripts/bot-errors-emit.py"
   "deploy/scripts/bot-errors-runner.py"
   "deploy/scripts/lib/__init__.py"
+  "deploy/scripts/lib/bounded_jsonl.py"
   "deploy/scripts/lib/bot_errors_envelope.py"
   "deploy/scripts/lib/bot_errors_redaction.py"
   "deploy/scripts/lib/bot_errors_daily_health.py"

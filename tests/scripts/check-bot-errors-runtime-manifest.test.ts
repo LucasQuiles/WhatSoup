@@ -48,6 +48,24 @@ describe('check-bot-errors-runtime-manifest guard', () => {
       .toContain('src/lib/fault-taxonomy-registry.json');
   });
 
+  it('pins the fenced bounded JSONL runtime module and capability markers', () => {
+    expect(computeRequiredRuntimePaths(repoRoot))
+      .toContain('deploy/scripts/lib/bounded_jsonl.py');
+    const manifest = JSON.parse(
+      readFileSync(path.join(repoRoot, 'deploy/bot-errors-runtime-manifest.json'), 'utf8'),
+    ) as { files: Array<{ path: string; mustContain?: string[] }> };
+    const entry = manifest.files.find(
+      (item) => item.path === 'deploy/scripts/lib/bounded_jsonl.py',
+    );
+    expect(entry?.mustContain).toEqual(expect.arrayContaining([
+      'append_bounded_jsonl',
+      'require_bounded_jsonl_commit',
+      '.bounded-jsonl.lock',
+      '_replace_relative',
+      'O_NOFOLLOW',
+    ]));
+  });
+
   it('keeps the checked-in BOT ERRORS runtime manifest aligned with scripts and markers', () => {
     const result = checkBotErrorsRuntimeManifest(repoRoot);
 

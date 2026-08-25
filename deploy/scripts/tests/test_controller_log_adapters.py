@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import importlib.util
 from pathlib import Path
 import sys
@@ -10,6 +11,7 @@ if str(_SCRIPT_ROOT) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_ROOT))
 
 from lib.controller_log import ControllerLogContext
+from lib.bounded_jsonl import BoundedJsonlResult
 
 
 def load_script(filename: str) -> ModuleType:
@@ -75,7 +77,23 @@ def test_five_controller_adapters_emit_one_envelope(monkeypatch, tmp_path: Path)
         module = load_script(filename)
         module.CONTROLLER_LOG_CONTEXT = deterministic_context(component)
         captured = []
-        monkeypatch.setattr(module, "append_private_jsonl", lambda path, record: captured.append((path, record)))
+        if filename == "bot-errors-heartbeat-watchdog.py":
+            monkeypatch.setattr(
+                module,
+                "append_bounded_jsonl",
+                lambda path, record, **_kwargs: captured.append((path, record)),
+            )
+            monkeypatch.setattr(
+                module,
+                "require_bounded_jsonl_commit",
+                lambda _result: None,
+            )
+        else:
+            monkeypatch.setattr(
+                module,
+                "append_private_jsonl",
+                lambda path, record: captured.append((path, record)),
+            )
         getattr(module, function_name)(*args)
         assert len(captured) == 1
         assert_v1(captured[0][1], component, args[0] if isinstance(args[0], str) else args[0]["type"])
@@ -83,7 +101,12 @@ def test_five_controller_adapters_emit_one_envelope(monkeypatch, tmp_path: Path)
     dispatcher = load_script("bot-errors-dispatcher.py")
     dispatcher.CONTROLLER_LOG_CONTEXT = deterministic_context("dispatcher")
     captured = []
-    monkeypatch.setattr(dispatcher, "append_private_jsonl", lambda path, record: captured.append((path, record)))
+    monkeypatch.setattr(
+        dispatcher,
+        "append_bounded_jsonl",
+        lambda path, record, **_kwargs: captured.append((path, record)),
+    )
+    monkeypatch.setattr(dispatcher, "require_bounded_jsonl_commit", lambda _result: None)
     paths = {"logs": tmp_path}
     dispatcher.append_dispatch_log(
         paths,
@@ -197,11 +220,20 @@ def test_identical_append_failure_policy_across_all_five_adapters(
         module.CONTROLLER_LOG_CONTEXT = deterministic_context(component)
         health = []
         fallback = []
-        monkeypatch.setattr(
-            module,
-            "append_private_jsonl",
-            lambda _path, _record: (_ for _ in ()).throw(PermissionError("private")),
-        )
+        if filename == "bot-errors-heartbeat-watchdog.py":
+            monkeypatch.setattr(
+                module,
+                "append_bounded_jsonl",
+                lambda _path, _record, **_kwargs: (_ for _ in ()).throw(
+                    PermissionError("private")
+                ),
+            )
+        else:
+            monkeypatch.setattr(
+                module,
+                "append_private_jsonl",
+                lambda _path, _record: (_ for _ in ()).throw(PermissionError("private")),
+            )
         monkeypatch.setattr(module, "persist_controller_log_health", health.append)
         monkeypatch.setattr(module, "controller_log_fallback", fallback.append)
         assert getattr(module, function_name)(*args) == "diagnostic_degraded"
@@ -215,8 +247,8 @@ def test_identical_append_failure_policy_across_all_five_adapters(
     fallback = []
     monkeypatch.setattr(
         dispatcher,
-        "append_private_jsonl",
-        lambda _path, _record: (_ for _ in ()).throw(PermissionError("private")),
+        "append_bounded_jsonl",
+        lambda _path, _record, **_kwargs: (_ for _ in ()).throw(PermissionError("private")),
     )
     monkeypatch.setattr(
         dispatcher,
@@ -271,3 +303,258 @@ def test_dispatcher_sink_health_receipt_lands_on_a_real_filesystem(tmp_path: Pat
     # The private-mode contract must hold for the directory this now creates.
     assert oct(receipt.parent.stat().st_mode & 0o777) == "0o700"
     assert oct(receipt.stat().st_mode & 0o777) == "0o600"
+
+
+def test_dispatcher_bounded_adapter_uses_one_exact_shared_publication(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    dispatcher = load_script("bot-errors-dispatcher.py")
+    dispatcher.CONTROLLER_LOG_CONTEXT = deterministic_context("dispatcher")
+    publication = object()
+    calls = []
+    consumed = []
+
+    def append_bounded(path, record, *, component, max_bytes):
+        calls.append({
+            "path": path,
+            "component": component,
+            "max_bytes": max_bytes,
+            "record_kind": record["recordKind"],
+        })
+        return publication
+
+    monkeypatch.setattr(dispatcher, "append_bounded_jsonl", append_bounded, raising=False)
+    monkeypatch.setattr(
+        dispatcher,
+        "require_bounded_jsonl_commit",
+        consumed.append,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        dispatcher,
+        "append_private_jsonl",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("bounded dispatcher sink used append_private_jsonl")
+        ),
+    )
+
+    result = dispatcher.append_dispatch_log(
+        {"root": tmp_path, "logs": tmp_path},
+        {"type": "sent", "attempts": 1},
+    )
+
+    assert result == "written"
+    assert calls == [{
+        "path": tmp_path / "dispatch.jsonl",
+        "component": "dispatcher.dispatch_log",
+        "max_bytes": dispatcher.MAX_DISPATCH_JSONL_BYTES,
+        "record_kind": "sent",
+    }]
+    assert consumed == [publication]
+
+
+def test_dispatcher_bounded_adapter_degrades_on_real_consumer_rejection(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    dispatcher = load_script("bot-errors-dispatcher.py")
+    dispatcher.CONTROLLER_LOG_CONTEXT = deterministic_context("dispatcher")
+    rejected = BoundedJsonlResult(
+        component="dispatcher.dispatch_log",
+        status="not_mutated",
+        method="none",
+        stage="lock",
+        record_sha256="0" * 64,
+        bytes_before=None,
+        bytes_after=None,
+        compacted=False,
+        oversized_record=False,
+        failure_class="lock_timeout",
+    )
+    monkeypatch.setattr(
+        dispatcher,
+        "append_bounded_jsonl",
+        lambda *_args, **_kwargs: rejected,
+        raising=False,
+    )
+    health = []
+    fallback = []
+    monkeypatch.setattr(
+        dispatcher,
+        "persist_controller_log_health",
+        lambda _paths, record: health.append(record),
+    )
+    monkeypatch.setattr(dispatcher, "controller_log_fallback", fallback.append)
+
+    result = dispatcher.append_dispatch_log(
+        {"root": tmp_path, "logs": tmp_path},
+        {"type": "sent", "attempts": 1},
+    )
+
+    assert result == "diagnostic_degraded"
+    assert len(health) == 1
+    assert health[0]["status"] == "degraded"
+    assert health[0]["failureClass"] == "unexpected_error"
+    assert len(fallback) == 1
+
+
+def test_dispatcher_bounded_adapter_preserves_excluded_sinks_and_decorator_order() -> None:
+    source = (_SCRIPT_ROOT / "bot-errors-dispatcher.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    functions = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+    run_once = functions["run_once"]
+    decorator_text = "\n".join(ast.unparse(node) for node in run_once.decorator_list)
+    assert "append_dispatch_log" in decorator_text
+    run_once_text = ast.get_source_segment(source, run_once)
+    assert run_once_text is not None
+    assert run_once_text.index('paths["locks"] / "dispatcher.lock"') < run_once_text.index(
+        "fcntl.flock"
+    )
+
+    state_projection = ast.get_source_segment(source, functions["project_dispatcher_state_mode"])
+    assert state_projection is not None
+    assert '"logs" / "dispatcher.jsonl"' in state_projection
+    assert "append_private_jsonl(log_path, record)" in state_projection
+    capture_functions = [
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and "append_private_jsonl(capture_path" in (ast.get_source_segment(source, node) or "")
+    ]
+    assert capture_functions == ["send_whatsapp"]
+
+    bounded_callers = sorted({
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and any(
+            isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Name)
+            and call.func.id == "append_bounded_jsonl"
+            for call in ast.walk(node)
+        )
+    })
+    assert bounded_callers == ["append_dispatch_log"]
+
+
+def test_watchdog_bounded_adapter_uses_one_exact_shared_publication(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    watchdog = load_script("bot-errors-heartbeat-watchdog.py")
+    watchdog.CONTROLLER_LOG_CONTEXT = deterministic_context("heartbeat_watchdog")
+    monkeypatch.setattr(watchdog, "state_root", lambda: tmp_path)
+    publication = object()
+    calls = []
+    consumed = []
+
+    def append_bounded(path, record, *, component, max_bytes):
+        calls.append({
+            "path": path,
+            "component": component,
+            "max_bytes": max_bytes,
+            "record_kind": record["recordKind"],
+        })
+        return publication
+
+    monkeypatch.setattr(watchdog, "append_bounded_jsonl", append_bounded, raising=False)
+    monkeypatch.setattr(
+        watchdog,
+        "require_bounded_jsonl_commit",
+        consumed.append,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        watchdog,
+        "append_private_jsonl",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("bounded watchdog sink used append_private_jsonl")
+        ),
+    )
+
+    result = watchdog.append_log("recovery_pending", {"count": 1})
+
+    assert result == "written"
+    assert calls == [{
+        "path": tmp_path / "logs" / "heartbeat-watchdog.jsonl",
+        "component": "heartbeat_watchdog.heartbeat_log",
+        "max_bytes": watchdog.MAX_HEARTBEAT_JSONL_BYTES,
+        "record_kind": "recovery_pending",
+    }]
+    assert consumed == [publication]
+
+
+def test_watchdog_bounded_adapter_degrades_on_real_consumer_rejection(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    watchdog = load_script("bot-errors-heartbeat-watchdog.py")
+    watchdog.CONTROLLER_LOG_CONTEXT = deterministic_context("heartbeat_watchdog")
+    monkeypatch.setattr(watchdog, "state_root", lambda: tmp_path)
+    rejected = BoundedJsonlResult(
+        component="heartbeat_watchdog.heartbeat_log",
+        status="not_mutated",
+        method="none",
+        stage="lock",
+        record_sha256="0" * 64,
+        bytes_before=None,
+        bytes_after=None,
+        compacted=False,
+        oversized_record=False,
+        failure_class="lock_timeout",
+    )
+    monkeypatch.setattr(
+        watchdog,
+        "append_bounded_jsonl",
+        lambda *_args, **_kwargs: rejected,
+        raising=False,
+    )
+    health = []
+    fallback = []
+    monkeypatch.setattr(watchdog, "persist_controller_log_health", health.append)
+    monkeypatch.setattr(watchdog, "controller_log_fallback", fallback.append)
+
+    result = watchdog.append_log("recovery_pending", {"count": 1})
+
+    assert result == "diagnostic_degraded"
+    assert len(health) == 1
+    assert health[0]["status"] == "degraded"
+    assert health[0]["failureClass"] == "unexpected_error"
+    assert len(fallback) == 1
+
+
+def test_watchdog_bounded_adapter_preserves_state_sink_and_decorator_funnel() -> None:
+    source = (_SCRIPT_ROOT / "bot-errors-heartbeat-watchdog.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    functions = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+    session = functions["open_watchdog_state_session"]
+    decorator_text = "\n".join(ast.unparse(node) for node in session.decorator_list)
+    assert "append_log" in decorator_text
+    state_projection = ast.get_source_segment(source, functions["project_watchdog_state_mode"])
+    assert state_projection is not None
+    assert '"logs" / "watchdog.jsonl"' in state_projection
+    assert "append_private_jsonl(log_path, record)" in state_projection
+
+    bounded_callers = sorted({
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and any(
+            isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Name)
+            and call.func.id == "append_bounded_jsonl"
+            for call in ast.walk(node)
+        )
+    })
+    assert bounded_callers == ["append_log"]

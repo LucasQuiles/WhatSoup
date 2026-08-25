@@ -7650,7 +7650,23 @@ def record_daily_health_receipt(event_path: Path, severity: str) -> None:
         "eventPath": str(event_path),
     }
     ensure_private_dir(root)
-    receipt_path.write_text(json.dumps(receipt, indent=2), encoding="utf-8")
+    target = _durable_target(receipt_path)
+    observation = observe_json(target)
+    publication_operation = operation_id(
+        target,
+        receipt,
+        component="health_check.daily_health_receipt",
+        predecessor=observation.version,
+    )
+    publication = publish_state_json(
+        target,
+        receipt,
+        component="health_check.daily_health_receipt",
+        operation_id=publication_operation,
+        expected=observation.version,
+        generation=(observation.version.generation or 0) + 1,
+    )
+    require_advance(publication)
 
 
 def daily() -> int:
