@@ -1336,7 +1336,7 @@
       "test": "tests/core/heal-fallback-prerequisite-2399.test.ts"
     },
     "provider_context_overflow": {
-      "disposition": "warning_session_killed_recovers_on_next_message_with_budgeted_context",
+      "disposition": "one_shot_observation_session_killed_recovers_on_next_message_no_incident",
       "owner": "src/runtimes/agent/runtime-turn-result-handler.ts",
       "test": "tests/runtimes/agent/runtime-turn-result-handler-context-overflow.test.ts"
     },
