@@ -140,6 +140,37 @@ describe('release snapshot planning', () => {
     ]);
   });
 
+  it('ignores host-built console assets under dist/ and nested tokens.env', () => {
+    // The fleet server serves the console from `<release>/dist` (vite outDir
+    // '../dist'); dist/ is gitignored and built ON THE HOST inside the release,
+    // so its hashed asset filenames can never be tracked or exact-path
+    // exempted. Without a dist/ exclude, the first console-serving export
+    // flags every built asset as extra-file drift — the same failure class as
+    // nested node_modules. The nested tokens.env pins the `**/<name>` basename
+    // branch at depth (previously only the root-level case was pinned).
+    const sourceRoot = makeFixtureSource();
+    const releaseRoot = path.join(tmpRoot, 'releases');
+    const plan = createReleaseSnapshotPlan({
+      sourceRoot,
+      sourceRef: 'main',
+      sourceCommit: 'abc123def4567890',
+      releaseRoot,
+      buildTime: '2026-06-13T06:00:00.000Z',
+      trackedFiles: ['package.json', 'src/main.ts'],
+    });
+    const releasePath = plan.manifest.release.path;
+    mkdirSync(path.join(releasePath, 'src'), { recursive: true });
+    writeFileSync(path.join(releasePath, 'package.json'), readFileSync(path.join(sourceRoot, 'package.json')));
+    writeFileSync(path.join(releasePath, 'src/main.ts'), readFileSync(path.join(sourceRoot, 'src/main.ts')));
+    mkdirSync(path.join(releasePath, 'dist/assets'), { recursive: true });
+    writeFileSync(path.join(releasePath, 'dist/index.html'), '<html></html>\n', 'utf8');
+    writeFileSync(path.join(releasePath, 'dist/assets/index-Ab12Cd34.js'), 'built\n', 'utf8');
+    mkdirSync(path.join(releasePath, 'config'), { recursive: true });
+    writeFileSync(path.join(releasePath, 'config/tokens.env'), 'ignored\n', 'utf8');
+
+    expect(collectReleaseSnapshotDrift(releasePath, plan.manifest)).toEqual([]);
+  });
+
   it('ignores nested node_modules installed inside the release on the host', () => {
     // `npm ci` runs on the host inside the release for the root AND nested package
     // roots (console/). Deployed fleet manifests exclude `**/node_modules/**`; with

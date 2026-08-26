@@ -115,7 +115,10 @@ Export properties (all fail closed):
   excluded even when git-tracked;
 - an existing release is never clobbered: without `--replace` the export
   refuses; with `--replace` the prior release is preserved at the manifest's
-  rollback path first;
+  rollback path first. The rollback slot itself is also never overwritten: a
+  second `--replace` of the same release name refuses while
+  `.rollback/<name>-before` is occupied — verify the preserved copy is no
+  longer needed, then remove it manually before re-running;
 - dependencies are NOT installed by the export: run `npm ci` inside the release
   on the host (the restart preflight blocks a release without `node_modules`).
 
