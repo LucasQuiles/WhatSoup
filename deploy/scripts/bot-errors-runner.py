@@ -25,6 +25,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from lib.bot_errors_envelope import new_event_fields
 from lib.state_root import DEFAULT_STATE_ROOT, state_root, test_state_root
+from lib.target_provenance import safe_observer_provenance, safe_target_provenance
 from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
 from lib.durable_json import (
     JsonVersion,
@@ -411,6 +412,12 @@ def build_failure_event(
             "execPath": sys.executable,
         },
         "runtime": {"provenance": runtime_provenance()},
+        # #2358 shadow mode: separated observer/target provenance. The legacy
+        # generic `process` block above describes THIS wrapper; the target block
+        # is resolved from the detector-authoritative --instance identity and
+        # fails closed to `unknown` rather than inheriting wrapper values.
+        "observerProvenance": safe_observer_provenance("bot-errors-runner", __file__, sys.platform),
+        "targetProvenance": safe_target_provenance(args.instance, sys.platform),
         "diagnostics": {
             "logHints": log_hints(args),
             "queue": str(outbox_dir()),

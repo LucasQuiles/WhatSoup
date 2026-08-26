@@ -95,7 +95,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "4ce6abab2aee6a381c84a77bd3fc3f5574d1a6acb696f7c628bc0a0a6da4128f",
+      "sha256": "37eb44bb5ad87d14b391dd9e677270e3c695c26dcef85ab76de7abe5b05c9aec",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -222,7 +222,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-runner.py",
-      "sha256": "a040ca195b211a852912546a33fddedec36047ac49c9ff6c91b2443a9582e2af",
+      "sha256": "8e3a3fa0aa5a0a00c6161ca6b61ea6afabb9adc46e10869553097b2e291f9a3b",
       "mustContain": [
         "publish_event_json",
         "refusing to use private directory through symlink",
@@ -529,6 +529,22 @@
       "mustContain": [
         "Single source of truth for bot-errors state-root resolution",
         "BOT_ERRORS_Q_LOOP_STATE_DIR"
+      ]
+    },
+    {
+      "path": "deploy/scripts/lib/target_provenance.py",
+      "sha256": "0676829670b431e4957167cc8b7a83ebbe7ac310bc70fe283e8d161275bfc298",
+      "mustContain": [
+        "TARGET_PROVENANCE_SCHEMA_VERSION",
+        "class TargetProbes:",
+        "def resolve_target_provenance(",
+        "def observer_provenance_block(",
+        "def safe_target_provenance(",
+        "def safe_observer_provenance(",
+        "def unit_for_instance(",
+        "resolver_error",
+        "multiple_processes",
+        "unmapped_instance"
       ]
     },
     {
