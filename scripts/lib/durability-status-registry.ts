@@ -198,6 +198,21 @@ export const REGISTRY: DurabilityStatusEntry[] = [
     writerSites: ['src/core/turn-recovery-store.ts'],
   },
   {
+    // #3295 S1: deferred_by_recovery_scope obligations. Quarantine/operator
+    // terminals are written by the store's fenced transitions; exhaustion is
+    // represented as pending with attempts spent (head-of-line block), not a
+    // distinct terminal value.
+    table: 'deferred_turn_obligations',
+    statusColumn: 'status',
+    vocabulary: [
+      'pending', 'claimed', 'dispatched_commit',
+      'terminal_completed', 'terminal_quarantined', 'terminal_operator',
+    ],
+    vocabularySource: 'sql-check',
+    terminalFailureValues: ['terminal_quarantined'],
+    writerSites: ['src/core/deferred-turn-store.ts'],
+  },
+  {
     table: 'agent_sessions',
     statusColumn: 'status',
     vocabulary: ['active', 'suspended', 'ended', 'completed', 'crashed', 'resume_failed', 'orphaned'],
