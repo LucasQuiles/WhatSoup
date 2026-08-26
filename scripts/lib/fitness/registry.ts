@@ -641,6 +641,10 @@ export const fitnessRules = [
         'deploy/scripts/bot-errors-heartbeat-watchdog.py',
         'deploy/scripts/bot-errors-runtime-staleness.py',
         'deploy/scripts/bot-errors-sentinel.py',
+        // #2358: systemctl probes live in the linux branch of a per-platform
+        // dispatch (default_probes) with launchctl equivalents on darwin —
+        // exactly the fallback this rule demands, invisible to its lexical scan.
+        'deploy/scripts/lib/target_provenance.py',
         'deploy/scripts/tests/',
       ],
     },
