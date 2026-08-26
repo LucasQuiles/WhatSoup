@@ -174,6 +174,28 @@ the drain settles.
 4. (Cold restart only) `capability-obligation-drain-now … --confirm` (§3) to activate the
    named obligation's session; the same scan then drains it.
 
+## AS-01 old-binary contracts (#3231)
+
+The decisive old-binary observation supports two declared contracts
+(`--old-binary-contract`, default `error`):
+
+- `error` — a start-style binary that throws `DatabaseCompatibilityError` with the
+  `future_schema` reason and exits nonzero. This is the legacy contract.
+- `check` — a deployed release whose launcher runs
+  `database-compatibility-bootstrap.ts <instance> --check`: it REPORTS the status on
+  stdout (`future_schema` = refusal, `ready` = bootable) and exits 0 either way. Use
+  `--script-arg <instance>` (repeatable) to thread the instance argument the release's
+  `bootstrapCommon` requires; args pass through `npm run <script> -- ...`.
+
+The contract is always declared by the operator, never guessed from output shape: the
+release's `--hold` drain server also exits 0 on a graceful SIGTERM, so under `check` an
+exit 0 with no status token classifies INCONCLUSIVE, never accepted.
+
+**Sanctioned manual fallback (the 2026-08-14 rehearsal oracle):** run the release's own
+`--check` against the migrated clone and require `future_schema` with a byte-identical
+file-set hash before/after, then `ready` after the coupled restore. This is a valid AS-01
+oracle when the automated harness cannot run; keep both receipts.
+
 ## Safety recap
 
 - Schema-guarded, dry-run-by-default, `--json` for automation.
