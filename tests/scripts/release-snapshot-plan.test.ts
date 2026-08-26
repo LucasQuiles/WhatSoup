@@ -140,6 +140,31 @@ describe('release snapshot planning', () => {
     ]);
   });
 
+  it('ignores nested node_modules installed inside the release on the host', () => {
+    // `npm ci` runs on the host inside the release for the root AND nested package
+    // roots (console/). Deployed fleet manifests exclude `**/node_modules/**`; with
+    // only the root `node_modules/**` default, a freshly exported release flags every
+    // console/node_modules file as extra-file drift the moment dependencies install.
+    const sourceRoot = makeFixtureSource();
+    const releaseRoot = path.join(tmpRoot, 'releases');
+    const plan = createReleaseSnapshotPlan({
+      sourceRoot,
+      sourceRef: 'main',
+      sourceCommit: 'abc123def4567890',
+      releaseRoot,
+      buildTime: '2026-06-13T06:00:00.000Z',
+      trackedFiles: ['package.json', 'src/main.ts'],
+    });
+    const releasePath = plan.manifest.release.path;
+    mkdirSync(path.join(releasePath, 'src'), { recursive: true });
+    writeFileSync(path.join(releasePath, 'package.json'), readFileSync(path.join(sourceRoot, 'package.json')));
+    writeFileSync(path.join(releasePath, 'src/main.ts'), readFileSync(path.join(sourceRoot, 'src/main.ts')));
+    mkdirSync(path.join(releasePath, 'console/node_modules/zod/v4'), { recursive: true });
+    writeFileSync(path.join(releasePath, 'console/node_modules/zod/v4/schemas.js'), 'installed\n', 'utf8');
+
+    expect(collectReleaseSnapshotDrift(releasePath, plan.manifest)).toEqual([]);
+  });
+
   it('ignores Python bytecode caches written by release-local helper scripts', () => {
     // Helper scripts under deploy/scripts import deploy/scripts/lib at runtime and CPython
     // writes __pycache__/*.pyc beside them. Those caches are mutable by nature; treating
