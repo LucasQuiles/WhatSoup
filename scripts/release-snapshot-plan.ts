@@ -13,7 +13,11 @@ export const RELEASE_MANIFEST_FILE = '.whatsoup-release-manifest.json';
 
 export const DEFAULT_RELEASE_MUTABLE_EXCLUDES = [
   '.git/**',
+  // Host-side `npm ci` installs dependencies inside the release for the root and for
+  // nested package roots (console/); deployed fleet manifests already exclude the deep
+  // form, and drift checks must never flag host-installed dependencies.
   'node_modules/**',
+  '**/node_modules/**',
   'artifacts/**',
   '.sweep/**',
   'coverage/**',
