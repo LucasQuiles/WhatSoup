@@ -612,15 +612,32 @@ describe('scheduled agent-job turn lifecycle (#3374)', () => {
     // whose provider terminal never arrives pins TurnQueue.activeTurn forever;
     // nothing bounds the active-turn age or retires the wedged queue while the
     // process lives (the W2 sweep above repairs only the durable journal row,
-    // after 24h). This probe asserts the DESIRED property; it.fails keeps it
-    // green only while the gap exists — a queue reaper landing flips it red,
-    // forcing promotion to a normal test.
-    it.fails('cell 7 reclamation gap probe: a wedged scheduled TurnQueue is reaped within a bound (no such reaper on main)', async () => {
-      dispatchScheduled();
+    // after 24h). This probe asserts the DESIRED property in a FIX-SHAPED,
+    // bound-independent form: time is driven by backdating the durable row and
+    // invoking the sweep — the one reclamation entry point main exposes — so a
+    // real reaper of ANY wall-clock bound that ties queue release to durable
+    // reclamation flips this red, forcing promotion to a normal test. (A
+    // wall-clock wait here could stay green forever against a reaper whose
+    // bound exceeds the in-test window.)
+    it.fails('cell 7 reclamation gap probe: durable reclamation also releases the wedged TurnQueue (no such coupling on main)', async () => {
+      const seq = dispatchScheduled();
       await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
       await vi.waitFor(() => {
-        expect(scheduledQueue()?.activeTurn ?? null).toBeNull();
-      }, { timeout: GAP_PROBE_BOUND_MS });
+        expect(scheduledQueue()?.activeTurn?.sourceMessageId).toMatch(/^agentjob-5-/);
+      }, { timeout: 4_000 });
+
+      // The sweep terminalizes the durable row as failed; the wedged turn's
+      // late terminal then has no eligible inbound row, so shutdown fails
+      // closed (asserted by afterEach). Set BEFORE the failing assertion —
+      // it.fails aborts the body at the first failed expect.
+      expectUnfinalizableShutdown = true;
+
+      backdate(seq, '-25 hours');
+      expect(engine.sweepStuckInbound()).toMatchObject({ failedStale: 1 });
+
+      // DESIRED: reclaiming the durable row also releases the runtime lane.
+      // On main the sweep repairs only the journal, so this fails.
+      expect(scheduledQueue()?.activeTurn ?? null).toBeNull();
     });
   });
 

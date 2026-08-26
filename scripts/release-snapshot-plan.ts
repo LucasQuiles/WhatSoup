@@ -18,6 +18,10 @@ export const DEFAULT_RELEASE_MUTABLE_EXCLUDES = [
   // form, and drift checks must never flag host-installed dependencies.
   'node_modules/**',
   '**/node_modules/**',
+  // The console is built ON THE HOST into `<release>/dist` (vite outDir '../dist',
+  // served by src/fleet/index.ts); dist/ is gitignored and its hashed asset names
+  // can never be tracked, so built console assets must never count as drift.
+  'dist/**',
   'artifacts/**',
   '.sweep/**',
   'coverage/**',
