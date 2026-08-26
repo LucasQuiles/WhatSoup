@@ -776,6 +776,129 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       expect(inner.chatSessions.has(groupJid)).toBe(true);
     });
 
+    it('#3374: subsequent interactive inbounds dispatch while and after a scheduled turn holds its session', async () => {
+      const { SessionManager: MockSessionManagerCtor } = await import('../../../src/runtimes/agent/session.ts');
+      // Same ctor-override discipline as the scheduled-isolation test above:
+      // restore the canonical singleton double even when this test fails.
+      const mockedSessionCtor = MockSessionManagerCtor as unknown as ReturnType<typeof vi.fn>;
+      const canonicalSessionCtor = mockedSessionCtor.getMockImplementation();
+      onTestFinished(() => {
+        if (canonicalSessionCtor) mockedSessionCtor.mockImplementation(canonicalSessionCtor);
+      });
+      type CapturedCtorOptions = {
+        chatJid: string;
+        onCrash?: (info: {
+          exitCode: number | null;
+          signal: NodeJS.Signals | null;
+          sessionId: string | null;
+          dbRowId: number | null;
+          generationIdentity: { managerId: string; generation: number };
+        }) => void;
+        onEvent: (event: AgentEvent) => void;
+      };
+      const createdOptions: CapturedCtorOptions[] = [];
+      const createdSessions: Array<typeof mockSession> = [];
+      mockedSessionCtor.mockImplementation(function (opts: CapturedCtorOptions) {
+        const session = {
+          ...mockSession,
+          getStatus: vi.fn(() => ({
+            active: false,
+            pid: null,
+            sessionId: null,
+            startedAt: null,
+            messageCount: 0,
+            lastMessageAt: null,
+          })),
+          spawnSession: vi.fn(async () => {}),
+          sendTurn: vi.fn(async (_text: string) => {}),
+          sendTurnAtProviderBoundary: vi.fn(async (text: string, onReady?: () => void) => {
+            onReady?.();
+            await session.sendTurn(text);
+          }),
+          bindGenerationOwnership: vi.fn(),
+        };
+        createdOptions.push(opts);
+        createdSessions.push(session);
+        return session;
+      });
+      const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger, 'test', {
+        sessionScope: 'per_chat',
+      });
+      const inner = runtime as unknown as {
+        _handleMessageInner(msg: IncomingMessage): Promise<void>;
+        chatSessions: Map<string, typeof mockSession>;
+        sessionManagerIds: WeakMap<typeof mockSession, string>;
+        sessionOwnership: {
+          get(mapKey: string): { managerId: string; generation: number } | undefined;
+        };
+      };
+
+      void inner._handleMessageInner(makeMsg({
+        chatJid: groupJid,
+        senderJid: dmJid,
+        isGroup: true,
+        content: 'interactive question one',
+      }));
+      await vi.waitFor(() => expect(createdSessions).toHaveLength(1));
+      const interactive = createdSessions[0]!;
+      await vi.waitFor(() => expect(interactive.sendTurn).toHaveBeenCalledTimes(1));
+      // Terminalize interactive turn one so its own scope is free.
+      createdOptions[0]!.onEvent({ type: 'result', text: null });
+
+      void inner._handleMessageInner(makeMsg({
+        messageId: 'agentjob-9-1',
+        chatJid: groupJid,
+        senderJid: 'admin@s.whatsapp.net',
+        senderName: 'Scheduled job',
+        isGroup: true,
+        isSyntheticJob: true,
+        content: 'daily scheduled digest',
+      }));
+      await vi.waitFor(() => expect(createdSessions).toHaveLength(2));
+      const scheduled = createdSessions[1]!;
+      await vi.waitFor(() => expect(scheduled.sendTurn).toHaveBeenCalledTimes(1));
+
+      // #3374 wedge half 1: the scheduled TURN is deliberately never
+      // terminalized (no result event) — the live incident's signature. A new
+      // interactive inbound must still dispatch on the interactive session
+      // instead of queueing behind the held scheduled turn.
+      void inner._handleMessageInner(makeMsg({
+        chatJid: groupJid,
+        senderJid: dmJid,
+        isGroup: true,
+        content: 'interactive question two while the job holds its session',
+      }));
+      await vi.waitFor(() => expect(interactive.sendTurn).toHaveBeenCalledTimes(2));
+      expect(createdSessions).toHaveLength(2);
+      expect(scheduled.sendTurn).toHaveBeenCalledTimes(1);
+      // Terminalize interactive turn two before the retirement phase.
+      createdOptions[0]!.onEvent({ type: 'result', text: null });
+
+      // Retire the scheduled session via provider exit (the #3341 idle path).
+      const scheduledMapKey2 = `${groupJid}::scheduled-agent-job`;
+      const scheduledManagerId = inner.sessionManagerIds.get(scheduled)!;
+      const scheduledGeneration = inner.sessionOwnership.get(scheduledMapKey2)!.generation;
+      createdOptions[1]?.onCrash?.({
+        exitCode: 0,
+        signal: null,
+        sessionId: null,
+        dbRowId: 2016,
+        generationIdentity: { managerId: scheduledManagerId, generation: scheduledGeneration },
+      });
+      expect(inner.chatSessions.has(scheduledMapKey2)).toBe(false);
+
+      // #3374 wedge half 2: after retirement the interactive lane still
+      // dispatches — the job left nothing behind that a user DM can wedge on.
+      void inner._handleMessageInner(makeMsg({
+        chatJid: groupJid,
+        senderJid: dmJid,
+        isGroup: true,
+        content: 'interactive question three after retirement',
+      }));
+      await vi.waitFor(() => expect(interactive.sendTurn).toHaveBeenCalledTimes(3));
+      expect(inner.chatSessions.has(groupJid)).toBe(true);
+    });
+
     it('maps a journal failure to a refused dispatch instead of an unowned ack (#2144)', () => {
       const db = makeDb();
       const runtime = new AgentRuntime(db, makeMessenger().messenger);
