@@ -17,6 +17,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFi
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
+import { isHelpFlag, takeValue } from './lib/cli-args.ts';
 import { cleanGitEnv } from './lib/guard-core.ts';
 import {
   RELEASE_MANIFEST_FILE,
@@ -244,10 +245,9 @@ function parseArgs(argv: string[], cwd: string): ParsedArgs {
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     const next = (): string => {
-      const value = argv[index + 1];
-      if (!value) throw new Error(`${arg} requires a value`);
-      index += 1;
-      return value;
+      const taken = takeValue(argv, index, arg);
+      index = taken.index;
+      return taken.value;
     };
     if (arg === '--repo-root') options.repoRoot = next();
     else if (arg === '--commit') options.commit = next();
@@ -259,7 +259,7 @@ function parseArgs(argv: string[], cwd: string): ParsedArgs {
     else if (arg === '--required-output') options.requiredOutputs.push(next());
     else if (arg === '--replace') options.replace = true;
     else if (arg === '--json') options.json = true;
-    else if (arg === '--help' || arg === '-h') {
+    else if (isHelpFlag(arg)) {
       throw new Error(
         'Usage: scripts/release-export.ts --commit <full-sha> --release-root /absolute/path [--repo-root /absolute/path] [--release-name name] [--rollback-root /absolute/path] [--source-ref label] [--build-time iso] [--required-output rel/path ...] [--replace] [--json]',
       );
