@@ -5,6 +5,7 @@ import { Check, Eye, EyeOff } from 'lucide-react'
 import { Field, RadioField, SelectInput, TextInput } from '../primitives'
 import WizardStep from './WizardStep'
 import { CHAT_API_KEY_SERVICE_OPTIONS } from '../../lib/providers'
+import { isRecord } from '../../lib/type-guards'
 
 interface ModelAuthStepProps {
   data: Record<string, unknown>
@@ -50,10 +51,6 @@ const OPENAI_ROLES: { key: ModelRole; label: string }[] = [
 const CHAT_OPENAI_PROVIDER_CONFIG = 'chatOptions.openaiProviderConfig' as const
 const CHAT_OPENAI_BASE_URL = `${CHAT_OPENAI_PROVIDER_CONFIG}.baseUrl` as const
 const CHAT_OPENAI_API_KEY_SERVICE = `${CHAT_OPENAI_PROVIDER_CONFIG}.apiKeyService` as const
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
 
 function readChatOpenAIProviderConfig(data: Record<string, unknown>): Record<string, unknown> {
   const chatOptions = isRecord(data.chatOptions) ? data.chatOptions : {}

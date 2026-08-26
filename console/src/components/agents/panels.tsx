@@ -6,7 +6,7 @@ import { useToast } from '../../hooks/toast-context';
 import { Button } from '../primitives/Button';
 import { TextInput } from '../primitives/FormControl';
 import type { LiveSession, ProviderStatus } from '../../types';
-import { isNonEmptyString } from '../../lib/type-guards';
+import { isNonEmptyString, isRecord } from '../../lib/type-guards';
 
 /* ── Shared panel shell (mockup .panel/.panel-h/.panel-b) ── */
 
@@ -26,9 +26,6 @@ export const AgentsPanel: FC<{
     <div className="agents-panel__b">{children}</div>
   </div>
 );
-
-const isRecord = (v: unknown): v is Record<string, unknown> =>
-  typeof v === 'object' && v !== null && !Array.isArray(v);
 
 const str = (v: unknown): string | null => (isNonEmptyString(v) ? v : null);
 
