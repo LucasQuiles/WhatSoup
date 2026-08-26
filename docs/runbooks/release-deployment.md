@@ -92,9 +92,37 @@ The plan enumerates:
 - manifest write path
 - the approval boundary for launchd/service mutation
 
-The planner has no apply mode. If an operator turns the plan into live actions,
-that live step must be approved separately and should preserve instance config,
-auth, logs, DBs, token files, and keychain material outside the release tree.
+The planner itself has no apply mode. The apply step is
+`scripts/release-export.ts` (`npm run release:export`), which materializes the
+plan from an EXACT commit — never the working tree — and self-verifies before
+publishing:
+
+```bash
+npm --silent run release:export -- \
+  --commit <full-40-hex-sha> \
+  --release-root "$HOME/.local/opt/whatsoup/releases" \
+  --json
+```
+
+Export properties (all fail closed):
+
+- source bytes come from `git archive <commit>`, so working-tree drift can
+  never leak into a release;
+- the release is assembled in a staging directory and self-checked with the
+  SAME drift checker the fleet runs (`--check-release` semantics) BEFORE it is
+  atomically renamed into place — a failed export leaves no release;
+- secret- and state-shaped paths (`tokens.env`, `*.db`, `auth/**`, ...) are
+  excluded even when git-tracked;
+- an existing release is never clobbered: without `--replace` the export
+  refuses; with `--replace` the prior release is preserved at the manifest's
+  rollback path first;
+- dependencies are NOT installed by the export: run `npm ci` inside the release
+  on the host (the restart preflight blocks a release without `node_modules`).
+
+The export creates release bytes only. Repointing a service at the new release
+and restarting it remain separately-approved host mutations, and must preserve
+instance config, auth, logs, DBs, token files, and keychain material outside
+the release tree.
 
 ## Drift Detection
 

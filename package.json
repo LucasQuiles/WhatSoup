@@ -116,6 +116,7 @@
     "provider:parity": "bash scripts/run-with-pinned-node.sh scripts/provider-parity-report.ts",
     "provider:mcp-canary": "bash scripts/run-with-pinned-node.sh scripts/provider-mcp-canary.ts",
     "release:snapshot": "bash scripts/run-with-pinned-node.sh scripts/release-snapshot-plan.ts",
+    "release:export": "bash scripts/run-with-pinned-node.sh scripts/release-export.ts",
     "leaks:anonymize": "bash scripts/run-with-pinned-node.sh scripts/anonymize-private-literals.ts",
     "work-index:regen": "bash scripts/run-with-pinned-node.sh scripts/work-index.ts",
     "strip-types-compat": "bash scripts/strip-types-compat.sh",
