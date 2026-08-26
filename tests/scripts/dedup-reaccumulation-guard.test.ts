@@ -61,10 +61,6 @@ const SSOT_HOMES = new Set([
  * the fold commit — the stale-entry test below enforces the removal.
  */
 const KNOWN_CLONES = new Set<string>([
-  // TODO(batch A04): fold into console/src/lib/type-guards.ts and remove.
-  'console/src/components/AddLineWizard.tsx:isRecord',
-  'console/src/components/wizard/ModelAuthStep.tsx:isRecord',
-  'console/src/components/agents/panels.tsx:isRecord',
   // False friend, not a clone: a void outcome-recorder (`record(outcome) =>
   // push + write result file`), unrelated to the record-coercion idiom this
   // guard exists for.  Kept visible here rather than special-cased in the

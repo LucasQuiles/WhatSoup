@@ -32,6 +32,7 @@ import { api } from '../lib/api'
 import { withDefaultAgentWorkspace } from '../lib/agent-cwd'
 import { CHAT_API_KEY_SERVICE_OPTIONS, DEFAULT_PROVIDER_ID } from '../lib/providers'
 import { buildFinishPatch } from '../lib/wizard-finish'
+import { isRecord } from '../lib/type-guards'
 import { useToast } from '../hooks/toast-context'
 
 interface AddLineWizardProps {
@@ -50,10 +51,6 @@ interface AddLineWizardProps {
  * 0 = Identity, 1 = Link, 2 = Model, 3 = Config, 4 = Review
  */
 const STEPS = ['Identity', 'Link', 'Model', 'Config', 'Review'] as const
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
 
 function isHttpUrl(value: string): boolean {
   try {
