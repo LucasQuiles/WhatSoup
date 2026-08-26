@@ -356,7 +356,7 @@
     },
     {
       "path": "deploy/scripts/lib/bounded_jsonl.py",
-      "sha256": "45434dc891c3ce19fd8c370eab5c7e17204b375b0b11ed29a750e91b5fb3b77c",
+      "sha256": "b1f78745efcc214fb3b220d6cbadbca8b1851841c4f7c028be88e74e4f1f48b3",
       "mustContain": [
         "append_bounded_jsonl",
         "require_bounded_jsonl_commit",

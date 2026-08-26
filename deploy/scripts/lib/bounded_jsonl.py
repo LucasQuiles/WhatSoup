@@ -238,13 +238,16 @@ def _sync_parent(parent_fd: int) -> None:
 
 
 def _sync_grandparent(parent: Path) -> None:
-    """Persist a newly created parent directory's own name.
+    """Prove the parent directory's own name durable in the grandparent.
 
     fsync on the parent fd durably records what is INSIDE the parent. The parent's
-    directory entry lives in the grandparent, so when mkdir() has just created the
-    parent, a crash before the grandparent is synced can leave the fsynced record
-    inside a directory that no longer exists. Only called on the create path; a
-    pre-existing parent is already durable.
+    directory entry lives in the grandparent, so until the grandparent has been
+    synced a crash can leave the fsynced record inside a directory that no longer
+    exists. Called unconditionally on every append: mkdir() makes a parent VISIBLE
+    before its entry is durable, so observing a pre-existing parent proves nothing —
+    a retry after a failed sync and a concurrent caller both see an unproven
+    directory. Failures propagate; the caller converts them into a non-committed
+    result.
     """
     grandparent_fd = os.open(
         parent.parent,
@@ -584,17 +587,27 @@ def _open_parent(path: Path) -> tuple[int | None, BoundedJsonlResult | None]:
             oversized_record=False,
             failure_class="unsafe_parent",
         )
-    if parent_created:
-        # A failed grandparent sync means the newly created parent's own directory
-        # entry is not durable. Reporting ordinary success here would be a fail-open:
-        # the caller would treat an unproven directory as committed. Both the open
-        # and the fsync propagate (matching _sync_parent/_sync_file, which never
-        # swallow), and the decision is made here at the caller.
+    # The barrier is UNCONDITIONAL, not gated on parent_created. Gating it was a
+    # fail-open: mkdir() makes the parent VISIBLE before its directory entry is
+    # durable, so
+    #   * a retry after a failed sync sees a pre-existing parent and skips the
+    #     barrier entirely, then commits; and
+    #   * a concurrent caller sees the creator's not-yet-synced parent and commits
+    #     while the creator is still mid-barrier.
+    # Both were reproduced against the gated version. "Visible" does not mean
+    # "durably linked", so no caller may return committed until this parent's own
+    # entry has been proven durable on THIS call. The cost is one directory fsync
+    # per append; in a module whose purpose is durability that is the right trade.
+    try:
+        _sync_grandparent(parent)
+    except OSError:
         try:
-            _sync_grandparent(parent)
-        except OSError:
             os.close(parent_fd)
-            return None, _result(
+        except OSError:
+            # Cleanup failure must not escape the bounded API as a raw OSError;
+            # the durability verdict below is what the caller contracts for.
+            pass
+        return None, _result(
                 component="invalid",
                 status="not_mutated",
                 method="none",
