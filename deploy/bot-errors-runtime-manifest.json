@@ -95,7 +95,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "e3f0970d3cbad21c54c4ca8c05010568a026a557585fa825c14fe9e5ae530d4d",
+      "sha256": "4ce6abab2aee6a381c84a77bd3fc3f5574d1a6acb696f7c628bc0a0a6da4128f",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -356,7 +356,7 @@
     },
     {
       "path": "deploy/scripts/lib/bounded_jsonl.py",
-      "sha256": "20c0fc0e619216d56a6c9868530ea62289bd073df303eff9cc8ede21a18f5724",
+      "sha256": "b1f78745efcc214fb3b220d6cbadbca8b1851841c4f7c028be88e74e4f1f48b3",
       "mustContain": [
         "append_bounded_jsonl",
         "require_bounded_jsonl_commit",
