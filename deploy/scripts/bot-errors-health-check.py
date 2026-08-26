@@ -32,6 +32,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
 from lib.bot_errors_envelope import new_event_fields
+from lib.target_provenance import safe_observer_provenance, safe_target_provenance
 from lib.health_reader import classify_projection, health_body_is_disclosed, instance_health_token, is_public_envelope
 from lib.controller_log import (
     ControllerLogContext,
@@ -2309,6 +2310,17 @@ def outbox_event(
             derived_alert_source = alert_source_from_critical_asset(critical_asset)
         if derived_alert_source:
             event["alertSource"] = derived_alert_source
+    # #2358 shadow mode: separated observer/target provenance. The generic
+    # `process` block above describes THIS producer; when the event names a
+    # target instance distinct from the producer, resolve that target's own
+    # provenance (fail-closed to unknown) instead of letting producer evidence
+    # stand in for it.
+    event["observerProvenance"] = redact_json_value(
+        safe_observer_provenance("bot-errors-health-check", __file__, HOST_PLATFORM)
+    )
+    target_instance = str(event["instance"])
+    if target_instance and target_instance != "bot-errors-health":
+        event["targetProvenance"] = redact_json_value(safe_target_provenance(target_instance, HOST_PLATFORM))
     if force_notify:
         event["diagnostics"]["forceNotify"] = True
         event["diagnostics"]["forceNotifyLevel"] = "critical"
