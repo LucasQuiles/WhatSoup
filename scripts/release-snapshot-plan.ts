@@ -315,6 +315,14 @@ function matchesExclude(relPath: string, patterns: readonly string[]): boolean {
     }
     if (candidate.startsWith('**/*.')) return normalized.endsWith(candidate.slice(4));
     if (candidate.startsWith('*.')) return base.endsWith(candidate.slice(1));
+    // `**/<name>` (no wildcard in the tail): match the exact basename at any
+    // depth, including the repo root. Without this branch the default
+    // `**/tokens.env` exclude is a dead pattern — a git-tracked root-level
+    // tokens.env would ship inside a release export.
+    if (candidate.startsWith('**/') && !candidate.slice(3).includes('*')) {
+      const name = candidate.slice(3);
+      return normalized === name || normalized.endsWith(`/${name}`);
+    }
     return false;
   });
 }
