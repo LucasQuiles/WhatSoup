@@ -439,6 +439,8 @@ export type OldBinaryOutcome = 'rejected_no_write' | 'accepted' | 'wrote_dangero
  * missing npm / crash / timeout / unrelated failure is `inconclusive`, never
  * conflated with the designed rejection.
  */
+export type OldBinaryContract = 'error' | 'check';
+
 export function classifyOldBinaryOutcome(obs: {
   status: number | null;
   signal: string | null;
@@ -446,17 +448,48 @@ export function classifyOldBinaryOutcome(obs: {
   stdout: string;
   stderr: string;
   wrote: boolean;
+  /**
+   * Which rejection contract the observed command implements (#3231):
+   * `error` (default) — a start-style binary that throws
+   * DatabaseCompatibilityError and exits nonzero on a future schema;
+   * `check` — the deployed release's `database-compatibility-bootstrap
+   * <instance> --check`, which REPORTS the status on stdout and exits 0 for
+   * both `future_schema` (refusal) and `ready` (bootable). The contract is
+   * always declared by the operator, never guessed from output shape: a
+   * graceful SIGTERM-drained hold server also exits 0, and guessing would
+   * misclassify it as accepted.
+   */
+  contract?: OldBinaryContract;
 }): OldBinaryOutcome {
   if (obs.wrote) return 'wrote_dangerous';
   if (obs.spawnError || obs.signal !== null) return 'inconclusive';
+  const text = `${obs.stdout}\n${obs.stderr}`;
+  // Tooling / environment failures that merely MENTION the reason string are not a
+  // schema rejection (e.g. `npm ERR! missing script: future_schema`).
+  const toolingFailure =
+    /npm ERR!|missing script|command not found|MODULE_NOT_FOUND|[Cc]annot find module/.test(text);
+  if ((obs.contract ?? 'error') === 'check') {
+    if (toolingFailure) return 'inconclusive';
+    if (obs.status === 0) {
+      // The check mode's stdout status contract. Exit code 0 alone proves
+      // nothing (graceful drain); only the explicit status token decides.
+      if (/\bfuture_schema\b/.test(obs.stdout)) return 'rejected_no_write';
+      if (/\bready\b/.test(obs.stdout)) return 'accepted';
+      return 'inconclusive';
+    }
+    if (obs.status === 126 || obs.status === 127) return 'inconclusive';
+    // The release may still throw instead of report; accept the error-class
+    // rejection as a fallback under the same AND rule as the error contract.
+    if (/DatabaseCompatibilityError/.test(text) && /future_schema/.test(text)) {
+      return 'rejected_no_write';
+    }
+    return 'inconclusive';
+  }
   if (obs.status === 0) return 'accepted';
   // 126/127 are shell/exec-not-found codes (a missing script/binary), never a
   // schema rejection.
   if (obs.status === 126 || obs.status === 127) return 'inconclusive';
-  const text = `${obs.stdout}\n${obs.stderr}`;
-  // Tooling / environment failures that merely MENTION the reason string are not a
-  // schema rejection (e.g. `npm ERR! missing script: future_schema`).
-  if (/npm ERR!|missing script|command not found|MODULE_NOT_FOUND|[Cc]annot find module/.test(text)) {
+  if (toolingFailure) {
     return 'inconclusive';
   }
   // The expected rejection is the old binary's DatabaseCompatibilityError contract:
@@ -489,7 +522,15 @@ function usage(): string {
   return [
     'Usage: capability-obligation-as01-rehearsal --release-dir DIR --clone-db PATH \\',
     '         --rehearsal-dir DIR --script-name NAME --start-schema N \\',
-    '         [--db-env WHATSOUP_DB_PATH] [--confirm] [--network-isolated]',
+    '         [--db-env WHATSOUP_DB_PATH] [--confirm] [--network-isolated] \\',
+    '         [--old-binary-contract error|check] [--script-arg V]...',
+    '',
+    '--old-binary-contract check observes the release\'s bounded',
+    'database-compatibility-bootstrap --check mode (status on stdout, exit 0 for',
+    'both future_schema and ready) instead of the legacy throw-and-exit contract.',
+    'The contract is declared, never guessed: a graceful drain exit 0 with no',
+    'status token classifies INCONCLUSIVE. --script-arg (repeatable) threads',
+    'arguments (e.g. the instance name) through `npm run <script> -- ...`.',
     '',
     'EXECUTION IS OWNER-GATED. Dry-run by default (prints the plan, mutates nothing).',
     '--clone-db must be a real SQLite file inside --rehearsal-dir; symlinks, a live',
@@ -520,8 +561,12 @@ export interface OldBinaryObservation {
 }
 
 /** Default old-binary runner: the release's OWN `npm run <script>` (real transport). */
-function defaultRunOldBinary(spec: { scriptName: string; releaseDir: string; env: Record<string, string> }): OldBinaryObservation {
-  const r: SpawnSyncReturns<string> = spawnSync('npm', ['run', spec.scriptName], {
+function defaultRunOldBinary(spec: { scriptName: string; releaseDir: string; env: Record<string, string>; scriptArgs?: readonly string[] }): OldBinaryObservation {
+  const args = ['run', spec.scriptName];
+  // #3231(b): thread operator-supplied arguments (e.g. the instance name the
+  // release's bootstrapCommon requires as argv[2]) through the npm runner.
+  if (spec.scriptArgs !== undefined && spec.scriptArgs.length > 0) args.push('--', ...spec.scriptArgs);
+  const r: SpawnSyncReturns<string> = spawnSync('npm', args, {
     cwd: spec.releaseDir, env: spec.env, encoding: 'utf8', timeout: 600_000,
   });
   return { status: r.status, signal: r.signal ?? null, error: r.error !== undefined, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
@@ -535,11 +580,12 @@ export interface As01Options {
    * tests inject a runner that spawns the fake directly (no npm subprocess tree),
    * keeping the write-delta observation real while removing npm from the suite.
    */
-  runOldBinary?: (spec: { command: string; scriptName: string; releaseDir: string; env: Record<string, string> }) => OldBinaryObservation;
+  runOldBinary?: (spec: { command: string; scriptName: string; releaseDir: string; env: Record<string, string>; scriptArgs?: readonly string[] }) => OldBinaryObservation;
 }
 
 export function runAs01RehearsalCli(argv: readonly string[], io: As01Io, opts: As01Options = {}): number {
   const flags = new Map<string, string>();
+  const scriptArgs: string[] = [];
   let confirm = false;
   let networkIsolated = false;
   for (let i = 0; i < argv.length; i += 1) {
@@ -549,6 +595,7 @@ export function runAs01RehearsalCli(argv: readonly string[], io: As01Io, opts: A
     if (t === '--help') { io.out(usage()); return 0; }
     const v = argv[i + 1];
     if (v === undefined) throw new Error(`${t} requires a value`);
+    if (t === '--script-arg') { scriptArgs.push(v); i += 1; continue; }
     flags.set(t, v);
     i += 1;
   }
@@ -558,6 +605,11 @@ export function runAs01RehearsalCli(argv: readonly string[], io: As01Io, opts: A
   const scriptName = flags.get('--script-name');
   const startSchemaRaw = flags.get('--start-schema');
   const dbEnvVar = flags.get('--db-env') ?? 'WHATSOUP_DB_PATH';
+  const contractRaw = flags.get('--old-binary-contract') ?? 'error';
+  if (contractRaw !== 'error' && contractRaw !== 'check') {
+    throw new Error(`--old-binary-contract must be error|check, got ${JSON.stringify(contractRaw)}.\n${usage()}`);
+  }
+  const oldBinaryContract: OldBinaryContract = contractRaw;
   if (!releaseDir || !cloneDb || !rehearsalDir || !scriptName || !startSchemaRaw) {
     throw new Error(`missing required flag.\n${usage()}`);
   }
@@ -573,6 +625,7 @@ export function runAs01RehearsalCli(argv: readonly string[], io: As01Io, opts: A
   io.out(`  release-dir : ${plan.releaseDir}`);
   io.out(`  clone-db    : ${plan.cloneDb}`);
   io.out(`  script      : ${plan.scriptName} => ${plan.resolvedCommand}`);
+  io.out(`  contract    : ${oldBinaryContract}${scriptArgs.length > 0 ? ` (script args: ${scriptArgs.join(' ')})` : ''}`);
   io.out(`  start-schema: ${startSchema} -> target ${CURRENT_SCHEMA_MIGRATION}`);
   if (!confirm) {
     io.out('DRY-RUN — nothing migrated or executed. --confirm migrates the clone; --network-isolated additionally runs the decisive old-binary check.');
@@ -630,7 +683,7 @@ export function runAs01RehearsalCli(argv: readonly string[], io: As01Io, opts: A
   if (pathValue !== undefined) childEnv.PATH = pathValue;
 
   const runOldBinary = opts.runOldBinary ?? defaultRunOldBinary;
-  const result = runOldBinary({ command: plan.resolvedCommand!, scriptName: plan.scriptName, releaseDir: plan.releaseDir, env: childEnv });
+  const result = runOldBinary({ command: plan.resolvedCommand!, scriptName: plan.scriptName, releaseDir: plan.releaseDir, env: childEnv, scriptArgs });
   // F1 — WAL-aware write-delta: the file-SET hash makes a WAL-only write visible.
   const hashAfterOldBinary = dbFileSetHash(plan.cloneDb);
   const wrote = hashAfterOldBinary !== migration.migratedCloneHash;
@@ -641,6 +694,7 @@ export function runAs01RehearsalCli(argv: readonly string[], io: As01Io, opts: A
     stdout: result.stdout,
     stderr: result.stderr,
     wrote,
+    contract: oldBinaryContract,
   });
   io.out(`  old-binary  : exit=${result.status ?? 'signal'} wrote=${wrote} outcome=${outcome}`);
   if (result.stdout) io.out(result.stdout.slice(-2048));
