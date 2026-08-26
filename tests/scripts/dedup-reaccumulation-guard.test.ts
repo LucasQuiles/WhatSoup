@@ -35,6 +35,15 @@ const REPO_ROOT = resolve(import.meta.dirname, '../..');
 const BANNED_NAMES = new Set(['isRecord', 'record', 'recordValue', 'safeEqual']);
 
 /**
+ * Cheap content prefilter: only files that mention a banned name at all are
+ * AST-parsed. Without this, two full-tree TypeScript parses (one per scan
+ * consumer) exceeded the 10s default test timeout on contended CI runners
+ * (quality 24.x lane). Precision is unaffected: the prefilter only ever
+ * ADMITS files, and the AST decides.
+ */
+const BANNED_NAME_RE = /\b(?:isRecord|record|recordValue|safeEqual)\b/;
+
+/**
  * Files that are unconditionally exempt — they are the SSOTs.
  *
  * Paths are repo-relative, normalised with forward slashes.
@@ -125,7 +134,10 @@ function bannedDeclarations(relPath: string, content: string): string[] {
   return found;
 }
 
+let scanMemo: { violations: string[]; allMatches: Set<string> } | null = null;
+
 function scanForViolations(): { violations: string[]; allMatches: Set<string> } {
+  if (scanMemo !== null) return scanMemo;
   const violations: string[] = [];
   const allMatches = new Set<string>();
 
@@ -138,6 +150,7 @@ function scanForViolations(): { violations: string[]; allMatches: Set<string> } 
       if (SSOT_HOMES.has(relPath)) continue;
 
       const content = readFileSync(file, 'utf8');
+      if (!BANNED_NAME_RE.test(content)) continue;
       for (const name of bannedDeclarations(relPath, content)) {
         const key = `${relPath}:${name}`;
         allMatches.add(key);
@@ -151,7 +164,8 @@ function scanForViolations(): { violations: string[]; allMatches: Set<string> } 
     }
   }
 
-  return { violations, allMatches };
+  scanMemo = { violations, allMatches };
+  return scanMemo;
 }
 
 describe('Dedup re-accumulation guard', () => {
@@ -163,7 +177,9 @@ describe('Dedup re-accumulation guard', () => {
       `New clone(s) detected:\n${violations.map((v) => `  • ${v}`).join('\n')}\n\n` +
       `SSOT homes: src/lib/type-guards.ts, src/lib/safe-compare.ts`,
     ).toEqual([]);
-  });
+    // Repository-fitness scan over the full tree — CI runners under full-suite
+    // contention exceeded the default 10s.
+  }, 30_000);
 
   it('allowlist contains only entries that actually match (no stale entries)', () => {
     const { allMatches } = scanForViolations();
@@ -174,7 +190,8 @@ describe('Dedup re-accumulation guard', () => {
       `Stale allowlist entries — file was cleaned but entry was not removed from KNOWN_CLONES: ` +
       stale.join(', '),
     ).toEqual([]);
-  });
+    // Shares the memoized scan with the violation test; budget kept for a cold run.
+  }, 30_000);
 
   it('detects .tsx and arrow-declaration clones (self-test of the scanner)', () => {
     // The pre-AST guard failed exactly these two shapes; pin them so a future

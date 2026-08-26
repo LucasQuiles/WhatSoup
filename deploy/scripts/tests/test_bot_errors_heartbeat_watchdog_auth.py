@@ -292,7 +292,9 @@ def test_boolean_open_incident_counters_are_reinitialized(tmp_path: Path, monkey
     assert incident["ageSeconds"] == 1000
 
 
-def test_log_write_failure_does_not_block_renotify_event(tmp_path: Path, monkeypatch):
+def test_infinite_suppression_resets_counters_without_renotify(tmp_path: Path, monkeypatch):
+    # Restored scenario: this test was shadowed by the same-named log-write-failure
+    # test below and never ran, silently dropping its coverage.
     mod = _load_module()
     state = _private_state(monkeypatch, mod, tmp_path)
     _write_private_json(

@@ -70,11 +70,16 @@ def test_grandparent_is_fsynced_when_the_parent_is_created(tmp_path, monkeypatch
     )
 
 
-def test_grandparent_is_not_fsynced_when_the_parent_already_exists(tmp_path, monkeypatch):
-    """Negative control: the extra sync is create-path-only, not unconditional.
+def test_grandparent_is_fsynced_even_when_the_parent_already_exists(tmp_path, monkeypatch):
+    """The durability barrier is UNCONDITIONAL, not scoped to the mkdir path.
 
-    Without this, the first test would still pass if _open_parent fsynced the
-    grandparent on every call -- correct but needlessly expensive on the hot path.
+    mkdir() makes a parent VISIBLE before its directory entry is durable, so a
+    pre-existing parent proves nothing: a retry after a failed sync and a
+    concurrent caller both observe a directory whose grandparent entry may never
+    have been synced. The gated barrier skipped exactly those callers and
+    committed into an unproven directory (the escapes are pinned red-first in
+    test_bounded_jsonl_grandparent_failclosed.py). One directory fsync per append
+    is the accepted cost of closing that fail-open.
     """
     grandparent = tmp_path / "gp"
     parent = grandparent / "already-there"
@@ -90,9 +95,10 @@ def test_grandparent_is_not_fsynced_when_the_parent_already_exists(tmp_path, mon
     )
 
     assert result.status != "not_mutated", f"append failed: {result}"
-    assert gp_ino not in seen, (
-        "the grandparent was fsynced even though the parent already existed; "
-        "the durability sync must be scoped to the mkdir path"
+    assert gp_ino in seen, (
+        "the grandparent was not fsynced for a pre-existing parent; visible is "
+        "not durable, so the barrier must run on every append "
+        f"(fsynced inodes: {sorted(seen)}, grandparent inode: {gp_ino})"
     )
 
 
