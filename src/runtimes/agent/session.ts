@@ -257,6 +257,13 @@ export interface SessionManagerOptions {
   whatsoupMcpSocket?: string;
   providerTransitionReady?: Promise<void>;
   handoffSystemBlock?: () => string | null;
+  /**
+   * #3149: degraded-capabilities system block, supplied by the runtime ONLY
+   * when this session serves a managed-loop fallback (a backup API provider
+   * with no child process standing in for the configured primary). Absent or
+   * null keeps the prompt byte-identical to a non-degraded session.
+   */
+  degradedCapabilitiesBlock?: () => string | null;
   routingSystemBlock?: () => string | null;
   /** Egress proxy port (#1607) — forwarded into buildChildEnv's baseOpts so spawned children pick up HTTP_PROXY/HTTPS_PROXY. Undefined when the instance has no allowedEgress. */
   egressProxyPort?: number;
@@ -660,6 +667,7 @@ export class SessionManager {
   private readonly whatsoupMcpSocket: string | undefined;
   private readonly providerTransitionReady: Promise<void> | undefined;
   private readonly handoffSystemBlock: (() => string | null) | undefined;
+  private readonly degradedCapabilitiesBlock: (() => string | null) | undefined;
   private readonly routingSystemBlock: (() => string | null) | undefined;
   private readonly egressProxyPort: number | undefined;
   private readonly providerExecutionGate: ProviderExecutionGate | undefined;
@@ -837,6 +845,7 @@ export class SessionManager {
     this.whatsoupMcpSocket = opts.whatsoupMcpSocket;
     this.providerTransitionReady = opts.providerTransitionReady;
     this.handoffSystemBlock = opts.handoffSystemBlock;
+    this.degradedCapabilitiesBlock = opts.degradedCapabilitiesBlock;
     this.routingSystemBlock = opts.routingSystemBlock;
     this.egressProxyPort = opts.egressProxyPort;
     this.providerExecutionGate = opts.providerExecutionGate;
@@ -939,6 +948,13 @@ export class SessionManager {
     const handoffBlock = this.handoffSystemBlock?.();
     if (handoffBlock) {
       sources.push(handoffBlock);
+    }
+
+    // #3149: the degradation fact precedes the configured persona so it cannot
+    // be buried under instance instructions.
+    const degradedBlock = this.degradedCapabilitiesBlock?.();
+    if (degradedBlock) {
+      sources.push(degradedBlock);
     }
 
     // NL routing prompt contract (slice 3). The callback is only wired when

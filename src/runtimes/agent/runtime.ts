@@ -149,6 +149,7 @@ import type { fetchAnthropicModelIdsWithStatus } from '../../lib/model-advisor.t
 import type { ModelRouteEvent } from './route-events.ts';
 import { RuntimeRoutingCoordinator, type RuntimeRoutingPort } from './runtime-routing.ts';
 import { RuntimeFallbackCoordinator, type RuntimeFallbackPort } from './runtime-fallback.ts';
+import { emitManagedLoopDegradedNotice, isManagedLoopFallbackDegraded, managedLoopDegradedSystemBlock } from './managed-loop-disclosure.ts';
 import { RuntimePollBridgeCoordinator, type RuntimePollBridgePort } from './runtime-poll-bridge.ts';
 import { buildRoutingPromptContract } from './route-intent.ts';
 import { createCatalogueSnapshotCache, type CatalogueSnapshotCache } from './model-snapshot-cache.ts';
@@ -936,6 +937,13 @@ export class AgentRuntime implements Runtime {
    * (no backup took over at all) and needs its own 2-part key shape.
    */
   private recentNoFallbackReauthNotices = new Map<string, number>();
+
+  /**
+   * Dedup for {@link emitManagedLoopDegradedNotice}
+   * (#3149), keyed `${chatJid}:managed-loop-degraded` — "this chat was already
+   * told it is being served with reduced capabilities" within the notice window.
+   */
+  private recentManagedLoopDegradedNotices = new Map<string, number>();
 
   /**
    * Tracks toolScopeKeys where at least one non-phantom tool_use event was
@@ -8934,6 +8942,12 @@ export class AgentRuntime implements Runtime {
     // instance-global one. A fallback to a non-claude provider tears the socket down.
     const sessionProvider = route ? route.provider : this.effectiveProvider;
     const mcpServerScript = providerMcpProxyScriptPath();
+    // #3149: a managed-loop API provider standing in for the configured primary
+    // silently loses the whole child-process tool surface. Mark the session so
+    // its system prompt discloses that to the MODEL, and tell the USER below.
+    const managedLoopDegraded = isManagedLoopFallbackDegraded(
+      sessionProvider ?? '', this.agentProvider, route !== undefined && route !== null,
+    );
     // BRNCH: undefined provider (no route, no effectiveProvider) means no per-chat
     // actor socket to wire — skip entirely (main parity on the undefined path).
     const actorSocketMapKey = opts.sessionMapKey !== undefined
@@ -9003,6 +9017,9 @@ export class AgentRuntime implements Runtime {
       whatsoupMcpSocket: mcpSocketPath ?? this.globalMcpSocketPath ?? undefined,
       providerTransitionReady,
       handoffSystemBlock: this.buildHandoffSystemBlock(sessionConversationKey, route ? route.provider : this.effectiveProvider),
+      degradedCapabilitiesBlock: managedLoopDegraded
+        ? managedLoopDegradedSystemBlock
+        : undefined,
       routingSystemBlock: config.nlRouting ? () => this.buildRoutingContractBlock(route ? route.provider : this.effectiveProvider) : undefined,
       routePolicy: route ?? undefined,
       egressProxyPort: this.egressProxy?.port,
@@ -9037,6 +9054,19 @@ export class AgentRuntime implements Runtime {
       session,
       opts.eventToolScopeKey ?? GLOBAL_TOOL_SCOPE_KEY,
     );
+    // #3149: user-facing half of the disclosure — deduped per chat, emitted at
+    // the degraded session's creation so it precedes the first reduced reply.
+    if (managedLoopDegraded) {
+      const degradedQueue = this.getQueueForChat(opts.chatJid, opts.sessionMapKey);
+      if (degradedQueue) {
+        emitManagedLoopDegradedNotice({
+          queue: degradedQueue,
+          recentNotices: this.recentManagedLoopDegradedNotices,
+          noticeDedupMs: config.fallbackTunables.noticeDedupMs,
+          capDedupeMap: (map) => this.capDedupeMap(map),
+        });
+      }
+    }
     if (this.durability) {
       session.setDurability(this.durability);
     }

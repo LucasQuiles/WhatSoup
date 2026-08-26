@@ -61,6 +61,35 @@ describe('SessionManager system prompt composition', () => {
     expect(prompt.match(new RegExp(identityLine.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'))).toHaveLength(1);
   });
 
+  it('#3149: includes the degraded-capabilities block only when the runtime supplies one', () => {
+    const cwd = makeTempRoot();
+    const block = 'DEGRADED CAPABILITIES — no child process this conversation.';
+    const base = {
+      db: makeDb(),
+      messenger: makeMessenger(),
+      chatJid: CHAT_JID,
+      onEvent: () => undefined,
+      instanceName: 'mybot',
+      cwd,
+      configSystemPrompt: 'Configured instruction.',
+      provider: 'openai-api',
+    } as const;
+
+    const degraded = new SessionManager({ ...base, degradedCapabilitiesBlock: () => block });
+    const normal = new SessionManager({ ...base });
+    const nullBlock = new SessionManager({ ...base, degradedCapabilitiesBlock: () => null });
+
+    const degradedPrompt = degraded.buildSystemPrompt();
+    expect(degradedPrompt).toContain(block);
+    // The degradation fact precedes the configured persona so it cannot be
+    // buried under instance instructions.
+    expect(degradedPrompt.indexOf(block)).toBeLessThan(degradedPrompt.indexOf('Configured instruction.'));
+    // Non-degraded prompts stay byte-identical whether the option is absent or
+    // returns null.
+    expect(normal.buildSystemPrompt()).toBe(nullBlock.buildSystemPrompt());
+    expect(normal.buildSystemPrompt()).not.toContain('DEGRADED CAPABILITIES');
+  });
+
   it('fails closed when a configured instructionsPath is missing', () => {
     const cwd = makeTempRoot();
     const instructionsPath = `no-such-instructions-${randomUUID()}.md`;
