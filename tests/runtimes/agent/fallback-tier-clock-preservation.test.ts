@@ -935,5 +935,6 @@ describe('no-arm scoped to existing window state', () => {
     resolveProbe(true);
     await vi.advanceTimersByTimeAsync(0);
     expect(rv.fallbackWindow.activeUntil).toBeNull();
+    expect(rv.effectiveProvider).toBe('claude-cli');
   });
 });
