@@ -7019,13 +7019,19 @@ describe('degradation classification symmetry', () => {
 //       means the snapshot was taken under a window, so its effectiveProvider
 //       is not the primary),
 //   (2) the receipt is strictly newer than the latch point (which advances on
-//       EVERY evaluation observing real degradation reasons, including the
-//       unhealthy branches — an unhealthy episode invalidates older receipts),
-//   (3) the receipt is fresh per the existing turn-reliance window
-//       (MODEL_STALE_RELIANCE_MS), and
-//   (4) every latched reason is turn-provable (TURN_PROVABLE_STATUS_REASONS):
-//       a turn proves the turn pipeline (turn capability, agent runtime, the
-//       connection it rode in on) — never enrichment/memory/durability/etc.
+//       EVERY evaluation observing real degradation reasons — including the
+//       unhealthy branches and the late-computed reasons such as
+//       schema_future — so an episode after the receipt invalidates it;
+//       strictly-newer is the ONLY temporal guard: a genuine receipt never
+//       expires by wall clock), and
+//   (3) every reason in the latched set is turn-provable
+//       (TURN_PROVABLE_STATUS_REASONS): a turn proves the turn pipeline (turn
+//       capability, agent runtime, the connection it rode in on) — never
+//       enrichment/memory/durability/etc. The latched set carries the reasons
+//       of the LATEST evaluation that observed real reasons (replace, not
+//       union): a blip that cleared before that evaluation was observed
+//       clearing, so it is not unproven silence and must not poison the
+//       latch.
 // Silence alone, elapsed time alone, an empty reason list alone, a stale
 // receipt, or a non-primary receipt never release. The latch itself is
 // process-lifetime (in-memory): a restart clears it by amnesia, a known
@@ -7306,6 +7312,112 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
       h.setTurnCapability(receiptTurnCapability(Date.now(), 'claude-cli'));
       const fifth = JSON.parse((await healthReq(h.port)).body);
       expectReleased(fifth);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('a non-provable blip that clears before the last real evaluation does not poison the latch', async () => {
+    const h = await buildLatchHarness();
+    try {
+      await seedTurnClassLatch(h);
+      // A non-provable enrichment blip arrives WHILE the turn-class
+      // degradation is still live...
+      h.setTurnCapability(degradedTurnCapability());
+      h.setRuntimeDegraded(true);
+      const second = JSON.parse((await healthReq(h.port)).body);
+      expect(second.status).toBe('degraded');
+      expect(second.status_reasons).toContain('turn_capability_degraded');
+      expect(second.status_reasons).toContain('enrichment_runtime_degraded');
+
+      // ...and clears while a real evaluation still observes the turn-class
+      // reason: the LAST real evaluation shows turn-class only, so the blip
+      // was observed clearing — it is not unproven silence.
+      h.setRuntimeDegraded(false);
+      const third = JSON.parse((await healthReq(h.port)).body);
+      expect(third.status).toBe('degraded');
+      expect(third.status_reasons).toContain('turn_capability_degraded');
+      expect(third.status_reasons).not.toContain('enrichment_runtime_degraded');
+
+      h.setTurnCapability(null);
+      await tick();
+      h.setTurnCapability(receiptTurnCapability(Date.now(), 'claude-cli'));
+      const fourth = JSON.parse((await healthReq(h.port)).body);
+      expectReleased(fourth);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('no release while the LAST real evaluation still shows a non-provable reason', async () => {
+    const h = await buildLatchHarness();
+    try {
+      await seedTurnClassLatch(h);
+      // The final real evaluation before silence carries the enrichment
+      // reason — the receipt cannot prove THAT recovered.
+      h.setTurnCapability(degradedTurnCapability());
+      h.setRuntimeDegraded(true);
+      const second = JSON.parse((await healthReq(h.port)).body);
+      expect(second.status).toBe('degraded');
+      expect(second.status_reasons).toContain('enrichment_runtime_degraded');
+
+      h.setRuntimeDegraded(false);
+      h.setTurnCapability(null);
+      await tick();
+      h.setTurnCapability(receiptTurnCapability(Date.now(), 'claude-cli'));
+      const third = JSON.parse((await healthReq(h.port)).body);
+      expectLatched(third);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('a late-computed unhealthy episode (schema_future) advances the latch point', async () => {
+    const h = await buildLatchHarness();
+    try {
+      await seedTurnClassLatch(h);
+      // Receipt T1: newer than the seed latch.
+      await tick();
+      h.setTurnCapability(receiptTurnCapability(Date.now(), 'claude-cli'));
+      // T2: schema_future is computed AFTER the early status chain — only
+      // latch maintenance that runs truly last can observe it.
+      await tick();
+      db.raw.prepare('INSERT INTO schema_migrations(version) VALUES (?)').run(CURRENT_SCHEMA_MIGRATION + 1);
+      const second = JSON.parse((await healthReq(h.port)).body);
+      expect(second.status).toBe('unhealthy');
+      expect(second.status_reasons).toContain('schema_future');
+
+      // T3: episode over; the only receipt predates it — NOT proof.
+      db.raw.prepare('DELETE FROM schema_migrations WHERE version = ?').run(CURRENT_SCHEMA_MIGRATION + 1);
+      const third = JSON.parse((await healthReq(h.port)).body);
+      expectLatched(third);
+
+      // The episode's reason set {schema_future} is not turn-provable, so
+      // even a FRESH receipt does not release — fail-closed by design; a
+      // schema_future episode resolves through operator action + restart.
+      await tick();
+      h.setTurnCapability(receiptTurnCapability(Date.now(), 'claude-cli'));
+      const fourth = JSON.parse((await healthReq(h.port)).body);
+      expectLatched(fourth);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('an unhealthy-only history never arms the latch: healthy immediately after recovery', async () => {
+    const h = await buildLatchHarness();
+    try {
+      // No prior degraded evaluation — straight to unhealthy.
+      h.setConnected(false);
+      const first = JSON.parse((await healthReq(h.port)).body);
+      expect(first.status).toBe('unhealthy');
+      expect(first.status_reasons).toContain('connection_disconnected');
+
+      h.setConnected(true);
+      const second = JSON.parse((await healthReq(h.port)).body);
+      expect(second.status).toBe('healthy');
+      expect(second.status_reasons).not.toContain('degradation_silence_unproven');
+      expect(second.degradation_causes).not.toContain('degradation_silence_unproven');
     } finally {
       await new Promise<void>((resolve) => h.server.close(() => resolve()));
     }
