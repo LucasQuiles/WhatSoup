@@ -31,6 +31,7 @@ function resolveGit(): string {
   return resolveTrustedGit();
 }
 
+const UINT8_ARRAY_CONSTRUCTOR = Uint8Array;
 const TYPED_ARRAY_PROTOTYPE = Object.getPrototypeOf(Uint8Array.prototype) as object;
 const TYPED_ARRAY_BYTE_LENGTH = Object.getOwnPropertyDescriptor(
   TYPED_ARRAY_PROTOTYPE,
@@ -1908,7 +1909,7 @@ export function parseExactTreePathListing(value: Uint8Array): string[] {
       throw treeEntryError("ci.input.tree-entry-malformed");
     }
     const byteOffset = Reflect.apply(TYPED_ARRAY_BYTE_OFFSET, value, []) as number;
-    bytes = Buffer.from(new Uint8Array(buffer, byteOffset, byteLength));
+    bytes = Buffer.from(new UINT8_ARRAY_CONSTRUCTOR(buffer, byteOffset, byteLength));
   } catch {
     throw treeEntryError("ci.input.tree-entry-malformed");
   }
