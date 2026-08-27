@@ -2559,7 +2559,6 @@ export class AgentRuntime implements Runtime {
     // reference would keep reading the pre-test-setup value.
     return {
       get sessionScope() { return runtime.sessionScope; },
-      deferredTurnAdmissionEnabled: () => runtime.deferredTurnAdmissionEnabled(),
       get sandboxPerChat() { return runtime.sandboxPerChat; },
       get shared() { return runtime.shared; },
       get instanceName() { return runtime.instanceName; },
@@ -2594,7 +2593,6 @@ export class AgentRuntime implements Runtime {
       get db() { return runtime.db; },
       get instanceName() { return runtime.instanceName; },
       get sessionScope() { return runtime.sessionScope; },
-      deferredTurnAdmissionEnabled: () => runtime.deferredTurnAdmissionEnabled(),
       get agentProvider() { return runtime.agentProvider; },
       get agentProviderConfig() { return runtime.agentProviderConfig; },
       get model() { return runtime.model; },
