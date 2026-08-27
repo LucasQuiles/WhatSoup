@@ -565,5 +565,11 @@ standard's reach.
   clarifications and PASSED its delta re-review (all four RESOLVED, zero new findings). v7
   resolves the owner's two v6 correctness gaps (O5 clock-anomaly fail-closed age, O6
   rotation retirement gate) plus the 600 s bucket and this section's correction.
-- Pending: delta re-review of the v7 changes, then owner final approval. Only after
-  approval: an implementation plan (separately reviewed) — this document authorizes no code.
+- v7 delta re-review: PASSED (O5/O6 RESOLVED, three assigned attack surfaces refuted; the
+  single MINOR P1-v7 was fixed and confirmed CLOSED by the reviewer at head `334596ac`).
+- Owner final approval: GRANTED 2026-08-27 for v7 at head `334596ac`, after the owner's
+  independent verification (O5 fail-closed unknown age, O6 retirement alias gate,
+  store-scoped V6 recovery, and the 600 s bucket each confirmed present). The approval
+  authorizes merging this design and drafting a separately reviewed implementation plan;
+  it does NOT authorize implementation, fleet rollout, alert activation, or control
+  automation — this document authorizes no code.
