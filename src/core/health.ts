@@ -2524,16 +2524,16 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           const reasons = wentThroughDegradedPath
             ? new Set(realReasons)
             : new Set([...existingLatch.reasons, ...realReasons]);
-          recentlyDegraded.set(deps.instanceName, { latchedAtMs: Date.now(), reasons });
+          recentlyDegraded.set(deps.instanceName, { latchedAtMs: systemClock.now(), reasons });
         } else if (releasedLatchReasons !== null) {
           recentlyDegraded.set(deps.instanceName, {
-            latchedAtMs: Date.now(),
+            latchedAtMs: systemClock.now(),
             reasons: new Set([...releasedLatchReasons, ...realReasons]),
           });
         } else if (latchArmEligible && status === 'degraded') {
           log.info({ instance: deps.instanceName }, 'degradation silence latch set');
           recentlyDegraded.set(deps.instanceName, {
-            latchedAtMs: Date.now(),
+            latchedAtMs: systemClock.now(),
             reasons: new Set(realReasons),
           });
         }
