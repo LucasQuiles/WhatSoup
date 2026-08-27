@@ -1,9 +1,9 @@
 {
-  "generated_at": "2026-08-27T01:05:00Z",
+  "generated_at": "2026-08-27T02:53:14Z",
   "repo": "WhatSoup",
-  "git_head": "7b98d7b444c74b486a0fcedca0aca18c7886ecf6",
+  "git_head": "20e814ccf7552738cc226ffcbfcef84e132367dd",
   "git_head_note": "git_head is captured at scan time, so it reflects the branch HEAD at the moment `build-work-index` ran — NOT the commit that carries this index. Expect divergence in two cases: (1) intra-branch, when the regenerated index is committed after further content changes are staged; (2) post-squash-merge, when the landed main SHA differs from the pre-merge branch SHA. The row data and inconsistency detection remain accurate regardless of git_head freshness.",
-  "total": 127,
+  "total": 128,
   "schema_version": 5,
   "rows": [
     {
@@ -1578,6 +1578,19 @@
       "supersedes_hint": null,
       "last_modified": "2026-08-26",
       "size_bytes": 35707
+    },
+    {
+      "path": "docs/superpowers/specs/2026-08-27-fleet-lifecycle-observability-standard-implementation-plan.md",
+      "kind": "spec",
+      "topic_raw": "2026-08-27-fleet-lifecycle-observability-standard-implementation-plan",
+      "topic": "fleet-lifecycle-observability-standard-implementation-plan",
+      "status": "unknown",
+      "status_source": "fallback",
+      "lifecycle": "executable",
+      "canonical_parent": "docs/superpowers/specs",
+      "supersedes_hint": null,
+      "last_modified": "2026-08-27",
+      "size_bytes": 9206
     },
     {
       "path": "docs/superpowers/specs/kill-session-transactional-cancellation/design.md",

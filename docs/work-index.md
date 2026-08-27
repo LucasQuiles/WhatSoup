@@ -18,15 +18,15 @@ The **Inconsistencies** section lists missing or stale index entries compared wi
 scoped markdown files currently on disk.
 
 **Repo:** `WhatSoup`
-**Total entries:** 127
+**Total entries:** 128
 
 ## Totals
 
 | Dimension | Breakdown |
 |---|---|
-| Kind | handoff=8, plan=63, review=4, spec=51, state=1 |
-| Status | active=32, closed=4, completed=37, deferred=7, pending=15, unknown=32 |
-| Status source | body-marker=107, fallback=19, state-md-status=1 |
+| Kind | handoff=8, plan=63, review=4, spec=52, state=1 |
+| Status | active=32, closed=4, completed=37, deferred=7, pending=15, unknown=33 |
+| Status source | body-marker=107, fallback=20, state-md-status=1 |
 
 ## Inconsistencies
 
@@ -71,7 +71,7 @@ scoped markdown files currently on disk.
 | `docs/superpowers/specs/provider-event-lifecycle/requirements.md` | spec | requirements | body-marker |
 | `docs/superpowers/specs/provider-event-lifecycle/tasks.md` | spec | tasks | body-marker |
 
-### Unknown-status — triage needed (32)
+### Unknown-status — triage needed (33)
 
 | Path | Kind | Topic | Last Mod |
 |------|------|-------|----------|
@@ -107,6 +107,7 @@ scoped markdown files currently on disk.
 | `docs/superpowers/specs/2026-08-15-loop-lag-safe-forensic-pipeline-design.md` | spec | loop-lag-safe-forensic-pipeline-design | 2026-08-16 |
 | `docs/superpowers/specs/2026-08-21-anonymous-health-projection-ceiling-design.md` | spec | anonymous-health-projection-ceiling-design | 2026-08-21 |
 | `docs/superpowers/specs/2026-08-26-fleet-lifecycle-observability-standard-design.md` | spec | fleet-lifecycle-observability-standard-design | 2026-08-26 |
+| `docs/superpowers/specs/2026-08-27-fleet-lifecycle-observability-standard-implementation-plan.md` | spec | fleet-lifecycle-observability-standard-implementation-plan | 2026-08-27 |
 
 ### Cross-tree topic clusters (4)
 
@@ -238,7 +239,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/reviews/2026-07-09-wall-to-wall-audit-pr-briefs.md` | review | completed | body-marker | wall-to-wall-audit-pr-briefs | 2026-07-10 |  |
 | `docs/superpowers/reviews/2026-07-24-r13-r15-tech-debt-review-map.md` | review | completed | body-marker | r13-r15-tech-debt-review-map | 2026-07-24 |  |
 
-### docs/superpowers/specs  _(45 entries)_
+### docs/superpowers/specs  _(46 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
@@ -287,6 +288,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/specs/2026-08-17-recovery-authority-store-concurrency-containment-design.md` | spec | completed | body-marker | recovery-authority-store-concurrency-containment-design | 2026-08-22 |  |
 | `docs/superpowers/specs/2026-08-21-anonymous-health-projection-ceiling-design.md` | spec | unknown | body-marker | anonymous-health-projection-ceiling-design | 2026-08-21 |  |
 | `docs/superpowers/specs/2026-08-26-fleet-lifecycle-observability-standard-design.md` | spec | unknown | body-marker | fleet-lifecycle-observability-standard-design | 2026-08-26 |  |
+| `docs/superpowers/specs/2026-08-27-fleet-lifecycle-observability-standard-implementation-plan.md` | spec | unknown | fallback | fleet-lifecycle-observability-standard-implementation-plan | 2026-08-27 |  |
 
 ### docs/superpowers/specs/kill-session-transactional-cancellation  _(3 entries)_
 
@@ -307,4 +309,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-08-27T01:05:00Z from commit `7b98d7b444c74b486a0fcedca0aca18c7886ecf6`
+- Generated at 2026-08-27T02:53:14Z from commit `20e814ccf7552738cc226ffcbfcef84e132367dd`

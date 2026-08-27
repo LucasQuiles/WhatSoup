@@ -15,15 +15,15 @@ markers and re-run the command — the result is a fixed point, so the resolutio
 rather than a hand-count. `docs/work-index.{json,md}` has the same property via
 `npm run work-index:regen`.
 
-**Total classification rows:** 398
+**Total classification rows:** 399
 
 | Classification | Count |
 |---|---:|
 | PUBLIC | 198 |
-| PRIVATE-ARCHIVE | 200 |
+| PRIVATE-ARCHIVE | 201 |
 | SANITIZE | 0 |
 | DELETE | 0 |
-| Total | 398 |
+| Total | 399 |
 
 | Path | Classification | Rationale |
 |---|---|---|
@@ -199,6 +199,7 @@ rather than a hand-count. `docs/work-index.{json,md}` has the same property via
 | `docs/superpowers/specs/2026-08-17-recovery-authority-store-concurrency-containment-design.md` | PRIVATE-ARCHIVE | Internal concurrency-failure evidence, containment architecture, falsifier protocol, and staged operational acceptance design; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/2026-08-21-anonymous-health-projection-ceiling-design.md` | PRIVATE-ARCHIVE | Internal health-authority security remediation design with sanitized synthetic evidence; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/2026-08-26-fleet-lifecycle-observability-standard-design.md` | PRIVATE-ARCHIVE | Internal fleet lifecycle-observability standard design (review-passed draft); no production identifiers, sanitized incident references only; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/specs/2026-08-27-fleet-lifecycle-observability-standard-implementation-plan.md` | PRIVATE-ARCHIVE | Internal phased implementation plan for the approved lifecycle-observability standard; no production identifiers, sanitized operational references only; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/kill-session-transactional-cancellation/design.md` | PRIVATE-ARCHIVE | Internal targeted-cancellation protocol design; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/kill-session-transactional-cancellation/requirements.md` | PRIVATE-ARCHIVE | Internal targeted-cancellation protocol requirements; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/kill-session-transactional-cancellation/tasks.md` | PRIVATE-ARCHIVE | Internal targeted-cancellation implementation plan; retained in the repository but excluded from public publication by default. |
