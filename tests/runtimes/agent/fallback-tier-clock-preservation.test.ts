@@ -199,6 +199,22 @@ type RuntimeView = {
     resetAt: Date | null,
     reason?: 'usage-limit' | 'rate-limit' | 'auth-required' | 'model-unavailable' | 'server-error',
   ): unknown;
+  fallback: {
+    activateProviderFallbackAfterTerminalResult(
+      resetAt: Date | null,
+      reason: 'usage-limit' | 'rate-limit' | 'auth-required' | 'server-error',
+      session: unknown,
+      evidenceText?: string,
+    ): unknown;
+  };
+  handleEventWithContext(
+    event: { type: string; text: string; isError: boolean },
+    queue: unknown,
+    session: unknown,
+    conversationKey: string,
+    inboundSeq: number,
+    mapKey: string,
+  ): void;
   handlePerChatCrash(mapKey: string, chatJid?: string, info?: CrashInfo): void;
   setOwnedPerChatSession(key: string, session: unknown): void;
   sessionOwnership: {
@@ -434,5 +450,156 @@ describe('fallback-tier failure clock preservation', () => {
         if (existsSync(fp)) unlinkSync(fp);
       }
     }
+  });
+});
+
+// ─── Classified terminal failures from the ACTIVE FALLBACK session ────────────
+//
+// The turn-result handler's classified branches (auth-required via the
+// response-registry workflow dispatch, rate-limit/server-error via the legacy
+// classified branch) call activateProviderFallbackAfterTerminalResult with the
+// FAILING session but no tier knowledge — so a classified failure emitted by
+// the active fallback entry's own session re-entered the activation path as if
+// the PRIMARY had failed, extending the window and restarting the probe: the
+// same clock defect the process-exit and empty-advance paths had.
+
+describe('classified terminal failures from the active fallback session', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-26T20:00:00Z'));
+    lookupCredentialMock.mockReturnValue('present-key');
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  // handleEventWithContext calls several session lifecycle methods; return real
+  // values for the ones classification/attribution read and no-op the rest.
+  // getModelRef must be a REAL null so the attribution model check is skipped
+  // (a Proxy-fabricated () => undefined would read as a model MISMATCH).
+  function makeClassifiedSession(provider: string) {
+    return new Proxy(
+      {
+        getProviderId: () => provider,
+        getStatus: () => ({ sessionId: `${provider}-1` }),
+        getDbRowId: () => null,
+        getModelRef: () => null,
+      } as Record<string, unknown>,
+      { get: (t, p) => (p in t ? t[p as string] : () => undefined) },
+    );
+  }
+
+  function armClassifiedShape() {
+    const runtime = makeRuntime([
+      { provider: 'opencode-cli', model: 'kimi/kimi-k3' },
+      { provider: 'opencode-cli', model: 'glm/glm-5.2' },
+    ]);
+    const rv = v(runtime);
+    expect(rv.activateProviderFallback(null, 'usage-limit')).not.toBeNull();
+    const probe = vi.fn(() => false);
+    rv.probePrimaryProviderRecovered = probe as unknown as () => boolean;
+    const armedUntil = rv.fallbackWindow.activeUntil!;
+    const queue = makeFakeQueue(CHAT);
+    rv.chatQueues.set(CHAT, queue);
+    return { rv, probe, armedUntil, queue };
+  }
+
+  it('a server-error result from the fallback session advances the chain without moving the window end or probe deadline', async () => {
+    const { rv, probe, armedUntil, queue } = armClassifiedShape();
+    const session = makeClassifiedSession('opencode-cli');
+
+    await vi.advanceTimersByTimeAsync(2 * 60 * 1000);
+    rv.handleEventWithContext(
+      { type: 'result', text: 'server_error: provider returned HTTP 503', isError: true },
+      queue,
+      session,
+      'conv',
+      1,
+      CHAT,
+    );
+
+    expect(rv.fallbackWindow.activeEntry?.model).toBe('glm/glm-5.2');
+    expect(rv.fallbackWindow.activeUntil).toBe(armedUntil);
+    expect(probe).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(3 * 60 * 1000);
+    expect(probe).toHaveBeenCalledTimes(1);
+  });
+
+  it('an auth-required result from the fallback session advances the chain without moving the window end or probe deadline', async () => {
+    const { rv, probe, armedUntil, queue } = armClassifiedShape();
+    const session = makeClassifiedSession('opencode-cli');
+
+    await vi.advanceTimersByTimeAsync(2 * 60 * 1000);
+    rv.handleEventWithContext(
+      { type: 'result', text: 'Not logged in — please run /login', isError: true },
+      queue,
+      session,
+      'conv',
+      1,
+      CHAT,
+    );
+
+    expect(rv.fallbackWindow.activeEntry?.model).toBe('glm/glm-5.2');
+    expect(rv.fallbackWindow.activeUntil).toBe(armedUntil);
+    expect(probe).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(3 * 60 * 1000);
+    expect(probe).toHaveBeenCalledTimes(1);
+  });
+
+  it('a classified failure from a PRIMARY session during a window still extends it and never touches the chain (regression pin)', async () => {
+    const { rv, armedUntil, queue } = armClassifiedShape();
+    const session = makeClassifiedSession('claude-cli');
+
+    await vi.advanceTimersByTimeAsync(2 * 60 * 1000);
+    rv.handleEventWithContext(
+      { type: 'result', text: 'server_error: provider returned HTTP 503', isError: true },
+      queue,
+      session,
+      'conv',
+      1,
+      CHAT,
+    );
+
+    // Not attributable to the active fallback entry → primary tier → the
+    // extend-never-shorten Math.max applies exactly as before.
+    expect(rv.fallbackWindow.activeUntil).toBe(armedUntil + 2 * 60 * 1000);
+    expect(rv.fallbackWindow.activeEntry?.model).toBe('kimi/kimi-k3');
+    expect(rv.fallbackChain.failedKeys.size).toBe(0);
+  });
+
+  it('usage-limit with a parsed resetAt from the FALLBACK session still extends to the absolute reset time (regression pin)', async () => {
+    const { rv, armedUntil } = armClassifiedShape();
+    const resetAt = new Date(armedUntil + 60 * 60 * 1000); // T0 + 6h
+
+    await vi.advanceTimersByTimeAsync(2 * 60 * 1000);
+    rv.fallback.activateProviderFallbackAfterTerminalResult(
+      resetAt,
+      'usage-limit',
+      ocSession,
+      'usage limit reached',
+    );
+
+    // Fallback tier, but a non-null resetAt targets an absolute reset time —
+    // the extension is tier-independent and stays.
+    expect(rv.fallbackWindow.activeUntil).toBe(resetAt.getTime());
+  });
+
+  it('usage-limit with a parsed resetAt from the PRIMARY session still extends to the absolute reset time (regression pin)', async () => {
+    const { rv, armedUntil } = armClassifiedShape();
+    const resetAt = new Date(armedUntil + 60 * 60 * 1000); // T0 + 6h
+    const primarySession = {
+      getProviderId: () => 'claude-cli',
+      getStatus: () => ({ sessionId: 'claude-cli-1' }),
+    };
+
+    await vi.advanceTimersByTimeAsync(2 * 60 * 1000);
+    rv.fallback.activateProviderFallbackAfterTerminalResult(
+      resetAt,
+      'usage-limit',
+      primarySession,
+      'usage limit reached',
+    );
+
+    expect(rv.fallbackWindow.activeUntil).toBe(resetAt.getTime());
   });
 });

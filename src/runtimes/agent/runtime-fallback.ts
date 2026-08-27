@@ -622,16 +622,23 @@ export class RuntimeFallbackCoordinator {
     reason: ProviderFallbackReason,
     session: SessionManager | null,
     evidenceText?: string,
-    failureTier: FallbackFailureTier = 'primary',
+    failureTier?: FallbackFailureTier,
   ): ProviderFallbackActivation | null {
     const failedKey = this.markActiveFallbackFailed(session, reason, evidenceText);
-    const activation = this.activateProviderFallback(resetAt, reason, failureTier);
+    // Tier attribution for callers that cannot know it (the turn-result
+    // handler's classified branches pass the failing session but no tier):
+    // failedKey is non-null exactly when markActiveFallbackFailed attributed
+    // the session to the ACTIVE fallback entry — the same identity seam the
+    // chain-advance paths rely on — so an unspecified tier derives from it
+    // instead of duplicating the provider/model match at every call site.
+    const tier = failureTier ?? (failedKey !== null ? 'fallback' : 'primary');
+    const activation = this.activateProviderFallback(resetAt, reason, tier);
     if (activation || !failedKey) return activation;
 
     // Preserve previous single-fallback behavior when no alternate exists:
     // keep the current fallback window instead of reverting to a known-bad primary.
     this.host.fallbackChain.failedKeys.delete(failedKey);
-    return this.activateProviderFallback(resetAt, reason, failureTier);
+    return this.activateProviderFallback(resetAt, reason, tier);
   }
 
   /**
