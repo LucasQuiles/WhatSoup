@@ -608,18 +608,15 @@ describe('scheduled agent-job turn lifecycle (#3374)', () => {
       expectUnfinalizableShutdown = true;
     });
 
-    // OPEN GAP (#3374): no queue-level reaper exists on main. A scheduled turn
-    // whose provider terminal never arrives pins TurnQueue.activeTurn forever;
-    // nothing bounds the active-turn age or retires the wedged queue while the
-    // process lives (the W2 sweep above repairs only the durable journal row,
-    // after 24h). This probe asserts the DESIRED property in a FIX-SHAPED,
-    // bound-independent form: time is driven by backdating the durable row and
-    // invoking the sweep — the one reclamation entry point main exposes — so a
-    // real reaper of ANY wall-clock bound that ties queue release to durable
-    // reclamation flips this red, forcing promotion to a normal test. (A
-    // wall-clock wait here could stay green forever against a reaper whose
-    // bound exceeds the in-test window.)
-    it.fails('cell 7 reclamation gap probe: durable reclamation also releases the wedged TurnQueue (no such coupling on main)', async () => {
+    // #3374 ask 2 — PROMOTED from the fix-shaped it.fails gap probe: the W2
+    // sweep's stale-reclaim listener now releases the runtime lane too. The
+    // release rejects the held turn's runtime completion, resolves the
+    // session's provider-turn promise (a killed real child does the same from
+    // its exit handler), and the queue's ordinary processor-error finalization
+    // advances — with WedgedTurnReclaimedError telling it that the durable
+    // terminal is already owned by the sweep, so a non-terminal finalization
+    // result must not park on a recovery that can never arrive.
+    it('cell 7 reclamation: durable reclamation also releases the wedged TurnQueue (#3374 ask-2 coupling)', async () => {
       const seq = dispatchScheduled();
       await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
       await vi.waitFor(() => {
@@ -635,9 +632,13 @@ describe('scheduled agent-job turn lifecycle (#3374)', () => {
       backdate(seq, '-25 hours');
       expect(engine.sweepStuckInbound()).toMatchObject({ failedStale: 1 });
 
-      // DESIRED: reclaiming the durable row also releases the runtime lane.
-      // On main the sweep repairs only the journal, so this fails.
-      expect(scheduledQueue()?.activeTurn ?? null).toBeNull();
+      // Reclaiming the durable row also releases the runtime lane (#3374
+      // ask 2): the sweep's reclaim listener rejects the held turn's runtime
+      // completion and drives crash finalization, so the pinned processor
+      // settles asynchronously.
+      await vi.waitFor(() => {
+        expect(scheduledQueue()?.activeTurn ?? null).toBeNull();
+      }, { timeout: 4_000 });
     });
   });
 

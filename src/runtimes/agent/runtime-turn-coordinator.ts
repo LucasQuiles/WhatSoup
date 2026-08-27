@@ -295,6 +295,20 @@ export interface RuntimeTurnCoordinatorPort {
   sendVoiceReply(chatJid: string, responseText: string): Promise<void>;
 }
 
+/**
+ * #3374 ask 2: thrown into a pinned per-chat processor when the W2 sweep has
+ * durably reclaimed its turn's inbound row. Signals the processor-error
+ * finalizer that the durable terminal is ALREADY owned by the sweep — a
+ * non-terminal finalization result must advance the queue instead of parking
+ * on a recovery that can never arrive (the row is already failed).
+ */
+export class WedgedTurnReclaimedError extends Error {
+  constructor() {
+    super('WEDGED_TURN_RECLAIMED');
+    this.name = 'WedgedTurnReclaimedError';
+  }
+}
+
 export class RuntimeTurnCoordinator {
   private readonly host: RuntimeTurnCoordinatorPort;
   private readonly turnQueueHalts = new TurnQueueHaltLatch();
@@ -2029,6 +2043,17 @@ async finalizePerChatProcessorError(
     clearReplayOnSuccess: true,
   });
   if (result.kind !== 'terminal' && !result.mayAdvance) {
+    if (error instanceof WedgedTurnReclaimedError) {
+      // The W2 sweep already failed this turn's inbound row (stale_reclaim):
+      // the durable terminal exists and no recovery job will ever arrive.
+      // Parking here would re-create the exact queue wedge the reclaim is
+      // releasing — advance instead.
+      log.warn(
+        { mapKey, scopeKey: this.runtimeTurnScopeKey(context), resultKind: result.kind },
+        'wedged-turn reclaim finalization is non-terminal — durable ownership already held by the stale-reclaim sweep; advancing queue',
+      );
+      return;
+    }
     await this.host.runtimeTurnSupervisor.waitForRecovery(context);
   }
 }

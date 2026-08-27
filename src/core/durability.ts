@@ -477,6 +477,17 @@ export type ContinuityCandidateSource =
   | 'runtime_fault_disarm';
 
 /** Counts returned by {@link DurabilityEngine.sweepStuckInbound}. */
+/**
+ * #3374 ask 2: identity of an inbound row the W2 sweep reclaimed as
+ * `stale_reclaim`, handed to the runtime's release listener so a TurnQueue
+ * still pinned by that turn can be released too.
+ */
+export interface StaleReclaimedInbound {
+  seq: number;
+  sourceMessageId: string;
+  conversationKey: string;
+}
+
 export interface StuckInboundSweepResult {
   completedEchoed: number;
   completedTurnDone: number;
@@ -1048,7 +1059,7 @@ export class DurabilityEngine {
          LIMIT 200`,
       ),
       getStaleOpenNoSuccess: prepare(
-        `SELECT i.seq AS seq
+        `SELECT i.seq AS seq, i.message_id AS message_id, i.conversation_key AS conversation_key
          FROM inbound_events i
          WHERE i.processing_status IN ('pending', 'processing')
            AND i.received_at < datetime('now', '-24 hours')
@@ -2971,8 +2982,37 @@ export class DurabilityEngine {
     return count;
   }
 
+  /**
+   * #3374 ask 2: registered by the runtime so durable stale reclamation can also
+   * release a RUNTIME lane still pinned by the reclaimed turn (a wedged
+   * TurnQueue whose provider terminal never arrived). Invoked post-commit,
+   * outside the sweep transaction; listener failures never affect the sweep.
+   */
+  setStaleInboundReclaimListener(
+    listener: ((rows: StaleReclaimedInbound[]) => void) | null,
+  ): void {
+    this.staleInboundReclaimListener = listener;
+  }
+
+  private staleInboundReclaimListener: ((rows: StaleReclaimedInbound[]) => void) | null = null;
+
   /** Atomically finalize live echoed/no-reply strands and fail stale open turns. */
   sweepStuckInbound(): StuckInboundSweepResult {
+    const reclaimedStaleRows: StaleReclaimedInbound[] = [];
+    const result = this.runSweepStuckInboundTransaction(reclaimedStaleRows);
+    if (reclaimedStaleRows.length > 0 && this.staleInboundReclaimListener) {
+      try {
+        this.staleInboundReclaimListener(reclaimedStaleRows);
+      } catch (err) {
+        log.warn({ err, rows: reclaimedStaleRows.length }, 'stale-inbound reclaim listener failed — sweep result unaffected');
+      }
+    }
+    return result;
+  }
+
+  private runSweepStuckInboundTransaction(
+    reclaimedStaleRows: StaleReclaimedInbound[],
+  ): StuckInboundSweepResult {
     return withTransaction(this.db, () => {
       let completedEchoed = 0;
       let completedTurnDone = 0;
@@ -2981,7 +3021,11 @@ export class DurabilityEngine {
 
       const echoed = this.statements.getOpenInboundWithEchoedTerminal.all() as Array<{ seq: number }>;
       const turnDone = this.statements.getStaleTurnDoneNoSuccess.all() as Array<{ seq: number }>;
-      const staleOpen = this.statements.getStaleOpenNoSuccess.all() as Array<{ seq: number }>;
+      const staleOpen = this.statements.getStaleOpenNoSuccess.all() as Array<{
+        seq: number;
+        message_id: string;
+        conversation_key: string;
+      }>;
       const recoveryOwned = this.statements.getRecoveryOwnedReclaimable.all() as Array<{
         seq: number;
         job_id: number;
@@ -3020,6 +3064,11 @@ export class DurabilityEngine {
           () => this.markInboundFailed(row.seq, 'stale_reclaim'),
         );
         failedStale += 1;
+        reclaimedStaleRows.push({
+          seq: row.seq,
+          sourceMessageId: row.message_id,
+          conversationKey: row.conversation_key,
+        });
       }
 
       // #1749: release the recovery-owner trap. Drive EVERY pending/claimed owning
