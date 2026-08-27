@@ -18,15 +18,15 @@ The **Inconsistencies** section lists missing or stale index entries compared wi
 scoped markdown files currently on disk.
 
 **Repo:** `WhatSoup`
-**Total entries:** 126
+**Total entries:** 127
 
 ## Totals
 
 | Dimension | Breakdown |
 |---|---|
-| Kind | handoff=8, plan=63, review=4, spec=50, state=1 |
-| Status | active=32, closed=4, completed=37, deferred=7, pending=15, unknown=31 |
-| Status source | body-marker=106, fallback=19, state-md-status=1 |
+| Kind | handoff=8, plan=63, review=4, spec=51, state=1 |
+| Status | active=32, closed=4, completed=37, deferred=7, pending=15, unknown=32 |
+| Status source | body-marker=107, fallback=19, state-md-status=1 |
 
 ## Inconsistencies
 
@@ -71,7 +71,7 @@ scoped markdown files currently on disk.
 | `docs/superpowers/specs/provider-event-lifecycle/requirements.md` | spec | requirements | body-marker |
 | `docs/superpowers/specs/provider-event-lifecycle/tasks.md` | spec | tasks | body-marker |
 
-### Unknown-status — triage needed (31)
+### Unknown-status — triage needed (32)
 
 | Path | Kind | Topic | Last Mod |
 |------|------|-------|----------|
@@ -106,6 +106,7 @@ scoped markdown files currently on disk.
 | `docs/superpowers/specs/2026-08-07-fallback-continuity-design.md` | spec | fallback-continuity-design | 2026-08-12 |
 | `docs/superpowers/specs/2026-08-15-loop-lag-safe-forensic-pipeline-design.md` | spec | loop-lag-safe-forensic-pipeline-design | 2026-08-16 |
 | `docs/superpowers/specs/2026-08-21-anonymous-health-projection-ceiling-design.md` | spec | anonymous-health-projection-ceiling-design | 2026-08-21 |
+| `docs/superpowers/specs/2026-08-26-fleet-lifecycle-observability-standard-design.md` | spec | fleet-lifecycle-observability-standard-design | 2026-08-26 |
 
 ### Cross-tree topic clusters (4)
 
@@ -225,7 +226,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/plans/2026-08-14-outbound-queue-quiescence-containment.md` | plan | active | body-marker | outbound-queue-quiescence-containment | 2026-08-20 |  |
 | `docs/superpowers/plans/2026-08-15-loop-lag-safe-forensic-pipeline.md` | plan | unknown | fallback | loop-lag-safe-forensic-pipeline | 2026-08-16 |  |
 | `docs/superpowers/plans/2026-08-15-poisoned-direct-send-rejection.md` | plan | unknown | fallback | poisoned-direct-send-rejection | 2026-08-20 |  |
-| `docs/superpowers/plans/2026-08-17-recovery-authority-store-concurrency-containment.md` | plan | completed | body-marker | recovery-authority-store-concurrency-containment | 2026-08-21 |  |
+| `docs/superpowers/plans/2026-08-17-recovery-authority-store-concurrency-containment.md` | plan | completed | body-marker | recovery-authority-store-concurrency-containment | 2026-08-22 |  |
 | `docs/superpowers/plans/2026-08-21-anonymous-health-projection-ceiling.md` | plan | unknown | fallback | anonymous-health-projection-ceiling | 2026-08-21 |  |
 
 ### docs/superpowers/reviews  _(4 entries)_
@@ -237,7 +238,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/reviews/2026-07-09-wall-to-wall-audit-pr-briefs.md` | review | completed | body-marker | wall-to-wall-audit-pr-briefs | 2026-07-10 |  |
 | `docs/superpowers/reviews/2026-07-24-r13-r15-tech-debt-review-map.md` | review | completed | body-marker | r13-r15-tech-debt-review-map | 2026-07-24 |  |
 
-### docs/superpowers/specs  _(44 entries)_
+### docs/superpowers/specs  _(45 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
@@ -283,8 +284,9 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/specs/2026-08-14-outbound-queue-quiescence-containment-design.md` | spec | active | body-marker | outbound-queue-quiescence-containment-design | 2026-08-20 |  |
 | `docs/superpowers/specs/2026-08-15-loop-lag-safe-forensic-pipeline-design.md` | spec | unknown | body-marker | loop-lag-safe-forensic-pipeline-design | 2026-08-16 |  |
 | `docs/superpowers/specs/2026-08-16-recovery-blocked-follower-lifecycle-design.md` | spec | active | body-marker | recovery-blocked-follower-lifecycle-design | 2026-08-16 |  |
-| `docs/superpowers/specs/2026-08-17-recovery-authority-store-concurrency-containment-design.md` | spec | completed | body-marker | recovery-authority-store-concurrency-containment-design | 2026-08-21 |  |
+| `docs/superpowers/specs/2026-08-17-recovery-authority-store-concurrency-containment-design.md` | spec | completed | body-marker | recovery-authority-store-concurrency-containment-design | 2026-08-22 |  |
 | `docs/superpowers/specs/2026-08-21-anonymous-health-projection-ceiling-design.md` | spec | unknown | body-marker | anonymous-health-projection-ceiling-design | 2026-08-21 |  |
+| `docs/superpowers/specs/2026-08-26-fleet-lifecycle-observability-standard-design.md` | spec | unknown | body-marker | fleet-lifecycle-observability-standard-design | 2026-08-26 |  |
 
 ### docs/superpowers/specs/kill-session-transactional-cancellation  _(3 entries)_
 
@@ -298,11 +300,11 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
-| `docs/superpowers/specs/provider-event-lifecycle/design.md` | spec | active | body-marker | design | 2026-08-16 |  |
-| `docs/superpowers/specs/provider-event-lifecycle/requirements.md` | spec | active | body-marker | requirements | 2026-08-16 |  |
-| `docs/superpowers/specs/provider-event-lifecycle/tasks.md` | spec | active | body-marker | tasks | 2026-08-16 |  |
+| `docs/superpowers/specs/provider-event-lifecycle/design.md` | spec | active | body-marker | design | 2026-08-26 |  |
+| `docs/superpowers/specs/provider-event-lifecycle/requirements.md` | spec | active | body-marker | requirements | 2026-08-26 |  |
+| `docs/superpowers/specs/provider-event-lifecycle/tasks.md` | spec | active | body-marker | tasks | 2026-08-26 |  |
 
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-08-22T03:25:37Z from commit `6343732469d0c781dc68f8f2749aa4328f8ba69c`
+- Generated at 2026-08-27T01:05:00Z from commit `7b98d7b444c74b486a0fcedca0aca18c7886ecf6`
