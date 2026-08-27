@@ -84,7 +84,15 @@ describe('releaseDegradationLatchOnRecoveryProof', () => {
   });
 
   it('releases when every latched reason is turn-provable', () => {
-    const map = latched(['turn_capability_degraded', 'agent_runtime_degraded', 'connection_disconnected']);
+    // runtime.provider_fallback_active is provable BY CONSTRUCTION of the
+    // release guard: a primary receipt is only accepted while NO fallback
+    // window is live, so acceptance itself is the evidence the window ended.
+    const map = latched([
+      'turn_capability_degraded',
+      'agent_runtime_degraded',
+      'connection_disconnected',
+      'runtime.provider_fallback_active',
+    ]);
     const released = releaseDegradationLatchOnRecoveryProof(map, NAME, receipt(LATCHED_AT + 1_000), 'claude-cli');
     expect(released).toBe(true);
     expect(map.has(NAME)).toBe(false);
@@ -110,14 +118,17 @@ describe('releaseDegradationLatchOnRecoveryProof', () => {
   });
 
   it('pins the turn-provable reason taxonomy so membership changes are deliberate', () => {
-    // A turn proves the turn pipeline: turn capability, agent runtime, and
-    // the connection the turn rode in on — nothing else. Review adjusts this
+    // A turn proves the turn pipeline: turn capability, agent runtime, the
+    // connection the turn rode in on, and — by construction of the release
+    // guard, which only accepts a primary receipt while no fallback window is
+    // live — the end of a fallback window. Nothing else. Review adjusts this
     // set consciously, not by side effect.
     expect([...TURN_PROVABLE_STATUS_REASONS].sort()).toEqual([
       'agent_runtime_degraded',
       'agent_runtime_unhealthy',
       'connection_disconnected',
       'connection_recovering',
+      'runtime.provider_fallback_active',
       'turn_capability_degraded',
     ]);
   });

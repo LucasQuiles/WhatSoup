@@ -7026,12 +7026,18 @@ describe('degradation classification symmetry', () => {
 //       expires by wall clock), and
 //   (3) every reason in the latched set is turn-provable
 //       (TURN_PROVABLE_STATUS_REASONS): a turn proves the turn pipeline (turn
-//       capability, agent runtime, the connection it rode in on) — never
-//       enrichment/memory/durability/etc. The latched set carries the reasons
-//       of the LATEST evaluation that observed real reasons (replace, not
-//       union): a blip that cleared before that evaluation was observed
-//       clearing, so it is not unproven silence and must not poison the
-//       latch.
+//       capability, agent runtime, the connection it rode in on, and — by
+//       construction of the release guard — the end of a fallback window) —
+//       never enrichment/memory/durability/etc. FULL-VISIBILITY evaluations
+//       (the normal degraded path, which re-checks every reason source)
+//       REPLACE the latched set with their reasons — a blip that cleared
+//       before such an evaluation was observed clearing, so it is not
+//       unproven silence and must not poison the latch; SHORT-CIRCUIT
+//       evaluations (auth / not-connected / runtime-unhealthy) UNION their
+//       observed reasons in, never removing members they had no visibility
+//       to re-check. Only real EARLY-path reasons on the full-visibility
+//       path ARM a new latch — late-source-only reasons are directly probed
+//       every evaluation and never arm.
 // Silence alone, elapsed time alone, an empty reason list alone, a stale
 // receipt, or a non-primary receipt never release. The latch itself is
 // process-lifetime (in-memory): a restart clears it by amnesia, a known
@@ -7090,12 +7096,15 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
     setTurnCapability: (tc: Record<string, unknown> | null) => void;
     setFallbackState: (s: { effectiveProvider: string; fallbackActiveUntil: number | null } | null) => void;
     setConnected: (v: boolean) => void;
+    setRuntimeSnapshot: (status: 'healthy' | 'degraded', degradedReasons: string[] | null) => void;
   }> {
     let runtimeDegraded = false;
     let tc: Record<string, unknown> | null = null;
     let fallback: { effectiveProvider: string; fallbackActiveUntil: number | null } | null =
       { effectiveProvider: 'claude-cli', fallbackActiveUntil: null };
     let connected = true;
+    let runtimeStatus: 'healthy' | 'degraded' = 'healthy';
+    let runtimeReasons: string[] | null = null;
     const deps = makeDeps(db, {
       instanceType: 'agent',
       getEnrichmentStats: () => ({ lastRun: null, unprocessed: 0, runtimeDegraded }),
@@ -7114,8 +7123,11 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
       } as unknown as ConnectionManager,
       runtime: {
         getHealthSnapshot: () => ({
-          status: 'healthy',
-          details: tc === null ? {} : { turnCapability: tc },
+          status: runtimeStatus,
+          details: {
+            ...(tc === null ? {} : { turnCapability: tc }),
+            ...(runtimeReasons === null ? {} : { degradedReasons: runtimeReasons }),
+          },
         }),
         getFallbackState: () => (fallback === null ? null : {
           ...fallback,
@@ -7133,6 +7145,10 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
       setTurnCapability: (next: Record<string, unknown> | null) => { tc = next; },
       setFallbackState: (s: { effectiveProvider: string; fallbackActiveUntil: number | null } | null) => { fallback = s; },
       setConnected: (v: boolean) => { connected = v; },
+      setRuntimeSnapshot: (status: 'healthy' | 'degraded', degradedReasons: string[] | null) => {
+        runtimeStatus = status;
+        runtimeReasons = degradedReasons;
+      },
     };
   }
 
@@ -7418,6 +7434,83 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
       expect(second.status).toBe('healthy');
       expect(second.status_reasons).not.toContain('degradation_silence_unproven');
       expect(second.degradation_causes).not.toContain('degradation_silence_unproven');
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('a late-source-only transient blip never arms the latch', async () => {
+    const h = await buildLatchHarness();
+    try {
+      // No early-path degradation ever. A late-source-only reason appears
+      // (schema_not_ready is computed after the early status chain)...
+      db.raw.prepare('DELETE FROM schema_migrations WHERE version = ?').run(CURRENT_SCHEMA_MIGRATION);
+      const first = JSON.parse((await healthReq(h.port)).body);
+      expect(first.status).toBe('degraded');
+      expect(first.status_reasons).toContain('schema_not_ready');
+      expect(first.status_reasons).not.toContain('degradation_silence_unproven');
+
+      // ...and clears. Late-source reasons are directly probed every
+      // evaluation — they are not silence-prone and need no silence latch.
+      db.raw.prepare('INSERT INTO schema_migrations(version) VALUES (?)').run(CURRENT_SCHEMA_MIGRATION);
+      const second = JSON.parse((await healthReq(h.port)).body);
+      expect(second.status).toBe('healthy');
+      expect(second.status_reasons).not.toContain('degradation_silence_unproven');
+      expect(second.degradation_causes).not.toContain('degradation_silence_unproven');
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('a fallback-window outage releases after revert on a fresh primary receipt', async () => {
+    const h = await buildLatchHarness();
+    try {
+      // Outage: the runtime reports degraded with the window-derived reason
+      // while a fallback window is live.
+      h.setFallbackState({ effectiveProvider: 'openai-api', fallbackActiveUntil: Date.now() + 600_000 });
+      h.setRuntimeSnapshot('degraded', ['provider_fallback_active']);
+      const first = JSON.parse((await healthReq(h.port)).body);
+      expect(first.status).toBe('degraded');
+      expect(first.status_reasons).toContain('runtime.provider_fallback_active');
+
+      // Revert: window over, primary serving again, fresh primary receipt.
+      // The release guard only accepts a primary receipt while NO window is
+      // live, so acceptance itself proves the window ended — the reason is
+      // turn-provable by construction of the guard.
+      h.setRuntimeSnapshot('healthy', null);
+      h.setFallbackState({ effectiveProvider: 'claude-cli', fallbackActiveUntil: null });
+      await tick();
+      h.setTurnCapability(receiptTurnCapability(Date.now(), 'claude-cli'));
+      const second = JSON.parse((await healthReq(h.port)).body);
+      expectReleased(second);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('a short-circuit evaluation must not launder a non-provable latch', async () => {
+    const h = await buildLatchHarness();
+    try {
+      // Non-provable latch: enrichment-class.
+      h.setRuntimeDegraded(true);
+      const first = JSON.parse((await healthReq(h.port)).body);
+      expect(first.status).toBe('degraded');
+      expect(first.status_reasons).toContain('enrichment_runtime_degraded');
+      h.setRuntimeDegraded(false);
+
+      // A disconnect evaluation short-circuits before the enrichment probes
+      // run — it has no visibility to re-check them, so it must UNION its
+      // observed reason into the latch, never replace the set.
+      h.setConnected(false);
+      const second = JSON.parse((await healthReq(h.port)).body);
+      expect(second.status).toBe('unhealthy');
+      expect(second.status_reasons).toContain('connection_disconnected');
+
+      h.setConnected(true);
+      await tick();
+      h.setTurnCapability(receiptTurnCapability(Date.now(), 'claude-cli'));
+      const third = JSON.parse((await healthReq(h.port)).body);
+      expectLatched(third);
     } finally {
       await new Promise<void>((resolve) => h.server.close(() => resolve()));
     }

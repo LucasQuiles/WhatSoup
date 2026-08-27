@@ -265,17 +265,25 @@ export interface DegradationLatchEntry {
 /** Status reasons a successful primary-provider turn is evidence AGAINST: the
  * turn pipeline itself (turn capability, agent runtime) and the transport
  * connection the turn necessarily rode in on. Reasons outside this set
- * (enrichment, memory, durability, flood/churn, auth-bond, `runtime.*`
- * specifics) are NOT proven recovered by a turn, so a latch carrying any of
- * them never releases on a turn receipt — a turn proves the turn pipeline
- * only. Named and exported so review can adjust membership without touching
- * the release mechanics. */
+ * (enrichment, memory, durability, flood/churn, auth-bond, the other
+ * `runtime.*` specifics) are NOT proven recovered by a turn, so a latch
+ * carrying any of them never releases on a turn receipt — a turn proves the
+ * turn pipeline only. Named and exported so review can adjust membership
+ * without touching the release mechanics. */
 export const TURN_PROVABLE_STATUS_REASONS: ReadonlySet<string> = new Set([
   'turn_capability_degraded',
   'agent_runtime_degraded',
   'agent_runtime_unhealthy',
   'connection_disconnected',
   'connection_recovering',
+  // Provable BY CONSTRUCTION of the release guard: a primary receipt is only
+  // accepted while NO fallback window is live (primaryProviderId is null
+  // otherwise), so accepting one is precisely the evidence that the window
+  // ended and the primary serves again. This is the only window-derived
+  // runtime degradedReason literal — both getHealthSnapshot branches gate it
+  // on fallbackActiveUntil !== null; every sibling literal is its own
+  // independently probed condition and stays non-provable.
+  'runtime.provider_fallback_active',
 ]);
 
 /** Recovery proof for the #2280 silence latch. The latch is released ONLY on a
@@ -1984,14 +1992,26 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       // degradation-cause assembly below can raise a matching typed cause.
       let silenceUnprovenLatched = false;
       // #2280: true when this evaluation took the normal degraded evaluation
-      // path (the else branch) — the only path whose degraded verdict may ARM
-      // a new latch; the unhealthy branches only advance an existing one.
+      // path (the else branch) — the FULL-VISIBILITY path that re-checks
+      // every early reason source. Latch maintenance uses it to decide
+      // replace-vs-union: only a full-visibility evaluation may REPLACE the
+      // latched reason set; a short-circuit branch (auth / not-connected /
+      // runtime-unhealthy) never evaluated the other sources and must UNION.
       let wentThroughDegradedPath = false;
+      // #2280: real EARLY-path reasons observed on the degraded evaluation
+      // path, captured at that point — the ONLY source that may ARM a new
+      // latch. Late-source-only reasons never arm (they are directly probed
+      // every evaluation, not silence-prone, so a transient late blip must
+      // clear to healthy on the next poll); the unhealthy short-circuit
+      // branches never arm either.
+      let latchArmEligible = false;
       // #2280: a release earlier in THIS evaluation is provisional — if a
-      // late-computed reason turns up before emit, latch maintenance
-      // re-latches with it, so the release only sticks (and is only logged)
-      // when the evaluation ends quiet.
+      // late-computed reason turns up before emit, latch maintenance RESTORES
+      // the released latch (advanced point, prior set ∪ observed reasons), so
+      // the release only sticks (and is only logged) when the evaluation ends
+      // quiet. releasedLatchReasons carries the prior set for restoration.
       let latchReleasedThisEvaluation = false;
+      let releasedLatchReasons: ReadonlySet<string> | null = null;
       if (authFailureIsUnhealthy) {
         status = 'unhealthy';
         statusReasons = [`auth_failure.${authFailureClass}`];
@@ -2038,17 +2058,22 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         // cause section's fallbackWindowActive keeps its wall-clock check for
         // reporting; it has no release authority.)
         wentThroughDegradedPath = true;
-        if (statusReasons.length === 0) {
+        latchArmEligible = statusReasons.length > 0;
+        if (!latchArmEligible) {
           const primaryProviderId =
             fallbackState !== null && fallbackState.fallbackActiveUntil === null
               ? fallbackState.effectiveProvider
               : null;
+          const priorLatch = recentlyDegraded.get(deps.instanceName);
           latchReleasedThisEvaluation = releaseDegradationLatchOnRecoveryProof(
             recentlyDegraded,
             deps.instanceName,
             turnCapability,
             primaryProviderId,
           );
+          if (latchReleasedThisEvaluation && priorLatch !== undefined) {
+            releasedLatchReasons = priorLatch.reasons;
+          }
         }
         silenceUnprovenLatched = addDegradationSilenceProof(statusReasons, recentlyDegraded, deps.instanceName);
         status = statusReasons.length > 0 ? 'degraded' : 'healthy';
@@ -2458,26 +2483,44 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       // (the early status chain, durability/retention, schema, pending polls,
       // fact export, the late runtime block, and the reason floor), so the
       // latch point advances on EVERY evaluation that observes real
-      // degradation reasons. REPLACE semantics, not union: the latched reason
-      // set is the reason set of this latest real evaluation — a blip that
-      // cleared before it was observed clearing by a real evaluation, so it
-      // is not unproven silence and must not poison the latch. The silence
-      // reason itself is excluded: it never advances the latch point and
-      // never enters the latched set (a receipt could never outrun a
-      // frequently-polled latch). Arming a NEW latch requires a degraded
-      // verdict on the normal evaluation path; an unhealthy verdict advances
-      // an existing latch only — except when a release happened earlier in
-      // THIS evaluation, which re-latches (the release was provisional and
-      // only sticks when the evaluation ends quiet).
-      const realReasons = statusReasons.filter((reason) => reason !== 'degradation_silence_unproven');
+      // degradation reasons. The silence reason never advances the latch
+      // point or enters the latched set (a receipt could never outrun a
+      // frequently-polled latch), and the defensive 'unclassified' floor
+      // literal is excluded too — it is not an observed reason, and latching
+      // it would create an unreleasable set. Rules by case:
+      //   ADVANCE (existing latch): a full-visibility evaluation (the normal
+      //     degraded path re-checked every reason source) REPLACES the
+      //     latched set with this evaluation's reasons — a blip that cleared
+      //     before it was observed clearing, so it is not unproven silence; a
+      //     short-circuit evaluation (auth / not-connected /
+      //     runtime-unhealthy) had no visibility to re-check members it did
+      //     not observe, so it UNIONS its observed reasons in — never
+      //     removes.
+      //   RESTORE (release earlier this evaluation + late reasons): the
+      //     provisional release comes back as the prior set ∪ the observed
+      //     reasons, advanced point — never a new arm.
+      //   ARM (no latch): only from real EARLY-path reasons on the
+      //     full-visibility degraded path (latchArmEligible).
+      //     Late-source-only reasons never arm — they are directly probed
+      //     every evaluation, not silence-prone, so a transient late blip
+      //     clears to healthy on the next poll.
+      const realReasons = statusReasons.filter(
+        (reason) => reason !== 'degradation_silence_unproven' && reason !== 'unclassified',
+      );
       if (realReasons.length > 0) {
         const existingLatch = recentlyDegraded.get(deps.instanceName);
-        const armEligible =
-          (wentThroughDegradedPath && status === 'degraded') || latchReleasedThisEvaluation;
-        if (existingLatch !== undefined || armEligible) {
-          if (existingLatch === undefined) {
-            log.info({ instance: deps.instanceName }, 'degradation silence latch set');
-          }
+        if (existingLatch !== undefined) {
+          const reasons = wentThroughDegradedPath
+            ? new Set(realReasons)
+            : new Set([...existingLatch.reasons, ...realReasons]);
+          recentlyDegraded.set(deps.instanceName, { latchedAtMs: Date.now(), reasons });
+        } else if (latchReleasedThisEvaluation) {
+          recentlyDegraded.set(deps.instanceName, {
+            latchedAtMs: Date.now(),
+            reasons: new Set([...(releasedLatchReasons ?? []), ...realReasons]),
+          });
+        } else if (latchArmEligible) {
+          log.info({ instance: deps.instanceName }, 'degradation silence latch set');
           recentlyDegraded.set(deps.instanceName, {
             latchedAtMs: Date.now(),
             reasons: new Set(realReasons),
