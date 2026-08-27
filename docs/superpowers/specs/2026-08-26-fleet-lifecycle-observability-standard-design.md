@@ -1,4 +1,4 @@
-# Fleet Lifecycle Observability Standard — design v7 (DRAFT for final approval)
+# Fleet Lifecycle Observability Standard — design v7 (APPROVED 2026-08-27; design only — authorizes no code)
 
 Status: draft. v4 PASSED the independent contradiction/privacy/cardinality review (no
 blockers; privacy: no findings); v5 folded in that pass's seven residual MINOR/NOTEs
