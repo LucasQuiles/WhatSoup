@@ -7011,14 +7011,26 @@ describe('degradation classification symmetry', () => {
 // latch held for the LIFE OF THE PROCESS — a genuinely recovered instance
 // (live example: ph-bot, 2026-08-26) reported degraded forever.
 //
-// Recovery-proof contract under test: the latch releases ONLY when the health
-// evaluation observes turn-capability evidence of a successful PRIMARY-provider
-// turn that is (a) strictly newer than the latch point and (b) fresh per the
-// existing turn-reliance window (MODEL_STALE_RELIANCE_MS). Silence alone,
-// elapsed time alone, an empty reason list alone, a stale receipt, or a
-// non-primary receipt never release. Reason/cause symmetry must hold in both
-// states: latched => both 'degradation_silence_unproven' twins present,
-// released => neither present.
+// Recovery-proof contract under test: the latch releases ONLY when
+//   (1) the health evaluation observes turn-capability evidence of a
+//       successful PRIMARY-provider turn (primary identity is only known when
+//       the fallback-state snapshot reports NO window: fallbackActiveUntil is
+//       null; a non-null value — even one already past expiry by check time —
+//       means the snapshot was taken under a window, so its effectiveProvider
+//       is not the primary),
+//   (2) the receipt is strictly newer than the latch point (which advances on
+//       EVERY evaluation observing real degradation reasons, including the
+//       unhealthy branches — an unhealthy episode invalidates older receipts),
+//   (3) the receipt is fresh per the existing turn-reliance window
+//       (MODEL_STALE_RELIANCE_MS), and
+//   (4) every latched reason is turn-provable (TURN_PROVABLE_STATUS_REASONS):
+//       a turn proves the turn pipeline (turn capability, agent runtime, the
+//       connection it rode in on) — never enrichment/memory/durability/etc.
+// Silence alone, elapsed time alone, an empty reason list alone, a stale
+// receipt, or a non-primary receipt never release. The latch itself is
+// process-lifetime (in-memory): a restart clears it by amnesia, a known
+// pre-existing hazard, not a release channel. Reason/cause symmetry must hold
+// in both states.
 // ---------------------------------------------------------------------------
 describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
   let db: Database;
@@ -7036,37 +7048,71 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
     else process.env.WHATSOUP_HEALTH_TOKEN = prevToken;
   });
 
-  // Agent-instance harness with one mutable degradation signal (enrichment
-  // runtime), a mutable turn receipt, and a primary-provider fallback state
-  // (no live window => effectiveProvider names the primary).
+  // Turn-class degradation seed: model_usable=false + a non-transient error
+  // class produce the 'turn_capability_degraded' status reason.
+  function degradedTurnCapability(): Record<string, unknown> {
+    return {
+      modelUsable: false,
+      modelUsabilityStatus: 'model-unavailable',
+      lastSuccessfulTurnAt: null,
+      lastTurnErrorClass: 'model-unavailable',
+      lastTurnErrorAt: Date.now(),
+    };
+  }
+
+  // Recovered turn capability carrying a successful-turn receipt.
+  function receiptTurnCapability(at: number, provider: string): Record<string, unknown> {
+    return {
+      modelUsable: true,
+      modelUsabilityStatus: 'usable',
+      lastSuccessfulTurnAt: at,
+      lastSuccessfulTurnProvider: provider,
+      lastTurnErrorClass: null,
+      lastTurnErrorAt: null,
+    };
+  }
+
+  // Agent-instance harness: one mutable non-turn degradation signal
+  // (enrichment runtime), mutable turn-capability evidence, a mutable
+  // fallback-state snapshot (default: on primary 'claude-cli', no window),
+  // and a mutable connection flag (false → 'connection_disconnected',
+  // status unhealthy).
   async function buildLatchHarness(): Promise<{
     server: ReturnType<typeof createServer>;
     port: number;
     setRuntimeDegraded: (v: boolean) => void;
-    setTurnReceipt: (receipt: { at: number; provider: string } | null) => void;
+    setTurnCapability: (tc: Record<string, unknown> | null) => void;
+    setFallbackState: (s: { effectiveProvider: string; fallbackActiveUntil: number | null } | null) => void;
+    setConnected: (v: boolean) => void;
   }> {
-    let runtimeDegraded = true;
-    let receipt: { at: number; provider: string } | null = null;
+    let runtimeDegraded = false;
+    let tc: Record<string, unknown> | null = null;
+    let fallback: { effectiveProvider: string; fallbackActiveUntil: number | null } | null =
+      { effectiveProvider: 'claude-cli', fallbackActiveUntil: null };
+    let connected = true;
     const deps = makeDeps(db, {
       instanceType: 'agent',
       getEnrichmentStats: () => ({ lastRun: null, unprocessed: 0, runtimeDegraded }),
+      connectionManager: {
+        botJid: '15551230004@s.whatsapp.net',
+        botLid: null,
+        sendMessage: vi.fn().mockResolvedValue({ waMessageId: null }),
+        sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
+        connect: vi.fn().mockResolvedValue(undefined),
+        disconnect: vi.fn().mockResolvedValue(undefined),
+        getConnectionState: () => emptyConnectionStateSnapshot({
+          connected,
+          stateChangedAt: '2026-07-29T00:00:00.000Z',
+          lastDisconnectReason: null,
+        }),
+      } as unknown as ConnectionManager,
       runtime: {
         getHealthSnapshot: () => ({
           status: 'healthy',
-          details: receipt === null ? {} : {
-            turnCapability: {
-              modelUsable: true,
-              modelUsabilityStatus: 'usable',
-              lastSuccessfulTurnAt: receipt.at,
-              lastSuccessfulTurnProvider: receipt.provider,
-              lastTurnErrorClass: null,
-              lastTurnErrorAt: null,
-            },
-          },
+          details: tc === null ? {} : { turnCapability: tc },
         }),
-        getFallbackState: () => ({
-          effectiveProvider: 'claude-cli',
-          fallbackActiveUntil: null,
+        getFallbackState: () => (fallback === null ? null : {
+          ...fallback,
           fallbackTurnsServed: 0,
           fallbackTurnsEmpty: 0,
           lastFallbackTurnAt: null,
@@ -7078,7 +7124,9 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
       server,
       port,
       setRuntimeDegraded: (v: boolean) => { runtimeDegraded = v; },
-      setTurnReceipt: (r: { at: number; provider: string } | null) => { receipt = r; },
+      setTurnCapability: (next: Record<string, unknown> | null) => { tc = next; },
+      setFallbackState: (s: { effectiveProvider: string; fallbackActiveUntil: number | null } | null) => { fallback = s; },
+      setConnected: (v: boolean) => { connected = v; },
     };
   }
 
@@ -7098,18 +7146,91 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
   // 5ms guarantees Date.now() moved even on a coarse timer.
   const tick = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 5));
 
-  it('releases the latch when a fresh primary-turn receipt is newer than the latch point', async () => {
+  // Seed a turn-class latch (every latched reason turn-provable).
+  async function seedTurnClassLatch(h: Awaited<ReturnType<typeof buildLatchHarness>>): Promise<void> {
+    h.setTurnCapability(degradedTurnCapability());
+    const first = JSON.parse((await healthReq(h.port)).body);
+    expect(first.status).toBe('degraded');
+    expect(first.status_reasons).toContain('turn_capability_degraded');
+    h.setTurnCapability(null);
+  }
+
+  it('releases a turn-class latch on a fresh primary-turn receipt newer than the latch point', async () => {
     const h = await buildLatchHarness();
     try {
+      await seedTurnClassLatch(h);
+      await tick();
+      h.setTurnCapability(receiptTurnCapability(Date.now(), 'claude-cli'));
+      const second = JSON.parse((await healthReq(h.port)).body);
+      expectReleased(second);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('a non-turn-class latch is not released by a turn receipt (a turn proves the turn pipeline only)', async () => {
+    const h = await buildLatchHarness();
+    try {
+      h.setRuntimeDegraded(true);
       const first = JSON.parse((await healthReq(h.port)).body);
       expect(first.status).toBe('degraded');
       expect(first.status_reasons).toContain('enrichment_runtime_degraded');
 
       h.setRuntimeDegraded(false);
       await tick();
-      h.setTurnReceipt({ at: Date.now(), provider: 'claude-cli' });
+      h.setTurnCapability(receiptTurnCapability(Date.now(), 'claude-cli'));
       const second = JSON.parse((await healthReq(h.port)).body);
-      expectReleased(second);
+      expectLatched(second);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('a receipt under a fallback-window snapshot does not release even if the window expired mid-evaluation', async () => {
+    const h = await buildLatchHarness();
+    try {
+      await seedTurnClassLatch(h);
+      await tick();
+      // The snapshot says a window exists (non-null expiry) but the expiry is
+      // already behind the clock by the time the release check compares — the
+      // race a wall-clock liveness test loses. The snapshot's
+      // effectiveProvider is the FALLBACK provider and must not pass as
+      // primary.
+      h.setFallbackState({ effectiveProvider: 'openai-api', fallbackActiveUntil: Date.now() - 1 });
+      h.setTurnCapability(receiptTurnCapability(Date.now(), 'openai-api'));
+      const second = JSON.parse((await healthReq(h.port)).body);
+      expectLatched(second);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('an unhealthy episode advances the latch point: a receipt predating it does not release', async () => {
+    const h = await buildLatchHarness();
+    try {
+      await seedTurnClassLatch(h);
+      // Receipt T1: newer than the seed latch, fresh, primary.
+      await tick();
+      h.setTurnCapability(receiptTurnCapability(Date.now(), 'claude-cli'));
+      // Unhealthy episode T2 > T1: disconnected transport.
+      await tick();
+      h.setConnected(false);
+      const second = JSON.parse((await healthReq(h.port)).body);
+      expect(second.status).toBe('unhealthy');
+      expect(second.status_reasons).toContain('connection_disconnected');
+
+      // Reconnect T3: every live signal quiet, but the only receipt predates
+      // the unhealthy episode — recovery is NOT proven.
+      h.setConnected(true);
+      const third = JSON.parse((await healthReq(h.port)).body);
+      expectLatched(third);
+
+      // A receipt newer than the unhealthy episode proves the round trip and
+      // releases (the connection classes ride the turn pipeline).
+      await tick();
+      h.setTurnCapability(receiptTurnCapability(Date.now(), 'claude-cli'));
+      const fourth = JSON.parse((await healthReq(h.port)).body);
+      expectReleased(fourth);
     } finally {
       await new Promise<void>((resolve) => h.server.close(() => resolve()));
     }
@@ -7119,11 +7240,8 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
     const h = await buildLatchHarness();
     try {
       const staleAt = Date.now() - 1000;
-      const first = JSON.parse((await healthReq(h.port)).body);
-      expect(first.status).toBe('degraded');
-
-      h.setRuntimeDegraded(false);
-      h.setTurnReceipt({ at: staleAt, provider: 'claude-cli' });
+      await seedTurnClassLatch(h);
+      h.setTurnCapability(receiptTurnCapability(staleAt, 'claude-cli'));
       const second = JSON.parse((await healthReq(h.port)).body);
       expectLatched(second);
     } finally {
@@ -7134,10 +7252,7 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
   it('silence alone never releases: no receipt and empty reasons stay latched across evaluations', async () => {
     const h = await buildLatchHarness();
     try {
-      const first = JSON.parse((await healthReq(h.port)).body);
-      expect(first.status).toBe('degraded');
-
-      h.setRuntimeDegraded(false);
+      await seedTurnClassLatch(h);
       const second = JSON.parse((await healthReq(h.port)).body);
       expectLatched(second);
       // Elapsed time / repeated quiet evaluations alone must not release either.
@@ -7152,12 +7267,9 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
   it('a fresh receipt from a non-primary provider does not release', async () => {
     const h = await buildLatchHarness();
     try {
-      const first = JSON.parse((await healthReq(h.port)).body);
-      expect(first.status).toBe('degraded');
-
-      h.setRuntimeDegraded(false);
+      await seedTurnClassLatch(h);
       await tick();
-      h.setTurnReceipt({ at: Date.now(), provider: 'openai-api' });
+      h.setTurnCapability(receiptTurnCapability(Date.now(), 'openai-api'));
       const second = JSON.parse((await healthReq(h.port)).body);
       expectLatched(second);
     } finally {
@@ -7168,32 +7280,30 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
   it('after a release, a new degradation re-latches and only a NEWER fresh receipt releases again', async () => {
     const h = await buildLatchHarness();
     try {
-      const first = JSON.parse((await healthReq(h.port)).body);
-      expect(first.status).toBe('degraded');
-
-      h.setRuntimeDegraded(false);
+      await seedTurnClassLatch(h);
       await tick();
-      h.setTurnReceipt({ at: Date.now(), provider: 'claude-cli' });
+      const firstReceiptAt = Date.now();
+      h.setTurnCapability(receiptTurnCapability(firstReceiptAt, 'claude-cli'));
       const second = JSON.parse((await healthReq(h.port)).body);
       expectReleased(second);
 
-      // A NEW real degradation re-latches normally...
-      h.setRuntimeDegraded(true);
+      // A NEW turn-class degradation re-latches normally...
       await tick();
+      h.setTurnCapability(degradedTurnCapability());
       const third = JSON.parse((await healthReq(h.port)).body);
       expect(third.status).toBe('degraded');
-      expect(third.status_reasons).toContain('enrichment_runtime_degraded');
+      expect(third.status_reasons).toContain('turn_capability_degraded');
       expect(third.status_reasons).not.toContain('degradation_silence_unproven');
 
       // ...and the receipt that released the FIRST latch predates the new
       // latch point, so it must not release this one.
-      h.setRuntimeDegraded(false);
+      h.setTurnCapability(receiptTurnCapability(firstReceiptAt, 'claude-cli'));
       const fourth = JSON.parse((await healthReq(h.port)).body);
       expectLatched(fourth);
 
       // A receipt newer than the new latch point releases again.
       await tick();
-      h.setTurnReceipt({ at: Date.now(), provider: 'claude-cli' });
+      h.setTurnCapability(receiptTurnCapability(Date.now(), 'claude-cli'));
       const fifth = JSON.parse((await healthReq(h.port)).body);
       expectReleased(fifth);
     } finally {
