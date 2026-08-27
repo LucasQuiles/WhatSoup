@@ -279,6 +279,22 @@ const TWO_ENTRY_CHAIN: FallbackEntry[] = [
   { provider: 'opencode-cli', model: 'glm/glm-5.2' },
 ];
 
+/** handleEventWithContext calls several session lifecycle methods; return real
+ *  values for the ones classification/attribution read and no-op the rest.
+ *  getModelRef must be a REAL value (or null) so attribution reads it — a
+ *  Proxy-fabricated () => undefined would read as a model MISMATCH. */
+function makeClassifiedSession(provider: string, model: string | null = null) {
+  return new Proxy(
+    {
+      getProviderId: () => provider,
+      getStatus: () => ({ sessionId: `${provider}-1` }),
+      getDbRowId: () => null,
+      getModelRef: () => model,
+    } as Record<string, unknown>,
+    { get: (t, p) => (p in t ? t[p as string] : () => undefined) },
+  );
+}
+
 // ─── Fallback-tier failures must not move the window clocks ───────────────────
 
 describe('fallback-tier failure clock preservation', () => {
@@ -473,22 +489,6 @@ describe('classified terminal failures from the active fallback session', () => 
     vi.useRealTimers();
   });
 
-  // handleEventWithContext calls several session lifecycle methods; return real
-  // values for the ones classification/attribution read and no-op the rest.
-  // getModelRef must be a REAL null so the attribution model check is skipped
-  // (a Proxy-fabricated () => undefined would read as a model MISMATCH).
-  function makeClassifiedSession(provider: string) {
-    return new Proxy(
-      {
-        getProviderId: () => provider,
-        getStatus: () => ({ sessionId: `${provider}-1` }),
-        getDbRowId: () => null,
-        getModelRef: () => null,
-      } as Record<string, unknown>,
-      { get: (t, p) => (p in t ? t[p as string] : () => undefined) },
-    );
-  }
-
   function armClassifiedShape() {
     const runtime = makeRuntime([
       { provider: 'opencode-cli', model: 'kimi/kimi-k3' },
@@ -658,5 +658,198 @@ describe('classified terminal failures from the active fallback session', () => 
 
     expect(rv.fallbackWindow.activeUntil).toBe(resetAt.getTime());
     expect(rv.fallbackWindow.resetAt).toBe(resetAt.getTime());
+  });
+});
+
+// ─── Tier attribution by route identity (increment 4) ─────────────────────────
+//
+// The failure TIER must answer "is this session NOT the primary?", which is a
+// different question from the MARKING predicate's "does it serve the ACTIVE
+// entry?". A session attributable to ANY configured fallback entry — active or
+// a PRIOR entry left running across a chain advance — is fallback-tier
+// evidence and must not move the window clocks; only a session positively
+// attributable to the PRIMARY route may. Fallback-tier evidence must also
+// never ARM a window: in the in-flight revert-probe gap (window shows expired
+// for ≤5s) an arm orphans the probe's own decision via the stale-window guard.
+
+describe('tier attribution by route identity', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-26T20:00:00Z'));
+    lookupCredentialMock.mockReturnValue('present-key');
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const SAME_PROVIDER_CHAIN: FallbackEntry[] = [
+    { provider: 'claude-cli', model: 'claude-haiku-4-5' },
+    { provider: 'opencode-cli', model: 'glm/glm-5.2' },
+  ];
+
+  it('a stale PRIOR-entry session\'s classified failure after a chain advance moves no clocks and does not mark the current entry', async () => {
+    const runtime = makeRuntime([
+      { provider: 'opencode-cli', model: 'kimi/kimi-k3' },
+      { provider: 'opencode-cli', model: 'glm/glm-5.2' },
+      { provider: 'opencode-cli', model: 'deepseek/deepseek-v4-pro' },
+    ]);
+    const { rv, owner } = armIncidentShape(runtime);
+    const probe = vi.fn(() => false);
+    rv.probePrimaryProviderRecovered = probe as unknown as () => boolean;
+    const armedUntil = rv.fallbackWindow.activeUntil!;
+
+    // Minute 1: the active kimi session dies — legitimate advance to glm.
+    await vi.advanceTimersByTimeAsync(60 * 1000);
+    rv.handlePerChatCrash(CHAT, CHAT, crashInfo(owner));
+    expect(rv.fallbackWindow.activeEntry?.model).toBe('glm/glm-5.2');
+    expect(rv.fallbackWindow.activeUntil).toBe(armedUntil);
+
+    // Minute 2: a PRIOR-entry kimi session (another chat's in-flight turn,
+    // spawned before the advance) emits a classified server-error. It is not
+    // the ACTIVE entry (model mismatch → correctly NOT marked) but it is
+    // still fallback-tier evidence — the clocks must not move.
+    const staleSession = makeClassifiedSession('opencode-cli', 'kimi/kimi-k3');
+    const queue = makeFakeQueue(CHAT);
+    await vi.advanceTimersByTimeAsync(60 * 1000);
+    rv.handleEventWithContext(
+      { type: 'result', text: 'server_error: provider returned HTTP 503', isError: true },
+      queue,
+      staleSession,
+      'conv',
+      1,
+      CHAT,
+    );
+
+    expect(rv.fallbackWindow.activeEntry?.model).toBe('glm/glm-5.2');
+    expect(rv.fallbackChain.failedKeys.size).toBe(1);
+    expect(rv.fallbackWindow.activeUntil).toBe(armedUntil);
+    expect(probe).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(RECHECK_MS - 2 * 60 * 1000);
+    expect(probe).toHaveBeenCalledTimes(1);
+  });
+
+  it('a fallback failure during the in-flight revert probe gap arms nothing, so the probe\'s own decision is not discarded', async () => {
+    const runtime = makeRuntime(TWO_ENTRY_CHAIN);
+    const rv = v(runtime);
+    let resolveProbe!: (recovered: boolean) => void;
+    rv.probePrimaryProviderRecovered = (() =>
+      new Promise<boolean>((resolve) => { resolveProbe = resolve; })) as unknown as () => boolean;
+    // auth-required with a near-now reset clamps to the 1-minute MIN window.
+    expect(rv.activateProviderFallback(new Date(Date.now() + 1000), 'auth-required')).not.toBeNull();
+    const gapWindowEnd = rv.fallbackWindow.activeUntil!;
+
+    // Window elapses → the revert timer fires and the recovery probe goes
+    // in-flight. Until it resolves, the window SHOWS expired.
+    await vi.advanceTimersByTimeAsync(60 * 1000 + 1);
+
+    // A fallback session's classified failure lands in that gap. It must not
+    // arm anything: an arm would move activeUntil and the probe resolution's
+    // stale-window guard would then discard the probe's own decision.
+    const queue = makeFakeQueue(CHAT);
+    rv.handleEventWithContext(
+      { type: 'result', text: 'server_error: provider returned HTTP 503', isError: true },
+      queue,
+      makeClassifiedSession('opencode-cli', 'kimi/kimi-k3'),
+      'conv',
+      1,
+      CHAT,
+    );
+    expect(rv.fallbackWindow.activeUntil).toBe(gapWindowEnd);
+
+    // The probe comes back RECOVERED — the decision must commit and revert.
+    resolveProbe(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(rv.fallbackWindow.activeUntil).toBeNull();
+    expect(rv.effectiveProvider).toBe('claude-cli');
+  });
+
+  it('same-provider chain: a primary session with a POSITIVE model identity still stores resetAt and extends (primary evidence honored)', async () => {
+    const runtime = makeRuntime(SAME_PROVIDER_CHAIN);
+    const rv = v(runtime);
+    expect(rv.activateProviderFallback(null, 'usage-limit')).not.toBeNull();
+    const armedUntil = rv.fallbackWindow.activeUntil!;
+    const resetAt = new Date(armedUntil + 60 * 60 * 1000);
+    // Model ref equals the configured primary model → positively primary even
+    // though the chain shares the provider.
+    const primarySession = makeClassifiedSession('claude-cli', 'claude-opus-4-8[1m]');
+
+    await vi.advanceTimersByTimeAsync(2 * 60 * 1000);
+    rv.fallback.activateProviderFallbackAfterTerminalResult(
+      resetAt,
+      'usage-limit',
+      primarySession,
+      'usage limit reached',
+    );
+
+    expect(rv.fallbackWindow.activeUntil).toBe(resetAt.getTime());
+    expect(rv.fallbackWindow.resetAt).toBe(resetAt.getTime());
+  });
+
+  it('same-provider chain: an AMBIGUOUS session (null model ref) fails CLOSED for clocks — no resetAt store, no extension', async () => {
+    const runtime = makeRuntime(SAME_PROVIDER_CHAIN);
+    const rv = v(runtime);
+    expect(rv.activateProviderFallback(null, 'usage-limit')).not.toBeNull();
+    expect(rv.fallbackWindow.activeEntry?.model).toBe('claude-haiku-4-5');
+    const armedUntil = rv.fallbackWindow.activeUntil!;
+    const resetAt = new Date(armedUntil + 60 * 60 * 1000);
+    // Provider matches BOTH the primary route and a chain entry; the model
+    // ref is null, so positive attribution is impossible either way.
+    const ambiguousSession = makeClassifiedSession('claude-cli', null);
+
+    await vi.advanceTimersByTimeAsync(2 * 60 * 1000);
+    rv.fallback.activateProviderFallbackAfterTerminalResult(
+      resetAt,
+      'usage-limit',
+      ambiguousSession,
+      'usage limit reached',
+    );
+
+    // Fail-closed rule: ambiguous evidence cannot move an existing window's
+    // clocks — resetAt stays unset and the end stays put.
+    expect(rv.fallbackWindow.resetAt).toBeNull();
+    expect(rv.fallbackWindow.activeUntil).toBe(armedUntil);
+    // Residual (pre-existing, documented): MARKING attribution still matches
+    // the ambiguous session against the active same-provider entry, so the
+    // entry is marked and the chain advances. Pinned so a change is loud.
+    expect(rv.fallbackChain.failedKeys.size).toBe(1);
+    expect(rv.fallbackWindow.activeEntry?.model).toBe('glm/glm-5.2');
+  });
+
+  it('persists the ORIGINAL activeUntil/activatedAt across a preserve arm and restores the original window end (real SQLite)', async () => {
+    const dbPath = join(tmpdir(), `whatsoup-tier-clock-persist-${randomBytes(4).toString('hex')}.db`);
+    const db = new Database(dbPath);
+    db.open();
+    try {
+      ensureFallbackStateSchema(db);
+      const runtimeA = makeRuntime(TWO_ENTRY_CHAIN, db);
+      const { rv, owner } = armIncidentShape(runtimeA);
+      const readRow = () => db.raw
+        .prepare(`SELECT active_until AS activeUntil, activated_at AS activatedAt FROM agent_fallback_state WHERE id = 1`)
+        .get() as { activeUntil: number; activatedAt: number } | undefined;
+      const rowAfterArm = readRow();
+      expect(rowAfterArm).toBeDefined();
+
+      // Fallback-tier process failure two minutes in: the chain advances and
+      // the preserve arm must persist the ORIGINAL window clock, not now+5h.
+      await vi.advanceTimersByTimeAsync(2 * 60 * 1000);
+      rv.handlePerChatCrash(CHAT, CHAT, crashInfo(owner));
+      expect(rv.fallbackWindow.activeEntry?.model).toBe('glm/glm-5.2');
+      const rowAfterCrash = readRow();
+      expect(rowAfterCrash?.activeUntil).toBe(rowAfterArm!.activeUntil);
+      expect(rowAfterCrash?.activatedAt).toBe(rowAfterArm!.activatedAt);
+
+      // The restarted process restores the ORIGINAL window end.
+      const runtimeB = makeRuntime(TWO_ENTRY_CHAIN, db);
+      const vB = v(runtimeB);
+      vB.probePrimaryProviderRecovered = vi.fn(() => false) as unknown as () => boolean;
+      vB.restorePersistedFallbackWindow();
+      expect(vB.fallbackWindow.activeUntil).toBe(rowAfterArm!.activeUntil);
+    } finally {
+      try { db.close(); } catch { /* best-effort */ }
+      for (const suffix of ['', '-wal', '-shm']) {
+        const fp = dbPath + suffix;
+        if (existsSync(fp)) unlinkSync(fp);
+      }
+    }
   });
 });

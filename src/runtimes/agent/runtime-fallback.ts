@@ -96,7 +96,7 @@ const log = createChildLogger('agent-runtime');
  * Which provider tier produced the failure driving a (re-)activation. The
  * reason taxonomy (ProviderFallbackReason) encodes WHY the primary was left,
  * never WHICH TIER just failed — so the tier is derived, in ONE place, from
- * session attribution (sessionServesActiveFallbackEntry). A fallback-tier
+ * route-identity attribution (failureTierForSession). A fallback-tier
  * failure carries no evidence about the PRIMARY: it must advance the chain
  * without extending the window, overwriting the stored resetAt, or
  * restarting the primary recovery clocks (live ph-bot 2026-08-26: a dead
@@ -387,6 +387,52 @@ export class RuntimeFallbackCoordinator {
     return sessionId?.startsWith(`${this.host.fallbackWindow.activeEntry.provider}-`) ?? false;
   }
 
+  /**
+   * Failure-tier derivation by ROUTE identity — a different question from the
+   * marking predicate above. Marking asks "does this session serve the ACTIVE
+   * entry?" (evidence against that entry). The tier asks "is this session NOT
+   * the primary?" — a session attributable to ANY configured fallback entry,
+   * active or a PRIOR entry still running across a chain advance, is
+   * fallback-tier evidence and must not move the window clocks.
+   *
+   * Attribution mirrors the route-currency compare (sessionMatchesCurrentRoute):
+   * the primary compare is provider-only (isCrossProviderSession's inverse) —
+   * disambiguation comes from the model-aware fallback-entry side, because a
+   * same-provider chain differs from the primary only by model. When positive
+   * attribution is impossible (ambiguous same-provider session with a null
+   * model ref, or a foreign provider), fail CLOSED for CLOCKS: with window
+   * state present the failure must not be able to move it; with no window at
+   * all there are no clocks to protect, and refusing to arm would break
+   * primary failover — so the legacy primary tier applies there.
+   */
+  private failureTierForSession(session: SessionManager | null): FallbackFailureTier {
+    if (!session) return 'primary';
+    const failClosedTier: FallbackFailureTier =
+      this.host.fallbackWindow.activeUntil !== null ? 'fallback' : 'primary';
+    const provider = typeof session.getProviderId === 'function' ? session.getProviderId() : null;
+    if (provider === null) {
+      // Last-resort sessionId-prefix attribution, mirroring the marking
+      // predicate's fallback identity read.
+      const sessionId = session.getStatus().sessionId;
+      if (!sessionId) return 'primary'; // unattributable — never block on a guess
+      const prefixFallback = this.host.agentFallbacks.some((e) => sessionId.startsWith(`${e.provider}-`));
+      const prefixPrimary = sessionId.startsWith(`${this.host.agentProvider}-`);
+      if (prefixFallback && !prefixPrimary) return 'fallback';
+      if (prefixPrimary && !prefixFallback) return 'primary';
+      return failClosedTier;
+    }
+    const model = typeof session.getModelRef === 'function' ? session.getModelRef() : null;
+    const matchesFallback = this.host.agentFallbacks.some((entry) => {
+      if (provider !== entry.provider) return false;
+      if (entry.model === undefined) return true;
+      return model === null || model === entry.model;
+    });
+    const matchesPrimary = provider === this.host.agentProvider;
+    if (matchesFallback && !matchesPrimary) return 'fallback';
+    if (matchesPrimary && !matchesFallback) return 'primary';
+    return failClosedTier;
+  }
+
   private markActiveFallbackFailed(
     session: SessionManager | null,
     reason: ProviderFallbackReason,
@@ -636,12 +682,14 @@ export class RuntimeFallbackCoordinator {
     evidenceText?: string,
   ): ProviderFallbackActivation | null {
     const failedKey = this.markActiveFallbackFailed(session, reason, evidenceText);
-    // SINGLE tier source: failedKey is non-null exactly when the failing
-    // session was attributed to the ACTIVE fallback entry
-    // (sessionServesActiveFallbackEntry) — callers never pass a tier, so no
+    // SINGLE tier source: route-identity attribution (failureTierForSession).
+    // Deliberately NOT derived from failedKey — marking answers "serves the
+    // ACTIVE entry" while the tier must answer "is NOT the primary": a stale
+    // PRIOR-entry session left running across a chain advance is unmarked
+    // (correctly) yet still fallback-tier. Callers never pass a tier, so no
     // call site can disagree with the attribution and every future call site
     // is clock-safe by construction.
-    const tier: FallbackFailureTier = failedKey !== null ? 'fallback' : 'primary';
+    const tier = this.failureTierForSession(session);
     const activation = this.activateProviderFallback(resetAt, reason, tier);
     if (activation || !failedKey) return activation;
 
@@ -656,18 +704,17 @@ export class RuntimeFallbackCoordinator {
    * whose workflow must NOT mark the active entry failed — the
    * model-unavailable split (response-registry: markActiveEntryFailedOnTrigger
    * false, direct activation). Derives the failure tier from the same
-   * attribution predicate the marking path uses, so a FALLBACK session's
-   * classified failure still cannot move the window clocks while the
-   * non-marking semantics (no failed-entry marking, no chain advance) are
-   * preserved.
+   * route-identity attribution the marking path's sibling uses
+   * (failureTierForSession), so a FALLBACK session's classified failure still
+   * cannot move the window clocks while the non-marking semantics (no
+   * failed-entry marking, no chain advance) are preserved.
    */
   activateProviderFallbackForSession(
     resetAt: Date | null,
     reason: ProviderFallbackReason,
     session: SessionManager | null,
   ): ProviderFallbackActivation | null {
-    const tier: FallbackFailureTier = this.sessionServesActiveFallbackEntry(session) ? 'fallback' : 'primary';
-    return this.activateProviderFallback(resetAt, reason, tier);
+    return this.activateProviderFallback(resetAt, reason, this.failureTierForSession(session));
   }
 
   /**
@@ -1691,18 +1738,28 @@ export class RuntimeFallbackCoordinator {
     this.kickStaleDiscoveryRefresh('window-arm');
     if (this.host.agentFallbacks.length === 0) return null;
 
+    // A FALLBACK-tier failure says nothing about the PRIMARY, so it must
+    // never ARM a window either — only a currently-ACTIVE window may be
+    // re-selected under it. The load-bearing case is the in-flight revert
+    // probe gap (≤5s, the window shows expired while activeUntil still holds
+    // the past deadline): an arm here would move activeUntil and the probe
+    // resolution's stale-window guard would then discard the probe's OWN
+    // decision — even a successful recovery. A stale post-revert fallback
+    // session's failure likewise must not re-fail-over a healthy primary.
+    if (failureTier === 'fallback' && !this.host.isFallbackWindowActive) return null;
+
     const wasActive = this.host.fallbackWindow.activeUntil !== null;
-    // A FALLBACK-tier failure says nothing about the PRIMARY, so the window
-    // clocks must not move: the default-window extension below would push
-    // activeUntil out by up to DEFAULT_FALLBACK_WINDOW_MS per failed fallback
-    // turn, and the re-arm would restart the standing primary recovery probe
-    // — together postponing primary recovery indefinitely while a dead
-    // fallback takes live traffic. This holds for ANY resetAt: a non-null one
-    // here is either the window's own stored value forwarded by an advance
-    // path (re-arming the probe on it per-turn suppresses early recovery for
-    // the whole window) or the FALLBACK entry's own parsed reset estimate,
-    // which describes the fallback provider's quota, never the primary's.
-    const preserveWindowClocks = failureTier === 'fallback' && wasActive;
+    // With the window ACTIVE, a fallback-tier failure must not move its
+    // clocks: the default-window extension below would push activeUntil out
+    // by up to DEFAULT_FALLBACK_WINDOW_MS per failed fallback turn, and the
+    // re-arm would restart the standing primary recovery probe — together
+    // postponing primary recovery indefinitely while a dead fallback takes
+    // live traffic. This holds for ANY resetAt: a non-null one here is either
+    // the window's own stored value forwarded by an advance path (re-arming
+    // the probe on it per-turn suppresses early recovery for the whole
+    // window) or the FALLBACK entry's own parsed reset estimate, which
+    // describes the fallback provider's quota, never the primary's.
+    const preserveWindowClocks = failureTier === 'fallback';
 
     const now = Date.now();
     const rawUntil = resetAt ? resetAt.getTime() : now + DEFAULT_FALLBACK_WINDOW_MS;
