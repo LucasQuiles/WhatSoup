@@ -8087,11 +8087,20 @@ export class AgentRuntime implements Runtime {
     this.fallback.deactivateProviderFallback(reason, receipt);
   }
 
+  /**
+   * Test-seam delegator (no production callers — the fallback suites reach it
+   * through the runtime-view cast). Routes through the tier-aware
+   * activateProviderFallbackForSession so the failing session, when one
+   * exists, is REQUIRED at the signature: a future runtime-internal caller
+   * cannot silently derive the primary tier by omitting it. Passing null
+   * states "no session evidence" explicitly (primary tier).
+   */
   private activateProviderFallback(
     resetAt: Date | null,
-    reason: ProviderFallbackReason = 'usage-limit',
-  ): ReturnType<RuntimeFallbackCoordinator['activateProviderFallback']> {
-    return this.fallback.activateProviderFallback(resetAt, reason);
+    reason: ProviderFallbackReason,
+    failedSession: SessionManager | null,
+  ): ReturnType<RuntimeFallbackCoordinator['activateProviderFallbackForSession']> {
+    return this.fallback.activateProviderFallbackForSession(resetAt, reason ?? 'usage-limit', failedSession ?? null);
   }
 
   private armFallbackWindow(until: number, reason: string, activatedAt?: number, opts?: { restored?: boolean }): boolean {

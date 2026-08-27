@@ -388,6 +388,19 @@ export class RuntimeFallbackCoordinator {
   }
 
   /**
+   * Window STATE exists (activeUntil set) — deliberately BROADER than
+   * {@link RuntimeFallbackPort.isFallbackWindowActive}: it also holds in the
+   * in-flight revert-probe gap, where the deadline is past but the window's
+   * state (activeEntry, resetAt, activatedAt, the probe's own pending
+   * decision) is still live. Clock/window state worth protecting exists
+   * exactly when this holds — the tier fail-closed scope and the no-arm scope
+   * both key on it, and MUST stay on the same predicate.
+   */
+  private fallbackWindowStateExists(): boolean {
+    return this.host.fallbackWindow.activeUntil !== null;
+  }
+
+  /**
    * Failure-tier derivation by ROUTE identity — a different question from the
    * marking predicate above. Marking asks "does this session serve the ACTIVE
    * entry?" (evidence against that entry). The tier asks "is this session NOT
@@ -405,19 +418,6 @@ export class RuntimeFallbackCoordinator {
    * all there are no clocks to protect, and refusing to arm would break
    * primary failover — so the legacy primary tier applies there.
    */
-  /**
-   * Window STATE exists (activeUntil set) — deliberately BROADER than
-   * {@link RuntimeFallbackPort.isFallbackWindowActive}: it also holds in the
-   * in-flight revert-probe gap, where the deadline is past but the window's
-   * state (activeEntry, resetAt, activatedAt, the probe's own pending
-   * decision) is still live. Clock/window state worth protecting exists
-   * exactly when this holds — the tier fail-closed scope and the no-arm scope
-   * both key on it, and MUST stay on the same predicate.
-   */
-  private fallbackWindowStateExists(): boolean {
-    return this.host.fallbackWindow.activeUntil !== null;
-  }
-
   private failureTierForSession(session: SessionManager | null): FallbackFailureTier {
     if (!session) return 'primary';
     const failClosedTier: FallbackFailureTier =
