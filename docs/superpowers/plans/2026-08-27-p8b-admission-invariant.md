@@ -1,5 +1,7 @@
 # P8b Admission Invariant — ruling record (#2822)
 
+**Status:** completed
+
 Ruled 2026-08-27 (owner decision, merge-gate burn-down campaign). This document
 records the semantic choice that unblocked the P8b residual of #2084, per the
 precedent of the #2601 design-doc record for the prior semantic stop.

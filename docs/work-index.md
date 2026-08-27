@@ -18,15 +18,15 @@ The **Inconsistencies** section lists missing or stale index entries compared wi
 scoped markdown files currently on disk.
 
 **Repo:** `WhatSoup`
-**Total entries:** 127
+**Total entries:** 128
 
 ## Totals
 
 | Dimension | Breakdown |
 |---|---|
-| Kind | handoff=8, plan=63, review=4, spec=51, state=1 |
-| Status | active=32, closed=4, completed=37, deferred=7, pending=15, unknown=32 |
-| Status source | body-marker=107, fallback=19, state-md-status=1 |
+| Kind | handoff=8, plan=64, review=4, spec=51, state=1 |
+| Status | active=32, closed=4, completed=38, deferred=7, pending=15, unknown=32 |
+| Status source | body-marker=108, fallback=19, state-md-status=1 |
 
 ## Inconsistencies
 
@@ -161,7 +161,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/handoffs/2026-07-16-boundary-core-history-mining.md` | handoff | pending | body-marker | boundary-core-history-mining | 2026-07-16 |  |
 | `docs/superpowers/handoffs/2026-07-28-incident-control-plane-finder-report.md` | handoff | unknown | fallback | incident-control-plane-finder-report | 2026-07-28 |  |
 
-### docs/superpowers/plans  _(63 entries)_
+### docs/superpowers/plans  _(64 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
@@ -228,6 +228,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/plans/2026-08-15-poisoned-direct-send-rejection.md` | plan | unknown | fallback | poisoned-direct-send-rejection | 2026-08-20 |  |
 | `docs/superpowers/plans/2026-08-17-recovery-authority-store-concurrency-containment.md` | plan | completed | body-marker | recovery-authority-store-concurrency-containment | 2026-08-22 |  |
 | `docs/superpowers/plans/2026-08-21-anonymous-health-projection-ceiling.md` | plan | unknown | fallback | anonymous-health-projection-ceiling | 2026-08-21 |  |
+| `docs/superpowers/plans/2026-08-27-p8b-admission-invariant.md` | plan | completed | body-marker | p8b-admission-invariant | 2026-08-26 |  |
 
 ### docs/superpowers/reviews  _(4 entries)_
 
@@ -307,4 +308,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-08-27T01:05:00Z from commit `7b98d7b444c74b486a0fcedca0aca18c7886ecf6`
+- Generated at 2026-08-27T02:07:41Z from commit `1f643e2bf983a7982191eac1e52ace680889f443`
