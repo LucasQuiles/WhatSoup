@@ -88,7 +88,9 @@ interface TrackedEntry {
  * typing-start-guard has since been wired).
  */
 const TRACKED_UNREACHABLE: readonly TrackedEntry[] = [
-  { path: 'src/core/deferred-turn-store.ts', issue: '#3295', reason: 'S1 lands the deferred_by_recovery_scope store test-wired by design; the flagged admission classifier (S2) and drain supervisor (S3) are its runtime importers and land next in the slice train' },
+  // src/core/deferred-turn-store.ts graduated with #3295 S2: DurabilityEngine
+  // constructs the store and the coordinator's flagged admission defer is its
+  // runtime consumer.
   // src/fleet/incidents/* graduated 2026-07-28: the Plan-2 ingestion surface
   // (POST /api/signals in src/fleet/index.ts) is their production importer.
   // 24h-window primitives (#1871 inventory): landed test-only-wired, pending

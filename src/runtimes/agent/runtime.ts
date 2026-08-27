@@ -453,6 +453,14 @@ export interface AgentRuntimeOptions {
   /** Reply Guarantee timeout override for tests and tightly controlled deployments. */
   replyGuaranteeTimeoutMs?: number;
   /**
+   * #3295 S2 (default OFF): defer replay-safe per_chat followers blocked
+   * solely by outstanding turn recovery into durable obligations instead of
+   * terminally rejecting them. Evaluated PER ADMISSION (kill-switch
+   * semantics): flipping `enabled` off stops deferral immediately. Drain is
+   * S3; until it lands an obligation only accumulates.
+   */
+  deferredTurnAdmission?: { enabled: boolean };
+  /**
    * Systemd restart capability, injected from the composition root. The runtimes
    * layer cannot import the fleet layer, so main.ts constructs the concrete
    * ServiceManager and passes it here. When absent, the restart_self tool is not
@@ -698,6 +706,8 @@ export class AgentRuntime implements Runtime {
   private readonly db: Database;
   private readonly messenger: Messenger;
   private readonly instanceName: string;
+  /** #3295 S2: live-read flag object for deferred-turn admission (null = feature absent). */
+  private readonly deferredTurnAdmissionOptions: { enabled: boolean } | null;
   /** #2397: mapKeys that have exhausted auto-respawn and are not yet recovered. */
   private readonly exhaustedRespawnOwners = new Set<string>();
   private readonly shared: boolean;
@@ -2310,6 +2320,9 @@ export class AgentRuntime implements Runtime {
     );
     this.messenger = messenger;
     this.instanceName = instanceName ?? 'personal';
+    // #3295 S2: keep the OPTIONS OBJECT (not a copied boolean) so the flag is
+    // read live at every admission — the kill-switch contract.
+    this.deferredTurnAdmissionOptions = options?.deferredTurnAdmission ?? null;
     this.providerExecutionGate = createProviderExecutionGate(this.instanceName);
     this.runtimeTurnSupervisor = new RuntimeTurnSupervisor(
       this.instanceName,
@@ -2546,6 +2559,7 @@ export class AgentRuntime implements Runtime {
     // reference would keep reading the pre-test-setup value.
     return {
       get sessionScope() { return runtime.sessionScope; },
+      deferredTurnAdmissionEnabled: () => runtime.deferredTurnAdmissionEnabled(),
       get sandboxPerChat() { return runtime.sandboxPerChat; },
       get shared() { return runtime.shared; },
       get instanceName() { return runtime.instanceName; },
@@ -2580,6 +2594,7 @@ export class AgentRuntime implements Runtime {
       get db() { return runtime.db; },
       get instanceName() { return runtime.instanceName; },
       get sessionScope() { return runtime.sessionScope; },
+      deferredTurnAdmissionEnabled: () => runtime.deferredTurnAdmissionEnabled(),
       get agentProvider() { return runtime.agentProvider; },
       get agentProviderConfig() { return runtime.agentProviderConfig; },
       get model() { return runtime.model; },
@@ -2732,6 +2747,7 @@ export class AgentRuntime implements Runtime {
       db: runtime.db,
       instanceName: runtime.instanceName,
       get sessionScope() { return runtime.sessionScope; },
+      deferredTurnAdmissionEnabled: () => runtime.deferredTurnAdmissionEnabled(),
       shared: runtime.shared,
       runtimeTurnSupervisor: runtime.runtimeTurnSupervisor,
       sessionOwnership: runtime.sessionOwnership,
@@ -2964,6 +2980,11 @@ export class AgentRuntime implements Runtime {
       captureOwnedGeneration: (key, s) => this.captureOwnedPerChatGeneration(key, s),
       activateSpawnedSession: (key, s, o) => this.activateSpawnedOwnedPerChatSession(key, s, o),
     }) ?? this.capabilityObligationRuntime;
+  }
+
+  /** #3295 S2: live per-admission flag read (RuntimeTurnCoordinatorPort). */
+  deferredTurnAdmissionEnabled(): boolean {
+    return this.deferredTurnAdmissionOptions?.enabled === true;
   }
 
   /**

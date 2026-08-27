@@ -75,7 +75,11 @@ describe('prepared statement caching', () => {
     // promotion workflow's read-only newer-activity probe.)
     // (+1 vs 137, #3374 ask 2: selectInboundReclaimState — the finalizer's
     // sweep-owned-terminal recognition probe.)
-    expect(prepareSpy).toHaveBeenCalledTimes(138);
+    // (+10 vs 138, #3295 S2: DeferredTurnStore is now constructed by the
+    // engine — its ten fenced obligation statements (enqueue, getBySource,
+    // claim/requeue/commit/terminalize family, expiry, listings) prepare
+    // once here.)
+    expect(prepareSpy).toHaveBeenCalledTimes(148);
     prepareSpy.mockClear();
 
     const seq = engine.journalInbound('msg-1', 'conv-1', 'jid-1@s.whatsapp.net', 'agent');
