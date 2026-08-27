@@ -2,7 +2,7 @@
 
 **Status:** Active — refreshed against canonical base `482b707d716aee5641db25d40c2a954caee5d78f`; migrations 47 through 52 are already consumed, and the current branch advances the schema to migration 53 for outbound-quarantine disposition and retirement receipts. Provider-lifecycle implementation and activation remain unauthorized
 
-**Schema allocation:** current canonical schema is migration 61; bounded terminal recovery/canonical `not_sent` is forward migration 62; the provider-event lifecycle ledger is migration 63. Migrations 50 and 51 are consumed by metadata-only durability evidence, migration 52 by outbound ambiguity-episode timing, migration 53 by outbound quarantine disposition/retirement receipts, migration 54 by the completed-delivery identity-admission ledger, migration 55 by typed online enrichment-cycle receipts, migration 56 by the inbound_events processing-status CHECK constraint (#2250), migration 57 by the durable trigger-occurrence ledger (#2566), migration 58 by the capability-obligation replay ledger, migration 59 by the fact-export queue state machine and lease durability (#2567), migration 60 by the capability-obligation audit hotfix (execution reservations + creation-reason honesty rebuild), and migration 61 by completed-delivery identity-admission terminalization (expired state + preserved receipt), so the still-unpublished forward allocations move to migrations 62 and 63.
+**Schema allocation:** current canonical schema is migration 62; bounded terminal recovery/canonical `not_sent` is forward migration 63; the provider-event lifecycle ledger is migration 64. Migrations 50 and 51 are consumed by metadata-only durability evidence, migration 52 by outbound ambiguity-episode timing, migration 53 by outbound quarantine disposition/retirement receipts, migration 54 by the completed-delivery identity-admission ledger, migration 55 by typed online enrichment-cycle receipts, migration 56 by the inbound_events processing-status CHECK constraint (#2250), migration 57 by the durable trigger-occurrence ledger (#2566), migration 58 by the capability-obligation replay ledger, migration 59 by the fact-export queue state machine and lease durability (#2567), migration 60 by the capability-obligation audit hotfix (execution reservations + creation-reason honesty rebuild), and migration 61 by completed-delivery identity-admission terminalization (expired state + preserved receipt), so the still-unpublished forward allocations move to migrations 62 and 63.
 
 ## Purpose
 
@@ -814,13 +814,13 @@ unproved child origins default to internal no-send/no-effect handling.
     never proves no transmission.
     `not_sent` is a distinct outbound operation status emitted only by typed pre-send
     rejection, and terminal `deliveryKind=not_sent` retains exact operation/status and
-    singleton-set proof. Migration 62 permits aggregate `not_sent` only for
+    singleton-set proof. Migration 63 permits aggregate `not_sent` only for
     an immutable singleton answer-set seal created atomically with terminalization;
     database triggers reject a racing/later answer sibling. Without that seal, even one
     not-sent operation remains aggregate uncertain. No-send delivery evidence never clears provider/tool/
     lifecycle replay vetoes. Both lockstepped terminal validators, database triggers,
     recovery queries, and retention prove and preserve the referenced operation state.
-  - **CON-002.AC-07:** Migration 63 replaces the singleton seal with immutable fields on
+  - **CON-002.AC-07:** Migration 64 replaces the singleton seal with immutable fields on
     the final attempt: publication-seal ID/kind, owner, invocation epoch, exact count,
     canonical membership fingerprint, and sealed time. Membership is restart-rederived
     from every reply-bearing/external outbound link across all sealed plans; terminal
