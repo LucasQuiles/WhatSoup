@@ -245,7 +245,7 @@ function noteProbeSuccess(warnMsg: string): void {
  * catch-all 'unclassified' cause absorb it. */
 export function addDegradationSilenceProof(
   statusReasons: string[],
-  recentlyDegraded: Set<string>,
+  recentlyDegraded: ReadonlySet<string> | ReadonlyMap<string, number>,
   instanceName: string,
 ): boolean {
   if (statusReasons.length === 0 && recentlyDegraded.has(instanceName)) {
@@ -253,6 +253,41 @@ export function addDegradationSilenceProof(
     return true;
   }
   return false;
+}
+
+/** Recovery proof for the #2280 silence latch. The latch is released ONLY on a
+ * fresh successful PRIMARY-provider turn receipt strictly newer than the latch
+ * point: the runtime reports a successful turn, served by the provider the
+ * caller has established as primary (`primaryProviderId`; pass null while a
+ * fallback window is live or the fallback state is unavailable — no release),
+ * with `last_successful_turn_at` strictly greater than the recorded latch
+ * timestamp and within the existing turn-reliance freshness window
+ * (MODEL_STALE_RELIANCE_MS). Silence, elapsed time, restarts, empty reason
+ * lists, stale receipts, and non-primary receipts never release. Deletes the
+ * latch entry and returns true when the proof holds. Seam note: this predicate
+ * is the whole release contract — an alternative (e.g. N consecutive clean
+ * evaluations) can replace it without touching the call site. */
+export function releaseDegradationLatchOnRecoveryProof(
+  recentlyDegraded: Map<string, number>,
+  instanceName: string,
+  turnCapability: {
+    last_successful_turn_at: number | null;
+    last_successful_turn_provider: string | null;
+  } | null,
+  primaryProviderId: string | null,
+  now: number,
+): boolean {
+  const latchedAtMs = recentlyDegraded.get(instanceName);
+  if (latchedAtMs === undefined) return false;
+  if (turnCapability === null || primaryProviderId === null) return false;
+  const receiptAt = turnCapability.last_successful_turn_at;
+  if (receiptAt === null || turnCapability.last_successful_turn_provider !== primaryProviderId) {
+    return false;
+  }
+  if (receiptAt <= latchedAtMs) return false; // predates the latch — stale proof
+  if (now - receiptAt > MODEL_STALE_RELIANCE_MS) return false; // receipt no longer fresh
+  recentlyDegraded.delete(instanceName);
+  return true;
 }
 
 /** Symmetric to the `degradation_causes` catch-all net (non-healthy status with
@@ -980,12 +1015,15 @@ function sendRequestErrorMessage(err: unknown): string {
 }
 
 export function startHealthServer(deps: HealthDeps): ReturnType<typeof createServer> {
-  // #2280: tracks instances that have recently been in STATUS_DEGRADED, so
-  // status updates that see empty statusReasons (silence) can keep the
-  // instance degraded until explicit recovery proof arrives. Scoped to the
-  // server instance: module scope would leak degradation across server
-  // lifetimes that share an instance name (observed as cross-test pollution).
-  const recentlyDegraded = new Set<string>();
+  // #2280: tracks instances that have recently been in STATUS_DEGRADED, keyed
+  // to the epoch-ms of the latest evaluation that observed a real degradation
+  // reason (the latch point), so status updates that see empty statusReasons
+  // (silence) keep the instance degraded until explicit recovery proof arrives
+  // — a fresh successful primary-turn receipt strictly newer than the latch
+  // point (releaseDegradationLatchOnRecoveryProof). Scoped to the server
+  // instance: module scope would leak degradation across server lifetimes that
+  // share an instance name (observed as cross-test pollution).
+  const recentlyDegraded = new Map<string, number>();
   // Shared by requireAuth and hasHealthAuth — one scoped, cached resolution
   // path for every protected route on this server (see HealthAuthState).
   const healthAuth: HealthAuthState = { instanceName: deps.instanceName };
@@ -1943,9 +1981,44 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         if (durabilityDebtIsDegraded) statusReasons.push('durability_delivery_debt');
         // #2280: silence from child processes is not proof of recovery.
         // If statusReasons is empty but the instance was recently degraded,
-        // keep it degraded until explicit recovery evidence is observed.
+        // keep it degraded until explicit recovery evidence is observed. The
+        // evidence that DOES release the latch is a fresh successful
+        // primary-provider turn receipt strictly newer than the latch point,
+        // checked BEFORE the silence proof so a genuinely recovered instance
+        // flips healthy on this evaluation. The primary provider is only named
+        // by fallback state while no fallback window is live (effectiveProvider
+        // is the primary then); during a live window a receipt cannot be proven
+        // primary, so no release (fail closed, mirrors fallbackWindowActive).
+        const hasLiveDegradationReasons = statusReasons.length > 0;
+        if (!hasLiveDegradationReasons) {
+          const fallbackWindowLive =
+            fallbackState !== null
+            && typeof fallbackState.fallbackActiveUntil === 'number'
+            && Number.isFinite(fallbackState.fallbackActiveUntil)
+            && fallbackState.fallbackActiveUntil > Date.now();
+          const primaryProviderId =
+            fallbackState !== null && !fallbackWindowLive ? fallbackState.effectiveProvider : null;
+          const latchReleased = releaseDegradationLatchOnRecoveryProof(
+            recentlyDegraded,
+            deps.instanceName,
+            turnCapability,
+            primaryProviderId,
+            Date.now(),
+          );
+          if (latchReleased) {
+            log.info({ instance: deps.instanceName }, 'degradation silence latch released: fresh primary-turn receipt');
+          }
+        }
         silenceUnprovenLatched = addDegradationSilenceProof(statusReasons, recentlyDegraded, deps.instanceName);
-        if (statusReasons.length > 0) recentlyDegraded.add(deps.instanceName);
+        if (hasLiveDegradationReasons) {
+          // Refresh the latch point only on REAL degradation reasons — the
+          // silence reason itself must not advance it, or a receipt could
+          // never outrun a frequently-polled latch.
+          if (!recentlyDegraded.has(deps.instanceName)) {
+            log.info({ instance: deps.instanceName }, 'degradation silence latch set');
+          }
+          recentlyDegraded.set(deps.instanceName, Date.now());
+        }
         status = statusReasons.length > 0 ? 'degraded' : 'healthy';
       }
 

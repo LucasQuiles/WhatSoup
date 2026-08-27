@@ -7001,3 +7001,203 @@ describe('degradation classification symmetry', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// #2280 silence-latch release: explicit recovery proof.
+//
+// The silence latch (degradation_silence_unproven) keeps an instance degraded
+// when every live signal goes quiet after a real degradation, because silence
+// from child processes is not proof of recovery. Without a proof channel the
+// latch held for the LIFE OF THE PROCESS — a genuinely recovered instance
+// (live example: ph-bot, 2026-08-26) reported degraded forever.
+//
+// Recovery-proof contract under test: the latch releases ONLY when the health
+// evaluation observes turn-capability evidence of a successful PRIMARY-provider
+// turn that is (a) strictly newer than the latch point and (b) fresh per the
+// existing turn-reliance window (MODEL_STALE_RELIANCE_MS). Silence alone,
+// elapsed time alone, an empty reason list alone, a stale receipt, or a
+// non-primary receipt never release. Reason/cause symmetry must hold in both
+// states: latched => both 'degradation_silence_unproven' twins present,
+// released => neither present.
+// ---------------------------------------------------------------------------
+describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
+  let db: Database;
+  let prevToken: string | undefined;
+
+  beforeEach(() => {
+    prevToken = process.env.WHATSOUP_HEALTH_TOKEN;
+    process.env.WHATSOUP_HEALTH_TOKEN = TEST_HEALTH_TOKEN;
+    db = makeDb();
+  });
+
+  afterEach(() => {
+    db.close();
+    if (prevToken === undefined) delete process.env.WHATSOUP_HEALTH_TOKEN;
+    else process.env.WHATSOUP_HEALTH_TOKEN = prevToken;
+  });
+
+  // Agent-instance harness with one mutable degradation signal (enrichment
+  // runtime), a mutable turn receipt, and a primary-provider fallback state
+  // (no live window => effectiveProvider names the primary).
+  async function buildLatchHarness(): Promise<{
+    server: ReturnType<typeof createServer>;
+    port: number;
+    setRuntimeDegraded: (v: boolean) => void;
+    setTurnReceipt: (receipt: { at: number; provider: string } | null) => void;
+  }> {
+    let runtimeDegraded = true;
+    let receipt: { at: number; provider: string } | null = null;
+    const deps = makeDeps(db, {
+      instanceType: 'agent',
+      getEnrichmentStats: () => ({ lastRun: null, unprocessed: 0, runtimeDegraded }),
+      runtime: {
+        getHealthSnapshot: () => ({
+          status: 'healthy',
+          details: receipt === null ? {} : {
+            turnCapability: {
+              modelUsable: true,
+              modelUsabilityStatus: 'usable',
+              lastSuccessfulTurnAt: receipt.at,
+              lastSuccessfulTurnProvider: receipt.provider,
+              lastTurnErrorClass: null,
+              lastTurnErrorAt: null,
+            },
+          },
+        }),
+        getFallbackState: () => ({
+          effectiveProvider: 'claude-cli',
+          fallbackActiveUntil: null,
+          fallbackTurnsServed: 0,
+          fallbackTurnsEmpty: 0,
+          lastFallbackTurnAt: null,
+        }),
+      } as unknown as HealthDeps['runtime'],
+    });
+    const { server, port } = await buildTestServer(deps);
+    return {
+      server,
+      port,
+      setRuntimeDegraded: (v: boolean) => { runtimeDegraded = v; },
+      setTurnReceipt: (r: { at: number; provider: string } | null) => { receipt = r; },
+    };
+  }
+
+  function expectLatched(json: Record<string, unknown>): void {
+    expect(json.status).toBe('degraded');
+    expect(json.status_reasons).toContain('degradation_silence_unproven');
+    expect(json.degradation_causes).toContain('degradation_silence_unproven');
+  }
+
+  function expectReleased(json: Record<string, unknown>): void {
+    expect(json.status).toBe('healthy');
+    expect(json.status_reasons).not.toContain('degradation_silence_unproven');
+    expect(json.degradation_causes).not.toContain('degradation_silence_unproven');
+  }
+
+  // Strictly-newer receipts need the clock to advance past the latch point;
+  // 5ms guarantees Date.now() moved even on a coarse timer.
+  const tick = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 5));
+
+  it('releases the latch when a fresh primary-turn receipt is newer than the latch point', async () => {
+    const h = await buildLatchHarness();
+    try {
+      const first = JSON.parse((await healthReq(h.port)).body);
+      expect(first.status).toBe('degraded');
+      expect(first.status_reasons).toContain('enrichment_runtime_degraded');
+
+      h.setRuntimeDegraded(false);
+      await tick();
+      h.setTurnReceipt({ at: Date.now(), provider: 'claude-cli' });
+      const second = JSON.parse((await healthReq(h.port)).body);
+      expectReleased(second);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('a stale receipt older than the latch point does not release', async () => {
+    const h = await buildLatchHarness();
+    try {
+      const staleAt = Date.now() - 1000;
+      const first = JSON.parse((await healthReq(h.port)).body);
+      expect(first.status).toBe('degraded');
+
+      h.setRuntimeDegraded(false);
+      h.setTurnReceipt({ at: staleAt, provider: 'claude-cli' });
+      const second = JSON.parse((await healthReq(h.port)).body);
+      expectLatched(second);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('silence alone never releases: no receipt and empty reasons stay latched across evaluations', async () => {
+    const h = await buildLatchHarness();
+    try {
+      const first = JSON.parse((await healthReq(h.port)).body);
+      expect(first.status).toBe('degraded');
+
+      h.setRuntimeDegraded(false);
+      const second = JSON.parse((await healthReq(h.port)).body);
+      expectLatched(second);
+      // Elapsed time / repeated quiet evaluations alone must not release either.
+      await tick();
+      const third = JSON.parse((await healthReq(h.port)).body);
+      expectLatched(third);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('a fresh receipt from a non-primary provider does not release', async () => {
+    const h = await buildLatchHarness();
+    try {
+      const first = JSON.parse((await healthReq(h.port)).body);
+      expect(first.status).toBe('degraded');
+
+      h.setRuntimeDegraded(false);
+      await tick();
+      h.setTurnReceipt({ at: Date.now(), provider: 'openai-api' });
+      const second = JSON.parse((await healthReq(h.port)).body);
+      expectLatched(second);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('after a release, a new degradation re-latches and only a NEWER fresh receipt releases again', async () => {
+    const h = await buildLatchHarness();
+    try {
+      const first = JSON.parse((await healthReq(h.port)).body);
+      expect(first.status).toBe('degraded');
+
+      h.setRuntimeDegraded(false);
+      await tick();
+      h.setTurnReceipt({ at: Date.now(), provider: 'claude-cli' });
+      const second = JSON.parse((await healthReq(h.port)).body);
+      expectReleased(second);
+
+      // A NEW real degradation re-latches normally...
+      h.setRuntimeDegraded(true);
+      await tick();
+      const third = JSON.parse((await healthReq(h.port)).body);
+      expect(third.status).toBe('degraded');
+      expect(third.status_reasons).toContain('enrichment_runtime_degraded');
+      expect(third.status_reasons).not.toContain('degradation_silence_unproven');
+
+      // ...and the receipt that released the FIRST latch predates the new
+      // latch point, so it must not release this one.
+      h.setRuntimeDegraded(false);
+      const fourth = JSON.parse((await healthReq(h.port)).body);
+      expectLatched(fourth);
+
+      // A receipt newer than the new latch point releases again.
+      await tick();
+      h.setTurnReceipt({ at: Date.now(), provider: 'claude-cli' });
+      const fifth = JSON.parse((await healthReq(h.port)).body);
+      expectReleased(fifth);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+});
