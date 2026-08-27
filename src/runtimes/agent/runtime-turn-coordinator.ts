@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { systemClock } from '../../lib/clock.ts';
 import type { CapabilityDecisionParams } from '../../core/capability-obligation-store.ts';
 import type { ContentType } from '../../core/types.ts';
 import type {
@@ -780,7 +781,7 @@ private maybeDeferRecoveryBlockedTurn(
       // is by inbound_seq, so a now-stamp keeps the row honest without a read.
       receivedAtUnixSeconds: Number.isFinite(replay.receivedAtUnixSeconds)
         ? replay.receivedAtUnixSeconds
-        : Math.floor(Date.now() / 1000),
+        : systemClock.nowUnixSec(),
       replaySafe: replay.replaySafe,
       senderJid: replay.senderJid,
       senderName: replay.senderName ?? null,
