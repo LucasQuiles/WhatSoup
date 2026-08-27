@@ -93,6 +93,18 @@ import type { RuntimePrimaryModelUsability, RuntimeTurnCapability } from './runt
 const log = createChildLogger('agent-runtime');
 
 /**
+ * Which provider tier produced the failure driving a (re-)activation. The
+ * reason taxonomy (ProviderFallbackReason) encodes WHY the primary was left,
+ * never WHICH TIER just failed — so the chain-advance paths that re-enter the
+ * activation machinery for a FALLBACK entry's failure must say so explicitly.
+ * A fallback-tier failure with no parsed reset estimate carries no evidence
+ * about the PRIMARY: it must advance the chain without extending the window
+ * or restarting the primary recovery clocks (live ph-bot 2026-08-26: a dead
+ * fallback tier plus user traffic postponed primary recovery indefinitely).
+ */
+type FallbackFailureTier = 'primary' | 'fallback';
+
+/**
  * Consecutive empty PRIMARY-provider user turns that force a provider fallback
  * even when the independent usability probe has not (yet) flagged the primary.
  * A healthy primary effectively never returns two pure-empty user turns in a
@@ -610,15 +622,16 @@ export class RuntimeFallbackCoordinator {
     reason: ProviderFallbackReason,
     session: SessionManager | null,
     evidenceText?: string,
+    failureTier: FallbackFailureTier = 'primary',
   ): ProviderFallbackActivation | null {
     const failedKey = this.markActiveFallbackFailed(session, reason, evidenceText);
-    const activation = this.activateProviderFallback(resetAt, reason);
+    const activation = this.activateProviderFallback(resetAt, reason, failureTier);
     if (activation || !failedKey) return activation;
 
     // Preserve previous single-fallback behavior when no alternate exists:
     // keep the current fallback window instead of reverting to a known-bad primary.
     this.host.fallbackChain.failedKeys.delete(failedKey);
-    return this.activateProviderFallback(resetAt, reason);
+    return this.activateProviderFallback(resetAt, reason, failureTier);
   }
 
   /**
@@ -953,6 +966,7 @@ export class RuntimeFallbackCoordinator {
         advanceReason,
         session,
         'fallback entry returned empty output',
+        'fallback',
       );
       if (activation) {
         // Advanced to a fresh entry — clear the empty run so the new entry
@@ -1021,6 +1035,7 @@ export class RuntimeFallbackCoordinator {
       advanceReason,
       session,
       evidence,
+      'fallback',
     );
     const to = this.host.fallbackWindow.activeEntry;
     const advanced = activation !== null
@@ -1323,7 +1338,7 @@ export class RuntimeFallbackCoordinator {
     }
   }
 
-  armFallbackWindow(until: number, reason: string, activatedAt: number = Date.now(), opts?: { restored?: boolean }): boolean {
+  armFallbackWindow(until: number, reason: string, activatedAt: number = Date.now(), opts?: { restored?: boolean; preserveClocks?: boolean }): boolean {
     this.kickStaleDiscoveryRefresh('window-arm');
     const selection = this.selectFallbackEntryForWindow(reason);
     if (!selection) return false;
@@ -1392,21 +1407,32 @@ export class RuntimeFallbackCoordinator {
         );
       }
     }
-    if (this.host.revertTimer) {
-      clearTimeout(this.host.revertTimer);
-      this.host.revertTimer = null;
+    // A clock-preserving arm (fallback-tier chain advance, `until` unchanged)
+    // keeps the already-armed revert timer: its deadline is the same, and
+    // re-setting it would be the disallowed re-arm the moment a caller ever
+    // passed a moved `until`. The revert timer is only ever null while no
+    // window is active, so the preserve branch (active window by definition)
+    // still re-arms defensively if the handle is somehow missing.
+    if (!opts?.preserveClocks || this.host.revertTimer === null) {
+      if (this.host.revertTimer) {
+        clearTimeout(this.host.revertTimer);
+        this.host.revertTimer = null;
+      }
+      this.host.revertTimer = setTimeout(() => {
+        this.handleFallbackRevertTimer();
+      }, Math.max(0, until - Date.now()));
+      // Do not let the revert timer keep the process alive at shutdown.
+      this.host.revertTimer.unref?.();
     }
-    this.host.revertTimer = setTimeout(() => {
-      this.handleFallbackRevertTimer();
-    }, Math.max(0, until - Date.now()));
-    // Do not let the revert timer keep the process alive at shutdown.
-    this.host.revertTimer.unref?.();
     // Belt-and-suspenders: persist the memory-authoritative reason (fallbackArmReason
     // after the set-when-null guard above) so the DB can never diverge from the
     // in-memory value even if a caller passes an incorrect reason directly.
     const persistReason = this.host.fallbackWindow.armReason ?? reason;
     this.host.fallbackWindow.recoveryProbeRequired = fallbackRequiresPrimaryProbe(persistReason as ProviderFallbackReason);
-    this.scheduleFallbackPrimaryProbe();
+    // The standing primary probe's countdown must survive a clock-preserving
+    // arm: scheduleFallbackPrimaryProbe clears and restarts it, which under
+    // per-turn fallback failures kept pushing the probe out forever.
+    if (!opts?.preserveClocks) this.scheduleFallbackPrimaryProbe();
     try {
       saveFallbackState(this.host.db, {
         activeUntil: until,
@@ -1611,12 +1637,15 @@ export class RuntimeFallbackCoordinator {
    * parsed `resetAt` when available, else `DEFAULT_FALLBACK_WINDOW_MS` from now,
    * clamped to [MIN_FALLBACK_WINDOW_MS, MAX_FALLBACK_WINDOW_MS]. Idempotent: a
    * second activation while already active extends the window to the later of
-   * the two. Schedules an auto-revert timer (unref'd so it never keeps the
-   * process alive).
+   * the two — except a fallback-tier re-activation with null resetAt (a chain
+   * advance past a failed FALLBACK entry), which keeps the window end and the
+   * primary recovery clocks untouched. Schedules an auto-revert timer (unref'd
+   * so it never keeps the process alive).
    */
   activateProviderFallback(
     resetAt: Date | null,
     reason: ProviderFallbackReason = 'usage-limit',
+    failureTier: FallbackFailureTier = 'primary',
   ): ProviderFallbackActivation | null {
     // Discovery mode: kick a stale/absent snapshot BEFORE the empty-chain
     // guard below — a failed boot derivation leaves the chain empty, and this
@@ -1626,18 +1655,30 @@ export class RuntimeFallbackCoordinator {
     this.kickStaleDiscoveryRefresh('window-arm');
     if (this.host.agentFallbacks.length === 0) return null;
 
+    const wasActive = this.host.fallbackWindow.activeUntil !== null;
+    // A FALLBACK-tier failure with no parsed reset estimate says nothing about
+    // the PRIMARY, so the window clocks must not move: the default-window
+    // extension below would push activeUntil out by up to
+    // DEFAULT_FALLBACK_WINDOW_MS per failed fallback turn, and the re-arm
+    // would restart the standing primary recovery probe — together postponing
+    // primary recovery indefinitely while a dead fallback takes live traffic.
+    // With a non-null resetAt the extension targets the same absolute reset
+    // time regardless of tier, so that path keeps the existing behavior.
+    const preserveWindowClocks = failureTier === 'fallback' && resetAt === null && wasActive;
+
     const now = Date.now();
     const rawUntil = resetAt ? resetAt.getTime() : now + DEFAULT_FALLBACK_WINDOW_MS;
     const clampedUntil = Math.min(
       now + MAX_FALLBACK_WINDOW_MS,
       Math.max(now + MIN_FALLBACK_WINDOW_MS, rawUntil),
     );
-    // Extend rather than shorten an already-active window.
-    const until = this.host.fallbackWindow.activeUntil
-      ? Math.max(this.host.fallbackWindow.activeUntil, clampedUntil)
-      : clampedUntil;
-
-    const wasActive = this.host.fallbackWindow.activeUntil !== null;
+    // Extend rather than shorten an already-active window — unless this is a
+    // clock-preserving fallback-tier advance, which keeps the end unchanged.
+    const until = preserveWindowClocks
+      ? this.host.fallbackWindow.activeUntil!
+      : this.host.fallbackWindow.activeUntil
+        ? Math.max(this.host.fallbackWindow.activeUntil, clampedUntil)
+        : clampedUntil;
     // Preserve the original first-engagement time across extensions so the
     // persisted record always reflects when the fallback was first triggered,
     // not when it was last extended.
@@ -1649,7 +1690,7 @@ export class RuntimeFallbackCoordinator {
     // stores 'usage-limit' as the original cause.
     const persistedReason = wasActive && this.host.fallbackWindow.armReason !== null ? this.host.fallbackWindow.armReason : reason;
     this.host.fallbackWindow.resetAt = resetAt?.getTime() ?? null;
-    const armed = this.armFallbackWindow(until, persistedReason, activatedAt);
+    const armed = this.armFallbackWindow(until, persistedReason, activatedAt, preserveWindowClocks ? { preserveClocks: true } : undefined);
     if (!armed) return null;
     const fallbackEntry = this.host.fallbackWindow.activeEntry;
     if (!fallbackEntry) return null;
