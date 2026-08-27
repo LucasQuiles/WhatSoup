@@ -17,7 +17,9 @@ const MAX_AUTOMATIC_RETRY_ATTEMPTS = 5;
 const RETRY_BATCH_SIZE = 16;
 const RETRY_DELAY_MS = 5_000;
 
-type NonTerminalFinalization = Exclude<FinalizeRuntimeTurnResult, { kind: 'terminal' }>;
+// reclaimed_by_sweep is terminal-equivalent (the sweep owns the durable
+// terminal) and is never retained, so it is excluded alongside 'terminal'.
+type NonTerminalFinalization = Exclude<FinalizeRuntimeTurnResult, { kind: 'terminal' | 'reclaimed_by_sweep' }>;
 
 export interface RuntimeTurnFinalizationPostEffects {
   readonly queue: unknown;
@@ -100,7 +102,7 @@ export class RuntimeTurnSupervisor<TPostEffects> {
   private readonly instanceName: string;
   private readonly durability: () => RuntimeTurnFinalizerDurability | null;
   private readonly applyRecovered: (
-    result: Extract<FinalizeRuntimeTurnResult, { kind: 'terminal' }>,
+    result: Extract<FinalizeRuntimeTurnResult, { kind: 'terminal' | 'reclaimed_by_sweep' }>,
     retained: RetainedRuntimeTurnFinalization<TPostEffects>,
   ) => void | Promise<void>;
   private readonly retained = new Map<string, RetainedRuntimeTurnFinalization<TPostEffects>>();
@@ -118,7 +120,7 @@ export class RuntimeTurnSupervisor<TPostEffects> {
     instanceName: string,
     durability: () => RuntimeTurnFinalizerDurability | null,
     applyRecovered: (
-      result: Extract<FinalizeRuntimeTurnResult, { kind: 'terminal' }>,
+      result: Extract<FinalizeRuntimeTurnResult, { kind: 'terminal' | 'reclaimed_by_sweep' }>,
       retained: RetainedRuntimeTurnFinalization<TPostEffects>,
     ) => void | Promise<void>,
   ) {
@@ -288,7 +290,7 @@ export class RuntimeTurnSupervisor<TPostEffects> {
           replay: retained.context.replay,
           bookkeeping: retained.bookkeeping,
         });
-        if (result.kind === 'terminal') {
+        if (result.kind === 'terminal' || result.kind === 'reclaimed_by_sweep') {
           await this.applyRecovered(result, retained);
           this.retained.delete(turnId);
           this.unblock(retained.context, turnId);

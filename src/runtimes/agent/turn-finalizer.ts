@@ -29,7 +29,10 @@ const REPLY_GUARANTEE_BREACH_ALERT_SUMMARY =
 export type RuntimeTurnFinalizerDurability = Pick<
   DurabilityEngine,
   'getOutboundDeliverySnapshot' | 'finalizeTurnTerminal' | 'markContinuityCandidateIfNoTerminalOutbound'
->;
+> & {
+  /** Optional so narrow test fakes keep compiling; the real engine has it. */
+  isInboundSweepReclaimed?(seq: number): boolean;
+};
 
 export type RuntimeAnswerEvidence =
   | { readonly kind: 'ready'; readonly opIds: readonly number[] }
@@ -82,6 +85,18 @@ export type FinalizeRuntimeTurnResult =
     readonly mayAdvance: false;
     readonly stickyDegraded: true;
     readonly stopAcceptingAffectedScope: true;
+  }
+  | {
+    /**
+     * The W2 stuck-inbound sweep already owns this turn's durable terminal
+     * (stale_reclaim, #3374 ask 2). Nothing durable remains to write and no
+     * recovery will ever arrive: the runtime must retire its in-memory state
+     * (post-effects) and advance — no incident, no supervisor retention.
+     */
+    readonly kind: 'reclaimed_by_sweep';
+    readonly identity: TurnIdentity;
+    readonly affectedScope: AffectedTurnScope;
+    readonly mayAdvance: true;
   };
 
 function deliveryIdentity(identity: TurnIdentity): OutboundDeliveryIdentity {
@@ -386,6 +401,17 @@ export function finalizeRuntimeTurn(
       effectiveReplyGuaranteeDisarmed: receipt.effectiveReplyGuaranteeDisarmed,
     };
   } catch {
+    if (
+      params.identity.inboundSeq !== null
+      && params.durability.isInboundSweepReclaimed?.(params.identity.inboundSeq) === true
+    ) {
+      return {
+        kind: 'reclaimed_by_sweep',
+        identity: params.identity,
+        affectedScope: affectedScope(params.identity),
+        mayAdvance: true,
+      };
+    }
     return emitFailureIncident(params, 'terminal_finalize');
   }
 }

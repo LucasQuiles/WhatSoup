@@ -7,6 +7,7 @@ import type { Database } from '../../core/database.ts';
 import type {
   DurabilityEngine,
   SessionCheckpointRow,
+  StaleReclaimedInbound,
 } from '../../core/durability.ts';
 import type { TurnRecoveryClaimFence, TurnRecoveryJobRow } from '../../core/turn-recovery-store.ts';
 import type {
@@ -238,6 +239,7 @@ import {
   type RuntimeTurnPostEffects,
   type RuntimeTurnQueueTeardown,
   type RuntimeTurnSourceSnapshot,
+  WedgedTurnReclaimedError,
 } from './runtime-turn-coordinator.ts';
 import { TurnCapabilityTracker, type TurnCapabilityErrorClass } from './turn-capability-tracker.ts';
 import { SessionOwnershipRegistry } from './session-ownership.ts';
@@ -2941,6 +2943,14 @@ export class AgentRuntime implements Runtime {
     this.turnRecoverySupervisor.start(); // PRESTAGE-T4; idempotent
     this.turnRecoveryDeadman.start();
 
+    // #3374 ask 2: when the W2 sweep durably reclaims a stale open inbound, a
+    // RUNTIME lane may still be pinned by that exact turn (provider terminal
+    // never arrived — the live wedge class). Durable reclamation alone repairs
+    // only the journal; this listener releases the wedged lane too.
+    if (typeof engine.setStaleInboundReclaimListener === 'function') {
+      engine.setStaleInboundReclaimListener((rows) => this.releaseWedgedReclaimedLanes(rows));
+    }
+
     // Obligation replay: opt-in, per_chat only; the helper keeps ABSENT fields inert.
     this.capabilityObligationRuntime = maybeActivateCapabilityObligationRuntime({
       enabled: this.sessionScope === 'per_chat', alreadyActive: this.capabilityObligationRuntime !== null,
@@ -2954,6 +2964,114 @@ export class AgentRuntime implements Runtime {
       captureOwnedGeneration: (key, s) => this.captureOwnedPerChatGeneration(key, s),
       activateSpawnedSession: (key, s, o) => this.activateSpawnedOwnedPerChatSession(key, s, o),
     }) ?? this.capabilityObligationRuntime;
+  }
+
+  /**
+   * #3374 ask 2 — wedged-lane release, coupled to durable stale reclamation.
+   *
+   * A turn whose provider terminal never arrives pins its TurnQueue's
+   * activeTurn forever: the turn watchdog clears at provider-turn terminal,
+   * the idle sweep refuses mid-turn sessions, and the W2 sweep repairs only
+   * the journal row (after its 24h grace). When that sweep reclaims a stale
+   * open inbound that is STILL the active turn of a live lane, this handler
+   * drives the same crash-finalization path a provider death would: the held
+   * processor settles, queued followers drain to a fresh session, and the
+   * wedge ends without a process restart. Lanes that do not match a reclaimed
+   * row are untouched; the sweep's 24h grace means no legitimate long turn is
+   * at risk (the long-op liveness ceiling caps genuine work far below that).
+   */
+  private releaseWedgedReclaimedLanes(rows: readonly StaleReclaimedInbound[]): void {
+    if (rows.length === 0) return;
+    const byMessageId = new Map(rows.map((row) => [row.sourceMessageId, row]));
+    for (const [mapKey, turnQueue] of this.perChatTurnQueues) {
+      const active = turnQueue.activeTurn;
+      if (!active) continue;
+      const row = byMessageId.get(active.sourceMessageId);
+      if (row === undefined) continue;
+      // The reclaimed row must identify THIS lane's turn, not a cross-chat
+      // message-id collision: the journaled inbound and the queued turn share
+      // a chat, so their conversation keys must agree.
+      if (row.conversationKey !== toConversationKey(active.chatJid)) {
+        log.warn(
+          { inboundSeq: row.seq, mapKey },
+          'wedged-lane release: reclaimed row conversation does not match the lane — skipping',
+        );
+        continue;
+      }
+      const session = this.chatSessions.get(mapKey);
+      if (!session || session === this.controlSession) {
+        log.warn(
+          { inboundSeq: row.seq, queuedBehind: turnQueue.pending },
+          'wedged-lane release: reclaimed turn pins a queue with no owned session — skipping',
+        );
+        continue;
+      }
+      const managerId = this.sessionManagerIds.get(session);
+      const owner = this.sessionOwnership.get(mapKey);
+      if (!managerId || !owner || owner.managerId !== managerId) {
+        log.warn({ inboundSeq: row.seq }, 'wedged-lane release: session ownership is not current — skipping');
+        continue;
+      }
+      // A session whose provider turn is NOT in flight is not wedged: its
+      // terminal arrived and ordinary finalization is racing the sweep —
+      // killing it would shoot a healthy child. Doubles without the field
+      // report undefined and proceed.
+      if (session.getStatus().turnInFlight === false) {
+        log.warn(
+          { inboundSeq: row.seq, mapKey },
+          'wedged-lane release: provider turn already terminalized — leaving finalization to its owner',
+        );
+        continue;
+      }
+      // Exactly one published context is the releasable shape; anything else
+      // is an anomalous lane no release action should touch (disclosed, not
+      // silent — and checked BEFORE the alert and the child kill).
+      const publishedContexts = this.perChatRuntimeTurnContexts.get(mapKey) ?? [];
+      if (publishedContexts.length !== 1) {
+        log.warn(
+          { inboundSeq: row.seq, mapKey, publishedContexts: publishedContexts.length },
+          'wedged-lane release: lane does not hold exactly one runtime turn context — skipping',
+        );
+        continue;
+      }
+      log.warn(
+        { inboundSeq: row.seq, queuedBehind: turnQueue.pending, scope: this.sessionScope },
+        'durably reclaimed turn still pins a live lane — releasing via crash finalization',
+      );
+      emitAlertChecked(
+        this.instanceName,
+        'agent_wedged_turn_released',
+        'Wedged agent turn released after durable reclamation',
+        `inbound_seq=${row.seq} queued_behind=${turnQueue.pending} scope=${this.sessionScope}`,
+        'warning',
+      );
+      // A live provider child (real-process wedge) is killed intentionally so
+      // its exit routes through the session's own crash machinery; session
+      // doubles and managed-provider sessions have no child to kill.
+      if (typeof session.reapWedgedProviderChild === 'function') {
+        session.reapWedgedProviderChild();
+      }
+      // Reject the held turn's runtime completion (the turn-recovery
+      // replay-abort pattern), then settle the session's provider-turn
+      // promise: the pinned processor is parked inside `sendTurn`, which by
+      // contract resolves only at provider TERMINALIZATION — an event the
+      // wedge, by definition, will never produce. A killed real child
+      // resolves it from its exit handler; resolving directly keeps the
+      // release independent of a child existing (completeProviderTurn is
+      // idempotent). The processor then observes the rejected completion and
+      // the queue's ordinary processor-error finalization retires the turn —
+      // the finalizer recognizes the sweep-owned durable terminal
+      // (reclaimed_by_sweep) and retires the runtime state through the
+      // standard post-effects, so followers drain to a fresh session.
+      // Deliberately NOT pre-finalized here: a second finalization owner
+      // would race the canonical one.
+      this.runtimeTurnCoordinator.rejectRuntimeTurnCompletion(
+        new WedgedTurnReclaimedError(),
+        mapKey,
+        publishedContexts[0],
+      );
+      session.completeProviderTurn();
+    }
   }
 
   /**
