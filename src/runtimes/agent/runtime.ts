@@ -3569,7 +3569,14 @@ export class AgentRuntime implements Runtime {
           );
         }
         const globalSession: SessionContext = { tier: 'global', allowedRoot: agentCwd };
-        this.globalSocketServer = new WhatSoupSocketServer(socketPath, this.registry, globalSession);
+        // #2976 (ii): identity is resolved per request from the executing-turn
+        // register — never stored on the session (no broadcast to go stale).
+        this.globalSocketServer = new WhatSoupSocketServer(
+          socketPath,
+          this.registry,
+          globalSession,
+          () => this.resolveExecutingGlobalActor(),
+        );
         this.globalSocketServer.start();
         this.globalMcpSocketPath = socketPath;
         log.info({ socketPath }, 'global WhatSoup socket server started');
@@ -4336,20 +4343,14 @@ export class AgentRuntime implements Runtime {
     // chat. In groups, msg.chatJid IS the group JID; without this propagation
     // admin gating would compare against the group JID and always reject.
     //
-    // Two cases to cover:
-    //   1. Global socket (single / shared / non-sandbox per_chat modes) —
-    //      always active when !sandboxPerChat; update unconditionally.
-    //   2. Per-chat sockets — only populated in workspaceResources when
-    //      sandboxPerChat=true (async ensureSessionAndQueue path). The
-    //      synchronous per_chat-without-sandbox path uses the global socket
-    //      above and never allocates a per-chat socket, so the `workspaceResources`
-    //      lookup here is only reachable under sandboxPerChat=true.
-    // Every non-sandbox per_chat subprocess uses its own actor-bound socket.
-    // Keep the shared global socket actor-less for the whole mode so any accidental
-    // fallback to it fails closed instead of inheriting another sender.
-    if (this.shouldBroadcastGlobalActor()) {
-      this.globalSocketServer?.updateActorJid(msg.senderJid);
-    }
+    // #2976 direction (ii): the global socket NEVER receives an actor
+    // broadcast. single/shared identity is resolved read-time per request
+    // from the executing-turn register (resolveExecutingGlobalActor), so no
+    // stored actor can go stale and a missed cleanup denies instead of
+    // allowing. Per-chat sockets (sandboxPerChat=true, below) keep their
+    // chat-scoped update; every non-sandbox per_chat subprocess uses its own
+    // actor-bound socket and the global socket stays actor-less for the
+    // whole mode so any accidental fallback fails closed.
     const recycleScopeKey = this.sessionScope === 'per_chat'
       ? perChatMapKey!
       : GLOBAL_TOOL_SCOPE_KEY;
@@ -4971,10 +4972,21 @@ export class AgentRuntime implements Runtime {
         recoveryDispatch.onProviderBoundary();
       }
       this.updateSessionActorJid(this.session!, senderJid);
-      await this.session!.sendTurn(withProviderApplicationContext(
-        renderUserTurnForProvider(this.turnChronology, exactText, context, 'live'),
-        participantContext,
-      ));
+      // #2976 (ii): publish the executing turn's actor for the global-socket
+      // read-time resolver at the provider boundary (shared-mode dispatch
+      // bypasses sendTurnToSession, so it publishes here).
+      const sharedExecQ = this.perChatExecActorQueue.get(GLOBAL_TOOL_SCOPE_KEY) ?? [];
+      sharedExecQ.push(senderJid);
+      this.perChatExecActorQueue.set(GLOBAL_TOOL_SCOPE_KEY, sharedExecQ);
+      try {
+        await this.session!.sendTurn(withProviderApplicationContext(
+          renderUserTurnForProvider(this.turnChronology, exactText, context, 'live'),
+          participantContext,
+        ));
+      } catch (sendErr) {
+        this.removeFailedExecutingActor(GLOBAL_TOOL_SCOPE_KEY, senderJid);
+        throw sendErr;
+      }
     } catch (err) {
       if (legacyOwner) {
         this.clearLegacyProviderTurn(GLOBAL_TOOL_SCOPE_KEY, legacyOwner);
@@ -5156,15 +5168,21 @@ export class AgentRuntime implements Runtime {
       if (systemTurnLease) this.requireSystemTurnProviderBoundary(systemTurnLease);
       beforeUserSend?.();
       // Publish actor and typing evidence only when provider execution begins.
-      if (this.sessionUsesPerChatActorSocket(session) && effectiveMapKey !== undefined) {
-        if (!session.getStatus().active) this.perChatExecActorQueue.delete(effectiveMapKey);
-        const execQ = this.perChatExecActorQueue.get(effectiveMapKey) ?? [];
+      // #2976: single/shared turns publish into the SAME executing-actor
+      // register under GLOBAL_TOOL_SCOPE_KEY — the global socket's read-time
+      // resolver (resolveExecutingGlobalActor) is its only consumer.
+      const execScopeKey = this.sessionUsesPerChatActorSocket(session) && effectiveMapKey !== undefined
+        ? effectiveMapKey
+        : (this.sessionScope !== 'per_chat' ? GLOBAL_TOOL_SCOPE_KEY : undefined);
+      if (execScopeKey !== undefined) {
+        if (!session.getStatus().active) this.perChatExecActorQueue.delete(execScopeKey);
+        const execQ = this.perChatExecActorQueue.get(execScopeKey) ?? [];
         execQ.push(actorJid);
-        this.perChatExecActorQueue.set(effectiveMapKey, execQ);
+        this.perChatExecActorQueue.set(execScopeKey, execQ);
         actorPushed = true;
         if (systemTurnLease) {
           this.systemTurnExecActors.set(systemTurnLease.id, {
-            scopeKey: effectiveMapKey,
+            scopeKey: execScopeKey,
             actorJid,
           });
         }
@@ -5182,8 +5200,12 @@ export class AgentRuntime implements Runtime {
         : withProviderApplicationContext(userTurnText, contextPreamble);
       await dispatchProviderTurn(session, turnInput, onProviderBoundaryReady);
     } catch (err) {
-      if (actorPushed && effectiveMapKey !== undefined) {
-        this.removeFailedExecutingActor(effectiveMapKey, actorJid, systemTurnLease);
+      if (actorPushed) {
+        this.removeFailedExecutingActor(
+          this.sessionScope !== 'per_chat' ? GLOBAL_TOOL_SCOPE_KEY : effectiveMapKey!,
+          actorJid,
+          systemTurnLease,
+        );
       }
       const errMsg = (err as Error).message ?? '';
       if (errMsg.includes('STDIN_WRITE_TIMEOUT')) {
@@ -7926,8 +7948,16 @@ export class AgentRuntime implements Runtime {
     return resolveExecutingActorForPort(this.chatTransportHost, chatJid);
   }
 
-  private shouldBroadcastGlobalActor(): boolean {
-    return this.sessionScope !== 'per_chat';
+  /**
+   * #2976 direction (ii): read-time actor resolution for the GLOBAL socket.
+   * Returns the currently EXECUTING single/shared turn's sender, or undefined
+   * (fail-closed deny) when no turn executes, the session is down, or the
+   * runtime is per_chat scope (whose senders ride per-chat actor sockets).
+   */
+  private resolveExecutingGlobalActor(): string | undefined {
+    if (this.sessionScope === 'per_chat') return undefined;
+    if (!this.session?.getStatus().active) return undefined;
+    return this.perChatExecActorQueue.get(GLOBAL_TOOL_SCOPE_KEY)?.[0];
   }
 
   private sessionUsesPerChatActorSocket(session: SessionManager): boolean {

@@ -1781,6 +1781,12 @@ async applyRuntimeTurnPostEffects(
       this.host.currentTurnChatJid = null;
       this.host.currentTurnReplayText = null;
       this.host.currentTurnReplayActorJid = undefined;
+      // #2976 (ii): retire the executing-turn actor for the global-socket
+      // resolver (pushed at the provider boundary; admission-rejected turns
+      // never pushed, so nothing to shift there).
+      if (!postEffects.admissionRejected) {
+        this.host.perChatExecActorQueue.get(GLOBAL_CONVERSATION_KEY)?.shift();
+      }
       ledger.fifoAdvanced = true;
     }
     if (!ledger.presentationCleared) {

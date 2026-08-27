@@ -653,15 +653,24 @@ describe('F-STICKY-ACTOR hardening: createSessionManager is the single wiring ch
 });
 
 describe('per_chat global socket remains actor-less', () => {
-  type Priv = { shouldBroadcastGlobalActor(): boolean };
+  type Priv = {
+    resolveExecutingGlobalActor(): string | undefined;
+    perChatExecActorQueue: Map<string, (string | undefined)[]>;
+  };
 
-  it('broadcasts only for single/shared modes, never non-sandbox per_chat', () => {
+  it('#2976 (ii): the global resolver denies at rest in every scope, and per_chat denies even with a primed register', () => {
     const single = new AgentRuntime(makeDb(), makeMessenger(), 'test', {});
     const shared = new AgentRuntime(makeDb(), makeMessenger(), 'test', { sessionScope: 'shared' });
     const perChat = new AgentRuntime(makeDb(), makeMessenger(), 'test', { sessionScope: 'per_chat' });
 
-    expect((single as unknown as Priv).shouldBroadcastGlobalActor()).toBe(true);
-    expect((shared as unknown as Priv).shouldBroadcastGlobalActor()).toBe(true);
-    expect((perChat as unknown as Priv).shouldBroadcastGlobalActor()).toBe(false);
+    // No session, no executing turn: fail-closed everywhere.
+    expect((single as unknown as Priv).resolveExecutingGlobalActor()).toBeUndefined();
+    expect((shared as unknown as Priv).resolveExecutingGlobalActor()).toBeUndefined();
+    expect((perChat as unknown as Priv).resolveExecutingGlobalActor()).toBeUndefined();
+
+    // per_chat scope: the gate holds even if the global register were primed —
+    // per-chat senders ride their own actor-bound sockets, never this one.
+    (perChat as unknown as Priv).perChatExecActorQueue.set('global', ['15550009@s.whatsapp.net']);
+    expect((perChat as unknown as Priv).resolveExecutingGlobalActor()).toBeUndefined();
   });
 });
