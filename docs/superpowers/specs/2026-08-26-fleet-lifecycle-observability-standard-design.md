@@ -1,12 +1,12 @@
 # Fleet Lifecycle Observability Standard — design v7 (APPROVED 2026-08-27; design only — authorizes no code)
 
-Status: draft. v4 PASSED the independent contradiction/privacy/cardinality review (no
-blockers; privacy: no findings); v5 folded in that pass's seven residual MINOR/NOTEs
-(delta-verified); v6 resolved the owner's first four verification findings (O1–O4,
-delta-verified, zero new findings); v7 resolves the owner's two v6 correctness gaps (O5–O6
-below) plus two corrections. Pending delta re-review of the v7 changes and owner final
-approval. Implementation is NOT authorized by this document; an implementation plan follows
-approval.
+Status: APPROVED (owner final approval 2026-08-27; see §14). v4 PASSED the independent
+contradiction/privacy/cardinality review (no blockers; privacy: no findings); v5 folded in
+that pass's seven residual MINOR/NOTEs (delta-verified); v6 resolved the owner's first four
+verification findings (O1–O4, delta-verified, zero new findings); v7 resolved the owner's
+two v6 correctness gaps (O5–O6 below) plus two corrections and passed its delta re-review.
+Implementation is NOT authorized by this document; the separately reviewed implementation
+plan follows.
 
 Scope: all WhatSoup fleet runtimes and hosts. The local agent-harness estate is a separate
 operational domain and is not governed by this standard; every contract is domain-portable
