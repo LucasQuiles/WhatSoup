@@ -123,13 +123,17 @@ describe('AgentRuntime structural policy', () => {
 
   });
 
-  it('QR-247: the global-broadcast gate is instance-global and never resource-presence-based', async () => {
+  it('#2976 (ii): the global socket carries NO actor broadcast — identity is read-time resolved, per_chat fail-closed', async () => {
     const source = await readRuntimeSource();
-    expect(source).toContain('if (this.shouldBroadcastGlobalActor()) {');
-    expect(methodSource(source, 'shouldBroadcastGlobalActor'))
-      .toContain("return this.sessionScope !== 'per_chat';");
-    const globalActorWrites = source.match(/globalSocketServer\?\.updateActorJid\(msg\.senderJid\)/g) ?? [];
-    expect(globalActorWrites).toHaveLength(1);
+    // The broadcast surface is gone entirely: nothing ever writes an inbound
+    // sender onto the global socket.
+    const globalActorWrites = source.match(/globalSocketServer\??\.updateActorJid\(/g) ?? [];
+    expect(globalActorWrites).toHaveLength(0);
+    // The read-time resolver replaces it, with the per_chat scope gate that
+    // keeps the shared global socket actor-less for the whole mode.
+    expect(methodSource(source, 'resolveExecutingGlobalActor'))
+      .toContain("if (this.sessionScope === 'per_chat') return undefined;");
+    expect(source).toContain('() => this.resolveExecutingGlobalActor(),');
   });
 
   it('/kill-session retires actor ownership only after child and turn teardown settle', async () => {
