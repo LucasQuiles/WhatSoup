@@ -711,6 +711,29 @@ describe('scheduled agent-job turn lifecycle (#3374)', () => {
       await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
       await driveInteractiveToComplete({}, GAP_PROBE_BOUND_MS);
     });
+
+    // OPEN GAP (#3374 ask 2): the stale-reclaim release iterates only
+    // perChatTurnQueues — shared mode's single global TurnQueue is never
+    // matched, so durable reclamation still leaves the runtime lane wedged.
+    // This probe asserts the DESIRED coupling; it.fails keeps it green only
+    // while the gap exists.
+    it.fails('cell 7 reclamation gap probe: durable reclamation also releases the wedged SHARED queue (#3374 ask-2 coupling)', async () => {
+      const seq = dispatchScheduled();
+      await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
+
+      // The sweep reclaims the durable row; the wedged turn's late terminal
+      // then has no eligible inbound row, so shutdown fails closed (asserted
+      // by afterEach). Set BEFORE the failing assertion — it.fails aborts the
+      // body at the first failed expect.
+      expectUnfinalizableShutdown = true;
+
+      backdate(seq, '-25 hours');
+      expect(engine.sweepStuckInbound()).toMatchObject({ failedStale: 1 });
+
+      await vi.waitFor(() => {
+        expect(globalQueue().activeTurn ?? null).toBeNull();
+      }, { timeout: GAP_PROBE_BOUND_MS });
+    });
   });
 
   // ─── single mode — direct dispatch serialized on the turn chain ───────────
@@ -782,6 +805,25 @@ describe('scheduled agent-job turn lifecycle (#3374)', () => {
       await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
       await driveInteractiveToComplete({}, GAP_PROBE_BOUND_MS);
     });
+
+    // OPEN GAP (#3374 ask 2): single mode has no TurnQueue — the wedged turn
+    // pins this.turnChain, and the stale-reclaim release has no lane to
+    // match. This probe asserts the DESIRED coupling (the chain settles once
+    // the durable row is reclaimed); it.fails keeps it green only while the
+    // gap exists.
+    it.fails('cell 7 reclamation gap probe: durable reclamation also settles the wedged turn chain (#3374 ask-2 coupling)', async () => {
+      const seq = dispatchScheduled();
+      await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
+
+      // Set BEFORE the failing assertion (it.fails aborts the body there);
+      // the afterEach asserts the fail-closed shutdown.
+      expectUnfinalizableShutdown = true;
+
+      backdate(seq, '-25 hours');
+      expect(engine.sweepStuckInbound()).toMatchObject({ failedStale: 1 });
+
+      expect(await turnChainState(GAP_PROBE_BOUND_MS)).toBe('settled');
+    });
   });
 
   // ─── sandbox per-chat — workspace-scoped sessions, scheduled NOT isolated ─
@@ -848,6 +890,30 @@ describe('scheduled agent-job turn lifecycle (#3374)', () => {
       dispatchScheduled();
       await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
       await driveInteractiveToComplete({}, GAP_PROBE_BOUND_MS);
+    });
+
+    // #3374 ask 2 in SANDBOX mode: the scheduled turn rides the chat's
+    // workspace lane, which lives in perChatTurnQueues — the exact map the
+    // stale-reclaim release iterates — so the ask-2 coupling covers sandbox
+    // mode too (unlike shared/single, whose lanes the release cannot reach).
+    it('cell 7 reclamation: durable reclamation also releases the wedged workspace lane (#3374 ask-2 coupling)', async () => {
+      const seq = dispatchScheduled();
+      await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
+      await vi.waitFor(() => {
+        expect(queueFor(workspaceKey)?.activeTurn?.sourceMessageId).toMatch(/^agentjob-5-/);
+      }, { timeout: 4_000 });
+
+      // The sweep owns the durable terminal; the wedged turn's late terminal
+      // has no eligible inbound row left, so shutdown fails closed (asserted
+      // by afterEach).
+      expectUnfinalizableShutdown = true;
+
+      backdate(seq, '-25 hours');
+      expect(engine.sweepStuckInbound()).toMatchObject({ failedStale: 1 });
+
+      await vi.waitFor(() => {
+        expect(queueFor(workspaceKey)?.activeTurn ?? null).toBeNull();
+      }, { timeout: 4_000 });
     });
   });
 });
