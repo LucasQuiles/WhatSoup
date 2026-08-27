@@ -405,10 +405,23 @@ export class RuntimeFallbackCoordinator {
    * all there are no clocks to protect, and refusing to arm would break
    * primary failover — so the legacy primary tier applies there.
    */
+  /**
+   * Window STATE exists (activeUntil set) — deliberately BROADER than
+   * {@link RuntimeFallbackPort.isFallbackWindowActive}: it also holds in the
+   * in-flight revert-probe gap, where the deadline is past but the window's
+   * state (activeEntry, resetAt, activatedAt, the probe's own pending
+   * decision) is still live. Clock/window state worth protecting exists
+   * exactly when this holds — the tier fail-closed scope and the no-arm scope
+   * both key on it, and MUST stay on the same predicate.
+   */
+  private fallbackWindowStateExists(): boolean {
+    return this.host.fallbackWindow.activeUntil !== null;
+  }
+
   private failureTierForSession(session: SessionManager | null): FallbackFailureTier {
     if (!session) return 'primary';
     const failClosedTier: FallbackFailureTier =
-      this.host.fallbackWindow.activeUntil !== null ? 'fallback' : 'primary';
+      this.fallbackWindowStateExists() ? 'fallback' : 'primary';
     const provider = typeof session.getProviderId === 'function' ? session.getProviderId() : null;
     if (provider === null) {
       // Last-resort sessionId-prefix attribution, mirroring the marking
@@ -421,7 +434,11 @@ export class RuntimeFallbackCoordinator {
       if (prefixPrimary && !prefixFallback) return 'primary';
       return failClosedTier;
     }
-    const model = typeof session.getModelRef === 'function' ? session.getModelRef() : null;
+    // getModelRef() returns `string | undefined` — a provider-default spawn
+    // returns UNDEFINED (the common real case). Normalize at the read: a
+    // missing model is match-ELIGIBLE, exactly as the entry.model===undefined
+    // arm below already treats the entry side.
+    const model = (typeof session.getModelRef === 'function' ? session.getModelRef() : null) ?? null;
     const matchesFallback = this.host.agentFallbacks.some((entry) => {
       if (provider !== entry.provider) return false;
       if (entry.model === undefined) return true;
@@ -1738,18 +1755,23 @@ export class RuntimeFallbackCoordinator {
     this.kickStaleDiscoveryRefresh('window-arm');
     if (this.host.agentFallbacks.length === 0) return null;
 
-    // A FALLBACK-tier failure says nothing about the PRIMARY, so it must
-    // never ARM a window either — only a currently-ACTIVE window may be
-    // re-selected under it. The load-bearing case is the in-flight revert
-    // probe gap (≤5s, the window shows expired while activeUntil still holds
-    // the past deadline): an arm here would move activeUntil and the probe
-    // resolution's stale-window guard would then discard the probe's OWN
-    // decision — even a successful recovery. A stale post-revert fallback
-    // session's failure likewise must not re-fail-over a healthy primary.
-    if (failureTier === 'fallback' && !this.host.isFallbackWindowActive) return null;
+    // The no-arm rule is scoped to EXISTING window state: while window state
+    // exists but the deadline is past (the ≤5s in-flight revert-probe gap), a
+    // fallback-tier arm would move activeUntil and the probe resolution's
+    // stale-window guard would then discard the probe's OWN decision — even a
+    // successful recovery — so such activations touch nothing. With NO window
+    // state at all there are no clocks or pending decisions to protect, and
+    // refusing to arm silently drops the user's turn (a /model-pinned chat on
+    // a chain-listed provider previously armed AND replayed): the full arm
+    // path applies. That deliberately keeps the pre-existing failover-policy
+    // residual that a stale post-revert fallback session's failure can arm a
+    // fresh window — a policy question beyond clock preservation.
+    if (failureTier === 'fallback' && this.fallbackWindowStateExists() && !this.host.isFallbackWindowActive) {
+      return null;
+    }
 
-    const wasActive = this.host.fallbackWindow.activeUntil !== null;
-    // With the window ACTIVE, a fallback-tier failure must not move its
+    const wasActive = this.fallbackWindowStateExists();
+    // With window state present, a fallback-tier failure must not move its
     // clocks: the default-window extension below would push activeUntil out
     // by up to DEFAULT_FALLBACK_WINDOW_MS per failed fallback turn, and the
     // re-arm would restart the standing primary recovery probe — together
@@ -1759,7 +1781,7 @@ export class RuntimeFallbackCoordinator {
     // the probe on it per-turn suppresses early recovery for the whole
     // window) or the FALLBACK entry's own parsed reset estimate, which
     // describes the fallback provider's quota, never the primary's.
-    const preserveWindowClocks = failureTier === 'fallback';
+    const preserveWindowClocks = failureTier === 'fallback' && this.fallbackWindowStateExists();
 
     const now = Date.now();
     const rawUntil = resetAt ? resetAt.getTime() : now + DEFAULT_FALLBACK_WINDOW_MS;

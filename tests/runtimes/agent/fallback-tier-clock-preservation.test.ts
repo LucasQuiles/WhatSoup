@@ -223,6 +223,8 @@ type RuntimeView = {
   fallbackWindow: { activeUntil: number | null; activeEntry: FallbackEntry | null; resetAt: number | null };
   fallbackChain: { failedKeys: Set<string> };
   chatQueues: Map<string, unknown>;
+  pendingTurnText: Map<string, string>;
+  scheduleFallbackReplay(args: unknown): boolean;
   recordFallbackTurnOutcome(
     queue: unknown,
     hadVisibleOutput: boolean,
@@ -785,22 +787,34 @@ describe('tier attribution by route identity', () => {
     expect(rv.fallbackWindow.resetAt).toBe(resetAt.getTime());
   });
 
-  it('same-provider chain: an AMBIGUOUS session (null model ref) fails CLOSED for clocks — no resetAt store, no extension', async () => {
+  it('same-provider chain: an AMBIGUOUS provider-default session (undefined model ref) fails CLOSED for clocks — no resetAt store, no extension', async () => {
     const runtime = makeRuntime(SAME_PROVIDER_CHAIN);
     const rv = v(runtime);
     expect(rv.activateProviderFallback(null, 'usage-limit')).not.toBeNull();
     expect(rv.fallbackWindow.activeEntry?.model).toBe('claude-haiku-4-5');
     const armedUntil = rv.fallbackWindow.activeUntil!;
     const resetAt = new Date(armedUntil + 60 * 60 * 1000);
-    // Provider matches BOTH the primary route and a chain entry; the model
-    // ref is null, so positive attribution is impossible either way.
-    const ambiguousSession = makeClassifiedSession('claude-cli', null);
+    // Production-real shape: SessionManager.getModelRef() returns
+    // `string | undefined`, and a provider-default spawn returns UNDEFINED —
+    // null never occurs from the real class. Provider matches BOTH the
+    // primary route and a chain entry; positive attribution is impossible.
+    // Built inline: passing undefined through a defaulted factory parameter
+    // would silently trigger the default instead.
+    const providerDefaultSession = new Proxy(
+      {
+        getProviderId: () => 'claude-cli',
+        getStatus: () => ({ sessionId: 'claude-cli-1' }),
+        getDbRowId: () => null,
+        getModelRef: () => undefined,
+      } as Record<string, unknown>,
+      { get: (t, p) => (p in t ? t[p as string] : () => undefined) },
+    );
 
     await vi.advanceTimersByTimeAsync(2 * 60 * 1000);
     rv.fallback.activateProviderFallbackAfterTerminalResult(
       resetAt,
       'usage-limit',
-      ambiguousSession,
+      providerDefaultSession,
       'usage limit reached',
     );
 
@@ -808,11 +822,11 @@ describe('tier attribution by route identity', () => {
     // clocks — resetAt stays unset and the end stays put.
     expect(rv.fallbackWindow.resetAt).toBeNull();
     expect(rv.fallbackWindow.activeUntil).toBe(armedUntil);
-    // Residual (pre-existing, documented): MARKING attribution still matches
-    // the ambiguous session against the active same-provider entry, so the
-    // entry is marked and the chain advances. Pinned so a change is loud.
-    expect(rv.fallbackChain.failedKeys.size).toBe(1);
-    expect(rv.fallbackWindow.activeEntry?.model).toBe('glm/glm-5.2');
+    // Pre-existing marking behavior, pinned: an undefined model ref reads as
+    // a model MISMATCH in the marking predicate, so the provider-default
+    // session is NOT attributed to the active entry — no marking, no advance.
+    expect(rv.fallbackChain.failedKeys.size).toBe(0);
+    expect(rv.fallbackWindow.activeEntry?.model).toBe('claude-haiku-4-5');
   });
 
   it('persists the ORIGINAL activeUntil/activatedAt across a preserve arm and restores the original window end (real SQLite)', async () => {
@@ -851,5 +865,75 @@ describe('tier attribution by route identity', () => {
         if (existsSync(fp)) unlinkSync(fp);
       }
     }
+  });
+});
+
+// ─── No-arm scoped to EXISTING window state (increment 5) ─────────────────────
+//
+// The no-arm rule protects window clocks and the in-flight probe decision —
+// both exist only while window STATE exists (activeUntil set, active or in
+// the revert-probe gap). With no window state at all there is nothing to
+// protect, and refusing to arm silently drops the user's turn: a /model-pinned
+// chat whose provider also appears in the chain previously armed a window and
+// REPLAYED the interrupted turn. That pre-branch arm path must be restored.
+
+describe('no-arm scoped to existing window state', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-26T20:00:00Z'));
+    lookupCredentialMock.mockClear();
+    lookupCredentialMock.mockReturnValue('present-key');
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('a pinned-chat fallback-provider usage-limit with NO window state still arms a window and replays the turn', async () => {
+    const runtime = makeRuntime(TWO_ENTRY_CHAIN);
+    const rv = v(runtime);
+    expect(rv.fallbackWindow.activeUntil).toBeNull();
+    // A pinned chat runs on a provider that also appears in the chain — its
+    // session is fallback-ATTRIBUTABLE, but with no window state its failure
+    // must take the full pre-branch arm path: arming, resetAt, replay.
+    const pinnedSession = makeClassifiedSession('opencode-cli', 'kimi/kimi-k3');
+    const queue = makeFakeQueue(CHAT);
+    rv.pendingTurnText.set(CHAT, 'the pinned turn that must be replayed');
+    const replaySpy = vi
+      .spyOn(rv as unknown as { scheduleFallbackReplay(args: unknown): boolean }, 'scheduleFallbackReplay')
+      .mockReturnValue(true);
+    // Epoch-anchored reset cue (timezone-free): parses to T0 + 2h.
+    const text = 'usage credit limit reached — resets at 1787781600';
+    expect(extractUsageLimitResetTime(text)?.getTime()).toBe(Date.now() + 2 * 60 * 60 * 1000);
+
+    rv.handleEventWithContext({ type: 'result', text, isError: true }, queue, pinnedSession, 'conv', 1, CHAT);
+
+    expect(replaySpy).toHaveBeenCalledTimes(1);
+    expect(rv.fallbackWindow.activeUntil).toBe(Date.now() + 2 * 60 * 60 * 1000);
+    expect(rv.fallbackWindow.resetAt).toBe(Date.now() + 2 * 60 * 60 * 1000);
+  });
+
+  it('the gap no-arm still holds: window state present but expired refuses fallback-tier arming', async () => {
+    const runtime = makeRuntime(TWO_ENTRY_CHAIN);
+    const rv = v(runtime);
+    let resolveProbe!: (recovered: boolean) => void;
+    rv.probePrimaryProviderRecovered = (() =>
+      new Promise<boolean>((resolve) => { resolveProbe = resolve; })) as unknown as () => boolean;
+    expect(rv.activateProviderFallback(new Date(Date.now() + 1000), 'auth-required')).not.toBeNull();
+    const gapWindowEnd = rv.fallbackWindow.activeUntil!;
+    await vi.advanceTimersByTimeAsync(60 * 1000 + 1);
+
+    const queue = makeFakeQueue(CHAT);
+    rv.handleEventWithContext(
+      { type: 'result', text: 'server_error: provider returned HTTP 503', isError: true },
+      queue,
+      makeClassifiedSession('opencode-cli', 'kimi/kimi-k3'),
+      'conv',
+      1,
+      CHAT,
+    );
+    expect(rv.fallbackWindow.activeUntil).toBe(gapWindowEnd);
+    resolveProbe(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(rv.fallbackWindow.activeUntil).toBeNull();
   });
 });
