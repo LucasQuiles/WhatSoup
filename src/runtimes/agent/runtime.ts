@@ -2947,7 +2947,9 @@ export class AgentRuntime implements Runtime {
     // RUNTIME lane may still be pinned by that exact turn (provider terminal
     // never arrived — the live wedge class). Durable reclamation alone repairs
     // only the journal; this listener releases the wedged lane too.
-    engine.setStaleInboundReclaimListener((rows) => this.releaseWedgedReclaimedLanes(rows));
+    if (typeof engine.setStaleInboundReclaimListener === 'function') {
+      engine.setStaleInboundReclaimListener((rows) => this.releaseWedgedReclaimedLanes(rows));
+    }
 
     // Obligation replay: opt-in, per_chat only; the helper keeps ABSENT fields inert.
     this.capabilityObligationRuntime = maybeActivateCapabilityObligationRuntime({
