@@ -1245,6 +1245,11 @@
       "owner": "src/runtimes/agent/runtime-turn-coordinator.ts",
       "test": "tests/runtimes/agent/runtime-turn-coordinator.test.ts"
     },
+    "agent_wedged_turn_released": {
+      "disposition": "wedged_turn_released_after_durable_stale_reclaim_original_inbound_requires_owner_resend",
+      "owner": "src/runtimes/agent/runtime.ts",
+      "test": "tests/runtimes/agent/scheduled-turn-lifecycle.test.ts"
+    },
     "dispatcher_deadman": {
       "disposition": "episode_scoped_supervision_pager_advanced_only_by_accepted_delivery_with_bounded_pending_retry",
       "owner": "deploy/scripts/bot-errors-health-check.py",

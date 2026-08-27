@@ -2887,6 +2887,28 @@ export class SessionManager {
    * re-prompting a hung session would postpone the kill indefinitely. This timer ignores
    * inbound messages; provider progress (tickWatchdog) cancels it.
    */
+  /**
+   * #3374 ask 2: SIGKILL the provider child of a lane whose turn the W2 sweep
+   * durably reclaimed as stale (24h past with no terminal). Marked intentional
+   * so the exit handler suppresses the generic crash notice and the runtime's
+   * synthetic crash finalization (which follows this call) is the single owner
+   * of turn/queue release. No liveness gate: durable reclamation already
+   * proves 24h without a terminal — far past the long-op ceiling.
+   */
+  reapWedgedProviderChild(): boolean {
+    if (!this.active || this.child === null) return false;
+    const child = this.child;
+    log.warn(
+      { sessionId: this.sessionId, pid: child.pid ?? null, chatJid: this.chatJid },
+      'wedged-turn reclamation — SIGKILL provider child',
+    );
+    this.markIntentionalKill(child, 'SIGKILL', 'stalled_operation');
+    void this.killChildTree(child, 'SIGKILL').catch((err) => {
+      log.error({ err, pid: child.pid ?? null, chatJid: this.chatJid }, 'failed to reap wedged provider process tree');
+    });
+    return true;
+  }
+
   recoverStalledOperation(toolId: string, toolName: string): void {
     if (!this.active || this.child === null) return;
     const ctx = { toolId, toolName, pid: this.child.pid, sessionId: this.sessionId };

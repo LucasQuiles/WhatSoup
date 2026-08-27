@@ -423,11 +423,11 @@ describe('scheduled agent-job turn lifecycle (#3374)', () => {
   }
 
   /** Cell 1: dispatch + scheduler publication acknowledgment; returns the journal seq. */
-  function dispatchScheduled(prompt = 'Check for a scholarship reply.'): number {
+  function dispatchScheduled(prompt = 'Check for a scholarship reply.', occurrenceId = 11): number {
     const ack = runtime.dispatchAgentJob({
       beadId: 7,
       triggerId: 5,
-      occurrenceId: 11,
+      occurrenceId,
       prompt,
       title: 'Scholarship check',
       reportChatJid: groupJid,
@@ -583,61 +583,61 @@ describe('scheduled agent-job turn lifecycle (#3374)', () => {
       expect(status(seq)).toBe('processing');
     });
 
-    it('cell 7 reclamation: the W2 stuck-inbound sweep is the only reaper main exposes for a wedged scheduled turn (24h grace)', async () => {
+    it('cell 7 reclamation: the W2 stuck-inbound sweep respects its 24h grace for an in-flight turn', async () => {
       const seq = dispatchScheduled();
       await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
 
       // Inside the grace window the sweep must NOT touch the in-flight row.
+      // (Post-grace reclamation AND the coupled lane release are owned by the
+      // promoted coupling test below.)
       expect(engine.sweepStuckInbound()).toMatchObject({ failedStale: 0 });
       expect(status(seq)).toBe('processing');
-
-      // Beyond the 24h grace window the durable row is reclaimed as failed.
-      backdate(seq, '-25 hours');
-      const swept = engine.sweepStuckInbound();
-      expect(swept.failedStale).toBe(1);
-      expect(status(seq)).toBe('failed');
-
-      // The RUNTIME lane is still wedged even after durable reclamation: the
-      // sweep repairs the journal, not the pinned TurnQueue (see it.fails gap
-      // probe below).
-      expect(scheduledQueue()?.activeTurn?.sourceMessageId).toMatch(/^agentjob-5-/);
-
-      // Consequence: when the wedged turn's terminal finally arrives, its
-      // finalization has no eligible inbound row left — shutdown fails closed.
-      // The afterEach asserts that exact outcome.
-      expectUnfinalizableShutdown = true;
     });
 
-    // OPEN GAP (#3374): no queue-level reaper exists on main. A scheduled turn
-    // whose provider terminal never arrives pins TurnQueue.activeTurn forever;
-    // nothing bounds the active-turn age or retires the wedged queue while the
-    // process lives (the W2 sweep above repairs only the durable journal row,
-    // after 24h). This probe asserts the DESIRED property in a FIX-SHAPED,
-    // bound-independent form: time is driven by backdating the durable row and
-    // invoking the sweep — the one reclamation entry point main exposes — so a
-    // real reaper of ANY wall-clock bound that ties queue release to durable
-    // reclamation flips this red, forcing promotion to a normal test. (A
-    // wall-clock wait here could stay green forever against a reaper whose
-    // bound exceeds the in-test window.)
-    it.fails('cell 7 reclamation gap probe: durable reclamation also releases the wedged TurnQueue (no such coupling on main)', async () => {
+    // #3374 ask 2 — PROMOTED from the fix-shaped it.fails gap probe: the W2
+    // sweep's stale-reclaim listener now releases the runtime lane too. The
+    // release rejects the held turn's runtime completion, resolves the
+    // session's provider-turn promise (a killed real child does the same from
+    // its exit handler), and the queue's ordinary processor-error finalization
+    // recognizes the sweep-owned durable terminal (reclaimed_by_sweep): the
+    // runtime state is retired through the standard post-effects — no
+    // incident, no supervisor retention — leaving the lane REUSABLE and
+    // shutdown clean (asserted implicitly by afterEach's normal shutdown).
+    it('cell 7 reclamation: durable reclamation also releases the wedged TurnQueue (#3374 ask-2 coupling)', async () => {
       const seq = dispatchScheduled();
       await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
       await vi.waitFor(() => {
         expect(scheduledQueue()?.activeTurn?.sourceMessageId).toMatch(/^agentjob-5-/);
       }, { timeout: 4_000 });
 
-      // The sweep terminalizes the durable row as failed; the wedged turn's
-      // late terminal then has no eligible inbound row, so shutdown fails
-      // closed (asserted by afterEach). Set BEFORE the failing assertion —
-      // it.fails aborts the body at the first failed expect.
-      expectUnfinalizableShutdown = true;
-
       backdate(seq, '-25 hours');
       expect(engine.sweepStuckInbound()).toMatchObject({ failedStale: 1 });
 
-      // DESIRED: reclaiming the durable row also releases the runtime lane.
-      // On main the sweep repairs only the journal, so this fails.
-      expect(scheduledQueue()?.activeTurn ?? null).toBeNull();
+      // Reclaiming the durable row also releases the runtime lane (#3374
+      // ask 2): the sweep's reclaim listener rejects the held turn's runtime
+      // completion and drives crash finalization, so the pinned processor
+      // settles asynchronously.
+      await vi.waitFor(() => {
+        expect(scheduledQueue()?.activeTurn ?? null).toBeNull();
+      }, { timeout: 4_000 });
+
+      // Release must leave the lane REUSABLE, not merely unblocked: the
+      // reclaimed turn's runtime-FIFO context must not leak (a retained
+      // owner makes every successor fail pre-dispatch with "FIFO already
+      // has an active owner"), and a successor scheduled turn must reach
+      // the provider.
+      await vi.waitFor(() => {
+        expect(
+          (runtime as unknown as { perChatRuntimeTurnContexts: Map<string, unknown[]> })
+            .perChatRuntimeTurnContexts.get(scheduledMapKey) ?? [],
+        ).toHaveLength(0);
+      }, { timeout: 4_000 });
+
+      // Distinct occurrence id: the synthetic message id embeds it, and a
+      // same-second successor with the same occurrence would collide in the
+      // journal (a harness artifact, not lane behavior).
+      dispatchScheduled('Successor after reclamation.', 12);
+      await waitForInFlightTurn((t) => t.includes('Successor after reclamation.'));
     });
   });
 
@@ -710,6 +710,23 @@ describe('scheduled agent-job turn lifecycle (#3374)', () => {
       await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
       await driveInteractiveToComplete({}, GAP_PROBE_BOUND_MS);
     });
+
+    // OPEN GAP (#3374 ask 2): the stale-reclaim release iterates only
+    // perChatTurnQueues — shared mode's single global TurnQueue is never
+    // matched, so durable reclamation still leaves the runtime lane wedged.
+    // This probe asserts the DESIRED coupling; it.fails keeps it green only
+    // while the gap exists.
+    it.fails('cell 7 reclamation gap probe: durable reclamation also releases the wedged SHARED queue (#3374 ask-2 coupling)', async () => {
+      const seq = dispatchScheduled();
+      await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
+
+      backdate(seq, '-25 hours');
+      expect(engine.sweepStuckInbound()).toMatchObject({ failedStale: 1 });
+
+      await vi.waitFor(() => {
+        expect(globalQueue().activeTurn ?? null).toBeNull();
+      }, { timeout: GAP_PROBE_BOUND_MS });
+    });
   });
 
   // ─── single mode — direct dispatch serialized on the turn chain ───────────
@@ -781,6 +798,21 @@ describe('scheduled agent-job turn lifecycle (#3374)', () => {
       await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
       await driveInteractiveToComplete({}, GAP_PROBE_BOUND_MS);
     });
+
+    // OPEN GAP (#3374 ask 2): single mode has no TurnQueue — the wedged turn
+    // pins this.turnChain, and the stale-reclaim release has no lane to
+    // match. This probe asserts the DESIRED coupling (the chain settles once
+    // the durable row is reclaimed); it.fails keeps it green only while the
+    // gap exists.
+    it.fails('cell 7 reclamation gap probe: durable reclamation also settles the wedged turn chain (#3374 ask-2 coupling)', async () => {
+      const seq = dispatchScheduled();
+      await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
+
+      backdate(seq, '-25 hours');
+      expect(engine.sweepStuckInbound()).toMatchObject({ failedStale: 1 });
+
+      expect(await turnChainState(GAP_PROBE_BOUND_MS)).toBe('settled');
+    });
   });
 
   // ─── sandbox per-chat — workspace-scoped sessions, scheduled NOT isolated ─
@@ -847,6 +879,25 @@ describe('scheduled agent-job turn lifecycle (#3374)', () => {
       dispatchScheduled();
       await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
       await driveInteractiveToComplete({}, GAP_PROBE_BOUND_MS);
+    });
+
+    // #3374 ask 2 in SANDBOX mode: the scheduled turn rides the chat's
+    // workspace lane, which lives in perChatTurnQueues — the exact map the
+    // stale-reclaim release iterates — so the ask-2 coupling covers sandbox
+    // mode too (unlike shared/single, whose lanes the release cannot reach).
+    it('cell 7 reclamation: durable reclamation also releases the wedged workspace lane (#3374 ask-2 coupling)', async () => {
+      const seq = dispatchScheduled();
+      await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
+      await vi.waitFor(() => {
+        expect(queueFor(workspaceKey)?.activeTurn?.sourceMessageId).toMatch(/^agentjob-5-/);
+      }, { timeout: 4_000 });
+
+      backdate(seq, '-25 hours');
+      expect(engine.sweepStuckInbound()).toMatchObject({ failedStale: 1 });
+
+      await vi.waitFor(() => {
+        expect(queueFor(workspaceKey)?.activeTurn ?? null).toBeNull();
+      }, { timeout: 4_000 });
     });
   });
 });
