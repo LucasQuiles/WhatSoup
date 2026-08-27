@@ -1,9 +1,10 @@
-# Fleet Lifecycle Observability Standard — design v5 (DRAFT for final approval)
+# Fleet Lifecycle Observability Standard — design v6 (DRAFT for final approval)
 
-Status: draft. The v4 revision PASSED the independent contradiction/privacy/cardinality review
-(no blockers; privacy: no findings). v5 folds in the review's seven residual MINOR/NOTE
-findings (N1–N7, changes below). Pending owner final approval. Implementation is NOT
-authorized by this document; an implementation plan follows approval.
+Status: draft. v4 PASSED the independent contradiction/privacy/cardinality review (no
+blockers; privacy: no findings); v5 folded in that pass's seven residual MINOR/NOTEs
+(delta-verified); v6 resolves the owner's four verification findings (O1–O4 below) plus two
+encoding clarifications. Pending delta re-review and owner final approval. Implementation is
+NOT authorized by this document; an implementation plan follows approval.
 
 Scope: all WhatSoup fleet runtimes and hosts. The local agent-harness estate is a separate
 operational domain and is not governed by this standard; every contract is domain-portable
@@ -58,6 +59,21 @@ Normative words: MUST / MUST NOT / SHOULD / MAY.
 20. N6: runtime admission behavior past the disk-safety margin is defined (availability wins;
     the degradation is itself declared).
 
+## v5 → v6 changes (owner verification-finding resolutions)
+
+21. O1: `health.progress.v1` now carries what the dashboard consumes — per-lane
+    `open_condition_classes` (closed-enum array) and top-level observer-freshness
+    aggregates; §9's current-state panel is defined against exactly those fields.
+22. O2: past-margin behavior is bounded — saturating counters only, never buffered event
+    payloads; condition/incident records get physically separate reserved capacity so they
+    keep writing when the event store is exhausted.
+23. O3: key rotation is decided normatively — dual-digest migration for one fleet wave;
+    C8 asserts that mechanism, not "the chosen behavior".
+24. O4: the clock model is specified — `boot_id` + monotonic offset for live progress,
+    durable UTC for cross-restart reconciliation, explicit future/regressing-clock rules.
+25. Clarified `m1_lifecycle_state` encoding (state-set pattern) and standard histogram
+    buckets.
+
 ## 1. Domain model — work lanes
 
 Every unit of runtime work belongs to exactly one lane:
@@ -97,9 +113,21 @@ Canonical envelope (versioned; additive-only within a major):
   },
   "phase": "released",
   "at_utc": "…",
+  "boot_id": "…", "mono_ms": 0,
   "attrs": { "closed": "enum, int, or registered keyed-digest fields only" }
 }
 ```
+
+**Clock model (O4).** `boot_id` is a per-process-boot identifier (opaque, minted at process
+start); `mono_ms` is the monotonic-clock offset since that boot. Progress age (axis 2, §3) is
+derived from `mono_ms` deltas WITHIN a `boot_id` — never from wall-clock subtraction — so a
+stepped or regressing system clock cannot fake or hide progress. `at_utc` is the durable
+wall-clock witness used for cross-restart reconciliation: across a `boot_id` change, age is
+the UTC delta and the derived value carries an `age_basis: utc_reconstructed` marker (vs
+`monotonic`). A future `at_utc` (ahead of the reader's clock) is clamped to now for age math
+and counted (`m1_evidence_dropped_total{kind}` does NOT cover this — it is a
+`clock_anomaly_total` saturating counter); a regressing wall clock never regresses a derived
+progress age (max-hold within boot).
 
 Phases (closed set): `admitted`, `dispatched`, `acknowledged`, `progress`, `tool_effect`,
 `terminal_result`, `finalized`, `delivered`, `suppressed`, `released`, `recovery_claimed`,
@@ -184,18 +212,27 @@ the set is closed at any given version; implementers MUST NOT invent classes.
 Metric names are versioned (`whatsoup_m1_*`).
 
 **Label registry (closed).** Global dimensions available to every metric: `instance` (fleet
-roster), `lane` (§1 enum + `unclassified`), `class` (§3 registry). Per-metric dimensions, each
-with a closed value set defined here: `state` (delivery five-state enum), `origin_lane` (lane
-enum), `observer` (registered `observer_id`s, bounded by the §6 registration set),
-`kind` ∈ {`event`, `rollup`, `condition_closed`, `witness_expired`}. No other label dimension
-or value is conformant. Raw identifiers never appear in labels.
+roster), `lane` (§1 enum + `unclassified`), `class` (§3 registry). Per-metric dimensions,
+each with a closed value set declared per metric: `state` on `m1_delivery_state_total` =
+the delivery five-state enum; `state` on `m1_lifecycle_state` = the lifecycle state set
+{`idle`, `active`, `degraded`, `violated`}; `origin_lane` (lane enum); `observer`
+(registered `observer_id`s, bounded by the §6 registration set); `kind` ∈ {`event`,
+`rollup`, `condition_closed`, `witness_expired`}. No other label dimension or value is
+conformant. Raw identifiers never appear in labels.
 
-Core set: `m1_lifecycle_state{lane}` · `m1_settlement_seconds{lane}` (histogram) ·
+Core set: `m1_lifecycle_state{lane,state}` · `m1_settlement_seconds{lane}` (histogram) ·
 `m1_progress_age_seconds{lane}` · `m1_unsettled_count{lane}` /
 `m1_unsettled_oldest_seconds{lane}` · `m1_queue_depth_behind_held` ·
 `m1_conditions_total{class}` · `m1_delivery_state_total{state}` ·
 `m1_recovery_open{origin_lane}` · `m1_observer_age_seconds{observer}` ·
-`m1_release_ancestry_ok` · `m1_evidence_dropped_total{kind}` · `m1_storage_bytes`.
+`m1_release_ancestry_ok` · `m1_evidence_dropped_total{kind}` · `m1_storage_bytes` ·
+`m1_clock_anomaly_total` (saturating).
+
+**Encodings (O-clarifications):** `m1_lifecycle_state` uses the state-set pattern — one
+series per `(lane, state)` with value 0/1, `state` ∈ {`idle`, `active`, `degraded`,
+`violated`} (closed; joins the label registry). Histograms use the fixed bucket set
+`le ∈ {1, 5, 15, 60, 300, 900, 3600, 14400, 86400}` seconds — identical across instances so
+fleet aggregation is well-defined.
 
 **SLO registry (closed; `slo_id` values):**
 
@@ -324,9 +361,30 @@ phone-number-derived and enumerable, so an unkeyed hash is reversible by diction
 with host access re-derive digests via the key to join against the private store; nobody else
 can. Conformance fixture C8 tests this property.
 
-Public `/health` adds `{schema:"health.progress.v1", per-lane {unsettled_count, oldest_age_s,
-progress_age_s, last_condition:{class, at_utc}?}}` — **current state only**: counts, ages,
-enum classes. No history, no identifiers, no digests.
+**Key rotation (O3, normative):** rotation is a **dual-digest migration over one fleet
+wave**. During the wave, writers emit both `kN` (new) and `kN-1` (previous) digests on new
+records, and condition identity matches on EITHER — open conditions keep their identity and
+history with no close/reopen churn. After the wave completes on every instance, `kN-1`
+emission stops and previous-key digests are dropped from new records; retained records are
+not rewritten. At most two keys are ever live; a reader seeing an unknown key id treats the
+digest as unjoinable, never as a new identity.
+
+Public `/health` adds (O1 — the schema carries exactly what §9's current-state panel
+consumes):
+
+```json
+{ "schema": "health.progress.v1",
+  "lanes": { "<lane>": { "unsettled_count": 0, "oldest_age_s": 0, "progress_age_s": 0,
+                          "open_condition_classes": ["V3", "P1"] } },
+  "observers": { "worst_age_s": 0, "breached_count": 0 } }
+```
+
+**Current state only**: counts, ages, and closed-enum class arrays (`open_condition_classes`
+is bounded by the §3 registry size, one entry per OPEN condition class in that lane).
+`observers` aggregates the §6 freshness surface — worst age across registered observers and
+how many currently exceed 2× cadence — with no observer identities. No history, no
+identifiers, no digests. Anything richer (which observer, which scope, any history) is the
+authenticated fleet API's job (§9), never health's.
 
 Liveness-only health (HTTP 200 alone) is declared meaningless; consumers treating 200 as
 health are nonconformant. The fleet watchdog template MUST consume the progress block once
@@ -345,8 +403,10 @@ other channel (§6).
 ## 9. Contract D — dashboards
 
 - **Console, per instance — current state**: one "Lifecycle" panel consuming
-  `health.progress.v1` only: per-lane settlement state, open condition classes, observer
-  worst-age. No history is derived from health — health has none.
+  `health.progress.v1` only, rendering exactly its fields (O1): per-lane
+  `unsettled_count` / `oldest_age_s` / `progress_age_s` / `open_condition_classes`, and the
+  `observers` aggregate (`worst_age_s`, `breached_count`). No history is derived from
+  health — health has none, and the panel shows nothing health does not carry.
 - **History**: condition/incident/settlement history panels consume bounded metrics (`m1_*`)
   and condition/incident records through the **authenticated fleet API** (the existing
   root-token-authed surface) — never public health, never the private event store directly.
@@ -383,13 +443,25 @@ root writes continue only up to a final disk-safety margin; the evidence store M
 the reason a runtime exhausts its disk or dies. Silent truncation of any kind is
 nonconformant.
 
-**Past the disk-safety margin (N6):** availability wins by declaration. The runtime keeps
-admitting and serving work; all event-store evidence writes stop (counted in memory, flushed
-when space returns), while condition/incident records — bounded by configuration — continue;
-settlement derivation for the affected window is marked degraded and every
-condition raised from it carries `evidence_digests: []`. This state is reachable only after a
-`V8` page (≤ 15 min, §5) plus the earlier soft-budget escalation went unanswered — the
-degradation is itself the declared, alarmed outcome, never a silent one.
+**Past the disk-safety margin (N6, bounded per O2):** availability wins by declaration. The
+runtime keeps admitting and serving work; all event-store evidence writes stop. What survives
+the outage is **saturating drop counters only** (`m1_evidence_dropped_total{kind}` and a
+per-lane dropped count) — event payloads are NEVER buffered in memory, so memory use during
+an arbitrarily long storage outage is O(counter set), fixed by the label registry.
+
+Condition/incident records continue through **reserved capacity**: they live in a physically
+separate store file with its own pre-provisioned quota (default 8 MiB, inside the global
+budget but never shared with the event store), sized for the worst case — one open condition
+per legal identity, identities bounded by operator configuration (§5). Event-store exhaustion
+therefore cannot block condition writes; if even the reserved store's quota is reached
+(configuration-bounded, so only by misconfiguration), the newest state per identity wins,
+older CLOSED records in the reserve are evicted first, and open-condition state is held as
+one bounded in-memory summary per identity until writable — never as a growing log.
+
+Settlement derivation for the affected window is marked degraded and every condition raised
+from it carries `evidence_digests: []`. This state is reachable only after a `V8` page
+(≤ 15 min, §5) plus the earlier soft-budget escalation went unanswered — the degradation is
+itself the declared, alarmed outcome, never a silent one.
 
 ## 11. Contract P — shadow-to-default promotion and rollback
 
@@ -431,11 +503,12 @@ behind `observability.fleetLifecycle = off | shadow | alerting | default` (defau
   committed review note covers **both** fixture and script (F12). Production snapshots are NOT
   repository assets and MUST NOT enter version control. MUST raise `V1`+`V3` for the wedge
   intervals and `V4` for the watchdog-green window.
-- **C8 digest resistance (F10)** — with a test key: exported digests differ from unkeyed
-  hashes of the same values; no exported surface contains any digest reproducible without the
-  key; key rotation (new key id) changes digests without breaking open-condition identity
-  (rotation closes and reopens conditions across a declared boundary or dual-digests for one
-  wave — fixture asserts the chosen behavior).
+- **C8 digest resistance and rotation (F10/O3)** — with a test key: exported digests differ
+  from unkeyed hashes of the same values; no exported surface contains any digest
+  reproducible without the key. Rotation fixture asserts the §7 dual-digest migration
+  normatively: during the wave both key ids match the same open condition (identity and
+  history preserved, no close/reopen); after the wave only the new key id is emitted; an
+  unknown key id reads as unjoinable, never as a new identity.
 
 ## 13. Adoption, versioning, portability
 
@@ -450,6 +523,9 @@ standard's reach.
 
 - Review history: v3 FAILED the independent contradiction/privacy/cardinality review (4
   BLOCKERs). v4 resolved all 16 findings and PASSED all three dimensions (privacy: no
-  findings). v5 folds in the v4 pass's seven residual MINOR/NOTE findings (N1–N7).
-- Pending: owner final approval. Only after approval: an implementation plan (separately
-  reviewed) — this document authorizes no code.
+  findings). v5 folded in the v4 pass's seven residual MINOR/NOTEs (delta-verified). v6
+  resolves the owner's four verification findings (O1 health/dashboard alignment, O2 bounded
+  disk-pressure behavior with reserved condition capacity, O3 normative dual-digest key
+  rotation, O4 clock model) plus encoding clarifications.
+- Pending: delta re-review of the v6 changes, then owner final approval. Only after
+  approval: an implementation plan (separately reviewed) — this document authorizes no code.
