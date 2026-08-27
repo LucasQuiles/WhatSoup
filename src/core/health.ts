@@ -2009,8 +2009,10 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       // late-computed reason turns up before emit, latch maintenance RESTORES
       // the released latch (advanced point, prior set ∪ observed reasons), so
       // the release only sticks (and is only logged) when the evaluation ends
-      // quiet. releasedLatchReasons carries the prior set for restoration.
-      let latchReleasedThisEvaluation = false;
+      // quiet. Non-null exactly when a release happened this evaluation,
+      // carrying the released latch's prior reason set for restoration — one
+      // variable, so the release flag and the captured set cannot desync (a
+      // release implies the entry existed, so the set is always available).
       let releasedLatchReasons: ReadonlySet<string> | null = null;
       if (authFailureIsUnhealthy) {
         status = 'unhealthy';
@@ -2065,13 +2067,15 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
               ? fallbackState.effectiveProvider
               : null;
           const priorLatch = recentlyDegraded.get(deps.instanceName);
-          latchReleasedThisEvaluation = releaseDegradationLatchOnRecoveryProof(
-            recentlyDegraded,
-            deps.instanceName,
-            turnCapability,
-            primaryProviderId,
-          );
-          if (latchReleasedThisEvaluation && priorLatch !== undefined) {
+          if (
+            priorLatch !== undefined
+            && releaseDegradationLatchOnRecoveryProof(
+              recentlyDegraded,
+              deps.instanceName,
+              turnCapability,
+              primaryProviderId,
+            )
+          ) {
             releasedLatchReasons = priorLatch.reasons;
           }
         }
@@ -2521,10 +2525,10 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
             ? new Set(realReasons)
             : new Set([...existingLatch.reasons, ...realReasons]);
           recentlyDegraded.set(deps.instanceName, { latchedAtMs: Date.now(), reasons });
-        } else if (latchReleasedThisEvaluation) {
+        } else if (releasedLatchReasons !== null) {
           recentlyDegraded.set(deps.instanceName, {
             latchedAtMs: Date.now(),
-            reasons: new Set([...(releasedLatchReasons ?? []), ...realReasons]),
+            reasons: new Set([...releasedLatchReasons, ...realReasons]),
           });
         } else if (latchArmEligible && status === 'degraded') {
           log.info({ instance: deps.instanceName }, 'degradation silence latch set');
@@ -2533,7 +2537,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
             reasons: new Set(realReasons),
           });
         }
-      } else if (latchReleasedThisEvaluation) {
+      } else if (releasedLatchReasons !== null) {
         log.info({ instance: deps.instanceName }, 'degradation silence latch released: fresh primary-turn receipt');
       }
 
