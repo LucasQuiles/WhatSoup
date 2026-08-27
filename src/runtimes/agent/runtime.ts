@@ -2841,7 +2841,8 @@ export class AgentRuntime implements Runtime {
         runtime.enqueueAutoSwitchNotice(queue, text, logChatJid, mode),
       withHandoffPrefix: (chatJid, text) => runtime.withHandoffPrefix(chatJid, text),
       flushPendingHandoffNotice: (queue) => runtime.flushPendingHandoffNotice(queue),
-      activateProviderFallback: (resetAt, reason) => runtime.fallback.activateProviderFallback(resetAt, reason),
+      activateProviderFallback: (resetAt, reason, failedSession) =>
+        runtime.fallback.activateProviderFallbackForSession(resetAt, reason ?? 'usage-limit', failedSession ?? null),
       activateProviderFallbackAfterTerminalResult: (resetAt, reason, session, evidenceText) =>
         runtime.fallback.activateProviderFallbackAfterTerminalResult(resetAt, reason, session, evidenceText),
       scheduleFallbackReplay: (args) => runtime.scheduleFallbackReplay(args),

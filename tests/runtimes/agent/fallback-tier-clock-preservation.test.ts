@@ -108,7 +108,7 @@ vi.mock('../../../src/runtimes/agent/providers/binary-preflight.ts', () => ({
   probeModelCatalog: vi.fn(() => Promise.resolve({ status: 'unknown', suggestion: null })),
 }));
 
-import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
+import { AgentRuntime, extractUsageLimitResetTime } from '../../../src/runtimes/agent/runtime.ts';
 import { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
 import { ensureFallbackStateSchema } from '../../../src/runtimes/agent/fallback-state-db.ts';
@@ -220,7 +220,7 @@ type RuntimeView = {
   sessionOwnership: {
     get: (key: string) => { managerId: string; generation: number; state: string } | undefined;
   };
-  fallbackWindow: { activeUntil: number | null; activeEntry: FallbackEntry | null };
+  fallbackWindow: { activeUntil: number | null; activeEntry: FallbackEntry | null; resetAt: number | null };
   fallbackChain: { failedKeys: Set<string> };
   chatQueues: Map<string, unknown>;
   recordFallbackTurnOutcome(
@@ -242,9 +242,9 @@ function v(runtime: AgentRuntime): RuntimeView {
 const CHAT = 'chat@s.whatsapp.net';
 
 /** Arm the window, map a fake fallback session + queue, return the pieces. */
-function armIncidentShape(runtime: AgentRuntime, opts: { model?: string } = {}) {
+function armIncidentShape(runtime: AgentRuntime, opts: { model?: string; resetAt?: Date } = {}) {
   const rv = v(runtime);
-  const activation = rv.activateProviderFallback(null, 'usage-limit');
+  const activation = rv.activateProviderFallback(opts.resetAt ?? null, 'usage-limit');
   expect(activation).not.toBeNull();
   const session = makeFallbackSession('opencode-cli', opts.model ?? 'kimi/kimi-k3');
   rv.setOwnedPerChatSession(CHAT, session);
@@ -567,24 +567,80 @@ describe('classified terminal failures from the active fallback session', () => 
     expect(rv.fallbackChain.failedKeys.size).toBe(0);
   });
 
-  it('usage-limit with a parsed resetAt from the FALLBACK session still extends to the absolute reset time (regression pin)', async () => {
-    const { rv, armedUntil } = armClassifiedShape();
-    const resetAt = new Date(armedUntil + 60 * 60 * 1000); // T0 + 6h
+  it('usage-limit with a parsed reset from the FALLBACK entry never overwrites resetAt, extends the window, or restarts the probe', async () => {
+    const { rv, probe, armedUntil, queue } = armClassifiedShape();
+    const session = makeClassifiedSession('opencode-cli');
+    // Epoch-anchored reset cue (timezone-free): parses to T0 + 6h, LATER than
+    // the current window end, so the old extend-toward-reset path is exposed.
+    const text = 'usage credit limit reached — resets at 1787796000';
+    expect(extractUsageLimitResetTime(text)?.getTime()).toBe(armedUntil + 60 * 60 * 1000);
 
     await vi.advanceTimersByTimeAsync(2 * 60 * 1000);
-    rv.fallback.activateProviderFallbackAfterTerminalResult(
-      resetAt,
-      'usage-limit',
-      ocSession,
-      'usage limit reached',
-    );
+    rv.handleEventWithContext({ type: 'result', text, isError: true }, queue, session, 'conv', 1, CHAT);
 
-    // Fallback tier, but a non-null resetAt targets an absolute reset time —
-    // the extension is tier-independent and stays.
-    expect(rv.fallbackWindow.activeUntil).toBe(resetAt.getTime());
+    // The marking usage-limit path still advances the chain past the entry...
+    expect(rv.fallbackWindow.activeEntry?.model).toBe('glm/glm-5.2');
+    // ...but the FALLBACK entry's own reset estimate describes the fallback
+    // provider's quota, not the primary's: the stored resetAt, the window end,
+    // and the standing probe countdown must all stay untouched.
+    expect(rv.fallbackWindow.resetAt).toBeNull();
+    expect(rv.fallbackWindow.activeUntil).toBe(armedUntil);
+    expect(probe).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(3 * 60 * 1000);
+    expect(probe).toHaveBeenCalledTimes(1);
   });
 
-  it('usage-limit with a parsed resetAt from the PRIMARY session still extends to the absolute reset time (regression pin)', async () => {
+  it('a fallback process crash under a STORED resetAt window does not restart the probe or move the clocks', async () => {
+    const runtime = makeRuntime(TWO_ENTRY_CHAIN);
+    const storedResetAt = new Date('2026-08-26T22:00:00Z'); // T0 + 2h
+    const { rv, owner } = armIncidentShape(runtime, { resetAt: storedResetAt });
+    const probe = vi.fn(() => false);
+    rv.probePrimaryProviderRecovered = probe as unknown as () => boolean;
+    expect(rv.fallbackWindow.activeUntil).toBe(storedResetAt.getTime());
+    expect(rv.fallbackWindow.resetAt).toBe(storedResetAt.getTime());
+
+    // The advance path forwards the window's stored resetAt — a non-null
+    // resetAt must not smuggle a probe restart back in on a fallback-tier
+    // failure (per-turn crashes faster than the recheck cadence would
+    // otherwise suppress early primary recovery for the whole window).
+    await vi.advanceTimersByTimeAsync(2 * 60 * 1000);
+    rv.handlePerChatCrash(CHAT, CHAT, crashInfo(owner));
+
+    expect(rv.fallbackWindow.activeEntry?.model).toBe('glm/glm-5.2');
+    expect(rv.fallbackWindow.activeUntil).toBe(storedResetAt.getTime());
+    expect(rv.fallbackWindow.resetAt).toBe(storedResetAt.getTime());
+    expect(probe).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(3 * 60 * 1000);
+    expect(probe).toHaveBeenCalledTimes(1);
+  });
+
+  it('model-unavailable from the fallback session neither extends the window nor marks the entry (non-marking split preserved)', async () => {
+    const { rv, probe, armedUntil, queue } = armClassifiedShape();
+    const session = makeClassifiedSession('opencode-cli');
+
+    await vi.advanceTimersByTimeAsync(2 * 60 * 1000);
+    rv.handleEventWithContext(
+      { type: 'result', text: 'not_found_error: model does not exist', isError: true },
+      queue,
+      session,
+      'conv',
+      1,
+      CHAT,
+    );
+
+    // The registry declares model-unavailable non-marking (direct activation):
+    // no failed-entry marking, no chain advance — that split is preserved.
+    expect(rv.fallbackWindow.activeEntry?.model).toBe('kimi/kimi-k3');
+    expect(rv.fallbackChain.failedKeys.size).toBe(0);
+    // But the fallback-tier failure still must not move any clock.
+    expect(rv.fallbackWindow.activeUntil).toBe(armedUntil);
+    expect(rv.fallbackWindow.resetAt).toBeNull();
+    expect(probe).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(3 * 60 * 1000);
+    expect(probe).toHaveBeenCalledTimes(1);
+  });
+
+  it('usage-limit with a parsed resetAt from the PRIMARY session still sets resetAt and extends to the absolute reset time (regression pin)', async () => {
     const { rv, armedUntil } = armClassifiedShape();
     const resetAt = new Date(armedUntil + 60 * 60 * 1000); // T0 + 6h
     const primarySession = {
@@ -601,5 +657,6 @@ describe('classified terminal failures from the active fallback session', () => 
     );
 
     expect(rv.fallbackWindow.activeUntil).toBe(resetAt.getTime());
+    expect(rv.fallbackWindow.resetAt).toBe(resetAt.getTime());
   });
 });
