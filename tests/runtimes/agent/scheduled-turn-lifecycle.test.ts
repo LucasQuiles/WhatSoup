@@ -423,11 +423,11 @@ describe('scheduled agent-job turn lifecycle (#3374)', () => {
   }
 
   /** Cell 1: dispatch + scheduler publication acknowledgment; returns the journal seq. */
-  function dispatchScheduled(prompt = 'Check for a scholarship reply.'): number {
+  function dispatchScheduled(prompt = 'Check for a scholarship reply.', occurrenceId = 11): number {
     const ack = runtime.dispatchAgentJob({
       beadId: 7,
       triggerId: 5,
-      occurrenceId: 11,
+      occurrenceId,
       prompt,
       title: 'Scholarship check',
       reportChatJid: groupJid,
@@ -583,29 +583,15 @@ describe('scheduled agent-job turn lifecycle (#3374)', () => {
       expect(status(seq)).toBe('processing');
     });
 
-    it('cell 7 reclamation: the W2 stuck-inbound sweep is the only reaper main exposes for a wedged scheduled turn (24h grace)', async () => {
+    it('cell 7 reclamation: the W2 stuck-inbound sweep respects its 24h grace for an in-flight turn', async () => {
       const seq = dispatchScheduled();
       await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
 
       // Inside the grace window the sweep must NOT touch the in-flight row.
+      // (Post-grace reclamation AND the coupled lane release are owned by the
+      // promoted coupling test below.)
       expect(engine.sweepStuckInbound()).toMatchObject({ failedStale: 0 });
       expect(status(seq)).toBe('processing');
-
-      // Beyond the 24h grace window the durable row is reclaimed as failed.
-      backdate(seq, '-25 hours');
-      const swept = engine.sweepStuckInbound();
-      expect(swept.failedStale).toBe(1);
-      expect(status(seq)).toBe('failed');
-
-      // The RUNTIME lane is still wedged even after durable reclamation: the
-      // sweep repairs the journal, not the pinned TurnQueue (see it.fails gap
-      // probe below).
-      expect(scheduledQueue()?.activeTurn?.sourceMessageId).toMatch(/^agentjob-5-/);
-
-      // Consequence: when the wedged turn's terminal finally arrives, its
-      // finalization has no eligible inbound row left — shutdown fails closed.
-      // The afterEach asserts that exact outcome.
-      expectUnfinalizableShutdown = true;
     });
 
     // #3374 ask 2 — PROMOTED from the fix-shaped it.fails gap probe: the W2
@@ -613,21 +599,16 @@ describe('scheduled agent-job turn lifecycle (#3374)', () => {
     // release rejects the held turn's runtime completion, resolves the
     // session's provider-turn promise (a killed real child does the same from
     // its exit handler), and the queue's ordinary processor-error finalization
-    // advances — with WedgedTurnReclaimedError telling it that the durable
-    // terminal is already owned by the sweep, so a non-terminal finalization
-    // result must not park on a recovery that can never arrive.
+    // recognizes the sweep-owned durable terminal (reclaimed_by_sweep): the
+    // runtime state is retired through the standard post-effects — no
+    // incident, no supervisor retention — leaving the lane REUSABLE and
+    // shutdown clean (asserted implicitly by afterEach's normal shutdown).
     it('cell 7 reclamation: durable reclamation also releases the wedged TurnQueue (#3374 ask-2 coupling)', async () => {
       const seq = dispatchScheduled();
       await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
       await vi.waitFor(() => {
         expect(scheduledQueue()?.activeTurn?.sourceMessageId).toMatch(/^agentjob-5-/);
       }, { timeout: 4_000 });
-
-      // The sweep terminalizes the durable row as failed; the wedged turn's
-      // late terminal then has no eligible inbound row, so shutdown fails
-      // closed (asserted by afterEach). Set BEFORE the failing assertion —
-      // it.fails aborts the body at the first failed expect.
-      expectUnfinalizableShutdown = true;
 
       backdate(seq, '-25 hours');
       expect(engine.sweepStuckInbound()).toMatchObject({ failedStale: 1 });
@@ -639,6 +620,24 @@ describe('scheduled agent-job turn lifecycle (#3374)', () => {
       await vi.waitFor(() => {
         expect(scheduledQueue()?.activeTurn ?? null).toBeNull();
       }, { timeout: 4_000 });
+
+      // Release must leave the lane REUSABLE, not merely unblocked: the
+      // reclaimed turn's runtime-FIFO context must not leak (a retained
+      // owner makes every successor fail pre-dispatch with "FIFO already
+      // has an active owner"), and a successor scheduled turn must reach
+      // the provider.
+      await vi.waitFor(() => {
+        expect(
+          (runtime as unknown as { perChatRuntimeTurnContexts: Map<string, unknown[]> })
+            .perChatRuntimeTurnContexts.get(scheduledMapKey) ?? [],
+        ).toHaveLength(0);
+      }, { timeout: 4_000 });
+
+      // Distinct occurrence id: the synthetic message id embeds it, and a
+      // same-second successor with the same occurrence would collide in the
+      // journal (a harness artifact, not lane behavior).
+      dispatchScheduled('Successor after reclamation.', 12);
+      await waitForInFlightTurn((t) => t.includes('Successor after reclamation.'));
     });
   });
 
@@ -720,12 +719,6 @@ describe('scheduled agent-job turn lifecycle (#3374)', () => {
     it.fails('cell 7 reclamation gap probe: durable reclamation also releases the wedged SHARED queue (#3374 ask-2 coupling)', async () => {
       const seq = dispatchScheduled();
       await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
-
-      // The sweep reclaims the durable row; the wedged turn's late terminal
-      // then has no eligible inbound row, so shutdown fails closed (asserted
-      // by afterEach). Set BEFORE the failing assertion — it.fails aborts the
-      // body at the first failed expect.
-      expectUnfinalizableShutdown = true;
 
       backdate(seq, '-25 hours');
       expect(engine.sweepStuckInbound()).toMatchObject({ failedStale: 1 });
@@ -815,10 +808,6 @@ describe('scheduled agent-job turn lifecycle (#3374)', () => {
       const seq = dispatchScheduled();
       await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
 
-      // Set BEFORE the failing assertion (it.fails aborts the body there);
-      // the afterEach asserts the fail-closed shutdown.
-      expectUnfinalizableShutdown = true;
-
       backdate(seq, '-25 hours');
       expect(engine.sweepStuckInbound()).toMatchObject({ failedStale: 1 });
 
@@ -902,11 +891,6 @@ describe('scheduled agent-job turn lifecycle (#3374)', () => {
       await vi.waitFor(() => {
         expect(queueFor(workspaceKey)?.activeTurn?.sourceMessageId).toMatch(/^agentjob-5-/);
       }, { timeout: 4_000 });
-
-      // The sweep owns the durable terminal; the wedged turn's late terminal
-      // has no eligible inbound row left, so shutdown fails closed (asserted
-      // by afterEach).
-      expectUnfinalizableShutdown = true;
 
       backdate(seq, '-25 hours');
       expect(engine.sweepStuckInbound()).toMatchObject({ failedStale: 1 });

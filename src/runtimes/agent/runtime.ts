@@ -2982,13 +2982,22 @@ export class AgentRuntime implements Runtime {
    */
   private releaseWedgedReclaimedLanes(rows: readonly StaleReclaimedInbound[]): void {
     if (rows.length === 0) return;
-    // DBGTRACE
     const byMessageId = new Map(rows.map((row) => [row.sourceMessageId, row]));
     for (const [mapKey, turnQueue] of this.perChatTurnQueues) {
       const active = turnQueue.activeTurn;
       if (!active) continue;
       const row = byMessageId.get(active.sourceMessageId);
       if (row === undefined) continue;
+      // The reclaimed row must identify THIS lane's turn, not a cross-chat
+      // message-id collision: the journaled inbound and the queued turn share
+      // a chat, so their conversation keys must agree.
+      if (row.conversationKey !== toConversationKey(active.chatJid)) {
+        log.warn(
+          { inboundSeq: row.seq, mapKey },
+          'wedged-lane release: reclaimed row conversation does not match the lane — skipping',
+        );
+        continue;
+      }
       const session = this.chatSessions.get(mapKey);
       if (!session || session === this.controlSession) {
         log.warn(
@@ -3001,6 +3010,28 @@ export class AgentRuntime implements Runtime {
       const owner = this.sessionOwnership.get(mapKey);
       if (!managerId || !owner || owner.managerId !== managerId) {
         log.warn({ inboundSeq: row.seq }, 'wedged-lane release: session ownership is not current — skipping');
+        continue;
+      }
+      // A session whose provider turn is NOT in flight is not wedged: its
+      // terminal arrived and ordinary finalization is racing the sweep —
+      // killing it would shoot a healthy child. Doubles without the field
+      // report undefined and proceed.
+      if (session.getStatus().turnInFlight === false) {
+        log.warn(
+          { inboundSeq: row.seq, mapKey },
+          'wedged-lane release: provider turn already terminalized — leaving finalization to its owner',
+        );
+        continue;
+      }
+      // Exactly one published context is the releasable shape; anything else
+      // is an anomalous lane no release action should touch (disclosed, not
+      // silent — and checked BEFORE the alert and the child kill).
+      const publishedContexts = this.perChatRuntimeTurnContexts.get(mapKey) ?? [];
+      if (publishedContexts.length !== 1) {
+        log.warn(
+          { inboundSeq: row.seq, mapKey, publishedContexts: publishedContexts.length },
+          'wedged-lane release: lane does not hold exactly one runtime turn context — skipping',
+        );
         continue;
       }
       log.warn(
@@ -3028,17 +3059,17 @@ export class AgentRuntime implements Runtime {
       // resolves it from its exit handler; resolving directly keeps the
       // release independent of a child existing (completeProviderTurn is
       // idempotent). The processor then observes the rejected completion and
-      // the queue's ordinary processor-error finalization retires the turn
-      // and advances queued followers — deliberately NOT pre-finalized here:
-      // a second finalization owner would race the canonical one.
-      const publishedContexts = this.perChatRuntimeTurnContexts.get(mapKey) ?? [];
-      if (publishedContexts.length === 1) {
-        this.runtimeTurnCoordinator.rejectRuntimeTurnCompletion(
-          new WedgedTurnReclaimedError(),
-          mapKey,
-          publishedContexts[0],
-        );
-      }
+      // the queue's ordinary processor-error finalization retires the turn —
+      // the finalizer recognizes the sweep-owned durable terminal
+      // (reclaimed_by_sweep) and retires the runtime state through the
+      // standard post-effects, so followers drain to a fresh session.
+      // Deliberately NOT pre-finalized here: a second finalization owner
+      // would race the canonical one.
+      this.runtimeTurnCoordinator.rejectRuntimeTurnCompletion(
+        new WedgedTurnReclaimedError(),
+        mapKey,
+        publishedContexts[0],
+      );
       session.completeProviderTurn();
     }
   }

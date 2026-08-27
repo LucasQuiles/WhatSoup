@@ -551,6 +551,7 @@ type DurabilityStatements = {
   markInboundComplete: PreparedStatement;
   markInboundFailed: PreparedStatement;
   markInboundFailedIfProcessing: PreparedStatement;
+  selectInboundReclaimState: PreparedStatement;
   markContinuityCandidate: PreparedStatement;
   markContinuityCandidateIfUnownedAndNoTerminalOutbound: PreparedStatement;
   markInboundSkipped: PreparedStatement;
@@ -640,6 +641,9 @@ export class DurabilityEngine {
         // terminal_reason stays exactly 'error' (external matcher contract); the
         // bounded, content-free failure_class column carries the driver split.
         `UPDATE inbound_events SET processing_status = 'failed', completed_at = datetime('now'), terminal_reason = 'error', failure_class = ? WHERE seq = ?`,
+      ),
+      selectInboundReclaimState: prepare(
+        `SELECT processing_status, failure_class FROM inbound_events WHERE seq = ?`,
       ),
       markInboundFailedIfProcessing: prepare(
         `UPDATE inbound_events
@@ -1505,6 +1509,21 @@ export class DurabilityEngine {
 
   markInboundFailed(seq: number, failureClass?: InboundFailureClass): void {
     this.statements.markInboundFailed.run(coerceInboundFailureClass(failureClass), seq);
+  }
+
+  /**
+   * True when the inbound row was already terminalized by the W2 stuck-inbound
+   * sweep (processing_status 'failed', failure_class 'stale_reclaim'). The
+   * sweep owns the durable terminal in that case, so a later runtime
+   * finalization for the same turn must retire its in-memory state instead of
+   * raising a finalization incident (#3374 ask 2).
+   */
+  isInboundSweepReclaimed(seq: number): boolean {
+    const row = this.statements.selectInboundReclaimState.get(seq) as {
+      processing_status: string;
+      failure_class: string | null;
+    } | undefined;
+    return row?.processing_status === 'failed' && row.failure_class === 'stale_reclaim';
   }
 
   /** Fail exactly the processing inbound owned by the supplied runtime message. */

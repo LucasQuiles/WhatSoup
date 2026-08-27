@@ -890,7 +890,7 @@ private async performRuntimeTurnFinalization(args: {
     bookkeeping,
     ...(capabilityDecision === undefined ? {} : { capabilityDecision }),
   });
-  const retained = result.kind === 'terminal'
+  const retained = result.kind === 'terminal' || result.kind === 'reclaimed_by_sweep'
     ? null
     : this.host.runtimeTurnSupervisor.retain({
         context: args.context,
@@ -909,6 +909,11 @@ private async performRuntimeTurnFinalization(args: {
       this.host.runtimeTurnSupervisor.markDegraded(args.context);
       return result;
     }
+    await this.applyRuntimeTurnPostEffects(result, args.context, postEffects);
+    this.finishRuntimeTurnContinuation(args.context);
+  } else if (result.kind === 'reclaimed_by_sweep') {
+    // The sweep owns the durable terminal (#3374 ask 2): retire the runtime
+    // state exactly like a terminal — no retention, no incident.
     await this.applyRuntimeTurnPostEffects(result, args.context, postEffects);
     this.finishRuntimeTurnContinuation(args.context);
   } else if (result.kind === 'durable_failure_incident' && retained?.mayAdvance === true) {
@@ -1603,9 +1608,9 @@ async applyRuntimeTurnPostEffects(
     ledger.fifoValidated = true;
   }
 
-  const shouldDisarm = result.kind === 'durable_failure_incident'
-    ? result.mayAdvance
-    : result.effectiveReplyGuaranteeDisarmed;
+  const shouldDisarm = result.kind === 'terminal'
+    ? result.effectiveReplyGuaranteeDisarmed
+    : result.mayAdvance;
   if (shouldDisarm && !ledger.guaranteeDisarmed) {
     this.host.replyGuarantee?.disarm(context.identity.inboundSeq ?? undefined);
     ledger.guaranteeDisarmed = true;
@@ -1747,9 +1752,17 @@ async retryRuntimeTurnFinalizations(): Promise<RuntimeTurnRetryResult> {
 }
 
 async applyRecoveredRuntimeTurnFinalization(
-  result: Extract<FinalizeRuntimeTurnResult, { kind: 'terminal' }>,
+  result: Extract<FinalizeRuntimeTurnResult, { kind: 'terminal' | 'reclaimed_by_sweep' }>,
   retained: RetainedRuntimeTurnFinalization<RuntimeTurnPostEffects>,
 ): Promise<void> {
+  if (result.kind === 'reclaimed_by_sweep') {
+    // A retained finalization whose row the sweep later reclaimed: the sweep
+    // owns the durable terminal; only the in-memory retirement remains.
+    if (!retained.postEffectsApplied) {
+      await this.applyRuntimeTurnPostEffects(result, retained.context, retained.postEffects);
+    }
+    return;
+  }
   if (!this.terminalPostEffectsAreProven(result)) {
     throw new Error('Recovered runtime terminal lacks an exact durable ownership handoff');
   }
@@ -1876,6 +1889,16 @@ async finalizeUndispatchedRuntimeTurn(
     bookkeeping,
   });
   const scopeKey = this.runtimeTurnScopeKey(context);
+  if (result.kind === 'reclaimed_by_sweep') {
+    // The sweep owns the durable terminal: retire the in-memory state only.
+    onOwnershipProven?.();
+    if (scopeRef !== undefined) {
+      await this.applyRuntimeTurnPostEffects(result, context, postEffects);
+    } else {
+      this.host.replyGuarantee?.disarm(context.identity.inboundSeq ?? undefined);
+    }
+    return result;
+  }
   if (result.kind !== 'terminal') {
     const retained = this.host.runtimeTurnSupervisor.retain({
       context,
@@ -2044,9 +2067,10 @@ async finalizePerChatProcessorError(
   });
   if (result.kind !== 'terminal' && !result.mayAdvance) {
     if (error instanceof WedgedTurnReclaimedError) {
-      // The W2 sweep already failed this turn's inbound row (stale_reclaim):
-      // the durable terminal exists and no recovery job will ever arrive.
-      // Parking here would re-create the exact queue wedge the reclaim is
+      // FALLBACK ONLY: a reclaimed turn normally finalizes as
+      // reclaimed_by_sweep (mayAdvance) and never reaches this branch. If the
+      // finalizer could not prove sweep ownership (e.g. the row read failed),
+      // parking would re-create the exact queue wedge the reclaim is
       // releasing — advance instead.
       log.warn(
         { mapKey, scopeKey: this.runtimeTurnScopeKey(context), resultKind: result.kind },
