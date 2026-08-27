@@ -1,4 +1,4 @@
-# Fleet Lifecycle Observability Standard — implementation plan v2 (DRAFT for review)
+# Fleet Lifecycle Observability Standard — implementation plan v2 (review PASSED 17/17; roadmap APPROVED 2026-08-27 — no stage authorized)
 
 Plans the implementation of the approved design
 (`2026-08-26-fleet-lifecycle-observability-standard-design.md`, v7, APPROVED 2026-08-27,
@@ -11,11 +11,11 @@ constraint made explicit; authority for Stage 0 execution separated from plan ap
 
 ## 0. Authority state
 
-- Authorized now: DRAFTING this plan and passing it through independent review, per the
-  owner's 2026-08-27 approval ("merging the design and drafting a separately reviewed
-  implementation plan").
-- NOT authorized: any implementation, fleet rollout, alert activation, or control
-  automation.
+- Roadmap APPROVED by the owner 2026-08-27 (after the v2 delta re-review PASS), with
+  the owner's amendments folded into this text. The approval authorizes only amending
+  and merging this roadmap. It does NOT authorize Stage 0, implementation, deployment,
+  alert activation, promotion, or control automation; every stage still requires a
+  separate named go-ahead.
 - Plan approval approves the ROADMAP only. No stage — including Stage 0 — starts on plan
   approval alone: each stage starts only on a subsequent owner go-ahead that names that
   stage (Stage 0's go-ahead must name S0.1–S0.5 execution, because Stage 0 touches
@@ -229,25 +229,31 @@ Gate: per-cohort owner activation acts; final completion report closes the plan.
   failure roll-up; credential expiry probes as first-class observers.
 - Adoption by other estates (design §13 portability seam stays a seam).
 
-## 11. Open decisions for the owner (proposed defaults; plan proceeds once decided)
+## 11. Owner decisions (all three DECIDED 2026-08-27; recorded with their rules)
 
-- **D1 Eradication acceptance count** (decision for the wedge-incident lane; it gates
-  no stage of THIS plan): propose 7 consecutive clean scheduled fires — the trigger is
-  daily, so 7 fires spans 7 calendar days, aligning with the shadow-soak duration by
-  construction — with a defined `inconclusive` outcome when a fire lacks a subsequent
-  interactive inbound to exercise the path. Until accepted, the incident stays open and
+- **D1 Eradication acceptance count** (DECIDED by the owner 2026-08-27; decision for
+  the wedge-incident lane; it gates no stage of THIS plan): acceptance = seven
+  consecutive ELIGIBLE clean fires. A fire is eligible when it exercises the path (a
+  subsequent interactive inbound follows it); an `inconclusive` fire (path not
+  exercised) neither advances nor resets the streak; a failure resets it. Acceptance
+  may therefore exceed seven calendar days. Until accepted, the incident stays open and
   its regression sentinels stay red-flip.
-- **D2 Wave stall policy:** propose skip-and-return — the coordination-gated host is
-  deferred and the wave continues through the remaining targets in the approved order,
-  with a weekly owner ping while that coordination stays open.
-- **D3 Unreachable-operator auto-containment:** propose NONE through Stage 3 (observe
-  only); revisit at Stage 4 with evidence.
+- **D2 Wave stall policy** (DECIDED by the owner 2026-08-27): skip-and-return — the
+  coordination-gated host is deferred and the wave continues through the remaining
+  targets in the approved order, with a weekly owner ping while that coordination stays
+  open. A skipped host remains an EXPLICITLY OPEN rollout obligation: fleet-wide
+  completion cannot be claimed until it passes.
+- **D3 Unreachable-operator auto-containment** (DECIDED by the owner 2026-08-27,
+  accepted unchanged): NONE through Stage 3 (observe only); revisit at Stage 4 with
+  evidence.
 
 ## 12. Verification and review
 
 - This plan passes an independent adversarial review (contradiction with the approved
   design, sequencing soundness, coverage of the design's ten contracts, authority-
   boundary correctness) BEFORE returning to the owner for approval. v1 FAILED that
-  review (2 BLOCKER, 8 MAJOR); v2 resolves every finding and awaits delta re-review.
+  review (2 BLOCKER, 8 MAJOR); the v2 delta re-review PASSED with all 17 findings
+  verified RESOLVED (one non-blocking authority-hygiene NOTE), and the owner approved
+  the roadmap 2026-08-27.
 - Every stage's acceptance is a falsifiable fixture or receipt, never a narrative claim;
   stage reports carry command-level evidence per the repo's verification discipline.
