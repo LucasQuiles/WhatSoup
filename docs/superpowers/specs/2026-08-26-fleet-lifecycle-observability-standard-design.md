@@ -1,10 +1,12 @@
-# Fleet Lifecycle Observability Standard — design v6 (DRAFT for final approval)
+# Fleet Lifecycle Observability Standard — design v7 (DRAFT for final approval)
 
 Status: draft. v4 PASSED the independent contradiction/privacy/cardinality review (no
 blockers; privacy: no findings); v5 folded in that pass's seven residual MINOR/NOTEs
-(delta-verified); v6 resolves the owner's four verification findings (O1–O4 below) plus two
-encoding clarifications. Pending delta re-review and owner final approval. Implementation is
-NOT authorized by this document; an implementation plan follows approval.
+(delta-verified); v6 resolved the owner's first four verification findings (O1–O4,
+delta-verified, zero new findings); v7 resolves the owner's two v6 correctness gaps (O5–O6
+below) plus two corrections. Pending delta re-review of the v7 changes and owner final
+approval. Implementation is NOT authorized by this document; an implementation plan follows
+approval.
 
 Scope: all WhatSoup fleet runtimes and hosts. The local agent-harness estate is a separate
 operational domain and is not governed by this standard; every contract is domain-portable
@@ -74,6 +76,18 @@ Normative words: MUST / MUST NOT / SHOULD / MAY.
 25. Clarified `m1_lifecycle_state` encoding (state-set pattern) and standard histogram
     buckets.
 
+## v6 → v7 changes (owner correctness-gap resolutions)
+
+26. O5: clock anomalies can no longer create false green — beyond a configured skew
+    allowance, anomalous UTC evidence makes age `unknown`, unknown age never satisfies a
+    settlement predicate or bound, and the anomaly raises `V6`.
+27. O6: key rotation cannot orphan dormant open conditions — retirement is gated on a
+    verified migration sweep that persists a `kN` alias on every open condition and
+    protected root, with zero unmigrated identities proven first. C8 asserts the dormant
+    case.
+28. Added the 600 s histogram bucket so the 10-minute SLOs are directly measurable.
+29. §14 corrected to reflect the completed v6 delta review.
+
 ## 1. Domain model — work lanes
 
 Every unit of runtime work belongs to exactly one lane:
@@ -124,10 +138,18 @@ derived from `mono_ms` deltas WITHIN a `boot_id` — never from wall-clock subtr
 stepped or regressing system clock cannot fake or hide progress. `at_utc` is the durable
 wall-clock witness used for cross-restart reconciliation: across a `boot_id` change, age is
 the UTC delta and the derived value carries an `age_basis: utc_reconstructed` marker (vs
-`monotonic`). A future `at_utc` (ahead of the reader's clock) is clamped to now for age math
-and counted (`m1_evidence_dropped_total{kind}` does NOT cover this — it is a
-`clock_anomaly_total` saturating counter); a regressing wall clock never regresses a derived
-progress age (max-hold within boot).
+`monotonic`).
+
+**Clock-anomaly handling (O5 — anomalies must never manufacture green):** a configured skew
+allowance (default 30 s) bounds tolerable clock disagreement. Within the allowance, a future
+`at_utc` is clamped to now for age math and counted (`m1_clock_anomaly_total`, saturating).
+BEYOND the allowance — a future timestamp past the allowance, or wall-clock regression
+observed across a reconstruction — the derived age becomes **`age_basis: unknown`**: an
+unknown age MUST NOT satisfy any settlement predicate, bound check, or SLO (unknown is
+not-green, fail-closed), the affected units are reported in `m1_lifecycle_state` as
+`degraded`, and the anomaly raises a **`V6` condition** (stale-wrong-evidence class) scoped
+to the emitting store. Within a boot, a regressing wall clock never regresses a derived
+progress age (max-hold); regression beyond the allowance is the same `V6` path.
 
 Phases (closed set): `admitted`, `dispatched`, `acknowledged`, `progress`, `tool_effect`,
 `terminal_result`, `finalized`, `delivered`, `suppressed`, `released`, `recovery_claimed`,
@@ -231,8 +253,9 @@ Core set: `m1_lifecycle_state{lane,state}` · `m1_settlement_seconds{lane}` (his
 **Encodings (O-clarifications):** `m1_lifecycle_state` uses the state-set pattern — one
 series per `(lane, state)` with value 0/1, `state` ∈ {`idle`, `active`, `degraded`,
 `violated`} (closed; joins the label registry). Histograms use the fixed bucket set
-`le ∈ {1, 5, 15, 60, 300, 900, 3600, 14400, 86400}` seconds — identical across instances so
-fleet aggregation is well-defined.
+`le ∈ {1, 5, 15, 60, 300, 600, 900, 3600, 14400, 86400}` seconds — identical across
+instances so fleet aggregation is well-defined, and the 600 s boundary makes the 10-minute
+SLOs directly measurable without interpolation.
 
 **SLO registry (closed; `slo_id` values):**
 
@@ -283,7 +306,10 @@ reporting (green/red contradicted by live evidence) is itself `V6`.
   then falls under `V7` rules until owned; `suppressed` is normally decided pre-send, so an
   ambiguous→suppressed resolution is expected to be rare but is legal, N5).
 - `U1`: the work is reclassified into a lane.
-- `V6`: the observer publishes a fresh success within its declared cadence.
+- `V6`, observer-scoped: the observer publishes a fresh success within its declared
+  cadence. `V6`, store-scoped (clock anomaly / retirement block): one full derivation pass
+  over that store observes zero beyond-allowance anomalies — or, for a retirement block,
+  the migration sweep re-scan reports zero unmigrated identities.
 - `V8`: storage back under budget with all protected roots intact.
 - `S1`: the SLO metric back within target for one full evaluation window.
 
@@ -361,13 +387,21 @@ phone-number-derived and enumerable, so an unkeyed hash is reversible by diction
 with host access re-derive digests via the key to join against the private store; nobody else
 can. Conformance fixture C8 tests this property.
 
-**Key rotation (O3, normative):** rotation is a **dual-digest migration over one fleet
+**Key rotation (O3 + O6, normative):** rotation is a **dual-digest migration over one fleet
 wave**. During the wave, writers emit both `kN` (new) and `kN-1` (previous) digests on new
 records, and condition identity matches on EITHER — open conditions keep their identity and
-history with no close/reopen churn. After the wave completes on every instance, `kN-1`
-emission stops and previous-key digests are dropped from new records; retained records are
-not rewritten. At most two keys are ever live; a reader seeing an unknown key id treats the
-digest as unjoinable, never as a new identity.
+history with no close/reopen churn.
+
+**Retirement gate (O6 — no dormant orphans):** dual-emission on new records alone cannot
+migrate an open condition that receives no event during the wave. Before `kN-1` retires, a
+**migration sweep** MUST visit every open condition and every protected retention root
+(§10) and persist a `kN` alias digest alongside the existing identity, and retirement is
+gated on a **verified zero-unmigrated-identities count** (the sweep re-scans and proves no
+open condition or protected root lacks a `kN` alias; a nonzero count blocks retirement and
+raises `V6` for the store). Only then does `kN-1` emission stop; closed historical records
+are not rewritten and become unjoinable by declared behavior. At most two keys are ever
+live; a reader seeing an unknown key id treats the digest as unjoinable, never as a new
+identity.
 
 Public `/health` adds (O1 — the schema carries exactly what §9's current-state panel
 consumes):
@@ -503,12 +537,15 @@ behind `observability.fleetLifecycle = off | shadow | alerting | default` (defau
   committed review note covers **both** fixture and script (F12). Production snapshots are NOT
   repository assets and MUST NOT enter version control. MUST raise `V1`+`V3` for the wedge
   intervals and `V4` for the watchdog-green window.
-- **C8 digest resistance and rotation (F10/O3)** — with a test key: exported digests differ
-  from unkeyed hashes of the same values; no exported surface contains any digest
+- **C8 digest resistance and rotation (F10/O3/O6)** — with a test key: exported digests
+  differ from unkeyed hashes of the same values; no exported surface contains any digest
   reproducible without the key. Rotation fixture asserts the §7 dual-digest migration
   normatively: during the wave both key ids match the same open condition (identity and
-  history preserved, no close/reopen); after the wave only the new key id is emitted; an
-  unknown key id reads as unjoinable, never as a new identity.
+  history preserved, no close/reopen); a DORMANT open condition receiving no event during
+  the wave still gains its `kN` alias via the migration sweep, and retirement is refused
+  while the unmigrated-identity count is nonzero; after verified-zero and the wave, only
+  the new key id is emitted; an unknown key id reads as unjoinable, never as a new
+  identity.
 
 ## 13. Adoption, versioning, portability
 
@@ -523,9 +560,10 @@ standard's reach.
 
 - Review history: v3 FAILED the independent contradiction/privacy/cardinality review (4
   BLOCKERs). v4 resolved all 16 findings and PASSED all three dimensions (privacy: no
-  findings). v5 folded in the v4 pass's seven residual MINOR/NOTEs (delta-verified). v6
-  resolves the owner's four verification findings (O1 health/dashboard alignment, O2 bounded
-  disk-pressure behavior with reserved condition capacity, O3 normative dual-digest key
-  rotation, O4 clock model) plus encoding clarifications.
-- Pending: delta re-review of the v6 changes, then owner final approval. Only after
+  findings). v5 folded in the v4 pass's seven residual MINOR/NOTEs (delta-verified
+  RESOLVED ×7). v6 resolved the owner's four verification findings (O1–O4) plus encoding
+  clarifications and PASSED its delta re-review (all four RESOLVED, zero new findings). v7
+  resolves the owner's two v6 correctness gaps (O5 clock-anomaly fail-closed age, O6
+  rotation retirement gate) plus the 600 s bucket and this section's correction.
+- Pending: delta re-review of the v7 changes, then owner final approval. Only after
   approval: an implementation plan (separately reviewed) — this document authorizes no code.
