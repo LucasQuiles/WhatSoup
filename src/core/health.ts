@@ -2500,10 +2500,17 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       //     provisional release comes back as the prior set ∪ the observed
       //     reasons, advanced point — never a new arm.
       //   ARM (no latch): only from real EARLY-path reasons on the
-      //     full-visibility degraded path (latchArmEligible).
-      //     Late-source-only reasons never arm — they are directly probed
-      //     every evaluation, not silence-prone, so a transient late blip
-      //     clears to healthy on the next poll.
+      //     full-visibility degraded path (latchArmEligible), and only when
+      //     the FINAL verdict is degraded. Late-source-only reasons never
+      //     arm — they are directly probed every evaluation, not
+      //     silence-prone, so a transient late blip clears to healthy on the
+      //     next poll. An unhealthy final verdict never arms either
+      //     (unhealthy verdicts advance/restore only): arming there would
+      //     contradict that scoping, and when a late reassignment like
+      //     schema_future replaced the reason list the armed set would even
+      //     have lost the early evidence. The silence window this leaves —
+      //     early-degraded evidence on an unhealthy-verdict evaluation arms
+      //     nothing — is exactly base behavior for every unhealthy verdict.
       const realReasons = statusReasons.filter(
         (reason) => reason !== 'degradation_silence_unproven' && reason !== 'unclassified',
       );
@@ -2519,7 +2526,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
             latchedAtMs: Date.now(),
             reasons: new Set([...(releasedLatchReasons ?? []), ...realReasons]),
           });
-        } else if (latchArmEligible) {
+        } else if (latchArmEligible && status === 'degraded') {
           log.info({ instance: deps.instanceName }, 'degradation silence latch set');
           recentlyDegraded.set(deps.instanceName, {
             latchedAtMs: Date.now(),

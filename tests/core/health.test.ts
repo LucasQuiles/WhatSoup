@@ -7488,6 +7488,43 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
     }
   });
 
+  it('an unhealthy-verdict evaluation never arms, even with real early-path reasons', async () => {
+    const h = await buildLatchHarness();
+    try {
+      // Evaluation 1: a real EARLY-path reason (enrichment) is observed, but
+      // a late block flips the final verdict to unhealthy — schema_future
+      // even REPLACES the reason list, so an arm here would latch a set that
+      // lost the early evidence entirely. Arming on an unhealthy verdict
+      // contradicts the scoping that unhealthy verdicts advance/restore only.
+      h.setRuntimeDegraded(true);
+      db.raw.prepare('INSERT INTO schema_migrations(version) VALUES (?)').run(CURRENT_SCHEMA_MIGRATION + 1);
+      const first = JSON.parse((await healthReq(h.port)).body);
+      expect(first.status).toBe('unhealthy');
+      expect(first.status_reasons).toContain('schema_future');
+
+      // Evaluation 2: everything clear — no latch may have been armed. The
+      // silence window this leaves is exactly base behavior for every
+      // unhealthy verdict.
+      h.setRuntimeDegraded(false);
+      db.raw.prepare('DELETE FROM schema_migrations WHERE version = ?').run(CURRENT_SCHEMA_MIGRATION + 1);
+      const second = JSON.parse((await healthReq(h.port)).body);
+      expect(second.status).toBe('healthy');
+      expect(second.status_reasons).not.toContain('degradation_silence_unproven');
+      expect(second.degradation_causes).not.toContain('degradation_silence_unproven');
+
+      // A later plain degraded evaluation arms normally.
+      h.setRuntimeDegraded(true);
+      const third = JSON.parse((await healthReq(h.port)).body);
+      expect(third.status).toBe('degraded');
+      expect(third.status_reasons).toContain('enrichment_runtime_degraded');
+      h.setRuntimeDegraded(false);
+      const fourth = JSON.parse((await healthReq(h.port)).body);
+      expectLatched(fourth);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
   it('a short-circuit evaluation must not launder a non-provable latch', async () => {
     const h = await buildLatchHarness();
     try {
