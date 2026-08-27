@@ -13,6 +13,18 @@ import {
   sha256Bytes,
 } from '../verification/boundary-run/shared.ts';
 
+// Admission invariant (#2822, ruled 2026-08-27): receipt bytes are CAPTURED as
+// an intrinsic-pinned Uint8Array snapshot at load (snapshotReceiptBytes), in
+// deliberate preference to the post-#2309 global-reader pattern used elsewhere.
+// Consequence for what admission verifies: an admitted classification binds to
+// the exact bytes presented AT ADMISSION TIME — re-serialized, digest-bound,
+// and re-verified on every same-process admission match — never to bytes
+// re-read through a shared reader at use time. A caller that mutates its
+// buffer after admission cannot alter what was admitted (the snapshot is
+// private), and tampering with the admitted object's bytes is caught by the
+// digest re-check in matchesSameProcessRiskClassificationAdmission.
+// See docs/superpowers/plans/2026-08-27-p8b-admission-invariant.md.
+
 export const MAX_CLASSIFICATION_RECEIPT_BYTES = 256 * 1024;
 
 export type RiskClassificationReceiptErrorCode =
