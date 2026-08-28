@@ -6258,7 +6258,11 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
                 expected=email_observation.version,
                 generation=email_generation,
             )
-            require_all_advance([incident_publication, email_publication])
+            require_all_advance(
+                [email_publication]
+                if incident
+                else [incident_publication, email_publication]
+            )
             email_sent_path = archive_path(paths["sent"], path.name, "sent", event)
             os.replace(claimed, email_sent_path)
             append_dispatch_log(paths, {
