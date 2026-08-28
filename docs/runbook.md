@@ -150,10 +150,42 @@ systemctl --user status 'whatsoup@*'
 The unit file is at `deploy/whatsoup@.service`.
 
 Key parameters:
-- `Restart=on-failure` — automatically restarts on non-zero exit
+- `Restart=always` — automatically restarts on any exit, clean or crash (an explicit `systemctl stop` stays stopped; exit 78 is held out via `RestartPreventExitStatus`)
 - `RestartSec=15` — waits 15 seconds before each restart attempt
-- `StartLimitBurst=5` — max 5 restarts within `StartLimitIntervalSec=120` seconds
-- After 5 failures in 2 minutes, systemd marks the unit as failed and stops restarting
+- `StartLimitBurst=10` — max 10 restarts within `StartLimitIntervalSec=300` seconds
+- After 10 failures in 5 minutes, systemd marks the unit as failed and stops restarting
+
+#### Planned stops require a stop-intent marker
+
+The BOT ERRORS heartbeat watchdog classifies a clean unit stop as planned only
+when a stop-intent marker is registered and younger than
+`BOT_ERRORS_STOP_INTENT_TTL_SECONDS` (default 14400 seconds). An unregistered
+clean exit alerts as `unplanned_clean_stop` — a clean exit code alone is not
+intent (2026-08-28: an external SIGTERM produced a clean exit that was misread
+as a planned stop while the line stayed down).
+
+Before an intentional stop:
+
+```bash
+mkdir -p ~/.local/state/bot-errors/stop-intents
+touch ~/.local/state/bot-errors/stop-intents/whatsoup@<instance>.service
+systemctl --user stop whatsoup@<instance>.service
+```
+
+The marker directory honors `BOT_ERRORS_STOP_INTENT_DIR`; delete the marker
+after maintenance so a later unexplained stop is not masked.
+
+#### Wedge-signature probe (dark by default)
+
+`wedge_signature` is a registered heartbeat-watchdog check that is NOT in the
+default check set. When explicitly added to `BOT_ERRORS_WATCHDOG_CHECKS`, it
+opens each expected instance's `bot.db` read-only (`mode=ro`, `query_only=ON`,
+never `immutable=1`) and pages on the two confirmed wedge signatures: a
+nonterminal inbound event older than `BOT_ERRORS_WEDGE_NONTERMINAL_AGE_SECONDS`
+(default 900) with younger rows queued behind it in the same conversation, and
+a trigger occurrence stuck nonterminal past
+`BOT_ERRORS_WEDGE_OCCURRENCE_GRACE_SECONDS` (default 3600). Database root
+override: `BOT_ERRORS_WEDGE_DB_ROOT`.
 
 To reset the restart counter after fixing a crash loop:
 ```bash
@@ -514,7 +546,7 @@ later Chat admission and does not write a terminal marker through the now
 read-only database handle.
 
 The launchd health watchdog can perform one transition restart into the startup
-classification above. systemd `Restart=on-failure` does not react to HTTP `503`;
+classification above. systemd `Restart=always` restarts on process exit but does not react to HTTP `503`;
 on systemd, a controlled operator restart is required. After that approved
 transition, a valid drain is held without a restart loop and a stable invalid
 artifact exits 78.
