@@ -868,6 +868,106 @@ describe('tier attribution by route identity', () => {
   });
 });
 
+// ─── Exact-primary-model disambiguation (review 2) ────────────────────────────
+//
+// A wildcard (model-undefined) same-provider fallback entry matches ANY
+// session on that provider, so a failing PRIMARY session used to land in the
+// ambiguous bucket and fail closed — a genuine primary usage-limit preserved
+// the clocks and its parsed resetAt evidence was discarded under a LEGAL
+// config. When the primary route carries an EXPLICITLY configured model and
+// the session's model equals it, the session IS the primary: the exact match
+// beats the wildcard. The genuinely ambiguous remainder (null session model,
+// or a provider-default primary) keeps the fail-closed rule.
+
+describe('exact-primary-model disambiguation', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-26T20:00:00Z'));
+    lookupCredentialMock.mockReturnValue('present-key');
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  // Wildcard entry: model omitted — legal for claude-cli (provider default).
+  const WILDCARD_SAME_PROVIDER_CHAIN: FallbackEntry[] = [{ provider: 'claude-cli' }];
+
+  it('a primary session whose model equals the EXPLICIT configured primary model stores resetAt and extends despite a wildcard same-provider entry', async () => {
+    const runtime = makeRuntime(WILDCARD_SAME_PROVIDER_CHAIN);
+    const rv = v(runtime);
+    expect(rv.activateProviderFallback(null, 'usage-limit')).not.toBeNull();
+    const armedUntil = rv.fallbackWindow.activeUntil!;
+    const resetAt = new Date(armedUntil + 60 * 60 * 1000);
+    // Session model ref equals the configured primary model exactly — this IS
+    // the primary failing; its reset evidence must be honored.
+    const primarySession = makeClassifiedSession('claude-cli', 'claude-opus-4-8[1m]');
+
+    await vi.advanceTimersByTimeAsync(2 * 60 * 1000);
+    rv.fallback.activateProviderFallbackAfterTerminalResult(
+      resetAt,
+      'usage-limit',
+      primarySession,
+      'usage limit reached',
+    );
+
+    expect(rv.fallbackWindow.resetAt).toBe(resetAt.getTime());
+    expect(rv.fallbackWindow.activeUntil).toBe(resetAt.getTime());
+  });
+
+  it('ambiguous remainder pin: a provider-default session (undefined model ref) with a wildcard same-provider entry still fails closed', async () => {
+    const runtime = makeRuntime(WILDCARD_SAME_PROVIDER_CHAIN);
+    const rv = v(runtime);
+    expect(rv.activateProviderFallback(null, 'usage-limit')).not.toBeNull();
+    const armedUntil = rv.fallbackWindow.activeUntil!;
+    const resetAt = new Date(armedUntil + 60 * 60 * 1000);
+    const providerDefaultSession = new Proxy(
+      {
+        getProviderId: () => 'claude-cli',
+        getStatus: () => ({ sessionId: 'claude-cli-1' }),
+        getDbRowId: () => null,
+        getModelRef: () => undefined,
+      } as Record<string, unknown>,
+      { get: (t, p) => (p in t ? t[p as string] : () => undefined) },
+    );
+
+    await vi.advanceTimersByTimeAsync(2 * 60 * 1000);
+    rv.fallback.activateProviderFallbackAfterTerminalResult(
+      resetAt,
+      'usage-limit',
+      providerDefaultSession,
+      'usage limit reached',
+    );
+
+    expect(rv.fallbackWindow.resetAt).toBeNull();
+    expect(rv.fallbackWindow.activeUntil).toBe(armedUntil);
+  });
+
+  it('ambiguous remainder pin: a provider-default PRIMARY (no configured model) with a wildcard same-provider entry still fails closed', async () => {
+    // Primary model unconfigured (host.model undefined): ANY claude-cli
+    // session could be the primary — genuinely ambiguous, stays disclosed.
+    const config = mockConfigRef();
+    config['agentProvider'] = 'claude-cli';
+    config['agentFallbacks'] = WILDCARD_SAME_PROVIDER_CHAIN;
+    const runtime = new AgentRuntime(makeDb(), makeMessenger(), 'test', { sessionScope: 'per_chat' });
+    const rv = v(runtime);
+    expect(rv.activateProviderFallback(null, 'usage-limit')).not.toBeNull();
+    const armedUntil = rv.fallbackWindow.activeUntil!;
+    const resetAt = new Date(armedUntil + 60 * 60 * 1000);
+    const session = makeClassifiedSession('claude-cli', 'claude-opus-4-8[1m]');
+
+    await vi.advanceTimersByTimeAsync(2 * 60 * 1000);
+    rv.fallback.activateProviderFallbackAfterTerminalResult(
+      resetAt,
+      'usage-limit',
+      session,
+      'usage limit reached',
+    );
+
+    expect(rv.fallbackWindow.resetAt).toBeNull();
+    expect(rv.fallbackWindow.activeUntil).toBe(armedUntil);
+  });
+});
+
 // ─── No-arm scoped to EXISTING window state (increment 5) ─────────────────────
 //
 // The no-arm rule protects window clocks and the in-flight probe decision —

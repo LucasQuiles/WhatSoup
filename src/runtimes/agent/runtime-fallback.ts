@@ -411,12 +411,16 @@ export class RuntimeFallbackCoordinator {
    * Attribution mirrors the route-currency compare (sessionMatchesCurrentRoute):
    * the primary compare is provider-only (isCrossProviderSession's inverse) —
    * disambiguation comes from the model-aware fallback-entry side, because a
-   * same-provider chain differs from the primary only by model. When positive
-   * attribution is impossible (ambiguous same-provider session with a null
-   * model ref, or a foreign provider), fail CLOSED for CLOCKS: with window
-   * state present the failure must not be able to move it; with no window at
-   * all there are no clocks to protect, and refusing to arm would break
-   * primary failover — so the legacy primary tier applies there.
+   * same-provider chain differs from the primary only by model, plus one
+   * tiebreak: a session whose model exactly equals the EXPLICITLY configured
+   * primary model is the primary even when a wildcard (model-undefined)
+   * same-provider entry also matches it. When positive attribution is
+   * impossible (ambiguous same-provider session with a null model ref, a
+   * provider-default primary beside a wildcard same-provider entry, or a
+   * foreign provider), fail CLOSED for CLOCKS: with window state present the
+   * failure must not be able to move it; with no window at all there are no
+   * clocks to protect, and refusing to arm would break primary failover — so
+   * the legacy primary tier applies there.
    */
   private failureTierForSession(session: SessionManager | null): FallbackFailureTier {
     if (!session) return 'primary';
@@ -447,6 +451,18 @@ export class RuntimeFallbackCoordinator {
     const matchesPrimary = provider === this.host.agentProvider;
     if (matchesFallback && !matchesPrimary) return 'fallback';
     if (matchesPrimary && !matchesFallback) return 'primary';
+    // Exact-primary disambiguation (review 2): a wildcard (model-undefined)
+    // fallback entry matches ANY session on its provider, which used to drop
+    // a failing PRIMARY session into the ambiguous bucket and discard its
+    // resetAt evidence under a legal config. When the primary route carries
+    // an EXPLICITLY configured model and the session's model equals it, the
+    // session IS the primary — the exact match beats the wildcard. The
+    // remainder stays fail-closed: a null session model on a same-provider
+    // chain, or a provider-default primary (host.model undefined) beside a
+    // wildcard same-provider entry, cannot be positively attributed.
+    if (matchesPrimary && matchesFallback && this.host.model !== undefined && model === this.host.model) {
+      return 'primary';
+    }
     return failClosedTier;
   }
 
