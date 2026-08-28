@@ -1366,11 +1366,124 @@ import importlib.util, json
 spec = importlib.util.spec_from_file_location("watchdog", "deploy/scripts/bot-errors-heartbeat-watchdog.py")
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
+names = ["wedge_signature", "supervision_deadman", "clock_skew"]
 print(json.dumps({
-    "known": "wedge_signature" in m.KNOWN_WATCHDOG_CHECKS,
-    "default": "wedge_signature" in m.DEFAULT_CHECKS.split(","),
+    name: [
+        "known" if name in m.KNOWN_WATCHDOG_CHECKS else "unknown",
+        "dark" if name not in m.DEFAULT_CHECKS.split(",") else "default",
+    ]
+    for name in names
 }))
 `], { cwd: process.cwd(), encoding: 'utf8' });
-    expect(JSON.parse(output)).toEqual({ known: true, default: false });
+    expect(JSON.parse(output)).toEqual({
+      wedge_signature: ['known', 'dark'],
+      supervision_deadman: ['known', 'dark'],
+      clock_skew: ['known', 'dark'],
+    });
+  });
+});
+
+describe('supervision_deadman check (FLOS Stage 0 S0.2)', () => {
+  const DRY_NOW = 1787900000;
+
+  function isoAt(epoch: number): string {
+    return new Date(epoch * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z');
+  }
+
+  function deadmanEnv(extra: Record<string, string> = {}) {
+    return {
+      BOT_ERRORS_STATE_DIR: tmpRoot,
+      BOT_ERRORS_WATCHDOG_CHECKS: 'supervision_deadman',
+      BOT_ERRORS_DRY_NOW: String(DRY_NOW),
+      ...extra,
+    };
+  }
+
+  it('alerts when the checkpoint pointer has not advanced within the bound', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-heartbeat-'));
+    const pointer = join(tmpRoot, 'CURRENT.json');
+    writeFileSync(pointer, JSON.stringify({ current_generation: 'gen-x.json', moved_at_utc: isoAt(DRY_NOW - 8000) }));
+
+    runWatchdog(deadmanEnv({ BOT_ERRORS_SUPERVISION_POINTER: pointer }));
+
+    const events = readOutboxEvents();
+    expect(events).toHaveLength(1);
+    expect(events[0]!.severity).toBe('critical');
+    expect(events[0]!.alertSource).toBe('supervision_deadman');
+    expect(events[0]!.evidence).toContain('supervision checkpoint stale');
+    expect(events[0]!.evidence).toContain('age_seconds=8000');
+  });
+
+  it('stays quiet while the pointer is fresh', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-heartbeat-'));
+    const pointer = join(tmpRoot, 'CURRENT.json');
+    writeFileSync(pointer, JSON.stringify({ current_generation: 'gen-x.json', moved_at_utc: isoAt(DRY_NOW - 600) }));
+
+    runWatchdog(deadmanEnv({ BOT_ERRORS_SUPERVISION_POINTER: pointer }));
+
+    expect(existsSync(join(tmpRoot, 'outbox'))).toBe(false);
+  });
+
+  it('alerts when the pointer file is unreadable', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-heartbeat-'));
+
+    runWatchdog(deadmanEnv({ BOT_ERRORS_SUPERVISION_POINTER: join(tmpRoot, 'absent.json') }));
+
+    const events = readOutboxEvents();
+    expect(events).toHaveLength(1);
+    expect(events[0]!.evidence).toContain('pointer unreadable');
+  });
+
+  it('alerts when enabled without a pointer path', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-heartbeat-'));
+
+    runWatchdog(deadmanEnv());
+
+    const events = readOutboxEvents();
+    expect(events).toHaveLength(1);
+    expect(events[0]!.evidence).toContain('misconfigured');
+  });
+});
+
+describe('clock_skew check (FLOS Stage 0 S0.3)', () => {
+  const DRY_NOW = 1787900000;
+
+  function skewEnv(extra: Record<string, string> = {}) {
+    return {
+      BOT_ERRORS_STATE_DIR: tmpRoot,
+      BOT_ERRORS_WATCHDOG_CHECKS: 'clock_skew',
+      BOT_ERRORS_DRY_NOW: String(DRY_NOW),
+      ...extra,
+    };
+  }
+
+  it('alerts when the wall clock skews beyond the allowance', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-heartbeat-'));
+
+    runWatchdog(skewEnv({ BOT_ERRORS_DRY_CLOCK_REFERENCE_EPOCH: String(DRY_NOW + 100) }));
+
+    const events = readOutboxEvents();
+    expect(events).toHaveLength(1);
+    expect(events[0]!.alertSource).toBe('clock_skew');
+    expect(events[0]!.evidence).toContain('clock skew beyond allowance');
+    expect(events[0]!.evidence).toContain('skew_seconds=100');
+  });
+
+  it('stays quiet within the allowance', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-heartbeat-'));
+
+    runWatchdog(skewEnv({ BOT_ERRORS_DRY_CLOCK_REFERENCE_EPOCH: String(DRY_NOW + 3) }));
+
+    expect(existsSync(join(tmpRoot, 'outbox'))).toBe(false);
+  });
+
+  it('alerts when enabled without a reference', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-heartbeat-'));
+
+    runWatchdog(skewEnv());
+
+    const events = readOutboxEvents();
+    expect(events).toHaveLength(1);
+    expect(events[0]!.evidence).toContain('misconfigured or unreachable');
   });
 });

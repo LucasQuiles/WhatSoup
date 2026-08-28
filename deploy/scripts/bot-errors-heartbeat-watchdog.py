@@ -104,6 +104,8 @@ KNOWN_WATCHDOG_CHECKS: frozenset[str] = frozenset({
     "collector_roster",
     "browser_debug",
     "wedge_signature",
+    "supervision_deadman",
+    "clock_skew",
 })
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -1445,6 +1447,103 @@ def wedge_signature_problems() -> dict[str, str]:
     return problems
 
 
+def supervision_max_age_seconds() -> float:
+    raw = os.environ.get("BOT_ERRORS_SUPERVISION_MAX_AGE_SECONDS", "7200")
+    try:
+        value = float(raw)
+    except ValueError:
+        return 7200.0
+    return max(0.0, value) if math.isfinite(value) else 7200.0
+
+
+def supervision_deadman_problems() -> dict[str, str]:
+    """FLOS Stage 0 S0.2: independent supervision-loop deadman.
+
+    Alerts when the supervision checkpoint pointer named by
+    BOT_ERRORS_SUPERVISION_POINTER has not advanced a generation (its
+    `moved_at_utc`) within BOT_ERRORS_SUPERVISION_MAX_AGE_SECONDS (default
+    2h). Dark by default: runs only when `supervision_deadman` is explicitly
+    listed in BOT_ERRORS_WATCHDOG_CHECKS; deploying it on a second host with
+    a mirrored pointer is a deployment act. Fail-closed: a missing path,
+    unreadable file, or absent timestamp alerts rather than staying quiet.
+    """
+    key = "supervision_deadman"
+    pointer = os.environ.get("BOT_ERRORS_SUPERVISION_POINTER", "").strip()
+    if not pointer:
+        return {key: "supervision deadman misconfigured: BOT_ERRORS_SUPERVISION_POINTER is not set"}
+    try:
+        payload = json.loads(Path(pointer).read_text())
+    except OSError as exc:
+        return {key: f"supervision checkpoint pointer unreadable: {pointer} error={str(exc)[:120]}"}
+    except json.JSONDecodeError as exc:
+        return {key: f"supervision checkpoint pointer malformed: {pointer} error={str(exc)[:120]}"}
+    moved = parse_iso_epoch(payload.get("moved_at_utc")) if isinstance(payload, dict) else None
+    if moved is None:
+        return {key: f"supervision checkpoint pointer missing moved_at_utc: {pointer}"}
+    age = now_epoch() - moved
+    max_age = supervision_max_age_seconds()
+    if age > max_age:
+        return {
+            key: f"supervision checkpoint stale: age_seconds={age} max={int(max_age)} pointer={pointer}"
+        }
+    return {}
+
+
+def clock_skew_allowance_seconds() -> float:
+    raw = os.environ.get("BOT_ERRORS_CLOCK_SKEW_ALLOWANCE_SECONDS", "5")
+    try:
+        value = float(raw)
+    except ValueError:
+        return 5.0
+    return max(0.0, value) if math.isfinite(value) else 5.0
+
+
+def clock_reference_epoch() -> tuple[int | None, str]:
+    dry = os.environ.get("BOT_ERRORS_DRY_CLOCK_REFERENCE_EPOCH", "").strip()
+    if dry:
+        try:
+            return int(float(dry)), "dry"
+        except ValueError:
+            return None, f"invalid dry reference epoch={dry!r}"
+    url = os.environ.get("BOT_ERRORS_CLOCK_REFERENCE_URL", "").strip()
+    if not url:
+        return None, "BOT_ERRORS_CLOCK_REFERENCE_URL is not set"
+    try:
+        with urlopen(Request(url, method="HEAD"), timeout=5) as resp:
+            date_header = resp.headers.get("Date")
+    except OSError as exc:
+        return None, f"reference unreachable: {str(exc)[:120]}"
+    if not date_header:
+        return None, "reference response carried no Date header"
+    from email.utils import parsedate_to_datetime
+
+    try:
+        return int(parsedate_to_datetime(date_header).timestamp()), "http-date"
+    except (TypeError, ValueError):
+        return None, f"unparseable Date header: {date_header[:60]}"
+
+
+def clock_skew_problems() -> dict[str, str]:
+    """FLOS Stage 0 S0.3: recurring wall-clock skew probe with an allowance.
+
+    Compares host wall clock against a common reference (dry override for
+    tests; otherwise the Date header of BOT_ERRORS_CLOCK_REFERENCE_URL).
+    Dark by default; fail-closed when enabled without a usable reference.
+    """
+    key = "clock_skew"
+    ref, source = clock_reference_epoch()
+    if ref is None:
+        return {key: f"clock skew probe misconfigured or unreachable: {source}"}
+    skew = abs(now_epoch() - ref)
+    allowance = clock_skew_allowance_seconds()
+    if skew > allowance:
+        return {
+            key: f"clock skew beyond allowance: skew_seconds={skew} "
+            f"allowance={int(allowance)} source={source}"
+        }
+    return {}
+
+
 def local_health_timeout() -> float:
     raw = os.environ.get("BOT_ERRORS_LOCAL_HEALTH_TIMEOUT_SECONDS", "3")
     try:
@@ -2267,6 +2366,10 @@ def active_reconcile_prefixes(checks: set[str]) -> list[str]:
         prefixes.append(BROWSER_DEBUG_PREFIX)
     if "wedge_signature" in checks:
         prefixes.append("wedge:")
+    if "supervision_deadman" in checks:
+        prefixes.append("supervision_deadman")
+    if "clock_skew" in checks:
+        prefixes.append("clock_skew")
     return prefixes
 
 
@@ -2385,6 +2488,10 @@ def collect_problems(args: argparse.Namespace, checks: set[str] | None = None, e
         problems.update(browser_debug_problems())
     if "wedge_signature" in checks:
         problems.update(wedge_signature_problems())
+    if "supervision_deadman" in checks:
+        problems.update(supervision_deadman_problems())
+    if "clock_skew" in checks:
+        problems.update(clock_skew_problems())
     return problems
 
 

@@ -187,6 +187,28 @@ a trigger occurrence stuck nonterminal past
 `BOT_ERRORS_WEDGE_OCCURRENCE_GRACE_SECONDS` (default 3600). Database root
 override: `BOT_ERRORS_WEDGE_DB_ROOT`.
 
+Two further dark-by-default checks ship alongside it:
+
+- `supervision_deadman` — alerts when the supervision checkpoint pointer named
+  by `BOT_ERRORS_SUPERVISION_POINTER` has not advanced (`moved_at_utc`) within
+  `BOT_ERRORS_SUPERVISION_MAX_AGE_SECONDS` (default 7200). Fail-closed: a
+  missing path, unreadable pointer, or absent timestamp alerts. Running it on
+  a second host against a mirrored pointer is a deployment act.
+- `clock_skew` — compares the host wall clock to a common reference (the
+  `Date` header of `BOT_ERRORS_CLOCK_REFERENCE_URL`) with
+  `BOT_ERRORS_CLOCK_SKEW_ALLOWANCE_SECONDS` (default 5); fail-closed when
+  enabled without a usable reference.
+
+#### Instance-database snapshots (dark by default)
+
+`deploy/scripts/whatsoup-db-snapshot.py` writes a coherent per-instance
+snapshot via the SQLite backup API against a `mode=ro` source (WAL-safe — a
+bare file copy misses the `-wal`), verifies it with `PRAGMA integrity_check`,
+records per-table row counts, and prunes to `--retain` (default 7). The
+`rehearse` subcommand re-opens a snapshot read-only and round-trips the row
+counts; nothing in the repository schedules this — wiring a timer on a host
+is a deployment act.
+
 To reset the restart counter after fixing a crash loop:
 ```bash
 systemctl --user reset-failed whatsoup@sandbox-agent
