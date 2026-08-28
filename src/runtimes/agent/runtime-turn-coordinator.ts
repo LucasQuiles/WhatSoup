@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { systemClock } from '../../lib/clock.ts';
 import type { CapabilityDecisionParams } from '../../core/capability-obligation-store.ts';
 import type { ContentType } from '../../core/types.ts';
 import type {
@@ -196,6 +197,11 @@ export interface RuntimeTurnCoordinatorPort {
   readonly durability: DurabilityEngine | null;
   readonly instanceName: string;
   readonly sessionScope: 'single' | 'shared' | 'per_chat';
+  /**
+   * #3295 S2: live per-admission read of the deferred-turn flag (kill-switch
+   * semantics). Optional so narrow test hosts keep compiling; absent = OFF.
+   */
+  deferredTurnAdmissionEnabled?(): boolean;
   readonly runtimeTurnSupervisor: RuntimeTurnSupervisor<RuntimeTurnPostEffects>;
   readonly sessionOwnership: SessionOwnershipRegistry;
   readonly recoveryManagerId: string;
@@ -307,6 +313,36 @@ export class WedgedTurnReclaimedError extends Error {
     super('WEDGED_TURN_RECLAIMED');
     this.name = 'WedgedTurnReclaimedError';
   }
+}
+
+/**
+ * #3295 S2: thrown by `beginRuntimeTurnEvidence` when a recovery-blocked,
+ * replay-safe follower was DEFERRED into a durable obligation instead of
+ * being terminally rejected. The processor-error path recognizes it and
+ * retires the runtime turn state WITHOUT any durable inbound mutation — the
+ * obligation row is the turn's durable owner from this point on.
+ */
+export class TurnDeferredToObligationError extends Error {
+  readonly obligationId: number;
+
+  constructor(obligationId: number) {
+    super('TURN_DEFERRED_TO_OBLIGATION');
+    this.name = 'TurnDeferredToObligationError';
+    this.obligationId = obligationId;
+  }
+}
+
+/**
+ * Terminal-equivalent retirement marker for a deferred turn: post-effects
+ * (FIFO shift, reply-guarantee disarm, presentation clear) apply exactly as
+ * for an admission-rejected turn, but no `finalizeRuntimeTurn` runs — the
+ * inbound row stays `processing`, owned by the obligation. Deliberately NOT
+ * part of `FinalizeRuntimeTurnResult`: `finalizeRuntimeTurn` can never
+ * return it, so no finalization consumer needs to handle it.
+ */
+interface DeferredToObligationRetirement {
+  readonly kind: 'deferred_to_obligation';
+  readonly mayAdvance: true;
 }
 
 export class RuntimeTurnCoordinator {
@@ -700,12 +736,81 @@ beginRuntimeTurnEvidence(
       excludeJobId !== undefined ? { excludeJobId } : undefined,
     )
   ) {
+    // #3295 S2 (flag default OFF, read per admission): a follower blocked
+    // SOLELY by outstanding recovery — this predicate, before any dispatch —
+    // that is replay-safe becomes a durable obligation instead of a terminal
+    // admission rejection. Every other rejection class (including the
+    // supervisor check below) keeps the terminal path bit-for-bit.
+    const deferred = this.maybeDeferRecoveryBlockedTurn(context, durability);
+    if (deferred !== null) throw deferred;
     throw new Error('Runtime turn scope is blocked by outstanding durable recovery');
   }
   if (!this.host.runtimeTurnSupervisor.canAccept(context)) {
     throw new Error('Runtime turn scope is blocked by terminal-finalization recovery state');
   }
   queue.beginTurnEvidence(context.identity.logicalTurnId);
+}
+
+/**
+ * #3295 S2 deferral predicate + enqueue. Returns the typed error to throw
+ * when the recovery-blocked turn was deferred, or null to keep the terminal
+ * path. Deferrable = flag ON (live read) AND per_chat scope (the wedge class
+ * from the issue; shared/singleton keep the terminal path in S2) AND a
+ * journaled inbound AND a replay-safe text envelope with no dispatch started
+ * (this seam is pre-dispatch by construction).
+ */
+private maybeDeferRecoveryBlockedTurn(
+  context: RuntimeTurnContext,
+  durability: DurabilityEngine,
+): TurnDeferredToObligationError | null {
+  if (this.host.deferredTurnAdmissionEnabled?.() !== true) return null;
+  if (context.identity.scope !== 'per_chat') return null;
+  if (context.identity.inboundSeq === null) return null;
+  const replay = context.replay;
+  if (replay === undefined || replay.replaySafe !== true) return null;
+  if (context.contentType !== 'text') return null;
+  try {
+    const enqueued = durability.deferredTurns.enqueueDeferredObligation({
+      scope: context.identity.scope,
+      conversationKey: context.identity.conversationKey,
+      deliveryJid: context.identity.deliveryJid,
+      inboundSeq: context.identity.inboundSeq,
+      sourceMessageId: replay.sourceMessageId,
+      // Live source snapshots can carry a non-finite receive time (NaN from
+      // an absent upstream timestamp — it would bind as NULL); deferral order
+      // is by inbound_seq, so a now-stamp keeps the row honest without a read.
+      receivedAtUnixSeconds: Number.isFinite(replay.receivedAtUnixSeconds)
+        ? replay.receivedAtUnixSeconds
+        : systemClock.nowUnixSec(),
+      replaySafe: replay.replaySafe,
+      senderJid: replay.senderJid,
+      senderName: replay.senderName ?? null,
+      text: replay.text,
+      isGroup: replay.isGroup,
+      groupName: replay.groupName ?? null,
+      contentType: context.contentType,
+      toolScopeKey: context.toolScopeKey ?? null,
+    });
+    log.info(
+      {
+        inboundSeq: context.identity.inboundSeq,
+        obligationId: enqueued.id,
+        deduplicated: enqueued.deduplicated,
+        scopeKey: this.runtimeTurnScopeKey(context),
+      },
+      'recovery-blocked follower deferred into durable obligation (#3295 S2)',
+    );
+    return new TurnDeferredToObligationError(enqueued.id);
+  } catch (err) {
+    // Fail toward today's behavior: if the obligation cannot be recorded the
+    // follower keeps the terminal admission-rejection path — deferral must
+    // never turn an explicit loss into a silent one.
+    log.error(
+      { err, inboundSeq: context.identity.inboundSeq },
+      'deferred-turn enqueue failed — keeping terminal admission rejection',
+    );
+    return null;
+  }
 }
 
 attemptOutcomeForResult(
@@ -1546,7 +1651,7 @@ retireIdlePerChatTurnQueueForRecycle(
 }
 
 async applyRuntimeTurnPostEffects(
-  result: Exclude<FinalizeRuntimeTurnResult, { kind: 'dual_sink_failure' }>,
+  result: Exclude<FinalizeRuntimeTurnResult, { kind: 'dual_sink_failure' }> | DeferredToObligationRetirement,
   context: RuntimeTurnContext,
   postEffects: RuntimeTurnPostEffects,
 ): Promise<void> {
@@ -1676,6 +1781,12 @@ async applyRuntimeTurnPostEffects(
       this.host.currentTurnChatJid = null;
       this.host.currentTurnReplayText = null;
       this.host.currentTurnReplayActorJid = undefined;
+      // #2976 (ii): retire the executing-turn actor for the global-socket
+      // resolver (pushed at the provider boundary; admission-rejected turns
+      // never pushed, so nothing to shift there).
+      if (!postEffects.admissionRejected) {
+        this.host.perChatExecActorQueue.get(GLOBAL_CONVERSATION_KEY)?.shift();
+      }
       ledger.fifoAdvanced = true;
     }
     if (!ledger.presentationCleared) {
@@ -2028,6 +2139,32 @@ finalizeMessageProcessingFailure(inboundSeq: number | undefined): boolean {
   return true;
 }
 
+/**
+ * #3295 S2: retire a deferred turn's runtime state through the standard
+ * admission-rejected post-effects (inbound-seq FIFO advance, reply-guarantee
+ * disarm, presentation clear) with ZERO durable writes — the obligation row
+ * enqueued at admission is the turn's durable owner.
+ */
+private async retireDeferredRuntimeTurn(
+  context: RuntimeTurnContext,
+  scopeRef: PerChatRuntimeScopeRef,
+): Promise<void> {
+  const postEffects = this.createRuntimeTurnPostEffects({
+    queue: null,
+    admissionRejected: true,
+    advancePerChatInboundSeq:
+      context.identity.inboundSeq !== null
+      && this.host.perChatInboundSeqQueue.get(scopeRef.value)?.[0]
+        === context.identity.inboundSeq,
+    scopeRef,
+  });
+  await this.applyRuntimeTurnPostEffects(
+    { kind: 'deferred_to_obligation', mayAdvance: true },
+    context,
+    postEffects,
+  );
+}
+
 async finalizePerChatProcessorError(
   mapKey: string,
   turn: QueuedTurn,
@@ -2041,6 +2178,14 @@ async finalizePerChatProcessorError(
     this.host.perChatRuntimeTurnContexts.get(mapKey)?.[0]?.identity.logicalTurnId
       !== context.identity.logicalTurnId
   ) {
+    // #3295 S2: the deferral throw happens pre-publication (the context never
+    // entered the FIFO), so it always lands in this branch. Retire the
+    // runtime state with NO durable inbound mutation — the obligation row
+    // recorded at admission owns the turn now.
+    if (error instanceof TurnDeferredToObligationError) {
+      await this.retireDeferredRuntimeTurn(context, { value: mapKey });
+      return;
+    }
     if (this.isUndispatchedRuntimeTurnCancelled(context)) {
       await this.waitForUndispatchedRuntimeCrash(context);
       this.clearUndispatchedRuntimeTurnCancellation(context);

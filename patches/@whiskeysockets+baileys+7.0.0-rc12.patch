@@ -1,0 +1,17 @@
+diff --git a/node_modules/@whiskeysockets/baileys/lib/Utils/messages-media.js b/node_modules/@whiskeysockets/baileys/lib/Utils/messages-media.js
+index a3d2fa6..e9ea519 100644
+--- a/node_modules/@whiskeysockets/baileys/lib/Utils/messages-media.js
++++ b/node_modules/@whiskeysockets/baileys/lib/Utils/messages-media.js
+@@ -512,6 +512,12 @@ export const downloadEncryptedContent = async (downloadUrl, { cipherKey, iv }, {
+             }
+         }
+     });
++    // WhatSoup overlay (#3315): .pipe() forwards no 'error' events — a socket
++    // death mid-body would throw on a zero-listener EventEmitter (uncaught
++    // TypeError, cause SocketError) and leave the consumer pending forever.
++    // Forward source errors into the returned Transform so awaited consumers
++    // reject instead.
++    fetched.on('error', (error) => output.destroy(error));
+     return fetched.pipe(output, { end: true });
+ };
+ export function extensionForMediaMessage(message) {
