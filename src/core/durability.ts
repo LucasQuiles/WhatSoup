@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { createChildLogger } from '../logger.ts';
 import { allFromStatement } from '../lib/db-query.ts';
 import { CapabilityObligationStore } from './capability-obligation-store.ts';
+import { DeferredTurnStore } from './deferred-turn-store.ts';
 import type { CapabilityDecisionOutcome } from './capability-obligation-store.ts';
 import { emitAlertChecked, clearAlertSourceChecked } from '../lib/emit-alert.ts';
 import { gateQuarantineClear } from '../lib/fleet-health-gate.ts';
@@ -621,6 +622,8 @@ export class DurabilityEngine {
   private readonly turnRecovery: TurnRecoveryStore;
   /** D4 (capability-obligation replay): joined into C3 via applyDecisionWithinCallerTransaction. */
   readonly capabilityObligations: CapabilityObligationStore;
+  /** #3295 S2: deferred recovery-blocked followers (admission behind a default-OFF flag). */
+  readonly deferredTurns: DeferredTurnStore;
   private readonly sessionLifecycle: SessionLifecycleStore;
   private readonly confirmedOutboundProbe: (seconds: number) => boolean;
   constructor(db: Database) {
@@ -1254,6 +1257,7 @@ export class DurabilityEngine {
       this.statements.selectNow.get() as { now: string }
     ).now);
     this.capabilityObligations = new CapabilityObligationStore(db);
+    this.deferredTurns = new DeferredTurnStore(db);
     this.sessionLifecycle = new SessionLifecycleStore(db);
     this.confirmedOutboundProbe = makeConfirmedOutboundProbe(db.raw);
     // Pre-warm the immediate-transaction runner so lifecycle methods that call
