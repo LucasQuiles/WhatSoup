@@ -98,6 +98,7 @@ import { HEALTH_DEGRADATION_CAUSE_REASON_TWINS, NO_REASON_TWIN } from '../../src
 import type { StartupNotificationHealth } from '../../src/core/startup-notification-controller.ts';
 import type { ConnectionManager } from '../../src/transport/connection.ts';
 import { emptyConnectionStateSnapshot } from '../../src/transport/twilio/connection-snapshot.ts';
+import { systemClock } from '../../src/lib/clock.ts';
 
 // ---------------------------------------------------------------------------
 // HTTP helper
@@ -3070,7 +3071,9 @@ describe('GET /health', () => {
       next_probe_due_at: null,
       last_successful_turn_at: null,
       last_successful_turn_provider: null,
+      last_successful_turn_model: null,
       last_successful_turn_session_current: null,
+      primary_model: null,
       last_turn_error_class: 'model-unavailable',
       last_turn_error_at: 1_781_316_000_000,
     });
@@ -3115,7 +3118,9 @@ describe('GET /health', () => {
       next_probe_due_at: null,
       last_successful_turn_at: 1_781_316_030_000,
       last_successful_turn_provider: null,
+      last_successful_turn_model: null,
       last_successful_turn_session_current: null,
+      primary_model: null,
       last_turn_error_class: null,
       last_turn_error_at: null,
     });
@@ -3166,7 +3171,9 @@ describe('GET /health', () => {
       next_probe_due_at: null,
       last_successful_turn_at: null,
       last_successful_turn_provider: null,
+      last_successful_turn_model: null,
       last_successful_turn_session_current: null,
+      primary_model: null,
       last_turn_error_class: 'empty-output',
       last_turn_error_at: 1_781_316_000_000,
     });
@@ -3619,7 +3626,9 @@ describe('GET /health', () => {
       next_probe_due_at: null,
       last_successful_turn_at: null,
       last_successful_turn_provider: null,
+      last_successful_turn_model: null,
       last_successful_turn_session_current: null,
+      primary_model: null,
       last_turn_error_class: null,
       last_turn_error_at: 1_781_316_000_000,
     });
@@ -3630,7 +3639,9 @@ describe('GET /health', () => {
       modelUsabilityStatus: null,
       lastSuccessfulTurnAt: null,
       lastSuccessfulTurnProvider: null,
+      lastSuccessfulTurnModel: null,
       lastSuccessfulTurnSessionCurrent: null,
+      primaryModel: null,
       lastTurnErrorClass: null,
       lastTurnErrorAt: 1_781_316_000_000,
       periodicProbeExpected: null,
@@ -6059,7 +6070,9 @@ describe('GET /health — normalizeBooleanOrNull and normalizeNumberOrNull non-t
       next_probe_due_at: null,
       last_successful_turn_at: null,
       last_successful_turn_provider: null,
+      last_successful_turn_model: null,
       last_successful_turn_session_current: null,
+      primary_model: null,
       last_turn_error_class: null,
       last_turn_error_at: null,
     });
@@ -6358,7 +6371,9 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
       next_probe_due_at: null,
       last_successful_turn_at: 1_700_000_000_000,
       last_successful_turn_provider: 'claude-cli',
+      last_successful_turn_model: null,
       last_successful_turn_session_current: true,
+      primary_model: null,
       last_turn_error_class: null,
       last_turn_error_at: null,
     });
@@ -7048,13 +7063,20 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
   let db: Database;
   let prevToken: string | undefined;
 
+  let clockOffsetMs = 0;
+  let clockNowSpy: ReturnType<typeof vi.spyOn> | null = null;
+
   beforeEach(() => {
     prevToken = process.env.WHATSOUP_HEALTH_TOKEN;
     process.env.WHATSOUP_HEALTH_TOKEN = TEST_HEALTH_TOKEN;
     db = makeDb();
+    clockOffsetMs = 0;
+    clockNowSpy = vi.spyOn(systemClock, 'now').mockImplementation(() => Date.now() + clockOffsetMs);
   });
 
   afterEach(() => {
+    clockNowSpy?.mockRestore();
+    clockNowSpy = null;
     db.close();
     if (prevToken === undefined) delete process.env.WHATSOUP_HEALTH_TOKEN;
     else process.env.WHATSOUP_HEALTH_TOKEN = prevToken;
@@ -7072,13 +7094,16 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
     };
   }
 
-  // Recovered turn capability carrying a successful-turn receipt.
+  // Recovered turn capability carrying a successful-turn receipt from the
+  // still-current session on the provider-default primary route (no explicit
+  // model on either side). Route/session overrides ride via object spread.
   function receiptTurnCapability(at: number, provider: string): Record<string, unknown> {
     return {
       modelUsable: true,
       modelUsabilityStatus: 'usable',
       lastSuccessfulTurnAt: at,
       lastSuccessfulTurnProvider: provider,
+      lastSuccessfulTurnSessionCurrent: true,
       lastTurnErrorClass: null,
       lastTurnErrorAt: null,
     };
@@ -7164,9 +7189,14 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
     expect(json.degradation_causes).not.toContain('degradation_silence_unproven');
   }
 
-  // Strictly-newer receipts need the clock to advance past the latch point;
-  // 5ms guarantees Date.now() moved even on a coarse timer.
-  const tick = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 5));
+  // Deterministic clock: latch stamps read systemClock.now(), which this
+  // suite spies to real time plus a controlled offset. advanceClock replaces
+  // real sleeps — it moves the stamp clock forward instantly — and
+  // harnessNow() builds receipt timestamps on the same offset clock, so every
+  // strictly-newer comparison is decided by the offset, never by a wall-clock
+  // race. The spy is installed per test (beforeEach) and restored (afterEach).
+  const advanceClock = (ms: number): void => { clockOffsetMs += ms; };
+  const harnessNow = (): number => Date.now() + clockOffsetMs;
 
   // Seed a turn-class latch (every latched reason turn-provable).
   async function seedTurnClassLatch(h: Awaited<ReturnType<typeof buildLatchHarness>>): Promise<void> {
@@ -7181,8 +7211,8 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
     const h = await buildLatchHarness();
     try {
       await seedTurnClassLatch(h);
-      await tick();
-      h.setTurnCapability(receiptTurnCapability(Date.now(), 'claude-cli'));
+      advanceClock(1000);
+      h.setTurnCapability(receiptTurnCapability(harnessNow(), 'claude-cli'));
       const second = JSON.parse((await healthReq(h.port)).body);
       expectReleased(second);
     } finally {
@@ -7199,8 +7229,8 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
       expect(first.status_reasons).toContain('enrichment_runtime_degraded');
 
       h.setRuntimeDegraded(false);
-      await tick();
-      h.setTurnCapability(receiptTurnCapability(Date.now(), 'claude-cli'));
+      advanceClock(1000);
+      h.setTurnCapability(receiptTurnCapability(harnessNow(), 'claude-cli'));
       const second = JSON.parse((await healthReq(h.port)).body);
       expectLatched(second);
     } finally {
@@ -7212,14 +7242,14 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
     const h = await buildLatchHarness();
     try {
       await seedTurnClassLatch(h);
-      await tick();
+      advanceClock(1000);
       // The snapshot says a window exists (non-null expiry) but the expiry is
       // already behind the clock by the time the release check compares — the
       // race a wall-clock liveness test loses. The snapshot's
       // effectiveProvider is the FALLBACK provider and must not pass as
       // primary.
       h.setFallbackState({ effectiveProvider: 'openai-api', fallbackActiveUntil: Date.now() - 1 });
-      h.setTurnCapability(receiptTurnCapability(Date.now(), 'openai-api'));
+      h.setTurnCapability(receiptTurnCapability(harnessNow(), 'openai-api'));
       const second = JSON.parse((await healthReq(h.port)).body);
       expectLatched(second);
     } finally {
@@ -7232,10 +7262,10 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
     try {
       await seedTurnClassLatch(h);
       // Receipt T1: newer than the seed latch, fresh, primary.
-      await tick();
-      h.setTurnCapability(receiptTurnCapability(Date.now(), 'claude-cli'));
+      advanceClock(1000);
+      h.setTurnCapability(receiptTurnCapability(harnessNow(), 'claude-cli'));
       // Unhealthy episode T2 > T1: disconnected transport.
-      await tick();
+      advanceClock(1000);
       h.setConnected(false);
       const second = JSON.parse((await healthReq(h.port)).body);
       expect(second.status).toBe('unhealthy');
@@ -7249,8 +7279,8 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
 
       // A receipt newer than the unhealthy episode proves the round trip and
       // releases (the connection classes ride the turn pipeline).
-      await tick();
-      h.setTurnCapability(receiptTurnCapability(Date.now(), 'claude-cli'));
+      advanceClock(1000);
+      h.setTurnCapability(receiptTurnCapability(harnessNow(), 'claude-cli'));
       const fourth = JSON.parse((await healthReq(h.port)).body);
       expectReleased(fourth);
     } finally {
@@ -7261,7 +7291,7 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
   it('a stale receipt older than the latch point does not release', async () => {
     const h = await buildLatchHarness();
     try {
-      const staleAt = Date.now() - 1000;
+      const staleAt = harnessNow() - 1000;
       await seedTurnClassLatch(h);
       h.setTurnCapability(receiptTurnCapability(staleAt, 'claude-cli'));
       const second = JSON.parse((await healthReq(h.port)).body);
@@ -7278,7 +7308,7 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
       const second = JSON.parse((await healthReq(h.port)).body);
       expectLatched(second);
       // Elapsed time / repeated quiet evaluations alone must not release either.
-      await tick();
+      advanceClock(1000);
       const third = JSON.parse((await healthReq(h.port)).body);
       expectLatched(third);
     } finally {
@@ -7290,8 +7320,8 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
     const h = await buildLatchHarness();
     try {
       await seedTurnClassLatch(h);
-      await tick();
-      h.setTurnCapability(receiptTurnCapability(Date.now(), 'openai-api'));
+      advanceClock(1000);
+      h.setTurnCapability(receiptTurnCapability(harnessNow(), 'openai-api'));
       const second = JSON.parse((await healthReq(h.port)).body);
       expectLatched(second);
     } finally {
@@ -7303,14 +7333,14 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
     const h = await buildLatchHarness();
     try {
       await seedTurnClassLatch(h);
-      await tick();
-      const firstReceiptAt = Date.now();
+      advanceClock(1000);
+      const firstReceiptAt = harnessNow();
       h.setTurnCapability(receiptTurnCapability(firstReceiptAt, 'claude-cli'));
       const second = JSON.parse((await healthReq(h.port)).body);
       expectReleased(second);
 
       // A NEW turn-class degradation re-latches normally...
-      await tick();
+      advanceClock(1000);
       h.setTurnCapability(degradedTurnCapability());
       const third = JSON.parse((await healthReq(h.port)).body);
       expect(third.status).toBe('degraded');
@@ -7324,8 +7354,8 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
       expectLatched(fourth);
 
       // A receipt newer than the new latch point releases again.
-      await tick();
-      h.setTurnCapability(receiptTurnCapability(Date.now(), 'claude-cli'));
+      advanceClock(1000);
+      h.setTurnCapability(receiptTurnCapability(harnessNow(), 'claude-cli'));
       const fifth = JSON.parse((await healthReq(h.port)).body);
       expectReleased(fifth);
     } finally {
@@ -7356,8 +7386,8 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
       expect(third.status_reasons).not.toContain('enrichment_runtime_degraded');
 
       h.setTurnCapability(null);
-      await tick();
-      h.setTurnCapability(receiptTurnCapability(Date.now(), 'claude-cli'));
+      advanceClock(1000);
+      h.setTurnCapability(receiptTurnCapability(harnessNow(), 'claude-cli'));
       const fourth = JSON.parse((await healthReq(h.port)).body);
       expectReleased(fourth);
     } finally {
@@ -7379,8 +7409,8 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
 
       h.setRuntimeDegraded(false);
       h.setTurnCapability(null);
-      await tick();
-      h.setTurnCapability(receiptTurnCapability(Date.now(), 'claude-cli'));
+      advanceClock(1000);
+      h.setTurnCapability(receiptTurnCapability(harnessNow(), 'claude-cli'));
       const third = JSON.parse((await healthReq(h.port)).body);
       expectLatched(third);
     } finally {
@@ -7393,11 +7423,11 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
     try {
       await seedTurnClassLatch(h);
       // Receipt T1: newer than the seed latch.
-      await tick();
-      h.setTurnCapability(receiptTurnCapability(Date.now(), 'claude-cli'));
+      advanceClock(1000);
+      h.setTurnCapability(receiptTurnCapability(harnessNow(), 'claude-cli'));
       // T2: schema_future is computed AFTER the early status chain — only
       // latch maintenance that runs truly last can observe it.
-      await tick();
+      advanceClock(1000);
       db.raw.prepare('INSERT INTO schema_migrations(version) VALUES (?)').run(CURRENT_SCHEMA_MIGRATION + 1);
       const second = JSON.parse((await healthReq(h.port)).body);
       expect(second.status).toBe('unhealthy');
@@ -7411,8 +7441,8 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
       // The episode's reason set {schema_future} is not turn-provable, so
       // even a FRESH receipt does not release — fail-closed by design; a
       // schema_future episode resolves through operator action + restart.
-      await tick();
-      h.setTurnCapability(receiptTurnCapability(Date.now(), 'claude-cli'));
+      advanceClock(1000);
+      h.setTurnCapability(receiptTurnCapability(harnessNow(), 'claude-cli'));
       const fourth = JSON.parse((await healthReq(h.port)).body);
       expectLatched(fourth);
     } finally {
@@ -7479,8 +7509,8 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
       // turn-provable by construction of the guard.
       h.setRuntimeSnapshot('healthy', null);
       h.setFallbackState({ effectiveProvider: 'claude-cli', fallbackActiveUntil: null });
-      await tick();
-      h.setTurnCapability(receiptTurnCapability(Date.now(), 'claude-cli'));
+      advanceClock(1000);
+      h.setTurnCapability(receiptTurnCapability(harnessNow(), 'claude-cli'));
       const second = JSON.parse((await healthReq(h.port)).body);
       expectReleased(second);
     } finally {
@@ -7525,6 +7555,93 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
     }
   });
 
+  it('a same-provider receipt from a DIFFERENT model than the explicit primary does not release', async () => {
+    const h = await buildLatchHarness();
+    try {
+      await seedTurnClassLatch(h);
+      advanceClock(1000);
+      // Same provider, wrong model: a /model-pinned chat serving another
+      // claude-cli model is NOT the primary route — its success proves that
+      // route, not the one the latch is about.
+      h.setTurnCapability({
+        ...receiptTurnCapability(harnessNow(), 'claude-cli'),
+        lastSuccessfulTurnModel: 'claude-haiku-4-5',
+        lastSuccessfulTurnSessionCurrent: true,
+        primaryModel: 'claude-opus-4-5',
+      });
+      const second = JSON.parse((await healthReq(h.port)).body);
+      expectLatched(second);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('an explicit primary model with an UNKNOWN receipt model does not release', async () => {
+    const h = await buildLatchHarness();
+    try {
+      await seedTurnClassLatch(h);
+      advanceClock(1000);
+      // Fail closed: when the primary model is explicit, a receipt that
+      // cannot name its serving model proves nothing about the primary route.
+      h.setTurnCapability({
+        ...receiptTurnCapability(harnessNow(), 'claude-cli'),
+        lastSuccessfulTurnSessionCurrent: true,
+        primaryModel: 'claude-opus-4-5',
+      });
+      const second = JSON.parse((await healthReq(h.port)).body);
+      expectLatched(second);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('a provider-default primary does not release on a model-pinned receipt', async () => {
+    const h = await buildLatchHarness();
+    try {
+      await seedTurnClassLatch(h);
+      advanceClock(1000);
+      // The pinned rule for a provider-default primary: the receipt's model
+      // must be absent/default too — a model-pinned session's success is a
+      // different route.
+      h.setTurnCapability({
+        ...receiptTurnCapability(harnessNow(), 'claude-cli'),
+        lastSuccessfulTurnModel: 'claude-haiku-4-5',
+        lastSuccessfulTurnSessionCurrent: true,
+      });
+      const second = JSON.parse((await healthReq(h.port)).body);
+      expectLatched(second);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('a receipt from a rotated or dead session does not release (session-current guard)', async () => {
+    const h = await buildLatchHarness();
+    try {
+      await seedTurnClassLatch(h);
+      advanceClock(1000);
+      // Explicitly not current: the success belongs to a session incarnation
+      // that no longer exists — it says nothing about the live route.
+      h.setTurnCapability({
+        ...receiptTurnCapability(harnessNow(), 'claude-cli'),
+        lastSuccessfulTurnSessionCurrent: false,
+      });
+      const second = JSON.parse((await healthReq(h.port)).body);
+      expectLatched(second);
+
+      // Unknown currency fails closed too.
+      advanceClock(1000);
+      h.setTurnCapability({
+        ...receiptTurnCapability(harnessNow(), 'claude-cli'),
+        lastSuccessfulTurnSessionCurrent: null,
+      });
+      const third = JSON.parse((await healthReq(h.port)).body);
+      expectLatched(third);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
   it('a short-circuit evaluation must not launder a non-provable latch', async () => {
     const h = await buildLatchHarness();
     try {
@@ -7544,8 +7661,8 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
       expect(second.status_reasons).toContain('connection_disconnected');
 
       h.setConnected(true);
-      await tick();
-      h.setTurnCapability(receiptTurnCapability(Date.now(), 'claude-cli'));
+      advanceClock(1000);
+      h.setTurnCapability(receiptTurnCapability(harnessNow(), 'claude-cli'));
       const third = JSON.parse((await healthReq(h.port)).body);
       expectLatched(third);
     } finally {

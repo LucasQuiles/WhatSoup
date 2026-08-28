@@ -286,45 +286,70 @@ export const TURN_PROVABLE_STATUS_REASONS: ReadonlySet<string> = new Set([
   'runtime.provider_fallback_active',
 ]);
 
-/** Recovery proof for the #2280 silence latch. The latch is released ONLY on a
- * successful PRIMARY-provider turn receipt strictly newer than the latch
- * point, and only when every latched reason is turn-provable
- * (TURN_PROVABLE_STATUS_REASONS — a turn proves the turn pipeline only): the
- * runtime reports a successful turn, served by the provider the caller has
- * established as primary (`primaryProviderId`; pass null while the fallback
- * snapshot shows a window or the fallback state is unavailable — no release),
- * with `last_successful_turn_at` strictly greater than the recorded latch
- * point. Strictly-newer is the ONLY temporal guard — deliberately no
- * wall-clock freshness window: anything bad after the receipt advanced the
- * latch point past it by construction, while an expiry window would make
- * release depend on /health polling cadence and permanently strand idle
- * instances. Silence, elapsed time, empty reason lists, stale receipts, and
- * non-primary receipts never release. The latch is process-lifetime,
- * in-memory state: a process restart clears it by amnesia — a known,
- * pre-existing hazard of the #2280 mechanism, which is loss of the latch, not
- * a release channel; nothing here treats a restart as proof. Deletes the
- * latch entry and returns true when the proof holds. Seam note: this
- * predicate is the whole release contract — an alternative (e.g. N
- * consecutive clean evaluations) can replace it without touching the call
- * site. */
+/** The primary route the latch release compares a receipt against: the
+ * primary provider (only known while no fallback window is live) and its
+ * configured model, null meaning the provider default. */
+export interface PrimaryRouteForRelease {
+  providerId: string;
+  modelRef: string | null;
+}
+
+/** Recovery proof for the #2280 silence latch. The latch is released ONLY on
+ * a successful EXACT-PRIMARY-ROUTE turn receipt from the still-current
+ * session, strictly newer than the latch point, and only when every latched
+ * reason is turn-provable (TURN_PROVABLE_STATUS_REASONS — a turn proves the
+ * turn pipeline only). Guards, all fail-closed:
+ *   - route: the receipt's provider AND model must equal the primary route
+ *     (`primaryRoute`; pass null while the fallback snapshot shows a window
+ *     or fallback state is unavailable — no release). Model rule: an explicit
+ *     primary model requires the receipt to name the SAME model — a
+ *     different or unknown receipt model never releases (a /model-pinned
+ *     same-provider session proves its own route, not the primary); a
+ *     provider-default primary (modelRef null) requires the receipt model to
+ *     be absent/default too.
+ *   - session currency: `last_successful_turn_session_current` must be
+ *     exactly true — a receipt from a rotated or dead session incarnation
+ *     (false, or unknown = null) says nothing about the live route.
+ *   - time: `last_successful_turn_at` strictly greater than the latch point.
+ *     Strictly-newer is the ONLY temporal guard — deliberately no wall-clock
+ *     freshness window: anything bad after the receipt advanced the latch
+ *     point past it by construction, while an expiry window would make
+ *     release depend on /health polling cadence and permanently strand idle
+ *     instances.
+ * Silence, elapsed time, empty reason lists, stale receipts, non-primary or
+ * off-route receipts never release. The latch is process-lifetime, in-memory
+ * state: a process restart clears it by amnesia — a known, pre-existing
+ * hazard of the #2280 mechanism, which is loss of the latch, not a release
+ * channel; nothing here treats a restart as proof. Deletes the latch entry
+ * and returns true when the proof holds. Seam note: this predicate is the
+ * whole release contract — an alternative (e.g. N consecutive clean
+ * evaluations) can replace it without touching the call site. */
 export function releaseDegradationLatchOnRecoveryProof(
   recentlyDegraded: Map<string, DegradationLatchEntry>,
   instanceName: string,
   turnCapability: {
     last_successful_turn_at: number | null;
     last_successful_turn_provider: string | null;
+    last_successful_turn_model: string | null;
+    last_successful_turn_session_current: boolean | null;
   } | null,
-  primaryProviderId: string | null,
+  primaryRoute: PrimaryRouteForRelease | null,
 ): boolean {
   const latch = recentlyDegraded.get(instanceName);
   if (latch === undefined) return false;
   for (const reason of latch.reasons) {
     if (!TURN_PROVABLE_STATUS_REASONS.has(reason)) return false; // a turn cannot prove this recovered
   }
-  if (turnCapability === null || primaryProviderId === null) return false;
+  if (turnCapability === null || primaryRoute === null) return false;
   const receiptAt = turnCapability.last_successful_turn_at;
-  if (receiptAt === null || turnCapability.last_successful_turn_provider !== primaryProviderId) {
+  if (receiptAt === null || turnCapability.last_successful_turn_provider !== primaryRoute.providerId) {
     return false;
+  }
+  if ((turnCapability.last_successful_turn_model ?? null) !== primaryRoute.modelRef) {
+    return false; // same provider, different or unknown model — not the primary route
+  }
+  if (turnCapability.last_successful_turn_session_current !== true) {
+    return false; // rotated/dead/unknown session incarnation — not live-route evidence
   }
   if (receiptAt <= latch.latchedAtMs) return false; // predates the latch — stale proof
   recentlyDegraded.delete(instanceName);
@@ -371,7 +396,14 @@ interface HealthTurnCapability {
   model_usability_status: string | null;
   last_successful_turn_at: number | null;
   last_successful_turn_provider: string | null;
+  /** Model ref that served the last successful turn (null = unknown, or the
+   *  session carried no explicit model — the provider default). */
+  last_successful_turn_model: string | null;
   last_successful_turn_session_current: boolean | null;
+  /** The runtime's configured primary model (null = provider default). With
+   *  last_successful_turn_model this lets the latch release distinguish an
+   *  exact-primary-route success from a same-provider different-model one. */
+  primary_model: string | null;
   last_turn_error_class: string | null;
   last_turn_error_at: number | null;
   /** #3017 AXIS A: true when the periodic primary-readiness probe is active.
@@ -588,6 +620,12 @@ function normalizeProviderNameOrNull(value: unknown): string | null {
   return isProviderId(value) ? value : null;
 }
 
+// Model refs are free-form provider model ids, not a closed enum — accept any
+// non-empty bounded string, null otherwise (absent = provider default).
+function normalizeModelRefOrNull(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 && value.length <= 256 ? value : null;
+}
+
 function normalizeAgentTurnCapability(details: Record<string, unknown> | null): HealthTurnCapability | null {
   if (!details) return null;
   const raw = details.turnCapability;
@@ -599,7 +637,9 @@ function normalizeAgentTurnCapability(details: Record<string, unknown> | null): 
     model_usability_status: normalizeEnumStringOrNull(raw.modelUsabilityStatus, HEALTH_MODEL_USABILITY_STATUSES),
     last_successful_turn_at: normalizeNumberOrNull(raw.lastSuccessfulTurnAt),
     last_successful_turn_provider: normalizeProviderNameOrNull(raw.lastSuccessfulTurnProvider),
+    last_successful_turn_model: normalizeModelRefOrNull(raw.lastSuccessfulTurnModel),
     last_successful_turn_session_current: normalizeBooleanOrNull(raw.lastSuccessfulTurnSessionCurrent),
+    primary_model: normalizeModelRefOrNull(raw.primaryModel),
     last_turn_error_class: normalizeEnumStringOrNull(raw.lastTurnErrorClass, HEALTH_TURN_ERROR_CLASSES),
     last_turn_error_at: normalizeNumberOrNull(raw.lastTurnErrorAt),
     periodic_probe_expected: normalizeBooleanOrNull(raw.periodicProbeExpected),
@@ -711,7 +751,9 @@ function agentRuntimeDetailsForHealth(
           modelUsabilityStatus: turnCapability.model_usability_status,
           lastSuccessfulTurnAt: turnCapability.last_successful_turn_at,
           lastSuccessfulTurnProvider: turnCapability.last_successful_turn_provider,
+          lastSuccessfulTurnModel: turnCapability.last_successful_turn_model,
           lastSuccessfulTurnSessionCurrent: turnCapability.last_successful_turn_session_current,
+          primaryModel: turnCapability.primary_model,
           lastTurnErrorClass: turnCapability.last_turn_error_class,
           lastTurnErrorAt: turnCapability.last_turn_error_at,
           periodicProbeExpected: turnCapability.periodic_probe_expected,
@@ -2062,9 +2104,12 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         wentThroughDegradedPath = true;
         latchArmEligible = statusReasons.length > 0;
         if (!latchArmEligible) {
-          const primaryProviderId =
+          const primaryRoute =
             fallbackState !== null && fallbackState.fallbackActiveUntil === null
-              ? fallbackState.effectiveProvider
+              ? {
+                  providerId: fallbackState.effectiveProvider,
+                  modelRef: turnCapability?.primary_model ?? null,
+                }
               : null;
           const priorLatch = recentlyDegraded.get(deps.instanceName);
           if (
@@ -2073,7 +2118,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
               recentlyDegraded,
               deps.instanceName,
               turnCapability,
-              primaryProviderId,
+              primaryRoute,
             )
           ) {
             releasedLatchReasons = priorLatch.reasons;

@@ -57,9 +57,10 @@ describe('degradation silence unproven (#2280)', () => {
 });
 
 // Recovery-proof release contract: the latch releases ONLY on a successful
-// PRIMARY-provider turn receipt strictly newer than the latch point, and only
-// when every latched reason is turn-provable (a turn proves the turn pipeline
-// only). Strictly-newer is the ONLY temporal guard — deliberately no
+// EXACT-PRIMARY-ROUTE turn receipt (provider AND model must match the primary
+// route) from the still-current session, strictly newer than the latch point,
+// and only when every latched reason is turn-provable (a turn proves the turn
+// pipeline only). Strictly-newer is the ONLY temporal guard — deliberately no
 // wall-clock expiry (see the no-clock test below). Everything else fails
 // closed. The latch is process-lifetime, in-memory state — a restart clears
 // it by amnesia, which is loss of the latch, not a release channel.
@@ -67,18 +68,26 @@ describe('releaseDegradationLatchOnRecoveryProof', () => {
   const NAME = 'test-instance';
   const NOW = 10_000_000;
   const LATCHED_AT = NOW - 60_000;
-  const receipt = (at: number, provider = 'claude-cli') => ({
+  // Provider-default primary route: no explicit model.
+  const PRIMARY = { providerId: 'claude-cli', modelRef: null };
+  const receipt = (
+    at: number,
+    provider = 'claude-cli',
+    overrides: { model?: string | null; sessionCurrent?: boolean | null } = {},
+  ) => ({
     last_successful_turn_at: at,
     last_successful_turn_provider: provider,
+    last_successful_turn_model: overrides.model ?? null,
+    last_successful_turn_session_current: overrides.sessionCurrent === undefined ? true : overrides.sessionCurrent,
   });
 
   function latched(reasons: string[] = ['turn_capability_degraded']): Map<string, DegradationLatchEntry> {
     return new Map([[NAME, { latchedAtMs: LATCHED_AT, reasons: new Set(reasons) }]]);
   }
 
-  it('releases on a primary receipt strictly newer than the latch point', () => {
+  it('releases on a current-session primary-route receipt strictly newer than the latch point', () => {
     const map = latched();
-    const released = releaseDegradationLatchOnRecoveryProof(map, NAME, receipt(LATCHED_AT + 1_000), 'claude-cli');
+    const released = releaseDegradationLatchOnRecoveryProof(map, NAME, receipt(LATCHED_AT + 1_000), PRIMARY);
     expect(released).toBe(true);
     expect(map.has(NAME)).toBe(false);
   });
@@ -93,7 +102,7 @@ describe('releaseDegradationLatchOnRecoveryProof', () => {
       'connection_disconnected',
       'runtime.provider_fallback_active',
     ]);
-    const released = releaseDegradationLatchOnRecoveryProof(map, NAME, receipt(LATCHED_AT + 1_000), 'claude-cli');
+    const released = releaseDegradationLatchOnRecoveryProof(map, NAME, receipt(LATCHED_AT + 1_000), PRIMARY);
     expect(released).toBe(true);
     expect(map.has(NAME)).toBe(false);
   });
@@ -110,7 +119,7 @@ describe('releaseDegradationLatchOnRecoveryProof', () => {
     ]) {
       const map = latched(reasons);
       expect(
-        releaseDegradationLatchOnRecoveryProof(map, NAME, receipt(LATCHED_AT + 1_000), 'claude-cli'),
+        releaseDegradationLatchOnRecoveryProof(map, NAME, receipt(LATCHED_AT + 1_000), PRIMARY),
         `latched reasons ${reasons.join(',')} must not release on a turn receipt`,
       ).toBe(false);
       expect(map.has(NAME)).toBe(true);
@@ -133,10 +142,45 @@ describe('releaseDegradationLatchOnRecoveryProof', () => {
     ]);
   });
 
+  it('pins the exact-route model rule: every mismatch branch fails closed', () => {
+    const explicit = { providerId: 'claude-cli', modelRef: 'claude-opus-4-5' };
+    for (const [route, model, allowed] of [
+      // Explicit primary model: receipt must name the SAME model.
+      [explicit, 'claude-opus-4-5', true],
+      [explicit, 'claude-haiku-4-5', false], // different model — its own route
+      [explicit, null, false],               // unknown model — proves nothing
+      // Provider-default primary: receipt model must be absent/default too.
+      [PRIMARY, null, true],
+      [PRIMARY, 'claude-haiku-4-5', false],  // model-pinned session — its own route
+    ] as const) {
+      const map = latched();
+      expect(
+        releaseDegradationLatchOnRecoveryProof(map, NAME, receipt(LATCHED_AT + 1_000, 'claude-cli', { model }), route),
+        `route=${route.modelRef ?? 'default'} receipt-model=${model ?? 'absent'} must ${allowed ? 'release' : 'hold'}`,
+      ).toBe(allowed);
+      expect(map.has(NAME)).toBe(!allowed);
+    }
+  });
+
+  it('pins the session-currency guard: only exactly-true releases', () => {
+    for (const [sessionCurrent, allowed] of [
+      [true, true],
+      [false, false], // rotated/dead session incarnation
+      [null, false],  // unknown — fail closed
+    ] as const) {
+      const map = latched();
+      expect(
+        releaseDegradationLatchOnRecoveryProof(map, NAME, receipt(LATCHED_AT + 1_000, 'claude-cli', { sessionCurrent }), PRIMARY),
+        `session-current=${String(sessionCurrent)} must ${allowed ? 'release' : 'hold'}`,
+      ).toBe(allowed);
+      expect(map.has(NAME)).toBe(!allowed);
+    }
+  });
+
   it('does not release on a receipt at or before the latch point', () => {
     for (const at of [LATCHED_AT, LATCHED_AT - 1]) {
       const map = latched();
-      expect(releaseDegradationLatchOnRecoveryProof(map, NAME, receipt(at), 'claude-cli')).toBe(false);
+      expect(releaseDegradationLatchOnRecoveryProof(map, NAME, receipt(at), PRIMARY)).toBe(false);
       expect(map.has(NAME)).toBe(true);
     }
   });
@@ -151,33 +195,43 @@ describe('releaseDegradationLatchOnRecoveryProof', () => {
     // back without a deliberate contract change.
     expect(releaseDegradationLatchOnRecoveryProof.length).toBe(4);
     const map = latched();
-    expect(releaseDegradationLatchOnRecoveryProof(map, NAME, receipt(LATCHED_AT + 1_000), 'claude-cli')).toBe(true);
+    expect(releaseDegradationLatchOnRecoveryProof(map, NAME, receipt(LATCHED_AT + 1_000), PRIMARY)).toBe(true);
     expect(map.has(NAME)).toBe(false);
   });
 
   it('does not release without turn-capability evidence or without a receipt', () => {
     const map = latched();
-    expect(releaseDegradationLatchOnRecoveryProof(map, NAME, null, 'claude-cli')).toBe(false);
+    expect(releaseDegradationLatchOnRecoveryProof(map, NAME, null, PRIMARY)).toBe(false);
     expect(releaseDegradationLatchOnRecoveryProof(
       map,
       NAME,
-      { last_successful_turn_at: null, last_successful_turn_provider: 'claude-cli' },
-      'claude-cli',
+      {
+        last_successful_turn_at: null,
+        last_successful_turn_provider: 'claude-cli',
+        last_successful_turn_model: null,
+        last_successful_turn_session_current: true,
+      },
+      PRIMARY,
     )).toBe(false);
     expect(map.has(NAME)).toBe(true);
   });
 
-  it('does not release when the receipt provider is not the primary, or the primary is unknown', () => {
+  it('does not release when the receipt provider is not the primary, or the route is unknown', () => {
     const map = latched();
-    expect(releaseDegradationLatchOnRecoveryProof(map, NAME, receipt(NOW - 1, 'openai-api'), 'claude-cli')).toBe(false);
-    // primaryProviderId null = the fallback snapshot shows a window (even one
+    expect(releaseDegradationLatchOnRecoveryProof(map, NAME, receipt(NOW - 1, 'openai-api'), PRIMARY)).toBe(false);
+    // primaryRoute null = the fallback snapshot shows a window (even one
     // whose expiry has since passed) or fallback state is absent.
     expect(releaseDegradationLatchOnRecoveryProof(map, NAME, receipt(NOW - 1), null)).toBe(false);
     expect(releaseDegradationLatchOnRecoveryProof(
       map,
       NAME,
-      { last_successful_turn_at: NOW - 1, last_successful_turn_provider: null },
-      'claude-cli',
+      {
+        last_successful_turn_at: NOW - 1,
+        last_successful_turn_provider: null,
+        last_successful_turn_model: null,
+        last_successful_turn_session_current: true,
+      },
+      PRIMARY,
     )).toBe(false);
     expect(map.has(NAME)).toBe(true);
   });
@@ -186,13 +240,13 @@ describe('releaseDegradationLatchOnRecoveryProof', () => {
     const map = new Map<string, DegradationLatchEntry>([
       ['other-instance', { latchedAtMs: LATCHED_AT, reasons: new Set(['turn_capability_degraded']) }],
     ]);
-    expect(releaseDegradationLatchOnRecoveryProof(map, NAME, receipt(NOW - 1), 'claude-cli')).toBe(false);
+    expect(releaseDegradationLatchOnRecoveryProof(map, NAME, receipt(NOW - 1), PRIMARY)).toBe(false);
     expect(map.has('other-instance')).toBe(true);
   });
 
   it('release then silence-proof: a released instance no longer latches the silence reason', () => {
     const map = latched();
-    releaseDegradationLatchOnRecoveryProof(map, NAME, receipt(LATCHED_AT + 1_000), 'claude-cli');
+    releaseDegradationLatchOnRecoveryProof(map, NAME, receipt(LATCHED_AT + 1_000), PRIMARY);
     const reasons: string[] = [];
     const latchedAgain = addDegradationSilenceProof(reasons, map, NAME);
     expect(latchedAgain).toBe(false);

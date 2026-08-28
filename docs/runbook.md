@@ -395,6 +395,46 @@ Request errors such as both targets, neither target, unknown alias, unknown prof
 
 **Important:** `degraded` returns HTTP 200 — enrichment staleness is a warning, not an outage. Monitoring scripts must inspect the JSON `status` field, not just the HTTP status code. Retained turn-finalization retries, outstanding/corrupt recovery jobs, echo conflicts, and preserved crash-exhaustion history also degrade agent health even when WhatsApp remains connected.
 
+### Degradation silence latch (`degradation_silence_unproven`)
+
+Silence from child processes is not proof of recovery, so an instance that was
+recently degraded stays `degraded` with the `degradation_silence_unproven`
+status reason (and the matching degradation cause) until explicit recovery
+evidence arrives. The latch lifecycle, implemented in `src/core/health.ts`:
+
+- **Arm.** A latch arms only when a full-visibility evaluation (the normal
+  degraded path, which checks every reason source) observes real EARLY-path
+  reasons and its final verdict is `degraded`. Unhealthy verdicts and
+  late-computed-only reasons (schema/durability/retention/pending-polls/fact
+  export/late runtime status — all directly probed each poll) never arm.
+- **Advance.** Every later evaluation that observes real degradation reasons
+  advances the latch point and updates the latched reason set: a
+  full-visibility evaluation REPLACES the set with what it observed (a reason
+  it saw clear is not unproven silence); a short-circuit evaluation
+  (auth-failure / disconnected / runtime-unhealthy) UNIONS its observed
+  reasons in, never removing members it had no visibility to re-check.
+- **Release.** The latch releases only on a successful EXACT-primary-route
+  turn receipt: same provider AND same model as the primary route (an
+  explicit primary model requires the receipt to name that model; a
+  provider-default primary requires the receipt model to be absent too), from
+  the still-current session (`last_successful_turn_session_current === true`;
+  false or unknown fails closed), strictly newer than the latch point, and
+  only while no fallback window is live. Additionally every latched reason
+  must be turn-provable (`TURN_PROVABLE_STATUS_REASONS`: turn capability,
+  agent runtime, the connection classes, and `runtime.provider_fallback_active`
+  — a turn proves the turn pipeline, never enrichment/memory/durability).
+  Strictly-newer is the only temporal guard; a genuine receipt does not
+  expire by wall clock.
+- **Restart amnesia (known hazard, not a channel).** The latch is
+  process-lifetime, in-memory state: a process restart clears it without any
+  recovery proof. Nothing treats a restart as proof; the loss is a documented
+  hazard of the mechanism.
+- **Known open limit: Chat instances.** Chat instances expose no
+  turn-capability evidence, so a silence-latched Chat instance has NO release
+  channel and stays `degraded` until restart. A mixed-reason latch whose set
+  contains a non-turn-provable reason likewise holds until the underlying
+  condition is fixed and the process restarts.
+
 ### Watchdog provider-credential states
 
 This section covers the **per-host launchd health watchdog**
