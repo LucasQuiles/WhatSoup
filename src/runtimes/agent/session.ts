@@ -187,7 +187,19 @@ const OPENCODE_BACKGROUND_TASK_DELIVERY_GUIDANCE = [
  * `idle_watchdog` is routine housekeeping (the 30-min inactivity reap); `stalled_operation`
  * is a real hang that the supervisor cleaned up.
  */
-export type SessionTerminationReason = 'idle_watchdog' | 'stalled_operation';
+export type SessionTerminationReason = 'idle_watchdog' | 'stalled_operation' | 'suspend' | 'ended';
+
+/**
+ * POSIX numbers for the ONLY signals this manager ever sends intentionally,
+ * for matching a provider's graceful self-exit (`code = 128 + signum`,
+ * `signal = null`) back to the kill we issued (#3391). Local constants rather
+ * than `os.constants.signals` so the mapping is platform-stable and free of
+ * module-mock coupling.
+ */
+const INTENTIONAL_KILL_SIGNUM: Partial<Record<NodeJS.Signals, number>> = {
+  SIGTERM: 15,
+  SIGKILL: 9,
+};
 
 export interface SessionCrashInfo {
   exitCode: number | null;
@@ -2686,7 +2698,21 @@ export class SessionManager {
 
       // Consume the marker for this child even on the clean-shutdown path below, so a
       // stale reap intent can never be attributed to a later, unrelated exit.
-      const terminationReason = this.takeIntentionalKill(child, signal);
+      const terminationReason = this.takeIntentionalKill(child, signal, code);
+
+      // #3391: an intentional shutdown's SIGTERM whose exit lands while a
+      // CONCURRENT inbound has already re-set `active` (the eviction race —
+      // evictIdleSession removes the session from the map only after
+      // shutdown, precisely to let that inbound re-spawn) is still the clean
+      // path, never a crash. shutdown() owns the durable closure; here only
+      // the in-memory child state retires so the re-activation spawns fresh.
+      if (terminationReason === 'suspend' || terminationReason === 'ended') {
+        this.completeProviderTurn();
+        this.active = false;
+        this.child = null;
+        this.sessionId = null;
+        return;
+      }
 
       if (!this.active) {
         // Clean shutdown — the caller retains its local child reference while
@@ -3042,17 +3068,28 @@ export class SessionManager {
 
   /**
    * Consume the intent marker for an exiting child. Returns the reason only when the exit
-   * matches the kill we issued — a different child, or a different signal than the one we
-   * sent, means the process died of something else and must still be treated as a crash.
+   * matches the kill we issued — a different child, or a termination that matches neither
+   * the signal we sent nor its graceful numeric form, means the process died of something
+   * else and must still be treated as a crash.
+   *
+   * #3391: a provider can CATCH the signal and gracefully self-exit `code =
+   * 128 + signum, signal = null` (claude-cli does this for SIGTERM → 143), so
+   * the match accepts either representation of the exact kill we issued.
    */
   private takeIntentionalKill(
     child: ReturnType<typeof spawn>,
     signal: NodeJS.Signals | null,
+    code: number | null,
   ): SessionTerminationReason | undefined {
     const marker = this.intentionalKill;
     if (marker === null || marker.child !== child) return undefined;
     this.intentionalKill = null;
-    return marker.signal === signal ? marker.reason : undefined;
+    if (marker.signal === signal) return marker.reason;
+    const signum = INTENTIONAL_KILL_SIGNUM[marker.signal];
+    if (signal === null && code !== null && signum !== undefined && code === 128 + signum) {
+      return marker.reason;
+    }
+    return undefined;
   }
 
   /**
@@ -3730,8 +3767,13 @@ export class SessionManager {
         // misclassified as a crash, inflating crash/heal telemetry and firing a
         // false onCrash + unexpected-exit notification (#1870). A non-zero exit
         // code still counts as an error even with a result, as it is a stronger
-        // failure signal than a teardown SIGTERM.
-        const exitedWithError = (code !== 0 && code !== null) || (signal !== null && !deliveredTerminalResult);
+        // failure signal than a teardown SIGTERM. #3391: the teardown SIGTERM
+        // can ALSO manifest as a graceful self-exit `code=143, signal=null`
+        // (claude-cli catches the signal) — the same delivered-result rule
+        // applies to that numeric representation.
+        const signalShapedExit = signal !== null || code === 143;
+        const exitedWithError = (code !== 0 && code !== null && code !== 143)
+          || (signalShapedExit && !deliveredTerminalResult);
         const missingTerminalResult = code === 0 && signal === null && !deliveredTerminalResult;
         if (exitedWithError || missingTerminalResult) {
           this.completeProviderTurn(providerTurnToken);
@@ -4059,6 +4101,11 @@ export class SessionManager {
     if (this.child !== null) {
       const terminatedSessionId = this.sessionId;
       const child = this.child;
+      // #3391: parity with every other intentional-kill path. `active = false`
+      // alone is NOT a durable suppression — a concurrent inbound can re-set
+      // it mid-kill (the eviction race), and claude-cli's graceful SIGTERM
+      // self-exit (code 143, signal null) then read as an unexpected crash.
+      this.markIntentionalKill(child, 'SIGTERM', suspend ? 'suspend' : 'ended');
       try {
         const treeCleanup = this.killChildTree(child, 'SIGTERM');
         this.armShutdownKillTimer(child);

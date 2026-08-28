@@ -7773,3 +7773,83 @@ describe('session.ts uncovered-branch coverage', () => {
     expect(sm.getStatus()).toMatchObject({ active: false });
   });
 });
+
+// #3391 — idle-suspend SIGTERM self-exits (code 143, signal null) must be
+// classified as intentional even when a concurrent inbound re-activated the
+// session mid-shutdown (the eviction race), while an UNMARKED 143 from a
+// child nothing killed on purpose must still alarm.
+describe('suspend SIGTERM graceful self-exit (#3391)', () => {
+  let mockChild: MockChild;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockChild = makeMockChild(31391);
+    (spawn as ReturnType<typeof vi.fn>).mockReturnValue(mockChild);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('a suspend whose child self-exits 143 during a concurrent re-activation is intentional — no crash notice, no onCrash', async () => {
+    const db = makeDb();
+    const { messenger, sentMessages } = makeMessenger();
+    const notifyUser = vi.fn();
+    const onCrash = vi.fn();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(), notifyUser, onCrash });
+    await sm.spawnSession();
+
+    // Idle-TTL sweep suspends; claude-cli catches the SIGTERM and gracefully
+    // self-exits code=143/signal=null. Before the exit lands, a concurrent
+    // inbound re-activates the session (evictIdleSession removes it from the
+    // session map only AFTER shutdown, exactly to allow this).
+    const shutdownDone = sm.shutdown(true);
+    (sm as unknown as { active: boolean }).active = true;
+    mockChild._exitCb?.(143, null);
+    await shutdownDone;
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(onCrash).not.toHaveBeenCalled();
+    expect(notifyUser).not.toHaveBeenCalled();
+    expect(sentMessages.filter((m) => m.text.includes('session ended'))).toHaveLength(0);
+    // The lane is re-spawnable: the dead child is released and the session is
+    // not left claiming an active provider.
+    expect(sm.getStatus()).toMatchObject({ active: false, pid: null });
+  });
+
+  it('an /new (ended) shutdown racing the same self-exit is equally intentional', async () => {
+    const db = makeDb();
+    const { messenger, sentMessages } = makeMessenger();
+    const onCrash = vi.fn();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(), onCrash });
+    await sm.spawnSession();
+
+    const shutdownDone = sm.shutdown(false);
+    (sm as unknown as { active: boolean }).active = true;
+    mockChild._exitCb?.(143, null);
+    await shutdownDone;
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(onCrash).not.toHaveBeenCalled();
+    expect(sentMessages.filter((m) => m.text.includes('session ended'))).toHaveLength(0);
+  });
+
+  it('an UNMARKED code-143 exit on an active session is still an untagged crash', async () => {
+    const db = makeDb();
+    const { messenger, sentMessages } = makeMessenger();
+    const onCrash = vi.fn();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(), onCrash });
+    await sm.spawnSession();
+
+    // Killed by something else (operator, systemd) — nothing marked this kill.
+    mockChild._exitCb?.(143, null);
+    await vi.waitFor(() => expect(onCrash).toHaveBeenCalledTimes(1));
+    expect(onCrash.mock.calls[0][0]).toMatchObject({ exitCode: 143, terminationReason: undefined });
+    await vi.waitFor(() => {
+      expect(sentMessages.filter((m) => m.text.includes('exited with code 143'))).toHaveLength(1);
+    });
+  });
+});
