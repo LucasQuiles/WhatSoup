@@ -21,6 +21,7 @@ import {
   type OutboundQueuePoisonHealth,
 } from './outbound-queue-poison-registry.ts';
 import { GLOBAL_CONVERSATION_KEY } from '../../core/conversation-key.ts';
+import { attemptOutcomeToken, classifyTurnLane, runtimeLifecycleEmitter, type LifecycleEmitInput } from '../../core/observability/lifecycle-emission.ts';
 import type { SessionManager } from './session.ts';
 import { config } from '../../config.ts';
 import { collectRuntimeTurnAnswerEvidence } from './runtime-turn-finalization.ts';
@@ -722,6 +723,32 @@ createRuntimeTurnForDispatch(args: {
  * admission check. Every other caller (normal live turns) omits it, so
  * their admission predicate is unchanged.
  */
+/**
+ * FLOS Stage 1 (plan §3): emit one turn-scoped lifecycle event. Lane and
+ * `trigger_occurrence_id` derive from the #2566 synthetic message id; the
+ * work_id is the source message id so occurrence-layer and turn-layer
+ * events join into one chain. emit() is phase-gated and never throws.
+ */
+private emitTurnLifecyclePhase(
+  context: RuntimeTurnContext,
+  phase: 'admitted' | 'acknowledged' | 'terminal_result' | 'finalized',
+  attrs?: LifecycleEmitInput['attrs'],
+): void {
+  const cls = classifyTurnLane(context.replay?.sourceMessageId);
+  runtimeLifecycleEmitter().emit({
+    lane: cls.lane,
+    work_id: context.replay?.sourceMessageId ?? context.identity.logicalTurnId,
+    phase,
+    correlation: {
+      logical_turn_id: context.identity.logicalTurnId,
+      generation: context.identity.generation,
+      ...(context.identity.inboundSeq === null ? {} : { inbound_seq: context.identity.inboundSeq }),
+      ...(cls.lane === 'L-SCH' ? { trigger_occurrence_id: cls.trigger_occurrence_id } : {}),
+    },
+    ...(attrs === undefined ? {} : { attrs }),
+  });
+}
+
 beginRuntimeTurnEvidence(
   queue: IOutboundQueue,
   context: RuntimeTurnContext,
@@ -749,6 +776,14 @@ beginRuntimeTurnEvidence(
     throw new Error('Runtime turn scope is blocked by terminal-finalization recovery state');
   }
   queue.beginTurnEvidence(context.identity.logicalTurnId);
+  // FLOS Stage 1: the turn passed every admission gate above. A scheduled
+  // turn was already admitted+dispatched at the occurrence layer, so this
+  // seam is the turn chain ACKNOWLEDGING the dispatched work; an interactive
+  // turn enters the system here and is ADMITTED.
+  this.emitTurnLifecyclePhase(
+    context,
+    classifyTurnLane(context.replay?.sourceMessageId).lane === 'L-SCH' ? 'acknowledged' : 'admitted',
+  );
 }
 
 /**
@@ -932,6 +967,18 @@ finalizeRuntimeTurnContext(args: {
     }
   };
   void finalization.then(release, release);
+  // FLOS Stage 1: a provider result event means a terminal result existed
+  // for this attempt; `finalized` is emitted only when finalization actually
+  // settles (a rejected finalization leaves the chain honestly unfinalized).
+  if (args.event !== undefined) {
+    this.emitTurnLifecyclePhase(args.context, 'terminal_result', {
+      attempt_outcome: attemptOutcomeToken(args.attemptOutcome.kind),
+    });
+  }
+  void finalization.then(
+    () => { this.emitTurnLifecyclePhase(args.context, 'finalized'); },
+    () => {},
+  );
   return finalization;
 }
 
