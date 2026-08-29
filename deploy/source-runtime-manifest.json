@@ -31,11 +31,13 @@
     },
     {
       "path": "scripts/restart-safety-preflight.ts",
-      "sha256": "4ab7c9424fa58f5764a7ee0a47a66b28c3bc82cafa6c148eb855829f4c967bf7",
+      "sha256": "39ee2172976abad5b6c0695c07c2d5061066b680e21df4ac82b0d6cbe2cdfe73",
       "mustContain": [
         "safeNonterminal",
         "missing_database",
-        "initial_database_create"
+        "initial_database_create",
+        "live_turns_in_flight",
+        "LIVE_TURN_WINDOW_SECONDS"
       ],
       "importGraph": true
     },
