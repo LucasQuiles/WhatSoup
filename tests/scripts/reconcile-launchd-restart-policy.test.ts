@@ -54,4 +54,79 @@ describe('reconcile-launchd-restart-policy CLI', () => {
     expect(reconcile).toHaveBeenLastCalledWith('agent-one', { dryRun: false });
     expect(stdout).toHaveBeenCalledWith(expect.stringContaining('com.whatsoup.agent-one'));
   });
+
+  it('prints governed-env drift by key and digest only', async () => {
+    const reconcile = vi.fn().mockResolvedValue({
+      label: 'com.whatsoup.agent-one',
+      plistPath: '/safe/agent-one.plist',
+      priorPlistExisted: true,
+      dryRun: true,
+      governedEnvDrift: {
+        comparable: true,
+        drift: [
+          { key: 'PATH', state: 'mismatch', expectedDigest: 'a'.repeat(64), observedDigest: 'b'.repeat(64) },
+          { key: 'CLAUDE_CONFIG_DIR', state: 'missing', expectedDigest: 'c'.repeat(64), observedDigest: null },
+        ],
+      },
+    });
+    const stdout = vi.fn();
+
+    await expect(runReconcileLaunchdRestartPolicy(['--instance', 'agent-one'], {
+      platform: 'darwin',
+      reconcile,
+      stdout,
+      stderr: vi.fn(),
+    })).resolves.toBe(0);
+
+    const lines = stdout.mock.calls.map((call) => String(call[0]));
+    expect(lines.some((line) => line.includes('governed env drift: PATH mismatch'))).toBe(true);
+    expect(lines.some((line) => line.includes('governed env drift: CLAUDE_CONFIG_DIR missing'))).toBe(true);
+    expect(lines.some((line) => line.includes('a'.repeat(64).slice(0, 12)))).toBe(true);
+  });
+
+  it('reports an explicit all-clear when governed keys match', async () => {
+    const reconcile = vi.fn().mockResolvedValue({
+      label: 'com.whatsoup.agent-one',
+      plistPath: '/safe/agent-one.plist',
+      priorPlistExisted: true,
+      dryRun: true,
+      governedEnvDrift: { comparable: true, drift: [] },
+    });
+    const stdout = vi.fn();
+
+    await runReconcileLaunchdRestartPolicy(['--instance', 'agent-one'], {
+      platform: 'darwin',
+      reconcile,
+      stdout,
+      stderr: vi.fn(),
+    });
+
+    const lines = stdout.mock.calls.map((call) => String(call[0]));
+    expect(lines.some((line) => line.includes('governed env: no drift'))).toBe(true);
+  });
+
+  it('surfaces an unparseable installed EnvironmentVariables dict as fail-closed drift', async () => {
+    const reconcile = vi.fn().mockResolvedValue({
+      label: 'com.whatsoup.agent-one',
+      plistPath: '/safe/agent-one.plist',
+      priorPlistExisted: true,
+      dryRun: true,
+      governedEnvDrift: {
+        comparable: false,
+        reason: 'environment-variables-unparseable',
+        drift: [],
+      },
+    });
+    const stdout = vi.fn();
+
+    await runReconcileLaunchdRestartPolicy(['--instance', 'agent-one'], {
+      platform: 'darwin',
+      reconcile,
+      stdout,
+      stderr: vi.fn(),
+    });
+
+    const lines = stdout.mock.calls.map((call) => String(call[0]));
+    expect(lines.some((line) => line.includes('unparseable'))).toBe(true);
+  });
 });
