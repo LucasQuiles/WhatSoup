@@ -730,8 +730,28 @@ export class OutboundQueue implements IOutboundQueue {
 
   /** Aggregation buffer for streaming text deltas — prevents per-token messages from streaming providers. */
   private streamBufferParts: BufferedStreamPart[] = [];
+  /**
+   * Path C recovery holding pen. `discardPreToolAssistantText()` moves buffered
+   * pre-tool text HERE rather than destroying it: the text is USUALLY narration
+   * ("Let me check…") that later output supersedes, but if the turn ends without
+   * ever delivering visible text, this WAS the user-owed reply. Cleared the
+   * instant any visible text reaches the user (markVisibleTextDelivered); flushed
+   * by endTurn() only when the whole turn otherwise produced nothing.
+   */
+  private provisionalPreToolDiscard: BufferedStreamPart[] = [];
   /** Timer for flushing aggregated streaming text after a pause. */
   private streamTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * Mark that visible text has reached the user this turn. Setting the flag AND
+   * dropping any provisionally-discarded pre-tool text is a single invariant:
+   * once the user has seen output, deferred narration is moot and must never be
+   * resurrected by endTurn()'s Path C recovery.
+   */
+  private markVisibleTextDelivered(): void {
+    this.turnHasVisibleText = true;
+    this.provisionalPreToolDiscard = [];
+  }
 
   /** Enqueue a text message for immediate sending (after pacing). */
   enqueueText(text: string, role: OutboundMessageRole = 'answer'): void {
@@ -740,7 +760,7 @@ export class OutboundQueue implements IOutboundQueue {
     const attribution = this.snapshotAttribution(role);
     // Flush any pending streaming buffer first to maintain ordering
     this.flushStreamBuffer();
-    this.turnHasVisibleText = true;
+    this.markVisibleTextDelivered();
     this.enqueuePreparedText(text, attribution);
   }
 
@@ -818,7 +838,7 @@ export class OutboundQueue implements IOutboundQueue {
       const { text: _firstText, onCommit: _firstOnCommit, ...attribution } = group[0];
       const text = group.map((part) => part.text).join('');
       if (text.trim() !== '') {
-        this.turnHasVisibleText = true;
+        this.markVisibleTextDelivered();
         this.enqueuePreparedText(text, attribution);
         for (const part of group) part.onCommit?.();
       }
@@ -847,10 +867,17 @@ export class OutboundQueue implements IOutboundQueue {
     }
     const partCount = this.streamBufferParts.length;
     const characterCount = this.streamBufferParts.reduce((total, part) => total + part.text.length, 0);
+    // Path C: DEFER, do not destroy. Buffered pre-tool text is almost always
+    // narration ("Let me check…") superseded by later output, but if the turn
+    // ends without ever delivering visible text, this text WAS the user-owed
+    // reply. Hold it; markVisibleTextDelivered() drops it the moment real output
+    // reaches the user, and endTurn() flushes it iff nothing else did (keeping
+    // the NO_REPLY guarantee honest instead of silently dropping the answer).
+    this.provisionalPreToolDiscard.push(...this.streamBufferParts);
     this.streamBufferParts = [];
     log.info(
       { chatJid: this.deliveryJid, partCount, characterCount },
-      'minimal mode suppressed buffered assistant text at tool boundary',
+      'minimal mode deferred buffered assistant text at tool boundary',
     );
   }
 
@@ -1189,6 +1216,7 @@ export class OutboundQueue implements IOutboundQueue {
     if (this.toolMaxAgeTimer !== null) { clearTimeout(this.toolMaxAgeTimer); this.toolMaxAgeTimer = null; }
     if (this.streamTimer !== null) { clearTimeout(this.streamTimer); this.streamTimer = null; }
     this.streamBufferParts = [];
+    this.provisionalPreToolDiscard = [];
     this.toolBuffer = [];
     this.friendlyProgressSent.clear();
     this.recentProgressTextAt.clear();
@@ -1247,6 +1275,7 @@ export class OutboundQueue implements IOutboundQueue {
     this.friendlyProgressSent.clear();
     this.recentProgressTextAt.clear();
     this.turnHasVisibleText = false;
+    this.provisionalPreToolDiscard = [];
   }
 
   private async atStableBoundary<T>(complete: () => T | Promise<T>): Promise<T> {
@@ -1334,6 +1363,23 @@ export class OutboundQueue implements IOutboundQueue {
    */
   endTurn(): void {
     this.flushStreamBuffer();
+    // Path C recovery: the turn is ending. If it never delivered visible text
+    // yet we deferred pre-tool buffered text, that text WAS the user-owed reply —
+    // flush it now rather than dropping it into silence. Route it back through
+    // the streaming buffer so grouping, attribution, evidence, and onCommit all
+    // apply exactly as a normal flush would.
+    if (!this.turnHasVisibleText && this.provisionalPreToolDiscard.length > 0) {
+      const recovered = this.provisionalPreToolDiscard;
+      this.provisionalPreToolDiscard = [];
+      const characterCount = recovered.reduce((total, part) => total + part.text.length, 0);
+      this.streamBufferParts.push(...recovered);
+      this.flushStreamBuffer();
+      log.warn(
+        { chatJid: this.deliveryJid, parts: recovered.length, characterCount },
+        'minimal mode recovered deferred pre-tool text as terminal reply (path C)',
+      );
+    }
+    this.provisionalPreToolDiscard = [];
     this.stopTyping();
     // PR-E: reset the per-turn status-cap state on the UNCONDITIONAL turn-end
     // choke (incl. early-break provider-failure branches that never reach
@@ -1385,7 +1431,7 @@ export class OutboundQueue implements IOutboundQueue {
       if (windowState.noticeSentAt === undefined) {
         windowState.noticeSentAt = now;
         this.flushStreamBuffer();
-        this.turnHasVisibleText = true;
+        this.markVisibleTextDelivered();
         this.enqueuePreparedText(STATUS_CAP_NOTICE, attribution);
       }
       return true;
@@ -1397,7 +1443,7 @@ export class OutboundQueue implements IOutboundQueue {
         this.statusCapNoticeSent = true;
         windowState.noticeSentAt ??= now;
         this.flushStreamBuffer();
-        this.turnHasVisibleText = true;
+        this.markVisibleTextDelivered();
         this.enqueuePreparedText(STATUS_CAP_NOTICE, attribution);
       }
       return true;
@@ -1445,7 +1491,7 @@ export class OutboundQueue implements IOutboundQueue {
     for (const batch of batches) {
       if (this.statusBudgetExhausted(batch.attribution)) continue;
       this.flushStreamBuffer();
-      this.turnHasVisibleText = true;
+      this.markVisibleTextDelivered();
       this.enqueuePreparedText(this.renderToolUpdates(batch.updates), batch.attribution);
     }
   }
