@@ -179,7 +179,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
-      "sha256": "9024170d82105c780ac2f655db2ed07f2e9f24e75819e098dc12abc30d35cfbc",
+      "sha256": "558f4d2e9097a5d1516332f8720652c372221a7068e681946ea5c013a3032b07",
       "mustContain": [
         "append_bounded_jsonl",
         "q_loop_state_root",
@@ -355,19 +355,6 @@
       ]
     },
     {
-      "path": "deploy/scripts/lib/bounded_jsonl.py",
-      "sha256": "b1f78745efcc214fb3b220d6cbadbca8b1851841c4f7c028be88e74e4f1f48b3",
-      "mustContain": [
-        "append_bounded_jsonl",
-        "require_bounded_jsonl_commit",
-        ".bounded-jsonl.lock",
-        ".bounded-jsonl.compact.tmp",
-        "_replace_relative",
-        "compact_replace",
-        "O_NOFOLLOW"
-      ]
-    },
-    {
       "path": "deploy/scripts/lib/bot_errors_daily_health.py",
       "sha256": "45b9b3e23ffda454a8315c1ec80ffc81c691e8ef37f3b20cb3386eaaa2af5bea",
       "mustContain": [
@@ -409,6 +396,19 @@
         "roster_digest",
         "roster_inventory",
         "load_roster"
+      ]
+    },
+    {
+      "path": "deploy/scripts/lib/bounded_jsonl.py",
+      "sha256": "b1f78745efcc214fb3b220d6cbadbca8b1851841c4f7c028be88e74e4f1f48b3",
+      "mustContain": [
+        "append_bounded_jsonl",
+        "require_bounded_jsonl_commit",
+        ".bounded-jsonl.lock",
+        ".bounded-jsonl.compact.tmp",
+        "_replace_relative",
+        "compact_replace",
+        "O_NOFOLLOW"
       ]
     },
     {
@@ -461,16 +461,6 @@
       ]
     },
     {
-      "path": "deploy/scripts/lib/observation_contract.py",
-      "sha256": "dee2986707c6772cb20b96bc8256cfbe28c62ff7714f7d4b2795f6cb56be74c6",
-      "mustContain": [
-        "contract_digest",
-        "build_contract",
-        "project_outcome",
-        "ObservationContractError"
-      ]
-    },
-    {
       "path": "deploy/scripts/lib/health_reader.py",
       "sha256": "dd3350e5bcea11bc7ecc405dd9bdba957cb4d5bc70bc94f519f114c4508be59d",
       "mustContain": [
@@ -480,14 +470,13 @@
       ]
     },
     {
-      "path": "deploy/scripts/reply-guarantee-observer.py",
-      "sha256": "cd4d10c51bb85c0ccf083764cdd8f4a9a2c2cba1c413f5ca3fe77a065221cb09",
+      "path": "deploy/scripts/lib/observation_contract.py",
+      "sha256": "dee2986707c6772cb20b96bc8256cfbe28c62ff7714f7d4b2795f6cb56be74c6",
       "mustContain": [
-        "sqlite-uri-mode-ro",
-        "reply-guarantee-active-breach",
-        "reply-guarantee-recovery-debt",
-        "reply-guarantee-observer",
-        "broad failed-row replay is unsafe"
+        "contract_digest",
+        "build_contract",
+        "project_outcome",
+        "ObservationContractError"
       ]
     },
     {
@@ -566,6 +555,26 @@
         "def cmd_render",
         "def cmd_verify",
         "find_placeholders"
+      ]
+    },
+    {
+      "path": "deploy/scripts/reply-guarantee-observer.py",
+      "sha256": "cd4d10c51bb85c0ccf083764cdd8f4a9a2c2cba1c413f5ca3fe77a065221cb09",
+      "mustContain": [
+        "sqlite-uri-mode-ro",
+        "reply-guarantee-active-breach",
+        "reply-guarantee-recovery-debt",
+        "reply-guarantee-observer",
+        "broad failed-row replay is unsafe"
+      ]
+    },
+    {
+      "path": "deploy/scripts/whatsoup-db-snapshot.py",
+      "sha256": "e7d0cf49032deddc3fb29314f207b592eca6263bb0eb7ec6ea1cfe137940b657",
+      "mustContain": [
+        "integrity_check",
+        "mode=ro",
+        "rehearse"
       ]
     },
     {
