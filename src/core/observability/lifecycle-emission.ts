@@ -106,8 +106,9 @@ export function createLifecycleEmitter(options: LifecycleEmitterOptions): Lifecy
     try {
       store = createLifecycleEventStore({ path: options.storePath, nowEpochMs });
     } catch {
-      // Observer-must-not-break-runtime: an unopenable store disables
-      // emission for this process instead of throwing into the caller.
+      // by design — an unopenable store disables emission for this process
+      // instead of throwing into the runtime hook site (observer must never
+      // break the runtime).
       storeBroken = true;
     }
     return store;
@@ -138,6 +139,8 @@ export function createLifecycleEmitter(options: LifecycleEmitterOptions): Lifecy
         };
         return target.append(event).accepted;
       } catch {
+        // by design — the observer must never break the runtime: any append
+        // fault is reported as a boolean false to the hook site, never thrown.
         return false;
       }
     },
@@ -146,7 +149,8 @@ export function createLifecycleEmitter(options: LifecycleEmitterOptions): Lifecy
       try {
         store?.close();
       } catch {
-        // Closing a broken store must not throw either.
+        // by design — closing an already-broken store must never throw into
+        // runtime shutdown paths.
       }
       store = null;
     },
@@ -182,6 +186,9 @@ export function initializeRuntimeLifecycleEmitter(build: () => LifecycleEmitterO
     try {
       runtimeEmitter = createLifecycleEmitter(build());
     } catch {
+      // by design — a config surface this module cannot read (e.g. a partial
+      // test config) latches the singleton INERT instead of throwing into
+      // the composition caller.
       runtimeEmitter = createLifecycleEmitter(INERT_OPTIONS);
     }
   }
