@@ -15,6 +15,17 @@
  * identity for subscription purposes, so it must read as a mismatch.
  * Dependency-light (Node builtins only) so both the config validator and the
  * runtime can share it.
+ *
+ * Deliberately NOT built on encodeLifecycleTuple (src/core/observability/
+ * lifecycle-digest.ts, #3405): that length-prefixed encoding exists to make
+ * ANY string content unambiguous for keyed lifecycle digests, whereas an
+ * account identity field carrying a control character is illegitimate input
+ * to refuse, not data to canonicalize — the refusal below gives this v1
+ * canonical string the same injectivity without coupling a dependency-light
+ * lib module to the observability domain (whose keyed-HMAC half is also not
+ * yet provisionable). The `/v1` version tag keeps convergence on a shared
+ * encoder open as a v2: new canonical input, fresh digest capture, no
+ * ratified rows to migrate.
  */
 import { createHash } from 'node:crypto';
 import { isNonEmptyString } from './type-guards.ts';
