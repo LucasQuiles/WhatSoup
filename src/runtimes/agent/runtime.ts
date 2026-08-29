@@ -10125,6 +10125,18 @@ export class AgentRuntime implements Runtime {
             if (!args.session.getStatus().active) return;
           }
         }
+        // #3398: the post-turn gate armed by the pre-crash turn's completed
+        // result survives the crash — no new user message has arrived to clear
+        // it. Left in place, it suppresses the continuation reply as
+        // 'post-turn gate: suppressed phantom assistant_text', silently
+        // dropping a user-owed reply. Clear the per-chat entry (and, outside
+        // per_chat scope, the shared entry gating keys on) before dispatching
+        // the continuation. Trade (reviewed): if a queued user turn completed
+        // inside the awaits above, its legitimately armed gate is wiped too —
+        // worst case one leaked phantom line, chosen over silently dropping
+        // the user-owed continuation reply.
+        this.postTurnGate.delete(activeMapKey);
+        if (this.sessionScope !== 'per_chat') this.postTurnGate.delete(GLOBAL_TOOL_SCOPE_KEY);
         continuationLease = this.markSystemTurn(
           args.session,
           activeMapKey,
@@ -10132,7 +10144,7 @@ export class AgentRuntime implements Runtime {
           args.chatJid,
         );
         await this.dispatchSystemTurn(
-          args.session, '[System: session resumed after crash ��� continue where you left off]',
+          args.session, '[System: session resumed after crash — continue where you left off]',
           continuationLease!, publishRespawnRecovery,
         );
         log.info({ mapKey: activeMapKey }, 'sent continuation turn after auto-respawn');
