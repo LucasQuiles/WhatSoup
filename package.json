@@ -86,6 +86,8 @@
     "guard:insecure-tempfile": "bash scripts/run-with-pinned-node.sh scripts/check-insecure-tempfile.ts",
     "guard:zero-byte-tracked": "bash scripts/run-with-pinned-node.sh scripts/check-zero-byte-tracked.ts",
     "guard:no-destructive-git": "bash scripts/run-with-pinned-node.sh scripts/no-destructive-git-guard.ts",
+    "guard:png-estate": "bash scripts/run-with-pinned-node.sh scripts/png-estate-guard.ts",
+    "guard:png-estate:staged": "bash scripts/run-with-pinned-node.sh scripts/png-estate-guard.ts --staged",
     "guard:baseline-growth": "bash scripts/run-with-pinned-node.sh scripts/baseline-growth-guard.ts",
     "guard:fault-taxonomy-coverage": "bash scripts/run-with-pinned-node.sh scripts/fault-taxonomy-source-coverage-guard.ts",
     "guard:catch-ratchet": "bash scripts/run-with-pinned-node.sh scripts/generate-catch-ratchet.mjs --check",
