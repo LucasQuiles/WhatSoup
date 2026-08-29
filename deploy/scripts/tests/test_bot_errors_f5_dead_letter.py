@@ -76,6 +76,10 @@ _mod = _load_module()
 # F5-a: next_backoff returns None at the cap
 # ---------------------------------------------------------------------------
 
+# These tests exercise email-fallback MECHANICS under a pytest tmp root. The
+# provenance gate refuses email for any dispatcher rooted in a test tmp dir by
+# design (the 2026-08-28 leak's tell), so it is disabled here explicitly; the
+# gate itself is covered by test_bot_errors_email_fallback_test_provenance.py.
 class TestNextBackoffCap:
     def test_returns_int_below_cap(self):
         mod = _load_module({"BOT_ERRORS_DELIVERY_MAX_ATTEMPTS": "5"})
@@ -318,6 +322,7 @@ class TestEmailFallbackUnavailableRecorded:
         event_path.chmod(0o600)
 
         with patch.object(mod, "send_whatsapp", side_effect=RuntimeError("send fails")), \
+         patch.object(mod, "email_fallback_blocked_reason", return_value=None), \
              patch.object(mod, "EMAIL_FALLBACK", "/nonexistent/email-fallback-xyz.sh"):
             ok, detail = mod.process_one(event_path, paths)
 
@@ -367,6 +372,7 @@ class TestEmailFallbackUnavailableRecorded:
         event_path.chmod(0o600)
 
         with patch.object(mod, "send_whatsapp", side_effect=RuntimeError("send fails")), \
+         patch.object(mod, "email_fallback_blocked_reason", return_value=None), \
              patch.object(mod, "EMAIL_FALLBACK", str(fallback)):
             ok, detail = mod.process_one(event_path, paths)
 

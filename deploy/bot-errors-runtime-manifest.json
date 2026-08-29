@@ -36,7 +36,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "eb96eb50bdb957a7644a7b084f829352cc108da6e69e207ec1b8e148c811e81d",
+      "sha256": "f14218124068b651ad8eef7c87724d06213a96b10c74de93609fc4abb67e23f9",
       "mustContain": [
         "append_bounded_jsonl",
         "append_private_jsonl",
@@ -179,7 +179,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
-      "sha256": "558f4d2e9097a5d1516332f8720652c372221a7068e681946ea5c013a3032b07",
+      "sha256": "343be559cfa88407bc7a1cee8161c8da3a6c37ee24bf551774ff6664bff58e8e",
       "mustContain": [
         "append_bounded_jsonl",
         "q_loop_state_root",
@@ -400,7 +400,7 @@
     },
     {
       "path": "deploy/scripts/lib/bounded_jsonl.py",
-      "sha256": "b1f78745efcc214fb3b220d6cbadbca8b1851841c4f7c028be88e74e4f1f48b3",
+      "sha256": "0d0dcd42b9c4d5d5e7920404d3cd8a2a5f2e15e95e3464ca3b3b7f127b30e807",
       "mustContain": [
         "append_bounded_jsonl",
         "require_bounded_jsonl_commit",

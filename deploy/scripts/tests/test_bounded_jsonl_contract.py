@@ -225,7 +225,9 @@ def _exercise_nonstandard_historical_constant(
     original = f'{{"id":"legacy","value":{constant}}}\n'.encode("utf-8")
     target.write_bytes(original)
 
-    result = _append(module, target, {"id": "incoming"}, 40)
+    # 32 (not 40): the append must cross the TRIM_HIGH_WATER_RATIO threshold
+    # so the destructive-compaction path is actually exercised under hysteresis.
+    result = _append(module, target, {"id": "incoming"}, 32)
     temp = tmp_path / ".diagnostic.jsonl.bounded-jsonl.compact.tmp"
     return result, target, original, temp
 
@@ -338,3 +340,24 @@ def test_require_commit_error_is_content_free(tmp_path: Path) -> None:
     assert "secret-path" not in message
     assert "secret-record" not in message
     assert raised.value.__cause__ is None
+
+
+def test_at_cap_appends_amortize_compaction_with_high_water_hysteresis(tmp_path: Path) -> None:
+    # production incident (2026-08-28): a JSONL pinned at max_bytes
+    # compacted on EVERY append (full read + parse + rewrite per record),
+    # stalling outbox drains. Hysteresis: plain-append until the high-water
+    # ratio, then one compaction back under max_bytes — the rewrite amortizes
+    # over ~0.25 * max_bytes of growth instead of firing per append.
+    module = _module()
+    target = tmp_path / "diagnostic.jsonl"
+    probe = line_bytes({"n": 0, "pad": "x" * 80})
+    max_bytes = len(probe) * 10
+    methods = []
+    for n in range(30):
+        result = _append(module, target, {"n": n, "pad": "x" * 80}, max_bytes)
+        assert result.status == "committed"
+        methods.append(result.method)
+        assert target.stat().st_size <= int(max_bytes * module.TRIM_HIGH_WATER_RATIO) + len(probe)
+    compactions = methods.count("compact_replace")
+    assert 1 <= compactions <= 6, methods
+    assert methods.count("append") >= 20, methods

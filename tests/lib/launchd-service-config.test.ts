@@ -5,6 +5,8 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
+  LaunchdRenderConfigError,
+  assertValidLaunchdPlistRenderOptions,
   extractLaunchdPlistRenderOptions,
   validateLaunchdServiceConfig,
 } from '../../src/lib/launchd-service-config.ts';
@@ -63,6 +65,42 @@ describe('validateLaunchdServiceConfig', () => {
     const pathPrepend = Array.from({ length: 17 }, (_, i) => `/opt/bin-${i}`);
     const error = validateLaunchdServiceConfig({ service: { pathPrepend } });
     expect(error).toMatchObject({ field: 'service.pathPrepend' });
+  });
+
+  it('caps each pathPrepend entry at 4096 characters (PATH_MAX class)', () => {
+    const atCap = '/' + 'a'.repeat(4095);
+    const overCap = '/' + 'a'.repeat(4096);
+    expect(validateLaunchdServiceConfig({ service: { pathPrepend: [atCap] } })).toBeNull();
+    expect(validateLaunchdServiceConfig({ service: { pathPrepend: [overCap] } })).toMatchObject({
+      field: 'service.pathPrepend[0]',
+    });
+  });
+
+  it('caps claudeConfigDir at 4096 characters (PATH_MAX class)', () => {
+    const atCap = '/' + 'a'.repeat(4095);
+    const overCap = '/' + 'a'.repeat(4096);
+    expect(validateLaunchdServiceConfig({ service: { claudeConfigDir: atCap } })).toBeNull();
+    expect(validateLaunchdServiceConfig({ service: { claudeConfigDir: overCap } })).toMatchObject({
+      field: 'service.claudeConfigDir',
+    });
+  });
+
+  it('keeps a per-key null rejected (unset the whole block with service: null instead)', () => {
+    expect(validateLaunchdServiceConfig({ service: null })).toBeNull();
+    expect(validateLaunchdServiceConfig({
+      service: { claudeConfigDir: null, pathPrepend: ['/opt/service-bin'] },
+    })).toMatchObject({ field: 'service.claudeConfigDir' });
+  });
+});
+
+describe('LaunchdRenderConfigError marker', () => {
+  it('is thrown by extract and assert so callers can print the message verbatim', () => {
+    expect(() => extractLaunchdPlistRenderOptions({
+      service: { claudeConfigDir: 'relative/root' },
+    })).toThrow(LaunchdRenderConfigError);
+    expect(() => assertValidLaunchdPlistRenderOptions({
+      claudeConfigDir: 'relative/root',
+    })).toThrow(LaunchdRenderConfigError);
   });
 });
 
