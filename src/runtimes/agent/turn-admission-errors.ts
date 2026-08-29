@@ -40,25 +40,25 @@ export class PerChatTurnFifoOwnerConflictError extends Error {
  * Structured fields for the pre-dispatch rejection log — exactly the data the
  * 2026-08-29 forensics lacked: WHICH gate rejected (rejectionClass) and what
  * the FIFO head was at rejection time ('none' distinguishes an empty FIFO
- * from a stale squatting owner — the H3 discriminator).
+ * from a stale squatting owner — the H3 discriminator). `fifoHead` is
+ * per-chat-only; omit it for shared/singleton scopes (no per-chat FIFO).
+ *
+ * Journal survival note: the log sanitizer redacts phone/JID-shaped values,
+ * so a per-chat `scope` may reach the journal partially masked. The fields
+ * that survive intact — and are the forensic joins — are `inboundSeq`
+ * (joins inbound_events) and `logicalTurnId` (UUID-based).
  */
 export function admissionRejectionLogFields(
-  mapKey: string,
+  scope: string,
   context: RuntimeTurnContext,
   error: unknown,
-  fifoHeadTurnId: string | undefined,
-): {
-  mapKey: string;
-  inboundSeq: number | null;
-  logicalTurnId: string;
-  rejectionClass: string;
-  fifoHeadTurnId: string;
-} {
+  fifoHead?: { turnId: string | undefined },
+) {
   return {
-    mapKey,
+    scope,
     inboundSeq: context.identity.inboundSeq,
     logicalTurnId: context.identity.logicalTurnId,
     rejectionClass: error instanceof Error ? error.constructor.name : 'non-error',
-    fifoHeadTurnId: fifoHeadTurnId ?? 'none',
+    ...(fifoHead === undefined ? {} : { fifoHeadTurnId: fifoHead.turnId ?? 'none' }),
   };
 }

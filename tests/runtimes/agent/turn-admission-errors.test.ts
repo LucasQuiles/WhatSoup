@@ -16,6 +16,7 @@ import {
 import { sanitizeLogValue } from '../../../src/lib/log-sanitizer.ts';
 import { RuntimeTurnCoordinator, type RuntimeTurnCoordinatorPort } from '../../../src/runtimes/agent/runtime-turn-coordinator.ts';
 import { createRuntimeTurnContext } from '../../../src/runtimes/agent/runtime-turn-context.ts';
+import type { IOutboundQueue } from '../../../src/runtimes/agent/outbound-queue.ts';
 
 vi.mock('../../../src/lib/emit-alert.ts', () => ({
   emitAlertChecked: vi.fn(() => true),
@@ -53,8 +54,8 @@ function context() {
   });
 }
 
-function queueStub() {
-  return { beginTurnEvidence: vi.fn() } as never;
+function queueStub(): IOutboundQueue {
+  return { beginTurnEvidence: vi.fn() } as unknown as IOutboundQueue;
 }
 
 describe('typed admission errors survive the log sanitizer', () => {
@@ -112,10 +113,10 @@ describe('admissionRejectionLogFields — the datum the 2026-08-29 forensics lac
       'chat@lid',
       context(),
       new ScopeBlockedByFinalizationRecoveryError(),
-      'stale-head-turn-id',
+      { turnId: 'stale-head-turn-id' },
     );
     expect(fields).toEqual({
-      mapKey: 'chat@lid',
+      scope: 'chat@lid',
       inboundSeq: 41,
       logicalTurnId: 'turn-admission-41',
       rejectionClass: 'ScopeBlockedByFinalizationRecoveryError',
@@ -124,8 +125,14 @@ describe('admissionRejectionLogFields — the datum the 2026-08-29 forensics lac
   });
 
   it('reports an empty FIFO explicitly (empty vs stale-head is the H3 discriminator)', () => {
-    const fields = admissionRejectionLogFields('chat@lid', context(), new Error('x'), undefined);
-    expect(fields.fifoHeadTurnId).toBe('none');
+    const fields = admissionRejectionLogFields('chat@lid', context(), new Error('x'), { turnId: undefined });
+    expect(fields['fifoHeadTurnId']).toBe('none');
     expect(fields.rejectionClass).toBe('Error');
+  });
+
+  it('omits the FIFO field for shared/singleton scopes (no per-chat FIFO exists)', () => {
+    const fields = admissionRejectionLogFields('shared', context(), new Error('x'), undefined);
+    expect('fifoHeadTurnId' in fields).toBe(false);
+    expect(fields.scope).toBe('shared');
   });
 });
