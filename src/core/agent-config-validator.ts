@@ -781,6 +781,32 @@ function validateAgentOptions(
     );
   }
 
+  // observability.fleetLifecycle — the Fleet Lifecycle Observability Standard's
+  // dark flag. Every lifecycle-observability code path is gated behind it and it
+  // defaults to off. The block is a closed shape validated fail-closed: a typo
+  // must never silently enable or disable emission.
+  const observability = opts['observability'];
+  if (observability !== undefined) {
+    if (typeof observability !== 'object' || observability === null || Array.isArray(observability)) {
+      return err('agentOptions.observability', 'agentOptions.observability must be an object when provided');
+    }
+    const observabilityKeys = Object.keys(observability as Record<string, unknown>);
+    const unknownObservabilityKeys = observabilityKeys.filter((key) => key !== 'fleetLifecycle');
+    if (unknownObservabilityKeys.length > 0) {
+      return err(
+        'agentOptions.observability',
+        `agentOptions.observability has unknown key(s): ${unknownObservabilityKeys.join(', ')} (allowed: fleetLifecycle)`,
+      );
+    }
+    const fleetLifecycle = (observability as Record<string, unknown>)['fleetLifecycle'];
+    if (fleetLifecycle !== undefined && typeof fleetLifecycle !== 'boolean') {
+      return err(
+        'agentOptions.observability.fleetLifecycle',
+        'agentOptions.observability.fleetLifecycle must be a boolean when provided',
+      );
+    }
+  }
+
   // cwd must be a string when provided.
   if (opts['cwd'] !== undefined && typeof opts['cwd'] !== 'string') {
     return err('agentOptions.cwd', 'agentOptions.cwd must be a string when provided');
