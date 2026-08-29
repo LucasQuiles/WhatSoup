@@ -8354,7 +8354,9 @@ export class AgentRuntime implements Runtime {
       modelUsabilityStatus: usability?.status ?? null,
       lastSuccessfulTurnAt: this.turnCapabilityTracker.lastSuccessfulTurnAt,
       lastSuccessfulTurnProvider: this.turnCapabilityTracker.lastSuccessfulTurnProvider,
+      lastSuccessfulTurnModel: this.turnCapabilityTracker.lastSuccessfulTurnModel,
       lastSuccessfulTurnSessionCurrent: this.lastSuccessfulTurnSessionCurrent(),
+      primaryModel: this.model ?? null,
       lastTurnErrorClass: this.turnCapabilityTracker.lastTurnErrorClass,
       lastTurnErrorAt: this.turnCapabilityTracker.lastTurnErrorAt,
       periodicProbeExpected,
@@ -8376,8 +8378,11 @@ export class AgentRuntime implements Runtime {
     // safe to null rather than throwing on a session that lacks the accessor.
     const successProvider =
       typeof session?.getProviderId === 'function' ? session.getProviderId() : null;
+    const successModel =
+      typeof session?.getModelRef === 'function' ? session.getModelRef() ?? null : null;
     this.turnCapabilityTracker.recordSuccess(
       successProvider,
+      successModel,
       session,
       sessionBinding,
     );
