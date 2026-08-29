@@ -23,6 +23,24 @@ const KNOWN_OUTBOUND_STATUSES = [
 const KNOWN_REPLAY_POLICIES = ['safe', 'unsafe', 'read_only'] as const;
 const REPLAY_SAFE_POLICIES = ['safe', 'read_only'] as const;
 
+/**
+ * Inbound dispositions that still owe a turn. Mirrors the open set the
+ * reply-guarantee observer uses (deploy/scripts/reply-guarantee-observer.py).
+ */
+const OPEN_INBOUND_STATUSES = ['pending', 'processing', 'turn_done'] as const;
+
+/**
+ * How recently an open inbound must have arrived to count as LIVE work rather
+ * than stale debt. Same 15 minutes the reply-guarantee observer uses to call an
+ * open inbound stale (its DEFAULT_STALE_SECONDS), read from the other side.
+ *
+ * The recency scoping is the whole point: q holds open inbounds from weeks ago,
+ * and a bare "any open inbound blocks the stop" rule would make a wedged
+ * instance permanently unrestartable — including the restart that clears the
+ * wedge. Stale rows are counted and reported, never blocking.
+ */
+export const LIVE_TURN_WINDOW_SECONDS = 15 * 60;
+
 export interface RestartSafetyVerdict {
   schemaVersion: 1;
   ok: boolean;
@@ -47,6 +65,34 @@ export interface RestartSafetyVerdict {
     processing: number;
     recent: number;
   };
+}
+
+/**
+ * Verdict for the PRE-STOP question, which the start gate above cannot answer.
+ *
+ * `inspectRestartSafety` runs from the launch wrapper at ExecStart — on
+ * 2026-08-29 it published its verdict three seconds AFTER the stop that had
+ * already finalized two owner DMs `failed` with no replay. Refusing there would
+ * only refuse to start. This verdict is for whoever issues the stop.
+ */
+export interface StopSafetyVerdict {
+  schemaVersion: 1;
+  ok: boolean;
+  decision: 'allow' | 'block';
+  reason: 'stop_safe' | 'live_turns_in_flight' | 'missing_database' | 'preflight_error';
+  quickCheck: 'ok' | 'not_applicable';
+  liveTurns: {
+    /** Open inbounds received inside the window — stopping now loses these. */
+    inFlight: number;
+    /** Open inbounds older than the window: stale debt, deliberately not blocking. */
+    staleIgnored: number;
+    windowSeconds: number;
+  };
+}
+
+export interface StopSafetyOptions {
+  /** Override the liveness window; defaults to {@link LIVE_TURN_WINDOW_SECONDS}. */
+  liveWindowSeconds?: number;
 }
 
 interface CountRow {
@@ -195,10 +241,82 @@ export function inspectRestartSafety(dbPath: string): RestartSafetyVerdict {
   }
 }
 
+/**
+ * Is it safe to STOP this instance right now? Read-only, and never throws on a
+ * missing database — a database that does not exist cannot hold live work.
+ *
+ * Blocks only on OPEN inbounds received within the liveness window. Stale open
+ * rows are reported in `staleIgnored` and never block, so wedge recovery by
+ * restart stays possible.
+ */
+export function inspectStopSafety(
+  dbPath: string,
+  options: StopSafetyOptions = {},
+): StopSafetyVerdict {
+  const windowSeconds = options.liveWindowSeconds ?? LIVE_TURN_WINDOW_SECONDS;
+  if (missingDatabase(dbPath)) {
+    return {
+      schemaVersion: 1,
+      ok: true,
+      decision: 'allow',
+      reason: 'missing_database',
+      quickCheck: 'not_applicable',
+      liveTurns: { inFlight: 0, staleIgnored: 0, windowSeconds },
+    };
+  }
+
+  const absolute = assertExistingRegularDatabase(dbPath);
+  const db = new DatabaseSync(absolute, {
+    readOnly: true,
+    timeout: SQLITE_BUSY_TIMEOUT_MS,
+    enableForeignKeyConstraints: false,
+  });
+  try {
+    db.exec('PRAGMA query_only = ON');
+    const quickCheck = assertQuickCheck(db);
+    assertRequiredSchema(db);
+
+    const modifier = `-${windowSeconds} seconds`;
+    const openStatuses = sqlList(OPEN_INBOUND_STATUSES);
+    const inFlight = db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM inbound_events
+      WHERE processing_status IN (${openStatuses})
+        AND received_at >= datetime('now', ?)
+    `).get(modifier) as unknown as CountRow;
+    const stale = db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM inbound_events
+      WHERE processing_status IN (${openStatuses})
+        AND received_at < datetime('now', ?)
+    `).get(modifier) as unknown as CountRow;
+
+    const liveTurns = {
+      inFlight: Number(inFlight.count),
+      staleIgnored: Number(stale.count),
+      windowSeconds,
+    };
+    const blocked = liveTurns.inFlight > 0;
+    return {
+      schemaVersion: 1,
+      ok: !blocked,
+      decision: blocked ? 'block' : 'allow',
+      reason: blocked ? 'live_turns_in_flight' : 'stop_safe',
+      quickCheck,
+      liveTurns,
+    };
+  } finally {
+    db.close();
+  }
+}
+
+type PreflightMode = 'start' | 'stop';
+
 interface RestartSafetyCliArgs {
   dbPath: string;
   instance?: string;
   initialMarker?: string;
+  mode: PreflightMode;
   json: true;
 }
 
@@ -206,10 +324,19 @@ function parseCliArgs(argv: string[]): RestartSafetyCliArgs {
   let dbPath: string | undefined;
   let instance: string | undefined;
   let initialMarker: string | undefined;
+  let mode: PreflightMode | undefined;
   let json = false;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
-    if (arg === '--db') {
+    if (arg === '--mode') {
+      if (mode !== undefined) throw new Error('Duplicate argument: --mode');
+      const value = argv[index + 1];
+      if (value !== 'start' && value !== 'stop') {
+        throw new Error('--mode must be start or stop');
+      }
+      mode = value;
+      index += 1;
+    } else if (arg === '--db') {
       if (dbPath !== undefined) throw new Error('Duplicate argument: --db');
       const value = argv[index + 1];
       if (!value || value.startsWith('--')) throw new Error('--db is required');
@@ -239,6 +366,7 @@ function parseCliArgs(argv: string[]): RestartSafetyCliArgs {
     dbPath,
     ...(instance === undefined ? {} : { instance }),
     ...(initialMarker === undefined ? {} : { initialMarker }),
+    mode: mode ?? 'start',
     json: true,
   };
 }
@@ -286,6 +414,11 @@ export function runRestartSafetyPreflightCli(
   write: (chunk: string) => void = (chunk) => { process.stdout.write(chunk); },
 ): number {
   const args = parseCliArgs(argv);
+  if (args.mode === 'stop') {
+    const stopVerdict = inspectStopSafety(args.dbPath);
+    write(`${JSON.stringify(stopVerdict)}\n`);
+    return stopVerdict.ok ? 0 : 3;
+  }
   const verdict = missingDatabase(args.dbPath)
     ? noDatabaseVerdict(
         args.instance !== undefined
