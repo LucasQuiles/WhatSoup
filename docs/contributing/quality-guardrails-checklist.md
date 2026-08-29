@@ -168,6 +168,7 @@ guards that `verify:push:branch` runs. Spelled out:
 | Fleet bot-hardening parity | `npm run guard:fleet-bot-hardening-parity` | Verify the redacted fleet bot-hardening parity manifest and its source anchors stay aligned with the A–D provider-resilience standard. | yes |
 | ARC binding drift | `npm run guard:arc-binding-drift` | Verify the tracked `.arc/` shim. Always-on vendored-pin check (`.arc/.canonical-sha` vs the payload sha in `arc.toml`/`ARC_BINDING.md`) hard-blocks a stale `.arc/` even in CI without the sibling repo; when the sibling agent-runtime-protocol is reachable (via `ARC_REPO_DIR`), additionally runs the full byte-for-byte adopt-generator comparison and cross-checks the pin against the live sha. | yes |
 | Guard test coverage (meta-guard) | `npm run guard:guard-test-coverage` | Meta-guard: every guard-family script (`scripts/*guard*.ts`, `scripts/check-*.ts`) must ship a companion test wired into `verify:push:branch`, or carry a `// meta-guard:no-test <reason>` opt-out. | no (pre-push only) |
+| PNG estate ratchet | `npm run guard:png-estate` | #2219 Option A: `artifacts/` PNGs are untracked by policy and the tracked-PNG census (count and bytes, `docs/design-system` + `docs/screenshots`) may only shrink; the `--staged` variant (pre-commit, CI-only) rejects any staged `artifacts/` PNG or a new/changed PNG over 100 KiB. Refuses INCONCLUSIVE (exit 2) on an empty scan root. | yes |
 
 ### Regenerating the ARC binding shim (`.arc/`)
 
