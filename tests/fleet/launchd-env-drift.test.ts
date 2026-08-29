@@ -49,20 +49,28 @@ function plistWithEnv(env: Record<string, string> | null): string {
 }
 
 describe('compareGovernedLaunchdEnv', () => {
-  it('reports no drift when governed keys match', () => {
+  it('reports no drift, nothing dropped, and no tail difference when governed keys match', () => {
     const expected = plistWithEnv({ PATH: '/opt/bin:/usr/bin' });
     const observed = plistWithEnv({ PATH: '/opt/bin:/usr/bin' });
     expect(compareGovernedLaunchdEnv(expected, observed)).toEqual({
       comparable: true,
       drift: [],
+      droppedNonGovernedKeys: [],
+      pathPrefix: {
+        configured: false,
+        satisfied: true,
+        ambientTailDiffers: false,
+        expectedDigest: sha256('/opt/bin:/usr/bin'),
+        observedDigest: sha256('/opt/bin:/usr/bin'),
+      },
     });
   });
 
-  it('reports a mismatched governed key by digest, never by value', () => {
+  it('reports a governed PATH mismatch by digest when the installed PATH lacks the configured prefix', () => {
     const expected = plistWithEnv({ PATH: '/opt/bin:/usr/bin' });
     const observed = plistWithEnv({ PATH: '/opt/hand-patched-bin:/usr/bin' });
 
-    const comparison = compareGovernedLaunchdEnv(expected, observed);
+    const comparison = compareGovernedLaunchdEnv(expected, observed, { pathPrepend: ['/opt/bin'] });
 
     expect(comparison.comparable).toBe(true);
     expect(comparison.drift).toEqual([{
@@ -71,7 +79,92 @@ describe('compareGovernedLaunchdEnv', () => {
       expectedDigest: sha256('/opt/bin:/usr/bin'),
       observedDigest: sha256('/opt/hand-patched-bin:/usr/bin'),
     }]);
+    expect(comparison.pathPrefix).toEqual({
+      configured: true,
+      satisfied: false,
+      ambientTailDiffers: true,
+      expectedDigest: sha256('/opt/bin:/usr/bin'),
+      observedDigest: sha256('/opt/hand-patched-bin:/usr/bin'),
+    });
     expect(JSON.stringify(comparison)).not.toContain('hand-patched');
+  });
+
+  it('treats a satisfied configured prefix with a different ambient tail as config-satisfied, not governed drift', () => {
+    const expected = plistWithEnv({ PATH: '/opt/service-bin:/repo/node_modules/.bin:/usr/bin' });
+    const observed = plistWithEnv({ PATH: '/opt/service-bin:/opt/homebrew/bin:/usr/bin' });
+
+    const comparison = compareGovernedLaunchdEnv(expected, observed, { pathPrepend: ['/opt/service-bin'] });
+
+    expect(comparison.drift).toEqual([]);
+    expect(comparison.pathPrefix).toEqual({
+      configured: true,
+      satisfied: true,
+      ambientTailDiffers: true,
+      expectedDigest: sha256('/opt/service-bin:/repo/node_modules/.bin:/usr/bin'),
+      observedDigest: sha256('/opt/service-bin:/opt/homebrew/bin:/usr/bin'),
+    });
+  });
+
+  it('matches the configured prefix on whole entries only, never on a partial directory name', () => {
+    const expected = plistWithEnv({ PATH: '/opt/bin:/usr/bin' });
+    const observed = plistWithEnv({ PATH: '/opt/bin-other:/usr/bin' });
+
+    const comparison = compareGovernedLaunchdEnv(expected, observed, { pathPrepend: ['/opt/bin'] });
+
+    expect(comparison.pathPrefix?.satisfied).toBe(false);
+    expect(comparison.drift.map((entry) => entry.state)).toEqual(['mismatch']);
+  });
+
+  it('reports an unconfigured prefix as trivially satisfied when only the ambient tail differs', () => {
+    const expected = plistWithEnv({ PATH: '/repo/node_modules/.bin:/usr/bin' });
+    const observed = plistWithEnv({ PATH: '/opt/hand-patched-bin:/usr/bin' });
+
+    const comparison = compareGovernedLaunchdEnv(expected, observed);
+
+    expect(comparison.drift).toEqual([]);
+    expect(comparison.pathPrefix).toEqual({
+      configured: false,
+      satisfied: true,
+      ambientTailDiffers: true,
+      expectedDigest: sha256('/repo/node_modules/.bin:/usr/bin'),
+      observedDigest: sha256('/opt/hand-patched-bin:/usr/bin'),
+    });
+    expect(JSON.stringify(comparison)).not.toContain('hand-patched');
+  });
+
+  it('reports an identical PATH as prefix satisfied with no tail difference', () => {
+    const plist = plistWithEnv({ PATH: '/opt/service-bin:/usr/bin' });
+
+    const comparison = compareGovernedLaunchdEnv(plist, plist, { pathPrepend: ['/opt/service-bin'] });
+
+    expect(comparison.drift).toEqual([]);
+    expect(comparison.pathPrefix).toMatchObject({ configured: true, satisfied: true, ambientTailDiffers: false });
+  });
+
+  it('lists installed non-governed key NAMES a re-render would drop, sorted, never their values', () => {
+    const expected = plistWithEnv({ PATH: '/usr/bin', HOME: '/opt/home' });
+    const observed = plistWithEnv({
+      PATH: '/usr/bin',
+      HOME: '/opt/home',
+      WHATSOUP_HEALTH_TOKEN: 'sentinel-token-value-never-reported',
+      MINIMAX_API_KEY: 'sentinel-key-value-never-reported',
+    });
+
+    const comparison = compareGovernedLaunchdEnv(expected, observed);
+
+    expect(comparison.drift).toEqual([]);
+    expect(comparison.droppedNonGovernedKeys).toEqual(['MINIMAX_API_KEY', 'WHATSOUP_HEALTH_TOKEN']);
+    expect(JSON.stringify(comparison)).not.toContain('never-reported');
+  });
+
+  it('does not list keys the re-render keeps or governed keys as dropped', () => {
+    const expected = plistWithEnv({ PATH: '/usr/bin', HOME: '/opt/home' });
+    const observed = plistWithEnv({ PATH: '/usr/bin', HOME: '/opt/other-home', CLAUDE_CONFIG_DIR: '/opt/claude-roots/x' });
+
+    const comparison = compareGovernedLaunchdEnv(expected, observed);
+
+    expect(comparison.droppedNonGovernedKeys).toEqual([]);
+    expect(comparison.drift.map((entry) => `${entry.key}:${entry.state}`)).toEqual(['CLAUDE_CONFIG_DIR:extra']);
   });
 
   it('reports an expected governed key absent from the installed plist as missing', () => {
@@ -101,14 +194,15 @@ describe('compareGovernedLaunchdEnv', () => {
     expect(JSON.stringify(comparison)).not.toContain('hand-added');
   });
 
-  it('ignores non-governed keys entirely and never leaks their values', () => {
+  it('keeps non-governed keys out of governed drift and never leaks their values', () => {
     const sentinel = 'sentinel-value-that-must-never-appear-in-a-report';
     const expected = plistWithEnv({ PATH: '/usr/bin' });
     const observed = plistWithEnv({ PATH: '/usr/bin', WHATSOUP_HEALTH_TOKEN: sentinel });
 
     const comparison = compareGovernedLaunchdEnv(expected, observed);
 
-    expect(comparison).toEqual({ comparable: true, drift: [] });
+    expect(comparison.drift).toEqual([]);
+    expect(comparison.droppedNonGovernedKeys).toEqual(['WHATSOUP_HEALTH_TOKEN']);
     expect(JSON.stringify(comparison)).not.toContain(sentinel);
   });
 
@@ -128,16 +222,16 @@ describe('compareGovernedLaunchdEnv', () => {
   });
 
   it('digests the unescaped value so XML entities compare by content', () => {
-    const expected = plistWithEnv({ PATH: '/opt/a&amp;b/bin' });
-    const observed = plistWithEnv({ PATH: '/opt/a&amp;b/bin' });
+    const expected = plistWithEnv({ CLAUDE_CONFIG_DIR: '/opt/a&amp;b/root' });
+    const observed = plistWithEnv({ CLAUDE_CONFIG_DIR: '/opt/a&amp;b/root' });
     expect(compareGovernedLaunchdEnv(expected, observed).drift).toEqual([]);
 
-    const drifted = compareGovernedLaunchdEnv(expected, plistWithEnv({ PATH: '/opt/a&amp;c/bin' }));
+    const drifted = compareGovernedLaunchdEnv(expected, plistWithEnv({ CLAUDE_CONFIG_DIR: '/opt/a&amp;c/root' }));
     expect(drifted.drift).toEqual([{
-      key: 'PATH',
+      key: 'CLAUDE_CONFIG_DIR',
       state: 'mismatch',
-      expectedDigest: sha256('/opt/a&b/bin'),
-      observedDigest: sha256('/opt/a&c/bin'),
+      expectedDigest: sha256('/opt/a&b/root'),
+      observedDigest: sha256('/opt/a&c/root'),
     }]);
   });
 
@@ -156,6 +250,7 @@ describe('compareGovernedLaunchdEnv', () => {
       comparable: false,
       reason: 'environment-variables-unparseable',
       drift: [],
+      droppedNonGovernedKeys: [],
     });
   });
 });

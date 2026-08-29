@@ -421,7 +421,9 @@ export async function reconcileLaunchdPlist(
     plistPath: dest,
     priorPlistExisted: true,
     dryRun: options.dryRun === true,
-    governedEnvDrift: compareGovernedLaunchdEnv(rendered, previousContents),
+    governedEnvDrift: compareGovernedLaunchdEnv(rendered, previousContents, {
+      pathPrepend: renderOptions.pathPrepend,
+    }),
   };
   if (result.dryRun) return result;
 
