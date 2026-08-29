@@ -57,6 +57,7 @@ import { dequeueNextReport, emitHealReport, parseHealContext } from '../../core/
 import { allowlistedHealCrashClass, errorClassForHealEvidence } from '../../core/heal-evidence.ts';
 import { sendTracked } from '../../core/durability.ts';
 import { classifyErrorForInbound } from '../../core/inbound-failure-class.ts';
+import { runtimeLifecycleEmitter } from '../../core/observability/lifecycle-emission.ts';
 import {
   normalizeFallbackEntriesFromAgentOptions,
   type AgentFallbackDiscoveryConfig,
@@ -4102,6 +4103,16 @@ export class AgentRuntime implements Runtime {
         'agent',
         now,
       );
+      // FLOS Stage 1 (plan §3): the occurrence is durably owned from here —
+      // L-SCH `admitted`, then `dispatched` once it is handed to the turn
+      // chain below. emit() is phase-gated (dark default) and never throws.
+      runtimeLifecycleEmitter().emit({
+        lane: 'L-SCH',
+        work_id: messageId,
+        phase: 'admitted',
+        correlation: { trigger_occurrence_id: String(ctx.occurrenceId), inbound_seq: inboundSeq },
+        attrs: { trigger_id: ctx.triggerId, bead_id: ctx.beadId },
+      });
       const synthetic: IncomingMessage = {
         messageId,
         chatJid: ctx.reportChatJid,
@@ -4126,6 +4137,13 @@ export class AgentRuntime implements Runtime {
           { err, triggerId: ctx.triggerId, beadId: ctx.beadId },
           'agent job turn failed after dispatch',
         );
+      });
+      runtimeLifecycleEmitter().emit({
+        lane: 'L-SCH',
+        work_id: messageId,
+        phase: 'dispatched',
+        correlation: { trigger_occurrence_id: String(ctx.occurrenceId), inbound_seq: inboundSeq },
+        attrs: { trigger_id: ctx.triggerId, bead_id: ctx.beadId },
       });
       return {
         dispatched: true,

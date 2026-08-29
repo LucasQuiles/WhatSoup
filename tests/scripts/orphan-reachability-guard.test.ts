@@ -128,10 +128,12 @@ const TRACKED_UNREACHABLE: readonly TrackedEntry[] = [
   // the keyed-digest primitive lands DARK by design — plan §1.3 requires every
   // stage's code to ship behind `observability.fleetLifecycle` (off). The
   // event.v1 emission slice is its runtime importer and graduates this entry.
-  { path: 'src/core/observability/lifecycle-digest.ts', issue: 'FLOS Stage 1 (plan §3; design §7/F10)', reason: 'digest primitive lands unwired by design; event.v1 emission (next Stage 1 slice) is the runtime importer and graduates this entry' },
-  { path: 'src/core/observability/lifecycle-event.ts', issue: 'FLOS Stage 1 (plan §3; design §2)', reason: 'event.v1 envelope lands unwired by design (dark behind observability.fleetLifecycle); the emission slice is the runtime importer and graduates this entry' },
-  { path: 'src/core/observability/lifecycle-clock.ts', issue: 'FLOS Stage 1 (plan §3; design §2 O4/O5)', reason: 'clock-model primitive lands unwired by design; the emission slice is the runtime importer and graduates this entry' },
-  { path: 'src/core/observability/lifecycle-event-store.ts', issue: 'FLOS Stage 1 (plan §3; design §10 Contract B)', reason: 'bounded private store lands unwired by design; the emission slice is the runtime importer and graduates this entry' },
+  // lifecycle-event.ts and lifecycle-event-store.ts graduated with the Stage 1
+  // emission slice: lifecycle-emission.ts (imported by runtime.ts and
+  // runtime-turn-coordinator.ts) is their runtime importer, dark behind
+  // `observability.fleetLifecycle` (off).
+  { path: 'src/core/observability/lifecycle-digest.ts', issue: 'FLOS Stage 1 (plan §3; design §7/F10)', reason: 'digest primitive lands unwired by design; keyed-digest emission needs the owner-gated secret-provisioning slice, which is its runtime importer and graduates this entry' },
+  { path: 'src/core/observability/lifecycle-clock.ts', issue: 'FLOS Stage 1 (plan §3; design §2 O4/O5)', reason: 'clock-model primitive lands unwired by design; Stage 2 settlement (progress-age derivation) is the runtime importer and graduates this entry' },
   { path: 'src/runtimes/chat/enrichment/contradiction.ts', issue: '#1871', reason: 'enrichment pipeline ported but never wired into a runtime chat root; unreachable island with upserter.ts' },
   { path: 'src/runtimes/chat/enrichment/upserter.ts', issue: '#1871', reason: 'enrichment pipeline ported but never wired into a runtime chat root; island head (imports contradiction.ts)' },
   // command-surface (/config) feature cluster in runtimes/agent: built but never
