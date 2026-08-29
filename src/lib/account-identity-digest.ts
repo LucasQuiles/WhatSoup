@@ -17,6 +17,7 @@
  * runtime can share it.
  */
 import { createHash } from 'node:crypto';
+import { isNonEmptyString } from './type-guards.ts';
 
 export interface AccountIdentityFields {
   email: string;
@@ -30,7 +31,7 @@ const DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
 const DIGEST_PREFIX_LENGTH = 12;
 
 export function isAccountIdentityDigest(value: unknown): value is string {
-  return typeof value === 'string' && DIGEST_RE.test(value);
+  return isNonEmptyString(value) && DIGEST_RE.test(value);
 }
 
 function canonicalField(name: keyof AccountIdentityFields, value: string): string {
