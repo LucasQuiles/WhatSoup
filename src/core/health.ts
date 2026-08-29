@@ -268,8 +268,11 @@ export interface DegradationLatchEntry {
  * (enrichment, memory, durability, flood/churn, auth-bond, the other
  * `runtime.*` specifics) are NOT proven recovered by a turn, so a latch
  * carrying any of them never releases on a turn receipt — a turn proves the
- * turn pipeline only. Named and exported so review can adjust membership
- * without touching the release mechanics. */
+ * turn pipeline only. The task-21 identity reasons
+ * (`runtime.credential_identity_mismatch` / `_unverifiable`) are deliberately
+ * absent: a turn proves the credential works, not whose it is. Named and
+ * exported so review can adjust membership without touching the release
+ * mechanics. */
 export const TURN_PROVABLE_STATUS_REASONS: ReadonlySet<string> = new Set([
   'turn_capability_degraded',
   'agent_runtime_degraded',
@@ -479,6 +482,11 @@ export type HealthDegradationCause =
   | 'delivery_identity_debt'
   | 'provider_execution_pressure'
   | 'agent_outbound_queue_poisoned'
+  // task-21: ratified account-identity verification (verify-only; the two
+  // classes are distinct so an unverifiable receipt never reads as a mismatch
+  // and a mismatch never hides behind "unknown").
+  | 'credential_identity_mismatch'
+  | 'credential_identity_unverifiable'
   | 'agent_runtime_degraded_unclassified'
   | 'agent_runtime_unhealthy'
   | 'chat_runtime_degraded'
@@ -572,6 +580,10 @@ export const HEALTH_DEGRADATION_CAUSE_REGISTRY: Readonly<
   // #3321: poisoned outbound queue scopes (successor to PR #3242) - the runtime
   // pushes the companion degradedReason while the containment latch is up.
   agent_outbound_queue_poisoned: { reasonTwins: ['runtime.outbound_queue_poisoned'] },
+  // task-21: the runtime pushes the companion degradedReason from its identity
+  // verdict (runtime.agent.accountIdentity.status).
+  credential_identity_mismatch: { reasonTwins: ['runtime.credential_identity_mismatch'] },
+  credential_identity_unverifiable: { reasonTwins: ['runtime.credential_identity_unverifiable'] },
   // the fall-through when the agent runtime is degraded for a reason no named
   // cause covers: the degradedReasons without a cause of their own, plus the
   // bare marker used when the runtime reported no reasons at all.
@@ -2511,6 +2523,14 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       ) {
         addDegradationCause('agent_outbound_queue_poisoned');
       }
+      // task-21: the identity verdict is a status class on the runtime block;
+      // name its cause so a mismatch or an unverifiable receipt never falls
+      // through to _unclassified (alerts and flap detection key on causes).
+      const accountIdentityStatus = isRecord(runtimeDetails?.['accountIdentity'])
+        ? runtimeDetails['accountIdentity']['status']
+        : undefined;
+      if (accountIdentityStatus === 'mismatch') addDegradationCause('credential_identity_mismatch');
+      else if (accountIdentityStatus === 'unverifiable') addDegradationCause('credential_identity_unverifiable');
       if (
         agentRuntimeStatus === 'degraded'
         && !fallbackWindowActive
@@ -2518,7 +2538,9 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           || cause === 'turn_finalization_degraded'
           || cause === 'turn_recovery_degraded'
           || cause === 'delivery_identity_debt'
-          || cause === 'provider_execution_pressure')
+          || cause === 'provider_execution_pressure'
+          || cause === 'credential_identity_mismatch'
+          || cause === 'credential_identity_unverifiable')
       ) {
         addDegradationCause('agent_runtime_degraded_unclassified');
       } else if (agentRuntimeStatus === 'unhealthy') {

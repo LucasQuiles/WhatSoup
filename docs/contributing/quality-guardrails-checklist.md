@@ -90,6 +90,19 @@ repo-global while several agents work the repo concurrently, so growth is
 routinely caused by an agent other than the pusher, who cannot clear it: growth
 is an ID set difference, and retiring unrelated work does not offset it.
 
+Pushes are then bound to a governed remote. The configured push URL must be an
+SSH URL for `LucasQuiles/WhatSoup` or its preserve mirror
+`LucasQuiles/WhatSoup-preserve`, and the hook-supplied URL must equal it. A push
+to the origin runs candidate alignment (clean invoking worktree, exactly one
+candidate equal to `HEAD`, candidate contains live `main`) around the
+verification composite. A push to the preserve mirror is a **preservation push**:
+every content destination must sit under `refs/preserve/*`, archival refs are
+**create-only** (an existing `refs/preserve/*` ref is never updated in place and
+a deletion may not ride a preservation push), the estate gate still runs, and
+candidate alignment plus the composite are skipped — archival refs are by
+definition not aligned with live `main`, which is what preservation is for.
+Delete-only and empty-stdin pushes keep their existing routing on either remote.
+
 Pre-push ref updates accept object IDs at exactly the 40-character SHA-1 or
 64-character SHA-256 width. Intermediate widths are malformed, and an all-zero
 local object ID at either supported width is treated as a deletion. A normal
@@ -168,6 +181,7 @@ guards that `verify:push:branch` runs. Spelled out:
 | Fleet bot-hardening parity | `npm run guard:fleet-bot-hardening-parity` | Verify the redacted fleet bot-hardening parity manifest and its source anchors stay aligned with the A–D provider-resilience standard. | yes |
 | ARC binding drift | `npm run guard:arc-binding-drift` | Verify the tracked `.arc/` shim. Always-on vendored-pin check (`.arc/.canonical-sha` vs the payload sha in `arc.toml`/`ARC_BINDING.md`) hard-blocks a stale `.arc/` even in CI without the sibling repo; when the sibling agent-runtime-protocol is reachable (via `ARC_REPO_DIR`), additionally runs the full byte-for-byte adopt-generator comparison and cross-checks the pin against the live sha. | yes |
 | Guard test coverage (meta-guard) | `npm run guard:guard-test-coverage` | Meta-guard: every guard-family script (`scripts/*guard*.ts`, `scripts/check-*.ts`) must ship a companion test wired into `verify:push:branch`, or carry a `// meta-guard:no-test <reason>` opt-out. | no (pre-push only) |
+| PNG estate ratchet | `npm run guard:png-estate` | #2219 Option A: `artifacts/` PNGs are untracked by policy and the tracked-PNG census (count and bytes, `docs/design-system` + `docs/screenshots`) may only shrink; the `--staged` variant (pre-commit, CI-only) rejects any staged `artifacts/` PNG or a new/changed PNG over 100 KiB. Refuses INCONCLUSIVE (exit 2) on an empty scan root. | yes |
 
 ### Regenerating the ARC binding shim (`.arc/`)
 

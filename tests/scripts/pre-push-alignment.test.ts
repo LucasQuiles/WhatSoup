@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   PushAlignmentError,
+  classifyPushRemote,
+  isPreserveMirrorUrl,
   verifyAlignmentAfter,
   verifyAlignmentBefore,
   type GitProbe,
@@ -219,5 +221,75 @@ describe('pre-push candidate alignment', () => {
       thrown = error;
     }
     expect(thrown).toMatchObject({ exitCode: 2 });
+  });
+});
+
+describe('push remote classification — origin vs preserve mirror', () => {
+  const MIRROR_URL = 'git@github.com:LucasQuiles/WhatSoup-preserve.git';
+  const MIRROR_URL_SSH_SCHEME = 'ssh://git@github.com/LucasQuiles/WhatSoup-preserve.git';
+  const mirrorProbe = (configured: string) => probe({
+    'remote get-url --push preserve-mirror': { status: 0, stdout: `${configured}\n` },
+  });
+
+  it('classifies the configured origin SSH URL as whatsoup', () => {
+    expect(classifyPushRemote({
+      cwd: '/repo',
+      remoteName: 'origin',
+      remoteUrl: REMOTE_URL,
+      runGit: probe(),
+    })).toBe('whatsoup');
+  });
+
+  it('classifies both SSH forms of the preserve mirror as preserve-mirror', () => {
+    for (const url of [MIRROR_URL, MIRROR_URL_SSH_SCHEME]) {
+      expect(classifyPushRemote({
+        cwd: '/repo',
+        remoteName: 'preserve-mirror',
+        remoteUrl: url,
+        runGit: mirrorProbe(url),
+      })).toBe('preserve-mirror');
+    }
+    expect(isPreserveMirrorUrl(MIRROR_URL)).toBe(true);
+    expect(isPreserveMirrorUrl(MIRROR_URL_SSH_SCHEME)).toBe(true);
+    expect(isPreserveMirrorUrl(REMOTE_URL)).toBe(false);
+    expect(isPreserveMirrorUrl('https://github.com/LucasQuiles/WhatSoup-preserve.git')).toBe(false);
+    expect(isPreserveMirrorUrl('git@github.com:LucasQuiles/WhatSoup-preserve-fork.git')).toBe(false);
+  });
+
+  it('refuses a non-SSH preserve mirror URL even when hook and config agree', () => {
+    const httpsUrl = 'https://github.com/LucasQuiles/WhatSoup-preserve.git';
+    expect(() => classifyPushRemote({
+      cwd: '/repo',
+      remoteName: 'preserve-mirror',
+      remoteUrl: httpsUrl,
+      runGit: mirrorProbe(httpsUrl),
+    })).toThrowError(/SSH push URL/);
+  });
+
+  it('refuses a hook URL that names the mirror while the configured push URL is something else', () => {
+    let thrown: unknown;
+    try {
+      classifyPushRemote({
+        cwd: '/repo',
+        remoteName: 'preserve-mirror',
+        remoteUrl: MIRROR_URL,
+        runGit: mirrorProbe(REMOTE_URL),
+      });
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(PushAlignmentError);
+    expect(String((thrown as Error).message)).toMatch(/remote URL does not match/);
+    expect(String((thrown as Error).message)).not.toContain(MIRROR_URL);
+  });
+
+  it('refuses candidate alignment against the preserve mirror (archival refs are not PR candidates)', () => {
+    expect(() => verifyAlignmentBefore({
+      cwd: '/repo',
+      remoteName: 'preserve-mirror',
+      remoteUrl: MIRROR_URL,
+      candidateOids: [HEAD],
+      runGit: mirrorProbe(MIRROR_URL),
+    })).toThrowError(/applies only to LucasQuiles\/WhatSoup/);
   });
 });
