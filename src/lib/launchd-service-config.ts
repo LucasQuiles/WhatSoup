@@ -109,6 +109,18 @@ export function validateLaunchdServiceConfig(
 }
 
 /**
+ * Assert caller-supplied render options obey the same shape rules as the
+ * config `service` block, so every render admission path shares one source
+ * of truth for absolute-path validation.
+ */
+export function assertValidLaunchdPlistRenderOptions(
+  options: LaunchdPlistRenderOptions,
+): void {
+  const error = validateLaunchdServiceConfig({ service: { ...options } });
+  if (error) throw new Error(error.message);
+}
+
+/**
  * Extract the typed launchd render options from a parsed instance config.
  * Throws on an invalid `service` block; returns {} when the block is absent.
  */

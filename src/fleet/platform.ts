@@ -15,7 +15,11 @@ import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { isValidInstanceName } from './instance-name.ts';
 import { escapeRegExp } from '../lib/regex-utils.ts';
-import type { LaunchdPlistRenderOptions } from '../lib/launchd-service-config.ts';
+import {
+  assertValidLaunchdPlistRenderOptions,
+  type LaunchdPlistRenderOptions,
+} from '../lib/launchd-service-config.ts';
+import { resolveLaunchdPlistRenderOptions } from './launchd-render-options.ts';
 import { repoRoot, tmpRoot, xdgDir } from './paths.ts';
 import { SIGNAL } from '../lib/signals.ts';
 
@@ -228,6 +232,13 @@ export function buildPlist(name: string, renderOptions: LaunchdPlistRenderOption
 export interface LaunchdReconcileOptions {
   /** Inspect the current plist and report the target without changing disk or launchd. */
   dryRun?: boolean;
+  /**
+   * Pre-resolved render options. When omitted, the instance's validated
+   * `service` config block is resolved via resolveLaunchdPlistRenderOptions —
+   * every render path goes through one resolution choke point so a configured
+   * governed environment cannot be silently dropped.
+   */
+  renderOptions?: LaunchdPlistRenderOptions;
 }
 
 export interface LaunchdReconcileResult {
@@ -399,10 +410,12 @@ export async function reconcileLaunchdPlist(
   if (previousContents === null) {
     throw new Error(`no existing launchd plist for ${result.label}`);
   }
+  const renderOptions = options.renderOptions ?? resolveLaunchdPlistRenderOptions(name);
+  assertValidLaunchdPlistRenderOptions(renderOptions);
   if (result.dryRun) return result;
 
   fs.mkdirSync(path.dirname(dest), { recursive: true });
-  writeAtomicLaunchdPlist(dest, buildPlist(name));
+  writeAtomicLaunchdPlist(dest, buildPlist(name, renderOptions));
 
   try {
     await bootoutLaunchdService(name);
@@ -426,10 +439,13 @@ export async function reconcileLaunchdPlist(
 
 /** Install a newly authenticated instance without loading any pre-auth job. */
 async function installLaunchdPlist(name: string): Promise<void> {
+  // Resolve (and thereby validate) the instance's render options before any
+  // filesystem mutation so an invalid service block aborts the install whole.
+  const renderOptions = resolveLaunchdPlistRenderOptions(name);
   const dest = plistPath(name);
   const previousContents = readExpectedGeneratedLaunchdPlist(name, dest);
   fs.mkdirSync(path.dirname(dest), { recursive: true });
-  writeAtomicLaunchdPlist(dest, buildPlist(name));
+  writeAtomicLaunchdPlist(dest, buildPlist(name, renderOptions));
 
   try {
     await bootstrapLaunchdService(name, dest);
