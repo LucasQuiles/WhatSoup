@@ -585,6 +585,20 @@ export const SELF_PROVISIONED: SelfProvisionedEntry[] = [
     reason: 'one-pending-notice-per-conversation stash for standby-provider handoff; self-managed schema (ensureStandbyNoticeSchema), not a numbered global migration.',
   },
   {
+    table: 'lifecycle_events',
+    module: 'src/core/observability/lifecycle-event-store.ts',
+    reason: 'FLOS Stage 1 private per-instance event store (Contract B); dedicated observability SQLite file, self-provisioned schema, not the instance message DB migration ledger.',
+    justification:
+      'phase is an immutable historical value on append-only evidence rows (the transitions pattern): a row is INSERTed once and never updated, settlement is computed by the Stage 2 predicates over JOINED evidence rather than any mutable status column, and retention/compaction deletes are counted in lifecycle_drop_counters — never silent.',
+  },
+  {
+    table: 'lifecycle_drop_counters',
+    module: 'src/core/observability/lifecycle-event-store.ts',
+    reason: 'FLOS Stage 1 saturating drop counters (kind/value) beside lifecycle_events in the dedicated observability database.',
+    justification:
+      'two-column saturating counter store with no lifecycle semantics; matches the discovery scan only as CREATE TABLE text in the same module.',
+  },
+  {
     table: 'transitions',
     module: 'src/fleet/incidents/schema.ts',
     reason: 'incident control plane append-only lifecycle transitions; same dedicated fleet incident database as the events ledger.',

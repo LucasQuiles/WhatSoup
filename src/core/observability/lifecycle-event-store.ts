@@ -98,7 +98,7 @@ export function createLifecycleEventStore(options: LifecycleEventStoreOptions): 
   db.exec('PRAGMA journal_mode = WAL');
   db.exec('PRAGMA auto_vacuum = FULL');
   db.exec(`
-    CREATE TABLE IF NOT EXISTS events (
+    CREATE TABLE IF NOT EXISTS lifecycle_events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       instance TEXT NOT NULL,
       host TEXT NOT NULL,
@@ -113,9 +113,9 @@ export function createLifecycleEventStore(options: LifecycleEventStoreOptions): 
       attrs_json TEXT NOT NULL,
       inserted_at_ms INTEGER NOT NULL
     );
-    CREATE INDEX IF NOT EXISTS idx_events_scope ON events (instance, lane, work_id, id);
-    CREATE INDEX IF NOT EXISTS idx_events_inserted ON events (inserted_at_ms);
-    CREATE TABLE IF NOT EXISTS drop_counters (
+    CREATE INDEX IF NOT EXISTS idx_lifecycle_events_scope ON lifecycle_events (instance, lane, work_id, id);
+    CREATE INDEX IF NOT EXISTS idx_lifecycle_events_inserted ON lifecycle_events (inserted_at_ms);
+    CREATE TABLE IF NOT EXISTS lifecycle_drop_counters (
       kind TEXT PRIMARY KEY,
       value INTEGER NOT NULL
     );
@@ -124,12 +124,12 @@ export function createLifecycleEventStore(options: LifecycleEventStoreOptions): 
   db.exec('VACUUM');
 
   const insertEvent = db.prepare(`
-    INSERT INTO events (instance, host, lane, origin_lane, work_id, phase, at_utc, boot_id, mono_ms, correlation_json, attrs_json, inserted_at_ms)
+    INSERT INTO lifecycle_events (instance, host, lane, origin_lane, work_id, phase, at_utc, boot_id, mono_ms, correlation_json, attrs_json, inserted_at_ms)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const upsertCounter = db.prepare(`
-    INSERT INTO drop_counters (kind, value) VALUES (?, ?)
-    ON CONFLICT(kind) DO UPDATE SET value = MIN(${COUNTER_SATURATION}, drop_counters.value + excluded.value)
+    INSERT INTO lifecycle_drop_counters (kind, value) VALUES (?, ?)
+    ON CONFLICT(kind) DO UPDATE SET value = MIN(${COUNTER_SATURATION}, lifecycle_drop_counters.value + excluded.value)
   `);
 
   function storageBytes(): number {
@@ -139,7 +139,7 @@ export function createLifecycleEventStore(options: LifecycleEventStoreOptions): 
   }
 
   function rowCount(): number {
-    const row = db.prepare('SELECT COUNT(*) AS n FROM events').get() as { n?: number } | undefined;
+    const row = db.prepare('SELECT COUNT(*) AS n FROM lifecycle_events').get() as { n?: number } | undefined;
     return row?.n ?? 0;
   }
 
@@ -150,10 +150,10 @@ export function createLifecycleEventStore(options: LifecycleEventStoreOptions): 
   /** Delete up to `limit` oldest non-root rows; returns rows deleted. */
   function deleteOldestNonRoot(limit: number): number {
     const result = db.prepare(`
-      DELETE FROM events WHERE id IN (
-        SELECT id FROM events
+      DELETE FROM lifecycle_events WHERE id IN (
+        SELECT id FROM lifecycle_events
         WHERE id NOT IN (
-          SELECT MAX(id) FROM events WHERE phase IN ${ROOT_PHASES} GROUP BY instance, lane, work_id
+          SELECT MAX(id) FROM lifecycle_events WHERE phase IN ${ROOT_PHASES} GROUP BY instance, lane, work_id
         )
         ORDER BY id ASC LIMIT ?
       )
@@ -187,10 +187,10 @@ export function createLifecycleEventStore(options: LifecycleEventStoreOptions): 
       // 1. Time-based expiry — never touches protected roots.
       const cutoff = now() - retentionMs;
       const expired = db.prepare(`
-        DELETE FROM events
+        DELETE FROM lifecycle_events
         WHERE inserted_at_ms < ?
           AND id NOT IN (
-            SELECT MAX(id) FROM events WHERE phase IN ${ROOT_PHASES} GROUP BY instance, lane, work_id
+            SELECT MAX(id) FROM lifecycle_events WHERE phase IN ${ROOT_PHASES} GROUP BY instance, lane, work_id
           )
       `).run(cutoff);
       const expiredRows = Number(expired.changes ?? 0);
@@ -221,7 +221,7 @@ export function createLifecycleEventStore(options: LifecycleEventStoreOptions): 
 
     counters() {
       const dropped: Record<string, number> = {};
-      const rows = db.prepare('SELECT kind, value FROM drop_counters').all() as Array<{ kind: string; value: number }>;
+      const rows = db.prepare('SELECT kind, value FROM lifecycle_drop_counters').all() as Array<{ kind: string; value: number }>;
       for (const row of rows) dropped[row.kind] = row.value;
       return { dropped, storage_bytes: storageBytes(), rows: rowCount() };
     },
@@ -234,7 +234,7 @@ export function createLifecycleEventStore(options: LifecycleEventStoreOptions): 
       if (filter.work_id !== undefined) { clauses.push('work_id = ?'); params.push(filter.work_id); }
       const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
       params.push(filter.limit ?? 1000);
-      const rows = db.prepare(`SELECT * FROM events ${where} ORDER BY id ASC LIMIT ?`).all(...params) as Array<Record<string, unknown>>;
+      const rows = db.prepare(`SELECT * FROM lifecycle_events ${where} ORDER BY id ASC LIMIT ?`).all(...params) as Array<Record<string, unknown>>;
       const events: LifecycleEvent[] = [];
       for (const row of rows) {
         const candidate = {
