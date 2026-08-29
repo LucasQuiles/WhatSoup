@@ -22,7 +22,7 @@ import type { Database } from '../../../src/core/database.ts';
 import type { Messenger, IncomingMessage } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
 import type { IOutboundQueue } from '../../../src/runtimes/agent/outbound-queue.ts';
-import { toConversationKey } from '../../../src/core/conversation-key.ts';
+import { GLOBAL_CONVERSATION_KEY, toConversationKey } from '../../../src/core/conversation-key.ts';
 import type {
   MarkSystemTurnInput,
   PendingSystemTurnSnapshot,
@@ -1313,6 +1313,95 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       admitPendingSystemResult(state, mapKey, 'respawn_continuation');
       // success path clears the prior respawn-failed alert
       expect(mockClearAlertSource).toHaveBeenCalledWith('test', 'agent_respawn_failed');
+    });
+
+    it('clears a stale post-turn gate before the continuation so the reply is delivered, not suppressed as phantom (3398)', async () => {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      const state = runtime as unknown as PollRuntimeState;
+      const mapKey = dmJid;
+      seedPerChatSession(state, mapKey);
+
+      // The pre-crash user turn completed normally, which arms the post-turn
+      // gate for this chat (runtime-turn-result-handler arms it on every
+      // genuine user-turn result). The crash lands with the gate still set —
+      // no new user message has arrived to clear it.
+      const postTurnGate = (runtime as unknown as { postTurnGate: Set<string> }).postTurnGate;
+      postTurnGate.add(mapKey);
+
+      mockSession.getStatus
+        .mockReturnValueOnce({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null }) // timer guard check
+        .mockReturnValue({ active: true, pid: 321, sessionId: 'sess-gate', startedAt: '2026-06-16T00:00:00Z', messageCount: 1, lastMessageAt: null }); // post-resume
+
+      state.handlePerChatCrash(mapKey, dmJid, {
+        ...currentCrashIdentity(runtime, mapKey),
+        exitCode: 1, signal: null, sessionId: 'sess-gate', dbRowId: 8,
+      });
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      await vi.advanceTimersByTimeAsync(2_000);
+
+      await vi.waitFor(() => {
+        expect(mockSession.sendTurn).toHaveBeenCalledWith(
+          expect.stringContaining('session resumed after crash'),
+        );
+      });
+
+      // The model's continuation reply arrives while the respawn_continuation
+      // system turn is still pending. It must reach the user — on the broken
+      // path it dies as 'post-turn gate: suppressed phantom assistant_text'.
+      const toolScopeKey = state.sessionEventToolScopes.get(mockSession);
+      if (!toolScopeKey) throw new Error(`missing tool scope for ${mapKey}`);
+      state.handleEventPerChat(
+        mockSession,
+        { type: 'assistant_text', text: 'Picking up where we left off.' },
+        toolScopeKey,
+      );
+      expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith('Picking up where we left off.');
+      // The dispatch site cleared the stale gate before sending the continuation.
+      expect(postTurnGate.has(mapKey)).toBe(false);
+
+      admitPendingSystemResult(state, mapKey, 'respawn_continuation');
+    });
+
+    it('clears the shared-scope post-turn gate entry before the continuation outside per_chat (3398)', async () => {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'shared' });
+      const state = runtime as unknown as PollRuntimeState;
+      const mapKey = dmJid;
+      seedPerChatSession(state, mapKey);
+
+      // Shared scope gates outbound text under GLOBAL_CONVERSATION_KEY (the
+      // shared tool-scope key). A stale entry there survives the crash the same
+      // way the per-chat entry does.
+      const postTurnGate = (runtime as unknown as { postTurnGate: Set<string> }).postTurnGate;
+      postTurnGate.add(mapKey);
+      postTurnGate.add(GLOBAL_CONVERSATION_KEY);
+
+      mockSession.getStatus
+        .mockReturnValueOnce({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null }) // timer guard check
+        .mockReturnValue({ active: true, pid: 321, sessionId: 'sess-gate-shared', startedAt: '2026-06-16T00:00:00Z', messageCount: 1, lastMessageAt: null }); // post-resume
+
+      state.handlePerChatCrash(mapKey, dmJid, {
+        ...currentCrashIdentity(runtime, mapKey),
+        exitCode: 1, signal: null, sessionId: 'sess-gate-shared', dbRowId: 9,
+      });
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      await vi.advanceTimersByTimeAsync(2_000);
+
+      await vi.waitFor(() => {
+        expect(mockSession.sendTurn).toHaveBeenCalledWith(
+          expect.stringContaining('session resumed after crash'),
+        );
+      });
+
+      expect(postTurnGate.has(mapKey)).toBe(false);
+      expect(postTurnGate.has(GLOBAL_CONVERSATION_KEY)).toBe(false);
+
+      admitPendingSystemResult(state, mapKey, 'respawn_continuation');
     });
 
     it('does not clear respawn failure until the continuation crosses the provider gate', async () => {
