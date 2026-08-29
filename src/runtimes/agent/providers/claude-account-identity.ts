@@ -24,7 +24,7 @@
 //     status class. Never the raw CLI output.
 //   - Never rejects. Probe failures are contained into the result.
 
-import { timingSafeEqual } from 'node:crypto';
+import { safeStringEqual } from '../../../lib/safe-compare.ts';
 import {
   accountIdentityDigestPrefix,
   computeAccountIdentityDigest,
@@ -125,12 +125,6 @@ export function parseClaudeAuthStatusIdentity(output: string): ObservedAccountId
   return { kind: 'identity', digest: computeAccountIdentityDigest({ email, orgId }) };
 }
 
-function digestsEqual(a: string, b: string): boolean {
-  const left = Buffer.from(a, 'utf8');
-  const right = Buffer.from(b, 'utf8');
-  return left.length === right.length && timingSafeEqual(left, right);
-}
-
 /**
  * Verify the CLI's serving identity against the ratified digest. `null`
  * expectation = verification disabled (no spawn). Never rejects.
@@ -193,7 +187,7 @@ export async function verifyClaudeAccountIdentity(
   }
   if (observed.kind === 'unparseable') return outcome('unverifiable', 'unparseable', null);
   if (observed.kind === 'absent') return outcome('unverifiable', observed.reason, null);
-  return digestsEqual(observed.digest, expectedDigest)
+  return safeStringEqual(observed.digest, expectedDigest)
     ? outcome('match', null, observed.digest)
     : outcome('mismatch', null, observed.digest);
 }

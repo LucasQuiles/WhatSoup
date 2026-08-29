@@ -447,7 +447,7 @@ export function validateInstanceConfig(
   // instance config on disk; the shape rule lives in
   // lib/service-identity-config.ts and runs on every path, authOnly included.
   const identityErr = validateServiceIdentityConfig(raw, {
-    effectiveType: raw['type'] ?? ctx.originalType,
+    effectiveType: ctx.originalType,
   });
   if (identityErr) return err(identityErr.field, identityErr.message);
 

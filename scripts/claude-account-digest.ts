@@ -13,7 +13,7 @@
  * Exit codes: 0 digest printed; 2 not logged in; 3 identity fields missing
  * or output unparseable; 4 binary missing or probe failed; 64 usage.
  */
-import { assertKnownFlag, isHelpFlag, takeValue } from './lib/cli-args.ts';
+import { parseClosedOptions, type ClosedOptionError } from './lib/cli-args.ts';
 import {
   CLAUDE_AUTH_STATUS_ARGS,
   scrubbedAuthStatusEnv,
@@ -39,8 +39,13 @@ export interface ClaudeAccountDigestDependencies {
   stderr: (line: string) => void;
 }
 
-const KNOWN_FLAGS = ['--binary', '--help', '-h'] as const;
 const PROBE_TIMEOUT_MS = 15_000;
+
+const CLOSED_OPTION_MESSAGES: Record<ClosedOptionError, string> = {
+  'ci.input.duplicate-option': 'each option may be provided only once',
+  'ci.input.option-unknown': 'unknown argument',
+  'ci.input.option-value-missing': '--binary requires a value, but none was given',
+};
 
 const USAGE = [
   'Usage: npm run claude-account-digest [-- --binary <path-to-claude>]',
@@ -54,24 +59,15 @@ const USAGE = [
 ].join('\n');
 
 export function parseClaudeAccountDigestArgs(argv: readonly string[]): ClaudeAccountDigestArgs {
-  let binary: string | null = null;
-  let help = false;
-  for (let index = 0; index < argv.length; index += 1) {
-    const arg = argv[index]!;
-    if (isHelpFlag(arg)) {
-      help = true;
-      continue;
-    }
-    assertKnownFlag(arg, KNOWN_FLAGS);
-    if (!arg.startsWith('-')) throw new Error(`unknown argument: ${arg}`);
-    if (arg === '--binary') {
-      if (binary !== null) throw new Error('--binary may be provided only once');
-      const taken = takeValue(argv, index, arg);
-      binary = taken.value;
-      index = taken.index;
-    }
-  }
-  return { binary, help };
+  const parsed = parseClosedOptions(argv, {
+    booleanOptions: ['--help', '-h'],
+    valueOptions: ['--binary'],
+  });
+  if (parsed.error !== null) throw new Error(CLOSED_OPTION_MESSAGES[parsed.error]);
+  return {
+    binary: parsed.values.get('--binary') ?? null,
+    help: parsed.flags.has('--help') || parsed.flags.has('-h'),
+  };
 }
 
 export async function runClaudeAccountDigest(
@@ -111,13 +107,14 @@ export async function runClaudeAccountDigest(
     deps.stderr('auth-status probe failed to run');
     return 4;
   }
-  // The raw output is classified, never echoed.
+  // The raw output is classified, never echoed. Not-logged-in is recognized
+  // regardless of exit status (the CLI reports it structurally either way).
   const observed = parseClaudeAuthStatusIdentity(probe.output);
+  if (observed.kind === 'absent' && observed.reason === 'not-logged-in') {
+    deps.stderr('claude CLI reports not logged in for this config root — log in interactively first, then re-run');
+    return 2;
+  }
   if (probe.status !== 'ok') {
-    if (observed.kind === 'absent' && observed.reason === 'not-logged-in') {
-      deps.stderr('claude CLI reports not logged in for this config root — log in interactively first, then re-run');
-      return 2;
-    }
     deps.stderr('auth-status probe exited non-zero; no digest captured');
     return 4;
   }
@@ -126,10 +123,6 @@ export async function runClaudeAccountDigest(
     return 3;
   }
   if (observed.kind === 'absent') {
-    if (observed.reason === 'not-logged-in') {
-      deps.stderr('claude CLI reports not logged in for this config root — log in interactively first, then re-run');
-      return 2;
-    }
     deps.stderr('auth-status output has identity fields missing; no digest captured');
     return 3;
   }
@@ -141,19 +134,12 @@ if (process.argv[1]?.endsWith('claude-account-digest.ts')) {
   runClaudeAccountDigest(process.argv.slice(2), {
     getProviderBinary: () => getProviderBinary('claude-cli'),
     probe: (binary, args, env) => probeBinaryCommand(binary, args, env, { timeoutMs: PROBE_TIMEOUT_MS }),
-    // Explicit allow-list — never hand the CLI probe the operator's full shell
-    // env. CLAUDE_CONFIG_DIR is forwarded when set so the digest is captured
-    // for the config root the service resolves (mirrors the runtime's probe).
-    env: {
-      // env-allowed: child-env forward; explicit per-var allow-list, not passthrough
-      HOME: process.env['HOME'],
-      // env-allowed: ambient OS PATH contract for executable resolution
-      PATH: process.env['PATH'],
-      // env-allowed: child-env forward; explicit per-var allow-list, not passthrough
-      USER: process.env['USER'],
-      // env-allowed: external-tool interop; must track the env the spawned claude CLI sees
-      ...(process.env['CLAUDE_CONFIG_DIR'] ? { CLAUDE_CONFIG_DIR: process.env['CLAUDE_CONFIG_DIR'] } : {}),
-    },
+    // Single allow-list: scrubbedAuthStatusEnv (the same scrub the runtime
+    // verifier applies) is the ONLY env filter, applied here and again —
+    // idempotently — before the spawn, so the captured digest context cannot
+    // drift from the service probe context. Never forwarded whole.
+    // env-allowed: scrubbed to the shared auth-status allow-list, not passthrough
+    env: scrubbedAuthStatusEnv(process.env),
     stdout: (line) => { process.stdout.write(`${line}\n`); },
     stderr: (line) => { process.stderr.write(`${line}\n`); },
   }).then((code) => { process.exitCode = code; });
