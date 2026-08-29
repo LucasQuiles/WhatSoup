@@ -63,6 +63,13 @@ function checkStaged(): void {
 }
 
 function checkRatchet(): void {
+  // Scope floor (#2102 idiom): a tree with no tracked files at all is not a
+  // clean estate, it is no estate — refuse rather than pass vacuously.
+  const trackedAny = git(['ls-files']).split('\n').filter((p) => p.length > 0).length;
+  if (trackedAny === 0) {
+    console.error('png-estate guard: INCONCLUSIVE — examined 0 tracked files (empty or non-repo scan root)');
+    process.exit(2);
+  }
   const tracked = git(['ls-files', '*.png', '*.PNG'])
     .split('\n')
     .filter((p) => p.length > 0);
@@ -101,6 +108,6 @@ try {
   if (process.argv.includes('--staged')) checkStaged();
   else checkRatchet();
 } catch (err) {
-  console.error(`png-estate guard could not run: ${String(err)}`);
+  console.error(`png-estate guard: INCONCLUSIVE — could not run: ${String(err)}`);
   process.exit(2);
 }
