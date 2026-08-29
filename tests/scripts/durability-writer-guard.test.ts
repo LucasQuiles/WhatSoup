@@ -493,7 +493,7 @@ describe('durability-writer-guard — self-provisioned discovery (completeness b
     expect(result.discoveredTableCount).toBeGreaterThan(0);
   });
 
-  it('SELF_PROVISIONED declares exactly the twelve known self-provisioned tables', () => {
+  it('SELF_PROVISIONED declares exactly the fourteen known self-provisioned tables', () => {
     const tables = SELF_PROVISIONED.map((e) => e.table).sort();
     expect(tables).toEqual(
       [
@@ -503,6 +503,8 @@ describe('durability-writer-guard — self-provisioned discovery (completeness b
         'command_surface_prefs',
         'events',
         'incidents',
+        'lifecycle_drop_counters',
+        'lifecycle_events',
         'meta',
         'pending_poll_decision_receipts',
         'pending_poll_decisions',
