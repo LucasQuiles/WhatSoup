@@ -2994,6 +2994,38 @@ def is_test_provenance_event(event: dict[str, Any]) -> bool:
     return provenance.get("test") is True
 
 
+# Test roots recognised ONLY by the email-fallback gate. Linux pytest basetemps
+# (``pytest-of-<user>``) are deliberately not global TEST_LEAK patterns: the
+# repository's own suite runs with tmp_path roots under them, and a global
+# match would silently drop fixture events in unrelated tests. The email gate
+# is narrow enough (no email for anything rooted in a test tmp dir) to apply it.
+_EMAIL_FALLBACK_TEST_ROOT_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(r"/pytest-of-[^/]+/", re.I),
+]
+
+
+def email_fallback_blocked_reason(event: dict[str, Any]) -> str | None:
+    """Why an event must NOT be escalated by email, or None when it may.
+
+    2026-08-28: a pytest-fixture dead-letter (dispatch log under a Linux
+    pytest basetemp, synthetic machine name, a real instance label) reached
+    the operator as a real critical email through the F5 fallback. The queue
+    path already suppresses test-provenance events; the email fallback must
+    apply the same gate plus the test-root check above.
+    """
+    if is_test_provenance_event(event):
+        return "test_provenance"
+    if event_is_test_leak(event):
+        return "test_leak"
+    parts: list[str] = []
+    _extract_event_text_values(event, parts)
+    for text in parts:
+        for pattern in _EMAIL_FALLBACK_TEST_ROOT_PATTERNS:
+            if pattern.search(text):
+                return "test_leak"
+    return None
+
+
 def omit_dispatch_log_in_message(event: dict[str, Any]) -> bool:
     diagnostics = event.get("diagnostics") if isinstance(event.get("diagnostics"), dict) else {}
     return diagnostics.get("omitDispatchLogInMessage") is True
@@ -6209,7 +6241,17 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
 
         # --- F5: email fallback (attempts >= 3) with unavailability tracking ---
         email_status = "not_attempted"
-        if attempts >= 3:
+        email_blocked = email_fallback_blocked_reason(event) if attempts >= 3 else None
+        if email_blocked is not None:
+            # Synthetic / test-provenance events never escalate by email; they
+            # keep the ordinary retry -> dead-letter lifecycle.
+            append_dispatch_log(paths, {
+                "type": "email_fallback_test_provenance_suppressed",
+                "eventId": event.get("id"),
+                "reason": email_blocked,
+                "attempts": attempts,
+            })
+        elif attempts >= 3:
             fallback_path = Path(EMAIL_FALLBACK)
             if not fallback_path.exists() or not os.access(fallback_path, os.X_OK):
                 # Fallback script is missing or non-executable — record unavailability
