@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import re
 import socket
+import sqlite3
 import subprocess
 import sys
 import time
@@ -102,6 +103,9 @@ KNOWN_WATCHDOG_CHECKS: frozenset[str] = frozenset({
     "fleet_sentinel",
     "collector_roster",
     "browser_debug",
+    "wedge_signature",
+    "supervision_deadman",
+    "clock_skew",
 })
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -1098,6 +1102,38 @@ def monotonic_now_seconds() -> float:
     return time.clock_gettime(time.CLOCK_MONOTONIC)
 
 
+def stop_intent_dir() -> Path:
+    """Directory of operator-registered stop-intent markers (one file per unit)."""
+    override = os.environ.get("BOT_ERRORS_STOP_INTENT_DIR", "").strip()
+    if override:
+        return Path(override)
+    return state_root() / "stop-intents"
+
+
+def stop_intent_ttl_seconds() -> float:
+    raw = os.environ.get("BOT_ERRORS_STOP_INTENT_TTL_SECONDS", "14400")
+    try:
+        value = float(raw)
+    except ValueError:
+        return 14400.0
+    return max(0.0, value) if math.isfinite(value) else 14400.0
+
+
+def stop_intent_age_seconds(service: str) -> float | None:
+    """Age of the registered stop-intent marker for `service`; None when absent.
+
+    A clean exit is "planned" only while a marker registered before the stop is
+    younger than the TTL — Result=success alone is NOT intent: an external
+    SIGTERM produces a clean exit that would otherwise be misread as planned
+    (observed live 2026-08-28: a production line sat down 3.5h behind an intent-skip).
+    """
+    try:
+        mtime = (stop_intent_dir() / service).stat().st_mtime
+    except OSError:
+        return None
+    return max(0.0, float(now_epoch()) - mtime)
+
+
 def dry_service_intent() -> dict[str, dict[str, str]]:
     raw = os.environ.get("BOT_ERRORS_DRY_SERVICE_INTENT", "").strip()
     if not raw:
@@ -1168,6 +1204,8 @@ def classify_service_intent(
     props: dict[str, str],
     grace_seconds: float,
     monotonic_now: float,
+    stop_intent_age: float | None = None,
+    stop_intent_ttl: float | None = None,
 ) -> tuple[str, str]:
     active_state = props.get("ActiveState", "").strip().lower()
     sub_state = props.get("SubState", "").strip().lower()
@@ -1200,10 +1238,22 @@ def classify_service_intent(
 
     if active_state in {"inactive", "deactivating"}:
         if result in {"", "success"} and exec_status in {"", "0"}:
+            ttl = stop_intent_ttl if stop_intent_ttl is not None else stop_intent_ttl_seconds()
+            if stop_intent_age is not None and stop_intent_age <= ttl:
+                return (
+                    "planned",
+                    f"clean stop with registered intent: age={round(stop_intent_age, 1)}s "
+                    f"ttl={round(ttl, 1)}s ActiveState={active_state} SubState={sub_state or 'dead'}",
+                )
+            reason = (
+                "no stop-intent marker"
+                if stop_intent_age is None
+                else f"stop-intent marker expired: age={round(stop_intent_age, 1)}s > ttl={round(ttl, 1)}s"
+            )
             return (
-                "planned",
-                f"clean stop: ActiveState={active_state} SubState={sub_state or 'dead'} "
-                f"Result={result or 'success'}",
+                "unplanned_clean_stop",
+                f"clean stop without registered intent ({reason}): ActiveState={active_state} "
+                f"SubState={sub_state or 'dead'} Result={result or 'success'}",
             )
         return (
             "crash",
@@ -1257,7 +1307,13 @@ def local_service_problems() -> dict[str, str]:
             continue
         try:
             props = service_intent_properties(service)
-            classification, detail = classify_service_intent(props, grace, monotonic_now)
+            classification, detail = classify_service_intent(
+                props,
+                grace,
+                monotonic_now,
+                stop_intent_age=stop_intent_age_seconds(service),
+                stop_intent_ttl=stop_intent_ttl_seconds(),
+            )
         except Exception as exc:  # noqa: BLE001 - ambiguity must alert, not hide.
             problems[key] = (
                 f"local service intent check failed: service={service} instance={name} "
@@ -1268,11 +1324,224 @@ def local_service_problems() -> dict[str, str]:
             if classification != "active":
                 log_intent_skip(service, name, classification, detail)
             continue
+        if classification == "unplanned_clean_stop":
+            detail += f" register_intent={stop_intent_dir() / service}"
         problems[key] = (
             f"local service crash: service={service} instance={name} "
             f"intent={classification} {detail} expected=always_on profile={profile}"
         )
     return problems
+
+
+def wedge_nonterminal_age_seconds() -> float:
+    raw = os.environ.get("BOT_ERRORS_WEDGE_NONTERMINAL_AGE_SECONDS", "900")
+    try:
+        value = float(raw)
+    except ValueError:
+        return 900.0
+    return max(0.0, value) if math.isfinite(value) else 900.0
+
+
+def wedge_occurrence_grace_seconds() -> float:
+    raw = os.environ.get("BOT_ERRORS_WEDGE_OCCURRENCE_GRACE_SECONDS", "3600")
+    try:
+        value = float(raw)
+    except ValueError:
+        return 3600.0
+    return max(0.0, value) if math.isfinite(value) else 3600.0
+
+
+def wedge_db_root() -> Path:
+    override = os.environ.get("BOT_ERRORS_WEDGE_DB_ROOT", "").strip()
+    if override:
+        return Path(override)
+    return Path.home() / ".local" / "share" / "whatsoup" / "instances"
+
+
+def wedge_signature_problems() -> dict[str, str]:
+    """FLOS Stage 0 S0.1: read-only wedge-signature probe per expected instance.
+
+    Two signatures, from the confirmed scheduled-session wedge incidents:
+    1. a nonterminal inbound event older than the age threshold with younger
+       rows queued behind it in the same conversation;
+    2. a scheduled trigger occurrence stuck nonterminal past deadline + grace.
+
+    Dark by default: runs only when `wedge_signature` is explicitly listed in
+    BOT_ERRORS_WATCHDOG_CHECKS (it is NOT in DEFAULT_CHECKS). Read-only toward
+    the product runtime: SQLite is opened mode=ro with query_only ON, never
+    immutable=1 (the live database is WAL).
+    """
+    problems: dict[str, str] = {}
+    now = now_epoch()
+    age_threshold = wedge_nonterminal_age_seconds()
+    occ_grace = wedge_occurrence_grace_seconds()
+    for item in expected_local_services():
+        name = item["name"]
+        key = f"wedge:{name}"
+        db_path = wedge_db_root() / name / "bot.db"
+        if not db_path.exists():
+            problems[key] = f"wedge probe misconfigured: instance={name} database missing: {db_path}"
+            continue
+        try:
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
+            try:
+                conn.execute("PRAGMA query_only=ON")
+                tables = {
+                    row[0]
+                    for row in conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table' "
+                        "AND name IN ('inbound_events','trigger_occurrences')"
+                    )
+                }
+                if not tables:
+                    problems[key] = (
+                        f"wedge probe found no lifecycle tables: instance={name} db={db_path}"
+                    )
+                    continue
+                wedged: list[tuple[int, str, str, int, int]] = []
+                if "inbound_events" in tables:
+                    rows = conn.execute(
+                        "SELECT r1.seq, r1.conversation_key, r1.processing_status, "
+                        "CAST(strftime('%s', r1.received_at) AS INTEGER), "
+                        "(SELECT COUNT(*) FROM inbound_events r2 "
+                        " WHERE r2.conversation_key = r1.conversation_key AND r2.seq > r1.seq) "
+                        "FROM inbound_events r1 "
+                        "WHERE r1.processing_status NOT IN ('complete', 'failed') "
+                        "ORDER BY r1.seq"
+                    ).fetchall()
+                    wedged = [
+                        row
+                        for row in rows
+                        if row[3] is not None and (now - row[3]) > age_threshold and row[4] > 0
+                    ]
+                stuck_occurrences: list[tuple[int, str, int]] = []
+                if "trigger_occurrences" in tables:
+                    stuck_occurrences = conn.execute(
+                        "SELECT id, state, scheduled_for FROM trigger_occurrences "
+                        "WHERE state IN ('pending', 'claimed', 'running') "
+                        "AND scheduled_for IS NOT NULL AND scheduled_for < ? "
+                        "ORDER BY id",
+                        (now - occ_grace,),
+                    ).fetchall()
+            finally:
+                conn.close()
+        except sqlite3.Error as exc:
+            problems[key] = f"wedge probe failed: instance={name} error={str(exc)[:160]}"
+            continue
+        details = []
+        if wedged:
+            first = wedged[0]
+            details.append(
+                f"nonterminal inbound seq={first[0]} status={first[2]} "
+                f"age_seconds={now - first[3]} queued_behind={first[4]} "
+                f"wedged_count={len(wedged)}"
+            )
+        if stuck_occurrences:
+            occ = stuck_occurrences[0]
+            details.append(
+                f"stuck occurrence id={occ[0]} state={occ[1]} scheduled_for={occ[2]} "
+                f"overdue_seconds={now - int(occ[2])} stuck_count={len(stuck_occurrences)}"
+            )
+        if details:
+            problems[key] = f"wedge signature: instance={name} " + "; ".join(details)
+    return problems
+
+
+def supervision_max_age_seconds() -> float:
+    raw = os.environ.get("BOT_ERRORS_SUPERVISION_MAX_AGE_SECONDS", "7200")
+    try:
+        value = float(raw)
+    except ValueError:
+        return 7200.0
+    return max(0.0, value) if math.isfinite(value) else 7200.0
+
+
+def supervision_deadman_problems() -> dict[str, str]:
+    """FLOS Stage 0 S0.2: independent supervision-loop deadman.
+
+    Alerts when the supervision checkpoint pointer named by
+    BOT_ERRORS_SUPERVISION_POINTER has not advanced a generation (its
+    `moved_at_utc`) within BOT_ERRORS_SUPERVISION_MAX_AGE_SECONDS (default
+    2h). Dark by default: runs only when `supervision_deadman` is explicitly
+    listed in BOT_ERRORS_WATCHDOG_CHECKS; deploying it on a second host with
+    a mirrored pointer is a deployment act. Fail-closed: a missing path,
+    unreadable file, or absent timestamp alerts rather than staying quiet.
+    """
+    key = "supervision_deadman"
+    pointer = os.environ.get("BOT_ERRORS_SUPERVISION_POINTER", "").strip()
+    if not pointer:
+        return {key: "supervision deadman misconfigured: BOT_ERRORS_SUPERVISION_POINTER is not set"}
+    try:
+        payload = json.loads(Path(pointer).read_text())
+    except OSError as exc:
+        return {key: f"supervision checkpoint pointer unreadable: {pointer} error={str(exc)[:120]}"}
+    except json.JSONDecodeError as exc:
+        return {key: f"supervision checkpoint pointer malformed: {pointer} error={str(exc)[:120]}"}
+    moved = parse_iso_epoch(payload.get("moved_at_utc")) if isinstance(payload, dict) else None
+    if moved is None:
+        return {key: f"supervision checkpoint pointer missing moved_at_utc: {pointer}"}
+    age = now_epoch() - moved
+    max_age = supervision_max_age_seconds()
+    if age > max_age:
+        return {
+            key: f"supervision checkpoint stale: age_seconds={age} max={int(max_age)} pointer={pointer}"
+        }
+    return {}
+
+
+def clock_skew_allowance_seconds() -> float:
+    raw = os.environ.get("BOT_ERRORS_CLOCK_SKEW_ALLOWANCE_SECONDS", "5")
+    try:
+        value = float(raw)
+    except ValueError:
+        return 5.0
+    return max(0.0, value) if math.isfinite(value) else 5.0
+
+
+def clock_reference_epoch() -> tuple[int | None, str]:
+    dry = os.environ.get("BOT_ERRORS_DRY_CLOCK_REFERENCE_EPOCH", "").strip()
+    if dry:
+        try:
+            return int(float(dry)), "dry"
+        except ValueError:
+            return None, f"invalid dry reference epoch={dry!r}"
+    url = os.environ.get("BOT_ERRORS_CLOCK_REFERENCE_URL", "").strip()
+    if not url:
+        return None, "BOT_ERRORS_CLOCK_REFERENCE_URL is not set"
+    try:
+        with urlopen(Request(url, method="HEAD"), timeout=5) as resp:
+            date_header = resp.headers.get("Date")
+    except OSError as exc:
+        return None, f"reference unreachable: {str(exc)[:120]}"
+    if not date_header:
+        return None, "reference response carried no Date header"
+    from email.utils import parsedate_to_datetime
+
+    try:
+        return int(parsedate_to_datetime(date_header).timestamp()), "http-date"
+    except (TypeError, ValueError):
+        return None, f"unparseable Date header: {date_header[:60]}"
+
+
+def clock_skew_problems() -> dict[str, str]:
+    """FLOS Stage 0 S0.3: recurring wall-clock skew probe with an allowance.
+
+    Compares host wall clock against a common reference (dry override for
+    tests; otherwise the Date header of BOT_ERRORS_CLOCK_REFERENCE_URL).
+    Dark by default; fail-closed when enabled without a usable reference.
+    """
+    key = "clock_skew"
+    ref, source = clock_reference_epoch()
+    if ref is None:
+        return {key: f"clock skew probe misconfigured or unreachable: {source}"}
+    skew = abs(now_epoch() - ref)
+    allowance = clock_skew_allowance_seconds()
+    if skew > allowance:
+        return {
+            key: f"clock skew beyond allowance: skew_seconds={skew} "
+            f"allowance={int(allowance)} source={source}"
+        }
+    return {}
 
 
 def local_health_timeout() -> float:
@@ -2095,6 +2364,12 @@ def active_reconcile_prefixes(checks: set[str]) -> list[str]:
         prefixes.append("collector_roster")
     if "browser_debug" in checks:
         prefixes.append(BROWSER_DEBUG_PREFIX)
+    if "wedge_signature" in checks:
+        prefixes.append("wedge:")
+    if "supervision_deadman" in checks:
+        prefixes.append("supervision_deadman")
+    if "clock_skew" in checks:
+        prefixes.append("clock_skew")
     return prefixes
 
 
@@ -2211,6 +2486,12 @@ def collect_problems(args: argparse.Namespace, checks: set[str] | None = None, e
         problems.update(local_instance_health_problems(evaluated_instances))
     if "browser_debug" in checks:
         problems.update(browser_debug_problems())
+    if "wedge_signature" in checks:
+        problems.update(wedge_signature_problems())
+    if "supervision_deadman" in checks:
+        problems.update(supervision_deadman_problems())
+    if "clock_skew" in checks:
+        problems.update(clock_skew_problems())
     return problems
 
 

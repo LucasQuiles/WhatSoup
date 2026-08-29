@@ -124,7 +124,7 @@ describe('public surface drift check', () => {
     );
     expect(normalizedRelease).toContain('`schema_ready: false`');
     expect(normalizedRunbook).toContain(
-      'systemd `Restart=on-failure` does not react to HTTP `503`',
+      'systemd `Restart=always` restarts on process exit but does not react to HTTP `503`',
     );
   });
 

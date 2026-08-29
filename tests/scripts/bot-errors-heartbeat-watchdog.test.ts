@@ -1180,3 +1180,310 @@ describe('bot-errors-heartbeat-watchdog transition latch', () => {
     expect(events[0]!.summary).toBe('BOT ERRORS heartbeat watchdog stale: q_loop');
   });
 });
+
+describe('stop-intent classification', () => {
+  const service = 'whatsoup-agent-alpha.service';
+
+  function intentEnv(intentProps: Record<string, string>, extra: Record<string, string> = {}) {
+    const profile = join(tmpRoot, 'health-profile.json');
+    writeFileSync(profile, JSON.stringify({
+      instances: [{ name: 'agent-alpha', expected: 'always_on', service }],
+    }));
+    return {
+      BOT_ERRORS_STATE_DIR: tmpRoot,
+      BOT_ERRORS_WATCHDOG_CHECKS: 'local_services',
+      BOT_ERRORS_HEALTH_PROFILE: profile,
+      BOT_ERRORS_DRY_SERVICE_INTENT: JSON.stringify({ [service]: intentProps }),
+      BOT_ERRORS_STOP_INTENT_DIR: join(tmpRoot, 'stop-intents'),
+      ...extra,
+    };
+  }
+
+  const cleanStop = { ActiveState: 'inactive', SubState: 'dead', Result: 'success', ExecMainStatus: '0' };
+
+  it('alerts on a clean stop with no registered stop intent', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-heartbeat-'));
+
+    runWatchdog(intentEnv(cleanStop));
+
+    const events = readOutboxEvents();
+    expect(events).toHaveLength(1);
+    expect(events[0]!.severity).toBe('critical');
+    expect(events[0]!.alertSource).toBe(`local_service:${service}`);
+    expect(events[0]!.evidence).toContain('unplanned_clean_stop');
+    expect(events[0]!.evidence).toContain('no stop-intent marker');
+    expect(events[0]!.evidence).toContain(join(tmpRoot, 'stop-intents', service));
+  });
+
+  it('honors a fresh registered stop intent as planned', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-heartbeat-'));
+    mkdirSync(join(tmpRoot, 'stop-intents'), { recursive: true });
+    writeFileSync(join(tmpRoot, 'stop-intents', service), '');
+
+    runWatchdog(intentEnv(cleanStop));
+
+    expect(existsSync(join(tmpRoot, 'outbox'))).toBe(false);
+  });
+
+  it('treats an expired stop intent as unplanned', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-heartbeat-'));
+    mkdirSync(join(tmpRoot, 'stop-intents'), { recursive: true });
+    const marker = join(tmpRoot, 'stop-intents', service);
+    writeFileSync(marker, '');
+    const old = new Date(Date.now() - 100_000_000); // ~27.8h ago; default TTL is 4h
+    utimesSync(marker, old, old);
+
+    runWatchdog(intentEnv(cleanStop));
+
+    const events = readOutboxEvents();
+    expect(events).toHaveLength(1);
+    expect(events[0]!.evidence).toContain('unplanned_clean_stop');
+    expect(events[0]!.evidence).toContain('stop-intent marker expired');
+  });
+
+  it('still alerts on unclean exits even when a stop intent is registered', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-heartbeat-'));
+    mkdirSync(join(tmpRoot, 'stop-intents'), { recursive: true });
+    writeFileSync(join(tmpRoot, 'stop-intents', service), '');
+
+    runWatchdog(intentEnv({ ActiveState: 'failed', SubState: 'failed', Result: 'exit-code', ExecMainStatus: '1' }));
+
+    const events = readOutboxEvents();
+    expect(events).toHaveLength(1);
+    expect(events[0]!.evidence).toContain('intent=crash');
+  });
+});
+
+describe('wedge_signature check (FLOS Stage 0 S0.1)', () => {
+  const DRY_NOW = 1787900000;
+
+  function receivedAt(secondsAgo: number): string {
+    return new Date((DRY_NOW - secondsAgo) * 1000).toISOString().replace('T', ' ').slice(0, 19);
+  }
+
+  function makeDb(dbPath: string, inbound: Array<[number, string, string, string]>, occurrences: Array<[number, string, number]>) {
+    execFileSync('python3', ['-c', `
+import json, sqlite3, sys
+from pathlib import Path
+db_path, inbound, occurrences = sys.argv[1], json.loads(sys.argv[2]), json.loads(sys.argv[3])
+Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+conn = sqlite3.connect(db_path)
+conn.execute("CREATE TABLE inbound_events (seq INTEGER PRIMARY KEY, message_id TEXT, conversation_key TEXT, chat_jid TEXT, received_at TEXT, routed_to TEXT, processing_status TEXT, completed_at TEXT, terminal_reason TEXT, continuity_candidate_reason TEXT, continuity_candidate_source TEXT, continuity_candidate_marked_at TEXT, failure_class TEXT)")
+conn.execute("CREATE TABLE trigger_occurrences (id INTEGER PRIMARY KEY, trigger_id INTEGER, state TEXT, scheduled_for INTEGER)")
+for seq, conv, status, received in inbound:
+    conn.execute("INSERT INTO inbound_events (seq, message_id, conversation_key, chat_jid, received_at, processing_status) VALUES (?, ?, ?, ?, ?, ?)", (seq, f"m{seq}", conv, conv, received, status))
+for oid, state, scheduled in occurrences:
+    conn.execute("INSERT INTO trigger_occurrences (id, trigger_id, state, scheduled_for) VALUES (?, 1, ?, ?)", (oid, state, scheduled))
+conn.commit()
+conn.close()
+`, dbPath, JSON.stringify(inbound), JSON.stringify(occurrences)], { cwd: process.cwd(), encoding: 'utf8' });
+  }
+
+  function wedgeEnv() {
+    const profile = join(tmpRoot, 'health-profile.json');
+    writeFileSync(profile, JSON.stringify({
+      instances: [{ name: 'agent-alpha', expected: 'always_on', service: 'whatsoup-agent-alpha.service' }],
+    }));
+    return {
+      BOT_ERRORS_STATE_DIR: tmpRoot,
+      BOT_ERRORS_WATCHDOG_CHECKS: 'wedge_signature',
+      BOT_ERRORS_HEALTH_PROFILE: profile,
+      BOT_ERRORS_WEDGE_DB_ROOT: join(tmpRoot, 'instances'),
+      BOT_ERRORS_DRY_NOW: String(DRY_NOW),
+    };
+  }
+
+  function dbPath(): string {
+    return join(tmpRoot, 'instances', 'agent-alpha', 'bot.db');
+  }
+
+  it('alerts when an old nonterminal inbound has younger rows queued behind it', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-heartbeat-'));
+    makeDb(dbPath(), [
+      [10, 'conv-1', 'processing', receivedAt(7200)],
+      [11, 'conv-1', 'pending', receivedAt(60)],
+    ], []);
+
+    runWatchdog(wedgeEnv());
+
+    const events = readOutboxEvents();
+    expect(events).toHaveLength(1);
+    expect(events[0]!.severity).toBe('critical');
+    expect(events[0]!.alertSource).toBe('wedge:agent-alpha');
+    expect(events[0]!.evidence).toContain('nonterminal inbound seq=10');
+    expect(events[0]!.evidence).toContain('queued_behind=1');
+  });
+
+  it('alerts when a scheduled occurrence is stuck nonterminal past its deadline', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-heartbeat-'));
+    makeDb(dbPath(), [], [[7, 'running', DRY_NOW - 7200]]);
+
+    runWatchdog(wedgeEnv());
+
+    const events = readOutboxEvents();
+    expect(events).toHaveLength(1);
+    expect(events[0]!.evidence).toContain('stuck occurrence id=7');
+    expect(events[0]!.evidence).toContain('state=running');
+  });
+
+  it('stays quiet on a healthy database', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-heartbeat-'));
+    makeDb(dbPath(), [
+      [10, 'conv-1', 'complete', receivedAt(7200)],
+      [11, 'conv-1', 'complete', receivedAt(60)],
+    ], [[7, 'ok', DRY_NOW - 7200]]);
+
+    runWatchdog(wedgeEnv());
+
+    expect(existsSync(join(tmpRoot, 'outbox'))).toBe(false);
+  });
+
+  it('stays quiet for an old nonterminal row with nothing queued behind it', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-heartbeat-'));
+    makeDb(dbPath(), [
+      [10, 'conv-2', 'processing', receivedAt(7200)],
+      [11, 'conv-other', 'complete', receivedAt(60)],
+    ], []);
+
+    runWatchdog(wedgeEnv());
+
+    expect(existsSync(join(tmpRoot, 'outbox'))).toBe(false);
+  });
+
+  it('reports a problem when the instance database is missing', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-heartbeat-'));
+
+    runWatchdog(wedgeEnv());
+
+    const events = readOutboxEvents();
+    expect(events).toHaveLength(1);
+    expect(events[0]!.evidence).toContain('database missing');
+  });
+
+  it('is registered but stays out of the default check set', () => {
+    const output = execFileSync('python3', ['-c', `
+import importlib.util, json
+spec = importlib.util.spec_from_file_location("watchdog", "deploy/scripts/bot-errors-heartbeat-watchdog.py")
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+names = ["wedge_signature", "supervision_deadman", "clock_skew"]
+print(json.dumps({
+    name: [
+        "known" if name in m.KNOWN_WATCHDOG_CHECKS else "unknown",
+        "dark" if name not in m.DEFAULT_CHECKS.split(",") else "default",
+    ]
+    for name in names
+}))
+`], { cwd: process.cwd(), encoding: 'utf8' });
+    expect(JSON.parse(output)).toEqual({
+      wedge_signature: ['known', 'dark'],
+      supervision_deadman: ['known', 'dark'],
+      clock_skew: ['known', 'dark'],
+    });
+  });
+});
+
+describe('supervision_deadman check (FLOS Stage 0 S0.2)', () => {
+  const DRY_NOW = 1787900000;
+
+  function isoAt(epoch: number): string {
+    return new Date(epoch * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z');
+  }
+
+  function deadmanEnv(extra: Record<string, string> = {}) {
+    return {
+      BOT_ERRORS_STATE_DIR: tmpRoot,
+      BOT_ERRORS_WATCHDOG_CHECKS: 'supervision_deadman',
+      BOT_ERRORS_DRY_NOW: String(DRY_NOW),
+      ...extra,
+    };
+  }
+
+  it('alerts when the checkpoint pointer has not advanced within the bound', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-heartbeat-'));
+    const pointer = join(tmpRoot, 'CURRENT.json');
+    writeFileSync(pointer, JSON.stringify({ current_generation: 'gen-x.json', moved_at_utc: isoAt(DRY_NOW - 8000) }));
+
+    runWatchdog(deadmanEnv({ BOT_ERRORS_SUPERVISION_POINTER: pointer }));
+
+    const events = readOutboxEvents();
+    expect(events).toHaveLength(1);
+    expect(events[0]!.severity).toBe('critical');
+    expect(events[0]!.alertSource).toBe('supervision_deadman');
+    expect(events[0]!.evidence).toContain('supervision checkpoint stale');
+    expect(events[0]!.evidence).toContain('age_seconds=8000');
+  });
+
+  it('stays quiet while the pointer is fresh', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-heartbeat-'));
+    const pointer = join(tmpRoot, 'CURRENT.json');
+    writeFileSync(pointer, JSON.stringify({ current_generation: 'gen-x.json', moved_at_utc: isoAt(DRY_NOW - 600) }));
+
+    runWatchdog(deadmanEnv({ BOT_ERRORS_SUPERVISION_POINTER: pointer }));
+
+    expect(existsSync(join(tmpRoot, 'outbox'))).toBe(false);
+  });
+
+  it('alerts when the pointer file is unreadable', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-heartbeat-'));
+
+    runWatchdog(deadmanEnv({ BOT_ERRORS_SUPERVISION_POINTER: join(tmpRoot, 'absent.json') }));
+
+    const events = readOutboxEvents();
+    expect(events).toHaveLength(1);
+    expect(events[0]!.evidence).toContain('pointer unreadable');
+  });
+
+  it('alerts when enabled without a pointer path', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-heartbeat-'));
+
+    runWatchdog(deadmanEnv());
+
+    const events = readOutboxEvents();
+    expect(events).toHaveLength(1);
+    expect(events[0]!.evidence).toContain('misconfigured');
+  });
+});
+
+describe('clock_skew check (FLOS Stage 0 S0.3)', () => {
+  const DRY_NOW = 1787900000;
+
+  function skewEnv(extra: Record<string, string> = {}) {
+    return {
+      BOT_ERRORS_STATE_DIR: tmpRoot,
+      BOT_ERRORS_WATCHDOG_CHECKS: 'clock_skew',
+      BOT_ERRORS_DRY_NOW: String(DRY_NOW),
+      ...extra,
+    };
+  }
+
+  it('alerts when the wall clock skews beyond the allowance', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-heartbeat-'));
+
+    runWatchdog(skewEnv({ BOT_ERRORS_DRY_CLOCK_REFERENCE_EPOCH: String(DRY_NOW + 100) }));
+
+    const events = readOutboxEvents();
+    expect(events).toHaveLength(1);
+    expect(events[0]!.alertSource).toBe('clock_skew');
+    expect(events[0]!.evidence).toContain('clock skew beyond allowance');
+    expect(events[0]!.evidence).toContain('skew_seconds=100');
+  });
+
+  it('stays quiet within the allowance', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-heartbeat-'));
+
+    runWatchdog(skewEnv({ BOT_ERRORS_DRY_CLOCK_REFERENCE_EPOCH: String(DRY_NOW + 3) }));
+
+    expect(existsSync(join(tmpRoot, 'outbox'))).toBe(false);
+  });
+
+  it('alerts when enabled without a reference', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-heartbeat-'));
+
+    runWatchdog(skewEnv());
+
+    const events = readOutboxEvents();
+    expect(events).toHaveLength(1);
+    expect(events[0]!.evidence).toContain('misconfigured or unreachable');
+  });
+});
