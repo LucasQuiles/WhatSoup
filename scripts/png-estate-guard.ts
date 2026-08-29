@@ -25,7 +25,9 @@ export const TRACKED_PNG_COUNT_BASELINE = 33;
 export const TRACKED_PNG_BYTES_BASELINE = 13_319_198;
 
 function git(args: string[]): string {
-  return execFileSync('git', args, { encoding: 'utf8' });
+  // 30s bound: repo-local plumbing only; the sync-exec timeout budget requires
+  // every sync exec call to carry one (fitness-sync-exec-timeout-budget).
+  return execFileSync('git', args, { encoding: 'utf8', timeout: 30_000 });
 }
 
 function fail(lines: string[]): never {
