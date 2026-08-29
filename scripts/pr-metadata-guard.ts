@@ -288,21 +288,28 @@ export function runPrMetadataGuard(
   const { base, head, target, defaultBranch, pullRequestNumber } = input;
   if (!isFullObjectId(base) || !isFullObjectId(head)) return inconclusive('pr-metadata.revision-invalid');
 
-  let commits = '';
+  // GitHub event payloads freeze base.sha at the base branch's tip when the event
+  // fired, not at the PR's fork point, so base may legitimately not be an ancestor
+  // of head. The merge base bounds the scan to exactly the PR's own commits; git
+  // failing to produce one (missing objects, unrelated histories) is the genuine
+  // invalid-range case.
+  let mergeBase = '';
   try {
-    execFileSync('git', ['merge-base', '--is-ancestor', base, head], {
+    mergeBase = execFileSync('git', ['merge-base', base, head], {
       cwd,
       encoding: 'utf8',
       env: cleanGitEnv(),
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout: 30_000,
-    });
+    }).trim();
   } catch {
     return inconclusive('pr-metadata.commit-range-invalid');
   }
+  if (!isFullObjectId(mergeBase)) return inconclusive('pr-metadata.commit-range-invalid');
 
+  let commits = '';
   try {
-    commits = execFileSync('git', ['log', '--format=%B', `${base}..${head}`], {
+    commits = execFileSync('git', ['log', '--format=%B', `${mergeBase}..${head}`], {
       cwd,
       encoding: 'utf8',
       env: cleanGitEnv(),
