@@ -21,6 +21,11 @@ import {
   type OutboundQueuePoisonHealth,
 } from './outbound-queue-poison-registry.ts';
 import { GLOBAL_CONVERSATION_KEY } from '../../core/conversation-key.ts';
+import {
+  ScopeBlockedByDurableRecoveryError,
+  ScopeBlockedByFinalizationRecoveryError,
+  admissionRejectionLogFields,
+} from './turn-admission-errors.ts';
 import { attemptOutcomeToken, classifyTurnLane, runtimeLifecycleEmitter, type LifecycleEmitInput } from '../../core/observability/lifecycle-emission.ts';
 import type { SessionManager } from './session.ts';
 import { config } from '../../config.ts';
@@ -770,10 +775,10 @@ beginRuntimeTurnEvidence(
     // supervisor check below) keeps the terminal path bit-for-bit.
     const deferred = this.maybeDeferRecoveryBlockedTurn(context, durability);
     if (deferred !== null) throw deferred;
-    throw new Error('Runtime turn scope is blocked by outstanding durable recovery');
+    throw new ScopeBlockedByDurableRecoveryError();
   }
   if (!this.host.runtimeTurnSupervisor.canAccept(context)) {
-    throw new Error('Runtime turn scope is blocked by terminal-finalization recovery state');
+    throw new ScopeBlockedByFinalizationRecoveryError();
   }
   queue.beginTurnEvidence(context.identity.logicalTurnId);
   // FLOS Stage 1: the turn passed every admission gate above. A scheduled
@@ -2100,7 +2105,24 @@ async finalizeUndispatchedRuntimeTurnAndWait(
   context: RuntimeTurnContext,
   scopeRef?: PerChatRuntimeScopeRef,
   attemptOutcome: AttemptOutcome = { kind: 'admission_rejected' },
+  rejection?: { error: unknown; fifoHead?: { turnId: string | undefined } },
 ): Promise<void> {
+  if (rejection !== undefined) {
+    // Diagnosability (2026-08-29 q DM wedge): record WHICH gate rejected and
+    // (per-chat) what held the FIFO head. Deliberately one warn per rejected
+    // turn — a wedged scope's rejection stream IS the forensic trail this
+    // incident lacked. Lives here so per_chat AND shared/singleton processor
+    // errors get the same record.
+    log.warn(
+      admissionRejectionLogFields(
+        scopeRef?.value ?? context.identity.scope,
+        context,
+        rejection.error,
+        rejection.fifoHead,
+      ),
+      'pre-dispatch turn rejection — finalizing failed with no replay',
+    );
+  }
   const result = await this.finalizeUndispatchedRuntimeTurn(context, scopeRef, attemptOutcome);
   if (result.kind !== 'terminal' && !result.mayAdvance) {
     await this.host.runtimeTurnSupervisor.waitForRecovery(context);
@@ -2221,10 +2243,8 @@ async finalizePerChatProcessorError(
   if (!context) {
     throw new Error('Per-chat processor failure has no immutable runtime turn context', { cause: error });
   }
-  if (
-    this.host.perChatRuntimeTurnContexts.get(mapKey)?.[0]?.identity.logicalTurnId
-      !== context.identity.logicalTurnId
-  ) {
+  const fifoHeadTurnId = this.host.perChatRuntimeTurnContexts.get(mapKey)?.[0]?.identity.logicalTurnId;
+  if (fifoHeadTurnId !== context.identity.logicalTurnId) {
     // #3295 S2: the deferral throw happens pre-publication (the context never
     // entered the FIFO), so it always lands in this branch. Retire the
     // runtime state with NO durable inbound mutation — the obligation row
@@ -2242,6 +2262,7 @@ async finalizePerChatProcessorError(
       context,
       { value: mapKey },
       { kind: 'admission_rejected', class: 'pre_dispatch_error' },
+      { error, fifoHead: { turnId: fifoHeadTurnId } },
     );
     return;
   }
@@ -2300,6 +2321,7 @@ async finalizeSharedProcessorError(
       context,
       undefined,
       { kind: 'admission_rejected', class: 'pre_dispatch_error' },
+      { error },
     );
     if (this.host.currentInboundSeq === context.identity.inboundSeq) {
       this.host.getQueueForChat(turn.chatJid)?.setInboundSeq(undefined);
