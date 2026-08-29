@@ -26,6 +26,7 @@ import { PROVIDER_IDS } from '../runtimes/agent/providers/index.ts';
 import { PROVIDER_API_KEY_SERVICES, SERVICE_ENV_MAP, isKeylessOpenCodeRoute, resolveProviderKeyService } from '../lib/provider-key-service.ts';
 import { isNonEmptyString, isRecord } from '../lib/type-guards.ts';
 import { validateLaunchdServiceConfig } from '../lib/launchd-service-config.ts';
+import { FLEET_LIFECYCLE_PHASES, isFleetLifecyclePhase } from './observability/fleet-lifecycle-flag.ts';
 import { isSamePhysicalDirectory } from '../lib/home-path.ts';
 import { resolveAgentModel } from './agent-model.ts';
 import {
@@ -782,27 +783,29 @@ function validateAgentOptions(
   }
 
   // observability.fleetLifecycle — the Fleet Lifecycle Observability Standard's
-  // dark flag. Every lifecycle-observability code path is gated behind it and it
-  // defaults to off. The block is a closed shape validated fail-closed: a typo
-  // must never silently enable or disable emission.
+  // dark flag: the promotion phase `off | shadow | alerting | default` (design
+  // §11), default `off`. Every lifecycle-observability code path gates through
+  // resolveFleetLifecyclePhase(); this block is a closed shape validated
+  // fail-closed so a typo INSIDE it can never silently change the phase. (A
+  // misspelled block name is an unknown agentOptions key and is ignored like
+  // any other — agentOptions itself is not a closed shape.)
   const observability = opts['observability'];
   if (observability !== undefined) {
-    if (typeof observability !== 'object' || observability === null || Array.isArray(observability)) {
+    if (!isRecord(observability)) {
       return err('agentOptions.observability', 'agentOptions.observability must be an object when provided');
     }
-    const observabilityKeys = Object.keys(observability as Record<string, unknown>);
-    const unknownObservabilityKeys = observabilityKeys.filter((key) => key !== 'fleetLifecycle');
+    const unknownObservabilityKeys = Object.keys(observability).filter((key) => key !== 'fleetLifecycle');
     if (unknownObservabilityKeys.length > 0) {
       return err(
         'agentOptions.observability',
         `agentOptions.observability has unknown key(s): ${unknownObservabilityKeys.join(', ')} (allowed: fleetLifecycle)`,
       );
     }
-    const fleetLifecycle = (observability as Record<string, unknown>)['fleetLifecycle'];
-    if (fleetLifecycle !== undefined && typeof fleetLifecycle !== 'boolean') {
+    const fleetLifecycle = observability['fleetLifecycle'];
+    if (fleetLifecycle !== undefined && !isFleetLifecyclePhase(fleetLifecycle)) {
       return err(
         'agentOptions.observability.fleetLifecycle',
-        'agentOptions.observability.fleetLifecycle must be a boolean when provided',
+        `agentOptions.observability.fleetLifecycle must be one of: ${FLEET_LIFECYCLE_PHASES.join(', ')}`,
       );
     }
   }

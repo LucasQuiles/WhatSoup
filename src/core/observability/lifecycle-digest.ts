@@ -11,6 +11,17 @@
 // dictionary. Operators with host access re-derive digests via the key to join
 // against the private store; nobody else can.
 //
+// Identity inputs are tuples (design F13/F15: scope = (instance, lane, class,
+// scope)). encodeLifecycleTuple() is the ONE canonical encoding — length-
+// prefixed, arity-bearing — so two emitters that agree on the tuple agree on
+// the digest without agreeing on a separator, and a separator-bearing part can
+// never collide with a neighbouring split.
+//
+// Key material is a Buffer, full stop. A hex string and its decoded bytes are
+// the SAME provisioned key; accepting both would let two writers derive
+// different digests under the same key id with joinable() blessing both.
+// Decode at provisioning (a later stage), not here.
+//
 // Rotation is a dual-digest migration over one fleet wave: writers emit both
 // the current (kN) and previous (kN-1) digests, and condition identity matches
 // on EITHER, so open conditions keep their identity with no close/reopen churn.
@@ -19,11 +30,16 @@
 // of the secret, rotation sweeps, and retirement gates live with later stages.
 //
 // Dark by default: nothing imports this until the `observability.fleetLifecycle`
-// flag gates emission.
+// phase (see ./fleet-lifecycle-flag.ts) gates emission.
 
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createHmac } from 'node:crypto';
+
+import { safeStringEqual } from '../../lib/safe-compare.ts';
 
 export type DigestDomain = 'scope' | 'condition' | 'evidence' | 'manager';
+
+/** A caller-canonical string, or an identity tuple (encoded by encodeLifecycleTuple). */
+export type LifecycleDigestInput = string | readonly string[];
 
 const DOMAIN_PREFIX = 'whatsoup.flos.v1';
 const KEY_ID_PATTERN = /^k[1-9][0-9]*$/;
@@ -32,8 +48,8 @@ const DIGEST_PATTERN = /^(k[1-9][0-9]*):([0-9a-f]{64})$/;
 export interface LifecycleKey {
   /** Versioned key id, e.g. `k1`. Rendered as the digest prefix. */
   keyId: string;
-  /** Per-fleet secret. Never logged, never exported. */
-  secret: Buffer | string;
+  /** Per-fleet secret bytes. Never logged, never exported. Buffer only. */
+  secret: Buffer;
 }
 
 export interface LifecycleDigesterOptions extends LifecycleKey {
@@ -55,19 +71,46 @@ export interface ParsedDigest {
 export interface LifecycleDigester {
   readonly keyId: string;
   /** Keyed digest of `value` within `domain`, rendered as `<keyId>:<hex>`. */
-  digest(domain: DigestDomain, value: string): string;
+  digest(domain: DigestDomain, value: LifecycleDigestInput): string;
   /** Current digest plus the previous-key digest during a rotation wave. */
-  digestPair(domain: DigestDomain, value: string): DigestPair;
+  digestPair(domain: DigestDomain, value: LifecycleDigestInput): DigestPair;
   /** True when the digest's key id is one this digester can re-derive. */
   joinable(digest: string): boolean;
 }
 
-function normalizeSecret(secret: Buffer | string, label: string): Buffer {
-  const buffer = typeof secret === 'string' ? Buffer.from(secret, 'utf8') : Buffer.from(secret);
-  if (buffer.length === 0) {
+/**
+ * Canonical, injective encoding of an identity tuple: arity prefix, then each
+ * part as `<utf8-byte-length>:<part>` joined by commas. Length prefixes make
+ * the encoding unambiguous regardless of what characters the parts contain.
+ */
+export function encodeLifecycleTuple(parts: readonly string[]): string {
+  if (!Array.isArray(parts) || parts.length === 0) {
+    throw new Error('lifecycle tuple must have at least one part');
+  }
+  const encoded: string[] = [];
+  for (const part of parts) {
+    if (typeof part !== 'string') {
+      throw new Error('lifecycle tuple parts must be strings');
+    }
+    encoded.push(`${Buffer.byteLength(part, 'utf8')}:${part}`);
+  }
+  return `t${parts.length}/${encoded.join(',')}`;
+}
+
+function canonicalValue(value: LifecycleDigestInput): string {
+  return typeof value === 'string' ? value : encodeLifecycleTuple(value);
+}
+
+function normalizeSecret(secret: Buffer, label: string): Buffer {
+  if (!Buffer.isBuffer(secret)) {
+    throw new Error(
+      `lifecycle digest ${label} secret must be a Buffer (one canonical key encoding; decode at provisioning)`,
+    );
+  }
+  if (secret.length === 0) {
     throw new Error(`lifecycle digest ${label} secret must not be empty`);
   }
-  return buffer;
+  return Buffer.from(secret);
 }
 
 function normalizeKeyId(keyId: string, label: string): string {
@@ -93,12 +136,6 @@ export function parseLifecycleDigest(digest: string): ParsedDigest | null {
   return { keyId: match[1]!, hex: match[2]! };
 }
 
-function hexEqual(a: string, b: string): boolean {
-  const left = Buffer.from(a, 'hex');
-  const right = Buffer.from(b, 'hex');
-  return left.length === right.length && timingSafeEqual(left, right);
-}
-
 /**
  * Identity match across a rotation wave: `candidate` matches `pair` when it
  * equals the current digest OR the previous-key digest (same key id AND same
@@ -111,7 +148,9 @@ export function digestsMatch(pair: DigestPair, candidate: string): boolean {
     if (emitted === undefined) continue;
     const parsed = parseLifecycleDigest(emitted);
     if (parsed === null) continue;
-    if (parsed.keyId === parsedCandidate.keyId && hexEqual(parsed.hex, parsedCandidate.hex)) {
+    // Both hex fields are regex-validated 64-char lowercase hex, so the
+    // constant-time string compare is byte-equivalent to comparing the digests.
+    if (parsed.keyId === parsedCandidate.keyId && safeStringEqual(parsed.hex, parsedCandidate.hex)) {
       return true;
     }
   }
@@ -134,12 +173,13 @@ export function createLifecycleDigester(options: LifecycleDigesterOptions): Life
   return {
     keyId,
     digest(domain, value) {
-      return hmacDigest(secret, keyId, domain, value);
+      return hmacDigest(secret, keyId, domain, canonicalValue(value));
     },
     digestPair(domain, value) {
-      const current = hmacDigest(secret, keyId, domain, value);
+      const canonical = canonicalValue(value);
+      const current = hmacDigest(secret, keyId, domain, canonical);
       return previous
-        ? { current, previous: hmacDigest(previous.secret, previous.keyId, domain, value) }
+        ? { current, previous: hmacDigest(previous.secret, previous.keyId, domain, canonical) }
         : { current };
     },
     joinable(digest) {
