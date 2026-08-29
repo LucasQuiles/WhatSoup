@@ -1,14 +1,18 @@
 import { isHelpFlag, takeValue } from './lib/cli-args.ts';
 import {
+  LaunchdReconcileRefusedError,
   reconcileLaunchdPlist,
   type LaunchdReconcileOptions,
   type LaunchdReconcileResult,
 } from '../src/fleet/platform.ts';
 import { isValidInstanceName } from '../src/fleet/instance-name.ts';
+import { LaunchdRenderConfigError } from '../src/lib/launchd-service-config.ts';
 
 export interface ReconcileLaunchdRestartPolicyArgs {
   instance: string | null;
   apply: boolean;
+  /** Acknowledge that --apply may drop installed non-governed EnvironmentVariables keys. */
+  dropNonGovernedEnv: boolean;
   help: boolean;
 }
 
@@ -23,9 +27,11 @@ export interface ReconcileLaunchdRestartPolicyDependencies {
 }
 
 const USAGE = [
-  'Usage: npm run reconcile-launchd-restart-policy -- --instance <name> [--apply]',
+  'Usage: npm run reconcile-launchd-restart-policy -- --instance <name> [--apply [--drop-non-governed-env]]',
   '',
   'Dry-run is the default. --apply reloads and starts/restarts one named macOS job after validating its generated plist identity.',
+  'Applying regenerates the whole plist: installed EnvironmentVariables keys the render does not own are dropped from the job.',
+  '--apply refuses when the dry-run report lists such keys unless --drop-non-governed-env acknowledges the drop.',
 ].join('\n');
 
 /** Parse a deliberately narrow, one-instance launchd reconciliation command. */
@@ -34,6 +40,7 @@ export function parseReconcileLaunchdRestartPolicyArgs(
 ): ReconcileLaunchdRestartPolicyArgs {
   let instance: string | null = null;
   let apply = false;
+  let dropNonGovernedEnv = false;
   let dryRunRequested = false;
   let help = false;
 
@@ -54,6 +61,10 @@ export function parseReconcileLaunchdRestartPolicyArgs(
       apply = true;
       continue;
     }
+    if (arg === '--drop-non-governed-env') {
+      dropNonGovernedEnv = true;
+      continue;
+    }
     if (arg === '--dry-run') {
       dryRunRequested = true;
       continue;
@@ -64,30 +75,45 @@ export function parseReconcileLaunchdRestartPolicyArgs(
   if (apply && dryRunRequested) {
     throw new Error('--apply and --dry-run cannot be used together');
   }
-  if (help) return { instance, apply, help };
+  if (help) return { instance, apply, dropNonGovernedEnv, help };
+  if (dropNonGovernedEnv && !apply) {
+    throw new Error('--drop-non-governed-env requires --apply');
+  }
   if (instance === null) throw new Error('--instance is required');
   if (!isValidInstanceName(instance)) {
     throw new Error('invalid instance name');
   }
 
-  return { instance, apply, help };
+  return { instance, apply, dropNonGovernedEnv, help };
 }
 
 /**
- * Governed-env drift lines for operator output: key, state, and short value
- * digests only — installed plists carry live credentials, so no environment
- * value is ever printed.
+ * Governed-env report lines for operator output: key names, states, and
+ * short value digests only — installed plists carry live credentials, so no
+ * environment value is ever printed. The all-clear line is printed only when
+ * there is nothing at all to report: governed drift, a differing PATH tail,
+ * and keys an apply would drop each suppress it.
  */
 function governedEnvLines(comparison: LaunchdReconcileResult['governedEnvDrift']): string[] {
   if (!comparison) return [];
   if (!comparison.comparable) {
-    return ['governed env: installed EnvironmentVariables unparseable (fail-closed: treat as drift)'];
+    return ['governed env: installed EnvironmentVariables unparseable (fail-closed: treat as drift; --apply refuses without --drop-non-governed-env)'];
   }
-  if (comparison.drift.length === 0) return ['governed env: no drift'];
   const digest = (value: string | null): string =>
     value === null ? 'absent' : `sha256:${value.slice(0, 12)}`;
-  return comparison.drift.map((entry) =>
+  const lines = comparison.drift.map((entry) =>
     `governed env drift: ${entry.key} ${entry.state} expected=${digest(entry.expectedDigest)} observed=${digest(entry.observedDigest)}`);
+  const prefix = comparison.pathPrefix;
+  if (prefix && prefix.satisfied && prefix.ambientTailDiffers) {
+    const prefixState = prefix.configured ? 'PATH configured prefix satisfied' : 'PATH no pathPrepend configured';
+    lines.push(`governed env: ${prefixState}; tail differs from this shell's PATH (expected=${digest(prefix.expectedDigest)} observed=${digest(prefix.observedDigest)}) — --apply bakes this shell's PATH tail`);
+  }
+  const dropped = comparison.droppedNonGovernedKeys ?? [];
+  if (dropped.length > 0) {
+    lines.push(`installed plist has ${dropped.length} non-governed EnvironmentVariables keys (${dropped.join(', ')}) that --apply will drop`);
+  }
+  if (lines.length === 0) lines.push('governed env: no drift');
+  return lines;
 }
 
 function defaultDependencies(): ReconcileLaunchdRestartPolicyDependencies {
@@ -128,13 +154,21 @@ export async function runReconcileLaunchdRestartPolicy(
   try {
     const result = await deps.reconcile(args.instance!, {
       dryRun: !args.apply,
+      dropNonGovernedEnv: args.dropNonGovernedEnv,
     });
     const verb = result.dryRun ? 'DRY RUN: would reload and start' : 'reloaded and started';
     deps.stdout(`${verb} ${result.label}`);
     for (const line of governedEnvLines(result.governedEnvDrift)) deps.stdout(line);
     return 0;
-  } catch {
-    deps.stderr(`reconcile-launchd-restart-policy: reconciliation failed for ${args.instance}`);
+  } catch (error) {
+    // Render-config and refusal messages are content-free by construction
+    // (rule text, errno codes, key names); every other failure class
+    // (launchctl output, filesystem paths) stays behind the generic line.
+    if (error instanceof LaunchdRenderConfigError || error instanceof LaunchdReconcileRefusedError) {
+      deps.stderr(`reconcile-launchd-restart-policy: ${error.message}`);
+    } else {
+      deps.stderr(`reconcile-launchd-restart-policy: reconciliation failed for ${args.instance}`);
+    }
     return 1;
   }
 }

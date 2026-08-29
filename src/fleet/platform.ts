@@ -240,6 +240,26 @@ export interface LaunchdReconcileOptions {
    * governed environment cannot be silently dropped.
    */
   renderOptions?: LaunchdPlistRenderOptions;
+  /**
+   * Acknowledge that applying may delete installed non-governed
+   * EnvironmentVariables keys (or an unparseable dict whose keys cannot be
+   * enumerated). Without it, an apply that would do so is refused before any
+   * mutation. Ignored on dry runs.
+   */
+  dropNonGovernedEnv?: boolean;
+}
+
+/**
+ * Thrown before any mutation when an apply would delete installed
+ * EnvironmentVariables keys the render does not own (credential keys live
+ * there on the fleet) and the caller has not acknowledged the drop. The
+ * message carries key NAMES only and is safe to print verbatim.
+ */
+export class LaunchdReconcileRefusedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'LaunchdReconcileRefusedError';
+  }
 }
 
 export interface LaunchdReconcileResult {
@@ -390,6 +410,25 @@ function throwLaunchdFailure(original: unknown, rollbackFailures: readonly unkno
 }
 
 /**
+ * Applying regenerates the whole plist, so every installed key the render
+ * does not own disappears from the job. Refuse — before any mutation — unless
+ * the caller acknowledged the drop; an unparseable installed dict is refused
+ * the same way because its keys cannot be enumerated.
+ */
+function refuseApplyThatDropsEnv(comparison: GovernedEnvComparison): void {
+  if (!comparison.comparable) {
+    throw new LaunchdReconcileRefusedError(
+      'installed plist has an unparseable EnvironmentVariables dict, so --apply cannot prove it drops no non-governed keys; pass --drop-non-governed-env to acknowledge',
+    );
+  }
+  const dropped = comparison.droppedNonGovernedKeys;
+  if (dropped.length === 0) return;
+  throw new LaunchdReconcileRefusedError(
+    `installed plist has ${dropped.length} non-governed EnvironmentVariables keys (${dropped.join(', ')}) that --apply will drop; pass --drop-non-governed-env to acknowledge`,
+  );
+}
+
+/**
  * Re-render and reload an existing macOS instance plist.
  *
  * A failed bootout is deliberately terminal rather than being guessed as an
@@ -416,16 +455,18 @@ export async function reconcileLaunchdPlist(
   // Render once: the drift report always describes exactly the bytes an apply
   // would install.
   const rendered = buildPlist(name, renderOptions);
+  const governedEnvDrift = compareGovernedLaunchdEnv(rendered, previousContents, {
+    pathPrepend: renderOptions.pathPrepend,
+  });
   const result: LaunchdReconcileResult = {
     label: launchdLabel(name),
     plistPath: dest,
     priorPlistExisted: true,
     dryRun: options.dryRun === true,
-    governedEnvDrift: compareGovernedLaunchdEnv(rendered, previousContents, {
-      pathPrepend: renderOptions.pathPrepend,
-    }),
+    governedEnvDrift,
   };
   if (result.dryRun) return result;
+  if (options.dropNonGovernedEnv !== true) refuseApplyThatDropsEnv(governedEnvDrift);
 
   fs.mkdirSync(path.dirname(dest), { recursive: true });
   writeAtomicLaunchdPlist(dest, rendered);
