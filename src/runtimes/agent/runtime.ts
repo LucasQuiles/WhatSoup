@@ -57,6 +57,7 @@ import { dequeueNextReport, emitHealReport, parseHealContext } from '../../core/
 import { allowlistedHealCrashClass, errorClassForHealEvidence } from '../../core/heal-evidence.ts';
 import { sendTracked } from '../../core/durability.ts';
 import { classifyErrorForInbound } from '../../core/inbound-failure-class.ts';
+import { initializeRuntimeLifecycleEmitter, runtimeLifecycleEmitter } from '../../core/observability/lifecycle-emission.ts';
 import {
   normalizeFallbackEntriesFromAgentOptions,
   type AgentFallbackDiscoveryConfig,
@@ -2320,6 +2321,15 @@ export class AgentRuntime implements Runtime {
     );
     this.messenger = messenger;
     this.instanceName = instanceName ?? 'personal';
+    // FLOS Stage 1: initialize the lifecycle-emission singleton from config
+    // here (composition edge already exists in this module — the domain
+    // module itself must stay config-free). First caller wins; the build
+    // thunk is evaluated inside the module's fail-closed boundary.
+    initializeRuntimeLifecycleEmitter(() => ({
+      phase: config.fleetLifecyclePhase,
+      storePath: join(config.dataRoot, 'lifecycle-events.db'),
+      instance: this.instanceName,
+    }));
     // #3295 S2: keep the OPTIONS OBJECT (not a copied boolean) so the flag is
     // read live at every admission — the kill-switch contract.
     this.deferredTurnAdmissionOptions = options?.deferredTurnAdmission ?? null;
@@ -4102,6 +4112,16 @@ export class AgentRuntime implements Runtime {
         'agent',
         now,
       );
+      // FLOS Stage 1 (plan §3): the occurrence is durably owned from here —
+      // L-SCH `admitted`, then `dispatched` once it is handed to the turn
+      // chain below. emit() is phase-gated (dark default) and never throws.
+      runtimeLifecycleEmitter().emit({
+        lane: 'L-SCH',
+        work_id: messageId,
+        phase: 'admitted',
+        correlation: { trigger_occurrence_id: String(ctx.occurrenceId), inbound_seq: inboundSeq },
+        attrs: { trigger_id: ctx.triggerId, bead_id: ctx.beadId },
+      });
       const synthetic: IncomingMessage = {
         messageId,
         chatJid: ctx.reportChatJid,
@@ -4126,6 +4146,13 @@ export class AgentRuntime implements Runtime {
           { err, triggerId: ctx.triggerId, beadId: ctx.beadId },
           'agent job turn failed after dispatch',
         );
+      });
+      runtimeLifecycleEmitter().emit({
+        lane: 'L-SCH',
+        work_id: messageId,
+        phase: 'dispatched',
+        correlation: { trigger_occurrence_id: String(ctx.occurrenceId), inbound_seq: inboundSeq },
+        attrs: { trigger_id: ctx.triggerId, bead_id: ctx.beadId },
       });
       return {
         dispatched: true,
