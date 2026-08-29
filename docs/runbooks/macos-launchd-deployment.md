@@ -167,6 +167,87 @@ scoped Keychain entry.
 Instances with `enabled: false` are skipped by fleet discovery but keep their
 config and auth state on disk.
 
+## Generated Render Options and Governed-Env Drift
+
+Generated instance plists render two config-owned environment surfaces from the
+instance `config.json` `service` block (schema:
+[docs/configuration.md](../configuration.md#service-launchd-render-options)):
+
+- `service.claudeConfigDir` → `CLAUDE_CONFIG_DIR` in `EnvironmentVariables`,
+  pointing the launchd service context at a dedicated claude-cli config root
+  (e.g. `$HOME/.claude-<instance>`). The block governs only which config root
+  the service resolves; credentials for that root stay keychain-resident and
+  are neither created nor copied by rendering.
+- `service.pathPrepend` → directories prepended, in order, ahead of the
+  generating shell's ambient `PATH` in the rendered service `PATH` (e.g.
+  `$HOME/.local/bin` so an opencode fallback binary resolves under launchd).
+
+Every render path — the first install after pairing and
+`reconcile-launchd-restart-policy` — resolves the block through the validated
+resolver (`src/fleet/launchd-render-options.ts`) and fails closed on an
+unreadable or invalid `config.json`. A missing `config.json` or absent block
+renders the historical byte-identical plist.
+
+### Checking governed-env drift
+
+The dry-run reconciler compares the fresh render against the installed plist on
+the governed keys (`CLAUDE_CONFIG_DIR`, `PATH`) by key and SHA-256 value digest.
+Installed bot plists carry live credentials, so values are never printed:
+
+```bash
+npm run reconcile-launchd-restart-policy -- --instance <instance>
+# governed env drift: PATH mismatch expected=sha256:… observed=sha256:…
+# governed env drift: CLAUDE_CONFIG_DIR missing expected=sha256:… observed=absent
+# governed env: no drift            ← all-clear
+```
+
+An installed `EnvironmentVariables` dict that exists but cannot be parsed is
+reported fail-closed as drift, never as "no drift".
+`scripts/check-launchd-drift.sh` keeps its separate structural-only checks for
+bot plists; the governed-key comparison lives in the reconciler because only
+the render path knows the expected values.
+
+### Adopting a hand-patched PATH (or claude root) into config
+
+For a host whose bot plist was hand-patched — for example `$HOME/.local/bin`
+prepended to `PATH` so a fallback provider binary resolves, or a hand-added
+`CLAUDE_CONFIG_DIR` — make the patch config-owned so the next regeneration
+renders it instead of destroying it:
+
+1. Add the equivalent `service` block to
+   `~/.config/whatsoup/instances/<instance>/config.json`, using absolute paths
+   (the block does not expand `~`):
+
+   ```json
+   "service": {
+     "pathPrepend": ["/absolute/home-dir/.local/bin"]
+   }
+   ```
+
+2. Dry-run and read the governed-env report. Expect `PATH mismatch` until the
+   block reproduces the hand-patched intent; once it does, the *rendered* PATH
+   is the hand-patched one:
+
+   ```bash
+   npm run reconcile-launchd-restart-policy -- --instance <instance>
+   ```
+
+3. Check the installed plist for non-governed hand-added keys (credential
+   environment variables). Reconciling regenerates the whole plist, so
+   anything not config-owned is destroyed. Move credentials to the keychain
+   ([Route B](../configuration.md#enabling-provider-fallback-on-a-new-host))
+   before applying.
+
+4. Apply with the usual bounded transaction, then run the acceptance gate from
+   [Generated-instance restart-policy migration](#generated-instance-restart-policy-migration):
+
+   ```bash
+   npm run reconcile-launchd-restart-policy -- --instance <instance> --apply
+   ```
+
+5. Re-run the dry-run: `governed env: no drift` confirms the hand-patch is now
+   rendered output owned by config.
+
 ## BYOK Memory Migration
 
 Memory and search settings are canonical under `memory` in `config.json`.
