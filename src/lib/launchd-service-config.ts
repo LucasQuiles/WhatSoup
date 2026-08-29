@@ -36,7 +36,21 @@ export interface ServiceConfigError {
   message: string;
 }
 
+/**
+ * Marker class for render-config failures whose messages are safe to print
+ * verbatim to an operator: validation-rule text and content-free resolver
+ * failures (never config.json content, parser source windows, or paths).
+ */
+export class LaunchdRenderConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'LaunchdRenderConfigError';
+  }
+}
+
 const MAX_PATH_PREPEND_ENTRIES = 16;
+/** PATH_MAX-class bound for one rendered path value. */
+const MAX_PATH_VALUE_LENGTH = 4096;
 
 /** Rendered plist values are single-line paths; reject C0 controls and DEL. */
 function hasControlChars(value: string): boolean {
@@ -49,6 +63,7 @@ function hasControlChars(value: string): boolean {
 
 function isCleanAbsolutePath(value: string): boolean {
   return value !== ''
+    && value.length <= MAX_PATH_VALUE_LENGTH
     && value === value.trim()
     && value.startsWith('/')
     && !hasControlChars(value);
@@ -75,7 +90,7 @@ export function validateLaunchdServiceConfig(
     if (typeof claudeConfigDir !== 'string' || !isCleanAbsolutePath(claudeConfigDir)) {
       return {
         field: 'service.claudeConfigDir',
-        message: 'service.claudeConfigDir must be an absolute path with no surrounding whitespace or control characters',
+        message: `service.claudeConfigDir must be an absolute path of at most ${MAX_PATH_VALUE_LENGTH} characters with no surrounding whitespace or control characters`,
       };
     }
   }
@@ -99,7 +114,7 @@ export function validateLaunchdServiceConfig(
       if (typeof entry !== 'string' || !isCleanAbsolutePath(entry) || entry.includes(':')) {
         return {
           field: `service.pathPrepend[${i}]`,
-          message: `service.pathPrepend[${i}] must be an absolute directory path without ':' or control characters`,
+          message: `service.pathPrepend[${i}] must be an absolute directory path of at most ${MAX_PATH_VALUE_LENGTH} characters without ':' or control characters`,
         };
       }
     }
@@ -117,7 +132,7 @@ export function assertValidLaunchdPlistRenderOptions(
   options: LaunchdPlistRenderOptions,
 ): void {
   const error = validateLaunchdServiceConfig({ service: { ...options } });
-  if (error) throw new Error(error.message);
+  if (error) throw new LaunchdRenderConfigError(error.message);
 }
 
 /**
@@ -128,7 +143,7 @@ export function extractLaunchdPlistRenderOptions(
   raw: Record<string, unknown>,
 ): LaunchdPlistRenderOptions {
   const error = validateLaunchdServiceConfig(raw);
-  if (error) throw new Error(error.message);
+  if (error) throw new LaunchdRenderConfigError(error.message);
   const service = raw['service'];
   if (service === undefined || service === null) return {};
   const block = service as Record<string, unknown>;
