@@ -15,6 +15,8 @@ _ENV_KEYS = [
     "BOT_ERRORS_RESTART_GRACE_SECONDS",
     "BOT_ERRORS_DRY_SERVICE_INTENT",
     "BOT_ERRORS_DRY_SERVICE_STATES",
+    "BOT_ERRORS_STOP_INTENT_DIR",
+    "BOT_ERRORS_STOP_INTENT_TTL_SECONDS",
 ]
 
 
@@ -60,7 +62,9 @@ def test_classify_active_is_not_a_problem():
     assert "ActiveState=active" in detail
 
 
-def test_classify_clean_stop_is_planned():
+def test_classify_clean_stop_without_intent_is_unplanned():
+    # 2026-08-28: an external SIGTERM produced a clean exit that was misread
+    # as planned. A clean exit code alone is NOT operator intent.
     mod = _load_module()
 
     cls, detail = mod.classify_service_intent(
@@ -74,8 +78,48 @@ def test_classify_clean_stop_is_planned():
         100.0,
     )
 
+    assert cls == "unplanned_clean_stop"
+    assert "no stop-intent marker" in detail
+
+
+def test_classify_clean_stop_with_registered_intent_is_planned():
+    mod = _load_module()
+
+    cls, detail = mod.classify_service_intent(
+        {
+            "ActiveState": "inactive",
+            "SubState": "dead",
+            "Result": "success",
+            "ExecMainStatus": "0",
+        },
+        45.0,
+        100.0,
+        stop_intent_age=120.0,
+        stop_intent_ttl=14400.0,
+    )
+
     assert cls == "planned"
-    assert "clean stop" in detail
+    assert "registered intent" in detail
+
+
+def test_classify_clean_stop_with_expired_intent_is_unplanned():
+    mod = _load_module()
+
+    cls, detail = mod.classify_service_intent(
+        {
+            "ActiveState": "inactive",
+            "SubState": "dead",
+            "Result": "success",
+            "ExecMainStatus": "0",
+        },
+        45.0,
+        100.0,
+        stop_intent_age=99999.0,
+        stop_intent_ttl=14400.0,
+    )
+
+    assert cls == "unplanned_clean_stop"
+    assert "stop-intent marker expired" in detail
 
 
 def test_classify_failed_is_crash():
@@ -207,9 +251,13 @@ def test_activating_elapsed_missing_zero_or_garbage_is_none():
     assert mod.activating_elapsed_seconds({"StateChangeTimestampMonotonic": "bad"}, 100.0) is None
 
 
-def test_planned_stop_is_not_a_problem(capsys):
+def test_planned_stop_with_registered_intent_is_not_a_problem(capsys, tmp_path):
     mod = _load_module()
     _with_one_service(mod)
+    intent_dir = tmp_path / "stop-intents"
+    intent_dir.mkdir()
+    (intent_dir / _SERVICE).touch()
+    os.environ["BOT_ERRORS_STOP_INTENT_DIR"] = str(intent_dir)
     os.environ["BOT_ERRORS_DRY_SERVICE_INTENT"] = json.dumps({
         _SERVICE: {
             "ActiveState": "inactive",
@@ -223,6 +271,27 @@ def test_planned_stop_is_not_a_problem(capsys):
 
     assert problems == {}
     assert "intent-skip" in capsys.readouterr().err
+
+
+def test_unregistered_clean_stop_is_a_problem(tmp_path):
+    mod = _load_module()
+    _with_one_service(mod)
+    os.environ["BOT_ERRORS_STOP_INTENT_DIR"] = str(tmp_path / "stop-intents")
+    os.environ["BOT_ERRORS_DRY_SERVICE_INTENT"] = json.dumps({
+        _SERVICE: {
+            "ActiveState": "inactive",
+            "SubState": "dead",
+            "Result": "success",
+            "ExecMainStatus": "0",
+        }
+    })
+
+    problems = mod.local_service_problems()
+
+    key = f"local_service:{_SERVICE}"
+    assert key in problems
+    assert "intent=unplanned_clean_stop" in problems[key]
+    assert "register_intent=" in problems[key]
 
 
 def test_crash_is_a_problem():
