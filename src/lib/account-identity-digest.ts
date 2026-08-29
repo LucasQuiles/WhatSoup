@@ -34,7 +34,22 @@ export function isAccountIdentityDigest(value: unknown): value is string {
   return isNonEmptyString(value) && DIGEST_RE.test(value);
 }
 
+/**
+ * The canonical input joins fields with `\n`, so a field carrying a control
+ * character could make two distinct identities share one canonical string.
+ * Refusing them (on the raw value, before canonicalization) keeps the
+ * encoding injective; the refusal message never echoes the value.
+ */
+const CONTROL_CHARS_RE = /[\u0000-\u001f\u007f]/;
+
+export function hasAccountIdentityControlCharacters(value: string): boolean {
+  return CONTROL_CHARS_RE.test(value);
+}
+
 function canonicalField(name: keyof AccountIdentityFields, value: string): string {
+  if (CONTROL_CHARS_RE.test(value)) {
+    throw new Error(`account identity ${name} contains control characters — refusing to digest an ambiguous identity`);
+  }
   const canonical = value.trim().toLowerCase();
   if (canonical === '') throw new Error(`account identity ${name} is empty — refusing to digest an absent identity`);
   return canonical;
@@ -50,7 +65,9 @@ export function computeAccountIdentityDigest(fields: AccountIdentityFields): str
 }
 
 export function accountIdentityDigestPrefix(digest: string | null): string | null {
-  if (digest === null) return null;
-  const hex = digest.startsWith(DIGEST_SCHEME) ? digest.slice(DIGEST_SCHEME.length) : digest;
-  return hex.slice(0, DIGEST_PREFIX_LENGTH);
+  // Strict validation first: a value that is not a well-formed digest (for
+  // example a malformed expectation that escaped admission) must never have a
+  // fragment of itself sliced into logs, alerts, or health payloads.
+  if (digest === null || !isAccountIdentityDigest(digest)) return null;
+  return digest.slice(DIGEST_SCHEME.length, DIGEST_SCHEME.length + DIGEST_PREFIX_LENGTH);
 }

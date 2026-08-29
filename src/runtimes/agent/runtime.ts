@@ -6822,7 +6822,7 @@ export class AgentRuntime implements Runtime {
       if (providerExecution.pressureActive) degradedReasons.push('provider_execution_pressure');
       if (pollPersistenceHealth.degraded) degradedReasons.push('poll_persistence_failure');
       if (offlineDecisionRetry.exhausted) degradedReasons.push('offline_decision_retry_exhausted');
-    degradedReasons.push(...accountIdentityReasons);
+      degradedReasons.push(...accountIdentityReasons);
       const healthStatus: RuntimeHealth['status'] = degradedReasons.length > 0 ? 'degraded' : 'healthy';
       return {
         status: healthStatus,

@@ -28,6 +28,7 @@ import { timingSafeEqual } from 'node:crypto';
 import {
   accountIdentityDigestPrefix,
   computeAccountIdentityDigest,
+  hasAccountIdentityControlCharacters,
   isAccountIdentityDigest,
 } from '../../../lib/account-identity-digest.ts';
 import { systemClock } from '../../../lib/clock.ts';
@@ -113,6 +114,12 @@ export function parseClaudeAuthStatusIdentity(output: string): ObservedAccountId
   const email = status['email'];
   const orgId = status['orgId'];
   if (!isNonEmptyString(email) || !isNonEmptyString(orgId)) {
+    return { kind: 'absent', reason: 'identity-fields-missing' };
+  }
+  // A control character in either field would reach the `\n`-joined canonical
+  // digest input (where it is ambiguous) and make computeAccountIdentityDigest
+  // throw; classify it as an absent identity so verify stays never-rejecting.
+  if (hasAccountIdentityControlCharacters(email) || hasAccountIdentityControlCharacters(orgId)) {
     return { kind: 'absent', reason: 'identity-fields-missing' };
   }
   return { kind: 'identity', digest: computeAccountIdentityDigest({ email, orgId }) };

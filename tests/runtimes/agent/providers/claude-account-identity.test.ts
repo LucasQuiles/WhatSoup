@@ -117,6 +117,21 @@ describe('parseClaudeAuthStatusIdentity — the only thing that leaves the parse
       expect(parseClaudeAuthStatusIdentity(output), JSON.stringify(output)).toEqual({ kind: 'unparseable' });
     }
   });
+
+  it('reports control-character-bearing identity fields as absent (digest-injection guard)', () => {
+    // An interior newline would otherwise reach the canonical `\n`-joined digest
+    // input, where {email: 'a\norg-b', orgId: 'org-c'} and
+    // {email: 'a', orgId: 'org-b\norg-c'} digest identically.
+    for (const over of [
+      { email: `${EMAIL}\nsmuggled-org` },
+      { orgId: `${ORG_ID}\nsmuggled-org` },
+      { email: 'a\u0000b@example.test' },
+      { orgId: `${ORG_ID}\r` },
+    ]) {
+      expect(parseClaudeAuthStatusIdentity(authStatusJson(over)), JSON.stringify(over))
+        .toEqual({ kind: 'absent', reason: 'identity-fields-missing' });
+    }
+  });
 });
 
 describe('verifyClaudeAccountIdentity — outcome classes', () => {
@@ -212,6 +227,18 @@ describe('verifyClaudeAccountIdentity — outcome classes', () => {
     expect(await verifyClaudeAccountIdentity('owner@example.test', d.deps))
       .toMatchObject({ status: 'unverifiable', reason: 'expectation-malformed' });
     expect(d.spawns).toHaveLength(0);
+  });
+
+  it('publishes NO prefix of a malformed expectation — a raw value that escaped admission is never sliced into evidence', async () => {
+    const d = deps();
+    const result = await verifyClaudeAccountIdentity('owner-secret@example.test', d.deps);
+    expect(result).toMatchObject({
+      status: 'unverifiable',
+      reason: 'expectation-malformed',
+      expectedDigestPrefix: null,
+      observedDigestPrefix: null,
+    });
+    expect(JSON.stringify(result)).not.toContain('owner-secret');
   });
 });
 

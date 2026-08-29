@@ -53,6 +53,24 @@ describe('computeAccountIdentityDigest', () => {
     expect(digest.toLowerCase()).not.toContain(EMAIL.toLowerCase());
     expect(digest.toLowerCase()).not.toContain(ORG_ID.toLowerCase());
   });
+
+  it('refuses control characters in either field, keeping the `\\n`-joined canonical input injective', () => {
+    // Without this refusal, {email: 'a@x\norg-b', orgId: 'org-c'} and
+    // {email: 'a@x', orgId: 'org-b\norg-c'} share one canonical string.
+    expect(() => computeAccountIdentityDigest({ email: 'a@x\norg-b', orgId: ORG_ID })).toThrow(/email/);
+    expect(() => computeAccountIdentityDigest({ email: EMAIL, orgId: 'org-b\norg-c' })).toThrow(/orgId/);
+    expect(() => computeAccountIdentityDigest({ email: 'a\u0009b@x', orgId: ORG_ID })).toThrow(/email/);
+    expect(() => computeAccountIdentityDigest({ email: EMAIL, orgId: `${ORG_ID}\r` })).toThrow(/orgId/);
+    // the refusal is content-free: the message never echoes the value
+    let message = '';
+    try {
+      computeAccountIdentityDigest({ email: 'smuggle-probe@x\norg-b', orgId: ORG_ID });
+    } catch (error) {
+      message = String(error);
+    }
+    expect(message).not.toBe('');
+    expect(message).not.toContain('smuggle-probe');
+  });
 });
 
 describe('isAccountIdentityDigest', () => {
