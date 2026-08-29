@@ -21,6 +21,11 @@ import {
   type OutboundQueuePoisonHealth,
 } from './outbound-queue-poison-registry.ts';
 import { GLOBAL_CONVERSATION_KEY } from '../../core/conversation-key.ts';
+import {
+  ScopeBlockedByDurableRecoveryError,
+  ScopeBlockedByFinalizationRecoveryError,
+  admissionRejectionLogFields,
+} from './turn-admission-errors.ts';
 import { attemptOutcomeToken, classifyTurnLane, runtimeLifecycleEmitter, type LifecycleEmitInput } from '../../core/observability/lifecycle-emission.ts';
 import type { SessionManager } from './session.ts';
 import { config } from '../../config.ts';
@@ -770,10 +775,10 @@ beginRuntimeTurnEvidence(
     // supervisor check below) keeps the terminal path bit-for-bit.
     const deferred = this.maybeDeferRecoveryBlockedTurn(context, durability);
     if (deferred !== null) throw deferred;
-    throw new Error('Runtime turn scope is blocked by outstanding durable recovery');
+    throw new ScopeBlockedByDurableRecoveryError();
   }
   if (!this.host.runtimeTurnSupervisor.canAccept(context)) {
-    throw new Error('Runtime turn scope is blocked by terminal-finalization recovery state');
+    throw new ScopeBlockedByFinalizationRecoveryError();
   }
   queue.beginTurnEvidence(context.identity.logicalTurnId);
   // FLOS Stage 1: the turn passed every admission gate above. A scheduled
@@ -2238,6 +2243,19 @@ async finalizePerChatProcessorError(
       this.clearUndispatchedRuntimeTurnCancellation(context);
       return;
     }
+    // Diagnosability (2026-08-29 q DM wedge): record WHICH gate rejected and
+    // what held the FIFO head — without these two fields a wedged scope logs
+    // an undiscriminating errorClass:"Error" until a restart destroys the
+    // in-memory state that would answer both questions.
+    log.warn(
+      admissionRejectionLogFields(
+        mapKey,
+        context,
+        error,
+        this.host.perChatRuntimeTurnContexts.get(mapKey)?.[0]?.identity.logicalTurnId,
+      ),
+      'pre-dispatch admission rejection — turn will be finalized failed with no replay',
+    );
     await this.finalizeUndispatchedRuntimeTurnAndWait(
       context,
       { value: mapKey },

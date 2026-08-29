@@ -368,8 +368,26 @@ export class RuntimeTurnSupervisor<TPostEffects> {
   private block(context: RuntimeTurnContext): void {
     const scopeKey = this.scopeKey(context);
     const blocked = this.blockedTurnsByScope.get(scopeKey) ?? new Set<string>();
-    blocked.add(context.identity.logicalTurnId);
+    const turnId = context.identity.logicalTurnId;
+    const firstBlock = !blocked.has(turnId);
+    blocked.add(turnId);
     this.blockedTurnsByScope.set(scopeKey, blocked);
+    if (firstBlock) {
+      // Visibility (2026-08-29 q DM wedge family): a blocked scope rejects
+      // EVERY subsequent turn at admission, yet this mutation was silent.
+      // `recoverable:false` marks a block with no retained record — the retry
+      // sweep can never release it (runRetries only unblocks turnIds it can
+      // finalize from `retained`), so only a process restart clears it.
+      log.warn(
+        {
+          scopeKey,
+          logicalTurnId: turnId,
+          blockedInScope: blocked.size,
+          recoverable: this.retained.has(turnId),
+        },
+        'turn-supervisor: scope admission blocked',
+      );
+    }
   }
 
   private unblock(context: RuntimeTurnContext, turnId: string): void {
