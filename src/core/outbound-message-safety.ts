@@ -182,6 +182,7 @@ export type AssistantTextSuppressionReason =
   | 'internal_narration'
   | 'progress_filler'
   | 'send_verification'
+  | 'no_reply_sentinel'
   | 'noop';
 
 export type AssistantTextEgressDecision =
@@ -225,6 +226,20 @@ export const CLIENT_TEMPORARY_ISSUE_TEXT =
   'I hit a temporary issue and am retrying. I will follow up shortly.';
 
 const NOOP_ASSISTANT_TEXT = /^(?:[.!?…]+|[-_]+)$/u;
+
+/**
+ * The deliberate-silence sentinel. Scheduled/isolated background turns are
+ * instructed to "output only NO_REPLY" (see isolateScheduledAgentJobPrompt) to
+ * signal they have nothing user-facing to deliver — but NO_REPLY is a
+ * prompt-level convention with no code-level consumer, so when a turn's entire
+ * final assistant_text is that token it leaks verbatim into the chat. Recognize
+ * a message whose WHOLE trimmed body is the sentinel (optionally wrapped in the
+ * markdown emphasis/code fences a model sometimes adds, with trailing
+ * punctuation) and suppress it as a genuine silent turn. Anchored to the full
+ * string so a real message that merely mentions NO_REPLY is never suppressed.
+ */
+const NO_REPLY_SENTINEL =
+  /^(?:`{1,3}|[*_~]{1,2}|["'])?\s*NO[_\s-]?REPLY\s*(?:`{1,3}|[*_~]{1,2}|["'])?[.!]?$/i;
 const SEND_VERIFICATION_PATTERNS: readonly RegExp[] = [
   /^send-and-verify\b.{0,120}\b(?:ok|complete|done|verified|pk\s+\d+|delivered|sent)\b/i,
   /\bread-?back\b.{0,160}\b(?:verified|pk\s+\d+|correct chat|matching content|delivered)\b/i,
@@ -295,6 +310,13 @@ export function classifyAssistantTextEgress(text: string): AssistantTextEgressDe
 
   if (NOOP_ASSISTANT_TEXT.test(trimmed)) {
     return { action: 'suppress', reason: 'noop', satisfiesReplyGuarantee: true };
+  }
+
+  // Deliberate-silence sentinel: the model explicitly signalled "nothing to
+  // deliver". Treat like a noop — a genuine silent turn that satisfies the
+  // reply guarantee, so the guarantee fallback does not re-deliver the token.
+  if (NO_REPLY_SENTINEL.test(trimmed)) {
+    return { action: 'suppress', reason: 'no_reply_sentinel', satisfiesReplyGuarantee: true };
   }
 
   if (SEND_VERIFICATION_PATTERNS.some((re) => re.test(trimmed))) {

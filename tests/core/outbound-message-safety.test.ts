@@ -457,6 +457,37 @@ describe('classifyAssistantTextEgress', () => {
       action: 'allow',
     });
   });
+
+  // NO_REPLY is the deliberate-silence sentinel that scheduled/isolated turns are
+  // instructed to "output only" — a prompt convention with no code consumer, so a
+  // turn whose entire body is the token leaks it verbatim into the chat. It must be
+  // suppressed as a genuine silent turn (satisfies the reply guarantee, like a noop).
+  it.each([
+    'NO_REPLY',
+    'no_reply',
+    '`NO_REPLY`',
+    '**NO_REPLY**',
+    '  NO_REPLY  ',
+    'NO REPLY',
+    'NO_REPLY.',
+    '"NO_REPLY"',
+  ])('suppresses the bare NO_REPLY sentinel and satisfies the reply guarantee: %j', (text) => {
+    expect(classifyAssistantTextEgress(text)).toEqual({
+      action: 'suppress',
+      reason: 'no_reply_sentinel',
+      satisfiesReplyGuarantee: true,
+    });
+  });
+
+  // A real message that merely MENTIONS the sentinel is not the sentinel — the
+  // pattern is anchored to the whole trimmed body, so prose is never suppressed.
+  it.each([
+    'The bug is that NO_REPLY leaks into the chat when a scheduled turn ends.',
+    'Emit NO_REPLY only when there is nothing to deliver.',
+    'NO_REPLY was posted to three chats today — here is why.',
+  ])('allows prose that merely mentions NO_REPLY: %j', (text) => {
+    expect(classifyAssistantTextEgress(text)).toEqual({ action: 'allow' });
+  });
 });
 
 describe('redactInternalArtifacts — audience scoping', () => {

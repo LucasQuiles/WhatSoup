@@ -885,6 +885,33 @@ export function providerFailureArmsFallback(kind: ProviderFailureKind): boolean 
   return FALLBACK_PROVIDER_FAILURE_KINDS.has(kind);
 }
 
+/** 128 + SIGTERM(15). claude-cli traps SIGTERM and self-exits with this code. */
+export const SIGTERM_SELF_EXIT_CODE = 143;
+/** 128 + SIGINT(2). claude-cli traps SIGINT and self-exits with this code. */
+export const SIGINT_SELF_EXIT_CODE = 130;
+
+/**
+ * True when a provider process exit represents a catchable, intentional teardown
+ * (SIGTERM/SIGINT), in EITHER shape:
+ *   - the process died under the signal → `signal === 'SIGTERM' | 'SIGINT'`, code null;
+ *   - the process TRAPPED the signal and self-exited `128 + signo` → `signal === null`,
+ *     `code === 143 | 130`. claude-cli does the latter, so every classifier that
+ *     switches only on the signal value has a blind spot for the numeric shape.
+ *
+ * Deliberately EXCLUDES SIGKILL / code 137: SIGKILL is uncatchable, so a 137 self-exit
+ * is impossible and a `signal === 'SIGKILL'` exit is a force-kill (our own reap — which
+ * is tracked separately via the intentional-kill marker — or an OOM/external kill that
+ * must still surface as a crash). Masking 137 here would hide real failures.
+ */
+export function isSignalTeardownExit(
+  code: number | null,
+  signal: NodeJS.Signals | string | null,
+): boolean {
+  if (signal === 'SIGTERM' || signal === 'SIGINT') return true;
+  if (signal !== null) return false;
+  return code === SIGTERM_SELF_EXIT_CODE || code === SIGINT_SELF_EXIT_CODE;
+}
+
 export function isExpectedProviderShutdown(input: {
   source: AgentFailureSource;
   exitCode?: number | null;
@@ -894,7 +921,7 @@ export function isExpectedProviderShutdown(input: {
   const exitCode = input.exitCode ?? null;
   const signal = input.signal ?? null;
   if (exitCode === 0 && signal === null) return true;
-  return signal === 'SIGTERM' || signal === 'SIGINT';
+  return isSignalTeardownExit(exitCode, signal);
 }
 
 export function classifyAgentFailure(input: AgentFailureInput): AgentFailureClassification {

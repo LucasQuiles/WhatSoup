@@ -56,6 +56,11 @@ import {
 } from './providers/turn-control-capabilities.ts';
 import { composeWithExactLineDedup } from './prompt-compose.ts';
 import {
+  isSignalTeardownExit,
+  SIGTERM_SELF_EXIT_CODE,
+  SIGINT_SELF_EXIT_CODE,
+} from './failure-taxonomy.ts';
+import {
   appendProviderCrashPreview,
   buildProviderCrashMetadata,
 } from './provider-crash-diagnostics.ts';
@@ -2788,6 +2793,20 @@ export class SessionManager {
       return;
     }
 
+    // A catchable-signal SELF-exit (`signal === null`, `code === 128 + signo`) is the
+    // provider trapping SIGTERM/SIGINT and shutting itself down — the same graceful
+    // teardown as code 0, just with the signal encoded in the code. claude-cli does this;
+    // when the whole process group is stopped (systemd restart) the child's exit can race
+    // ahead of the parent flipping `active`, so it reaches here unmarked and would emit a
+    // spurious "exited with code 143. Send any message to start a new session." to every
+    // live chat. Suppress it. A signal-DEATH exit (`signal === 'SIGTERM'`, code null) is
+    // NOT suppressed here — an unmarked provider killed mid-turn is still a reportable
+    // crash (#1870 control).
+    if (signal === null && (code === SIGTERM_SELF_EXIT_CODE || code === SIGINT_SELF_EXIT_CODE)) {
+      log.info({ rowId: this.dbRowId, exitCode: code }, 'provider self-exited on caught teardown signal — no crash notification');
+      return;
+    }
+
     // A supervisor reap already sent the user a notice that says why the session ended
     // (inactivity, stalled tool). The generic crash line would be a second, less accurate
     // message for the same event.
@@ -3723,15 +3742,22 @@ export class SessionManager {
           pendingOpenCodeResult = null;
         }
 
-        // A signal exit AFTER the turn delivered its terminal result is the
-        // normal spawn-per-turn teardown (the provider emits its result, then
-        // the process tree is torn down with SIGTERM). Only treat a signal exit
-        // as an error when no result was seen — otherwise a delivered reply is
-        // misclassified as a crash, inflating crash/heal telemetry and firing a
-        // false onCrash + unexpected-exit notification (#1870). A non-zero exit
-        // code still counts as an error even with a result, as it is a stronger
-        // failure signal than a teardown SIGTERM.
-        const exitedWithError = (code !== 0 && code !== null) || (signal !== null && !deliveredTerminalResult);
+        // A catchable-teardown exit AFTER the turn delivered its terminal result
+        // is the normal spawn-per-turn teardown (the provider emits its result,
+        // then the process tree is torn down with SIGTERM). This teardown surfaces
+        // in TWO shapes: the child dies under the signal (`signal === 'SIGTERM'`,
+        // code null) OR — as claude-cli does — it TRAPS SIGTERM and self-exits
+        // `128 + 15 = 143` (`signal === null`, `code === 143`). The prior guard only
+        // excused the first shape, so a delivered reply that then self-exited 143
+        // was misclassified as a crash — inflating crash/heal telemetry and firing
+        // a false onCrash + unexpected-exit notification (#1870, and the numeric-143
+        // blind spot behind the recurring "exited with code 143" flap). Only treat a
+        // teardown exit as an error when no result was seen. SIGKILL / code 137 is
+        // NOT a teardown exit (see isSignalTeardownExit) and still counts as a crash.
+        const cleanTeardownExit = isSignalTeardownExit(code, signal);
+        const exitedWithError =
+          (code !== 0 && code !== null && !(cleanTeardownExit && deliveredTerminalResult)) ||
+          (signal !== null && !deliveredTerminalResult);
         const missingTerminalResult = code === 0 && signal === null && !deliveredTerminalResult;
         if (exitedWithError || missingTerminalResult) {
           this.completeProviderTurn(providerTurnToken);

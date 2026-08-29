@@ -240,6 +240,10 @@ interface CrashCountSurface {
   getRecentCrashCount(): number;
   decrementCrashCount(mapKey: string): void;
   getCrashScopeKey(chatJid: string): string;
+  crashCountsTowardExhaustion(info?: {
+    exitCode: number | null;
+    signal: NodeJS.Signals | null;
+  }): boolean;
 }
 
 function crashSurface(runtime: AgentRuntime): CrashCountSurface {
@@ -339,5 +343,46 @@ describe('AgentRuntime getCrashScopeKey (characterization)', () => {
     });
     // chatJidToWorkspace is mocked to strip the @s.whatsapp.net suffix.
     expect(crashSurface(runtime).getCrashScopeKey(CHAT)).toBe('alice');
+  });
+});
+
+describe('AgentRuntime crashCountsTowardExhaustion (respawn-exhaustion gate)', () => {
+  let crash: CrashCountSurface;
+
+  beforeEach(() => {
+    crash = crashSurface(new AgentRuntime(makeDb(), makeMessenger(), 'test', { sessionScope: 'per_chat' }));
+  });
+
+  it('does NOT count an expected provider teardown (SIGTERM/SIGINT death or 143/130 self-exit)', () => {
+    // A systemd restart SIGTERMs the whole process group; each chat's child
+    // self-exits 143 at once. Counting those inflates the window into fleet-wide
+    // false "respawn exhausted".
+    expect(crash.crashCountsTowardExhaustion({ exitCode: null, signal: 'SIGTERM' })).toBe(false);
+    expect(crash.crashCountsTowardExhaustion({ exitCode: null, signal: 'SIGINT' })).toBe(false);
+    expect(crash.crashCountsTowardExhaustion({ exitCode: 143, signal: null })).toBe(false);
+    expect(crash.crashCountsTowardExhaustion({ exitCode: 130, signal: null })).toBe(false);
+  });
+
+  it('DOES count a genuine provider fault (error code, SIGKILL/OOM, missing binary)', () => {
+    expect(crash.crashCountsTowardExhaustion({ exitCode: 1, signal: null })).toBe(true);
+    expect(crash.crashCountsTowardExhaustion({ exitCode: 137, signal: null })).toBe(true);
+    expect(crash.crashCountsTowardExhaustion({ exitCode: null, signal: 'SIGKILL' })).toBe(true);
+  });
+
+  it('counts a crash with no info (conservative default)', () => {
+    expect(crash.crashCountsTowardExhaustion()).toBe(true);
+  });
+
+  it('four consecutive 143 teardowns never exhaust, but four code-1 faults do', () => {
+    const key = 'chat-x';
+    for (let i = 0; i < 4; i++) {
+      if (crash.crashCountsTowardExhaustion({ exitCode: 143, signal: null })) crash.recordCrash(key);
+    }
+    expect(crash.getCrashCount(key)).toBe(0); // AUTO_RESPAWN_MAX_CRASHES=3; 0 never exhausts
+
+    for (let i = 0; i < 4; i++) {
+      if (crash.crashCountsTowardExhaustion({ exitCode: 1, signal: null })) crash.recordCrash(key);
+    }
+    expect(crash.getCrashCount(key)).toBe(4); // > 3 → exhausted
   });
 });

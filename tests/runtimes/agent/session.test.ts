@@ -821,6 +821,43 @@ describe('SessionManager', () => {
     expect(sentMessages[0].text).toContain('session ended');
   });
 
+  it('a caught-SIGTERM self-exit (code 143) does not send a spurious crash notice', async () => {
+    const db = makeDb();
+    const { messenger, sentMessages } = makeMessenger();
+    const onCrash = vi.fn();
+
+    // Default provider is claude-cli (persistent). When the whole process group is
+    // SIGTERM'd (systemd restart), the child traps it and self-exits 143 with the
+    // signal reported as null; that exit can race ahead of the parent flipping
+    // `active`, reaching the exit handler unmarked. It must NOT produce a
+    // "session ended (exited with code 143). Send any message..." notice.
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(), onCrash });
+    await sm.spawnSession();
+
+    mockChild._exitCb?.(143, null);
+
+    // Give the setImmediate-deferred notify path a chance to (not) fire.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(sentMessages).toHaveLength(0);
+  });
+
+  it('a caught-SIGINT self-exit (code 130) does not send a spurious crash notice', async () => {
+    const db = makeDb();
+    const { messenger, sentMessages } = makeMessenger();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    await sm.spawnSession();
+
+    mockChild._exitCb?.(130, null);
+
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(sentMessages).toHaveLength(0);
+  });
+
   it('spawn-per-turn non-zero close invokes crash handling and notifies the user', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();

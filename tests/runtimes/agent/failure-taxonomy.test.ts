@@ -11,6 +11,9 @@ import {
   classifyStreamedProviderFailure,
   isFallbackEligibleForFailureClass,
   isExpectedProviderShutdown,
+  isSignalTeardownExit,
+  SIGTERM_SELF_EXIT_CODE,
+  SIGINT_SELF_EXIT_CODE,
   isPromptTooLongMessage,
   isProviderAuthRequiredMessage,
   isProviderModelUnavailableMessage,
@@ -740,6 +743,9 @@ describe('classifyAgentFailure', () => {
       { exitCode: 0, signal: null },
       { exitCode: null, signal: 'SIGTERM' },
       { exitCode: null, signal: 'SIGINT' },
+      // claude-cli traps the signal and self-exits 128+signo (signal reported null).
+      { exitCode: SIGTERM_SELF_EXIT_CODE, signal: null }, // 143
+      { exitCode: SIGINT_SELF_EXIT_CODE, signal: null }, // 130
     ] as const) {
       const result = classifyAgentFailure({
         ...baseInput,
@@ -973,5 +979,32 @@ describe('isTransientProviderConnectionMessage — ETIMEDOUT socket-context co-w
 
   it('does not match a bare ETIMEDOUT without socket/connect/peer context', () => {
     expect(isTransientProviderConnectionMessage('request failed: ETIMEDOUT')).toBe(false);
+  });
+});
+
+describe('isSignalTeardownExit — catchable SIGTERM/SIGINT in both exit shapes', () => {
+  it('recognizes signal-death SIGTERM/SIGINT', () => {
+    expect(isSignalTeardownExit(null, 'SIGTERM')).toBe(true);
+    expect(isSignalTeardownExit(null, 'SIGINT')).toBe(true);
+  });
+
+  it('recognizes the numeric self-exit shape a trapping CLI produces (143/130, signal null)', () => {
+    expect(isSignalTeardownExit(SIGTERM_SELF_EXIT_CODE, null)).toBe(true); // 143
+    expect(isSignalTeardownExit(SIGINT_SELF_EXIT_CODE, null)).toBe(true); // 130
+    expect(isSignalTeardownExit(143, null)).toBe(true);
+    expect(isSignalTeardownExit(130, null)).toBe(true);
+  });
+
+  it('does NOT treat SIGKILL / code 137 as a teardown (uncatchable — real kill or OOM)', () => {
+    expect(isSignalTeardownExit(null, 'SIGKILL')).toBe(false);
+    expect(isSignalTeardownExit(137, null)).toBe(false);
+  });
+
+  it('does NOT treat ordinary error codes or clean exit as a teardown', () => {
+    expect(isSignalTeardownExit(0, null)).toBe(false);
+    expect(isSignalTeardownExit(1, null)).toBe(false);
+    // A numeric teardown code only counts when NO signal was reported — a real
+    // signal death that also carried a code is governed by the signal branch.
+    expect(isSignalTeardownExit(143, 'SIGKILL')).toBe(false);
   });
 });

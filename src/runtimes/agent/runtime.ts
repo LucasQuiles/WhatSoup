@@ -23,6 +23,7 @@ import {
   classifyProviderFailure,
   classifyStreamedProviderFailure,
   detectAutoSwitchNotice,
+  isExpectedProviderShutdown,
   isProviderAuthRequiredMessage,
   MAX_STREAMED_BANNER_LENGTH,
   type ProviderFailureKind,
@@ -986,6 +987,31 @@ export class AgentRuntime implements Runtime {
 
   private recordCrash(mapKey: string): number {
     return this.crashes.record(mapKey);
+  }
+
+  /**
+   * Whether a provider process exit should count toward auto-respawn exhaustion.
+   *
+   * An EXPECTED shutdown — the provider trapping SIGTERM/SIGINT and exiting, in
+   * either the signal-death shape (`signal === 'SIGTERM'`) or the numeric
+   * self-exit shape (`code === 143 | 130`, the shape claude-cli produces) — is
+   * environmental teardown (e.g. a systemd restart signalling the whole process
+   * group), NOT a provider fault. Counting it inflates the crash window: a single
+   * restart makes every live chat's child self-exit 143 at once, and the sites
+   * that record against GLOBAL_CRASH_SCOPE_KEY then sum those into fleet-wide
+   * false exhaustion ("agent respawn exhausted" + "Send any message to start a new
+   * session"). A genuine provider fault (code 1, stream-corrupt, ENOENT) and an
+   * uncatchable SIGKILL / OOM (`signal === 'SIGKILL'`) are NOT expected and still
+   * count. Supervisor-reap accounting (idle_watchdog / stalled_operation, which
+   * SIGKILL and are already handled) is intentionally left unchanged.
+   */
+  private crashCountsTowardExhaustion(info?: SessionCrashInfo): boolean {
+    if (!info) return true;
+    return !isExpectedProviderShutdown({
+      source: 'provider_process_exit',
+      exitCode: info.exitCode,
+      signal: info.signal,
+    });
   }
 
   private getCrashCount(mapKey: string): number {
@@ -3925,7 +3951,7 @@ export class AgentRuntime implements Runtime {
           onEvent: (event) => this.handleEvent(resumedSession, event),
           onResumeFailed: () => this.handleResumeFailed(resumeChatJid),
           onCrash: (info) => {
-            this.recordCrash(GLOBAL_CRASH_SCOPE_KEY);
+            if (this.crashCountsTowardExhaustion(info)) this.recordCrash(GLOBAL_CRASH_SCOPE_KEY);
             const turnWasInFlight = this.currentRuntimeTurnContext !== null;
             const queue = this.getActiveQueue();
             this.finalizeRuntimeCrash(this.currentRuntimeTurnContext, queue, this.session);
@@ -8717,7 +8743,7 @@ export class AgentRuntime implements Runtime {
       trackSingletonMcpSession: true,
       onEvent: (event) => this.handleEvent(replacementSession, event),
       onCrash: (info) => {
-        this.recordCrash(GLOBAL_CRASH_SCOPE_KEY);
+        if (this.crashCountsTowardExhaustion(info)) this.recordCrash(GLOBAL_CRASH_SCOPE_KEY);
         const queue = this.getActiveQueue();
         this.finalizeRuntimeCrash(this.currentRuntimeTurnContext, queue, this.session);
         this.cleanupSharedCrashTurnState();
@@ -9512,7 +9538,7 @@ export class AgentRuntime implements Runtime {
         trackSingletonMcpSession: true,
         onEvent: (event) => this.handleEvent(singletonSession, event),
         onCrash: (info) => {
-          this.recordCrash(GLOBAL_CRASH_SCOPE_KEY);
+          if (this.crashCountsTowardExhaustion(info)) this.recordCrash(GLOBAL_CRASH_SCOPE_KEY);
           const turnWasInFlight = this.currentRuntimeTurnContext !== null;
           const queue = this.getActiveQueue();
           this.finalizeRuntimeCrash(this.currentRuntimeTurnContext, queue, this.session);
@@ -9782,7 +9808,17 @@ export class AgentRuntime implements Runtime {
     }
 
     this.sessionOwnership.transition(currentMapKey, managerId, 'recoverable_dead');
-    this.recordCrash(currentMapKey);
+    // Expected provider teardown (SIGTERM/SIGINT death or the 143/130 self-exit
+    // shape) is environmental, not a provider fault — recover the session but do
+    // not count it toward auto-respawn exhaustion (see crashCountsTowardExhaustion).
+    if (this.crashCountsTowardExhaustion(info)) {
+      this.recordCrash(currentMapKey);
+    } else {
+      log.info(
+        { mapKey: currentMapKey, exitCode: info?.exitCode ?? null, signal: info?.signal ?? null },
+        'expected provider teardown — recovering without counting toward respawn exhaustion',
+      );
+    }
     const crashCount = this.getCrashCount(currentMapKey);
     const exhausted = crashCount > AUTO_RESPAWN_MAX_CRASHES;
     if (exhausted) {
