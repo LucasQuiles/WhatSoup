@@ -567,23 +567,104 @@ describe('platform service managers', () => {
     expect(childProcessMocks.execFile).not.toHaveBeenCalled();
   });
 
-  it('reports a hand-patched service PATH as a governed mismatch by digest only', async () => {
+  it('reports a hand-patched PATH with no config source as a tail difference, by digest only', async () => {
     setPlatform('darwin');
     const { buildPlist, reconcileLaunchdPlist } = await importPlatform();
-    // Simulates the hand-patched-plist class this feature adopts: the
-    // installed plist prepends a directory that has no config source.
+    // Simulates the hand-patched-plist class this feature adopts BEFORE the
+    // prepend is config-owned: nothing is configured, so the prefix is
+    // trivially satisfied and only the tail differs from this shell's PATH.
     const observed = buildPlist('agent', { pathPrepend: ['/opt/hand-patched-bin'] });
     mockReads({ plist: observed, config: { name: 'agent' } });
 
     const result = await reconcileLaunchdPlist('agent', { dryRun: true });
 
-    expect(result.governedEnvDrift?.drift).toEqual([{
-      key: 'PATH',
-      state: 'mismatch',
+    expect(result.governedEnvDrift?.drift).toEqual([]);
+    expect(result.governedEnvDrift?.pathPrefix).toEqual({
+      configured: false,
+      satisfied: true,
+      ambientTailDiffers: true,
       expectedDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
       observedDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
-    }]);
+    });
     expect(JSON.stringify(result.governedEnvDrift)).not.toContain('hand-patched');
+  });
+
+  it('reports a governed PATH mismatch when the installed PATH lacks the configured prefix', async () => {
+    setPlatform('darwin');
+    const { buildPlist, reconcileLaunchdPlist } = await importPlatform();
+    const observed = buildPlist('agent', { pathPrepend: ['/opt/hand-patched-bin'] });
+    mockReads({ plist: observed, config: { name: 'agent', service: { pathPrepend: ['/opt/service-bin'] } } });
+
+    const result = await reconcileLaunchdPlist('agent', { dryRun: true });
+
+    expect(result.governedEnvDrift?.drift.map((entry) => `${entry.key}:${entry.state}`)).toEqual(['PATH:mismatch']);
+    expect(result.governedEnvDrift?.pathPrefix).toMatchObject({ configured: true, satisfied: false });
+  });
+
+  it('refuses an apply that would drop installed non-governed keys unless the drop is acknowledged', async () => {
+    setPlatform('darwin');
+    const { LaunchdReconcileRefusedError, buildPlist, reconcileLaunchdPlist } = await importPlatform();
+    const observed = buildPlist('agent').replace(
+      '    <key>HOME</key>',
+      '    <key>WHATSOUP_HEALTH_TOKEN</key>\n    <string>sentinel-token-value-never-reported</string>\n    <key>HOME</key>',
+    );
+    mockReads({ plist: observed, config: { name: 'agent' } });
+
+    let thrown: unknown;
+    try {
+      await reconcileLaunchdPlist('agent', { dryRun: false });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(LaunchdReconcileRefusedError);
+    expect((thrown as Error).message).toContain('WHATSOUP_HEALTH_TOKEN');
+    expect((thrown as Error).message).not.toContain('never-reported');
+    expect(fsMocks.writeFileSync).not.toHaveBeenCalled();
+    expect(childProcessMocks.execFile).not.toHaveBeenCalled();
+  });
+
+  it('proceeds with the apply when the non-governed drop is explicitly acknowledged', async () => {
+    setPlatform('darwin');
+    const { buildPlist, reconcileLaunchdPlist } = await importPlatform();
+    const observed = buildPlist('agent').replace(
+      '    <key>HOME</key>',
+      '    <key>WHATSOUP_HEALTH_TOKEN</key>\n    <string>sentinel-token-value-never-reported</string>\n    <key>HOME</key>',
+    );
+    mockReads({ plist: observed, config: { name: 'agent' } });
+
+    await expect(reconcileLaunchdPlist('agent', { dryRun: false, dropNonGovernedEnv: true }))
+      .resolves.toMatchObject({ dryRun: false });
+
+    expect(fsMocks.writeFileSync).toHaveBeenCalled();
+    const domain = `gui/${currentUid()}`;
+    expect(childProcessMocks.execFile).toHaveBeenNthCalledWith(1, 'launchctl', ['bootout', `${domain}/com.whatsoup.agent`], expect.any(Function));
+  });
+
+  it('refuses an apply when the installed EnvironmentVariables dict is unparseable, unless acknowledged', async () => {
+    setPlatform('darwin');
+    const { LaunchdReconcileRefusedError, reconcileLaunchdPlist } = await importPlatform();
+    const observed = `${generatedPlistIdentity()}\n<key>EnvironmentVariables</key>\n<dict>\n<key>PATH</key>`;
+    mockReads({ plist: observed, config: { name: 'agent' } });
+
+    await expect(reconcileLaunchdPlist('agent', { dryRun: false })).rejects.toThrow(LaunchdReconcileRefusedError);
+    expect(fsMocks.writeFileSync).not.toHaveBeenCalled();
+    expect(childProcessMocks.execFile).not.toHaveBeenCalled();
+  });
+
+  it('reports installed non-governed key names that an apply would drop', async () => {
+    setPlatform('darwin');
+    const { buildPlist, reconcileLaunchdPlist } = await importPlatform();
+    const observed = buildPlist('agent').replace(
+      '    <key>HOME</key>',
+      '    <key>WHATSOUP_HEALTH_TOKEN</key>\n    <string>sentinel-token-value-never-reported</string>\n    <key>HOME</key>',
+    );
+    mockReads({ plist: observed, config: { name: 'agent' } });
+
+    const result = await reconcileLaunchdPlist('agent', { dryRun: true });
+
+    expect(result.governedEnvDrift?.droppedNonGovernedKeys).toEqual(['WHATSOUP_HEALTH_TOKEN']);
+    expect(JSON.stringify(result.governedEnvDrift)).not.toContain('never-reported');
   });
 
   it('requires an existing plist for an explicit launchd migration', async () => {

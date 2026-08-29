@@ -496,7 +496,7 @@ into place during deployment.
 | `toolUpdateMode` | string | no | `full` | Controls what the user sees during agent tool execution. `full`: elapsed time and technical details. `friendly`: plain-language status, one-time per tool. `minimal`: typing indicator only during tools; pre-tool assistant narration is suppressed and the terminal answer is preserved. |
 | `echoGuard` | object | no | `{ enabled: true, groupCooldownMs: 1000 }` | Suppresses outbound echo loops in group chats. When enabled, group messages sent within `groupCooldownMs` of a prior send are suppressed. DMs are never affected. In-memory state, resets on restart. |
 | `operationTracker` | object | no | see defaults | Per-tool progress reporting and stall detection. All sub-fields optional; unset fields use platform defaults. See [operationTracker](#operationtracker). |
-| `service` | object | no | — | Service-manager render options for generated macOS launchd plists, valid on every instance type. `claudeConfigDir` renders as `CLAUDE_CONFIG_DIR` in the generated plist's `EnvironmentVariables`; `pathPrepend` prepends directories to the rendered service `PATH`. Ignored by the systemd and Docker backends. See [`service` (launchd render options)](#service-launchd-render-options). |
+| `service` | object | no | — | Service-manager render options for generated macOS launchd plists, valid on every instance type. `claudeConfigDir` renders as `CLAUDE_CONFIG_DIR` in the generated plist's `EnvironmentVariables`; `pathPrepend` prepends directories to the rendered service `PATH`. Not rendered by the systemd or Docker backends, but validated on every platform: a bad block fails config admission and load everywhere. See [`service` (launchd render options)](#service-launchd-render-options). |
 | `agentOptions` | object | agent only | — | Agent-specific settings. Required fields vary by `sessionScope`. See [agentOptions](#agentoptions). |
 | `chatOptions` | object | no | — | Chat-specific settings. Currently just `openaiProviderConfig` (chat OpenAI endpoint/key override). See [chatOptions](#chatoptions). |
 | `transcriptionOptions` | object | no | — | Shared OpenAI Whisper transcription endpoint/key override. Valid for chat, agent, and passive instances. See [transcriptionOptions](#transcriptionoptions). |
@@ -559,10 +559,22 @@ unreadable or invalid `config.json` aborts a plist install or reconcile instead
 of regenerating the plist without its governed environment; only a missing
 `config.json` (or absent block) renders the historical byte-identical plist.
 
+Unknown keys inside `service` are ignored (the instance-config convention for
+extraneous keys), so a misspelled field is silently inert — read the dry-run
+report after editing the block. Validation stays strict per field: a
+per-key `null` is rejected. Because the fleet config `PATCH` route deep-merges
+objects, a single governed key cannot be unset by omitting it; unset the whole
+block with `"service": null` and re-add the fields you want, or edit
+`config.json` directly.
+
 Reconciliation (`npm run reconcile-launchd-restart-policy -- --instance <name>`)
 additionally reports governed-key drift (`CLAUDE_CONFIG_DIR`, `PATH`) between
 the fresh render and the installed plist by key and SHA-256 value digest —
-never by value; installed bot plists carry live credentials. See the
+never by value; installed bot plists carry live credentials. `PATH` is
+decomposed into the config-owned prefix (does the installed `PATH` start with
+the configured `pathPrepend`?) and the rendering shell's ambient tail, and the
+report lists the *names* of installed non-governed keys an apply would drop
+(`--apply` refuses those without `--drop-non-governed-env`). See the
 [macOS launchd deployment runbook](runbooks/macos-launchd-deployment.md#generated-render-options-and-governed-env-drift)
 for the drift-check and hand-patch adoption workflow.
 
