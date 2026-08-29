@@ -2702,7 +2702,7 @@ export class SessionManager {
 
       // #3391: an intentional shutdown's SIGTERM whose exit lands while a
       // CONCURRENT inbound has already re-set `active` (the eviction race —
-      // evictIdleSession removes the session from the map only after
+      // evictIdleSession deletes the map entry synchronously after INITIATING
       // shutdown, precisely to let that inbound re-spawn) is still the clean
       // path, never a crash. shutdown() owns the durable closure; here only
       // the in-memory child state retires so the re-activation spawns fresh.
@@ -2710,10 +2710,10 @@ export class SessionManager {
         this.completeProviderTurn();
         this.active = false;
         this.child = null;
-        // sessionId is deliberately retained here, as on the clean path below:
-        // shutdown() retires it after durable closure (using the id it captured
-        // before the kill), so a re-activation that lands first still resumes
-        // the suspended provider session instead of starting cold.
+        // sessionId is deliberately retained here, matching the clean path
+        // below: shutdown() owns its retirement at the tail (durable closure
+        // uses the id it captured before the kill), and no exit-handler
+        // consumer needs it cleared — resume derivation is caller/DB-supplied.
         return;
       }
 

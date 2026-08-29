@@ -7799,16 +7799,27 @@ describe('suspend SIGTERM graceful self-exit (#3391)', () => {
 
     const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(), notifyUser, onCrash });
     await sm.spawnSession();
+    mockChild.stdout.emit(
+      'data',
+      Buffer.from(`${JSON.stringify({ type: 'system', subtype: 'init', session_id: 'ses_3391_suspend' })}\n`),
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    // Coverage assertion: the fixture really has a live session id to retain.
+    expect((sm as unknown as { sessionId: string | null }).sessionId).toBe('ses_3391_suspend');
 
     // Idle-TTL sweep suspends; claude-cli catches the SIGTERM and gracefully
     // self-exits code=143/signal=null. Before the exit lands, a concurrent
-    // inbound re-activates the session (evictIdleSession removes it from the
-    // session map only AFTER shutdown, exactly to allow this).
+    // inbound re-activates the session (evictIdleSession deletes the map entry
+    // synchronously after INITIATING shutdown, exactly to allow this).
     const shutdownDone = sm.shutdown(true);
     (sm as unknown as { active: boolean }).active = true;
     mockChild._exitCb?.(143, null);
+    // Retention pin (#3391 review): the intentional-exit early return must NOT
+    // retire the session id — shutdown() owns that at its tail.
+    expect((sm as unknown as { sessionId: string | null }).sessionId).toBe('ses_3391_suspend');
     await shutdownDone;
     await new Promise((resolve) => setImmediate(resolve));
+    expect((sm as unknown as { sessionId: string | null }).sessionId).toBeNull();
 
     expect(onCrash).not.toHaveBeenCalled();
     expect(notifyUser).not.toHaveBeenCalled();
