@@ -538,7 +538,7 @@ export function attest(
   args: AttestArgs,
   canary: CapabilityCanaryOutcome | null,
   now: Date,
-  mediaRootReadable: boolean | null = null,
+  mediaRootReadable: boolean | null,
 ): AttestResult {
   const binding = bindingForAttestArgs(args);
   const attestationDigest = attestationBindingDigest(binding);
