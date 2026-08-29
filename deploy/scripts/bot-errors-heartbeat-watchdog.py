@@ -1511,6 +1511,13 @@ def clock_reference_epoch() -> tuple[int | None, str]:
     try:
         with urlopen(Request(url, method="HEAD"), timeout=5) as resp:
             date_header = resp.headers.get("Date")
+    except HTTPError as exc:
+        # A 403/404/etc. still carries the origin's Date header, which is all
+        # the probe needs (first live run: Cloudflare answered urllib's HEAD
+        # with 403 and the probe paged "unreachable" against an exact clock).
+        date_header = exc.headers.get("Date") if exc.headers is not None else None
+        if not date_header:
+            return None, f"reference unreachable: HTTP {exc.code} without Date header"
     except OSError as exc:
         return None, f"reference unreachable: {str(exc)[:120]}"
     if not date_header:
