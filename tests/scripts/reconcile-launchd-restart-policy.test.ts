@@ -2,11 +2,17 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   parseReconcileLaunchdRestartPolicyArgs,
   runReconcileLaunchdRestartPolicy,
+  type ReconcileLaunchdRestartPolicyDependencies,
 } from '../../scripts/reconcile-launchd-restart-policy.ts';
-import { LaunchdReconcileRefusedError } from '../../src/fleet/platform.ts';
+import { LaunchdReconcileRefusedError, type LaunchdReconcileResult } from '../../src/fleet/platform.ts';
 import { LaunchdRenderConfigError } from '../../src/lib/launchd-service-config.ts';
 
-function reconcileResult(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+type Reconcile = ReconcileLaunchdRestartPolicyDependencies['reconcile'];
+
+/** Typed to the reconcile signature so tsconfig.test.json type-checks the fake against the real contract. */
+const mockReconcile = (): ReturnType<typeof vi.fn<Reconcile>> => vi.fn<Reconcile>();
+
+function reconcileResult(overrides: Partial<LaunchdReconcileResult> = {}): LaunchdReconcileResult {
   return {
     label: 'com.whatsoup.agent-one',
     plistPath: '/safe/agent-one.plist',
@@ -19,7 +25,7 @@ function reconcileResult(overrides: Record<string, unknown> = {}): Record<string
 
 async function runWith(
   argv: string[],
-  reconcile: ReturnType<typeof vi.fn>,
+  reconcile: Reconcile,
 ): Promise<{ code: number; stdout: string[]; stderr: string[] }> {
   const stdout: string[] = [];
   const stderr: string[] = [];
@@ -61,7 +67,7 @@ describe('reconcile-launchd-restart-policy CLI', () => {
   });
 
   it('never prints an all-clear when the installed plist has non-governed keys an apply would drop', async () => {
-    const reconcile = vi.fn().mockResolvedValue(reconcileResult({
+    const reconcile = mockReconcile().mockResolvedValue(reconcileResult({
       governedEnvDrift: {
         comparable: true,
         drift: [],
@@ -79,7 +85,7 @@ describe('reconcile-launchd-restart-policy CLI', () => {
   });
 
   it('reports a satisfied configured prefix with a differing ambient tail as config-satisfied, not drift', async () => {
-    const reconcile = vi.fn().mockResolvedValue(reconcileResult({
+    const reconcile = mockReconcile().mockResolvedValue(reconcileResult({
       governedEnvDrift: {
         comparable: true,
         drift: [],
@@ -102,7 +108,7 @@ describe('reconcile-launchd-restart-policy CLI', () => {
   });
 
   it('passes the acknowledgement through to the reconciler on apply', async () => {
-    const reconcile = vi.fn().mockResolvedValue(reconcileResult({ dryRun: false }));
+    const reconcile = mockReconcile().mockResolvedValue(reconcileResult({ dryRun: false }));
 
     await runWith(['--instance', 'agent-one', '--apply', '--drop-non-governed-env'], reconcile);
 
@@ -110,13 +116,13 @@ describe('reconcile-launchd-restart-policy CLI', () => {
   });
 
   it('prints render-config and refusal messages verbatim but keeps other failures generic', async () => {
-    const validation = vi.fn().mockRejectedValue(
+    const validation = mockReconcile().mockRejectedValue(
       new LaunchdRenderConfigError("service.pathPrepend[0] must be an absolute directory path of at most 4096 characters without ':' or control characters"),
     );
-    const refused = vi.fn().mockRejectedValue(
+    const refused = mockReconcile().mockRejectedValue(
       new LaunchdReconcileRefusedError('installed plist has 1 non-governed EnvironmentVariables keys (WHATSOUP_HEALTH_TOKEN) that --apply will drop'),
     );
-    const launchctl = vi.fn().mockRejectedValue(new Error('launchctl exploded at /private/detail'));
+    const launchctl = mockReconcile().mockRejectedValue(new Error('launchctl exploded at /private/detail'));
 
     const validationRun = await runWith(['--instance', 'agent-one'], validation);
     expect(validationRun.code).toBe(1);
