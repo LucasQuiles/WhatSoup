@@ -22,6 +22,7 @@
 
 import { DatabaseSync } from 'node:sqlite';
 
+import { systemClock } from '../../lib/clock.ts';
 import { parseLifecycleEvent, type LifecycleEvent } from './lifecycle-event.ts';
 
 const DAY_MS = 86_400_000;
@@ -39,7 +40,7 @@ export interface LifecycleEventStoreOptions {
   retentionDays?: number;
   /** Event row cap. Default 100_000. */
   maxRows?: number;
-  /** Injectable clock (epoch ms). Default Date.now. */
+  /** Injectable clock (epoch ms). Default systemClock.now. */
   nowEpochMs?: () => number;
 }
 
@@ -92,7 +93,7 @@ export function createLifecycleEventStore(options: LifecycleEventStoreOptions): 
   const hardCeilingBytes = budgetBytes * (options.hardCeilingMultiple ?? 8);
   const retentionMs = (options.retentionDays ?? 14) * DAY_MS;
   const maxRows = options.maxRows ?? 100_000;
-  const now = options.nowEpochMs ?? Date.now;
+  const now = options.nowEpochMs ?? ((): number => systemClock.now());
 
   const db = new DatabaseSync(options.path);
   db.exec('PRAGMA journal_mode = WAL');
