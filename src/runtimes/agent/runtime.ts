@@ -2857,7 +2857,8 @@ export class AgentRuntime implements Runtime {
         runtime.enqueueAutoSwitchNotice(queue, text, logChatJid, mode),
       withHandoffPrefix: (chatJid, text) => runtime.withHandoffPrefix(chatJid, text),
       flushPendingHandoffNotice: (queue) => runtime.flushPendingHandoffNotice(queue),
-      activateProviderFallback: (resetAt, reason) => runtime.fallback.activateProviderFallback(resetAt, reason),
+      activateProviderFallback: (resetAt, reason, failedSession) =>
+        runtime.fallback.activateProviderFallbackForSession(resetAt, reason ?? 'usage-limit', failedSession ?? null),
       activateProviderFallbackAfterTerminalResult: (resetAt, reason, session, evidenceText) =>
         runtime.fallback.activateProviderFallbackAfterTerminalResult(resetAt, reason, session, evidenceText),
       scheduleFallbackReplay: (args) => runtime.scheduleFallbackReplay(args),
@@ -8253,11 +8254,20 @@ export class AgentRuntime implements Runtime {
     this.fallback.deactivateProviderFallback(reason, receipt);
   }
 
+  /**
+   * Test-seam delegator (no production callers — the fallback suites reach it
+   * through the runtime-view cast). Routes through the tier-aware
+   * activateProviderFallbackForSession so the failing session, when one
+   * exists, is REQUIRED at the signature: a future runtime-internal caller
+   * cannot silently derive the primary tier by omitting it. Passing null
+   * states "no session evidence" explicitly (primary tier).
+   */
   private activateProviderFallback(
     resetAt: Date | null,
-    reason: ProviderFallbackReason = 'usage-limit',
-  ): ReturnType<RuntimeFallbackCoordinator['activateProviderFallback']> {
-    return this.fallback.activateProviderFallback(resetAt, reason);
+    reason: ProviderFallbackReason,
+    failedSession: SessionManager | null,
+  ): ReturnType<RuntimeFallbackCoordinator['activateProviderFallbackForSession']> {
+    return this.fallback.activateProviderFallbackForSession(resetAt, reason ?? 'usage-limit', failedSession ?? null);
   }
 
   private armFallbackWindow(until: number, reason: string, activatedAt?: number, opts?: { restored?: boolean }): boolean {
@@ -8344,7 +8354,9 @@ export class AgentRuntime implements Runtime {
       modelUsabilityStatus: usability?.status ?? null,
       lastSuccessfulTurnAt: this.turnCapabilityTracker.lastSuccessfulTurnAt,
       lastSuccessfulTurnProvider: this.turnCapabilityTracker.lastSuccessfulTurnProvider,
+      lastSuccessfulTurnModel: this.turnCapabilityTracker.lastSuccessfulTurnModel,
       lastSuccessfulTurnSessionCurrent: this.lastSuccessfulTurnSessionCurrent(),
+      primaryModel: this.model ?? null,
       lastTurnErrorClass: this.turnCapabilityTracker.lastTurnErrorClass,
       lastTurnErrorAt: this.turnCapabilityTracker.lastTurnErrorAt,
       periodicProbeExpected,
@@ -8366,8 +8378,11 @@ export class AgentRuntime implements Runtime {
     // safe to null rather than throwing on a session that lacks the accessor.
     const successProvider =
       typeof session?.getProviderId === 'function' ? session.getProviderId() : null;
+    const successModel =
+      typeof session?.getModelRef === 'function' ? session.getModelRef() ?? null : null;
     this.turnCapabilityTracker.recordSuccess(
       successProvider,
+      successModel,
       session,
       sessionBinding,
     );

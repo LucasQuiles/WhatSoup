@@ -218,6 +218,11 @@ export interface RuntimeResultHandlerPort {
   activateProviderFallback(
     resetAt: Date | null,
     reason?: ProviderFallbackReason,
+    // The FAILING session, for tier attribution: a classified failure emitted
+    // by the ACTIVE FALLBACK entry's own session must not move the window
+    // clocks. Non-marking (unlike activateProviderFallbackAfterTerminalResult,
+    // which also fails the entry) — used by the model-unavailable split.
+    failedSession?: SessionManager | null,
   ): ProviderFallbackActivation | null;
   activateProviderFallbackAfterTerminalResult(
     resetAt: Date | null,
@@ -479,7 +484,7 @@ if (event.text && (!hasPendingPoll || terminalFailureDuringPoll)) {
   if (providerFailureKind === 'model-unavailable') {
     recordTurnFailure(providerFailureKind);
     log.warn({ chatJid: queue.targetChatJid, textPreview: providerPreview(event.text, 300) }, 'suppressed provider model-unavailable message from result — session will be shut down');
-    const activation = host.activateProviderFallback(null, 'model-unavailable');
+    const activation = host.activateProviderFallback(null, 'model-unavailable', session);
     const replayScheduled = activation
       ? host.scheduleFallbackReplay({
           activation,
@@ -834,7 +839,7 @@ if (diagnosticBundleEnabled()) host.kickDiagnosticBundle(wf, providerText);
 const resetAt = reason === 'usage-limit' ? parseUsageLimitResetTime(providerText) : null;
 const activation = wf.fallback.markActiveEntryFailedOnTrigger
   ? host.activateProviderFallbackAfterTerminalResult(resetAt, reason, session, providerText)
-  : host.activateProviderFallback(resetAt, reason);
+  : host.activateProviderFallback(resetAt, reason, session);
 const replayScheduled = activation
   ? host.scheduleFallbackReplay({
       activation,
@@ -1077,7 +1082,7 @@ if (event.text) {
   if (providerFailureKind === 'model-unavailable') {
     recordTurnFailure(providerFailureKind);
     log.warn({ chatJid: host.shared ? host.currentTurnChatJid : host.activeChatJid, textPreview: providerPreview(event.text, 300) }, 'suppressed provider model-unavailable message from result — session will be shut down');
-    const activation = host.activateProviderFallback(null, 'model-unavailable');
+    const activation = host.activateProviderFallback(null, 'model-unavailable', host.session);
     const replayScheduled = activation
       ? host.scheduleFallbackReplay({
           activation,
