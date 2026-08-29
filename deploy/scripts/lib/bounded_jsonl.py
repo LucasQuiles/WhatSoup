@@ -109,6 +109,8 @@ class _TransactionFailure(Exception):
         super().__init__(status, stage, failure_class)
 
 
+TRIM_HIGH_WATER_RATIO = 1.25
+
 _COMPONENT_RE = re.compile(r"[a-z][a-z0-9_.-]{0,127}\Z")
 _MUTEX_REGISTRY_LOCK = threading.Lock()
 _MUTEXES: dict[tuple[int, int, str], threading.Lock] = {}
@@ -767,7 +769,14 @@ def _append_under_fence(
                 failure_class="incomplete_jsonl",
             )
 
-    if bytes_before + len(line) > max_bytes:
+    # High-water hysteresis (ported from the 2026-08-28 production fix):
+    # compacting the instant size crosses max_bytes makes a file pinned at the
+    # cap rewrite O(file) on EVERY append, which stalled outbox drains. Allow
+    # growth to TRIM_HIGH_WATER_RATIO * max_bytes, then compact back under
+    # max_bytes once; an oversized single record still compacts immediately.
+    if len(line) > max_bytes or bytes_before + len(line) > int(
+        max_bytes * TRIM_HIGH_WATER_RATIO
+    ):
         return _compact_replace(
             parent_fd=parent_fd,
             target_name=target_name,

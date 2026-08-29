@@ -1486,4 +1486,24 @@ describe('clock_skew check (FLOS Stage 0 S0.3)', () => {
     expect(events).toHaveLength(1);
     expect(events[0]!.evidence).toContain('misconfigured or unreachable');
   });
+
+  it('reads the Date header from an HTTP error response', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-heartbeat-'));
+    const output = execFileSync('python3', ['-c', `
+import importlib.util, json, io, email.utils
+from urllib.error import HTTPError
+spec = importlib.util.spec_from_file_location("watchdog", "deploy/scripts/bot-errors-heartbeat-watchdog.py")
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+m.os.environ["BOT_ERRORS_CLOCK_REFERENCE_URL"] = "https://reference.invalid/"
+m.os.environ.pop("BOT_ERRORS_DRY_CLOCK_REFERENCE_EPOCH", None)
+hdrs = email.message.Message()
+hdrs["Date"] = email.utils.formatdate(1787900000, usegmt=True)
+def fake_urlopen(req, timeout=5):
+    raise HTTPError(req.full_url, 403, "Forbidden", hdrs, io.BytesIO(b""))
+m.urlopen = fake_urlopen
+print(json.dumps(list(m.clock_reference_epoch())))
+`], { cwd: process.cwd(), encoding: 'utf8' });
+    expect(JSON.parse(output)).toEqual([1787900000, 'http-date']);
+  });
 });
