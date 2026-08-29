@@ -19,8 +19,9 @@
 // Vitest's suite collection fails because the module doesn't exist; all 15
 // declared cases are unreached.
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { DatabaseSync } from 'node:sqlite';
+import { Database } from '../../src/core/database.ts';
 import {
   createChatResolver,
   seedChatAliases,
@@ -327,5 +328,119 @@ describe('residual-branch coverage', () => {
       prepareSpy.mockRestore();
       db.close();
     }
+  });
+});
+
+// --- Contract: LID canonicalization (issue 3150) ---------------------------
+//
+// Regression for issue 3150: a resolved phone JID (`<E.164>@s.whatsapp.net`)
+// whose conversation actually lives under a `@lid` JID — with the mapping in
+// this instance's lid_mappings — must canonicalize onto the EXISTING @lid
+// conversation instead of opening a second, parallel thread. Fail-open in
+// every degraded case: no dbWrapper, no mapping, or no existing @lid
+// conversation -> the JID is returned as given.
+//
+// Fixture uses the real migrated schema (Database wrapper) because the
+// canonicalization consults lid_mappings + chats/messages, mirroring the
+// resolveLidsForPhone contract in src/core/lid-resolver.ts.
+
+describe('ChatResolver contract -- LID canonicalization (3150)', () => {
+  const PHONE_JID = '15551230001@s.whatsapp.net';
+  const LID = '11111110222';
+  const LID_JID = `${LID}@lid`;
+  const CONVERSATION_KEY = '15551230001';
+
+  let wdb: Database;
+  let resolver: ChatResolver;
+
+  function seedLidMapping(lid: string, phoneJid: string, updatedAt = '2026-08-01 00:00:00'): void {
+    wdb.raw
+      .prepare('INSERT INTO lid_mappings (lid, phone_jid, updated_at) VALUES (?, ?, ?)')
+      .run(lid, phoneJid, updatedAt);
+  }
+
+  function seedChatRow(jid: string, conversationKey: string): void {
+    wdb.raw
+      .prepare('INSERT INTO chats (jid, conversation_key) VALUES (?, ?)')
+      .run(jid, conversationKey);
+  }
+
+  function seedMessageRow(chatJid: string, conversationKey: string): void {
+    wdb.raw
+      .prepare(`
+        INSERT INTO messages (chat_jid, conversation_key, sender_jid, message_id, content, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `)
+      .run(chatJid, conversationKey, chatJid, 'msg-3150-1', 'hello', 1756000000);
+  }
+
+  beforeEach(() => {
+    wdb = new Database(':memory:');
+    wdb.open();
+    resolver = createChatResolver({ db: wdb.raw, dbWrapper: wdb });
+  });
+
+  afterEach(() => {
+    wdb.close();
+  });
+
+  it('canonicalizes a phone JID onto the existing @lid conversation', () => {
+    seedLidMapping(LID, PHONE_JID);
+    seedChatRow(LID_JID, CONVERSATION_KEY);
+
+    expect(resolver.resolve({ chatJid: PHONE_JID })).toBe(LID_JID);
+  });
+
+  it('canonicalizes an alias-resolved phone JID onto the existing @lid conversation', () => {
+    seedLidMapping(LID, PHONE_JID);
+    seedChatRow(LID_JID, CONVERSATION_KEY);
+    seedAlias(wdb.raw, 'monitor', PHONE_JID);
+
+    expect(resolver.resolve({ to: 'monitor' })).toBe(LID_JID);
+  });
+
+  it('canonicalizes when the @lid thread exists only in messages (no chats row)', () => {
+    seedLidMapping(LID, PHONE_JID);
+    seedMessageRow(LID_JID, CONVERSATION_KEY);
+
+    expect(resolver.resolve({ chatJid: PHONE_JID })).toBe(LID_JID);
+  });
+
+  it('picks the most recent mapping whose @lid conversation exists', () => {
+    // Newer mapping without a thread must not shadow the older mapping that
+    // actually holds the conversation.
+    seedLidMapping('11111110333', PHONE_JID, '2026-08-20 00:00:00');
+    seedLidMapping(LID, PHONE_JID, '2026-08-01 00:00:00');
+    seedChatRow(LID_JID, CONVERSATION_KEY);
+
+    expect(resolver.resolve({ chatJid: PHONE_JID })).toBe(LID_JID);
+  });
+
+  it('fail-open: returns the phone JID unchanged when no lid mapping exists', () => {
+    seedChatRow(LID_JID, CONVERSATION_KEY); // thread exists but is unmapped
+
+    expect(resolver.resolve({ chatJid: PHONE_JID })).toBe(PHONE_JID);
+  });
+
+  it('fail-open: returns the phone JID unchanged when the mapping has no existing @lid conversation', () => {
+    seedLidMapping(LID, PHONE_JID); // mapped, but no chats/messages rows
+
+    expect(resolver.resolve({ chatJid: PHONE_JID })).toBe(PHONE_JID);
+  });
+
+  it('fail-open: a resolver constructed without dbWrapper never canonicalizes', () => {
+    seedLidMapping(LID, PHONE_JID);
+    seedChatRow(LID_JID, CONVERSATION_KEY);
+
+    const bare = createChatResolver({ db: wdb.raw });
+    expect(bare.resolve({ chatJid: PHONE_JID })).toBe(PHONE_JID);
+  });
+
+  it('leaves group and @lid targets untouched', () => {
+    seedLidMapping(LID, PHONE_JID);
+    seedChatRow(LID_JID, CONVERSATION_KEY);
+
+    expect(resolver.resolve({ chatJid: 'fixture-group-3150@g.us' })).toBe('fixture-group-3150@g.us');
+    expect(resolver.resolve({ chatJid: LID_JID })).toBe(LID_JID);
   });
 });

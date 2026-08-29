@@ -8,7 +8,7 @@ import { MS_PER_HOUR } from '../../lib/time-units.ts';
 import type { ToolRegistry } from '../registry.ts';
 import { errorResult, toolError, type SessionContext } from '../types.ts';
 import type { RuntimeConnection } from '../../transport/runtime-connection.ts';
-import { toConversationKey } from '../../core/conversation-key.ts';
+import { canonicalConversationKey } from '../../core/access-list.ts';
 import type { Database } from '../../core/database.ts';
 import {
   AliasNotFoundError,
@@ -214,7 +214,10 @@ export function registerMessagingTools(
 ): void {
   const { connection, db } = deps;
   const sendPipeline = createSendPipeline({
-    resolver: createChatResolver({ db }),
+    // Issue 3150: dbWrapper enables outbound LID canonicalization — a
+    // phone-JID recipient whose thread lives under a mapped `@lid` JID is
+    // resolved onto that existing conversation before dispatch (fail-open).
+    resolver: createChatResolver({ db, dbWrapper: deps.dbWrapper }),
     profiles: deps.profiles,
     auditWriter: deps.auditWriter,
     caller: 'mcp',
@@ -299,7 +302,13 @@ export function registerMessagingTools(
 
             let resolvedConversationKey: string;
             try {
-              resolvedConversationKey = toConversationKey(prepared.chatJid);
+              // Issue 3150 companion: prepared.chatJid may now be an `@lid`
+              // JID (canonicalized onto the existing conversation). Session
+              // conversation keys are stored PHONE-folded at ingest (QR-050),
+              // so the comparison must fold `@lid` -> phone the same way —
+              // a bare toConversationKey would yield the raw LID digits and
+              // falsely reject the pinned conversation.
+              resolvedConversationKey = canonicalConversationKey(prepared.chatJid, deps.dbWrapper);
             } catch {
               throw new Error(`Invalid chatJid "${prepared.chatJid}": must be a valid JID`);
             }
