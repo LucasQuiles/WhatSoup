@@ -253,59 +253,114 @@ const attestationExpectationSchema = z.object({
  * declared resolver argv itself, derives the observed source digest from what
  * IT executed (never from model-controlled text), and validates the typed
  * outcome (exit code + minimum output evidence).
+ *
+ * TYPED EXECUTION CONTRACT (#3221 Debt 4, config-contract half — owner-ratified
+ * 2026-08-28 as specced). The free-form `execution.command` argv is REPLACED by
+ * the typed `{ interpreter, resolverArtifactPath, args }` struct, so the shape
+ * is unrepresentable-if-wrong AT THE SCHEMA rather than refused at verify:
+ *
+ *   - `interpreter`: the explicit interpreter PATH, or null ⇒ direct mode (the
+ *     artifact executes itself). The KEY is required — mode is DECLARED, never
+ *     guessed (the round-18 deny-by-default rule, now structural).
+ *   - `resolverArtifactPath`: the code artifact — ALWAYS the executing token by
+ *     construction (`command[1]` interpreted, `command[0]` direct), so the
+ *     round-18/19 decoy and mislabel shapes cannot be written down.
+ *   - `args`: the data argv tail. At least one arg must embed `{source}`; in
+ *     DIRECT mode every arg must embed `{source}` and must not be a flag
+ *     (round-21 finding 2, now a load-time schema refusal — `["-c","{source}"]`
+ *     and `["--eval={source}"]` are unrepresentable).
+ *
+ * The schema DERIVES the runtime pair the executor/canonicalizer consume —
+ * `command` = [interpreter?, resolverArtifactPath, ...args], `interpreted` =
+ * interpreter !== null — through the unchanged `canonicalExecutionIdentity`,
+ * so an equivalent declaration produces a byte-identical canonical identity
+ * and NO attested composite-digest drift. The legacy `command`/`interpreted`
+ * body is refused loudly (strict shape). The runtime half (content-addressed
+ * staging, interpreter identity, drain-seam re-compare) is unchanged; the
+ * direct-mode positional-code residual (awk-shape) remains the owner-ACCEPTED
+ * documented boundary (2026-08-13 ratification).
  */
 const executionRuleSchema = z
   .object({
-    /** Resolver argv; the literal '{source}' argument is replaced with the validated source. */
-    command: z.array(z.string().min(1)).nonempty(),
+    /**
+     * Explicit interpreter PATH (must contain '/': a bare $PATH name like `node` is
+     * unpinnable and refused — round-20 advisor), or null for a directly executable
+     * artifact. The key itself is REQUIRED: pass `interpreter: null` to declare direct
+     * mode consciously.
+     */
+    interpreter: z.string().min(1).nullable(),
+    /**
+     * Round-18 finding 1: the EXPLICIT path to the resolver's code artifact — the file
+     * whose content the attestation verifies. Under the typed struct it is REQUIRED and
+     * is the executing token by construction. See `capability-resolver-artifact.ts`.
+     */
+    resolverArtifactPath: z.string().min(1),
+    /** Data argv tail; the literal '{source}' is replaced with the validated source. */
+    args: z.array(z.string().min(1)),
     /** Hard wall-clock bound on the resolver child process. */
     timeoutMs: z.number().int().positive().max(600_000),
     /** Minimum resolver stdout bytes for an 'ok' receipt. */
     minOutputBytes: z.number().int().positive(),
-    /**
-     * Round-18 finding 1: the EXPLICIT path to the resolver's code artifact — the file whose
-     * content the attestation verifies (never inferred from argv). Nullable in the field type
-     * for back-compat, but round-20 REQUIRES it (non-null) for an ENABLED config at LOAD (the
-     * refine below): the documented contract is "enabled: true requires a fully valid body",
-     * so a missing declaration is a startup ConfigValidationError, never a deferred drain-seam
-     * failure. See `capability-resolver-artifact.ts`.
-     */
-    resolverArtifactPath: z.string().min(1).nullable().default(null),
-    /**
-     * Round-18 finding 1: true ⇒ command[0] is an interpreter and the artifact is command[1];
-     * false ⇒ command[0] is the artifact itself. The operator declares the structure; the
-     * verifier never guesses it. Round-20 REQUIRES it (non-null) at LOAD for an enabled config.
-     */
-    interpreted: z.boolean().nullable().default(null),
   })
-  .refine((rule) => rule.command.some((part) => part.includes('{source}')), {
-    message: "execution.command must reference the '{source}' placeholder",
+  .strict() // a legacy free-form `command`/`interpreted` body is refused loudly, never silently dropped
+  .superRefine((rule, ctx) => {
+    if (rule.interpreter !== null) {
+      // Round-20 (advisor): SYNTACTIC load check (no fs access at parse time — the resolver
+      // host may differ from the parse host). A bare $PATH name is unpinnable; a flag is
+      // never an interpreter. The runtime then realpath-resolves and content-hashes it.
+      if (!rule.interpreter.includes('/')) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'execution.interpreter must be an explicit interpreter PATH (containing "/") — a bare name resolved via $PATH is unpinnable and is refused at load',
+          path: ['interpreter'],
+        });
+      }
+      if (rule.interpreter.startsWith('-')) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'execution.interpreter may not be a flag',
+          path: ['interpreter'],
+        });
+      }
+    }
+    if (!rule.args.some((part) => part.includes('{source}'))) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "execution.args must reference the '{source}' placeholder",
+        path: ['args'],
+      });
+    }
+    if (rule.interpreter === null) {
+      // Round-21 finding 2, structural at the schema: in direct mode a (possibly renamed-
+      // interpreter) artifact may treat a flag or bare positional as CODE, so only
+      // {source}-bearing non-flag data tokens are representable after the artifact.
+      rule.args.forEach((tok, i) => {
+        if (tok.startsWith('-')) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `execution.args[${i}] "${tok}" is a flag — a direct artifact may take only {source}-bearing DATA tokens, never flags (a renamed interpreter reads -c/-e/--eval as "run the following as code")`,
+            path: ['args', i],
+          });
+        } else if (!tok.includes('{source}')) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `execution.args[${i}] "${tok}" is a bare positional argument (no {source}) — a direct artifact that is or wraps an interpreter could execute it as an unattested script`,
+            path: ['args', i],
+          });
+        }
+      });
+    }
   })
-  .refine((rule) => rule.resolverArtifactPath !== null && rule.resolverArtifactPath.length > 0, {
-    message: 'execution.resolverArtifactPath is required for an enabled capability-obligation config — declare the resolver artifact explicitly (validated at load, not deferred to the drain seam)',
-    path: ['resolverArtifactPath'],
-  })
-  .refine((rule) => rule.interpreted !== null, {
-    message: 'execution.interpreted is required for an enabled capability-obligation config — declare whether command[0] is an interpreter (validated at load, not deferred to the drain seam)',
-    path: ['interpreted'],
-  })
-  .refine(
-    (rule) => {
-      if (rule.interpreted !== true) return true;
-      const interpreter = rule.command[0];
-      // Round-20 (advisor): SYNTACTIC load check (no fs access at parse time — the resolver host
-      // may differ from the parse host and paths may be relative). A bare interpreter name resolved
-      // via $PATH (`node`, `python3`) is unpinnable: $PATH is ambient and mutable, so the attested
-      // interpreter is not provably the one that would execute. Require an explicit path (contains
-      // '/'); the runtime then realpath-resolves and content-hashes it into the composite. Caught at
-      // LOAD as a ConfigValidationError, never deferred to the drain seam.
-      return typeof interpreter === 'string' && interpreter.includes('/');
-    },
-    {
-      message: 'execution.command[0] must be an explicit interpreter PATH (containing "/") when interpreted:true — a bare name resolved via $PATH is unpinnable and is refused at load',
-      path: ['command', 0],
-    },
-  );
+  .transform((rule) => ({
+    ...rule,
+    /** DERIVED (single source: the typed struct) — what the executor spawns and the canonicalizer binds. */
+    command:
+      rule.interpreter === null
+        ? [rule.resolverArtifactPath, ...rule.args]
+        : [rule.interpreter, rule.resolverArtifactPath, ...rule.args],
+    /** DERIVED: interpreted ⇔ an interpreter is declared. */
+    interpreted: rule.interpreter !== null,
+  }));
 
 const capabilityObligationsOptionsSchema = z.object({
   enabled: z.literal(true),

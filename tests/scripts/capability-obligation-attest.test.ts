@@ -63,7 +63,7 @@ function configOptions(over: Record<string, unknown> = {}): CapabilityObligation
     mediaRoot: '/var/media',
     retentionPolicyVersion: 'ret/1',
     retentionHorizonDays: 30,
-    execution: { command: ['resolver', '{source}'], timeoutMs: 5000, minOutputBytes: 1, resolverArtifactPath: 'resolver', interpreted: false },
+    execution: { interpreter: null, resolverArtifactPath: 'resolver', args: ['{source}'], timeoutMs: 5000, minOutputBytes: 1 },
     attestation: {
       skillName: 'watch', skillVersion: '1.0.0', skillDigest: 'sd', resolverDigest: 'rd',
       dependencyVersions: { 'yt-dlp': '2026.03.17' }, probeVersion: 'p/1', canaryId: 'can-1',
@@ -274,19 +274,30 @@ describe('capability-obligation-attest CLI (the operator front-door records end-
   // with the canonical execution SHAPE). Derive it from the config the CLI actually reads,
   // exactly as the producer/executor do, so admission and the drain-seam re-comparison match.
   function compositeFromConfigFile(configFile: string): string {
+    // #3221 Debt 4: the config carries the TYPED { interpreter, resolverArtifactPath, args }
+    // struct; derive command/interpreted exactly as the schema transform does.
     const cfg = JSON.parse(readFileSync(configFile, 'utf8')) as {
-      agentOptions: { capabilityObligations: { execution: { command: string[]; resolverArtifactPath: string; interpreted: boolean; timeoutMs: number; minOutputBytes: number } } };
+      agentOptions: { capabilityObligations: { execution: { interpreter: string | null; resolverArtifactPath: string; args: string[]; timeoutMs: number; minOutputBytes: number } } };
     };
     const ex = cfg.agentOptions.capabilityObligations.execution;
+    if (!Array.isArray(ex.args)) {
+      // A rawExecution falsifier config (legacy free-form shape): no composite is derivable —
+      // and none is needed, because config LOAD refuses the shape before any digest comparison.
+      return 'ff'.repeat(32);
+    }
+    const interpreted = ex.interpreter !== null;
+    const command = interpreted
+      ? [ex.interpreter!, ex.resolverArtifactPath, ...ex.args]
+      : [ex.resolverArtifactPath, ...ex.args];
     const contentDigest = createHash('sha256').update(readFileSync(realpathSync(ex.resolverArtifactPath))).digest('hex');
     // round-20: the composite binds the interpreter content, the envelope (timeoutMs/minOutputBytes),
     // AND the whole resolver-directory manifest.
-    const interpreterDigest = ex.interpreted ? createHash('sha256').update(readFileSync(realpathSync(ex.command[0]!))).digest('hex') : null;
+    const interpreterDigest = interpreted ? createHash('sha256').update(readFileSync(realpathSync(command[0]!))).digest('hex') : null;
     const manifestDigest = directoryManifestDigest(dirname(realpathSync(ex.resolverArtifactPath)));
-    return resolverCompositeDigest(contentDigest, manifestDigest, { command: ex.command, resolverArtifactPath: ex.resolverArtifactPath, interpreted: ex.interpreted, timeoutMs: ex.timeoutMs, minOutputBytes: ex.minOutputBytes }, interpreterDigest);
+    return resolverCompositeDigest(contentDigest, manifestDigest, { command, resolverArtifactPath: ex.resolverArtifactPath, interpreted, timeoutMs: ex.timeoutMs, minOutputBytes: ex.minOutputBytes }, interpreterDigest);
   }
 
-  function writeConfig(dir: string, over: { mediaRoot?: string; resolverDigest?: string; command?: readonly string[]; resolverArtifactPath?: string; interpreted?: boolean } = {}): string {
+  function writeConfig(dir: string, over: { mediaRoot?: string; resolverDigest?: string; command?: readonly string[]; resolverArtifactPath?: string; interpreted?: boolean; rawExecution?: Record<string, unknown> } = {}): string {
     // round-20 (advisor): the composite now binds the WHOLE resolver directory. `dir` itself
     // accumulates instance.json, obligations.db, media, and receipts, which would poison and drift
     // the manifest — so the resolver lives in its own isolated subdirectory holding ONLY resolver.cjs.
@@ -313,12 +324,15 @@ describe('capability-obligation-attest CLI (the operator front-door records end-
           mediaRoot: over.mediaRoot ?? dir, // a real readable directory
           retentionPolicyVersion: 'ret/1',
           retentionHorizonDays: 30,
-          execution: {
-            command,
-            timeoutMs, minOutputBytes,
+          // #3221 Debt 4: the TYPED execution struct — command/interpreted are derived
+          // by the schema; a legacy free-form `command` body is unrepresentable
+          // (`rawExecution` below lets a falsifier write one to prove the refusal).
+          execution: over.rawExecution ?? {
+            interpreter: interpreted ? command[0]! : null,
             // round-18 finding 1: explicit artifact declaration (verified, never inferred).
             resolverArtifactPath,
-            interpreted,
+            args: command.slice(interpreted ? 2 : 1),
+            timeoutMs, minOutputBytes,
           },
           attestation: {
             skillName: 'watch', skillVersion: '1.0.0', skillDigest: 'sd', resolverDigest: over.resolverDigest ?? composite,
@@ -397,18 +411,21 @@ describe('capability-obligation-attest CLI (the operator front-door records end-
     expect(admissibleOutcome(dbFile, dir, configFile)).toBe('skip'); // ZERO admissible rows — no fail-open row without a durable receipt
   }, 30_000);
 
-  it('FALSIFIER (finding 1, r18): a config resolver whose command[1] is an inline `-e` flag refuses AND admits nothing', () => {
+  it('FALSIFIER (finding 1, r18 → #3221 Debt 4): an inline `-e` free-form command config is UNREPRESENTABLE — refused at config load, admits nothing', () => {
     const dir = tmp.make('codeflag');
     const dbFile = seedSchemaCurrentDb(dir);
-    // The old defect: `node -e '<inline>'` verified a decoy while inline code ran. Now the
-    // declared artifact must BE command[1]; a flag at command[1] is refused.
-    const configFile = writeConfig(dir, { command: [process.execPath, '-e', 'process.stdout.write("processed:x")', '{source}'] });
+    // The old defect: `node -e '<inline>'` verified a decoy while inline code ran. The typed
+    // { interpreter, resolverArtifactPath, args } struct cannot express it — the artifact is
+    // always the executing token by construction — so the legacy free-form command body is
+    // refused at LOAD (strict schema), before any observation or canary.
+    const configFile = writeConfig(dir, {
+      rawExecution: { command: [process.execPath, '-e', 'process.stdout.write("processed:x")', '{source}'], timeoutMs: 10_000, minOutputBytes: 5, resolverArtifactPath: join(dir, 'resolver-src', 'resolver.cjs'), interpreted: true },
+    });
     const receiptOut = join(dir, 'r.json');
     const result = runCli(dbFile, configFile, dir, ['--run-canary', '--confirm', '--probe-source', 'https://probe.example/clip', '--receipt-out', receiptOut]);
     expect(result.status).not.toBe(0);
-    expect(result.stderr).toMatch(/is a flag, not the declared script|inline-code/);
+    expect(result.stderr).toMatch(/[Uu]nrecognized key|interpreter|args/);
     expect(existsSync(receiptOut)).toBe(false);
-    expect(admissibleOutcome(dbFile, dir, configFile)).toBe('skip');
   }, 30_000);
 
   it('FALSIFIER (finding 2, r18): a second --run-canary to the SAME --receipt-out is REFUSED (evidence is write-once, no clobber)', () => {

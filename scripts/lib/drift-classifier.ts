@@ -203,6 +203,10 @@ const PATH_RULES: ReadonlyArray<{ test: (p: string) => boolean; drift: DriftClas
       // classes, failure policies, and remediation. Editing it changes how every
       // downstream verdict is reached, so it is policy drift, not data drift.
       p.startsWith('controls/') ||
+      // Owner-approved runtime policy artifacts (#3221 Debt 3: policy/media-retention.json).
+      // The config-load gate verifies enabled activations against them fail-closed, so a
+      // drifted artifact changes what the runtime ACCEPTS — policy drift, not data.
+      p.startsWith('policy/') ||
       p.startsWith('tools/whatsoup_guard/'),
   },
   {

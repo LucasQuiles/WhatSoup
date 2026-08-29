@@ -37,9 +37,12 @@
  * run against the recorded `sha256(probeSource)`, exited 0 within bound and produced
  * >= minOutputBytes — it is NOT proof of semantic processing (a bounded probe cannot
  * establish that). Per spec §3.3 the fulfillment proof is the D6 execution receipt +
- * normal-delivery chain, not the canary. Attestation-row evidence columns are NOT
- * added here: a new column needs migration 58, which bumps CURRENT_SCHEMA_MIGRATION
- * INSIDE the attestation binding and would invalidate every digest + reopen AS-01.
+ * normal-delivery chain, not the canary. Migration 63 (#3221 Debt 2 graduation)
+ * added the attestation-row evidence columns (probe stdout/stderr refs, exit,
+ * canary-input ref, media-root readability): the recorded row now carries the
+ * evidence itself and the `--receipt-out` file is CORROBORATING, no longer the
+ * sole preservation. The schema bump is inside the attestation binding by design
+ * (AS-01 must be re-run 44→63 at rollout; old digests stop admitting).
  *
  *   dry-run (default): capability-obligation-attest --db PATH --provider P \
  *     --contract-version V --capability C --skill-name N --skill-digest D \
@@ -66,6 +69,7 @@ import {
   type CapabilityAttestationBinding,
 } from '../src/core/capability-attestation.ts';
 import {
+  attestationEvidenceFromCanary,
   produceCapabilityAttestation,
   type CapabilityCanaryOutcome,
 } from '../src/core/capability-attestation-producer.ts';
@@ -525,18 +529,23 @@ export type AttestResult =
  * The testable core: derive the binding, and — given a canary outcome (injected;
  * the CLI computes it via runResolverCanary under --run-canary) — record via the
  * fail-closed producer. A null canary is a dry-run: derive + digest, record nothing.
+ * `mediaRootReadable` is the front-door's observation (the CLI asserts the media
+ * root readable BEFORE running the canary, so its record path passes true); it
+ * lands on the row with the rest of the migration-63 evidence.
  */
 export function attest(
   db: Database,
   args: AttestArgs,
   canary: CapabilityCanaryOutcome | null,
   now: Date,
+  mediaRootReadable: boolean | null = null,
 ): AttestResult {
   const binding = bindingForAttestArgs(args);
   const attestationDigest = attestationBindingDigest(binding);
   if (canary === null) return { mode: 'dry-run', attestationDigest, recorded: false };
   const produced = produceCapabilityAttestation(db, {
     binding, canary, validForSeconds: args.validForSeconds, attestedAt: now,
+    evidence: attestationEvidenceFromCanary(canary, mediaRootReadable),
   });
   if (produced.recorded) {
     return { mode: 'record', attestationDigest, recorded: true, attestationId: produced.attestationId };
@@ -619,12 +628,13 @@ if (import.meta.url === invokedPath) {
             resolverArtifact: artifact,
             mediaRoot: options.mediaRoot,
             probeSourceDigest: (canary.detail as { probeSourceDigest?: string } | undefined)?.probeSourceDigest ?? null,
-            admission: `evidence only — admission is the capability_attestations row with nonce=${args.runId}; verify the row exists, this receipt does not assert it`,
+            admission: `evidence only — admission is the capability_attestations row with nonce=${args.runId}; verify the row exists, this receipt does not assert it. Since migration 63 the row itself carries the evidence columns; this receipt corroborates them`,
             claimScope: 'NOT a proof of semantic processing — exit0+bytes+verified-artifact+source-digest only; fulfillment proof = D6 receipt + delivery chain (spec §3.3)',
             attestedAt: now.toISOString(),
           };
           writeReceiptDurably(args.receiptOut, receipt); // durable + read-back verified, strictly before the INSERT below
-          const result = attest(db, args, canary, now);
+          // media_root_readable = true: assertMediaRootReadable above threw otherwise.
+          const result = attest(db, args, canary, now, true);
           if (result.recorded) {
             process.stdout.write((args.json ? JSON.stringify(result) : `RECORDED attest ${args.capability}: id=${result.attestationId} digest=${result.attestationDigest} receipt=${args.receiptOut}`) + '\n');
             process.exitCode = 0;
