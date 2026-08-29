@@ -114,7 +114,7 @@ describe('AgentRuntime — account identity rides the usability probe seam', () 
   }
 
   it('no expectation configured: verification disabled, never invoked, health quiet', async () => {
-    const verify = vi.fn(async () => verification({}));
+    const verify = vi.fn(async (_expected: string | null) => verification({}));
     const { state, identity, reasons } = build({ accountIdentityVerify: verify });
     await runProbe(state, 'startup');
     expect(verify).not.toHaveBeenCalled();
@@ -124,7 +124,7 @@ describe('AgentRuntime — account identity rides the usability probe seam', () 
   });
 
   it('pending before the first verification; a startup probe triggers exactly one verification with the ratified digest', async () => {
-    const verify = vi.fn(async () => verification({}));
+    const verify = vi.fn(async (_expected: string | null) => verification({}));
     const { state, identity, reasons, snapshot } = build({ expectedAccountDigest: EXPECTED, accountIdentityVerify: verify });
     expect(identity()).toMatchObject({ status: 'pending' });
     expect(reasons()).toEqual([]);
@@ -142,7 +142,7 @@ describe('AgentRuntime — account identity rides the usability probe seam', () 
       verification({ status: 'mismatch', observedDigestPrefix: 'bbbbbbbbbbbb' }),
       verification({}),
     ];
-    const verify = vi.fn(async () => results.shift()!);
+    const verify = vi.fn(async (_expected: string | null) => results.shift()!);
     const { state, identity, reasons, snapshot } = build({ expectedAccountDigest: EXPECTED, accountIdentityVerify: verify });
     await runProbe(state, 'startup');
     expect(identity()).toMatchObject({ status: 'mismatch', observedDigestPrefix: 'bbbbbbbbbbbb' });
@@ -159,7 +159,7 @@ describe('AgentRuntime — account identity rides the usability probe seam', () 
   });
 
   it('unverifiable: its own degradedReason and warning alert', async () => {
-    const verify = vi.fn(async () => verification({ status: 'unverifiable', reason: 'not-logged-in', observedDigestPrefix: null }));
+    const verify = vi.fn(async (_expected: string | null) => verification({ status: 'unverifiable', reason: 'not-logged-in', observedDigestPrefix: null }));
     const { state, identity, reasons } = build({ expectedAccountDigest: EXPECTED, accountIdentityVerify: verify });
     await runProbe(state, 'manual');
     expect(identity()).toMatchObject({ status: 'unverifiable', reason: 'not-logged-in' });
@@ -170,7 +170,7 @@ describe('AgentRuntime — account identity rides the usability probe seam', () 
   });
 
   it('never verified inside the freshness window: pending flips to unverifiable/never-verified (fail closed, but not at boot)', async () => {
-    const verify = vi.fn(async () => verification({}));
+    const verify = vi.fn(async (_expected: string | null) => verification({}));
     const { identity, reasons } = build({ expectedAccountDigest: EXPECTED, accountIdentityVerify: verify });
     vi.advanceTimersByTime(29 * MINUTE);
     expect(identity()).toMatchObject({ status: 'pending' });
@@ -181,7 +181,7 @@ describe('AgentRuntime — account identity rides the usability probe seam', () 
   });
 
   it('a match older than the freshness window is a stale receipt, not a match', async () => {
-    const verify = vi.fn(async () => verification({ checkedAt: Date.now() }));
+    const verify = vi.fn(async (_expected: string | null) => verification({ checkedAt: Date.now() }));
     const { state, identity, reasons } = build({ expectedAccountDigest: EXPECTED, accountIdentityVerify: verify });
     await runProbe(state, 'startup');
     expect(identity()).toMatchObject({ status: 'match' });
@@ -196,7 +196,7 @@ describe('AgentRuntime — account identity rides the usability probe seam', () 
       verification({ status: 'mismatch', observedDigestPrefix: 'bbbbbbbbbbbb' }),
       verification({ status: 'unverifiable', reason: 'unparseable', observedDigestPrefix: null }),
     ];
-    const verify = vi.fn(async () => results.shift()!);
+    const verify = vi.fn(async (_expected: string | null) => results.shift()!);
     const { state } = build({ expectedAccountDigest: EXPECTED, accountIdentityVerify: verify });
     await runProbe(state, 'startup');
     await runProbe(state, 'periodic');
@@ -206,7 +206,7 @@ describe('AgentRuntime — account identity rides the usability probe seam', () 
   });
 
   it('the health snapshot publishes digest prefixes and status classes only', async () => {
-    const verify = vi.fn(async () => verification({ status: 'mismatch', observedDigestPrefix: 'bbbbbbbbbbbb' }));
+    const verify = vi.fn(async (_expected: string | null) => verification({ status: 'mismatch', observedDigestPrefix: 'bbbbbbbbbbbb' }));
     const { state, snapshot } = build({ expectedAccountDigest: EXPECTED, accountIdentityVerify: verify });
     await runProbe(state, 'startup');
     const serialized = JSON.stringify(snapshot());

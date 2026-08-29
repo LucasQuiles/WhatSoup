@@ -57,8 +57,8 @@ function makeDeps(results: Array<AccountIdentityVerification | Error>) {
     if (next instanceof Error) throw next;
     return next;
   });
-  const emitAlertChecked = vi.fn(() => true);
-  const clearAlertSourceChecked = vi.fn(() => true);
+  const emitAlertChecked = vi.fn((..._args: unknown[]) => true);
+  const clearAlertSourceChecked = vi.fn((..._args: unknown[]) => true);
   const logs: Array<{ level: string; obj: unknown; msg: string }> = [];
   const log = {
     info: (obj: unknown, msg: string) => { logs.push({ level: 'info', obj, msg }); },
@@ -67,7 +67,7 @@ function makeDeps(results: Array<AccountIdentityVerification | Error>) {
   return { verify, emitAlertChecked, clearAlertSourceChecked, log, logs };
 }
 
-function alertCalls(fn: ReturnType<typeof vi.fn>): Array<{ source: string; severity: string | undefined; evidence: string }> {
+function alertCalls(fn: { mock: { calls: unknown[][] } }): Array<{ source: string; severity: string | undefined; evidence: string }> {
   return fn.mock.calls.map((call) => {
     const [, source, , evidence, severity] = call as [string, string, string, string, string | undefined];
     return { source, severity, evidence };
