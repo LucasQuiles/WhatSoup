@@ -648,7 +648,7 @@ if (import.meta.url === invokedPath) {
         // Dry-run: derive the binding + digest, record nothing. With --config, also
         // prove the binding would be admitted by the live instance before ever recording.
         if (args.configPath !== null) assertArgsMatchConfig(args, loadObligationOptionsFromConfig(args.configPath));
-        const result = attest(db, args, null, new Date());
+        const result = attest(db, args, null, new Date(), null);
         const configNote = args.configPath !== null ? ' (binding matches --config)' : '';
         process.stdout.write((args.json ? JSON.stringify(result) : `DRY-RUN attest ${args.capability}: digest=${result.attestationDigest}${configNote} (no attestation recorded — pass --run-canary --confirm --config PATH --probe-source SOURCE on the target host)`) + '\n');
         process.exitCode = 0;

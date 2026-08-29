@@ -93,21 +93,21 @@ afterEach(() => db.close());
 
 describe('attest (operator attestation producer front-door)', () => {
   it('dry-run (no canary) derives the digest and records NOTHING', () => {
-    const result = attest(db, args(), null, new Date());
+    const result = attest(db, args(), null, new Date(), null);
     expect(result).toMatchObject({ mode: 'dry-run', recorded: false, attestationDigest: expect.any(String) });
     expect((db.raw.prepare('SELECT COUNT(*) AS c FROM capability_attestations').get() as { c: number }).c).toBe(0);
   });
 
   it('a PASSING canary records an attestation that ADMITS the derived binding', () => {
     const a = args();
-    const result = attest(db, a, { result: 'pass', nonce: 'run-1' }, new Date());
+    const result = attest(db, a, { result: 'pass', nonce: 'run-1' }, new Date(), true);
     expect(result).toMatchObject({ mode: 'record', recorded: true, attestationId: expect.any(Number) });
     expect(findAdmissibleAttestation(db, bindingForAttestArgs(a))).toMatchObject({ outcome: 'admissible' });
   });
 
   it('FALSIFIER: a FAILED canary records nothing and admission stays closed', () => {
     const a = args();
-    const result = attest(db, a, { result: 'fail', nonce: 'run-1' }, new Date());
+    const result = attest(db, a, { result: 'fail', nonce: 'run-1' }, new Date(), true);
     expect(result).toMatchObject({ mode: 'record', recorded: false, reason: 'canary_failed' });
     expect(findAdmissibleAttestation(db, bindingForAttestArgs(a))).toMatchObject({ outcome: 'skip' });
   });
@@ -236,7 +236,7 @@ describe('runResolverCanary (bounded, non-sending resolver probe)', () => {
     const a = args();
     const canary = await runResolverCanary({ ...canaryInput(dir, 'process.stdout.write("processed:" + process.argv[2])\n'), probeSource: 'https://probe.example/clip', nonce: a.runId });
     expect(canary.result).toBe('pass');
-    const result = attest(db, a, canary, new Date());
+    const result = attest(db, a, canary, new Date(), true);
     expect(result).toMatchObject({ mode: 'record', recorded: true });
     expect(findAdmissibleAttestation(db, bindingForAttestArgs(a))).toMatchObject({ outcome: 'admissible' });
   });
