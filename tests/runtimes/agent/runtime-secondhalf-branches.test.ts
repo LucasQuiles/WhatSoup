@@ -348,6 +348,7 @@ type CrashInfo = {
   crashClass?: string;
   stderrPreview?: string;
   generationIdentity?: { managerId: string; generation: number };
+  terminationReason?: 'idle_watchdog' | 'stalled_operation' | 'suspend' | 'ended';
 };
 
 type PollRuntimeState = {
@@ -1551,6 +1552,188 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
         provider: 'p', crashClass: 'oom', stderrPreview: 'kaboom',
       });
 
+      expect(mockEmitAlert).toHaveBeenCalledWith(
+        'test',
+        'agent_respawn_failed',
+        expect.stringContaining('respawn exhausted'),
+        expect.stringContaining('Last exit'),
+      );
+    });
+  });
+
+  // ── intentional suspend-class exits vs the auto-respawn budget (3395) ──────
+  //
+  // #3394 classifies a supervisor-issued kill (takeIntentionalKill) and threads
+  // the matched reason through SessionCrashInfo.terminationReason. #3395: a
+  // marked-intentional exit is a resumable suspend-class exit and must not
+  // charge the auto-respawn attempt budget — a bot that idle-suspends
+  // repeatedly must never reach "auto-respawn exhausted". Unmarked exits (an
+  // external SIGTERM, a bare 143 that no marker claimed) keep counting, so a
+  // genuinely crashing child still exhausts at the same threshold.
+  describe('intentional suspend-class exits do not charge the auto-respawn budget (3395)', () => {
+    type OwnershipView = {
+      get: (key: string) => { managerId: string; generation: number; state: string } | undefined;
+      advanceGeneration: (key: string, managerId: string) => number;
+      transition: (key: string, managerId: string, to: never) => void;
+    };
+    type CrashBudgetState = PollRuntimeState & {
+      getCrashCount: (key: string) => number;
+      exhaustedRespawnOwners: Set<string>;
+      sessionOwnership: OwnershipView;
+    };
+
+    function makeCrashBudgetRuntime(): { runtime: AgentRuntime; state: CrashBudgetState } {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      const state = runtime as unknown as CrashBudgetState;
+      setOwnedTestSession(runtime, dmJid);
+      state.chatQueues.set(dmJid, mockQueue);
+      return { runtime, state };
+    }
+
+    // Model one reap→respawn cycle boundary: a real respawn advances the owner
+    // generation and reactivates it before the next exit can be observed. The
+    // first cycle keeps the freshly claimed 'starting' generation. Returns
+    // false once the owner is gone (released by exhaustion terminalization) so
+    // the loop degrades into a readable assertion diff instead of throwing.
+    function reactivateForNextCycle(state: CrashBudgetState, mapKey: string): boolean {
+      const owner = state.sessionOwnership.get(mapKey);
+      if (!owner) return false;
+      if (owner.state !== 'starting') {
+        state.sessionOwnership.advanceGeneration(mapKey, owner.managerId);
+        state.sessionOwnership.transition(mapKey, owner.managerId, 'active' as never);
+      }
+      return true;
+    }
+
+    it('recurring marked-intentional reaps never consume respawn attempts (3395)', () => {
+      const { runtime, state } = makeCrashBudgetRuntime();
+      const mapKey = dmJid;
+
+      // Six reap/respawn cycles — well past AUTO_RESPAWN_MAX_CRASHES (3).
+      const counts: number[] = [];
+      const states: string[] = [];
+      for (let cycle = 0; cycle < 6; cycle++) {
+        if (!reactivateForNextCycle(state, mapKey)) {
+          counts.push(-1);
+          states.push('released');
+          continue;
+        }
+        state.handlePerChatCrash(mapKey, dmJid, {
+          ...currentCrashIdentity(runtime, mapKey),
+          exitCode: null,
+          signal: 'SIGKILL',
+          sessionId: null,
+          dbRowId: null,
+          provider: 'p',
+          terminationReason: 'idle_watchdog',
+        });
+        counts.push(state.getCrashCount(mapKey));
+        states.push(state.sessionOwnership.get(mapKey)?.state ?? 'released');
+      }
+
+      // The budget is never charged: no crash counted, no exhaustion, no alert.
+      expect(counts).toEqual([0, 0, 0, 0, 0, 0]);
+      expect(states).toEqual(Array<string>(6).fill('recoverable_dead'));
+      expect(state.exhaustedRespawnOwners.has(mapKey)).toBe(false);
+      expect(mockEmitAlert).not.toHaveBeenCalledWith(
+        'test',
+        'agent_respawn_failed',
+        expect.anything(),
+        expect.anything(),
+      );
+
+      // The full budget is still intact afterwards: genuine crashes alone must
+      // walk it 1→4 and exhaust exactly on the 4th, not earlier.
+      const genuineStates: string[] = [];
+      const genuineCounts: number[] = [];
+      for (let i = 0; i < 4; i++) {
+        if (!reactivateForNextCycle(state, mapKey)) {
+          genuineCounts.push(-1);
+          genuineStates.push('released');
+          continue;
+        }
+        state.handlePerChatCrash(mapKey, dmJid, {
+          ...currentCrashIdentity(runtime, mapKey),
+          exitCode: 1,
+          signal: null,
+          sessionId: null,
+          dbRowId: null,
+        });
+        genuineCounts.push(state.getCrashCount(mapKey));
+        genuineStates.push(state.sessionOwnership.get(mapKey)?.state ?? 'released');
+      }
+      expect(genuineCounts).toEqual([1, 2, 3, 4]);
+      // Exhaustion terminalization releases the ownership record.
+      expect(genuineStates).toEqual(['recoverable_dead', 'recoverable_dead', 'recoverable_dead', 'released']);
+      expect(state.exhaustedRespawnOwners.has(mapKey)).toBe(true);
+      expect(mockEmitAlert).toHaveBeenCalledWith(
+        'test',
+        'agent_respawn_failed',
+        expect.stringContaining('respawn exhausted'),
+        expect.stringContaining('Last exit'),
+      );
+    });
+
+    it('an unmarked graceful 143 exit still charges the budget (the 3394 pin)', () => {
+      const { runtime, state } = makeCrashBudgetRuntime();
+      const mapKey = dmJid;
+
+      // No terminationReason: the exit was not claimed by takeIntentionalKill,
+      // so the numeric SIGTERM form must keep counting as a crash.
+      expect(reactivateForNextCycle(state, mapKey)).toBe(true);
+      state.handlePerChatCrash(mapKey, dmJid, {
+        ...currentCrashIdentity(runtime, mapKey),
+        exitCode: 143,
+        signal: null,
+        sessionId: null,
+        dbRowId: null,
+      });
+      expect(state.getCrashCount(mapKey)).toBe(1);
+      expect(state.sessionOwnership.get(mapKey)?.state).toBe('recoverable_dead');
+
+      // An external SIGTERM (signal form, unmarked) counts too.
+      expect(reactivateForNextCycle(state, mapKey)).toBe(true);
+      state.handlePerChatCrash(mapKey, dmJid, {
+        ...currentCrashIdentity(runtime, mapKey),
+        exitCode: null,
+        signal: 'SIGTERM',
+        sessionId: null,
+        dbRowId: null,
+      });
+      expect(state.getCrashCount(mapKey)).toBe(2);
+    });
+
+    it('genuine crash exhaustion still triggers at the unchanged threshold', () => {
+      const { runtime, state } = makeCrashBudgetRuntime();
+      const mapKey = dmJid;
+
+      const counts: number[] = [];
+      const exhaustedAfter: boolean[] = [];
+      for (let i = 0; i < 4; i++) {
+        if (!reactivateForNextCycle(state, mapKey)) {
+          counts.push(-1);
+          exhaustedAfter.push(true);
+          continue;
+        }
+        state.handlePerChatCrash(mapKey, dmJid, {
+          ...currentCrashIdentity(runtime, mapKey),
+          exitCode: 1,
+          signal: 'SIGKILL',
+          sessionId: null,
+          dbRowId: null,
+        });
+        counts.push(state.getCrashCount(mapKey));
+        exhaustedAfter.push(state.exhaustedRespawnOwners.has(mapKey));
+      }
+
+      expect(counts).toEqual([1, 2, 3, 4]);
+      expect(exhaustedAfter).toEqual([false, false, false, true]);
+      const respawnFailedAlerts = mockEmitAlert.mock.calls.filter(
+        (call) => call[1] === 'agent_respawn_failed',
+      );
+      expect(respawnFailedAlerts).toHaveLength(1);
       expect(mockEmitAlert).toHaveBeenCalledWith(
         'test',
         'agent_respawn_failed',
