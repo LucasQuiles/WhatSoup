@@ -154,8 +154,8 @@ release.
 Editing only the plist `WorkingDirectory` to the new release and restarting
 produces a convincing green while the OLD code keeps running: `GET /health`
 returns 200, the process cwd is the new release directory, and no fallback is
-active. This happened on mini11 (2026-08-29) and was accepted as a successful
-activation before the provenance fields were read.
+active. This happened on mini11 and was accepted as a successful activation
+before the provenance fields were read.
 
 The tell is provenance, not configuration: `instance.commit` in the health
 payload and the process's `WHATSOUP_GIT_SHA` still report the OLD commit.
@@ -218,10 +218,17 @@ change with `kickstart -k`.
 Record the previous wrapper symlink target before repointing it, and back up
 every plist you edit as `<plist>.bak-<tag>-<ts>`. Rollback is then a single
 coordinated restore — symlink target and the auxiliary `WorkingDirectory`
-values together — followed by the same reload sequence. The previous release's
-directory is untouched by the export, so the prior generation is still on disk
-to return to. Verify a rollback the same way as an activation: from the
-executing process, not from the restored configuration.
+values together — followed by the same reload sequence.
+
+The prior generation survives the export, but not always at the path you
+recorded: a `--replace` export of the SAME release name preserves the previous
+release at the manifest's rollback path (`.rollback/<name>-before`) rather than
+leaving it in place (see Dry-Run Planning above). Re-verify that the recorded
+symlink target still resolves before relying on it, and fall back to the
+manifest's rollback path when it does not.
+
+Verify a rollback the same way as an activation: from the executing process,
+not from the restored configuration.
 
 ## Drift Detection
 
