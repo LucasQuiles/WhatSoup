@@ -127,6 +127,102 @@ and restarting it remain separately-approved host mutations, and must preserve
 instance config, auth, logs, DBs, token files, and keychain material outside
 the release tree.
 
+## Activating a release
+
+Activation is the separately-approved host mutation the section above stops
+short of. Having exported a release is not approval to activate it: activation
+needs named approval in the current turn, naming the instance, the target
+release, and the prepared rollback target.
+
+**The wrapper symlink is the release selector.** The release that runs is the
+target of the wrapper symlink `~/.local/bin/whatsoup` →
+`<release>/deploy/whatsoup`. The wrapper resolves its own path through symlinks
+and derives the repository root from the resolved location:
+
+```bash
+SCRIPT_DIR="$(cd "$(dirname "$(_resolve_symlinks "${BASH_SOURCE[0]}")")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+```
+
+Every path the service executes is derived from `REPO_ROOT` — including the
+entrypoint `$REPO_ROOT/src/bootstrap.ts`. The launchd plist `WorkingDirectory`
+sets the process's current directory and nothing else. It does not select the
+release.
+
+### The WorkingDirectory false pass
+
+Editing only the plist `WorkingDirectory` to the new release and restarting
+produces a convincing green while the OLD code keeps running: `GET /health`
+returns 200, the process cwd is the new release directory, and no fallback is
+active. This happened on mini11 (2026-08-29) and was accepted as a successful
+activation before the provenance fields were read.
+
+The tell is provenance, not configuration: `instance.commit` in the health
+payload and the process's `WHATSOUP_GIT_SHA` still report the OLD commit.
+
+**Verify activation from the executing process, never from configuration.**
+
+1. `ps -p <pid> -o command=` must show `<new release>/src/bootstrap.ts`.
+2. `WHATSOUP_GIT_SHA` and health `instance.commit` must equal the new commit.
+
+A cwd that agrees with the intended release is not proof of anything; it is the
+exact observation the false pass produces.
+
+Note that an exported release is not a git work tree, so git-derived provenance
+inside it is unavailable. The wrapper detects this and falls back to the release
+manifest's `source.commit` for `WHATSOUP_GIT_SHA`/`WHATSOUP_GIT_BRANCH`, and
+unsets both (with a `WARN`) when neither source yields a 40-hex commit. A
+release whose provenance is unset cannot be verified by step 2 above.
+
+### Activation is a coordinated switch
+
+Auxiliary launchd jobs pin a release through their own `WorkingDirectory`.
+Observed on mini11: `com.whatsoup.harness-maintenance`,
+`com.whatsoup.release-drift-check`, and `com.whatsoup.reply-guarantee`
+(templates in `deploy/`). Repointing the wrapper symlink alone leaves those jobs
+executing the previous release, so the estate ends up mixed-generation — the bot
+on one release, its maintenance and drift observers on another.
+
+A correct activation repoints the wrapper symlink AND updates those
+`WorkingDirectory` values as one switch.
+
+### Reload sequence
+
+`bootout`, then a bounded poll until the old process actually exits, then
+`bootstrap`. Bootstrapping while the previous process is still in `SIGTERMed`
+shutdown fails with `Bootstrap failed: 5: Input/output error` and leaves the
+service DOWN. On mini11 recovery was a second `bootstrap` after the process had
+exited; do not treat that retry as part of the plan.
+
+```bash
+old_pid=<pid captured before bootout>
+launchctl bootout gui/"$(id -u)"/com.whatsoup.<instance>
+for _ in $(seq 1 60); do
+  kill -0 "$old_pid" 2>/dev/null || break
+  sleep 1
+done
+if kill -0 "$old_pid" 2>/dev/null; then
+  echo "FATAL: pid $old_pid still running after bootout; refusing to bootstrap" >&2
+  exit 1
+fi
+launchctl bootstrap gui/"$(id -u)" ~/Library/LaunchAgents/com.whatsoup.<instance>.plist
+```
+
+`docs/runbooks/macos-launchd-deployment.md` owns the surrounding launchd
+hazards this sequence inherits: the bounded retry for the transient bootstrap
+error class, and the SSH/keychain-session hazard that requires finishing a plist
+change with `kickstart -k`.
+
+### Rollback
+
+Record the previous wrapper symlink target before repointing it, and back up
+every plist you edit as `<plist>.bak-<tag>-<ts>`. Rollback is then a single
+coordinated restore — symlink target and the auxiliary `WorkingDirectory`
+values together — followed by the same reload sequence. The previous release's
+directory is untouched by the export, so the prior generation is still on disk
+to return to. Verify a rollback the same way as an activation: from the
+executing process, not from the restored configuration.
+
 ## Drift Detection
 
 Use the manifest to compare a release snapshot against the source commit used

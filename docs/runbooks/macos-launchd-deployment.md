@@ -113,6 +113,13 @@ running WhatSoup code. This makes relative repository health inputs, including
 `.arc/arc.toml`, deterministic. Regenerate the plist when changing checkouts;
 do not hand-edit it to point at a different tree.
 
+`WorkingDirectory` sets the process's current directory; it does not select
+which code executes. On a release-snapshot host the executing release is the
+target of the wrapper symlink `~/.local/bin/whatsoup`, so repointing
+`WorkingDirectory` alone leaves the previous release running behind a health
+check that reads green. See
+[Activating a release](release-deployment.md#activating-a-release).
+
 The launcher scrubs inherited credential environment variables (provider API
 keys and `WHATSOUP_HEALTH_TOKEN`) before its first subprocess, so ambient
 launchd/session values cannot shadow the launcher's own keyring/file
