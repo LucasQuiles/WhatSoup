@@ -20,6 +20,7 @@ import {
   type LaunchdPlistRenderOptions,
 } from '../lib/launchd-service-config.ts';
 import { resolveLaunchdPlistRenderOptions } from './launchd-render-options.ts';
+import { compareGovernedLaunchdEnv, type GovernedEnvComparison } from './launchd-env-drift.ts';
 import { repoRoot, tmpRoot, xdgDir } from './paths.ts';
 import { SIGNAL } from '../lib/signals.ts';
 
@@ -246,6 +247,13 @@ export interface LaunchdReconcileResult {
   plistPath: string;
   priorPlistExisted: boolean;
   dryRun: boolean;
+  /**
+   * Governed-environment comparison between the fresh render and the
+   * previously installed plist (CLAUDE_CONFIG_DIR, PATH — by key and value
+   * digest, never values). Set on every successful reconcile, dry-run
+   * included.
+   */
+  governedEnvDrift?: GovernedEnvComparison;
 }
 
 function readExistingLaunchdPlist(filePath: string): string | null {
@@ -400,22 +408,25 @@ export async function reconcileLaunchdPlist(
   }
   const dest = plistPath(name);
   const previousContents = readExpectedGeneratedLaunchdPlist(name, dest);
-  const result: LaunchdReconcileResult = {
-    label: launchdLabel(name),
-    plistPath: dest,
-    priorPlistExisted: previousContents !== null,
-    dryRun: options.dryRun === true,
-  };
-
   if (previousContents === null) {
-    throw new Error(`no existing launchd plist for ${result.label}`);
+    throw new Error(`no existing launchd plist for ${launchdLabel(name)}`);
   }
   const renderOptions = options.renderOptions ?? resolveLaunchdPlistRenderOptions(name);
   assertValidLaunchdPlistRenderOptions(renderOptions);
+  // Render once: the drift report always describes exactly the bytes an apply
+  // would install.
+  const rendered = buildPlist(name, renderOptions);
+  const result: LaunchdReconcileResult = {
+    label: launchdLabel(name),
+    plistPath: dest,
+    priorPlistExisted: true,
+    dryRun: options.dryRun === true,
+    governedEnvDrift: compareGovernedLaunchdEnv(rendered, previousContents),
+  };
   if (result.dryRun) return result;
 
   fs.mkdirSync(path.dirname(dest), { recursive: true });
-  writeAtomicLaunchdPlist(dest, buildPlist(name, renderOptions));
+  writeAtomicLaunchdPlist(dest, rendered);
 
   try {
     await bootoutLaunchdService(name);

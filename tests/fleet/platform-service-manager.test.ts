@@ -504,6 +504,49 @@ describe('platform service managers', () => {
     expect(childProcessMocks.execFile).not.toHaveBeenCalled();
   });
 
+  it('reports governed-env drift on a dry-run reconcile without touching disk or launchd', async () => {
+    setPlatform('darwin');
+    const { buildPlist, reconcileLaunchdPlist } = await importPlatform();
+    // The installed plist is a real render without the newly configured
+    // claude root: reconciliation must flag CLAUDE_CONFIG_DIR as missing.
+    const observed = buildPlist('agent');
+    mockReads({
+      plist: observed,
+      config: { name: 'agent', service: { claudeConfigDir: '/opt/claude-roots/agent' } },
+    });
+
+    const result = await reconcileLaunchdPlist('agent', { dryRun: true });
+
+    expect(result.governedEnvDrift).toMatchObject({ comparable: true });
+    expect(result.governedEnvDrift?.drift).toEqual([{
+      key: 'CLAUDE_CONFIG_DIR',
+      state: 'missing',
+      expectedDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
+      observedDigest: null,
+    }]);
+    expect(fsMocks.writeFileSync).not.toHaveBeenCalled();
+    expect(childProcessMocks.execFile).not.toHaveBeenCalled();
+  });
+
+  it('reports a hand-patched service PATH as a governed mismatch by digest only', async () => {
+    setPlatform('darwin');
+    const { buildPlist, reconcileLaunchdPlist } = await importPlatform();
+    // Simulates the hand-patched-plist class this feature adopts: the
+    // installed plist prepends a directory that has no config source.
+    const observed = buildPlist('agent', { pathPrepend: ['/opt/hand-patched-bin'] });
+    mockReads({ plist: observed, config: { name: 'agent' } });
+
+    const result = await reconcileLaunchdPlist('agent', { dryRun: true });
+
+    expect(result.governedEnvDrift?.drift).toEqual([{
+      key: 'PATH',
+      state: 'mismatch',
+      expectedDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
+      observedDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
+    }]);
+    expect(JSON.stringify(result.governedEnvDrift)).not.toContain('hand-patched');
+  });
+
   it('requires an existing plist for an explicit launchd migration', async () => {
     setPlatform('darwin');
     const { reconcileLaunchdPlist } = await importPlatform();
