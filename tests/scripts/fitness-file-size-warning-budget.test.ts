@@ -105,6 +105,13 @@ const EXPECTED_FILE_SIZE_WARNING_FILES = [
   // grandfathered per the project norm for large core files (cf. database.ts
   // above). Slice 2's concurrency/observer work should revisit an extraction.
   'src/core/substrate/poller.ts',
+  // The fallback-tier clock-preservation fixes (route-identity tier
+  // attribution, resetAt/probe protection, gap no-arm — ph-bot 2026-08-26
+  // incident) took this file just over the 2000-line warn budget. The logic is
+  // cohesive with the coordinator's window/chain responsibility; the named
+  // extraction path (first-class chain-advance operation, matcher unification
+  // with sessionMatchesCurrentRoute) is deferred to review in the same PR.
+  'src/runtimes/agent/runtime-fallback.ts',
   // #2398's durable stuck-scope escape store (file-backed registration,
   // startup reconcile, logged failure paths) took this file just over the
   // 2000-line arch.file-size warn budget. The store is cohesive with the
