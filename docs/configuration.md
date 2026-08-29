@@ -496,6 +496,7 @@ into place during deployment.
 | `toolUpdateMode` | string | no | `full` | Controls what the user sees during agent tool execution. `full`: elapsed time and technical details. `friendly`: plain-language status, one-time per tool. `minimal`: typing indicator only during tools; pre-tool assistant narration is suppressed and the terminal answer is preserved. |
 | `echoGuard` | object | no | `{ enabled: true, groupCooldownMs: 1000 }` | Suppresses outbound echo loops in group chats. When enabled, group messages sent within `groupCooldownMs` of a prior send are suppressed. DMs are never affected. In-memory state, resets on restart. |
 | `operationTracker` | object | no | see defaults | Per-tool progress reporting and stall detection. All sub-fields optional; unset fields use platform defaults. See [operationTracker](#operationtracker). |
+| `service` | object | no | — | Service-manager render options for generated macOS launchd plists, valid on every instance type. `claudeConfigDir` renders as `CLAUDE_CONFIG_DIR` in the generated plist's `EnvironmentVariables`; `pathPrepend` prepends directories to the rendered service `PATH`. Ignored by the systemd and Docker backends. See [`service` (launchd render options)](#service-launchd-render-options). |
 | `agentOptions` | object | agent only | — | Agent-specific settings. Required fields vary by `sessionScope`. See [agentOptions](#agentoptions). |
 | `chatOptions` | object | no | — | Chat-specific settings. Currently just `openaiProviderConfig` (chat OpenAI endpoint/key override). See [chatOptions](#chatoptions). |
 | `transcriptionOptions` | object | no | — | Shared OpenAI Whisper transcription endpoint/key override. Valid for chat, agent, and passive instances. See [transcriptionOptions](#transcriptionoptions). |
@@ -530,6 +531,40 @@ into place during deployment.
 | `advanced` | object | `{ enableRelayMessage: false, enableResync: false, relayMaxPayloadBytes: 1048576, enableUrlWatch: false }` | Gates for low-level/privileged MCP capabilities (`src/mcp/tools/advanced.ts`, `src/mcp/tools/substrate.ts`). `enableResync` must be `true` for the `resync_app_state` tool; `enableRelayMessage` must be `true` for the `relay_message` tool; `relayMaxPayloadBytes` caps the raw protobuf payload size (default 1 MB). `enableUrlWatch` must be `true` for `create_watch` to accept `source:'poll.url'` watches — when `false` (default) creation is rejected and the poller fails any persisted `poll.url` row closed (`url_watch_disabled`). The `poll.url` executor reuses the link-preview SSRF stack and is https-only + default-port-only. All default off/conservative. |
 
 [^enabled]: Enforcement sites: [`src/fleet/discovery.ts:94`](../src/fleet/discovery.ts) (fleet scan skip), [`src/fleet/routes/ops.ts:767`](../src/fleet/routes/ops.ts) (port-in-use scan), [`src/fleet/routes/ops.ts:788`](../src/fleet/routes/ops.ts) (existing-port map for PATCH conflict checks).
+
+### `service` (launchd render options)
+
+Optional, all instance types. On macOS, generated `com.whatsoup.<instance>.plist`
+files (`buildPlist()` in `src/fleet/platform.ts`) render this block into the
+job's `EnvironmentVariables`, making previously hand-patched plist edits
+config-owned and regeneration-safe:
+
+```json
+"service": {
+  "claudeConfigDir": "/absolute/path/to/claude-config-root",
+  "pathPrepend": ["/absolute/dir/bin"]
+}
+```
+
+| Field | Type | Rules | Effect |
+|-------|------|-------|--------|
+| `claudeConfigDir` | string | absolute path; no surrounding whitespace or control characters | Rendered as `CLAUDE_CONFIG_DIR` so the launchd service context resolves the same dedicated claude-cli config root as interactive use of that root (e.g. an isolated per-bot root such as `$HOME/.claude-<instance>`). Omitted → the key is not rendered. The block governs only which config root the service resolves; it does not create or copy credentials (the CLI keeps those keychain-resident). |
+| `pathPrepend` | string[] | at most 16 entries; each an absolute path without `:` or control characters | Prepended in order ahead of the generating shell's ambient `PATH` in the rendered service `PATH` (e.g. `$HOME/.local/bin` so a fallback provider binary resolves under launchd). Omitted or empty → byte-identical `PATH` to the historical render. |
+
+One source of truth: the shape rules live in `src/lib/launchd-service-config.ts`
+and are enforced at config admission (CREATE / PATCH / load / discovery, every
+instance type) and again by the render-time resolver
+(`src/fleet/launchd-render-options.ts`). Render paths fail closed: an
+unreadable or invalid `config.json` aborts a plist install or reconcile instead
+of regenerating the plist without its governed environment; only a missing
+`config.json` (or absent block) renders the historical byte-identical plist.
+
+Reconciliation (`npm run reconcile-launchd-restart-policy -- --instance <name>`)
+additionally reports governed-key drift (`CLAUDE_CONFIG_DIR`, `PATH`) between
+the fresh render and the installed plist by key and SHA-256 value digest —
+never by value; installed bot plists carry live credentials. See the
+[macOS launchd deployment runbook](runbooks/macos-launchd-deployment.md#generated-render-options-and-governed-env-drift)
+for the drift-check and hand-patch adoption workflow.
 
 ### Startup-notification protocol
 
@@ -1406,12 +1441,14 @@ When deploying an instance config that uses `fallbackProvider` or `fallbacks` to
    </dict>
    ```
 
-   **launchd caveat:** generated plists emit only `PATH`/`HOME`/`TMPDIR`
-   (+`WHATSOUP_NODE`) in `EnvironmentVariables` (`buildPlist()`,
-   `src/fleet/platform.ts`) — there is no `EnvironmentFile` equivalent to the
-   systemd units' per-instance `tokens.env`, so a hand-added key in a
-   generated plist is LOST on the next `deploy:launchd.generated`
-   regeneration. On macOS prefer Route B: API-provider keys are read
+   **launchd caveat:** generated plists emit `PATH`/`HOME`/`TMPDIR`
+   (+`WHATSOUP_NODE`, and — when configured through the instance
+   [`service` block](#service-launchd-render-options) — `CLAUDE_CONFIG_DIR`
+   plus a `pathPrepend`-extended `PATH`) in `EnvironmentVariables`
+   (`buildPlist()`, `src/fleet/platform.ts`). There is no `EnvironmentFile`
+   equivalent to the systemd units' per-instance `tokens.env`, so a hand-added
+   key outside that governed set (e.g. a credential variable) is LOST on the
+   next `deploy:launchd.generated` regeneration. On macOS prefer Route B: API-provider keys are read
    in-process at request time, so the keychain entry alone is sufficient —
    no plist edit needed. Grant the service user's launchd context access to
    the item (`security add-generic-password -U …` under that user); keychain

@@ -73,6 +73,23 @@ export function parseReconcileLaunchdRestartPolicyArgs(
   return { instance, apply, help };
 }
 
+/**
+ * Governed-env drift lines for operator output: key, state, and short value
+ * digests only — installed plists carry live credentials, so no environment
+ * value is ever printed.
+ */
+function governedEnvLines(comparison: LaunchdReconcileResult['governedEnvDrift']): string[] {
+  if (!comparison) return [];
+  if (!comparison.comparable) {
+    return ['governed env: installed EnvironmentVariables unparseable (fail-closed: treat as drift)'];
+  }
+  if (comparison.drift.length === 0) return ['governed env: no drift'];
+  const digest = (value: string | null): string =>
+    value === null ? 'absent' : `sha256:${value.slice(0, 12)}`;
+  return comparison.drift.map((entry) =>
+    `governed env drift: ${entry.key} ${entry.state} expected=${digest(entry.expectedDigest)} observed=${digest(entry.observedDigest)}`);
+}
+
 function defaultDependencies(): ReconcileLaunchdRestartPolicyDependencies {
   return {
     platform: process.platform,
@@ -114,6 +131,7 @@ export async function runReconcileLaunchdRestartPolicy(
     });
     const verb = result.dryRun ? 'DRY RUN: would reload and start' : 'reloaded and started';
     deps.stdout(`${verb} ${result.label}`);
+    for (const line of governedEnvLines(result.governedEnvDrift)) deps.stdout(line);
     return 0;
   } catch {
     deps.stderr(`reconcile-launchd-restart-policy: reconciliation failed for ${args.instance}`);

@@ -25,6 +25,7 @@ import { homedir } from 'node:os';
 import { PROVIDER_IDS } from '../runtimes/agent/providers/index.ts';
 import { PROVIDER_API_KEY_SERVICES, SERVICE_ENV_MAP, isKeylessOpenCodeRoute, resolveProviderKeyService } from '../lib/provider-key-service.ts';
 import { isNonEmptyString, isRecord } from '../lib/type-guards.ts';
+import { validateLaunchdServiceConfig } from '../lib/launchd-service-config.ts';
 import { isSamePhysicalDirectory } from '../lib/home-path.ts';
 import { resolveAgentModel } from './agent-model.ts';
 import {
@@ -431,6 +432,14 @@ export function validateInstanceConfig(
 
   const transportErr = validateTransportConfig(raw);
   if (transportErr) return transportErr;
+
+  // --- service block (launchd render options) ---
+  // Shape rules live in lib/launchd-service-config.ts, the same source of
+  // truth the fleet-side plist render resolver enforces — rejecting here means
+  // an invalid block fails at config admission on every path (create / patch /
+  // load / discovery, all instance types) instead of first failing a render.
+  const serviceErr = validateLaunchdServiceConfig(raw);
+  if (serviceErr) return err(serviceErr.field, serviceErr.message);
 
   if (raw['type'] === 'agent') {
     const modelConsistencyErr = validateAgentModelConsistency(raw);
