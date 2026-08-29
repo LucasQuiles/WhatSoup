@@ -1722,3 +1722,71 @@ describe('pre-push guard — preservation pushes to the preserve mirror', () => 
     });
   });
 });
+
+describe('pre-push guard — preservation integrity (append-only, create-only)', () => {
+  const MIRROR_URL = 'git@github.com:LucasQuiles/WhatSoup-preserve.git';
+  const withStubNpm = (fn: (npmCallsLog: string) => void) => {
+    const root = mkdtempSync(resolve(tmpdir(), 'whatsoup-pre-push-guard-preserve-hard-'));
+    const bin = resolve(root, 'bin');
+    const callsLog = resolve(root, 'npm-calls.log');
+    const originalPath = process.env['PATH'];
+    try {
+      mkdirSync(bin, { recursive: true });
+      const npmStub = resolve(bin, 'npm');
+      writeFileSync(npmStub, ['#!/bin/sh', `printf "%s\\n" "$*" >> "${callsLog}"`, 'exit 0', ''].join('\n'));
+      chmodSync(npmStub, 0o755);
+      process.env['PATH'] = `${bin}:${originalPath ?? ''}`;
+      fn(callsLog);
+    } finally {
+      if (originalPath === undefined) delete process.env['PATH'];
+      else process.env['PATH'] = originalPath;
+      rmSync(root, { recursive: true, force: true });
+    }
+  };
+
+  it('refuses a deletion riding a preservation push (append-only)', () => {
+    withStubNpm(() => {
+      const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        const input = [
+          `refs/heads/fix/example ${'a'.repeat(40)} refs/preserve/20260829/fix-example ${ZERO_SHA}`,
+          `(delete) ${ZERO_SHA} refs/preserve/20250101/old ${'b'.repeat(40)}`,
+        ].join('\n');
+        expect(() => runPrePushGuard(
+          input,
+          repoRoot,
+          {
+            assertConsoleDependencies: () => { throw new Error('unreachable'); },
+            verifyAlignmentBefore: () => { throw new Error('unreachable'); },
+            classifyPushRemote: () => 'preserve-mirror',
+          },
+          { remoteName: 'preserve-mirror', remoteUrl: MIRROR_URL },
+        )).toThrow(/append-only through this hook; ref deletions may not ride/);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
+
+  it('refuses updating an existing archival ref (create-only)', () => {
+    withStubNpm(() => {
+      const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        const input =
+          `refs/heads/fix/example ${'a'.repeat(40)} refs/preserve/20260829/fix-example ${'c'.repeat(40)}`;
+        expect(() => runPrePushGuard(
+          input,
+          repoRoot,
+          {
+            assertConsoleDependencies: () => { throw new Error('unreachable'); },
+            verifyAlignmentBefore: () => { throw new Error('unreachable'); },
+            classifyPushRemote: () => 'preserve-mirror',
+          },
+          { remoteName: 'preserve-mirror', remoteUrl: MIRROR_URL },
+        )).toThrow(/create-only through this hook; existing-ref update refused/);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
+});

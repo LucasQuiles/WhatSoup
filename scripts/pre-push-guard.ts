@@ -225,6 +225,23 @@ export function runPrePushGuard(
         `pre-push guard: the preserve mirror accepts only ${PRESERVE_REF_PREFIX}* destinations through this hook; refused: ${offending.map((update) => update.remoteRef).join(', ')}`,
       );
     }
+    // Preservation integrity (review-hardened): archival refs are append-only —
+    // a deletion may not ride a preservation push (it would skip both the
+    // delete-only metadata routing and any preservation check), and an existing
+    // archival ref is never updated in place (create-only; remote-side non-FF
+    // protection on the mirror is not assumed).
+    const rideAlongDeletes = parsedUpdates.filter((update) => isZeroObjectId(update.localSha));
+    if (rideAlongDeletes.length > 0) {
+      throw new Error(
+        `pre-push guard: the preserve mirror is append-only through this hook; ref deletions may not ride a preservation push: ${rideAlongDeletes.map((update) => update.remoteRef).join(', ')}`,
+      );
+    }
+    const overwrites = contentUpdates.filter((update) => !isZeroObjectId(update.remoteSha));
+    if (overwrites.length > 0) {
+      throw new Error(
+        `pre-push guard: archival refs are create-only through this hook; existing-ref update refused: ${overwrites.map((update) => update.remoteRef).join(', ')}`,
+      );
+    }
     console.error(
       'pre-push guard: preservation push to the preserve mirror (refs/preserve/* only); estate verified; candidate alignment and the verification composite do not apply to archival refs',
     );

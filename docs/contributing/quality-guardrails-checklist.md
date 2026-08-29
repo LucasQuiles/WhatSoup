@@ -96,9 +96,11 @@ SSH URL for `LucasQuiles/WhatSoup` or its preserve mirror
 to the origin runs candidate alignment (clean invoking worktree, exactly one
 candidate equal to `HEAD`, candidate contains live `main`) around the
 verification composite. A push to the preserve mirror is a **preservation push**:
-every content destination must sit under `refs/preserve/*`, the estate gate still
-runs, and candidate alignment plus the composite are skipped — archival refs are
-by definition not aligned with live `main`, which is what preservation is for.
+every content destination must sit under `refs/preserve/*`, archival refs are
+**create-only** (an existing `refs/preserve/*` ref is never updated in place and
+a deletion may not ride a preservation push), the estate gate still runs, and
+candidate alignment plus the composite are skipped — archival refs are by
+definition not aligned with live `main`, which is what preservation is for.
 Delete-only and empty-stdin pushes keep their existing routing on either remote.
 
 Pre-push ref updates accept object IDs at exactly the 40-character SHA-1 or
