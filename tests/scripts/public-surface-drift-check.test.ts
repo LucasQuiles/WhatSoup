@@ -113,7 +113,7 @@ describe('public surface drift check', () => {
 
     expect(normalizedHealthSection).toContain('Inspection-only startup binds to `127.0.0.1`');
     expect(normalizedHealthSection).toContain('canonical instance `healthPort`');
-    expect(healthStatusRow).toContain('`src/core/health.ts:1643`');
+    expect(healthStatusRow).toContain('`src/core/health.ts:1770`');
     expect(healthStatusRow).toContain('`src/core/database-compatibility-early.ts:172`');
     expect(healthStatusRow).toContain('`service_mode: "inspection_only"`');
     expect(healthStatusRow).toContain('`startup_block`');
@@ -124,7 +124,7 @@ describe('public surface drift check', () => {
     );
     expect(normalizedRelease).toContain('`schema_ready: false`');
     expect(normalizedRunbook).toContain(
-      'systemd `Restart=on-failure` does not react to HTTP `503`',
+      'systemd `Restart=always` restarts on process exit but does not react to HTTP `503`',
     );
   });
 

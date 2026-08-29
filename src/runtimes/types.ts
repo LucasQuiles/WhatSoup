@@ -20,8 +20,15 @@ export interface RuntimeTurnCapabilityHealth {
   lastSuccessfulTurnAt: number | null;
   /** Provider that served the most recent successful user turn, if known. */
   lastSuccessfulTurnProvider: string | null;
+  /** Model ref that served that turn (null = unknown, or the session carried
+   *  no explicit model — the provider default). Optional for older
+   *  implementers; consumers treat absence as null. */
+  lastSuccessfulTurnModel?: string | null;
   /** Whether that success belongs to the exact still-live session incarnation. */
   lastSuccessfulTurnSessionCurrent: boolean | null;
+  /** The configured primary model of this runtime (null = provider default).
+   *  Optional for older implementers; consumers treat absence as null. */
+  primaryModel?: string | null;
   lastTurnErrorClass: string | null;
   lastTurnErrorAt: number | null;
   /** #3017 AXIS A: true when the periodic primary-readiness probe is active
