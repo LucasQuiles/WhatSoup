@@ -17,7 +17,10 @@ import type { DatabaseSync, StatementSync } from 'node:sqlite';
 import { isNonEmptyString } from '../lib/type-guards.ts';
 import { isPnJid, toLidJid } from './jid-constants.ts';
 import { resolveLidsForPhone } from './lid-resolver.ts';
+import { createChildLogger } from '../logger.ts';
 import type { Database } from './database.ts';
+
+const log = createChildLogger('chats-resolver');
 
 // ── Errors ──────────────────────────────────────────────────────────────────
 
@@ -117,8 +120,11 @@ export function createChatResolver(deps: ChatResolverDeps): ChatResolver {
     if (chatProbe === undefined) {
       try {
         chatProbe = db.prepare('SELECT 1 FROM chats WHERE jid = ?');
-      } catch {
+      } catch (err) {
         chatProbe = null;
+        // Content-free: probe name only, never a JID. Without this line the
+        // degradation is silent for the resolver's whole lifetime.
+        log.debug({ err, probe: 'chats' }, 'LID canonicalization existence probe unavailable; memoized as permanent miss for this resolver');
       }
     }
     if (chatProbe !== null && chatProbe.get(lidJid) !== undefined) return true;
@@ -128,8 +134,9 @@ export function createChatResolver(deps: ChatResolverDeps): ChatResolver {
     if (messageProbe === undefined) {
       try {
         messageProbe = db.prepare('SELECT 1 FROM messages WHERE chat_jid = ? LIMIT 1');
-      } catch {
+      } catch (err) {
         messageProbe = null;
+        log.debug({ err, probe: 'messages' }, 'LID canonicalization existence probe unavailable; memoized as permanent miss for this resolver');
       }
     }
     return messageProbe !== null && messageProbe.get(lidJid) !== undefined;
@@ -149,8 +156,13 @@ export function createChatResolver(deps: ChatResolverDeps): ChatResolver {
         const lidJid = toLidJid(lid);
         if (lidConversationExists(lidJid)) return lidJid;
       }
-    } catch {
-      // fail-open: degraded probe -> original JID
+    } catch (err) {
+      // Last-resort fail-open: resolve() must NEVER throw from the
+      // canonicalization step — the issue-3150 contract is that a degraded
+      // lookup means "send to the JID as given", never a failed send. A
+      // throw here is exceptional (e.g. closed handle), so a per-call debug
+      // line cannot get noisy. Content-free: no JIDs logged.
+      log.debug({ err }, 'LID canonicalization lookup failed; sending to the JID as given');
     }
     return chatJid;
   }
