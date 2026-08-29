@@ -504,6 +504,45 @@ describe('platform service managers', () => {
     expect(childProcessMocks.execFile).not.toHaveBeenCalled();
   });
 
+  it('restores the prior plist bytes, not the new render, when reload fails after an options render', async () => {
+    setPlatform('darwin');
+    const plist = '/tmp/whatsoup-home/Library/LaunchAgents/com.whatsoup.agent.plist';
+    mockReads({
+      plist: generatedPlistIdentity(),
+      config: { name: 'agent', service: { claudeConfigDir: '/opt/claude-roots/agent' } },
+    });
+    childProcessMocks.execFile
+      .mockImplementationOnce((_cmd, _args, optionsOrCallback, maybeCallback) => {
+        const callback = typeof optionsOrCallback === 'function' ? optionsOrCallback : maybeCallback;
+        queueMicrotask(() => callback?.(null, '', ''));
+        return new EventEmitter();
+      })
+      .mockImplementationOnce((_cmd, _args, optionsOrCallback, maybeCallback) => {
+        const callback = typeof optionsOrCallback === 'function' ? optionsOrCallback : maybeCallback;
+        queueMicrotask(() => callback?.(new Error('bootstrap rejected'), '', ''));
+        return new EventEmitter();
+      });
+    const { reconcileLaunchdPlist } = await importPlatform();
+
+    await expect(reconcileLaunchdPlist('agent', {})).rejects.toThrow('bootstrap rejected');
+
+    // First write publishes the options render; the rollback write restores
+    // the exact prior bytes, which never contained the claude root.
+    const firstWrite = String(fsMocks.writeFileSync.mock.calls[0]?.[1]);
+    expect(firstWrite).toContain('<key>CLAUDE_CONFIG_DIR</key>');
+    expect(fsMocks.writeFileSync).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining('.com.whatsoup.agent.plist.tmp-'),
+      generatedPlistIdentity(),
+      { encoding: 'utf-8', mode: 0o644 },
+    );
+    expect(fsMocks.renameSync).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining('.com.whatsoup.agent.plist.tmp-'),
+      plist,
+    );
+  });
+
   it('reports governed-env drift on a dry-run reconcile without touching disk or launchd', async () => {
     setPlatform('darwin');
     const { buildPlist, reconcileLaunchdPlist } = await importPlatform();
