@@ -5,6 +5,7 @@ import {
   type TurnRecoveryOwnerIdentity,
 } from '../../../src/core/durability.ts';
 import { TurnRecoveryClaimFenceError } from '../../../src/core/turn-recovery-store.ts';
+import { ScopeBlockedByDurableRecoveryError } from '../../../src/runtimes/agent/turn-admission-errors.ts';
 import {
   toTurnFinalizationPersistence,
   toTurnRecoveryJobPersistence,
@@ -269,7 +270,10 @@ describe('TurnRecoverySupervisor — BRICK-LAB-shaped regression', () => {
         excludeJobId !== undefined ? { excludeJobId } : undefined,
       )
     ) {
-      throw new Error('Runtime turn scope is blocked by outstanding durable recovery');
+      // The real admission gate's typed error (turn-admission-errors.ts) —
+      // constructing it here keeps this simulation from desynchronizing if
+      // the production message ever changes.
+      throw new ScopeBlockedByDurableRecoveryError();
     }
   }
 
