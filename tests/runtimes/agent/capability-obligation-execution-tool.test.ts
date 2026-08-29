@@ -114,11 +114,11 @@ const OPTIONS = parseCapabilityObligationsOptions({
   retentionPolicyVersion: 'policy/1',
   retentionHorizonDays: 30,
   execution: {
-    command: [NODE, RESOLVER_PATH, '{source}'],
+    interpreter: NODE,
+    resolverArtifactPath: RESOLVER_PATH,
+    args: ['{source}'],
     timeoutMs: 30_000,
     minOutputBytes: 8,
-    resolverArtifactPath: RESOLVER_PATH,
-    interpreted: true,
   },
   attestation: {
     skillName: 'watch',
@@ -175,6 +175,7 @@ function freshAttestation(execution: CapabilityObligationsOptions['execution'] =
     nonce: `n-${Math.random().toString(36).slice(2)}`,
     attestedAt: new Date().toISOString(),
     expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+    evidence: { probeStdoutRef: null, probeStderrRef: null, probeExit: null, canaryInputRef: null, mediaRootReadable: null },
   });
 }
 
@@ -353,7 +354,7 @@ describe('media obligations', () => {
     const marker = join(work, 'ran-marker');
     const resolver = join(resolverDir, 'resolver.cjs');
     writeFileSync(resolver, `require('fs').writeFileSync(${JSON.stringify(marker)}, 'RAN'); console.log('resolver ran anyway');`);
-    const execution: CapabilityObligationsOptions['execution'] = { command: [NODE, resolver, '{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: resolver, interpreted: true };
+    const execution: CapabilityObligationsOptions['execution'] = { command: [NODE, resolver, '{source}'], interpreter: NODE, args: ['{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: resolver, interpreted: true };
     const id = seedObligation({ retainedMedia: { path: mediaPath, sha256: mediaSha, bytes: 20, policyVersion: 'p/1' } });
     freshAttestation(execution);
     const { runtime } = makeRuntime({
@@ -384,7 +385,7 @@ describe('media obligations', () => {
     // Echo the input's CONTENT so the assertion proves the child was handed a
     // readable snapshot of the retained bytes, not just any path.
     writeFileSync(resolver, "const fs=require('fs');console.log('processed-media ' + fs.readFileSync(process.argv[2],'utf8'));");
-    const execution: CapabilityObligationsOptions['execution'] = { command: [NODE, resolver, '{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: resolver, interpreted: true };
+    const execution: CapabilityObligationsOptions['execution'] = { command: [NODE, resolver, '{source}'], interpreter: NODE, args: ['{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: resolver, interpreted: true };
     const id = seedObligation({ retainedMedia: { path: mediaPath, sha256: mediaSha, bytes: CONTENT.length, policyVersion: 'p/1' } });
     freshAttestation(execution);
     const { runtime } = makeRuntime({
@@ -413,7 +414,7 @@ describe('media obligations', () => {
     const resolverDir = mkdtempSync(join(tmpdir(), 'capx-media-mut-resolver-'));
     const mutator = join(resolverDir, 'mutator.cjs');
     writeFileSync(mutator, "require('fs').writeFileSync(process.argv[2],'MUTATED-DIFFERENT-BYTES');console.log('processed-and-mutated-ok');");
-    const execution: CapabilityObligationsOptions['execution'] = { command: [NODE, mutator, '{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: mutator, interpreted: true };
+    const execution: CapabilityObligationsOptions['execution'] = { command: [NODE, mutator, '{source}'], interpreter: NODE, args: ['{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: mutator, interpreted: true };
     const id = seedObligation({ retainedMedia: { path: mediaPath, sha256: mediaSha, bytes: ORIGINAL.length, policyVersion: 'p/1' } });
     freshAttestation(execution);
     const { runtime } = makeRuntime({
@@ -442,7 +443,7 @@ describe('spawn seam', () => {
     // The NUL rides a config token, which staging does not inspect in interpreted
     // mode past command[0]/command[1] — spawn() would throw an opaque synchronous
     // ERR_INVALID_ARG_VALUE; the guard must reject cleanly first.
-    const execution: CapabilityObligationsOptions['execution'] = { command: [NODE, resolver, '{source}', 'nul\0token'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: resolver, interpreted: true };
+    const execution: CapabilityObligationsOptions['execution'] = { command: [NODE, resolver, '{source}', 'nul\0token'], interpreter: NODE, args: ['{source}', 'nul\0token'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: resolver, interpreted: true };
     const id = seedObligation();
     freshAttestation(execution);
     const { runtime } = makeRuntime({
@@ -507,7 +508,7 @@ describe('spawn seam', () => {
   });
 
   it('a pid-less child that outlives the watchdog is recorded as a timed-out signal exit — the group-kill is a safe no-op', async () => {
-    const execution: CapabilityObligationsOptions['execution'] = { command: [NODE, RESOLVER_PATH, '{source}'], timeoutMs: 100, minOutputBytes: 8, resolverArtifactPath: RESOLVER_PATH, interpreted: true };
+    const execution: CapabilityObligationsOptions['execution'] = { command: [NODE, RESOLVER_PATH, '{source}'], interpreter: NODE, args: ['{source}'], timeoutMs: 100, minOutputBytes: 8, resolverArtifactPath: RESOLVER_PATH, interpreted: true };
     const id = seedObligation();
     freshAttestation(execution);
     const { runtime } = makeRuntime({
@@ -599,7 +600,7 @@ describe('output capture caps', () => {
     // Pipes deliver in bounded chunks, so appending stops within one chunk of
     // each cap — well under the totals written.
     writeFileSync(resolver, "process.stdout.write('a'.repeat(400000)); process.stderr.write('b'.repeat(200000));");
-    const execution: CapabilityObligationsOptions['execution'] = { command: [NODE, resolver, '{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: resolver, interpreted: true };
+    const execution: CapabilityObligationsOptions['execution'] = { command: [NODE, resolver, '{source}'], interpreter: NODE, args: ['{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: resolver, interpreted: true };
     const id = seedObligation();
     freshAttestation(execution);
     const { runtime } = makeRuntime({
@@ -628,7 +629,7 @@ describe('direct (non-interpreted) execution mode', () => {
     const script = join(resolverDir, 'watch-direct-resolver');
     writeFileSync(script, '#!/bin/sh\nprintf "processed direct %s ok\\n" "$1"\n');
     chmodSync(script, 0o755);
-    const execution: CapabilityObligationsOptions['execution'] = { command: [script, '{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: script, interpreted: false };
+    const execution: CapabilityObligationsOptions['execution'] = { command: [script, '{source}'], interpreter: null, args: ['{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: script, interpreted: false };
     const id = seedObligation();
     freshAttestation(execution);
     const { runtime } = makeRuntime({
@@ -654,7 +655,7 @@ describe('resolver identity refusal', () => {
     const marker = join(markerDir, 'evil-marker');
     const resolver = join(resolverDir, 'resolver.cjs');
     writeFileSync(resolver, 'console.log("processed " + process.argv[2] + " ORIGINAL ok");');
-    const execution: CapabilityObligationsOptions['execution'] = { command: [NODE, resolver, '{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: resolver, interpreted: true };
+    const execution: CapabilityObligationsOptions['execution'] = { command: [NODE, resolver, '{source}'], interpreter: NODE, args: ['{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: resolver, interpreted: true };
     const id = seedObligation();
     freshAttestation(execution); // binds the ORIGINAL bytes
     const { runtime } = makeRuntime({
@@ -709,6 +710,8 @@ function countingResolver(): { execution: CapabilityObligationsOptions['executio
   return {
     execution: {
       command: [NODE, script, '{source}'],
+      interpreter: NODE,
+      args: ['{source}'],
       timeoutMs: 30_000,
       minOutputBytes: 8,
       resolverArtifactPath: script,
@@ -812,6 +815,8 @@ describe('byte-exact caps and honest signal labeling (audit F8)', () => {
     writeFileSync(script, "process.stdout.write('\\u20ac'.repeat(100000));\n");
     const execution: CapabilityObligationsOptions['execution'] = {
       command: [NODE, script, '{source}'],
+      interpreter: NODE,
+      args: ['{source}'],
       timeoutMs: 30_000,
       minOutputBytes: 8,
       resolverArtifactPath: script,
@@ -839,6 +844,8 @@ describe('byte-exact caps and honest signal labeling (audit F8)', () => {
     writeFileSync(script, "process.kill(process.pid, 'SIGKILL');\n");
     const execution: CapabilityObligationsOptions['execution'] = {
       command: [NODE, script, '{source}'],
+      interpreter: NODE,
+      args: ['{source}'],
       timeoutMs: 30_000,
       minOutputBytes: 8,
       resolverArtifactPath: script,

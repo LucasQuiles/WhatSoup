@@ -99,6 +99,7 @@ describe('approveDrain (operator group-drain approval)', () => {
     const attId = recordCapabilityAttestation(db, {
       ...binding, canaryResult: 'pass', nonce: 'n-1',
       attestedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+      evidence: { probeStdoutRef: null, probeStderrRef: null, probeExit: null, canaryInputRef: null, mediaRootReadable: null },
     });
 
     // ONE operator command records the approval AND drives the sole

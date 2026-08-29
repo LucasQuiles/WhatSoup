@@ -41,7 +41,7 @@ const OPTIONS = parseCapabilityObligationsOptions({
   retentionHorizonDays: 30,
   // round-18/20: an enabled config requires an explicit interpreter PATH, an explicit resolver
   // artifact, and an explicit interpreted flag (syntactic Zod validation; paths need not exist here).
-  execution: { command: ['/usr/bin/node', '/opt/watch/resolver.cjs', '{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: '/opt/watch/resolver.cjs', interpreted: true },
+  execution: { interpreter: '/usr/bin/node', resolverArtifactPath: '/opt/watch/resolver.cjs', args: ['{source}'], timeoutMs: 30_000, minOutputBytes: 8 },
   attestation: {
     skillName: 'watch',
     skillVersion: '1.0.0',

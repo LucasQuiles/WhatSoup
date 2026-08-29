@@ -23,6 +23,12 @@ capability **attestation** (readiness) and, for a group, a **drain approval** (a
   attestation will never admit a real obligation. `--config PATH` (the instance
   `agentOptions.capabilityObligations` block) is cross-checked against your flags and the
   command refuses on any binding mismatch.
+- **Media-retention policy (#3221 Debt 3, A-08):** the instance config's
+  `retentionPolicyVersion` must name the owner-approved artifact
+  `policy/media-retention.json` verbatim, and `retentionHorizonDays` must not exceed its
+  approved horizon (**90 days**, owner-ruled 2026-08-28). Startup verifies this fail-closed
+  (`EX_CONFIG` on violation), so no DM/group media drain can run under an unapproved
+  horizon — check it here BEFORE cutover rather than discovering it as a boot refusal.
 
 ## 1. Produce a capability attestation — `scripts/capability-obligation-attest.ts`
 
@@ -168,6 +174,8 @@ the drain settles.
 
 ## End-to-end order
 
+0. Confirm the instance config complies with `policy/media-retention.json` (horizon ≤ 90,
+   version match — Prerequisites above); a violating config refuses to boot.
 1. `capability-obligation-attest … --run-canary --confirm` (readiness attestation).
 2. For a group: `capability-obligation-approve-drain … --confirm` (AS-08 approval + arm).
 3. The supervisor scans → admits (attestation) → claims (fenced) → dispatches → settles.
@@ -201,7 +209,11 @@ oracle when the automated harness cannot run; keep both receipts.
 - Schema-guarded, dry-run-by-default, `--json` for automation.
 - No live DB write, provider call, or WhatsApp send occurs from a dry run.
 - Recording an attestation and approving a group drain are owner-gated actions (H5 / AS-08);
-  a live migration additionally requires the AS-01 old-binary rehearsal to pass.
+  a live migration additionally requires the AS-01 old-binary rehearsal to pass. Migration 63
+  (#3221 Debt 2: attestation-evidence columns in the row; the `--receipt-out` file is now
+  corroborating) bumps the schema INSIDE the attestation binding — before its rollout the
+  AS-01 rehearsal must be re-run 44→63, and every previously recorded attestation digest
+  stops admitting on the new binary by design (re-attest after upgrade).
 - The same-UID staged-copy window (F4, incl. the EUID-owned interpreter) and the direct-mode
   positional-code residual (awk-shape) are OWNER-RATIFIED threat-model boundaries
   (2026-08-13) — documented in `docs/durability.md` §5.7, not open defects. The drain-now
