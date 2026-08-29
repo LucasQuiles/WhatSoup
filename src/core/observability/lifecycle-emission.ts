@@ -19,9 +19,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
-import { join } from 'node:path';
 
-import { config } from '../../config.ts';
 import { systemClock } from '../../lib/clock.ts';
 import type { FleetLifecyclePhase } from './fleet-lifecycle-flag.ts';
 import type { LifecycleEvent, LifecycleLane, LifecyclePhase } from './lifecycle-event.ts';
@@ -156,30 +154,41 @@ export function createLifecycleEmitter(options: LifecycleEmitterOptions): Lifecy
 }
 
 // ---------------------------------------------------------------------------
-// Runtime singleton — the accessor the hook sites call. Constructed lazily
-// from config so an `off` phase costs one boolean check per hook site.
+// Runtime singleton — the accessor the hook sites call. This DOMAIN module
+// carries no config knowledge (ring boundary): the composition-facing caller
+// (AgentRuntime's constructor, whose config import is an existing edge)
+// initializes it. Until initialized, the singleton is inert.
+
+const INERT_OPTIONS: LifecycleEmitterOptions = { phase: 'off', storePath: '', instance: 'unknown' };
 
 let runtimeEmitter: LifecycleEmitter | null = null;
+let inertFallback: LifecycleEmitter | null = null;
 
 export function runtimeLifecycleEmitter(): LifecycleEmitter {
+  if (runtimeEmitter !== null) return runtimeEmitter;
+  inertFallback ??= createLifecycleEmitter(INERT_OPTIONS);
+  return inertFallback;
+}
+
+/**
+ * Initialize the runtime singleton once (first caller wins; later calls are
+ * no-ops returning the existing emitter). `build` is evaluated inside the
+ * fail-closed boundary: if it or the construction throws (e.g. a partial
+ * test config with no dataRoot), the singleton latches INERT — never a
+ * throw into the caller.
+ */
+export function initializeRuntimeLifecycleEmitter(build: () => LifecycleEmitterOptions): LifecycleEmitter {
   if (runtimeEmitter === null) {
     try {
-      runtimeEmitter = createLifecycleEmitter({
-        phase: config.fleetLifecyclePhase,
-        storePath: join(config.dataRoot, 'lifecycle-events.db'),
-        instance: config.botName,
-      });
+      runtimeEmitter = createLifecycleEmitter(build());
     } catch {
-      // Observer-must-not-break-runtime at the construction boundary too: a
-      // config surface this module cannot read (e.g. a partial test config)
-      // yields a permanently inert emitter, never a throw into a hook site.
-      runtimeEmitter = createLifecycleEmitter({ phase: 'off', storePath: '', instance: 'unknown' });
+      runtimeEmitter = createLifecycleEmitter(INERT_OPTIONS);
     }
   }
   return runtimeEmitter;
 }
 
-/** Test hook: inject a capturing emitter (null restores config-derived). */
+/** Test hook: inject a capturing emitter (null restores uninitialized/inert). */
 export function __setRuntimeLifecycleEmitterForTests(emitter: LifecycleEmitter | null): void {
   runtimeEmitter = emitter;
 }

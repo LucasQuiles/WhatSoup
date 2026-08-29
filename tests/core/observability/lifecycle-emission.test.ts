@@ -11,6 +11,7 @@ import {
   attemptOutcomeToken,
   classifyTurnLane,
   createLifecycleEmitter,
+  initializeRuntimeLifecycleEmitter,
   runtimeLifecycleEmitter,
 } from '../../../src/core/observability/lifecycle-emission.ts';
 import { createLifecycleEventStore, type LifecycleEventStore } from '../../../src/core/observability/lifecycle-event-store.ts';
@@ -171,8 +172,30 @@ describe('phase shadow (emitting)', () => {
   });
 });
 
-describe('runtime singleton test hook', () => {
-  it('returns the injected emitter instead of constructing from config', () => {
+describe('runtime singleton (config-free domain module)', () => {
+  it('is inert until initialized — uninitialized access never emits', () => {
+    const emitter = runtimeLifecycleEmitter();
+    expect(emitter.enabled).toBe(false);
+    expect(emitter.emit({ lane: 'L-INT', work_id: 'w', phase: 'admitted' })).toBe(false);
+  });
+
+  it('initializes once from a build thunk; later initializations are no-ops', () => {
+    const path = join(tempDir(), 'lifecycle-events.db');
+    const first = initializeRuntimeLifecycleEmitter(() => ({ phase: 'shadow', storePath: path, instance: 'inst-a' }));
+    expect(first.enabled).toBe(true);
+    const second = initializeRuntimeLifecycleEmitter(() => ({ phase: 'shadow', storePath: path, instance: 'OTHER' }));
+    expect(second).toBe(first);
+    expect(runtimeLifecycleEmitter()).toBe(first);
+    first.close();
+  });
+
+  it('latches INERT when the build thunk throws (fail-closed, never throws)', () => {
+    const emitter = initializeRuntimeLifecycleEmitter(() => { throw new Error('no dataRoot in this context'); });
+    expect(emitter.enabled).toBe(false);
+    expect(runtimeLifecycleEmitter()).toBe(emitter);
+  });
+
+  it('returns the injected test emitter', () => {
     const captured: LifecycleEvent[] = [];
     const fake = {
       enabled: true,

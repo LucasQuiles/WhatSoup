@@ -57,7 +57,7 @@ import { dequeueNextReport, emitHealReport, parseHealContext } from '../../core/
 import { allowlistedHealCrashClass, errorClassForHealEvidence } from '../../core/heal-evidence.ts';
 import { sendTracked } from '../../core/durability.ts';
 import { classifyErrorForInbound } from '../../core/inbound-failure-class.ts';
-import { runtimeLifecycleEmitter } from '../../core/observability/lifecycle-emission.ts';
+import { initializeRuntimeLifecycleEmitter, runtimeLifecycleEmitter } from '../../core/observability/lifecycle-emission.ts';
 import {
   normalizeFallbackEntriesFromAgentOptions,
   type AgentFallbackDiscoveryConfig,
@@ -2321,6 +2321,15 @@ export class AgentRuntime implements Runtime {
     );
     this.messenger = messenger;
     this.instanceName = instanceName ?? 'personal';
+    // FLOS Stage 1: initialize the lifecycle-emission singleton from config
+    // here (composition edge already exists in this module — the domain
+    // module itself must stay config-free). First caller wins; the build
+    // thunk is evaluated inside the module's fail-closed boundary.
+    initializeRuntimeLifecycleEmitter(() => ({
+      phase: config.fleetLifecyclePhase,
+      storePath: join(config.dataRoot, 'lifecycle-events.db'),
+      instance: this.instanceName,
+    }));
     // #3295 S2: keep the OPTIONS OBJECT (not a copied boolean) so the flag is
     // read live at every admission — the kill-switch contract.
     this.deferredTurnAdmissionOptions = options?.deferredTurnAdmission ?? null;
