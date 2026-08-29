@@ -96,6 +96,7 @@ const SCOPE_MAP: Record<string, ScopeEntry> = {
   'hooks-installed': { class: 'probe-refuse', reason: 'resolves cwd git config core.hooksPath and the checked-out hook objects; refuses ci.hooks.evidence-unavailable (exit 2) when neither a repo nor hooks resolve', probe: { via: 'cwd' } },
   'transport-patterns': { class: 'probe-refuse', reason: 'walks glob roots; takes --root; floor added this session — refuses "matched 0 files"', probe: { via: 'flag', flag: '--root' } },
   'platform-patterns': { class: 'probe-refuse', reason: 'scans cwd tree for platform-specific patterns; takes --root; floor added this session — refuses "matched 0 files"', probe: { via: 'flag', flag: '--root' } },
+  'png-estate': { class: 'probe-refuse', reason: 'tracked-PNG census ratchet over cwd git ls-files (#2219); refuses "examined 0 tracked files" and a non-repo cwd (git failure -> INCONCLUSIVE exit 2)', probe: { via: 'cwd' } },
 
   // ---- probe-nonzero: cwd-relative fixed-artifact guards that fail closed on an empty tree ----
   'fault-taxonomy-coverage': { class: 'probe-nonzero', reason: 'reads cwd registry + debt baseline; ENOENT -> exit 2 non-zero', probe: { via: 'cwd' } },
@@ -128,6 +129,7 @@ const SCOPE_MAP: Record<string, ScopeEntry> = {
 
   // ---- skip-diff-scoped: empty diff/index is legitimately nothing (not a whole-tree scan) ----
   'design-system-hygiene': { class: 'skip-diff-scoped', reason: 'scans STAGED files; empty index -> legitimately clean (exit 0), not vacuity' },
+  'png-estate:staged': { class: 'skip-diff-scoped', reason: 'pre-commit half of the png-estate policy (#2219): scans STAGED PNGs; empty index -> legitimately clean (exit 0). The whole-tree ratchet is the probe-refuse entry above' },
   repo: { class: 'skip-diff-scoped', reason: 'default mode staged scans ADDED lines; empty index -> legitimately clean. Its whole-tree release-hygiene mode is floored + covered by MODE_PROBES below' },
   'pre-push': { class: 'skip-diff-scoped', reason: 'consumes stdin ref updates; no push context -> "delete-only" no-op, not a tree scan' },
   'semantic-quality': { class: 'skip-diff-scoped', reason: 'evaluates a push CANDIDATE receipt; candidate-unavailable -> no-op, not a tree scan' },
