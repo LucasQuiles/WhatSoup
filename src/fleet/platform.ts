@@ -15,6 +15,7 @@ import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { isValidInstanceName } from './instance-name.ts';
 import { escapeRegExp } from '../lib/regex-utils.ts';
+import type { LaunchdPlistRenderOptions } from '../lib/launchd-service-config.ts';
 import { repoRoot, tmpRoot, xdgDir } from './paths.ts';
 import { SIGNAL } from '../lib/signals.ts';
 
@@ -141,8 +142,13 @@ function assertExpectedGeneratedLaunchdPlist(name: string, contents: string): vo
  *
  * All interpolated values are XML-escaped to prevent injection via
  * PATH, home directory, or other environment-sourced strings.
+ *
+ * `renderOptions` is the typed instance-specific render input; callers resolve
+ * it from validated instance config (src/fleet/launchd-render-options.ts) —
+ * this function never reads config.json itself. Omitted options render
+ * byte-identical output to the historical no-options form.
  */
-export function buildPlist(name: string): string {
+export function buildPlist(name: string, renderOptions: LaunchdPlistRenderOptions = {}): string {
   assertValidLaunchdInstanceName(name);
   const xdgConfig = xdgDir('XDG_CONFIG_HOME', '.config');
   const logDir = path.join(xdgConfig, 'whatsoup', 'instances', name);
@@ -152,6 +158,7 @@ export function buildPlist(name: string): string {
   const envPath = process.env.PATH ?? (process.platform === 'darwin'
   ? '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin'
   : '/usr/local/bin:/usr/bin:/bin');
+  const servicePath = [...(renderOptions.pathPrepend ?? []), envPath].join(':');
   // env-allowed: host-level generating-shell platform detection; pre-instance by design
   const whatsoupNode = process.env.WHATSOUP_NODE;
 
@@ -194,11 +201,17 @@ export function buildPlist(name: string): string {
     '  <key>EnvironmentVariables</key>',
     '  <dict>',
     '    <key>PATH</key>',
-    `    <string>${escapeXml(envPath)}</string>`,
+    `    <string>${escapeXml(servicePath)}</string>`,
     '    <key>HOME</key>',
     `    <string>${escapeXml(os.homedir())}</string>`,
     '    <key>TMPDIR</key>',
     `    <string>${escapeXml(tmpDir)}</string>`,
+    ...(renderOptions.claudeConfigDir
+      ? [
+          '    <key>CLAUDE_CONFIG_DIR</key>',
+          `    <string>${escapeXml(renderOptions.claudeConfigDir)}</string>`,
+        ]
+      : []),
     ...(whatsoupNode
       ? [
           '    <key>WHATSOUP_NODE</key>',
