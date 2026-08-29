@@ -1562,3 +1562,231 @@ describe('pre-push guard — local/CI enforcement parity for guard steps', () =>
     expect(blank, `exemption(s) without a substantive reason: ${blank.join(', ')}`).toEqual([]);
   });
 });
+
+describe('pre-push guard — preservation pushes to the preserve mirror', () => {
+  const MIRROR_URL = 'git@github.com:LucasQuiles/WhatSoup-preserve.git';
+  const ORIGIN_URL = 'git@github.com:LucasQuiles/WhatSoup.git';
+  const withStubNpm = (fn: (npmCallsLog: string) => void) => {
+    const root = mkdtempSync(resolve(tmpdir(), 'whatsoup-pre-push-guard-preserve-'));
+    const bin = resolve(root, 'bin');
+    const callsLog = resolve(root, 'npm-calls.log');
+    const originalPath = process.env['PATH'];
+    try {
+      mkdirSync(bin, { recursive: true });
+      const npmStub = resolve(bin, 'npm');
+      writeFileSync(npmStub, ['#!/bin/sh', `printf "%s\\n" "$*" >> "${callsLog}"`, 'exit 0', ''].join('\n'));
+      chmodSync(npmStub, 0o755);
+      process.env['PATH'] = `${bin}:${originalPath ?? ''}`;
+      fn(callsLog);
+    } finally {
+      if (originalPath === undefined) delete process.env['PATH'];
+      else process.env['PATH'] = originalPath;
+      rmSync(root, { recursive: true, force: true });
+    }
+  };
+  const quiet = () => vi.spyOn(console, 'error').mockImplementation(() => {});
+
+  it('maps the preserve decision to no verification composite', () => {
+    expect(commandsForDecision('preserve')).toEqual([]);
+  });
+
+  it('routes a refs/preserve/* push to the mirror through the estate gate only — no alignment, no console deps, no composite', () => {
+    withStubNpm((callsLog) => {
+      const spy = quiet();
+      const events: string[] = [];
+      try {
+        const input =
+          `refs/heads/fix/example ${'a'.repeat(40)} refs/preserve/20260829/fix-example ${ZERO_SHA}`;
+        const decision = runPrePushGuard(
+          input,
+          repoRoot,
+          {
+            assertConsoleDependencies: () => events.push('console'),
+            verifyAlignmentBefore: () => {
+              events.push('before');
+              throw new Error('candidate alignment must not run for a preservation push');
+            },
+            verifyAlignmentAfter: () => events.push('after'),
+            classifyPushRemote: (options) => {
+              events.push(`classify:${options.remoteName}:${options.remoteUrl}`);
+              return 'preserve-mirror';
+            },
+          },
+          { remoteName: 'preserve-mirror', remoteUrl: MIRROR_URL },
+        );
+        expect(decision).toBe('preserve');
+        expect(readFileSync(callsLog, 'utf8').trim().split('\n')).toEqual([
+          'run guard:git-estate -- guard --phase pre-push --push-local-ref refs/heads/fix/example',
+        ]);
+        expect(events).toEqual([`classify:preserve-mirror:${MIRROR_URL}`]);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
+
+  it('refuses a non-preserve destination on the mirror after the estate gate and before any verification', () => {
+    withStubNpm((callsLog) => {
+      const spy = quiet();
+      const events: string[] = [];
+      try {
+        const input =
+          `refs/heads/fix/example ${'a'.repeat(40)} refs/heads/fix/example ${ZERO_SHA}`;
+        expect(() => runPrePushGuard(
+          input,
+          repoRoot,
+          {
+            assertConsoleDependencies: () => events.push('console'),
+            verifyAlignmentBefore: () => {
+              events.push('before');
+              throw new Error('unreachable');
+            },
+            classifyPushRemote: () => 'preserve-mirror',
+          },
+          { remoteName: 'preserve-mirror', remoteUrl: MIRROR_URL },
+        )).toThrow(/accepts only refs\/preserve\/\* destinations/);
+        expect(readFileSync(callsLog, 'utf8').trim().split('\n')).toEqual([
+          'run guard:git-estate -- guard --phase pre-push --push-local-ref refs/heads/fix/example',
+        ]);
+        expect(events).toEqual([]);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
+
+  it('refuses when the hook names the mirror but the configured push remote does not classify as it', () => {
+    withStubNpm(() => {
+      const spy = quiet();
+      try {
+        const input =
+          `refs/heads/fix/example ${'a'.repeat(40)} refs/preserve/20260829/fix-example ${ZERO_SHA}`;
+        expect(() => runPrePushGuard(
+          input,
+          repoRoot,
+          {
+            assertConsoleDependencies: () => {},
+            verifyAlignmentBefore: () => {
+              throw new Error('unreachable');
+            },
+            classifyPushRemote: () => 'whatsoup',
+          },
+          { remoteName: 'preserve-mirror', remoteUrl: MIRROR_URL },
+        )).toThrow(/did not classify as it/);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
+
+  it('leaves the origin path untouched: no remote classification call, alignment and composite as before', () => {
+    withStubNpm((callsLog) => {
+      const spy = quiet();
+      const events: string[] = [];
+      const receipt = {
+        schemaVersion: 1 as const,
+        remoteName: 'origin',
+        remoteUrlDigest: 'd'.repeat(64),
+        candidateOid: 'a'.repeat(40),
+        headOid: 'a'.repeat(40),
+        remoteMainOid: 'b'.repeat(40),
+      };
+      try {
+        const input =
+          `refs/heads/fix/example ${'a'.repeat(40)} refs/preserve/imported/fix-example ${ZERO_SHA}`;
+        expect(runPrePushGuard(
+          input,
+          repoRoot,
+          {
+            assertConsoleDependencies: () => events.push('console'),
+            verifyAlignmentBefore: () => {
+              events.push('before');
+              return receipt;
+            },
+            verifyAlignmentAfter: () => events.push('after'),
+            classifyPushRemote: () => {
+              events.push('classify');
+              return 'whatsoup';
+            },
+          },
+          { remoteName: 'origin', remoteUrl: ORIGIN_URL },
+        )).toBe('branch');
+        expect(readFileSync(callsLog, 'utf8').trim().split('\n')).toEqual([
+          'run guard:git-estate -- guard --phase pre-push --push-local-ref refs/heads/fix/example',
+          'run verify:push:branch',
+        ]);
+        expect(events).toEqual(['before', 'console', 'after']);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
+});
+
+describe('pre-push guard — preservation integrity (append-only, create-only)', () => {
+  const MIRROR_URL = 'git@github.com:LucasQuiles/WhatSoup-preserve.git';
+  const withStubNpm = (fn: (npmCallsLog: string) => void) => {
+    const root = mkdtempSync(resolve(tmpdir(), 'whatsoup-pre-push-guard-preserve-hard-'));
+    const bin = resolve(root, 'bin');
+    const callsLog = resolve(root, 'npm-calls.log');
+    const originalPath = process.env['PATH'];
+    try {
+      mkdirSync(bin, { recursive: true });
+      const npmStub = resolve(bin, 'npm');
+      writeFileSync(npmStub, ['#!/bin/sh', `printf "%s\\n" "$*" >> "${callsLog}"`, 'exit 0', ''].join('\n'));
+      chmodSync(npmStub, 0o755);
+      process.env['PATH'] = `${bin}:${originalPath ?? ''}`;
+      fn(callsLog);
+    } finally {
+      if (originalPath === undefined) delete process.env['PATH'];
+      else process.env['PATH'] = originalPath;
+      rmSync(root, { recursive: true, force: true });
+    }
+  };
+
+  it('refuses a deletion riding a preservation push (append-only)', () => {
+    withStubNpm(() => {
+      const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        const input = [
+          `refs/heads/fix/example ${'a'.repeat(40)} refs/preserve/20260829/fix-example ${ZERO_SHA}`,
+          `(delete) ${ZERO_SHA} refs/preserve/20250101/old ${'b'.repeat(40)}`,
+        ].join('\n');
+        expect(() => runPrePushGuard(
+          input,
+          repoRoot,
+          {
+            assertConsoleDependencies: () => { throw new Error('unreachable'); },
+            verifyAlignmentBefore: () => { throw new Error('unreachable'); },
+            classifyPushRemote: () => 'preserve-mirror',
+          },
+          { remoteName: 'preserve-mirror', remoteUrl: MIRROR_URL },
+        )).toThrow(/append-only through this hook; ref deletions may not ride/);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
+
+  it('refuses updating an existing archival ref (create-only)', () => {
+    withStubNpm(() => {
+      const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        const input =
+          `refs/heads/fix/example ${'a'.repeat(40)} refs/preserve/20260829/fix-example ${'c'.repeat(40)}`;
+        expect(() => runPrePushGuard(
+          input,
+          repoRoot,
+          {
+            assertConsoleDependencies: () => { throw new Error('unreachable'); },
+            verifyAlignmentBefore: () => { throw new Error('unreachable'); },
+            classifyPushRemote: () => 'preserve-mirror',
+          },
+          { remoteName: 'preserve-mirror', remoteUrl: MIRROR_URL },
+        )).toThrow(/create-only through this hook; existing-ref update refused/);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
+});

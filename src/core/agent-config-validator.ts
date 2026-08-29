@@ -27,6 +27,7 @@ import { PROVIDER_API_KEY_SERVICES, SERVICE_ENV_MAP, isKeylessOpenCodeRoute, res
 import { isNonEmptyString, isRecord } from '../lib/type-guards.ts';
 import { validateLaunchdServiceConfig } from '../lib/launchd-service-config.ts';
 import { FLEET_LIFECYCLE_PHASES, isFleetLifecyclePhase } from './observability/fleet-lifecycle-flag.ts';
+import { validateServiceIdentityConfig } from '../lib/service-identity-config.ts';
 import { isSamePhysicalDirectory } from '../lib/home-path.ts';
 import { resolveAgentModel } from './agent-model.ts';
 import {
@@ -441,6 +442,14 @@ export function validateInstanceConfig(
   // load / discovery, all instance types) instead of first failing a render.
   const serviceErr = validateLaunchdServiceConfig(raw);
   if (serviceErr) return err(serviceErr.field, serviceErr.message);
+  // --- service.expectedAccountDigest (ratified account identity) ---
+  // Admission is the only gate between a raw account identifier and the
+  // instance config on disk; the shape rule lives in
+  // lib/service-identity-config.ts and runs on every path, authOnly included.
+  const identityErr = validateServiceIdentityConfig(raw, {
+    effectiveType: ctx.originalType,
+  });
+  if (identityErr) return err(identityErr.field, identityErr.message);
 
   if (raw['type'] === 'agent') {
     const modelConsistencyErr = validateAgentModelConsistency(raw);

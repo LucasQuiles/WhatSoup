@@ -587,6 +587,19 @@ incident. A valid database compatibility drain or terminal WhatsApp-auth state
 also suppresses restart but preserves any provider-credential marker; neither
 state is evidence that the primary provider recovered.
 
+Nor is a working credential proof of the *right* account. On claude-cli agent
+instances with `service.expectedAccountDigest` configured, the runtime reads
+its own service-context `claude auth status --json` on startup and on every
+primary-usability probe and reports the verdict as
+`runtime.agent.accountIdentity` (status classes and digest prefixes only).
+`credential_identity_mismatch` (critical) and `credential_identity_unverifiable`
+(warning) are alert sources and degradation causes with the reason twins
+`runtime.credential_identity_*`; neither is turn-provable, so a latched
+identity degradation releases only on a restart after the owner corrects the
+login. The runtime never heals, mirrors, or seeds a credential from this
+check — see
+[Ratified account identity](configuration.md#ratified-account-identity-serviceexpectedaccountdigest).
+
 ### Database Compatibility Startup Classification
 
 A valid database compatibility drain is distinct from an ordinary WhatsApp
@@ -2281,3 +2294,31 @@ Volumes persist until explicitly removed with `docker volume rm`.
 - `reason=preflight_error`: the preflight itself failed (fail-closed). The verdict JSON carries the error;
   a read-only `node:sqlite` open on a hot WAL is verified supported, so a live writer alone does not
   explain it — check file permissions and disk state, then rerun.
+
+## Check before you stop an instance (`--mode stop`)
+
+The preflight above is a **start** gate: the launch wrapper runs it at `ExecStart`, so it speaks only
+after a stop has already happened. On 2026-08-29 that ordering was visible in the journal — `Stopping`
+at 00:30:41, `Started` at 00:30:42, preflight verdict at 00:30:44 — by which point three journaled
+turns (two of them owner DMs) had been finalized `failed` by the shutdown with no replay. A stricter
+start gate cannot prevent that; it would only refuse to bring the instance back.
+
+Whoever issues the stop must ask the other question first:
+
+```bash
+node scripts/restart-safety-preflight.ts --db "$DB" --json --mode stop
+```
+
+Exit `0` means no open inbound arrived inside the liveness window. Exit `3` means
+`reason=live_turns_in_flight` — a turn is mid-flight and stopping now loses it; wait and re-check, or
+make it an explicit, recorded operator decision. **Any script that repoints a release and restarts a
+unit must run this first** — including a deploy an agent runs against its own runtime, which is how the
+2026-08-29 loss happened.
+
+Liveness is recency-scoped on purpose. Only OPEN inbounds (`pending`, `processing`, `turn_done`)
+received within `LIVE_TURN_WINDOW_SECONDS` (15 minutes, the same threshold the reply-guarantee observer
+uses to call an open inbound stale) block the stop. Older open rows are reported as
+`liveTurns.staleIgnored` and never block — an instance carrying weeks-old wedged rows (q holds 11) must
+stay restartable, since restart is how a wedge gets cleared.
+
+The verdict reports `liveTurns.windowSeconds`, so a deploy receipt can record the exact predicate applied.

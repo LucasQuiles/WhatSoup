@@ -310,6 +310,9 @@ jobs:
       - name: Insecure tempfile guard
         run: npm run guard:insecure-tempfile
 
+      - name: PNG estate ratchet guard
+        run: npm run guard:png-estate
+
       - name: Zero-byte tracked file guard
         run: npm run guard:zero-byte-tracked
 

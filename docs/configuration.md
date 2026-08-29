@@ -496,7 +496,7 @@ into place during deployment.
 | `toolUpdateMode` | string | no | `full` | Controls what the user sees during agent tool execution. `full`: elapsed time and technical details. `friendly`: plain-language status, one-time per tool. `minimal`: typing indicator only during tools; pre-tool assistant narration is suppressed and the terminal answer is preserved. |
 | `echoGuard` | object | no | `{ enabled: true, groupCooldownMs: 1000 }` | Suppresses outbound echo loops in group chats. When enabled, group messages sent within `groupCooldownMs` of a prior send are suppressed. DMs are never affected. In-memory state, resets on restart. |
 | `operationTracker` | object | no | see defaults | Per-tool progress reporting and stall detection. All sub-fields optional; unset fields use platform defaults. See [operationTracker](#operationtracker). |
-| `service` | object | no | — | Service-manager render options for generated macOS launchd plists, valid on every instance type. `claudeConfigDir` renders as `CLAUDE_CONFIG_DIR` in the generated plist's `EnvironmentVariables`; `pathPrepend` prepends directories to the rendered service `PATH`. Not rendered by the systemd or Docker backends, but validated on every platform: a bad block fails config admission and load everywhere. See [`service` (launchd render options)](#service-launchd-render-options). |
+| `service` | object | no | — | Service-manager render options for generated macOS launchd plists, valid on every instance type. `claudeConfigDir` renders as `CLAUDE_CONFIG_DIR` in the generated plist's `EnvironmentVariables`; `pathPrepend` prepends directories to the rendered service `PATH` (both render keys are not rendered by the systemd or Docker backends; the block is validated on every platform — a bad block fails config admission and load everywhere). `expectedAccountDigest` (claude-cli agent instances only, every platform) is the owner-ratified, opaque account-identity digest the runtime verifies the claude CLI's serving identity against — see [`service` (launchd render options)](#service-launchd-render-options) and [Ratified account identity](#ratified-account-identity-serviceexpectedaccountdigest). |
 | `agentOptions` | object | agent only | — | Agent-specific settings. Required fields vary by `sessionScope`. See [agentOptions](#agentoptions). |
 | `chatOptions` | object | no | — | Chat-specific settings. Currently just `openaiProviderConfig` (chat OpenAI endpoint/key override). See [chatOptions](#chatoptions). |
 | `transcriptionOptions` | object | no | — | Shared OpenAI Whisper transcription endpoint/key override. Valid for chat, agent, and passive instances. See [transcriptionOptions](#transcriptionoptions). |
@@ -550,6 +550,7 @@ config-owned and regeneration-safe:
 |-------|------|-------|--------|
 | `claudeConfigDir` | string | absolute path; no surrounding whitespace or control characters | Rendered as `CLAUDE_CONFIG_DIR` so the launchd service context resolves the same dedicated claude-cli config root as interactive use of that root (e.g. an isolated per-bot root such as `$HOME/.claude-<instance>`). Omitted → the key is not rendered. The block governs only which config root the service resolves; it does not create or copy credentials (the CLI keeps those keychain-resident). |
 | `pathPrepend` | string[] | at most 16 entries; each an absolute path without `:` or control characters | Prepended in order ahead of the generating shell's ambient `PATH` in the rendered service `PATH` (e.g. `$HOME/.local/bin` so a fallback provider binary resolves under launchd). Omitted or empty → byte-identical `PATH` to the historical render. |
+| `expectedAccountDigest` | string | `sha256:<64 lowercase hex>` exactly, produced by `npm run claude-account-digest`; agent instances with `agentOptions.provider` `claude-cli` (the default) only — rejected elsewhere | Not a render key (never reaches the plist; applies on every platform). The ratified account identity the runtime verifies against; see [Ratified account identity](#ratified-account-identity-serviceexpectedaccountdigest). A raw email or organization id is rejected at admission on every path (create / PATCH / load / discovery). Omitted → verification disabled (one info log line at the first probe). |
 
 One source of truth: the shape rules live in `src/lib/launchd-service-config.ts`
 and are enforced at config admission (CREATE / PATCH / load / discovery, every
@@ -577,6 +578,72 @@ report lists the *names* of installed non-governed keys an apply would drop
 (`--apply` refuses those without `--drop-non-governed-env`). See the
 [macOS launchd deployment runbook](runbooks/macos-launchd-deployment.md#generated-render-options-and-governed-env-drift)
 for the drift-check and hand-patch adoption workflow.
+
+### Ratified account identity (`service.expectedAccountDigest`)
+
+Verify-only identity pin for claude-cli agent instances. Credentials stay
+keychain-resident and CLI-managed; the runtime never writes, mirrors, or seeds
+one. What it does is answer one question on startup and on every primary
+model usability probe: **is the claude CLI, in this service context, serving
+with the account the owner ratified?**
+
+- **Observed identity.** The runtime spawns `claude auth status --json` with the
+  same scrubbed allow-list environment the model probe and real turns use
+  (`HOME`, `PATH`, `USER`, `NO_COLOR`, and `CLAUDE_CONFIG_DIR` when set) and
+  reduces the answer to an opaque digest. The CLI's `email` and `orgId` are
+  read only inside the parser; nothing downstream — config, logs, alerts,
+  health, this repository's tests — ever carries a raw identifier.
+- **Ratified expectation.** `sha256:` + SHA-256 over a versioned canonical
+  string binding the account **and** the organization (`email` lower-cased
+  and trimmed, `orgId` lower-cased and trimmed; see
+  `src/lib/account-identity-digest.ts`). Binding the org UUID is what makes
+  the digest non-guessable — a digest over the email alone falls to a short
+  candidate list — and "same login, different org" is a different serving
+  identity, so it reads as a mismatch by design.
+- **Outcomes.** `match` → quiet (clears any open identity alert).
+  `mismatch` → critical alert `credential_identity_mismatch` + health
+  degraded with reason `runtime.credential_identity_mismatch` / cause
+  `credential_identity_mismatch`. `unverifiable` (not logged in, identity
+  fields missing, output unparseable, binary missing, probe failed or
+  threw, malformed expectation, stale receipt, never verified) → warning
+  alert `credential_identity_unverifiable` + the matching reason/cause pair.
+  Unverifiable is never treated as a match, and it never clears an open
+  mismatch. A match older than the model-usability freshness window is
+  `unverifiable`/`stale-receipt`. With the field configured and no
+  verification yet, health reports `pending` (no degradation) until that
+  window has elapsed since the runtime armed, then `never-verified`.
+  Without the field, `runtime.agent.accountIdentity.status` is `disabled`.
+- **Latch interaction.** The identity reasons are deliberately not
+  turn-provable (a successful turn proves the credential works, not whose it
+  is), so if the #2280 silence latch captured one, the instance stays
+  `degraded` until it restarts after the identity is corrected. Restart is
+  the release path; a passing turn is not.
+
+**Capturing the digest at a known-good login (no raw identifier printed):**
+
+1. On the host, in the same config-root context the service resolves —
+   the `service.claudeConfigDir` root when one is configured, otherwise the
+   CLI default — confirm the login interactively (`claude` opens the usual
+   flow; this is an owner action, never automated by WhatSoup).
+2. Run the capture in that context. It runs the runtime's own read-only
+   probe and prints exactly one line, so it is safe in a shared terminal log:
+
+   ```bash
+   CLAUDE_CONFIG_DIR=/absolute/claude-root npm run claude-account-digest
+   # sha256:… ← the only output; exit 2 = not logged in, 3 = identity unreadable
+   ```
+
+   Do **not** substitute `claude auth status --json` here: it prints the raw
+   email and organization id.
+3. Put the printed value in `service.expectedAccountDigest`, restart the
+   instance, and confirm `runtime.agent.accountIdentity.status` is `match`
+   in authenticated `GET /health` (the first probe runs at startup).
+
+**Rotation.** An intentional account or organization change is a new
+ratification: re-run the capture at the new known-good login, update the
+field, restart. Until then the runtime alerts `mismatch` — that alert is the
+control, not a fault. To retire the check, remove the field (verification is
+disabled, never silently downgraded).
 
 ### Startup-notification protocol
 

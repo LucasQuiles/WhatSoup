@@ -15,6 +15,7 @@ import { ChatRuntime } from './runtimes/chat/runtime.ts';
 import { AgentRuntime } from './runtimes/agent/runtime.ts';
 import { consumeIntentionalRestartMarker } from './runtimes/agent/self-restart.ts';
 import { emitAlertChecked } from './lib/emit-alert.ts';
+import { extractExpectedAccountDigest } from './lib/service-identity-config.ts';
 import { MS_PER_MINUTE, MS_PER_HOUR, MS_PER_DAY } from './lib/time-units.ts';
 import { resolveLatestPluginDir } from './runtimes/agent/plugin-dir-resolver.ts';
 import { resolveAgentModel } from './instance-loader.ts';
@@ -514,6 +515,10 @@ if (instanceType === 'agent') {
     // Composition root owns the fleet/systemd binding; inject it so the runtimes
     // layer (which cannot import fleet) can offer the restart_self tool.
     serviceRestarter: createServiceManager(),
+    // task-21: ratified account identity (service.expectedAccountDigest);
+    // validated at load, so a malformed value throws here rather than starting
+    // with a half-valid expectation.
+    expectedAccountDigest: extractExpectedAccountDigest(instanceConfig),
   });
   // Wire the capability-grant manager over this agent's .claude/settings.json.
   // Groups are config-driven (empty by default → /grant reports "unknown group").
