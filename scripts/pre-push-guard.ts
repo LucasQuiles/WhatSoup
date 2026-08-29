@@ -4,11 +4,15 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import {
+  classifyPushRemote,
+  isPreserveMirrorUrl,
   verifyAlignmentAfter,
   verifyAlignmentBefore,
   type AlignmentAfterOptions,
   type AlignmentBeforeOptions,
   type AlignmentReceipt,
+  type PushRemoteClass,
+  type RemoteClassOptions,
 } from './pre-push-alignment.ts';
 
 export const ZERO_SHA = '0000000000000000000000000000000000000000';
@@ -16,10 +20,13 @@ const ZERO_SHA_256 = '0'.repeat(64);
 const OBJECT_ID_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
 export type RefDecision = 'delete' | 'branch' | 'release';
-export type PushDecision = 'skip' | 'branch' | 'release';
+// 'preserve' = archival push to the preserve mirror: refs/preserve/* destinations
+// only, estate-gated, exempt from candidate alignment and the verification composite.
+export type PushDecision = 'skip' | 'branch' | 'release' | 'preserve';
 
 const REQUIRED_CONSOLE_EXECUTABLES = ['eslint', 'tsc', 'vite'] as const;
 const DELETE_ONLY_METADATA_SCRIPTS = ['design:metrics', 'design:burndown'] as const;
+const PRESERVE_REF_PREFIX = 'refs/preserve/';
 
 interface PrePushGuardDependencies {
   assertConsoleDependencies: (cwd: string) => void;
@@ -28,6 +35,7 @@ interface PrePushGuardDependencies {
     receipt: AlignmentReceipt,
     options: AlignmentAfterOptions,
   ) => void;
+  classifyPushRemote?: (options: RemoteClassOptions) => PushRemoteClass;
 }
 
 interface PushRemote {
@@ -189,6 +197,39 @@ export function runPrePushGuard(
     { cwd, timeout: 30_000, stdio: 'inherit' },
   );
   if (parseError) throw parseError;
+
+  // Preservation pushes: only when the hook names the preserve mirror AND at least one
+  // non-delete update is present (empty/whitespace stdin keeps its fail-closed branch
+  // routing; delete-only keeps its metadata-only routing). The configured push URL is
+  // then proven to be the mirror over SSH, and every content destination must sit under
+  // refs/preserve/*. Candidate alignment and the composite are for PR candidates, which
+  // archival refs are not; the deterministic estate gate above already ran.
+  const contentUpdates = parsedUpdates.filter((update) => !isZeroObjectId(update.localSha));
+  if (remote && contentUpdates.length > 0 && isPreserveMirrorUrl(remote.remoteUrl)) {
+    const classifyRemote = dependencies.classifyPushRemote ?? classifyPushRemote;
+    const remoteClass = classifyRemote({
+      cwd,
+      remoteName: remote.remoteName,
+      remoteUrl: remote.remoteUrl,
+    });
+    if (remoteClass !== 'preserve-mirror') {
+      throw new Error(
+        'pre-push guard: hook named the preserve mirror but the configured push remote did not classify as it; refusing',
+      );
+    }
+    const offending = contentUpdates.filter(
+      (update) => !update.remoteRef.startsWith(PRESERVE_REF_PREFIX),
+    );
+    if (offending.length > 0) {
+      throw new Error(
+        `pre-push guard: the preserve mirror accepts only ${PRESERVE_REF_PREFIX}* destinations through this hook; refused: ${offending.map((update) => update.remoteRef).join(', ')}`,
+      );
+    }
+    console.error(
+      'pre-push guard: preservation push to the preserve mirror (refs/preserve/* only); estate verified; candidate alignment and the verification composite do not apply to archival refs',
+    );
+    return 'preserve';
+  }
 
   const decision = classifyPrePushInput(input);
   const commands = commandsForDecision(decision);

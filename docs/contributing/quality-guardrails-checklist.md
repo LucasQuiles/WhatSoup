@@ -90,6 +90,17 @@ repo-global while several agents work the repo concurrently, so growth is
 routinely caused by an agent other than the pusher, who cannot clear it: growth
 is an ID set difference, and retiring unrelated work does not offset it.
 
+Pushes are then bound to a governed remote. The configured push URL must be an
+SSH URL for `LucasQuiles/WhatSoup` or its preserve mirror
+`LucasQuiles/WhatSoup-preserve`, and the hook-supplied URL must equal it. A push
+to the origin runs candidate alignment (clean invoking worktree, exactly one
+candidate equal to `HEAD`, candidate contains live `main`) around the
+verification composite. A push to the preserve mirror is a **preservation push**:
+every content destination must sit under `refs/preserve/*`, the estate gate still
+runs, and candidate alignment plus the composite are skipped — archival refs are
+by definition not aligned with live `main`, which is what preservation is for.
+Delete-only and empty-stdin pushes keep their existing routing on either remote.
+
 Pre-push ref updates accept object IDs at exactly the 40-character SHA-1 or
 64-character SHA-256 width. Intermediate widths are malformed, and an all-zero
 local object ID at either supported width is treated as a deletion. A normal
