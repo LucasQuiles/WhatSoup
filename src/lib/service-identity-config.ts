@@ -14,6 +14,7 @@
  */
 import { isAccountIdentityDigest } from './account-identity-digest.ts';
 import type { ServiceConfigError } from './launchd-service-config.ts';
+import { isNonEmptyString, isRecord } from './type-guards.ts';
 
 export const EXPECTED_ACCOUNT_DIGEST_FIELD = 'service.expectedAccountDigest';
 
@@ -21,10 +22,6 @@ export interface ServiceIdentityValidationOptions {
   /** Instance type to judge against when the raw payload omits `type`
    *  (PATCH merges carry the immutable original type via the validator). */
   effectiveType?: unknown;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function rawDigest(raw: Record<string, unknown>): unknown {
@@ -59,7 +56,7 @@ export function validateServiceIdentityConfig(
     };
   }
   const agentOptions = raw['agentOptions'];
-  const provider = isRecord(agentOptions) && typeof agentOptions['provider'] === 'string'
+  const provider = isRecord(agentOptions) && isNonEmptyString(agentOptions['provider'])
     ? agentOptions['provider']
     : 'claude-cli';
   if (provider !== 'claude-cli') {
