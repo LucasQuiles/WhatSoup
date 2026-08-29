@@ -16,6 +16,7 @@ import { DEFAULT_IMESSAGE, type ImessageConfig, type ImessageInboundMode } from 
 import { DEFAULT_SIGNAL, SIGNAL_UUID_RE, type SignalConfig, type SignalInboundMode } from './transport/signal/types.ts';
 import { canonicalizeImessageDirectIdentity } from './core/transport-refs.ts';
 import { parseCapabilityObligationsOptions } from './core/capability-contract.ts';
+import { resolveFleetLifecyclePhase } from './core/observability/fleet-lifecycle-flag.ts';
 import { normalizeFallbackDiscoveryFromAgentOptions, normalizeFallbackEntriesFromAgentOptions } from './core/fallback-chain.ts';
 import {
   isProviderBoundaryMode,
@@ -1199,6 +1200,12 @@ export const config = {
   // Capability-obligation replay (all-or-inert; default OFF). `enabled: true`
   // with a malformed body fails startup as EX_CONFIG — never a partial activation.
   capabilityObligations: configCapabilityObligations(),
+
+  // FLOS Stage 1 (design §11): the fleet-lifecycle observability phase, lifted
+  // like capabilityObligations so runtime emission can gate on it. The resolver
+  // is total — malformed or absent input resolves to 'off' (dark), never a
+  // throw; the load-path validator separately rejects malformed values loudly.
+  fleetLifecyclePhase: resolveFleetLifecyclePhase(resolvedAgentOptions),
 
   // NL-first routing aliases + per-sender preference store (owner-approved
   // PR-plan v2). Default false: flag off keeps behavior byte-identical —

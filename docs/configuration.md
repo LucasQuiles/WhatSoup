@@ -496,6 +496,7 @@ into place during deployment.
 | `toolUpdateMode` | string | no | `full` | Controls what the user sees during agent tool execution. `full`: elapsed time and technical details. `friendly`: plain-language status, one-time per tool. `minimal`: typing indicator only during tools; pre-tool assistant narration is suppressed and the terminal answer is preserved. |
 | `echoGuard` | object | no | `{ enabled: true, groupCooldownMs: 1000 }` | Suppresses outbound echo loops in group chats. When enabled, group messages sent within `groupCooldownMs` of a prior send are suppressed. DMs are never affected. In-memory state, resets on restart. |
 | `operationTracker` | object | no | see defaults | Per-tool progress reporting and stall detection. All sub-fields optional; unset fields use platform defaults. See [operationTracker](#operationtracker). |
+| `service` | object | no | — | Service-manager render options for generated macOS launchd plists, valid on every instance type. `claudeConfigDir` renders as `CLAUDE_CONFIG_DIR` in the generated plist's `EnvironmentVariables`; `pathPrepend` prepends directories to the rendered service `PATH`. Not rendered by the systemd or Docker backends, but validated on every platform: a bad block fails config admission and load everywhere. See [`service` (launchd render options)](#service-launchd-render-options). |
 | `agentOptions` | object | agent only | — | Agent-specific settings. Required fields vary by `sessionScope`. See [agentOptions](#agentoptions). |
 | `chatOptions` | object | no | — | Chat-specific settings. Currently just `openaiProviderConfig` (chat OpenAI endpoint/key override). See [chatOptions](#chatoptions). |
 | `transcriptionOptions` | object | no | — | Shared OpenAI Whisper transcription endpoint/key override. Valid for chat, agent, and passive instances. See [transcriptionOptions](#transcriptionoptions). |
@@ -530,6 +531,52 @@ into place during deployment.
 | `advanced` | object | `{ enableRelayMessage: false, enableResync: false, relayMaxPayloadBytes: 1048576, enableUrlWatch: false }` | Gates for low-level/privileged MCP capabilities (`src/mcp/tools/advanced.ts`, `src/mcp/tools/substrate.ts`). `enableResync` must be `true` for the `resync_app_state` tool; `enableRelayMessage` must be `true` for the `relay_message` tool; `relayMaxPayloadBytes` caps the raw protobuf payload size (default 1 MB). `enableUrlWatch` must be `true` for `create_watch` to accept `source:'poll.url'` watches — when `false` (default) creation is rejected and the poller fails any persisted `poll.url` row closed (`url_watch_disabled`). The `poll.url` executor reuses the link-preview SSRF stack and is https-only + default-port-only. All default off/conservative. |
 
 [^enabled]: Enforcement sites: [`src/fleet/discovery.ts:94`](../src/fleet/discovery.ts) (fleet scan skip), [`src/fleet/routes/ops.ts:767`](../src/fleet/routes/ops.ts) (port-in-use scan), [`src/fleet/routes/ops.ts:788`](../src/fleet/routes/ops.ts) (existing-port map for PATCH conflict checks).
+
+### `service` (launchd render options)
+
+Optional, all instance types. On macOS, generated `com.whatsoup.<instance>.plist`
+files (`buildPlist()` in `src/fleet/platform.ts`) render this block into the
+job's `EnvironmentVariables`, making previously hand-patched plist edits
+config-owned and regeneration-safe:
+
+```json
+"service": {
+  "claudeConfigDir": "/absolute/path/to/claude-config-root",
+  "pathPrepend": ["/absolute/dir/bin"]
+}
+```
+
+| Field | Type | Rules | Effect |
+|-------|------|-------|--------|
+| `claudeConfigDir` | string | absolute path; no surrounding whitespace or control characters | Rendered as `CLAUDE_CONFIG_DIR` so the launchd service context resolves the same dedicated claude-cli config root as interactive use of that root (e.g. an isolated per-bot root such as `$HOME/.claude-<instance>`). Omitted → the key is not rendered. The block governs only which config root the service resolves; it does not create or copy credentials (the CLI keeps those keychain-resident). |
+| `pathPrepend` | string[] | at most 16 entries; each an absolute path without `:` or control characters | Prepended in order ahead of the generating shell's ambient `PATH` in the rendered service `PATH` (e.g. `$HOME/.local/bin` so a fallback provider binary resolves under launchd). Omitted or empty → byte-identical `PATH` to the historical render. |
+
+One source of truth: the shape rules live in `src/lib/launchd-service-config.ts`
+and are enforced at config admission (CREATE / PATCH / load / discovery, every
+instance type) and again by the render-time resolver
+(`src/fleet/launchd-render-options.ts`). Render paths fail closed: an
+unreadable or invalid `config.json` aborts a plist install or reconcile instead
+of regenerating the plist without its governed environment; only a missing
+`config.json` (or absent block) renders the historical byte-identical plist.
+
+Unknown keys inside `service` are ignored (the instance-config convention for
+extraneous keys), so a misspelled field is silently inert — read the dry-run
+report after editing the block. Validation stays strict per field: a
+per-key `null` is rejected. Because the fleet config `PATCH` route deep-merges
+objects, a single governed key cannot be unset by omitting it; unset the whole
+block with `"service": null` and re-add the fields you want, or edit
+`config.json` directly.
+
+Reconciliation (`npm run reconcile-launchd-restart-policy -- --instance <name>`)
+additionally reports governed-key drift (`CLAUDE_CONFIG_DIR`, `PATH`) between
+the fresh render and the installed plist by key and SHA-256 value digest —
+never by value; installed bot plists carry live credentials. `PATH` is
+decomposed into the config-owned prefix (does the installed `PATH` start with
+the configured `pathPrepend`?) and the rendering shell's ambient tail, and the
+report lists the *names* of installed non-governed keys an apply would drop
+(`--apply` refuses those without `--drop-non-governed-env`). See the
+[macOS launchd deployment runbook](runbooks/macos-launchd-deployment.md#generated-render-options-and-governed-env-drift)
+for the drift-check and hand-patch adoption workflow.
 
 ### Startup-notification protocol
 
@@ -928,6 +975,7 @@ proof unless a WhatSoup-specific proof artifact says so.
 | `autoCompactInputTokens` | number | no | `150000` | For Claude CLI agent sessions, automatically send a silent `/compact` after this many input tokens since the last successful compact. Default: 150,000 tokens (prevents prompt-too-long errors while leaving headroom for tool results). Valid range: 50,000-100,000,000. **Bootstrap behavior:** the first time eligibility is checked on any session whose `last_compact_input_tokens=0` (a fresh enable, or a brand-new session whose first turn crosses the threshold), the baseline is initialised silently without firing `/compact`. This prevents a compact storm on rollout but means the first real compact is deferred by one full threshold's worth of tokens. **Cooldown behavior:** successful auto-compacts wait 5 minutes before re-arming; scopes that become eligible again inside the rapid re-arm window escalate to 15, 30, then 60 minute cooldowns. A compact still unfinished after 4 minutes releases the following dispatch and applies a 5-minute retry backoff, but retains its FIFO result-classification slot: a late compact result is still consumed as a system result and cannot steal the next user's inbound identity. `GET /health` exposes current aggregate state through `runtime.agent.autoCompactState`, `autoCompactActiveBackoffScopes`, and `autoCompactWorstCurrentBackoffTier`. It also preserves the process-lifetime diagnostics `autoCompactIneffective`, `autoCompactConsecutiveRapidRearmsMax`, and `autoCompactNextTurnOverThreshold`; those totals/maxima do not independently degrade current health. |
 | `allowM365Mutations` | boolean | no | `false` | Per-instance opt-in for propagating `ALLOW_M365_MUTATIONS` to the agent subprocess. Only consulted when `WHATSOUP_CONNECTOR_FAILCLOSED=1` is set on the parent process (off by default). See [Connector mutation policy (#411)](#connector-mutation-policy-411). |
 | `capabilityObligations` | object | no | — (inert) | Capability-obligation replay activation — all-or-inert, default OFF. Absent, or anything not exactly `enabled: true`, activates nothing. `enabled: true` requires a fully valid body — `contract` (versioned rule list: exact leading token, exact URL-host allowlist, declared prepared-media class), `mediaRoot`, `retentionPolicyVersion`, `retentionHorizonDays` (finite 1–365 media-retention horizon; A-08), `execution` (the resolver argv template — `command` array that MUST contain the `{source}` placeholder, `timeoutMs`, `minOutputBytes`, plus the EXPLICIT artifact declaration `resolverArtifactPath` (the code file whose content is hashed and executed) and `interpreted` (`true` ⇒ `command[0]` is an interpreter and the artifact is `command[1]`; `false` ⇒ `command[0]` is the artifact) — spawned shell-lessly by the trusted `execute_capability` tool, which re-verifies the artifact by realpath, refuses an `interpreted:false` mislabel of an interpreter (and in direct mode any token after the artifact that is a flag or does not embed `{source}` — round-21 finding 2, so `["-c","{source}"]` cannot run the source as code), requires an EXPLICIT interpreter PATH when `interpreted:true` (a bare `$PATH` name like `node` is unpinnable and refused at config LOAD) that is NOT writable by a different untrusted actor (world/group-writable, non-sticky — round-21 finding 1, since the interpreter is executed from its realpath not staged), and CONTENT-ADDRESSED STAGES the artifact's whole directory into a private root — re-hashing and executing the immutable COPY (round-20), so a post-attest rename or in-place write cannot substitute unverified bytes; the substituted source is refused if it begins with `-`. **The resolver artifact MUST live in an ISOLATED, symlink-free directory containing ONLY itself and its intentional siblings** — nothing else may be written next to it (no `.DS_Store`, editor swap file, `__pycache__`, log, db, or media) or the whole-directory manifest drifts and every drain fails closed with `resolver_digest_mismatch`), and `attestation` (expected skill name/version/digest, resolver digest — a COMPOSITE binding the artifact content, the whole-DIRECTORY manifest (artifact + every sibling), the INTERPRETER content, AND the canonical execution shape + envelope (`timeoutMs`/`minOutputBytes`), re-derived and re-compared at the drain seam so a post-attest content swap, sibling swap, interpreter swap, or shape/envelope change is refused — dependency versions, probe version, canary id) — validated at config load by `parseCapabilityObligationsOptions` (`src/core/capability-contract.ts`); a malformed enabled body is a startup `ConfigValidationError` (exit `EX_CONFIG`), never a partial activation. `per_chat` session scope only. |
+| `observability` | object | no | — (phase `off`) | Fleet Lifecycle Observability Standard dark flag. Closed shape with one key, `fleetLifecycle`: the promotion phase `off` \| `shadow` \| `alerting` \| `default` (design §11; `off` when the block or key is absent). Anything else — a boolean, a case variant, an unknown key inside the block — is a load-time `ConfigValidationError` (fail-closed, never a partial enable). Code behind the flag ships dark; every phase transition is a separate owner act per cohort with single-step rollback (one phase back). |
 | `nlRouting` | boolean | no | `false` | Flag-gates the NL-first routing aliases (`/model`, `/why`, `/reset`) and the per-sender route-preference store. Off = byte-identical base behavior: the three commands keep forwarding to the agent session and no preference table is created. Routing preference and visibility only — never tool or authority changes (capability-preserved routing). |
 | `nlRoutingTiers` | object | no | — | Intent→provider map for NL routing: `{ "strongest": "<provider-id>", "fastest": "<provider-id>" }`. Unset tiers resolve to the default route honestly (`/model strongest` records the preference and routing reports it as unmapped). |
 | `nlRoutingEventsDir` | string | no | per-instance config dir | Sink directory for the fail-closed `route-events.ndjson` sidecar (route metadata only — no message bodies, no raw sender JIDs; emit failure degrades to a warning and never blocks a turn). |
@@ -1406,12 +1454,14 @@ When deploying an instance config that uses `fallbackProvider` or `fallbacks` to
    </dict>
    ```
 
-   **launchd caveat:** generated plists emit only `PATH`/`HOME`/`TMPDIR`
-   (+`WHATSOUP_NODE`) in `EnvironmentVariables` (`buildPlist()`,
-   `src/fleet/platform.ts`) — there is no `EnvironmentFile` equivalent to the
-   systemd units' per-instance `tokens.env`, so a hand-added key in a
-   generated plist is LOST on the next `deploy:launchd.generated`
-   regeneration. On macOS prefer Route B: API-provider keys are read
+   **launchd caveat:** generated plists emit `PATH`/`HOME`/`TMPDIR`
+   (+`WHATSOUP_NODE`, and — when configured through the instance
+   [`service` block](#service-launchd-render-options) — `CLAUDE_CONFIG_DIR`
+   plus a `pathPrepend`-extended `PATH`) in `EnvironmentVariables`
+   (`buildPlist()`, `src/fleet/platform.ts`). There is no `EnvironmentFile`
+   equivalent to the systemd units' per-instance `tokens.env`, so a hand-added
+   key outside that governed set (e.g. a credential variable) is LOST on the
+   next `deploy:launchd.generated` regeneration. On macOS prefer Route B: API-provider keys are read
    in-process at request time, so the keychain entry alone is sufficient —
    no plist edit needed. Grant the service user's launchd context access to
    the item (`security add-generic-password -U …` under that user); keychain

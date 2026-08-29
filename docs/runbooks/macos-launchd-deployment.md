@@ -35,6 +35,11 @@ scope, no inherited broad environment for child providers, mode-restricted
 secret files, and posture checks that verify presence/absence without reading
 secret values.
 
+The instance `service` block (launchd render options) is writable through the
+fleet config `PATCH` route, so a fleet-token holder can steer the service
+`PATH` and claude config root that the next plist reconcile renders; treat
+fleet tokens with the same care as the plist itself.
+
 ## Shell PATH
 
 Interactive shells may not include Homebrew's bin path. Set it before running
@@ -166,6 +171,115 @@ scoped Keychain entry.
 
 Instances with `enabled: false` are skipped by fleet discovery but keep their
 config and auth state on disk.
+
+## Generated Render Options and Governed-Env Drift
+
+Generated instance plists render two config-owned environment surfaces from the
+instance `config.json` `service` block (schema:
+[docs/configuration.md](../configuration.md#service-launchd-render-options)):
+
+- `service.claudeConfigDir` → `CLAUDE_CONFIG_DIR` in `EnvironmentVariables`,
+  pointing the launchd service context at a dedicated claude-cli config root
+  (e.g. `$HOME/.claude-<instance>`). The block governs only which config root
+  the service resolves; credentials for that root stay keychain-resident and
+  are neither created nor copied by rendering.
+- `service.pathPrepend` → directories prepended, in order, ahead of the
+  generating shell's ambient `PATH` in the rendered service `PATH` (e.g.
+  `$HOME/.local/bin` so an opencode fallback binary resolves under launchd).
+
+Every render path — the first install after pairing and
+`reconcile-launchd-restart-policy` — resolves the block through the validated
+resolver (`src/fleet/launchd-render-options.ts`) and fails closed on an
+unreadable or invalid `config.json`. A missing `config.json` or absent block
+renders the historical byte-identical plist.
+
+### Checking governed-env drift
+
+The dry-run reconciler compares the fresh render against the installed plist on
+the governed keys (`CLAUDE_CONFIG_DIR`, `PATH`) by key and SHA-256 value digest.
+Installed bot plists carry live credentials, so values are never printed:
+
+```bash
+npm run reconcile-launchd-restart-policy -- --instance <instance>
+# governed env drift: CLAUDE_CONFIG_DIR missing expected=sha256:… observed=absent
+# governed env drift: PATH mismatch expected=sha256:… observed=sha256:…
+# governed env: PATH configured prefix satisfied; tail differs from this shell's PATH (expected=sha256:… observed=sha256:…) — --apply bakes this shell's PATH tail
+# installed plist has 2 non-governed EnvironmentVariables keys (MINIMAX_API_KEY, WHATSOUP_HEALTH_TOKEN) that --apply will drop
+# governed env: no drift            ← all-clear, printed only when there is nothing at all to report
+```
+
+`PATH` is read in two parts. The config-owned fact is whether the installed
+`PATH` starts with the configured `pathPrepend` entries; only an unsatisfied
+*configured* prefix is governed drift (`PATH mismatch`). The rest of the
+rendered `PATH` is the reconciling shell's own `PATH`, so a satisfied prefix
+with a differing tail is reported as "tail differs from this shell's PATH",
+not as drift — `npm run` adds `node_modules/.bin` directories and the
+pinned-node wrapper prepends its Node directory, so the tail legitimately
+varies by how you invoke the reconciler. `--apply` bakes the invoking
+shell's tail into the job. To keep the baked tail predictable, run the
+reconciler through the pinned-node wrapper from a clean login shell rather
+than from a nested `npm run` inside another tool's environment:
+
+```bash
+bash scripts/run-with-pinned-node.sh scripts/reconcile-launchd-restart-policy.ts --instance <instance>
+```
+
+The report also lists the *names* (never values) of installed non-governed
+`EnvironmentVariables` keys the re-render would delete from the job; while
+that list is non-empty no all-clear is printed and `--apply` refuses unless
+`--drop-non-governed-env` acknowledges the drop. An installed
+`EnvironmentVariables` dict that exists but cannot be parsed is reported
+fail-closed as drift and refuses `--apply` the same way, because its keys
+cannot be enumerated. `scripts/check-launchd-drift.sh` keeps its separate
+structural-only checks for bot plists; the governed-key comparison lives in
+the reconciler because only the render path knows the expected values.
+
+### Adopting a hand-patched PATH (or claude root) into config
+
+For a host whose bot plist was hand-patched — for example `$HOME/.local/bin`
+prepended to `PATH` so a fallback provider binary resolves, or a hand-added
+`CLAUDE_CONFIG_DIR` — make the patch config-owned so the next regeneration
+renders it instead of destroying it:
+
+1. Add the equivalent `service` block to
+   `~/.config/whatsoup/instances/<instance>/config.json`, using absolute paths
+   (the block does not expand `~`):
+
+   ```json
+   "service": {
+     "pathPrepend": ["/absolute/home-dir/.local/bin"]
+   }
+   ```
+
+2. Dry-run and read the governed-env report. Before the block exists the
+   hand-patch shows up as `PATH no pathPrepend configured; tail differs from
+   this shell's PATH`; once the block reproduces the hand-patched entries the
+   line becomes `PATH configured prefix satisfied`, which is the config-owned
+   fact you are after (the tail still differs until `--apply` re-bakes it):
+
+   ```bash
+   bash scripts/run-with-pinned-node.sh scripts/reconcile-launchd-restart-policy.ts --instance <instance>
+   ```
+
+3. Read the `installed plist has N non-governed EnvironmentVariables keys
+   (…) that --apply will drop` line of the same report. Reconciling
+   regenerates the whole plist, so every listed key (typically hand-added
+   credential variables) is destroyed by `--apply`. Move credentials to the
+   keychain ([Route B](../configuration.md#enabling-provider-fallback-on-a-new-host))
+   before applying; the reconciler refuses `--apply` while the list is
+   non-empty unless you pass `--drop-non-governed-env` to acknowledge the
+   drop explicitly.
+
+4. Apply with the usual bounded transaction, then run the acceptance gate from
+   [Generated-instance restart-policy migration](#generated-instance-restart-policy-migration):
+
+   ```bash
+   bash scripts/run-with-pinned-node.sh scripts/reconcile-launchd-restart-policy.ts --instance <instance> --apply
+   # add --drop-non-governed-env only after step 3 confirmed the listed keys are safe to drop
+   ```
+
+5. Re-run the dry-run: `governed env: no drift` confirms the hand-patch is now
+   rendered output owned by config and the baked tail matches this shell.
 
 ## BYOK Memory Migration
 

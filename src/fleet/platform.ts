@@ -15,6 +15,12 @@ import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { isValidInstanceName } from './instance-name.ts';
 import { escapeRegExp } from '../lib/regex-utils.ts';
+import {
+  assertValidLaunchdPlistRenderOptions,
+  type LaunchdPlistRenderOptions,
+} from '../lib/launchd-service-config.ts';
+import { resolveLaunchdPlistRenderOptions } from './launchd-render-options.ts';
+import { compareGovernedLaunchdEnv, type GovernedEnvComparison } from './launchd-env-drift.ts';
 import { repoRoot, tmpRoot, xdgDir } from './paths.ts';
 import { SIGNAL } from '../lib/signals.ts';
 
@@ -141,8 +147,13 @@ function assertExpectedGeneratedLaunchdPlist(name: string, contents: string): vo
  *
  * All interpolated values are XML-escaped to prevent injection via
  * PATH, home directory, or other environment-sourced strings.
+ *
+ * `renderOptions` is the typed instance-specific render input; callers resolve
+ * it from validated instance config (src/fleet/launchd-render-options.ts) —
+ * this function never reads config.json itself. Omitted options render
+ * byte-identical output to the historical no-options form.
  */
-export function buildPlist(name: string): string {
+export function buildPlist(name: string, renderOptions: LaunchdPlistRenderOptions = {}): string {
   assertValidLaunchdInstanceName(name);
   const xdgConfig = xdgDir('XDG_CONFIG_HOME', '.config');
   const logDir = path.join(xdgConfig, 'whatsoup', 'instances', name);
@@ -152,6 +163,7 @@ export function buildPlist(name: string): string {
   const envPath = process.env.PATH ?? (process.platform === 'darwin'
   ? '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin'
   : '/usr/local/bin:/usr/bin:/bin');
+  const servicePath = [...(renderOptions.pathPrepend ?? []), envPath].join(':');
   // env-allowed: host-level generating-shell platform detection; pre-instance by design
   const whatsoupNode = process.env.WHATSOUP_NODE;
 
@@ -194,11 +206,17 @@ export function buildPlist(name: string): string {
     '  <key>EnvironmentVariables</key>',
     '  <dict>',
     '    <key>PATH</key>',
-    `    <string>${escapeXml(envPath)}</string>`,
+    `    <string>${escapeXml(servicePath)}</string>`,
     '    <key>HOME</key>',
     `    <string>${escapeXml(os.homedir())}</string>`,
     '    <key>TMPDIR</key>',
     `    <string>${escapeXml(tmpDir)}</string>`,
+    ...(renderOptions.claudeConfigDir
+      ? [
+          '    <key>CLAUDE_CONFIG_DIR</key>',
+          `    <string>${escapeXml(renderOptions.claudeConfigDir)}</string>`,
+        ]
+      : []),
     ...(whatsoupNode
       ? [
           '    <key>WHATSOUP_NODE</key>',
@@ -215,6 +233,33 @@ export function buildPlist(name: string): string {
 export interface LaunchdReconcileOptions {
   /** Inspect the current plist and report the target without changing disk or launchd. */
   dryRun?: boolean;
+  /**
+   * Pre-resolved render options. When omitted, the instance's validated
+   * `service` config block is resolved via resolveLaunchdPlistRenderOptions —
+   * every render path goes through one resolution choke point so a configured
+   * governed environment cannot be silently dropped.
+   */
+  renderOptions?: LaunchdPlistRenderOptions;
+  /**
+   * Acknowledge that applying may delete installed non-governed
+   * EnvironmentVariables keys (or an unparseable dict whose keys cannot be
+   * enumerated). Without it, an apply that would do so is refused before any
+   * mutation. Ignored on dry runs.
+   */
+  dropNonGovernedEnv?: boolean;
+}
+
+/**
+ * Thrown before any mutation when an apply would delete installed
+ * EnvironmentVariables keys the render does not own (credential keys live
+ * there on the fleet) and the caller has not acknowledged the drop. The
+ * message carries key NAMES only and is safe to print verbatim.
+ */
+export class LaunchdReconcileRefusedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'LaunchdReconcileRefusedError';
+  }
 }
 
 export interface LaunchdReconcileResult {
@@ -222,6 +267,13 @@ export interface LaunchdReconcileResult {
   plistPath: string;
   priorPlistExisted: boolean;
   dryRun: boolean;
+  /**
+   * Governed-environment comparison between the fresh render and the
+   * previously installed plist (CLAUDE_CONFIG_DIR, PATH — by key and value
+   * digest, never values). Set on every successful reconcile, dry-run
+   * included.
+   */
+  governedEnvDrift?: GovernedEnvComparison;
 }
 
 function readExistingLaunchdPlist(filePath: string): string | null {
@@ -358,6 +410,25 @@ function throwLaunchdFailure(original: unknown, rollbackFailures: readonly unkno
 }
 
 /**
+ * Applying regenerates the whole plist, so every installed key the render
+ * does not own disappears from the job. Refuse — before any mutation — unless
+ * the caller acknowledged the drop; an unparseable installed dict is refused
+ * the same way because its keys cannot be enumerated.
+ */
+function refuseApplyThatDropsEnv(comparison: GovernedEnvComparison): void {
+  if (!comparison.comparable) {
+    throw new LaunchdReconcileRefusedError(
+      'installed plist has an unparseable EnvironmentVariables dict, so --apply cannot prove it drops no non-governed keys; pass --drop-non-governed-env to acknowledge',
+    );
+  }
+  const dropped = comparison.droppedNonGovernedKeys;
+  if (dropped.length === 0) return;
+  throw new LaunchdReconcileRefusedError(
+    `installed plist has ${dropped.length} non-governed EnvironmentVariables keys (${dropped.join(', ')}) that --apply will drop; pass --drop-non-governed-env to acknowledge`,
+  );
+}
+
+/**
  * Re-render and reload an existing macOS instance plist.
  *
  * A failed bootout is deliberately terminal rather than being guessed as an
@@ -376,20 +447,29 @@ export async function reconcileLaunchdPlist(
   }
   const dest = plistPath(name);
   const previousContents = readExpectedGeneratedLaunchdPlist(name, dest);
+  if (previousContents === null) {
+    throw new Error(`no existing launchd plist for ${launchdLabel(name)}`);
+  }
+  const renderOptions = options.renderOptions ?? resolveLaunchdPlistRenderOptions(name);
+  assertValidLaunchdPlistRenderOptions(renderOptions);
+  // Render once: the drift report always describes exactly the bytes an apply
+  // would install.
+  const rendered = buildPlist(name, renderOptions);
+  const governedEnvDrift = compareGovernedLaunchdEnv(rendered, previousContents, {
+    pathPrepend: renderOptions.pathPrepend,
+  });
   const result: LaunchdReconcileResult = {
     label: launchdLabel(name),
     plistPath: dest,
-    priorPlistExisted: previousContents !== null,
+    priorPlistExisted: true,
     dryRun: options.dryRun === true,
+    governedEnvDrift,
   };
-
-  if (previousContents === null) {
-    throw new Error(`no existing launchd plist for ${result.label}`);
-  }
   if (result.dryRun) return result;
+  if (options.dropNonGovernedEnv !== true) refuseApplyThatDropsEnv(governedEnvDrift);
 
   fs.mkdirSync(path.dirname(dest), { recursive: true });
-  writeAtomicLaunchdPlist(dest, buildPlist(name));
+  writeAtomicLaunchdPlist(dest, rendered);
 
   try {
     await bootoutLaunchdService(name);
@@ -413,10 +493,13 @@ export async function reconcileLaunchdPlist(
 
 /** Install a newly authenticated instance without loading any pre-auth job. */
 async function installLaunchdPlist(name: string): Promise<void> {
+  // Resolve (and thereby validate) the instance's render options before any
+  // filesystem mutation so an invalid service block aborts the install whole.
+  const renderOptions = resolveLaunchdPlistRenderOptions(name);
   const dest = plistPath(name);
   const previousContents = readExpectedGeneratedLaunchdPlist(name, dest);
   fs.mkdirSync(path.dirname(dest), { recursive: true });
-  writeAtomicLaunchdPlist(dest, buildPlist(name));
+  writeAtomicLaunchdPlist(dest, buildPlist(name, renderOptions));
 
   try {
     await bootstrapLaunchdService(name, dest);

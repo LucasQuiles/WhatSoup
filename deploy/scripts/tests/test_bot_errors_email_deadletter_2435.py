@@ -90,6 +90,10 @@ def _fallback_script(tmp_path: Path, exit_code: int) -> Path:
     return script
 
 
+# These tests exercise email-fallback MECHANICS under a pytest tmp root. The
+# provenance gate refuses email for any dispatcher rooted in a test tmp dir by
+# design (the 2026-08-28 leak's tell), so it is disabled here explicitly; the
+# gate itself is covered by test_bot_errors_email_fallback_test_provenance.py.
 def test_accepted_fallback_is_terminal_and_archived(tmp_path):
     """Accepted email -> True/email_delivered, archived to sent/, no leaks."""
     mod = _load_module({
@@ -101,6 +105,7 @@ def test_accepted_fallback_is_terminal_and_archived(tmp_path):
     fallback = _fallback_script(tmp_path, 0)
 
     with patch.object(mod, "send_whatsapp", side_effect=RuntimeError("send fails")), \
+         patch.object(mod, "email_fallback_blocked_reason", return_value=None), \
          patch.object(mod, "EMAIL_FALLBACK", str(fallback)):
         ok, detail = mod.process_one(event_path, paths)
 
@@ -125,6 +130,7 @@ def test_accepted_fallback_writes_dispatch_log(tmp_path):
     fallback = _fallback_script(tmp_path, 0)
 
     with patch.object(mod, "send_whatsapp", side_effect=RuntimeError("send fails")), \
+         patch.object(mod, "email_fallback_blocked_reason", return_value=None), \
          patch.object(mod, "EMAIL_FALLBACK", str(fallback)):
         mod.process_one(event_path, paths)
 
@@ -144,6 +150,7 @@ def test_failed_fallback_still_retries(tmp_path):
     fallback = _fallback_script(tmp_path, 1)
 
     with patch.object(mod, "send_whatsapp", side_effect=RuntimeError("send fails")), \
+         patch.object(mod, "email_fallback_blocked_reason", return_value=None), \
          patch.object(mod, "EMAIL_FALLBACK", str(fallback)):
         ok, detail = mod.process_one(event_path, paths)
 
