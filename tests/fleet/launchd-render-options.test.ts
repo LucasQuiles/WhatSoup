@@ -10,6 +10,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { resolveLaunchdPlistRenderOptions } from '../../src/fleet/launchd-render-options.ts';
+import { LaunchdRenderConfigError } from '../../src/lib/launchd-service-config.ts';
 
 const tempRoots: string[] = [];
 
@@ -90,5 +91,68 @@ describe('resolveLaunchdPlistRenderOptions', () => {
     const root = makeInstancesRoot();
 
     expect(() => resolveLaunchdPlistRenderOptions('../../outside', root)).toThrow('invalid instance name');
+  });
+
+  it('never embeds config.json content in a malformed-JSON error (parser source windows carry values)', () => {
+    const root = makeInstancesRoot();
+    const planted = 'PLANTED-VALUE-7c1d-must-not-leak';
+    writeConfig(root, 'phbot', `{"name":"phbot","chatOptions":{"providerKey": ${planted}}}`);
+
+    let thrown: unknown;
+    try {
+      resolveLaunchdPlistRenderOptions('phbot', root);
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(LaunchdRenderConfigError);
+    const message = (thrown as Error).message;
+    expect(message).toBe('malformed JSON in config.json for instance phbot');
+    expect(message).not.toContain(planted);
+  });
+
+  it('keeps validation-rule text verbatim as a printable render-config error', () => {
+    const root = makeInstancesRoot();
+    writeConfig(root, 'phbot', { name: 'phbot', service: { pathPrepend: ['relative/bin'] } });
+
+    expect(() => resolveLaunchdPlistRenderOptions('phbot', root)).toThrow(LaunchdRenderConfigError);
+    expect(() => resolveLaunchdPlistRenderOptions('phbot', root)).toThrow('service.pathPrepend[0]');
+  });
+
+  it('aborts on a dangling config.json symlink instead of rendering byte-compat', () => {
+    const root = makeInstancesRoot();
+    fs.mkdirSync(path.join(root, 'phbot'), { recursive: true });
+    fs.symlinkSync(path.join(root, 'nowhere.json'), path.join(root, 'phbot', 'config.json'));
+
+    expect(() => resolveLaunchdPlistRenderOptions('phbot', root)).toThrow(LaunchdRenderConfigError);
+    expect(() => resolveLaunchdPlistRenderOptions('phbot', root)).toThrow(/dangling symlink/);
+  });
+
+  it('aborts with a content-free, path-free message when config.json is unreadable (EACCES)', () => {
+    const root = makeInstancesRoot();
+    writeConfig(root, 'phbot', { name: 'phbot', service: { pathPrepend: ['/opt/service-bin'] } });
+    const file = path.join(root, 'phbot', 'config.json');
+    fs.chmodSync(file, 0o000);
+    try {
+      let thrown: unknown;
+      try {
+        resolveLaunchdPlistRenderOptions('phbot', root);
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBeInstanceOf(LaunchdRenderConfigError);
+      expect((thrown as Error).message).toMatch(/EACCES/);
+      expect((thrown as Error).message).not.toContain(root);
+    } finally {
+      fs.chmodSync(file, 0o600);
+    }
+  });
+
+  it('aborts when config.json is a directory (EISDIR)', () => {
+    const root = makeInstancesRoot();
+    fs.mkdirSync(path.join(root, 'phbot', 'config.json'), { recursive: true });
+
+    expect(() => resolveLaunchdPlistRenderOptions('phbot', root)).toThrow(LaunchdRenderConfigError);
+    expect(() => resolveLaunchdPlistRenderOptions('phbot', root)).toThrow(/EISDIR/);
   });
 });
