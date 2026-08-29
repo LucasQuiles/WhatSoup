@@ -587,6 +587,19 @@ incident. A valid database compatibility drain or terminal WhatsApp-auth state
 also suppresses restart but preserves any provider-credential marker; neither
 state is evidence that the primary provider recovered.
 
+Nor is a working credential proof of the *right* account. On claude-cli agent
+instances with `service.expectedAccountDigest` configured, the runtime reads
+its own service-context `claude auth status --json` on startup and on every
+primary-usability probe and reports the verdict as
+`runtime.agent.accountIdentity` (status classes and digest prefixes only).
+`credential_identity_mismatch` (critical) and `credential_identity_unverifiable`
+(warning) are alert sources and degradation causes with the reason twins
+`runtime.credential_identity_*`; neither is turn-provable, so a latched
+identity degradation releases only on a restart after the owner corrects the
+login. The runtime never heals, mirrors, or seeds a credential from this
+check — see
+[Ratified account identity](configuration.md#ratified-account-identity-serviceexpectedaccountdigest).
+
 ### Database Compatibility Startup Classification
 
 A valid database compatibility drain is distinct from an ordinary WhatsApp

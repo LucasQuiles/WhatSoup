@@ -41,9 +41,16 @@ export interface AccountAuthStatusDeps {
   env: NodeJS.ProcessEnv;
 }
 
-const AUTH_STATUS_ARGS = ['auth', 'status', '--json'];
+/** `claude auth status --json` — shared with the account-identity verifier
+ *  (claude-account-identity.ts) so both read the same CLI surface. */
+export const CLAUDE_AUTH_STATUS_ARGS: readonly string[] = ['auth', 'status', '--json'];
+const AUTH_STATUS_ARGS = [...CLAUDE_AUTH_STATUS_ARGS];
 
 /** Scrubbed env for the CLI probe — only what the binary needs to resolve auth. */
+export function scrubbedAuthStatusEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return scrubbedEnv(env);
+}
+
 function scrubbedEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return {
     HOME: env['HOME'],
