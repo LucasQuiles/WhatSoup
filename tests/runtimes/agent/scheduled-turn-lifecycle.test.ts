@@ -334,6 +334,7 @@ vi.mock('node:fs', async (importOriginal) => {
 import { Database } from '../../../src/core/database.ts';
 import { DurabilityEngine } from '../../../src/core/durability.ts';
 import { AgentRuntime, type AgentRuntimeOptions } from '../../../src/runtimes/agent/runtime.ts';
+import { __setRuntimeLifecycleEmitterForTests, type LifecycleEmitInput } from '../../../src/core/observability/lifecycle-emission.ts';
 import { TurnQueue } from '../../../src/runtimes/agent/turn-queue.ts';
 import { installFakePerChatMcpSocketManager } from './helpers/fake-per-chat-mcp-socket-manager.ts';
 
@@ -432,7 +433,7 @@ describe('scheduled agent-job turn lifecycle (#3374)', () => {
       title: 'Scholarship check',
       reportChatJid: groupJid,
     });
-    expect(ack.dispatched).toBe(true);
+    expect(ack.dispatched, ack.detail).toBe(true);
     const seqMatch = /inbound seq (\d+)/.exec(ack.detail ?? '');
     expect(seqMatch).not.toBeNull();
     const seq = Number(seqMatch![1]);
@@ -898,6 +899,60 @@ describe('scheduled agent-job turn lifecycle (#3374)', () => {
       await vi.waitFor(() => {
         expect(queueFor(workspaceKey)?.activeTurn ?? null).toBeNull();
       }, { timeout: 4_000 });
+    });
+  });
+
+  // ─── FLOS Stage 1 emission (plan §3) — the runtime emission seams ─────────
+
+  describe('FLOS Stage 1 lifecycle emission', () => {
+    let captured: LifecycleEmitInput[];
+
+    beforeEach(() => {
+      captured = [];
+      __setRuntimeLifecycleEmitterForTests({
+        enabled: true,
+        bootId: 'boot-test',
+        emit: (input) => {
+          captured.push(input);
+          return true;
+        },
+        close: () => {},
+      });
+      makeRuntime({ sessionScope: 'per_chat' });
+    });
+
+    afterEach(() => {
+      __setRuntimeLifecycleEmitterForTests(null);
+    });
+
+    it('a scheduled turn emits one L-SCH chain under its synthetic message id: admitted → dispatched → acknowledged → terminal_result → finalized', async () => {
+      const seq = dispatchScheduled('Check for a scholarship reply.', 23);
+      const session = await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
+      emitMidTurnToolDelivery(session);
+      emitTerminal(session);
+      await vi.waitFor(() => {
+        expect(captured.map((e) => e.phase)).toContain('finalized');
+      }, { timeout: 4_000 });
+
+      const schEvents = captured.filter((e) => e.lane === 'L-SCH');
+      expect(new Set(schEvents.map((e) => e.work_id)).size).toBe(1);
+      expect(schEvents.map((e) => e.phase)).toEqual([
+        'admitted', 'dispatched', 'acknowledged', 'terminal_result', 'finalized',
+      ]);
+      // Every event in the chain joins to its trigger_occurrences row (#2566).
+      for (const event of schEvents) {
+        expect(event.correlation?.['trigger_occurrence_id']).toBe('23');
+      }
+      expect(schEvents[0]!.correlation?.['inbound_seq']).toBe(seq);
+    });
+
+    it('an interactive turn emits L-INT admitted, terminal_result, and finalized under its inbound message id', async () => {
+      await driveInteractiveToComplete({ messageId: 'msg-flos-int-1' });
+      const intEvents = captured.filter((e) => e.lane === 'L-INT' && e.work_id === 'msg-flos-int-1');
+      const phases = intEvents.map((e) => e.phase);
+      expect(phases[0]).toBe('admitted');
+      expect(phases).toContain('terminal_result');
+      expect(phases[phases.length - 1]).toBe('finalized');
     });
   });
 });
