@@ -2710,7 +2710,10 @@ export class SessionManager {
         this.completeProviderTurn();
         this.active = false;
         this.child = null;
-        this.sessionId = null;
+        // sessionId is deliberately retained here, as on the clean path below:
+        // shutdown() retires it after durable closure (using the id it captured
+        // before the kill), so a re-activation that lands first still resumes
+        // the suspended provider session instead of starting cold.
         return;
       }
 
