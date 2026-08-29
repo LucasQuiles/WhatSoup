@@ -299,6 +299,11 @@ export class ToolRegistry {
   private turnCorrelationResolver:
     | ((conversationKey: string) => { logicalTurnId: string; inboundSeq: number | null } | null)
     | null = null;
+  // Issue 3150 registry layer: canonical conversation-key fold for the
+  // pre-handler cross-conversation guard. Null until installed (see
+  // setCanonicalConversationKeyResolver); the guard then falls back to bare
+  // toConversationKey, which can only err toward rejection.
+  private canonicalConversationKeyResolver: ((jid: string) => string) | null = null;
   // QR-017 / #1976: transient group tag applied by withModule() to any tool
   // registered inside the bracket. Set only for the synchronous span of a
   // withModule() call, so there is no cross-registration bleed. Pure taxonomy
@@ -465,6 +470,21 @@ export class ToolRegistry {
     resolver: (conversationKey: string) => { logicalTurnId: string; inboundSeq: number | null } | null,
   ): void {
     this.turnCorrelationResolver = resolver;
+  }
+
+  /**
+   * Issue 3150 registry layer: install the canonical conversation-key fold
+   * used by the pre-handler cross-conversation guard. Session conversation
+   * keys are stored PHONE-folded at ingest (QR-050), so a pinned global
+   * session addressing its OWN conversation by its mapped `@lid` JID must
+   * fold the same way — a bare `toConversationKey` yields the raw LID digits
+   * and falsely rejects the pin one layer above the handler's own fold.
+   * Installed by `registerMessagingTools`, which holds the db the fold needs;
+   * until then the guard falls back to `toConversationKey`, which can only
+   * err toward rejection — never toward admitting a foreign conversation.
+   */
+  setCanonicalConversationKeyResolver(resolver: (jid: string) => string): void {
+    this.canonicalConversationKeyResolver = resolver;
   }
 
   /** AS-04: any tool-durability write loss at or after `sinceMs`? */
@@ -693,10 +713,17 @@ export class ToolRegistry {
 
         // Cross-conversation guard: only enforced when session has a bound conversationKey
         // Alias targets are resolved inside the tool handler, then checked there.
+        // The caller JID is folded through the installed canonical resolver
+        // (issue 3150: `@lid` -> phone, matching ingest QR-050 keying) so a
+        // session addressing its own conversation by its `@lid` JID is not
+        // falsely rejected; foreign `@lid` JIDs fold to a different phone and
+        // still fail the comparison.
         if (session.conversationKey && hasCallerJid && !hasAliasTarget) {
           let resolved: string;
           try {
-            resolved = toConversationKey(callerJid);
+            resolved = this.canonicalConversationKeyResolver
+              ? this.canonicalConversationKeyResolver(callerJid)
+              : toConversationKey(callerJid);
           } catch {
             return reject(
               `Invalid chatJid "${callerJid}": must be a valid JID`,

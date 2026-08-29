@@ -400,6 +400,100 @@ describe('ToolRegistry', () => {
     expect(capturedChatJid).toBe('18001234567@s.whatsapp.net');
   });
 
+  // --- call: cross-conversation guard canonical fold (issue 3150) ---
+  // Session conversation keys are phone-folded at ingest (QR-050); the
+  // installed resolver folds an @lid caller JID the same way so a session
+  // addressing its OWN conversation by its @lid JID is admitted, while a
+  // foreign @lid (folding to a different phone) is still rejected. Without a
+  // resolver the guard keeps the bare toConversationKey comparison, covered
+  // by the two tests above.
+
+  it('folds the caller chatJid through the installed canonical-key resolver before the cross-conversation check (3150)', async () => {
+    let capturedChatJid: unknown;
+    registry.register(
+      makeTool({
+        name: 'injected_tool',
+        scope: 'chat',
+        targetMode: 'injected',
+        schema: z.object({ chatJid: z.string(), message: z.string() }),
+        handler: async (params) => {
+          capturedChatJid = params['chatJid'];
+          return 'ok';
+        },
+      }),
+    );
+    // Mirrors canonicalConversationKey: the session's own @lid folds onto the
+    // phone-keyed pin; the handler still receives the @lid JID untouched.
+    registry.setCanonicalConversationKeyResolver((jid) =>
+      jid === '11111110777@lid' ? '18001234567' : jid,
+    );
+
+    const session: SessionContext = {
+      tier: 'global',
+      conversationKey: '18001234567',
+    };
+    const result = await registry.call(
+      'injected_tool',
+      { chatJid: '11111110777@lid', message: 'hello' },
+      session,
+    );
+
+    expect(result.isError).toBeUndefined();
+    expect(capturedChatJid).toBe('11111110777@lid');
+  });
+
+  it('still rejects when the canonical-key resolver folds the chatJid to a foreign conversation (3150)', async () => {
+    registry.register(
+      makeTool({
+        name: 'injected_tool',
+        scope: 'chat',
+        targetMode: 'injected',
+        schema: z.object({ chatJid: z.string(), message: z.string() }),
+      }),
+    );
+    registry.setCanonicalConversationKeyResolver(() => '19995551234');
+
+    const session: SessionContext = {
+      tier: 'global',
+      conversationKey: '18001234567',
+    };
+    const result = await registry.call(
+      'injected_tool',
+      { chatJid: '11111110888@lid', message: 'hello' },
+      session,
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/does not match session conversation/);
+  });
+
+  it('rejects as invalid when the canonical-key resolver throws (3150, fail-closed)', async () => {
+    registry.register(
+      makeTool({
+        name: 'injected_tool',
+        scope: 'chat',
+        targetMode: 'injected',
+        schema: z.object({ chatJid: z.string(), message: z.string() }),
+      }),
+    );
+    registry.setCanonicalConversationKeyResolver(() => {
+      throw new Error('resolver blew up');
+    });
+
+    const session: SessionContext = {
+      tier: 'global',
+      conversationKey: '15551230777',
+    };
+    const result = await registry.call(
+      'injected_tool',
+      { chatJid: '15551230777@s.whatsapp.net', message: 'hello' },
+      session,
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/Invalid chatJid/);
+  });
+
   // --- call: caller-supplied tools ---
 
   it('calls a caller-supplied chat tool successfully', async () => {
