@@ -327,6 +327,18 @@ import {
 } from './shutdown-message-handler-drain.ts';
 import { ensureClaudeFileStoreCredential } from './providers/claude-filestore-heal.ts';
 import {
+  AccountIdentityVerifier,
+  type AccountIdentityProbeTrigger,
+  type AccountIdentityVerifierHost,
+  type AccountIdentityVerifyFn,
+} from './account-identity-verifier.ts';
+import {
+  accountIdentityDegradedReasons,
+  deriveAccountIdentityHealth,
+  type AccountIdentityHealth,
+  type AccountIdentityVerification,
+} from './providers/claude-account-identity.ts';
+import {
   resolveFallbackRecoveryDecision,
   type FallbackRecoveryEvidence,
   type FallbackRecoveryReceipt,
@@ -479,6 +491,16 @@ export interface AgentRuntimeOptions {
    */
   modelCatalogueListFn?: typeof listModelCatalog;
   modelCatalogueAnthropicFn?: typeof fetchAnthropicModelIdsWithStatus;
+  /**
+   * Ratified account-identity digest (`service.expectedAccountDigest`,
+   * task-21). When set, the runtime verifies the claude CLI's serving
+   * identity against it on startup and on every primary-usability probe and
+   * alerts on mismatch; it never writes a credential. null/undefined =
+   * verification disabled (one info note at the first probe).
+   */
+  expectedAccountDigest?: string | null;
+  /** Test seam for the identity verification (defaults to the real CLI probe). */
+  accountIdentityVerify?: AccountIdentityVerifyFn;
 }
 
 export type RuntimePrimaryModelUsability = PrimaryModelUsabilityResult & {
@@ -876,6 +898,13 @@ export class AgentRuntime implements Runtime {
   private lastDiagnosticBundleAt = 0;
   private primaryModelUsability: RuntimePrimaryModelUsability | null = null;
   private primaryModelUsabilityAlertActive = false;
+  /** Ratified account-identity digest; null = identity verification disabled (task-21). */
+  private readonly expectedAccountDigest: string | null;
+  /** Last identity verification result — runtime-owned so the health snapshot reads it directly. */
+  private accountIdentity: AccountIdentityVerification | null = null;
+  /** When the expectation was armed (construction); `never-verified` is judged from here. */
+  private readonly accountIdentityArmedAt: number | null;
+  private readonly accountIdentityVerifier: AccountIdentityVerifier;
   /** Consecutive empty PRIMARY-provider user turns; reset on any successful turn
    *  or when an empty-output fallback is armed. Drives the empty-output fallback
    *  trigger — see maybeArmFallbackAfterEmptyPrimaryTurn. */
@@ -2373,6 +2402,12 @@ export class AgentRuntime implements Runtime {
     this.serviceRestarter = options?.serviceRestarter;
     this.modelCatalogueListFn = options?.modelCatalogueListFn;
     this.modelCatalogueAnthropicFn = options?.modelCatalogueAnthropicFn;
+    this.expectedAccountDigest = options?.expectedAccountDigest ?? null;
+    this.accountIdentityArmedAt = this.expectedAccountDigest === null ? null : systemClock.now();
+    this.accountIdentityVerifier = new AccountIdentityVerifier(
+      this.createAccountIdentityVerifierHost(),
+      options?.accountIdentityVerify ? { verify: options.accountIdentityVerify } : {},
+    );
     this.workspaceSweeper = new WorkspaceSweeper(
       this.sandboxPerChat,
       this.workspaceResources,
@@ -2699,6 +2734,7 @@ export class AgentRuntime implements Runtime {
       emitRouteEventChecked: (ev) => runtime.emitRouteEventChecked(ev),
       capDedupeMap: (map, max) => runtime.capDedupeMap(map, max),
       getTurnCapability: () => runtime.getTurnCapability(),
+      verifyAccountIdentity: (trigger) => runtime.verifyAccountIdentity(trigger),
       scheduleFallbackReplay: (args) => runtime.scheduleFallbackReplay(args),
       notifyProviderFallbackActivated: (queue, activation, replay) =>
         runtime.notifyProviderFallbackActivated(queue, activation, replay),
@@ -2707,6 +2743,29 @@ export class AgentRuntime implements Runtime {
       deactivateProviderFallback: (reason, receipt) => runtime.deactivateProviderFallback(reason, receipt),
       schedulePostTransitionRouteRecycles: () => runtime.schedulePostTransitionRouteRecycles(),
     };
+  }
+
+  /**
+   * Host for the account-identity verifier (task-21): live getters, and the
+   * verification result as runtime-owned state so getHealthSnapshot reads it
+   * without a second copy.
+   */
+  private createAccountIdentityVerifierHost(): AccountIdentityVerifierHost {
+    const runtime = this;
+    return {
+      get instanceName() { return runtime.instanceName; },
+      get agentProvider() { return runtime.agentProvider; },
+      get expectedAccountDigest() { return runtime.expectedAccountDigest; },
+      get shutdownRequested() { return runtime.shutdownRequested; },
+      get accountIdentity() { return runtime.accountIdentity; },
+      set accountIdentity(value) { runtime.accountIdentity = value; },
+    };
+  }
+
+  /** Fire-and-forget identity verification after a usability probe settles
+   *  (the coordinator's seam); the verifier never rejects. */
+  private verifyAccountIdentity(trigger: AccountIdentityProbeTrigger): void {
+    void this.accountIdentityVerifier.run(trigger);
   }
 
   /**
@@ -6717,10 +6776,15 @@ export class AgentRuntime implements Runtime {
     // retry state, surfaced in BOTH health branches below.
     const pollPersistenceHealth = this.pollPersistence.healthDetails();
     const offlineDecisionRetry = this.offlineDecisionRetry.healthDetails();
+    // task-21: identity verdict as a status class (+ digest prefixes) and its
+    // companion degradedReason, pushed by both branches below.
+    const accountIdentity = this.accountIdentityHealth();
+    const accountIdentityReasons = accountIdentityDegradedReasons(accountIdentity);
     // Health-detail fields shared verbatim by both session-scope branches below.
     // Computed once here (all inputs are already in scope) and spread into each
     // branch's `details` at the same position, preserving key order and output.
     const sharedHealthDetails = {
+      accountIdentity,
       pollPersistenceErrors: this.pollPersistence.errors,
       pollPersistenceHealth,
       offlineDecisionRetry,
@@ -6786,6 +6850,7 @@ export class AgentRuntime implements Runtime {
       if (providerExecution.pressureActive) degradedReasons.push('provider_execution_pressure');
       if (pollPersistenceHealth.degraded) degradedReasons.push('poll_persistence_failure');
       if (offlineDecisionRetry.exhausted) degradedReasons.push('offline_decision_retry_exhausted');
+      degradedReasons.push(...accountIdentityReasons);
       const healthStatus: RuntimeHealth['status'] = degradedReasons.length > 0 ? 'degraded' : 'healthy';
       return {
         status: healthStatus,
@@ -6815,6 +6880,7 @@ export class AgentRuntime implements Runtime {
     if (poisonHealth.outboundQueuePoisoned) degradedReasons.push('outbound_queue_poisoned');
     if (pollPersistenceHealth.degraded) degradedReasons.push('poll_persistence_failure');
     if (offlineDecisionRetry.exhausted) degradedReasons.push('offline_decision_retry_exhausted');
+    degradedReasons.push(...accountIdentityReasons);
     // A halted single/shared queue is the active admission path — unhealthy/503,
     // matching the public-surface contract; every other reason degrades only.
     const healthStatus: RuntimeHealth['status'] =
@@ -8366,6 +8432,18 @@ export class AgentRuntime implements Runtime {
         checkedAt: this.primaryModelUsability?.checkedAt ?? null,
       },
     );
+  }
+
+  /** Freshness-honest identity verdict for /health, judged against the same
+   *  window as model usability (the identity check rides the same probe). */
+  private accountIdentityHealth(): AccountIdentityHealth {
+    return deriveAccountIdentityHealth({
+      expectedConfigured: this.expectedAccountDigest !== null,
+      verification: this.accountIdentity,
+      armedAtMs: this.accountIdentityArmedAt,
+      nowMs: systemClock.now(),
+      freshnessMs: this.modelUsabilityFreshnessMs(),
+    });
   }
 
   private getTurnCapability(): RuntimeTurnCapability {

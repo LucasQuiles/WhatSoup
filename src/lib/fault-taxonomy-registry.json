@@ -127,6 +127,8 @@
         "delivery_identity_debt",
         "provider_execution_pressure",
         "agent_outbound_queue_poisoned",
+        "credential_identity_mismatch",
+        "credential_identity_unverifiable",
         "agent_runtime_degraded_unclassified",
         "agent_runtime_unhealthy",
         "unclassified",
@@ -873,6 +875,22 @@
         "clearPredicate": "cause absent from the next accepted health body degradation vector",
         "requiresCorroborationBeforePaging": false
       },
+      "credential_identity_mismatch": {
+        "family": "credential_identity",
+        "impactTier": "page",
+        "notification": "critical",
+        "rootOwner": "agent_account_identity_verifier",
+        "clearPredicate": "a fresh service-context identity verification matches the ratified digest after the owner corrects the login or re-ratifies; a latched reason releases only on restart, never on a turn (a turn cannot prove identity); no automatic credential write",
+        "requiresCorroborationBeforePaging": false
+      },
+      "credential_identity_unverifiable": {
+        "family": "credential_identity",
+        "impactTier": "hold",
+        "notification": "warning",
+        "rootOwner": "agent_account_identity_verifier",
+        "clearPredicate": "a fresh service-context identity verification matches the ratified digest; an unverifiable receipt never self-clears by silence and is never treated as a match; no automatic credential write",
+        "requiresCorroborationBeforePaging": false
+      },
       "agent_session_inactive": {
         "family": "agent_runtime",
         "impactTier": "page",
@@ -1409,6 +1427,16 @@
       "disposition": "trigger_retired_after_bounded_forbidden_rejects_requires_producer_rearm",
       "owner": "src/core/substrate/poller.ts",
       "test": "tests/core/substrate/poller-forbidden-target.test.ts"
+    },
+    "credential_identity_mismatch": {
+      "disposition": "ratified_identity_mismatch_requires_owner_login_repair_or_reratification_no_automatic_credential_write",
+      "owner": "src/runtimes/agent/account-identity-verifier.ts",
+      "test": "tests/runtimes/agent/account-identity-verifier.test.ts"
+    },
+    "credential_identity_unverifiable": {
+      "disposition": "identity_receipt_unverifiable_fail_closed_until_fresh_match_no_automatic_credential_write",
+      "owner": "src/runtimes/agent/account-identity-verifier.ts",
+      "test": "tests/runtimes/agent/account-identity-verifier.test.ts"
     }
   }
 }

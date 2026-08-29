@@ -72,6 +72,7 @@
     "guard:branch-protection-drift": "gh api repos/LucasQuiles/WhatSoup/branches/main/protection | bash scripts/run-with-pinned-node.sh scripts/branch-protection-drift-check.ts --observed -",
     "guard:branch-retirement": "bash scripts/run-with-pinned-node.sh scripts/branch-retirement.ts",
     "reconcile-launchd-restart-policy": "bash scripts/run-with-pinned-node.sh scripts/reconcile-launchd-restart-policy.ts",
+    "claude-account-digest": "bash scripts/run-with-pinned-node.sh scripts/claude-account-digest.ts",
     "guard:hardcoded-tmpdir": "bash scripts/run-with-pinned-node.sh scripts/check-hardcoded-tmpdir.ts",
     "guard:fleet-bot-hardening-parity": "bash scripts/run-with-pinned-node.sh scripts/check-fleet-bot-hardening-parity.ts",
     "guard:observation-contract": "bash scripts/run-with-pinned-node.sh scripts/observation-contract-guard.ts",

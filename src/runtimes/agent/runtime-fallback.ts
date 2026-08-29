@@ -244,6 +244,10 @@ export interface RuntimeFallbackPort {
   emitRouteEventChecked(ev: Omit<ModelRouteEvent, 'ts' | 'instance' | 'chatScope' | 'authority'>): void;
   capDedupeMap(map: Map<string, unknown>, max?: number): void;
   getTurnCapability(): RuntimeTurnCapability;
+  /** task-21: verify the ratified account identity after a usability probe
+   *  settles (startup / periodic / manual). Optional so hand-built hosts in
+   *  older suites keep compiling; the runtime always supplies it. */
+  verifyAccountIdentity?(trigger: 'startup' | 'manual' | 'periodic'): void;
   scheduleFallbackReplay(args: {
     activation: ProviderFallbackActivation;
     chatJid: string;
@@ -2079,7 +2083,11 @@ export class RuntimeFallbackCoordinator {
           model: target.model,
           reason: 'probe-threw',
         }, trigger);
-      });
+      })
+      // task-21: the identity check rides this seam (no poller of its own) and
+      // runs after the usability result is recorded, whichever way it went —
+      // the verifier owns its own shutdown drop and never rejects.
+      .then(() => { this.host.verifyAccountIdentity?.(trigger); });
   }
 
   scheduleNextPeriodicUsabilityProbe(): void {

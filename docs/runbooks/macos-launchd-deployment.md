@@ -281,6 +281,40 @@ renders it instead of destroying it:
 5. Re-run the dry-run: `governed env: no drift` confirms the hand-patch is now
    rendered output owned by config and the baked tail matches this shell.
 
+### Ratified account identity in the service context
+
+A dedicated `service.claudeConfigDir` root isolates *which* config the
+service resolves; it does not prove *whose* account the claude CLI is serving
+with there. Credentials for that root stay keychain-resident and CLI-managed
+(observed live: a token refresh moved the credential into the login keychain
+the gui-domain service reads). The verify-only pin
+`service.expectedAccountDigest`
+([schema and capture procedure](../configuration.md#ratified-account-identity-serviceexpectedaccountdigest))
+closes that gap without any credential write:
+
+- Capture the digest **in the service's own config-root context**, not in a
+  cold SSH shell — an SSH login shell resolves its own keychain session and
+  its own `CLAUDE_CONFIG_DIR`, so its `claude auth status` describes the SSH
+  context, not the launchd job:
+
+  ```bash
+  CLAUDE_CONFIG_DIR=/absolute/claude-root npm run claude-account-digest
+  ```
+
+  The command prints one opaque `sha256:` line and nothing else. Never paste
+  `claude auth status --json` output into a shared log; it carries the raw
+  email and organization id.
+- After the plist is (re)loaded, the runtime verifies the identity at startup
+  and on every primary-usability probe. Confirm with authenticated
+  `GET /health`: `runtime.agent.accountIdentity.status` must read `match`.
+  `mismatch` pages `credential_identity_mismatch` (critical);
+  `unverifiable` pages `credential_identity_unverifiable` (warning) and is
+  never a match. Both degrade health with the same-named cause.
+- Correcting a mismatch is an owner action in the GUI/launchd context (the
+  keychain-session hazard above applies), followed by a restart: the identity
+  reasons are not turn-provable, so a silence-latched identity degradation
+  clears only on restart, never on a passing turn.
+
 ## BYOK Memory Migration
 
 Memory and search settings are canonical under `memory` in `config.json`.

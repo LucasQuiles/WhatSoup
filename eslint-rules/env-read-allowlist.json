@@ -172,6 +172,11 @@
       "reason": "child-env builder: explicit allow-list, not passthrough \u2014 highest-leak-risk seam."
     },
     {
+      "file": "src/runtimes/agent/providers/claude-account-identity.ts",
+      "allowedUnmarkedSites": 1,
+      "reason": "`deps.env ?? process.env` DI seam for the read-only identity probe (task-21); scrubbed to the auth-status allow-list (HOME/PATH/USER/NO_COLOR/CLAUDE_CONFIG_DIR) before spawn, never forwarded whole — same seam shape as claude-filestore-heal.ts."
+    },
+    {
       "file": "src/runtimes/agent/providers/claude-filestore-heal.ts",
       "allowedUnmarkedSites": 2,
       "reason": "VITEST/NODE_ENV detection + `deps.env ?? process.env` DI seam."
