@@ -139,17 +139,35 @@ export async function executeBridgeTool(
 /**
  * Create a provider-native MCP bridge backed by WhatSoup's in-process registry.
  * Used by managed-loop HTTP providers to advertise and execute tools directly.
+ *
+ * #2976 residual: the stored `session` object is the long-lived per-session MCP
+ * context. Its `actorJid` was written per turn (updateMcpActorJid) and never
+ * cleared, so a subsequent actor-less turn on the same managed-loop session
+ * would authorize/attribute as the previous sender. This is the in-process
+ * sibling of the global-socket read-time resolver from #3389: take a
+ * per-request SessionContext snapshot and override `actorJid` from the
+ * read-time `resolveActor` resolver (the executing-turn register) so the raw
+ * stored object never reaches listTools/call. Missing/unresolvable actor stays
+ * undefined -> the registry's R1 sensitive-tool gate denies fail-closed.
+ * Mirrors socket-server.ts:238-243 (QR-042 per-request snapshot + resolver
+ * override). When no resolver is supplied the stored session is used verbatim
+ * (unchanged behavior for callers that manage identity themselves).
  */
 export function createProviderMcpBridge(
   registry: ToolRegistry,
   session: SessionContext,
+  resolveActor?: () => string | undefined,
 ): ProviderMcpBridge {
+  const snapshotSession = (): SessionContext =>
+    resolveActor === undefined
+      ? session
+      : { ...session, actorJid: resolveActor() };
   return {
     listTools(): ProviderMcpTool[] {
-      return registry.listTools(session);
+      return registry.listTools(snapshotSession());
     },
     async executeTool(name: string, params: Record<string, unknown>): Promise<ProviderMcpToolResult> {
-      return normalizeToolResult(await registry.call(name, params, session));
+      return normalizeToolResult(await registry.call(name, params, snapshotSession()));
     },
   };
 }

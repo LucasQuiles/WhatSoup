@@ -304,6 +304,8 @@ import {
   writeProviderMcpConfigTarget,
 } from './providers/mcp-bridge.ts';
 import {
+  executionModeForProvider,
+  isProviderId,
   providerUsesWhatSoupMcp,
   requiresPerChatActorSocket,
 } from './providers/index.ts';
@@ -5249,6 +5251,10 @@ export class AgentRuntime implements Runtime {
       return;
     }
     let actorPushed = false;
+    // Hoisted so the dispatch-failure retirement (removeFailedExecutingActor)
+    // shifts the SAME register key the provider boundary pushed onto — the two
+    // must never drift.
+    let pushedExecScopeKey: string | undefined;
     const onProviderBoundaryReady = (): void => {
       if (dispatchCancelled()) {
         throw new Error('TURN_RECOVERY_DISPATCH_TARGET_SUPERSEDED');
@@ -5258,8 +5264,15 @@ export class AgentRuntime implements Runtime {
       // Publish actor and typing evidence only when provider execution begins.
       // #2976: single/shared turns publish into the SAME executing-actor
       // register under GLOBAL_TOOL_SCOPE_KEY — the global socket's read-time
-      // resolver (resolveExecutingGlobalActor) is its only consumer.
-      const execScopeKey = this.sessionUsesPerChatActorSocket(session) && effectiveMapKey !== undefined
+      // resolver (resolveExecutingGlobalActor) reads it. per_chat sessions that
+      // ride a per-chat actor socket publish under their mapKey; #2976 residual:
+      // per_chat managed-loop (API) sessions have no socket but serve tools
+      // through the in-process bridge, so they publish under the mapKey too, and
+      // resolveBridgeActor resolves it read-time.
+      const usesPerChatActorRegister =
+        this.sessionUsesPerChatActorSocket(session)
+        || (this.sessionScope === 'per_chat' && this.sessionUsesInProcessBridge(session));
+      const execScopeKey = usesPerChatActorRegister && effectiveMapKey !== undefined
         ? effectiveMapKey
         : (this.sessionScope !== 'per_chat' ? GLOBAL_TOOL_SCOPE_KEY : undefined);
       if (execScopeKey !== undefined) {
@@ -5268,6 +5281,7 @@ export class AgentRuntime implements Runtime {
         execQ.push(actorJid);
         this.perChatExecActorQueue.set(execScopeKey, execQ);
         actorPushed = true;
+        pushedExecScopeKey = execScopeKey;
         if (systemTurnLease) {
           this.systemTurnExecActors.set(systemTurnLease.id, {
             scopeKey: execScopeKey,
@@ -5288,9 +5302,9 @@ export class AgentRuntime implements Runtime {
         : withProviderApplicationContext(userTurnText, contextPreamble);
       await dispatchProviderTurn(session, turnInput, onProviderBoundaryReady);
     } catch (err) {
-      if (actorPushed) {
+      if (actorPushed && pushedExecScopeKey !== undefined) {
         this.removeFailedExecutingActor(
-          this.sessionScope !== 'per_chat' ? GLOBAL_TOOL_SCOPE_KEY : effectiveMapKey!,
+          pushedExecScopeKey,
           actorJid,
           systemTurnLease,
         );
@@ -8061,6 +8075,35 @@ export class AgentRuntime implements Runtime {
     return providerUsesWhatSoupMcp(provider);
   }
 
+  /**
+   * #2976 residual: managed-loop (API) providers advertise/execute WhatSoup
+   * tools through the in-process provider MCP bridge (createProviderMcpBridge),
+   * never a stdio-proxy socket. They therefore never wire a per-chat actor
+   * socket, so in per_chat scope their executing turn's actor was NOT published
+   * to the actor register — the bridge fell back to the stored session's stale
+   * actorJid. Detect the bridge sessions so the provider boundary publishes
+   * their actor into the same per-chat register (retired by the coordinator
+   * post-effects seam) and resolveBridgeActor can resolve it read-time.
+   */
+  private sessionUsesInProcessBridge(session: SessionManager): boolean {
+    const provider = session.getProviderId();
+    return isProviderId(provider) && executionModeForProvider(provider) === 'managed_loop';
+  }
+
+  /**
+   * #2976 residual: read-time actor resolver for the in-process provider MCP
+   * bridge (managed-loop providers), the sibling of resolveExecutingGlobalActor
+   * used by the global socket. per_chat scope reads the per-chat executing-actor
+   * register (re-derives the mapKey each call, transparent to LID rekey);
+   * shared/single reads the GLOBAL register. Fail-closed to undefined when no
+   * turn executes, which the R1 sensitive-tool gate denies.
+   */
+  private resolveBridgeActor(chatJid: string): string | undefined {
+    return this.sessionScope === 'per_chat'
+      ? this.resolveExecutingActor(chatJid)
+      : this.resolveExecutingGlobalActor();
+  }
+
   private wirePerChatActorSocket(chatJid: string, provider: string, mapKeyOverride?: string):
     | { mcpSocketPath?: string; providerTransitionReady: Promise<void> }
     | undefined {
@@ -9299,7 +9342,11 @@ export class AgentRuntime implements Runtime {
       providerConfig: opts.providerConfigOverride
         ? { ...(route ? this.routeSessionProviderConfig(route) : this.sessionProviderConfig()), ...opts.providerConfigOverride }
         : (route ? this.routeSessionProviderConfig(route) : this.sessionProviderConfig()),
-      mcpBridge: createProviderMcpBridge(this.registry, providerToolSession),
+      mcpBridge: createProviderMcpBridge(
+        this.registry,
+        providerToolSession,
+        () => this.resolveBridgeActor(opts.chatJid),
+      ),
       mcpSessionContext: providerToolSession,
       whatsoupInstance: this.instanceName,
       whatsoupMcpSocket: mcpSocketPath ?? this.globalMcpSocketPath ?? undefined,

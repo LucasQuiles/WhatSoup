@@ -76,6 +76,17 @@ export type { RuntimeTurnCompletion } from './runtime-turn-completion.ts';
 const log = createChildLogger('agent-runtime');
 export const RUNTIME_TURN_SHUTDOWN_FINALIZATION_TIMEOUT_MS = 2_000;
 
+/**
+ * #2976 residual: retire the turn's actor from a session's stored MCP conduit
+ * at turn end. Optional-called (like updateSessionActorJid in runtime.ts) so a
+ * partial session double that omits the method is a safe no-op; the real
+ * SessionManager always implements clearMcpActorJid.
+ */
+function clearSessionMcpActor(session: SessionManager | null | undefined): void {
+  (session as (SessionManager & { clearMcpActorJid?: () => void }) | null | undefined)
+    ?.clearMcpActorJid?.();
+}
+
 export interface RuntimeTurnSourceSnapshot {
   readonly sourceMessageId: string;
   readonly receivedAtUnixSeconds: number;
@@ -1788,6 +1799,11 @@ async applyRuntimeTurnPostEffects(
         seqs?.shift();
         if (seqs?.length === 0) this.host.perChatInboundSeqQueue.delete(mapKey);
         this.host.perChatExecActorQueue.get(mapKey)?.shift();
+        // #2976 residual: retire the turn's actor from the per-chat session's
+        // stored MCP conduit at the same seam the executing-actor register is
+        // retired, so it cannot linger onto the next turn. Optional-called like
+        // updateSessionActorJid (runtime.ts) — partial session doubles omit it.
+        clearSessionMcpActor(this.host.chatSessions.get(mapKey));
       }
       this.host.perChatRuntimeTurnScopeRefs.delete(context.identity.logicalTurnId);
       ledger.fifoAdvanced = true;
@@ -1838,6 +1854,10 @@ async applyRuntimeTurnPostEffects(
       // never pushed, so nothing to shift there).
       if (!postEffects.admissionRejected) {
         this.host.perChatExecActorQueue.get(GLOBAL_CONVERSATION_KEY)?.shift();
+        // #2976 residual: retire the turn's actor from the shared/single
+        // session's stored MCP conduit at the same seam, so it cannot linger
+        // onto the next turn (the in-process bridge reads it defensively).
+        clearSessionMcpActor(this.host.session);
       }
       ledger.fifoAdvanced = true;
     }
