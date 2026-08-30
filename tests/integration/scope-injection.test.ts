@@ -12,7 +12,7 @@
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import { Database } from '../../src/core/database.ts';
-import { ToolRegistry } from '../../src/mcp/registry.ts';
+import { ToolRegistry } from '../helpers/resolved-tool-registry.ts';
 import { registerChatOperationTools } from '../../src/mcp/tools/chat-operations.ts';
 import { registerMessagingTools, type MessagingDeps } from '../../src/mcp/tools/messaging.ts';
 import { registerGroupTools } from '../../src/mcp/tools/groups.ts';

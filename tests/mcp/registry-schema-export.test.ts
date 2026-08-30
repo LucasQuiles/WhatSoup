@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { z } from 'zod';
-import { ToolRegistry } from '../../src/mcp/registry.ts';
+import { ToolRegistry } from '../helpers/resolved-tool-registry.ts';
 import type { ToolDeclaration, SessionContext } from '../../src/mcp/types.ts';
 
 // Regression guard for the tools/list export: the MCP contract requires every tool's

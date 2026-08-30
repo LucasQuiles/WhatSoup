@@ -3,7 +3,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { DatabaseSync } from 'node:sqlite';
 import { Database } from '../../../src/core/database.ts';
-import { ToolRegistry } from '../../../src/mcp/registry.ts';
+import { ToolRegistry } from '../../helpers/resolved-tool-registry.ts';
 import { registerMessagingTools, type MessagingDeps, type PollRegistrar } from '../../../src/mcp/tools/messaging.ts';
 import { createProfileRegistry } from '../../../src/core/profiles.ts';
 import { createOutboundSendsWriter } from '../../../src/core/outbound-sends.ts';

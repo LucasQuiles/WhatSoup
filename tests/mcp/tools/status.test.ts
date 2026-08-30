@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { Database } from '../../../src/core/database.ts';
-import { ToolRegistry } from '../../../src/mcp/registry.ts';
+import { ToolRegistry } from '../../helpers/resolved-tool-registry.ts';
 import { registerStatusTools } from '../../../src/mcp/tools/status.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
 import type { WhatsAppSocket } from '../../../src/transport/connection.ts';

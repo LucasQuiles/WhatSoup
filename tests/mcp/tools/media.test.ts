@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { writeFileSync, mkdirSync, symlinkSync, unlinkSync, rmdirSync, existsSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
-import { ToolRegistry } from '../../../src/mcp/registry.ts';
+import { ToolRegistry } from '../../helpers/resolved-tool-registry.ts';
 import { registerMediaTools, type MediaDeps } from '../../../src/mcp/tools/media.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
 import { Database } from '../../../src/core/database.ts';

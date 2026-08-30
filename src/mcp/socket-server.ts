@@ -9,7 +9,9 @@ import { type Clock, systemClock } from '../lib/clock.ts';
 import type { ToolRegistry } from './registry.ts';
 import {
   makeConversationBinding,
+  resolveSessionContext,
   type ExecutingSessionContext,
+  type ResolvedSessionContext,
   type SessionContext,
 } from './types.ts';
 
@@ -233,10 +235,12 @@ export class WhatSoupSocketServer {
           // admin-gated tool reading actorJid (it could observe the wrong turn's actor).
           // A shallow per-request copy pins those fields at dispatch time; the live
           // abortSignal is preserved by reference so client-disconnect still aborts.
-          const requestSession: SessionContext = { ...connSession };
           // Dynamic authorization fields are pinned to the executing turn.
           // Explicit undefined values overwrite stale base-session values.
-          Object.assign(requestSession, this.executingSessionResolver());
+          const requestSession = resolveSessionContext(
+            connSession,
+            this.executingSessionResolver(),
+          );
           void this.handleRequest(req, requestSession).then((response) => {
             if (response !== null) {
               writeResponse(response, 'failed to write response');
@@ -468,7 +472,10 @@ export class WhatSoupSocketServer {
     }
   }
 
-  private async handleRequest(req: JsonRpcRequest, session: SessionContext): Promise<JsonRpcResponse | null> {
+  private async handleRequest(
+    req: JsonRpcRequest,
+    session: ResolvedSessionContext,
+  ): Promise<JsonRpcResponse | null> {
     const id = req.id ?? null;
 
     try {

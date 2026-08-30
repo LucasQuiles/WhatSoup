@@ -6,7 +6,7 @@ import { ToolRegistry } from '../src/mcp/registry.ts';
 import { PresenceCache } from '../src/transport/presence-cache.ts';
 import { registerAllTools } from '../src/mcp/register-all.ts';
 import type { ConnectionManager } from '../src/transport/connection.ts';
-import type { SessionContext } from '../src/mcp/types.ts';
+import { resolveSessionContext, type SessionContext } from '../src/mcp/types.ts';
 
 function makeConnection(): ConnectionManager {
   return {
@@ -37,17 +37,23 @@ const boundSession: SessionContext = {
   binding: { kind: 'conversation-bound', conversationKey: 'k@s.whatsapp.net', deliveryJid: 'k@s.whatsapp.net' } as never,
 };
 
-const g = registry.listTools(globalSession);
-const c = registry.listTools(chatSession);
-const b = registry.listTools(boundSession);
+const resolved = (session: SessionContext) => resolveSessionContext(session, {
+  actorJid: session.actorJid,
+  purpose: session.purpose,
+  conversationKey: session.conversationKey,
+});
+
+const g = registry.listTools(resolved(globalSession));
+const c = registry.listTools(resolved(chatSession));
+const b = registry.listTools(resolved(boundSession));
 
 // Second pass: gate ON (memory_write registers) — a fresh registry.
 process.env.PINECONE_API_KEY = hadKey ?? 'probe-dummy-key';
 (cfgMod.config as { pineconeIndex?: string }).pineconeIndex = hadIndex ?? 'probe-index';
 const registry2 = new ToolRegistry();
 registerAllTools(registry2, makeConnection(), db);
-const c2 = registry2.listTools(chatSession);
-const b2 = registry2.listTools(boundSession);
+const c2 = registry2.listTools(resolved(chatSession));
+const b2 = registry2.listTools(resolved(boundSession));
 
 console.log(JSON.stringify({
   gateOff: {

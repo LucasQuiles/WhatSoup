@@ -3,10 +3,11 @@
 // converts MCP tool definitions to API function-calling formats for API providers.
 
 import type { ToolRegistry } from '../../../mcp/registry.ts';
-import type {
-  ExecutingSessionContext,
-  SessionContext,
-  ToolCallResult,
+import {
+  resolveSessionContext,
+  type ExecutingSessionContext,
+  type SessionContext,
+  type ToolCallResult,
 } from '../../../mcp/types.ts';
 import { createChildLogger } from '../../../logger.ts';
 import {
@@ -157,7 +158,7 @@ export function createProviderMcpBridge(
   session: SessionContext,
   resolveExecutingSession: () => ExecutingSessionContext,
 ): ProviderMcpBridge {
-  const snapshotSession = (): SessionContext => ({ ...session, ...resolveExecutingSession() });
+  const snapshotSession = () => resolveSessionContext(session, resolveExecutingSession());
   return {
     listTools(): ProviderMcpTool[] {
       return registry.listTools(snapshotSession());

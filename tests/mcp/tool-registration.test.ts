@@ -3,7 +3,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { Database } from '../../src/core/database.ts';
-import { ToolRegistry } from '../../src/mcp/registry.ts';
+import { ToolRegistry } from '../helpers/resolved-tool-registry.ts';
 import { PresenceCache } from '../../src/transport/presence-cache.ts';
 import { registerMessagingTools } from '../../src/mcp/tools/messaging.ts';
 import { registerMediaTools } from '../../src/mcp/tools/media.ts';

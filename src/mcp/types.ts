@@ -82,6 +82,21 @@ export type ExecutingSessionContext = Pick<
   'actorJid' | 'purpose' | 'conversationKey'
 >;
 
+declare const resolvedSessionContextBrand: unique symbol;
+
+/** A request-local session whose mutable authorization fields were resolved read-time. */
+export type ResolvedSessionContext = SessionContext & {
+  readonly [resolvedSessionContextBrand]: true;
+};
+
+/** The sole production constructor for registry-authorized session snapshots. */
+export function resolveSessionContext(
+  session: SessionContext,
+  executing: ExecutingSessionContext,
+): ResolvedSessionContext {
+  return { ...session, ...executing } as ResolvedSessionContext;
+}
+
 /** Explicit fail-closed resolver for surfaces that never execute agent turns. */
 export function noExecutingSession(): ExecutingSessionContext {
   return { actorJid: undefined, purpose: undefined, conversationKey: undefined };

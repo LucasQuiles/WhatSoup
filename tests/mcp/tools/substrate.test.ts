@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { Database } from '../../../src/core/database.ts';
-import { ADMIN_REQUIRED_DENIAL, ToolRegistry } from '../../../src/mcp/registry.ts';
+import { ADMIN_REQUIRED_DENIAL, ToolRegistry } from '../../helpers/resolved-tool-registry.ts';
 import { registerSubstrateTools } from '../../../src/mcp/tools/substrate.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
 import { createBead, getBead } from '../../../src/core/substrate/beads.ts';

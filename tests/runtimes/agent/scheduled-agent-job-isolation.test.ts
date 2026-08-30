@@ -3,7 +3,7 @@ import { z } from 'zod';
 import {
   SCHEDULED_AGENT_JOB_FORBIDDEN_TOOLS,
   ToolRegistry,
-} from '../../../src/mcp/registry.ts';
+} from '../../helpers/resolved-tool-registry.ts';
 import {
   isolateScheduledAgentJobPrompt,
   resolveAgentTurnMapKey,

@@ -10,7 +10,11 @@ import type { Database } from '../../core/database.ts';
 import { ToolRegistry } from '../../mcp/registry.ts';
 import { registerAllTools } from '../../mcp/register-all.ts';
 import { WhatSoupSocketServer } from '../../mcp/socket-server.ts';
-import { noExecutingSession, type SessionContext } from '../../mcp/types.ts';
+import {
+  noExecutingSession,
+  resolveSessionContext,
+  type SessionContext,
+} from '../../mcp/types.ts';
 import { join } from 'node:path';
 import { createChildLogger } from '../../logger.ts';
 
@@ -59,7 +63,12 @@ export class PassiveRuntime implements Runtime {
     );
     this.socketServer.start();
     log.info(
-      { socketPath, toolCount: this.registry.listTools({ tier: 'global' }).length },
+      {
+        socketPath,
+        toolCount: this.registry.listTools(
+          resolveSessionContext({ tier: 'global' }, noExecutingSession()),
+        ).length,
+      },
       'passive runtime started',
     );
   }

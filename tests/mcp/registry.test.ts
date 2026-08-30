@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { z } from 'zod';
-import { ToolRegistry } from '../../src/mcp/registry.ts';
+import { ToolRegistry } from '../helpers/resolved-tool-registry.ts';
 import { toolError, type ToolDeclaration, type SessionContext } from '../../src/mcp/types.ts';
 import { fakeClock } from '../../src/lib/clock.ts';
 

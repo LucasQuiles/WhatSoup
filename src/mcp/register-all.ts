@@ -37,7 +37,12 @@ import * as mediaTools from './tools/media.ts';
 import { config } from '../config.ts';
 import { createChildLogger } from '../logger.ts';
 import { ToolRegistry } from './registry.ts';
-import type { ToolDeclaration, ExtendedBaileysSocket } from './types.ts';
+import {
+  noExecutingSession,
+  resolveSessionContext,
+  type ToolDeclaration,
+  type ExtendedBaileysSocket,
+} from './types.ts';
 import type { Database } from '../core/database.ts';
 import type { RuntimeConnection } from '../transport/runtime-connection.ts';
 import { createProfileRegistry } from '../core/profiles.ts';
@@ -241,7 +246,9 @@ export function registerAllTools(
 
   log.info(
     {
-      toolCount: registry.listTools({ tier: 'global' }).length,
+      toolCount: registry.listTools(
+        resolveSessionContext({ tier: 'global' }, noExecutingSession()),
+      ).length,
       optionalFailures: failures.filter((f) => !f.core).map((f) => f.module),
     },
     'all tools registered',

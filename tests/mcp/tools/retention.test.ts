@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { config } from '../../../src/config.ts';
 import { Database } from '../../../src/core/database.ts';
-import { ToolRegistry } from '../../../src/mcp/registry.ts';
+import { ToolRegistry } from '../../helpers/resolved-tool-registry.ts';
 import { registerRetentionTools } from '../../../src/mcp/tools/retention.ts';
 import { fakeClock } from '../../../src/lib/clock.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';

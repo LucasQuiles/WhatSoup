@@ -22,6 +22,7 @@ import {
   isToolErrorPayload,
   type ToolDeclaration,
   type ToolCallResult,
+  type ResolvedSessionContext,
   type SessionContext,
 } from './types.ts';
 import { errorMessage } from '../lib/error-message.ts';
@@ -499,7 +500,7 @@ export class ToolRegistry {
    * - Chat-scoped sessions: see only 'chat' scope tools. Injected tools have
    *   chatJid omitted (auto-filled at call time).
    */
-  listTools(session: SessionContext): Array<{
+  listTools(session: ResolvedSessionContext): Array<{
     name: string;
     description: string;
     inputSchema: JsonSchema;
@@ -533,7 +534,7 @@ export class ToolRegistry {
   async call(
     name: string,
     params: Record<string, unknown>,
-    session: SessionContext,
+    session: ResolvedSessionContext,
   ): Promise<ToolCallResult> {
     const tool = this.tools.get(name);
     if (!tool) {
