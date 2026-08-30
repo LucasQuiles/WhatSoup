@@ -11,7 +11,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Database } from '../../../src/core/database.ts';
-import { ToolRegistry } from '../../../src/mcp/registry.ts';
+import { ToolRegistry } from '../../helpers/resolved-tool-registry.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
 
 vi.mock('../../../src/runtimes/chat/providers/elevenlabs.ts', () => ({

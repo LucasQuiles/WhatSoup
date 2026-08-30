@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { ToolRegistry } from '../../src/mcp/registry.ts';
 import { WhatSoupSocketServer } from '../../src/mcp/socket-server.ts';
-import { noExecutingSession } from '../../src/mcp/types.ts';
+import { noExecutingSession, type SessionContext } from '../../src/mcp/types.ts';
 import { createProviderMcpBridge } from '../../src/runtimes/agent/providers/mcp-bridge.ts';
 
 describe('executing-session resolver type boundary (#3429)', () => {
@@ -25,5 +25,19 @@ describe('executing-session resolver type boundary (#3429)', () => {
       purpose: undefined,
       conversationKey: undefined,
     });
+  });
+
+  it('rejects raw session contexts at the registry authorization boundary', async () => {
+    const registry = new ToolRegistry();
+    const rawSession: SessionContext = { tier: 'global' };
+
+    if (false) {
+      // @ts-expect-error -- permanent negative fixture: listTools requires a resolved session snapshot; expires 2099-12-31
+      registry.listTools(rawSession);
+      // @ts-expect-error -- permanent negative fixture: call requires a resolved session snapshot; expires 2099-12-31
+      await registry.call('unused', {}, rawSession);
+    }
+
+    expect(registry).toBeInstanceOf(ToolRegistry);
   });
 });

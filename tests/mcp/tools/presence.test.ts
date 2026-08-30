@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { ToolRegistry } from '../../../src/mcp/registry.ts';
+import { ToolRegistry } from '../../helpers/resolved-tool-registry.ts';
 import { registerPresenceTools } from '../../../src/mcp/tools/presence.ts';
 import { PresenceCache } from '../../../src/transport/presence-cache.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';

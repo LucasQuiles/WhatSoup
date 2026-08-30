@@ -36,7 +36,7 @@ import type { SessionActivationPorts } from '../../../src/runtimes/agent/capabil
 import type { RuntimeTurnContext } from '../../../src/runtimes/agent/runtime-turn-context.ts';
 import type { CapabilityObligationDueRow } from '../../../src/core/capability-obligation-store.ts';
 import type { ObligationDispatchOutcome } from '../../../src/runtimes/agent/capability-obligation-supervisor.ts';
-import { ToolRegistry } from '../../../src/mcp/registry.ts';
+import { ToolRegistry } from '../../helpers/resolved-tool-registry.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
 import type { ToolDeclaration } from '../../../src/mcp/types.ts';
 import { trustedNodePath } from '../../helpers/trusted-node.ts';

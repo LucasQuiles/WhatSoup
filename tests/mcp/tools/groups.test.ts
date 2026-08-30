@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { ToolRegistry } from '../../../src/mcp/registry.ts';
+import { ToolRegistry } from '../../helpers/resolved-tool-registry.ts';
 import { registerGroupTools } from '../../../src/mcp/tools/groups.ts';
 import { config } from '../../../src/config.ts';
 import { Database } from '../../../src/core/database.ts';

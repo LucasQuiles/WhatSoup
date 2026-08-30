@@ -4,7 +4,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { z } from 'zod';
 import { Database } from '../../src/core/database.ts';
-import { ToolRegistry } from '../../src/mcp/registry.ts';
+import { ToolRegistry } from '../helpers/resolved-tool-registry.ts';
 import { PresenceCache } from '../../src/transport/presence-cache.ts';
 import { registerAllTools } from '../../src/mcp/register-all.ts';
 import type { ConnectionManager } from '../../src/transport/connection.ts';

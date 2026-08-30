@@ -81,6 +81,7 @@ describe('provider MCP bridge — read-time actor scoping (#2976 residual)', () 
     const bridge = createProviderMcpBridge(registry, storedSession, () => ({
       actorJid: executingActor,
       purpose: undefined,
+      conversationKey: undefined,
     }));
 
     // Between turns: no turn executes, so the read-time resolver yields
@@ -97,6 +98,7 @@ describe('provider MCP bridge — read-time actor scoping (#2976 residual)', () 
     const bridge = createProviderMcpBridge(registry, storedSession, () => ({
       actorJid: executingActor,
       purpose: undefined,
+      conversationKey: undefined,
     }));
 
     // Mid-turn: the executing turn's sender is the admin → allowed.
@@ -110,6 +112,7 @@ describe('provider MCP bridge — read-time actor scoping (#2976 residual)', () 
     const bridge = createProviderMcpBridge(registry, storedSession, () => ({
       actorJid: executingActor,
       purpose: undefined,
+      conversationKey: undefined,
     }));
 
     // storedSession.actorJid is still the stale admin, but the executing turn
@@ -150,6 +153,7 @@ describe('provider MCP bridge — read-time actor scoping (#2976 residual)', () 
     let executing = {
       actorJid: ADMIN_JID as string | undefined,
       purpose: 'scheduled-agent-job' as SessionContext['purpose'],
+      conversationKey: undefined as string | undefined,
     };
     const resolveExecuting = () => executing;
     const bridge = createProviderMcpBridge(registry, storedSession, resolveExecuting);
@@ -159,11 +163,11 @@ describe('provider MCP bridge — read-time actor scoping (#2976 residual)', () 
     expect((await bridge.executeTool('delete_chat', {})).isError).toBe(true);
     expect((await bridge.executeTool('send_message', {})).isError).toBe(false);
 
-    executing = { actorJid: ADMIN_JID, purpose: undefined };
+    executing = { actorJid: ADMIN_JID, purpose: undefined, conversationKey: undefined };
     expect(bridge.listTools().map((tool) => tool.name)).toContain('delete_chat');
     expect((await bridge.executeTool('delete_chat', {})).isError).toBe(false);
 
-    executing = { actorJid: ADMIN_JID, purpose: 'scheduled-agent-job' };
+    executing = { actorJid: ADMIN_JID, purpose: 'scheduled-agent-job', conversationKey: undefined };
     expect(bridge.listTools().map((tool) => tool.name)).not.toContain('delete_chat');
     expect((await bridge.executeTool('delete_chat', {})).isError).toBe(true);
   });

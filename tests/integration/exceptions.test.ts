@@ -11,7 +11,7 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { Database } from '../../src/core/database.ts';
-import { ToolRegistry } from '../../src/mcp/registry.ts';
+import { ToolRegistry } from '../helpers/resolved-tool-registry.ts';
 import { registerChatManagementTools } from '../../src/mcp/tools/chat-management.ts';
 import { registerSearchTools } from '../../src/mcp/tools/search.ts';
 import { registerMessagingTools, type MessagingDeps } from '../../src/mcp/tools/messaging.ts';

@@ -20,7 +20,7 @@
  */
 import { beforeAll, describe, it, expect } from 'vitest';
 import { Database } from '../../src/core/database.ts';
-import { ADMIN_REQUIRED_DENIAL, ToolRegistry } from '../../src/mcp/registry.ts';
+import { ADMIN_REQUIRED_DENIAL, ToolRegistry } from '../helpers/resolved-tool-registry.ts';
 import { PresenceCache } from '../../src/transport/presence-cache.ts';
 import { registerAllTools } from '../../src/mcp/register-all.ts';
 import {

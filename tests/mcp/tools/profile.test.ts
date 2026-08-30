@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { ToolRegistry } from '../../../src/mcp/registry.ts';
+import { ToolRegistry } from '../../helpers/resolved-tool-registry.ts';
 import { registerProfileTools } from '../../../src/mcp/tools/profile.ts';
 import { Database } from '../../../src/core/database.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
