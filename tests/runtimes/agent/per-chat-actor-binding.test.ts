@@ -9,6 +9,8 @@ import type {
   SystemTurnLeaseToken,
 } from '../../../src/runtimes/agent/pending-system-result-tracker.ts';
 
+type ExecContext = { actorJid: string | undefined; purpose?: 'scheduled-agent-job' };
+
 // ── Hoisted mocks ───────────────────────────────────────────────────────────
 
 const { mockSession, mockQueue, capturedOnEventRef } = vi.hoisted(() => {
@@ -268,11 +270,11 @@ describe('F-STICKY-ACTOR: resolveExecutingActor fail-closed / executing-turn HEA
     });
   }
   function setQueue(actors: Array<string | undefined>): void {
-    (runtime as unknown as { perChatExecActorQueue: Map<string, Array<string | undefined>> })
-      .perChatExecActorQueue.set(mapKey, [...actors]);
+    (runtime as unknown as { perChatExecActorQueue: Map<string, ExecContext[]> })
+      .perChatExecActorQueue.set(mapKey, actors.map((actorJid) => ({ actorJid })));
   }
   function shiftHead(): void {
-    (runtime as unknown as { perChatExecActorQueue: Map<string, Array<string | undefined>> })
+    (runtime as unknown as { perChatExecActorQueue: Map<string, ExecContext[]> })
       .perChatExecActorQueue.get(mapKey)!.shift();
   }
   const resolve = (): string | undefined =>
@@ -321,7 +323,7 @@ describe('system continuation actor ownership', () => {
     const mapKey = 'group-poll@g.us';
     const lease = { id: 41, scopeKey: mapKey };
     const state = runtime as unknown as {
-      perChatExecActorQueue: Map<string, Array<string | undefined>>;
+      perChatExecActorQueue: Map<string, ExecContext[]>;
       systemTurnExecActors: Map<number, { scopeKey: string; actorJid: string | undefined }>;
       releaseSystemTurnExecutingActor(turn: {
         lease: typeof lease;
@@ -331,8 +333,8 @@ describe('system continuation actor ownership', () => {
       }): void;
     };
     state.perChatExecActorQueue.set(mapKey, [
-      'admin@s.whatsapp.net',
-      'guest@s.whatsapp.net',
+      { actorJid: 'admin@s.whatsapp.net' },
+      { actorJid: 'guest@s.whatsapp.net' },
     ]);
     state.systemTurnExecActors.set(lease.id, {
       scopeKey: mapKey,
@@ -346,7 +348,7 @@ describe('system continuation actor ownership', () => {
       blocking: true,
     });
 
-    expect(state.perChatExecActorQueue.get(mapKey)).toEqual(['guest@s.whatsapp.net']);
+    expect(state.perChatExecActorQueue.get(mapKey)).toEqual([{ actorJid: 'guest@s.whatsapp.net' }]);
     expect(state.systemTurnExecActors.has(lease.id)).toBe(false);
   });
 
@@ -360,7 +362,7 @@ describe('system continuation actor ownership', () => {
         mark(input: MarkSystemTurnInput): SystemTurnLeaseToken;
         cancel(lease: SystemTurnLeaseToken): boolean;
       };
-      perChatExecActorQueue: Map<string, Array<string | undefined>>;
+      perChatExecActorQueue: Map<string, ExecContext[]>;
       systemTurnExecActors: Map<number, { scopeKey: string; actorJid: string | undefined }>;
       markSystemTurn(
         session: object,
@@ -378,8 +380,8 @@ describe('system continuation actor ownership', () => {
       mapKey,
     );
     state.perChatExecActorQueue.set(mapKey, [
-      'admin@s.whatsapp.net',
-      'guest@s.whatsapp.net',
+      { actorJid: 'admin@s.whatsapp.net' },
+      { actorJid: 'guest@s.whatsapp.net' },
     ]);
     state.systemTurnExecActors.set(lease.id, {
       scopeKey: mapKey,
@@ -396,7 +398,7 @@ describe('system continuation actor ownership', () => {
     state.pendingSystemResults.cancel(lease);
 
     expect(mockSession.shutdown).toHaveBeenCalledWith(false);
-    expect(state.perChatExecActorQueue.get(mapKey)).toEqual(['guest@s.whatsapp.net']);
+    expect(state.perChatExecActorQueue.get(mapKey)).toEqual([{ actorJid: 'guest@s.whatsapp.net' }]);
     expect(state.systemTurnExecActors.has(lease.id)).toBe(false);
   });
 });
@@ -413,7 +415,7 @@ describe('F-STICKY-ACTOR: crash clears the WHOLE executing-actor queue (S-CRASH,
   type Priv = {
     resolvePerChatMapKey(c: string): string;
     chatSessions: Map<string, unknown>;
-    perChatExecActorQueue: Map<string, Array<string | undefined>>;
+    perChatExecActorQueue: Map<string, ExecContext[]>;
     handlePerChatCrash(mapKey: string, chatJid: string, info: Record<string, unknown>): void;
     resolveExecutingActor(c: string): string | undefined;
   };
@@ -424,7 +426,7 @@ describe('F-STICKY-ACTOR: crash clears the WHOLE executing-actor queue (S-CRASH,
     mapKey = priv().resolvePerChatMapKey(CHAT);
     // A live session with two in-flight turns: ADMIN executing (HEAD) + GUEST queued behind.
     setOwnedTestSession(runtime, mapKey, mockSession);
-    priv().perChatExecActorQueue.set(mapKey, [ADMIN, GUEST]);
+    priv().perChatExecActorQueue.set(mapKey, [{ actorJid: ADMIN }, { actorJid: GUEST }]);
   });
 
   it('handlePerChatCrash clears ALL in-flight entries (not shift-one) -> post-respawn turn is fail-closed', () => {
@@ -447,7 +449,7 @@ describe('F-STICKY-ACTOR F6: replayTurnOnFallback clears the exec-queue (QR-247)
   let mapKey: string;
   type Priv = {
     resolvePerChatMapKey(c: string): string;
-    perChatExecActorQueue: Map<string, Array<string | undefined>>;
+    perChatExecActorQueue: Map<string, ExecContext[]>;
     replayTurnOnFallback(args: { chatJid: string; mapKey?: string; replayText: string; actorJid?: string; oldSession: unknown }): Promise<void>;
   };
   const priv = (): Priv => runtime as unknown as Priv;
@@ -458,7 +460,7 @@ describe('F-STICKY-ACTOR F6: replayTurnOnFallback clears the exec-queue (QR-247)
   });
 
   it('clears the whole queue before replaying (mutation target: revert delete -> RED)', async () => {
-    priv().perChatExecActorQueue.set(mapKey, [ADMIN, GUEST]); // stale in-flight on the killed child
+    priv().perChatExecActorQueue.set(mapKey, [{ actorJid: ADMIN }, { actorJid: GUEST }]); // stale in-flight on the killed child
     // Isolate the clear: stub the recreate + replay (they re-push on their own).
     vi.spyOn(runtime as unknown as { recreatePerChatSessionForFallback: (...a: unknown[]) => void }, 'recreatePerChatSessionForFallback').mockImplementation(() => {});
     vi.spyOn(runtime as unknown as { sendTurnPerChat: (...a: unknown[]) => Promise<void> }, 'sendTurnPerChat').mockResolvedValue(undefined);
@@ -477,7 +479,7 @@ describe('F-STICKY-ACTOR F6: dispatch to an INACTIVE session clears stale entrie
     resolvePerChatMapKey(c: string): string;
     chatSessions: Map<string, unknown>;
     chatQueues: Map<string, unknown>;
-    perChatExecActorQueue: Map<string, Array<string | undefined>>;
+    perChatExecActorQueue: Map<string, ExecContext[]>;
     sendTurnToSession(session: unknown, chatJid: string, text: string, mapKey?: string, actorJid?: string): Promise<void>;
   };
   const priv = (): Priv => runtime as unknown as Priv;
@@ -500,10 +502,10 @@ describe('F-STICKY-ACTOR F6: dispatch to an INACTIVE session clears stale entrie
     };
     setOwnedTestSession(runtime, mapKey, inactive);
     priv().chatQueues.set(mapKey, mockQueue);
-    priv().perChatExecActorQueue.set(mapKey, [GUEST]); // stale from a dead subprocess (e.g. resume-fail)
+    priv().perChatExecActorQueue.set(mapKey, [{ actorJid: GUEST }]); // stale from a dead subprocess (e.g. resume-fail)
     await priv().sendTurnToSession(inactive, CHAT, 'admin turn', mapKey, ADMIN);
     // The stale GUEST is dropped at the push (session inactive) — only the fresh ADMIN turn remains.
-    expect(priv().perChatExecActorQueue.get(mapKey)).toEqual([ADMIN]);
+    expect(priv().perChatExecActorQueue.get(mapKey)).toEqual([{ actorJid: ADMIN, purpose: undefined }]);
     },
   );
 });
@@ -515,7 +517,7 @@ describe('F-STICKY-ACTOR F6: LID-rekey migrates the exec-queue + socket to canon
   type Priv = {
     resolvePerChatMapKey(c: string): string;
     chatSessions: Map<string, unknown>;
-    perChatExecActorQueue: Map<string, Array<string | undefined>>;
+    perChatExecActorQueue: Map<string, ExecContext[]>;
     perChatMcpSocketManager: {
       rekey: (oldKey: string, newKey: string, deliveryJid: string) => void;
     };
@@ -534,14 +536,14 @@ describe('F-STICKY-ACTOR F6: LID-rekey migrates the exec-queue + socket to canon
     const canonical = priv().resolvePerChatMapKey(newJid);
     // Preconditions for the per_chat rekey branch: a session + in-flight state under lidKey.
     setOwnedTestSession(runtime, lidKey, mockSession);
-    priv().perChatExecActorQueue.set(lidKey, [ADMIN, GUEST]);
+    priv().perChatExecActorQueue.set(lidKey, [{ actorJid: ADMIN }, { actorJid: GUEST }]);
     const rekey = vi.spyOn(priv().perChatMcpSocketManager, 'rekey');
 
     priv().handleJidAliasChanged(convKey, newJid);
 
     // Migrated to canonical; the trailing cleanupPerChatState(lidKey) finds nothing under lidKey.
     expect(priv().perChatExecActorQueue.get(lidKey)).toBeUndefined();
-    expect(priv().perChatExecActorQueue.get(canonical)).toEqual([ADMIN, GUEST]);
+    expect(priv().perChatExecActorQueue.get(canonical)).toEqual([{ actorJid: ADMIN }, { actorJid: GUEST }]);
     expect(rekey).toHaveBeenCalledWith(lidKey, canonical, newJid);
   });
 });
@@ -655,7 +657,7 @@ describe('F-STICKY-ACTOR hardening: createSessionManager is the single wiring ch
 describe('per_chat global socket remains actor-less', () => {
   type Priv = {
     resolveExecutingGlobalActor(): string | undefined;
-    perChatExecActorQueue: Map<string, (string | undefined)[]>;
+    perChatExecActorQueue: Map<string, ExecContext[]>;
   };
 
   it('#2976 (ii): the global resolver denies at rest in every scope, and per_chat denies even with a primed register', () => {
@@ -670,7 +672,7 @@ describe('per_chat global socket remains actor-less', () => {
 
     // per_chat scope: the gate holds even if the global register were primed —
     // per-chat senders ride their own actor-bound sockets, never this one.
-    (perChat as unknown as Priv).perChatExecActorQueue.set('global', ['15550009@s.whatsapp.net']);
+    (perChat as unknown as Priv).perChatExecActorQueue.set('global', [{ actorJid: '15550009@s.whatsapp.net' }]);
     expect((perChat as unknown as Priv).resolveExecutingGlobalActor()).toBeUndefined();
   });
 });

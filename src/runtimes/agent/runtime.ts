@@ -281,7 +281,7 @@ import { EgressProxy } from './egress-proxy.ts';
 import { ToolRegistry } from '../../mcp/registry.ts';
 import { PerChatMcpSocketManager } from './per-chat-mcp-socket-manager.ts';
 import { WhatSoupSocketServer } from '../../mcp/socket-server.ts';
-import type { SessionContext } from '../../mcp/types.ts';
+import type { ExecutingSessionContext, SessionContext } from '../../mcp/types.ts';
 import type { ConnectionManager } from '../../transport/connection.ts';
 import { registerAllTools } from '../../mcp/register-all.ts';
 import { startMediaBridge, setMediaBridgeChat, type MediaBridge } from './media-bridge.ts';
@@ -1876,11 +1876,12 @@ export class AgentRuntime implements Runtime {
   // Used to replay a message when session resume fails and the turn was lost.
   private pendingTurnText: Map<string, string> = new Map();
   private pendingTurnActorJid: Map<string, string | undefined> = new Map();
-  // F-STICKY-ACTOR (QR-245): per-chat executing-turn actor register. HEAD =
+  private pendingTurnPurpose: Map<string, SessionContext['purpose']> = new Map();
+  // Per-chat executing-turn authorization context. HEAD =
   // oldest-dispatched-unresolved = the turn the subprocess is currently running.
-  // Read fail-closed by resolveExecutingActor (empty/absent -> deny). Cleared on
+  // Read fail-closed by the context resolvers (empty/absent -> deny). Cleared on
   // every abnormal termination (cleanupPerChatState + crash/resume/fallback).
-  private perChatExecActorQueue: Map<string, (string | undefined)[]> = new Map();
+  private perChatExecActorQueue: Map<string, ExecutingSessionContext[]> = new Map();
   /** Exact actor FIFO slot owned by an output-producing system lease (poll continuation). */
   private readonly systemTurnExecActors = new Map<number, {
     scopeKey: string;
@@ -1888,6 +1889,7 @@ export class AgentRuntime implements Runtime {
   }>();
   private currentTurnReplayText: string | null = null;
   private currentTurnReplayActorJid: string | undefined;
+  private currentTurnReplayPurpose: SessionContext['purpose'];
 
   // ---------------------------------------------------------------------------
   // Image coalescing — batch rapid image sends into a single turn
@@ -1979,6 +1981,7 @@ export class AgentRuntime implements Runtime {
     this.perChatRouteMarkerHold.delete(mapKey);
     this.pendingTurnText.delete(mapKey);
     this.pendingTurnActorJid.delete(mapKey);
+    this.pendingTurnPurpose.delete(mapKey);
     this.perChatExecActorQueue.delete(mapKey);
     this.clearSystemTurnExecutingActors(mapKey);
     this.resumeFailedHandling.delete(mapKey);
@@ -2138,6 +2141,7 @@ export class AgentRuntime implements Runtime {
       }
       this.pendingTurnText.delete(mapKey);
       this.pendingTurnActorJid.delete(mapKey);
+      this.pendingTurnPurpose.delete(mapKey);
       this.perChatTurnSourceMessageId.delete(mapKey);
       this.perChatTurnContentType.delete(mapKey);
       this.perChatTurnText.delete(mapKey);
@@ -2889,8 +2893,8 @@ export class AgentRuntime implements Runtime {
       isShuttingDown: () => runtime.shutdownRequested,
       getActiveQueue: () => runtime.getActiveQueue(),
       getQueueForChat: (chatJid, mapKey) => runtime.getQueueForChat(chatJid, mapKey),
-      sendTurnPerChat: (chatJid, text, mapKey, actorJid, context, scopeRef, systemTurnLease, excludeJobId, deliveryKind, dispatchAllowed, onProviderBoundary) =>
-        runtime.sendTurnPerChat(chatJid, text, mapKey, actorJid, context, scopeRef, systemTurnLease, excludeJobId, deliveryKind, dispatchAllowed, onProviderBoundary),
+      sendTurnPerChat: (chatJid, text, mapKey, actorJid, context, scopeRef, systemTurnLease, excludeJobId, deliveryKind, dispatchAllowed, onProviderBoundary, purpose) =>
+        runtime.sendTurnPerChat(chatJid, text, mapKey, actorJid, context, scopeRef, systemTurnLease, excludeJobId, deliveryKind, dispatchAllowed, onProviderBoundary, purpose),
       deleteOwnedPerChatSession: (mapKey, expected) => runtime.deleteOwnedPerChatSession(mapKey, expected),
       discardPerChatSessionForFallback: (mapKey, expected) =>
         runtime.discardPerChatSessionForFallback(mapKey, expected),
@@ -3330,6 +3334,11 @@ export class AgentRuntime implements Runtime {
             this.pendingTurnActorJid.delete(lidKey);
             this.pendingTurnActorJid.set(canonical, pendingActor);
           }
+          if (this.pendingTurnPurpose.has(lidKey)) {
+            const pendingPurpose = this.pendingTurnPurpose.get(lidKey);
+            this.pendingTurnPurpose.delete(lidKey);
+            this.pendingTurnPurpose.set(canonical, pendingPurpose);
+          }
           // F-STICKY-ACTOR (QR-247, F4): migrate the executing-actor queue and
           // actor-socket identity together so the live resolver follows the new key.
           const execActors = this.perChatExecActorQueue.get(lidKey);
@@ -3648,7 +3657,7 @@ export class AgentRuntime implements Runtime {
           socketPath,
           this.registry,
           globalSession,
-          () => this.resolveExecutingGlobalActor(),
+          () => this.resolveExecutingGlobalSession(),
         );
         this.globalSocketServer.start();
         this.globalMcpSocketPath = socketPath;
@@ -4867,6 +4876,7 @@ export class AgentRuntime implements Runtime {
         isGroup: msg.isGroup,
         groupName: msg.isGroup ? chatJid : undefined,
         contentType: msg.contentType,
+        purpose: msg.isSyntheticJob === true ? 'scheduled-agent-job' : undefined,
         ...(runtimeContext ? { runtimeContext } : {}),
         inboundSeq: msg.inboundSeq,
       });
@@ -4916,6 +4926,7 @@ export class AgentRuntime implements Runtime {
           isGroup: msg.isGroup,
           groupName: msg.isGroup ? chatJid : undefined,
           contentType: msg.contentType,
+          purpose: msg.isSyntheticJob === true ? 'scheduled-agent-job' : undefined,
           ...(runtimeContext ? { runtimeContext } : {}),
           inboundSeq: msg.inboundSeq,
         });
@@ -4942,7 +4953,7 @@ export class AgentRuntime implements Runtime {
         contentType: msg.contentType,
         isGroup: msg.isGroup,
         ...(msg.isGroup ? { groupName: chatJid } : {}),
-      }, msg.inboundSeq);
+      }, msg.inboundSeq, msg.isSyntheticJob === true ? 'scheduled-agent-job' : undefined);
     }
   }
 
@@ -5005,7 +5016,7 @@ export class AgentRuntime implements Runtime {
       onProviderBoundary: () => void;
     },
   ): Promise<void> {
-    const { chatJid, senderJid, senderName, text, isGroup } = turn;
+    const { chatJid, senderJid, senderName, text, isGroup, purpose } = turn;
 
     // Clear post-turn gate — legitimate new user turn begins (shared mode)
     this.postTurnGate.delete(GLOBAL_TOOL_SCOPE_KEY);
@@ -5030,6 +5041,7 @@ export class AgentRuntime implements Runtime {
     this.currentTurnRouteMarkerHold = config.nlRouting ? '' : null;
     this.currentTurnReplayText = exactText;
     this.currentTurnReplayActorJid = senderJid;
+    this.currentTurnReplayPurpose = purpose;
     this.replyGuarantee?.arm({ inboundSeq: turn.inboundSeq, chatJid });
 
     // Thread inbound seq into the outbound queue so ops can link back
@@ -5071,7 +5083,7 @@ export class AgentRuntime implements Runtime {
       // read-time resolver at the provider boundary (shared-mode dispatch
       // bypasses sendTurnToSession, so it publishes here).
       const sharedExecQ = this.perChatExecActorQueue.get(GLOBAL_TOOL_SCOPE_KEY) ?? [];
-      sharedExecQ.push(senderJid);
+      sharedExecQ.push({ actorJid: senderJid, purpose });
       this.perChatExecActorQueue.set(GLOBAL_TOOL_SCOPE_KEY, sharedExecQ);
       try {
         await this.session!.sendTurn(withProviderApplicationContext(
@@ -5119,6 +5131,7 @@ export class AgentRuntime implements Runtime {
     dispatchAllowed?: () => boolean,
     runtimeContext?: RuntimeTurnContext,
     deliveryKind: TurnDeliveryKind = 'live',
+    purpose?: SessionContext['purpose'],
   ): Promise<void> {
     let effectiveMapKey = mapKey;
     let spawnedForTurn = false;
@@ -5273,9 +5286,10 @@ export class AgentRuntime implements Runtime {
       // ride a per-chat actor socket publish under their mapKey; #2976 residual:
       // per_chat managed-loop (API) sessions have no socket but serve tools
       // through the in-process bridge, so they publish under the mapKey too, and
-      // resolveBridgeActor resolves it read-time.
+      // the provider bridge resolves it read-time.
       const usesPerChatActorRegister =
-        this.sessionUsesPerChatActorSocket(session)
+        this.sandboxPerChat
+        || this.sessionUsesPerChatActorSocket(session)
         || (this.sessionScope === 'per_chat' && this.sessionUsesInProcessBridge(session));
       const execScopeKey = usesPerChatActorRegister && effectiveMapKey !== undefined
         ? effectiveMapKey
@@ -5283,7 +5297,7 @@ export class AgentRuntime implements Runtime {
       if (execScopeKey !== undefined) {
         if (!session.getStatus().active) this.perChatExecActorQueue.delete(execScopeKey);
         const execQ = this.perChatExecActorQueue.get(execScopeKey) ?? [];
-        execQ.push(actorJid);
+        execQ.push({ actorJid, purpose });
         this.perChatExecActorQueue.set(execScopeKey, execQ);
         actorPushed = true;
         pushedExecScopeKey = execScopeKey;
@@ -5339,6 +5353,7 @@ export class AgentRuntime implements Runtime {
     actorJid: string,
     source?: RuntimeTurnSourceSnapshot,
     inboundSeq?: number,
+    purpose?: SessionContext['purpose'],
   ): Promise<void> {
     // Clear post-turn gate for shared session scope
     this.postTurnGate.delete(GLOBAL_TOOL_SCOPE_KEY);
@@ -5347,6 +5362,7 @@ export class AgentRuntime implements Runtime {
     this.turnHadVisibleOutput = false;
     this.currentTurnReplayText = text;
     this.currentTurnReplayActorJid = actorJid;
+    this.currentTurnReplayPurpose = purpose;
     let context: RuntimeTurnContext | null = null;
     const completion: { value: RuntimeTurnCompletion | null } = { value: null };
     if (source) {
@@ -5402,7 +5418,7 @@ export class AgentRuntime implements Runtime {
       }, undefined, () => (
         !this.shutdownRequested
         && (context === null || !this.runtimeTurnCoordinator.isUndispatchedRuntimeTurnCancelled(context))
-      ), context ?? undefined);
+      ), context ?? undefined, 'live', purpose);
       if (context && completion.value === null) {
         if (!this.runtimeTurnCoordinator.isUndispatchedRuntimeTurnCancelled(context)) {
           this.runtimeTurnCoordinator.terminalizeUndispatchedRuntimeCrash(context);
@@ -5438,6 +5454,7 @@ export class AgentRuntime implements Runtime {
     requestedDeliveryKind?: TurnDeliveryKind,
     targetDispatchAllowed?: () => boolean,
     onProviderBoundary?: () => void,
+    purpose?: SessionContext['purpose'],
   ): Promise<void> {
     mapKey = scopeRef?.value ?? mapKey;
     const dispatchAllowed = runtimeContext === undefined && targetDispatchAllowed === undefined
@@ -5541,6 +5558,7 @@ export class AgentRuntime implements Runtime {
     // before the agent can process it.
     this.pendingTurnText.set(mapKey, text);
     this.pendingTurnActorJid.set(mapKey, actorJid);
+    this.pendingTurnPurpose.set(mapKey, purpose);
 
     const legacyOwner: { value: LegacyProviderTurnOwner | null } = { value: null };
     const beginDispatchedTurn = (
@@ -5583,6 +5601,7 @@ export class AgentRuntime implements Runtime {
         log.error({ chatJid, mapKey: currentMapKey }, 'failed to create session for chat — message dropped');
         this.pendingTurnText.delete(currentMapKey);
         this.pendingTurnActorJid.delete(currentMapKey);
+        this.pendingTurnPurpose.delete(currentMapKey);
         if (runtimeContext) {
           await this.runtimeTurnCoordinator.finalizeUndispatchedRuntimeTurnAndWait(runtimeContext, scopeRef);
         } else if (this.durability && this.perChatInboundSeqQueue.get(currentMapKey)?.[0] !== undefined) {
@@ -5615,7 +5634,7 @@ export class AgentRuntime implements Runtime {
             scopeRef?.value ?? currentMapKey,
           );
           onProviderBoundary?.();
-        }, systemTurnLease, dispatchAllowed, providerTurnContext, providerDeliveryKind);
+        }, systemTurnLease, dispatchAllowed, providerTurnContext, providerDeliveryKind, purpose);
       } catch (err) {
         if (legacyOwner.value) {
           this.clearLegacyProviderTurn(currentMapKey, legacyOwner.value);
@@ -5633,7 +5652,7 @@ export class AgentRuntime implements Runtime {
           scopeRef?.value ?? mapKey,
         );
         onProviderBoundary?.();
-      }, systemTurnLease, dispatchAllowed, providerTurnContext, providerDeliveryKind);
+      }, systemTurnLease, dispatchAllowed, providerTurnContext, providerDeliveryKind, purpose);
     } catch (err) {
       if (legacyOwner.value) {
         this.clearLegacyProviderTurn(scopeRef?.value ?? mapKey, legacyOwner.value);
@@ -7557,8 +7576,10 @@ export class AgentRuntime implements Runtime {
       this.perChatAssistantItemText.clear();
       this.pendingTurnText.clear();
       this.pendingTurnActorJid.clear();
+      this.pendingTurnPurpose.clear();
       this.currentTurnReplayText = null;
       this.currentTurnReplayActorJid = undefined;
+      this.currentTurnReplayPurpose = undefined;
       this.resumeFailedHandling.clear();
       this.imageCoalesce.buffers.clear();
     }
@@ -8010,7 +8031,7 @@ export class AgentRuntime implements Runtime {
     if (systemTurnLease) this.systemTurnExecActors.delete(systemTurnLease.id);
     const queue = this.perChatExecActorQueue.get(mapKey);
     if (!queue) return;
-    if (queue.at(-1) === actorJid) queue.pop();
+    if (queue.at(-1)?.actorJid === actorJid) queue.pop();
     else {
       log.error({ mapKey }, 'executing actor FIFO drift on failed dispatch — clearing fail-closed');
       queue.length = 0;
@@ -8028,7 +8049,7 @@ export class AgentRuntime implements Runtime {
     this.systemTurnExecActors.delete(lease.id);
     const queue = this.perChatExecActorQueue.get(binding.scopeKey);
     if (!queue) return;
-    if (queue[0] === binding.actorJid) queue.shift();
+    if (queue[0]?.actorJid === binding.actorJid) queue.shift();
     else {
       log.error(
         { scopeKey: binding.scopeKey, leaseId: lease.id },
@@ -8053,9 +8074,14 @@ export class AgentRuntime implements Runtime {
    * Re-derives mapKey each call so it is transparent to LID rekey.
    */
   private resolveExecutingActorByMapKey(mapKey: string): string | undefined {
+    return this.resolveExecutingSessionByMapKey(mapKey).actorJid;
+  }
+
+  private resolveExecutingSessionByMapKey(mapKey: string): ExecutingSessionContext {
     const session = this.chatSessions.get(mapKey);
-    if (!session || !session.getStatus().active) return undefined;
-    return this.perChatExecActorQueue.get(mapKey)?.[0];
+    if (!session || !session.getStatus().active) return { actorJid: undefined, purpose: undefined };
+    return this.perChatExecActorQueue.get(mapKey)?.[0]
+      ?? { actorJid: undefined, purpose: undefined };
   }
 
   private resolveExecutingActor(chatJid: string): string | undefined {
@@ -8069,9 +8095,14 @@ export class AgentRuntime implements Runtime {
    * runtime is per_chat scope (whose senders ride per-chat actor sockets).
    */
   private resolveExecutingGlobalActor(): string | undefined {
-    if (this.sessionScope === 'per_chat') return undefined;
-    if (!this.session?.getStatus().active) return undefined;
-    return this.perChatExecActorQueue.get(GLOBAL_TOOL_SCOPE_KEY)?.[0];
+    return this.resolveExecutingGlobalSession().actorJid;
+  }
+
+  private resolveExecutingGlobalSession(): ExecutingSessionContext {
+    if (this.sessionScope === 'per_chat') return { actorJid: undefined, purpose: undefined };
+    if (!this.session?.getStatus().active) return { actorJid: undefined, purpose: undefined };
+    return this.perChatExecActorQueue.get(GLOBAL_TOOL_SCOPE_KEY)?.[0]
+      ?? { actorJid: undefined, purpose: undefined };
   }
 
   private sessionUsesPerChatActorSocket(session: SessionManager): boolean {
@@ -8088,25 +8119,11 @@ export class AgentRuntime implements Runtime {
    * to the actor register — the bridge fell back to the stored session's stale
    * actorJid. Detect the bridge sessions so the provider boundary publishes
    * their actor into the same per-chat register (retired by the coordinator
-   * post-effects seam) and resolveBridgeActor can resolve it read-time.
+   * post-effects seam) and the bridge resolver can read it at request time.
    */
   private sessionUsesInProcessBridge(session: SessionManager): boolean {
     const provider = session.getProviderId();
     return isProviderId(provider) && executionModeForProvider(provider) === 'managed_loop';
-  }
-
-  /**
-   * #2976 residual: read-time actor resolver for the in-process provider MCP
-   * bridge (managed-loop providers), the sibling of resolveExecutingGlobalActor
-   * used by the global socket. per_chat scope reads the per-chat executing-actor
-   * register (re-derives the mapKey each call, transparent to LID rekey);
-   * shared/single reads the GLOBAL register. Fail-closed to undefined when no
-   * turn executes, which the R1 sensitive-tool gate denies.
-   */
-  private resolveBridgeActor(chatJid: string): string | undefined {
-    return this.sessionScope === 'per_chat'
-      ? this.resolveExecutingActor(chatJid)
-      : this.resolveExecutingGlobalActor();
   }
 
   private wirePerChatActorSocket(chatJid: string, provider: string, mapKeyOverride?: string):
@@ -8956,6 +8973,9 @@ export class AgentRuntime implements Runtime {
     const actorJid = args.mapKey !== undefined
       ? this.pendingTurnActorJid.get(args.mapKey)
       : this.currentTurnReplayActorJid;
+    const purpose = args.mapKey !== undefined
+      ? this.pendingTurnPurpose.get(args.mapKey)
+      : this.currentTurnReplayPurpose;
 
     let routeOverride: ResolvedReplayRoute;
     try {
@@ -9018,13 +9038,14 @@ export class AgentRuntime implements Runtime {
         },
         replayText,
         actorJid,
+        purpose,
       ).catch((err) => this.finalizeFailedFallbackContinuation(
         scopeRef === undefined ? args : { ...args, mapKey: scopeRef.value },
         runtimeContext,
         err,
       ));
     } else {
-      void this.dispatchFallbackReplay({ ...args, routeOverride }, replayText, actorJid)
+      void this.dispatchFallbackReplay({ ...args, routeOverride }, replayText, actorJid, purpose)
         .then(() => {
           this.fallbackMetrics.recordReplay();
           emitAlertChecked(
@@ -9099,6 +9120,7 @@ export class AgentRuntime implements Runtime {
     },
     replayText: string,
     actorJid: string | undefined,
+    purpose: SessionContext['purpose'],
   ): Promise<void> {
     if (args.preDispatch) await args.preDispatch;
     await this.replayTurnOnFallback({
@@ -9106,6 +9128,7 @@ export class AgentRuntime implements Runtime {
       mapKey: args.mapKey,
       replayText,
       actorJid,
+      purpose,
       oldSession: args.oldSession,
       runtimeContext: args.runtimeContext,
       routeOverride: args.routeOverride,
@@ -9350,7 +9373,11 @@ export class AgentRuntime implements Runtime {
       mcpBridge: createProviderMcpBridge(
         this.registry,
         providerToolSession,
-        () => this.resolveBridgeActor(opts.chatJid),
+        () => this.sessionScope === 'per_chat'
+          ? this.resolveExecutingSessionByMapKey(
+              opts.sessionMapKey ?? this.resolvePerChatMapKey(opts.chatJid),
+            )
+          : this.resolveExecutingGlobalSession(),
       ),
       mcpSessionContext: providerToolSession,
       whatsoupInstance: this.instanceName,
@@ -9496,7 +9523,12 @@ export class AgentRuntime implements Runtime {
               ...(actorJid ? { actorJid } : {}),
               allowedRoot: workspacePath,
             };
-            socketServer = new WhatSoupSocketServer(socketPath, this.registry, chatSession);
+            socketServer = new WhatSoupSocketServer(
+              socketPath,
+              this.registry,
+              chatSession,
+              () => this.resolveExecutingSessionByMapKey(workspaceKey),
+            );
             socketServer.start();
             log.info({ socketPath, workspaceKey }, 'chat-scoped WhatSoup socket server started');
           } catch (err) {
@@ -10299,6 +10331,7 @@ export class AgentRuntime implements Runtime {
     this.currentTurnChatJid = null;
     this.currentTurnReplayText = null;
     this.currentTurnReplayActorJid = undefined;
+    this.currentTurnReplayPurpose = undefined;
     this.currentTurnInboundContentType = null;
     this.currentTurnSourceMessageId = null;
     this.currentTurnAssistantText = '';

@@ -227,7 +227,7 @@ describe('PerChatMcpSocketManager', () => {
     const resources = (manager as unknown as {
       resources: Map<string, {
         server: {
-          actorResolver: () => string | undefined;
+          executingSessionResolver: () => { actorJid?: string; purpose?: string };
           baseSession: {
             binding?: { conversationKey: string; deliveryJid: string };
           };
@@ -236,9 +236,9 @@ describe('PerChatMcpSocketManager', () => {
     }).resources;
     const resource = resources.get(oldIdentity)!;
 
-    expect(resource.server.actorResolver()).toBe(oldIdentity);
+    expect(resource.server.executingSessionResolver().actorJid).toBe(oldIdentity);
     manager.rekey(oldIdentity, newIdentity, newIdentity);
-    expect(resource.server.actorResolver()).toBe(newIdentity);
+    expect(resource.server.executingSessionResolver().actorJid).toBe(newIdentity);
     expect(observedIdentities).toEqual([oldIdentity, newIdentity]);
     expect(resource.server.baseSession.binding).toEqual({
       kind: 'conversation-bound',

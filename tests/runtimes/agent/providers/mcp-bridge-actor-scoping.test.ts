@@ -78,7 +78,10 @@ describe('provider MCP bridge — read-time actor scoping (#2976 residual)', () 
   });
 
   it('AUTH RED: an admin sensitive tool is DENIED on the actor-less follow-up turn (base: fail-open)', async () => {
-    const bridge = createProviderMcpBridge(registry, storedSession, () => executingActor);
+    const bridge = createProviderMcpBridge(registry, storedSession, () => ({
+      actorJid: executingActor,
+      purpose: undefined,
+    }));
 
     // Between turns: no turn executes, so the read-time resolver yields
     // undefined and the R1 gate must deny fail-closed. On unmodified base the
@@ -91,7 +94,10 @@ describe('provider MCP bridge — read-time actor scoping (#2976 residual)', () 
   });
 
   it('AUTH GREEN pin: the real admin mid-turn is still ALLOWED (no regression)', async () => {
-    const bridge = createProviderMcpBridge(registry, storedSession, () => executingActor);
+    const bridge = createProviderMcpBridge(registry, storedSession, () => ({
+      actorJid: executingActor,
+      purpose: undefined,
+    }));
 
     // Mid-turn: the executing turn's sender is the admin → allowed.
     executingActor = ADMIN_JID;
@@ -101,7 +107,10 @@ describe('provider MCP bridge — read-time actor scoping (#2976 residual)', () 
   });
 
   it('a non-admin executing turn is DENIED even when the stored conduit holds a stale admin', async () => {
-    const bridge = createProviderMcpBridge(registry, storedSession, () => executingActor);
+    const bridge = createProviderMcpBridge(registry, storedSession, () => ({
+      actorJid: executingActor,
+      purpose: undefined,
+    }));
 
     // storedSession.actorJid is still the stale admin, but the executing turn
     // belongs to a non-admin — the resolver override must win.
@@ -116,5 +125,44 @@ describe('provider MCP bridge — read-time actor scoping (#2976 residual)', () 
     const bridge = createProviderMcpBridge(registry, storedSession);
     const result = await bridge.executeTool('admin_probe', {});
     expect(result.isError).toBe(false);
+  });
+
+  it('AUTH RED: scheduled purpose is resolved read-time for discovery and execution', async () => {
+    registry.register({
+      name: 'delete_chat',
+      description: 'Harmless scheduled-purpose denial probe',
+      scope: 'global',
+      targetMode: 'caller-supplied',
+      schema: z.object({}),
+      handler: async () => ({ deleted: false }),
+    });
+    registry.register({
+      name: 'send_message',
+      description: 'Harmless scheduled-purpose allowed probe',
+      scope: 'global',
+      targetMode: 'caller-supplied',
+      schema: z.object({}),
+      handler: async () => ({ sent: false }),
+    });
+
+    let executing = {
+      actorJid: ADMIN_JID as string | undefined,
+      purpose: 'scheduled-agent-job' as SessionContext['purpose'],
+    };
+    const resolveExecuting = () => executing;
+    const bridge = createProviderMcpBridge(registry, storedSession, resolveExecuting);
+
+    expect(bridge.listTools().map((tool) => tool.name)).not.toContain('delete_chat');
+    expect(bridge.listTools().map((tool) => tool.name)).toContain('send_message');
+    expect((await bridge.executeTool('delete_chat', {})).isError).toBe(true);
+    expect((await bridge.executeTool('send_message', {})).isError).toBe(false);
+
+    executing = { actorJid: ADMIN_JID, purpose: undefined };
+    expect(bridge.listTools().map((tool) => tool.name)).toContain('delete_chat');
+    expect((await bridge.executeTool('delete_chat', {})).isError).toBe(false);
+
+    executing = { actorJid: ADMIN_JID, purpose: 'scheduled-agent-job' };
+    expect(bridge.listTools().map((tool) => tool.name)).not.toContain('delete_chat');
+    expect((await bridge.executeTool('delete_chat', {})).isError).toBe(true);
   });
 });

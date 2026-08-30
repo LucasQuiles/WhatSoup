@@ -3,7 +3,11 @@
 // converts MCP tool definitions to API function-calling formats for API providers.
 
 import type { ToolRegistry } from '../../../mcp/registry.ts';
-import type { SessionContext, ToolCallResult } from '../../../mcp/types.ts';
+import type {
+  ExecutingSessionContext,
+  SessionContext,
+  ToolCallResult,
+} from '../../../mcp/types.ts';
 import { createChildLogger } from '../../../logger.ts';
 import {
   buildProviderMcpConfigArgs,
@@ -140,15 +144,10 @@ export async function executeBridgeTool(
  * Create a provider-native MCP bridge backed by WhatSoup's in-process registry.
  * Used by managed-loop HTTP providers to advertise and execute tools directly.
  *
- * #2976 residual: the stored `session` object is the long-lived per-session MCP
- * context. Its `actorJid` was written per turn (updateMcpActorJid) and never
- * cleared, so a subsequent actor-less turn on the same managed-loop session
- * would authorize/attribute as the previous sender. This is the in-process
- * sibling of the global-socket read-time resolver from #3389: take a
- * per-request SessionContext snapshot and override `actorJid` from the
- * read-time `resolveActor` resolver (the executing-turn register) so the raw
- * stored object never reaches listTools/call. Missing/unresolvable actor stays
- * undefined -> the registry's R1 sensitive-tool gate denies fail-closed.
+ * The stored `session` object is the long-lived per-session MCP context. Take a
+ * per-request snapshot and override its dynamic authorization fields from the
+ * executing-turn register so stale actor or purpose values never reach
+ * listTools/call. Explicit undefined values fail closed between turns.
  * Mirrors socket-server.ts:238-243 (QR-042 per-request snapshot + resolver
  * override). When no resolver is supplied the stored session is used verbatim
  * (unchanged behavior for callers that manage identity themselves).
@@ -156,12 +155,12 @@ export async function executeBridgeTool(
 export function createProviderMcpBridge(
   registry: ToolRegistry,
   session: SessionContext,
-  resolveActor?: () => string | undefined,
+  resolveExecutingSession?: () => ExecutingSessionContext,
 ): ProviderMcpBridge {
   const snapshotSession = (): SessionContext =>
-    resolveActor === undefined
+    resolveExecutingSession === undefined
       ? session
-      : { ...session, actorJid: resolveActor() };
+      : { ...session, ...resolveExecutingSession() };
   return {
     listTools(): ProviderMcpTool[] {
       return registry.listTools(snapshotSession());
