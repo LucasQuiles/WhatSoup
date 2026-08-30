@@ -300,10 +300,17 @@ the gui-domain service reads). The verify-only pin
 ([schema and capture procedure](../configuration.md#ratified-account-identity-serviceexpectedaccountdigest))
 closes that gap without any credential write:
 
-- Capture the digest **in a context with login-keychain access** — a
-  GUI/console session, or a one-shot bootstrapped into the owner's
-  `gui/<uid>` launchd domain when it must be unattended — and in the
-  service's own config-root context. **Not over SSH.** Supplying the plist's
+- Capture the digest **in a context with login-keychain access**, and in the
+  service's own config-root context. A GUI/console session is the normal one.
+  When the capture must be unattended, a one-shot bootstrapped into the owner's
+  `gui/<uid>` launchd domain works, under two conditions: it needs the
+  **owner's explicit authorization**, because bootstrapping into someone's
+  login domain acts on their session rather than just their filesystem; and it
+  is temporary — `bootout` the job and delete its plist as soon as the digest
+  is captured, since a one-shot left loaded re-runs at the next login and
+  re-probes the credential with nobody watching.
+
+  **Not over SSH.** Supplying the plist's
   `CLAUDE_CONFIG_DIR` does not make an SSH shell sufficient: it has no
   login-keychain session, so the probe reads `loggedIn: false` and the
   capture exits 2 anyway (observed live on an instance whose gui-domain
@@ -324,10 +331,16 @@ closes that gap without any credential write:
   not corroboration.
 
   ```bash
-  CLAUDE_CONFIG_DIR=/absolute/claude-root npm run claude-account-digest
+  CLAUDE_CONFIG_DIR=/absolute/claude-root npm run --silent claude-account-digest
   ```
 
-  The command prints one opaque `sha256:` line and nothing else. Never paste
+  `--silent` is load-bearing, not tidiness: without it `npm run` prints a
+  four-line banner to **stdout** before the digest, so
+  `DIGEST=$(npm run claude-account-digest)` captures the banner as well and
+  writes an `expectedAccountDigest` that can never match — producing a
+  `credential_identity_mismatch` alert caused by the capture rather than by the
+  credential. With `--silent` the command emits one opaque `sha256:` line on
+  stdout and nothing else; wrapper diagnostics go to stderr. Never paste
   `claude auth status --json` output into a shared log; it carries the raw
   email and organization id.
 - After the plist is (re)loaded, the runtime verifies the identity at startup

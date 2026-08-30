@@ -550,7 +550,7 @@ config-owned and regeneration-safe:
 |-------|------|-------|--------|
 | `claudeConfigDir` | string | absolute path; no surrounding whitespace or control characters | Rendered as `CLAUDE_CONFIG_DIR` so the launchd service context resolves the same dedicated claude-cli config root as interactive use of that root (e.g. an isolated per-bot root such as `$HOME/.claude-<instance>`). Omitted → the key is not rendered. The block governs only which config root the service resolves; it does not create or copy credentials (the CLI keeps those keychain-resident). |
 | `pathPrepend` | string[] | at most 16 entries; each an absolute path without `:` or control characters | Prepended in order ahead of the generating shell's ambient `PATH` in the rendered service `PATH` (e.g. `$HOME/.local/bin` so a fallback provider binary resolves under launchd). Omitted or empty → byte-identical `PATH` to the historical render. |
-| `expectedAccountDigest` | string | `sha256:<64 lowercase hex>` exactly, produced by `npm run claude-account-digest`; agent instances with `agentOptions.provider` `claude-cli` (the default) only — rejected elsewhere | Not a render key (never reaches the plist; applies on every platform). The ratified account identity the runtime verifies against; see [Ratified account identity](#ratified-account-identity-serviceexpectedaccountdigest). A raw email or organization id is rejected at admission on every path (create / PATCH / load / discovery). Omitted → verification disabled (one info log line at the first probe). |
+| `expectedAccountDigest` | string | `sha256:<64 lowercase hex>` exactly, produced by `npm run --silent claude-account-digest` (the `--silent` matters — see the capture procedure); agent instances with `agentOptions.provider` `claude-cli` (the default) only — rejected elsewhere | Not a render key (never reaches the plist; applies on every platform). The ratified account identity the runtime verifies against; see [Ratified account identity](#ratified-account-identity-serviceexpectedaccountdigest). A raw email or organization id is rejected at admission on every path (create / PATCH / load / discovery). Omitted → verification disabled (one info log line at the first probe). |
 
 One source of truth: the shape rules live in `src/lib/launchd-service-config.ts`
 and are enforced at config admission (CREATE / PATCH / load / discovery, every
@@ -629,13 +629,23 @@ with the account the owner ratified?**
    the `service.claudeConfigDir` root when one is configured, otherwise the
    CLI default — confirm the login interactively (`claude` opens the usual
    flow; this is an owner action, never automated by WhatSoup).
-2. Run the capture in that context. It runs the runtime's own read-only
-   probe and prints exactly one line, so it is safe in a shared terminal log:
+2. Run the capture in that context. It runs the runtime's own read-only probe
+   and prints the digest and nothing else — but **`--silent` is required** for
+   that to be true. Without it `npm run` writes its own four-line banner to
+   **stdout**, ahead of the digest:
 
    ```bash
-   CLAUDE_CONFIG_DIR=/absolute/claude-root npm run claude-account-digest
-   # sha256:… ← the only output; exit 2 = not logged in, 3 = identity unreadable
+   CLAUDE_CONFIG_DIR=/absolute/claude-root npm run --silent claude-account-digest
+   # sha256:… ← the only stdout line; exit 2 = not logged in, 3 = identity unreadable
    ```
+
+   Drop `--silent` and a capture like `DIGEST=$(npm run claude-account-digest)`
+   swallows the banner too, so `service.expectedAccountDigest` gets a value that
+   can never match and the instance degrades with
+   `credential_identity_mismatch` — the alert firing for a defect in the
+   capture, not in the credential. Diagnostics from the pinned-node wrapper
+   (including its fallback `WARN`) go to stderr, so capturing stdout alone is
+   safe.
 
    Do **not** substitute `claude auth status --json` here: it prints the raw
    email and organization id.
@@ -645,8 +655,16 @@ with the account the owner ratified?**
    keychain is bound to the GUI/login session, so a cold SSH shell has none and
    the probe returns `loggedIn: false` — the capture exits 2 even with the
    authoritative `CLAUDE_CONFIG_DIR` and an explicit `--binary`. Use a
-   GUI/console session on the host, or a one-shot bootstrapped into the owner's
-   `gui/<uid>` launchd domain when the capture has to be unattended.
+   GUI/console session on the host.
+
+   When the capture genuinely has to be unattended, a one-shot job bootstrapped
+   into the owner's `gui/<uid>` launchd domain works, with two conditions.
+   Bootstrapping into somebody's login domain is a privileged act on their
+   session: it needs the **owner's explicit authorization**, not merely
+   filesystem access. And the job is **temporary** — `bootout` it and delete its
+   plist as soon as the digest is captured. A one-shot left loaded is residue
+   that can re-run at the next login, re-probing the credential with nobody
+   watching.
 
    That exit 2 is a false negative about the capture *context*, not evidence
    the instance is logged out, and the message's "log in interactively first"
