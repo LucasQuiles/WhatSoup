@@ -17,6 +17,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { ToolRegistry } from '../../../src/mcp/registry.ts';
 import { WhatSoupSocketServer } from '../../../src/mcp/socket-server.ts';
+import { noExecutingSession } from '../../../src/mcp/types.ts';
 import {
   assertSafeOwnedSocket,
   PerChatMcpSocketManager,
@@ -152,6 +153,7 @@ describe('PerChatMcpSocketManager', () => {
       socketPath,
       new ToolRegistry(),
       { tier: 'global', allowedRoot: root },
+      noExecutingSession,
     );
 
     await expect(server.startAndWait({ unlinkExisting: false })).rejects.toBeDefined();

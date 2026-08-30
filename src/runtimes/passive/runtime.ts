@@ -10,7 +10,7 @@ import type { Database } from '../../core/database.ts';
 import { ToolRegistry } from '../../mcp/registry.ts';
 import { registerAllTools } from '../../mcp/register-all.ts';
 import { WhatSoupSocketServer } from '../../mcp/socket-server.ts';
-import type { SessionContext } from '../../mcp/types.ts';
+import { noExecutingSession, type SessionContext } from '../../mcp/types.ts';
 import { join } from 'node:path';
 import { createChildLogger } from '../../logger.ts';
 
@@ -51,7 +51,12 @@ export class PassiveRuntime implements Runtime {
     // against a legitimate directory rather than being denied outright, while paths
     // outside the instance state (system dirs, credentials) are rejected.
     const session: SessionContext = { tier: 'global', allowedRoot: this.config.paths.stateRoot };
-    this.socketServer = new WhatSoupSocketServer(socketPath, this.registry, session);
+    this.socketServer = new WhatSoupSocketServer(
+      socketPath,
+      this.registry,
+      session,
+      noExecutingSession,
+    );
     this.socketServer.start();
     log.info(
       { socketPath, toolCount: this.registry.listTools({ tier: 'global' }).length },

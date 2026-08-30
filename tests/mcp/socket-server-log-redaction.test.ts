@@ -12,6 +12,7 @@ vi.mock('../../src/logger.ts', async () => {
 
 import { WhatSoupSocketServer } from '../../src/mcp/socket-server.ts';
 import type { ToolRegistry } from '../../src/mcp/registry.ts';
+import { noExecutingSession } from '../../src/mcp/types.ts';
 import { makeSocketPath } from '../helpers/socket-rpc.ts';
 import { waitForSocket } from '../helpers/wait-for.ts';
 
@@ -63,6 +64,7 @@ describe('WhatSoupSocketServer malformed JSON-RPC logging', () => {
       socketPath,
       {} as ToolRegistry,
       { tier: 'global' },
+      noExecutingSession,
     );
     server.start();
     await waitForSocket(socketPath);

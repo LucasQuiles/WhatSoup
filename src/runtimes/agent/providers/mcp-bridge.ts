@@ -149,18 +149,15 @@ export async function executeBridgeTool(
  * executing-turn register so stale actor or purpose values never reach
  * listTools/call. Explicit undefined values fail closed between turns.
  * Mirrors socket-server.ts:238-243 (QR-042 per-request snapshot + resolver
- * override). When no resolver is supplied the stored session is used verbatim
- * (unchanged behavior for callers that manage identity themselves).
+ * override). The resolver is mandatory so a new caller cannot silently trust
+ * long-lived authorization or confinement fields by omitting the rail.
  */
 export function createProviderMcpBridge(
   registry: ToolRegistry,
   session: SessionContext,
-  resolveExecutingSession?: () => ExecutingSessionContext,
+  resolveExecutingSession: () => ExecutingSessionContext,
 ): ProviderMcpBridge {
-  const snapshotSession = (): SessionContext =>
-    resolveExecutingSession === undefined
-      ? session
-      : { ...session, ...resolveExecutingSession() };
+  const snapshotSession = (): SessionContext => ({ ...session, ...resolveExecutingSession() });
   return {
     listTools(): ProviderMcpTool[] {
       return registry.listTools(snapshotSession());
