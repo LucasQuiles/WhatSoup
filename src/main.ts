@@ -1131,6 +1131,25 @@ const stuckInboundInterval = setInterval(() => {
   } catch (err) { log.error({ err }, 'stuck-inbound sweep failed'); }
 }, 15 * MS_PER_MINUTE);
 
+// 13c. Continuity-candidate reconciler — settle the consumed_at lifecycle for
+// dropped admitted turns (reply guarantee armed, NO terminal outbound; owner
+// messages have died this way). The out-of-process observer
+// (deploy/scripts/reply-guarantee-observer.py) owns the operator alert; this
+// pass only stamps marks whose drop was already resolved by another path so the
+// reader stops re-scanning them. Unresolved drops are left surfaced — never
+// auto-consumed — because re-delivery is deferred to the recovery follow-up.
+// Zero delivery blast radius. Runs once at startup then on the same slow cadence
+// as the stuck-inbound sweep; failure-isolated so a sweep error never breaks the
+// process.
+try {
+  durability.reconcileContinuityCandidates();
+} catch (err) { log.error({ err }, 'startup continuity-candidate reconcile failed'); }
+const continuityConsumerInterval = setInterval(() => {
+  try {
+    durability.reconcileContinuityCandidates();
+  } catch (err) { log.error({ err }, 'continuity-candidate reconcile failed'); }
+}, 15 * MS_PER_MINUTE);
+
 // 14. Degradation signal check — detect persistent decryption failures (Type 2)
 // Only run on instances that have Q as a control peer (i.e., heal targets like Loops).
 // Q itself has controlPeers but no 'q' entry — running the timer on Q would accumulate
@@ -1344,6 +1363,7 @@ async function shutdown(signal: string): Promise<void> {
         { name: 'memory-consolidation-scheduler', stop: async () => { await memoryConsolidationScheduler?.stop(); } },
         { name: 'echo-timeout-interval', stop: () => clearInterval(echoTimeoutInterval) },
         { name: 'stuck-inbound-interval', stop: () => clearInterval(stuckInboundInterval) },
+        { name: 'continuity-consumer-interval', stop: () => clearInterval(continuityConsumerInterval) },
         { name: 'lid-reconcile-interval', stop: () => clearInterval(lidReconcileInterval) },
         { name: 'degradation-interval', stop: () => { if (degradationInterval) clearInterval(degradationInterval); } },
         { name: 'startup-notification-controller', stop: () => startupNotificationController?.stop() },

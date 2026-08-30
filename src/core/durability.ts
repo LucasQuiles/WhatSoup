@@ -12,6 +12,7 @@ import {
   setRecoveryMarker,
 } from '../lib/recovery-authority-store.ts';
 import { MS_PER_HOUR, MS_PER_MINUTE } from '../lib/time-units.ts';
+import { systemClock } from '../lib/clock.ts';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
@@ -365,6 +366,31 @@ function normalizeOutboundQuarantineEvidenceCoverage(
     : 'legacy_unclassified';
 }
 
+// ── Continuity-candidate reconciler ──
+//
+// Continuity-candidate marks are already surfaced to operators by the
+// out-of-process observer `deploy/scripts/reply-guarantee-observer.py`, which
+// counts unresolved marks (no terminal/outbound/recovery) into its
+// `reply-guarantee-recovery-debt` signal. This in-process pass does NOT emit a
+// competing alert and does NOT re-deliver. It only reconciles the durable
+// `continuity_candidate_consumed_at` lifecycle: a mark whose drop was already
+// resolved by another path (a terminal record, a terminal outbound, or an
+// enqueued recovery job now covers its seq) is stamped consumed so the reader
+// stops re-scanning it. Unresolved drops — fresh or stale — are LEFT untouched
+// for the observer to surface; auto-consuming them without a recovery path
+// would silently age out real dropped turns. Actual re-delivery is deferred to
+// the recovery follow-up that captures a replay envelope at mark time.
+
+/**
+ * Parse a SQLite `datetime('now')` UTC string (`YYYY-MM-DD HH:MM:SS`, no zone
+ * suffix) to epoch ms. Returns null for a malformed value so the caller treats
+ * it conservatively (unparseable → not fresh) rather than throwing on the sweep.
+ */
+function parseSqliteUtcToMs(value: string): number | null {
+  const ms = Date.parse(`${value.replace(' ', 'T')}Z`);
+  return Number.isNaN(ms) ? null : ms;
+}
+
 // ── SQLite row interfaces ──
 
 /** Row returned by SELECT on inbound_events for pending/processing recovery. */
@@ -477,6 +503,40 @@ export type ContinuityCandidateSource =
   | 'pre_connect_recovery'
   | 'runtime_fault_disarm';
 
+/**
+ * A drop marked within this window of wall-clock time is FRESH: recent enough
+ * that operator catch-up is still meaningful and, in principle, recoverable.
+ * Older marks are STALE and surface-only — never blanket-replayed. Named so the
+ * 30-minute policy has a single source of truth shared by the consumer and its
+ * tests.
+ */
+export const CONTINUITY_CANDIDATE_FRESH_WINDOW_MS = 30 * 60 * 1000;
+
+/** A marked-but-unconsumed continuity candidate (reader projection). */
+export interface UnconsumedContinuityCandidate {
+  seq: number;
+  reason: ContinuityCandidateReason;
+  source: ContinuityCandidateSource;
+  /** SQLite `datetime('now')` UTC string, e.g. `2026-08-29 12:00:00`. */
+  markedAt: string;
+}
+
+/** Outcome of one {@link DurabilityEngine.reconcileContinuityCandidates} pass. */
+export interface ContinuityCandidateReconcileResult {
+  /**
+   * Marks whose drop was already resolved elsewhere (a terminal record,
+   * terminal outbound, or recovery job now covers their seq) and were stamped
+   * `continuity_candidate_consumed_at` on this pass.
+   */
+  reconciled: number;
+  /** Unresolved marks within the fresh window — still actionable, left surfaced. */
+  unresolvedFresh: number;
+  /** Unresolved marks older than the fresh window, left surfaced. */
+  unresolvedStale: number;
+  /** Newest marked_at across the unresolved rows, or null when none. */
+  newestUnresolvedMarkedAt: string | null;
+}
+
 /** Counts returned by {@link DurabilityEngine.sweepStuckInbound}. */
 /**
  * #3374 ask 2: identity of an inbound row the W2 sweep reclaimed as
@@ -555,6 +615,10 @@ type DurabilityStatements = {
   selectInboundReclaimState: PreparedStatement;
   markContinuityCandidate: PreparedStatement;
   markContinuityCandidateIfUnownedAndNoTerminalOutbound: PreparedStatement;
+  selectUnconsumedContinuityCandidates: PreparedStatement;
+  countUnconsumedContinuityCandidates: PreparedStatement;
+  stampContinuityCandidateConsumed: PreparedStatement;
+  continuityCandidateHasTerminalOrRecovery: PreparedStatement;
   markInboundSkipped: PreparedStatement;
   selectInboundStatus: PreparedStatement;
   selectInboundReceipt: PreparedStatement;
@@ -682,6 +746,43 @@ export class DurabilityEngine {
              WHERE o.source_inbound_seq = inbound_events.seq AND o.is_terminal = 1
                AND o.status NOT IN ('quarantined', 'failed_permanent')
            )`,
+      ),
+      selectUnconsumedContinuityCandidates: prepare(
+        `SELECT seq,
+                continuity_candidate_reason AS reason,
+                continuity_candidate_source AS source,
+                continuity_candidate_marked_at AS markedAt
+         FROM inbound_events
+         WHERE continuity_candidate_reason IS NOT NULL
+           AND continuity_candidate_consumed_at IS NULL
+         ORDER BY continuity_candidate_marked_at ASC, seq ASC
+         LIMIT ?`,
+      ),
+      countUnconsumedContinuityCandidates: prepare(
+        `SELECT COUNT(*) AS count
+         FROM inbound_events
+         WHERE continuity_candidate_reason IS NOT NULL
+           AND continuity_candidate_consumed_at IS NULL`,
+      ),
+      // Idempotent stamp: only an as-yet-unconsumed marked row is stamped, so a
+      // repeated consume of the same seq is a no-op (COALESCE preserves the
+      // first stamp; the IS NULL guard prevents a second surfacing).
+      stampContinuityCandidateConsumed: prepare(
+        `UPDATE inbound_events
+         SET continuity_candidate_consumed_at = COALESCE(continuity_candidate_consumed_at, datetime('now'))
+         WHERE seq = ?
+           AND continuity_candidate_reason IS NOT NULL
+           AND continuity_candidate_consumed_at IS NULL`,
+      ),
+      continuityCandidateHasTerminalOrRecovery: prepare(
+        `SELECT 1 AS found
+         WHERE EXISTS (
+             SELECT 1 FROM turn_terminal_records t WHERE t.inbound_seq_key = ?
+           )
+            OR EXISTS (
+             SELECT 1 FROM turn_recovery_jobs j WHERE j.source_inbound_seq = ?
+           )
+         LIMIT 1`,
       ),
       markInboundSkipped: prepare(
         `UPDATE inbound_events SET processing_status = 'complete', completed_at = datetime('now'), terminal_reason = ? WHERE seq = ?`,
@@ -1563,6 +1664,89 @@ export class DurabilityEngine {
       source,
       seq,
     ).changes === 1;
+  }
+
+  /**
+   * Reader for the continuity-candidate consumer: marked-but-unconsumed drops,
+   * oldest first, bounded. A marked row is a durable record that an admitted
+   * turn was dropped with the reply guarantee still armed and no terminal
+   * outbound. Rows already stamped `continuity_candidate_consumed_at` are
+   * excluded so the consumer surfaces each drop once.
+   */
+  getUnconsumedContinuityCandidates(limit = 100): UnconsumedContinuityCandidate[] {
+    return allFromStatement<UnconsumedContinuityCandidate>(
+      this.statements.selectUnconsumedContinuityCandidates,
+      limit,
+    );
+  }
+
+  /** Operator/health probe: how many marked drops remain unsurfaced. */
+  countUnconsumedContinuityCandidates(): number {
+    return (this.statements.countUnconsumedContinuityCandidates.get() as { count: number }).count;
+  }
+
+  /**
+   * Idempotency guard for guarded recovery: true when a terminal record or a
+   * turn-recovery job now exists for this seq. The marker refuses to mark once a
+   * terminal record exists, so a live candidate normally returns false; this is
+   * the defensive check that keeps a seq which acquired coverage after marking
+   * out of the recoverable set.
+   */
+  continuityCandidateHasTerminalOrRecovery(seq: number): boolean {
+    return this.statements.continuityCandidateHasTerminalOrRecovery.get(seq, seq) !== undefined;
+  }
+
+  /**
+   * Reconcile the `continuity_candidate_consumed_at` lifecycle. For each
+   * marked-but-unconsumed row: if the drop was already resolved elsewhere (a
+   * terminal record, terminal outbound, or recovery job now covers its seq),
+   * stamp it consumed so the reader stops re-scanning a settled mark. Rows that
+   * are still unresolved are left untouched and reported by fresh/stale bucket
+   * (diagnostic only — the out-of-process observer owns the operator alert).
+   *
+   * Delivery blast radius is zero: this never re-sends and never mutates an
+   * unresolved drop. Re-delivery of unresolved drops is deferred to the recovery
+   * follow-up, which must capture a replay envelope at mark time — a continuity
+   * candidate has no `turn_terminal_records` row and inbound_events carries no
+   * replay envelope, so it cannot ride the terminal-record-linked
+   * `turn_recovery_jobs` path without fabricating one.
+   *
+   * Idempotent and safe to run repeatedly on a periodic sweep.
+   *
+   * @param nowMs wall-clock reference for the fresh/stale split (injectable for tests).
+   * @param limit max rows surfaced per pass.
+   */
+  reconcileContinuityCandidates(
+    nowMs: number = systemClock.now(),
+    limit = 100,
+  ): ContinuityCandidateReconcileResult {
+    const rows = this.getUnconsumedContinuityCandidates(limit);
+    if (rows.length === 0) {
+      return { reconciled: 0, unresolvedFresh: 0, unresolvedStale: 0, newestUnresolvedMarkedAt: null };
+    }
+
+    let reconciled = 0;
+    let unresolvedFresh = 0;
+    let unresolvedStale = 0;
+    let newestUnresolvedMarkedAt: string | null = null;
+    const freshWindowStart = nowMs - CONTINUITY_CANDIDATE_FRESH_WINDOW_MS;
+    for (const row of rows) {
+      if (this.continuityCandidateHasTerminalOrRecovery(row.seq)) {
+        // Drop already handled by another path — settle the mark.
+        this.statements.stampContinuityCandidateConsumed.run(row.seq);
+        reconciled += 1;
+        continue;
+      }
+      // Genuinely unresolved: leave it for the observer / recovery follow-up.
+      const markedMs = parseSqliteUtcToMs(row.markedAt);
+      if (markedMs !== null && markedMs >= freshWindowStart) unresolvedFresh += 1;
+      else unresolvedStale += 1;
+      if (newestUnresolvedMarkedAt === null || row.markedAt > newestUnresolvedMarkedAt) {
+        newestUnresolvedMarkedAt = row.markedAt;
+      }
+    }
+
+    return { reconciled, unresolvedFresh, unresolvedStale, newestUnresolvedMarkedAt };
   }
 
   markInboundSkipped(seq: number, reason: string): void {
