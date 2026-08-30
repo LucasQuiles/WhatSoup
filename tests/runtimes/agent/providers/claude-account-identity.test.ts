@@ -15,8 +15,10 @@
 import { describe, expect, it } from 'vitest';
 import { computeAccountIdentityDigest } from '../../../../src/lib/account-identity-digest.ts';
 import {
+  ACCOUNT_IDENTITY_PROBE_TIMEOUT_MS,
   accountIdentityDegradedReasons,
   deriveAccountIdentityHealth,
+  observeClaudeAccountIdentity,
   parseClaudeAuthStatusIdentity,
   verifyClaudeAccountIdentity,
   type AccountIdentityVerification,
@@ -379,5 +381,149 @@ describe('verifyClaudeAccountIdentity — req-03: zero credential writes on ever
     }
     expect(statuses).toEqual(['match', 'mismatch', 'unverifiable', 'unverifiable', 'unverifiable', 'unverifiable', 'unverifiable']);
     expect(snapshot()).toEqual(before);
+  });
+});
+
+/**
+ * observeClaudeAccountIdentity - the ONE binary-resolve + probe + parse +
+ * classify ladder.
+ *
+ * It used to exist twice: here inside verifyClaudeAccountIdentity, and again
+ * in scripts/claude-account-digest.ts, with the 15s bound as two unlinked
+ * private constants. The verifier maps this outcome to a verification status;
+ * the capture script maps it to exit codes. These cases pin the ladder itself,
+ * so the two consumers cannot drift apart in the classification they share.
+ */
+describe('observeClaudeAccountIdentity - the shared classification ladder', () => {
+  it('returns the digest for a clean, logged-in status', async () => {
+    const d = deps();
+    await expect(observeClaudeAccountIdentity(d.deps)).resolves.toEqual({ kind: 'identity', digest: EXPECTED });
+  });
+
+  it('probes read-only auth-status with the scrubbed allow-list env and the shared timeout', async () => {
+    const probes: Array<{ binary: string; args: string[]; env: NodeJS.ProcessEnv; options: unknown }> = [];
+    await observeClaudeAccountIdentity({
+      getProviderBinary: () => '/opt/bin/claude',
+      probeBinaryCommand: async (binary, args, env, options) => {
+        probes.push({ binary, args, env, options });
+        return { status: 'ok', output: authStatusJson() };
+      },
+      env: { HOME: '/fixture/home', PATH: '/opt/bin', USER: 'owner', CLAUDE_CONFIG_DIR: '/fixture/home/.claude-phbot', SECRET_TOKEN: 'never-forwarded' },
+    });
+    expect(probes).toHaveLength(1);
+    expect(probes[0]!.binary).toBe('/opt/bin/claude');
+    expect(probes[0]!.args).toEqual(['auth', 'status', '--json']);
+    expect(probes[0]!.env).toEqual({
+      HOME: '/fixture/home',
+      PATH: '/opt/bin',
+      USER: 'owner',
+      NO_COLOR: '1',
+      CLAUDE_CONFIG_DIR: '/fixture/home/.claude-phbot',
+    });
+    expect(probes[0]!.options).toMatchObject({ timeoutMs: ACCOUNT_IDENTITY_PROBE_TIMEOUT_MS });
+  });
+
+  it('exports a single 15s timeout constant for both consumers to share', () => {
+    expect(ACCOUNT_IDENTITY_PROBE_TIMEOUT_MS).toBe(15_000);
+  });
+
+  it('an explicit binary skips provider resolution entirely', async () => {
+    let resolved = 0;
+    const probes: string[] = [];
+    const observed = await observeClaudeAccountIdentity({
+      binary: '/custom/claude',
+      getProviderBinary: () => { resolved += 1; return '/opt/bin/claude'; },
+      probeBinaryCommand: async (binary) => { probes.push(binary); return { status: 'ok', output: authStatusJson() }; },
+      env: { HOME: '/fixture/home', PATH: '/opt/bin' },
+    });
+    expect(observed).toEqual({ kind: 'identity', digest: EXPECTED });
+    expect(resolved).toBe(0);
+    expect(probes).toEqual(['/custom/claude']);
+  });
+
+  it('a missing binary fails before any probe', async () => {
+    let probed = 0;
+    const observed = await observeClaudeAccountIdentity({
+      getProviderBinary: () => null,
+      probeBinaryCommand: async () => { probed += 1; return { status: 'ok', output: authStatusJson() }; },
+      env: {},
+    });
+    expect(observed).toEqual({ kind: 'failed', reason: 'binary-missing' });
+    expect(probed).toBe(0);
+  });
+
+  it('a throwing binary resolver is contained as binary-missing, not propagated', async () => {
+    const observed = await observeClaudeAccountIdentity({
+      getProviderBinary: () => { throw new Error('resolver exploded'); },
+      probeBinaryCommand: async () => ({ status: 'ok', output: authStatusJson() }),
+      env: {},
+    });
+    expect(observed).toEqual({ kind: 'failed', reason: 'binary-missing' });
+  });
+
+  it('a throwing probe is contained as probe-threw, not propagated', async () => {
+    const observed = await observeClaudeAccountIdentity({
+      getProviderBinary: () => '/opt/bin/claude',
+      probeBinaryCommand: async () => { throw new Error('spawn exploded'); },
+      env: {},
+    });
+    expect(observed).toEqual({ kind: 'failed', reason: 'probe-threw' });
+  });
+
+  it('INVARIANT: a non-zero exit with valid-looking identity output is probe-failed, never an identity', async () => {
+    // The capture script must not emit a digest, and the verifier must not
+    // report a match, from output that was never cleanly produced.
+    const d = deps({ status: 'failed', output: authStatusJson() });
+    await expect(observeClaudeAccountIdentity(d.deps)).resolves.toEqual({ kind: 'failed', reason: 'probe-failed' });
+  });
+
+  it('INVARIANT: not-logged-in is recognized regardless of exit status', async () => {
+    for (const status of ['ok', 'failed'] as const) {
+      const d = deps({ status, output: JSON.stringify({ loggedIn: false }) });
+      await expect(observeClaudeAccountIdentity(d.deps), status)
+        .resolves.toEqual({ kind: 'failed', reason: 'not-logged-in' });
+    }
+  });
+
+  it('classifies missing identity fields and unparseable output as distinct reasons', async () => {
+    const missing = deps({ output: authStatusJson({ orgId: undefined }) });
+    await expect(observeClaudeAccountIdentity(missing.deps))
+      .resolves.toEqual({ kind: 'failed', reason: 'identity-fields-missing' });
+
+    const garbage = deps({ output: `noise ${EMAIL} ${ORG_ID}` });
+    await expect(observeClaudeAccountIdentity(garbage.deps))
+      .resolves.toEqual({ kind: 'failed', reason: 'unparseable' });
+  });
+
+  it('never leaks a raw identifier on any branch', async () => {
+    const outputs = [
+      authStatusJson(),
+      JSON.stringify({ loggedIn: false }),
+      authStatusJson({ email: undefined }),
+      `noise ${EMAIL} ${ORG_ID}`,
+    ];
+    for (const output of outputs) {
+      for (const status of ['ok', 'failed'] as const) {
+        assertNoRawIdentity(await observeClaudeAccountIdentity(deps({ output, status }).deps));
+      }
+    }
+  });
+
+  it('the verifier is a thin mapping over this ladder: every failure reason becomes unverifiable with that reason', async () => {
+    const cases: Array<{ over: Parameters<typeof deps>[0]; reason: string }> = [
+      { over: { status: 'failed', output: authStatusJson() }, reason: 'probe-failed' },
+      { over: { status: 'failed', output: JSON.stringify({ loggedIn: false }) }, reason: 'not-logged-in' },
+      { over: { output: authStatusJson({ orgId: undefined }) }, reason: 'identity-fields-missing' },
+      { over: { output: 'not json at all' }, reason: 'unparseable' },
+      { over: { getProviderBinary: () => null }, reason: 'binary-missing' },
+    ];
+    for (const { over, reason } of cases) {
+      const observed = await observeClaudeAccountIdentity(deps(over).deps);
+      expect(observed.kind, reason).toBe('failed');
+      const verification = await verifyClaudeAccountIdentity(EXPECTED, deps(over).deps);
+      expect(verification.status, reason).toBe('unverifiable');
+      expect(verification.reason, reason).toBe(reason);
+      expect(verification.observedDigestPrefix, reason).toBeNull();
+    }
   });
 });

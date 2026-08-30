@@ -64,6 +64,38 @@ export function asNonEmptyString(value: unknown): string | undefined {
 }
 
 /**
+ * True iff `value` contains a C0 control character (U+0000-U+001F) or DEL
+ * (U+007F).
+ *
+ * `has*` is a fourth prefix alongside the naming law below: it asks about the
+ * CONTENT of a string that is already known to be a string, rather than
+ * narrowing an `unknown`.
+ *
+ * Consolidates the byte-identical C0+DEL detectors in
+ * lib/account-identity-digest (`CONTROL_CHARS_RE`, guarding the injectivity of
+ * the `\n`-joined canonical digest input) and lib/launchd-service-config
+ * (`hasControlChars`, guarding single-line rendered plist values) — two
+ * predicates that police sibling `service.*` fields of the SAME instance-config
+ * block and so must never disagree.
+ *
+ * Deliberately NOT the widest such class in the tree, and deliberately not
+ * merged with the two that stay separate:
+ *   - lib/sql-fts `unsafeCharPattern` also rejects `"` (FTS quoting), and
+ *   - core/chat-display-name `sanitizeDisplayNameForRender` also strips C1
+ *     (U+0080-U+009F) and U+2028/U+2029 (WhatsApp-markdown rendering).
+ * Both are supersets serving different threat models; adopting either here
+ * would silently narrow what config paths and account identities are admitted.
+ *
+ * Code-unit matching is sound for this class: no C0/DEL code unit can occur
+ * inside a surrogate pair, so an astral character never matches.
+ */
+const CONTROL_CHARACTERS_RE = /[\u0000-\u001f\u007f]/;
+
+export function hasControlCharacters(value: string): boolean {
+  return CONTROL_CHARACTERS_RE.test(value);
+}
+
+/**
  * Throwing companions to the predicates above.
  *
  * Naming law for this module:

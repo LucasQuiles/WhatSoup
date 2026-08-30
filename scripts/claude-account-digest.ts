@@ -14,12 +14,16 @@
  * or output unparseable; 4 binary missing or probe failed; 64 usage.
  */
 import { parseClosedOptions, type ClosedOptionError } from './lib/cli-args.ts';
+import { scrubbedAuthStatusEnv } from '../src/runtimes/agent/providers/account-auth-status.ts';
 import {
-  CLAUDE_AUTH_STATUS_ARGS,
-  scrubbedAuthStatusEnv,
-} from '../src/runtimes/agent/providers/account-auth-status.ts';
-import { probeBinaryCommand } from '../src/runtimes/agent/providers/binary-preflight.ts';
-import { parseClaudeAuthStatusIdentity } from '../src/runtimes/agent/providers/claude-account-identity.ts';
+  probeBinaryCommand,
+  type BinaryAuthStatusResult,
+  type BinaryCommandProbeOptions,
+} from '../src/runtimes/agent/providers/binary-preflight.ts';
+import {
+  observeClaudeAccountIdentity,
+  type ObservedAccountIdentityFailureReason,
+} from '../src/runtimes/agent/providers/claude-account-identity.ts';
 import { getProviderBinary } from '../src/runtimes/agent/session.ts';
 
 export interface ClaudeAccountDigestArgs {
@@ -33,13 +37,35 @@ export interface ClaudeAccountDigestDependencies {
     binary: string,
     args: string[],
     env: NodeJS.ProcessEnv,
-  ) => Promise<{ status: 'ok' | 'failed'; output: string }>;
+    options?: BinaryCommandProbeOptions,
+  ) => Promise<BinaryAuthStatusResult>;
   env: NodeJS.ProcessEnv;
   stdout: (line: string) => void;
   stderr: (line: string) => void;
 }
 
-const PROBE_TIMEOUT_MS = 15_000;
+/**
+ * Exit code and operator message per observation-failure class.
+ *
+ * A total Record over the shared failure union, so a new failure class in the
+ * runtime observer is a compile error here until this script decides what it
+ * means to an operator — rather than silently collapsing into a wrong code.
+ * Every message is content-free: no raw identifier, no CLI output.
+ */
+const FAILURE_EXITS: Record<
+  ObservedAccountIdentityFailureReason,
+  { code: number; message: string }
+> = {
+  'binary-missing': { code: 4, message: 'claude binary not found: pass --binary <path> or fix PATH' },
+  'probe-threw': { code: 4, message: 'auth-status probe failed to run' },
+  'probe-failed': { code: 4, message: 'auth-status probe exited non-zero; no digest captured' },
+  'not-logged-in': {
+    code: 2,
+    message: 'claude CLI reports not logged in for this config root — log in interactively first, then re-run',
+  },
+  unparseable: { code: 3, message: 'auth-status output unparseable; no digest captured' },
+  'identity-fields-missing': { code: 3, message: 'auth-status output has identity fields missing; no digest captured' },
+};
 
 const CLOSED_OPTION_MESSAGES: Record<ClosedOptionError, string> = {
   'ci.input.duplicate-option': 'each option may be provided only once',
@@ -87,53 +113,36 @@ export async function runClaudeAccountDigest(
     return 0;
   }
 
-  let binary: string | null = args.binary;
-  if (binary === null) {
-    try {
-      binary = deps.getProviderBinary();
-    } catch {
-      binary = null;
-    }
+  // The SAME binary-resolve + probe + parse + classify ladder the runtime
+  // verifier runs, including the shared probe timeout and the shared
+  // auth-status env scrub. This script only decides what each outcome means to
+  // an operator. The raw output is classified inside the observer, never echoed.
+  const observed = await observeClaudeAccountIdentity({
+    binary: args.binary,
+    getProviderBinary: () => deps.getProviderBinary(),
+    probeBinaryCommand: (binary, probeArgs, env, options) => deps.probe(binary, probeArgs, env, options),
+    env: deps.env,
+  });
+  if (observed.kind === 'identity') {
+    deps.stdout(observed.digest);
+    return 0;
   }
-  if (!binary) {
-    deps.stderr('claude binary not found: pass --binary <path> or fix PATH');
-    return 4;
-  }
-
-  let probe: { status: 'ok' | 'failed'; output: string };
-  try {
-    probe = await deps.probe(binary, [...CLAUDE_AUTH_STATUS_ARGS], scrubbedAuthStatusEnv(deps.env));
-  } catch {
-    deps.stderr('auth-status probe failed to run');
-    return 4;
-  }
-  // The raw output is classified, never echoed. Not-logged-in is recognized
-  // regardless of exit status (the CLI reports it structurally either way).
-  const observed = parseClaudeAuthStatusIdentity(probe.output);
-  if (observed.kind === 'absent' && observed.reason === 'not-logged-in') {
-    deps.stderr('claude CLI reports not logged in for this config root — log in interactively first, then re-run');
-    return 2;
-  }
-  if (probe.status !== 'ok') {
-    deps.stderr('auth-status probe exited non-zero; no digest captured');
-    return 4;
-  }
-  if (observed.kind === 'unparseable') {
-    deps.stderr('auth-status output unparseable; no digest captured');
-    return 3;
-  }
-  if (observed.kind === 'absent') {
-    deps.stderr('auth-status output has identity fields missing; no digest captured');
-    return 3;
-  }
-  deps.stdout(observed.digest);
-  return 0;
+  const failure = FAILURE_EXITS[observed.reason];
+  deps.stderr(failure.message);
+  return failure.code;
 }
 
 if (process.argv[1]?.endsWith('claude-account-digest.ts')) {
   runClaudeAccountDigest(process.argv.slice(2), {
     getProviderBinary: () => getProviderBinary('claude-cli'),
-    probe: (binary, args, env) => probeBinaryCommand(binary, args, env, { timeoutMs: PROBE_TIMEOUT_MS }),
+    // `options` MUST be forwarded: the probe bound is supplied by the shared
+    // observer (ACCOUNT_IDENTITY_PROBE_TIMEOUT_MS = 15s). Dropping it here
+    // would silently fall back to probeBinaryCommand's own 5s default — a
+    // TIGHTER bound than this probe needs, producing spurious `probe-failed`
+    // on a loaded host, which is exactly why the 15s constant exists. A fake
+    // that ignores extra arguments cannot catch this, which is why one fake in
+    // the script's suite captures `options` and asserts the bound explicitly.
+    probe: (binary, args, env, options) => probeBinaryCommand(binary, args, env, options),
     // Single allow-list: scrubbedAuthStatusEnv (the same scrub the runtime
     // verifier applies) is the ONLY env filter, applied here and again —
     // idempotently — before the spawn, so the captured digest context cannot
