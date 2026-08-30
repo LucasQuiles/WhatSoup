@@ -77,10 +77,11 @@ export interface SessionContext {
 }
 
 /** Mutable authorization and confinement fields resolved from the turn currently executing. */
-export type ExecutingSessionContext = Pick<
-  SessionContext,
-  'actorJid' | 'purpose' | 'conversationKey'
->;
+export interface ExecutingSessionContext {
+  actorJid: SessionContext['actorJid'];
+  purpose: SessionContext['purpose'];
+  conversationKey: SessionContext['conversationKey'];
+}
 
 declare const resolvedSessionContextBrand: unique symbol;
 

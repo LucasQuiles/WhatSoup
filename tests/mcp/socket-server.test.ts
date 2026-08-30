@@ -1322,7 +1322,7 @@ describe("F-STICKY-ACTOR: actorResolver overrides the per-request actor (D2)", (
   });
 
   async function observeActor(
-    resolver: (() => { actorJid: string | undefined; purpose: undefined }) | undefined,
+    resolver: (() => { actorJid: string | undefined; purpose: undefined; conversationKey: undefined }) | undefined,
     baseActor: string | undefined,
   ): Promise<string | undefined> {
     let observed: string | undefined = "UNSET";
@@ -1349,14 +1349,14 @@ describe("F-STICKY-ACTOR: actorResolver overrides the per-request actor (D2)", (
 
   it("a resolver return value overrides the broadcast base-session actor", async () => {
     expect(await observeActor(
-      () => ({ actorJid: "resolver-actor", purpose: undefined }),
+      () => ({ actorJid: "resolver-actor", purpose: undefined, conversationKey: undefined }),
       "base-actor",
     )).toBe("resolver-actor");
   });
 
   it("a resolver returning undefined yields an undefined actor (fail-closed source)", async () => {
     expect(await observeActor(
-      () => ({ actorJid: undefined, purpose: undefined }),
+      () => ({ actorJid: undefined, purpose: undefined, conversationKey: undefined }),
       "base-actor",
     )).toBeUndefined();
   });
@@ -1377,7 +1377,7 @@ describe("F-STICKY-ACTOR: actorResolver overrides the per-request actor (D2)", (
       socketPath,
       registry,
       makeSession({ actorJid: "base-actor" }),
-      () => ({ actorJid: "resolver-actor", purpose: undefined }),
+      () => ({ actorJid: "resolver-actor", purpose: undefined, conversationKey: undefined }),
     );
     server.start();
     await waitForSocket(socketPath);
@@ -1441,6 +1441,7 @@ describe("F-STICKY-ACTOR: actorResolver overrides the per-request actor (D2)", (
     let executing = {
       actorJid: 'admin@s.whatsapp.net' as string | undefined,
       purpose: 'scheduled-agent-job' as SessionContext['purpose'],
+      conversationKey: undefined as string | undefined,
     };
     const resolveExecuting = () => executing;
     server = new WhatSoupSocketServer(
@@ -1468,11 +1469,11 @@ describe("F-STICKY-ACTOR: actorResolver overrides the per-request actor (D2)", (
     expect((await call(103, 'delete_chat')).result?.isError ?? true).toBe(true);
     expect((await call(104, 'send_message')).result?.isError ?? false).toBe(false);
 
-    executing = { actorJid: 'admin@s.whatsapp.net', purpose: undefined };
+    executing = { actorJid: 'admin@s.whatsapp.net', purpose: undefined, conversationKey: undefined };
     expect(await listNames(105)).toContain('delete_chat');
     expect((await call(106, 'delete_chat')).result?.isError ?? false).toBe(false);
 
-    executing = { actorJid: 'admin@s.whatsapp.net', purpose: 'scheduled-agent-job' };
+    executing = { actorJid: 'admin@s.whatsapp.net', purpose: 'scheduled-agent-job', conversationKey: undefined };
     expect(await listNames(107)).not.toContain('delete_chat');
     expect((await call(108, 'delete_chat')).result?.isError ?? true).toBe(true);
   });
