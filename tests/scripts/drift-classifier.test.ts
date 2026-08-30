@@ -14,16 +14,17 @@
  *   3. An unrecognised path must force UNKNOWN. Defaulting it to DISJOINT_CODE is exactly
  *      how a new policy surface gets treated as inert.
  */
-import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
-import { changedPaths, main, parseArgs, trackedPaths } from '../../scripts/drift-classify.ts';
+import { main, parseArgs, trackedPaths } from '../../scripts/drift-classify.ts';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 import {
   DRIFT_CLASSES,
@@ -255,24 +256,136 @@ describe('drift-classify CLI — the IO boundary', () => {
     });
   });
 
-  it('returns null — not [] — when git cannot answer', () => {
-    // The distinction the whole three-outcome discipline rests on: an empty array means
-    // "nothing changed", null means "I could not look".
-    expect(changedPaths('does-not-exist-aaa', 'does-not-exist-bbb', repoRoot)).toBeNull();
-  });
-
-  it('returns a real path list for a range that exists', () => {
-    const paths = changedPaths('HEAD~1', 'HEAD', repoRoot);
-    expect(paths).not.toBeNull();
-    expect(Array.isArray(paths)).toBe(true);
-  });
-
   it('exits INCONCLUSIVE when --base is missing rather than assuming a base', () => {
     expect(main([], repoRoot)).toBe(EXIT_INCONCLUSIVE);
   });
 
   it('exits INCONCLUSIVE when the diff cannot be computed', () => {
     expect(main(['--base', 'totally-not-a-ref-zzz'], repoRoot)).toBe(EXIT_INCONCLUSIVE);
+  });
+});
+
+describe('drift-classify consumes classification-admission (#2822 adoption)', () => {
+  /**
+   * The changed-path set feeding the drift verdict is earned through
+   * `createRiskClassificationReceipt` and gated by
+   * `matchesSameProcessRiskClassificationAdmission`, not read from a raw `git diff`.
+   * The observable consequences, each pinned below: inputs the admission boundary refuses
+   * (a base that is not the observed tip's predecessor; a base with no control manifest to
+   * bind the receipt to) are INCONCLUSIVE rather than classified, and a successful verdict
+   * carries the admission evidence digests it was earned under.
+   */
+  const tmp = trackTmpDirs('drift-admission-');
+
+  function git(cwd: string, args: string[]): string {
+    return execFileSync('git', args, {
+      cwd,
+      encoding: 'utf8',
+      env: {
+        PATH: process.env.PATH,
+        HOME: cwd,
+        GIT_CONFIG_NOSYSTEM: '1',
+        GIT_CONFIG_GLOBAL: '/dev/null',
+        GIT_AUTHOR_NAME: 'Fixture Author',
+        GIT_AUTHOR_EMAIL: 'fixture@example.invalid',
+        GIT_COMMITTER_NAME: 'Fixture Author',
+        GIT_COMMITTER_EMAIL: 'fixture@example.invalid',
+        GIT_NO_REPLACE_OBJECTS: '1',
+        GIT_TERMINAL_PROMPT: '0',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).trim();
+  }
+
+  function write(root: string, path: string, content: string): void {
+    const target = join(root, path);
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, content, 'utf8');
+  }
+
+  function commit(root: string, message: string): string {
+    git(root, ['add', '-A']);
+    git(root, ['commit', '--quiet', '-m', message]);
+    return git(root, ['rev-parse', 'HEAD']);
+  }
+
+  function fixture(options: { manifest?: boolean } = {}): { root: string; baseOid: string } {
+    const root = tmp.make('repo');
+    git(root, ['init', '--quiet']);
+    if (options.manifest !== false) {
+      mkdirSync(join(root, 'controls'), { recursive: true });
+      cpSync(
+        resolve(repoRoot, 'controls/ci-control-manifest.json'),
+        join(root, 'controls/ci-control-manifest.json'),
+      );
+    }
+    write(root, 'docs/guide.md', 'base guide\n');
+    write(root, 'src/runtimes/agent/runtime.ts', 'export const value = 1;\n');
+    return { root, baseOid: commit(root, 'base') };
+  }
+
+  /** Run main() capturing console.log output, so JSON payloads can be asserted. */
+  function run(argv: string[], cwd: string): { code: number; lines: string[] } {
+    const lines: string[] = [];
+    const spy = vi.spyOn(console, 'log').mockImplementation((message?: unknown) => {
+      lines.push(String(message));
+    });
+    try {
+      return { code: main(argv, cwd), lines };
+    } finally {
+      spy.mockRestore();
+    }
+  }
+
+  it('classifies a clean ancestor chain as before, now carrying admission evidence', () => {
+    const { root, baseOid } = fixture();
+    write(root, 'docs/guide.md', 'revised guide\n');
+    const observedOid = commit(root, 'observed');
+    const { code, lines } = run(['--base', baseOid, '--observed', observedOid, '--json'], root);
+    expect(code).toBe(EXIT_CONTINUE);
+    const payload = JSON.parse(lines.join('\n')) as {
+      drift: string;
+      admission?: { evidenceDigest?: string; manifestDigest?: string; classifierDigest?: string };
+    };
+    expect(payload.drift).toBe('DISJOINT_METADATA');
+    // The receipt bindings prove the verdict was earned through the admission module.
+    expect(payload.admission?.evidenceDigest).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(payload.admission?.manifestDigest).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(payload.admission?.classifierDigest).toMatch(/^sha256:[0-9a-f]{64}$/);
+  });
+
+  it('refuses a base that is not the observed tip’s predecessor instead of certifying it', () => {
+    // Old behaviour this test retires: `git diff sibling..observed` answers happily, the
+    // docs-only path set classifies DISJOINT_METADATA, and evidence earned against a base
+    // that was never main's predecessor gets certified with exit 0. Through the admission
+    // module the push-event receipt requires merge-base(base, observed) == base, so this
+    // classification is refused as INCONCLUSIVE.
+    const { root, baseOid } = fixture();
+    write(root, 'docs/guide.md', 'observed change\n');
+    const observedOid = commit(root, 'observed');
+    git(root, ['checkout', '--quiet', '--detach', baseOid]);
+    write(root, 'docs/sibling.md', 'sibling change\n');
+    const siblingOid = commit(root, 'sibling');
+    expect(main(['--base', siblingOid, '--observed', observedOid], root)).toBe(EXIT_INCONCLUSIVE);
+  });
+
+  it('is INCONCLUSIVE when the base carries no control manifest to bind the receipt to', () => {
+    const { root, baseOid } = fixture({ manifest: false });
+    write(root, 'docs/guide.md', 'observed change\n');
+    const observedOid = commit(root, 'observed');
+    expect(main(['--base', baseOid, '--observed', observedOid], root)).toBe(EXIT_INCONCLUSIVE);
+  });
+
+  it('classifies candidate overlap as CONFLICT through a paired candidate receipt', () => {
+    const { root, baseOid } = fixture();
+    write(root, 'docs/guide.md', 'observed change\n');
+    const observedOid = commit(root, 'observed');
+    git(root, ['checkout', '--quiet', '--detach', baseOid]);
+    write(root, 'docs/guide.md', 'candidate change\n');
+    const candidateOid = commit(root, 'candidate');
+    expect(
+      main(['--base', baseOid, '--observed', observedOid, '--candidate', candidateOid], root),
+    ).toBe(EXIT_STOP);
   });
 });
 

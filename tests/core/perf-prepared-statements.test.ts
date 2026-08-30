@@ -79,7 +79,12 @@ describe('prepared statement caching', () => {
     // engine — its ten fenced obligation statements (enqueue, getBySource,
     // claim/requeue/commit/terminalize family, expiry, listings) prepare
     // once here.)
-    expect(prepareSpy).toHaveBeenCalledTimes(148);
+    // (+4 vs 148, continuity-consumer (migration 64): the continuity-candidate
+    // consumed_at reconciliation statements — selectUnconsumedContinuityCandidates,
+    // countUnconsumedContinuityCandidates, stampContinuityCandidateConsumed, and
+    // continuityCandidateHasTerminalOrRecovery — prepared once in the constructor
+    // for reconcileContinuityCandidates() reuse.)
+    expect(prepareSpy).toHaveBeenCalledTimes(152);
     prepareSpy.mockClear();
 
     const seq = engine.journalInbound('msg-1', 'conv-1', 'jid-1@s.whatsapp.net', 'agent');

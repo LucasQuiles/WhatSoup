@@ -300,16 +300,47 @@ the gui-domain service reads). The verify-only pin
 ([schema and capture procedure](../configuration.md#ratified-account-identity-serviceexpectedaccountdigest))
 closes that gap without any credential write:
 
-- Capture the digest **in the service's own config-root context**, not in a
-  cold SSH shell — an SSH login shell resolves its own keychain session and
-  its own `CLAUDE_CONFIG_DIR`, so its `claude auth status` describes the SSH
-  context, not the launchd job:
+- Capture the digest **in a context with login-keychain access**, and in the
+  service's own config-root context. A GUI/console session is the normal one.
+  When the capture must be unattended, a one-shot bootstrapped into the owner's
+  `gui/<uid>` launchd domain works, under two conditions: it needs the
+  **owner's explicit authorization**, because bootstrapping into someone's
+  login domain acts on their session rather than just their filesystem; and it
+  is temporary — `bootout` the job and delete its plist as soon as the digest
+  is captured, since a one-shot left loaded re-runs at the next login and
+  re-probes the credential with nobody watching.
+
+  **Not over SSH.** Supplying the plist's
+  `CLAUDE_CONFIG_DIR` does not make an SSH shell sufficient: it has no
+  login-keychain session, so the probe reads `loggedIn: false` and the
+  capture exits 2 anyway (observed live on an instance whose gui-domain
+  service was serving turns on that same credential at the time). That exit 2
+  is a false negative about the capture context, not evidence the instance is
+  logged out. Before treating it as a logout, check the instance's own
+  signals in authenticated `GET /health` — `turn_capability.model_usable`
+  true with `model_usable_stale` false (use these rather than the raw
+  `instance.primaryModelUsability.status`, which has no staleness guard, so a
+  stale `usable` would corroborate a credential that has since died);
+  `turn_capability.last_successful_turn_at` with
+  `last_successful_turn_provider` `claude-cli` and
+  `last_successful_turn_session_current` exactly `true`; and no armed fallback
+  window in the `instance` block (`fallbackActiveUntil`). All of them together
+  mean the credential is live and the SSH reading is wrong. Treat it as a real
+  logout in either of the opposite cases: those signals point the same way as
+  the exit 2, or any one of them is missing or stale. Absent corroboration is
+  not corroboration.
 
   ```bash
-  CLAUDE_CONFIG_DIR=/absolute/claude-root npm run claude-account-digest
+  CLAUDE_CONFIG_DIR=/absolute/claude-root npm run --silent claude-account-digest
   ```
 
-  The command prints one opaque `sha256:` line and nothing else. Never paste
+  `--silent` is load-bearing, not tidiness: without it `npm run` prints a
+  four-line banner to **stdout** before the digest, so
+  `DIGEST=$(npm run claude-account-digest)` captures the banner as well and
+  writes an `expectedAccountDigest` that can never match — producing a
+  `credential_identity_mismatch` alert caused by the capture rather than by the
+  credential. With `--silent` the command emits one opaque `sha256:` line on
+  stdout and nothing else; wrapper diagnostics go to stderr. Never paste
   `claude auth status --json` output into a shared log; it carries the raw
   email and organization id.
 - After the plist is (re)loaded, the runtime verifies the identity at startup
@@ -320,8 +351,11 @@ closes that gap without any credential write:
   never a match. Both degrade health with the same-named cause.
 - Correcting a mismatch is an owner action in the GUI/launchd context (the
   keychain-session hazard above applies), followed by a restart: the identity
-  reasons are not turn-provable, so a silence-latched identity degradation
-  clears only on restart, never on a passing turn.
+  reasons are not turn-provable, so a passing turn never releases a
+  silence-latched identity degradation. Correct the identity first. The
+  restart does not prove the fix — the latch is process-local, so a restart
+  clears it by amnesia — and restarting without correcting the identity only
+  hides the degradation until the next probe re-latches it.
 
 ## BYOK Memory Migration
 

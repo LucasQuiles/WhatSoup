@@ -1,12 +1,17 @@
 /**
  * CLI for the drift classifier (rider P1).
  *
- *   npm run drift:classify -- --base <oid> [--observed <ref>] [--candidate <ref>]
+ *   npm run drift:classify -- --base <ref> [--observed <ref>] [--candidate <ref>]
  *
- * Answers "my evidence was earned against <base>; `main` has moved — what still holds?"
- * by enumerating the paths that changed and classifying them. See
- * `scripts/lib/drift-classifier.ts` for the matrix; all judgement lives there, pure and
- * exhaustively tested. This file is only the IO boundary.
+ * Answers "my evidence was earned against <base>; `main` has moved — what still holds?".
+ * Path judgement lives in `scripts/lib/drift-classifier.ts`, pure and exhaustively tested;
+ * this file is the IO boundary. Since the #2822 adoption the changed-path set feeding that
+ * judgement is earned through `scripts/lib/ci-control/classification-admission.ts`: every
+ * ref is resolved to an immutable OID, a risk-classification receipt is created against the
+ * control manifest at <base>, and the verdict reads the ADMITTED classification's change
+ * facts — never a raw `git diff`. Whatever admission refuses (a base that is not the
+ * observed tip's predecessor, a missing or drifted manifest, an unverifiable receipt) is
+ * INCONCLUSIVE, not a verdict.
  *
  * Exit codes follow the repo's three-outcome discipline, and the third one is the point:
  *   0  continue        — drift does not invalidate the evidence that matters
@@ -19,13 +24,21 @@
 import { spawnSync } from 'node:child_process';
 
 import { assertKnownFlag, takeValue } from './lib/cli-args.ts';
+import {
+  createRiskClassificationReceipt,
+  matchesSameProcessRiskClassificationAdmission,
+  type AdmittedRiskClassificationV1,
+} from './lib/ci-control/classification-admission.ts';
+import { readControlManifestAtRevision } from './lib/ci-control/classifier.ts';
+import { FULL_OID, type ChangeFactV1 } from './lib/ci-control/git-input-core.ts';
+import { digestControlManifest } from './lib/ci-control/manifest.ts';
 import { cleanGitEnv } from './lib/guard-core.ts';
 import {
   EXIT_CONTINUE,
   EXIT_INCONCLUSIVE,
   classifyDrift,
   exitCodeFor,
-  type ClassifyOptions,
+  type DriftVerdict,
 } from './lib/drift-classifier.ts';
 
 const GIT_TIMEOUT_MS = 30_000;
@@ -42,6 +55,17 @@ interface Args {
   candidate?: string;
   json: boolean;
   selfCheck: boolean;
+}
+
+/** The receipt bindings a verdict was earned under, reported alongside it. */
+interface AdmissionEvidence {
+  evidenceDigest: string;
+  manifestDigest: string;
+  classifierDigest: string;
+  changeSetDigest: string | null;
+  reasons: string[];
+  candidateEvidenceDigest: string | null;
+  candidateReasons: string[];
 }
 
 const KNOWN_FLAGS = ['--base', '--observed', '--candidate', '--json', '--self-check'] as const;
@@ -79,9 +103,6 @@ export function parseArgs(argv: readonly string[]): Args {
  * borrow that module's environment and buffer policy, which is the part worth sharing:
  * `cleanGitEnv()` stops an ambient `GIT_DIR` (set whenever a guard runs from a git hook)
  * resolving these commands against the wrong repository.
- *
- * One helper rather than two near-identical functions: the earlier pair had drifted
- * already, with `maxBuffer` set on one call site and not the other.
  */
 function gitLinesOrNull(args: string[], cwd: string): string[] | null {
   const r = spawnSync('git', args, {
@@ -146,15 +167,61 @@ function selfCheck(cwd: string): number {
   return EXIT_CONTINUE;
 }
 
+/** Resolve any ref to the full commit OID admission can bind, or null if git cannot answer. */
+function resolveCommitOid(ref: string, cwd: string): string | null {
+  const lines = gitLinesOrNull(['rev-parse', '--verify', `${ref}^{commit}`], cwd);
+  const oid = lines?.[0];
+  return oid !== undefined && FULL_OID.test(oid) ? oid : null;
+}
+
+/** Every path a change-fact touches: renames contribute both sides. */
+function factPaths(changed: readonly ChangeFactV1[]): string[] {
+  return changed.flatMap((fact) => (fact.oldPath === null ? [fact.path] : [fact.oldPath, fact.path]));
+}
+
 /**
- * `git diff --name-only A..B`, or null if git could not answer.
+ * Project an admitted risk classification into a drift verdict.
  *
- * Returns null rather than [] on failure. An empty array is a real result meaning "nothing
- * changed"; a failure means "I could not look", and the two must not share a
- * representation — that conflation is precisely how an unexaminable tree gets certified.
+ * Port of the #2084 anchor's `projectDriftResult`, adapted to the landed admission API.
+ * The changed-path set is read from the ADMITTED classification, and every binding this
+ * adapter relies on is re-verified here: the admission is same-process (the WeakMap +
+ * digest re-check in `matchesSameProcessRiskClassificationAdmission`), the base really is
+ * the observed tip's predecessor, no merge object is involved, and both receipts were
+ * earned against the manifest read at <base> by the same classifier. Anything that fails
+ * degrades to UNKNOWN — INCONCLUSIVE — rather than a verdict.
  */
-export function changedPaths(from: string, to: string, cwd: string): string[] | null {
-  return gitLinesOrNull(['diff', '--name-only', `${from}..${to}`], cwd);
+function projectAdmittedDrift(
+  observedAdmission: unknown,
+  manifestDigest: string,
+  candidateAdmission: unknown,
+): DriftVerdict {
+  if (!matchesSameProcessRiskClassificationAdmission(observedAdmission)
+    || (candidateAdmission !== null && !matchesSameProcessRiskClassificationAdmission(candidateAdmission))) {
+    return classifyDrift([], { analysisFailed: true });
+  }
+  const observed = observedAdmission.classification;
+  const candidate = candidateAdmission === null
+    ? null
+    : (candidateAdmission as AdmittedRiskClassificationV1).classification;
+  const candidateBindingsMatch = candidate === null || (
+    candidate.outcome === 'pass'
+    && candidate.baseOid === observed.baseOid
+    && candidate.mergeBaseOid === observed.baseOid
+    && candidate.mergeOid === null
+    && candidate.manifestDigest === observed.manifestDigest
+    && candidate.classifierDigest === observed.classifierDigest
+  );
+  if (observed.outcome !== 'pass'
+    || observed.baseOid === null
+    || observed.mergeBaseOid !== observed.baseOid
+    || observed.mergeOid !== null
+    || observed.manifestDigest !== manifestDigest
+    || !candidateBindingsMatch) {
+    return classifyDrift([], { analysisFailed: true });
+  }
+  return classifyDrift(factPaths(observed.changed), {
+    candidatePaths: candidate === null ? [] : factPaths(candidate.changed),
+  });
 }
 
 function main(argv: readonly string[], cwd: string): number {
@@ -168,20 +235,55 @@ function main(argv: readonly string[], cwd: string): number {
     return EXIT_INCONCLUSIVE;
   }
 
-  const drifted = changedPaths(args.base, args.observed, cwd);
-  const options: ClassifyOptions = { analysisFailed: drifted === null };
-  if (args.candidate) {
-    const candidatePaths = changedPaths(args.base, args.candidate, cwd);
-    // A failed candidate diff cannot be treated as "the candidate touches nothing" — that
-    // would silently downgrade every genuine CONFLICT to a milder class.
-    if (candidatePaths === null) options.analysisFailed = true;
-    else options.candidatePaths = candidatePaths;
+  // Admission binds exact objects, not refs: resolve everything to immutable OIDs first.
+  const baseOid = resolveCommitOid(args.base, cwd);
+  const observedOid = resolveCommitOid(args.observed, cwd);
+  const candidateOid = args.candidate === undefined ? null : resolveCommitOid(args.candidate, cwd);
+
+  let verdict: DriftVerdict;
+  let admission: AdmissionEvidence | null = null;
+  if (baseOid === null || observedOid === null || (args.candidate !== undefined && candidateOid === null)) {
+    verdict = classifyDrift([], { analysisFailed: true });
+  } else {
+    try {
+      const manifestDigest = digestControlManifest(readControlManifestAtRevision(cwd, baseOid));
+      const observed = createRiskClassificationReceipt(cwd, {
+        eventName: 'push',
+        baseOid,
+        candidateOid: observedOid,
+        mergeOid: null,
+        manifestDigest,
+      });
+      const candidate = candidateOid === null ? null : createRiskClassificationReceipt(cwd, {
+        eventName: 'local',
+        baseOid,
+        candidateOid,
+        mergeOid: null,
+        manifestDigest,
+      });
+      verdict = projectAdmittedDrift(observed, manifestDigest, candidate);
+      admission = {
+        evidenceDigest: observed.evidenceDigest,
+        manifestDigest: observed.classification.manifestDigest,
+        classifierDigest: observed.classification.classifierDigest,
+        changeSetDigest: observed.classification.changeSetDigest,
+        reasons: [...observed.classification.reasons],
+        candidateEvidenceDigest: candidate?.evidenceDigest ?? null,
+        candidateReasons: [...(candidate?.classification.reasons ?? [])],
+      };
+    } catch (error) {
+      // The manifest could not be read at <base>, or the admission boundary refused the
+      // receipt. Either way nothing was classified — INCONCLUSIVE, never a verdict.
+      const code = error instanceof Error && /^ci\./.test(error.message)
+        ? error.message
+        : 'ci.classification.graph-unavailable';
+      console.error(`drift-classify: INCONCLUSIVE — admission refused the classification (${code})`);
+      verdict = classifyDrift([], { analysisFailed: true });
+    }
   }
 
-  const verdict = classifyDrift(drifted ?? [], options);
-
   if (args.json) {
-    console.log(JSON.stringify(verdict, null, 2));
+    console.log(JSON.stringify({ ...verdict, admission }, null, 2));
   } else {
     console.log(`drift-classify: ${verdict.drift} — ${verdict.behavior}`);
     console.log(`  ${verdict.why}`);
@@ -192,6 +294,12 @@ function main(argv: readonly string[], cwd: string): number {
       console.log(`  invalidates receipts tagged: ${verdict.invalidates.join(', ')}`);
     } else {
       console.log('  invalidates no receipts');
+    }
+    if (admission !== null) {
+      console.log(`  admitted via classification-admission (evidence ${admission.evidenceDigest})`);
+      if (admission.reasons.length > 0) {
+        console.log(`  admission reasons: ${admission.reasons.join(', ')}`);
+      }
     }
     for (const c of verdict.classifications.slice(0, 20)) {
       console.log(`    ${c.drift.padEnd(20)} ${c.path}  (${c.rule})`);

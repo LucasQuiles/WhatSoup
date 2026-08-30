@@ -166,6 +166,13 @@ const { mockConfig } = vi.hoisted(() => ({
   },
 }));
 
+// #3427 S4: capture the resolvePurpose (arg 4) the runtime passes to
+// createProviderMcpBridge (runtime.ts ~9420), so the bridge-surface wiring is
+// asserted through the real runtime, not only the bridge unit test.
+const { bridgeCaptures } = vi.hoisted(() => ({
+  bridgeCaptures: [] as Array<(() => SessionContext['purpose']) | undefined>,
+}));
+
 // ─── Module mocks (mirror global-actor-scoping.test.ts) ──────────────────────
 
 vi.mock('../../../src/logger.ts', async () => {
@@ -261,6 +268,24 @@ vi.mock('../../../src/mcp/socket-server.ts', () => ({
 }));
 
 vi.mock('../../../src/mcp/register-all.ts', () => ({ registerAllTools: vi.fn() }));
+
+// #3427 S4: wrap the REAL createProviderMcpBridge, capturing arg 4
+// (resolvePurpose) so the runtime's bridge wiring is asserted end-to-end.
+vi.mock('../../../src/runtimes/agent/providers/mcp-bridge.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/runtimes/agent/providers/mcp-bridge.ts')>();
+  return {
+    ...actual,
+    createProviderMcpBridge: vi.fn((
+      registry: Parameters<typeof actual.createProviderMcpBridge>[0],
+      session: Parameters<typeof actual.createProviderMcpBridge>[1],
+      resolveActor?: Parameters<typeof actual.createProviderMcpBridge>[2],
+      resolvePurpose?: Parameters<typeof actual.createProviderMcpBridge>[3],
+    ) => {
+      bridgeCaptures.push(resolvePurpose);
+      return actual.createProviderMcpBridge(registry, session, resolveActor, resolvePurpose);
+    }),
+  };
+});
 
 vi.mock('../../../src/runtimes/agent/media-bridge.ts', () => ({
   startMediaBridge: vi.fn(() => null), setMediaBridgeChat: vi.fn(),
@@ -397,6 +422,7 @@ describe('#3427 scheduled-agent-job purpose — scope matrix', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     resetDoubles();
+    bridgeCaptures.length = 0;
     db = new Database(':memory:');
     db.open();
     engine = new DurabilityEngine(db);
@@ -462,6 +488,26 @@ describe('#3427 scheduled-agent-job purpose — scope matrix', () => {
     expect(resolver).toBeDefined();
 
     const midPurpose = resolver!();
+    expect(midPurpose).toBe(SCHEDULED);
+    expect(await reachability(midPurpose)).toBe('denied');
+  });
+
+  it('S4 bridge (single/shared): the runtime wires resolveBridgePurpose into createProviderMcpBridge → forbidden tool DENIED', async () => {
+    // Managed-loop providers serve tools through the in-process bridge, not the
+    // socket. This row asserts the runtime passes a working purpose resolver as
+    // createProviderMcpBridge arg 4 (runtime.ts ~9420) — the bridge surface the
+    // socket rows do not exercise. resolveBridgePurpose delegates to the same
+    // global register the socket resolver reads, so a scheduled job resolves to
+    // 'scheduled-agent-job' mid-turn.
+    makeRuntime({ sessionScope: 'single' });
+    await runtime.start();
+
+    await arriveJob();
+    await waitForInFlightTurn((t) => t.includes('scheduled work'));
+
+    const resolvePurpose = bridgeCaptures.at(-1);
+    expect(resolvePurpose).toBeDefined(); // wiring: bridge arg 4 present
+    const midPurpose = resolvePurpose!();
     expect(midPurpose).toBe(SCHEDULED);
     expect(await reachability(midPurpose)).toBe('denied');
   });
