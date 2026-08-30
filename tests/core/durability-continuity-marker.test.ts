@@ -1,6 +1,24 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Database } from '../../src/core/database.ts';
-import { DurabilityEngine } from '../../src/core/durability.ts';
+import {
+  CONTINUITY_CANDIDATE_FRESH_WINDOW_MS,
+  DurabilityEngine,
+} from '../../src/core/durability.ts';
+import { resetEmitAlertThrottle } from '../../src/lib/emit-alert.ts';
+
+function readAlerts(sink: string, source: string): Array<Record<string, unknown>> {
+  if (!existsSync(sink)) return [];
+  return readFileSync(sink, 'utf8')
+    .split('\n')
+    .filter((l) => l.trim().length > 0)
+    .map((l) => JSON.parse(l) as Record<string, unknown>)
+    .filter((e) => e['source'] === source && e['eventType'] === 'alert');
+}
+
+const CONTINUITY_BACKLOG_ALERT_SOURCE = 'agent_continuity_candidate_backlog';
 
 type InboundContinuityRow = {
   processing_status: string;
@@ -187,5 +205,138 @@ describe('DurabilityEngine continuity candidate marker', () => {
     expect(marked.continuity_candidate_reason).toBe('runtime_fault_no_terminal_outbound');
     expect(marked.continuity_candidate_source).toBe('runtime_fault_disarm');
     expect(getInboundContinuityRow(db, terminalOutbound).continuity_candidate_reason).toBeNull();
+  });
+});
+
+describe('DurabilityEngine continuity candidate reconciler', () => {
+  let db: Database;
+  let engine: DurabilityEngine;
+  let sinkDir: string;
+  let sink: string;
+
+  beforeEach(() => {
+    db = makeDb();
+    engine = new DurabilityEngine(db);
+    sinkDir = mkdtempSync(join(tmpdir(), 'continuity-reconcile-'));
+    sink = join(sinkDir, 'alerts.jsonl');
+    // Prove the in-process reconciler pages NOBODY — the out-of-process observer
+    // owns the recovery-debt alert. Capture any stray emit to a file.
+    process.env['WHATSOUP_ALERT_SINK'] = sink;
+    process.env['EMIT_ALERT_THROTTLE_MS'] = '0';
+    resetEmitAlertThrottle();
+  });
+
+  afterEach(() => {
+    delete process.env['WHATSOUP_ALERT_SINK'];
+    delete process.env['EMIT_ALERT_THROTTLE_MS'];
+    rmSync(sinkDir, { recursive: true, force: true });
+    db.close();
+  });
+
+  function markRuntimeFault(messageId: string, key: string, jid: string): number {
+    const seq = engine.journalInbound(messageId, key, jid, 'agent');
+    engine.markContinuityCandidateIfNoTerminalOutbound(
+      seq,
+      'runtime_fault_no_terminal_outbound',
+      'runtime_fault_disarm',
+    );
+    return seq;
+  }
+
+  /** Insert a minimal terminal record so a mark's seq counts as resolved-elsewhere. */
+  function resolveWithTerminalRecord(seq: number, key: string, jid: string): void {
+    db.raw.prepare(`
+      INSERT INTO turn_terminal_records
+        (scope, conversation_key, delivery_jid, inbound_seq, inbound_seq_key,
+         logical_turn_id, manager_id, generation, attempt_kind,
+         inbound_disposition, delivery_kind, reply_guarantee_disarmed)
+      VALUES ('per_chat', ?, ?, ?, ?, ?, 'mgr-1', 1, 'initial', 'delivered', 'sent', 0)
+    `).run(key, jid, seq, seq, `lt-${seq}`);
+  }
+
+  it('reads marked-but-unconsumed rows, ordered and bounded', () => {
+    const a = markRuntimeFault('reconcile-1', 'ck-1', 'jid-1');
+    const b = markRuntimeFault('reconcile-2', 'ck-2', 'jid-2');
+
+    const rows = engine.getUnconsumedContinuityCandidates();
+    expect(rows.map((r) => r.seq)).toEqual([a, b]);
+    expect(rows[0]).toMatchObject({
+      reason: 'runtime_fault_no_terminal_outbound',
+      source: 'runtime_fault_disarm',
+    });
+    expect(typeof rows[0].markedAt).toBe('string');
+
+    expect(engine.getUnconsumedContinuityCandidates(1).map((r) => r.seq)).toEqual([a]);
+    expect(engine.countUnconsumedContinuityCandidates()).toBe(2);
+  });
+
+  it('leaves unresolved fresh drops untouched and emits no alert', () => {
+    markRuntimeFault('reconcile-1', 'ck-1', 'jid-1');
+    markRuntimeFault('reconcile-2', 'ck-2', 'jid-2');
+
+    const res = engine.reconcileContinuityCandidates(Date.now());
+    expect(res).toMatchObject({ reconciled: 0, unresolvedFresh: 2, unresolvedStale: 0 });
+    expect(res.newestUnresolvedMarkedAt).toEqual(expect.any(String));
+
+    // Never auto-consumed: the observer still surfaces them; no page from us.
+    expect(engine.countUnconsumedContinuityCandidates()).toBe(2);
+    expect(readAlerts(sink, CONTINUITY_BACKLOG_ALERT_SOURCE).length).toBe(0);
+  });
+
+  it('reconciles a mark whose drop was resolved elsewhere: stamps consumed_at, no alert', () => {
+    const a = markRuntimeFault('reconcile-1', 'ck-1', 'jid-1');
+    markRuntimeFault('reconcile-2', 'ck-2', 'jid-2');
+    resolveWithTerminalRecord(a, 'ck-1', 'jid-1');
+    expect(engine.continuityCandidateHasTerminalOrRecovery(a)).toBe(true);
+
+    const res = engine.reconcileContinuityCandidates(Date.now());
+    expect(res).toMatchObject({ reconciled: 1, unresolvedFresh: 1, unresolvedStale: 0 });
+
+    // Only the settled mark is stamped; the bare one is left surfaced.
+    expect(engine.getUnconsumedContinuityCandidates().map((r) => r.seq)).not.toContain(a);
+    expect(engine.countUnconsumedContinuityCandidates()).toBe(1);
+    expect(readAlerts(sink, CONTINUITY_BACKLOG_ALERT_SOURCE).length).toBe(0);
+  });
+
+  it('is idempotent: a repeat reconcile over settled marks is a no-op', () => {
+    const a = markRuntimeFault('reconcile-1', 'ck-1', 'jid-1');
+    resolveWithTerminalRecord(a, 'ck-1', 'jid-1');
+    engine.reconcileContinuityCandidates(Date.now());
+
+    const res2 = engine.reconcileContinuityCandidates(Date.now());
+    expect(res2).toMatchObject({ reconciled: 0, unresolvedFresh: 0, unresolvedStale: 0 });
+    expect(readAlerts(sink, CONTINUITY_BACKLOG_ALERT_SOURCE).length).toBe(0);
+  });
+
+  it('no marks present is a safe no-op with no alert', () => {
+    const res = engine.reconcileContinuityCandidates(Date.now());
+    expect(res).toMatchObject({
+      reconciled: 0,
+      unresolvedFresh: 0,
+      unresolvedStale: 0,
+      newestUnresolvedMarkedAt: null,
+    });
+    expect(readAlerts(sink, CONTINUITY_BACKLOG_ALERT_SOURCE).length).toBe(0);
+  });
+
+  it('buckets unresolved drops older than the fresh window as stale, still untouched', () => {
+    markRuntimeFault('reconcile-1', 'ck-1', 'jid-1');
+
+    // The row is marked ~now; evaluate as if the clock advanced past the window.
+    const future = Date.now() + CONTINUITY_CANDIDATE_FRESH_WINDOW_MS + 60_000;
+    const res = engine.reconcileContinuityCandidates(future);
+    expect(res).toMatchObject({ reconciled: 0, unresolvedFresh: 0, unresolvedStale: 1 });
+
+    // Stale + unresolved is NOT reaped without a recovery path.
+    expect(engine.countUnconsumedContinuityCandidates()).toBe(1);
+    expect(readAlerts(sink, CONTINUITY_BACKLOG_ALERT_SOURCE).length).toBe(0);
+  });
+
+  it('a bare candidate has no terminal or recovery record (recovery deferred)', () => {
+    const seq = markRuntimeFault('reconcile-1', 'ck-1', 'jid-1');
+    expect(engine.continuityCandidateHasTerminalOrRecovery(seq)).toBe(false);
+
+    const res = engine.reconcileContinuityCandidates(Date.now());
+    expect(res).toMatchObject({ reconciled: 0, unresolvedFresh: 1 });
   });
 });
