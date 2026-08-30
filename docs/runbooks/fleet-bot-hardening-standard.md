@@ -92,11 +92,19 @@ host.
 The drift job is compliant only when:
 
 - it is read-only;
-- it uses the active launchd plist `WorkingDirectory` or a separately reviewed
-  release path;
+- it checks the release the job **actually executes** — derived from the job's
+  `ProgramArguments` (the wrapper symlink for instance jobs, the absolute script
+  path for auxiliary jobs) — or a separately reviewed release path. Plist
+  `WorkingDirectory` is cwd, never the selector: a job whose drift check keys on
+  it follows a hand-edit and corroborates the wrong release, which is the
+  false-pass signature this capability exists to catch. Reading
+  `WorkingDirectory` as a cross-check and reporting a disagreement is compliant;
+  substituting it for the selector is not;
 - it queues BOT ERRORS only on drift or checker failure;
 - a clean check is quiet unless a deliberate clear-on-ok recovery proof is being
-  captured;
+  captured, and clear-on-ok is used against a **single** job per invocation —
+  one BOT ERRORS incident key covers every target in an invocation, so a clean
+  job's clear would resolve a drifted job's alert;
 - any install, load, re-cut, restart, or alerting schedule change has separate
   named approval.
 
@@ -195,7 +203,7 @@ closed.
 |---|---|
 | Host | Machine name and access path used for evidence capture |
 | Instance | WhatSoup instance name and service label |
-| Source/live | source commit, release snapshot path, and live `WorkingDirectory` |
+| Source/live | source commit, and the release the job actually executes (resolved from `ProgramArguments`); record live `WorkingDirectory` only as a cross-check, noting any disagreement |
 | Health URL | bound host/port and authentication posture |
 | Primary | configured provider, model, and `primaryModelUsability` state |
 | Turn capability | full `turn_capability` block and latest successful-turn evidence |

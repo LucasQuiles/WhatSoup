@@ -396,6 +396,65 @@ describe('live release drift alert: launchd selector disagreement', () => {
     expect(parseRecordLine(proc.stdout)).toMatchObject({ ok: false, outcome: 'checker_failed' });
     expect(proc.stdout).not.toContain(tmpRoot);
   });
+
+  /**
+   * The structural `deploy/` rule resolves `<dir>/deploy/<exe>` to `<dir>`
+   * WITHOUT consulting a manifest, so it can name a directory that is not a
+   * release at all. That is deliberate — the wrapper computes REPO_ROOT the
+   * same way whether or not a manifest exists — but it is only safe if the
+   * checker then REFUSES the path instead of treating an unverifiable
+   * directory as clean. This pins the refusal: a manifest-less job must alert,
+   * never report a quiet pass.
+   */
+  it('refuses a manifest-less directory reached through the structural deploy/ rule', () => {
+    tmpRoot = mkdtempSync(path.join(tmpdir(), 'whatsoup-live-release-drift-alert-'));
+    const fakeRelease = path.join(tmpRoot, 'fake-release');
+    mkdirSync(path.join(fakeRelease, 'deploy'), { recursive: true });
+    writeFileSync(path.join(fakeRelease, 'deploy/whatsoup'), '#!/bin/sh\nexit 0\n', 'utf8');
+    const plistPath = path.join(tmpRoot, 'com.whatsoup.manifestless.plist');
+    writeFileSync(plistPath, `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.whatsoup.manifestless</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${path.join(fakeRelease, 'deploy/whatsoup')}</string>
+    <string>ph-bot</string>
+  </array>
+</dict>
+</plist>
+`, 'utf8');
+
+    const proc = runCli(['--launchd-plist', plistPath, '--no-emit']);
+
+    expect(proc.status, proc.stderr).not.toBe(0);
+    expect(parseRecordLine(proc.stdout)).toMatchObject({
+      ok: false,
+      outcome: 'drift',
+      issueKinds: { 'manifest-missing': 1 },
+      alert: { required: true },
+    });
+  });
+
+  /**
+   * A `WorkingDirectory` that is not inside any release (a development
+   * checkout, say) resolves to nothing. The cross-check must then stay silent
+   * rather than invent a disagreement — otherwise every dev-shaped job would
+   * alert on a difference that does not exist.
+   */
+  it('raises no disagreement when WorkingDirectory is not inside any release', () => {
+    const { releasePath } = writeFixtureRelease();
+    const nonRelease = path.join(tmpRoot, 'a-git-checkout');
+    mkdirSync(nonRelease, { recursive: true });
+    const plistPath = writeLaunchdPlist(releasePath, { workingDirectory: nonRelease });
+
+    const proc = runCli(['--launchd-plist', plistPath, '--no-emit']);
+
+    expect(proc.status, proc.stderr).toBe(0);
+    expect(parseRecordLine(proc.stdout)).toMatchObject({ ok: true, outcome: 'passed', issueKinds: {} });
+  });
 });
 
 describe('live release drift alert: multi-job coverage', () => {
