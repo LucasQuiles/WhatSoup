@@ -2450,7 +2450,7 @@ export class AgentRuntime implements Runtime {
       registry: this.registry,
       allowedRoot: this.cwd ?? homedir(),
       conversationBound: this.perChatConversationBound,
-      resolveActor: (mapKey) => this.resolveExecutingActorByMapKey(mapKey),
+      resolveExecutingSession: (mapKey) => this.resolveExecutingSessionByMapKey(mapKey),
     });
     this.catalogueSnapshot = createCatalogueSnapshotCache();
 
@@ -5083,7 +5083,11 @@ export class AgentRuntime implements Runtime {
       // read-time resolver at the provider boundary (shared-mode dispatch
       // bypasses sendTurnToSession, so it publishes here).
       const sharedExecQ = this.perChatExecActorQueue.get(GLOBAL_TOOL_SCOPE_KEY) ?? [];
-      sharedExecQ.push({ actorJid: senderJid, purpose });
+      sharedExecQ.push({
+        actorJid: senderJid,
+        purpose,
+        conversationKey: canonicalConversationKey(chatJid, this.db),
+      });
       this.perChatExecActorQueue.set(GLOBAL_TOOL_SCOPE_KEY, sharedExecQ);
       try {
         await this.session!.sendTurn(withProviderApplicationContext(
@@ -5297,7 +5301,11 @@ export class AgentRuntime implements Runtime {
       if (execScopeKey !== undefined) {
         if (!session.getStatus().active) this.perChatExecActorQueue.delete(execScopeKey);
         const execQ = this.perChatExecActorQueue.get(execScopeKey) ?? [];
-        execQ.push({ actorJid, purpose });
+        execQ.push({
+          actorJid,
+          purpose,
+          conversationKey: canonicalConversationKey(chatJid, this.db),
+        });
         this.perChatExecActorQueue.set(execScopeKey, execQ);
         actorPushed = true;
         pushedExecScopeKey = execScopeKey;
@@ -8079,9 +8087,11 @@ export class AgentRuntime implements Runtime {
 
   private resolveExecutingSessionByMapKey(mapKey: string): ExecutingSessionContext {
     const session = this.chatSessions.get(mapKey);
-    if (!session || !session.getStatus().active) return { actorJid: undefined, purpose: undefined };
+    if (!session || !session.getStatus().active) {
+      return { actorJid: undefined, purpose: undefined, conversationKey: undefined };
+    }
     return this.perChatExecActorQueue.get(mapKey)?.[0]
-      ?? { actorJid: undefined, purpose: undefined };
+      ?? { actorJid: undefined, purpose: undefined, conversationKey: undefined };
   }
 
   private resolveExecutingActor(chatJid: string): string | undefined {
@@ -8099,10 +8109,14 @@ export class AgentRuntime implements Runtime {
   }
 
   private resolveExecutingGlobalSession(): ExecutingSessionContext {
-    if (this.sessionScope === 'per_chat') return { actorJid: undefined, purpose: undefined };
-    if (!this.session?.getStatus().active) return { actorJid: undefined, purpose: undefined };
+    if (this.sessionScope === 'per_chat') {
+      return { actorJid: undefined, purpose: undefined, conversationKey: undefined };
+    }
+    if (!this.session?.getStatus().active) {
+      return { actorJid: undefined, purpose: undefined, conversationKey: undefined };
+    }
     return this.perChatExecActorQueue.get(GLOBAL_TOOL_SCOPE_KEY)?.[0]
-      ?? { actorJid: undefined, purpose: undefined };
+      ?? { actorJid: undefined, purpose: undefined, conversationKey: undefined };
   }
 
   private sessionUsesPerChatActorSocket(session: SessionManager): boolean {
