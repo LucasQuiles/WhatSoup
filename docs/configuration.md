@@ -550,7 +550,7 @@ config-owned and regeneration-safe:
 |-------|------|-------|--------|
 | `claudeConfigDir` | string | absolute path; no surrounding whitespace or control characters | Rendered as `CLAUDE_CONFIG_DIR` so the launchd service context resolves the same dedicated claude-cli config root as interactive use of that root (e.g. an isolated per-bot root such as `$HOME/.claude-<instance>`). Omitted → the key is not rendered. The block governs only which config root the service resolves; it does not create or copy credentials (the CLI keeps those keychain-resident). |
 | `pathPrepend` | string[] | at most 16 entries; each an absolute path without `:` or control characters | Prepended in order ahead of the generating shell's ambient `PATH` in the rendered service `PATH` (e.g. `$HOME/.local/bin` so a fallback provider binary resolves under launchd). Omitted or empty → byte-identical `PATH` to the historical render. |
-| `expectedAccountDigest` | string | `sha256:<64 lowercase hex>` exactly, produced by `npm run claude-account-digest`; agent instances with `agentOptions.provider` `claude-cli` (the default) only — rejected elsewhere | Not a render key (never reaches the plist; applies on every platform). The ratified account identity the runtime verifies against; see [Ratified account identity](#ratified-account-identity-serviceexpectedaccountdigest). A raw email or organization id is rejected at admission on every path (create / PATCH / load / discovery). Omitted → verification disabled (one info log line at the first probe). |
+| `expectedAccountDigest` | string | `sha256:<64 lowercase hex>` exactly, produced by `npm run --silent claude-account-digest` (the `--silent` matters — see the capture procedure); agent instances with `agentOptions.provider` `claude-cli` (the default) only — rejected elsewhere | Not a render key (never reaches the plist; applies on every platform). The ratified account identity the runtime verifies against; see [Ratified account identity](#ratified-account-identity-serviceexpectedaccountdigest). A raw email or organization id is rejected at admission on every path (create / PATCH / load / discovery). Omitted → verification disabled (one info log line at the first probe). |
 
 One source of truth: the shape rules live in `src/lib/launchd-service-config.ts`
 and are enforced at config admission (CREATE / PATCH / load / discovery, every
@@ -616,8 +616,12 @@ with the account the owner ratified?**
 - **Latch interaction.** The identity reasons are deliberately not
   turn-provable (a successful turn proves the credential works, not whose it
   is), so if the #2280 silence latch captured one, the instance stays
-  `degraded` until it restarts after the identity is corrected. Restart is
-  the release path; a passing turn is not.
+  `degraded` until it restarts after the identity is corrected. A passing turn
+  never releases it. Note what the restart actually is: the latch is
+  process-local state, so a restart clears it by amnesia, not by proof — it
+  loses the latch rather than satisfying it. Correct the identity first; a
+  restart used as a way to clear the degradation only hides an
+  uncorrected one until the next probe re-latches it.
 
 **Capturing the digest at a known-good login (no raw identifier printed):**
 
@@ -625,16 +629,66 @@ with the account the owner ratified?**
    the `service.claudeConfigDir` root when one is configured, otherwise the
    CLI default — confirm the login interactively (`claude` opens the usual
    flow; this is an owner action, never automated by WhatSoup).
-2. Run the capture in that context. It runs the runtime's own read-only
-   probe and prints exactly one line, so it is safe in a shared terminal log:
+2. Run the capture in that context. It runs the runtime's own read-only probe
+   and prints the digest and nothing else — but **`--silent` is required** for
+   that to be true. Without it `npm run` writes its own four-line banner to
+   **stdout**, ahead of the digest:
 
    ```bash
-   CLAUDE_CONFIG_DIR=/absolute/claude-root npm run claude-account-digest
-   # sha256:… ← the only output; exit 2 = not logged in, 3 = identity unreadable
+   CLAUDE_CONFIG_DIR=/absolute/claude-root npm run --silent claude-account-digest
+   # sha256:… ← the only stdout line; exit 2 = not logged in, 3 = identity unreadable
    ```
+
+   Drop `--silent` and a capture like `DIGEST=$(npm run claude-account-digest)`
+   swallows the banner too, so `service.expectedAccountDigest` gets a value that
+   can never match and the instance degrades with
+   `credential_identity_mismatch` — the alert firing for a defect in the
+   capture, not in the credential. Diagnostics from the pinned-node wrapper
+   (including its fallback `WARN`) go to stderr, so capturing stdout alone is
+   safe.
 
    Do **not** substitute `claude auth status --json` here: it prints the raw
    email and organization id.
+
+   Run it where the credential store is readable. **On macOS, where the CLI
+   credential lives in the login keychain, that means not over SSH**: the
+   keychain is bound to the GUI/login session, so a cold SSH shell has none and
+   the probe returns `loggedIn: false` — the capture exits 2 even with the
+   authoritative `CLAUDE_CONFIG_DIR` and an explicit `--binary`. Use a
+   GUI/console session on the host.
+
+   When the capture genuinely has to be unattended, a one-shot job bootstrapped
+   into the owner's `gui/<uid>` launchd domain works, with two conditions.
+   Bootstrapping into somebody's login domain is a privileged act on their
+   session: it needs the **owner's explicit authorization**, not merely
+   filesystem access. And the job is **temporary** — `bootout` it and delete its
+   plist as soon as the digest is captured. A one-shot left loaded is residue
+   that can re-run at the next login, re-probing the credential with nobody
+   watching.
+
+   That exit 2 is a false negative about the capture *context*, not evidence
+   the instance is logged out, and the message's "log in interactively first"
+   hint does not apply. **This reprieve is macOS-specific.** On a
+   systemd or Docker host the credential is not keychain-bound and SSH is a
+   perfectly good capture context, so there an exit 2 is the ordinary meaning —
+   genuinely not logged in. Do not carry the macOS reading onto a Linux host;
+   that inference would mask a real logout.
+
+   Either way, corroborate before believing an exit 2. In authenticated
+   `GET /health`, all of: `turn_capability.model_usable` true with
+   `model_usable_stale` false (read the usability verdict here, not the raw
+   `instance.primaryModelUsability.status`, which carries no staleness guard —
+   a stale `usable` would otherwise corroborate a credential that has since
+   died); a recent `turn_capability.last_successful_turn_at` whose
+   `last_successful_turn_provider` is `claude-cli` and whose
+   `last_successful_turn_session_current` is exactly `true` (a receipt from a
+   rotated or dead session incarnation says nothing about the live
+   credential); and no armed fallback window in the `instance` block
+   (`fallbackActiveUntil`, `fallbackReason`). All of them together mean the
+   credential is live and the SSH reading is wrong. Treat it as a real logout
+   in either of the opposite cases: the instance's own signals point the same
+   way as the exit 2, or any one of them is missing or stale. Absent
+   corroboration is not corroboration.
 3. Put the printed value in `service.expectedAccountDigest`, restart the
    instance, and confirm `runtime.agent.accountIdentity.status` is `match`
    in authenticated `GET /health` (the first probe runs at startup).
