@@ -302,8 +302,10 @@ Production hosts can wrap the same read-only drift check with
 a BOT ERRORS event only when drift or checker failure is observed. Clean checks
 do not emit by default; use `--clear-on-ok` only for a deliberate recovery proof.
 
-Every invocation of `live-release-drift-alert.ts` prints exactly one structured
-JSON log record to stdout (in addition to `--json` printing the full result).
+`live-release-drift-alert.ts` prints one structured JSON log record to stdout
+per checked target — exactly one for a single `--release` or `--launchd-plist`,
+and one per job when `--launchd-plist` is repeated (in addition to `--json`
+printing the full result).
 The record is content-free: `schemaVersion`, `observedAt` (UTC),
 `invocationId`, a bounded `outcome` (`passed` / `drift` / `checker_failed` /
 `emit_failed`), `issueKinds` counts, a stable `conditionFingerprint`
@@ -355,10 +357,36 @@ it is the live alerting change.
 
 Installing a launchd/cron schedule for this command is a live alerting change and
 needs separate named approval. The scheduled job must use the pinned Node runtime
-and either an explicit reviewed release path or the active bot plist's
-`WorkingDirectory` via `--launchd-plist`; the latter is preferred so the check
-tracks future re-cuts. It must remain read-only: no apply, re-cut, plist
-mutation, restart, cleanup, WhatsApp turn, or credential change.
+and either an explicit reviewed release path or a job's plist via
+`--launchd-plist`; the latter is preferred so the check tracks future re-cuts.
+It must remain read-only: no apply, re-cut, plist mutation, restart, cleanup,
+WhatsApp turn, or credential change.
+
+`--launchd-plist` derives the release from `ProgramArguments` — the wrapper
+symlink for the bot and fleet jobs, the absolute script path for the auxiliary
+jobs — exactly as "Activation is a coordinated switch" above describes. It reads
+`WorkingDirectory` only as a cross-check and reports
+`launchd-working-directory-mismatch` when the two disagree, which is the
+WorkingDirectory false pass caught at observation time rather than at incident
+time. A job whose release cannot be derived from `ProgramArguments` fails closed
+(`checker_failed`, exit 2); it never falls back to `WorkingDirectory`, because
+that fallback is what let a stale release read as green for two months.
+
+`--launchd-plist` is repeatable, so one invocation can cover the instance job
+alongside `com.whatsoup.whatsoup-fleet`, `com.whatsoup.harness-maintenance`,
+`com.whatsoup.release-drift-check`, and `com.whatsoup.reply-guarantee` — the
+mixed-generation estate the coordinated switch exists to prevent. The invocation
+exits on the worst status across the set, so one healthy job cannot mask a stale
+one.
+
+`--clear-on-ok` is refused alongside several `--launchd-plist` targets. BOT
+ERRORS keys an incident by `machine|instance|source` and every target in one
+invocation shares that key, so a clean job's clear would resolve the incident a
+drifted job had just opened. `--instance`, `--source`, and `--manifest` are
+likewise per-invocation, not per-job: a multi-job run labels every event with
+the same instance and source, and checks every release against one `--manifest`
+override if given. Use single-target invocations when per-job attribution or a
+clear event matters.
 
 ### Release currency is a separate observation
 

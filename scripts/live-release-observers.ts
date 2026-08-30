@@ -8,10 +8,13 @@ import {
 } from './live-release-currency-alert.ts';
 import {
   checkLiveReleaseDrift,
-  resolveReleasePathFromLaunchdPlist,
   type LiveReleaseDriftAlertResult,
 } from './live-release-drift-alert.ts';
 import { takeValue } from './lib/cli-args.ts';
+import {
+  resolveLaunchdReleaseSelection,
+  type LaunchdReleaseSelection,
+} from './lib/launchd-release-selector.ts';
 
 interface ParsedArgs {
   releasePath?: string;
@@ -76,7 +79,12 @@ function parseArgs(argv: string[]): ParsedArgs {
 
 export async function run(argv: string[] = process.argv.slice(2)): Promise<LiveReleaseObserversResult> {
   const parsed = parseArgs(argv);
-  const releasePath = parsed.releasePath ?? resolveReleasePathFromLaunchdPlist(parsed.launchdPlistPath!);
+  // The release comes from the job's ProgramArguments, never WorkingDirectory —
+  // this is the scheduled path that ran against the wrong field on mini11.
+  const launchdSelection: LaunchdReleaseSelection | undefined = parsed.launchdPlistPath
+    ? resolveLaunchdReleaseSelection(parsed.launchdPlistPath)
+    : undefined;
+  const releasePath = parsed.releasePath ?? launchdSelection!.releasePath;
   const emitHelper = path.join(parsed.repoRoot, 'deploy/scripts/bot-errors-emit.py');
   const drift = checkLiveReleaseDrift({
     repoRoot: parsed.repoRoot,
@@ -87,6 +95,7 @@ export async function run(argv: string[] = process.argv.slice(2)): Promise<LiveR
     emitHelper,
     python: 'python3',
     clearOnOk: parsed.clearOnOk,
+    launchdSelection,
   });
   const currency = await checkLiveReleaseCurrency({
     repoRoot: parsed.repoRoot,
