@@ -139,8 +139,9 @@ if (process.argv[1]?.endsWith('claude-account-digest.ts')) {
     // observer (ACCOUNT_IDENTITY_PROBE_TIMEOUT_MS = 15s). Dropping it here
     // would silently fall back to probeBinaryCommand's own 5s default — a
     // TIGHTER bound than this probe needs, producing spurious `probe-failed`
-    // on a loaded host, which is exactly why the 15s constant exists. Every
-    // test fake ignores extra arguments, so no fake would catch it.
+    // on a loaded host, which is exactly why the 15s constant exists. A fake
+    // that ignores extra arguments cannot catch this, which is why one fake in
+    // the script's suite captures `options` and asserts the bound explicitly.
     probe: (binary, args, env, options) => probeBinaryCommand(binary, args, env, options),
     // Single allow-list: scrubbedAuthStatusEnv (the same scrub the runtime
     // verifier applies) is the ONLY env filter, applied here and again —

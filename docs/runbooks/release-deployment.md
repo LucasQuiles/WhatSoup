@@ -193,13 +193,28 @@ bot on one release, its maintenance and drift observers on another.
 
 A correct activation repoints the wrapper symlink AND moves each auxiliary job's
 `ProgramArguments` onto the new release as one switch. The supported way to do
-the second half is to RE-RENDER the plists from the new release with
-`WHATSOUP_REPO_ROOT` set (`deploy/scripts/render-release-drift-launchd.sh` and
-the sibling templates), because `__WHATSOUP_REPO_ROOT__` substitutes into both
-`ProgramArguments` and `WorkingDirectory` and the two stay consistent by
-construction. Hand-editing `WorkingDirectory` is the trap: it changes cwd,
-leaves `ProgramArguments` on the old release, and reproduces the same
-"configuration looks right, old code runs" false pass described above.
+the second half is to RE-RENDER the plists FROM INSIDE the new release, because
+`__WHATSOUP_REPO_ROOT__` is substituted globally into both `ProgramArguments`
+and `WorkingDirectory`, so the two stay consistent by construction. The two
+renderers take their root differently, and only one honours an environment
+variable:
+
+- `com.whatsoup.release-drift-check` — `deploy/scripts/render-release-drift-launchd.sh`,
+  which honours `WHATSOUP_REPO_ROOT`;
+- `com.whatsoup.harness-maintenance` and `com.whatsoup.reply-guarantee` —
+  `deploy/setup.sh`, whose `install_launchd_timer` derives the root from its own
+  `${BASH_SOURCE[0]}` and IGNORES `WHATSOUP_REPO_ROOT`. Run it from inside the
+  new release; exporting the variable does nothing for these two.
+
+Re-rendering writes the plist on disk but does NOT switch a job that is already
+loaded: launchd keeps the loaded definition until the label is reloaded, so
+apply the reload sequence below to each auxiliary label as well as to the
+instance. Skipping that leaves the aux jobs on the previous release even though
+the plists on disk look correct.
+
+Hand-editing `WorkingDirectory` is the trap: it changes cwd, leaves
+`ProgramArguments` on the old release, and reproduces the same "configuration
+looks right, old code runs" false pass described above.
 
 ### Reload sequence
 
@@ -223,10 +238,15 @@ fi
 launchctl bootstrap gui/"$(id -u)" ~/Library/LaunchAgents/com.whatsoup.<instance>.plist
 ```
 
+Run this same sequence for every auxiliary label whose plist you re-rendered,
+not just `com.whatsoup.<instance>` — a re-rendered plist does not take effect
+until its label is reloaded.
+
 `docs/runbooks/macos-launchd-deployment.md` owns the surrounding launchd
 hazards this sequence inherits: the bounded retry for the transient bootstrap
-error class, and the SSH/keychain-session hazard that requires finishing a plist
-change with `kickstart -k`.
+error class, the rule that `kickstart -k` reuses the already-loaded definition
+so a disk edit needs `bootout` + `bootstrap`, and the SSH/keychain-session
+hazard that requires finishing a plist change with `kickstart -k`.
 
 ### Rollback
 
