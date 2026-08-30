@@ -83,25 +83,63 @@ function outboxEvents(stateDir: string): Array<Record<string, unknown>> {
     .map((name) => JSON.parse(readFileSync(path.join(outbox, name), 'utf8')) as Record<string, unknown>);
 }
 
-function writeLaunchdPlist(releasePath: string): string {
-  const plistPath = path.join(tmpRoot, 'com.whatsoup.release-bot.plist');
+function writeLaunchdPlist(releasePath: string, options: { workingDirectory?: string; name?: string } = {}): string {
+  const name = options.name ?? 'com.whatsoup.release-bot';
+  const plistPath = path.join(tmpRoot, `${name}.plist`);
   writeFileSync(plistPath, `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.whatsoup.release-bot</string>
+  <string>${name}</string>
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
     <string>${releasePath}/src/bootstrap.ts</string>
   </array>
   <key>WorkingDirectory</key>
-  <string>${releasePath}</string>
+  <string>${options.workingDirectory ?? releasePath}</string>
 </dict>
 </plist>
 `, 'utf8');
   return plistPath;
+}
+
+/**
+ * The mini11 false-pass shape: the job really runs release A (selected by
+ * `ProgramArguments`) while a hand-edited `WorkingDirectory` names release B.
+ * Both releases are content-clean, so the ONLY thing that can fail the check is
+ * the selector disagreement itself.
+ */
+function writeFalsePassFixture(): { running: string; stale: string; plistPath: string } {
+  tmpRoot = mkdtempSync(path.join(tmpdir(), 'whatsoup-live-release-drift-alert-'));
+  const build = (commit: string): string => {
+    const sourceRoot = path.join(tmpRoot, `source-${commit}`);
+    mkdirSync(path.join(sourceRoot, 'src'), { recursive: true });
+    writeFileSync(path.join(sourceRoot, 'package.json'), '{"name":"fixture"}\n', 'utf8');
+    writeFileSync(path.join(sourceRoot, 'src/main.ts'), 'export const value = true;\n', 'utf8');
+    const plan = createReleaseSnapshotPlan({
+      sourceRoot,
+      sourceRef: 'HEAD',
+      sourceCommit: commit,
+      releaseRoot: path.join(tmpRoot, 'releases'),
+      buildTime: '2026-06-14T06:00:00.000Z',
+      trackedFiles: ['package.json', 'src/main.ts'],
+    });
+    const releasePath = plan.manifest.release.path;
+    mkdirSync(path.join(releasePath, 'src'), { recursive: true });
+    writeFileSync(path.join(releasePath, 'package.json'), readFileSync(path.join(sourceRoot, 'package.json')));
+    writeFileSync(path.join(releasePath, 'src/main.ts'), readFileSync(path.join(sourceRoot, 'src/main.ts')));
+    writeFileSync(
+      path.join(releasePath, '.whatsoup-release-manifest.json'),
+      `${JSON.stringify(plan.manifest, null, 2)}\n`,
+      'utf8',
+    );
+    return releasePath;
+  };
+  const running = build('aaaaaaaaaaaa1111');
+  const stale = build('bbbbbbbbbbbb2222');
+  return { running, stale, plistPath: writeLaunchdPlist(running, { workingDirectory: stale }) };
 }
 
 describe('live release drift alert', () => {
@@ -206,11 +244,10 @@ describe('live release drift alert', () => {
     expect(() => readdirSync(path.join(stateDir, 'outbox'))).toThrow(/ENOENT/);
   });
 
-  it('resolves the release path from a launchd plist WorkingDirectory', () => {
-    const { releasePath } = writeFixtureRelease();
-    const plistPath = writeLaunchdPlist(releasePath);
+  it('resolves the release path from ProgramArguments, not WorkingDirectory', () => {
+    const { running, plistPath } = writeFalsePassFixture();
 
-    expect(resolveReleasePathFromLaunchdPlist(plistPath)).toBe(releasePath);
+    expect(resolveReleasePathFromLaunchdPlist(plistPath)).toBe(running);
   });
 
   it('CLI accepts launchd plist mode for the currently configured release path', () => {
@@ -262,6 +299,234 @@ describe('live release drift alert', () => {
       cwd: process.cwd(),
       encoding: 'utf8',
     });
+
+    expect(proc.status).toBe(2);
+    expect(proc.stderr).toContain('--release and --launchd-plist are mutually exclusive');
+  });
+});
+
+describe('live release drift alert: launchd selector disagreement', () => {
+  it('fails a content-clean release whose WorkingDirectory names a different release', () => {
+    const { running, stale, plistPath } = writeFalsePassFixture();
+    const stateDir = path.join(tmpRoot, 'bot-errors-state');
+
+    const proc = runCli(['--launchd-plist', plistPath, '--json'], { BOT_ERRORS_STATE_DIR: stateDir });
+
+    // The mini11 signature: every file under the running release verifies, so
+    // release-content drift is empty and the old observer reported green.
+    expect(proc.status, proc.stderr).toBe(1);
+    const result = JSON.parse(proc.stdout) as {
+      ok: boolean;
+      releasePath: string;
+      issues: Array<{ kind: string }>;
+      alert: { required: boolean; kind: string | null };
+    };
+    expect(result.ok).toBe(false);
+    expect(result.releasePath).toBe(running);
+    expect(result.issues.map((issue) => issue.kind)).toEqual(['launchd-working-directory-mismatch']);
+    expect(result.alert).toMatchObject({ required: true, kind: 'alert' });
+
+    // The operator must be able to see WHICH release each side named.
+    const [event] = outboxEvents(stateDir);
+    expect(String(event.evidence)).toContain(running);
+    expect(String(event.evidence)).toContain(stale);
+  });
+
+  it('does not emit a clear event for a disagreeing job under --clear-on-ok', () => {
+    const { plistPath } = writeFalsePassFixture();
+    const stateDir = path.join(tmpRoot, 'bot-errors-state');
+
+    const proc = runCli(['--launchd-plist', plistPath, '--clear-on-ok'], { BOT_ERRORS_STATE_DIR: stateDir });
+
+    expect(proc.status, proc.stderr).toBe(1);
+    expect(outboxEvents(stateDir).map((event) => event.eventType)).toEqual(['alert']);
+  });
+
+  it('counts the disagreement in the content-free record without naming either release', () => {
+    const { running, stale, plistPath } = writeFalsePassFixture();
+
+    const proc = runCli(['--launchd-plist', plistPath, '--no-emit']);
+
+    const record = parseRecordLine(proc.stdout);
+    expect(record).toMatchObject({
+      ok: false,
+      outcome: 'drift',
+      issueKinds: { 'launchd-working-directory-mismatch': 1 },
+    });
+    expect(proc.stdout).not.toContain(running);
+    expect(proc.stdout).not.toContain(stale);
+  });
+
+  it('passes a job whose WorkingDirectory agrees with the real selector', () => {
+    const { releasePath } = writeFixtureRelease();
+    const plistPath = writeLaunchdPlist(releasePath);
+
+    const proc = runCli(['--launchd-plist', plistPath, '--no-emit']);
+
+    expect(proc.status, proc.stderr).toBe(0);
+    expect(parseRecordLine(proc.stdout)).toMatchObject({ ok: true, outcome: 'passed', issueKinds: {} });
+  });
+
+  it('fails closed when no ProgramArguments entry resolves to a release', () => {
+    const { releasePath } = writeFixtureRelease();
+    const plistPath = path.join(tmpRoot, 'com.whatsoup.unresolvable.plist');
+    // WorkingDirectory still names a real release: the old code would have
+    // checked it and reported a pass for a job it could not actually locate.
+    writeFileSync(plistPath, `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.whatsoup.unresolvable</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>${path.join(tmpRoot, 'nowhere/run.sh')}</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>${releasePath}</string>
+</dict>
+</plist>
+`, 'utf8');
+
+    const proc = runCli(['--launchd-plist', plistPath, '--no-emit']);
+
+    expect(proc.status, proc.stderr).toBe(2);
+    expect(proc.stderr).toBe('');
+    expect(parseRecordLine(proc.stdout)).toMatchObject({ ok: false, outcome: 'checker_failed' });
+    expect(proc.stdout).not.toContain(tmpRoot);
+  });
+
+  /**
+   * The structural `deploy/` rule resolves `<dir>/deploy/<exe>` to `<dir>`
+   * WITHOUT consulting a manifest, so it can name a directory that is not a
+   * release at all. That is deliberate — the wrapper computes REPO_ROOT the
+   * same way whether or not a manifest exists — but it is only safe if the
+   * checker then REFUSES the path instead of treating an unverifiable
+   * directory as clean. This pins the refusal: a manifest-less job must alert,
+   * never report a quiet pass.
+   */
+  it('refuses a manifest-less directory reached through the structural deploy/ rule', () => {
+    tmpRoot = mkdtempSync(path.join(tmpdir(), 'whatsoup-live-release-drift-alert-'));
+    const fakeRelease = path.join(tmpRoot, 'fake-release');
+    mkdirSync(path.join(fakeRelease, 'deploy'), { recursive: true });
+    writeFileSync(path.join(fakeRelease, 'deploy/whatsoup'), '#!/bin/sh\nexit 0\n', 'utf8');
+    const plistPath = path.join(tmpRoot, 'com.whatsoup.manifestless.plist');
+    writeFileSync(plistPath, `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.whatsoup.manifestless</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${path.join(fakeRelease, 'deploy/whatsoup')}</string>
+    <string>ph-bot</string>
+  </array>
+</dict>
+</plist>
+`, 'utf8');
+
+    const proc = runCli(['--launchd-plist', plistPath, '--no-emit']);
+
+    expect(proc.status, proc.stderr).not.toBe(0);
+    expect(parseRecordLine(proc.stdout)).toMatchObject({
+      ok: false,
+      outcome: 'drift',
+      issueKinds: { 'manifest-missing': 1 },
+      alert: { required: true },
+    });
+  });
+
+  /**
+   * A `WorkingDirectory` that is not inside any release (a development
+   * checkout, say) resolves to nothing. The cross-check must then stay silent
+   * rather than invent a disagreement — otherwise every dev-shaped job would
+   * alert on a difference that does not exist.
+   */
+  it('raises no disagreement when WorkingDirectory is not inside any release', () => {
+    const { releasePath } = writeFixtureRelease();
+    const nonRelease = path.join(tmpRoot, 'a-git-checkout');
+    mkdirSync(nonRelease, { recursive: true });
+    const plistPath = writeLaunchdPlist(releasePath, { workingDirectory: nonRelease });
+
+    const proc = runCli(['--launchd-plist', plistPath, '--no-emit']);
+
+    expect(proc.status, proc.stderr).toBe(0);
+    expect(parseRecordLine(proc.stdout)).toMatchObject({ ok: true, outcome: 'passed', issueKinds: {} });
+  });
+});
+
+describe('live release drift alert: multi-job coverage', () => {
+  it('checks every repeated --launchd-plist and prints one record per job', () => {
+    const { running, stale, plistPath } = writeFalsePassFixture();
+    const cleanPlist = writeLaunchdPlist(stale, { name: 'com.whatsoup.harness-maintenance' });
+
+    const proc = runCli(['--launchd-plist', plistPath, '--launchd-plist', cleanPlist, '--no-emit']);
+
+    const records = proc.stdout.split('\n').filter((line) => line.trim().length > 0).map((line) => JSON.parse(line));
+    expect(records).toHaveLength(2);
+    expect(records[0]).toMatchObject({ ok: false, issueKinds: { 'launchd-working-directory-mismatch': 1 } });
+    expect(records[1]).toMatchObject({ ok: true, outcome: 'passed' });
+    // Worst status across the set wins; one healthy job cannot mask a bad one.
+    expect(proc.status).toBe(1);
+    expect(proc.stdout).not.toContain(running);
+  });
+
+  it('reports the worst outcome when one job is unresolvable and another is clean', () => {
+    const { releasePath } = writeFixtureRelease();
+    const cleanPlist = writeLaunchdPlist(releasePath);
+    const brokenPlist = writeLaunchdPlist(path.join(tmpRoot, 'nowhere'), { name: 'com.whatsoup.broken' });
+
+    const proc = runCli(['--launchd-plist', cleanPlist, '--launchd-plist', brokenPlist, '--no-emit']);
+
+    expect(proc.status).toBe(2);
+    const outcomes = proc.stdout.split('\n').filter((line) => line.trim().length > 0)
+      .map((line) => (JSON.parse(line) as { outcome: string }).outcome);
+    expect(outcomes).toEqual(['passed', 'checker_failed']);
+  });
+
+  it('keeps a single --launchd-plist invocation on the one-record contract', () => {
+    const { releasePath } = writeFixtureRelease();
+    const plistPath = writeLaunchdPlist(releasePath);
+
+    const proc = runCli(['--launchd-plist', plistPath, '--no-emit', '--json']);
+
+    expect(proc.status, proc.stderr).toBe(0);
+    // --json still prints ONE object, not an array, for a single target.
+    const result = JSON.parse(proc.stdout) as { check: string; releasePath: string };
+    expect(result).toMatchObject({ check: 'live-release-drift-alert', releasePath });
+  });
+
+  it('refuses --clear-on-ok across several jobs, because one clear would cancel another job alert', () => {
+    const { plistPath } = writeFalsePassFixture();
+    const cleanPlist = writeLaunchdPlist(path.dirname(plistPath), { name: 'com.whatsoup.other' });
+
+    const proc = runCli(['--launchd-plist', plistPath, '--launchd-plist', cleanPlist, '--clear-on-ok']);
+
+    // BOT ERRORS keys incidents by machine|instance|source, and every target in
+    // one invocation shares that key: a clean job's clear would resolve the
+    // incident a drifted job just opened.
+    expect(proc.status).toBe(2);
+    expect(proc.stderr).toContain('--clear-on-ok');
+  });
+
+  it('still allows --clear-on-ok for a single job', () => {
+    const { releasePath } = writeFixtureRelease();
+    const plistPath = writeLaunchdPlist(releasePath);
+    const stateDir = path.join(tmpRoot, 'bot-errors-state');
+
+    const proc = runCli(['--launchd-plist', plistPath, '--clear-on-ok'], { BOT_ERRORS_STATE_DIR: stateDir });
+
+    expect(proc.status, proc.stderr).toBe(0);
+    expect(outboxEvents(stateDir).map((event) => event.eventType)).toEqual(['clear']);
+  });
+
+  it('still rejects --release combined with a repeated --launchd-plist', () => {
+    const { releasePath } = writeFixtureRelease();
+    const plistPath = writeLaunchdPlist(releasePath);
+
+    const proc = runCli(['--release', releasePath, '--launchd-plist', plistPath, '--launchd-plist', plistPath]);
 
     expect(proc.status).toBe(2);
     expect(proc.stderr).toContain('--release and --launchd-plist are mutually exclusive');
