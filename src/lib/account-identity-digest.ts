@@ -28,7 +28,7 @@
  * ratified rows to migrate.
  */
 import { createHash } from 'node:crypto';
-import { isNonEmptyString } from './type-guards.ts';
+import { hasControlCharacters, isNonEmptyString } from './type-guards.ts';
 
 export interface AccountIdentityFields {
   email: string;
@@ -50,15 +50,18 @@ export function isAccountIdentityDigest(value: unknown): value is string {
  * character could make two distinct identities share one canonical string.
  * Refusing them (on the raw value, before canonicalization) keeps the
  * encoding injective; the refusal message never echoes the value.
+ *
+ * The C0+DEL class itself is `hasControlCharacters` in lib/type-guards - the
+ * same predicate lib/launchd-service-config applies to the sibling `service.*`
+ * path fields of the same instance-config block. This named wrapper keeps the
+ * account-identity vocabulary for it (and the runtime verifier's import).
  */
-const CONTROL_CHARS_RE = /[\u0000-\u001f\u007f]/;
-
 export function hasAccountIdentityControlCharacters(value: string): boolean {
-  return CONTROL_CHARS_RE.test(value);
+  return hasControlCharacters(value);
 }
 
 function canonicalField(name: keyof AccountIdentityFields, value: string): string {
-  if (CONTROL_CHARS_RE.test(value)) {
+  if (hasAccountIdentityControlCharacters(value)) {
     throw new Error(`account identity ${name} contains control characters — refusing to digest an ambiguous identity`);
   }
   const canonical = value.trim().toLowerCase();

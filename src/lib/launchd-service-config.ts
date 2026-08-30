@@ -5,10 +5,12 @@
  * pure function of its arguments: it never reads instance config.json itself.
  * Callers obtain a validated `LaunchdPlistRenderOptions` from the
  * instance-specific resolver (src/fleet/launchd-render-options.ts) and pass it
- * down. This module is dependency-light (Node builtins only) so both the core
- * instance-config validator and the fleet render path can share one source of
- * truth for the shape rules.
+ * down. This module is dependency-light (Node builtins plus lib/type-guards,
+ * which itself imports nothing) so both the core instance-config validator and
+ * the fleet render path can share one source of truth for the shape rules.
  */
+
+import { hasControlCharacters } from './type-guards.ts';
 
 export interface LaunchdPlistRenderOptions {
   /**
@@ -52,21 +54,15 @@ const MAX_PATH_PREPEND_ENTRIES = 16;
 /** PATH_MAX-class bound for one rendered path value. */
 const MAX_PATH_VALUE_LENGTH = 4096;
 
-/** Rendered plist values are single-line paths; reject C0 controls and DEL. */
-function hasControlChars(value: string): boolean {
-  for (const ch of value) {
-    const code = ch.codePointAt(0) ?? 0;
-    if (code < 0x20 || code === 0x7f) return true;
-  }
-  return false;
-}
-
+/** Rendered plist values are single-line paths: C0 controls and DEL are refused
+ *  via the shared `hasControlCharacters` predicate, which lib/account-identity-digest
+ *  applies to the sibling `service.expectedAccountDigest` identity fields. */
 function isCleanAbsolutePath(value: string): boolean {
   return value !== ''
     && value.length <= MAX_PATH_VALUE_LENGTH
     && value === value.trim()
     && value.startsWith('/')
-    && !hasControlChars(value);
+    && !hasControlCharacters(value);
 }
 
 /**
