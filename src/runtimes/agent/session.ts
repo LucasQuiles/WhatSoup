@@ -877,6 +877,21 @@ export class SessionManager {
     }
   }
 
+  /**
+   * #2976 residual: retire the turn's actor from the long-lived MCP session
+   * context at turn end. Set at dispatch (updateMcpActorJid), cleared here so
+   * the previous sender cannot linger on the stored conduit between turns. The
+   * authoritative per-call identity now comes from the bridge's read-time
+   * resolver snapshot (createProviderMcpBridge); this clear keeps the stored
+   * object honest as defense in depth for any reader of it that predates or
+   * bypasses the snapshot.
+   */
+  clearMcpActorJid(): void {
+    if (this.mcpSessionContext) {
+      this.mcpSessionContext.actorJid = undefined;
+    }
+  }
+
   getRoutePolicy(): ProviderRoutePolicy | undefined {
     return this.routePolicy;
   }
