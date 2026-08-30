@@ -1199,6 +1199,7 @@ def save_incident_state(
     incident_path = paths.get("incident_state")
     if incident_path is None:
         raise ValueError("save_incident_state: paths missing incident_state key")
+    _reject_bare_write_if_adopted(incident_path)
     state["updatedAt"] = now_iso()
     target = _durable_target(incident_path)
     observation = observe_json(target)
@@ -1236,6 +1237,43 @@ class IncidentCycleRequiredError(RuntimeError):
     """
 
 
+def _incident_state_is_adopted(anchor: Path) -> bool:
+    """True when the incident-state dir carries the ``.initialized`` marker.
+
+    Single definition of "adopted" so the helper-boundary guard and the
+    writer-level guard cannot drift apart.
+    """
+    return (anchor.parent / (anchor.name + ".initialized")).exists()
+
+
+def _reject_bare_write_if_adopted(anchor: Path) -> None:
+    """#3054 writer-level guard — refuse a bare-JSON write post-adoption.
+
+    ``_require_incident_cycle_if_adopted`` is a *helper-boundary* check: it
+    is inert whenever a cycle was supplied, because its question is "does a
+    cycle exist?". That is not the same question as "does this write use
+    the cycle?", so a helper could pass the boundary guard with
+    ``incident`` in hand and still reach ``save_incident_state`` on a later
+    branch — overwriting the ``_controllerState`` envelope with bare JSON
+    and producing the ``schema_incompatible`` corruption #3053 fixed.
+
+    Guarding inside the writer closes that gap for every call site at once,
+    including ones added later, because the bare write is never legitimate
+    post-adoption. Pre-adoption (no ``.initialized``) the bare write is
+    still the correct legacy/compat path, so this stays inert there.
+    ``IncidentStateCycle.commit()`` persists through ``session.save()`` and
+    never routes here, so the supported path is unaffected.
+    """
+    if _incident_state_is_adopted(anchor):
+        raise IncidentCycleRequiredError(
+            f"save_incident_state: refusing a post-adoption bare-JSON write to "
+            f"{anchor.name}. The incident-state primary is enveloped "
+            f"(_controllerState); this wrapper would overwrite it and the next "
+            f"validate would reject it as schema_incompatible (#3053/#3054). "
+            f"Route this write through IncidentStateCycle.commit()."
+        )
+
+
 def _require_incident_cycle_if_adopted(
     paths: dict[str, Path],
     incident: "IncidentStateCycle | None",
@@ -1257,7 +1295,7 @@ def _require_incident_cycle_if_adopted(
     anchor = paths.get("incident_state")
     if anchor is None:
         return
-    if (anchor.parent / (anchor.name + ".initialized")).exists():
+    if _incident_state_is_adopted(anchor):
         raise IncidentCycleRequiredError(
             f"{helper}: post-adoption incident-state write requires the "
             f"IncidentStateCycle (incident=None would route through "
