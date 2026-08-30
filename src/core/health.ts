@@ -616,6 +616,56 @@ export const HEALTH_DEGRADATION_CAUSE_REASON_TWINS: Readonly<
   ),
 ) as Readonly<Record<HealthDegradationCause, HealthDegradationCauseReasonTwins>>;
 
+/**
+ * Which causes already CLASSIFY an agent-runtime degradation — derived from the
+ * registry above, not restated as a literal chain.
+ *
+ * `agent_runtime_degraded_unclassified` is the fall-through raised when the
+ * agent runtime is degraded and nothing named the reason. Deciding "did
+ * anything already name it?" used to be an inline predicate chain of
+ * `cause.startsWith('agent_') || cause === '...' || ...`, which every new
+ * agent-runtime cause had to remember to extend. Forgetting was silent and
+ * wrong in the same direction every time: the real cause AND the unclassified
+ * marker both reached the wire, so alerts and flap detection keyed on a
+ * meaningless catch-all beside the specific one. #3406 grew that chain to its
+ * 6th and 7th special case.
+ *
+ * Membership is two registry-visible facts, either sufficient:
+ *   - the cause declares a `runtime.*` reason twin, i.e. its condition reaches
+ *     status_reasons through the agent-runtime degradedReasons passthrough; or
+ *   - the cause is in the `agent_*` naming family, which the registry uses for
+ *     runtime conditions keyed off runtime detail counters. This second arm
+ *     retains `agent_runtime_unhealthy`, whose twin is the bare
+ *     `agent_runtime_unhealthy` reason rather than a `runtime.*` passthrough.
+ *
+ * `chat_runtime_degraded` / `passive_runtime_degraded` are deliberately OUT:
+ * their twins are `runtime_degraded` / `runtime_unhealthy` (underscore, not the
+ * `runtime.` passthrough prefix) and they describe non-agent instance modes.
+ *
+ * The derivation admits one cause the old literal chain did not,
+ * `provider_fallback_active`, and that addition is inert by construction: it is
+ * raised if and only if `fallbackWindowActive`, and the fall-through guard's own
+ * `&& !fallbackWindowActive` conjunct has already short-circuited in exactly
+ * that case. Exported (with the derivation) so review can check membership and
+ * a test can prove a newly registered runtime-scoped cause is picked up without
+ * a manual edit.
+ */
+export function deriveAgentRuntimeClassifiedCauses(
+  registry: Readonly<Record<string, HealthDegradationCauseRegistryEntry>>,
+): ReadonlySet<string> {
+  const classified = new Set<string>();
+  for (const [cause, entry] of Object.entries(registry)) {
+    const twins = entry.reasonTwins;
+    const runtimeScoped = twins !== NO_REASON_TWIN
+      && twins.some((reason) => reason.startsWith('runtime.'));
+    if (runtimeScoped || cause.startsWith('agent_')) classified.add(cause);
+  }
+  return classified;
+}
+
+export const AGENT_RUNTIME_CLASSIFIED_CAUSES: ReadonlySet<string> =
+  deriveAgentRuntimeClassifiedCauses(HEALTH_DEGRADATION_CAUSE_REGISTRY);
+
 function normalizeBooleanOrNull(value: unknown): boolean | null {
   return typeof value === 'boolean' ? value : null;
 }
@@ -2531,16 +2581,13 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         : undefined;
       if (accountIdentityStatus === 'mismatch') addDegradationCause('credential_identity_mismatch');
       else if (accountIdentityStatus === 'unverifiable') addDegradationCause('credential_identity_unverifiable');
+      // Membership comes from AGENT_RUNTIME_CLASSIFIED_CAUSES, derived from the
+      // cause registry: a newly registered runtime-scoped cause classifies
+      // itself here without an edit to this guard.
       if (
         agentRuntimeStatus === 'degraded'
         && !fallbackWindowActive
-        && !degradationCauses.some((cause) => cause.startsWith('agent_')
-          || cause === 'turn_finalization_degraded'
-          || cause === 'turn_recovery_degraded'
-          || cause === 'delivery_identity_debt'
-          || cause === 'provider_execution_pressure'
-          || cause === 'credential_identity_mismatch'
-          || cause === 'credential_identity_unverifiable')
+        && !degradationCauses.some((cause) => AGENT_RUNTIME_CLASSIFIED_CAUSES.has(cause))
       ) {
         addDegradationCause('agent_runtime_degraded_unclassified');
       } else if (agentRuntimeStatus === 'unhealthy') {
