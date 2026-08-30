@@ -11,7 +11,7 @@ import { createConnection } from 'node:net';
 import { join } from 'node:path';
 import { toConversationKey } from '../../core/conversation-key.ts';
 import type { ToolRegistry } from '../../mcp/registry.ts';
-import type { SessionContext } from '../../mcp/types.ts';
+import type { ExecutingSessionContext, SessionContext } from '../../mcp/types.ts';
 import { WhatSoupSocketServer } from '../../mcp/socket-server.ts';
 import { perChatActorSession } from './per-chat-actor-session.ts';
 
@@ -20,7 +20,7 @@ interface PerChatMcpSocketManagerOptions {
   registry: ToolRegistry;
   allowedRoot: string;
   conversationBound: boolean;
-  resolveActor: (conversationIdentity: string) => string | undefined;
+  resolveExecutingSession: (conversationIdentity: string) => ExecutingSessionContext;
 }
 
 interface PerChatSocketResource {
@@ -120,10 +120,13 @@ export class PerChatMcpSocketManager {
         deliveryJid,
         purpose,
       ),
-      () => ({
-        actorJid: this.options.resolveActor(identity.value),
-        purpose,
-      }),
+      () => {
+        const executing = this.options.resolveExecutingSession(identity.value);
+        return {
+          ...executing,
+          conversationKey: executing.conversationKey ?? toConversationKey(identity.value),
+        };
+      },
     );
     let ownedSocket: { dev: number; ino: number } | undefined;
     let resource!: PerChatSocketResource;

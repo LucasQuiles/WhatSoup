@@ -132,7 +132,7 @@ describe('AgentRuntime structural policy', () => {
     // The read-time resolver replaces it, with the per_chat scope gate that
     // keeps the shared global socket actor-less for the whole mode.
     expect(methodSource(source, 'resolveExecutingGlobalSession'))
-      .toContain("if (this.sessionScope === 'per_chat') return { actorJid: undefined, purpose: undefined };");
+      .toContain("return { actorJid: undefined, purpose: undefined, conversationKey: undefined };");
     expect(source).toContain('() => this.resolveExecutingGlobalSession(),');
   });
 

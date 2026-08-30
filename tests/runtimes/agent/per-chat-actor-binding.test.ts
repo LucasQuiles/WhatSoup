@@ -9,7 +9,11 @@ import type {
   SystemTurnLeaseToken,
 } from '../../../src/runtimes/agent/pending-system-result-tracker.ts';
 
-type ExecContext = { actorJid: string | undefined; purpose?: 'scheduled-agent-job' };
+type ExecContext = {
+  actorJid: string | undefined;
+  purpose?: 'scheduled-agent-job';
+  conversationKey?: string;
+};
 
 // ── Hoisted mocks ───────────────────────────────────────────────────────────
 
@@ -505,7 +509,11 @@ describe('F-STICKY-ACTOR F6: dispatch to an INACTIVE session clears stale entrie
     priv().perChatExecActorQueue.set(mapKey, [{ actorJid: GUEST }]); // stale from a dead subprocess (e.g. resume-fail)
     await priv().sendTurnToSession(inactive, CHAT, 'admin turn', mapKey, ADMIN);
     // The stale GUEST is dropped at the push (session inactive) — only the fresh ADMIN turn remains.
-    expect(priv().perChatExecActorQueue.get(mapKey)).toEqual([{ actorJid: ADMIN, purpose: undefined }]);
+    expect(priv().perChatExecActorQueue.get(mapKey)).toEqual([{
+      actorJid: ADMIN,
+      purpose: undefined,
+      conversationKey: CHAT,
+    }]);
     },
   );
 });

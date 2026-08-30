@@ -45,7 +45,11 @@ describe('PerChatMcpSocketManager', () => {
       registry: options.registry ?? new ToolRegistry(),
       allowedRoot: root,
       conversationBound: options.conversationBound ?? true,
-      resolveActor: () => undefined,
+      resolveExecutingSession: () => ({
+        actorJid: undefined,
+        purpose: undefined,
+        conversationKey: undefined,
+      }),
     });
   }
 
@@ -215,9 +219,13 @@ describe('PerChatMcpSocketManager', () => {
       registry: new ToolRegistry(),
       allowedRoot: root,
       conversationBound: true,
-      resolveActor: (identity) => {
+      resolveExecutingSession: (identity) => {
         observedIdentities.push(identity);
-        return identity;
+        return {
+          actorJid: identity,
+          purpose: undefined,
+          conversationKey: identity,
+        };
       },
     });
     const oldIdentity = '15550001111@lid';
@@ -227,7 +235,11 @@ describe('PerChatMcpSocketManager', () => {
     const resources = (manager as unknown as {
       resources: Map<string, {
         server: {
-          executingSessionResolver: () => { actorJid?: string; purpose?: string };
+          executingSessionResolver: () => {
+            actorJid?: string;
+            purpose?: string;
+            conversationKey?: string;
+          };
           baseSession: {
             binding?: { conversationKey: string; deliveryJid: string };
           };
@@ -236,9 +248,13 @@ describe('PerChatMcpSocketManager', () => {
     }).resources;
     const resource = resources.get(oldIdentity)!;
 
-    expect(resource.server.executingSessionResolver().actorJid).toBe(oldIdentity);
+    const oldContext = resource.server.executingSessionResolver();
+    expect(oldContext.actorJid).toBe(oldIdentity);
+    expect(oldContext.conversationKey).toBe(oldIdentity);
     manager.rekey(oldIdentity, newIdentity, newIdentity);
-    expect(resource.server.executingSessionResolver().actorJid).toBe(newIdentity);
+    const newContext = resource.server.executingSessionResolver();
+    expect(newContext.conversationKey).toBe(newIdentity);
+    expect(newContext.actorJid).toBe(newIdentity);
     expect(observedIdentities).toEqual([oldIdentity, newIdentity]);
     expect(resource.server.baseSession.binding).toEqual({
       kind: 'conversation-bound',

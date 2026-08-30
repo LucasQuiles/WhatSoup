@@ -135,7 +135,11 @@ const { sessionDoubles, queueDoubles, resetDoubles, makeSessionDouble, makeQueue
   /** Every WhatSoupSocketServer construction: tier + captured resolver + spies. */
   const socketServers: Array<{
     session: { tier?: string };
-    executingSessionResolver: (() => { actorJid?: string; purpose?: string }) | undefined;
+    executingSessionResolver: (() => {
+      actorJid?: string;
+      purpose?: string;
+      conversationKey?: string;
+    }) | undefined;
     updateActorJid: ReturnType<typeof vi.fn>;
   }> = [];
 
@@ -269,7 +273,11 @@ vi.mock('../../../src/mcp/socket-server.ts', () => ({
     _socketPath: string,
     _registry: unknown,
     session: { tier?: string },
-    executingSessionResolver?: () => { actorJid?: string; purpose?: string },
+    executingSessionResolver?: () => {
+      actorJid?: string;
+      purpose?: string;
+      conversationKey?: string;
+    },
   ) {
     const instance = {
       session,
@@ -428,18 +436,30 @@ describe('global-socket actor scoping (#2976 direction ii)', () => {
     const resolver = globalSocket().executingSessionResolver;
     expect(resolver).toBeDefined();
     // Before any turn: deny.
-    expect(resolver!()).toEqual({ actorJid: undefined, purpose: undefined });
+    expect(resolver!()).toEqual({
+      actorJid: undefined,
+      purpose: undefined,
+      conversationKey: undefined,
+    });
 
     await arriveMessage();
     const session = await waitForInFlightTurn((t) => t.includes('operator scoping question'));
     // Mid-turn: the executing turn's sender resolves.
-    expect(resolver!()).toEqual({ actorJid: senderJid, purpose: undefined });
+    expect(resolver!()).toEqual({
+      actorJid: senderJid,
+      purpose: undefined,
+      conversationKey: toConversationKey(chatJid),
+    });
 
     session.emit({ type: 'result', text: 'done' });
     await (runtime as unknown as { turnChain: Promise<void> }).turnChain;
     // Between turns: deny again — a missed cleanup would DENY, never allow.
     await vi.waitFor(() => {
-      expect(resolver!()).toEqual({ actorJid: undefined, purpose: undefined });
+      expect(resolver!()).toEqual({
+        actorJid: undefined,
+        purpose: undefined,
+        conversationKey: undefined,
+      });
     }, { timeout: 4_000 });
   });
 
@@ -454,7 +474,11 @@ describe('global-socket actor scoping (#2976 direction ii)', () => {
     await waitForInFlightTurn((t) => t.includes('operator scoping question'));
     // The per-chat sender rides its own actor-bound socket; the shared global
     // socket stays actor-less for the whole mode.
-    expect(resolver!()).toEqual({ actorJid: undefined, purpose: undefined });
+    expect(resolver!()).toEqual({
+      actorJid: undefined,
+      purpose: undefined,
+      conversationKey: undefined,
+    });
   });
 
   it('sandboxPerChat: the workspace socket resolves the scheduled turn actor and purpose at request time', async () => {
@@ -465,12 +489,20 @@ describe('global-socket actor scoping (#2976 direction ii)', () => {
     const session = await waitForInFlightTurn((text) => text.includes('scheduled workspace turn'));
     const resolver = workspaceSocket().executingSessionResolver;
     expect(resolver).toBeDefined();
-    expect(resolver!()).toEqual({ actorJid: senderJid, purpose: 'scheduled-agent-job' });
+    expect(resolver!()).toEqual({
+      actorJid: senderJid,
+      purpose: 'scheduled-agent-job',
+      conversationKey: toConversationKey(chatJid),
+    });
 
     session.emit({ type: 'result', text: 'done' });
     await (runtime as unknown as { turnChain: Promise<void> }).turnChain;
     await vi.waitFor(() => {
-      expect(resolver!()).toEqual({ actorJid: undefined, purpose: undefined });
+      expect(resolver!()).toEqual({
+        actorJid: undefined,
+        purpose: undefined,
+        conversationKey: undefined,
+      });
     }, { timeout: 4_000 });
   });
 });

@@ -457,7 +457,8 @@ describe('provider-bridge actor scoping (#2976 residual)', () => {
     await vi.waitFor(() => {
       expect(session.mcpSessionContext?.actorJid).toBeUndefined();
     }, { timeout: 4_000 });
-    await bridge!.executeTool('actor_probe', {});
+    const betweenTurns = await bridge!.executeTool('actor_probe', {});
+    expect(betweenTurns.isError).toBe(false);
     expect(observedActors.at(-1)).toBeUndefined();
   });
 
@@ -483,8 +484,17 @@ describe('provider-bridge actor scoping (#2976 residual)', () => {
     await vi.waitFor(() => {
       expect(session.mcpSessionContext?.actorJid).toBeUndefined();
     }, { timeout: 4_000 });
-    await bridge!.executeTool('actor_probe', {});
-    expect(observedActors.at(-1)).toBeUndefined();
+    const state = runtime as unknown as {
+      perChatExecActorQueue: Map<string, unknown[]>;
+      resolveExecutingSessionByMapKey(mapKey: string): SessionContext;
+    };
+    expect(state.perChatExecActorQueue.get(session.ctorOpts.persistenceConversationKey!) ?? [])
+      .toEqual([]);
+    expect(state.resolveExecutingSessionByMapKey(session.ctorOpts.persistenceConversationKey!).actorJid)
+      .toBeUndefined();
+    const betweenTurns = await bridge!.executeTool('actor_probe', {});
+    expect(betweenTurns).toMatchObject({ isError: true });
+    expect(betweenTurns.content).toMatch(/no durable evidence identity/i);
   });
 
   it('per_chat managed-loop: an actor-less SYSTEM turn after an admin turn is DENIED admin-gated tools (stale admin not inherited)', async () => {
