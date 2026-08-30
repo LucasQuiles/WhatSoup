@@ -666,10 +666,11 @@ with the account the owner ratified?**
    `last_successful_turn_session_current` is exactly `true` (a receipt from a
    rotated or dead session incarnation says nothing about the live
    credential); and no armed fallback window in the `instance` block
-   (`fallbackActiveUntil`, `fallbackReason`). Together those mean the
-   credential is live and the SSH reading is wrong. Call it a real logout when
-   the instance's own signals agree, or when any of them is missing or stale —
-   absent corroboration is not corroboration.
+   (`fallbackActiveUntil`, `fallbackReason`). All of them together mean the
+   credential is live and the SSH reading is wrong. Treat it as a real logout
+   in either of the opposite cases: the instance's own signals point the same
+   way as the exit 2, or any one of them is missing or stale. Absent
+   corroboration is not corroboration.
 3. Put the printed value in `service.expectedAccountDigest`, restart the
    instance, and confirm `runtime.agent.accountIdentity.status` is `match`
    in authenticated `GET /health` (the first probe runs at startup).

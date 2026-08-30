@@ -317,9 +317,11 @@ closes that gap without any credential write:
   `turn_capability.last_successful_turn_at` with
   `last_successful_turn_provider` `claude-cli` and
   `last_successful_turn_session_current` exactly `true`; and no armed fallback
-  window in the `instance` block (`fallbackActiveUntil`) — and call it a real
-  logout only when they agree. Any of those missing or stale is not
-  corroboration.
+  window in the `instance` block (`fallbackActiveUntil`). All of them together
+  mean the credential is live and the SSH reading is wrong. Treat it as a real
+  logout in either of the opposite cases: those signals point the same way as
+  the exit 2, or any one of them is missing or stale. Absent corroboration is
+  not corroboration.
 
   ```bash
   CLAUDE_CONFIG_DIR=/absolute/claude-root npm run claude-account-digest
