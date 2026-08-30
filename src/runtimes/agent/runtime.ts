@@ -4978,7 +4978,12 @@ export class AgentRuntime implements Runtime {
           'failed to clear crashed fallback handoff notice');
       }
     }
-    this.runtimeTurnCoordinator.finalizeRuntimeCrash(context, queue, session, mapKey);
+    // #3398: every call into this wrapper is a genuine provider death
+    // mid-turn, so the queue may salvage an owed reply the crashed turn never
+    // delivered (status-role; crash finalization semantics unchanged).
+    this.runtimeTurnCoordinator.finalizeRuntimeCrash(context, queue, session, mapKey, {
+      salvageOwedReply: true,
+    });
   }
 
   private processPerChatTurn(scopeRef: PerChatRuntimeScopeRef, turn: QueuedTurn): Promise<void> {
@@ -9909,7 +9914,8 @@ export class AgentRuntime implements Runtime {
         scopeRef,
       );
     } else if (!crashContext && journaledCrashSeq !== undefined) {
-      crashQueue?.abortTurn({ preserveEvidence: true });
+      // #3398: provider crash — salvage any owed reply before the wipe.
+      crashQueue?.abortTurn({ preserveEvidence: true, salvageOwedReply: true });
       log.error(
         { mapKey: currentMapKey, inboundSeq: journaledCrashSeq },
         'journaled per-chat crash has no provable immutable context; retaining exhausted ownership',

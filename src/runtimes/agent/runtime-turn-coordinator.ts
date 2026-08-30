@@ -2357,13 +2357,21 @@ finalizeRuntimeCrash(
   queue: IOutboundQueue | null | undefined,
   session: SessionManager | null,
   mapKey?: string,
+  // #3398: set ONLY by the runtime's provider-crash wrapper. The fence-lost
+  // replay abort (abortTurnRecoveryReplay) reaches here too and must stay
+  // quiet — a lane that lost its claim goes silent while the new claimant
+  // owns delivery — so salvage is opt-in per call site, and the salvage send
+  // is status-role (never answer evidence), leaving this function's crash
+  // finalization classes untouched.
+  options: { salvageOwedReply?: boolean } = {},
 ): void {
+  const salvageOwedReply = options.salvageOwedReply === true;
   if (!context || !queue || !this.host.durability) {
     if (!context && this.host.currentInboundSeq === undefined) {
       queue?.abortTurn();
       return;
     }
-    queue?.abortTurn({ preserveEvidence: true });
+    queue?.abortTurn({ preserveEvidence: true, ...(salvageOwedReply ? { salvageOwedReply } : {}) });
     if (context || this.host.currentInboundSeq !== undefined) {
       log.error(
         { mapKey, inboundSeq: context?.identity.inboundSeq ?? this.host.currentInboundSeq },
@@ -2372,7 +2380,7 @@ finalizeRuntimeCrash(
     }
     return;
   }
-  queue.abortTurn({ preserveEvidence: true });
+  queue.abortTurn({ preserveEvidence: true, ...(salvageOwedReply ? { salvageOwedReply } : {}) });
   void this.finalizeRuntimeTurnContext({
     context,
     queue,
