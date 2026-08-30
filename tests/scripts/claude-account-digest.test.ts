@@ -7,6 +7,7 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 import { computeAccountIdentityDigest } from '../../src/lib/account-identity-digest.ts';
+import { ACCOUNT_IDENTITY_PROBE_TIMEOUT_MS } from '../../src/runtimes/agent/providers/claude-account-identity.ts';
 import {
   parseClaudeAccountDigestArgs,
   runClaudeAccountDigest,
@@ -130,5 +131,21 @@ describe('runClaudeAccountDigest', () => {
       expect(text).not.toContain(ORG_ID);
       expect(text).not.toContain('Owner Org');
     }
+  });
+  it('bounds the probe with the SAME timeout constant the runtime verifier uses', async () => {
+    // The 15s bound used to be two unlinked private constants (PROBE_TIMEOUT_MS
+    // here, IDENTITY_PROBE_TIMEOUT_MS in the provider) and nothing asserted
+    // either of them. This pins that the capture script and the runtime
+    // verifier bound the same probe the same way.
+    const seen: unknown[] = [];
+    await runClaudeAccountDigest([], {
+      getProviderBinary: () => '/opt/bin/claude',
+      probe: async (_binary, _args, _env, options) => { seen.push(options); return { status: 'ok', output: authStatusJson() }; },
+      env: { HOME: '/srv/fixture', PATH: '/opt/bin' },
+      stdout: () => {},
+      stderr: () => {},
+    });
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({ timeoutMs: ACCOUNT_IDENTITY_PROBE_TIMEOUT_MS });
   });
 });

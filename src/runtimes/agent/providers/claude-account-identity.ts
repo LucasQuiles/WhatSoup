@@ -42,8 +42,11 @@ import {
 } from './binary-preflight.ts';
 
 /** Same bound as the CLI model probe: `auth status` is local, but the CLI's
- *  own startup on a loaded host can exceed the 5 s preflight default. */
-const IDENTITY_PROBE_TIMEOUT_MS = 15_000;
+ *  own startup on a loaded host can exceed the 5 s preflight default. Exported
+ *  because the operator capture script (scripts/claude-account-digest.ts) runs
+ *  the same probe and must bound it identically — it used to carry its own
+ *  unlinked copy of this number. */
+export const ACCOUNT_IDENTITY_PROBE_TIMEOUT_MS = 15_000;
 
 export type ObservedAccountIdentity =
   | { kind: 'identity'; digest: string }
@@ -52,13 +55,20 @@ export type ObservedAccountIdentity =
 
 export type AccountIdentityVerificationStatus = 'disabled' | 'match' | 'mismatch' | 'unverifiable';
 
-export type AccountIdentityUnverifiableReason =
+/** Bounded failure classes of the observation itself — everything that can go
+ *  wrong between "resolve the binary" and "we hold a digest". Deliberately
+ *  free of any notion of an EXPECTATION: comparing against a ratified digest is
+ *  the verifier's job, and `expectation-malformed` is the verifier's own class. */
+export type ObservedAccountIdentityFailureReason =
   | 'binary-missing'
   | 'probe-failed'
   | 'probe-threw'
   | 'not-logged-in'
   | 'identity-fields-missing'
-  | 'unparseable'
+  | 'unparseable';
+
+export type AccountIdentityUnverifiableReason =
+  | ObservedAccountIdentityFailureReason
   | 'expectation-malformed';
 
 export interface AccountIdentityVerification {
@@ -125,6 +135,79 @@ export function parseClaudeAuthStatusIdentity(output: string): ObservedAccountId
   return { kind: 'identity', digest: computeAccountIdentityDigest({ email, orgId }) };
 }
 
+/** Outcome of one observation: a digest, or a bounded failure reason. */
+export type ObservedAccountIdentityOutcome =
+  | { kind: 'identity'; digest: string }
+  | { kind: 'failed'; reason: ObservedAccountIdentityFailureReason };
+
+export interface ObserveClaudeAccountIdentityDeps extends ClaudeAccountIdentityDeps {
+  /** Caller-supplied binary path. When set, provider resolution is skipped
+   *  entirely (the capture script's `--binary` override). */
+  binary?: string | null;
+  signal?: AbortSignal;
+}
+
+/**
+ * Resolve the binary, run the read-only auth-status probe, parse it, and
+ * classify the result. THE one ladder — the runtime verifier below maps this
+ * outcome to a verification status, and the operator capture script
+ * (scripts/claude-account-digest.ts) maps it to exit codes and digest output.
+ * Both used to implement this ladder separately.
+ *
+ * Order is load-bearing and must not be rearranged:
+ *   - the binary is resolved before anything is spawned, so a missing binary
+ *     never probes;
+ *   - the output is parsed BEFORE the exit status is judged, because the CLI
+ *     reports a logged-out state structurally on either exit path;
+ *   - but a non-zero exit that is NOT that structured logged-out state is a
+ *     probe failure even when the output looks like a valid identity — output
+ *     that was never cleanly produced is not trusted.
+ *
+ * Never rejects: every failure, including a throwing resolver or spawn, is
+ * contained into a returned reason. Content-free: raw identity fields stay
+ * inside parseClaudeAuthStatusIdentity; what leaves here is a digest or a class.
+ */
+export async function observeClaudeAccountIdentity(
+  deps: ObserveClaudeAccountIdentityDeps = {},
+): Promise<ObservedAccountIdentityOutcome> {
+  let binary: string | null = deps.binary ?? null;
+  if (binary === null) {
+    try {
+      binary = (deps.getProviderBinary ?? getProviderBinary)('claude-cli');
+    } catch {
+      binary = null;
+    }
+  }
+  if (!binary) return { kind: 'failed', reason: 'binary-missing' };
+
+  let probe: BinaryAuthStatusResult;
+  try {
+    probe = await (deps.probeBinaryCommand ?? probeBinaryCommand)(
+      binary,
+      [...CLAUDE_AUTH_STATUS_ARGS],
+      // env-allowed: explicit per-var allow-list scrubbed from the caller-supplied env, not passthrough
+      scrubbedAuthStatusEnv(deps.env ?? process.env),
+      {
+        timeoutMs: deps.timeoutMs ?? ACCOUNT_IDENTITY_PROBE_TIMEOUT_MS,
+        ...(deps.signal ? { signal: deps.signal } : {}),
+      },
+    );
+  } catch {
+    return { kind: 'failed', reason: 'probe-threw' };
+  }
+
+  const observed = parseClaudeAuthStatusIdentity(probe.output);
+  if (probe.status !== 'ok') {
+    return {
+      kind: 'failed',
+      reason: observed.kind === 'absent' && observed.reason === 'not-logged-in' ? 'not-logged-in' : 'probe-failed',
+    };
+  }
+  if (observed.kind === 'unparseable') return { kind: 'failed', reason: 'unparseable' };
+  if (observed.kind === 'absent') return { kind: 'failed', reason: observed.reason };
+  return { kind: 'identity', digest: observed.digest };
+}
+
 /**
  * Verify the CLI's serving identity against the ratified digest. `null`
  * expectation = verification disabled (no spawn). Never rejects.
@@ -153,40 +236,10 @@ export async function verifyClaudeAccountIdentity(
   }
   if (!isAccountIdentityDigest(expectedDigest)) return outcome('unverifiable', 'expectation-malformed', null);
 
-  let binary: string | null;
-  try {
-    binary = (deps.getProviderBinary ?? getProviderBinary)('claude-cli');
-  } catch {
-    binary = null;
-  }
-  if (!binary) return outcome('unverifiable', 'binary-missing', null);
-
-  let probe: BinaryAuthStatusResult;
-  try {
-    probe = await (deps.probeBinaryCommand ?? probeBinaryCommand)(
-      binary,
-      [...CLAUDE_AUTH_STATUS_ARGS],
-      // env-allowed: explicit per-var allow-list scrubbed from the caller-supplied env, not passthrough
-      scrubbedAuthStatusEnv(deps.env ?? process.env),
-      { timeoutMs: deps.timeoutMs ?? IDENTITY_PROBE_TIMEOUT_MS, ...(signal ? { signal } : {}) },
-    );
-  } catch {
-    return outcome('unverifiable', 'probe-threw', null);
-  }
-
-  const observed = parseClaudeAuthStatusIdentity(probe.output);
-  if (probe.status !== 'ok') {
-    // A non-zero exit that still reports a structured logged-out state is that
-    // state; any other non-zero exit is a probe failure — even output that
-    // looks like a valid identity is not trusted without a clean exit.
-    return outcome(
-      'unverifiable',
-      observed.kind === 'absent' && observed.reason === 'not-logged-in' ? 'not-logged-in' : 'probe-failed',
-      null,
-    );
-  }
-  if (observed.kind === 'unparseable') return outcome('unverifiable', 'unparseable', null);
-  if (observed.kind === 'absent') return outcome('unverifiable', observed.reason, null);
+  // Every observation failure is already a bounded reason, and this function's
+  // whole remaining job is the digest comparison.
+  const observed = await observeClaudeAccountIdentity({ ...deps, ...(signal ? { signal } : {}) });
+  if (observed.kind === 'failed') return outcome('unverifiable', observed.reason, null);
   return safeStringEqual(observed.digest, expectedDigest)
     ? outcome('match', null, observed.digest)
     : outcome('mismatch', null, observed.digest);
