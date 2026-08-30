@@ -310,12 +310,16 @@ closes that gap without any credential write:
   service was serving turns on that same credential at the time). That exit 2
   is a false negative about the capture context, not evidence the instance is
   logged out. Before treating it as a logout, check the instance's own
-  signals in authenticated `GET /health` —
-  `instance.primaryModelUsability.status`,
-  `turn_capability.last_successful_turn_at` /
-  `last_successful_turn_provider`, and whether the `instance` block reports
-  an armed fallback window (`fallbackActiveUntil`) — and call it a real
-  logout only when they agree.
+  signals in authenticated `GET /health` — `turn_capability.model_usable`
+  true with `model_usable_stale` false (use these rather than the raw
+  `instance.primaryModelUsability.status`, which has no staleness guard, so a
+  stale `usable` would corroborate a credential that has since died);
+  `turn_capability.last_successful_turn_at` with
+  `last_successful_turn_provider` `claude-cli` and
+  `last_successful_turn_session_current` exactly `true`; and no armed fallback
+  window in the `instance` block (`fallbackActiveUntil`) — and call it a real
+  logout only when they agree. Any of those missing or stale is not
+  corroboration.
 
   ```bash
   CLAUDE_CONFIG_DIR=/absolute/claude-root npm run claude-account-digest
@@ -332,8 +336,11 @@ closes that gap without any credential write:
   never a match. Both degrade health with the same-named cause.
 - Correcting a mismatch is an owner action in the GUI/launchd context (the
   keychain-session hazard above applies), followed by a restart: the identity
-  reasons are not turn-provable, so a silence-latched identity degradation
-  clears only on restart, never on a passing turn.
+  reasons are not turn-provable, so a passing turn never releases a
+  silence-latched identity degradation. Correct the identity first. The
+  restart does not prove the fix — the latch is process-local, so a restart
+  clears it by amnesia — and restarting without correcting the identity only
+  hides the degradation until the next probe re-latches it.
 
 ## BYOK Memory Migration
 
