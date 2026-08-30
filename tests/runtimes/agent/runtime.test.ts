@@ -405,6 +405,7 @@ const { mockSocketServerInstance, MockWhatSoupSocketServer } = vi.hoisted(() => 
     stop: vi.fn(),
     updateDeliveryJid: vi.fn(),
     updateActorJid: vi.fn(),
+    updatePurpose: vi.fn(),
     updateConversationKey: vi.fn(),
   };
   // eslint-disable-next-line prefer-arrow-callback -- vi.fn().mockImplementation requires function keyword for constructor mocks; expires 2026-12-31

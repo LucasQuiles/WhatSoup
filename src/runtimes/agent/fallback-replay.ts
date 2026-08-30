@@ -3,6 +3,7 @@ import type { RuntimeTurnContext } from './runtime-turn-context.ts';
 import type { SessionManager } from './session.ts';
 import type { SystemTurnLeaseToken } from './pending-system-result-tracker.ts';
 import type { TurnDeliveryKind } from './turn-chronology.ts';
+import type { ExecActorSlot } from './exec-actor-slot.ts';
 
 /** Exact next-session route captured when a fallback replay is admitted. */
 export type ResolvedReplayRoute = RouteDecision & { pinnedProvider: string | null };
@@ -35,7 +36,7 @@ export interface ProviderFallbackReplayArgs {
 
 /** Minimal runtime surface required to recreate and dispatch a fallback turn. */
 export interface FallbackReplayHost {
-  readonly perChatExecActorQueue: Map<string, (string | undefined)[]>;
+  readonly perChatExecActorQueue: Map<string, ExecActorSlot[]>;
   session: SessionManager | null;
   currentTurnChatJid: string | null;
   currentTurnReplayText: string | null;

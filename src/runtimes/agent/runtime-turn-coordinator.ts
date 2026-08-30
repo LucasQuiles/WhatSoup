@@ -50,6 +50,7 @@ import type {
 import type { SystemTurnLeaseToken } from './pending-system-result-tracker.ts';
 import type { ReplyGuaranteeManager } from '../../core/reply-guarantee.ts';
 import type { SessionOwnershipRegistry } from './session-ownership.ts';
+import type { ExecActorSlot } from './exec-actor-slot.ts';
 import { createChildLogger } from '../../logger.ts';
 import { emitAlertChecked } from '../../lib/emit-alert.ts';
 import type { TurnDeliveryKind } from './turn-chronology.ts';
@@ -232,7 +233,7 @@ export interface RuntimeTurnCoordinatorPort {
   replaceGlobalTurnQueue(expected: TurnQueue): void;
   readonly perChatTurnQueues: Map<string, TurnQueue>;
   readonly perChatTurnQueueKeys: WeakMap<TurnQueue, PerChatRuntimeScopeRef>;
-  readonly perChatExecActorQueue: Map<string, (string | undefined)[]>;
+  readonly perChatExecActorQueue: Map<string, ExecActorSlot[]>;
   readonly pendingTurnText: Map<string, string>;
   readonly pendingTurnActorJid: Map<string, string | undefined>;
   readonly perChatTurnSourceMessageId: Map<string, string>;

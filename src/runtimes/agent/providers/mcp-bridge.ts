@@ -152,16 +152,29 @@ export async function executeBridgeTool(
  * Mirrors socket-server.ts:238-243 (QR-042 per-request snapshot + resolver
  * override). When no resolver is supplied the stored session is used verbatim
  * (unchanged behavior for callers that manage identity themselves).
+ *
+ * #3427: `resolvePurpose` is the sibling read-time override for
+ * `session.purpose` — the scheduled-agent-job restriction flag the registry's
+ * forbidden-tools gate reads. It is a DISTINCT resolver from `resolveActor`
+ * (never overloaded onto the actor field). Polarity differs from the actor:
+ * `purpose` is a RESTRICTION, so the resolver only ADDS it (`?? session.purpose`)
+ * — it engages the gate for single/shared, where the stored session carries no
+ * static purpose, and never clears a statically-correct purpose on a dedicated
+ * per_chat scheduled-job session. Missing resolver ⇒ stored purpose stands.
  */
 export function createProviderMcpBridge(
   registry: ToolRegistry,
   session: SessionContext,
   resolveActor?: () => string | undefined,
+  resolvePurpose?: () => SessionContext['purpose'],
 ): ProviderMcpBridge {
-  const snapshotSession = (): SessionContext =>
-    resolveActor === undefined
-      ? session
-      : { ...session, actorJid: resolveActor() };
+  const snapshotSession = (): SessionContext => {
+    if (resolveActor === undefined && resolvePurpose === undefined) return session;
+    const snap: SessionContext = { ...session };
+    if (resolveActor !== undefined) snap.actorJid = resolveActor();
+    if (resolvePurpose !== undefined) snap.purpose = resolvePurpose() ?? session.purpose;
+    return snap;
+  };
   return {
     listTools(): ProviderMcpTool[] {
       return registry.listTools(snapshotSession());

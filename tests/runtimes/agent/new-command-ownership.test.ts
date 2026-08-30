@@ -395,10 +395,12 @@ describe('per-chat /new ownership transition', () => {
       await new Promise<void>((resolve) => setImmediate(resolve));
       // P4: context is merged into the single user turn — no fresh_session_context
       // lease exists, so the rekey-following property is witnessed through the
-      // exec-actor queue landing under the ACTIVATED key instead.
+      // exec-actor queue landing under the ACTIVATED key instead. #3427: the
+      // register slot now carries {actorJid, purpose} (purpose undefined here —
+      // this is a normal /new turn, not a scheduled job).
       expect(routedTurns).toHaveLength(1);
       expect(state.pendingSystemResults.counts.get(canonicalKey) ?? 0).toBe(0);
-      expect(state.perChatExecActorQueue.get(canonicalKey)).toEqual([lidJid]);
+      expect(state.perChatExecActorQueue.get(canonicalKey)).toEqual([{ actorJid: lidJid, purpose: undefined }]);
 
       releaseContextResult();
       await turn;
@@ -417,7 +419,8 @@ describe('per-chat /new ownership transition', () => {
       expect(indicateTyping).toHaveBeenCalledTimes(1);
       expect(state.pendingSystemResults.counts.get(canonicalKey) ?? 0).toBe(0);
       expect(state.pendingSystemResults.counts.has(lidKey)).toBe(false);
-      expect(state.perChatExecActorQueue.get(canonicalKey)).toEqual([lidJid]);
+      // #3427: register slot now carries {actorJid, purpose} (normal /new turn).
+      expect(state.perChatExecActorQueue.get(canonicalKey)).toEqual([{ actorJid: lidJid, purpose: undefined }]);
       expect(state.perChatExecActorQueue.has(lidKey)).toBe(false);
       expect(routedTurns).toHaveLength(1);
       expect(routedTurns[0]?.mapKey).toBe(canonicalKey);

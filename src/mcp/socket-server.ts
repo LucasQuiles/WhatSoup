@@ -83,11 +83,24 @@ export class WhatSoupSocketServer {
    */
   private readonly actorResolver?: () => string | undefined;
 
+  /**
+   * #3427: optional per-request PURPOSE resolver, the sibling of actorResolver.
+   * When set (the global socket in single/shared scope), the scheduled-agent-job
+   * restriction flag for each tool call is resolved at read time from the turn
+   * the subprocess is currently executing, so the registry's forbidden-tools
+   * gate engages in the scopes where the `::scheduled-agent-job` mapKey suffix
+   * never runs. When unset, behavior is unchanged and the request uses the
+   * base/broadcast session purpose (per-chat and sandbox sockets, whose purpose
+   * is static/broadcast — see updatePurpose).
+   */
+  private readonly purposeResolver?: () => SessionContext['purpose'];
+
   constructor(
     socketPath: string,
     registry: ToolRegistry,
     session: SessionContext,
     actorResolver?: () => string | undefined,
+    purposeResolver?: () => SessionContext['purpose'],
     // Injectable so error-id timestamps can be driven to a known instant
     // (#2200). Optional and defaulted, so this slice changes no existing call
     // site.
@@ -104,6 +117,7 @@ export class WhatSoupSocketServer {
       session.binding = Object.freeze({ ...session.binding });
     }
     this.actorResolver = actorResolver;
+    this.purposeResolver = purposeResolver;
   }
 
   /** Number of active client connections. */
@@ -241,6 +255,14 @@ export class WhatSoupSocketServer {
           // deny). Overrides the broadcast connSession.actorJid, which is not
           // maintained for per-chat sockets.
           if (this.actorResolver) requestSession.actorJid = this.actorResolver();
+          // #3427: bind the scheduled-agent-job restriction to the executing
+          // turn at read time (global socket, single/shared). A RESTRICTION flag,
+          // so it only ADDS (`?? requestSession.purpose`): it engages the gate
+          // where the base session carries no static purpose and never clears a
+          // statically-set one.
+          if (this.purposeResolver) {
+            requestSession.purpose = this.purposeResolver() ?? requestSession.purpose;
+          }
           void this.handleRequest(req, requestSession).then((response) => {
             if (response !== null) {
               writeResponse(response, 'failed to write response');
@@ -376,6 +398,21 @@ export class WhatSoupSocketServer {
     this.baseSession.actorJid = jid;
     for (const session of this.connectionSessions.values()) {
       session.actorJid = jid;
+    }
+  }
+
+  /**
+   * #3427: broadcast the scheduled-agent-job restriction on the base session AND
+   * all active connections. The sandboxPerChat per-workspace socket carries no
+   * read-time purposeResolver and reuses one socket across a chat's turns
+   * (scheduled and normal alike), so — exactly as updateActorJid does for the
+   * caller — the runtime sets this per message before dispatch. Set to
+   * `'scheduled-agent-job'` for a synthetic job turn, `undefined` otherwise.
+   */
+  updatePurpose(purpose: SessionContext['purpose']): void {
+    this.baseSession.purpose = purpose;
+    for (const session of this.connectionSessions.values()) {
+      session.purpose = purpose;
     }
   }
 

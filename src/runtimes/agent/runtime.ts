@@ -192,6 +192,7 @@ import {
   isScheduledAgentJobMapKey,
   resolveAgentTurnMapKey,
 } from './scheduled-agent-job-isolation.ts';
+import type { ExecActorSlot } from './exec-actor-slot.ts';
 import { resolveConfiguredAdminJid, toPersonalJid, isGroupJid } from '../../core/jid-constants.ts';
 import { jidNormalizedUser } from '@whiskeysockets/baileys';
 import { contextMessagesForTurn } from './context-handoff.ts';
@@ -1876,11 +1877,14 @@ export class AgentRuntime implements Runtime {
   // Used to replay a message when session resume fails and the turn was lost.
   private pendingTurnText: Map<string, string> = new Map();
   private pendingTurnActorJid: Map<string, string | undefined> = new Map();
-  // F-STICKY-ACTOR (QR-245): per-chat executing-turn actor register. HEAD =
+  // F-STICKY-ACTOR (QR-245): per-chat executing-turn register. HEAD =
   // oldest-dispatched-unresolved = the turn the subprocess is currently running.
   // Read fail-closed by resolveExecutingActor (empty/absent -> deny). Cleared on
   // every abnormal termination (cleanupPerChatState + crash/resume/fallback).
-  private perChatExecActorQueue: Map<string, (string | undefined)[]> = new Map();
+  // #3427: each slot carries the executing turn's {actorJid, purpose} together
+  // (ExecActorSlot) so the scheduled-agent-job restriction rides the same FIFO
+  // as the actor and can never drift from it.
+  private perChatExecActorQueue: Map<string, ExecActorSlot[]> = new Map();
   /** Exact actor FIFO slot owned by an output-producing system lease (poll continuation). */
   private readonly systemTurnExecActors = new Map<number, {
     scopeKey: string;
@@ -3649,6 +3653,10 @@ export class AgentRuntime implements Runtime {
           this.registry,
           globalSession,
           () => this.resolveExecutingGlobalActor(),
+          // #3427: resolve the scheduled-agent-job restriction read-time from the
+          // same executing-turn register, so the forbidden-tools gate engages in
+          // single/shared scope where the mapKey suffix never sets purpose.
+          () => this.resolveExecutingGlobalPurpose(),
         );
         this.globalSocketServer.start();
         this.globalMcpSocketPath = socketPath;
@@ -4452,6 +4460,14 @@ export class AgentRuntime implements Runtime {
       const key = perChatMapKey ?? this.resolvePerChatMapKey(chatJid);
       const res = this.workspaceResources.get(key);
       res?.socketServer?.updateActorJid(msg.senderJid);
+      // #3427: broadcast the scheduled-agent-job restriction alongside the actor.
+      // sandboxPerChat reuses ONE workspace socket across a chat's turns and
+      // applies no read-time purposeResolver, so — exactly as with the actor —
+      // the purpose is set per message here; the mapKey suffix is not applied in
+      // sandbox mode, so this broadcast is the sole engager of the gate.
+      res?.socketServer?.updatePurpose(
+        msg.isSyntheticJob === true ? 'scheduled-agent-job' : undefined,
+      );
       // Relocate media files from global temp dir into user's workspace
       // so the agent can read them within its sandbox-allowed paths.
       if (content) {
@@ -4867,6 +4883,7 @@ export class AgentRuntime implements Runtime {
         isGroup: msg.isGroup,
         groupName: msg.isGroup ? chatJid : undefined,
         contentType: msg.contentType,
+        isSyntheticJob: msg.isSyntheticJob === true,
         ...(runtimeContext ? { runtimeContext } : {}),
         inboundSeq: msg.inboundSeq,
       });
@@ -4942,7 +4959,7 @@ export class AgentRuntime implements Runtime {
         contentType: msg.contentType,
         isGroup: msg.isGroup,
         ...(msg.isGroup ? { groupName: chatJid } : {}),
-      }, msg.inboundSeq);
+      }, msg.inboundSeq, msg.isSyntheticJob === true);
     }
   }
 
@@ -5069,9 +5086,13 @@ export class AgentRuntime implements Runtime {
       this.updateSessionActorJid(this.session!, senderJid);
       // #2976 (ii): publish the executing turn's actor for the global-socket
       // read-time resolver at the provider boundary (shared-mode dispatch
-      // bypasses sendTurnToSession, so it publishes here).
+      // bypasses sendTurnToSession, so it publishes here). #3427: the synthetic
+      // job flag rides the SAME slot as the purpose the forbidden-tools gate reads.
       const sharedExecQ = this.perChatExecActorQueue.get(GLOBAL_TOOL_SCOPE_KEY) ?? [];
-      sharedExecQ.push(senderJid);
+      sharedExecQ.push({
+        actorJid: senderJid,
+        purpose: turn.isSyntheticJob === true ? 'scheduled-agent-job' : undefined,
+      });
       this.perChatExecActorQueue.set(GLOBAL_TOOL_SCOPE_KEY, sharedExecQ);
       try {
         await this.session!.sendTurn(withProviderApplicationContext(
@@ -5119,6 +5140,11 @@ export class AgentRuntime implements Runtime {
     dispatchAllowed?: () => boolean,
     runtimeContext?: RuntimeTurnContext,
     deliveryKind: TurnDeliveryKind = 'live',
+    // #3427: synthetic scheduled-agent-job turn. single scope (mapKey undefined,
+    // GLOBAL register) has no suffix to derive from, so admission threads this
+    // flag; per_chat callers leave it false and the suffixed effectiveMapKey
+    // supplies the same signal below.
+    isScheduledAgentJob = false,
   ): Promise<void> {
     let effectiveMapKey = mapKey;
     let spawnedForTurn = false;
@@ -5283,7 +5309,17 @@ export class AgentRuntime implements Runtime {
       if (execScopeKey !== undefined) {
         if (!session.getStatus().active) this.perChatExecActorQueue.delete(execScopeKey);
         const execQ = this.perChatExecActorQueue.get(execScopeKey) ?? [];
-        execQ.push(actorJid);
+        // #3427: publish the scheduled-agent-job purpose in the SAME slot as the
+        // actor. single scope threads `isScheduledAgentJob` from admission (its
+        // GLOBAL register key carries no suffix); per_chat derives it from the
+        // suffixed effectiveMapKey. Either way the restriction and the actor
+        // are pushed and shifted together and can never drift.
+        const slotPurpose: SessionContext['purpose'] =
+          isScheduledAgentJob
+          || (effectiveMapKey !== undefined && isScheduledAgentJobMapKey(effectiveMapKey))
+            ? 'scheduled-agent-job'
+            : undefined;
+        execQ.push({ actorJid, purpose: slotPurpose });
         this.perChatExecActorQueue.set(execScopeKey, execQ);
         actorPushed = true;
         pushedExecScopeKey = execScopeKey;
@@ -5339,6 +5375,9 @@ export class AgentRuntime implements Runtime {
     actorJid: string,
     source?: RuntimeTurnSourceSnapshot,
     inboundSeq?: number,
+    // #3427: single-scope synthetic scheduled-agent-job flag, threaded to the
+    // GLOBAL executing-turn register publish (single has no mapKey suffix).
+    isScheduledAgentJob = false,
   ): Promise<void> {
     // Clear post-turn gate for shared session scope
     this.postTurnGate.delete(GLOBAL_TOOL_SCOPE_KEY);
@@ -5402,7 +5441,7 @@ export class AgentRuntime implements Runtime {
       }, undefined, () => (
         !this.shutdownRequested
         && (context === null || !this.runtimeTurnCoordinator.isUndispatchedRuntimeTurnCancelled(context))
-      ), context ?? undefined);
+      ), context ?? undefined, 'live', isScheduledAgentJob);
       if (context && completion.value === null) {
         if (!this.runtimeTurnCoordinator.isUndispatchedRuntimeTurnCancelled(context)) {
           this.runtimeTurnCoordinator.terminalizeUndispatchedRuntimeCrash(context);
@@ -8010,7 +8049,7 @@ export class AgentRuntime implements Runtime {
     if (systemTurnLease) this.systemTurnExecActors.delete(systemTurnLease.id);
     const queue = this.perChatExecActorQueue.get(mapKey);
     if (!queue) return;
-    if (queue.at(-1) === actorJid) queue.pop();
+    if (queue.at(-1)?.actorJid === actorJid) queue.pop();
     else {
       log.error({ mapKey }, 'executing actor FIFO drift on failed dispatch — clearing fail-closed');
       queue.length = 0;
@@ -8028,7 +8067,7 @@ export class AgentRuntime implements Runtime {
     this.systemTurnExecActors.delete(lease.id);
     const queue = this.perChatExecActorQueue.get(binding.scopeKey);
     if (!queue) return;
-    if (queue[0] === binding.actorJid) queue.shift();
+    if (queue[0]?.actorJid === binding.actorJid) queue.shift();
     else {
       log.error(
         { scopeKey: binding.scopeKey, leaseId: lease.id },
@@ -8055,7 +8094,7 @@ export class AgentRuntime implements Runtime {
   private resolveExecutingActorByMapKey(mapKey: string): string | undefined {
     const session = this.chatSessions.get(mapKey);
     if (!session || !session.getStatus().active) return undefined;
-    return this.perChatExecActorQueue.get(mapKey)?.[0];
+    return this.perChatExecActorQueue.get(mapKey)?.[0]?.actorJid;
   }
 
   private resolveExecutingActor(chatJid: string): string | undefined {
@@ -8071,7 +8110,22 @@ export class AgentRuntime implements Runtime {
   private resolveExecutingGlobalActor(): string | undefined {
     if (this.sessionScope === 'per_chat') return undefined;
     if (!this.session?.getStatus().active) return undefined;
-    return this.perChatExecActorQueue.get(GLOBAL_TOOL_SCOPE_KEY)?.[0];
+    return this.perChatExecActorQueue.get(GLOBAL_TOOL_SCOPE_KEY)?.[0]?.actorJid;
+  }
+
+  /**
+   * #3427: read-time PURPOSE resolver for the GLOBAL socket / in-process bridge,
+   * the sibling of resolveExecutingGlobalActor. Returns the currently EXECUTING
+   * single/shared turn's runtime purpose (`'scheduled-agent-job'` for a synthetic
+   * job turn), or undefined when no turn executes, the session is down, or the
+   * runtime is per_chat scope (whose purpose is static/suffix-derived on the
+   * dedicated session, not read from this global register). Reads the SAME slot
+   * as the actor, so purpose and actor are always coherent for a given turn.
+   */
+  private resolveExecutingGlobalPurpose(): SessionContext['purpose'] {
+    if (this.sessionScope === 'per_chat') return undefined;
+    if (!this.session?.getStatus().active) return undefined;
+    return this.perChatExecActorQueue.get(GLOBAL_TOOL_SCOPE_KEY)?.[0]?.purpose;
   }
 
   private sessionUsesPerChatActorSocket(session: SessionManager): boolean {
@@ -8107,6 +8161,22 @@ export class AgentRuntime implements Runtime {
     return this.sessionScope === 'per_chat'
       ? this.resolveExecutingActor(chatJid)
       : this.resolveExecutingGlobalActor();
+  }
+
+  /**
+   * #3427: read-time PURPOSE resolver for the in-process provider MCP bridge,
+   * the sibling of resolveBridgeActor. single/shared read the global executing
+   * register (resolveExecutingGlobalPurpose). per_chat returns undefined: a
+   * per_chat scheduled job runs on a DEDICATED, suffixed-mapKey session whose
+   * `providerToolSession.purpose` is set statically at spawn (isScheduledAgent
+   * JobMapKey), so the bridge's `?? session.purpose` merge keeps that static
+   * restriction — the read-time override is only needed where no static purpose
+   * exists (single/shared).
+   */
+  private resolveBridgePurpose(): SessionContext['purpose'] {
+    return this.sessionScope === 'per_chat'
+      ? undefined
+      : this.resolveExecutingGlobalPurpose();
   }
 
   private wirePerChatActorSocket(chatJid: string, provider: string, mapKeyOverride?: string):
@@ -9351,6 +9421,8 @@ export class AgentRuntime implements Runtime {
         this.registry,
         providerToolSession,
         () => this.resolveBridgeActor(opts.chatJid),
+        // #3427: read-time purpose override, sibling of the actor resolver.
+        () => this.resolveBridgePurpose(),
       ),
       mcpSessionContext: providerToolSession,
       whatsoupInstance: this.instanceName,

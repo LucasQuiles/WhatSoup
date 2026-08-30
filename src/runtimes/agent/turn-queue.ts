@@ -25,6 +25,13 @@ export interface QueuedTurn {
   runtimeContext?: RuntimeTurnContext;
   /** durability: inbound_events.seq for this turn — threaded to outbound ops */
   inboundSeq?: number;
+  /**
+   * #3427: this turn is a synthetic scheduled-agent-job (msg.isSyntheticJob).
+   * Carried from admission so the shared/single provider boundary can publish
+   * the `'scheduled-agent-job'` purpose into the executing-turn register beside
+   * the actor — the forbidden-tools restriction the registry gate reads.
+   */
+  isSyntheticJob?: boolean;
 }
 
 /**
