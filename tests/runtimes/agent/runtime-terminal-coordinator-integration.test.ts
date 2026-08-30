@@ -1068,7 +1068,9 @@ describe('runtime terminal coordinator integration', () => {
       expect(state.chatSessions.get(mapKey)).toBe(session);
       expect(state.chatQueues.get(mapKey)).toBe(queue);
       expect(queue.abortTurn).toHaveBeenCalledTimes(1);
-      expect(queue.abortTurn).toHaveBeenCalledWith({ preserveEvidence: true });
+      // #3398: the provider-crash wrapper requests owed-reply salvage;
+      // non-crash aborts (reset, fence-lost replay) must NOT carry the flag.
+      expect(queue.abortTurn).toHaveBeenCalledWith({ preserveEvidence: true, salvageOwedReply: true });
       expect(runtime.getHealthSnapshot()).toMatchObject({
         status: 'degraded',
         details: { recentCrashes: 4 },

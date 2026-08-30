@@ -240,6 +240,22 @@ export const STATUS_CAP_NOTICE =
  * gates or suppresses a send.
  */
 export const HIGH_VOLUME_TURN_WATERMARK = 40;
+/**
+ * #3398: prefix for a salvaged reply delivered when a turn is crash-aborted
+ * before its terminal result ever enqueues. The guarantee is "no silent turn",
+ * never "always the original answer" — the salvage is the model's last
+ * buffered narration, honestly framed as pre-interruption progress rather
+ * than a completed reply.
+ */
+export const SALVAGED_REPLY_NOTICE =
+  '_I was interrupted before I could finish. Last progress before the interruption:_';
+/**
+ * #3398: cap on the deferred narration retained per turn in the
+ * provisionalPreToolDiscard pen. Enforced by dropping the OLDEST whole
+ * batches first — never by slicing inside a batch, because a sliced secret
+ * fragment could evade the redaction patterns applied at delivery time.
+ */
+export const MAX_SALVAGE_RETENTION_CHARS = 4000;
 /** Hard cap on the terminal-text dedup map so it can't grow unbounded between window prunes. */
 const MAX_TERMINAL_TEXT_DEDUPE_KEYS = 1_000;
 
@@ -379,7 +395,14 @@ export interface IOutboundQueue {
   shutdown(): Promise<void>;
   /** Stop waiting on transport so durable finalization owns the shutdown budget. */
   preemptForShutdown?(deadlineAt: number): void;
-  abortTurn(options?: { preserveEvidence?: boolean }): void;
+  /**
+   * Cancel per-turn timers/buffers without a normal turn end. `salvageOwedReply`
+   * is for PROVIDER-CRASH finalization only: when the dying turn produced no
+   * visible text, its undelivered buffered/deferred narration is delivered as a
+   * status-role salvage message (never answer evidence) instead of being
+   * destroyed. Interrupt/reset/fence-lost callers must NOT pass it.
+   */
+  abortTurn(options?: { preserveEvidence?: boolean; salvageOwedReply?: boolean }): void;
   /** The chat JID this queue is currently targeting. */
   readonly targetChatJid: string;
   /** Opaque echo-guard token. Exposed so a replacement queue can INHERIT the
@@ -731,14 +754,22 @@ export class OutboundQueue implements IOutboundQueue {
   /** Aggregation buffer for streaming text deltas — prevents per-token messages from streaming providers. */
   private streamBufferParts: BufferedStreamPart[] = [];
   /**
-   * Path C recovery holding pen. `discardPreToolAssistantText()` moves buffered
-   * pre-tool text HERE rather than destroying it: the text is USUALLY narration
-   * ("Let me check…") that later output supersedes, but if the turn ends without
-   * ever delivering visible text, this WAS the user-owed reply. Cleared the
-   * instant any visible text reaches the user (markVisibleTextDelivered); flushed
-   * by endTurn() only when the whole turn otherwise produced nothing.
+   * Path C recovery holding pen — the SINGLE retention store for minimal-mode
+   * narration deferred at tool boundaries (#3415) and for abort-path salvage
+   * (#3398). `discardPreToolAssistantText()` moves buffered pre-tool text HERE
+   * rather than destroying it — grouped into whole batches and capped at
+   * MAX_SALVAGE_RETENTION_CHARS by dropping oldest whole batches (see
+   * retainDiscardedBatches) — because the text is USUALLY narration ("Let me
+   * check…") that later output supersedes, but if the turn ends without ever
+   * delivering visible text, this WAS the user-owed reply. Cleared the instant
+   * any visible text reaches the user (markVisibleTextDelivered); flushed by
+   * endTurn() only when the whole turn otherwise produced nothing; consumed or
+   * destroyed LOUDLY by abortTurn() (deliver on crash salvage, log.warn on
+   * every other abort); destroyed loudly by completeFlushPresentation().
+   * Deliberately NOT counted by hasPendingWork() — dormant salvage material,
+   * not pending sends.
    */
-  private provisionalPreToolDiscard: BufferedStreamPart[] = [];
+  private provisionalPreToolDiscard: BufferedStreamPart[][] = [];
   /** Timer for flushing aggregated streaming text after a pause. */
   private streamTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -870,15 +901,59 @@ export class OutboundQueue implements IOutboundQueue {
     // Path C: DEFER, do not destroy. Buffered pre-tool text is almost always
     // narration ("Let me check…") superseded by later output, but if the turn
     // ends without ever delivering visible text, this text WAS the user-owed
-    // reply. Hold it; markVisibleTextDelivered() drops it the moment real output
-    // reaches the user, and endTurn() flushes it iff nothing else did (keeping
-    // the NO_REPLY guarantee honest instead of silently dropping the answer).
-    this.provisionalPreToolDiscard.push(...this.streamBufferParts);
+    // reply. Hold it (whole-batch grouped and capped — see
+    // retainDiscardedBatches); markVisibleTextDelivered() drops it the moment
+    // real output reaches the user, endTurn() flushes it iff nothing else did
+    // (keeping the NO_REPLY guarantee honest instead of silently dropping the
+    // answer), and abortTurn() salvages or loudly destroys it (#3398).
+    const deferredParts = this.streamBufferParts;
     this.streamBufferParts = [];
+    this.retainDiscardedBatches(deferredParts);
     log.info(
       { chatJid: this.deliveryJid, partCount, characterCount },
       'minimal mode deferred buffered assistant text at tool boundary',
     );
+  }
+
+  /**
+   * #3398: fold buffered stream parts into the provisionalPreToolDiscard pen,
+   * grouped into whole batches exactly as flushStreamBuffer() would have
+   * grouped them (attribution-change boundaries). Whole batches are the cap
+   * and salvage granularity: the cap drops OLDEST whole batches and never
+   * slices inside one, because a sliced fragment could evade the redaction
+   * patterns applied at delivery time. onCommit callbacks stay attached to
+   * the retained parts (endTurn()'s path C recovery re-flushes them with full
+   * commit semantics) but are never fired by abortTurn()'s salvage delivery:
+   * salvage must not commit runtime bookkeeping (replay-unsafe marks,
+   * perChatTurnText, reply-guarantee resets), or the crash-recovery machinery
+   * would mistake stale narration for a delivered reply and skip the real
+   * recovery (QR-103 double-answer rule).
+   */
+  private retainDiscardedBatches(parts: BufferedStreamPart[]): void {
+    let group: BufferedStreamPart[] = [];
+    const commitGroup = (): void => {
+      if (group.length === 0) return;
+      if (group.some((part) => part.text.trim() !== '')) {
+        this.provisionalPreToolDiscard.push(group);
+      }
+      group = [];
+    };
+    for (const part of parts) {
+      const prior = group[0];
+      if (prior && !OutboundQueue.sameAttribution(prior, part)) commitGroup();
+      group.push(part);
+    }
+    commitGroup();
+    // Enforce the retention cap by dropping OLDEST whole batches (see
+    // MAX_SALVAGE_RETENTION_CHARS for why batches are never sliced).
+    let total = this.provisionalPreToolDiscard.reduce(
+      (sum, batch) => sum + batch.reduce((len, part) => len + part.text.length, 0),
+      0,
+    );
+    while (this.provisionalPreToolDiscard.length > 1 && total > MAX_SALVAGE_RETENTION_CHARS) {
+      const dropped = this.provisionalPreToolDiscard.shift()!;
+      total -= dropped.reduce((len, part) => len + part.text.length, 0);
+    }
   }
 
   /**
@@ -1211,12 +1286,61 @@ export class OutboundQueue implements IOutboundQueue {
    * naturally on the recipient's side (~10-15s), acting as a soft signal that
    * the session is in trouble.
    */
-  abortTurn(options: { preserveEvidence?: boolean } = {}): void {
+  abortTurn(options: { preserveEvidence?: boolean; salvageOwedReply?: boolean } = {}): void {
     if (this.toolTimer !== null) { clearTimeout(this.toolTimer); this.toolTimer = null; }
     if (this.toolMaxAgeTimer !== null) { clearTimeout(this.toolMaxAgeTimer); this.toolMaxAgeTimer = null; }
     if (this.streamTimer !== null) { clearTimeout(this.streamTimer); this.streamTimer = null; }
+    // #3398 — reply-guarantee choke for turns that die WITHOUT a terminal
+    // result (the result path settles its own guarantee via commitStreamingText /
+    // enqueueResultText / endTurn()'s path C recovery and never reaches this
+    // branch with owed text). Semantics: an owed reply — buffered or
+    // tool-boundary-deferred narration on a turn that delivered NO visible
+    // text — either DELIVERS (salvageOwedReply: provider-crash finalization
+    // only) or fails LOUDLY (log.warn); it is never destroyed silently.
+    // Salvage is sent with role 'status' so it can never enter answerOpIds:
+    // crash finalization must keep seeing delivery evidence 'none', or the
+    // inbound disposition would flip from failed_terminal to
+    // transferred_to_recovery_owner and perturb the recovery lane's semantics
+    // (turn-finalizer.ts deriveInboundDisposition). Under an uncatchable
+    // SIGKILL before any output reaches the runtime there is nothing to
+    // salvage — the guarantee is "no silent drop of what we HELD", not
+    // "always the original answer".
+    const liveParts = this.streamBufferParts;
     this.streamBufferParts = [];
-    this.provisionalPreToolDiscard = [];
+    if (!this.turnHasVisibleText) {
+      this.retainDiscardedBatches(liveParts);
+      const owed = this.provisionalPreToolDiscard;
+      this.provisionalPreToolDiscard = [];
+      if (owed.length > 0) {
+        const batchCount = owed.length;
+        const characterCount = owed.reduce(
+          (sum, batch) => sum + batch.reduce((len, part) => len + part.text.length, 0),
+          0,
+        );
+        if (options.salvageOwedReply === true) {
+          const lastBatch = owed[owed.length - 1];
+          const { text: _text, onCommit: _onCommit, ...batchAttribution } = lastBatch[0];
+          const attribution: OutboundAttribution = { ...batchAttribution, role: 'status' };
+          this.enqueuePreparedText(
+            `${SALVAGED_REPLY_NOTICE}\n\n${owed
+              .map((batch) => batch.map((part) => part.text).join(''))
+              .join('\n\n')}`,
+            attribution,
+          );
+          log.warn(
+            { chatJid: this.deliveryJid, batchCount, characterCount },
+            'crash abort salvaged undelivered assistant text as owed-reply fallback',
+          );
+        } else {
+          log.warn(
+            { chatJid: this.deliveryJid, batchCount, characterCount },
+            'turn abort destroyed undelivered assistant text with no visible reply this turn',
+          );
+        }
+      }
+    } else {
+      this.provisionalPreToolDiscard = [];
+    }
     this.toolBuffer = [];
     this.friendlyProgressSent.clear();
     this.recentProgressTextAt.clear();
@@ -1274,6 +1398,21 @@ export class OutboundQueue implements IOutboundQueue {
     this.stopTyping();
     this.friendlyProgressSent.clear();
     this.recentProgressTextAt.clear();
+    // #3398: presentation teardown is a non-salvage seam — an owed reply
+    // destroyed here must fail loudly, never silently. (atStableBoundary()
+    // already flushed the stream buffer, so anything still in the pen on a
+    // no-visible-text turn is genuinely destroyed undelivered text.)
+    if (!this.turnHasVisibleText && this.provisionalPreToolDiscard.length > 0) {
+      const batchCount = this.provisionalPreToolDiscard.length;
+      const characterCount = this.provisionalPreToolDiscard.reduce(
+        (sum, batch) => sum + batch.reduce((len, part) => len + part.text.length, 0),
+        0,
+      );
+      log.warn(
+        { chatJid: this.deliveryJid, batchCount, characterCount },
+        'presentation flush destroyed undelivered assistant text with no visible reply this turn',
+      );
+    }
     this.turnHasVisibleText = false;
     this.provisionalPreToolDiscard = [];
   }
@@ -1369,7 +1508,7 @@ export class OutboundQueue implements IOutboundQueue {
     // the streaming buffer so grouping, attribution, evidence, and onCommit all
     // apply exactly as a normal flush would.
     if (!this.turnHasVisibleText && this.provisionalPreToolDiscard.length > 0) {
-      const recovered = this.provisionalPreToolDiscard;
+      const recovered = this.provisionalPreToolDiscard.flat();
       this.provisionalPreToolDiscard = [];
       const characterCount = recovered.reduce((total, part) => total + part.text.length, 0);
       this.streamBufferParts.push(...recovered);

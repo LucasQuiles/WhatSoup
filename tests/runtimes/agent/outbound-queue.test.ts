@@ -13,6 +13,8 @@ import {
   MAX_CHUNKS,
   MAX_STATUS_MESSAGES_PER_TURN,
   STATUS_CAP_NOTICE,
+  SALVAGED_REPLY_NOTICE,
+  MAX_SALVAGE_RETENTION_CHARS,
 } from '../../../src/runtimes/agent/outbound-queue.ts';
 import type { ToolUpdate } from '../../../src/runtimes/agent/outbound-queue.ts';
 import type { ProgressEvent } from '../../../src/runtimes/agent/operation-tracker.ts';
@@ -2126,6 +2128,145 @@ describe('OutboundQueue', () => {
     expect(calls).toEqual(['It renews every 12 months.']);
     expect(narrationCommit).not.toHaveBeenCalled();
     expect(answerCommit).toHaveBeenCalledOnce();
+  });
+
+  // #3398: an owed reply on a turn that dies without a terminal result must
+  // deliver (crash salvage) or fail loudly — never vanish silently.
+  it('crash abort with salvageOwedReply delivers narration discarded at a tool boundary', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setToolUpdateMode('minimal');
+    const onCommit = vi.fn();
+
+    queue.enqueueStreamingText('I will check the workbook now.', 'answer', onCommit);
+    queue.discardPreToolAssistantText();
+    queue.enqueueToolUpdate({ category: 'reading', detail: 'workbook.xlsx' });
+    // Provider dies before any result event — crash finalization salvages.
+    queue.abortTurn({ preserveEvidence: true, salvageOwedReply: true });
+    await vi.runAllTimersAsync();
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toContain(SALVAGED_REPLY_NOTICE);
+    expect(calls[0]).toContain('I will check the workbook now.');
+    // Salvage is uncommitted: runtime bookkeeping must keep seeing an
+    // undelivered crash so recovery replay still runs.
+    expect(onCommit).not.toHaveBeenCalled();
+  });
+
+  it('crash salvage joins discarded batches with the live buffer tail in order', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setToolUpdateMode('minimal');
+
+    queue.enqueueStreamingText('First: reading the files.');
+    queue.discardPreToolAssistantText();
+    queue.enqueueStreamingText('Second: comparing results.');
+    queue.discardPreToolAssistantText();
+    queue.enqueueStreamingText('Third: almost done.');
+    queue.abortTurn({ preserveEvidence: true, salvageOwedReply: true });
+    await vi.runAllTimersAsync();
+
+    expect(calls).toHaveLength(1);
+    const first = calls[0].indexOf('First: reading the files.');
+    const second = calls[0].indexOf('Second: comparing results.');
+    const third = calls[0].indexOf('Third: almost done.');
+    expect(first).toBeGreaterThan(-1);
+    expect(second).toBeGreaterThan(first);
+    expect(third).toBeGreaterThan(second);
+  });
+
+  it('crash salvage records status delivery evidence, never answer evidence', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setDurability(makeDurabilityStub());
+    queue.setToolUpdateMode('minimal');
+    queue.beginTurnEvidence('turn-3398rc');
+
+    queue.enqueueStreamingText('Narration before the tool call.');
+    queue.discardPreToolAssistantText();
+    queue.abortTurn({ preserveEvidence: true, salvageOwedReply: true });
+    const evidencePromise = queue.flushTurnEvidence('turn-3398rc');
+    await vi.runAllTimersAsync();
+    const evidence = await evidencePromise;
+
+    expect(calls).toHaveLength(1);
+    // Crash finalization derives the inbound disposition from answerOpIds; a
+    // salvage op there would flip failed_terminal to recovery-owner transfer.
+    expect(evidence.answerOpIds).toHaveLength(0);
+    expect(evidence.statusOpIds.length).toBeGreaterThan(0);
+  });
+
+  it('plain abortTurn destroys the owed reply loudly instead of silently', async () => {
+    mockLog.warn.mockClear();
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setToolUpdateMode('minimal');
+
+    queue.enqueueStreamingText('Doomed narration.');
+    queue.discardPreToolAssistantText();
+    queue.abortTurn();
+    await vi.runAllTimersAsync();
+
+    expect(calls).toEqual([]);
+    expect(mockLog.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ chatJid: CHAT_JID, batchCount: 1 }),
+      'turn abort destroyed undelivered assistant text with no visible reply this turn',
+    );
+  });
+
+  it('crash salvage is skipped when the turn already delivered visible text', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setToolUpdateMode('minimal');
+
+    queue.enqueueText('Early partial answer.');
+    await vi.runAllTimersAsync();
+    expect(calls).toEqual(['Early partial answer.']);
+
+    queue.enqueueStreamingText('Later narration.');
+    queue.discardPreToolAssistantText();
+    queue.abortTurn({ preserveEvidence: true, salvageOwedReply: true });
+    await vi.runAllTimersAsync();
+
+    expect(calls).toEqual(['Early partial answer.']);
+  });
+
+  it('endTurn settles the retained narration so a later crash cannot replay the finished turn', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setToolUpdateMode('minimal');
+
+    queue.enqueueStreamingText('Stale narration from the finished turn.');
+    queue.discardPreToolAssistantText();
+    // #3415 path C delivers the deferred text as the terminal reply and
+    // empties the pen — the crash abort below must find nothing to salvage.
+    queue.endTurn();
+    await vi.runAllTimersAsync();
+    expect(calls).toEqual(['Stale narration from the finished turn.']);
+
+    queue.abortTurn({ preserveEvidence: true, salvageOwedReply: true });
+    await vi.runAllTimersAsync();
+
+    expect(calls).toEqual(['Stale narration from the finished turn.']);
+  });
+
+  it('crash salvage retention drops oldest whole batches past the cap', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setToolUpdateMode('minimal');
+
+    const oldest = `OLDEST-${'a'.repeat(MAX_SALVAGE_RETENTION_CHARS - 500)}`;
+    const newest = `NEWEST-${'b'.repeat(1000)}`;
+    queue.enqueueStreamingText(oldest);
+    queue.discardPreToolAssistantText();
+    queue.enqueueStreamingText(newest);
+    queue.discardPreToolAssistantText();
+    queue.abortTurn({ preserveEvidence: true, salvageOwedReply: true });
+    await vi.runAllTimersAsync();
+
+    const delivered = calls.join('\n');
+    expect(delivered).toContain('NEWEST-');
+    expect(delivered).not.toContain('OLDEST-');
   });
 
   it('minimal mode flushes a buffered decision prompt before its poll', async () => {
