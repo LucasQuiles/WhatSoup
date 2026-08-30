@@ -22,7 +22,11 @@ never routes through the wrapper, so the supported path is untouched.
 from __future__ import annotations
 
 import importlib.util
+import json
+import os
+import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -109,3 +113,151 @@ def test_boundary_guard_still_inert_when_a_cycle_is_supplied(dispatcher, tmp_pat
         dispatcher._require_incident_cycle_if_adopted(
             paths, None, helper="collapse_storm_group"
         )
+
+
+# ---------------------------------------------------------------------------
+# The live-incident falsifier: collapse_storm_group's superseding branch.
+#
+# The writer guard above turns a silent corruption into a raised error, which
+# is strictly better but still an outage -- the dispatcher then crash-loops on
+# exit 78. The *direct* defect is that one branch never gated its write:
+# ``save_incident_state`` has 14 call sites in this file and 13 are wrapped in
+# ``if incident: incident.commit() else: ...``. The superseding-digest branch
+# of ``collapse_storm_group`` was the sole exception, so a caller holding a
+# cycle still bare-wrote the primary and destroyed the envelope.
+#
+# Reaching that branch needs two things at once: a *second* storm batch after
+# the first digest was delivered (the superseding revision), and an event whose
+# ``source`` starts with ``daily-health`` -- only that sets ``state_changed``.
+# Both held on 2026-08-30: a daily-health FAIL burst across six hosts at
+# 11:20:52Z, a storm collapse at 11:20:54Z, envelope gone at 11:21:31Z.
+# ---------------------------------------------------------------------------
+
+_HEALTHY_PROBE = "http_status=200 health_status=healthy"
+
+
+def _adopt_via_real_session(dispatcher, root: Path) -> dict[str, Path]:
+    """Adopt the store through the REAL controller-state session.
+
+    Deliberately not a hand-written marker file. ``controller_state`` owns the
+    ``.initialized`` suffix and spells it internally; if it ever moves or
+    renames the marker, this fixture stops adopting and every guard test below
+    fails loudly. A synthetic marker would keep these tests green while the
+    production guard silently failed *open* -- the guard would stop guarding
+    and nothing would say so.
+    """
+    os.environ["BOT_ERRORS_STATE_DIR"] = str(root)
+    paths = dispatcher.setup_dirs()
+    anchor = paths["incident_state"]
+    session = dispatcher.open_controller_state(
+        anchor,
+        component="dispatcher-incident",
+        bootstrap=dispatcher.dispatcher_bootstrap_state,
+        validate_payload=dispatcher.validate_dispatcher_state,
+        lock_timeout_seconds=10,
+    )
+    with session:
+        result = session.load()
+        session.save(dict(result.payload or {}), result.capability)
+    marker = anchor.parent / (anchor.name + ".initialized")
+    assert marker.exists(), "adoption fixture must go through the real writer"
+    return paths
+
+
+def _member(event_id: str, machine: str, base_epoch: int) -> dict[str, Any]:
+    """A daily-health storm member -- the source that sets ``state_changed``."""
+    return {
+        "schemaVersion": 1,
+        "id": event_id,
+        "eventType": "alert",
+        "severity": "critical",
+        "source": "daily-health",
+        "machine": machine,
+        "instance": "eh-bot",
+        "summary": f"storm member {event_id}",
+        "evidence": f"health eh-bot: {_HEALTHY_PROBE}",
+        "createdAt": _iso(event_id, base_epoch),
+        "diagnostics": {"relay": {"remoteHost": machine}},
+        "delivery": {"attempts": 0, "status": "queued", "nextAttemptAtEpoch": 0},
+    }
+
+
+def _iso(_event_id: str, base_epoch: int) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(base_epoch))
+
+
+def _queue(paths: dict[str, Path], name: str, event: dict[str, Any]) -> Path:
+    path = paths["outbox"] / name
+    path.write_text(json.dumps(event), encoding="utf-8")
+    path.chmod(0o600)
+    return path
+
+
+def test_superseding_branch_must_not_reach_the_bare_writer(
+    dispatcher, tmp_path, monkeypatch
+):
+    """RED before the gate: the superseding branch bare-writes despite a cycle.
+
+    Drives the real ``collapse_storm_group`` against an adopted store while
+    holding an ``IncidentStateCycle``. Pre-fix the branch calls
+    ``save_incident_state`` unconditionally, so the writer guard fires and this
+    raises ``IncidentCycleRequiredError`` -- proving the branch reaches the
+    bare writer. Post-fix it commits through the cycle and the envelope on disk
+    is still intact.
+    """
+    monkeypatch.setenv("BOT_ERRORS_STORM_THRESHOLD", "2")
+    monkeypatch.setenv("BOT_ERRORS_STORM_WINDOW_SECONDS", "120")
+    monkeypatch.setattr(
+        dispatcher, "send_whatsapp", lambda text, socket_path="": None, raising=False
+    )
+    paths = _adopt_via_real_session(dispatcher, tmp_path)
+    base = int(time.time())
+
+    m1 = _member("e1", "host-a", base)
+    m2 = _member("e2", "host-b", base)
+    _queue(paths, "a.json", m1)
+    _queue(paths, "b.json", m2)
+    fingerprint = dispatcher.storm_fingerprint(m1)
+
+    session = dispatcher.open_controller_state(
+        paths["incident_state"],
+        component="dispatcher-incident",
+        bootstrap=dispatcher.dispatcher_bootstrap_state,
+        validate_payload=dispatcher.validate_dispatcher_state,
+        lock_timeout_seconds=10,
+    )
+    with session:
+        loaded = session.load()
+        cycle = dispatcher.IncidentStateCycle(
+            session, loaded.payload, loaded.capability, paths=paths
+        )
+        # Batch 1 -> initial manifest + queued digest.
+        dispatcher.collapse_storm_group(
+            paths,
+            (fingerprint, base),
+            [(paths["outbox"] / "a.json", m1), (paths["outbox"] / "b.json", m2)],
+            dict(loaded.payload or {}),
+            incident=cycle,
+        )
+        # Deliver the digest: its evidence is now immutable, so the next batch
+        # must create a *superseding* revision -- the branch under test.
+        digests = [p for p in paths["outbox"].glob("*.json") if "storm-collapse" in p.name]
+        assert len(digests) == 1, f"expected one queued digest, got {len(digests)}"
+        os.replace(digests[0], paths["sent"] / f"{digests[0].name}.{base}.sent")
+
+        m3 = _member("e3", "host-c", base + 30)
+        _queue(paths, "c.json", m3)
+        # Pre-fix this raises IncidentCycleRequiredError from the writer guard.
+        dispatcher.collapse_storm_group(
+            paths,
+            (fingerprint, base),
+            [(paths["outbox"] / "c.json", m3)],
+            dict(loaded.payload or {}),
+            incident=cycle,
+        )
+
+    primary = json.loads(paths["incident_state"].read_text(encoding="utf-8"))
+    assert "_controllerState" in primary, (
+        "superseding branch destroyed the envelope -- this is the #3053 "
+        "corruption that crash-loops the dispatcher on exit 78"
+    )

@@ -5181,7 +5181,16 @@ def collapse_storm_group(
             )
             prepared.append((path, target, event))
         if state_changed:
-            publications.append(save_incident_state(paths, incident_state))
+            # Route through the cycle exactly as the two sibling branches of
+            # this function already do. Without this gate a caller holding an
+            # IncidentStateCycle still bare-wrote the primary here, destroying
+            # the _controllerState envelope: the sole ungated save_incident_state
+            # of the 14 in this file, and the one that took the dispatcher into
+            # a schema_incompatible crash loop on 2026-08-30.
+            if incident:
+                incident.commit()
+            else:
+                publications.append(save_incident_state(paths, incident_state))
         require_all_advance(publications)
         for path, target, event in prepared:
             os.replace(path, target)
