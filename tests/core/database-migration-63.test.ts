@@ -151,7 +151,7 @@ describe('migration 63 through the full registry + the producer writes the evide
   afterEach(() => db.close());
 
   it('a fresh database opens at schema 63 with the evidence columns present', () => {
-    expect(CURRENT_SCHEMA_MIGRATION).toBe(63);
+    expect(CURRENT_SCHEMA_MIGRATION).toBe(64);
     const cols = columnNames(db.raw as unknown as DatabaseSync);
     for (const col of EVIDENCE_COLUMNS) expect(cols).toContain(col);
   });

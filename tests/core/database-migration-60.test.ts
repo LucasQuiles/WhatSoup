@@ -55,7 +55,7 @@ describe('migration 60 — execution reservations + creation_reason honesty rebu
   });
 
   it('registers as the current schema migration', () => {
-    expect(CURRENT_SCHEMA_MIGRATION).toBe(63);
+    expect(CURRENT_SCHEMA_MIGRATION).toBe(64);
   });
 
   it('reservation UNIQUE turns a duplicate (obligation, claim epoch, attempt) into a constraint failure', () => {
@@ -176,7 +176,7 @@ describe('migration 60 — execution reservations + creation_reason honesty rebu
       const applied = db.raw
         .prepare('SELECT MAX(version) AS v FROM schema_migrations')
         .get() as { v: number };
-      expect(applied.v).toBe(63);
+      expect(applied.v).toBe(64);
       const t = db.raw
         .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='capability_execution_reservations'")
         .get() as { name: string } | undefined;
