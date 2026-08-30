@@ -108,10 +108,11 @@ The bridge row is a deployment pattern, not evidence that a bridge is installed.
 Verify the concrete plist, wrapper, logs, and target Pinecone project before
 claiming queued facts are exported.
 
-Generated instance plists set `WorkingDirectory` to the checkout containing the
-running WhatSoup code. This makes relative repository health inputs, including
-`.arc/arc.toml`, deterministic. Regenerate the plist when changing checkouts;
-do not hand-edit it to point at a different tree.
+Generated instance plists set `WorkingDirectory` to the repo root the plist was
+generated from. This makes relative repository health inputs, including
+`.arc/arc.toml`, deterministic. It is the process's cwd, NOT a selector for
+which code runs — see the paragraph below. Regenerate the plist when changing
+checkouts; do not hand-edit it to point at a different tree.
 
 `WorkingDirectory` sets the process's current directory; it does not select
 which code executes. On a release-snapshot host the executing release is the

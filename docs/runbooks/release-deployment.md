@@ -176,15 +176,30 @@ release whose provenance is unset cannot be verified by step 2 above.
 
 ### Activation is a coordinated switch
 
-Auxiliary launchd jobs pin a release through their own `WorkingDirectory`.
-Observed on mini11: `com.whatsoup.harness-maintenance`,
-`com.whatsoup.release-drift-check`, and `com.whatsoup.reply-guarantee`
-(templates in `deploy/`). Repointing the wrapper symlink alone leaves those jobs
-executing the previous release, so the estate ends up mixed-generation — the bot
-on one release, its maintenance and drift observers on another.
+Auxiliary launchd jobs pin a release through the ABSOLUTE SCRIPT PATH in their
+`ProgramArguments` — not through `WorkingDirectory`. The templates in `deploy/`
+substitute `__WHATSOUP_REPO_ROOT__` into `ProgramArguments`, and each script
+then derives its own repo root from its own resolved path
+(`harness-maintenance.sh`, `reply-guarantee-drain.sh`,
+`run-release-drift-schedule.sh` all resolve `${BASH_SOURCE[0]}`), never from
+cwd. `WorkingDirectory` in those plists selects nothing. Observed on mini11:
+`com.whatsoup.harness-maintenance`, `com.whatsoup.release-drift-check`, and
+`com.whatsoup.reply-guarantee`.
 
-A correct activation repoints the wrapper symlink AND updates those
-`WorkingDirectory` values as one switch.
+So the wrapper symlink governs the bot, and an absolute `ProgramArguments` path
+governs each auxiliary job. Repointing the symlink alone leaves those jobs
+executing the previous release, and the estate ends up mixed-generation — the
+bot on one release, its maintenance and drift observers on another.
+
+A correct activation repoints the wrapper symlink AND moves each auxiliary job's
+`ProgramArguments` onto the new release as one switch. The supported way to do
+the second half is to RE-RENDER the plists from the new release with
+`WHATSOUP_REPO_ROOT` set (`deploy/scripts/render-release-drift-launchd.sh` and
+the sibling templates), because `__WHATSOUP_REPO_ROOT__` substitutes into both
+`ProgramArguments` and `WorkingDirectory` and the two stay consistent by
+construction. Hand-editing `WorkingDirectory` is the trap: it changes cwd,
+leaves `ProgramArguments` on the old release, and reproduces the same
+"configuration looks right, old code runs" false pass described above.
 
 ### Reload sequence
 
@@ -217,8 +232,9 @@ change with `kickstart -k`.
 
 Record the previous wrapper symlink target before repointing it, and back up
 every plist you edit as `<plist>.bak-<tag>-<ts>`. Rollback is then a single
-coordinated restore — symlink target and the auxiliary `WorkingDirectory`
-values together — followed by the same reload sequence.
+coordinated restore — symlink target and the auxiliary plists (their
+`ProgramArguments` paths, and `WorkingDirectory` if you changed it) together —
+followed by the same reload sequence.
 
 The prior generation survives the export, but not always at the path you
 recorded: a `--replace` export of the SAME release name preserves the previous
