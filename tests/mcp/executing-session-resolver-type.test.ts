@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { ToolRegistry } from '../../src/mcp/registry.ts';
 import { WhatSoupSocketServer } from '../../src/mcp/socket-server.ts';
+import { noExecutingSession } from '../../src/mcp/types.ts';
 import { createProviderMcpBridge } from '../../src/runtimes/agent/providers/mcp-bridge.ts';
 
 describe('executing-session resolver type boundary (#3429)', () => {
@@ -16,5 +17,13 @@ describe('executing-session resolver type boundary (#3429)', () => {
     }
 
     expect(registry).toBeInstanceOf(ToolRegistry);
+  });
+
+  it('makes a non-executing surface deny every mutable authorization field explicitly', () => {
+    expect(noExecutingSession()).toEqual({
+      actorJid: undefined,
+      purpose: undefined,
+      conversationKey: undefined,
+    });
   });
 });
