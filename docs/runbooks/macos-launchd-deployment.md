@@ -300,10 +300,22 @@ the gui-domain service reads). The verify-only pin
 ([schema and capture procedure](../configuration.md#ratified-account-identity-serviceexpectedaccountdigest))
 closes that gap without any credential write:
 
-- Capture the digest **in the service's own config-root context**, not in a
-  cold SSH shell — an SSH login shell resolves its own keychain session and
-  its own `CLAUDE_CONFIG_DIR`, so its `claude auth status` describes the SSH
-  context, not the launchd job:
+- Capture the digest **in a context with login-keychain access** — a
+  GUI/console session, or a one-shot bootstrapped into the owner's
+  `gui/<uid>` launchd domain when it must be unattended — and in the
+  service's own config-root context. **Not over SSH.** Supplying the plist's
+  `CLAUDE_CONFIG_DIR` does not make an SSH shell sufficient: it has no
+  login-keychain session, so the probe reads `loggedIn: false` and the
+  capture exits 2 anyway (observed live on an instance whose gui-domain
+  service was serving turns on that same credential at the time). That exit 2
+  is a false negative about the capture context, not evidence the instance is
+  logged out. Before treating it as a logout, check the instance's own
+  signals in authenticated `GET /health` —
+  `instance.primaryModelUsability.status`,
+  `turn_capability.last_successful_turn_at` /
+  `last_successful_turn_provider`, and whether the `instance` block reports
+  an armed fallback window (`fallbackActiveUntil`) — and call it a real
+  logout only when they agree.
 
   ```bash
   CLAUDE_CONFIG_DIR=/absolute/claude-root npm run claude-account-digest

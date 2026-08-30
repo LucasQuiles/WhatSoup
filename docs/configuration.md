@@ -635,6 +635,22 @@ with the account the owner ratified?**
 
    Do **not** substitute `claude auth status --json` here: it prints the raw
    email and organization id.
+
+   Run it where the login keychain is readable: a GUI/console session on the
+   host, or a one-shot bootstrapped into the owner's `gui/<uid>` launchd
+   domain when the capture has to be unattended. **Not over SSH.** A cold SSH
+   shell has no login-keychain session, so the probe returns `loggedIn: false`
+   and the capture exits 2 even with the authoritative `CLAUDE_CONFIG_DIR` and
+   an explicit `--binary` — that exit 2 is a false negative about the capture
+   context, not evidence the instance is logged out, and the message's "log in
+   interactively first" hint does not apply. Corroborate before believing it:
+   in authenticated `GET /health`, a `usable`
+   `instance.primaryModelUsability.status`, a recent
+   `turn_capability.last_successful_turn_at` whose
+   `last_successful_turn_provider` is `claude-cli`, and no armed fallback
+   window in the `instance` block (`fallbackActiveUntil`, `fallbackReason`)
+   together mean the credential is live and the SSH reading is wrong. Call it
+   a real logout only when the instance's own signals agree.
 3. Put the printed value in `service.expectedAccountDigest`, restart the
    instance, and confirm `runtime.agent.accountIdentity.status` is `match`
    in authenticated `GET /health` (the first probe runs at startup).
