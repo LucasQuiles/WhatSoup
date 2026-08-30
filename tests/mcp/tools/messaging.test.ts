@@ -520,10 +520,12 @@ describe('registerMessagingTools', () => {
     });
 
     // ── session-pin fold (issue 3150 companion) ────────────────────────────
-    // The pin check compares canonicalConversationKey (phone-folded, matching
-    // ingest QR-050), not bare toConversationKey. Two directions are pinned:
-    // the fold must let a canonicalized @lid send SURVIVE its own pin, and it
-    // must NOT open a hole for a FOREIGN @lid mapped to a different phone.
+    // BOTH pin layers — the registry's pre-handler cross-conversation guard
+    // and the handler's beforeAudit check — compare canonicalConversationKey
+    // (phone-folded, matching ingest QR-050), not bare toConversationKey. Two
+    // directions are pinned at each layer: the fold must let an own-thread
+    // @lid target SURVIVE its own pin, and it must NOT open a hole for a
+    // FOREIGN @lid mapped to a different phone.
 
     describe('session-pin fold across LID canonicalization (3150)', () => {
       const PIN_PHONE = '15551230777';
@@ -564,6 +566,24 @@ describe('registerMessagingTools', () => {
         expect(JSON.parse(calls[0]).jid).toBe(PIN_LID_JID);
       });
 
+      it('admits a direct own-@lid chatJid at the registry guard and dispatches to the @lid conversation', async () => {
+        seedPinMapping(PIN_LID, PIN_PHONE_JID);
+
+        const result = await registry.call(
+          'send_message',
+          { chatJid: PIN_LID_JID, text: 'own thread, lid-addressed' },
+          { tier: 'global', conversationKey: PIN_PHONE },
+        );
+
+        // 3150 remainder (registry layer): before the guard folded canonical
+        // keys, its bare toConversationKey('<lid>@lid') yielded the raw LID
+        // digits and rejected the session's OWN conversation BEFORE the
+        // handler ran — one layer above the beforeAudit fold pinned above.
+        expect(result.isError).toBeUndefined();
+        expect(calls).toHaveLength(1);
+        expect(JSON.parse(calls[0]).jid).toBe(PIN_LID_JID);
+      });
+
       it('still rejects a foreign @lid target mapped to a DIFFERENT phone (handler fold path, via alias)', async () => {
         // Alias route: the registry's own pre-handler cross-conversation
         // guard is skipped for `to` targets ("alias targets are resolved
@@ -586,9 +606,10 @@ describe('registerMessagingTools', () => {
       });
 
       it('still rejects a direct foreign @lid chatJid at the registry layer (defense in depth)', async () => {
-        // Direct chatJid route: the REGISTRY cross-conversation guard
-        // (registry.ts, bare toConversationKey) rejects before the handler
-        // runs — plain-text rejection, no JSON envelope, nothing dispatched.
+        // Direct chatJid route: the REGISTRY cross-conversation guard rejects
+        // before the handler runs — the canonical fold resolves the foreign
+        // @lid to its mapped phone, which is not the pinned key. Plain-text
+        // rejection, no JSON envelope, nothing dispatched.
         seedPinMapping(PIN_LID, PIN_PHONE_JID);
         seedPinMapping('11111110888', '15551230999@s.whatsapp.net');
 

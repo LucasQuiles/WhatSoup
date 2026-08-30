@@ -213,6 +213,13 @@ export function registerMessagingTools(
   deps: MessagingDeps,
 ): void {
   const { connection, db } = deps;
+
+  // Issue 3150 registry layer: the registry's pre-handler cross-conversation
+  // guard must fold `@lid` -> phone exactly like the beforeAudit session-pin
+  // check below (canonicalConversationKey, matching ingest QR-050). The guard
+  // has no db of its own, so it is armed here, where the handlers get theirs.
+  registry.setCanonicalConversationKeyResolver((jid) => canonicalConversationKey(jid, deps.dbWrapper));
+
   const sendPipeline = createSendPipeline({
     // Issue 3150: dbWrapper enables outbound LID canonicalization — a
     // phone-JID recipient whose thread lives under a mapped `@lid` JID is
