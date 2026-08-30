@@ -319,6 +319,7 @@ vi.mock('node:fs', async (importOriginal) => {
 import { Database } from '../../../src/core/database.ts';
 import { DurabilityEngine } from '../../../src/core/durability.ts';
 import { ToolRegistry } from '../../../src/mcp/registry.ts';
+import { isAdminActor, type SubstrateDeps } from '../../../src/mcp/tools/substrate.ts';
 import { AgentRuntime, type AgentRuntimeOptions } from '../../../src/runtimes/agent/runtime.ts';
 import { installFakePerChatMcpSocketManager } from './helpers/fake-per-chat-mcp-socket-manager.ts';
 
@@ -476,6 +477,91 @@ describe('provider-bridge actor scoping (#2976 residual)', () => {
     }, { timeout: 4_000 });
     await bridge!.executeTool('actor_probe', {});
     expect(observedActors.at(-1)).toBeUndefined();
+  });
+
+  it('per_chat managed-loop: an actor-less SYSTEM turn after an admin turn is DENIED admin-gated tools (stale admin not inherited)', async () => {
+    providerForDouble.value = 'anthropic-api';
+    makeRuntime({ sessionScope: 'per_chat' });
+    // Real R1 authorizer (the production substrate admin predicate) + a real
+    // sensitive tool on the runtime's registry. scope 'chat' so the chat-scoped
+    // tier reaches the R1 gate differential (production substrate tools are
+    // scope 'global' and additionally scope-rejected on chat tier; the R1
+    // sensitive gate runs FIRST and is what this pins).
+    const registry = (runtime as unknown as { registry: ToolRegistry }).registry;
+    const adminDeps: SubstrateDeps = {
+      db: db.raw,
+      instanceName: 'test-instance',
+      dbWrapper: db,
+      adminPhones: new Set<string>(['15550001']),
+      memory: {
+        adminJid: 'admin@s.whatsapp.net',
+        vaultPath: '/tmp/whatsoup-test-vault-bridge-system-turn',
+        observationConfidenceMin: 0.5,
+        sweep: { beadProposeMin: 0.5, beadUpdateMin: 0.5, lookbackHours: 24, reviewByDays: 7 },
+        watchTtl: { defaultHours: 24, maxHours: 168 },
+      },
+    };
+    registry.setSensitiveToolAuthorizer((session) => isAdminActor(adminDeps, session));
+    // Records the handler-view session.actorJid — the same value the in-handler
+    // assertAdmin defense-in-depth (substrate.ts) reads.
+    const handlerViewActors: Array<string | undefined> = [];
+    registry.register({
+      name: 'admin_chat_probe',
+      sensitive: true,
+      description: 'Admin-gated chat-scoped probe',
+      scope: 'chat',
+      targetMode: 'caller-supplied',
+      schema: z.object({}),
+      handler: async (_params, session) => {
+        handlerViewActors.push(session.actorJid);
+        return { ok: true };
+      },
+    });
+    await runtime.start();
+
+    // Turn 1: ADMIN human message (senderJid 15550001@... is on adminPhones).
+    await arriveMessage();
+    const session = await waitForInFlightTurn((t) => t.includes('bridge scoping question'));
+    session.emit({ type: 'result', text: 'done' });
+    await (runtime as unknown as { turnChain: Promise<void> }).turnChain;
+
+    // Actor-less SYSTEM turn on the SAME managed-loop session — the poll-bridge
+    // dispatch shape (markSystemTurn + sendTurnPerChat with actorJid undefined),
+    // shared by the heal/recovery/continuation system paths.
+    const internals = runtime as unknown as {
+      resolvePerChatMapKey(chatJid: string): string;
+      markSystemTurn(session: unknown, scopeKey: string, purpose: string, routeChatJid?: string): unknown;
+      sendTurnPerChat(
+        chatJid: string,
+        text: string,
+        mapKey?: string,
+        actorJid?: string,
+        runtimeContext?: unknown,
+        scopeRef?: unknown,
+        systemTurnLease?: unknown,
+      ): Promise<void>;
+    };
+    const mapKey = internals.resolvePerChatMapKey(chatJid);
+    const lease = internals.markSystemTurn(session, mapKey, 'poll_answer_continuation', chatJid);
+    const systemDispatch = internals.sendTurnPerChat(
+      chatJid, 'system continuation text', mapKey, undefined, undefined, undefined, lease,
+    );
+
+    const systemTurnSession = await waitForInFlightTurn((t) => t.includes('system continuation text'));
+    expect(systemTurnSession).toBe(session);
+
+    // Mid-system-turn: the executing-turn register holds an actor-less entry,
+    // so the bridge's read-time resolver yields undefined and the R1 gate
+    // DENIES. On unmodified base the bridge reads the stored conduit, which
+    // still holds the ADMIN from turn 1 — the call succeeds (fail-open red).
+    const denied = await session.mcpBridge!.executeTool('admin_chat_probe', {});
+    expect(denied.isError).toBe(true);
+    // The handler never ran — the in-handler assertAdmin view was never even
+    // reached, and no stale admin identity was observable anywhere downstream.
+    expect(handlerViewActors).toHaveLength(0);
+
+    session.emit({ type: 'result', text: 'sys done' });
+    await systemDispatch.catch(() => {});
   });
 
   it('attribution pin: the stored MCP conduit holds the sender only during the turn', async () => {
