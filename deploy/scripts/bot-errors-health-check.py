@@ -7866,6 +7866,31 @@ def _restart_explains_cycle_age(
     return cycle_age_seconds <= service_uptime + restart_grace
 
 
+def _cycle_stale_should_report(
+    cycle_age_seconds: int,
+    max_state_age: int,
+    grace_reason: str | None,
+    service_uptime: int | None,
+    restart_grace: int,
+) -> bool:
+    """Whether cycle staleness is reportable: stale, and not excused by a restart.
+
+    The decision is factored out of ``deadman`` so it is directly testable.
+    Leaving it inline meant a test could cover ``_restart_explains_cycle_age``
+    while the call site silently reverted to an unconditional
+    ``if not grace_reason`` and every test still passed -- the same shape as
+    the guard defect this change exists to close, where the check was correct
+    but not in the path that mattered.
+    """
+    if cycle_age_seconds <= max_state_age:
+        return False
+    if not grace_reason:
+        return True
+    return not _restart_explains_cycle_age(
+        cycle_age_seconds, service_uptime, restart_grace
+    )
+
+
 def deadman(max_state_age: int, restart_grace: int, cooldown_seconds: int) -> int:
     root = state_root()
     state = root / DISPATCHER_STATE
@@ -7902,11 +7927,10 @@ def deadman(max_state_age: int, restart_grace: int, cooldown_seconds: int) -> in
         # state file was just written by the crash handler (within grace).
         if state_age is not None and state_age > restart_grace and not grace_reason:
             active_members["cycle_incomplete"] = {"state_age_seconds": state_age}
-    elif cycle_completed_at > max_state_age:
-        if not grace_reason or not _restart_explains_cycle_age(
-            cycle_completed_at, service_uptime, restart_grace
-        ):
-            active_members["cycle_stale"] = {"cycle_age_seconds": cycle_completed_at}
+    elif _cycle_stale_should_report(
+        cycle_completed_at, max_state_age, grace_reason, service_uptime, restart_grace
+    ):
+        active_members["cycle_stale"] = {"cycle_age_seconds": cycle_completed_at}
     if not SOCKET_PATH or not Path(SOCKET_PATH).exists():
         active_members["socket_missing"] = {}
 

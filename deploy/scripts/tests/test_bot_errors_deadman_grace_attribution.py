@@ -69,3 +69,58 @@ def test_restart_loop_cannot_mask_an_indefinitely_stale_cycle(health_check):
 def test_unknown_uptime_leaves_grace_intact(health_check):
     """Attribution impossible -> grace stands; never invent an alert from absence."""
     assert health_check._restart_explains_cycle_age(3600, None, 300) is True
+
+
+# --- the decision itself, not just the helper -------------------------------
+#
+# The tests above cover _restart_explains_cycle_age's arithmetic. On their own
+# they do NOT prove the helper is wired into the suppression decision: with the
+# call site reverted to an unconditional `if not grace_reason`, all of them
+# still passed. These exercise _cycle_stale_should_report, the predicate the
+# call site actually evaluates, so removing the fix fails the suite.
+
+
+def test_fresh_cycle_is_never_reported(health_check):
+    assert (
+        health_check._cycle_stale_should_report(10, 900, None, 5000, 300) is False
+    )
+
+
+def test_stale_cycle_without_grace_is_reported(health_check):
+    assert (
+        health_check._cycle_stale_should_report(3600, 900, None, 5000, 300) is True
+    )
+
+
+def test_stale_cycle_is_excused_when_the_restart_explains_it(health_check):
+    """Just restarted, no cycle yet -- the case grace legitimately covers."""
+    assert (
+        health_check._cycle_stale_should_report(
+            1000, 900, "service_uptime_seconds=800", 800, 300
+        )
+        is False
+    )
+
+
+def test_restart_loop_cannot_suppress_the_stale_cycle_decision(health_check):
+    """The regression, at the decision the call site evaluates.
+
+    Crash-looping every 10s keeps grace_reason permanently set. Before the
+    bound, this returned False forever and cycle_stale was never raised.
+    """
+    assert (
+        health_check._cycle_stale_should_report(
+            3 * 60 * 60, 900, "service_uptime_seconds=10", 10, 300
+        )
+        is True
+    )
+
+
+def test_unknown_uptime_under_grace_still_suppresses(health_check):
+    """Attribution impossible -> grace stands, consistent with the helper."""
+    assert (
+        health_check._cycle_stale_should_report(
+            3600, 900, "service_state_change_age_seconds=5", None, 300
+        )
+        is False
+    )
