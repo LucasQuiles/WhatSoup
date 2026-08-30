@@ -9888,9 +9888,17 @@ export class AgentRuntime implements Runtime {
     }
 
     this.sessionOwnership.transition(currentMapKey, managerId, 'recoverable_dead');
-    this.recordCrash(currentMapKey);
+    // #3395: a marked-intentional exit (#3394's takeIntentionalKill match —
+    // the reap/suspend kill this manager issued on purpose) is a resumable
+    // suspend-class exit, not a crash: it must not charge the auto-respawn
+    // attempt budget, or a bot whose idle sessions are reaped repeatedly
+    // exhausts the budget and goes dark. Unmarked exits — an external SIGTERM,
+    // a bare 143 no marker claimed — keep counting, so a genuinely crashing
+    // child still exhausts at the same threshold.
+    const intentionalExit = info?.terminationReason !== undefined;
+    if (!intentionalExit) this.recordCrash(currentMapKey);
     const crashCount = this.getCrashCount(currentMapKey);
-    const exhausted = crashCount > AUTO_RESPAWN_MAX_CRASHES;
+    const exhausted = !intentionalExit && crashCount > AUTO_RESPAWN_MAX_CRASHES;
     if (exhausted) {
       this.terminalizeExhaustedPerChatSession(
         currentMapKey,
@@ -9950,7 +9958,9 @@ export class AgentRuntime implements Runtime {
       const sessionId = info.sessionId;
       const dbRowId = info.dbRowId;
       const crashedAtSec = Math.floor(Date.now() / 1000);
-      const delayMs = jitteredDelay(AUTO_RESPAWN_BASE_MS, crashCount - 1, AUTO_RESPAWN_MAX_DELAY_MS);
+      // crashCount can be 0 here (#3395: an uncharged intentional exit) —
+      // clamp so the backoff exponent never goes negative.
+      const delayMs = jitteredDelay(AUTO_RESPAWN_BASE_MS, Math.max(crashCount - 1, 0), AUTO_RESPAWN_MAX_DELAY_MS);
       log.info({ mapKey: currentMapKey, sessionId, attempt: crashCount, delayMs }, 'scheduling auto-respawn');
       const timer = setTimeout(() => {
         void this.runOwnedPerChatRespawn({
