@@ -190,6 +190,14 @@ function parseArgs(argv: string[]): ParsedArgs {
   if (parsed.releasePath && parsed.launchdPlistPaths.length > 0) throw new Error('--release and --launchd-plist are mutually exclusive');
   if (parsed.releasePath) parsed.releasePath = requireAbsolute('--release', parsed.releasePath);
   parsed.launchdPlistPaths = parsed.launchdPlistPaths.map((plistPath) => requireAbsolute('--launchd-plist', plistPath));
+  // BOT ERRORS keys an incident by machine|instance|source, and every target in
+  // one invocation shares that key. A clean job's clear would therefore resolve
+  // the incident a drifted job just opened — silent green, which is the failure
+  // mode this check exists to remove. Refuse the combination rather than pick an
+  // emit order and hope.
+  if (parsed.clearOnOk && parsed.launchdPlistPaths.length > 1) {
+    throw new Error('--clear-on-ok cannot be combined with several --launchd-plist targets: they share one BOT ERRORS incident key, so a clean job would clear another job\'s alert');
+  }
   parsed.repoRoot = requireAbsolute('--repo-root', parsed.repoRoot);
   if (parsed.manifestPath) parsed.manifestPath = requireAbsolute('--manifest', parsed.manifestPath);
   if (!isNonEmptyString(parsed.instance)) throw new Error('--instance must be non-empty');

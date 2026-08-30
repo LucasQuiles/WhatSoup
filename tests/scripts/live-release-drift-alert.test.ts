@@ -439,6 +439,30 @@ describe('live release drift alert: multi-job coverage', () => {
     expect(result).toMatchObject({ check: 'live-release-drift-alert', releasePath });
   });
 
+  it('refuses --clear-on-ok across several jobs, because one clear would cancel another job alert', () => {
+    const { plistPath } = writeFalsePassFixture();
+    const cleanPlist = writeLaunchdPlist(path.dirname(plistPath), { name: 'com.whatsoup.other' });
+
+    const proc = runCli(['--launchd-plist', plistPath, '--launchd-plist', cleanPlist, '--clear-on-ok']);
+
+    // BOT ERRORS keys incidents by machine|instance|source, and every target in
+    // one invocation shares that key: a clean job's clear would resolve the
+    // incident a drifted job just opened.
+    expect(proc.status).toBe(2);
+    expect(proc.stderr).toContain('--clear-on-ok');
+  });
+
+  it('still allows --clear-on-ok for a single job', () => {
+    const { releasePath } = writeFixtureRelease();
+    const plistPath = writeLaunchdPlist(releasePath);
+    const stateDir = path.join(tmpRoot, 'bot-errors-state');
+
+    const proc = runCli(['--launchd-plist', plistPath, '--clear-on-ok'], { BOT_ERRORS_STATE_DIR: stateDir });
+
+    expect(proc.status, proc.stderr).toBe(0);
+    expect(outboxEvents(stateDir).map((event) => event.eventType)).toEqual(['clear']);
+  });
+
   it('still rejects --release combined with a repeated --launchd-plist', () => {
     const { releasePath } = writeFixtureRelease();
     const plistPath = writeLaunchdPlist(releasePath);

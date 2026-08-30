@@ -379,6 +379,15 @@ mixed-generation estate the coordinated switch exists to prevent. The invocation
 exits on the worst status across the set, so one healthy job cannot mask a stale
 one.
 
+`--clear-on-ok` is refused alongside several `--launchd-plist` targets. BOT
+ERRORS keys an incident by `machine|instance|source` and every target in one
+invocation shares that key, so a clean job's clear would resolve the incident a
+drifted job had just opened. `--instance`, `--source`, and `--manifest` are
+likewise per-invocation, not per-job: a multi-job run labels every event with
+the same instance and source, and checks every release against one `--manifest`
+override if given. Use single-target invocations when per-job attribution or a
+clear event matters.
+
 ### Release currency is a separate observation
 
 The scheduled macOS release observer also runs
