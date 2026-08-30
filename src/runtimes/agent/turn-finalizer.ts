@@ -6,8 +6,11 @@ import type {
   OutboundDeliverySnapshot,
   TurnFinalizationBookkeepingParams,
 } from '../../core/durability.ts';
+import { createChildLogger } from '../../logger.ts';
 import { emitAlert, emitAlertChecked, type AlertEmissionStatus } from '../../lib/emit-alert.ts';
 import { shortHash } from '../../lib/short-hash.ts';
+
+const log = createChildLogger('turn-finalizer');
 import {
   toTurnFinalizationPersistence,
   toTurnRecoveryJobPersistence,
@@ -309,7 +312,24 @@ export function finalizeRuntimeTurn(
       observedDeliveryEvidence.kind === 'echoed'
       ? { kind: 'none' }
       : observedDeliveryEvidence;
-  } catch {
+  } catch (err) {
+    // Diagnosability: the underlying delivery-proof cause was previously
+    // swallowed here (bare `catch`), so a finalize fault — including the
+    // pre_dispatch_error path — reached the operator only as an opaque
+    // incident. Log the cause structured; control flow is unchanged.
+    log.warn(
+      {
+        err,
+        inboundSeq: params.identity.inboundSeq,
+        logicalTurnId: params.identity.logicalTurnId,
+        scope: params.identity.scope,
+        attemptOutcomeKind: params.attemptOutcome.kind,
+        attemptOutcomeClass:
+          'class' in params.attemptOutcome ? params.attemptOutcome.class : undefined,
+        failureStage: 'delivery_proof',
+      },
+      'turn finalization delivery-proof failed — surfacing as failure incident',
+    );
     return emitFailureIncident(params, 'delivery_proof');
   }
 
@@ -400,11 +420,30 @@ export function finalizeRuntimeTurn(
       receipt,
       effectiveReplyGuaranteeDisarmed: receipt.effectiveReplyGuaranteeDisarmed,
     };
-  } catch {
-    if (
+  } catch (err) {
+    // Diagnosability: the terminal-finalize cause was previously swallowed by a
+    // bare `catch`. This is THE finalize site for the pre_dispatch_error path
+    // (attemptOutcome admission_rejected/pre_dispatch_error), whose underlying
+    // error never reached the journal. Log it structured; control flow is
+    // unchanged (still reclaim-or-incident below).
+    const sweepReclaimed =
       params.identity.inboundSeq !== null
-      && params.durability.isInboundSweepReclaimed?.(params.identity.inboundSeq) === true
-    ) {
+      && params.durability.isInboundSweepReclaimed?.(params.identity.inboundSeq) === true;
+    log.warn(
+      {
+        err,
+        inboundSeq: params.identity.inboundSeq,
+        logicalTurnId: params.identity.logicalTurnId,
+        scope: params.identity.scope,
+        attemptOutcomeKind: params.attemptOutcome.kind,
+        attemptOutcomeClass:
+          'class' in params.attemptOutcome ? params.attemptOutcome.class : undefined,
+        failureStage: 'terminal_finalize',
+        sweepReclaimed,
+      },
+      'turn finalization terminal-persist failed — resolving via sweep reclaim or failure incident',
+    );
+    if (sweepReclaimed) {
       return {
         kind: 'reclaimed_by_sweep',
         identity: params.identity,
