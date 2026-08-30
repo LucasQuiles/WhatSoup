@@ -1301,7 +1301,7 @@ describe("F-STICKY-ACTOR: actorResolver overrides the per-request actor (D2)", (
   });
 
   async function observeActor(
-    resolver: (() => string | undefined) | undefined,
+    resolver: (() => { actorJid: string | undefined; purpose: undefined }) | undefined,
     baseActor: string | undefined,
   ): Promise<string | undefined> {
     let observed: string | undefined = "UNSET";
@@ -1327,11 +1327,17 @@ describe("F-STICKY-ACTOR: actorResolver overrides the per-request actor (D2)", (
   }
 
   it("a resolver return value overrides the broadcast base-session actor", async () => {
-    expect(await observeActor(() => "resolver-actor", "base-actor")).toBe("resolver-actor");
+    expect(await observeActor(
+      () => ({ actorJid: "resolver-actor", purpose: undefined }),
+      "base-actor",
+    )).toBe("resolver-actor");
   });
 
   it("a resolver returning undefined yields an undefined actor (fail-closed source)", async () => {
-    expect(await observeActor(() => undefined, "base-actor")).toBeUndefined();
+    expect(await observeActor(
+      () => ({ actorJid: undefined, purpose: undefined }),
+      "base-actor",
+    )).toBeUndefined();
   });
 
   it("no resolver leaves the base-session actor unchanged (back-compat)", async () => {
@@ -1350,7 +1356,7 @@ describe("F-STICKY-ACTOR: actorResolver overrides the per-request actor (D2)", (
       socketPath,
       registry,
       makeSession({ actorJid: "base-actor" }),
-      () => "resolver-actor",
+      () => ({ actorJid: "resolver-actor", purpose: undefined }),
     );
     server.start();
     await waitForSocket(socketPath);
@@ -1395,5 +1401,58 @@ describe("F-STICKY-ACTOR: actorResolver overrides the per-request actor (D2)", (
       error: { code: -32602, message: "Reserved session context" },
     });
     expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('AUTH RED: scheduled purpose is resolved read-time for discovery and execution', async () => {
+    registry.register(makeTool({
+      name: 'delete_chat',
+      scope: 'global',
+      schema: z.object({}),
+      handler: async () => ({ deleted: false }),
+    }));
+    registry.register(makeTool({
+      name: 'send_message',
+      scope: 'global',
+      schema: z.object({}),
+      handler: async () => ({ sent: false }),
+    }));
+
+    let executing = {
+      actorJid: 'admin@s.whatsapp.net' as string | undefined,
+      purpose: 'scheduled-agent-job' as SessionContext['purpose'],
+    };
+    const resolveExecuting = () => executing;
+    server = new WhatSoupSocketServer(
+      socketPath,
+      registry,
+      makeSession({ actorJid: 'stale-admin@s.whatsapp.net' }),
+      resolveExecuting,
+    );
+    server.start();
+    await waitForSocket(socketPath);
+
+    const listNames = async (id: number): Promise<string[]> => {
+      const response = await sendJsonRpc(socketPath, {
+        jsonrpc: '2.0', id, method: 'tools/list', params: {},
+      }) as { result: { tools: Array<{ name: string }> } };
+      return response.result.tools.map((tool) => tool.name);
+    };
+    const call = async (id: number, name: string): Promise<{ result?: { isError?: boolean }; error?: unknown }> =>
+      await sendJsonRpc(socketPath, {
+        jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: {} },
+      }) as { result?: { isError?: boolean }; error?: unknown };
+
+    expect(await listNames(101)).not.toContain('delete_chat');
+    expect(await listNames(102)).toContain('send_message');
+    expect((await call(103, 'delete_chat')).result?.isError ?? true).toBe(true);
+    expect((await call(104, 'send_message')).result?.isError ?? false).toBe(false);
+
+    executing = { actorJid: 'admin@s.whatsapp.net', purpose: undefined };
+    expect(await listNames(105)).toContain('delete_chat');
+    expect((await call(106, 'delete_chat')).result?.isError ?? false).toBe(false);
+
+    executing = { actorJid: 'admin@s.whatsapp.net', purpose: 'scheduled-agent-job' };
+    expect(await listNames(107)).not.toContain('delete_chat');
+    expect((await call(108, 'delete_chat')).result?.isError ?? true).toBe(true);
   });
 });

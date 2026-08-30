@@ -4,6 +4,7 @@
 import { createChildLogger } from '../../logger.ts';
 import type { ContentType } from '../../core/types.ts';
 import type { RuntimeTurnContext } from './runtime-turn-context.ts';
+import type { SessionContext } from '../../mcp/types.ts';
 
 const log = createChildLogger('turn-queue');
 
@@ -21,6 +22,8 @@ export interface QueuedTurn {
   isGroup: boolean;
   groupName?: string;
   contentType: ContentType;
+  /** Authorization purpose captured from the admitted turn. */
+  purpose?: SessionContext['purpose'];
   /** Immutable journal-backed context minted at admission for user turns. */
   runtimeContext?: RuntimeTurnContext;
   /** durability: inbound_events.seq for this turn — threaded to outbound ops */

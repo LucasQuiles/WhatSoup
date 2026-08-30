@@ -20,6 +20,8 @@ import type {
 import type { RuntimeTurnContext } from './runtime-turn-context.ts';
 import type { SessionManager } from './session.ts';
 import type { QueuedTurn } from './turn-queue.ts';
+import { classifyTurnLane } from '../../core/observability/lifecycle-emission.ts';
+import type { SessionContext } from '../../mcp/types.ts';
 import {
   TurnRecoverySupervisor,
   type TurnRecoveryDispatchTarget,
@@ -28,6 +30,12 @@ import {
 } from './turn-recovery-supervisor.ts';
 
 const log = createChildLogger('turn-recovery-dispatch');
+
+function recoveryPurpose(sourceMessageId: string): SessionContext['purpose'] {
+  return classifyTurnLane(sourceMessageId).lane === 'L-SCH'
+    ? 'scheduled-agent-job'
+    : undefined;
+}
 
 export function createTurnRecoverySupervisorForRuntime(deps: {
   readonly instanceName: string;
@@ -213,6 +221,7 @@ export async function dispatchTurnRecoveryReplayForJob(
     isGroup: source.isGroup,
     groupName: source.groupName,
     contentType: 'text',
+    purpose: recoveryPurpose(job.source_message_id),
     runtimeContext,
     inboundSeq: job.source_inbound_seq,
   };
@@ -312,6 +321,7 @@ async function dispatchGlobalScopeReplay(
     isGroup: source.isGroup,
     groupName: source.groupName,
     contentType: 'text',
+    purpose: recoveryPurpose(job.source_message_id),
     runtimeContext,
     inboundSeq: job.source_inbound_seq,
   };

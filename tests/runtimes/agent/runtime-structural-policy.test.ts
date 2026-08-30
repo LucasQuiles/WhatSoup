@@ -131,9 +131,9 @@ describe('AgentRuntime structural policy', () => {
     expect(globalActorWrites).toHaveLength(0);
     // The read-time resolver replaces it, with the per_chat scope gate that
     // keeps the shared global socket actor-less for the whole mode.
-    expect(methodSource(source, 'resolveExecutingGlobalActor'))
-      .toContain("if (this.sessionScope === 'per_chat') return undefined;");
-    expect(source).toContain('() => this.resolveExecutingGlobalActor(),');
+    expect(methodSource(source, 'resolveExecutingGlobalSession'))
+      .toContain("if (this.sessionScope === 'per_chat') return { actorJid: undefined, purpose: undefined };");
+    expect(source).toContain('() => this.resolveExecutingGlobalSession(),');
   });
 
   it('/kill-session retires actor ownership only after child and turn teardown settle', async () => {

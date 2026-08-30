@@ -120,7 +120,10 @@ export class PerChatMcpSocketManager {
         deliveryJid,
         purpose,
       ),
-      () => this.options.resolveActor(identity.value),
+      () => ({
+        actorJid: this.options.resolveActor(identity.value),
+        purpose,
+      }),
     );
     let ownedSocket: { dev: number; ino: number } | undefined;
     let resource!: PerChatSocketResource;

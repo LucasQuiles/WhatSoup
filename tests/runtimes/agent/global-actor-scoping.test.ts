@@ -135,7 +135,7 @@ const { sessionDoubles, queueDoubles, resetDoubles, makeSessionDouble, makeQueue
   /** Every WhatSoupSocketServer construction: tier + captured resolver + spies. */
   const socketServers: Array<{
     session: { tier?: string };
-    actorResolver: (() => string | undefined) | undefined;
+    executingSessionResolver: (() => { actorJid?: string; purpose?: string }) | undefined;
     updateActorJid: ReturnType<typeof vi.fn>;
   }> = [];
 
@@ -269,11 +269,11 @@ vi.mock('../../../src/mcp/socket-server.ts', () => ({
     _socketPath: string,
     _registry: unknown,
     session: { tier?: string },
-    actorResolver?: () => string | undefined,
+    executingSessionResolver?: () => { actorJid?: string; purpose?: string },
   ) {
     const instance = {
       session,
-      actorResolver,
+      executingSessionResolver,
       start: vi.fn(),
       stop: vi.fn(),
       updateDeliveryJid: vi.fn(),
@@ -371,6 +371,12 @@ describe('global-socket actor scoping (#2976 direction ii)', () => {
     return server!;
   }
 
+  function workspaceSocket() {
+    const server = socketServers.find((s) => s.session?.tier === 'chat-scoped');
+    expect(server).toBeDefined();
+    return server!;
+  }
+
   function makeRuntime(options: AgentRuntimeOptions): void {
     runtime = new AgentRuntime(db, makeMessenger(), 'test', options);
     installFakePerChatMcpSocketManager(runtime);
@@ -419,21 +425,21 @@ describe('global-socket actor scoping (#2976 direction ii)', () => {
     makeRuntime({ sessionScope: 'shared' });
     await runtime.start();
 
-    const resolver = globalSocket().actorResolver;
+    const resolver = globalSocket().executingSessionResolver;
     expect(resolver).toBeDefined();
     // Before any turn: deny.
-    expect(resolver!()).toBeUndefined();
+    expect(resolver!()).toEqual({ actorJid: undefined, purpose: undefined });
 
     await arriveMessage();
     const session = await waitForInFlightTurn((t) => t.includes('operator scoping question'));
     // Mid-turn: the executing turn's sender resolves.
-    expect(resolver!()).toBe(senderJid);
+    expect(resolver!()).toEqual({ actorJid: senderJid, purpose: undefined });
 
     session.emit({ type: 'result', text: 'done' });
     await (runtime as unknown as { turnChain: Promise<void> }).turnChain;
     // Between turns: deny again — a missed cleanup would DENY, never allow.
     await vi.waitFor(() => {
-      expect(resolver!()).toBeUndefined();
+      expect(resolver!()).toEqual({ actorJid: undefined, purpose: undefined });
     }, { timeout: 4_000 });
   });
 
@@ -441,13 +447,30 @@ describe('global-socket actor scoping (#2976 direction ii)', () => {
     makeRuntime({ sessionScope: 'per_chat' });
     await runtime.start();
 
-    const resolver = globalSocket().actorResolver;
+    const resolver = globalSocket().executingSessionResolver;
     expect(resolver).toBeDefined();
 
     await arriveMessage();
     await waitForInFlightTurn((t) => t.includes('operator scoping question'));
     // The per-chat sender rides its own actor-bound socket; the shared global
     // socket stays actor-less for the whole mode.
-    expect(resolver!()).toBeUndefined();
+    expect(resolver!()).toEqual({ actorJid: undefined, purpose: undefined });
+  });
+
+  it('sandboxPerChat: the workspace socket resolves the scheduled turn actor and purpose at request time', async () => {
+    makeRuntime({ sessionScope: 'per_chat', sandboxPerChat: true });
+    await runtime.start();
+
+    await arriveMessage({ content: 'scheduled workspace turn', isSyntheticJob: true });
+    const session = await waitForInFlightTurn((text) => text.includes('scheduled workspace turn'));
+    const resolver = workspaceSocket().executingSessionResolver;
+    expect(resolver).toBeDefined();
+    expect(resolver!()).toEqual({ actorJid: senderJid, purpose: 'scheduled-agent-job' });
+
+    session.emit({ type: 'result', text: 'done' });
+    await (runtime as unknown as { turnChain: Promise<void> }).turnChain;
+    await vi.waitFor(() => {
+      expect(resolver!()).toEqual({ actorJid: undefined, purpose: undefined });
+    }, { timeout: 4_000 });
   });
 });

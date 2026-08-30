@@ -9,6 +9,7 @@ import type {
 import { splitInputTokenUsage, type AgentEvent } from './stream-parser.ts';
 import { classifyProviderFailure } from './failure-taxonomy.ts';
 import type { IOutboundQueue } from './outbound-queue.ts';
+import type { ExecutingSessionContext, SessionContext } from '../../mcp/types.ts';
 import {
   TurnQueue,
   type QueuedTurn,
@@ -232,7 +233,7 @@ export interface RuntimeTurnCoordinatorPort {
   replaceGlobalTurnQueue(expected: TurnQueue): void;
   readonly perChatTurnQueues: Map<string, TurnQueue>;
   readonly perChatTurnQueueKeys: WeakMap<TurnQueue, PerChatRuntimeScopeRef>;
-  readonly perChatExecActorQueue: Map<string, (string | undefined)[]>;
+  readonly perChatExecActorQueue: Map<string, ExecutingSessionContext[]>;
   readonly pendingTurnText: Map<string, string>;
   readonly pendingTurnActorJid: Map<string, string | undefined>;
   readonly perChatTurnSourceMessageId: Map<string, string>;
@@ -282,6 +283,7 @@ export interface RuntimeTurnCoordinatorPort {
     deliveryKind?: TurnDeliveryKind,
     dispatchAllowed?: () => boolean,
     onProviderBoundary?: () => void,
+    purpose?: SessionContext['purpose'],
   ): Promise<void>;
   deleteOwnedPerChatSession(mapKey: string, expected?: SessionManager): boolean;
   discardPerChatSessionForFallback(mapKey: string, expected: SessionManager): boolean;
@@ -314,6 +316,7 @@ export interface RuntimeTurnCoordinatorPort {
     dispatchAllowed?: () => boolean,
     runtimeContext?: RuntimeTurnContext,
     deliveryKind?: TurnDeliveryKind,
+    purpose?: SessionContext['purpose'],
   ): Promise<void>;
   sendVoiceReply(chatJid: string, responseText: string): Promise<void>;
 }
@@ -2458,6 +2461,7 @@ async processPerChatTurn(
         providerBoundaryCrossed = true;
         onProviderBoundary?.();
       },
+      turn.purpose,
     );
   } catch (err) {
     dispatchFailed = true;

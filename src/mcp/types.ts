@@ -76,6 +76,9 @@ export interface SessionContext {
   abortSignal?: AbortSignal;
 }
 
+/** Mutable authorization fields resolved from the turn currently executing. */
+export type ExecutingSessionContext = Pick<SessionContext, 'actorJid' | 'purpose'>;
+
 export interface ToolDeclaration {
   name: string;
   description: string;

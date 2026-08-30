@@ -17,6 +17,7 @@ import type { SessionManager } from './session.ts';
 import type { IOutboundQueue } from './outbound-queue.ts';
 import { OperationTracker, type ProgressEvent } from './operation-tracker.ts';
 import type { PerChatMcpSocketManager } from './per-chat-mcp-socket-manager.ts';
+import type { ExecutingSessionContext } from '../../mcp/types.ts';
 import { isProviderId, providerUsesWhatSoupMcp } from './providers/index.ts';
 import { isScheduledAgentJobMapKey } from './scheduled-agent-job-isolation.ts';
 
@@ -48,7 +49,7 @@ export interface ChatTransportPort {
   readonly chatSessions: Map<string, SessionManager>;
   readonly chatQueues: Map<string, IOutboundQueue>;
   readonly outboundQueues: Map<string, IOutboundQueue>;
-  readonly perChatExecActorQueue: Map<string, (string | undefined)[]>;
+  readonly perChatExecActorQueue: Map<string, ExecutingSessionContext[]>;
   readonly perChatMcpSocketManager: PerChatMcpSocketManager;
   readonly operationTrackers: Map<string, OperationTracker>;
   /** Threaded from runtime.ts's own `config` import (src/config.ts) rather than importing `config` here — this module stays out of the composition ring, matching the model-pin.ts precedent (createModelPinHost's `nlRoutingTiers: config.nlRoutingTiers`). */
@@ -70,7 +71,7 @@ export function resolveExecutingActor(port: ChatTransportPort, chatJid: string):
   const mapKey = port.resolvePerChatMapKey(chatJid);
   const session = port.chatSessions.get(mapKey);
   if (!session || !session.getStatus().active) return undefined;
-  return port.perChatExecActorQueue.get(mapKey)?.[0];
+  return port.perChatExecActorQueue.get(mapKey)?.[0]?.actorJid;
 }
 
 /**

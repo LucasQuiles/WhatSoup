@@ -46,7 +46,7 @@ type RuntimeState = {
   chatQueues: Map<string, unknown>;
   operationTrackers: Map<string, unknown>;
   pendingSystemResults: { counts: Map<string, number> };
-  perChatExecActorQueue: Map<string, Array<string | undefined>>;
+  perChatExecActorQueue: Map<string, Array<{ actorJid: string | undefined; purpose?: 'scheduled-agent-job' }>>;
   sessionOwnership: SessionOwnershipRegistry;
 };
 
@@ -398,7 +398,7 @@ describe('per-chat /new ownership transition', () => {
       // exec-actor queue landing under the ACTIVATED key instead.
       expect(routedTurns).toHaveLength(1);
       expect(state.pendingSystemResults.counts.get(canonicalKey) ?? 0).toBe(0);
-      expect(state.perChatExecActorQueue.get(canonicalKey)).toEqual([lidJid]);
+      expect(state.perChatExecActorQueue.get(canonicalKey)).toEqual([{ actorJid: lidJid, purpose: undefined }]);
 
       releaseContextResult();
       await turn;
@@ -417,7 +417,7 @@ describe('per-chat /new ownership transition', () => {
       expect(indicateTyping).toHaveBeenCalledTimes(1);
       expect(state.pendingSystemResults.counts.get(canonicalKey) ?? 0).toBe(0);
       expect(state.pendingSystemResults.counts.has(lidKey)).toBe(false);
-      expect(state.perChatExecActorQueue.get(canonicalKey)).toEqual([lidJid]);
+      expect(state.perChatExecActorQueue.get(canonicalKey)).toEqual([{ actorJid: lidJid, purpose: undefined }]);
       expect(state.perChatExecActorQueue.has(lidKey)).toBe(false);
       expect(routedTurns).toHaveLength(1);
       expect(routedTurns[0]?.mapKey).toBe(canonicalKey);

@@ -3,6 +3,7 @@ import type { RuntimeTurnContext } from './runtime-turn-context.ts';
 import type { SessionManager } from './session.ts';
 import type { SystemTurnLeaseToken } from './pending-system-result-tracker.ts';
 import type { TurnDeliveryKind } from './turn-chronology.ts';
+import type { ExecutingSessionContext, SessionContext } from '../../mcp/types.ts';
 
 /** Exact next-session route captured when a fallback replay is admitted. */
 export type ResolvedReplayRoute = RouteDecision & { pinnedProvider: string | null };
@@ -28,6 +29,7 @@ export interface ProviderFallbackReplayArgs {
   mapKey?: string;
   replayText: string;
   actorJid?: string;
+  purpose?: SessionContext['purpose'];
   oldSession: SessionManager | null;
   runtimeContext?: RuntimeTurnContext;
   routeOverride?: ResolvedReplayRoute;
@@ -35,7 +37,7 @@ export interface ProviderFallbackReplayArgs {
 
 /** Minimal runtime surface required to recreate and dispatch a fallback turn. */
 export interface FallbackReplayHost {
-  readonly perChatExecActorQueue: Map<string, (string | undefined)[]>;
+  readonly perChatExecActorQueue: Map<string, ExecutingSessionContext[]>;
   session: SessionManager | null;
   currentTurnChatJid: string | null;
   currentTurnReplayText: string | null;
@@ -70,6 +72,9 @@ export interface FallbackReplayHost {
     systemTurnLease?: SystemTurnLeaseToken,
     excludeJobId?: number,
     deliveryKind?: TurnDeliveryKind,
+    dispatchAllowed?: () => boolean,
+    onProviderBoundary?: () => void,
+    purpose?: SessionContext['purpose'],
   ): Promise<void>;
   sendTurnToSession(
     session: SessionManager,
@@ -82,6 +87,7 @@ export interface FallbackReplayHost {
     dispatchAllowed?: () => boolean,
     runtimeContext?: RuntimeTurnContext,
     deliveryKind?: TurnDeliveryKind,
+    purpose?: SessionContext['purpose'],
   ): Promise<void>;
 }
 
@@ -140,6 +146,9 @@ export async function replayTurnOnFallback(
       undefined,
       undefined,
       'recovery_replay',
+      undefined,
+      undefined,
+      args.purpose,
     );
     return;
   }
@@ -160,5 +169,6 @@ export async function replayTurnOnFallback(
     undefined,
     args.runtimeContext,
     args.runtimeContext === undefined ? 'live' : 'recovery_replay',
+    args.purpose,
   );
 }

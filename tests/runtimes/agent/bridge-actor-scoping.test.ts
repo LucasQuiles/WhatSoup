@@ -398,6 +398,14 @@ describe('provider-bridge actor scoping (#2976 residual)', () => {
         return { actor: session.actorJid ?? null };
       },
     });
+    registry.register({
+      name: 'delete_chat',
+      description: 'Forbidden scheduled-job probe',
+      scope: 'chat',
+      targetMode: 'caller-supplied',
+      schema: z.object({}),
+      handler: async () => ({ ok: true }),
+    });
   }
 
   async function arriveMessage(overrides: Partial<IncomingMessage> = {}): Promise<number> {
@@ -562,6 +570,37 @@ describe('provider-bridge actor scoping (#2976 residual)', () => {
 
     session.emit({ type: 'result', text: 'sys done' });
     await systemDispatch.catch(() => {});
+  });
+
+  it.each([
+    ['single', {}],
+    ['shared', { sessionScope: 'shared' as const }],
+    ['per_chat', { sessionScope: 'per_chat' as const }],
+    ['sandboxPerChat', { sessionScope: 'per_chat' as const, sandboxPerChat: true }],
+  ])('%s: scheduled purpose hides destructive tools, then an interactive turn restores them', async (scope, options) => {
+    providerForDouble.value = 'anthropic-api';
+    makeRuntime(options);
+    await runtime.start();
+
+    await arriveMessage({
+      messageId: `scheduled-${scope}`,
+      content: `scheduled ${scope}`,
+      isSyntheticJob: true,
+    });
+    const scheduledSession = await waitForInFlightTurn((text) => text.includes(`scheduled ${scope}`));
+    expect(scheduledSession.mcpBridge?.listTools().map((tool) => tool.name)).not.toContain('delete_chat');
+
+    scheduledSession.emit({ type: 'result', text: 'done' });
+    scheduledSession.completeProviderTurn();
+    await (runtime as unknown as { turnChain: Promise<void> }).turnChain;
+
+    await arriveMessage({
+      messageId: `interactive-${scope}`,
+      content: `interactive ${scope}`,
+      isSyntheticJob: false,
+    });
+    const interactiveSession = await waitForInFlightTurn((text) => text.includes(`interactive ${scope}`));
+    expect(interactiveSession.mcpBridge?.listTools().map((tool) => tool.name)).toContain('delete_chat');
   });
 
   it('attribution pin: the stored MCP conduit holds the sender only during the turn', async () => {
