@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { z } from 'zod';
 import { WhatSoupSocketServer } from '../../src/mcp/socket-server.ts';
 import { ToolRegistry } from '../../src/mcp/registry.ts';
-import type { SessionContext, ToolDeclaration } from '../../src/mcp/types.ts';
+import { noExecutingSession, type SessionContext, type ToolDeclaration } from '../../src/mcp/types.ts';
 import { waitForSocket } from '../helpers/wait-for.ts';
 import { makeSocketPath, sendJsonRpc } from '../helpers/socket-rpc.ts';
 
@@ -48,13 +48,13 @@ describe('WhatSoupSocketServer — conversation binding lifecycle', () => {
 
   it('freezes the binding at construction', () => {
     const session = boundSession();
-    server = new WhatSoupSocketServer(makeSocketPath(), new ToolRegistry(), session);
+    server = new WhatSoupSocketServer(makeSocketPath(), new ToolRegistry(), session, noExecutingSession);
     expect(Object.isFrozen(session.binding)).toBe(true);
   });
 
   it('updateDeliveryJid rebuilds the binding coherently (no split-brain)', () => {
     const session = boundSession();
-    server = new WhatSoupSocketServer(makeSocketPath(), new ToolRegistry(), session);
+    server = new WhatSoupSocketServer(makeSocketPath(), new ToolRegistry(), session, noExecutingSession);
     server.updateDeliveryJid(NEW_JID);
     expect(session.deliveryJid).toBe(NEW_JID);
     expect(session.binding?.deliveryJid).toBe(NEW_JID);
@@ -64,7 +64,7 @@ describe('WhatSoupSocketServer — conversation binding lifecycle', () => {
 
   it('updateConversationKey is refused on a bound socket (lifetime binding cannot be re-pinned)', () => {
     const session = boundSession();
-    server = new WhatSoupSocketServer(makeSocketPath(), new ToolRegistry(), session);
+    server = new WhatSoupSocketServer(makeSocketPath(), new ToolRegistry(), session, noExecutingSession);
     server.updateConversationKey('99999');
     expect(session.conversationKey).toBe(BOUND_KEY);
     expect(session.binding?.conversationKey).toBe(BOUND_KEY);
@@ -75,7 +75,7 @@ describe('WhatSoupSocketServer — conversation binding lifecycle', () => {
     const registry = new ToolRegistry();
     const seen: unknown[] = [];
     registry.register(makeInjectedTool((chatJid) => { seen.push(chatJid); }));
-    server = new WhatSoupSocketServer(socketPath, registry, boundSession());
+    server = new WhatSoupSocketServer(socketPath, registry, boundSession(), noExecutingSession);
     server.start();
     await waitForSocket(socketPath);
 
@@ -112,7 +112,7 @@ describe('WhatSoupSocketServer — conversation binding lifecycle', () => {
         return { ok: true };
       },
     });
-    server = new WhatSoupSocketServer(socketPath, registry, boundSession());
+    server = new WhatSoupSocketServer(socketPath, registry, boundSession(), noExecutingSession);
     server.start();
     await waitForSocket(socketPath);
 

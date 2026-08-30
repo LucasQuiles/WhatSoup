@@ -9,10 +9,15 @@ import {
   SocketCleanupError,
   SocketPathTooLongError,
   SocketCollisionError,
-  WhatSoupSocketServer,
+  WhatSoupSocketServer as ProductionWhatSoupSocketServer,
 } from '../../src/mcp/socket-server.ts';
 import { ToolRegistry } from '../../src/mcp/registry.ts';
-import type { SessionContext, ToolDeclaration } from '../../src/mcp/types.ts';
+import {
+  type ExecutingSessionContext,
+  type SessionContext,
+  type ToolDeclaration,
+} from '../../src/mcp/types.ts';
+import type { Clock } from '../../src/lib/clock.ts';
 import { once } from 'node:events';
 import { waitForSocket } from '../helpers/wait-for.ts';
 import { makeSocketPath, sendJsonRpc } from '../helpers/socket-rpc.ts';
@@ -23,6 +28,22 @@ import { makeSocketPath, sendJsonRpc } from '../helpers/socket-rpc.ts';
 
 function makeSession(overrides: Partial<SessionContext> = {}): SessionContext {
   return { tier: 'global', ...overrides };
+}
+
+class WhatSoupSocketServer extends ProductionWhatSoupSocketServer {
+  constructor(
+    socketPath: string,
+    registry: ToolRegistry,
+    session: SessionContext,
+    executingSessionResolver: () => ExecutingSessionContext = () => ({
+      actorJid: session.actorJid,
+      purpose: session.purpose,
+      conversationKey: session.conversationKey,
+    }),
+    clock?: Clock,
+  ) {
+    super(socketPath, registry, session, executingSessionResolver, clock);
+  }
 }
 
 function makeTool(overrides: Partial<ToolDeclaration> = {}): ToolDeclaration {
@@ -1340,7 +1361,7 @@ describe("F-STICKY-ACTOR: actorResolver overrides the per-request actor (D2)", (
     )).toBeUndefined();
   });
 
-  it("no resolver leaves the base-session actor unchanged (back-compat)", async () => {
+  it("the test compatibility resolver reads the current base actor explicitly", async () => {
     expect(await observeActor(undefined, "base-actor")).toBe("base-actor");
   });
 

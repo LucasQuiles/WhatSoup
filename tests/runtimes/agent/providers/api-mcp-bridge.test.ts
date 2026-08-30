@@ -1,11 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import type { AgentEvent } from '../../../../src/runtimes/agent/stream-parser.ts';
-import type { SessionContext } from '../../../../src/mcp/types.ts';
+import {
+  noExecutingSession,
+  type ExecutingSessionContext,
+  type SessionContext,
+} from '../../../../src/mcp/types.ts';
 import { ToolRegistry } from '../../../../src/mcp/registry.ts';
 import { OpenAIApiProvider } from '../../../../src/runtimes/agent/providers/openai-api.ts';
 import { AnthropicApiProvider } from '../../../../src/runtimes/agent/providers/anthropic-api.ts';
-import { createProviderMcpBridge } from '../../../../src/runtimes/agent/providers/mcp-bridge.ts';
+import {
+  createProviderMcpBridge as createProductionProviderMcpBridge,
+} from '../../../../src/runtimes/agent/providers/mcp-bridge.ts';
+import type { ProviderMcpBridge } from '../../../../src/runtimes/agent/providers/types.ts';
 
 vi.mock('../../../../src/logger.ts', async () => {
   const { loggerMock } = await import('../../../helpers/logger-mock.ts');
@@ -42,6 +49,14 @@ function registerEchoTool(registry: ToolRegistry): void {
       echoed: `${String(params['value'])}:${session.deliveryJid ?? 'unknown'}`,
     }),
   });
+}
+
+function createProviderMcpBridge(
+  registry: ToolRegistry,
+  session: SessionContext,
+  resolveExecutingSession: () => ExecutingSessionContext = noExecutingSession,
+): ProviderMcpBridge {
+  return createProductionProviderMcpBridge(registry, session, resolveExecutingSession);
 }
 
 function registerFailTool(registry: ToolRegistry): void {

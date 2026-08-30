@@ -119,12 +119,14 @@ describe('provider MCP bridge — read-time actor scoping (#2976 residual)', () 
     expect(result.isError).toBe(true);
   });
 
-  it('without a resolver the stored session is used verbatim (unchanged legacy contract)', async () => {
-    // Callers that manage identity themselves (e.g. direct-construction tests)
-    // keep the pre-#2976 behavior: the stored session reaches the registry.
-    const bridge = createProviderMcpBridge(registry, storedSession);
+  it('an explicit fail-closed resolver never trusts the stored actor', async () => {
+    const bridge = createProviderMcpBridge(registry, storedSession, () => ({
+      actorJid: undefined,
+      purpose: undefined,
+      conversationKey: undefined,
+    }));
     const result = await bridge.executeTool('admin_probe', {});
-    expect(result.isError).toBe(false);
+    expect(result.isError).toBe(true);
   });
 
   it('AUTH RED: scheduled purpose is resolved read-time for discovery and execution', async () => {

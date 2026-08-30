@@ -79,13 +79,13 @@ export class WhatSoupSocketServer {
   private ownedSocket: { dev: number; ino: number } | null = null;
 
   /** Dynamic authorization context for the turn executing this request. */
-  private readonly executingSessionResolver?: () => ExecutingSessionContext;
+  private readonly executingSessionResolver: () => ExecutingSessionContext;
 
   constructor(
     socketPath: string,
     registry: ToolRegistry,
     session: SessionContext,
-    executingSessionResolver?: () => ExecutingSessionContext,
+    executingSessionResolver: () => ExecutingSessionContext,
     // Injectable so error-id timestamps can be driven to a known instant
     // (#2200). Optional and defaulted, so this slice changes no existing call
     // site.
@@ -236,9 +236,7 @@ export class WhatSoupSocketServer {
           const requestSession: SessionContext = { ...connSession };
           // Dynamic authorization fields are pinned to the executing turn.
           // Explicit undefined values overwrite stale base-session values.
-          if (this.executingSessionResolver) {
-            Object.assign(requestSession, this.executingSessionResolver());
-          }
+          Object.assign(requestSession, this.executingSessionResolver());
           void this.handleRequest(req, requestSession).then((response) => {
             if (response !== null) {
               writeResponse(response, 'failed to write response');

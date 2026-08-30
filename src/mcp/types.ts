@@ -82,6 +82,11 @@ export type ExecutingSessionContext = Pick<
   'actorJid' | 'purpose' | 'conversationKey'
 >;
 
+/** Explicit fail-closed resolver for surfaces that never execute agent turns. */
+export function noExecutingSession(): ExecutingSessionContext {
+  return { actorJid: undefined, purpose: undefined, conversationKey: undefined };
+}
+
 export interface ToolDeclaration {
   name: string;
   description: string;
