@@ -1637,12 +1637,9 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       expect(counts).toEqual([0, 0, 0, 0, 0, 0]);
       expect(states).toEqual(Array<string>(6).fill('recoverable_dead'));
       expect(state.exhaustedRespawnOwners.has(mapKey)).toBe(false);
-      expect(mockEmitAlert).not.toHaveBeenCalledWith(
-        'test',
-        'agent_respawn_failed',
-        expect.anything(),
-        expect.anything(),
-      );
+      // Stronger than a shaped not.toHaveBeenCalledWith: no respawn-failed
+      // alert with ANY argument shape may exist.
+      expect(mockEmitAlert.mock.calls.filter((c) => c[1] === 'agent_respawn_failed')).toHaveLength(0);
 
       // The full budget is still intact afterwards: genuine crashes alone must
       // walk it 1→4 and exhaust exactly on the 4th, not earlier.
