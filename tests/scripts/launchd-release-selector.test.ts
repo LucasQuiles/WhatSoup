@@ -217,9 +217,14 @@ describe('launchd release selector', () => {
 
     const selection = resolveLaunchdReleaseSelection(plistPath);
 
-    expect(selection.releasePath).toBe(running);
-    expect(selection.workingDirectory).toBeNull();
-    expect(selection.workingDirectoryReleasePath).toBeNull();
+    // Terminal assertion covers the whole shape: the release still resolves
+    // from ProgramArguments, and BOTH WorkingDirectory fields are absent —
+    // a plist without the key must not fall back to it or invent a value.
+    expect(selection).toMatchObject({
+      releasePath: running,
+      workingDirectory: null,
+      workingDirectoryReleasePath: null,
+    });
   });
 
   it('agrees with the selector when WorkingDirectory names the running release', () => {
