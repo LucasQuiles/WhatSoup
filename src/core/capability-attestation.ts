@@ -47,11 +47,35 @@ export interface CapabilityAttestationBinding {
   mediaRoot: string;
 }
 
+/**
+ * Migration-63 (#3221 Debt 2) attestation-evidence fields — the probe evidence
+ * the design spec lists for `capability_attestations`, preserved IN the row
+ * (the round-17 nonce-keyed receipt file is corroborating, no longer the sole
+ * preservation). Refs are sha256 hex REFERENCES, never raw stream content, so
+ * no secret can land in the row. Every field is nullable because evidence can
+ * be underivable (an injected canary without structured detail records NULL,
+ * exactly like a pre-63 legacy row) — but the producer must always SUPPLY the
+ * object, so omitting evidence is a conscious null, not a forgotten column.
+ */
+export interface CapabilityAttestationEvidence {
+  /** sha256 hex of the canary resolver's captured stdout. */
+  probeStdoutRef: string | null;
+  /** sha256 hex of the canary resolver's captured stderr. */
+  probeStderrRef: string | null;
+  /** The canary resolver child's exit code (0 on every recorded pass). */
+  probeExit: number | null;
+  /** sha256 hex of the bounded probe source the canary executed against. */
+  canaryInputRef: string | null;
+  /** The attest front-door's fail-closed media-root readability observation. */
+  mediaRootReadable: boolean | null;
+}
+
 export interface CapabilityAttestationRecordParams extends CapabilityAttestationBinding {
   canaryResult: 'pass' | 'fail';
   nonce: string;
   attestedAt: string;
   expiresAt: string;
+  evidence: CapabilityAttestationEvidence;
 }
 
 /**
@@ -160,8 +184,9 @@ export function recordCapabilityAttestation(
          host_id, runtime_user, release_sha, schema_version, provider_id, harness_type,
          contract_version, capability, skill_name, skill_version, skill_digest,
          resolver_digest, dependency_versions, media_root, canary_id, canary_result,
-         probe_version, nonce, attested_at, expires_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         probe_version, nonce, attested_at, expires_at,
+         probe_stdout_ref, probe_stderr_ref, probe_exit, canary_input_ref, media_root_readable
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       params.hostId,
@@ -184,6 +209,11 @@ export function recordCapabilityAttestation(
       params.nonce,
       params.attestedAt,
       params.expiresAt,
+      params.evidence.probeStdoutRef,
+      params.evidence.probeStderrRef,
+      params.evidence.probeExit,
+      params.evidence.canaryInputRef,
+      params.evidence.mediaRootReadable === null ? null : params.evidence.mediaRootReadable ? 1 : 0,
     );
   return Number(result.lastInsertRowid);
 }

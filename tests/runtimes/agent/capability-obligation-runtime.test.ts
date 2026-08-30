@@ -107,11 +107,11 @@ const OPTIONS = parseCapabilityObligationsOptions({
   retentionPolicyVersion: 'policy/1',
   retentionHorizonDays: 30,
   execution: {
-    command: [NODE, RESOLVER_PATH, '{source}'],
+    interpreter: NODE,
+    resolverArtifactPath: RESOLVER_PATH,
+    args: ['{source}'],
     timeoutMs: 30_000,
     minOutputBytes: 8,
-    resolverArtifactPath: RESOLVER_PATH,
-    interpreted: true,
   },
   attestation: {
     skillName: 'watch',
@@ -176,6 +176,7 @@ function freshAttestation(
     nonce: `n-${Math.random().toString(36).slice(2)}`,
     attestedAt: new Date().toISOString(),
     expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+    evidence: { probeStdoutRef: null, probeStderrRef: null, probeExit: null, canaryInputRef: null, mediaRootReadable: null },
   });
 }
 
@@ -489,7 +490,7 @@ describe('trusted execution tool (D6)', () => {
       const resolver = join(work, 'resolver.cjs');
       writeFileSync(resolver, 'console.log("plenty of output before dying"); process.exit(3)\n');
       const id = seedObligation();
-      const execution: CapabilityObligationsOptions['execution'] = { command: [NODE,resolver, '{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: resolver, interpreted: true };
+      const execution: CapabilityObligationsOptions['execution'] = { command: [NODE, resolver, '{source}'], interpreter: NODE, args: ['{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: resolver, interpreted: true };
       freshAttestation(execution);
       const { runtime } = makeRuntime({
         execution,
@@ -528,7 +529,7 @@ describe('trusted execution tool (D6)', () => {
       const SMUGGLE_SOURCE = `--output=${smuggleTarget}`;
       const SMUGGLE_DIGEST = createHash('sha256').update(SMUGGLE_SOURCE).digest('hex');
       const id = seedObligation({ sourceDigest: SMUGGLE_DIGEST, sourceToken: SMUGGLE_SOURCE, replayText: SMUGGLE_SOURCE });
-      const execution: CapabilityObligationsOptions['execution'] = { command: [NODE,resolver, '{source}'], timeoutMs: 30_000, minOutputBytes: 1, resolverArtifactPath: resolver, interpreted: true };
+      const execution: CapabilityObligationsOptions['execution'] = { command: [NODE, resolver, '{source}'], interpreter: NODE, args: ['{source}'], timeoutMs: 30_000, minOutputBytes: 1, resolverArtifactPath: resolver, interpreted: true };
       freshAttestation(execution);
       const { runtime } = makeRuntime({
         execution,
@@ -579,7 +580,7 @@ describe('trusted execution tool (D6)', () => {
       const escaped = join(work, 'escaped');
       const ESCAPED_DIGEST = createHash('sha256').update(escaped).digest('hex');
       const id = seedObligation({ sourceDigest: ESCAPED_DIGEST, sourceToken: escaped, replayText: escaped });
-      const execution: CapabilityObligationsOptions['execution'] = { command: [NODE,resolver, '{source}'], timeoutMs: 200, minOutputBytes: 1, resolverArtifactPath: resolver, interpreted: true };
+      const execution: CapabilityObligationsOptions['execution'] = { command: [NODE, resolver, '{source}'], interpreter: NODE, args: ['{source}'], timeoutMs: 200, minOutputBytes: 1, resolverArtifactPath: resolver, interpreted: true };
       freshAttestation(execution);
       const { runtime } = makeRuntime({
         execution,
@@ -629,7 +630,7 @@ describe('trusted execution tool (D6)', () => {
       const escaped = join(work, 'escaped');
       const ESCAPED_DIGEST = createHash('sha256').update(escaped).digest('hex');
       const id = seedObligation({ sourceDigest: ESCAPED_DIGEST, sourceToken: escaped, replayText: escaped });
-      const execution: CapabilityObligationsOptions['execution'] = { command: [NODE,resolver, '{source}'], timeoutMs: 30_000, minOutputBytes: 1, resolverArtifactPath: resolver, interpreted: true };
+      const execution: CapabilityObligationsOptions['execution'] = { command: [NODE, resolver, '{source}'], interpreter: NODE, args: ['{source}'], timeoutMs: 30_000, minOutputBytes: 1, resolverArtifactPath: resolver, interpreted: true };
       freshAttestation(execution);
       const { runtime } = makeRuntime({
         // timeout far larger than the clean exit — this is NOT the timeout path
@@ -671,7 +672,7 @@ describe('trusted execution tool (D6)', () => {
       const resolver = join(work, 'echo.cjs');
       writeFileSync(resolver, "const m=/^--out=(.+)$/.exec(process.argv[2]);console.log(m?m[1]:'NO-SUBSTITUTION');");
       seedObligation();
-      const execution: CapabilityObligationsOptions['execution'] = { command: [NODE,resolver, '--out={source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: resolver, interpreted: true };
+      const execution: CapabilityObligationsOptions['execution'] = { command: [NODE, resolver, '--out={source}'], interpreter: NODE, args: ['--out={source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: resolver, interpreted: true };
       freshAttestation(execution);
       let output = '';
       const { runtime } = makeRuntime({
@@ -703,7 +704,7 @@ describe('trusted execution tool (D6)', () => {
       const mutator = join(work, 'mutator.cjs');
       writeFileSync(mutator, "require('fs').writeFileSync(process.argv[2],'MUTATED-DIFFERENT-BYTES');console.log('processed-and-mutated-ok');");
       const id = seedObligation({ retainedMedia: { path: mediaPath, sha256: mediaSha, bytes: ORIGINAL.length, policyVersion: 'p/1' } });
-      const execution: CapabilityObligationsOptions['execution'] = { command: [NODE,mutator, '{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: mutator, interpreted: true };
+      const execution: CapabilityObligationsOptions['execution'] = { command: [NODE, mutator, '{source}'], interpreter: NODE, args: ['{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: mutator, interpreted: true };
       freshAttestation(execution);
       const { runtime } = makeRuntime({
         execution,
@@ -735,7 +736,7 @@ describe('trusted execution tool (D6)', () => {
       // next to the staged resolver and resolves — a single-file copy (or the round-19 hardlink) was
       // replaced precisely so sibling modules keep working while execution is a swap-proof copy.
       writeFileSync(resolver, 'const h = require("./helper.cjs"); console.log("processed " + process.argv[2] + " " + h());');
-      const execution: CapabilityObligationsOptions['execution'] = { command: [NODE, resolver, '{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: resolver, interpreted: true };
+      const execution: CapabilityObligationsOptions['execution'] = { command: [NODE, resolver, '{source}'], interpreter: NODE, args: ['{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: resolver, interpreted: true };
       seedObligation();
       freshAttestation(execution);
       let output = '';
@@ -762,7 +763,7 @@ describe('trusted execution tool (D6)', () => {
     try {
       const resolver = join(work, 'resolver.cjs');
       writeFileSync(resolver, 'console.log("processed " + process.argv[2] + " ORIGINAL ok");');
-      const execution: CapabilityObligationsOptions['execution'] = { command: [NODE, resolver, '{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: resolver, interpreted: true };
+      const execution: CapabilityObligationsOptions['execution'] = { command: [NODE, resolver, '{source}'], interpreter: NODE, args: ['{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: resolver, interpreted: true };
       const id = seedObligation();
       freshAttestation(execution); // records the COMPOSITE of the ORIGINAL bytes + shape
       const { runtime } = makeRuntime({
@@ -799,7 +800,7 @@ describe('trusted execution tool (D6)', () => {
       writeFileSync(helper, 'module.exports = function () { return "HELPER-OK"; };');
       // require('./helper.cjs') loads the sibling from the executing (staged) dir — dir-staging copies it.
       writeFileSync(resolver, 'const h = require("./helper.cjs"); console.log("processed " + process.argv[2] + " " + h());');
-      const execution: CapabilityObligationsOptions['execution'] = { command: [NODE, resolver, '{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: resolver, interpreted: true };
+      const execution: CapabilityObligationsOptions['execution'] = { command: [NODE, resolver, '{source}'], interpreter: NODE, args: ['{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: resolver, interpreted: true };
       const id = seedObligation();
       freshAttestation(execution); // records the COMPOSITE of the ORIGINAL tree (resolver + OK helper)
       const { runtime } = makeRuntime({
@@ -833,7 +834,7 @@ describe('trusted execution tool (D6)', () => {
       const artifact = join(work, 'watch-resolver'); // basename evades isInterpreterName
       writeFileSync(artifact, '#!/bin/sh\nexec "$@"\n');
       chmodSync(artifact, 0o755);
-      const execution: CapabilityObligationsOptions['execution'] = { command: [artifact, '-c', '{source}'], timeoutMs: 30_000, minOutputBytes: 1, resolverArtifactPath: artifact, interpreted: false };
+      const execution: CapabilityObligationsOptions['execution'] = { command: [artifact, '-c', '{source}'], interpreter: null, args: ['-c', '{source}'], timeoutMs: 30_000, minOutputBytes: 1, resolverArtifactPath: artifact, interpreted: false };
       const id = seedObligation();
       freshAttestation(execution, 'r21-f2-unattestable'); // admissible row; digest matches the override below
       const { runtime } = makeRuntime({
@@ -863,7 +864,7 @@ describe('trusted execution tool (D6)', () => {
       writeFileSync(interp, '#!/bin/sh\nexit 0\n');
       chmodSync(interp, 0o755);
       chmodSync(binDir, 0o777); // WORLD-writable ancestor → a different actor could swap the interpreter
-      const execution: CapabilityObligationsOptions['execution'] = { command: [interp, resolver, '{source}'], timeoutMs: 30_000, minOutputBytes: 1, resolverArtifactPath: resolver, interpreted: true };
+      const execution: CapabilityObligationsOptions['execution'] = { command: [interp, resolver, '{source}'], interpreter: interp, args: ['{source}'], timeoutMs: 30_000, minOutputBytes: 1, resolverArtifactPath: resolver, interpreted: true };
       const id = seedObligation();
       freshAttestation(execution, 'r21-f1-unattestable'); // admissible row; digest matches the override below
       const { runtime } = makeRuntime({
@@ -889,7 +890,7 @@ describe('trusted execution tool (D6)', () => {
     try {
       const resolver = join(work, 'resolver.cjs');
       writeFileSync(resolver, 'console.log("processed " + process.argv[2] + " ok");');
-      const execution: CapabilityObligationsOptions['execution'] = { command: [NODE, resolver, '{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: resolver, interpreted: true };
+      const execution: CapabilityObligationsOptions['execution'] = { command: [NODE, resolver, '{source}'], interpreter: NODE, args: ['{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: resolver, interpreted: true };
       const id = seedObligation();
       freshAttestation(execution); // composite of the tree WITHOUT the extra dir
       const { runtime } = makeRuntime({
@@ -922,7 +923,7 @@ describe('trusted execution tool (D6)', () => {
       mkdirSync(join(work, 'sub'));                              // an intentional EMPTY sibling directory
       writeFileSync(join(work, 'sub', 'helper.cjs'), 'module.exports = 1;'); // and a non-empty one below it
       mkdirSync(join(work, 'emptypkg'));                         // a genuinely empty directory
-      const execution: CapabilityObligationsOptions['execution'] = { command: [NODE, resolver, '{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: resolver, interpreted: true };
+      const execution: CapabilityObligationsOptions['execution'] = { command: [NODE, resolver, '{source}'], interpreter: NODE, args: ['{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: resolver, interpreted: true };
       const id = seedObligation();
       freshAttestation(execution); // composite over the tree WITH the empty dir
       const { runtime } = makeRuntime({
@@ -952,10 +953,10 @@ describe('trusted execution tool (D6)', () => {
       // executor re-derives composite(liveShape) and refuses when it differs from the
       // admitted composite(attestedShape).
       writeFileSync(resolver, 'console.log("processed " + process.argv[process.argv.length - 1] + " ORIGINAL ok");');
-      const attestedShape: CapabilityObligationsOptions['execution'] = { command: [NODE, resolver, '{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: resolver, interpreted: true };
+      const attestedShape: CapabilityObligationsOptions['execution'] = { command: [NODE, resolver, '{source}'], interpreter: NODE, args: ['{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: resolver, interpreted: true };
       // Same artifact, same bytes — but a flag is spliced in ahead of {source}. Only the
       // shape differs; a content-only binding would wave this straight through.
-      const driftedShape: CapabilityObligationsOptions['execution'] = { command: [NODE, resolver, '--experimental-vm-modules', '{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: resolver, interpreted: true };
+      const driftedShape: CapabilityObligationsOptions['execution'] = { command: [NODE, resolver, '--experimental-vm-modules', '{source}'], interpreter: NODE, args: ['--experimental-vm-modules', '{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: resolver, interpreted: true };
       const id = seedObligation();
       freshAttestation(attestedShape); // admission binds the COMPOSITE of the ATTESTED shape
       const { runtime } = makeRuntime({
@@ -1442,6 +1443,7 @@ describe('operator drain-now servicing at the EXECUTOR seam (r22 AE1 adapter)', 
       nonce: `pre-${Math.random().toString(36).slice(2)}`,
       attestedAt: new Date().toISOString(),
       expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+      evidence: { probeStdoutRef: null, probeStderrRef: null, probeExit: null, canaryInputRef: null, mediaRootReadable: null },
     });
   }
 
@@ -1673,6 +1675,7 @@ describe('live wiring (maybeActivateCapabilityObligationRuntime)', () => {
       nonce: `live-${Math.random().toString(36).slice(2)}`,
       attestedAt: new Date().toISOString(),
       expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+      evidence: { probeStdoutRef: null, probeStderrRef: null, probeExit: null, canaryInputRef: null, mediaRootReadable: null },
     });
   }
 

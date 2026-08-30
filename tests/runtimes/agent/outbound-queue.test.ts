@@ -2086,6 +2086,48 @@ describe('OutboundQueue', () => {
     expect(finalCommit).toHaveBeenCalledOnce();
   });
 
+  it('minimal mode recovers deferred pre-tool text as the reply when the turn ends with no other output', async () => {
+    // Path C: the model streamed its actual ANSWER, then made a trailing tool
+    // call — minimal mode would discard it as "narration". The turn then ends
+    // (endTurn) with no further visible output. Without recovery the user gets
+    // silence; with it, the deferred answer is delivered.
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setToolUpdateMode('minimal');
+    const onCommit = vi.fn();
+
+    queue.enqueueStreamingText('The self-direction budget renews every 12 months.', 'answer', onCommit);
+    queue.discardPreToolAssistantText();
+    queue.enqueueToolUpdate({ category: 'reading', detail: 'policy.pdf' });
+    queue.endTurn();
+    await queue.flush();
+
+    expect(calls).toEqual(['The self-direction budget renews every 12 months.']);
+    expect(onCommit).toHaveBeenCalledOnce();
+  });
+
+  it('minimal mode does not resurrect deferred narration when the turn delivered a real answer', async () => {
+    // Regression guard for over-delivery: once real output reaches the user the
+    // deferred pre-tool narration must be dropped, not double-sent by endTurn().
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setToolUpdateMode('minimal');
+    const narrationCommit = vi.fn();
+    const answerCommit = vi.fn();
+
+    queue.enqueueStreamingText('Let me check the policy.', 'answer', narrationCommit);
+    queue.discardPreToolAssistantText();
+    queue.enqueueToolUpdate({ category: 'reading', detail: 'policy.pdf' });
+    queue.enqueueStreamingText('It renews every 12 months.', 'answer', answerCommit);
+    queue.commitStreamingText();
+    queue.endTurn();
+    await queue.flush();
+
+    expect(calls).toEqual(['It renews every 12 months.']);
+    expect(narrationCommit).not.toHaveBeenCalled();
+    expect(answerCommit).toHaveBeenCalledOnce();
+  });
+
   it('minimal mode flushes a buffered decision prompt before its poll', async () => {
     const { messenger, calls } = makeMessenger();
     const queue = new OutboundQueue(messenger, CHAT_JID);

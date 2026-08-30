@@ -104,6 +104,9 @@ describe('classifyDrift — path classification', () => {
     ['scripts/check-insecure-tempfile.ts', 'POLICY_OR_WORKFLOW'],
     ['scripts/import-boundary-check.ts', 'POLICY_OR_WORKFLOW'],
     ['scripts/check-unit-drift.sh', 'POLICY_OR_WORKFLOW'],
+    // #3221 Debt 3: the owner-approved retention policy gates what the runtime accepts
+    // at config load, so drifting it is policy drift (and never falls through to UNKNOWN).
+    ['policy/media-retention.json', 'POLICY_OR_WORKFLOW'],
     ['package-lock.json', 'DEPENDENCY'],
     ['.nvmrc', 'DEPENDENCY'],
     ['src/lib/phone.ts', 'SHARED_RUNTIME'],

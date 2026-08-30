@@ -4134,6 +4134,35 @@ describe('POST /send — Authorization header check', () => {
     }]);
   });
 
+  it('canonicalizes a phone-JID recipient onto the existing @lid conversation and echoes the resolved JID (3150)', async () => {
+    process.env.WHATSOUP_HEALTH_TOKEN = 'test-health-token-2515';
+    // The instance knows this phone identity maps to a LID whose DM thread
+    // already exists — an admin /send addressed by phone JID must land in
+    // that thread, not open a second one, and the response must echo the
+    // resolved JID so callers can verify routing (issue 3150).
+    db.raw
+      .prepare('INSERT INTO lid_mappings (lid, phone_jid) VALUES (?, ?)')
+      .run('11111110222', '15550100001@s.whatsapp.net');
+    db.raw
+      .prepare('INSERT INTO chats (jid, conversation_key) VALUES (?, ?)')
+      .run('11111110222@lid', '15550100001');
+
+    const payload = JSON.stringify({ chatJid: '15550100001@s.whatsapp.net', text: 'canonical hello' });
+    const { status, body } = await httpReq(port, '/send', 'POST', payload, {
+      authorization: 'Bearer test-health-token-2515',
+    });
+
+    expect(status).toBe(200);
+    const json = JSON.parse(body);
+    expect(json.ok).toBe(true);
+    expect(json.chatJid).toBe('11111110222@lid');
+    expect(deps.connectionManager.sendMessage).toHaveBeenCalledWith(
+      '11111110222@lid',
+      'canonical hello',
+      { caller: 'health' },
+    );
+  });
+
   it('surfaces bounded aggregate outbound evidence without destination or provider identifiers', async () => {
     process.env.WHATSOUP_HEALTH_TOKEN = TEST_HEALTH_TOKEN;
     const payload = JSON.stringify({ chatJid: '15550100001@s.whatsapp.net', text: 'hello health proof' });

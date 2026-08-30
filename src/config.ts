@@ -16,6 +16,10 @@ import { DEFAULT_IMESSAGE, type ImessageConfig, type ImessageInboundMode } from 
 import { DEFAULT_SIGNAL, SIGNAL_UUID_RE, type SignalConfig, type SignalInboundMode } from './transport/signal/types.ts';
 import { canonicalizeImessageDirectIdentity } from './core/transport-refs.ts';
 import { parseCapabilityObligationsOptions } from './core/capability-contract.ts';
+import {
+  assertRetentionConfigCompliesWithPolicy,
+  loadMediaRetentionPolicy,
+} from './core/media-retention-policy.ts';
 import { resolveFleetLifecyclePhase } from './core/observability/fleet-lifecycle-flag.ts';
 import { normalizeFallbackDiscoveryFromAgentOptions, normalizeFallbackEntriesFromAgentOptions } from './core/fallback-chain.ts';
 import {
@@ -1188,7 +1192,16 @@ function configModelRole(value: string, role: string): string {
 // EX_CONFIG(78) (stops the restart-flap), never a bare throw with exit 1.
 function configCapabilityObligations() {
   try {
-    return parseCapabilityObligationsOptions(resolvedAgentOptions['capabilityObligations']);
+    const options = parseCapabilityObligationsOptions(resolvedAgentOptions['capabilityObligations']);
+    if (options !== null) {
+      // #3221 Debt 3 (A-08): every ENABLED activation must comply with the
+      // owner-approved media-retention policy artifact shipped with the release
+      // (policy/media-retention.json) — verified fail-closed at load, upstream
+      // of every DM/group media drain. A horizon longer than the owner ruled,
+      // or a policy-version mismatch, is a startup EX_CONFIG, never a drain.
+      assertRetentionConfigCompliesWithPolicy(options, loadMediaRetentionPolicy());
+    }
+    return options;
   } catch (err) {
     throw new ConfigValidationError(
       `agentOptions.capabilityObligations is enabled but malformed: ${errorMessage(err)}`,

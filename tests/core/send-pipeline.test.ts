@@ -10,6 +10,7 @@ import {
 import {
   MissingTargetError,
   MutuallyExclusiveError,
+  createChatResolver,
   type ChatResolver,
 } from '../../src/core/chats-resolver.ts';
 import { createProfileRegistry, UnknownProfileError } from '../../src/core/profiles.ts';
@@ -438,5 +439,69 @@ describe('prepareTextSend', () => {
       text: '[SAT] https://example.com',
       linkPreviewMode: 'auto',
     });
+  });
+});
+
+// --- LID canonicalization through the send pipeline (issue 3150) -----------
+//
+// The pipeline must deliver to the canonical EXISTING @lid conversation when
+// the caller addresses the recipient by phone JID and the instance's
+// lid_mappings holds the phone->LID row (fail-open otherwise). Uses the real
+// resolver over the real migrated schema — the transport must observe the
+// canonicalized JID.
+
+describe('LID canonicalization through the send pipeline (3150)', () => {
+  const PHONE_JID = '15551230001@s.whatsapp.net';
+  const LID_JID = '11111110222@lid';
+
+  it('dispatches to the existing @lid conversation when the caller passes the phone JID', async () => {
+    const wdb = new Database(':memory:');
+    wdb.open();
+    try {
+      wdb.raw
+        .prepare('INSERT INTO lid_mappings (lid, phone_jid) VALUES (?, ?)')
+        .run('11111110222', PHONE_JID);
+      wdb.raw
+        .prepare('INSERT INTO chats (jid, conversation_key) VALUES (?, ?)')
+        .run(LID_JID, '15551230001');
+
+      const pipeline = createSendPipeline({
+        resolver: createChatResolver({ db: wdb.raw, dbWrapper: wdb }),
+      });
+
+      let dispatchedJid: string | undefined;
+      await pipeline.executeSend(
+        { chatJid: PHONE_JID, text: 'canonical thread please' },
+        async (prepared) => {
+          dispatchedJid = prepared.chatJid;
+        },
+      );
+
+      expect(dispatchedJid).toBe(LID_JID);
+    } finally {
+      wdb.close();
+    }
+  });
+
+  it('fail-open: dispatches to the phone JID as given when no mapping exists', async () => {
+    const wdb = new Database(':memory:');
+    wdb.open();
+    try {
+      const pipeline = createSendPipeline({
+        resolver: createChatResolver({ db: wdb.raw, dbWrapper: wdb }),
+      });
+
+      let dispatchedJid: string | undefined;
+      await pipeline.executeSend(
+        { chatJid: PHONE_JID, text: 'no mapping' },
+        async (prepared) => {
+          dispatchedJid = prepared.chatJid;
+        },
+      );
+
+      expect(dispatchedJid).toBe(PHONE_JID);
+    } finally {
+      wdb.close();
+    }
   });
 });

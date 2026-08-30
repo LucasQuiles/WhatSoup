@@ -1174,7 +1174,10 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
   // Shared by requireAuth and hasHealthAuth — one scoped, cached resolution
   // path for every protected route on this server (see HealthAuthState).
   const healthAuth: HealthAuthState = { instanceName: deps.instanceName };
-  const chatResolver = createChatResolver({ db: deps.db.raw });
+  // Issue 3150: the wrapper enables outbound LID canonicalization — a
+  // phone-JID recipient whose thread lives under a mapped `@lid` JID is
+  // resolved onto that existing conversation before dispatch (fail-open).
+  const chatResolver = createChatResolver({ db: deps.db.raw, dbWrapper: deps.db });
   const sendPipeline = createSendPipeline({
     resolver: chatResolver,
     profiles: deps.profiles,
@@ -1299,7 +1302,12 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           return;
         }
 
+        // Issue 3150: echo the JID the pipeline actually dispatched to (it may
+        // have been canonicalized onto an existing @lid conversation) so
+        // callers can verify routing.
+        let resolvedChatJid: string | undefined;
         sendPipeline.executeSend(parsed, async (prepared) => {
+          resolvedChatJid = prepared.chatJid;
           // QR-086: the admin /send is an authenticated infra action — tag it as
           // a system caller ('health') so the outbound-identity guard's spec
           // §4.2-step-B exemption applies and a deliberate admin send to a cold
@@ -1309,7 +1317,10 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         })
           .then(() => {
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ ok: true }));
+            res.end(JSON.stringify({
+              ok: true,
+              ...(resolvedChatJid !== undefined ? { chatJid: resolvedChatJid } : {}),
+            }));
           })
           .catch((err) => {
             const sendError = sendRequestErrorMessage(err);
