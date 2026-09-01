@@ -38,6 +38,19 @@ _CLEAN_STATE_DIR = "/tmp/unused-state-dir-for-pattern-test"
 _PYTEST_BASETEMP_STATE_DIR = "/srv/whatsoup/tmp/pytest-of-user/pytest-4/testdeadlettersavesabsorbe0/state"
 _MACOS_VITEST_SANDBOX_STATE_DIR = "/var/folders/zz/zyxvpxvq6csfxvn_n0000000000000/T/whatsoup-vitest-bot-errors/0123456789ab.1"
 
+# Transport failure texts produced VERBATIM by shipped code, both carrying a path
+# that matches a global test-leak pattern. json_rpc_call raises
+# RuntimeError(f"socket missing: {socket_path}") and send_whatsapp raises
+# RuntimeError(f"send_message returned error: {result}"); process_one funnels
+# either into delivery.lastError via mark_failure, three statements before the
+# email gate runs. Neither is producer-claimed text.
+_SOCKET_MISSING_ERROR = (
+    "socket missing: /var/folders/zz/zyxvpxvq6csfxvn_n0000000000000/T/whatsoup/eh-bot/whatsoup.sock"
+)
+_BRIDGE_ERROR_WITH_FIXTURE_PATH = (
+    "send_message returned error: {'isError': True, 'authDir': '/tmp/wa-test-auth/creds.json'}"
+)
+
 
 @pytest.fixture(autouse=True)
 def _clean_env():
@@ -155,37 +168,34 @@ def test_genuine_alert_mentioning_pytest_dir_is_not_blocked():
     assert mod.email_fallback_blocked_reason(event, state_dir=Path(_CLEAN_STATE_DIR)) is None
 
 
-def test_injected_dispatch_log_path_does_not_block_email_fallback():
-    # #3404: the dispatcher stamps diagnostics.dispatchLog (under its state
-    # root) into the event before delivery. With a state root under a macOS
-    # $TMPDIR that path matches the global /var/folders/.../T/ leak pattern, so
-    # the POST-injection event reads as a leak -- but the as-claimed event is
-    # clean and the launched state dir here is not a test root.
+def test_gate_reads_only_the_claimed_payload_not_post_claim_injection():
+    # #3404: the gate is fed the AS-CLAIMED snapshot, so text the dispatcher
+    # itself stamps into the event after the claim -- diagnostics.dispatchLog,
+    # delivery.lastError -- cannot make a clean alert read as a leak. The
+    # post-injection event is shown here purely to prove the two differ.
     mod = _load_module({"BOT_ERRORS_STATE_DIR": _CLEAN_STATE_DIR})
+    claimed = _event()
+    assert mod.email_fallback_blocked_reason(claimed) is None
+
     injected = _event(diagnostics={"dispatchLog": _MACOS_VITEST_SANDBOX_STATE_DIR + "/logs/dispatch.jsonl"})
-    assert mod.event_is_test_leak(injected) is True, "scenario precondition: injected path is a leak pattern"
-    assert mod.email_fallback_blocked_reason(injected) is None
+    assert mod.event_is_test_leak(injected) is True, "precondition: the injected path IS a leak pattern"
+    failed = mod.mark_failure(_event(), _SOCKET_MISSING_ERROR)
+    assert mod.event_is_test_leak(failed) is True, "precondition: the transport error text IS a leak pattern"
 
-    as_claimed = mod.as_claimed_event(injected)
-    assert as_claimed is not injected
-    assert "dispatchLog" not in as_claimed["diagnostics"]
-    assert injected["diagnostics"] == {"dispatchLog": _MACOS_VITEST_SANDBOX_STATE_DIR + "/logs/dispatch.jsonl"}
-    assert mod.event_is_test_leak(as_claimed) is False
-
-
-def test_as_claimed_event_preserves_producer_diagnostics_and_passes_through_untouched_events():
-    mod = _load_module({"BOT_ERRORS_STATE_DIR": _CLEAN_STATE_DIR})
-    untouched = _event()
-    assert mod.as_claimed_event(untouched) is untouched
-    producer_only = _event(diagnostics={"omitDispatchLogInMessage": True})
-    assert mod.as_claimed_event(producer_only) is producer_only
-    mixed = _event(diagnostics={"omitDispatchLogInMessage": True, "dispatchLog": "/x/logs/dispatch.jsonl"})
-    assert mod.as_claimed_event(mixed)["diagnostics"] == {"omitDispatchLogInMessage": True}
+    # The gate never sees either; it sees the claimed payload, which is clean.
+    assert mod.email_fallback_blocked_reason(claimed, state_dir=Path(_CLEAN_STATE_DIR)) is None
 
 
 def test_as_claimed_test_leak_is_still_blocked_with_a_clean_state_dir():
-    # event_is_test_leak semantics are unchanged: a producer-claimed fixture
-    # path is a leak wherever the dispatcher runs.
+    """Pins FUNCTION semantics, not route coverage.
+
+    event_is_test_leak semantics are unchanged: a producer-claimed fixture path
+    is a leak wherever the dispatcher runs. This branch is deliberately
+    unreachable through ``process_one`` -- the B2 check at the claim already
+    dropped such events as ``test_leak_dropped`` long before F5 -- so no
+    integration test can cover it. It is kept as defence in depth for any future
+    caller of the gate, and as an anti-regression pin on the shared detector.
+    """
     mod = _load_module({"BOT_ERRORS_STATE_DIR": _CLEAN_STATE_DIR})
     leaked = _event(evidence="authDir: /tmp/wa-test-auth/creds.json unreadable")
     assert mod.event_is_test_leak(leaked) is True
@@ -342,4 +352,53 @@ def test_genuine_alert_mentioning_pytest_dir_reaches_email_fallback(tmp_path: Pa
             mod.process_one(event_path, paths)
 
         assert fallback.call_count == 1
+        assert "email_fallback_test_provenance_suppressed" not in _dispatch_log_types(paths)
+
+
+@pytest.mark.parametrize(
+    ("label", "transport_error"),
+    [
+        ("socket_missing", _SOCKET_MISSING_ERROR),
+        ("bridge_error_payload", _BRIDGE_ERROR_WITH_FIXTURE_PATH),
+    ],
+)
+def test_transport_error_path_in_lastError_does_not_block_email_fallback(
+    tmp_path: Path,
+    label: str,
+    transport_error: str,
+) -> None:
+    """A dispatcher-owned transport error must not make a genuine alert look leaked.
+
+    The email fallback only matters when WhatsApp is already failing, and it is
+    exactly then that ``process_one`` calls ``mark_failure(event, str(exc))``,
+    writing the transport's own exception text into ``delivery.lastError`` three
+    statements before the gate. Both texts here are produced verbatim by shipped
+    code and carry a path that matches a global test-leak pattern.
+
+    Gating on the post-injection event therefore reported ``test_leak`` for a
+    clean producer payload on a production state dir, and the alert dead-lettered
+    silently -- the #3404 headline reached through a second field. The gate reads
+    the as-claimed snapshot, so the injected text cannot reach it.
+    """
+    with _state_root_outside_test_roots() as state_root:
+        mod = _load_module({
+            "BOT_ERRORS_STATE_DIR": str(state_root),
+            "BOT_ERRORS_DELIVERY_MAX_ATTEMPTS": "10",
+        })
+        assert mod.matched_state_dir_test_root_pattern(state_root) is None, "precondition: production-like state dir"
+        claimed = _event()
+        assert mod.event_is_test_leak(claimed) is False, "precondition: producer payload is clean"
+        assert mod.event_is_test_leak(mod.mark_failure(_event(), transport_error)) is True, (
+            "precondition: the transport error text alone reads as a leak"
+        )
+
+        paths = mod.setup_dirs()
+        event_path = _write_event(paths, claimed)
+
+        with patch.object(mod, "send_whatsapp", side_effect=RuntimeError(transport_error)), \
+             patch.object(mod, "EMAIL_FALLBACK", _executable_fallback(tmp_path)), \
+             patch.object(mod, "email_fallback", return_value=True) as fallback:
+            mod.process_one(event_path, paths)
+
+        assert fallback.call_count == 1, label
         assert "email_fallback_test_provenance_suppressed" not in _dispatch_log_types(paths)

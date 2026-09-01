@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import calendar
+import copy
 import fcntl
 import hashlib
 import json
@@ -3017,32 +3018,6 @@ _EMAIL_FALLBACK_TEST_ROOT_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"/pytest-of-[^/]+/", re.I),
 ]
 
-# Fields the dispatcher itself injects into a claimed event before delivery.
-# They carry dispatcher-owned paths (the dispatch log lives under the state
-# root) and must not feed the email gate's test-leak scan (#3404).
-_DISPATCHER_INJECTED_DIAGNOSTICS_KEYS: tuple[str, ...] = ("dispatchLog",)
-
-
-def as_claimed_event(event: dict[str, Any]) -> dict[str, Any]:
-    """The event as its producer claimed it: dispatcher-injected diagnostics removed.
-
-    Returns ``event`` itself when nothing was injected; otherwise a copy whose
-    ``diagnostics`` is rebuilt without the injected keys. Never mutates ``event``.
-    """
-    diagnostics = event.get("diagnostics")
-    if not isinstance(diagnostics, dict) or not any(
-        key in diagnostics for key in _DISPATCHER_INJECTED_DIAGNOSTICS_KEYS
-    ):
-        return event
-    stripped = dict(event)
-    stripped["diagnostics"] = {
-        key: value
-        for key, value in diagnostics.items()
-        if key not in _DISPATCHER_INJECTED_DIAGNOSTICS_KEYS
-    }
-    return stripped
-
-
 def matched_state_dir_test_root_pattern(state_dir: Path | str | None) -> str | None:
     """Return the test-root pattern matching the dispatcher's own state directory.
 
@@ -3061,32 +3036,50 @@ def matched_state_dir_test_root_pattern(state_dir: Path | str | None) -> str | N
 
 
 def email_fallback_blocked_reason(
-    event: dict[str, Any],
+    claimed_event: dict[str, Any],
     *,
     state_dir: Path | str | None = None,
 ) -> str | None:
     """Why an event must NOT be escalated by email, or None when it may.
 
-    2026-08-28: a pytest-fixture dead-letter (dispatch log under a Linux
-    pytest basetemp, synthetic machine name, a real instance label) reached
-    the operator as a real critical email through the F5 fallback. Three
-    gates, evaluated in order:
+    CONTRACT: ``claimed_event`` MUST be the event AS ITS PRODUCER CLAIMED IT --
+    the payload as read off the queue, before any dispatcher bookkeeping is
+    written into it. ``process_one`` snapshots exactly that at the B2 test-leak
+    check and carries the snapshot to this call; do not pass the live event.
+
+    That contract is the whole of #3404. The gate used to scan the event as it
+    stood at the F5 call site, which by then carried dispatcher-owned text:
+    ``diagnostics.dispatchLog`` (always) and ``delivery.lastError`` (the
+    transport's own exception string, written by ``mark_failure`` three
+    statements earlier -- and the email fallback only runs when the transport is
+    already failing). A production dispatcher whose socket or state root sat
+    under a tmp dir, or whose bridge returned an error payload naming a fixture
+    path, therefore reported ``test_leak`` for a perfectly clean alert and
+    dead-lettered it silently. Reading only the claimed payload closes that
+    class for every such field at once, present and future, rather than
+    stripping known keys by name.
+
+    Three gates, evaluated in order:
 
     * ``test_provenance`` -- the producer flagged ``runtime.provenance.test``.
-    * ``test_leak`` -- the AS-CLAIMED event matches a global test-leak pattern
-      (identical ``event_is_test_leak`` semantics to the queue path). The
-      dispatcher's own injected ``diagnostics.dispatchLog`` is excluded, so a
-      state root under a tmp dir cannot make every event look leaked.
+    * ``test_leak`` -- the claimed payload matches a global test-leak pattern
+      (identical ``event_is_test_leak`` semantics to the queue path). On the
+      ``process_one`` route this branch is unreachable by construction: the B2
+      check drops such events as ``test_leak_dropped`` at the claim, long before
+      F5. It is kept as defence in depth for any other caller of this gate and
+      as an anti-regression pin on the shared detector.
     * ``test_state_dir`` -- the state directory the dispatcher was launched
       with (``state_dir``; defaults to the resolved state root) lies under a
-      recognised test root. This is what the 2026-08-28 incident actually
-      was. It replaces the earlier scan for ``/pytest-of-<user>/`` anywhere in
+      recognised test root. This is what the 2026-08-28 incident actually was:
+      a pytest-fixture dead-letter reached the operator as a real critical
+      email because the run itself was a test run. Binding to the launched
+      state dir replaces the earlier scan for ``/pytest-of-<user>/`` anywhere in
       the event text, which also blocked genuine alerts that merely mentioned
-      such a path and left them to dead-letter silently (#3404).
+      such a path (#3404).
     """
-    if is_test_provenance_event(event):
+    if is_test_provenance_event(claimed_event):
         return "test_provenance"
-    if event_is_test_leak(as_claimed_event(event)):
+    if event_is_test_leak(claimed_event):
         return "test_leak"
     if state_dir is None:
         state_dir = state_root()
@@ -6231,6 +6224,16 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
         })
         return False, "test_leak"
 
+    # #3404: freeze what the PRODUCER claimed, before the dispatcher writes any
+    # of its own text into the event. Everything below this line may add
+    # dispatcher-owned strings -- diagnostics.dispatchLog immediately, and
+    # delivery.lastError from mark_failure once the transport fails -- and those
+    # strings carry local paths that can match a test-leak pattern. The F5 email
+    # gate is evaluated against this snapshot so a genuine alert can never be
+    # mistaken for a test leak on the strength of the dispatcher's own
+    # bookkeeping. Deep-copied because the injections below mutate nested dicts.
+    claimed_event = copy.deepcopy(event)
+
     diagnostics = event.setdefault("diagnostics", {})
     if isinstance(diagnostics, dict) and not omit_dispatch_log_in_message(event):
         diagnostics["dispatchLog"] = str(paths["logs"] / "dispatch.jsonl")
@@ -6387,7 +6390,7 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
         # --- F5: email fallback (attempts >= 3) with unavailability tracking ---
         email_status = "not_attempted"
         email_blocked = (
-            email_fallback_blocked_reason(event, state_dir=paths["root"])
+            email_fallback_blocked_reason(claimed_event, state_dir=paths["root"])
             if attempts >= 3
             else None
         )
