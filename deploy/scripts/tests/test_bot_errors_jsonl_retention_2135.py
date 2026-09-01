@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import math
 import os
 from pathlib import Path
 import sys
@@ -67,20 +68,27 @@ class TestAppendPlusRetention:
         assert target.read_bytes() == existing + line_bytes(incoming)
 
     def test_over_threshold_keeps_newest_ordered_suffix(self, tmp_path: Path) -> None:
+        # #3404: retention after compaction is the newest suffix that fits under
+        # the low-water target (TRIM_LOW_WATER_RATIO * max_bytes); max_bytes
+        # itself is the hard ceiling the file never exceeds.
         module = _module()
         target = tmp_path / "diagnostic.jsonl"
         existing = [{"id": index, "payload": "x" * 64} for index in range(10)]
         incoming = {"id": 10, "payload": "y" * 64}
         target.write_bytes(b"".join(line_bytes(record) for record in existing))
-        expected = [existing[-1], incoming]
-        max_bytes = sum(len(line_bytes(record)) for record in expected)
+        expected = [existing[-2], existing[-1], incoming]
+        expected_bytes = sum(len(line_bytes(record)) for record in expected)
+        max_bytes = math.ceil(expected_bytes / module.TRIM_LOW_WATER_RATIO)
+        low_water = int(max_bytes * module.TRIM_LOW_WATER_RATIO)
+        assert expected_bytes <= low_water < expected_bytes + len(line_bytes(existing[-3]))
 
         result = _append(module, target, incoming, max_bytes)
 
         assert result.status == "committed"
         assert result.method == "compact_replace"
         assert read_records(target) == expected
-        assert target.stat().st_size <= max_bytes
+        assert target.stat().st_size == expected_bytes
+        assert target.stat().st_size <= low_water <= max_bytes
 
     def test_empty_file_becomes_one_committed_record(self, tmp_path: Path) -> None:
         module = _module()

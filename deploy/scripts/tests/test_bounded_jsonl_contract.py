@@ -92,20 +92,30 @@ def test_exact_limit_uses_direct_append(tmp_path: Path) -> None:
 
 
 def test_over_limit_compaction_keeps_newest_records_in_order(tmp_path: Path) -> None:
+    # #3404: compaction retains the newest records that fit under the LOW-WATER
+    # target (TRIM_LOW_WATER_RATIO * max_bytes), not under max_bytes itself, so
+    # the file has headroom after the rewrite. Size max_bytes so that exactly
+    # the two newest existing records plus the incoming one fit that target.
     module = _module()
     target = tmp_path / "diagnostic.jsonl"
     records = [{"id": index, "payload": "x" * 24} for index in range(8)]
     incoming = {"id": 8, "payload": "y" * 24}
     target.write_bytes(b"".join(line_bytes(record) for record in records))
-    max_bytes = sum(len(line_bytes(record)) for record in [records[-2], records[-1], incoming])
+    expected = [records[-2], records[-1], incoming]
+    expected_bytes = sum(len(line_bytes(record)) for record in expected)
+    max_bytes = math.ceil(expected_bytes / module.TRIM_LOW_WATER_RATIO)
+    low_water = int(max_bytes * module.TRIM_LOW_WATER_RATIO)
+    assert expected_bytes <= low_water < expected_bytes + len(line_bytes(records[-3]))
 
     result = _append(module, target, incoming, max_bytes)
 
     assert result.status == "committed"
     assert result.method == "compact_replace"
     assert result.compacted is True
-    assert read_records(target) == [records[-2], records[-1], incoming]
-    assert target.stat().st_size <= max_bytes
+    assert read_records(target) == expected
+    assert result.bytes_after == expected_bytes
+    assert target.stat().st_size == expected_bytes
+    assert target.stat().st_size <= low_water <= max_bytes
 
 
 def test_oversized_incoming_record_survives_and_is_reported(tmp_path: Path) -> None:
@@ -225,9 +235,14 @@ def _exercise_nonstandard_historical_constant(
     original = f'{{"id":"legacy","value":{constant}}}\n'.encode("utf-8")
     target.write_bytes(original)
 
-    # 32 (not 40): the append must cross the TRIM_HIGH_WATER_RATIO threshold
-    # so the destructive-compaction path is actually exercised under hysteresis.
-    result = _append(module, target, {"id": "incoming"}, 32)
+    # The existing line plus the incoming record must exceed max_bytes so the
+    # append takes the destructive-compaction path (which is what the malformed
+    # historical line has to block). Asserted rather than assumed: the budget
+    # was once retuned 40 -> 32 only to clear the retired 1.25x high-water
+    # overshoot (#3404); under the hard cap 40 exercises the path directly.
+    max_bytes = 40
+    assert len(original) + len(line_bytes({"id": "incoming"})) > max_bytes
+    result = _append(module, target, {"id": "incoming"}, max_bytes)
     temp = tmp_path / ".diagnostic.jsonl.bounded-jsonl.compact.tmp"
     return result, target, original, temp
 
@@ -342,22 +357,118 @@ def test_require_commit_error_is_content_free(tmp_path: Path) -> None:
     assert raised.value.__cause__ is None
 
 
-def test_at_cap_appends_amortize_compaction_with_high_water_hysteresis(tmp_path: Path) -> None:
-    # production incident (2026-08-28): a JSONL pinned at max_bytes
-    # compacted on EVERY append (full read + parse + rewrite per record),
-    # stalling outbox drains. Hysteresis: plain-append until the high-water
-    # ratio, then one compaction back under max_bytes — the rewrite amortizes
-    # over ~0.25 * max_bytes of growth instead of firing per append.
+def _fixed_width_record(n: int) -> dict:
+    # Zero-padded counter keeps every serialized line the same length so the
+    # cap arithmetic below is exact.
+    return {"n": f"{n:05d}", "pad": "x" * 80}
+
+
+def test_max_bytes_is_a_hard_cap_across_many_cap_crossings(tmp_path: Path) -> None:
+    # #3404: BOT_ERRORS_*_JSONL_MAX_BYTES means MAXIMUM. Under the retired 1.25x
+    # high-water design this run peaked at ~1.21 * max_bytes; the bound must
+    # hold after EVERY committed append, across many compaction cycles, and the
+    # file must actually reach the cap (so the assertion is not vacuous).
     module = _module()
     target = tmp_path / "diagnostic.jsonl"
-    probe = line_bytes({"n": 0, "pad": "x" * 80})
+    probe = line_bytes(_fixed_width_record(0))
     max_bytes = len(probe) * 10
+    sizes = []
+    compactions = 0
+    for n in range(400):
+        result = _append(module, target, _fixed_width_record(n), max_bytes)
+        assert result.status == "committed", result
+        assert result.oversized_record is False
+        size = target.stat().st_size
+        assert size <= max_bytes, (n, size, max_bytes, result)
+        assert result.bytes_after == size
+        sizes.append(size)
+        compactions += result.method == "compact_replace"
+    assert max(sizes) == max_bytes, "run never reached the cap; bound not exercised"
+    assert compactions >= 20, "run did not cross the cap many times"
+
+
+def test_compaction_trims_to_low_water_target_and_keeps_newest_suffix(tmp_path: Path) -> None:
+    # #3404: the compaction that fires when an append would cross max_bytes
+    # trims the file to TRIM_LOW_WATER_RATIO * max_bytes -- as many of the
+    # newest records as fit under that target (not fewer), in order, ending
+    # with the incoming record.
+    module = _module()
+    target = tmp_path / "diagnostic.jsonl"
+    probe = line_bytes(_fixed_width_record(0))
+    max_bytes = len(probe) * 10
+    low_water = int(max_bytes * module.TRIM_LOW_WATER_RATIO)
+    appended = []
+    for n in range(10):
+        record = _fixed_width_record(n)
+        appended.append(record)
+        result = _append(module, target, record, max_bytes)
+        assert result.method == "append", (n, result)
+    assert target.stat().st_size == max_bytes
+
+    incoming = _fixed_width_record(10)
+    appended.append(incoming)
+    result = _append(module, target, incoming, max_bytes)
+
+    assert (result.status, result.method, result.compacted) == ("committed", "compact_replace", True)
+    assert result.bytes_before == max_bytes
+    assert result.bytes_after == target.stat().st_size
+    assert result.bytes_after <= low_water
+    assert result.bytes_after + len(probe) > low_water, "compaction over-trimmed below the low-water target"
+    retained = read_records(target)
+    assert retained == appended[-len(retained):]
+    assert retained[-1] == incoming
+    assert 1 < len(retained) < len(appended)
+
+
+def test_at_cap_appends_amortize_compaction_via_low_water_headroom(tmp_path: Path) -> None:
+    # production incident (2026-08-28): a JSONL pinned at max_bytes compacted on
+    # EVERY append (full read + parse + rewrite per record), stalling outbox
+    # drains. #3404 keeps max_bytes hard and takes the amortisation from the
+    # low-water trim instead: after a compaction the file has
+    # (max_bytes - low_water) bytes of headroom, so at least
+    # headroom // len(record) plain appends separate consecutive compactions.
+    module = _module()
+    target = tmp_path / "diagnostic.jsonl"
+    probe = line_bytes(_fixed_width_record(0))
+    max_bytes = len(probe) * 40
+    low_water = int(max_bytes * module.TRIM_LOW_WATER_RATIO)
+    headroom_records = (max_bytes - low_water) // len(probe)
+    assert headroom_records >= 2, "fixture must leave real headroom"
+    total = 200
     methods = []
-    for n in range(30):
-        result = _append(module, target, {"n": n, "pad": "x" * 80}, max_bytes)
-        assert result.status == "committed"
+    for n in range(total):
+        result = _append(module, target, _fixed_width_record(n), max_bytes)
+        assert result.status == "committed", result
+        assert target.stat().st_size <= max_bytes
         methods.append(result.method)
-        assert target.stat().st_size <= int(max_bytes * module.TRIM_HIGH_WATER_RATIO) + len(probe)
     compactions = methods.count("compact_replace")
-    assert 1 <= compactions <= 6, methods
-    assert methods.count("append") >= 20, methods
+    assert compactions >= 1, methods
+    # The stall signature: a compaction immediately followed by another one.
+    for index in range(len(methods) - 1):
+        assert not (methods[index] == "compact_replace" and methods[index + 1] == "compact_replace"), (
+            index, methods[index - 3 : index + 3]
+        )
+    # Each compaction buys at least headroom_records plain appends.
+    assert compactions <= math.ceil(total / (headroom_records + 1)) + 1, (compactions, methods)
+    assert methods.count("append") >= total - compactions
+
+
+def test_oversized_record_compacts_immediately_even_with_headroom(tmp_path: Path) -> None:
+    # The one documented exception to the hard cap: a single record larger than
+    # max_bytes evicts everything and becomes the whole file, at once, even when
+    # the file had headroom for ordinary appends.
+    module = _module()
+    target = tmp_path / "diagnostic.jsonl"
+    small = [{"id": index} for index in range(3)]
+    target.write_bytes(b"".join(line_bytes(record) for record in small))
+    max_bytes = target.stat().st_size + 4096
+    incoming = {"id": "oversized", "payload": "z" * 5000}
+    assert len(line_bytes(incoming)) > max_bytes
+
+    result = _append(module, target, incoming, max_bytes)
+
+    assert (result.status, result.method, result.compacted, result.oversized_record) == (
+        "committed", "compact_replace", True, True
+    )
+    assert target.read_bytes() == line_bytes(incoming)
+    assert result.bytes_after == len(line_bytes(incoming))
