@@ -6,7 +6,7 @@
   "files": [
     {
       "path": "deploy/lib/runtime-path.sh",
-      "sha256": "6f20ad080462e10fc81d1fbb60ce8898be0dfde35bae99e744271c786c4a90ae",
+      "sha256": "0884f949aae18fb55c41a3052a90ee71cbf2074e5f05d6fecd3bc266e0662bdc",
       "mustContain": [
         "whatsoup_effective_runtime_path",
         "whatsoup_export_runtime_path"
