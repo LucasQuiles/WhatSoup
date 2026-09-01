@@ -34,6 +34,9 @@ import {
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const GUARD = path.join(REPO_ROOT, 'scripts/resolved-override-inventory-guard.ts');
 
+/** The three marker keys that make a literal recognisably an executing context. */
+const MARKERS = 'actorJid: undefined, purpose: undefined, conversationKey: undefined';
+
 /** An executing-context literal that asserts resolution, as a production caller would write it. */
 const PRODUCTION_OVERRIDE = [
   'export function build(session: SessionContext) {',
@@ -89,6 +92,72 @@ describe('resolved-override-inventory-guard — the three rules it claims', () =
   });
 });
 
+describe('resolved-override-inventory-guard — evasions found by adversarial review (#3435)', () => {
+  // Each case below EVADED the guard before this fix: the ternary cases skipped all three
+  // literal rules, the false-prefix cases inherited the `resolved: false` exemption. They are
+  // pinned verbatim so a regression in either helper turns this file red rather than silently
+  // reopening the hole.
+
+  it('F1 FLAGS a feature-flagged ternary true branch (the likeliest re-introduction shape)', () => {
+    const src = 'export function reopen(force: boolean, executing: ExecutingCtx) {\n'
+      + '  return force ? { ...executing, resolved: true } : executing;\n}';
+    const findings = scanFileForResolvedOverrides('src/mcp/registry.ts', src);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].rule).toBe('executing-literal');
+    expect(findings[0].line).toBe(2);
+  });
+
+  it('F1 FLAGS a ternary true branch written with marker keys instead of a spread', () => {
+    const src = `const ctx = force ? { ${MARKERS}, resolved: true } : base;`;
+    const findings = scanFileForResolvedOverrides('src/mcp/flagged.ts', src);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].rule).toBe('executing-literal');
+  });
+
+  it('F1 FLAGS a marker-less ternary true branch inside a machinery file', () => {
+    const src = 'import { resolveSessionContext } from "./types.ts";\n'
+      + 'const ctx = force ? { resolved: true } : base;';
+    const findings = scanFileForResolvedOverrides('src/mcp/bare-ternary.ts', src);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].rule).toBe('machinery-file-literal');
+  });
+
+  it('F1 still FLAGS the ternary FALSE branch (never regressed, pinned as a control)', () => {
+    const src = 'const ctx = cond ? base : { ...executing, resolved: true };';
+    expect(scanFileForResolvedOverrides('src/mcp/false-branch.ts', src)).toHaveLength(1);
+  });
+
+  it('F2 FLAGS `false || force`, which asserts resolution whenever the flag is on', () => {
+    const src = `export const x = { ${MARKERS}, resolved: false || Boolean(process.env.X) };`;
+    const findings = scanFileForResolvedOverrides('src/mcp/false-or.ts', src);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].rule).toBe('executing-literal');
+  });
+
+  it('F2 FLAGS `false ? a : true`, which always asserts resolution', () => {
+    const src = `export const x = { ${MARKERS}, resolved: false ? false : true };`;
+    const findings = scanFileForResolvedOverrides('src/mcp/false-ternary.ts', src);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].rule).toBe('executing-literal');
+  });
+
+  it('F2 FLAGS the same false-prefix through the shared assignment rule', () => {
+    const src = 'export function p(ctx: { resolved?: boolean }) {\n'
+      + '  ctx.resolved = false || Boolean(process.env.X);\n  return ctx;\n}';
+    const findings = scanFileForResolvedOverrides('src/mcp/false-assign.ts', src);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].rule).toBe('property-assignment');
+    expect(findings[0].line).toBe(2);
+  });
+
+  it('F5 FLAGS an `export default` executing-context literal', () => {
+    const src = `export default { ${MARKERS}, resolved: true };`;
+    const findings = scanFileForResolvedOverrides('src/mcp/default-export.ts', src);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].rule).toBe('executing-literal');
+  });
+});
+
 describe('resolved-override-inventory-guard — what it deliberately does NOT flag', () => {
   it('ignores `resolved: false`, which never asserts resolution', () => {
     const src = 'const ctx = wrap({ actorJid: a, purpose: p, conversationKey: k, resolved: false });';
@@ -128,6 +197,20 @@ describe('resolved-override-inventory-guard — what it deliberately does NOT fl
 
   it('ignores an equality comparison against the field', () => {
     expect(scanFileForResolvedOverrides('src/mcp/read.ts', 'if (ctx.resolved === true) go();')).toHaveLength(0);
+  });
+
+  it('still ignores a BARE `false` assignment, so the F2 tightening did not over-reach', () => {
+    expect(scanFileForResolvedOverrides('src/mcp/off-assign.ts', 'ctx.resolved = false;')).toHaveLength(0);
+  });
+
+  it('still ignores a bare `false` in a spread literal (the live tree relies on this)', () => {
+    const src = 'return { resolved: false, ...evaluation };';
+    expect(scanFileForResolvedOverrides('src/fleet/like-transition-controller.ts', src)).toHaveLength(0);
+  });
+
+  it('ignores an optional type member, which declares the field rather than setting it', () => {
+    const src = 'export function p(ctx: { resolved?: boolean }) { return ctx; }';
+    expect(scanFileForResolvedOverrides('src/mcp/optional-member.ts', src)).toHaveLength(0);
   });
 
   it('flags real code even when a comment mentioning the shape precedes it (line = the CODE line)', () => {
@@ -218,6 +301,23 @@ describe('resolved-override-inventory-guard — subprocess exits', () => {
     const { status, output } = runGuardIn(dir);
     expect(status, `expected ${EXIT_BLOCK} BLOCK, got ${status}:\n${output}`).toBe(EXIT_BLOCK);
     expect(output).toMatch(/has 2 resolved-override site\(s\) but the inventory pins 1/);
+  });
+
+  it('exits 1 BLOCK on an override in a .mts module, not just a .ts one', () => {
+    const dir = fixtureRepo('mts');
+    writeFileSync(path.join(dir, 'src/mcp/new-caller.mts'), PRODUCTION_OVERRIDE);
+    const { status, output } = runGuardIn(dir);
+    expect(status, `expected ${EXIT_BLOCK} BLOCK, got ${status}:\n${output}`).toBe(EXIT_BLOCK);
+    expect(output).toMatch(/src\/mcp\/new-caller\.mts:6 \[executing-literal\]/);
+  });
+
+  it('does NOT scan .tsx — a disclosed limit, pinned so the exclusion stays deliberate', () => {
+    // JSX would desynchronise the lexical scanner (`</div>` reads as a regex opening), which
+    // under-reports. src/ carries no JSX; this asserts the documented boundary, not a wish.
+    const dir = fixtureRepo('tsx');
+    writeFileSync(path.join(dir, 'src/mcp/new-caller.tsx'), PRODUCTION_OVERRIDE);
+    const { status, output } = runGuardIn(dir);
+    expect(status, output).toBe(EXIT_PASS);
   });
 
   it('exits 2 INCONCLUSIVE — not 0 — on an empty tree (no scan roots at all)', () => {

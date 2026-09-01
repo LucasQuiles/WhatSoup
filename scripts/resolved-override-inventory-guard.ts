@@ -15,12 +15,14 @@
 // count-pinned allowlist of the permitted test-only sites.
 //
 // WHAT IS MATCHED (on comment-stripped, string-blanked source):
-//   (a) `executing-literal`: an object literal that sets `resolved` (any value other than
-//       the literal `false`; quoted, computed and shorthand keys included) AND is
-//       recognisably an executing context — it also carries one of the required keys
-//       `actorJid` / `purpose` / `conversationKey`, or a spread (`...executing`). A fresh
-//       ExecutingSessionContext literal must carry all three keys or spread them, so this
-//       marker set is complete for the direct-literal shape wherever it appears.
+//   (a) `executing-literal`: an object literal that sets `resolved` (any value other than a
+//       bare `false`; quoted and shorthand keys included, plus the SPELLED `['resolved']`
+//       computed form — a key assembled at runtime is not) AND is recognisably an executing
+//       context — it also carries one of the required keys `actorJid` / `purpose` /
+//       `conversationKey`, or a spread (`...executing`). A fresh ExecutingSessionContext
+//       literal must carry all three keys or spread them, so this marker set is complete for
+//       the direct-literal shape wherever it appears. A conditional expression's TRUE branch
+//       (`flag ? { ...executing, resolved: true } : executing`) is a literal for this rule.
 //   (b) `machinery-file-literal`: the same `resolved` key on a marker-less literal (e.g.
 //       `Object.assign(ctx, { resolved: true })`, `{ resolved: true } as ExecutingSessionContext`)
 //       in a file that names the executing-context machinery (ExecutingSessionContext /
@@ -29,18 +31,37 @@
 //       (plain or `??=` / `||=`) with a value other than the literal `false`, in any scanned
 //       file.
 //
-// WHAT IS NOT MATCHED (stated honestly, not overclaimed):
+// WHAT IS NOT MATCHED. This list is the guard's honesty contract, and the summary at the end
+// claims no more than the list allows. Every entry was reproduced against the guard binary.
 //   - destructuring patterns (`const { resolved, ...rest } = ctx`, type-annotated parameter
 //     patterns) read the field, they do not set it — excluded;
 //   - `resolved: false` never asserts resolution (resolveSessionContext honours `=== true`
-//     only) — ignored;
+//     only) — ignored. Only a BARE `false` closed by a terminator is exempt: `false || force`
+//     and `false ? a : true` are FLAGGED, through the literal and the assignment rule alike.
+//     So is `false as const`, a deliberate over-flag in the fail-closed direction;
 //   - a marker-less `{ resolved: true }` literal in a file that names none of the machinery
 //     tokens and reaches the type only through an intermediary is not caught;
+//   - a key assembled at runtime (`['resol' + 'ved']`) and a reflective write
+//     (`Object.defineProperty(ctx, 'resolved', { value: true })`) are NOT caught. The scanner
+//     matches spelled keys and direct property writes only;
+//   - `.tsx` / `.jsx` are not candidates — a limit with a reason, not an oversight. `</div>`
+//     puts `/` immediately after `<`, which the regex-literal heuristic reads as a regex
+//     opening, so the lexer would blank forward and UNDER-report, the dangerous direction for
+//     a fail-closed rail. `src/` carries no JSX today; every `.tsx` under a scan root is
+//     console/browser test code. Files outside the two SCAN_ROOTS are likewise not candidates;
 //   - the scanner is lexical, not a type-checker: it recognises string, template, comment
 //     and (heuristically) regex literals, so a pathological regex literal can still
 //     desynchronise it for the rest of one file.
-// It is a tripwire for every realistic re-introduction shape plus a built-in positive
-// control, not a proof.
+//
+// WHAT THIS RAIL DOES NOT COVER AT ALL. `resolveSessionContext` classifies a context
+// `'resolved'` on `resolved === true` OR on any defined `actorJid` / `purpose` /
+// `conversationKey`. This rail inventories the FIRST spelling only. The second is the
+// socket-identity `conversationKey` injection that src/mcp/types.ts documents as standing,
+// intentional production behaviour. A green run here is NOT complete coverage of the
+// empty-context fail-open.
+//
+// It is a tripwire for the shapes enumerated above, plus a built-in positive control. It is
+// not a proof, and the list of what it misses is part of the claim.
 //
 // COVERAGE ASSERTIONS (a guard that examined nothing must not pass):
 //   - exit 2 INCONCLUSIVE when either scan root (src/, tests/) yielded zero readable files, or
@@ -135,7 +156,15 @@ const SHORTHAND_RE = /(?<![A-Za-z0-9_$.])resolved(?=\s*[,}])/g;
 /** `x.resolved = v` / `x['resolved'] = v`, plain or `??=` / `||=` (never `==` / `=>`). */
 const ASSIGN_RE = /(?:\.\s*resolved|\[\s*'resolved'\s*\]|\[\s*"resolved"\s*\])\s*(?:\?\?|\|\|)?=(?![=>])/g;
 
-const TS_EXT_RE = /\.ts$/;
+/**
+ * Module extensions the walker treats as candidates: `.ts` / `.mts` / `.cts` / `.js` / `.mjs` /
+ * `.cjs`. `.tsx` and `.jsx` are DELIBERATELY excluded, and the exclusion is a limit, not an
+ * oversight: a JSX closing tag puts `/` immediately after `<`, which `precededByRegexContext`
+ * reads as the start of a regex literal, so the lexer would blank forward from `</div>` and
+ * UNDER-report — the dangerous direction for a fail-closed rail. `src/` carries no JSX today;
+ * every `.tsx` under a scan root is console/browser test code.
+ */
+const SCANNED_EXT_RE = /\.[cm]?[tj]s$/;
 
 /**
  * Chars after which a `/` starts a regex literal rather than a division. Conservative:
@@ -340,7 +369,7 @@ function nextNonSpace(structure: string, index: number): string {
   return i < structure.length ? structure.slice(i, i + 2) : '';
 }
 
-const LITERAL_PRECEDERS = new Set(['(', ',', '=', ':', '?', '[', '||', '&&', '??', 'return', 'yield', 'await', 'throw']);
+const LITERAL_PRECEDERS = new Set(['(', ',', '=', ':', '?', '[', '||', '&&', '??', 'return', 'yield', 'await', 'throw', 'default']);
 const DESTRUCTURING_PRECEDERS = new Set(['const', 'let', 'var']);
 
 /**
@@ -353,18 +382,41 @@ function isObjectLiteralExpression(structure: string, open: number, close: numbe
   if (!LITERAL_PRECEDERS.has(before)) return false;
   // Statement separators at depth 0 mean a block or a type / interface body, never a literal.
   if (depthZeroText(structure, open, close).includes(';')) return false;
-  // `{ ... }: Type` and `{ ... } = value` are destructuring patterns (parameter / assignment).
+  // `{ ... }: Type` and `{ ... } = value` are destructuring patterns (parameter / assignment) —
+  // EXCEPT when the literal is a conditional expression's TRUE branch, where the trailing `:` is
+  // the ternary's own separator, not a type annotation. Rejecting those unconditionally let a
+  // feature-flagged `flag ? { ...executing, resolved: true } : executing` skip ALL THREE literal
+  // rules, which is the likeliest real re-introduction shape (#3435 F1). A `?` preceder plus a
+  // trailing `:` is a ternary: a destructuring parameter is never preceded by `?` (an optional
+  // parameter writes `{ a }?: T`, whose preceder is `(` or `,`).
   const after = nextNonSpace(structure, close + 1);
-  if (after.startsWith(':')) return false;
+  const isTernaryTrueBranch = before === '?';
+  if (after.startsWith(':') && !isTernaryTrueBranch) return false;
   if (after.startsWith('=') && !after.startsWith('==') && !after.startsWith('=>')) return false;
   return true;
 }
 
-/** The literal `false` (and nothing else) as the value starting at `index`. */
+/** Characters that can legitimately END a value expression, so a bare `false` stops there. */
+const VALUE_TERMINATORS = new Set([',', '}', ')', ']', ';']);
+
+/**
+ * The literal `false` AND NOTHING ELSE as the value starting at `index`.
+ *
+ * The terminator requirement is load-bearing. Matching a leading `false` and merely checking the
+ * next character is not an identifier char let every truthy-capable expression that BEGINS with
+ * `false` inherit the `resolved: false` exemption — `false || force`, `false ? a : true`, and the
+ * same shapes through the shared assignment rule (#3435 F2). Each of those asserts resolution at
+ * runtime. Anything that is not exactly `false` followed by a terminator is treated as a live
+ * value, so `resolved: false as const` is flagged too: over-flagging a safe value is the
+ * fail-closed direction, and a reviewer can answer it with an allowlist row.
+ */
 function valueIsLiteralFalse(structure: string, index: number): boolean {
   let i = index;
   while (i < structure.length && /\s/.test(structure[i])) i += 1;
-  return structure.slice(i, i + 5) === 'false' && !IDENT_CHAR_RE.test(structure[i + 5] ?? '');
+  if (structure.slice(i, i + 5) !== 'false') return false;
+  let end = i + 5;
+  while (end < structure.length && /\s/.test(structure[end])) end += 1;
+  return end >= structure.length || VALUE_TERMINATORS.has(structure[end]);
 }
 
 function lineOf(content: string, index: number): number {
@@ -466,7 +518,7 @@ function walkTsFiles(root: string, dir: string, acc: string[]): void {
     }
     if (st.isDirectory()) {
       walkTsFiles(root, full, acc);
-    } else if (TS_EXT_RE.test(entry)) {
+    } else if (SCANNED_EXT_RE.test(entry)) {
       acc.push(path.relative(root, full));
     }
   }
