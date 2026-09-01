@@ -205,6 +205,7 @@ const CHAIN_REQUIREMENTS: ChainRequirement[] = [
       'npm run guard:no-destructive-git',
       'npm run guard:catch-ratchet',
       'npm run guard:grant-resolver',
+      'npm run guard:resolved-override',
       'npm run guard:instance-config',
       'npm run guard:guard-test-coverage',
       'npm run guard:lint:src',
