@@ -21,6 +21,7 @@ import type { TransportId } from './transport/registry.ts';
 import type { TwilioSmsConfig } from './transport/twilio/types.ts';
 import type { ImessageConfig } from './transport/imessage/types.ts';
 import type { SignalConfig } from './transport/signal/types.ts';
+import type { LaunchdPlistRenderOptions } from './lib/launchd-service-config.ts';
 import { errorMessage } from './lib/error-message.ts';
 import { setLoadedInstanceConfig } from './lib/instance-context.ts';
 
@@ -123,6 +124,12 @@ interface InstanceConfig {
   imessageConfig?: ImessageConfig;
   // Signal transport config — present only when transport === 'signal'
   signalConfig?: SignalConfig;
+  // Governed launchd service render options (config-owned CLAUDE_CONFIG_DIR +
+  // PATH prepend) and the ratified account-identity digest. Validated on every
+  // path (create/patch/load) by validateLaunchdServiceConfig /
+  // validateServiceIdentityConfig (core/agent-config-validator.ts); CREATE
+  // passes it through PASSTHROUGH_FIELDS (#3401).
+  service?: LaunchdPlistRenderOptions & { expectedAccountDigest?: string };
   // Resolved paths (added by loader)
   paths: InstancePaths;
 }

@@ -1131,6 +1131,11 @@ export async function handleCreateLine(
     'models', 'model', 'pineconeIndex', 'pineconeSearchMode', 'pineconeRerank', 'pineconeTopK',
     'pineconeAllowedIndexes', 'memory', 'agentOptions', 'toolUpdateMode', 'controlPeers',
     'transcriptionOptions',
+    // service: governed launchd render options (claudeConfigDir, pathPrepend) and
+    // the ratified account digest. Passed through so the shared validator below
+    // (validateLaunchdServiceConfig / validateServiceIdentityConfig) admits or
+    // rejects the block on CREATE as it already does on PATCH/load (#3401 item 2).
+    'service',
     'pineconeApiKeyEnv', 'pineconeProjectId', 'pineconeExpectedHostSuffix',
     'pineconeNamespaces', 'pineconeFactsNamespace', 'pineconeChunksNamespace',
     'pineconeSummariesNamespace', 'pineconeKnowledgeSearch', 'pineconeKnowledgeProfiles',
