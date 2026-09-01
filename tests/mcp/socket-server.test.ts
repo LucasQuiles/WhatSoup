@@ -30,6 +30,17 @@ function makeSession(overrides: Partial<SessionContext> = {}): SessionContext {
   return { tier: 'global', ...overrides };
 }
 
+// L3 test-shim hygiene note (#3435, #3429 P3 rail): this local subclass supplies
+// a DEFAULT `executingSessionResolver` that derives the executing context from
+// the stored `session` fields. That default re-creates the verbatim base-session
+// trust the #3429 P3 rail removed from production: production surfaces MUST name a
+// read-time resolver reading the executing-turn register, and a session with no
+// live turn resolves to the UNRESOLVED empty context — not to the stored session's
+// fields. The P3 compile-time rail (mandatory resolver arg) does NOT protect NEW
+// tests authored here, because this shim re-adds the default. Any confinement or
+// three-state assertion written against this class is testing the shim's default,
+// not production coverage — pass an explicit resolver (or an empty/`noExecutingSession()`
+// context) for such cases.
 class WhatSoupSocketServer extends ProductionWhatSoupSocketServer {
   constructor(
     socketPath: string,

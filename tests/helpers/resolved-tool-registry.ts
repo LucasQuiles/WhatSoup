@@ -15,6 +15,16 @@ function resolveTestSession(session: SessionContext) {
     actorJid: session.actorJid,
     purpose: session.purpose,
     conversationKey: session.conversationKey,
+    // Direct-registry tests model a REAL (resolved) turn: this adapter snapshots
+    // a caller-built session rather than reading a live executing-turn register,
+    // so a bare `{tier:'global'}` test session is resolved-normal, not the
+    // unresolved empty-context state (#3435). Assert resolution UNCONDITIONALLY —
+    // never derive it from the session fields, which would re-create the very
+    // all-undefined ambiguity the discriminator exists to remove. Tests that
+    // exercise the UNRESOLVED path must NOT use this adapter (they would be
+    // rescued to resolved here and pass vacuously) — construct the resolved
+    // context directly with `noExecutingSession()` / an empty executing context.
+    resolved: true,
   });
 }
 

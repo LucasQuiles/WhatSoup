@@ -81,13 +81,44 @@ export interface ExecutingSessionContext {
   actorJid: SessionContext['actorJid'];
   purpose: SessionContext['purpose'];
   conversationKey: SessionContext['conversationKey'];
+  /**
+   * Explicit assertion that a REAL executing-turn resolution produced this
+   * context (#3435, L1). Optional: a real resolution is normally recognized
+   * because it carries at least one defined authorization/confinement field —
+   * a live register entry always pins a canonical `conversationKey`
+   * (src/runtimes/agent/runtime.ts `onProviderBoundaryReady`). The all-undefined
+   * context is the UNRESOLVED state (`noExecutingSession()`, or a read-time
+   * resolver that found no executing-turn entry). Set `resolved: true` ONLY to
+   * assert resolution for a legitimately all-undefined resolved turn — in
+   * practice just the direct-registry test adapter, which snapshots a
+   * caller-built session rather than reading a live register entry. Never set it
+   * to paper over an empty resolution: that reopens the fail-open this brand closes.
+   */
+  resolved?: boolean;
 }
 
 declare const resolvedSessionContextBrand: unique symbol;
 
-/** A request-local session whose mutable authorization fields were resolved read-time. */
+/**
+ * A request-local session whose mutable authorization fields were resolved
+ * read-time. The brand additionally carries `executingResolution`, the explicit
+ * three-state discriminator the registry gate reads (#3435, L1):
+ *
+ *   - `'resolved'`   — a real executing-turn resolution produced this snapshot.
+ *                      Split further by `purpose`: resolved-normal (undefined
+ *                      purpose = an ordinary, non-scheduled turn) vs
+ *                      resolved-scheduled (`purpose === 'scheduled-agent-job'`).
+ *   - `'unresolved'` — an empty (all-undefined) context reached the gate; no real
+ *                      resolution happened. The scheduled-agent-job forbidden-tool
+ *                      set is denied fail-closed in this state.
+ *
+ * An undefined `purpose` is NOT by itself the unresolved state — on a
+ * resolved-normal turn it is the load-bearing representation of "this is a normal
+ * (non-scheduled) turn," and the history-mutation tools MUST stay reachable there.
+ */
 export type ResolvedSessionContext = SessionContext & {
   readonly [resolvedSessionContextBrand]: true;
+  readonly executingResolution: 'resolved' | 'unresolved';
 };
 
 /** The sole production constructor for registry-authorized session snapshots. */
@@ -95,10 +126,38 @@ export function resolveSessionContext(
   session: SessionContext,
   executing: ExecutingSessionContext,
 ): ResolvedSessionContext {
-  return { ...session, ...executing } as ResolvedSessionContext;
+  const { resolved: assertedResolved, ...executingFields } = executing;
+  // A resolution is REAL when it is explicitly asserted OR carries at least one
+  // defined authorization/confinement field. The all-undefined context — the
+  // issue's own definition of the empty context — is the UNRESOLVED state
+  // (`noExecutingSession()`, or a read-time resolver that found no executing-turn
+  // entry). A live register entry always pins a canonical `conversationKey`, so a
+  // real turn is never all-undefined and needs no explicit assertion.
+  const executingResolution: ResolvedSessionContext['executingResolution'] =
+    assertedResolved === true
+    || executingFields.actorJid !== undefined
+    || executingFields.purpose !== undefined
+    || (typeof executingFields.conversationKey === 'string' && executingFields.conversationKey.length > 0)
+      ? 'resolved'
+      : 'unresolved';
+  return { ...session, ...executingFields, executingResolution } as ResolvedSessionContext;
 }
 
-/** Explicit fail-closed resolver for surfaces that never execute agent turns. */
+/**
+ * The UNCONFINED-OPERATOR resolver (#3435, L2): the read-time context for a
+ * surface that never executes an agent turn. It produces the all-undefined
+ * (UNRESOLVED) executing context, which is fail-closed for `actorJid`
+ * (`sensitiveAllowed` denies) AND — since #3435 — for the scheduled-agent-job
+ * forbidden-tool set (an unresolved context denies it).
+ *
+ * It is NOT a general "confine" helper. It does NOT confine conversation scope:
+ * an unresolved context leaves the cross-conversation guard unchanged (the
+ * passive operator socket is intentionally unconfined). Do NOT wire this to a
+ * surface that runs scheduled turns expecting it to gate `purpose`/`conversationKey`
+ * by scope — it only asserts "no executing turn." Its sole production consumer is
+ * the passive operator socket (src/runtimes/passive/runtime.ts), which processes
+ * no messages and therefore legitimately needs none of the history-mutation tools.
+ */
 export function noExecutingSession(): ExecutingSessionContext {
   return { actorJid: undefined, purpose: undefined, conversationKey: undefined };
 }
