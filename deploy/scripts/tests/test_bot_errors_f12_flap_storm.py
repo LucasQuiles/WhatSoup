@@ -7,7 +7,11 @@ Covered:
 - record_flap_trip accumulates trips and prunes the sliding window (wall-clock).
 - flap_evaluate opens a storm at threshold (warning), suppresses members, and
   promotes to critical on cumulative count or sustained persistence.
-- flap_should_resolve fires only after a stable window of zero trips.
+- flap_should_resolve fires after a stable period BELOW storm intensity — the
+  symmetric counterpart of the threshold that opened the storm, measured from
+  the last storm-rate moment rather than the last trip of any size.
+- sweep_flap_storms prunes never-stormed entries past retention, silently, so
+  flapState stays bounded; open storms are exempt.
 - flap_storm_event carries a REAL requested_action (never 'none') and is EXEMPT
   from Pattern A suppression (§10 C4).
 - flapState survives a load/save round-trip (§10 C0 disk persistence).
@@ -345,3 +349,193 @@ def test_2428_seen_ids_prune_after_retention_and_stay_bounded(tmp_path):
     for i in range(mod.FLAP_SEEN_EVENT_MAX_IDS + 10):
         mod.flap_occurrence_already_counted(entry, f"evt-cap-{i}", later + i)
     assert len(entry["seenEventIds"]) <= mod.FLAP_SEEN_EVENT_MAX_IDS
+
+
+# ---------------------------------------------------------------------------
+# Storm lifecycle: resolution is rate-based, and flapState is bounded.
+#
+# Live defect (2026-09-01, dispatcher incident state): every monitored instance
+# carried a permanently-open `critical` health_body_degraded storm — the worst
+# 3681 trips over 1691h, the next 3593 over 1460h, 8 of 8. The old resolve gate
+# demanded ZERO trips in the window AND FLAP_STABLE_SECONDS since the last trip.
+# A source tripping every ~25-50 minutes (measured 1.2-2.5/h) can never
+# accumulate an hour of total quiet, so the storm could not close and re-emitted
+# at the backoff cadence forever — 63 of 298 BOT ERRORS messages in 26h.
+#
+# A storm OPENS at >= FLAP_TRIP_THRESHOLD trips in the window; it must CLOSE on
+# the symmetric condition (sustained rate below that threshold), not on a
+# stricter one the source can never reach.
+# ---------------------------------------------------------------------------
+
+def test_chronic_subthreshold_source_resolves(tmp_path):
+    """A source that keeps tripping BELOW storm intensity must resolve.
+
+    Threshold 3 / window 60s / stable 200s. After the storm opens, trip once
+    every 40s forever: trips-in-window stays at 1-2 (sub-threshold) but never
+    reaches zero, and lastTripAt is always recent. The old gate returned False
+    at every point on this timeline.
+    """
+    mod = _load(tmp_path)
+    fs: dict = {}
+    t0 = 1_000_000
+    for i in range(3):
+        mod.record_flap_trip(fs, KEY, t0 + i)
+    mod.flap_evaluate(fs[KEY], t0 + 2)
+    entry = fs[KEY]
+    assert entry.get("stormAt"), "precondition: storm is open"
+
+    # Chronic low-rate tail: one trip every 40s, well past the stable window.
+    # Start beyond the 60s window so the opening burst has already aged out and
+    # every sample below is genuinely sub-threshold.
+    t = t0 + 2 + 61
+    for _ in range(20):
+        mod.record_flap_trip(fs, KEY, t)
+        assert mod.flap_trips_in_window(entry, t) < 3, "precondition: sub-threshold rate"
+        t += 40
+
+    assert mod.flap_trips_in_window(entry, t) > 0, "precondition: window never empties"
+    assert (t - int(entry["lastTripAt"])) < 200, "precondition: last trip is always recent"
+    assert mod.flap_should_resolve(entry, t) is True
+
+
+def test_storm_rate_source_does_not_resolve(tmp_path):
+    """Guard against over-fixing: a source still tripping AT storm intensity
+    must stay open. Trip every 5s so the 60s window holds >= 3."""
+    mod = _load(tmp_path)
+    fs: dict = {}
+    t0 = 1_000_000
+    for i in range(3):
+        mod.record_flap_trip(fs, KEY, t0 + i)
+    mod.flap_evaluate(fs[KEY], t0 + 2)
+    entry = fs[KEY]
+
+    t = t0 + 2
+    for _ in range(60):
+        t += 5
+        mod.record_flap_trip(fs, KEY, t)
+    assert mod.flap_trips_in_window(entry, t) >= 3, "precondition: still at storm rate"
+    assert mod.flap_should_resolve(entry, t) is False
+
+
+def test_legacy_entry_without_rate_watermark_converges(tmp_path):
+    """Entries written before the watermark existed must not resolve instantly
+    on sight, and must not be pinned open forever either — they seed on the
+    next trip and then converge on the normal stable window."""
+    mod = _load(tmp_path)
+    fs: dict = {}
+    t0 = 1_000_000
+    for i in range(3):
+        mod.record_flap_trip(fs, KEY, t0 + i)
+    mod.flap_evaluate(fs[KEY], t0 + 2)
+    entry = fs[KEY]
+    # Simulate a pre-upgrade entry: watermark absent, trips long in the past.
+    entry.pop("lastStormRateAt", None)
+
+    seed_at = t0 + 100_000
+    mod.record_flap_trip(fs, KEY, seed_at)
+    assert entry.get("lastStormRateAt") == seed_at, "seeded, not back-dated"
+    assert mod.flap_should_resolve(entry, seed_at + 10) is False
+    assert mod.flap_should_resolve(entry, seed_at + 200) is True
+
+
+def test_sweep_prunes_stale_never_stormed_entries_silently(tmp_path):
+    """flapState had no prune at all: sweep_flap_storms only pops entries that
+    opened a storm, so a key that merely tripped a few times was retained
+    forever. Live: 517 entries, including three orphaned hostname generations of
+    the same machine, one last seen 47 days earlier.
+
+    A never-stormed entry past retention is dropped WITHOUT an alert — there is
+    no storm to resolve, so announcing one would be a false recovery.
+    """
+    mod = _load(tmp_path)
+    paths = mod.state_paths()
+    state = mod.load_incident_state(paths)
+    fs = state.setdefault("flapState", {})
+    now = int(time.time())
+    stale_key = "dead-host|gone-bot|health_body_degraded"
+    fresh_key = "live-host|live-bot|health_body_degraded"
+    mod.record_flap_trip(fs, stale_key, now - mod.FLAP_ENTRY_RETENTION_SECONDS - 60)
+    mod.record_flap_trip(fs, fresh_key, now - 30)
+    mod.save_incident_state(paths, state)
+
+    sends: list[str] = []
+    mod.send_whatsapp = lambda text, *a, **k: sends.append(text)  # type: ignore[assignment]
+    resolved, errors = mod.sweep_flap_storms(paths)
+
+    assert (resolved, errors) == (0, 0), "a silent prune is not a resolve"
+    assert sends == [], "pruning a never-stormed entry must not page"
+    reloaded = mod.load_incident_state(paths)["flapState"]
+    assert stale_key not in reloaded
+    assert fresh_key in reloaded
+
+
+def test_sweep_retains_open_storm_past_retention(tmp_path):
+    """Retention must never silently drop an OPEN storm — that would erase a
+    live incident instead of resolving it through the normal path."""
+    mod = _load(tmp_path)
+    paths = mod.state_paths()
+    state = mod.load_incident_state(paths)
+    fs = state.setdefault("flapState", {})
+    now = int(time.time())
+    old = now - mod.FLAP_ENTRY_RETENTION_SECONDS - 600
+    for i in range(3):
+        mod.record_flap_trip(fs, KEY, old + i)
+    mod.flap_evaluate(fs[KEY], old + 2)
+    # Keep it at storm rate right now so the resolve path cannot fire either.
+    # Ascending: record_flap_trip prunes against the timestamp it is given, so
+    # replaying trips backwards would discard every earlier one.
+    for i in range(5):
+        mod.record_flap_trip(fs, KEY, now - 4 + i)
+    mod.save_incident_state(paths, state)
+
+    sends: list[str] = []
+    mod.send_whatsapp = lambda text, *a, **k: sends.append(text)  # type: ignore[assignment]
+    mod.sweep_flap_storms(paths)
+    assert KEY in mod.load_incident_state(paths)["flapState"], "open storm must survive retention"
+
+
+def test_legacy_open_storm_without_watermark_resolves_when_quiet(tmp_path):
+    """The shape actually found on the live store: an entry written before the
+    watermark existed, storm opened long ago, still tripping but below storm
+    rate. All 9 open storms in the live store looked like this.
+
+    Falling back to lastTripAt would pin every one of them open forever (the
+    original defect); falling back to stormAt -- the last PROVEN storm-rate
+    moment -- lets them resolve while the sub-threshold guard still protects an
+    entry that is genuinely storming.
+    """
+    mod = _load(tmp_path)
+    fs: dict = {}
+    t0 = 1_000_000
+    for i in range(3):
+        mod.record_flap_trip(fs, KEY, t0 + i)
+    mod.flap_evaluate(fs[KEY], t0 + 2)
+    entry = fs[KEY]
+    entry.pop("lastStormRateAt", None)
+
+    # Long after the storm opened, one recent sub-threshold trip.
+    now = t0 + 100_000
+    entry["tripTimestamps"] = [now - 5]
+    entry["lastTripAt"] = now - 5
+    assert mod.flap_trips_in_window(entry, now) < 3, "precondition: sub-threshold"
+    assert (now - int(entry["lastTripAt"])) < 200, "precondition: last trip is recent"
+    assert mod.flap_should_resolve(entry, now) is True
+
+
+def test_legacy_open_storm_at_storm_rate_still_held(tmp_path):
+    """A legacy entry WITHOUT a watermark that is genuinely at storm rate right
+    now must not be resolved by the stormAt fallback."""
+    mod = _load(tmp_path)
+    fs: dict = {}
+    t0 = 1_000_000
+    for i in range(3):
+        mod.record_flap_trip(fs, KEY, t0 + i)
+    mod.flap_evaluate(fs[KEY], t0 + 2)
+    entry = fs[KEY]
+    entry.pop("lastStormRateAt", None)
+
+    now = t0 + 100_000
+    entry["tripTimestamps"] = [now - 3, now - 2, now - 1]
+    entry["lastTripAt"] = now - 1
+    assert mod.flap_trips_in_window(entry, now) >= 3, "precondition: at storm rate"
+    assert mod.flap_should_resolve(entry, now) is False

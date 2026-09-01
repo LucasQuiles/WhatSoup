@@ -231,6 +231,15 @@ FLAP_STORM_CADENCE_BACKOFF_SECONDS = [
     for x in os.environ.get("BOT_ERRORS_FLAP_STORM_CADENCE_BACKOFF", _FLAP_CADENCE_BACKOFF_DEFAULT).split(",")
 ]
 FLAP_STABLE_SECONDS = positive_env_int("BOT_ERRORS_FLAP_STABLE_SECONDS", 3600)
+# How long a flapState entry that never opened a storm is kept after its last
+# trip. sweep_flap_storms only ever removed entries it RESOLVED, so a key that
+# merely tripped a few times was retained forever: the live store had grown to
+# 517 entries, including three orphaned hostname generations of one machine
+# (a hostname change strands the old key permanently, since incident_key embeds
+# the machine name) and entries last seen 47 days earlier.
+FLAP_ENTRY_RETENTION_SECONDS = positive_env_int(
+    "BOT_ERRORS_FLAP_ENTRY_RETENTION_SECONDS", 604800
+)
 # #2428: how long a counted event id is remembered after it was last seen in
 # the outbox. An undelivered event keeps being seen every scan so it never
 # ages out while retries continue; once delivered/quarantined it ages out and
@@ -3594,6 +3603,13 @@ def record_flap_trip(flap_state: dict[str, Any], key: str, now: int) -> dict[str
     entry["lastTripAt"] = now
     if not entry.get("firstTripAt"):
         entry["firstTripAt"] = now
+    # Watermark: the last moment this source was flapping at STORM intensity,
+    # which is what flap_should_resolve measures quiet against. `pruned` is the
+    # in-window trip list including this trip, so its length is the current
+    # windowed rate. Seeded on first sight so entries written before this field
+    # existed converge on the normal stable window instead of being pinned open.
+    if len(pruned) >= FLAP_TRIP_THRESHOLD or not entry.get("lastStormRateAt"):
+        entry["lastStormRateAt"] = now
     return entry
 
 
@@ -3646,13 +3662,41 @@ def flap_evaluate(entry: dict[str, Any], now: int) -> dict[str, Any]:
 
 
 def flap_should_resolve(entry: dict[str, Any], now: int) -> bool:
-    """An open storm resolves only after FLAP_STABLE_SECONDS of zero trips in the
-    window. (C2 notes liveness should also gate this; collector silence alone is
-    a weaker signal — tracked as a follow-up; time-stable is the Wave-1 gate.)"""
+    """An open storm resolves after FLAP_STABLE_SECONDS below storm intensity.
+
+    Resolution is the symmetric counterpart of opening: a storm OPENS at
+    >= FLAP_TRIP_THRESHOLD trips in the window, so it CLOSES once the windowed
+    rate has stayed under that threshold for the stable period.
+
+    It previously demanded ZERO trips in the window AND FLAP_STABLE_SECONDS
+    since the last trip — strictly harder than the condition that opened it, and
+    unreachable for a chronic low-rate source. Measured on 2026-09-01:
+    health_body_degraded tripped 1.2-2.5 times per hour on all 8 monitored bots,
+    so an hour of total quiet never arrived and every storm stayed open at
+    `critical` for 1000-1800 hours, re-emitting on the backoff cadence
+    (63 of 298 BOT ERRORS messages in 26h). Quiet is now measured from
+    `lastStormRateAt` -- the last time the source actually reached storm rate --
+    not from the last trip of any size.
+
+    (C2 notes liveness should also gate this; collector silence alone is a
+    weaker signal — tracked as a follow-up; time-stable is the Wave-1 gate.)
+    """
     if not entry.get("stormAt"):
         return False
-    last_trip = int(entry.get("lastTripAt") or 0)
-    return flap_trips_in_window(entry, now) == 0 and (now - last_trip) >= FLAP_STABLE_SECONDS
+    if flap_trips_in_window(entry, now) >= FLAP_TRIP_THRESHOLD:
+        return False
+    watermark = entry.get("lastStormRateAt")
+    if not isinstance(watermark, (int, float)):
+        # Pre-upgrade entry: `stormAt` is the last moment this source was PROVEN
+        # to be at storm rate, which is exactly what the watermark records, so it
+        # is the honest stand-in. Falling back to `lastTripAt` instead would
+        # reproduce the original defect on every existing entry -- a chronic
+        # source refreshes lastTripAt faster than the stable window, so the 9
+        # storms open on the live store would have stayed open. The
+        # trips-in-window guard above still protects a legacy entry that is
+        # genuinely storming right now.
+        watermark = int(entry.get("stormAt") or entry.get("lastTripAt") or 0)
+    return (now - int(watermark)) >= FLAP_STABLE_SECONDS
 
 
 def flap_storm_event(key: str, entry: dict[str, Any], severity: str, now: int) -> dict[str, Any]:
@@ -3854,6 +3898,23 @@ def sweep_flap_storms(paths: dict[str, Path], incident: IncidentStateCycle | Non
         if not isinstance(entry, dict):
             continue
         try:
+            # Retention prune. An entry that never opened a storm has nothing to
+            # resolve, so it is dropped SILENTLY once it ages out — announcing a
+            # resolve here would report a recovery that never happened. Open
+            # storms are exempt: they leave only through the resolve path below,
+            # so retention can never erase a live incident.
+            if not entry.get("stormAt"):
+                last_trip = int(entry.get("lastTripAt") or 0)
+                if last_trip and (now - last_trip) >= FLAP_ENTRY_RETENTION_SECONDS:
+                    flap_state.pop(key, None)
+                    changed = True
+                    append_dispatch_log(paths, {
+                        "type": "flap_entry_pruned",
+                        "incidentKey": key,
+                        "lastTripAt": last_trip,
+                        "ageSeconds": now - last_trip,
+                    })
+                continue
             if flap_should_resolve(entry, now):
                 open_incidents = incident_state.get("openIncidents")
                 underlying_open = isinstance(open_incidents, dict) and isinstance(open_incidents.get(key), dict)
