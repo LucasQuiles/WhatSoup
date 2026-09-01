@@ -14,7 +14,7 @@ import socket
 import subprocess
 import sys
 import time
-from typing import Any
+from typing import Any, NoReturn
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -2467,38 +2467,293 @@ def configured_remote_hosts(remotes: list[str]) -> list[str]:
     return hosts
 
 
-def alert_remote_from_key(key: str) -> str | None:
-    for source in ("remote-claim-failed", "remote-drain-stale", "remote-relay-failed"):
+# --- #2429 registered collector alert-source inventory ---------------------
+#
+# One inventory for pruning, so a source that any emit site mints cannot fall
+# outside the pruning model and strand its record after its producer is gone.
+# Each entry declares WHERE that source's open state lives, because the three
+# homes are retired differently:
+#
+#   ALERT_STATE_OPEN_ALERTS   -- state["alerts"] / state["openAlerts"], keyed
+#                                f"{remote}:{source}" by alert_key().
+#   ALERT_STATE_ACK_FAILURES  -- state["writefailAckFailures"], keyed by an
+#                                opaque payload digest, remote in the record
+#                                body (acknowledgement membership).
+#   ALERT_STATE_REMOTE_RECORD -- flags on state["remotes"][remote]. These
+#                                direct escalation tiers are minted straight
+#                                to the outbox by _emit_collector_outbox_event
+#                                and hold no open-alert bucket key at all.
+#
+# Only the ALERT_STATE_OPEN_ALERTS subset is suffix-matched against bucket
+# keys; the other two are matched by their own state shape.
+# test_bot_errors_collector_pruning_disposition_2429.py AST-scans this
+# module's emit sites and fails when a minted source literal is absent here,
+# so the inventory cannot drift behind a newly added emitter.
+ALERT_STATE_OPEN_ALERTS = "openAlerts"
+ALERT_STATE_ACK_FAILURES = "writefailAckFailures"
+ALERT_STATE_REMOTE_RECORD = "remotes"
+
+# HD-11b -- collector capture-failure escalation (DEFECT-REGISTER collection-
+# blindness class / NOTES.md wishlist 10, 13): a persistently uncollectable
+# remote must not silently stall collection. Distinct from and independently
+# tunable from RELAY_BACKOFF_FAILURE_THRESHOLD (backoff entry) -- both key off
+# the same consecutiveFailures counter but serve different purposes: this is
+# the earlier, lower-confidence escalation signal that opens a real dispatcher
+# incident with a typed clear; relay_host_down is backoff-schedule entry.
+# Defined here rather than beside collector_failure_escalate_threshold() so
+# the registry below has a single definition point for every source it names.
+COLLECTOR_CAPTURE_ESCALATION_SOURCE: str = "collector_remote_unreachable"
+RELAY_HOST_DOWN_SOURCE: str = "relay_host_down"
+
+REGISTERED_ALERT_SOURCES: dict[str, str] = {
+    "remote-claim-failed": ALERT_STATE_OPEN_ALERTS,
+    "remote-drain-stale": ALERT_STATE_OPEN_ALERTS,
+    "remote-relay-failed": ALERT_STATE_OPEN_ALERTS,
+    "remote-writefail-harvest-failed": ALERT_STATE_OPEN_ALERTS,
+    "remote-writefail-nondurable": ALERT_STATE_OPEN_ALERTS,
+    "remote-writefail-ack-failed": ALERT_STATE_ACK_FAILURES,
+    COLLECTOR_CAPTURE_ESCALATION_SOURCE: ALERT_STATE_REMOTE_RECORD,
+    RELAY_HOST_DOWN_SOURCE: ALERT_STATE_REMOTE_RECORD,
+}
+
+OPEN_ALERT_KEY_SOURCES: tuple[str, ...] = tuple(
+    source for source, location in REGISTERED_ALERT_SOURCES.items() if location == ALERT_STATE_OPEN_ALERTS
+)
+
+CONFIGURATION_RETIRED_DISPOSITION = "configuration_retired"
+CONFIGURATION_RETIRED_REASON = "remote_not_configured"
+
+
+class UnregisteredAlertSourceError(RuntimeError):
+    """An alert bucket key names a source outside REGISTERED_ALERT_SOURCES.
+
+    #2429 requires an unknown or newly added source key to fail closed rather
+    than be silently retained (old behaviour) or silently dropped. The message
+    is bounded and content-free -- a count plus an opaque digest, never the raw
+    key, remote identity, or remote root.
+    """
+
+
+def split_alert_key(key: str) -> tuple[str, str] | None:
+    """Split an alerts/openAlerts key into (remote, source), or None.
+
+    None means the key names no registered open-alert source. Callers that
+    prune must treat that as fail-closed, never as "not an alert key".
+    """
+    for source in OPEN_ALERT_KEY_SOURCES:
         suffix = f":{source}"
         if key.endswith(suffix):
-            return key[: -len(suffix)]
+            return key[: -len(suffix)], source
     return None
 
 
+def _raise_unregistered_alert_sources(unregistered: list[str]) -> NoReturn:
+    """Fail closed with a bounded, content-free reason.
+
+    The message carries a count and an opaque digest only: an alert key holds
+    a remote identity and remote root, and #2429's public-surface rule keeps
+    those out of operator-visible diagnostics.
+    """
+    digest = hashlib.sha256("\0".join(unregistered).encode("utf-8")).hexdigest()[:16]
+    raise UnregisteredAlertSourceError(
+        f"unregistered_alert_source keys={len(unregistered)} digest={digest}"
+    )
+
+
+def require_registered_alert_keys(keys: list[str]) -> None:
+    """Raise once for the whole batch when any key names an unregistered source."""
+    unregistered = sorted({key for key in keys if split_alert_key(key) is None})
+    if unregistered:
+        _raise_unregistered_alert_sources(unregistered)
+
+
+def alert_remote_from_key(key: str) -> str:
+    """Return the remote named by a registered open-alert key.
+
+    Raises UnregisteredAlertSourceError for a key whose source is not in the
+    inventory. Returning None here (the pre-#2429 behaviour for the four-plus
+    sources the three-suffix list omitted) silently retained those records
+    forever once their remote left configuration.
+    """
+    split = split_alert_key(key)
+    if split is None:
+        _raise_unregistered_alert_sources([key])
+    return split[0]
+
+
+def emit_configuration_retired_disposition(
+    remote: str,
+    source: str,
+    state_location: str,
+    *,
+    prior_status: str,
+    alert_key_value: str | None = None,
+) -> str:
+    """Publish the terminal disposition for one configuration-retired record.
+
+    Reuses _emit_collector_outbox_event -- the same publish_event_json +
+    require_advance + append_log path every other collector-minted lifecycle
+    transition already uses -- rather than opening a second ledger.
+
+    eventType is "observation", never "clear". Only kind == "incident_recovery"
+    (eventType "clear", severity info) closes a dispatcher incident, and #2429
+    forbids manufacturing a recovery clear: roster/configuration absence is
+    configuration evidence, not health evidence. The disposition keeps the
+    retired source and diagnostics.remote unchanged so dispatcher
+    incident_key() lands it on the very incident it disposes.
+    """
+    key = alert_key_value or f"{remote}:{source}"
+    retired_at = int(time.time())
+    retired_at_iso = now_iso()
+    key_digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+    evidence = "\n".join([
+        f"remote={remote}",
+        f"alert_source={source}",
+        f"disposition={CONFIGURATION_RETIRED_DISPOSITION}",
+        f"disposition_reason={CONFIGURATION_RETIRED_REASON}",
+        f"state_location={state_location}",
+        f"prior_status={prior_status}",
+        f"alert_key_digest={key_digest}",
+        f"retired_at={retired_at_iso}",
+        "recovery_claimed=false",
+        f"collector_log={state_root() / 'logs/collector.jsonl'}",
+    ])
+    return _emit_collector_outbox_event(
+        remote,
+        source=source,
+        event_type="observation",
+        severity="info",
+        summary=f"BOT ERRORS collector retired open alert state for unconfigured remote: {remote}",
+        evidence=evidence,
+        log_type="alert_configuration_retired",
+        extra_diagnostics={
+            "disposition": CONFIGURATION_RETIRED_DISPOSITION,
+            "dispositionReason": CONFIGURATION_RETIRED_REASON,
+            "dispositionSource": source,
+            "dispositionStateLocation": state_location,
+            "retiredAt": retired_at,
+            "retiredAtIso": retired_at_iso,
+            "priorStatus": prior_status,
+            "alertKeyDigest": key_digest,
+            "recoveryClaimed": False,
+        },
+    )
+
+
 def prune_state_to_configured_remotes(state: dict[str, Any], remotes: list[str]) -> None:
+    """Retire the state of remotes that configuration no longer lists.
+
+    #2429 (pruning half): every open record removed here first emits an
+    audited ``configuration_retired`` terminal disposition through the normal
+    durable outbox path, so an operator can tell a deliberate retirement from
+    a recovery, a corrupt-state loss, or an accidental roster omission. The
+    disposition is an observation, never a clear -- see
+    emit_configuration_retired_disposition.
+
+    Validation runs to completion BEFORE the first effect. A bucket key naming
+    a source outside REGISTERED_ALERT_SOURCES raises
+    UnregisteredAlertSourceError with nothing published and nothing popped.
+    This function runs at the top of _run_once_with_state, above every
+    remote/probe/claim/ack/outbox effect and above save_collector_state, so
+    that raise fails the whole cycle closed and leaves the prior ledger intact.
+    """
     configured = set(remotes)
+
+    # --- validation pass: no effects before the whole key world is known ---
+    alert_buckets: list[dict[str, Any]] = []
+    for bucket_name in ("alerts", "openAlerts"):
+        bucket = state.get(bucket_name)
+        if isinstance(bucket, dict):
+            alert_buckets.append(bucket)
+    require_registered_alert_keys([str(key) for bucket in alert_buckets for key in bucket])
+
+    # --- direct escalation tiers (state["remotes"][remote] flags) ----------
     remote_state = state.get("remotes")
     if isinstance(remote_state, dict):
         for remote in list(remote_state):
-            if remote not in configured:
-                remote_state.pop(remote, None)
+            if remote in configured:
+                continue
+            record = remote_state.get(remote)
+            if isinstance(record, dict):
+                # captureFailureEscalated / downEventEmitted are the two open
+                # markers for the outbox-minted tiers; a quiet remote record
+                # owns no incident and needs no disposition.
+                if record.get("captureFailureEscalated"):
+                    emit_configuration_retired_disposition(
+                        remote,
+                        COLLECTOR_CAPTURE_ESCALATION_SOURCE,
+                        ALERT_STATE_REMOTE_RECORD,
+                        prior_status="open",
+                    )
+                if record.get("downEventEmitted"):
+                    emit_configuration_retired_disposition(
+                        remote,
+                        RELAY_HOST_DOWN_SOURCE,
+                        ALERT_STATE_REMOTE_RECORD,
+                        prior_status="open",
+                    )
+            remote_state.pop(remote, None)
     else:
         state["remotes"] = {}
+
+    # --- open alert bookkeeping (alerts + openAlerts share one key space) --
+    open_alerts = state.get("openAlerts")
+    retiring: dict[str, tuple[str, str]] = {}
+    for bucket in alert_buckets:
+        for raw_key in bucket:
+            key = str(raw_key)
+            if key in retiring:
+                continue
+            remote, source = split_alert_key(key)  # type: ignore[misc]
+            if remote not in configured:
+                retiring[key] = (remote, source)
+    for key, (remote, source) in retiring.items():
+        record = open_alerts.get(key) if isinstance(open_alerts, dict) else None
+        if isinstance(record, dict):
+            prior_status = str(record.get("status") or "open")
+        else:
+            # An alerts-only key is a pre-open-incident timestamp that
+            # legacy_open_record() would still materialise as an open episode.
+            prior_status = "legacy"
+        emit_configuration_retired_disposition(
+            remote,
+            source,
+            ALERT_STATE_OPEN_ALERTS,
+            prior_status=prior_status,
+            alert_key_value=key,
+        )
+    for bucket in alert_buckets:
+        for key in retiring:
+            bucket.pop(key, None)
     for bucket_name in ("alerts", "openAlerts"):
         bucket = state.get(bucket_name)
-        if not isinstance(bucket, dict):
-            if bucket is not None:
-                state[bucket_name] = {}
-            continue
-        for key in list(bucket):
-            remote = alert_remote_from_key(str(key))
-            if remote is not None and remote not in configured:
-                bucket.pop(key, None)
+        if not isinstance(bucket, dict) and bucket is not None:
+            state[bucket_name] = {}
+
+    # --- acknowledgement membership (writefailAckFailures) ----------------
     ack_failures = state.get("writefailAckFailures")
     if isinstance(ack_failures, dict):
         for key, record in list(ack_failures.items()):
-            if not isinstance(record, dict) or record.get("remote") not in configured:
-                ack_failures.pop(key, None)
+            remote = record.get("remote") if isinstance(record, dict) else None
+            if isinstance(remote, str) and remote in configured:
+                continue
+            if isinstance(remote, str) and remote:
+                emit_configuration_retired_disposition(
+                    remote,
+                    "remote-writefail-ack-failed",
+                    ALERT_STATE_ACK_FAILURES,
+                    prior_status="open",
+                    alert_key_value=str(key),
+                )
+            else:
+                # No attributable remote: the record cannot be dispositioned
+                # against an incident, but its removal is still audited rather
+                # than silent.
+                append_log({
+                    "type": "writefail_ack_failure_pruned_unattributable",
+                    "recordKeyDigest": hashlib.sha256(str(key).encode("utf-8")).hexdigest()[:16],
+                })
+            ack_failures.pop(key, None)
     elif ack_failures is not None:
         state["writefailAckFailures"] = {}
 
@@ -2511,16 +2766,9 @@ def default_recovery_successes() -> int:
         return 2
 
 
-# HD-11b — collector capture-failure escalation (DEFECT-REGISTER collection-
-# blindness class / NOTES.md wishlist 10, 13): a persistently uncollectable
-# remote must not silently stall collection. Distinct from and independently
-# tunable from RELAY_BACKOFF_FAILURE_THRESHOLD (backoff entry) -- both key off
-# the same consecutiveFailures counter but serve different purposes: this is
-# the earlier, lower-confidence escalation signal that opens a real dispatcher
-# incident with a typed clear; relay_host_down is backoff-schedule entry.
-COLLECTOR_CAPTURE_ESCALATION_SOURCE: str = "collector_remote_unreachable"
-
-
+# HD-11b escalation threshold. COLLECTOR_CAPTURE_ESCALATION_SOURCE, the source
+# this threshold opens, is defined with the REGISTERED_ALERT_SOURCES registry
+# above so the inventory has one definition point per source.
 def collector_failure_escalate_threshold() -> int:
     raw = os.environ.get("BOT_ERRORS_COLLECTOR_FAILURE_ESCALATE_THRESHOLD", "2")
     try:
@@ -3294,7 +3542,7 @@ def emit_relay_host_state_event(remote: str, kind: str, evidence: str, state: di
     # relay_host_down record open forever. The clear must carry the DOWN source;
     # the recovered kind survives in the summary and collector log_type.
     event_type = "clear" if kind == "relay_host_recovered" else "alert"
-    source = "relay_host_down" if kind == "relay_host_recovered" else kind
+    source = RELAY_HOST_DOWN_SOURCE if kind == "relay_host_recovered" else kind
     _emit_collector_outbox_event(
         remote,
         source=source,

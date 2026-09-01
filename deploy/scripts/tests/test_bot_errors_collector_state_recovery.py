@@ -167,7 +167,16 @@ def _rich_state(marker: str = "seed-1") -> dict:
                 "lastDrainError": f"boom {marker}",
             }
         },
-        "alerts": {f"{REMOTE}|remote-drain-stale": 1600000000},
+        # Separator is ":" because that is what the collector's own
+        # alert_key(remote, source) mints; the pipe this fixture used before
+        # #2429 could not be produced by any emitter, and pruning now
+        # validates every alert key against REGISTERED_ALERT_SOURCES rather
+        # than silently retaining what it cannot parse. The source is
+        # remote-writefail-nondurable because it has no happy-path
+        # enqueue_meta_recovery caller, so this entry still measures what the
+        # retention assertions were written to measure: a recovered domain
+        # root surviving the cycle, not a clear being emitted for it.
+        "alerts": {f"{REMOTE}:remote-writefail-nondurable": 1600000000},
         "ackContributors": {REMOTE: ["writefail-1"]},
         "configuredRemotes": [REMOTE],
         "configuredRemoteHosts": [REMOTE.split(":", 1)[0]],
