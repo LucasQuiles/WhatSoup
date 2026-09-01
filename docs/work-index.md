@@ -18,15 +18,15 @@ The **Inconsistencies** section lists missing or stale index entries compared wi
 scoped markdown files currently on disk.
 
 **Repo:** `WhatSoup`
-**Total entries:** 129
+**Total entries:** 130
 
 ## Totals
 
 | Dimension | Breakdown |
 |---|---|
-| Kind | handoff=8, plan=64, review=4, spec=52, state=1 |
-| Status | active=32, closed=4, completed=38, deferred=7, pending=15, unknown=33 |
-| Status source | body-marker=108, fallback=20, state-md-status=1 |
+| Kind | doc=1, handoff=8, plan=64, review=4, spec=52, state=1 |
+| Status | active=32, closed=4, completed=38, deferred=7, pending=15, unknown=34 |
+| Status source | body-marker=109, fallback=20, state-md-status=1 |
 
 ## Inconsistencies
 
@@ -71,10 +71,11 @@ scoped markdown files currently on disk.
 | `docs/superpowers/specs/provider-event-lifecycle/requirements.md` | spec | requirements | body-marker |
 | `docs/superpowers/specs/provider-event-lifecycle/tasks.md` | spec | tasks | body-marker |
 
-### Unknown-status — triage needed (33)
+### Unknown-status — triage needed (34)
 
 | Path | Kind | Topic | Last Mod |
 |------|------|-------|----------|
+| `docs/sdlc/convention-map.md` | doc | sdlc | 2026-09-01 |
 | `docs/superpowers/handoffs/2026-07-28-incident-control-plane-finder-report.md` | handoff | incident-control-plane-finder-report | 2026-07-28 |
 | `docs/superpowers/plans/2026-07-15-headless-fallback-runtime-alignment.md` | plan | headless-fallback-runtime-alignment | 2026-07-15 |
 | `docs/superpowers/plans/2026-07-17-boundary-validator-ci-refactor.md` | plan | boundary-validator-ci-refactor | 2026-07-17 |
@@ -142,6 +143,12 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/specs/provider-event-lifecycle/tasks.md` |
 
 ## Full listing by canonical parent
+
+### docs/sdlc  _(1 entries)_
+
+| Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
+|------|------|--------|--------|-------|----------|------------|
+| `docs/sdlc/convention-map.md` | doc | unknown | body-marker | sdlc | 2026-09-01 |  |
 
 ### docs/sdlc/closed/fleet-charts-20260407  _(1 entries)_
 
@@ -310,4 +317,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-08-30T07:14:54Z from commit `8fea6a79f7c8e8ecbd276e5a58c68a72dbb29ca4`
+- Generated at 2026-09-01T20:52:46Z from commit `2f8580e531b5db34d4fddadebc860f490a4897ee`

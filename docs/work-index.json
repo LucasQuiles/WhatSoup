@@ -1,9 +1,9 @@
 {
-  "generated_at": "2026-08-30T07:14:54Z",
+  "generated_at": "2026-09-01T20:52:46Z",
   "repo": "WhatSoup",
-  "git_head": "8fea6a79f7c8e8ecbd276e5a58c68a72dbb29ca4",
+  "git_head": "2f8580e531b5db34d4fddadebc860f490a4897ee",
   "git_head_note": "git_head is captured at scan time, so it reflects the branch HEAD at the moment `build-work-index` ran — NOT the commit that carries this index. Expect divergence in two cases: (1) intra-branch, when the regenerated index is committed after further content changes are staged; (2) post-squash-merge, when the landed main SHA differs from the pre-merge branch SHA. The row data and inconsistency detection remain accurate regardless of git_head freshness.",
-  "total": 129,
+  "total": 130,
   "schema_version": 5,
   "rows": [
     {
@@ -18,6 +18,19 @@
       "supersedes_hint": null,
       "last_modified": "2026-04-23",
       "size_bytes": 3205
+    },
+    {
+      "path": "docs/sdlc/convention-map.md",
+      "kind": "doc",
+      "topic_raw": "sdlc",
+      "topic": "sdlc",
+      "status": "unknown",
+      "status_source": "body-marker",
+      "lifecycle": "executable",
+      "canonical_parent": "docs/sdlc",
+      "supersedes_hint": null,
+      "last_modified": "2026-09-01",
+      "size_bytes": 10082
     },
     {
       "path": "docs/superpowers/handoffs/2026-04-07-fleet-charts-guidelines.md",
