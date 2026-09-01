@@ -84,15 +84,36 @@ export interface ExecutingSessionContext {
   /**
    * Explicit assertion that a REAL executing-turn resolution produced this
    * context (#3435, L1). Optional: a real resolution is normally recognized
-   * because it carries at least one defined authorization/confinement field —
-   * a live register entry always pins a canonical `conversationKey`
-   * (src/runtimes/agent/runtime.ts `onProviderBoundaryReady`). The all-undefined
-   * context is the UNRESOLVED state (`noExecutingSession()`, or a read-time
-   * resolver that found no executing-turn entry). Set `resolved: true` ONLY to
-   * assert resolution for a legitimately all-undefined resolved turn — in
-   * practice just the direct-registry test adapter, which snapshots a
-   * caller-built session rather than reading a live register entry. Never set it
-   * to paper over an empty resolution: that reopens the fail-open this brand closes.
+   * because it carries at least one defined authorization/confinement field. The
+   * all-undefined context is the UNRESOLVED state (`noExecutingSession()`, or a
+   * read-time resolver that found no executing-turn entry).
+   *
+   * WHAT SUPPLIES THAT DEFINED FIELD IS PER-SURFACE, AND IT IS NOT ALWAYS THE
+   * TURN. The per-chat actor socket is the standing exception: its resolver
+   * substitutes the SOCKET IDENTITY's conversation key whenever the executing turn
+   * left one undefined (src/runtimes/agent/per-chat-mcp-socket-manager.ts
+   * `conversationKey: executing.conversationKey ?? toConversationKey(identity.value)`),
+   * so every context leaving that surface carries a defined `conversationKey` and
+   * classifies `'resolved'` whether or not a turn actually resolved — the
+   * fail-closed UNRESOLVED branch is unreachable there by construction. That is
+   * intentional, not an oversight: the socket is created per bound conversation and
+   * its identity IS the confinement, so no ambiguous empty context can reach the
+   * gate through it. Do NOT read the branch's presence at that call site as runtime
+   * protection.
+   *
+   * The branch stays load-bearing for the surfaces that CAN emit an all-undefined
+   * context: the passive operator socket (`noExecutingSession()`,
+   * src/runtimes/passive/runtime.ts) and any read-time resolver that finds no
+   * executing-turn entry.
+   *
+   * Set `resolved: true` ONLY to assert resolution for a legitimately
+   * all-undefined resolved turn — in practice just the direct-registry test
+   * adapter, which snapshots a caller-built session rather than reading a live
+   * register entry. Never set it to paper over an empty resolution: that reopens
+   * the fail-open this brand closes. The permitted sites are inventoried and
+   * count-pinned by `npm run guard:resolved-override`
+   * (scripts/resolved-override-inventory-guard.ts): a production caller setting it
+   * fails the push gate.
    */
   resolved?: boolean;
 }
@@ -131,8 +152,13 @@ export function resolveSessionContext(
   // defined authorization/confinement field. The all-undefined context — the
   // issue's own definition of the empty context — is the UNRESOLVED state
   // (`noExecutingSession()`, or a read-time resolver that found no executing-turn
-  // entry). A live register entry always pins a canonical `conversationKey`, so a
-  // real turn is never all-undefined and needs no explicit assertion.
+  // entry). A caller that structurally cannot produce an all-undefined context
+  // needs no explicit assertion: the per-chat actor socket, for one, pins a
+  // `conversationKey` from the SOCKET IDENTITY before calling in, so its contexts
+  // are always classified resolved (see the `resolved` field's docstring above —
+  // that is a property of the socket, not of the turn). The callers that CAN emit
+  // one — the passive operator socket, and a read-time resolver that finds no
+  // entry — land in the fail-closed branch, which is the point.
   const executingResolution: ResolvedSessionContext['executingResolution'] =
     assertedResolved === true
     || executingFields.actorJid !== undefined
