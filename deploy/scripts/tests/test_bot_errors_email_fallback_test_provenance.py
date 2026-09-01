@@ -168,22 +168,28 @@ def test_genuine_alert_mentioning_pytest_dir_is_not_blocked():
     assert mod.email_fallback_blocked_reason(event, state_dir=Path(_CLEAN_STATE_DIR)) is None
 
 
-def test_gate_reads_only_the_claimed_payload_not_post_claim_injection():
-    # #3404: the gate is fed the AS-CLAIMED snapshot, so text the dispatcher
-    # itself stamps into the event after the claim -- diagnostics.dispatchLog,
-    # delivery.lastError -- cannot make a clean alert read as a leak. The
-    # post-injection event is shown here purely to prove the two differ.
+def test_dispatcher_owned_text_reads_as_a_leak_while_the_claimed_payload_does_not():
+    """Fixture-validity check for the two #3404 regression scenarios.
+
+    Pins the premise the integration tests rest on: the SAME alert is clean as
+    the producer claimed it, yet reads as a test leak once the dispatcher has
+    written its own text into it -- diagnostics.dispatchLog on every event, and
+    delivery.lastError once the transport fails.
+
+    It deliberately does NOT assert that the gate ignores the injected text, and
+    could not: the gate now trusts its caller to hand it the claimed payload, so
+    that property lives at the call site, not in the function. It is covered
+    end-to-end by test_transport_error_path_in_lastError_does_not_block_email_fallback.
+    """
     mod = _load_module({"BOT_ERRORS_STATE_DIR": _CLEAN_STATE_DIR})
     claimed = _event()
-    assert mod.email_fallback_blocked_reason(claimed) is None
+    assert mod.event_is_test_leak(claimed) is False
+    assert mod.email_fallback_blocked_reason(claimed, state_dir=Path(_CLEAN_STATE_DIR)) is None
 
     injected = _event(diagnostics={"dispatchLog": _MACOS_VITEST_SANDBOX_STATE_DIR + "/logs/dispatch.jsonl"})
-    assert mod.event_is_test_leak(injected) is True, "precondition: the injected path IS a leak pattern"
+    assert mod.event_is_test_leak(injected) is True, "dispatchLog injection alone reads as a leak"
     failed = mod.mark_failure(_event(), _SOCKET_MISSING_ERROR)
-    assert mod.event_is_test_leak(failed) is True, "precondition: the transport error text IS a leak pattern"
-
-    # The gate never sees either; it sees the claimed payload, which is clean.
-    assert mod.email_fallback_blocked_reason(claimed, state_dir=Path(_CLEAN_STATE_DIR)) is None
+    assert mod.event_is_test_leak(failed) is True, "transport error text alone reads as a leak"
 
 
 def test_as_claimed_test_leak_is_still_blocked_with_a_clean_state_dir():
