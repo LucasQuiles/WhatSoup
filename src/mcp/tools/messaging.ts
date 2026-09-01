@@ -260,13 +260,80 @@ export function registerMessagingTools(
       profile: z.string().optional().describe('Optional per-instance send profile for text decoration and link preview policy.'),
       viewOnce: z.boolean().optional().describe('Send as a view-once message that disappears after viewing.'),
       link_preview: z.enum(['auto', 'off']).optional().describe('Control link preview generation. "auto" (default) uses Baileys auto-preview. "off" suppresses the preview entirely.'),
+      dryRun: z.boolean().optional().describe('Resolve the recipient — including @lid canonicalization onto an existing conversation — and report the resolved chatJid WITHOUT sending. No message is transmitted and no audit record is written; use it to verify outbound routing (issue 3150).'),
     }),
     handler: async (params, session: SessionContext) => {
+      // Cross-conversation routing guard (issue 3150): a global-tier session
+      // pinned to a conversation may only send to a chatJid that folds to that
+      // same conversation. prepared.chatJid may be an `@lid` JID (canonicalized
+      // onto the existing conversation); session conversation keys are stored
+      // PHONE-folded at ingest (QR-050), so the comparison folds `@lid` -> phone
+      // the same way — a bare toConversationKey would yield the raw LID digits
+      // and falsely reject the pinned conversation. Shared by the live send
+      // (beforeAudit) and the dryRun preview so both report identical routing.
+      const assertConversationMatch = (resolvedChatJidArg: string): void => {
+        if (session.tier !== 'global' || !session.conversationKey) return;
+        let resolvedConversationKey: string;
+        try {
+          resolvedConversationKey = canonicalConversationKey(resolvedChatJidArg, deps.dbWrapper);
+        } catch {
+          throw new Error(`Invalid chatJid "${resolvedChatJidArg}": must be a valid JID`);
+        }
+        if (resolvedConversationKey !== session.conversationKey) {
+          throw new Error(
+            `chatJid "${resolvedChatJidArg}" resolves to conversation "${resolvedConversationKey}" which does not match session conversation "${session.conversationKey}"`,
+          );
+        }
+      };
+
+      // Issue 3150 dry-run: resolve the recipient (alias + `@lid`
+      // canonicalization via prepareSend) and report the resolved chatJid
+      // WITHOUT transmitting or writing an audit record. The cross-conversation
+      // guard is re-run here for faithfulness; for `chatJid` targets the
+      // registry pre-handler guard (registry.ts) already rejected a mismatch
+      // before this handler ran, so this only adds coverage for `to` aliases
+      // (whose resolution happens inside the handler). Text-safety transforms
+      // are NOT applied in a dry run, so the resolved text is deliberately not
+      // echoed — only the routing target is reported.
+      if (params['dryRun'] === true) {
+        let prepared: PreparedTextSend;
+        try {
+          prepared = sendPipeline.prepareSend(params);
+          assertConversationMatch(prepared.chatJid);
+        } catch (err) {
+          if (
+            err instanceof AliasNotFoundError ||
+            err instanceof MissingTargetError ||
+            err instanceof MutuallyExclusiveError ||
+            err instanceof InvalidSendRequestError ||
+            err instanceof MissingTextError ||
+            err instanceof UnknownProfileError
+          ) {
+            return errorResult(err.message);
+          }
+          if (err instanceof Error && (err.message.startsWith('chatJid "') || err.message.startsWith('Invalid chatJid "'))) {
+            return errorResult(err.message);
+          }
+          return errorResult(sanitizeError(err));
+        }
+        return {
+          sent: false,
+          dryRun: true,
+          resolved_chatJid: prepared.chatJid,
+        };
+      }
+
       let formattedText = '';
       let auditReceipt: string | undefined;
+      let resolvedChatJid: string | undefined;
       let guardDecision: OutboundMessageSafetyDecision | null = null;
       try {
         await sendPipeline.executeSend(params, async (prepared) => {
+          // Issue 3150 echo: the resolved (alias- and `@lid`-canonicalized)
+          // target actually dispatched to, surfaced in the response so callers
+          // can verify routing even when a phone JID canonicalized onto an
+          // existing `@lid` conversation.
+          resolvedChatJid = prepared.chatJid;
           const viewOnce = params['viewOnce'] as boolean | undefined;
           const { text: formatted, jids: mentions, hasMentions } = formatMentions(
             prepared.text,
@@ -305,25 +372,7 @@ export function registerMessagingTools(
             };
           },
           beforeAudit(prepared: PreparedTextSend): void {
-            if (session.tier !== 'global' || !session.conversationKey) return;
-
-            let resolvedConversationKey: string;
-            try {
-              // Issue 3150 companion: prepared.chatJid may now be an `@lid`
-              // JID (canonicalized onto the existing conversation). Session
-              // conversation keys are stored PHONE-folded at ingest (QR-050),
-              // so the comparison must fold `@lid` -> phone the same way —
-              // a bare toConversationKey would yield the raw LID digits and
-              // falsely reject the pinned conversation.
-              resolvedConversationKey = canonicalConversationKey(prepared.chatJid, deps.dbWrapper);
-            } catch {
-              throw new Error(`Invalid chatJid "${prepared.chatJid}": must be a valid JID`);
-            }
-            if (resolvedConversationKey !== session.conversationKey) {
-              throw new Error(
-                `chatJid "${prepared.chatJid}" resolves to conversation "${resolvedConversationKey}" which does not match session conversation "${session.conversationKey}"`,
-              );
-            }
+            assertConversationMatch(prepared.chatJid);
           },
           onAuditReceipt(receipt: string): void {
             auditReceipt = receipt;
@@ -353,6 +402,7 @@ export function registerMessagingTools(
       return {
         sent: true,
         text: formattedText,
+        ...(resolvedChatJid ? { resolved_chatJid: resolvedChatJid } : {}),
         ...(auditReceipt ? { audit_receipt: auditReceipt } : {}),
       };
     },
