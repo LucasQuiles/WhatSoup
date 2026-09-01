@@ -539,3 +539,65 @@ def test_legacy_open_storm_at_storm_rate_still_held(tmp_path):
     entry["lastTripAt"] = now - 1
     assert mod.flap_trips_in_window(entry, now) >= 3, "precondition: at storm rate"
     assert mod.flap_should_resolve(entry, now) is False
+
+
+def test_rate_decay_resolve_never_claims_stable(tmp_path):
+    """Rate-based resolution must not announce a recovery that did not happen.
+
+    An open storm SUPPRESSES its member events, so the underlying condition is
+    usually absent from openIncidents exactly when it is still occurring. On the
+    live store none of the 9 resolving keys were in openIncidents while 8 of the
+    instances were still degraded — trusting that map alone would have sent 8
+    'stable after N flaps' all-clears for conditions that never recovered.
+    """
+    mod = _load(tmp_path)
+    paths = mod.state_paths()
+    state = mod.load_incident_state(paths)
+    fs = state.setdefault("flapState", {})
+    now = int(time.time())
+    base = now - 50_000
+    for i in range(3):
+        mod.record_flap_trip(fs, KEY, base + i)
+    mod.flap_evaluate(fs[KEY], base + 2)
+    entry = fs[KEY]
+    # Source still tripping, but below storm rate: resolvable, NOT quiet.
+    mod.record_flap_trip(fs, KEY, now - 5)
+    entry["lastStormRateAt"] = base + 2
+    assert mod.flap_should_resolve(entry, now) is True, "precondition: resolves"
+    assert mod.flap_source_went_quiet(entry, now) is False, "precondition: not silent"
+    assert state.get("openIncidents", {}).get(KEY) is None, "precondition: not in openIncidents"
+    mod.save_incident_state(paths, state)
+
+    sends: list[str] = []
+    mod.send_whatsapp = lambda text, *a, **k: sends.append(text)  # type: ignore[assignment]
+    resolved, errors = mod.sweep_flap_storms(paths)
+
+    assert (resolved, errors) == (1, 0)
+    assert len(sends) == 1
+    assert "STILL OPEN" in sends[0], f"expected persistent-condition wording, got:\n{sends[0]}"
+    assert "stable after" not in sends[0], f"must not claim recovery, got:\n{sends[0]}"
+
+
+def test_genuine_silence_still_reports_stable(tmp_path):
+    """The honest recovery wording must survive: a source that truly went quiet
+    still resolves as 'stable after N flaps'."""
+    mod = _load(tmp_path)
+    paths = mod.state_paths()
+    state = mod.load_incident_state(paths)
+    fs = state.setdefault("flapState", {})
+    now = int(time.time())
+    base = now - 50_000
+    for i in range(3):
+        mod.record_flap_trip(fs, KEY, base + i)
+    mod.flap_evaluate(fs[KEY], base + 2)
+    entry = fs[KEY]
+    assert mod.flap_source_went_quiet(entry, now) is True, "precondition: silent"
+    mod.save_incident_state(paths, state)
+
+    sends: list[str] = []
+    mod.send_whatsapp = lambda text, *a, **k: sends.append(text)  # type: ignore[assignment]
+    resolved, _ = mod.sweep_flap_storms(paths)
+
+    assert resolved == 1
+    assert "stable after" in sends[0], f"expected recovery wording, got:\n{sends[0]}"
+    assert "STILL OPEN" not in sends[0]

@@ -3661,6 +3661,21 @@ def flap_evaluate(entry: dict[str, Any], now: int) -> dict[str, Any]:
     return {"emit": False, "severity": new_severity, "reason": "flap_storm_member_suppressed"}
 
 
+def flap_source_went_quiet(entry: dict[str, Any], now: int) -> bool:
+    """True when the source actually FELL SILENT, not merely dropped below storm
+    rate. Only silence justifies the 'stable after N flaps' recovery wording.
+
+    This is the pre-rate-based resolve condition, kept as the wording
+    discriminator: a storm that closes because the rate decayed while the source
+    keeps tripping has produced no evidence of recovery, and announcing one would
+    be a false all-clear. `openIncidents` cannot answer this on its own — an open
+    storm SUPPRESSES its member events, so the underlying condition is often
+    absent from that map exactly when it is still occurring.
+    """
+    last_trip = int(entry.get("lastTripAt") or 0)
+    return flap_trips_in_window(entry, now) == 0 and (now - last_trip) >= FLAP_STABLE_SECONDS
+
+
 def flap_should_resolve(entry: dict[str, Any], now: int) -> bool:
     """An open storm resolves after FLAP_STABLE_SECONDS below storm intensity.
 
@@ -3917,7 +3932,16 @@ def sweep_flap_storms(paths: dict[str, Path], incident: IncidentStateCycle | Non
                 continue
             if flap_should_resolve(entry, now):
                 open_incidents = incident_state.get("openIncidents")
-                underlying_open = isinstance(open_incidents, dict) and isinstance(open_incidents.get(key), dict)
+                # A resolve may only claim 'stable' when the source actually went
+                # silent. Rate-based resolution closes storms whose source is
+                # still tripping below threshold, and an open storm suppresses its
+                # own members so `openIncidents` usually has no record of the
+                # underlying condition — trusting that map alone would have
+                # announced recovery for every still-degraded instance.
+                underlying_open = (
+                    (isinstance(open_incidents, dict) and isinstance(open_incidents.get(key), dict))
+                    or not flap_source_went_quiet(entry, now)
+                )
                 send_whatsapp(format_event(flap_resolve_event(str(key), entry, now, underlying_open)))
                 append_dispatch_log(paths, {
                     "type": "flap_storm_resolved",
