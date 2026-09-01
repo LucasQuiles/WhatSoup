@@ -212,13 +212,19 @@ npm run reconcile-launchd-restart-policy -- --instance <instance>
 # governed env drift: CLAUDE_CONFIG_DIR missing expected=sha256:… observed=absent
 # governed env drift: PATH mismatch expected=sha256:… observed=sha256:…
 # governed env: PATH configured prefix satisfied; tail differs from this shell's PATH (expected=sha256:… observed=sha256:…) — --apply bakes this shell's PATH tail
+# governed env: installed PATH present but not config-owned (no service.pathPrepend configured) — cannot verify PATH ownership; --apply bakes this shell's PATH (expected=sha256:… observed=sha256:…)
 # installed plist has 2 non-governed EnvironmentVariables keys (MINIMAX_API_KEY, WHATSOUP_HEALTH_TOKEN) that --apply will drop
-# governed env: no drift            ← all-clear, printed only when there is nothing at all to report
+# governed env: no drift            ← all-clear, printed only when the render is config-owned and matches; a PATH with no service.pathPrepend prints the "cannot verify" line above instead
 ```
 
 `PATH` is read in two parts. The config-owned fact is whether the installed
 `PATH` starts with the configured `pathPrepend` entries; only an unsatisfied
-*configured* prefix is governed drift (`PATH mismatch`). The rest of the
+*configured* prefix is governed drift (`PATH mismatch`). When no `pathPrepend`
+is configured at all, nothing about the installed `PATH` is config-owned, so
+the report says `cannot verify PATH ownership` — a coincidental match against
+this shell's ambient `PATH` is never reported as an all-clear (the render's
+`PATH` is only this shell's ambient `PATH`, and a launchd/ssh non-login shell
+can regenerate a different one). The rest of the
 rendered `PATH` is the reconciling shell's own `PATH`, so a satisfied prefix
 with a differing tail is reported as "tail differs from this shell's PATH",
 not as drift — `npm run` adds `node_modules/.bin` directories and the
@@ -260,8 +266,10 @@ renders it instead of destroying it:
    ```
 
 2. Dry-run and read the governed-env report. Before the block exists the
-   hand-patch shows up as `PATH no pathPrepend configured; tail differs from
-   this shell's PATH`; once the block reproduces the hand-patched entries the
+   installed `PATH` is not config-owned, so the report says `installed PATH
+   present but not config-owned (no service.pathPrepend configured) — cannot
+   verify PATH ownership` (never `no drift`, even if the ambient `PATH`
+   happens to match); once the block reproduces the hand-patched entries the
    line becomes `PATH configured prefix satisfied`, which is the config-owned
    fact you are after (the tail still differs until `--apply` re-bakes it):
 
@@ -287,7 +295,11 @@ renders it instead of destroying it:
    ```
 
 5. Re-run the dry-run: `governed env: no drift` confirms the hand-patch is now
-   rendered output owned by config and the baked tail matches this shell.
+   rendered output owned by config and the baked tail matches this shell. This
+   acceptance is valid only because `no drift` now requires a *configured*
+   prefix — if the `service.pathPrepend` block is missing or empty the report
+   prints `cannot verify PATH ownership` instead, so a coincidental ambient
+   match can no longer be mistaken for config ownership.
 
 ### Ratified account identity in the service context
 

@@ -107,6 +107,37 @@ describe('reconcile-launchd-restart-policy CLI', () => {
     expect(stdout.some((line) => line === 'governed env: no drift')).toBe(false);
   });
 
+  it('never reports an all-clear when an installed PATH is present but no pathPrepend governs it (issue 3401 item 1)', async () => {
+    // With no service.pathPrepend configured, the render's PATH is whatever
+    // this shell's ambient PATH happens to be. When it coincides with the
+    // installed PATH the comparator finds no governed drift (drift stays [],
+    // the prefix is trivially satisfied, ambient tail matches) — yet nothing is
+    // config-owned, so the next non-login-shell regeneration can silently drop
+    // the operator's hand-patched PATH. The CLI must surface this as
+    // unverifiable, never as an all-clear the runbook reads as "ownership
+    // confirmed by config".
+    const reconcile = mockReconcile().mockResolvedValue(reconcileResult({
+      governedEnvDrift: {
+        comparable: true,
+        drift: [],
+        droppedNonGovernedKeys: [],
+        pathPrefix: {
+          configured: false,
+          satisfied: true,
+          ambientTailDiffers: false,
+          expectedDigest: 'a'.repeat(64),
+          observedDigest: 'a'.repeat(64),
+        },
+      },
+    }));
+
+    const { stdout } = await runWith(['--instance', 'agent-one'], reconcile);
+
+    expect(stdout.some((line) => line === 'governed env: no drift')).toBe(false);
+    expect(stdout.some((line) => line.includes('cannot verify') && line.includes('PATH') && line.includes('no service.pathPrepend configured'))).toBe(true);
+    expect(stdout.some((line) => line.includes('governed env drift'))).toBe(false);
+  });
+
   it('passes the acknowledgement through to the reconciler on apply', async () => {
     const reconcile = mockReconcile().mockResolvedValue(reconcileResult({ dryRun: false }));
 

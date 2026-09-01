@@ -91,8 +91,9 @@ export function parseReconcileLaunchdRestartPolicyArgs(
  * Governed-env report lines for operator output: key names, states, and
  * short value digests only — installed plists carry live credentials, so no
  * environment value is ever printed. The all-clear line is printed only when
- * there is nothing at all to report: governed drift, a differing PATH tail,
- * and keys an apply would drop each suppress it.
+ * there is nothing at all to report: governed drift, an installed PATH that no
+ * config prepend governs (unverifiable, not clean), a differing PATH tail, and
+ * keys an apply would drop each suppress it.
  */
 function governedEnvLines(comparison: LaunchdReconcileResult['governedEnvDrift']): string[] {
   if (!comparison) return [];
@@ -104,9 +105,17 @@ function governedEnvLines(comparison: LaunchdReconcileResult['governedEnvDrift']
   const lines = comparison.drift.map((entry) =>
     `governed env drift: ${entry.key} ${entry.state} expected=${digest(entry.expectedDigest)} observed=${digest(entry.observedDigest)}`);
   const prefix = comparison.pathPrefix;
-  if (prefix && prefix.satisfied && prefix.ambientTailDiffers) {
-    const prefixState = prefix.configured ? 'PATH configured prefix satisfied' : 'PATH no pathPrepend configured';
-    lines.push(`governed env: ${prefixState}; tail differs from this shell's PATH (expected=${digest(prefix.expectedDigest)} observed=${digest(prefix.observedDigest)}) — --apply bakes this shell's PATH tail`);
+  if (prefix && !prefix.configured) {
+    // Issue 3401 item 1: an installed PATH is present but no service.pathPrepend
+    // governs it, so the render's PATH is only this shell's ambient PATH. A
+    // match against the installed PATH proves nothing about config ownership —
+    // the next regeneration from a launchd/ssh non-login shell can produce a
+    // different PATH and silently drop a hand-patched prepend. Never an
+    // all-clear: report it as unverifiable so the runbook cannot read "no drift"
+    // as "ownership confirmed by config".
+    lines.push(`governed env: installed PATH present but not config-owned (no service.pathPrepend configured) — cannot verify PATH ownership; --apply bakes this shell's PATH (expected=${digest(prefix.expectedDigest)} observed=${digest(prefix.observedDigest)})`);
+  } else if (prefix && prefix.satisfied && prefix.ambientTailDiffers) {
+    lines.push(`governed env: PATH configured prefix satisfied; tail differs from this shell's PATH (expected=${digest(prefix.expectedDigest)} observed=${digest(prefix.observedDigest)}) — --apply bakes this shell's PATH tail`);
   }
   const dropped = comparison.droppedNonGovernedKeys ?? [];
   if (dropped.length > 0) {
