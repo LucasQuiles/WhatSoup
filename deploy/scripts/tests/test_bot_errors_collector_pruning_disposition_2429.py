@@ -42,6 +42,22 @@ _outbox_by_source = _conftest._outbox_by_source
 
 _COLLECTOR_PATH = Path(__file__).resolve().parent.parent / "bot-errors-collector.py"
 
+# The openAlerts-keyed sources this suite sweeps. Held here rather than read
+# from the collector at collection time so the red-first run is reproducible:
+# the suite still collects against a tree that has no REGISTERED_ALERT_SOURCES
+# yet, which is exactly the tree a reviewer re-runs to see RED-2 fail.
+# test_registry_covers_the_issue_acceptance_inventory asserts this list equals
+# the module's own OPEN_ALERT_KEY_SOURCES, so the two cannot drift apart.
+OPEN_ALERT_KEY_SOURCES = sorted(
+    {
+        "remote-claim-failed",
+        "remote-drain-stale",
+        "remote-relay-failed",
+        "remote-writefail-harvest-failed",
+        "remote-writefail-nondurable",
+    }
+)
+
 RETIRED = "mini9:/var/tmp/bot-errors-drill"
 KEPT = "mini5"
 
@@ -92,16 +108,7 @@ def test_red1_retired_open_alert_emits_terminal_disposition(tmp_state):
 # --- RED-2: a registered-but-uninventoried source was silently retained -----
 
 
-@pytest.mark.parametrize(
-    "source",
-    [
-        "remote-claim-failed",
-        "remote-drain-stale",
-        "remote-relay-failed",
-        "remote-writefail-harvest-failed",
-        "remote-writefail-nondurable",
-    ],
-)
+@pytest.mark.parametrize("source", OPEN_ALERT_KEY_SOURCES)
 def test_red2_every_registered_open_alert_source_is_pruned_and_dispositioned(tmp_state, source):
     state_dir, outbox_dir = tmp_state
     with _env(state_dir, outbox_dir):
@@ -387,6 +394,12 @@ def test_registry_covers_the_issue_acceptance_inventory(tmp_state):
     assert set(mod.OPEN_ALERT_KEY_SOURCES) == {
         s for s, loc in mod.REGISTERED_ALERT_SOURCES.items() if loc == mod.ALERT_STATE_OPEN_ALERTS
     }
+    # Pins what test_red2_* parametrises over against the module's own
+    # inventory. A source added to (or dropped from) the registry without a
+    # matching change here fails this assertion instead of quietly leaving the
+    # sweep short, and the sweep cannot pass vacuously on an empty list.
+    assert OPEN_ALERT_KEY_SOURCES == sorted(mod.OPEN_ALERT_KEY_SOURCES)
+    assert len(OPEN_ALERT_KEY_SOURCES) == 5
 
 
 def test_alert_remote_from_key_rejects_unregistered_source(tmp_state):
