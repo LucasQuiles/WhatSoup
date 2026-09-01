@@ -81,9 +81,28 @@ export const SCHEDULED_AGENT_JOB_FORBIDDEN_TOOLS: ReadonlySet<string> = new Set(
   'set_disappearing_messages',
 ]);
 
-function scheduledAgentJobMaySee(tool: ToolDeclaration, session: SessionContext): boolean {
-  return session.purpose !== 'scheduled-agent-job'
-    || !SCHEDULED_AGENT_JOB_FORBIDDEN_TOOLS.has(tool.name);
+/**
+ * Three-state gate for the scheduled-agent-job forbidden (history-mutation) set
+ * (#3435, L1). A forbidden tool is reachable ONLY on a resolved-NORMAL turn:
+ *
+ *   - not-forbidden tool           → always visible/callable (unchanged).
+ *   - resolved-normal (purpose     → REACHABLE. An undefined purpose on a REAL
+ *     undefined, real resolution)     resolution is the load-bearing marker of a
+ *                                     non-scheduled turn; it must NOT over-restrict.
+ *   - resolved-scheduled           → DENIED (the original gate).
+ *     (purpose === 'scheduled-agent-job')
+ *   - unresolved (empty context    → DENIED, fail-closed. Closes the asymmetry
+ *     reached the gate)               where `actorJid` undefined already fail-closes
+ *                                     `sensitiveAllowed` but an undefined `purpose`
+ *                                     used to fail-OPEN the forbidden set.
+ *
+ * The denial keys on the EXPLICIT `executingResolution` discriminator, never on
+ * `purpose === undefined` alone — that is the invariant #3435 hardens.
+ */
+function scheduledAgentJobMaySee(tool: ToolDeclaration, session: ResolvedSessionContext): boolean {
+  if (!SCHEDULED_AGENT_JOB_FORBIDDEN_TOOLS.has(tool.name)) return true;
+  if (session.executingResolution === 'unresolved') return false;
+  return session.purpose !== 'scheduled-agent-job';
 }
 
 /** Eligibility of a tool for a conversation-bound session (list AND call). */
@@ -95,7 +114,7 @@ function conversationBoundMaySee(tool: ToolDeclaration): boolean {
  *  by listTools filtering and the R1 denial-shape split (list-visible sessions
  *  get a typed admin_required denial; hidden-listing sessions keep the
  *  non-disclosing "Unknown tool" reply). */
-function sessionWouldList(tool: ToolDeclaration, session: SessionContext): boolean {
+function sessionWouldList(tool: ToolDeclaration, session: ResolvedSessionContext): boolean {
   if (!scheduledAgentJobMaySee(tool, session)) return false;
   if (session.tier === 'chat-scoped' && tool.scope === 'global') return false;
   if (conversationBoundKey(session) !== undefined && !conversationBoundMaySee(tool)) return false;
