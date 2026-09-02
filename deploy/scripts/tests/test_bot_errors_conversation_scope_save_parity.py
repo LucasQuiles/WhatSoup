@@ -200,3 +200,40 @@ def test_a_failing_sweep_is_logged_and_still_lets_the_write_through(tmp_path):
     assert phase == "save_normalize", phase
     assert "sweep exploded" in message
     assert treated is False
+
+
+def test_an_idle_cycle_still_sweeps_the_scope_sidecar(tmp_path):
+    """SHOULD-3: retention must not depend on the queue being busy.
+
+    The sweep runs inside the save path, and on a fully idle cycle nothing
+    saves: run_once's only non-process_one commit sits behind `if emitted:`
+    for the test-leak daily marker. So an orphaned or expired subtree was
+    retained forever with an empty queue, contradicting the retention row in
+    docs/configuration.md. This drives run_once with NO queued events and an
+    orphaned subtree seeded, and asserts the sweep still bounded it.
+    """
+    os.environ["BOT_ERRORS_STATE_DIR"] = str(tmp_path / "idle")
+    paths = disp.setup_dirs()
+    os.chmod(paths["incident_state"].parent, 0o700)
+
+    now = int(time.time())
+    orphan = f"{MACHINE}|instance-gone|{SOURCE}"
+    session = _session(paths)
+    with session:
+        result = session.load()
+        payload = dict(result.payload or {})
+        # No open incident for this key: its subtree is dead weight.
+        payload["openIncidents"] = {}
+        payload["conversationScopes"] = {
+            orphan: {SCOPE: {"lastSeenAt": now, "eventIds": {}}}
+        }
+        session.save(payload, result.capability)
+
+    assert not list(paths["outbox"].glob("*.json")), "the cycle must be idle"
+    disp.run_once(8)
+
+    scopes = disp.load_incident_state(paths).get("conversationScopes") or {}
+    assert orphan not in scopes, (
+        "an idle cycle must still sweep an orphaned conversation-scope "
+        f"subtree: {scopes!r}"
+    )

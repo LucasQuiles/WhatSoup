@@ -7384,6 +7384,20 @@ def run_once(max_events: int) -> dict[str, Any]:
                         "source": "dispatcher",
                     })
 
+            # Retention is a per-CYCLE obligation, not a per-save side effect.
+            # The sweep otherwise rides along on incident-state writes, and a
+            # fully idle cycle performs none: the only other commit in this
+            # function is gated on the test-leak marker above. An orphaned or
+            # expired subtree on a quiet instance was therefore retained
+            # forever, which is precisely what the documented retention window
+            # says cannot happen. Commit only when the sweep actually removed
+            # something, so an idle cycle stays a no-op write-wise.
+            try:
+                if sweep_conversation_scopes(_incident_cycle.payload, int(time.time())):
+                    _incident_cycle.commit()
+            except Exception as exc:
+                log_conversation_scope_error("cycle_sweep", "", exc, False)
+
             suppressed_pruned = prune_suppressed(paths)
 
             record_state(
