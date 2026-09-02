@@ -2864,6 +2864,7 @@ export class AgentRuntime implements Runtime {
       chatQueues: runtime.chatQueues,
       chatSessions: runtime.chatSessions,
       runtimeTurnAfterTerminal: runtime.runtimeTurnAfterTerminal,
+      requireSessionToolScopeKey: (session) => runtime.requireSessionToolScopeKey(session),
       get durability() { return runtime.durability; },
       get runtimeTurnCoordinator() { return runtime.runtimeTurnCoordinator; },
       get replyGuarantee() { return runtime.replyGuarantee; },

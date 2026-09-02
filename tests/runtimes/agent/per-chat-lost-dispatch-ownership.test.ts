@@ -17,8 +17,12 @@ import type { RuntimeTurnContext } from '../../../src/runtimes/agent/runtime-tur
 import {
   type RuntimeState,
   context,
+  durabilityMock,
   makeRuntimeState,
+  perChatToolScopeKey,
   queueStub,
+  registerSessionToolScope,
+  replyGuaranteeMock,
   sessionStub,
 } from './lib/runtime-terminal-coordinator-harness.ts';
 
@@ -70,6 +74,15 @@ type OwnershipState = RuntimeState & {
     runtimeContext: RuntimeTurnContext,
   ): Promise<boolean>;
   sweepPerChatSessionsWithoutOwner(): number;
+  handleEventPerChat(
+    sourceSession: ReturnType<typeof sessionStub>,
+    event: { type: 'result'; text: string | null },
+    toolScopeKey: string,
+  ): void;
+  unownedProviderEventRejects: number;
+  providerEventRejectReasonCounts: Map<string, number>;
+  createToolScopeKey(scopeBase: string): string;
+  sessionEventToolScopes: WeakMap<object, string>;
   logHealthStats(): void;
   operationTrackers: Map<string, { shutdown: ReturnType<typeof vi.fn> }>;
   ownedSessionManagers: Map<string, ReturnType<typeof sessionStub>>;
@@ -168,19 +181,39 @@ function installUnownedSession(
   }
   state.chatSessions.set(MAP_KEY, session);
   state.chatQueues.set(MAP_KEY, queueStub(deliveryJid));
+  // The inbound context is minted from the MAPPED session's registered scope,
+  // so the stale entry carries the scope the queued context already holds.
+  registerSessionToolScope(state, session, perChatToolScopeKey(MAP_KEY));
   return session;
 }
 
-/** Mimic what a real spawn does: claim ownership, then map session and queue. */
+/**
+ * Mimic what a real spawn does: claim ownership, then map session and queue.
+ *
+ * The replacement takes a freshly minted incarnation scope, as
+ * `ensureSessionAndQueueSync` does at its `createToolScopeKey` call — the
+ * predecessor and the replacement never share one.
+ */
 function stubSpawnAndClaim(state: OwnershipState, deliveryJid: string) {
   const spawned = sessionStub();
   vi.spyOn(state, 'ensureSessionAndQueueSync').mockImplementation((_chatJid, mapKey) => {
     const key = mapKey ?? MAP_KEY;
     state.sessionOwnership.claim(key, state.managerIdFor(spawned));
+    registerSessionToolScope(state, spawned, state.createToolScopeKey(key));
     state.chatSessions.set(key, spawned);
     state.chatQueues.set(key, queueStub(deliveryJid));
   });
   return spawned;
+}
+
+/** The incarnation scope a spawned replacement was registered under. */
+function spawnedToolScopeKey(
+  state: OwnershipState,
+  spawned: ReturnType<typeof sessionStub>,
+): string {
+  const scope = state.sessionEventToolScopes.get(spawned);
+  if (!scope) throw new Error('replacement session was never registered a tool scope');
+  return scope;
 }
 
 afterEach(() => {
@@ -222,6 +255,58 @@ describe('per-chat session entry whose dispatch ownership was lost', () => {
     }
   });
 
+  it('admits the replacement session own provider terminal after the repair', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const { state } = makePerChatRuntime(db);
+      // An admitted terminal runs the finalization path, which requires a
+      // durability engine; a rejected one returns before reaching it.
+      state.durability = durabilityMock();
+      state.replyGuarantee = replyGuaranteeMock();
+      const inboundSeq = 514;
+      const runtimeContext = context('per_chat', MAP_KEY, inboundSeq, 'turn-replacement-terminal');
+      const deliveryJid = runtimeContext.identity.deliveryJid;
+      // Fault shape (b): the registry names a different, provably terminated
+      // manager than the mapped session — the shape the eviction repairs.
+      installUnownedSession(state, deliveryJid, true);
+      const spawned = stubSpawnAndClaim(state, deliveryJid);
+      // The journaled inbound this turn came from; finalization reconciles the
+      // terminal against it.
+      state.perChatInboundSeqQueue.set(MAP_KEY, [inboundSeq]);
+
+      // Emit the terminal from inside the provider send, which is when a real
+      // replacement emits it: the repaired turn's context is in the FIFO and
+      // has not been retired by finalization yet.
+      let publishedToolScopeKey: string | undefined;
+      vi.mocked(spawned.sendTurn).mockImplementation(async () => {
+        publishedToolScopeKey = state.perChatRuntimeTurnContexts
+          .get(MAP_KEY)?.[0]?.toolScopeKey;
+        state.handleEventPerChat(
+          spawned,
+          { type: 'result', text: null },
+          spawnedToolScopeKey(state, spawned),
+        );
+      });
+
+      await dispatchTurn(state, runtimeContext);
+
+      const spawnedScope = spawnedToolScopeKey(state, spawned);
+      // The session that emits the terminal and the context admission compares
+      // it against must agree on the scope, or the repaired turn's completion
+      // never settles and the chat pins behind the FIFO conflict guard.
+      expect(publishedToolScopeKey).toBe(spawnedScope);
+      expect(state.providerEventRejectReasonCounts.get('no_owner')).toBeUndefined();
+      expect(state.unownedProviderEventRejects).toBe(0);
+      // A rejected terminal returns before it can reach the queue at all.
+      const replacementQueue = state.chatQueues.get(MAP_KEY)!;
+      expect(vi.mocked(replacementQueue.endTurn)).toHaveBeenCalled();
+      expect(vi.mocked(replacementQueue.flushTurnEvidence)).toHaveBeenCalled();
+    } finally {
+      db.close();
+    }
+  });
+
   it('leaves a correctly owned session untouched', async () => {
     const db = new Database(':memory:');
     db.open();
@@ -233,6 +318,7 @@ describe('per-chat session entry whose dispatch ownership was lost', () => {
       state.sessionOwnership.claim(MAP_KEY, state.managerIdFor(session));
       state.chatSessions.set(MAP_KEY, session);
       state.chatQueues.set(MAP_KEY, queueStub(deliveryJid));
+      registerSessionToolScope(state, session, runtimeContext.toolScopeKey);
       const spawn = vi.spyOn(state, 'ensureSessionAndQueueSync');
 
       await dispatchTurn(state, runtimeContext);
@@ -623,6 +709,7 @@ describe('per-chat session entry whose dispatch ownership was lost', () => {
         const key = mapKey ?? MAP_KEY;
         tokenVisibleToReplacement = state.chatQueues.get(key)?.getSenderToken();
         state.sessionOwnership.claim(key, state.managerIdFor(spawned));
+        registerSessionToolScope(state, spawned, state.createToolScopeKey(key));
         state.chatSessions.set(key, spawned);
         state.chatQueues.set(key, queueStub(deliveryJid));
       });

@@ -39,6 +39,10 @@ export interface RuntimeState {
   outboundQueues: Map<string, IOutboundQueue>;
   chatQueues: Map<string, IOutboundQueue>;
   chatSessions: Map<string, ReturnType<typeof sessionStub>>;
+  /** Session -> event tool scope, written by `createSessionManager` in production. */
+  sessionEventToolScopes: WeakMap<object, string>;
+  /** Mints the next `<base>#<ordinal>` tool scope key, as a real spawn does. */
+  createToolScopeKey(scopeBase: string): string;
   perChatRuntimeTurnScopeRefs: Map<string, { value: string }>;
   pendingTurnText: Map<string, string>;
   runtimeTurnAfterTerminal: Map<string, (result: unknown) => void | Promise<void>>;
@@ -243,8 +247,44 @@ export function context(
       isGroup: false,
     },
     contentType: 'text',
-    toolScopeKey: scope === 'per_chat' ? conversationKey : '__global__',
+    toolScopeKey: scope === 'per_chat'
+      ? perChatToolScopeKey(conversationKey)
+      : '__global__',
   });
+}
+
+/**
+ * The tool scope key a harness context carries, in the shape production mints.
+ *
+ * `createToolScopeKey` appends a monotonic ordinal to the scope base, so a live
+ * per-chat scope is always `<base>#<ordinal>` with the ordinal starting at 1. A
+ * bare conversation key — what this helper returned before — matched every stub
+ * session trivially, which made the scope comparison at the event-admission
+ * gate unable to fail in this suite no matter what the dispatch rebind did.
+ *
+ * Ordinal 0 is deliberate: it is the one value of the real shape that no
+ * incarnation can ever be minted with, so a test whose context and session must
+ * agree on a scope has to say so by registering the session explicitly
+ * (`registerSessionToolScope`) rather than getting agreement by accident.
+ */
+export function perChatToolScopeKey(conversationKey: string): string {
+  return `${conversationKey}#0`;
+}
+
+/**
+ * Give a stub session the tool scope registration a real one gets.
+ *
+ * The runtime records a session's event tool scope inside `createSessionManager`;
+ * stub sessions never go through it, so dispatch paths that read the scope back
+ * would find nothing. Returns the key it registered.
+ */
+export function registerSessionToolScope(
+  state: { sessionEventToolScopes: WeakMap<object, string> },
+  session: object,
+  toolScopeKey: string,
+): string {
+  state.sessionEventToolScopes.set(session, toolScopeKey);
+  return toolScopeKey;
 }
 
 export function durabilityMock() {
