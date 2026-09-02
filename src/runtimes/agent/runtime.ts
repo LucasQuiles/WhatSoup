@@ -7911,14 +7911,27 @@ export class AgentRuntime implements Runtime {
     // so retire the current one rather than orphan it — an abandoned tracker
     // keeps its armed timers running (QR-094).
     const tracker = this.operationTrackers.get(mapKey);
-    tracker?.shutdown();
+    // Retiring the predecessor's tracker and aborting its queue is housekeeping
+    // around the repair, not the repair itself. A synchronous throw from either
+    // must not abandon the eviction half-applied — that leaves the chat mapped
+    // to a dead session and wedged, which is the state this path exists to end.
+    // Each unmapping below therefore runs unconditionally.
+    try {
+      tracker?.shutdown();
+    } catch (err) {
+      log.warn({ err, mapKey }, 'operation tracker shutdown failed during eviction — continuing');
+    }
     this.operationTrackers.delete(mapKey);
     // Abort the outbound queue but LEAVE IT MAPPED. `createOutboundQueue` reads
     // the predecessor's echo-guard token through `priorSenderTokenForChat`,
     // which looks this very key up; deleting here would drop the token and let
     // a replacement's first group reply fall inside the old cooldown. The spawn
     // path replaces the entry unconditionally, so nothing leaks by leaving it.
-    this.chatQueues.get(mapKey)?.abortTurn();
+    try {
+      this.chatQueues.get(mapKey)?.abortTurn();
+    } catch (err) {
+      log.warn({ err, mapKey }, 'outbound queue abort failed during eviction — continuing');
+    }
     // The retired generation's in-flight turns are gone with it, so its
     // executing-actor entries must go too. `cleanupPerChatCrashTurnState` makes
     // the same clear for the same reason: a later turn must not append behind a

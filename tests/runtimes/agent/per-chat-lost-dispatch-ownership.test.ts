@@ -572,6 +572,37 @@ describe('per-chat session entry whose dispatch ownership was lost', () => {
     }
   });
 
+  it('completes the eviction when the operation tracker shutdown throws', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const { state } = makePerChatRuntime(db);
+      const runtimeContext = context('per_chat', MAP_KEY, 533, 'turn-tracker-shutdown-throws');
+      const deliveryJid = runtimeContext.identity.deliveryJid;
+      installUnownedSession(state, deliveryJid, false);
+      const spawned = stubSpawnAndClaim(state, deliveryJid);
+
+      // Retiring the predecessor's tracker is housekeeping, not the repair. A
+      // synchronous throw here must not leave the eviction half-applied, with
+      // the session still mapped and the chat still wedged.
+      const failing = { shutdown: vi.fn(() => { throw new Error('tracker shutdown failed'); }) };
+      state.operationTrackers.set(MAP_KEY, failing);
+
+      await dispatchTurn(state, runtimeContext);
+
+      expect(failing.shutdown).toHaveBeenCalledTimes(1);
+      expect(state.operationTrackers.has(MAP_KEY)).toBe(false);
+      expect(state.chatSessions.get(MAP_KEY)).toBe(spawned);
+      expect(vi.mocked(spawned.sendTurn)).toHaveBeenCalledTimes(1);
+      expect(runtimeLogger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ mapKey: MAP_KEY }),
+        expect.stringContaining('operation tracker'),
+      );
+    } finally {
+      db.close();
+    }
+  });
+
   it('leaves the outbound queue mapped so the replacement inherits its echo-guard token', async () => {
     const db = new Database(':memory:');
     db.open();
