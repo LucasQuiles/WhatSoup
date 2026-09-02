@@ -1214,6 +1214,96 @@ def test_the_two_probe_allowlists_differ_only_by_the_claude_config_root():
     assert "WHATSOUP_PATH_PREPEND" in common
 
 
+# Prefixes that mark a key as Claude/Anthropic identity, authentication or
+# configuration. The two rows below pin the CLASS rather than today's split.
+CLAUDE_CLASS_ENV_PREFIXES = ("ANTHROPIC_", "CLAUDE_")
+
+
+def test_opencode_probe_allowlist_admits_no_claude_or_anthropic_class_key():
+    """Class pin on the constants. The split test above does NOT cover this.
+
+    That test asserts set equality plus "CLAUDE_CONFIG_DIR" not in the common
+    set. Add a provider credential key, or a second CLAUDE_-prefixed variable,
+    to COMMON_FUNCTIONAL_ENV_KEYS and every one of its assertions still holds
+    while the key enters BOTH probe children. The contract is not "the sets
+    differ by this one name", it is "no Claude or Anthropic identity, auth or
+    config variable is inherited by the opencode probe child".
+
+    Boundary, stated so a later reader does not widen this wrongly: it stops at
+    the ALLOWLIST. opencode_functional_probe_env deliberately injects the
+    configured provider credential AFTER the allowlist, and for the "anthropic"
+    key service that credential is itself an ANTHROPIC_-prefixed name
+    (SERVICE_ENV_MAP). That is an intended per-instance injection of opencode's
+    own key, not inheritance, so asserting this class over the whole probe env
+    would be false for a valid configuration.
+    """
+    assert [k for k in _mod.OPENCODE_FUNCTIONAL_ENV_KEYS
+            if k.startswith(CLAUDE_CLASS_ENV_PREFIXES)] == []
+    # Asserted on the common tuple too: OPENCODE == COMMON today, but that
+    # identity is an implementation detail, not the contract.
+    assert [k for k in _mod.COMMON_FUNCTIONAL_ENV_KEYS
+            if k.startswith(CLAUDE_CLASS_ENV_PREFIXES)] == []
+    # Non-vacuity: the predicate matches a real key, and it DISCRIMINATES --
+    # the claude allowlist carries exactly one key of this class.
+    assert "CLAUDE_CONFIG_DIR".startswith(CLAUDE_CLASS_ENV_PREFIXES)
+    assert [k for k in _mod.CLAUDE_FUNCTIONAL_ENV_KEYS
+            if k.startswith(CLAUDE_CLASS_ENV_PREFIXES)] == ["CLAUDE_CONFIG_DIR"]
+
+
+def test_opencode_probe_child_environment_admits_no_claude_or_anthropic_class_key():
+    """The same class pin against the environment the helper actually builds.
+
+    The constants row above can be satisfied by a tuple that never reaches the
+    child. This one drives governed_child_environment with a base environment
+    that really does offer four keys of the class, so an empty result is a fact
+    about the allowlist rather than about the fixture.
+    """
+    base_env = {
+        "PATH": "/fixture/pin/bin:/usr/bin",
+        "HOME": "/fixture/home",
+        "CLAUDE_CONFIG_DIR": "/fixture/config/agent-alpha",
+        "CLAUDE_CODE_ENTRYPOINT": "cli",
+        "ANTHROPIC_API_KEY": "must-not-propagate",
+        "ANTHROPIC_AUTH_TOKEN": "must-not-propagate",
+    }
+    offered = sorted(k for k in base_env if k.startswith(CLAUDE_CLASS_ENV_PREFIXES))
+    assert offered == [
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "CLAUDE_CODE_ENTRYPOINT",
+        "CLAUDE_CONFIG_DIR",
+    ], "fixture must actually offer keys of the class, or the assertion is vacuous"
+
+    opencode_child = _mod.governed_child_environment(
+        "/fixture/pin/bin:/usr/bin",
+        "agent-alpha",
+        "/fixture/work",
+        base_env,
+        env_keys=_mod.OPENCODE_FUNCTIONAL_ENV_KEYS,
+    )
+
+    assert sorted(k for k in opencode_child
+                  if k.startswith(CLAUDE_CLASS_ENV_PREFIXES)) == []
+    # The allowlist still ran and the governed keys still travelled.
+    assert opencode_child["PATH"] == "/fixture/pin/bin:/usr/bin"
+    assert opencode_child["HOME"] == "/fixture/home"
+    assert opencode_child["WHATSOUP_INSTANCE"] == "agent-alpha"
+
+    # Contrast from the SAME base environment: the claude allowlist admits the
+    # per-instance config root and nothing else of the class, so the rule is
+    # "one named config key for one provider", not "no such key anywhere".
+    claude_child = _mod.governed_child_environment(
+        "/fixture/pin/bin:/usr/bin",
+        "agent-alpha",
+        "/fixture/work",
+        base_env,
+        env_keys=_mod.CLAUDE_FUNCTIONAL_ENV_KEYS,
+    )
+    assert sorted(k for k in claude_child
+                  if k.startswith(CLAUDE_CLASS_ENV_PREFIXES)) == ["CLAUDE_CONFIG_DIR"]
+    assert claude_child["CLAUDE_CONFIG_DIR"] == "/fixture/config/agent-alpha"
+
+
 def test_default_provider_probe_child_keeps_the_claude_config_root(monkeypatch, tmp_path):
     """The other side of the split, through the real probe rather than the helper.
 
