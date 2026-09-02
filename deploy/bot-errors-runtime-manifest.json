@@ -36,7 +36,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "023c0b041874ae84363540dfd515e0606e53d9279b09a03e9908be88a551c9c4",
+      "sha256": "0f6b77c9e5403420087e6a0436542bad87096da03aec7ecf01426b7c96d1156e",
       "mustContain": [
         "append_bounded_jsonl",
         "append_private_jsonl",
@@ -61,7 +61,10 @@
         "degradation_causes_from_event",
         "degradationCauseDispositions",
         "autocloseHoldReleasedAt",
-        "autocloseHoldReleasedReason"
+        "autocloseHoldReleasedReason",
+        "event_text",
+        "record_legacy_alert_content",
+        "legacyAlertContent"
       ]
     },
     {
@@ -365,7 +368,7 @@
     },
     {
       "path": "deploy/scripts/lib/bot_errors_envelope.py",
-      "sha256": "79be73a209d502108ff78edb2fa248b9010bb04d911309b375760fa980d34760",
+      "sha256": "c0eea4c7713d515195865e0b4e44ae3fb030ae7c4365257e093a1b9e23334edb",
       "mustContain": [
         "SCHEMA_VERSION",
         "EVENT_KINDS",
@@ -373,12 +376,14 @@
         "class EventClassification",
         "classify_event",
         "normalize_event",
-        "new_event_fields"
+        "new_event_fields",
+        "_require_renderable_alert_content",
+        "unrenderable_alert_content"
       ]
     },
     {
       "path": "deploy/scripts/lib/bot_errors_redaction.py",
-      "sha256": "274316080daac4fb1949e357e2d1688938a9d44fb63330ed2bef524ef73f4301",
+      "sha256": "f85e3fe54ac6ae66373f4151db2697f81ea50146682f836e962c3612b6aa4d52",
       "mustContain": [
         "redact_bot_errors_text",
         "CREDENTIAL_PATH_RE",
@@ -386,7 +391,12 @@
         "AUTHORIZATION_BEARER_RE",
         "AUTHORIZATION_KEYED_RE",
         "WHATSAPP_SERVICE_UNIT_RE",
-        "PEM_PRIVATE_KEY_RE"
+        "PEM_PRIVATE_KEY_RE",
+        "LEGACY_CONFINED_KEYS",
+        "_BAKED_REPR_RE",
+        "legacy_confined_to_text",
+        "alert_text",
+        "alert_text_kind"
       ]
     },
     {
