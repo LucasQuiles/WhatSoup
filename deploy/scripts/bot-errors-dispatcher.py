@@ -412,6 +412,10 @@ CONVERSATION_SCOPE_MAX_PER_KEY = positive_env_int(
 # an operator is already being told the incident is large, and the storm alert
 # carries the rate, so losing per-conversation granularity there is better than
 # paging without bound.
+# Delivery statuses that mean an operator HAS been shown this event. A file in
+# processing/ carrying one of these is a crash between the terminal state
+# commit and the archive rename, never work still to do.
+TERMINAL_DELIVERY_STATUSES = frozenset({"sent", "email_delivered"})
 CONVERSATION_SCOPE_OVERFLOW_KEY = "__overflow__"
 # Top-level counterpart of the per-key marker. Written into the incident state
 # root (NOT into conversationScopes, so it is never a scope key and never an
@@ -6909,6 +6913,40 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
     diagnostics = event.setdefault("diagnostics", {})
     if isinstance(diagnostics, dict) and not omit_dispatch_log_in_message(event):
         diagnostics["dispatchLog"] = str(paths["logs"] / "dispatch.jsonl")
+    # A reclaimed file whose delivery is ALREADY terminal is the crash window
+    # between the terminal state commit and the archive rename: the operator has
+    # been paged, only the rename was lost. Handle it here, while the record is
+    # still the producer's, because mark_attempt below overwrites the status
+    # with "sending" -- which is why the conversation-scope guard could never
+    # see it and why the replay re-paged.
+    replay_delivery = event.get("delivery")
+    if (
+        isinstance(replay_delivery, dict)
+        and str(replay_delivery.get("status") or "") in TERMINAL_DELIVERY_STATUSES
+    ):
+        terminal_status = str(replay_delivery.get("status"))
+        # incident_state is not bound until after the attempt publication below,
+        # so resolve it here the same way that line does.
+        replay_state = incident.payload if incident else load_incident_state(paths)
+        # Idempotent repair: representation is recorded on delivery, and the
+        # commit that would have recorded it may be exactly what the crash lost.
+        record_conversation_scope_delivered(
+            event, replay_state, incident_key(event), int(time.time())
+        )
+        if incident:
+            incident.commit()
+        else:
+            require_all_advance([save_incident_state(paths, replay_state)])
+        replay_path = archive_path(paths["sent"], path.name, "sent", event)
+        os.replace(claimed, replay_path)
+        append_dispatch_log(paths, {
+            "type": "terminal_replay_archived",
+            "eventId": event.get("id"),
+            "path": str(replay_path),
+            "deliveryStatus": terminal_status,
+        })
+        return True, f"terminal_replay_archived; deliveryStatus={terminal_status}"
+
     event = mark_attempt(event)
     attempt_target = _durable_target(claimed)
     attempt_observation = observe_json(attempt_target)
