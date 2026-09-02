@@ -443,14 +443,27 @@ describe('platform service managers', () => {
       });
     });
 
+    // Drives the REAL install entry (startAfterAuthFire -> installLaunchdPlist),
+    // not the resolver in isolation, against a PERSISTED invalid service block.
+    // The refusal comes from the resolver, which validates and throws before
+    // installLaunchdPlist touches the filesystem; an explicit assertion after
+    // it would be unreachable, since this path takes no caller-supplied render
+    // options. The reconcile path, which does take an override, keeps its own
+    // assertion.
+    // Asserted by marker NAME, not `instanceof`: importPlatform() re-imports
+    // through vi.resetModules(), so the class the install path throws comes
+    // from a different module registry than the one this file imports and the
+    // identity check fails even though the error is the right type.
+    await expect(firstStart).rejects.toMatchObject({ name: 'LaunchdRenderConfigError' });
     await expect(firstStart).rejects.toThrow('service.claudeConfigDir');
     expect(fsMocks.writeFileSync).not.toHaveBeenCalled();
     expect(childProcessMocks.execFile).not.toHaveBeenCalled();
-    // Refused before ANY filesystem mutation, not merely before the write:
-    // the install path creates the LaunchAgents directory before rendering, so
-    // a guard placed after that point would still leave a directory behind on
-    // every refusal while the two assertions above stayed green.
+    // Refused before ANY filesystem mutation, not merely before the write: the
+    // install path creates the LaunchAgents directory before rendering, so a
+    // guard placed after that point would leave a directory behind on every
+    // refusal while the assertions above stayed green.
     expect(fsMocks.mkdirSync).not.toHaveBeenCalled();
+    expect(fsMocks.renameSync).not.toHaveBeenCalled();
   });
 
   it('re-renders the resolved service block when reconciling an existing plist', async () => {
