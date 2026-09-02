@@ -38,7 +38,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "df85025bfb0ce5c107f0d26d4bee97316f84a60b56c58181ec1cefafa9c8facc",
+      "sha256": "4d6c2e87182f07c8739084dc0e938a4b6fc430ae3fffc48fb74384a1f662e990",
       "mustContain": [
         "append_bounded_jsonl",
         "append_private_jsonl",
