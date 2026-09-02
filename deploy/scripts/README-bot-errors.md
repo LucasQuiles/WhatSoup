@@ -394,15 +394,16 @@ alert loop. Past the cap an operator already knows the incident is large.
 | `BOT_ERRORS_CONVERSATION_SCOPED_SOURCES` | `agent_turn_admission_rejected` | Comma-separated sources this gate applies to. A source not listed behaves exactly as before. |
 | `BOT_ERRORS_CONVERSATION_SCOPE_RETENTION_SECONDS` | `604800` (7d) | How long a conversation stays represented. Past it the conversation can force again. |
 | `BOT_ERRORS_CONVERSATION_SCOPE_MAX_PER_KEY` | `256` | Conversations tracked per incident key, and event ids per conversation. Exceeding it sets the overflow marker. |
-| `BOT_ERRORS_CONVERSATION_SCOPE_MAX_KEYS` | `128` | Incident keys carrying a scope sidecar at once. Bounds the state file against a long tail of historical keys. Eviction past the cap stamps the bounded top-level `conversationScopesOverflow` marker, which makes the gate treat an absent key as represented rather than new. |
+| `BOT_ERRORS_CONVERSATION_SCOPE_MAX_KEYS` | `128` | Incident keys carrying a scope sidecar at once. Bounds the state file against a long tail of historical keys. Eviction past the cap tombstones each evicted key in `conversationScopesEvicted` for one retention window; the gate treats an absent key as represented only for a key with a live tombstone, so a never-evicted key still pages once. |
 
 **Rollback.** Setting `BOT_ERRORS_CONVERSATION_SCOPED_SOURCES` to an empty
 value disables the gate entirely: every event behaves as it did before this
 change, and the sidecar is swept away by the normal state lifecycle -- the
 sweep runs on both incident-state save paths, the controller-backed
 `IncidentStateCycle.commit()` that production takes and the RESTORE-COMPAT
-`save_incident_state` wrapper. The sweep's top-level `conversationScopesOverflow`
-marker is part of that sidecar and is swept with it. No state migration is
+`save_incident_state` wrapper. The sweep's `conversationScopesEvicted` tombstones and its
+`conversationScopesOverflow` telemetry record are part of that sidecar and
+expire with it. No state migration is
 needed in either direction.
 
 

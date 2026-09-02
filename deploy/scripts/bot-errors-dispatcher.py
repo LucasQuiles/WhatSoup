@@ -422,6 +422,12 @@ CONVERSATION_SCOPE_OVERFLOW_KEY = "__overflow__"
 # eviction candidate) whenever the sweep evicts a top-level key. Bounded: one
 # object, updated in place, never a growing list.
 CONVERSATION_SCOPE_GLOBAL_OVERFLOW_FIELD = "conversationScopesOverflow"
+# Per-key eviction tombstones: {incident_key: evictedAt}. A key evicted for
+# CAPACITY is remembered here for one retention window, so the admission guard
+# can tell "this key's records were dropped to make room" from "this key has
+# never been seen". The global marker above stays as telemetry ONLY -- it
+# answers "did anything ever evict?", which is not the question the guard asks.
+CONVERSATION_SCOPE_EVICTED_FIELD = "conversationScopesEvicted"
 # Outer bound on how many incident keys carry a scope sidecar at once, so a
 # long tail of historical keys cannot grow the state file without limit.
 CONVERSATION_SCOPE_MAX_KEYS = positive_env_int(
@@ -1291,6 +1297,51 @@ def _mark_conversation_scope_overflow(
     incident_state[CONVERSATION_SCOPE_GLOBAL_OVERFLOW_FIELD] = marker
 
 
+def _mark_conversation_scope_evicted(
+    incident_state: dict[str, Any], current: int, keys: list[str]
+) -> None:
+    """Tombstone each key evicted for capacity, and drop expired tombstones.
+
+    Bounded twice over: entries expire after one retention window, and the map
+    is hard-capped at the same key cap as the sidecar itself, so it cannot grow
+    past what the sidecar could have held.
+    """
+    stones = incident_state.get(CONVERSATION_SCOPE_EVICTED_FIELD)
+    if not isinstance(stones, dict):
+        stones = {}
+    for key in keys:
+        stones[key] = current
+    for stale in [
+        key
+        for key, at in stones.items()
+        if not isinstance(at, (int, float))
+        or current - at > CONVERSATION_SCOPE_RETENTION_SECONDS
+    ]:
+        stones.pop(stale, None)
+    if len(stones) > CONVERSATION_SCOPE_MAX_KEYS:
+        for oldest in sorted(stones, key=lambda k: stones[k])[
+            : len(stones) - CONVERSATION_SCOPE_MAX_KEYS
+        ]:
+            stones.pop(oldest, None)
+    if stones:
+        incident_state[CONVERSATION_SCOPE_EVICTED_FIELD] = stones
+    else:
+        incident_state.pop(CONVERSATION_SCOPE_EVICTED_FIELD, None)
+
+
+def conversation_scope_key_was_evicted(
+    incident_state: dict[str, Any], key: str, current: int
+) -> bool:
+    """True when THIS key's records were dropped for capacity, recently."""
+    stones = incident_state.get(CONVERSATION_SCOPE_EVICTED_FIELD)
+    if not isinstance(stones, dict):
+        return False
+    at = stones.get(key)
+    if not isinstance(at, (int, float)):
+        return False
+    return current - at <= CONVERSATION_SCOPE_RETENTION_SECONDS
+
+
 def conversation_scopes_have_overflowed(incident_state: dict[str, Any]) -> bool:
     """True once the top-level scope map has evicted a key for capacity."""
     return isinstance(
@@ -1360,10 +1411,14 @@ def sweep_conversation_scopes(incident_state: dict[str, Any], current: int) -> i
             )
 
         evicted = 0
+        evicted_keys = []
         for oldest in sorted(scopes, key=_key_recency)[: len(scopes) - CONVERSATION_SCOPE_MAX_KEYS]:
             scopes.pop(oldest, None)
             removed += 1
             evicted += 1
+            evicted_keys.append(oldest)
+        if evicted_keys:
+            _mark_conversation_scope_evicted(incident_state, current, evicted_keys)
         if evicted:
             # A key evicted for CAPACITY is not a key that was never seen. Record
             # that at the top level so the admission guard can tell the two apart:
@@ -2299,7 +2354,17 @@ def conversation_scope_is_unrepresented(
         # endless page loop. Gated on the marker: with no eviction on record a
         # missing key really is a conversation nobody has been told about, and
         # it must still force its one notification.
-        if seen is None and conversation_scopes_have_overflowed(incident_state):
+        # Scoped to what was actually evicted. A global "something evicted once"
+        # flag answers the wrong question: the sidecar empties for ordinary
+        # reasons (a closed incident's key, aged-out records, the per-cycle
+        # sweep), so after one eviction anywhere an absent key would be the
+        # normal state and NO new conversation could ever force its
+        # notification again. The tombstone is per key and expires with the
+        # retention window, so a key that was never evicted -- or whose
+        # eviction has aged out -- still pages once, as it must.
+        if seen is None and conversation_scope_key_was_evicted(
+            incident_state, key, current
+        ):
             return False
         return True
     if current - _conversation_scope_last_seen(record) > CONVERSATION_SCOPE_RETENTION_SECONDS:

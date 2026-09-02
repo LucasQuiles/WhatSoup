@@ -19,6 +19,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import time
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -37,6 +38,7 @@ _ENV_KEYS = [
     "BOT_ERRORS_STATE_DIR",
     "BOT_ERRORS_CONVERSATION_SCOPE_MAX_KEYS",
     "BOT_ERRORS_CONVERSATION_SCOPED_SOURCES",
+    "BOT_ERRORS_CONVERSATION_SCOPE_RETENTION_SECONDS",
 ]
 
 
@@ -53,9 +55,11 @@ def _clean_env():
             os.environ[k] = v
 
 
-def _load(state_dir: Path, cap: int):
+def _load(state_dir: Path, cap: int, retention: int | None = None):
     os.environ["BOT_ERRORS_STATE_DIR"] = str(state_dir)
     os.environ["BOT_ERRORS_CONVERSATION_SCOPE_MAX_KEYS"] = str(cap)
+    if retention is not None:
+        os.environ["BOT_ERRORS_CONVERSATION_SCOPE_RETENTION_SECONDS"] = str(retention)
     (state_dir / "logs").mkdir(parents=True, exist_ok=True)
     spec = importlib.util.spec_from_file_location(
         f"bot_errors_dispatcher_cap_{state_dir.name}", _SCRIPT
@@ -187,4 +191,129 @@ def test_a_new_conversation_still_pages_when_nothing_was_evicted(tmp_path):
     assert len(calls) == 1, (
         "a conversation nobody has been told about must still page when no "
         f"eviction has occurred: pages = {len(calls)}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# The "represented after overflow" default must be scoped to what was EVICTED.
+# ---------------------------------------------------------------------------
+#
+# A global "has anything ever evicted?" flag answers the wrong question. The
+# call site asks whether THIS key was evicted, and the two diverge immediately:
+# the sidecar empties for ordinary reasons (a closed incident's key is popped,
+# aged records are popped and then the emptied key, the whole map is popped when
+# empty, and the per-cycle sweep runs all of that on idle cycles). After one
+# eviction anywhere, an absent key is the normal state, so a global flag
+# silences every genuinely new conversation for the life of the state file.
+
+
+def _fresh_conversation(mod, paths, key_index: int, scope_index: int, rnd: int) -> int:
+    """One rejection for a NEW conversation on `key_index`; returns pages sent."""
+    event_id = f"evt-k{key_index:04d}-s{scope_index:04d}-r{rnd}"
+    event = {
+        "schemaVersion": 2,
+        "eventKind": "incident_alert",
+        "eventType": "alert",
+        "severity": "warning",
+        "machine": MACHINE,
+        "instance": f"instance-{key_index:04d}",
+        "source": SOURCE,
+        "id": event_id,
+        "createdAt": mod.now_iso(),
+        "conversationScope": f"cs1_{scope_index:016x}",
+        "summary": {"failureClass": "unknown", "length": 44, "correlationDigest": "de" * 32},
+        "evidence": {"failureClass": "Error", "length": 88, "correlationDigest": f"{scope_index:064d}"},
+        "delivery": {"attempts": 0, "status": "queued", "nextAttemptAtEpoch": 0, "lastError": None},
+    }
+    path = paths["outbox"] / f"20260902{rnd:06d}.instance-{key_index:04d}.{SOURCE}.{event_id}.json"
+    path.write_text(json.dumps(event, indent=2))
+    path.chmod(0o600)
+    calls: list = []
+    with patch.object(mod, "send_whatsapp", side_effect=lambda *a, **k: calls.append(a)):
+        mod.run_once(64)
+    return len(calls)
+
+
+def test_a_new_conversation_on_a_never_evicted_key_still_pages(tmp_path):
+    """Leg (a): an eviction ELSEWHERE must not silence an untouched key.
+
+    The decisive shape, and the one a global flag gets wrong. Capacity
+    eviction happens on some key. A DIFFERENT key that was never evicted then
+    loses its sidecar entry the ordinary way -- its records age past the
+    retention window and the sweep drops the emptied key -- while its incident
+    stays open. Its next conversation is one nobody has been told about, and
+    the gate exists to deliver exactly that.
+    """
+    cap = 8
+    mod = _load(tmp_path / "never-evicted", cap, retention=1)
+    paths = _dirs(mod)
+
+    first = _round(mod, paths, cap + 1, 1)
+    assert first == cap + 1, first
+    state = mod.load_incident_state(paths)
+    survivors = sorted(state.get("conversationScopes") or {})
+    assert len(survivors) == cap, f"the fixture must evict for capacity: {len(survivors)}"
+    survivor = survivors[-1]
+    key_index = int(survivor.split("|")[1].split("-")[1])
+
+    # Age every record out, then let an idle cycle sweep the emptied keys.
+    time.sleep(2)
+    with patch.object(mod, "send_whatsapp", side_effect=lambda *a, **k: None):
+        mod.run_once(8)
+    state = mod.load_incident_state(paths)
+    assert not (state.get("conversationScopes") or {}), "the sweep must empty the sidecar"
+    assert survivor in (state.get("openIncidents") or {}), "the incident must stay open"
+
+    pages = _fresh_conversation(mod, paths, key_index, 9001, 2)
+
+    assert pages == 1, (
+        "a conversation nobody has been told about, under a key that was never "
+        f"evicted, must still page: pages = {pages}"
+    )
+
+
+def test_an_evicted_keys_conversation_is_suppressed_then_pages_after_the_ttl(tmp_path):
+    """Leg (b): the tombstone is bounded, not permanent."""
+    cap = 8
+    mod = _load(tmp_path / "tombstone-ttl", cap, retention=2)
+    paths = _dirs(mod)
+
+    _round(mod, paths, cap + 1, 1)
+    state = mod.load_incident_state(paths)
+    present = set(state.get("conversationScopes") or {})
+    evicted = [
+        index for index in range(cap + 1)
+        if f"{MACHINE}|instance-{index:04d}|{SOURCE}" not in present
+    ]
+    assert evicted, "the fixture must actually evict a key"
+
+    inside = _fresh_conversation(mod, paths, evicted[0], 9002, 2)
+    assert inside == 0, (
+        f"inside the tombstone window an evicted key's conversation must be "
+        f"suppressed: pages = {inside}"
+    )
+
+    time.sleep(3)  # past the 2s retention window
+    after = _fresh_conversation(mod, paths, evicted[0], 9003, 3)
+    assert after == 1, (
+        f"once the tombstone has expired the key must page again: pages = {after}"
+    )
+
+
+def test_an_idle_sweep_does_not_silence_a_new_conversation(tmp_path):
+    """Leg (d): emptying the sidecar is not the same as evicting for capacity."""
+    cap = 8
+    mod = _load(tmp_path / "idle-then-new", cap)
+    paths = _dirs(mod)
+
+    _round(mod, paths, cap + 1, 1)
+    calls: list = []
+    with patch.object(mod, "send_whatsapp", side_effect=lambda *a, **k: calls.append(a)):
+        mod.run_once(8)  # idle cycle: sweeps, no queued events
+    assert calls == [], "the idle cycle must not page"
+
+    pages = _fresh_conversation(mod, paths, cap + 40, 9004, 2)
+
+    assert pages == 1, (
+        f"a brand-new key after an idle sweep must page: pages = {pages}"
     )
