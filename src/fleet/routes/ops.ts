@@ -721,7 +721,9 @@ function resolveHomeConfinedPath(inputPath: string, res: ServerResponse, error: 
 }
 
 /**
- * Converted to the same physical policy as resolveHomeConfinedPath.
+ * Shares resolveHomeConfinedPath's physical predicate, not merely its policy:
+ * both call `physicalPrefixIsConfined`, so neither can be repaired without the
+ * other. The lexical strict gate below is the resolver's, applied here too.
  *
  * It previously used the JS `fs.realpathSync` for the home root and for the
  * post-mkdir re-check, and it handed the old longest-existing-prefix walk the
@@ -729,6 +731,9 @@ function resolveHomeConfinedPath(inputPath: string, res: ServerResponse, error: 
  * survived at this call site even after the resolver itself was converted, and
  * the walk let a dangling intermediate through. Both now use
  * `fs.realpathSync.native` against the raw spelling.
+ *
+ * The post-mkdir re-check stays strict and stays last: it is the only check
+ * that sees the created leaf.
  */
 function ensureHomeConfinedDirectory(dirPath: string): void {
   const homePath = path.resolve(os.homedir());
