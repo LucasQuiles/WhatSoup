@@ -396,10 +396,24 @@ CONVERSATION_SCOPE_RETENTION_SECONDS = positive_env_int(
 CONVERSATION_SCOPE_MAX_PER_KEY = positive_env_int(
     "BOT_ERRORS_CONVERSATION_SCOPE_MAX_PER_KEY", 256
 )
-# Emitted digests are lowercase hex. Anything else is not trusted into state:
-# an unexpected shape is far more likely to be a raw identifier from a
+# Emitted digests are lowercase hex of a FIXED width (the emission boundary
+# mints exactly CONVERSATION_SCOPE_HEX_LENGTH = 16 chars). Anything else is not
+# trusted: an unexpected shape is far more likely to be a raw identifier from a
 # mis-wired emitter than a usable scope.
-CONVERSATION_SCOPE_RE = re.compile(r"^[0-9a-f]{8,64}$")
+#
+# Width alone is not enough, which is the trap. Decimal digits ARE hex digits,
+# so a bare conversation local part — exactly what toConversationKey mints for
+# both the personal and the LID domain — satisfies any plain hex test. An
+# all-decimal value is therefore rejected as well.
+#
+# The cost of that second rule is one genuine digest in about 44 thousand
+# ((10/16) ** 16) being treated as untrusted. That conversation loses its scope
+# line and its force-notify for as long as the digest is all-decimal, which is
+# the same behaviour as before this change and is the safe direction to fail:
+# a suppressed alert is recoverable, a disclosed identifier is not.
+CONVERSATION_SCOPE_HEX_LENGTH = 16
+CONVERSATION_SCOPE_RE = re.compile(r"^[0-9a-f]{%d}$" % CONVERSATION_SCOPE_HEX_LENGTH)
+CONVERSATION_SCOPE_ALL_DECIMAL_RE = re.compile(r"^[0-9]+$")
 
 # #2409 — cause-aware disposition for health_body_degraded. The producer emits a
 # bounded degradation-cause vector; the registered per-cause policy decides
@@ -2034,7 +2048,11 @@ def event_conversation_scope(event: dict[str, Any]) -> str | None:
     if not isinstance(value, str):
         return None
     candidate = value.strip().lower()
-    return candidate if CONVERSATION_SCOPE_RE.match(candidate) else None
+    if not CONVERSATION_SCOPE_RE.match(candidate):
+        return None
+    if CONVERSATION_SCOPE_ALL_DECIMAL_RE.match(candidate):
+        return None
+    return candidate
 
 
 def conversation_scope_is_unrepresented(
@@ -2057,23 +2075,71 @@ def conversation_scope_is_unrepresented(
     if not isinstance(seen, dict):
         seen = {}
         scopes[key] = seen
+
+    # Records are {digest: {"lastSeenAt": epoch, "eventIds": {id: epoch}}}.
+    # Entries written before the eventIds field existed are bare epochs; they
+    # are read forward rather than migrated, so an older state file keeps
+    # working and a downgrade still finds the timestamps it expects.
+    def record_for(item: Any) -> dict[str, Any]:
+        if isinstance(item, dict):
+            item.setdefault("lastSeenAt", current)
+            if not isinstance(item.get("eventIds"), dict):
+                item["eventIds"] = {}
+            return item
+        return {"lastSeenAt": item if isinstance(item, (int, float)) else current, "eventIds": {}}
+
+    def last_seen(item: Any) -> float:
+        if isinstance(item, dict):
+            value = item.get("lastSeenAt")
+            return value if isinstance(value, (int, float)) else 0
+        return item if isinstance(item, (int, float)) else 0
+
     for stale in [
         item
-        for item, at in seen.items()
+        for item, value in seen.items()
+        if current - last_seen(value) > CONVERSATION_SCOPE_RETENTION_SECONDS
+    ]:
+        seen.pop(stale, None)
+
+    known = digest in seen
+    record = record_for(seen.get(digest))
+    record["lastSeenAt"] = current
+    seen[digest] = record
+
+    # #2428, applied to this counter: a delivery retry re-reads the SAME event
+    # id out of the outbox with its original identity. Treating that retry as
+    # "already represented" would drop the one forced notification whenever the
+    # transport blipped — reintroducing exactly the silence this gate exists to
+    # remove. So a repeat of an id we have already forced still forces.
+    #
+    # An id-less event cannot be deduped this way and falls back to recording
+    # once, which is the pre-existing behaviour (fail toward today's).
+    event_ids = record["eventIds"]
+    event_id = str(event.get("id") or "")
+    retry_of_forced_event = bool(event_id) and event_id in event_ids
+    for stale_id in [
+        item
+        for item, at in event_ids.items()
         if not isinstance(at, (int, float))
         or current - at > CONVERSATION_SCOPE_RETENTION_SECONDS
     ]:
-        seen.pop(stale, None)
-    already = digest in seen
-    seen[digest] = current
+        event_ids.pop(stale_id, None)
+    if event_id:
+        event_ids[event_id] = current
+        if len(event_ids) > CONVERSATION_SCOPE_MAX_PER_KEY:
+            for oldest in sorted(event_ids, key=lambda item: event_ids[item])[
+                : len(event_ids) - CONVERSATION_SCOPE_MAX_PER_KEY
+            ]:
+                event_ids.pop(oldest, None)
+
     if len(seen) > CONVERSATION_SCOPE_MAX_PER_KEY:
-        for oldest in sorted(seen, key=lambda item: seen[item])[
+        for oldest in sorted(seen, key=lambda item: last_seen(seen[item]))[
             : len(seen) - CONVERSATION_SCOPE_MAX_PER_KEY
         ]:
             seen.pop(oldest, None)
     for empty in [item for item, values in scopes.items() if not values]:
         scopes.pop(empty, None)
-    return not already
+    return (not known) or retry_of_forced_event
 
 
 def note_conversation_scope_notify(
@@ -2663,7 +2729,14 @@ def format_event(event: dict[str, Any]) -> str:
         event_line("source", event.get("source")),
         event_line("alert_source", event.get("alertSource")),
         event_line("incident_key", incident_key(event)),
-        event_line("conversation_scope", event.get("conversationScope")),
+        # MUST render the VALIDATED digest, never the raw field. redact() does
+        # not save us here: a bare digit run (exactly what toConversationKey
+        # mints for both the personal and LID domains) has no phone syntax, so
+        # redact_phone_like_match returns it unchanged and it would reach
+        # WhatsApp and the email fallback verbatim. event_conversation_scope
+        # enforces CONVERSATION_SCOPE_RE and the source allowlist, and returns
+        # None for anything else, which omits the line.
+        event_line("conversation_scope", event_conversation_scope(event)),
         event_line("asset_kind", asset.get("kind")),
         event_line("failure_code", failure.get("code")),
         event_line("failure_domain", failure.get("domain")),

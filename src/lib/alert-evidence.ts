@@ -139,11 +139,21 @@ const CONVERSATION_SCOPE_HEX_LENGTH = 16;
  * digest.
  *
  * Uses the same slow KDF as {@link confineAlertContent} under its own domain
- * salt. That choice is deliberate rather than incidental: a conversation
- * identifier is a small, enumerable space (a phone-number-shaped local part),
- * so a bare SHA-256 would be reversible by exhaustion. Domain separation also
- * keeps this digest from colliding with an evidence or summary digest of the
- * same bytes.
+ * salt, and domain separation keeps this digest from colliding with an
+ * evidence or summary digest of the same bytes.
+ *
+ * What this provides, stated precisely: the emitted value is not a plaintext
+ * identifier, it is deterministic so the dispatcher can compare two events,
+ * and it is domain-separated. What it does NOT provide is secrecy against a
+ * determined offline attacker. The salt is fixed and public, the iteration
+ * count is 1000, and the output is truncated to 16 hex characters, so against
+ * a conversation-identifier space of roughly 10^10 candidates an exhaustive
+ * search remains tractable on commodity hardware — 1000 iterations raises the
+ * cost by about three orders of magnitude, which is a real but not decisive
+ * margin. Treat this as a bounded, non-reversible-in-practice value for logs
+ * and alert routing, never as a secret. Raising the cost was considered and
+ * not done here: this is an error path that must stay cheap, and the value's
+ * job is de-duplication rather than confidentiality.
  *
  * Returns ``null`` — never an empty string or a placeholder — when the caller
  * has no conversation, so the field can be omitted from the event entirely and
