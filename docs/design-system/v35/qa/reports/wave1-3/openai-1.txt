@@ -31,7 +31,7 @@ Below is a strict audit by image, assuming violations exist and checking against
    - **Why:** Although shapes exist, the tiny markers are visually dominated by color and not consistently legible as shape-coded states at this size. The deactivated/alert distinctions rely heavily on color recognition.
 
 5. **Muted low-contrast text for essential identifiers**
-   - **Location:** Secondary line identifiers under line names, e.g. `+1 555 ... 0199`, `signal · +1 845 ... 0077`, `help@shinycartel…`, etc.
+   - **Location:** Secondary line identifiers under line names, e.g. `+1 555 ... 0199`, `signal · +1 555 ... 0100`, `help@shinycartel…`, etc.
    - **Rule:** **4**
    - **Severity:** **Medium**
    - **Why:** These are essential identifiers but are rendered in very muted brown-on-brown contrast.
