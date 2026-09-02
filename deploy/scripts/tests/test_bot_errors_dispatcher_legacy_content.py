@@ -677,3 +677,72 @@ def test_flush_is_silent_when_nothing_was_quarantined() -> None:
     incident_state: dict[str, Any] = {}
     assert _mod.flush_unrenderable_quarantine_telemetry(incident_state) is False
     assert "legacyAlertContent" not in incident_state
+
+
+# ---------------------------------------------------------------------------
+# A poison alert-content value must not wedge the queue
+# ---------------------------------------------------------------------------
+# An unbounded digit run in the repr grammar let int() raise ValueError from
+# inside the render path. Nothing above it guards: process_one has no try around
+# the render, and neither does run_once. One such event aborted the whole cycle
+# before any event was delivered or quarantined, and it stayed in the outbox to
+# re-poison every following cycle -- total alert loss, silent and permanent.
+
+POISON_SUMMARY = (
+    "{'failureClass': 'TypeError', 'length': "
+    + "1" * 5000
+    + ", 'correlationDigest': '"
+    + DIGEST
+    + "'}"
+)
+
+
+def test_poison_alert_content_does_not_wedge_the_queue(tmp_path, monkeypatch) -> None:
+    """End-to-end over two cycles: the queue drains and the healthy alert lands."""
+    root = tmp_path / "state"
+    outbox = root / "outbox"
+    monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(root))
+    monkeypatch.setenv("BOT_ERRORS_OUTBOX_DIR", str(outbox))
+    monkeypatch.setenv("BOT_ERRORS_JID", "12345@g.us")
+    mod = _load_module()
+
+    sent_texts: list[str] = []
+    monkeypatch.setattr(mod, "send_whatsapp", lambda text, socket_path="": sent_texts.append(text))
+    monkeypatch.setattr(mod, "append_dispatch_log", lambda *a, **k: None)
+
+    paths = mod.setup_dirs()
+    # Sorted first, so it is processed before the healthy alert: an abort here
+    # would take the healthy alert down with it.
+    poison = _make_event(id="poison-001", summary=POISON_SUMMARY, evidence="poison evidence")
+    # A DIFFERENT source, so the two are distinct incidents. Sharing a source would
+    # make the second a duplicate of the first's open incident and it would be
+    # suppressed for reasons unrelated to this test.
+    healthy = _make_event(
+        id="healthy-001", source="agent_respawn_failed",
+        summary="healthy alert", evidence="healthy evidence",
+    )
+    for name, event in (("aaa-poison.json", poison), ("zzz-healthy.json", healthy)):
+        path = paths["outbox"] / name
+        path.write_text(json.dumps(event), encoding="utf-8")
+        path.chmod(0o600)
+
+    # No exception may escape run_once.
+    first = mod.run_once(max_events=25)
+    second = mod.run_once(max_events=25)
+
+    remaining = sorted(p.name for p in paths["outbox"].glob("*.json"))
+    assert remaining == [], f"the queue must drain, still holds {remaining}"
+    assert any("healthy alert" in text for text in sent_texts), (
+        "the healthy alert must be delivered even when a poison event is queued first"
+    )
+    # Both events were accounted for in cycle one; cycle two has nothing left to do,
+    # which is the property that was broken: the poison used to re-abort every cycle.
+    assert first.get("processed", 0) == 2
+    assert second.get("processed", 0) == 0
+    assert first.get("failed", 0) == 0
+
+
+def test_poison_alert_content_renders_as_text_not_as_an_envelope() -> None:
+    """The bounded grammar makes an over-long run simply not the envelope."""
+    assert _mod.alert_text(POISON_SUMMARY) == POISON_SUMMARY
+    assert _mod.alert_text_kind(POISON_SUMMARY) == "string"

@@ -183,9 +183,14 @@ def redact_json_value(value: Any, redact_text) -> Any:
 # envelope. Two serialisations reach this consumer:
 #   * the live mapping {"failureClass": str, "length": int, "correlationDigest": str}
 #   * a baked `repr` string, produced wherever that mapping reached str()
-# The baked form appears in BOTH key orders the producer emits, so every matcher
-# below is key-order-insensitive. A matcher pinned to one order is blind to the
-# other and silently under-reports.
+# The baked form appears in TWO key orders, so every matcher below is
+# key-order-insensitive. A matcher pinned to one order is blind to the other and
+# silently under-reports. Only one of the two comes from the producer, which
+# builds the object literal in failureClass order and serialises it with
+# insertion order preserved; the alphabetical form arises on this side, from
+# sort_keys round-trips through persisted state. Order-insensitive matching is
+# required either way -- both forms are in the corpus -- but the second order is
+# ours, not the producer's.
 #
 # Rendering is deliberately restricted to the EXACT three-key shape. An arbitrary
 # mapping is never rendered: its values could be anything, and printing them would
@@ -206,7 +211,16 @@ _LEGACY_DIGEST_RE = re.compile(r"\A[0-9a-f]{64}\Z")
 # level: a single-quoted literal or a bare integer. `[^'{}]*` keeps a pair from
 # swallowing a brace, so the three-pair bound below cannot be defeated by a
 # nested structure.
-_REPR_PAIR = r"'[A-Za-z][A-Za-z0-9_]*': (?:'[^'{}]*'|\d+)"
+#
+# The digit run is BOUNDED at 19. CPython refuses int(str) past 4300 digits, and
+# _parse_baked_repr converts before it validates keys, so an unbounded run let a
+# queue string raise ValueError from inside the render path -- which has no guard
+# above it, so one such event aborted the whole dispatcher cycle and stayed in the
+# outbox to re-poison the next one. A character count cannot need 19 digits, so an
+# over-long run is simply not this envelope and falls through to the text path.
+# The bound must appear in BOTH grammars below: bounding only the parser would
+# leave the scan matching and the parser still converting.
+_REPR_PAIR = r"'[A-Za-z][A-Za-z0-9_]*': (?:'[^'{}]*'|\d{1,19})"
 
 # Anchored: the whole string is one brace group holding EXACTLY three pairs, in
 # any order. Key identity and value typing are verified by _parse_baked_repr
@@ -219,7 +233,7 @@ _BAKED_REPR_RE = re.compile(r"\A\{" + _REPR_PAIR + r"(?:, " + _REPR_PAIR + r"){2
 _BAKED_REPR_SCAN_RE = re.compile(r"\{" + _REPR_PAIR + r"(?:, " + _REPR_PAIR + r"){2}\}")
 
 _REPR_PAIR_PARTS_RE = re.compile(
-    r"'(?P<key>[A-Za-z][A-Za-z0-9_]*)': (?:'(?P<text>[^'{}]*)'|(?P<number>\d+))"
+    r"'(?P<key>[A-Za-z][A-Za-z0-9_]*)': (?:'(?P<text>[^'{}]*)'|(?P<number>\d{1,19}))"
 )
 
 

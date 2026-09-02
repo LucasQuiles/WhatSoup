@@ -187,3 +187,70 @@ def test_no_eval_or_literal_eval_in_module() -> None:
 def test_legacy_confined_keys_is_the_exact_three_key_set() -> None:
     mod = load_redaction()
     assert set(mod.LEGACY_CONFINED_KEYS) == {"failureClass", "length", "correlationDigest"}
+
+
+# ---------------------------------------------------------------------------
+# The repr grammar must not admit an integer Python refuses to convert
+# ---------------------------------------------------------------------------
+# CPython caps int(str) at 4300 digits by default. An unbounded digit run in the
+# grammar let _parse_baked_repr call int() on a longer run and raise ValueError
+# from inside the render path, which has no guard above it. A character count can
+# never legitimately need 19 digits, so the grammar bounds the run and an
+# over-long one simply is not the envelope: it falls through to the text path.
+
+_OVERLONG_DIGITS = 5000
+_CONTROL_DIGITS = 4000
+
+
+def _repr_with_digit_run(count: int) -> str:
+    return (
+        "{'failureClass': 'TypeError', 'length': "
+        + "1" * count
+        + ", 'correlationDigest': '"
+        + DIGEST
+        + "'}"
+    )
+
+
+def test_overlong_integer_in_repr_does_not_raise() -> None:
+    """The poison shape: renders as text, never raises out of the funnel."""
+    mod = load_redaction()
+    poison = _repr_with_digit_run(_OVERLONG_DIGITS)
+    rendered = mod.alert_text(poison)
+    assert isinstance(rendered, str)
+    # Not the envelope, so it is passed through as ordinary operator text.
+    assert rendered == poison
+
+
+def test_digit_run_below_the_conversion_limit_still_parses() -> None:
+    """Control: a long-but-convertible run behaves as before the bound.
+
+    This is what separates "the bound is doing something" from "the whole branch
+    stopped working". A 4000-digit run is under CPython's limit, so at the tree
+    before the fix it converted successfully rather than raising.
+    """
+    mod = load_redaction()
+    control = _repr_with_digit_run(_CONTROL_DIGITS)
+    assert isinstance(mod.alert_text(control), str)
+
+
+def test_overlong_integer_in_a_non_envelope_repr_does_not_raise() -> None:
+    """int() ran before key validation, so any three-pair shape reached it."""
+    mod = load_redaction()
+    probe = "{'a': 'x', 'b': " + "9" * _OVERLONG_DIGITS + ", 'c': 'y'}"
+    assert mod.alert_text(probe) == probe
+    assert mod.alert_text_kind(probe) == "string"
+
+
+def test_nineteen_digit_length_is_still_the_envelope() -> None:
+    """The bound is 19 digits, so a 19-digit count still renders canonically."""
+    mod = load_redaction()
+    nineteen = "9" * 19
+    text = (
+        "{'failureClass': 'TypeError', 'length': "
+        + nineteen
+        + ", 'correlationDigest': '"
+        + DIGEST
+        + "'}"
+    )
+    assert mod.alert_text(text) == f"TypeError - {int(nineteen)} chars - digest a1b2c3d4"
