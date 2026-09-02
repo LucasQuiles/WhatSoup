@@ -87,9 +87,11 @@ export function rawAbsolutePath(inputPath: string, cwd: string = process.cwd()):
  * A tempting stricter rule, "only the final leaf may be absent", was measured
  * and rejected: it refuses the default agent workspace
  * (`~/.local/share/<...>/instances/<name>/workspace`, created after
- * validation) and broke 20 existing tests. It buys nothing, because an absent
- * segment is not an escape vector until something is created there, and that is
- * equally true of the leaf.
+ * validation), which broke agent cwd defaulting on CREATE and PATCH, the
+ * CLAUDE.md and settings.json writes that depend on that cwd, and the in-home
+ * service-block positives. It buys nothing either, because an absent segment is
+ * not an escape vector until something is created there, and at that point it
+ * is no longer absent and is refused.
  *
  * `fs.realpathSync.native` (libc realpath(3)) is load-bearing and must not be
  * swapped back to `fs.realpathSync`, which calls `path.resolve()` first and so
@@ -129,6 +131,30 @@ export function realpathLongestAbsentTolerantPrefix(targetPath: string): string 
 }
 
 /**
+ * Is this spelling already canonical — absolute, no `.`/`..` component, no
+ * redundant separators?
+ *
+ * Only applied to values that are rendered VERBATIM into a launchd service
+ * `PATH` or `CLAUDE_CONFIG_DIR`. For those, physical containment is not enough
+ * on its own: a `..` component is re-resolved by the kernel at exec time
+ * against whatever the filesystem looks like then, so a spelling that resolves
+ * in-home today escapes later if any leading component becomes a symlink.
+ * Refusing the spelling outright removes that whole class, and costs operators
+ * nothing because a canonical form always exists.
+ *
+ * Lives here rather than beside either caller because the API-admission guard
+ * (src/fleet/routes/ops.ts) and the render-admission guard
+ * (src/fleet/platform.ts) must apply the SAME predicate: this module exists
+ * because near-duplicate copies of a confinement rule drifted apart once
+ * already. A third copy is exactly what it is here to prevent.
+ */
+export function isCanonicalAbsolutePath(value: string): boolean {
+  if (!value.startsWith('/')) return false;
+  if (value !== path.posix.normalize(value)) return false;
+  return !value.split('/').some((segment) => segment === '.' || segment === '..');
+}
+
+/**
  * Lexical containment, for callers that only need "is this path under that
  * root" with no filesystem access.
  *
@@ -138,4 +164,29 @@ export function realpathLongestAbsentTolerantPrefix(targetPath: string): string 
  */
 export function pathIsInsideRoot(root: string, candidate: string): boolean {
   return pathIsInsideDirectory(path.resolve(candidate), path.resolve(root));
+}
+
+/**
+ * Is `inputPath` physically confined to `homeDir`?
+ *
+ * Applied to ONE path value at a time - a `pathPrepend` ENTRY or
+ * `claudeConfigDir` - and never to a joined `PATH` string. The rendered `PATH`
+ * is the entries followed by the generating shell's ambient tail, and that tail
+ * legitimately carries system directories outside home, so a predicate over the
+ * joined value would reject every real row. The fleet service-path survey
+ * measured this: on the joined value it rejects every live row, on the entries
+ * it rejects none.
+ *
+ * Throws whatever resolution threw; callers decide the refusal shape.
+ */
+export function isPhysicallyInsideHome(inputPath: string, homeDir: string): boolean {
+  const homeReal = fs.realpathSync.native(homeDir);
+  const raw = rawAbsolutePath(inputPath);
+  // Lexical gate first, and STRICT: it is the only check that separates "an
+  // absent directory under home" from "home itself", since both resolve to a
+  // prefix of home.
+  if (!pathIsInsideDirectory(path.resolve(raw), path.resolve(homeDir))) return false;
+  // Physical check, at-or-inside because the resolved prefix legitimately IS
+  // home when every segment below it is still absent.
+  return pathIsAtOrInsideDirectory(realpathLongestAbsentTolerantPrefix(raw), homeReal);
 }

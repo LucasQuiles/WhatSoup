@@ -294,7 +294,7 @@ describe('handleConfigUpdate: agent path validation branch arms', () => {
 
     expect(res._status).toBe(400);
     const body = JSON.parse(res._body) as { error: string };
-    expect(body.error).toBe('pluginDirs entries must be within the home directory');
+    expect(body.error).toBe('each pluginDirs entry must be within the home directory');
   });
 
   it('normalises a non-array permissions.deny in existing settings.json (line 573)', async () => {

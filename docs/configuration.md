@@ -548,8 +548,8 @@ config-owned and regeneration-safe:
 
 | Field | Type | Rules | Effect |
 |-------|------|-------|--------|
-| `claudeConfigDir` | string | absolute path; no surrounding whitespace or control characters; within the home directory when written through the API (see below) | Rendered as `CLAUDE_CONFIG_DIR` so the launchd service context resolves the same dedicated claude-cli config root as interactive use of that root (e.g. an isolated per-bot root such as `$HOME/.claude-<instance>`). Omitted → the key is not rendered. The block governs only which config root the service resolves; it does not create or copy credentials (the CLI keeps those keychain-resident). |
-| `pathPrepend` | string[] | at most 16 entries; each an absolute path without `:` or control characters; each within the home directory when written through the API (see below) | Prepended in order ahead of the generating shell's ambient `PATH` in the rendered service `PATH` (e.g. `$HOME/.local/bin` so a fallback provider binary resolves under launchd). Omitted or empty → byte-identical `PATH` to the historical render. |
+| `claudeConfigDir` | string | absolute path; no surrounding whitespace or control characters; within the home directory, checked at API admission and again at plist render (see below) | Rendered as `CLAUDE_CONFIG_DIR` so the launchd service context resolves the same dedicated claude-cli config root as interactive use of that root (e.g. an isolated per-bot root such as `$HOME/.claude-<instance>`). Omitted → the key is not rendered. The block governs only which config root the service resolves; it does not create or copy credentials (the CLI keeps those keychain-resident). |
+| `pathPrepend` | string[] | at most 16 entries; each an absolute path without `:` or control characters; each within the home directory, checked at API admission and again at plist render (see below) | Prepended in order ahead of the generating shell's ambient `PATH` in the rendered service `PATH` (e.g. `$HOME/.local/bin` so a fallback provider binary resolves under launchd). Omitted or empty → byte-identical `PATH` to the historical render. |
 | `expectedAccountDigest` | string | `sha256:<64 lowercase hex>` exactly, produced by `npm run --silent claude-account-digest` (the `--silent` matters — see the capture procedure); agent instances with `agentOptions.provider` `claude-cli` (the default) only — rejected elsewhere | Not a render key (never reaches the plist; applies on every platform). The ratified account identity the runtime verifies against; see [Ratified account identity](#ratified-account-identity-serviceexpectedaccountdigest). A raw email or organization id is rejected at admission on every path (create / PATCH / load / discovery). Omitted → verification disabled (one info log line at the first probe). |
 
 One source of truth: the shape rules live in `src/lib/launchd-service-config.ts`
@@ -560,17 +560,105 @@ unreadable or invalid `config.json` aborts a plist install or reconcile instead
 of regenerating the plist without its governed environment; only a missing
 `config.json` (or absent block) renders the historical byte-identical plist.
 
-Home-confinement of the two filesystem fields is enforced one layer up, at the
-API write paths only (`POST /api/lines` and `PATCH /api/lines/:name/config` in
-`src/fleet/routes/ops.ts`), which refuse a `claudeConfigDir` or a `pathPrepend`
-entry resolving outside the instance user's home directory with a `400`. It is
-not a shape rule, because `src/lib/launchd-service-config.ts` also runs on load
-and on render admission: rejecting there would stop an instance that already
-persisted an out-of-home value from loading at all. So a value written before
-this rule existed, or edited into `config.json` by hand, still loads and still
-renders — the guard closes the ingress, it does not retire existing values. The
-`PATCH` guard runs on the merged config, so an instance carrying an out-of-home
-entry is refused on every field until the entry is corrected.
+Home-confinement of the two filesystem fields is enforced at two call sites. At
+API admission (`POST /api/lines` and `PATCH /api/lines/:name/config` in
+`src/fleet/routes/ops.ts`) a `claudeConfigDir` or a `pathPrepend` entry
+resolving outside the instance user's home directory is refused with a `400`. At
+plist RENDER admission (`assertHomeConfinedRenderOptions` in
+`src/fleet/platform.ts`, on both the reconcile and the first-install paths) the
+same rule is applied again to the resolved render options, immediately before
+the plist is built.
+
+It is still not a shape rule, because `src/lib/launchd-service-config.ts` also
+runs on config load: rejecting there would stop an instance that already
+persisted an out-of-home value from loading at all. So such a value — written
+before this rule existed, or edited into `config.json` by hand — still loads,
+but it no longer renders. The render refuses it with a
+`LaunchdRenderConfigError` naming the field, which covers reconciliation
+(`--dry-run` included, because the check precedes the dry-run early return) and
+the first install after authentication.
+
+Re-checking at render is not redundant with admission, because admission cannot
+bind a value whose meaning can still change. A path admitted while an
+intermediate segment was absent resolves to wherever a symlink later created at
+that segment points, and admission has already happened by then. Render
+admission is the last point before the value is baked into a plist, so that is
+where the physical resolution has to be repeated. This section records the
+render-time revalidation decision the PATH-governance follow-ups require.
+
+The `PATCH` guard runs on the merged config, so an instance carrying an
+out-of-home entry is refused on every field until the entry is corrected.
+
+#### Preflight for an instance that already carries a service path
+
+Render admission also applies to values that were persisted before it existed.
+An instance whose `service.claudeConfigDir`, or any `service.pathPrepend` entry,
+breaks one of the rules below cannot install or reconcile its plist: the render
+throws before any bytes are written, so the job keeps running from its already
+installed plist and no update reaches it until the value is corrected. Check
+every instance before upgrading.
+
+The rules a persisted value must satisfy, all four:
+
+- **Absolute.** It starts with `/`. Neither `~` nor a relative path is expanded
+  here.
+- **Canonically spelled.** No `.` or `..` component and no doubled separator.
+  A `..` is re-resolved by the kernel at every exec, so a spelling that lands
+  in the home directory today can land elsewhere after a component becomes a
+  symlink.
+- **Inside the instance user's home directory,** after symlinks are resolved.
+- **Physically resolvable.** Every component that exists must resolve. A
+  symlink whose target does not exist is refused, because whoever creates that
+  target later decides where the value points. A component that is simply
+  absent is fine.
+
+To find the values, read the block in each instance's `config.json` under the
+instance config directory, and check the two keys. To have the checker find them
+for you, dry-run the reconciler per instance:
+
+```bash
+bash scripts/run-with-pinned-node.sh scripts/reconcile-launchd-restart-policy.ts --instance <instance>
+```
+
+A `LaunchdRenderConfigError` naming a field is the answer: the message says
+which key and which rule, and never echoes the value. `must be a normalized
+absolute path within the home directory` means the spelling; `must resolve to a
+path inside the home directory` means where it points, or that something on the
+path does not resolve.
+
+To fix one, replace the value with a canonical absolute path inside the home
+directory and create the directory if it is missing, or drop the entry. Editing
+`config.json` directly is enough; the same rules are enforced on the API write
+paths, so `PATCH` refuses a bad replacement rather than persisting it. Re-run
+the dry-run until it reports drift instead of refusing, then apply.
+
+#### Design boundary: trusted ancestry under the home directory
+
+Render admission is a POINT-IN-TIME check, and this is a deliberate boundary
+rather than an oversight. Three properties combine:
+
+- A path whose leaf components do not exist yet is admitted on its longest
+  existing prefix. That is required, not incidental: an agent's default
+  workspace is several not-yet-created segments deep, and refusing it would
+  break instance creation.
+- The value persisted and rendered into `PATH` and `CLAUDE_CONFIG_DIR` is the
+  operator's spelling, not a resolved path.
+- Starting or restarting an instance from an already installed plist does not
+  re-run render admission. Only reconcile and first install do.
+
+So a principal who can write inside an accepted in-home ancestor can create the
+missing component as a symlink pointing outside the home directory AFTER the
+render, and the executable lookup that happens at the next start follows it.
+Render-time validation cannot close that window; no check made before a write
+can bind a filesystem that stays writable afterwards. What the rule does buy is
+that the ancestor must already be inside the home directory, so the trust
+boundary is "whoever can write under this home directory", not "anyone".
+
+Whether that principal is inside the threat model is an owner decision, not a
+property of this code. The stricter alternatives, if it is, are to require the
+complete target to exist at validation time, or to create the leaf directories
+privately before validating them. Both trade instance-creation ergonomics for
+the guarantee, and neither is implemented here.
 
 Unknown keys inside `service` are ignored (the instance-config convention for
 extraneous keys), so a misspelled field is silently inert — read the dry-run

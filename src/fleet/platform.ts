@@ -17,8 +17,10 @@ import { isValidInstanceName } from './instance-name.ts';
 import { escapeRegExp } from '../lib/regex-utils.ts';
 import {
   assertValidLaunchdPlistRenderOptions,
+  LaunchdRenderConfigError,
   type LaunchdPlistRenderOptions,
 } from '../lib/launchd-service-config.ts';
+import { isCanonicalAbsolutePath, isPhysicallyInsideHome } from '../lib/home-confinement.ts';
 import { resolveLaunchdPlistRenderOptions } from './launchd-render-options.ts';
 import { compareGovernedLaunchdEnv, type GovernedEnvComparison } from './launchd-env-drift.ts';
 import { repoRoot, tmpRoot, xdgDir } from './paths.ts';
@@ -317,6 +319,18 @@ function writeAtomicLaunchdPlist(filePath: string, contents: string): void {
   }
 }
 
+/**
+ * Roll a plist back to the bytes captured before this operation.
+ *
+ * This is the one plist WRITE path with no render-admission assertion in its
+ * block, and correctly so: `previousContents` is bytes read from the installed
+ * plist by `readExpectedGeneratedLaunchdPlist`, never a fresh render. Nothing
+ * here calls `buildPlist` or reads a render option, so there is nothing to
+ * admit; whatever wrote those bytes admitted them, possibly a render that
+ * predates the confinement rule. Re-rendering or re-validating instead would
+ * defeat the purpose of a rollback, which is to restore the prior state rather
+ * than to install a new one.
+ */
 function restoreLaunchdPlist(filePath: string, previousContents: string | null): void {
   if (previousContents !== null) {
     writeAtomicLaunchdPlist(filePath, previousContents);
@@ -429,6 +443,88 @@ function refuseApplyThatDropsEnv(comparison: GovernedEnvComparison): void {
 }
 
 /**
+ * Confine the two rendered filesystem values to the instance user's home at
+ * RENDER admission.
+ *
+ * A different call site from config LOAD, so the objection that keeps this rule
+ * out of the shape validator does not apply here. The route guard closes the
+ * write ingress but cannot close this one: a value admitted while a segment was
+ * absent can be poisoned afterwards by creating a symlink there, and admission
+ * has already happened by then. Re-checking at render is what catches that.
+ *
+ * SCOPE, binding: the predicate applies to each `pathPrepend` ENTRY and to
+ * `claudeConfigDir`, and NEVER to the joined rendered `PATH`. `buildPlist`
+ * composes the entries ahead of the generating shell's ambient tail, and that
+ * tail legitimately carries out-of-home system directories, so a predicate over
+ * the joined value would refuse every real row. The fleet service-path survey
+ * measured both framings; a test below pins the distinction.
+ *
+ * SPELLING FIRST, then physical resolution. `isCanonicalAbsolutePath` is the
+ * same predicate the API-admission guard applies, imported from the shared
+ * module rather than copied, and it runs BEFORE `isPhysicallyInsideHome`.
+ *
+ * Two defects it closes, both invisible to physical resolution alone:
+ *
+ * 1. A NONCANONICAL but fully existing in-home spelling. `<home>/anchor/../leaf`
+ *    with both components present resolves in-home right now, so the physical
+ *    check admits it, and the raw spelling is what gets persisted and rendered
+ *    into `PATH`. The kernel re-resolves that `..` at every exec, so replacing
+ *    `anchor` with a symlink afterwards changes where the same stored string
+ *    points. A canonical spelling has no such degree of freedom.
+ * 2. A NON-ABSOLUTE spelling. `isPhysicallyInsideHome` makes a relative input
+ *    absolute against `process.cwd()`, and on a real host the repository root
+ *    sits UNDER the instance user's home, so `~/.local/bin`, `~` and a bare
+ *    `pin/bin` would be ADMITTED from there while the same spellings are
+ *    refused from a working directory outside home.
+ *
+ * Neither is reachable through the resolver today, which requires a leading `/`
+ * and rejects control characters; but this function is exported and presented
+ * as the standalone render-admission rule, so it must not depend on the
+ * ordering of a check it does not itself perform, nor on where the rendering
+ * process happens to be standing. Config LOAD compatibility is untouched: this
+ * is a render-admission rule, not a shape rule, so an instance carrying such a
+ * value still loads.
+ *
+ * Messages name the field and the rule only. `LaunchdRenderConfigError` is the
+ * marker for operator-safe render failures, so the offending value is never
+ * echoed. A spelling refusal carries its OWN message, matching the API guard's
+ * wording: telling an operator that `<home>/anchor/../leaf` "must resolve to a
+ * path inside the home directory" points at the wrong fix, because it does.
+ */
+export function assertHomeConfinedRenderOptions(
+  options: LaunchdPlistRenderOptions,
+  homeDir: string = os.homedir(),
+): void {
+  const entries: Array<{ field: string; value: string }> = [];
+  if (options.claudeConfigDir !== undefined) {
+    entries.push({ field: 'service.claudeConfigDir', value: options.claudeConfigDir });
+  }
+  (options.pathPrepend ?? []).forEach((value, index) => {
+    entries.push({ field: `service.pathPrepend[${index}]`, value });
+  });
+
+  for (const { field, value } of entries) {
+    // Fail closed WITHOUT consulting the filesystem or the working directory.
+    if (!isCanonicalAbsolutePath(value)) {
+      throw new LaunchdRenderConfigError(
+        `${field} must be a normalized absolute path within the home directory`,
+      );
+    }
+    let confined: boolean;
+    try {
+      confined = isPhysicallyInsideHome(value, homeDir);
+    } catch {
+      confined = false;
+    }
+    if (!confined) {
+      throw new LaunchdRenderConfigError(
+        `${field} must resolve to a path inside the home directory`,
+      );
+    }
+  }
+}
+
+/**
  * Re-render and reload an existing macOS instance plist.
  *
  * A failed bootout is deliberately terminal rather than being guessed as an
@@ -452,6 +548,7 @@ export async function reconcileLaunchdPlist(
   }
   const renderOptions = options.renderOptions ?? resolveLaunchdPlistRenderOptions(name);
   assertValidLaunchdPlistRenderOptions(renderOptions);
+  assertHomeConfinedRenderOptions(renderOptions);
   // Render once: the drift report always describes exactly the bytes an apply
   // would install.
   const rendered = buildPlist(name, renderOptions);
@@ -494,14 +591,29 @@ export async function reconcileLaunchdPlist(
 /** Install a newly authenticated instance without loading any pre-auth job. */
 async function installLaunchdPlist(name: string): Promise<void> {
   // Resolve (and thereby validate) the instance's render options before any
-  // filesystem mutation so an invalid service block aborts the install whole.
-  // Shape is validated inside the resolver, which throws before anything is
-  // written. An explicit assertion here would be unreachable: this path takes
-  // no caller-supplied renderOptions override, unlike reconcileLaunchdPlist,
-  // so the resolver is always what refuses. The install-time refusal is pinned
-  // by "fails a first install closed when the instance service block is
-  // invalid" in tests/fleet/platform-service-manager.test.ts.
+  // filesystem mutation, so an invalid service block aborts the install whole.
+  // The resolver throws on a bad shape before anything is written, and the
+  // install-time refusal is pinned by "fails a first install closed when the
+  // instance service block is invalid" in
+  // tests/fleet/platform-service-manager.test.ts.
   const renderOptions = resolveLaunchdPlistRenderOptions(name);
+  // This is the second render call site, and until now the only unasserted one:
+  // reconcileLaunchdPlist has always asserted render-option shape, so
+  // assertValidLaunchdPlistRenderOptions had exactly one caller in src/.
+  //
+  // Both rules run here, and they are not redundant. Confinement judges WHERE a
+  // path points; shape judges the string itself. An in-home pathPrepend entry
+  // carrying a ':' passes confinement and still corrupts the colon-separated
+  // PATH, so neither rule subsumes the other.
+  //
+  // The shape assertion is unreachable only while the resolver is the sole
+  // supplier of options, which is true today because this path takes no
+  // caller-supplied override. It becomes load-bearing the moment anything
+  // supplies options the resolver did not validate, and
+  // tests/fleet/platform-install-shape-assertion.test.ts pins that by mocking
+  // the resolver to return options it never checked.
+  assertValidLaunchdPlistRenderOptions(renderOptions);
+  assertHomeConfinedRenderOptions(renderOptions);
   const dest = plistPath(name);
   const previousContents = readExpectedGeneratedLaunchdPlist(name, dest);
   fs.mkdirSync(path.dirname(dest), { recursive: true });

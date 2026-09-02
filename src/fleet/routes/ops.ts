@@ -5,6 +5,7 @@ import * as os from 'node:os';
 import { spawn } from 'node:child_process';
 import { readBody, jsonResponse, requireInstance } from '../../lib/http.ts';
 import {
+  isCanonicalAbsolutePath,
   pathIsAtOrInsideDirectory,
   pathIsInsideDirectory,
   rawAbsolutePath,
@@ -673,7 +674,12 @@ export async function handleDeleteLine(
 
 
 
-function resolveHomeConfinedPath(inputPath: string, res: ServerResponse, error: string): string | null {
+function resolveHomeConfinedPath(
+  inputPath: string,
+  res: ServerResponse,
+  error: string,
+  spellingError: string = error,
+): string | null {
   if (hasUnsupportedTildePrefix(inputPath)) {
     jsonResponse(res, 400, { error });
     return null;
@@ -693,7 +699,9 @@ function resolveHomeConfinedPath(inputPath: string, res: ServerResponse, error: 
   // is the same reject-not-canonicalise rule the service block already applies.
   // A canonical form always exists, and no caller in this repo passes `..`.
   if (!isCanonicalAbsolutePath(expanded)) {
-    jsonResponse(res, 400, { error });
+    // A distinct message: the path may well BE inside home, so telling the
+    // operator it "must be within the home directory" points at the wrong fix.
+    jsonResponse(res, 400, { error: spellingError });
     return null;
   }
   const resolved = path.resolve(expanded);
@@ -773,7 +781,12 @@ function ensureHomeConfinedDirectory(dirPath: string): void {
 function resolveAndValidateCwd(agentOptions: Record<string, unknown>, res: ServerResponse): string | null {
   const cwd = agentOptions.cwd as string;
   if (!cwd.trim()) return cwd; // empty — caller decides whether it's valid
-  const safeCwd = resolveHomeConfinedPath(cwd, res, 'agentOptions.cwd must be within the home directory');
+  const safeCwd = resolveHomeConfinedPath(
+    cwd,
+    res,
+    'agentOptions.cwd must be within the home directory',
+    'agentOptions.cwd must be a normalized absolute path within the home directory',
+  );
   if (safeCwd === null) return null;
   try {
     if (isSamePhysicalDirectory(safeCwd, os.homedir())) {
@@ -819,28 +832,9 @@ function resolveAndValidateAgentCwd(
 }
 
 /**
- * Is this spelling already canonical — absolute, no `.`/`..` component, no
- * redundant separators?
- *
- * Only applied to values that are rendered VERBATIM into the launchd service
- * `PATH`. For those, containment at admission time is not enough: a `..`
- * component is re-resolved by the kernel at exec time against whatever the
- * filesystem looks like then, so a spelling that is in-home today can escape
- * later if any leading component becomes a symlink. Refusing the spelling
- * outright removes that whole class, and costs operators nothing because a
- * canonical form always exists.
- */
-function isCanonicalAbsolutePath(value: string): boolean {
-  if (!value.startsWith('/')) return false;
-  if (value !== path.posix.normalize(value)) return false;
-  return !value.split('/').some((segment) => segment === '.' || segment === '..');
-}
-
-/**
  * Validate a list of filesystem paths as home-confined, returning the accepted
  * canonical paths (never a rewritten value for the caller to persist — callers
- * persist the operator's original spelling, which is why
- * `requireCanonicalSpelling` exists).
+ * persist the operator's original spelling).
  *
  * One helper for both callers: `agentOptions.pluginDirs` and the launchd
  * `service` block ran near-identical loops over the same predicate, so a fix to
@@ -854,24 +848,18 @@ function validateHomeConfinedPathList(
   values: readonly unknown[],
   res: ServerResponse,
   fieldFor: (index: number) => string,
-  options: { requireCanonicalSpelling?: boolean } = {},
 ): string[] | null {
   const accepted: string[] = [];
   for (let i = 0; i < values.length; i++) {
     const field = fieldFor(i);
     const containmentError = `${field} must be within the home directory`;
+    const spellingError = `${field} must be a normalized absolute path within the home directory`;
     const value = values[i];
     if (typeof value !== 'string') {
       jsonResponse(res, 400, { error: containmentError });
       return null;
     }
-    if (options.requireCanonicalSpelling && !isCanonicalAbsolutePath(value)) {
-      jsonResponse(res, 400, {
-        error: `${field} must be a normalized absolute path within the home directory`,
-      });
-      return null;
-    }
-    const safe = resolveHomeConfinedPath(value, res, containmentError);
+    const safe = resolveHomeConfinedPath(value, res, containmentError, spellingError);
     if (safe === null) return null;
     accepted.push(safe);
   }
@@ -883,7 +871,7 @@ function validateHomeConfinedPathList(
  * Writes a 400 response and returns false on the first violation; returns true when valid.
  */
 function validatePluginDirs(dirs: unknown[], res: ServerResponse): boolean {
-  return validateHomeConfinedPathList(dirs, res, () => 'pluginDirs entries') !== null;
+  return validateHomeConfinedPathList(dirs, res, () => 'each pluginDirs entry') !== null;
 }
 
 /**
@@ -892,12 +880,22 @@ function validatePluginDirs(dirs: unknown[], res: ServerResponse): boolean {
  *
  * Deliberately a ROUTE guard rather than a rule in
  * `validateLaunchdServiceConfig` (src/lib/launchd-service-config.ts): that
- * validator is the shared shape contract and also runs on config *load* and on
- * render admission (assertValidLaunchdPlistRenderOptions ->
- * reconcileLaunchdPlist, src/fleet/platform.ts), so rejecting an out-of-home
- * value there would stop an instance that already persisted one from loading
- * at all. Confining at admission closes the ingress for new writes and leaves
- * already-persisted values loadable; sweeping those is separate work.
+ * validator is the shared shape contract and also runs on config *load*, so
+ * rejecting an out-of-home value there would stop an instance that already
+ * persisted one from loading at all.
+ *
+ * This is no longer the only confinement check.
+ * `assertHomeConfinedRenderOptions` (src/fleet/platform.ts) applies the same
+ * rule again at plist RENDER admission, on the reconcile and first-install
+ * paths, so an already-persisted out-of-home value still LOADS but no longer
+ * RENDERS. This guard is the early feedback half: it refuses the write with a
+ * 400 naming the field, while the operator is still at the keyboard, rather
+ * than at the next reconcile.
+ *
+ * The two are not redundant. Admission cannot bind a value whose meaning can
+ * still change: a path admitted while an intermediate segment was absent
+ * resolves to wherever a symlink later created at that segment points, and
+ * admission has already happened by then.
  *
  * Runs after the shared validator, so shape (absolute, bounded, no control
  * characters, no ':') is already guaranteed; the typeof guards are
@@ -915,14 +913,14 @@ function validateServiceHomeConfinement(service: unknown, res: ServerResponse): 
   const claudeConfigDir = block['claudeConfigDir'];
   if (claudeConfigDir !== undefined) {
     if (validateHomeConfinedPathList(
-      [claudeConfigDir], res, () => 'service.claudeConfigDir', { requireCanonicalSpelling: true },
+      [claudeConfigDir], res, () => 'service.claudeConfigDir',
     ) === null) return false;
   }
 
   const pathPrepend = block['pathPrepend'];
   if (Array.isArray(pathPrepend)) {
     if (validateHomeConfinedPathList(
-      pathPrepend, res, (i) => `service.pathPrepend[${i}]`, { requireCanonicalSpelling: true },
+      pathPrepend, res, (i) => `service.pathPrepend[${i}]`,
     ) === null) return false;
   }
 

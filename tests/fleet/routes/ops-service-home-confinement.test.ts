@@ -711,6 +711,49 @@ describe('service block home-confinement (F3)', () => {
     }
   });
 
+  it('names the SPELLING rule, not containment, when cwd or pluginDirs is non-canonical', async () => {
+    // A `.` component is refused, which is correct, but the message said the
+    // path "must be within the home directory" - and it IS within the home
+    // directory. The operator is told the wrong thing to fix. The service block
+    // already distinguished the two; these two fields did not.
+    const home = homeDir();
+    const nonCanonical = `${home}/./pin/bin`;
+
+    const cwdRes = mockRes();
+    await handleCreateLine(
+      mockReq({
+        method: 'POST',
+        body: JSON.stringify({
+          name: 'spelling-msg-cwd', type: 'agent', adminPhones: ['15551234567'],
+          agentOptions: { cwd: nonCanonical },
+        }),
+      }),
+      cwdRes,
+      makeDeps<any>({}),
+    );
+    expect(cwdRes._status).toBe(400);
+    expect(JSON.parse(cwdRes._body).error).toBe(
+      'agentOptions.cwd must be a normalized absolute path within the home directory',
+    );
+
+    const pluginRes = mockRes();
+    await handleCreateLine(
+      mockReq({
+        method: 'POST',
+        body: JSON.stringify({
+          name: 'spelling-msg-plugindirs', type: 'agent', adminPhones: ['15551234567'],
+          agentOptions: { pluginDirs: [nonCanonical] },
+        }),
+      }),
+      pluginRes,
+      makeDeps<any>({}),
+    );
+    expect(pluginRes._status).toBe(400);
+    expect(JSON.parse(pluginRes._body).error).toBe(
+      'each pluginDirs entry must be a normalized absolute path within the home directory',
+    );
+  });
+
   it('accepts an in-home directory whose name merely starts with dots', async () => {
     // `pathIsInsideDirectory` tested `relative.startsWith('..')`, which also
     // matches a legitimate sibling-free in-home name like `..config`. That is
