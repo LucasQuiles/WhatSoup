@@ -445,11 +445,9 @@ def test_retried_event_carrying_a_prior_attempts_lasterror_still_escalates(tmp_p
     is not matched against event text at all, so a persisted transport error
     naming a pytest root reaches the gate and is ignored.
 
-    The neighbouring case is not this gate's: a persisted ``lastError`` matching
-    a GLOBAL test-leak pattern never reaches F5, because the B2 check at the
-    claim drops the whole event as ``test_leak_dropped`` first. That is
-    pre-existing and behaves identically before #3444 -- verified against
-    ``e460995a`` -- so it is characterised here, not changed.
+    The neighbouring case, a persisted ``lastError`` matching a GLOBAL test-leak
+    pattern, used to be worse and is fixed separately in this change: see
+    ``test_retry_with_a_path_bearing_transport_error_is_not_archived_as_a_leak``.
     """
     stale = "socket missing: /tmp/pytest-of-runner/pytest-12/whatsoup.sock"
     with _state_root_outside_test_roots() as state_root:
@@ -482,31 +480,133 @@ def test_retried_event_carrying_a_prior_attempts_lasterror_still_escalates(tmp_p
         assert "email_fallback_test_provenance_suppressed" not in _dispatch_log_types(paths)
 
 
-def test_persisted_lasterror_matching_a_global_pattern_is_dropped_at_the_claim(tmp_path: Path):
-    """Characterisation, not a contract this branch introduces or changes.
+# --------------------------------------------------------------------------
+# producer_claim: the single input to every test-provenance decision
+# --------------------------------------------------------------------------
 
-    Documents where the neighbouring F5 case actually goes: a retried event
-    whose persisted ``delivery.lastError`` matches a GLOBAL test-leak pattern is
-    dropped by the B2 check at the claim and never reaches the email gate. The
-    email fallback is not consulted, so this is not a fallback suppression.
 
-    Verified identical at ``e460995a``, before the gate changes. If the B2 rule
-    is ever narrowed to producer-claimed content, this test should be updated
-    with that change rather than treated as a regression.
+def test_producer_claim_drops_dispatcher_bookkeeping_and_keeps_the_payload():
+    mod = _load_module({"BOT_ERRORS_STATE_DIR": _CLEAN_STATE_DIR})
+    event = _event(
+        delivery={"attempts": 2, "status": "queued", "nextAttemptAtEpoch": 0, "lastError": _SOCKET_MISSING_ERROR},
+        diagnostics={"dispatchLog": "/state/logs/dispatch.jsonl", "omitDispatchLogInMessage": True},
+    )
+
+    claim = mod.producer_claim(event)
+
+    assert "delivery" not in claim
+    assert "dispatchLog" not in claim["diagnostics"]
+    # Everything the producer actually said survives, including its own
+    # diagnostics keys -- stripping is scoped to what the dispatcher writes.
+    assert claim["diagnostics"] == {"omitDispatchLogInMessage": True}
+    for field in ("id", "eventType", "severity", "source", "instance", "machine", "summary", "evidence"):
+        assert claim[field] == event[field]
+    # Independent copy: the live event is untouched and later mutation cannot
+    # reach the claim.
+    assert event["delivery"]["lastError"] == _SOCKET_MISSING_ERROR
+    event["evidence"] = "mutated after the claim"
+    assert claim["evidence"] != "mutated after the claim"
+
+
+def test_producer_claim_still_exposes_a_genuine_leak_in_producer_fields():
+    # The stripping must not blunt detection: a real fixture event declares
+    # itself in producer-owned fields, and all of those are preserved.
+    mod = _load_module({"BOT_ERRORS_STATE_DIR": _CLEAN_STATE_DIR})
+    for field in ("evidence", "summary"):
+        leaked = _event(**{field: "authDir: /tmp/wa-test-auth/creds.json unreadable"})
+        assert mod.matched_test_leak_pattern(mod.producer_claim(leaked)) is not None, field
+    nested = _event(diagnostics={"logHints": ["see /tmp/wa-test-auth/creds.json"]})
+    assert mod.matched_test_leak_pattern(mod.producer_claim(nested)) is not None
+
+
+def _run_attempts(mod, paths, tmp_path: Path, errors: list[str]):
+    """Drive process_one once per entry in `errors`, following the requeue."""
+    results = []
+    calls = {"n": 0}
+
+    def failing_send(_text: str) -> None:
+        index = calls["n"]
+        calls["n"] += 1
+        raise RuntimeError(errors[index])
+
+    for _ in errors:
+        queued = sorted(paths["outbox"].glob("*evt-email-provenance*"))
+        if not queued:
+            results.append((None, "not-queued", 0))
+            break
+        with patch.object(mod, "send_whatsapp", side_effect=failing_send), \
+             patch.object(mod, "EMAIL_FALLBACK", _executable_fallback(tmp_path)), \
+             patch.object(mod, "email_fallback", return_value=True) as fallback:
+            ok, detail = mod.process_one(queued[0], paths)
+        results.append((ok, detail, fallback.call_count))
+    return results
+
+
+def test_retry_with_a_path_bearing_transport_error_is_not_archived_as_a_leak(tmp_path: Path):
+    """A genuine alert must survive a transport error that names a fixture path.
+
+    The multi-attempt case, starting where a real event starts: attempt 0, clean
+    producer payload, production-like state root. The transport fails on the
+    first attempt with a message shipped code actually raises,
+    ``RuntimeError(f"socket missing: {socket_path}")``, and that socket sits
+    under a test-fixture path.
+
+    ``mark_failure`` writes that string into ``delivery.lastError``, and the
+    retry path publishes the mutated event back to the queued file. Deriving the
+    B2 verdict from the live event therefore made attempt 2 read the
+    dispatcher's own text and ARCHIVE the alert as a test leak: destroyed, not
+    delayed, with the email fallback never reached. Verified identical at
+    ``e460995a`` and at ``c6a00805``, so this predates the gate work; it is the
+    same class #3404 exists to close, through the queue gate rather than the
+    email gate.
+
+    Both gates now read ``producer_claim`` only, so the alert survives to the
+    fallback threshold and escalates.
     """
     with _state_root_outside_test_roots() as state_root:
         mod = _load_module({
             "BOT_ERRORS_STATE_DIR": str(state_root),
             "BOT_ERRORS_DELIVERY_MAX_ATTEMPTS": "10",
         })
-        retried = _event(delivery={
-            "attempts": 2,
-            "status": "queued",
-            "nextAttemptAtEpoch": 0,
-            "lastError": "socket missing: /tmp/wa-test-auth/whatsoup.sock",
+        assert mod.matched_state_dir_test_root_pattern(state_root) is None, "precondition: production state dir"
+        clean = _event(delivery={"attempts": 0, "status": "queued", "nextAttemptAtEpoch": 0, "lastError": None})
+        assert mod.event_is_test_leak(clean) is False, "precondition: the producer payload is clean"
+        assert mod.event_is_test_leak(mod.mark_failure(_event(), _SOCKET_MISSING_ERROR)) is True, (
+            "precondition: the transport error text alone reads as a leak"
+        )
+
+        paths = mod.setup_dirs()
+        _write_event(paths, clean)
+
+        results = _run_attempts(mod, paths, tmp_path, [
+            _SOCKET_MISSING_ERROR,
+            "bridge unavailable",
+            "bridge unavailable",
+        ])
+
+        details = [detail for _ok, detail, _calls in results]
+        assert "test_leak" not in details, results
+        assert "test_leak_dropped" not in _dispatch_log_types(paths)
+        assert not list(paths["testleak"].glob("*evt-email-provenance*")), "the alert must not be archived"
+        # Attempt 3 is the first at the fallback threshold, and it escalates.
+        assert results[-1][0] is True, results
+        assert results[-1][1] == "email_delivered", results
+        assert results[-1][2] == 1, results
+        assert "email_fallback_test_provenance_suppressed" not in _dispatch_log_types(paths)
+
+
+def test_a_genuine_producer_claimed_leak_is_still_archived_at_the_claim(tmp_path: Path):
+    # Negative control for the test above: narrowing what B2 reads must not
+    # stop it dropping a real fixture event. Same route, same state dir; the
+    # only difference is that the leak is in the producer's own evidence.
+    with _state_root_outside_test_roots() as state_root:
+        mod = _load_module({
+            "BOT_ERRORS_STATE_DIR": str(state_root),
+            "BOT_ERRORS_DELIVERY_MAX_ATTEMPTS": "10",
         })
         paths = mod.setup_dirs()
-        event_path = _write_event(paths, retried)
+        leaked = _event(evidence="authDir: /tmp/wa-test-auth/creds.json unreadable")
+        event_path = _write_event(paths, leaked)
 
         with patch.object(mod, "send_whatsapp", side_effect=RuntimeError("bridge unavailable")), \
              patch.object(mod, "EMAIL_FALLBACK", _executable_fallback(tmp_path)), \
@@ -516,3 +616,46 @@ def test_persisted_lasterror_matching_a_global_pattern_is_dropped_at_the_claim(t
         assert (ok, detail) == (False, "test_leak")
         assert fallback.call_count == 0
         assert "test_leak_dropped" in _dispatch_log_types(paths)
+        assert len(list(paths["testleak"].glob("*evt-email-provenance*"))) == 1
+
+
+def test_state_dir_test_root_match_is_spelling_independent(tmp_path: Path):
+    """A test root must be recognised however the state dir is spelled.
+
+    ``BOT_ERRORS_STATE_DIR`` is taken unnormalised, so a relative value or a
+    symlink into a sandbox would present a clean string for a state root that is
+    really a test root. Matching only the supplied spelling fails OPEN: the test
+    run is allowed to email the operator.
+    """
+    mod = _load_module({"BOT_ERRORS_STATE_DIR": _CLEAN_STATE_DIR})
+    sandbox = tmp_path / "pytest-of-runner" / "pytest-1" / "state"
+    sandbox.mkdir(parents=True)
+    assert mod.matched_state_dir_test_root_pattern(sandbox) is not None, "absolute spelling"
+
+    # A symlink whose own path says nothing about where it points.
+    link = tmp_path / "clean-looking-state"
+    link.symlink_to(sandbox, target_is_directory=True)
+    assert mod.matched_state_dir_test_root_pattern(link) is not None, "symlink alias"
+
+    # A relative spelling of the same directory.
+    previous = os.getcwd()
+    os.chdir(tmp_path / "pytest-of-runner" / "pytest-1")
+    try:
+        assert mod.matched_state_dir_test_root_pattern("state") is not None, "relative spelling"
+    finally:
+        os.chdir(previous)
+
+
+def test_unresolvable_state_dir_blocks_rather_than_allows():
+    # Fail closed: a state directory that cannot be classified must not be
+    # treated as production. Otherwise the failure mode of the check is to
+    # permit exactly what it exists to prevent.
+    mod = _load_module({"BOT_ERRORS_STATE_DIR": _CLEAN_STATE_DIR})
+
+    class Unresolvable:
+        def __fspath__(self) -> str:
+            return "\x00/not/a/real/path"
+
+    matched = mod.matched_state_dir_test_root_pattern(Unresolvable())
+    assert matched == mod.UNRESOLVABLE_STATE_DIR_PATTERN
+    assert mod.email_fallback_blocked_reason(_event(), state_dir=Unresolvable()) == "test_state_dir"
