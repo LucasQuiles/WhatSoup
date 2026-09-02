@@ -3547,3 +3547,40 @@ def test_tombstone_ledger_is_bounded_by_age_and_count(tmp_path: Path):
     assert len(kept) == _mod.RETIRED_HOST_TOMBSTONE_MAX
     # Newest kept, oldest dropped.
     assert "member-000" in kept
+
+
+def test_run_once_refuses_a_queued_action_for_a_host_it_retires_this_cycle(tmp_path: Path, monkeypatch):
+    """The WIRING, pinned at the cycle level.
+
+    consume_action_outbox grows a tombstone guard, but the guard is only
+    reachable if run_once actually hands it state["retiredHosts"]. Reverting
+    that call site to consume_action_outbox(config) leaves every other test
+    green: the guard's own test calls the helper directly with retired_hosts=,
+    and the back-compat test asserts exactly the behaviour the regression
+    produces. This drives a real cycle instead.
+
+    Ordering inside run_once matters here and is part of what this pins:
+    retire_unconfigured_hosts writes the tombstone early, consume_action_outbox
+    runs later in the SAME cycle, so an action queued before the retirement is
+    refused on the very cycle that retires its subject.
+    """
+    config, deps, _ = _roster_retirement_fixture(tmp_path)
+    outbox = _mod.action_outbox_dir(config)
+    outbox.mkdir(parents=True, exist_ok=True, mode=0o700)
+    queued = outbox / "0999-host-retired-member-restart_host-stale.json"
+    _write_json(queued, {"action": "restart_host", "host": "retired-member"})
+
+    executed: list[str] = []
+    monkeypatch.setattr(_mod, "execute_action", lambda action: executed.append(str(action.get("host"))))
+
+    result = _mod.run_once(config, deps)
+
+    # The member is retired this cycle...
+    assert result["retirementEvents"][0]["host"] == "retired-member"
+    state = json.loads(_mod.state_path(config).read_text(encoding="utf-8"))
+    assert "retired-member" in state["retiredHosts"]
+    # ...so its queued remediation must not run.
+    assert executed == [], "a restart queued before the retirement must not execute"
+    assert queued.with_suffix(".retired").exists()
+    assert not queued.exists()
+    assert not queued.with_suffix(".done").exists()
