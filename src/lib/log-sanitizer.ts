@@ -9,7 +9,8 @@
  * - Content-bearing fields (textPreview, message, content, body, prompt, …)
  * - Identity fields (jid, lid, conversationId, phone, email, …)
  * - URL userinfo, query, and fragment components
- * - Error messages and stack traces (replaced with bounded error class)
+ * - Error stack traces (dropped; they carry absolute filesystem paths)
+ * - Error messages (bounded and passed through the same string sanitizer)
  * - Binary buffers (replaced with `[binary]` placeholder)
  *
  * The sanitizer is recursive, cycle-safe (WeakSet), and never throws.
@@ -66,6 +67,31 @@ function sanitizeStringValue(value: string): string {
     .replace(PHONE_RE, '***');
 }
 
+// ─── Bounded diagnostic text ────────────────────────────────────────────────
+
+/**
+ * Byte budget for diagnostic text retained from an Error. Long enough to carry
+ * a real failure message, short enough that a runaway message cannot dominate
+ * a log line. The truncation marker is charged against the same budget, so the
+ * returned string never exceeds this length.
+ */
+const MAX_ERROR_TEXT_LENGTH = 512;
+const TRUNCATION_MARKER = '[truncated]';
+
+/**
+ * Sanitize a diagnostic string, then bound it.
+ *
+ * Order is load-bearing: truncating first can split an email address or cut a
+ * digit run below PHONE_RE's seven-digit floor, leaving behind a fragment the
+ * pattern no longer matches. Sanitizing first means every pattern sees the
+ * whole string.
+ */
+function boundedSanitizedText(value: string): string {
+  const sanitized = sanitizeStringValue(value);
+  if (sanitized.length <= MAX_ERROR_TEXT_LENGTH) return sanitized;
+  return sanitized.slice(0, MAX_ERROR_TEXT_LENGTH - TRUNCATION_MARKER.length) + TRUNCATION_MARKER;
+}
+
 // ─── Recursive sanitizer ────────────────────────────────────────────────────
 
 const MAX_DEPTH = 10;
@@ -110,10 +136,28 @@ export function sanitizeLogValue(
     if (seenSet.has(value as object)) return '[circular]';
     seenSet.add(value as object);
 
-    // Error objects: extract bounded error class, drop message/stack
+    // Error objects: bounded class, bounded sanitized message, no stack.
+    //
+    // The message is the single most useful diagnostic field in the system.
+    // Dropping it made pre-dispatch turn rejections journal
+    // `err: {"errorClass":"Error"}` and nothing else, so the throw site could
+    // not be identified after the fact; two agent-runtime call sites had
+    // already worked around this locally with a sibling `errorMessage` field.
+    //
+    // Key names are deliberate. `message`, `msg` and `name` are all matched by
+    // CONTENT_KEY_RE / IDENTITY_KEY_RE, so diagnostic text must travel under a
+    // key the filters do not match — `errorMessage` also matches the existing
+    // call-site convention in src/runtimes/agent/runtime.ts.
+    //
+    // The stack stays dropped: stacks carry absolute filesystem paths.
     if (value instanceof Error) {
+      const code = (value as Error & { code?: unknown }).code;
       return {
         errorClass: value.constructor.name,
+        errorMessage: boundedSanitizedText(value.message),
+        ...(typeof code === 'string' || typeof code === 'number'
+          ? { errorCode: boundedSanitizedText(String(code)) }
+          : {}),
         ...(value.cause !== undefined
           ? { cause: sanitizeLogValue(value.cause, seenSet, depth + 1) }
           : {}),

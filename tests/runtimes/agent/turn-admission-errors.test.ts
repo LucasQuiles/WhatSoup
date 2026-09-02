@@ -59,15 +59,18 @@ function queueStub(): IOutboundQueue {
 }
 
 describe('typed admission errors survive the log sanitizer', () => {
-  it('each class sanitizes to its own discriminating errorClass', () => {
+  it('each class sanitizes to its own discriminating errorClass and message', () => {
     expect(sanitizeLogValue(new ScopeBlockedByDurableRecoveryError())).toEqual({
       errorClass: 'ScopeBlockedByDurableRecoveryError',
+      errorMessage: 'Runtime turn scope is blocked by outstanding durable recovery',
     });
     expect(sanitizeLogValue(new ScopeBlockedByFinalizationRecoveryError())).toEqual({
       errorClass: 'ScopeBlockedByFinalizationRecoveryError',
+      errorMessage: 'Runtime turn scope is blocked by terminal-finalization recovery state',
     });
     expect(sanitizeLogValue(new PerChatTurnFifoOwnerConflictError('key'))).toEqual({
       errorClass: 'PerChatTurnFifoOwnerConflictError',
+      errorMessage: 'Per-chat runtime turn context FIFO already has an active owner for "key"',
     });
   });
 

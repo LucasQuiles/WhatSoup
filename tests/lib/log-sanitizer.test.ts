@@ -133,23 +133,29 @@ describe('sanitizeLogValue', () => {
     expect(items[1]!.count).toBe(1);
   });
 
-  it('handles Error objects: extracts class, drops message and stack', () => {
+  it('handles Error objects: extracts class and bounded message, drops stack', () => {
+    // Contract change: the message is retained (bounded, string-sanitized) so a
+    // logged rejection is diagnosable. The stack stays dropped.
     const err = new Error(MARKERS.message);
     err.stack = `Error: ${MARKERS.stack}\n    at foo:1:1`;
     const result = sanitizeLogValue({ err }) as Record<string, unknown>;
     const sanitizedErr = result.err as Record<string, unknown>;
     expect(sanitizedErr.errorClass).toBe('Error');
-    expect(JSON.stringify(sanitizedErr)).not.toContain(MARKERS.message);
+    expect(sanitizedErr.errorMessage).toBe(MARKERS.message);
     expect(JSON.stringify(sanitizedErr)).not.toContain(MARKERS.stack);
   });
 
   it('handles Error with cause chain', () => {
+    // Contract change: the cause's message is retained too, bounded and
+    // string-sanitized, so a wrapped failure names its root cause.
     const rootCause = new Error(MARKERS.nestedError);
     const wrapper = new Error('wrapper');
     (wrapper as Error & { cause?: unknown }).cause = rootCause;
     const result = sanitizeLogValue({ err: wrapper }) as Record<string, unknown>;
-    const serialized = JSON.stringify(result);
-    expect(serialized).not.toContain(MARKERS.nestedError);
+    const sanitizedErr = result.err as Record<string, unknown>;
+    const cause = sanitizedErr.cause as Record<string, unknown>;
+    expect(cause.errorClass).toBe('Error');
+    expect(cause.errorMessage).toBe(MARKERS.nestedError);
   });
 
   it('handles circular references without throwing', () => {
@@ -212,11 +218,16 @@ describe('WS-A06 negative canary', () => {
       email: MARKERS.email,
       // URL with sensitive components
       endpoint: MARKERS.url,
-      // Nested error
-      err: Object.assign(new Error(MARKERS.message), {
-        cause: new Error(MARKERS.nestedError),
-        stack: MARKERS.stack,
-      }),
+      // Nested error. The sanitizer now retains a bounded message, so the
+      // canary carries sensitive-shaped text INSIDE the message: that is the
+      // surface this contract change opened, and it must still be scrubbed.
+      err: Object.assign(
+        new Error(`failed for ${MARKERS.email} at ${MARKERS.phone} via ${MARKERS.url} token=${MARKERS.sensitive}`),
+        {
+          cause: new Error(`root cause for ${MARKERS.email}`),
+          stack: MARKERS.stack,
+        },
+      ),
       // Safe metadata that must survive
       event: 'turn_complete',
       stage: 'response',
@@ -237,6 +248,12 @@ describe('WS-A06 negative canary', () => {
     expect(serialized).toContain('turn_complete');
     expect(serialized).toContain('response');
     expect(serialized).toContain('"count":1');
+
+    // The retained diagnostic frame survives, so the marker sweep above is not
+    // passing merely because the error message was dropped again.
+    const sanitizedErr = (sanitized as { err: Record<string, unknown> }).err;
+    expect(sanitizedErr.errorMessage).toContain('failed for');
+    expect((sanitizedErr.cause as Record<string, unknown>).errorMessage).toContain('root cause');
   });
 
   it('third-party child logger payloads are sanitized at the hook level', () => {
@@ -257,5 +274,183 @@ describe('WS-A06 negative canary', () => {
     const captured = JSON.stringify(capturedPayloads[0]);
     expect(captured).not.toContain(MARKERS.sensitive);
     expect(captured).not.toContain(MARKERS.textPreview);
+  });
+});
+
+// ─── Bounded diagnostic error message on the Error branch ───────────────────
+//
+// The sanitizer originally reduced every Error to `{errorClass}`, discarding
+// the message. A pre-dispatch turn rejection therefore journalled
+// `err: {"errorClass":"Error"}` and nothing else, and the throw site could not
+// be identified after the fact. Two call sites in the agent runtime had already
+// worked around this by logging a sibling `errorMessage` field; these tests pin
+// the durable behaviour in the sanitizer itself.
+//
+// The retained text is bounded and passed through the same string sanitizer as
+// every other string value, so URL userinfo/query/fragment, JID, email,
+// phone-shaped digit runs, and prefixed bearer/API-key tokens are still
+// scrubbed. Stacks stay dropped: they carry absolute filesystem paths.
+
+describe('Error branch: bounded diagnostic message', () => {
+  it('keeps a recoverable message for a bare thrown Error', () => {
+    const err = new Error('per-chat runtime turn has no current dispatch owner');
+    const result = sanitizeLogValue({ err }) as Record<string, unknown>;
+    const sanitizedErr = result.err as Record<string, unknown>;
+
+    expect(sanitizedErr.errorClass).toBe('Error');
+    expect(sanitizedErr.errorMessage).toBe(
+      'per-chat runtime turn has no current dispatch owner',
+    );
+  });
+
+  it('carries the message through the shape the turn queue logs', () => {
+    // turn-queue.ts drain() logs `{ err, chatJid }` with no call-site
+    // workaround. This asserts the sanitizer alone makes that line diagnostic.
+    const err = new Error('per-chat runtime turn has no outbound queue');
+    const result = sanitizeLogValue({ err, chatJid: '15550100199@s.whatsapp.net' }) as Record<
+      string,
+      unknown
+    >;
+    const sanitizedErr = result.err as Record<string, unknown>;
+
+    expect(sanitizedErr.errorMessage).toBe('per-chat runtime turn has no outbound queue');
+    // `chatJid` is not matched by IDENTITY_KEY_RE (which covers `chatid`/`chat_id`),
+    // so it is masked by JID_RE during string sanitization rather than dropped by key.
+    expect(result.chatJid).toBe('***');
+  });
+
+  it('reports the subclass name alongside the message', () => {
+    class ScopeBlockedByDurableRecoveryError extends Error {}
+    const err = new ScopeBlockedByDurableRecoveryError('scope is blocked by durable recovery');
+    const result = sanitizeLogValue({ err }) as Record<string, unknown>;
+    const sanitizedErr = result.err as Record<string, unknown>;
+
+    expect(sanitizedErr.errorClass).toBe('ScopeBlockedByDurableRecoveryError');
+    expect(sanitizedErr.errorMessage).toBe('scope is blocked by durable recovery');
+  });
+
+  it('never uses a key the sanitizer redacts by name', () => {
+    // `message`, `msg` and `name` are all matched by CONTENT_KEY_RE or
+    // IDENTITY_KEY_RE. A fix that used one of them would be replaced with
+    // `[redacted]` the moment the object were re-walked.
+    const result = sanitizeLogValue({ err: new Error('boom') }) as Record<string, unknown>;
+    const sanitizedErr = result.err as Record<string, unknown>;
+
+    expect(Object.keys(sanitizedErr)).not.toContain('message');
+    expect(Object.keys(sanitizedErr)).not.toContain('msg');
+    expect(Object.keys(sanitizedErr)).not.toContain('name');
+  });
+
+  it('scrubs secret-shaped and identity-shaped content inside the message', () => {
+    const err = new Error(
+      `auth failed token=${MARKERS.sensitive} for ${MARKERS.email} at ${MARKERS.phone} jid 15550100199@s.whatsapp.net`,
+    );
+    const result = sanitizeLogValue({ err }) as Record<string, unknown>;
+    const sanitizedErr = result.err as Record<string, unknown>;
+    const retained = sanitizedErr.errorMessage as string;
+
+    expect(retained).not.toContain(MARKERS.sensitive);
+    expect(retained).not.toContain(MARKERS.email);
+    expect(retained).not.toContain('15550100199');
+    // The diagnostic frame survives — scrubbing must not blank the whole string.
+    expect(retained).toContain('auth failed');
+  });
+
+  it('bounds the retained message length', () => {
+    const err = new Error('E'.repeat(5000));
+    const result = sanitizeLogValue({ err }) as Record<string, unknown>;
+    const sanitizedErr = result.err as Record<string, unknown>;
+    const retained = sanitizedErr.errorMessage as string;
+
+    expect(retained.length).toBeLessThanOrEqual(512);
+    expect(retained.endsWith('[truncated]')).toBe(true);
+  });
+
+  it('sanitizes before truncating so a boundary cut cannot leak a fragment', () => {
+    // Truncating first would cut the digit run below PHONE_RE's 7-digit floor,
+    // leaving an unmatched fragment in the retained text.
+    const err = new Error(`${'p'.repeat(505)}5550100199 tail`);
+    const result = sanitizeLogValue({ err }) as Record<string, unknown>;
+    const sanitizedErr = result.err as Record<string, unknown>;
+    const retained = sanitizedErr.errorMessage as string;
+
+    expect(retained).not.toContain('5550100');
+    expect(retained.length).toBeLessThanOrEqual(512);
+  });
+
+  it('keeps a bounded sanitized code when the error carries one', () => {
+    const err = Object.assign(new Error('spawn failed'), { code: 'ENOENT' });
+    const result = sanitizeLogValue({ err }) as Record<string, unknown>;
+    const sanitizedErr = result.err as Record<string, unknown>;
+
+    expect(sanitizedErr.errorCode).toBe('ENOENT');
+  });
+
+  it('omits the code key when the error has none', () => {
+    const result = sanitizeLogValue({ err: new Error('no code here') }) as Record<string, unknown>;
+    const sanitizedErr = result.err as Record<string, unknown>;
+
+    expect(Object.keys(sanitizedErr)).not.toContain('errorCode');
+  });
+
+  it('still drops the stack', () => {
+    const err = new Error('stack must not survive');
+    err.stack = `Error: ${MARKERS.stack}\n    at /fixture/src/runtimes/agent/turn-queue.ts:1:1`;
+    const result = sanitizeLogValue({ err }) as Record<string, unknown>;
+    const sanitizedErr = result.err as Record<string, unknown>;
+
+    expect(Object.keys(sanitizedErr)).not.toContain('stack');
+    expect(JSON.stringify(sanitizedErr)).not.toContain(MARKERS.stack);
+    expect(JSON.stringify(sanitizedErr)).not.toContain('/fixture/src/runtimes');
+  });
+
+  it('keeps a bounded message on a nested cause', () => {
+    const rootCause = new Error('root cause text');
+    const wrapper = new Error('wrapper text', { cause: rootCause });
+    const result = sanitizeLogValue({ err: wrapper }) as Record<string, unknown>;
+    const sanitizedErr = result.err as Record<string, unknown>;
+    const cause = sanitizedErr.cause as Record<string, unknown>;
+
+    expect(sanitizedErr.errorMessage).toBe('wrapper text');
+    expect(cause.errorMessage).toBe('root cause text');
+  });
+});
+
+// ─── Real-sink coverage: the message survives pino's serializer pipeline ────
+
+describe('Error branch reaches a real pino sink', () => {
+  it('a thrown Error arrives at the sink with a recoverable message', async () => {
+    const pino = (await import('pino')).default;
+    const { errorLikeSerializers } = await import('../../src/logger.ts');
+    const { sanitizingLogHook } = await import('../../src/lib/log-sanitizer.ts');
+
+    const lines: string[] = [];
+    const sink = {
+      write(chunk: string) {
+        lines.push(chunk);
+      },
+    };
+    const logger = pino(
+      {
+        level: 'info',
+        serializers: errorLikeSerializers,
+        hooks: { logMethod: sanitizingLogHook } as never,
+      },
+      sink,
+    );
+
+    try {
+      throw new Error('per-chat runtime turn has no current dispatch owner');
+    } catch (err) {
+      logger.warn({ err, chatJid: '15550100199@s.whatsapp.net' }, 'turn processor error');
+    }
+
+    expect(lines).toHaveLength(1);
+    const record = JSON.parse(lines[0]!) as { err: Record<string, unknown> };
+    expect(record.err.errorClass).toBe('Error');
+    expect(record.err.errorMessage).toBe(
+      'per-chat runtime turn has no current dispatch owner',
+    );
+    expect(lines[0]).not.toContain('15550100199');
   });
 });
