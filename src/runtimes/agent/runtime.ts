@@ -2530,6 +2530,8 @@ export class AgentRuntime implements Runtime {
       get operationTracker() { return runtime.operationTracker; },
       set operationTracker(value) { runtime.operationTracker = value; },
       sendDirect: (chatJid, text) => runtime.sendDirect(chatJid, text),
+      // F2a (#2121): the id-bearing send, used by the pin-receipt path only.
+      sendDirectWithReceipt: (chatJid, text) => runtime.sendDirectWithReceipt(chatJid, text),
       resolveRouteForTurn: (chatJid, actorJid) => runtime.resolveRouteForTurn(chatJid, actorJid),
       resolvePerChatMapKey: (chatJid) => runtime.resolvePerChatMapKey(chatJid),
       routeSessionProviderConfig: (route) => runtime.routeSessionProviderConfig(route),

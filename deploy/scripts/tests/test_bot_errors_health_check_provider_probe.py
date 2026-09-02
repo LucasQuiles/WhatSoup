@@ -181,10 +181,10 @@ def test_provider_credential_probe_item_false_overrides_profile_and_env_unlock(m
 
 
 def test_fleet_api_default_url_uses_configured_bind_address(monkeypatch):
-    monkeypatch.setenv("FLEET_BIND_ADDRESS", "100.91.13.7")
+    monkeypatch.setenv("FLEET_BIND_ADDRESS", "192.0.2.10")
     monkeypatch.delenv("BOT_ERRORS_FLEET_API_PORT", raising=False)
 
-    assert _mod.fleet_api_default_url({}) == "http://100.91.13.7:9099"
+    assert _mod.fleet_api_default_url({}) == "http://192.0.2.10:9099"
 
 
 def test_fleet_api_default_url_uses_loopback_for_wildcard_bind(monkeypatch):
@@ -204,7 +204,7 @@ def test_fleet_api_default_url_brackets_ipv6_bind(monkeypatch):
 
 
 def test_fleet_api_inventory_explicit_url_still_wins(monkeypatch):
-    monkeypatch.setenv("FLEET_BIND_ADDRESS", "100.91.13.7")
+    monkeypatch.setenv("FLEET_BIND_ADDRESS", "192.0.2.10")
     monkeypatch.setenv("BOT_ERRORS_FLEET_API_URL", "http://127.0.0.1:18080/api/instances")
     monkeypatch.setenv("BOT_ERRORS_DRY_FLEET_TOKEN_JSON", '{"active":"token","accept":[]}')
     monkeypatch.setenv("BOT_ERRORS_DRY_FLEET_API_STATUS", "200")
