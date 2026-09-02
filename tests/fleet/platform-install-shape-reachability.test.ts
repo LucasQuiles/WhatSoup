@@ -136,8 +136,17 @@ describe.runIf(process.env.WHATSOUP_REACHABILITY_PROBE === '1')(
   });
 
   it('DEAD-PROBE: unvalidated shape-invalid options pass the install site unchallenged', async () => {
-    // Passes under A. Fails under B, where the restored assertion catches them.
+    // Passes under A. Fails under B, where the shape assertion catches them.
+    //
+    // "No error" alone would be a weak terminal assertion: it also holds if the
+    // install never ran at all. So this asserts the install actually PROCEEDED
+    // past the assertion site and rendered the invalid entry into the plist,
+    // which is what "unchallenged" has to mean for the probe to say anything.
     const { error } = await runInstall();
     expect(error, 'install should NOT have refused on shape').toBeNull();
+    expect(fsMocks.writeFileSync, 'the plist must actually have been written').toHaveBeenCalled();
+    const written = String(fsMocks.writeFileSync.mock.calls[0]?.[1]);
+    expect(written, 'the shape-invalid entry must have reached the rendered PATH')
+      .toContain(`${SERVICE_HOME}/pin:bin`);
   });
 });
