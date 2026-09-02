@@ -7884,13 +7884,18 @@ export class AgentRuntime implements Runtime {
     // worse than the wedge this repair replaces. `setOwnedPerChatSession`
     // refuses the same situation, so refuse it here rather than disagree with
     // it. Only a registered owner that is itself provably terminated, or no
-    // registered owner at all, may be released.
+    // ownership record at all, may be released.
+    //
+    // The two arms are deliberately asymmetric. NO record is the field wedge
+    // this repair exists for, and it evicts. A record naming a manager the
+    // index cannot produce is a different shape: absence from a secondary index
+    // is not a termination proof, and releasing on it would spawn a second
+    // provider for a generation nobody proved had stopped. That fails closed.
     const owner = this.sessionOwnership.get(mapKey);
-    const registeredOwner = owner === undefined
-      ? undefined
-      : this.ownedSessionManagers.get(owner.managerId);
-    if (registeredOwner !== undefined && !this.isSessionProvablyTerminated(registeredOwner)) {
-      return false;
+    if (owner !== undefined) {
+      const registeredOwner = this.ownedSessionManagers.get(owner.managerId);
+      if (registeredOwner === undefined) return false;
+      if (!this.isSessionProvablyTerminated(registeredOwner)) return false;
     }
     log.warn(
       { mapKey, hasOwner: owner !== undefined },

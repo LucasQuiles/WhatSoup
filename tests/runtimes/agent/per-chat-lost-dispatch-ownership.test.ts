@@ -155,8 +155,14 @@ function installUnownedSession(
 ): ReturnType<typeof sessionStub> {
   const session = exitedSessionStub();
   if (ownedByOtherManager) {
-    const strandedOwner = state.managerIdFor(sessionStub());
-    state.sessionOwnership.claim(MAP_KEY, strandedOwner);
+    // The registry names a DIFFERENT manager. Register it, provably terminated:
+    // an ownership record whose manager the index cannot produce is now refused
+    // as unproven, so the mismatch shape has to carry a manager whose
+    // termination IS proven for recovery to be the correct outcome.
+    const strandedOwner = exitedSessionStub();
+    const strandedOwnerId = state.managerIdFor(strandedOwner);
+    state.ownedSessionManagers.set(strandedOwnerId, strandedOwner);
+    state.sessionOwnership.claim(MAP_KEY, strandedOwnerId);
   }
   state.chatSessions.set(MAP_KEY, session);
   state.chatQueues.set(MAP_KEY, queueStub(deliveryJid));
@@ -404,6 +410,36 @@ describe('per-chat session entry whose dispatch ownership was lost', () => {
       expect(vi.mocked(owner.shutdown)).not.toHaveBeenCalled();
       expect(state.ownedSessionManagers.get(ownerId)).toBe(owner);
       expect(state.sessionOwnership.get(MAP_KEY)?.managerId).toBe(ownerId);
+      expect(state.chatSessions.get(MAP_KEY)).toBe(deadMapped);
+      expect(state.perChatSessionsWithoutOwner()).toEqual([MAP_KEY]);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('does not release an ownership record whose manager the index cannot produce', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const { state } = makePerChatRuntime(db);
+      const runtimeContext = context('per_chat', MAP_KEY, 532, 'turn-unindexed-registry-owner');
+      const deliveryJid = runtimeContext.identity.deliveryJid;
+
+      // The registry names manager B, but the manager index has no entry for
+      // it. Nothing here proves B stopped; releasing on that absence would
+      // orphan B and spawn a replacement beside it.
+      const unindexedOwnerId = state.managerIdFor(sessionStub());
+      state.sessionOwnership.claim(MAP_KEY, unindexedOwnerId);
+      const deadMapped = exitedSessionStub();
+      state.chatSessions.set(MAP_KEY, deadMapped);
+      state.chatQueues.set(MAP_KEY, queueStub(deliveryJid));
+      const spawned = stubSpawnAndClaim(state, deliveryJid);
+
+      await expect(dispatchTurn(state, runtimeContext)).rejects.toThrow();
+
+      expect(vi.mocked(state.ensureSessionAndQueueSync)).not.toHaveBeenCalled();
+      expect(vi.mocked(spawned.sendTurn)).not.toHaveBeenCalled();
+      expect(state.sessionOwnership.get(MAP_KEY)?.managerId).toBe(unindexedOwnerId);
       expect(state.chatSessions.get(MAP_KEY)).toBe(deadMapped);
       expect(state.perChatSessionsWithoutOwner()).toEqual([MAP_KEY]);
     } finally {
