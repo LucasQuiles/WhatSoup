@@ -50,6 +50,14 @@
       "grantedAt": "2026-08-13",
       "expiresAt": "2026-08-27",
       "admitsNewIdentities": true
+    },
+    {
+      "path": "scripts/fault-taxonomy-source-coverage-baseline.json",
+      "maxWeight": 21,
+      "reason": "Honest re-measurement, not new debt: the source-coverage guard's extractor never saw Python producers, so the committed 0 was an extraction artifact. The extractor now reads every Python `source=` form and claims every non-literal one; the 21 entries (13 literal unregistered sources + 8 dynamic families) are pre-existing emitters recorded as tolerated debt with owner and reason, exactly as the registry's tolerates line describes. Self-spending cap at the exact measured weight (0 -> 21); no further growth authorized. Payback = registering each source's disposition through review (a disposition is a paging contract and is not invented in bulk), which shrinks this baseline back toward 0.",
+      "issue": "https://github.com/LucasQuiles/WhatSoup/issues/2147",
+      "grantedAt": "2026-09-02",
+      "expiresAt": "2026-09-16"
     }
   ]
 }
