@@ -106,7 +106,7 @@ const ENV_KEY_MARKER = '<key>EnvironmentVariables</key>';
  * Held as SOURCE, not as a RegExp: a module-scope /g pattern carries lastIndex
  * between calls and one comparison parses two plists.
  */
-const DICT_OPEN_TOKEN_SOURCE = '<dict(?=[\\s/>])';
+const DICT_OPEN_TOKEN_SOURCE = '<dict(?=[ \\t\\r\\n/>])';
 /**
  * What this reader will PARSE is narrower than what it DETECTS: plain,
  * whitespace-padded and self-closing only. An attributed dict is refused rather
@@ -115,9 +115,14 @@ const DICT_OPEN_TOKEN_SOURCE = '<dict(?=[\\s/>])';
  * pairs, injecting a governed key from inside a tag. plist(5) dicts carry no
  * attributes, so refusing costs nothing and fails closed.
  */
-const DICT_OPEN_SOURCE = '<dict\\s*(/?)>';
-const DICT_CLOSE_SOURCE = '</dict\\s*>';
-const CDATA_OPEN = '<![CDATA[';
+const DICT_OPEN_SOURCE = '<dict[ \\t\\r\\n]*(/?)>';
+const DICT_CLOSE_SOURCE = '</dict[ \\t\\r\\n]*>';
+/**
+ * XML whitespace is exactly these four characters. \s and String.trim() also
+ * accept \v, \f and the Unicode spaces, which the system plist parser rejects,
+ * so a plist this comparator called well-formed could be one launchd refuses.
+ */
+const XML_SPACE_ONLY = /^[ \t\r\n]*$/;
 
 /**
  * Extract the EnvironmentVariables dict as a key -> value map. Returns an
@@ -161,18 +166,30 @@ function parseEnvironmentVariables(plist: string): Map<string, string> | null {
   // plist's own dicts are out of scope.
   const nestedPattern = new RegExp(DICT_OPEN_TOKEN_SOURCE, 'g');
   if (nestedPattern.exec(body) !== null) return null;
-  // A CDATA section is a shape this comparator does not model, and the pair
-  // pattern below cannot match across one because CDATA contains '<'. The key
-  // would vanish from the map rather than read wrong, so a governed key present
-  // on disk would compare as absent -- while the system parser accepts CDATA.
-  // Refuse it, under the same fail-closed rule as a nested dict.
-  if (body.includes(CDATA_OPEN)) return null;
-
+  // THE BODY MUST BE FULLY CONSUMED BY THE PAIRS.
+  //
+  // Extracting adjacent key/string pairs and ignoring the rest is what made a
+  // governed key vanish: any token interposed between a key and its string, or
+  // any entry this pattern does not model, left the pair unmatched and the key
+  // absent from the map. Here that also emptied droppedNonGovernedKeys, so an
+  // apply proceeded as though the installed plist had no non-governed keys to
+  // drop and deleted them. Every byte of the body is therefore accounted for:
+  // whatever is not a matched pair and not XML whitespace fails closed.
   const env = new Map<string, string>();
-  const pair = /<key>([^<]*)<\/key>\s*<string>([^<]*)<\/string>/g;
+  const pair = /<key>([^<]*)<\/key>[ \t\r\n]*<string>([^<]*)<\/string>/g;
+  let consumed = 0;
   for (const match of body.matchAll(pair)) {
-    env.set(unescapeXml(match[1] ?? ''), unescapeXml(match[2] ?? ''));
+    const start = match.index ?? 0;
+    if (!XML_SPACE_ONLY.test(body.slice(consumed, start))) return null;
+    const key = unescapeXml(match[1] ?? '');
+    // A duplicate key is refused, not resolved. This comparator took the LAST
+    // occurrence and the Python reader took the FIRST, so the two disagreed
+    // about the same file. Refusing settles it on both sides.
+    if (env.has(key)) return null;
+    env.set(key, unescapeXml(match[2] ?? ''));
+    consumed = start + match[0].length;
   }
+  if (!XML_SPACE_ONLY.test(body.slice(consumed))) return null;
   return env;
 }
 

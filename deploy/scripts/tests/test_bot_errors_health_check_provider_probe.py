@@ -1000,9 +1000,15 @@ def test_instance_plist_environment_fails_closed_on_a_nested_dict(monkeypatch, t
     assert _mod.instance_provider_path("agent-alpha") is None
 
 
-def test_instance_plist_environment_keeps_the_first_duplicate_key(monkeypatch, tmp_path):
-    # The single-key re.search this reader replaced returned the FIRST match; a
-    # hand-edited plist with two PATH keys must not resolve differently now.
+def test_instance_plist_environment_refuses_a_duplicate_key(monkeypatch, tmp_path):
+    """A duplicate key is refused rather than resolved. Contract CHANGE.
+
+    This reader took the FIRST occurrence and the TypeScript comparator took the
+    LAST, so the two disagreed about the same file and neither matched a parser
+    with its own precedence. Refusing settles the asymmetry on both sides, and
+    it is the fail-closed direction: an operator is told the plist is ambiguous
+    instead of one of two tools quietly picking a different value.
+    """
     _arm_darwin_plist(
         monkeypatch,
         tmp_path,
@@ -1010,7 +1016,8 @@ def test_instance_plist_environment_keeps_the_first_duplicate_key(monkeypatch, t
         {"PATH": "/fixture/second/bin"},
         duplicate_path="/fixture/first/bin",
     )
-    assert _mod.instance_provider_path("agent-alpha") == "/fixture/first/bin"
+    assert _mod.instance_plist_environment("agent-alpha") is None
+    assert _mod.instance_provider_path("agent-alpha") is None
 
 
 def test_path_starts_with_entries_compares_whole_entries_including_empties():
@@ -1697,17 +1704,43 @@ def test_default_provider_probe_does_not_spawn_when_a_nested_dict_hides_the_prep
 # carry it. Both readers now refuse a CDATA opener inside the EnvironmentVariables
 # block, under the same fail-closed rule as a nested dict.
 
-CDATA_CELLS = {
-    "value_on_prepend": [
+# The silent-absence class. Each cell is a VALID plist the system parser accepts
+# and launchd loads, which the pair-extraction reader turned into a missing
+# governed key. The first is delta-introduced by the non-"<" pair class; the
+# next four pre-date this branch. Duplicate and unpaired keys are the same
+# structural failure reached from the other direction.
+SILENT_ABSENCE_CELLS = {
+    "cdata_value": [
         '    <key>PATH</key><string>{path}</string>',
         '    <key>WHATSOUP_PATH_PREPEND</key><string><![CDATA[{prepend}]]></string>',
     ],
-    "value_on_path": [
-        '    <key>PATH</key><string><![CDATA[{path}]]></string>',
+    "cdata_key_name": [
+        '    <key><![CDATA[PATH]]></key><string>{path}</string>',
         '    <key>WHATSOUP_PATH_PREPEND</key><string>{prepend}</string>',
     ],
-    "key_name": [
-        '    <key><![CDATA[PATH]]></key><string>{path}</string>',
+    "comment_between_key_and_string": [
+        '    <key>PATH</key><string>{path}</string>',
+        '    <key>WHATSOUP_PATH_PREPEND</key><!-- operator note --><string>{prepend}</string>',
+    ],
+    "processing_instruction_between_key_and_string": [
+        '    <key>PATH</key><string>{path}</string>',
+        '    <key>WHATSOUP_PATH_PREPEND</key><?ide fold?><string>{prepend}</string>',
+    ],
+    "whitespace_in_key_end_tag": [
+        '    <key>PATH</key><string>{path}</string>',
+        '    <key>WHATSOUP_PATH_PREPEND</key ><string>{prepend}</string>',
+    ],
+    "whitespace_in_string_start_tag": [
+        '    <key>PATH</key><string>{path}</string>',
+        '    <key>WHATSOUP_PATH_PREPEND</key><string >{prepend}</string>',
+    ],
+    "unpaired_key": [
+        '    <key>PATH</key><string>{path}</string>',
+        '    <key>WHATSOUP_PATH_PREPEND</key>',
+    ],
+    "duplicate_key": [
+        '    <key>PATH</key><string>{path}</string>',
+        '    <key>PATH</key><string>/fixture/other/bin</string>',
         '    <key>WHATSOUP_PATH_PREPEND</key><string>{prepend}</string>',
     ],
 }
@@ -1738,19 +1771,24 @@ def _write_plist_with_raw_entries(home: Path, name: str, entries: list[str]) -> 
     return target
 
 
-@pytest.mark.parametrize("cell", sorted(CDATA_CELLS))
-def test_plist_reader_refuses_a_cdata_section(monkeypatch, tmp_path, cell):
-    """All three CDATA cells must fail closed, not silently drop a key."""
+@pytest.mark.parametrize("cell", sorted(SILENT_ABSENCE_CELLS))
+def test_plist_reader_refuses_every_silent_absence_cell(monkeypatch, tmp_path, cell):
+    """Every cell must fail closed rather than drop a governed key.
+
+    The rule under test is general: the body must be fully consumed by matched
+    key/string pairs and XML whitespace. These cells are the spellings that
+    reached a real plist, not the definition of the rule.
+    """
     environment = _matrix_environment(tmp_path)
     _arm_darwin_host(monkeypatch, tmp_path)
     entries = [
         line.format(path=environment["PATH"], prepend=environment["WHATSOUP_PATH_PREPEND"])
-        for line in CDATA_CELLS[cell]
+        for line in SILENT_ABSENCE_CELLS[cell]
     ]
     _write_plist_with_raw_entries(tmp_path, "agent-alpha", entries)
 
     assert _mod.instance_plist_environment("agent-alpha") is None, (
-        f"{cell}: a CDATA section must be refused, not parsed into a partial map"
+        f"{cell}: must be refused, not parsed into a map missing a governed key"
     )
     assert _mod.instance_plist_governed_environment("agent-alpha") == (
         _mod.GOVERNED_PLIST_UNREADABLE,
@@ -1782,7 +1820,7 @@ def test_plist_reader_still_parses_the_generator_escaped_form(monkeypatch, tmp_p
     assert parsed["PATH"] == "/fixture/pin/bin:/usr/bin"
 
 
-def test_default_provider_probe_does_not_spawn_when_cdata_hides_the_prepend(
+def test_default_provider_probe_does_not_spawn_when_markup_hides_the_prepend(
     monkeypatch, tmp_path
 ):
     """End to end: the cell that made the probe spawn where it must not.
@@ -1933,15 +1971,22 @@ def test_plist_reader_reads_a_self_closing_environment_dict_as_empty(
     )
 
 
-def test_plist_reader_does_not_let_intervening_markup_swallow_a_governed_key(
+def test_plist_reader_refuses_a_non_string_value_in_the_environment(
     monkeypatch, tmp_path
 ):
-    """The key/value pair regex must not span markup.
+    """A non-string entry makes the plist unreadable. Contract CHANGE.
 
-    A dotted non-greedy key group walked THROUGH an unrelated element and
-    matched one bogus pair whose key was the whole run and whose value belonged
-    to the next real key -- so WHATSOUP_PATH_PREPEND read as absent from a plist
-    that declares it, with no nested dict involved.
+    An earlier round asserted this plist was READABLE with the <data> entry
+    skipped. That was the same silent-absence defect in a milder form: the
+    reader decided on its own which entries to ignore, and an entry it ignores
+    is a key it cannot report. launchd's EnvironmentVariables is a dictionary of
+    STRINGS, so a <data> value there is a schema violation; refusing it is the
+    correct contract, and a key paired with a non-string value is structurally
+    the same case as a key separated from its string by markup.
+
+    Deliberately NOT fixed by adding a consume-and-ignore path for
+    <key>..</key><data>..</data>: that would reinstate the reader's licence to
+    skip entries it does not model, which is the defect itself.
     """
     environment = _matrix_environment(tmp_path)
     _arm_darwin_host(monkeypatch, tmp_path)
@@ -1955,13 +2000,11 @@ def test_plist_reader_does_not_let_intervening_markup_swallow_a_governed_key(
         },
     )
 
-    parsed = _mod.instance_plist_environment("agent-alpha")
-    assert parsed is not None, "no nested dict here: the plist is readable"
-    assert parsed.get("PATH") == environment["PATH"]
-    assert parsed.get("WHATSOUP_PATH_PREPEND") == environment["WHATSOUP_PATH_PREPEND"]
-    # The non-string element contributes no pair at all rather than a bogus one.
-    assert "KeepAliveHint" not in parsed
-    assert sorted(parsed) == ["PATH", "WHATSOUP_PATH_PREPEND"]
+    assert _mod.instance_plist_environment("agent-alpha") is None
+    assert _mod.instance_plist_governed_environment("agent-alpha") == (
+        _mod.GOVERNED_PLIST_UNREADABLE,
+        None,
+    )
 
 
 
@@ -2323,14 +2366,22 @@ def test_default_provider_probe_child_carries_no_synthesized_mcp_socket(monkeypa
         seen["child_env"] = kwargs.get("child_env")
         return ("OK", "", 0, False)
 
+    # NON-VACUITY: the loaded job itself carries a socket variable, so an empty
+    # result proves the child env is BUILT from an allowlist rather than merely
+    # that nothing synthesized one. Asserting absence against a source that never
+    # offered the variable could not fail for the right reason.
+    source_environment = dict(environment)
+    source_environment["WHATSOUP_MCP_SOCKET"] = "/fixture/workspace/.claude/whatsoup.sock"
+
     monkeypatch.setattr(_mod, "provider_command_output", _fake_output)
-    monkeypatch.setattr(_mod, "loaded_instance_environment", lambda name: dict(environment))
+    monkeypatch.setattr(_mod, "loaded_instance_environment", lambda name: dict(source_environment))
     _mod.provider_probe_target_inventory({}, {}, "agent-alpha", config, "claude-cli", "primary")
 
     child_env = seen.get("child_env")
     assert child_env is not None, "the probe never reached the provider spawn"
+    assert source_environment["WHATSOUP_MCP_SOCKET"], "fixture must offer the variable"
     assert "WHATSOUP_MCP_SOCKET" not in child_env, (
-        "a diagnostic must not be handed the instance's tool socket"
+        "a diagnostic must not be handed the instance's tool socket, by synthesis or inheritance"
     )
     # Vacuity guard: the allowlist still produced a populated environment.
     assert child_env["PATH"] == _mod.effective_instance_provider_path(environment)
@@ -2406,6 +2457,40 @@ def _spawn_env_and_cwd(args, kwargs):
     child_env = kwargs.get("child_env", args[5] if len(args) > 5 else None)
     child_cwd = kwargs.get("child_cwd", args[6] if len(args) > 6 else None)
     return child_env, child_cwd
+
+
+def test_probe_directory_predicate_rejects_a_descendant_of_the_workspace(tmp_path):
+    """MED-3. A temporary root inside the workspace must not count as outside."""
+    workspace = tmp_path / "workspace"
+    (workspace / "tmp" / "probe").mkdir(parents=True)
+    assert not _mod.probe_directory_is_outside_workspace(
+        str(workspace / "tmp" / "probe"), str(workspace)
+    )
+    assert not _mod.probe_directory_is_outside_workspace(str(workspace), str(workspace))
+    # A sibling whose name merely starts with the workspace path is NOT inside it.
+    sibling = tmp_path / "workspace-other"
+    sibling.mkdir()
+    assert _mod.probe_directory_is_outside_workspace(str(sibling), str(workspace))
+
+
+def test_probe_directory_predicate_resolves_symlinks_before_deciding(tmp_path):
+    """A symlinked temporary root that lands inside the workspace is refused.
+
+    This is the case a string comparison cannot see: the probe path looks
+    unrelated until both sides are resolved.
+    """
+    workspace = tmp_path / "workspace"
+    (workspace / "inner").mkdir(parents=True)
+    link = tmp_path / "looks-neutral"
+    link.symlink_to(workspace / "inner")
+
+    assert not _mod.probe_directory_is_outside_workspace(str(link), str(workspace))
+    # Control: the same link pointing somewhere genuinely outside is accepted.
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    other_link = tmp_path / "also-neutral"
+    other_link.symlink_to(elsewhere)
+    assert _mod.probe_directory_is_outside_workspace(str(other_link), str(workspace))
 
 
 def test_opencode_capability_probes_run_outside_the_instance_workspace(monkeypatch, tmp_path):

@@ -766,6 +766,30 @@ describe('platform service managers', () => {
     expect(childProcessMocks.execFile).toHaveBeenNthCalledWith(1, 'launchctl', ['bootout', `${domain}/com.whatsoup.agent`], expect.any(Function));
   });
 
+  it('refuses an apply when a credential key is hidden behind interposed markup', async () => {
+    // The apply-level consequence of the silent-absence class, and the reason it
+    // is a MUST rather than a probe nit. Pair-extraction dropped the credential
+    // key from the parsed map, droppedNonGovernedKeys came back empty, and the
+    // apply concluded there was nothing to drop -- then regenerated the plist
+    // and deleted the credential. The outer dict is spelled `<dict >`, which
+    // this branch newly made parseable, so the cell is reachable rather than
+    // hypothetical.
+    setPlatform('darwin');
+    const { LaunchdReconcileRefusedError, buildPlist, reconcileLaunchdPlist } = await importPlatform();
+    const observed = buildPlist('agent')
+      .replace('  <key>EnvironmentVariables</key>\n  <dict>', '  <key>EnvironmentVariables</key>\n  <dict >')
+      .replace(
+        '    <key>HOME</key>',
+        '    <key>OPERATOR_API_KEY</key><!-- rotated 2026-08 --><string>fixture-not-a-real-key</string>\n    <key>HOME</key>',
+      );
+    mockReads({ plist: observed, config: { name: 'agent' } });
+
+    await expect(reconcileLaunchdPlist('agent', { dryRun: false }))
+      .rejects.toThrow(LaunchdReconcileRefusedError);
+    // The refusal must happen BEFORE any mutation, or the credential is already gone.
+    expect(fsMocks.writeFileSync).not.toHaveBeenCalled();
+  });
+
   it('refuses an apply when the installed EnvironmentVariables dict is unparseable, unless acknowledged', async () => {
     setPlatform('darwin');
     const { LaunchdReconcileRefusedError, reconcileLaunchdPlist } = await importPlatform();

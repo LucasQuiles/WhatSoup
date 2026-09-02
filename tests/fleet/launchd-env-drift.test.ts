@@ -464,28 +464,64 @@ describe('compareGovernedLaunchdEnv', () => {
     }]);
   });
 
-  // CDATA: the non-'<' pair class cannot match across a CDATA section, so the
-  // key would VANISH from the map rather than read wrong, and a governed key
-  // present on disk would compare as absent. The system parser accepts CDATA.
-  // Both readers refuse it, under the same fail-closed rule as a nested dict.
-  const CDATA_CELLS: Record<string, Record<string, string>> = {
-    value_on_prepend: {
-      PATH: '/opt/bin:/usr/bin',
-      WHATSOUP_PATH_PREPEND: '<![CDATA[/opt/bin]]>',
-    },
-    value_on_path: {
-      PATH: '<![CDATA[/opt/bin:/usr/bin]]>',
-      WHATSOUP_PATH_PREPEND: '/opt/bin',
-    },
+  // The silent-absence class. Each body below is a VALID plist the system
+  // parser accepts, which pair-extraction turned into a MISSING governed key.
+  // Here that also emptied droppedNonGovernedKeys, so an apply proceeded as
+  // though there were no non-governed keys to drop.
+  const SILENT_ABSENCE_BODIES: Record<string, string[]> = {
+    cdata_value: [
+      '    <key>PATH</key><string>/opt/bin:/usr/bin</string>',
+      '    <key>WHATSOUP_PATH_PREPEND</key><string><![CDATA[/opt/bin]]></string>',
+    ],
+    cdata_key_name: [
+      '    <key><![CDATA[PATH]]></key><string>/opt/bin:/usr/bin</string>',
+    ],
+    comment_between_key_and_string: [
+      '    <key>PATH</key><string>/opt/bin:/usr/bin</string>',
+      '    <key>WHATSOUP_PATH_PREPEND</key><!-- note --><string>/opt/bin</string>',
+    ],
+    processing_instruction_between_key_and_string: [
+      '    <key>PATH</key><string>/opt/bin:/usr/bin</string>',
+      '    <key>WHATSOUP_PATH_PREPEND</key><?ide fold?><string>/opt/bin</string>',
+    ],
+    whitespace_in_key_end_tag: [
+      '    <key>PATH</key><string>/opt/bin:/usr/bin</string>',
+      '    <key>WHATSOUP_PATH_PREPEND</key ><string>/opt/bin</string>',
+    ],
+    whitespace_in_string_start_tag: [
+      '    <key>PATH</key><string>/opt/bin:/usr/bin</string>',
+      '    <key>WHATSOUP_PATH_PREPEND</key><string >/opt/bin</string>',
+    ],
+    unpaired_key: [
+      '    <key>PATH</key><string>/opt/bin:/usr/bin</string>',
+      '    <key>WHATSOUP_PATH_PREPEND</key>',
+    ],
+    duplicate_key: [
+      '    <key>PATH</key><string>/opt/bin:/usr/bin</string>',
+      '    <key>PATH</key><string>/opt/other/bin</string>',
+    ],
   };
 
-  it.each(Object.keys(CDATA_CELLS))('fails closed on a CDATA section (%s)', (cell) => {
+  function plistWithRawEnvBody(entries: string[]): string {
+    return [
+      '<?xml version="1.0" encoding="UTF-8"?>',
+      '<plist version="1.0">',
+      '<dict>',
+      '  <key>EnvironmentVariables</key>',
+      '  <dict>',
+      ...entries,
+      '  </dict>',
+      '</dict>',
+      '</plist>',
+      '',
+    ].join('\n');
+  }
+
+  it.each(Object.keys(SILENT_ABSENCE_BODIES))('fails closed on %s', (cell) => {
     const expected = plistWithSpelledEnv({
       env: { PATH: '/opt/bin:/usr/bin', WHATSOUP_PATH_PREPEND: '/opt/bin' },
     });
-    // plistWithSpelledEnv writes the value verbatim, so the CDATA markup lands
-    // in the document rather than being escaped.
-    const observed = plistWithSpelledEnv({ env: CDATA_CELLS[cell] as Record<string, string> });
+    const observed = plistWithRawEnvBody(SILENT_ABSENCE_BODIES[cell] as string[]);
 
     expect(compareGovernedLaunchdEnv(expected, observed)).toEqual({
       comparable: false,
@@ -495,23 +531,19 @@ describe('compareGovernedLaunchdEnv', () => {
     });
   });
 
-  it('fails closed on a CDATA section in a KEY name', () => {
+  it('reports a non-governed key it can see, so the refusal is not blanket', () => {
+    // Positive control for the class above: a body the reader DOES fully consume
+    // still enumerates its non-governed keys, which is what an apply relies on.
     const expected = plistWithSpelledEnv({ env: { PATH: '/opt/bin:/usr/bin' } });
-    const observed = [
-      '<?xml version="1.0" encoding="UTF-8"?>',
-      '<plist version="1.0">',
-      '<dict>',
-      '  <key>EnvironmentVariables</key>',
-      '  <dict>',
-      '    <key><![CDATA[PATH]]></key>',
-      '    <string>/opt/bin:/usr/bin</string>',
-      '  </dict>',
-      '</dict>',
-      '</plist>',
-      '',
-    ].join('\n');
+    const observed = plistWithRawEnvBody([
+      '    <key>PATH</key><string>/opt/bin:/usr/bin</string>',
+      '    <key>OPERATOR_SECRET</key><string>keep-me</string>',
+    ]);
 
-    expect(compareGovernedLaunchdEnv(expected, observed).comparable).toBe(false);
+    const comparison = compareGovernedLaunchdEnv(expected, observed);
+    expect(comparison.comparable).toBe(true);
+    expect(comparison.droppedNonGovernedKeys).toEqual(['OPERATOR_SECRET']);
+    expect(JSON.stringify(comparison)).not.toContain('keep-me');
   });
 
   it('still parses the generator-escaped form, which is not CDATA', () => {

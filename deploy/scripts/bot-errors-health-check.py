@@ -4240,16 +4240,23 @@ PLIST_ENVIRONMENT_KEY_MARKER = "<key>EnvironmentVariables</key>"
 # governed key declared AFTER the nested dict read as absent rather than as
 # unknown. The lookahead keeps a hypothetical `<dictionary>` out.
 # DETECTION is broad: any dict opening token at all, whatever it carries.
-PLIST_DICT_OPEN_TOKEN_RE = re.compile(r"<dict(?=[\s/>])")
+PLIST_DICT_OPEN_TOKEN_RE = re.compile(r"<dict(?=[ \t\r\n/>])")
 # What this reader will PARSE is narrow: plain, whitespace-padded and
 # self-closing. An attributed dict is REFUSED rather than consumed. Consuming to
 # the first ">" would end the token early on a legal `<dict a="x>y">`, and the
 # remainder of the opening tag would then be read as body pairs -- a first-wins
 # injection of a governed key from inside a tag. plist(5) dicts carry no
 # attributes, so refusing costs nothing and fails closed.
-PLIST_DICT_OPEN_RE = re.compile(r"<dict\s*(/?)>")
-PLIST_DICT_CLOSE_RE = re.compile(r"</dict\s*>")
-PLIST_CDATA_OPEN = "<![CDATA["
+PLIST_DICT_OPEN_RE = re.compile(r"<dict[ \t\r\n]*(/?)>")
+PLIST_DICT_CLOSE_RE = re.compile(r"</dict[ \t\r\n]*>")
+# XML whitespace is exactly these four characters. Python's \s and .strip() also
+# accept \x0b, \x0c and the Unicode spaces, which the system plist parser
+# rejects -- so a plist this reader called well-formed could be one launchd
+# refuses to load.
+PLIST_XML_SPACE = " \t\r\n"
+PLIST_ENV_PAIR_RE = re.compile(
+    r"<key>([^<]*)</key>[ \t\r\n]*<string>([^<]*)</string>"
+)
 
 
 def instance_plist_environment(name: str) -> dict[str, str] | None:
@@ -4309,31 +4316,39 @@ def instance_plist_environment(name: str) -> dict[str, str] | None:
     # report unknown rather than hand back a partial map.
     if PLIST_DICT_OPEN_TOKEN_RE.search(block) is not None:
         return None
-    # A CDATA section is a shape this reader does not model, and the pair regex
-    # below cannot match across one because CDATA contains "<". The key would
-    # therefore vanish from the map rather than read wrong, landing the governed
-    # comparison in the benign absent-vs-absent cell -- while the SYSTEM parser
-    # accepts CDATA and launchd loads the value. Refuse it, under the same
-    # fail-closed rule as a nested dict. The generator escapes "<" as an entity
-    # and never emits CDATA, so this costs a hand-edited plist only.
-    if PLIST_CDATA_OPEN in block:
-        return None
+    # THE BODY MUST BE FULLY CONSUMED BY THE PAIRS.
+    #
+    # Extracting adjacent key/string pairs and ignoring the rest is what made a
+    # governed key vanish: any token interposed between a key and its string, or
+    # any entry the pattern does not model, left the pair unmatched and the key
+    # simply absent from the map. Absent on both sides is the benign cell, so the
+    # probe reported agreement while launchd loaded the value. The system parser
+    # accepts all of these spellings; this reader must not silently disagree with
+    # it. So every byte of the body is accounted for: whatever is not a matched
+    # pair and not XML whitespace makes the plist UNREADABLE.
+    #
+    # This is a general rule rather than a list of known-bad tokens, because the
+    # failure is structural. It covers at least a CDATA value, a comment or a
+    # processing instruction between a key and its string, whitespace inside the
+    # </key> or <string> tag, an unpaired key, and a non-string value such as
+    # <data> -- launchd's EnvironmentVariables is a dictionary of STRINGS, so a
+    # non-string value there is a schema violation and refusing it is correct.
     environment: dict[str, str] = {}
-    # `[^<]` rather than `.` with DOTALL: a dotted non-greedy key group spans
-    # intervening markup, so `<key>A</key><data/>…<key>PATH</key><string>v</string>`
-    # parsed as ONE pair whose key was the whole run and whose value belonged to
-    # PATH -- the governed key then read as absent. Values are plain strings and
-    # entities arrive escaped, so neither side legitimately contains a "<".
-    for match in re.finditer(
-        r"<key>([^<]*)</key>\s*<string>([^<]*)</string>", block
-    ):
+    consumed = 0
+    for match in PLIST_ENV_PAIR_RE.finditer(block):
+        if block[consumed:match.start()].strip(PLIST_XML_SPACE):
+            return None
         key = html.unescape(match.group(1))
-        # FIRST occurrence wins, preserving the precedence of the single-key
-        # re.search this reader replaced. A hand-edited plist with a duplicate
-        # key must not resolve differently than it did before the refactor.
+        # A duplicate key is refused rather than resolved. This reader took the
+        # FIRST occurrence and the TypeScript comparator took the LAST, so the
+        # two disagreed about the same file; neither precedence is defensible
+        # against a parser that has its own. Refusing settles it on both sides.
         if key in environment:
-            continue
+            return None
         environment[key] = html.unescape(match.group(2)).strip()
+        consumed = match.end()
+    if block[consumed:].strip(PLIST_XML_SPACE):
+        return None
     return environment
 
 
@@ -4597,6 +4612,24 @@ def governed_prepend_failure_class(
     ):
         return "provider_runtime_path_prepend_inconsistent"
     return None
+
+
+def probe_directory_is_outside_workspace(probe_cwd: str, workspace: str) -> bool:
+    """True when probe_cwd is neither the workspace nor inside it.
+
+    Creating the probe directory under a system temporary root does not PROVE it
+    sits outside the instance workspace: TMPDIR can be set to a path within the
+    workspace, and either path can traverse a symlink into the other. Both sides
+    are resolved before comparison, and the caller fails closed when this is
+    False -- an unattended probe must never fall back into the agent's own
+    directory, which is the condition the neutral directory exists to guarantee.
+    """
+    try:
+        probe = os.path.realpath(probe_cwd)
+        target = os.path.realpath(workspace)
+    except OSError:
+        return False
+    return probe != target and not probe.startswith(target.rstrip(os.sep) + os.sep)
 
 
 def agent_workspace_cwd(data: dict[str, Any], name: str) -> str:
@@ -4904,6 +4937,12 @@ def opencode_provider_probe_inventory(
     )
     try:
         with tempfile.TemporaryDirectory(prefix="whatsoup-opencode-diagnostic-") as diagnostic_cwd:
+            if not probe_directory_is_outside_workspace(diagnostic_cwd, child_cwd):
+                return [(
+                    f"FAIL provider_probe {name}: provider={provider} command={safe_command} "
+                    "failure_class=provider_probe_directory_unsafe "
+                    "remediation=set_TMPDIR_outside_the_instance_workspace"
+                )]
             version_stdout, version_stderr, version_rc, _ = provider_command_output(
                 [command, "--version"],
                 timeout_seconds,
@@ -6176,9 +6215,26 @@ def provider_probe_target_inventory(
         env_keys=CLAUDE_FUNCTIONAL_ENV_KEYS,
     )
 
+    # The probe no longer runs from the instance workspace, so a RELATIVE command
+    # would resolve against a different directory than it used to. Resolve it to
+    # an absolute path before the spawn, preferring the governed PATH, so argv[0]
+    # names the same binary the service would run wherever the probe stands.
+    if not os.path.isabs(command):
+        command = (
+            shutil.which(command, path=effective_provider_path)
+            or shutil.which(command)
+            or command
+        )
+
     timed_out = False
     try:
         with tempfile.TemporaryDirectory(prefix="whatsoup-provider-probe-") as probe_cwd:
+            if not probe_directory_is_outside_workspace(probe_cwd, agent_workspace_cwd(data, name)):
+                return [(
+                    f"FAIL provider_probe {name}: provider={provider} target={target} "
+                    "failure_class=provider_probe_directory_unsafe "
+                    "remediation=set_TMPDIR_outside_the_instance_workspace"
+                )]
             stdout, stderr, rc, timed_out = provider_command_output(
                 [command, "--print", "Return exactly OK."],
                 timeout_seconds,
