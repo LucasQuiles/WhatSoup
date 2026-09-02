@@ -406,11 +406,11 @@ CONVERSATION_SCOPE_MAX_PER_KEY = positive_env_int(
 # both the personal and the LID domain — satisfies any plain hex test. An
 # all-decimal value is therefore rejected as well.
 #
-# The cost of that second rule is one genuine digest in about 44 thousand
-# ((10/16) ** 16) being treated as untrusted. That conversation loses its scope
-# line and its force-notify for as long as the digest is all-decimal, which is
-# the same behaviour as before this change and is the safe direction to fail:
-# a suppressed alert is recoverable, a disclosed identifier is not.
+# The cost of that second rule is one genuine digest in about 1,845
+# ((10/16) ** 16 = 5.42e-4) being treated as untrusted. That conversation loses
+# its scope line and its force-notify for as long as the digest is all-decimal,
+# which is the same behaviour as before this change and is the safe direction
+# to fail: a suppressed alert is recoverable, a disclosed identifier is not.
 CONVERSATION_SCOPE_HEX_LENGTH = 16
 CONVERSATION_SCOPE_RE = re.compile(r"^[0-9a-f]{%d}$" % CONVERSATION_SCOPE_HEX_LENGTH)
 CONVERSATION_SCOPE_ALL_DECIMAL_RE = re.compile(r"^[0-9]+$")
