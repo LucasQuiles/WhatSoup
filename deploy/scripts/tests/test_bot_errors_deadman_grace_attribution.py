@@ -537,8 +537,15 @@ def _deadman_plist_block(installer: str) -> str:
 
 def test_default_check_interval_matches_the_systemd_timer_cadence(health_check):
     timer = (_DEPLOY / "bot-errors-deadman.timer").read_text(encoding="utf-8")
-    values = re.findall(r"^OnUnitActiveSec=(.+)$", timer, re.M)
+    # Match the way systemd's parser reads assignments: whitespace around the key and
+    # the '=' is stripped, and the value runs to end of line (no inline comments).
+    values = [v.strip() for v in re.findall(r"^\s*OnUnitActiveSec\s*=(.*)$", timer, re.M)]
     assert values, "bot-errors-deadman.timer has no OnUnitActiveSec"
+    for value in values:
+        # An empty assignment resets the setting: the timer would lose its repeat trigger.
+        assert value, "bot-errors-deadman.timer has an empty OnUnitActiveSec assignment (resets the cadence)"
+        if ";" in value or "#" in value:
+            pytest.fail(f"inline comment in OnUnitActiveSec value {value!r}: systemd has no inline comments; the unit would not load")
     # systemd honours the LAST assignment in the file, so an appended override is the
     # value that runs; every assignment must agree so no reading of the file is wrong.
     assert all(_systemd_seconds(v) == health_check.DEADMAN_CHECK_INTERVAL_SECONDS for v in values), values
