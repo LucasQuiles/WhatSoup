@@ -1,7 +1,7 @@
 /**
  * F3 — route-layer home-confinement of the launchd `service` block
  * (`service.pathPrepend[]` and `service.claudeConfigDir`) on both admission
- * verbs: POST /instances (handleCreateLine) and PATCH /lines/:name
+ * verbs: POST /api/lines (handleCreateLine) and PATCH /api/lines/:name/config
  * (handleConfigUpdate).
  *
  * Before this file, `validateLaunchdServiceConfig`

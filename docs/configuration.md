@@ -561,7 +561,7 @@ of regenerating the plist without its governed environment; only a missing
 `config.json` (or absent block) renders the historical byte-identical plist.
 
 Home-confinement of the two filesystem fields is enforced one layer up, at the
-API write paths only (`POST /instances` and `PATCH /api/lines/:name` in
+API write paths only (`POST /api/lines` and `PATCH /api/lines/:name/config` in
 `src/fleet/routes/ops.ts`), which refuse a `claudeConfigDir` or a `pathPrepend`
 entry resolving outside the instance user's home directory with a `400`. It is
 not a shape rule, because `src/lib/launchd-service-config.ts` also runs on load
