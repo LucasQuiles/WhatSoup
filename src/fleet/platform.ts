@@ -496,6 +496,12 @@ async function installLaunchdPlist(name: string): Promise<void> {
   // Resolve (and thereby validate) the instance's render options before any
   // filesystem mutation so an invalid service block aborts the install whole.
   const renderOptions = resolveLaunchdPlistRenderOptions(name);
+  // Second render call site. reconcileLaunchdPlist has always asserted render
+  // option shape here; this one never did, so `assertValidLaunchdPlistRenderOptions`
+  // had exactly one caller in src/ and the install path rendered unasserted.
+  // Shape only: home confinement at render admission is a separate, larger
+  // change and is deliberately NOT added here.
+  assertValidLaunchdPlistRenderOptions(renderOptions);
   const dest = plistPath(name);
   const previousContents = readExpectedGeneratedLaunchdPlist(name, dest);
   fs.mkdirSync(path.dirname(dest), { recursive: true });

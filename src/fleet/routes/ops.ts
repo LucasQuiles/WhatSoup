@@ -4,6 +4,13 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { spawn } from 'node:child_process';
 import { readBody, jsonResponse, requireInstance } from '../../lib/http.ts';
+import {
+  nothingExistsAt,
+  pathIsAtOrInsideDirectory,
+  pathIsInsideDirectory,
+  rawAbsolutePath,
+  realpathLongestAbsentTolerantPrefix,
+} from '../../lib/home-confinement.ts';
 import { escapeRegExp } from '../../lib/regex-utils.ts';
 import { isNonEmptyString, isRecord } from '../../lib/type-guards.ts';
 import { createSSEWriter } from '../sse-helpers.ts';
@@ -665,59 +672,7 @@ export async function handleDeleteLine(
   jsonResponse(res, 200, { deleted: params.name });
 }
 
-/**
- * Does a `path.relative()` result step OUT of the parent directory?
- *
- * A bare `relative.startsWith('..')` also matches a legitimate in-home entry
- * whose own name begins with dots (`..config` relativises to `..config`, not
- * `../config`), so it over-rejected real paths. Only a `..` component escapes:
- * the whole string being `..`, or a leading `..` followed by a separator. An
- * absolute result means the two paths share no root and is always an escape.
- */
-function relativePathEscapes(relative: string): boolean {
-  return relative === '..'
-    || relative.startsWith('..' + path.sep)
-    || path.isAbsolute(relative);
-}
 
-function pathIsInsideDirectory(candidate: string, parent: string): boolean {
-  const relative = path.relative(parent, candidate);
-  return relative !== '' && !relativePathEscapes(relative);
-}
-
-function pathIsAtOrInsideDirectory(candidate: string, parent: string): boolean {
-  const relative = path.relative(parent, candidate);
-  return relative === '' || !relativePathEscapes(relative);
-}
-
-/**
- * PHYSICAL realpath of the longest existing prefix of `targetPath`.
- *
- * `fs.realpathSync.native` (libc realpath(3)) is load-bearing and must not be
- * swapped back to `fs.realpathSync`: the JS implementation calls
- * `path.resolve()` first, which collapses `..` TEXTUALLY before walking any
- * symlink. For `<home>/link/../x` with `link -> /outside` that yields the
- * in-home answer `<home>/x` (or ENOENT), while the kernel — and therefore
- * anything that execs a binary found through the rendered PATH — resolves
- * `..` against the symlink TARGET and lands outside home. Only the native
- * binding reports what the kernel will do.
- *
- * The ENOENT parent-walk is preserved so a not-yet-created leaf is judged by
- * its nearest existing ancestor rather than refused outright.
- */
-function realpathExistingPrefix(targetPath: string): string {
-  let current = targetPath;
-  while (true) {
-    try {
-      return fs.realpathSync.native(current);
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-      const parent = path.dirname(current);
-      if (parent === current) throw err;
-      current = parent;
-    }
-  }
-}
 
 function resolveHomeConfinedPath(inputPath: string, res: ServerResponse, error: string): string | null {
   if (hasUnsupportedTildePrefix(inputPath)) {
@@ -739,12 +694,15 @@ function resolveHomeConfinedPath(inputPath: string, res: ServerResponse, error: 
 
   // Make the raw spelling absolute WITHOUT normalising it: `path.resolve` would
   // collapse the `..` this check exists to catch.
-  const rawAbsolute = path.isAbsolute(expanded) ? expanded : `${process.cwd()}${path.sep}${expanded}`;
+  const rawAbsolute = rawAbsolutePath(expanded);
 
   try {
     const homeReal = fs.realpathSync.native(homePath);
-    const existingReal = realpathExistingPrefix(rawAbsolute);
-    if (!pathIsAtOrInsideDirectory(existingReal, homeReal)) {
+    // The resolved value now carries the leaf, so containment is STRICT: the
+    // old at-or-inside allowance existed only because the ancestor walk could
+    // return home itself.
+    const physicalPrefix = realpathLongestAbsentTolerantPrefix(rawAbsolute);
+    if (!pathIsAtOrInsideDirectory(physicalPrefix, homeReal)) {
       jsonResponse(res, 400, { error });
       return null;
     }
@@ -756,19 +714,43 @@ function resolveHomeConfinedPath(inputPath: string, res: ServerResponse, error: 
   return resolved;
 }
 
+/**
+ * Converted to the same physical policy as resolveHomeConfinedPath.
+ *
+ * It previously used the JS `fs.realpathSync` for the home root and for the
+ * post-mkdir re-check, and it handed the old longest-existing-prefix walk the
+ * LEXICALLY collapsed `path.resolve` form. So the `..`-through-symlink escape
+ * survived at this call site even after the resolver itself was converted, and
+ * the walk let a dangling intermediate through. Both now use
+ * `fs.realpathSync.native` against the raw spelling.
+ */
 function ensureHomeConfinedDirectory(dirPath: string): void {
-  const resolved = path.resolve(dirPath);
   const homePath = path.resolve(os.homedir());
-  const homeReal = fs.realpathSync(homePath);
-  const existingReal = realpathExistingPrefix(resolved);
-  if (!pathIsInsideDirectory(resolved, homePath) || !pathIsAtOrInsideDirectory(existingReal, homeReal)) {
+  // Absolute WITHOUT normalising: `path.resolve` would collapse the `..` this
+  // check exists to catch.
+  const rawAbsolute = rawAbsolutePath(dirPath);
+  const refuse = (): never => {
     throw privateWriteError('directory must be within the home directory', 'EACCES');
+  };
+
+  let homeReal: string;
+  try {
+    homeReal = fs.realpathSync.native(homePath);
+    if (!pathIsAtOrInsideDirectory(realpathLongestAbsentTolerantPrefix(rawAbsolute), homeReal)) refuse();
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EACCES') throw err;
+    refuse();
   }
 
-  fs.mkdirSync(resolved, { recursive: true, mode: 0o700 });
-  const dirReal = fs.realpathSync(resolved);
-  if (!pathIsInsideDirectory(resolved, homePath) || !pathIsAtOrInsideDirectory(dirReal, homeReal)) {
-    throw privateWriteError('directory must be within the home directory', 'EACCES');
+  fs.mkdirSync(rawAbsolute, { recursive: true, mode: 0o700 });
+
+  // Re-check AFTER creation. The directory now exists, so there is no leaf
+  // tolerance left: it must resolve physically and wholly inside home.
+  try {
+    if (!pathIsInsideDirectory(fs.realpathSync.native(rawAbsolute), homeReal!)) refuse();
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EACCES') throw err;
+    refuse();
   }
 }
 

@@ -426,6 +426,125 @@ describe('service block home-confinement (F3)', () => {
     expect(fs.existsSync(cfgPathFor('svc-unnormalized'))).toBe(false);
   });
 
+  // -------------------------------------------------------------------------
+  // F6 variant (b) — a PLAIN in-home path with NO traversal syntax whose
+  // intermediate segment is a DANGLING symlink. The earlier
+  // longest-existing-prefix walk treated the dangling link as absent and
+  // climbed past it to an in-home ancestor, so the path was admitted, leaving
+  // whoever could later create the link target to choose where it pointed.
+  // Because raw === resolved here, neither path.resolve nor a
+  // raw-versus-resolved comparison can catch it.
+  // -------------------------------------------------------------------------
+
+  it('rejects a CREATE whose service.pathPrepend crosses a DANGLING symlink', async () => {
+    const home = homeDir();
+    fs.symlinkSync(path.join(tmpDir, 'attacker-creates-this-later'), path.join(home, 'dangle'));
+    const raw = path.join(home, 'dangle', 'bin');
+
+    // No traversal syntax: the spelling is already canonical, which is exactly
+    // why the earlier fixes cannot see it.
+    expect(raw).toBe(path.resolve(raw));
+
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq({ method: 'POST', body: createBody({ pathPrepend: [raw] }, 'svc-dangling-intermediate') }),
+      res,
+      makeDeps<any>({}),
+    );
+
+    expect(res._status, 'create must be refused: ' + res._body).toBe(400);
+    expect(fs.existsSync(cfgPathFor('svc-dangling-intermediate'))).toBe(false);
+  });
+
+  it('rejects a PATCH whose service.pathPrepend crosses a DANGLING symlink', async () => {
+    const home = homeDir();
+    fs.symlinkSync(path.join(tmpDir, 'attacker-creates-this-later'), path.join(home, 'dangle'));
+    const { deps, configPath } = patchTarget();
+    const before = fs.readFileSync(configPath, 'utf-8');
+    const res = mockRes();
+    await handleConfigUpdate(
+      mockReq({
+        method: 'PATCH',
+        body: JSON.stringify({ service: { pathPrepend: [path.join(home, 'dangle', 'bin')] } }),
+      }),
+      res,
+      deps,
+      { name: 'svc-patch-target' },
+    );
+
+    expect(res._status, 'patch must be refused: ' + res._body).toBe(400);
+    expect(fs.readFileSync(configPath, 'utf-8')).toBe(before);
+  });
+
+  it('admits a wholly absent in-home path but refuses it once a dangling link appears in it', async () => {
+    // The pair that fixes the policy boundary. An absent segment is not an
+    // escape vector, and refusing it would break the default agent workspace,
+    // which is several not-yet-created segments deep. A segment that EXISTS and
+    // does not resolve IS the bypass.
+    const home = homeDir();
+    const entry = path.join(home, 'never-created', 'bin');
+
+    const ok = mockRes();
+    await handleCreateLine(
+      mockReq({ method: 'POST', body: createBody({ pathPrepend: [entry] }, 'svc-absent-chain') }),
+      ok,
+      makeDeps<any>({}),
+    );
+    expect(ok._status, 'absent chain must be admitted: ' + ok._body).toBe(201);
+
+    fs.symlinkSync(path.join(tmpDir, 'attacker-creates-this-later'), path.join(home, 'never-created'));
+    const refused = mockRes();
+    await handleCreateLine(
+      mockReq({ method: 'POST', body: createBody({ pathPrepend: [entry] }, 'svc-dangling-chain') }),
+      refused,
+      makeDeps<any>({}),
+    );
+    expect(refused._status, 'dangling chain must be refused: ' + refused._body).toBe(400);
+    expect(fs.existsSync(cfgPathFor('svc-dangling-chain'))).toBe(false);
+  });
+
+  it('still admits an absent LEAF inside an existing in-home parent', async () => {
+    // Exactly one level of tolerance. Requiring every segment to exist would
+    // break the ordinary case of naming a directory the operator is about to
+    // create, so the leaf stays permitted while its parent must resolve.
+    const home = homeDir();
+    const parent = path.join(home, 'pin');
+    fs.mkdirSync(parent, { recursive: true, mode: 0o700 });
+    const service = { pathPrepend: [path.join(parent, 'not-yet-created')] };
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq({ method: 'POST', body: createBody(service, 'svc-absent-leaf') }),
+      res,
+      makeDeps<any>({}),
+    );
+
+    expect(res._status, 'create must succeed: ' + res._body).toBe(201);
+    const persisted = JSON.parse(fs.readFileSync(cfgPathFor('svc-absent-leaf'), 'utf-8'));
+    expect(persisted.service).toEqual(service);
+  });
+
+  it('rejects agentOptions.pluginDirs crossing a DANGLING symlink (shared predicate)', async () => {
+    const home = homeDir();
+    fs.symlinkSync(path.join(tmpDir, 'attacker-creates-this-later'), path.join(home, 'dangle'));
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq({
+        method: 'POST',
+        body: JSON.stringify({
+          name: 'svc-plugindirs-dangle',
+          type: 'agent',
+          adminPhones: ['15551234567'],
+          agentOptions: { pluginDirs: [path.join(home, 'dangle', 'plugins')] },
+        }),
+      }),
+      res,
+      makeDeps<any>({}),
+    );
+
+    expect(res._status, 'create must be refused: ' + res._body).toBe(400);
+    expect(fs.existsSync(cfgPathFor('svc-plugindirs-dangle'))).toBe(false);
+  });
+
   it('accepts an in-home directory whose name merely starts with dots', async () => {
     // `pathIsInsideDirectory` tested `relative.startsWith('..')`, which also
     // matches a legitimate sibling-free in-home name like `..config`. That is
