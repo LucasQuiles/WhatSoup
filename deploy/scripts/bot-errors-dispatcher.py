@@ -1359,13 +1359,19 @@ def _normalize_incident_state_for_save(state: dict[str, Any]) -> None:
     """
     try:
         sweep_conversation_scopes(state, int(time.time()))
-    except Exception:
+    except Exception as exc:
         # Never let housekeeping block a state write; a slightly larger state
         # file is recoverable, a lost incident update is not. This swallow
         # arrived with the sweep from save_incident_state and now covers the
         # controller-backed path too, so a sweep fault cannot fail a
         # production commit either.
-        pass
+        #
+        # But swallow LOUDLY: silence here means the documented retention
+        # window and key cap can stop holding on every save with nothing to
+        # alert on. log_conversation_scope_error is the module's bounded,
+        # metadata-only reporter and guards its own write, so a diagnostic
+        # cannot turn a state write into an exception.
+        log_conversation_scope_error("save_normalize", "", exc, False)
     state["updatedAt"] = now_iso()
 
 

@@ -153,3 +153,50 @@ def test_control_the_compat_wrapper_already_bounded_the_sidecar(tmp_path):
     disp.save_incident_state(paths, payload)
 
     assert len(payload["conversationScopes"]) == disp.CONVERSATION_SCOPE_MAX_KEYS
+
+
+def test_a_failing_sweep_is_logged_and_still_lets_the_write_through(tmp_path):
+    """SHOULD-1: a silently swallowed sweep failure means the bounds are off.
+
+    The sweep's `except: pass` moved onto the PRODUCTION save path with the
+    normaliser. Keeping the write unblocked is right -- a larger state file is
+    recoverable, a lost incident update is not -- but swallowing without a
+    signal means the documented 128-key and TTL bounds can stop holding with
+    nothing to alert on. The failure is now logged through the module's own
+    bounded, metadata-only helper.
+    """
+    paths = _adopt(tmp_path / "adopted")
+    session = _session(paths)
+
+    def _boom(state, current):
+        raise RuntimeError("sweep exploded")
+
+    logged: list[tuple] = []
+    original_sweep = disp.sweep_conversation_scopes
+    original_log = disp.log_conversation_scope_error
+    disp.sweep_conversation_scopes = _boom  # type: ignore[assignment]
+    disp.log_conversation_scope_error = (  # type: ignore[assignment]
+        lambda phase, key, exc, treated: logged.append((phase, key, str(exc), treated))
+    )
+    try:
+        with session:
+            result = session.load()
+            payload = dict(result.payload or {})
+            payload["openIncidents"] = {"k": {"status": "open"}}
+            cycle = disp.IncidentStateCycle(
+                session, payload, result.capability, paths=paths
+            )
+            cycle.commit()
+    finally:
+        disp.sweep_conversation_scopes = original_sweep  # type: ignore[assignment]
+        disp.log_conversation_scope_error = original_log  # type: ignore[assignment]
+
+    # The write still completed: the normaliser stamped updatedAt and the
+    # commit persisted, so housekeeping never blocks an incident update.
+    assert payload.get("updatedAt"), "the state write must still complete"
+
+    assert logged, "a swallowed sweep failure must still emit a signal"
+    phase, _key, message, treated = logged[0]
+    assert phase == "save_normalize", phase
+    assert "sweep exploded" in message
+    assert treated is False
