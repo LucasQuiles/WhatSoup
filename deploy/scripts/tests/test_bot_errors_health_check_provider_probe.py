@@ -1687,6 +1687,133 @@ def test_default_provider_probe_does_not_spawn_when_a_nested_dict_hides_the_prep
     _assert_fail_line_is_path_free(lines[0], tmp_path)
 
 
+# --- CDATA: the pair regex cannot match across one, so the KEY would vanish ---
+#
+# The system plist parser accepts a CDATA section and launchd loads the value
+# (verified with plutil: a prepend written as CDATA extracts to its plain text).
+# The non-"<" pair class introduced with the markup-span fix cannot match a
+# CDATA value or key at all, so the pair is dropped and the governed key reads
+# as ABSENT -- the benign absent-vs-absent cell -- while the service really does
+# carry it. Both readers now refuse a CDATA opener inside the EnvironmentVariables
+# block, under the same fail-closed rule as a nested dict.
+
+CDATA_CELLS = {
+    "value_on_prepend": [
+        '    <key>PATH</key><string>{path}</string>',
+        '    <key>WHATSOUP_PATH_PREPEND</key><string><![CDATA[{prepend}]]></string>',
+    ],
+    "value_on_path": [
+        '    <key>PATH</key><string><![CDATA[{path}]]></string>',
+        '    <key>WHATSOUP_PATH_PREPEND</key><string>{prepend}</string>',
+    ],
+    "key_name": [
+        '    <key><![CDATA[PATH]]></key><string>{path}</string>',
+        '    <key>WHATSOUP_PATH_PREPEND</key><string>{prepend}</string>',
+    ],
+}
+
+
+def _write_plist_with_raw_entries(home: Path, name: str, entries: list[str]) -> Path:
+    agents = home / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True, exist_ok=True)
+    target = agents / f"com.whatsoup.{name}.plist"
+    target.write_text(
+        "\n".join(
+            [
+                '<?xml version="1.0" encoding="UTF-8"?>',
+                '<plist version="1.0">',
+                "<dict>",
+                "  <key>Label</key>",
+                f"  <string>com.whatsoup.{name}</string>",
+                "  <key>EnvironmentVariables</key>",
+                "  <dict>",
+                *entries,
+                "  </dict>",
+                "</dict>",
+                "</plist>",
+                "",
+            ]
+        )
+    )
+    return target
+
+
+@pytest.mark.parametrize("cell", sorted(CDATA_CELLS))
+def test_plist_reader_refuses_a_cdata_section(monkeypatch, tmp_path, cell):
+    """All three CDATA cells must fail closed, not silently drop a key."""
+    environment = _matrix_environment(tmp_path)
+    _arm_darwin_host(monkeypatch, tmp_path)
+    entries = [
+        line.format(path=environment["PATH"], prepend=environment["WHATSOUP_PATH_PREPEND"])
+        for line in CDATA_CELLS[cell]
+    ]
+    _write_plist_with_raw_entries(tmp_path, "agent-alpha", entries)
+
+    assert _mod.instance_plist_environment("agent-alpha") is None, (
+        f"{cell}: a CDATA section must be refused, not parsed into a partial map"
+    )
+    assert _mod.instance_plist_governed_environment("agent-alpha") == (
+        _mod.GOVERNED_PLIST_UNREADABLE,
+        None,
+    )
+
+
+def test_plist_reader_still_parses_the_generator_escaped_form(monkeypatch, tmp_path):
+    """Positive control for the refusal: the shipped escaping is unaffected.
+
+    buildPlist escapes "<" as an entity rather than wrapping it in CDATA, and
+    that form must keep parsing to the same value the system parser resolves.
+    Without this row the CDATA refusal could be satisfied by refusing every
+    plist that mentions a "<" at all.
+    """
+    _arm_darwin_host(monkeypatch, tmp_path)
+    _write_plist_with_raw_entries(
+        tmp_path,
+        "agent-alpha",
+        [
+            "    <key>PATH</key><string>/fixture/pin/bin:/usr/bin</string>",
+            "    <key>WHATSOUP_PATH_PREPEND</key><string>/fixture/pin&lt;bin</string>",
+        ],
+    )
+
+    parsed = _mod.instance_plist_environment("agent-alpha")
+    assert parsed is not None, "the escaped form is not CDATA and must still parse"
+    assert parsed["WHATSOUP_PATH_PREPEND"] == "/fixture/pin<bin"
+    assert parsed["PATH"] == "/fixture/pin/bin:/usr/bin"
+
+
+def test_default_provider_probe_does_not_spawn_when_cdata_hides_the_prepend(
+    monkeypatch, tmp_path
+):
+    """End to end: the cell that made the probe spawn where it must not.
+
+    The plist declares WHATSOUP_PATH_PREPEND inside a CDATA section, which the
+    system parser resolves and launchd loads, and the loaded job here carries no
+    prepend. Dropping the key put both sides in the benign absent-vs-absent cell,
+    so the probe reported ok and ran the provider. Refusing the plist fails it
+    closed instead.
+    """
+    environment = _matrix_environment(tmp_path)
+    _arm_darwin_host(monkeypatch, tmp_path)
+    _write_plist_with_raw_entries(
+        tmp_path,
+        "agent-alpha",
+        [
+            f'    <key>PATH</key><string>{environment["PATH"]}</string>',
+            "    <key>WHATSOUP_PATH_PREPEND</key>"
+            f'<string><![CDATA[{environment["WHATSOUP_PATH_PREPEND"]}]]></string>',
+        ],
+    )
+    loaded_environment = dict(environment)
+    loaded_environment.pop("WHATSOUP_PATH_PREPEND")
+
+    captured, lines = _claude_probe(monkeypatch, {}, loaded_environment)
+
+    assert not captured, "the probe must not spawn the provider on a refused plist"
+    assert "failure_class=provider_runtime_plist_unreadable" in lines[0]
+    _assert_fail_line_is_path_free(lines[0], tmp_path)
+
+
 @pytest.mark.parametrize("outer_spelling", OUTER_DICT_SPELLINGS)
 def test_plist_reader_accepts_every_environment_dict_spelling(
     monkeypatch, tmp_path, outer_spelling

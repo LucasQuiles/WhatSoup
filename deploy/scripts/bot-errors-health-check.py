@@ -4249,6 +4249,7 @@ PLIST_DICT_OPEN_TOKEN_RE = re.compile(r"<dict(?=[\s/>])")
 # attributes, so refusing costs nothing and fails closed.
 PLIST_DICT_OPEN_RE = re.compile(r"<dict\s*(/?)>")
 PLIST_DICT_CLOSE_RE = re.compile(r"</dict\s*>")
+PLIST_CDATA_OPEN = "<![CDATA["
 
 
 def instance_plist_environment(name: str) -> dict[str, str] | None:
@@ -4307,6 +4308,15 @@ def instance_plist_environment(name: str) -> dict[str, str] | None:
     # (src/fleet/launchd-env-drift.ts) refuses outright in that case; match it and
     # report unknown rather than hand back a partial map.
     if PLIST_DICT_OPEN_TOKEN_RE.search(block) is not None:
+        return None
+    # A CDATA section is a shape this reader does not model, and the pair regex
+    # below cannot match across one because CDATA contains "<". The key would
+    # therefore vanish from the map rather than read wrong, landing the governed
+    # comparison in the benign absent-vs-absent cell -- while the SYSTEM parser
+    # accepts CDATA and launchd loads the value. Refuse it, under the same
+    # fail-closed rule as a nested dict. The generator escapes "<" as an entity
+    # and never emits CDATA, so this costs a hand-edited plist only.
+    if PLIST_CDATA_OPEN in block:
         return None
     environment: dict[str, str] = {}
     # `[^<]` rather than `.` with DOTALL: a dotted non-greedy key group spans

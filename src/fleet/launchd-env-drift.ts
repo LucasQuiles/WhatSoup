@@ -117,6 +117,7 @@ const DICT_OPEN_TOKEN_SOURCE = '<dict(?=[\\s/>])';
  */
 const DICT_OPEN_SOURCE = '<dict\\s*(/?)>';
 const DICT_CLOSE_SOURCE = '</dict\\s*>';
+const CDATA_OPEN = '<![CDATA[';
 
 /**
  * Extract the EnvironmentVariables dict as a key -> value map. Returns an
@@ -160,6 +161,12 @@ function parseEnvironmentVariables(plist: string): Map<string, string> | null {
   // plist's own dicts are out of scope.
   const nestedPattern = new RegExp(DICT_OPEN_TOKEN_SOURCE, 'g');
   if (nestedPattern.exec(body) !== null) return null;
+  // A CDATA section is a shape this comparator does not model, and the pair
+  // pattern below cannot match across one because CDATA contains '<'. The key
+  // would vanish from the map rather than read wrong, so a governed key present
+  // on disk would compare as absent -- while the system parser accepts CDATA.
+  // Refuse it, under the same fail-closed rule as a nested dict.
+  if (body.includes(CDATA_OPEN)) return null;
 
   const env = new Map<string, string>();
   const pair = /<key>([^<]*)<\/key>\s*<string>([^<]*)<\/string>/g;

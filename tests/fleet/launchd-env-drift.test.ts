@@ -464,6 +464,68 @@ describe('compareGovernedLaunchdEnv', () => {
     }]);
   });
 
+  // CDATA: the non-'<' pair class cannot match across a CDATA section, so the
+  // key would VANISH from the map rather than read wrong, and a governed key
+  // present on disk would compare as absent. The system parser accepts CDATA.
+  // Both readers refuse it, under the same fail-closed rule as a nested dict.
+  const CDATA_CELLS: Record<string, Record<string, string>> = {
+    value_on_prepend: {
+      PATH: '/opt/bin:/usr/bin',
+      WHATSOUP_PATH_PREPEND: '<![CDATA[/opt/bin]]>',
+    },
+    value_on_path: {
+      PATH: '<![CDATA[/opt/bin:/usr/bin]]>',
+      WHATSOUP_PATH_PREPEND: '/opt/bin',
+    },
+  };
+
+  it.each(Object.keys(CDATA_CELLS))('fails closed on a CDATA section (%s)', (cell) => {
+    const expected = plistWithSpelledEnv({
+      env: { PATH: '/opt/bin:/usr/bin', WHATSOUP_PATH_PREPEND: '/opt/bin' },
+    });
+    // plistWithSpelledEnv writes the value verbatim, so the CDATA markup lands
+    // in the document rather than being escaped.
+    const observed = plistWithSpelledEnv({ env: CDATA_CELLS[cell] as Record<string, string> });
+
+    expect(compareGovernedLaunchdEnv(expected, observed)).toEqual({
+      comparable: false,
+      reason: 'environment-variables-unparseable',
+      drift: [],
+      droppedNonGovernedKeys: [],
+    });
+  });
+
+  it('fails closed on a CDATA section in a KEY name', () => {
+    const expected = plistWithSpelledEnv({ env: { PATH: '/opt/bin:/usr/bin' } });
+    const observed = [
+      '<?xml version="1.0" encoding="UTF-8"?>',
+      '<plist version="1.0">',
+      '<dict>',
+      '  <key>EnvironmentVariables</key>',
+      '  <dict>',
+      '    <key><![CDATA[PATH]]></key>',
+      '    <string>/opt/bin:/usr/bin</string>',
+      '  </dict>',
+      '</dict>',
+      '</plist>',
+      '',
+    ].join('\n');
+
+    expect(compareGovernedLaunchdEnv(expected, observed).comparable).toBe(false);
+  });
+
+  it('still parses the generator-escaped form, which is not CDATA', () => {
+    // Positive control for the refusal: without it, refusing every plist that
+    // mentions a '<' would satisfy the rows above and break the shipped form.
+    const expected = plistWithSpelledEnv({ env: { PATH: '/opt/&lt;bin' } });
+    const observed = plistWithSpelledEnv({ env: { PATH: '/opt/&lt;bin' } });
+
+    const comparison = compareGovernedLaunchdEnv(expected, observed);
+    expect(comparison.comparable).toBe(true);
+    expect(comparison.drift).toEqual([]);
+    expect(comparison.pathPrefix?.expectedDigest).toBe(sha256('/opt/<bin'));
+  });
+
   it('does not carry regex state between the two plists of one comparison', () => {
     // The reader builds its patterns per call. A module-scope /g pattern would
     // keep lastIndex from the expected plist and start the observed plist's
