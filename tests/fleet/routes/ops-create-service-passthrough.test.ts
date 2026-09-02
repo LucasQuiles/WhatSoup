@@ -2,7 +2,7 @@
  * CREATE `service`-block passthrough coverage (issue #3401 item 2).
  *
  * Before this file, `PASSTHROUGH_FIELDS` in src/fleet/routes/ops.ts did NOT
- * include `service`, so `POST /instances` with a `service` block dropped it
+ * include `service`, so `POST /api/lines` with a `service` block dropped it
  * silently: the shared validator (validateInstanceConfig →
  * validateLaunchdServiceConfig, src/core/agent-config-validator.ts) never saw
  * the block, an invalid `service.pathPrepend`/`service.claudeConfigDir`
