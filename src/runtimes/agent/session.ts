@@ -761,6 +761,21 @@ export class SessionManager {
   private resumeAttemptId: string | null = null;
   /** Prevents cleanup shutdown from repainting an already-terminal durable lifecycle as resumable. */
   private durableFailureClosed = false;
+  /**
+   * A managed-provider kill threw, so nothing proved the provider stopped.
+   * Explicit rather than implied by a retained handle: a cleanup refactor can
+   * silently null a handle, but it cannot silently satisfy a named flag.
+   * Cleared when a new incarnation takes over (spawn, or a failed-start reset).
+   */
+  private managedTerminationUnknown = false;
+  /**
+   * False while a managed-loop turn is in flight. The abort a kill performs
+   * reaches the HTTP request, not an `executeBridgeTool` call the tool loop has
+   * already entered, and the crash path clears `providerTurnInFlight` before
+   * that promise settles — so neither of those answers whether provider work is
+   * still running. This does: settled means resolved OR rejected.
+   */
+  private managedTurnSettled = true;
   /** Durable cleanup failed and an active lifecycle may still require operator reconciliation. */
   private durableFailureInconclusive = false;
   private durableFailureIdentity: {
@@ -1936,6 +1951,7 @@ export class SessionManager {
     this.child = preservedChild;
     this.managedProviderSession = null;
     this.managedProviderGeneration = null;
+    this.managedTerminationUnknown = false;
     this.dbRowId = null;
     this.sessionId = null;
     this.resetStdoutBuffers();
@@ -2267,6 +2283,9 @@ export class SessionManager {
 
       this.managedProviderSession = providerSession;
       this.managedProviderGeneration = managedGeneration;
+      // A new incarnation owns this handle; the previous one's unknown
+      // termination is not this one's to carry.
+      this.managedTerminationUnknown = false;
       this.active = true;
       this.resetStdoutBuffers();
       this.crashStderrPreview = '';
@@ -3227,21 +3246,17 @@ export class SessionManager {
     if (providerSession !== null) {
       try {
         providerSession.kill();
-        // Released only now. `providerTerminated` promises that every handle
-        // this session held has been let go, and the per-chat eviction guard
-        // detaches a conversation on that promise.
-        this.managedProviderSession = null;
       } catch (killErr) {
-        // A kill that threw released nothing, so keep the handle: termination
-        // is UNKNOWN, and unknown must not read as terminated. The state cannot
-        // outlive this incarnation — `spawnSession` installs a fresh handle and
-        // `resetFailedSessionStart` clears it — so this fails closed without
-        // wedging the chat permanently.
-        log.debug({ err: killErr, provider: this.provider, chatJid: this.chatJid }, 'managed provider kill failed during crash cleanup — retaining the handle, termination unproven');
+        // A kill that threw released nothing. Record that as a named state
+        // rather than leaving it implied, so `providerTerminated` reports
+        // unknown instead of proven and the eviction guard fails closed. It
+        // cannot outlive this incarnation: a spawn or a failed-start reset
+        // clears it.
+        this.managedTerminationUnknown = true;
+        log.debug({ err: killErr, provider: this.provider, chatJid: this.chatJid }, 'managed provider kill failed during crash cleanup — termination unproven');
       }
-    } else {
-      this.managedProviderSession = null;
     }
+    this.managedProviderSession = null;
 
     this.closeDurableFailureLifecycle(crashedSessionId, crashedDbRowId);
 
@@ -3376,6 +3391,10 @@ export class SessionManager {
       }
       this.clearTurnWatchdog();
       this.armWatchdog(providerSession, generationIdentity);
+      // Provider work is running from here until the turn promise settles. The
+      // watchdog can crash this session while the tool loop is still inside an
+      // already-entered tool call, and that call is not cancelled by the abort.
+      this.managedTurnSettled = false;
       try {
         const parts = isStructuredProviderTurn(input)
           ? [
@@ -3400,6 +3419,9 @@ export class SessionManager {
           this.notifyUser?.('Agent provider request failed — send any message to start a new session.');
         }
         throw err;
+      } finally {
+        // Settled = resolved OR rejected. Either way the tool loop has returned.
+        this.managedTurnSettled = true;
       }
 
       if (!this.isCurrentManagedProviderSession(providerSession, generationIdentity)) {
@@ -4058,7 +4080,10 @@ export class SessionManager {
     return {
       active: this.active,
       pid: this.child?.pid ?? null,
-      providerTerminated: this.child === null && this.managedProviderSession === null,
+      providerTerminated: this.child === null
+        && this.managedProviderSession === null
+        && !this.managedTerminationUnknown
+        && this.managedTurnSettled,
       sessionId: this.sessionId,
       startedAt: this.startedAt,
       messageCount: this.messageCount,
