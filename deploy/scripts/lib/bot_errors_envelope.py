@@ -5,6 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+try:  # imported as ``lib.bot_errors_envelope`` by every deploy script
+    from lib.bot_errors_redaction import legacy_confined_to_text
+except ImportError:  # loaded by file path, without the package context
+    from bot_errors_redaction import legacy_confined_to_text
+
 
 SCHEMA_VERSION = 2
 LEGACY_SCHEMA_VERSION = 1
@@ -92,18 +97,44 @@ def _classify_v2(event: Mapping[str, Any]) -> EventClassification:
     return EventClassification(kind, canonical_event_type, canonical_severity, SCHEMA_VERSION, False)
 
 
+ALERT_CONTENT_FIELDS = ("summary", "evidence")
+
+
+def _require_renderable_alert_content(event: Mapping[str, Any]) -> None:
+    """Reject a mapping the consumer has no safe way to render (#2386).
+
+    `summary` and `evidence` are operator-visible text. The one non-string value
+    a consumer can render is the legacy confinement envelope, whose exact
+    three-key shape carries a failure class, a length, and a digest. Any other
+    mapping would have to be stringified to be displayed, which is precisely how
+    Python dict reprs were baked into WhatsApp messages and persisted incident
+    state. Quarantine it instead: `load_valid_event_or_quarantine` already routes
+    `EnvelopeError` to the quarantine directory, so no new plumbing is needed.
+
+    A string is always accepted here -- rendering it is the reader's job, not the
+    envelope's.
+    """
+    for field in ALERT_CONTENT_FIELDS:
+        value = event.get(field)
+        if isinstance(value, Mapping) and legacy_confined_to_text(dict(value)) is None:
+            raise EnvelopeError("unrenderable_alert_content")
+
+
 def classify_event(event: Mapping[str, Any]) -> EventClassification:
     """Classify a supported v1 or v2 event without mutating the input."""
 
     version = _schema_version(event)
     if version == SCHEMA_VERSION:
-        return _classify_v2(event)
+        classification = _classify_v2(event)
+        _require_renderable_alert_content(event)
+        return classification
 
     if "eventKind" in event:
         raise EnvelopeError("unexpected_legacy_event_kind")
     event_type = _required_string(event, "eventType", "missing_event_type")
     severity = _required_string(event, "severity", "missing_severity")
     kind, canonical_event_type, canonical_severity = _classify_legacy_pair(event_type, severity)
+    _require_renderable_alert_content(event)
     return EventClassification(kind, canonical_event_type, canonical_severity, LEGACY_SCHEMA_VERSION, True)
 
 

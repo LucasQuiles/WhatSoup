@@ -236,3 +236,63 @@ def test_direct_queue_event_constructors_do_not_inline_v1_envelopes() -> None:
 
     assert missing_builder_calls == []
     assert stale_literals == []
+
+
+# ---------------------------------------------------------------------------
+# #2386 -- alert-content shape check
+# ---------------------------------------------------------------------------
+# A mapping reaching `summary`/`evidence` is only safe to consume when it is the
+# exact legacy confinement envelope. Any other mapping is unrenderable: the
+# consumer would have to str() it, which is what baked reprs into operator
+# messages and persisted state in the first place. Quarantine it instead.
+
+_LEGACY_DIGEST = "a1b2c3d4" + "e5f60789" * 7
+
+
+def _alert_event(**overrides):
+    event = {"schemaVersion": 2, "eventKind": "incident_alert", "eventType": "alert", "severity": "critical"}
+    event.update(overrides)
+    return event
+
+
+def test_classify_event_rejects_arbitrary_mapping_summary() -> None:
+    envelope = load_envelope()
+    event = _alert_event(summary={"failureClass": "TypeError", "note": "unexpected"})
+    with pytest.raises(envelope.EnvelopeError) as excinfo:
+        envelope.classify_event(event)
+    assert excinfo.value.code == "unrenderable_alert_content"
+
+
+def test_classify_event_rejects_arbitrary_mapping_evidence() -> None:
+    envelope = load_envelope()
+    event = _alert_event(evidence={"anything": "at all"})
+    with pytest.raises(envelope.EnvelopeError) as excinfo:
+        envelope.classify_event(event)
+    assert excinfo.value.code == "unrenderable_alert_content"
+
+
+def test_classify_event_accepts_exact_legacy_shape() -> None:
+    envelope = load_envelope()
+    legacy = {"failureClass": "TypeError", "length": 54, "correlationDigest": _LEGACY_DIGEST}
+    event = _alert_event(summary=dict(legacy), evidence=dict(legacy))
+    classification = envelope.classify_event(event)
+    assert classification.kind == "incident_alert"
+
+
+def test_classify_event_accepts_string_alert_content() -> None:
+    envelope = load_envelope()
+    event = _alert_event(summary="plain operator text", evidence="line one\nline two")
+    assert envelope.classify_event(event).kind == "incident_alert"
+
+
+def test_classify_event_rejects_extra_key_mapping_summary() -> None:
+    envelope = load_envelope()
+    four_key = {
+        "failureClass": "TypeError",
+        "length": 54,
+        "correlationDigest": _LEGACY_DIGEST,
+        "extra": "x",
+    }
+    with pytest.raises(envelope.EnvelopeError) as excinfo:
+        envelope.classify_event(_alert_event(summary=four_key))
+    assert excinfo.value.code == "unrenderable_alert_content"

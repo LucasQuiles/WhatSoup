@@ -173,3 +173,163 @@ def redact_json_value(value: Any, redact_text) -> Any:
     if isinstance(value, dict):
         return {str(key): redact_json_value(item, redact_text) for key, item in value.items()}
     return value
+
+
+# ---------------------------------------------------------------------------
+# #2386 — legacy confined alert-content compatibility reader
+# ---------------------------------------------------------------------------
+# The TypeScript producer's confineAlertContent boundary replaced the
+# operator-visible `summary`/`evidence` strings with a three-key confinement
+# envelope. Two serialisations reach this consumer:
+#   * the live mapping {"failureClass": str, "length": int, "correlationDigest": str}
+#   * a baked `repr` string, produced wherever that mapping reached str()
+# The baked form appears in BOTH key orders the producer emits, so every matcher
+# below is key-order-insensitive. A matcher pinned to one order is blind to the
+# other and silently under-reports.
+#
+# Rendering is deliberately restricted to the EXACT three-key shape. An arbitrary
+# mapping is never rendered: its values could be anything, and printing them would
+# defeat the confinement boundary this envelope exists to enforce. Unknown shapes
+# get a fixed sentinel and are quarantined by the caller.
+#
+# This reader never evaluates queue text and never parses it as JSON. The repr is
+# matched structurally and its three typed values are read out of the regex match,
+# so a hostile string is inert here. A source-scan test enforces that.
+
+LEGACY_CONFINED_KEYS = frozenset({"failureClass", "length", "correlationDigest"})
+
+UNRENDERABLE_ALERT_CONTENT = "[unrenderable alert content]"
+
+_LEGACY_DIGEST_RE = re.compile(r"\A[0-9a-f]{64}\Z")
+
+# One `'key': value` pair of the envelope's repr. Values are typed at the pair
+# level: a single-quoted literal or a bare integer. `[^'{}]*` keeps a pair from
+# swallowing a brace, so the three-pair bound below cannot be defeated by a
+# nested structure.
+_REPR_PAIR = r"'[A-Za-z][A-Za-z0-9_]*': (?:'[^'{}]*'|\d+)"
+
+# Anchored: the whole string is one brace group holding EXACTLY three pairs, in
+# any order. Key identity and value typing are verified by _parse_baked_repr
+# after the match, which is what rejects a duplicate key or a four-key repr.
+_BAKED_REPR_RE = re.compile(r"\A\{" + _REPR_PAIR + r"(?:, " + _REPR_PAIR + r"){2}\}\Z")
+
+# Same grammar, unanchored: finds an envelope embedded in surrounding operator
+# text. Persisted incident state carries prefixed forms (an escalation prefix
+# concatenated onto a baked envelope), so rendering must reach those too.
+_BAKED_REPR_SCAN_RE = re.compile(r"\{" + _REPR_PAIR + r"(?:, " + _REPR_PAIR + r"){2}\}")
+
+_REPR_PAIR_PARTS_RE = re.compile(
+    r"'(?P<key>[A-Za-z][A-Za-z0-9_]*)': (?:'(?P<text>[^'{}]*)'|(?P<number>\d+))"
+)
+
+
+def _legacy_confined_mapping_to_text(value: Any) -> str | None:
+    """Render a live confinement-envelope mapping, or None if it is not one."""
+    if not isinstance(value, dict):
+        return None
+    if frozenset(value.keys()) != LEGACY_CONFINED_KEYS:
+        return None
+    failure_class = value.get("failureClass")
+    length = value.get("length")
+    digest = value.get("correlationDigest")
+    if not isinstance(failure_class, str):
+        return None
+    # bool is an int subclass; a boolean is not a character count.
+    if isinstance(length, bool) or not isinstance(length, int):
+        return None
+    if not isinstance(digest, str) or not _LEGACY_DIGEST_RE.match(digest):
+        return None
+    return f"{failure_class} - {length} chars - digest {digest[:8]}"
+
+
+def _parse_baked_repr(text: str) -> dict[str, Any] | None:
+    """Read the three typed values out of a matched repr, or None.
+
+    Structural only -- the values come from regex groups, never from evaluating
+    the string. Rejects a duplicate key, which the three-pair bound alone allows.
+    """
+    parsed: dict[str, Any] = {}
+    for match in _REPR_PAIR_PARTS_RE.finditer(text):
+        key = match.group("key")
+        if key in parsed:
+            return None
+        number = match.group("number")
+        parsed[key] = int(number) if number is not None else match.group("text")
+    if frozenset(parsed.keys()) != LEGACY_CONFINED_KEYS:
+        return None
+    return parsed
+
+
+def _baked_repr_to_text(text: str) -> str | None:
+    """Render one exact baked-repr string, or None if it is not one."""
+    if not _BAKED_REPR_RE.match(text):
+        return None
+    parsed = _parse_baked_repr(text)
+    if parsed is None:
+        return None
+    return _legacy_confined_mapping_to_text(parsed)
+
+
+def legacy_confined_to_text(value: Any) -> str | None:
+    """Canonical operator string for the legacy confinement envelope.
+
+    Accepts the live mapping or an exact baked-repr string, in either key order.
+    Returns None for every other value, including a mapping with an extra or
+    missing key, a non-hex or short digest, and a non-integer length.
+    """
+    rendered = _legacy_confined_mapping_to_text(value)
+    if rendered is not None:
+        return rendered
+    if isinstance(value, str):
+        return _baked_repr_to_text(value)
+    return None
+
+
+def _render_embedded_baked_reprs(text: str) -> str:
+    """Replace every embedded envelope repr with its canonical string.
+
+    Surrounding operator text is preserved, so a persisted
+    "ESCALATED still open: {...}" row renders readably instead of leaking a repr.
+    """
+
+    def replace(match: re.Match[str]) -> str:
+        rendered = _baked_repr_to_text(match.group(0))
+        return rendered if rendered is not None else match.group(0)
+
+    return _BAKED_REPR_SCAN_RE.sub(replace, text)
+
+
+def alert_text(value: Any) -> str:
+    """The single funnel every alert-content read passes through.
+
+    A string renders as itself, with any embedded envelope repr replaced by its
+    canonical form. The live envelope mapping renders canonically. Anything else
+    -- an arbitrary mapping, a list, a number -- renders as the fixed sentinel and
+    is never printed, so an unexpected shape cannot leak through the boundary.
+    """
+    if value is None:
+        return ""
+    rendered = legacy_confined_to_text(value)
+    if rendered is not None:
+        return rendered
+    if isinstance(value, str):
+        return _render_embedded_baked_reprs(value)
+    return UNRENDERABLE_ALERT_CONTENT
+
+
+def alert_text_kind(value: Any) -> str:
+    """Telemetry label for one alert-content value.
+
+    One of "string", "legacy_object", "baked_repr", "unrenderable". Callers count
+    these per event; an event can carry more than one kind across its fields, so
+    the counters are never summed.
+    """
+    if value is None:
+        return "string"
+    if _legacy_confined_mapping_to_text(value) is not None:
+        return "legacy_object"
+    if isinstance(value, str):
+        if _BAKED_REPR_SCAN_RE.search(value) and _render_embedded_baked_reprs(value) != value:
+            return "baked_repr"
+        return "string"
+    return "unrenderable"

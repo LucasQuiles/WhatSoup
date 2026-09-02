@@ -36,7 +36,12 @@ from lib.bounded_jsonl import (
     require_bounded_jsonl_commit,
 )
 from lib.bot_errors_envelope import EnvelopeError, classify_event, new_event_fields, normalize_event
-from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
+from lib.bot_errors_redaction import (
+    alert_text,
+    alert_text_kind,
+    redact_bot_errors_text,
+    redact_json_value as redact_shared_json_value,
+)
 from lib.controller_log import (
     ControllerLogContext,
     controller_cycle,
@@ -415,7 +420,7 @@ def degradation_causes_from_event(event: dict[str, Any]) -> list[str] | None:
         ):
             return list(structured)
         return None
-    tokens = _DEGRADATION_CAUSES_EVIDENCE_RE.findall(str(event.get("evidence") or ""))
+    tokens = _DEGRADATION_CAUSES_EVIDENCE_RE.findall(event_text(event, "evidence"))
     if not tokens:
         return None
     causes = [c for c in tokens[-1].split(",") if c]
@@ -624,6 +629,67 @@ def record_test_leak_daily_marker(
 
 
 COMMA_TOKEN_LIST = re.compile(r"\b[A-Za-z0-9_.:-]+(?:\s*,\s*[A-Za-z0-9_.:-]+)+\b")
+
+
+# ---------------------------------------------------------------------------
+# #2386 -- legacy confined alert-content reader
+# ---------------------------------------------------------------------------
+# `summary` and `evidence` arrive as a plain string from the Python producers and,
+# since the TypeScript producer began confining alert content, as a three-key
+# confinement envelope -- either the live mapping or a baked repr of it, in either
+# key order. Every alert-content read goes through this one funnel so a single
+# rendering rule governs messages, escalation prefixes, persisted incident state,
+# storm fingerprints, and the storm manifest.
+#
+# Deliberately NOT applied to `truncate`/`redact`: those are shared primitives
+# whose callers include a raw exception object, and funnelling them would replace
+# operator-visible error text with the unrenderable sentinel.
+#
+# This restores READABILITY. It does not restore token routing: the producer's
+# confinement destroyed the tokens, and no consumer can recover them.
+
+
+def event_text(event: dict[str, Any], key: str) -> str:
+    """Render one alert-content field of a queue event as operator text."""
+    return alert_text(event.get(key) or "")
+
+
+LEGACY_ALERT_CONTENT_KEY = "legacyAlertContent"
+_LEGACY_ALERT_CONTENT_COUNTERS = {
+    "legacy_object": "queueLegacyObject",
+    "baked_repr": "queueBakedRepr",
+    "unrenderable": "queueUnrenderable",
+}
+
+
+def record_legacy_alert_content(event: dict[str, Any], incident_state: dict[str, Any]) -> None:
+    """Count the legacy alert-content forms one event carries (#2386).
+
+    Called once per claimed event, never inside ``alert_text`` -- that runs many
+    times per event. One event can carry a different form in each field, so each
+    counter increments AT MOST ONCE per event and the counters must NEVER be
+    summed: adding object to repr double-counts an event carrying both.
+
+    Retirement needs both halves: these counters reading zero for 14 consecutive
+    days AND a direct scan of the incident-state JSON finding neither form. A
+    quiet open incident carrying a legacy ``lastEvidence`` is never rendered, so
+    the counters alone cannot prove the corpus is clean.
+    """
+    kinds = {alert_text_kind(event.get(field)) for field in ("summary", "evidence")}
+    incremented = {
+        counter for kind, counter in _LEGACY_ALERT_CONTENT_COUNTERS.items() if kind in kinds
+    }
+    if not incremented:
+        return
+    block = incident_state.get(LEGACY_ALERT_CONTENT_KEY)
+    if not isinstance(block, dict):
+        block = {}
+    for counter in _LEGACY_ALERT_CONTENT_COUNTERS.values():
+        block[counter] = int_field(block, counter) + (1 if counter in incremented else 0)
+    block["lastLegacyAt"] = int(time.time())
+    block["lastLegacyIso"] = now_iso()
+    block["lastLegacySource"] = safe_segment(str(event.get("source") or "unknown"))
+    incident_state[LEGACY_ALERT_CONTENT_KEY] = block
 
 
 def now_iso() -> str:
@@ -1355,8 +1421,8 @@ def legacy_record_matches_alert_source(event: dict[str, Any], record: dict[str, 
     if str(record.get("failureCode") or "") == "SOURCE_UPDATE_BLOCKED":
         return True
     evidence = " ".join([
-        str(record.get("lastEvidence") or ""),
-        str(record.get("lastSummary") or ""),
+        alert_text(record.get("lastEvidence")),
+        alert_text(record.get("lastSummary")),
     ]).lower()
     return "source_update" in evidence and (
         "source_update_blocked" in evidence
@@ -1482,7 +1548,7 @@ def classify_failure_mode(event: dict[str, Any]) -> str:
     """
     source = str(event.get("source") or "")
     diagnostics = event.get("diagnostics") if isinstance(event.get("diagnostics"), dict) else {}
-    evidence = str(event.get("evidence") or "")
+    evidence = event_text(event, "evidence")
 
     # SSH timeout to a peer Tailscale still reports online: host is up, the probe
     # timed out — transient.
@@ -1773,7 +1839,7 @@ def record_has_verified_health_recovery(record: dict[str, Any]) -> bool:
     the same probe-extraction shape and the same oracle as the recovery path; no
     parallel verification logic. Fail-closed: any parse error -> not verified.
     """
-    for raw_line in str(record.get("lastEvidence") or "").splitlines():
+    for raw_line in alert_text(record.get("lastEvidence")).splitlines():
         line = raw_line.strip()
         match = re.match(r"^health\s+([^:\s]+):\s+(.+)$", line)
         probe = match.group(2).strip() if match else line
@@ -1793,7 +1859,7 @@ def daily_health_recovered_incident_keys(
     created = event_created_epoch(event)
     recovered: list[str] = []
     seen: set[str] = set()
-    for raw_line in str(event.get("evidence") or "").splitlines():
+    for raw_line in event_text(event, "evidence").splitlines():
         line = raw_line.strip()
         match = re.match(r"^health\s+([^:\s]+):\s+(.+)$", line)
         if not match:
@@ -2050,7 +2116,7 @@ def record_autoclose_reopen_if_recent(
         "secondsSinceAutoclose": seconds_since,
         "source": source_from_incident_key(key),
         "eventId": event.get("id"),
-        "summary": redacted_state_text(event.get("summary"), 500),
+        "summary": redacted_state_text(event_text(event, "summary"), 500),
     }
     safety = incident_state.setdefault("promotionSafety", {})
     safety["autoCloseThenReopenCount"] = int_field(safety, "autoCloseThenReopenCount") + 1
@@ -2099,7 +2165,7 @@ def is_logged_out_physical_signal(event: dict[str, Any]) -> bool:
     if critical_failure_code(event) == "WA_AUTH_BOND_SERVER_REVOKED":
         return True
     source = str(event.get("source") or "")
-    evidence = str(event.get("evidence") or "").lower()
+    evidence = event_text(event, "evidence").lower()
     return source == "instance_logged_out" and (
         evidence_has_terminal_auth_failure_class(evidence) or (
             "last_status_code=401" in evidence and evidence_has_logged_out_reason(evidence)
@@ -2118,7 +2184,7 @@ def is_verified_device_bond_lost_signal(event: dict[str, Any]) -> bool:
         if kind in {"whatsapp_linked_device", "account_linkage"}:
             return True
     source = str(event.get("source") or "")
-    evidence = str(event.get("evidence") or "").lower()
+    evidence = event_text(event, "evidence").lower()
     return (
         source == "whatsapp_device_bond_lost"
         and "classification: physical_intervention_required" in evidence
@@ -2137,7 +2203,7 @@ def physical_confirmation_threshold(event: dict[str, Any]) -> int:
 def event_has_awaiting_physical_context(event: dict[str, Any]) -> bool:
     if critical_recoverability(event) == "manual_relink_required":
         return True
-    evidence = str(event.get("evidence") or "").lower()
+    evidence = event_text(event, "evidence").lower()
     return "incident_status=awaiting_physical" in evidence or "status=awaiting_physical" in evidence
 
 
@@ -2159,7 +2225,7 @@ def update_awaiting_physical_tracking(event: dict[str, Any], record: dict[str, A
     record["physicalCandidateLastAt"] = current
     record["physicalCandidateLastIso"] = now
     record["physicalCandidateLastEventId"] = event_id
-    record["physicalCandidateLastEvidence"] = str(event.get("evidence") or "")[-1000:]
+    record["physicalCandidateLastEvidence"] = event_text(event, "evidence")[-1000:]
 
     if previous_status != "awaiting_physical" and count >= physical_confirmation_threshold(event):
         record["status"] = "awaiting_physical"
@@ -2191,7 +2257,7 @@ def stale_action_text() -> str:
 
 
 def event_has_stale_context(event: dict[str, Any]) -> bool:
-    evidence = str(event.get("evidence") or "").lower()
+    evidence = event_text(event, "evidence").lower()
     return "incident_stale=true" in evidence or "incident_status=stale" in evidence
 
 
@@ -2227,24 +2293,24 @@ def append_still_open_context(
             f"physical_action={physical_action_text()}",
             f"renotify_cadence_seconds={AWAITING_PHYSICAL_RENOTIFY_SECONDS}",
         ])
-    evidence = str(event.get("evidence") or "").strip()
+    evidence = event_text(event, "evidence").strip()
     event["evidence"] = "\n".join(part for part in [evidence, *additions] if part)
     if awaiting_physical and digest:
-        if "still-open digest" not in str(event.get("summary") or "").lower():
-            event["summary"] = f"Still-open digest, awaiting physical action: {event.get('summary') or key}"
+        if "still-open digest" not in event_text(event, "summary").lower():
+            event["summary"] = f"Still-open digest, awaiting physical action: {event_text(event, 'summary') or key}"
     elif awaiting_physical:
         event["severity"] = "critical"
-        if "awaiting physical" not in str(event.get("summary") or "").lower():
-            event["summary"] = f"Awaiting physical action: {event.get('summary') or key}"
+        if "awaiting physical" not in event_text(event, "summary").lower():
+            event["summary"] = f"Awaiting physical action: {event_text(event, 'summary') or key}"
     elif escalated:
         event["severity"] = "critical"
-        if "escalated" not in str(event.get("summary") or "").lower():
-            event["summary"] = f"ESCALATED still open: {event.get('summary') or key}"
+        if "escalated" not in event_text(event, "summary").lower():
+            event["summary"] = f"ESCALATED still open: {event_text(event, 'summary') or key}"
     elif digest:
-        if "still-open digest" not in str(event.get("summary") or "").lower():
-            event["summary"] = f"Still-open digest: {event.get('summary') or key}"
-    elif "still open" not in str(event.get("summary") or "").lower():
-        event["summary"] = f"Still open: {event.get('summary') or key}"
+        if "still-open digest" not in event_text(event, "summary").lower():
+            event["summary"] = f"Still-open digest: {event_text(event, 'summary') or key}"
+    elif "still open" not in event_text(event, "summary").lower():
+        event["summary"] = f"Still open: {event_text(event, 'summary') or key}"
 
 
 def truncate(value: Any, limit: int) -> str:
@@ -2490,7 +2556,7 @@ def format_event(event: dict[str, Any]) -> str:
         title = "BOT WARNING"
     else:
         title = "BOT ERROR"
-    summary = truncate(redact(event.get("summary") or "unspecified bot error").replace("@", " at "), 220)
+    summary = truncate(redact(event_text(event, "summary") or "unspecified bot error").replace("@", " at "), 220)
     process_info = event.get("process") if isinstance(event.get("process"), dict) else {}
     diagnostics = event.get("diagnostics") if isinstance(event.get("diagnostics"), dict) else {}
     delivery = event.get("delivery") if isinstance(event.get("delivery"), dict) else {}
@@ -2566,7 +2632,7 @@ def format_event(event: dict[str, Any]) -> str:
         event_line("queue", diagnostics.get("queue")),
         event_line("dispatch_log", diagnostics.get("dispatchLog")),
         event_line("clear_requirement", clear_requirement, 900),
-        event_line("evidence", event.get("evidence"), 1800),
+        event_line("evidence", event_text(event, "evidence"), 1800),
         requested_action,
     ])
     text = "\n".join(line for line in lines if line)
@@ -2827,7 +2893,7 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
     if (
         is_incident_alert(event)
         and source == "whatsapp_auth_bond_local_failure"
-        and TEST_FIXTURE_AUTH_BOND.search(str(event.get("evidence") or ""))
+        and TEST_FIXTURE_AUTH_BOND.search(event_text(event, "evidence"))
     ):
         return "test fixture auth-bond event suppressed from live BOT ERRORS"
     if source == "daily-health" and severity == "info" and not is_incident_clear(event):
@@ -2898,8 +2964,8 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
             open_record["lastSeenAt"] = current
             open_record["lastSeenIso"] = now_iso()
             open_record["lastEventId"] = event.get("id")
-            open_record["lastSummary"] = redacted_state_text(event.get("summary"), 500)
-            open_record["lastEvidence"] = redacted_state_text(event.get("evidence"), 1000, tail=True)
+            open_record["lastSummary"] = redacted_state_text(event_text(event, "summary"), 500)
+            open_record["lastEvidence"] = redacted_state_text(event_text(event, "evidence"), 1000, tail=True)
             suppressed = int_field(open_record, "suppressedCount") + 1
             open_record["suppressedCount"] = suppressed
             became_awaiting_physical = update_awaiting_physical_tracking(event, open_record, current)
@@ -3134,7 +3200,7 @@ def append_clear_context(event: dict[str, Any], incident_state: dict[str, Any]) 
             )
     if recovered_keys:
         additions.append("recovered_incidents=" + ",".join(recovered_keys))
-    evidence = str(event.get("evidence") or "").strip()
+    evidence = event_text(event, "evidence").strip()
     event["evidence"] = "\n".join(part for part in [evidence, *additions] if part)
 
 
@@ -3172,8 +3238,8 @@ def mark_incident_sent(event: dict[str, Any], incident_state: dict[str, Any]) ->
             "lastSentIso": now_iso(),
             "lastNotifiedAt": current,
             "lastNotifiedIso": now_iso(),
-            "lastSummary": redacted_state_text(event.get("summary"), 500),
-            "lastEvidence": redacted_state_text(event.get("evidence"), 1000, tail=True),
+            "lastSummary": redacted_state_text(event_text(event, "summary"), 500),
+            "lastEvidence": redacted_state_text(event_text(event, "evidence"), 1000, tail=True),
             "suppressedCount": suppressed,
             "renotifyCount": renotify_count,
             "forceNotifyLevels": force_levels,
@@ -3290,15 +3356,15 @@ def mark_suppressed_by_stronger(
         stronger_record["lastSuppressedClearAt"] = current
         stronger_record["lastSuppressedClearIso"] = now_iso()
         stronger_record["lastSuppressedClearSource"] = incident_source(event)
-        stronger_record["lastSuppressedClearSummary"] = redacted_state_text(event.get("summary"), 500)
+        stronger_record["lastSuppressedClearSummary"] = redacted_state_text(event_text(event, "summary"), 500)
         stronger_record["lastSuppressedClearReason"] = f"clear suppressed by stronger open incident {stronger_key}"
         return
 
     stronger_record["lastSeenAt"] = current
     stronger_record["lastSeenIso"] = now_iso()
     stronger_record["lastSuppressedSymptomSource"] = incident_source(event)
-    stronger_record["lastSuppressedSymptomSummary"] = redacted_state_text(event.get("summary"), 500)
-    stronger_record["lastSuppressedSymptomEvidence"] = redacted_state_text(event.get("evidence"), 1000, tail=True)
+    stronger_record["lastSuppressedSymptomSummary"] = redacted_state_text(event_text(event, "summary"), 500)
+    stronger_record["lastSuppressedSymptomEvidence"] = redacted_state_text(event_text(event, "evidence"), 1000, tail=True)
     if critical_failure_code(event):
         stronger_record["lastSuppressedSymptomFailureCode"] = critical_failure_code(event)
     stronger_record["suppressedCount"] = int_field(stronger_record, "suppressedCount") + 1
@@ -3494,7 +3560,7 @@ def stale_incident_event(key: str, record: dict[str, Any], current: int) -> dict
     if last_stale_failed and current - last_stale_failed < INCIDENT_STALE_FAILURE_RETRY_SECONDS:
         return None
 
-    summary = str(record.get("lastSummary") or key)
+    summary = alert_text(record.get("lastSummary")) or key
     if awaiting_physical:
         title = f"Stale incident digest, awaiting physical action: {summary}"
         action = physical_action_text()
@@ -4430,7 +4496,7 @@ def normalize_token_lists(text: str) -> str:
 
 
 def normalized_summary(event: dict[str, Any]) -> str:
-    text = redact(event.get("summary") or "unspecified bot error").lower()
+    text = redact(event_text(event, "summary") or "unspecified bot error").lower()
     host_tokens = set()
     for key in ("machine", "machineName", "host", "hostname", "instance"):
         raw = str(event.get(key) or "").strip().lower()
@@ -4485,7 +4551,7 @@ def is_storm_candidate(event: dict[str, Any]) -> bool:
 
 
 def recovery_normalized_summary(event: dict[str, Any]) -> str:
-    text = str(event.get("summary") or "unspecified bot error").strip().lower()
+    text = (event_text(event, "summary") or "unspecified bot error").strip().lower()
     return re.sub(r"\s+", " ", text)
 
 
@@ -4546,8 +4612,8 @@ def manifest_entry(path: Path, event: dict[str, Any]) -> dict[str, Any]:
         "source": event.get("source"),
         "severity": event.get("severity"),
         "createdAt": event.get("createdAt"),
-        "summary": truncate(redact(event.get("summary")), 700),
-        "evidence": truncate(redact(event.get("evidence")), 1800),
+        "summary": truncate(redact(event_text(event, "summary")), 700),
+        "evidence": truncate(redact(event_text(event, "evidence")), 1800),
         "outboxPath": str(path),
         "logHints": [truncate(redact(hint), 900) for hint in log_hints[:10]],
     }
@@ -4779,7 +4845,7 @@ def collapse_storm_group(
             )
             require_all_advance([absorb_manifest_publication])
             publications.append(absorb_manifest_publication)
-            summary_text = str(digest_event.get("summary") or "")
+            summary_text = event_text(digest_event, "summary")
             summary_tail = (
                 summary_text.split(" hosts - ", 1)[1]
                 if " hosts - " in summary_text
@@ -6282,6 +6348,7 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
             })
             return True, "stale_episode_quarantined"
 
+    record_legacy_alert_content(event, incident_state)
     absorb_daily_health_signal(event, incident_state)
     suppress_reason = should_suppress_send(event, incident_state)
     if suppress_reason:
@@ -6413,7 +6480,7 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
             else:
                 email_status = (
                     "accepted_unconfirmed"
-                    if email_fallback(f"BOT ERRORS delivery failing: {event.get('summary', 'unknown')}", text)
+                    if email_fallback(f"BOT ERRORS delivery failing: {event_text(event, 'summary') or 'unknown'}", text)
                     else "failed"
                 )
         if isinstance(delivery, dict):
