@@ -2749,6 +2749,9 @@ describe('AgentRuntime', () => {
         getStatus: vi.fn(() => ({
           active: false,
           pid: null,
+          // The crashed child's handle is released before the crash is
+          // notified, so the respawn gate can prove termination.
+          providerTerminated: true,
           sessionId: null,
           startedAt: null,
           messageCount: 0,
@@ -2881,6 +2884,7 @@ describe('AgentRuntime', () => {
           .mockReturnValueOnce({
             active: false,
             pid: null,
+            providerTerminated: true,
             sessionId: 'sess-auto',
             startedAt: null,
             messageCount: 0,
@@ -2980,6 +2984,7 @@ describe('AgentRuntime', () => {
           .mockReturnValueOnce({
             active: false,
             pid: null,
+            providerTerminated: true,
             sessionId: 'sess-auto-inject-error',
             startedAt: null,
             messageCount: 0,
