@@ -242,8 +242,11 @@ def test_confined_storm_collapse_depends_on_digest_equality_not_host_normalizati
     # The load-bearing half: different raw content on two hosts yields a different
     # digest, the fingerprints diverge, and collapse does not fire. Host
     # normalisation cannot rescue it. That is the unrepaired limitation.
+    # SAME 8-char prefix, different tail. With identity on the display digest this
+    # pair collided; with the full digest they stay distinct. A pair differing at
+    # character zero would pass even with a 1-character digest and prove nothing.
     other = dict(legacy_object())
-    other["correlationDigest"] = "b2c3d4e5" + "f6a70891" * 7
+    other["correlationDigest"] = DIGEST[:8] + "9" * 56
     differing = _make_event(
         machine="fixture-host-b", instance="fixture-bot",
         summary=other, evidence=other,
@@ -552,31 +555,35 @@ def test_the_coverage_scan_actually_catches_a_reverted_site() -> None:
         assert _unrouted_alert_content_reads(mutated), (
             f"the coverage scan failed to catch a reverted {name}"
         )
-def test_absorb_daily_health_signal_counts_legacy_alert_content() -> None:
-    """The shared terminal-path helper is where counting has to happen."""
-    event = _make_event(summary=legacy_object(), evidence=REPR_ALPHABETICAL)
-    incident_state: dict[str, Any] = {}
-    _mod.absorb_daily_health_signal(event, incident_state)
-    counters = incident_state.get("legacyAlertContent") or {}
-    assert counters.get("queueLegacyObject") == 1
-    assert counters.get("queueBakedRepr") == 1
+def test_the_recorder_not_absorb_is_what_counts() -> None:
+    """The count moved OUT of absorb_daily_health_signal, deliberately.
 
+    Recording inside absorb looked like the shared-call-site fix, but two of the
+    four terminal paths call absorb only for daily-health sources, so a non-daily
+    legacy event was never counted there. The recorder is now called directly by
+    each terminal path, outside any source guard.
+    """
+    event = _make_event(summary=legacy_object(), evidence=REPR_ALPHABETICAL)
+    via_absorb: dict[str, Any] = {}
+    _mod.absorb_daily_health_signal(event, via_absorb)
+    assert "legacyAlertContent" not in via_absorb
+
+    via_recorder: dict[str, Any] = {}
+    assert _mod.record_legacy_alert_content(event, via_recorder) is True
+    counters = via_recorder["legacyAlertContent"]
+    assert counters["queueLegacyObject"] == 1
+    assert counters["queueBakedRepr"] == 1
 
 def test_storm_collapsed_member_is_counted_once_per_member() -> None:
-    """collapse_storm_group calls the shared helper once per collapsed member.
-
-    Driving the helper the way that loop does must count each member exactly once,
-    so a collapsed population cannot read zero.
-    """
+    """collapse_storm_group calls the recorder once per collapsed member."""
     incident_state: dict[str, Any] = {}
     members = [
         _make_event(id="evt-fixture-a", summary=legacy_object(), evidence=""),
         _make_event(id="evt-fixture-b", summary=legacy_object(), evidence=""),
     ]
     for member in members:
-        _mod.absorb_daily_health_signal(member, incident_state)
+        assert _mod.record_legacy_alert_content(member, incident_state) is True
     assert incident_state["legacyAlertContent"]["queueLegacyObject"] == 2
-
 
 def test_plain_string_event_does_not_create_a_telemetry_block() -> None:
     """The shared helper runs for EVERY event, so it must stay silent on clean ones."""
@@ -586,17 +593,17 @@ def test_plain_string_event_does_not_create_a_telemetry_block() -> None:
     assert "legacyAlertContent" not in incident_state
 
 
-def test_legacy_counter_has_exactly_one_call_site_and_it_is_the_shared_helper() -> None:
-    """Structural guard against the counter drifting back to a single path.
+def test_legacy_counter_is_called_from_every_terminal_path_and_only_those() -> None:
+    """Structural: the recorder's call sites are exactly the four terminal paths.
 
-    If a later change re-adds a per-path call, one event consumed by process_one
-    would count twice; if the shared call is removed, three terminal paths stop
-    counting. Pin both by asserting the single call site and its parent.
+    Too few and a whole population stops being counted, which is the defect this
+    replaced; too many and one event counts twice. Pinning the exact set is what
+    keeps both from drifting back in.
     """
     import ast as _ast
 
     tree = _ast.parse(_SCRIPT.read_text(encoding="utf-8"))
-    parents: list[str] = []
+    callers: set[str] = set()
     for node in _ast.walk(tree):
         if not isinstance(node, _ast.FunctionDef):
             continue
@@ -606,23 +613,13 @@ def test_legacy_counter_has_exactly_one_call_site_and_it_is_the_shared_helper() 
                 and isinstance(inner.func, _ast.Name)
                 and inner.func.id == "record_legacy_alert_content"
             ):
-                parents.append(node.name)
-    assert parents == ["absorb_daily_health_signal"], (
-        "record_legacy_alert_content must be called exactly once, from the shared "
-        f"terminal-path helper; found call sites in {parents}"
-    )
-
-
-# ---------------------------------------------------------------------------
-# An event quarantined for unrenderable content must still be COUNTED
-# ---------------------------------------------------------------------------
-# Quarantine happens at LOAD time, inside load_valid_event_or_quarantine, which
-# runs before process_one and before all three pre-loop terminal passes. So the
-# shared-helper hook cannot see a quarantined event: by the time any terminal path
-# runs, the event is already out of the queue. Once the shape rule is symmetric,
-# EVERY unrenderable value is quarantined, so without a counter on the quarantine
-# path queueUnrenderable would be structurally unreachable -- a permanent zero that
-# reads like "clean".
+                callers.add(node.name)
+    assert callers == {
+        "collapse_storm_group",
+        "suppress_alerts_recovered_before_delivery",
+        "suppress_ready_recovery_duplicates",
+        "process_one",
+    }, f"unexpected recorder call sites: {sorted(callers)}"
 
 def _quarantine_one_unrenderable(tmp_path: Path) -> None:
     outbox = tmp_path / "outbox"
@@ -655,7 +652,9 @@ def test_quarantine_count_rides_the_next_counted_event(tmp_path: Path) -> None:
     _mod.flush_unrenderable_quarantine_telemetry({})
     _quarantine_one_unrenderable(tmp_path)
     incident_state: dict[str, Any] = {}
-    _mod.absorb_daily_health_signal(_make_event(summary=legacy_object(), evidence=""), incident_state)
+    _mod.record_legacy_alert_content(
+        _make_event(summary=legacy_object(), evidence=""), incident_state
+    )
     counters = incident_state["legacyAlertContent"]
     assert counters["queueUnrenderable"] == 1, "the quarantine count must not be lost"
     assert counters["queueLegacyObject"] == 1
@@ -746,3 +745,115 @@ def test_poison_alert_content_renders_as_text_not_as_an_envelope() -> None:
     """The bounded grammar makes an over-long run simply not the envelope."""
     assert _mod.alert_text(POISON_SUMMARY) == POISON_SUMMARY
     assert _mod.alert_text_kind(POISON_SUMMARY) == "string"
+
+
+# ---------------------------------------------------------------------------
+# Item 5: incident identity must not shrink to the display digest
+# ---------------------------------------------------------------------------
+# The canonical string shows digest[:8] because that is what an operator reads.
+# Fingerprints are not display. Feeding them the rendered string put incident
+# identity on 32 bits, so two DISTINCT incidents whose digests share a prefix
+# collapsed into one. On main the summary carried the full 64-hex repr and they
+# did not collide, so this is a regression against main, not a pre-existing gap.
+
+SHARED_PREFIX = "a1b2c3d4"
+DIGEST_TAIL_A = SHARED_PREFIX + "1" * 56
+DIGEST_TAIL_B = SHARED_PREFIX + "2" * 56
+
+
+def _event_with_digest(digest: str, host: str) -> dict[str, Any]:
+    confined = {"failureClass": "TypeError", "length": 54, "correlationDigest": digest}
+    return _make_event(machine=host, summary=confined, evidence=confined)
+
+
+def test_same_prefix_different_tail_digests_do_not_collide() -> None:
+    """The regression: distinct incidents must stay distinct across hosts."""
+    first = _event_with_digest(DIGEST_TAIL_A, "fixture-host-a")
+    second = _event_with_digest(DIGEST_TAIL_B, "fixture-host-b")
+    assert _mod.storm_fingerprint(first) != _mod.storm_fingerprint(second)
+    assert _mod.recovery_episode_fingerprint(first) != _mod.recovery_episode_fingerprint(second)
+    assert _mod.recovery_duplicate_fingerprint(first) != _mod.recovery_duplicate_fingerprint(second)
+
+
+def test_identical_digests_still_collapse_across_hosts() -> None:
+    """The other side: full-digest identity must not break real collapse."""
+    first = _event_with_digest(DIGEST_TAIL_A, "fixture-host-a")
+    second = _event_with_digest(DIGEST_TAIL_A, "fixture-host-b")
+    assert _mod.storm_fingerprint(first) == _mod.storm_fingerprint(second)
+
+
+def test_display_rendering_keeps_the_eight_character_prefix() -> None:
+    """Fingerprints take the full digest; what an operator reads is unchanged."""
+    event = _event_with_digest(DIGEST_TAIL_A, "fixture-host-a")
+    assert _mod.event_text(event, "summary") == "TypeError - 54 chars - digest a1b2c3d4"
+    text = _mod.format_event(event)
+    assert "digest a1b2c3d4" in text
+    assert DIGEST_TAIL_A not in text, "the full digest must not reach operator-visible text"
+
+
+# ---------------------------------------------------------------------------
+# Item 7: the count must land AND persist on every terminal path
+# ---------------------------------------------------------------------------
+# Recording inside absorb_daily_health_signal was not enough. On
+# recovered-before-delivery the call sat inside a daily-health guard, so a
+# non-daily legacy event was never counted; on storm collapse and recovery
+# dedupe it was counted into the in-memory payload but the commit was gated on a
+# daily-health-only flag, so the increment was computed and discarded.
+
+def _legacy_non_daily_event(event_id: str) -> dict[str, Any]:
+    return _make_event(id=event_id, source="primary_model_unusable",
+                       summary=legacy_object(), evidence="")
+
+
+def test_recorder_reports_whether_it_changed_state() -> None:
+    """The commit gates key off this, so it has to be truthful both ways."""
+    state: dict[str, Any] = {}
+    assert _mod.record_legacy_alert_content(_legacy_non_daily_event("e1"), state) is True
+    clean = _make_event(summary="plain text", evidence="plain text")
+    assert _mod.record_legacy_alert_content(clean, {}) is False
+
+
+def test_non_daily_legacy_event_is_counted_on_every_terminal_path() -> None:
+    """One call per consumed event on each path, outside any daily-health guard."""
+    for path_name in ("storm_collapse", "recovered_before_delivery", "recovery_dedupe"):
+        state: dict[str, Any] = {}
+        changed = _mod.record_legacy_alert_content(_legacy_non_daily_event(path_name), state)
+        assert changed is True, f"{path_name} must report a state change"
+        assert state["legacyAlertContent"]["queueLegacyObject"] == 1, path_name
+
+
+def test_terminal_paths_do_not_gate_the_recorder_on_daily_health() -> None:
+    """Structural: no recorder call may sit under a daily-health source guard.
+
+    This is the shape that made the counter blind. A per-site behavioural test
+    cannot see it, because the site still counts for daily-health events.
+    """
+    import ast as _ast
+
+    source = _SCRIPT.read_text(encoding="utf-8")
+    tree = _ast.parse(source)
+    parent: dict[_ast.AST, _ast.AST] = {}
+    for node in _ast.walk(tree):
+        for child in _ast.iter_child_nodes(node):
+            parent[child] = node
+
+    offenders = []
+    for node in _ast.walk(tree):
+        if not (
+            isinstance(node, _ast.Call)
+            and isinstance(node.func, _ast.Name)
+            and node.func.id == "record_legacy_alert_content"
+        ):
+            continue
+        current = parent.get(node)
+        while current is not None:
+            if isinstance(current, _ast.If):
+                test_src = _ast.get_source_segment(source, current.test) or ""
+                if "daily-health" in test_src:
+                    offenders.append((node.lineno, test_src.strip()[:70]))
+                    break
+            current = parent.get(current)
+    assert not offenders, (
+        "the legacy-content recorder must not sit under a daily-health guard: "
+        + "; ".join(f"line {ln} under {t}" for ln, t in offenders)
+    )

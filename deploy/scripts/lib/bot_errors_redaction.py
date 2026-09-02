@@ -237,7 +237,17 @@ _REPR_PAIR_PARTS_RE = re.compile(
 )
 
 
-def _legacy_confined_mapping_to_text(value: Any) -> str | None:
+# What an OPERATOR reads is the 8-character prefix; it is a display convenience.
+# What decides INCIDENT IDENTITY is the full digest. Those are different jobs and
+# they get different renderings: collapsing identity onto 32 bits merges distinct
+# incidents, which is a silent loss, so the fingerprint path takes all 64 chars.
+LEGACY_DISPLAY_DIGEST_CHARS = 8
+LEGACY_FULL_DIGEST_CHARS = 64
+
+
+def _legacy_confined_mapping_to_text(
+    value: Any, *, digest_chars: int = LEGACY_DISPLAY_DIGEST_CHARS
+) -> str | None:
     """Render a live confinement-envelope mapping, or None if it is not one."""
     if not isinstance(value, dict):
         return None
@@ -253,7 +263,7 @@ def _legacy_confined_mapping_to_text(value: Any) -> str | None:
         return None
     if not isinstance(digest, str) or not _LEGACY_DIGEST_RE.match(digest):
         return None
-    return f"{failure_class} - {length} chars - digest {digest[:8]}"
+    return f"{failure_class} - {length} chars - digest {digest[:digest_chars]}"
 
 
 def _parse_baked_repr(text: str) -> dict[str, Any] | None:
@@ -274,32 +284,38 @@ def _parse_baked_repr(text: str) -> dict[str, Any] | None:
     return parsed
 
 
-def _baked_repr_to_text(text: str) -> str | None:
+def _baked_repr_to_text(
+    text: str, *, digest_chars: int = LEGACY_DISPLAY_DIGEST_CHARS
+) -> str | None:
     """Render one exact baked-repr string, or None if it is not one."""
     if not _BAKED_REPR_RE.match(text):
         return None
     parsed = _parse_baked_repr(text)
     if parsed is None:
         return None
-    return _legacy_confined_mapping_to_text(parsed)
+    return _legacy_confined_mapping_to_text(parsed, digest_chars=digest_chars)
 
 
-def legacy_confined_to_text(value: Any) -> str | None:
+def legacy_confined_to_text(
+    value: Any, *, digest_chars: int = LEGACY_DISPLAY_DIGEST_CHARS
+) -> str | None:
     """Canonical operator string for the legacy confinement envelope.
 
     Accepts the live mapping or an exact baked-repr string, in either key order.
     Returns None for every other value, including a mapping with an extra or
     missing key, a non-hex or short digest, and a non-integer length.
     """
-    rendered = _legacy_confined_mapping_to_text(value)
+    rendered = _legacy_confined_mapping_to_text(value, digest_chars=digest_chars)
     if rendered is not None:
         return rendered
     if isinstance(value, str):
-        return _baked_repr_to_text(value)
+        return _baked_repr_to_text(value, digest_chars=digest_chars)
     return None
 
 
-def _render_embedded_baked_reprs(text: str) -> str:
+def _render_embedded_baked_reprs(
+    text: str, *, digest_chars: int = LEGACY_DISPLAY_DIGEST_CHARS
+) -> str:
     """Replace every embedded envelope repr with its canonical string.
 
     Surrounding operator text is preserved, so a persisted
@@ -307,13 +323,13 @@ def _render_embedded_baked_reprs(text: str) -> str:
     """
 
     def replace(match: re.Match[str]) -> str:
-        rendered = _baked_repr_to_text(match.group(0))
+        rendered = _baked_repr_to_text(match.group(0), digest_chars=digest_chars)
         return rendered if rendered is not None else match.group(0)
 
     return _BAKED_REPR_SCAN_RE.sub(replace, text)
 
 
-def alert_text(value: Any) -> str:
+def alert_text(value: Any, *, digest_chars: int = LEGACY_DISPLAY_DIGEST_CHARS) -> str:
     """The single funnel every alert-content read passes through.
 
     A string renders as itself, with any embedded envelope repr replaced by its
@@ -323,12 +339,25 @@ def alert_text(value: Any) -> str:
     """
     if value is None:
         return ""
-    rendered = legacy_confined_to_text(value)
+    rendered = legacy_confined_to_text(value, digest_chars=digest_chars)
     if rendered is not None:
         return rendered
     if isinstance(value, str):
-        return _render_embedded_baked_reprs(value)
+        return _render_embedded_baked_reprs(value, digest_chars=digest_chars)
     return UNRENDERABLE_ALERT_CONTENT
+
+
+def alert_text_for_fingerprint(value: Any) -> str:
+    """Render for IDENTITY, not for display: the full 64-hex digest.
+
+    storm_fingerprint, recovery_episode_fingerprint and recovery_duplicate_
+    fingerprint group incidents by this text. Feeding them the display rendering
+    put identity on the 8-character prefix, so two incidents sharing a prefix
+    merged into one -- a regression against the pre-confinement behaviour, where
+    the summary carried the whole digest. Everything else about the rendering is
+    identical, so grouping is unchanged apart from the restored entropy.
+    """
+    return alert_text(value, digest_chars=LEGACY_FULL_DIGEST_CHARS)
 
 
 def alert_text_kind(value: Any) -> str:

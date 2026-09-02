@@ -38,6 +38,7 @@ from lib.bounded_jsonl import (
 from lib.bot_errors_envelope import EnvelopeError, classify_event, new_event_fields, normalize_event
 from lib.bot_errors_redaction import (
     alert_text,
+    alert_text_for_fingerprint,
     alert_text_kind,
     redact_bot_errors_text,
     redact_json_value as redact_shared_json_value,
@@ -654,6 +655,15 @@ def event_text(event: dict[str, Any], key: str) -> str:
     return alert_text(event.get(key) or "")
 
 
+def event_fingerprint_text(event: dict[str, Any], key: str) -> str:
+    """Render one alert-content field for IDENTITY, carrying the full digest.
+
+    Display truncates the digest to 8 characters because that is what an operator
+    reads. Grouping must not: identity on 32 bits merges distinct incidents.
+    """
+    return alert_text_for_fingerprint(event.get(key) or "")
+
+
 LEGACY_ALERT_CONTENT_KEY = "legacyAlertContent"
 _LEGACY_ALERT_CONTENT_COUNTERS = {
     "legacy_object": "queueLegacyObject",
@@ -702,7 +712,7 @@ def flush_unrenderable_quarantine_telemetry(incident_state: dict[str, Any]) -> b
     return True
 
 
-def record_legacy_alert_content(event: dict[str, Any], incident_state: dict[str, Any]) -> None:
+def record_legacy_alert_content(event: dict[str, Any], incident_state: dict[str, Any]) -> bool:
     """Count the legacy alert-content forms one event carries (#2386).
 
     Called once per claimed event, never inside ``alert_text`` -- that runs many
@@ -715,13 +725,13 @@ def record_legacy_alert_content(event: dict[str, Any], incident_state: dict[str,
     quiet open incident carrying a legacy ``lastEvidence`` is never rendered, so
     the counters alone cannot prove the corpus is clean.
     """
-    flush_unrenderable_quarantine_telemetry(incident_state)
+    changed = flush_unrenderable_quarantine_telemetry(incident_state)
     kinds = {alert_text_kind(event.get(field)) for field in ("summary", "evidence")}
     incremented = {
         counter for kind, counter in _LEGACY_ALERT_CONTENT_COUNTERS.items() if kind in kinds
     }
     if not incremented:
-        return
+        return changed
     block = incident_state.get(LEGACY_ALERT_CONTENT_KEY)
     if not isinstance(block, dict):
         block = {}
@@ -731,6 +741,7 @@ def record_legacy_alert_content(event: dict[str, Any], incident_state: dict[str,
     block["lastLegacyIso"] = now_iso()
     block["lastLegacySource"] = safe_segment(str(event.get("source") or "unknown"))
     incident_state[LEGACY_ALERT_CONTENT_KEY] = block
+    return True
 
 
 def now_iso() -> str:
@@ -2010,7 +2021,6 @@ def absorb_daily_health_signal(event: dict[str, Any], incident_state: dict[str, 
     changed the ledger can check ``event["source"]`` itself, which is
     already in hand.
     """
-    record_legacy_alert_content(event, incident_state)
     record_daily_health_freshness(event, incident_state)
     recovered: list[str] = []
     if str(event.get("source") or "") == "daily-health" and not is_incident_clear(event):
@@ -4549,7 +4559,7 @@ def normalize_token_lists(text: str) -> str:
 
 
 def normalized_summary(event: dict[str, Any]) -> str:
-    text = redact(event_text(event, "summary") or "unspecified bot error").lower()
+    text = redact(event_fingerprint_text(event, "summary") or "unspecified bot error").lower()
     host_tokens = set()
     for key in ("machine", "machineName", "host", "hostname", "instance"):
         raw = str(event.get(key) or "").strip().lower()
@@ -4604,7 +4614,7 @@ def is_storm_candidate(event: dict[str, Any]) -> bool:
 
 
 def recovery_normalized_summary(event: dict[str, Any]) -> str:
-    text = (event_text(event, "summary") or "unspecified bot error").strip().lower()
+    text = (event_fingerprint_text(event, "summary") or "unspecified bot error").strip().lower()
     return re.sub(r"\s+", " ", text)
 
 
@@ -4954,6 +4964,8 @@ def collapse_storm_group(
                     })
                     continue
                 absorb_daily_health_signal(event, incident_state)
+                if record_legacy_alert_content(event, incident_state):
+                    state_changed = True
                 if str(event.get("source") or "").startswith("daily-health"):
                     state_changed = True
                 event = mark_collapsed(event, latest_digest_id, bound_manifest_path)
@@ -5105,6 +5117,8 @@ def collapse_storm_group(
                 })
                 continue
             absorb_daily_health_signal(event, incident_state)
+            if record_legacy_alert_content(event, incident_state):
+                state_changed = True
             if str(event.get("source") or "").startswith("daily-health"):
                 state_changed = True
             event = mark_collapsed(event, superseding_digest_id, superseding_manifest_path)
@@ -5268,6 +5282,8 @@ def collapse_storm_group(
             })
             continue
         absorb_daily_health_signal(event, incident_state)
+        if record_legacy_alert_content(event, incident_state):
+            state_changed = True
         if str(event.get("source") or "").startswith("daily-health"):
             state_changed = True
         event = mark_collapsed(event, str(digest.get("id")), manifest_path)
@@ -5530,11 +5546,15 @@ def suppress_alerts_recovered_before_delivery(paths: dict[str, Path], incident: 
         # retryable in the outbox as a visible failed run.
         state_changed = False
         for _alert_path, alert_event, _alert_epoch, _alert_order in pending_alerts:
+            if record_legacy_alert_content(alert_event, incident_state):
+                state_changed = True
             if str(alert_event.get("source") or "").startswith("daily-health"):
                 absorb_daily_health_signal(alert_event, incident_state)
                 state_changed = True
         migrate_legacy_unqualified_incident(clear_event, incident_state)
         clear_will_dispatch = isinstance(open_incidents.get(key), dict)
+        if record_legacy_alert_content(clear_event, incident_state):
+            state_changed = True
         if not clear_will_dispatch and str(clear_event.get("source") or "").startswith("daily-health"):
             absorb_daily_health_signal(clear_event, incident_state)
             state_changed = True
@@ -5646,6 +5666,8 @@ def suppress_ready_recovery_duplicates(paths: dict[str, Path], incident: Inciden
     state_changed = False
     for _path, event in duplicates:
         absorb_daily_health_signal(event, incident_state)
+        if record_legacy_alert_content(event, incident_state):
+            state_changed = True
         if str(event.get("source") or "").startswith("daily-health"):
             state_changed = True
     if state_changed:
@@ -6403,6 +6425,7 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
             })
             return True, "stale_episode_quarantined"
 
+    record_legacy_alert_content(event, incident_state)
     absorb_daily_health_signal(event, incident_state)
     suppress_reason = should_suppress_send(event, incident_state)
     if suppress_reason:
