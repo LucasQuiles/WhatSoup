@@ -14,7 +14,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-collector.py",
-      "sha256": "66f553c995a6fc3868e68534d99ee836a0d58f2952130742d7f46de7a6b9737e",
+      "sha256": "6b53086e01b3d8b86b620c15f17d84c5ece4df6bf8d98fab5d80766f87b672cd",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -265,7 +265,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-sentinel.py",
-      "sha256": "551e2a995a6c5084f5838c86d7ac35a36367fc27901733213de8ae6150109b9d",
+      "sha256": "075137829d4d072bbd23282c58e8731c910d20f7a5642f64a28c17b58c3f8573",
       "mustContain": [
         "DEFAULT_HEARTBEAT_MAX_AGE_SECONDS",
         "DEFAULT_HYSTERESIS_CYCLES"
