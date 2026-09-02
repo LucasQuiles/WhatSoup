@@ -871,7 +871,7 @@ function validateHomeConfinedPathList(
  * Writes a 400 response and returns false on the first violation; returns true when valid.
  */
 function validatePluginDirs(dirs: unknown[], res: ServerResponse): boolean {
-  return validateHomeConfinedPathList(dirs, res, () => 'pluginDirs entries') !== null;
+  return validateHomeConfinedPathList(dirs, res, () => 'each pluginDirs entry') !== null;
 }
 
 /**

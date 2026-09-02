@@ -302,11 +302,16 @@ describe('assertHomeConfinedRenderOptions — physical render admission', () => 
     // predicate were ever applied to it, this render would be refused.
     const { buildPlist } = await import('../../src/fleet/platform.ts');
     const rendered = buildPlist('agent', { pathPrepend: [good] });
-    const pathValue = rendered
-      .split('\n')
-      .find((line) => line.includes(good) && line.includes('<string>'));
-    expect(pathValue, 'the governed entry must be rendered first in PATH').toBeTruthy();
-    expect(pathValue!.indexOf(good)).toBeLessThan(pathValue!.length);
+    // Locate the value by its KEY, not by searching for a line that happens to
+    // contain the entry. A `find` over every `<string>` line would also match
+    // CLAUDE_CONFIG_DIR, or any future key carrying the same directory, so it
+    // could assert about the wrong value while looking green.
+    const lines = rendered.split('\n');
+    const pathKeyIndex = lines.findIndex((line) => line.includes('<key>PATH</key>'));
+    expect(pathKeyIndex, 'the rendered plist must carry a PATH key').toBeGreaterThanOrEqual(0);
+    const pathValue = lines[pathKeyIndex + 1];
+    expect(pathValue, 'the PATH key must be followed by its string value')
+      .toMatch(/^\s*<string>.*<\/string>\s*$/);
 
     // Prove the joined value genuinely leaves home, so this test cannot pass
     // vacuously on a machine whose ambient PATH happened to be home-confined.

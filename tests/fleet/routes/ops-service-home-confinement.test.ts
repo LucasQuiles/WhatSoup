@@ -750,7 +750,7 @@ describe('service block home-confinement (F3)', () => {
     );
     expect(pluginRes._status).toBe(400);
     expect(JSON.parse(pluginRes._body).error).toBe(
-      'pluginDirs entries must be a normalized absolute path within the home directory',
+      'each pluginDirs entry must be a normalized absolute path within the home directory',
     );
   });
 
