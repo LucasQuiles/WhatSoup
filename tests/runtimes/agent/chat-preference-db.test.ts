@@ -25,6 +25,8 @@ import {
   getLatestChatPreference,
   clearChatPreference,
   promoteToSticky,
+  recordKeepReceiptMessageId,
+  getKeepReceiptMessageId,
   type ChatModelPreference,
 } from '../../../src/runtimes/agent/chat-preference-db.ts';
 
@@ -52,6 +54,7 @@ function pref(overrides: Partial<ChatModelPreference> = {}): ChatModelPreference
     validatedProvider: null,
     modelPinVerified: null,
     requestedEffort: null,
+    keepReceiptMessageId: null,
     ...overrides,
   };
 }
@@ -481,5 +484,83 @@ describe('promoteToSticky (CAS keep-promotion)', () => {
     db.raw.prepare(`UPDATE chat_model_preference SET intent = 'banana' WHERE chat_jid = ? AND sender_jid = ?`).run(CHAT_A, SENDER_A);
     const result = promoteToSticky(db, CHAT_A, SENDER_A, 1_500);
     expect(result.outcome).toBe('absent');
+  });
+});
+
+/**
+ * F2a (#2121, owner decision 2026-08-04) — the pin-receipt id column that lets
+ * a reply-threaded `confirm`/`yes`/`pin` be authenticated against the receipt
+ * it quotes. These tests own the two store-level properties the matcher
+ * depends on and cannot verify for itself: the capture write must not disturb
+ * the compare-and-set promotion, and the new column must stay outside the
+ * model-pin fields' cross-field null-contract.
+ */
+describe('keep receipt id (F2a reply-threading)', () => {
+  const RECEIPT = 'WA0123456789ABCDEF';
+
+  it('is null until captured, then reads back from the chat-scoped winning row', () => {
+    setPreference(db, pref({ updatedAt: 1_000, expiresAt: 5_000 }));
+    expect(getKeepReceiptMessageId(db, CHAT_A)).toBeNull();
+
+    recordKeepReceiptMessageId(db, CHAT_A, SENDER_A, RECEIPT);
+    expect(getKeepReceiptMessageId(db, CHAT_A)).toBe(RECEIPT);
+    expect(getPreference(db, CHAT_A, SENDER_A, NOW)?.keepReceiptMessageId).toBe(RECEIPT);
+    // Scoped to its own chat — never leaks sideways into another conversation.
+    expect(getKeepReceiptMessageId(db, CHAT_B)).toBeNull();
+  });
+
+  // The load-bearing store invariant. `updated_at` is promoteToSticky's CAS
+  // token AND the chat-scoped last-writer-wins ordering key, so a capture that
+  // bumped it would make the receipt supersede its own pin: the `keep` the
+  // user was just invited to send would come back `superseded` instead of
+  // `promoted`. This test fails the moment that regresses.
+  it('capture leaves updated_at untouched, so a later keep still promotes', () => {
+    setPreference(db, pref({ updatedAt: 1_000, expiresAt: 5_000 }));
+    recordKeepReceiptMessageId(db, CHAT_A, SENDER_A, RECEIPT);
+    expect(rawRow(CHAT_A, SENDER_A)?.updated_at).toBe(1_000);
+
+    const result = promoteToSticky(db, CHAT_A, SENDER_A, 1_500);
+    expect(result.outcome).toBe('promoted');
+    expect(rawRow(CHAT_A, SENDER_A)?.expires_at).toBeNull();
+  });
+
+  // An INTENT pin carries no requested_model but still earns a keep-promising
+  // receipt. If the receipt id were folded into the model-pin group's
+  // null-contract, every such row would read back as null and route
+  // resolution would silently lose the pin.
+  it('survives read-back on an intent pin that has no model-pin fields', () => {
+    setPreference(db, pref({ intent: 'strongest', requestedModel: null, updatedAt: 1_000, expiresAt: 5_000 }));
+    recordKeepReceiptMessageId(db, CHAT_A, SENDER_A, RECEIPT);
+    const loaded = getPreference(db, CHAT_A, SENDER_A, NOW);
+    expect(loaded).not.toBeNull();
+    expect(loaded?.intent).toBe('strongest');
+    expect(loaded?.requestedModel).toBeNull();
+    expect(loaded?.keepReceiptMessageId).toBe(RECEIPT);
+    expect(getLatestChatPreference(db, CHAT_A, NOW)).not.toBeNull();
+  });
+
+  it('a fresh pin write clears the previous receipt id', () => {
+    setPreference(db, pref({ updatedAt: 1_000, expiresAt: 5_000 }));
+    recordKeepReceiptMessageId(db, CHAT_A, SENDER_A, RECEIPT);
+    setPreference(db, pref({ updatedAt: 1_200, expiresAt: 5_000 }));
+    expect(getKeepReceiptMessageId(db, CHAT_A)).toBeNull();
+  });
+
+  it('capturing against an absent row is a no-op, never an insert', () => {
+    recordKeepReceiptMessageId(db, CHAT_A, SENDER_A, RECEIPT);
+    expect(getPreference(db, CHAT_A, SENDER_A, NOW)).toBeNull();
+    expect(getKeepReceiptMessageId(db, CHAT_A)).toBeNull();
+  });
+
+  // TEXT affinity silently coerces a stored number to its string form, so the
+  // only value that reaches the reader wrong-typed is a BLOB — affinity leaves
+  // those alone. That is the case the validator has to catch.
+  it('a wrong-typed (blob) receipt id maps the row to null, like every other field', () => {
+    setPreference(db, pref({ updatedAt: 1_000, expiresAt: 5_000 }));
+    db.raw
+      .prepare(`UPDATE chat_model_preference SET keep_receipt_message_id = x'00FF' WHERE chat_jid = ? AND sender_jid = ?`)
+      .run(CHAT_A, SENDER_A);
+    expect(getPreference(db, CHAT_A, SENDER_A, NOW)).toBeNull();
+    expect(getKeepReceiptMessageId(db, CHAT_A)).toBeNull();
   });
 });

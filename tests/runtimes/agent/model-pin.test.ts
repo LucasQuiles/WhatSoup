@@ -494,12 +494,19 @@ import { providerConfigEffort, providerHasNativeReasoningControl } from '../../.
 import { Database as RealDatabase } from '../../../src/core/database.ts';
 import { DurabilityEngine } from '../../../src/core/durability.ts';
 
-function makeMessenger(): { messenger: Messenger; sentMessages: Array<{ jid: string; text: string }> } {
-  const sentMessages: Array<{ jid: string; text: string }> = [];
+function makeMessenger(
+  // F2a (#2121): production's SubmissionReceipt carries the sent message's
+  // transport id. The DEFAULT stays null — the pre-F2a shape every other test
+  // in this file was written against — and only the reply-threading tests opt
+  // in to a deterministic id, so nothing else in this suite changes behavior.
+  nextMessageId: () => string | null = () => null,
+): { messenger: Messenger; sentMessages: Array<{ jid: string; text: string; waMessageId: string | null }> } {
+  const sentMessages: Array<{ jid: string; text: string; waMessageId: string | null }> = [];
   const messenger: Messenger = {
     sendMessage: vi.fn(async (jid: string, text: string) => {
-      sentMessages.push({ jid, text });
-      return { waMessageId: null };
+      const waMessageId = nextMessageId();
+      sentMessages.push({ jid, text, waMessageId });
+      return { waMessageId };
     }),
     sendMedia: vi.fn(async () => ({ waMessageId: null })),
   };
@@ -639,8 +646,11 @@ describe('NL routing handlers (nlRouting flag)', () => {
     fs.rmSync(eventsDir, { recursive: true, force: true });
   });
 
-  function makeRoutingRuntime(runtimeOptions: Record<string, unknown> = {}): { runtime: AgentRuntime; sentMessages: Array<{ jid: string; text: string }> } {
-    const { messenger, sentMessages } = makeMessenger();
+  function makeRoutingRuntime(
+    runtimeOptions: Record<string, unknown> = {},
+    nextMessageId: () => string | null = () => null,
+  ): { runtime: AgentRuntime; sentMessages: Array<{ jid: string; text: string; waMessageId: string | null }> } {
+    const { messenger, sentMessages } = makeMessenger(nextMessageId);
     const runtime = new AgentRuntime(routingDb, messenger, 'test', runtimeOptions);
     // Mirror the flag-gated schema init that runtime.start() performs in
     // production (tests do not call start(); its other side effects are
@@ -670,7 +680,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
     expect(Object.isFrozen(opts?.routePolicy)).toBe(true);
   });
 
-  function allReplies(sentMessages: Array<{ jid: string; text: string }>): string[] {
+  function allReplies(sentMessages: Array<{ jid: string; text: string; waMessageId: string | null }>): string[] {
     return [
       ...sentMessages.map((s) => s.text),
       ...mockQueue.enqueueText.mock.calls.map((c) => String(c[0])),
@@ -2244,6 +2254,186 @@ describe('NL routing handlers (nlRouting flag)', () => {
       expect(events.filter((e) => e.event === 'model_preference_set' && e.reasonCode === 'user_pin_kept')).toHaveLength(0);
 
       duraDb.close();
+    });
+  });
+
+  // F2a reply-threaded widening (#2121, owner decision recorded on the issue
+  // 2026-08-04). The affirmative set gains `confirm`/`yes`/`pin`, but those
+  // three promote ONLY from a reply the client threaded to the pin receipt —
+  // the inbound's `quotedMessageId` must equal the id that receipt was sent
+  // with. The owner's stated reason: "a stray bare 'yes' in an unrelated reply
+  // cannot mutate routing; only a threaded reply to the actual receipt can."
+  //
+  // Bare `keep` is unchanged and is covered by the suite above; the tests here
+  // own the widening and, above all, the negative case the owner named as this
+  // change's acceptance falsifier — an UNQUOTED `confirm` must not promote.
+  describe('F2a: a reply threaded to the pin receipt confirms it', () => {
+    const RECEIPT_ID = 'WA-RECEIPT-0001';
+
+    // Pin through `/model N default`, which produces a keep-promising receipt
+    // ("Now answering with `opencode-cli`. reply keep to make it permanent").
+    // The pin is a GENUINE provider switch, so the live session recycles first
+    // and the recycle drops the outbound queue — that is what puts the receipt
+    // on the messenger path, where the transport id exists. On the queue path
+    // the id is null by design (#2981 car-A) and nothing is captured; see
+    // sendPinReceipt's coverage note in model-pin.ts.
+    async function pinWithReceipt(): Promise<{
+      runtime: AgentRuntime;
+      sentMessages: Array<{ jid: string; text: string; waMessageId: string | null }>;
+    }> {
+      cfgAny().agentFallbacks = [{ provider: 'opencode-cli', model: 'kimi/kimi-k3' }];
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' }, () => RECEIPT_ID);
+      (runtime as unknown as { routablePinTargets: () => string[] }).routablePinTargets =
+        () => ['claude-cli', 'opencode-cli'];
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
+      await sendAndDrain(runtime, makeMsg({
+        chatJid: CHAT, senderJid: SENDER_A, content: '/model 2 default', messageId: 'msg-pin',
+      }));
+      mockSession.sendTurn.mockClear();
+      return { runtime, sentMessages };
+    }
+
+    function receiptRow(): Record<string, unknown> {
+      const rows = prefRows();
+      expect(rows).toHaveLength(1);
+      return rows[0]!;
+    }
+
+    it('captures the id of the receipt that promises the keep reply', async () => {
+      const { sentMessages } = await pinWithReceipt();
+      const receipt = sentMessages.find((m) => m.text.includes('reply keep to make it permanent'));
+      expect(receipt).toBeDefined();
+      expect(receipt!.waMessageId).toBe(RECEIPT_ID);
+      // The id is stored against the pin it describes, and the pin is still
+      // temporary — capture must not promote anything by itself.
+      expect(receiptRow().keep_receipt_message_id).toBe(RECEIPT_ID);
+      expect(receiptRow().expires_at).not.toBeNull();
+    });
+
+    // ── Quadrant 1: threaded + affirmative token → promotes ──────────────────
+    it.each(['confirm', 'yes', 'pin'])(
+      'threaded + affirmative: a quoted "%s" promotes the pin',
+      async (token) => {
+        const { runtime, sentMessages } = await pinWithReceipt();
+        await sendAndDrain(runtime, makeMsg({
+          chatJid: CHAT,
+          senderJid: SENDER_A,
+          content: token,
+          quotedMessageId: RECEIPT_ID,
+          messageId: 'msg-confirm',
+        }));
+        expect(allReplies(sentMessages).join('\n')).toContain('Keeping opencode-cli for this chat until you /reset.');
+        expect(receiptRow().expires_at).toBeNull();
+        expect(receiptRow().scope).toBe('sticky');
+        // Handled locally — the confirmation never reaches the agent.
+        expect(mockSession.sendTurn).not.toHaveBeenCalled();
+      },
+    );
+
+    // ── Quadrant 2: UNTHREADED + affirmative token → must NOT promote ────────
+    // THE ACCEPTANCE FALSIFIER. This is the property the widening buys its
+    // safety with; it must hold before and after the change.
+    it.each(['confirm', 'yes', 'pin'])(
+      'unthreaded + affirmative: a bare "%s" does NOT promote and reaches the agent',
+      async (token) => {
+        const { runtime, sentMessages } = await pinWithReceipt();
+        await sendAndDrain(runtime, makeMsg({
+          chatJid: CHAT,
+          senderJid: SENDER_A,
+          content: token,
+          quotedMessageId: null,
+          messageId: 'msg-unthreaded',
+        }));
+        expect(receiptRow().expires_at).not.toBeNull();
+        expect(receiptRow().scope).toBe('this_thread');
+        expect(allReplies(sentMessages).join('\n')).not.toContain('Keeping opencode-cli');
+        expect(mockSession.sendTurn).toHaveBeenCalled();
+      },
+    );
+
+    // ── Quadrant 3: threaded + non-token → must NOT promote ──────────────────
+    it('threaded + non-token: quoting the receipt with ordinary text does NOT promote', async () => {
+      const { runtime, sentMessages } = await pinWithReceipt();
+      await sendAndDrain(runtime, makeMsg({
+        chatJid: CHAT,
+        senderJid: SENDER_A,
+        content: 'thanks, that looks right',
+        quotedMessageId: RECEIPT_ID,
+        messageId: 'msg-thanks',
+      }));
+      expect(receiptRow().expires_at).not.toBeNull();
+      expect(allReplies(sentMessages).join('\n')).not.toContain('Keeping opencode-cli');
+      expect(mockSession.sendTurn).toHaveBeenCalled();
+    });
+
+    // ── Quadrant 4: unthreaded + non-token → must NOT promote ────────────────
+    it('unthreaded + non-token: ordinary text does NOT promote', async () => {
+      const { runtime, sentMessages } = await pinWithReceipt();
+      await sendAndDrain(runtime, makeMsg({
+        chatJid: CHAT,
+        senderJid: SENDER_A,
+        content: 'please confirm it for me',
+        quotedMessageId: null,
+        messageId: 'msg-sentence',
+      }));
+      expect(receiptRow().expires_at).not.toBeNull();
+      expect(allReplies(sentMessages).join('\n')).not.toContain('Keeping opencode-cli');
+      expect(mockSession.sendTurn).toHaveBeenCalled();
+    });
+
+    // Threading is authenticated against THE receipt, not against any quote:
+    // a reply that quotes some other message is exactly as inert as no quote.
+    it('a quote of a DIFFERENT message does NOT promote', async () => {
+      const { runtime, sentMessages } = await pinWithReceipt();
+      await sendAndDrain(runtime, makeMsg({
+        chatJid: CHAT,
+        senderJid: SENDER_A,
+        content: 'confirm',
+        quotedMessageId: 'WA-SOME-OTHER-MESSAGE',
+        messageId: 'msg-wrong-quote',
+      }));
+      expect(receiptRow().expires_at).not.toBeNull();
+      expect(mockSession.sendTurn).toHaveBeenCalled();
+    });
+
+    // Backward compatibility with the 2026-07-23 contract: the widening added
+    // a threading requirement to the NEW tokens only. `keep` must still work
+    // exactly as it did, with no quote.
+    it('bare keep still promotes with no quote at all', async () => {
+      const { runtime, sentMessages } = await pinWithReceipt();
+      await sendAndDrain(runtime, makeMsg({
+        chatJid: CHAT,
+        senderJid: SENDER_A,
+        content: 'keep',
+        quotedMessageId: null,
+        messageId: 'msg-keep',
+      }));
+      expect(allReplies(sentMessages).join('\n')).toContain('Keeping opencode-cli for this chat until you /reset.');
+      expect(receiptRow().expires_at).toBeNull();
+      expect(mockSession.sendTurn).not.toHaveBeenCalled();
+    });
+
+    // The actor policy the Q-CANARY contract established is not weakened by
+    // threading: possession of the receipt's id is not authority over the pin.
+    it('a threaded confirm from another group member is still refused', async () => {
+      cfgAny().agentFallbacks = [{ provider: 'opencode-cli', model: 'kimi/kimi-k3' }];
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' }, () => RECEIPT_ID);
+      (runtime as unknown as { routablePinTargets: () => string[] }).routablePinTargets =
+        () => ['claude-cli', 'opencode-cli'];
+      await sendAndDrain(runtime, makeMsg({ chatJid: GROUP, senderJid: SENDER_A, isGroup: true, content: '/model list' }));
+      await sendAndDrain(runtime, makeMsg({
+        chatJid: GROUP, senderJid: SENDER_A, isGroup: true, content: '/model 2 default', messageId: 'msg-pin',
+      }));
+      await sendAndDrain(runtime, makeMsg({
+        chatJid: GROUP,
+        senderJid: SENDER_B,
+        isGroup: true,
+        content: 'confirm',
+        quotedMessageId: RECEIPT_ID,
+        messageId: 'msg-other-confirm',
+      }));
+      expect(allReplies(sentMessages).join('\n')).toContain("Only whoever set this chat's pin can keep it.");
+      expect(receiptRow().expires_at).not.toBeNull();
     });
   });
 
