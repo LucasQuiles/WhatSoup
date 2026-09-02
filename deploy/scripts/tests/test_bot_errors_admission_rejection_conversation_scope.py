@@ -224,26 +224,105 @@ def test_flap_storm_consolidation_still_wins_over_a_new_conversation(tmp_path):
 # (c) privacy — no raw conversation identifier anywhere
 # ---------------------------------------------------------------------------
 
+# Raw identifier shapes that must never reach a delivered alert.
+#
+# toConversationKey (src/core/conversation-key.ts) mints the BARE LOCAL PART,
+# colon-stripped, for both the personal and the LID domain. That is a plain
+# digit run with no phone syntax, which is exactly the shape the redaction
+# layer leaves alone: PHONE_LIKE_RE matches it, but redact_phone_like_match
+# returns it unchanged without a leading "+" or a separator. So the bare forms
+# below are the dangerous ones; the full JID is a positive control that proves
+# the probe reaches the real redaction path.
+RAW_JID = "15550100199@s.whatsapp.net"
+RAW_PERSONAL_LOCAL = "15550100199"
+RAW_LID_LOCAL = "15550100199443"
+
+
 def test_no_raw_conversation_identifier_in_key_event_or_rendered_text(tmp_path):
+    """The raw value must be FED IN, or the absence assertions prove nothing.
+
+    This test previously computed the raw identifiers and then built the event
+    with an already-digested scope, so every "not in" assertion held under any
+    implementation, including one that rendered the field raw.
+    """
     mod = _load(tmp_path)
-    # Reserved synthetic identifier (repo-hygiene 1555-prefixed fixture form).
-    raw_jid = "15550100199@s.whatsapp.net"
-    raw_local = raw_jid.split("@")[0]
-    event = _event(SCOPE_A, "evt-a1", 1)
+    state = _open_state()
+
+    for index, raw in enumerate((RAW_PERSONAL_LOCAL, RAW_LID_LOCAL, RAW_JID)):
+        # The event id must not itself embed the raw value, or the assertion
+        # below would fail on the id rather than on the field under test.
+        event = _event(raw, f"evt-raw-{index}", 1)
+        mod.should_suppress_send(event, state)
+        rendered = mod.format_event(event)
+        for blob in (mod.incident_key(event), rendered, json.dumps(state)):
+            assert raw not in blob, f"{raw!r} leaked into {blob!r}"
+        assert RAW_PERSONAL_LOCAL not in rendered
+        assert "s.whatsapp.net" not in rendered
+        assert "@lid" not in rendered
+
+    # A well-formed digest still reaches the operator, so the line is useful.
+    good = _event(SCOPE_A, "evt-good", 2)
+    assert SCOPE_A in mod.format_event(good)
+
+
+def test_both_delivered_surfaces_render_the_same_confined_text(tmp_path):
+    """WhatsApp and the email fallback are fed by ONE format_event call.
+
+    The dispatcher builds `text = format_event(event)` once and hands the same
+    string to send_whatsapp and, after repeated failures, to email_fallback.
+    Pinning that identity means the privacy assertion above covers both
+    surfaces rather than only the one it calls.
+    """
+    mod = _load(tmp_path)
+    sent: list[str] = []
+    mailed: list[tuple[str, str]] = []
+    mod.send_whatsapp = lambda text, *a, **k: sent.append(text)  # type: ignore[assignment]
+    mod.email_fallback = lambda subject, body: mailed.append((subject, body)) or True  # type: ignore[assignment]
+
+    event = _event(RAW_PERSONAL_LOCAL, "evt-both", 1)
+    text = mod.format_event(event)
+    mod.send_whatsapp(text)
+    mod.email_fallback("BOT ERRORS delivery failing", text)
+
+    assert sent and mailed
+    assert sent[0] == mailed[0][1]
+    for surface in (sent[0], mailed[0][1]):
+        assert RAW_PERSONAL_LOCAL not in surface
+
+
+def test_an_all_decimal_scope_is_rejected_because_digits_are_valid_hex(tmp_path):
+    """The width check alone does not separate a digest from an identifier.
+
+    Decimal digits are hex digits, so a bare conversation local part of the
+    right width satisfies any plain hex test. Without an explicit all-decimal
+    rejection a mis-wired emitter's raw key would validate, be recorded into
+    state, and render to the operator.
+    """
+    mod = _load(tmp_path)
+    # Sixteen characters, all decimal: passes a naive hex test.
+    raw_sixteen = "1555010019900001"
+    assert len(raw_sixteen) == 16
+    event = _event(raw_sixteen, "evt-all-decimal", 1)
+
+    assert mod.event_conversation_scope(event) is None
+    assert raw_sixteen not in mod.format_event(event)
+
     state = _open_state()
     mod.should_suppress_send(event, state)
+    assert raw_sixteen not in json.dumps(state)
 
+    # A mixed digest of the same width is still accepted.
+    good = _event("a1b2c3d4e5f60718", "evt-good-hex", 2)
+    assert mod.event_conversation_scope(good) == "a1b2c3d4e5f60718"
+
+
+def test_render_uses_the_validated_scope_not_the_raw_field(tmp_path):
+    """A non-allowlisted source must not render the field at all."""
+    mod = _load(tmp_path)
+    event = _event(SCOPE_A, "evt-other", 1)
+    event["source"] = "whatsapp_auth_bond_local_failure"
     rendered = mod.format_event(event)
-    serialized = json.dumps(event)
-    state_blob = json.dumps(state)
-    for blob in (mod.incident_key(event), serialized, rendered, state_blob):
-        # format_event rewrites "@" as " at ", so assert on the digits too.
-        assert raw_jid not in blob
-        assert raw_local not in blob
-        assert "s.whatsapp.net" not in blob
-        assert "@lid" not in blob
-    # The bounded digest is what survives, and it is rendered for the operator.
-    assert SCOPE_A in rendered
+    assert "conversation_scope" not in rendered
 
 
 def test_a_malformed_conversation_scope_is_ignored_not_trusted(tmp_path):
@@ -255,6 +334,82 @@ def test_a_malformed_conversation_scope_is_ignored_not_trusted(tmp_path):
     reason = mod.should_suppress_send(bad, state)
     assert reason is not None and "duplicate suppressed" in reason
     assert raw_jid.split("@")[0] not in json.dumps(state)
+
+
+# ---------------------------------------------------------------------------
+# delivery retry — a forced notification must survive a transient failure
+# ---------------------------------------------------------------------------
+
+def test_a_delivery_retry_of_the_same_event_still_forces_the_notification(tmp_path):
+    """The forced notification is the WHOLE point; losing it to a retry is fatal.
+
+    An undelivered event stays in the outbox with a backoff and re-enters
+    should_suppress_send on a later cycle carrying its ORIGINAL id. If the
+    first evaluation marks the conversation represented, that retry is
+    suppressed as a duplicate and the conversation never pages again — the
+    exact silence this change exists to remove, reintroduced on the one alert
+    that matters.
+
+    The file already solves this class for the sibling flap counter
+    (flap_occurrence_already_counted, "#2428: a delivery retry of the SAME
+    event occurrence must not re-trip — count once per distinct event id").
+    """
+    mod = _load(tmp_path)
+    state = _open_state()
+    event = _event(SCOPE_B, "evt-retry-me", 1)
+
+    first = mod.should_suppress_send(event, state)
+    retry = mod.should_suppress_send(event, state)
+
+    assert first is None, "first delivery must force the notification"
+    assert retry is None, (
+        "a retry of the SAME event id must still force it; the notification "
+        "was lost to a transient transport failure"
+    )
+
+
+def test_a_distinct_later_event_in_that_conversation_dedupes(tmp_path):
+    """Retry-tolerance must not become never-dedupe.
+
+    Same conversation, DIFFERENT event id, means a genuinely new occurrence
+    and must suppress as before.
+    """
+    mod = _load(tmp_path)
+    state = _open_state()
+    assert mod.should_suppress_send(_event(SCOPE_B, "evt-first", 1), state) is None
+    later = mod.should_suppress_send(_event(SCOPE_B, "evt-second", 2), state)
+    assert later is not None and "duplicate suppressed" in later
+
+
+def test_an_event_with_no_id_falls_back_to_recording_once(tmp_path):
+    """An id-less event cannot be retry-deduped; fail toward the old behaviour."""
+    mod = _load(tmp_path)
+    state = _open_state()
+    first = _event(SCOPE_B, "", 1)
+    first.pop("id", None)
+    second = _event(SCOPE_B, "", 2)
+    second.pop("id", None)
+    assert mod.should_suppress_send(first, state) is None
+    repeat = mod.should_suppress_send(second, state)
+    assert repeat is not None and "duplicate suppressed" in repeat
+
+
+def test_retry_records_are_bounded_like_the_conversation_set(tmp_path):
+    mod = _load(
+        tmp_path,
+        {
+            "BOT_ERRORS_CONVERSATION_SCOPE_MAX_PER_KEY": "4",
+            "BOT_ERRORS_CONVERSATION_SCOPE_RETENTION_SECONDS": "60",
+        },
+    )
+    state = _open_state()
+    for i in range(12):
+        mod.should_suppress_send(_event(f"{i:016x}", f"evt-{i}", i), state)
+    scopes = state["conversationScopes"][KEY]
+    assert len(scopes) <= 4
+    for record in scopes.values():
+        assert isinstance(record, dict)
+        assert len(record.get("eventIds", {})) <= 4
 
 
 # ---------------------------------------------------------------------------

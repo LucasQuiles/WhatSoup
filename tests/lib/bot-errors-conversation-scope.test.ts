@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { buildBotErrorsEvent } from '../../src/lib/bot-errors-outbox.ts';
 import { emitAlertChecked } from '../../src/lib/emit-alert.ts';
-import { confineConversationScope } from '../../src/lib/alert-evidence.ts';
+import { confineAlertContent, confineConversationScope } from '../../src/lib/alert-evidence.ts';
 
 // A per-conversation fault (an admission rejection) must be distinguishable
 // from another conversation's fault by the bot-errors dispatcher, which
@@ -76,6 +76,22 @@ describe('conversation scope at the bot-errors emission boundary', () => {
     expect(digest).not.toBeNull();
     expect(digest).toMatch(/^[0-9a-f]{16}$/);
     expect(RAW_JID).not.toContain(digest as string);
+  });
+
+  // The docstring claims domain separation keeps a conversation digest from
+  // colliding with an evidence or summary digest of the same bytes. Nothing
+  // pinned that: swapping the salt to 'evidence' left the whole suite green.
+  it('separates the conversation domain from the evidence and summary domains', () => {
+    const conversation = confineConversationScope(RAW_JID) as string;
+    const asEvidence = confineAlertContent('evidence', RAW_JID).correlationDigest;
+    const asSummary = confineAlertContent('summary', RAW_JID).correlationDigest;
+
+    // Same input bytes, three domains, three distinct digests. Compared over
+    // the conversation digest's own width, since it is the truncated one.
+    const width = conversation.length;
+    expect(asEvidence.slice(0, width)).not.toBe(conversation);
+    expect(asSummary.slice(0, width)).not.toBe(conversation);
+    expect(asEvidence).not.toBe(asSummary);
   });
 });
 
