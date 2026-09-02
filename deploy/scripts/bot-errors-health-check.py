@@ -4887,12 +4887,20 @@ def opencode_provider_probe_inventory(
     # fresh directory the probe owns, on the same governed PATH allowlist with
     # no socket synthesized. The FUNCTIONAL probe below is unchanged: it does
     # drive a real session against the instance's own context.
-    diagnostic_env = governed_child_environment(
+    # The same environment the functional probe gets, minus the socket: passing
+    # no child_cwd is what suppresses the synthesized WHATSOUP_MCP_SOCKET. The
+    # configured provider credential is deliberately RETAINED here. Whether a
+    # capability probe needs one is a real question, but it is a different
+    # question from where these three run, and narrowing it belongs to its own
+    # change with its own evidence.
+    diagnostic_env = opencode_functional_probe_env(
+        data,
+        target,
+        timeout_seconds,
         effective_provider_path,
         name,
         None,
         loaded_environment,
-        env_keys=OPENCODE_FUNCTIONAL_ENV_KEYS,
     )
     try:
         with tempfile.TemporaryDirectory(prefix="whatsoup-opencode-diagnostic-") as diagnostic_cwd:
