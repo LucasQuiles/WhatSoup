@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -138,8 +139,8 @@ def test_unknown_restart_age_under_grace_still_suppresses(health_check):
 # ---------------------------------------------------------------------------
 # End-to-end: drive deadman() itself, so the live call site is what is tested.
 # Reverting deadman() to the unconditional ``if not grace_reason`` (keeping the
-# helpers) fails every test in this section; the helper tests above cannot see
-# that revert.
+# helpers) fails the two restart-loop tests and the grace-decided test below;
+# the helper tests above cannot see that revert.
 # ---------------------------------------------------------------------------
 
 
@@ -178,6 +179,15 @@ def env(monkeypatch, tmp_path: Path) -> SimpleNamespace:
     def cycle_completed(seconds_ago: int) -> None:
         dispatcher_state.write_text(json.dumps({"cycleCompletedAt": mod.epoch_to_iso(clock["now"] - seconds_ago)}))
 
+    def state_written(seconds_ago: int, payload: dict | None = None) -> None:
+        """Write a state file whose mtime is ``seconds_ago`` on the fixture clock (no cycleCompletedAt by default)."""
+        dispatcher_state.write_text(json.dumps(payload or {}))
+        stamp = clock["now"] - seconds_ago
+        os.utime(dispatcher_state, (stamp, stamp))
+
+    def advance(seconds: int) -> None:
+        clock["now"] += seconds
+
     def run(max_state_age: int = 180, restart_grace: int = 30) -> int:
         return mod.deadman(max_state_age=max_state_age, restart_grace=restart_grace, cooldown_seconds=300)
 
@@ -188,7 +198,7 @@ def env(monkeypatch, tmp_path: Path) -> SimpleNamespace:
         record = json.loads(path.read_text(encoding="utf-8")).get("episode")
         return set(record["members"]) if isinstance(record, dict) else set()
 
-    return SimpleNamespace(svc=svc, cycle_completed=cycle_completed, run=run, members=members)
+    return SimpleNamespace(svc=svc, cycle_completed=cycle_completed, state_written=state_written, advance=advance, run=run, members=members)
 
 
 def test_deadman_reports_cycle_stale_in_an_active_restart_loop(env):
@@ -247,3 +257,49 @@ def test_deadman_reports_a_stale_cycle_with_no_grace_at_all(env):
     env.cycle_completed(600)
     assert env.run() == 2
     assert env.members() == {"cycle_stale"}
+
+
+def test_deadman_reports_an_incomplete_state_the_restart_cannot_explain(env):
+    """A state file without cycleCompletedAt (a cycle that never finished) is
+    excused by grace only while the restart can account for its age."""
+    env.svc["status"] = "active"
+    env.svc["ages"] = (10, 10)
+    env.state_written(100)  # > 10 + 30: predates the restart
+    assert env.run() == 2
+    assert env.members() == {"cycle_incomplete"}
+
+
+def test_deadman_excuses_an_incomplete_state_the_restart_explains(env):
+    env.svc["status"] = "active"
+    env.svc["ages"] = (10, 10)
+    env.state_written(35)  # <= 10 + 30
+    assert env.run() == 0
+    assert "cycle_incomplete" not in env.members()
+
+
+def test_deadman_reports_missing_state_once_grace_outlives_the_threshold(env):
+    """No state file, uptime always 10s: the first check is a plausible fresh
+    start, but grace that stays continuously active longer than max_state_age
+    is a restart loop that never wrote state."""
+    env.svc["status"] = "active"
+    env.svc["ages"] = (10, 10)
+    assert env.run() == 0
+    assert "state_missing" not in env.members()
+    env.advance(200)  # > max_state_age 180 of continuous grace
+    assert env.run() == 2
+    assert env.members() == {"state_missing"}
+
+
+def test_deadman_grace_streak_resets_when_grace_lapses(env):
+    env.svc["status"] = "active"
+    env.svc["ages"] = (10, 10)
+    assert env.run() == 0
+    env.advance(100)
+    env.svc["ages"] = (600, 600)  # grace lapses: a normal, long-running unit with a fresh cycle
+    env.cycle_completed(5)
+    assert env.run() == 0
+    env.advance(100)
+    env.svc["ages"] = (10, 10)  # grace again, but the streak restarted at this check
+    env.state_written(0)
+    assert env.run() == 0
+    assert "state_missing" not in env.members()

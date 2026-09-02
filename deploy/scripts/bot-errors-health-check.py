@@ -7835,6 +7835,26 @@ def _deadman_recovery_text(episode: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _note_grace_streak(deadman_state: dict[str, Any], grace_active: bool, now_epoch: int) -> tuple[int, bool]:
+    """Track how long restart grace has been continuously active across checks.
+
+    Returns ``(streak_seconds, dirty)``. A single observation cannot tell a
+    fresh restart from a restart loop when there is no state age to bound
+    grace with; the streak is the deadman's own memory of that, persisted in
+    deadman-state.json under ``graceStreakSince``.
+    """
+    since = deadman_state.get("graceStreakSince")
+    if not grace_active:
+        if since is None:
+            return 0, False
+        deadman_state.pop("graceStreakSince", None)
+        return 0, True
+    if not isinstance(since, int) or since > now_epoch:
+        deadman_state["graceStreakSince"] = int(now_epoch)
+        return 0, True
+    return int(now_epoch - since), False
+
+
 def _restart_explains_cycle_age(
     cycle_age_seconds: int,
     restart_age: int | None,
@@ -7931,14 +7951,29 @@ def deadman(max_state_age: int, restart_grace: int, cooldown_seconds: int) -> in
     elif service_uptime is not None and service_uptime <= restart_grace:
         grace_reason = f"service_uptime_seconds={service_uptime}"
         grace_age = service_uptime
+    deadman_state = load_deadman_state()
+    migrate_deadman_state(deadman_state, now_epoch)
+    grace_streak_seconds, streak_dirty = _note_grace_streak(deadman_state, grace_reason is not None, now_epoch)
     if not state.exists():
-        if not grace_reason:
-            active_members["state_missing"] = {}
+        # No state file carries no age to bound grace with, so a restart loop
+        # that never writes state would be excused on every check. The
+        # deadman's own record of how long grace has been continuously active
+        # is the only evidence left: grace that has outlived max_state_age is
+        # a restart loop, not a fresh start.
+        if not grace_reason or grace_streak_seconds > max_state_age:
+            active_members["state_missing"] = (
+                {"grace_streak_seconds": grace_streak_seconds} if grace_reason else {}
+            )
     elif cycle_completed_at is None:
         # State exists but has no cycleCompletedAt — the last cycle did not
         # complete (crash between start and end). Treat as stale unless the
-        # state file was just written by the crash handler (within grace).
-        if state_age is not None and state_age > restart_grace and not grace_reason:
+        # state file was just written by the crash handler (within grace) and
+        # the restart that granted grace can actually account for its age.
+        if (
+            state_age is not None
+            and state_age > restart_grace
+            and not (grace_reason and _restart_explains_cycle_age(state_age, grace_age, restart_grace))
+        ):
             active_members["cycle_incomplete"] = {"state_age_seconds": state_age}
     elif _cycle_stale_should_report(
         cycle_completed_at, max_state_age, grace_reason, grace_age, restart_grace
@@ -7946,9 +7981,6 @@ def deadman(max_state_age: int, restart_grace: int, cooldown_seconds: int) -> in
         active_members["cycle_stale"] = {"cycle_age_seconds": cycle_completed_at}
     if not SOCKET_PATH or not Path(SOCKET_PATH).exists():
         active_members["socket_missing"] = {}
-
-    deadman_state = load_deadman_state()
-    migrate_deadman_state(deadman_state, now_epoch)
 
     onset_text = {"value": None}
 
@@ -7976,7 +8008,7 @@ def deadman(max_state_age: int, restart_grace: int, cooldown_seconds: int) -> in
         attempt_onset=attempt_onset,
         attempt_recovery=attempt_recovery,
     )
-    if result["dirty"]:
+    if result["dirty"] or streak_dirty:
         save_deadman_state(deadman_state)
     for payload, level in result["logs"]:
         append_deadman_log(payload, level=level)

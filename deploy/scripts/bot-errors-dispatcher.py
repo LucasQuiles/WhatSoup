@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import calendar
+import errno
 import fcntl
 import hashlib
 import json
@@ -1188,6 +1189,8 @@ class _CompatPublication:
 def save_incident_state(
     paths: dict[str, Path],
     state: dict[str, Any],
+    *,
+    lock_timeout_seconds: float = 10.0,
 ) -> PublicationResult:
     """RESTORE-COMPAT compat wrapper — uses ``publish_state_json`` directly.
 
@@ -1202,26 +1205,30 @@ def save_incident_state(
     incident_path = paths.get("incident_state")
     if incident_path is None:
         raise ValueError("save_incident_state: paths missing incident_state key")
-    _reject_bare_write_if_adopted(incident_path)
-    state["updatedAt"] = now_iso()
-    target = _durable_target(incident_path)
-    observation = observe_json(target)
-    _reject_bare_write_over_envelope(incident_path, observation.payload)
-    generation = (observation.version.generation or 0) + 1
-    publication_operation = operation_id(
-        target,
-        redacted_dispatcher_payload(state),
-        component="dispatcher.incident_state",
-        predecessor=observation.version,
-    )
-    publication = publish_state_json(
-        target,
-        redacted_dispatcher_payload(state),
-        component="dispatcher.incident_state",
-        operation_id=publication_operation,
-        expected=observation.version,
-        generation=generation,
-    )
+    # The whole observe-then-publish sequence runs under the controller-state
+    # adoption lock, so the two refusals below decide against a store that
+    # adoption cannot change underneath them (see _AdoptionLock).
+    with _AdoptionLock(incident_path, lock_timeout_seconds):
+        _reject_bare_write_if_adopted(incident_path)
+        state["updatedAt"] = now_iso()
+        target = _durable_target(incident_path)
+        observation = observe_json(target)
+        _reject_bare_write_over_envelope(incident_path, observation.payload)
+        generation = (observation.version.generation or 0) + 1
+        publication_operation = operation_id(
+            target,
+            redacted_dispatcher_payload(state),
+            component="dispatcher.incident_state",
+            predecessor=observation.version,
+        )
+        publication = publish_state_json(
+            target,
+            redacted_dispatcher_payload(state),
+            component="dispatcher.incident_state",
+            operation_id=publication_operation,
+            expected=observation.version,
+            generation=generation,
+        )
     require_advance(publication)
     return publication
 
@@ -1286,6 +1293,65 @@ def _reject_bare_write_if_adopted(anchor: Path) -> None:
             f"validate would reject it as schema_incompatible (#3053/#3054). "
             f"Route this write through IncidentStateCycle.commit()."
         )
+
+
+class _AdoptionLock:
+    """Hold the controller-state adoption lock (``<anchor>.lock``) for a bare write.
+
+    Adoption runs inside a controller-state session, which takes an exclusive
+    ``flock`` on ``<anchor>.lock`` in the state directory. The bare publisher
+    only takes ``.durable-json.lock``, so without this a bare write could pass
+    the marker check and the envelope check, and adoption could still replace
+    the primary between the publisher's version compare and its ``os.replace``.
+    Holding the same lock for the whole observe-then-publish sequence
+    serialises the bare writer with adoption; the marker and envelope checks
+    then decide under the lock and cannot be raced.
+
+    Lock order is adoption lock first, ``.durable-json.lock`` second, the same
+    order a session-holding caller uses when it publishes member files.
+    """
+
+    def __init__(self, anchor: Path, timeout_seconds: float) -> None:
+        self._path = anchor.parent / (anchor.name + ".lock")
+        self._timeout = max(0.0, float(timeout_seconds))
+        self._fd: int | None = None
+
+    def __enter__(self) -> "_AdoptionLock":
+        fd = os.open(self._path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        try:
+            observed = os.fstat(fd)
+            if (
+                not stat.S_ISREG(observed.st_mode)
+                or observed.st_uid != os.getuid()
+                or observed.st_nlink != 1
+                or stat.S_IMODE(observed.st_mode) & 0o077
+            ):
+                raise OSError(errno.EPERM, f"unsafe adoption lock file: {self._path.name}")
+            deadline = time.monotonic() + self._timeout
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(
+                            f"save_incident_state: the incident-state adoption lock stayed busy for "
+                            f"{self._timeout:g}s ({self._path.name})"
+                        ) from None
+                    time.sleep(min(0.005, max(0.0, deadline - time.monotonic())))
+        except BaseException:
+            os.close(fd)
+            raise
+        self._fd = fd
+        return self
+
+    def __exit__(self, *_exc: Any) -> None:
+        if self._fd is not None:
+            try:
+                fcntl.flock(self._fd, fcntl.LOCK_UN)
+            finally:
+                os.close(self._fd)
+                self._fd = None
 
 
 def _reject_bare_write_over_envelope(anchor: Path, observed: Mapping[str, Any] | None) -> None:

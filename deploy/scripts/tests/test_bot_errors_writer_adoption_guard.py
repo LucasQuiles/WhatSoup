@@ -346,3 +346,64 @@ def test_daemon_exits_loudly_when_the_writer_guard_fires(dispatcher, monkeypatch
     out = capsys.readouterr().out
     record = json.loads(out.strip().splitlines()[-1])
     assert record["exit"] == 79 and "post-adoption" in record["error"]
+
+
+def test_bare_writer_waits_for_the_controller_adoption_lock(dispatcher, tmp_path):
+    """The bare write must serialise with adoption on ``<anchor>.lock``.
+
+    While another holder has the exclusive flock, the writer must not touch the
+    primary; once released, the pre-adoption bare write proceeds normally.
+    """
+    import fcntl
+
+    anchor = tmp_path / "incident-state.json"
+    anchor.write_text('{"sentinel": "pre-adoption"}', encoding="utf-8")
+    anchor.chmod(0o600)
+    lock_path = tmp_path / "incident-state.json.lock"
+    holder = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(holder, fcntl.LOCK_EX)
+        before = anchor.read_bytes()
+        with pytest.raises(TimeoutError, match="adoption lock"):
+            dispatcher.save_incident_state({"incident_state": anchor}, {"incidents": {}}, lock_timeout_seconds=0.2)
+        assert anchor.read_bytes() == before, "the primary must not change while the lock is held elsewhere"
+        fcntl.flock(holder, fcntl.LOCK_UN)
+    finally:
+        os.close(holder)
+    dispatcher.save_incident_state({"incident_state": anchor}, {"incidents": {}}, lock_timeout_seconds=0.2)
+    assert json.loads(anchor.read_text(encoding="utf-8")).get("incidents") == {}
+
+
+def test_bare_writer_lock_is_the_controller_session_lock(dispatcher, tmp_path, monkeypatch):
+    """Prove both writers contend on the same file: a real session cannot open while the bare writer's lock is held."""
+    monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(tmp_path))
+    paths = dispatcher.setup_dirs()
+    anchor = paths["incident_state"]
+    with dispatcher._AdoptionLock(anchor, 0.2):
+        with pytest.raises(Exception) as raised:
+            session = dispatcher.open_controller_state(
+                anchor,
+                component="dispatcher-incident",
+                bootstrap=dispatcher.dispatcher_bootstrap_state,
+                validate_payload=dispatcher.validate_dispatcher_state,
+                lock_timeout_seconds=0.2,
+            )
+            with session:
+                session.load()
+        if isinstance(raised.value, dispatcher.ControllerStateRequired):
+            details = json.dumps(dispatcher.state_diagnostic_details(raised.value.diagnostic))
+            assert "lock" in details, details
+        else:
+            assert isinstance(raised.value, TimeoutError), repr(raised.value)
+    # Released: the same session shape now adopts normally (adoption happens on save).
+    session = dispatcher.open_controller_state(
+        anchor,
+        component="dispatcher-incident",
+        bootstrap=dispatcher.dispatcher_bootstrap_state,
+        validate_payload=dispatcher.validate_dispatcher_state,
+        lock_timeout_seconds=2,
+    )
+    with session:
+        result = session.load()
+        session.save(dict(result.payload or {}), result.capability)
+    assert dispatcher._incident_state_is_adopted(anchor)
