@@ -14,7 +14,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-collector.py",
-      "sha256": "6b53086e01b3d8b86b620c15f17d84c5ece4df6bf8d98fab5d80766f87b672cd",
+      "sha256": "8598578cc8820594ebd6698c9682a0c49e8ac6c514337be3d3d545bb6bdbb107",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -33,7 +33,8 @@
         "tailscale_ping_command",
         "collector_remote_unreachable",
         "REGISTERED_ALERT_SOURCES",
-        "configuration_retired"
+        "configuration_retired",
+        "allow-empty-roster"
       ]
     },
     {
