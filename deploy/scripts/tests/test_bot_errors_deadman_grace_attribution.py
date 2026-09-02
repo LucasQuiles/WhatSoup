@@ -17,6 +17,16 @@ about that duration plus the grace window, and no more. ``restart_age`` is
 measured on the clock that granted grace (uptime for an active unit,
 state-change age otherwise), and the end-to-end tests below drive ``deadman()``
 itself so that reverting the call site fails the suite.
+
+``state_missing`` and ``cycle_incomplete`` have no cycle timestamp to attribute
+against: a restart legitimately follows an arbitrarily old heartbeat (the
+downtime before it was already reported as ``service_inactive``), and
+``tests/scripts/bot-errors-health-check.test.ts`` pins that a stale heartbeat
+is graced inside a fresh restart window. There the only evidence of a restart
+loop is grace itself persisting across checks, so both branches are bounded by
+the persisted grace streak (``_grace_still_credible``): grace that has been
+continuously active for longer than ``max_state_age`` is a loop, not a fresh
+start.
 """
 from __future__ import annotations
 
@@ -134,6 +144,25 @@ def test_unknown_restart_age_under_grace_still_suppresses(health_check):
         )
         is False
     )
+
+
+# --- the streak bound used by the branches that have no cycle timestamp -------
+
+
+def test_grace_is_credible_on_the_first_graced_check(health_check):
+    assert health_check._grace_still_credible("service_uptime_seconds=2", 0, 30) is True
+
+
+def test_grace_stays_credible_up_to_max_state_age_of_streak(health_check):
+    assert health_check._grace_still_credible("service_uptime_seconds=10", 180, 180) is True
+
+
+def test_grace_is_not_credible_once_the_streak_outlives_max_state_age(health_check):
+    assert health_check._grace_still_credible("service_uptime_seconds=10", 181, 180) is False
+
+
+def test_no_grace_is_never_credible(health_check):
+    assert health_check._grace_still_credible(None, 0, 180) is False
 
 
 # ---------------------------------------------------------------------------
@@ -263,12 +292,49 @@ def test_deadman_reports_a_stale_cycle_with_no_grace_at_all(env):
     assert env.members() == {"cycle_stale"}
 
 
-def test_deadman_reports_an_incomplete_state_the_restart_cannot_explain(env):
+def test_deadman_graces_a_stale_heartbeat_inside_a_fresh_restart_window(env):
+    """The contract tests/scripts/bot-errors-health-check.test.ts pins ("graces a
+    stale dispatcher heartbeat when service uptime is inside restart grace"): a
+    120s-old state file with no cycleCompletedAt, 2s after a restart, at the
+    flags that test uses. The heartbeat predates the restart, but a restart
+    legitimately follows an old heartbeat; bounding this branch by the restart
+    age reported it and broke that test in CI."""
+    env.svc["status"] = "active"
+    env.svc["ages"] = (2, 2)
+    env.state_written(120, {"time": env.mod.epoch_to_iso(100_000)})
+    assert env.run(max_state_age=30, restart_grace=30) == 0
+    assert "cycle_incomplete" not in env.members()
+
+
+def test_deadman_graces_a_stale_heartbeat_for_a_transitional_unit(env):
+    """Same contract for the state-change-age clock (unit activating, 2s in)."""
+    env.svc["status"] = "activating"
+    env.svc["ages"] = (None, 2)
+    env.state_written(120, {"time": env.mod.epoch_to_iso(100_000)})
+    assert env.run(max_state_age=30, restart_grace=30) == 0
+    assert "cycle_incomplete" not in env.members()
+
+
+def test_deadman_reports_an_incomplete_state_once_grace_outlives_the_threshold(env):
     """A state file without cycleCompletedAt (a cycle that never finished) is
-    excused by grace only while the restart can account for its age."""
+    excused by a restart window, but a window that stays open for longer than
+    max_state_age is a restart loop: uptime 10s on every check, state never
+    completing, must be reported once the streak passes the threshold."""
     env.svc["status"] = "active"
     env.svc["ages"] = (10, 10)
-    env.state_written(100)  # > 10 + 30: predates the restart
+    env.state_written(100)
+    assert env.run() == 0  # first graced check: indistinguishable from a fresh start
+    assert "cycle_incomplete" not in env.members()
+    env.advance(200)  # > max_state_age 180 of continuous grace
+    env.state_written(300)
+    assert env.run() == 2
+    assert env.members() == {"cycle_incomplete"}
+
+
+def test_deadman_reports_an_incomplete_state_with_no_grace_at_all(env):
+    env.svc["status"] = "active"
+    env.svc["ages"] = (600, 600)
+    env.state_written(100)
     assert env.run() == 2
     assert env.members() == {"cycle_incomplete"}
 
@@ -276,7 +342,7 @@ def test_deadman_reports_an_incomplete_state_the_restart_cannot_explain(env):
 def test_deadman_excuses_an_incomplete_state_the_restart_explains(env):
     env.svc["status"] = "active"
     env.svc["ages"] = (10, 10)
-    env.state_written(35)  # <= 10 + 30
+    env.state_written(35)
     assert env.run() == 0
     assert "cycle_incomplete" not in env.members()
 

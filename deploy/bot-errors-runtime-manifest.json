@@ -102,7 +102,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "50840466e18e26171a55bdbc45dc07baa20ddf0bb8e0fb5c90b768f04d7164fe",
+      "sha256": "45d3906568de7fbcb5debb71dba9ab1254c10480de75ab38c46cb25b0dff0c2f",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -184,7 +184,8 @@
         "MCP_REQUIRED_TOOLS_MISSING",
         "_restart_explains_cycle_age",
         "_cycle_stale_should_report",
-        "_note_grace_streak"
+        "_note_grace_streak",
+        "_grace_still_credible"
       ]
     },
     {

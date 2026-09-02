@@ -7857,6 +7857,32 @@ def _note_grace_streak(deadman_state: dict[str, Any], grace_active: bool, now_ep
     return int(now_epoch - since), False
 
 
+def _grace_still_credible(
+    grace_reason: str | None,
+    grace_streak_seconds: int,
+    max_state_age: int,
+) -> bool:
+    """Whether an open restart window still excuses a branch with no cycle timestamp.
+
+    ``state_missing`` and ``cycle_incomplete`` cannot be attributed by age the
+    way ``cycle_stale`` is: a restart legitimately follows an arbitrarily old
+    heartbeat (the downtime before it was already reported as
+    ``service_inactive``), and a state file with no ``cycleCompletedAt`` carries
+    no cycle time to compare the restart against. Bounding those branches by
+    the restart age reported every fresh restart whose heartbeat predated it,
+    which ``tests/scripts/bot-errors-health-check.test.ts`` pins as graced.
+
+    The evidence of a restart loop there is grace itself: a unit that keeps
+    restarting has grace active on every check, so the deadman's persisted
+    streak (``graceStreakSince``) keeps growing. Grace that has been
+    continuously active for longer than ``max_state_age`` is a loop, not a
+    fresh start, and stops excusing anything.
+    """
+    if not grace_reason:
+        return False
+    return grace_streak_seconds <= max_state_age
+
+
 def _restart_explains_cycle_age(
     cycle_age_seconds: int,
     restart_age: int | None,
@@ -7962,19 +7988,23 @@ def deadman(max_state_age: int, restart_grace: int, cooldown_seconds: int) -> in
         # deadman's own record of how long grace has been continuously active
         # is the only evidence left: grace that has outlived max_state_age is
         # a restart loop, not a fresh start.
-        if not grace_reason or grace_streak_seconds > max_state_age:
+        if not _grace_still_credible(grace_reason, grace_streak_seconds, max_state_age):
             active_members["state_missing"] = (
                 {"grace_streak_seconds": grace_streak_seconds} if grace_reason else {}
             )
     elif cycle_completed_at is None:
         # State exists but has no cycleCompletedAt — the last cycle did not
         # complete (crash between start and end). Treat as stale unless the
-        # state file was just written by the crash handler (within grace) and
-        # the restart that granted grace can actually account for its age.
+        # state file was just written by the crash handler (within grace) or a
+        # restart window is open. The heartbeat's age is not attributable to
+        # the restart (a restart legitimately follows an old heartbeat), so the
+        # window is bounded by the grace streak instead: grace that has stayed
+        # open longer than max_state_age is a restart loop that never
+        # completes a cycle.
         if (
             state_age is not None
             and state_age > restart_grace
-            and not (grace_reason and _restart_explains_cycle_age(state_age, grace_age, restart_grace))
+            and not _grace_still_credible(grace_reason, grace_streak_seconds, max_state_age)
         ):
             active_members["cycle_incomplete"] = {"state_age_seconds": state_age}
     elif _cycle_stale_should_report(
