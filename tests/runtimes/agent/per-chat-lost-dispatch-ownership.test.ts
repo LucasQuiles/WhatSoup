@@ -49,6 +49,17 @@ type OwnershipState = RuntimeState & {
     expected?: ReturnType<typeof sessionStub>,
   ): boolean;
   perChatSessionsWithoutOwner(): string[];
+  isSessionProvablyTerminated(session: ReturnType<typeof sessionStub>): boolean;
+  abortTurnRecoveryReplay(
+    target: {
+      scope: 'per_chat';
+      mapKey: string;
+      managerId: string;
+      generation: number;
+      session: ReturnType<typeof sessionStub>;
+    },
+    runtimeContext: RuntimeTurnContext,
+  ): Promise<boolean>;
   sweepPerChatSessionsWithoutOwner(): number;
   logHealthStats(): void;
   operationTrackers: Map<string, { shutdown: ReturnType<typeof vi.fn> }>;
@@ -599,6 +610,37 @@ describe('per-chat ownership teardown atomicity', () => {
     }
   });
 
+  it('leaves no orphaned ownership state when releasing ownership throws', () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const { state } = makePerChatRuntime(db);
+      const session = sessionStub();
+      const managerId = state.managerIdFor(session);
+      state.sessionOwnership.claim(MAP_KEY, managerId);
+      state.ownedSessionManagers.set(managerId, session);
+      state.chatSessions.set(MAP_KEY, session);
+      vi.spyOn(state.sessionOwnership, 'release').mockImplementation(() => {
+        throw new Error('ownership release failed');
+      });
+
+      expect(() => state.deleteOwnedPerChatSession(MAP_KEY, session)).toThrow(
+        'ownership release failed',
+      );
+
+      // Retirement is all-or-nothing across the correlated stores. The unowned
+      // sweep iterates chatSessions, so a record left in `closing` with its
+      // manager still indexed would be an orphan NO detector can see: the map
+      // entry it would be found through is already gone.
+      expect(state.chatSessions.has(MAP_KEY)).toBe(false);
+      expect(state.sessionOwnership.get(MAP_KEY)).toBeUndefined();
+      expect(state.ownedSessionManagers.get(managerId)).toBeUndefined();
+      expect(state.perChatSessionsWithoutOwner()).toEqual([]);
+    } finally {
+      db.close();
+    }
+  });
+
   it('clears both the session entry and the ownership record on the normal path', () => {
     const db = new Database(':memory:');
     db.open();
@@ -730,6 +772,78 @@ describe('unowned per-chat session sweep', () => {
       expect(health.details.degradedReasons)
         .not.toContain('per_chat_session_without_owner');
       expect(health.details.perChatSessionsWithoutOwner).toBe(0);
+    } finally {
+      db.close();
+    }
+  });
+});
+
+/**
+ * The eviction guard proves termination with `isSessionProvablyTerminated`
+ * (provider-independent: cleared `active`, every provider handle released, no
+ * turn in flight). The turn-recovery abort path answered the same question with
+ * an older spelling — `!active && pid === null && !turnInFlight` — which a
+ * managed-loop provider satisfies for its whole life, because it never assigns
+ * a child and so reports a null pid even while its handle is live. Two
+ * spellings of one contract disagree exactly where it matters.
+ */
+describe('turn-recovery abort uses the same termination proof as eviction', () => {
+  it('does not report a managed session mid-shutdown as aborted', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const { state } = makePerChatRuntime(db);
+      const runtimeContext = context('per_chat', MAP_KEY, 520, 'turn-recovery-managed-mid-shutdown');
+      // Managed-loop shutdown in progress: flag cleared, no child was ever
+      // spawned, handle still held.
+      const managedMidShutdown = sessionStub();
+      managedMidShutdown.getStatus.mockReturnValue({
+        active: false,
+        sessionId: 'session-42',
+        pid: null,
+        turnInFlight: false,
+        providerTerminated: false,
+      });
+      // Not current: the chat holds no entry for this session, so the abort
+      // takes its no-shutdown early return and answers from status alone.
+      const target = {
+        scope: 'per_chat' as const,
+        mapKey: MAP_KEY,
+        managerId: state.managerIdFor(managedMidShutdown),
+        generation: 1,
+        session: managedMidShutdown,
+      };
+
+      const aborted = await state.abortTurnRecoveryReplay(target, runtimeContext);
+
+      // Identical input, one answer: the eviction proof says "not terminated",
+      // so the abort path must not claim the replay is safely stopped.
+      expect(state.isSessionProvablyTerminated(managedMidShutdown)).toBe(false);
+      expect(aborted).toBe(false);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('reports a fully released session as aborted', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const { state } = makePerChatRuntime(db);
+      const runtimeContext = context('per_chat', MAP_KEY, 521, 'turn-recovery-released');
+      const released = exitedSessionStub();
+      const target = {
+        scope: 'per_chat' as const,
+        mapKey: MAP_KEY,
+        managerId: state.managerIdFor(released),
+        generation: 1,
+        session: released,
+      };
+
+      // Positive counterpart: the stricter proof must not turn every abort into
+      // an unresolved one.
+      expect(state.isSessionProvablyTerminated(released)).toBe(true);
+      expect(await state.abortTurnRecoveryReplay(target, runtimeContext)).toBe(true);
     } finally {
       db.close();
     }

@@ -5774,8 +5774,9 @@ export class AgentRuntime implements Runtime {
   ): Promise<boolean> {
     const session = target.session as SessionManager;
     if (!this.isTurnRecoveryDispatchTargetCurrent(target)) {
-      const status = session.getStatus();
-      return !status.active && status.pid === null && status.turnInFlight !== true;
+      // One termination contract. The older spelling proved termination from a
+      // null pid, which a managed-loop provider reports for its whole life.
+      return this.isSessionProvablyTerminated(session);
     }
     // #2170: singleton/shared targets have no mapKey — the reject/finalize
     // pair and queue lookup take their global (mapKey-less) forms.
@@ -5793,8 +5794,7 @@ export class AgentRuntime implements Runtime {
       log.error({ err }, 'turn recovery replay exact-generation shutdown failed');
       return false;
     }
-    const status = session.getStatus();
-    return !status.active && status.pid === null && status.turnInFlight !== true;
+    return this.isSessionProvablyTerminated(session);
   }
 
   private async dispatchTurnRecoveryReplay(
@@ -7839,12 +7839,19 @@ export class AgentRuntime implements Runtime {
         this.clearOwnedRespawnTimer(mapKey, current);
         this.sessionOwnership.transition(mapKey, current.managerId, 'closing');
         this.sessionOwnership.release(mapKey, current.managerId);
-        this.ownedSessionManagers.delete(current.managerId);
       }
     } finally {
-      // The session-map entry must never outlive its ownership record. A
-      // retained entry with no owner is the state that wedges every later turn
-      // at the dispatch rebind, so drop it even if the release above threw.
+      // Retirement is all-or-nothing across the correlated stores. The
+      // session-map entry must never outlive its ownership record — a retained
+      // entry with no owner wedges every later turn at the dispatch rebind — but
+      // the inverse is just as bad and strictly harder to see: the unowned sweep
+      // iterates chatSessions, so a record stranded in `closing` with its
+      // manager still indexed is an orphan no detector can reach. Drop all three
+      // together even if the release above threw.
+      if (current) {
+        this.ownedSessionManagers.delete(current.managerId);
+        this.sessionOwnership.discardIfOwned(mapKey, current.managerId);
+      }
       this.chatSessions.delete(mapKey);
     }
     return mapped !== undefined;
@@ -10411,11 +10418,12 @@ export class AgentRuntime implements Runtime {
         currentMapKey &&
         this.sessionOwnership.isCurrent(currentMapKey, args.managerId, respawnGeneration)
       ) {
-        const failedStatus = args.session.getStatus();
         this.sessionOwnership.transition(
           currentMapKey,
           args.managerId,
-          !failedStatus.active && failedStatus.pid === null ? 'recoverable_dead' : 'closing',
+          // Same proof as eviction and recovery-abort: a managed handle that is
+          // still held is not a dead generation to recover from.
+          this.isSessionProvablyTerminated(args.session) ? 'recoverable_dead' : 'closing',
         );
       }
       log.warn({ err, mapKey, sessionId: args.sessionId }, 'auto-respawn resume failed — will retry on next message');
