@@ -207,17 +207,65 @@ def test_repeat_rejections_in_one_conversation_still_dedupe(tmp_path):
     assert state["openIncidents"][KEY]["suppressedCount"] == 3 + 5
 
 
-def test_flap_storm_consolidation_still_wins_over_a_new_conversation(tmp_path):
-    """Disclosure pinned as behaviour: an OPEN storm still consolidates.
+def test_an_open_storm_does_not_mask_a_new_conversations_first_rejection(tmp_path):
+    """An open flap storm must not swallow a conversation it has never seen.
 
-    Pattern F runs before this gate on purpose — the storm alert already
-    carries the rate. Widening past it is out of scope for this change.
+    Pattern F consolidates storm members because the storm alert already
+    carries the count and rate. It does NOT carry the identity of a
+    conversation nobody has been told about. The storm opens at five events
+    in a 600s window and stays open until 3600s below threshold, so during
+    exactly the multi-conversation wedge this gate targets the storm is the
+    normal state, and consolidating first sightings into it would make the
+    gate inert for up to an hour.
     """
     mod = _load(tmp_path)
     state = _open_state()
     state["flapState"] = {KEY: {"stormAt": 1, "tripTimestamps": [], "cumulativeCount": 5}}
-    reason = mod.should_suppress_send(_event(SCOPE_B, "evt-b1", 2), state)
+
+    first = mod.should_suppress_send(_event(SCOPE_B, "evt-b1", 2), state)
+    assert first is None, (
+        "a conversation the storm has never represented must still be notified"
+    )
+
+
+def test_an_open_storm_still_consolidates_repeats_of_a_known_conversation(tmp_path):
+    """The consolidation Pattern F exists for is preserved.
+
+    Only the FIRST sighting of an unrepresented conversation escapes; every
+    repeat is a storm member and stays consolidated, so the storm still does
+    its job of collapsing a flapping source into one alert.
+    """
+    mod = _load(tmp_path)
+    state = _open_state()
+    state["flapState"] = {KEY: {"stormAt": 1, "tripTimestamps": [], "cumulativeCount": 5}}
+
+    assert mod.should_suppress_send(_event(SCOPE_B, "evt-b1", 2), state) is None
+    for index in range(2, 8):
+        reason = mod.should_suppress_send(_event(SCOPE_B, f"evt-b{index}", index), state)
+        assert reason is not None and "flap_storm_member" in reason
+
+
+def test_an_open_storm_still_consolidates_an_event_with_no_conversation(tmp_path):
+    """Storm consolidation is unchanged for every source that carries no scope."""
+    mod = _load(tmp_path)
+    state = _open_state()
+    state["flapState"] = {KEY: {"stormAt": 1, "tripTimestamps": [], "cumulativeCount": 5}}
+    reason = mod.should_suppress_send(_event(None, "evt-none", 2), state)
     assert reason is not None and "flap_storm_member" in reason
+
+
+def test_a_storm_retry_of_an_already_forced_event_is_still_forced(tmp_path):
+    """The retry guarantee holds inside a storm too.
+
+    The forced notification is exactly as loseable here as on the ordinary
+    path, so the same event id must survive a transient transport failure.
+    """
+    mod = _load(tmp_path)
+    state = _open_state()
+    state["flapState"] = {KEY: {"stormAt": 1, "tripTimestamps": [], "cumulativeCount": 5}}
+    event = _event(SCOPE_B, "evt-storm-retry", 2)
+    assert mod.should_suppress_send(event, state) is None
+    assert mod.should_suppress_send(event, state) is None
 
 
 # ---------------------------------------------------------------------------
