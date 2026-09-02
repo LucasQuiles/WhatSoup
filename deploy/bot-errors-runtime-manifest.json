@@ -584,7 +584,8 @@
       "sha256": "b15832328db5aaade620a23987f26c9102e2073b01ba9ae85733537f0da2ac32",
       "mustContain": [
         "confineAlertContent",
-        "ConfinedAlertContent"
+        "ConfinedAlertContent",
+        "bot-errors-evidence:"
       ]
     },
     {
