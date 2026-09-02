@@ -311,4 +311,138 @@ describe('compareGovernedLaunchdEnv', () => {
       droppedNonGovernedKeys: [],
     });
   });
+
+  // MED-7: the reader must match the dict ELEMENT, not one spelling of it.
+  //
+  // `<dict>`, `<dict >`, `<dict\n>`, `<dict/>` and `<dict attr="x">` are the
+  // same element. Matching the literal '<dict>' let every other spelling of a
+  // NESTED dict past the fail-closed guard while the body still truncated at
+  // that dict's close, so a governed key declared after it read as absent and
+  // was reported as benign 'missing' drift instead of an unparseable plist.
+  //
+  // The nested dict goes BEFORE the governed key on purpose: with it last,
+  // every key is already parsed before the truncation point and the defect
+  // cannot show.
+  const NESTED_DICT_SPELLINGS = ['<dict>', '<dict >', '<dict\n    >', '<dict class="x">', '<dict/>'];
+  const OUTER_DICT_SPELLINGS = ['<dict>', '<dict >', '<dict\n  >', '<dict class="x">'];
+
+  function plistWithSpelledEnv(options: {
+    outerSpelling?: string;
+    nestedSpelling?: string;
+    env?: Record<string, string>;
+    trailingEnv?: Record<string, string>;
+  }): string {
+    const outerSpelling = options.outerSpelling ?? '<dict>';
+    const entries = Object.entries(options.env ?? {}).flatMap(([key, value]) => [
+      `    <key>${key}</key>`,
+      `    <string>${value}</string>`,
+    ]);
+    if (options.nestedSpelling !== undefined) {
+      entries.push(
+        options.nestedSpelling.endsWith('/>')
+          ? `    <key>Nested</key>${options.nestedSpelling}`
+          : `    <key>Nested</key>${options.nestedSpelling}<key>Inner</key><string>x</string></dict>`,
+      );
+    }
+    entries.push(
+      ...Object.entries(options.trailingEnv ?? {}).flatMap(([key, value]) => [
+        `    <key>${key}</key>`,
+        `    <string>${value}</string>`,
+      ]),
+    );
+    const envBlock = outerSpelling.endsWith('/>')
+      ? [`  ${outerSpelling}`]
+      : [`  ${outerSpelling}`, ...entries, '  </dict>'];
+    return [
+      '<?xml version="1.0" encoding="UTF-8"?>',
+      '<plist version="1.0">',
+      '<dict>',
+      '  <key>Label</key>',
+      '  <string>com.whatsoup.agent</string>',
+      '  <key>KeepAlive</key>',
+      '  <dict>',
+      '    <key>Crashed</key>',
+      '    <true/>',
+      '  </dict>',
+      '  <key>EnvironmentVariables</key>',
+      ...envBlock,
+      '</dict>',
+      '</plist>',
+      '',
+    ].join('\n');
+  }
+
+  it.each(NESTED_DICT_SPELLINGS)(
+    'fails closed when a nested dict spelled %j hides a governed key',
+    (nestedSpelling) => {
+      const expected = plistWithSpelledEnv({
+        env: { PATH: '/opt/bin:/usr/bin' },
+        trailingEnv: { WHATSOUP_PATH_PREPEND: '/opt/bin' },
+      });
+      const observed = plistWithSpelledEnv({
+        nestedSpelling,
+        env: { PATH: '/opt/bin:/usr/bin' },
+        trailingEnv: { WHATSOUP_PATH_PREPEND: '/opt/bin' },
+      });
+
+      expect(compareGovernedLaunchdEnv(observed, observed)).toEqual({
+        comparable: false,
+        reason: 'environment-variables-unparseable',
+        drift: [],
+        droppedNonGovernedKeys: [],
+      });
+      // Against a well-formed render the same plist previously produced a
+      // bogus 'missing' row for the key the truncation ate.
+      expect(compareGovernedLaunchdEnv(expected, observed).comparable).toBe(false);
+    },
+  );
+
+  it.each(OUTER_DICT_SPELLINGS)(
+    'reads an EnvironmentVariables dict spelled %j',
+    (outerSpelling) => {
+      const observed = plistWithSpelledEnv({
+        outerSpelling,
+        env: { PATH: '/opt/bin:/usr/bin', WHATSOUP_PATH_PREPEND: '/opt/bin' },
+      });
+      const expected = plistWithSpelledEnv({
+        env: { PATH: '/opt/bin:/usr/bin', WHATSOUP_PATH_PREPEND: '/opt/bin' },
+      });
+
+      const comparison = compareGovernedLaunchdEnv(expected, observed, {
+        pathPrepend: ['/opt/bin'],
+      });
+      expect(comparison.comparable).toBe(true);
+      expect(comparison.drift).toEqual([]);
+      expect(comparison.droppedNonGovernedKeys).toEqual([]);
+    },
+  );
+
+  it('reads a self-closing EnvironmentVariables dict as an empty environment', () => {
+    const expected = plistWithSpelledEnv({ env: { PATH: '/opt/bin:/usr/bin' } });
+    const observed = plistWithSpelledEnv({ outerSpelling: '<dict/>' });
+
+    const comparison = compareGovernedLaunchdEnv(expected, observed);
+    expect(comparison.comparable).toBe(true);
+    expect(comparison.drift).toEqual([{
+      key: 'PATH',
+      state: 'missing',
+      expectedDigest: sha256('/opt/bin:/usr/bin'),
+      observedDigest: null,
+    }]);
+  });
+
+  it('does not carry regex state between the two plists of one comparison', () => {
+    // The reader builds its patterns per call. A module-scope /g pattern would
+    // keep lastIndex from the expected plist and start the observed plist's
+    // search past its own EnvironmentVariables dict.
+    const plist = plistWithSpelledEnv({
+      env: { PATH: '/opt/bin:/usr/bin', WHATSOUP_PATH_PREPEND: '/opt/bin' },
+    });
+
+    for (let i = 0; i < 3; i += 1) {
+      const comparison = compareGovernedLaunchdEnv(plist, plist, { pathPrepend: ['/opt/bin'] });
+      expect(comparison.comparable).toBe(true);
+      expect(comparison.drift).toEqual([]);
+    }
+  });
 });

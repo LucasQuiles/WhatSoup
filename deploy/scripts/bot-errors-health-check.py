@@ -4232,6 +4232,17 @@ def opencode_provider_probe_command(profile: dict[str, Any], item: dict[str, Any
     return "opencode"
 
 
+PLIST_ENVIRONMENT_KEY_MARKER = "<key>EnvironmentVariables</key>"
+# The dict ELEMENT token, not one literal spelling of it. `<dict>`, `<dict >`,
+# `<dict\n>`, `<dict/>` and `<dict attr="x">` are the same element to any plist
+# reader, so matching the literal "<dict>" made the nested-dict guard below miss
+# every other spelling: the block still truncated at the first `</dict>` and a
+# governed key declared AFTER the nested dict read as absent rather than as
+# unknown. The lookahead keeps a hypothetical `<dictionary>` out.
+PLIST_DICT_OPEN_RE = re.compile(r"<dict(?=[\s/>])[^>]*>")
+PLIST_DICT_CLOSE_RE = re.compile(r"</dict\s*>")
+
+
 def instance_plist_environment(name: str) -> dict[str, str] | None:
     """Read the WHOLE EnvironmentVariables map out of a generated instance plist.
 
@@ -4257,21 +4268,40 @@ def instance_plist_environment(name: str) -> dict[str, str] | None:
     )
     if label_match is None or html.unescape(label_match.group(1)) != f"com.whatsoup.{name}":
         return None
-    environment_match = re.search(
-        r"<key>EnvironmentVariables</key>\s*<dict>(.*?)</dict>", raw, re.DOTALL
-    )
-    if environment_match is None:
+    marker = raw.find(PLIST_ENVIRONMENT_KEY_MARKER)
+    if marker < 0:
         return None
-    block = environment_match.group(1)
-    # The block regex stops at the FIRST </dict>, so a nested dict would silently
-    # truncate the map and make a declared key read as absent. The TypeScript
-    # comparator (src/fleet/launchd-env-drift.ts) refuses outright in that case;
-    # match it and report unknown rather than hand back a partial map.
-    if "<dict>" in block:
+    after_marker = marker + len(PLIST_ENVIRONMENT_KEY_MARKER)
+    open_match = PLIST_DICT_OPEN_RE.search(raw, after_marker)
+    if open_match is None:
+        return None
+    # Only whitespace may separate the key from its value element; anything else
+    # means this dict belongs to some later key, not to EnvironmentVariables.
+    if raw[after_marker:open_match.start()].strip():
+        return None
+    # `<dict/>` is a well-formed EMPTY map, not an unreadable plist. Saying
+    # "unreadable" there misnames the operator's problem; the governed-PATH
+    # absence check downstream reports it accurately instead.
+    if open_match.group(0).endswith("/>"):
+        return {}
+    close_match = PLIST_DICT_CLOSE_RE.search(raw, open_match.end())
+    if close_match is None:
+        return None
+    block = raw[open_match.end():close_match.start()]
+    # The block ends at the FIRST </dict>, so a nested dict truncates the map and
+    # makes a declared key read as absent. The TypeScript comparator
+    # (src/fleet/launchd-env-drift.ts) refuses outright in that case; match it and
+    # report unknown rather than hand back a partial map.
+    if PLIST_DICT_OPEN_RE.search(block) is not None:
         return None
     environment: dict[str, str] = {}
+    # `[^<]` rather than `.` with DOTALL: a dotted non-greedy key group spans
+    # intervening markup, so `<key>A</key><data/>…<key>PATH</key><string>v</string>`
+    # parsed as ONE pair whose key was the whole run and whose value belonged to
+    # PATH -- the governed key then read as absent. Values are plain strings and
+    # entities arrive escaped, so neither side legitimately contains a "<".
     for match in re.finditer(
-        r"<key>(.*?)</key>\s*<string>(.*?)</string>", block, re.DOTALL
+        r"<key>([^<]*)</key>\s*<string>([^<]*)</string>", block
     ):
         key = html.unescape(match.group(1))
         # FIRST occurrence wins, preserving the precedence of the single-key

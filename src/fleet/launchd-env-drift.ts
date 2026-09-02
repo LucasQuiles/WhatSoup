@@ -95,8 +95,19 @@ function sha256Hex(value: string): string {
 }
 
 const ENV_KEY_MARKER = '<key>EnvironmentVariables</key>';
-const DICT_OPEN = '<dict>';
-const DICT_CLOSE = '</dict>';
+/**
+ * The dict ELEMENT token, not one literal spelling of it. `<dict>`, `<dict >`,
+ * `<dict\n>`, `<dict/>` and `<dict attr="x">` are the same element to any plist
+ * reader, so matching the literal '<dict>' made the nested-dict guard below miss
+ * every other spelling: the body still truncated at the first `</dict>` and a
+ * governed key declared AFTER the nested dict read as absent rather than making
+ * the comparison fail closed. The lookahead keeps a `<dictionary>` out.
+ *
+ * Held as SOURCE, not as a RegExp: a module-scope /g pattern carries lastIndex
+ * between calls and one comparison parses two plists.
+ */
+const DICT_OPEN_SOURCE = '<dict(?=[\\s/>])[^>]*>';
+const DICT_CLOSE_SOURCE = '</dict\\s*>';
 
 /**
  * Extract the EnvironmentVariables dict as a key -> value map. Returns an
@@ -109,17 +120,32 @@ const DICT_CLOSE = '</dict>';
 function parseEnvironmentVariables(plist: string): Map<string, string> | null {
   const marker = plist.indexOf(ENV_KEY_MARKER);
   if (marker === -1) return new Map();
-  const dictOpen = plist.indexOf(DICT_OPEN, marker);
-  if (dictOpen === -1) return null;
-  if (plist.slice(marker + ENV_KEY_MARKER.length, dictOpen).trim() !== '') return null;
-  // Environment values are plain strings; a nested dict inside the block is a
-  // shape this comparator does not understand — fail closed.
-  const dictClose = plist.indexOf(DICT_CLOSE, dictOpen);
-  if (dictClose === -1) return null;
-  const nestedOpen = plist.indexOf(DICT_OPEN, dictOpen + DICT_OPEN.length);
-  if (nestedOpen !== -1 && nestedOpen < dictClose) return null;
+  const afterMarker = marker + ENV_KEY_MARKER.length;
+  const openPattern = new RegExp(DICT_OPEN_SOURCE, 'g');
+  openPattern.lastIndex = afterMarker;
+  const open = openPattern.exec(plist);
+  if (open === null) return null;
+  // Only whitespace may separate the key from its value element; anything else
+  // means this dict belongs to a later key, not to EnvironmentVariables.
+  if (plist.slice(afterMarker, open.index).trim() !== '') return null;
+  // `<dict/>` is a well-formed EMPTY environment, not an unparseable one: every
+  // governed key is then genuinely missing, which the drift rows report.
+  if (open[0].endsWith('/>')) return new Map();
+  const bodyStart = open.index + open[0].length;
 
-  const body = plist.slice(dictOpen + DICT_OPEN.length, dictClose);
+  const closePattern = new RegExp(DICT_CLOSE_SOURCE, 'g');
+  closePattern.lastIndex = bodyStart;
+  const close = closePattern.exec(plist);
+  if (close === null) return null;
+
+  const body = plist.slice(bodyStart, close.index);
+  // Environment values are plain strings; a nested dict inside the body is a
+  // shape this comparator does not understand, and the body already truncated at
+  // that dict's close — fail closed. Searched over the BODY, so the outer
+  // plist's own dicts are out of scope.
+  const nestedPattern = new RegExp(DICT_OPEN_SOURCE, 'g');
+  if (nestedPattern.exec(body) !== null) return null;
+
   const env = new Map<string, string>();
   const pair = /<key>([^<]*)<\/key>\s*<string>([^<]*)<\/string>/g;
   for (const match of body.matchAll(pair)) {

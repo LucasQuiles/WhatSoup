@@ -843,7 +843,7 @@ def _write_instance_plist(
     return target
 
 
-def _arm_darwin_plist(monkeypatch, tmp_path: Path, name: str, environment: dict[str, str], **kwargs):
+def _arm_darwin_host(monkeypatch, tmp_path: Path) -> None:
     # Clear EVERY environment affordance that would mark the governed surfaces
     # not-applicable. Without this the matrix below would silently stop testing
     # what it claims the moment one of these leaked in from the ambient
@@ -854,6 +854,10 @@ def _arm_darwin_plist(monkeypatch, tmp_path: Path, name: str, environment: dict[
     monkeypatch.delenv("BOT_ERRORS_DRY_PROVIDER_PROBE_RC", raising=False)
     monkeypatch.setattr(_mod, "HOST_PLATFORM", "darwin")
     monkeypatch.setattr(_mod.Path, "home", classmethod(lambda cls: tmp_path))
+
+
+def _arm_darwin_plist(monkeypatch, tmp_path: Path, name: str, environment: dict[str, str], **kwargs):
+    _arm_darwin_host(monkeypatch, tmp_path)
     return _write_instance_plist(tmp_path, name, environment, **kwargs)
 
 
@@ -1341,6 +1345,217 @@ def _matrix_environment(tmp_path: Path) -> dict[str, str]:
     _write_shadow(tmp_path / "pin" / "bin", "claude")
     _write_shadow(tmp_path / "pin" / "bin", "opencode")
     return environment
+
+
+# --- MED-7: the plist readers must match the dict ELEMENT, not one spelling ---
+#
+# Both readers matched the literal "<dict>". Every other legal spelling of the
+# same element slipped past the nested-dict guard while still truncating the
+# block at the first "</dict>", so a governed key declared AFTER a nested dict
+# read as ABSENT rather than as unknown. Absent on both sides is the benign
+# prepend cell, so the probe reported ok and spawned the provider where the
+# well-formed plist fails closed.
+#
+# Fixture shape matters: the existing helpers append their nested dict LAST, so
+# every governed key is already parsed before the truncation point and the
+# fail-open cannot show. These fixtures put the nested dict BEFORE the prepend.
+
+NESTED_DICT_SPELLINGS = ["<dict>", "<dict >", "<dict\n    >", '<dict class="x">', "<dict/>"]
+OUTER_DICT_SPELLINGS = ["<dict>", "<dict >", "<dict\n  >", '<dict class="x">']
+
+
+def _write_plist_with_dict_spellings(
+    home: Path,
+    name: str,
+    *,
+    outer_spelling: str = "<dict>",
+    nested_spelling: str | None = None,
+    environment: dict[str, str] | None = None,
+    extra_entries: list[str] | None = None,
+    trailing_environment: dict[str, str] | None = None,
+) -> Path:
+    """Instance plist whose EnvironmentVariables dict tokens are spelled verbatim.
+
+    `trailing_environment` is written after the nested dict and any extra
+    markup on purpose -- that is the only position from which a governed key can
+    be lost to a truncated block, and it is the position the shipped fixtures
+    never exercised.
+    """
+    agents = home / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True, exist_ok=True)
+    entries: list[str] = []
+    for key, value in (environment or {}).items():
+        entries.append(f"    <key>{key}</key><string>{value}</string>")
+    entries.extend(extra_entries or [])
+    if nested_spelling is not None:
+        if nested_spelling.endswith("/>"):
+            entries.append(f"    <key>Nested</key>{nested_spelling}")
+        else:
+            entries.append(
+                f"    <key>Nested</key>{nested_spelling}<key>Inner</key><string>x</string></dict>"
+            )
+    for key, value in (trailing_environment or {}).items():
+        entries.append(f"    <key>{key}</key><string>{value}</string>")
+    environment_block = (
+        [f"  {outer_spelling}"]
+        if outer_spelling.endswith("/>")
+        else [f"  {outer_spelling}", *entries, "  </dict>"]
+    )
+    target = agents / f"com.whatsoup.{name}.plist"
+    target.write_text(
+        "\n".join(
+            [
+                '<?xml version="1.0" encoding="UTF-8"?>',
+                '<plist version="1.0">',
+                "<dict>",
+                "  <key>Label</key>",
+                f"  <string>com.whatsoup.{name}</string>",
+                "  <key>KeepAlive</key>",
+                "  <dict><key>Crashed</key><true/></dict>",
+                "  <key>EnvironmentVariables</key>",
+                *environment_block,
+                "</dict>",
+                "</plist>",
+                "",
+            ]
+        )
+    )
+    return target
+
+
+@pytest.mark.parametrize("nested_spelling", NESTED_DICT_SPELLINGS)
+def test_plist_reader_fails_closed_on_every_nested_dict_spelling(
+    monkeypatch, tmp_path, nested_spelling
+):
+    environment = _matrix_environment(tmp_path)
+    _arm_darwin_host(monkeypatch, tmp_path)
+    _write_plist_with_dict_spellings(
+        tmp_path,
+        "agent-alpha",
+        nested_spelling=nested_spelling,
+        environment={"PATH": environment["PATH"]},
+        trailing_environment={
+            "WHATSOUP_PATH_PREPEND": environment["WHATSOUP_PATH_PREPEND"]
+        },
+    )
+
+    assert _mod.instance_plist_environment("agent-alpha") is None, (
+        "a nested dict truncates the map, so the reader must report unknown"
+    )
+    assert _mod.instance_plist_governed_environment("agent-alpha") == (
+        _mod.GOVERNED_PLIST_UNREADABLE,
+        None,
+    )
+
+
+@pytest.mark.parametrize("nested_spelling", ["<dict>", "<dict >"])
+def test_default_provider_probe_does_not_spawn_when_a_nested_dict_hides_the_prepend(
+    monkeypatch, tmp_path, nested_spelling
+):
+    """The operator-visible half of MED-7, and a parity assertion.
+
+    Both spellings name the same element, so both must produce the same class.
+    The "<dict>" row is the control that proves the fixture reaches the code;
+    the "<dict >" row is the one that spawned the provider before the fix,
+    because the hidden WHATSOUP_PATH_PREPEND matched the loaded job's absent one.
+    """
+    environment = _matrix_environment(tmp_path)
+    _arm_darwin_host(monkeypatch, tmp_path)
+    _write_plist_with_dict_spellings(
+        tmp_path,
+        "agent-alpha",
+        nested_spelling=nested_spelling,
+        environment={"PATH": environment["PATH"]},
+        trailing_environment={
+            "WHATSOUP_PATH_PREPEND": environment["WHATSOUP_PATH_PREPEND"]
+        },
+    )
+    loaded_environment = dict(environment)
+    # The pre-migration loaded job carries no governed prepend. Paired with a
+    # prepend the reader lost, that is the benign absent/absent cell.
+    loaded_environment.pop("WHATSOUP_PATH_PREPEND")
+
+    captured, lines = _claude_probe(monkeypatch, {}, loaded_environment)
+
+    assert not captured, "the probe must not spawn the provider on an unreadable plist"
+    assert "failure_class=provider_runtime_plist_unreadable" in lines[0]
+    _assert_fail_line_is_path_free(lines[0], tmp_path)
+
+
+@pytest.mark.parametrize("outer_spelling", OUTER_DICT_SPELLINGS)
+def test_plist_reader_accepts_every_environment_dict_spelling(
+    monkeypatch, tmp_path, outer_spelling
+):
+    """The other direction: a valid plist must not be called unreadable.
+
+    Matching the literal "<dict>" made these fail CLOSED, which is safe but
+    misnames the operator's problem: the plist is fine.
+    """
+    environment = _matrix_environment(tmp_path)
+    _arm_darwin_host(monkeypatch, tmp_path)
+    _write_plist_with_dict_spellings(
+        tmp_path,
+        "agent-alpha",
+        outer_spelling=outer_spelling,
+        environment={
+            "PATH": environment["PATH"],
+            "WHATSOUP_PATH_PREPEND": environment["WHATSOUP_PATH_PREPEND"],
+        },
+    )
+
+    assert _mod.instance_plist_environment("agent-alpha") == {
+        "PATH": environment["PATH"],
+        "WHATSOUP_PATH_PREPEND": environment["WHATSOUP_PATH_PREPEND"],
+    }
+
+
+def test_plist_reader_reads_a_self_closing_environment_dict_as_empty(monkeypatch, tmp_path):
+    """`<dict/>` is a well-formed EMPTY map, not an unreadable plist.
+
+    The reader now says readable-with-nothing-in-it, and the governed-PATH
+    absence check names the real problem. Both states fail the probe closed; only
+    the class changes.
+    """
+    _arm_darwin_host(monkeypatch, tmp_path)
+    _write_plist_with_dict_spellings(tmp_path, "agent-alpha", outer_spelling="<dict/>")
+
+    assert _mod.instance_plist_environment("agent-alpha") == {}
+    assert _mod.instance_plist_governed_environment("agent-alpha") == (
+        _mod.GOVERNED_PLIST_READABLE,
+        {},
+    )
+
+
+def test_plist_reader_does_not_let_intervening_markup_swallow_a_governed_key(
+    monkeypatch, tmp_path
+):
+    """The key/value pair regex must not span markup.
+
+    A dotted non-greedy key group walked THROUGH an unrelated element and
+    matched one bogus pair whose key was the whole run and whose value belonged
+    to the next real key -- so WHATSOUP_PATH_PREPEND read as absent from a plist
+    that declares it, with no nested dict involved.
+    """
+    environment = _matrix_environment(tmp_path)
+    _arm_darwin_host(monkeypatch, tmp_path)
+    _write_plist_with_dict_spellings(
+        tmp_path,
+        "agent-alpha",
+        environment={"PATH": environment["PATH"]},
+        extra_entries=["    <key>KeepAliveHint</key><data>eA==</data>"],
+        trailing_environment={
+            "WHATSOUP_PATH_PREPEND": environment["WHATSOUP_PATH_PREPEND"]
+        },
+    )
+
+    parsed = _mod.instance_plist_environment("agent-alpha")
+    assert parsed is not None, "no nested dict here: the plist is readable"
+    assert parsed.get("PATH") == environment["PATH"]
+    assert parsed.get("WHATSOUP_PATH_PREPEND") == environment["WHATSOUP_PATH_PREPEND"]
+    # The non-string element contributes no pair at all rather than a bogus one.
+    assert "KeepAliveHint" not in parsed
+    assert sorted(parsed) == ["PATH", "WHATSOUP_PATH_PREPEND"]
+
 
 
 @pytest.mark.parametrize("generated_path", [None, ""])
