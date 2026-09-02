@@ -7849,7 +7849,9 @@ def _note_grace_streak(deadman_state: dict[str, Any], grace_active: bool, now_ep
             return 0, False
         deadman_state.pop("graceStreakSince", None)
         return 0, True
-    if not isinstance(since, int) or since > now_epoch:
+    if isinstance(since, bool) or not isinstance(since, int) or since < 0 or since > now_epoch:
+        # Absent, corrupt (bool passes isinstance int), negative, or in the
+        # future: start the streak now rather than trusting the value.
         deadman_state["graceStreakSince"] = int(now_epoch)
         return 0, True
     return int(now_epoch - since), False

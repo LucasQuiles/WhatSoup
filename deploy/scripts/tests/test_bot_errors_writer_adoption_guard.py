@@ -352,7 +352,10 @@ def test_bare_writer_waits_for_the_controller_adoption_lock(dispatcher, tmp_path
     """The bare write must serialise with adoption on ``<anchor>.lock``.
 
     While another holder has the exclusive flock, the writer must not touch the
-    primary; once released, the pre-adoption bare write proceeds normally.
+    primary; once released, the pre-adoption bare write proceeds normally. The
+    timeout is the guard's own error class so that, under --daemon, a helper
+    that reaches the bare writer from inside the cycle (self-held lock) exits
+    79 instead of being swallowed as a failed cycle.
     """
     import fcntl
 
@@ -364,7 +367,7 @@ def test_bare_writer_waits_for_the_controller_adoption_lock(dispatcher, tmp_path
     try:
         fcntl.flock(holder, fcntl.LOCK_EX)
         before = anchor.read_bytes()
-        with pytest.raises(TimeoutError, match="adoption lock"):
+        with pytest.raises(dispatcher.IncidentCycleRequiredError, match="adoption lock"):
             dispatcher.save_incident_state({"incident_state": anchor}, {"incidents": {}}, lock_timeout_seconds=0.2)
         assert anchor.read_bytes() == before, "the primary must not change while the lock is held elsewhere"
         fcntl.flock(holder, fcntl.LOCK_UN)

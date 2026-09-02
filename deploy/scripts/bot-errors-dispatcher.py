@@ -1317,7 +1317,13 @@ class _AdoptionLock:
         self._fd: int | None = None
 
     def __enter__(self) -> "_AdoptionLock":
-        fd = os.open(self._path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        # Pin the parent directory first, as the session does, so the lock is
+        # opened relative to the directory we checked rather than by path.
+        dir_fd = os.open(self._path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            fd = os.open(self._path.name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=dir_fd)
+        finally:
+            os.close(dir_fd)
         try:
             observed = os.fstat(fd)
             if (
@@ -1334,9 +1340,17 @@ class _AdoptionLock:
                     break
                 except BlockingIOError:
                     if time.monotonic() >= deadline:
-                        raise TimeoutError(
+                        # Either this process already holds the session lock (a
+                        # helper reached the bare writer from inside the cycle,
+                        # the programming error the guard exists for) or an
+                        # adoption is in progress, after which the bare write
+                        # must be refused anyway. Both are the guard's error,
+                        # so the daemon exits 79 instead of swallowing a
+                        # TimeoutError as a failed cycle.
+                        raise IncidentCycleRequiredError(
                             f"save_incident_state: the incident-state adoption lock stayed busy for "
-                            f"{self._timeout:g}s ({self._path.name})"
+                            f"{self._timeout:g}s ({self._path.name}); a bare write must not run "
+                            f"while a controller-state session holds the store"
                         ) from None
                     time.sleep(min(0.005, max(0.0, deadline - time.monotonic())))
         except BaseException:

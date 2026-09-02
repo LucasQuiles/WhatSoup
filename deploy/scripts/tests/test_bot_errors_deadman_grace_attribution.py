@@ -303,3 +303,17 @@ def test_deadman_grace_streak_resets_when_grace_lapses(env):
     env.state_written(0)
     assert env.run() == 0
     assert "state_missing" not in env.members()
+
+
+def test_deadman_grace_streak_rejects_bool_and_negative_epochs(env, tmp_path):
+    """A corrupt graceStreakSince (bool passes isinstance int; negative) must not
+    manufacture an enormous streak; it resets and is persisted as an int."""
+    for bad in (True, -5):
+        (tmp_path / "deadman-state.json").write_text(json.dumps({"schemaVersion": 1, "incidents": {}, "graceStreakSince": bad}))
+        (tmp_path / "deadman-state.json").chmod(0o600)  # durable_json refuses group/other-readable targets
+        env.svc["status"] = "active"
+        env.svc["ages"] = (10, 10)
+        assert env.run() == 0, bad
+        assert "state_missing" not in env.members()
+        saved = json.loads((tmp_path / "deadman-state.json").read_text())
+        assert saved["graceStreakSince"] == 100_000 and type(saved["graceStreakSince"]) is int
