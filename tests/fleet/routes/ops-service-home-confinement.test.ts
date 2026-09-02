@@ -1,8 +1,9 @@
 /**
  * F3 — route-layer home-confinement of the launchd `service` block
  * (`service.pathPrepend[]` and `service.claudeConfigDir`) on both admission
- * verbs: POST /instances (handleCreateLine) and PATCH /lines/:name
- * (handleConfigUpdate).
+ * verbs: POST /api/lines (handleCreateLine) and PATCH /api/lines/:name/config
+ * (handleConfigUpdate) — the canonical registered paths, per the route table at
+ * src/fleet/index.ts:373 and :397.
  *
  * Before this file, `validateLaunchdServiceConfig`
  * (src/lib/launchd-service-config.ts) enforced only the *shape* of those two
@@ -289,6 +290,157 @@ describe('service block home-confinement (F3)', () => {
     expect(res._status, 'patch must succeed: ' + res._body).toBe(200);
     const persisted = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
     expect(persisted.name).toBe('svc-patch-target');
+    expect(persisted.service).toEqual(service);
+  });
+
+  // -------------------------------------------------------------------------
+  // F6 — `..` traversal THROUGH a symlink escapes home
+  //
+  // Admission validated the LEXICALLY resolved path but persisted the RAW
+  // spelling. `path.resolve()` collapses `..` textually, so `<home>/jump/../x`
+  // reads as `<home>/x` and passes the containment check, while the kernel
+  // resolves `..` PHYSICALLY after following `jump` at exec time, landing
+  // outside home. The raw spelling is what gets rendered into the service PATH.
+  //
+  // `fs.realpathSync` is NOT a usable oracle here: it calls path.resolve()
+  // first, so it collapses `..` lexically before walking symlinks and reports
+  // the in-home answer (or ENOENT). Only `fs.realpathSync.native` (libc
+  // realpath(3)) performs physical resolution.
+  // -------------------------------------------------------------------------
+
+  /** Build a home-rooted spelling that traverses `..` through a symlink to a
+   *  real directory outside home, and assert the escape is genuine before any
+   *  route assertion depends on it. Returns the RAW spelling to submit. */
+  function makeSymlinkEscape(): string {
+    const home = homeDir();
+    const outside = path.join(tmpDir, 'outside');
+    const escapeTarget = path.join(tmpDir, 'escape');
+    fs.mkdirSync(path.join(outside, 'bin'), { recursive: true, mode: 0o700 });
+    fs.mkdirSync(escapeTarget, { recursive: true, mode: 0o700 });
+    fs.symlinkSync(outside, path.join(home, 'jump'));
+
+    // String concatenation, NOT path.join: path.join would normalize the `..`
+    // away and the fixture would silently stop exercising the defect.
+    const raw = `${home}/jump/../escape`;
+
+    // Harness self-check: this fixture is only meaningful if the spelling
+    // LOOKS in-home lexically but resolves OUTSIDE home physically.
+    expect(path.resolve(raw), 'lexical resolution must look in-home').toBe(path.join(home, 'escape'));
+    expect(fs.realpathSync.native(raw), 'physical resolution must escape home').toBe(
+      fs.realpathSync.native(escapeTarget),
+    );
+    expect(fs.realpathSync.native(raw).startsWith(home + path.sep)).toBe(false);
+    return raw;
+  }
+
+  it('rejects a CREATE whose service.pathPrepend escapes home via `..` through a symlink', async () => {
+    const raw = makeSymlinkEscape();
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq({ method: 'POST', body: createBody({ pathPrepend: [raw] }, 'svc-symlink-escape') }),
+      res,
+      makeDeps<any>({}),
+    );
+
+    expect(res._status, 'create must be refused: ' + res._body).toBe(400);
+    expect(fs.existsSync(cfgPathFor('svc-symlink-escape'))).toBe(false);
+  });
+
+  it('rejects a CREATE whose service.claudeConfigDir escapes home via `..` through a symlink', async () => {
+    const raw = makeSymlinkEscape();
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq({ method: 'POST', body: createBody({ claudeConfigDir: raw }, 'svc-symlink-escape-cfg') }),
+      res,
+      makeDeps<any>({}),
+    );
+
+    expect(res._status, 'create must be refused: ' + res._body).toBe(400);
+    expect(fs.existsSync(cfgPathFor('svc-symlink-escape-cfg'))).toBe(false);
+  });
+
+  it('rejects a PATCH whose service.pathPrepend escapes home via `..` through a symlink', async () => {
+    const raw = makeSymlinkEscape();
+    const { deps, configPath } = patchTarget();
+    const before = fs.readFileSync(configPath, 'utf-8');
+    const res = mockRes();
+    await handleConfigUpdate(
+      mockReq({ method: 'PATCH', body: JSON.stringify({ service: { pathPrepend: [raw] } }) }),
+      res,
+      deps,
+      { name: 'svc-patch-target' },
+    );
+
+    expect(res._status, 'patch must be refused: ' + res._body).toBe(400);
+    expect(fs.readFileSync(configPath, 'utf-8')).toBe(before);
+  });
+
+  it('rejects agentOptions.pluginDirs escaping home the same way (shared predicate)', async () => {
+    // Same predicate, same defect. Pinned here so the shared fix is covered on
+    // the sibling caller too.
+    const raw = makeSymlinkEscape();
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq({
+        method: 'POST',
+        body: JSON.stringify({
+          name: 'svc-plugindirs-escape',
+          type: 'agent',
+          adminPhones: ['15551234567'],
+          agentOptions: { pluginDirs: [raw] },
+        }),
+      }),
+      res,
+      makeDeps<any>({}),
+    );
+
+    expect(res._status, 'create must be refused: ' + res._body).toBe(400);
+    expect(fs.existsSync(cfgPathFor('svc-plugindirs-escape'))).toBe(false);
+  });
+
+  it('rejects a service.pathPrepend entry that is the home directory itself', async () => {
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq({ method: 'POST', body: createBody({ pathPrepend: [homeDir()] }, 'svc-prepend-is-home') }),
+      res,
+      makeDeps<any>({}),
+    );
+
+    expect(res._status, 'create must be refused: ' + res._body).toBe(400);
+    expect(fs.existsSync(cfgPathFor('svc-prepend-is-home'))).toBe(false);
+  });
+
+  it('rejects a non-normalized service.pathPrepend spelling even without a symlink', async () => {
+    // Rendered verbatim into PATH, so a `..` segment is refused on spelling
+    // alone: whether it escapes depends on filesystem state at exec time, which
+    // admission cannot see.
+    const home = homeDir();
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq({ method: 'POST', body: createBody({ pathPrepend: [`${home}/pin/../pin/bin`] }, 'svc-unnormalized') }),
+      res,
+      makeDeps<any>({}),
+    );
+
+    expect(res._status, 'create must be refused: ' + res._body).toBe(400);
+    expect(fs.existsSync(cfgPathFor('svc-unnormalized'))).toBe(false);
+  });
+
+  it('accepts an in-home directory whose name merely starts with dots', async () => {
+    // `pathIsInsideDirectory` tested `relative.startsWith('..')`, which also
+    // matches a legitimate sibling-free in-home name like `..config`. That is
+    // an over-rejection, not an escape: the path is genuinely inside home.
+    const home = homeDir();
+    const service = { pathPrepend: [path.join(home, '..config', 'bin')] };
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq({ method: 'POST', body: createBody(service, 'svc-dotdot-name') }),
+      res,
+      makeDeps<any>({}),
+    );
+
+    expect(res._status, 'create must succeed: ' + res._body).toBe(201);
+    const persisted = JSON.parse(fs.readFileSync(cfgPathFor('svc-dotdot-name'), 'utf-8'));
     expect(persisted.service).toEqual(service);
   });
 });
