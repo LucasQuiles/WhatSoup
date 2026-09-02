@@ -554,6 +554,72 @@ describe('platform service managers', () => {
     expect(childProcessMocks.execFile).not.toHaveBeenCalled();
   });
 
+  // -------------------------------------------------------------------------
+  // RENDER-SITE WIRING for home confinement.
+  //
+  // tests/fleet/launchd-render-home-confinement.test.ts proves the PREDICATE by
+  // calling assertHomeConfinedRenderOptions directly. Nothing there proved the
+  // predicate is WIRED INTO either render path, so deleting the guard statement
+  // from reconcileLaunchdPlist or from installLaunchdPlist killed zero tests and
+  // the security property could be reverted invisibly. These two drive the real
+  // entry points against a PERSISTED out-of-home service block instead, one per
+  // render call site.
+  //
+  // Both fixtures are shape-VALID (absolute, no ':', no control characters), so
+  // the shape assertion that runs first cannot be what refuses them and only
+  // confinement can. Both assert the refusal REASON, not merely that something
+  // threw, because a different validator refusing for a different cause would
+  // otherwise read as a pass.
+  // -------------------------------------------------------------------------
+
+  it('refuses an out-of-home pathPrepend at the reconcile render site', async () => {
+    setPlatform('darwin');
+    mockReads({
+      plist: generatedPlistIdentity(),
+      config: { name: 'agent', service: { pathPrepend: ['/opt/out-of-home-bin'] } },
+    });
+    const { reconcileLaunchdPlist } = await importPlatform();
+
+    // Asserted by marker NAME rather than `instanceof`, for the module-registry
+    // reason recorded on the first-install refusal above.
+    await expect(reconcileLaunchdPlist('agent', { dryRun: true }))
+      .rejects.toMatchObject({ name: 'LaunchdRenderConfigError' });
+    await expect(reconcileLaunchdPlist('agent', { dryRun: true }))
+      .rejects.toThrow(/service\.pathPrepend\[0\] must resolve to a path inside the home directory/);
+
+    // A dry run is the read-only diagnostic and the guard precedes its early
+    // return, so a persisted out-of-home block is refused even here.
+    expect(fsMocks.writeFileSync).not.toHaveBeenCalled();
+    expect(fsMocks.renameSync).not.toHaveBeenCalled();
+    expect(childProcessMocks.execFile).not.toHaveBeenCalled();
+  });
+
+  it('refuses an out-of-home claudeConfigDir at the install render site', async () => {
+    setPlatform('darwin');
+    mockReads({ config: { name: 'agent', service: { claudeConfigDir: '/opt/out-of-home-root' } } });
+    const { createServiceManager } = await importPlatform();
+    const manager = createServiceManager();
+    if (!manager.startAfterAuthFire) throw new Error('missing macOS authenticated-start hook');
+
+    const firstStart = new Promise<void>((resolve, reject) => {
+      manager.startAfterAuthFire!('agent', (err) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
+
+    await expect(firstStart).rejects.toMatchObject({ name: 'LaunchdRenderConfigError' });
+    await expect(firstStart)
+      .rejects.toThrow(/service\.claudeConfigDir must resolve to a path inside the home directory/);
+
+    // Refused before ANY filesystem mutation, not merely before the write: the
+    // install path creates the LaunchAgents directory before rendering.
+    expect(fsMocks.writeFileSync).not.toHaveBeenCalled();
+    expect(fsMocks.mkdirSync).not.toHaveBeenCalled();
+    expect(fsMocks.renameSync).not.toHaveBeenCalled();
+    expect(childProcessMocks.execFile).not.toHaveBeenCalled();
+  });
+
   it('restores the prior plist bytes, not the new render, when reload fails after an options render', async () => {
     setPlatform('darwin');
     const plist = `${SERVICE_HOME}/Library/LaunchAgents/com.whatsoup.agent.plist`;
