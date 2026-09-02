@@ -609,9 +609,9 @@ async function installLaunchdPlist(name: string): Promise<void> {
   // The shape assertion is unreachable only while the resolver is the sole
   // supplier of options, which is true today because this path takes no
   // caller-supplied override. It becomes load-bearing the moment anything
-  // supplies options the resolver did not validate.
-  // tests/fleet/platform-install-shape-reachability.test.ts measures exactly
-  // that, with a pair of contradictory probes.
+  // supplies options the resolver did not validate, and
+  // tests/fleet/platform-install-shape-assertion.test.ts pins that by mocking
+  // the resolver to return options it never checked.
   assertValidLaunchdPlistRenderOptions(renderOptions);
   assertHomeConfinedRenderOptions(renderOptions);
   const dest = plistPath(name);

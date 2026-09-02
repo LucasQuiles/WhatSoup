@@ -1,31 +1,25 @@
 /**
- * Reachability proof for the render-option SHAPE assertion at the install site.
+ * Regression guard for the render-option SHAPE assertion at the install site.
  *
- * The question the gate's MED-2 ruling needs answered: with home confinement
- * added beside the install call, does `assertValidLaunchdPlistRenderOptions`
- * become reachable again, or does it stay dead?
- *
- * It cannot be answered through the production path, because
+ * The assertion cannot be reached through the production path, because
  * `installLaunchdPlist` takes only an instance name and
  * `resolveLaunchdPlistRenderOptions` validates shape and throws before the
- * assertion could run. So these tests mock the resolver to hand back a
+ * assertion could run. So this test mocks the resolver to hand back a
  * SHAPE-INVALID options object directly, which is the only way anything
  * unvalidated reaches that line. That models exactly one future: a caller, or a
  * changed resolver contract, that supplies options the resolver did not check.
  *
- * The two probe tests are deliberately contradictory. Exactly one passes per
- * variant, and which one passes IS the answer:
- *   variant A = confinement only, shape assertion removed
- *   variant B = confinement plus the shape assertion restored
+ * Home confinement is not what is under test here. The mocked entry is absolute
+ * and inside home, so confinement admits it and only the shape rule can refuse
+ * it; the test asserts the shape reason for that reason.
  *
- * Home confinement is not what is under test here; the mocked options are
- * home-confined so only the shape rule can refuse them.
- *
- * The probe pair is a one-time MEASUREMENT and is opt-in, so it guards nothing
- * in CI: with the probe env unset both members are skipped and deleting the
- * install-site shape assertion fails no test at all. The first describe below is
- * the always-on regression guard for that assertion; the opt-in pair follows it
- * and still answers the reachability question when it is run deliberately.
+ * An earlier version of this file also carried a deliberately contradictory
+ * pair of probes behind `describe.runIf`, which measured whether the assertion
+ * was reachable at all. Exactly one member passed per variant, so the file was
+ * skipped by default and guaranteed red when enabled. The measurement is done
+ * and its result is recorded in the change record; a suite is the wrong place
+ * to keep an experiment that cannot be green. Deleting it also removes the only
+ * `fitness/categorized-skips` warning this work introduced.
  */
 import { EventEmitter } from 'node:events';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -96,9 +90,9 @@ async function installFixtureSetUp(): Promise<void> {
   });
   // The input has to be shape-INVALID but confinement-VALID, or the two rules
   // cannot be told apart. A relative path does not work: confinement refuses
-  // that too, via its lexical gate, so both rules refuse and a probe would
-  // agree for the wrong reason. (Measured: the first attempt used a relative
-  // path and DEAD-PROBE failed under BOTH variants.)
+  // that too, via its spelling gate, so both rules refuse and the test would
+  // pass for the wrong reason. (Measured: a first attempt used a relative path
+  // and could not distinguish the two rules at all.)
   //
   // A `pathPrepend` entry containing ':' is the discriminator. It is absolute
   // and inside home, so confinement admits it, and it violates the shape rule,
@@ -125,11 +119,8 @@ async function runInstall(): Promise<{ error: Error | null }> {
   });
 }
 
-// Always-on. One member, no contradiction, so it runs in every ordinary suite
-// run and goes red the moment the install-site shape assertion is deleted. The
-// opt-in pair below answers a different question — whether that assertion is
-// reachable at all — and cannot serve as this guard, because a skipped test
-// enforces nothing.
+// Always-on, and the only suite in this file: it runs in every ordinary suite
+// run and goes red the moment the install-site shape assertion is deleted.
 describe('install-site render-option shape assertion — regression guard', () => {
   beforeEach(installFixtureSetUp);
   afterEach(installFixtureTearDown);
@@ -145,40 +136,5 @@ describe('install-site render-option shape assertion — regression guard', () =
     expect(String(error?.message)).toContain("without ':' or control characters");
     expect(fsMocks.writeFileSync, 'a refused install must render no plist bytes').not.toHaveBeenCalled();
     expect(fsMocks.mkdirSync, 'a refused install must create no LaunchAgents directory').not.toHaveBeenCalled();
-  });
-});
-
-// The probe pair is deliberately contradictory: exactly one member passes per
-// variant, so one of them ALWAYS fails. That is the measurement, not a defect,
-// but it must not sit red in ordinary runs, so the pair is opt-in:
-//
-//   WHATSOUP_REACHABILITY_PROBE=1 npx vitest run tests/fleet/platform-install-shape-reachability.test.ts
-//
-// Run it once per variant and record which member passed.
-describe.runIf(process.env.WHATSOUP_REACHABILITY_PROBE === '1')(
-  'install-site render-option shape assertion — reachability', () => {
-  beforeEach(installFixtureSetUp);
-  afterEach(installFixtureTearDown);
-
-  it('REACHABLE-PROBE: unvalidated shape-invalid options are refused at the install site', async () => {
-    // Passes under B. Fails under A, where nothing at the install site checks shape.
-    const { error } = await runInstall();
-    expect(error, 'install should have refused the unvalidated invalid shape').not.toBeNull();
-    expect(String(error?.message)).toContain('service.pathPrepend');
-  });
-
-  it('DEAD-PROBE: unvalidated shape-invalid options pass the install site unchallenged', async () => {
-    // Passes under A. Fails under B, where the shape assertion catches them.
-    //
-    // "No error" alone would be a weak terminal assertion: it also holds if the
-    // install never ran at all. So this asserts the install actually PROCEEDED
-    // past the assertion site and rendered the invalid entry into the plist,
-    // which is what "unchallenged" has to mean for the probe to say anything.
-    const { error } = await runInstall();
-    expect(error, 'install should NOT have refused on shape').toBeNull();
-    expect(fsMocks.writeFileSync, 'the plist must actually have been written').toHaveBeenCalled();
-    const written = String(fsMocks.writeFileSync.mock.calls[0]?.[1]);
-    expect(written, 'the shape-invalid entry must have reached the rendered PATH')
-      .toContain(`${SERVICE_HOME}/pin:bin`);
   });
 });
