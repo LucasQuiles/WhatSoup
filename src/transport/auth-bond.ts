@@ -17,6 +17,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { pathIsInsideRoot } from '../lib/home-confinement.ts';
 import { DEFAULT_FRESH_INVALID_GRACE_MS } from '../lib/auth-bond-policy.ts';
 import { forceEnsurePrivateDirectorySync, fsyncDirectory, privateWriteError } from '../lib/private-fs.ts';
 import { shortHash } from '../lib/short-hash.ts';
@@ -530,10 +531,10 @@ function readLatestManifest(path: string): LatestManifest | null {
   }
 }
 
-function pathIsInside(root: string, candidate: string): boolean {
-  const rel = relative(resolve(root), resolve(candidate));
-  return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel);
-}
+// Containment lives in src/lib/home-confinement.ts. The copy that used to sit
+// here was byte-equivalent, including the bare `rel.startsWith('..')` test that
+// also rejects an in-root name beginning with dots.
+const pathIsInside = pathIsInsideRoot;
 
 export class AuthBondGuard {
   private readonly authDir: string;

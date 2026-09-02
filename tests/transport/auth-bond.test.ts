@@ -1,6 +1,6 @@
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AuthBondGuard } from '../../src/transport/auth-bond.ts';
 
@@ -1126,6 +1126,42 @@ describe('AuthBondGuard', () => {
     expect(restored).toMatchObject({ attempted: true, restored: false, source: captured.path });
     expect(restored.error).toContain('backup creds.json hash mismatch');
     expect(existsSync(authDir)).toBe(false);
+  });
+
+  it('restores from a history-root entry whose name merely begins with dots', () => {
+    // DECLARED BEHAVIOUR CHANGE. The containment predicate here used to be a
+    // local copy testing `rel.startsWith('..')`, which also matched an entry
+    // that is genuinely INSIDE the history root but whose name happens to begin
+    // with two dots. `..keep` relativises to `..keep`, not `../keep`, so it
+    // never escaped; it was refused anyway. Folding the predicate into
+    // src/lib/home-confinement.ts fixes that over-rejection.
+    //
+    // Nothing is loosened: the sibling-directory escape stays refused by the
+    // test directly below this one.
+    const root = makeRoot();
+    const authDir = join(root, 'auth');
+    const stateRoot = join(root, 'state');
+    writeAuth(authDir, '15550100033:1@s.whatsapp.net');
+    const guard = new AuthBondGuard({ authDir, stateRoot, instanceName: 'dotted-restore-bot' });
+    const captured = guard.capture('connection-open');
+    expect(captured.ok).toBe(true);
+
+    const historyRoot = join(stateRoot, 'auth-bond-backups', 'dotted-restore-bot', 'history');
+    const dottedBackup = join(historyRoot, '..keep');
+    cpSync(captured.path!, dottedBackup, { recursive: true });
+    // The fixture is only meaningful if this really is inside the root.
+    expect(relative(historyRoot, dottedBackup)).toBe('..keep');
+
+    const latestPath = join(stateRoot, 'auth-bond-backups', 'dotted-restore-bot', 'latest.json');
+    const latest = JSON.parse(readFileSync(latestPath, 'utf8')) as Record<string, unknown>;
+    writeFileSync(latestPath, `${JSON.stringify({ ...latest, backupPath: dottedBackup }, null, 2)}\n`, { mode: 0o600 });
+    rmSync(authDir, { recursive: true, force: true });
+
+    const restored = guard.restoreLatestIfNeeded();
+
+    expect(restored.error ?? '').not.toContain('backup path escapes history root');
+    expect(restored).toMatchObject({ attempted: true, restored: true, source: dottedBackup });
+    expect(existsSync(authDir)).toBe(true);
   });
 
   it('refuses to restore from a latest pointer outside the protected history root', () => {
