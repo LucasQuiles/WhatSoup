@@ -1444,6 +1444,7 @@ export class AgentRuntime implements Runtime {
       sandboxPerChat: this.sandboxPerChat,
       chatSessions: this.chatSessions.size,
       chatQueues: this.chatQueues.size,
+      perChatSessionsWithoutOwner: this.sweepPerChatSessionsWithoutOwner(),
       outboundQueues: this.outboundQueues.size,
       workspaceResources: this.workspaceResources.size,
       fdCount: this.getOpenFileDescriptorCount(),
@@ -5593,7 +5594,16 @@ export class AgentRuntime implements Runtime {
       );
     };
 
-    const session = this.chatSessions.get(mapKey);
+    const mappedSession = this.chatSessions.get(mapKey);
+    // A mapped session whose dispatch ownership was lost cannot serve a turn:
+    // it throws at the ownership rebind below and, because the spawn-and-claim
+    // repair is gated on this very lookup MISSING, it would keep throwing for
+    // the process lifetime. Drop the stale entry so this turn falls through to
+    // that repair — a one-turn delay instead of a permanent wedge.
+    const session = mappedSession !== undefined
+      && this.evictUnownedPerChatSession(mapKey, mappedSession)
+      ? undefined
+      : mappedSession;
     if (!session) {
       log.warn({ chatJid, mapKey }, 'no active session for chat — spawning new session');
       // Instead of silently dropping, initialize session and queue so message is handled
@@ -6814,6 +6824,9 @@ export class AgentRuntime implements Runtime {
     const completedDeliveryIdentityAdmissions = this.completedDeliveryIdentityAdmissionHealth();
     const completedDeliveryIdentityDebt = completedDeliveryIdentityAdmissions.unresolvedCount > 0;
     const finalizationDegraded = runtimeTurnRecoveryIsDegraded(finalizationHealth, recoveryHealth);
+    // Chats wedged with a session entry no ownership record backs. Read pure
+    // here: this snapshot is polled, so the warning sweep stays on the tick.
+    const perChatSessionsWithoutOwner = this.perChatSessionsWithoutOwner();
     const turnQueueHealth = this.runtimeTurnCoordinator.turnQueueHaltHealth(this.sessionScope);
     const poisonHealth = this.runtimeTurnCoordinator.outboundQueuePoisonHealth();
     const publicPoisonHealth = {
@@ -6854,6 +6867,7 @@ export class AgentRuntime implements Runtime {
       unownedProviderEventRejects: this.unownedProviderEventRejects,
       suppressedSystemTurnEffectRejects: this.suppressedSystemTurnEffectRejects,
       providerEventRejectReasons: Object.fromEntries(this.providerEventRejectReasonCounts),
+      perChatSessionsWithoutOwner: perChatSessionsWithoutOwner.length,
       ...this.turnChronology.healthDetails(),
       providerExecution,
       turnFinalizationRetainedRetries: finalizationHealth.retainedRetries,
@@ -6893,6 +6907,11 @@ export class AgentRuntime implements Runtime {
       if (fallbackState.fallbackActiveUntil !== null) degradedReasons.push('provider_fallback_active');
       if (finalizationDegraded) degradedReasons.push('turn_finalization_debt');
       if (completedDeliveryIdentityDebt) degradedReasons.push('completed_delivery_identity_debt');
+      // This state rejects every inbound turn in the affected chat and, before
+      // the eviction path, did so with no operator-visible signal at all.
+      if (perChatSessionsWithoutOwner.length > 0) {
+        degradedReasons.push('per_chat_session_without_owner');
+      }
       if (turnQueueHealth.turnQueueHalted) degradedReasons.push('turn_queue_halted');
       if (poisonHealth.outboundQueuePoisoned) degradedReasons.push('outbound_queue_poisoned');
       if (providerExecution.pressureActive) degradedReasons.push('provider_execution_pressure');
@@ -7815,13 +7834,97 @@ export class AgentRuntime implements Runtime {
     const mapped = this.chatSessions.get(mapKey);
     if (expected && mapped !== expected) return false;
     const current = this.sessionOwnership.get(mapKey);
-    if (current) {
-      this.clearOwnedRespawnTimer(mapKey, current);
-      this.sessionOwnership.transition(mapKey, current.managerId, 'closing');
-      this.sessionOwnership.release(mapKey, current.managerId);
-      this.ownedSessionManagers.delete(current.managerId);
+    try {
+      if (current) {
+        this.clearOwnedRespawnTimer(mapKey, current);
+        this.sessionOwnership.transition(mapKey, current.managerId, 'closing');
+        this.sessionOwnership.release(mapKey, current.managerId);
+        this.ownedSessionManagers.delete(current.managerId);
+      }
+    } finally {
+      // The session-map entry must never outlive its ownership record. A
+      // retained entry with no owner is the state that wedges every later turn
+      // at the dispatch rebind, so drop it even if the release above threw.
+      this.chatSessions.delete(mapKey);
     }
-    return this.chatSessions.delete(mapKey);
+    return mapped !== undefined;
+  }
+
+  /**
+   * A per-chat session entry is only usable while `sessionOwnership` holds a
+   * record naming the mapped session's manager: `rebindRuntimeTurnForDispatch`
+   * rejects every turn otherwise. Treat a violation as a stale entry and drop
+   * it, so the caller re-spawns and re-claims instead of wedging forever.
+   *
+   * Fail closed in two cases. A published runtime-turn context means a turn in
+   * this chat is still in flight and still needs the entry, so eviction waits.
+   * The heal control session is deliberately mapped without an ownership
+   * record and is never dispatched through this path (the wedged-lane sweep
+   * carries the same guard), so it is not a violation.
+   */
+  private evictUnownedPerChatSession(mapKey: string, session: SessionManager): boolean {
+    if (!this.isPerChatSessionWithoutOwner(mapKey, session)) return false;
+    if ((this.perChatRuntimeTurnContexts.get(mapKey)?.length ?? 0) > 0) return false;
+    // Fail closed while the provider child is still alive. Every other detach
+    // path proves the child stopped before releasing ownership; detaching a
+    // live child here would let the spawn below run a second child for one
+    // conversation. The state this exists to recover is an exited child, so
+    // the recovery still lands; a live one stays wedged and stays reported.
+    if (session.getStatus().active) return false;
+    log.warn(
+      { mapKey, hasOwner: this.sessionOwnership.get(mapKey) !== undefined },
+      'per-chat session entry has no current dispatch owner — evicting the stale entry so the next turn respawns',
+    );
+    // The replacement overwrites this chat's outbound queue and operation
+    // tracker unconditionally, so retire the current pair rather than orphan
+    // it — an abandoned tracker keeps its armed timers running (QR-094).
+    const tracker = this.operationTrackers.get(mapKey);
+    tracker?.shutdown();
+    this.operationTrackers.delete(mapKey);
+    this.chatQueues.get(mapKey)?.abortTurn();
+    this.chatQueues.delete(mapKey);
+    // Deliberately NOT cleanupPerChatState: unlike idle eviction, this runs at
+    // the head of a turn that is about to be dispatched, and that helper drops
+    // the in-flight turn's journal seq and pending text. Detaching to exactly
+    // the state the ordinary "no active session" spawn path expects is the
+    // point — that path also runs with this turn's state already set.
+    this.deleteOwnedPerChatSession(mapKey, session);
+    return true;
+  }
+
+  /** True when this chat holds a session entry no ownership record backs. */
+  private isPerChatSessionWithoutOwner(mapKey: string, session: SessionManager): boolean {
+    if (session === this.controlSession) return false;
+    const owner = this.sessionOwnership.get(mapKey);
+    // Read the manager id rather than minting one: `managerIdFor` assigns an id
+    // as a side effect, which a predicate must not do.
+    return owner === undefined || owner.managerId !== this.sessionManagerIds.get(session);
+  }
+
+  /**
+   * Chats holding a session entry with no current dispatch owner — a state
+   * that should be impossible and that silently rejects every inbound turn in
+   * the affected chat. Pure, so the polled health snapshot can read it without
+   * emitting a log line per poll.
+   */
+  private perChatSessionsWithoutOwner(): string[] {
+    const unowned: string[] = [];
+    for (const [mapKey, session] of this.chatSessions) {
+      if (this.isPerChatSessionWithoutOwner(mapKey, session)) unowned.push(mapKey);
+    }
+    return unowned;
+  }
+
+  /** Periodic sweep: report the impossible state. Health tick only. */
+  private sweepPerChatSessionsWithoutOwner(): number {
+    const unowned = this.perChatSessionsWithoutOwner();
+    for (const mapKey of unowned) {
+      log.warn(
+        { mapKey, hasOwner: this.sessionOwnership.get(mapKey) !== undefined },
+        'per-chat session entry has no current dispatch owner — turns in this chat are rejected until it is evicted',
+      );
+    }
+    return unowned.length;
   }
 
   private rekeyOwnedPerChatSession(fromMapKey: string, toMapKey: string, session: SessionManager): void {
@@ -10322,9 +10425,11 @@ export class AgentRuntime implements Runtime {
       this.chatQueues.get(releaseKey)?.abortTurn();
       this.chatQueues.delete(releaseKey);
       this.cleanupPerChatState(releaseKey, { preserveCrashHistory: true });
-      this.chatSessions.delete(releaseKey);
-      this.ownedSessionManagers.delete(managerId);
-      this.sessionOwnership.release(releaseKey, managerId);
+      // Drop the session entry and the ownership record together. Releasing
+      // them separately can desync — this closure may run long after the
+      // ownership state was set, and a release rejected on an unexpected state
+      // would strand one half of the pair.
+      this.deleteOwnedPerChatSession(releaseKey, session);
     };
     if (crashContext) {
       this.runtimeTurnCoordinator.appendRuntimeTurnAfterTerminalAction(
