@@ -83,7 +83,7 @@ function generatedPlistIdentity(name = 'agent'): string {
     `<string>com.whatsoup.${name}</string>`,
     '<key>ProgramArguments</key>',
     '<array>',
-    '<string>/tmp/whatsoup-home/.local/bin/whatsoup</string>',
+    `<string>${SERVICE_HOME}/.local/bin/whatsoup</string>`,
     `<string>${name}</string>`,
     '</array>',
     '</plist>',
@@ -108,26 +108,34 @@ function mockReads({ plist, config }: { plist?: string; config?: unknown } = {})
 }
 
 /**
- * The mocked home must EXIST on disk for F6b: render admission resolves service
- * paths physically, so an imaginary home cannot be confined against. The literal
- * is the one this suite already used for every plist-path assertion; it is
- * created here rather than assumed.
+ * The mocked home must EXIST on disk: render admission resolves service paths
+ * physically, so an imaginary home cannot be confined against.
  *
- * The lstat guard is deliberate. A fixed path under the shared temp directory
- * can be pre-created by another user as a symlink, which would silently move
- * "home" and make every confinement assertion below meaningless. Refuse loudly
- * instead of testing against someone else's directory.
+ * Created per test with `mkdtempSync` rather than at a fixed path. A fixed path
+ * under the shared temp directory is raced by concurrent runs - the gate runs
+ * lanes in parallel and CI runs two Node majors on one runner image - and it is
+ * pre-creatable by another user as a symlink, which would silently relocate
+ * "home" and make every confinement assertion here pass vacuously.
+ * `mkdtempSync` creates atomically under a name nothing else holds, so there is
+ * no shared path to race on and no guard to get wrong.
+ *
+ * Canonicalised, because on macOS the temp root is itself a symlink
+ * (/var/... -> /private/var/...) and this suite compares rendered plist strings
+ * against paths derived from this same value, so both sides must be physical.
  */
-const SERVICE_HOME = '/tmp/whatsoup-home';
+let SERVICE_HOME: string;
 const realFsPromise = vi.importActual<typeof import('node:fs')>('node:fs');
+const realPathPromise = vi.importActual<typeof import('node:path')>('node:path');
+const realOsPromise = vi.importActual<typeof import('node:os')>('node:os');
 
 describe('platform service managers', () => {
   beforeEach(async () => {
-    const realFs = await realFsPromise;
-    if (realFs.existsSync(SERVICE_HOME) && realFs.lstatSync(SERVICE_HOME).isSymbolicLink()) {
-      throw new Error(`${SERVICE_HOME} is a symlink; refusing to run confinement fixtures against it`);
-    }
-    realFs.mkdirSync(SERVICE_HOME, { recursive: true, mode: 0o700 });
+    const [realFs, realPath, realOs] = await Promise.all([
+      realFsPromise, realPathPromise, realOsPromise,
+    ]);
+    SERVICE_HOME = realFs.realpathSync.native(
+      realFs.mkdtempSync(realPath.join(realOs.tmpdir(), 'whatsoup-home-')),
+    );
 
     vi.useRealTimers();
     setPlatform(originalPlatform);
@@ -147,11 +155,15 @@ describe('platform service managers', () => {
 
     fsMocks.existsSync.mockReturnValue(false);
     fsMocks.readFileSync.mockImplementation(absentFile);
-    osMocks.homedir.mockReturnValue('/tmp/whatsoup-home');
+    osMocks.homedir.mockReturnValue(`${SERVICE_HOME}`);
     resolveExecFile();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    if (SERVICE_HOME) {
+      const realFs = await realFsPromise;
+      realFs.rmSync(SERVICE_HOME, { recursive: true, force: true });
+    }
     vi.useRealTimers();
     vi.restoreAllMocks();
     setPlatform(originalPlatform);
@@ -239,8 +251,8 @@ describe('platform service managers', () => {
     await manager.restart('agent');
     await manager.disable('agent');
 
-    const plist = '/tmp/whatsoup-home/Library/LaunchAgents/com.whatsoup.agent.plist';
-    expect(fsMocks.mkdirSync).toHaveBeenCalledWith('/tmp/whatsoup-home/Library/LaunchAgents', { recursive: true });
+    const plist = `${SERVICE_HOME}/Library/LaunchAgents/com.whatsoup.agent.plist`;
+    expect(fsMocks.mkdirSync).toHaveBeenCalledWith(`${SERVICE_HOME}/Library/LaunchAgents`, { recursive: true });
     expect(fsMocks.writeFileSync).toHaveBeenCalledWith(
       expect.stringContaining('.com.whatsoup.agent.plist.tmp-'),
       expect.stringContaining('<string>com.whatsoup.agent</string>'),
@@ -312,7 +324,7 @@ describe('platform service managers', () => {
     });
 
     const domain = `gui/${currentUid()}`;
-    const plist = '/tmp/whatsoup-home/Library/LaunchAgents/com.whatsoup.agent.plist';
+    const plist = `${SERVICE_HOME}/Library/LaunchAgents/com.whatsoup.agent.plist`;
     expect(childProcessMocks.execFile).toHaveBeenNthCalledWith(
       1,
       'launchctl',
@@ -367,7 +379,7 @@ describe('platform service managers', () => {
     });
 
     const domain = `gui/${currentUid()}`;
-    const plist = '/tmp/whatsoup-home/Library/LaunchAgents/com.whatsoup.agent.plist';
+    const plist = `${SERVICE_HOME}/Library/LaunchAgents/com.whatsoup.agent.plist`;
     expect(childProcessMocks.execFile).toHaveBeenNthCalledWith(1, 'launchctl', ['bootout', `${domain}/com.whatsoup.agent`], expect.any(Function));
     expect(childProcessMocks.execFile).toHaveBeenNthCalledWith(2, 'launchctl', ['kickstart', '-k', `${domain}/com.whatsoup.agent`], expect.any(Function));
     expect(childProcessMocks.execFile).toHaveBeenNthCalledWith(3, 'launchctl', ['bootstrap', domain, plist], expect.any(Function));
@@ -544,7 +556,7 @@ describe('platform service managers', () => {
 
   it('restores the prior plist bytes, not the new render, when reload fails after an options render', async () => {
     setPlatform('darwin');
-    const plist = '/tmp/whatsoup-home/Library/LaunchAgents/com.whatsoup.agent.plist';
+    const plist = `${SERVICE_HOME}/Library/LaunchAgents/com.whatsoup.agent.plist`;
     mockReads({
       plist: generatedPlistIdentity(),
       config: { name: 'agent', service: { claudeConfigDir: `${SERVICE_HOME}/claude-roots/agent` } },
@@ -791,7 +803,7 @@ describe('platform service managers', () => {
       dryRun: false,
     });
     const domain = `gui/${currentUid()}`;
-    const plist = '/tmp/whatsoup-home/Library/LaunchAgents/com.whatsoup.agent.plist';
+    const plist = `${SERVICE_HOME}/Library/LaunchAgents/com.whatsoup.agent.plist`;
     expect(childProcessMocks.execFile).toHaveBeenNthCalledWith(1, 'launchctl', ['bootout', `${domain}/com.whatsoup.agent`], expect.any(Function));
     expect(childProcessMocks.execFile).toHaveBeenNthCalledWith(2, 'launchctl', ['bootstrap', domain, plist], expect.any(Function));
     expect(childProcessMocks.execFile).toHaveBeenNthCalledWith(3, 'launchctl', ['bootstrap', domain, plist], expect.any(Function));
@@ -800,7 +812,7 @@ describe('platform service managers', () => {
 
   it('restores the prior plist and job when launchd reload fails', async () => {
     setPlatform('darwin');
-    const plist = '/tmp/whatsoup-home/Library/LaunchAgents/com.whatsoup.agent.plist';
+    const plist = `${SERVICE_HOME}/Library/LaunchAgents/com.whatsoup.agent.plist`;
     mockReads({ plist: generatedPlistIdentity() });
     childProcessMocks.execFile
       .mockImplementationOnce((_cmd, _args, optionsOrCallback, maybeCallback) => {
@@ -847,7 +859,7 @@ describe('platform service managers', () => {
 
   it('still restores the prior plist and attempts its restart when new-job cleanup fails', async () => {
     setPlatform('darwin');
-    const plist = '/tmp/whatsoup-home/Library/LaunchAgents/com.whatsoup.agent.plist';
+    const plist = `${SERVICE_HOME}/Library/LaunchAgents/com.whatsoup.agent.plist`;
     mockReads({ plist: generatedPlistIdentity() });
     childProcessMocks.execFile
       .mockImplementationOnce((_cmd, _args, optionsOrCallback, maybeCallback) => {
@@ -880,7 +892,7 @@ describe('platform service managers', () => {
 
   it('boots out a partially loaded new job before restoring after kickstart fails', async () => {
     setPlatform('darwin');
-    const plist = '/tmp/whatsoup-home/Library/LaunchAgents/com.whatsoup.agent.plist';
+    const plist = `${SERVICE_HOME}/Library/LaunchAgents/com.whatsoup.agent.plist`;
     mockReads({ plist: generatedPlistIdentity() });
     childProcessMocks.execFile
       .mockImplementationOnce((_cmd, _args, optionsOrCallback, maybeCallback) => {
@@ -914,7 +926,7 @@ describe('platform service managers', () => {
 
   it('restores only the plist and aborts when the initial launchd bootout fails', async () => {
     setPlatform('darwin');
-    const plist = '/tmp/whatsoup-home/Library/LaunchAgents/com.whatsoup.agent.plist';
+    const plist = `${SERVICE_HOME}/Library/LaunchAgents/com.whatsoup.agent.plist`;
     mockReads({ plist: generatedPlistIdentity() });
     childProcessMocks.execFile.mockImplementationOnce((_cmd, _args, optionsOrCallback, maybeCallback) => {
       const callback = typeof optionsOrCallback === 'function' ? optionsOrCallback : maybeCallback;
@@ -939,7 +951,7 @@ describe('platform service managers', () => {
     await expect(createServiceManager().disable('agent')).resolves.toBeUndefined();
 
     const domain = `gui/${currentUid()}`;
-    const plist = '/tmp/whatsoup-home/Library/LaunchAgents/com.whatsoup.agent.plist';
+    const plist = `${SERVICE_HOME}/Library/LaunchAgents/com.whatsoup.agent.plist`;
     expect(childProcessMocks.execFile).toHaveBeenCalledWith('launchctl', ['bootout', `${domain}/com.whatsoup.agent`], expect.any(Function));
     expect(fsMocks.unlinkSync).toHaveBeenCalledWith(plist);
   });
@@ -1038,7 +1050,7 @@ describe('platform service managers', () => {
     await expect(firstStart).rejects.toThrow('rollback also failed');
 
     const domain = `gui/${currentUid()}`;
-    const plist = '/tmp/whatsoup-home/Library/LaunchAgents/com.whatsoup.agent.plist';
+    const plist = `${SERVICE_HOME}/Library/LaunchAgents/com.whatsoup.agent.plist`;
     expect(childProcessMocks.execFile).toHaveBeenNthCalledWith(1, 'launchctl', ['bootstrap', domain, plist], expect.any(Function));
     expect(childProcessMocks.execFile).toHaveBeenNthCalledWith(2, 'launchctl', ['kickstart', '-k', `${domain}/com.whatsoup.agent`], expect.any(Function));
     expect(childProcessMocks.execFile).toHaveBeenNthCalledWith(3, 'launchctl', ['bootout', `${domain}/com.whatsoup.agent`], expect.any(Function));
@@ -1073,7 +1085,7 @@ describe('platform service managers', () => {
     await expect(firstStart).rejects.toThrow('bootstrap rejected');
 
     const domain = `gui/${currentUid()}`;
-    const plist = '/tmp/whatsoup-home/Library/LaunchAgents/com.whatsoup.agent.plist';
+    const plist = `${SERVICE_HOME}/Library/LaunchAgents/com.whatsoup.agent.plist`;
     expect(childProcessMocks.execFile).toHaveBeenNthCalledWith(1, 'launchctl', ['bootstrap', domain, plist], expect.any(Function));
     expect(childProcessMocks.execFile).toHaveBeenNthCalledWith(2, 'launchctl', ['bootout', `${domain}/com.whatsoup.agent`], expect.any(Function));
     expect(fsMocks.unlinkSync).toHaveBeenCalledWith(plist);
@@ -1104,7 +1116,7 @@ describe('platform service managers', () => {
 
     await expect(createServiceManager().restart('agent')).resolves.toBeUndefined();
     const domain = `gui/${currentUid()}`;
-    const plist = '/tmp/whatsoup-home/Library/LaunchAgents/com.whatsoup.agent.plist';
+    const plist = `${SERVICE_HOME}/Library/LaunchAgents/com.whatsoup.agent.plist`;
     expect(childProcessMocks.execFile).toHaveBeenNthCalledWith(1, 'launchctl', ['bootout', `${domain}/com.whatsoup.agent`], expect.any(Function));
     expect(childProcessMocks.execFile).toHaveBeenNthCalledWith(2, 'launchctl', ['bootstrap', domain, plist], expect.any(Function));
     expect(childProcessMocks.execFile).toHaveBeenNthCalledWith(3, 'launchctl', ['kickstart', '-k', `${domain}/com.whatsoup.agent`], expect.any(Function));
