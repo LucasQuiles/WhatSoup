@@ -1186,3 +1186,125 @@ describe('the label shape masks a glued prefix of any length', () => {
     });
   }
 });
+
+// ─── The value-side guard, pinned in both directions ────────────────────────
+//
+// The separator branch refuses to take another label word as its value. That
+// guard exists for one shape: `Authorization: token <credential>`, where the
+// first label would otherwise swallow `token` as its value and leave the real
+// credential in the clear. The shape it must refuse is therefore a label word
+// followed by WHITESPACE — the scheme-like form where the credential is the
+// NEXT word — and not a label word that merely happens to start the value.
+//
+// Keying the refusal on a word boundary instead refused both. The cross-model
+// bench's S0 measured the cost: a credential whose value BEGINS with a label
+// word and a separating character, `token=secret-<credential>`, was refused by
+// the guard, matched nothing at all, and reached the sink verbatim.
+//
+// Both directions are pinned below: the values the guard must let through to
+// masking, and the shape it must still refuse. Nothing here is a coverage
+// hole the way it was when a one-token change to the guard passed the whole
+// suite unchanged.
+
+describe('the value-side guard admits a label-initial credential value', () => {
+  const GUARD_LABELS = ['token', 'api_key', 'bearer'] as const;
+  const GUARD_SEPARATORS = ['=', ': '] as const;
+  // Value prefixes that are a label word plus a separating character, which is
+  // what the boundary-keyed guard used to refuse.
+  const LABEL_INITIAL_VALUE_PREFIXES = [
+    'secret-',
+    'token-',
+    'authorization-',
+    'api_key-',
+  ] as const;
+  const GUARD_SECRET = 'Zx9Kq2Wm7Lp4';
+
+  it('covers the full label x separator x value-prefix matrix', () => {
+    // Coverage assertion: a shrunk axis would otherwise pass silently.
+    expect(GUARD_LABELS).toHaveLength(3);
+    expect(GUARD_SEPARATORS).toHaveLength(2);
+    expect(LABEL_INITIAL_VALUE_PREFIXES).toHaveLength(4);
+    expect(GUARD_SECRET).toHaveLength(12);
+  });
+
+  it('masks a plain value after the same labels (positive control)', async () => {
+    for (const label of GUARD_LABELS) {
+      for (const separator of GUARD_SEPARATORS) {
+        const out = await sanitizedErrorMessage(
+          `upstream call failed ${label}${separator}I9j0K1l2M3n4 at gate`,
+        );
+        expect(out).not.toContain('I9j0K1l2M3n4');
+        expect(out).toContain('at gate');
+      }
+    }
+  });
+
+  it('masks every label-initial value across the matrix', async () => {
+    const leaking: string[] = [];
+    const unframed: string[] = [];
+    let examined = 0;
+    for (const label of GUARD_LABELS) {
+      for (const separator of GUARD_SEPARATORS) {
+        for (const prefix of LABEL_INITIAL_VALUE_PREFIXES) {
+          const message = `upstream call failed ${label}${separator}${prefix}${GUARD_SECRET} at gate`;
+          const line = await captureSanitizedErrorLine(message);
+          const out = (JSON.parse(line) as { err: Record<string, unknown> }).err
+            .errorMessage as string;
+          examined += 1;
+          if (line.includes(GUARD_SECRET)) leaking.push(message);
+          // Frame assertion per cell: a refused or blanked message would satisfy
+          // the absence check without the pattern having matched anything.
+          if (!out.includes('at gate')) unframed.push(message);
+        }
+      }
+    }
+    // Coverage assertion: a zero here would make both assertions below vacuous.
+    expect(examined).toBe(24);
+    expect(leaking).toEqual([]);
+    expect(unframed).toEqual([]);
+  });
+
+  it('masks a label-initial value that ends the message', async () => {
+    // The degenerate form of the same class: the value IS a label word, with
+    // nothing after it, so no whitespace follows and the guard admits it.
+    const out = await sanitizedErrorMessage('upstream call failed token=passphrase');
+    expect(out).toBe('upstream call failed token ***');
+  });
+
+  // The other direction. These read identically before and after the guard
+  // change; they fail if the guard stops refusing the shape it exists for.
+  const UNCHANGED_BY_THE_GUARD: ReadonlyArray<readonly [string, string, string]> = [
+    [
+      'a label word followed by whitespace still falls through to the separator-less branch',
+      'request rejected Authorization: token Cr3d3nt1alV4lue9 at gate',
+      'request rejected Authorization: token *** at gate',
+    ],
+    [
+      'an authentication scheme is still consumed before the guard is reached',
+      'request rejected Authorization: Basic QmFzaWNTZWNyZXQx at gate',
+      'request rejected Authorization *** at gate',
+    ],
+    [
+      'prose after a label word is still left alone',
+      'authorization failed',
+      'authorization failed',
+    ],
+    [
+      'a bare label word followed by whitespace is still refused, carrying no credential',
+      'upstream call failed token=secret at gate',
+      'upstream call failed token=secret at gate',
+    ],
+  ];
+
+  it('covers four shapes the guard change must not alter', () => {
+    // Coverage assertion: a shrunk table would otherwise pass silently.
+    expect(UNCHANGED_BY_THE_GUARD).toHaveLength(4);
+    expect(new Set(UNCHANGED_BY_THE_GUARD.map(([, message]) => message)).size).toBe(4);
+  });
+
+  for (const [name, message, expected] of UNCHANGED_BY_THE_GUARD) {
+    it(`leaves the guard's own shape alone: ${name}`, async () => {
+      expect(await sanitizedErrorMessage(message)).toBe(expected);
+    });
+  }
+});
