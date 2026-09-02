@@ -2022,6 +2022,64 @@ def test_default_provider_probe_child_carries_no_synthesized_mcp_socket(monkeypa
     assert child_env["PATH"] == _mod.effective_instance_provider_path(environment)
 
 
+def test_only_the_opencode_probe_gates_generated_against_loaded_path(monkeypatch, tmp_path):
+    """S1. Pins the asymmetry the module comment and docs now describe.
+
+    `instance_provider_path_match` has ONE call site, in the opencode inventory.
+    The comment above the default-provider branch used to claim claude-cli got
+    "the same governed PATH and prepend checks", and docs/configuration.md said
+    both PATH steps ran for both providers. Neither was true of the
+    generated-vs-loaded EQUALITY gate.
+
+    This is a characterization pin, not a red-first row: it passes before and
+    after, which is exactly what makes it evidence that narrowing the prose was
+    the correct half of the either/or rather than adding the gate.
+
+    One fixture, both providers: a generated PATH that differs from the loaded
+    one while still leading with the governed prepend, so the prepend checks
+    agree and only the equality gate can separate the two probes.
+    """
+    environment = _matrix_environment(tmp_path)
+    prepend_bin = tmp_path / "pin" / "bin"
+    generated_path = f"{prepend_bin}:/usr/bin"
+    assert generated_path != environment["PATH"], "the fixture must actually differ"
+    _arm_darwin_plist(
+        monkeypatch,
+        tmp_path,
+        "agent-alpha",
+        {
+            "PATH": generated_path,
+            "WHATSOUP_PATH_PREPEND": environment["WHATSOUP_PATH_PREPEND"],
+        },
+    )
+    monkeypatch.setattr(_mod, "loaded_instance_environment", lambda name: dict(environment))
+    captured: list[list[str]] = []
+
+    def _fake_output(command, *args, **kwargs):
+        captured.append(list(command))
+        return ("OK", "", 0, False)
+
+    monkeypatch.setattr(_mod, "provider_command_output", _fake_output)
+
+    opencode_lines = _mod.opencode_provider_probe_inventory(
+        {}, {}, "agent-alpha",
+        {"type": "agent", "agentOptions": {"provider": "opencode-cli"}},
+        "opencode-cli",
+    )
+    assert "failure_class=provider_runtime_path_mismatch" in opencode_lines[0]
+
+    claude_lines = _mod.provider_probe_target_inventory(
+        {}, {}, "agent-alpha",
+        {"type": "agent", "agentOptions": {"provider": "claude-cli"}},
+        "claude-cli", "primary",
+    )
+    joined = "\n".join(claude_lines)
+    assert "provider_runtime_path_mismatch" not in joined
+    # Vacuity guard: the default provider reached the spawn on the same fixture
+    # rather than failing closed for some unrelated reason.
+    assert captured and captured[-1][0] == str(prepend_bin / "claude")
+
+
 def test_opencode_functional_probe_still_runs_in_the_instance_workspace(monkeypatch, tmp_path):
     """Control for the change above: the opencode probe is deliberately untouched.
 

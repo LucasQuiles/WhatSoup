@@ -6008,9 +6008,14 @@ def provider_probe_target_inventory(
     if provider != "claude-cli":
         return [f"provider_probe {name}: skipped provider={redact_evidence_string(provider, 80)} target={target}"]
 
-    # claude-cli is the DEFAULT agentOptions.provider, so it gets the same
-    # governed PATH and prepend checks the opencode probe gets. Reading the
-    # plist once here keeps both governed keys on one file state.
+    # claude-cli is the DEFAULT agentOptions.provider, so it gets the governed
+    # plist-state check, both prepend checks, and the effective-PATH derivation
+    # the opencode probe gets. It does NOT get the generated-vs-loaded PATH
+    # EQUALITY gate: instance_provider_path_match has one call site, in the
+    # opencode inventory. Here a governed PATH that cannot supply the binary is
+    # reported as provider_runtime_path_unavailable with a reason, not as its own
+    # mismatch class. Reading the plist once here keeps both governed keys on one
+    # file state.
     plist_state, plist_environment = instance_plist_governed_environment(name)
     if (
         plist_state == GOVERNED_PLIST_READABLE

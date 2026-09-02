@@ -1610,8 +1610,14 @@ When deploying an instance config that uses `fallbackProvider` or `fallbacks` to
    checks that a declared prepend actually leads the plist's own `PATH`
    (`provider_runtime_path_prepend_inconsistent`).
 
-   Both checks run for **both** providers, `opencode-cli` and the default
-   `claude-cli`. On macOS the probe distinguishes three states of the instance
+   The second step — deriving the effective provider PATH through the shared
+   helper — runs for **both** providers, `opencode-cli` and the default
+   `claude-cli`, and so do the two prepend checks. The first step, comparing the
+   generated plist's `PATH` against the loaded job's for equality
+   (`provider_runtime_path_mismatch`), runs for `opencode-cli` only. For
+   `claude-cli` a governed PATH that cannot supply the binary is reported through
+   `provider_runtime_path_unavailable` with a `reason`, rather than as its own
+   mismatch class. On macOS the probe distinguishes three states of the instance
    LaunchAgent, and only one of them is benign:
 
    - **Readable.** The governed checks run. If the loaded job environment
