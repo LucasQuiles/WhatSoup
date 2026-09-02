@@ -40,6 +40,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -486,4 +487,58 @@ def test_deadman_streak_gap_limit_follows_check_interval(env):
     env.state_written(1000)
     assert env.mod.deadman(max_state_age=180, restart_grace=30, cooldown_seconds=300, check_interval=900) == 2
     assert env.members() == {"cycle_incomplete"}
+
+
+# ---------------------------------------------------------------------------
+# The gap limit is derived from --check-interval, whose default must equal the
+# cadence the shipped schedulers actually run at. The shipped units pass no
+# value, so the coupling is implicit; this pins it so lengthening the timer
+# without passing the flag (which would re-seed the streak on every check and
+# silence state_missing/cycle_incomplete for good) fails the suite.
+# ---------------------------------------------------------------------------
+
+_DEPLOY = Path(__file__).resolve().parents[2]
+
+
+def _systemd_seconds(value: str) -> int:
+    units = {"s": 1, "sec": 1, "m": 60, "min": 60, "h": 3600}
+    total = 0
+    for number, unit in re.findall(r"(\d+)\s*([a-z]+)?", value.strip()):
+        total += int(number) * units[(unit or "s").lower()]
+    return total
+
+
+def test_default_check_interval_matches_the_systemd_timer_cadence(health_check):
+    timer = (_DEPLOY / "bot-errors-deadman.timer").read_text(encoding="utf-8")
+    match = re.search(r"^OnUnitActiveSec=(.+)$", timer, re.M)
+    assert match, "bot-errors-deadman.timer has no OnUnitActiveSec"
+    assert _systemd_seconds(match.group(1)) == health_check.DEADMAN_CHECK_INTERVAL_SECONDS
+
+
+def test_default_check_interval_matches_the_launchd_deadman_agent_cadence(health_check):
+    installer = (_DEPLOY / "scripts" / "install-bot-errors-launchd.sh").read_text(encoding="utf-8")
+    start = installer.index('write_plist "$deadman_label"')
+    match = re.search(r"<key>StartInterval</key><integer>(\d+)</integer>", installer[start:])
+    assert match, "deadman launchd agent has no StartInterval"
+    assert int(match.group(1)) == health_check.DEADMAN_CHECK_INTERVAL_SECONDS
+
+
+def test_shipped_deadman_service_does_not_override_check_interval_inconsistently(health_check):
+    """If the unit ever passes --check-interval explicitly it must still match the timer."""
+    service = (_DEPLOY / "bot-errors-deadman.service").read_text(encoding="utf-8")
+    exec_line = next(line for line in service.splitlines() if line.startswith("ExecStart="))
+    assert "--deadman" in exec_line
+    match = re.search(r"--check-interval[= ](\d+)", exec_line)
+    if match:
+        assert int(match.group(1)) == health_check.DEADMAN_CHECK_INTERVAL_SECONDS
+
+
+def test_cli_default_check_interval_is_the_shared_constant(health_check):
+    """The argparse default and the deadman() signature default must be the constant the
+    coupling tests above pin, not a second literal that can drift on its own."""
+    import inspect
+
+    assert inspect.signature(health_check.deadman).parameters["check_interval"].default == health_check.DEADMAN_CHECK_INTERVAL_SECONDS
+    source = inspect.getsource(health_check.main) if hasattr(health_check, "main") else _SCRIPT.read_text(encoding="utf-8")
+    assert re.search(r'"--check-interval",\s*type=int,\s*default=DEADMAN_CHECK_INTERVAL_SECONDS', source), "argparse default is not the shared constant"
 

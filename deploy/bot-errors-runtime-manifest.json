@@ -102,7 +102,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "0b6bdcefdb24931399f823cf2f976375a87b588008d08f82a515fb2f4e170b93",
+      "sha256": "6481768e4462c86e6f6d7ebaab64bd0550ba0ae128ce935db4c100b3a33c1e98",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -185,7 +185,9 @@
         "_restart_explains_cycle_age",
         "_cycle_stale_should_report",
         "_note_grace_streak",
-        "_grace_still_credible"
+        "_grace_still_credible",
+        "graceStreakSeenAt",
+        "DEADMAN_CHECK_INTERVAL_SECONDS"
       ]
     },
     {

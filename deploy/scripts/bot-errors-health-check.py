@@ -7835,6 +7835,13 @@ def _deadman_recovery_text(episode: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+# Cadence the shipped schedulers run the deadman at: deploy/bot-errors-deadman.timer
+# (OnUnitActiveSec=5m) and the deadman agent in deploy/scripts/install-bot-errors-launchd.sh
+# (StartInterval 300). The grace-streak gap limit is derived from it, so the
+# default must track those files; test_bot_errors_deadman_grace_attribution.py pins it.
+DEADMAN_CHECK_INTERVAL_SECONDS = 300
+
+
 def _note_grace_streak(
     deadman_state: dict[str, Any],
     grace_active: bool,
@@ -7973,7 +7980,7 @@ def deadman(
     max_state_age: int,
     restart_grace: int,
     cooldown_seconds: int,
-    check_interval: int = 300,
+    check_interval: int = DEADMAN_CHECK_INTERVAL_SECONDS,
 ) -> int:
     root = state_root()
     state = root / DISPATCHER_STATE
@@ -8012,7 +8019,7 @@ def deadman(
     migrate_deadman_state(deadman_state, now_epoch)
     # Consecutive graced checks more than two timer intervals apart are not
     # continuous grace (reboot, stopped timer); the streak re-seeds instead.
-    streak_max_gap = 2 * (check_interval if check_interval > 0 else 300)
+    streak_max_gap = 2 * (check_interval if check_interval > 0 else DEADMAN_CHECK_INTERVAL_SECONDS)
     grace_streak_seconds, streak_dirty = _note_grace_streak(
         deadman_state, grace_reason is not None, now_epoch, streak_max_gap
     )
@@ -8117,7 +8124,7 @@ def main() -> int:
     parser.add_argument(
         "--check-interval",
         type=int,
-        default=300,
+        default=DEADMAN_CHECK_INTERVAL_SECONDS,
         help="seconds between deadman timer runs (OnUnitActiveSec); the restart-grace streak is continuous only while consecutive checks are at most twice this apart",
     )
     parser.add_argument("--deadman-cooldown", type=int, default=positive_env_int("BOT_ERRORS_DEADMAN_COOLDOWN_SECONDS", 1800))
