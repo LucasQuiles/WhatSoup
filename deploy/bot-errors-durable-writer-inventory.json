@@ -949,6 +949,17 @@
       "fault_test_ids": ["event.serialization", "event.identity-reconcile", "event.no-advance-unproven"]
     },
     {
+      "site_id": "sentinel-retirement-intent",
+      "script": "deploy/scripts/bot-errors-sentinel.py",
+      "function": "save_retirement_intents",
+      "logical_publication": "sentinel.retirement_intent",
+      "kind": "state_replace_expected",
+      "operation_identity_source": "durable_json.operation_id.v1",
+      "result_policy": "require_advance",
+      "result_consumer": "save_retirement_intents",
+      "fault_test_ids": ["state.serialization", "state.predecessor-reconcile", "state.no-advance-unproven"]
+    },
+    {
       "site_id": "sentinel-configuration-retired-event",
       "script": "deploy/scripts/bot-errors-sentinel.py",
       "function": "retire_unconfigured_hosts",
