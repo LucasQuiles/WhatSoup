@@ -3084,12 +3084,37 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
     # consolidated flap_storm alert (emitted by the pre-collapse scan) already
     # carries the count/rate. The storm itself never routes through here
     # (it is sent directly), so this cannot suppress the storm alert.
+    #
+    # EXCEPTION: a conversation the storm has never represented. The storm
+    # alert carries a count and a rate, not the identity of a conversation
+    # nobody has been told about, so consolidating a FIRST sighting into it
+    # loses the one signal that conversation will ever produce. This matters
+    # because the storm is the normal state during the fault this gate exists
+    # for: it opens at FLAP_TRIP_THRESHOLD (5) events within FLAP_WINDOW_SECONDS
+    # (600) and stays open until FLAP_STABLE_SECONDS (3600) below threshold, so
+    # without the exception the gate is inert for up to an hour in exactly the
+    # multi-conversation wedge it targets.
+    #
+    # Scope of the exception, deliberately narrow: only the first sighting of an
+    # unrepresented conversation (and a delivery retry of that same event)
+    # escapes. Every repeat is a storm member and stays consolidated, so the
+    # storm still collapses a flapping source into one alert, and an event
+    # carrying no conversation is unaffected.
     if FLAP_DETECTION and is_incident_alert(event) and not is_incident_clear(event) and source != "flap_storm":
         flap_state = incident_state.get("flapState")
         if isinstance(flap_state, dict):
             flap_rec = flap_state.get(key)
             if isinstance(flap_rec, dict) and flap_rec.get("stormAt"):
-                return f"flap_storm_member: {key} consolidated into open flap storm"
+                try:
+                    storm_unrepresented = conversation_scope_is_unrepresented(
+                        event, incident_state, key, current
+                    )
+                except Exception:
+                    storm_unrepresented = False  # fail toward today's behaviour
+                if not storm_unrepresented:
+                    return f"flap_storm_member: {key} consolidated into open flap storm"
+                note_conversation_scope_notify(open_incidents.get(key), event, current)
+                return None
     stronger = stronger_open_incident_for(event, incident_state)
     if stronger is not None:
         stronger_key, stronger_record = stronger
