@@ -38,7 +38,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "023c0b041874ae84363540dfd515e0606e53d9279b09a03e9908be88a551c9c4",
+      "sha256": "839c7012df1ab14c4b205146325773bda8bd17e06264ffbb5bf3fcceeda2ff9d",
       "mustContain": [
         "append_bounded_jsonl",
         "append_private_jsonl",
@@ -63,7 +63,9 @@
         "degradation_causes_from_event",
         "degradationCauseDispositions",
         "autocloseHoldReleasedAt",
-        "autocloseHoldReleasedReason"
+        "autocloseHoldReleasedReason",
+        "conversation_scope_is_unrepresented",
+        "CONVERSATION_SCOPED_SOURCES"
       ]
     },
     {
@@ -581,14 +583,15 @@
     },
     {
       "path": "src/lib/bot-errors-outbox.ts",
-      "sha256": "4a0215bdf4a7ad9223beeabb7268a3f1bd1c16eabd979234b0e81aee51ea2ffc",
+      "sha256": "cd7d11c44c050d519c0395aa32bf8583d434f10cf85832e3a67c254b7c2fcb88",
       "mustContain": [
         "AUTHORIZATION_BEARER",
         "WHATSAPP_SERVICE_UNIT",
         "constants.O_NOFOLLOW",
         "redactOutboxValue(event)",
         "recordBotErrorsWritefail",
-        "confineAlertContent"
+        "confineAlertContent",
+        "confineConversationScope"
       ]
     },
     {
