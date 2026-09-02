@@ -862,7 +862,10 @@ export const MOCK_FEED: FeedEvent[] = [
   }, 'codex-cli'),
   // health — status change
   feedEvent(88, 'chat', 'sales', 'sales: Status changed to degraded', 'warn', {
+    // Carries the bounded classification the real poller emits (#2523), so the
+    // demo feed shows the reason label and confidence rather than the raw error.
     type: 'health', status: 'degraded', previousStatus: 'online', error: 'enrichment stalled',
+    reason: 'health_body_degraded', confidence: 'confirmed',
   }, 'anthropic-api'),
   // connection — reconnecting
   feedEvent(120, 'agent', 'intern', 'intern: Attempting reconnection', 'warn', {
