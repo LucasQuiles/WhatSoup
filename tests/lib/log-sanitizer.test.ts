@@ -454,3 +454,74 @@ describe('Error branch reaches a real pino sink', () => {
     expect(lines[0]).not.toContain('15550100199');
   });
 });
+
+// ─── The Error branch must honour the never-throws invariant ────────────────
+//
+// `message`, `code`, `cause` and `constructor` are ordinary properties. Any of
+// them can be overwritten with a non-string or redefined as a throwing getter,
+// by application code or by a third-party library. The sanitizer runs inside
+// pino's logMethod hook, so a throw here does not merely lose a log line: it
+// propagates into the caller that was trying to report a failure.
+
+describe('Error branch never throws on hostile error objects', () => {
+  const readErr = (err: unknown) =>
+    (sanitizeLogValue({ err }) as Record<string, unknown>).err as Record<string, unknown>;
+
+  it('survives a null message', () => {
+    const err = Object.assign(new Error('x'), { message: null });
+    expect(() => readErr(err)).not.toThrow();
+    expect(readErr(err).errorClass).toBe('Error');
+  });
+
+  it('survives a non-string message', () => {
+    const err = Object.assign(new Error('x'), { message: { nested: 1 } });
+    expect(() => readErr(err)).not.toThrow();
+    expect(typeof readErr(err).errorMessage).toBe('string');
+  });
+
+  it('survives a numeric message', () => {
+    const err = Object.assign(new Error('x'), { message: 42 });
+    expect(() => readErr(err)).not.toThrow();
+    expect(readErr(err).errorMessage).toBe('42');
+  });
+
+  it('survives a throwing message getter', () => {
+    const err = new Error('x');
+    Object.defineProperty(err, 'message', {
+      get() {
+        throw new Error('getter blew up');
+      },
+    });
+    expect(() => readErr(err)).not.toThrow();
+    expect(readErr(err).errorClass).toBe('Error');
+  });
+
+  it('survives a throwing code getter', () => {
+    const err = new Error('x');
+    Object.defineProperty(err, 'code', {
+      get() {
+        throw new Error('getter blew up');
+      },
+    });
+    expect(() => readErr(err)).not.toThrow();
+    expect(readErr(err).errorMessage).toBe('x');
+  });
+
+  it('survives a throwing cause getter', () => {
+    const err = new Error('x');
+    Object.defineProperty(err, 'cause', {
+      get() {
+        throw new Error('getter blew up');
+      },
+    });
+    expect(() => readErr(err)).not.toThrow();
+    expect(readErr(err).errorMessage).toBe('x');
+  });
+
+  it('survives a missing constructor', () => {
+    const err = new Error('x');
+    Object.defineProperty(err, 'constructor', { value: undefined });
+    expect(() => readErr(err)).not.toThrow();
+    expect(readErr(err).errorMessage).toBe('x');
+  });
+});

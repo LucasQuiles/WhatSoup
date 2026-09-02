@@ -92,6 +92,41 @@ function boundedSanitizedText(value: string): string {
   return sanitized.slice(0, MAX_ERROR_TEXT_LENGTH - TRUNCATION_MARKER.length) + TRUNCATION_MARKER;
 }
 
+/**
+ * Sentinel for a property whose read threw. A unique symbol, so it can never
+ * collide with a legitimate property value.
+ */
+const UNREADABLE = Symbol('unreadable');
+
+/**
+ * Read one property off an Error without ever throwing.
+ *
+ * `message`, `code`, `cause` and `constructor` are ordinary properties: any of
+ * them can be overwritten with a non-string or redefined as a throwing getter,
+ * by application code or by a library we do not own. This sanitizer runs inside
+ * pino's logMethod hook, so a throw here does not merely lose a log line — it
+ * propagates into the caller that was trying to report a failure.
+ */
+function readErrorProperty(read: () => unknown): unknown {
+  try {
+    return read();
+  } catch {
+    return UNREADABLE;
+  }
+}
+
+/** Coerce an already-read property to bounded, sanitized text. Never throws. */
+function boundedErrorText(raw: unknown): string {
+  if (typeof raw === 'string') return boundedSanitizedText(raw);
+  if (raw === UNREADABLE) return '[unreadable]';
+  if (raw === undefined || raw === null) return '';
+  try {
+    return boundedSanitizedText(String(raw));
+  } catch {
+    return '[unstringifiable]';
+  }
+}
+
 // ─── Recursive sanitizer ────────────────────────────────────────────────────
 
 const MAX_DEPTH = 10;
@@ -151,15 +186,17 @@ export function sanitizeLogValue(
     //
     // The stack stays dropped: stacks carry absolute filesystem paths.
     if (value instanceof Error) {
-      const code = (value as Error & { code?: unknown }).code;
+      const constructorName = readErrorProperty(() => value.constructor?.name);
+      const code = readErrorProperty(() => (value as Error & { code?: unknown }).code);
+      const cause = readErrorProperty(() => (value as Error).cause);
       return {
-        errorClass: value.constructor.name,
-        errorMessage: boundedSanitizedText(value.message),
+        errorClass: typeof constructorName === 'string' ? constructorName : 'Error',
+        errorMessage: boundedErrorText(readErrorProperty(() => value.message)),
         ...(typeof code === 'string' || typeof code === 'number'
-          ? { errorCode: boundedSanitizedText(String(code)) }
+          ? { errorCode: boundedErrorText(code) }
           : {}),
-        ...(value.cause !== undefined
-          ? { cause: sanitizeLogValue(value.cause, seenSet, depth + 1) }
+        ...(cause !== undefined && cause !== UNREADABLE
+          ? { cause: sanitizeLogValue(cause, seenSet, depth + 1) }
           : {}),
       };
     }
