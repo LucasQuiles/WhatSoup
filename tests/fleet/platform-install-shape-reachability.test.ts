@@ -13,13 +13,19 @@
  * unvalidated reaches that line. That models exactly one future: a caller, or a
  * changed resolver contract, that supplies options the resolver did not check.
  *
- * The two tests are deliberately contradictory. Exactly one passes per variant,
- * and which one passes IS the answer:
+ * The two probe tests are deliberately contradictory. Exactly one passes per
+ * variant, and which one passes IS the answer:
  *   variant A = confinement only, shape assertion removed
  *   variant B = confinement plus the shape assertion restored
  *
  * Home confinement is not what is under test here; the mocked options are
  * home-confined so only the shape rule can refuse them.
+ *
+ * The probe pair is a one-time MEASUREMENT and is opt-in, so it guards nothing
+ * in CI: with the probe env unset both members are skipped and deleting the
+ * install-site shape assertion fails no test at all. The first describe below is
+ * the always-on regression guard for that assertion; the opt-in pair follows it
+ * and still answers the reachability question when it is run deliberately.
  */
 import { EventEmitter } from 'node:events';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -67,66 +73,92 @@ function setPlatform(platform: NodeJS.Platform): void {
   Object.defineProperty(process, 'platform', { value: platform });
 }
 
-// The pair is deliberately contradictory: exactly one member passes per
+async function installFixtureSetUp(): Promise<void> {
+  const [realFs, realPath, realOs] = await Promise.all([
+    realFsPromise, realPathPromise, realOsPromise,
+  ]);
+  SERVICE_HOME = realFs.realpathSync.native(
+    realFs.mkdtempSync(realPath.join(realOs.tmpdir(), 'whatsoup-reach-')),
+  );
+  vi.clearAllMocks();
+  setPlatform('darwin');
+  osMocks.homedir.mockReturnValue(SERVICE_HOME);
+  fsMocks.existsSync.mockReturnValue(false);
+  fsMocks.readFileSync.mockImplementation(() => {
+    const err = new Error('ENOENT') as NodeJS.ErrnoException;
+    err.code = 'ENOENT';
+    throw err;
+  });
+  childProcessMocks.execFile.mockImplementation((_c, _a, optionsOrCb, maybeCb) => {
+    const cb = typeof optionsOrCb === 'function' ? optionsOrCb : maybeCb;
+    queueMicrotask(() => cb?.(null, '', ''));
+    return new EventEmitter();
+  });
+  // The input has to be shape-INVALID but confinement-VALID, or the two rules
+  // cannot be told apart. A relative path does not work: confinement refuses
+  // that too, via its lexical gate, so both rules refuse and a probe would
+  // agree for the wrong reason. (Measured: the first attempt used a relative
+  // path and DEAD-PROBE failed under BOTH variants.)
+  //
+  // A `pathPrepend` entry containing ':' is the discriminator. It is absolute
+  // and inside home, so confinement admits it, and it violates the shape rule,
+  // which forbids ':' because the rendered PATH is colon-separated.
+  renderOptionsMocks.resolveLaunchdPlistRenderOptions.mockReturnValue({
+    pathPrepend: [`${SERVICE_HOME}/pin:bin`],
+  });
+}
+
+async function installFixtureTearDown(): Promise<void> {
+  const realFs = await realFsPromise;
+  if (SERVICE_HOME) realFs.rmSync(SERVICE_HOME, { recursive: true, force: true });
+  setPlatform(originalPlatform);
+  vi.restoreAllMocks();
+}
+
+async function runInstall(): Promise<{ error: Error | null }> {
+  vi.resetModules();
+  const { createServiceManager } = await import('../../src/fleet/platform.ts');
+  const manager = createServiceManager();
+  if (!manager.startAfterAuthFire) throw new Error('missing macOS authenticated-start hook');
+  return new Promise((resolve) => {
+    manager.startAfterAuthFire!('agent', (err) => resolve({ error: (err as Error) ?? null }));
+  });
+}
+
+// Always-on. One member, no contradiction, so it runs in every ordinary suite
+// run and goes red the moment the install-site shape assertion is deleted. The
+// opt-in pair below answers a different question — whether that assertion is
+// reachable at all — and cannot serve as this guard, because a skipped test
+// enforces nothing.
+describe('install-site render-option shape assertion — regression guard', () => {
+  beforeEach(installFixtureSetUp);
+  afterEach(installFixtureTearDown);
+
+  it('refuses unvalidated shape-invalid render options before rendering the plist', async () => {
+    const { error } = await runInstall();
+    expect(error, 'the install site must refuse options the resolver did not validate').not.toBeNull();
+    // Asserted on the SHAPE reason specifically. Confinement admits this entry
+    // (absolute, inside home), so a refusal carrying the confinement reason
+    // would mean a different rule fired and this guard would be measuring
+    // something other than what it names.
+    expect(String(error?.message)).toContain('service.pathPrepend[0] must be an absolute directory path');
+    expect(String(error?.message)).toContain("without ':' or control characters");
+    expect(fsMocks.writeFileSync, 'a refused install must render no plist bytes').not.toHaveBeenCalled();
+    expect(fsMocks.mkdirSync, 'a refused install must create no LaunchAgents directory').not.toHaveBeenCalled();
+  });
+});
+
+// The probe pair is deliberately contradictory: exactly one member passes per
 // variant, so one of them ALWAYS fails. That is the measurement, not a defect,
-// but it must not sit red in ordinary runs, so the suite is opt-in:
+// but it must not sit red in ordinary runs, so the pair is opt-in:
 //
 //   WHATSOUP_REACHABILITY_PROBE=1 npx vitest run tests/fleet/platform-install-shape-reachability.test.ts
 //
 // Run it once per variant and record which member passed.
 describe.runIf(process.env.WHATSOUP_REACHABILITY_PROBE === '1')(
   'install-site render-option shape assertion — reachability', () => {
-  beforeEach(async () => {
-    const [realFs, realPath, realOs] = await Promise.all([
-      realFsPromise, realPathPromise, realOsPromise,
-    ]);
-    SERVICE_HOME = realFs.realpathSync.native(
-      realFs.mkdtempSync(realPath.join(realOs.tmpdir(), 'whatsoup-reach-')),
-    );
-    vi.clearAllMocks();
-    setPlatform('darwin');
-    osMocks.homedir.mockReturnValue(SERVICE_HOME);
-    fsMocks.existsSync.mockReturnValue(false);
-    fsMocks.readFileSync.mockImplementation(() => {
-      const err = new Error('ENOENT') as NodeJS.ErrnoException;
-      err.code = 'ENOENT';
-      throw err;
-    });
-    childProcessMocks.execFile.mockImplementation((_c, _a, optionsOrCb, maybeCb) => {
-      const cb = typeof optionsOrCb === 'function' ? optionsOrCb : maybeCb;
-      queueMicrotask(() => cb?.(null, '', ''));
-      return new EventEmitter();
-    });
-    // The input has to be shape-INVALID but confinement-VALID, or the two rules
-    // cannot be told apart. A relative path does not work: confinement refuses
-    // that too, via its lexical gate, so both variants refuse and the probes
-    // agree for the wrong reason. (Measured: the first attempt used a relative
-    // path and DEAD-PROBE failed under BOTH variants.)
-    //
-    // A `pathPrepend` entry containing ':' is the discriminator. It is absolute
-    // and inside home, so confinement admits it, and it violates the shape rule,
-    // which forbids ':' because the rendered PATH is colon-separated.
-    renderOptionsMocks.resolveLaunchdPlistRenderOptions.mockReturnValue({
-      pathPrepend: [`${SERVICE_HOME}/pin:bin`],
-    });
-  });
-
-  afterEach(async () => {
-    const realFs = await realFsPromise;
-    if (SERVICE_HOME) realFs.rmSync(SERVICE_HOME, { recursive: true, force: true });
-    setPlatform(originalPlatform);
-    vi.restoreAllMocks();
-  });
-
-  async function runInstall(): Promise<{ error: Error | null }> {
-    vi.resetModules();
-    const { createServiceManager } = await import('../../src/fleet/platform.ts');
-    const manager = createServiceManager();
-    if (!manager.startAfterAuthFire) throw new Error('missing macOS authenticated-start hook');
-    return new Promise((resolve) => {
-      manager.startAfterAuthFire!('agent', (err) => resolve({ error: (err as Error) ?? null }));
-    });
-  }
+  beforeEach(installFixtureSetUp);
+  afterEach(installFixtureTearDown);
 
   it('REACHABLE-PROBE: unvalidated shape-invalid options are refused at the install site', async () => {
     // Passes under B. Fails under A, where nothing at the install site checks shape.
