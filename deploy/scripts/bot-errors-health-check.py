@@ -4674,14 +4674,11 @@ def opencode_functional_probe_args(command: str, data: dict[str, Any], target: s
     return args
 
 
-OPENCODE_FUNCTIONAL_ENV_KEYS = (
+COMMON_FUNCTIONAL_ENV_KEYS = (
     "PATH",
     # Without this the child environment drops the governed prepend and the
     # functional probe resolves a different binary than the service does.
     "WHATSOUP_PATH_PREPEND",
-    # The service can select a per-instance configuration/authentication root.
-    # Keep that identity while continuing to exclude provider credentials.
-    "CLAUDE_CONFIG_DIR",
     "HOME",
     "USER",
     "SHELL",
@@ -4694,12 +4691,30 @@ OPENCODE_FUNCTIONAL_ENV_KEYS = (
     "TMPDIR",
 )
 
+# The service can select a per-instance configuration/authentication root for
+# the default provider, and the probe is meant to exercise that same identity.
+# Provider credentials stay excluded.
+CLAUDE_FUNCTIONAL_ENV_KEYS = COMMON_FUNCTIONAL_ENV_KEYS + ("CLAUDE_CONFIG_DIR",)
+
+# The opencode probe child must never be WIDER than the production opencode
+# child. buildOpenCodeBaseChildEnv (src/runtimes/agent/providers/child-env.ts) is
+# a separate positive allowlist whose contract is that Claude-specific auth and
+# config variables never enter it; CLAUDE_CONFIG_DIR reached this probe only
+# because one shared tuple served both providers. Splitting the tuple keeps the
+# probe inside the production envelope.
+#
+# WHATSOUP_PATH_PREPEND is the one deliberate difference from that production
+# child: the probe exists to prove PATH parity, so it must carry the governed
+# prepend the launcher uses. It is not an auth or config variable.
+OPENCODE_FUNCTIONAL_ENV_KEYS = COMMON_FUNCTIONAL_ENV_KEYS
+
 
 def governed_child_environment(
     provider_path: str | None = None,
     name: str | None = None,
     child_cwd: str | None = None,
     base_env: dict[str, str] | None = None,
+    env_keys: tuple[str, ...] = OPENCODE_FUNCTIONAL_ENV_KEYS,
 ) -> dict[str, str]:
     """Allowlisted child environment carrying the GOVERNED provider PATH.
 
@@ -4712,11 +4727,15 @@ def governed_child_environment(
     of this; claude-cli authenticates out of band, and handing it another
     provider's API key would be both wrong and a credential leak into a child
     that has no use for it.
+
+    env_keys is the caller's allowlist, and it defaults to the NARROWER of the
+    two: a new probe that forgets to name one gets the common set, never a set
+    widened by whichever provider happened to need more.
     """
     source_env = base_env if base_env is not None else os.environ
     child_env = {
         key: value
-        for key in OPENCODE_FUNCTIONAL_ENV_KEYS
+        for key in env_keys
         if (value := source_env.get(key)) is not None
     }
     if provider_path:
@@ -4737,7 +4756,13 @@ def opencode_functional_probe_env(
     child_cwd: str | None = None,
     base_env: dict[str, str] | None = None,
 ) -> dict[str, str]:
-    child_env = governed_child_environment(provider_path, name, child_cwd, base_env)
+    child_env = governed_child_environment(
+        provider_path,
+        name,
+        child_cwd,
+        base_env,
+        env_keys=OPENCODE_FUNCTIONAL_ENV_KEYS,
+    )
     model = provider_model_from_config(data, target)
     service = opencode_key_service_from_config(data, target)
     env_key = service_env_var(service) if service else None
@@ -6096,6 +6121,7 @@ def provider_probe_target_inventory(
         name,
         None,
         loaded_environment,
+        env_keys=CLAUDE_FUNCTIONAL_ENV_KEYS,
     )
 
     timed_out = False

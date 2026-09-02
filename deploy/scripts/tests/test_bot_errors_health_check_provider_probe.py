@@ -1122,6 +1122,9 @@ def test_opencode_functional_probe_env_retains_the_governed_prepend():
 
 
 def test_governed_child_environment_retains_the_configured_claude_config_dir():
+    # The per-instance config root is a claude-cli key, so it is asserted
+    # against the claude-cli allowlist. Its absence from the opencode allowlist
+    # is HIGH-1 and has its own rows below.
     child = _mod.governed_child_environment(
         "/fixture/pin/bin:/usr/bin",
         "agent-alpha",
@@ -1130,6 +1133,7 @@ def test_governed_child_environment_retains_the_configured_claude_config_dir():
             "PATH": "/fixture/pin/bin:/usr/bin",
             "CLAUDE_CONFIG_DIR": "/fixture/config/agent-alpha",
         },
+        env_keys=_mod.CLAUDE_FUNCTIONAL_ENV_KEYS,
     )
 
     assert child.get("CLAUDE_CONFIG_DIR") == "/fixture/config/agent-alpha"
@@ -1141,9 +1145,104 @@ def test_governed_child_environment_leaves_absent_claude_config_dir_absent():
         "agent-alpha",
         "/fixture/work",
         {"PATH": "/fixture/pin/bin:/usr/bin"},
+        env_keys=_mod.CLAUDE_FUNCTIONAL_ENV_KEYS,
     )
 
     assert "CLAUDE_CONFIG_DIR" not in child
+
+
+def test_governed_child_environment_defaults_to_the_narrower_allowlist():
+    """A caller that names no allowlist must get the common set, not a wide one.
+
+    The default is the fail-closed direction: a probe added later without an
+    explicit key set carries no provider-specific variable at all, rather than
+    inheriting whichever provider needed the most.
+    """
+    child = _mod.governed_child_environment(
+        "/fixture/pin/bin:/usr/bin",
+        "agent-alpha",
+        "/fixture/work",
+        {
+            "PATH": "/fixture/pin/bin:/usr/bin",
+            "CLAUDE_CONFIG_DIR": "/fixture/config/agent-alpha",
+        },
+    )
+
+    assert "CLAUDE_CONFIG_DIR" not in child
+    assert child["PATH"] == "/fixture/pin/bin:/usr/bin"
+
+
+def test_opencode_functional_probe_child_excludes_the_claude_config_root():
+    """HIGH-1. The probe child must never be wider than the production child.
+
+    buildOpenCodeBaseChildEnv (src/runtimes/agent/providers/child-env.ts) is a
+    separate positive allowlist that admits no Claude auth or config variable.
+    CLAUDE_CONFIG_DIR reached this probe only because one shared tuple served
+    both providers.
+    """
+    child = _mod.opencode_functional_probe_env(
+        {},
+        "primary",
+        2,
+        "/fixture/pin/bin:/usr/bin",
+        "agent-alpha",
+        "/fixture/work",
+        {
+            "PATH": "/fixture/pin/bin:/usr/bin",
+            "CLAUDE_CONFIG_DIR": "/fixture/config/agent-alpha",
+        },
+    )
+
+    assert "CLAUDE_CONFIG_DIR" not in child
+    # Vacuity guards: the allowlist ran and the governed keys still travel.
+    assert child["PATH"] == "/fixture/pin/bin:/usr/bin"
+    assert child["WHATSOUP_INSTANCE"] == "agent-alpha"
+
+
+def test_the_two_probe_allowlists_differ_only_by_the_claude_config_root():
+    """Pins the split itself, so a later key lands on a deliberate side.
+
+    Stated precisely rather than as "never wider": the opencode probe child does
+    carry WHATSOUP_PATH_PREPEND, which the production opencode child does not.
+    That one is the point of the probe -- it proves PATH parity with the
+    launcher -- and it is not an auth or config variable.
+    """
+    common = set(_mod.COMMON_FUNCTIONAL_ENV_KEYS)
+    assert set(_mod.OPENCODE_FUNCTIONAL_ENV_KEYS) == common
+    assert set(_mod.CLAUDE_FUNCTIONAL_ENV_KEYS) - common == {"CLAUDE_CONFIG_DIR"}
+    assert "CLAUDE_CONFIG_DIR" not in common
+    assert "WHATSOUP_PATH_PREPEND" in common
+
+
+def test_default_provider_probe_child_keeps_the_claude_config_root(monkeypatch, tmp_path):
+    """The other side of the split, through the real probe rather than the helper.
+
+    Passes before and after: the split must not take the config root away from
+    the provider that legitimately needs it.
+    """
+    environment = _matrix_environment(tmp_path)
+    environment["CLAUDE_CONFIG_DIR"] = str(tmp_path / "config" / "agent-alpha")
+    _arm_darwin_plist(
+        monkeypatch, tmp_path, "agent-alpha",
+        {"PATH": environment["PATH"], "WHATSOUP_PATH_PREPEND": environment["WHATSOUP_PATH_PREPEND"]},
+    )
+    seen: dict[str, object] = {}
+
+    def _fake_output(command, *args, **kwargs):
+        seen["child_env"] = kwargs.get("child_env")
+        return ("OK", "", 0, False)
+
+    monkeypatch.setattr(_mod, "provider_command_output", _fake_output)
+    monkeypatch.setattr(_mod, "loaded_instance_environment", lambda name: dict(environment))
+    _mod.provider_probe_target_inventory(
+        {}, {}, "agent-alpha",
+        {"type": "agent", "agentOptions": {"provider": "claude-cli"}},
+        "claude-cli", "primary",
+    )
+
+    child_env = seen.get("child_env")
+    assert child_env is not None, "the probe never reached the provider spawn"
+    assert child_env["CLAUDE_CONFIG_DIR"] == str(tmp_path / "config" / "agent-alpha")
 
 
 def test_governed_child_environment_excludes_provider_credentials():
