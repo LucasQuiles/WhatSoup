@@ -998,28 +998,36 @@ def test_systemd_seconds_rejects_partially_parsed_values():
 
 
 def test_deadman_reports_a_restart_loop_across_repeated_reboots(env):
-    """Bench finding: every boot-identity change re-seeds the streak. What that
-    means in practice: within each boot the loop is reported once the streak
-    outgrows max_state_age, and only a host that reboots faster than
-    max_state_age (180s at the shipped flags) stays silent. Boot A -> B -> C at
-    a 300s cadence reports in every boot; at a 100s cadence it does not, which
-    is the documented residual (a host rebooting every 100s cannot run a
-    5-minute timer either)."""
+    """Bench finding: every boot-identity change re-seeds the streak. Uptime
+    follows the clock within a boot here, as on a real host. Boot A -> B -> C
+    with a check 2s and 302s after each boot: the 2s check is graced (a fresh
+    restart), the 302s check reports at once, because grace itself is active
+    only inside restart_grace and the 120s-old incomplete state is older than
+    that. The re-seed therefore silences nothing that a check outside the
+    grace window would see. The residual is narrower than "reboots faster than
+    max_state_age": every deadman check has to land within restart_grace (30s)
+    of a boot, pinned last, and the first check that lands 50s after a boot
+    reports."""
     env.svc["status"] = "active"
-    env.svc["ages"] = (2, 2)
     for boot in ("boot-A", "boot-B", "boot-C"):
         env.boot["id"] = boot
+        env.svc["ages"] = (2, 2)
         env.state_written(120, {"time": env.mod.epoch_to_iso(100_000)})
         assert env.run() == 0, boot  # first check after the (re)boot: a fresh restart is graced
         env.advance(300)
+        env.svc["ages"] = (302, 302)  # uptime follows the clock: this check is outside restart_grace
         env.state_written(120, {"time": env.mod.epoch_to_iso(100_000)})
-        assert env.run() == 2, boot  # second check: the streak within this boot outgrew max_state_age
+        assert env.run() == 2, boot
         assert "cycle_incomplete" in env.members()
         env.advance(300)
     for boot in ("boot-D", "boot-E", "boot-F"):
         env.boot["id"] = boot
+        env.svc["ages"] = (2, 2)  # a reboot per check, each check 2s after it: the residual
         env.state_written(120, {"time": env.mod.epoch_to_iso(100_000)})
         assert env.run() == 0, boot
-        env.advance(100)  # faster than max_state_age: the residual
-    assert env.run() == 0
-
+        env.advance(300)
+    env.boot["id"] = "boot-G"
+    env.svc["ages"] = (50, 50)  # one check that lands past restart_grace after its boot
+    env.state_written(120, {"time": env.mod.epoch_to_iso(100_000)})
+    assert env.run() == 2
+    assert "cycle_incomplete" in env.members()
