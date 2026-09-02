@@ -548,8 +548,8 @@ config-owned and regeneration-safe:
 
 | Field | Type | Rules | Effect |
 |-------|------|-------|--------|
-| `claudeConfigDir` | string | absolute path; no surrounding whitespace or control characters | Rendered as `CLAUDE_CONFIG_DIR` so the launchd service context resolves the same dedicated claude-cli config root as interactive use of that root (e.g. an isolated per-bot root such as `$HOME/.claude-<instance>`). Omitted → the key is not rendered. The block governs only which config root the service resolves; it does not create or copy credentials (the CLI keeps those keychain-resident). |
-| `pathPrepend` | string[] | at most 16 entries; each an absolute path without `:` or control characters | Prepended in order ahead of the generating shell's ambient `PATH` in the rendered service `PATH` (e.g. `$HOME/.local/bin` so a fallback provider binary resolves under launchd). Omitted or empty → byte-identical `PATH` to the historical render. |
+| `claudeConfigDir` | string | absolute path; no surrounding whitespace or control characters; within the home directory when written through the API (see below) | Rendered as `CLAUDE_CONFIG_DIR` so the launchd service context resolves the same dedicated claude-cli config root as interactive use of that root (e.g. an isolated per-bot root such as `$HOME/.claude-<instance>`). Omitted → the key is not rendered. The block governs only which config root the service resolves; it does not create or copy credentials (the CLI keeps those keychain-resident). |
+| `pathPrepend` | string[] | at most 16 entries; each an absolute path without `:` or control characters; each within the home directory when written through the API (see below) | Prepended in order ahead of the generating shell's ambient `PATH` in the rendered service `PATH` (e.g. `$HOME/.local/bin` so a fallback provider binary resolves under launchd). Omitted or empty → byte-identical `PATH` to the historical render. |
 | `expectedAccountDigest` | string | `sha256:<64 lowercase hex>` exactly, produced by `npm run --silent claude-account-digest` (the `--silent` matters — see the capture procedure); agent instances with `agentOptions.provider` `claude-cli` (the default) only — rejected elsewhere | Not a render key (never reaches the plist; applies on every platform). The ratified account identity the runtime verifies against; see [Ratified account identity](#ratified-account-identity-serviceexpectedaccountdigest). A raw email or organization id is rejected at admission on every path (create / PATCH / load / discovery). Omitted → verification disabled (one info log line at the first probe). |
 
 One source of truth: the shape rules live in `src/lib/launchd-service-config.ts`
@@ -559,6 +559,18 @@ instance type) and again by the render-time resolver
 unreadable or invalid `config.json` aborts a plist install or reconcile instead
 of regenerating the plist without its governed environment; only a missing
 `config.json` (or absent block) renders the historical byte-identical plist.
+
+Home-confinement of the two filesystem fields is enforced one layer up, at the
+API write paths only (`POST /instances` and `PATCH /api/lines/:name` in
+`src/fleet/routes/ops.ts`), which refuse a `claudeConfigDir` or a `pathPrepend`
+entry resolving outside the instance user's home directory with a `400`. It is
+not a shape rule, because `src/lib/launchd-service-config.ts` also runs on load
+and on render admission: rejecting there would stop an instance that already
+persisted an out-of-home value from loading at all. So a value written before
+this rule existed, or edited into `config.json` by hand, still loads and still
+renders — the guard closes the ingress, it does not retire existing values. The
+`PATCH` guard runs on the merged config, so an instance carrying an out-of-home
+entry is refused on every field until the entry is corrected.
 
 Unknown keys inside `service` are ignored (the instance-config convention for
 extraneous keys), so a misspelled field is silently inert — read the dry-run
