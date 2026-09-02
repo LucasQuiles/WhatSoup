@@ -6280,8 +6280,12 @@ def provider_probe_target_inventory(
     # run an ungoverned binary and report ITS health as the service's. An
     # unresolvable name stays bare and reaches the spawn bare, which fails
     # closed, exactly as it did before this resolution step existed.
-    if not os.path.isabs(command):
-        command = shutil.which(command, path=effective_provider_path) or command
+    resolved_on_governed_path = os.path.isabs(command)
+    if not resolved_on_governed_path:
+        candidate = shutil.which(command, path=effective_provider_path)
+        if candidate:
+            command = candidate
+            resolved_on_governed_path = True
 
     timed_out = False
     try:
@@ -6309,24 +6313,35 @@ def provider_probe_target_inventory(
         stderr = exc.stderr if isinstance(exc.stderr, str) else ""
         rc = 124
         timed_out = True
-    except FileNotFoundError:
-        # argv[0] reached the spawn unresolved, which happens exactly when the
-        # command could not be found on the GOVERNED PATH. Refusing here is the
-        # intended outcome; what matters is that it is reported as the class the
-        # documentation promises for this condition rather than as the generic
-        # probe-failed one, and that the line carries no command -- a name the
-        # governed PATH cannot supply tells an operator nothing and publishes the
-        # probe host's layout, which is this module's redaction stance for the
-        # whole provider_runtime_path_* family.
-        governed_entry_count = len(
-            [entry for entry in (effective_provider_path or "").split(":") if entry]
-        )
-        return [(
-            f"FAIL provider_probe {name}: provider={provider} target={target} "
-            "failure_class=provider_runtime_path_unavailable "
-            f"reason=command_not_on_governed_path governed_path_entries={governed_entry_count} "
-            "remediation=repair_the_shared_runtime_path_helper_and_node_pin"
-        )]
+    except FileNotFoundError as exc:
+        # ENOENT reaches here from THREE places, and only one of them is a
+        # statement about the governed PATH:
+        #   the command never resolved, so argv[0] arrived bare -- that one;
+        #   the temporary directory could not be created, e.g. TMPDIR absent;
+        #   the command resolved and ran but its shebang interpreter is missing.
+        #
+        # exc.filename alone cannot separate them: a missing interpreter reports
+        # the SCRIPT's path, which is argv[0], exactly as an unresolvable command
+        # reports its own name. Measured, not assumed. The discriminator that
+        # does work is whether resolution against the governed PATH succeeded, so
+        # that is recorded at the resolution step and consulted here; the
+        # filename check keeps a failed temporary directory out of the branch.
+        if not resolved_on_governed_path and exc.filename == command:
+            # The line carries no command on purpose: a name the governed PATH
+            # cannot supply tells an operator nothing and publishes the probe
+            # host's layout, which is this module's redaction stance for the
+            # whole provider_runtime_path_* family.
+            governed_entry_count = len(
+                [entry for entry in (effective_provider_path or "").split(":") if entry]
+            )
+            return [(
+                f"FAIL provider_probe {name}: provider={provider} target={target} "
+                "failure_class=provider_runtime_path_unavailable "
+                f"reason=command_not_on_governed_path governed_path_entries={governed_entry_count} "
+                "remediation=repair_the_shared_runtime_path_helper_and_node_pin"
+            )]
+        safe_command = redact_evidence_string(command, 120)
+        return [f"FAIL provider_probe {name}: provider={provider} target={target} command={safe_command} failure_class=provider_probe_failed error={redact_evidence_string(str(exc), 180)}"]
     except Exception as exc:  # noqa: BLE001 - daily health should report provider probe failure.
         safe_command = redact_evidence_string(command, 120)
         return [f"FAIL provider_probe {name}: provider={provider} target={target} command={safe_command} failure_class=provider_probe_failed error={redact_evidence_string(str(exc), 180)}"]

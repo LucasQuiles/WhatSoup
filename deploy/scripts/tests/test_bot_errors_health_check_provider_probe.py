@@ -2593,6 +2593,84 @@ def _force_samefile_oserror(monkeypatch):
     monkeypatch.setattr(os.path, "samefile", _raise)
 
 
+def _governed_claude_fixture(monkeypatch, tmp_path, marker="GOVERNED-CLAUDE-RAN"):
+    """Instance whose governed PATH supplies a real claude that prints a marker."""
+    environment = _prepend_fixture(tmp_path)
+    governed_bin = tmp_path / "pin" / "bin"
+    _write_marker_binary(governed_bin, "claude", marker)
+    _arm_darwin_plist(
+        monkeypatch, tmp_path, "agent-alpha",
+        {"PATH": environment["PATH"], "WHATSOUP_PATH_PREPEND": environment["WHATSOUP_PATH_PREPEND"]},
+    )
+    monkeypatch.setattr(_mod, "loaded_instance_environment", lambda name: dict(environment))
+    return environment, governed_bin
+
+
+def _run_claude_probe(item=None):
+    return _mod.provider_probe_target_inventory(
+        {}, item or {}, "agent-alpha",
+        {"type": "agent", "agentOptions": {"provider": "claude-cli"}},
+        "claude-cli", "primary",
+    )
+
+
+def test_absent_temp_root_is_not_reported_as_a_governed_path_failure(monkeypatch, tmp_path):
+    """D-1. A temporary directory that cannot be created is not a PATH fact.
+
+    The FileNotFoundError arm wrapped the whole block, so a TMPDIR that does not
+    exist reported reason=command_not_on_governed_path even though the command
+    resolved fine. Fail-closed either way, but mislabelled: it sends an operator
+    to repair a runtime path that is not broken.
+    """
+    _governed_claude_fixture(monkeypatch, tmp_path)
+    monkeypatch.setattr(_mod.tempfile, "tempdir", str(tmp_path / "no-such-temp-root"))
+
+    lines = _run_claude_probe()
+
+    assert "reason=command_not_on_governed_path" not in lines[0], lines[0]
+    assert "failure_class=provider_probe_failed" in lines[0], lines[0]
+
+
+def test_missing_shebang_interpreter_is_not_reported_as_a_governed_path_failure(
+    monkeypatch, tmp_path
+):
+    """D-1, the case exc.filename cannot separate on its own.
+
+    A script whose interpreter is missing raises FileNotFoundError reporting the
+    SCRIPT's path, which is argv[0] — identical in shape to a command that never
+    resolved. Measured rather than assumed, which is why the discriminator is
+    whether resolution against the governed PATH succeeded, not the filename.
+    """
+    environment, governed_bin = _governed_claude_fixture(monkeypatch, tmp_path)
+    # Replace the governed claude with one whose interpreter does not exist.
+    binary = governed_bin / "claude"
+    binary.write_text("#!/nonexistent/interpreter\necho unreachable\n")
+    binary.chmod(0o755)
+
+    lines = _run_claude_probe()
+
+    assert "reason=command_not_on_governed_path" not in lines[0], lines[0]
+    assert "failure_class=provider_probe_failed" in lines[0], lines[0]
+
+
+def test_a_command_absent_from_the_governed_path_keeps_its_own_class(monkeypatch, tmp_path):
+    """D-1 control: the true case must keep reporting the governed-PATH class.
+
+    Without this the two rows above could be satisfied by removing the class
+    entirely.
+    """
+    environment, governed_bin = _governed_claude_fixture(monkeypatch, tmp_path)
+    ambient_bin = tmp_path / "ambient-only" / "bin"
+    _write_marker_binary(ambient_bin, "bareprobe", "UNGOVERNED-BINARY-RAN")
+    monkeypatch.setenv("PATH", f"{ambient_bin}:/usr/bin:/bin")
+
+    lines = _run_claude_probe({"providerProbeCommand": "bareprobe"})
+
+    assert "failure_class=provider_runtime_path_unavailable" in lines[0], lines[0]
+    assert "reason=command_not_on_governed_path" in lines[0], lines[0]
+    assert "UNGOVERNED-BINARY-RAN" not in "\n".join(lines)
+
+
 def test_probe_directory_refuses_when_identity_is_unreadable(monkeypatch, tmp_path):
     """The ancestor walk must not answer 'outside' when it cannot tell.
 
