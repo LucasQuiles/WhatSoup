@@ -636,56 +636,68 @@ def _quarantine_one_unrenderable(tmp_path: Path) -> None:
 
 
 def test_unrenderable_quarantine_is_counted(tmp_path: Path) -> None:
-    _mod.flush_unrenderable_quarantine_telemetry({})  # drain any prior pending count
+    _mod.ack_unrenderable_quarantine_telemetry(
+        _mod.flush_unrenderable_quarantine_telemetry({})
+    )  # drain any prior pending count
     _quarantine_one_unrenderable(tmp_path)
     incident_state: dict[str, Any] = {}
-    assert _mod.flush_unrenderable_quarantine_telemetry(incident_state) is True
+    folded = _mod.flush_unrenderable_quarantine_telemetry(incident_state)
+    assert folded == 1
     counters = incident_state["legacyAlertContent"]
     assert counters["queueUnrenderable"] == 1
     assert counters["queueLegacyObject"] == 0
     assert counters["queueBakedRepr"] == 0
     assert counters["lastLegacyAt"] > 0
+    _mod.ack_unrenderable_quarantine_telemetry(folded)
 
+def test_the_recorder_does_not_fold_quarantine_counts(tmp_path: Path) -> None:
+    """One fold site, and its commit is adjacent to it.
 
-def test_quarantine_count_rides_the_next_counted_event(tmp_path: Path) -> None:
-    """A cycle that also processes a real event must carry the quarantine count."""
-    _mod.flush_unrenderable_quarantine_telemetry({})
+    The recorder used to fold pending quarantine counts too, but its callers
+    commit far away, so a failed write there could not be detected or recovered
+    from. Folding happens only at the end-of-cycle drain, where the commit is the
+    next statement and can be acknowledged.
+    """
+    _mod.ack_unrenderable_quarantine_telemetry(
+        _mod.flush_unrenderable_quarantine_telemetry({})
+    )
     _quarantine_one_unrenderable(tmp_path)
     incident_state: dict[str, Any] = {}
     _mod.record_legacy_alert_content(
         _make_event(summary=legacy_object(), evidence=""), incident_state
     )
     counters = incident_state["legacyAlertContent"]
-    assert counters["queueUnrenderable"] == 1, "the quarantine count must not be lost"
     assert counters["queueLegacyObject"] == 1
+    assert counters["queueUnrenderable"] == 0, "the recorder must not fold quarantine counts"
 
+    # The pending quarantine is still there, for the drain site to fold.
+    drained: dict[str, Any] = {}
+    folded = _mod.flush_unrenderable_quarantine_telemetry(drained)
+    assert folded == 1
+    _mod.ack_unrenderable_quarantine_telemetry(folded)
 
-def test_quarantine_count_is_drained_not_replayed(tmp_path: Path) -> None:
-    """Flushing twice must not count the same quarantine twice."""
-    _mod.flush_unrenderable_quarantine_telemetry({})
+def test_acknowledged_quarantine_count_is_not_replayed(tmp_path: Path) -> None:
+    """Once acknowledged, the same quarantine must not be folded again."""
+    _mod.ack_unrenderable_quarantine_telemetry(
+        _mod.flush_unrenderable_quarantine_telemetry({})
+    )
     _quarantine_one_unrenderable(tmp_path)
     first: dict[str, Any] = {}
-    assert _mod.flush_unrenderable_quarantine_telemetry(first) is True
+    folded = _mod.flush_unrenderable_quarantine_telemetry(first)
+    assert folded == 1
+    _mod.ack_unrenderable_quarantine_telemetry(folded)
+
     second: dict[str, Any] = {}
-    assert _mod.flush_unrenderable_quarantine_telemetry(second) is False
+    assert _mod.flush_unrenderable_quarantine_telemetry(second) == 0
     assert "legacyAlertContent" not in second
 
-
 def test_flush_is_silent_when_nothing_was_quarantined() -> None:
-    _mod.flush_unrenderable_quarantine_telemetry({})
+    _mod.ack_unrenderable_quarantine_telemetry(
+        _mod.flush_unrenderable_quarantine_telemetry({})
+    )
     incident_state: dict[str, Any] = {}
-    assert _mod.flush_unrenderable_quarantine_telemetry(incident_state) is False
+    assert _mod.flush_unrenderable_quarantine_telemetry(incident_state) == 0
     assert "legacyAlertContent" not in incident_state
-
-
-# ---------------------------------------------------------------------------
-# A poison alert-content value must not wedge the queue
-# ---------------------------------------------------------------------------
-# An unbounded digit run in the repr grammar let int() raise ValueError from
-# inside the render path. Nothing above it guards: process_one has no try around
-# the render, and neither does run_once. One such event aborted the whole cycle
-# before any event was delivered or quarantined, and it stayed in the outbox to
-# re-poison every following cycle -- total alert loss, silent and permanent.
 
 POISON_SUMMARY = (
     "{'failureClass': 'TypeError', 'length': "
@@ -856,4 +868,173 @@ def test_terminal_paths_do_not_gate_the_recorder_on_daily_health() -> None:
     assert not offenders, (
         "the legacy-content recorder must not sit under a daily-health guard: "
         + "; ".join(f"line {ln} under {t}" for ln, t in offenders)
+    )
+
+
+# ---------------------------------------------------------------------------
+# MED-2: a quarantine count must survive a failed durable write
+# ---------------------------------------------------------------------------
+# The pending counter is a process global. Draining it at fold time and
+# committing later means a failed durable write loses the count outright: it is
+# gone from the global AND absent from disk. The count must only be acknowledged
+# once a commit has actually succeeded.
+
+def test_pending_quarantine_survives_a_failed_commit(tmp_path: Path) -> None:
+    """Fold without acknowledgement leaves the count pending for the next cycle."""
+    _mod.ack_unrenderable_quarantine_telemetry(
+        _mod.flush_unrenderable_quarantine_telemetry({})
+    )  # drain any prior pending count
+    _quarantine_one_unrenderable(tmp_path)
+
+    # Cycle one: fold, then the durable write fails, so no acknowledgement.
+    lost_state: dict[str, Any] = {}
+    folded = _mod.flush_unrenderable_quarantine_telemetry(lost_state)
+    assert folded == 1
+    assert lost_state["legacyAlertContent"]["queueUnrenderable"] == 1
+    # commit raised; the state object is discarded and never acknowledged.
+
+    # Cycle two: the count must still be pending and must land.
+    kept_state: dict[str, Any] = {}
+    refolded = _mod.flush_unrenderable_quarantine_telemetry(kept_state)
+    assert refolded == 1, "a failed commit must not lose the quarantine count"
+    assert kept_state["legacyAlertContent"]["queueUnrenderable"] == 1
+    _mod.ack_unrenderable_quarantine_telemetry(refolded)
+
+    # Acknowledged now, so it must not be folded a third time.
+    after_state: dict[str, Any] = {}
+    assert _mod.flush_unrenderable_quarantine_telemetry(after_state) == 0
+    assert "legacyAlertContent" not in after_state
+
+
+def test_acknowledgement_drains_only_what_was_committed(tmp_path: Path) -> None:
+    """A partial acknowledgement must leave the remainder pending."""
+    _mod.ack_unrenderable_quarantine_telemetry(
+        _mod.flush_unrenderable_quarantine_telemetry({})
+    )
+    _quarantine_one_unrenderable(tmp_path)
+    _quarantine_one_unrenderable(tmp_path)
+
+    first: dict[str, Any] = {}
+    folded = _mod.flush_unrenderable_quarantine_telemetry(first)
+    assert folded == 2
+    _mod.ack_unrenderable_quarantine_telemetry(1)   # only one write made it
+
+    remainder: dict[str, Any] = {}
+    assert _mod.flush_unrenderable_quarantine_telemetry(remainder) == 1
+    _mod.ack_unrenderable_quarantine_telemetry(1)
+    assert _mod.flush_unrenderable_quarantine_telemetry({}) == 0
+
+
+# ---------------------------------------------------------------------------
+# LOW-2: a queued clear must not be counted twice
+# ---------------------------------------------------------------------------
+# suppress_alerts_recovered_before_delivery records the clear unconditionally,
+# but only consumes it when no incident is open. With an incident open the clear
+# stays in the outbox and process_one records it a second time.
+
+def test_queued_clear_is_counted_once_not_twice(tmp_path, monkeypatch) -> None:
+    """Two cycles, end to end: three legacy events must count three times, not four.
+
+    Reaching the defect needs the real preconditions, not just an open incident:
+    suppress_alerts_recovered_before_delivery only runs its body when a clear has a
+    PENDING, NOT-YET-READY alert of the same key still in the outbox. With an
+    incident already open the clear will dispatch, so the pass leaves it in the
+    outbox for process_one -- and recording it in both places counted that one
+    event twice.
+    """
+    root = tmp_path / "state"
+    outbox = root / "outbox"
+    monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(root))
+    monkeypatch.setenv("BOT_ERRORS_OUTBOX_DIR", str(outbox))
+    monkeypatch.setenv("BOT_ERRORS_JID", "12345@g.us")
+    mod = _load_module()
+    monkeypatch.setattr(mod, "send_whatsapp", lambda text, socket_path="": None)
+    monkeypatch.setattr(mod, "append_dispatch_log", lambda *a, **k: None)
+    paths = mod.setup_dirs()
+
+    def queue(name: str, event: dict[str, Any]) -> None:
+        path = paths["outbox"] / name
+        path.write_text(json.dumps(event), encoding="utf-8")
+        path.chmod(0o600)
+
+    def counted() -> int:
+        raw = json.loads(paths["incident_state"].read_text(encoding="utf-8"))
+        return int((raw.get("legacyAlertContent") or {}).get("queueLegacyObject") or 0)
+
+    # First cycle: one legacy alert opens the incident. One event, one count.
+    queue("a.json", _make_event(id="alert-001", summary=legacy_object(), evidence=""))
+    mod.run_once(max_events=25)
+    assert counted() == 1, "the first cycle must count the alert exactly once"
+
+    # Second cycle: a NOT-READY alert of the same key plus a READY clear. Two more
+    # events, so two more counts.
+    queue("b-alert.json", _make_event(
+        id="alert-002", summary=legacy_object(), evidence="",
+        createdAt="2026-09-02T00:01:00.000Z",
+        delivery={"nextAttemptAtEpoch": int(time.time()) + 3600, "attempts": 1},
+    ))
+    queue("c-clear.json", _make_event(
+        id="clear-001", eventKind="incident_recovery", eventType="clear",
+        severity="info", summary=legacy_object(), evidence="",
+        createdAt="2026-09-02T00:02:00.000Z",
+    ))
+    result = mod.run_once(max_events=25)
+    assert result.get("recoveredBeforeDelivery") == 1, (
+        "the recovered-before-delivery pass must actually have run"
+    )
+
+    total = counted()
+    assert total == 3, (
+        f"three legacy events must count three times, got {total}; "
+        "four means the queued clear was counted by both the pre-loop pass and process_one"
+    )
+
+def test_recovered_before_delivery_gates_the_clear_recorder() -> None:
+    """Structural: the clear-event recorder must sit under the same gate as its
+    consumption, so a queued clear is not counted by two different paths.
+
+    A behavioural test on the helper alone cannot see this: the double count only
+    appears once process_one also runs, in a later phase of the same cycle.
+    """
+    import ast as _ast
+
+    source = _SCRIPT.read_text(encoding="utf-8")
+    tree = _ast.parse(source)
+    target = None
+    for node in _ast.walk(tree):
+        if isinstance(node, _ast.FunctionDef) and node.name == "suppress_alerts_recovered_before_delivery":
+            target = node
+            break
+    assert target is not None
+
+    parent: dict[_ast.AST, _ast.AST] = {}
+    for node in _ast.walk(target):
+        for child in _ast.iter_child_nodes(node):
+            parent[child] = node
+
+    ungated = []
+    for node in _ast.walk(target):
+        if not (
+            isinstance(node, _ast.Call)
+            and isinstance(node.func, _ast.Name)
+            and node.func.id == "record_legacy_alert_content"
+            and node.args
+            and isinstance(node.args[0], _ast.Name)
+            and node.args[0].id == "clear_event"
+        ):
+            continue
+        gated = False
+        current = parent.get(node)
+        while current is not None:
+            if isinstance(current, _ast.If):
+                test_src = _ast.get_source_segment(source, current.test) or ""
+                if "clear_will_dispatch" in test_src:
+                    gated = True
+                    break
+            current = parent.get(current)
+        if not gated:
+            ungated.append(node.lineno)
+    assert not ungated, (
+        "the clear-event recorder must be gated on clear_will_dispatch, "
+        f"ungated at line(s) {ungated}"
     )

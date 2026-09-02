@@ -687,17 +687,22 @@ def note_unrenderable_quarantine() -> None:
     _pending_unrenderable_quarantines += 1
 
 
-def flush_unrenderable_quarantine_telemetry(incident_state: dict[str, Any]) -> bool:
-    """Fold pending quarantine counts into incident state and drain them.
+def flush_unrenderable_quarantine_telemetry(incident_state: dict[str, Any]) -> int:
+    """Fold pending quarantine counts into incident state; return how many.
 
-    Returns whether anything was folded, so a caller can skip an otherwise empty
-    state commit. Draining is what keeps a re-flush from replaying the same count.
+    Deliberately does NOT drain. The caller commits AFTER this returns, and a
+    failed durable write would otherwise lose the count from both places at once:
+    zeroed here, and absent from disk because the write failed. The count is only
+    given up once a commit has actually succeeded, via
+    ``ack_unrenderable_quarantine_telemetry``. Folding again into a state object
+    that was never committed is harmless; losing a permanent quarantine is not.
+
+    Returns the number folded, so a caller can skip an otherwise empty commit and
+    knows exactly how much to acknowledge.
     """
-    global _pending_unrenderable_quarantines
     pending = _pending_unrenderable_quarantines
     if not pending:
-        return False
-    _pending_unrenderable_quarantines = 0
+        return 0
     block = incident_state.get(LEGACY_ALERT_CONTENT_KEY)
     if not isinstance(block, dict):
         block = {}
@@ -708,7 +713,19 @@ def flush_unrenderable_quarantine_telemetry(incident_state: dict[str, Any]) -> b
     block["lastLegacyIso"] = now_iso()
     block.setdefault("lastLegacySource", "")
     incident_state[LEGACY_ALERT_CONTENT_KEY] = block
-    return True
+    return pending
+
+
+def ack_unrenderable_quarantine_telemetry(count: int) -> None:
+    """Give up pending quarantine counts, but only once a commit has succeeded.
+
+    Subtracts rather than zeroing, so a count that arrived between the fold and
+    the commit is not swallowed by an acknowledgement that never covered it.
+    """
+    global _pending_unrenderable_quarantines
+    if count <= 0:
+        return
+    _pending_unrenderable_quarantines = max(0, _pending_unrenderable_quarantines - count)
 
 
 def record_legacy_alert_content(event: dict[str, Any], incident_state: dict[str, Any]) -> bool:
@@ -724,7 +741,7 @@ def record_legacy_alert_content(event: dict[str, Any], incident_state: dict[str,
     quiet open incident carrying a legacy ``lastEvidence`` is never rendered, so
     the counters alone cannot prove the corpus is clean.
     """
-    changed = flush_unrenderable_quarantine_telemetry(incident_state)
+    changed = False
     kinds = {alert_text_kind(event.get(field)) for field in ("summary", "evidence")}
     incremented = {
         counter for kind, counter in _LEGACY_ALERT_CONTENT_COUNTERS.items() if kind in kinds
@@ -2029,14 +2046,10 @@ def absorb_daily_health_signal(event: dict[str, Any], incident_state: dict[str, 
     and not a clear-type event — so behavior at each call site matches what
     process_one would have done had the event reached it.
 
-    Also counts the legacy confined alert-content forms the event carries
-    (#2386). That count belongs here for the same reason freshness does: an
-    event consumed by storm collapse or recovery dedup never reaches
-    process_one, and neither half of the A4 retirement criterion would see it
-    -- the counter would not increment, and the collapsed member writes no
-    alert content into incident state for a direct scan to find. Counting at
-    the shared call site is what makes "zero" mean "clean" instead of
-    "unobserved".
+    This helper does NOT count legacy alert content. ``record_legacy_alert_content``
+    owns that, and each terminal path calls it directly, outside any source guard
+    -- counting here would have missed every non-daily-health event, because two
+    of the four paths only reach this helper for daily-health sources.
 
     Also stamps the ``sourceSpecificRecoveredIncidents`` diagnostic onto the
     event itself when incidents were recovered (folded in here from the
@@ -5685,7 +5698,10 @@ def suppress_alerts_recovered_before_delivery(paths: dict[str, Path], incident: 
                 state_changed = True
         migrate_legacy_unqualified_incident(clear_event, incident_state)
         clear_will_dispatch = isinstance(open_incidents.get(key), dict)
-        if record_legacy_alert_content(clear_event, incident_state):
+        # Gated exactly like the absorb below, and for the same reason: when the
+        # clear will dispatch it stays in the outbox and process_one counts it.
+        # Counting it here as well double-counted that one event (#2386).
+        if not clear_will_dispatch and record_legacy_alert_content(clear_event, incident_state):
             state_changed = True
         if not clear_will_dispatch and str(clear_event.get("source") or "").startswith("daily-health"):
             absorb_daily_health_signal(clear_event, incident_state)
@@ -6958,8 +6974,12 @@ def run_once(max_events: int) -> dict[str, Any]:
             # #2386: a cycle whose events were ALL quarantined never reaches the
             # shared telemetry helper, so drain any pending quarantine counts here
             # before the cycle ends. Commit only when something was folded.
-            if flush_unrenderable_quarantine_telemetry(_incident_cycle.payload):
+            folded_quarantines = flush_unrenderable_quarantine_telemetry(_incident_cycle.payload)
+            if folded_quarantines:
                 _incident_cycle.commit()
+                # Only now is the count safe to give up: if the commit above
+                # raises, the pending count survives and the next cycle folds it.
+                ack_unrenderable_quarantine_telemetry(folded_quarantines)
 
             # Daily test-leak summary marker (at most once per UTC date per day).
             if test_leak_dropped > 0:
