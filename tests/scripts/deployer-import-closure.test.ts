@@ -1,4 +1,5 @@
-import { readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -77,12 +78,36 @@ function countQuotedFilesEntries(scriptText: string): number {
  */
 const GRAPH_BUILD_BUDGET_MS = 120_000;
 
+/**
+ * The terminator `parseDeployPinPaths` replaced: stop at the first `)`
+ * character after `FILES=(` rather than at the line that IS `)`. Kept here so
+ * the regression control can assert the two implementations DISAGREE on a
+ * paren-bearing fixture, which is the only thing that makes it a control.
+ */
+function naiveFirstParenParse(scriptText: string): string[] {
+  const open = scriptText.indexOf('FILES=(');
+  const close = scriptText.indexOf(')', open);
+  if (open === -1 || close === -1) return [];
+  const body = scriptText.slice(open + 'FILES=('.length, close);
+  const paths: string[] = [];
+  for (const rawLine of body.split('\n')) {
+    const line = rawLine.trim();
+    if (line.length === 0) continue;
+    const unquoted = line.replace(/^["']/, '').replace(/["']$/, '');
+    const pinPath = unquoted.split(':')[0]?.trim();
+    if (pinPath) paths.push(pinPath);
+  }
+  return paths;
+}
+
 describe('bot-errors deployer allowlist is closed under import', () => {
   const scriptText = readFileSync(path.join(repoRoot, DEPLOY_SCRIPT_REL), 'utf8');
   const pinPaths = parseDeployPinPaths(scriptText);
   let context: ClosureContext;
   let closure: ImportClosure;
   let shrunken: ImportClosure;
+  let closureWithForeignContext: ImportClosure;
+  let foreignGraphKnowsRepoModule: boolean;
 
   beforeAll(() => {
     // One parse of src/ shared by both closures. Reusing the context is what
@@ -92,6 +117,24 @@ describe('bot-errors deployer allowlist is closed under import', () => {
     closure = computeImportClosure(repoRoot, pinPaths, context);
     // Negative control, computed here so the case below only asserts.
     shrunken = computeImportClosure(repoRoot, ['src/lib/bot-errors-outbox.ts'], context);
+
+    // Context-guard probe, also computed here: it deliberately does NOT reuse
+    // `context`, so it pays a second graph build and belongs in the budgeted
+    // hook rather than in a per-test budget.
+    const foreignRoot = mkdtempSync(path.join(tmpdir(), 'deployer-closure-foreign-'));
+    try {
+      mkdirSync(path.join(foreignRoot, 'src', 'lib'), { recursive: true });
+      writeFileSync(
+        path.join(foreignRoot, 'src', 'lib', 'unrelated.ts'),
+        'export const unrelated = 1;\n',
+        'utf8',
+      );
+      const foreign = createClosureContext(foreignRoot);
+      foreignGraphKnowsRepoModule = foreign.graph.files.has('src/lib/bot-errors-outbox.ts');
+      closureWithForeignContext = computeImportClosure(repoRoot, pinPaths, foreign);
+    } finally {
+      rmSync(foreignRoot, { recursive: true, force: true });
+    }
   }, GRAPH_BUILD_BUDGET_MS);
 
   const manifest = JSON.parse(
@@ -131,16 +174,33 @@ describe('bot-errors deployer allowlist is closed under import', () => {
     });
 
     it('does not stop at a parenthesis inside the array', () => {
-      // Regression control. Terminating on the first `)` after `FILES=(`
-      // instead of on a line that IS `)` truncates the allowlist at the first
-      // comment that contains one, and a truncated allowlist under-seeds the
-      // closure while every assertion below still passes.
-      const truncating = scriptText.replace(
-        '\nFILES=(\n',
-        '\nFILES=(\n  # a comment with a close paren -> here\n',
-      );
-      expect(truncating).not.toBe(scriptText);
-      expect(parseDeployPinPaths(truncating)).toEqual(pinPaths);
+      // Regression control for the truncation that actually happened: a
+      // comment carrying parentheses BETWEEN two entries silently cut the
+      // parsed allowlist from 30 to 26, and nothing threw.
+      //
+      // The fixture must contain real parenthesis characters. An earlier
+      // version of this case injected a comment that spelled the word "paren"
+      // and contained none, so both parsers agreed on it and reverting
+      // parseDeployPinPaths to the naive terminator left the whole file green.
+      // Hence the explicit character assertions and the negative direction
+      // below: a control that cannot fail is not a control.
+      const firstEntryLine = `  "${pinPaths[0]}"\n`;
+      expect(scriptText).toContain(firstEntryLine);
+      const injectedComment = '  # runs from source (no bundler), so it ships as-is\n';
+      expect(injectedComment).toContain('(');
+      expect(injectedComment).toContain(')');
+      const fixture = scriptText.replace(firstEntryLine, firstEntryLine + injectedComment);
+      expect(fixture).not.toBe(scriptText);
+
+      // Positive: the shipped parser is unaffected by the comment.
+      expect(parseDeployPinPaths(fixture)).toEqual(pinPaths);
+
+      // Negative: the terminator this replaced truncates on the SAME fixture.
+      // Without this half the case cannot tell the two implementations apart.
+      const naive = naiveFirstParenParse(fixture);
+      expect(naive).not.toEqual(pinPaths);
+      expect(naive.length).toBeLessThan(pinPaths.length);
+      expect(naive).not.toContain(pinPaths[pinPaths.length - 1]);
     });
 
     it('parsed every python allowlist member with python ast', () => {
@@ -180,6 +240,22 @@ describe('bot-errors deployer allowlist is closed under import', () => {
           'deploy/scripts/bot-errors-tree-provenance.py',
         ),
       ).toBe(true);
+    });
+
+    it('ignores a closure context built for a different repository root', () => {
+      // The guard is `context.repoRoot === repoRoot`. Relaxing it to
+      // `context ?? createClosureContext(repoRoot)` would let a graph parsed
+      // from some other tree stand in for this one. The closure MEMBERS would
+      // not move - after the fix the allowlist is closed, so the TypeScript
+      // seeds are already members - which is exactly why this asserts on the
+      // EDGES. A foreign graph knows none of them, so it yields a closure that
+      // looks correct and proves nothing.
+      expect(
+        foreignGraphKnowsRepoModule,
+        'the probe context must genuinely be foreign, or this case is vacuous',
+      ).toBe(false);
+      expect(closureWithForeignContext.edges).toEqual(closure.edges);
+      expect(closureWithForeignContext.closure).toEqual(closure.closure);
     });
 
     it('reports members that a shrunken allowlist would leave unshipped', () => {
