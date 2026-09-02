@@ -903,3 +903,71 @@ def test_a_malformed_overflow_counter_does_not_break_post_delivery_bookkeeping(t
     # The malformed value is treated as 0 and the increment still lands, so the
     # predicate keeps its "this key overflowed" signal instead of losing it.
     assert overflow["overflowCount"] == 1
+
+
+# ---------------------------------------------------------------------------
+# (g) the crash window between the state commit and the archive rename
+# ---------------------------------------------------------------------------
+
+def _sent_delivery() -> dict:
+    """The delivery record process_one writes BEFORE it archives the file."""
+    return {"attempts": 1, "status": "sent", "nextAttemptAtEpoch": 0, "lastError": None}
+
+
+def test_a_delivered_event_replayed_after_a_crash_is_not_paged_again(tmp_path):
+    """codex MED-1: the crash window re-pages an event already delivered.
+
+    process_one publishes the sent record into the processing file and commits
+    incident state, THEN os.replace()s the file into sent/. A crash in that
+    window leaves a file in processing/ whose delivery.status is already
+    "sent". reclaim_processing bounces it back to the outbox and ready()
+    accepts it, so the gate sees the SAME delivered event again and forces a
+    second page for a conversation an operator has already been shown.
+    """
+    mod = _load(tmp_path)
+    state = _open_state()
+    event = _event(SCOPE_B, "evt-delivered-then-crashed", 11)
+    assert _gate_then_deliver(mod, event, state) is None
+
+    event["delivery"] = _sent_delivery()
+    reason = mod.should_suppress_send(event, state)
+
+    assert reason is not None, "an already-delivered event must not be paged again"
+
+
+def test_a_delivered_event_replayed_into_an_open_storm_does_not_escape(tmp_path):
+    """ocwx HIGH-2: the storm-branch instance of the same replay.
+
+    The narrow storm exception exists for the FIRST sighting of a conversation
+    nobody has been told about. An event whose delivery already succeeded is
+    not that, so it must stay consolidated as a storm member.
+    """
+    mod = _load(tmp_path)
+    state = _open_state()
+    state["flapState"] = {KEY: {"stormAt": 1, "tripTimestamps": [], "cumulativeCount": 5}}
+    event = _event(SCOPE_B, "evt-storm-delivered", 12)
+    assert _gate_then_deliver(mod, event, state) is None
+
+    event["delivery"] = _sent_delivery()
+    reason = mod.should_suppress_send(event, state)
+
+    assert reason is not None and "flap_storm_member" in reason
+
+
+def test_control_the_same_replay_is_a_duplicate_when_the_scope_gate_is_off(tmp_path):
+    """CONTROL: the re-page belongs to this gate, not to the deployer.
+
+    With BOT_ERRORS_CONVERSATION_SCOPED_SOURCES empty — the rollback the
+    configuration table documents — the identical replay is suppressed as an
+    ordinary duplicate. This leg passes both before and after the fix; it is
+    here to prove the defect is this branch's and not a pre-existing property
+    of the reclaim path.
+    """
+    mod = _load(tmp_path, {"BOT_ERRORS_CONVERSATION_SCOPED_SOURCES": ""})
+    state = _open_state()
+    event = _event(SCOPE_B, "evt-delivered-gate-off", 13)
+    event["delivery"] = _sent_delivery()
+
+    reason = mod.should_suppress_send(event, state)
+
+    assert reason is not None and "duplicate suppressed" in reason

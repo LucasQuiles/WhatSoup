@@ -2197,6 +2197,17 @@ def conversation_scope_is_unrepresented(
     scope = event_conversation_scope(event)
     if scope is None:
         return False
+    # An event whose OWN delivery record already reads "sent" has been shown to
+    # an operator. process_one publishes that record into the processing file
+    # and commits incident state BEFORE os.replace() archives the file, so a
+    # crash in that window leaves a delivered event that reclaim_processing
+    # feeds straight back through this gate. Forcing it again re-pages a
+    # conversation already reported and lets it escape an open flap storm.
+    # A retry after a FAILED delivery still carries a non-sent status, so the
+    # #2428 guarantee below is untouched.
+    delivery = event.get("delivery")
+    if isinstance(delivery, dict) and delivery.get("status") == "sent":
+        return False
     scopes = incident_state.get("conversationScopes")
     seen = scopes.get(key) if isinstance(scopes, dict) else None
     record = seen.get(scope) if isinstance(seen, dict) else None
