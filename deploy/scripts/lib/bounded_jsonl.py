@@ -109,7 +109,19 @@ class _TransactionFailure(Exception):
         super().__init__(status, stage, failure_class)
 
 
-TRIM_HIGH_WATER_RATIO = 1.25
+# Compaction low-water target (#3404).
+#
+# ``max_bytes`` is a HARD cap: every committed file is <= max_bytes, the sole
+# exception being a single record that is itself larger than max_bytes (it then
+# becomes the whole file and is reported as ``oversized_record``). When an append
+# would carry the file past the cap, compaction keeps the newest records that fit
+# under ``TRIM_LOW_WATER_RATIO * max_bytes`` together with the incoming record,
+# leaving ``(1 - TRIM_LOW_WATER_RATIO) * max_bytes`` of headroom. A file that
+# lives at the cap is therefore rewritten once per headroom's worth of appends,
+# not on every append (the 2026-08-28 outbox-drain stall). The earlier design
+# spent the same 25% headroom ABOVE the cap (a 1.25x high-water mark), which
+# made ``BOT_ERRORS_*_JSONL_MAX_BYTES`` a soft bound rather than a maximum.
+TRIM_LOW_WATER_RATIO = 0.75
 
 _COMPONENT_RE = re.compile(r"[a-z][a-z0-9_.-]{0,127}\Z")
 _MUTEX_REGISTRY_LOCK = threading.Lock()
@@ -276,6 +288,11 @@ def _retained_candidate(
 ) -> tuple[deque[bytes], int, bool]:
     retained: deque[bytes] = deque()
     retained_bytes = 0
+    # Trim to the low-water target, not to max_bytes: refilling the file to the
+    # cap would make the very next append compact again (see
+    # TRIM_LOW_WATER_RATIO). An incoming record larger than the target evicts
+    # every retained line and survives alone.
+    low_water = int(max_bytes * TRIM_LOW_WATER_RATIO)
     if target_fd is None:
         retained.append(incoming)
         return retained, len(incoming), len(incoming) > max_bytes
@@ -302,7 +319,7 @@ def _retained_candidate(
                 )
             retained.append(line)
             retained_bytes += len(line)
-            while retained and retained_bytes + len(incoming) > max_bytes:
+            while retained and retained_bytes + len(incoming) > low_water:
                 retained_bytes -= len(retained.popleft())
     retained.append(incoming)
     retained_bytes += len(incoming)
@@ -769,14 +786,15 @@ def _append_under_fence(
                 failure_class="incomplete_jsonl",
             )
 
-    # High-water hysteresis (ported from the 2026-08-28 production fix):
-    # compacting the instant size crosses max_bytes makes a file pinned at the
-    # cap rewrite O(file) on EVERY append, which stalled outbox drains. Allow
-    # growth to TRIM_HIGH_WATER_RATIO * max_bytes, then compact back under
-    # max_bytes once; an oversized single record still compacts immediately.
-    if len(line) > max_bytes or bytes_before + len(line) > int(
-        max_bytes * TRIM_HIGH_WATER_RATIO
-    ):
+    # Hard cap (#3404): compact the moment an append would carry the file past
+    # max_bytes, so no committed append ever leaves st_size > max_bytes. The
+    # amortisation that the 2026-08-28 production fix needed (a file pinned at
+    # the cap must not rewrite O(file) on EVERY append, which stalled outbox
+    # drains) comes from compaction trimming down to TRIM_LOW_WATER_RATIO *
+    # max_bytes rather than from letting the file overshoot the cap. A record
+    # larger than max_bytes satisfies this test on its own and compacts
+    # immediately (it evicts everything and survives alone).
+    if bytes_before + len(line) > max_bytes:
         return _compact_replace(
             parent_fd=parent_fd,
             target_name=target_name,
