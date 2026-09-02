@@ -140,6 +140,59 @@ describe('assertHomeConfinedRenderOptions — physical render admission', () => 
     )).toThrow(/service\.claudeConfigDir must resolve to a path inside the home directory/);
   });
 
+  // -- absoluteness, and independence from the working directory ------------
+
+  it('refuses non-absolute values from a working directory INSIDE home', () => {
+    // The physical check makes a non-absolute input absolute against
+    // process.cwd(). On a real host the repository root sits under the instance
+    // user's home, which is exactly the shape reproduced here, and all three
+    // spellings then resolve to an existing in-home directory and are admitted.
+    // The shape rule refuses them at both production call sites, so this was
+    // never live; the predicate simply must not depend on a check it does not
+    // perform.
+    const repoRoot = path.join(home, 'repo', 'checkout');
+    fs.mkdirSync(repoRoot, { recursive: true, mode: 0o700 });
+    fs.mkdirSync(path.join(home, 'pin', 'bin'), { recursive: true, mode: 0o700 });
+
+    const originalCwd = process.cwd();
+    try {
+      process.chdir(repoRoot);
+      for (const value of ['~/.local/bin', '~', 'pin/bin']) {
+        expect(
+          () => assertHomeConfinedRenderOptions({ pathPrepend: [value] }, home),
+          `expected a refusal for pathPrepend spelling ${value}`,
+        ).toThrow(/service\.pathPrepend\[0\] must resolve to a path inside the home directory/);
+        expect(
+          () => assertHomeConfinedRenderOptions({ claudeConfigDir: value }, home),
+          `expected a refusal for claudeConfigDir spelling ${value}`,
+        ).toThrow(/service\.claudeConfigDir must resolve to a path inside the home directory/);
+      }
+    } finally {
+      process.chdir(originalCwd);
+    }
+  });
+
+  it('refuses the same spellings from a working directory OUTSIDE home', () => {
+    // Control: the refusal is a property of the value, not of where the
+    // rendering process happens to be standing. Without the absoluteness rule
+    // this test passes and the one above fails, which is precisely the
+    // cwd-dependence being removed.
+    fs.mkdirSync(path.join(home, 'pin', 'bin'), { recursive: true, mode: 0o700 });
+
+    const originalCwd = process.cwd();
+    try {
+      process.chdir(outside);
+      for (const value of ['~/.local/bin', '~', 'pin/bin']) {
+        expect(
+          () => assertHomeConfinedRenderOptions({ pathPrepend: [value] }, home),
+          `expected a refusal for pathPrepend spelling ${value}`,
+        ).toThrow(LaunchdRenderConfigError);
+      }
+    } finally {
+      process.chdir(originalCwd);
+    }
+  });
+
   // -- boundary --------------------------------------------------------------
 
   it('refuses the home directory itself and a plain symlink out of home', () => {

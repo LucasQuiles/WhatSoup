@@ -447,9 +447,22 @@ function refuseApplyThatDropsEnv(comparison: GovernedEnvComparison): void {
  * the joined value would refuse every real row. The fleet service-path survey
  * measured both framings; a test below pins the distinction.
  *
+ * PRECONDITION, enforced here rather than assumed: the value must be ABSOLUTE.
+ * `isPhysicallyInsideHome` makes a non-absolute input absolute against
+ * `process.cwd()`, and on a real host the repository root sits UNDER the
+ * instance user's home, so `~/.local/bin`, `~` and a bare relative `pin/bin` would
+ * all be ADMITTED from there while the same spellings are refused from a
+ * working directory outside home. Nothing reaches that today, because both call
+ * sites run the shape rule first and it requires a leading `/`; but this
+ * function is exported and presented as the standalone render-admission rule, so
+ * it must not depend on the ordering of a check it does not itself perform, nor
+ * on where the rendering process happens to be standing.
+ *
  * Messages name the field and the rule only. `LaunchdRenderConfigError` is the
  * marker for operator-safe render failures, so the offending value is never
- * echoed.
+ * echoed. A non-absolute value is refused with the SAME message as an
+ * out-of-home one: both are "does not resolve to a path inside the home
+ * directory", and splitting them would leak the spelling back into the message.
  */
 export function assertHomeConfinedRenderOptions(
   options: LaunchdPlistRenderOptions,
@@ -465,10 +478,16 @@ export function assertHomeConfinedRenderOptions(
 
   for (const { field, value } of entries) {
     let confined: boolean;
-    try {
-      confined = isPhysicallyInsideHome(value, homeDir);
-    } catch {
+    if (!path.isAbsolute(value)) {
+      // Fail closed WITHOUT consulting the filesystem or the working
+      // directory: see the PRECONDITION note above.
       confined = false;
+    } else {
+      try {
+        confined = isPhysicallyInsideHome(value, homeDir);
+      } catch {
+        confined = false;
+      }
     }
     if (!confined) {
       throw new LaunchdRenderConfigError(
