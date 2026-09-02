@@ -248,6 +248,32 @@ cannot be enumerated. `scripts/check-launchd-drift.sh` keeps its separate
 structural-only checks for bot plists; the governed-key comparison lives in
 the reconciler because only the render path knows the expected values.
 
+### Preflight: service paths that are already persisted
+
+Plist render refuses a `service` path that is not a canonical absolute path
+inside the instance user's home directory, or whose existing components do not
+resolve. The refusal happens before any bytes are written, so an instance
+carrying such a value keeps running its installed plist but cannot be installed
+or reconciled until the value is corrected. Sweep the hosts before upgrading.
+
+For each instance, dry-run the reconciler:
+
+```bash
+bash scripts/run-with-pinned-node.sh scripts/reconcile-launchd-restart-policy.ts --instance <instance>
+```
+
+A normal governed-env report means the block is fine. A `LaunchdRenderConfigError`
+names the offending key, `service.claudeConfigDir` or `service.pathPrepend[N]`,
+and the rule it broke, without echoing the value. Then edit that key in the
+instance's `config.json`: make it an absolute path with no `.` or `..`
+component, inside the home directory, and create the target directory if a
+symlink on the path does not resolve. Dropping the entry is also a fix. Re-run
+the dry-run until it reports drift instead of refusing, then apply as usual.
+
+See [`service` (launchd render options)](../configuration.md#service-launchd-render-options)
+for the full rule list and for the trusted-ancestry boundary this check does
+not cover.
+
 ### Adopting a hand-patched PATH (or claude root) into config
 
 For a host whose bot plist was hand-patched — for example `$HOME/.local/bin`

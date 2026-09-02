@@ -589,6 +589,77 @@ render-time revalidation decision the PATH-governance follow-ups require.
 The `PATCH` guard runs on the merged config, so an instance carrying an
 out-of-home entry is refused on every field until the entry is corrected.
 
+#### Preflight for an instance that already carries a service path
+
+Render admission also applies to values that were persisted before it existed.
+An instance whose `service.claudeConfigDir`, or any `service.pathPrepend` entry,
+breaks one of the rules below cannot install or reconcile its plist: the render
+throws before any bytes are written, so the job keeps running from its already
+installed plist and no update reaches it until the value is corrected. Check
+every instance before upgrading.
+
+The rules a persisted value must satisfy, all four:
+
+- **Absolute.** It starts with `/`. Neither `~` nor a relative path is expanded
+  here.
+- **Canonically spelled.** No `.` or `..` component and no doubled separator.
+  A `..` is re-resolved by the kernel at every exec, so a spelling that lands
+  in the home directory today can land elsewhere after a component becomes a
+  symlink.
+- **Inside the instance user's home directory,** after symlinks are resolved.
+- **Physically resolvable.** Every component that exists must resolve. A
+  symlink whose target does not exist is refused, because whoever creates that
+  target later decides where the value points. A component that is simply
+  absent is fine.
+
+To find the values, read the block in each instance's `config.json` under the
+instance config directory, and check the two keys. To have the checker find them
+for you, dry-run the reconciler per instance:
+
+```bash
+bash scripts/run-with-pinned-node.sh scripts/reconcile-launchd-restart-policy.ts --instance <instance>
+```
+
+A `LaunchdRenderConfigError` naming a field is the answer: the message says
+which key and which rule, and never echoes the value. `must be a normalized
+absolute path within the home directory` means the spelling; `must resolve to a
+path inside the home directory` means where it points, or that something on the
+path does not resolve.
+
+To fix one, replace the value with a canonical absolute path inside the home
+directory and create the directory if it is missing, or drop the entry. Editing
+`config.json` directly is enough; the same rules are enforced on the API write
+paths, so `PATCH` refuses a bad replacement rather than persisting it. Re-run
+the dry-run until it reports drift instead of refusing, then apply.
+
+#### Design boundary: trusted ancestry under the home directory
+
+Render admission is a POINT-IN-TIME check, and this is a deliberate boundary
+rather than an oversight. Three properties combine:
+
+- A path whose leaf components do not exist yet is admitted on its longest
+  existing prefix. That is required, not incidental: an agent's default
+  workspace is several not-yet-created segments deep, and refusing it would
+  break instance creation.
+- The value persisted and rendered into `PATH` and `CLAUDE_CONFIG_DIR` is the
+  operator's spelling, not a resolved path.
+- Starting or restarting an instance from an already installed plist does not
+  re-run render admission. Only reconcile and first install do.
+
+So a principal who can write inside an accepted in-home ancestor can create the
+missing component as a symlink pointing outside the home directory AFTER the
+render, and the executable lookup that happens at the next start follows it.
+Render-time validation cannot close that window; no check made before a write
+can bind a filesystem that stays writable afterwards. What the rule does buy is
+that the ancestor must already be inside the home directory, so the trust
+boundary is "whoever can write under this home directory", not "anyone".
+
+Whether that principal is inside the threat model is an owner decision, not a
+property of this code. The stricter alternatives, if it is, are to require the
+complete target to exist at validation time, or to create the leaf directories
+privately before validating them. Both trade instance-creation ergonomics for
+the guarantee, and neither is implemented here.
+
 Unknown keys inside `service` are ignored (the instance-config convention for
 extraneous keys), so a misspelled field is silently inert — read the dry-run
 report after editing the block. Validation stays strict per field: a
