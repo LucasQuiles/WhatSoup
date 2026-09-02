@@ -14,14 +14,21 @@ Contract pinned here:
 - an EXPLICITLY declared empty roster (``--allow-empty-roster``) runs one
   state-only cycle: the departed remote's open records are dispositioned and
   the pruned ledger is saved, and the process exits 0;
-- that cycle performs no remote, probe, claim, acknowledgement or paging
-  effect, because the cycle body is ``for remote in remotes`` and the roster
-  is empty;
+- that cycle performs no remote, probe, claim or acknowledgement effect,
+  because the cycle body is ``for remote in remotes`` and the roster is empty.
+  It is not silent: each retired record's disposition is an info-severity
+  observation the dispatcher delivers as a BOT INFO line, so a full retirement
+  is one informational message per open record;
+- the flag declares an EMPTY poll list, never a MISSING one: with the variable
+  absent it stays on the fail-closed path, so a broken environment file cannot
+  retire the ledger;
 - an UNDECLARED empty roster is unchanged: a missing poll list, and a poll
   list variable that is present but empty, both still fail closed with 64 and
   leave the ledger byte-identical. Inconclusive configuration is not a
   decision to poll nothing;
-- a declared empty roster never daemonises, because there is nothing to poll.
+- a declared empty roster is one-shot: ``--allow-empty-roster`` together with
+  ``--daemon`` is refused at the usage boundary, above the state session, so
+  the pair can never be parked in a unit and rewrite state on a restart loop.
 """
 from __future__ import annotations
 
@@ -84,6 +91,10 @@ def _failing_remote(stack: ExitStack, mod) -> None:
 def _main(mod, argv: list[str]) -> int:
     with patch.object(sys, "argv", ["bot-errors-collector.py", *argv]):
         return mod.main()
+
+
+def _event_files(outbox_dir: Path) -> set[Path]:
+    return set(outbox_dir.glob("*.json"))
 
 
 def _dispositions(outbox_dir: Path) -> list[dict]:
@@ -189,11 +200,26 @@ def test_the_declared_empty_cycle_dispositions_acknowledgement_membership(tmp_st
 
 
 def test_the_declared_empty_cycle_performs_no_remote_effects(tmp_state):
-    """No probing and no paging: the seams are never reached at all."""
+    """No probe, claim or acknowledgement effect: the seams are never reached.
+
+    "No effects" is scoped deliberately. The cycle DOES publish, one
+    info-severity disposition per retired record, which the dispatcher
+    delivers as a BOT INFO line. What it must not do is touch a remote.
+
+    The outbox assertion is a whitelist over the events THIS cycle added, not
+    a blacklist of a few known-bad types. Naming only the types the cycle must
+    not mint would let an unforeseen envelope -- a new escalation tier, a
+    recovery, a health record -- pass unnoticed, which is exactly the hole a
+    "no effects" claim has to close. A delta is also required rather than
+    merely tidy: the seeding cycle mints a critical ``alert`` envelope, so an
+    assertion phrased over the whole outbox would trip on state this test did
+    not create.
+    """
     state_dir, outbox_dir = tmp_state
     with _env(state_dir, outbox_dir, _EMPTY_ROSTER_ENV):
         mod = _load_mod_with_dirs(state_dir, outbox_dir, _EMPTY_ROSTER_ENV)
         _seed_open_alert_through_a_real_cycle(mod, state_dir)
+        before = _event_files(outbox_dir)
 
         with ExitStack() as stack:
             ssh, preflight = _no_remote_effects(stack, mod)
@@ -202,28 +228,15 @@ def test_the_declared_empty_cycle_performs_no_remote_effects(tmp_state):
         assert rc == 0
         assert ssh.call_count == 0
         assert preflight.call_count == 0
-        # The only event the cycle published is the terminal disposition; no
-        # alert, escalation or recovery envelope was minted.
-        assert [event["eventType"] for event in _all_outbox_events(outbox_dir)].count("clear") == 0
 
-
-def test_a_declared_empty_roster_does_not_daemonize(tmp_state):
-    """There is nothing to poll, so the retirement cycle is bounded."""
-    state_dir, outbox_dir = tmp_state
-    with _env(state_dir, outbox_dir, _EMPTY_ROSTER_ENV):
-        mod = _load_mod_with_dirs(state_dir, outbox_dir, _EMPTY_ROSTER_ENV)
-        _seed_open_alert_through_a_real_cycle(mod, state_dir)
-
-        with ExitStack() as stack:
-            _no_remote_effects(stack, mod)
-            daemon = stack.enter_context(
-                patch.object(mod, "run_daemon", side_effect=AssertionError("declared empty roster daemonised"))
-            )
-            rc = _main(mod, ["--daemon", "--allow-empty-roster"])
-
-        assert rc == 0
-        assert daemon.call_count == 0
-        assert len(_dispositions(outbox_dir)) == 1
+        added = sorted(_event_files(outbox_dir) - before)
+        assert added, "the cycle published nothing, so the whitelist proves nothing"
+        for path in added:
+            event = json.loads(path.read_text())
+            diagnostics = event.get("diagnostics") or {}
+            assert event.get("eventType") == "observation", event.get("eventType")
+            assert diagnostics.get("disposition") == "configuration_retired", diagnostics.get("disposition")
+            assert diagnostics.get("recoveryClaimed") is False
 
 
 # --- negative controls: an UNDECLARED empty roster is unchanged -------------
@@ -329,5 +342,71 @@ def test_an_unregistered_key_still_fails_the_declared_empty_cycle_closed(tmp_sta
         stderr = capsys.readouterr().err
         assert "unregistered_alert_source" in stderr
         assert "collector-disk-full" not in stderr
+        assert state_file.read_bytes() == before
+        assert _dispositions(outbox_dir) == []
+
+
+def test_daemon_and_allow_empty_roster_are_mutually_exclusive(tmp_state, capsys):
+    """A declared-empty retirement is one-shot and must never be a daemon.
+
+    Parked in the unit's ExecStart the pair would look harmless while a roster
+    existed, then degrade the moment it emptied: the process would succeed,
+    exit, and be restarted on the service manager's schedule, rewriting state
+    every cycle. The combination is refused at the usage boundary, above the
+    state session, so the ledger is never opened.
+    """
+    state_dir, outbox_dir = tmp_state
+    with _env(state_dir, outbox_dir, _EMPTY_ROSTER_ENV):
+        mod = _load_mod_with_dirs(state_dir, outbox_dir, _EMPTY_ROSTER_ENV)
+        _seed_open_alert_through_a_real_cycle(mod, state_dir)
+        state_file = state_dir / "collector-state.json"
+        before = state_file.read_bytes()
+        capsys.readouterr()
+
+        with ExitStack() as stack:
+            _no_remote_effects(stack, mod)
+            daemon = stack.enter_context(
+                patch.object(mod, "run_daemon", side_effect=AssertionError("refused combination daemonised"))
+            )
+            rc = _main(mod, ["--daemon", "--allow-empty-roster"])
+
+        assert rc == 64
+        stderr = capsys.readouterr().err
+        assert "--allow-empty-roster" in stderr
+        assert "--daemon" in stderr
+        assert daemon.call_count == 0
+        # Refused above the state session: nothing loaded, pruned, saved or published.
+        assert state_file.read_bytes() == before
+        assert _dispositions(outbox_dir) == []
+
+
+def test_the_flag_does_not_declare_anything_when_the_variable_is_absent(tmp_state, capsys):
+    """The flag declares an EMPTY poll list, not a MISSING one.
+
+    Present-and-empty is an operator saying "poll nothing". Absent is the
+    variable never having been set, or an environment file that failed to
+    load -- inconclusive configuration that happens to look identical once
+    the value is read with a default. The flag standing alone over an absent
+    variable must therefore stay on the fail-closed path, or a broken
+    environment file plus a parked flag would retire the whole ledger.
+    """
+    state_dir, outbox_dir = tmp_state
+    with _env(state_dir, outbox_dir, _EMPTY_ROSTER_ENV):
+        mod = _load_mod_with_dirs(state_dir, outbox_dir, _EMPTY_ROSTER_ENV)
+        _seed_open_alert_through_a_real_cycle(mod, state_dir)
+        state_file = state_dir / "collector-state.json"
+        before = state_file.read_bytes()
+        capsys.readouterr()
+
+        with patch.dict("os.environ"):
+            import os
+
+            os.environ.pop("BOT_ERRORS_RELAY_REMOTES", None)
+            with ExitStack() as stack:
+                _no_remote_effects(stack, mod)
+                rc = _main(mod, ["--allow-empty-roster"])
+
+        assert rc == 64
+        assert "no remotes configured" in capsys.readouterr().err
         assert state_file.read_bytes() == before
         assert _dispositions(outbox_dir) == []

@@ -4395,27 +4395,56 @@ def main() -> int:
     parser.add_argument("--allow-empty-roster", action="store_true")
     args = parser.parse_args()
 
-    remotes = args.remote or [r for r in os.environ.get("BOT_ERRORS_RELAY_REMOTES", "").split(",") if r]
-    if not remotes and not args.allow_empty_roster:
-        # Unchanged fail-closed default. An absent or unreadable poll list is
-        # inconclusive configuration, not a decision to poll nothing, so it
-        # stays EX_USAGE and performs no state work at all.
+    if args.daemon and args.allow_empty_roster:
+        # A declared-empty retirement is one-shot by definition, so this pair is
+        # refused at the usage boundary rather than reconciled. Parked in a
+        # unit's ExecStart it would look harmless while a roster existed and
+        # degrade the moment one emptied: the cycle would succeed, exit, and be
+        # restarted on the service manager's schedule, rewriting state every
+        # cycle instead of retiring once. Checked first because it reads only
+        # argv, so the answer cannot depend on the environment, and checked
+        # above the state session, so the ledger is never opened.
+        print(
+            "--allow-empty-roster is a one-shot retirement and cannot be combined with --daemon",
+            file=sys.stderr,
+        )
+        return 64
+    # None (never set, or an environment file that failed to load) is NOT the
+    # same as "" (an operator emptying the list), and reading with a default
+    # collapses the two. Keep the distinction: only a PRESENT variable can be
+    # declared empty.
+    roster_env = os.environ.get("BOT_ERRORS_RELAY_REMOTES")
+    remotes = args.remote or [r for r in (roster_env or "").split(",") if r]
+    declared_empty_roster = args.allow_empty_roster and roster_env is not None
+    if not remotes and not declared_empty_roster:
+        # Unchanged fail-closed default, now covering one more case. An absent
+        # or unreadable poll list is inconclusive configuration, not a decision
+        # to poll nothing, and that stays true when --allow-empty-roster is
+        # standing: the flag declares an EMPTY roster, never a MISSING one, so
+        # a broken environment file cannot retire the whole ledger. EX_USAGE,
+        # and no state work at all.
         print("no remotes configured", file=sys.stderr)
         return 64
     best_effort_remotes = set(args.best_effort_remote or [])
     recovery_successes = max(1, int(args.recovery_successes))
     try:
-        # A declared empty roster is a retirement, not a poll. It runs exactly
+        # A declared empty roster is a retirement, not a poll: it runs exactly
         # one cycle so prune_state_to_configured_remotes can disposition every
-        # open record the departed remotes still own, then stops: daemonising
-        # would poll nothing on an interval forever. The cycle reaches the
+        # open record the departed remotes still own, then stops. The two
+        # guards above make that exact, so no third check is needed here:
+        # reaching this line with args.daemon set proves the roster is
+        # non-empty, because --daemon over an empty roster is either the
+        # fail-closed 64 or the refused combination. The cycle reaches the
         # state session and nothing else, because _run_once_with_state's only
         # work between the prune and the save is `for remote in remotes`, so an
-        # empty roster performs no remote, probe, claim, acknowledgement or
-        # paging effect. An unregistered bucket key still fails the whole cycle
+        # empty roster performs no remote, probe, claim or acknowledgement
+        # effect. It is not silent, though: each retired record's disposition is
+        # an info-severity observation, which the dispatcher delivers as a BOT
+        # INFO line, so a full retirement is one informational message per open
+        # record. An unregistered bucket key still fails the whole cycle
         # closed, which matters most here: retiring every remote at once is the
         # widest reach the pruning validation pass ever has.
-        if args.daemon and remotes:
+        if args.daemon:
             run_daemon(
                 remotes,
                 best_effort_remotes,
