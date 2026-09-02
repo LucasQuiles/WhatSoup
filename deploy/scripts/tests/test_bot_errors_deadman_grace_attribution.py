@@ -500,12 +500,36 @@ def test_deadman_streak_gap_limit_follows_check_interval(env):
 _DEPLOY = Path(__file__).resolve().parents[2]
 
 
+_SYSTEMD_UNITS = {
+    "s": 1, "sec": 1, "second": 1, "seconds": 1,
+    "m": 60, "min": 60, "minute": 60, "minutes": 60,
+    "h": 3600, "hr": 3600, "hour": 3600, "hours": 3600,
+    "d": 86400, "day": 86400, "days": 86400,
+}
+
+
 def _systemd_seconds(value: str) -> int:
-    units = {"s": 1, "sec": 1, "m": 60, "min": 60, "h": 3600}
+    """Parse the systemd time-span forms a timer here could plausibly use (5m, 300s,
+    5min, 1h, 2m30s, 5minutes...). An unknown unit fails the test by name rather than
+    by KeyError so a rewrite in a valid-but-unlisted spelling is diagnosed, not buried."""
     total = 0
-    for number, unit in re.findall(r"(\d+)\s*([a-z]+)?", value.strip()):
-        total += int(number) * units[(unit or "s").lower()]
+    matched = 0
+    for number, unit in re.findall(r"(\d+)\s*([A-Za-z]*)", value.strip()):
+        unit_key = (unit or "s").lower()
+        if unit_key not in _SYSTEMD_UNITS:
+            pytest.fail(f"unknown systemd time unit {unit!r} in {value!r}; extend _SYSTEMD_UNITS")
+        total += int(number) * _SYSTEMD_UNITS[unit_key]
+        matched += 1
+    assert matched, f"no duration found in {value!r}"
     return total
+
+
+def _deadman_plist_block(installer: str) -> str:
+    """The heredoc that write_plist emits for the deadman agent, bounded by the next
+    write_plist call so another block's keys can never be read as the deadman's."""
+    start = installer.index('write_plist "$deadman_label"')
+    nxt = installer.find("write_plist ", start + 1)
+    return installer[start: nxt if nxt != -1 else len(installer)]
 
 
 def test_default_check_interval_matches_the_systemd_timer_cadence(health_check):
@@ -517,10 +541,29 @@ def test_default_check_interval_matches_the_systemd_timer_cadence(health_check):
 
 def test_default_check_interval_matches_the_launchd_deadman_agent_cadence(health_check):
     installer = (_DEPLOY / "scripts" / "install-bot-errors-launchd.sh").read_text(encoding="utf-8")
-    start = installer.index('write_plist "$deadman_label"')
-    match = re.search(r"<key>StartInterval</key><integer>(\d+)</integer>", installer[start:])
+    block = _deadman_plist_block(installer)
+    match = re.search(r"<key>StartInterval</key><integer>(\d+)</integer>", block)
     assert match, "deadman launchd agent has no StartInterval"
     assert int(match.group(1)) == health_check.DEADMAN_CHECK_INTERVAL_SECONDS
+
+
+def test_launchd_deadman_agent_does_not_override_check_interval_inconsistently(health_check):
+    """The macOS agent takes its arguments from the plist's ProgramArguments, not the
+    systemd unit; an explicit --check-interval there must match the timer too."""
+    installer = (_DEPLOY / "scripts" / "install-bot-errors-launchd.sh").read_text(encoding="utf-8")
+    block = _deadman_plist_block(installer)
+    assert "<string>--deadman</string>" in block
+    match = re.search(r"<string>--check-interval</string>\s*<string>(\d+)</string>", block)
+    if match:
+        assert int(match.group(1)) == health_check.DEADMAN_CHECK_INTERVAL_SECONDS
+
+
+def test_systemd_duration_parser_covers_the_plausible_spellings():
+    assert [_systemd_seconds(v) for v in ("5m", "300s", "5min", "1h", "2m30s", "300", "5minutes", "1hr", "1h30min")] == [
+        300, 300, 300, 3600, 150, 300, 300, 3600, 5400
+    ]
+    with pytest.raises(pytest.fail.Exception):
+        _systemd_seconds("5fortnights")
 
 
 def test_shipped_deadman_service_does_not_override_check_interval_inconsistently(health_check):
