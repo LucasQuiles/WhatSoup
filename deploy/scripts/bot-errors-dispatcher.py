@@ -2844,7 +2844,9 @@ def queue_dead_letter_meta_alert(paths: dict[str, Path], now: int) -> int:
     try:
         oldest_file = min(dl_files, key=lambda f: f.stat().st_mtime)
         crumb = json.loads(oldest_file.read_text(encoding="utf-8"))
-        oldest_summary = str(crumb.get("event", {}).get("summary") or "")
+        # A crumb is a persisted artifact and can carry the legacy confined form;
+        # this text is interpolated into a newly minted meta-alert (#2386).
+        oldest_summary = alert_text(crumb.get("event", {}).get("summary") or "")
     except Exception:  # noqa: BLE001
         oldest_summary = ""
 

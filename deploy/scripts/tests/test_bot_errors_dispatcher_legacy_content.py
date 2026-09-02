@@ -343,3 +343,57 @@ def test_manifest_entry_renders_legacy_content() -> None:
     assert "{'" not in entry["summary"]
     assert "{'" not in entry["evidence"]
     assert CANONICAL in entry["summary"]
+
+
+def test_dead_letter_crumb_summary_does_not_bake_repr() -> None:
+    """A dead-letter crumb is a persisted artifact that can carry the legacy form.
+
+    queue_dead_letter_meta_alert reads the oldest crumb's embedded event summary and
+    interpolates it into a NEWLY MINTED meta-alert's evidence, so an unrouted read
+    here re-creates the defect downstream of every other fix in this change.
+    """
+    rendered = _mod.alert_text(legacy_object())
+    event = _mod.dead_letter_meta_event(
+        {"dead_letter": Path("/fixture/state/dead-letter")}, 3, rendered
+    )
+    assert "{\'" not in event["evidence"]
+    assert "correlationDigest" not in event["evidence"]
+    assert CANONICAL in event["evidence"]
+
+
+def test_no_unrouted_alert_content_reads_remain_in_dispatcher() -> None:
+    """Coverage assertion over the whole dispatcher, not a sample.
+
+    The invariant this change establishes is that EVERY alert-content read goes
+    through the alert_text funnel. Per-site tests can only prove the sites someone
+    thought to list; this scans the file so a site nobody listed still fails. It is
+    what catches a read like the dead-letter crumb's, which no design document
+    enumerated.
+
+    `truncate`/`redact` are deliberately excluded from the funnel and are guarded
+    separately by test_truncate_still_stringifies_raw_error.
+    """
+    source = _SCRIPT.read_text(encoding="utf-8")
+    unrouted = []
+    for number, line in enumerate(source.splitlines(), 1):
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue
+        # A raw stringify of an alert-content field, in any container.
+        for field in ("summary", "evidence"):
+            if f'.get("{field}")' not in line:
+                continue
+            if "str(" not in line:
+                continue
+            # Allow the persisted-state field names, which are distinct keys.
+            if any(
+                other in line
+                for other in ("lastSummary", "lastEvidence", "SuppressedClear",
+                              "SuppressedSymptom", "physicalCandidate")
+            ):
+                continue
+            unrouted.append(f"{number}: {stripped}")
+    assert not unrouted, (
+        "alert-content reads must go through event_text/alert_text; unrouted:\n"
+        + "\n".join(unrouted)
+    )
