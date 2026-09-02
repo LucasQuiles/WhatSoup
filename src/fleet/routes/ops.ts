@@ -919,58 +919,6 @@ function validateServiceHomeConfinement(service: unknown, res: ServerResponse): 
 }
 
 /**
- * Confine the launchd `service` block's filesystem fields — `claudeConfigDir`
- * and every `pathPrepend` entry — to the instance user's home directory.
- *
- * Deliberately a ROUTE guard rather than a rule in
- * `validateLaunchdServiceConfig` (src/lib/launchd-service-config.ts): that
- * validator is the shared shape contract and also runs on config *load* and on
- * render admission (assertValidLaunchdPlistRenderOptions ->
- * reconcileLaunchdPlist, src/fleet/platform.ts), so rejecting an out-of-home
- * value there would stop an instance that already persisted one from loading
- * at all. Confining at admission closes the ingress for new writes and leaves
- * already-persisted values loadable; sweeping those is separate work.
- *
- * Runs after the shared validator, so shape (absolute, bounded, no control
- * characters, no ':') is already guaranteed; the typeof guards are
- * defense-in-depth for callers that reorder the checks. Values are validated,
- * never rewritten, so a config round-trips verbatim.
- *
- * Writes a 400 and returns false on the first violation; returns true when the
- * block is absent or entirely home-confined. Mirrors validatePluginDirs above.
- */
-function validateServiceHomeConfinement(service: unknown, res: ServerResponse): boolean {
-  if (service === undefined || service === null) return true;
-  if (typeof service !== 'object' || Array.isArray(service)) return true; // shape validator owns this
-  const block = service as Record<string, unknown>;
-
-  const claudeConfigDir = block['claudeConfigDir'];
-  if (claudeConfigDir !== undefined) {
-    const error = 'service.claudeConfigDir must be within the home directory';
-    if (typeof claudeConfigDir !== 'string') {
-      jsonResponse(res, 400, { error });
-      return false;
-    }
-    if (resolveHomeConfinedPath(claudeConfigDir, res, error) === null) return false;
-  }
-
-  const pathPrepend = block['pathPrepend'];
-  if (Array.isArray(pathPrepend)) {
-    for (let i = 0; i < pathPrepend.length; i++) {
-      const error = `service.pathPrepend[${i}] must be within the home directory`;
-      const entry = pathPrepend[i];
-      if (typeof entry !== 'string') {
-        jsonResponse(res, 400, { error });
-        return false;
-      }
-      if (resolveHomeConfinedPath(entry, res, error) === null) return false;
-    }
-  }
-
-  return true;
-}
-
-/**
  * Deduplicate and normalize an array of phone strings using E.164 format.
  */
 function normalizeAdminPhones(phones: string[]): string[] {
