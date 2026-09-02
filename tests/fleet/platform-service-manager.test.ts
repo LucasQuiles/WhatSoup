@@ -107,8 +107,28 @@ function mockReads({ plist, config }: { plist?: string; config?: unknown } = {})
   });
 }
 
+/**
+ * The mocked home must EXIST on disk for F6b: render admission resolves service
+ * paths physically, so an imaginary home cannot be confined against. The literal
+ * is the one this suite already used for every plist-path assertion; it is
+ * created here rather than assumed.
+ *
+ * The lstat guard is deliberate. A fixed path under the shared temp directory
+ * can be pre-created by another user as a symlink, which would silently move
+ * "home" and make every confinement assertion below meaningless. Refuse loudly
+ * instead of testing against someone else's directory.
+ */
+const SERVICE_HOME = '/tmp/whatsoup-home';
+const realFsPromise = vi.importActual<typeof import('node:fs')>('node:fs');
+
 describe('platform service managers', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
+    const realFs = await realFsPromise;
+    if (realFs.existsSync(SERVICE_HOME) && realFs.lstatSync(SERVICE_HOME).isSymbolicLink()) {
+      throw new Error(`${SERVICE_HOME} is a symlink; refusing to run confinement fixtures against it`);
+    }
+    realFs.mkdirSync(SERVICE_HOME, { recursive: true, mode: 0o700 });
+
     vi.useRealTimers();
     setPlatform(originalPlatform);
     if (originalDocker === undefined) delete process.env.WHATSOUP_DOCKER;
@@ -403,8 +423,8 @@ describe('platform service managers', () => {
       config: {
         name: 'agent',
         service: {
-          claudeConfigDir: '/opt/claude-roots/agent',
-          pathPrepend: ['/opt/service-bin'],
+          claudeConfigDir: `${SERVICE_HOME}/claude-roots/agent`,
+          pathPrepend: [`${SERVICE_HOME}/service-bin`],
         },
       },
     });
@@ -425,8 +445,8 @@ describe('platform service managers', () => {
       { encoding: 'utf-8', mode: 0o644 },
     );
     const written = String(fsMocks.writeFileSync.mock.calls[0]?.[1]);
-    expect(written).toContain('<string>/opt/claude-roots/agent</string>');
-    expect(written).toContain('<string>/opt/service-bin:');
+    expect(written).toContain(`<string>${SERVICE_HOME}/claude-roots/agent</string>`);
+    expect(written).toContain(`<string>${SERVICE_HOME}/service-bin:`);
   });
 
   it('fails a first install closed when the instance service block is invalid', async () => {
@@ -452,7 +472,7 @@ describe('platform service managers', () => {
     setPlatform('darwin');
     mockReads({
       plist: generatedPlistIdentity(),
-      config: { name: 'agent', service: { claudeConfigDir: '/opt/claude-roots/agent' } },
+      config: { name: 'agent', service: { claudeConfigDir: `${SERVICE_HOME}/claude-roots/agent` } },
     });
     const { reconcileLaunchdPlist } = await importPlatform();
 
@@ -485,11 +505,11 @@ describe('platform service managers', () => {
     const { reconcileLaunchdPlist } = await importPlatform();
 
     await expect(reconcileLaunchdPlist('agent', {
-      renderOptions: { claudeConfigDir: '/opt/claude-roots/explicit' },
+      renderOptions: { claudeConfigDir: `${SERVICE_HOME}/claude-roots/explicit` },
     })).resolves.toMatchObject({ dryRun: false });
 
     const written = String(fsMocks.writeFileSync.mock.calls[0]?.[1]);
-    expect(written).toContain('<string>/opt/claude-roots/explicit</string>');
+    expect(written).toContain(`<string>${SERVICE_HOME}/claude-roots/explicit</string>`);
   });
 
   it('rejects caller-supplied renderOptions that violate the shared shape rules', async () => {
@@ -509,7 +529,7 @@ describe('platform service managers', () => {
     const plist = '/tmp/whatsoup-home/Library/LaunchAgents/com.whatsoup.agent.plist';
     mockReads({
       plist: generatedPlistIdentity(),
-      config: { name: 'agent', service: { claudeConfigDir: '/opt/claude-roots/agent' } },
+      config: { name: 'agent', service: { claudeConfigDir: `${SERVICE_HOME}/claude-roots/agent` } },
     });
     childProcessMocks.execFile
       .mockImplementationOnce((_cmd, _args, optionsOrCallback, maybeCallback) => {
@@ -551,7 +571,7 @@ describe('platform service managers', () => {
     const observed = buildPlist('agent');
     mockReads({
       plist: observed,
-      config: { name: 'agent', service: { claudeConfigDir: '/opt/claude-roots/agent' } },
+      config: { name: 'agent', service: { claudeConfigDir: `${SERVICE_HOME}/claude-roots/agent` } },
     });
 
     const result = await reconcileLaunchdPlist('agent', { dryRun: true });
@@ -573,7 +593,7 @@ describe('platform service managers', () => {
     // Simulates the hand-patched-plist class this feature adopts BEFORE the
     // prepend is config-owned: nothing is configured, so the prefix is
     // trivially satisfied and only the tail differs from this shell's PATH.
-    const observed = buildPlist('agent', { pathPrepend: ['/opt/hand-patched-bin'] });
+    const observed = buildPlist('agent', { pathPrepend: [`${SERVICE_HOME}/hand-patched-bin`] });
     mockReads({ plist: observed, config: { name: 'agent' } });
 
     const result = await reconcileLaunchdPlist('agent', { dryRun: true });
@@ -592,8 +612,8 @@ describe('platform service managers', () => {
   it('reports a governed PATH mismatch when the installed PATH lacks the configured prefix', async () => {
     setPlatform('darwin');
     const { buildPlist, reconcileLaunchdPlist } = await importPlatform();
-    const observed = buildPlist('agent', { pathPrepend: ['/opt/hand-patched-bin'] });
-    mockReads({ plist: observed, config: { name: 'agent', service: { pathPrepend: ['/opt/service-bin'] } } });
+    const observed = buildPlist('agent', { pathPrepend: [`${SERVICE_HOME}/hand-patched-bin`] });
+    mockReads({ plist: observed, config: { name: 'agent', service: { pathPrepend: [`${SERVICE_HOME}/service-bin`] } } });
 
     const result = await reconcileLaunchdPlist('agent', { dryRun: true });
 

@@ -17,8 +17,10 @@ import { isValidInstanceName } from './instance-name.ts';
 import { escapeRegExp } from '../lib/regex-utils.ts';
 import {
   assertValidLaunchdPlistRenderOptions,
+  LaunchdRenderConfigError,
   type LaunchdPlistRenderOptions,
 } from '../lib/launchd-service-config.ts';
+import { isPhysicallyInsideHome } from '../lib/home-confinement.ts';
 import { resolveLaunchdPlistRenderOptions } from './launchd-render-options.ts';
 import { compareGovernedLaunchdEnv, type GovernedEnvComparison } from './launchd-env-drift.ts';
 import { repoRoot, tmpRoot, xdgDir } from './paths.ts';
@@ -429,6 +431,54 @@ function refuseApplyThatDropsEnv(comparison: GovernedEnvComparison): void {
 }
 
 /**
+ * Confine the two rendered filesystem values to the instance user's home at
+ * RENDER admission.
+ *
+ * A different call site from config LOAD, so the objection that keeps this rule
+ * out of the shape validator does not apply here. The route guard closes the
+ * write ingress but cannot close this one: a value admitted while a segment was
+ * absent can be poisoned afterwards by creating a symlink there, and admission
+ * has already happened by then. Re-checking at render is what catches that.
+ *
+ * SCOPE, binding: the predicate applies to each `pathPrepend` ENTRY and to
+ * `claudeConfigDir`, and NEVER to the joined rendered `PATH`. `buildPlist`
+ * composes the entries ahead of the generating shell's ambient tail, and that
+ * tail legitimately carries out-of-home system directories, so a predicate over
+ * the joined value would refuse every real row. The fleet service-path survey
+ * measured both framings; a test below pins the distinction.
+ *
+ * Messages name the field and the rule only. `LaunchdRenderConfigError` is the
+ * marker for operator-safe render failures, so the offending value is never
+ * echoed.
+ */
+export function assertHomeConfinedRenderOptions(
+  options: LaunchdPlistRenderOptions,
+  homeDir: string = os.homedir(),
+): void {
+  const entries: Array<{ field: string; value: string }> = [];
+  if (options.claudeConfigDir !== undefined) {
+    entries.push({ field: 'service.claudeConfigDir', value: options.claudeConfigDir });
+  }
+  (options.pathPrepend ?? []).forEach((value, index) => {
+    entries.push({ field: `service.pathPrepend[${index}]`, value });
+  });
+
+  for (const { field, value } of entries) {
+    let confined: boolean;
+    try {
+      confined = isPhysicallyInsideHome(value, homeDir);
+    } catch {
+      confined = false;
+    }
+    if (!confined) {
+      throw new LaunchdRenderConfigError(
+        `${field} must resolve to a path inside the home directory`,
+      );
+    }
+  }
+}
+
+/**
  * Re-render and reload an existing macOS instance plist.
  *
  * A failed bootout is deliberately terminal rather than being guessed as an
@@ -452,6 +502,7 @@ export async function reconcileLaunchdPlist(
   }
   const renderOptions = options.renderOptions ?? resolveLaunchdPlistRenderOptions(name);
   assertValidLaunchdPlistRenderOptions(renderOptions);
+  assertHomeConfinedRenderOptions(renderOptions);
   // Render once: the drift report always describes exactly the bytes an apply
   // would install.
   const rendered = buildPlist(name, renderOptions);
@@ -502,6 +553,7 @@ async function installLaunchdPlist(name: string): Promise<void> {
   // Shape only: home confinement at render admission is a separate, larger
   // change and is deliberately NOT added here.
   assertValidLaunchdPlistRenderOptions(renderOptions);
+  assertHomeConfinedRenderOptions(renderOptions);
   const dest = plistPath(name);
   const previousContents = readExpectedGeneratedLaunchdPlist(name, dest);
   fs.mkdirSync(path.dirname(dest), { recursive: true });

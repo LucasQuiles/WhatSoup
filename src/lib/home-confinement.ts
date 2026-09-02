@@ -115,3 +115,27 @@ export function realpathLongestAbsentTolerantPrefix(targetPath: string): string 
   }
 }
 
+/**
+ * Is `inputPath` physically confined to `homeDir`?
+ *
+ * Applied to ONE path value at a time - a `pathPrepend` ENTRY or
+ * `claudeConfigDir` - and never to a joined `PATH` string. The rendered `PATH`
+ * is the entries followed by the generating shell's ambient tail, and that tail
+ * legitimately carries system directories outside home, so a predicate over the
+ * joined value would reject every real row. The fleet service-path survey
+ * measured this: on the joined value it rejects every live row, on the entries
+ * it rejects none.
+ *
+ * Throws whatever resolution threw; callers decide the refusal shape.
+ */
+export function isPhysicallyInsideHome(inputPath: string, homeDir: string): boolean {
+  const homeReal = fs.realpathSync.native(homeDir);
+  const raw = rawAbsolutePath(inputPath);
+  // Lexical gate first, and STRICT: it is the only check that separates "an
+  // absent directory under home" from "home itself", since both resolve to a
+  // prefix of home.
+  if (!pathIsInsideDirectory(path.resolve(raw), path.resolve(homeDir))) return false;
+  // Physical check, at-or-inside because the resolved prefix legitimately IS
+  // home when every segment below it is still absent.
+  return pathIsAtOrInsideDirectory(realpathLongestAbsentTolerantPrefix(raw), homeReal);
+}
