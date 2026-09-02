@@ -230,10 +230,10 @@ describe('assertHomeConfinedRenderOptions — physical render admission', () => 
   });
 
   // -------------------------------------------------------------------------
-  // BINDING SCOPE CONDITION from the fleet service-path survey
-  // (execution/fleet-service-path-survey-20260902.md): the predicate applies to
-  // each pathPrepend ENTRY and to claudeConfigDir, NEVER to the joined rendered
-  // PATH. buildPlist composes the entries ahead of the generating shell's
+  // BINDING SCOPE CONDITION from the fleet service-path survey, an external
+  // campaign record that is not part of this repository: the predicate applies
+  // to each pathPrepend ENTRY and to claudeConfigDir, NEVER to the joined
+  // rendered PATH. buildPlist composes the entries ahead of the generating shell's
   // ambient tail, and that tail carries out-of-home system directories on every
   // real host, so a predicate over the joined value refuses every live row while
   // the same predicate over the entries refuses none.

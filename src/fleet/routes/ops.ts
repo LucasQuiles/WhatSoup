@@ -897,12 +897,22 @@ function validatePluginDirs(dirs: unknown[], res: ServerResponse): boolean {
  *
  * Deliberately a ROUTE guard rather than a rule in
  * `validateLaunchdServiceConfig` (src/lib/launchd-service-config.ts): that
- * validator is the shared shape contract and also runs on config *load* and on
- * render admission (assertValidLaunchdPlistRenderOptions ->
- * reconcileLaunchdPlist, src/fleet/platform.ts), so rejecting an out-of-home
- * value there would stop an instance that already persisted one from loading
- * at all. Confining at admission closes the ingress for new writes and leaves
- * already-persisted values loadable; sweeping those is separate work.
+ * validator is the shared shape contract and also runs on config *load*, so
+ * rejecting an out-of-home value there would stop an instance that already
+ * persisted one from loading at all.
+ *
+ * This is no longer the only confinement check.
+ * `assertHomeConfinedRenderOptions` (src/fleet/platform.ts) applies the same
+ * rule again at plist RENDER admission, on the reconcile and first-install
+ * paths, so an already-persisted out-of-home value still LOADS but no longer
+ * RENDERS. This guard is the early feedback half: it refuses the write with a
+ * 400 naming the field, while the operator is still at the keyboard, rather
+ * than at the next reconcile.
+ *
+ * The two are not redundant. Admission cannot bind a value whose meaning can
+ * still change: a path admitted while an intermediate segment was absent
+ * resolves to wherever a symlink later created at that segment points, and
+ * admission has already happened by then.
  *
  * Runs after the shared validator, so shape (absolute, bounded, no control
  * characters, no ':') is already guaranteed; the typeof guards are

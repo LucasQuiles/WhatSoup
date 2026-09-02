@@ -319,6 +319,18 @@ function writeAtomicLaunchdPlist(filePath: string, contents: string): void {
   }
 }
 
+/**
+ * Roll a plist back to the bytes captured before this operation.
+ *
+ * This is the one plist WRITE path with no render-admission assertion in its
+ * block, and correctly so: `previousContents` is bytes read from the installed
+ * plist by `readExpectedGeneratedLaunchdPlist`, never a fresh render. Nothing
+ * here calls `buildPlist` or reads a render option, so there is nothing to
+ * admit; whatever wrote those bytes admitted them, possibly a render that
+ * predates the confinement rule. Re-rendering or re-validating instead would
+ * defeat the purpose of a rollback, which is to restore the prior state rather
+ * than to install a new one.
+ */
 function restoreLaunchdPlist(filePath: string, previousContents: string | null): void {
   if (previousContents !== null) {
     writeAtomicLaunchdPlist(filePath, previousContents);
