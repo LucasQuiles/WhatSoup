@@ -1396,10 +1396,17 @@ describe('the value-side guard refuses a nested label that opens its own assignm
 //
 // The row above pins one cell that main masks and this branch retains. This
 // block bounds that narrowing, so the disclosure is measured rather than
-// asserted: the retained class is the BARE label word, and credential material
-// after a label word is still masked here in every form tested.
+// asserted.
+//
+// The bound was originally written as "the bare label word, with nothing after
+// it". That was FALSE: a CHAIN of label words joined by `=` or `:` is retained
+// too (`password=token=secret`), because the guard refuses at every link. The
+// source comment carries the corrected statement and the measured counts. The
+// rows below are unchanged in behaviour; only the claim they are said to prove
+// is narrowed to what they actually show — that credential material after a
+// label word is still masked here.
 
-describe('the bare-label-word narrowing is confined to the label word itself', () => {
+describe('the bare-label-word narrowing: label words and chains of them are retained', () => {
   // Cells main masks and this branch retains. Named, not ranged, so the extent
   // of the narrowing is visible in the test rather than implied.
   const RETAINED_BARE_LABEL_WORDS: readonly string[] = [

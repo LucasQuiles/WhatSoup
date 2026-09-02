@@ -189,11 +189,29 @@ const PHONE_RE = /\+?\d{7,}/g;
 // intended behaviour, and it is the owner's WS-A06 decision to accept or
 // reverse — not a thing to close here.
 //
-// The narrowing is CONFINED to the bare label word. Credential material after a
-// label word is still masked in every tested form: `token=secretAbc123XY`,
-// `token=secret_Abc123XY`, `api_key=tokenAbc123XY` and
-// `bearer=authorizationAbc123XY` all read back as `<label> ***`. The retained
-// text in the residual is the label word itself, with nothing after it.
+// THE RETAINED TEXT IS A LABEL WORD **OR A CHAIN OF LABEL WORDS** joined by `=`
+// or `:`. An earlier version of this comment said the residual was "the label
+// word itself, with nothing after it". That bound is FALSE and the correction
+// matters, because the acceptance decision rests on how wide the residual is.
+// `password=token=secret`, `token=secret=password` and `api_key=token=secret`
+// are all retained here VERBATIM, and main masks the first label's value in
+// each (`password=ToKeN==***`, `token==***=password`). Measured over two-label
+// chains built from the eight label words with both joiners: 112 of 128 are
+// retained verbatim here, and 42 of the 48 that main masks are among them.
+//
+// The chain is retained because the guard refuses at every link: each label is
+// followed by `=` or `:`, which is in the follow set, so the separator branch
+// never matches, and the separator-less branch needs whitespace it never finds.
+//
+// What the residual does NOT extend to is credential material. Once a non-label
+// token appears the chain terminates and the value is masked:
+// `token=secret=Abc123XY` reads back as `token=secret ***` and
+// `api_key=token=secret=Cred99XY` as `api_key=token=secret ***`. Main is the
+// weaker side there — it masks only the first value and leaves the credential
+// in the clear (`token==***=Abc123XY`). Single-label forms are unchanged:
+// `token=secretAbc123XY`, `token=secret_Abc123XY`, `api_key=tokenAbc123XY` and
+// `bearer=authorizationAbc123XY` all read back as `<label> ***`.
+//
 // The trailing-separator forms `token=secret:` and `token=secret=` are retained
 // on the same rule and carry nothing either.
 //
