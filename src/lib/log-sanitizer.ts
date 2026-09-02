@@ -20,10 +20,19 @@
  *
  * WHAT IT RETAINS — and why this file is NOT metadata-only
  * An Error reaching this sanitizer keeps a bounded, pattern-scrubbed copy of
- * its `message`, and of its `cause`'s message, under `errorMessage`. Free text
- * therefore reaches the sink. The masking above is pattern-based: it removes
- * the shapes it knows and cannot remove an unshaped secret or a sentence of
- * private prose that happens to sit in an error message.
+ * its `message` under `errorMessage`, and of its `code`, when that is a string
+ * or a number, under `errorCode`. Its `cause` is kept too: an Error cause is
+ * recursed into the same shape, and a string cause gets the same budget as a
+ * message. Free text therefore reaches the sink. The masking above is
+ * pattern-based: it removes the shapes it knows and cannot remove an unshaped
+ * secret or a sentence of private prose that happens to sit in an error
+ * message.
+ *
+ * One retained shape is NOT bounded, and this is a disclosure, not an
+ * oversight: an OBJECT cause is recursed with key filtering, so a string field
+ * whose key the filters do not match is retained at whatever length it has. A
+ * diagnostic string above the input ceiling is refused outright rather than
+ * shortened, and reads `[oversized error]`.
  *
  * This narrows a live privacy acceptance. WS-A06 in
  * docs/superpowers/specs/2026-07-09-wall-to-wall-audit-remediation-design.md:214
@@ -336,7 +345,18 @@ export function sanitizeLogValue(
           ? { errorCode: boundedErrorText(code) }
           : {}),
         ...(cause !== undefined && cause !== UNREADABLE
-          ? { cause: sanitizeLogValue(cause, seenSet, depth + 1) }
+          ? {
+              // A cause is not always an Error. A string cause used to reach
+              // the sink through the general recursion, which sanitizes but
+              // does not bound, so it could carry far more retained text than
+              // the message beside it. It gets the message's budget instead.
+              // An object cause is still recursed with key filtering, and a
+              // string field the filters do not match is retained in full.
+              cause:
+                typeof cause === 'string'
+                  ? boundedSanitizedText(cause)
+                  : sanitizeLogValue(cause, seenSet, depth + 1),
+            }
           : {}),
       };
     }

@@ -531,6 +531,48 @@ describe('Error branch: bounded diagnostic message', () => {
     expect(sanitizedErr.errorMessage).toBe('wrapper text');
     expect(cause.errorMessage).toBe('root cause text');
   });
+
+  // A cause is not always an Error. A string cause reached the sink through the
+  // general recursion, which sanitizes but does not bound, so it could carry
+  // far more retained text than the message beside it.
+
+  const causeOf = (cause: unknown) =>
+    (
+      (sanitizeLogValue({ err: new Error('wrapper text', { cause }) }) as Record<string, unknown>)
+        .err as Record<string, unknown>
+    ).cause;
+
+  it('bounds a string cause to the same limit as the message', () => {
+    const cause = causeOf('C'.repeat(1200)) as string;
+
+    expect(typeof cause).toBe('string');
+    expect(cause.length).toBeLessThanOrEqual(512);
+    expect(cause.endsWith('[truncated]')).toBe(true);
+  });
+
+  it('refuses an oversized string cause the same way as a message', () => {
+    expect(causeOf('C'.repeat(3000))).toBe('[oversized error]');
+  });
+
+  it('keeps a short string cause intact', () => {
+    expect(causeOf('root cause text')).toBe('root cause text');
+  });
+
+  it('scrubs a secret inside a string cause', () => {
+    const cause = causeOf('upstream said apiToken=L2m3N4o5P6q7') as string;
+
+    expect(cause).not.toContain('L2m3N4o5P6q7');
+    expect(cause).toContain('upstream said');
+  });
+
+  it('does not bound the string fields of an object cause', () => {
+    // Disclosed residual, pinned here so the file header's claim is falsifiable:
+    // an object cause is recursed with key filtering, and a string field the
+    // filters do not match is retained in full rather than bounded.
+    const cause = causeOf({ detail: 'D'.repeat(1200) }) as Record<string, unknown>;
+
+    expect((cause.detail as string).length).toBe(1200);
+  });
 });
 
 // ─── Real-sink coverage: the message survives pino's serializer pipeline ────
