@@ -277,6 +277,14 @@ renders it instead of destroying it:
    bash scripts/run-with-pinned-node.sh scripts/reconcile-launchd-restart-policy.ts --instance <instance>
    ```
 
+   The dry run is refused outright when the persisted `service` block names a
+   path outside the instance user's home directory, or one whose intermediate
+   segment is a symlink that does not resolve. Render-admission confinement runs
+   before the dry-run early return, so the command exits with a
+   `LaunchdRenderConfigError` naming the offending field instead of printing a
+   report. Correct that entry in `config.json` — or drop it from the block — and
+   re-run; the same refusal would otherwise have stopped `--apply` at step 4.
+
 3. Read the `installed plist has N non-governed EnvironmentVariables keys
    (…) that --apply will drop` line of the same report. Reconciling
    regenerates the whole plist, so every listed key (typically hand-added
