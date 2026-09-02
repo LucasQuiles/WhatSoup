@@ -1211,7 +1211,7 @@ class IncidentStateCycle:
         (#3053 regression fix — IncidentStateCycle diverts
         persistence away from save_incident_state).
         """
-        self._payload["updatedAt"] = now_iso()
+        _normalize_incident_state_for_save(self._payload)
         redacted = redacted_dispatcher_payload(self._payload)
         result = self._session.save(redacted, self._capability)
         self._capability = result.capability
@@ -1272,8 +1272,14 @@ def sweep_conversation_scopes(incident_state: dict[str, Any], current: int) -> i
     Expiry previously ran only when another event for that same incident key
     happened to enter the gate, so a quiet or decommissioned instance retained
     digests indefinitely regardless of the retention setting, and closed
-    incidents left their subtree behind. This runs on the save lifecycle, so
-    the bound holds whether or not that key sees traffic again.
+    incidents left their subtree behind. Both incident-state persistence
+    paths apply this through ``_normalize_incident_state_for_save`` -- the
+    controller-backed ``IncidentStateCycle.commit()`` that production takes
+    and the RESTORE-COMPAT ``save_incident_state`` wrapper -- so the bound
+    holds whether or not that key sees traffic again. Naming both paths is
+    deliberate: the bound previously lived on the compat wrapper alone,
+    which production does not call, so this claim was false where it
+    mattered.
 
     Removes: expired scope records, subtrees whose incident is no longer open,
     and empty buckets. Enforces an outer cap on the number of keys tracked so
@@ -1330,6 +1336,39 @@ def sweep_conversation_scopes(incident_state: dict[str, Any], current: int) -> i
     return removed
 
 
+def _normalize_incident_state_for_save(state: dict[str, Any]) -> None:
+    """Pre-save normalization shared by BOTH incident-state persistence paths.
+
+    Bounds the conversation-scope sidecar, then stamps ``updatedAt``.
+
+    This exists because the bound used to live inside ``save_incident_state``
+    alone — the RESTORE-COMPAT bare-JSON wrapper — while production saves go
+    through ``IncidentStateCycle.commit()``: ``run_once`` builds the cycle
+    unconditionally, every save barrier is ``if incident: incident.commit()
+    else: save_incident_state(...)``, and post-adoption
+    ``_require_incident_cycle_if_adopted`` forbids the bare path. The
+    retention window and the outer key cap were therefore enforced only on a
+    path production does not take. One function called from both is what makes
+    the documented bound true wherever the state is written.
+
+    Redaction deliberately stays at each call site: the two paths hand the
+    redacted payload to different persistence APIs (``session.save`` versus
+    ``operation_id`` plus ``publish_state_json``), so folding it in here would
+    also change how many times ``redacted_dispatcher_payload`` is applied on
+    the compat path. That is a separate change and not needed for the bound.
+    """
+    try:
+        sweep_conversation_scopes(state, int(time.time()))
+    except Exception:
+        # Never let housekeeping block a state write; a slightly larger state
+        # file is recoverable, a lost incident update is not. This swallow
+        # arrived with the sweep from save_incident_state and now covers the
+        # controller-backed path too, so a sweep fault cannot fail a
+        # production commit either.
+        pass
+    state["updatedAt"] = now_iso()
+
+
 def save_incident_state(
     paths: dict[str, Path],
     state: dict[str, Any],
@@ -1347,17 +1386,7 @@ def save_incident_state(
     incident_path = paths.get("incident_state")
     if incident_path is None:
         raise ValueError("save_incident_state: paths missing incident_state key")
-    # Bound the conversation-scope sidecar on the save lifecycle. Expiry that
-    # runs only when a key sees traffic is not a bound: a quiet or removed
-    # instance would keep digests past the retention window, and a closed
-    # incident would leave its subtree behind forever.
-    try:
-        sweep_conversation_scopes(state, int(time.time()))
-    except Exception:
-        # Never let housekeeping block a state write; a slightly larger state
-        # file is recoverable, a lost incident update is not.
-        pass
-    state["updatedAt"] = now_iso()
+    _normalize_incident_state_for_save(state)
     target = _durable_target(incident_path)
     observation = observe_json(target)
     generation = (observation.version.generation or 0) + 1

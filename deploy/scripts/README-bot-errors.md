@@ -398,8 +398,11 @@ alert loop. Past the cap an operator already knows the incident is large.
 
 **Rollback.** Setting `BOT_ERRORS_CONVERSATION_SCOPED_SOURCES` to an empty
 value disables the gate entirely: every event behaves as it did before this
-change, and the sidecar is swept away by the normal state lifecycle. No state
-migration is needed in either direction.
+change, and the sidecar is swept away by the normal state lifecycle -- the
+sweep runs on both incident-state save paths, the controller-backed
+`IncidentStateCycle.commit()` that production takes and the RESTORE-COMPAT
+`save_incident_state` wrapper. No state migration is needed in either
+direction.
 
 
 ## NORMATIVE — Alert source and ownership index
