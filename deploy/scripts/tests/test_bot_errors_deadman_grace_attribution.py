@@ -12,13 +12,18 @@ dispatcher keeps reporting ``deadman grace ok``. The alarm is silenced by the
 exact symptom it exists to detect.
 
 ``_restart_explains_cycle_age`` bounds grace by what the restart can actually
-explain: a restart ``service_uptime`` seconds ago accounts for staleness of
-about that duration plus the grace window, and no more.
+explain: a restart ``restart_age`` seconds ago accounts for staleness of
+about that duration plus the grace window, and no more. ``restart_age`` is
+measured on the clock that granted grace (uptime for an active unit,
+state-change age otherwise), and the end-to-end tests below drive ``deadman()``
+itself so that reverting the call site fails the suite.
 """
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -96,7 +101,7 @@ def test_stale_cycle_is_excused_when_the_restart_explains_it(health_check):
     """Just restarted, no cycle yet -- the case grace legitimately covers."""
     assert (
         health_check._cycle_stale_should_report(
-            1000, 900, "service_uptime_seconds=800", 800, 300
+            320, 300, "service_uptime_seconds=20", 20, 300
         )
         is False
     )
@@ -116,11 +121,112 @@ def test_restart_loop_cannot_suppress_the_stale_cycle_decision(health_check):
     )
 
 
-def test_unknown_uptime_under_grace_still_suppresses(health_check):
-    """Attribution impossible -> grace stands, consistent with the helper."""
+def test_unknown_restart_age_under_grace_still_suppresses(health_check):
+    """Direct-caller contract only: ``deadman`` never passes None while grace is active.
+
+    See ``test_deadman_reports_cycle_stale_when_the_unit_never_reenters_active``
+    for the production shape, where the granting age is the state-change age.
+    """
     assert (
         health_check._cycle_stale_should_report(
             3600, 900, "service_state_change_age_seconds=5", None, 300
         )
         is False
     )
+
+
+# ---------------------------------------------------------------------------
+# End-to-end: drive deadman() itself, so the live call site is what is tested.
+# Reverting deadman() to the unconditional ``if not grace_reason`` (keeping the
+# helpers) fails every test in this section; the helper tests above cannot see
+# that revert.
+# ---------------------------------------------------------------------------
+
+
+class _Direct:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def __call__(self, text: str) -> None:
+        self.calls.append(text)
+
+
+class _Email:
+    def __call__(self, subject: str, body: str) -> str:
+        return "rejected"
+
+
+@pytest.fixture()
+def env(monkeypatch, tmp_path: Path) -> SimpleNamespace:
+    spec = importlib.util.spec_from_file_location("bot_errors_health_check_grace_e2e", _SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(mod)
+    monkeypatch.setattr(mod, "state_root", lambda: tmp_path)
+    dispatcher_state = tmp_path / mod.DISPATCHER_STATE
+    socket_file = tmp_path / "personal.sock"
+    socket_file.write_text("")
+    monkeypatch.setattr(mod, "SOCKET_PATH", str(socket_file))
+    svc = {"status": "active", "ages": (600, 600)}
+    monkeypatch.setattr(mod, "service_is_active", lambda _service: svc["status"])
+    monkeypatch.setattr(mod, "service_restart_ages", lambda _service: svc["ages"])
+    clock = {"now": 100_000}
+    monkeypatch.setattr(mod, "current_epoch", lambda: clock["now"])
+    monkeypatch.setattr(mod, "send_direct", _Direct())
+    monkeypatch.setattr(mod, "email_fallback_outcome", _Email())
+
+    def cycle_completed(seconds_ago: int) -> None:
+        dispatcher_state.write_text(json.dumps({"cycleCompletedAt": mod.epoch_to_iso(clock["now"] - seconds_ago)}))
+
+    def run() -> int:
+        return mod.deadman(max_state_age=180, restart_grace=30, cooldown_seconds=300)
+
+    def members() -> set[str]:
+        path = tmp_path / "deadman-state.json"
+        if not path.exists():
+            return set()
+        record = json.loads(path.read_text(encoding="utf-8")).get("episode")
+        return set(record["members"]) if isinstance(record, dict) else set()
+
+    return SimpleNamespace(svc=svc, cycle_completed=cycle_completed, run=run, members=members)
+
+
+def test_deadman_reports_cycle_stale_in_an_active_restart_loop(env):
+    """Uptime 10s on every check (crash loop) must not excuse an hour of staleness."""
+    env.svc["status"] = "active"
+    env.svc["ages"] = (10, 10)
+    env.cycle_completed(3600)
+    assert env.run() == 2
+    assert env.members() == {"cycle_stale"}
+
+
+def test_deadman_reports_cycle_stale_when_the_unit_never_reenters_active(env):
+    """Grace granted from state-change age is bounded by that same age.
+
+    A unit that fails before becoming active (bad EnvironmentFile, missing
+    interpreter) has a fresh state change on every check and an unknown or
+    stale ActiveEnter age. Bounding by uptime would have left both
+    service_inactive and cycle_stale silent forever.
+    """
+    env.svc["status"] = "activating"
+    env.svc["ages"] = (None, 5)
+    env.cycle_completed(3600)
+    assert env.run() == 2
+    assert env.members() == {"cycle_stale"}
+
+
+def test_deadman_keeps_grace_for_a_restart_that_explains_the_staleness(env):
+    """The case grace exists for: just restarted, first cycle not yet complete."""
+    env.svc["status"] = "active"
+    env.svc["ages"] = (10, 10)
+    env.cycle_completed(35)  # <= 10 + 30
+    assert env.run() == 0
+    assert "cycle_stale" not in env.members()
+
+
+def test_deadman_reports_a_stale_cycle_with_no_grace_at_all(env):
+    env.svc["status"] = "active"
+    env.svc["ages"] = (600, 600)
+    env.cycle_completed(600)
+    assert env.run() == 2
+    assert env.members() == {"cycle_stale"}

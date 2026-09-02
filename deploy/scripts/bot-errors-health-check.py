@@ -7837,7 +7837,7 @@ def _deadman_recovery_text(episode: dict[str, Any]) -> str:
 
 def _restart_explains_cycle_age(
     cycle_age_seconds: int,
-    service_uptime: int | None,
+    restart_age: int | None,
     restart_grace: int,
 ) -> bool:
     """Whether a recent restart can actually account for this cycle staleness.
@@ -7854,23 +7854,29 @@ def _restart_explains_cycle_age(
     silenced by exactly the symptom it exists to detect, and an indefinitely
     broken dispatcher reports ``deadman grace ok``.
 
-    A restart that happened ``service_uptime`` seconds ago can only explain a
+    A restart that happened ``restart_age`` seconds ago can only explain a
     cycle that has been stale for about that long (plus the grace window
     itself). Older staleness predates the restart and must be reported.
 
-    Returns True when uptime is unknown: attribution is impossible, so grace
-    stands rather than manufacturing an alert from missing evidence.
+    ``restart_age`` must be measured on the clock that granted grace: service
+    uptime for an active unit, state-change age for a unit that is not active.
+    Bounding a state-change grace by uptime silenced a unit that restart-loops
+    without ever re-entering active (uptime stale or unknown, change age
+    always small). ``deadman`` passes the granting age, so ``None`` is not
+    reachable while grace is active; it is kept for direct callers, where
+    unknown age means attribution is impossible and grace stands rather than
+    manufacturing an alert from missing evidence.
     """
-    if service_uptime is None:
+    if restart_age is None:
         return True
-    return cycle_age_seconds <= service_uptime + restart_grace
+    return cycle_age_seconds <= restart_age + restart_grace
 
 
 def _cycle_stale_should_report(
     cycle_age_seconds: int,
     max_state_age: int,
     grace_reason: str | None,
-    service_uptime: int | None,
+    restart_age: int | None,
     restart_grace: int,
 ) -> bool:
     """Whether cycle staleness is reportable: stale, and not excused by a restart.
@@ -7887,7 +7893,7 @@ def _cycle_stale_should_report(
     if not grace_reason:
         return True
     return not _restart_explains_cycle_age(
-        cycle_age_seconds, service_uptime, restart_grace
+        cycle_age_seconds, restart_age, restart_grace
     )
 
 
@@ -7911,13 +7917,20 @@ def deadman(max_state_age: int, restart_grace: int, cooldown_seconds: int) -> in
     service_status = service_is_active(DISPATCHER_SERVICE)
     service_uptime, service_state_change_age = service_restart_ages(DISPATCHER_SERVICE)
     grace_reason = None
+    # Age of the event that granted grace, on the clock that granted it. The
+    # staleness bound below must use this age, not service_uptime: a unit that
+    # restart-loops without re-entering active keeps its state-change age under
+    # grace on every check while ActiveEnterTimestamp stays stale or unset.
+    grace_age: int | None = None
     if service_status != "active":
         if service_state_change_age is not None and service_state_change_age <= restart_grace:
             grace_reason = f"service_state_change_age_seconds={service_state_change_age}"
+            grace_age = service_state_change_age
         else:
             active_members["service_inactive"] = {"status": _bounded_service_status(service_status)}
     elif service_uptime is not None and service_uptime <= restart_grace:
         grace_reason = f"service_uptime_seconds={service_uptime}"
+        grace_age = service_uptime
     if not state.exists():
         if not grace_reason:
             active_members["state_missing"] = {}
@@ -7928,7 +7941,7 @@ def deadman(max_state_age: int, restart_grace: int, cooldown_seconds: int) -> in
         if state_age is not None and state_age > restart_grace and not grace_reason:
             active_members["cycle_incomplete"] = {"state_age_seconds": state_age}
     elif _cycle_stale_should_report(
-        cycle_completed_at, max_state_age, grace_reason, service_uptime, restart_grace
+        cycle_completed_at, max_state_age, grace_reason, grace_age, restart_grace
     ):
         active_members["cycle_stale"] = {"cycle_age_seconds": cycle_completed_at}
     if not SOCKET_PATH or not Path(SOCKET_PATH).exists():

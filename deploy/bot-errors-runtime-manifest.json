@@ -101,7 +101,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "5139899748a6bf3fb4929fa8e9c41fb3c367e6a3773b1d4b9b09651f0a88747e",
+      "sha256": "308556d6ef59bcfc3a0b6f3fe831bb0ecc6945078f16610709534b733283a3e5",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -180,7 +180,9 @@
         "required_tools_lifecycle",
         "save_tool_inventory_state",
         "MCP_TOOL_INVENTORY_UNOBSERVED",
-        "MCP_REQUIRED_TOOLS_MISSING"
+        "MCP_REQUIRED_TOOLS_MISSING",
+        "_restart_explains_cycle_age",
+        "_cycle_stale_should_report"
       ]
     },
     {
