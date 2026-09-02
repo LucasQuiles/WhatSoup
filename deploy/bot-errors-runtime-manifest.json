@@ -597,6 +597,15 @@
       ]
     },
     {
+      "path": "src/lib/alert-evidence.ts",
+      "sha256": "b15832328db5aaade620a23987f26c9102e2073b01ba9ae85733537f0da2ac32",
+      "mustContain": [
+        "confineAlertContent",
+        "ConfinedAlertContent",
+        "bot-errors-evidence:"
+      ]
+    },
+    {
       "path": "src/lib/bot-errors-outbox.ts",
       "sha256": "4a0215bdf4a7ad9223beeabb7268a3f1bd1c16eabd979234b0e81aee51ea2ffc",
       "mustContain": [
@@ -616,6 +625,29 @@
         "runtimeAgentHealthSignals",
         "turnRecoveryBlockedUnsafe",
         "autoCompactActiveBackoffScopes"
+      ]
+    },
+    {
+      "path": "src/lib/private-fs.ts",
+      "sha256": "405975415cbbb023b19d8497afb6c3be09e411611b4dc79623f95b2c17faf60c",
+      "mustContain": [
+        "forceEnsurePrivateDirectorySync",
+        "fsyncDirectory"
+      ]
+    },
+    {
+      "path": "src/lib/redaction-patterns.ts",
+      "sha256": "c91114fedbba5bbabb1d8285cb47d0a1f1b008207dde92578ff3128dc89c827d",
+      "mustContain": [
+        "jidPattern"
+      ]
+    },
+    {
+      "path": "src/lib/type-guards.ts",
+      "sha256": "a5c720ed58c8bea11774cbc4d5eb1edb4fc7bbce4cabdd36dde74bdcc2e58e92",
+      "mustContain": [
+        "asNonEmptyString",
+        "isRecord"
       ]
     }
   ]
