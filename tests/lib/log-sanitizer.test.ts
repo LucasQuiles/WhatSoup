@@ -1439,3 +1439,71 @@ describe('the bare-label-word narrowing is confined to the label word itself', (
     });
   }
 });
+
+// ─── Why the guard's refusal set stops at whitespace, `:` and `=` ───────────
+//
+// The follow set is a REFUSAL set: a nested label followed by one of its
+// characters makes the separator branch reject. So adding characters to it
+// makes the sanitizer mask LESS, not more, and that is counter-intuitive
+// enough to have been proposed as an improvement.
+//
+// The joiners below are masked precisely BECAUSE the guard admits them: the
+// value class runs to the next whitespace, so it swallows the joiner and the
+// credential together in one match. Widening the refusal set to
+// `[\s:=./+~]` was measured through this same sink and turns every row here
+// into a leak — the guard rejects, the separator-less branch finds no
+// whitespace, the separator branch finds no `[:=]`, and the whole assignment
+// is retained with the credential in it.
+//
+// These rows exist so that a future widening of the follow set fails a test
+// instead of being merged as a tightening.
+
+describe('joiners outside the guard follow set stay masked', () => {
+  // [message, expected output]
+  const ADMITTED_JOINER_SHAPES: ReadonlyArray<readonly [string, string]> = [
+    [
+      'upstream call failed token=secret.SYNTHETICVALUE at gate',
+      'upstream call failed token *** at gate',
+    ],
+    [
+      'upstream call failed token=secret/SYNTHETICVALUE at gate',
+      'upstream call failed token *** at gate',
+    ],
+    [
+      'upstream call failed token=secret+SYNTHETICVALUE at gate',
+      'upstream call failed token *** at gate',
+    ],
+    [
+      'upstream call failed token=secret~SYNTHETICVALUE at gate',
+      'upstream call failed token *** at gate',
+    ],
+    [
+      'upstream call failed api_key=token.abc123 at gate',
+      'upstream call failed api_key *** at gate',
+    ],
+  ];
+
+  it('covers the four joiners plus the compound-label case', () => {
+    // Coverage assertion: a shrunk table would otherwise pass silently.
+    expect(ADMITTED_JOINER_SHAPES).toHaveLength(5);
+    expect(new Set(ADMITTED_JOINER_SHAPES.map(([message]) => message)).size).toBe(5);
+    // Each row must actually carry the joiner it is named for, so a rewritten
+    // fixture cannot quietly test the same shape five times.
+    for (const joiner of ['.', '/', '+', '~']) {
+      expect(
+        ADMITTED_JOINER_SHAPES.some(([message]) => message.includes(`secret${joiner}`)),
+      ).toBe(true);
+    }
+  });
+
+  for (const [message, expected] of ADMITTED_JOINER_SHAPES) {
+    it(`masks through the sink: ${message}`, async () => {
+      const line = await captureSanitizedErrorLine(message);
+      const out = (JSON.parse(line) as { err: Record<string, unknown> }).err
+        .errorMessage as string;
+      expect(line).not.toContain('SYNTHETICVALUE');
+      expect(line).not.toContain('abc123');
+      expect(out).toBe(expected);
+    });
+  }
+});
