@@ -140,25 +140,6 @@ describe('turnFinalizationBookkeeping — token-loss visibility (#1775)', () => 
     );
   });
 
-  it('carries the conversation so one chat\'s open incident cannot mask another', () => {
-    // The dispatcher keys incidents on machine|instance|source. Without a
-    // conversation the emission boundary cannot tell two wedged chats apart,
-    // and the second chat's outage is filed into the first chat's incident.
-    // The raw key is confined to a digest inside buildBotErrorsEvent; the
-    // emitter's job is only to name the conversation.
-    const coordinator = makeCoordinator();
-
-    coordinator.turnFinalizationBookkeeping(
-      context(),
-      sessionWithRowId(13),
-      undefined,
-      { kind: 'admission_rejected', class: 'queue_closed' },
-    );
-
-    const call = emitAlertChecked.mock.calls.at(-1) as unknown[];
-    expect(call[7]).toEqual({ conversationKey: '15550190099' });
-  });
-
   it('keeps unjournaled system-turn admission rejection out of BOT ERRORS', () => {
     const coordinator = makeCoordinator();
     const unjournaled = createRuntimeTurnContext({

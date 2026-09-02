@@ -396,6 +396,28 @@ CONVERSATION_SCOPE_RETENTION_SECONDS = positive_env_int(
 CONVERSATION_SCOPE_MAX_PER_KEY = positive_env_int(
     "BOT_ERRORS_CONVERSATION_SCOPE_MAX_PER_KEY", 256
 )
+# Sentinel record marking that this incident key has exceeded the per-key cap.
+# Not a conversation, and deliberately not a valid scope token, so it can never
+# collide with one: valid scopes carry the cs1_ tag and 16 hex characters.
+#
+# Once set, a scope that is NOT individually tracked is treated as already
+# represented rather than as new. Without that, eviction recycles conversations
+# into "new" status — with more failing conversations than the cap, each is
+# dropped before it recurs, so every recurrence forces another notification and
+# one large incident becomes a permanent alert loop that also bypasses storm
+# consolidation. Measured at cap 4 with 5 cycling conversations: 30 events
+# produced 30 notifications instead of 5.
+#
+# The trade is deliberate and is the safer direction at capacity: past the cap
+# an operator is already being told the incident is large, and the storm alert
+# carries the rate, so losing per-conversation granularity there is better than
+# paging without bound.
+CONVERSATION_SCOPE_OVERFLOW_KEY = "__overflow__"
+# Outer bound on how many incident keys carry a scope sidecar at once, so a
+# long tail of historical keys cannot grow the state file without limit.
+CONVERSATION_SCOPE_MAX_KEYS = positive_env_int(
+    "BOT_ERRORS_CONVERSATION_SCOPE_MAX_KEYS", 128
+)
 # A conversation scope is a TAGGED token: the version tag "cs1_" followed by
 # exactly CONVERSATION_SCOPE_HEX_LENGTH lowercase hex characters, minted at the
 # emission boundary (src/lib/alert-evidence.ts, CONVERSATION_SCOPE_TAG).
@@ -1244,6 +1266,70 @@ class _CompatPublication:
         return {"advance_allowed": self.advance_allowed}
 
 
+def sweep_conversation_scopes(incident_state: dict[str, Any], current: int) -> int:
+    """Prune the conversation-scope sidecar across the WHOLE state.
+
+    Expiry previously ran only when another event for that same incident key
+    happened to enter the gate, so a quiet or decommissioned instance retained
+    digests indefinitely regardless of the retention setting, and closed
+    incidents left their subtree behind. This runs on the save lifecycle, so
+    the bound holds whether or not that key sees traffic again.
+
+    Removes: expired scope records, subtrees whose incident is no longer open,
+    and empty buckets. Enforces an outer cap on the number of keys tracked so
+    a long tail of historical keys cannot grow the map without limit.
+    Returns the number of keys removed.
+    """
+    scopes = incident_state.get("conversationScopes")
+    if not isinstance(scopes, dict):
+        return 0
+    open_incidents = incident_state.get("openIncidents")
+    open_keys = set(open_incidents) if isinstance(open_incidents, dict) else set()
+    removed = 0
+
+    for key in list(scopes):
+        records = scopes.get(key)
+        if not isinstance(records, dict):
+            scopes.pop(key, None)
+            removed += 1
+            continue
+        # A closed incident's per-conversation bookkeeping is dead weight: the
+        # next alert under that key opens a fresh incident and every
+        # conversation is legitimately new again.
+        if key not in open_keys:
+            scopes.pop(key, None)
+            removed += 1
+            continue
+        for scope in list(records):
+            record = records.get(scope)
+            if not isinstance(record, dict):
+                records.pop(scope, None)
+                continue
+            if current - _conversation_scope_last_seen(record) > CONVERSATION_SCOPE_RETENTION_SECONDS:
+                records.pop(scope, None)
+        if not records:
+            scopes.pop(key, None)
+            removed += 1
+
+    if len(scopes) > CONVERSATION_SCOPE_MAX_KEYS:
+        def _key_recency(name: str) -> float:
+            records = scopes.get(name)
+            if not isinstance(records, dict) or not records:
+                return 0
+            return max(
+                (_conversation_scope_last_seen(item) for item in records.values()),
+                default=0,
+            )
+
+        for oldest in sorted(scopes, key=_key_recency)[: len(scopes) - CONVERSATION_SCOPE_MAX_KEYS]:
+            scopes.pop(oldest, None)
+            removed += 1
+
+    if not scopes:
+        incident_state.pop("conversationScopes", None)
+    return removed
+
+
 def save_incident_state(
     paths: dict[str, Path],
     state: dict[str, Any],
@@ -1261,6 +1347,16 @@ def save_incident_state(
     incident_path = paths.get("incident_state")
     if incident_path is None:
         raise ValueError("save_incident_state: paths missing incident_state key")
+    # Bound the conversation-scope sidecar on the save lifecycle. Expiry that
+    # runs only when a key sees traffic is not a bound: a quiet or removed
+    # instance would keep digests past the retention window, and a closed
+    # incident would leave its subtree behind forever.
+    try:
+        sweep_conversation_scopes(state, int(time.time()))
+    except Exception:
+        # Never let housekeeping block a state write; a slightly larger state
+        # file is recoverable, a lost incident update is not.
+        pass
     state["updatedAt"] = now_iso()
     target = _durable_target(incident_path)
     observation = observe_json(target)
@@ -2105,6 +2201,11 @@ def conversation_scope_is_unrepresented(
     seen = scopes.get(key) if isinstance(scopes, dict) else None
     record = seen.get(scope) if isinstance(seen, dict) else None
     if not isinstance(record, dict):
+        # At capacity, an untracked scope is treated as represented: it may be
+        # one this key has already seen and evicted, and re-forcing evicted
+        # conversations is what turns a large incident into an alert loop.
+        if isinstance(seen, dict) and CONVERSATION_SCOPE_OVERFLOW_KEY in seen:
+            return False
         return True
     if current - _conversation_scope_last_seen(record) > CONVERSATION_SCOPE_RETENTION_SECONDS:
         return True
@@ -2187,11 +2288,21 @@ def record_conversation_scope_delivered(
             ]:
                 event_ids.pop(oldest, None)
 
-    if len(seen) > CONVERSATION_SCOPE_MAX_PER_KEY:
-        for oldest in sorted(seen, key=lambda item: _conversation_scope_last_seen(seen[item]))[
-            : len(seen) - CONVERSATION_SCOPE_MAX_PER_KEY
+    tracked = [item for item in seen if item != CONVERSATION_SCOPE_OVERFLOW_KEY]
+    if len(tracked) > CONVERSATION_SCOPE_MAX_PER_KEY:
+        # Evicting alone would recycle those conversations into "new" on their
+        # next event. Record that the key overflowed, so the predicate stops
+        # treating untracked scopes as unseen.
+        for oldest in sorted(tracked, key=lambda item: _conversation_scope_last_seen(seen[item]))[
+            : len(tracked) - CONVERSATION_SCOPE_MAX_PER_KEY
         ]:
             seen.pop(oldest, None)
+        overflow = seen.get(CONVERSATION_SCOPE_OVERFLOW_KEY)
+        if not isinstance(overflow, dict):
+            overflow = {"eventIds": {}, "overflowedAt": current, "overflowCount": 0}
+        overflow["lastSeenAt"] = current
+        overflow["overflowCount"] = int(overflow.get("overflowCount") or 0) + 1
+        seen[CONVERSATION_SCOPE_OVERFLOW_KEY] = overflow
 
     scopes = incident_state.get("conversationScopes")
     if isinstance(scopes, dict):
