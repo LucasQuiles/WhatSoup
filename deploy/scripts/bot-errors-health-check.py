@@ -4639,13 +4639,29 @@ def probe_directory_is_outside_workspace(probe_cwd: str, workspace: str) -> bool
     # remedy: on POSIX it is the identity function, so it would look like a fix
     # and change nothing. Ask the FILESYSTEM instead, walking the probe's
     # ancestors and comparing by inode.
+    #
+    # Existence is decided ONCE, before the walk. A configured workspace that
+    # does not exist cannot contain anything, so the probe is outside it and the
+    # check does not apply -- refusing there would refuse EVERY probe on such an
+    # instance, which is the regression this control already had to fix once.
+    # Disclosed rather than silent: an absent configured workspace is reported
+    # as "outside", not as a containment failure.
+    if not os.path.exists(target):
+        return True
+    # From here the workspace EXISTS, so an unreadable identity is a fact about
+    # this process, not about the paths: a permission error, a transient mount
+    # failure, or the path being replaced mid-walk. Swallowing it and continuing
+    # let the loop run out at the filesystem root and answer "outside", which
+    # spawns the provider -- a fail-OPEN branch inside a containment control, and
+    # the opposite of what the realpath failure above does. Any OSError now
+    # refuses, which is the same direction as every other arm of this function.
     current = probe
     while True:
         try:
             if os.path.samefile(current, target):
                 return False
         except OSError:
-            pass
+            return False
         parent = os.path.dirname(current)
         if parent == current:
             return True

@@ -2587,6 +2587,93 @@ def test_probe_directory_predicate_resolves_symlinks_before_deciding(tmp_path):
     assert _mod.probe_directory_is_outside_workspace(str(other_link), str(workspace))
 
 
+def _force_samefile_oserror(monkeypatch):
+    def _raise(_a, _b):
+        raise OSError("simulated: identity unreadable")
+    monkeypatch.setattr(os.path, "samefile", _raise)
+
+
+def test_probe_directory_refuses_when_identity_is_unreadable(monkeypatch, tmp_path):
+    """The ancestor walk must not answer 'outside' when it cannot tell.
+
+    Swallowing OSError and continuing let the loop run out at the filesystem
+    root and return True, which the caller reads as "safe" and SPAWNS. That is a
+    fail-OPEN branch inside a containment control, and the opposite direction
+    from the realpath failure in the same function, which refuses.
+
+    The fixture reaches the walk rather than the string prefix: the workspace and
+    the probe are spelled with different case, so the prefix test cannot decide
+    and only identity can.
+    """
+    workspace = tmp_path / "Workspace"
+    (workspace / "tmp").mkdir(parents=True)
+    probe = str(tmp_path / "workspace" / "tmp")
+    if not os.path.exists(probe):
+        pytest.skip("case-sensitive volume: this spelling is a different directory here")
+
+    # Control: with identity readable the probe is correctly seen as inside.
+    assert not _mod.probe_directory_is_outside_workspace(probe, str(workspace))
+
+    _force_samefile_oserror(monkeypatch)
+    assert not _mod.probe_directory_is_outside_workspace(probe, str(workspace)), (
+        "an unreadable identity must refuse, not report the probe as outside"
+    )
+
+
+def test_probe_directory_reports_an_absent_workspace_as_outside(monkeypatch, tmp_path):
+    """A configured workspace that does not exist cannot contain the probe.
+
+    Existence is decided ONCE, before the walk, precisely so this case does not
+    reach the OSError arm. Refusing here would refuse EVERY probe on an instance
+    whose configured workspace is absent, which is the regression this control
+    already had to fix once. Disclosed rather than silent: absent reads as
+    outside.
+    """
+    absent = str(tmp_path / "never-created")
+    probe = tmp_path / "probe"
+    probe.mkdir()
+
+    assert _mod.probe_directory_is_outside_workspace(str(probe), absent)
+    # Still true when identity is unreadable, because existence decided first.
+    _force_samefile_oserror(monkeypatch)
+    assert _mod.probe_directory_is_outside_workspace(str(probe), absent)
+
+
+def test_probe_directory_refuses_a_probe_that_does_not_exist(tmp_path):
+    """A vanished probe directory refuses rather than reading as outside.
+
+    Disclosed consequence of the existence rule: in production the probe is a
+    directory the probe itself just created, so this arm is defensive.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    assert not _mod.probe_directory_is_outside_workspace(str(tmp_path / "gone"), str(workspace))
+
+
+def test_probe_directory_identity_holds_through_a_symlinked_alias(tmp_path):
+    """LOW-1. A platform-independent identity row, runnable on Linux CI.
+
+    The case-variant row above can only assert its point on a case-INSENSITIVE
+    volume and skips elsewhere, so on a Linux runner it proves nothing. A
+    symlinked alias of the workspace exercises the same identity question on
+    every platform: the probe reached through the alias is INSIDE the workspace,
+    and a string comparison of the two spellings would not say so.
+    """
+    workspace = tmp_path / "workspace"
+    (workspace / "inner").mkdir(parents=True)
+    alias = tmp_path / "alias"
+    alias.symlink_to(workspace)
+
+    # Probe reached through the alias, workspace named directly.
+    assert not _mod.probe_directory_is_outside_workspace(str(alias / "inner"), str(workspace))
+    # And the mirror: workspace named through the alias.
+    assert not _mod.probe_directory_is_outside_workspace(str(workspace / "inner"), str(alias))
+    # Control: a directory outside the workspace stays outside through the alias.
+    other = tmp_path / "other"
+    other.mkdir()
+    assert _mod.probe_directory_is_outside_workspace(str(other), str(alias))
+
+
 def test_probe_directory_predicate_is_case_insensitive_aware(tmp_path):
     """S-A. On a case-insensitive volume, case must not read as 'outside'.
 
@@ -2605,13 +2692,15 @@ def test_probe_directory_predicate_is_case_insensitive_aware(tmp_path):
     # function on POSIX, so the branch below would never take the
     # case-insensitive path even on a volume that is.
     same_directory = os.path.exists(variant) and os.path.samefile(variant, str(workspace))
-    if same_directory:
-        assert not _mod.probe_directory_is_outside_workspace(str(inner), variant)
-    else:
-        # Case-SENSITIVE volume: the two really are different directories, so
-        # "outside" is the correct answer and this row documents the divergence
-        # rather than asserting the wrong thing for the platform it runs on.
-        assert _mod.probe_directory_is_outside_workspace(str(inner), variant)
+    if not same_directory:
+        # Case-SENSITIVE volume, which is the Linux CI default: the two spellings
+        # really are different directories, so there is no case question to
+        # answer here and this row asserts nothing about the fix. Skipped with
+        # the measured reason rather than inverted into a vacuous pass; the
+        # symlink-alias row above carries the identity assertion on every
+        # platform.
+        pytest.skip("case-sensitive volume: the two spellings are different directories here")
+    assert not _mod.probe_directory_is_outside_workspace(str(inner), variant)
     # Control, true on every volume: the exact spelling is inside.
     assert not _mod.probe_directory_is_outside_workspace(str(inner), str(workspace))
 
