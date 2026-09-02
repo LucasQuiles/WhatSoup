@@ -486,6 +486,7 @@ import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
 import {
   applyRouteChangeAndRecycle,
   consumePendingRecycleIfIdle,
+  handleModelCommand,
   PIN_RECEIPT_SEND_TIMEOUT_MS,
   recordRouteModelPin,
   recycleLiveSession,
@@ -2602,6 +2603,127 @@ describe('NL routing handlers (nlRouting flag)', () => {
         chatJid: CHAT, senderJid: SENDER_A, content: 'anything at all', messageId: 'msg-after-stall',
       }));
       expect(mockSession.sendTurn).toHaveBeenCalled();
+    });
+
+    // S2 (#2121 follow-up review) — the RUNTIME half of the A1 capture guard.
+    // The store test proves recordKeepReceiptMessageId REFUSES a sticky row;
+    // this proves the runtime actually REACHES that call with a sticky row
+    // underneath, so the guard is load-bearing rather than defensive.
+    //
+    // Two conditions must hold at once: the pin outcome is 'sticky_kept' (so
+    // no write clears the id) and the recycle is NOT a no-op (so the echo is
+    // the honest keep-promising receipt, not the plain "Already set (sticky)"
+    // line, which promises nothing and never reaches the capture). They
+    // coincide when the LIVE SESSION is on a different route from the sticky
+    // pin — the ordinary shape after a restart or a /new, where the session
+    // was spawned before the pin existed.
+    //
+    // Driven through the exported `handleModelCommand` with a port whose
+    // getActiveQueue() is null, which is the state the recycle itself leaves
+    // behind: recycleLiveSession drops the per-chat queue, and only then does
+    // the receipt go out on the messenger carrying a real transport id. Behind
+    // a live queue the send is accepted with a NULL id by design (#2981
+    // car-A), so no capture is attempted at all and the test would be vacuous.
+    it('a sticky re-confirm that recycles does not re-arm the receipt on the sticky row', async () => {
+      const prefMod = await import('../../../src/runtimes/agent/chat-preference-db.ts');
+      const keysMod = await import('../../../src/runtimes/agent/preference-keys.ts');
+      prefMod.ensureChatPreferenceSchema(routingDb);
+      const { chatKey, senderKey } = keysMod.preferenceKeys(routingDb, CHAT, SENDER_A);
+
+      // The pin as `/model 2 default` + `keep` leaves it: permanent, and
+      // holding no receipt (A1 consumed it at promotion).
+      prefMod.setPreference(routingDb, {
+        chatJid: chatKey,
+        senderJid: senderKey,
+        intent: 'provider_specific',
+        requestedProvider: 'opencode-cli',
+        scope: 'sticky',
+        pinStrict: true,
+        fallbackPermitted: false,
+        updatedAt: Date.now(),
+        expiresAt: null,
+        requestedModel: null,
+        validatedProvider: null,
+        modelPinVerified: null,
+        requestedEffort: null,
+        keepReceiptMessageId: null,
+      });
+
+      const sent: Array<{ text: string; id: string | null }> = [];
+      let outboundId = 0;
+      const port = {
+        db: routingDb,
+        instanceName: 'test',
+        sessionScope: 'single',
+        // 'sticky_kept': the row is already permanent and identical, so the
+        // store is not written — this is the real production return for a
+        // re-confirm, not a stub shortcut.
+        recordRoutePreference: () => 'sticky_kept' as const,
+        // The live session is on the DEFAULT route while the pin names
+        // opencode-cli, so applyRouteChangeAndRecycle reports a real change.
+        resolveRouteForTurn: () => ({ provider: 'opencode-cli', reasonCode: 'user_pin', pinnedProvider: 'opencode-cli' }),
+        resolvePerChatMapKey: (jid: string) => jid,
+        isTurnInFlight: () => false,
+        // Post-recycle: the queue is gone, so the receipt goes out on the
+        // messenger and carries a real id.
+        getActiveQueue: () => null,
+        catalogueSnapshot: {
+          resolveCataloguePick: () => ({ providerId: 'opencode-cli' }),
+          resolveLatestPick: () => null,
+        },
+        emitRouteEventChecked: () => {},
+        sendDirect: (_jid: string, text: string) => { sent.push({ text, id: null }); },
+        sendDirectWithReceipt: async (_jid: string, text: string) => {
+          const id = `WA-OUT-${String(++outboundId).padStart(4, '0')}`;
+          sent.push({ text, id });
+          return { accepted: true, messageId: id };
+        },
+        // A live session spawned on the DEFAULT route, before the pin existed
+        // — the ordinary shape after a restart or a /new. This is what makes
+        // the re-confirm a real route change rather than a no-op.
+        session: {
+          getProviderId: () => 'claude-cli',
+          getModelRef: () => 'claude-opus-4-8',
+          getSpawnedEffort: () => null,
+          shutdown: async () => {},
+        },
+        routeSessionProviderConfig: () => ({}),
+        cleanupGlobalAutoCompactState: () => {},
+        deleteOwnedPerChatSession: () => true,
+        cleanupPerChatState: () => {},
+        operationTracker: null,
+        activeChatJid: null,
+        queue: null,
+        chatSessions: new Map(),
+        chatQueues: new Map(),
+        pendingRecycle: new Set<string>(),
+        recyclePromises: new Map(),
+        recycleOwners: new Map(),
+        recycleFailures: new Map(),
+        effectiveFallbackEntry: null,
+        completeLocalInbound: () => {},
+      } as unknown as ModelPinPort;
+
+      await handleModelCommand(port, {
+        chatJid: CHAT, senderJid: SENDER_A, args: '1 default', perChatMapKey: CHAT,
+      });
+
+      // Coverage assertion: the test is only meaningful if a keep-promising
+      // receipt really went out WITH a real transport id. Without it the
+      // capture is never attempted and the row assertion below would hold
+      // vacuously, guard or no guard.
+      const receipts = sent.filter((m) => m.text.includes(RECEIPT_PROMISE));
+      expect(receipts).toHaveLength(1);
+      expect(typeof receipts[0]!.id).toBe('string');
+
+      // The guard's whole point: the pin is already permanent, so it takes no
+      // receipt and cannot intercept a later threaded affirmative.
+      expect(prefMod.getKeepReceiptMessageId(routingDb, chatKey)).toBeNull();
+      expect(prefMod.getPreference(routingDb, chatKey, senderKey, Date.now())).toMatchObject({
+        scope: 'sticky',
+        expiresAt: null,
+        keepReceiptMessageId: null,
+      });
     });
 
     // A1 (#2121 follow-up) — promotion did not clear the captured receipt id,

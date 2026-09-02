@@ -563,6 +563,10 @@ describe('keep receipt id (F2a reply-threading)', () => {
     // receipt move together, and the RETURNED preference describes the row
     // that now exists — a caller renders its reply from it.
     expect(result.preference).toMatchObject({ scope: 'sticky', expiresAt: null, keepReceiptMessageId: null });
+    // S4: the returned id is READ BACK from the row, so it cannot report
+    // "consumed" while the row still holds one. Proven by agreement with a
+    // direct read of the store rather than by the literal above alone.
+    expect(result.preference?.keepReceiptMessageId).toBe(getKeepReceiptMessageId(db, CHAT_A));
     expect(getPreference(db, CHAT_A, SENDER_A, NOW)).toMatchObject({
       scope: 'sticky',
       expiresAt: null,

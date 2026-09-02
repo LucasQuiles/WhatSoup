@@ -518,8 +518,20 @@ export function promoteToSticky(
   if (result.changes !== 1) {
     return { outcome: 'superseded', preference: null };
   }
+  // S4 (#2121 follow-up review): the receipt id is READ BACK from the row the
+  // UPDATE just wrote, not asserted as a literal null. A literal would keep
+  // reporting "consumed" even if the clause above stopped clearing it, so the
+  // returned object could stay correct while the store was wrong — exactly the
+  // divergence a caller rendering from this object would not survive. No
+  // caller reads the field today; reading it back is what keeps that safe.
+  const promotedRow = db.raw
+    .prepare(`SELECT ${PREFERENCE_COLUMNS} FROM chat_model_preference WHERE chat_jid = ? AND sender_jid = ?`)
+    .get(winning.chatJid, winning.senderJid) as PreferenceRow | undefined;
+  const keepReceiptMessageId = typeof promotedRow?.keep_receipt_message_id === 'string'
+    ? promotedRow.keep_receipt_message_id
+    : null;
   return {
     outcome: 'promoted',
-    preference: { ...winning, scope: 'sticky', expiresAt: null, updatedAt, keepReceiptMessageId: null },
+    preference: { ...winning, scope: 'sticky', expiresAt: null, updatedAt, keepReceiptMessageId },
   };
 }
