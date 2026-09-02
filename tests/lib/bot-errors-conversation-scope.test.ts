@@ -34,9 +34,21 @@ function alertInput(conversationKey?: string) {
 }
 
 describe('conversation scope at the bot-errors emission boundary', () => {
-  it('projects a raw conversation identifier to a bounded hex digest', () => {
+  it('emits a tagged token so a raw identifier can never be mistaken for one', () => {
+    // Untagged hex is ambiguous: decimal digits are hex digits, so a bare
+    // conversation local part satisfies any plain hex test. The consumer had
+    // to reject all-decimal values to compensate, which threw away roughly
+    // one genuine digest in 1,845. A version tag removes the ambiguity at the
+    // source and lets the consumer require the tag instead of guessing.
     const event = buildBotErrorsEvent(alertInput(RAW_JID));
-    expect(event.conversationScope).toMatch(/^[0-9a-f]{16}$/);
+    expect(event.conversationScope).toMatch(/^cs1_[0-9a-f]{16}$/);
+  });
+
+  it('produces a tagged token for an all-decimal digest too', () => {
+    // The tag is what makes this safe; no digest value is special-cased.
+    const scope = confineConversationScope(RAW_JID) as string;
+    expect(scope.startsWith('cs1_')).toBe(true);
+    expect(scope.slice(4)).toMatch(/^[0-9a-f]{16}$/);
   });
 
   it('never lets the raw identifier reach the serialized event', () => {
@@ -74,15 +86,15 @@ describe('conversation scope at the bot-errors emission boundary', () => {
   it('confineConversationScope never returns any substring of its input', () => {
     const digest = confineConversationScope(RAW_JID);
     expect(digest).not.toBeNull();
-    expect(digest).toMatch(/^[0-9a-f]{16}$/);
-    expect(RAW_JID).not.toContain(digest as string);
+    expect(digest).toMatch(/^cs1_[0-9a-f]{16}$/);
+    expect(RAW_JID).not.toContain((digest as string).slice(4));
   });
 
   // The docstring claims domain separation keeps a conversation digest from
   // colliding with an evidence or summary digest of the same bytes. Nothing
   // pinned that: swapping the salt to 'evidence' left the whole suite green.
   it('separates the conversation domain from the evidence and summary domains', () => {
-    const conversation = confineConversationScope(RAW_JID) as string;
+    const conversation = (confineConversationScope(RAW_JID) as string).slice(4);
     const asEvidence = confineAlertContent('evidence', RAW_JID).correlationDigest;
     const asSummary = confineAlertContent('summary', RAW_JID).correlationDigest;
 
@@ -130,7 +142,7 @@ describe('conversation scope survives the real emission path', () => {
   it('forwards the conversation from emitAlertChecked to the emitted event', () => {
     const event = emittedEvent(RAW_JID);
     expect(event['conversationScope']).toBe(confineConversationScope(RAW_JID));
-    expect(event['conversationScope']).toMatch(/^[0-9a-f]{16}$/);
+    expect(event['conversationScope']).toMatch(/^cs1_[0-9a-f]{16}$/);
   });
 
   it('keeps the raw identifier out of the emitted event on that path', () => {

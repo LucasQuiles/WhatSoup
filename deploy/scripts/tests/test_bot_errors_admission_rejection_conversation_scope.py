@@ -32,9 +32,10 @@ INSTANCE = "instance-x"
 MACHINE = "unknown"
 KEY = f"{MACHINE}|{INSTANCE}|{SOURCE}"
 
-# Synthetic conversation digests (16 lowercase hex, the emitted shape).
-SCOPE_A = "a1b2c3d4e5f60718"
-SCOPE_B = "0f1e2d3c4b5a6978"
+# Synthetic conversation scopes in the emitted shape: the cs1_ version tag
+# followed by 16 lowercase hex characters.
+SCOPE_A = "cs1_a1b2c3d4e5f60718"
+SCOPE_B = "cs1_0f1e2d3c4b5a6978"
 
 _ENV_KEYS = [
     "BOT_ERRORS_STATE_DIR",
@@ -338,30 +339,35 @@ def test_both_delivered_surfaces_render_the_same_confined_text(tmp_path):
         assert RAW_PERSONAL_LOCAL not in surface
 
 
-def test_an_all_decimal_scope_is_rejected_because_digits_are_valid_hex(tmp_path):
-    """The width check alone does not separate a digest from an identifier.
+def test_an_untagged_scope_is_rejected_whatever_its_digits(tmp_path):
+    """The tag is the whole validity test; no digest value is special-cased.
 
-    Decimal digits are hex digits, so a bare conversation local part of the
-    right width satisfies any plain hex test. Without an explicit all-decimal
-    rejection a mis-wired emitter's raw key would validate, be recorded into
-    state, and render to the operator.
+    Bare hex was ambiguous, because decimal digits are hex digits, so a raw
+    conversation local part satisfied any plain hex test. That forced an
+    all-decimal rejection which discarded about one genuine digest in 1,845.
+    Requiring the tag removes both the ambiguity and the false rejection: a
+    raw identifier never carries it, and every real digest does.
     """
     mod = _load(tmp_path)
-    # Sixteen characters, all decimal: passes a naive hex test.
-    raw_sixteen = "1555010019900001"
-    assert len(raw_sixteen) == 16
-    event = _event(raw_sixteen, "evt-all-decimal", 1)
-
-    assert mod.event_conversation_scope(event) is None
-    assert raw_sixteen not in mod.format_event(event)
-
     state = _open_state()
-    mod.should_suppress_send(event, state)
-    assert raw_sixteen not in json.dumps(state)
 
-    # A mixed digest of the same width is still accepted.
-    good = _event("a1b2c3d4e5f60718", "evt-good-hex", 2)
-    assert mod.event_conversation_scope(good) == "a1b2c3d4e5f60718"
+    untagged = [
+        "a1b2c3d4e5f60718",   # a real digest, but untagged
+        "1555010019900001",   # all-decimal, the case that used to need a rule
+        "15550100199",        # a raw personal local part
+        "15550100199443",     # a raw LID-shaped local part
+    ]
+    for index, value in enumerate(untagged):
+        event = _event(value, f"evt-untagged-{index}", index)
+        assert mod.event_conversation_scope(event) is None, f"{value!r} must not validate"
+        assert value not in mod.format_event(event)
+        mod.should_suppress_send(event, state)
+        assert value not in json.dumps(state)
+
+    # An all-decimal DIGEST is now perfectly valid, because the tag carries
+    # the meaning. This is the case the old rule threw away.
+    all_decimal_digest = _event("cs1_1234567890123456", "evt-decimal-digest", 9)
+    assert mod.event_conversation_scope(all_decimal_digest) == "cs1_1234567890123456"
 
 
 def test_render_uses_the_validated_scope_not_the_raw_field(tmp_path):
@@ -451,8 +457,14 @@ def test_retry_records_are_bounded_like_the_conversation_set(tmp_path):
         },
     )
     state = _open_state()
-    for i in range(12):
-        mod.should_suppress_send(_event(f"{i:016x}", f"evt-{i}", i), state)
+    # Mixed-hex fixtures, every one valid, comfortably more than the cap of 4.
+    # The previous fixtures used f"{i:016x}" over 0..11, of which ten were
+    # all-decimal and silently rejected, leaving two scopes against a cap of
+    # four so the assertion could never fail.
+    scope_values = [f"cs1_a{i:015x}" for i in range(12)]
+    for index, scope in enumerate(scope_values):
+        assert mod.event_conversation_scope(_event(scope, f"evt-{index}", index)) == scope
+        mod.should_suppress_send(_event(scope, f"evt-{index}", index), state)
     scopes = state["conversationScopes"][KEY]
     assert len(scopes) <= 4
     for record in scopes.values():
@@ -492,13 +504,20 @@ def test_conversation_scope_state_is_bounded_by_count_and_retention(tmp_path):
         },
     )
     state = _open_state()
-    for i in range(12):
-        mod.should_suppress_send(_event(f"{i:016x}", f"evt-{i}", i), state)
+    # Mixed-hex, every value valid, well past the cap of 4. The previous
+    # fixtures were f"{i:016x}" over 0..11: ten were all-decimal and silently
+    # rejected, so only two scopes ever reached the cap assertion.
+    scope_values = [f"cs1_b{i:015x}" for i in range(12)]
+    for index, scope in enumerate(scope_values):
+        assert mod.event_conversation_scope(_event(scope, f"evt-{index}", index)) == scope
+        mod.should_suppress_send(_event(scope, f"evt-{index}", index), state)
     assert len(state["conversationScopes"][KEY]) <= 4
 
     # Retention: an entry older than the window is pruned, so that
     # conversation is "new" again and re-notifies.
-    state["conversationScopes"] = {KEY: {SCOPE_B: int(time.time()) - 600}}
+    state["conversationScopes"] = {
+        KEY: {SCOPE_B: {"lastSeenAt": int(time.time()) - 600, "eventIds": {}}}
+    }
     assert mod.should_suppress_send(_event(SCOPE_B, "evt-b2", 99), state) is None
 
 
