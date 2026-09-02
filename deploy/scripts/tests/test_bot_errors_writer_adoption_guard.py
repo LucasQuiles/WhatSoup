@@ -369,7 +369,7 @@ def test_bare_writer_waits_for_the_controller_adoption_lock(dispatcher, tmp_path
     try:
         fcntl.flock(holder, fcntl.LOCK_EX)
         before = anchor.read_bytes()
-        with pytest.raises(dispatcher.IncidentCycleRequiredError, match="adoption lock"):
+        with pytest.raises(dispatcher.IncidentCycleRequiredError, match="stayed busy"):
             dispatcher.save_incident_state({"incident_state": anchor}, {"incidents": {}}, lock_timeout_seconds=0.2)
         assert anchor.read_bytes() == before, "the primary must not change while the lock is held elsewhere"
         fcntl.flock(holder, fcntl.LOCK_UN)
@@ -508,4 +508,24 @@ def test_missing_state_directory_is_the_guards_error_too(dispatcher, tmp_path):
     with pytest.raises(dispatcher.IncidentCycleRequiredError, match="adoption lock") as raised:
         dispatcher.save_incident_state({"incident_state": anchor}, {"incidents": {}}, lock_timeout_seconds=0.2)
     assert isinstance(raised.value.__cause__, FileNotFoundError)
+
+
+def test_in_lock_failures_reach_the_caller_unwrapped(dispatcher, tmp_path, monkeypatch):
+    """The acquisition wrap must not widen: an OSError from the observe-then-
+    publish body inside the lock is a store or disk fault, not the guard's
+    refusal, and it reaches the caller as itself so --daemon records the failed
+    cycle and retries. Pins the scope of _AdoptionLock.__enter__'s wrap."""
+    anchor = _anchor(tmp_path, adopted=False)
+    anchor.chmod(0o600)
+
+    def disk_fault(_target):
+        raise OSError(errno.EIO, "observe failed")
+
+    monkeypatch.setattr(dispatcher, "observe_json", disk_fault)
+    before = anchor.read_bytes()
+    with pytest.raises(OSError) as raised:
+        dispatcher.save_incident_state({"incident_state": anchor}, {"incidents": {}}, lock_timeout_seconds=0.2)
+    assert not isinstance(raised.value, dispatcher.IncidentCycleRequiredError), "the in-lock body was over-captured"
+    assert raised.value.errno == errno.EIO
+    assert anchor.read_bytes() == before
 
