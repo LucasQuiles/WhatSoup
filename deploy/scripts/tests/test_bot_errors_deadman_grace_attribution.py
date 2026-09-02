@@ -28,12 +28,22 @@ the persisted grace streak (``_grace_still_credible``): grace that has been
 continuously active for longer than ``max_state_age`` is a loop, not a fresh
 start.
 
-"Continuously" needs a liveness record: the streak persists the epoch of the
-last graced check (``graceStreakSeenAt``) and re-seeds when consecutive checks
-are further apart than twice the deadman timer interval (``--check-interval``,
-default 300s = ``OnUnitActiveSec=5m``). Without it, a reboot or a stopped timer
-after a graced check read as hours of continuous grace and paged a genuinely
-fresh restart.
+"Continuously" needs a liveness record, and the record must not forgive the
+deadman's own absence. The streak persists the epoch of the last graced check
+(``graceStreakSeenAt``) and the host boot identity that observed it
+(``graceStreakBootId``, clock-independent: Linux boot_id, macOS kern.boottime).
+Grace observed on the same boot is continuous whatever the gap between checks:
+a dispatcher that is still in its restart window after the deadman was starved
+for an hour had that hour to complete a cycle and did not. Only a different
+boot (an actual reboot) re-seeds, because the previous grace belonged to a
+process the boot itself ended. Forgiving any gap re-seeded on every check when
+the deadman ran less often than the limit, and a real restart loop under a
+starved timer stayed silent forever.
+
+A gap longer than twice the timer interval (``--check-interval``, default 300
+= ``OnUnitActiveSec=5m``) is not silently absorbed: it is persisted as
+``lastCheckGapSeconds`` and printed as ``check_gap_seconds=`` on the grace line,
+so a starved or stopped deadman timer is visible as its own signal.
 """
 from __future__ import annotations
 
@@ -173,44 +183,65 @@ def test_no_grace_is_never_credible(health_check):
     assert health_check._grace_still_credible(None, 0, 180) is False
 
 
-# --- streak liveness: a gap in checks is not continuous grace -----------------
+# --- streak continuity: bound to the host boot, not to the gap between checks --
 
 
-def test_grace_streak_reseeds_after_a_gap_in_checks_longer_than_the_limit(health_check):
-    """Seeded 8h ago, last seen 8h ago: the deadman did not run in between, so
-    the record says nothing about continuity. Re-seed now, persist."""
+def test_grace_streak_continues_across_a_long_gap_on_the_same_boot(health_check):
+    """The deadman was starved for 8h on the same boot: grace at both ends with the
+    dispatcher still in its restart window is a loop, and the gap is reported."""
     now = 200_000
-    state = {"graceStreakSince": now - 8 * 3600, "graceStreakSeenAt": now - 8 * 3600}
-    assert health_check._note_grace_streak(state, True, now, 600) == (0, True)
-    assert state["graceStreakSince"] == now and state["graceStreakSeenAt"] == now
+    state = {"graceStreakSince": now - 8 * 3600, "graceStreakSeenAt": now - 8 * 3600, "graceStreakBootId": "boot-A"}
+    assert health_check._note_grace_streak(state, True, now, "boot-A") == (8 * 3600, True, 8 * 3600)
+    assert state["graceStreakSeenAt"] == now and state["graceStreakSince"] == now - 8 * 3600
 
 
-def test_grace_streak_continues_across_a_gap_within_the_limit(health_check):
-    """One timer interval (300s) between checks is continuous at the default limit."""
+def test_grace_streak_reseeds_after_a_reboot(health_check):
+    """A different boot identity: the process the previous grace belonged to is gone."""
     now = 200_000
-    state = {"graceStreakSince": now - 900, "graceStreakSeenAt": now - 300}
-    assert health_check._note_grace_streak(state, True, now, 600) == (900, True)
-    assert state["graceStreakSeenAt"] == now
+    state = {"graceStreakSince": now - 8 * 3600, "graceStreakSeenAt": now - 8 * 3600, "graceStreakBootId": "boot-A"}
+    assert health_check._note_grace_streak(state, True, now, "boot-B") == (0, True, None)
+    assert state["graceStreakSince"] == now and state["graceStreakSeenAt"] == now and state["graceStreakBootId"] == "boot-B"
 
 
-def test_grace_streak_at_exactly_the_gap_limit_is_still_continuous(health_check):
+def test_grace_streak_continues_at_the_timer_cadence(health_check):
     now = 200_000
-    state = {"graceStreakSince": now - 900, "graceStreakSeenAt": now - 600}
-    assert health_check._note_grace_streak(state, True, now, 600) == (900, True)
+    state = {"graceStreakSince": now - 900, "graceStreakSeenAt": now - 300, "graceStreakBootId": "boot-A"}
+    assert health_check._note_grace_streak(state, True, now, "boot-A") == (900, True, 300)
+
+
+def test_grace_streak_with_unknown_host_boot_continues(health_check):
+    """Boot identity unavailable: continuity cannot be disproved, and a missed
+    alarm is the worse error, so the streak continues."""
+    now = 200_000
+    state = {"graceStreakSince": now - 900, "graceStreakSeenAt": now - 300, "graceStreakBootId": "boot-A"}
+    assert health_check._note_grace_streak(state, True, now, None) == (900, True, 300)
 
 
 def test_grace_streak_without_a_liveness_record_is_reseeded(health_check):
-    """A record from before this field existed carries no liveness evidence."""
     now = 200_000
     state = {"graceStreakSince": now - 900}
-    assert health_check._note_grace_streak(state, True, now, 600) == (0, True)
-    assert state["graceStreakSince"] == now and state["graceStreakSeenAt"] == now
+    assert health_check._note_grace_streak(state, True, now, "boot-A") == (0, True, None)
+    assert state["graceStreakSince"] == now and state["graceStreakSeenAt"] == now and state["graceStreakBootId"] == "boot-A"
 
 
-def test_grace_streak_lapse_clears_the_liveness_record_too(health_check):
-    state = {"graceStreakSince": 100, "graceStreakSeenAt": 400}
-    assert health_check._note_grace_streak(state, False, 500, 600) == (0, True)
-    assert "graceStreakSince" not in state and "graceStreakSeenAt" not in state
+def test_grace_streak_without_a_boot_record_is_reseeded(health_check):
+    now = 200_000
+    state = {"graceStreakSince": now - 900, "graceStreakSeenAt": now - 300}
+    assert health_check._note_grace_streak(state, True, now, "boot-A") == (0, True, None)
+
+
+@pytest.mark.parametrize("bad_seen", [True, 0, -5, 200_001])
+def test_grace_streak_rejects_a_corrupt_seen_epoch(health_check, bad_seen):
+    now = 200_000
+    state = {"graceStreakSince": now - 900, "graceStreakSeenAt": bad_seen, "graceStreakBootId": "boot-A"}
+    assert health_check._note_grace_streak(state, True, now, "boot-A") == (0, True, None)
+    assert state["graceStreakSeenAt"] == now and type(state["graceStreakSeenAt"]) is int
+
+
+def test_grace_streak_lapse_clears_every_field(health_check):
+    state = {"graceStreakSince": 100, "graceStreakSeenAt": 400, "graceStreakBootId": "boot-A"}
+    assert health_check._note_grace_streak(state, False, 500, "boot-A") == (0, True, None)
+    assert not any(k.startswith("graceStreak") for k in state)
 
 
 # ---------------------------------------------------------------------------
@@ -248,6 +279,8 @@ def env(monkeypatch, tmp_path: Path) -> SimpleNamespace:
     svc = {"status": "active", "ages": (600, 600)}
     monkeypatch.setattr(mod, "service_is_active", lambda _service: svc["status"])
     monkeypatch.setattr(mod, "service_restart_ages", lambda _service: svc["ages"])
+    boot = {"id": "boot-A"}
+    monkeypatch.setattr(mod, "_host_boot_id", lambda: boot["id"])
     clock = {"now": 100_000}
     monkeypatch.setattr(mod, "current_epoch", lambda: clock["now"])
     monkeypatch.setattr(mod, "send_direct", _Direct())
@@ -265,8 +298,13 @@ def env(monkeypatch, tmp_path: Path) -> SimpleNamespace:
     def advance(seconds: int) -> None:
         clock["now"] += seconds
 
-    def run(max_state_age: int = 180, restart_grace: int = 30) -> int:
-        return mod.deadman(max_state_age=max_state_age, restart_grace=restart_grace, cooldown_seconds=300)
+    def run(max_state_age: int = 180, restart_grace: int = 30, check_interval: int | None = None) -> int:
+        kwargs = {} if check_interval is None else {"check_interval": check_interval}
+        return mod.deadman(max_state_age=max_state_age, restart_grace=restart_grace, cooldown_seconds=300, **kwargs)
+
+    def deadman_state() -> dict:
+        path = tmp_path / "deadman-state.json"
+        return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
 
     def members() -> set[str]:
         path = tmp_path / "deadman-state.json"
@@ -279,7 +317,7 @@ def env(monkeypatch, tmp_path: Path) -> SimpleNamespace:
         if dispatcher_state.exists():
             dispatcher_state.unlink()
 
-    return SimpleNamespace(mod=mod, svc=svc, cycle_completed=cycle_completed, state_written=state_written, state_removed=state_removed, advance=advance, run=run, members=members)
+    return SimpleNamespace(mod=mod, svc=svc, boot=boot, cycle_completed=cycle_completed, state_written=state_written, state_removed=state_removed, advance=advance, run=run, members=members, deadman_state=deadman_state)
 
 
 def test_deadman_reports_cycle_stale_in_an_active_restart_loop(env):
@@ -438,7 +476,7 @@ def test_deadman_grace_streak_rejects_bool_zero_and_negative_epochs(env, tmp_pat
     """A corrupt graceStreakSince (bool passes isinstance int; zero; negative) must
     not manufacture an enormous streak; it resets and is persisted as an int."""
     for bad in (True, 0, -5):
-        (tmp_path / "deadman-state.json").write_text(json.dumps({"schemaVersion": 1, "incidents": {}, "graceStreakSince": bad}))
+        (tmp_path / "deadman-state.json").write_text(json.dumps({"schemaVersion": 1, "incidents": {}, "graceStreakSince": bad, "graceStreakSeenAt": 100_000, "graceStreakBootId": "boot-A"}))
         (tmp_path / "deadman-state.json").chmod(0o600)  # durable_json refuses group/other-readable targets
         env.svc["status"] = "active"
         env.svc["ages"] = (10, 10)
@@ -448,19 +486,75 @@ def test_deadman_grace_streak_rejects_bool_zero_and_negative_epochs(env, tmp_pat
         assert saved["graceStreakSince"] == 100_000 and type(saved["graceStreakSince"]) is int
 
 
-def test_deadman_does_not_page_a_fresh_restart_after_a_gap_in_checks(env):
-    """The record left by a graced check hours ago must not turn a genuinely
-    fresh restart (uptime 2s, 120s-old heartbeat, no cycleCompletedAt) into a
-    cycle_incomplete page: the deadman did not run in between, so the streak
-    is not continuous."""
+def test_deadman_does_not_page_a_fresh_restart_after_a_reboot(env):
+    """The record left by a graced check before a reboot belongs to a process the
+    boot ended: a genuinely fresh restart afterwards (uptime 2s, 120s-old
+    heartbeat, no cycleCompletedAt) is graced, not paged."""
     env.svc["status"] = "active"
     env.svc["ages"] = (10, 10)
-    assert env.run() == 0  # seeds graceStreakSince (no state file, first check)
-    env.advance(8 * 3600)  # reboot / stopped timer: no checks for 8 hours
+    assert env.run() == 0  # seeds the streak on boot-A
+    env.advance(8 * 3600)
+    env.boot["id"] = "boot-B"  # the host rebooted
     env.svc["ages"] = (2, 2)
     env.state_written(120, {"time": env.mod.epoch_to_iso(100_000)})
     assert env.run() == 0
     assert "cycle_incomplete" not in env.members()
+
+
+def test_deadman_reports_a_restart_loop_even_when_its_own_checks_are_starved(env):
+    """The regression the cross-model review found: checks 601s apart (every gap
+    past the old limit) re-seeded the streak on every check, so a dispatcher
+    restarting forever on the same boot with an incomplete state was never
+    reported. Same boot, grace at both ends, cycle still incomplete: report."""
+    env.svc["status"] = "active"
+    env.svc["ages"] = (2, 2)
+    env.state_written(120, {"time": env.mod.epoch_to_iso(100_000)})
+    assert env.run(max_state_age=30, restart_grace=30) == 0
+    for _ in range(2):
+        env.advance(601)
+        env.state_written(120, {"time": env.mod.epoch_to_iso(100_000)})
+        assert env.run(max_state_age=30, restart_grace=30) == 2
+        assert env.members() == {"cycle_incomplete"}
+
+
+def test_deadman_reports_a_missing_state_loop_even_when_its_own_checks_are_starved(env):
+    env.svc["status"] = "active"
+    env.svc["ages"] = (10, 10)
+    assert env.run() == 0
+    env.advance(601)
+    assert env.run() == 2
+    assert env.members() == {"state_missing"}
+
+
+def test_deadman_reports_an_observation_gap_instead_of_absorbing_it(env, capsys):
+    """A same-boot gap longer than twice the timer interval is a signal about the
+    deadman itself: persisted and printed, never silently forgiven."""
+    env.svc["status"] = "active"
+    env.svc["ages"] = (10, 10)
+    env.cycle_completed(5)
+    assert env.run() == 0
+    assert "lastCheckGapSeconds" not in env.deadman_state()
+    env.advance(700)
+    env.cycle_completed(5)
+    assert env.run() == 0
+    assert env.deadman_state()["lastCheckGapSeconds"] == 700
+    assert "check_gap_seconds=700" in capsys.readouterr().out
+    env.advance(300)
+    env.cycle_completed(5)
+    assert env.run() == 0
+    assert "lastCheckGapSeconds" not in env.deadman_state()  # cleared once the cadence is back
+
+
+def test_deadman_observation_gap_threshold_follows_check_interval(env, capsys):
+    env.svc["status"] = "active"
+    env.svc["ages"] = (10, 10)
+    env.cycle_completed(5)
+    assert env.run(check_interval=900) == 0
+    env.advance(700)
+    env.cycle_completed(5)
+    assert env.run(check_interval=900) == 0  # 700 <= 2 x 900: not a gap at that cadence
+    assert "lastCheckGapSeconds" not in env.deadman_state()
+    assert "check_gap_seconds" not in capsys.readouterr().out
 
 
 def test_deadman_still_reports_an_incomplete_state_loop_at_the_timer_cadence(env):
@@ -473,19 +567,6 @@ def test_deadman_still_reports_an_incomplete_state_loop_at_the_timer_cadence(env
     env.advance(300)
     env.state_written(400)
     assert env.run() == 2
-    assert env.members() == {"cycle_incomplete"}
-
-
-def test_deadman_streak_gap_limit_follows_check_interval(env):
-    """A slower timer (interval 900s) keeps checks 900s apart continuous; the
-    same gap at the default interval would have re-seeded the streak."""
-    env.svc["status"] = "active"
-    env.svc["ages"] = (10, 10)
-    env.state_written(100)
-    assert env.run() == 0
-    env.advance(900)
-    env.state_written(1000)
-    assert env.mod.deadman(max_state_age=180, restart_grace=30, cooldown_seconds=300, check_interval=900) == 2
     assert env.members() == {"cycle_incomplete"}
 
 
@@ -535,11 +616,26 @@ def _deadman_plist_block(installer: str) -> str:
     return installer[start: nxt if nxt != -1 else len(installer)]
 
 
+def _on_unit_active_values(timer_text: str) -> list[str]:
+    """Every OnUnitActiveSec assignment, read the way systemd's parser reads it:
+    continuation lines (a trailing backslash) are joined first, whitespace around
+    the key and the '=' is stripped, and the value runs to end of line (there are
+    no inline comments)."""
+    joined = re.sub(r"[ \t]*\\\n\s*", " ", timer_text)
+    return [v.strip() for v in re.findall(r"^\s*OnUnitActiveSec\s*=(.*)$", joined, re.M)]
+
+
+def test_timer_pin_joins_continuation_lines():
+    """systemd concatenates a line ending in a backslash with the next one, so
+    'OnUnitActiveSec=5m \\' + '10m' is the single value '5m 10m' (900s)."""
+    assert _on_unit_active_values("[Timer]\nOnUnitActiveSec=5m \\\n10m\n") == ["5m 10m"]
+    assert _systemd_seconds("5m 10m") == 900
+    assert _on_unit_active_values("OnUnitActiveSec =15m\nOnUnitActiveSec=5m\n") == ["15m", "5m"]
+
+
 def test_default_check_interval_matches_the_systemd_timer_cadence(health_check):
     timer = (_DEPLOY / "bot-errors-deadman.timer").read_text(encoding="utf-8")
-    # Match the way systemd's parser reads assignments: whitespace around the key and
-    # the '=' is stripped, and the value runs to end of line (no inline comments).
-    values = [v.strip() for v in re.findall(r"^\s*OnUnitActiveSec\s*=(.*)$", timer, re.M)]
+    values = _on_unit_active_values(timer)
     assert values, "bot-errors-deadman.timer has no OnUnitActiveSec"
     for value in values:
         # An empty assignment resets the setting: the timer would lose its repeat trigger.
@@ -598,4 +694,3 @@ def test_cli_default_check_interval_is_the_shared_constant(health_check):
     assert inspect.signature(health_check.deadman).parameters["check_interval"].default == health_check.DEADMAN_CHECK_INTERVAL_SECONDS
     source = inspect.getsource(health_check.main) if hasattr(health_check, "main") else _SCRIPT.read_text(encoding="utf-8")
     assert re.search(r'"--check-interval",\s*type=int,\s*default=DEADMAN_CHECK_INTERVAL_SECONDS', source), "argparse default is not the shared constant"
-
