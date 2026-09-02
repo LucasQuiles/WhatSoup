@@ -23,6 +23,7 @@ import stat
 import subprocess
 import sys
 import time
+from collections.abc import Mapping
 from typing import Any
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -1203,6 +1204,7 @@ def save_incident_state(
     state["updatedAt"] = now_iso()
     target = _durable_target(incident_path)
     observation = observe_json(target)
+    _reject_bare_write_over_envelope(incident_path, observation.payload)
     generation = (observation.version.generation or 0) + 1
     publication_operation = operation_id(
         target,
@@ -1220,6 +1222,26 @@ def save_incident_state(
     )
     require_advance(publication)
     return publication
+
+# Exit status for a refused post-adoption bare write reached in daemon mode.
+# Distinct from STATE_RECOVERY_REQUIRED_EXIT (78): that path carries a
+# controller-state diagnostic and runs the recovery projection. This one is a
+# programming error (a helper reached save_incident_state without its
+# IncidentStateCycle) and must stop the loop loudly rather than fail every
+# cycle in silence. Restart=always brings the unit back; the deadman then
+# reports cycle_stale once the staleness outgrows what the restart explains.
+INCIDENT_CYCLE_REQUIRED_EXIT = 79
+
+
+# Exit status for a refused post-adoption bare write reached in daemon mode.
+# Distinct from STATE_RECOVERY_REQUIRED_EXIT (78): that path carries a
+# controller-state diagnostic and runs the recovery projection. This one is a
+# programming error (a helper reached save_incident_state without its
+# IncidentStateCycle) and must stop the loop loudly rather than fail every
+# cycle in silence. Restart=always brings the unit back; the deadman then
+# reports cycle_stale once the staleness outgrows what the restart explains.
+INCIDENT_CYCLE_REQUIRED_EXIT = 79
+
 
 class IncidentCycleRequiredError(RuntimeError):
     """#3054: a cycle-accepting helper was called post-adoption without the
@@ -1271,6 +1293,52 @@ def _reject_bare_write_if_adopted(anchor: Path) -> None:
             f"(_controllerState); this wrapper would overwrite it and the next "
             f"validate would reject it as schema_incompatible (#3053/#3054). "
             f"Route this write through IncidentStateCycle.commit()."
+        )
+
+
+def _reject_bare_write_over_envelope(anchor: Path, observed: Mapping[str, Any] | None) -> None:
+    """Second half of the writer guard: never overwrite an observed envelope.
+
+    ``_reject_bare_write_if_adopted`` reads the ``.initialized`` marker before
+    the write observes the file, and adoption takes a different lock
+    (``incident-state.json.lock``) from the bare publisher
+    (``.durable-json.lock``), so a bare caller can pass the marker check while
+    adoption completes underneath it. The write publishes against
+    ``observation.version``: if adoption landed after the observation the
+    compare-and-swap refuses the write, and if it landed before, the observed
+    payload already carries ``_controllerState`` and this check refuses it.
+    Together the marker check, this check, and the CAS leave no window in
+    which bare JSON can replace the envelope.
+    """
+    if isinstance(observed, Mapping) and "_controllerState" in observed:
+        raise IncidentCycleRequiredError(
+            f"save_incident_state: refusing to overwrite the enveloped incident "
+            f"state at {anchor.name} with bare JSON (observed _controllerState "
+            f"without the adoption marker). Route this write through "
+            f"IncidentStateCycle.commit()."
+        )
+
+
+def _reject_bare_write_over_envelope(anchor: Path, observed: Mapping[str, Any] | None) -> None:
+    """Second half of the writer guard: never overwrite an observed envelope.
+
+    ``_reject_bare_write_if_adopted`` reads the ``.initialized`` marker before
+    the write observes the file, and adoption takes a different lock
+    (``incident-state.json.lock``) from the bare publisher
+    (``.durable-json.lock``), so a bare caller can pass the marker check while
+    adoption completes underneath it. The write publishes against
+    ``observation.version``: if adoption landed after the observation the
+    compare-and-swap refuses the write, and if it landed before, the observed
+    payload already carries ``_controllerState`` and this check refuses it.
+    Together the marker check, this check, and the CAS leave no window in
+    which bare JSON can replace the envelope.
+    """
+    if isinstance(observed, Mapping) and "_controllerState" in observed:
+        raise IncidentCycleRequiredError(
+            f"save_incident_state: refusing to overwrite the enveloped incident "
+            f"state at {anchor.name} with bare JSON (observed _controllerState "
+            f"without the adoption marker). Route this write through "
+            f"IncidentStateCycle.commit()."
         )
 
 
@@ -4849,6 +4917,15 @@ def collapse_storm_group(
     incident: IncidentStateCycle | None = None,
 ) -> int:
     _require_incident_cycle_if_adopted(paths, incident, helper="collapse_storm_group")
+    if incident is not None and incident.payload is not incident_state:
+        # The cycle branch below persists incident.payload, so a caller that
+        # hands in a different dict would have its mutations (freshness ledger,
+        # daily-health absorption) silently dropped at commit(). Refuse before
+        # any member publication or manifest write happens.
+        raise ValueError(
+            "collapse_storm_group: incident_state must be incident.payload when an "
+            "IncidentStateCycle is supplied; commit() would persist a different object"
+        )
     fingerprint, requested_start = key
     window = storm_window_seconds()
     fingerprint_hash = storm_fingerprint_hash(fingerprint)
@@ -5185,7 +5262,7 @@ def collapse_storm_group(
             # this function already do. Without this gate a caller holding an
             # IncidentStateCycle still bare-wrote the primary here, destroying
             # the _controllerState envelope: the sole ungated save_incident_state
-            # of the 14 in this file, and the one that took the dispatcher into
+            # of the 12 executable call sites in this file, and the one that took the dispatcher into
             # a schema_incompatible crash loop on 2026-08-30.
             if incident:
                 incident.commit()
@@ -6941,6 +7018,34 @@ def run_daemon(interval: int, max_events: int) -> None:
                 "exit": STATE_RECOVERY_REQUIRED_EXIT,
             }), flush=True)
             sys.exit(STATE_RECOVERY_REQUIRED_EXIT)
+        except IncidentCycleRequiredError as exc:
+            # A refused post-adoption bare write is a programming error, not a
+            # transient fault. Swallowing it below kept the daemon alive with
+            # every cycle failing while record_state dropped cycleCompletedAt,
+            # which parks the deadman on the cycle_incomplete branch that a 30s
+            # interval never trips. Exit instead: the state file keeps its last
+            # cycleCompletedAt, the unit restarts, and the restart-bounded grace
+            # reports cycle_stale once the staleness outgrows the restart.
+            print(json.dumps({
+                "time": now_iso(),
+                "error": str(exc),
+                "exit": INCIDENT_CYCLE_REQUIRED_EXIT,
+            }), flush=True)
+            sys.exit(INCIDENT_CYCLE_REQUIRED_EXIT)
+        except IncidentCycleRequiredError as exc:
+            # A refused post-adoption bare write is a programming error, not a
+            # transient fault. Swallowing it below kept the daemon alive with
+            # every cycle failing while record_state dropped cycleCompletedAt,
+            # which parks the deadman on the cycle_incomplete branch that a 30s
+            # interval never trips. Exit instead: the state file keeps its last
+            # cycleCompletedAt, the unit restarts, and the restart-bounded grace
+            # reports cycle_stale once the staleness outgrows the restart.
+            print(json.dumps({
+                "time": now_iso(),
+                "error": str(exc),
+                "exit": INCIDENT_CYCLE_REQUIRED_EXIT,
+            }), flush=True)
+            sys.exit(INCIDENT_CYCLE_REQUIRED_EXIT)
         except Exception as exc:
             paths = setup_dirs()
             record_state(paths, lastRunAt=now_iso(), processed=0, sent=0, failed=1, lastError=str(exc))

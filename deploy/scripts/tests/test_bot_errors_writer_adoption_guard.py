@@ -136,7 +136,7 @@ def test_boundary_guard_still_inert_when_a_cycle_is_supplied(dispatcher, tmp_pat
 _HEALTHY_PROBE = "http_status=200 health_status=healthy"
 
 
-def _adopt_via_real_session(dispatcher, root: Path) -> dict[str, Path]:
+def _adopt_via_real_session(dispatcher, root: Path, monkeypatch) -> dict[str, Path]:
     """Adopt the store through the REAL controller-state session.
 
     Deliberately not a hand-written marker file. ``controller_state`` owns the
@@ -146,7 +146,7 @@ def _adopt_via_real_session(dispatcher, root: Path) -> dict[str, Path]:
     production guard silently failed *open* -- the guard would stop guarding
     and nothing would say so.
     """
-    os.environ["BOT_ERRORS_STATE_DIR"] = str(root)
+    monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(root))
     paths = dispatcher.setup_dirs()
     anchor = paths["incident_state"]
     session = dispatcher.open_controller_state(
@@ -210,7 +210,7 @@ def test_superseding_branch_must_not_reach_the_bare_writer(
     monkeypatch.setattr(
         dispatcher, "send_whatsapp", lambda text, socket_path="": None, raising=False
     )
-    paths = _adopt_via_real_session(dispatcher, tmp_path)
+    paths = _adopt_via_real_session(dispatcher, tmp_path, monkeypatch)
     base = int(time.time())
 
     m1 = _member("e1", "host-a", base)
@@ -236,7 +236,7 @@ def test_superseding_branch_must_not_reach_the_bare_writer(
             paths,
             (fingerprint, base),
             [(paths["outbox"] / "a.json", m1), (paths["outbox"] / "b.json", m2)],
-            dict(loaded.payload or {}),
+            cycle.payload,
             incident=cycle,
         )
         # Deliver the digest: its evidence is now immutable, so the next batch
@@ -252,7 +252,7 @@ def test_superseding_branch_must_not_reach_the_bare_writer(
             paths,
             (fingerprint, base),
             [(paths["outbox"] / "c.json", m3)],
-            dict(loaded.payload or {}),
+            cycle.payload,
             incident=cycle,
         )
 
@@ -261,3 +261,83 @@ def test_superseding_branch_must_not_reach_the_bare_writer(
         "superseding branch destroyed the envelope -- this is the #3053 "
         "corruption that crash-loops the dispatcher on exit 78"
     )
+
+
+# ---------------------------------------------------------------------------
+# Review findings on the 2026-09-02 recut (Codex + Opus adversarial reviews).
+# ---------------------------------------------------------------------------
+
+
+def test_storm_branch_refuses_a_state_dict_that_is_not_the_cycle_payload(dispatcher, tmp_path, monkeypatch):
+    """commit() persists incident.payload; a different dict would be dropped.
+
+    The identity check runs at entry, before any member publication or manifest
+    write, so a mis-wired caller fails closed with nothing half-applied.
+    """
+    paths = _adopt_via_real_session(dispatcher, tmp_path, monkeypatch)
+    base = int(time.time())
+    fingerprint = "identity-check"
+    m1 = _member("e1", "host-a", base)
+    _queue(paths, "a.json", m1)
+    session = dispatcher.open_controller_state(
+        paths["incident_state"],
+        component="dispatcher-incident",
+        bootstrap=dispatcher.dispatcher_bootstrap_state,
+        validate_payload=dispatcher.validate_dispatcher_state,
+        lock_timeout_seconds=10,
+    )
+    with session:
+        loaded = session.load()
+        cycle = dispatcher.IncidentStateCycle(
+            session, loaded.payload, loaded.capability, paths=paths
+        )
+        with pytest.raises(ValueError, match="incident.payload"):
+            dispatcher.collapse_storm_group(
+                paths,
+                (fingerprint, base),
+                [(paths["outbox"] / "a.json", m1)],
+                dict(loaded.payload or {}),
+                incident=cycle,
+            )
+    assert (paths["outbox"] / "a.json").exists(), "entry check must run before any member move"
+    assert not list(paths["storm_manifests"].glob("*.json")), "entry check must run before any manifest write"
+
+
+def test_writer_refuses_bare_json_over_an_observed_envelope_without_the_marker(dispatcher, tmp_path):
+    """Closes the adoption race: marker absent, but the file already carries the envelope."""
+    anchor = tmp_path / "incident-state.json"
+    envelope = {"_controllerState": {"schemaVersion": 1, "generation": 3}, "updatedAt": "2026-09-02T00:00:00Z"}
+    anchor.write_text(json.dumps(envelope), encoding="utf-8")
+    anchor.chmod(0o600)  # durable_json refuses group/other-readable targets before any guard runs
+    assert dispatcher._incident_state_is_adopted(anchor) is False
+    before = anchor.read_bytes()
+    with pytest.raises(dispatcher.IncidentCycleRequiredError, match="_controllerState"):
+        dispatcher.save_incident_state({"incident_state": anchor}, {"incidents": {}})
+    assert anchor.read_bytes() == before, "the envelope must survive untouched"
+
+
+def test_daemon_exits_loudly_when_the_writer_guard_fires(dispatcher, monkeypatch, capsys):
+    """Under --daemon the guard must stop the loop, not be swallowed as a failed cycle.
+
+    A swallowed guard called record_state, which drops cycleCompletedAt and
+    parks the deadman on the cycle_incomplete branch that a 30s interval never
+    trips. Exiting keeps the last cycleCompletedAt on disk so cycle_stale can
+    fire after the unit restarts.
+    """
+
+    def boom(_max_events):
+        raise dispatcher.IncidentCycleRequiredError("save_incident_state: refusing a post-adoption bare-JSON write")
+
+    def never(*_args, **_kwargs):
+        raise AssertionError("the guard path must not record state or sleep")
+
+    monkeypatch.setattr(dispatcher, "run_once", boom)
+    monkeypatch.setattr(dispatcher, "setup_dirs", never)
+    monkeypatch.setattr(dispatcher, "record_state", never)
+    monkeypatch.setattr(dispatcher.time, "sleep", never)
+    with pytest.raises(SystemExit) as raised:
+        dispatcher.run_daemon(30, 25)
+    assert raised.value.code == dispatcher.INCIDENT_CYCLE_REQUIRED_EXIT == 79
+    out = capsys.readouterr().out
+    record = json.loads(out.strip().splitlines()[-1])
+    assert record["exit"] == 79 and "post-adoption" in record["error"]
