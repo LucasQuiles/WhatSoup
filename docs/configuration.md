@@ -1611,15 +1611,31 @@ When deploying an instance config that uses `fallbackProvider` or `fallbacks` to
    (`provider_runtime_path_prepend_inconsistent`).
 
    Both checks run for **both** providers, `opencode-cli` and the default
-   `claude-cli`, and both apply only where a LaunchAgent plist exists and its
-   environment reads as a whole map. Where a plist exists but the loaded job
-   environment cannot be composed, the `claude-cli` probe fails closed with
-   `provider_runtime_path_unavailable` rather than quietly resolving the CLI
-   from the probe process's own `PATH`. Where there is no LaunchAgent at all,
-   which is every Linux host, resolution is unchanged. The remediation for these
-   classes names both repairs, because `launchctl print` output is explicitly
-   not a stable interface: regenerate and reload the LaunchAgent, or check that
-   its output still parses.
+   `claude-cli`. On macOS the probe distinguishes three states of the instance
+   LaunchAgent, and only one of them is benign:
+
+   - **Readable.** The governed checks run. If the loaded job environment
+     cannot be composed, or it composes and holds no `claude`, the probe fails
+     closed with `provider_runtime_path_unavailable` and a `reason` naming
+     which of the two applies, rather than quietly resolving the CLI from the
+     probe process's own `PATH`.
+   - **Unreadable.** The plist is missing, wrongly labelled, symlinked,
+     oversized, carries a nested `<dict>`, or cannot be read. A plist is
+     expected here and the parser refused it, so the probe fails closed with
+     `provider_runtime_plist_unreadable`. It does not report a healthy provider
+     on a LaunchAgent it could not verify.
+   - **Not applicable.** No LaunchAgent surface exists, which is every Linux
+     host. The governed checks genuinely do not apply and resolution is
+     unchanged.
+
+   A configured `providerProbeCommand` chooses **which** binary is probed; it
+   does not exempt the service from the runtime-path gate, because the gate is
+   a statement about the service's own `PATH` rather than about the probe. The
+   selected provider is also executed with the governed `PATH`, so an
+   interpreter-resolving wrapper cannot pick up a different runtime than the
+   service uses. The remediation for these classes names both repairs, because
+   `launchctl print` output is explicitly not a stable interface: regenerate and
+   reload the LaunchAgent, or check that its output still parses.
 
 2. **Provision the provider API key** via one of three portable routes. Runtime
    lookup order is environment variable, private WhatSoup credential file,

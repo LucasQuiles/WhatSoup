@@ -97,7 +97,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "2d512297cb442014fbfd09368a673611ee8d8917338a75e57247c0bb38eac01e",
+      "sha256": "a58b19f286e727e9a2a7ee94033f24ff0d325133cb2b4c4556dab21594cd4628",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -169,6 +169,11 @@
         "effective_instance_provider_path",
         "instance_plist_environment",
         "instance_plist_governed_environment",
+        "GOVERNED_PLIST_UNREADABLE",
+        "GOVERNED_PLIST_NOT_APPLICABLE",
+        "provider_runtime_plist_unreadable",
+        "provider_probe_output_is_stubbed",
+        "governed_child_environment",
         "environment_value",
         "environment_provider_path",
         "governed_prepend_failure_class",
