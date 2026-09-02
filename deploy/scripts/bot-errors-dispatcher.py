@@ -3183,8 +3183,10 @@ def email_fallback_blocked_reason(
     under a tmp dir, or whose bridge returned an error payload naming a fixture
     path, therefore reported ``test_leak`` for a perfectly clean alert and
     dead-lettered it silently. Reading only the claimed payload closes that
-    class for every such field at once, present and future, rather than
-    stripping known keys by name.
+    class for the fields ``producer_claim`` names -- the ``delivery`` block, and
+    ``diagnostics.dispatchLog`` when it holds this dispatcher's own value. Other
+    dispatcher-written diagnostics survive the claim and are a known remainder,
+    not something this closes by construction.
 
     Three gates, evaluated in order:
 
