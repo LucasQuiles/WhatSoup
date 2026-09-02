@@ -198,7 +198,11 @@ def env(monkeypatch, tmp_path: Path) -> SimpleNamespace:
         record = json.loads(path.read_text(encoding="utf-8")).get("episode")
         return set(record["members"]) if isinstance(record, dict) else set()
 
-    return SimpleNamespace(svc=svc, cycle_completed=cycle_completed, state_written=state_written, advance=advance, run=run, members=members)
+    def state_removed() -> None:
+        if dispatcher_state.exists():
+            dispatcher_state.unlink()
+
+    return SimpleNamespace(mod=mod, svc=svc, cycle_completed=cycle_completed, state_written=state_written, state_removed=state_removed, advance=advance, run=run, members=members)
 
 
 def test_deadman_reports_cycle_stale_in_an_active_restart_loop(env):
@@ -290,18 +294,29 @@ def test_deadman_reports_missing_state_once_grace_outlives_the_threshold(env):
     assert env.members() == {"state_missing"}
 
 
-def test_deadman_grace_streak_resets_when_grace_lapses(env):
+def test_deadman_grace_streak_resets_when_grace_lapses(env, tmp_path):
+    """The persisted streak must start at the first graced check, clear when
+    grace lapses, and re-seed at the next graced check. Asserted on the
+    persisted field, so removing the reset fails this test."""
+    state_path = tmp_path / "deadman-state.json"
+
+    def persisted():
+        return json.loads(state_path.read_text()).get("graceStreakSince")
+
     env.svc["status"] = "active"
     env.svc["ages"] = (10, 10)
     assert env.run() == 0
+    assert persisted() == 100_000  # seeded at the first graced check
     env.advance(100)
-    env.svc["ages"] = (600, 600)  # grace lapses: a normal, long-running unit with a fresh cycle
+    env.svc["ages"] = (600, 600)  # grace lapses: a long-running unit with a fresh cycle
     env.cycle_completed(5)
     assert env.run() == 0
-    env.advance(100)
-    env.svc["ages"] = (10, 10)  # grace again, but the streak restarted at this check
-    env.state_written(0)
+    assert persisted() is None  # cleared and persisted
+    env.advance(300)  # longer than max_state_age since the first seed
+    env.svc["ages"] = (10, 10)  # grace again: the streak must restart now, not resume
+    env.state_removed()  # no state file: only the streak can decide state_missing
     assert env.run() == 0
+    assert persisted() == 100_400
     assert "state_missing" not in env.members()
 
 
