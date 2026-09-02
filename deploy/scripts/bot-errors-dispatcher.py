@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import argparse
 import calendar
-import copy
 import fcntl
 import hashlib
 import json
@@ -1084,6 +1083,34 @@ def dispatcher_bootstrap_state() -> dict[str, Any]:
     }
 
 
+def json_snapshot(payload: Any) -> Any:
+    """Independent deep copy of a JSON-shaped payload: the file's ONE snapshot idiom.
+
+    Shared by :func:`validate_dispatcher_state` and the claimed-event snapshot in
+    :func:`process_one`. Both take an independent copy of parsed JSON so later
+    mutation cannot reach it, and both must agree on how deep a payload they
+    accept -- so there is one implementation rather than two.
+
+    A JSON round-trip, deliberately, NOT ``copy.deepcopy``. ``deepcopy``
+    consumes roughly twice the interpreter stack per nesting level, which cost
+    ``process_one`` half its tolerated event depth when it was used here
+    (#3404 follow-up): events the dispatcher's own reader accepts, and that it
+    had always handled, began raising ``RecursionError`` mid-cycle. The
+    round-trip tolerates an order of magnitude more nesting.
+
+    The round-trip is structural identity for these inputs rather than a
+    coincidence: events arrive through ``safe_read_json`` and state through the
+    controller store, so every member is already JSON-serialisable.
+
+    RAISES rather than deciding: ``RecursionError`` for a payload nested past
+    the encoder's limit, ``TypeError``/``ValueError`` for a member JSON cannot
+    represent. The failure mode belongs to the caller -- ``process_one``
+    quarantines the event as poison so one bad event cannot abort the pass,
+    while ``validate_dispatcher_state`` lets it propagate as it always has.
+    """
+    return json.loads(json.dumps(payload))
+
+
 def validate_dispatcher_state(payload: Any) -> dict[str, Any]:
     """#2723 R5.1: validate and sanitise incident-state payload.
 
@@ -1105,7 +1132,7 @@ def validate_dispatcher_state(payload: Any) -> dict[str, Any]:
         raise ValueError("dispatcher state openIncidents must be an object")
     if not isinstance(sanitized.setdefault("lastSentAt", {}), dict):
         raise ValueError("dispatcher state lastSentAt must be an object")
-    return json.loads(json.dumps(sanitized))
+    return json_snapshot(sanitized)
 
 
 def redacted_dispatcher_payload(value: Any) -> Any:
@@ -3147,6 +3174,73 @@ _EMAIL_FALLBACK_TEST_ROOT_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"/pytest-of-[^/]+/", re.I),
 ]
 
+# Fields the DISPATCHER owns and writes into an event it is delivering. They
+# carry local paths -- the dispatch log under the state root, and the transport's
+# own exception text -- so no test-provenance decision may read them (#3404).
+#
+# ``delivery`` is excluded wholesale rather than key by key. It is the
+# dispatcher's bookkeeping block by contract: the TypeScript producer
+# (src/lib/bot-errors-outbox.ts) emits it empty, and only the dispatcher writes
+# attempts, status, backoff, lastError and emailFallback into it. Nothing a
+# producer legitimately puts there is evidence of test provenance. Naming the
+# block instead of chasing its keys is what stops this from regressing the next
+# time a field is added to it -- which is exactly how ``lastError`` was missed.
+_DISPATCHER_OWNED_TOP_LEVEL_KEYS: tuple[str, ...] = ("delivery",)
+
+
+def producer_claim(
+    event: dict[str, Any],
+    *,
+    injected_dispatch_log: str | None = None,
+) -> dict[str, Any]:
+    """The event as its PRODUCER claimed it: dispatcher-owned bookkeeping removed.
+
+    An independent copy (see :func:`json_snapshot`), so later mutation of the
+    live event cannot reach it, with the dispatcher's own writes stripped.
+
+    This is the input to every test-provenance decision: the B2 queue check and
+    the F5 email gate both read it and never the live event. Deriving those
+    decisions from the live event is a silent-loss bug, because the retry path
+    persists dispatcher text back into the queued file -- a transport error
+    naming a fixture path made attempt 2 archive a genuine critical alert as a
+    test leak.
+
+    ``diagnostics.dispatchLog`` is stripped ONLY when it equals
+    ``injected_dispatch_log``, the value this dispatcher writes. It is not a
+    dispatcher-exclusive key: ``bot-errors-emit.py`` accepts arbitrary
+    ``diagnostics`` keys from the command line, and with
+    ``diagnostics.omitDispatchLogInMessage`` set the dispatcher does not
+    overwrite what the producer put there -- while ``format_event`` still
+    renders it into the delivered message. Stripping it unconditionally
+    therefore laundered a producer-supplied fixture path straight past this
+    check and into WhatsApp. A value the producer chose is producer-claimed
+    text and stays in the claim.
+
+    Detection of real test-fixture events is otherwise unaffected: those declare
+    themselves in producer-owned fields (evidence, summary, payload,
+    diagnostics), which are all preserved here. ``event_is_test_leak`` and
+    ``matched_test_leak_pattern`` are unchanged; only what they are handed is.
+
+    Raises whatever :func:`json_snapshot` raises; the caller decides.
+    """
+    claim = json_snapshot(event)
+    if not isinstance(claim, dict):
+        raise ValueError("event root must be an object")
+    for key in _DISPATCHER_OWNED_TOP_LEVEL_KEYS:
+        claim.pop(key, None)
+    diagnostics = claim.get("diagnostics")
+    if (
+        injected_dispatch_log is not None
+        and isinstance(diagnostics, dict)
+        and diagnostics.get("dispatchLog") == injected_dispatch_log
+    ):
+        diagnostics.pop("dispatchLog", None)
+    return claim
+
+
+UNRESOLVABLE_STATE_DIR_PATTERN = "<state directory could not be resolved>"
+
+
 def matched_state_dir_test_root_pattern(state_dir: Path | str | None) -> str | None:
     """Return the test-root pattern matching the dispatcher's own state directory.
 
@@ -3154,13 +3248,46 @@ def matched_state_dir_test_root_pattern(state_dir: Path | str | None) -> str | N
     additions via BOT_ERRORS_TEST_LEAK_PATH_PATTERNS) and the email-gate-only
     pytest basetemp rule. ``None`` when the state directory is not under any
     recognised test root.
+
+    Four spellings of the directory are tested, not just the one supplied.
+    ``BOT_ERRORS_STATE_DIR`` is accepted unnormalised (``lib.state_root`` wraps
+    it in ``Path`` and nothing more), so a relative value or a symlink into a
+    sandbox would otherwise present a clean-looking string for a state root that
+    really is a test root -- a fail-OPEN miss, letting a test run email the
+    operator. The spellings are:
+
+    * ``raw`` -- exactly what the caller supplied;
+    * ``absolute`` -- ``raw`` anchored at the working directory, which is what
+      catches a relative value;
+    * ``parent-resolved`` -- the #2723 anchor form, resolving OS aliases such as
+      ``/var`` to ``/private/var`` while keeping the final component's own name;
+    * ``fully resolved`` -- every component dereferenced, INCLUDING the leaf.
+
+    The last of these is load-bearing on its own. The parent-resolved form
+    deliberately preserves the leaf name, so a state directory that is itself a
+    symlink into a sandbox resolves to nothing revealing and the check misses
+    it. That was a real hole in the first version of this function.
+
+    Fails CLOSED: if the directory cannot be resolved at all, this reports
+    ``UNRESOLVABLE_STATE_DIR_PATTERN`` rather than ``None``, so an
+    unclassifiable state root blocks the email instead of silently allowing it.
     """
     if state_dir is None:
         return None
-    text = os.fspath(state_dir).rstrip("/") + "/"
-    for pattern in (*TEST_LEAK_PATTERNS, *_EMAIL_FALLBACK_TEST_ROOT_PATTERNS):
-        if pattern.search(text):
-            return pattern.pattern
+    raw = os.fspath(state_dir)
+    spellings = [raw]
+    try:
+        absolute = Path(raw).absolute()
+        spellings.append(os.fspath(absolute))
+        spellings.append(os.fspath(absolute.parent.resolve() / absolute.name))
+        spellings.append(os.fspath(Path(raw).resolve(strict=False)))
+    except (OSError, RuntimeError, ValueError):
+        return UNRESOLVABLE_STATE_DIR_PATTERN
+    for spelling in spellings:
+        text = spelling.rstrip("/") + "/"
+        for pattern in (*TEST_LEAK_PATTERNS, *_EMAIL_FALLBACK_TEST_ROOT_PATTERNS):
+            if pattern.search(text):
+                return pattern.pattern
     return None
 
 
@@ -3185,8 +3312,10 @@ def email_fallback_blocked_reason(
     under a tmp dir, or whose bridge returned an error payload naming a fixture
     path, therefore reported ``test_leak`` for a perfectly clean alert and
     dead-lettered it silently. Reading only the claimed payload closes that
-    class for every such field at once, present and future, rather than
-    stripping known keys by name.
+    class for the fields ``producer_claim`` names -- the ``delivery`` block, and
+    ``diagnostics.dispatchLog`` when it holds this dispatcher's own value. Other
+    dispatcher-written diagnostics survive the claim and are a known remainder,
+    not something this closes by construction.
 
     Three gates, evaluated in order:
 
@@ -3211,6 +3340,9 @@ def email_fallback_blocked_reason(
     if event_is_test_leak(claimed_event):
         return "test_leak"
     if state_dir is None:
+        # Unreachable in production: process_one, the only caller, always passes
+        # paths["root"]. Kept so a unit test can exercise the gate against the
+        # env-configured root without building a paths dict.
         state_dir = state_root()
     if matched_state_dir_test_root_pattern(state_dir) is not None:
         return "test_state_dir"
@@ -6348,13 +6480,53 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
     if not normalize_publication.advance_allowed:
         require_advance(normalize_publication)
 
+    # #3404: recover what the PRODUCER claimed, before ANY test-provenance
+    # decision is taken on this event. Both gates below read this and nothing
+    # else: the B2 queue check here, and the F5 email gate further down.
+    #
+    # Neither may read the live event, because on every attempt after the first
+    # the live event carries the dispatcher's OWN text, persisted by the retry
+    # path: diagnostics.dispatchLog, and delivery.lastError holding the
+    # transport's exception string. When a transport error named a fixture path
+    # -- shipped code raises RuntimeError(f"socket missing: {socket_path}") --
+    # attempt 1 wrote it into the event, the retry published it back to the
+    # queue file, and attempt 2's B2 check read it and ARCHIVED a genuine
+    # critical alert as a test leak. The alert was destroyed, not merely
+    # delayed, and the email fallback never ran.
+    #
+    # A snapshot failure must NOT escape: run_once calls process_one unguarded
+    # and reclaim_processing returns a stranded claimed file to the outbox with
+    # no attempt counter, so an exception here would abort the pass, skip every
+    # alert queued behind this one, and do it again on the next cycle, forever.
+    # Quarantining is the failure mode the function already uses for an event it
+    # cannot handle, and it is loud: the file leaves the queue for good and
+    # quarantine_poison raises a meta-alert to the operator.
+    #
+    # Catching Exception rather than an enumerated tuple is deliberate. The
+    # tuple form is a standing bet that no future edit to producer_claim can
+    # raise anything else, and losing that bet costs the whole alerting
+    # pipeline; over-catching costs one quarantined event and a meta-alert
+    # naming it. Quarantine is the right shape for ANY snapshot failure.
+    try:
+        claimed_event = producer_claim(
+            event,
+            injected_dispatch_log=str(paths["logs"] / "dispatch.jsonl"),
+        )
+    except Exception:
+        quarantine_poison(
+            claimed,
+            paths["quarantine"],
+            "claimed event could not be snapshotted (nesting depth or non-serialisable member)",
+        )
+        return False, "poison"
+
     # --- Test-leak defense-in-depth (B2) ---
-    # Drop test-fixture events BEFORE any delivery, incident-state load, or
-    # diagnostics injection.  Running first on the as-claimed event keeps
-    # matchedPattern attribution honest (it reflects only the payload's own
-    # fields, never our injected dispatchLog path) and avoids a wasted
-    # load_incident_state read for events we are about to discard.
-    matched_pattern = matched_test_leak_pattern(event)
+    # Drop test-fixture events BEFORE any delivery or incident-state load.
+    # Reading the producer's claim keeps matchedPattern attribution honest -- it
+    # reflects only the payload's own fields, never dispatcher bookkeeping --
+    # and avoids a wasted load_incident_state read for events we are about to
+    # discard.
+    matched_pattern = matched_test_leak_pattern(claimed_event)
     if matched_pattern is not None:
         testleak_path = archive_path(paths["testleak"], path.name, "testleak", event)
         os.replace(claimed, testleak_path)
@@ -6366,16 +6538,6 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
             "matchedPattern": matched_pattern,
         })
         return False, "test_leak"
-
-    # #3404: freeze what the PRODUCER claimed, before the dispatcher writes any
-    # of its own text into the event. Everything below this line may add
-    # dispatcher-owned strings -- diagnostics.dispatchLog immediately, and
-    # delivery.lastError from mark_failure once the transport fails -- and those
-    # strings carry local paths that can match a test-leak pattern. The F5 email
-    # gate is evaluated against this snapshot so a genuine alert can never be
-    # mistaken for a test leak on the strength of the dispatcher's own
-    # bookkeeping. Deep-copied because the injections below mutate nested dicts.
-    claimed_event = copy.deepcopy(event)
 
     diagnostics = event.setdefault("diagnostics", {})
     if isinstance(diagnostics, dict) and not omit_dispatch_log_in_message(event):
