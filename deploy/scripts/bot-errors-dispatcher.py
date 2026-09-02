@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import argparse
 import calendar
-import copy
 import fcntl
 import hashlib
 import json
@@ -966,6 +965,34 @@ def dispatcher_bootstrap_state() -> dict[str, Any]:
     }
 
 
+def json_snapshot(payload: Any) -> Any:
+    """Independent deep copy of a JSON-shaped payload: the file's ONE snapshot idiom.
+
+    Shared by :func:`validate_dispatcher_state` and the claimed-event snapshot in
+    :func:`process_one`. Both take an independent copy of parsed JSON so later
+    mutation cannot reach it, and both must agree on how deep a payload they
+    accept -- so there is one implementation rather than two.
+
+    A JSON round-trip, deliberately, NOT ``copy.deepcopy``. ``deepcopy``
+    consumes roughly twice the interpreter stack per nesting level, which cost
+    ``process_one`` half its tolerated event depth when it was used here
+    (#3404 follow-up): events the dispatcher's own reader accepts, and that it
+    had always handled, began raising ``RecursionError`` mid-cycle. The
+    round-trip tolerates an order of magnitude more nesting.
+
+    The round-trip is structural identity for these inputs rather than a
+    coincidence: events arrive through ``safe_read_json`` and state through the
+    controller store, so every member is already JSON-serialisable.
+
+    RAISES rather than deciding: ``RecursionError`` for a payload nested past
+    the encoder's limit, ``TypeError``/``ValueError`` for a member JSON cannot
+    represent. The failure mode belongs to the caller -- ``process_one``
+    quarantines the event as poison so one bad event cannot abort the pass,
+    while ``validate_dispatcher_state`` lets it propagate as it always has.
+    """
+    return json.loads(json.dumps(payload))
+
+
 def validate_dispatcher_state(payload: Any) -> dict[str, Any]:
     """#2723 R5.1: validate and sanitise incident-state payload.
 
@@ -987,7 +1014,7 @@ def validate_dispatcher_state(payload: Any) -> dict[str, Any]:
         raise ValueError("dispatcher state openIncidents must be an object")
     if not isinstance(sanitized.setdefault("lastSentAt", {}), dict):
         raise ValueError("dispatcher state lastSentAt must be an object")
-    return json.loads(json.dumps(sanitized))
+    return json_snapshot(sanitized)
 
 
 def redacted_dispatcher_payload(value: Any) -> Any:
@@ -6231,8 +6258,25 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
     # strings carry local paths that can match a test-leak pattern. The F5 email
     # gate is evaluated against this snapshot so a genuine alert can never be
     # mistaken for a test leak on the strength of the dispatcher's own
-    # bookkeeping. Deep-copied because the injections below mutate nested dicts.
-    claimed_event = copy.deepcopy(event)
+    # bookkeeping. A copy, not a reference, because the injections below mutate
+    # nested dicts in place.
+    #
+    # A snapshot failure must NOT escape: run_once calls process_one unguarded
+    # and reclaim_processing returns a stranded claimed file to the outbox with
+    # no attempt counter, so an exception here would abort the pass, skip every
+    # alert queued behind this one, and do it again on the next cycle, forever.
+    # Quarantining is the failure mode the function already uses for an event it
+    # cannot handle, and it is loud: the file leaves the queue for good and
+    # quarantine_poison raises a meta-alert to the operator.
+    try:
+        claimed_event = json_snapshot(event)
+    except (RecursionError, TypeError, ValueError):
+        quarantine_poison(
+            claimed,
+            paths["quarantine"],
+            "claimed event could not be snapshotted (nesting depth or non-serialisable member)",
+        )
+        return False, "poison"
 
     diagnostics = event.setdefault("diagnostics", {})
     if isinstance(diagnostics, dict) and not omit_dispatch_log_in_message(event):

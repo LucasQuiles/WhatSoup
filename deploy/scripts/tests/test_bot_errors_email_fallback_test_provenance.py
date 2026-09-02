@@ -9,12 +9,32 @@ fallback. The queue path already suppresses test-provenance events; the email
 fallback applied no such gate.
 
 #3404: the first gate scanned the POST-injection event for ``/pytest-of-<user>/``
-and re-ran the global test-leak scan on it. Two false blocks followed: a genuine
-alert whose evidence merely mentioned an orphaned ``/tmp/pytest-of-*`` directory
-dead-lettered silently, and any dispatcher whose state root sat under a macOS
-``$TMPDIR`` blocked every email because its own injected ``dispatchLog`` path
-matched. The gate now evaluates test-leak on the AS-CLAIMED event and binds the
-test-root rule to the state directory the dispatcher was launched with.
+and re-ran the global test-leak scan on it, so a genuine alert whose evidence
+merely mentioned an orphaned ``/tmp/pytest-of-*`` directory dead-lettered
+silently. The gate now evaluates test-leak on the AS-CLAIMED event and binds the
+test-root rule to the state directory the dispatcher was launched with. That
+false block is closed.
+
+CORRECTION (#3404 follow-up). An earlier version of this docstring, and the
+commit message that landed it, also listed the macOS ``$TMPDIR`` state root as a
+false block that had been fixed. It was NOT fixed. It was RELABELLED, and in one
+dimension it is now WIDER:
+
+* ``matched_state_dir_test_root_pattern`` applies the whole
+  ``TEST_LEAK_PATTERNS`` set to the state directory, and that set contains
+  ``/var/folders/.../T/``. A dispatcher whose state root sits under a macOS
+  ``$TMPDIR`` still blocks every email fallback -- now deliberately, under the
+  distinct reason ``test_state_dir`` rather than ``test_leak``.
+* With ``diagnostics.omitDispatchLogInMessage: true`` no ``$TMPDIR`` string ever
+  reached the event, so that configuration used to escalate by email. It is now
+  blocked on the state directory alone. Measured, same clean payload, state root
+  ``/var/folders/aa/bb1234567890/T/bot-errors``: base ``None``, here
+  ``test_state_dir``.
+
+The new semantics are the intended ones -- what makes a run a test run is where
+its own state lives, not what its payload mentions -- but an operator running a
+production dispatcher out of ``$TMPDIR`` loses the email fallback, so the
+widening is recorded here rather than described as a fix.
 """
 from __future__ import annotations
 
@@ -408,3 +428,91 @@ def test_transport_error_path_in_lastError_does_not_block_email_fallback(
 
         assert fallback.call_count == 1, label
         assert "email_fallback_test_provenance_suppressed" not in _dispatch_log_types(paths)
+
+
+def test_retried_event_carrying_a_prior_attempts_lasterror_still_escalates(tmp_path: Path):
+    """The fallback fires only on a RETRY, so the snapshot sees persisted bookkeeping.
+
+    F5, asked as: on attempt 3 the event has been through ``mark_failure``
+    before, and the retry paths publish the mutated event back to the claimed
+    file and move it to the outbox. Does the next attempt's B2 snapshot -- taken
+    at the claim, before this pass writes anything -- therefore carry attempt
+    2's ``delivery.lastError``, and can that text suppress the fallback on the
+    one attempt where it fires?
+
+    Answer: it does carry it, and it cannot suppress the fallback. The
+    email-only pytest-basetemp rule is bound to the launched state directory and
+    is not matched against event text at all, so a persisted transport error
+    naming a pytest root reaches the gate and is ignored.
+
+    The neighbouring case is not this gate's: a persisted ``lastError`` matching
+    a GLOBAL test-leak pattern never reaches F5, because the B2 check at the
+    claim drops the whole event as ``test_leak_dropped`` first. That is
+    pre-existing and behaves identically before #3444 -- verified against
+    ``e460995a`` -- so it is characterised here, not changed.
+    """
+    stale = "socket missing: /tmp/pytest-of-runner/pytest-12/whatsoup.sock"
+    with _state_root_outside_test_roots() as state_root:
+        mod = _load_module({
+            "BOT_ERRORS_STATE_DIR": str(state_root),
+            "BOT_ERRORS_DELIVERY_MAX_ATTEMPTS": "10",
+        })
+        assert mod.matched_state_dir_test_root_pattern(state_root) is None, "precondition: production state dir"
+        # The event exactly as attempt 2 left it on disk: attempts persisted,
+        # and the previous transport failure's text still in lastError.
+        retried = _event(delivery={
+            "attempts": 2,
+            "status": "queued",
+            "nextAttemptAtEpoch": 0,
+            "lastError": stale,
+        })
+        assert mod.event_is_test_leak(retried) is False, (
+            "precondition: a pytest-root path is NOT a global leak pattern"
+        )
+
+        paths = mod.setup_dirs()
+        event_path = _write_event(paths, retried)
+
+        with patch.object(mod, "send_whatsapp", side_effect=RuntimeError("bridge unavailable")), \
+             patch.object(mod, "EMAIL_FALLBACK", _executable_fallback(tmp_path)), \
+             patch.object(mod, "email_fallback", return_value=True) as fallback:
+            mod.process_one(event_path, paths)
+
+        assert fallback.call_count == 1, "attempt 3 must escalate; the retry reached the fallback threshold"
+        assert "email_fallback_test_provenance_suppressed" not in _dispatch_log_types(paths)
+
+
+def test_persisted_lasterror_matching_a_global_pattern_is_dropped_at_the_claim(tmp_path: Path):
+    """Characterisation, not a contract this branch introduces or changes.
+
+    Documents where the neighbouring F5 case actually goes: a retried event
+    whose persisted ``delivery.lastError`` matches a GLOBAL test-leak pattern is
+    dropped by the B2 check at the claim and never reaches the email gate. The
+    email fallback is not consulted, so this is not a fallback suppression.
+
+    Verified identical at ``e460995a``, before the gate changes. If the B2 rule
+    is ever narrowed to producer-claimed content, this test should be updated
+    with that change rather than treated as a regression.
+    """
+    with _state_root_outside_test_roots() as state_root:
+        mod = _load_module({
+            "BOT_ERRORS_STATE_DIR": str(state_root),
+            "BOT_ERRORS_DELIVERY_MAX_ATTEMPTS": "10",
+        })
+        retried = _event(delivery={
+            "attempts": 2,
+            "status": "queued",
+            "nextAttemptAtEpoch": 0,
+            "lastError": "socket missing: /tmp/wa-test-auth/whatsoup.sock",
+        })
+        paths = mod.setup_dirs()
+        event_path = _write_event(paths, retried)
+
+        with patch.object(mod, "send_whatsapp", side_effect=RuntimeError("bridge unavailable")), \
+             patch.object(mod, "EMAIL_FALLBACK", _executable_fallback(tmp_path)), \
+             patch.object(mod, "email_fallback", return_value=True) as fallback:
+            ok, detail = mod.process_one(event_path, paths)
+
+        assert (ok, detail) == (False, "test_leak")
+        assert fallback.call_count == 0
+        assert "test_leak_dropped" in _dispatch_log_types(paths)
