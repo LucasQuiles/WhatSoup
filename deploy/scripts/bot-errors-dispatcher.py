@@ -3293,6 +3293,22 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
     # escapes. Every repeat is a storm member and stays consolidated, so the
     # storm still collapses a flapping source into one alert, and an event
     # carrying no conversation is unaffected.
+    #
+    # ORDERING, deliberate and not an oversight: this block can return before
+    # stronger_open_incident_for below, so a first sighting that escapes an
+    # open storm is not additionally tested against root-cause inhibition.
+    # Reordering the two was considered and DECLINED. The policies overlap
+    # only for a source that is both conversation-scoped
+    # (BOT_ERRORS_CONVERSATION_SCOPED_SOURCES) and listed as a symptom in the
+    # inhibition map, and under shipped defaults that intersection is empty:
+    # the scoped set is {agent_turn_admission_rejected} while the symptom
+    # sources are the instance/health/outbound families, so today's exposure
+    # is zero. It is empty by configuration, though, not by construction --
+    # both sets are env-driven and BOT_ERRORS_INHIBITION_MAP is union-merged
+    # over the seed, so a deployment can add a scoped source as a symptom.
+    # A reorder would then silently change which policy wins, with no test
+    # pinning the answer. That ordering deserves its own test that states
+    # which policy should win; it is not worth changing blind here.
     if FLAP_DETECTION and is_incident_alert(event) and not is_incident_clear(event) and source != "flap_storm":
         flap_state = incident_state.get("flapState")
         if isinstance(flap_state, dict):
