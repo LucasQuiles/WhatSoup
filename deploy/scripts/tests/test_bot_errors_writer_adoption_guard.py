@@ -21,9 +21,11 @@ never routes through the wrapper, so the supported path is untouched.
 """
 from __future__ import annotations
 
+import errno
 import importlib.util
 import json
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -410,3 +412,73 @@ def test_bare_writer_lock_is_the_controller_session_lock(dispatcher, tmp_path, m
         result = session.load()
         session.save(dict(result.payload or {}), result.capability)
     assert dispatcher._incident_state_is_adopted(anchor)
+
+
+def test_adopted_store_refuses_before_contending_for_a_self_held_lock(dispatcher, tmp_path):
+    """The informative refusal must be reachable from inside a session.
+
+    A helper that reaches the bare writer from within a controller-state
+    session already holds ``<anchor>.lock`` in this process, and flock on a
+    second descriptor self-blocks. Adoption is irreversible, so a marker seen
+    before the lock is final: the writer must refuse with the routing message
+    at once instead of waiting out the lock timeout and reporting contention.
+    """
+    import fcntl
+    import time
+
+    anchor = _anchor(tmp_path, adopted=True)
+    lock_path = tmp_path / "incident-state.json.lock"
+    holder = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(holder, fcntl.LOCK_EX)
+        started = time.monotonic()
+        with pytest.raises(dispatcher.IncidentCycleRequiredError, match="Route this write through IncidentStateCycle.commit"):
+            dispatcher.save_incident_state({"incident_state": anchor}, {"incidents": {}}, lock_timeout_seconds=3.0)
+        elapsed = time.monotonic() - started
+        fcntl.flock(holder, fcntl.LOCK_UN)
+    finally:
+        os.close(holder)
+    assert elapsed < 1.0, f"refusal waited on the self-held lock for {elapsed:.2f}s"
+
+
+def test_unsafe_adoption_lock_file_is_the_guards_error_not_a_failed_cycle(dispatcher, tmp_path):
+    """The lock-hardening refusal must take the same exit path as a lock timeout.
+
+    A bare OSError from the hardening check is swallowed by ``--daemon`` as a
+    failed cycle (record_state, sleep, retry forever). It is the guard's own
+    error class, chained from the EPERM that names the unsafe leaf, so the
+    daemon exits 79 loudly; the primary is untouched either way.
+    """
+    anchor = _anchor(tmp_path, adopted=False)
+    lock_path = tmp_path / "incident-state.json.lock"
+    lock_path.write_text("")
+    lock_path.chmod(0o666)  # group/other bits: the hardening check must refuse this leaf
+    before = anchor.read_bytes()
+    with pytest.raises(dispatcher.IncidentCycleRequiredError, match="unsafe adoption lock") as raised:
+        dispatcher.save_incident_state({"incident_state": anchor}, {"incidents": {}}, lock_timeout_seconds=0.2)
+    cause = raised.value.__cause__
+    assert isinstance(cause, OSError) and cause.errno == errno.EPERM, repr(cause)
+    assert anchor.read_bytes() == before
+
+
+def test_runbook_documents_exit_79_consistently_with_the_unit_file():
+    """Exit 79 needs a consumer an operator can find: the runbook names the code,
+    the fix, and the unit behaviour that actually ships. The claim is bound to
+    the unit file so a later RestartPreventExitStatus cannot leave the runbook
+    describing a restart loop that no longer happens (or the reverse)."""
+    repo = Path(__file__).resolve().parents[3]
+    runbook = (repo / "docs" / "runbook.md").read_text(encoding="utf-8")
+    unit = (repo / "deploy" / "bot-errors-dispatcher.service").read_text(encoding="utf-8")
+    start = runbook.index("### BOT ERRORS dispatcher exit codes")
+    section = runbook[start : runbook.index("\n### ", start + 1)]
+    assert "exit 79" in section and "INCIDENT_CYCLE_REQUIRED_EXIT" in section
+    assert "IncidentStateCycle.commit()" in section
+    restart_sec = re.search(r"^RestartSec=(\d+)", unit, re.M)
+    assert restart_sec is not None and f"every {restart_sec.group(1)} seconds" in section
+    prevent = re.search(r"^RestartPreventExitStatus=(.*)$", unit, re.M)
+    held_out = prevent is not None and "79" in prevent.group(1).split()
+    if held_out:
+        assert "stays down" in section, "the unit holds 79 out of the restart loop; the runbook must say so"
+    else:
+        assert "no `RestartPreventExitStatus`" in section, "the unit restarts on 79; the runbook must say so"
+

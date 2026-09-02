@@ -1205,9 +1205,19 @@ def save_incident_state(
     incident_path = paths.get("incident_state")
     if incident_path is None:
         raise ValueError("save_incident_state: paths missing incident_state key")
+    # An adopted store is refused before contending for the adoption lock.
+    # Adoption is irreversible (the marker never goes away), so a marker seen
+    # here is final; and the caller most likely to reach this writer
+    # post-adoption is a helper inside a controller-state session, which
+    # already holds that session's flock in this process. Waiting on it would
+    # stall the full timeout and report lock contention instead of the routing
+    # error the guard exists to name.
+    _reject_bare_write_if_adopted(incident_path)
     # The whole observe-then-publish sequence runs under the controller-state
     # adoption lock, so the two refusals below decide against a store that
-    # adoption cannot change underneath them (see _AdoptionLock).
+    # adoption cannot change underneath them (see _AdoptionLock). The marker
+    # check repeats under the lock for the not-yet-adopted case, where
+    # adoption can still land between the fast check and the lock.
     with _AdoptionLock(incident_path, lock_timeout_seconds):
         _reject_bare_write_if_adopted(incident_path)
         state["updatedAt"] = now_iso()
@@ -1238,7 +1248,10 @@ def save_incident_state(
 # programming error (a helper reached save_incident_state without its
 # IncidentStateCycle) and must stop the loop loudly rather than fail every
 # cycle in silence. Restart=always brings the unit back; the deadman then
-# reports cycle_stale once the staleness outgrows what the restart explains.
+# reports cycle_stale once the staleness outgrows what the restart explains,
+# or state_missing / cycle_incomplete once its grace streak outgrows
+# max_state_age. Documented for operators in docs/runbook.md ("BOT ERRORS
+# dispatcher exit codes").
 INCIDENT_CYCLE_REQUIRED_EXIT = 79
 
 
@@ -1332,7 +1345,18 @@ class _AdoptionLock:
                 or observed.st_nlink != 1
                 or stat.S_IMODE(observed.st_mode) & 0o077
             ):
-                raise OSError(errno.EPERM, f"unsafe adoption lock file: {self._path.name}")
+                # The guard's own error class, like the timeout below: a bare
+                # OSError here is swallowed by --daemon as a failed cycle and
+                # retried every interval, which is the silent failure mode the
+                # exit-79 path exists to prevent. The EPERM stays attached as
+                # the cause so the refusal still names the unsafe leaf.
+                raise IncidentCycleRequiredError(
+                    f"save_incident_state: refusing the bare write: unsafe adoption lock file "
+                    f"{self._path.name} (regular={stat.S_ISREG(observed.st_mode)} "
+                    f"owner_matches={observed.st_uid == os.getuid()} nlink={observed.st_nlink} "
+                    f"mode={stat.S_IMODE(observed.st_mode):04o}); the store's lock cannot be "
+                    f"trusted and a bare write must not run without it"
+                ) from OSError(errno.EPERM, f"unsafe adoption lock file: {self._path.name}")
             deadline = time.monotonic() + self._timeout
             while True:
                 try:

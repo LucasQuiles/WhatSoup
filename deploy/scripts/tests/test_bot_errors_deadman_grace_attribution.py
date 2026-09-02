@@ -597,16 +597,59 @@ def test_deadman_grace_streak_resets_when_grace_lapses(env, tmp_path):
 
 def test_deadman_grace_streak_rejects_bool_zero_and_negative_epochs(env, tmp_path):
     """A corrupt graceStreakSince (bool passes isinstance int; zero; negative) must
-    not manufacture an enormous streak; it resets and is persisted as an int."""
+    not manufacture an enormous streak. It is re-seeded as an int, but the check
+    that found it refuses grace: a continuity record this process did not write
+    validly cannot vouch for a fresh restart, and re-seeding to zero would make
+    grace credible again for a whole max_state_age (the gate's finding)."""
     for bad in (True, 0, -5):
         (tmp_path / "deadman-state.json").write_text(json.dumps({"schemaVersion": 1, "incidents": {}, "graceStreakSince": bad, "graceStreakSeenAt": 100_000, "graceStreakBootId": "boot-A", "graceStreakSeenMonotonic": 500_000, "graceStreakAccumulated": 0, "graceStreakGapForgiven": False}))
         (tmp_path / "deadman-state.json").chmod(0o600)  # durable_json refuses group/other-readable targets
         env.svc["status"] = "active"
         env.svc["ages"] = (10, 10)
-        assert env.run() == 0, bad
-        assert "state_missing" not in env.members()
+        assert env.run() == 2, bad
+        assert env.members() == {"state_missing"}, bad
         saved = json.loads((tmp_path / "deadman-state.json").read_text())
         assert saved["graceStreakSince"] == 100_000 and type(saved["graceStreakSince"]) is int
+        assert saved["episode"]["members"]["state_missing"]["detail"]["grace_refused"] == "corrupt_streak_record"
+        (tmp_path / "deadman-state.json").unlink()
+
+
+def test_deadman_graces_again_once_the_corrupt_record_is_re_seeded(env, tmp_path):
+    """Refusing grace on a corrupt record is a one-check verdict: the re-seeded
+    valid record vouches normally on the next check, so a genuinely fresh
+    restart is graced again rather than paged on every check."""
+    (tmp_path / "deadman-state.json").write_text(json.dumps({"schemaVersion": 1, "incidents": {}, "graceStreakSince": True, "graceStreakSeenAt": 100_000, "graceStreakBootId": "boot-A", "graceStreakSeenMonotonic": 500_000, "graceStreakAccumulated": 0, "graceStreakGapForgiven": False}))
+    (tmp_path / "deadman-state.json").chmod(0o600)
+    env.svc["status"] = "active"
+    env.svc["ages"] = (10, 10)
+    assert env.run() == 2
+    assert env.members() == {"state_missing"}
+    env.advance(30)
+    env.svc["ages"] = (10, 10)
+    assert env.run() == 0
+    assert "state_missing" not in env.members()
+
+
+def test_deadman_still_re_seeds_a_partial_record_silently(env, tmp_path):
+    """A record missing fields is an upgrade or a first run, not corruption:
+    it re-seeds and grace stays credible, exactly as before."""
+    (tmp_path / "deadman-state.json").write_text(json.dumps({"schemaVersion": 1, "incidents": {}, "graceStreakSince": 100_000, "graceStreakSeenAt": 100_000}))
+    (tmp_path / "deadman-state.json").chmod(0o600)
+    env.svc["status"] = "active"
+    env.svc["ages"] = (10, 10)
+    assert env.run() == 0
+    assert "state_missing" not in env.members()
+    assert env.deadman_state()["graceStreakAccumulated"] == 0
+
+
+def test_grace_streak_record_state_distinguishes_absent_partial_valid_and_corrupt(health_check):
+    valid = {"graceStreakSince": 1, "graceStreakSeenAt": 1, "graceStreakBootId": "b", "graceStreakSeenMonotonic": 0, "graceStreakAccumulated": 0, "graceStreakGapForgiven": False}
+    assert health_check._grace_streak_record_state({}) == "absent"
+    assert health_check._grace_streak_record_state({"graceStreakSince": 1}) == "partial"
+    assert health_check._grace_streak_record_state(dict(valid)) == "valid"
+    assert health_check._grace_streak_record_state({**valid, "graceStreakSeenMonotonic": None}) == "valid"
+    for field, bad in (("graceStreakSince", True), ("graceStreakSince", 0), ("graceStreakSeenAt", -1), ("graceStreakBootId", 7), ("graceStreakSeenMonotonic", "x"), ("graceStreakAccumulated", -1), ("graceStreakGapForgiven", "no")):
+        assert health_check._grace_streak_record_state({**valid, field: bad}) == "corrupt", (field, bad)
 
 
 def test_deadman_does_not_page_a_fresh_restart_after_a_reboot(env):
@@ -717,10 +760,21 @@ def test_deadman_reports_an_observation_gap_instead_of_absorbing_it(env, capsys)
     assert env.run() == 0
     assert env.deadman_state()["lastCheckGapSeconds"] == 700
     assert "check_gap_seconds=700" in capsys.readouterr().out
+    gap_seen_at = env.mod.epoch_to_iso(env.clock["now"])
+    assert env.deadman_state()["lastCheckGapAt"] == gap_seen_at
     env.advance(300)
     env.cycle_completed(5)
     assert env.run() == 0
-    assert "lastCheckGapSeconds" not in env.deadman_state()  # cleared once the cadence is back
+    # The last gap is a durable record of the deadman's own absence: a check at
+    # the normal cadence must not erase it (it was write-only otherwise).
+    assert env.deadman_state()["lastCheckGapSeconds"] == 700
+    assert env.deadman_state()["lastCheckGapAt"] == gap_seen_at
+    assert "check_gap_seconds" not in capsys.readouterr().out
+    env.advance(1_000)
+    env.cycle_completed(5)
+    assert env.run() == 0
+    assert env.deadman_state()["lastCheckGapSeconds"] == 1_000  # only the next gap replaces it
+    assert env.deadman_state()["lastCheckGapAt"] == env.mod.epoch_to_iso(env.clock["now"])
 
 
 def test_deadman_observation_gap_threshold_follows_check_interval(env, capsys):
@@ -872,3 +926,40 @@ def test_cli_default_check_interval_is_the_shared_constant(health_check):
     assert inspect.signature(health_check.deadman).parameters["check_interval"].default == health_check.DEADMAN_CHECK_INTERVAL_SECONDS
     source = inspect.getsource(health_check.main) if hasattr(health_check, "main") else _SCRIPT.read_text(encoding="utf-8")
     assert re.search(r'"--check-interval",\s*type=int,\s*default=DEADMAN_CHECK_INTERVAL_SECONDS', source), "argparse default is not the shared constant"
+
+
+def test_deadman_observation_gap_line_reads_the_durable_record(health_check):
+    """The daily check renders the last observed gap while it is younger than the
+    window, omits it afterwards, and never hides a malformed stamp."""
+    at = health_check.epoch_to_iso(100_000)
+    record = {"lastCheckGapSeconds": 700, "lastCheckGapAt": at}
+    assert health_check.deadman_observation_gap_line(record, 100_600) == f"deadman_last_observation_gap: seconds=700 at={at} age_seconds=600"
+    assert health_check.deadman_observation_gap_line(record, 100_000 + 86_400) is not None
+    assert health_check.deadman_observation_gap_line(record, 100_000 + 86_401) is None
+    assert health_check.deadman_observation_gap_line(record, 99_000) is None  # a stamp from the future is not a gap in this window
+    assert health_check.deadman_observation_gap_line({}, 100_600) is None
+    assert health_check.deadman_observation_gap_line({"lastCheckGapSeconds": 700}, 100_600) is None
+    assert health_check.deadman_observation_gap_line({"lastCheckGapSeconds": True, "lastCheckGapAt": at}, 100_600) is None
+    assert health_check.deadman_observation_gap_line({"lastCheckGapSeconds": 0, "lastCheckGapAt": at}, 100_600) is None
+    malformed = health_check.deadman_observation_gap_line({"lastCheckGapSeconds": 700, "lastCheckGapAt": "not-a-time"}, 100_600)
+    assert malformed is not None and "age_seconds=unparseable" in malformed
+
+
+def test_daily_renders_the_last_observation_gap_from_the_deadman_record(env, capsys, monkeypatch):
+    """End to end: a gap the deadman persisted shows up on the next daily run."""
+    env.svc["status"] = "active"
+    env.svc["ages"] = (10, 10)
+    env.cycle_completed(5)
+    assert env.run() == 0
+    env.advance(700)
+    env.cycle_completed(5)
+    assert env.run() == 0
+    capsys.readouterr()
+    lines = env.mod.deadman_observation_gap_inventory()
+    assert lines == [f"deadman_last_observation_gap: seconds=700 at={env.mod.epoch_to_iso(env.clock['now'])} age_seconds=0"]
+    env.advance(86_401)
+    assert env.mod.deadman_observation_gap_inventory() == []
+    import inspect
+
+    assert "deadman_observation_gap_inventory()" in inspect.getsource(env.mod.daily), "daily() must render the record"
+
