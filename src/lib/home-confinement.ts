@@ -40,8 +40,9 @@ export function pathIsAtOrInsideDirectory(candidate: string, parent: string): bo
 /**
  * Is nothing at all at this path? A DANGLING symlink is NOT absent — something
  * is there, it just does not resolve. `lstat` separates the two without
- * following the link. Same distinction as `isTrulyAbsent` in
- * src/fleet/launchd-render-options.ts.
+ * following the link. The launchd render-options resolver
+ * (src/fleet/launchd-render-options.ts) calls this rather than keeping its own
+ * copy of the same probe, so a repair here reaches both call sites.
  *
  * Trailing separators are stripped before the probe because POSIX reads a
  * trailing `/` as a following `.`, so `lstat('<link>/')` reports on the link's
