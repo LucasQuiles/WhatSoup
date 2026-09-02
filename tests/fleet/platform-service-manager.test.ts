@@ -620,6 +620,61 @@ describe('platform service managers', () => {
     expect(childProcessMocks.execFile).not.toHaveBeenCalled();
   });
 
+  // A NONCANONICAL spelling whose components all exist is admitted by physical
+  // resolution: it resolves inside home right now. What is refused is the
+  // spelling, because the raw string is persisted and rendered and the kernel
+  // re-resolves its `..` at every exec. One test per render call site.
+  const noncanonicalFixture = async (): Promise<string> => {
+    const realFs = await realFsPromise;
+    realFs.mkdirSync(`${SERVICE_HOME}/anchor`, { recursive: true });
+    realFs.mkdirSync(`${SERVICE_HOME}/destination`, { recursive: true });
+    return `${SERVICE_HOME}/anchor/../destination`;
+  };
+
+  it('refuses a noncanonical pathPrepend at the reconcile render site', async () => {
+    setPlatform('darwin');
+    const raw = await noncanonicalFixture();
+    mockReads({
+      plist: generatedPlistIdentity(),
+      config: { name: 'agent', service: { pathPrepend: [raw] } },
+    });
+    const { reconcileLaunchdPlist } = await importPlatform();
+
+    await expect(reconcileLaunchdPlist('agent', { dryRun: true }))
+      .rejects.toMatchObject({ name: 'LaunchdRenderConfigError' });
+    await expect(reconcileLaunchdPlist('agent', { dryRun: true }))
+      .rejects.toThrow(/service\.pathPrepend\[0\] must be a normalized absolute path within the home directory/);
+
+    expect(fsMocks.writeFileSync).not.toHaveBeenCalled();
+    expect(fsMocks.renameSync).not.toHaveBeenCalled();
+    expect(childProcessMocks.execFile).not.toHaveBeenCalled();
+  });
+
+  it('refuses a noncanonical claudeConfigDir at the install render site', async () => {
+    setPlatform('darwin');
+    const raw = await noncanonicalFixture();
+    mockReads({ config: { name: 'agent', service: { claudeConfigDir: raw } } });
+    const { createServiceManager } = await importPlatform();
+    const manager = createServiceManager();
+    if (!manager.startAfterAuthFire) throw new Error('missing macOS authenticated-start hook');
+
+    const firstStart = new Promise<void>((resolve, reject) => {
+      manager.startAfterAuthFire!('agent', (err) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
+
+    await expect(firstStart).rejects.toMatchObject({ name: 'LaunchdRenderConfigError' });
+    await expect(firstStart)
+      .rejects.toThrow(/service\.claudeConfigDir must be a normalized absolute path within the home directory/);
+
+    expect(fsMocks.writeFileSync).not.toHaveBeenCalled();
+    expect(fsMocks.mkdirSync).not.toHaveBeenCalled();
+    expect(fsMocks.renameSync).not.toHaveBeenCalled();
+    expect(childProcessMocks.execFile).not.toHaveBeenCalled();
+  });
+
   it('restores the prior plist bytes, not the new render, when reload fails after an options render', async () => {
     setPlatform('darwin');
     const plist = `${SERVICE_HOME}/Library/LaunchAgents/com.whatsoup.agent.plist`;

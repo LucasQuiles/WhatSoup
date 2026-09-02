@@ -20,7 +20,7 @@ import {
   LaunchdRenderConfigError,
   type LaunchdPlistRenderOptions,
 } from '../lib/launchd-service-config.ts';
-import { isPhysicallyInsideHome } from '../lib/home-confinement.ts';
+import { isCanonicalAbsolutePath, isPhysicallyInsideHome } from '../lib/home-confinement.ts';
 import { resolveLaunchdPlistRenderOptions } from './launchd-render-options.ts';
 import { compareGovernedLaunchdEnv, type GovernedEnvComparison } from './launchd-env-drift.ts';
 import { repoRoot, tmpRoot, xdgDir } from './paths.ts';
@@ -459,22 +459,37 @@ function refuseApplyThatDropsEnv(comparison: GovernedEnvComparison): void {
  * the joined value would refuse every real row. The fleet service-path survey
  * measured both framings; a test below pins the distinction.
  *
- * PRECONDITION, enforced here rather than assumed: the value must be ABSOLUTE.
- * `isPhysicallyInsideHome` makes a non-absolute input absolute against
- * `process.cwd()`, and on a real host the repository root sits UNDER the
- * instance user's home, so `~/.local/bin`, `~` and a bare relative `pin/bin` would
- * all be ADMITTED from there while the same spellings are refused from a
- * working directory outside home. Nothing reaches that today, because both call
- * sites run the shape rule first and it requires a leading `/`; but this
- * function is exported and presented as the standalone render-admission rule, so
- * it must not depend on the ordering of a check it does not itself perform, nor
- * on where the rendering process happens to be standing.
+ * SPELLING FIRST, then physical resolution. `isCanonicalAbsolutePath` is the
+ * same predicate the API-admission guard applies, imported from the shared
+ * module rather than copied, and it runs BEFORE `isPhysicallyInsideHome`.
+ *
+ * Two defects it closes, both invisible to physical resolution alone:
+ *
+ * 1. A NONCANONICAL but fully existing in-home spelling. `<home>/anchor/../leaf`
+ *    with both components present resolves in-home right now, so the physical
+ *    check admits it, and the raw spelling is what gets persisted and rendered
+ *    into `PATH`. The kernel re-resolves that `..` at every exec, so replacing
+ *    `anchor` with a symlink afterwards changes where the same stored string
+ *    points. A canonical spelling has no such degree of freedom.
+ * 2. A NON-ABSOLUTE spelling. `isPhysicallyInsideHome` makes a relative input
+ *    absolute against `process.cwd()`, and on a real host the repository root
+ *    sits UNDER the instance user's home, so `~/.local/bin`, `~` and a bare
+ *    `pin/bin` would be ADMITTED from there while the same spellings are
+ *    refused from a working directory outside home.
+ *
+ * Neither is reachable through the resolver today, which requires a leading `/`
+ * and rejects control characters; but this function is exported and presented
+ * as the standalone render-admission rule, so it must not depend on the
+ * ordering of a check it does not itself perform, nor on where the rendering
+ * process happens to be standing. Config LOAD compatibility is untouched: this
+ * is a render-admission rule, not a shape rule, so an instance carrying such a
+ * value still loads.
  *
  * Messages name the field and the rule only. `LaunchdRenderConfigError` is the
  * marker for operator-safe render failures, so the offending value is never
- * echoed. A non-absolute value is refused with the SAME message as an
- * out-of-home one: both are "does not resolve to a path inside the home
- * directory", and splitting them would leak the spelling back into the message.
+ * echoed. A spelling refusal carries its OWN message, matching the API guard's
+ * wording: telling an operator that `<home>/anchor/../leaf` "must resolve to a
+ * path inside the home directory" points at the wrong fix, because it does.
  */
 export function assertHomeConfinedRenderOptions(
   options: LaunchdPlistRenderOptions,
@@ -489,17 +504,17 @@ export function assertHomeConfinedRenderOptions(
   });
 
   for (const { field, value } of entries) {
+    // Fail closed WITHOUT consulting the filesystem or the working directory.
+    if (!isCanonicalAbsolutePath(value)) {
+      throw new LaunchdRenderConfigError(
+        `${field} must be a normalized absolute path within the home directory`,
+      );
+    }
     let confined: boolean;
-    if (!path.isAbsolute(value)) {
-      // Fail closed WITHOUT consulting the filesystem or the working
-      // directory: see the PRECONDITION note above.
+    try {
+      confined = isPhysicallyInsideHome(value, homeDir);
+    } catch {
       confined = false;
-    } else {
-      try {
-        confined = isPhysicallyInsideHome(value, homeDir);
-      } catch {
-        confined = false;
-      }
     }
     if (!confined) {
       throw new LaunchdRenderConfigError(

@@ -22,6 +22,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 
 import { assertHomeConfinedRenderOptions } from '../../src/fleet/platform.ts';
+import { isPhysicallyInsideHome } from '../../src/lib/home-confinement.ts';
 import { LaunchdRenderConfigError } from '../../src/lib/launchd-service-config.ts';
 
 describe('assertHomeConfinedRenderOptions — physical render admission', () => {
@@ -72,10 +73,16 @@ describe('assertHomeConfinedRenderOptions — physical render admission', () => 
     expect(path.resolve(raw)).toBe(path.join(home, 'escape'));
     expect(fs.realpathSync.native(raw).startsWith(home + path.sep)).toBe(false);
 
+    // The render guard refuses this on SPELLING now, because the canonical rule
+    // runs first and no `..` component survives it. The physical defence still
+    // has to hold underneath, or removing the spelling gate would silently
+    // reopen the traversal: assert the predicate directly so the gate cannot
+    // mask its rot.
+    expect(isPhysicallyInsideHome(raw, home)).toBe(false);
     expect(() => assertHomeConfinedRenderOptions({ pathPrepend: [raw] }, home))
       .toThrow(LaunchdRenderConfigError);
     expect(() => assertHomeConfinedRenderOptions({ pathPrepend: [raw] }, home))
-      .toThrow(/service\.pathPrepend\[0\] must resolve to a path inside the home directory/);
+      .toThrow(/service\.pathPrepend\[0\] must be a normalized absolute path within the home directory/);
   });
 
   // -- (b) plain in-home path through a DANGLING symlink --------------------
@@ -161,11 +168,11 @@ describe('assertHomeConfinedRenderOptions — physical render admission', () => 
         expect(
           () => assertHomeConfinedRenderOptions({ pathPrepend: [value] }, home),
           `expected a refusal for pathPrepend spelling ${value}`,
-        ).toThrow(/service\.pathPrepend\[0\] must resolve to a path inside the home directory/);
+        ).toThrow(/service\.pathPrepend\[0\] must be a normalized absolute path within the home directory/);
         expect(
           () => assertHomeConfinedRenderOptions({ claudeConfigDir: value }, home),
           `expected a refusal for claudeConfigDir spelling ${value}`,
-        ).toThrow(/service\.claudeConfigDir must resolve to a path inside the home directory/);
+        ).toThrow(/service\.claudeConfigDir must be a normalized absolute path within the home directory/);
       }
     } finally {
       process.chdir(originalCwd);
@@ -191,6 +198,50 @@ describe('assertHomeConfinedRenderOptions — physical render admission', () => 
     } finally {
       process.chdir(originalCwd);
     }
+  });
+
+  // -- canonical spelling, judged before physical resolution ----------------
+
+  it('refuses a noncanonical spelling whose components ALL exist inside home', () => {
+    const anchor = path.join(home, 'anchor');
+    const destination = path.join(home, 'destination');
+    fs.mkdirSync(anchor, { recursive: true, mode: 0o700 });
+    fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
+    // String concatenation, not path.join: path.join normalizes the `..` away
+    // and the fixture would stop exercising the defect.
+    const raw = `${home}/anchor/../destination`;
+
+    // The fixture is only meaningful if PHYSICAL resolution admits it. Both
+    // components exist and the value resolves inside home right now, so the
+    // physical check cannot be what refuses it, and before the spelling rule
+    // this value was rendered verbatim into PATH.
+    expect(fs.realpathSync.native(raw)).toBe(fs.realpathSync.native(destination));
+    expect(isPhysicallyInsideHome(raw, home)).toBe(true);
+
+    // Why it still has to be refused: the kernel re-resolves that `..` at every
+    // exec against whatever the filesystem looks like then, so replacing
+    // `anchor` with a symlink later moves where the same STORED string points.
+    expect(() => assertHomeConfinedRenderOptions({ pathPrepend: [raw] }, home))
+      .toThrow(/service\.pathPrepend\[0\] must be a normalized absolute path within the home directory/);
+    expect(() => assertHomeConfinedRenderOptions({ claudeConfigDir: raw }, home))
+      .toThrow(/service\.claudeConfigDir must be a normalized absolute path within the home directory/);
+  });
+
+  it('refuses a single-dot component and a doubled separator, and admits the canonical spelling', () => {
+    const destination = path.join(home, 'destination');
+    fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
+
+    for (const raw of [`${home}/./destination`, `${home}//destination`]) {
+      expect(
+        () => assertHomeConfinedRenderOptions({ pathPrepend: [raw] }, home),
+        `expected a spelling refusal for ${raw}`,
+      ).toThrow(/service\.pathPrepend\[0\] must be a normalized absolute path within the home directory/);
+    }
+
+    // Positive control, and the reason this rule costs operators nothing: the
+    // canonical spelling of the SAME directory is admitted, so the rule refuses
+    // spellings rather than paths.
+    expect(() => assertHomeConfinedRenderOptions({ pathPrepend: [destination] }, home)).not.toThrow();
   });
 
   // -- boundary --------------------------------------------------------------

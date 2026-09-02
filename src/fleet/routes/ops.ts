@@ -5,6 +5,7 @@ import * as os from 'node:os';
 import { spawn } from 'node:child_process';
 import { readBody, jsonResponse, requireInstance } from '../../lib/http.ts';
 import {
+  isCanonicalAbsolutePath,
   pathIsAtOrInsideDirectory,
   pathIsInsideDirectory,
   rawAbsolutePath,
@@ -828,24 +829,6 @@ function resolveAndValidateAgentCwd(
   }
 
   return resolveAndValidateCwd(agentOptions, res);
-}
-
-/**
- * Is this spelling already canonical — absolute, no `.`/`..` component, no
- * redundant separators?
- *
- * Only applied to values that are rendered VERBATIM into the launchd service
- * `PATH`. For those, containment at admission time is not enough: a `..`
- * component is re-resolved by the kernel at exec time against whatever the
- * filesystem looks like then, so a spelling that is in-home today can escape
- * later if any leading component becomes a symlink. Refusing the spelling
- * outright removes that whole class, and costs operators nothing because a
- * canonical form always exists.
- */
-function isCanonicalAbsolutePath(value: string): boolean {
-  if (!value.startsWith('/')) return false;
-  if (value !== path.posix.normalize(value)) return false;
-  return !value.split('/').some((segment) => segment === '.' || segment === '..');
 }
 
 /**

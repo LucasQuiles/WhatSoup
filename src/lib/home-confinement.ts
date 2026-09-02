@@ -131,6 +131,30 @@ export function realpathLongestAbsentTolerantPrefix(targetPath: string): string 
 }
 
 /**
+ * Is this spelling already canonical — absolute, no `.`/`..` component, no
+ * redundant separators?
+ *
+ * Only applied to values that are rendered VERBATIM into a launchd service
+ * `PATH` or `CLAUDE_CONFIG_DIR`. For those, physical containment is not enough
+ * on its own: a `..` component is re-resolved by the kernel at exec time
+ * against whatever the filesystem looks like then, so a spelling that resolves
+ * in-home today escapes later if any leading component becomes a symlink.
+ * Refusing the spelling outright removes that whole class, and costs operators
+ * nothing because a canonical form always exists.
+ *
+ * Lives here rather than beside either caller because the API-admission guard
+ * (src/fleet/routes/ops.ts) and the render-admission guard
+ * (src/fleet/platform.ts) must apply the SAME predicate: this module exists
+ * because near-duplicate copies of a confinement rule drifted apart once
+ * already. A third copy is exactly what it is here to prevent.
+ */
+export function isCanonicalAbsolutePath(value: string): boolean {
+  if (!value.startsWith('/')) return false;
+  if (value !== path.posix.normalize(value)) return false;
+  return !value.split('/').some((segment) => segment === '.' || segment === '..');
+}
+
+/**
  * Lexical containment, for callers that only need "is this path under that
  * root" with no filesystem access.
  *
