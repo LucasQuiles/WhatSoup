@@ -845,7 +845,14 @@ def _write_instance_plist(
 
 
 def _arm_darwin_plist(monkeypatch, tmp_path: Path, name: str, environment: dict[str, str], **kwargs):
+    # Clear EVERY environment affordance that would mark the governed surfaces
+    # not-applicable. Without this the matrix below would silently stop testing
+    # what it claims the moment one of these leaked in from the ambient
+    # environment, which is the vacuity mode that made an earlier assertion in
+    # this file pass on one platform and fail on the other.
     monkeypatch.delenv("BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH", raising=False)
+    monkeypatch.delenv("BOT_ERRORS_DRY_PROVIDER_PROBE_STDOUT", raising=False)
+    monkeypatch.delenv("BOT_ERRORS_DRY_PROVIDER_PROBE_RC", raising=False)
     monkeypatch.setattr(_mod, "HOST_PLATFORM", "darwin")
     monkeypatch.setattr(_mod.Path, "home", classmethod(lambda cls: tmp_path))
     return _write_instance_plist(tmp_path, name, environment, **kwargs)
@@ -1428,3 +1435,47 @@ def test_default_provider_probe_runs_the_provider_in_the_governed_environment(mo
     assert child_env["PATH"].split(":")[0] == str(prepend_bin)
     assert child_env.get("WHATSOUP_PATH_PREPEND") == environment["WHATSOUP_PATH_PREPEND"]
     assert seen.get("child_cwd"), "the provider must run in the instance workspace, not the probe's cwd"
+
+
+def test_governed_checks_apply_when_no_dry_affordance_is_set(monkeypatch, tmp_path):
+    """Named pin for the environment affordances that switch the checks off.
+
+    Two environment variables mark the governed surfaces not-applicable: the
+    dry-run PATH override and an injected probe result. Both are production-code
+    bypasses of a fail-closed path, so this asserts explicitly that with NEITHER
+    set the fail-closed still holds, and that each one alone is enough to switch
+    it off. Without this the six-row matrix would still pass if an affordance
+    leaked in from the ambient environment, because the assertion would never
+    reach the code it names.
+    """
+    environment = _matrix_environment(tmp_path)
+    target = _arm_darwin_plist(
+        monkeypatch, tmp_path, "agent-alpha",
+        {"PATH": environment["PATH"], "WHATSOUP_PATH_PREPEND": environment["WHATSOUP_PATH_PREPEND"]},
+    )
+    _break_plist(target, "missing", tmp_path)
+
+    # Precondition: the affordances really are absent for this assertion.
+    assert os.environ.get("BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH") is None
+    assert os.environ.get("BOT_ERRORS_DRY_PROVIDER_PROBE_STDOUT") is None
+    assert os.environ.get("BOT_ERRORS_DRY_PROVIDER_PROBE_RC") is None
+    assert _mod.provider_probe_output_is_stubbed() is False
+    assert _mod.instance_plist_governed_environment("agent-alpha") == (
+        _mod.GOVERNED_PLIST_UNREADABLE,
+        None,
+    )
+
+    # Each affordance ALONE switches the governed surfaces off, which is the
+    # bypass being disclosed rather than hidden.
+    monkeypatch.setenv("BOT_ERRORS_DRY_PROVIDER_PROBE_RC", "0")
+    assert _mod.provider_probe_output_is_stubbed() is True
+    assert _mod.instance_plist_governed_environment("agent-alpha") == (
+        _mod.GOVERNED_PLIST_NOT_APPLICABLE,
+        None,
+    )
+    monkeypatch.delenv("BOT_ERRORS_DRY_PROVIDER_PROBE_RC", raising=False)
+    monkeypatch.setenv("BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH", "/fixture/dry/bin")
+    assert _mod.instance_plist_governed_environment("agent-alpha") == (
+        _mod.GOVERNED_PLIST_NOT_APPLICABLE,
+        None,
+    )
