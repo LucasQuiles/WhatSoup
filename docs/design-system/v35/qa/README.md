@@ -22,15 +22,26 @@ Scripts are sanitized: machine-specific paths/hosts are environment variables.
     set `OLLAMA_HOST`; API keys via keyring only).
   - Shared env: `QA_ROOT` (default `~/.cache/soup-v35-qa`) — images in, reports out.
 - `evidence/` — the tracked part of the final screenshots (9 surfaces × 2 themes)
-  the wave-4 verdicts were rendered against; ten of the eighteen remain tracked.
-  The `agents`, `fleet`, `inbox` and `hatch` pairs were removed rather than
-  re-shot. They were taken before the identifier-replacement pass and kept
-  rendering a masked operator line the mockups no longer contain, and a fresh
-  render of those four surfaces is 119-476 KiB per image, well over the
-  tracked-PNG bound in `scripts/png-estate-guard.ts`, so replacements cannot be
-  committed in their place. Re-shoot any surface on demand with `shoot_w4.py`,
-  which renders the mockups as they currently stand; review a fresh render for
-  identifier masks before publishing it anywhere.
+  the wave-4 verdicts were rendered against. Ten of the eighteen remain tracked
+  and are unchanged. The `agents`, `fleet`, `inbox` and `hatch` pairs were
+  removed: they were shot before the identifier-replacement pass and still
+  rendered an operator identifier at a length that reconstructs it completely,
+  which is no longer present in the mockups they were rendered from. They are not
+  replaced in place because the shrink-only tracked-PNG ratchet from issue #2219
+  Option A, enforced by `scripts/png-estate-guard.ts` from `.husky/pre-commit`,
+  caps any new or changed PNG at 100 KiB while a fresh render of these surfaces
+  is several times that. Regenerate on demand instead, with the pipeline this
+  directory documents:
+
+      python3 -m venv .venv
+      .venv/bin/pip install playwright        # verified with 1.62.0
+      MOCKUPS=<repo>/docs/design-system/v35/mockups QA_ROOT=<output-dir> \
+        .venv/bin/python scripts/shoot_w4.py
+
+  `shoot_w4.py` drives the `chrome` channel at a 1440x900 viewport with a device
+  scale factor of 2, so each image is 2880x1800, and renders the mockups as they
+  currently stand. Review a fresh render for identifier masks before publishing
+  it anywhere.
 - `reports/wave4/` — raw reviewer outputs (gpt-5.4 waves, codex, grok waves, final
   confirmations).
 - `reports/wave4/personas/` — sol/tera/luna raw outputs.
