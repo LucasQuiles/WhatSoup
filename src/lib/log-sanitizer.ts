@@ -86,14 +86,42 @@ const PHONE_RE = /\+?\d{7,}/g;
 // port (:N) suffixed forms. A short-id @lid also sits below PHONE_RE's
 // seven-digit floor, so nothing else caught it.
 //
-// Secret-bearing tokens inside a string. The separator is OPTIONAL, so the
-// canonical `Authorization: Bearer <token>` header form is covered; requiring
-// [=:] matched only `token=...` and `api_key: ...` and missed the header. The
-// eight-character floor keeps ordinary prose after a label ("authorization
-// failed") out of the match, because over-scrubbing defeats the point of
-// retaining a diagnostic message at all.
-const BEARER_RE =
-  /\b(bearer|api[_-]?key|authorization|token|secret|password|passphrase|pairing)\b(?:\s*[:=]\s*|\s+)["']?[\w.~+/-]{8,}={0,2}["']?/gi;
+// Secret-bearing tokens inside a string.
+//
+// The separator is OPTIONAL, so the canonical `Authorization: Bearer <token>`
+// header form is covered; requiring [=:] matched only `token=...` and
+// `api_key: ...` and missed the header entirely.
+//
+// The length floor is CONDITIONAL, and that is the load-bearing detail. A
+// single 8-character floor across both forms was measured against the pattern
+// this replaced and silently dropped coverage for 18 of 120 fixture cells:
+// every 5-, 6- or 7-character secret after `bearer`, `api_key` or `token` with
+// a separator, which the previous pattern redacted because it had no floor at
+// all. A 6-character pairing code after `token=` is exactly that shape.
+//
+// So: an explicit separator means the text that follows IS the value, and no
+// floor applies. The floor survives only on the separator-less form, where the
+// next token is as likely to be prose — it is what keeps "authorization failed"
+// from becoming "authorization ***", and over-scrubbing would defeat the point
+// of retaining a diagnostic message at all.
+//
+// Known cost, accepted: after a keyword AND a separator, prose is scrubbed too
+// ("authorization: denied" becomes "authorization ***"). The previous pattern
+// behaved the same way for its three keywords; this extends that behaviour to
+// five more. Scrubbing is the safe direction when a separator says a value
+// follows.
+//
+// The separator branch must not accept another label as its value. Without the
+// lookahead, `Authorization: Bearer <token>` matches at `Authorization`,
+// consumes `Bearer` as the value, and leaves the real token untouched — the
+// exact header this pattern exists to cover.
+const SECRET_LABELS = 'bearer|api[_-]?key|authorization|token|secret|password|passphrase|pairing';
+const BEARER_RE = new RegExp(
+  `\\b(${SECRET_LABELS})\\b`
+    + `(?:\\s*[:=]\\s*(?!(?:${SECRET_LABELS})\\b)["']?[\\w.~+/-]+={0,2}["']?`
+    + `|\\s+["']?[\\w.~+/-]{8,}={0,2}["']?)`,
+  'gi',
+);
 
 function sanitizeStringValue(value: string): string {
   return value

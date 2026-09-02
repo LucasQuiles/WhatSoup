@@ -625,7 +625,51 @@ describe('retained error text scrubs the canonical bearer header form', () => {
 
   it('does not eat ordinary diagnostic words after a label', () => {
     // Over-scrubbing would defeat the point of retaining the message at all.
+    // No separator here: the floor below applies and 'failed' is short.
     const out = retained('authorization failed');
+    expect(out).toContain('failed');
+  });
+
+  // Short secrets after an explicit separator.
+  //
+  // Measured against the pattern this branch replaced: that pattern had NO
+  // length floor, so `token=A1b2c` was redacted. Adding a single 8-character
+  // floor to cover the separator-less header form silently dropped that
+  // coverage for 18 of 120 measured cells, every one of them a 5-, 6- or
+  // 7-character secret after `bearer`, `api_key` or `token` with a separator.
+  //
+  // The floor is therefore conditional. An explicit separator means the text
+  // that follows IS the value, so no floor applies there. The floor stays only
+  // on the separator-less form, where the next token is as likely to be prose.
+  for (const keyword of [
+    'bearer',
+    'api_key',
+    'api-key',
+    'apikey',
+    'authorization',
+    'token',
+    'secret',
+    'password',
+    'passphrase',
+    'pairing',
+  ]) {
+    for (const secret of ['A1b2c', 'A1b2c3', 'A1b2c3d']) {
+      it(`scrubs a ${secret.length}-character secret after ${keyword}= `, () => {
+        const out = retained(`auth failed ${keyword}=${secret} at gate`);
+        expect(out).not.toContain(secret);
+        expect(out).toContain('auth failed');
+      });
+
+      it(`scrubs a ${secret.length}-character secret after ${keyword}: `, () => {
+        const out = retained(`auth failed ${keyword}: ${secret} at gate`);
+        expect(out).not.toContain(secret);
+      });
+    }
+  }
+
+  it('keeps the floor on the separator-less form, where prose follows', () => {
+    // `pairing failed` must not become `pairing ***`.
+    const out = retained('pairing failed');
     expect(out).toContain('failed');
   });
 });
