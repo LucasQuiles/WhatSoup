@@ -2062,12 +2062,14 @@ def build_configuration_retired_event(
     ``reconcile_retirement_intents`` pins the first attempt's clock so that
     retry reproduces byte-identical bytes and reconciles into the SAME file,
     which removes the duplicate in the common case. It does not remove it in
-    every case: the ``requestId`` is derived from the roster digests, so if the
-    roster changes between a failed cycle and its retry -- a second member
-    leaving -- the digests move, the ``requestId`` moves with them, and
-    requestId-based dedupe has nothing to match either. That case still leaves
-    two audit records for one retirement. The contract stated here is the only
-    thing a consumer can rely on.
+    every case: the ``requestId`` is derived from the roster digests, so ANY
+    roster change between a failed cycle and its retry moves them -- a second
+    member leaving, a member being ADDED, a rename, or a manifest-epoch bump --
+    and the ``requestId`` moves with them, so requestId-based dedupe has nothing
+    to match either. The digests cover the whole member set, not just the
+    departing member, so the trigger is far wider than a second departure. That
+    case still leaves two audit records for one retirement. The contract stated
+    here is the only thing a consumer can rely on.
     """
     return {
         "schemaVersion": 1,
@@ -2144,7 +2146,17 @@ def load_retirement_intents(config: SentinelConfig) -> dict:
     the process -- which is the crash case. It needs its own durable file.
 
     Unreadable, malformed, or unusably-timestamped entries are dropped rather
-    than raising: a lost pin costs a duplicate audit record, never a wedge.
+    than raising, so READING the ledger never fails a cycle: a lost pin costs a
+    duplicate audit record.
+
+    That tolerance does NOT extend to writing it. ``save_retirement_intents``
+    publishes through the durable-state path, which refuses to replace a file
+    it cannot parse or whose mode/type is wrong: a corrupt ledger raises
+    ``DurableWriteError serialization``, and a wrong-mode file or a directory at
+    this path raises ``DurableWriteError permission``. Either wedges every cycle
+    that has a retiring member, until an operator removes the file. That is the
+    same failure the sentinel state file already has, and it is deliberately NOT
+    softened here -- failing a write open would need its own design and test.
     """
     ledger = optional_json_object(retirement_intent_path(config)) or {}
     intents = ledger.get("intents")
@@ -2195,7 +2207,9 @@ def retirement_content_binding(payload: dict) -> str:
     )
 
 
-def reconcile_retirement_intents(config: SentinelConfig, bindings: dict, now: float) -> dict:
+def reconcile_retirement_intents(
+    config: SentinelConfig, bindings: dict, now: float, episode_seq: int
+) -> dict:
     """Pin each retiring member's first-attempt clock, durably, before publishing.
 
     ``action_event_path`` puts ``int(now)`` in the filename and the payload
@@ -2205,18 +2219,37 @@ def reconcile_retirement_intents(config: SentinelConfig, bindings: dict, now: fl
     ``publish_event_json`` reconciles (RECONCILED_COMMITTED /
     INTENDED_AUTHORITATIVE) rather than answering CONFLICT.
 
-    A pin is reused only while the disposition's CONTENT is unchanged. That is
-    the whole safety argument, and it is why ``int(now)`` deliberately stays in
-    the filename. Reusing a pin across changed content -- a member retired,
-    re-added, then retired again under unchanged roster digests, so the same
-    requestId but a fresh record -- would aim identical filenames at differing
-    bytes and wedge the retirement permanently. When the content moves, so does
-    the clock, and the two attempts get distinct files.
+    A pin may be reused only for the SAME RETIREMENT EPISODE, which takes two
+    independent conditions -- content equality is not enough on its own:
 
-    The same rule handles a roster that changes between a failed cycle and its
-    retry: the digests move, so the requestId and the roster block move, so the
-    binding moves and a fresh episode begins. That case still leaves a
-    requestId-distinct duplicate audit record. This ledger does not close it.
+    1. ``contentBinding`` unchanged. If the disposition's bytes would differ,
+       reusing the clock would aim an identical filename at differing bytes,
+       which ``publish_event_json`` answers with CONFLICT -- a permanent
+       retirement wedge. This is why ``int(now)`` deliberately stays in the
+       filename.
+    2. ``episodeSeq`` unchanged, where the value is ``state["cycleSeq"]`` as
+       read at the top of ``retire_unconfigured_hosts``. Content equality alone
+       CANNOT separate a retry from a genuinely new retirement of the same
+       member: ``retired_host_summary`` carries no timestamp, so a member
+       retired, re-added and retired again under an unchanged roster rebuilds a
+       byte-identical disposition. Reusing the pin there makes the second
+       retirement reconcile silently onto the FIRST one's artifact -- the record
+       is deleted and no event is written for it, which is precisely the #2429
+       defect this module exists to end.
+
+    ``cycleSeq`` separates the two cases exactly, because of where it moves:
+    it is advanced and persisted only by a cycle that reaches ``save_state``.
+    A retry sees the same value, because the failure path raises above
+    run_once's ``try/finally`` so nothing was saved. A second episode cannot
+    exist without at least one intervening saved cycle, because a member
+    re-enters ``state["hosts"]`` only through run_once's evaluation loop.
+    ``run_redeem`` also saves state, but touches neither ``cycleSeq`` nor
+    ``hosts``, so it cannot forge or erase an episode boundary.
+
+    A roster that changes between a failed cycle and its retry moves the
+    digests, so the requestId and the roster block move, the binding moves, and
+    a fresh episode begins. That case still leaves a requestId-distinct
+    duplicate audit record; this ledger does not close it.
 
     A cycle with no retiring members does not touch this file at all.
     Publishing it on an otherwise-clean cycle would add a new way for that
@@ -2234,6 +2267,7 @@ def reconcile_retirement_intents(config: SentinelConfig, bindings: dict, now: fl
         reusable = (
             isinstance(entry, dict)
             and entry.get("contentBinding") == binding
+            and entry.get("episodeSeq") == episode_seq
             and first is not None
             and first <= now
             and now - first <= RETIREMENT_INTENT_TTL_SECONDS
@@ -2242,6 +2276,7 @@ def reconcile_retirement_intents(config: SentinelConfig, bindings: dict, now: fl
             entry = {
                 "episodeId": stable_request_id("retirement_intent", host, binding, now),
                 "contentBinding": binding,
+                "episodeSeq": episode_seq,
                 "firstAttemptEpoch": now,
                 "firstAttemptAtIso": now_iso(now),
             }
@@ -2310,7 +2345,14 @@ def retire_unconfigured_hosts(
                 roster,
             )
         )
-    intents = reconcile_retirement_intents(config, bindings, now)
+    # The episode discriminator is the cycle counter as it stands on disk RIGHT
+    # NOW, before this cycle advances it at :2513. Same value across a retry
+    # (nothing was saved), different across episodes (a saved cycle sat between
+    # them). Without it, content equality alone lets a second retirement
+    # reconcile onto the first one's artifact.
+    intents = reconcile_retirement_intents(
+        config, bindings, now, int_or_zero(state.get("cycleSeq"))
+    )
     emitted = []
     for host in retiring:
         record = host_state.get(host)

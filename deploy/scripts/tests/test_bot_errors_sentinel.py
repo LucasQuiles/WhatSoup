@@ -4119,3 +4119,115 @@ def test_partial_publish_failure_keeps_the_published_hosts_tombstone(tmp_path: P
     assert "retire-y" not in state["retiredHosts"]
     assert state["hosts"]["retire-y"]["alertState"] == "open"
     assert state["hosts"]["retire-y"]["consecutive"] == 2
+
+
+# ---------------------------------------------------------------------------
+# #2429 follow-up (b), MUST-A: a repeat retirement must publish its own artifact
+# ---------------------------------------------------------------------------
+
+
+def _roster_with(tmp_path: Path, hosts: list[str]) -> dict:
+    """Write the roster file for exactly ``hosts`` and refresh their heartbeats."""
+    return {
+        "schemaVersion": 1,
+        "hosts": [{"host": h, "heartbeatPath": str(tmp_path / f"{h}-hb.json")} for h in hosts],
+    }
+
+
+def test_a_repeat_retirement_publishes_its_own_artifact_not_a_stale_pin(tmp_path: Path):
+    """A SECOND retirement of the same member must never reconcile onto the first.
+
+    The pin that makes a retry byte-identical is reused on content equality. A
+    member retired, re-added and retired again under an unchanged roster
+    produces byte-IDENTICAL content -- same roster digests, so the same
+    requestId, and an identically-rebuilt record. Without an episode
+    discriminator the second retirement reuses the first episode's clock,
+    publish_event_json reconciles onto the existing file, require_all_advance
+    passes, and the member's record is deleted while NO event is written for
+    that retirement -- #2429's own defect, reintroduced by its own fix.
+
+    The tombstone is the tell: its eventPath names a file whose createdAt
+    belongs to the earlier retirement.
+    """
+    for host in ("host-a", "repeat-member"):
+        _heartbeat(tmp_path / f"{host}-hb.json", healthy=True, mtime=995.0)
+    hosts_path = _write_json(tmp_path / "hosts.json", _roster_with(tmp_path, ["host-a", "repeat-member"]))
+    config = _config(tmp_path, hosts_path)
+
+    def _cycle(now: float, roster: list[str]):
+        _write_json(config.hosts_path, _roster_with(tmp_path, roster))
+        for host in roster:
+            _heartbeat(tmp_path / f"{host}-hb.json", healthy=True, mtime=now - 5.0)
+        probes = {h: {"reachable": True, "healthy": True, "class": "healthy"} for h in roster}
+        return _mod.run_once(config, _deps(now, probes))
+
+    # 1. both configured, so both records are built by the same evaluation path
+    _cycle(1000.0, ["host-a", "repeat-member"])
+    # 2. drop the member -> first retirement
+    _cycle(1100.0, ["host-a"])
+    first = [e for e in _retirement_events(config) if e["host"] == "repeat-member"]
+    assert len(first) == 1
+    # 3. re-add it -> tombstone clears, record is rebuilt identically
+    _cycle(1200.0, ["host-a", "repeat-member"])
+    # 4. drop it again, same roster digests -> same requestId, same content
+    _cycle(1300.0, ["host-a"])
+
+    events = [e for e in _retirement_events(config) if e["host"] == "repeat-member"]
+    assert len(events) == 2, "the second retirement published no artifact of its own"
+    assert events[0]["requestId"] == events[1]["requestId"], "same digests, so the requestId is stable"
+    assert events[0]["createdAt"] != events[1]["createdAt"], "two episodes, two clocks"
+
+    # The state must not claim a retirement whose evidence belongs to an earlier one.
+    state = json.loads(_mod.state_path(config).read_text(encoding="utf-8"))
+    tombstone = state["retiredHosts"]["repeat-member"]
+    named = json.loads(Path(tombstone["eventPath"]).read_text(encoding="utf-8"))
+    assert named["createdAt"] == tombstone["retiredAtIso"], (
+        "the tombstone points at an artifact created for a different retirement"
+    )
+
+
+def _intent_ledger(config) -> dict:
+    """The durable pending-retirement ledger, or {} when absent."""
+    path = _mod.retirement_intent_path(config)
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8")).get("intents") or {}
+
+
+def test_the_episode_discriminator_holds_across_a_retry_and_moves_across_episodes(
+    tmp_path: Path, monkeypatch
+):
+    """Pin the PREMISE the discriminator rests on, not just its effect.
+
+    The whole argument for using the persisted cycle counter is that it moves
+    on exactly one boundary: a cycle that reached save_state. If that stops
+    being true -- someone advances the counter before the retirement decision,
+    or persists it on the failure path -- reuse silently changes meaning and
+    every symptom shows up somewhere else. So assert the counter's behaviour
+    directly, on both sides.
+    """
+    # Side 1: a retry of a FAILED cycle must see the SAME episode.
+    config = _two_member_retirement_fixture(tmp_path)
+    probes = {"host-a": {"reachable": True, "healthy": True, "class": "healthy"}}
+    monkeypatch.setattr(_mod, "publish_event_json", _publish_except_for("retire-y"))
+    with pytest.raises(OSError):
+        _mod.run_once(config, _deps(1000.0, probes))
+    first_attempt = _intent_ledger(config)["retire-x"]["episodeSeq"]
+    with pytest.raises(OSError):
+        _mod.run_once(config, _deps(1100.0, probes))
+    assert _intent_ledger(config)["retire-x"]["episodeSeq"] == first_attempt, (
+        "a retry must stay in the same episode, or the pin stops reconciling"
+    )
+    # Nothing was saved on either failed cycle, which is WHY it stayed the same.
+    saved = json.loads(_mod.state_path(config).read_text(encoding="utf-8"))
+    assert "cycleSeq" not in saved
+
+    # Side 2: a completed cycle advances the counter, so a later retirement of
+    # the same member is a different episode.
+    monkeypatch.undo()
+    _mod.run_once(config, _deps(1200.0, probes))
+    after_success = json.loads(_mod.state_path(config).read_text(encoding="utf-8"))["cycleSeq"]
+    assert after_success >= 1
+    _mod.run_once(config, _deps(1300.0, probes))
+    advanced = json.loads(_mod.state_path(config).read_text(encoding="utf-8"))["cycleSeq"]
+    assert advanced > after_success, "a saved cycle must advance the episode boundary"

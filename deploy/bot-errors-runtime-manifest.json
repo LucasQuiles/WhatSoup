@@ -249,7 +249,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-sentinel.py",
-      "sha256": "15adb9bcc29f45e68c5e4b9908e519edea7dc6ee370b6826ee082a49a88b2b9a",
+      "sha256": "448cd67190e4868e213f3d9f64afe7aae77bb827cd71ba0ebe7004b2b7d62173",
       "mustContain": [
         "DEFAULT_HEARTBEAT_MAX_AGE_SECONDS",
         "DEFAULT_HYSTERESIS_CYCLES",
@@ -258,7 +258,8 @@
         "RETIRED_HOST_TOMBSTONE_MAX",
         "reconcile_retirement_intents",
         "enforce_retired_host_tombstone_cap",
-        "qRemediationDisposition"
+        "qRemediationDisposition",
+        "episodeSeq"
       ]
     },
     {
