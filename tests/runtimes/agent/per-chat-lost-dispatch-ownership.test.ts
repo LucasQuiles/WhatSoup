@@ -49,6 +49,13 @@ type OwnershipState = RuntimeState & {
     expected?: ReturnType<typeof sessionStub>,
   ): boolean;
   perChatSessionsWithoutOwner(): string[];
+  perChatExecActorQueue: Map<string, Array<{
+    actorJid: string | undefined;
+    purpose?: 'scheduled-agent-job';
+    conversationKey?: string;
+  }>>;
+  systemTurnExecActors: Map<string, { scopeKey: string; actorJid: string | undefined }>;
+  resolveExecutingActorByMapKey(mapKey: string): string | undefined;
   isSessionProvablyTerminated(session: ReturnType<typeof sessionStub>): boolean;
   abortTurnRecoveryReplay(
     target: {
@@ -844,6 +851,58 @@ describe('turn-recovery abort uses the same termination proof as eviction', () =
       // an unresolved one.
       expect(state.isSessionProvablyTerminated(released)).toBe(true);
       expect(await state.abortTurnRecoveryReplay(target, runtimeContext)).toBe(true);
+    } finally {
+      db.close();
+    }
+  });
+});
+
+/**
+ * F-STICKY-ACTOR (QR-247) meets lost-ownership recovery.
+ *
+ * `cleanupPerChatCrashTurnState` clears the WHOLE executing-actor queue on a
+ * crash, and its comment says why: a later user turn must not append behind a
+ * stale (possibly administrator) head and be served that actor. Eviction
+ * deliberately skips `cleanupPerChatState`, so it skipped that clear too, and
+ * the guard that drops a stale queue when dispatching to a non-active mapped
+ * session cannot cover it — eviction removes the mapped session first, and the
+ * replacement is active.
+ */
+describe('lost-ownership eviction retires the executing-actor queue', () => {
+  const ADMIN = '15550100301@s.whatsapp.net';
+
+  it('does not serve a retired administrator actor to a later turn', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const { state } = makePerChatRuntime(db);
+      const runtimeContext = context('per_chat', MAP_KEY, 530, 'turn-retired-admin-actor');
+      const deliveryJid = runtimeContext.identity.deliveryJid;
+      installUnownedSession(state, deliveryJid, false);
+      const spawned = stubSpawnAndClaim(state, deliveryJid);
+
+      // The retired generation's in-flight administrator turn, still at the
+      // FIFO head, plus the system-turn binding that names the same scope.
+      state.perChatExecActorQueue.set(MAP_KEY, [{
+        actorJid: ADMIN,
+        purpose: undefined,
+        conversationKey: MAP_KEY,
+      }]);
+      state.systemTurnExecActors.set('lease-retired-admin', {
+        scopeKey: MAP_KEY,
+        actorJid: ADMIN,
+      });
+
+      await dispatchTurn(state, runtimeContext);
+
+      // Recovery still happened.
+      expect(state.chatSessions.get(MAP_KEY)).toBe(spawned);
+      // The escalation: a sensitive tool call in the replacement's turn must not
+      // resolve to the administrator whose session was just retired.
+      expect(state.resolveExecutingActorByMapKey(MAP_KEY)).not.toBe(ADMIN);
+      expect(state.perChatExecActorQueue.get(MAP_KEY) ?? [])
+        .not.toContainEqual(expect.objectContaining({ actorJid: ADMIN }));
+      expect(state.systemTurnExecActors.get('lease-retired-admin')).toBeUndefined();
     } finally {
       db.close();
     }

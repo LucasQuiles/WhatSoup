@@ -7908,6 +7908,15 @@ export class AgentRuntime implements Runtime {
     // a replacement's first group reply fall inside the old cooldown. The spawn
     // path replaces the entry unconditionally, so nothing leaks by leaving it.
     this.chatQueues.get(mapKey)?.abortTurn();
+    // The retired generation's in-flight turns are gone with it, so its
+    // executing-actor entries must go too. `cleanupPerChatCrashTurnState` makes
+    // the same clear for the same reason: a later turn must not append behind a
+    // stale (possibly administrator) head and be served that actor for a
+    // sensitive tool call. The `!active` guard on the dispatch push cannot
+    // cover this path — eviction unmaps the dead session first, and the
+    // replacement is active — so clear it here.
+    this.perChatExecActorQueue.delete(mapKey);
+    this.clearSystemTurnExecutingActors(mapKey);
     // Deliberately NOT cleanupPerChatState: unlike idle eviction, this runs at
     // the head of a turn that is about to be dispatched, and that helper drops
     // the in-flight turn's journal seq and pending text. Detaching to exactly
