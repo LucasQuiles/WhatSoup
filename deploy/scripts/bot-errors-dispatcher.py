@@ -1233,16 +1233,6 @@ def save_incident_state(
 INCIDENT_CYCLE_REQUIRED_EXIT = 79
 
 
-# Exit status for a refused post-adoption bare write reached in daemon mode.
-# Distinct from STATE_RECOVERY_REQUIRED_EXIT (78): that path carries a
-# controller-state diagnostic and runs the recovery projection. This one is a
-# programming error (a helper reached save_incident_state without its
-# IncidentStateCycle) and must stop the loop loudly rather than fail every
-# cycle in silence. Restart=always brings the unit back; the deadman then
-# reports cycle_stale once the staleness outgrows what the restart explains.
-INCIDENT_CYCLE_REQUIRED_EXIT = 79
-
-
 class IncidentCycleRequiredError(RuntimeError):
     """#3054: a cycle-accepting helper was called post-adoption without the
     ``IncidentStateCycle``.
@@ -1293,29 +1283,6 @@ def _reject_bare_write_if_adopted(anchor: Path) -> None:
             f"(_controllerState); this wrapper would overwrite it and the next "
             f"validate would reject it as schema_incompatible (#3053/#3054). "
             f"Route this write through IncidentStateCycle.commit()."
-        )
-
-
-def _reject_bare_write_over_envelope(anchor: Path, observed: Mapping[str, Any] | None) -> None:
-    """Second half of the writer guard: never overwrite an observed envelope.
-
-    ``_reject_bare_write_if_adopted`` reads the ``.initialized`` marker before
-    the write observes the file, and adoption takes a different lock
-    (``incident-state.json.lock``) from the bare publisher
-    (``.durable-json.lock``), so a bare caller can pass the marker check while
-    adoption completes underneath it. The write publishes against
-    ``observation.version``: if adoption landed after the observation the
-    compare-and-swap refuses the write, and if it landed before, the observed
-    payload already carries ``_controllerState`` and this check refuses it.
-    Together the marker check, this check, and the CAS leave no window in
-    which bare JSON can replace the envelope.
-    """
-    if isinstance(observed, Mapping) and "_controllerState" in observed:
-        raise IncidentCycleRequiredError(
-            f"save_incident_state: refusing to overwrite the enveloped incident "
-            f"state at {anchor.name} with bare JSON (observed _controllerState "
-            f"without the adoption marker). Route this write through "
-            f"IncidentStateCycle.commit()."
         )
 
 
@@ -7018,20 +6985,6 @@ def run_daemon(interval: int, max_events: int) -> None:
                 "exit": STATE_RECOVERY_REQUIRED_EXIT,
             }), flush=True)
             sys.exit(STATE_RECOVERY_REQUIRED_EXIT)
-        except IncidentCycleRequiredError as exc:
-            # A refused post-adoption bare write is a programming error, not a
-            # transient fault. Swallowing it below kept the daemon alive with
-            # every cycle failing while record_state dropped cycleCompletedAt,
-            # which parks the deadman on the cycle_incomplete branch that a 30s
-            # interval never trips. Exit instead: the state file keeps its last
-            # cycleCompletedAt, the unit restarts, and the restart-bounded grace
-            # reports cycle_stale once the staleness outgrows the restart.
-            print(json.dumps({
-                "time": now_iso(),
-                "error": str(exc),
-                "exit": INCIDENT_CYCLE_REQUIRED_EXIT,
-            }), flush=True)
-            sys.exit(INCIDENT_CYCLE_REQUIRED_EXIT)
         except IncidentCycleRequiredError as exc:
             # A refused post-adoption bare write is a programming error, not a
             # transient fault. Swallowing it below kept the daemon alive with
