@@ -4732,8 +4732,8 @@ def opencode_provider_probe_inventory(
         if generated_provider_path is None:
             return [generated_provider_path_absence_failure(name, provider, target)]
     elif plist_state == GOVERNED_PLIST_NOT_APPLICABLE:
-        # Linux and explicit dry fixtures have no generated LaunchAgent map.
-        # This accessor does not read a plist for those states.
+        # Preserve legacy resolution when governed checking is intentionally
+        # not applicable; some stubbed Darwin fixtures may still read a plist.
         generated_provider_path = instance_provider_path(name)
     else:
         generated_provider_path = None
