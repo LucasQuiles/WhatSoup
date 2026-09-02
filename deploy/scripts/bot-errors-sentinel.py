@@ -87,6 +87,18 @@ CONFIGURATION_RETIRED_LANE = "configuration_retirement"
 # state file cannot grow without bound.
 RETIRED_HOST_TOMBSTONE_MAX = 64
 RETIRED_HOST_TOMBSTONE_TTL_SECONDS = 30 * 24 * 3600
+# What a retirement did to the fleet-wide Tier-2 remediation slot, as bounded
+# enum tokens. Never free text and never a reason string: the tombstone is an
+# audit record a consumer parses, and prose here would smuggle unbounded
+# content into a ledger whose whole point is that it carries none.
+QREMEDIATION_RETIREMENT_CANCELLED = "cancelled_host_retired"
+QREMEDIATION_RETIREMENT_NONE = "none"
+# Pending-retirement intents: the durable record that pins a retirement's FIRST
+# attempt clock so a retry republishes byte-identical bytes instead of a second
+# timestamped artifact. Bounded the same way the tombstone ledger is.
+RETIREMENT_INTENT_LEDGER = "sentinel-retirement-intents.json"
+RETIREMENT_INTENT_MAX = 64
+RETIREMENT_INTENT_TTL_SECONDS = 7 * 24 * 3600
 
 ATTENTION_ACTIONS = {"tier1_heal_candidate", "escalate", "escalate_flapping", "freeze_correlated_drift", "q_unavailable"}
 ATTENTION_FLEET_ACTIONS = {
@@ -431,6 +443,10 @@ def action_outbox_dir(config: SentinelConfig) -> Path:
     return config.action_outbox_dir or config.state_dir / "actions"
 
 
+def retirement_intent_path(config: SentinelConfig) -> Path:
+    return config.state_dir / RETIREMENT_INTENT_LEDGER
+
+
 def execute_action(action: dict[str, Any]) -> None:
     """Execute a sentinel remediation action.
 
@@ -505,7 +521,23 @@ def consume_action_outbox(config: SentinelConfig, retired_hosts: Optional[dict] 
                         f"[bot-errors-sentinel] action skipped for retired subject: {entry.name}",
                         file=sys.stderr,
                     )
-                    entry.rename(entry.with_suffix(".retired"))
+                    # Its own handler, deliberately NOT the outer one. A raced
+                    # rename, an EPERM on the directory or ENOSPC at the
+                    # directory inode would otherwise fall through to the
+                    # ``.failed`` rename below, and ``.failed`` reads
+                    # downstream as a remediation failure rather than "subject
+                    # retired, do nothing" -- a fabricated failure against a
+                    # member that was deliberately decommissioned. Leaving the
+                    # file untouched is correct: the next cycle consults the
+                    # tombstone again and reaches the same disposition.
+                    try:
+                        entry.rename(entry.with_suffix(".retired"))
+                    except Exception as exc:
+                        print(
+                            f"[bot-errors-sentinel] retired-subject disposition deferred "
+                            f"{entry.name}: {exc}",
+                            file=sys.stderr,
+                        )
                     continue
                 execute_action(action)
                 entry.rename(entry.with_suffix(".done"))
@@ -2018,6 +2050,24 @@ def build_configuration_retired_event(
     severity info and criticalWhatsAppEligible False: this is an audit record,
     not a page. recoveryClaimed False is explicit because the whole point of
     #2429 is that a retirement must never be mistaken for a recovery.
+
+    CONSUMER CONTRACT -- duplicates are collapsed by ``requestId``, never by
+    file path. The path is not an identity: ``action_event_path`` embeds a
+    timestamp, and a cycle that publishes one member then fails on another
+    persists nothing (the raise escapes above run_once's ``finally:
+    save_state``), so the first member is republished next cycle. A consumer
+    that dedupes on the filename will double-count; one that dedupes on
+    ``requestId`` will not.
+
+    ``reconcile_retirement_intents`` pins the first attempt's clock so that
+    retry reproduces byte-identical bytes and reconciles into the SAME file,
+    which removes the duplicate in the common case. It does not remove it in
+    every case: the ``requestId`` is derived from the roster digests, so if the
+    roster changes between a failed cycle and its retry -- a second member
+    leaving -- the digests move, the ``requestId`` moves with them, and
+    requestId-based dedupe has nothing to match either. That case still leaves
+    two audit records for one retirement. The contract stated here is the only
+    thing a consumer can rely on.
     """
     return {
         "schemaVersion": 1,
@@ -2042,6 +2092,34 @@ def build_configuration_retired_event(
     }
 
 
+def enforce_retired_host_tombstone_cap(state: dict) -> dict:
+    """The ONLY count-cap enforcement site for the tombstone ledger.
+
+    Kept separate from the age prune because the two run at different points:
+    age is evaluated once per cycle against that cycle's clock, but the count
+    has to be evaluated AFTER the retirement loop's insertions. Enforcing it
+    only before the loop lets a ledger already at the cap reach save_state at
+    cap+N and sit there on disk until the next cycle -- bounded by the members
+    retired in one cycle, but past the documented bound and durable.
+
+    Newest-first, so a cycle's own retirements are what survives the trim.
+    """
+    tombstones = state.get("retiredHosts")
+    if not isinstance(tombstones, dict):
+        tombstones = {}
+        state["retiredHosts"] = tombstones
+    if len(tombstones) > RETIRED_HOST_TOMBSTONE_MAX:
+        ordered = sorted(
+            tombstones.items(),
+            key=lambda item: (
+                finite_float(item[1].get("retiredAt")) or 0.0 if isinstance(item[1], dict) else 0.0
+            ),
+            reverse=True,
+        )
+        state["retiredHosts"] = dict(ordered[:RETIRED_HOST_TOMBSTONE_MAX])
+    return state["retiredHosts"]
+
+
 def prune_retired_host_tombstones(state: dict, now: float) -> dict:
     """Keep the tombstone ledger bounded by age and count."""
     tombstones = state.get("retiredHosts")
@@ -2052,15 +2130,125 @@ def prune_retired_host_tombstones(state: dict, now: float) -> dict:
         retired_at = finite_float(entry.get("retiredAt")) if isinstance(entry, dict) else None
         if retired_at is None or now - retired_at > RETIRED_HOST_TOMBSTONE_TTL_SECONDS:
             tombstones.pop(host, None)
-    if len(tombstones) > RETIRED_HOST_TOMBSTONE_MAX:
-        ordered = sorted(
-            tombstones.items(),
-            key=lambda item: finite_float(item[1].get("retiredAt")) or 0.0,
-            reverse=True,
+    return enforce_retired_host_tombstone_cap(state)
+
+
+def load_retirement_intents(config: SentinelConfig) -> dict:
+    """Pending retirement intents, keyed by member.
+
+    Deliberately NOT part of ``state``. retire_unconfigured_hosts rolls state
+    back to a pre-publication deepcopy on failure, and the cycle's ``save_state``
+    never runs on that path because the raise escapes above run_once's
+    ``finally``. An intent held in state would therefore be erased by exactly
+    the failure it exists to survive, and an in-memory-only one would die with
+    the process -- which is the crash case. It needs its own durable file.
+
+    Unreadable, malformed, or unusably-timestamped entries are dropped rather
+    than raising: a lost pin costs a duplicate audit record, never a wedge.
+    """
+    ledger = optional_json_object(retirement_intent_path(config)) or {}
+    intents = ledger.get("intents")
+    if not isinstance(intents, dict):
+        return {}
+    usable = {}
+    for host, entry in intents.items():
+        if not isinstance(entry, dict):
+            continue
+        if finite_float(entry.get("firstAttemptEpoch")) is None:
+            continue
+        usable[str(host)] = dict(entry)
+    return usable
+
+
+def save_retirement_intents(config: SentinelConfig, intents: dict) -> None:
+    payload = {"schemaVersion": 1, "intents": intents}
+    target = _durable_target(retirement_intent_path(config))
+    observation = observe_json(target)
+    publication_operation = operation_id(
+        target,
+        payload,
+        component="sentinel.retirement_intent",
+        predecessor=observation.version,
+    )
+    publication = publish_state_json(
+        target,
+        payload,
+        component="sentinel.retirement_intent",
+        operation_id=publication_operation,
+        expected=observation.version,
+        generation=(observation.version.generation or 0) + 1,
+    )
+    require_advance(publication)
+
+
+def retirement_content_binding(payload: dict) -> str:
+    """Digest of everything in a retirement disposition EXCEPT its clock.
+
+    Two attempts may share a pinned timestamp only if they would otherwise
+    publish identical bytes. Binding the pin to the content is what makes that
+    decidable in advance, instead of discovering it as a CONFLICT at
+    publication time.
+    """
+    material = {key: value for key, value in payload.items() if key != "createdAt"}
+    return stable_request_id(
+        "retirement_content", json.dumps(material, sort_keys=True, separators=(",", ":"))
+    )
+
+
+def reconcile_retirement_intents(config: SentinelConfig, bindings: dict, now: float) -> dict:
+    """Pin each retiring member's first-attempt clock, durably, before publishing.
+
+    ``action_event_path`` puts ``int(now)`` in the filename and the payload
+    carries ``createdAt``, so an unpinned retry writes a SECOND file for the
+    same stable requestId. Reusing the recorded epoch for both makes the retry
+    byte-identical, and byte-identical is the only input under which
+    ``publish_event_json`` reconciles (RECONCILED_COMMITTED /
+    INTENDED_AUTHORITATIVE) rather than answering CONFLICT.
+
+    A pin is reused only while the disposition's CONTENT is unchanged. That is
+    the whole safety argument, and it is why ``int(now)`` deliberately stays in
+    the filename. Reusing a pin across changed content -- a member retired,
+    re-added, then retired again under unchanged roster digests, so the same
+    requestId but a fresh record -- would aim identical filenames at differing
+    bytes and wedge the retirement permanently. When the content moves, so does
+    the clock, and the two attempts get distinct files.
+
+    The same rule handles a roster that changes between a failed cycle and its
+    retry: the digests move, so the requestId and the roster block move, so the
+    binding moves and a fresh episode begins. That case still leaves a
+    requestId-distinct duplicate audit record. This ledger does not close it.
+
+    A cycle with no retiring members does not touch this file at all.
+    Publishing it on an otherwise-clean cycle would add a new way for that
+    cycle to raise above run_once's ``finally: save_state`` and lose
+    everything. Stale entries therefore linger until the next retirement, which
+    rewrites the ledger down to that cycle's retiring set; age and count bounds
+    are the backstop.
+    """
+    stored = load_retirement_intents(config)
+    kept: dict = {}
+    for host in sorted(bindings)[:RETIREMENT_INTENT_MAX]:
+        binding = bindings[host]
+        entry = stored.get(host)
+        first = finite_float(entry.get("firstAttemptEpoch")) if isinstance(entry, dict) else None
+        reusable = (
+            isinstance(entry, dict)
+            and entry.get("contentBinding") == binding
+            and first is not None
+            and first <= now
+            and now - first <= RETIREMENT_INTENT_TTL_SECONDS
         )
-        state["retiredHosts"] = dict(ordered[:RETIRED_HOST_TOMBSTONE_MAX])
-        tombstones = state["retiredHosts"]
-    return tombstones
+        if not reusable:
+            entry = {
+                "episodeId": stable_request_id("retirement_intent", host, binding, now),
+                "contentBinding": binding,
+                "firstAttemptEpoch": now,
+                "firstAttemptAtIso": now_iso(now),
+            }
+        kept[host] = entry
+    if kept != stored:
+        save_retirement_intents(config, kept)
+    return kept
 
 
 def retire_unconfigured_hosts(
@@ -2103,16 +2291,42 @@ def retire_unconfigured_hosts(
         "manifestDigest": (roster_inventory_data or {}).get("digest"),
         "manifestEpoch": roster_epoch_value,
     }
+    # Durable BEFORE any publication, so a retry can reproduce this cycle's
+    # bytes exactly. Only the CLOCK is pinned -- never the requestId, and never
+    # across changed content. Each member's disposition is built once with a
+    # placeholder clock purely to bind the pin to what will be published.
+    bindings = {}
+    for host in retiring:
+        record = host_state.get(host)
+        bindings[host] = retirement_content_binding(
+            build_configuration_retired_event(
+                host,
+                record if isinstance(record, dict) else {},
+                0.0,
+                controller_host,
+                stable_request_id(
+                    "configuration_retired", host, roster["previousDigest"], roster["currentDigest"]
+                ),
+                roster,
+            )
+        )
+    intents = reconcile_retirement_intents(config, bindings, now)
     emitted = []
     for host in retiring:
         record = host_state.get(host)
         state_before_event = copy.deepcopy(state)
+        intent = intents.get(host)
+        pinned_at = finite_float(intent.get("firstAttemptEpoch")) if isinstance(intent, dict) else None
+        if pinned_at is None:
+            pinned_at = now
         request_id = stable_request_id(
             "configuration_retired", host, roster["previousDigest"], roster["currentDigest"]
         )
-        path = action_event_path(config, now, "retirement", host, CONFIGURATION_RETIRED_ACTION, request_id)
+        path = action_event_path(
+            config, pinned_at, "retirement", host, CONFIGURATION_RETIRED_ACTION, request_id
+        )
         payload = build_configuration_retired_event(
-            host, record if isinstance(record, dict) else {}, now, controller_host, request_id, roster
+            host, record if isinstance(record, dict) else {}, pinned_at, controller_host, request_id, roster
         )
         target = _durable_target(path)
         absent = JsonVersion(False, None, None, None)
@@ -2135,6 +2349,29 @@ def retire_unconfigured_hosts(
             state.update(state_before_event)
             raise
         # Durably published: only now may the record go.
+        #
+        # The Tier-2 remediation token goes with it. state["qRemediation"] is a
+        # SINGLE GLOBAL SLOT, not a per-host map, so a retired member's token
+        # refuses every other member's Tier-2 request with
+        # ``q_remediation_inflight`` until its TTL runs out, and on expiry
+        # emit_q_unavailable_event pages critically -- against the critical
+        # WhatsApp budget -- naming a member that no longer exists. Both the
+        # live and the expired case are closed by disposing of the token here.
+        #
+        # ORDERING is the contract, the same contract the record deletion
+        # obeys: the disposal sits BELOW the publication and inside the same
+        # rollback boundary, so a failed publication leaves the token exactly
+        # as it found it. Only the retiring member's own token may be taken --
+        # popping the slot unconditionally would strand a live remediation for
+        # a still-configured member.
+        q_remediation = state.get("qRemediation")
+        q_remediation_cancelled = (
+            isinstance(q_remediation, dict)
+            and bool(q_remediation)
+            and str(q_remediation.get("host") or "") == host
+        )
+        if q_remediation_cancelled:
+            state.pop("qRemediation", None)
         tombstones[host] = {
             "retiredAt": now,
             "retiredAtIso": now_iso(now),
@@ -2143,6 +2380,11 @@ def retire_unconfigured_hosts(
             "eventPath": str(path),
             "priorAlertState": payload["retiredRecord"].get("alertState"),
             "rosterCurrentDigest": roster["currentDigest"],
+            "qRemediationDisposition": (
+                QREMEDIATION_RETIREMENT_CANCELLED
+                if q_remediation_cancelled
+                else QREMEDIATION_RETIREMENT_NONE
+            ),
         }
         host_state.pop(host, None)
         emitted.append(
@@ -2154,6 +2396,9 @@ def retire_unconfigured_hosts(
                 "path": str(path),
             }
         )
+    # The insertions above are what can push the ledger past its bound, so the
+    # count is enforced here rather than only before the loop.
+    enforce_retired_host_tombstone_cap(state)
     return emitted
 
 
