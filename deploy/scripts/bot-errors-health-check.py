@@ -7837,19 +7837,22 @@ def _deadman_recovery_text(episode: dict[str, Any]) -> str:
 
 # Cadence the shipped schedulers run the deadman at: deploy/bot-errors-deadman.timer
 # (OnUnitActiveSec=5m) and the deadman agent in deploy/scripts/install-bot-errors-launchd.sh
-# (StartInterval 300). A gap between consecutive graced checks longer than twice
-# this is reported as an observation gap (lastCheckGapSeconds / check_gap_seconds=),
-# so the default must track those files; test_bot_errors_deadman_grace_attribution.py
-# pins it. Grace-streak continuity itself is bound to the host boot, not to this.
+# (StartInterval 300). Twice this is both the threshold above which a gap between
+# consecutive graced checks is reported as an observation gap (lastCheckGapSeconds /
+# check_gap_seconds=) and the cap on how much one late interval credits the grace
+# streak, so the default must track those files; test_bot_errors_deadman_grace_attribution.py
+# pins it.
 DEADMAN_CHECK_INTERVAL_SECONDS = 300
+
+_LINUX_BOOT_ID_PATH = Path("/proc/sys/kernel/random/boot_id")
 
 
 def _host_boot_id() -> str | None:
     """A clock-independent identity for the current host boot, or None if unknown.
 
-    Linux exposes a per-boot UUID; macOS exposes the boot wall time, which the
-    kernel fixes at boot and does not move when the clock steps. Both survive
-    wall-clock adjustments, which ``now - uptime`` would not.
+    Linux exposes a per-boot UUID; macOS exposes a per-boot session UUID. Neither
+    moves when the wall clock steps, which ``now - uptime`` (and macOS
+    ``kern.boottime``, which tracks the calendar) would.
     """
     dry = os.environ.get("BOT_ERRORS_DRY_HOST_BOOT_ID")
     if dry is not None:
@@ -7857,24 +7860,54 @@ def _host_boot_id() -> str | None:
     if HOST_PLATFORM == "darwin":
         try:
             proc = subprocess.run(
-                ["sysctl", "-n", "kern.boottime"],
+                ["sysctl", "-n", "kern.bootsessionuuid"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 text=True,
                 timeout=3,
                 check=False,
             )
-            match = re.search(r"sec = (\d+)", proc.stdout)
-            if match:
-                return f"boottime:{match.group(1)}"
+            value = (proc.stdout or "").strip()
+            return f"bootsession:{value}" if value else None
         except Exception:  # noqa: BLE001 - unknown boot identity is handled by the caller.
             return None
-        return None
     try:
-        value = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
+        value = _LINUX_BOOT_ID_PATH.read_text(encoding="utf-8").strip()
         return f"boot_id:{value}" if value else None
     except Exception:  # noqa: BLE001 - unknown boot identity is handled by the caller.
         return None
+
+
+def _host_monotonic_seconds() -> int | None:
+    """Seconds since boot on a clock that keeps counting through sleep and never
+    steps: Linux CLOCK_BOOTTIME, macOS CLOCK_MONOTONIC (which continues across
+    sleep on Darwin). Shared by every process on the boot, so consecutive deadman
+    runs can measure the interval between them without trusting the wall clock.
+    None when unavailable; the caller falls back to clamped wall time."""
+    dry = os.environ.get("BOT_ERRORS_DRY_HOST_MONOTONIC_SECONDS")
+    if dry is not None:
+        try:
+            return int(float(dry))
+        except ValueError:
+            return None
+    clock = getattr(time, "CLOCK_MONOTONIC", None) if HOST_PLATFORM == "darwin" else getattr(time, "CLOCK_BOOTTIME", None)
+    if clock is None:
+        return None
+    try:
+        return int(time.clock_gettime(clock))
+    except Exception:  # noqa: BLE001 - unavailable clock is handled by the caller.
+        return None
+
+
+_GRACE_STREAK_FIELDS = (
+    "graceStreakSince",
+    "graceStreakSeenAt",
+    "graceStreakBootId",
+    "graceStreakSeenMonotonic",
+    "graceStreakAccumulated",
+    "graceStreakGapForgiven",
+)
+_UNKNOWN_BOOT = "unknown"
 
 
 def _note_grace_streak(
@@ -7882,57 +7915,83 @@ def _note_grace_streak(
     grace_active: bool,
     now_epoch: int,
     boot_id: str | None,
+    monotonic_now: int | None,
+    gap_cap_seconds: int,
 ) -> tuple[int, bool, int | None]:
     """Track how long restart grace has been continuously active across checks.
 
     Returns ``(streak_seconds, dirty, observation_gap_seconds)``. A single
     observation cannot tell a fresh restart from a restart loop when there is no
     state age to bound grace with; the streak is the deadman's own memory of
-    that, persisted in deadman-state.json as ``graceStreakSince`` (first graced
-    check), ``graceStreakSeenAt`` (latest graced check) and ``graceStreakBootId``
-    (the host boot that observed it).
+    that, persisted in deadman-state.json.
 
-    Continuity is bound to the boot, not to the gap between checks. Grace seen
-    on the same boot is continuous however long the deadman itself was absent:
-    a dispatcher still inside its restart window after the deadman was starved
-    for an hour had that hour to complete a cycle and did not. Forgiving a gap
-    re-seeded the streak on every check when the deadman ran less often than
-    the limit, and a real restart loop under a starved timer stayed silent
-    forever. Only a different boot identity re-seeds, because the boot ended
-    the process the previous grace belonged to. An unknown boot identity
-    (``None``) cannot disprove continuity and a missed alarm is the worse
-    error, so it continues. A record missing any field, or carrying a corrupt
-    epoch (bool, non-positive, or in the future), re-seeds.
+    The streak is the sum of the intervals the deadman actually observed, on the
+    boot's monotonic clock (wall time, clamped at zero, when that is unavailable),
+    so a wall-clock step in either direction is neither a re-seed nor a corrupt
+    record. An interval longer than ``gap_cap_seconds`` (twice the timer cadence)
+    credits nothing the first time -- a suspend or a stopped timer is not observed
+    grace, and the first check after it must not page a dispatcher that has only
+    had seconds -- but consecutive long intervals each credit the cap, so a deadman
+    that keeps running late still reports a restart loop within a few checks
+    instead of re-seeding forever. Only a different boot identity re-seeds: the
+    boot ended the process the previous grace belonged to. An unknown identity
+    cannot disprove continuity and a missed alarm is the worse error, so it
+    continues. A record missing any field, or carrying a corrupt epoch (bool or
+    non-positive), re-seeds.
 
-    The gap itself is returned so the caller can report it: the deadman's own
+    The interval is returned so the caller can report it: the deadman's own
     absence is a signal, not something to absorb.
     """
-    since = deadman_state.get("graceStreakSince")
-    seen = deadman_state.get("graceStreakSeenAt")
-    recorded_boot = deadman_state.get("graceStreakBootId")
-    fields = ("graceStreakSince", "graceStreakSeenAt", "graceStreakBootId")
     if not grace_active:
-        present = [f for f in fields if f in deadman_state]
+        present = [f for f in _GRACE_STREAK_FIELDS if f in deadman_state]
         for f in present:
             deadman_state.pop(f, None)
         return 0, bool(present), None
 
-    def _valid_epoch(value: Any) -> bool:
-        # bool passes isinstance int; zero, negative, or future values are corrupt.
-        return not isinstance(value, bool) and isinstance(value, int) and 0 < value <= now_epoch
+    def _int(value: Any, minimum: int) -> bool:
+        return not isinstance(value, bool) and isinstance(value, int) and value >= minimum
 
-    same_boot = boot_id is None or (isinstance(recorded_boot, str) and recorded_boot == boot_id)
-    if not _valid_epoch(since) or not _valid_epoch(seen) or not isinstance(recorded_boot, str) or not same_boot:
+    since = deadman_state.get("graceStreakSince")
+    seen = deadman_state.get("graceStreakSeenAt")
+    recorded_boot = deadman_state.get("graceStreakBootId")
+    seen_mono = deadman_state.get("graceStreakSeenMonotonic")
+    accumulated = deadman_state.get("graceStreakAccumulated")
+    forgiven = deadman_state.get("graceStreakGapForgiven")
+    complete = (
+        _int(since, 1)
+        and _int(seen, 1)
+        and isinstance(recorded_boot, str)
+        and (seen_mono is None or _int(seen_mono, 0))
+        and _int(accumulated, 0)
+        and isinstance(forgiven, bool)
+    )
+    same_boot = boot_id is None or recorded_boot == _UNKNOWN_BOOT or recorded_boot == boot_id
+    if not complete or not same_boot:
         deadman_state["graceStreakSince"] = int(now_epoch)
         deadman_state["graceStreakSeenAt"] = int(now_epoch)
-        if boot_id is not None:
-            deadman_state["graceStreakBootId"] = boot_id
-        elif not isinstance(recorded_boot, str):
-            deadman_state.pop("graceStreakBootId", None)
+        deadman_state["graceStreakBootId"] = boot_id if boot_id is not None else _UNKNOWN_BOOT
+        deadman_state["graceStreakSeenMonotonic"] = monotonic_now
+        deadman_state["graceStreakAccumulated"] = 0
+        deadman_state["graceStreakGapForgiven"] = False
         return 0, True, None
-    observation_gap = int(now_epoch - seen)
+    if monotonic_now is not None and isinstance(seen_mono, int) and monotonic_now >= seen_mono:
+        interval = int(monotonic_now - seen_mono)
+    else:
+        interval = max(0, int(now_epoch - seen))
+    if interval > gap_cap_seconds:
+        credit = gap_cap_seconds if forgiven else 0
+        forgiven = True
+    else:
+        credit = interval
+        forgiven = False
+    accumulated = int(accumulated) + credit
     deadman_state["graceStreakSeenAt"] = int(now_epoch)
-    return int(now_epoch - since), True, observation_gap
+    deadman_state["graceStreakSeenMonotonic"] = monotonic_now
+    deadman_state["graceStreakAccumulated"] = accumulated
+    deadman_state["graceStreakGapForgiven"] = forgiven
+    if boot_id is not None and recorded_boot == _UNKNOWN_BOOT:
+        deadman_state["graceStreakBootId"] = boot_id
+    return accumulated, True, interval
 
 
 def _grace_still_credible(
@@ -7953,10 +8012,10 @@ def _grace_still_credible(
 
     The evidence of a restart loop there is grace itself: a unit that keeps
     restarting has grace active on every check, so the deadman's persisted
-    streak (``graceStreakSince``, continuous within one host boot however
-    sparse the checks) keeps growing. Grace that has been continuously active
-    for longer than ``max_state_age`` is a loop, not a fresh start, and stops
-    excusing anything.
+    streak (the observed grace intervals summed on the boot's monotonic clock,
+    see ``_note_grace_streak``) keeps growing. Grace that has been continuously
+    active for longer than ``max_state_age`` is a loop, not a fresh start, and
+    stops excusing anything.
     """
     if not grace_reason:
         return False
@@ -8066,13 +8125,13 @@ def deadman(
         grace_age = service_uptime
     deadman_state = load_deadman_state()
     migrate_deadman_state(deadman_state, now_epoch)
+    gap_threshold = 2 * (check_interval if check_interval > 0 else DEADMAN_CHECK_INTERVAL_SECONDS)
     grace_streak_seconds, streak_dirty, observation_gap = _note_grace_streak(
-        deadman_state, grace_reason is not None, now_epoch, _host_boot_id()
+        deadman_state, grace_reason is not None, now_epoch, _host_boot_id(), _host_monotonic_seconds(), gap_threshold
     )
     # The deadman's own absence is a signal: a gap between consecutive graced
     # checks longer than two timer intervals is persisted and printed, never
     # silently absorbed into the streak.
-    gap_threshold = 2 * (check_interval if check_interval > 0 else DEADMAN_CHECK_INTERVAL_SECONDS)
     check_gap_note = ""
     if observation_gap is not None and observation_gap > gap_threshold:
         deadman_state["lastCheckGapSeconds"] = observation_gap
@@ -8183,7 +8242,7 @@ def main() -> int:
         "--check-interval",
         type=int,
         default=DEADMAN_CHECK_INTERVAL_SECONDS,
-        help="seconds between deadman timer runs (OnUnitActiveSec); a gap between consecutive graced checks longer than twice this is reported as check_gap_seconds and persisted as lastCheckGapSeconds",
+        help="seconds between deadman timer runs (OnUnitActiveSec); twice this is the observation-gap report threshold (check_gap_seconds / lastCheckGapSeconds) and the cap one late interval credits the restart-grace streak",
     )
     parser.add_argument("--deadman-cooldown", type=int, default=positive_env_int("BOT_ERRORS_DEADMAN_COOLDOWN_SECONDS", 1800))
     args = parser.parse_args()

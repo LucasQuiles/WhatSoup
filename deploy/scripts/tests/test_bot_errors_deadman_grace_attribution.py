@@ -28,17 +28,18 @@ the persisted grace streak (``_grace_still_credible``): grace that has been
 continuously active for longer than ``max_state_age`` is a loop, not a fresh
 start.
 
-"Continuously" needs a liveness record, and the record must not forgive the
-deadman's own absence. The streak persists the epoch of the last graced check
-(``graceStreakSeenAt``) and the host boot identity that observed it
-(``graceStreakBootId``, clock-independent: Linux boot_id, macOS kern.boottime).
-Grace observed on the same boot is continuous whatever the gap between checks:
-a dispatcher that is still in its restart window after the deadman was starved
-for an hour had that hour to complete a cycle and did not. Only a different
-boot (an actual reboot) re-seeds, because the previous grace belonged to a
-process the boot itself ended. Forgiving any gap re-seeded on every check when
-the deadman ran less often than the limit, and a real restart loop under a
-starved timer stayed silent forever.
+"Continuously" is measured as the sum of the intervals the deadman actually
+observed, on a since-boot monotonic clock (Linux CLOCK_BOOTTIME, macOS
+CLOCK_MONOTONIC), tied to a clock-independent boot identity (Linux boot_id,
+macOS kern.bootsessionuuid). A backwards wall-clock step is therefore neither a
+re-seed nor a corrupt record: with the monotonic clock the interval is exact,
+and without it the wall interval is clamped at zero. A single interval longer
+than twice the timer cadence (a suspend, a stopped timer) credits nothing, so
+the first check after it cannot page a dispatcher that has only had seconds;
+consecutive long intervals each credit the cap, so a deadman that keeps
+running late still reports a restart loop within a few checks instead of
+re-seeding forever. Only a different boot identity re-seeds: the boot ended
+the process the previous grace belonged to.
 
 A gap longer than twice the timer interval (``--check-interval``, default 300
 = ``OnUnitActiveSec=5m``) is not silently absorbed: it is persisted as
@@ -55,6 +56,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from hypothesis import HealthCheck, given
+from hypothesis import settings as hypothesis_settings
+from hypothesis import strategies as st
 
 _SCRIPT = Path(__file__).resolve().parents[1] / "bot-errors-health-check.py"
 
@@ -183,65 +187,178 @@ def test_no_grace_is_never_credible(health_check):
     assert health_check._grace_still_credible(None, 0, 180) is False
 
 
-# --- streak continuity: bound to the host boot, not to the gap between checks --
+# --- streak accumulation: observed intervals on the boot's monotonic clock -------
+
+_CAP = 600  # 2 x the default check interval
 
 
-def test_grace_streak_continues_across_a_long_gap_on_the_same_boot(health_check):
-    """The deadman was starved for 8h on the same boot: grace at both ends with the
-    dispatcher still in its restart window is a loop, and the gap is reported."""
+def _record(now=200_000, *, since=None, seen=None, boot="boot-A", mono=1000, acc=0, forgiven=False):
+    return {
+        "graceStreakSince": now - 900 if since is None else since,
+        "graceStreakSeenAt": now - 300 if seen is None else seen,
+        "graceStreakBootId": boot,
+        "graceStreakSeenMonotonic": mono,
+        "graceStreakAccumulated": acc,
+        "graceStreakGapForgiven": forgiven,
+    }
+
+
+def test_grace_streak_accumulates_an_observed_interval_at_the_timer_cadence(health_check):
     now = 200_000
-    state = {"graceStreakSince": now - 8 * 3600, "graceStreakSeenAt": now - 8 * 3600, "graceStreakBootId": "boot-A"}
-    assert health_check._note_grace_streak(state, True, now, "boot-A") == (8 * 3600, True, 8 * 3600)
-    assert state["graceStreakSeenAt"] == now and state["graceStreakSince"] == now - 8 * 3600
+    state = _record(now, mono=1000, acc=600)
+    assert health_check._note_grace_streak(state, True, now, "boot-A", 1300, _CAP) == (900, True, 300)
+    assert state["graceStreakSeenMonotonic"] == 1300 and state["graceStreakSeenAt"] == now
+    assert state["graceStreakAccumulated"] == 900 and state["graceStreakGapForgiven"] is False
+
+
+def test_grace_streak_forgives_a_single_long_gap_but_reports_it(health_check):
+    """One 8h interval the deadman did not observe credits nothing (a suspend or a
+    stopped timer is not observed grace) but is still returned as the gap."""
+    now = 200_000
+    state = _record(now, mono=1000, acc=300)
+    assert health_check._note_grace_streak(state, True, now, "boot-A", 1000 + 8 * 3600, _CAP) == (300, True, 8 * 3600)
+    assert state["graceStreakGapForgiven"] is True
+
+
+def test_grace_streak_credits_consecutive_long_gaps_at_the_cap(health_check):
+    """A second long interval in a row means the cadence is starved, not paused:
+    each credits the cap, so a restart loop is reported within a few checks."""
+    now = 200_000
+    state = _record(now, mono=1000, acc=300, forgiven=True)
+    assert health_check._note_grace_streak(state, True, now, "boot-A", 1601, _CAP) == (900, True, 601)
+    assert state["graceStreakGapForgiven"] is True
+
+
+def test_grace_streak_forgiveness_resets_after_a_normal_interval(health_check):
+    now = 200_000
+    state = _record(now, mono=1000, acc=300, forgiven=True)
+    assert health_check._note_grace_streak(state, True, now, "boot-A", 1300, _CAP) == (600, True, 300)
+    assert state["graceStreakGapForgiven"] is False
+
+
+def test_grace_streak_uses_the_monotonic_clock_when_the_wall_clock_steps_back(health_check):
+    """Wall clock stepped back 5000s between checks; the monotonic clock says 300s."""
+    now = 200_000
+    state = _record(now, seen=now + 5000, mono=1000, acc=0)
+    assert health_check._note_grace_streak(state, True, now, "boot-A", 1300, _CAP) == (300, True, 300)
+
+
+def test_grace_streak_clamps_a_backwards_wall_step_without_a_monotonic_clock(health_check):
+    """No monotonic clock: a backwards step is a zero-length interval, never a re-seed."""
+    now = 200_000
+    state = _record(now, seen=now + 5000, mono=None, acc=300)
+    assert health_check._note_grace_streak(state, True, now, "boot-A", None, _CAP) == (300, True, 0)
+    assert state["graceStreakAccumulated"] == 300 and state["graceStreakSince"] == now - 900
+
+
+def test_grace_streak_falls_back_to_wall_time_when_the_monotonic_clock_is_unavailable_now(health_check):
+    now = 200_000
+    state = _record(now, mono=1000, acc=0)
+    assert health_check._note_grace_streak(state, True, now, "boot-A", None, _CAP) == (300, True, 300)
 
 
 def test_grace_streak_reseeds_after_a_reboot(health_check):
-    """A different boot identity: the process the previous grace belonged to is gone."""
     now = 200_000
-    state = {"graceStreakSince": now - 8 * 3600, "graceStreakSeenAt": now - 8 * 3600, "graceStreakBootId": "boot-A"}
-    assert health_check._note_grace_streak(state, True, now, "boot-B") == (0, True, None)
-    assert state["graceStreakSince"] == now and state["graceStreakSeenAt"] == now and state["graceStreakBootId"] == "boot-B"
-
-
-def test_grace_streak_continues_at_the_timer_cadence(health_check):
-    now = 200_000
-    state = {"graceStreakSince": now - 900, "graceStreakSeenAt": now - 300, "graceStreakBootId": "boot-A"}
-    assert health_check._note_grace_streak(state, True, now, "boot-A") == (900, True, 300)
+    state = _record(now, mono=90_000, acc=5000)
+    assert health_check._note_grace_streak(state, True, now, "boot-B", 20, _CAP) == (0, True, None)
+    assert state["graceStreakSince"] == now and state["graceStreakSeenAt"] == now
+    assert state["graceStreakBootId"] == "boot-B" and state["graceStreakSeenMonotonic"] == 20
+    assert state["graceStreakAccumulated"] == 0 and state["graceStreakGapForgiven"] is False
 
 
 def test_grace_streak_with_unknown_host_boot_continues(health_check):
-    """Boot identity unavailable: continuity cannot be disproved, and a missed
+    """Boot identity unavailable now: continuity cannot be disproved and a missed
     alarm is the worse error, so the streak continues."""
     now = 200_000
-    state = {"graceStreakSince": now - 900, "graceStreakSeenAt": now - 300, "graceStreakBootId": "boot-A"}
-    assert health_check._note_grace_streak(state, True, now, None) == (900, True, 300)
+    state = _record(now, mono=1000, acc=0)
+    assert health_check._note_grace_streak(state, True, now, None, 1300, _CAP) == (300, True, 300)
 
 
-def test_grace_streak_without_a_liveness_record_is_reseeded(health_check):
+def test_grace_streak_seeded_without_a_boot_identity_still_continues(health_check):
+    """A record seeded while the identity was unknown must not re-seed on every check."""
     now = 200_000
-    state = {"graceStreakSince": now - 900}
-    assert health_check._note_grace_streak(state, True, now, "boot-A") == (0, True, None)
-    assert state["graceStreakSince"] == now and state["graceStreakSeenAt"] == now and state["graceStreakBootId"] == "boot-A"
+    state = {}
+    assert health_check._note_grace_streak(state, True, now - 300, None, 1000, _CAP) == (0, True, None)
+    assert health_check._note_grace_streak(state, True, now, "boot-A", 1300, _CAP) == (300, True, 300)
+    assert state["graceStreakBootId"] == "boot-A"
 
 
-def test_grace_streak_without_a_boot_record_is_reseeded(health_check):
+def test_grace_streak_without_a_complete_record_is_reseeded(health_check):
     now = 200_000
-    state = {"graceStreakSince": now - 900, "graceStreakSeenAt": now - 300}
-    assert health_check._note_grace_streak(state, True, now, "boot-A") == (0, True, None)
+    for partial in ({"graceStreakSince": now - 900}, {"graceStreakSince": now - 900, "graceStreakSeenAt": now - 300, "graceStreakBootId": "boot-A"}):
+        state = dict(partial)
+        assert health_check._note_grace_streak(state, True, now, "boot-A", 1300, _CAP) == (0, True, None)
+        assert state["graceStreakAccumulated"] == 0
 
 
-@pytest.mark.parametrize("bad_seen", [True, 0, -5, 200_001])
-def test_grace_streak_rejects_a_corrupt_seen_epoch(health_check, bad_seen):
+@given(bad=st.one_of(st.booleans(), st.integers(max_value=0)))
+@hypothesis_settings(max_examples=60, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
+def test_grace_streak_rejects_a_corrupt_epoch_in_either_field(health_check, bad):
+    """bool passes isinstance int; zero and negatives are not epochs. Either field
+    corrupt re-seeds; the other field is valid so the rejection is isolated."""
     now = 200_000
-    state = {"graceStreakSince": now - 900, "graceStreakSeenAt": bad_seen, "graceStreakBootId": "boot-A"}
-    assert health_check._note_grace_streak(state, True, now, "boot-A") == (0, True, None)
-    assert state["graceStreakSeenAt"] == now and type(state["graceStreakSeenAt"]) is int
+    for field in ("graceStreakSince", "graceStreakSeenAt"):
+        state = _record(now)
+        state[field] = bad
+        assert health_check._note_grace_streak(state, True, now, "boot-A", 1300, _CAP) == (0, True, None)
+        assert state[field] == now and type(state[field]) is int
 
 
 def test_grace_streak_lapse_clears_every_field(health_check):
-    state = {"graceStreakSince": 100, "graceStreakSeenAt": 400, "graceStreakBootId": "boot-A"}
-    assert health_check._note_grace_streak(state, False, 500, "boot-A") == (0, True, None)
+    state = _record(200_000)
+    assert health_check._note_grace_streak(state, False, 200_000, "boot-A", 1300, _CAP) == (0, True, None)
     assert not any(k.startswith("graceStreak") for k in state)
+
+
+# --- the host clocks the streak is measured on --------------------------------
+
+
+def test_host_boot_id_prefers_the_dry_override(health_check, monkeypatch):
+    monkeypatch.setenv("BOT_ERRORS_DRY_HOST_BOOT_ID", "dry-boot")
+    assert health_check._host_boot_id() == "dry-boot"
+    monkeypatch.setenv("BOT_ERRORS_DRY_HOST_BOOT_ID", "")
+    assert health_check._host_boot_id() is None
+
+
+def test_host_boot_id_reads_the_macos_boot_session_uuid(health_check, monkeypatch):
+    monkeypatch.delenv("BOT_ERRORS_DRY_HOST_BOOT_ID", raising=False)
+    monkeypatch.setattr(health_check, "HOST_PLATFORM", "darwin")
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        return SimpleNamespace(stdout="1D89CD9D-C880-41A9-823E-FC91AFD6ACB5\n", returncode=0)
+
+    monkeypatch.setattr(health_check.subprocess, "run", fake_run)
+    assert health_check._host_boot_id() == "bootsession:1D89CD9D-C880-41A9-823E-FC91AFD6ACB5"
+    assert calls == [["sysctl", "-n", "kern.bootsessionuuid"]]
+
+
+def test_host_boot_id_reads_the_linux_boot_id(health_check, monkeypatch, tmp_path):
+    monkeypatch.delenv("BOT_ERRORS_DRY_HOST_BOOT_ID", raising=False)
+    monkeypatch.setattr(health_check, "HOST_PLATFORM", "linux")
+    boot_file = tmp_path / "boot_id"
+    boot_file.write_text("5b0a4a3e-1f7d-4e5e-9c0a-2c1d7c9b6f3a\n")
+    monkeypatch.setattr(health_check, "_LINUX_BOOT_ID_PATH", boot_file)
+    assert health_check._host_boot_id() == "boot_id:5b0a4a3e-1f7d-4e5e-9c0a-2c1d7c9b6f3a"
+    boot_file.unlink()
+    assert health_check._host_boot_id() is None
+
+
+def test_host_monotonic_seconds_prefers_the_dry_override_and_survives_failure(health_check, monkeypatch):
+    monkeypatch.setenv("BOT_ERRORS_DRY_HOST_MONOTONIC_SECONDS", "1234.9")
+    assert health_check._host_monotonic_seconds() == 1234
+    monkeypatch.setenv("BOT_ERRORS_DRY_HOST_MONOTONIC_SECONDS", "junk")
+    assert health_check._host_monotonic_seconds() is None
+    monkeypatch.delenv("BOT_ERRORS_DRY_HOST_MONOTONIC_SECONDS")
+    monkeypatch.setattr(health_check.time, "clock_gettime", lambda _clock: (_ for _ in ()).throw(OSError("no clock")))
+    assert health_check._host_monotonic_seconds() is None
+
+
+def test_host_monotonic_seconds_is_a_since_boot_clock(health_check, monkeypatch):
+    monkeypatch.delenv("BOT_ERRORS_DRY_HOST_MONOTONIC_SECONDS", raising=False)
+    value = health_check._host_monotonic_seconds()
+    assert value is None or (isinstance(value, int) and value > 0)
 
 
 # ---------------------------------------------------------------------------
@@ -281,6 +398,8 @@ def env(monkeypatch, tmp_path: Path) -> SimpleNamespace:
     monkeypatch.setattr(mod, "service_restart_ages", lambda _service: svc["ages"])
     boot = {"id": "boot-A"}
     monkeypatch.setattr(mod, "_host_boot_id", lambda: boot["id"])
+    mono = {"now": 500_000}
+    monkeypatch.setattr(mod, "_host_monotonic_seconds", lambda: mono["now"])
     clock = {"now": 100_000}
     monkeypatch.setattr(mod, "current_epoch", lambda: clock["now"])
     monkeypatch.setattr(mod, "send_direct", _Direct())
@@ -295,8 +414,12 @@ def env(monkeypatch, tmp_path: Path) -> SimpleNamespace:
         stamp = clock["now"] - seconds_ago
         os.utime(dispatcher_state, (stamp, stamp))
 
-    def advance(seconds: int) -> None:
-        clock["now"] += seconds
+    def advance(seconds: int, wall: int | None = None) -> None:
+        """Advance the monotonic clock by ``seconds`` and the wall clock by ``wall``
+        (default: the same), so a wall-clock step can be simulated."""
+        if mono["now"] is not None:
+            mono["now"] += seconds
+        clock["now"] += seconds if wall is None else wall
 
     def run(max_state_age: int = 180, restart_grace: int = 30, check_interval: int | None = None) -> int:
         kwargs = {} if check_interval is None else {"check_interval": check_interval}
@@ -317,7 +440,7 @@ def env(monkeypatch, tmp_path: Path) -> SimpleNamespace:
         if dispatcher_state.exists():
             dispatcher_state.unlink()
 
-    return SimpleNamespace(mod=mod, svc=svc, boot=boot, cycle_completed=cycle_completed, state_written=state_written, state_removed=state_removed, advance=advance, run=run, members=members, deadman_state=deadman_state)
+    return SimpleNamespace(mod=mod, svc=svc, boot=boot, mono=mono, clock=clock, cycle_completed=cycle_completed, state_written=state_written, state_removed=state_removed, advance=advance, run=run, members=members, deadman_state=deadman_state)
 
 
 def test_deadman_reports_cycle_stale_in_an_active_restart_loop(env):
@@ -476,7 +599,7 @@ def test_deadman_grace_streak_rejects_bool_zero_and_negative_epochs(env, tmp_pat
     """A corrupt graceStreakSince (bool passes isinstance int; zero; negative) must
     not manufacture an enormous streak; it resets and is persisted as an int."""
     for bad in (True, 0, -5):
-        (tmp_path / "deadman-state.json").write_text(json.dumps({"schemaVersion": 1, "incidents": {}, "graceStreakSince": bad, "graceStreakSeenAt": 100_000, "graceStreakBootId": "boot-A"}))
+        (tmp_path / "deadman-state.json").write_text(json.dumps({"schemaVersion": 1, "incidents": {}, "graceStreakSince": bad, "graceStreakSeenAt": 100_000, "graceStreakBootId": "boot-A", "graceStreakSeenMonotonic": 500_000, "graceStreakAccumulated": 0, "graceStreakGapForgiven": False}))
         (tmp_path / "deadman-state.json").chmod(0o600)  # durable_json refuses group/other-readable targets
         env.svc["status"] = "active"
         env.svc["ages"] = (10, 10)
@@ -503,13 +626,16 @@ def test_deadman_does_not_page_a_fresh_restart_after_a_reboot(env):
 
 def test_deadman_reports_a_restart_loop_even_when_its_own_checks_are_starved(env):
     """The regression the cross-model review found: checks 601s apart (every gap
-    past the old limit) re-seeded the streak on every check, so a dispatcher
-    restarting forever on the same boot with an incomplete state was never
-    reported. Same boot, grace at both ends, cycle still incomplete: report."""
+    past the cadence) must not re-seed forever. The first long gap is forgiven
+    (it could be a suspend); the second in a row credits the cap, so the loop
+    is reported on the third check and stays reported."""
     env.svc["status"] = "active"
     env.svc["ages"] = (2, 2)
     env.state_written(120, {"time": env.mod.epoch_to_iso(100_000)})
     assert env.run(max_state_age=30, restart_grace=30) == 0
+    env.advance(601)
+    env.state_written(120, {"time": env.mod.epoch_to_iso(100_000)})
+    assert env.run(max_state_age=30, restart_grace=30) == 0  # one long gap: forgiven
     for _ in range(2):
         env.advance(601)
         env.state_written(120, {"time": env.mod.epoch_to_iso(100_000)})
@@ -522,8 +648,60 @@ def test_deadman_reports_a_missing_state_loop_even_when_its_own_checks_are_starv
     env.svc["ages"] = (10, 10)
     assert env.run() == 0
     env.advance(601)
+    assert env.run() == 0
+    env.advance(601)
     assert env.run() == 2
     assert env.members() == {"state_missing"}
+
+
+def test_deadman_does_not_page_on_the_first_check_after_a_suspend(env):
+    """The mirror of the starved-cadence case: one 8h absence on the same boot
+    (suspend, stopped timer) credits nothing, so a dispatcher that has only had
+    seconds since resume is graced; it is reported one normal interval later if
+    its cycle is still incomplete."""
+    env.svc["status"] = "active"
+    env.svc["ages"] = (10, 10)
+    assert env.run() == 0
+    env.advance(8 * 3600)
+    env.svc["ages"] = (2, 2)
+    env.state_written(120, {"time": env.mod.epoch_to_iso(100_000)})
+    assert env.run() == 0
+    assert "cycle_incomplete" not in env.members()
+    env.advance(300)
+    env.state_written(420, {"time": env.mod.epoch_to_iso(100_000)})
+    assert env.run() == 2
+    assert env.members() == {"cycle_incomplete"}
+
+
+def test_deadman_survives_a_backwards_wall_clock_step(env):
+    """A recurring backwards wall-clock step must not re-seed the streak: the
+    interval is read from the monotonic clock. On the pushed head this stayed
+    silent forever."""
+    env.svc["status"] = "active"
+    env.svc["ages"] = (10, 10)
+    env.state_written(100)
+    assert env.run() == 0
+    for _ in range(2):
+        env.advance(300, wall=-5000)  # monotonic +300, wall -5000
+        env.state_written(100)
+    assert env.run() == 2
+    assert env.members() == {"cycle_incomplete"}
+
+
+def test_deadman_survives_a_backwards_wall_clock_step_without_a_monotonic_clock(env):
+    env.mono["now"] = None
+    env.svc["status"] = "active"
+    env.svc["ages"] = (10, 10)
+    env.state_written(100)
+    assert env.run() == 0
+    env.advance(0, wall=-5000)  # backwards step: a zero-length interval, no re-seed
+    env.state_written(100)
+    assert env.run() == 0
+    assert env.deadman_state()["graceStreakAccumulated"] == 0
+    env.advance(0, wall=300)
+    env.state_written(100)
+    assert env.run() == 2  # the record survived the step, so the next interval counts
+    assert env.members() == {"cycle_incomplete"}
 
 
 def test_deadman_reports_an_observation_gap_instead_of_absorbing_it(env, capsys):

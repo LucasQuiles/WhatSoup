@@ -102,7 +102,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "d04a22e8dbbb446228f1990117577b4ae55fb2fba4e5c92184ab2ac3aac817e6",
+      "sha256": "0e8812cb506766b5a27ead292445577288691a3f3730beb012b55f6ddc351c9e",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -190,7 +190,11 @@
         "DEADMAN_CHECK_INTERVAL_SECONDS",
         "_host_boot_id",
         "graceStreakBootId",
-        "lastCheckGapSeconds"
+        "lastCheckGapSeconds",
+        "_host_monotonic_seconds",
+        "graceStreakSeenMonotonic",
+        "graceStreakAccumulated",
+        "graceStreakGapForgiven"
       ]
     },
     {
