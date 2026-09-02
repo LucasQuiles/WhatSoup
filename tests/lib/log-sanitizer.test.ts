@@ -180,6 +180,22 @@ describe('sanitizeLogValue', () => {
     expect(() => sanitizeLogValue(true)).not.toThrow();
     expect(() => sanitizeLogValue(() => {})).not.toThrow();
     expect(() => sanitizeLogValue(Symbol('test'))).not.toThrow();
+    // Error-branch inputs belong in this canary too: the branch reads four
+    // ordinary properties, any of which an error can make hostile. The full
+    // case matrix lives in "Error branch never throws on hostile error objects".
+    expect(() => sanitizeLogValue(Object.assign(new Error('x'), { message: null }))).not.toThrow();
+    expect(() =>
+      sanitizeLogValue(Object.assign(new Error('x'), { message: { nested: 1 } })),
+    ).not.toThrow();
+    expect(() => {
+      const err = new Error('x');
+      Object.defineProperty(err, 'message', {
+        get() {
+          throw new Error('getter blew up');
+        },
+      });
+      return sanitizeLogValue(err);
+    }).not.toThrow();
   });
 
   it('does not mutate the original object', () => {
@@ -523,5 +539,102 @@ describe('Error branch never throws on hostile error objects', () => {
     Object.defineProperty(err, 'constructor', { value: undefined });
     expect(() => readErr(err)).not.toThrow();
     expect(readErr(err).errorMessage).toBe('x');
+  });
+});
+
+// ─── Residual-exposure classes closed after the first review round ──────────
+
+describe('retained error text does not leak home-directory paths', () => {
+  const retained = (message: string) =>
+    ((sanitizeLogValue({ err: new Error(message) }) as Record<string, unknown>).err as Record<
+      string,
+      unknown
+    >).errorMessage as string;
+
+  it('scrubs the account segment of a POSIX home path in an ENOENT-shaped message', () => {
+    // Node fs errors quote the absolute path, which on this platform carries the
+    // OS account name. The branch drops stacks for exactly this reason, so the
+    // retained message must not reintroduce the same class.
+    const out = retained(
+      "ENOENT: no such file or directory, open '/Users/testuser/lab/creds.json'",
+    );
+    expect(out).not.toContain('testuser');
+    expect(out).toContain('/Users/***');
+    // The rest of the path stays, or the message stops being diagnostic.
+    expect(out).toContain('creds.json');
+    expect(out).toContain('ENOENT');
+  });
+
+  it('scrubs a Linux home path', () => {
+    const out = retained("EACCES: permission denied, scandir '/home/testuser/.config'");
+    expect(out).not.toContain('testuser');
+    expect(out).toContain('/home/***');
+    expect(out).toContain('.config');
+  });
+
+  it('leaves non-home absolute paths intact', () => {
+    const out = retained("ENOENT: no such file or directory, open '/opt/whatsoup/config.json'");
+    expect(out).toContain('/opt/whatsoup/config.json');
+  });
+});
+
+describe('retained error text scrubs the canonical bearer header form', () => {
+  const retained = (message: string) =>
+    ((sanitizeLogValue({ err: new Error(message) }) as Record<string, unknown>).err as Record<
+      string,
+      unknown
+    >).errorMessage as string;
+
+  it('scrubs Authorization: Bearer <token>, the separator-less canonical form', () => {
+    const out = retained(
+      'request rejected, sent header Authorization: Bearer abcdefghijklmnopqrstuvwxyz012345',
+    );
+    expect(out).not.toContain('abcdefghijklmnopqrstuvwxyz012345');
+    expect(out).toContain('request rejected');
+  });
+
+  it('still scrubs the separator form', () => {
+    const out = retained('auth failed token=abcdefghijklmnopqrstuvwxyz012345');
+    expect(out).not.toContain('abcdefghijklmnopqrstuvwxyz012345');
+  });
+
+  it('does not eat ordinary diagnostic words after a label', () => {
+    // Over-scrubbing would defeat the point of retaining the message at all.
+    const out = retained('authorization failed');
+    expect(out).toContain('failed');
+  });
+});
+
+describe('retained error text uses the canonical JID pattern (SSOT)', () => {
+  const retained = (message: string) =>
+    ((sanitizeLogValue({ err: new Error(message) }) as Record<string, unknown>).err as Record<
+      string,
+      unknown
+    >).errorMessage as string;
+
+  it('scrubs a short-id @lid, which the sanitizer-local pattern missed entirely', () => {
+    // 12345@lid: below PHONE_RE's 7-digit floor and not @s.whatsapp.net, so the
+    // divergent local pattern let it through whole.
+    const out = retained('no route for 12345@lid');
+    expect(out).not.toContain('12345@lid');
+    expect(out).toContain('no route for');
+  });
+
+  it('scrubs a device-suffixed JID', () => {
+    const out = retained('owner conflict for 15550100199-6@s.whatsapp.net');
+    expect(out).not.toContain('15550100199-6@s.whatsapp.net');
+  });
+
+  it('scrubs an uppercase-domain JID', () => {
+    const out = retained('owner conflict for 15550100199@S.WHATSAPP.NET');
+    expect(out).not.toContain('15550100199@S.WHATSAPP.NET');
+  });
+
+  it('scrubs a short-id @g.us group JID', () => {
+    // 99999@g.us: five digits, so PHONE_RE's seven-digit floor does not reach it
+    // either. Only the canonical pattern catches this one.
+    const out = retained('no route for 99999@g.us');
+    expect(out).not.toContain('99999@g.us');
+    expect(out).toContain('no route for');
   });
 });

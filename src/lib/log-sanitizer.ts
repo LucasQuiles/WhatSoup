@@ -11,6 +11,7 @@
  * - URL userinfo, query, and fragment components
  * - Error stack traces (dropped; they carry absolute filesystem paths)
  * - Error messages (bounded and passed through the same string sanitizer)
+ * - Home-directory account segments in any retained text
  * - Binary buffers (replaced with `[binary]` placeholder)
  *
  * The sanitizer is recursive, cycle-safe (WeakSet), and never throws.
@@ -19,6 +20,8 @@
  * not remove a sensitive value that occurs near the beginning of a preview.
  * This sanitizer removes the value entirely.
  */
+
+import { homePathPattern, jidPattern } from './redaction-patterns.ts';
 
 // ─── Sensitive key patterns ─────────────────────────────────────────────────
 //
@@ -51,18 +54,29 @@ const URL_FRAGMENT_RE = /#[^\s]+/g;
 const EMAIL_RE = /[\w.+-]+@[\w-]+\.[\w.-]+/g;
 // Phone-like: 7+ consecutive digits with optional +
 const PHONE_RE = /\+?\d{7,}/g;
-// WhatsApp JID: digits@s.whatsapp.net or lid:something@something
-const JID_RE = /[\d]+@s\.whatsapp\.net/gi;
-// Bearer/API key patterns in strings
-const BEARER_RE = /((?:bearer|api[_-]?key|token)\s*[=:]\s*)[\w-]+/gi;
+// WhatsApp JID: the canonical SSOT pattern in ./redaction-patterns.ts. The
+// sanitizer previously carried its own copy matching only digits@s.whatsapp.net,
+// which let every @lid and @g.us address through, along with device (-N) and
+// port (:N) suffixed forms. A short-id @lid also sits below PHONE_RE's
+// seven-digit floor, so nothing else caught it.
+//
+// Secret-bearing tokens inside a string. The separator is OPTIONAL, so the
+// canonical `Authorization: Bearer <token>` header form is covered; requiring
+// [=:] matched only `token=...` and `api_key: ...` and missed the header. The
+// eight-character floor keeps ordinary prose after a label ("authorization
+// failed") out of the match, because over-scrubbing defeats the point of
+// retaining a diagnostic message at all.
+const BEARER_RE =
+  /\b(bearer|api[_-]?key|authorization|token|secret|password|passphrase|pairing)\b(?:\s*[:=]\s*|\s+)["']?[\w.~+/-]{8,}={0,2}["']?/gi;
 
 function sanitizeStringValue(value: string): string {
   return value
     .replace(URL_USERINFO_RE, '://***@')
     .replace(URL_QUERY_RE, '?***')
     .replace(URL_FRAGMENT_RE, '#***')
-    .replace(JID_RE, '***')
-    .replace(BEARER_RE, '$1=***')
+    .replace(homePathPattern(), '$1/***')
+    .replace(jidPattern(), '***')
+    .replace(BEARER_RE, '$1 ***')
     .replace(EMAIL_RE, '***')
     .replace(PHONE_RE, '***');
 }
