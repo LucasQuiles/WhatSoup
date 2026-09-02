@@ -34,9 +34,9 @@ function collectTsFiles(dir: string): string[] {
     .map((entry) => resolve(entry.parentPath || dir, entry.name));
 }
 
-const QUOTE = String.fromCharCode(39);
+const QUOTE = "'";
 const PUSH_MARKER = 'degradedReasons.push(';
-const CLOSE_PAREN = String.fromCharCode(41);
+const CLOSE_PAREN = ')';
 
 /** Spread forms this suite knows about, and the reasons they contribute. */
 const SPREAD_SOURCES = ['...accountIdentityReasons'];
