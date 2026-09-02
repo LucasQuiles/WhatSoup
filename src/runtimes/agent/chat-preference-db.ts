@@ -399,6 +399,18 @@ function latestRowIncludingExpired(db: Database, chatJid: string): PreferenceRow
  *
  * Idempotent and lossless: an absent row (pruned, /reset between the send and
  * this write) affects zero rows and is a no-op, never an insert.
+ *
+ * A1 (#2121 follow-up) — the `expires_at IS NOT NULL` clause makes "a receipt
+ * id exists only on a pin that can still be promoted" a STORE invariant rather
+ * than a property of who happens to call. It matters because a re-confirm of an
+ * already-sticky pin still renders a keep-promising echo
+ * (`renderPinPreferenceOutcome` prints "reply keep to make it permanent" on
+ * every branch), so this function IS reachable with a sticky row underneath.
+ * Attaching an id there would re-arm exactly the interception that clearing the
+ * id at promotion exists to end. Like the absent-row case it affects zero rows
+ * and is a silent no-op: the receipt has already been sent, and the widened
+ * tokens simply fall through to the agent — the module's documented
+ * fail-closed degrade.
  */
 export function recordKeepReceiptMessageId(
   db: Database,
@@ -409,7 +421,7 @@ export function recordKeepReceiptMessageId(
   db.raw
     .prepare(
       `UPDATE chat_model_preference SET keep_receipt_message_id = ?
-       WHERE chat_jid = ? AND sender_jid = ?`,
+       WHERE chat_jid = ? AND sender_jid = ? AND expires_at IS NOT NULL`,
     )
     .run(messageId, chatJid, senderJid);
 }
@@ -458,6 +470,15 @@ export function getKeepReceiptMessageId(db: Database, chatJid: string): string |
  * are set together in the same statement — the store's own invariant
  * (`scope=sticky ⇔ expires_at IS NULL`, see the module doc above) can never
  * be split across two writes.
+ *
+ * A1 (#2121 follow-up): the same statement CONSUMES the receipt
+ * (`keep_receipt_message_id = NULL`). A promoted pin is permanent and has
+ * nothing left to confirm, so leaving its id behind only let the sticky row go
+ * on authenticating replies to the receipt that made it sticky — every later
+ * threaded `confirm`/`yes`/`pin` was intercepted and answered "already kept"
+ * instead of reaching the agent. Cleared in the SAME atomic write, for the same
+ * reason scope and expiry are: a promotion must never be observable with the
+ * receipt still attached.
  */
 export function promoteToSticky(
   db: Database,
@@ -490,12 +511,15 @@ export function promoteToSticky(
   const result = db.raw
     .prepare(
       `UPDATE chat_model_preference
-         SET scope = 'sticky', expires_at = NULL, updated_at = ?
+         SET scope = 'sticky', expires_at = NULL, updated_at = ?, keep_receipt_message_id = NULL
        WHERE chat_jid = ? AND sender_jid = ? AND updated_at = ?`,
     )
     .run(updatedAt, winning.chatJid, winning.senderJid, winning.updatedAt);
   if (result.changes !== 1) {
     return { outcome: 'superseded', preference: null };
   }
-  return { outcome: 'promoted', preference: { ...winning, scope: 'sticky', expiresAt: null, updatedAt } };
+  return {
+    outcome: 'promoted',
+    preference: { ...winning, scope: 'sticky', expiresAt: null, updatedAt, keepReceiptMessageId: null },
+  };
 }
