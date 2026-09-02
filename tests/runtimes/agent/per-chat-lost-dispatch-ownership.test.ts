@@ -823,6 +823,32 @@ describe('unowned per-chat session sweep', () => {
     }
   });
 
+  it('throttles the repeated warning for a persistently unowned chat', () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const { state } = makePerChatRuntime(db);
+      // No ownership record: unowned on every tick, for as long as it stays
+      // mapped. That is the shape that storms the log.
+      state.chatSessions.set(MAP_KEY, sessionStub());
+
+      for (let tick = 0; tick < 8; tick += 1) {
+        // The SIGNAL is every tick and is never throttled.
+        expect(state.sweepPerChatSessionsWithoutOwner()).toBe(1);
+      }
+
+      // The LOG is the first occurrence, then powers of two: 1, 2, 4, 8.
+      // Count this sweep's own line, not every warning the runtime emits.
+      const sweepWarnings = runtimeLogger.warn.mock.calls.filter(
+        ([, message]) => typeof message === 'string'
+          && message.includes('no current dispatch owner'),
+      );
+      expect(sweepWarnings).toHaveLength(4);
+    } finally {
+      db.close();
+    }
+  });
+
   it('reports the unowned count in the periodic health payload', () => {
     const db = new Database(':memory:');
     db.open();

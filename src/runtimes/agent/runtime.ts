@@ -196,6 +196,7 @@ import { resolveConfiguredAdminJid, toPersonalJid, isGroupJid } from '../../core
 import { jidNormalizedUser } from '@whiskeysockets/baileys';
 import { contextMessagesForTurn } from './context-handoff.ts';
 import { canonicalizeChatJid } from '../../core/lid-resolver.ts';
+import { ProbeErrorThrottle } from '../../core/health.ts';
 import { TurnQueue, type QueuedTurn, type TurnRejectReason } from './turn-queue.ts';
 import {
   markRuntimeTurnReplayUnsafe,
@@ -1883,6 +1884,14 @@ export class AgentRuntime implements Runtime {
   // Read fail-closed by the context resolvers (empty/absent -> deny). Cleared on
   // every abnormal termination (cleanupPerChatState + crash/resume/fallback).
   private perChatExecActorQueue: Map<string, ExecutingSessionContext[]> = new Map();
+  /**
+   * Bounds the unowned-session warning. That wedge persists until a turn
+   * evicts it, so an unthrottled per-tick warn is an unbounded log storm for
+   * exactly the chats an operator most needs to read about. Same powers-of-two
+   * shape the health probes use. Per runtime instance, keyed by map key. The
+   * COUNT the sweep returns is never throttled — only the log line is.
+   */
+  private readonly unownedSweepLogThrottle = new ProbeErrorThrottle();
   /** Exact actor FIFO slot owned by an output-producing system lease (poll continuation). */
   private readonly systemTurnExecActors = new Map<number, {
     scopeKey: string;
@@ -8002,9 +8011,17 @@ export class AgentRuntime implements Runtime {
   /** Periodic sweep: report the impossible state. Health tick only. */
   private sweepPerChatSessionsWithoutOwner(): number {
     const unowned = this.perChatSessionsWithoutOwner();
+    const unownedKeys = new Set(unowned);
+    // A chat that recovered clears its history, so a later recurrence logs from
+    // the first occurrence again instead of inheriting a suppressed count.
+    for (const mapKey of this.chatSessions.keys()) {
+      if (!unownedKeys.has(mapKey)) this.unownedSweepLogThrottle.onSuccess(mapKey);
+    }
     for (const mapKey of unowned) {
+      const tickCount = this.unownedSweepLogThrottle.onFailure(mapKey);
+      if (tickCount === null) continue;
       log.warn(
-        { mapKey, hasOwner: this.sessionOwnership.get(mapKey) !== undefined },
+        { mapKey, hasOwner: this.sessionOwnership.get(mapKey) !== undefined, tickCount },
         'per-chat session entry has no current dispatch owner — turns in this chat are rejected until it is evicted',
       );
     }
