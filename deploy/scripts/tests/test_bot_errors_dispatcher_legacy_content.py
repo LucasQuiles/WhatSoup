@@ -12,17 +12,19 @@ All fixtures are synthetic.
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
-
-import pytest
+from unittest.mock import patch
 
 _SCRIPT = Path(__file__).resolve().parents[1] / "bot-errors-dispatcher.py"
 
+BRACE_QUOTE = "{" + chr(39)   # the "{'" prefix of a baked dict repr
 DIGEST = "a1b2c3d4" + "e5f60789" * 7
 CANONICAL = "TypeError - 54 chars - digest a1b2c3d4"
 REPR_ALPHABETICAL = (
@@ -87,14 +89,14 @@ def test_format_event_renders_legacy_object_summary_readably() -> None:
     text = _mod.format_event(_make_event())
     assert CANONICAL in text
     assert "correlationDigest" not in text
-    assert "{'" not in text
+    assert BRACE_QUOTE not in text
 
 
 def test_format_event_renders_baked_repr_summary_readably() -> None:
     event = _make_event(summary=REPR_ALPHABETICAL, evidence=REPR_FAILURE_CLASS_FIRST)
     text = _mod.format_event(event)
     assert "correlationDigest" not in text
-    assert "{'" not in text
+    assert BRACE_QUOTE not in text
 
 
 # ---------------------------------------------------------------------------
@@ -109,9 +111,9 @@ def test_escalation_prefix_does_not_bake_repr() -> None:
         escalated=True, digest=False,
     )
     assert event["summary"].startswith("ESCALATED still open: ")
-    assert "{'" not in event["summary"]
+    assert BRACE_QUOTE not in event["summary"]
     assert "correlationDigest" not in event["summary"]
-    assert "{'" not in event["evidence"]
+    assert BRACE_QUOTE not in event["evidence"]
     assert CANONICAL in event["summary"]
 
 
@@ -149,7 +151,7 @@ def test_second_append_path_does_not_bake_repr() -> None:
     assert isinstance(event["evidence"], str)
     assert "suppressed_duplicates=2" in event["evidence"], "the append path must have run"
     assert CANONICAL in event["evidence"]
-    assert "{'" not in event["evidence"]
+    assert BRACE_QUOTE not in event["evidence"]
     assert "correlationDigest" not in event["evidence"]
 
 
@@ -166,7 +168,7 @@ def test_persisted_last_summary_is_canonical_string() -> None:
     record = next(iter(records.values()))
     assert record["lastSummary"] == CANONICAL
     assert record["lastEvidence"] == CANONICAL
-    assert "{'" not in record["lastSummary"]
+    assert BRACE_QUOTE not in record["lastSummary"]
 
 
 def test_persisted_state_read_renders_historical_repr() -> None:
@@ -183,7 +185,7 @@ def test_persisted_state_read_renders_historical_repr() -> None:
     }
     rendered = _mod.alert_text(record.get("lastSummary"))
     assert rendered == "ESCALATED still open: " + CANONICAL
-    assert "{'" not in rendered
+    assert BRACE_QUOTE not in rendered
 
 
 def test_awaiting_physical_evidence_is_stored_readably() -> None:
@@ -195,7 +197,7 @@ def test_awaiting_physical_evidence_is_stored_readably() -> None:
     )
     record: dict[str, Any] = {}
     _mod.update_awaiting_physical_tracking(event, record, 1000)
-    assert "{'" not in record.get("physicalCandidateLastEvidence", "")
+    assert BRACE_QUOTE not in record.get("physicalCandidateLastEvidence", "")
 
     repr_event = _make_event(
         source="whatsapp_device_bond_lost",
@@ -208,7 +210,7 @@ def test_awaiting_physical_evidence_is_stored_readably() -> None:
     _mod.update_awaiting_physical_tracking(repr_event, repr_record, 1000)
     stored = repr_record.get("physicalCandidateLastEvidence", "")
     assert stored, "the physical-candidate path must have stored evidence"
-    assert "{'" not in stored
+    assert BRACE_QUOTE not in stored
     assert "correlationDigest" not in stored
 
 
@@ -216,20 +218,44 @@ def test_awaiting_physical_evidence_is_stored_readably() -> None:
 # Storm grouping
 # ---------------------------------------------------------------------------
 
-def test_storm_fingerprint_collapses_across_hosts_for_legacy_objects() -> None:
-    """Two hosts, one confinement envelope: the collapse must fire.
+def test_confined_storm_collapse_depends_on_digest_equality_not_host_normalization() -> None:
+    """PINS A LIMITATION THIS CHANGE DOES NOT REPAIR.
 
-    Against a raw repr the fingerprints differed only by the un-substituted host
-    token, so cross-host storm collapse stopped firing entirely.
+    The design expected PR-A to restore cross-host storm collapse. It does not, and
+    this test exists so nobody merges believing otherwise.
+
+    normalized_summary replaces host tokens with a {host} placeholder so two hosts'
+    summaries normalise together. A canonical confined summary contains NO host
+    token, so that substitution is permanently inert for confined events. What
+    remains is failureClass, length and an 8-hex digest prefix, and both length and
+    digest derive from the RAW content the producer confined. Two hosts therefore
+    collapse only when their raw summaries were byte-identical to begin with, not
+    because the consumer normalised anything.
+
+    Cross-host collapse for confined events returns only when the producer ships a
+    typed diagnostic field and the grouping sites read it.
     """
-    first = _make_event(machine="fixture-host-a", instance="fixture-bot")
-    second = _make_event(machine="fixture-host-b", instance="fixture-bot")
-    assert _mod.storm_fingerprint(first) == _mod.storm_fingerprint(second)
-    # Equality alone is satisfied by two identical reprs. The fingerprint must
-    # also be the readable canonical form, not a baked repr.
-    assert "{'" not in _mod.storm_fingerprint(first)
-    assert "correlationdigest" not in _mod.storm_fingerprint(first).lower()
+    same_digest_a = _make_event(machine="fixture-host-a", instance="fixture-bot")
+    same_digest_b = _make_event(machine="fixture-host-b", instance="fixture-bot")
+    assert _mod.storm_fingerprint(same_digest_a) == _mod.storm_fingerprint(same_digest_b)
 
+    # The load-bearing half: different raw content on two hosts yields a different
+    # digest, the fingerprints diverge, and collapse does not fire. Host
+    # normalisation cannot rescue it. That is the unrepaired limitation.
+    other = dict(legacy_object())
+    other["correlationDigest"] = "b2c3d4e5" + "f6a70891" * 7
+    differing = _make_event(
+        machine="fixture-host-b", instance="fixture-bot",
+        summary=other, evidence=other,
+    )
+    assert _mod.storm_fingerprint(same_digest_a) != _mod.storm_fingerprint(differing), (
+        "if this ever passes, cross-host collapse for confined events was repaired "
+        "and this limitation test should be replaced by a real collapse test"
+    )
+
+    # What this change DOES deliver: a readable fingerprint, not a baked repr.
+    assert BRACE_QUOTE not in _mod.storm_fingerprint(same_digest_a)
+    assert "correlationdigest" not in _mod.storm_fingerprint(same_digest_a).lower()
 
 def test_recovery_normalized_summary_matches_across_forms() -> None:
     """Alert/recovery pairing must match whether the producer sent the mapping or
@@ -240,7 +266,7 @@ def test_recovery_normalized_summary_matches_across_forms() -> None:
     # And against the OTHER key order, which a matcher pinned to one order misses.
     as_alt_repr = _make_event(summary=REPR_ALPHABETICAL)
     assert _mod.recovery_normalized_summary(as_object) == _mod.recovery_normalized_summary(as_alt_repr)
-    assert "{'" not in _mod.recovery_normalized_summary(as_object)
+    assert BRACE_QUOTE not in _mod.recovery_normalized_summary(as_object)
 
 
 # ---------------------------------------------------------------------------
@@ -340,60 +366,248 @@ def test_truncate_still_stringifies_raw_error() -> None:
 def test_manifest_entry_renders_legacy_content() -> None:
     event = _make_event()
     entry = _mod.manifest_entry(Path("/fixture/outbox/evt-fixture-001.json"), event)
-    assert "{'" not in entry["summary"]
-    assert "{'" not in entry["evidence"]
+    assert BRACE_QUOTE not in entry["summary"]
+    assert BRACE_QUOTE not in entry["evidence"]
     assert CANONICAL in entry["summary"]
 
 
-def test_dead_letter_crumb_summary_does_not_bake_repr() -> None:
-    """A dead-letter crumb is a persisted artifact that can carry the legacy form.
+def test_dead_letter_crumb_summary_renders_in_the_emitted_meta_alert(tmp_path, monkeypatch) -> None:
+    """Drives queue_dead_letter_meta_alert, where the raw read actually lived.
 
-    queue_dead_letter_meta_alert reads the oldest crumb's embedded event summary and
-    interpolates it into a NEWLY MINTED meta-alert's evidence, so an unrouted read
-    here re-creates the defect downstream of every other fix in this change.
+    A dead-letter crumb is a persisted artifact and can carry the legacy form, and
+    the meta-alert built from it is a NEWLY MINTED event, so an unrouted read here
+    re-creates the defect downstream of every other fix in this change. Asserting on
+    the emitted payload is what makes this test fail when the read is reverted.
     """
-    rendered = _mod.alert_text(legacy_object())
-    event = _mod.dead_letter_meta_event(
-        {"dead_letter": Path("/fixture/state/dead-letter")}, 3, rendered
-    )
-    assert "{\'" not in event["evidence"]
-    assert "correlationDigest" not in event["evidence"]
-    assert CANONICAL in event["evidence"]
+    monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(tmp_path / "state"))
+    mod = _load_module()
+    paths = mod.setup_dirs()
+
+    crumb = {
+        "event": {
+            "id": "dead-evt-fixture-001",
+            "source": "primary_model_unusable",
+            "summary": legacy_object(),
+            "createdAt": "2026-09-01T00:00:00Z",
+        },
+        "delivery": {"status": "dead_letter", "attempts": 10},
+        "terminated_at": "2026-09-01T01:00:00Z",
+    }
+    crumb_path = paths["dead_letter"] / "20260901010000.dead-evt-fixture-001.json"
+    crumb_path.write_text(json.dumps(crumb, indent=2, sort_keys=True) + chr(10), encoding="utf-8")
+    crumb_path.chmod(0o600)
+
+    with patch.object(mod, "append_dispatch_log"), \
+         patch.object(mod, "read_meta_state", return_value={}):
+        count = mod.queue_dead_letter_meta_alert(paths, int(time.time()))
+
+    assert count == 1, "the meta-alert must fire for a non-empty dead-letter dir"
+    queued = sorted(paths["outbox"].glob("*.json"))
+    assert len(queued) == 1
+    payload = json.loads(queued[0].read_text(encoding="utf-8"))
+    assert payload["source"] == "meta_alert_dead_letter"
+    evidence = payload["evidence"]
+    assert "oldest_summary=" in evidence, "the crumb summary must reach the meta-alert"
+    assert CANONICAL in evidence
+    assert BRACE_QUOTE not in evidence
+    assert "correlationDigest" not in evidence
+
+ALERT_CONTENT_FIELDS = frozenset({
+    # live event fields
+    "summary", "evidence",
+    # the seven persisted incident-state fields the prevalence recapture found
+    # carrying the legacy form
+    "lastSummary", "lastEvidence", "physicalCandidateLastEvidence",
+    "lastSuppressedClearSummary", "lastSuppressedSymptomEvidence",
+    "lastSuppressedSymptomSummary",
+})
+ALERT_CONTENT_ROUTERS = frozenset({"alert_text", "event_text", "alert_text_kind"})
+
+
+def _unrouted_alert_content_reads(source: str) -> list[tuple[int, str, str, str]]:
+    """Every alert-content READ in the dispatcher that is not routed through the funnel.
+
+    AST-based, so it sees the read regardless of how it is spelled: single or
+    double quotes, a two-argument ``.get(field, default)``, a bare ``.get(field)``
+    with no ``str()`` around it, or a subscript. Writes are excluded by requiring a
+    Load context, so ``event["summary"] = ...`` is correctly not a read.
+    """
+    tree = ast.parse(source)
+    lines = source.splitlines()
+    parent: dict[ast.AST, ast.AST] = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parent[child] = node
+
+    def enclosing_function(node: ast.AST) -> str:
+        current = parent.get(node)
+        while current is not None and not isinstance(current, ast.FunctionDef):
+            current = parent.get(current)
+        return current.name if current is not None else "<module>"
+
+    def is_routed(node: ast.AST) -> bool:
+        current = parent.get(node)
+        hops = 0
+        while current is not None and hops < 4:
+            if (
+                isinstance(current, ast.Call)
+                and isinstance(current.func, ast.Name)
+                and current.func.id in ALERT_CONTENT_ROUTERS
+            ):
+                return True
+            current = parent.get(current)
+            hops += 1
+        return False
+
+    found: list[tuple[int, str, str, str]] = []
+    for node in ast.walk(tree):
+        field = None
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and node.args[0].value in ALERT_CONTENT_FIELDS
+        ):
+            field = node.args[0].value
+        elif (
+            isinstance(node, ast.Subscript)
+            and isinstance(node.ctx, ast.Load)
+            and isinstance(node.slice, ast.Constant)
+            and node.slice.value in ALERT_CONTENT_FIELDS
+        ):
+            field = node.slice.value
+        if field is None:
+            continue
+        function = enclosing_function(node)
+        if function in ALERT_CONTENT_ROUTERS or is_routed(node):
+            continue
+        found.append((node.lineno, field, function, lines[node.lineno - 1].strip()))
+    return found
 
 
 def test_no_unrouted_alert_content_reads_remain_in_dispatcher() -> None:
-    """Coverage assertion over the whole dispatcher, not a sample.
+    """Coverage assertion over every alert-content read in the dispatcher.
 
-    The invariant this change establishes is that EVERY alert-content read goes
-    through the alert_text funnel. Per-site tests can only prove the sites someone
-    thought to list; this scans the file so a site nobody listed still fails. It is
-    what catches a read like the dead-letter crumb's, which no design document
-    enumerated.
+    Per-site tests can only prove the sites someone thought to enumerate. This is
+    what catches a site nobody listed, which is exactly how the dead-letter crumb
+    read was found. It is AST-based rather than text-based on purpose: a text scan
+    keyed to one idiom silently misses a bare `.get("summary")`, a two-argument
+    `.get(field, default)`, single quotes, and subscript reads.
 
-    `truncate`/`redact` are deliberately excluded from the funnel and are guarded
-    separately by test_truncate_still_stringifies_raw_error.
+    There is no allowlist, because at HEAD there is nothing to allow: `truncate`
+    and `redact` take their arguments from elsewhere and never read these fields
+    themselves, which is why they can stay outside the funnel. If a future change
+    needs an exemption, add it here explicitly with a reason rather than loosening
+    the scan.
+    """
+    unrouted = _unrouted_alert_content_reads(_SCRIPT.read_text(encoding="utf-8"))
+    assert not unrouted, "alert-content reads must go through event_text/alert_text:\n" + "\n".join(
+        f"  line {line} [{field}] in {function}: {text}" for line, field, function, text in unrouted
+    )
+
+
+def test_the_coverage_scan_actually_catches_a_reverted_site() -> None:
+    """Guards the guard.
+
+    A coverage assertion that cannot fail is worse than none, because it reads as
+    proof. This reverts each routed site in memory and requires the scan to flag
+    it. The email-fallback subject is included here deliberately: its live branch
+    sits behind a provenance gate that refuses email for a dispatcher rooted in a
+    test directory, so it has structural coverage only, and this is what holds it.
     """
     source = _SCRIPT.read_text(encoding="utf-8")
-    unrouted = []
-    for number, line in enumerate(source.splitlines(), 1):
-        stripped = line.strip()
-        if stripped.startswith("#"):
+    reverts = [
+        (
+            "email fallback subject",
+            "{event_text(event, 'summary') or 'unknown'}",
+            "{event.get('summary', 'unknown')}",
+        ),
+        (
+            "format_event summary",
+            'redact(event_text(event, "summary") or "unspecified bot error")',
+            'redact(event.get("summary") or "unspecified bot error")',
+        ),
+        (
+            "format_event evidence",
+            'event_line("evidence", event_text(event, "evidence"), 1800)',
+            'event_line("evidence", event.get("evidence"), 1800)',
+        ),
+        (
+            "dead-letter crumb",
+            'alert_text(crumb.get("event", {}).get("summary") or "")',
+            'str(crumb.get("event", {}).get("summary") or "")',
+        ),
+        (
+            "persisted lastSummary",
+            'redacted_state_text(event_text(event, "summary"), 500)',
+            'redacted_state_text(event.get("summary"), 500)',
+        ),
+    ]
+    assert not _unrouted_alert_content_reads(source), "HEAD must start clean"
+    for name, routed, raw in reverts:
+        assert routed in source, f"routed form for {name} not found; update this test"
+        mutated = source.replace(routed, raw, 1)
+        assert _unrouted_alert_content_reads(mutated), (
+            f"the coverage scan failed to catch a reverted {name}"
+        )
+def test_absorb_daily_health_signal_counts_legacy_alert_content() -> None:
+    """The shared terminal-path helper is where counting has to happen."""
+    event = _make_event(summary=legacy_object(), evidence=REPR_ALPHABETICAL)
+    incident_state: dict[str, Any] = {}
+    _mod.absorb_daily_health_signal(event, incident_state)
+    counters = incident_state.get("legacyAlertContent") or {}
+    assert counters.get("queueLegacyObject") == 1
+    assert counters.get("queueBakedRepr") == 1
+
+
+def test_storm_collapsed_member_is_counted_once_per_member() -> None:
+    """collapse_storm_group calls the shared helper once per collapsed member.
+
+    Driving the helper the way that loop does must count each member exactly once,
+    so a collapsed population cannot read zero.
+    """
+    incident_state: dict[str, Any] = {}
+    members = [
+        _make_event(id="evt-fixture-a", summary=legacy_object(), evidence=""),
+        _make_event(id="evt-fixture-b", summary=legacy_object(), evidence=""),
+    ]
+    for member in members:
+        _mod.absorb_daily_health_signal(member, incident_state)
+    assert incident_state["legacyAlertContent"]["queueLegacyObject"] == 2
+
+
+def test_plain_string_event_does_not_create_a_telemetry_block() -> None:
+    """The shared helper runs for EVERY event, so it must stay silent on clean ones."""
+    event = _make_event(summary="plain operator text", evidence="more operator text")
+    incident_state: dict[str, Any] = {}
+    _mod.absorb_daily_health_signal(event, incident_state)
+    assert "legacyAlertContent" not in incident_state
+
+
+def test_legacy_counter_has_exactly_one_call_site_and_it_is_the_shared_helper() -> None:
+    """Structural guard against the counter drifting back to a single path.
+
+    If a later change re-adds a per-path call, one event consumed by process_one
+    would count twice; if the shared call is removed, three terminal paths stop
+    counting. Pin both by asserting the single call site and its parent.
+    """
+    import ast as _ast
+
+    tree = _ast.parse(_SCRIPT.read_text(encoding="utf-8"))
+    parents: list[str] = []
+    for node in _ast.walk(tree):
+        if not isinstance(node, _ast.FunctionDef):
             continue
-        # A raw stringify of an alert-content field, in any container.
-        for field in ("summary", "evidence"):
-            if f'.get("{field}")' not in line:
-                continue
-            if "str(" not in line:
-                continue
-            # Allow the persisted-state field names, which are distinct keys.
-            if any(
-                other in line
-                for other in ("lastSummary", "lastEvidence", "SuppressedClear",
-                              "SuppressedSymptom", "physicalCandidate")
+        for inner in _ast.walk(node):
+            if (
+                isinstance(inner, _ast.Call)
+                and isinstance(inner.func, _ast.Name)
+                and inner.func.id == "record_legacy_alert_content"
             ):
-                continue
-            unrouted.append(f"{number}: {stripped}")
-    assert not unrouted, (
-        "alert-content reads must go through event_text/alert_text; unrouted:\n"
-        + "\n".join(unrouted)
+                parents.append(node.name)
+    assert parents == ["absorb_daily_health_signal"], (
+        "record_legacy_alert_content must be called exactly once, from the shared "
+        f"terminal-path helper; found call sites in {parents}"
     )

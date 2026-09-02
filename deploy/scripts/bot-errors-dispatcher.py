@@ -1950,6 +1950,15 @@ def absorb_daily_health_signal(event: dict[str, Any], incident_state: dict[str, 
     and not a clear-type event — so behavior at each call site matches what
     process_one would have done had the event reached it.
 
+    Also counts the legacy confined alert-content forms the event carries
+    (#2386). That count belongs here for the same reason freshness does: an
+    event consumed by storm collapse or recovery dedup never reaches
+    process_one, and neither half of the A4 retirement criterion would see it
+    -- the counter would not increment, and the collapsed member writes no
+    alert content into incident state for a direct scan to find. Counting at
+    the shared call site is what makes "zero" mean "clean" instead of
+    "unobserved".
+
     Also stamps the ``sourceSpecificRecoveredIncidents`` diagnostic onto the
     event itself when incidents were recovered (folded in here from the
     three call sites that used to repeat the same 4-line block).
@@ -1960,6 +1969,7 @@ def absorb_daily_health_signal(event: dict[str, Any], incident_state: dict[str, 
     changed the ledger can check ``event["source"]`` itself, which is
     already in hand.
     """
+    record_legacy_alert_content(event, incident_state)
     record_daily_health_freshness(event, incident_state)
     recovered: list[str] = []
     if str(event.get("source") or "") == "daily-health" and not is_incident_clear(event):
@@ -6350,7 +6360,6 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
             })
             return True, "stale_episode_quarantined"
 
-    record_legacy_alert_content(event, incident_state)
     absorb_daily_health_signal(event, incident_state)
     suppress_reason = should_suppress_send(event, incident_state)
     if suppress_reason:
