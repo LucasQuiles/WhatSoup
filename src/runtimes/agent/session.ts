@@ -3221,16 +3221,26 @@ export class SessionManager {
 
     this.completeProviderTurn();
     this.active = false;
-    this.managedProviderSession = null;
     this.managedProviderGeneration = null;
     this.sessionId = null;
 
     if (providerSession !== null) {
       try {
         providerSession.kill();
+        // Released only now. `providerTerminated` promises that every handle
+        // this session held has been let go, and the per-chat eviction guard
+        // detaches a conversation on that promise.
+        this.managedProviderSession = null;
       } catch (killErr) {
-        log.debug({ err: killErr, provider: this.provider, chatJid: this.chatJid }, 'managed provider kill failed during crash cleanup');
+        // A kill that threw released nothing, so keep the handle: termination
+        // is UNKNOWN, and unknown must not read as terminated. The state cannot
+        // outlive this incarnation — `spawnSession` installs a fresh handle and
+        // `resetFailedSessionStart` clears it — so this fails closed without
+        // wedging the chat permanently.
+        log.debug({ err: killErr, provider: this.provider, chatJid: this.chatJid }, 'managed provider kill failed during crash cleanup — retaining the handle, termination unproven');
       }
+    } else {
+      this.managedProviderSession = null;
     }
 
     this.closeDurableFailureLifecycle(crashedSessionId, crashedDbRowId);

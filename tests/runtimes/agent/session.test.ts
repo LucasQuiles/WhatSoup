@@ -6323,6 +6323,73 @@ describe('session.ts uncovered-branch coverage', () => {
     expect(sm.getStatus()).toMatchObject({ active: false, pid: null, providerTerminated: true });
   });
 
+  // --- F3(1): a managed kill that THROWS is not a termination proof.
+  //     `crashManagedProviderSession` clears the handle as part of cleanup, and
+  //     the interface permits `kill()` to fail (providers/types.ts). If the
+  //     handle is cleared regardless, `providerTerminated` claims a release that
+  //     never happened, and the per-chat eviction guard that reads it would
+  //     detach a conversation whose provider may still be running.
+
+  it('does not report the provider terminated when the managed kill throws during crash cleanup', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const onCrash = vi.fn();
+    const generationIdentity = { managerId: 'managed-kill-throw', generation: 1 };
+    const killSpy = vi
+      .spyOn(OpenAIApiProvider.prototype, 'kill')
+      .mockImplementation(() => { throw new Error('managed kill failed'); });
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'openai-api',
+      onCrash,
+    });
+    sm.bindGenerationOwnership(() => generationIdentity);
+    await sm.spawnSession();
+    expect(sm.getStatus()).toMatchObject({ active: true, pid: null, providerTerminated: false });
+
+    const crash = (sm as unknown as {
+      crashManagedProviderSession: (reason: string) => boolean;
+    }).crashManagedProviderSession.bind(sm);
+    expect(crash('kill failure probe')).toBe(true);
+
+    expect(killSpy).toHaveBeenCalledTimes(1);
+    expect(onCrash).toHaveBeenCalledTimes(1);
+    // Nothing released the handle, so termination is unproven, not proven.
+    expect(sm.getStatus()).toMatchObject({ active: false, pid: null, providerTerminated: false });
+  });
+
+  it('reports the provider terminated when the managed kill succeeds during crash cleanup', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const onCrash = vi.fn();
+    const generationIdentity = { managerId: 'managed-kill-ok', generation: 1 };
+    const killSpy = vi.spyOn(OpenAIApiProvider.prototype, 'kill').mockImplementation(() => {});
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'openai-api',
+      onCrash,
+    });
+    sm.bindGenerationOwnership(() => generationIdentity);
+    await sm.spawnSession();
+
+    const crash = (sm as unknown as {
+      crashManagedProviderSession: (reason: string) => boolean;
+    }).crashManagedProviderSession.bind(sm);
+    expect(crash('clean kill probe')).toBe(true);
+
+    // Positive counterpart: the flag must still flip when the kill DID release
+    // the handle, so the guard above cannot be satisfied by pinning it false.
+    expect(killSpy).toHaveBeenCalledTimes(1);
+    expect((sm as unknown as { managedProviderSession: unknown }).managedProviderSession).toBeNull();
+    expect(sm.getStatus()).toMatchObject({ active: false, pid: null, providerTerminated: true });
+  });
+
   // --- shutdown SIGKILL escalation when SIGTERM doesn't kill the child
   //     (lines 1963-1965). Use fake timers and a child whose kill is a no-op
   //     so the grace timer fires the SIGKILL path.
