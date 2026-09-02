@@ -6076,27 +6076,40 @@ def provider_probe_target_inventory(
 
     # Run the provider in the environment it was SELECTED from. Passing none
     # meant the binary came from the governed PATH but executed under the probe
-    # process's PATH, HOME and cwd, so an interpreter-resolving wrapper could
-    # pick a different runtime than the service uses. opencode already does this.
-    child_cwd = agent_workspace_cwd(data, name)
+    # process's PATH and HOME, so an interpreter-resolving wrapper could pick a
+    # different runtime than the service uses.
+    #
+    # The WORKSPACE is a different question, and the answer is no. This probe is
+    # an unattended one-shot diagnostic; the instance workspace carries the
+    # agent's own project-local .claude surface, written with bypassPermissions
+    # and tool allowances (src/core/settings-template.ts), and a child started
+    # there adopts them. Nothing the probe checks needs that directory: the
+    # binary is already resolved to an absolute path out of the governed PATH
+    # above, and PATH parity travels in child_env, not in the working directory.
+    # So the probe runs from a fresh directory it owns and throws away.
+    #
+    # The synthesized WHATSOUP_MCP_SOCKET goes with it. Handing a diagnostic the
+    # instance's tool socket widens it by the same route the workspace cwd did,
+    # and no check here reads the socket.
     child_env = governed_child_environment(
         effective_provider_path,
         name,
-        child_cwd,
+        None,
         loaded_environment,
     )
 
     timed_out = False
     try:
-        stdout, stderr, rc, timed_out = provider_command_output(
-            [command, "--print", "Return exactly OK."],
-            timeout_seconds,
-            "BOT_ERRORS_DRY_PROVIDER_PROBE_STDOUT",
-            "BOT_ERRORS_DRY_PROVIDER_PROBE_STDERR",
-            "BOT_ERRORS_DRY_PROVIDER_PROBE_RC",
-            child_env=child_env,
-            child_cwd=child_cwd,
-        )
+        with tempfile.TemporaryDirectory(prefix="whatsoup-provider-probe-") as probe_cwd:
+            stdout, stderr, rc, timed_out = provider_command_output(
+                [command, "--print", "Return exactly OK."],
+                timeout_seconds,
+                "BOT_ERRORS_DRY_PROVIDER_PROBE_STDOUT",
+                "BOT_ERRORS_DRY_PROVIDER_PROBE_STDERR",
+                "BOT_ERRORS_DRY_PROVIDER_PROBE_RC",
+                child_env=child_env,
+                child_cwd=probe_cwd,
+            )
     except subprocess.TimeoutExpired as exc:
         stdout = exc.stdout if isinstance(exc.stdout, str) else ""
         stderr = exc.stderr if isinstance(exc.stderr, str) else ""

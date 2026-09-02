@@ -1813,7 +1813,153 @@ def test_default_provider_probe_runs_the_provider_in_the_governed_environment(mo
     assert child_env["PATH"] == effective
     assert child_env["PATH"].split(":")[0] == str(prepend_bin)
     assert child_env.get("WHATSOUP_PATH_PREPEND") == environment["WHATSOUP_PATH_PREPEND"]
-    assert seen.get("child_cwd"), "the provider must run in the instance workspace, not the probe's cwd"
+    # The working directory is pinned by its own test below: the probe is given
+    # an explicit one, and it is NOT the instance workspace.
+    assert seen.get("child_cwd"), "the probe must be given an explicit working directory"
+
+
+def test_default_provider_probe_runs_outside_the_instance_agent_workspace(monkeypatch, tmp_path):
+    """MED-2. An unattended diagnostic must not inherit the agent's permissions.
+
+    The probe used to spawn the provider with cwd = the instance workspace and a
+    WHATSOUP_MCP_SOCKET synthesized from that same directory. The workspace
+    carries the agent's own project-local settings surface (written by
+    src/core/settings-template.ts with a permissive default mode and tool
+    allowances), so a one-shot diagnostic adopted them and was handed the
+    instance's tool socket.
+
+    Nothing the probe checks needs that directory: the binary is resolved to an
+    absolute path out of the governed PATH before the spawn, and PATH parity
+    travels in the child environment. So the probe runs from a fresh directory
+    it owns.
+
+    Residual, stated so this is not mistaken for isolation: HOME still comes from
+    the governed environment, so user-level settings under that HOME still apply.
+    What this removes is the project-local surface and the socket.
+    """
+    environment = _matrix_environment(tmp_path)
+    _arm_darwin_plist(
+        monkeypatch, tmp_path, "agent-alpha",
+        {"PATH": environment["PATH"], "WHATSOUP_PATH_PREPEND": environment["WHATSOUP_PATH_PREPEND"]},
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    # A populated workspace, so "the probe directory is empty" discriminates
+    # between the two directories instead of holding trivially.
+    (workspace / "workspace-marker").write_text("x")
+    config = {
+        "type": "agent",
+        "agentOptions": {"provider": "claude-cli", "cwd": str(workspace)},
+    }
+    seen: dict[str, object] = {}
+
+    def _fake_output(command, *args, **kwargs):
+        # Read the directory from INSIDE the call: the probe owns it through a
+        # context manager, so it is gone by the time the inventory returns and an
+        # assertion made afterwards would report a cleaned-up directory as an
+        # implementation bug.
+        cwd = kwargs.get("child_cwd")
+        seen["child_cwd"] = cwd
+        seen["cwd_is_dir"] = bool(cwd) and Path(cwd).is_dir()
+        seen["cwd_entries"] = (
+            sorted(entry.name for entry in Path(cwd).iterdir())
+            if cwd and Path(cwd).is_dir()
+            else None
+        )
+        seen["child_env"] = kwargs.get("child_env")
+        return ("OK", "", 0, False)
+
+    monkeypatch.setattr(_mod, "provider_command_output", _fake_output)
+    monkeypatch.setattr(_mod, "loaded_instance_environment", lambda name: dict(environment))
+    _mod.provider_probe_target_inventory({}, {}, "agent-alpha", config, "claude-cli", "primary")
+
+    # Vacuity guard: the probe reached the spawn rather than failing closed first.
+    assert seen, "the probe never reached the provider spawn"
+    assert _mod.agent_workspace_cwd(config, "agent-alpha") == str(workspace)
+    assert seen["child_cwd"] != str(workspace), "the probe must not run in the agent workspace"
+    assert seen["cwd_is_dir"], "the probe must be given a real directory"
+    assert seen["cwd_entries"] == [], "the probe directory must be fresh, not a populated one"
+    # Positive control on the same call: the governed environment still travels.
+    child_env = seen["child_env"]
+    assert child_env is not None
+    assert child_env["PATH"] == _mod.effective_instance_provider_path(environment)
+    assert child_env["WHATSOUP_INSTANCE"] == "agent-alpha"
+
+
+def test_default_provider_probe_child_carries_no_synthesized_mcp_socket(monkeypatch, tmp_path):
+    """MED-2 negative control, asserted on its own so it cannot hide behind the cwd row.
+
+    The probe SYNTHESIZED a WHATSOUP_MCP_SOCKET from the workspace it was about
+    to run in, handing an unattended diagnostic the instance's tool socket. No
+    check in this inventory reads the socket.
+    """
+    environment = _matrix_environment(tmp_path)
+    _arm_darwin_plist(
+        monkeypatch, tmp_path, "agent-alpha",
+        {"PATH": environment["PATH"], "WHATSOUP_PATH_PREPEND": environment["WHATSOUP_PATH_PREPEND"]},
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    config = {
+        "type": "agent",
+        "agentOptions": {"provider": "claude-cli", "cwd": str(workspace)},
+    }
+    seen: dict[str, object] = {}
+
+    def _fake_output(command, *args, **kwargs):
+        seen["child_env"] = kwargs.get("child_env")
+        return ("OK", "", 0, False)
+
+    monkeypatch.setattr(_mod, "provider_command_output", _fake_output)
+    monkeypatch.setattr(_mod, "loaded_instance_environment", lambda name: dict(environment))
+    _mod.provider_probe_target_inventory({}, {}, "agent-alpha", config, "claude-cli", "primary")
+
+    child_env = seen.get("child_env")
+    assert child_env is not None, "the probe never reached the provider spawn"
+    assert "WHATSOUP_MCP_SOCKET" not in child_env, (
+        "a diagnostic must not be handed the instance's tool socket"
+    )
+    # Vacuity guard: the allowlist still produced a populated environment.
+    assert child_env["PATH"] == _mod.effective_instance_provider_path(environment)
+
+
+def test_opencode_functional_probe_still_runs_in_the_instance_workspace(monkeypatch, tmp_path):
+    """Control for the change above: the opencode probe is deliberately untouched.
+
+    Its functional probe drives a real session that reads the instance's own
+    context, so it keeps both the workspace cwd and the socket. Without this row,
+    dropping them for the default provider could silently spread.
+    """
+    environment = _matrix_environment(tmp_path)
+    _arm_darwin_plist(
+        monkeypatch, tmp_path, "agent-alpha",
+        {"PATH": environment["PATH"], "WHATSOUP_PATH_PREPEND": environment["WHATSOUP_PATH_PREPEND"]},
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    config = {
+        "type": "agent",
+        "agentOptions": {"provider": "opencode-cli", "cwd": str(workspace)},
+    }
+    seen: dict[str, object] = {}
+
+    def _fake_output(command, *args, **kwargs):
+        seen["child_cwd"] = kwargs.get("child_cwd")
+        seen["child_env"] = kwargs.get("child_env")
+        return ("opencode 1.0.0", "", 0, False)
+
+    monkeypatch.setattr(_mod, "provider_command_output", _fake_output)
+    monkeypatch.setattr(_mod, "loaded_instance_environment", lambda name: dict(environment))
+    _mod.opencode_provider_probe_inventory({}, {}, "agent-alpha", config, "opencode-cli")
+
+    assert seen, "the opencode probe never reached the provider spawn"
+    assert seen["child_cwd"] == str(workspace)
+    child_env = seen["child_env"]
+    assert child_env is not None
+    socket_path = child_env.get("WHATSOUP_MCP_SOCKET")
+    assert socket_path is not None, "the opencode probe keeps its synthesized socket"
+    assert socket_path.startswith(f"{workspace}/")
+    assert socket_path.endswith("whatsoup.sock")
 
 
 def test_governed_checks_apply_when_no_dry_affordance_is_set(monkeypatch, tmp_path):
