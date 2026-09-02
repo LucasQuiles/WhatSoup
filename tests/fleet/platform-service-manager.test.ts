@@ -446,6 +446,11 @@ describe('platform service managers', () => {
     await expect(firstStart).rejects.toThrow('service.claudeConfigDir');
     expect(fsMocks.writeFileSync).not.toHaveBeenCalled();
     expect(childProcessMocks.execFile).not.toHaveBeenCalled();
+    // Refused before ANY filesystem mutation, not merely before the write:
+    // the install path creates the LaunchAgents directory before rendering, so
+    // a guard placed after that point would still leave a directory behind on
+    // every refusal while the two assertions above stayed green.
+    expect(fsMocks.mkdirSync).not.toHaveBeenCalled();
   });
 
   it('re-renders the resolved service block when reconciling an existing plist', async () => {

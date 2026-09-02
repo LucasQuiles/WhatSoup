@@ -545,6 +545,172 @@ describe('service block home-confinement (F3)', () => {
     expect(fs.existsSync(cfgPathFor('svc-plugindirs-dangle'))).toBe(false);
   });
 
+  // -------------------------------------------------------------------------
+  // ABSENT SEGMENT + `..` ONTO A PRE-EXISTING OUT-OF-HOME SYMLINK
+  //
+  // The escape both earlier fixes missed. `<home>/nope/../jump` with `nope`
+  // absent and `jump -> /outside` already on disk: the whole path fails to
+  // resolve because `nope` does not exist, so the right-to-left climb throws
+  // away `jump`, then `..`, then `nope`, lands on `<home>` and reports the
+  // path as confined. The `..` is discarded before the symlink to its left is
+  // ever followed. The route then persists the LEXICALLY collapsed
+  // `<home>/jump` — which IS the symlink out of home.
+  //
+  // Absence is safe on its own and traversal is safe on its own; only the
+  // combination escapes, which is why the dangling-symlink and
+  // `..`-after-symlink fixes both passed while this shape did not.
+  // -------------------------------------------------------------------------
+
+  /** `jump` -> a real directory outside home; returns the escaping spellings. */
+  function makeAbsentThenTraverse(): { one: string; deeper: string; outside: string } {
+    const home = homeDir();
+    const outside = path.join(tmpDir, 'outside');
+    fs.mkdirSync(path.join(outside, 'bin'), { recursive: true, mode: 0o700 });
+    fs.symlinkSync(outside, path.join(home, 'jump'));
+    // String concatenation, never path.join: path.join normalizes the `..`
+    // away and the fixture stops exercising the defect.
+    const one = `${home}/nope/../jump`;
+    const deeper = `${home}/nope/../jump/deeper`;
+
+    // Fixture self-checks, so a passing test cannot be vacuous.
+    expect(fs.existsSync(path.join(home, 'nope')), '`nope` must be ABSENT').toBe(false);
+    expect(fs.realpathSync.native(path.join(home, 'jump')), '`jump` must already point outside home')
+      .toBe(fs.realpathSync.native(outside));
+    expect(path.resolve(one), 'the value the route would persist is the symlink itself')
+      .toBe(path.join(home, 'jump'));
+    return { one, deeper, outside };
+  }
+
+  it('rejects a CREATE whose agentOptions.cwd is an absent segment then `..` onto an out-of-home symlink', async () => {
+    const { one } = makeAbsentThenTraverse();
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq({
+        method: 'POST',
+        body: JSON.stringify({
+          name: 'cwd-absent-traverse', type: 'agent', adminPhones: ['15551234567'],
+          agentOptions: { cwd: one },
+        }),
+      }),
+      res,
+      makeDeps<any>({}),
+    );
+    expect(res._status, 'must be refused at validation, not at commit: ' + res._body).toBe(400);
+    expect(fs.existsSync(cfgPathFor('cwd-absent-traverse'))).toBe(false);
+  });
+
+  it('rejects a CREATE whose agentOptions.cwd traverses deeper past the symlink', async () => {
+    const { deeper } = makeAbsentThenTraverse();
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq({
+        method: 'POST',
+        body: JSON.stringify({
+          name: 'cwd-absent-traverse-deep', type: 'agent', adminPhones: ['15551234567'],
+          agentOptions: { cwd: deeper },
+        }),
+      }),
+      res,
+      makeDeps<any>({}),
+    );
+    expect(res._status, 'must be refused: ' + res._body).toBe(400);
+    expect(fs.existsSync(cfgPathFor('cwd-absent-traverse-deep'))).toBe(false);
+  });
+
+  it('rejects a CREATE whose agentOptions.pluginDirs use the same shape', async () => {
+    const { one, deeper } = makeAbsentThenTraverse();
+    for (const [i, entry] of [one, deeper].entries()) {
+      const res = mockRes();
+      await handleCreateLine(
+        mockReq({
+          method: 'POST',
+          body: JSON.stringify({
+            name: `plugindirs-absent-traverse-${i}`, type: 'agent', adminPhones: ['15551234567'],
+            agentOptions: { pluginDirs: [entry] },
+          }),
+        }),
+        res,
+        makeDeps<any>({}),
+      );
+      expect(res._status, `entry ${i} must be refused: ` + res._body).toBe(400);
+      expect(fs.existsSync(cfgPathFor(`plugindirs-absent-traverse-${i}`))).toBe(false);
+    }
+  });
+
+  /** An agent instance on disk, so PATCH has something to read-merge-write. */
+  function agentPatchTarget(): { deps: OpsDeps; configPath: string } {
+    const name = 'agent-patch-target';
+    const configDir = path.join(process.env.XDG_CONFIG_HOME!, 'whatsoup', 'instances', name);
+    fs.mkdirSync(configDir, { recursive: true, mode: 0o700 });
+    const configPath = path.join(configDir, 'config.json');
+    fs.writeFileSync(configPath, JSON.stringify({
+      name, type: 'agent', adminPhones: ['15551234567'], accessMode: 'self_only',
+      healthPort: 9098, introSent: false,
+      agentOptions: { sessionScope: 'per_chat', cwd: path.join(homeDir(), 'workspace') },
+    }, null, 2) + '\n', { mode: 0o600 });
+    const instance = {
+      name, type: 'agent', accessMode: 'self_only', healthPort: 9098,
+      dbPath: path.join(configDir, 'bot.db'), stateRoot: configDir, logDir: configDir,
+      healthToken: 'tok', configPath, socketPath: null,
+    } as DiscoveredInstance;
+    return {
+      deps: makeDeps<any>({ discovery: { getInstance: vi.fn(() => instance), scan: vi.fn() } as any }),
+      configPath,
+    };
+  }
+
+  it('rejects a PATCH of agentOptions.cwd with the same shape, at validation', async () => {
+    // CREATE/PATCH parity: both verbs must refuse with 400 during validation.
+    // A 500 at commit time would mean the instance was already partly built.
+    const { one } = makeAbsentThenTraverse();
+    const { deps, configPath } = agentPatchTarget();
+    const before = fs.readFileSync(configPath, 'utf-8');
+    const res = mockRes();
+    await handleConfigUpdate(
+      mockReq({ method: 'PATCH', body: JSON.stringify({ agentOptions: { cwd: one } }) }),
+      res, deps, { name: 'agent-patch-target' },
+    );
+    expect(res._status, 'must be refused: ' + res._body).toBe(400);
+    expect(fs.readFileSync(configPath, 'utf-8')).toBe(before);
+  });
+
+  it('rejects a PATCH of agentOptions.pluginDirs with the same shape, at validation', async () => {
+    const { deeper } = makeAbsentThenTraverse();
+    const { deps, configPath } = agentPatchTarget();
+    const before = fs.readFileSync(configPath, 'utf-8');
+    const res = mockRes();
+    await handleConfigUpdate(
+      mockReq({ method: 'PATCH', body: JSON.stringify({ agentOptions: { pluginDirs: [deeper] } }) }),
+      res, deps, { name: 'agent-patch-target' },
+    );
+    expect(res._status, 'must be refused: ' + res._body).toBe(400);
+    expect(fs.readFileSync(configPath, 'utf-8')).toBe(before);
+  });
+
+  it('leaves no partially-created instance when CREATE is refused', async () => {
+    // The guard must sit above the first mkdir. Moving it below would leave
+    // the config and data directories behind on every refusal, and every other
+    // test here would still pass.
+    const { one } = makeAbsentThenTraverse();
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq({
+        method: 'POST',
+        body: JSON.stringify({
+          name: 'no-partial-instance', type: 'agent', adminPhones: ['15551234567'],
+          agentOptions: { cwd: one },
+        }),
+      }),
+      res,
+      makeDeps<any>({}),
+    );
+    expect(res._status).toBe(400);
+    for (const root of ['XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME']) {
+      const dir = path.join(process.env[root]!, 'whatsoup', 'instances', 'no-partial-instance');
+      expect(fs.existsSync(dir), `${root} must hold no directory for the refused instance`).toBe(false);
+    }
+  });
+
   it('accepts an in-home directory whose name merely starts with dots', async () => {
     // `pathIsInsideDirectory` tested `relative.startsWith('..')`, which also
     // matches a legitimate sibling-free in-home name like `..config`. That is
