@@ -38,7 +38,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "b0fe946da34628e7fcb441c59af3b44cf8155128817dd4f9b3f50774533f81b7",
+      "sha256": "a370ca2152a1e8610f65284398f19b8c73831a52f5637f17f79ebe0e0f9e56f0",
       "mustContain": [
         "append_bounded_jsonl",
         "append_private_jsonl",
@@ -68,7 +68,8 @@
         "record_legacy_alert_content",
         "legacyAlertContent",
         "note_unrenderable_quarantine",
-        "flush_unrenderable_quarantine_telemetry"
+        "flush_unrenderable_quarantine_telemetry",
+        "event_fingerprint_text"
       ]
     },
     {
@@ -387,7 +388,7 @@
     },
     {
       "path": "deploy/scripts/lib/bot_errors_redaction.py",
-      "sha256": "b90a2dc67c64ebe3bb7e603079cf5240dca29715648aae0227a878f7c91b4ef4",
+      "sha256": "38f499eb39ac628c99579470c839f6c56e7604de4e839e5036bb96539b8efffd",
       "mustContain": [
         "redact_bot_errors_text",
         "CREDENTIAL_PATH_RE",
@@ -400,7 +401,9 @@
         "_BAKED_REPR_RE",
         "legacy_confined_to_text",
         "alert_text",
-        "alert_text_kind"
+        "alert_text_kind",
+        "alert_text_for_fingerprint",
+        "LEGACY_FULL_DIGEST_CHARS"
       ]
     },
     {
