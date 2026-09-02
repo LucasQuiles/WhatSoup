@@ -365,6 +365,10 @@ type PollRuntimeState = {
   handlePendingPollHardExpiry: (mapKey: string, expected: PendingPollQuestion) => void;
   handlePerChatCrash: (mapKey: string, chatJid?: string, info?: CrashInfo) => void;
   pendingRespawnTimers: Set<ReturnType<typeof setTimeout>>;
+  sessionOwnership: {
+    advanceGeneration(mapKey: string, managerId: string): number;
+    transition(mapKey: string, managerId: string, to: 'respawning'): void;
+  };
 };
 
 const groupJid = '12036355555555NNNN@g.us';
@@ -1419,6 +1423,74 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       expect(mockSession.spawnSession).toHaveBeenCalledTimes(1);
       expect(mockSession.spawnSession).toHaveBeenCalledWith('sess-control', 13);
       expect(state.pendingRespawnTimers.size).toBe(0);
+    });
+
+    /** Every decline reason this suite pins, asserted as an exact list so a
+     *  scenario that silently lands on a different branch cannot pass. */
+    function declineReasons(): Array<string | undefined> {
+      return mockRuntimeLogger.info.mock.calls
+        .filter((c: unknown[]) => typeof c[1] === 'string' && c[1].includes('auto-respawn withheld'))
+        .map((c: unknown[]) => (c[0] as { reason?: string }).reason);
+    }
+
+    it('says why it withheld a respawn superseded by a newer attempt', async () => {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      const state = runtime as unknown as PollRuntimeState;
+      const mapKey = dmJid;
+      seedPerChatSession(state, mapKey);
+      mockSession.getStatus.mockReturnValue({
+        active: false, pid: null, providerTerminated: true,
+        sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null,
+      });
+      const managerId = currentCrashIdentity(runtime, mapKey).generationIdentity.managerId;
+
+      state.handlePerChatCrash(mapKey, dmJid, {
+        ...currentCrashIdentity(runtime, mapKey),
+        exitCode: 1, signal: null, sessionId: 'sess-superseded', dbRowId: 15,
+        provider: 'p', crashClass: 'oom', stderrPreview: 'boom',
+      });
+      // A later attempt advanced the generation, so this timer no longer owns
+      // the respawn slot.
+      state.sessionOwnership.advanceGeneration(mapKey, managerId);
+      mockRuntimeLogger.info.mockClear();
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      await vi.advanceTimersByTimeAsync(2_000);
+
+      expect(mockSession.spawnSession).not.toHaveBeenCalled();
+      expect(declineReasons()).toEqual(['respawn_timer_superseded']);
+    });
+
+    it('says why it withheld a respawn whose chat is no longer the attempt owner', async () => {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      const state = runtime as unknown as PollRuntimeState;
+      const mapKey = dmJid;
+      seedPerChatSession(state, mapKey);
+      mockSession.getStatus.mockReturnValue({
+        active: false, pid: null, providerTerminated: true,
+        sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null,
+      });
+      const managerId = currentCrashIdentity(runtime, mapKey).generationIdentity.managerId;
+
+      state.handlePerChatCrash(mapKey, dmJid, {
+        ...currentCrashIdentity(runtime, mapKey),
+        exitCode: 1, signal: null, sessionId: 'sess-moved-on', dbRowId: 16,
+        provider: 'p', crashClass: 'oom', stderrPreview: 'boom',
+      });
+      // Same manager and generation, so the timer is still this attempt's, but
+      // the record left recoverable_dead — something else is already resuming.
+      state.sessionOwnership.transition(mapKey, managerId, 'respawning');
+      mockRuntimeLogger.info.mockClear();
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      await vi.advanceTimersByTimeAsync(2_000);
+
+      expect(mockSession.spawnSession).not.toHaveBeenCalled();
+      expect(declineReasons()).toEqual(['ownership_moved_on']);
     });
 
     it('does not resume a manager whose provider termination is unproven', async () => {

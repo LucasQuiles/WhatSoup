@@ -10391,7 +10391,15 @@ export class AgentRuntime implements Runtime {
   private async runOwnedPerChatRespawn(args: OwnedPerChatRespawnArgs): Promise<void> {
     this.pendingRespawnTimers.delete(args.timer);
     const mapKey = this.findMapKeyForSession(args.session, args.initialMapKey);
-    if (!mapKey) return;
+    if (!mapKey) {
+      log.info({
+        mapKey: args.initialMapKey,
+        sessionId: args.sessionId,
+        generation: args.recoveryGeneration,
+        reason: 'session_unmapped',
+      }, 'auto-respawn withheld — the session is no longer mapped to any chat');
+      return;
+    }
     if (
       !this.sessionOwnership.clearRespawnTimer(
         mapKey,
@@ -10409,6 +10417,12 @@ export class AgentRuntime implements Runtime {
           args.timer,
         );
       }
+      log.info({
+        mapKey,
+        sessionId: args.sessionId,
+        generation: args.recoveryGeneration,
+        reason: 'respawn_timer_superseded',
+      }, 'auto-respawn withheld — a newer attempt owns this chat respawn slot');
       return;
     }
 
@@ -10431,6 +10445,14 @@ export class AgentRuntime implements Runtime {
     ) {
       // The chat moved on: a different session, manager, generation or state
       // owns it now. Consuming the timer is correct — this attempt is stale.
+      log.info({
+        mapKey,
+        sessionId: args.sessionId,
+        generation: args.recoveryGeneration,
+        reason: 'ownership_moved_on',
+        currentGeneration: owner?.generation ?? null,
+        currentState: owner?.state ?? null,
+      }, 'auto-respawn withheld — this chat is no longer owned by the attempt that scheduled it');
       return;
     }
     if (!this.isSessionProvablyTerminated(args.session)) {
