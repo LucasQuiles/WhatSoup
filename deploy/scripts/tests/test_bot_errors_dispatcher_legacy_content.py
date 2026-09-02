@@ -95,6 +95,12 @@ def test_format_event_renders_legacy_object_summary_readably() -> None:
 def test_format_event_renders_baked_repr_summary_readably() -> None:
     event = _make_event(summary=REPR_ALPHABETICAL, evidence=REPR_FAILURE_CLASS_FIRST)
     text = _mod.format_event(event)
+    # Absence alone would accept the unrenderable sentinel or empty output, which
+    # are regressions, not fixes. Assert the rendering that is actually wanted.
+    assert CANONICAL in text
+    # Derived from the code under test rather than a duplicated literal.
+    sentinel = _mod.alert_text({"not": "renderable"})
+    assert sentinel not in text
     assert "correlationDigest" not in text
     assert BRACE_QUOTE not in text
 
@@ -197,7 +203,12 @@ def test_awaiting_physical_evidence_is_stored_readably() -> None:
     )
     record: dict[str, Any] = {}
     _mod.update_awaiting_physical_tracking(event, record, 1000)
-    assert BRACE_QUOTE not in record.get("physicalCandidateLastEvidence", "")
+    # Without this the assertion below passes on the early-return path, where
+    # nothing was stored at all and the default "" trivially contains no repr.
+    assert "physicalCandidateLastEvidence" in record, (
+        "the physical-candidate path must have stored evidence"
+    )
+    assert BRACE_QUOTE not in record["physicalCandidateLastEvidence"]
 
     repr_event = _make_event(
         source="whatsapp_device_bond_lost",
@@ -424,7 +435,12 @@ ALERT_CONTENT_FIELDS = frozenset({
     "lastSuppressedClearSummary", "lastSuppressedSymptomEvidence",
     "lastSuppressedSymptomSummary",
 })
-ALERT_CONTENT_ROUTERS = frozenset({"alert_text", "event_text", "alert_text_kind"})
+ALERT_CONTENT_ROUTERS = frozenset({
+    "alert_text", "event_text", "alert_text_kind",
+    # Without these two a direct .get() regression INSIDE them is invisible to
+    # the scan, which is exactly where such a regression would hide.
+    "alert_text_for_fingerprint", "event_fingerprint_text", "legacy_confined_to_text",
+})
 
 
 def _unrouted_alert_content_reads(source: str) -> list[tuple[int, str, str, str]]:
@@ -484,7 +500,10 @@ def _unrouted_alert_content_reads(source: str) -> list[tuple[int, str, str, str]
         if field is None:
             continue
         function = enclosing_function(node)
-        if function in ALERT_CONTENT_ROUTERS or is_routed(node):
+        # NO blanket skip for reads inside the router helpers themselves. Skipping
+        # them hid a direct read inside the funnel, which is exactly where such a
+        # regression would sit. Verified: without the skip, HEAD is still clean.
+        if is_routed(node):
             continue
         found.append((node.lineno, field, function, lines[node.lineno - 1].strip()))
     return found
@@ -504,11 +523,37 @@ def test_no_unrouted_alert_content_reads_remain_in_dispatcher() -> None:
     themselves, which is why they can stay outside the funnel. If a future change
     needs an exemption, add it here explicitly with a reason rather than loosening
     the scan.
+
+    Reads inside the router helpers are NOT exempt either: those helpers read via a
+    variable field name, so an added constant-key read there is a regression and is
+    reported like any other.
     """
     unrouted = _unrouted_alert_content_reads(_SCRIPT.read_text(encoding="utf-8"))
     assert not unrouted, "alert-content reads must go through event_text/alert_text:\n" + "\n".join(
         f"  line {line} [{field}] in {function}: {text}" for line, field, function, text in unrouted
     )
+
+
+def test_the_coverage_scan_catches_a_direct_read_inside_a_router_helper() -> None:
+    """A regression hiding INSIDE the funnel must not be invisible.
+
+    The scan used to skip every read whose enclosing function was a router, so a
+    direct constant-key read added to one of those helpers passed silently. The
+    helpers legitimately read via a VARIABLE field name, so nothing is lost by
+    scanning them, and HEAD stays clean.
+    """
+    source = _SCRIPT.read_text(encoding="utf-8")
+    assert not _unrouted_alert_content_reads(source), "HEAD must start clean"
+    routed_call = '    return alert_text_for_fingerprint(event.get(key) or "")'
+    assert routed_call in source, "the fingerprint helper's shape changed; update this test"
+    mutated = source.replace(
+        routed_call,
+        '    _leak = event.get("summary")\n' + routed_call,
+        1,
+    )
+    found = _unrouted_alert_content_reads(mutated)
+    assert found, "a direct read inside a router helper must be reported"
+    assert any(entry[2] == "event_fingerprint_text" for entry in found), found
 
 
 def test_the_coverage_scan_actually_catches_a_reverted_site() -> None:
@@ -1038,3 +1083,43 @@ def test_recovered_before_delivery_gates_the_clear_recorder() -> None:
         "the clear-event recorder must be gated on clear_will_dispatch, "
         f"ungated at line(s) {ungated}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Telemetry must never be able to wedge the queue
+# ---------------------------------------------------------------------------
+# The recorder is pure today, but it is the per-event caller of the quarantine
+# fold, so a future raise inside it would abort the cycle before the event is
+# delivered -- the same total-alert-loss class as the poison value. Telemetry is
+# not worth an alert, so the call fails open and records why.
+
+def test_a_raising_recorder_does_not_stop_the_event(tmp_path, monkeypatch) -> None:
+    root = tmp_path / "state"
+    monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(root))
+    monkeypatch.setenv("BOT_ERRORS_OUTBOX_DIR", str(root / "outbox"))
+    monkeypatch.setenv("BOT_ERRORS_JID", "12345@g.us")
+    mod = _load_module()
+
+    sent: list[str] = []
+    logged: list[dict[str, Any]] = []
+    monkeypatch.setattr(mod, "send_whatsapp", lambda text, socket_path="": sent.append(text))
+    monkeypatch.setattr(mod, "append_dispatch_log", lambda paths, record: logged.append(record))
+
+    def raising_recorder(event, incident_state):
+        raise RuntimeError("fixture telemetry failure")
+
+    monkeypatch.setattr(mod, "record_legacy_alert_content", raising_recorder)
+
+    paths = mod.setup_dirs()
+    path = paths["outbox"] / "evt-telemetry.json"
+    path.write_text(json.dumps(_make_event(id="telemetry-001", summary="operator text")), encoding="utf-8")
+    path.chmod(0o600)
+
+    result = mod.run_once(max_events=25)
+
+    assert result.get("sent", 0) == 1, "a telemetry failure must not stop delivery"
+    assert any("operator text" in text for text in sent)
+    assert list(paths["outbox"].glob("*.json")) == [], "the queue must still drain"
+    assert any(
+        record.get("type") == "legacy_alert_content_telemetry_failed" for record in logged
+    ), "the failure must be recorded, not swallowed silently"

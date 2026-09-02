@@ -6603,7 +6603,18 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
             })
             return True, "stale_episode_quarantined"
 
-    record_legacy_alert_content(event, incident_state)
+    # Fail-open: this is telemetry, and it is the per-event caller of the
+    # quarantine fold. A raise here would abort the cycle before the event is
+    # delivered, which is the total-alert-loss class. Record why and continue.
+    try:
+        record_legacy_alert_content(event, incident_state)
+    except Exception as exc:  # noqa: BLE001 - telemetry must never block dispatch.
+        append_dispatch_log(paths, {
+            "type": "legacy_alert_content_telemetry_failed",
+            "eventId": event.get("id"),
+            "source": event.get("source"),
+            "reason": str(exc),
+        })
     absorb_daily_health_signal(event, incident_state)
     suppress_reason = should_suppress_send(event, incident_state)
     if suppress_reason:

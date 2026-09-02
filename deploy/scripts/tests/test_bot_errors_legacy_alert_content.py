@@ -222,16 +222,19 @@ def test_overlong_integer_in_repr_does_not_raise() -> None:
     assert rendered == poison
 
 
-def test_digit_run_below_the_conversion_limit_still_parses() -> None:
-    """Control: a long-but-convertible run behaves as before the bound.
+def test_run_under_the_conversion_limit_but_over_the_bound_renders_as_text() -> None:
+    """A run CPython could convert but the grammar refuses still renders as text.
 
-    This is what separates "the bound is doing something" from "the whole branch
-    stopped working". A 4000-digit run is under CPython's limit, so at the tree
-    before the fix it converted successfully rather than raising.
+    4000 digits is under CPython's 4300-digit conversion limit, so before the
+    bound this parsed and rendered canonically. It is over the 19-digit bound, so
+    it is now simply not the envelope and passes through unchanged. Asserting the
+    rendered text is what makes this a real case: isinstance(..., str) held for
+    every possible return value and proved nothing.
     """
     mod = load_redaction()
     control = _repr_with_digit_run(_CONTROL_DIGITS)
-    assert isinstance(mod.alert_text(control), str)
+    assert mod.alert_text(control) == control
+    assert mod.alert_text_kind(control) == "string"
 
 
 def test_overlong_integer_in_a_non_envelope_repr_does_not_raise() -> None:
