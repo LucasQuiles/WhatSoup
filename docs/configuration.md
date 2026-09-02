@@ -560,17 +560,42 @@ comparator and the daily health probe a typed value to read instead:
 <key>EnvironmentVariables</key>
 <dict>
   <key>PATH</key>
-  <string>/opt/pinned-cli/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+  <string>$HOME/pinned-cli/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
   <key>WHATSOUP_PATH_PREPEND</key>
-  <string>/opt/pinned-cli/bin</string>
+  <string>$HOME/pinned-cli/bin</string>
 </dict>
 ```
+
+`$HOME` stands for the absolute home path here; the rendered plist carries the
+expanded value, since launchd does not expand variables in
+`EnvironmentVariables`. The example pins a directory inside the home directory
+on purpose: entries written through the fleet API are home-confined, so an
+out-of-home prepend is refused at the route even though a value hand-edited into
+`config.json` still loads and renders.
 
 A configured prepend therefore appears **twice** in the effective runtime PATH,
 once from the key and once inside the plist `PATH`:
 `<prepend>:$HOME/.local/bin:<node-dir>:<prepend>:<ambient>`. First match wins, so
 the launcher and the probe resolve the same binary; the duplicate is accepted
 deliberately rather than removed by string surgery in the launcher.
+
+**The prepend also outranks the pinned Node directory.** The composition above
+puts it ahead of `<node-dir>`, so a prepend directory containing a `node` binary
+shadows the `WHATSOUP_NODE` pin for every child process that resolves `node`
+from `PATH`. The launcher itself is unaffected, because it invokes the resolved
+Node by absolute path at every call site, but the exported `PATH` is inherited by
+the bot and its children. Do not put a `node` binary in `service.pathPrepend`.
+
+**Platform scope.** Rendering is macOS-only: the systemd service manager writes
+no unit file, so nothing on a Linux host renders this key. The shared helper
+`deploy/lib/runtime-path.sh` has no platform guard and is sourced by
+`deploy/whatsoup` on **both** operating systems, so two of its behaviours apply
+everywhere: repeated colons in the inherited `PATH` are collapsed, and an empty
+segment in `WHATSOUP_PATH_PREPEND` aborts instance start with a `FATAL:` line.
+On a Linux host the variable is settable through the unit's optional
+environment files and is honoured by the launcher, but no drift comparator
+covers it there and the health probe's prepend readers return nothing off
+macOS. Governing it on Linux is a follow-up, not part of this contract.
 
 **Colon footgun.** An empty `PATH` entry means the *current directory*, so a
 value with a leading, trailing, or doubled colon would put the working directory

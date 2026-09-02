@@ -4,6 +4,15 @@
 # The optional 4th argument is a host-configured prepend that outranks
 # ~/.local/bin. Without it the composition is byte-identical to the legacy form.
 #
+# ORDERING, deliberate and load-bearing: the prepend precedes BOTH ~/.local/bin
+# and the pinned Node directory. A prepend directory containing a `node` binary
+# therefore shadows the WHATSOUP_NODE pin for every child process that resolves
+# node from PATH. The launcher itself is unaffected -- deploy/whatsoup invokes
+# "$NODE" absolutely at every call site -- but the exported PATH is inherited by
+# the bot and its children. Do not put a node binary in service.pathPrepend.
+# test_runtime_path_prepend.sh asserts this order so a future reorder has to be
+# a deliberate act rather than an accident.
+#
 # Why it exists: ~/.local/bin was prepended ahead of the ENTIRE inherited PATH,
 # including the ordering a LaunchAgent plist had deliberately chosen. A host that
 # pinned an older claude CLI by putting ~/.local/opt/claude-pin/bin first in its
@@ -61,6 +70,14 @@ whatsoup_effective_runtime_path() {
 }
 
 whatsoup_export_runtime_path() {
-  PATH="$(whatsoup_effective_runtime_path "$1" "$2" "$PATH" "${WHATSOUP_PATH_PREPEND:-}")" || return 1
+  # Composed into a local FIRST. Assigning the command substitution straight to
+  # PATH sets PATH to the empty string before `|| return 1` runs, so a caller
+  # that invokes this inside an `if` or with `||` would continue with an empty
+  # PATH. deploy/whatsoup calls it bare under `set -euo pipefail` and so exits,
+  # but the empty-segment rejection added here makes that failure newly
+  # reachable and the footgun is not worth leaving for the next caller.
+  local composed
+  composed="$(whatsoup_effective_runtime_path "$1" "$2" "$PATH" "${WHATSOUP_PATH_PREPEND:-}")" || return 1
+  PATH="$composed"
   export PATH
 }

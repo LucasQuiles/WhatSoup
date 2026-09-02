@@ -201,7 +201,13 @@ instance `config.json` `service` block (schema:
   renders neither surface. Never hand-edit the key: it is governed, so `--apply`
   overwrites it, and an empty segment in a hand-set value makes the shared
   runtime helper fail closed with a `FATAL:` line rather than start the instance
-  with the current directory on its PATH.
+  with the current directory on its PATH. The prepend outranks the pinned Node
+  directory as well as `$HOME/.local/bin`, so a `node` binary placed in it
+  shadows the `WHATSOUP_NODE` pin for every child process that resolves `node`
+  from `PATH`; the launcher is unaffected because it calls Node by absolute
+  path. The shared helper itself has no platform guard and is sourced on both
+  operating systems, so the colon collapse and the fail-closed empty-segment
+  path apply on Linux hosts too even though nothing renders the key there.
 
 Every render path — the first install after pairing and
 `reconcile-launchd-restart-policy` — resolves the block through the validated

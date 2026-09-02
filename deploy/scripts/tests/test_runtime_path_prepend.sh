@@ -158,6 +158,31 @@ for bad_inherited in "::" ":::" ":"; do
   fi
 done
 
+echo "== the prepend outranks the pinned node dir, deliberately =="
+# A prepend directory holding a `node` binary shadows the WHATSOUP_NODE pin for
+# child processes. The launcher uses "$NODE" absolutely so it is unaffected, but
+# the exported PATH is inherited. Pinned here so a reorder is a deliberate act.
+got_order="$(run /fixture/user-root /fixture/node/bin/node /loaded/bin /fixture/pin/bin)"
+prepend_rank=-1; node_rank=-1; rank=0
+IFS=: read -r -a order_entries <<< "$got_order"
+for entry in "${order_entries[@]}"; do
+  [[ "$entry" == "/fixture/pin/bin" && "$prepend_rank" -lt 0 ]] && prepend_rank="$rank"
+  [[ "$entry" == "/fixture/node/bin" && "$node_rank" -lt 0 ]] && node_rank="$rank"
+  rank=$((rank + 1))
+done
+if [[ "$prepend_rank" -ge 0 && "$node_rank" -ge 0 && "$prepend_rank" -lt "$node_rank" ]]; then
+  echo "  ok   prepend (rank $prepend_rank) precedes the pinned node dir (rank $node_rank)"
+else
+  echo "  FAIL prepend rank $prepend_rank vs node dir rank $node_rank in: $got_order"; fail=1
+fi
+
+echo "== a failed export leaves the caller's PATH intact =="
+# The wrapper composes into a local before assigning, so a rejected prepend must
+# not blank the caller's PATH on its way out.
+got_preserved="$(WHATSOUP_PATH_PREPEND=/fixture/pin/bin: PATH=/loaded/bin /bin/bash -c \
+  '. "$1"; whatsoup_export_runtime_path /fixture/user-root /fixture/node/bin/node 2>/dev/null; printf "%s" "$PATH"' _ "$LIB")"
+check "PATH survives a rejected prepend" "/loaded/bin" "$got_preserved"
+
 if [[ "$fail" -ne 0 ]]; then
   echo "RUNTIME_PATH_PREPEND_TEST_FAIL"
   exit 1

@@ -645,7 +645,7 @@ describe('platform service managers', () => {
     }
   });
 
-  it('composes the documented effective runtime PATH end to end, with the governed prepend appearing twice', async () => {
+  it('renders both governed PATH surfaces from one config fact', async () => {
     setPlatform('darwin');
     const previousPath = process.env.PATH;
     const previousNode = process.env.WHATSOUP_NODE;
@@ -657,28 +657,16 @@ describe('platform service managers', () => {
       const servicePath = readPlistEnv(rendered, 'PATH');
       const governedPrepend = readPlistEnv(rendered, 'WHATSOUP_PATH_PREPEND');
 
+      // These two are what the renderer actually decides, and they are what made
+      // this test red on base. launchd injects both, and deploy/lib/runtime-path.sh
+      // composes "$prepend:$home/.local/bin:$node_dir:$inherited", so the governed
+      // prepend appears TWICE in the effective PATH and first match wins. That
+      // composition is proven executably in
+      // deploy/scripts/tests/test_runtime_path_prepend.sh, which runs the real
+      // helper; node:child_process is mocked here, so re-joining the pieces in
+      // this file would only assert a literal against itself.
       expect(servicePath).toBe('/fixture/pin/bin:/loaded/bin');
       expect(governedPrepend).toBe('/fixture/pin/bin');
-
-      // launchd injects BOTH rendered values, and deploy/lib/runtime-path.sh
-      // composes "$prepend:$home/.local/bin:$node_dir:$inherited". The governed
-      // prepend therefore appears TWICE in the effective PATH. First match wins,
-      // so both the launcher and the probe resolve the same binary. Deduplicating
-      // would mean string surgery in the launcher plus a new failure mode, and
-      // would break the legacy exact-equality pins in
-      // deploy/scripts/tests/test_runtime_path_prepend.sh. The quirk is accepted
-      // deliberately and asserted verbatim here rather than papered over.
-      // node:child_process is mocked in this file, so the executable proof of
-      // that composition lives in test_runtime_path_prepend.sh.
-      const effective = [
-        governedPrepend,
-        '/tmp/whatsoup-home/.local/bin',
-        '/fixture/node/bin',
-        servicePath,
-      ].join(':');
-      expect(effective).toBe(
-        '/fixture/pin/bin:/tmp/whatsoup-home/.local/bin:/fixture/node/bin:/fixture/pin/bin:/loaded/bin',
-      );
     } finally {
       if (previousPath === undefined) delete process.env.PATH;
       else process.env.PATH = previousPath;
@@ -733,6 +721,29 @@ describe('platform service managers', () => {
       .resolves.toMatchObject({ dryRun: false });
 
     expect(fsMocks.writeFileSync).toHaveBeenCalled();
+    const domain = `gui/${currentUid()}`;
+    expect(childProcessMocks.execFile).toHaveBeenNthCalledWith(1, 'launchctl', ['bootout', `${domain}/com.whatsoup.agent`], expect.any(Function));
+  });
+
+  it('proceeds with an apply whose only drift is a governed hand-added PATH prepend', async () => {
+    setPlatform('darwin');
+    const { buildPlist, reconcileLaunchdPlist } = await importPlatform();
+    // Before the key was governed this same plist refused --apply as a
+    // non-governed drop. Governing it means --apply now OVERWRITES an
+    // operator's hand-set value. That is the disclosed live behaviour change,
+    // and it needs a positive assertion, not just an empty droppedNonGovernedKeys.
+    const observed = buildPlist('agent').replace(
+      '    <key>HOME</key>',
+      '    <key>WHATSOUP_PATH_PREPEND</key>\n    <string>/opt/hand-added-bin</string>\n    <key>HOME</key>',
+    );
+    mockReads({ plist: observed, config: { name: 'agent' } });
+
+    await expect(reconcileLaunchdPlist('agent', { dryRun: false }))
+      .resolves.toMatchObject({ dryRun: false });
+
+    expect(fsMocks.writeFileSync).toHaveBeenCalled();
+    const written = String(fsMocks.writeFileSync.mock.calls[0]?.[1]);
+    expect(written).not.toContain('hand-added-bin');
     const domain = `gui/${currentUid()}`;
     expect(childProcessMocks.execFile).toHaveBeenNthCalledWith(1, 'launchctl', ['bootout', `${domain}/com.whatsoup.agent`], expect.any(Function));
   });
