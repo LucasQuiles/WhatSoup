@@ -741,6 +741,24 @@ describe('retained error text scrubs a label at the tail of a longer identifier'
       expect(out).toContain('upstream call failed');
     });
   }
+
+  // The prefix run is bounded, not open-ended, and the bound is load-bearing:
+  // an unbounded run backtracks over the whole identifier at every start
+  // position. The two sibling redactors in this repo bound theirs at 40 for the
+  // same reason. These two cases pin the boundary from both sides, so widening
+  // or dropping the bound fails a test rather than passing silently.
+
+  it('treats a 40-character glued prefix as a label', () => {
+    const out = retained(`upstream call failed ${'a'.repeat(40)}token=I9j0K1l2M3n4 at gate`);
+    expect(out).not.toContain('I9j0K1l2M3n4');
+  });
+
+  it('does not treat a 41-character glued prefix as a label', () => {
+    // Disclosed residual: a label glued to more than 40 leading word characters
+    // is not recognised. The bound is the ReDoS guard; this is its cost.
+    const out = retained(`upstream call failed ${'a'.repeat(41)}token=J0k1L2m3N4o5 at gate`);
+    expect(out).toContain('J0k1L2m3N4o5');
+  });
 });
 
 describe('retained error text uses the canonical JID pattern (SSOT)', () => {

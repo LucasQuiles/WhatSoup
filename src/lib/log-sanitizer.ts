@@ -131,9 +131,21 @@ const PHONE_RE = /\+?\d{7,}/g;
 // substitution and the diagnostic still reads back: `apiToken=<secret>`
 // becomes `apiToken ***`, not `Token ***`. The trailing \b still applies, so
 // the label must end the identifier; `tokenizer=<value>` is not a match.
+//
+// The prefix run is BOUNDED at 40, which caps prefix backtracking (ReDoS-safe);
+// an open-ended run rescans the whole identifier from every start position.
+// Two sibling redactors in this repo bound the same construct the same way:
+// SECRETISH_ASSIGNMENT in src/lib/bot-errors-outbox.ts and SECRETISH_ASSIGNMENT
+// in src/lib/cli-redaction.ts both spell it `[A-Za-z0-9]{1,40}`. Theirs is a
+// required prefix in a dedicated branch, so it reads {1,40}; here one branch
+// serves bare and glued labels alike, so the same bound reads {0,40}. Those two
+// patterns and this one are a three-way duplication of the same credential
+// shape, deliberately left in place: consolidating them is a separate change,
+// not one to make inside a fix. Disclosed cost of the bound: a label glued to
+// more than 40 leading word characters is not recognised.
 const SECRET_LABELS = 'bearer|api[_-]?key|authorization|token|secret|password|passphrase|pairing';
 const BEARER_RE = new RegExp(
-  `\\b([A-Za-z0-9_]*(?:${SECRET_LABELS}))\\b`
+  `\\b([A-Za-z0-9_]{0,40}(?:${SECRET_LABELS}))\\b`
     + `(?:\\s*[:=]\\s*(?!(?:${SECRET_LABELS})\\b)["']?[\\w.~+/-]+={0,2}["']?`
     + `|\\s+["']?[\\w.~+/-]{8,}={0,2}["']?)`,
   'gi',
