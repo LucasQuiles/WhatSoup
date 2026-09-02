@@ -39,6 +39,12 @@ from typing import Any
 
 import pytest
 
+_TESTS_DIR = Path(__file__).resolve().parent
+if str(_TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TESTS_DIR))
+
+from support import dispatcher_fixtures  # noqa: E402
+
 _SCRIPTS_DIR = Path(__file__).resolve().parents[1]
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
@@ -46,12 +52,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
 _DISPATCHER = _SCRIPTS_DIR / "bot-errors-dispatcher.py"
 
 
-def _load(name: str, path: Path):
-    spec = importlib.util.spec_from_file_location(name, path)
-    mod = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(mod)
-    return mod
+_load = dispatcher_fixtures.load_module_from_path
 
 
 _disp = _load("bot_errors_dispatcher_collapse_freshness", _DISPATCHER)
@@ -65,11 +66,7 @@ _HEALTHY_PROBE = (
 )
 
 
-def _write_event(paths: dict[str, Path], filename: str, event: dict[str, Any]) -> Path:
-    path = paths["outbox"] / filename
-    path.write_text(json.dumps(event), encoding="utf-8")
-    path.chmod(0o600)
-    return path
+_write_event = dispatcher_fixtures.write_outbox_event
 
 
 # ---------------------------------------------------------------------------

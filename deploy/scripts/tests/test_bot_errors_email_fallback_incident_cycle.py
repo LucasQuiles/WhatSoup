@@ -33,6 +33,12 @@ from unittest.mock import patch
 
 import pytest
 
+_TESTS_DIR = Path(__file__).resolve().parent
+if str(_TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TESTS_DIR))
+
+from support import dispatcher_fixtures  # noqa: E402
+
 _SCRIPTS = Path(__file__).resolve().parents[1]
 _SCRIPT = _SCRIPTS / "bot-errors-dispatcher.py"
 sys.path.insert(0, str(_SCRIPTS))
@@ -47,17 +53,7 @@ TEST_ENV_KEYS = [
 ]
 
 
-@pytest.fixture(autouse=True)
-def _clean_test_env():
-    saved = {k: os.environ.get(k) for k in TEST_ENV_KEYS}
-    for k in TEST_ENV_KEYS:
-        os.environ.pop(k, None)
-    yield
-    for k, v in saved.items():
-        if v is None:
-            os.environ.pop(k, None)
-        else:
-            os.environ[k] = v
+_clean_test_env = dispatcher_fixtures.make_env_scrub_fixture(TEST_ENV_KEYS)
 
 
 def _load_module(extra_env: dict[str, str]):
@@ -91,18 +87,10 @@ def _event(event_id: str) -> dict[str, Any]:
     }
 
 
-def _write_event(paths: dict[str, Path], event: dict[str, Any]) -> Path:
-    event_path = paths["outbox"] / f"20260612000000.ana-bot.socket_down.{event['id']}.json"
-    event_path.write_text(json.dumps(event, indent=2, sort_keys=True) + "\n")
-    event_path.chmod(0o600)
-    return event_path
+_write_event = dispatcher_fixtures.write_named_outbox_event
 
 
-def _fallback_script(tmp_path: Path, exit_code: int) -> Path:
-    script = tmp_path / "fake-fallback.sh"
-    script.write_text(f"#!/bin/sh\nexit {exit_code}\n")
-    script.chmod(0o755)
-    return script
+_fallback_script = dispatcher_fixtures.fallback_script
 
 
 def _adopt(mod, paths: dict[str, Path]):
