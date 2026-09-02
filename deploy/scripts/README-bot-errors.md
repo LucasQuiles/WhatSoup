@@ -401,9 +401,10 @@ value disables the gate entirely: every event behaves as it did before this
 change, and the sidecar is swept away by the normal state lifecycle -- the
 sweep runs on both incident-state save paths, the controller-backed
 `IncidentStateCycle.commit()` that production takes and the RESTORE-COMPAT
-`save_incident_state` wrapper. The sweep's `conversationScopesEvicted` tombstones and its
-`conversationScopesOverflow` telemetry record are part of that sidecar and
-expire with it. No state migration is
+`save_incident_state` wrapper. `conversationScopesEvicted` tombstones expire on their own retention window
+rather than with the sidecar, and the `conversationScopesOverflow` telemetry
+record is never swept at all: it is a cumulative count that survives an empty
+sidecar by design. No state migration is
 needed in either direction.
 
 

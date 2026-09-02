@@ -2328,17 +2328,13 @@ def conversation_scope_is_unrepresented(
     scope = event_conversation_scope(event)
     if scope is None:
         return False
-    # An event whose OWN delivery record already reads "sent" has been shown to
-    # an operator. process_one publishes that record into the processing file
-    # and commits incident state BEFORE os.replace() archives the file, so a
-    # crash in that window leaves a delivered event that reclaim_processing
-    # feeds straight back through this gate. Forcing it again re-pages a
-    # conversation already reported and lets it escape an open flap storm.
-    # A retry after a FAILED delivery still carries a non-sent status, so the
-    # #2428 guarantee below is untouched.
-    delivery = event.get("delivery")
-    if isinstance(delivery, dict) and delivery.get("status") == "sent":
-        return False
+    # NOTE: no delivery-status check here. An earlier revision short-circuited on
+    # delivery.status == "sent", but process_one calls mark_attempt before this
+    # gate and mark_attempt overwrites the status with "sending", so the branch
+    # was unreachable in production. The crash-window replay it was meant to
+    # stop is handled where the record is still the producer's -- ahead of
+    # mark_attempt, for both terminal statuses -- and pinned end to end in
+    # deploy/scripts/tests/test_bot_errors_terminal_replay_reclaim.py.
     scopes = incident_state.get("conversationScopes")
     seen = scopes.get(key) if isinstance(scopes, dict) else None
     record = seen.get(scope) if isinstance(seen, dict) else None

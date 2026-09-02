@@ -652,6 +652,11 @@ def test_the_email_delivery_branch_records_representation(tmp_path):
     assert mod.should_suppress_send(event, state) is None
 
     mod.record_conversation_scope_delivered(event, state, KEY, int(time.time()))
+    # SCOPE, stated: this asserts the in-memory dict, because it calls the
+    # recorder directly rather than a persistence path. That is the whole of
+    # what it claims. The persisted read -- the branch actually writing state to
+    # disk -- is pinned in
+    # test_the_email_branch_calls_the_recorder_on_the_real_path below.
     assert SCOPE_B in state["conversationScopes"][KEY]
     after = mod.should_suppress_send(_event(SCOPE_B, "evt-after", 2), state)
     assert after is not None and "duplicate suppressed" in after, after
@@ -837,6 +842,9 @@ def test_state_written_by_an_older_dispatcher_loads_and_gates(tmp_path):
     mod = _load(tmp_path)
     state = {"version": 1, "openIncidents": {KEY: {"status": "open", "openedAt": 1}}, "lastSentAt": {}}
     assert _gate_then_deliver(mod, _event(SCOPE_B, "evt-b1", 2), state) is None
+    # In-memory by design: the claim is that the gate CREATES the subtree lazily
+    # on a state shape written before this field existed, which is a property of
+    # the dict the gate was handed, not of any write.
     assert SCOPE_B in state["conversationScopes"][KEY]
 
 

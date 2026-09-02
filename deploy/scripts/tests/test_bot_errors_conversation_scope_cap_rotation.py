@@ -317,3 +317,62 @@ def test_an_idle_sweep_does_not_silence_a_new_conversation(tmp_path):
     assert pages == 1, (
         f"a brand-new key after an idle sweep must page: pages = {pages}"
     )
+
+
+def _scopeless_alert(mod, paths, key_index: int, rnd: int) -> int:
+    """An admission rejection carrying NO conversationScope."""
+    event_id = f"evt-noscope-k{key_index:04d}-r{rnd}"
+    event = {
+        "schemaVersion": 2,
+        "eventKind": "incident_alert",
+        "eventType": "alert",
+        "severity": "warning",
+        "machine": MACHINE,
+        "instance": f"instance-{key_index:04d}",
+        "source": SOURCE,
+        "id": event_id,
+        "createdAt": mod.now_iso(),
+        "summary": {"failureClass": "unknown", "length": 44, "correlationDigest": "de" * 32},
+        "evidence": {"failureClass": "Error", "length": 88, "correlationDigest": f"{key_index:064d}"},
+        "delivery": {"attempts": 0, "status": "queued", "nextAttemptAtEpoch": 0, "lastError": None},
+    }
+    path = paths["outbox"] / f"20260902{rnd:06d}.instance-{key_index:04d}.{SOURCE}.{event_id}.json"
+    path.write_text(json.dumps(event, indent=2))
+    path.chmod(0o600)
+    calls: list = []
+    with patch.object(mod, "send_whatsapp", side_effect=lambda *a, **k: calls.append(a)):
+        mod.run_once(64)
+    return len(calls)
+
+
+def test_an_incident_opened_without_a_conversation_still_admits_a_new_one(tmp_path):
+    """Leg (e): an open incident with NO subtree is not an evicted key.
+
+    An admission rejection can arrive with no conversationScope at all. It
+    opens an incident and records no sidecar subtree, so that key looks
+    exactly like one whose records were dropped. Under a global "something
+    evicted" flag the next genuinely new conversation under that key was
+    silenced; the tombstone is per key, and this key has none, so it pages.
+    """
+    cap = 8
+    mod = _load(tmp_path / "scopeless", cap)
+    paths = _dirs(mod)
+
+    # A capacity eviction elsewhere, so any global overflow signal is latched.
+    _round(mod, paths, cap + 1, 1)
+    state = mod.load_incident_state(paths)
+    assert len(state.get("conversationScopes") or {}) == cap, "the fixture must evict"
+
+    key_index = cap + 700
+    assert _scopeless_alert(mod, paths, key_index, 2) == 1, "the scopeless alert must page"
+    state = mod.load_incident_state(paths)
+    key = f"{MACHINE}|instance-{key_index:04d}|{SOURCE}"
+    assert key in (state.get("openIncidents") or {}), "it must open an incident"
+    assert key not in (state.get("conversationScopes") or {}), "and record no subtree"
+
+    pages = _fresh_conversation(mod, paths, key_index, 9005, 3)
+
+    assert pages == 1, (
+        "a genuinely new conversation under an incident opened without one "
+        f"must page: pages = {pages}"
+    )
