@@ -620,6 +620,79 @@ describe('Error branch reaches a real pino sink', () => {
   });
 });
 
+// ─── The route the runtime actually emits ───────────────────────────────────
+//
+// src/runtimes/agent/runtime.ts logs `{ err, errorMessage: errorMessage(err) }`
+// at two call sites. The Error travels through the sanitizer's Error branch,
+// and errorMessage() from src/lib/error-message.ts puts the SAME text in a
+// sibling top-level string. `errorMessage` is matched by none of the key
+// filters, so that sibling travels as an ordinary retained string.
+//
+// Every test above asserts what the Error branch keeps, which locks in the
+// retention but never exercises the shape the runtime emits. These two do,
+// through a real pino sink with the repo's own serializers and hook.
+
+describe('the runtime error-shaping route reaches the sink masked', () => {
+  const capture = async (payload: Record<string, unknown>) => {
+    const pino = (await import('pino')).default;
+    const { errorLikeSerializers } = await import('../../src/logger.ts');
+    const { sanitizingLogHook } = await import('../../src/lib/log-sanitizer.ts');
+
+    const lines: string[] = [];
+    const logger = pino(
+      {
+        level: 'info',
+        serializers: errorLikeSerializers,
+        hooks: { logMethod: sanitizingLogHook } as never,
+      },
+      {
+        write(chunk: string) {
+          lines.push(chunk);
+        },
+      },
+    );
+    logger.error(payload, 'failed to replay unjournaled turn');
+    expect(lines).toHaveLength(1);
+    return lines[0]!;
+  };
+
+  it('masks the secret in the Error branch and in the sibling string alike', async () => {
+    const { errorMessage } = await import('../../src/lib/error-message.ts');
+    const secret = 'M3n4O5p6Q7r8';
+    const err = new Error(`replay failed sessionToken=${secret} for 15550100199@s.whatsapp.net`);
+
+    const line = await capture({
+      err,
+      errorMessage: errorMessage(err),
+      chatJid: '15550100199@s.whatsapp.net',
+      mapKey: 'fixture-map-key',
+    });
+    const record = JSON.parse(line) as { err: Record<string, unknown>; errorMessage: string };
+
+    expect(line).not.toContain(secret);
+    expect(record.err.errorMessage).not.toContain(secret);
+    expect(record.errorMessage).not.toContain(secret);
+    expect(line).not.toContain('15550100199');
+    // Scrubbing is not blanking: the diagnostic frame survives on both.
+    expect(record.err.errorMessage).toContain('replay failed');
+    expect(record.errorMessage).toContain('replay failed');
+  });
+
+  it('does not bound the sibling string the way it bounds the Error branch', async () => {
+    // Disclosed residual on this route: the sibling is an ordinary retained
+    // string, so it is masked but neither bounded nor refused. Only the Error
+    // branch applies the budget, which is why the two fields disagree here.
+    const { errorMessage } = await import('../../src/lib/error-message.ts');
+    const err = new Error('R'.repeat(3000));
+
+    const line = await capture({ err, errorMessage: errorMessage(err) });
+    const record = JSON.parse(line) as { err: Record<string, unknown>; errorMessage: string };
+
+    expect(record.err.errorMessage).toBe('[oversized error]');
+    expect(record.errorMessage).toHaveLength(3000);
+  });
+});
+
 // ─── The Error branch must honour the never-throws invariant ────────────────
 //
 // `message`, `code`, `cause` and `constructor` are ordinary properties. Any of
