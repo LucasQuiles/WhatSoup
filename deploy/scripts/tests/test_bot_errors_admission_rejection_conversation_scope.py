@@ -636,17 +636,15 @@ def test_a_delivered_alert_does_mark_the_conversation_represented(tmp_path):
 def test_the_email_delivery_branch_records_representation(tmp_path):
     """Email is a real operator-visible route, so it records representation.
 
-    Scope limit, stated rather than papered over: process_one's email branch
-    cannot be driven end-to-end from a test, because
-    email_fallback_blocked_reason vetoes the route whenever the state
-    directory looks like a test root, returning "test_state_dir". That guard
-    is deliberate and predates this change, and defeating it would mean
-    faking a production-shaped state root.
-
-    So this asserts the property that branch depends on: the delivery
-    recorder marks a conversation represented. The branch's own call to it is
-    covered by reading the source, not by execution, and that limit is
-    disclosed in the pull request body rather than implied to be tested.
+    SCOPE, corrected: an earlier version of this docstring said the branch
+    "cannot be driven end-to-end from a test" because
+    email_fallback_blocked_reason vetoes any dispatcher rooted in a test tmp
+    dir. That veto is a module-level function, and this file already replaces
+    module globals the same way six times over, so the claim was false: the
+    sibling suite test_bot_errors_email_deadletter_2435.py drives exactly this
+    branch by patching that veto. The executed pin now lives in
+    test_the_email_branch_calls_the_recorder_on_the_real_path below; this test
+    keeps the direct property assertion as the cheaper unit-level check.
     """
     mod = _load(tmp_path)
     assert mod.email_fallback_blocked_reason(
@@ -996,3 +994,49 @@ def test_control_the_same_replay_is_a_duplicate_when_the_scope_gate_is_off(tmp_p
     reason = mod.should_suppress_send(event, state)
 
     assert reason is not None and "duplicate suppressed" in reason
+
+
+def test_the_email_branch_calls_the_recorder_on_the_real_path(tmp_path):
+    """codex LOW-9 / F2: pin the email branch's recorder call by EXECUTION.
+
+    The branch returns before mark_incident_sent, so it must record
+    representation itself. That call was previously covered by reading the
+    source: deleting it left the whole module green. This drives the real
+    process_one down the accepted-email path -- primary transport failing,
+    the provenance veto patched off the way the sibling #2435 suite does it,
+    and a fallback script that exits 0 -- and asserts the conversation is
+    represented in the state the branch actually persisted.
+    """
+    from unittest.mock import patch
+
+    mod = _load(tmp_path, {"BOT_ERRORS_DELIVERY_MAX_ATTEMPTS": "10"})
+    paths = mod.state_paths()
+    _prepare_dirs(mod, paths)
+    _seed_open_incident(mod, paths)
+
+    path = _outbox_event(mod, paths, SCOPE_B, "evt-emailed-real")
+    event = json.loads(path.read_text())
+    # The email fallback only runs at attempts >= 3.
+    event["delivery"]["attempts"] = 3
+    path.write_text(json.dumps(event, indent=2))
+
+    fallback = tmp_path / "fake-fallback.sh"
+    fallback.write_text("#!/bin/sh\nexit 0\n")
+    fallback.chmod(0o755)
+
+    with patch.object(mod, "send_whatsapp", side_effect=RuntimeError("transport down")), \
+         patch.object(mod, "email_fallback_blocked_reason", return_value=None), \
+         patch.object(mod, "EMAIL_FALLBACK", str(fallback)):
+        ok, detail = mod.process_one(path, paths)
+
+    assert (ok, detail) == (True, "email_delivered"), (ok, detail)
+
+    # The branch persisted incident state itself; read it back rather than
+    # trusting an in-memory dict the call may never have touched.
+    persisted = mod.load_incident_state(paths)
+    scopes = persisted.get("conversationScopes") or {}
+    assert KEY in scopes, f"email delivery recorded no scope subtree: {scopes!r}"
+    assert SCOPE_B in scopes[KEY], (
+        "the email branch delivered this conversation but did not record it as "
+        f"represented: {scopes[KEY]!r}"
+    )
