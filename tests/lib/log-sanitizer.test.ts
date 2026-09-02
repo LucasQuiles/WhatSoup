@@ -1189,17 +1189,21 @@ describe('the label shape masks a glued prefix of any length', () => {
 
 // ─── The value-side guard, pinned in both directions ────────────────────────
 //
-// The separator branch refuses to take another label word as its value. That
-// guard exists for one shape: `Authorization: token <credential>`, where the
-// first label would otherwise swallow `token` as its value and leave the real
-// credential in the clear. The shape it must refuse is therefore a label word
-// followed by WHITESPACE — the scheme-like form where the credential is the
-// NEXT word — and not a label word that merely happens to start the value.
+// The separator branch refuses to take another label word as its value. The
+// guard exists for two shapes: `Authorization: token <credential>`, where the
+// credential is the NEXT word, and `token=secret: <credential>`, where the
+// nested label opens its own assignment. In both the first label would
+// otherwise swallow the second and leave the real credential in the clear.
+// What it must NOT refuse is a label word that merely begins the value.
 //
-// Keying the refusal on a word boundary instead refused both. The cross-model
-// bench's S0 measured the cost: a credential whose value BEGINS with a label
-// word and a separating character, `token=secret-<credential>`, was refused by
-// the guard, matched nothing at all, and reached the sink verbatim.
+// The discriminator is the character AFTER the nested label: whitespace, `:`
+// or `=` means the credential is still to come, anything else means the label
+// word is part of the value. Keying the refusal on a word boundary refused all
+// three cases. The cross-model bench's S0 measured that cost: a credential
+// whose value BEGINS with a label word and a separating character,
+// `token=secret-<credential>`, was refused by the guard, matched nothing at
+// all, and reached the sink verbatim. The nested-assignment half is pinned by
+// its own block at the end of this file.
 //
 // Both directions are pinned below: the values the guard must let through to
 // masking, and the shape it must still refuse. Nothing here is a coverage
@@ -1209,8 +1213,9 @@ describe('the label shape masks a glued prefix of any length', () => {
 describe('the value-side guard admits a label-initial credential value', () => {
   const GUARD_LABELS = ['token', 'api_key', 'bearer'] as const;
   const GUARD_SEPARATORS = ['=', ': '] as const;
-  // Value prefixes that are a label word plus a separating character, which is
-  // what the boundary-keyed guard used to refuse.
+  // Value prefixes that are a label word plus a character OUTSIDE the guard's
+  // follow set, which is what the boundary-keyed guard used to refuse and what
+  // the guard must keep admitting.
   const LABEL_INITIAL_VALUE_PREFIXES = [
     'secret-',
     'token-',
@@ -1291,6 +1296,8 @@ describe('the value-side guard admits a label-initial credential value', () => {
     ],
     [
       'a bare label word followed by whitespace is still refused, carrying no credential',
+      // Disclosed residual, not a target of any fix on this branch: the guard
+      // refuses on its follow set whether or not a credential is really there.
       'upstream call failed token=secret at gate',
       'upstream call failed token=secret at gate',
     ],
@@ -1307,4 +1314,72 @@ describe('the value-side guard admits a label-initial credential value', () => {
       expect(await sanitizedErrorMessage(message)).toBe(expected);
     });
   }
+});
+
+// ─── A nested assignment must not be eaten as the outer label's value ───────
+//
+// The guard has to refuse a nested label that is ITSELF an assignment, not
+// only one that is scheme-like. `token=secret: <value>` carries the credential
+// after the INNER label, and the outer `token=` must not swallow `secret:` and
+// stop at the whitespace, because that consumes the assignment operator and
+// leaves the credential standing in the clear.
+//
+// The leak needs whitespace after the inner separator. `token=secret:<value>`
+// with no space is masked either way, because the value class runs to the next
+// whitespace and takes the credential with it. These rows therefore use the
+// spaced form, which is the shape that actually leaked.
+//
+// Raised as the cross-model bench's HIGH against the previous head, where the
+// guard keyed on whitespace alone: `secret:` is not followed by whitespace, so
+// the guard admitted it as a value.
+
+describe('the value-side guard refuses a nested label that opens its own assignment', () => {
+  // [case, message, expected output]
+  const NESTED_ASSIGNMENT_SHAPES: ReadonlyArray<readonly [string, string, string]> = [
+    [
+      'a colon-separated nested assignment',
+      'upstream call failed token=secret: SYNTHETICVALUE at gate',
+      'upstream call failed token=secret *** at gate',
+    ],
+    [
+      'an equals-separated nested assignment',
+      'upstream call failed token=secret= SYNTHETICVALUE at gate',
+      'upstream call failed token=secret *** at gate',
+    ],
+    [
+      'a nested assignment under a different outer label',
+      'upstream call failed api_key=token: SYNTHETICVALUE at gate',
+      'upstream call failed api_key=token *** at gate',
+    ],
+  ];
+
+  it('covers three nested-assignment shapes', () => {
+    // Coverage assertion: a shrunk table would otherwise pass silently.
+    expect(NESTED_ASSIGNMENT_SHAPES).toHaveLength(3);
+    expect(new Set(NESTED_ASSIGNMENT_SHAPES.map(([, message]) => message)).size).toBe(3);
+  });
+
+  for (const [name, message, expected] of NESTED_ASSIGNMENT_SHAPES) {
+    it(`masks the credential after ${name}`, async () => {
+      const line = await captureSanitizedErrorLine(message);
+      const out = (JSON.parse(line) as { err: Record<string, unknown> }).err
+        .errorMessage as string;
+      // The whole sink line, not only the retained field.
+      expect(line).not.toContain('SYNTHETICVALUE');
+      // Exact output: the inner label survives as the readable cue and the
+      // credential after it is replaced. An absence check alone would pass on a
+      // blanked message.
+      expect(out).toBe(expected);
+    });
+  }
+
+  it('masks the unspaced form too, by consuming the whole value run', async () => {
+    // Not the leak shape, and it is masked at both heads. Pinned so that the
+    // spaced and unspaced forms cannot silently diverge.
+    const out = await sanitizedErrorMessage(
+      'upstream call failed token=secret:SYNTHETICVALUE at gate',
+    );
+    expect(out).not.toContain('SYNTHETICVALUE');
+    expect(out).toContain('at gate');
+  });
 });

@@ -132,22 +132,46 @@ const PHONE_RE = /\+?\d{7,}/g;
 // consumes `Bearer` as the value, and leaves the real token untouched — the
 // exact header this pattern exists to cover.
 //
-// THE GUARD IS KEYED ON WHITESPACE, NOT ON A WORD BOUNDARY, because the shape
-// it must refuse is a label word with the credential in the NEXT word:
-// `Authorization: token <credential>`. Keying it on \b refused that shape and
-// one more that is not scheme-like at all — a credential whose VALUE begins
-// with a label word and a separating character. `token=secret-<credential>`
-// matched nothing and reached the sink verbatim, which the cross-model bench's
-// S0 measured across a label x separator x value-prefix matrix. Requiring
-// whitespace admits that whole class to masking and still refuses the
-// scheme-like form, which then falls through to the separator-less branch and
-// masks the credential at the second label instead.
+// THE GUARD IS KEYED ON WHAT FOLLOWS THE NESTED LABEL: whitespace, `:` or `=`.
+// Those three characters are what distinguish a label word that INTRODUCES the
+// credential from one that merely begins it, and both readings have been wrong
+// here before, in opposite directions.
 //
-// Residual, disclosed: a label word followed by whitespace is refused whether
-// or not a credential follows, so `token=secret at gate` is retained. Nothing
-// there is credential material — the value IS the label word — but a real
-// credential separated from a label word by a space is only reached by the
-// separator-less branch, which carries an eight-character floor.
+// Keyed on a word boundary, the guard refused far too much. A credential whose
+// VALUE begins with a label word and a separating character — the shape
+// `token=secret-<credential>` — matched nothing at all and reached the sink
+// verbatim. The cross-model bench's S0 measured that across a label x separator
+// x value-prefix matrix.
+//
+// Keyed on whitespace alone, it then refused too little. `token=secret:
+// <credential>` puts the credential after an INNER assignment; `secret:` is not
+// followed by whitespace, so the guard admitted it, the value class consumed
+// `secret:` and stopped at the space, and the credential was left standing in
+// the clear. The cross-model bench raised that as a regression of the previous
+// head. Adding `:` and `=` to the guard's follow set refuses the nested
+// assignment, and the scan then matches at the inner label, so the credential
+// is masked and the outer label survives as a readable cue.
+//
+// Requiring a following separator character rather than any word boundary is
+// what keeps the S0 class masked: `secret-`, `token.`, `api_key-` and the rest
+// are followed by none of the three, so the guard still admits them.
+//
+// The whitespace half of the follow set is also what keeps
+// `Authorization: token <credential>` working: `token` IS followed by
+// whitespace, so the guard refuses, and the separator-less branch masks the
+// credential at the second label instead.
+//
+// Residual, disclosed: the guard refuses on those three characters whether or
+// not a credential actually follows, so `token=secret at gate` is retained, and
+// so are the trailing-separator forms `token=secret:` and `token=secret=`.
+// Nothing in any of them is credential material — the value is the label word
+// itself — but a real credential separated from a label word by a space is
+// reached only by the separator-less branch, which carries an eight-character
+// floor.
+//
+// Also unchanged and pre-existing: the value class stops at `,`, `;` and a
+// quote, so `token=secret,<credential>` retains the text after the comma at
+// every version of this pattern. That is the value class, not the guard.
 //
 // A LABEL IS MATCHED WHEREVER IT ENDS AN IDENTIFIER, AND ITS PREFIX IS NOT
 // CONSUMED. The pattern this replaced had no anchor at all, so `token=` matched
@@ -202,7 +226,7 @@ const SECRET_VALUE = '[^\\s"\',;}\\\\]+';
 const SECRET_LABELS = 'bearer|api[_-]?key|authorization|token|secret|password|passphrase|pairing';
 const BEARER_RE = new RegExp(
   `((?:${SECRET_LABELS}))\\b`
-    + `(?:\\s*[:=]\\s*(?:(?:${AUTH_SCHEMES})\\s+)?(?!(?:${SECRET_LABELS})\\s)["']?${SECRET_VALUE}["']?`
+    + `(?:\\s*[:=]\\s*(?:(?:${AUTH_SCHEMES})\\s+)?(?!(?:${SECRET_LABELS})[\\s:=])["']?${SECRET_VALUE}["']?`
     + `|\\s+["']?[\\w.~+/-]{8,}={0,2}["']?)`,
   'gi',
 );
