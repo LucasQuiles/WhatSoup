@@ -488,8 +488,11 @@ def test_retry_records_are_bounded_like_the_conversation_set(tmp_path):
         assert mod.event_conversation_scope(_event(scope, f"evt-{index}", index)) == scope
         _gate_then_deliver(mod, _event(scope, f"evt-{index}", index), state)
     scopes = state["conversationScopes"][KEY]
-    assert len(scopes) <= 4
-    for record in scopes.values():
+    # The overflow sentinel is bookkeeping, not a conversation, so the bound
+    # is over TRACKED scopes.
+    tracked = {k: v for k, v in scopes.items() if k != mod.CONVERSATION_SCOPE_OVERFLOW_KEY}
+    assert len(tracked) <= 4
+    for record in tracked.values():
         assert isinstance(record, dict)
         assert len(record.get("eventIds", {})) <= 4
 
@@ -669,6 +672,132 @@ def test_the_predicate_does_not_mutate_state(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# capacity — a large incident must not become an unbounded alert loop
+# ---------------------------------------------------------------------------
+
+def test_cycling_more_conversations_than_the_cap_does_not_page_forever(tmp_path):
+    """Eviction must not recycle a known conversation back into "new".
+
+    The per-key cap drops the oldest scope. With more failing conversations
+    than the cap, each one is evicted before it recurs, so every recurrence
+    looks unrepresented and forces another notification — turning one large
+    incident into a permanent alert loop, and defeating the storm
+    consolidation that exists to stop exactly that.
+
+    Measured before the fix: 5 conversations cycling against a cap of 4
+    produced 30 forced notifications over 30 events. Bounded behaviour is one
+    per conversation, then quiet.
+    """
+    mod = _load(tmp_path, {"BOT_ERRORS_CONVERSATION_SCOPE_MAX_PER_KEY": "4"})
+    state = _open_state()
+    state["flapState"] = {KEY: {"stormAt": 1, "tripTimestamps": [], "cumulativeCount": 9}}
+
+    scopes = [f"cs1_c{i:015x}" for i in range(5)]
+    forced = 0
+    for cycle in range(6):
+        for index, scope in enumerate(scopes):
+            event = _event(scope, f"evt-{cycle}-{index}", index)
+            if _gate_then_deliver(mod, event, state) is None:
+                forced += 1
+
+    assert forced <= len(scopes), (
+        f"{forced} notifications for {len(scopes)} conversations over 30 events; "
+        "eviction is recycling known conversations into 'new'"
+    )
+
+
+def test_overflow_is_recorded_so_the_condition_is_visible(tmp_path):
+    """Silently capping is how the loop hid; the overflow is stated."""
+    mod = _load(tmp_path, {"BOT_ERRORS_CONVERSATION_SCOPE_MAX_PER_KEY": "4"})
+    state = _open_state()
+    for index in range(9):
+        event = _event(f"cs1_d{index:015x}", f"evt-{index}", index)
+        _gate_then_deliver(mod, event, state)
+
+    records = state["conversationScopes"][KEY]
+    assert len(records) <= 4 + 1  # the cap, plus the overflow marker itself
+    assert mod.CONVERSATION_SCOPE_OVERFLOW_KEY in records
+
+
+def test_a_genuinely_new_conversation_still_pages_under_the_cap(tmp_path):
+    """The bound must not silence conversations while there is room."""
+    mod = _load(tmp_path, {"BOT_ERRORS_CONVERSATION_SCOPE_MAX_PER_KEY": "8"})
+    state = _open_state()
+    forced = 0
+    for index in range(4):
+        event = _event(f"cs1_e{index:015x}", f"evt-{index}", index)
+        if _gate_then_deliver(mod, event, state) is None:
+            forced += 1
+    assert forced == 4
+
+
+# ---------------------------------------------------------------------------
+# retention — the sidecar is bounded by the state lifecycle, not by traffic
+# ---------------------------------------------------------------------------
+
+def test_expired_scope_records_are_swept_without_new_traffic(tmp_path):
+    """Retention that only runs on traffic is not retention.
+
+    A quiet or decommissioned instance would otherwise hold conversation
+    digests past the window forever, because expiry only ran when another
+    event for that same key entered the gate.
+    """
+    mod = _load(tmp_path, {"BOT_ERRORS_CONVERSATION_SCOPE_RETENTION_SECONDS": "60"})
+    state = _open_state()
+    state["conversationScopes"] = {
+        KEY: {SCOPE_A: {"lastSeenAt": int(time.time()) - 600, "eventIds": {}}}
+    }
+    removed = mod.sweep_conversation_scopes(state, int(time.time()))
+    assert removed >= 1
+    assert "conversationScopes" not in state or KEY not in state["conversationScopes"]
+
+
+def test_closing_an_incident_drops_its_scope_subtree(tmp_path):
+    """A closed incident's per-conversation bookkeeping is dead weight."""
+    mod = _load(tmp_path)
+    state = _open_state()
+    state["conversationScopes"] = {
+        "unknown|instance-x|some_other_closed_source": {
+            SCOPE_A: {"lastSeenAt": int(time.time()), "eventIds": {}}
+        }
+    }
+    mod.sweep_conversation_scopes(state, int(time.time()))
+    assert "unknown|instance-x|some_other_closed_source" not in state.get(
+        "conversationScopes", {}
+    )
+
+
+def test_the_outer_key_cap_is_enforced(tmp_path):
+    """A long tail of historical keys cannot grow the map without limit."""
+    mod = _load(tmp_path, {"BOT_ERRORS_CONVERSATION_SCOPE_MAX_KEYS": "3"})
+    now = int(time.time())
+    state = _open_state()
+    # All keys open, so only the outer cap can bound them.
+    for index in range(9):
+        key = f"unknown|instance-x|source_{index}"
+        state["openIncidents"][key] = {"status": "open", "openedAt": now}
+        state.setdefault("conversationScopes", {})[key] = {
+            SCOPE_A: {"lastSeenAt": now - index, "eventIds": {}}
+        }
+    mod.sweep_conversation_scopes(state, now)
+    assert len(state["conversationScopes"]) <= 3
+
+
+def test_the_sweep_runs_on_save(tmp_path):
+    """Wired into the lifecycle, not merely available."""
+    mod = _load(tmp_path, {"BOT_ERRORS_CONVERSATION_SCOPE_RETENTION_SECONDS": "60"})
+    paths = mod.state_paths()
+    paths["incident_state"].parent.mkdir(parents=True, exist_ok=True)
+    state = _open_state()
+    state["conversationScopes"] = {
+        KEY: {SCOPE_A: {"lastSeenAt": int(time.time()) - 600, "eventIds": {}}}
+    }
+    mod.save_incident_state(paths, state)
+    reloaded = mod.load_incident_state(paths)
+    assert SCOPE_A not in reloaded.get("conversationScopes", {}).get(KEY, {})
+
+
+# ---------------------------------------------------------------------------
 # (d) incident-state schema compatibility — existing keys keep working
 # ---------------------------------------------------------------------------
 
@@ -707,7 +836,12 @@ def test_conversation_scope_state_is_bounded_by_count_and_retention(tmp_path):
     for index, scope in enumerate(scope_values):
         assert mod.event_conversation_scope(_event(scope, f"evt-{index}", index)) == scope
         _gate_then_deliver(mod, _event(scope, f"evt-{index}", index), state)
-    assert len(state["conversationScopes"][KEY]) <= 4
+    tracked = {
+        k: v
+        for k, v in state["conversationScopes"][KEY].items()
+        if k != mod.CONVERSATION_SCOPE_OVERFLOW_KEY
+    }
+    assert len(tracked) <= 4
 
     # Retention: an entry older than the window is pruned, so that
     # conversation is "new" again and re-notifies.
