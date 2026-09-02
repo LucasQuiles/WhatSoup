@@ -396,24 +396,28 @@ CONVERSATION_SCOPE_RETENTION_SECONDS = positive_env_int(
 CONVERSATION_SCOPE_MAX_PER_KEY = positive_env_int(
     "BOT_ERRORS_CONVERSATION_SCOPE_MAX_PER_KEY", 256
 )
-# Emitted digests are lowercase hex of a FIXED width (the emission boundary
-# mints exactly CONVERSATION_SCOPE_HEX_LENGTH = 16 chars). Anything else is not
-# trusted: an unexpected shape is far more likely to be a raw identifier from a
-# mis-wired emitter than a usable scope.
+# A conversation scope is a TAGGED token: the version tag "cs1_" followed by
+# exactly CONVERSATION_SCOPE_HEX_LENGTH lowercase hex characters, minted at the
+# emission boundary (src/lib/alert-evidence.ts, CONVERSATION_SCOPE_TAG).
 #
-# Width alone is not enough, which is the trap. Decimal digits ARE hex digits,
-# so a bare conversation local part — exactly what toConversationKey mints for
-# both the personal and the LID domain — satisfies any plain hex test. An
-# all-decimal value is therefore rejected as well.
+# The tag is what makes validation decidable. Bare hex was ambiguous, because
+# decimal digits are hex digits, so a raw conversation local part — exactly
+# what toConversationKey mints for both the personal and the LID domain —
+# satisfied any plain hex test. Compensating for that required rejecting every
+# all-decimal value, which discarded roughly one genuine digest in 1,845
+# ((10/16) ** 16 = 5.42e-4) and cost those conversations their scope line and
+# their forced notification.
 #
-# The cost of that second rule is one genuine digest in about 1,845
-# ((10/16) ** 16 = 5.42e-4) being treated as untrusted. That conversation loses
-# its scope line and its force-notify for as long as the digest is all-decimal,
-# which is the same behaviour as before this change and is the safe direction
-# to fail: a suppressed alert is recoverable, a disclosed identifier is not.
+# Requiring the tag removes both problems at once: no raw identifier carries
+# it, every real digest does, and an all-decimal DIGEST is now perfectly valid.
+# Untagged values are rejected outright with no legacy acceptance, which is
+# safe here because producer and consumer ship together and no intermediate
+# version of this format ever reached a runtime.
 CONVERSATION_SCOPE_HEX_LENGTH = 16
-CONVERSATION_SCOPE_RE = re.compile(r"^[0-9a-f]{%d}$" % CONVERSATION_SCOPE_HEX_LENGTH)
-CONVERSATION_SCOPE_ALL_DECIMAL_RE = re.compile(r"^[0-9]+$")
+CONVERSATION_SCOPE_TAG = "cs1_"
+CONVERSATION_SCOPE_RE = re.compile(
+    r"^%s[0-9a-f]{%d}$" % (re.escape(CONVERSATION_SCOPE_TAG), CONVERSATION_SCOPE_HEX_LENGTH)
+)
 
 # #2409 — cause-aware disposition for health_body_degraded. The producer emits a
 # bounded degradation-cause vector; the registered per-cause policy decides
@@ -2048,11 +2052,7 @@ def event_conversation_scope(event: dict[str, Any]) -> str | None:
     if not isinstance(value, str):
         return None
     candidate = value.strip().lower()
-    if not CONVERSATION_SCOPE_RE.match(candidate):
-        return None
-    if CONVERSATION_SCOPE_ALL_DECIMAL_RE.match(candidate):
-        return None
-    return candidate
+    return candidate if CONVERSATION_SCOPE_RE.match(candidate) else None
 
 
 def conversation_scope_is_unrepresented(
@@ -2076,23 +2076,24 @@ def conversation_scope_is_unrepresented(
         seen = {}
         scopes[key] = seen
 
-    # Records are {digest: {"lastSeenAt": epoch, "eventIds": {id: epoch}}}.
-    # Entries written before the eventIds field existed are bare epochs; they
-    # are read forward rather than migrated, so an older state file keeps
-    # working and a downgrade still finds the timestamps it expects.
+    # Records are {scope: {"lastSeenAt": epoch, "eventIds": {id: epoch}}}.
+    # There is no bare-epoch legacy form to read forward: this state subtree
+    # and the tagged token ship together, and no intermediate version of
+    # either reached a runtime. A malformed record is rebuilt rather than
+    # trusted.
     def record_for(item: Any) -> dict[str, Any]:
         if isinstance(item, dict):
             item.setdefault("lastSeenAt", current)
             if not isinstance(item.get("eventIds"), dict):
                 item["eventIds"] = {}
             return item
-        return {"lastSeenAt": item if isinstance(item, (int, float)) else current, "eventIds": {}}
+        return {"lastSeenAt": current, "eventIds": {}}
 
     def last_seen(item: Any) -> float:
         if isinstance(item, dict):
             value = item.get("lastSeenAt")
             return value if isinstance(value, (int, float)) else 0
-        return item if isinstance(item, (int, float)) else 0
+        return 0
 
     for stale in [
         item

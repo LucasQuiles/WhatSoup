@@ -135,6 +135,22 @@ export function confineAlertContent(
 const CONVERSATION_SCOPE_HEX_LENGTH = 16;
 
 /**
+ * Version tag on every emitted conversation scope.
+ *
+ * Without it the token is bare hex, and bare hex is ambiguous: decimal digits
+ * are hex digits, so a raw conversation local part (what `toConversationKey`
+ * mints) satisfies any plain hex test. The consumer previously compensated by
+ * rejecting all-decimal values, which discarded roughly one genuine digest in
+ * 1,845. The tag removes the ambiguity at the source, so the consumer can
+ * require a shape no raw identifier has instead of guessing at one.
+ *
+ * The `1` is a format version. A future change to the digest width or
+ * algorithm takes a new tag, so a consumer can tell the formats apart rather
+ * than mis-parsing one as the other.
+ */
+export const CONVERSATION_SCOPE_TAG = 'cs1_';
+
+/**
  * Project a raw conversation identifier into a bounded, non-reversible scope
  * digest.
  *
@@ -155,6 +171,11 @@ const CONVERSATION_SCOPE_HEX_LENGTH = 16;
  * not done here: this is an error path that must stay cheap, and the value's
  * job is de-duplication rather than confidentiality.
  *
+ * The emitted value is ``cs1_`` followed by 16 lowercase hex characters. The
+ * tag is not decoration: it is what lets the consumer accept a scope by shape
+ * without having to guess whether an untagged hex run is a digest or a raw
+ * identifier.
+ *
  * Returns ``null`` — never an empty string or a placeholder — when the caller
  * has no conversation, so the field can be omitted from the event entirely and
  * the emitted shape stays backward compatible.
@@ -166,5 +187,6 @@ export function confineConversationScope(
 ): string | null {
   const trimmed = conversationKey?.trim() ?? '';
   if (trimmed.length === 0) return null;
-  return digestContent('conversation', trimmed).slice(0, CONVERSATION_SCOPE_HEX_LENGTH);
+  const digest = digestContent('conversation', trimmed).slice(0, CONVERSATION_SCOPE_HEX_LENGTH);
+  return `${CONVERSATION_SCOPE_TAG}${digest}`;
 }
