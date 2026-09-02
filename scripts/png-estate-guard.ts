@@ -30,9 +30,13 @@ import { pathToFileURL } from 'node:url';
 import { git } from './lib/guard-core.ts';
 
 export const MAX_NEW_PNG_BYTES = 100 * 1024;
-// Post-Option-A baseline (docs/design-system 18 + docs/screenshots 15).
-export const TRACKED_PNG_COUNT_BASELINE = 33;
-export const TRACKED_PNG_BYTES_BASELINE = 13_319_198;
+// Post-Option-A baseline (docs/design-system 10 + docs/screenshots 15). Lowered
+// from 33 / 13_319_198 when the eight QA evidence screenshots that rendered a
+// pre-scrub operator identifier were removed rather than re-shot: a fresh
+// 1440x900 @2x render of those surfaces is 119-476 KiB, so every replacement
+// blob exceeds MAX_NEW_PNG_BYTES and the estate cannot carry them.
+export const TRACKED_PNG_COUNT_BASELINE = 25;
+export const TRACKED_PNG_BYTES_BASELINE = 10_238_137;
 
 const SYMLINK_MODE = '120000';
 
