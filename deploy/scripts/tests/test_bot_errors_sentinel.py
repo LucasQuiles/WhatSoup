@@ -1563,6 +1563,18 @@ def test_transition_pruning_and_state_cleanup(tmp_path: Path):
     state = json.loads(_mod.state_path(config).read_text(encoding="utf-8"))
     assert sorted(state["hosts"]) == ["host-a"]
 
+    # #2429 sentinel roster-removal extension: the pruning assertion above is
+    # necessary but was never sufficient. "removed" held alertState=open, so its
+    # disappearance must be accompanied by a published terminal disposition --
+    # otherwise a consumer cannot tell a deliberate retirement from a recovery,
+    # a corrupt state file, or an accidental roster omission.
+    events = _retirement_events(config)
+    assert len(events) == 1
+    assert events[0]["host"] == "removed"
+    assert events[0]["disposition"] == "configuration_retired"
+    assert events[0]["retiredRecord"]["alertState"] == "open"
+    assert result["retirementEvents"][0]["host"] == "removed"
+
 
 def test_malformed_host_state_record_is_reinitialized(tmp_path: Path):
     hb = _heartbeat(tmp_path / "host-a-hb.json", healthy=True, mtime=995.0)
@@ -3143,3 +3155,235 @@ def test_observation_digest_matches_selfcheck_digest_helper(tmp_path: Path):
     sample = {"kind": "bot-errors-selfcheck-heartbeat", "host": "x", "healthy": True, "nested": {"b": 2, "a": 1}}
     assert selfcheck.heartbeat_observation_digest(sample) == _mod.heartbeat_observation_digest(sample)
     assert _mod.heartbeat_observation_digest(sample) == _observation_digest(sample)
+
+
+# ---------------------------------------------------------------------------
+# #2429 sentinel roster-removal extension: configuration-retirement disposition
+# ---------------------------------------------------------------------------
+
+
+def _retirement_events(config) -> list[dict]:
+    """Every published configuration-retirement disposition, oldest first."""
+    outbox = _mod.action_outbox_dir(config)
+    found = []
+    for path in sorted(outbox.glob("*.json")):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if payload.get("disposition") == "configuration_retired":
+            payload["_path"] = str(path)
+            found.append(payload)
+    return found
+
+
+def _roster_retirement_fixture(tmp_path: Path, *, open_alert: bool = True):
+    """One configured member, one member the roster no longer lists."""
+    hb = _heartbeat(tmp_path / "host-a-hb.json", healthy=True, mtime=995.0)
+    hosts = _hosts_file(tmp_path, [{"host": "host-a", "heartbeatPath": str(hb)}])
+    config = _config(tmp_path, hosts)
+    retired_record = {
+        "alertState": "open" if open_alert else "closed",
+        "consecutive": 3,
+        "transitions": [990.0, 995.0],
+        "lastClass": "unreachable",
+        "lastAction": "escalate",
+        "lastBadAt": 995.0,
+        "lastActionEventKey": "host:retired-member:unreachable:escalate",
+        "lastActionEventAt": 995.0,
+    }
+    _write_json(
+        _mod.state_path(config),
+        {
+            "schemaVersion": 1,
+            "hosts": {"host-a": {"alertState": "closed"}, "retired-member": retired_record},
+        },
+    )
+    deps = _deps(1000.0, {"host-a": {"reachable": True, "healthy": True, "class": "healthy"}})
+    return config, deps, retired_record
+
+
+def test_retirement_publishes_disposition_before_deleting_the_record(tmp_path: Path):
+    config, deps, retired_record = _roster_retirement_fixture(tmp_path)
+
+    result = _mod.run_once(config, deps)
+
+    events = _retirement_events(config)
+    assert len(events) == 1
+    event = events[0]
+    assert event["host"] == "retired-member"
+    assert event["kind"] == "bot-errors-sentinel-configuration-retired"
+    assert event["disposition"] == "configuration_retired"
+    assert event["dispositionReason"] == "host_not_in_roster"
+    # The ownership the deletion destroys is on the record, as bounded enums
+    # and counts -- not probe output, not heartbeat contents.
+    assert event["retiredRecord"] == {
+        "recordPresent": True,
+        "alertState": "open",
+        "consecutive": 3,
+        "transitionCount": 2,
+        "lastClass": "unreachable",
+        "lastAction": "escalate",
+        "hadActionCooldown": True,
+        "lastBadAtPresent": True,
+    }
+    # ...and only then is the record gone.
+    state = json.loads(_mod.state_path(config).read_text(encoding="utf-8"))
+    assert sorted(state["hosts"]) == ["host-a"]
+    assert result["retirementEvents"][0]["requestId"] == event["requestId"]
+
+
+def test_retirement_is_never_a_recovery_clear(tmp_path: Path):
+    """Roster absence is configuration evidence, not health evidence."""
+    config, deps, _ = _roster_retirement_fixture(tmp_path)
+    _mod.run_once(config, deps)
+    event = _retirement_events(config)[0]
+
+    assert event["severity"] == "info"
+    assert event["recoveryClaimed"] is False
+    assert event["healthEvidence"] is False
+    assert event["criticalWhatsAppEligible"] is False
+    # "clear" routes to lane resolved_state_change, which IS health evidence.
+    # A retirement must not borrow it.
+    assert event["lane"] == _mod.CONFIGURATION_RETIRED_LANE
+    assert event["lane"] != _mod.action_event_route("clear")[1]
+    assert event["action"] != "clear"
+
+
+def test_retirement_action_is_neither_minted_nor_executed_as_an_action(tmp_path: Path):
+    """The disposition shares the outbox with actions; it must not BE one."""
+    assert _mod.CONFIGURATION_RETIRED_ACTION not in _mod.ACTION_EVENT_ACTIONS
+    assert _mod.CONFIGURATION_RETIRED_ACTION not in _mod.EXTERNAL_REMEDIATION_ACTIONS
+    assert _mod.CONFIGURATION_RETIRED_ACTION not in _mod.ATTENTION_ACTIONS
+
+    config, deps, _ = _roster_retirement_fixture(tmp_path)
+    _mod.run_once(config, deps)
+    event_path = Path(_retirement_events(config)[0]["_path"])
+    assert event_path.exists()
+
+    # A second cycle runs consume_action_outbox over the same directory. The
+    # disposition must be left untouched, not executed and not renamed .done.
+    consumed = _mod.consume_action_outbox(config)
+    assert consumed == 0
+    assert event_path.exists()
+    assert not event_path.with_suffix(".done").exists()
+    assert not event_path.with_suffix(".failed").exists()
+
+
+def test_publish_failure_preserves_the_record_and_the_state_file(tmp_path: Path, monkeypatch):
+    """Fail closed: no disposition published means no deletion, on disk either."""
+    config, deps, _ = _roster_retirement_fixture(tmp_path)
+    state_file = _mod.state_path(config)
+    before = state_file.read_bytes()
+
+    def _boom(*args, **kwargs):
+        raise OSError("publication failed")
+
+    monkeypatch.setattr(_mod, "publish_event_json", _boom)
+
+    with pytest.raises(OSError):
+        _mod.run_once(config, deps)
+
+    # The cycle aborted above run_once's save; the ledger still owns the member.
+    assert state_file.read_bytes() == before
+    state = json.loads(state_file.read_text(encoding="utf-8"))
+    assert state["hosts"]["retired-member"]["alertState"] == "open"
+    assert _retirement_events(config) == []
+
+
+def test_second_real_cycle_emits_no_duplicate_disposition(tmp_path: Path):
+    """Cross-cycle idempotence through two real run_once calls."""
+    config, deps, _ = _roster_retirement_fixture(tmp_path)
+
+    _mod.run_once(config, deps)
+    assert len(_retirement_events(config)) == 1
+
+    _mod.run_once(config, _deps(1100.0, {"host-a": {"reachable": True, "healthy": True, "class": "healthy"}}))
+    assert len(_retirement_events(config)) == 1
+
+
+def test_configured_members_are_never_retired(tmp_path: Path):
+    hb = _heartbeat(tmp_path / "host-a-hb.json", healthy=True, mtime=995.0)
+    hosts = _hosts_file(tmp_path, [{"host": "host-a", "heartbeatPath": str(hb)}])
+    config = _config(tmp_path, hosts)
+    _write_json(
+        _mod.state_path(config),
+        {"schemaVersion": 1, "hosts": {"host-a": {"alertState": "open", "consecutive": 2}}},
+    )
+    deps = _deps(1000.0, {"host-a": {"reachable": True, "healthy": True, "class": "healthy"}})
+
+    result = _mod.run_once(config, deps)
+
+    assert _retirement_events(config) == []
+    assert result["retirementEvents"] == []
+    state = json.loads(_mod.state_path(config).read_text(encoding="utf-8"))
+    assert "host-a" in state["hosts"]
+
+
+def test_retirement_binds_the_old_and_new_roster(tmp_path: Path):
+    config, deps, _ = _roster_retirement_fixture(tmp_path)
+    _mod.run_once(config, deps)
+    roster = _retirement_events(config)[0]["roster"]
+
+    # Digests, not membership lists: a consumer can bind the retirement to the
+    # roster revision that caused it without the event carrying the roster.
+    assert roster["previousDigest"] == _mod.host_set_digest(["host-a", "retired-member"])
+    assert roster["currentDigest"] == _mod.host_set_digest(["host-a"])
+    assert roster["previousDigest"] != roster["currentDigest"]
+    assert roster["previousCount"] == 2
+    assert roster["currentCount"] == 1
+    assert roster["retiredCount"] == 1
+    assert len(_retirement_events(config)[0]["subjectDigest"]) == 16
+    assert "retired-member" not in json.dumps(roster)
+
+
+def test_retirement_leaves_a_bounded_tombstone_cleared_by_re_addition(tmp_path: Path):
+    config, deps, _ = _roster_retirement_fixture(tmp_path)
+    _mod.run_once(config, deps)
+
+    state = json.loads(_mod.state_path(config).read_text(encoding="utf-8"))
+    tombstone = state["retiredHosts"]["retired-member"]
+    assert tombstone["priorAlertState"] == "open"
+    assert tombstone["requestId"] == _retirement_events(config)[0]["requestId"]
+
+    # Re-adding the member to the roster clears its tombstone, so a delayed
+    # acknowledgement can be correlated but the ledger cannot grow forever.
+    hb_b = _heartbeat(tmp_path / "retired-hb.json", healthy=True, mtime=1095.0)
+    _write_json(
+        config.hosts_path,
+        {
+            "schemaVersion": 1,
+            "hosts": [
+                {"host": "host-a", "heartbeatPath": str(tmp_path / "host-a-hb.json")},
+                {"host": "retired-member", "heartbeatPath": str(hb_b)},
+            ],
+        },
+    )
+    _mod.run_once(
+        config,
+        _deps(
+            1100.0,
+            {
+                "host-a": {"reachable": True, "healthy": True, "class": "healthy"},
+                "retired-member": {"reachable": True, "healthy": True, "class": "healthy"},
+            },
+        ),
+    )
+    state = json.loads(_mod.state_path(config).read_text(encoding="utf-8"))
+    assert "retired-member" not in state["retiredHosts"]
+    assert "retired-member" in state["hosts"]
+
+
+def test_tombstone_ledger_is_bounded_by_age_and_count(tmp_path: Path):
+    hb = _heartbeat(tmp_path / "host-a-hb.json", healthy=True, mtime=995.0)
+    hosts = _hosts_file(tmp_path, [{"host": "host-a", "heartbeatPath": str(hb)}])
+    config = _config(tmp_path, hosts)
+    state = {"retiredHosts": {}}
+    # One entry older than the TTL, plus more entries than the cap.
+    state["retiredHosts"]["stale"] = {"retiredAt": 1000.0 - _mod.RETIRED_HOST_TOMBSTONE_TTL_SECONDS - 1}
+    for index in range(_mod.RETIRED_HOST_TOMBSTONE_MAX + 10):
+        state["retiredHosts"][f"member-{index:03d}"] = {"retiredAt": 1000.0 - index}
+
+    kept = _mod.prune_retired_host_tombstones(state, 1000.0)
+
+    assert "stale" not in kept
+    assert len(kept) == _mod.RETIRED_HOST_TOMBSTONE_MAX
+    # Newest kept, oldest dropped.
+    assert "member-000" in kept

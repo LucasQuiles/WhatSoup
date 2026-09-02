@@ -71,6 +71,23 @@ ACTION_EVENT_ACTIONS = {
     "q_unavailable",
     "clear",
 }
+# #2429 sentinel roster-removal extension. Retirement is deliberately NOT a
+# member of ACTION_EVENT_ACTIONS (emit_action_events must never mint it),
+# NOT a member of EXTERNAL_REMEDIATION_ACTIONS (consume_action_outbox must
+# never execute it), and NOT the "clear" action (whose lane is
+# resolved_state_change, i.e. health evidence). Roster absence is
+# configuration evidence, not health evidence.
+CONFIGURATION_RETIRED_ACTION = "configuration_retired"
+CONFIGURATION_RETIRED_DISPOSITION = "configuration_retired"
+CONFIGURATION_RETIRED_REASON = "host_not_in_roster"
+CONFIGURATION_RETIRED_TIER = "configuration"
+CONFIGURATION_RETIRED_LANE = "configuration_retirement"
+# Bounded tombstone: long enough to dedupe a delayed acknowledgement or action
+# for a retired member and to correlate a re-addition, short enough that the
+# state file cannot grow without bound.
+RETIRED_HOST_TOMBSTONE_MAX = 64
+RETIRED_HOST_TOMBSTONE_TTL_SECONDS = 30 * 24 * 3600
+
 ATTENTION_ACTIONS = {"tier1_heal_candidate", "escalate", "escalate_flapping", "freeze_correlated_drift", "q_unavailable"}
 ATTENTION_FLEET_ACTIONS = {
     "central_connectivity_suspect",
@@ -1935,6 +1952,192 @@ def compute_cycle_metrics(results: list, action_events: list) -> dict:
     }
 
 
+def host_set_digest(hosts) -> str:
+    """Opaque, order-independent digest over a host set.
+
+    Used for both the previous and the current roster so the two are directly
+    comparable, and for the retired member itself, so a consumer can bind a
+    retirement to the roster revision that caused it without the event having
+    to carry the membership list.
+    """
+    canonical = "\0".join(sorted(str(host) for host in hosts))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+
+
+def retired_host_summary(record: dict) -> dict:
+    """Bounded, content-free summary of the ownership a retirement destroys.
+
+    Enums and counts only. The point is that a reader can see WHAT was owned
+    (an open alert, a cooldown, flap history) without the event carrying probe
+    output, error text, or heartbeat contents.
+    """
+    if not isinstance(record, dict):
+        return {"recordPresent": False}
+    transitions = record.get("transitions")
+    return {
+        "recordPresent": True,
+        "alertState": str(record.get("alertState") or "unknown"),
+        "consecutive": int_or_zero(record.get("consecutive")),
+        "transitionCount": len(transitions) if isinstance(transitions, list) else 0,
+        "lastClass": str(record.get("lastClass") or "") or None,
+        "lastAction": str(record.get("lastAction") or "") or None,
+        "hadActionCooldown": record.get("lastActionEventKey") is not None,
+        "lastBadAtPresent": record.get("lastBadAt") is not None,
+    }
+
+
+def build_configuration_retired_event(
+    host: str,
+    record: dict,
+    now: float,
+    controller_host: str,
+    request_id: str,
+    roster: dict,
+) -> dict:
+    """One typed configuration-retirement disposition for one retired member.
+
+    severity info and criticalWhatsAppEligible False: this is an audit record,
+    not a page. recoveryClaimed False is explicit because the whole point of
+    #2429 is that a retirement must never be mistaken for a recovery.
+    """
+    return {
+        "schemaVersion": 1,
+        "kind": "bot-errors-sentinel-configuration-retired",
+        "scope": "host",
+        "requestId": request_id,
+        "createdAt": now_iso(now),
+        "controllerHost": controller_host,
+        "host": host,
+        "subjectDigest": host_set_digest([host]),
+        "action": CONFIGURATION_RETIRED_ACTION,
+        "disposition": CONFIGURATION_RETIRED_DISPOSITION,
+        "dispositionReason": CONFIGURATION_RETIRED_REASON,
+        "tier": CONFIGURATION_RETIRED_TIER,
+        "lane": CONFIGURATION_RETIRED_LANE,
+        "severity": "info",
+        "criticalWhatsAppEligible": False,
+        "recoveryClaimed": False,
+        "healthEvidence": False,
+        "retiredRecord": retired_host_summary(record),
+        "roster": roster,
+    }
+
+
+def prune_retired_host_tombstones(state: dict, now: float) -> dict:
+    """Keep the tombstone ledger bounded by age and count."""
+    tombstones = state.get("retiredHosts")
+    if not isinstance(tombstones, dict):
+        tombstones = {}
+        state["retiredHosts"] = tombstones
+    for host, entry in list(tombstones.items()):
+        retired_at = finite_float(entry.get("retiredAt")) if isinstance(entry, dict) else None
+        if retired_at is None or now - retired_at > RETIRED_HOST_TOMBSTONE_TTL_SECONDS:
+            tombstones.pop(host, None)
+    if len(tombstones) > RETIRED_HOST_TOMBSTONE_MAX:
+        ordered = sorted(
+            tombstones.items(),
+            key=lambda item: finite_float(item[1].get("retiredAt")) or 0.0,
+            reverse=True,
+        )
+        state["retiredHosts"] = dict(ordered[:RETIRED_HOST_TOMBSTONE_MAX])
+        tombstones = state["retiredHosts"]
+    return tombstones
+
+
+def retire_unconfigured_hosts(
+    state: dict,
+    config: SentinelConfig,
+    now: float,
+    controller_host: str,
+    configured_hosts: set,
+    roster_inventory_data: Optional[dict],
+    roster_epoch_value: Optional[int],
+) -> list[dict]:
+    """Publish a terminal disposition for every member configuration dropped,
+    then delete its record. #2429 sentinel roster-removal extension.
+
+    Ordering is the contract. The disposition is durable (publish_event_json +
+    require_all_advance) BEFORE ``del host_state[host]``, and the deletion is
+    durable only at the end-of-cycle ``save_state``. If publication fails, the
+    in-memory state is rolled back and the exception propagates, exactly as
+    emit_action_events does; because this runs above run_once's try/finally,
+    no ``save_state`` executes on that path, so the record survives on disk and
+    the retirement is retried next cycle. A member is never deleted without a
+    published disposition.
+    """
+    host_state = state.setdefault("hosts", {})
+    previous_hosts = sorted(host_state)
+    retiring = [host for host in previous_hosts if host not in configured_hosts]
+    tombstones = prune_retired_host_tombstones(state, now)
+    # Re-addition correlation: a member back in the roster clears its tombstone.
+    for host in list(tombstones):
+        if host in configured_hosts:
+            tombstones.pop(host, None)
+    if not retiring:
+        return []
+    roster = {
+        "previousDigest": host_set_digest(previous_hosts),
+        "previousCount": len(previous_hosts),
+        "currentDigest": host_set_digest(configured_hosts),
+        "currentCount": len(configured_hosts),
+        "retiredCount": len(retiring),
+        "manifestDigest": (roster_inventory_data or {}).get("digest"),
+        "manifestEpoch": roster_epoch_value,
+    }
+    emitted = []
+    for host in retiring:
+        record = host_state.get(host)
+        state_before_event = copy.deepcopy(state)
+        request_id = stable_request_id(
+            "configuration_retired", host, roster["previousDigest"], roster["currentDigest"]
+        )
+        path = action_event_path(config, now, "retirement", host, CONFIGURATION_RETIRED_ACTION, request_id)
+        payload = build_configuration_retired_event(
+            host, record if isinstance(record, dict) else {}, now, controller_host, request_id, roster
+        )
+        target = _durable_target(path)
+        absent = JsonVersion(False, None, None, None)
+        publication_operation = operation_id(
+            target,
+            payload,
+            component="sentinel.configuration_retired_event",
+            predecessor=absent,
+        )
+        try:
+            publication = publish_event_json(
+                target,
+                payload,
+                component="sentinel.configuration_retired_event",
+                operation_id=publication_operation,
+            )
+            require_all_advance([publication])
+        except Exception:
+            state.clear()
+            state.update(state_before_event)
+            raise
+        # Durably published: only now may the record go.
+        tombstones[host] = {
+            "retiredAt": now,
+            "retiredAtIso": now_iso(now),
+            "subjectDigest": payload["subjectDigest"],
+            "requestId": request_id,
+            "eventPath": str(path),
+            "priorAlertState": payload["retiredRecord"].get("alertState"),
+            "rosterCurrentDigest": roster["currentDigest"],
+        }
+        host_state.pop(host, None)
+        emitted.append(
+            {
+                "scope": "host",
+                "host": host,
+                "action": CONFIGURATION_RETIRED_ACTION,
+                "requestId": request_id,
+                "path": str(path),
+            }
+        )
+    return emitted
+
+
 def run_once(config: SentinelConfig, deps: Optional[SentinelDeps] = None) -> dict:
     deps = deps or default_deps(config)
     now = deps.now_epoch()
@@ -1959,9 +2162,18 @@ def run_once(config: SentinelConfig, deps: Optional[SentinelDeps] = None) -> dic
     state["controllerHost"] = controller_host
     host_state = state.setdefault("hosts", {})
     configured_hosts = {spec.host for spec in hosts}
-    for host in list(host_state):
-        if host not in configured_hosts:
-            del host_state[host]
+    # #2429: every member configuration drops gets a published terminal
+    # disposition before its record is deleted. Raises rather than deleting if
+    # publication fails.
+    retirement_events = retire_unconfigured_hosts(
+        state,
+        config,
+        now,
+        controller_host,
+        configured_hosts,
+        roster_inventory_data,
+        roster_epoch_value,
+    )
 
     results = []
     for spec in hosts:
@@ -2056,6 +2268,7 @@ def run_once(config: SentinelConfig, deps: Optional[SentinelDeps] = None) -> dic
             "reachabilityOracle": oracle,
             "hosts": results,
             "actionEvents": action_events,
+            "retirementEvents": retirement_events,
             "actionOutboxDepth": action_outbox_depth,
             "metrics": compute_cycle_metrics(results, action_events),
             "statePath": str(state_path(config)),
