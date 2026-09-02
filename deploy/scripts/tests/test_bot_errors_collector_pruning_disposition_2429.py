@@ -537,6 +537,41 @@ def test_remote_record_sources_declare_an_open_flag(tmp_state):
         assert isinstance(flag, str) and flag
 
 
+def test_remote_record_open_flags_name_fields_the_module_actually_writes(tmp_state):
+    """The flag STRINGS are the last hand-typed link; pin them to real writes.
+
+    The map ties a registered tier to the state field marking its incident
+    open. Nothing else forces those strings to match the field the escalation
+    ladder actually sets, so renaming the field and not the map would silently
+    stop pruning from seeing an open tier -- the same shape of hole as the
+    unswept constants. Assert every flag appears as a subscript assignment
+    target somewhere in the collector.
+    """
+    state_dir, outbox_dir = tmp_state
+    mod = _load_mod_with_dirs(state_dir, outbox_dir)
+    tree = ast.parse(_COLLECTOR_PATH.read_text())
+    written: set[str] = set()
+    for node in ast.walk(tree):
+        targets: list[ast.expr] = []
+        if isinstance(node, ast.Assign):
+            targets = list(node.targets)
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+            targets = [node.target]
+        for target in targets:
+            if isinstance(target, ast.Subscript) and isinstance(target.slice, ast.Constant):
+                if isinstance(target.slice.value, str):
+                    written.add(target.slice.value)
+    # Coverage assertion: the scan must find real state writes, so an empty or
+    # truncated parse cannot satisfy the subset check below vacuously.
+    assert "downSince" in written, "subscript-assignment scan did not reach the backoff ladder"
+    assert len(written) >= 20, f"scan found only {len(written)} assigned state fields"
+    missing = set(mod.REMOTE_RECORD_OPEN_FLAGS.values()) - written
+    assert not missing, (
+        f"REMOTE_RECORD_OPEN_FLAGS names field(s) the collector never assigns: {sorted(missing)}. "
+        "A renamed state field must be renamed in the map too, or pruning stops seeing that tier."
+    )
+
+
 def test_relay_host_kind_translation_is_closed(tmp_state):
     state_dir, outbox_dir = tmp_state
     mod = _load_mod_with_dirs(state_dir, outbox_dir)

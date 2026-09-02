@@ -4,6 +4,12 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { spawn } from 'node:child_process';
 import { readBody, jsonResponse, requireInstance } from '../../lib/http.ts';
+import {
+  pathIsAtOrInsideDirectory,
+  pathIsInsideDirectory,
+  rawAbsolutePath,
+  realpathLongestAbsentTolerantPrefix,
+} from '../../lib/home-confinement.ts';
 import { escapeRegExp } from '../../lib/regex-utils.ts';
 import { isNonEmptyString, isRecord } from '../../lib/type-guards.ts';
 import { createSSEWriter } from '../sse-helpers.ts';
@@ -665,46 +671,49 @@ export async function handleDeleteLine(
   jsonResponse(res, 200, { deleted: params.name });
 }
 
-function pathIsInsideDirectory(candidate: string, parent: string): boolean {
-  const relative = path.relative(parent, candidate);
-  return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative);
-}
 
-function pathIsAtOrInsideDirectory(candidate: string, parent: string): boolean {
-  const relative = path.relative(parent, candidate);
-  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
-}
-
-function realpathExistingPrefix(targetPath: string): string {
-  let current = targetPath;
-  while (true) {
-    try {
-      return fs.realpathSync(current);
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-      const parent = path.dirname(current);
-      if (parent === current) throw err;
-      current = parent;
-    }
-  }
-}
 
 function resolveHomeConfinedPath(inputPath: string, res: ServerResponse, error: string): string | null {
   if (hasUnsupportedTildePrefix(inputPath)) {
     jsonResponse(res, 400, { error });
     return null;
   }
-  const resolved = path.resolve(expandHomePath(inputPath));
+  // Two forms, deliberately kept apart:
+  //  - `expanded` is the RAW spelling with `..` INTACT. It is what the physical
+  //    check must judge, because it is what gets persisted and rendered.
+  //  - `resolved` is the lexically collapsed form, used only as a cheap first
+  //    gate and as the return value.
+  const expanded = expandHomePath(inputPath);
+  // Refuse `.`/`..` components outright, on the tilde-expanded spelling.
+  //
+  // Chosen over resolving left-to-right because this route PERSISTS the
+  // lexically collapsed form: validating one string and storing another is the
+  // shape that produced the traversal bypass in the first place. Refusing the
+  // spelling makes the validated value and the stored value identical, and it
+  // is the same reject-not-canonicalise rule the service block already applies.
+  // A canonical form always exists, and no caller in this repo passes `..`.
+  if (!isCanonicalAbsolutePath(expanded)) {
+    jsonResponse(res, 400, { error });
+    return null;
+  }
+  const resolved = path.resolve(expanded);
   const homePath = path.resolve(os.homedir());
   if (!pathIsInsideDirectory(resolved, homePath)) {
     jsonResponse(res, 400, { error });
     return null;
   }
 
+  // Make the raw spelling absolute WITHOUT normalising it: `path.resolve` would
+  // collapse the `..` this check exists to catch.
+  const rawAbsolute = rawAbsolutePath(expanded);
+
   try {
-    const homeReal = fs.realpathSync(homePath);
-    const existingReal = realpathExistingPrefix(resolved);
-    if (!pathIsAtOrInsideDirectory(existingReal, homeReal)) {
+    const homeReal = fs.realpathSync.native(homePath);
+    // The resolved value now carries the leaf, so containment is STRICT: the
+    // old at-or-inside allowance existed only because the ancestor walk could
+    // return home itself.
+    const physicalPrefix = realpathLongestAbsentTolerantPrefix(rawAbsolute);
+    if (!pathIsAtOrInsideDirectory(physicalPrefix, homeReal)) {
       jsonResponse(res, 400, { error });
       return null;
     }
@@ -716,19 +725,43 @@ function resolveHomeConfinedPath(inputPath: string, res: ServerResponse, error: 
   return resolved;
 }
 
+/**
+ * Converted to the same physical policy as resolveHomeConfinedPath.
+ *
+ * It previously used the JS `fs.realpathSync` for the home root and for the
+ * post-mkdir re-check, and it handed the old longest-existing-prefix walk the
+ * LEXICALLY collapsed `path.resolve` form. So the `..`-through-symlink escape
+ * survived at this call site even after the resolver itself was converted, and
+ * the walk let a dangling intermediate through. Both now use
+ * `fs.realpathSync.native` against the raw spelling.
+ */
 function ensureHomeConfinedDirectory(dirPath: string): void {
-  const resolved = path.resolve(dirPath);
   const homePath = path.resolve(os.homedir());
-  const homeReal = fs.realpathSync(homePath);
-  const existingReal = realpathExistingPrefix(resolved);
-  if (!pathIsInsideDirectory(resolved, homePath) || !pathIsAtOrInsideDirectory(existingReal, homeReal)) {
+  // Absolute WITHOUT normalising: `path.resolve` would collapse the `..` this
+  // check exists to catch.
+  const rawAbsolute = rawAbsolutePath(dirPath);
+  const refuse = (): never => {
     throw privateWriteError('directory must be within the home directory', 'EACCES');
+  };
+
+  let homeReal: string;
+  try {
+    homeReal = fs.realpathSync.native(homePath);
+    if (!pathIsAtOrInsideDirectory(realpathLongestAbsentTolerantPrefix(rawAbsolute), homeReal)) refuse();
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EACCES') throw err;
+    refuse();
   }
 
-  fs.mkdirSync(resolved, { recursive: true, mode: 0o700 });
-  const dirReal = fs.realpathSync(resolved);
-  if (!pathIsInsideDirectory(resolved, homePath) || !pathIsAtOrInsideDirectory(dirReal, homeReal)) {
-    throw privateWriteError('directory must be within the home directory', 'EACCES');
+  fs.mkdirSync(rawAbsolute, { recursive: true, mode: 0o700 });
+
+  // Re-check AFTER creation. The directory now exists, so there is no leaf
+  // tolerance left: it must resolve physically and wholly inside home.
+  try {
+    if (!pathIsInsideDirectory(fs.realpathSync.native(rawAbsolute), homeReal!)) refuse();
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EACCES') throw err;
+    refuse();
   }
 }
 
@@ -786,18 +819,71 @@ function resolveAndValidateAgentCwd(
 }
 
 /**
+ * Is this spelling already canonical — absolute, no `.`/`..` component, no
+ * redundant separators?
+ *
+ * Only applied to values that are rendered VERBATIM into the launchd service
+ * `PATH`. For those, containment at admission time is not enough: a `..`
+ * component is re-resolved by the kernel at exec time against whatever the
+ * filesystem looks like then, so a spelling that is in-home today can escape
+ * later if any leading component becomes a symlink. Refusing the spelling
+ * outright removes that whole class, and costs operators nothing because a
+ * canonical form always exists.
+ */
+function isCanonicalAbsolutePath(value: string): boolean {
+  if (!value.startsWith('/')) return false;
+  if (value !== path.posix.normalize(value)) return false;
+  return !value.split('/').some((segment) => segment === '.' || segment === '..');
+}
+
+/**
+ * Validate a list of filesystem paths as home-confined, returning the accepted
+ * canonical paths (never a rewritten value for the caller to persist — callers
+ * persist the operator's original spelling, which is why
+ * `requireCanonicalSpelling` exists).
+ *
+ * One helper for both callers: `agentOptions.pluginDirs` and the launchd
+ * `service` block ran near-identical loops over the same predicate, so a fix to
+ * one silently missed the other.
+ *
+ * `fieldFor(index)` names the offending field; the two messages are derived
+ * from it so a caller cannot drift them apart. Writes a 400 and returns null on
+ * the first violation.
+ */
+function validateHomeConfinedPathList(
+  values: readonly unknown[],
+  res: ServerResponse,
+  fieldFor: (index: number) => string,
+  options: { requireCanonicalSpelling?: boolean } = {},
+): string[] | null {
+  const accepted: string[] = [];
+  for (let i = 0; i < values.length; i++) {
+    const field = fieldFor(i);
+    const containmentError = `${field} must be within the home directory`;
+    const value = values[i];
+    if (typeof value !== 'string') {
+      jsonResponse(res, 400, { error: containmentError });
+      return null;
+    }
+    if (options.requireCanonicalSpelling && !isCanonicalAbsolutePath(value)) {
+      jsonResponse(res, 400, {
+        error: `${field} must be a normalized absolute path within the home directory`,
+      });
+      return null;
+    }
+    const safe = resolveHomeConfinedPath(value, res, containmentError);
+    if (safe === null) return null;
+    accepted.push(safe);
+  }
+  return accepted;
+}
+
+/**
  * Validate that every entry in pluginDirs is a string within the home directory.
  * Writes a 400 response and returns false on the first violation; returns true when valid.
  */
 function validatePluginDirs(dirs: unknown[], res: ServerResponse): boolean {
-  for (const dir of dirs) {
-    if (typeof dir !== 'string') {
-      jsonResponse(res, 400, { error: 'pluginDirs entries must be within the home directory' });
-      return false;
-    }
-    if (resolveHomeConfinedPath(dir, res, 'pluginDirs entries must be within the home directory') === null) return false;
-  }
-  return true;
+  return validateHomeConfinedPathList(dirs, res, () => 'pluginDirs entries') !== null;
 }
 
 /**
@@ -828,25 +914,16 @@ function validateServiceHomeConfinement(service: unknown, res: ServerResponse): 
 
   const claudeConfigDir = block['claudeConfigDir'];
   if (claudeConfigDir !== undefined) {
-    const error = 'service.claudeConfigDir must be within the home directory';
-    if (typeof claudeConfigDir !== 'string') {
-      jsonResponse(res, 400, { error });
-      return false;
-    }
-    if (resolveHomeConfinedPath(claudeConfigDir, res, error) === null) return false;
+    if (validateHomeConfinedPathList(
+      [claudeConfigDir], res, () => 'service.claudeConfigDir', { requireCanonicalSpelling: true },
+    ) === null) return false;
   }
 
   const pathPrepend = block['pathPrepend'];
   if (Array.isArray(pathPrepend)) {
-    for (let i = 0; i < pathPrepend.length; i++) {
-      const error = `service.pathPrepend[${i}] must be within the home directory`;
-      const entry = pathPrepend[i];
-      if (typeof entry !== 'string') {
-        jsonResponse(res, 400, { error });
-        return false;
-      }
-      if (resolveHomeConfinedPath(entry, res, error) === null) return false;
-    }
+    if (validateHomeConfinedPathList(
+      pathPrepend, res, (i) => `service.pathPrepend[${i}]`, { requireCanonicalSpelling: true },
+    ) === null) return false;
   }
 
   return true;
