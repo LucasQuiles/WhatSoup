@@ -143,10 +143,23 @@ const PHONE_RE = /\+?\d{7,}/g;
 // shape, deliberately left in place: consolidating them is a separate change,
 // not one to make inside a fix. Disclosed cost of the bound: a label glued to
 // more than 40 leading word characters is not recognised.
+// An HTTP authentication scheme can sit between the label and the credential.
+// It is consumed as part of the match, BEFORE the not-another-label guard, for
+// two reasons measured on this file: `Authorization: Basic <credential>` took
+// `Basic` as the value and left the credential in the clear, and
+// `Authorization: Bearer <short token>` matched nothing at all, because the
+// guard rejected the authorization branch and the separator-less floor then
+// rejected the short token.
+const AUTH_SCHEMES = 'bearer|basic';
+// A credential value runs to the next character that could end it. The token
+// class this replaced stopped at the first character outside [\w.~+/-], so
+// `password=Pw9@Xk2!Qm7` masked the leading `Pw9` and left the rest in the
+// clear. The excluded set matches the sibling redactors named above.
+const SECRET_VALUE = '[^\\s"\',;}\\\\]+';
 const SECRET_LABELS = 'bearer|api[_-]?key|authorization|token|secret|password|passphrase|pairing';
 const BEARER_RE = new RegExp(
   `\\b([A-Za-z0-9_]{0,40}(?:${SECRET_LABELS}))\\b`
-    + `(?:\\s*[:=]\\s*(?!(?:${SECRET_LABELS})\\b)["']?[\\w.~+/-]+={0,2}["']?`
+    + `(?:\\s*[:=]\\s*(?:(?:${AUTH_SCHEMES})\\s+)?(?!(?:${SECRET_LABELS})\\b)["']?${SECRET_VALUE}["']?`
     + `|\\s+["']?[\\w.~+/-]{8,}={0,2}["']?)`,
   'gi',
 );

@@ -837,6 +837,69 @@ describe('retained error text scrubs a label at the tail of a longer identifier'
   });
 });
 
+// ─── Credential shapes the label pattern alone did not reach ────────────────
+//
+// Three shapes were measured as leaking through the retained message, each for
+// a different reason:
+//
+// - `Authorization: Basic <value>` consumed the scheme word as the value and
+//   left the credential in the clear.
+// - `Authorization: Bearer <short>` was refused by the guard that stops one
+//   label being taken as another's value, and the separator-less floor then
+//   rejected the short token, so nothing matched at all.
+// - A value containing characters outside the token class stopped at the first
+//   of them, masking only the leading fragment and leaving the rest.
+//
+// The fourth is a regression pin rather than a fix: a compound underscore label
+// is already covered, because the glued-prefix run treats `client_` as prefix.
+
+describe('retained error text scrubs the wider credential shapes', () => {
+  const retained = (message: string) =>
+    ((sanitizeLogValue({ err: new Error(message) }) as Record<string, unknown>).err as Record<
+      string,
+      unknown
+    >).errorMessage as string;
+
+  // [case, message, the fragment that must not survive]
+  const WIDER_SHAPES: ReadonlyArray<readonly [string, string, string]> = [
+    [
+      'an Authorization header carrying the Basic scheme',
+      'request rejected Authorization: Basic QmFzaWNTZWNyZXQx at gate',
+      'QmFzaWNTZWNyZXQx',
+    ],
+    [
+      'an Authorization header carrying a six-character Bearer token',
+      'request rejected Authorization: Bearer SYN123 at gate',
+      'SYN123',
+    ],
+    [
+      'a value containing characters outside the token class',
+      'login failed password=Pw9@Xk2!Qm7 at gate',
+      'Xk2!Qm7',
+    ],
+    [
+      'a compound underscore label',
+      'exchange failed client_secret=K1l2M3n4O5p6 at gate',
+      'K1l2M3n4O5p6',
+    ],
+  ];
+
+  it('covers all four shapes, each with a distinct synthetic secret', () => {
+    // Coverage assertion: a shrunk table would otherwise pass silently.
+    expect(WIDER_SHAPES).toHaveLength(4);
+    expect(new Set(WIDER_SHAPES.map(([, , fragment]) => fragment)).size).toBe(4);
+  });
+
+  for (const [name, message, fragment] of WIDER_SHAPES) {
+    it(`scrubs ${name}`, () => {
+      const out = retained(message);
+      expect(out).not.toContain(fragment);
+      // The diagnostic frame must survive; scrubbing is not blanking.
+      expect(out).toContain('at gate');
+    });
+  }
+});
+
 describe('retained error text uses the canonical JID pattern (SSOT)', () => {
   const retained = (message: string) =>
     ((sanitizeLogValue({ err: new Error(message) }) as Record<string, unknown>).err as Record<
