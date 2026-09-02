@@ -503,6 +503,12 @@ export async function handleConfigUpdate(
       if (Array.isArray(mergedAo?.pluginDirs)) {
         if (!validatePluginDirs(mergedAo!.pluginDirs as unknown[], res)) haltConfigUpdateAfterResponse();
       }
+      // service-block home-confinement is fs-aware for the same reason, and runs
+      // on the MERGED view: a patch that leaves an out-of-home entry standing is
+      // refused even when the entry came from the existing config, matching the
+      // pluginDirs sibling. An instance already carrying one is therefore
+      // un-patchable until the entry is corrected.
+      if (!validateServiceHomeConfinement(merged.service, res)) haltConfigUpdateAfterResponse();
       if (patch.claudeMd && merged.type === 'agent') {
         // Invariant: resolveAndValidateAgentCwd() (called above whenever
         // merged.type === 'agent') always leaves agentOptions.cwd a validated
@@ -791,6 +797,58 @@ function validatePluginDirs(dirs: unknown[], res: ServerResponse): boolean {
     }
     if (resolveHomeConfinedPath(dir, res, 'pluginDirs entries must be within the home directory') === null) return false;
   }
+  return true;
+}
+
+/**
+ * Confine the launchd `service` block's filesystem fields — `claudeConfigDir`
+ * and every `pathPrepend` entry — to the instance user's home directory.
+ *
+ * Deliberately a ROUTE guard rather than a rule in
+ * `validateLaunchdServiceConfig` (src/lib/launchd-service-config.ts): that
+ * validator is the shared shape contract and also runs on config *load* and on
+ * render admission (assertValidLaunchdPlistRenderOptions ->
+ * reconcileLaunchdPlist, src/fleet/platform.ts), so rejecting an out-of-home
+ * value there would stop an instance that already persisted one from loading
+ * at all. Confining at admission closes the ingress for new writes and leaves
+ * already-persisted values loadable; sweeping those is separate work.
+ *
+ * Runs after the shared validator, so shape (absolute, bounded, no control
+ * characters, no ':') is already guaranteed; the typeof guards are
+ * defense-in-depth for callers that reorder the checks. Values are validated,
+ * never rewritten, so a config round-trips verbatim.
+ *
+ * Writes a 400 and returns false on the first violation; returns true when the
+ * block is absent or entirely home-confined. Mirrors validatePluginDirs above.
+ */
+function validateServiceHomeConfinement(service: unknown, res: ServerResponse): boolean {
+  if (service === undefined || service === null) return true;
+  if (typeof service !== 'object' || Array.isArray(service)) return true; // shape validator owns this
+  const block = service as Record<string, unknown>;
+
+  const claudeConfigDir = block['claudeConfigDir'];
+  if (claudeConfigDir !== undefined) {
+    const error = 'service.claudeConfigDir must be within the home directory';
+    if (typeof claudeConfigDir !== 'string') {
+      jsonResponse(res, 400, { error });
+      return false;
+    }
+    if (resolveHomeConfinedPath(claudeConfigDir, res, error) === null) return false;
+  }
+
+  const pathPrepend = block['pathPrepend'];
+  if (Array.isArray(pathPrepend)) {
+    for (let i = 0; i < pathPrepend.length; i++) {
+      const error = `service.pathPrepend[${i}] must be within the home directory`;
+      const entry = pathPrepend[i];
+      if (typeof entry !== 'string') {
+        jsonResponse(res, 400, { error });
+        return false;
+      }
+      if (resolveHomeConfinedPath(entry, res, error) === null) return false;
+    }
+  }
+
   return true;
 }
 
@@ -1170,6 +1228,15 @@ export async function handleCreateLine(
       return;
     }
   }
+
+  // service-block home-confinement (fs-aware, so not in the shared validator).
+  // Placed outside the `type === 'agent'` block above that holds the pluginDirs
+  // sibling: `service` is type-agnostic, so an out-of-home prepend on a chat or
+  // passive instance must be refused too. Reads the assembled `config` rather
+  // than `body` so it sees the post-passthrough, post-strip view that is about
+  // to be written. Runs before the first mkdir, so a refusal leaves no
+  // partially-created instance.
+  if (!validateServiceHomeConfinement(config['service'], res)) return;
 
   // --- Create directories ---
   const createdExtras: ExtraRecord[] = [];
