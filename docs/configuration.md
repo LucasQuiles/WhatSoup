@@ -546,10 +546,45 @@ config-owned and regeneration-safe:
 }
 ```
 
+#### `WHATSOUP_PATH_PREPEND` (second rendered surface of `pathPrepend`)
+
+`service.pathPrepend` stays the single source of truth; the plist carries it
+twice because the launcher cannot recover it from `PATH` alone. `deploy/whatsoup`
+sources `deploy/lib/runtime-path.sh`, which receives one already-joined `PATH`
+string with no marker separating a governed prefix from an ambient entry — so
+honouring the prepend launcher-side would mean reordering the composition for
+every caller on every host. The dedicated key gives the launcher, the drift
+comparator and the daily health probe a typed value to read instead:
+
+```xml
+<key>EnvironmentVariables</key>
+<dict>
+  <key>PATH</key>
+  <string>/opt/pinned-cli/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+  <key>WHATSOUP_PATH_PREPEND</key>
+  <string>/opt/pinned-cli/bin</string>
+</dict>
+```
+
+A configured prepend therefore appears **twice** in the effective runtime PATH,
+once from the key and once inside the plist `PATH`:
+`<prepend>:$HOME/.local/bin:<node-dir>:<prepend>:<ambient>`. First match wins, so
+the launcher and the probe resolve the same binary; the duplicate is accepted
+deliberately rather than removed by string surgery in the launcher.
+
+**Colon footgun.** An empty `PATH` entry means the *current directory*, so a
+value with a leading, trailing, or doubled colon would put the working directory
+ahead of every system binary on a service PATH. Config admission already rejects
+empty entries and entries containing `:`, and the shared helper independently
+fails closed on a hand-set `WHATSOUP_PATH_PREPEND` containing one, printing a
+`FATAL:` line and refusing to start the instance. Set the value through
+`service.pathPrepend`, never by hand-editing the plist: the key is governed, so
+`reconcile-launchd-restart-policy --apply` overwrites a hand-added value.
+
 | Field | Type | Rules | Effect |
 |-------|------|-------|--------|
 | `claudeConfigDir` | string | absolute path; no surrounding whitespace or control characters | Rendered as `CLAUDE_CONFIG_DIR` so the launchd service context resolves the same dedicated claude-cli config root as interactive use of that root (e.g. an isolated per-bot root such as `$HOME/.claude-<instance>`). Omitted → the key is not rendered. The block governs only which config root the service resolves; it does not create or copy credentials (the CLI keeps those keychain-resident). |
-| `pathPrepend` | string[] | at most 16 entries; each an absolute path without `:` or control characters | Prepended in order ahead of the generating shell's ambient `PATH` in the rendered service `PATH` (e.g. `$HOME/.local/bin` so a fallback provider binary resolves under launchd). Omitted or empty → byte-identical `PATH` to the historical render. |
+| `pathPrepend` | string[] | at most 16 entries; each an absolute path without `:` or control characters | Rendered onto **two** surfaces of the same plist: prepended in order ahead of the generating shell's ambient `PATH` in the service `PATH` (e.g. `$HOME/.local/bin` so a fallback provider binary resolves under launchd), **and** joined with `:` into a second governed key `WHATSOUP_PATH_PREPEND`. Omitted or empty → neither surface changes and the plist is byte-identical to the historical render. |
 | `expectedAccountDigest` | string | `sha256:<64 lowercase hex>` exactly, produced by `npm run --silent claude-account-digest` (the `--silent` matters — see the capture procedure); agent instances with `agentOptions.provider` `claude-cli` (the default) only — rejected elsewhere | Not a render key (never reaches the plist; applies on every platform). The ratified account identity the runtime verifies against; see [Ratified account identity](#ratified-account-identity-serviceexpectedaccountdigest). A raw email or organization id is rejected at admission on every path (create / PATCH / load / discovery). Omitted → verification disabled (one info log line at the first probe). |
 
 One source of truth: the shape rules live in `src/lib/launchd-service-config.ts`
@@ -569,7 +604,8 @@ block with `"service": null` and re-add the fields you want, or edit
 `config.json` directly.
 
 Reconciliation (`npm run reconcile-launchd-restart-policy -- --instance <name>`)
-additionally reports governed-key drift (`CLAUDE_CONFIG_DIR`, `PATH`) between
+additionally reports governed-key drift (`CLAUDE_CONFIG_DIR`, `PATH`,
+`WHATSOUP_PATH_PREPEND`) between
 the fresh render and the installed plist by key and SHA-256 value digest —
 never by value; installed bot plists carry live credentials. `PATH` is
 decomposed into the config-owned prefix (does the installed `PATH` start with
@@ -1529,7 +1565,14 @@ When deploying an instance config that uses `fallbackProvider` or `fallbacks` to
    the effective provider PATH through `deploy/lib/runtime-path.sh`, including
    the launcher's `$HOME/.local/bin` and pinned-Node prefixes. This second step
    prevents a matching static LaunchAgent PATH from hiding a runtime-only
-   binary shadow or ordering change.
+   binary shadow or ordering change. The probe passes the plist's
+   `WHATSOUP_PATH_PREPEND` to that helper as its fourth argument, exactly as the
+   launcher does, so a governed prepend cannot be honoured by the service and
+   ignored by the probe. It also compares the prepend the plist declares against
+   the one the loaded job carries (`provider_runtime_path_prepend_mismatch`) and
+   checks that a declared prepend actually leads the plist's own `PATH`
+   (`provider_runtime_path_prepend_inconsistent`); both remediate by
+   regenerating and reloading the LaunchAgent.
 
 2. **Provision the provider API key** via one of three portable routes. Runtime
    lookup order is environment variable, private WhatSoup credential file,

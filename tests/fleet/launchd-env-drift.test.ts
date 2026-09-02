@@ -235,6 +235,64 @@ describe('compareGovernedLaunchdEnv', () => {
     }]);
   });
 
+  it('reports a configured PATH prepend that the installed plist never rendered as missing', () => {
+    // A host configured with service.pathPrepend whose installed plist predates
+    // the governed key: this must read as drift, not as "no drift".
+    const expected = plistWithEnv({
+      PATH: '/opt/bin:/usr/bin',
+      WHATSOUP_PATH_PREPEND: '/opt/bin',
+    });
+    const observed = plistWithEnv({ PATH: '/opt/bin:/usr/bin' });
+
+    const comparison = compareGovernedLaunchdEnv(expected, observed, { pathPrepend: ['/opt/bin'] });
+
+    expect(comparison.comparable).toBe(true);
+    expect(comparison.drift).toEqual([{
+      key: 'WHATSOUP_PATH_PREPEND',
+      state: 'missing',
+      expectedDigest: sha256('/opt/bin'),
+      observedDigest: null,
+    }]);
+    // The key is governed now, so it must never be reported as a dropped
+    // non-governed key -- that is what would refuse --apply on affected hosts.
+    expect(comparison.droppedNonGovernedKeys).toEqual([]);
+  });
+
+  it('reports no drift when the installed plist carries the same governed PATH prepend', () => {
+    const expected = plistWithEnv({
+      PATH: '/opt/bin:/usr/bin',
+      WHATSOUP_PATH_PREPEND: '/opt/bin',
+    });
+    const observed = plistWithEnv({
+      PATH: '/opt/bin:/usr/bin',
+      WHATSOUP_PATH_PREPEND: '/opt/bin',
+    });
+
+    const comparison = compareGovernedLaunchdEnv(expected, observed, { pathPrepend: ['/opt/bin'] });
+
+    expect(comparison.drift).toEqual([]);
+    expect(comparison.droppedNonGovernedKeys).toEqual([]);
+  });
+
+  it('reports a hand-added PATH prepend with no config source as governed extra drift', () => {
+    const expected = plistWithEnv({ PATH: '/usr/bin' });
+    const observed = plistWithEnv({ PATH: '/usr/bin', WHATSOUP_PATH_PREPEND: '/opt/hand-added-bin' });
+
+    const comparison = compareGovernedLaunchdEnv(expected, observed);
+
+    expect(comparison.drift).toEqual([{
+      key: 'WHATSOUP_PATH_PREPEND',
+      state: 'extra',
+      expectedDigest: null,
+      observedDigest: sha256('/opt/hand-added-bin'),
+    }]);
+    // Behaviour change disclosed in the PR body: before this key was governed a
+    // hand-added value refused --apply as a non-governed drop; now --apply
+    // overwrites it.
+    expect(comparison.droppedNonGovernedKeys).toEqual([]);
+    expect(JSON.stringify(comparison)).not.toContain('hand-added-bin');
+  });
+
   it('fails closed when an EnvironmentVariables dict exists but cannot be parsed', () => {
     const expected = plistWithEnv({ PATH: '/usr/bin' });
     const observed = [

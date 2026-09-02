@@ -698,3 +698,243 @@ def test_watchdog_currency_inventory_skips_missing(monkeypatch, tmp_path):
     monkeypatch.setattr(_mod.Path, "home", lambda: tmp_path)
     (tmp_path / ".local" / "bin").mkdir(parents=True)
     assert _mod.watchdog_currency_inventory(["yl-bot"]) == []
+
+
+# --- governed runtime PATH prepend: probe/launcher binary-selection parity ---
+#
+# The launcher (deploy/whatsoup -> whatsoup_export_runtime_path) reads
+# WHATSOUP_PATH_PREPEND out of the LaunchAgent environment; the probe composes
+# the effective PATH itself. These tests pin that BOTH sides select the same
+# binary, using two independent code paths: the launcher side shells out to the
+# real helper, the probe side goes through effective_instance_provider_path +
+# executable_candidate. BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH is deliberately
+# unset -- setting it short-circuits the helper at :4322 and the comparison
+# becomes vacuous.
+
+
+def _write_shadow(directory: Path, name: str) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    target = directory / name
+    target.write_text("#!/bin/sh\nexit 0\n")
+    target.chmod(0o755)
+    return target
+
+
+def _prepend_fixture(tmp_path: Path) -> dict[str, str]:
+    """Synthetic instance environment as a governed plist would render it.
+
+    PATH is `<prepend>:<ambient>` exactly as buildPlist composes it, and
+    WHATSOUP_PATH_PREPEND carries the same governed prefix.
+    """
+    home = tmp_path / "home"
+    prepend_bin = tmp_path / "pin" / "bin"
+    ambient_bin = tmp_path / "ambient" / "bin"
+    node_bin = tmp_path / "node" / "bin"
+    (home / ".local" / "bin").mkdir(parents=True, exist_ok=True)
+    prepend_bin.mkdir(parents=True, exist_ok=True)
+    ambient_bin.mkdir(parents=True, exist_ok=True)
+    _write_shadow(node_bin, "node")
+    return {
+        "HOME": str(home),
+        "PATH": f"{prepend_bin}:{ambient_bin}:/usr/bin:/bin",
+        "WHATSOUP_NODE": str(node_bin / "node"),
+        "WHATSOUP_PATH_PREPEND": str(prepend_bin),
+    }
+
+
+def _launcher_resolved(command_name: str, environment: dict[str, str]) -> str:
+    """Resolve a command the way the launcher does, through the real helper."""
+    import subprocess
+
+    helper = _mod.REPO_ROOT / "deploy" / "lib" / "runtime-path.sh"
+    proc = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            '. "$1"; whatsoup_export_runtime_path "$HOME" "$2" || exit 1; command -v "$3"',
+            "runtime-path",
+            str(helper),
+            environment["WHATSOUP_NODE"],
+            command_name,
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=15,
+        check=False,
+        env=dict(environment),
+    )
+    assert proc.returncode == 0, f"launcher-side resolution failed: {proc.stderr}"
+    resolved = proc.stdout.strip()
+    assert resolved, "launcher-side resolution produced no path"
+    return resolved
+
+
+def test_probe_and_launcher_select_the_same_opencode_under_a_governed_prepend(
+    monkeypatch, tmp_path
+):
+    monkeypatch.delenv("BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH", raising=False)
+    environment = _prepend_fixture(tmp_path)
+    prepend_bin = tmp_path / "pin" / "bin"
+    local_bin = tmp_path / "home" / ".local" / "bin"
+    # Shadow in BOTH: the governed pin and the auto-updating ~/.local/bin.
+    _write_shadow(prepend_bin, "opencode")
+    _write_shadow(local_bin, "opencode")
+
+    effective = _mod.effective_instance_provider_path(environment)
+    assert effective is not None, "effective provider PATH was not composed"
+    # Vacuity guard: proves the shared helper actually ran rather than the
+    # dry-run short circuit returning the inherited PATH unchanged.
+    assert str(tmp_path / "node" / "bin") in effective
+
+    probe_side = _mod.executable_candidate("opencode", effective)
+    launcher_side = _launcher_resolved("opencode", environment)
+
+    assert probe_side == str(prepend_bin / "opencode")
+    assert probe_side == launcher_side
+
+
+def test_claude_cli_probe_resolves_the_command_from_the_effective_provider_path(
+    monkeypatch, tmp_path
+):
+    monkeypatch.delenv("BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH", raising=False)
+    environment = _prepend_fixture(tmp_path)
+    prepend_bin = tmp_path / "pin" / "bin"
+    probe_bin = tmp_path / "probe" / "bin"
+    _write_shadow(prepend_bin, "claude")
+    _write_shadow(probe_bin, "claude")
+    # The probe process's OWN PATH carries a different claude; resolving from it
+    # is exactly the defect under test.
+    monkeypatch.setenv("PATH", f"{probe_bin}:/usr/bin:/bin")
+    monkeypatch.setattr(_mod, "loaded_instance_environment", lambda name: dict(environment))
+
+    captured: list[list[str]] = []
+
+    def _fake_output(command, *args, **kwargs):
+        captured.append(list(command))
+        return ("OK", "", 0, False)
+
+    monkeypatch.setattr(_mod, "provider_command_output", _fake_output)
+
+    _mod.provider_probe_target_inventory(
+        {},
+        {},
+        "agent-alpha",
+        {"type": "agent", "agentOptions": {"provider": "claude-cli"}},
+        "claude-cli",
+        "primary",
+    )
+
+    assert captured, "claude-cli probe never invoked the provider command"
+    assert captured[0][0] == str(prepend_bin / "claude")
+    assert captured[0][0] == _launcher_resolved("claude", environment)
+
+
+def test_claude_cli_probe_keeps_an_explicit_operator_probe_command(monkeypatch, tmp_path):
+    monkeypatch.delenv("BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH", raising=False)
+    environment = _prepend_fixture(tmp_path)
+    _write_shadow(tmp_path / "pin" / "bin", "claude")
+    monkeypatch.setattr(_mod, "loaded_instance_environment", lambda name: dict(environment))
+
+    captured: list[list[str]] = []
+
+    def _fake_output(command, *args, **kwargs):
+        captured.append(list(command))
+        return ("OK", "", 0, False)
+
+    monkeypatch.setattr(_mod, "provider_command_output", _fake_output)
+
+    _mod.provider_probe_target_inventory(
+        {},
+        {"providerProbeCommand": "/fixture/operator/bin/claude"},
+        "agent-alpha",
+        {"type": "agent", "agentOptions": {"provider": "claude-cli"}},
+        "claude-cli",
+        "primary",
+    )
+
+    assert captured, "claude-cli probe never invoked the provider command"
+    assert captured[0][0] == "/fixture/operator/bin/claude"
+
+
+def test_instance_provider_path_prepend_match_treats_both_absent_as_equal():
+    assert _mod.instance_provider_path_prepend_match(None, None)
+    assert _mod.instance_provider_path_prepend_match("", None)
+    assert _mod.instance_provider_path_prepend_match(None, "")
+    assert _mod.instance_provider_path_prepend_match("/fixture/pin/bin", "/fixture/pin/bin")
+    assert not _mod.instance_provider_path_prepend_match("/fixture/pin/bin", None)
+    assert not _mod.instance_provider_path_prepend_match(None, "/fixture/pin/bin")
+    assert not _mod.instance_provider_path_prepend_match("/fixture/pin/bin", "/fixture/other/bin")
+
+
+def _opencode_probe_lines(monkeypatch, *, generated_path, plist_prepend, loaded_environment):
+    monkeypatch.delenv("BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH", raising=False)
+    monkeypatch.setattr(_mod, "HOST_PLATFORM", "darwin")
+    monkeypatch.setattr(_mod, "instance_provider_path", lambda name: generated_path)
+    monkeypatch.setattr(_mod, "instance_provider_path_prepend", lambda name: plist_prepend)
+    monkeypatch.setattr(_mod, "loaded_instance_environment", lambda name: dict(loaded_environment))
+    monkeypatch.setattr(
+        _mod, "effective_instance_provider_path", lambda environment: "/fixture/pin/bin:/usr/bin:/bin"
+    )
+    monkeypatch.setattr(
+        _mod, "executable_candidate", lambda command, path_value=None: "/fixture/pin/bin/opencode"
+    )
+    return _mod.opencode_provider_probe_inventory(
+        {},
+        {},
+        "agent-alpha",
+        {"type": "agent", "agentOptions": {"provider": "opencode-cli", "model": "xai/grok-4"}},
+        "opencode-cli",
+    )
+
+
+def test_opencode_probe_fails_when_the_loaded_job_lacks_the_declared_prepend(monkeypatch):
+    lines = _opencode_probe_lines(
+        monkeypatch,
+        generated_path="/fixture/pin/bin:/usr/bin:/bin",
+        plist_prepend="/fixture/pin/bin",
+        loaded_environment={"PATH": "/fixture/pin/bin:/usr/bin:/bin", "HOME": "/fixture/user-root"},
+    )
+    assert "failure_class=provider_runtime_path_prepend_mismatch" in lines[0]
+    assert "remediation=regenerate_and_reload_the_instance_launchagent" in lines[0]
+
+
+def test_opencode_probe_fails_when_the_declared_prepend_does_not_lead_its_own_path(monkeypatch):
+    lines = _opencode_probe_lines(
+        monkeypatch,
+        generated_path="/usr/bin:/bin",
+        plist_prepend="/fixture/pin/bin",
+        loaded_environment={
+            "PATH": "/usr/bin:/bin",
+            "HOME": "/fixture/user-root",
+            "WHATSOUP_PATH_PREPEND": "/fixture/pin/bin",
+        },
+    )
+    assert "failure_class=provider_runtime_path_prepend_inconsistent" in lines[0]
+
+
+def test_opencode_probe_passes_the_prepend_checks_when_plist_and_job_agree(monkeypatch):
+    lines = _opencode_probe_lines(
+        monkeypatch,
+        generated_path="/fixture/pin/bin:/usr/bin:/bin",
+        plist_prepend="/fixture/pin/bin",
+        loaded_environment={
+            "PATH": "/fixture/pin/bin:/usr/bin:/bin",
+            "HOME": "/fixture/user-root",
+            "WHATSOUP_PATH_PREPEND": "/fixture/pin/bin",
+        },
+    )
+    assert "provider_runtime_path_prepend" not in "\n".join(lines)
+
+
+def test_opencode_functional_probe_env_retains_the_governed_prepend():
+    child = _mod.opencode_functional_probe_env(
+        {"type": "agent", "agentOptions": {"provider": "opencode-cli"}},
+        "primary",
+        2,
+        "/fixture/pin/bin:/fixture/user-root/.local/bin",
+        "agent-alpha",
+        None,
+        {"PATH": "/fixture/pin/bin:/usr/bin", "WHATSOUP_PATH_PREPEND": "/fixture/pin/bin"},
+    )
+    assert child.get("WHATSOUP_PATH_PREPEND") == "/fixture/pin/bin"

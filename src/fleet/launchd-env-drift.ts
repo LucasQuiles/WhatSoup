@@ -4,14 +4,15 @@
  * Installed bot plists carry live credentials in EnvironmentVariables
  * (observed on the fleet), so their content is NEVER printed, diffed, or
  * embedded in a report. This comparator inspects the governed key set
- * (CLAUDE_CONFIG_DIR, PATH) and reports presence plus SHA-256 value digests —
- * enough to detect missing/extra/mismatched governed keys without exposing a
- * single environment value. Non-governed keys contribute only their NAMES,
- * and only when a re-render would drop them from the job.
+ * (CLAUDE_CONFIG_DIR, PATH, WHATSOUP_PATH_PREPEND) and reports presence plus
+ * SHA-256 value digests — enough to detect missing/extra/mismatched governed
+ * keys without exposing a single environment value. Non-governed keys
+ * contribute only their NAMES, and only when a re-render would drop them from
+ * the job.
  */
 import { createHash } from 'node:crypto';
 
-export const GOVERNED_LAUNCHD_ENV_KEYS = ['CLAUDE_CONFIG_DIR', 'PATH'] as const;
+export const GOVERNED_LAUNCHD_ENV_KEYS = ['CLAUDE_CONFIG_DIR', 'PATH', 'WHATSOUP_PATH_PREPEND'] as const;
 
 export type GovernedLaunchdEnvKey = (typeof GOVERNED_LAUNCHD_ENV_KEYS)[number];
 
