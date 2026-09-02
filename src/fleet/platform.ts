@@ -545,19 +545,27 @@ export async function reconcileLaunchdPlist(
 /** Install a newly authenticated instance without loading any pre-auth job. */
 async function installLaunchdPlist(name: string): Promise<void> {
   // Resolve (and thereby validate) the instance's render options before any
-  // filesystem mutation so an invalid service block aborts the install whole.
-  // Shape is validated inside the resolver, which throws before anything is
-  // written. An explicit assertion here would be unreachable: this path takes
-  // no caller-supplied renderOptions override, unlike reconcileLaunchdPlist,
-  // so the resolver is always what refuses. The install-time refusal is pinned
-  // by "fails a first install closed when the instance service block is
-  // invalid" in tests/fleet/platform-service-manager.test.ts.
+  // filesystem mutation, so an invalid service block aborts the install whole.
+  // The resolver throws on a bad shape before anything is written, and the
+  // install-time refusal is pinned by "fails a first install closed when the
+  // instance service block is invalid" in
+  // tests/fleet/platform-service-manager.test.ts.
   const renderOptions = resolveLaunchdPlistRenderOptions(name);
-  // Second render call site. reconcileLaunchdPlist has always asserted render
-  // option shape here; this one never did, so `assertValidLaunchdPlistRenderOptions`
-  // had exactly one caller in src/ and the install path rendered unasserted.
-  // Shape only: home confinement at render admission is a separate, larger
-  // change and is deliberately NOT added here.
+  // This is the second render call site, and until now the only unasserted one:
+  // reconcileLaunchdPlist has always asserted render-option shape, so
+  // assertValidLaunchdPlistRenderOptions had exactly one caller in src/.
+  //
+  // Both rules run here, and they are not redundant. Confinement judges WHERE a
+  // path points; shape judges the string itself. An in-home pathPrepend entry
+  // carrying a ':' passes confinement and still corrupts the colon-separated
+  // PATH, so neither rule subsumes the other.
+  //
+  // The shape assertion is unreachable only while the resolver is the sole
+  // supplier of options, which is true today because this path takes no
+  // caller-supplied override. It becomes load-bearing the moment anything
+  // supplies options the resolver did not validate.
+  // tests/fleet/platform-install-shape-reachability.test.ts measures exactly
+  // that, with a pair of contradictory probes.
   assertValidLaunchdPlistRenderOptions(renderOptions);
   assertHomeConfinedRenderOptions(renderOptions);
   const dest = plistPath(name);
