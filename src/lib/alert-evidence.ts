@@ -20,6 +20,14 @@
  * - ``length``: raw character count of the original string.
  * - ``correlationDigest``: a domain-separated SHA-256 hex digest of
  *   the original content — deterministic, non-reversible, for dedup.
+ * - ``conversationScope`` (see {@link confineConversationScope}): a bounded,
+ *   domain-separated digest of the conversation a per-conversation fault
+ *   belongs to. Emitted as its own event field, never inside prose. It exists
+ *   because the bot-errors dispatcher keys incidents on
+ *   machine|instance|source and otherwise cannot tell one wedged conversation
+ *   from another under the same instance — so one chat's open incident
+ *   silently absorbs every other chat's outage. The digest is the smallest
+ *   value that restores that distinction without shipping an identifier.
  *
  * ## What is stripped
  *
@@ -117,4 +125,36 @@ export function confineAlertContent(
     length: raw.length,
     correlationDigest: digestContent(domain, raw),
   };
+}
+
+/**
+ * Hex length of an emitted conversation digest. Matches the dispatcher's
+ * existing ``incident_source_fingerprint`` convention (16 hex chars), which
+ * is what the incident-state file is already sized and validated for.
+ */
+const CONVERSATION_SCOPE_HEX_LENGTH = 16;
+
+/**
+ * Project a raw conversation identifier into a bounded, non-reversible scope
+ * digest.
+ *
+ * Uses the same slow KDF as {@link confineAlertContent} under its own domain
+ * salt. That choice is deliberate rather than incidental: a conversation
+ * identifier is a small, enumerable space (a phone-number-shaped local part),
+ * so a bare SHA-256 would be reversible by exhaustion. Domain separation also
+ * keeps this digest from colliding with an evidence or summary digest of the
+ * same bytes.
+ *
+ * Returns ``null`` — never an empty string or a placeholder — when the caller
+ * has no conversation, so the field can be omitted from the event entirely and
+ * the emitted shape stays backward compatible.
+ *
+ * @param conversationKey - raw conversation identifier (never emitted)
+ */
+export function confineConversationScope(
+  conversationKey: string | undefined | null,
+): string | null {
+  const trimmed = conversationKey?.trim() ?? '';
+  if (trimmed.length === 0) return null;
+  return digestContent('conversation', trimmed).slice(0, CONVERSATION_SCOPE_HEX_LENGTH);
 }

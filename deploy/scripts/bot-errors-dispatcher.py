@@ -358,6 +358,50 @@ MAINTENANCE_ENABLED = env_flag("BOT_ERRORS_MAINTENANCE_WINDOWS", True)
 TRANSIENT_TIERING_ENABLED = env_flag("BOT_ERRORS_TRANSIENT_TIERING", True)
 TRANSIENT_PROMOTE_SECONDS = positive_env_int("BOT_ERRORS_TRANSIENT_PROMOTE_SECONDS", 30 * 60)
 
+# Per-conversation incident scoping.
+#
+# incident_key() is machine|instance|source. For a fault that belongs to ONE
+# conversation that key is too coarse: the first conversation to fail opens the
+# incident, and every LATER conversation failing under the same instance is
+# filed as a duplicate of it. A chat that goes permanently dead therefore
+# produces no operator signal at all, because a different chat already holds
+# the incident open.
+#
+# The fix does NOT change the key (see the note on clears below). Instead, an
+# alert naming a conversation that the open incident does not yet represent
+# forces one notification, and the conversation is remembered so its own
+# repeats keep deduplicating normally.
+#
+# Why not put the conversation IN the key: a recovery is emitted as
+# clearAlertSource(instance, source) and has no conversation to hash, so a
+# conversation-scoped key would make every clear miss every open incident and
+# the incidents would never close. Keeping the key stable also means existing
+# incident-state files keep working with no migration.
+#
+# The conversation arrives as `conversationScope`, a bounded non-reversible
+# digest minted at the emission boundary (src/lib/alert-evidence.ts). This
+# process never sees a raw identifier.
+CONVERSATION_SCOPED_SOURCES = {
+    item.strip()
+    for item in os.environ.get(
+        "BOT_ERRORS_CONVERSATION_SCOPED_SOURCES", "agent_turn_admission_rejected"
+    ).split(",")
+    if item.strip()
+}
+# Bounded like flapState["seenEventIds"]: prune by age, then hard-cap by count
+# (dropping the oldest), so the state file cannot grow without limit on a host
+# with many conversations.
+CONVERSATION_SCOPE_RETENTION_SECONDS = positive_env_int(
+    "BOT_ERRORS_CONVERSATION_SCOPE_RETENTION_SECONDS", 7 * 24 * 3600
+)
+CONVERSATION_SCOPE_MAX_PER_KEY = positive_env_int(
+    "BOT_ERRORS_CONVERSATION_SCOPE_MAX_PER_KEY", 256
+)
+# Emitted digests are lowercase hex. Anything else is not trusted into state:
+# an unexpected shape is far more likely to be a raw identifier from a
+# mis-wired emitter than a usable scope.
+CONVERSATION_SCOPE_RE = re.compile(r"^[0-9a-f]{8,64}$")
+
 # #2409 — cause-aware disposition for health_body_degraded. The producer emits a
 # bounded degradation-cause vector; the registered per-cause policy decides
 # whether a connected degradation is a soft-fault hold or a visible outage.
@@ -1950,6 +1994,81 @@ def force_notify_level(event: dict[str, Any]) -> str | None:
     return safe_segment(str(diagnostics.get("forceNotifyLevel") or "default"))
 
 
+def event_conversation_scope(event: dict[str, Any]) -> str | None:
+    """The bounded conversation digest carried by this event, if any.
+
+    Returns None for every event that predates the field, for a source that is
+    not conversation-scoped, and for any value that is not a bare hex digest.
+    None always means "behave exactly as before".
+    """
+    if str(event.get("source") or "") not in CONVERSATION_SCOPED_SOURCES:
+        return None
+    value = event.get("conversationScope")
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip().lower()
+    return candidate if CONVERSATION_SCOPE_RE.match(candidate) else None
+
+
+def conversation_scope_is_unrepresented(
+    event: dict[str, Any], incident_state: dict[str, Any], key: str, current: int
+) -> bool:
+    """Record this event's conversation under `key`; True if it is new there.
+
+    Recording happens whether or not the event ends up being sent, so the
+    FIRST alert for a conversation registers it and that conversation's own
+    repeats then dedupe through the ordinary open-incident path.
+    """
+    digest = event_conversation_scope(event)
+    if digest is None:
+        return False
+    scopes = incident_state.setdefault("conversationScopes", {})
+    if not isinstance(scopes, dict):
+        scopes = {}
+        incident_state["conversationScopes"] = scopes
+    seen = scopes.get(key)
+    if not isinstance(seen, dict):
+        seen = {}
+        scopes[key] = seen
+    for stale in [
+        item
+        for item, at in seen.items()
+        if not isinstance(at, (int, float))
+        or current - at > CONVERSATION_SCOPE_RETENTION_SECONDS
+    ]:
+        seen.pop(stale, None)
+    already = digest in seen
+    seen[digest] = current
+    if len(seen) > CONVERSATION_SCOPE_MAX_PER_KEY:
+        for oldest in sorted(seen, key=lambda item: seen[item])[
+            : len(seen) - CONVERSATION_SCOPE_MAX_PER_KEY
+        ]:
+            seen.pop(oldest, None)
+    for empty in [item for item, values in scopes.items() if not values]:
+        scopes.pop(empty, None)
+    return not already
+
+
+def note_conversation_scope_notify(
+    open_record: Any, event: dict[str, Any], current: int
+) -> None:
+    """Keep an open incident's bookkeeping honest after a forced notification.
+
+    Without this the still-open reminder cadence would not see the send and
+    could re-page moments later.
+    """
+    if not isinstance(open_record, dict):
+        return
+    open_record["lastSeenAt"] = current
+    open_record["lastSeenIso"] = now_iso()
+    open_record["lastEventId"] = event.get("id")
+    open_record["lastNotifiedAt"] = current
+    open_record["lastNotifiedIso"] = now_iso()
+    open_record["conversationScopeNotifyCount"] = (
+        int_field(open_record, "conversationScopeNotifyCount") + 1
+    )
+
+
 def int_field(record: dict[str, Any], key: str, fallback: int = 0) -> int:
     try:
         return int(record.get(key) or fallback)
@@ -2517,6 +2636,7 @@ def format_event(event: dict[str, Any]) -> str:
         event_line("source", event.get("source")),
         event_line("alert_source", event.get("alertSource")),
         event_line("incident_key", incident_key(event)),
+        event_line("conversation_scope", event.get("conversationScope")),
         event_line("asset_kind", asset.get("kind")),
         event_line("failure_code", failure.get("code")),
         event_line("failure_domain", failure.get("domain")),
@@ -2881,6 +3001,25 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
             f"symptom incident {key} suppressed because stronger incident "
             f"{stronger_key} remains open (inhibited_by:{root_source})"
         )
+    # Per-conversation scoping: a conversation this incident does not yet
+    # represent is a DIFFERENT outage, not a duplicate of the one already open.
+    # Placed here so it unmasks both paths that would otherwise silence it —
+    # the open-incident duplicate branch and the post-close cooldown below —
+    # while leaving root-cause inhibition (above) and flap-storm consolidation
+    # (Pattern F, above) in charge as before. An open storm therefore still
+    # consolidates a new conversation's first rejection; the storm alert
+    # already carries the rate, and widening past it is a separate change.
+    # FAIL TOWARD TODAY'S BEHAVIOUR: any error here forces nothing.
+    if is_incident_alert(event) and not is_incident_clear(event):
+        try:
+            unrepresented = conversation_scope_is_unrepresented(
+                event, incident_state, key, current
+            )
+        except Exception:
+            unrepresented = False
+        if unrepresented:
+            note_conversation_scope_notify(open_incidents.get(key), event, current)
+            return None
     if is_incident_alert(event):
         # Pattern D — hold a transient soft-fault at warning tier; only a
         # transient that persists past TRANSIENT_PROMOTE_SECONDS promotes back to
