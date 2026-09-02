@@ -97,7 +97,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "f946ea1cb954ecec9fa17c19ae8925e2f8d300d145dfbb1d69321b8e9ce638dc",
+      "sha256": "af6537a46f60cf40508704475407f898913016bb8c2ae4d5940584da4fee2e7f",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
