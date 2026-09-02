@@ -31,6 +31,15 @@ def _append(module, path: Path, record: dict, max_bytes: int = 4096):
     )
 
 
+def test_low_water_ratio_is_the_documented_constant() -> None:
+    # Every low-water expectation below is computed FROM module.TRIM_LOW_WATER_RATIO,
+    # so a change to the constant would silently resize its own oracle and those
+    # tests would keep passing. This is the one place that pins the value itself:
+    # retention floor and compaction frequency both move with it, so changing it
+    # is a policy decision that must fail here first.
+    assert _module().TRIM_LOW_WATER_RATIO == 0.75
+
+
 def test_missing_target_commits_private_file(tmp_path: Path) -> None:
     module = _module()
     target = tmp_path / "private" / "diagnostic.jsonl"
