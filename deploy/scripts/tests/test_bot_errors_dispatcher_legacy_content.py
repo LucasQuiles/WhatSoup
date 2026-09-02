@@ -611,3 +611,69 @@ def test_legacy_counter_has_exactly_one_call_site_and_it_is_the_shared_helper() 
         "record_legacy_alert_content must be called exactly once, from the shared "
         f"terminal-path helper; found call sites in {parents}"
     )
+
+
+# ---------------------------------------------------------------------------
+# An event quarantined for unrenderable content must still be COUNTED
+# ---------------------------------------------------------------------------
+# Quarantine happens at LOAD time, inside load_valid_event_or_quarantine, which
+# runs before process_one and before all three pre-loop terminal passes. So the
+# shared-helper hook cannot see a quarantined event: by the time any terminal path
+# runs, the event is already out of the queue. Once the shape rule is symmetric,
+# EVERY unrenderable value is quarantined, so without a counter on the quarantine
+# path queueUnrenderable would be structurally unreachable -- a permanent zero that
+# reads like "clean".
+
+def _quarantine_one_unrenderable(tmp_path: Path) -> None:
+    outbox = tmp_path / "outbox"
+    quarantine = tmp_path / "quarantine"
+    outbox.mkdir(exist_ok=True)
+    quarantine.mkdir(exist_ok=True)
+    event = _make_event(summary=["not", "renderable"])
+    path = outbox / "evt-unrenderable.json"
+    path.write_text(json.dumps(event), encoding="utf-8")
+    assert _mod.load_valid_event_or_quarantine(path, quarantine) is None
+    landed = list(quarantine.iterdir())
+    assert len(landed) == 1
+    assert "unrenderable_alert_content" in landed[0].name
+
+
+def test_unrenderable_quarantine_is_counted(tmp_path: Path) -> None:
+    _mod.flush_unrenderable_quarantine_telemetry({})  # drain any prior pending count
+    _quarantine_one_unrenderable(tmp_path)
+    incident_state: dict[str, Any] = {}
+    assert _mod.flush_unrenderable_quarantine_telemetry(incident_state) is True
+    counters = incident_state["legacyAlertContent"]
+    assert counters["queueUnrenderable"] == 1
+    assert counters["queueLegacyObject"] == 0
+    assert counters["queueBakedRepr"] == 0
+    assert counters["lastLegacyAt"] > 0
+
+
+def test_quarantine_count_rides_the_next_counted_event(tmp_path: Path) -> None:
+    """A cycle that also processes a real event must carry the quarantine count."""
+    _mod.flush_unrenderable_quarantine_telemetry({})
+    _quarantine_one_unrenderable(tmp_path)
+    incident_state: dict[str, Any] = {}
+    _mod.absorb_daily_health_signal(_make_event(summary=legacy_object(), evidence=""), incident_state)
+    counters = incident_state["legacyAlertContent"]
+    assert counters["queueUnrenderable"] == 1, "the quarantine count must not be lost"
+    assert counters["queueLegacyObject"] == 1
+
+
+def test_quarantine_count_is_drained_not_replayed(tmp_path: Path) -> None:
+    """Flushing twice must not count the same quarantine twice."""
+    _mod.flush_unrenderable_quarantine_telemetry({})
+    _quarantine_one_unrenderable(tmp_path)
+    first: dict[str, Any] = {}
+    assert _mod.flush_unrenderable_quarantine_telemetry(first) is True
+    second: dict[str, Any] = {}
+    assert _mod.flush_unrenderable_quarantine_telemetry(second) is False
+    assert "legacyAlertContent" not in second
+
+
+def test_flush_is_silent_when_nothing_was_quarantined() -> None:
+    _mod.flush_unrenderable_quarantine_telemetry({})
+    incident_state: dict[str, Any] = {}
+    assert _mod.flush_unrenderable_quarantine_telemetry(incident_state) is False
+    assert "legacyAlertContent" not in incident_state

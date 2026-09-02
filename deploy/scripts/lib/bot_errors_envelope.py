@@ -112,12 +112,21 @@ def _require_renderable_alert_content(event: Mapping[str, Any]) -> None:
     `EnvelopeError` to the quarantine directory, so no new plumbing is needed.
 
     A string is always accepted here -- rendering it is the reader's job, not the
-    envelope's.
+    envelope's -- and so is an absent field.
+
+    The rule is deliberately SYMMETRIC across types. An earlier version rejected
+    only non-legacy mappings, which let a list, an int, a bool or a float pass
+    classification and reach the reader, where it rendered as the sentinel. That is
+    the same "no safe way to render this" condition arriving by a different type,
+    so it gets the same fail-closed answer instead of a silently degraded alert.
     """
     for field in ALERT_CONTENT_FIELDS:
         value = event.get(field)
-        if isinstance(value, Mapping) and legacy_confined_to_text(dict(value)) is None:
-            raise EnvelopeError("unrenderable_alert_content")
+        if value is None or isinstance(value, str):
+            continue
+        if isinstance(value, Mapping) and legacy_confined_to_text(dict(value)) is not None:
+            continue
+        raise EnvelopeError("unrenderable_alert_content")
 
 
 def classify_event(event: Mapping[str, Any]) -> EventClassification:

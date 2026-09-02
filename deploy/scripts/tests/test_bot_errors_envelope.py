@@ -296,3 +296,31 @@ def test_classify_event_rejects_extra_key_mapping_summary() -> None:
     with pytest.raises(envelope.EnvelopeError) as excinfo:
         envelope.classify_event(_alert_event(summary=four_key))
     assert excinfo.value.code == "unrenderable_alert_content"
+
+
+# ---------------------------------------------------------------------------
+# #2386 -- the shape rule must be symmetric
+# ---------------------------------------------------------------------------
+# Quarantining only non-legacy MAPPINGS left every other non-string value to pass
+# classification and render as the sentinel: a list, an int, a bool, a float. That
+# is the same "cannot be rendered" condition reached by a different type, so it
+# gets the same fail-closed answer.
+
+def test_classify_event_rejects_non_string_non_mapping_alert_content() -> None:
+    envelope = load_envelope()
+    for value in (["a", "list"], 17, True, 1.5, ("a", "tuple")):
+        with pytest.raises(envelope.EnvelopeError) as excinfo:
+            envelope.classify_event(_alert_event(summary=value))
+        assert excinfo.value.code == "unrenderable_alert_content", value
+        with pytest.raises(envelope.EnvelopeError) as excinfo:
+            envelope.classify_event(_alert_event(evidence=value))
+        assert excinfo.value.code == "unrenderable_alert_content", value
+
+
+def test_classify_event_still_accepts_string_and_absent_alert_content() -> None:
+    """Guard against over-rejection: the common shapes must keep classifying."""
+    envelope = load_envelope()
+    assert envelope.classify_event(_alert_event(summary="text", evidence="text")).kind == "incident_alert"
+    assert envelope.classify_event(_alert_event()).kind == "incident_alert"
+    assert envelope.classify_event(_alert_event(summary="", evidence="")).kind == "incident_alert"
+    assert envelope.classify_event(_alert_event(summary=None, evidence=None)).kind == "incident_alert"

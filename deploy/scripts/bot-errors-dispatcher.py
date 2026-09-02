@@ -662,6 +662,46 @@ _LEGACY_ALERT_CONTENT_COUNTERS = {
 }
 
 
+# Quarantine happens at LOAD time, inside load_valid_event_or_quarantine, which
+# runs before process_one and before all three pre-loop terminal passes. A
+# quarantined event is therefore already out of the queue by the time any path
+# that holds incident_state runs, so it cannot be counted where the other forms
+# are. Since the shape rule is symmetric, EVERY unrenderable value is quarantined,
+# and without this queueUnrenderable would be structurally unreachable: a
+# permanent zero that reads exactly like "clean".
+_pending_unrenderable_quarantines = 0
+
+
+def note_unrenderable_quarantine() -> None:
+    """Record that one event was quarantined for unrenderable alert content."""
+    global _pending_unrenderable_quarantines
+    _pending_unrenderable_quarantines += 1
+
+
+def flush_unrenderable_quarantine_telemetry(incident_state: dict[str, Any]) -> bool:
+    """Fold pending quarantine counts into incident state and drain them.
+
+    Returns whether anything was folded, so a caller can skip an otherwise empty
+    state commit. Draining is what keeps a re-flush from replaying the same count.
+    """
+    global _pending_unrenderable_quarantines
+    pending = _pending_unrenderable_quarantines
+    if not pending:
+        return False
+    _pending_unrenderable_quarantines = 0
+    block = incident_state.get(LEGACY_ALERT_CONTENT_KEY)
+    if not isinstance(block, dict):
+        block = {}
+    for counter in _LEGACY_ALERT_CONTENT_COUNTERS.values():
+        block.setdefault(counter, 0)
+    block["queueUnrenderable"] = int_field(block, "queueUnrenderable") + pending
+    block["lastLegacyAt"] = int(time.time())
+    block["lastLegacyIso"] = now_iso()
+    block.setdefault("lastLegacySource", "")
+    incident_state[LEGACY_ALERT_CONTENT_KEY] = block
+    return True
+
+
 def record_legacy_alert_content(event: dict[str, Any], incident_state: dict[str, Any]) -> None:
     """Count the legacy alert-content forms one event carries (#2386).
 
@@ -675,6 +715,7 @@ def record_legacy_alert_content(event: dict[str, Any], incident_state: dict[str,
     quiet open incident carrying a legacy ``lastEvidence`` is never rendered, so
     the counters alone cannot prove the corpus is clean.
     """
+    flush_unrenderable_quarantine_telemetry(incident_state)
     kinds = {alert_text_kind(event.get(field)) for field in ("summary", "evidence")}
     incremented = {
         counter for kind, counter in _LEGACY_ALERT_CONTENT_COUNTERS.items() if kind in kinds
@@ -5864,6 +5905,8 @@ def quarantine_invalid_envelope(path: Path, quarantine_dir: Path, code: str) -> 
     """Quarantine an invalid envelope without treating it as an alert to send."""
 
     ensure_private_dir(quarantine_dir)
+    if code == "unrenderable_alert_content":
+        note_unrenderable_quarantine()
     reason = safe_segment(code)
     dest = quarantine_dir / f"{path.name}.{int(time.time())}.{os.getpid()}.{reason}.invalid-envelope"
     try:
@@ -6726,6 +6769,12 @@ def run_once(max_events: int) -> dict[str, Any]:
 
             # --- F5: dead-letter meta-alert (at most once per hour when dir non-empty) ---
             dead_letter_meta_alerted = queue_dead_letter_meta_alert(paths, int(time.time()))
+
+            # #2386: a cycle whose events were ALL quarantined never reaches the
+            # shared telemetry helper, so drain any pending quarantine counts here
+            # before the cycle ends. Commit only when something was folded.
+            if flush_unrenderable_quarantine_telemetry(_incident_cycle.payload):
+                _incident_cycle.commit()
 
             # Daily test-leak summary marker (at most once per UTC date per day).
             if test_leak_dropped > 0:
