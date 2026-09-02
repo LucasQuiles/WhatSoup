@@ -664,6 +664,21 @@ describe('retained error text scrubs the canonical bearer header form', () => {
         const out = retained(`auth failed ${keyword}: ${secret} at gate`);
         expect(out).not.toContain(secret);
       });
+
+      // Same cell, with the label sitting at the tail of a longer identifier.
+      // Anchoring the label with a leading \b made this whole column retain,
+      // and the three forms above cannot detect that: every one of them places
+      // the label at a word boundary.
+      it(`scrubs a ${secret.length}-character secret after x${keyword}= `, () => {
+        const out = retained(`auth failed x${keyword}=${secret} at gate`);
+        expect(out).not.toContain(secret);
+        expect(out).toContain('auth failed');
+      });
+
+      it(`scrubs a ${secret.length}-character secret after x${keyword}: `, () => {
+        const out = retained(`auth failed x${keyword}: ${secret} at gate`);
+        expect(out).not.toContain(secret);
+      });
     }
   }
 
@@ -672,6 +687,60 @@ describe('retained error text scrubs the canonical bearer header form', () => {
     const out = retained('pairing failed');
     expect(out).toContain('failed');
   });
+});
+
+// ─── Labels at the tail of a longer identifier ──────────────────────────────
+//
+// The pattern this branch replaced had NO word-boundary anchor, so `token=`
+// matched inside a longer identifier and `apiToken=<secret>` was masked.
+// Anchoring the label with a leading \b dropped that entire class, and nothing
+// downstream catches it: PHONE_RE needs seven consecutive digits, EMAIL_RE
+// needs an `@`, and the key filters do not apply to a substring sitting inside
+// text that has already been retained.
+//
+// `accessToken`, `refreshToken` and `sessionToken` are the very identifiers
+// SECRET_KEY_RE lists as must-never-log field names, so the sanitizer removed
+// them as keys while retaining them inside a message.
+//
+// The label alternation therefore accepts a leading run of word characters,
+// and that run is part of the captured group, so the identifier still reads
+// back in the diagnostic (`apiToken=<secret>` becomes `apiToken ***`).
+
+describe('retained error text scrubs a label at the tail of a longer identifier', () => {
+  const retained = (message: string) =>
+    ((sanitizeLogValue({ err: new Error(message) }) as Record<string, unknown>).err as Record<
+      string,
+      unknown
+    >).errorMessage as string;
+
+  // [label-with-separator, 12-character synthetic secret]
+  const EMBEDDED_LABEL_SHAPES: ReadonlyArray<readonly [string, string]> = [
+    ['apiToken=', 'A1b2C3d4E5f6'],
+    ['authToken: ', 'B2c3D4e5F6g7'],
+    ['accessToken=', 'C3d4E5f6G7h8'],
+    ['refreshToken=', 'D4e5F6g7H8i9'],
+    ['sessionToken=', 'E5f6G7h8I9j0'],
+    ['bearerToken=', 'F6g7H8i9J0k1'],
+    ['xapikey=', 'G7h8I9j0K1l2'],
+    ['my_token=', 'H8i9J0k1L2m3'],
+  ];
+
+  it('covers all eight shapes, each with a distinct 12-character secret', () => {
+    // Coverage assertion: a shrunk table would otherwise pass silently.
+    expect(EMBEDDED_LABEL_SHAPES).toHaveLength(8);
+    expect(new Set(EMBEDDED_LABEL_SHAPES.map(([, secret]) => secret)).size).toBe(8);
+    for (const [, secret] of EMBEDDED_LABEL_SHAPES) {
+      expect(secret).toHaveLength(12);
+    }
+  });
+
+  for (const [label, secret] of EMBEDDED_LABEL_SHAPES) {
+    it(`scrubs the value after ${label.trim()}`, () => {
+      const out = retained(`upstream call failed ${label}${secret} at gate`);
+      expect(out).not.toContain(secret);
+      expect(out).toContain('upstream call failed');
+    });
+  }
 });
 
 describe('retained error text uses the canonical JID pattern (SSOT)', () => {

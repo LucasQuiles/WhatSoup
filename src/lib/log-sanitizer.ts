@@ -115,9 +115,25 @@ const PHONE_RE = /\+?\d{7,}/g;
 // lookahead, `Authorization: Bearer <token>` matches at `Authorization`,
 // consumes `Bearer` as the value, and leaves the real token untouched — the
 // exact header this pattern exists to cover.
+//
+// A LEADING RUN OF WORD CHARACTERS IS PART OF THE LABEL. The pattern this
+// replaced had no anchor at all, so `token=` matched inside a longer
+// identifier and `apiToken=<secret>` was masked. Anchoring the label with a
+// leading \b dropped that whole class — `apiToken`, `authToken`, `accessToken`,
+// `refreshToken`, `sessionToken`, `bearerToken`, `xapikey`, `my_token` — and
+// nothing downstream catches it: PHONE_RE needs seven consecutive digits,
+// EMAIL_RE needs an `@`, and the key filters do not apply to a substring
+// sitting inside text that has already been retained. `access_token`,
+// `refresh_token` and `token` are themselves SECRET_KEY_RE entries, so those
+// values were removed as field names and kept inside messages.
+//
+// The prefix is inside the capture, so the identifier survives the
+// substitution and the diagnostic still reads back: `apiToken=<secret>`
+// becomes `apiToken ***`, not `Token ***`. The trailing \b still applies, so
+// the label must end the identifier; `tokenizer=<value>` is not a match.
 const SECRET_LABELS = 'bearer|api[_-]?key|authorization|token|secret|password|passphrase|pairing';
 const BEARER_RE = new RegExp(
-  `\\b(${SECRET_LABELS})\\b`
+  `\\b([A-Za-z0-9_]*(?:${SECRET_LABELS}))\\b`
     + `(?:\\s*[:=]\\s*(?!(?:${SECRET_LABELS})\\b)["']?[\\w.~+/-]+={0,2}["']?`
     + `|\\s+["']?[\\w.~+/-]{8,}={0,2}["']?)`,
   'gi',
