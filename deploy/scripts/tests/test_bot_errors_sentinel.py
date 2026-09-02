@@ -3371,6 +3371,166 @@ def test_retirement_leaves_a_bounded_tombstone_cleared_by_re_addition(tmp_path: 
     assert "retired-member" in state["hosts"]
 
 
+def test_disposition_is_published_while_the_member_is_still_in_memory(tmp_path: Path):
+    """The ORDER is the contract, so observe the order, not just the outcome.
+
+    The fail-closed test can only see the on-disk state file, which is unchanged
+    whether or not the pop precedes the publish, because the raise aborts above
+    save_state. This one watches in-memory state AT publish time, so moving the
+    pop above the publish turns it red.
+    """
+    config, deps, _ = _roster_retirement_fixture(tmp_path)
+    real_publish = _mod.publish_event_json
+    observed: dict = {}
+
+    def _recording_publish(target, payload, **kwargs):
+        # Snapshot at the moment of publication, before any pop can be observed.
+        if isinstance(payload, dict) and payload.get("disposition") == "configuration_retired":
+            observed.setdefault("hostsAtPublish", []).append(sorted(_state_ref["state"]["hosts"]))
+            observed.setdefault("tombstonesAtPublish", []).append(
+                sorted(_state_ref["state"].get("retiredHosts") or {})
+            )
+        return real_publish(target, payload, **kwargs)
+
+    _state_ref: dict = {}
+    real_retire = _mod.retire_unconfigured_hosts
+
+    def _capturing_retire(state, *args, **kwargs):
+        _state_ref["state"] = state
+        return real_retire(state, *args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(_mod, "publish_event_json", _recording_publish)
+        mp.setattr(_mod, "retire_unconfigured_hosts", _capturing_retire)
+        _mod.run_once(config, deps)
+
+    assert observed.get("hostsAtPublish"), "no configuration_retired publication was observed"
+    # The record must still be in the in-memory roster when its disposition is
+    # published. Popping first makes this list lack the member.
+    assert "retired-member" in observed["hostsAtPublish"][0]
+    # ...and its tombstone must not exist yet either.
+    assert "retired-member" not in observed["tombstonesAtPublish"][0]
+    # The pop still happens, after.
+    state = json.loads(_mod.state_path(config).read_text(encoding="utf-8"))
+    assert sorted(state["hosts"]) == ["host-a"]
+    assert "retired-member" in state["retiredHosts"]
+
+
+def test_publish_failure_restores_in_memory_state_before_any_save(tmp_path: Path, monkeypatch):
+    """A failed publication restores the pre-publication snapshot in memory.
+
+    Called directly so the state object survives the raise. The stub corrupts
+    state and then fails, which is what distinguishes a real rollback from
+    'nothing had been mutated yet anyway' -- the reason the on-disk assertion
+    could not see the rollback at all.
+    """
+    config, _, _ = _roster_retirement_fixture(tmp_path)
+    state = {
+        "hosts": {
+            "host-a": {"alertState": "closed"},
+            "retired-member": {"alertState": "open", "consecutive": 3, "transitions": [990.0]},
+        },
+        "retiredHosts": {},
+    }
+
+    def _corrupt_then_fail(target, payload, **kwargs):
+        state["hosts"]["retired-member"]["alertState"] = "CORRUPTED"
+        state["hosts"]["injected-by-failed-publish"] = {"alertState": "open"}
+        state["retiredHosts"]["premature"] = {"retiredAt": 1000.0}
+        raise OSError("publication failed")
+
+    monkeypatch.setattr(_mod, "publish_event_json", _corrupt_then_fail)
+
+    with pytest.raises(OSError):
+        _mod.retire_unconfigured_hosts(state, config, 1000.0, "central-test", {"host-a"}, None, None)
+
+    # Rolled back to the snapshot taken before the publication attempt.
+    assert state["hosts"]["retired-member"]["alertState"] == "open"
+    assert state["hosts"]["retired-member"]["consecutive"] == 3
+    assert "injected-by-failed-publish" not in state["hosts"]
+    assert "premature" not in state["retiredHosts"]
+    assert "retired-member" not in state["retiredHosts"]
+
+
+def test_retired_subject_action_is_not_executed(tmp_path: Path, monkeypatch):
+    """The tombstone's dedupe half: a delayed remediation for a retired member.
+
+    Without the tombstone consult, a restart_host queued before the retirement
+    still executes against a decommissioned host.
+    """
+    hb = _heartbeat(tmp_path / "host-a-hb.json", healthy=True, mtime=995.0)
+    hosts = _hosts_file(tmp_path, [{"host": "host-a", "heartbeatPath": str(hb)}])
+    config = _config(tmp_path, hosts)
+    outbox = _mod.action_outbox_dir(config)
+    outbox.mkdir(parents=True, exist_ok=True, mode=0o700)
+    stale = outbox / "1000-host-retired-member-restart_host-abc.json"
+    _write_json(stale, {"action": "restart_host", "host": "retired-member"})
+    live = outbox / "1000-host-host-a-restart_host-def.json"
+    _write_json(live, {"action": "restart_host", "host": "host-a"})
+
+    executed: list[str] = []
+    monkeypatch.setattr(_mod, "execute_action", lambda action: executed.append(str(action.get("host"))))
+
+    consumed = _mod.consume_action_outbox(config, retired_hosts={"retired-member": {"retiredAt": 1000.0}})
+
+    assert executed == ["host-a"], "a retired subject's remediation must not execute"
+    assert consumed == 1
+    assert stale.with_suffix(".retired").exists()
+    assert not stale.exists()
+    assert live.with_suffix(".done").exists()
+
+
+def test_action_consumer_without_a_tombstone_ledger_is_unchanged(tmp_path: Path, monkeypatch):
+    """Backwards compatible: no ledger means the pre-#2429 behaviour."""
+    hb = _heartbeat(tmp_path / "host-a-hb.json", healthy=True, mtime=995.0)
+    hosts = _hosts_file(tmp_path, [{"host": "host-a", "heartbeatPath": str(hb)}])
+    config = _config(tmp_path, hosts)
+    outbox = _mod.action_outbox_dir(config)
+    outbox.mkdir(parents=True, exist_ok=True, mode=0o700)
+    _write_json(outbox / "1000-host-host-a-restart_host-def.json", {"action": "restart_host", "host": "host-a"})
+    executed: list[str] = []
+    monkeypatch.setattr(_mod, "execute_action", lambda action: executed.append(str(action.get("host"))))
+
+    assert _mod.consume_action_outbox(config) == 1
+    assert executed == ["host-a"]
+
+
+def test_tombstone_age_bound_removes_a_stale_entry_that_the_cap_would_keep(tmp_path: Path):
+    """Age must remove on its own, with the count cap out of the picture.
+
+    The combined fixture below cannot prove this: its stale entry is also the
+    oldest, so the newest-first count trim removes it whether or not the TTL
+    branch runs.
+    """
+    state = {
+        "retiredHosts": {
+            # Two entries only, far under RETIRED_HOST_TOMBSTONE_MAX.
+            "aged-out": {"retiredAt": 1000.0 - _mod.RETIRED_HOST_TOMBSTONE_TTL_SECONDS - 1},
+            "fresh": {"retiredAt": 1000.0 - 10},
+        }
+    }
+    kept = _mod.prune_retired_host_tombstones(state, 1000.0)
+
+    assert len(state["retiredHosts"]) <= _mod.RETIRED_HOST_TOMBSTONE_MAX, "cap must not be the cause"
+    assert "aged-out" not in kept, "the TTL branch alone must remove an age-expired entry"
+    assert "fresh" in kept
+
+
+def test_tombstone_entry_without_a_usable_timestamp_is_removed(tmp_path: Path):
+    """The TTL branch is also the only thing that drops an unusable timestamp."""
+    state = {
+        "retiredHosts": {
+            "no-timestamp": {"subjectDigest": "0" * 16},
+            "non-finite": {"retiredAt": float("inf")},
+            "not-a-dict": "corrupt",
+            "fresh": {"retiredAt": 1000.0 - 10},
+        }
+    }
+    kept = _mod.prune_retired_host_tombstones(state, 1000.0)
+
+    assert sorted(kept) == ["fresh"]
+
+
 def test_tombstone_ledger_is_bounded_by_age_and_count(tmp_path: Path):
     hb = _heartbeat(tmp_path / "host-a-hb.json", healthy=True, mtime=995.0)
     hosts = _hosts_file(tmp_path, [{"host": "host-a", "heartbeatPath": str(hb)}])

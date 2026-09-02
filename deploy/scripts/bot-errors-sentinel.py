@@ -465,12 +465,23 @@ def execute_action(action: dict[str, Any]) -> None:
 EXTERNAL_REMEDIATION_ACTIONS = ("restart_host",)
 
 
-def consume_action_outbox(config: SentinelConfig) -> int:
+def consume_action_outbox(config: SentinelConfig, retired_hosts: Optional[dict] = None) -> int:
     """Consume pending external remediation actions from the action outbox.
 
     Dispatches only the action types this consumer actually executes
     (``EXTERNAL_REMEDIATION_ACTIONS``), renaming each file to ``.done`` on
-    success or ``.failed`` on error. Every other file is left untouched:
+    success or ``.failed`` on error.
+
+    ``retired_hosts`` is the live tombstone ledger (``state["retiredHosts"]``).
+    An action whose subject carries a live tombstone is NOT executed: the member
+    was deliberately removed from the roster, so a remediation queued before the
+    retirement is stale by construction and restarting a decommissioned host is
+    exactly the wrong outcome. It is renamed ``.retired``, a terminal
+    disposition in the same vocabulary as ``.done``/``.failed``, so it is neither
+    retried each cycle nor silently resurrected when the tombstone ages out.
+    This is the dedupe half of #2429's tombstone bullet.
+
+    Every other file is left untouched:
     escalate / q-remediation records carry tokens whose consumer is the
     redeem CLI (prune is their terminal disposition), clear/ack event records
     have their own readers, and internal actions have their own consumers —
@@ -487,6 +498,14 @@ def consume_action_outbox(config: SentinelConfig) -> int:
                 action = json.loads(entry.read_text(encoding="utf-8"))
                 action_type = action.get("action") if isinstance(action, dict) else None
                 if action_type not in EXTERNAL_REMEDIATION_ACTIONS:
+                    continue
+                subject = str(action.get("host") or "")
+                if retired_hosts and subject and subject in retired_hosts:
+                    print(
+                        f"[bot-errors-sentinel] action skipped for retired subject: {entry.name}",
+                        file=sys.stderr,
+                    )
+                    entry.rename(entry.with_suffix(".retired"))
                     continue
                 execute_action(action)
                 entry.rename(entry.with_suffix(".done"))
@@ -2251,7 +2270,7 @@ def run_once(config: SentinelConfig, deps: Optional[SentinelDeps] = None) -> dic
     # Consume pending actions from the outbox, then prune remaining .done/
     # .failed files.  The consumer reads .json, executes, and renames to .done
     # or .failed so the same action is not consumed twice.
-    action_outbox_depth = consume_action_outbox(config)
+    action_outbox_depth = consume_action_outbox(config, retired_hosts=state.get("retiredHosts"))
     action_outbox_depth = prune_action_outbox(config)
     sweep_started_at = now_iso(now)
     sweep_ended_epoch = deps.now_epoch()
