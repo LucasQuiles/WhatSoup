@@ -413,6 +413,11 @@ CONVERSATION_SCOPE_MAX_PER_KEY = positive_env_int(
 # carries the rate, so losing per-conversation granularity there is better than
 # paging without bound.
 CONVERSATION_SCOPE_OVERFLOW_KEY = "__overflow__"
+# Top-level counterpart of the per-key marker. Written into the incident state
+# root (NOT into conversationScopes, so it is never a scope key and never an
+# eviction candidate) whenever the sweep evicts a top-level key. Bounded: one
+# object, updated in place, never a growing list.
+CONVERSATION_SCOPE_GLOBAL_OVERFLOW_FIELD = "conversationScopesOverflow"
 # Outer bound on how many incident keys carry a scope sidecar at once, so a
 # long tail of historical keys cannot grow the state file without limit.
 CONVERSATION_SCOPE_MAX_KEYS = positive_env_int(
@@ -1266,6 +1271,29 @@ class _CompatPublication:
         return {"advance_allowed": self.advance_allowed}
 
 
+def _mark_conversation_scope_overflow(
+    incident_state: dict[str, Any], current: int, evicted: int
+) -> None:
+    """Record that the top-level scope map has evicted for capacity.
+
+    Bounded by construction: ONE object updated in place, carrying the last
+    eviction time and a cumulative count. Never a list, so it cannot grow.
+    """
+    marker = incident_state.get(CONVERSATION_SCOPE_GLOBAL_OVERFLOW_FIELD)
+    if not isinstance(marker, dict):
+        marker = {}
+    marker["overflowedAt"] = current
+    marker["overflowCount"] = int_field(marker, "overflowCount") + evicted
+    incident_state[CONVERSATION_SCOPE_GLOBAL_OVERFLOW_FIELD] = marker
+
+
+def conversation_scopes_have_overflowed(incident_state: dict[str, Any]) -> bool:
+    """True once the top-level scope map has evicted a key for capacity."""
+    return isinstance(
+        incident_state.get(CONVERSATION_SCOPE_GLOBAL_OVERFLOW_FIELD), dict
+    )
+
+
 def sweep_conversation_scopes(incident_state: dict[str, Any], current: int) -> int:
     """Prune the conversation-scope sidecar across the WHOLE state.
 
@@ -1327,9 +1355,18 @@ def sweep_conversation_scopes(incident_state: dict[str, Any], current: int) -> i
                 default=0,
             )
 
+        evicted = 0
         for oldest in sorted(scopes, key=_key_recency)[: len(scopes) - CONVERSATION_SCOPE_MAX_KEYS]:
             scopes.pop(oldest, None)
             removed += 1
+            evicted += 1
+        if evicted:
+            # A key evicted for CAPACITY is not a key that was never seen. Record
+            # that at the top level so the admission guard can tell the two apart:
+            # without this, an evicted conversation reads as brand new on its next
+            # rejection, force-notifies, re-adds its key and evicts another --
+            # a rotation that pages forever above the cap.
+            _mark_conversation_scope_overflow(incident_state, current, evicted)
 
     if not scopes:
         incident_state.pop("conversationScopes", None)
@@ -2251,6 +2288,14 @@ def conversation_scope_is_unrepresented(
         # one this key has already seen and evicted, and re-forcing evicted
         # conversations is what turns a large incident into an alert loop.
         if isinstance(seen, dict) and CONVERSATION_SCOPE_OVERFLOW_KEY in seen:
+            return False
+        # Same policy one level up: once the sweep has evicted a top-level key
+        # for capacity, a MISSING key may be one this dispatcher represented
+        # and then dropped, so treating it as new is what rotates into an
+        # endless page loop. Gated on the marker: with no eviction on record a
+        # missing key really is a conversation nobody has been told about, and
+        # it must still force its one notification.
+        if seen is None and conversation_scopes_have_overflowed(incident_state):
             return False
         return True
     if current - _conversation_scope_last_seen(record) > CONVERSATION_SCOPE_RETENTION_SECONDS:
