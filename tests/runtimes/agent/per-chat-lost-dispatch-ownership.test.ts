@@ -56,6 +56,8 @@ type OwnershipState = RuntimeState & {
   }>>;
   systemTurnExecActors: Map<string, { scopeKey: string; actorJid: string | undefined }>;
   resolveExecutingActorByMapKey(mapKey: string): string | undefined;
+  resolvePerChatMapKey(chatJid: string): string;
+  createOutboundQueue(chatJid: string, reason: string): { getSenderToken(): string | undefined };
   isSessionProvablyTerminated(session: ReturnType<typeof sessionStub>): boolean;
   abortTurnRecoveryReplay(
     target: {
@@ -973,6 +975,43 @@ describe('lost-ownership eviction retires the executing-actor queue', () => {
       expect(state.perChatExecActorQueue.get(MAP_KEY) ?? [])
         .not.toContainEqual(expect.objectContaining({ actorJid: ADMIN }));
       expect(state.systemTurnExecActors.get('lease-retired-admin')).toBeUndefined();
+    } finally {
+      db.close();
+    }
+  });
+});
+
+/**
+ * `sandboxPerChat` is supported configuration: the validator requires per-chat
+ * session scope for it and rejects it alongside the conversation-bound option.
+ * In that mode every per-chat map is keyed by the WORKSPACE key, but the
+ * echo-guard token lookup searched only the raw chat id, the canonical chat id
+ * and the shared queue — so a replacement queue started with a fresh token and
+ * its first group reply could fall inside the predecessor's cooldown.
+ */
+describe('sandbox per-chat replacement queues inherit the predecessor token', () => {
+  it('finds the predecessor queue stored under the workspace key', () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const { state } = makeRuntimeState<OwnershipState>(db, {
+        sessionScope: 'per_chat',
+        sandboxPerChat: true,
+      });
+      const chatJid = `${MAP_KEY}@s.whatsapp.net`;
+      const workspaceKey = state.resolvePerChatMapKey(chatJid);
+      // The premise: the workspace key is not the chat id, so a lookup by chat
+      // id does not reach the queue that is actually mapped for this chat.
+      expect(workspaceKey).not.toBe(chatJid);
+
+      const predecessor = queueStub(chatJid);
+      vi.mocked(predecessor.getSenderToken).mockReturnValue('sender-token-sandbox');
+      state.chatQueues.set(workspaceKey, predecessor);
+      expect(state.chatQueues.get(chatJid)).toBeUndefined();
+
+      const replacement = state.createOutboundQueue(chatJid, 'sandbox per-chat replacement');
+
+      expect(replacement.getSenderToken()).toBe('sender-token-sandbox');
     } finally {
       db.close();
     }

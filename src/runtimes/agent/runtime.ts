@@ -2984,6 +2984,12 @@ export class AgentRuntime implements Runtime {
       this.outboundQueues.get(canonical) ??
       this.chatQueues.get(chatJid) ??
       this.chatQueues.get(canonical) ??
+      // In workspace-isolated per-chat mode the per-chat maps are keyed by the
+      // workspace key, which is neither of the ids above, so neither lookup
+      // reaches the queue actually mapped for this chat. Outside that mode this
+      // resolves to the canonical id the line above already probed, so the
+      // extra lookup changes nothing there.
+      this.chatQueues.get(this.resolvePerChatMapKey(chatJid)) ??
       this.queue ??
       undefined;
     return prior?.getSenderToken();
