@@ -27,6 +27,13 @@ loop is grace itself persisting across checks, so both branches are bounded by
 the persisted grace streak (``_grace_still_credible``): grace that has been
 continuously active for longer than ``max_state_age`` is a loop, not a fresh
 start.
+
+"Continuously" needs a liveness record: the streak persists the epoch of the
+last graced check (``graceStreakSeenAt``) and re-seeds when consecutive checks
+are further apart than twice the deadman timer interval (``--check-interval``,
+default 300s = ``OnUnitActiveSec=5m``). Without it, a reboot or a stopped timer
+after a graced check read as hours of continuous grace and paged a genuinely
+fresh restart.
 """
 from __future__ import annotations
 
@@ -163,6 +170,46 @@ def test_grace_is_not_credible_once_the_streak_outlives_max_state_age(health_che
 
 def test_no_grace_is_never_credible(health_check):
     assert health_check._grace_still_credible(None, 0, 180) is False
+
+
+# --- streak liveness: a gap in checks is not continuous grace -----------------
+
+
+def test_grace_streak_reseeds_after_a_gap_in_checks_longer_than_the_limit(health_check):
+    """Seeded 8h ago, last seen 8h ago: the deadman did not run in between, so
+    the record says nothing about continuity. Re-seed now, persist."""
+    now = 200_000
+    state = {"graceStreakSince": now - 8 * 3600, "graceStreakSeenAt": now - 8 * 3600}
+    assert health_check._note_grace_streak(state, True, now, 600) == (0, True)
+    assert state["graceStreakSince"] == now and state["graceStreakSeenAt"] == now
+
+
+def test_grace_streak_continues_across_a_gap_within_the_limit(health_check):
+    """One timer interval (300s) between checks is continuous at the default limit."""
+    now = 200_000
+    state = {"graceStreakSince": now - 900, "graceStreakSeenAt": now - 300}
+    assert health_check._note_grace_streak(state, True, now, 600) == (900, True)
+    assert state["graceStreakSeenAt"] == now
+
+
+def test_grace_streak_at_exactly_the_gap_limit_is_still_continuous(health_check):
+    now = 200_000
+    state = {"graceStreakSince": now - 900, "graceStreakSeenAt": now - 600}
+    assert health_check._note_grace_streak(state, True, now, 600) == (900, True)
+
+
+def test_grace_streak_without_a_liveness_record_is_reseeded(health_check):
+    """A record from before this field existed carries no liveness evidence."""
+    now = 200_000
+    state = {"graceStreakSince": now - 900}
+    assert health_check._note_grace_streak(state, True, now, 600) == (0, True)
+    assert state["graceStreakSince"] == now and state["graceStreakSeenAt"] == now
+
+
+def test_grace_streak_lapse_clears_the_liveness_record_too(health_check):
+    state = {"graceStreakSince": 100, "graceStreakSeenAt": 400}
+    assert health_check._note_grace_streak(state, False, 500, 600) == (0, True)
+    assert "graceStreakSince" not in state and "graceStreakSeenAt" not in state
 
 
 # ---------------------------------------------------------------------------
@@ -398,3 +445,45 @@ def test_deadman_grace_streak_rejects_bool_zero_and_negative_epochs(env, tmp_pat
         assert "state_missing" not in env.members()
         saved = json.loads((tmp_path / "deadman-state.json").read_text())
         assert saved["graceStreakSince"] == 100_000 and type(saved["graceStreakSince"]) is int
+
+
+def test_deadman_does_not_page_a_fresh_restart_after_a_gap_in_checks(env):
+    """The record left by a graced check hours ago must not turn a genuinely
+    fresh restart (uptime 2s, 120s-old heartbeat, no cycleCompletedAt) into a
+    cycle_incomplete page: the deadman did not run in between, so the streak
+    is not continuous."""
+    env.svc["status"] = "active"
+    env.svc["ages"] = (10, 10)
+    assert env.run() == 0  # seeds graceStreakSince (no state file, first check)
+    env.advance(8 * 3600)  # reboot / stopped timer: no checks for 8 hours
+    env.svc["ages"] = (2, 2)
+    env.state_written(120, {"time": env.mod.epoch_to_iso(100_000)})
+    assert env.run() == 0
+    assert "cycle_incomplete" not in env.members()
+
+
+def test_deadman_still_reports_an_incomplete_state_loop_at_the_timer_cadence(env):
+    """Checks 300s apart (OnUnitActiveSec=5m) stay continuous at the default
+    limit, so the loop is reported on the second check."""
+    env.svc["status"] = "active"
+    env.svc["ages"] = (10, 10)
+    env.state_written(100)
+    assert env.run() == 0
+    env.advance(300)
+    env.state_written(400)
+    assert env.run() == 2
+    assert env.members() == {"cycle_incomplete"}
+
+
+def test_deadman_streak_gap_limit_follows_check_interval(env):
+    """A slower timer (interval 900s) keeps checks 900s apart continuous; the
+    same gap at the default interval would have re-seeded the streak."""
+    env.svc["status"] = "active"
+    env.svc["ages"] = (10, 10)
+    env.state_written(100)
+    assert env.run() == 0
+    env.advance(900)
+    env.state_written(1000)
+    assert env.mod.deadman(max_state_age=180, restart_grace=30, cooldown_seconds=300, check_interval=900) == 2
+    assert env.members() == {"cycle_incomplete"}
+

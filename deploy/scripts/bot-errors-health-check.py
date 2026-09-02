@@ -7835,26 +7835,49 @@ def _deadman_recovery_text(episode: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _note_grace_streak(deadman_state: dict[str, Any], grace_active: bool, now_epoch: int) -> tuple[int, bool]:
+def _note_grace_streak(
+    deadman_state: dict[str, Any],
+    grace_active: bool,
+    now_epoch: int,
+    max_gap_seconds: int = 600,
+) -> tuple[int, bool]:
     """Track how long restart grace has been continuously active across checks.
 
     Returns ``(streak_seconds, dirty)``. A single observation cannot tell a
     fresh restart from a restart loop when there is no state age to bound
     grace with; the streak is the deadman's own memory of that, persisted in
-    deadman-state.json under ``graceStreakSince``.
+    deadman-state.json as ``graceStreakSince`` (first graced check) and
+    ``graceStreakSeenAt`` (latest graced check).
+
+    "Continuously" needs the second field: the streak is only evidence while
+    the deadman actually observed grace on consecutive checks. A reboot or a
+    stopped timer after a graced check would otherwise read as hours of
+    continuous grace and page a genuinely fresh restart. Consecutive checks
+    further apart than ``max_gap_seconds`` (twice the timer interval) re-seed
+    the streak instead of extending it, as does a record with no liveness
+    field at all.
     """
     since = deadman_state.get("graceStreakSince")
+    seen = deadman_state.get("graceStreakSeenAt")
     if not grace_active:
-        if since is None:
+        if since is None and seen is None:
             return 0, False
         deadman_state.pop("graceStreakSince", None)
+        deadman_state.pop("graceStreakSeenAt", None)
         return 0, True
-    if isinstance(since, bool) or not isinstance(since, int) or since <= 0 or since > now_epoch:
-        # Absent, corrupt (bool passes isinstance int), zero, negative, or in
-        # the future: start the streak now rather than trusting the value.
+
+    def _valid_epoch(value: Any) -> bool:
+        # bool passes isinstance int; zero, negative, or future values are corrupt.
+        return not isinstance(value, bool) and isinstance(value, int) and 0 < value <= now_epoch
+
+    if not _valid_epoch(since) or not _valid_epoch(seen) or now_epoch - seen > max_gap_seconds:
+        # Absent, corrupt, or not observed recently enough to be continuous:
+        # start the streak now rather than trusting the record.
         deadman_state["graceStreakSince"] = int(now_epoch)
+        deadman_state["graceStreakSeenAt"] = int(now_epoch)
         return 0, True
-    return int(now_epoch - since), False
+    deadman_state["graceStreakSeenAt"] = int(now_epoch)
+    return int(now_epoch - since), True
 
 
 def _grace_still_credible(
@@ -7866,8 +7889,9 @@ def _grace_still_credible(
 
     ``state_missing`` and ``cycle_incomplete`` cannot be attributed by age the
     way ``cycle_stale`` is: a restart legitimately follows an arbitrarily old
-    heartbeat (the downtime before it was already reported as
-    ``service_inactive``), and a state file with no ``cycleCompletedAt`` carries
+    heartbeat (an outage long enough to matter was reported as
+    ``service_inactive`` by the checks that ran during it), and a state file
+    with no ``cycleCompletedAt`` carries
     no cycle time to compare the restart against. Bounding those branches by
     the restart age reported every fresh restart whose heartbeat predated it,
     which ``tests/scripts/bot-errors-health-check.test.ts`` pins as graced.
@@ -7945,7 +7969,12 @@ def _cycle_stale_should_report(
     )
 
 
-def deadman(max_state_age: int, restart_grace: int, cooldown_seconds: int) -> int:
+def deadman(
+    max_state_age: int,
+    restart_grace: int,
+    cooldown_seconds: int,
+    check_interval: int = 300,
+) -> int:
     root = state_root()
     state = root / DISPATCHER_STATE
     active_members: dict[str, dict[str, Any]] = {}
@@ -7981,7 +8010,12 @@ def deadman(max_state_age: int, restart_grace: int, cooldown_seconds: int) -> in
         grace_age = service_uptime
     deadman_state = load_deadman_state()
     migrate_deadman_state(deadman_state, now_epoch)
-    grace_streak_seconds, streak_dirty = _note_grace_streak(deadman_state, grace_reason is not None, now_epoch)
+    # Consecutive graced checks more than two timer intervals apart are not
+    # continuous grace (reboot, stopped timer); the streak re-seeds instead.
+    streak_max_gap = 2 * (check_interval if check_interval > 0 else 300)
+    grace_streak_seconds, streak_dirty = _note_grace_streak(
+        deadman_state, grace_reason is not None, now_epoch, streak_max_gap
+    )
     if not state.exists():
         # No state file carries no age to bound grace with, so a restart loop
         # that never writes state would be excused on every check. The
@@ -8080,6 +8114,12 @@ def main() -> int:
     parser.add_argument("--verified-at", default=now_iso())
     parser.add_argument("--max-state-age", type=int, default=180)
     parser.add_argument("--restart-grace", type=int, default=30)
+    parser.add_argument(
+        "--check-interval",
+        type=int,
+        default=300,
+        help="seconds between deadman timer runs (OnUnitActiveSec); the restart-grace streak is continuous only while consecutive checks are at most twice this apart",
+    )
     parser.add_argument("--deadman-cooldown", type=int, default=positive_env_int("BOT_ERRORS_DEADMAN_COOLDOWN_SECONDS", 1800))
     args = parser.parse_args()
 
@@ -8103,7 +8143,7 @@ def main() -> int:
     if args.daily:
         return daily()
     if args.deadman:
-        return deadman(args.max_state_age, args.restart_grace, args.deadman_cooldown)
+        return deadman(args.max_state_age, args.restart_grace, args.deadman_cooldown, args.check_interval)
     return daily()
 
 
