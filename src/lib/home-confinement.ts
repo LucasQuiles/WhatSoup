@@ -140,6 +140,24 @@ export function realpathLongestAbsentTolerantPrefix(targetPath: string): string 
 }
 
 /**
+ * Is the longest physically-resolvable prefix of this RAW spelling at or inside
+ * the resolved home root?
+ *
+ * Containment is at-or-inside rather than strict on purpose: the absent-tolerant
+ * walk can legitimately return the home directory itself, because a caller may
+ * name a directory several not-yet-created segments below home. A caller that
+ * holds a resolved leaf applies the strict test separately.
+ *
+ * Both admission sites in src/fleet/routes/ops.ts call this instead of spelling
+ * the composition out themselves, so the physical policy cannot drift between
+ * them. Throws whatever realpathLongestAbsentTolerantPrefix throws; callers
+ * decide how to classify a refusal.
+ */
+export function physicalPrefixIsConfined(rawAbsolute: string, homeReal: string): boolean {
+  return pathIsAtOrInsideDirectory(realpathLongestAbsentTolerantPrefix(rawAbsolute), homeReal);
+}
+
+/**
  * Lexical containment, for callers that only need "is this path under that
  * root" with no filesystem access.
  *

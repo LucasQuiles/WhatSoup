@@ -5,10 +5,9 @@ import * as os from 'node:os';
 import { spawn } from 'node:child_process';
 import { readBody, jsonResponse, requireInstance } from '../../lib/http.ts';
 import {
-  pathIsAtOrInsideDirectory,
   pathIsInsideDirectory,
+  physicalPrefixIsConfined,
   rawAbsolutePath,
-  realpathLongestAbsentTolerantPrefix,
 } from '../../lib/home-confinement.ts';
 import { escapeRegExp } from '../../lib/regex-utils.ts';
 import { isNonEmptyString, isRecord } from '../../lib/type-guards.ts';
@@ -709,11 +708,7 @@ function resolveHomeConfinedPath(inputPath: string, res: ServerResponse, error: 
 
   try {
     const homeReal = fs.realpathSync.native(homePath);
-    // The resolved value now carries the leaf, so containment is STRICT: the
-    // old at-or-inside allowance existed only because the ancestor walk could
-    // return home itself.
-    const physicalPrefix = realpathLongestAbsentTolerantPrefix(rawAbsolute);
-    if (!pathIsAtOrInsideDirectory(physicalPrefix, homeReal)) {
+    if (!physicalPrefixIsConfined(rawAbsolute, homeReal)) {
       jsonResponse(res, 400, { error });
       return null;
     }
@@ -744,10 +739,20 @@ function ensureHomeConfinedDirectory(dirPath: string): void {
     throw privateWriteError('directory must be within the home directory', 'EACCES');
   };
 
+  // The same lexical strict gate resolveHomeConfinedPath applies, and before
+  // any directory is created, so nothing is brought into existence for a
+  // spelling the resolver would have refused outright.
+  //
+  // Defence in depth, not a live refusal path: every call site today passes
+  // path.join(cwd, '.claude') for a cwd resolveAndValidateCwd already accepted,
+  // so no request reaching here can fail this gate. It exists for the next
+  // caller, which is the failure mode this module was created to end.
+  if (!pathIsInsideDirectory(path.resolve(rawAbsolute), homePath)) refuse();
+
   let homeReal: string;
   try {
     homeReal = fs.realpathSync.native(homePath);
-    if (!pathIsAtOrInsideDirectory(realpathLongestAbsentTolerantPrefix(rawAbsolute), homeReal)) refuse();
+    if (!physicalPrefixIsConfined(rawAbsolute, homeReal)) refuse();
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'EACCES') throw err;
     refuse();
