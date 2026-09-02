@@ -2055,18 +2055,14 @@ def event_conversation_scope(event: dict[str, Any]) -> str | None:
     return candidate if CONVERSATION_SCOPE_RE.match(candidate) else None
 
 
-def conversation_scope_is_unrepresented(
-    event: dict[str, Any], incident_state: dict[str, Any], key: str, current: int
-) -> bool:
-    """Record this event's conversation under `key`; True if it is new there.
+def conversation_scope_records(
+    incident_state: dict[str, Any], key: str
+) -> dict[str, Any]:
+    """The {scope: {lastSeenAt, eventIds}} sidecar for `key`, created if absent.
 
-    Recording happens whether or not the event ends up being sent, so the
-    FIRST alert for a conversation registers it and that conversation's own
-    repeats then dedupe through the ordinary open-incident path.
+    Records are written ONLY by the delivery transition. See
+    record_conversation_scope_delivered.
     """
-    digest = event_conversation_scope(event)
-    if digest is None:
-        return False
     scopes = incident_state.setdefault("conversationScopes", {})
     if not isinstance(scopes, dict):
         scopes = {}
@@ -2075,49 +2071,106 @@ def conversation_scope_is_unrepresented(
     if not isinstance(seen, dict):
         seen = {}
         scopes[key] = seen
+    return seen
 
-    # Records are {scope: {"lastSeenAt": epoch, "eventIds": {id: epoch}}}.
-    # There is no bare-epoch legacy form to read forward: this state subtree
-    # and the tagged token ship together, and no intermediate version of
-    # either reached a runtime. A malformed record is rebuilt rather than
-    # trusted.
-    def record_for(item: Any) -> dict[str, Any]:
-        if isinstance(item, dict):
-            item.setdefault("lastSeenAt", current)
-            if not isinstance(item.get("eventIds"), dict):
-                item["eventIds"] = {}
-            return item
-        return {"lastSeenAt": current, "eventIds": {}}
 
-    def last_seen(item: Any) -> float:
-        if isinstance(item, dict):
-            value = item.get("lastSeenAt")
-            return value if isinstance(value, (int, float)) else 0
-        return 0
+def _conversation_scope_last_seen(record: Any) -> float:
+    if isinstance(record, dict):
+        value = record.get("lastSeenAt")
+        return value if isinstance(value, (int, float)) else 0
+    return 0
 
+
+def conversation_scope_is_unrepresented(
+    event: dict[str, Any], incident_state: dict[str, Any], key: str, current: int
+) -> bool:
+    """True when this event's conversation is not covered by a DELIVERED alert.
+
+    PURE: this is consulted before anything is sent, so it must not write.
+    Recording "represented" here was a real defect — an alert that failed
+    every delivery route still marked its conversation covered, so the next
+    distinct alert for that conversation was suppressed as a duplicate and the
+    conversation went silent while appearing handled. That is precisely the
+    failure this gate exists to remove, reintroduced on the failure path.
+
+    A retry of an event we already forced still counts as unrepresented, so a
+    transient transport failure cannot consume the one forced notification.
+    Expired records are ignored rather than pruned; pruning belongs to the
+    write path.
+    """
+    scope = event_conversation_scope(event)
+    if scope is None:
+        return False
+    scopes = incident_state.get("conversationScopes")
+    seen = scopes.get(key) if isinstance(scopes, dict) else None
+    record = seen.get(scope) if isinstance(seen, dict) else None
+    if not isinstance(record, dict):
+        return True
+    if current - _conversation_scope_last_seen(record) > CONVERSATION_SCOPE_RETENTION_SECONDS:
+        return True
+    event_ids = record.get("eventIds")
+    event_id = str(event.get("id") or "")
+    if not event_id or not isinstance(event_ids, dict):
+        return False
+    # #2428, applied here: a delivery retry re-reads the SAME event id out of
+    # the outbox with its original identity. A repeat of an id we already
+    # forced must still force, or a transport blip silently consumes it.
+    return event_id in event_ids
+
+
+def log_conversation_scope_error(
+    phase: str, key: str, exc: Exception, treated_as_unrepresented: bool
+) -> None:
+    """Record a scope-bookkeeping failure without letting logging raise.
+
+    Silence here was itself the defect: the previous code swallowed every
+    exception and fell into "represented", which quietly restored the
+    alert-loss behaviour this gate removes. The error is bounded (no raw
+    state, no identifiers) and the log write is itself guarded, because a
+    diagnostic must never convert a deliverable alert into an exception.
+    """
+    try:
+        append_dispatch_log(state_paths(), {
+            "type": "conversation_scope_error",
+            "phase": phase,
+            "incidentKey": key,
+            "error": truncate(str(exc), 300),
+            "treatedAsUnrepresented": treated_as_unrepresented,
+        })
+    except Exception:
+        pass
+
+
+def record_conversation_scope_delivered(
+    event: dict[str, Any], incident_state: dict[str, Any], key: str, current: int
+) -> None:
+    """Mark this event's conversation represented — ONLY after delivery.
+
+    Called from the successful-delivery transition beside mark_incident_sent,
+    so "represented" means an operator has actually been shown this
+    conversation. Bounded like the flap detector's seen-event map: prune by
+    age, then hard-cap by count dropping the oldest, and drop empty buckets.
+    """
+    scope = event_conversation_scope(event)
+    if scope is None:
+        return
+    seen = conversation_scope_records(incident_state, key)
     for stale in [
         item
         for item, value in seen.items()
-        if current - last_seen(value) > CONVERSATION_SCOPE_RETENTION_SECONDS
+        if current - _conversation_scope_last_seen(value) > CONVERSATION_SCOPE_RETENTION_SECONDS
     ]:
         seen.pop(stale, None)
 
-    known = digest in seen
-    record = record_for(seen.get(digest))
+    record = seen.get(scope)
+    if not isinstance(record, dict):
+        record = {"lastSeenAt": current, "eventIds": {}}
     record["lastSeenAt"] = current
-    seen[digest] = record
+    if not isinstance(record.get("eventIds"), dict):
+        record["eventIds"] = {}
+    seen[scope] = record
 
-    # #2428, applied to this counter: a delivery retry re-reads the SAME event
-    # id out of the outbox with its original identity. Treating that retry as
-    # "already represented" would drop the one forced notification whenever the
-    # transport blipped — reintroducing exactly the silence this gate exists to
-    # remove. So a repeat of an id we have already forced still forces.
-    #
-    # An id-less event cannot be deduped this way and falls back to recording
-    # once, which is the pre-existing behaviour (fail toward today's).
     event_ids = record["eventIds"]
-    event_id = str(event.get("id") or "")
-    retry_of_forced_event = bool(event_id) and event_id in event_ids
     for stale_id in [
         item
         for item, at in event_ids.items()
@@ -2125,6 +2178,7 @@ def conversation_scope_is_unrepresented(
         or current - at > CONVERSATION_SCOPE_RETENTION_SECONDS
     ]:
         event_ids.pop(stale_id, None)
+    event_id = str(event.get("id") or "")
     if event_id:
         event_ids[event_id] = current
         if len(event_ids) > CONVERSATION_SCOPE_MAX_PER_KEY:
@@ -2134,33 +2188,15 @@ def conversation_scope_is_unrepresented(
                 event_ids.pop(oldest, None)
 
     if len(seen) > CONVERSATION_SCOPE_MAX_PER_KEY:
-        for oldest in sorted(seen, key=lambda item: last_seen(seen[item]))[
+        for oldest in sorted(seen, key=lambda item: _conversation_scope_last_seen(seen[item]))[
             : len(seen) - CONVERSATION_SCOPE_MAX_PER_KEY
         ]:
             seen.pop(oldest, None)
-    for empty in [item for item, values in scopes.items() if not values]:
-        scopes.pop(empty, None)
-    return (not known) or retry_of_forced_event
 
-
-def note_conversation_scope_notify(
-    open_record: Any, event: dict[str, Any], current: int
-) -> None:
-    """Keep an open incident's bookkeeping honest after a forced notification.
-
-    Without this the still-open reminder cadence would not see the send and
-    could re-page moments later.
-    """
-    if not isinstance(open_record, dict):
-        return
-    open_record["lastSeenAt"] = current
-    open_record["lastSeenIso"] = now_iso()
-    open_record["lastEventId"] = event.get("id")
-    open_record["lastNotifiedAt"] = current
-    open_record["lastNotifiedIso"] = now_iso()
-    open_record["conversationScopeNotifyCount"] = (
-        int_field(open_record, "conversationScopeNotifyCount") + 1
-    )
+    scopes = incident_state.get("conversationScopes")
+    if isinstance(scopes, dict):
+        for empty in [item for item, values in scopes.items() if not values]:
+            scopes.pop(empty, None)
 
 
 def int_field(record: dict[str, Any], key: str, fallback: int = 0) -> int:
@@ -3110,11 +3146,15 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
                     storm_unrepresented = conversation_scope_is_unrepresented(
                         event, incident_state, key, current
                     )
-                except Exception:
-                    storm_unrepresented = False  # fail toward today's behaviour
+                except Exception as exc:
+                    # A validated scope with broken bookkeeping is treated as
+                    # UNREPRESENTED: an extra alert is recoverable, a silently
+                    # dropped one is not. Swallowing this silently restored the
+                    # exact alert-loss behaviour the gate removes.
+                    storm_unrepresented = event_conversation_scope(event) is not None
+                    log_conversation_scope_error("flap_storm", key, exc, storm_unrepresented)
                 if not storm_unrepresented:
                     return f"flap_storm_member: {key} consolidated into open flap storm"
-                note_conversation_scope_notify(open_incidents.get(key), event, current)
                 return None
     stronger = stronger_open_incident_for(event, incident_state)
     if stronger is not None:
@@ -3131,20 +3171,23 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
     # represent is a DIFFERENT outage, not a duplicate of the one already open.
     # Placed here so it unmasks both paths that would otherwise silence it —
     # the open-incident duplicate branch and the post-close cooldown below —
-    # while leaving root-cause inhibition (above) and flap-storm consolidation
-    # (Pattern F, above) in charge as before. An open storm therefore still
-    # consolidates a new conversation's first rejection; the storm alert
-    # already carries the rate, and widening past it is a separate change.
-    # FAIL TOWARD TODAY'S BEHAVIOUR: any error here forces nothing.
+    # while leaving root-cause inhibition (above) in charge as before. An open
+    # flap storm does NOT consolidate a conversation it has never represented:
+    # that exception lives in the Pattern F block above, because the storm
+    # alert carries a count and a rate, not the identity of a conversation
+    # nobody has been told about.
+    # FAIL TOWARD VISIBILITY: a bookkeeping error produces an extra alert
+    # rather than a silent loss (see the except branches below).
     if is_incident_alert(event) and not is_incident_clear(event):
         try:
             unrepresented = conversation_scope_is_unrepresented(
                 event, incident_state, key, current
             )
-        except Exception:
-            unrepresented = False
+        except Exception as exc:
+            # Same direction as the storm branch above: fail toward visibility.
+            unrepresented = event_conversation_scope(event) is not None
+            log_conversation_scope_error("open_incident", key, exc, unrepresented)
         if unrepresented:
-            note_conversation_scope_notify(open_incidents.get(key), event, current)
             return None
     if is_incident_alert(event):
         # Pattern D — hold a transient soft-fault at warning tier; only a
@@ -3511,6 +3554,12 @@ def append_clear_context(event: dict[str, Any], incident_state: dict[str, Any]) 
 def mark_incident_sent(event: dict[str, Any], incident_state: dict[str, Any]) -> None:
     key = incident_key(event)
     current = int(time.time())
+    # An operator has now actually been shown this event, on WhatsApp or via
+    # the email fallback, so its conversation is genuinely represented. This is
+    # the ONLY place representation is recorded; the admission predicate is
+    # pure. Recording it pre-delivery meant a dead-lettered alert marked its
+    # conversation covered and silenced the next distinct one.
+    record_conversation_scope_delivered(event, incident_state, key, current)
     if is_incident_alert(event):
         close_superseded_incidents(event, incident_state)
         incident_state.setdefault("lastSentAt", {})[key] = current
@@ -6827,6 +6876,15 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
             # primary-channel sent path. Returning without the archive
             # move would leak the claimed file into processing/, where
             # reclaim_processing would resurrect and re-send it (#2435).
+            #
+            # Email is a real operator-visible route, so a conversation
+            # delivered this way IS represented. This branch returns before
+            # mark_incident_sent, so it has to record that itself — otherwise
+            # an emailed forced alert would be shown to an operator and then
+            # forced again on the conversation's next event.
+            record_conversation_scope_delivered(
+                event, incident_state, incident_key(event), int(time.time())
+            )
             if isinstance(delivery, dict):
                 delivery["nextAttemptAtEpoch"] = 0
                 delivery["status"] = "email_delivered"
