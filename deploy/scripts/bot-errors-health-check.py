@@ -5901,13 +5901,22 @@ def provider_probe_target_inventory(
             if effective_provider_path
             else None
         )
-        # Fail closed ONLY when a LaunchAgent exists and its environment could
-        # not be composed (job unloaded, launchctl print failed): silently
-        # dropping back to the probe's own PATH there is the pre-fix defect.
+        # Fail closed whenever a LaunchAgent exists and the governed PATH cannot
+        # supply the binary. TWO distinct causes, and gating on the first alone
+        # left a false green on the DEFAULT provider: the environment could not
+        # be composed at all (job unloaded, launchctl print failed), OR it
+        # composed fine and simply holds no claude. executable_candidate returns
+        # None rather than widening when given a real path, so that second case
+        # used to fall through to shutil.which and report status=ok naming a
+        # binary outside the prepend, ~/.local/bin, the pinned node dir and the
+        # plist PATH -- by construction one the service cannot execute. The
+        # opencode probe already fails closed on the same shape.
         # Where there is no LaunchAgent surface at all -- a systemd host, or the
         # dry-run override -- plist_environment is None and the legacy fallback
         # chain below is preserved byte-identical.
-        if effective_provider_path is None and plist_environment is not None:
+        if plist_environment is not None and (
+            effective_provider_path is None or runtime_command is None
+        ):
             runtime_path_unavailable = True
         command = runtime_command or shutil.which("claude") or "claude"
 

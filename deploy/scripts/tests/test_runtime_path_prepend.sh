@@ -39,6 +39,15 @@ run() {
   /bin/bash -c '. "$1"; shift; whatsoup_effective_runtime_path "$@"' _ "$LIB" "$@"
 }
 
+echo "== the helper under test is actually sourced (anti-vacuity) =="
+if /bin/bash -c '. "$1"; declare -F whatsoup_effective_runtime_path >/dev/null' _ "$LIB"; then
+  echo "  ok   whatsoup_effective_runtime_path is defined after sourcing $LIB"
+else
+  echo "  FAIL could not source $LIB -- every rejection assertion below would be vacuous"; fail=1
+  echo "RUNTIME_PATH_PREPEND_TEST_FAIL"
+  exit 1
+fi
+
 echo "== legacy behavior is preserved when nothing is configured =="
 check "three-arg form unchanged" \
   "/fixture/user-root/.local/bin:/fixture/node/bin:/loaded/bin" \
@@ -78,15 +87,6 @@ echo "== multi-segment prepend is passed through verbatim =="
 check "colon-separated prepend preserved" \
   "/a/bin:/b/bin:/fixture/user-root/.local/bin:/fixture/node/bin:/loaded/bin" \
   "$(run /fixture/user-root /fixture/node/bin/node /loaded/bin /a/bin:/b/bin)"
-
-echo "== the helper under test is actually sourced (anti-vacuity) =="
-if /bin/bash -c '. "$1"; declare -F whatsoup_effective_runtime_path >/dev/null' _ "$LIB"; then
-  echo "  ok   whatsoup_effective_runtime_path is defined after sourcing $LIB"
-else
-  echo "  FAIL could not source $LIB -- every rejection assertion below would be vacuous"; fail=1
-  echo "RUNTIME_PATH_PREPEND_TEST_FAIL"
-  exit 1
-fi
 
 echo "== argument validation still fails closed =="
 if run /fixture/user-root relative/node/bin /loaded/bin >/dev/null 2>&1; then

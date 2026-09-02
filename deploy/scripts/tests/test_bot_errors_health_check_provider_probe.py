@@ -1168,3 +1168,37 @@ def test_claude_cli_probe_passes_the_prepend_checks_when_plist_and_job_agree(mon
     assert captured, "probe never invoked the provider command"
     assert captured[0][0] == str(prepend_bin / "claude")
     assert "provider_runtime_path_prepend" not in "\n".join(lines)
+
+
+def test_claude_cli_probe_fails_closed_when_the_governed_path_holds_no_claude(monkeypatch, tmp_path):
+    # False-green on the DEFAULT provider: the effective PATH composes fine, but
+    # it holds no claude. executable_candidate returns None rather than widening
+    # when given a real path, so the old code fell through to shutil.which and
+    # reported status=ok naming an ambient binary the service cannot execute.
+    # opencode fails closed under the identical fixture; this closes the asymmetry.
+    environment = _prepend_fixture(tmp_path)
+    _arm_darwin_plist(
+        monkeypatch,
+        tmp_path,
+        "agent-alpha",
+        {"PATH": environment["PATH"], "WHATSOUP_PATH_PREPEND": environment["WHATSOUP_PATH_PREPEND"]},
+    )
+    # Deliberately OUTSIDE every directory the governed composition can see:
+    # not the prepend, not ~/.local/bin, not the pinned node dir, not the plist
+    # PATH. This is the npm-global / Homebrew / scheduler-PATH shape.
+    probe_only_bin = tmp_path / "probe-only" / "bin"
+    _write_shadow(probe_only_bin, "claude")
+    monkeypatch.setenv("PATH", f"{probe_only_bin}:/usr/bin:/bin")
+
+    # Preconditions that make this the exact reported shape, asserted so the
+    # test cannot pass for an unrelated reason.
+    effective = _mod.effective_instance_provider_path(environment)
+    assert effective is not None, "fixture must compose an effective PATH"
+    assert _mod.executable_candidate("claude", effective) is None, "fixture must have no claude on the governed PATH"
+    assert _mod.shutil.which("claude") == str(probe_only_bin / "claude")
+
+    captured, lines = _claude_probe(monkeypatch, {}, environment)
+
+    assert not captured, "probe must not execute a binary absent from the governed PATH"
+    assert "failure_class=provider_runtime_path_unavailable" in lines[0]
+    assert str(probe_only_bin) not in lines[0]
