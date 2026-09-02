@@ -26,7 +26,9 @@ import ast
 import copy
 import importlib.util
 import json
+from contextlib import ExitStack
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -38,6 +40,7 @@ _conftest_spec.loader.exec_module(_conftest)  # type: ignore[union-attr]
 _env = _conftest._env
 _load_mod_with_dirs = _conftest._load_mod_with_dirs
 _all_outbox_events = _conftest._all_outbox_events
+_run_once_defaults = _conftest._run_once_defaults
 _outbox_by_source = _conftest._outbox_by_source
 
 _COLLECTOR_PATH = Path(__file__).resolve().parent.parent / "bot-errors-collector.py"
@@ -60,6 +63,18 @@ OPEN_ALERT_KEY_SOURCES = sorted(
 
 RETIRED = "mini9:/var/tmp/bot-errors-drill"
 KEPT = "mini5"
+# Reserved synthetic remote for the cycle-level test, matching the identity
+# convention the sibling state-recovery suite uses.
+REMOTE = "h1.example"
+
+
+def _happy_patches(stack: ExitStack, mod) -> None:
+    """Neutralise every remote seam so a cycle reaches prune with no network."""
+    stack.enter_context(
+        patch.object(mod, "preflight_remote_unreachable", return_value={"status": "found", "online": True})
+    )
+    stack.enter_context(patch.object(mod, "ssh_json_lines", return_value=[]))
+    stack.enter_context(patch.object(mod, "remote_failure_context", return_value=([], {})))
 
 
 def _open_record(opened_at: int = 1_700_000_000) -> dict:
@@ -237,7 +252,17 @@ def test_configured_remote_open_alert_is_untouched(tmp_state):
         assert _all_outbox_events(outbox_dir) == []
 
 
-def test_second_prune_emits_nothing_new(tmp_state):
+def test_prune_is_not_reentrant_on_its_own_output(tmp_state):
+    """Re-pruning the SAME dict emits nothing new.
+
+    This is non-reentrancy, not cross-cycle idempotence. A disposition is
+    durable at publish_event_json + require_advance time while the pop is
+    durable only at save_collector_state, so an abort between the two re-emits
+    the whole disposition set on the next cycle. That is at-least-once
+    delivery, the same shape enqueue_meta_recovery already has, and the
+    duplicates are observation/info events that neither open nor close a
+    dispatcher incident.
+    """
     state_dir, outbox_dir = tmp_state
     with _env(state_dir, outbox_dir):
         mod = _load_mod_with_dirs(state_dir, outbox_dir)
@@ -264,7 +289,11 @@ def test_writefail_ack_membership_is_dispositioned_before_deletion(tmp_state):
         state = {
             "remotes": {RETIRED: {}, KEPT: {}},
             "writefailAckFailures": {
+                # Three failed payloads for ONE retired remote: the bucket is
+                # digest-keyed, so this is the fan-out case.
                 "a" * 64: {"remote": RETIRED, "payloadSha256": "b" * 64, "seenCount": 3},
+                "e" * 64: {"remote": RETIRED, "payloadSha256": "f" * 64, "seenCount": 1},
+                "0" * 64: {"remote": RETIRED, "payloadSha256": "1" * 64, "seenCount": 9},
                 "c" * 64: {"remote": KEPT, "payloadSha256": "d" * 64, "seenCount": 1},
             },
         }
@@ -272,9 +301,12 @@ def test_writefail_ack_membership_is_dispositioned_before_deletion(tmp_state):
 
         assert list(state["writefailAckFailures"]) == ["c" * 64]
         emitted = _dispositions(outbox_dir)
+        # ONE disposition for the remote, not one per digest.
         assert len(emitted) == 1
         assert emitted[0]["source"] == "remote-writefail-ack-failed"
         assert emitted[0]["diagnostics"]["dispositionStateLocation"] == mod.ALERT_STATE_ACK_FAILURES
+        assert emitted[0]["diagnostics"]["retiredRecordCount"] == 3
+        assert emitted[0]["diagnostics"]["remote"] == RETIRED
 
 
 # --- direct escalation tiers ------------------------------------------------
@@ -315,14 +347,64 @@ def test_quiet_remote_record_emits_no_disposition(tmp_state):
 # --- registry drift guard (coverage assertion, not a positive control) ------
 
 
-def _emitted_source_literals() -> set[str]:
-    """Every string literal this module mints an alert-bearing event under.
+def _module_string_constants(tree: ast.Module) -> dict[str, str]:
+    """Module-level `NAME = "single-line literal"` bindings.
 
-    Scans the collector's own AST rather than a hand-typed list, so a new
-    emit site with a new source literal fails this test until the registry
-    covers it.
+    Multi-line values are excluded on purpose and are held accountable
+    separately by test_every_source_named_constant_is_classified: the collector
+    embeds a ~27KB remote helper script as REMOTE_DURABLE_JSON_SOURCE, which is
+    program text, not an alert source. Resolving it here would flood the sweep,
+    so instead every *_SOURCE constant must be explicitly classified below and a
+    new one fails the classification test until someone decides which it is.
+    """
+    constants: dict[str, str] = {}
+    for node in tree.body:
+        targets: list[ast.expr] = []
+        if isinstance(node, ast.Assign):
+            targets = list(node.targets)
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets = [node.target]
+        else:
+            continue
+        value = node.value
+        if not (isinstance(value, ast.Constant) and isinstance(value.value, str)):
+            continue
+        if "\n" in value.value:
+            continue
+        for target in targets:
+            if isinstance(target, ast.Name):
+                constants[target.id] = value.value
+    return constants
+
+
+def _resolve(arg: ast.expr, constants: dict[str, str]) -> str | None:
+    """A string literal, or a Name bound to a module-level string constant."""
+    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+        return arg.value
+    if isinstance(arg, ast.Name):
+        return constants.get(arg.id)
+    return None
+
+
+def _emitted_source_literals() -> set[str]:
+    """Every source this module can mint an alert-bearing event under.
+
+    Scans the collector's own AST rather than a hand-typed list, so a new emit
+    site fails this test until the registry covers it. Three producing forms are
+    swept, because the codebase uses all three:
+
+    1. a string literal argument;
+    2. a Name argument bound to a module-level string constant -- the form
+       COLLECTOR_CAPTURE_ESCALATION_SOURCE uses, which the first revision of
+       this sweep missed entirely (review F1);
+    3. the VALUES of RELAY_HOST_STATE_KIND_SOURCES, which is the only place a
+       relay-host `kind` becomes a source. Its keys are deliberately not swept:
+       "relay_host_recovered" is a kind, never a source (#2419 maps it to the
+       DOWN source so the clear keys onto the open incident), so sweeping keys
+       would report a source that must never exist.
     """
     tree = ast.parse(_COLLECTOR_PATH.read_text())
+    constants = _module_string_constants(tree)
     literals: set[str] = set()
     positional_second = {"enqueue_meta_alert", "enqueue_meta_recovery", "defer_meta_recovery"}
     for node in ast.walk(tree):
@@ -338,34 +420,138 @@ def _emitted_source_literals() -> set[str]:
         if isinstance(node, ast.Call):
             name = node.func.id if isinstance(node.func, ast.Name) else None
             if name in positional_second and len(node.args) >= 2:
-                arg = node.args[1]
-                if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-                    literals.add(arg.value)
+                resolved = _resolve(node.args[1], constants)
+                if resolved is not None:
+                    literals.add(resolved)
             # clear_meta_recovery_progress(state, remote, source) -- source is 3rd.
             if name == "clear_meta_recovery_progress" and len(node.args) >= 3:
-                arg = node.args[2]
-                if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-                    literals.add(arg.value)
+                resolved = _resolve(node.args[2], constants)
+                if resolved is not None:
+                    literals.add(resolved)
             if name == "_emit_collector_outbox_event":
                 candidates = list(node.args[1:2])
                 candidates += [kw.value for kw in node.keywords if kw.arg == "source"]
                 for arg in candidates:
-                    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-                        literals.add(arg.value)
+                    resolved = _resolve(arg, constants)
+                    if resolved is not None:
+                        literals.add(resolved)
+        # Form 3: the relay-host kind -> source translation table.
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == "RELAY_HOST_STATE_KIND_SOURCES" for t in node.targets
+        ):
+            if isinstance(node.value, ast.Dict):
+                for value in node.value.values:
+                    resolved = _resolve(value, constants)
+                    if resolved is not None:
+                        literals.add(resolved)
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            if node.target.id == "RELAY_HOST_STATE_KIND_SOURCES" and isinstance(node.value, ast.Dict):
+                for value in node.value.values:
+                    resolved = _resolve(value, constants)
+                    if resolved is not None:
+                        literals.add(resolved)
     return literals
 
 
 def test_every_emitted_source_literal_is_registered(tmp_state):
     state_dir, outbox_dir = tmp_state
     mod = _load_mod_with_dirs(state_dir, outbox_dir)
-    literals = _emitted_source_literals()
-    # Coverage assertion: the scan must actually find the known emit sites.
-    # An empty or truncated scan would otherwise pass vacuously.
-    assert "remote-claim-failed" in literals
-    assert "remote-writefail-ack-failed" in literals
-    assert len(literals) >= 6
+    swept = _emitted_source_literals()
+    # Coverage assertion: the sweep must actually reach all three producing
+    # forms. An empty or truncated scan would otherwise pass vacuously, which
+    # is exactly how the first revision stayed green while two of the eight
+    # sources were invisible to it (review F1).
+    assert "remote-claim-failed" in swept, "literal-argument form not swept"
+    assert "remote-writefail-ack-failed" in swept, "event-dict literal form not swept"
+    assert mod.COLLECTOR_CAPTURE_ESCALATION_SOURCE in swept, "module-constant form not swept"
+    assert mod.RELAY_HOST_DOWN_SOURCE in swept, "relay-kind translation table not swept"
+    assert len(swept) >= 8, f"sweep reached only {len(swept)} sources: {sorted(swept)}"
     registered = set(mod.REGISTERED_ALERT_SOURCES)
-    assert literals <= registered, f"unregistered emit-site sources: {sorted(literals - registered)}"
+    assert swept <= registered, f"unregistered emit-site sources: {sorted(swept - registered)}"
+
+
+# Every module-level constant whose name ends in _SOURCE must be classified.
+# Adding one without a decision here is a test failure, which is what stops a
+# new escalation tier from being minted outside the inventory (review F1a).
+CLASSIFIED_ALERT_SOURCE = "alert-source"
+CLASSIFIED_EMBEDDED_SCRIPT = "embedded-remote-script"
+
+SOURCE_CONSTANT_DISPOSITIONS = {
+    "COLLECTOR_CAPTURE_ESCALATION_SOURCE": CLASSIFIED_ALERT_SOURCE,
+    "RELAY_HOST_DOWN_SOURCE": CLASSIFIED_ALERT_SOURCE,
+    # Program text shipped to the remote host, not a source name.
+    "REMOTE_DURABLE_JSON_SOURCE": CLASSIFIED_EMBEDDED_SCRIPT,
+}
+
+
+def test_every_source_named_constant_is_classified(tmp_state):
+    state_dir, outbox_dir = tmp_state
+    mod = _load_mod_with_dirs(state_dir, outbox_dir)
+    tree = ast.parse(_COLLECTOR_PATH.read_text())
+    found: set[str] = set()
+    for node in tree.body:
+        targets: list[ast.expr] = []
+        if isinstance(node, ast.Assign):
+            targets = list(node.targets)
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        for target in targets:
+            if isinstance(target, ast.Name) and target.id.endswith("_SOURCE"):
+                found.add(target.id)
+    assert found, "scan found no *_SOURCE constants at all"
+    unclassified = found - set(SOURCE_CONSTANT_DISPOSITIONS)
+    assert not unclassified, (
+        f"unclassified *_SOURCE constant(s): {sorted(unclassified)}. Add each to "
+        "SOURCE_CONSTANT_DISPOSITIONS as an alert source (and to "
+        "REGISTERED_ALERT_SOURCES) or as an embedded script."
+    )
+    stale = set(SOURCE_CONSTANT_DISPOSITIONS) - found
+    assert not stale, f"SOURCE_CONSTANT_DISPOSITIONS names constants that no longer exist: {sorted(stale)}"
+    for name, disposition in SOURCE_CONSTANT_DISPOSITIONS.items():
+        if disposition == CLASSIFIED_ALERT_SOURCE:
+            assert getattr(mod, name) in mod.REGISTERED_ALERT_SOURCES, (
+                f"{name} is classified as an alert source but is not registered"
+            )
+
+
+def test_remote_record_sources_declare_an_open_flag(tmp_state):
+    """The flag map and the registry must agree in both directions.
+
+    Before this, the prune branched on hand-typed flag names, so a third
+    remote-record tier could be registered and still have its open state
+    deleted with no disposition, with nothing red (review F1).
+    """
+    state_dir, outbox_dir = tmp_state
+    mod = _load_mod_with_dirs(state_dir, outbox_dir)
+    registered_remote_record = {
+        source
+        for source, location in mod.REGISTERED_ALERT_SOURCES.items()
+        if location == mod.ALERT_STATE_REMOTE_RECORD
+    }
+    assert set(mod.REMOTE_RECORD_OPEN_FLAGS) == registered_remote_record
+    assert registered_remote_record == {
+        mod.COLLECTOR_CAPTURE_ESCALATION_SOURCE,
+        mod.RELAY_HOST_DOWN_SOURCE,
+    }
+    for flag in mod.REMOTE_RECORD_OPEN_FLAGS.values():
+        assert isinstance(flag, str) and flag
+
+
+def test_relay_host_kind_translation_is_closed(tmp_state):
+    state_dir, outbox_dir = tmp_state
+    mod = _load_mod_with_dirs(state_dir, outbox_dir)
+    # Every kind resolves to a REGISTERED source, and the recovered kind
+    # deliberately carries the DOWN source (#2419) rather than one of its own.
+    for kind, source in mod.RELAY_HOST_STATE_KIND_SOURCES.items():
+        assert source in mod.REGISTERED_ALERT_SOURCES, f"{kind} maps to unregistered {source}"
+    assert mod.relay_host_state_source("relay_host_recovered") == mod.RELAY_HOST_DOWN_SOURCE
+    assert mod.relay_host_state_source("relay_host_down") == mod.RELAY_HOST_DOWN_SOURCE
+    assert "relay_host_recovered" not in mod.REGISTERED_ALERT_SOURCES
+    # An unknown kind fails closed instead of minting an unregistered source.
+    with pytest.raises(mod.UnregisteredAlertSourceError) as excinfo:
+        mod.relay_host_state_source("relay_host_flapping")
+    assert "unregistered_relay_host_kind" in str(excinfo.value)
+    assert "relay_host_flapping" not in str(excinfo.value)
 
 
 def test_registry_covers_the_issue_acceptance_inventory(tmp_state):
@@ -384,7 +570,7 @@ def test_registry_covers_the_issue_acceptance_inventory(tmp_state):
     }
     assert required <= registered
     # Every registered source declares where its state lives, and only the
-    # openAlerts-keyed subset is suffix-matched by alert_remote_from_key.
+    # openAlerts-keyed subset is suffix-matched by split_alert_key.
     for source in registered:
         assert mod.REGISTERED_ALERT_SOURCES[source] in {
             mod.ALERT_STATE_OPEN_ALERTS,
@@ -402,9 +588,85 @@ def test_registry_covers_the_issue_acceptance_inventory(tmp_state):
     assert len(OPEN_ALERT_KEY_SOURCES) == 5
 
 
-def test_alert_remote_from_key_rejects_unregistered_source(tmp_state):
+def test_split_alert_key_splits_registered_and_refuses_the_rest(tmp_state):
     state_dir, outbox_dir = tmp_state
     mod = _load_mod_with_dirs(state_dir, outbox_dir)
-    assert mod.alert_remote_from_key(f"{RETIRED}:remote-drain-stale") == RETIRED
+    # A remote containing a colon still splits on the trailing source suffix.
+    assert mod.split_alert_key(f"{RETIRED}:remote-drain-stale") == (RETIRED, "remote-drain-stale")
+    assert mod.split_alert_key(f"{RETIRED}:not-a-registered-source") is None
+    # split_alert_key reports; require_registered_alert_keys is what fails closed.
     with pytest.raises(mod.UnregisteredAlertSourceError):
-        mod.alert_remote_from_key(f"{RETIRED}:not-a-registered-source")
+        mod.require_registered_alert_keys([f"{RETIRED}:not-a-registered-source"])
+    assert not hasattr(mod, "alert_remote_from_key"), (
+        "alert_remote_from_key had no production caller after #2429; it was removed "
+        "so nothing adopts a raising contract nobody exercises"
+    )
+
+
+# --- the alerts-only (legacy) branch ---------------------------------------
+
+
+def test_alerts_only_key_is_dispositioned_as_legacy(tmp_state):
+    """An alerts timestamp with no openAlerts record still owns an episode.
+
+    legacy_open_record() exists precisely to materialise an open incident from
+    a pre-open-incident alerts timestamp, so retiring one is retiring an open
+    lifecycle and must not be silent either.
+    """
+    state_dir, outbox_dir = tmp_state
+    with _env(state_dir, outbox_dir):
+        mod = _load_mod_with_dirs(state_dir, outbox_dir)
+        key = f"{RETIRED}:remote-relay-failed"
+        state = {
+            "remotes": {RETIRED: {}, KEPT: {}},
+            "alerts": {key: 1_700_000_000},
+            "openAlerts": {},
+        }
+        mod.prune_state_to_configured_remotes(state, [KEPT])
+
+        assert state["alerts"] == {}
+        emitted = _dispositions(outbox_dir)
+        assert len(emitted) == 1
+        assert emitted[0]["diagnostics"]["priorStatus"] == "legacy"
+        assert emitted[0]["diagnostics"]["dispositionStateLocation"] == mod.ALERT_STATE_OPEN_ALERTS
+
+
+# --- cycle-level fail-closed (not just the prune function) ------------------
+
+
+def test_unregistered_key_fails_the_whole_cycle_closed(tmp_state):
+    """The operational claim, pinned: the CYCLE fails closed, not just prune.
+
+    Every other test in this file calls prune_state_to_configured_remotes
+    directly. This one drives a real cycle through run_once against a durable
+    ledger, so a later refactor that wraps the cycle in a broad `except` or
+    moves the prune below the first effect turns red here (review F2).
+    """
+    state_dir, outbox_dir = tmp_state
+    with _env(state_dir, outbox_dir):
+        mod = _load_mod_with_dirs(state_dir, outbox_dir)
+
+        # Seed a durable ledger through the collector's own session writer.
+        session = mod.open_collector_state_session()
+        try:
+            payload, capability = mod._load_collector_state_for_cycle(session)
+            payload["remotes"] = {REMOTE: {}}
+            payload["openAlerts"] = {f"{REMOTE}:collector-disk-full": _open_record()}
+            mod.save_collector_state(session, payload, capability)
+        finally:
+            session.close()
+
+        state_file = state_dir / "collector-state.json"
+        before = state_file.read_bytes()
+        assert _all_outbox_events(outbox_dir) == []
+
+        with ExitStack() as stack:
+            _happy_patches(stack, mod)
+            with pytest.raises(mod.UnregisteredAlertSourceError) as excinfo:
+                _run_once_defaults(mod, [REMOTE])
+
+        assert "unregistered_alert_source" in str(excinfo.value)
+        # Nothing committed, nothing published: the prior ledger is intact and
+        # still recoverable.
+        assert state_file.read_bytes() == before
+        assert _all_outbox_events(outbox_dir) == []
