@@ -183,6 +183,106 @@ describe('healthPresentation projection', () => {
   })
 })
 
+// The unknown-cause marker must depend on the absence of a RESOLVED REASON, not
+// on the chip list being empty. Confidence, availability and staleness chips are
+// pushed first, so an emptiness test lets a reason-less event render as
+// "degraded — confidence confirmed" and never say the cause is unknown.
+describe('unknown-cause marker is independent of the other chips', () => {
+  it('still says unknown when a reason-less degraded event carries a confidence', () => {
+    const presented = healthPresentation({ status: 'degraded', confidence: 'confirmed' })
+    expect(presented.summary).toBe('unknown · confidence confirmed')
+    expect(presented.clipboardText).toBe('degraded — unknown · confidence confirmed')
+  })
+
+  it('still says unknown when a reason-less degraded event is only marked stale', () => {
+    const presented = healthPresentation({ status: 'degraded', stale: true })
+    expect(presented.summary).toBe(`unknown · ${STALE_OBSERVATION_LABEL}`)
+    expect(presented.clipboardText).toContain('unknown')
+  })
+
+  it('leaves the bare reason-less degraded copy untouched', () => {
+    expect(healthPresentation({ status: 'degraded' }).clipboardText).toBe('degraded — unknown')
+  })
+
+  it('does not add an unknown marker once a reason resolves', () => {
+    const presented = healthPresentation({
+      status: 'degraded',
+      reason: 'health_body_unhealthy',
+      confidence: 'confirmed',
+    })
+    expect(presented.summary).not.toContain('unknown')
+  })
+})
+
+// The projection is a trust boundary: `reason` and `confidence` arrive over the
+// wire and are typed, not validated. Anything that reaches `confidence` is
+// interpolated into visible text AND the clipboard, so an unvalidated value is a
+// raw-text leak straight through the AC7 containment.
+describe('forged input fails closed at the projection boundary', () => {
+  it('treats a non-string reason as unsupported, never as absent', () => {
+    const presented = healthPresentation({
+      status: 'degraded',
+      reason: 42 as unknown as string,
+    })
+    expect(presented.supported).toBe(false)
+    expect(presented.label).toBe(UNSUPPORTED_REASON_LABEL)
+    expect(presented.code).toBeNull()
+    expect(presented.summary).not.toContain('42')
+  })
+
+  it('treats an object reason as unsupported without stringifying it', () => {
+    const presented = healthPresentation({
+      status: 'degraded',
+      reason: { toString: () => 'health_body_unhealthy' } as unknown as string,
+    })
+    expect(presented.supported).toBe(false)
+    expect(presented.summary).not.toContain('[object Object]')
+    expect(presented.summary).not.toContain('health_body_unhealthy')
+  })
+
+  it('drops an unregistered confidence value instead of rendering it', () => {
+    const forged = 'ECONNREFUSED 127.0.0.1:4001 raw leak'
+    const presented = healthPresentation({
+      status: 'degraded',
+      reason: 'health_body_unhealthy',
+      confidence: forged as unknown as 'confirmed',
+    })
+    expect(presented.summary).not.toContain(forged)
+    expect(presented.clipboardText).not.toContain(forged)
+    expect(presented.confidence).toBeNull()
+    expect(presented.summary).toContain('confidence unavailable')
+  })
+
+  it('drops a non-string confidence instead of stringifying it', () => {
+    const presented = healthPresentation({
+      status: 'degraded',
+      reason: 'health_body_unhealthy',
+      confidence: { level: 'confirmed' } as unknown as 'confirmed',
+    })
+    expect(presented.summary).not.toContain('[object Object]')
+    expect(presented.clipboardText).not.toContain('[object Object]')
+    expect(presented.confidence).toBeNull()
+    expect(presented.summary).toBe(
+      'health response reports unhealthy (health_body_unhealthy) · confidence unavailable',
+    )
+  })
+
+  it('accepts every registered confidence value unchanged', () => {
+    for (const value of ['confirmed', 'inferred', 'ambiguous'] as const) {
+      const presented = healthPresentation({ status: 'degraded', confidence: value })
+      expect(presented.confidence).toBe(value)
+      expect(presented.summary).toContain(`confidence ${value}`)
+    }
+  })
+
+  it('keeps the stale flag strict rather than truthy', () => {
+    expect(healthPresentation({
+      status: 'degraded',
+      stale: 'yes' as unknown as boolean,
+    }).stale).toBe(false)
+  })
+})
+
 describe('healthPresentationShortText', () => {
   it('shortens a registered reason to its label and keeps the availability verdict', () => {
     const presented = healthPresentation({

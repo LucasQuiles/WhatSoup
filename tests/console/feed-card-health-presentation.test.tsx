@@ -211,31 +211,72 @@ describe('FeedCard health presentation — fail-closed unsupported codes', () =>
 })
 
 describe('FeedCard health presentation — raw error and evidence containment', () => {
-  it('keeps the raw error out of the visible text, tooltips and accessible names', () => {
-    const rawError = 'ECONNREFUSED 127.0.0.1:4001 while reading /var/run/whatsoup.sock'
+  // Distinct sentinels so a leak names its own source, and every sink is
+  // exercised: visible text, attributes and accessible names, and the clipboard.
+  const ERROR_SENTINEL = 'ECONNREFUSED 127.0.0.1:4001 while reading /var/run/whatsoup.sock'
+  const EVIDENCE_SENTINEL = 'EVIDENCESENTINEL-raw_stack=Error: boom'
+
+  function leakyEvent() {
+    return event({
+      detail: {
+        type: 'health',
+        status: 'degraded',
+        confidence: 'confirmed',
+        reason: 'health_body_unhealthy',
+        error: ERROR_SENTINEL,
+        evidence: ['health_body_status=unhealthy', EVIDENCE_SENTINEL],
+      },
+    })
+  }
+
+  it('keeps both sentinels out of the visible text, tooltips and accessible names', () => {
+    const { container } = render(
+      <FeedCard event={leakyEvent()} onRestart={() => undefined} onStop={() => undefined} />,
+    )
+
+    expect(container.textContent).not.toContain(ERROR_SENTINEL)
+    expect(container.textContent).not.toContain(EVIDENCE_SENTINEL)
+    for (const el of container.querySelectorAll('[title], [aria-label]')) {
+      const attrs = `${el.getAttribute('title') ?? ''} ${el.getAttribute('aria-label') ?? ''}`
+      expect(attrs).not.toContain(ERROR_SENTINEL)
+      expect(attrs).not.toContain(EVIDENCE_SENTINEL)
+    }
+  })
+
+  it('keeps both sentinels out of the copied text', async () => {
+    const writeText = installClipboard()
+    render(<FeedCard event={leakyEvent()} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Copy to clipboard' }))
+    await waitFor(() => expect(writeText).toHaveBeenCalled())
+    const copied = writeText.mock.calls[0]![0] as string
+    expect(copied).not.toContain(ERROR_SENTINEL)
+    expect(copied).not.toContain(EVIDENCE_SENTINEL)
+    expect(copied).toBe(
+      'degraded — health response reports unhealthy (health_body_unhealthy) · confidence confirmed',
+    )
+  })
+
+  it('cannot be used to smuggle raw text through the confidence field', async () => {
+    const writeText = installClipboard()
+    const forged = 'CONFIDENCESENTINEL raw leak'
     const { container } = render(
       <FeedCard
         event={event({
           detail: {
             type: 'health',
             status: 'degraded',
-            confidence: 'confirmed',
             reason: 'health_body_unhealthy',
-            error: rawError,
-            evidence: ['health_body_status=unhealthy', 'raw_stack=Error: boom'],
+            confidence: forged as unknown as 'confirmed',
           },
         })}
-        onRestart={() => undefined}
-        onStop={() => undefined}
       />,
     )
 
-    expect(container.textContent).not.toContain(rawError)
-    expect(container.textContent).not.toContain('raw_stack')
-    for (const el of container.querySelectorAll('[title], [aria-label]')) {
-      expect(el.getAttribute('title') ?? '').not.toContain(rawError)
-      expect(el.getAttribute('aria-label') ?? '').not.toContain(rawError)
-    }
+    expect(container.textContent).not.toContain(forged)
+    fireEvent.click(screen.getByRole('button', { name: 'Copy to clipboard' }))
+    await waitFor(() => expect(writeText).toHaveBeenCalled())
+    expect(writeText.mock.calls[0]![0] as string).not.toContain(forged)
   })
 })
 

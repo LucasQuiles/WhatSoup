@@ -346,6 +346,19 @@ const AVAILABILITY_LABELS: Readonly<Record<ObservationAvailability, string | nul
 export const STALE_OBSERVATION_LABEL = 'stale observation';
 
 /**
+ * Text shown when a confidence arrived that this build does not recognise.
+ *
+ * The producer's confidence is TYPED but not validated at the wire, and it is
+ * interpolated into visible text and the clipboard. Rendering it unchecked would
+ * carry arbitrary producer text straight through the raw-text containment, so an
+ * unrecognised value is replaced by this bounded label rather than shown.
+ */
+export const UNVALIDATED_CONFIDENCE_LABEL = 'confidence unavailable';
+
+/** The closed confidence vocabulary, as a runtime guard over `StatusConfidence`. */
+const CONFIDENCE_VALUES: readonly string[] = ['confirmed', 'inferred', 'ambiguous'];
+
+/**
  * The inputs this module READS.
  *
  * `error` and `evidence` are not among them. A caller may pass a wider object
@@ -429,9 +442,18 @@ function headlineIsGenericBucket(status?: string | null): boolean {
 }
 
 export function healthPresentation(observation: HealthObservation): HealthPresentation {
-  const rawReason = typeof observation.reason === 'string' ? observation.reason.trim() : '';
-  const code = rawReason !== '' && isRegistered(rawReason) ? rawReason : null;
-  const supported = rawReason === '' || code !== null;
+  // This function is a trust boundary. `reason` and `confidence` arrive over the
+  // wire and are typed, not validated, so every branch below fails closed on a
+  // shape it does not recognise rather than passing the value through.
+  const reasonInput: unknown = observation.reason;
+  const reasonSupplied = reasonInput !== undefined && reasonInput !== null;
+  // A MALFORMED reason is not an ABSENT one. Treating a forged shape as "no
+  // reason supplied" would let it render as the benign `unknown` state and would
+  // hide that the producer sent something this build cannot classify.
+  const reasonIsMalformed = reasonSupplied && typeof reasonInput !== 'string';
+  const rawReason = typeof reasonInput === 'string' ? reasonInput.trim() : '';
+  const code = !reasonIsMalformed && rawReason !== '' && isRegistered(rawReason) ? rawReason : null;
+  const supported = !reasonIsMalformed && (rawReason === '' || code !== null);
   const entry = code !== null ? HEALTH_REASON_DETAILS[code] : null;
 
   const label = entry !== null
@@ -440,7 +462,15 @@ export function healthPresentation(observation: HealthObservation): HealthPresen
       ? UNKNOWN_REASON_LABEL
       : UNSUPPORTED_REASON_LABEL;
 
-  const confidence = observation.confidence ?? null;
+  const confidenceInput: unknown = observation.confidence;
+  const confidenceSupplied = confidenceInput !== undefined && confidenceInput !== null;
+  const confidence: StatusConfidence | null =
+    typeof confidenceInput === 'string' && CONFIDENCE_VALUES.includes(confidenceInput)
+      ? (confidenceInput as StatusConfidence)
+      : null;
+  // Something arrived, but not a value from the closed vocabulary. Say so with a
+  // bounded label; never render what came in.
+  const confidenceRejected = confidenceSupplied && confidence === null;
   // A reason we cannot resolve is an unproven observation, not a clean one.
   const availability: ObservationAvailability = entry !== null
     ? entry.availability
@@ -450,19 +480,25 @@ export function healthPresentation(observation: HealthObservation): HealthPresen
   const nextAction: NextActionClass = entry !== null ? entry.nextAction : 'investigate';
   const stale = observation.stale === true;
 
+  // The CAUSE chip. Exactly one of these three branches speaks for the cause, so
+  // the unknown marker depends on the absence of a resolved reason and on
+  // nothing else. Deriving it from an empty chip list instead would let a
+  // confidence or staleness chip suppress it, and a reason-less degraded event
+  // would read "degraded — confidence confirmed" while never saying the cause is
+  // unknown.
   const chips: string[] = [];
   if (entry !== null && code !== null) {
     chips.push(`${label} (${code})`);
   } else if (!supported) {
     chips.push(label);
+  } else if (headlineIsGenericBucket(observation.status)) {
+    chips.push(UNKNOWN_REASON_LABEL);
   }
   if (confidence !== null) chips.push(`confidence ${confidence}`);
+  else if (confidenceRejected) chips.push(UNVALIDATED_CONFIDENCE_LABEL);
   const availabilityLabel = AVAILABILITY_LABELS[availability];
   if (availabilityLabel !== null) chips.push(availabilityLabel);
   if (stale) chips.push(STALE_OBSERVATION_LABEL);
-  if (chips.length === 0 && headlineIsGenericBucket(observation.status)) {
-    chips.push(UNKNOWN_REASON_LABEL);
-  }
 
   const summary = chips.length > 0 ? chips.join(' · ') : undefined;
   const headline = healthHeadline(observation.status, observation.lastSessionStatus);
