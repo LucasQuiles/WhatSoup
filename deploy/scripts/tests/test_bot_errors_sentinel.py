@@ -4154,8 +4154,17 @@ def test_a_repeat_retirement_publishes_its_own_artifact_not_a_stale_pin(tmp_path
     hosts_path = _write_json(tmp_path / "hosts.json", _roster_with(tmp_path, ["host-a", "repeat-member"]))
     config = _config(tmp_path, hosts_path)
 
+    # The roster file's INTEGER mtime is the roster epoch (bot_errors_roster.roster_epoch),
+    # and it rides in the disposition payload as roster.manifestEpoch, so it is part of the
+    # content binding. Left to wall-clock, two roster writes that straddle a second boundary
+    # give the two retirements DIFFERENT bindings, the pre-fix code mints a fresh pin, and
+    # this test passes against the unfixed code for a reason that has nothing to do with the
+    # defect. Pin it so the scenario is built by construction, not by running fast enough.
+    roster_mtime = 900.0
+
     def _cycle(now: float, roster: list[str]):
         _write_json(config.hosts_path, _roster_with(tmp_path, roster))
+        os.utime(config.hosts_path, (roster_mtime, roster_mtime))
         for host in roster:
             _heartbeat(tmp_path / f"{host}-hb.json", healthy=True, mtime=now - 5.0)
         probes = {h: {"reachable": True, "healthy": True, "class": "healthy"} for h in roster}
@@ -4167,10 +4176,21 @@ def test_a_repeat_retirement_publishes_its_own_artifact_not_a_stale_pin(tmp_path
     _cycle(1100.0, ["host-a"])
     first = [e for e in _retirement_events(config) if e["host"] == "repeat-member"]
     assert len(first) == 1
+    first_binding = _intent_ledger(config)["repeat-member"]["contentBinding"]
     # 3. re-add it -> tombstone clears, record is rebuilt identically
     _cycle(1200.0, ["host-a", "repeat-member"])
     # 4. drop it again, same roster digests -> same requestId, same content
     _cycle(1300.0, ["host-a"])
+
+    # FIXTURE GUARD, asserted before the artifact count: the two retirements must really
+    # produce the same non-clock content. If they do not, this test can pass against the
+    # unfixed code without exercising the defect at all, so a mismatch is a broken fixture
+    # and must fail loudly rather than read as a pass.
+    second_binding = _intent_ledger(config)["repeat-member"]["contentBinding"]
+    assert second_binding == first_binding, (
+        "fixture did not reproduce identical disposition content, so the artifact-count "
+        "assertion below would not be testing the collapse"
+    )
 
     events = [e for e in _retirement_events(config) if e["host"] == "repeat-member"]
     assert len(events) == 2, "the second retirement published no artifact of its own"

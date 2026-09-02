@@ -2062,14 +2062,23 @@ def build_configuration_retired_event(
     ``reconcile_retirement_intents`` pins the first attempt's clock so that
     retry reproduces byte-identical bytes and reconciles into the SAME file,
     which removes the duplicate in the common case. It does not remove it in
-    every case: the ``requestId`` is derived from the roster digests, so ANY
-    roster change between a failed cycle and its retry moves them -- a second
-    member leaving, a member being ADDED, a rename, or a manifest-epoch bump --
-    and the ``requestId`` moves with them, so requestId-based dedupe has nothing
-    to match either. The digests cover the whole member set, not just the
-    departing member, so the trigger is far wider than a second departure. That
-    case still leaves two audit records for one retirement. The contract stated
-    here is the only thing a consumer can rely on.
+    every case, and the two kinds of roster change are NOT equivalent:
+
+    - A MEMBERSHIP change between a failed cycle and its retry -- a second
+      member leaving, a member being added, a rename -- moves the digests,
+      because ``host_set_digest`` hashes the member names. The ``requestId`` is
+      derived from those digests, so it moves too and requestId-based dedupe
+      has nothing to match. The digests cover the whole member set, not just
+      the departing member, so this is far wider than a second departure. That
+      case still leaves two audit records for one retirement.
+    - A MANIFEST-ONLY change -- a new ``manifestDigest`` or ``manifestEpoch``,
+      the latter being just the roster file's integer mtime -- does NOT move
+      the digests and therefore does NOT move the ``requestId``. It rides in
+      the ``roster`` block of the payload, so it moves the retirement-intent
+      content binding and starts a fresh pinned episode, but dedupe by
+      ``requestId`` still collapses the records correctly.
+
+    The contract stated here is the only thing a consumer can rely on.
     """
     return {
         "schemaVersion": 1,
@@ -2228,7 +2237,9 @@ def reconcile_retirement_intents(
        retirement wedge. This is why ``int(now)`` deliberately stays in the
        filename.
     2. ``episodeSeq`` unchanged, where the value is ``state["cycleSeq"]`` as
-       read at the top of ``retire_unconfigured_hosts``. Content equality alone
+       read at this function's call site in ``retire_unconfigured_hosts``,
+       after the per-member binding loop and before any publication. Content
+       equality alone
        CANNOT separate a retry from a genuinely new retirement of the same
        member: ``retired_host_summary`` carries no timestamp, so a member
        retired, re-added and retired again under an unchanged roster rebuilds a
@@ -2246,10 +2257,12 @@ def reconcile_retirement_intents(
     ``run_redeem`` also saves state, but touches neither ``cycleSeq`` nor
     ``hosts``, so it cannot forge or erase an episode boundary.
 
-    A roster that changes between a failed cycle and its retry moves the
-    digests, so the requestId and the roster block move, the binding moves, and
-    a fresh episode begins. That case still leaves a requestId-distinct
-    duplicate audit record; this ledger does not close it.
+    A MEMBERSHIP change between a failed cycle and its retry moves the digests,
+    so the requestId and the roster block move, the binding moves, and a fresh
+    episode begins. That case still leaves a requestId-distinct duplicate audit
+    record; this ledger does not close it. A manifest-only change (including
+    ``manifestEpoch``, the roster file's integer mtime) moves the binding but
+    NOT the requestId, so it starts a fresh episode while remaining dedupable.
 
     A cycle with no retiring members does not touch this file at all.
     Publishing it on an otherwise-clean cycle would add a new way for that
@@ -2346,10 +2359,10 @@ def retire_unconfigured_hosts(
             )
         )
     # The episode discriminator is the cycle counter as it stands on disk RIGHT
-    # NOW, before this cycle advances it at :2513. Same value across a retry
-    # (nothing was saved), different across episodes (a saved cycle sat between
-    # them). Without it, content equality alone lets a second retirement
-    # reconcile onto the first one's artifact.
+    # NOW, before run_once advances it later in the same cycle. Same value
+    # across a retry (nothing was saved), different across episodes (a saved
+    # cycle sat between them). Without it, content equality alone lets a second
+    # retirement reconcile onto the first one's artifact.
     intents = reconcile_retirement_intents(
         config, bindings, now, int_or_zero(state.get("cycleSeq"))
     )
