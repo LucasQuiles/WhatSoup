@@ -514,8 +514,11 @@ def _systemd_seconds(value: str) -> int:
     by KeyError so a rewrite in a valid-but-unlisted spelling is diagnosed, not buried."""
     total = 0
     matched = 0
-    for number, unit in re.findall(r"(\d+)\s*([A-Za-z]*)", value.strip()):
-        unit_key = (unit or "s").lower()
+    if re.search(r"[A-Z]", value):
+        # systemd time units are lowercase; an uppercase unit makes the file unloadable.
+        pytest.fail(f"uppercase time unit in {value!r}: systemd would not load this timer")
+    for number, unit in re.findall(r"(\d+)\s*([a-z]*)", value.strip()):
+        unit_key = unit or "s"
         if unit_key not in _SYSTEMD_UNITS:
             pytest.fail(f"unknown systemd time unit {unit!r} in {value!r}; extend _SYSTEMD_UNITS")
         total += int(number) * _SYSTEMD_UNITS[unit_key]
@@ -534,9 +537,11 @@ def _deadman_plist_block(installer: str) -> str:
 
 def test_default_check_interval_matches_the_systemd_timer_cadence(health_check):
     timer = (_DEPLOY / "bot-errors-deadman.timer").read_text(encoding="utf-8")
-    match = re.search(r"^OnUnitActiveSec=(.+)$", timer, re.M)
-    assert match, "bot-errors-deadman.timer has no OnUnitActiveSec"
-    assert _systemd_seconds(match.group(1)) == health_check.DEADMAN_CHECK_INTERVAL_SECONDS
+    values = re.findall(r"^OnUnitActiveSec=(.+)$", timer, re.M)
+    assert values, "bot-errors-deadman.timer has no OnUnitActiveSec"
+    # systemd honours the LAST assignment in the file, so an appended override is the
+    # value that runs; every assignment must agree so no reading of the file is wrong.
+    assert all(_systemd_seconds(v) == health_check.DEADMAN_CHECK_INTERVAL_SECONDS for v in values), values
 
 
 def test_default_check_interval_matches_the_launchd_deadman_agent_cadence(health_check):
@@ -564,6 +569,8 @@ def test_systemd_duration_parser_covers_the_plausible_spellings():
     ]
     with pytest.raises(pytest.fail.Exception):
         _systemd_seconds("5fortnights")
+    with pytest.raises(pytest.fail.Exception):
+        _systemd_seconds("5M")  # uppercase unit: systemd would refuse to load the timer
 
 
 def test_shipped_deadman_service_does_not_override_check_interval_inconsistently(health_check):
