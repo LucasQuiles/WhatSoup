@@ -204,6 +204,43 @@ describe('healthPresentationShortText', () => {
     expect(healthPresentationShortText(healthPresentation({ status: 'degraded', reason: 'nope' })))
       .toContain(UNSUPPORTED_REASON_LABEL)
   })
+
+  it('keeps the auth-expired nuance when the surface carries the last session status', () => {
+    expect(healthPresentationShortText(
+      healthPresentation({ status: 'unreachable', lastSessionStatus: 'auth_expired' }),
+    )).toBe('auth expired')
+    expect(healthPresentationShortText(healthPresentation({ status: 'unreachable' })))
+      .toBe('connection lost')
+  })
+})
+
+// The lines route synthesises these two on top of the poller's vocabulary
+// (src/fleet/routes/lines.ts:506). Both are routine states, so neither may reach
+// the fail-closed unsupported presentation.
+describe('lines-route synthesised reasons', () => {
+  it('labels a never-polled line as awaiting its first observation', () => {
+    const presented = healthPresentation({ status: 'unknown', reason: 'not_polled' })
+    expect(presented.code).toBe('not_polled')
+    expect(presented.supported).toBe(true)
+    expect(presented.label).toBe('awaiting first health poll')
+    expect(presented.availability).toBe('unavailable')
+    expect(presented.nextAction).toBe('monitor')
+    expect(presented.actionProof).toBeNull()
+  })
+
+  it('treats a config error as a confirmed local observation, not an unavailable one', () => {
+    const presented = healthPresentation({
+      status: 'config_error',
+      reason: 'config_error',
+      confidence: 'confirmed',
+    })
+    expect(presented.code).toBe('config_error')
+    expect(presented.availability).toBe('observed')
+    // The route stamps `confidence: confirmed` alongside this code; marking the
+    // observation unavailable would contradict it in the same sentence.
+    expect(presented.summary).toContain('confidence confirmed')
+    expect(presented.summary).not.toContain('observation unavailable')
+  })
 })
 
 describe('connection reason labels share the registry module', () => {

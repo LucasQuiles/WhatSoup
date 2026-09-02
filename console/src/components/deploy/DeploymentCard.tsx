@@ -130,10 +130,17 @@ export function DeploymentCard({ lines, queryError }: { lines: LineInstance[]; q
                 reason: l.statusReason,
                 confidence: l.statusConfidence,
                 stale: l.stale,
+                lastSessionStatus: l.lastSessionStatus,
               });
               return (
                 <span key={l.name} className="deploy-mini__warn" title={health.clipboardText}>
                   {l.name}: {healthPresentationShortText(health)}
+                  {/* The chip is compact by design, but the issue's contract requires
+                      the COMPLETE safe classification to reach assistive text. A
+                      `title` on a non-interactive span is hover-only, so the reason
+                      code and confidence would otherwise be unreachable by keyboard
+                      or screen reader. */}
+                  <span className="sr-only">{` (${health.clipboardText})`}</span>
                 </span>
               );
             })}

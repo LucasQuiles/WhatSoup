@@ -27,7 +27,9 @@
  *  - Observation/schema availability failures stay distinct from confirmed
  *    domain unhealthiness.
  *  - Raw exception text and raw evidence never enter this projection: no field
- *    of `HealthPresentation` is derived from `error` or `evidence`.
+ *    of `HealthPresentation` is derived from `error` or `evidence`. That is an
+ *    implementation-and-test guarantee, not a type-level one; see
+ *    `HealthObservation` below.
  *  - `unknown` appears only when the producer supplied no reason at all, never
  *    because a consumer discarded one.
  *
@@ -75,6 +77,14 @@ export const HEALTH_REASON_CODES = [
   'health_probe_timeout_under_proxy_load',
   'health_poll_failed_transient',
   'health_poll_failed_threshold',
+  // --- synthesised by the lines route, not the poller ------------------------
+  // `src/fleet/routes/lines.ts:506` builds `LineInstance.statusReason` as
+  // `isConfigError ? 'config_error' : (poll?.statusReason ?? 'not_polled')`, so
+  // the deployments card receives these two codes in addition to the poller's.
+  // Both are routine states: every line reads `not_polled` until its first poll
+  // completes, and a misconfigured line reads `config_error` durably.
+  'config_error',
+  'not_polled',
 ] as const;
 
 export type HealthReasonCode = (typeof HEALTH_REASON_CODES)[number];
@@ -220,6 +230,21 @@ export const HEALTH_REASON_DETAILS = {
     availability: 'unavailable',
     nextAction: 'restart_line',
   },
+  config_error: {
+    label: 'line configuration is invalid',
+    // A config error is read locally from the line's own config file, so it IS
+    // a confirmed observation. Marking it `unavailable` would contradict the
+    // `confirmed` confidence the route stamps alongside it.
+    impact: 'the line cannot start until its configuration is corrected',
+    availability: 'observed',
+    nextAction: 'investigate',
+  },
+  not_polled: {
+    label: 'awaiting first health poll',
+    impact: 'no poll has completed for this line yet, so no state has been observed',
+    availability: 'unavailable',
+    nextAction: 'monitor',
+  },
 } satisfies Record<HealthReasonCode, HealthReasonEntry>;
 
 // ---------------------------------------------------------------------------
@@ -321,11 +346,15 @@ const AVAILABILITY_LABELS: Readonly<Record<ObservationAvailability, string | nul
 export const STALE_OBSERVATION_LABEL = 'stale observation';
 
 /**
- * The inputs a surface may hand this module.
+ * The inputs this module READS.
  *
- * Deliberately NOT accepted: `error` and `evidence`. Raw producer text has no
- * path into the projection, so it cannot reach a label, a tooltip, an
- * accessible name, or the clipboard.
+ * `error` and `evidence` are not among them. A caller may pass a wider object
+ * (`FeedCard` hands over a whole `HealthDetail`, and TypeScript's excess-property
+ * check does not apply to a non-literal argument), but no field of
+ * `HealthPresentation` is derived from either, so raw producer text has no path
+ * into a label, a tooltip, an accessible name, or the clipboard. The guarantee
+ * is enforced by this module's implementation and by
+ * tests/console/feed-card-health-presentation.test.tsx, not by the type.
  */
 export interface HealthObservation {
   /** Line status (`online` | `degraded` | `unreachable` | `logged_out` | ...). */
@@ -341,6 +370,12 @@ export interface HealthObservation {
    * freshness field, so it is absent there.
    */
   readonly stale?: boolean | null;
+  /**
+   * The line's last session status, when the surface carries it
+   * (`LineInstance.lastSessionStatus`). Only used to keep the "auth expired"
+   * headline distinct from "connection lost" for an unreachable line.
+   */
+  readonly lastSessionStatus?: string | null;
 }
 
 export interface HealthPresentation {
@@ -374,9 +409,14 @@ function isRegistered(reason: string): reason is HealthReasonCode {
 /**
  * The status headline. `online` reads as a transition because health events are
  * emitted on change; every other status uses the canonical severity message.
+ *
+ * `lastSessionStatus` is forwarded so an unreachable line whose session expired
+ * reads "auth expired" rather than the generic "connection lost"
+ * (`status-severity.ts` owns that distinction). Surfaces that do not carry the
+ * field simply omit it.
  */
-export function healthHeadline(status?: string | null): string {
-  return status === 'online' ? 'came online' : statusAlertMessage(status);
+export function healthHeadline(status?: string | null, lastSessionStatus?: string | null): string {
+  return status === 'online' ? 'came online' : statusAlertMessage(status, lastSessionStatus);
 }
 
 /**
@@ -425,7 +465,7 @@ export function healthPresentation(observation: HealthObservation): HealthPresen
   }
 
   const summary = chips.length > 0 ? chips.join(' · ') : undefined;
-  const headline = healthHeadline(observation.status);
+  const headline = healthHeadline(observation.status, observation.lastSessionStatus);
 
   return {
     code,

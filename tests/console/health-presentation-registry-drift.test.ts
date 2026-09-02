@@ -2,18 +2,29 @@
  * Producer/console drift guard for the health-presentation registry (#2523).
  *
  * The console registry (console/src/lib/health-presentation.ts) is a validated
- * view of the vocabulary the fleet health poller actually emits. If the poller
- * gains a `statusReason` the console does not register, the new code would
- * silently degrade to the fail-closed "unsupported reason code" state on every
- * operator surface. That is the right runtime behaviour and the wrong shipping
- * state, so this guard fails the build instead.
+ * view of the vocabulary the fleet actually emits. If a producer gains a
+ * `statusReason` the console does not register, the new code would silently
+ * degrade to the fail-closed "unsupported reason code" state on every operator
+ * surface. That is the right runtime behaviour and the wrong shipping state, so
+ * this guard fails the build instead.
  *
- * The poller is read as TEXT, never imported: `src/fleet/health-poller.ts` is a
+ * There are TWO producers, and the guard must cover both:
+ *   - `src/fleet/health-poller.ts` classifies every non-online line. Its codes
+ *     reach the feed card unchanged (`src/fleet/routes/feed.ts:382` relays
+ *     `poll.statusReason` verbatim).
+ *   - `src/fleet/routes/lines.ts:506` builds `LineInstance.statusReason`, which
+ *     the deployments card consumes. It relays the poller's codes but also
+ *     synthesises `config_error` and `not_polled` of its own.
+ * Scanning only the poller is how those two shipped unregistered, so a
+ * never-polled line and a misconfigured line both rendered as "unsupported
+ * reason code" on the deployments card.
+ *
+ * Both files are read as TEXT, never imported: `src/fleet/health-poller.ts` is a
  * 2500-line module with a heavy runtime import graph, and console tests must not
  * pull it in (the same reason `console/src/types.ts` mirrors rather than imports
  * `src/transport/connection.ts`).
  *
- * The scan is anchored on the four shapes that actually produce a
+ * The poller scan is anchored on the four shapes that actually produce a
  * `statusReason`:
  *   1. a `HealthSnapshotClassification` return  (`confidence:` line immediately
  *      followed by a `reason:` line);
@@ -24,8 +35,11 @@
  *      supply `alertSource` positionally.
  * ALL-CAPS constants referenced at those sites are resolved to their literal.
  *
- * A coverage assertion guards the scanner itself: a regex that stops matching
- * would otherwise make this suite pass vacuously.
+ * The lines-route scan is anchored far more narrowly — see
+ * `emittedRouteStatusReasons` for why sweeping that file is wrong.
+ *
+ * A coverage assertion guards each scanner: a regex that stops matching would
+ * otherwise make this suite pass vacuously.
  */
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
@@ -36,6 +50,14 @@ import {
 } from '../../console/src/lib/health-presentation'
 
 const POLLER = resolve(import.meta.dirname, '../..', 'src/fleet/health-poller.ts')
+/**
+ * The SECOND producer. `LineInstance.statusReason` — the field the deployments
+ * card consumes — is not a straight relay of the poller: the lines route
+ * synthesises `config_error` and `not_polled` on top of the poller's codes.
+ * Scanning only the poller left both unregistered, so every never-polled line
+ * and every misconfigured line rendered as "unsupported reason code".
+ */
+const LINES_ROUTE = resolve(import.meta.dirname, '../..', 'src/fleet/routes/lines.ts')
 
 /**
  * Status and confidence values, which share the reason sites but are not reason
@@ -112,22 +134,63 @@ function emittedStatusReasons(source: string): Set<string> {
   return found
 }
 
+/**
+ * The lines route's own `statusReason` vocabulary.
+ *
+ * DELIBERATELY NARROW: anchored on the `statusReason:` assignment alone, never
+ * on the file at large. `src/fleet/routes/lines.ts` also contains a LINKED-status
+ * classifier whose returns have the same `confidence:` then `reason:` shape
+ * (`auth_artifacts_present` / `whatsapp_health_connected` and five more). Those
+ * belong to a different field and a different vocabulary; sweeping them in would
+ * register seven codes no health surface can ever receive, and would turn the
+ * orphan assertion below into noise.
+ */
+function emittedRouteStatusReasons(source: string): Set<string> {
+  const found = new Set<string>()
+  for (const line of source.split('\n')) {
+    if (!/^\s*statusReason:/.test(line)) continue
+    const cleaned = line.replace(/[=!]==?\s*'[^']*'/g, '')
+    for (const m of cleaned.matchAll(/'([a-z][a-z0-9_]{3,})'/g)) {
+      if (!NOT_REASON_CODES.has(m[1]!)) found.add(m[1]!)
+    }
+  }
+  return found
+}
+
 describe('health-presentation registry drift', () => {
-  const emitted = emittedStatusReasons(readFileSync(POLLER, 'utf8'))
+  const pollerEmitted = emittedStatusReasons(readFileSync(POLLER, 'utf8'))
+  const routeEmitted = emittedRouteStatusReasons(readFileSync(LINES_ROUTE, 'utf8'))
+  const emitted = new Set([...pollerEmitted, ...routeEmitted])
 
   it('still reaches every producer anchor shape (scanner coverage assertion)', () => {
-    expect(emitted.size).toBeGreaterThanOrEqual(15)
+    expect(pollerEmitted.size).toBeGreaterThanOrEqual(15)
     for (const anchor of SCANNER_ANCHORS) {
-      expect([...emitted]).toContain(anchor)
+      expect([...pollerEmitted]).toContain(anchor)
     }
   })
 
-  it('registers a presentation for every status reason the poller emits', () => {
+  it('still reaches the lines route statusReason assignment (scanner coverage assertion)', () => {
+    // Both codes come from the one ternary at src/fleet/routes/lines.ts:506.
+    // If that assignment is renamed or restructured the set empties and this
+    // fails, rather than the guard silently reverting to poller-only cover.
+    expect([...routeEmitted].sort()).toEqual(['config_error', 'not_polled'])
+  })
+
+  it('does not sweep in the lines route linked-status vocabulary', () => {
+    // Negative control for the narrow anchor: these are `reason:` fields on the
+    // LINKED-status classifier, not status reasons. If the anchor ever widens,
+    // this fails before the orphan assertion turns into noise.
+    for (const foreign of ['auth_artifacts_present', 'auth_artifacts_absent', 'whatsapp_health_connected']) {
+      expect([...routeEmitted]).not.toContain(foreign)
+    }
+  })
+
+  it('registers a presentation for every status reason either producer emits', () => {
     const unregistered = [...emitted].filter((code) => !(code in HEALTH_REASON_DETAILS)).sort()
     expect(unregistered).toEqual([])
   })
 
-  it('registers no code the poller cannot emit', () => {
+  it('registers no code neither producer can emit', () => {
     const orphans = HEALTH_REASON_CODES.filter((code) => !emitted.has(code)).sort()
     expect(orphans).toEqual([])
   })
