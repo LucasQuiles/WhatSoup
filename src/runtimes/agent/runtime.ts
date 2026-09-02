@@ -196,7 +196,7 @@ import { resolveConfiguredAdminJid, toPersonalJid, isGroupJid } from '../../core
 import { jidNormalizedUser } from '@whiskeysockets/baileys';
 import { contextMessagesForTurn } from './context-handoff.ts';
 import { canonicalizeChatJid } from '../../core/lid-resolver.ts';
-import { ProbeErrorThrottle } from '../../core/health.ts';
+import { ProbeErrorThrottle } from '../../lib/probe-error-throttle.ts';
 import { TurnQueue, type QueuedTurn, type TurnRejectReason } from './turn-queue.ts';
 import {
   markRuntimeTurnReplayUnsafe,

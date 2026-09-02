@@ -178,44 +178,11 @@ const NOT_APPLICABLE_STARTUP_NOTIFICATION_HEALTH: StartupNotificationHealth = Ob
   lastSendAt: null,
 });
 
-/**
- * Bounds health-probe error-log storms (#1778 Defect B). A permanent probe
- * failure (e.g. `no such table`) must not re-log on every ~5 s poll forever —
- * one observed instance emitted 24,613 identical lines over 34 h, another
- * 40,005. The degraded-state latch still fires every poll (the SIGNAL), but the
- * LOG is emitted on the 1st failure and then only at power-of-two counts,
- * turning O(polls) log lines into O(log polls) while a permanent error can never
- * become an unbounded storm.
- */
-export class ProbeErrorThrottle {
-  private readonly failures = new Map<string, number>();
-
-  /**
-   * Record a probe failure for `key`. Returns the running failure count when
-   * this occurrence should be logged (the 1st, then powers of two), or `null`
-   * to suppress it.
-   */
-  onFailure(key: string): number | null {
-    const n = (this.failures.get(key) ?? 0) + 1;
-    this.failures.set(key, n);
-    // Powers of two (and 1) satisfy (n & (n - 1)) === 0.
-    return (n & (n - 1)) === 0 ? n : null;
-  }
-
-  /**
-   * Record a probe success for `key`. Returns the number of accumulated
-   * failures cleared (0 when the probe was already healthy).
-   */
-  onSuccess(key: string): number {
-    const n = this.failures.get(key) ?? 0;
-    if (n > 0) this.failures.delete(key);
-    return n;
-  }
-
-  reset(): void {
-    this.failures.clear();
-  }
-}
+// Re-exported from its leaf module so consumers that must not pull this
+// file's import graph (which reaches the transport layer) can share the one
+// implementation instead of spelling the same throttle a second time.
+export { ProbeErrorThrottle } from '../lib/probe-error-throttle.ts';
+import { ProbeErrorThrottle } from '../lib/probe-error-throttle.ts';
 
 const probeErrorThrottle = new ProbeErrorThrottle();
 
