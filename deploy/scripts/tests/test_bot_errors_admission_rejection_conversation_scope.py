@@ -27,6 +27,26 @@ import pytest
 
 _SCRIPT = Path(__file__).resolve().parents[1] / "bot-errors-dispatcher.py"
 
+
+def _raise_transport(*args, **kwargs):
+    raise RuntimeError("transport down")
+
+
+def _gate_then_deliver(mod, event: dict, state: dict) -> str | None:
+    """Evaluate the gate, then record delivery when it says send.
+
+    Mirrors process_one: should_suppress_send decides, and only a successful
+    send reaches mark_incident_sent, which is where representation is
+    recorded. Tests that want the post-delivery state must go through this
+    rather than calling the predicate twice, because the predicate is pure.
+    """
+    reason = mod.should_suppress_send(event, state)
+    if reason is None:
+        mod.record_conversation_scope_delivered(
+            event, state, mod.incident_key(event), int(time.time())
+        )
+    return reason
+
 SOURCE = "agent_turn_admission_rejected"
 INSTANCE = "instance-x"
 MACHINE = "unknown"
@@ -43,6 +63,7 @@ _ENV_KEYS = [
     "BOT_ERRORS_CONVERSATION_SCOPE_RETENTION_SECONDS",
     "BOT_ERRORS_CONVERSATION_SCOPE_MAX_PER_KEY",
     "BOT_ERRORS_INCIDENT_COOLDOWN_SECONDS",
+    "BOT_ERRORS_EMAIL_FALLBACK",
 ]
 
 
@@ -130,12 +151,12 @@ def test_second_conversation_is_notified_under_an_open_incident(tmp_path):
     mod = _load(tmp_path)
     state = _open_state()
     # Chat A's first rejection reaches the operator and registers the chat.
-    assert mod.should_suppress_send(_event(SCOPE_A, "evt-a1", 1), state) is None
+    assert _gate_then_deliver(mod, _event(SCOPE_A, "evt-a1", 1), state) is None
     # Chat A's own repeat dedupes into the open incident, exactly as before.
-    repeat = mod.should_suppress_send(_event(SCOPE_A, "evt-a2", 2), state)
+    repeat = _gate_then_deliver(mod, _event(SCOPE_A, "evt-a2", 2), state)
     assert repeat is not None and "duplicate suppressed" in repeat
     # Chat B has never been represented: it must reach the operator too.
-    assert mod.should_suppress_send(_event(SCOPE_B, "evt-b1", 3), state) is None
+    assert _gate_then_deliver(mod, _event(SCOPE_B, "evt-b1", 3), state) is None
     # One incident, two notifications.
     assert list(state["openIncidents"]) == [KEY]
 
@@ -152,11 +173,11 @@ def test_an_incident_open_from_before_the_upgrade_resurfaces_once_per_chat(tmp_p
     state = _open_state()
     assert "conversationScopes" not in state
     first_pass = [
-        mod.should_suppress_send(_event(scope, f"evt-{scope}", i), state)
+        _gate_then_deliver(mod, _event(scope, f"evt-{scope}", i), state)
         for i, scope in enumerate((SCOPE_A, SCOPE_B), start=1)
     ]
     second_pass = [
-        mod.should_suppress_send(_event(scope, f"evt-{scope}-again", i), state)
+        _gate_then_deliver(mod, _event(scope, f"evt-{scope}-again", i), state)
         for i, scope in enumerate((SCOPE_A, SCOPE_B), start=3)
     ]
     assert first_pass == [None, None]
@@ -183,11 +204,11 @@ def test_new_conversation_overrides_the_cooldown_with_no_open_incident(tmp_path)
     now = int(time.time())
     state = {"version": 1, "openIncidents": {}, "lastSentAt": {KEY: now - 60}}
     # Chat A was the one just sent; a repeat from A stays inside the cooldown.
-    assert mod.should_suppress_send(_event(SCOPE_A, "evt-a1", 1), state) is None
-    repeat = mod.should_suppress_send(_event(SCOPE_A, "evt-a2", 2), state)
+    assert _gate_then_deliver(mod, _event(SCOPE_A, "evt-a1", 1), state) is None
+    repeat = _gate_then_deliver(mod, _event(SCOPE_A, "evt-a2", 2), state)
     assert repeat is not None and "cooldown active" in repeat
     # Chat B is unrepresented: cooldown must not swallow it.
-    assert mod.should_suppress_send(_event(SCOPE_B, "evt-b1", 3), state) is None
+    assert _gate_then_deliver(mod, _event(SCOPE_B, "evt-b1", 3), state) is None
 
 
 # ---------------------------------------------------------------------------
@@ -198,7 +219,7 @@ def test_repeat_rejections_in_one_conversation_still_dedupe(tmp_path):
     mod = _load(tmp_path)
     state = _open_state()
     reasons = [
-        mod.should_suppress_send(_event(SCOPE_A, f"evt-a{i}", i), state)
+        _gate_then_deliver(mod, _event(SCOPE_A, f"evt-a{i}", i), state)
         for i in range(1, 7)
     ]
     # The first sighting registers the conversation and surfaces once; every
@@ -240,9 +261,9 @@ def test_an_open_storm_still_consolidates_repeats_of_a_known_conversation(tmp_pa
     state = _open_state()
     state["flapState"] = {KEY: {"stormAt": 1, "tripTimestamps": [], "cumulativeCount": 5}}
 
-    assert mod.should_suppress_send(_event(SCOPE_B, "evt-b1", 2), state) is None
+    assert _gate_then_deliver(mod, _event(SCOPE_B, "evt-b1", 2), state) is None
     for index in range(2, 8):
-        reason = mod.should_suppress_send(_event(SCOPE_B, f"evt-b{index}", index), state)
+        reason = _gate_then_deliver(mod, _event(SCOPE_B, f"evt-b{index}", index), state)
         assert reason is not None and "flap_storm_member" in reason
 
 
@@ -265,7 +286,8 @@ def test_a_storm_retry_of_an_already_forced_event_is_still_forced(tmp_path):
     state = _open_state()
     state["flapState"] = {KEY: {"stormAt": 1, "tripTimestamps": [], "cumulativeCount": 5}}
     event = _event(SCOPE_B, "evt-storm-retry", 2)
-    assert mod.should_suppress_send(event, state) is None
+    assert _gate_then_deliver(mod, event, state) is None
+    # A RETRY of the same id after a FAILED delivery must still force.
     assert mod.should_suppress_send(event, state) is None
 
 
@@ -430,8 +452,8 @@ def test_a_distinct_later_event_in_that_conversation_dedupes(tmp_path):
     """
     mod = _load(tmp_path)
     state = _open_state()
-    assert mod.should_suppress_send(_event(SCOPE_B, "evt-first", 1), state) is None
-    later = mod.should_suppress_send(_event(SCOPE_B, "evt-second", 2), state)
+    assert _gate_then_deliver(mod, _event(SCOPE_B, "evt-first", 1), state) is None
+    later = _gate_then_deliver(mod, _event(SCOPE_B, "evt-second", 2), state)
     assert later is not None and "duplicate suppressed" in later
 
 
@@ -443,8 +465,8 @@ def test_an_event_with_no_id_falls_back_to_recording_once(tmp_path):
     first.pop("id", None)
     second = _event(SCOPE_B, "", 2)
     second.pop("id", None)
-    assert mod.should_suppress_send(first, state) is None
-    repeat = mod.should_suppress_send(second, state)
+    assert _gate_then_deliver(mod, first, state) is None
+    repeat = _gate_then_deliver(mod, second, state)
     assert repeat is not None and "duplicate suppressed" in repeat
 
 
@@ -464,12 +486,186 @@ def test_retry_records_are_bounded_like_the_conversation_set(tmp_path):
     scope_values = [f"cs1_a{i:015x}" for i in range(12)]
     for index, scope in enumerate(scope_values):
         assert mod.event_conversation_scope(_event(scope, f"evt-{index}", index)) == scope
-        mod.should_suppress_send(_event(scope, f"evt-{index}", index), state)
+        _gate_then_deliver(mod, _event(scope, f"evt-{index}", index), state)
     scopes = state["conversationScopes"][KEY]
     assert len(scopes) <= 4
     for record in scopes.values():
         assert isinstance(record, dict)
         assert len(record.get("eventIds", {})) <= 4
+
+
+# ---------------------------------------------------------------------------
+# delivery lifecycle — "represented" must mean DELIVERED, not merely evaluated
+# ---------------------------------------------------------------------------
+
+def _outbox_event(mod, paths, scope: str, event_id: str) -> Path:
+    """Write a real outbox event so process_one can claim and process it."""
+    event = {
+        "schemaVersion": 2,
+        "eventKind": "incident_alert",
+        "eventType": "alert",
+        "severity": "warning",
+        "machine": MACHINE,
+        "instance": INSTANCE,
+        "source": SOURCE,
+        "id": event_id,
+        "createdAt": mod.now_iso(),
+        "summary": {"failureClass": "unknown", "length": 44, "correlationDigest": "de" * 32},
+        "evidence": {"failureClass": "Error", "length": 88, "correlationDigest": "00" * 32},
+        "conversationScope": scope,
+        "delivery": {"attempts": 0, "status": "queued", "nextAttemptAtEpoch": 0, "lastError": None},
+    }
+    stamp = mod.now_iso().replace(":", "").replace("-", "")
+    path = paths["outbox"] / f"{stamp}.{INSTANCE}.{SOURCE}.{event_id}.json"
+    path.write_text(json.dumps(event, indent=2))
+    path.chmod(0o600)
+    return path
+
+
+def _prepare_dirs(mod, paths) -> None:
+    for key in ("outbox", "processing", "sent", "suppressed", "dead_letter", "quarantine", "logs"):
+        if key in paths:
+            paths[key].mkdir(parents=True, exist_ok=True)
+
+
+def _seed_open_incident(mod, paths) -> None:
+    mod.save_incident_state(paths, _open_state())
+
+
+def test_a_conversation_is_not_represented_when_delivery_dead_letters(tmp_path):
+    """The whole point of the forced alert is that an operator sees it.
+
+    An undelivered alert that still marks its conversation represented is
+    worse than no gate at all: the conversation is now silent AND believed
+    covered. Reproduced through the real process_one with every delivery
+    route failing, so the event exhausts its attempts and dead-letters.
+    """
+    mod = _load(tmp_path)
+    paths = mod.state_paths()
+    _prepare_dirs(mod, paths)
+    _seed_open_incident(mod, paths)
+
+    mod.send_whatsapp = _raise_transport  # type: ignore[assignment]
+    mod.email_fallback = lambda subject, body: False  # type: ignore[assignment]
+
+    path = _outbox_event(mod, paths, SCOPE_B, "evt-b-forced")
+    event = json.loads(path.read_text())
+    event["delivery"]["attempts"] = 99
+    path.write_text(json.dumps(event, indent=2))
+
+    ok, detail = mod.process_one(path, paths)
+    assert ok is False and "dead_letter" in detail
+
+    reloaded = mod.load_incident_state(paths)
+    scopes = reloaded.get("conversationScopes", {}).get(KEY, {})
+    assert SCOPE_B not in scopes, (
+        "the conversation was marked represented although the alert never "
+        "reached an operator"
+    )
+
+
+def test_a_distinct_later_alert_is_still_forced_after_a_dead_letter(tmp_path):
+    """The consequence of the above, stated as the operator sees it."""
+    mod = _load(tmp_path)
+    paths = mod.state_paths()
+    _prepare_dirs(mod, paths)
+    _seed_open_incident(mod, paths)
+
+    mod.send_whatsapp = _raise_transport  # type: ignore[assignment]
+    mod.email_fallback = lambda subject, body: False  # type: ignore[assignment]
+    path = _outbox_event(mod, paths, SCOPE_B, "evt-b-forced")
+    event = json.loads(path.read_text())
+    event["delivery"]["attempts"] = 99
+    path.write_text(json.dumps(event, indent=2))
+    mod.process_one(path, paths)
+
+    reloaded = mod.load_incident_state(paths)
+    later = _event(SCOPE_B, "evt-b-distinct", 2)
+    assert mod.should_suppress_send(later, reloaded) is None, (
+        "a conversation whose only alert was lost must not be suppressed"
+    )
+
+
+def test_a_delivered_alert_does_mark_the_conversation_represented(tmp_path):
+    """The positive control: delivery is what records representation."""
+    mod = _load(tmp_path)
+    paths = mod.state_paths()
+    _prepare_dirs(mod, paths)
+    _seed_open_incident(mod, paths)
+
+    sent: list[str] = []
+    mod.send_whatsapp = lambda text, *a, **k: sent.append(text)  # type: ignore[assignment]
+
+    path = _outbox_event(mod, paths, SCOPE_B, "evt-b-delivered")
+    ok, _ = mod.process_one(path, paths)
+    assert ok is True and sent
+
+    reloaded = mod.load_incident_state(paths)
+    scopes = reloaded.get("conversationScopes", {}).get(KEY, {})
+    assert SCOPE_B in scopes
+
+
+def test_the_email_delivery_branch_records_representation(tmp_path):
+    """Email is a real operator-visible route, so it records representation.
+
+    Scope limit, stated rather than papered over: process_one's email branch
+    cannot be driven end-to-end from a test, because
+    email_fallback_blocked_reason vetoes the route whenever the state
+    directory looks like a test root, returning "test_state_dir". That guard
+    is deliberate and predates this change, and defeating it would mean
+    faking a production-shaped state root.
+
+    So this asserts the property that branch depends on: the delivery
+    recorder marks a conversation represented. The branch's own call to it is
+    covered by reading the source, not by execution, and that limit is
+    disclosed in the pull request body rather than implied to be tested.
+    """
+    mod = _load(tmp_path)
+    assert mod.email_fallback_blocked_reason(
+        _event(SCOPE_B, "evt-probe", 1), state_dir=mod.state_paths()["root"]
+    ) == "test_state_dir", "the veto this test documents no longer applies; drive the branch instead"
+
+    state = _open_state()
+    event = _event(SCOPE_B, "evt-emailed", 1)
+    assert mod.should_suppress_send(event, state) is None
+
+    mod.record_conversation_scope_delivered(event, state, KEY, int(time.time()))
+    assert SCOPE_B in state["conversationScopes"][KEY]
+    assert mod.should_suppress_send(_event(SCOPE_B, "evt-after", 2), state) is not None
+
+
+def test_a_suppressed_event_id_is_not_recorded_as_forced(tmp_path):
+    """The inverse error: a suppressed event must not look like a forced one.
+
+    If suppressed ids were stored as forced, re-evaluating one after a crash
+    would page an operator for an alert that was deliberately silenced.
+    """
+    mod = _load(tmp_path)
+    state = _open_state()
+
+    first = _event(SCOPE_B, "evt-first", 1)
+    assert _gate_then_deliver(mod, first, state) is None
+
+    suppressed = _event(SCOPE_B, "evt-suppressed", 2)
+    assert _gate_then_deliver(mod, suppressed, state) is not None
+
+    record = state["conversationScopes"][KEY][SCOPE_B]
+    assert "evt-suppressed" not in record.get("eventIds", {}), (
+        "a suppressed event id was recorded as though it had been forced"
+    )
+
+
+def test_the_predicate_does_not_mutate_state(tmp_path):
+    """Evaluation is a question, not a decision.
+
+    The predicate is consulted before anything is delivered, so it must not
+    write. Recording belongs to the delivery transition.
+    """
+    mod = _load(tmp_path)
+    state = _open_state()
+    before = json.dumps(state, sort_keys=True)
+    mod.conversation_scope_is_unrepresented(_event(SCOPE_B, "evt-probe", 1), state, KEY, int(time.time()))
+    assert json.dumps(state, sort_keys=True) == before, "the predicate mutated incident state"
 
 
 # ---------------------------------------------------------------------------
@@ -491,7 +687,7 @@ def test_state_written_by_an_older_dispatcher_loads_and_gates(tmp_path):
     """No conversationScopes subtree in state: the gate creates it lazily."""
     mod = _load(tmp_path)
     state = {"version": 1, "openIncidents": {KEY: {"status": "open", "openedAt": 1}}, "lastSentAt": {}}
-    assert mod.should_suppress_send(_event(SCOPE_B, "evt-b1", 2), state) is None
+    assert _gate_then_deliver(mod, _event(SCOPE_B, "evt-b1", 2), state) is None
     assert SCOPE_B in state["conversationScopes"][KEY]
 
 
@@ -510,7 +706,7 @@ def test_conversation_scope_state_is_bounded_by_count_and_retention(tmp_path):
     scope_values = [f"cs1_b{i:015x}" for i in range(12)]
     for index, scope in enumerate(scope_values):
         assert mod.event_conversation_scope(_event(scope, f"evt-{index}", index)) == scope
-        mod.should_suppress_send(_event(scope, f"evt-{index}", index), state)
+        _gate_then_deliver(mod, _event(scope, f"evt-{index}", index), state)
     assert len(state["conversationScopes"][KEY]) <= 4
 
     # Retention: an entry older than the window is pruned, so that
