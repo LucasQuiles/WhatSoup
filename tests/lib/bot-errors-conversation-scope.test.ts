@@ -1,5 +1,9 @@
-import { describe, expect, it } from 'vitest';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
 import { buildBotErrorsEvent } from '../../src/lib/bot-errors-outbox.ts';
+import { emitAlertChecked } from '../../src/lib/emit-alert.ts';
 import { confineConversationScope } from '../../src/lib/alert-evidence.ts';
 
 // A per-conversation fault (an admission rejection) must be distinguishable
@@ -72,5 +76,55 @@ describe('conversation scope at the bot-errors emission boundary', () => {
     expect(digest).not.toBeNull();
     expect(digest).toMatch(/^[0-9a-f]{16}$/);
     expect(RAW_JID).not.toContain(digest as string);
+  });
+});
+
+// The tests above exercise the event builder directly. This one crosses the
+// path production actually uses — emitAlertChecked -> emitAlert -> the event
+// written to the queue — so a slip in the argument forwarding between them
+// cannot pass unnoticed.
+describe('conversation scope survives the real emission path', () => {
+  let dir: string | null = null;
+
+  afterEach(() => {
+    delete process.env['WHATSOUP_ALERT_SINK'];
+    if (dir) rmSync(dir, { recursive: true, force: true });
+    dir = null;
+  });
+
+  function emittedEvent(conversationKey?: string): Record<string, unknown> {
+    dir = mkdtempSync(join(tmpdir(), 'q3-alert-sink-'));
+    const sink = join(dir, 'alerts.jsonl');
+    process.env['WHATSOUP_ALERT_SINK'] = sink;
+    emitAlertChecked(
+      'instance-x',
+      'agent_turn_admission_rejected',
+      'Journaled agent turn rejected before dispatch',
+      'inbound_seq=65062 reason=pre_dispatch_error automatic_replay=false scope=per_chat',
+      'warning',
+      undefined,
+      undefined,
+      conversationKey === undefined ? undefined : { conversationKey },
+    );
+    const lines = readFileSync(sink, 'utf8').trim().split('\n');
+    expect(lines).toHaveLength(1);
+    return JSON.parse(lines[0] as string) as Record<string, unknown>;
+  }
+
+  it('forwards the conversation from emitAlertChecked to the emitted event', () => {
+    const event = emittedEvent(RAW_JID);
+    expect(event['conversationScope']).toBe(confineConversationScope(RAW_JID));
+    expect(event['conversationScope']).toMatch(/^[0-9a-f]{16}$/);
+  });
+
+  it('keeps the raw identifier out of the emitted event on that path', () => {
+    const serialized = JSON.stringify(emittedEvent(RAW_JID));
+    expect(serialized).not.toContain(RAW_JID);
+    expect(serialized).not.toContain(RAW_LOCAL);
+    expect(serialized).not.toContain('s.whatsapp.net');
+  });
+
+  it('emits the unchanged shape when no conversation is named', () => {
+    expect('conversationScope' in emittedEvent()).toBe(false);
   });
 });
