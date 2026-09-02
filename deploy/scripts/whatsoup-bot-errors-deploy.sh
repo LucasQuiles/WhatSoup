@@ -44,6 +44,18 @@ FILES=(
   "deploy/scripts/bot-errors-heartbeat-watchdog.py"
   "deploy/scripts/bot-errors-q-loop.py"
   "src/lib/bot-errors-outbox.ts"
+  # bot-errors-outbox.ts imports these at module scope; Node links them on
+  # import, so shipping the importer without them yields an unstartable
+  # runtime rather than a degraded one. The omission predates the
+  # conversation-scope work and became fatal when the outbox began importing
+  # a NEW export (a target runtime linked the new importer against an old
+  # dependency lacking the name). Same deployer-scope class as the #3452 note.
+  # deploy/scripts/tests/test_bot_errors_deploy_import_closure.py enforces
+  # the closure so a future import cannot reopen this silently.
+  "src/lib/alert-evidence.ts"
+  "src/lib/private-fs.ts"
+  "src/lib/redaction-patterns.ts"
+  "src/lib/type-guards.ts"
   "src/lib/fault-taxonomy-registry.json"
   "deploy/scripts/bot-errors-collector.py"
   "deploy/scripts/bot-errors-emit.py"
