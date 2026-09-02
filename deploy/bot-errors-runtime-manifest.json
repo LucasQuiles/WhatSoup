@@ -604,9 +604,11 @@
       "path": "src/lib/alert-evidence.ts",
       "sha256": "e4da1611319e5c95ff4619539f96e879b907425cdb900b578dcae77aaaecd62b",
       "mustContain": [
+        "ConfinedAlertContent",
         "confineAlertContent",
         "confineConversationScope",
-        "CONVERSATION_SCOPE_TAG"
+        "CONVERSATION_SCOPE_TAG",
+        "bot-errors-evidence:"
       ]
     },
     {
