@@ -3050,16 +3050,20 @@ _EMAIL_FALLBACK_TEST_ROOT_PATTERNS: list[re.Pattern[str]] = [
 # own exception text -- so no test-provenance decision may read them (#3404).
 #
 # ``delivery`` is excluded wholesale rather than key by key. It is the
-# dispatcher's bookkeeping block by contract (attempts, status, backoff,
-# lastError, emailFallback); a producer emits it empty or omits it, and nothing
-# a producer legitimately puts there is evidence of test provenance. Naming the
+# dispatcher's bookkeeping block by contract: the TypeScript producer
+# (src/lib/bot-errors-outbox.ts) emits it empty, and only the dispatcher writes
+# attempts, status, backoff, lastError and emailFallback into it. Nothing a
+# producer legitimately puts there is evidence of test provenance. Naming the
 # block instead of chasing its keys is what stops this from regressing the next
 # time a field is added to it -- which is exactly how ``lastError`` was missed.
 _DISPATCHER_OWNED_TOP_LEVEL_KEYS: tuple[str, ...] = ("delivery",)
-_DISPATCHER_OWNED_DIAGNOSTICS_KEYS: tuple[str, ...] = ("dispatchLog",)
 
 
-def producer_claim(event: dict[str, Any]) -> dict[str, Any]:
+def producer_claim(
+    event: dict[str, Any],
+    *,
+    injected_dispatch_log: str | None = None,
+) -> dict[str, Any]:
     """The event as its PRODUCER claimed it: dispatcher-owned bookkeeping removed.
 
     An independent copy (see :func:`json_snapshot`), so later mutation of the
@@ -3072,7 +3076,18 @@ def producer_claim(event: dict[str, Any]) -> dict[str, Any]:
     naming a fixture path made attempt 2 archive a genuine critical alert as a
     test leak.
 
-    Detection of real test-fixture events is unaffected: those declare
+    ``diagnostics.dispatchLog`` is stripped ONLY when it equals
+    ``injected_dispatch_log``, the value this dispatcher writes. It is not a
+    dispatcher-exclusive key: ``bot-errors-emit.py`` accepts arbitrary
+    ``diagnostics`` keys from the command line, and with
+    ``diagnostics.omitDispatchLogInMessage`` set the dispatcher does not
+    overwrite what the producer put there -- while ``format_event`` still
+    renders it into the delivered message. Stripping it unconditionally
+    therefore laundered a producer-supplied fixture path straight past this
+    check and into WhatsApp. A value the producer chose is producer-claimed
+    text and stays in the claim.
+
+    Detection of real test-fixture events is otherwise unaffected: those declare
     themselves in producer-owned fields (evidence, summary, payload,
     diagnostics), which are all preserved here. ``event_is_test_leak`` and
     ``matched_test_leak_pattern`` are unchanged; only what they are handed is.
@@ -3085,9 +3100,12 @@ def producer_claim(event: dict[str, Any]) -> dict[str, Any]:
     for key in _DISPATCHER_OWNED_TOP_LEVEL_KEYS:
         claim.pop(key, None)
     diagnostics = claim.get("diagnostics")
-    if isinstance(diagnostics, dict):
-        for key in _DISPATCHER_OWNED_DIAGNOSTICS_KEYS:
-            diagnostics.pop(key, None)
+    if (
+        injected_dispatch_log is not None
+        and isinstance(diagnostics, dict)
+        and diagnostics.get("dispatchLog") == injected_dispatch_log
+    ):
+        diagnostics.pop("dispatchLog", None)
     return claim
 
 
@@ -3102,12 +3120,24 @@ def matched_state_dir_test_root_pattern(state_dir: Path | str | None) -> str | N
     pytest basetemp rule. ``None`` when the state directory is not under any
     recognised test root.
 
-    Every spelling of the directory is tested, not just the one supplied.
+    Four spellings of the directory are tested, not just the one supplied.
     ``BOT_ERRORS_STATE_DIR`` is accepted unnormalised (``lib.state_root`` wraps
     it in ``Path`` and nothing more), so a relative value or a symlink into a
     sandbox would otherwise present a clean-looking string for a state root that
     really is a test root -- a fail-OPEN miss, letting a test run email the
-    operator. Raw, absolute, and fully resolved spellings are all matched.
+    operator. The spellings are:
+
+    * ``raw`` -- exactly what the caller supplied;
+    * ``absolute`` -- ``raw`` anchored at the working directory, which is what
+      catches a relative value;
+    * ``parent-resolved`` -- the #2723 anchor form, resolving OS aliases such as
+      ``/var`` to ``/private/var`` while keeping the final component's own name;
+    * ``fully resolved`` -- every component dereferenced, INCLUDING the leaf.
+
+    The last of these is load-bearing on its own. The parent-resolved form
+    deliberately preserves the leaf name, so a state directory that is itself a
+    symlink into a sandbox resolves to nothing revealing and the check misses
+    it. That was a real hole in the first version of this function.
 
     Fails CLOSED: if the directory cannot be resolved at all, this reports
     ``UNRESOLVABLE_STATE_DIR_PATTERN`` rather than ``None``, so an
@@ -3121,6 +3151,7 @@ def matched_state_dir_test_root_pattern(state_dir: Path | str | None) -> str | N
         absolute = Path(raw).absolute()
         spellings.append(os.fspath(absolute))
         spellings.append(os.fspath(absolute.parent.resolve() / absolute.name))
+        spellings.append(os.fspath(Path(raw).resolve(strict=False)))
     except (OSError, RuntimeError, ValueError):
         return UNRESOLVABLE_STATE_DIR_PATTERN
     for spelling in spellings:
@@ -6325,9 +6356,18 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
     # Quarantining is the failure mode the function already uses for an event it
     # cannot handle, and it is loud: the file leaves the queue for good and
     # quarantine_poison raises a meta-alert to the operator.
+    #
+    # Catching Exception rather than an enumerated tuple is deliberate. The
+    # tuple form is a standing bet that no future edit to producer_claim can
+    # raise anything else, and losing that bet costs the whole alerting
+    # pipeline; over-catching costs one quarantined event and a meta-alert
+    # naming it. Quarantine is the right shape for ANY snapshot failure.
     try:
-        claimed_event = producer_claim(event)
-    except (RecursionError, TypeError, ValueError):
+        claimed_event = producer_claim(
+            event,
+            injected_dispatch_log=str(paths["logs"] / "dispatch.jsonl"),
+        )
+    except Exception:
         quarantine_poison(
             claimed,
             paths["quarantine"],

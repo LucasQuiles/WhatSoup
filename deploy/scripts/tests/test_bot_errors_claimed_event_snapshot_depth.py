@@ -133,26 +133,34 @@ def _dispatch_log_records(paths: dict[str, Path]) -> list[dict[str, Any]]:
 # --------------------------------------------------------------------------
 
 
-_SHAPES: dict[str, dict[str, Any]] = {
-    "provenance_flag": {"runtime": {"provenance": {"test": True}}},
-    "leak_path_in_evidence": {"evidence": "authDir: /tmp/wa-test-auth/creds.json unreadable"},
-    "clean_alert": {},
-    "nested_list_bools_float_null": {
-        "diagnostics": {
-            "logHints": ["a", "b"],
-            "counts": [1, 2, [3, {"deep": None}]],
-            "ratio": 0.5,
-            "flag": False,
-            "missing": None,
-        }
-    },
+# Each shape carries the verdict the gate must return for it, so the idiom
+# comparison below cannot pass by both sides being None.
+_SHAPES: dict[str, tuple[dict[str, Any], str | None]] = {
+    "provenance_flag": ({"runtime": {"provenance": {"test": True}}}, "test_provenance"),
+    "leak_path_in_evidence": (
+        {"evidence": "authDir: /tmp/wa-test-auth/creds.json unreadable"},
+        "test_leak",
+    ),
+    "clean_alert": ({}, None),
+    "nested_list_bools_float_null": (
+        {
+            "diagnostics": {
+                "logHints": ["a", "b"],
+                "counts": [1, 2, [3, {"deep": None}]],
+                "ratio": 0.5,
+                "flag": False,
+                "missing": None,
+            }
+        },
+        None,
+    ),
 }
 
 
 @pytest.mark.parametrize("shape", sorted(_SHAPES))
 def test_json_snapshot_equals_the_input_and_is_independent_of_it(shape: str, state_root: Path):
     mod = _load_module({"BOT_ERRORS_STATE_DIR": str(state_root)})
-    event = _event("evt-shape", **_SHAPES[shape])
+    event = _event("evt-shape", **_SHAPES[shape][0])
 
     snapshot = mod.json_snapshot(event)
 
@@ -171,13 +179,20 @@ def test_gate_verdict_is_identical_under_both_snapshot_idioms(shape: str, state_
     # S1: the round-trip replaces copy.deepcopy at this call site only if the
     # two produce the same gate answer. Pinned for every shape the reviewer
     # tabled, on a production-like state dir so the state-dir rule stays out.
+    #
+    # Each side is also compared against the verdict the shape is SUPPOSED to
+    # get. Asserting only that the two idioms agree is vacuous for the two clean
+    # shapes, where both are None and would stay equal even if the gate stopped
+    # working entirely.
     mod = _load_module({"BOT_ERRORS_STATE_DIR": str(state_root)})
-    event = _event("evt-shape", **_SHAPES[shape])
+    overrides, expected = _SHAPES[shape]
+    event = _event("evt-shape", **overrides)
 
     via_roundtrip = mod.email_fallback_blocked_reason(mod.json_snapshot(event), state_dir=state_root)
     via_deepcopy = mod.email_fallback_blocked_reason(copy.deepcopy(event), state_dir=state_root)
 
-    assert via_roundtrip == via_deepcopy
+    assert via_roundtrip == expected, shape
+    assert via_deepcopy == expected, shape
 
 
 def test_json_snapshot_tolerates_nesting_that_deepcopy_cannot(state_root: Path):

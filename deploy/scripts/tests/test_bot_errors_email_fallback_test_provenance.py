@@ -492,7 +492,7 @@ def test_producer_claim_drops_dispatcher_bookkeeping_and_keeps_the_payload():
         diagnostics={"dispatchLog": "/state/logs/dispatch.jsonl", "omitDispatchLogInMessage": True},
     )
 
-    claim = mod.producer_claim(event)
+    claim = mod.producer_claim(event, injected_dispatch_log="/state/logs/dispatch.jsonl")
 
     assert "delivery" not in claim
     assert "dispatchLog" not in claim["diagnostics"]
@@ -619,31 +619,48 @@ def test_a_genuine_producer_claimed_leak_is_still_archived_at_the_claim(tmp_path
         assert len(list(paths["testleak"].glob("*evt-email-provenance*"))) == 1
 
 
-def test_state_dir_test_root_match_is_spelling_independent(tmp_path: Path):
+def test_state_dir_test_root_match_is_spelling_independent():
     """A test root must be recognised however the state dir is spelled.
 
     ``BOT_ERRORS_STATE_DIR`` is taken unnormalised, so a relative value or a
     symlink into a sandbox would present a clean string for a state root that is
     really a test root. Matching only the supplied spelling fails OPEN: the test
     run is allowed to email the operator.
+
+    Deliberately HOME-rooted rather than under ``tmp_path``. pytest's own
+    ``tmp_path`` lives inside a ``pytest-of-<user>`` basetemp, so a symlink
+    created there carries the substring in its RAW path and the assertion
+    succeeds without dereferencing anything. The first version of this test did
+    exactly that and passed while the leaf symlink was never resolved. Each
+    alias spelling is asserted clean FIRST, so resolution is the only thing that
+    can satisfy the match.
     """
     mod = _load_module({"BOT_ERRORS_STATE_DIR": _CLEAN_STATE_DIR})
-    sandbox = tmp_path / "pytest-of-runner" / "pytest-1" / "state"
-    sandbox.mkdir(parents=True)
-    assert mod.matched_state_dir_test_root_pattern(sandbox) is not None, "absolute spelling"
+    with _state_root_outside_test_roots() as root:
+        sandbox = root / "pytest-of-runner" / "pytest-1" / "state"
+        sandbox.mkdir(parents=True)
+        link = root / "clean-looking-state"
+        link.symlink_to(sandbox, target_is_directory=True)
 
-    # A symlink whose own path says nothing about where it points.
-    link = tmp_path / "clean-looking-state"
-    link.symlink_to(sandbox, target_is_directory=True)
-    assert mod.matched_state_dir_test_root_pattern(link) is not None, "symlink alias"
+        assert mod.matched_state_dir_test_root_pattern(root) is None, (
+            "precondition: the HOME-rooted parent is not itself a test root"
+        )
+        assert mod.matched_state_dir_test_root_pattern(sandbox) is not None, "direct spelling"
 
-    # A relative spelling of the same directory.
-    previous = os.getcwd()
-    os.chdir(tmp_path / "pytest-of-runner" / "pytest-1")
-    try:
-        assert mod.matched_state_dir_test_root_pattern("state") is not None, "relative spelling"
-    finally:
-        os.chdir(previous)
+        # A leaf symlink whose own path says nothing about where it points.
+        assert "pytest-of" not in str(link), "precondition: the link's raw path is clean"
+        assert mod.matched_state_dir_test_root_pattern(link) is not None, "leaf symlink"
+
+        # The same alias, spelled relatively.
+        previous = os.getcwd()
+        os.chdir(root)
+        try:
+            assert "pytest-of" not in "clean-looking-state", "precondition: relative spelling is clean"
+            assert mod.matched_state_dir_test_root_pattern("clean-looking-state") is not None, (
+                "relative spelling of the leaf symlink"
+            )
+        finally:
+            os.chdir(previous)
 
 
 def test_unresolvable_state_dir_blocks_rather_than_allows():
@@ -659,3 +676,77 @@ def test_unresolvable_state_dir_blocks_rather_than_allows():
     matched = mod.matched_state_dir_test_root_pattern(Unresolvable())
     assert matched == mod.UNRESOLVABLE_STATE_DIR_PATTERN
     assert mod.email_fallback_blocked_reason(_event(), state_dir=Unresolvable()) == "test_state_dir"
+
+
+def test_producer_written_dispatch_log_is_kept_and_still_trips_the_gate():
+    """diagnostics.dispatchLog is NOT a dispatcher-exclusive key.
+
+    bot-errors-emit.py accepts arbitrary diagnostics keys from the command
+    line, so a producer can set dispatchLog itself. Only the value THIS
+    dispatcher would inject is bookkeeping; any other value is text the producer
+    chose, and stripping it unconditionally laundered a fixture path past the
+    queue check.
+    """
+    mod = _load_module({"BOT_ERRORS_STATE_DIR": _CLEAN_STATE_DIR})
+    injected = "/srv/whatsoup/state/bot-errors/logs/dispatch.jsonl"
+    producer_written = _event(diagnostics={
+        "omitDispatchLogInMessage": True,
+        "dispatchLog": "/tmp/wa-test-auth/fixture/logs/dispatch.jsonl",
+    })
+
+    claim = mod.producer_claim(producer_written, injected_dispatch_log=injected)
+
+    assert claim["diagnostics"]["dispatchLog"] == "/tmp/wa-test-auth/fixture/logs/dispatch.jsonl"
+    assert mod.matched_test_leak_pattern(claim) is not None, "the producer's own value must still be scanned"
+
+
+def test_the_dispatchers_own_injected_dispatch_log_never_trips_the_gate():
+    # The positive half: the value the dispatcher writes is bookkeeping, and it
+    # is dropped even when the state root makes it look like a leak. This is
+    # what keeps a $TMPDIR-rooted dispatcher from blocking on its own log path.
+    mod = _load_module({"BOT_ERRORS_STATE_DIR": _CLEAN_STATE_DIR})
+    injected = _MACOS_VITEST_SANDBOX_STATE_DIR + "/logs/dispatch.jsonl"
+    event = _event(diagnostics={"dispatchLog": injected})
+    assert mod.event_is_test_leak(event) is True, "precondition: that path IS a leak pattern"
+
+    claim = mod.producer_claim(event, injected_dispatch_log=injected)
+
+    assert "dispatchLog" not in claim["diagnostics"]
+    assert mod.matched_test_leak_pattern(claim) is None
+
+
+def test_producer_written_fixture_dispatch_log_is_archived_not_delivered(tmp_path: Path):
+    """Sole-signal control, end to end: the ONLY leak marker is the producer's dispatchLog.
+
+    With omitDispatchLogInMessage set, the dispatcher leaves the producer's
+    value in place and format_event renders it into the delivered message, so a
+    fixture path would reach WhatsApp and, after retries, email. Every other
+    field here is deliberately clean, so this test fails if the queue check
+    stops reading that key for any reason.
+    """
+    with _state_root_outside_test_roots() as state_root:
+        mod = _load_module({
+            "BOT_ERRORS_STATE_DIR": str(state_root),
+            "BOT_ERRORS_DELIVERY_MAX_ATTEMPTS": "10",
+        })
+        paths = mod.setup_dirs()
+        event = _event(
+            summary="looks legit",
+            evidence="nothing suspicious here",
+            diagnostics={
+                "omitDispatchLogInMessage": True,
+                "dispatchLog": "/tmp/wa-test-auth/fixture/logs/dispatch.jsonl",
+            },
+        )
+        event_path = _write_event(paths, event)
+
+        sent: list[str] = []
+        with patch.object(mod, "send_whatsapp", side_effect=lambda text: sent.append(text)), \
+             patch.object(mod, "EMAIL_FALLBACK", _executable_fallback(tmp_path)), \
+             patch.object(mod, "email_fallback", return_value=True) as fallback:
+            ok, detail = mod.process_one(event_path, paths)
+
+        assert (ok, detail) == (False, "test_leak")
+        assert sent == [], "a fixture path must never reach the transport"
+        assert fallback.call_count == 0
+        assert len(list(paths["testleak"].glob("*evt-email-provenance*"))) == 1
