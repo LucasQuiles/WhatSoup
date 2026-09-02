@@ -24,6 +24,8 @@ import {
   pruneExpired,
   clearChatPreference,
   promoteToSticky,
+  recordKeepReceiptMessageId,
+  getKeepReceiptMessageId,
   type PreferenceIntent,
 } from './chat-preference-db.ts';
 import { preferenceKeys } from './preference-keys.ts';
@@ -35,6 +37,7 @@ import { isProviderId } from './providers/index.ts';
 import { isExplicitModelId } from './commands.ts';
 import type { listModelCatalog } from './providers/binary-preflight.ts';
 import { getProviderBinary, type SessionManager } from './session.ts';
+import type { SendDirectOutcome } from './chat-transport.ts';
 import type { IOutboundQueue } from './outbound-queue.ts';
 import type { TurnQueue } from './turn-queue.ts';
 import type { OperationTracker } from './operation-tracker.ts';
@@ -73,7 +76,22 @@ export const PREFERENCE_TTL_MS = MS_PER_DAY;
 // Only the receipt's promised bare reply mutates routing (Q-CANARY model-pin
 // `keep` contract, 2026-07-23). Conversational uses such as "please keep it"
 // must continue to the agent unchanged.
+//
+// F2a widening (#2121) — per the owner decision recorded on that issue on
+// 2026-08-04, which this comment cites rather than silently replacing the
+// dated contract above. The affirmative set gains `confirm`/`yes`/`pin`, but
+// those three promote ONLY from a reply the client threaded to the pin
+// receipt itself: the inbound's `quotedMessageId` must equal the id that
+// receipt was sent with. The decision's own words for why this NARROWS
+// rather than reopens the false-positive surface PR #2109 closed — "a stray
+// bare 'yes' in an unrelated reply cannot mutate routing; only a threaded
+// reply to the actual receipt can".
+//
+// Bare `keep` is deliberately UNCHANGED: it still promotes whether or not the
+// reply is threaded, so nothing the 2026-07-23 contract admitted now needs a
+// quote. The threading requirement is the price of the WIDENING only.
 const BARE_KEEP_RE = /^\s*keep[\s!.]*$/i;
+const THREADED_AFFIRMATIVE_RE = /^\s*(?:confirm|yes|pin)[\s!.]*$/i;
 
 /**
  * Task G (D14) — outcome of applyRouteChangeAndRecycle: 'recycled' (idle,
@@ -84,6 +102,17 @@ const BARE_KEEP_RE = /^\s*keep[\s!.]*$/i;
 export type RouteRecycleOutcome = 'recycled' | 'deferred' | 'noop';
 
 export type RouteRecycleFailure = LifecycleRouteRecycleFailure<SessionManager>;
+
+/**
+ * One rendered `/model` echo plus whether it is a keep-PROMISING pin receipt
+ * — i.e. whether its text invites the "reply keep to make it permanent"
+ * confirmation and so needs its message id captured for F2a (#2121)
+ * reply-threading. Only `renderPinPreferenceOutcome` produces such text.
+ */
+export interface PinEcho {
+  readonly text: string;
+  readonly keepPromising: boolean;
+}
 
 /**
  * The AgentRuntime surface the pin/recycle path reads and mutates. Declared
@@ -149,13 +178,30 @@ export interface ModelPinPort extends ModelCatalogueRenderPort {
   /** Terminal durability completion for text handled locally without an
    *  agent turn (R14 shape) — a no-op when inboundSeq is undefined. */
   completeLocalInbound(inboundSeq: number | undefined): void;
+  /**
+   * F2a (#2121) — the id-bearing sibling of `sendDirect`, used ONLY for the
+   * pin receipts whose message id a threaded confirmation must quote. Landed
+   * for this feature by #2981 car-B (chat-transport.ts `sendDirectWithReceipt`,
+   * runtime.ts's public method of the same name); every other send in this
+   * module still goes through the void `sendDirect`, so the widening adds no
+   * new obligation at the other call sites.
+   */
+  sendDirectWithReceipt(chatJid: string, text: string): Promise<SendDirectOutcome>;
 }
 
 /**
  * Full bare-`keep` interception (Q-CANARY model-pin `keep` contract,
- * 2026-07-23) — the ONE call site runtime.ts needs. Only the receipt's
- * promised bare reply mutates routing; conversational uses like "please keep
- * it" continue to the agent unchanged (BARE_KEEP_RE requires an exact match).
+ * 2026-07-23; widened by the F2a decision of 2026-08-04, #2121) — the ONE
+ * call site runtime.ts needs. Only the receipt's promised bare reply mutates
+ * routing; conversational uses like "please keep it" continue to the agent
+ * unchanged (both matchers require an exact match).
+ *
+ * Two admission rules, not one. Bare `keep` is admitted on the text alone,
+ * exactly as before. The widened affirmatives (`confirm`/`yes`/`pin`) are
+ * admitted only when the reply is client-threaded to the pin receipt. An
+ * UNQUOTED `confirm` is therefore NOT a near miss to be receipted — it is
+ * ordinary conversation and reaches the agent untouched, which is the
+ * property the owner named as this change's acceptance falsifier.
  * Eligibility is evaluated at `msg.timestamp` (the inbound's own receive
  * time, epoch seconds), never `Date.now()` at processing time, so a
  * provider-queue delay cannot turn an on-time reply into a false "expired"
@@ -164,12 +210,108 @@ export interface ModelPinPort extends ModelCatalogueRenderPort {
  * immediately without any further dispatch.
  */
 export function tryHandleBareKeep(port: ModelPinPort, classified: CommandResult, chatJid: string, msg: IncomingMessage): boolean {
-  if (classified.type !== 'message' || !BARE_KEEP_RE.test(classified.text)) return false;
+  if (classified.type !== 'message') return false;
+  if (!BARE_KEEP_RE.test(classified.text)) {
+    if (!THREADED_AFFIRMATIVE_RE.test(classified.text)) return false;
+    if (!isThreadedToPinReceipt(port, chatJid, msg)) return false;
+  }
   const keepReply = handleBareKeep(port, chatJid, msg.senderJid, msg.timestamp * 1000);
   if (keepReply === null) return false;
   port.sendDirect(chatJid, keepReply);
   port.completeLocalInbound(msg.inboundSeq);
   return true;
+}
+
+/**
+ * F2a (#2121) — is this inbound a reply threaded to THIS chat's pin receipt?
+ *
+ * The comparison is between the inbound's `quotedMessageId` (the quoted
+ * message's transport id, `contextInfo.stanzaId` on the WhatsApp parse) and
+ * the id stored when that receipt was sent. The stored id is read from the
+ * same winning row `promoteToSticky` will resolve, so authentication and
+ * promotion can never disagree about which pin is being confirmed.
+ *
+ * Fails CLOSED on every uncertainty — no quote, an empty quote, no captured
+ * receipt id, a different message, or an unreadable store. A widened
+ * affirmative that cannot be authenticated stays ordinary text; it never
+ * promotes and never earns a receipt of its own.
+ */
+function isThreadedToPinReceipt(port: ModelPinPort, chatJid: string, msg: IncomingMessage): boolean {
+  const quoted = msg.quotedMessageId;
+  if (typeof quoted !== 'string' || quoted === '') return false;
+  const { chatKey } = preferenceKeys(port.db, chatJid, msg.senderJid);
+  try {
+    return getKeepReceiptMessageId(port.db, chatKey) === quoted;
+  } catch (err) {
+    log.warn({ err, instance: port.instanceName }, 'keep: receipt thread check failed');
+    return false;
+  }
+}
+
+/**
+ * F2a (#2121) — send a keep-PROMISING pin receipt and record the id it was
+ * sent with, so a threaded `confirm`/`yes`/`pin` can later be authenticated
+ * against it. Used only for the text `renderPinPreferenceOutcome` produces
+ * (the four branches that say "reply keep to make it permanent"); every other
+ * reply in this module still goes through the void `sendDirect`.
+ *
+ * KNOWN COVERAGE BOUNDARY, inherited from #2981 car-A and not papered over:
+ * `sendDirectWithReceipt` reports acceptance with a NULL id on the healthy
+ * outbound-queue path, because that queue sends asynchronously and the
+ * outcome is deferred by design. A receipt sent while a live queue owns the
+ * chat therefore stores no id, and the widened affirmatives simply fall
+ * through to the agent there, exactly as they did before this change. The
+ * primary F2a path is unaffected: a genuine route switch recycles the live
+ * session first (`recycleLiveSession` drops the per-chat queue, or nulls the
+ * singleton one), so the receipt goes out through the messenger and carries a
+ * real id. Bare `keep` is independent of all of this and works either way.
+ *
+ * A capture failure is never allowed to break the send that already happened:
+ * the receipt is out, so a store error is logged and swallowed, leaving the
+ * widened tokens unauthenticated rather than losing the user's reply.
+ *
+ * AWAITED, unlike the void `sendDirect` it replaces at these sites, and for a
+ * correctness reason rather than tidiness: the id must be durable before the
+ * user's reply can arrive, or a fast threaded `confirm` would race the write
+ * and be refused. The handler already awaits slower work on this same path
+ * (the pin-time catalogue verify, the live-session recycle), so this adds no
+ * new class of blocking; every non-receipt reply in this module still goes out
+ * fire-and-forget.
+ */
+async function sendPinReceipt(
+  port: ModelPinPort,
+  chatJid: string,
+  chatKey: string,
+  senderKey: string,
+  text: string,
+): Promise<void> {
+  const outcome = await port.sendDirectWithReceipt(chatJid, text);
+  if (!outcome.accepted || outcome.messageId === null) return;
+  try {
+    recordKeepReceiptMessageId(port.db, chatKey, senderKey, outcome.messageId);
+  } catch (err) {
+    log.warn({ err, instance: port.instanceName }, 'keep: pin receipt id capture failed');
+  }
+}
+
+/**
+ * Send one `/model` echo, capturing its id only when it is a keep-promising
+ * receipt. Keeps the promise and the capture in one place so a future echo
+ * cannot advertise "reply keep" without also storing the id that reply must
+ * quote.
+ */
+async function sendPinEcho(
+  port: ModelPinPort,
+  chatJid: string,
+  chatKey: string,
+  senderKey: string,
+  echo: PinEcho,
+): Promise<void> {
+  if (!echo.keepPromising) {
+    port.sendDirect(chatJid, echo.text);
+    return;
+  }
+  await sendPinReceipt(port, chatJid, chatKey, senderKey, echo.text);
 }
 
 /**
@@ -702,16 +844,22 @@ export async function echoReconfirmOutcome(
   perChatMapKey: string | undefined,
   label: string,
   alreadySetText: string,
-): Promise<string> {
+): Promise<PinEcho> {
   const fallbackOutcome = fallbackReconfirmationOutcome(
     label,
     alreadySetText,
     fallbackRouteForResolvedPreference(port, chatJid, senderJid),
   );
-  if (fallbackOutcome) return fallbackOutcome;
+  // F2a: neither the health-fallback re-confirmation nor the plain
+  // "Already set" line advertises the keep reply — only
+  // renderPinPreferenceOutcome's four branches do. Reporting the branch
+  // instead of matching on the rendered words keeps that fact where the
+  // renderers are, not in a string test that a copy edit could silently
+  // invalidate.
+  if (fallbackOutcome) return { text: fallbackOutcome, keepPromising: false };
   const recycleOutcome = await applyRouteChangeAndRecycle(port, chatJid, senderJid, perChatMapKey);
-  if (recycleOutcome === 'noop') return alreadySetText;
-  return renderPinOutcomeEcho(port, chatJid, senderJid, label, recycleOutcome);
+  if (recycleOutcome === 'noop') return { text: alreadySetText, keepPromising: false };
+  return { text: renderPinOutcomeEcho(port, chatJid, senderJid, label, recycleOutcome), keepPromising: true };
 }
 
 /**
@@ -755,14 +903,14 @@ async function pinConfiguredModelEntry(
   const { chatJid, senderJid, perChatMapKey, chatKey, senderKey } = ctx;
   const outcome = recordRouteModelPin(port, chatJid, chatKey, senderKey, providerId, modelId, effort);
   if (outcome === 'refreshed') {
-    port.sendDirect(chatJid, await echoReconfirmOutcome(
+    await sendPinEcho(port, chatJid, chatKey, senderKey, await echoReconfirmOutcome(
       port, chatJid, senderJid, perChatMapKey, modelId,
       '_Already set — extended for another 24h. /reset to go back to the default route._',
     ));
     return;
   }
   if (outcome === 'sticky_kept') {
-    port.sendDirect(chatJid, await echoReconfirmOutcome(
+    await sendPinEcho(port, chatJid, chatKey, senderKey, await echoReconfirmOutcome(
       port, chatJid, senderJid, perChatMapKey, modelId,
       '_Already set (sticky). /reset to go back to the default route._',
     ));
@@ -797,7 +945,10 @@ async function pinConfiguredModelEntry(
   // receipt says what changed); a null effort (Default / no-rc model) echoes the
   // model alone, so the pre-Slice-3 receipt is byte-identical when no effort is set.
   const echoLabel = effort ? `${modelId} (${prettyEffortLabel(effort).toLowerCase()} reasoning)` : modelId;
-  port.sendDirect(chatJid, renderPinOutcomeEcho(port, chatJid, senderJid, echoLabel, recycleOutcome));
+  await sendPinReceipt(
+    port, chatJid, chatKey, senderKey,
+    renderPinOutcomeEcho(port, chatJid, senderJid, echoLabel, recycleOutcome),
+  );
 }
 
 /**
@@ -1008,14 +1159,14 @@ export async function handleModelCommand(
     }
     const outcome = port.recordRoutePreference(chatJid, chatKey, senderKey, 'provider_specific', entry.providerId);
     if (outcome === 'refreshed') {
-      port.sendDirect(chatJid, await echoReconfirmOutcome(
+      await sendPinEcho(port, chatJid, chatKey, senderKey, await echoReconfirmOutcome(
         port, chatJid, senderJid, perChatMapKey, `\`${entry.providerId}\``,
         '_Already set — extended for another 24h. /reset to go back to the default route._',
       ));
       return;
     }
     if (outcome === 'sticky_kept') {
-      port.sendDirect(chatJid, await echoReconfirmOutcome(
+      await sendPinEcho(port, chatJid, chatKey, senderKey, await echoReconfirmOutcome(
         port, chatJid, senderJid, perChatMapKey, `\`${entry.providerId}\``,
         '_Already set (sticky). /reset to go back to the default route._',
       ));
@@ -1024,7 +1175,10 @@ export async function handleModelCommand(
     // Task G: apply the switch immediately (idle) or defer it to the
     // next message (busy) — the echo below discloses which.
     const recycleOutcome = await applyRouteChangeAndRecycle(port, chatJid, senderJid, perChatMapKey);
-    port.sendDirect(chatJid, renderPinOutcomeEcho(port, chatJid, senderJid, `\`${entry.providerId}\``, recycleOutcome));
+    await sendPinReceipt(
+      port, chatJid, chatKey, senderKey,
+      renderPinOutcomeEcho(port, chatJid, senderJid, `\`${entry.providerId}\``, recycleOutcome),
+    );
     return;
   }
   // D6/D10/D16 + Slice 2: `/model N` / `/model N<letter>` — resolve N against
@@ -1175,19 +1329,22 @@ export async function handleModelCommand(
   const what = isProvider ? `\`${sub}\`` : `my ${sub} model`;
   const outcome = port.recordRoutePreference(chatJid, chatKey, senderKey, intent, requestedProvider);
   if (outcome === 'refreshed') {
-    port.sendDirect(chatJid, await echoReconfirmOutcome(
+    await sendPinEcho(port, chatJid, chatKey, senderKey, await echoReconfirmOutcome(
       port, chatJid, senderJid, perChatMapKey, what,
       '_Already set — extended for another 24h. /reset to go back to the default route._',
     ));
     return;
   }
   if (outcome === 'sticky_kept') {
-    port.sendDirect(chatJid, await echoReconfirmOutcome(
+    await sendPinEcho(port, chatJid, chatKey, senderKey, await echoReconfirmOutcome(
       port, chatJid, senderJid, perChatMapKey, what,
       '_Already set (sticky). /reset to go back to the default route._',
     ));
     return;
   }
   const recycleOutcome = await applyRouteChangeAndRecycle(port, chatJid, senderJid, perChatMapKey);
-  port.sendDirect(chatJid, renderPinOutcomeEcho(port, chatJid, senderJid, what, recycleOutcome));
+  await sendPinReceipt(
+    port, chatJid, chatKey, senderKey,
+    renderPinOutcomeEcho(port, chatJid, senderJid, what, recycleOutcome),
+  );
 }
