@@ -40,12 +40,23 @@ export function pathIsAtOrInsideDirectory(candidate: string, parent: string): bo
 /**
  * Is nothing at all at this path? A DANGLING symlink is NOT absent — something
  * is there, it just does not resolve. `lstat` separates the two without
- * following the link. Same distinction as `isTrulyAbsent` in
- * src/fleet/launchd-render-options.ts.
+ * following the link. The launchd render-options resolver
+ * (src/fleet/launchd-render-options.ts) calls this rather than keeping its own
+ * copy of the same probe, so a repair here reaches both call sites.
+ *
+ * Trailing separators are stripped before the probe because POSIX reads a
+ * trailing `/` as a following `.`, so `lstat('<link>/')` reports on the link's
+ * TARGET instead of the link. Without the strip a dangling link named
+ * `<home>/dangle/` read as absent, the ancestor climb in
+ * realpathLongestAbsentTolerantPrefix walked past it to an in-home ancestor,
+ * and one character turned a refusal into an admission at every caller. The
+ * pattern is anchored so it can never empty the string: `lstat('')` is ENOENT,
+ * which would report the filesystem root as absent.
  */
 export function nothingExistsAt(targetPath: string): boolean {
+  const bare = targetPath.replace(/(?!^)\/+$/, '');
   try {
-    fs.lstatSync(targetPath);
+    fs.lstatSync(bare);
     return false;
   } catch (err) {
     return (err as NodeJS.ErrnoException).code === 'ENOENT';
@@ -126,6 +137,24 @@ export function realpathLongestAbsentTolerantPrefix(targetPath: string): string 
       current = parent;
     }
   }
+}
+
+/**
+ * Is the longest physically-resolvable prefix of this RAW spelling at or inside
+ * the resolved home root?
+ *
+ * Containment is at-or-inside rather than strict on purpose: the absent-tolerant
+ * walk can legitimately return the home directory itself, because a caller may
+ * name a directory several not-yet-created segments below home. A caller that
+ * holds a resolved leaf applies the strict test separately.
+ *
+ * Both admission sites in src/fleet/routes/ops.ts call this instead of spelling
+ * the composition out themselves, so the physical policy cannot drift between
+ * them. Throws whatever realpathLongestAbsentTolerantPrefix throws; callers
+ * decide how to classify a refusal.
+ */
+export function physicalPrefixIsConfined(rawAbsolute: string, homeReal: string): boolean {
+  return pathIsAtOrInsideDirectory(realpathLongestAbsentTolerantPrefix(rawAbsolute), homeReal);
 }
 
 /**
