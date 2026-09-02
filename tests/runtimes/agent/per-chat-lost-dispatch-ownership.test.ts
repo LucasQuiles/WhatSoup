@@ -307,6 +307,46 @@ describe('per-chat session entry whose dispatch ownership was lost', () => {
     }
   });
 
+  it('recovers a session auto-respawn declined, on the next inbound turn', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const { state } = makePerChatRuntime(db);
+      const runtimeContext = context('per_chat', MAP_KEY, 515, 'turn-declined-respawn');
+      const deliveryJid = runtimeContext.identity.deliveryJid;
+
+      // The state auto-respawn now refuses to resume: owned and mapped, child
+      // gone, but termination unproven. Auto-respawn resumes a manager in place
+      // with no shutdown, so it needs the proof; this path does not, because it
+      // shuts the session down before spawning and that awaits termination.
+      const session = sessionStub();
+      session.getStatus.mockReturnValue({
+        active: false,
+        sessionId: null,
+        pid: null,
+        turnInFlight: false,
+        providerTerminated: false,
+      });
+      state.sessionOwnership.claim(MAP_KEY, state.managerIdFor(session));
+      state.chatSessions.set(MAP_KEY, session);
+      state.chatQueues.set(MAP_KEY, queueStub(deliveryJid));
+      registerSessionToolScope(state, session, runtimeContext.toolScopeKey);
+      const spawn = vi.spyOn(state, 'ensureSessionAndQueueSync');
+
+      await dispatchTurn(state, runtimeContext);
+
+      // Declining the resume delays the chat by one turn; it does not strand it.
+      expect(vi.mocked(session.shutdown)).toHaveBeenCalled();
+      expect(vi.mocked(session.spawnSession)).toHaveBeenCalled();
+      expect(vi.mocked(session.sendTurn)).toHaveBeenCalledTimes(1);
+      // Recovery came from the dispatch path, not from a second eviction.
+      expect(spawn).not.toHaveBeenCalled();
+      expect(state.chatSessions.get(MAP_KEY)).toBe(session);
+    } finally {
+      db.close();
+    }
+  });
+
   it('leaves a correctly owned session untouched', async () => {
     const db = new Database(':memory:');
     db.open();
