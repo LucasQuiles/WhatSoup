@@ -356,9 +356,27 @@ def test_host_monotonic_seconds_prefers_the_dry_override_and_survives_failure(he
 
 
 def test_host_monotonic_seconds_is_a_since_boot_clock(health_check, monkeypatch):
+    """Not vacuous for availability: on a platform that exposes the boot clock
+    the value must be a positive int, and only a platform without it may
+    return None."""
     monkeypatch.delenv("BOT_ERRORS_DRY_HOST_MONOTONIC_SECONDS", raising=False)
+    import time as _time
+
+    clock_name = "CLOCK_MONOTONIC" if health_check.HOST_PLATFORM == "darwin" else "CLOCK_BOOTTIME"
     value = health_check._host_monotonic_seconds()
-    assert value is None or (isinstance(value, int) and value > 0)
+    if hasattr(_time, clock_name):
+        assert isinstance(value, int) and value > 0
+    else:
+        assert value is None
+
+
+def test_host_monotonic_seconds_rejects_a_malformed_dry_override(health_check, monkeypatch):
+    """A dry override is a test knob; a bad one must degrade to the wall-clock
+    fallback, never crash the deadman or poison the record (a negative value
+    would classify the next record as corrupt and refuse grace)."""
+    for bad in ("inf", "-inf", "nan", "-5", "1e400", ""):
+        monkeypatch.setenv("BOT_ERRORS_DRY_HOST_MONOTONIC_SECONDS", bad)
+        assert health_check._host_monotonic_seconds() is None, bad
 
 
 # ---------------------------------------------------------------------------
@@ -830,6 +848,10 @@ def _systemd_seconds(value: str) -> int:
     if re.search(r"[A-Z]", value):
         # systemd time units are lowercase; an uppercase unit makes the file unloadable.
         pytest.fail(f"uppercase time unit in {value!r}: systemd would not load this timer")
+    if not re.fullmatch(r"(\s*\d+\s*[a-z]*)+\s*", value):
+        # The whole value must be number-unit pairs: leading junk or a separator
+        # systemd rejects was silently skipped by the scan below.
+        pytest.fail(f"partially parseable systemd time span {value!r}: systemd would not load this timer")
     for number, unit in re.findall(r"(\d+)\s*([a-z]*)", value.strip()):
         unit_key = unit or "s"
         if unit_key not in _SYSTEMD_UNITS:
@@ -964,4 +986,40 @@ def test_daily_renders_the_last_observation_gap_from_the_deadman_record(env, cap
     import inspect
 
     assert "deadman_observation_gap_inventory()" in inspect.getsource(env.mod.daily), "daily() must render the record"
+
+
+def test_systemd_seconds_rejects_partially_parsed_values():
+    """The cadence pin must read the whole value: leading junk or a separator
+    systemd would reject was silently skipped by the number-unit scan."""
+    assert _systemd_seconds("5m") == 300 and _systemd_seconds("2m30s") == 150 and _systemd_seconds("5m 10m") == 900
+    for bad in ("abc5m", "5m;10m", "5m,10m", "5 m x 10m"):
+        with pytest.raises(pytest.fail.Exception):
+            _systemd_seconds(bad)
+
+
+def test_deadman_reports_a_restart_loop_across_repeated_reboots(env):
+    """Bench finding: every boot-identity change re-seeds the streak. What that
+    means in practice: within each boot the loop is reported once the streak
+    outgrows max_state_age, and only a host that reboots faster than
+    max_state_age (180s at the shipped flags) stays silent. Boot A -> B -> C at
+    a 300s cadence reports in every boot; at a 100s cadence it does not, which
+    is the documented residual (a host rebooting every 100s cannot run a
+    5-minute timer either)."""
+    env.svc["status"] = "active"
+    env.svc["ages"] = (2, 2)
+    for boot in ("boot-A", "boot-B", "boot-C"):
+        env.boot["id"] = boot
+        env.state_written(120, {"time": env.mod.epoch_to_iso(100_000)})
+        assert env.run() == 0, boot  # first check after the (re)boot: a fresh restart is graced
+        env.advance(300)
+        env.state_written(120, {"time": env.mod.epoch_to_iso(100_000)})
+        assert env.run() == 2, boot  # second check: the streak within this boot outgrew max_state_age
+        assert "cycle_incomplete" in env.members()
+        env.advance(300)
+    for boot in ("boot-D", "boot-E", "boot-F"):
+        env.boot["id"] = boot
+        env.state_written(120, {"time": env.mod.epoch_to_iso(100_000)})
+        assert env.run() == 0, boot
+        env.advance(100)  # faster than max_state_age: the residual
+    assert env.run() == 0
 

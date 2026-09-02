@@ -1125,11 +1125,10 @@ class IncidentStateCycle:
     def commit(self) -> Any:
         """Set ``updatedAt``, redact, persist, and advance the capability.
 
-        Returns the ``PublicationResult`` from ``session.save()``.
-        Also writes the raw incident state file so test
-        ``readIncidentState`` surfaces the updated payload
-        (#3053 regression fix — IncidentStateCycle diverts
-        persistence away from save_incident_state).
+        Returns the ``PublicationResult`` from ``session.save()``, which is
+        the only write: the session persists the enveloped primary itself.
+        The raw co-write this once did was removed with the #3053 fix, and
+        the cycle is the supported path away from ``save_incident_state``.
         """
         self._payload["updatedAt"] = now_iso()
         redacted = redacted_dispatcher_payload(self._payload)
@@ -1220,10 +1219,12 @@ def save_incident_state(
     # adoption can still land between the fast check and the lock.
     with _AdoptionLock(incident_path, lock_timeout_seconds):
         _reject_bare_write_if_adopted(incident_path)
-        state["updatedAt"] = now_iso()
         target = _durable_target(incident_path)
         observation = observe_json(target)
         _reject_bare_write_over_envelope(incident_path, observation.payload)
+        # Stamped only once every refusal has passed: a refused write hands the
+        # caller's dict back exactly as given.
+        state["updatedAt"] = now_iso()
         generation = (observation.version.generation or 0) + 1
         publication_operation = operation_id(
             target,
@@ -1348,59 +1349,84 @@ class _AdoptionLock:
                 f"a bare write must not run without the store's mutual exclusion"
             ) from exc
 
+    @staticmethod
+    def _safe_leaf(observed: os.stat_result) -> bool:
+        return (
+            stat.S_ISREG(observed.st_mode)
+            and observed.st_uid == os.getuid()
+            and observed.st_nlink == 1
+            and not (stat.S_IMODE(observed.st_mode) & 0o077)
+        )
+
     def _acquire(self) -> "_AdoptionLock":
         # Pin the parent directory first, as the session does, so the lock is
-        # opened relative to the directory we checked rather than by path.
+        # opened relative to the directory we checked rather than by path. The
+        # descriptor stays open through acquisition: after the flock the named
+        # leaf is re-opened relative to it and must still be the locked inode,
+        # the same identity check the canonical controller-state lock makes
+        # (controller_state._open_lock). Without it a same-owner replacement of
+        # the leaf between open and flock lets adoption lock a different inode
+        # while this writer holds the old one.
         dir_fd = os.open(self._path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             fd = os.open(self._path.name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=dir_fd)
+            try:
+                self._lock_and_verify(fd, dir_fd)
+            except BaseException:
+                os.close(fd)
+                raise
         finally:
             os.close(dir_fd)
-        try:
-            observed = os.fstat(fd)
-            if (
-                not stat.S_ISREG(observed.st_mode)
-                or observed.st_uid != os.getuid()
-                or observed.st_nlink != 1
-                or stat.S_IMODE(observed.st_mode) & 0o077
-            ):
-                # The guard's own error class, like the timeout below: a bare
-                # OSError here is swallowed by --daemon as a failed cycle and
-                # retried every interval, which is the silent failure mode the
-                # exit-79 path exists to prevent. The EPERM stays attached as
-                # the cause so the refusal still names the unsafe leaf.
-                raise IncidentCycleRequiredError(
-                    f"save_incident_state: refusing the bare write: unsafe adoption lock file "
-                    f"{self._path.name} (regular={stat.S_ISREG(observed.st_mode)} "
-                    f"owner_matches={observed.st_uid == os.getuid()} nlink={observed.st_nlink} "
-                    f"mode={stat.S_IMODE(observed.st_mode):04o}); the store's lock cannot be "
-                    f"trusted and a bare write must not run without it"
-                ) from OSError(errno.EPERM, f"unsafe adoption lock file: {self._path.name}")
-            deadline = time.monotonic() + self._timeout
-            while True:
-                try:
-                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    break
-                except BlockingIOError:
-                    if time.monotonic() >= deadline:
-                        # Either this process already holds the session lock (a
-                        # helper reached the bare writer from inside the cycle,
-                        # the programming error the guard exists for) or an
-                        # adoption is in progress, after which the bare write
-                        # must be refused anyway. Both are the guard's error,
-                        # so the daemon exits 79 instead of swallowing a
-                        # TimeoutError as a failed cycle.
-                        raise IncidentCycleRequiredError(
-                            f"save_incident_state: the incident-state adoption lock stayed busy for "
-                            f"{self._timeout:g}s ({self._path.name}); a bare write must not run "
-                            f"while a controller-state session holds the store"
-                        ) from None
-                    time.sleep(min(0.005, max(0.0, deadline - time.monotonic())))
-        except BaseException:
-            os.close(fd)
-            raise
         self._fd = fd
         return self
+
+    def _lock_and_verify(self, fd: int, dir_fd: int) -> None:
+        observed = os.fstat(fd)
+        if not self._safe_leaf(observed):
+            # The guard's own error class, like the timeout below: a bare
+            # OSError here is swallowed by --daemon as a failed cycle and
+            # retried every interval, which is the silent failure mode the
+            # exit-79 path exists to prevent. The EPERM stays attached as
+            # the cause so the refusal still names the unsafe leaf.
+            raise IncidentCycleRequiredError(
+                f"save_incident_state: refusing the bare write: unsafe adoption lock file "
+                f"{self._path.name} (regular={stat.S_ISREG(observed.st_mode)} "
+                f"owner_matches={observed.st_uid == os.getuid()} nlink={observed.st_nlink} "
+                f"mode={stat.S_IMODE(observed.st_mode):04o}); the store's lock cannot be "
+                f"trusted and a bare write must not run without it"
+            ) from OSError(errno.EPERM, f"unsafe adoption lock file: {self._path.name}")
+        deadline = time.monotonic() + self._timeout
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    # Either this process already holds the session lock (a
+                    # helper reached the bare writer from inside the cycle,
+                    # the programming error the guard exists for) or an
+                    # adoption is in progress, after which the bare write
+                    # must be refused anyway. Both are the guard's error,
+                    # so the daemon exits 79 instead of swallowing a
+                    # TimeoutError as a failed cycle.
+                    raise IncidentCycleRequiredError(
+                        f"save_incident_state: the incident-state adoption lock stayed busy for "
+                        f"{self._timeout:g}s ({self._path.name}); a bare write must not run "
+                        f"while a controller-state session holds the store"
+                    ) from None
+                time.sleep(min(0.005, max(0.0, deadline - time.monotonic())))
+        recheck = os.open(self._path.name, os.O_RDWR | os.O_NOFOLLOW, dir_fd=dir_fd)
+        try:
+            rechecked = os.fstat(recheck)
+        finally:
+            os.close(recheck)
+        if not self._safe_leaf(rechecked) or (rechecked.st_dev, rechecked.st_ino) != (observed.st_dev, observed.st_ino):
+            raise IncidentCycleRequiredError(
+                f"save_incident_state: refusing the bare write: the incident-state adoption lock "
+                f"{self._path.name} was replaced during acquisition (locked inode "
+                f"{observed.st_dev}:{observed.st_ino}, named inode {rechecked.st_dev}:{rechecked.st_ino}); "
+                f"the mutual exclusion this writer holds no longer guards the store"
+            )
 
     def __exit__(self, *_exc: Any) -> None:
         if self._fd is not None:
@@ -7150,6 +7176,16 @@ def main() -> int:
 
     try:
         result = run_once(args.max_events)
+    except IncidentCycleRequiredError as exc:
+        # The exit-79 contract holds in --once exactly as in --daemon: a refused
+        # post-adoption bare write is reported as itself, not as a traceback
+        # with exit 1 that a wrapper script would read as an ordinary failure.
+        print(json.dumps({
+            "time": now_iso(),
+            "error": str(exc),
+            "exit": INCIDENT_CYCLE_REQUIRED_EXIT,
+        }))
+        return INCIDENT_CYCLE_REQUIRED_EXIT
     except ControllerStateRequired as exc:
         import sys, traceback; traceback.print_exception(type(exc), exc, exc.__traceback__, file=sys.stderr)
         project_dispatcher_state_mode(exc.diagnostic)

@@ -21,11 +21,13 @@ never routes through the wrapper, so the supported path is untouched.
 """
 from __future__ import annotations
 
+import ast
 import errno
 import importlib.util
 import json
 import os
 import re
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -528,4 +530,110 @@ def test_in_lock_failures_reach_the_caller_unwrapped(dispatcher, tmp_path, monke
     assert not isinstance(raised.value, dispatcher.IncidentCycleRequiredError), "the in-lock body was over-captured"
     assert raised.value.errno == errno.EIO
     assert anchor.read_bytes() == before
+
+
+def test_adoption_lock_detects_a_leaf_replaced_during_acquisition(dispatcher, tmp_path, monkeypatch):
+    """Bench finding: the bare writer flocked a descriptor and never re-verified
+    the leaf, unlike the canonical controller-state lock, so a same-UID replace
+    of the lock path between open and flock let adoption lock a different inode
+    while the bare writer held the old one. The directory descriptor is held
+    through acquisition and the named leaf must still be the locked inode."""
+    import fcntl
+
+    anchor = _anchor(tmp_path, adopted=False)
+    lock_path = tmp_path / "incident-state.json.lock"
+    real_flock = fcntl.flock
+    swapped = {"done": False}
+
+    def swap_then_lock(fd, operation):
+        if not swapped["done"] and operation & fcntl.LOCK_EX:
+            swapped["done"] = True
+            replacement = tmp_path / "incident-state.json.lock.new"
+            replacement.write_text("")
+            replacement.chmod(0o600)
+            os.replace(replacement, lock_path)  # the named path now leads to another inode
+        return real_flock(fd, operation)
+
+    monkeypatch.setattr(dispatcher.fcntl, "flock", swap_then_lock)
+    before = anchor.read_bytes()
+    with pytest.raises(dispatcher.IncidentCycleRequiredError, match="replaced"):
+        dispatcher.save_incident_state({"incident_state": anchor}, {"incidents": {}}, lock_timeout_seconds=0.2)
+    assert swapped["done"]
+    assert anchor.read_bytes() == before
+
+
+def test_once_mode_exits_79_when_the_writer_guard_fires(dispatcher, monkeypatch, capsys):
+    """The exit-79 contract must hold in --once as it does in --daemon: main()
+    caught only ControllerStateRequired, so the guard's error exited 1 by
+    traceback and the two run modes disagreed."""
+
+    def boom(_max_events):
+        raise dispatcher.IncidentCycleRequiredError("save_incident_state: refusing a post-adoption bare-JSON write")
+
+    monkeypatch.setattr(dispatcher, "run_once", boom)
+    monkeypatch.setattr(sys, "argv", ["bot-errors-dispatcher.py", "--once"])
+    assert dispatcher.main() == dispatcher.INCIDENT_CYCLE_REQUIRED_EXIT == 79
+    record = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert record["exit"] == 79 and "post-adoption" in record["error"]
+
+
+def test_refused_write_leaves_the_callers_state_untouched(dispatcher, tmp_path):
+    """updatedAt was stamped before the envelope check, so a refused write handed
+    the caller back a mutated dict. Both refusals must leave it as given."""
+    marker_dir = tmp_path / "adopted"
+    marker_dir.mkdir()
+    marker_anchor = _anchor(marker_dir, adopted=True)
+    state = {"incidents": {}}
+    with pytest.raises(dispatcher.IncidentCycleRequiredError):
+        dispatcher.save_incident_state({"incident_state": marker_anchor}, state, lock_timeout_seconds=0.2)
+    assert state == {"incidents": {}}
+    envelope_dir = tmp_path / "enveloped"
+    envelope_dir.mkdir()
+    envelope_anchor = envelope_dir / "incident-state.json"
+    envelope_anchor.write_text(json.dumps({"_controllerState": {"v": 1}, "incidents": {}}), encoding="utf-8")
+    envelope_anchor.chmod(0o600)
+    with pytest.raises(dispatcher.IncidentCycleRequiredError, match="enveloped"):
+        dispatcher.save_incident_state({"incident_state": envelope_anchor}, state, lock_timeout_seconds=0.2)
+    assert state == {"incidents": {}}
+
+
+def test_every_executable_bare_write_site_is_the_else_of_an_incident_check():
+    """The comment above claims a call-site count; this is the machine-checked
+    form. Every executable save_incident_state call in the dispatcher sits in
+    the else-branch of an ``if incident`` test, and collapse_storm_group's
+    three branches are among them (the superseding branch was the one that
+    was not)."""
+    tree = ast.parse(_SCRIPT.read_text(encoding="utf-8"))
+    parents = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[child] = node
+
+    def enclosing(node):
+        while node in parents:
+            node = parents[node]
+            if isinstance(node, ast.FunctionDef):
+                return node.name
+        return "<module>"
+
+    def in_else_of_incident_check(node):
+        child = node
+        while child in parents:
+            parent = parents[child]
+            if isinstance(parent, ast.If) and child in parent.orelse:
+                if "incident" in {n.id for n in ast.walk(parent.test) if isinstance(n, ast.Name)}:
+                    return True
+            child = parent
+        return False
+
+    sites = [
+        (node.lineno, enclosing(node), in_else_of_incident_check(node))
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "save_incident_state"
+        and enclosing(node) != "<module>"
+    ]
+    assert sites, "no executable call site found; the scan is broken"
+    unguarded = [(line, fn) for line, fn, ok in sites if not ok]
+    assert not unguarded, f"bare-write sites outside an if-incident else branch: {unguarded}"
+    assert sum(1 for _, fn, _ in sites if fn == "collapse_storm_group") == 3
 

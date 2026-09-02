@@ -7921,10 +7921,16 @@ def _host_monotonic_seconds() -> int | None:
     None when unavailable; the caller falls back to clamped wall time."""
     dry = os.environ.get("BOT_ERRORS_DRY_HOST_MONOTONIC_SECONDS")
     if dry is not None:
+        # A test knob, so a bad value degrades to the wall-clock fallback and
+        # never crashes the deadman (OverflowError on "inf") or poisons the
+        # record (a negative value would classify the next record corrupt).
         try:
-            return int(float(dry))
+            parsed = float(dry)
         except ValueError:
             return None
+        if parsed != parsed or parsed in (float("inf"), float("-inf")) or parsed < 0:
+            return None
+        return int(parsed)
     clock = getattr(time, "CLOCK_MONOTONIC", None) if HOST_PLATFORM == "darwin" else getattr(time, "CLOCK_BOOTTIME", None)
     if clock is None:
         return None
