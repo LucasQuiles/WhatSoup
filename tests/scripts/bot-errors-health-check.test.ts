@@ -5609,7 +5609,7 @@ print(m.probe_health(9092))
     const lines = JSON.parse(python([
       importHealthModulePrelude(),
       'import json',
-      'm.instance_provider_path = lambda name: "/runtime/bin:/usr/bin:/bin"',
+      'm.instance_plist_governed_environment = lambda name: (m.GOVERNED_PLIST_READABLE, {"PATH": "/runtime/bin:/usr/bin:/bin"})',
       'm.loaded_instance_environment = lambda name: {"PATH": "/runtime/bin:/usr/bin:/bin", "HOME": "/fixture"}',
       'm.executable_candidate = lambda command, path_value=None: "/runtime/bin/opencode"',
       'lines = m.opencode_provider_probe_inventory({}, {"opencodeProviderProbeCommand": "/gui-only/bin/opencode"}, "agent-alpha", {"type": "agent", "agentOptions": {"provider": "opencode-cli", "model": "xai/grok-4"}}, "opencode-cli")',
@@ -5624,7 +5624,7 @@ print(m.probe_health(9092))
       importHealthModulePrelude(),
       'import json',
       'm.HOST_PLATFORM = "darwin"',
-      'm.instance_provider_path = lambda name: "/generated/bin:/usr/bin:/bin"',
+      'm.instance_plist_governed_environment = lambda name: (m.GOVERNED_PLIST_READABLE, {"PATH": "/generated/bin:/usr/bin:/bin"})',
       'm.loaded_instance_environment = lambda name: {"PATH": "/loaded/bin:/usr/bin:/bin", "HOME": "/fixture"}',
       'm.executable_candidate = lambda command, path_value=None: "/loaded/bin/opencode"',
       'lines = m.opencode_provider_probe_inventory({}, {}, "agent-alpha", {"type": "agent", "agentOptions": {"provider": "opencode-cli", "model": "xai/grok-4"}}, "opencode-cli")',

@@ -97,7 +97,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "a58b19f286e727e9a2a7ee94033f24ff0d325133cb2b4c4556dab21594cd4628",
+      "sha256": "f642fe405fdb8092820f472bbdbc4cfa8078b6ee1aae5158ca781c475b8eb888",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -176,8 +176,9 @@
         "governed_child_environment",
         "environment_value",
         "environment_provider_path",
+        "generated_provider_path_absence_failure",
+        "reason=generated_path_absent",
         "governed_prepend_failure_class",
-        "instance_provider_path_prepend",
         "instance_provider_path_prepend_match",
         "path_starts_with_entries",
         "WHATSOUP_PATH_PREPEND",

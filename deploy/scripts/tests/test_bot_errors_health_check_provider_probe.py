@@ -807,9 +807,8 @@ def _write_instance_plist(
 ) -> Path:
     """Write a real LaunchAgent plist so the guarded reader is exercised for real.
 
-    The probe's plist parsing had no direct coverage while the tests stubbed
-    instance_provider_path_prepend; these fixtures drive instance_plist_environment
-    itself, including its two fail-closed shapes.
+    These fixtures drive instance_plist_environment itself, including its
+    fail-closed shapes, and let assertions use the surviving map accessor.
     """
     agents = home / "Library" / "LaunchAgents"
     agents.mkdir(parents=True, exist_ok=True)
@@ -979,7 +978,7 @@ def test_instance_plist_environment_reads_every_governed_key(monkeypatch, tmp_pa
     assert environment is not None
     assert environment["PATH"] == "/fixture/pin/bin:/usr/bin"
     assert environment["WHATSOUP_PATH_PREPEND"] == "/fixture/pin/bin"
-    assert _mod.instance_provider_path_prepend("agent-alpha") == "/fixture/pin/bin"
+    assert _mod.environment_value(environment, "WHATSOUP_PATH_PREPEND") == "/fixture/pin/bin"
 
 
 def test_instance_plist_environment_fails_closed_on_a_nested_dict(monkeypatch, tmp_path):
@@ -1116,6 +1115,47 @@ def test_opencode_functional_probe_env_retains_the_governed_prepend():
         {"PATH": "/fixture/pin/bin:/usr/bin", "WHATSOUP_PATH_PREPEND": "/fixture/pin/bin"},
     )
     assert child.get("WHATSOUP_PATH_PREPEND") == "/fixture/pin/bin"
+
+
+def test_governed_child_environment_retains_the_configured_claude_config_dir():
+    child = _mod.governed_child_environment(
+        "/fixture/pin/bin:/usr/bin",
+        "agent-alpha",
+        "/fixture/work",
+        {
+            "PATH": "/fixture/pin/bin:/usr/bin",
+            "CLAUDE_CONFIG_DIR": "/fixture/config/agent-alpha",
+        },
+    )
+
+    assert child.get("CLAUDE_CONFIG_DIR") == "/fixture/config/agent-alpha"
+
+
+def test_governed_child_environment_leaves_absent_claude_config_dir_absent():
+    child = _mod.governed_child_environment(
+        "/fixture/pin/bin:/usr/bin",
+        "agent-alpha",
+        "/fixture/work",
+        {"PATH": "/fixture/pin/bin:/usr/bin"},
+    )
+
+    assert "CLAUDE_CONFIG_DIR" not in child
+
+
+def test_governed_child_environment_excludes_provider_credentials():
+    child = _mod.governed_child_environment(
+        "/fixture/pin/bin:/usr/bin",
+        "agent-alpha",
+        "/fixture/work",
+        {
+            "PATH": "/fixture/pin/bin:/usr/bin",
+            "ANTHROPIC_API_KEY": "must-not-propagate",
+            "OPENAI_API_KEY": "must-not-propagate",
+        },
+    )
+
+    assert "ANTHROPIC_API_KEY" not in child
+    assert "OPENAI_API_KEY" not in child
 
 
 # --- claude-cli is the DEFAULT provider: it gets the same governed checks ---
@@ -1301,6 +1341,130 @@ def _matrix_environment(tmp_path: Path) -> dict[str, str]:
     _write_shadow(tmp_path / "pin" / "bin", "claude")
     _write_shadow(tmp_path / "pin" / "bin", "opencode")
     return environment
+
+
+@pytest.mark.parametrize("generated_path", [None, ""])
+def test_default_provider_probe_fails_closed_when_readable_plist_has_no_governed_path(
+    monkeypatch, tmp_path, generated_path
+):
+    loaded_environment = _matrix_environment(tmp_path)
+    loaded_environment.pop("WHATSOUP_PATH_PREPEND")
+    plist_environment = {"HOME": str(tmp_path / "home")}
+    if generated_path is not None:
+        plist_environment["PATH"] = generated_path
+    _arm_darwin_plist(monkeypatch, tmp_path, "agent-alpha", plist_environment)
+
+    captured, lines = _claude_probe(monkeypatch, {}, loaded_environment)
+
+    assert not captured, "probe must fail before invoking the provider"
+    assert "failure_class=provider_runtime_path_unavailable" in lines[0]
+    assert "reason=generated_path_absent" in lines[0]
+    _assert_fail_line_is_path_free(lines[0], tmp_path)
+
+
+@pytest.mark.parametrize("generated_path", [None, ""])
+def test_opencode_probe_fails_closed_when_readable_plist_has_no_governed_path(
+    monkeypatch, tmp_path, generated_path
+):
+    loaded_environment = _matrix_environment(tmp_path)
+    loaded_environment.pop("WHATSOUP_PATH_PREPEND")
+    plist_environment = {"HOME": str(tmp_path / "home")}
+    if generated_path is not None:
+        plist_environment["PATH"] = generated_path
+    _arm_darwin_plist(monkeypatch, tmp_path, "agent-alpha", plist_environment)
+    monkeypatch.setattr(
+        _mod,
+        "loaded_instance_environment",
+        lambda _name: dict(loaded_environment),
+    )
+    captured: list[list[str]] = []
+
+    def _fake_output(command, *args, **kwargs):
+        captured.append(list(command))
+        return ("opencode 1.0.0", "", 0, False)
+
+    monkeypatch.setattr(_mod, "provider_command_output", _fake_output)
+
+    lines = _mod.opencode_provider_probe_inventory(
+        {},
+        {},
+        "agent-alpha",
+        {"type": "agent", "agentOptions": {"provider": "opencode-cli"}},
+        "opencode-cli",
+    )
+
+    assert not captured, "probe must fail before invoking the provider"
+    assert "failure_class=provider_runtime_path_unavailable" in lines[0]
+    assert "reason=generated_path_absent" in lines[0]
+    _assert_fail_line_is_path_free(lines[0], tmp_path)
+
+
+def test_opencode_probe_uses_one_generated_environment_snapshot_during_atomic_replacement(
+    monkeypatch,
+):
+    old_environment = {
+        "PATH": "/fixture/old/bin:/usr/bin",
+        "WHATSOUP_PATH_PREPEND": "/fixture/old/bin",
+    }
+    new_environment = {
+        "PATH": "/fixture/new/bin:/usr/bin",
+        "WHATSOUP_PATH_PREPEND": "/fixture/new/bin",
+    }
+    reads: list[dict[str, str]] = []
+
+    def _changing_plist(_name):
+        environment = old_environment if not reads else new_environment
+        reads.append(dict(environment))
+        return dict(environment)
+
+    monkeypatch.delenv("BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH", raising=False)
+    monkeypatch.delenv("BOT_ERRORS_DRY_PROVIDER_PROBE_STDOUT", raising=False)
+    monkeypatch.delenv("BOT_ERRORS_DRY_PROVIDER_PROBE_RC", raising=False)
+    monkeypatch.setattr(_mod, "HOST_PLATFORM", "darwin")
+    monkeypatch.setattr(_mod, "instance_plist_environment", _changing_plist)
+    monkeypatch.setattr(
+        _mod,
+        "loaded_instance_environment",
+        lambda _name: {
+            **old_environment,
+            "HOME": "/fixture/home",
+            "WHATSOUP_NODE": "/fixture/node/bin/node",
+        },
+    )
+    monkeypatch.setattr(
+        _mod,
+        "effective_instance_provider_path",
+        lambda _environment: old_environment["PATH"],
+    )
+    monkeypatch.setattr(
+        _mod,
+        "executable_candidate",
+        lambda _command, _path=None: "/fixture/old/bin/opencode",
+    )
+    captured: list[list[str]] = []
+
+    def _fake_output(command, *args, **kwargs):
+        captured.append(list(command))
+        return (
+            "opencode 1.0.0\nusage: opencode run --format json --pure -m model\n",
+            "",
+            0,
+            False,
+        )
+
+    monkeypatch.setattr(_mod, "provider_command_output", _fake_output)
+
+    lines = _mod.opencode_provider_probe_inventory(
+        {},
+        {},
+        "agent-alpha",
+        {"type": "agent", "agentOptions": {"provider": "opencode-cli"}},
+        "opencode-cli",
+    )
+
+    assert reads == [old_environment]
+    assert captured, "a coherent generated snapshot must reach the provider boundary"
+    assert "provider_runtime_path_prepend_mismatch" not in "\n".join(lines)
 
 
 def test_default_provider_probe_healthy_plist_control_row(monkeypatch, tmp_path):

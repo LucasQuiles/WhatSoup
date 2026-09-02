@@ -4367,12 +4367,6 @@ def instance_plist_governed_environment(name: str) -> tuple[str, dict[str, str] 
     return (GOVERNED_PLIST_READABLE, environment)
 
 
-def instance_provider_path_prepend(name: str) -> str | None:
-    """Governed PATH prepend exactly as the instance's own LaunchAgent declares it."""
-    _state, environment = instance_plist_governed_environment(name)
-    return environment_value(environment, "WHATSOUP_PATH_PREPEND")
-
-
 def launchctl_environment(output: str) -> dict[str, str]:
     environment_match = re.search(
         r"(?ms)^\s*environment = \{\s*$\n(.*?)^\s*\}\s*$",
@@ -4503,6 +4497,20 @@ REGENERATE_LAUNCHAGENT_REMEDIATION = (
     "regenerate_and_reload_the_instance_launchagent"
     "_or_verify_launchctl_print_output_parses"
 )
+
+
+def generated_provider_path_absence_failure(
+    name: str,
+    provider: str,
+    target: str,
+) -> str:
+    """Path-free refusal shared by both providers when a readable plist has no PATH."""
+    return (
+        f"FAIL provider_probe {name}: provider={provider} target={target} "
+        "failure_class=provider_runtime_path_unavailable "
+        "reason=generated_path_absent governed_path_entries=0 "
+        f"remediation={REGENERATE_LAUNCHAGENT_REMEDIATION}"
+    )
 
 
 def governed_prepend_failure_class(
@@ -4641,6 +4649,9 @@ OPENCODE_FUNCTIONAL_ENV_KEYS = (
     # Without this the child environment drops the governed prepend and the
     # functional probe resolves a different binary than the service does.
     "WHATSOUP_PATH_PREPEND",
+    # The service can select a per-instance configuration/authentication root.
+    # Keep that identity while continuing to exclude provider credentials.
+    "CLAUDE_CONFIG_DIR",
     "HOME",
     "USER",
     "SHELL",
@@ -4714,9 +4725,18 @@ def opencode_provider_probe_inventory(
     provider: str,
     target: str = "primary",
 ) -> list[str]:
-    generated_provider_path = instance_provider_path(name)
     # ONE plist read per probe run; every governed key is derived from this map.
-    _plist_state, plist_environment = instance_plist_governed_environment(name)
+    plist_state, plist_environment = instance_plist_governed_environment(name)
+    if plist_state == GOVERNED_PLIST_READABLE:
+        generated_provider_path = environment_provider_path(plist_environment)
+        if generated_provider_path is None:
+            return [generated_provider_path_absence_failure(name, provider, target)]
+    elif plist_state == GOVERNED_PLIST_NOT_APPLICABLE:
+        # Linux and explicit dry fixtures have no generated LaunchAgent map.
+        # This accessor does not read a plist for those states.
+        generated_provider_path = instance_provider_path(name)
+    else:
+        generated_provider_path = None
     loaded_environment = loaded_instance_environment(name)
     loaded_provider_path = loaded_environment.get("PATH")
     effective_provider_path = effective_instance_provider_path(loaded_environment)
@@ -5934,10 +5954,15 @@ def provider_probe_target_inventory(
         return [f"provider_probe {name}: skipped provider={redact_evidence_string(provider, 80)} target={target}"]
 
     # claude-cli is the DEFAULT agentOptions.provider, so it gets the same
-    # governed-prepend agreement check the opencode probe gets. Reading the
+    # governed PATH and prepend checks the opencode probe gets. Reading the
     # plist once here keeps both governed keys on one file state.
-    loaded_environment = loaded_instance_environment(name)
     plist_state, plist_environment = instance_plist_governed_environment(name)
+    if (
+        plist_state == GOVERNED_PLIST_READABLE
+        and environment_provider_path(plist_environment) is None
+    ):
+        return [generated_provider_path_absence_failure(name, provider, target)]
+    loaded_environment = loaded_instance_environment(name)
 
     # The runtime-path gate is a statement about the SERVICE's PATH, not about
     # which binary the probe happens to run, so it is evaluated BEFORE and
