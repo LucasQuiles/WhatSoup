@@ -5894,6 +5894,7 @@ def provider_probe_target_inventory(
         or profile_string(profile, "providerProbeCommand")
     )
     runtime_path_unavailable = False
+    unavailable_reason = "unknown"
     if not command:
         effective_provider_path = effective_instance_provider_path(loaded_environment)
         runtime_command = (
@@ -5918,20 +5919,39 @@ def provider_probe_target_inventory(
             effective_provider_path is None or runtime_command is None
         ):
             runtime_path_unavailable = True
+            # Which of the two causes fired, as a bounded token rather than a
+            # path. "uncomposable" means the environment yielded no effective
+            # PATH at all; "no_claude" means it composed and simply holds none.
+            unavailable_reason = (
+                "effective_path_uncomposable"
+                if effective_provider_path is None
+                else "no_claude_on_governed_path"
+            )
         command = runtime_command or shutil.which("claude") or "claude"
 
     prepend_failure = governed_prepend_failure_class(plist_environment, loaded_environment)
     if prepend_failure or runtime_path_unavailable:
-        early_command = redact_evidence_string(command, 120)
+        # These two lines deliberately carry NO command and no PATH element.
+        # The command here is either irrelevant to the failure (the prepend
+        # cases) or, worse, a binary resolved from the PROBE's own PATH that the
+        # service cannot execute -- so printing it publishes the probe host's
+        # filesystem layout while adding nothing an operator can act on. The
+        # actionable facts are the class, which cause fired, and how many
+        # entries the governed PATH offered. Matches the module's redaction
+        # stance for paths (see credential_path_ref / path_fingerprint).
         if prepend_failure:
             return [(
                 f"FAIL provider_probe {name}: provider={provider} target={target} "
-                f"command={early_command} failure_class={prepend_failure} "
+                f"failure_class={prepend_failure} "
                 f"remediation={REGENERATE_LAUNCHAGENT_REMEDIATION}"
             )]
+        governed_entry_count = len(
+            [entry for entry in (effective_provider_path or "").split(":") if entry]
+        )
         return [(
             f"FAIL provider_probe {name}: provider={provider} target={target} "
-            f"command={early_command} failure_class=provider_runtime_path_unavailable "
+            "failure_class=provider_runtime_path_unavailable "
+            f"reason={unavailable_reason} governed_path_entries={governed_entry_count} "
             "remediation=repair_the_shared_runtime_path_helper_and_node_pin"
         )]
     timeout_seconds = int_or_none(item.get("providerProbeTimeoutSeconds"))

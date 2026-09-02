@@ -712,6 +712,27 @@ def test_watchdog_currency_inventory_skips_missing(monkeypatch, tmp_path):
 # becomes vacuous.
 
 
+
+def _assert_fail_line_is_path_free(line: str, *fixture_paths: Path) -> None:
+    """A fail-closed FAIL line must carry no filesystem path, on EITHER platform.
+
+    The basetemp spelling differs by platform -- macOS resolves the temp root
+    through /private while Linux does not -- so an `in` check against a single
+    spelling passes vacuously on the other one. That is exactly how the first
+    version of this assertion went green on macOS and red on the Linux CI job,
+    which is the platform the probe actually deploys to. Assert every spelling
+    of each fixture path AND, decisively, that the line carries no path
+    separator at all, which cannot pass vacuously anywhere.
+    """
+    for fixture in fixture_paths:
+        raw = str(fixture)
+        spellings = {raw, os.path.realpath(raw)}
+        spellings.add(raw[len("/private"):] if raw.startswith("/private/") else f"/private{raw}")
+        for spelling in spellings:
+            assert spelling not in line, f"FAIL line leaks the fixture path {spelling}: {line}"
+    assert "/" not in line, f"FAIL line carries a path separator: {line}"
+
+
 def _write_shadow(directory: Path, name: str) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     target = directory / name
@@ -1113,6 +1134,7 @@ def test_claude_cli_probe_fails_when_the_loaded_job_lacks_the_declared_prepend(m
     assert not captured, "probe must fail closed before invoking the provider"
     assert "failure_class=provider_runtime_path_prepend_mismatch" in lines[0]
     assert "verify_launchctl_print_output_parses" in lines[0]
+    _assert_fail_line_is_path_free(lines[0], tmp_path)
 
 
 def test_claude_cli_probe_fails_closed_when_the_plist_exists_but_the_job_environment_is_unreadable(
@@ -1130,7 +1152,11 @@ def test_claude_cli_probe_fails_closed_when_the_plist_exists_but_the_job_environ
     captured, lines = _claude_probe(monkeypatch, {}, {})
     assert not captured, "probe must fail closed before invoking the provider"
     assert "failure_class=provider_runtime_path_unavailable" in lines[0]
+    assert "reason=effective_path_uncomposable" in lines[0]
     assert "remediation=repair_the_shared_runtime_path_helper_and_node_pin" in lines[0]
+    # Mirror of the no-claude case: the other cause of the same class must be
+    # equally path-free, or the redaction fix would only cover one branch.
+    _assert_fail_line_is_path_free(lines[0], tmp_path)
 
 
 def test_claude_cli_probe_is_unchanged_on_a_host_with_no_launchagent(monkeypatch, tmp_path):
@@ -1201,4 +1227,5 @@ def test_claude_cli_probe_fails_closed_when_the_governed_path_holds_no_claude(mo
 
     assert not captured, "probe must not execute a binary absent from the governed PATH"
     assert "failure_class=provider_runtime_path_unavailable" in lines[0]
-    assert str(probe_only_bin) not in lines[0]
+    assert "reason=no_claude_on_governed_path" in lines[0]
+    _assert_fail_line_is_path_free(lines[0], probe_only_bin, tmp_path)
