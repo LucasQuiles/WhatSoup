@@ -2301,7 +2301,12 @@ def record_conversation_scope_delivered(
         if not isinstance(overflow, dict):
             overflow = {"eventIds": {}, "overflowedAt": current, "overflowCount": 0}
         overflow["lastSeenAt"] = current
-        overflow["overflowCount"] = int(overflow.get("overflowCount") or 0) + 1
+        # int_field, not a raw int(): a malformed counter must not raise out of
+        # post-delivery bookkeeping. mark_incident_sent runs at try-depth 0 in
+        # process_one, AFTER the operator has been paged and BEFORE the state
+        # commit, so a raise there leaves the claimed file in processing/ with
+        # the scope unrecorded and the next cycle pages again.
+        overflow["overflowCount"] = int_field(overflow, "overflowCount") + 1
         seen[CONVERSATION_SCOPE_OVERFLOW_KEY] = overflow
 
     scopes = incident_state.get("conversationScopes")

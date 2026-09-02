@@ -861,3 +861,45 @@ def test_gate_is_limited_to_the_registered_conversation_scoped_sources(tmp_path)
     event["source"] = "whatsapp_auth_bond_local_failure"
     reason = mod.should_suppress_send(event, state)
     assert reason is not None and "duplicate suppressed" in reason
+
+
+def test_a_malformed_overflow_counter_does_not_break_post_delivery_bookkeeping(tmp_path):
+    """codex LOW-8: a non-numeric overflowCount must not raise out of bookkeeping.
+
+    mark_incident_sent runs at try-depth 0 in process_one, AFTER send_whatsapp
+    has already paged the operator and BEFORE incident.commit(). A raise there
+    leaves the claimed file in processing/ with the scope unrecorded, so the
+    next cycle reclaims it, still finds the conversation unrepresented, pages
+    again and raises again. That is an unbounded page loop, not one duplicate.
+    The module's own defensive integer helper (int_field, used 41 times) exists
+    for exactly this; the raw int() on the overflow counter was a pattern fork.
+    """
+    mod = _load(tmp_path, {"BOT_ERRORS_CONVERSATION_SCOPE_MAX_PER_KEY": "2"})
+    now = int(time.time())
+    event = _event(SCOPE_A, "evt-overflow-malformed", 41)
+    key = mod.incident_key(event)
+    state = {
+        "version": 1,
+        "openIncidents": {key: {"status": "open"}},
+        "lastSentAt": {},
+        "conversationScopes": {
+            key: {
+                "cs1_00000000000000aa": {"lastSeenAt": now, "eventIds": {}},
+                "cs1_00000000000000bb": {"lastSeenAt": now, "eventIds": {}},
+                "cs1_00000000000000cc": {"lastSeenAt": now, "eventIds": {}},
+                mod.CONVERSATION_SCOPE_OVERFLOW_KEY: {
+                    "eventIds": {},
+                    "overflowedAt": now,
+                    "lastSeenAt": now,
+                    "overflowCount": "corrupt",
+                },
+            }
+        },
+    }
+
+    mod.mark_incident_sent(event, state)
+
+    overflow = state["conversationScopes"][key][mod.CONVERSATION_SCOPE_OVERFLOW_KEY]
+    # The malformed value is treated as 0 and the increment still lands, so the
+    # predicate keeps its "this key overflowed" signal instead of losing it.
+    assert overflow["overflowCount"] == 1
