@@ -16,6 +16,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 
 import {
+  nothingExistsAt,
   realpathLongestAbsentTolerantPrefix,
   pathIsInsideRoot,
 } from '../../src/lib/home-confinement.ts';
@@ -83,6 +84,45 @@ describe('home-confinement primitive', () => {
   it('refuses a dangling symlink rather than climbing past it', () => {
     fs.symlinkSync(path.join(tmpDir, 'never-created'), path.join(home, 'dangle'));
     expect(() => realpathLongestAbsentTolerantPrefix(path.join(home, 'dangle', 'bin'))).toThrow();
+  });
+
+  it('sees a dangling symlink named with a trailing separator', () => {
+    // POSIX reads a trailing separator as a following `.`, so `lstat(2)` on
+    // `<link>/` reports on the link's TARGET, not on the link. An existence
+    // probe that does not bare the path therefore calls a dangling link absent,
+    // and the ancestor climb walks straight past it to an in-home ancestor —
+    // the exact branch the refusal at the climb exists to take.
+    fs.symlinkSync(path.join(tmpDir, 'never-created'), path.join(home, 'dangle'));
+    const link = path.join(home, 'dangle');
+
+    expect(nothingExistsAt(link), 'the link exists; only its target does not').toBe(false);
+    expect(nothingExistsAt(`${link}/`), 'the same link, one character apart').toBe(false);
+    expect(() => realpathLongestAbsentTolerantPrefix(link)).toThrow();
+    expect(() => realpathLongestAbsentTolerantPrefix(`${link}/`)).toThrow();
+  });
+
+  it('keeps the root and the absent spellings unchanged while baring separators', () => {
+    // Baring must never empty the string: `lstat('')` is ENOENT, which would
+    // report the filesystem root as absent. `//` is the input that separates an
+    // anchored strip from a length-guarded one.
+    expect(nothingExistsAt('/'), 'the root exists').toBe(false);
+    expect(nothingExistsAt('//'), 'still the root').toBe(false);
+
+    const absent = path.join(home, 'no-such-entry');
+    expect(nothingExistsAt(absent), 'nothing is there').toBe(true);
+    expect(nothingExistsAt(`${absent}/`), 'still nothing is there').toBe(true);
+  });
+
+  it('still resolves a REAL directory named with a trailing separator', () => {
+    // The compatibility control. Refusing the spelling outright would also
+    // refuse an operator's already-persisted `<home>/bin/`, so the benign case
+    // must survive unchanged.
+    const real = path.join(home, 'realdir');
+    fs.mkdirSync(real, { recursive: true, mode: 0o700 });
+
+    expect(nothingExistsAt(`${real}/`), 'a real directory is not absent').toBe(false);
+    expect(realpathLongestAbsentTolerantPrefix(`${real}/`)).toBe(real);
+    expect(pathIsInsideRoot(home, realpathLongestAbsentTolerantPrefix(`${real}/`))).toBe(true);
   });
 
   it('pathIsInsideRoot accepts an in-root name that merely begins with dots', () => {

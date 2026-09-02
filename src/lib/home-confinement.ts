@@ -42,10 +42,20 @@ export function pathIsAtOrInsideDirectory(candidate: string, parent: string): bo
  * is there, it just does not resolve. `lstat` separates the two without
  * following the link. Same distinction as `isTrulyAbsent` in
  * src/fleet/launchd-render-options.ts.
+ *
+ * Trailing separators are stripped before the probe because POSIX reads a
+ * trailing `/` as a following `.`, so `lstat('<link>/')` reports on the link's
+ * TARGET instead of the link. Without the strip a dangling link named
+ * `<home>/dangle/` read as absent, the ancestor climb in
+ * realpathLongestAbsentTolerantPrefix walked past it to an in-home ancestor,
+ * and one character turned a refusal into an admission at every caller. The
+ * pattern is anchored so it can never empty the string: `lstat('')` is ENOENT,
+ * which would report the filesystem root as absent.
  */
 export function nothingExistsAt(targetPath: string): boolean {
+  const bare = targetPath.replace(/(?!^)\/+$/, '');
   try {
-    fs.lstatSync(targetPath);
+    fs.lstatSync(bare);
     return false;
   } catch (err) {
     return (err as NodeJS.ErrnoException).code === 'ENOENT';
