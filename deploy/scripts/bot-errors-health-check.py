@@ -6216,15 +6216,19 @@ def provider_probe_target_inventory(
     )
 
     # The probe no longer runs from the instance workspace, so a RELATIVE command
-    # would resolve against a different directory than it used to. Resolve it to
-    # an absolute path before the spawn, preferring the governed PATH, so argv[0]
-    # names the same binary the service would run wherever the probe stands.
+    # would resolve against a different directory than it used to. Resolve it
+    # against the GOVERNED PATH only, so argv[0] names the binary the service
+    # would run wherever the probe stands.
+    #
+    # There is deliberately NO ambient fallback. Resolving a bare command from
+    # the health check's own PATH produces an absolute argv[0], and an absolute
+    # argv[0] executes regardless of the child environment's PATH -- so a
+    # configured bare probe command that is absent from the governed PATH would
+    # run an ungoverned binary and report ITS health as the service's. An
+    # unresolvable name stays bare and reaches the spawn bare, which fails
+    # closed, exactly as it did before this resolution step existed.
     if not os.path.isabs(command):
-        command = (
-            shutil.which(command, path=effective_provider_path)
-            or shutil.which(command)
-            or command
-        )
+        command = shutil.which(command, path=effective_provider_path) or command
 
     timed_out = False
     try:
@@ -6249,6 +6253,24 @@ def provider_probe_target_inventory(
         stderr = exc.stderr if isinstance(exc.stderr, str) else ""
         rc = 124
         timed_out = True
+    except FileNotFoundError:
+        # argv[0] reached the spawn unresolved, which happens exactly when the
+        # command could not be found on the GOVERNED PATH. Refusing here is the
+        # intended outcome; what matters is that it is reported as the class the
+        # documentation promises for this condition rather than as the generic
+        # probe-failed one, and that the line carries no command -- a name the
+        # governed PATH cannot supply tells an operator nothing and publishes the
+        # probe host's layout, which is this module's redaction stance for the
+        # whole provider_runtime_path_* family.
+        governed_entry_count = len(
+            [entry for entry in (effective_provider_path or "").split(":") if entry]
+        )
+        return [(
+            f"FAIL provider_probe {name}: provider={provider} target={target} "
+            "failure_class=provider_runtime_path_unavailable "
+            f"reason=command_not_on_governed_path governed_path_entries={governed_entry_count} "
+            "remediation=repair_the_shared_runtime_path_helper_and_node_pin"
+        )]
     except Exception as exc:  # noqa: BLE001 - daily health should report provider probe failure.
         safe_command = redact_evidence_string(command, 120)
         return [f"FAIL provider_probe {name}: provider={provider} target={target} command={safe_command} failure_class=provider_probe_failed error={redact_evidence_string(str(exc), 180)}"]

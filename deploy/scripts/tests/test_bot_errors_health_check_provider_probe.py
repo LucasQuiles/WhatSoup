@@ -2459,6 +2459,100 @@ def _spawn_env_and_cwd(args, kwargs):
     return child_env, child_cwd
 
 
+def _write_marker_binary(directory: Path, name: str, marker: str) -> Path:
+    """A REAL executable that announces itself, so 'it ran' is observable."""
+    directory.mkdir(parents=True, exist_ok=True)
+    binary = directory / name
+    binary.write_text(f"#!/bin/sh\necho {marker}\n")
+    binary.chmod(0o755)
+    return binary
+
+
+def _governed_probe_fixture(monkeypatch, tmp_path, configured_command):
+    """Instance whose GOVERNED PATH supplies claude, plus an AMBIENT-only binary.
+
+    The governed PATH must supply `claude` or the runtime-path gate refuses
+    before the spawn and the resolution step under test is never reached. The
+    configured probe command is a DIFFERENT bare name that exists only on the
+    health check's own PATH.
+    """
+    environment = _prepend_fixture(tmp_path)
+    governed_bin = tmp_path / "pin" / "bin"
+    _write_marker_binary(governed_bin, "claude", "GOVERNED-CLAUDE-RAN")
+    ambient_bin = tmp_path / "ambient-only" / "bin"
+    _write_marker_binary(ambient_bin, "bareprobe", "UNGOVERNED-BINARY-RAN")
+    # The ambient PATH of the health-check process carries the bare name; the
+    # governed PATH does not.
+    monkeypatch.setenv("PATH", f"{ambient_bin}:/usr/bin:/bin")
+    _arm_darwin_plist(
+        monkeypatch, tmp_path, "agent-alpha",
+        {"PATH": environment["PATH"], "WHATSOUP_PATH_PREPEND": environment["WHATSOUP_PATH_PREPEND"]},
+    )
+    monkeypatch.setattr(_mod, "loaded_instance_environment", lambda name: dict(environment))
+    lines = _mod.provider_probe_target_inventory(
+        {}, {"providerProbeCommand": configured_command}, "agent-alpha",
+        {"type": "agent", "agentOptions": {"provider": "claude-cli"}},
+        "claude-cli", "primary",
+    )
+    return environment, governed_bin, ambient_bin, lines
+
+
+def test_probe_command_is_never_resolved_from_the_health_check_own_path(monkeypatch, tmp_path):
+    """MUST. A bare command absent from the governed PATH must not run.
+
+    Resolving it from the health check's OWN PATH yields an absolute argv[0],
+    and an absolute argv[0] executes regardless of the child environment's PATH.
+    A configured bare probe command missing from the governed PATH would then run
+    an ungoverned binary and report ITS health as the service's, which
+    contradicts the documented contract that the provider is executed with the
+    governed PATH rather than resolved from the probe process's own.
+
+    No spawn stub here: the real provider_command_output runs, and the ungoverned
+    binary prints a marker. The marker's ABSENCE is the proof that nothing ran.
+    """
+    environment, _governed_bin, ambient_bin, lines = _governed_probe_fixture(
+        monkeypatch, tmp_path, "bareprobe",
+    )
+    joined = "\n".join(lines)
+
+    assert "UNGOVERNED-BINARY-RAN" not in joined, (
+        "the probe executed a binary the governed PATH cannot supply"
+    )
+    assert "failure_class=provider_runtime_path_unavailable" in lines[0], lines[0]
+    assert "reason=command_not_on_governed_path" in lines[0], lines[0]
+    # The line carries no command and no filesystem path, matching the redaction
+    # stance for the whole provider_runtime_path_* family.
+    assert "bareprobe" not in joined
+    _assert_fail_line_is_path_free(lines[0], tmp_path)
+    assert str(ambient_bin) not in joined
+
+
+def test_probe_command_resolves_against_the_governed_path_and_runs(monkeypatch, tmp_path):
+    """Positive control. A bare command ON the governed PATH still resolves and runs.
+
+    Without this, the row above could be satisfied by never resolving anything.
+    """
+    seen: dict[str, object] = {}
+    real_output = _mod.provider_command_output
+
+    def _spy(command, *args, **kwargs):
+        seen["argv"] = list(command)
+        return real_output(command, *args, **kwargs)
+
+    monkeypatch.setattr(_mod, "provider_command_output", _spy)
+    environment, governed_bin, _ambient, lines = _governed_probe_fixture(
+        monkeypatch, tmp_path, "claude",
+    )
+
+    argv = seen.get("argv")
+    assert argv, "the probe never reached the spawn"
+    assert os.path.isabs(argv[0]), f"argv[0] must be absolute, got {argv[0]}"
+    assert argv[0].startswith(str(governed_bin)), (
+        f"argv[0] must resolve under the governed directory, got {argv[0]}"
+    )
+    assert "GOVERNED-CLAUDE-RAN" in "\n".join(lines), lines
+
+
 def test_probe_directory_predicate_rejects_a_descendant_of_the_workspace(tmp_path):
     """MED-3. A temporary root inside the workspace must not count as outside."""
     workspace = tmp_path / "workspace"
