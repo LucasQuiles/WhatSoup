@@ -89,6 +89,7 @@ const SCOPE_MAP: Record<string, ScopeEntry> = {
   'zero-byte-tracked': { class: 'probe-refuse', reason: 'enumerates git ls-files under cwd (argv2 ?? cwd); observed exit 2 on both an empty git repo ("examined 0 tracked files") and a non-git dir (git ls-files fatal -> fail-closed)', probe: { via: 'cwd' } },
   boundaries: { class: 'probe-refuse', reason: 'import-boundary walks cwd src; refuses "examined 0 source file(s)" (#2102)', probe: { via: 'cwd' } },
   'grant-resolver': { class: 'probe-refuse', reason: 'walks cwd/src; floor added this session — refuses "examined 0 source file(s)"', probe: { via: 'cwd' } },
+  'resolved-override': { class: 'probe-refuse', reason: 'walks cwd/src and cwd/tests for ExecutingSessionContext.resolved overrides (#3435); refuses "examined 0 source file(s)" on either root, an unreadable candidate, and an allowlisted site that produced 0 matches (the allowlist is its positive control)', probe: { via: 'cwd' } },
   publication: { class: 'probe-refuse', reason: 'default mode all audits git ls-files; floor added this session — refuses 0 tracked files', probe: { via: 'cwd' } },
   'baseline-growth': { class: 'probe-refuse', reason: 'import.meta-rooted but takes --repo; refuses "could not resolve a merge base"', probe: { via: 'flag', flag: '--repo' } },
   'import-cycle': { class: 'probe-refuse', reason: 'import.meta-rooted but takes --repo; refuses "no tsconfig.json"', probe: { via: 'flag', flag: '--repo' } },
