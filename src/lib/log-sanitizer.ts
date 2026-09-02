@@ -175,14 +175,45 @@ const MAX_ERROR_TEXT_LENGTH = 512;
 const TRUNCATION_MARKER = '[truncated]';
 
 /**
+ * Ceiling on the input a diagnostic string may have before the masking
+ * patterns are allowed to run over it, in UTF-16 code units.
+ *
+ * EMAIL_RE (`[\w.+-]+@…`) backtracks quadratically over a long run of word
+ * characters containing no `@`, and this runs synchronously inside pino's
+ * logMethod hook, so the cost lands on the event loop on the error path. An
+ * unbounded `Error.message` is a realistic input: one in-repo provider builds
+ * its Error from a full, unsliced remote response body. Measured on this file:
+ * 8,000 word characters cost 35 ms, 16,000 cost 125 ms, 32,000 cost 492 ms,
+ * and 130,000 cost 8.3 s.
+ *
+ * Four times the retained budget is a generous ceiling — the output is at most
+ * MAX_ERROR_TEXT_LENGTH either way.
+ */
+const MAX_SANITIZER_INPUT_LENGTH = MAX_ERROR_TEXT_LENGTH * 4;
+
+/**
+ * Stand-in for a diagnostic string too large to mask. Content-free by design:
+ * it carries no fragment of the value it replaces.
+ */
+const OVERSIZED_MARKER = '[oversized error]';
+
+/**
  * Sanitize a diagnostic string, then bound it.
  *
  * Order is load-bearing: truncating first can split an email address or cut a
  * digit run below PHONE_RE's seven-digit floor, leaving behind a fragment the
  * pattern no longer matches. Sanitizing first means every pattern sees the
  * whole string.
+ *
+ * That ordering is why an oversized string is REFUSED rather than shortened.
+ * Clipping it first would reintroduce exactly the boundary cut the ordering
+ * exists to prevent, at a point chosen by the length of the input rather than
+ * by anything in it. Refusing costs a diagnostic; masking a fragment of an
+ * unexamined value costs a secret. The refusal is total: no pattern is run
+ * over the value, so the quadratic is never entered.
  */
 function boundedSanitizedText(value: string): string {
+  if (value.length > MAX_SANITIZER_INPUT_LENGTH) return OVERSIZED_MARKER;
   const sanitized = sanitizeStringValue(value);
   if (sanitized.length <= MAX_ERROR_TEXT_LENGTH) return sanitized;
   return sanitized.slice(0, MAX_ERROR_TEXT_LENGTH - TRUNCATION_MARKER.length) + TRUNCATION_MARKER;

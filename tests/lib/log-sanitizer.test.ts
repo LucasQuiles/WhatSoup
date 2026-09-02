@@ -398,7 +398,9 @@ describe('Error branch: bounded diagnostic message', () => {
   });
 
   it('bounds the retained message length', () => {
-    const err = new Error('E'.repeat(5000));
+    // Inside the input bound, so this is the truncation path. A message past
+    // that bound is refused outright instead — see the oversized cases below.
+    const err = new Error('E'.repeat(1500));
     const result = sanitizeLogValue({ err }) as Record<string, unknown>;
     const sanitizedErr = result.err as Record<string, unknown>;
     const retained = sanitizedErr.errorMessage as string;
@@ -417,6 +419,80 @@ describe('Error branch: bounded diagnostic message', () => {
 
     expect(retained).not.toContain('5550100');
     expect(retained.length).toBeLessThanOrEqual(512);
+  });
+
+  // Oversized diagnostic strings are rejected before any pattern runs.
+  //
+  // The masking patterns are applied before the bound, so without a cap an
+  // unbounded Error.message is matched at full length inside pino's logMethod
+  // hook. EMAIL_RE backtracks quadratically over a long run of word characters
+  // containing no `@`: measured on this file, 8,000 word characters cost 35 ms,
+  // 32,000 cost 492 ms, and 130,000 cost 8.3 s of blocked event loop on the
+  // error path. Truncating first is not the answer either, because a cut can
+  // land inside a token; the string is refused outright instead.
+
+  it('never hands the masking patterns more than the input bound', () => {
+    // Structural, not timing-based: observe the length every pattern pass
+    // actually receives. `E` is matched by none of the patterns, so every
+    // intermediate string in the chain still starts with the marker run.
+    const observed: number[] = [];
+    const originalReplace = String.prototype.replace;
+    const instrumented = function (this: string, ...args: unknown[]) {
+      if (this.startsWith('EEEE')) observed.push(this.length);
+      return (originalReplace as (...a: unknown[]) => string).apply(this, args);
+    };
+    // eslint-disable-next-line no-extend-native -- restored in the finally below; instrumenting the builtin is the only way to assert what the patterns receive rather than what they return. expires 2026-12-31
+    String.prototype.replace = instrumented as unknown as typeof String.prototype.replace;
+    try {
+      // At the bound the passes run; far past it nothing should reach them.
+      sanitizeLogValue({ err: new Error('E'.repeat(2048)) });
+      sanitizeLogValue({ err: new Error('E'.repeat(200_000)) });
+    } finally {
+      String.prototype.replace = originalReplace;
+    }
+
+    // Coverage assertion: a zero here would make the bound assertion vacuous.
+    expect(observed.length).toBeGreaterThan(0);
+    expect(Math.max(...observed)).toBeLessThanOrEqual(2048);
+  });
+
+  it('keeps a diagnostic string that is exactly at the input bound', () => {
+    const result = sanitizeLogValue({ err: new Error('E'.repeat(2048)) }) as Record<
+      string,
+      unknown
+    >;
+    const retained = (result.err as Record<string, unknown>).errorMessage as string;
+
+    expect(retained).not.toBe('[oversized error]');
+    expect(retained.endsWith('[truncated]')).toBe(true);
+    expect(retained.length).toBeLessThanOrEqual(512);
+  });
+
+  it('rejects a diagnostic string one code unit past the bound', () => {
+    const result = sanitizeLogValue({ err: new Error('E'.repeat(2049)) }) as Record<
+      string,
+      unknown
+    >;
+
+    expect((result.err as Record<string, unknown>).errorMessage).toBe('[oversized error]');
+  });
+
+  it('returns a content-free sentinel, carrying no fragment of the message', () => {
+    const marker = 'SYNTHETIC_WS_A06_OVERSIZED_MARKER';
+    const err = new Error(`${marker} ${'E'.repeat(4000)} ${marker}`);
+    const result = sanitizeLogValue({ err }) as Record<string, unknown>;
+    const retained = (result.err as Record<string, unknown>).errorMessage as string;
+
+    expect(retained).toBe('[oversized error]');
+    expect(retained).not.toContain(marker);
+    expect(retained).not.toContain('E');
+  });
+
+  it('rejects an oversized error code the same way', () => {
+    const err = Object.assign(new Error('spawn failed'), { code: 'E'.repeat(3000) });
+    const result = sanitizeLogValue({ err }) as Record<string, unknown>;
+
+    expect((result.err as Record<string, unknown>).errorCode).toBe('[oversized error]');
   });
 
   it('keeps a bounded sanitized code when the error carries one', () => {
