@@ -4239,7 +4239,15 @@ PLIST_ENVIRONMENT_KEY_MARKER = "<key>EnvironmentVariables</key>"
 # every other spelling: the block still truncated at the first `</dict>` and a
 # governed key declared AFTER the nested dict read as absent rather than as
 # unknown. The lookahead keeps a hypothetical `<dictionary>` out.
-PLIST_DICT_OPEN_RE = re.compile(r"<dict(?=[\s/>])[^>]*>")
+# DETECTION is broad: any dict opening token at all, whatever it carries.
+PLIST_DICT_OPEN_TOKEN_RE = re.compile(r"<dict(?=[\s/>])")
+# What this reader will PARSE is narrow: plain, whitespace-padded and
+# self-closing. An attributed dict is REFUSED rather than consumed. Consuming to
+# the first ">" would end the token early on a legal `<dict a="x>y">`, and the
+# remainder of the opening tag would then be read as body pairs -- a first-wins
+# injection of a governed key from inside a tag. plist(5) dicts carry no
+# attributes, so refusing costs nothing and fails closed.
+PLIST_DICT_OPEN_RE = re.compile(r"<dict\s*(/?)>")
 PLIST_DICT_CLOSE_RE = re.compile(r"</dict\s*>")
 
 
@@ -4272,17 +4280,23 @@ def instance_plist_environment(name: str) -> dict[str, str] | None:
     if marker < 0:
         return None
     after_marker = marker + len(PLIST_ENVIRONMENT_KEY_MARKER)
-    open_match = PLIST_DICT_OPEN_RE.search(raw, after_marker)
-    if open_match is None:
+    token_match = PLIST_DICT_OPEN_TOKEN_RE.search(raw, after_marker)
+    if token_match is None:
         return None
     # Only whitespace may separate the key from its value element; anything else
     # means this dict belongs to some later key, not to EnvironmentVariables.
-    if raw[after_marker:open_match.start()].strip():
+    if raw[after_marker:token_match.start()].strip():
+        return None
+    # The token is located broadly and then must match the narrow form EXACTLY
+    # where it was found, so an attributed dict is refused here rather than
+    # skipped over in favour of some later plain one.
+    open_match = PLIST_DICT_OPEN_RE.match(raw, token_match.start())
+    if open_match is None:
         return None
     # `<dict/>` is a well-formed EMPTY map, not an unreadable plist. Saying
     # "unreadable" there misnames the operator's problem; the governed-PATH
     # absence check downstream reports it accurately instead.
-    if open_match.group(0).endswith("/>"):
+    if open_match.group(1):
         return {}
     close_match = PLIST_DICT_CLOSE_RE.search(raw, open_match.end())
     if close_match is None:
@@ -4292,7 +4306,7 @@ def instance_plist_environment(name: str) -> dict[str, str] | None:
     # makes a declared key read as absent. The TypeScript comparator
     # (src/fleet/launchd-env-drift.ts) refuses outright in that case; match it and
     # report unknown rather than hand back a partial map.
-    if PLIST_DICT_OPEN_RE.search(block) is not None:
+    if PLIST_DICT_OPEN_TOKEN_RE.search(block) is not None:
         return None
     environment: dict[str, str] = {}
     # `[^<]` rather than `.` with DOTALL: a dotted non-greedy key group spans

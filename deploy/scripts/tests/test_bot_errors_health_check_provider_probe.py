@@ -1459,8 +1459,24 @@ def _matrix_environment(tmp_path: Path) -> dict[str, str]:
 # every governed key is already parsed before the truncation point and the
 # fail-open cannot show. These fixtures put the nested dict BEFORE the prepend.
 
-NESTED_DICT_SPELLINGS = ["<dict>", "<dict >", "<dict\n    >", '<dict class="x">', "<dict/>"]
-OUTER_DICT_SPELLINGS = ["<dict>", "<dict >", "<dict\n  >", '<dict class="x">']
+# Nested-dict DETECTION is broad: any dict opening token at all, whatever it
+# carries, truncates the block and must fail closed.
+NESTED_DICT_SPELLINGS = [
+    "<dict>",
+    "<dict >",
+    "<dict\n    >",
+    "<dict/>",
+    "<dict />",
+    '<dict class="x">',
+    '<dict foo="a>b">',
+]
+# What the reader PARSES is narrower: plain and whitespace-padded only.
+OUTER_DICT_SPELLINGS = ["<dict>", "<dict >", "<dict\n  >"]
+OUTER_SELF_CLOSING_SPELLINGS = ["<dict/>", "<dict />"]
+# An attributed dict is REFUSED, not consumed. `<dict a="x>y">` is legal XML, and
+# consuming to the first ">" would end the token inside the attribute value and
+# read the rest of the opening tag as body pairs.
+OUTER_DICT_REFUSED_SPELLINGS = ['<dict class="x">', '<dict foo="a>b">']
 
 
 def _write_plist_with_dict_spellings(
@@ -1547,16 +1563,16 @@ def test_plist_reader_fails_closed_on_every_nested_dict_spelling(
     )
 
 
-@pytest.mark.parametrize("nested_spelling", ["<dict>", "<dict >"])
+@pytest.mark.parametrize("nested_spelling", NESTED_DICT_SPELLINGS)
 def test_default_provider_probe_does_not_spawn_when_a_nested_dict_hides_the_prepend(
     monkeypatch, tmp_path, nested_spelling
 ):
     """The operator-visible half of MED-7, and a parity assertion.
 
-    Both spellings name the same element, so both must produce the same class.
-    The "<dict>" row is the control that proves the fixture reaches the code;
-    the "<dict >" row is the one that spawned the provider before the fix,
-    because the hidden WHATSOUP_PATH_PREPEND matched the loaded job's absent one.
+    Every spelling names the same element, so every row must produce the same
+    class. The "<dict>" row is the control that proves the fixture reaches the
+    code; the others spawned the provider before the fix, because the hidden
+    WHATSOUP_PATH_PREPEND matched the loaded job's absent one.
     """
     environment = _matrix_environment(tmp_path)
     _arm_darwin_host(monkeypatch, tmp_path)
@@ -1608,7 +1624,82 @@ def test_plist_reader_accepts_every_environment_dict_spelling(
     }
 
 
-def test_plist_reader_reads_a_self_closing_environment_dict_as_empty(monkeypatch, tmp_path):
+@pytest.mark.parametrize("outer_spelling", OUTER_DICT_REFUSED_SPELLINGS)
+def test_plist_reader_refuses_an_attributed_environment_dict(
+    monkeypatch, tmp_path, outer_spelling
+):
+    """An attributed dict is refused rather than consumed to the first ">".
+
+    A ">" inside an attribute value is legal XML. Consuming the token up to the
+    first ">" ends it INSIDE the attribute value, and the remainder of the
+    opening tag is then read as body pairs. Because this reader is first-wins, a
+    governed key injected from inside the tag would beat the plist's own. plist(5)
+    dicts carry no attributes, so refusing costs nothing.
+    """
+    environment = _matrix_environment(tmp_path)
+    _arm_darwin_host(monkeypatch, tmp_path)
+    _write_plist_with_dict_spellings(
+        tmp_path,
+        "agent-alpha",
+        outer_spelling=outer_spelling,
+        environment={
+            "PATH": environment["PATH"],
+            "WHATSOUP_PATH_PREPEND": environment["WHATSOUP_PATH_PREPEND"],
+        },
+    )
+
+    assert _mod.instance_plist_environment("agent-alpha") is None
+    assert _mod.instance_plist_governed_environment("agent-alpha") == (
+        _mod.GOVERNED_PLIST_UNREADABLE,
+        None,
+    )
+
+
+def test_plist_reader_refuses_a_governed_key_injected_from_inside_a_dict_tag(
+    monkeypatch, tmp_path
+):
+    """The concrete harm the refusal prevents, asserted on the value.
+
+    Without the refusal the reader returns a map whose WHATSOUP_PATH_PREPEND came
+    from inside the opening tag, not from the plist body, and first-wins makes it
+    beat the real one.
+    """
+    _arm_darwin_host(monkeypatch, tmp_path)
+    agents = tmp_path / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True, exist_ok=True)
+    injected = (
+        '<dict foo="a>'
+        "<key>WHATSOUP_PATH_PREPEND</key><string>/fixture/injected</string>"
+        'b">'
+    )
+    (agents / "com.whatsoup.agent-alpha.plist").write_text(
+        "\n".join(
+            [
+                '<?xml version="1.0" encoding="UTF-8"?>',
+                '<plist version="1.0">',
+                "<dict>",
+                "  <key>Label</key>",
+                "  <string>com.whatsoup.agent-alpha</string>",
+                "  <key>EnvironmentVariables</key>",
+                f"  {injected}",
+                "    <key>PATH</key><string>/fixture/pin/bin:/usr/bin</string>",
+                "    <key>WHATSOUP_PATH_PREPEND</key><string>/fixture/pin/bin</string>",
+                "  </dict>",
+                "</dict>",
+                "</plist>",
+                "",
+            ]
+        )
+    )
+
+    parsed = _mod.instance_plist_environment("agent-alpha")
+    assert parsed is None, f"the injected tag must not parse, got {parsed!r}"
+
+
+@pytest.mark.parametrize("outer_spelling", OUTER_SELF_CLOSING_SPELLINGS)
+def test_plist_reader_reads_a_self_closing_environment_dict_as_empty(
+    monkeypatch, tmp_path, outer_spelling
+):
     """`<dict/>` is a well-formed EMPTY map, not an unreadable plist.
 
     The reader now says readable-with-nothing-in-it, and the governed-PATH
@@ -1616,7 +1707,7 @@ def test_plist_reader_reads_a_self_closing_environment_dict_as_empty(monkeypatch
     the class changes.
     """
     _arm_darwin_host(monkeypatch, tmp_path)
-    _write_plist_with_dict_spellings(tmp_path, "agent-alpha", outer_spelling="<dict/>")
+    _write_plist_with_dict_spellings(tmp_path, "agent-alpha", outer_spelling=outer_spelling)
 
     assert _mod.instance_plist_environment("agent-alpha") == {}
     assert _mod.instance_plist_governed_environment("agent-alpha") == (

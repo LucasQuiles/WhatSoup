@@ -323,8 +323,23 @@ describe('compareGovernedLaunchdEnv', () => {
   // The nested dict goes BEFORE the governed key on purpose: with it last,
   // every key is already parsed before the truncation point and the defect
   // cannot show.
-  const NESTED_DICT_SPELLINGS = ['<dict>', '<dict >', '<dict\n    >', '<dict class="x">', '<dict/>'];
-  const OUTER_DICT_SPELLINGS = ['<dict>', '<dict >', '<dict\n  >', '<dict class="x">'];
+  // Nested-dict DETECTION is broad: any dict opening token at all truncates the
+  // body and must fail closed. What the reader PARSES is narrower.
+  const NESTED_DICT_SPELLINGS = [
+    '<dict>',
+    '<dict >',
+    '<dict\n    >',
+    '<dict/>',
+    '<dict />',
+    '<dict class="x">',
+    '<dict foo="a>b">',
+  ];
+  const OUTER_DICT_SPELLINGS = ['<dict>', '<dict >', '<dict\n  >'];
+  const OUTER_SELF_CLOSING_SPELLINGS = ['<dict/>', '<dict />'];
+  // An attributed dict is REFUSED, not consumed. `<dict a="x>y">` is legal XML,
+  // and consuming to the first '>' would end the token inside the attribute
+  // value and read the rest of the opening tag as body pairs.
+  const OUTER_DICT_REFUSED_SPELLINGS = ['<dict class="x">', '<dict foo="a>b">'];
 
   function plistWithSpelledEnv(options: {
     outerSpelling?: string;
@@ -417,9 +432,27 @@ describe('compareGovernedLaunchdEnv', () => {
     },
   );
 
-  it('reads a self-closing EnvironmentVariables dict as an empty environment', () => {
+  it.each(OUTER_DICT_REFUSED_SPELLINGS)(
+    'refuses an EnvironmentVariables dict spelled %j rather than consuming it',
+    (outerSpelling) => {
+      const expected = plistWithSpelledEnv({ env: { PATH: '/opt/bin:/usr/bin' } });
+      const observed = plistWithSpelledEnv({
+        outerSpelling,
+        env: { PATH: '/opt/bin:/usr/bin', WHATSOUP_PATH_PREPEND: '/opt/bin' },
+      });
+
+      expect(compareGovernedLaunchdEnv(expected, observed)).toEqual({
+        comparable: false,
+        reason: 'environment-variables-unparseable',
+        drift: [],
+        droppedNonGovernedKeys: [],
+      });
+    },
+  );
+
+  it.each(OUTER_SELF_CLOSING_SPELLINGS)('reads %j as an empty environment', (outerSpelling) => {
     const expected = plistWithSpelledEnv({ env: { PATH: '/opt/bin:/usr/bin' } });
-    const observed = plistWithSpelledEnv({ outerSpelling: '<dict/>' });
+    const observed = plistWithSpelledEnv({ outerSpelling });
 
     const comparison = compareGovernedLaunchdEnv(expected, observed);
     expect(comparison.comparable).toBe(true);

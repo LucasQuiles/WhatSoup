@@ -106,7 +106,16 @@ const ENV_KEY_MARKER = '<key>EnvironmentVariables</key>';
  * Held as SOURCE, not as a RegExp: a module-scope /g pattern carries lastIndex
  * between calls and one comparison parses two plists.
  */
-const DICT_OPEN_SOURCE = '<dict(?=[\\s/>])[^>]*>';
+const DICT_OPEN_TOKEN_SOURCE = '<dict(?=[\\s/>])';
+/**
+ * What this reader will PARSE is narrower than what it DETECTS: plain,
+ * whitespace-padded and self-closing only. An attributed dict is refused rather
+ * than consumed — consuming to the first '>' would end the token early on a
+ * legal `<dict a="x>y">` and the rest of the opening tag would be read as body
+ * pairs, injecting a governed key from inside a tag. plist(5) dicts carry no
+ * attributes, so refusing costs nothing and fails closed.
+ */
+const DICT_OPEN_SOURCE = '<dict\\s*(/?)>';
 const DICT_CLOSE_SOURCE = '</dict\\s*>';
 
 /**
@@ -121,16 +130,22 @@ function parseEnvironmentVariables(plist: string): Map<string, string> | null {
   const marker = plist.indexOf(ENV_KEY_MARKER);
   if (marker === -1) return new Map();
   const afterMarker = marker + ENV_KEY_MARKER.length;
-  const openPattern = new RegExp(DICT_OPEN_SOURCE, 'g');
-  openPattern.lastIndex = afterMarker;
-  const open = openPattern.exec(plist);
-  if (open === null) return null;
+  const tokenPattern = new RegExp(DICT_OPEN_TOKEN_SOURCE, 'g');
+  tokenPattern.lastIndex = afterMarker;
+  const token = tokenPattern.exec(plist);
+  if (token === null) return null;
   // Only whitespace may separate the key from its value element; anything else
   // means this dict belongs to a later key, not to EnvironmentVariables.
-  if (plist.slice(afterMarker, open.index).trim() !== '') return null;
+  if (plist.slice(afterMarker, token.index).trim() !== '') return null;
+  // Sticky: the narrow form must match EXACTLY where the token was found, so an
+  // attributed dict is refused here rather than skipped over for a later one.
+  const openPattern = new RegExp(DICT_OPEN_SOURCE, 'y');
+  openPattern.lastIndex = token.index;
+  const open = openPattern.exec(plist);
+  if (open === null) return null;
   // `<dict/>` is a well-formed EMPTY environment, not an unparseable one: every
   // governed key is then genuinely missing, which the drift rows report.
-  if (open[0].endsWith('/>')) return new Map();
+  if (open[1] === '/') return new Map();
   const bodyStart = open.index + open[0].length;
 
   const closePattern = new RegExp(DICT_CLOSE_SOURCE, 'g');
@@ -143,7 +158,7 @@ function parseEnvironmentVariables(plist: string): Map<string, string> | null {
   // shape this comparator does not understand, and the body already truncated at
   // that dict's close — fail closed. Searched over the BODY, so the outer
   // plist's own dicts are out of scope.
-  const nestedPattern = new RegExp(DICT_OPEN_SOURCE, 'g');
+  const nestedPattern = new RegExp(DICT_OPEN_TOKEN_SOURCE, 'g');
   if (nestedPattern.exec(body) !== null) return null;
 
   const env = new Map<string, string>();
