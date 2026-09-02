@@ -75,10 +75,11 @@ export const SUPPRESSED_RUNTIME_PATHS: ReadonlySet<string> = new Set([
 export const EXPLICIT_REQUIRED_RUNTIME_PATHS = [
   'deploy/lib/runtime-path.sh',
   'src/lib/bot-errors-outbox.ts',
-  // bot-errors-outbox.ts imports these at module scope, so the deployer ships
-  // them and the manifest pins them. They must be required here too or the
-  // manifest carries rows this list does not expect and the row-count check
-  // disagrees with the manifest.
+  // Imported for value by bot-errors-outbox.ts at module scope, and TypeScript
+  // runs from source here, so these load in production exactly like the outbox
+  // itself. The bot-errors deployer ships all four; an entry it ships without a
+  // manifest hash is a hard exit-3 in resolve_managed_files, so requiring them
+  // keeps the two lists from drifting apart in either direction.
   'src/lib/alert-evidence.ts',
   'src/lib/private-fs.ts',
   'src/lib/redaction-patterns.ts',

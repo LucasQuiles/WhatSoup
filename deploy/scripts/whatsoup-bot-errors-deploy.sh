@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# whatsoup-bot-errors-deploy.sh — reversible materialize of the 15 bot-errors runtime
+# whatsoup-bot-errors-deploy.sh — reversible materialize of the bot-errors runtime
 # files into a host's TRUE bot-errors root. Expected per-file hashes are resolved at
 # startup from deploy/bot-errors-runtime-manifest.json (the single source of truth) --
 # not embedded in this script.
@@ -60,10 +60,6 @@ FILES=(
   "deploy/scripts/bot-errors-heartbeat-watchdog.py"
   "deploy/scripts/bot-errors-q-loop.py"
   "src/lib/bot-errors-outbox.ts"
-  "src/lib/alert-evidence.ts"
-  "src/lib/private-fs.ts"
-  "src/lib/redaction-patterns.ts"
-  "src/lib/type-guards.ts"
   "src/lib/fault-taxonomy-registry.json"
   "deploy/scripts/bot-errors-collector.py"
   "deploy/scripts/bot-errors-emit.py"
@@ -76,6 +72,31 @@ FILES=(
   "deploy/scripts/lib/bot_errors_roster.py"
   "deploy/scripts/lib/controller_log.py"
   "deploy/scripts/lib/controller_state.py"
+  # Closure members. Everything above is imported BY something; everything here
+  # is imported by something above, and a root that omits it makes the importer
+  # crash on load while do_verify still prints VERIFY_OK. Kept managed by
+  # tests/scripts/deployer-import-closure.test.ts, which derives the required
+  # set from the parsed import graph -- never from this array.
+  "deploy/scripts/lib/durable_json.py"
+  "deploy/scripts/lib/health_reader.py"
+  "deploy/scripts/lib/queue_age.py"
+  "deploy/scripts/lib/sentinel_pin.py"
+  "deploy/scripts/lib/state_files.py"
+  "deploy/scripts/lib/state_root.py"
+  "deploy/scripts/lib/target_provenance.py"
+  # Loaded by file path, not by an import statement:
+  # bot-errors-health-check.py resolves this hyphenated sibling through
+  # importlib.util.spec_from_file_location and returns None when it is absent,
+  # so an unshipped copy silently drops the tree-provenance guard.
+  "deploy/scripts/bot-errors-tree-provenance.py"
+  # TypeScript runs from source with no bundler: package.json `start` executes
+  # src/main.ts directly, so these are runtime edges of
+  # src/lib/bot-errors-outbox.ts -- imported for value at its top, not as
+  # `import type` -- and not build-time artifacts.
+  "src/lib/alert-evidence.ts"
+  "src/lib/private-fs.ts"
+  "src/lib/redaction-patterns.ts"
+  "src/lib/type-guards.ts"
 )
 
 sha() {

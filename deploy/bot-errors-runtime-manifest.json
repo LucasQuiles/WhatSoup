@@ -630,7 +630,8 @@
       "path": "src/lib/type-guards.ts",
       "sha256": "a5c720ed58c8bea11774cbc4d5eb1edb4fc7bbce4cabdd36dde74bdcc2e58e92",
       "mustContain": [
-        "asNonEmptyString"
+        "asNonEmptyString",
+        "isRecord"
       ]
     },
     {
