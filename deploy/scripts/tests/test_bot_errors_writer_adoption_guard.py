@@ -482,3 +482,30 @@ def test_runbook_documents_exit_79_consistently_with_the_unit_file():
     else:
         assert "no `RestartPreventExitStatus`" in section, "the unit restarts on 79; the runbook must say so"
 
+
+def test_symlinked_adoption_lock_leaf_is_the_guards_error_not_a_failed_cycle(dispatcher, tmp_path):
+    """The reviewer's falsifier: a symlinked lock leaf is someone redirecting the
+    store's mutual exclusion. O_NOFOLLOW refuses it with ELOOP, which is neither
+    the blocking error nor (before this fix) the guard's class, so --daemon
+    swallowed it as a failed cycle. Every acquisition failure takes one exit."""
+    anchor = _anchor(tmp_path, adopted=False)
+    elsewhere = tmp_path / "elsewhere.lock"
+    elsewhere.write_text("")
+    elsewhere.chmod(0o600)
+    (tmp_path / "incident-state.json.lock").symlink_to(elsewhere)
+    before = anchor.read_bytes()
+    with pytest.raises(dispatcher.IncidentCycleRequiredError, match="adoption lock") as raised:
+        dispatcher.save_incident_state({"incident_state": anchor}, {"incidents": {}}, lock_timeout_seconds=0.2)
+    cause = raised.value.__cause__
+    assert isinstance(cause, OSError) and cause.errno == errno.ELOOP, repr(cause)
+    assert anchor.read_bytes() == before
+
+
+def test_missing_state_directory_is_the_guards_error_too(dispatcher, tmp_path):
+    """The parent-directory pin can fail before the leaf is ever opened; that
+    path must not fall through to the daemon's generic handler either."""
+    anchor = tmp_path / "gone" / "incident-state.json"
+    with pytest.raises(dispatcher.IncidentCycleRequiredError, match="adoption lock") as raised:
+        dispatcher.save_incident_state({"incident_state": anchor}, {"incidents": {}}, lock_timeout_seconds=0.2)
+    assert isinstance(raised.value.__cause__, FileNotFoundError)
+

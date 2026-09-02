@@ -936,7 +936,9 @@ def test_deadman_observation_gap_line_reads_the_durable_record(health_check):
     assert health_check.deadman_observation_gap_line(record, 100_600) == f"deadman_last_observation_gap: seconds=700 at={at} age_seconds=600"
     assert health_check.deadman_observation_gap_line(record, 100_000 + 86_400) is not None
     assert health_check.deadman_observation_gap_line(record, 100_000 + 86_401) is None
-    assert health_check.deadman_observation_gap_line(record, 99_000) is None  # a stamp from the future is not a gap in this window
+    # A stamp from the future (a forward clock step) is rendered, not hidden: the
+    # record is real and the negative age is the honest description of it.
+    assert health_check.deadman_observation_gap_line(record, 99_000) == f"deadman_last_observation_gap: seconds=700 at={at} age_seconds=-1000"
     assert health_check.deadman_observation_gap_line({}, 100_600) is None
     assert health_check.deadman_observation_gap_line({"lastCheckGapSeconds": 700}, 100_600) is None
     assert health_check.deadman_observation_gap_line({"lastCheckGapSeconds": True, "lastCheckGapAt": at}, 100_600) is None

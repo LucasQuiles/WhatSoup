@@ -7383,9 +7383,9 @@ def deadman_observation_gap_line(
     two of its graced checks were further apart than twice the timer cadence
     (a suspend, a stopped timer, a starved scheduler). Without a reader the
     record was write-only. It is rendered while younger than ``window_seconds``
-    and omitted otherwise; an unparseable timestamp is rendered rather than
-    hidden. Informational: a late deadman is a scheduler signal, not a fault
-    of the service it watches.
+    and omitted once older; an unparseable timestamp, or one from the future
+    (a forward clock step), is rendered rather than hidden. Informational: a
+    late deadman is a scheduler signal, not a fault of the service it watches.
     """
     gap = deadman_state.get("lastCheckGapSeconds")
     at = deadman_state.get("lastCheckGapAt")
@@ -7395,7 +7395,7 @@ def deadman_observation_gap_line(
         age = int(now_epoch - parse_iso_epoch(at))
     except Exception:  # noqa: BLE001 - a malformed stamp is reported, not hidden
         return f"deadman_last_observation_gap: seconds={gap} at={at} age_seconds=unparseable"
-    if age < 0 or age > window_seconds:
+    if age > window_seconds:
         return None
     return f"deadman_last_observation_gap: seconds={gap} at={at} age_seconds={age}"
 

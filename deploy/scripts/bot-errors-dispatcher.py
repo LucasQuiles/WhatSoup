@@ -1330,6 +1330,25 @@ class _AdoptionLock:
         self._fd: int | None = None
 
     def __enter__(self) -> "_AdoptionLock":
+        # Every way of failing to acquire the lock is the guard's error: the
+        # bare write must not run without the store's mutual exclusion, and a
+        # bare OSError from here (a symlinked leaf refused by O_NOFOLLOW with
+        # ELOOP, a missing or unopenable directory, a failed fstat) would be
+        # swallowed by --daemon as a failed cycle and retried every interval,
+        # the silent failure mode the exit-79 path exists to prevent. The
+        # original error stays attached as the cause.
+        try:
+            return self._acquire()
+        except IncidentCycleRequiredError:
+            raise
+        except OSError as exc:
+            raise IncidentCycleRequiredError(
+                f"save_incident_state: refusing the bare write: the incident-state adoption lock "
+                f"{self._path.name} could not be acquired safely ({type(exc).__name__}: {exc}); "
+                f"a bare write must not run without the store's mutual exclusion"
+            ) from exc
+
+    def _acquire(self) -> "_AdoptionLock":
         # Pin the parent directory first, as the session does, so the lock is
         # opened relative to the directory we checked rather than by path.
         dir_fd = os.open(self._path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
