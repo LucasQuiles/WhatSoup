@@ -379,6 +379,30 @@ const AUTO_RESPAWN_MAX_CRASHES = 3;
 const AUTO_RESPAWN_BASE_MS = 2 * MS_PER_SECOND;
 /** Maximum respawn delay (ms) — caps the exponential backoff. */
 const AUTO_RESPAWN_MAX_DELAY_MS = 15 * MS_PER_SECOND;
+/**
+ * Max times a scheduled respawn may re-arm itself because provider termination
+ * is not yet proven. Bounds the one case that is genuinely transient — a tool
+ * loop still inside an already-entered call, which settles in its own `finally`
+ * — without letting a session that can never prove termination re-arm forever.
+ * At the respawn backoff this spans roughly 45 seconds before the respawn is
+ * abandoned and the conversation waits for the user's next message.
+ */
+const AUTO_RESPAWN_MAX_TERMINATION_DEFERRALS = 5;
+
+/** One scheduled auto-respawn attempt for an owned per-chat session. */
+interface OwnedPerChatRespawnArgs {
+  initialMapKey: string;
+  chatJid?: string;
+  session: SessionManager;
+  managerId: string;
+  recoveryGeneration: number;
+  sessionId: string;
+  dbRowId: number | null;
+  crashedAtSec: number;
+  timer: ReturnType<typeof setTimeout>;
+  /** How many times this attempt already re-armed for unproven termination. */
+  terminationDeferrals?: number;
+}
 /** Periodic runtime health stats emission interval. */
 const HEALTH_STATS_INTERVAL_MS = MS_PER_MINUTE;
 const SHARED_QUEUE_IDLE_MS = MS_PER_HOUR;
@@ -10310,17 +10334,61 @@ export class AgentRuntime implements Runtime {
     }
   }
 
-  private async runOwnedPerChatRespawn(args: {
-    initialMapKey: string;
-    chatJid?: string;
-    session: SessionManager;
-    managerId: string;
-    recoveryGeneration: number;
-    sessionId: string;
-    dbRowId: number | null;
-    crashedAtSec: number;
-    timer: ReturnType<typeof setTimeout>;
-  }): Promise<void> {
+  /**
+   * Re-arm a respawn whose only unmet precondition is proven termination.
+   *
+   * The timer is consumed at the top of `runOwnedPerChatRespawn`, before the
+   * gate reads it, so a refusal there spends the conversation's one automatic
+   * recovery. For an unproven termination that is the wrong trade: the state is
+   * usually transient — `managedTurnSettled` returns to true in the tool loop's
+   * own `finally`, and a crash can be handled while that loop is still inside an
+   * already-entered call — and nothing else re-arms the timer. The only other
+   * route back is the user's next inbound message, which for a managed provider
+   * does not await termination either: `shutdown()` does its termination work
+   * inside a child-handle guard and a managed-handle guard, and the managed
+   * crash path has already nulled both.
+   *
+   * Bounded by a count carried on the attempt's own arguments rather than by
+   * instance state, so a session that can never prove termination stops
+   * re-arming after a fixed number of tries and leaves nothing behind to reset.
+   * The delay reuses the respawn backoff, so the wait grows and stays capped.
+   */
+  private deferRespawnForUnprovenTermination(
+    mapKey: string,
+    args: OwnedPerChatRespawnArgs,
+  ): void {
+    const deferral = (args.terminationDeferrals ?? 0) + 1;
+    const status = args.session.getStatus();
+    const evidence = {
+      mapKey,
+      sessionId: args.sessionId,
+      generation: args.recoveryGeneration,
+      deferral,
+      providerTerminated: status.providerTerminated === true,
+      turnInFlight: status.turnInFlight === true,
+    };
+    if (deferral > AUTO_RESPAWN_MAX_TERMINATION_DEFERRALS) {
+      log.warn(
+        evidence,
+        'auto-respawn abandoned — provider termination never proved; the next inbound message rebuilds this chat',
+      );
+      return;
+    }
+    const delayMs = jitteredDelay(AUTO_RESPAWN_BASE_MS, deferral - 1, AUTO_RESPAWN_MAX_DELAY_MS);
+    const timer = setTimeout(() => {
+      void this.runOwnedPerChatRespawn({ ...args, timer, terminationDeferrals: deferral });
+    }, delayMs);
+    if (
+      this.sessionOwnership.setRespawnTimer(mapKey, args.managerId, args.recoveryGeneration, timer)
+    ) {
+      this.pendingRespawnTimers.add(timer);
+      log.info({ ...evidence, delayMs }, 'auto-respawn deferred — provider termination not yet proven');
+    } else {
+      clearTimeout(timer);
+    }
+  }
+
+  private async runOwnedPerChatRespawn(args: OwnedPerChatRespawnArgs): Promise<void> {
     this.pendingRespawnTimers.delete(args.timer);
     const mapKey = this.findMapKeyForSession(args.session, args.initialMapKey);
     if (!mapKey) return;
@@ -10359,9 +10427,18 @@ export class AgentRuntime implements Runtime {
       this.chatSessions.get(mapKey) !== args.session ||
       owner?.managerId !== args.managerId ||
       owner.generation !== args.recoveryGeneration ||
-      owner.state !== 'recoverable_dead' ||
-      !this.isSessionProvablyTerminated(args.session)
+      owner.state !== 'recoverable_dead'
     ) {
+      // The chat moved on: a different session, manager, generation or state
+      // owns it now. Consuming the timer is correct — this attempt is stale.
+      return;
+    }
+    if (!this.isSessionProvablyTerminated(args.session)) {
+      // Everything except the termination proof still matches, and the timer
+      // was already consumed above. Returning here would spend the
+      // conversation's one automatic recovery on a condition that is usually
+      // transient, so defer instead.
+      this.deferRespawnForUnprovenTermination(mapKey, args);
       return;
     }
 

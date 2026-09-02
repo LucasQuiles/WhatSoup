@@ -364,6 +364,7 @@ type PollRuntimeState = {
   handlePendingPollSoftExpiry: (mapKey: string, expected: PendingPollQuestion) => void;
   handlePendingPollHardExpiry: (mapKey: string, expected: PendingPollQuestion) => void;
   handlePerChatCrash: (mapKey: string, chatJid?: string, info?: CrashInfo) => void;
+  pendingRespawnTimers: Set<ReturnType<typeof setTimeout>>;
 };
 
 const groupJid = '12036355555555NNNN@g.us';
@@ -1316,6 +1317,108 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       admitPendingSystemResult(state, mapKey, 'respawn_continuation');
       // success path clears the prior respawn-failed alert
       expect(mockClearAlertSource).toHaveBeenCalledWith('test', 'agent_respawn_failed');
+    });
+
+    it('re-arms a respawn refused only because termination is unproven, and recovers once it proves', async () => {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      const state = runtime as unknown as PollRuntimeState;
+      const mapKey = dmJid;
+      seedPerChatSession(state, mapKey);
+
+      // Unproven at the moment the timer fires: the managed tool loop is still
+      // inside an already-entered call, so nothing has released the provider.
+      const unproven = {
+        active: false, pid: null, providerTerminated: false,
+        sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null,
+      };
+      const proven = { ...unproven, providerTerminated: true };
+      mockSession.getStatus.mockReturnValue(unproven);
+
+      state.handlePerChatCrash(mapKey, dmJid, {
+        ...currentCrashIdentity(runtime, mapKey),
+        exitCode: null, signal: null, sessionId: 'sess-defer', dbRowId: 12,
+        provider: 'p', crashClass: 'managed_provider_error', stderrPreview: 'tool loop still running',
+      });
+
+      // One respawn delay only. The backoff is jittered within [1.5s, 2.5s] at
+      // this attempt, so 2.6s fires exactly the first timer and no deferral.
+      await vi.advanceTimersByTimeAsync(2_600);
+      expect(mockSession.spawnSession).not.toHaveBeenCalled();
+      // The attempt must not have been consumed: something has to bring the
+      // respawn back, and this timer is the only thing that does.
+      expect(state.pendingRespawnTimers.size).toBe(1);
+
+      // The tool loop returns and its `finally` settles the turn.
+      mockSession.getStatus.mockReturnValue(proven);
+
+      await vi.advanceTimersByTimeAsync(2_600);
+      await vi.advanceTimersByTimeAsync(2_000);
+
+      expect(mockSession.spawnSession).toHaveBeenCalledWith('sess-defer', 12);
+      expect(state.pendingRespawnTimers.size).toBe(0);
+    });
+
+    it('stops re-arming when termination never proves, leaving no pending timer', async () => {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      const state = runtime as unknown as PollRuntimeState;
+      const mapKey = dmJid;
+      seedPerChatSession(state, mapKey);
+
+      // Termination never proves. The deferral must be bounded, or this session
+      // re-arms a timer for the life of the process.
+      mockSession.getStatus.mockReturnValue({
+        active: false, pid: null, providerTerminated: false,
+        sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null,
+      });
+
+      state.handlePerChatCrash(mapKey, dmJid, {
+        ...currentCrashIdentity(runtime, mapKey),
+        exitCode: null, signal: null, sessionId: 'sess-never', dbRowId: 14,
+        provider: 'p', crashClass: 'managed_provider_error', stderrPreview: 'never settles',
+      });
+
+      // The whole deferral budget at this backoff fits well inside 120s.
+      await vi.advanceTimersByTimeAsync(120_000);
+
+      expect(mockSession.spawnSession).not.toHaveBeenCalled();
+      expect(state.pendingRespawnTimers.size).toBe(0);
+    });
+
+    it('recovers on the first firing when termination is already proven', async () => {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      const state = runtime as unknown as PollRuntimeState;
+      const mapKey = dmJid;
+      seedPerChatSession(state, mapKey);
+
+      mockSession.getStatus
+        .mockReturnValueOnce({
+          active: false, pid: null, providerTerminated: true,
+          sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null,
+        })
+        .mockReturnValue({
+          active: true, pid: 321, providerTerminated: false, sessionId: 'sess-control',
+          startedAt: '2026-06-16T00:00:00Z', messageCount: 1, lastMessageAt: null,
+        });
+
+      state.handlePerChatCrash(mapKey, dmJid, {
+        ...currentCrashIdentity(runtime, mapKey),
+        exitCode: 1, signal: null, sessionId: 'sess-control', dbRowId: 13,
+        provider: 'p', crashClass: 'oom', stderrPreview: 'boom',
+      });
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      await vi.advanceTimersByTimeAsync(2_000);
+
+      // Exactly once: the proven path must not deferrals-loop or double-spawn.
+      expect(mockSession.spawnSession).toHaveBeenCalledTimes(1);
+      expect(mockSession.spawnSession).toHaveBeenCalledWith('sess-control', 13);
+      expect(state.pendingRespawnTimers.size).toBe(0);
     });
 
     it('does not resume a manager whose provider termination is unproven', async () => {

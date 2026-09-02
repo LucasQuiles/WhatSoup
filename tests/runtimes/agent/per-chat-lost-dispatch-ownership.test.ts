@@ -316,9 +316,15 @@ describe('per-chat session entry whose dispatch ownership was lost', () => {
       const deliveryJid = runtimeContext.identity.deliveryJid;
 
       // The state auto-respawn now refuses to resume: owned and mapped, child
-      // gone, but termination unproven. Auto-respawn resumes a manager in place
-      // with no shutdown, so it needs the proof; this path does not, because it
-      // shuts the session down before spawning and that awaits termination.
+      // gone, but termination unproven. This path still reaches the provider,
+      // via shutdown-then-spawn rather than a resume in place.
+      //
+      // What that shutdown is worth depends on the shape. It does termination
+      // work only inside a child-handle guard and a managed-handle guard, and
+      // the managed crash path nulls both, so for the managed-kill-throws shape
+      // it awaits nothing and this route is no safer than the resume. That is
+      // why the respawn timer must defer rather than consume itself: this is
+      // not a sound fallback for that shape, it is only the reachable one.
       const session = sessionStub();
       session.getStatus.mockReturnValue({
         active: false,
