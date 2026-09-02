@@ -37,6 +37,22 @@ ROOT="${2:?missing <root>}"
 # tests/scripts/deployer-static-parity.test.ts) reads it statically out of
 # this file's source text to derive the managed-path set independent of any
 # runtime manifest lookup.
+#
+# Keep the array body a flat list of quoted paths: no comment lines and no
+# parenthesis characters. tests/scripts/deployer-static-parity.test.ts slices
+# this file's text from the array opener to the first ')' and treats every
+# remaining non-blank line as a pin path, so an embedded ')' truncates the pin
+# set and a comment line inside the array is read as a pin. Issue #3469
+# rewrites that parser; until it lands, notes belong here, above the array.
+#
+# On the src/lib entries: bot-errors-outbox.ts imports alert-evidence.ts,
+# private-fs.ts, redaction-patterns.ts and type-guards.ts at module scope.
+# Node links them on import, so shipping the importer without them yields an
+# unstartable runtime rather than a degraded one. The omission predates the
+# conversation-scope work and became fatal when the outbox began importing a
+# NEW export that an old dependency lacked. Same deployer-scope class as the
+# #3452 note. deploy/scripts/tests/test_bot_errors_deploy_import_closure.py
+# enforces the closure so a future import cannot reopen this silently.
 FILES=(
   "deploy/lib/runtime-path.sh"
   "deploy/scripts/bot-errors-dispatcher.py"
@@ -44,14 +60,6 @@ FILES=(
   "deploy/scripts/bot-errors-heartbeat-watchdog.py"
   "deploy/scripts/bot-errors-q-loop.py"
   "src/lib/bot-errors-outbox.ts"
-  # bot-errors-outbox.ts imports these at module scope; Node links them on
-  # import, so shipping the importer without them yields an unstartable
-  # runtime rather than a degraded one. The omission predates the
-  # conversation-scope work and became fatal when the outbox began importing
-  # a NEW export (a target runtime linked the new importer against an old
-  # dependency lacking the name). Same deployer-scope class as the #3452 note.
-  # deploy/scripts/tests/test_bot_errors_deploy_import_closure.py enforces
-  # the closure so a future import cannot reopen this silently.
   "src/lib/alert-evidence.ts"
   "src/lib/private-fs.ts"
   "src/lib/redaction-patterns.ts"
