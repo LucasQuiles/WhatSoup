@@ -38,7 +38,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "07e98c787ce50966e05125689eda8156c7cf2dbe68a3c85b54ab5dbaaaaeea29",
+      "sha256": "b0fe946da34628e7fcb441c59af3b44cf8155128817dd4f9b3f50774533f81b7",
       "mustContain": [
         "append_bounded_jsonl",
         "append_private_jsonl",
@@ -66,7 +66,9 @@
         "autocloseHoldReleasedReason",
         "event_text",
         "record_legacy_alert_content",
-        "legacyAlertContent"
+        "legacyAlertContent",
+        "note_unrenderable_quarantine",
+        "flush_unrenderable_quarantine_telemetry"
       ]
     },
     {
@@ -370,7 +372,7 @@
     },
     {
       "path": "deploy/scripts/lib/bot_errors_envelope.py",
-      "sha256": "c0eea4c7713d515195865e0b4e44ae3fb030ae7c4365257e093a1b9e23334edb",
+      "sha256": "19ba63af02f0ec1c4b31a3a8025166d4e47dbb7b140b72680e49cebc6af68d1d",
       "mustContain": [
         "SCHEMA_VERSION",
         "EVENT_KINDS",
