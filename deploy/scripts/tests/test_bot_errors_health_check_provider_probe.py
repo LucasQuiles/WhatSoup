@@ -2587,6 +2587,115 @@ def test_probe_directory_predicate_resolves_symlinks_before_deciding(tmp_path):
     assert _mod.probe_directory_is_outside_workspace(str(other_link), str(workspace))
 
 
+def test_probe_directory_predicate_is_case_insensitive_aware(tmp_path):
+    """S-A. On a case-insensitive volume, case must not read as 'outside'.
+
+    macOS volumes are case-insensitive by default, so two spellings that differ
+    only in case name ONE directory. Comparing realpath strings raw returned
+    "outside" for a probe directory that is genuinely inside, which is the
+    permissive direction for a containment check.
+    """
+    workspace = tmp_path / "Workspace"
+    inner = workspace / "tmp"
+    inner.mkdir(parents=True)
+    variant = str(tmp_path / "workspace")
+
+    # Ask the FILESYSTEM whether the two spellings are one directory. Deciding
+    # this by normcase would be wrong twice over: normcase is the identity
+    # function on POSIX, so the branch below would never take the
+    # case-insensitive path even on a volume that is.
+    same_directory = os.path.exists(variant) and os.path.samefile(variant, str(workspace))
+    if same_directory:
+        assert not _mod.probe_directory_is_outside_workspace(str(inner), variant)
+    else:
+        # Case-SENSITIVE volume: the two really are different directories, so
+        # "outside" is the correct answer and this row documents the divergence
+        # rather than asserting the wrong thing for the platform it runs on.
+        assert _mod.probe_directory_is_outside_workspace(str(inner), variant)
+    # Control, true on every volume: the exact spelling is inside.
+    assert not _mod.probe_directory_is_outside_workspace(str(inner), str(workspace))
+
+
+def test_probe_directory_check_is_not_applied_without_a_configured_workspace(
+    monkeypatch, tmp_path
+):
+    """S-B. No configured workspace means nothing to keep the probe out of.
+
+    agent_workspace_cwd falls back to the home directory so a spawn always has a
+    working directory. Feeding that fallback to the containment check would make
+    EVERY probe refuse on a host whose TMPDIR sits under the home directory,
+    which is the default on macOS for some configurations. The check now asks
+    configured_agent_workspace_cwd and skips itself when the instance declares
+    none.
+    """
+    assert _mod.configured_agent_workspace_cwd({"agentOptions": {}}) is None
+    assert _mod.configured_agent_workspace_cwd(
+        {"agentOptions": {"cwd": "/fixture/workspace"}}
+    ) == "/fixture/workspace"
+
+    environment = _prepend_fixture(tmp_path)
+    _write_marker_binary(tmp_path / "pin" / "bin", "claude", "GOVERNED-CLAUDE-RAN")
+    _arm_darwin_plist(
+        monkeypatch, tmp_path, "agent-alpha",
+        {"PATH": environment["PATH"], "WHATSOUP_PATH_PREPEND": environment["WHATSOUP_PATH_PREPEND"]},
+    )
+    monkeypatch.setattr(_mod, "loaded_instance_environment", lambda name: dict(environment))
+    # The temp root under the HOME the fallback would have used. Before the fix
+    # this made the probe refuse; with no configured workspace it must proceed.
+    # tempfile.gettempdir() CACHES its answer, so setting TMPDIR after any earlier
+    # temp directory in the process has no effect; tempfile.tempdir is the
+    # documented override and is what the probe actually reads.
+    home_tmp = tmp_path / "tmp-under-home"
+    home_tmp.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(_mod.tempfile, "tempdir", str(home_tmp))
+
+    lines = _mod.provider_probe_target_inventory(
+        {}, {}, "agent-alpha",
+        {"type": "agent", "agentOptions": {}},
+        "claude-cli", "primary",
+    )
+
+    joined = "\n".join(lines)
+    assert "provider_probe_directory_unsafe" not in joined, joined
+    assert "GOVERNED-CLAUDE-RAN" in joined, joined
+
+
+def test_probe_refuses_when_the_temp_directory_sits_inside_the_workspace(
+    monkeypatch, tmp_path
+):
+    """S-E. Drives a provider_probe_directory_unsafe CALL SITE, not the predicate.
+
+    The two predicate rows exercise the comparison; neither reached the emitted
+    line, so its class string and remediation were unexercised. Pointing TMPDIR
+    inside a CONFIGURED workspace makes the probe's own temporary directory land
+    where the probe must not run.
+    """
+    environment = _prepend_fixture(tmp_path)
+    _write_marker_binary(tmp_path / "pin" / "bin", "claude", "GOVERNED-CLAUDE-RAN")
+    _arm_darwin_plist(
+        monkeypatch, tmp_path, "agent-alpha",
+        {"PATH": environment["PATH"], "WHATSOUP_PATH_PREPEND": environment["WHATSOUP_PATH_PREPEND"]},
+    )
+    monkeypatch.setattr(_mod, "loaded_instance_environment", lambda name: dict(environment))
+    workspace = tmp_path / "workspace"
+    inside = workspace / "tmp"
+    inside.mkdir(parents=True)
+    # tempfile.gettempdir() caches; tempfile.tempdir is the documented override.
+    monkeypatch.setattr(_mod.tempfile, "tempdir", str(inside))
+
+    lines = _mod.provider_probe_target_inventory(
+        {}, {}, "agent-alpha",
+        {"type": "agent", "agentOptions": {"cwd": str(workspace)}},
+        "claude-cli", "primary",
+    )
+
+    assert "failure_class=provider_probe_directory_unsafe" in lines[0], lines[0]
+    assert "remediation=set_TMPDIR_outside_the_instance_workspace" in lines[0], lines[0]
+    # The provider must not have run, and the line must not publish paths.
+    assert "GOVERNED-CLAUDE-RAN" not in "\n".join(lines)
+    _assert_fail_line_is_path_free(lines[0], tmp_path)
+
+
 def test_opencode_capability_probes_run_outside_the_instance_workspace(monkeypatch, tmp_path):
     """SHOULD-4. The three capability probes are not the functional probe.
 

@@ -4629,14 +4629,48 @@ def probe_directory_is_outside_workspace(probe_cwd: str, workspace: str) -> bool
         target = os.path.realpath(workspace)
     except OSError:
         return False
-    return probe != target and not probe.startswith(target.rstrip(os.sep) + os.sep)
+    if probe == target or probe.startswith(target.rstrip(os.sep) + os.sep):
+        return False
+    # String comparison alone is not enough on a case-INSENSITIVE volume, which
+    # is the macOS default: "/fixture/Work" and "/fixture/work" name one
+    # directory, realpath preserves whichever spelling it was given, and the
+    # prefix test then calls a probe directory "outside" a workspace it is
+    # actually inside -- the permissive direction. os.path.normcase is NOT the
+    # remedy: on POSIX it is the identity function, so it would look like a fix
+    # and change nothing. Ask the FILESYSTEM instead, walking the probe's
+    # ancestors and comparing by inode.
+    current = probe
+    while True:
+        try:
+            if os.path.samefile(current, target):
+                return False
+        except OSError:
+            pass
+        parent = os.path.dirname(current)
+        if parent == current:
+            return True
+        current = parent
 
 
-def agent_workspace_cwd(data: dict[str, Any], name: str) -> str:
+def configured_agent_workspace_cwd(data: dict[str, Any]) -> str | None:
+    """The CONFIGURED agent workspace, or None when the instance declares none.
+
+    agent_workspace_cwd falls back to the home directory so a spawn always has a
+    working directory. The containment check must NOT use that fallback: with no
+    configured workspace there is no agent directory to keep the probe out of,
+    and on a host whose TMPDIR sits under $HOME the fallback would make every
+    probe refuse. The distinction only this function can make is "configured"
+    versus "defaulted", so the check asks here and skips itself when the answer
+    is None.
+    """
     configured = agent_options_from_config(data).get("cwd")
     if isinstance(configured, str) and configured.strip():
         return str(Path(configured.strip()).expanduser())
-    return str(Path.home())
+    return None
+
+
+def agent_workspace_cwd(data: dict[str, Any], name: str) -> str:
+    return configured_agent_workspace_cwd(data) or str(Path.home())
 
 
 def opencode_runtime_context_problem(data: dict[str, Any]) -> str | None:
@@ -4937,7 +4971,10 @@ def opencode_provider_probe_inventory(
     )
     try:
         with tempfile.TemporaryDirectory(prefix="whatsoup-opencode-diagnostic-") as diagnostic_cwd:
-            if not probe_directory_is_outside_workspace(diagnostic_cwd, child_cwd):
+            configured_workspace = configured_agent_workspace_cwd(data)
+            if configured_workspace is not None and not probe_directory_is_outside_workspace(
+                diagnostic_cwd, configured_workspace
+            ):
                 return [(
                     f"FAIL provider_probe {name}: provider={provider} command={safe_command} "
                     "failure_class=provider_probe_directory_unsafe "
@@ -6233,7 +6270,10 @@ def provider_probe_target_inventory(
     timed_out = False
     try:
         with tempfile.TemporaryDirectory(prefix="whatsoup-provider-probe-") as probe_cwd:
-            if not probe_directory_is_outside_workspace(probe_cwd, agent_workspace_cwd(data, name)):
+            configured_workspace = configured_agent_workspace_cwd(data)
+            if configured_workspace is not None and not probe_directory_is_outside_workspace(
+                probe_cwd, configured_workspace
+            ):
                 return [(
                     f"FAIL provider_probe {name}: provider={provider} target={target} "
                     "failure_class=provider_probe_directory_unsafe "
