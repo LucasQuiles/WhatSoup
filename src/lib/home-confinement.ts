@@ -115,19 +115,3 @@ export function realpathLongestAbsentTolerantPrefix(targetPath: string): string 
   }
 }
 
-/**
- * Is `inputPath` physically confined to `homeDir`? Throws whatever the
- * resolution threw; callers decide the refusal shape (a 400, or a render
- * error).
- */
-export function isPhysicallyInsideHome(inputPath: string, homeDir: string): boolean {
-  const homeReal = fs.realpathSync.native(homeDir);
-  const raw = rawAbsolutePath(inputPath);
-  // Lexical gate first, and STRICT: it is the only check that can tell "an
-  // absent directory under home" from "home itself", since both resolve to a
-  // prefix of home.
-  if (!pathIsInsideDirectory(path.resolve(raw), path.resolve(homeDir))) return false;
-  // Physical check, at-or-inside because the resolved prefix legitimately IS
-  // home when every segment below it is still absent.
-  return pathIsAtOrInsideDirectory(realpathLongestAbsentTolerantPrefix(raw), homeReal);
-}
