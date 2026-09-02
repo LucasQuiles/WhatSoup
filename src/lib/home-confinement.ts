@@ -87,9 +87,11 @@ export function rawAbsolutePath(inputPath: string, cwd: string = process.cwd()):
  * A tempting stricter rule, "only the final leaf may be absent", was measured
  * and rejected: it refuses the default agent workspace
  * (`~/.local/share/<...>/instances/<name>/workspace`, created after
- * validation) and broke 20 existing tests. It buys nothing, because an absent
- * segment is not an escape vector until something is created there, and that is
- * equally true of the leaf.
+ * validation), which broke agent cwd defaulting on CREATE and PATCH, the
+ * CLAUDE.md and settings.json writes that depend on that cwd, and the in-home
+ * service-block positives. It buys nothing either, because an absent segment is
+ * not an escape vector until something is created there, and at that point it
+ * is no longer absent and is refused.
  *
  * `fs.realpathSync.native` (libc realpath(3)) is load-bearing and must not be
  * swapped back to `fs.realpathSync`, which calls `path.resolve()` first and so

@@ -673,7 +673,12 @@ export async function handleDeleteLine(
 
 
 
-function resolveHomeConfinedPath(inputPath: string, res: ServerResponse, error: string): string | null {
+function resolveHomeConfinedPath(
+  inputPath: string,
+  res: ServerResponse,
+  error: string,
+  spellingError: string = error,
+): string | null {
   if (hasUnsupportedTildePrefix(inputPath)) {
     jsonResponse(res, 400, { error });
     return null;
@@ -693,7 +698,9 @@ function resolveHomeConfinedPath(inputPath: string, res: ServerResponse, error: 
   // is the same reject-not-canonicalise rule the service block already applies.
   // A canonical form always exists, and no caller in this repo passes `..`.
   if (!isCanonicalAbsolutePath(expanded)) {
-    jsonResponse(res, 400, { error });
+    // A distinct message: the path may well BE inside home, so telling the
+    // operator it "must be within the home directory" points at the wrong fix.
+    jsonResponse(res, 400, { error: spellingError });
     return null;
   }
   const resolved = path.resolve(expanded);
@@ -773,7 +780,12 @@ function ensureHomeConfinedDirectory(dirPath: string): void {
 function resolveAndValidateCwd(agentOptions: Record<string, unknown>, res: ServerResponse): string | null {
   const cwd = agentOptions.cwd as string;
   if (!cwd.trim()) return cwd; // empty — caller decides whether it's valid
-  const safeCwd = resolveHomeConfinedPath(cwd, res, 'agentOptions.cwd must be within the home directory');
+  const safeCwd = resolveHomeConfinedPath(
+    cwd,
+    res,
+    'agentOptions.cwd must be within the home directory',
+    'agentOptions.cwd must be a normalized absolute path within the home directory',
+  );
   if (safeCwd === null) return null;
   try {
     if (isSamePhysicalDirectory(safeCwd, os.homedir())) {
@@ -839,8 +851,7 @@ function isCanonicalAbsolutePath(value: string): boolean {
 /**
  * Validate a list of filesystem paths as home-confined, returning the accepted
  * canonical paths (never a rewritten value for the caller to persist — callers
- * persist the operator's original spelling, which is why
- * `requireCanonicalSpelling` exists).
+ * persist the operator's original spelling).
  *
  * One helper for both callers: `agentOptions.pluginDirs` and the launchd
  * `service` block ran near-identical loops over the same predicate, so a fix to
@@ -854,24 +865,18 @@ function validateHomeConfinedPathList(
   values: readonly unknown[],
   res: ServerResponse,
   fieldFor: (index: number) => string,
-  options: { requireCanonicalSpelling?: boolean } = {},
 ): string[] | null {
   const accepted: string[] = [];
   for (let i = 0; i < values.length; i++) {
     const field = fieldFor(i);
     const containmentError = `${field} must be within the home directory`;
+    const spellingError = `${field} must be a normalized absolute path within the home directory`;
     const value = values[i];
     if (typeof value !== 'string') {
       jsonResponse(res, 400, { error: containmentError });
       return null;
     }
-    if (options.requireCanonicalSpelling && !isCanonicalAbsolutePath(value)) {
-      jsonResponse(res, 400, {
-        error: `${field} must be a normalized absolute path within the home directory`,
-      });
-      return null;
-    }
-    const safe = resolveHomeConfinedPath(value, res, containmentError);
+    const safe = resolveHomeConfinedPath(value, res, containmentError, spellingError);
     if (safe === null) return null;
     accepted.push(safe);
   }
@@ -915,14 +920,14 @@ function validateServiceHomeConfinement(service: unknown, res: ServerResponse): 
   const claudeConfigDir = block['claudeConfigDir'];
   if (claudeConfigDir !== undefined) {
     if (validateHomeConfinedPathList(
-      [claudeConfigDir], res, () => 'service.claudeConfigDir', { requireCanonicalSpelling: true },
+      [claudeConfigDir], res, () => 'service.claudeConfigDir',
     ) === null) return false;
   }
 
   const pathPrepend = block['pathPrepend'];
   if (Array.isArray(pathPrepend)) {
     if (validateHomeConfinedPathList(
-      pathPrepend, res, (i) => `service.pathPrepend[${i}]`, { requireCanonicalSpelling: true },
+      pathPrepend, res, (i) => `service.pathPrepend[${i}]`,
     ) === null) return false;
   }
 

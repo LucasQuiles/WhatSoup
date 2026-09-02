@@ -67,7 +67,15 @@ function setPlatform(platform: NodeJS.Platform): void {
   Object.defineProperty(process, 'platform', { value: platform });
 }
 
-describe('install-site render-option shape assertion — reachability', () => {
+// The pair is deliberately contradictory: exactly one member passes per
+// variant, so one of them ALWAYS fails. That is the measurement, not a defect,
+// but it must not sit red in ordinary runs, so the suite is opt-in:
+//
+//   WHATSOUP_REACHABILITY_PROBE=1 npx vitest run tests/fleet/platform-install-shape-reachability.test.ts
+//
+// Run it once per variant and record which member passed.
+describe.runIf(process.env.WHATSOUP_REACHABILITY_PROBE === '1')(
+  'install-site render-option shape assertion — reachability', () => {
   beforeEach(async () => {
     const [realFs, realPath, realOs] = await Promise.all([
       realFsPromise, realPathPromise, realOsPromise,
