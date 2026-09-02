@@ -7897,9 +7897,12 @@ export class AgentRuntime implements Runtime {
     // live owner would be orphaned while the spawn below starts a replacement
     // — two live provider children for one conversation, which is strictly
     // worse than the wedge this repair replaces. `setOwnedPerChatSession`
-    // refuses the same situation, so refuse it here rather than disagree with
-    // it. Only a registered owner that is itself provably terminated, or no
-    // ownership record at all, may be released.
+    // refuses the same situation only when that manager is indexed AND still
+    // `active` — its check reads that one field and falls through an optional
+    // chain when the index cannot produce the manager — so this guard is the
+    // stricter of the two rather than a restatement of it. Only a registered
+    // owner that is itself provably terminated, or no ownership record at all,
+    // may be released.
     //
     // The two arms are deliberately asymmetric. NO record is the field wedge
     // this repair exists for, and it evicts. A record naming a manager the
