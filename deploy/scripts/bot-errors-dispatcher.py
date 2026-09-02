@@ -1391,11 +1391,16 @@ def sweep_conversation_scopes(incident_state: dict[str, Any], current: int) -> i
             continue
         for scope in list(records):
             record = records.get(scope)
+            # Nested prunes COUNT. run_once commits only when this function
+            # reports change, so a prune inside a surviving key that returned 0
+            # never reached disk and the stale record survived every cycle.
             if not isinstance(record, dict):
                 records.pop(scope, None)
+                removed += 1
                 continue
             if current - _conversation_scope_last_seen(record) > CONVERSATION_SCOPE_RETENTION_SECONDS:
                 records.pop(scope, None)
+                removed += 1
         if not records:
             scopes.pop(key, None)
             removed += 1
@@ -6991,8 +6996,34 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
         replay_state = incident.payload if incident else load_incident_state(paths)
         # Idempotent repair: representation is recorded on delivery, and the
         # commit that would have recorded it may be exactly what the crash lost.
+        #
+        # Restore the incident marker FIRST. The pre-save normaliser sweeps on
+        # every write and the sweep drops any key absent from openIncidents, so
+        # recording the conversation without the marker meant the repair was
+        # erased by the very commit that persisted it. The marker is precisely
+        # what the crash lost, so re-establishing it here is the repair, not an
+        # extra effect: without it the next event for this conversation pages a
+        # second time for an alert already delivered.
+        replay_key = incident_key(event)
+        if is_incident_alert(event) and not is_incident_clear(event):
+            open_incidents = replay_state.setdefault("openIncidents", {})
+            if not isinstance(open_incidents, dict):
+                open_incidents = {}
+                replay_state["openIncidents"] = open_incidents
+            existing = open_incidents.get(replay_key)
+            if not isinstance(existing, dict):
+                open_incidents[replay_key] = {
+                    "status": "open",
+                    "openedAt": int(time.time()),
+                    "openedIso": now_iso(),
+                    "eventId": event.get("id"),
+                    "restoredFrom": "terminal_replay",
+                }
+            replay_sent = replay_state.setdefault("lastSentAt", {})
+            if isinstance(replay_sent, dict):
+                replay_sent.setdefault(replay_key, int(time.time()))
         record_conversation_scope_delivered(
-            event, replay_state, incident_key(event), int(time.time())
+            event, replay_state, replay_key, int(time.time())
         )
         if incident:
             incident.commit()
@@ -7456,6 +7487,11 @@ def run_once(max_events: int) -> dict[str, Any]:
             try:
                 if sweep_conversation_scopes(_incident_cycle.payload, int(time.time())):
                     _incident_cycle.commit()
+            except ControllerStateRequired:
+                # NEVER swallowed. A refused state publication is the fail-closed
+                # path: reporting a completed cycle after it would hide exactly
+                # the condition the controller guard exists to surface.
+                raise
             except Exception as exc:
                 log_conversation_scope_error("cycle_sweep", "", exc, False)
 

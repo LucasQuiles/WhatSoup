@@ -23,6 +23,8 @@ import sys
 import time
 from pathlib import Path
 
+from unittest.mock import patch
+
 import pytest
 
 _SCRIPTS = Path(__file__).resolve().parents[1]
@@ -237,3 +239,90 @@ def test_an_idle_cycle_still_sweeps_the_scope_sidecar(tmp_path):
         "an idle cycle must still sweep an orphaned conversation-scope "
         f"subtree: {scopes!r}"
     )
+
+
+def _seed_without_normalizing(paths, payload: dict) -> None:
+    """Write incident state WITHOUT running the pre-save normaliser.
+
+    save_incident_state normalises, so seeding an aged record through it
+    prunes that record before the test starts and the defect under test
+    becomes unobservable. session.save() persists the payload as given.
+    """
+    session = _session(paths)
+    with session:
+        result = session.load()
+        merged = dict(result.payload or {})
+        merged.update(payload)
+        session.save(merged, result.capability)
+
+
+def test_an_idle_cycle_persists_a_pruned_record_inside_a_surviving_key(tmp_path):
+    """MUST-E: nested prunes must count, or they never reach disk.
+
+    The sweep prunes aged records inside a key that keeps other live records,
+    but only whole-key removals increment its return value. run_once commits
+    only when the sweep reports change, so that prune stayed in memory and the
+    stale record survived on disk cycle after cycle -- the exact retention
+    guarantee the per-cycle sweep was added to make true.
+    """
+    # `disp` is imported once at module load, so the retention window is fixed
+    # at its default here: setting the env var now would NOT change it, and an
+    # "aged" record chosen against a shorter window would simply not be aged.
+    # Age the record past the window the module actually holds.
+    os.environ["BOT_ERRORS_STATE_DIR"] = str(tmp_path / "nested-prune")
+    paths = disp.setup_dirs()
+    os.chmod(paths["incident_state"].parent, 0o700)
+
+    now = int(time.time())
+    key = f"{MACHINE}|instance-x|{SOURCE}"
+    disp.save_incident_state(paths, {"version": 1, "openIncidents": {key: {"status": "open"}}})
+    _seed_without_normalizing(paths, {
+        "openIncidents": {key: {"status": "open", "openedAt": now - 600, "lastSeenAt": now}},
+        "lastSentAt": {key: now},
+        "conversationScopes": {key: {
+            "cs1_00000000000000aa": {
+                "lastSeenAt": now - (disp.CONVERSATION_SCOPE_RETENTION_SECONDS + 60),
+                "eventIds": {},
+            },
+            "cs1_00000000000000bb": {"lastSeenAt": now, "eventIds": {}},
+        }},
+    })
+    seeded = (disp.load_incident_state(paths).get("conversationScopes") or {}).get(key) or {}
+    assert "cs1_00000000000000aa" in seeded, "the fixture must seed an aged record"
+
+    disp.run_once(8)
+
+    records = (disp.load_incident_state(paths).get("conversationScopes") or {}).get(key) or {}
+    assert "cs1_00000000000000aa" not in records, (
+        f"an aged record pruned by the cycle sweep must reach disk: {records!r}"
+    )
+    assert "cs1_00000000000000bb" in records, "the live record must survive"
+
+
+def test_a_refused_controller_commit_fails_the_cycle_closed(tmp_path):
+    """MUST-F: a fail-closed refusal must not read as a completed cycle.
+
+    The cycle sweep was wrapped in a bare `except Exception`, which swallowed
+    ControllerStateRequired raised by the guarded commit and logged it as an
+    ordinary scope-bookkeeping error. run_once then returned a normal summary,
+    so a refused state publication looked like a healthy cycle.
+    """
+    os.environ["BOT_ERRORS_STATE_DIR"] = str(tmp_path / "refused")
+    paths = disp.setup_dirs()
+    os.chmod(paths["incident_state"].parent, 0o700)
+
+    now = int(time.time())
+    key = f"{MACHINE}|instance-x|{SOURCE}"
+    disp.save_incident_state(paths, {
+        "version": 1,
+        "openIncidents": {key: {"status": "open"}},
+        "conversationScopes": {key: {SCOPE: {"lastSeenAt": now, "eventIds": {}}}},
+    })
+
+    def _refuse(*_args, **_kwargs):
+        raise disp.ControllerStateRequired("state publication refused")
+
+    with patch.object(disp, "sweep_conversation_scopes", return_value=1), \
+         patch.object(disp.IncidentStateCycle, "commit", _refuse), \
+         pytest.raises(disp.ControllerStateRequired):
+        disp.run_once(8)

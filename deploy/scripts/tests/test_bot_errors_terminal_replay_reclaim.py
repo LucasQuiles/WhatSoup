@@ -221,3 +221,52 @@ def test_a_first_attempt_transport_failure_records_nothing_then_delivers(tmp_pat
     assert SCOPE in scopes.get(key, {}), (
         f"a delivered retry must record its conversation: {scopes!r}"
     )
+
+
+def test_the_replay_repair_survives_its_own_commit(tmp_path):
+    """MUST-D: the save-path sweep must not erase the repair that commits it.
+
+    _normalize_incident_state_for_save runs the sweep on EVERY save, and the
+    sweep drops any key that is not in openIncidents. In the pre-commit crash
+    window the incident marker is exactly what was lost, so the terminal-replay
+    repair recorded the conversation and then its own commit swept the record
+    straight back out: openIncidents stayed empty, the next event for that
+    conversation paged a second time for an alert already delivered, and a
+    delivered clear archived with the incident still open.
+    """
+    mod = _load(tmp_path / "replay-survives")
+    paths = mod.setup_dirs()
+    event = _event("evt-crash-swept", "sent")
+    key = mod.incident_key(event)
+
+    # The crash window WITHOUT the incident-open marker: that write is what the
+    # crash lost, so the replay must not depend on it surviving.
+    mod.save_incident_state(paths, {
+        "version": 1, "openIncidents": {}, "lastSentAt": {}, "conversationScopes": {},
+    })
+    claimed = paths["processing"] / f"20260902.{INSTANCE}.{SOURCE}.{event['id']}.json.999.processing"
+    claimed.write_text(json.dumps(event, indent=2))
+    claimed.chmod(0o600)
+
+    calls = _cycle(mod, paths)
+    assert calls == [], f"the replay itself must not page: {len(calls)}"
+
+    persisted = mod.load_incident_state(paths)
+    scopes = persisted.get("conversationScopes") or {}
+    assert key in scopes and SCOPE in scopes[key], (
+        "the replay repair must survive the commit that persists it, or the "
+        f"next event pages a second time for a delivered alert: {scopes!r}"
+    )
+
+    # And the consequence the repair exists to prevent: a repeat stays quiet.
+    repeat = _event("evt-crash-swept-repeat", "queued")
+    repeat_path = paths["outbox"] / f"20260902.{INSTANCE}.{SOURCE}.{repeat['id']}.json"
+    repeat_path.write_text(json.dumps(repeat, indent=2))
+    repeat_path.chmod(0o600)
+    again: list = []
+    with patch.object(mod, "send_whatsapp", side_effect=lambda *a, **k: again.append(a)):
+        if mod.ready(repeat_path, paths["quarantine"]):
+            mod.process_one(repeat_path, paths)
+    assert again == [], (
+        f"a repeat of an already-delivered conversation must stay suppressed: {len(again)}"
+    )

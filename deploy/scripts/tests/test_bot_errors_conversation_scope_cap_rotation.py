@@ -376,3 +376,36 @@ def test_an_incident_opened_without_a_conversation_still_admits_a_new_one(tmp_pa
         "a genuinely new conversation under an incident opened without one "
         f"must page: pages = {pages}"
     )
+
+
+def test_a_tombstone_survives_the_closed_incident_sweep(tmp_path):
+    """The tombstone must outlive the branch that drops the key's subtree.
+
+    The sweep pops the whole per-key subtree when the incident is no longer
+    open. A tombstone stored inside that subtree would die in the same window
+    the terminal-replay repair does, and the eviction it records would be
+    forgotten while the eviction's consequences persist. It lives at the state
+    root instead, and this pins that placement rather than leaving it to
+    inspection.
+    """
+    cap = 8
+    mod = _load(tmp_path / "tombstone-survives", cap)
+    now = int(time.time())
+    key = f"{MACHINE}|instance-gone|{SOURCE}"
+
+    state = {
+        "version": 1,
+        "openIncidents": {},  # incident CLOSED: the sweep drops this key's subtree
+        "lastSentAt": {},
+        "conversationScopes": {key: {"cs1_00000000000000aa": {"lastSeenAt": now, "eventIds": {}}}},
+        mod.CONVERSATION_SCOPE_EVICTED_FIELD: {key: now},
+    }
+
+    mod.sweep_conversation_scopes(state, now)
+
+    assert key not in (state.get("conversationScopes") or {}), (
+        "the closed-incident branch must still drop the subtree"
+    )
+    assert key in (state.get(mod.CONVERSATION_SCOPE_EVICTED_FIELD) or {}), (
+        "the eviction tombstone must survive the sweep that drops the subtree"
+    )
