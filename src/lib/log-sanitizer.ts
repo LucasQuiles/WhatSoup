@@ -147,10 +147,29 @@ const PHONE_RE = /\+?\d{7,}/g;
 // <credential>` puts the credential after an INNER assignment; `secret:` is not
 // followed by whitespace, so the guard admitted it, the value class consumed
 // `secret:` and stopped at the space, and the credential was left standing in
-// the clear. The cross-model bench raised that as a regression of the previous
-// head. Adding `:` and `=` to the guard's follow set refuses the nested
+// the clear. Adding `:` and `=` to the guard's follow set refuses the nested
 // assignment, and the scan then matches at the inner label, so the credential
 // is masked and the outer label survives as a readable cue.
+//
+// That is an improvement, not a repair: main leaks the same two joiner shapes,
+// by a different route. Measured through the real sink, `token=secret:
+// <credential>` reaches the sink carrying the credential at main and at the
+// two intermediate heads of this branch alike. The masking it is compared
+// against existed only at an unmerged intermediate of this branch, so the
+// class was never closed on main and is not being reopened here.
+//
+// The HYPHEN joiner stays open at every version including main
+// (`token=secret-password <credential>` keeps the credential), and closing it
+// would mean reintroducing the boundary-keyed guard and the whole S0 class
+// with it. It is deliberately left alone.
+//
+// The follow set is deliberately NOT widened to `.`, `/`, `+` or `~`. Those
+// joiners are already masked, because the guard admits them and the value class
+// then swallows the joiner and the credential together. Adding them to the
+// refusal set makes the guard reject, and nothing downstream matches — no
+// whitespace for the separator-less branch, no `[:=]` for the separator branch
+// — so `token=secret.<credential>` would be retained whole. Measured: the
+// wider set turns four masked joiner classes back into leaks.
 //
 // Requiring a following separator character rather than any word boundary is
 // what keeps the S0 class masked: `secret-`, `token.`, `api_key-` and the rest
@@ -161,17 +180,31 @@ const PHONE_RE = /\+?\d{7,}/g;
 // whitespace, so the guard refuses, and the separator-less branch masks the
 // credential at the second label instead.
 //
-// Residual, disclosed: the guard refuses on those three characters whether or
-// not a credential actually follows, so `token=secret at gate` is retained, and
-// so are the trailing-separator forms `token=secret:` and `token=secret=`.
-// Nothing in any of them is credential material — the value is the label word
-// itself — but a real credential separated from a label word by a space is
-// reached only by the separator-less branch, which carries an eight-character
-// floor.
+// RESIDUAL, AND IT IS A NARROWING AGAINST MAIN, stated with its direction. The
+// guard refuses on its follow set whether or not a credential actually follows,
+// so `token=secret at gate` is RETAINED here. Main MASKS that cell
+// (`token==*** at gate`), as it does the whole bare-label-word class:
+// `api_key=token`, `bearer=password` and their siblings. This branch does not
+// mask them. That is a live narrowing of what main removes, not neutral
+// intended behaviour, and it is the owner's WS-A06 decision to accept or
+// reverse — not a thing to close here.
 //
-// Also unchanged and pre-existing: the value class stops at `,`, `;` and a
-// quote, so `token=secret,<credential>` retains the text after the comma at
-// every version of this pattern. That is the value class, not the guard.
+// The narrowing is CONFINED to the bare label word. Credential material after a
+// label word is still masked in every tested form: `token=secretAbc123XY`,
+// `token=secret_Abc123XY`, `api_key=tokenAbc123XY` and
+// `bearer=authorizationAbc123XY` all read back as `<label> ***`. The retained
+// text in the residual is the label word itself, with nothing after it.
+// The trailing-separator forms `token=secret:` and `token=secret=` are retained
+// on the same rule and carry nothing either.
+//
+// A real credential separated from a label word by a space is reached only by
+// the separator-less branch, which carries an eight-character floor.
+//
+// Also unchanged and pre-existing, disclosed rather than fixed: the value class
+// stops at `,`, `;` and a quote, so `token=secret,<credential>`,
+// `token=secret;<credential>` and the quoted form all retain the text after
+// that character. That is the value class, not the guard, and it behaves the
+// same way before and after this change.
 //
 // A LABEL IS MATCHED WHEREVER IT ENDS AN IDENTIFIER, AND ITS PREFIX IS NOT
 // CONSUMED. The pattern this replaced had no anchor at all, so `token=` matched

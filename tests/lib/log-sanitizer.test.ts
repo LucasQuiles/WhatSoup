@@ -1123,11 +1123,13 @@ describe('the label shape masks a glued prefix of any length', () => {
   ];
 
   it('covers three prefix lengths past the former bound, each with a distinct secret', () => {
-    // Coverage assertion: a shrunk table would otherwise pass silently.
-    expect(GLUED_PREFIX_LENGTHS).toHaveLength(3);
+    // Coverage assertion, frozen rather than ranged: a per-row
+    // `toBeGreaterThan(40)` would still pass if every row collapsed to the same
+    // length, so the tuple itself is pinned.
+    expect(GLUED_PREFIX_LENGTHS.map(([length]) => length)).toEqual([41, 60, 200]);
+    expect(new Set(GLUED_PREFIX_LENGTHS.map(([length]) => length)).size).toBe(3);
     expect(new Set(GLUED_PREFIX_LENGTHS.map(([, secret]) => secret)).size).toBe(3);
-    for (const [length, secret] of GLUED_PREFIX_LENGTHS) {
-      expect(length).toBeGreaterThan(40);
+    for (const [, secret] of GLUED_PREFIX_LENGTHS) {
       expect(secret).toHaveLength(12);
     }
   });
@@ -1295,9 +1297,15 @@ describe('the value-side guard admits a label-initial credential value', () => {
       'authorization failed',
     ],
     [
-      'a bare label word followed by whitespace is still refused, carrying no credential',
-      // Disclosed residual, not a target of any fix on this branch: the guard
-      // refuses on its follow set whether or not a credential is really there.
+      'KNOWN NARROWING against main: a bare label word is retained here, masked on main',
+      // This row pins a NARROWING, not neutral intended behaviour. Main masks
+      // this cell — `token=secret at gate` reads back as `token==*** at gate`
+      // there — and this branch retains it, because the guard refuses on its
+      // follow set whether or not a credential really follows.
+      //
+      // It is pinned so the narrowing is visible and reversible, NOT because
+      // retaining is the desired contract. Reversing it is the owner's WS-A06
+      // decision; the sibling test below records how far the narrowing reaches.
       'upstream call failed token=secret at gate',
       'upstream call failed token=secret at gate',
     ],
@@ -1382,4 +1390,52 @@ describe('the value-side guard refuses a nested label that opens its own assignm
     expect(out).not.toContain('SYNTHETICVALUE');
     expect(out).toContain('at gate');
   });
+});
+
+// ─── How far the known narrowing reaches ────────────────────────────────────
+//
+// The row above pins one cell that main masks and this branch retains. This
+// block bounds that narrowing, so the disclosure is measured rather than
+// asserted: the retained class is the BARE label word, and credential material
+// after a label word is still masked here in every form tested.
+
+describe('the bare-label-word narrowing is confined to the label word itself', () => {
+  // Cells main masks and this branch retains. Named, not ranged, so the extent
+  // of the narrowing is visible in the test rather than implied.
+  const RETAINED_BARE_LABEL_WORDS: readonly string[] = [
+    'upstream call failed token=secret at gate',
+    'upstream call failed api_key=token at gate',
+    'upstream call failed bearer=password at gate',
+  ];
+
+  // The other side of the bound: a label word with credential material glued to
+  // it is masked. If this ever flips, the narrowing has widened past the
+  // disclosure and the guard's follow set is doing more than it is documented
+  // to do.
+  const MASKED_WITH_CREDENTIAL_MATERIAL: ReadonlyArray<readonly [string, string]> = [
+    ['upstream call failed token=secretAbc123XY at gate', 'Abc123XY'],
+    ['upstream call failed token=secret_Abc123XY at gate', 'Abc123XY'],
+    ['upstream call failed api_key=tokenAbc123XY at gate', 'Abc123XY'],
+    ['upstream call failed bearer=authorizationAbc123XY at gate', 'Abc123XY'],
+  ];
+
+  it('covers both sides of the bound', () => {
+    // Coverage assertion: a shrunk table would otherwise pass silently.
+    expect(RETAINED_BARE_LABEL_WORDS).toHaveLength(3);
+    expect(MASKED_WITH_CREDENTIAL_MATERIAL).toHaveLength(4);
+  });
+
+  for (const message of RETAINED_BARE_LABEL_WORDS) {
+    it(`retains the bare label word, which main masks: ${message}`, async () => {
+      expect(await sanitizedErrorMessage(message)).toBe(message);
+    });
+  }
+
+  for (const [message, material] of MASKED_WITH_CREDENTIAL_MATERIAL) {
+    it(`still masks credential material glued to a label word: ${message}`, async () => {
+      const out = await sanitizedErrorMessage(message);
+      expect(out).not.toContain(material);
+      expect(out).toContain('at gate');
+    });
+  }
 });
