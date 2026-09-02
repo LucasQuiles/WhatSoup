@@ -46,8 +46,8 @@
  * is paired with removal of free-text previews." This file pairs central key
  * redaction with the ADDITION of a free-text preview. Quoting only the first
  * sentence would understate the departure in the paragraph whose whole purpose
- * is to state it. WS-A06 is tracked by
- * issue #2164 and was never mechanically enforced: the artifacts its plan named
+ * is to state it. WS-A06 is tracked by issue #2164 and was never mechanically
+ * enforced: the artifacts its plan named
  * (tests/logger-privacy.test.ts, tests/fixtures/log-privacy-canary.ts,
  * src/lib/log-safety.ts) do not exist in this tree.
  *
@@ -58,7 +58,7 @@
  *
  * The sanitizer is recursive, cycle-safe (WeakSet), and never throws.
  *
- * Design principle for the fields it drops: truncation limits retained bytes
+ * Design principle for the fields it drops: truncation limits retained length
  * but does not remove a sensitive value near the start of a preview, so those
  * values are removed entirely rather than shortened.
  */
@@ -195,9 +195,12 @@ function sanitizeStringValue(value: string): string {
 // ─── Bounded diagnostic text ────────────────────────────────────────────────
 
 /**
- * Byte budget for diagnostic text retained from an Error. Long enough to carry
- * a real failure message, short enough that a runaway message cannot dominate
- * a log line. The truncation marker is charged against the same budget, so the
+ * Budget for diagnostic text retained from an Error, in UTF-16 code units, not
+ * bytes: every length in this file is a JavaScript string length, so an
+ * astral-plane character counts twice and a multi-byte UTF-8 character may
+ * serialize to more bytes than it is charged here. Long enough to carry a real
+ * failure message, short enough that a runaway message cannot dominate a log
+ * line. The truncation marker is charged against the same budget, so the
  * returned string never exceeds this length.
  */
 const MAX_ERROR_TEXT_LENGTH = 512;
