@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import calendar
+import copy
 import fcntl
 import hashlib
 import json
@@ -3006,32 +3007,84 @@ def is_test_provenance_event(event: dict[str, Any]) -> bool:
 # Test roots recognised ONLY by the email-fallback gate. Linux pytest basetemps
 # (``pytest-of-<user>``) are deliberately not global TEST_LEAK patterns: the
 # repository's own suite runs with tmp_path roots under them, and a global
-# match would silently drop fixture events in unrelated tests. The email gate
-# is narrow enough (no email for anything rooted in a test tmp dir) to apply it.
+# match would silently drop fixture events in unrelated tests.
+#
+# #3404: these patterns are matched against the STATE DIRECTORY the dispatcher
+# was launched with, never against strings inside the event. A genuine alert
+# may legitimately *mention* such a path (a tmp-retention alert about orphaned
+# ``/tmp/pytest-of-*`` directories, for example); what makes a run a test run
+# is where its own state lives.
 _EMAIL_FALLBACK_TEST_ROOT_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"/pytest-of-[^/]+/", re.I),
 ]
 
+def matched_state_dir_test_root_pattern(state_dir: Path | str | None) -> str | None:
+    """Return the test-root pattern matching the dispatcher's own state directory.
 
-def email_fallback_blocked_reason(event: dict[str, Any]) -> str | None:
+    Recognises the global test-leak roots (vitest/jest sandboxes, operator
+    additions via BOT_ERRORS_TEST_LEAK_PATH_PATTERNS) and the email-gate-only
+    pytest basetemp rule. ``None`` when the state directory is not under any
+    recognised test root.
+    """
+    if state_dir is None:
+        return None
+    text = os.fspath(state_dir).rstrip("/") + "/"
+    for pattern in (*TEST_LEAK_PATTERNS, *_EMAIL_FALLBACK_TEST_ROOT_PATTERNS):
+        if pattern.search(text):
+            return pattern.pattern
+    return None
+
+
+def email_fallback_blocked_reason(
+    claimed_event: dict[str, Any],
+    *,
+    state_dir: Path | str | None = None,
+) -> str | None:
     """Why an event must NOT be escalated by email, or None when it may.
 
-    2026-08-28: a pytest-fixture dead-letter (dispatch log under a Linux
-    pytest basetemp, synthetic machine name, a real instance label) reached
-    the operator as a real critical email through the F5 fallback. The queue
-    path already suppresses test-provenance events; the email fallback must
-    apply the same gate plus the test-root check above.
+    CONTRACT: ``claimed_event`` MUST be the event AS ITS PRODUCER CLAIMED IT --
+    the payload as read off the queue, before any dispatcher bookkeeping is
+    written into it. ``process_one`` snapshots exactly that at the B2 test-leak
+    check and carries the snapshot to this call; do not pass the live event.
+
+    That contract is the whole of #3404. The gate used to scan the event as it
+    stood at the F5 call site, which by then carried dispatcher-owned text:
+    ``diagnostics.dispatchLog`` (always) and ``delivery.lastError`` (the
+    transport's own exception string, written by ``mark_failure`` three
+    statements earlier -- and the email fallback only runs when the transport is
+    already failing). A production dispatcher whose socket or state root sat
+    under a tmp dir, or whose bridge returned an error payload naming a fixture
+    path, therefore reported ``test_leak`` for a perfectly clean alert and
+    dead-lettered it silently. Reading only the claimed payload closes that
+    class for every such field at once, present and future, rather than
+    stripping known keys by name.
+
+    Three gates, evaluated in order:
+
+    * ``test_provenance`` -- the producer flagged ``runtime.provenance.test``.
+    * ``test_leak`` -- the claimed payload matches a global test-leak pattern
+      (identical ``event_is_test_leak`` semantics to the queue path). On the
+      ``process_one`` route this branch is unreachable by construction: the B2
+      check drops such events as ``test_leak_dropped`` at the claim, long before
+      F5. It is kept as defence in depth for any other caller of this gate and
+      as an anti-regression pin on the shared detector.
+    * ``test_state_dir`` -- the state directory the dispatcher was launched
+      with (``state_dir``; defaults to the resolved state root) lies under a
+      recognised test root. This is what the 2026-08-28 incident actually was:
+      a pytest-fixture dead-letter reached the operator as a real critical
+      email because the run itself was a test run. Binding to the launched
+      state dir replaces the earlier scan for ``/pytest-of-<user>/`` anywhere in
+      the event text, which also blocked genuine alerts that merely mentioned
+      such a path (#3404).
     """
-    if is_test_provenance_event(event):
+    if is_test_provenance_event(claimed_event):
         return "test_provenance"
-    if event_is_test_leak(event):
+    if event_is_test_leak(claimed_event):
         return "test_leak"
-    parts: list[str] = []
-    _extract_event_text_values(event, parts)
-    for text in parts:
-        for pattern in _EMAIL_FALLBACK_TEST_ROOT_PATTERNS:
-            if pattern.search(text):
-                return "test_leak"
+    if state_dir is None:
+        state_dir = state_root()
+    if matched_state_dir_test_root_pattern(state_dir) is not None:
+        return "test_state_dir"
     return None
 
 
@@ -6171,6 +6224,16 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
         })
         return False, "test_leak"
 
+    # #3404: freeze what the PRODUCER claimed, before the dispatcher writes any
+    # of its own text into the event. Everything below this line may add
+    # dispatcher-owned strings -- diagnostics.dispatchLog immediately, and
+    # delivery.lastError from mark_failure once the transport fails -- and those
+    # strings carry local paths that can match a test-leak pattern. The F5 email
+    # gate is evaluated against this snapshot so a genuine alert can never be
+    # mistaken for a test leak on the strength of the dispatcher's own
+    # bookkeeping. Deep-copied because the injections below mutate nested dicts.
+    claimed_event = copy.deepcopy(event)
+
     diagnostics = event.setdefault("diagnostics", {})
     if isinstance(diagnostics, dict) and not omit_dispatch_log_in_message(event):
         diagnostics["dispatchLog"] = str(paths["logs"] / "dispatch.jsonl")
@@ -6326,7 +6389,11 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
 
         # --- F5: email fallback (attempts >= 3) with unavailability tracking ---
         email_status = "not_attempted"
-        email_blocked = email_fallback_blocked_reason(event) if attempts >= 3 else None
+        email_blocked = (
+            email_fallback_blocked_reason(claimed_event, state_dir=paths["root"])
+            if attempts >= 3
+            else None
+        )
         if email_blocked is not None:
             # Synthetic / test-provenance events never escalate by email; they
             # keep the ordinary retry -> dead-letter lifecycle.

@@ -329,6 +329,9 @@ jobs:
       - name: Grant resolver inventory guard
         run: npm run guard:grant-resolver
 
+      - name: Resolved-override inventory guard
+        run: npm run guard:resolved-override
+
       - name: Agent decision polls guard
         run: npm run guard:agent-decision-polls
 

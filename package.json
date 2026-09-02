@@ -95,6 +95,7 @@
     "guard:import-cycle": "bash scripts/run-with-pinned-node.sh scripts/import-cycle-guard.ts",
     "guard:phantom-deps": "bash scripts/run-with-pinned-node.sh scripts/phantom-dependency-guard.ts",
     "guard:grant-resolver": "bash scripts/run-with-pinned-node.sh scripts/grant-resolver-inventory-guard.ts",
+    "guard:resolved-override": "bash scripts/run-with-pinned-node.sh scripts/resolved-override-inventory-guard.ts",
     "triage:required-suites": "bash scripts/run-with-pinned-node.sh scripts/required-suites.ts",
     "guard:claude-settings": "bash scripts/run-with-pinned-node.sh scripts/claude-settings-guard.ts --check",
     "guard:agent-decision-polls": "bash scripts/run-with-pinned-node.sh scripts/agent-decision-polls-guard.ts",
