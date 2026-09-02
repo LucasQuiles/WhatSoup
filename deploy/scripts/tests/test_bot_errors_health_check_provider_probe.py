@@ -2394,12 +2394,83 @@ def test_only_the_opencode_probe_gates_generated_against_loaded_path(monkeypatch
     assert captured and captured[-1][0] == str(prepend_bin / "claude")
 
 
-def test_opencode_functional_probe_still_runs_in_the_instance_workspace(monkeypatch, tmp_path):
-    """Control for the change above: the opencode probe is deliberately untouched.
+def _spawn_env_and_cwd(args, kwargs):
+    """(child_env, child_cwd) from a provider_command_output call, either form.
 
-    Its functional probe drives a real session that reads the instance's own
-    context, so it keeps both the workspace cwd and the socket. Without this row,
-    dropping them for the default provider could silently spread.
+    The capability probes pass them as KEYWORDS and the functional probe passes
+    them POSITIONALLY, so a fixed index is wrong for half the call sites and
+    silently yields the env dict where the cwd was expected. Positional order
+    after `command` is: timeout, three dry-run env names, input_text, child_env,
+    child_cwd.
+    """
+    child_env = kwargs.get("child_env", args[5] if len(args) > 5 else None)
+    child_cwd = kwargs.get("child_cwd", args[6] if len(args) > 6 else None)
+    return child_env, child_cwd
+
+
+def test_opencode_capability_probes_run_outside_the_instance_workspace(monkeypatch, tmp_path):
+    """SHOULD-4. The three capability probes are not the functional probe.
+
+    `--version`, `--help` and `run --help` ask the binary what it is and what it
+    supports. None starts a session, so none needs the instance workspace or its
+    tool socket; both reached them only because the three shared the functional
+    probe's child env and cwd. The workspace justification in the body covers
+    the FUNCTIONAL probe alone.
+
+    The functional probe is deliberately unchanged and has its own control row,
+    so this cannot be read as moving opencode off its context wholesale.
+    """
+    environment = _matrix_environment(tmp_path)
+    _arm_darwin_plist(
+        monkeypatch, tmp_path, "agent-alpha",
+        {"PATH": environment["PATH"], "WHATSOUP_PATH_PREPEND": environment["WHATSOUP_PATH_PREPEND"]},
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "workspace-marker").write_text("x")
+    config = {
+        "type": "agent",
+        "agentOptions": {"provider": "opencode-cli", "cwd": str(workspace), "model": "xai/grok-4"},
+    }
+    seen: list[dict[str, object]] = []
+
+    def _fake_output(command, *args, **kwargs):
+        env, cwd = _spawn_env_and_cwd(args, kwargs)
+        seen.append({
+            "argv": list(command),
+            "cwd": cwd,
+            # Read from INSIDE the call: the diagnostic directory is owned by a
+            # context manager and is gone once the inventory returns.
+            "cwd_entries": (
+                sorted(entry.name for entry in Path(cwd).iterdir())
+                if cwd and Path(cwd).is_dir() else None
+            ),
+            "has_socket": bool(env) and "WHATSOUP_MCP_SOCKET" in env,
+            "path": (env or {}).get("PATH"),
+        })
+        return ("opencode 1.0.0", "", 0, False)
+
+    monkeypatch.setattr(_mod, "provider_command_output", _fake_output)
+    monkeypatch.setattr(_mod, "loaded_instance_environment", lambda name: dict(environment))
+    _mod.opencode_provider_probe_inventory({}, {}, "agent-alpha", config, "opencode-cli")
+
+    capability = [row for row in seen if row["argv"][1:] in (["--version"], ["--help"], ["run", "--help"])]
+    assert len(capability) == 3, f"expected three capability probes, saw {[r['argv'][1:] for r in seen]}"
+    for row in capability:
+        label = " ".join(row["argv"][1:])
+        assert row["cwd"] != str(workspace), f"{label} must not run in the agent workspace"
+        assert row["cwd_entries"] == [], f"{label} must run in a fresh directory the probe owns"
+        assert not row["has_socket"], f"{label} must not be handed the instance tool socket"
+        # The governed PATH still travels, so the binary resolves as the service does.
+        assert row["path"] == _mod.effective_instance_provider_path(environment), label
+
+
+def test_opencode_functional_probe_keeps_the_workspace_and_socket(monkeypatch, tmp_path):
+    """Control for the row above: the functional probe is NOT moved.
+
+    It drives a real session that reads the instance's own context, so it keeps
+    both the workspace cwd and the synthesized socket. Without this row the
+    capability-probe change could quietly spread to the session probe.
     """
     environment = _matrix_environment(tmp_path)
     _arm_darwin_plist(
@@ -2410,27 +2481,42 @@ def test_opencode_functional_probe_still_runs_in_the_instance_workspace(monkeypa
     workspace.mkdir(parents=True, exist_ok=True)
     config = {
         "type": "agent",
-        "agentOptions": {"provider": "opencode-cli", "cwd": str(workspace)},
+        "agentOptions": {"provider": "opencode-cli", "cwd": str(workspace), "model": "xai/grok-4"},
     }
-    seen: dict[str, object] = {}
+    seen: list[dict[str, object]] = []
+
+    # detect_opencode_mode must classify the CLI as modern-run, or the inventory
+    # returns provider_compatibility_unsupported before the functional spawn.
+    run_help = "Usage: opencode run [options]\n  --format json\n  --pure\n  -m, --model <model>\n"
 
     def _fake_output(command, *args, **kwargs):
-        seen["child_cwd"] = kwargs.get("child_cwd")
-        seen["child_env"] = kwargs.get("child_env")
+        env, cwd = _spawn_env_and_cwd(args, kwargs)
+        seen.append({"argv": list(command), "cwd": cwd, "env": env})
+        if command[1:3] == ["run", "--help"]:
+            return (run_help, "", 0, False)
+        if command[1:2] == ["run"]:
+            return ('{"type":"message","text":"OK"}', "", 0, False)
         return ("opencode 1.0.0", "", 0, False)
 
-    monkeypatch.setattr(_mod, "provider_command_output", _fake_output)
-    monkeypatch.setattr(_mod, "loaded_instance_environment", lambda name: dict(environment))
-    _mod.opencode_provider_probe_inventory({}, {}, "agent-alpha", config, "opencode-cli")
+    # The model selects the xai key service, and a missing credential returns
+    # provider_credential_missing before the functional spawn. Synthetic value.
+    service_environment = dict(environment)
+    service_environment["XAI_API_KEY"] = "fixture-not-a-real-key"
 
-    assert seen, "the opencode probe never reached the provider spawn"
-    assert seen["child_cwd"] == str(workspace)
-    child_env = seen["child_env"]
-    assert child_env is not None
-    socket_path = child_env.get("WHATSOUP_MCP_SOCKET")
-    assert socket_path is not None, "the opencode probe keeps its synthesized socket"
+    monkeypatch.setattr(_mod, "provider_command_output", _fake_output)
+    monkeypatch.setattr(_mod, "loaded_instance_environment", lambda name: dict(service_environment))
+    _mod.opencode_provider_probe_inventory(
+        {"expectOpenCodeFunctionalProbe": True}, {}, "agent-alpha", config, "opencode-cli",
+    )
+
+    functional = [row for row in seen
+                  if row["argv"][1:2] == ["run"] and row["argv"][1:3] != ["run", "--help"]]
+    assert len(functional) == 1, f"expected one functional probe, saw {[r['argv'][1:3] for r in seen]}"
+    row = functional[0]
+    assert row["cwd"] == str(workspace), "the functional probe keeps the instance workspace"
+    socket_path = (row["env"] or {}).get("WHATSOUP_MCP_SOCKET")
+    assert socket_path is not None, "the functional probe keeps its synthesized socket"
     assert socket_path.startswith(f"{workspace}/")
-    assert socket_path.endswith("whatsoup.sock")
 
 
 def test_governed_checks_apply_when_no_dry_affordance_is_set(monkeypatch, tmp_path):

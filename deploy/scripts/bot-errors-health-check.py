@@ -4880,34 +4880,49 @@ def opencode_provider_probe_inventory(
             "remediation=run_a_context_bound_provider_canary_for_this_instance"
         )]
 
+    # The three capability probes below ask the binary what it is and what it
+    # supports. None of them starts a session, so none needs the instance
+    # workspace or its tool socket, and both were reaching them only because
+    # they shared the functional probe's child env and cwd. They run from a
+    # fresh directory the probe owns, on the same governed PATH allowlist with
+    # no socket synthesized. The FUNCTIONAL probe below is unchanged: it does
+    # drive a real session against the instance's own context.
+    diagnostic_env = governed_child_environment(
+        effective_provider_path,
+        name,
+        None,
+        loaded_environment,
+        env_keys=OPENCODE_FUNCTIONAL_ENV_KEYS,
+    )
     try:
-        version_stdout, version_stderr, version_rc, _ = provider_command_output(
-            [command, "--version"],
-            timeout_seconds,
-            "BOT_ERRORS_DRY_OPENCODE_VERSION_STDOUT",
-            "BOT_ERRORS_DRY_OPENCODE_VERSION_STDERR",
-            "BOT_ERRORS_DRY_OPENCODE_VERSION_RC",
-            child_env=child_env,
-            child_cwd=child_cwd,
-        )
-        help_stdout, help_stderr, help_rc, _ = provider_command_output(
-            [command, "--help"],
-            timeout_seconds,
-            "BOT_ERRORS_DRY_OPENCODE_HELP_STDOUT",
-            "BOT_ERRORS_DRY_OPENCODE_HELP_STDERR",
-            "BOT_ERRORS_DRY_OPENCODE_HELP_RC",
-            child_env=child_env,
-            child_cwd=child_cwd,
-        )
-        run_help_stdout, run_help_stderr, run_help_rc, _ = provider_command_output(
-            [command, "run", "--help"],
-            timeout_seconds,
-            "BOT_ERRORS_DRY_OPENCODE_RUN_HELP_STDOUT",
-            "BOT_ERRORS_DRY_OPENCODE_RUN_HELP_STDERR",
-            "BOT_ERRORS_DRY_OPENCODE_RUN_HELP_RC",
-            child_env=child_env,
-            child_cwd=child_cwd,
-        )
+        with tempfile.TemporaryDirectory(prefix="whatsoup-opencode-diagnostic-") as diagnostic_cwd:
+            version_stdout, version_stderr, version_rc, _ = provider_command_output(
+                [command, "--version"],
+                timeout_seconds,
+                "BOT_ERRORS_DRY_OPENCODE_VERSION_STDOUT",
+                "BOT_ERRORS_DRY_OPENCODE_VERSION_STDERR",
+                "BOT_ERRORS_DRY_OPENCODE_VERSION_RC",
+                child_env=diagnostic_env,
+                child_cwd=diagnostic_cwd,
+            )
+            help_stdout, help_stderr, help_rc, _ = provider_command_output(
+                [command, "--help"],
+                timeout_seconds,
+                "BOT_ERRORS_DRY_OPENCODE_HELP_STDOUT",
+                "BOT_ERRORS_DRY_OPENCODE_HELP_STDERR",
+                "BOT_ERRORS_DRY_OPENCODE_HELP_RC",
+                child_env=diagnostic_env,
+                child_cwd=diagnostic_cwd,
+            )
+            run_help_stdout, run_help_stderr, run_help_rc, _ = provider_command_output(
+                [command, "run", "--help"],
+                timeout_seconds,
+                "BOT_ERRORS_DRY_OPENCODE_RUN_HELP_STDOUT",
+                "BOT_ERRORS_DRY_OPENCODE_RUN_HELP_STDERR",
+                "BOT_ERRORS_DRY_OPENCODE_RUN_HELP_RC",
+                child_env=diagnostic_env,
+                child_cwd=diagnostic_cwd,
+            )
     except Exception as exc:  # noqa: BLE001 - daily health should report provider probe failure.
         return [(
             f"FAIL provider_probe {name}: provider={provider} command={safe_command} "
