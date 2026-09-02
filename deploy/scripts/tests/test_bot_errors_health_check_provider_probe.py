@@ -751,7 +751,11 @@ def _launcher_resolved(command_name: str, environment: dict[str, str]) -> str:
         [
             "/bin/bash",
             "-c",
-            '. "$1"; whatsoup_export_runtime_path "$HOME" "$2" || exit 1; command -v "$3"',
+            # declare -F first: without it a removed or renamed helper would
+            # leave the shell resolving "$3" from the AMBIENT PATH and the
+            # parity assertion would pass while proving nothing.
+            '. "$1"; declare -F whatsoup_export_runtime_path >/dev/null || { echo "helper missing" >&2; exit 9; }; '
+            'whatsoup_export_runtime_path "$HOME" "$2" || exit 1; command -v "$3"',
             "runtime-path",
             str(helper),
             environment["WHATSOUP_NODE"],

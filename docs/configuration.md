@@ -1596,8 +1596,18 @@ When deploying an instance config that uses `fallbackProvider` or `fallbacks` to
    ignored by the probe. It also compares the prepend the plist declares against
    the one the loaded job carries (`provider_runtime_path_prepend_mismatch`) and
    checks that a declared prepend actually leads the plist's own `PATH`
-   (`provider_runtime_path_prepend_inconsistent`); both remediate by
-   regenerating and reloading the LaunchAgent.
+   (`provider_runtime_path_prepend_inconsistent`).
+
+   Both checks run for **both** providers, `opencode-cli` and the default
+   `claude-cli`, and both apply only where a LaunchAgent plist exists and its
+   environment reads as a whole map. Where a plist exists but the loaded job
+   environment cannot be composed, the `claude-cli` probe fails closed with
+   `provider_runtime_path_unavailable` rather than quietly resolving the CLI
+   from the probe process's own `PATH`. Where there is no LaunchAgent at all,
+   which is every Linux host, resolution is unchanged. The remediation for these
+   classes names both repairs, because `launchctl print` output is explicitly
+   not a stable interface: regenerate and reload the LaunchAgent, or check that
+   its output still parses.
 
 2. **Provision the provider API key** via one of three portable routes. Runtime
    lookup order is environment variable, private WhatSoup credential file,

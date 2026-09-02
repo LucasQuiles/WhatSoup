@@ -4353,10 +4353,6 @@ def launchctl_environment(output: str) -> dict[str, str]:
     }
 
 
-def launchctl_environment_path(output: str) -> str | None:
-    return environment_provider_path(launchctl_environment(output))
-
-
 def loaded_instance_environment(name: str) -> dict[str, str]:
     dry_path = os.environ.get("BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH")
     if dry_path is not None:
