@@ -594,6 +594,31 @@ describe('keep receipt id (F2a reply-threading)', () => {
     });
   });
 
+  // Item 5 (#2121 follow-up, cross-model bench) — the INSTALLED BASE. The
+  // writer guard and the promotion clear only govern rows this version writes.
+  // A row the previous unguarded writer stamped, and which has since become
+  // sticky, still carries an id in the column; answering it would let an old
+  // receipt authenticate a threaded affirmative on a permanent pin. Seeded
+  // with a raw UPDATE precisely because the fixed writer now refuses it: this
+  // is base's state reproduced, not a state the current code can reach.
+  it('a legacy sticky row that still carries a receipt id answers null', () => {
+    setPreference(db, pref({ scope: 'sticky', updatedAt: 1_000, expiresAt: null }));
+    db.raw
+      .prepare(`UPDATE chat_model_preference SET keep_receipt_message_id = ? WHERE chat_jid = ? AND sender_jid = ?`)
+      .run(RECEIPT, CHAT_A, SENDER_A);
+    const storedId = (): unknown => (db.raw
+      .prepare(`SELECT keep_receipt_message_id AS id FROM chat_model_preference WHERE chat_jid = ? AND sender_jid = ?`)
+      .get(CHAT_A, SENDER_A) as { id: unknown } | undefined)?.id;
+    // Coverage assertion: the legacy value really is in the column, so the
+    // read below is exercising the repair rather than an empty cell.
+    expect(storedId()).toBe(RECEIPT);
+
+    // Repaired on READ — no migration, no write, and the stored byte is left
+    // exactly as found.
+    expect(getKeepReceiptMessageId(db, CHAT_A)).toBeNull();
+    expect(storedId()).toBe(RECEIPT);
+  });
+
   it('capturing against an absent row is a no-op, never an insert', () => {
     recordKeepReceiptMessageId(db, CHAT_A, SENDER_A, RECEIPT);
     expect(getPreference(db, CHAT_A, SENDER_A, NOW)).toBeNull();

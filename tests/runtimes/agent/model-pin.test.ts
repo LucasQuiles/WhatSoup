@@ -2345,6 +2345,19 @@ describe('NL routing handlers (nlRouting flag)', () => {
       expect(receiptRow().expires_at).not.toBeNull();
     });
 
+    // Items 6/7 (#2121 follow-up review) — the matrices below iterate the
+    // production tuple, which makes them a faithful oracle for "every shipped
+    // token behaves correctly" but NOT for "the shipped set is the intended
+    // set": shrinking THREADED_AFFIRMATIVE_TOKENS to ['confirm'] drops the
+    // suite from 157 to 151 and stays green, because the deleted tokens take
+    // their own coverage with them. This independent equality assertion is the
+    // contract the tuple cannot satisfy about itself — a token added or
+    // removed must be a deliberate edit here, reviewed as a change to the
+    // owner's F2a affirmative set.
+    it('the widened affirmative set is exactly confirm/yes/pin', () => {
+      expect([...THREADED_AFFIRMATIVE_TOKENS]).toEqual(['confirm', 'yes', 'pin']);
+    });
+
     // ── Quadrant 1: threaded + affirmative token → promotes ──────────────────
     // D4 (#2121 follow-up): the matrices below iterate the SAME tuple the
     // runtime matcher is built from (THREADED_AFFIRMATIVE_TOKENS), not a
@@ -2772,6 +2785,52 @@ describe('NL routing handlers (nlRouting flag)', () => {
       }));
       expect(allReplies(sentMessages).join('\n')).toContain('is already kept for this chat');
       expect(mockSession.sendTurn).not.toHaveBeenCalled();
+    });
+
+    // Item 5 (#2121 follow-up, cross-model bench) — LEGACY ROWS. The capture
+    // guard added for A1 stops NEW receipt ids landing on a sticky row, and
+    // promotion consumes the id going forward. Neither repairs a row that the
+    // BASE code already stamped: `keep_receipt_message_id` set on a row that
+    // is now sticky. `getKeepReceiptMessageId` returned that stored id without
+    // consulting `expires_at`, so after upgrade an old receipt still
+    // authenticated a threaded affirmative and the pin surface went on
+    // swallowing it — the exact interception this work exists to end,
+    // surviving in the installed base.
+    //
+    // The row is seeded with a raw UPDATE precisely BECAUSE the fixed writer
+    // now refuses it: this is the state base produced, reproduced faithfully,
+    // not a state the current code can reach. Reading it back as null repairs
+    // every such row on the next read, with no migration and no write.
+    it('a threaded affirmative on a LEGACY sticky row carrying an old receipt id reaches the agent', async () => {
+      const { runtime, sentMessages, receiptId } = await pinWithReceipt();
+      await sendAndDrain(runtime, makeMsg({
+        chatJid: CHAT, senderJid: SENDER_A, content: 'confirm',
+        quotedMessageId: receiptId, messageId: 'msg-promote',
+      }));
+      expect(receiptRow().scope).toBe('sticky');
+
+      // Reproduce the pre-upgrade row shape: sticky, and still stamped with
+      // the receipt id that base's unguarded writer left behind.
+      const LEGACY_RECEIPT = 'WA-LEGACY-RECEIPT';
+      (routingDb.raw as unknown as { prepare: (s: string) => { run: (...a: unknown[]) => void } })
+        .prepare('UPDATE chat_model_preference SET keep_receipt_message_id = ?')
+        .run(LEGACY_RECEIPT);
+      // Coverage assertion: the seed really is in place, so the dispatch below
+      // exercises the legacy path rather than passing on an empty column.
+      expect(receiptRow().keep_receipt_message_id).toBe(LEGACY_RECEIPT);
+      expect(receiptRow().expires_at).toBeNull();
+
+      mockSession.sendTurn.mockClear();
+      const repliesBefore = allReplies(sentMessages).length;
+      await sendAndDrain(runtime, makeMsg({
+        chatJid: CHAT, senderJid: SENDER_A, content: 'yes',
+        quotedMessageId: LEGACY_RECEIPT, messageId: 'msg-legacy-yes',
+      }));
+
+      // The affirmative reaches the agent, and the pin surface produces no
+      // local reply of its own — no "already kept", nothing.
+      expect(mockSession.sendTurn).toHaveBeenCalled();
+      expect(allReplies(sentMessages)).toHaveLength(repliesBefore);
     });
 
     // A3 (#2121 follow-up) — setPreference's comment claims "a pin write

@@ -438,9 +438,21 @@ export function recordKeepReceiptMessageId(
  * outcomes; this function only answers "which receipt".
  *
  * Returns null when there is no row, or the row never captured an id.
+ *
+ * A STICKY winning row (`expires_at IS NULL`) always answers null, whatever the
+ * column holds. The writer already refuses to stamp a sticky row and promotion
+ * consumes the id, so for rows written by this version the check is redundant —
+ * its job is the INSTALLED BASE. A row stamped by the previous unguarded writer
+ * and since promoted still carries an id, and reading it back would let an old
+ * receipt authenticate a threaded affirmative long after the pin became
+ * permanent: the interception this work removes, surviving the upgrade. Deciding
+ * it on READ repairs every such row without a migration and without a write,
+ * and makes "a receipt id is only ever answered for a pin that can still be
+ * promoted" true of the whole store rather than only of rows written since.
  */
 export function getKeepReceiptMessageId(db: Database, chatJid: string): string | null {
   const raw = latestRowIncludingExpired(db, chatJid);
+  if (raw && raw.expires_at === null) return null;
   const id = raw?.keep_receipt_message_id;
   return typeof id === 'string' && id !== '' ? id : null;
 }
