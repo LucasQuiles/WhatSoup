@@ -751,9 +751,9 @@ def test_deadman_still_reports_an_incomplete_state_loop_at_the_timer_cadence(env
 # ---------------------------------------------------------------------------
 # The gap limit is derived from --check-interval, whose default must equal the
 # cadence the shipped schedulers actually run at. The shipped units pass no
-# value, so the coupling is implicit; this pins it so lengthening the timer
-# without passing the flag (which would re-seed the streak on every check and
-# silence state_missing/cycle_incomplete for good) fails the suite.
+# value, so the coupling is implicit; this pins it so changing the timer
+# without changing the default cannot make the observation-gap threshold and
+# late-interval credit cap drift from the cadence that actually invokes it.
 # ---------------------------------------------------------------------------
 
 _DEPLOY = Path(__file__).resolve().parents[2]
