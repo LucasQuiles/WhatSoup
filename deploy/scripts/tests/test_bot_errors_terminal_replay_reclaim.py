@@ -173,3 +173,51 @@ def test_a_failed_delivery_replay_still_retries(tmp_path):
         "a retry after a failed delivery must still force its notification: "
         f"{len(calls)} send(s)"
     )
+
+
+def test_a_first_attempt_transport_failure_records_nothing_then_delivers(tmp_path):
+    """SHOULD-4: the retry lifecycle, driven rather than hand-written.
+
+    The sibling unit tests construct the post-failure delivery record
+    themselves, which pins the gate's reading of a record but not that the
+    dispatcher ever writes one that shape. This drives the real process_one
+    twice: the first attempt fails in transport, and nothing may be recorded
+    as represented, because an operator saw nothing. The event is then
+    requeued and the second attempt succeeds, which is what records it.
+    """
+    mod = _load(tmp_path / "retry-lifecycle")
+    paths = mod.setup_dirs()
+    event = _event("evt-retry-lifecycle", "queued")
+    key = mod.incident_key(event)
+    now = int(time.time())
+    mod.save_incident_state(paths, {
+        "version": 1,
+        "openIncidents": {key: {"status": "open", "openedAt": now - 600}},
+        "lastSentAt": {key: now - 60},
+    })
+    queued = paths["outbox"] / f"20260902.{INSTANCE}.{SOURCE}.{event['id']}.json"
+    queued.write_text(json.dumps(event, indent=2))
+    queued.chmod(0o600)
+
+    with patch.object(mod, "send_whatsapp", side_effect=RuntimeError("transport down")), \
+         patch.object(mod, "email_fallback", return_value=False):
+        mod.process_one(queued, paths)
+
+    scopes = (mod.load_incident_state(paths).get("conversationScopes") or {})
+    assert SCOPE not in scopes.get(key, {}), (
+        "a conversation whose alert never reached an operator must not be "
+        f"recorded as represented: {scopes!r}"
+    )
+
+    # The dispatcher requeued it. Second attempt, transport healthy.
+    requeued = sorted(paths["outbox"].glob("*.json"))
+    assert requeued, "a failed delivery must leave the event queued for retry"
+    calls: list = []
+    with patch.object(mod, "send_whatsapp", side_effect=lambda *a, **k: calls.append(a)):
+        mod.process_one(requeued[0], paths)
+
+    assert len(calls) == 1, f"the retry must still reach the operator: {len(calls)}"
+    scopes = (mod.load_incident_state(paths).get("conversationScopes") or {})
+    assert SCOPE in scopes.get(key, {}), (
+        f"a delivered retry must record its conversation: {scopes!r}"
+    )
