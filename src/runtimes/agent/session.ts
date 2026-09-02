@@ -4034,10 +4034,21 @@ export class SessionManager {
     turnInFlight: boolean;
     durableFailureClosed: boolean;
     durableFailureInconclusive: boolean;
+    /**
+     * True only once every provider handle this session ever held has been
+     * released. `active` is cleared at the top of `shutdown()`, before either
+     * termination is awaited, so it is not a termination proof; the child
+     * handle is nulled only after its kill tree completes and the managed
+     * provider handle only after its shutdown promise settles. Managed-loop
+     * providers never assign a child at all, so `pid` alone proves nothing
+     * for them — this flag is the provider-independent answer.
+     */
+    providerTerminated: boolean;
   } {
     return {
       active: this.active,
       pid: this.child?.pid ?? null,
+      providerTerminated: this.child === null && this.managedProviderSession === null,
       sessionId: this.sessionId,
       startedAt: this.startedAt,
       messageCount: this.messageCount,

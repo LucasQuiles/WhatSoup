@@ -34,6 +34,35 @@ function collectTsFiles(dir: string): string[] {
     .map((entry) => resolve(entry.parentPath || dir, entry.name));
 }
 
+const QUOTE = String.fromCharCode(39);
+const PUSH_MARKER = 'degradedReasons.push(';
+const CLOSE_PAREN = String.fromCharCode(41);
+
+/** Spread forms this suite knows about, and the reasons they contribute. */
+const SPREAD_SOURCES = ['...accountIdentityReasons'];
+const SPREAD_REASONS = ['credential_identity_mismatch', 'credential_identity_unverifiable'];
+
+/** Every argument text passed to `degradedReasons.push`, literal or spread. */
+function pushArguments(source: string): string[] {
+  const args: string[] = [];
+  let at = source.indexOf(PUSH_MARKER);
+  while (at !== -1) {
+    const start = at + PUSH_MARKER.length;
+    const end = source.indexOf(CLOSE_PAREN, start);
+    if (end === -1) break;
+    args.push(source.slice(start, end).trim());
+    at = source.indexOf(PUSH_MARKER, start);
+  }
+  return args;
+}
+
+/** The reason name when the argument is a plain quoted literal. */
+function quotedReason(argument: string): string | undefined {
+  if (!argument.startsWith(QUOTE) || !argument.endsWith(QUOTE)) return undefined;
+  const inner = argument.slice(1, -1);
+  return /^[a-z_]+$/.test(inner) ? inner : undefined;
+}
+
 function emittingSource(): string {
   const files = [
     resolve(repoRoot, 'src/core/health.ts'),
@@ -121,13 +150,37 @@ describe('HEALTH_DEGRADATION_CAUSE_REASON_TWINS — cause -> status_reason cross
       resolve(repoRoot, 'src/runtimes/agent/runtime.ts'),
       'utf8',
     );
-    const pushed = [...runtimeSource.matchAll(/degradedReasons\.push\('([a-z_]+)'\)/g)]
-      .map((match) => match[1]);
-    // Guard the extraction itself: a regex that silently matches nothing would
-    // make this test vacuously green.
-    expect(pushed.length, 'no degradedReasons.push literals found — extraction is broken')
-      .toBeGreaterThanOrEqual(10);
-    expect(pushed).toContain('per_chat_session_without_owner');
+    const allPushes = pushArguments(runtimeSource);
+    const literalPushes = allPushes
+      .map(quotedReason)
+      .filter((reason): reason is string => reason !== undefined);
+
+    // Coverage assertion, not merely a positive control. A literal-only match
+    // silently ignores spread emissions, so state the whole population and
+    // require every member to be one of the two forms this test understands.
+    // A third form — a new spread, a computed reason — fails here instead of
+    // passing unnoticed, which is what the earlier literal-only claim did.
+    const unclassified = allPushes.filter(
+      (argument) => quotedReason(argument) === undefined && !SPREAD_SOURCES.includes(argument),
+    );
+    expect(unclassified, 'degradedReasons.push form this test cannot classify').toEqual([]);
+    expect(allPushes.length, 'no degradedReasons.push found — extraction is broken')
+      .toBeGreaterThanOrEqual(12);
+    expect(literalPushes).toContain('per_chat_session_without_owner');
+
+    // The spread source contributes these two reasons. They are checked below
+    // alongside the literals rather than exempted, and pinned to their emitter
+    // so a rename there fails here.
+    const spreadSource = readFileSync(
+      resolve(repoRoot, 'src/runtimes/agent/providers/claude-account-identity.ts'),
+      'utf8',
+    );
+    for (const reason of SPREAD_REASONS) {
+      expect(
+        spreadSource.includes(QUOTE + reason + QUOTE),
+        `${reason} is no longer emitted by the spread source`,
+      ).toBe(true);
+    }
 
     const named = new Set(
       HEALTH_DEGRADATION_CAUSES.flatMap((cause) => {
@@ -135,7 +188,7 @@ describe('HEALTH_DEGRADATION_CAUSE_REASON_TWINS — cause -> status_reason cross
         return twins === NO_REASON_TWIN ? [] : [...twins];
       }),
     );
-    const orphans = [...new Set(pushed)]
+    const orphans = [...new Set([...literalPushes, ...SPREAD_REASONS])]
       .filter((reason) => !named.has(`runtime.${reason}`))
       .sort();
     expect(orphans, 'runtime degradedReasons no degradation cause names as a twin').toEqual([]);

@@ -312,6 +312,7 @@ export function queueStub(chatJid: string): IOutboundQueue {
     setPollPending: vi.fn(),
     flush: vi.fn(async () => {}),
     isPoisoned: vi.fn(() => false),
+    getSenderToken: vi.fn((): string | undefined => undefined),
     shutdown: vi.fn(async () => {}),
     abortTurn: vi.fn(),
     updateDeliveryJid: vi.fn(),
@@ -349,6 +350,8 @@ export function sessionStub() {
       turnInFlight?: boolean;
       durableFailureClosed?: boolean;
       durableFailureInconclusive?: boolean;
+      /** Provider-handle release proof; absent means "not proven". */
+      providerTerminated?: boolean;
     }>(() => ({ active: true, sessionId: 'session-41', pid: 4100, turnInFlight: false })),
   };
 }

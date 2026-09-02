@@ -36,6 +36,7 @@ import { createChildLogger } from '../../../src/logger.ts';
 
 const runtimeLogger = createChildLogger('test') as unknown as {
   warn: ReturnType<typeof vi.fn>;
+  info: ReturnType<typeof vi.fn>;
 };
 
 /** Private runtime surface this suite drives directly. */
@@ -51,6 +52,8 @@ type OwnershipState = RuntimeState & {
   sweepPerChatSessionsWithoutOwner(): number;
   logHealthStats(): void;
   operationTrackers: Map<string, { shutdown: ReturnType<typeof vi.fn> }>;
+  ownedSessionManagers: Map<string, ReturnType<typeof sessionStub>>;
+  sessionManagerIds: WeakMap<object, string>;
   getHealthSnapshot(): { status: string; details: Record<string, unknown> };
   sessionOwnership: RuntimeState['sessionOwnership'] & {
     get(mapKey: string): { managerId: string } | undefined;
@@ -116,6 +119,7 @@ function exitedSessionStub(): ReturnType<typeof sessionStub> {
     sessionId: 'session-41',
     pid: null,
     turnInFlight: false,
+    providerTerminated: true,
   });
   return session;
 }
@@ -156,6 +160,7 @@ function stubSpawnAndClaim(state: OwnershipState, deliveryJid: string) {
 afterEach(() => {
   vi.restoreAllMocks();
   runtimeLogger.warn.mockClear();
+  runtimeLogger.info.mockClear();
 });
 
 describe('per-chat session entry whose dispatch ownership was lost', () => {
@@ -266,6 +271,166 @@ describe('per-chat session entry whose dispatch ownership was lost', () => {
     }
   });
 
+  it('does not release a registered live owner named by the registry', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const { state } = makePerChatRuntime(db);
+      const runtimeContext = context('per_chat', MAP_KEY, 509, 'turn-registered-live-owner');
+      const deliveryJid = runtimeContext.identity.deliveryJid;
+
+      // The shape the predicate calls "unowned" but that is NOT ours to
+      // release: the registry names manager B, whose session is live and
+      // registered, while the session map holds a dead session A. Releasing
+      // here would orphan B and spawn C — two live children for one chat.
+      const liveOwner = sessionStub();
+      const liveOwnerId = state.managerIdFor(liveOwner);
+      state.ownedSessionManagers.set(liveOwnerId, liveOwner);
+      state.sessionOwnership.claim(MAP_KEY, liveOwnerId);
+      const deadMapped = exitedSessionStub();
+      state.chatSessions.set(MAP_KEY, deadMapped);
+      state.chatQueues.set(MAP_KEY, queueStub(deliveryJid));
+      const spawn = vi.spyOn(state, 'ensureSessionAndQueueSync');
+
+      await expect(dispatchTurn(state, runtimeContext)).rejects.toThrow();
+
+      // No release, no spawn, and the live owner is untouched and still owned.
+      expect(spawn).not.toHaveBeenCalled();
+      expect(vi.mocked(liveOwner.shutdown)).not.toHaveBeenCalled();
+      expect(liveOwner.getStatus().active).toBe(true);
+      expect(state.ownedSessionManagers.get(liveOwnerId)).toBe(liveOwner);
+      expect(state.sessionOwnership.get(MAP_KEY)?.managerId).toBe(liveOwnerId);
+      expect(state.chatSessions.get(MAP_KEY)).toBe(deadMapped);
+      // Wedged, exactly as it was before this repair existed, but reported.
+      expect(state.perChatSessionsWithoutOwner()).toEqual([MAP_KEY]);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('evicts when the registry names a manager that is itself gone', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const { state } = makePerChatRuntime(db);
+      const runtimeContext = context('per_chat', MAP_KEY, 510, 'turn-dead-registered-owner');
+      const deliveryJid = runtimeContext.identity.deliveryJid;
+
+      // Same mismatch shape, but the registered owner is provably terminated,
+      // so releasing it cannot strand a running child. Recovery must still run
+      // — the guard above must not turn every mismatch into a permanent wedge.
+      const deadOwner = exitedSessionStub();
+      const deadOwnerId = state.managerIdFor(deadOwner);
+      state.ownedSessionManagers.set(deadOwnerId, deadOwner);
+      state.sessionOwnership.claim(MAP_KEY, deadOwnerId);
+      state.chatSessions.set(MAP_KEY, exitedSessionStub());
+      state.chatQueues.set(MAP_KEY, queueStub(deliveryJid));
+      const spawned = stubSpawnAndClaim(state, deliveryJid);
+
+      await dispatchTurn(state, runtimeContext);
+
+      expect(state.chatSessions.get(MAP_KEY)).toBe(spawned);
+      expect(vi.mocked(spawned.sendTurn)).toHaveBeenCalledTimes(1);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('does not evict a managed-provider session mid-shutdown', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const { state } = makePerChatRuntime(db);
+      const runtimeContext = context('per_chat', MAP_KEY, 511, 'turn-managed-mid-shutdown');
+      const deliveryJid = runtimeContext.identity.deliveryJid;
+
+      // A managed-loop provider never assigns a child, so it reports a null pid
+      // for its whole life. `shutdown()` clears `active` before awaiting the
+      // managed shutdown, which can time out and force-kill. Cleared flag plus
+      // null pid therefore proves nothing here; only the handle release does.
+      const managedMidShutdown = sessionStub();
+      managedMidShutdown.getStatus.mockReturnValue({
+        active: false,
+        sessionId: 'session-41',
+        pid: null,
+        turnInFlight: false,
+        providerTerminated: false,
+      });
+      state.chatSessions.set(MAP_KEY, managedMidShutdown);
+      state.chatQueues.set(MAP_KEY, queueStub(deliveryJid));
+      const spawn = vi.spyOn(state, 'ensureSessionAndQueueSync');
+
+      await expect(dispatchTurn(state, runtimeContext)).rejects.toThrow();
+
+      expect(spawn).not.toHaveBeenCalled();
+      expect(state.chatSessions.get(MAP_KEY)).toBe(managedMidShutdown);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('does not evict a terminated session whose turn is still in flight', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const { state } = makePerChatRuntime(db);
+      const runtimeContext = context('per_chat', MAP_KEY, 512, 'turn-still-in-flight');
+      const deliveryJid = runtimeContext.identity.deliveryJid;
+      const busy = sessionStub();
+      busy.getStatus.mockReturnValue({
+        active: false,
+        sessionId: 'session-41',
+        pid: null,
+        turnInFlight: true,
+        providerTerminated: true,
+      });
+      state.chatSessions.set(MAP_KEY, busy);
+      state.chatQueues.set(MAP_KEY, queueStub(deliveryJid));
+      const spawn = vi.spyOn(state, 'ensureSessionAndQueueSync');
+
+      await expect(dispatchTurn(state, runtimeContext)).rejects.toThrow();
+
+      expect(spawn).not.toHaveBeenCalled();
+      expect(state.chatSessions.get(MAP_KEY)).toBe(busy);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('leaves the outbound queue mapped so the replacement inherits its echo-guard token', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const { state } = makePerChatRuntime(db);
+      const runtimeContext = context('per_chat', MAP_KEY, 513, 'turn-echo-guard-token');
+      const deliveryJid = runtimeContext.identity.deliveryJid;
+      installUnownedSession(state, deliveryJid, false);
+      const staleQueue = state.chatQueues.get(MAP_KEY)!;
+
+      // `createOutboundQueue` reads the predecessor's token through
+      // `priorSenderTokenForChat`, which looks up this very key. Deleting the
+      // entry during eviction would drop the token and let the replacement's
+      // first group reply fall inside the predecessor's cooldown.
+      let tokenVisibleToReplacement: string | undefined;
+      const spawned = sessionStub();
+      vi.spyOn(state, 'ensureSessionAndQueueSync').mockImplementation((_chatJid, mapKey) => {
+        const key = mapKey ?? MAP_KEY;
+        tokenVisibleToReplacement = state.chatQueues.get(key)?.getSenderToken();
+        state.sessionOwnership.claim(key, state.managerIdFor(spawned));
+        state.chatSessions.set(key, spawned);
+        state.chatQueues.set(key, queueStub(deliveryJid));
+      });
+      vi.mocked(staleQueue.getSenderToken).mockReturnValue('sender-token-1');
+
+      await dispatchTurn(state, runtimeContext);
+
+      expect(vi.mocked(staleQueue.abortTurn)).toHaveBeenCalled();
+      expect(tokenVisibleToReplacement).toBe('sender-token-1');
+    } finally {
+      db.close();
+    }
+  });
+
   it('does not evict a cleared session that still holds a pid', async () => {
     const db = new Database(':memory:');
     db.open();
@@ -283,6 +448,7 @@ describe('per-chat session entry whose dispatch ownership was lost', () => {
         sessionId: 'session-41',
         pid: 4100,
         turnInFlight: false,
+        providerTerminated: false,
       });
       state.chatSessions.set(MAP_KEY, clearedButLive);
       state.chatQueues.set(MAP_KEY, queueStub(deliveryJid));
@@ -420,14 +586,25 @@ describe('unowned per-chat session sweep', () => {
     }
   });
 
-  it('reports the unowned count on the periodic health line', () => {
+  it('reports the unowned count in the periodic health payload', () => {
     const db = new Database(':memory:');
     db.open();
     try {
       const { state } = makePerChatRuntime(db);
       state.chatSessions.set(MAP_KEY, sessionStub());
-      expect(() => state.logHealthStats()).not.toThrow();
-      expect(state.perChatSessionsWithoutOwner()).toEqual([MAP_KEY]);
+      runtimeLogger.info.mockClear();
+
+      state.logHealthStats();
+
+      // Assert the PAYLOAD, not merely that the call did not throw: the
+      // earlier version of this test stayed green with the field deleted.
+      const healthLine = runtimeLogger.info.mock.calls.find(
+        (call) => call[1] === 'agent runtime health stats',
+      );
+      expect(healthLine, 'no health stats line was logged').toBeDefined();
+      const payload = healthLine?.[0] as { perChatSessionsWithoutOwner?: number };
+      expect(payload).toHaveProperty('perChatSessionsWithoutOwner');
+      expect(payload.perChatSessionsWithoutOwner).toBe(1);
     } finally {
       db.close();
     }

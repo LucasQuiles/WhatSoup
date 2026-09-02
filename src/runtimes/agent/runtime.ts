@@ -7867,29 +7867,40 @@ export class AgentRuntime implements Runtime {
   private evictUnownedPerChatSession(mapKey: string, session: SessionManager): boolean {
     if (!this.isPerChatSessionWithoutOwner(mapKey, session)) return false;
     if ((this.perChatRuntimeTurnContexts.get(mapKey)?.length ?? 0) > 0) return false;
-    // Fail closed unless the child is PROVABLY gone. A cleared `active` flag
-    // alone is not that proof: `SessionManager.shutdown` clears it before it
-    // kills the child, and `resetFailedSessionStart` clears it while
-    // deliberately retaining a child whose kill failed. Use the file's own
-    // provably-dead idiom instead — cleared flag AND no pid — because
-    // detaching a live child would let the spawn below run a second child for
-    // one conversation. The state this exists to recover is an exited child,
-    // so the recovery still lands; anything less certain stays wedged, and
-    // stays reported by the sweep.
-    const status = session.getStatus();
-    if (status.active || status.pid !== null) return false;
+    // Fail closed unless the mapped session is provably terminated.
+    if (!this.isSessionProvablyTerminated(session)) return false;
+    // The predicate treats "the registry names a DIFFERENT manager" as unowned
+    // too, and that shape is not ours to release: `deleteOwnedPerChatSession`
+    // releases whichever manager the REGISTRY names, so a registered, still
+    // live owner would be orphaned while the spawn below starts a replacement
+    // — two live provider children for one conversation, which is strictly
+    // worse than the wedge this repair replaces. `setOwnedPerChatSession`
+    // refuses the same situation, so refuse it here rather than disagree with
+    // it. Only a registered owner that is itself provably terminated, or no
+    // registered owner at all, may be released.
+    const owner = this.sessionOwnership.get(mapKey);
+    const registeredOwner = owner === undefined
+      ? undefined
+      : this.ownedSessionManagers.get(owner.managerId);
+    if (registeredOwner !== undefined && !this.isSessionProvablyTerminated(registeredOwner)) {
+      return false;
+    }
     log.warn(
-      { mapKey, hasOwner: this.sessionOwnership.get(mapKey) !== undefined },
+      { mapKey, hasOwner: owner !== undefined },
       'per-chat session entry has no current dispatch owner — evicting the stale entry so the next turn respawns',
     );
-    // The replacement overwrites this chat's outbound queue and operation
-    // tracker unconditionally, so retire the current pair rather than orphan
-    // it — an abandoned tracker keeps its armed timers running (QR-094).
+    // The replacement overwrites this chat's operation tracker unconditionally,
+    // so retire the current one rather than orphan it — an abandoned tracker
+    // keeps its armed timers running (QR-094).
     const tracker = this.operationTrackers.get(mapKey);
     tracker?.shutdown();
     this.operationTrackers.delete(mapKey);
+    // Abort the outbound queue but LEAVE IT MAPPED. `createOutboundQueue` reads
+    // the predecessor's echo-guard token through `priorSenderTokenForChat`,
+    // which looks this very key up; deleting here would drop the token and let
+    // a replacement's first group reply fall inside the old cooldown. The spawn
+    // path replaces the entry unconditionally, so nothing leaks by leaving it.
     this.chatQueues.get(mapKey)?.abortTurn();
-    this.chatQueues.delete(mapKey);
     // Deliberately NOT cleanupPerChatState: unlike idle eviction, this runs at
     // the head of a turn that is about to be dispatched, and that helper drops
     // the in-flight turn's journal seq and pending text. Detaching to exactly
@@ -7897,6 +7908,22 @@ export class AgentRuntime implements Runtime {
     // point — that path also runs with this turn's state already set.
     this.deleteOwnedPerChatSession(mapKey, session);
     return true;
+  }
+
+  /**
+   * True only when this session can no longer be running provider work.
+   *
+   * `active` is cleared at the top of `SessionManager.shutdown` and by
+   * `resetFailedSessionStart`, in both cases while a provider handle may still
+   * be live, so it is not a termination proof on its own. `pid` is not one
+   * either: managed-loop providers never assign a child, so they report a null
+   * pid for their whole life. `providerTerminated` is the provider-independent
+   * answer, and an in-flight turn means work is still running whatever the
+   * handles say.
+   */
+  private isSessionProvablyTerminated(session: SessionManager): boolean {
+    const status = session.getStatus();
+    return !status.active && status.providerTerminated === true && status.turnInFlight !== true;
   }
 
   /** True when this chat holds a session entry no ownership record backs. */
