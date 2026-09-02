@@ -38,12 +38,10 @@ ROOT="${2:?missing <root>}"
 # this file's source text to derive the managed-path set independent of any
 # runtime manifest lookup.
 #
-# Keep the array body a flat list of quoted paths: no comment lines and no
-# parenthesis characters. tests/scripts/deployer-static-parity.test.ts slices
-# this file's text from the array opener to the first ')' and treats every
-# remaining non-blank line as a pin path, so an embedded ')' truncates the pin
-# set and a comment line inside the array is read as a pin. Issue #3469
-# rewrites that parser; until it lands, notes belong here, above the array.
+# The array body is parsed statically by scripts/lib/deployer-import-closure.ts
+# (parseDeployPinPaths), which anchors on the closing ")" at column 0 and skips
+# blank and "#" lines, so comments between the entries are safe and the array
+# below carries them. Each remaining line must be a single quoted bare path.
 #
 # On the src/lib entries: bot-errors-outbox.ts imports alert-evidence.ts,
 # private-fs.ts, redaction-patterns.ts and type-guards.ts at module scope.
