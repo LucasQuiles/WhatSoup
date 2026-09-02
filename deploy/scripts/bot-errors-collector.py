@@ -4431,14 +4431,18 @@ def main() -> int:
         emit_state_recovery_fallback(exc.diagnostic)
         return STATE_RECOVERY_REQUIRED_EXIT
     except UnregisteredAlertSourceError as exc:
-        # Same process boundary as ControllerStateRequired, and deliberately the
-        # same exit code: 78 is held out of the service manager's restart loop
-        # (RestartPreventExitStatus=78 in deploy/whatsoup@.service), which is the
-        # correct shape here. An unregistered source means the state file or the
-        # registry needs an operator edit; restarting cannot clear it, and a
-        # bare traceback in a restart loop is what this replaces. The line is the
-        # exception's own bounded message: a count and an opaque digest, never a
-        # key, a remote identity, or a remote root.
+        # Same process boundary and the same exit code as
+        # ControllerStateRequired: 78 is this estate's typed "state needs an
+        # operator decision" code across collector, dispatcher and watchdog.
+        # It does NOT suppress restarts for this process -- the collector runs
+        # under deploy/bot-errors-collector.service (Restart=always,
+        # RestartSec=10, no RestartPreventExitStatus); the unit that holds 78
+        # out of its restart loop is deploy/whatsoup@.service, a different
+        # unit. What this replaces is therefore the bare traceback, not the
+        # loop: an operator gets a typed exit code and one bounded line instead
+        # of a stack trace every ten seconds. The line is the exception's own
+        # message, a count and an opaque digest, never a key, a remote
+        # identity, or a remote root.
         print(f"bot-errors-collector: {exc}", file=sys.stderr)
         return STATE_RECOVERY_REQUIRED_EXIT
     print(json.dumps(result, sort_keys=True))
