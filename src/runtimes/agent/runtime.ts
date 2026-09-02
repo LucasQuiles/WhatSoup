@@ -7936,10 +7936,20 @@ export class AgentRuntime implements Runtime {
    * pid for their whole life. `providerTerminated` is the provider-independent
    * answer, and an in-flight turn means work is still running whatever the
    * handles say.
+   *
+   * An inconclusive durable failure is disqualifying too. That latch means a
+   * compensation was never confirmed, and `assertDurableFailureReconciled`
+   * refuses to respawn the manager holding it. Releasing such a manager throws
+   * the latch away and lets a replacement spawn as if the write had settled,
+   * so treat it as work that may still be outstanding rather than as a
+   * terminated generation.
    */
   private isSessionProvablyTerminated(session: SessionManager): boolean {
     const status = session.getStatus();
-    return !status.active && status.providerTerminated === true && status.turnInFlight !== true;
+    return !status.active
+      && status.providerTerminated === true
+      && status.turnInFlight !== true
+      && status.durableFailureInconclusive !== true;
   }
 
   /** True when this chat holds a session entry no ownership record backs. */

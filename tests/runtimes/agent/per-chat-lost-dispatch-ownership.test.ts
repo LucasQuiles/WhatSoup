@@ -500,6 +500,40 @@ describe('per-chat session entry whose dispatch ownership was lost', () => {
     }
   });
 
+  it('does not evict a session holding an inconclusive durable failure', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const { state } = makePerChatRuntime(db);
+      const runtimeContext = context('per_chat', MAP_KEY, 531, 'turn-durable-failure-inconclusive');
+      const deliveryJid = runtimeContext.identity.deliveryJid;
+
+      // Handles released and no turn running, but the durable-failure
+      // compensation was never confirmed. `assertDurableFailureReconciled`
+      // refuses to respawn a manager in that state, so discarding it drops the
+      // latch and lets the replacement spawn as if nothing had happened.
+      const inconclusive = sessionStub();
+      inconclusive.getStatus.mockReturnValue({
+        active: false,
+        sessionId: 'session-42',
+        pid: null,
+        turnInFlight: false,
+        providerTerminated: true,
+        durableFailureInconclusive: true,
+      });
+      state.chatSessions.set(MAP_KEY, inconclusive);
+      state.chatQueues.set(MAP_KEY, queueStub(deliveryJid));
+      const spawn = vi.spyOn(state, 'ensureSessionAndQueueSync');
+
+      await expect(dispatchTurn(state, runtimeContext)).rejects.toThrow();
+
+      expect(spawn).not.toHaveBeenCalled();
+      expect(state.chatSessions.get(MAP_KEY)).toBe(inconclusive);
+    } finally {
+      db.close();
+    }
+  });
+
   it('leaves the outbound queue mapped so the replacement inherits its echo-guard token', async () => {
     const db = new Database(':memory:');
     db.open();
