@@ -5558,11 +5558,17 @@ print(m.probe_health(9092))
       importHealthModulePrelude(),
       'import json',
       'loaded = """gui/501/com.whatsoup.agent-alpha = {\n\tenvironment = {\n\t\tPATH => /loaded/first:/loaded/second\n\t\tHOME => /fixture\n\t}\n}"""',
-      'print(json.dumps({"parsed": m.launchctl_environment_path(loaded), "match": m.instance_provider_path_match("/loaded/first:/loaded/second", "/loaded/first:/loaded/second"), "mismatch": m.instance_provider_path_match("/disk", "/loaded")}))',
+      // launchctl_environment_path was a one-line wrapper with no production
+      // caller; it is gone and its parse assertion is carried here, driving the
+      // surviving readers directly: launchctl_environment for the block parse,
+      // environment_provider_path for the PATH accessor.
+      'parsed_env = m.launchctl_environment(loaded)',
+      'print(json.dumps({"parsed": m.environment_provider_path(parsed_env), "home": parsed_env.get("HOME"), "match": m.instance_provider_path_match("/loaded/first:/loaded/second", "/loaded/first:/loaded/second"), "mismatch": m.instance_provider_path_match("/disk", "/loaded")}))',
     ].join('\n'))) as Record<string, unknown>;
 
     expect(result).toEqual({
       parsed: '/loaded/first:/loaded/second',
+      home: '/fixture',
       match: true,
       mismatch: false,
     });

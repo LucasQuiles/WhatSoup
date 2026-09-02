@@ -4232,12 +4232,16 @@ def opencode_provider_probe_command(profile: dict[str, Any], item: dict[str, Any
     return "opencode"
 
 
-def instance_provider_path(name: str) -> str | None:
-    dry_path = os.environ.get("BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH")
-    if dry_path is not None:
-        return dry_path.strip() or None
-    if HOST_PLATFORM != "darwin":
-        return os.environ.get("PATH") or None
+def instance_plist_environment(name: str) -> dict[str, str] | None:
+    """Read the WHOLE EnvironmentVariables map out of a generated instance plist.
+
+    One reader for every governed key the probe checks (PATH and
+    WHATSOUP_PATH_PREPEND today), so a second key cannot arrive with a second
+    copy of these guards: regular non-symlink file, bounded size, and a Label
+    that matches the instance, so an unrelated or planted plist at the expected
+    pathname is never parsed. None means "no readable generated plist", which
+    every caller must treat as unknown rather than as absence of drift.
+    """
     plist_path = Path.home() / "Library" / "LaunchAgents" / f"com.whatsoup.{name}.plist"
     try:
         plist_stat = plist_path.lstat()
@@ -4258,13 +4262,115 @@ def instance_provider_path(name: str) -> str | None:
     )
     if environment_match is None:
         return None
-    path_match = re.search(
-        r"<key>PATH</key>\s*<string>(.*?)</string>", environment_match.group(1), re.DOTALL
-    )
-    if path_match is None:
+    block = environment_match.group(1)
+    # The block regex stops at the FIRST </dict>, so a nested dict would silently
+    # truncate the map and make a declared key read as absent. The TypeScript
+    # comparator (src/fleet/launchd-env-drift.ts) refuses outright in that case;
+    # match it and report unknown rather than hand back a partial map.
+    if "<dict>" in block:
         return None
-    value = html.unescape(path_match.group(1)).strip()
-    return value or None
+    environment: dict[str, str] = {}
+    for match in re.finditer(
+        r"<key>(.*?)</key>\s*<string>(.*?)</string>", block, re.DOTALL
+    ):
+        key = html.unescape(match.group(1))
+        # FIRST occurrence wins, preserving the precedence of the single-key
+        # re.search this reader replaced. A hand-edited plist with a duplicate
+        # key must not resolve differently than it did before the refactor.
+        if key in environment:
+            continue
+        environment[key] = html.unescape(match.group(2)).strip()
+    return environment
+
+
+def environment_value(environment: dict[str, str] | None, key: str) -> str | None:
+    """Single accessor for ONE governed value out of ANY environment map.
+
+    The generated plist, `launchctl print` output and the loaded job all answer
+    the same question, so they share one reader rather than each carrying its
+    own `.get(...)`. Empty and whitespace-only read as absent: launchctl drops
+    empty-valued keys, and an empty PATH entry would otherwise mean the current
+    directory.
+    """
+    if not environment:
+        return None
+    value = environment.get(key)
+    if value is None:
+        return None
+    return value.strip() or None
+
+
+def environment_provider_path(environment: dict[str, str] | None) -> str | None:
+    """Provider PATH out of any environment map."""
+    return environment_value(environment, "PATH")
+
+
+def instance_provider_path(name: str) -> str | None:
+    dry_path = os.environ.get("BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH")
+    if dry_path is not None:
+        return dry_path.strip() or None
+    if HOST_PLATFORM != "darwin":
+        return os.environ.get("PATH") or None
+    return environment_provider_path(instance_plist_environment(name))
+
+
+def provider_probe_output_is_stubbed() -> bool:
+    """True when the provider probe's output is injected rather than executed.
+
+    Same class of test affordance as BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH: when
+    the probe result is supplied by the caller, the probe is not vouching for a
+    real provider, so the governed LaunchAgent checks have nothing to govern and
+    would otherwise mask the classification under test. Without this the checks
+    would also make those suites platform-divergent, passing on a Linux runner
+    and failing on a macOS one purely because HOST_PLATFORM is read from the
+    host rather than pinned.
+    """
+    return (
+        os.environ.get("BOT_ERRORS_DRY_PROVIDER_PROBE_STDOUT") is not None
+        or os.environ.get("BOT_ERRORS_DRY_PROVIDER_PROBE_RC") is not None
+    )
+
+
+GOVERNED_PLIST_READABLE = "readable"
+GOVERNED_PLIST_NOT_APPLICABLE = "not_applicable"
+GOVERNED_PLIST_UNREADABLE = "unreadable"
+
+
+def instance_plist_governed_environment(name: str) -> tuple[str, dict[str, str] | None]:
+    """(state, environment) for the governed checks. THREE states, not two.
+
+    These used to collapse into one None, and that collapse was a fail-open: a
+    caller could not tell "there is no LaunchAgent surface here" from "there is
+    one and I could not read it", so it treated both as "no drift" and the
+    default provider reported healthy on a missing, planted, oversized,
+    symlinked, wrongly-labelled or unreadable plist while opencode failed
+    closed on the same fixture.
+
+      not_applicable -- benign. No LaunchAgent surface exists (systemd host) or
+        the dry-run PATH override is active. The governed checks genuinely do
+        not apply and resolution proceeds unchanged.
+      unreadable -- NOT benign. This is darwin, a plist is expected, and the
+        parser refused it. Its docstring already says None means UNKNOWN, so
+        callers must fail closed rather than read it as absence of drift.
+      readable -- the whole map, read once per probe run so two governed keys
+        can never come from two different states of the same file.
+    """
+    if os.environ.get("BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH") is not None:
+        return (GOVERNED_PLIST_NOT_APPLICABLE, None)
+    if provider_probe_output_is_stubbed():
+        return (GOVERNED_PLIST_NOT_APPLICABLE, None)
+    if HOST_PLATFORM != "darwin":
+        return (GOVERNED_PLIST_NOT_APPLICABLE, None)
+    environment = instance_plist_environment(name)
+    if environment is None:
+        return (GOVERNED_PLIST_UNREADABLE, None)
+    return (GOVERNED_PLIST_READABLE, environment)
+
+
+def instance_provider_path_prepend(name: str) -> str | None:
+    """Governed PATH prepend exactly as the instance's own LaunchAgent declares it."""
+    _state, environment = instance_plist_governed_environment(name)
+    return environment_value(environment, "WHATSOUP_PATH_PREPEND")
 
 
 def launchctl_environment(output: str) -> dict[str, str]:
@@ -4282,10 +4388,6 @@ def launchctl_environment(output: str) -> dict[str, str]:
         )
         if match.group(2).strip()
     }
-
-
-def launchctl_environment_path(output: str) -> str | None:
-    return launchctl_environment(output).get("PATH")
 
 
 def loaded_instance_environment(name: str) -> dict[str, str]:
@@ -4313,10 +4415,6 @@ def loaded_instance_environment(name: str) -> dict[str, str]:
     return launchctl_environment(proc.stdout) if proc.returncode == 0 else {}
 
 
-def loaded_instance_provider_path(name: str) -> str | None:
-    return loaded_instance_environment(name).get("PATH")
-
-
 def effective_instance_provider_path(environment: dict[str, str]) -> str | None:
     inherited_path = environment.get("PATH", "").strip()
     if os.environ.get("BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH") is not None:
@@ -4332,18 +4430,24 @@ def effective_instance_provider_path(environment: dict[str, str]) -> str | None:
             node = str(Path(home) / ".nvm" / "versions" / "node" / f"v{nvmrc_version}" / "bin" / "node")
     if not inherited_path or not home or not node:
         return None
+    # The launcher passes the governed prepend as the helper's 4th argument
+    # (whatsoup_export_runtime_path reads WHATSOUP_PATH_PREPEND). Passing only
+    # three here made the probe compose a DIFFERENT effective PATH than the
+    # service, so the two sides could resolve different provider binaries.
+    path_prepend = environment.get("WHATSOUP_PATH_PREPEND", "").strip()
     helper = REPO_ROOT / "deploy" / "lib" / "runtime-path.sh"
     try:
         proc = subprocess.run(
             [
                 "/bin/bash",
                 "-c",
-                '. "$1"; whatsoup_effective_runtime_path "$2" "$3" "$4"',
+                '. "$1"; whatsoup_effective_runtime_path "$2" "$3" "$4" "$5"',
                 "runtime-path",
                 str(helper),
                 home,
                 node,
                 inherited_path,
+                path_prepend,
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -4362,6 +4466,75 @@ def effective_instance_provider_path(environment: dict[str, str]) -> str | None:
 
 def instance_provider_path_match(generated_path: str | None, loaded_path: str | None) -> bool:
     return bool(generated_path and loaded_path and generated_path == loaded_path)
+
+
+def instance_provider_path_prepend_match(
+    plist_prepend: str | None,
+    loaded_prepend: str | None,
+) -> bool:
+    """Compare the governed prepend the plist declares against the loaded job's.
+
+    Both absent counts as EQUAL: a host with no service.pathPrepend renders no
+    key and launchd loads none, which is agreement rather than drift. Empty and
+    whitespace-only normalise to absent because launchctl drops empty-valued
+    keys, so an empty rendered value would otherwise never compare equal to
+    itself.
+    """
+    return (plist_prepend or "").strip() == (loaded_prepend or "").strip()
+
+
+def path_starts_with_entries(path_value: str | None, prefix_value: str | None) -> bool:
+    """True when every entry of prefix_value leads path_value, entry by entry.
+
+    Split into entries rather than compared as a string prefix: a string
+    comparison would accept "/pin/binary" as satisfying a "/pin/bin" prefix.
+    Empty entries are compared, not filtered out, so this agrees with
+    pathStartsWithEntries in src/fleet/launchd-env-drift.ts on a hand-edited
+    value like "/a::/b" instead of quietly accepting a PATH the TypeScript
+    comparator rejects.
+    """
+    if not prefix_value:
+        return True
+    prefix_entries = prefix_value.split(":")
+    return (path_value or "").split(":")[: len(prefix_entries)] == prefix_entries
+
+
+REGENERATE_LAUNCHAGENT_REMEDIATION = (
+    "regenerate_and_reload_the_instance_launchagent"
+    "_or_verify_launchctl_print_output_parses"
+)
+
+
+def governed_prepend_failure_class(
+    plist_environment: dict[str, str] | None,
+    loaded_environment: dict[str, str],
+) -> str | None:
+    """Governed-prepend failure class shared by EVERY provider probe, or None.
+
+    claude-cli is the default agentOptions.provider, so wiring this check into
+    the opencode probe alone would leave the default provider unchecked. Both
+    values come from one already-read plist map, so a regenerate landing mid-run
+    cannot make the PATH and the prepend disagree by accident. A None
+    plist_environment means the governed surfaces are not real here and the
+    check is skipped rather than guessed.
+    """
+    if plist_environment is None:
+        return None
+    declared = environment_value(plist_environment, "WHATSOUP_PATH_PREPEND")
+    if not instance_provider_path_prepend_match(
+        declared,
+        loaded_environment.get("WHATSOUP_PATH_PREPEND"),
+    ):
+        return "provider_runtime_path_prepend_mismatch"
+    # A declared prepend that does not lead the plist's OWN PATH means the two
+    # rendered surfaces of one config fact disagree, so the launcher and the
+    # probe would compose different effective PATHs from a single plist.
+    if declared and not path_starts_with_entries(
+        environment_provider_path(plist_environment),
+        declared,
+    ):
+        return "provider_runtime_path_prepend_inconsistent"
+    return None
 
 
 def agent_workspace_cwd(data: dict[str, Any], name: str) -> str:
@@ -4465,6 +4638,9 @@ def opencode_functional_probe_args(command: str, data: dict[str, Any], target: s
 
 OPENCODE_FUNCTIONAL_ENV_KEYS = (
     "PATH",
+    # Without this the child environment drops the governed prepend and the
+    # functional probe resolves a different binary than the service does.
+    "WHATSOUP_PATH_PREPEND",
     "HOME",
     "USER",
     "SHELL",
@@ -4478,15 +4654,24 @@ OPENCODE_FUNCTIONAL_ENV_KEYS = (
 )
 
 
-def opencode_functional_probe_env(
-    data: dict[str, Any],
-    target: str,
-    timeout_seconds: int,
+def governed_child_environment(
     provider_path: str | None = None,
     name: str | None = None,
     child_cwd: str | None = None,
     base_env: dict[str, str] | None = None,
 ) -> dict[str, str]:
+    """Allowlisted child environment carrying the GOVERNED provider PATH.
+
+    Shared by every provider probe. The binary is selected from the governed
+    PATH, so it must also RUN under that PATH: otherwise a `#!/usr/bin/env node`
+    wrapper resolves its interpreter from the probe process's PATH and the probe
+    exercises the right executable under the wrong runtime.
+
+    Deliberately carries NO provider credential. opencode layers its own on top
+    of this; claude-cli authenticates out of band, and handing it another
+    provider's API key would be both wrong and a credential leak into a child
+    that has no use for it.
+    """
     source_env = base_env if base_env is not None else os.environ
     child_env = {
         key: value
@@ -4499,6 +4684,19 @@ def opencode_functional_probe_env(
         child_env["WHATSOUP_INSTANCE"] = name
     if child_cwd:
         child_env["WHATSOUP_MCP_SOCKET"] = str(Path(child_cwd) / ".claude" / "whatsoup.sock")
+    return child_env
+
+
+def opencode_functional_probe_env(
+    data: dict[str, Any],
+    target: str,
+    timeout_seconds: int,
+    provider_path: str | None = None,
+    name: str | None = None,
+    child_cwd: str | None = None,
+    base_env: dict[str, str] | None = None,
+) -> dict[str, str]:
+    child_env = governed_child_environment(provider_path, name, child_cwd, base_env)
     model = provider_model_from_config(data, target)
     service = opencode_key_service_from_config(data, target)
     env_key = service_env_var(service) if service else None
@@ -4517,6 +4715,8 @@ def opencode_provider_probe_inventory(
     target: str = "primary",
 ) -> list[str]:
     generated_provider_path = instance_provider_path(name)
+    # ONE plist read per probe run; every governed key is derived from this map.
+    _plist_state, plist_environment = instance_plist_governed_environment(name)
     loaded_environment = loaded_instance_environment(name)
     loaded_provider_path = loaded_environment.get("PATH")
     effective_provider_path = effective_instance_provider_path(loaded_environment)
@@ -4547,7 +4747,15 @@ def opencode_provider_probe_inventory(
         return [(
             f"FAIL provider_probe {name}: provider={provider} command={safe_command} "
             "failure_class=provider_runtime_path_mismatch "
-            "remediation=regenerate_and_reload_the_instance_launchagent"
+            f"remediation={REGENERATE_LAUNCHAGENT_REMEDIATION}"
+        )]
+
+    prepend_failure = governed_prepend_failure_class(plist_environment, loaded_environment)
+    if prepend_failure:
+        return [(
+            f"FAIL provider_probe {name}: provider={provider} command={safe_command} "
+            f"failure_class={prepend_failure} "
+            f"remediation={REGENERATE_LAUNCHAGENT_REMEDIATION}"
         )]
     if effective_provider_path is None:
         return [(
@@ -5725,16 +5933,103 @@ def provider_probe_target_inventory(
     if provider != "claude-cli":
         return [f"provider_probe {name}: skipped provider={redact_evidence_string(provider, 80)} target={target}"]
 
-    command = (
+    # claude-cli is the DEFAULT agentOptions.provider, so it gets the same
+    # governed-prepend agreement check the opencode probe gets. Reading the
+    # plist once here keeps both governed keys on one file state.
+    loaded_environment = loaded_instance_environment(name)
+    plist_state, plist_environment = instance_plist_governed_environment(name)
+
+    # The runtime-path gate is a statement about the SERVICE's PATH, not about
+    # which binary the probe happens to run, so it is evaluated BEFORE and
+    # independently of any operator override. It used to live inside
+    # `if not command:`, which let a configured providerProbeCommand silently
+    # disable it while the docs promised it unconditionally.
+    effective_provider_path = effective_instance_provider_path(loaded_environment)
+    # executable_candidate is only ever given a real path here: called with None
+    # it widens to BOT_ERRORS_PROVIDER_BIN_DIRS and an npm-global guess, which
+    # is the opencode discovery contract, not this one.
+    runtime_command = (
+        executable_candidate("claude", effective_provider_path)
+        if effective_provider_path
+        else None
+    )
+    runtime_path_unavailable = False
+    unavailable_reason = "unknown"
+    if plist_state == GOVERNED_PLIST_READABLE:
+        # A readable plist and a governed PATH that cannot supply the binary.
+        # TWO distinct causes: the environment yielded no effective PATH at all
+        # (job unloaded, launchctl print failed), or it composed and simply
+        # holds no claude. The second used to fall through to shutil.which and
+        # report status=ok naming a binary outside the prepend, ~/.local/bin,
+        # the pinned node dir and the plist PATH, one the service cannot run.
+        if effective_provider_path is None or runtime_command is None:
+            runtime_path_unavailable = True
+            unavailable_reason = (
+                "effective_path_uncomposable"
+                if effective_provider_path is None
+                else "no_claude_on_governed_path"
+            )
+
+    # An operator-configured probe command still chooses WHICH binary is
+    # probed; it does not exempt the service's PATH from the gate above.
+    configured_command = (
         profile_string(item, "providerProbeCommand")
         or profile_string(profile, "providerProbeCommand")
-        or shutil.which("claude")
-        or "claude"
     )
+    command = configured_command or runtime_command or shutil.which("claude") or "claude"
+
+    prepend_failure = governed_prepend_failure_class(plist_environment, loaded_environment)
+    if plist_state == GOVERNED_PLIST_UNREADABLE:
+        # A plist is expected here and the parser refused it: missing, planted,
+        # wrongly labelled, symlinked, oversized or unreadable. Treating that as
+        # "no drift" reported the default provider healthy while opencode failed
+        # closed on the identical state. Fail closed, with its own class so the
+        # operator is told the plist is the problem rather than the PATH.
+        return [(
+            f"FAIL provider_probe {name}: provider={provider} target={target} "
+            "failure_class=provider_runtime_plist_unreadable "
+            f"remediation={REGENERATE_LAUNCHAGENT_REMEDIATION}"
+        )]
+    if prepend_failure or runtime_path_unavailable:
+        # These two lines deliberately carry NO command and no PATH element.
+        # The command here is either irrelevant to the failure (the prepend
+        # cases) or, worse, a binary resolved from the PROBE's own PATH that the
+        # service cannot execute -- so printing it publishes the probe host's
+        # filesystem layout while adding nothing an operator can act on. The
+        # actionable facts are the class, which cause fired, and how many
+        # entries the governed PATH offered. Matches the module's redaction
+        # stance for paths (see credential_path_ref / path_fingerprint).
+        if prepend_failure:
+            return [(
+                f"FAIL provider_probe {name}: provider={provider} target={target} "
+                f"failure_class={prepend_failure} "
+                f"remediation={REGENERATE_LAUNCHAGENT_REMEDIATION}"
+            )]
+        governed_entry_count = len(
+            [entry for entry in (effective_provider_path or "").split(":") if entry]
+        )
+        return [(
+            f"FAIL provider_probe {name}: provider={provider} target={target} "
+            "failure_class=provider_runtime_path_unavailable "
+            f"reason={unavailable_reason} governed_path_entries={governed_entry_count} "
+            "remediation=repair_the_shared_runtime_path_helper_and_node_pin"
+        )]
     timeout_seconds = int_or_none(item.get("providerProbeTimeoutSeconds"))
     if timeout_seconds is None:
         timeout_seconds = int_or_none(profile.get("providerProbeTimeoutSeconds")) or 15
     timeout_seconds = max(1, min(timeout_seconds, 60))
+
+    # Run the provider in the environment it was SELECTED from. Passing none
+    # meant the binary came from the governed PATH but executed under the probe
+    # process's PATH, HOME and cwd, so an interpreter-resolving wrapper could
+    # pick a different runtime than the service uses. opencode already does this.
+    child_cwd = agent_workspace_cwd(data, name)
+    child_env = governed_child_environment(
+        effective_provider_path,
+        name,
+        child_cwd,
+        loaded_environment,
+    )
 
     timed_out = False
     try:
@@ -5744,6 +6039,8 @@ def provider_probe_target_inventory(
             "BOT_ERRORS_DRY_PROVIDER_PROBE_STDOUT",
             "BOT_ERRORS_DRY_PROVIDER_PROBE_STDERR",
             "BOT_ERRORS_DRY_PROVIDER_PROBE_RC",
+            child_env=child_env,
+            child_cwd=child_cwd,
         )
     except subprocess.TimeoutExpired as exc:
         stdout = exc.stdout if isinstance(exc.stdout, str) else ""

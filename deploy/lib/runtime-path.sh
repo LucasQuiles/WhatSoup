@@ -4,6 +4,15 @@
 # The optional 4th argument is a host-configured prepend that outranks
 # ~/.local/bin. Without it the composition is byte-identical to the legacy form.
 #
+# ORDERING, deliberate and load-bearing: the prepend precedes BOTH ~/.local/bin
+# and the pinned Node directory. A prepend directory containing a `node` binary
+# therefore shadows the WHATSOUP_NODE pin for every child process that resolves
+# node from PATH. The launcher itself is unaffected -- deploy/whatsoup invokes
+# "$NODE" absolutely at every call site -- but the exported PATH is inherited by
+# the bot and its children. Do not put a node binary in service.pathPrepend.
+# test_runtime_path_prepend.sh asserts this order so a future reorder has to be
+# a deliberate act rather than an accident.
+#
 # Why it exists: ~/.local/bin was prepended ahead of the ENTIRE inherited PATH,
 # including the ordering a LaunchAgent plist had deliberately chosen. A host that
 # pinned an older claude CLI by putting ~/.local/opt/claude-pin/bin first in its
@@ -20,12 +29,40 @@ whatsoup_effective_runtime_path() {
   [ -n "$home_dir" ] || return 1
   [[ "$node_bin" == /*/* ]] || return 1
   [ -n "$inherited_path" ] || return 1
+
+  # Arg 3 is whatever PATH the process inherited, so an empty segment here is a
+  # host fact this function does not control. COLLAPSE rather than reject: the
+  # launcher runs under `set -euo pipefail` and calls the wrapper bare, so
+  # rejecting would fail bot start on every host whose ambient PATH already
+  # contains "::". An empty PATH entry means the CURRENT DIRECTORY, so the
+  # hazard still has to go. One substitution pass is not enough -- ":::" would
+  # collapse to "::" -- so iterate to a fixed point, then strip one leading and
+  # one trailing colon, then re-assert non-empty so an all-empty value like
+  # "::" still fails closed rather than composing a PATH with nothing in it.
+  while [[ "$inherited_path" == *::* ]]; do
+    inherited_path="${inherited_path//::/:}"
+  done
+  inherited_path="${inherited_path#:}"
+  inherited_path="${inherited_path%:}"
+  [ -n "$inherited_path" ] || return 1
+
   node_dir="${node_bin%/*}"
   # An unset prepend must contribute NO segment. Composing "$path_prepend:$rest"
   # unconditionally would emit a leading empty entry when it is unset, and an
   # empty PATH entry means the CURRENT DIRECTORY — putting CWD ahead of every
   # system binary on every host, which is a worse defect than the one this fixes.
   if [ -n "$path_prepend" ]; then
+    # Arg 4 is config-owned and already validated upstream, so an empty segment
+    # can only come from a hand-set WHATSOUP_PATH_PREPEND. Reject it: refusing
+    # to start beats putting the current directory ahead of every system binary
+    # on a service PATH. Wrapping in colons catches leading, trailing and
+    # embedded empties in one test. FATAL line first, per whatsoup_resolve_node.
+    case ":$path_prepend:" in
+      *::*)
+        echo "FATAL: WHATSOUP_PATH_PREPEND contains an empty PATH segment (an empty entry means the current directory): $path_prepend" >&2
+        return 1
+        ;;
+    esac
     printf '%s\n' "$path_prepend:$home_dir/.local/bin:$node_dir:$inherited_path"
     return 0
   fi
@@ -33,6 +70,14 @@ whatsoup_effective_runtime_path() {
 }
 
 whatsoup_export_runtime_path() {
-  PATH="$(whatsoup_effective_runtime_path "$1" "$2" "$PATH" "${WHATSOUP_PATH_PREPEND:-}")" || return 1
+  # Composed into a local FIRST. Assigning the command substitution straight to
+  # PATH sets PATH to the empty string before `|| return 1` runs, so a caller
+  # that invokes this inside an `if` or with `||` would continue with an empty
+  # PATH. deploy/whatsoup calls it bare under `set -euo pipefail` and so exits,
+  # but the empty-segment rejection added here makes that failure newly
+  # reachable and the footgun is not worth leaving for the next caller.
+  local composed
+  composed="$(whatsoup_effective_runtime_path "$1" "$2" "$PATH" "${WHATSOUP_PATH_PREPEND:-}")" || return 1
+  PATH="$composed"
   export PATH
 }

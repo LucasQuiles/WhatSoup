@@ -19,6 +19,8 @@ echo "== redaction parity gate (BEAD-052) =="
 "${PYTEST_CMD[@]}" "${CURATED_SENTINEL_TEST_FILES[4]}" --import-mode=importlib -q
 echo "== gui-session-monitor coverage gate =="
 "${PYTEST_CMD[@]}" "${CURATED_SENTINEL_TEST_FILES[5]}" --cov=bot_errors_gui_session_monitor --cov-branch --cov-fail-under=98 --import-mode=importlib -q
+echo "== shared runtime PATH contract =="
+bash deploy/scripts/tests/test_runtime_path_prepend.sh | tee "$tmp/runtime_path_prepend.out" | grep -q RUNTIME_PATH_PREPEND_TEST_OK || { echo "runtime path prepend FAIL"; cat "$tmp/runtime_path_prepend.out"; exit 1; }
 echo "== deployer pin mode =="
 bash deploy/scripts/tests/test_deployer_pin_mode.sh | tee "$tmp/pin_mode.out" | grep -q PIN_TEST_PASS || { echo "pin mode FAIL"; cat "$tmp/pin_mode.out"; exit 1; }
 echo "== deployer static guard =="

@@ -107,6 +107,17 @@ function mockReads({ plist, config }: { plist?: string; config?: unknown } = {})
   });
 }
 
+/**
+ * Reads one EnvironmentVariables value back out of a rendered plist. The
+ * generated plist puts a KeepAlive dict BEFORE EnvironmentVariables, so the
+ * block is anchored on its own key rather than on the first <dict>.
+ */
+function readPlistEnv(plist: string, key: string): string | undefined {
+  const envBlock = /<key>EnvironmentVariables<\/key>\s*<dict>([\s\S]*?)<\/dict>/.exec(plist)?.[1];
+  if (envBlock === undefined) return undefined;
+  return new RegExp(`<key>${key}</key>\\s*<string>([\\s\\S]*?)</string>`).exec(envBlock)?.[1];
+}
+
 describe('platform service managers', () => {
   beforeEach(() => {
     vi.useRealTimers();
@@ -589,14 +600,24 @@ describe('platform service managers', () => {
     setPlatform('darwin');
     const { buildPlist, reconcileLaunchdPlist } = await importPlatform();
     // Simulates the hand-patched-plist class this feature adopts BEFORE the
-    // prepend is config-owned: nothing is configured, so the prefix is
+    // prepend is config-owned: nothing is configured, so the PATH prefix is
     // trivially satisfied and only the tail differs from this shell's PATH.
     const observed = buildPlist('agent', { pathPrepend: ['/opt/hand-patched-bin'] });
     mockReads({ plist: observed, config: { name: 'agent' } });
 
     const result = await reconcileLaunchdPlist('agent', { dryRun: true });
 
-    expect(result.governedEnvDrift?.drift).toEqual([]);
+    // WHATSOUP_PATH_PREPEND is a governed key, so an installed value with no
+    // config source is reported as governed `extra` drift rather than being
+    // invisible. Before it was governed the same hand-added key counted as a
+    // non-governed drop and refused --apply; now --apply overwrites it. Value
+    // still never leaves the comparator: digest only, asserted below.
+    expect(result.governedEnvDrift?.drift).toEqual([{
+      key: 'WHATSOUP_PATH_PREPEND',
+      state: 'extra',
+      expectedDigest: null,
+      observedDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
+    }]);
     expect(result.governedEnvDrift?.pathPrefix).toEqual({
       configured: false,
       satisfied: true,
@@ -615,8 +636,71 @@ describe('platform service managers', () => {
 
     const result = await reconcileLaunchdPlist('agent', { dryRun: true });
 
-    expect(result.governedEnvDrift?.drift.map((entry) => `${entry.key}:${entry.state}`)).toEqual(['PATH:mismatch']);
+    // Both governed surfaces disagree: the composed PATH and the governed
+    // prepend key that now carries the same config fact on its own.
+    expect(result.governedEnvDrift?.drift.map((entry) => `${entry.key}:${entry.state}`))
+      .toEqual(['PATH:mismatch', 'WHATSOUP_PATH_PREPEND:mismatch']);
     expect(result.governedEnvDrift?.pathPrefix).toMatchObject({ configured: true, satisfied: false });
+  });
+
+  it('renders the governed PATH prepend as its own environment key without changing PATH composition', async () => {
+    setPlatform('darwin');
+    const previousPath = process.env.PATH;
+    // env-allowed in test: buildPlist reads the generating shell's PATH as the
+    // ambient tail, so it has to be pinned for an exact-equality assertion.
+    process.env.PATH = '/loaded/bin';
+    try {
+      const { buildPlist } = await importPlatform();
+      const rendered = buildPlist('agent', { pathPrepend: ['/fixture/pin/bin', '/fixture/second/bin'] });
+
+      expect(rendered).toContain('    <key>WHATSOUP_PATH_PREPEND</key>');
+      expect(readPlistEnv(rendered, 'WHATSOUP_PATH_PREPEND')).toBe('/fixture/pin/bin:/fixture/second/bin');
+      // PATH composition is untouched: still `prepend:ambient`.
+      expect(readPlistEnv(rendered, 'PATH')).toBe('/fixture/pin/bin:/fixture/second/bin:/loaded/bin');
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+    }
+  });
+
+  it('renders both governed PATH surfaces from one config fact', async () => {
+    setPlatform('darwin');
+    const previousPath = process.env.PATH;
+    const previousNode = process.env.WHATSOUP_NODE;
+    process.env.PATH = '/loaded/bin';
+    process.env.WHATSOUP_NODE = '/fixture/node/bin/node';
+    try {
+      const { buildPlist } = await importPlatform();
+      const rendered = buildPlist('agent', { pathPrepend: ['/fixture/pin/bin'] });
+      const servicePath = readPlistEnv(rendered, 'PATH');
+      const governedPrepend = readPlistEnv(rendered, 'WHATSOUP_PATH_PREPEND');
+
+      // These two are what the renderer actually decides, and they are what made
+      // this test red on base. launchd injects both, and deploy/lib/runtime-path.sh
+      // composes "$prepend:$home/.local/bin:$node_dir:$inherited", so the governed
+      // prepend appears TWICE in the effective PATH and first match wins. That
+      // composition is proven executably in
+      // deploy/scripts/tests/test_runtime_path_prepend.sh, which runs the real
+      // helper; node:child_process is mocked here, so re-joining the pieces in
+      // this file would only assert a literal against itself.
+      expect(servicePath).toBe('/fixture/pin/bin:/loaded/bin');
+      expect(governedPrepend).toBe('/fixture/pin/bin');
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+      if (previousNode === undefined) delete process.env.WHATSOUP_NODE;
+      else process.env.WHATSOUP_NODE = previousNode;
+    }
+  });
+
+  it('renders byte-identical output when no path prepend is configured', async () => {
+    setPlatform('darwin');
+    const { buildPlist } = await importPlatform();
+    const baseline = buildPlist('agent');
+
+    expect(baseline).not.toContain('WHATSOUP_PATH_PREPEND');
+    expect(buildPlist('agent', {})).toBe(baseline);
+    expect(buildPlist('agent', { pathPrepend: [] })).toBe(baseline);
   });
 
   it('refuses an apply that would drop installed non-governed keys unless the drop is acknowledged', async () => {
@@ -655,6 +739,29 @@ describe('platform service managers', () => {
       .resolves.toMatchObject({ dryRun: false });
 
     expect(fsMocks.writeFileSync).toHaveBeenCalled();
+    const domain = `gui/${currentUid()}`;
+    expect(childProcessMocks.execFile).toHaveBeenNthCalledWith(1, 'launchctl', ['bootout', `${domain}/com.whatsoup.agent`], expect.any(Function));
+  });
+
+  it('proceeds with an apply whose only drift is a governed hand-added PATH prepend', async () => {
+    setPlatform('darwin');
+    const { buildPlist, reconcileLaunchdPlist } = await importPlatform();
+    // Before the key was governed this same plist refused --apply as a
+    // non-governed drop. Governing it means --apply now OVERWRITES an
+    // operator's hand-set value. That is the disclosed live behaviour change,
+    // and it needs a positive assertion, not just an empty droppedNonGovernedKeys.
+    const observed = buildPlist('agent').replace(
+      '    <key>HOME</key>',
+      '    <key>WHATSOUP_PATH_PREPEND</key>\n    <string>/opt/hand-added-bin</string>\n    <key>HOME</key>',
+    );
+    mockReads({ plist: observed, config: { name: 'agent' } });
+
+    await expect(reconcileLaunchdPlist('agent', { dryRun: false }))
+      .resolves.toMatchObject({ dryRun: false });
+
+    expect(fsMocks.writeFileSync).toHaveBeenCalled();
+    const written = String(fsMocks.writeFileSync.mock.calls[0]?.[1]);
+    expect(written).not.toContain('hand-added-bin');
     const domain = `gui/${currentUid()}`;
     expect(childProcessMocks.execFile).toHaveBeenNthCalledWith(1, 'launchctl', ['bootout', `${domain}/com.whatsoup.agent`], expect.any(Function));
   });

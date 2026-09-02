@@ -4,6 +4,8 @@ import importlib.util
 import os
 from pathlib import Path
 
+import pytest
+
 _SCRIPT = Path(__file__).resolve().parents[1] / "bot-errors-health-check.py"
 
 
@@ -698,3 +700,782 @@ def test_watchdog_currency_inventory_skips_missing(monkeypatch, tmp_path):
     monkeypatch.setattr(_mod.Path, "home", lambda: tmp_path)
     (tmp_path / ".local" / "bin").mkdir(parents=True)
     assert _mod.watchdog_currency_inventory(["yl-bot"]) == []
+
+
+# --- governed runtime PATH prepend: probe/launcher binary-selection parity ---
+#
+# The launcher (deploy/whatsoup -> whatsoup_export_runtime_path) reads
+# WHATSOUP_PATH_PREPEND out of the LaunchAgent environment; the probe composes
+# the effective PATH itself. These tests pin that BOTH sides select the same
+# binary, using two independent code paths: the launcher side shells out to the
+# real helper, the probe side goes through effective_instance_provider_path +
+# executable_candidate. BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH is deliberately
+# unset -- setting it short-circuits the helper at :4322 and the comparison
+# becomes vacuous.
+
+
+
+def _assert_fail_line_is_path_free(line: str, *fixture_paths: Path) -> None:
+    """A fail-closed FAIL line must carry no filesystem path, on EITHER platform.
+
+    The basetemp spelling differs by platform -- macOS resolves the temp root
+    through /private while Linux does not -- so an `in` check against a single
+    spelling passes vacuously on the other one. That is exactly how the first
+    version of this assertion went green on macOS and red on the Linux CI job,
+    which is the platform the probe actually deploys to. Assert every spelling
+    of each fixture path AND, decisively, that the line carries no path
+    separator at all, which cannot pass vacuously anywhere.
+    """
+    for fixture in fixture_paths:
+        raw = str(fixture)
+        spellings = {raw, os.path.realpath(raw)}
+        spellings.add(raw[len("/private"):] if raw.startswith("/private/") else f"/private{raw}")
+        for spelling in spellings:
+            assert spelling not in line, f"FAIL line leaks the fixture path {spelling}: {line}"
+    assert "/" not in line, f"FAIL line carries a path separator: {line}"
+
+
+def _write_shadow(directory: Path, name: str) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    target = directory / name
+    target.write_text("#!/bin/sh\nexit 0\n")
+    target.chmod(0o755)
+    return target
+
+
+def _prepend_fixture(tmp_path: Path) -> dict[str, str]:
+    """Synthetic instance environment as a governed plist would render it.
+
+    PATH is `<prepend>:<ambient>` exactly as buildPlist composes it, and
+    WHATSOUP_PATH_PREPEND carries the same governed prefix.
+    """
+    home = tmp_path / "home"
+    prepend_bin = tmp_path / "pin" / "bin"
+    ambient_bin = tmp_path / "ambient" / "bin"
+    node_bin = tmp_path / "node" / "bin"
+    (home / ".local" / "bin").mkdir(parents=True, exist_ok=True)
+    prepend_bin.mkdir(parents=True, exist_ok=True)
+    ambient_bin.mkdir(parents=True, exist_ok=True)
+    _write_shadow(node_bin, "node")
+    return {
+        "HOME": str(home),
+        "PATH": f"{prepend_bin}:{ambient_bin}:/usr/bin:/bin",
+        "WHATSOUP_NODE": str(node_bin / "node"),
+        "WHATSOUP_PATH_PREPEND": str(prepend_bin),
+    }
+
+
+def _launcher_resolved(command_name: str, environment: dict[str, str]) -> str:
+    """Resolve a command the way the launcher does, through the real helper."""
+    import subprocess
+
+    helper = _mod.REPO_ROOT / "deploy" / "lib" / "runtime-path.sh"
+    proc = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            # declare -F first: without it a removed or renamed helper would
+            # leave the shell resolving "$3" from the AMBIENT PATH and the
+            # parity assertion would pass while proving nothing.
+            '. "$1"; declare -F whatsoup_export_runtime_path >/dev/null || { echo "helper missing" >&2; exit 9; }; '
+            'whatsoup_export_runtime_path "$HOME" "$2" || exit 1; command -v "$3"',
+            "runtime-path",
+            str(helper),
+            environment["WHATSOUP_NODE"],
+            command_name,
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=15,
+        check=False,
+        env=dict(environment),
+    )
+    assert proc.returncode == 0, f"launcher-side resolution failed: {proc.stderr}"
+    resolved = proc.stdout.strip()
+    assert resolved, "launcher-side resolution produced no path"
+    return resolved
+
+
+def _write_instance_plist(
+    home: Path,
+    name: str,
+    environment: dict[str, str],
+    *,
+    nested_dict: bool = False,
+    duplicate_path: str | None = None,
+) -> Path:
+    """Write a real LaunchAgent plist so the guarded reader is exercised for real.
+
+    The probe's plist parsing had no direct coverage while the tests stubbed
+    instance_provider_path_prepend; these fixtures drive instance_plist_environment
+    itself, including its two fail-closed shapes.
+    """
+    agents = home / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True, exist_ok=True)
+    entries: list[str] = []
+    if duplicate_path is not None:
+        entries.append(f"    <key>PATH</key><string>{duplicate_path}</string>")
+    for key, value in environment.items():
+        entries.append(f"    <key>{key}</key><string>{value}</string>")
+    if nested_dict:
+        entries.append("    <key>Nested</key><dict><key>Inner</key><string>x</string></dict>")
+    target = agents / f"com.whatsoup.{name}.plist"
+    target.write_text(
+        "\n".join(
+            [
+                '<?xml version="1.0" encoding="UTF-8"?>',
+                '<plist version="1.0">',
+                "<dict>",
+                "  <key>Label</key>",
+                f"  <string>com.whatsoup.{name}</string>",
+                "  <key>KeepAlive</key>",
+                "  <dict><key>Crashed</key><true/></dict>",
+                "  <key>EnvironmentVariables</key>",
+                "  <dict>",
+                *entries,
+                "  </dict>",
+                "</dict>",
+                "</plist>",
+                "",
+            ]
+        )
+    )
+    return target
+
+
+def _arm_darwin_plist(monkeypatch, tmp_path: Path, name: str, environment: dict[str, str], **kwargs):
+    # Clear EVERY environment affordance that would mark the governed surfaces
+    # not-applicable. Without this the matrix below would silently stop testing
+    # what it claims the moment one of these leaked in from the ambient
+    # environment, which is the vacuity mode that made an earlier assertion in
+    # this file pass on one platform and fail on the other.
+    monkeypatch.delenv("BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH", raising=False)
+    monkeypatch.delenv("BOT_ERRORS_DRY_PROVIDER_PROBE_STDOUT", raising=False)
+    monkeypatch.delenv("BOT_ERRORS_DRY_PROVIDER_PROBE_RC", raising=False)
+    monkeypatch.setattr(_mod, "HOST_PLATFORM", "darwin")
+    monkeypatch.setattr(_mod.Path, "home", classmethod(lambda cls: tmp_path))
+    return _write_instance_plist(tmp_path, name, environment, **kwargs)
+
+
+def test_probe_and_launcher_select_the_same_opencode_under_a_governed_prepend(
+    monkeypatch, tmp_path
+):
+    monkeypatch.delenv("BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH", raising=False)
+    environment = _prepend_fixture(tmp_path)
+    prepend_bin = tmp_path / "pin" / "bin"
+    local_bin = tmp_path / "home" / ".local" / "bin"
+    # Shadow in BOTH: the governed pin and the auto-updating ~/.local/bin.
+    _write_shadow(prepend_bin, "opencode")
+    _write_shadow(local_bin, "opencode")
+
+    effective = _mod.effective_instance_provider_path(environment)
+    assert effective is not None, "effective provider PATH was not composed"
+    # Vacuity guard: proves the shared helper actually ran rather than the
+    # dry-run short circuit returning the inherited PATH unchanged.
+    assert str(tmp_path / "node" / "bin") in effective
+
+    probe_side = _mod.executable_candidate("opencode", effective)
+    launcher_side = _launcher_resolved("opencode", environment)
+
+    assert probe_side == str(prepend_bin / "opencode")
+    assert probe_side == launcher_side
+
+
+def test_claude_cli_probe_resolves_the_command_from_the_effective_provider_path(
+    monkeypatch, tmp_path
+):
+    environment = _prepend_fixture(tmp_path)
+    prepend_bin = tmp_path / "pin" / "bin"
+    probe_bin = tmp_path / "probe" / "bin"
+    _write_shadow(prepend_bin, "claude")
+    _write_shadow(probe_bin, "claude")
+    # Arm a synthetic plist under a temp HOME. Without this the test ran on the
+    # real darwin home with no LaunchAgent, which is both a hygiene problem and
+    # the exact unreadable-plist state that now fails closed.
+    _arm_darwin_plist(
+        monkeypatch,
+        tmp_path,
+        "agent-alpha",
+        {"PATH": environment["PATH"], "WHATSOUP_PATH_PREPEND": environment["WHATSOUP_PATH_PREPEND"]},
+    )
+    # The probe process's OWN PATH carries a different claude; resolving from it
+    # is exactly the defect under test.
+    monkeypatch.setenv("PATH", f"{probe_bin}:/usr/bin:/bin")
+    monkeypatch.setattr(_mod, "loaded_instance_environment", lambda name: dict(environment))
+
+    captured: list[list[str]] = []
+
+    def _fake_output(command, *args, **kwargs):
+        captured.append(list(command))
+        return ("OK", "", 0, False)
+
+    monkeypatch.setattr(_mod, "provider_command_output", _fake_output)
+
+    _mod.provider_probe_target_inventory(
+        {},
+        {},
+        "agent-alpha",
+        {"type": "agent", "agentOptions": {"provider": "claude-cli"}},
+        "claude-cli",
+        "primary",
+    )
+
+    assert captured, "claude-cli probe never invoked the provider command"
+    assert captured[0][0] == str(prepend_bin / "claude")
+    assert captured[0][0] == _launcher_resolved("claude", environment)
+
+
+def test_claude_cli_probe_keeps_an_explicit_operator_probe_command(monkeypatch, tmp_path):
+    environment = _prepend_fixture(tmp_path)
+    _write_shadow(tmp_path / "pin" / "bin", "claude")
+    _arm_darwin_plist(
+        monkeypatch,
+        tmp_path,
+        "agent-alpha",
+        {"PATH": environment["PATH"], "WHATSOUP_PATH_PREPEND": environment["WHATSOUP_PATH_PREPEND"]},
+    )
+    monkeypatch.setattr(_mod, "loaded_instance_environment", lambda name: dict(environment))
+
+    captured: list[list[str]] = []
+
+    def _fake_output(command, *args, **kwargs):
+        captured.append(list(command))
+        return ("OK", "", 0, False)
+
+    monkeypatch.setattr(_mod, "provider_command_output", _fake_output)
+
+    _mod.provider_probe_target_inventory(
+        {},
+        {"providerProbeCommand": "/fixture/operator/bin/claude"},
+        "agent-alpha",
+        {"type": "agent", "agentOptions": {"provider": "claude-cli"}},
+        "claude-cli",
+        "primary",
+    )
+
+    assert captured, "claude-cli probe never invoked the provider command"
+    assert captured[0][0] == "/fixture/operator/bin/claude"
+
+
+def test_instance_provider_path_prepend_match_treats_both_absent_as_equal():
+    assert _mod.instance_provider_path_prepend_match(None, None)
+    assert _mod.instance_provider_path_prepend_match("", None)
+    assert _mod.instance_provider_path_prepend_match(None, "")
+    assert _mod.instance_provider_path_prepend_match("/fixture/pin/bin", "/fixture/pin/bin")
+    assert not _mod.instance_provider_path_prepend_match("/fixture/pin/bin", None)
+    assert not _mod.instance_provider_path_prepend_match(None, "/fixture/pin/bin")
+    assert not _mod.instance_provider_path_prepend_match("/fixture/pin/bin", "/fixture/other/bin")
+
+
+def test_instance_plist_environment_reads_every_governed_key(monkeypatch, tmp_path):
+    _arm_darwin_plist(
+        monkeypatch,
+        tmp_path,
+        "agent-alpha",
+        {"PATH": "/fixture/pin/bin:/usr/bin", "WHATSOUP_PATH_PREPEND": "/fixture/pin/bin"},
+    )
+    environment = _mod.instance_plist_environment("agent-alpha")
+    assert environment is not None
+    assert environment["PATH"] == "/fixture/pin/bin:/usr/bin"
+    assert environment["WHATSOUP_PATH_PREPEND"] == "/fixture/pin/bin"
+    assert _mod.instance_provider_path_prepend("agent-alpha") == "/fixture/pin/bin"
+
+
+def test_instance_plist_environment_fails_closed_on_a_nested_dict(monkeypatch, tmp_path):
+    # The block regex stops at the first </dict>, so a nested dict would truncate
+    # the map and make a declared key read as absent. Report unknown instead,
+    # matching the TypeScript comparator's refusal.
+    _arm_darwin_plist(
+        monkeypatch,
+        tmp_path,
+        "agent-alpha",
+        {"PATH": "/fixture/pin/bin:/usr/bin", "WHATSOUP_PATH_PREPEND": "/fixture/pin/bin"},
+        nested_dict=True,
+    )
+    assert _mod.instance_plist_environment("agent-alpha") is None
+    assert _mod.instance_provider_path("agent-alpha") is None
+
+
+def test_instance_plist_environment_keeps_the_first_duplicate_key(monkeypatch, tmp_path):
+    # The single-key re.search this reader replaced returned the FIRST match; a
+    # hand-edited plist with two PATH keys must not resolve differently now.
+    _arm_darwin_plist(
+        monkeypatch,
+        tmp_path,
+        "agent-alpha",
+        {"PATH": "/fixture/second/bin"},
+        duplicate_path="/fixture/first/bin",
+    )
+    assert _mod.instance_provider_path("agent-alpha") == "/fixture/first/bin"
+
+
+def test_path_starts_with_entries_compares_whole_entries_including_empties():
+    assert _mod.path_starts_with_entries("/fixture/pin/bin:/usr/bin", "/fixture/pin/bin")
+    assert not _mod.path_starts_with_entries("/fixture/pin/binary:/usr/bin", "/fixture/pin/bin")
+    assert _mod.path_starts_with_entries("/fixture/a/bin:/usr/bin", None)
+    # Empty entries are compared, not filtered, so this agrees with
+    # pathStartsWithEntries in src/fleet/launchd-env-drift.ts.
+    assert not _mod.path_starts_with_entries("/a:/b:/usr/bin", "/a::/b")
+    assert _mod.path_starts_with_entries("/a::/b:/usr/bin", "/a::/b")
+
+
+def _opencode_probe_lines(monkeypatch, tmp_path, *, plist_environment, loaded_environment):
+    _arm_darwin_plist(monkeypatch, tmp_path, "agent-alpha", plist_environment)
+    monkeypatch.setattr(_mod, "instance_provider_path", lambda name: plist_environment.get("PATH"))
+    monkeypatch.setattr(_mod, "loaded_instance_environment", lambda name: dict(loaded_environment))
+    monkeypatch.setattr(
+        _mod, "effective_instance_provider_path", lambda environment: "/fixture/pin/bin:/usr/bin:/bin"
+    )
+    monkeypatch.setattr(
+        _mod, "executable_candidate", lambda command, path_value=None: "/fixture/pin/bin/opencode"
+    )
+    # Stub the exec boundary so a probe that gets PAST every runtime-path check
+    # reaches the version/help stage deterministically, without a real binary.
+    monkeypatch.setattr(
+        _mod,
+        "provider_command_output",
+        lambda command, *args, **kwargs: (
+            "opencode 1.0.0\nusage: opencode run --format json --pure -m model\n", "", 0, False
+        ),
+    )
+    return _mod.opencode_provider_probe_inventory(
+        {},
+        {},
+        "agent-alpha",
+        {"type": "agent", "agentOptions": {"provider": "opencode-cli", "model": "xai/grok-4"}},
+        "opencode-cli",
+    )
+
+
+def test_opencode_probe_fails_when_the_loaded_job_lacks_the_declared_prepend(monkeypatch, tmp_path):
+    lines = _opencode_probe_lines(
+        monkeypatch,
+        tmp_path,
+        plist_environment={
+            "PATH": "/fixture/pin/bin:/usr/bin:/bin",
+            "WHATSOUP_PATH_PREPEND": "/fixture/pin/bin",
+        },
+        loaded_environment={"PATH": "/fixture/pin/bin:/usr/bin:/bin", "HOME": "/fixture/user-root"},
+    )
+    assert "failure_class=provider_runtime_path_prepend_mismatch" in lines[0]
+    assert "remediation=regenerate_and_reload_the_instance_launchagent" in lines[0]
+    # A drifted launchctl print parser presents as this same class, and
+    # regenerating would not fix that, so the remediation has to say so.
+    assert "verify_launchctl_print_output_parses" in lines[0]
+
+
+def test_opencode_probe_fails_when_the_declared_prepend_does_not_lead_its_own_path(monkeypatch, tmp_path):
+    lines = _opencode_probe_lines(
+        monkeypatch,
+        tmp_path,
+        plist_environment={
+            "PATH": "/usr/bin:/bin",
+            "WHATSOUP_PATH_PREPEND": "/fixture/pin/bin",
+        },
+        loaded_environment={
+            "PATH": "/usr/bin:/bin",
+            "HOME": "/fixture/user-root",
+            "WHATSOUP_PATH_PREPEND": "/fixture/pin/bin",
+        },
+    )
+    assert "failure_class=provider_runtime_path_prepend_inconsistent" in lines[0]
+
+
+def test_opencode_probe_passes_the_prepend_checks_when_plist_and_job_agree(monkeypatch, tmp_path):
+    lines = _opencode_probe_lines(
+        monkeypatch,
+        tmp_path,
+        plist_environment={
+            "PATH": "/fixture/pin/bin:/usr/bin:/bin",
+            "WHATSOUP_PATH_PREPEND": "/fixture/pin/bin",
+        },
+        loaded_environment={
+            "PATH": "/fixture/pin/bin:/usr/bin:/bin",
+            "HOME": "/fixture/user-root",
+            "WHATSOUP_PATH_PREPEND": "/fixture/pin/bin",
+        },
+    )
+    joined = "\n".join(lines)
+    assert "provider_runtime_path_prepend" not in joined
+    # Positive companion: an absence-only assertion would also pass on an empty
+    # return or an unrelated early exit, so prove the probe reached the stage
+    # that only runs AFTER every runtime-path check has passed.
+    assert lines, "probe returned no lines at all"
+    assert "detected_mode=" in joined
+
+
+def test_opencode_functional_probe_env_retains_the_governed_prepend():
+    child = _mod.opencode_functional_probe_env(
+        {"type": "agent", "agentOptions": {"provider": "opencode-cli"}},
+        "primary",
+        2,
+        "/fixture/pin/bin:/fixture/user-root/.local/bin",
+        "agent-alpha",
+        None,
+        {"PATH": "/fixture/pin/bin:/usr/bin", "WHATSOUP_PATH_PREPEND": "/fixture/pin/bin"},
+    )
+    assert child.get("WHATSOUP_PATH_PREPEND") == "/fixture/pin/bin"
+
+
+# --- claude-cli is the DEFAULT provider: it gets the same governed checks ---
+
+
+def _claude_probe(monkeypatch, item, loaded_environment):
+    captured: list[list[str]] = []
+
+    def _fake_output(command, *args, **kwargs):
+        captured.append(list(command))
+        return ("OK", "", 0, False)
+
+    monkeypatch.setattr(_mod, "provider_command_output", _fake_output)
+    monkeypatch.setattr(_mod, "loaded_instance_environment", lambda name: dict(loaded_environment))
+    lines = _mod.provider_probe_target_inventory(
+        {},
+        item,
+        "agent-alpha",
+        {"type": "agent", "agentOptions": {"provider": "claude-cli"}},
+        "claude-cli",
+        "primary",
+    )
+    return captured, lines
+
+
+def test_claude_cli_probe_fails_when_the_loaded_job_lacks_the_declared_prepend(monkeypatch, tmp_path):
+    _arm_darwin_plist(
+        monkeypatch,
+        tmp_path,
+        "agent-alpha",
+        {"PATH": "/fixture/pin/bin:/usr/bin", "WHATSOUP_PATH_PREPEND": "/fixture/pin/bin"},
+    )
+    captured, lines = _claude_probe(
+        monkeypatch,
+        {"providerProbeCommand": "/fixture/operator/bin/claude"},
+        {"PATH": "/fixture/pin/bin:/usr/bin", "HOME": str(tmp_path)},
+    )
+    assert not captured, "probe must fail closed before invoking the provider"
+    assert "failure_class=provider_runtime_path_prepend_mismatch" in lines[0]
+    assert "verify_launchctl_print_output_parses" in lines[0]
+    _assert_fail_line_is_path_free(lines[0], tmp_path)
+
+
+def test_claude_cli_probe_fails_closed_when_the_plist_exists_but_the_job_environment_is_unreadable(
+    monkeypatch, tmp_path
+):
+    # launchctl print failed or the job is unloaded: the effective provider PATH
+    # cannot be composed. Falling back to the probe's own PATH here is the
+    # pre-fix defect, so this must fail closed instead.
+    _arm_darwin_plist(
+        monkeypatch,
+        tmp_path,
+        "agent-alpha",
+        {"PATH": "/fixture/pin/bin:/usr/bin"},
+    )
+    captured, lines = _claude_probe(monkeypatch, {}, {})
+    assert not captured, "probe must fail closed before invoking the provider"
+    assert "failure_class=provider_runtime_path_unavailable" in lines[0]
+    assert "reason=effective_path_uncomposable" in lines[0]
+    assert "remediation=repair_the_shared_runtime_path_helper_and_node_pin" in lines[0]
+    # Mirror of the no-claude case: the other cause of the same class must be
+    # equally path-free, or the redaction fix would only cover one branch.
+    _assert_fail_line_is_path_free(lines[0], tmp_path)
+
+
+def test_claude_cli_probe_is_unchanged_on_a_host_with_no_launchagent(monkeypatch, tmp_path):
+    # Linux/systemd hosts render no plist. instance_plist_governed_environment is
+    # None there, so the legacy resolution chain must stay byte-identical and no
+    # new failure class may appear. This pins the change as a provable no-op.
+    monkeypatch.delenv("BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH", raising=False)
+    monkeypatch.setattr(_mod, "HOST_PLATFORM", "linux")
+    monkeypatch.setattr(_mod.Path, "home", classmethod(lambda cls: tmp_path))
+    probe_bin = tmp_path / "probe" / "bin"
+    _write_shadow(probe_bin, "claude")
+    monkeypatch.setenv("PATH", f"{probe_bin}:/usr/bin:/bin")
+
+    captured, lines = _claude_probe(monkeypatch, {}, {})
+
+    assert _mod.instance_plist_governed_environment("agent-alpha") == (
+        _mod.GOVERNED_PLIST_NOT_APPLICABLE,
+        None,
+    )
+    assert captured, "probe must still run on a host with no LaunchAgent"
+    assert captured[0][0] == str(probe_bin / "claude")
+    assert "provider_runtime_path_prepend" not in "\n".join(lines)
+    assert "provider_runtime_path_unavailable" not in "\n".join(lines)
+
+
+def test_claude_cli_probe_passes_the_prepend_checks_when_plist_and_job_agree(monkeypatch, tmp_path):
+    environment = _prepend_fixture(tmp_path)
+    prepend_bin = tmp_path / "pin" / "bin"
+    _write_shadow(prepend_bin, "claude")
+    _arm_darwin_plist(
+        monkeypatch,
+        tmp_path,
+        "agent-alpha",
+        {"PATH": environment["PATH"], "WHATSOUP_PATH_PREPEND": environment["WHATSOUP_PATH_PREPEND"]},
+    )
+    captured, lines = _claude_probe(monkeypatch, {}, environment)
+
+    assert captured, "probe never invoked the provider command"
+    assert captured[0][0] == str(prepend_bin / "claude")
+    assert "provider_runtime_path_prepend" not in "\n".join(lines)
+
+
+def test_claude_cli_probe_fails_closed_when_the_governed_path_holds_no_claude(monkeypatch, tmp_path):
+    # False-green on the DEFAULT provider: the effective PATH composes fine, but
+    # it holds no claude. executable_candidate returns None rather than widening
+    # when given a real path, so the old code fell through to shutil.which and
+    # reported status=ok naming an ambient binary the service cannot execute.
+    # opencode fails closed under the identical fixture; this closes the asymmetry.
+    environment = _prepend_fixture(tmp_path)
+    _arm_darwin_plist(
+        monkeypatch,
+        tmp_path,
+        "agent-alpha",
+        {"PATH": environment["PATH"], "WHATSOUP_PATH_PREPEND": environment["WHATSOUP_PATH_PREPEND"]},
+    )
+    # Deliberately OUTSIDE every directory the governed composition can see:
+    # not the prepend, not ~/.local/bin, not the pinned node dir, not the plist
+    # PATH. This is the npm-global / Homebrew / scheduler-PATH shape.
+    probe_only_bin = tmp_path / "probe-only" / "bin"
+    _write_shadow(probe_only_bin, "claude")
+    monkeypatch.setenv("PATH", f"{probe_only_bin}:/usr/bin:/bin")
+
+    # Preconditions that make this the exact reported shape, asserted so the
+    # test cannot pass for an unrelated reason.
+    effective = _mod.effective_instance_provider_path(environment)
+    assert effective is not None, "fixture must compose an effective PATH"
+    assert _mod.executable_candidate("claude", effective) is None, "fixture must have no claude on the governed PATH"
+    assert _mod.shutil.which("claude") == str(probe_only_bin / "claude")
+
+    captured, lines = _claude_probe(monkeypatch, {}, environment)
+
+    assert not captured, "probe must not execute a binary absent from the governed PATH"
+    assert "failure_class=provider_runtime_path_unavailable" in lines[0]
+    assert "reason=no_claude_on_governed_path" in lines[0]
+    _assert_fail_line_is_path_free(lines[0], probe_only_bin, tmp_path)
+
+
+# --- MED-3: every unreadable-plist state must fail closed on the DEFAULT provider ---
+#
+# The parser returns None for six distinct broken states, and the governed-
+# environment wrapper returned that same None for the two BENIGN states (Linux,
+# dry-run). Both callers read None as "no failure", so on macOS a missing,
+# planted, corrupt or unreadable LaunchAgent made the default provider report
+# green while opencode failed closed on the identical fixture. The parser's own
+# docstring says None means UNKNOWN. These rows pin the asymmetry closed.
+
+
+def _break_plist(target: Path, state: str, home: Path) -> None:
+    """Put the instance plist into one named broken state. Synthetic HOME only."""
+    if state == "missing":
+        target.unlink()
+    elif state == "wrong_label":
+        target.write_text(target.read_text().replace("com.whatsoup.agent-alpha", "com.other.agent-alpha"))
+    elif state == "nested_dict":
+        target.write_text(
+            target.read_text().replace(
+                "  </dict>\n</dict>",
+                "    <key>Nested</key><dict><key>Inner</key><string>x</string></dict>\n  </dict>\n</dict>",
+                1,
+            )
+        )
+    elif state == "oversized":
+        target.write_text(target.read_text() + ("<!-- " + "x" * 70000 + " -->\n"))
+    elif state == "symlinked":
+        real = home / "real-agent.plist"
+        real.write_text(target.read_text())
+        target.unlink()
+        target.symlink_to(real)
+    elif state == "unreadable":
+        target.chmod(0o000)
+    else:
+        raise AssertionError(f"unknown state {state}")
+
+
+PLIST_BREAKAGE_STATES = ["missing", "wrong_label", "nested_dict", "oversized", "symlinked", "unreadable"]
+
+
+def _matrix_environment(tmp_path: Path) -> dict[str, str]:
+    environment = _prepend_fixture(tmp_path)
+    _write_shadow(tmp_path / "pin" / "bin", "claude")
+    _write_shadow(tmp_path / "pin" / "bin", "opencode")
+    return environment
+
+
+def test_default_provider_probe_healthy_plist_control_row(monkeypatch, tmp_path):
+    # Control: with a readable plist whose loaded job disagrees, the default
+    # provider already fails closed. Without this row the six broken rows below
+    # could pass for a reason unrelated to plist readability.
+    environment = _matrix_environment(tmp_path)
+    _arm_darwin_plist(
+        monkeypatch, tmp_path, "agent-alpha",
+        {"PATH": environment["PATH"], "WHATSOUP_PATH_PREPEND": environment["WHATSOUP_PATH_PREPEND"]},
+    )
+    # Loaded job AGREES on the prepend so the prepend check passes and the
+    # runtime-path gate is what refuses; it carries no PATH, so the effective
+    # PATH cannot compose.
+    captured, lines = _claude_probe(
+        monkeypatch, {}, {"WHATSOUP_PATH_PREPEND": environment["WHATSOUP_PATH_PREPEND"]}
+    )
+    assert not captured
+    assert "failure_class=provider_runtime_path_unavailable" in lines[0]
+    assert "reason=effective_path_uncomposable" in lines[0]
+
+
+@pytest.mark.parametrize("state", PLIST_BREAKAGE_STATES)
+def test_default_provider_probe_fails_closed_on_every_unreadable_plist_state(monkeypatch, tmp_path, state):
+    environment = _matrix_environment(tmp_path)
+    target = _arm_darwin_plist(
+        monkeypatch, tmp_path, "agent-alpha",
+        {"PATH": environment["PATH"], "WHATSOUP_PATH_PREPEND": environment["WHATSOUP_PATH_PREPEND"]},
+    )
+    _break_plist(target, state, tmp_path)
+    assert _mod.instance_plist_environment("agent-alpha") is None, f"{state}: fixture must be unreadable"
+
+    captured, lines = _claude_probe(monkeypatch, {}, dict(environment))
+
+    # Assert the REFUSAL REASON, not merely that something failed: a status-only
+    # assertion passes when an unrelated validator refuses for another cause.
+    assert not captured, f"{state}: probe must not run a provider it cannot vouch for"
+    assert "failure_class=provider_runtime_plist_unreadable" in lines[0], f"{state}: {lines[0]}"
+    _assert_fail_line_is_path_free(lines[0], tmp_path)
+
+
+@pytest.mark.parametrize("state", PLIST_BREAKAGE_STATES)
+def test_opencode_probe_also_fails_closed_on_every_unreadable_plist_state(monkeypatch, tmp_path, state):
+    # Parity rows: opencode already failed closed on all six. Pinning it here
+    # means a future change cannot restore the asymmetry from either side.
+    environment = _matrix_environment(tmp_path)
+    target = _arm_darwin_plist(
+        monkeypatch, tmp_path, "agent-alpha",
+        {"PATH": environment["PATH"], "WHATSOUP_PATH_PREPEND": environment["WHATSOUP_PATH_PREPEND"]},
+    )
+    _break_plist(target, state, tmp_path)
+    monkeypatch.setattr(_mod, "loaded_instance_environment", lambda name: dict(environment))
+
+    lines = _mod.opencode_provider_probe_inventory(
+        {}, {}, "agent-alpha",
+        {"type": "agent", "agentOptions": {"provider": "opencode-cli", "model": "xai/grok-4"}},
+        "opencode-cli",
+    )
+    assert lines[0].startswith("FAIL provider_probe"), f"{state}: {lines[0]}"
+    assert "failure_class=provider_runtime_path_" in lines[0], f"{state}: {lines[0]}"
+
+
+def test_default_provider_probe_stays_benign_when_there_is_no_launchagent_surface(monkeypatch, tmp_path):
+    # The two BENIGN states must NOT be swept into the fail-closed change:
+    # a Linux host has no plist by design, and the dry-run override is a test
+    # affordance. This is the regression guard for the fix's blast radius.
+    environment = _matrix_environment(tmp_path)
+    monkeypatch.delenv("BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH", raising=False)
+    monkeypatch.setattr(_mod, "HOST_PLATFORM", "linux")
+    monkeypatch.setattr(_mod.Path, "home", classmethod(lambda cls: tmp_path))
+    state, env = _mod.instance_plist_governed_environment("agent-alpha")
+    assert (state, env) == (_mod.GOVERNED_PLIST_NOT_APPLICABLE, None)
+
+    captured, lines = _claude_probe(monkeypatch, {}, dict(environment))
+    assert captured, "a host with no LaunchAgent surface must still probe"
+    assert "provider_runtime_plist_unreadable" not in "\n".join(lines)
+
+
+def test_default_provider_probe_gate_applies_even_with_an_operator_probe_command(monkeypatch, tmp_path):
+    # MED-2 negative control. The runtime-path gate is a statement about the
+    # SERVICE's PATH, so an operator override picks WHICH binary is probed but
+    # must not exempt the service from the gate. Before the hoist the gate lived
+    # inside `if not command:` and an override reported status=ok here.
+    environment = _matrix_environment(tmp_path)
+    _arm_darwin_plist(
+        monkeypatch, tmp_path, "agent-alpha",
+        {"PATH": environment["PATH"], "WHATSOUP_PATH_PREPEND": environment["WHATSOUP_PATH_PREPEND"]},
+    )
+    captured, lines = _claude_probe(
+        monkeypatch,
+        {"providerProbeCommand": "/fixture/operator/bin/claude"},
+        {"WHATSOUP_PATH_PREPEND": environment["WHATSOUP_PATH_PREPEND"]},
+    )
+    assert not captured, "an override must not exempt the service PATH from the gate"
+    assert "failure_class=provider_runtime_path_unavailable" in lines[0]
+    assert "reason=effective_path_uncomposable" in lines[0]
+
+
+def test_default_provider_probe_runs_the_provider_in_the_governed_environment(monkeypatch, tmp_path):
+    # MED-1. The binary is chosen from the governed PATH, so it must also RUN
+    # under that PATH. Passing no child environment meant a `#!/usr/bin/env node`
+    # wrapper resolved its interpreter from the probe's PATH, exercising the
+    # right executable under the wrong node or config root.
+    environment = _matrix_environment(tmp_path)
+    prepend_bin = tmp_path / "pin" / "bin"
+    _arm_darwin_plist(
+        monkeypatch, tmp_path, "agent-alpha",
+        {"PATH": environment["PATH"], "WHATSOUP_PATH_PREPEND": environment["WHATSOUP_PATH_PREPEND"]},
+    )
+    seen: dict[str, object] = {}
+
+    def _fake_output(command, *args, **kwargs):
+        seen["command"] = list(command)
+        seen["child_env"] = kwargs.get("child_env")
+        seen["child_cwd"] = kwargs.get("child_cwd")
+        return ("OK", "", 0, False)
+
+    monkeypatch.setattr(_mod, "provider_command_output", _fake_output)
+    monkeypatch.setattr(_mod, "loaded_instance_environment", lambda name: dict(environment))
+    _mod.provider_probe_target_inventory(
+        {}, {}, "agent-alpha",
+        {"type": "agent", "agentOptions": {"provider": "claude-cli"}},
+        "claude-cli", "primary",
+    )
+
+    assert seen.get("command", [None])[0] == str(prepend_bin / "claude")
+    child_env = seen.get("child_env")
+    assert child_env is not None, "the provider must not run in the probe's own environment"
+    # The environment key that decides interpreter and binary resolution.
+    effective = _mod.effective_instance_provider_path(environment)
+    assert child_env["PATH"] == effective
+    assert child_env["PATH"].split(":")[0] == str(prepend_bin)
+    assert child_env.get("WHATSOUP_PATH_PREPEND") == environment["WHATSOUP_PATH_PREPEND"]
+    assert seen.get("child_cwd"), "the provider must run in the instance workspace, not the probe's cwd"
+
+
+def test_governed_checks_apply_when_no_dry_affordance_is_set(monkeypatch, tmp_path):
+    """Named pin for the environment affordances that switch the checks off.
+
+    Two environment variables mark the governed surfaces not-applicable: the
+    dry-run PATH override and an injected probe result. Both are production-code
+    bypasses of a fail-closed path, so this asserts explicitly that with NEITHER
+    set the fail-closed still holds, and that each one alone is enough to switch
+    it off. Without this the six-row matrix would still pass if an affordance
+    leaked in from the ambient environment, because the assertion would never
+    reach the code it names.
+    """
+    environment = _matrix_environment(tmp_path)
+    target = _arm_darwin_plist(
+        monkeypatch, tmp_path, "agent-alpha",
+        {"PATH": environment["PATH"], "WHATSOUP_PATH_PREPEND": environment["WHATSOUP_PATH_PREPEND"]},
+    )
+    _break_plist(target, "missing", tmp_path)
+
+    # Precondition: the affordances really are absent for this assertion.
+    assert os.environ.get("BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH") is None
+    assert os.environ.get("BOT_ERRORS_DRY_PROVIDER_PROBE_STDOUT") is None
+    assert os.environ.get("BOT_ERRORS_DRY_PROVIDER_PROBE_RC") is None
+    assert _mod.provider_probe_output_is_stubbed() is False
+    assert _mod.instance_plist_governed_environment("agent-alpha") == (
+        _mod.GOVERNED_PLIST_UNREADABLE,
+        None,
+    )
+
+    # Each affordance ALONE switches the governed surfaces off, which is the
+    # bypass being disclosed rather than hidden.
+    monkeypatch.setenv("BOT_ERRORS_DRY_PROVIDER_PROBE_RC", "0")
+    assert _mod.provider_probe_output_is_stubbed() is True
+    assert _mod.instance_plist_governed_environment("agent-alpha") == (
+        _mod.GOVERNED_PLIST_NOT_APPLICABLE,
+        None,
+    )
+    monkeypatch.delenv("BOT_ERRORS_DRY_PROVIDER_PROBE_RC", raising=False)
+    monkeypatch.setenv("BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH", "/fixture/dry/bin")
+    assert _mod.instance_plist_governed_environment("agent-alpha") == (
+        _mod.GOVERNED_PLIST_NOT_APPLICABLE,
+        None,
+    )
