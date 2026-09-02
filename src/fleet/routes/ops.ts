@@ -5,10 +5,9 @@ import * as os from 'node:os';
 import { spawn } from 'node:child_process';
 import { readBody, jsonResponse, requireInstance } from '../../lib/http.ts';
 import {
-  pathIsAtOrInsideDirectory,
   pathIsInsideDirectory,
+  physicalPrefixIsConfined,
   rawAbsolutePath,
-  realpathLongestAbsentTolerantPrefix,
 } from '../../lib/home-confinement.ts';
 import { escapeRegExp } from '../../lib/regex-utils.ts';
 import { isNonEmptyString, isRecord } from '../../lib/type-guards.ts';
@@ -709,11 +708,7 @@ function resolveHomeConfinedPath(inputPath: string, res: ServerResponse, error: 
 
   try {
     const homeReal = fs.realpathSync.native(homePath);
-    // The resolved value now carries the leaf, so containment is STRICT: the
-    // old at-or-inside allowance existed only because the ancestor walk could
-    // return home itself.
-    const physicalPrefix = realpathLongestAbsentTolerantPrefix(rawAbsolute);
-    if (!pathIsAtOrInsideDirectory(physicalPrefix, homeReal)) {
+    if (!physicalPrefixIsConfined(rawAbsolute, homeReal)) {
       jsonResponse(res, 400, { error });
       return null;
     }
@@ -726,7 +721,9 @@ function resolveHomeConfinedPath(inputPath: string, res: ServerResponse, error: 
 }
 
 /**
- * Converted to the same physical policy as resolveHomeConfinedPath.
+ * Shares resolveHomeConfinedPath's physical predicate, not merely its policy:
+ * both call `physicalPrefixIsConfined`, so neither can be repaired without the
+ * other. The lexical strict gate below is the resolver's, applied here too.
  *
  * It previously used the JS `fs.realpathSync` for the home root and for the
  * post-mkdir re-check, and it handed the old longest-existing-prefix walk the
@@ -734,6 +731,9 @@ function resolveHomeConfinedPath(inputPath: string, res: ServerResponse, error: 
  * survived at this call site even after the resolver itself was converted, and
  * the walk let a dangling intermediate through. Both now use
  * `fs.realpathSync.native` against the raw spelling.
+ *
+ * The post-mkdir re-check stays strict and stays last: it is the only check
+ * that sees the created leaf.
  */
 function ensureHomeConfinedDirectory(dirPath: string): void {
   const homePath = path.resolve(os.homedir());
@@ -744,10 +744,20 @@ function ensureHomeConfinedDirectory(dirPath: string): void {
     throw privateWriteError('directory must be within the home directory', 'EACCES');
   };
 
+  // The same lexical strict gate resolveHomeConfinedPath applies, and before
+  // any directory is created, so nothing is brought into existence for a
+  // spelling the resolver would have refused outright.
+  //
+  // Defence in depth, not a live refusal path: every call site today passes
+  // path.join(cwd, '.claude') for a cwd resolveAndValidateCwd already accepted,
+  // so no request reaching here can fail this gate. It exists for the next
+  // caller, which is the failure mode this module was created to end.
+  if (!pathIsInsideDirectory(path.resolve(rawAbsolute), homePath)) refuse();
+
   let homeReal: string;
   try {
     homeReal = fs.realpathSync.native(homePath);
-    if (!pathIsAtOrInsideDirectory(realpathLongestAbsentTolerantPrefix(rawAbsolute), homeReal)) refuse();
+    if (!physicalPrefixIsConfined(rawAbsolute, homeReal)) refuse();
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'EACCES') throw err;
     refuse();

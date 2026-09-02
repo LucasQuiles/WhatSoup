@@ -10,6 +10,7 @@
  */
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { nothingExistsAt } from '../lib/home-confinement.ts';
 import {
   LaunchdRenderConfigError,
   extractLaunchdPlistRenderOptions,
@@ -19,16 +20,6 @@ import { isValidInstanceName } from './instance-name.ts';
 import { configRoot } from './paths.ts';
 
 export type { LaunchdPlistRenderOptions } from '../lib/launchd-service-config.ts';
-
-/** True only when nothing exists at the path — a dangling symlink still exists. */
-function isTrulyAbsent(configPath: string): boolean {
-  try {
-    fs.lstatSync(configPath);
-    return false;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === 'ENOENT';
-  }
-}
 
 /**
  * Read and validate `<instancesConfigRoot>/<name>/config.json`, returning the
@@ -51,7 +42,7 @@ export function resolveLaunchdPlistRenderOptions(
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code ?? 'unknown';
     if (code === 'ENOENT') {
-      if (isTrulyAbsent(configPath)) return {};
+      if (nothingExistsAt(configPath)) return {};
       throw new LaunchdRenderConfigError(`config.json for instance ${name} is a dangling symlink`);
     }
     throw new LaunchdRenderConfigError(`config.json for instance ${name} is unreadable (${code})`);
