@@ -546,6 +546,12 @@ export async function reconcileLaunchdPlist(
 async function installLaunchdPlist(name: string): Promise<void> {
   // Resolve (and thereby validate) the instance's render options before any
   // filesystem mutation so an invalid service block aborts the install whole.
+  // Shape is validated inside the resolver, which throws before anything is
+  // written. An explicit assertion here would be unreachable: this path takes
+  // no caller-supplied renderOptions override, unlike reconcileLaunchdPlist,
+  // so the resolver is always what refuses. The install-time refusal is pinned
+  // by "fails a first install closed when the instance service block is
+  // invalid" in tests/fleet/platform-service-manager.test.ts.
   const renderOptions = resolveLaunchdPlistRenderOptions(name);
   // Second render call site. reconcileLaunchdPlist has always asserted render
   // option shape here; this one never did, so `assertValidLaunchdPlistRenderOptions`

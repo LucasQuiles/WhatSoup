@@ -5,7 +5,6 @@ import * as os from 'node:os';
 import { spawn } from 'node:child_process';
 import { readBody, jsonResponse, requireInstance } from '../../lib/http.ts';
 import {
-  nothingExistsAt,
   pathIsAtOrInsideDirectory,
   pathIsInsideDirectory,
   rawAbsolutePath,
@@ -685,6 +684,18 @@ function resolveHomeConfinedPath(inputPath: string, res: ServerResponse, error: 
   //  - `resolved` is the lexically collapsed form, used only as a cheap first
   //    gate and as the return value.
   const expanded = expandHomePath(inputPath);
+  // Refuse `.`/`..` components outright, on the tilde-expanded spelling.
+  //
+  // Chosen over resolving left-to-right because this route PERSISTS the
+  // lexically collapsed form: validating one string and storing another is the
+  // shape that produced the traversal bypass in the first place. Refusing the
+  // spelling makes the validated value and the stored value identical, and it
+  // is the same reject-not-canonicalise rule the service block already applies.
+  // A canonical form always exists, and no caller in this repo passes `..`.
+  if (!isCanonicalAbsolutePath(expanded)) {
+    jsonResponse(res, 400, { error });
+    return null;
+  }
   const resolved = path.resolve(expanded);
   const homePath = path.resolve(os.homedir());
   if (!pathIsInsideDirectory(resolved, homePath)) {

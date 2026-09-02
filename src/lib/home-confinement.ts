@@ -21,7 +21,7 @@ import * as path from 'node:path';
  * An absolute result means the two paths share no root, which is always an
  * escape.
  */
-export function relativePathEscapes(relative: string): boolean {
+function relativePathEscapes(relative: string): boolean {
   return relative === '..'
     || relative.startsWith('..' + path.sep)
     || path.isAbsolute(relative);
@@ -99,6 +99,18 @@ export function rawAbsolutePath(inputPath: string, cwd: string = process.cwd()):
  * failures.
  */
 export function realpathLongestAbsentTolerantPrefix(targetPath: string): string {
+  // A `..` anywhere in the spelling makes the climb unsound, so the climb is
+  // not attempted at all.
+  //
+  // The climb discards components RIGHT TO LEFT. For `<home>/absent/../link`
+  // with `link -> /outside`, the whole path fails to resolve because `absent`
+  // does not exist, and each climb then throws away `link`, then `..`, then
+  // `absent`, landing on `<home>` and reporting the path as confined. The `..`
+  // is discarded before the symlink to its left is ever followed, while the
+  // caller goes on to persist the LEXICALLY collapsed `<home>/link`, which is
+  // the symlink. Absence and traversal are individually safe here and lethal
+  // together, so the combination is refused.
+  const hasTraversal = targetPath.split(path.sep).includes('..');
   let current = targetPath;
   for (;;) {
     try {
@@ -108,11 +120,24 @@ export function realpathLongestAbsentTolerantPrefix(targetPath: string): string 
       // Something IS here and does not resolve: a dangling symlink. Refuse
       // rather than climb past it.
       if (!nothingExistsAt(current)) throw err;
+      if (hasTraversal) throw err;
       const parent = path.dirname(current);
       if (parent === current) throw err;
       current = parent;
     }
   }
+}
+
+/**
+ * Lexical containment, for callers that only need "is this path under that
+ * root" with no filesystem access.
+ *
+ * Exported so src/transport/auth-bond.ts stops carrying its own copy. That copy
+ * used the bare `rel.startsWith('..')` test, so it inherited the same
+ * over-rejection of in-root names that merely begin with dots.
+ */
+export function pathIsInsideRoot(root: string, candidate: string): boolean {
+  return pathIsInsideDirectory(path.resolve(candidate), path.resolve(root));
 }
 
 /**
