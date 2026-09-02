@@ -680,11 +680,93 @@ _LEGACY_ALERT_CONTENT_COUNTERS = {
 # permanent zero that reads exactly like "clean".
 _pending_unrenderable_quarantines = 0
 
+# The counter above answers "how many"; the operator also needs "which incident",
+# because a quarantine happens inside ready(), BEFORE process_one, so the alert
+# never reaches a delivery path and nothing else in the cycle would say a word
+# about it. #2386's acceptance is that a malformed schema fails closed WITHOUT
+# suppressing the safe source/class signal, so the signal is captured here and a
+# content-free meta-alert is queued once per cycle from run_once.
+_pending_unrenderable_signals: list[dict[str, str]] = []
+# Monotonic across the process; run_once takes a mark/delta around one cycle so
+# the cycle's quarantine count is independent of the fold/acknowledge protocol.
+_unrenderable_quarantines_total = 0
+# A cycle always drains the signal list, but note_unrenderable_quarantine is also
+# reachable outside one. Bound the list so a pathological caller cannot grow it
+# without limit; the count above is never dropped, only the per-incident detail.
+UNRENDERABLE_SIGNAL_CAP = 512
+UNRENDERABLE_META_ALERT_SOURCE = "meta_alert_unrenderable_alert_content"
+# The fixed EnvelopeError code. It is the only value that ever reaches lastError
+# from this path, so lastError stays bounded and content-free.
+UNRENDERABLE_ALERT_CONTENT_CODE = "unrenderable_alert_content"
+# The same throttle the dead-letter meta-alert uses, applied per incident key.
+UNRENDERABLE_META_ALERT_THROTTLE_SECONDS = DEAD_LETTER_META_ALERT_THROTTLE_SECONDS
+# Read through a VARIABLE field name on purpose: the alert-content coverage scan
+# matches constant reads, and these two reads are content-free by construction.
+UNRENDERABLE_SIGNAL_FIELDS = ("summary", "evidence")
 
-def note_unrenderable_quarantine() -> None:
+
+def unrenderable_alert_signal(event: Any) -> dict[str, str]:
+    """The content-free operator signal a quarantined event still carries.
+
+    Deliberately excludes every byte of the unrenderable value: having no safe way
+    to render it is exactly why the event was quarantined, and baking it into a
+    meta-alert would reintroduce the dict-repr leak this issue exists to remove.
+
+    What survives is identity plus class. ``failureClass`` is read only from a
+    field that IS a legacy confinement envelope -- a bounded producer token that
+    ``alert_text`` already renders into the dead-letter meta-alert -- and never the
+    digest or the length. The unrenderable fields are reported by NAME and TYPE,
+    which describes the shape of the failure without quoting any of its content.
+    """
+    unknown = {
+        "source": "unknown",
+        "incidentKey": "unknown",
+        "failureClass": "unavailable",
+        "unrenderableFields": "",
+    }
+    if not isinstance(event, dict):
+        return unknown
+    failure_class = ""
+    unrenderable: list[str] = []
+    for field in UNRENDERABLE_SIGNAL_FIELDS:
+        value = event.get(field)
+        kind = alert_text_kind(value)
+        if kind == "unrenderable":
+            unrenderable.append(f"{field}:{type(value).__name__}")
+        elif kind == "legacy_object" and not failure_class:
+            # "{failureClass} - {length} chars - digest {digest[:8]}" -- take the
+            # class only, so neither the length nor the digest reaches the alert.
+            failure_class = alert_text(value).split(" - ", 1)[0]
+    try:
+        key = incident_key(event)
+        source = incident_source(event)
+    except Exception:  # noqa: BLE001 -- identity helpers must not break quarantine
+        return unknown
+    return {
+        "source": redacted_state_text(source or "unknown", 120),
+        "incidentKey": redacted_state_text(key or "unknown", 200),
+        "failureClass": redacted_state_text(failure_class, 64) if failure_class else "unavailable",
+        "unrenderableFields": ",".join(unrenderable),
+    }
+
+
+def note_unrenderable_quarantine(event: Any = None) -> None:
     """Record that one event was quarantined for unrenderable alert content."""
-    global _pending_unrenderable_quarantines
+    global _pending_unrenderable_quarantines, _unrenderable_quarantines_total
     _pending_unrenderable_quarantines += 1
+    _unrenderable_quarantines_total += 1
+    if len(_pending_unrenderable_signals) < UNRENDERABLE_SIGNAL_CAP:
+        _pending_unrenderable_signals.append(unrenderable_alert_signal(event))
+
+
+def unrenderable_quarantine_total() -> int:
+    """Every unrenderable quarantine this process has seen, never reset.
+
+    run_once brackets a cycle with two reads of this and reports the difference,
+    so the per-cycle count does not depend on the fold/acknowledge protocol that
+    governs the persisted telemetry counter.
+    """
+    return _unrenderable_quarantines_total
 
 
 def flush_unrenderable_quarantine_telemetry(incident_state: dict[str, Any]) -> int:
@@ -5985,6 +6067,129 @@ def queue_test_provenance_meta_alert(paths: dict[str, Path], refused: int) -> in
     return 1
 
 
+def unrenderable_meta_event(signal: dict[str, str], count: int) -> dict[str, Any]:
+    """A content-free page for alerts the dispatcher had to quarantine (#2386).
+
+    Every field here is either fixed text or a bounded identity token from
+    ``unrenderable_alert_signal``. No byte of the quarantined ``summary`` or
+    ``evidence`` appears, and neither does the correlation digest -- strictly less
+    than the dead-letter meta-alert, which renders the confined summary through
+    ``alert_text``.
+    """
+    now = int(time.time())
+    key_digest = hashlib.sha256(signal.get("incidentKey", "").encode("utf-8")).hexdigest()[:8]
+    return {
+        **new_event_fields("alert", "critical"),
+        "id": f"dispatcher-unrenderable-alert-content-{now}-{os.getpid()}-{key_digest}",
+        "createdAt": now_iso(),
+        "machine": socket.gethostname(),
+        "platform": sys.platform,
+        "instance": "bot-errors-dispatcher",
+        "source": UNRENDERABLE_META_ALERT_SOURCE,
+        "summary": "BOT ERRORS quarantined an alert it has no safe way to render",
+        # NOTE: as in dead_letter_meta_event, no absolute state path goes in
+        # evidence -- matched_test_leak_pattern() walks every string field and a
+        # sandbox path would make this meta-alert drop itself. The quarantine
+        # path is recorded in the dispatch log instead.
+        "evidence": "\n".join([
+            f"unrenderable_quarantine_count={count}",
+            f"alert_source={signal.get('source', 'unknown')}",
+            f"incident_key={signal.get('incidentKey', 'unknown')}",
+            f"failure_class={signal.get('failureClass', 'unavailable')}",
+            f"unrenderable_fields={signal.get('unrenderableFields', '')}",
+            "disposition: original quarantined, not delivered and not retried",
+        ]),
+        "process": {"pid": os.getpid()},
+        "diagnostics": {"omitDispatchLogInMessage": True},
+        "delivery": {"attempts": 0, "status": "queued", "nextAttemptAtEpoch": 0, "lastError": None},
+    }
+
+
+def queue_unrenderable_meta_alerts(paths: dict[str, Path], now: int) -> int:
+    """Page once per incident key for the alerts this cycle quarantined (#2386).
+
+    Quarantine happens inside ``ready()``, before ``process_one``, so the event is
+    already out of the queue by the time any delivery path runs: without this the
+    dispatcher drops a CRITICAL alert, exits 0, and says nothing. The base
+    behaviour paged a sentinel, and #2386's acceptance is that failing closed on a
+    malformed schema must not suppress the safe source/class signal.
+
+    Throttled on the dead-letter meta-alert's window, applied PER INCIDENT KEY, so
+    a storm of unrenderable events from one producer pages once while a second,
+    unrelated producer is still reported. A key is only removed from the pending
+    list once its meta-alert has been published or deliberately debounced, so a
+    failed publication is retried on the next cycle rather than lost.
+    """
+    global _pending_unrenderable_signals
+    if not _pending_unrenderable_signals:
+        return 0
+
+    grouped: dict[str, dict[str, Any]] = {}
+    for signal in _pending_unrenderable_signals:
+        entry = grouped.setdefault(signal["incidentKey"], {"signal": signal, "count": 0})
+        entry["count"] = int(entry["count"]) + 1
+
+    state = read_meta_state(paths)
+    seen = state.get("unrenderableMetaAlertAtEpoch")
+    if not isinstance(seen, dict):
+        seen = {}
+
+    queued = 0
+    settled: set[str] = set()
+    for key, entry in sorted(grouped.items()):
+        last = int(seen.get(key) or 0)
+        if last and now - last < UNRENDERABLE_META_ALERT_THROTTLE_SECONDS:
+            append_dispatch_log(paths, {
+                "type": "unrenderable_meta_debounced",
+                "incidentKey": key,
+                "count": entry["count"],
+                "throttleSeconds": UNRENDERABLE_META_ALERT_THROTTLE_SECONDS,
+            })
+            settled.add(key)
+            continue
+        event = unrenderable_meta_event(entry["signal"], int(entry["count"]))
+        path = outbox_path_for_event(event, paths)
+        target = _durable_target(path)
+        absent = JsonVersion(False, None, None, None)
+        publication_operation = operation_id(
+            target,
+            event,
+            component="dispatcher.unrenderable_meta_alert",
+            predecessor=absent,
+        )
+        event_publication = publish_event_json(
+            target,
+            event,
+            component="dispatcher.unrenderable_meta_alert",
+            operation_id=publication_operation,
+        )
+        require_advance(event_publication)
+        seen[key] = now
+        queued += 1
+        settled.add(key)
+        append_dispatch_log(paths, {
+            "type": "unrenderable_meta_queued",
+            "eventId": event["id"],
+            "incidentKey": key,
+            "count": entry["count"],
+        })
+
+    # Prune expired keys: the map is keyed by incident key, so without this a
+    # long-lived dispatcher would accumulate one entry per distinct producer.
+    seen = {
+        str(k): int(v or 0)
+        for k, v in seen.items()
+        if now - int(v or 0) < UNRENDERABLE_META_ALERT_THROTTLE_SECONDS
+    }
+    state["unrenderableMetaAlertAtEpoch"] = seen
+    write_meta_state(paths, state)
+    _pending_unrenderable_signals = [
+        signal for signal in _pending_unrenderable_signals
+        if signal["incidentKey"] not in settled
+    ]
+    return queued
+
+
 def suppress_test_provenance_events(paths: dict[str, Path]) -> tuple[int, int]:
     suppressed = 0
     for path in sorted(paths["outbox"].glob("*.json")):
@@ -6008,25 +6213,99 @@ def suppress_test_provenance_events(paths: dict[str, Path]) -> tuple[int, int]:
     return suppressed, alerted
 
 
+class QueueDisposition:
+    """What the scan decided about one queue entry (#2386, repair contract A).
+
+    A bare bool or a bare event-or-None cannot distinguish "not due yet" from
+    "removed from the queue forever", so the caller had no way to account a
+    terminal drop. ``reason`` is a fixed EnvelopeError code; ``kind`` and
+    ``severity`` are the canonical header values, populated only when
+    classification had already validated them. None of the three is ever raw
+    event text.
+
+    Deliberately NOT a dataclass. Several test modules load this script by file
+    path WITHOUT registering it in ``sys.modules``, and ``@dataclass`` resolves
+    ``cls.__module__`` through ``sys.modules`` while it builds the class, so the
+    decorator raises at import time under exactly that loader. A plain class has
+    no such dependency and this module must stay importable by file path.
+    """
+
+    def __init__(self, state: str, reason: str = "", kind: str = "", severity: str = "") -> None:
+        self.state = state
+        self.reason = reason
+        self.kind = kind
+        self.severity = severity
+
+    def __repr__(self) -> str:
+        return (
+            f"QueueDisposition(state={self.state!r}, reason={self.reason!r}, "
+            f"kind={self.kind!r}, severity={self.severity!r})"
+        )
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, QueueDisposition):
+            return NotImplemented
+        return (
+            self.state == other.state
+            and self.reason == other.reason
+            and self.kind == other.kind
+            and self.severity == other.severity
+        )
+
+
+DISPOSITION_READY = QueueDisposition("ready")
+DISPOSITION_NOT_READY = QueueDisposition("not_ready")
+
+
+def load_event_disposition(
+    path: Path, quarantine_dir: Path
+) -> tuple[dict[str, Any] | None, QueueDisposition]:
+    """Load one queue entry, returning it alongside a tagged disposition."""
+    event = _load_valid_event_or_quarantine_inner(path, quarantine_dir)
+    return event, _LAST_LOAD_DISPOSITION[0]
+
+
 def load_valid_event_or_quarantine(path: Path, quarantine_dir: Path) -> dict[str, Any] | None:
+    """Back-compatible view of the loader: the event, or None."""
+    event, _disposition = load_event_disposition(path, quarantine_dir)
+    return event
+
+
+# The disposition of the most recent load, so the tagged result can be returned
+# without changing the signature every existing caller depends on.
+_LAST_LOAD_DISPOSITION: list[QueueDisposition] = [DISPOSITION_NOT_READY]
+
+
+def _load_valid_event_or_quarantine_inner(path: Path, quarantine_dir: Path) -> dict[str, Any] | None:
     # #2484: reject symlink and non-regular leaves before reading.  Quarantine
     # the directory entry itself without dereferencing its target.
+    _LAST_LOAD_DISPOSITION[0] = DISPOSITION_NOT_READY
     if not safe_is_regular_entry(path):
         quarantine_untrusted_entry(path, quarantine_dir, "untrusted leaf entry")
+        _LAST_LOAD_DISPOSITION[0] = QueueDisposition("quarantined", "untrusted_leaf_entry")
         return None
     try:
         event = safe_read_json(path)
     except UntrustedEntryError:
         quarantine_untrusted_entry(path, quarantine_dir, "untrusted leaf entry after open")
+        _LAST_LOAD_DISPOSITION[0] = QueueDisposition("quarantined", "untrusted_leaf_entry")
         return None
     except Exception as exc:
         quarantine_poison(path, quarantine_dir, f"invalid JSON before claim: {exc}")
+        _LAST_LOAD_DISPOSITION[0] = QueueDisposition("quarantined", "poison")
         return None
     try:
         classify_event(event)
     except EnvelopeError as exc:
-        quarantine_invalid_envelope(path, quarantine_dir, exc.code)
+        quarantine_invalid_envelope(path, quarantine_dir, exc.code, event)
+        _LAST_LOAD_DISPOSITION[0] = QueueDisposition(
+            "quarantined",
+            safe_segment(exc.code),
+            getattr(exc, "kind", "") or "",
+            getattr(exc, "severity", "") or "",
+        )
         return None
+    _LAST_LOAD_DISPOSITION[0] = DISPOSITION_READY
     return event
 
 
@@ -6046,9 +6325,14 @@ def delivery_ready(event: dict[str, Any]) -> bool:
 
 
 def ready(path: Path, quarantine_dir: Path) -> bool:
-    event = load_valid_event_or_quarantine(path, quarantine_dir)
+    """Boolean view of ``ready_disposition`` for callers that only branch on it."""
+    return ready_disposition(path, quarantine_dir).state == "ready"
+
+
+def ready_disposition(path: Path, quarantine_dir: Path) -> QueueDisposition:
+    event, disposition = load_event_disposition(path, quarantine_dir)
     if event is None:
-        return False
+        return disposition
     delivery = event.get("delivery") if isinstance(event.get("delivery"), dict) else {}
     try:
         int(delivery.get("nextAttemptAtEpoch") or 0)
@@ -6056,7 +6340,7 @@ def ready(path: Path, quarantine_dir: Path) -> bool:
         # #2437: quarantine malformed metadata so a single poison record
         # cannot wedge the queue; the scan continues with the next event.
         quarantine_poison(path, quarantine_dir, f"malformed delivery.nextAttemptAtEpoch: {exc}")
-        return False
+        return QueueDisposition("quarantined", "poison")
     try:
         int(delivery.get("attempts") or 0)
     except (TypeError, ValueError) as exc:
@@ -6067,16 +6351,26 @@ def ready(path: Path, quarantine_dir: Path) -> bool:
         # the record back to outbox, creating an infinite claim-fail loop.
         # Validate here (before claim) so the scan quarantines and continues.
         quarantine_poison(path, quarantine_dir, f"malformed delivery.attempts: {exc}")
-        return False
-    return delivery_ready(event)
+        return QueueDisposition("quarantined", "poison")
+    return DISPOSITION_READY if delivery_ready(event) else DISPOSITION_NOT_READY
 
 
-def quarantine_invalid_envelope(path: Path, quarantine_dir: Path, code: str) -> Path:
-    """Quarantine an invalid envelope without treating it as an alert to send."""
+def quarantine_invalid_envelope(
+    path: Path,
+    quarantine_dir: Path,
+    code: str,
+    event: Any = None,
+) -> Path:
+    """Quarantine an invalid envelope without treating it as an alert to send.
+
+    ``event`` is the raw record the caller already parsed. It is used only to
+    capture the content-free operator signal (#2386); the value is never rendered
+    and never reaches the quarantined file or the meta-alert body.
+    """
 
     ensure_private_dir(quarantine_dir)
-    if code == "unrenderable_alert_content":
-        note_unrenderable_quarantine()
+    if code == UNRENDERABLE_ALERT_CONTENT_CODE:
+        note_unrenderable_quarantine(event)
     reason = safe_segment(code)
     dest = quarantine_dir / f"{path.name}.{int(time.time())}.{os.getpid()}.{reason}.invalid-envelope"
     try:
@@ -6475,7 +6769,10 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
     try:
         event = normalize_event(event)
     except EnvelopeError as exc:
-        quarantine_invalid_envelope(claimed, paths["quarantine"], exc.code)
+        # Reachable despite the ready() pre-check: the file can be rewritten
+        # between the scan and the claim. Both sites must page, or the second
+        # one silently drops the alert the first one was fixed to report.
+        quarantine_invalid_envelope(claimed, paths["quarantine"], exc.code, event)
         return False, "invalid_envelope"
     normalize_target = _durable_target(claimed)
     normalize_observation = observe_json(normalize_target)
@@ -6931,6 +7228,10 @@ def run_once(max_events: int) -> dict[str, Any]:
                 session, _load_result.payload, _load_result.capability, paths=paths
             )
 
+            # #2386: mark BEFORE the first pass that can quarantine. Every pre-loop
+            # pass below calls ready(), which is where an unrenderable event is
+            # removed from the queue.
+            quarantine_mark = unrenderable_quarantine_total()
             writefail_recovered = recover_writefail_breadcrumbs(paths)
             reclaimed = reclaim_processing(paths)
             test_provenance_suppressed, test_provenance_meta_alerted = suppress_test_provenance_events(paths)
@@ -6951,7 +7252,23 @@ def run_once(max_events: int) -> dict[str, Any]:
             for path in sorted(paths["outbox"].glob("*.json")):
                 if processed >= max_events:
                     break
-                if not ready(path, paths["quarantine"]):
+                disposition = ready_disposition(path, paths["quarantine"])
+                if disposition.state != "ready":
+                    if (
+                        disposition.state == "quarantined"
+                        and disposition.reason == UNRENDERABLE_ALERT_CONTENT_CODE
+                    ):
+                        # Terminal: the alert left the queue and is never retried.
+                        # Accounted once at the end of the cycle, where the count
+                        # also covers the pre-loop passes that call ready().
+                        # Scanning CONTINUES so one malformed event cannot
+                        # suppress a healthy sibling behind it.
+                        append_dispatch_log(paths, {
+                            "type": "unrenderable_alert_quarantined",
+                            "reason": disposition.reason,
+                            "eventKind": disposition.kind,
+                            "severity": disposition.severity,
+                        })
                     continue
                 try:
                     preview = safe_read_json(path)
@@ -6982,6 +7299,11 @@ def run_once(max_events: int) -> dict[str, Any]:
             # --- F5: dead-letter meta-alert (at most once per hour when dir non-empty) ---
             dead_letter_meta_alerted = queue_dead_letter_meta_alert(paths, int(time.time()))
 
+            # #2386: page for anything quarantined as unrenderable this cycle.
+            # Runs after the loop so the alert it queues is picked up next cycle
+            # rather than re-entering the scan that is still in progress.
+            unrenderable_meta_alerted = queue_unrenderable_meta_alerts(paths, int(time.time()))
+
             # #2386: a cycle whose events were ALL quarantined never reaches the
             # shared telemetry helper, so drain any pending quarantine counts here
             # before the cycle ends. Commit only when something was folded.
@@ -7009,6 +7331,24 @@ def run_once(max_events: int) -> dict[str, Any]:
                     })
 
             suppressed_pruned = prune_suppressed(paths)
+            # Named for exactly what it counts. `record_state` already reports a
+            # `quarantine` key holding the SIZE of the quarantine directory, and
+            # this counts only the unrenderable class within one cycle; a bare
+            # `quarantined` beside it would read as "every quarantine this cycle".
+            unrenderable_quarantined = unrenderable_quarantine_total() - quarantine_mark
+            if unrenderable_quarantined:
+                # #2386: a quarantined alert was NOT delivered and will never be
+                # retried, so it is a terminal failure of this cycle. Accounting it
+                # here rather than in the scan loop is deliberate: the pre-loop
+                # passes (test-provenance suppression, recovery dedup, flap scan,
+                # storm collapse) all call ready() over the same outbox, so one of
+                # them can quarantine an event BEFORE the loop ever sees it. Driving
+                # the count off the cycle delta catches it wherever it happened.
+                # `failed` carries it so existing health inspection and the one-shot
+                # exit status observe the drop with no new predicate.
+                processed += unrenderable_quarantined
+                failed += unrenderable_quarantined
+                last_error = UNRENDERABLE_ALERT_CONTENT_CODE
 
             record_state(
                 paths,
@@ -7033,6 +7373,8 @@ def run_once(max_events: int) -> dict[str, Any]:
                 flapResolveErrors=flap_resolve_errors,
                 suppressedPruned=suppressed_pruned,
                 deadLetterMetaAlerted=dead_letter_meta_alerted,
+                unrenderableQuarantined=unrenderable_quarantined,
+                unrenderableMetaAlerted=unrenderable_meta_alerted,
                 lastError=last_error,
             )
             return {
@@ -7055,6 +7397,8 @@ def run_once(max_events: int) -> dict[str, Any]:
                 "flapResolveErrors": flap_resolve_errors,
                 "suppressedPruned": suppressed_pruned,
                 "deadLetterMetaAlerted": dead_letter_meta_alerted,
+                "unrenderableQuarantined": unrenderable_quarantined,
+                "unrenderableMetaAlerted": unrenderable_meta_alerted,
                 "lastError": last_error,
             }
 
@@ -7112,6 +7456,10 @@ def main() -> int:
         }))
         return STATE_RECOVERY_REQUIRED_EXIT
     print(json.dumps(result, sort_keys=True))
+    # #2386: a quarantined event is an alert that was NOT delivered, and run_once
+    # folds it into `failed`, so this one predicate covers it. Reporting success
+    # for a cycle that silently dropped a CRITICAL page is the failure this exit
+    # code exists to prevent.
     return 1 if result.get("failed") else 0
 
 

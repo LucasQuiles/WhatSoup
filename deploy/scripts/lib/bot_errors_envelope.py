@@ -21,10 +21,20 @@ INCIDENT_SEVERITIES = frozenset(("critical", "error", "warning"))
 
 
 class EnvelopeError(ValueError):
-    """A bounded reason why a queue event is not safe to consume."""
+    """A bounded reason why a queue event is not safe to consume.
 
-    def __init__(self, code: str) -> None:
+    ``kind`` and ``severity`` are populated only when classification had ALREADY
+    validated them before the failure was raised, which is the case for
+    ``unrenderable_alert_content``: the header is sound, the alert content is not.
+    They are canonical values from a closed set, never raw event text, so a
+    consumer can report what class of alert it dropped without echoing content.
+    Both are empty when the failure happened before or during header validation.
+    """
+
+    def __init__(self, code: str, *, kind: str = "", severity: str = "") -> None:
         self.code = code
+        self.kind = kind
+        self.severity = severity
         super().__init__(code)
 
 
@@ -94,6 +104,7 @@ def _classify_v2(event: Mapping[str, Any]) -> EventClassification:
     expected_kind, canonical_event_type, canonical_severity = _classify_v2_pair(event_type, severity)
     if kind != expected_kind:
         raise EnvelopeError("invalid_kind_severity")
+    _require_renderable_alert_content_classified(event, expected_kind, canonical_severity)
     return EventClassification(kind, canonical_event_type, canonical_severity, SCHEMA_VERSION, False)
 
 
@@ -135,21 +146,29 @@ def _require_renderable_alert_content(event: Mapping[str, Any]) -> None:
         raise EnvelopeError("unrenderable_alert_content")
 
 
+def _require_renderable_alert_content_classified(
+    event: Mapping[str, Any], kind: str, severity: str
+) -> None:
+    """Validate alert content, tagging the failure with the validated header."""
+    try:
+        _require_renderable_alert_content(event)
+    except EnvelopeError as exc:
+        raise EnvelopeError(exc.code, kind=kind, severity=severity) from None
+
+
 def classify_event(event: Mapping[str, Any]) -> EventClassification:
     """Classify a supported v1 or v2 event without mutating the input."""
 
     version = _schema_version(event)
     if version == SCHEMA_VERSION:
-        classification = _classify_v2(event)
-        _require_renderable_alert_content(event)
-        return classification
+        return _classify_v2(event)
 
     if "eventKind" in event:
         raise EnvelopeError("unexpected_legacy_event_kind")
     event_type = _required_string(event, "eventType", "missing_event_type")
     severity = _required_string(event, "severity", "missing_severity")
     kind, canonical_event_type, canonical_severity = _classify_legacy_pair(event_type, severity)
-    _require_renderable_alert_content(event)
+    _require_renderable_alert_content_classified(event, kind, canonical_severity)
     return EventClassification(kind, canonical_event_type, canonical_severity, LEGACY_SCHEMA_VERSION, True)
 
 

@@ -1123,3 +1123,305 @@ def test_a_raising_recorder_does_not_stop_the_event(tmp_path, monkeypatch) -> No
     assert any(
         record.get("type") == "legacy_alert_content_telemetry_failed" for record in logged
     ), "the failure must be recorded, not swallowed silently"
+
+
+# ---------------------------------------------------------------------------
+# The quarantine path must page (#2386)
+# ---------------------------------------------------------------------------
+# Quarantine happens inside ready(), BEFORE process_one, so a quarantined event
+# is out of the queue before any delivery path runs. Nothing else in the cycle
+# reports it: the dead-letter meta-alert covers exhausted delivery only, and the
+# failed counter is incremented after the move. A one-shot run with a single
+# unrenderable CRITICAL alert therefore exited 0 with the alert silently dropped,
+# where the base behaviour paged a sentinel. #2386's acceptance is that failing
+# closed on a malformed schema must not suppress the safe source/class signal.
+
+UNRENDERABLE_NONCE = "nonce4f2a9c1edonotleak"
+
+
+def _dispatcher_in(tmp_path: Path, monkeypatch) -> Any:
+    """A dispatcher module bound to a sandbox state root, with sending stubbed."""
+    root = tmp_path / "state"
+    monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(root))
+    monkeypatch.setenv("BOT_ERRORS_OUTBOX_DIR", str(root / "outbox"))
+    monkeypatch.setenv("BOT_ERRORS_JID", "12345@g.us")
+    mod = _load_module()
+    monkeypatch.setattr(mod, "send_whatsapp", lambda text, socket_path="": None)
+    return mod
+
+
+def _queue_event(paths: dict[str, Path], name: str, event: dict[str, Any]) -> dict[str, Any]:
+    path = paths["outbox"] / name
+    path.write_text(json.dumps(event), encoding="utf-8")
+    path.chmod(0o600)
+    return event
+
+
+def _unrenderable_event(**overrides: Any) -> dict[str, Any]:
+    """A CRITICAL alert whose summary is a mapping-free value nothing can render.
+
+    The nonce lives ONLY in the unrenderable value, so a meta-alert that quotes any
+    part of the quarantined content fails the leak assertion below.
+    """
+    base: dict[str, Any] = {
+        "id": "unrenderable-001",
+        "summary": [UNRENDERABLE_NONCE, "not renderable"],
+        "evidence": "plain evidence text " + UNRENDERABLE_NONCE,
+    }
+    base.update(overrides)
+    return _make_event(**base)
+
+
+def _queued_meta_alerts(paths: dict[str, Path], mod: Any) -> list[dict[str, Any]]:
+    found: list[dict[str, Any]] = []
+    for path in sorted(paths["outbox"].glob("*.json")):
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if record.get("source") == mod.UNRENDERABLE_META_ALERT_SOURCE:
+            found.append(record)
+    return found
+
+
+def test_a_quarantined_unrenderable_alert_queues_exactly_one_meta_alert(tmp_path, monkeypatch) -> None:
+    mod = _dispatcher_in(tmp_path, monkeypatch)
+    paths = mod.setup_dirs()
+    _queue_event(paths, "aaa-unrenderable.json", _unrenderable_event())
+
+    result = mod.run_once(max_events=25)
+
+    alerts = _queued_meta_alerts(paths, mod)
+    assert len(alerts) == 1, f"expected exactly one meta-alert, got {len(alerts)}"
+    assert result.get("unrenderableMetaAlerted") == 1
+    assert alerts[0]["severity"] == "critical", "a dropped CRITICAL alert must page"
+    assert alerts[0]["eventKind"] == "incident_alert"
+
+    quarantined = [p.name for p in paths["quarantine"].iterdir()]
+    assert len(quarantined) == 1 and "unrenderable_alert_content" in quarantined[0]
+
+    counters = json.loads(paths["incident_state"].read_text(encoding="utf-8"))
+    assert int((counters.get("legacyAlertContent") or {}).get("queueUnrenderable") or 0) == 1
+
+
+def test_a_one_shot_run_that_quarantined_an_alert_does_not_exit_zero(tmp_path, monkeypatch) -> None:
+    """The exit code is the only signal a systemd one-shot unit reports."""
+    mod = _dispatcher_in(tmp_path, monkeypatch)
+    paths = mod.setup_dirs()
+    _queue_event(paths, "aaa-unrenderable.json", _unrenderable_event())
+
+    monkeypatch.setattr(sys, "argv", ["bot-errors-dispatcher.py", "--once"])
+    assert mod.main() == 1, "a cycle that dropped an alert must not report success"
+
+
+def test_a_one_shot_run_with_nothing_quarantined_still_exits_zero(tmp_path, monkeypatch) -> None:
+    """Negative control: the new non-zero path must not fire on a healthy cycle."""
+    mod = _dispatcher_in(tmp_path, monkeypatch)
+    paths = mod.setup_dirs()
+    _queue_event(paths, "aaa-healthy.json", _make_event(
+        id="healthy-001", summary="healthy alert", evidence="healthy evidence",
+    ))
+
+    monkeypatch.setattr(sys, "argv", ["bot-errors-dispatcher.py", "--once"])
+    assert mod.main() == 0
+
+
+def test_the_run_result_reports_the_quarantine_count_for_the_cycle(tmp_path, monkeypatch) -> None:
+    mod = _dispatcher_in(tmp_path, monkeypatch)
+    paths = mod.setup_dirs()
+    _queue_event(paths, "aaa-one.json", _unrenderable_event(id="unrenderable-001"))
+    _queue_event(paths, "bbb-two.json", _unrenderable_event(
+        id="unrenderable-002", source="agent_respawn_failed",
+    ))
+
+    result = mod.run_once(max_events=25)
+
+    assert result["unrenderableQuarantined"] == 2
+    # Two DIFFERENT incident keys, so the per-key throttle pages for both.
+    assert result["unrenderableMetaAlerted"] == 2
+    # A quarantined alert was not delivered and is never retried, so it is a
+    # terminal failure of the cycle, folded into the counters health inspection
+    # and the one-shot exit status already read.
+    assert result["failed"] == 2
+    assert result["processed"] == 2
+    assert result["lastError"] == "unrenderable_alert_content"
+
+
+def test_a_second_unrenderable_event_inside_the_window_queues_no_second_meta_alert(
+    tmp_path, monkeypatch,
+) -> None:
+    """Throttled per incident key, so one broken producer pages once, not per event."""
+    mod = _dispatcher_in(tmp_path, monkeypatch)
+    paths = mod.setup_dirs()
+
+    _queue_event(paths, "aaa-one.json", _unrenderable_event(id="unrenderable-001"))
+    first = mod.run_once(max_events=25)
+    _queue_event(paths, "bbb-two.json", _unrenderable_event(id="unrenderable-002"))
+    second = mod.run_once(max_events=25)
+
+    assert first["unrenderableMetaAlerted"] == 1
+    assert second["unrenderableMetaAlerted"] == 0, "the throttle must suppress the second page"
+    assert first["unrenderableQuarantined"] + second["unrenderableQuarantined"] == 2, (
+        "the throttle governs the PAGE, never the count"
+    )
+    counters = json.loads(paths["incident_state"].read_text(encoding="utf-8"))
+    assert int((counters.get("legacyAlertContent") or {}).get("queueUnrenderable") or 0) == 2
+
+
+def test_the_meta_alert_carries_no_bytes_of_the_quarantined_content(tmp_path, monkeypatch) -> None:
+    """Mutation-provable: leaking one byte of the quarantined value turns this red."""
+    mod = _dispatcher_in(tmp_path, monkeypatch)
+    paths = mod.setup_dirs()
+    original = _queue_event(paths, "aaa-unrenderable.json", _unrenderable_event())
+    # Positive control: the nonce really is in the record that was quarantined, so
+    # its absence below is a property of the meta-alert, not of the fixture.
+    assert UNRENDERABLE_NONCE in json.dumps(original)
+
+    mod.run_once(max_events=25)
+
+    alerts = _queued_meta_alerts(paths, mod)
+    assert len(alerts) == 1
+    body = json.dumps(alerts[0])
+    assert UNRENDERABLE_NONCE not in body, "the meta-alert quoted the quarantined content"
+    assert BRACE_QUOTE not in body, "the meta-alert baked a dict repr"
+    # The safe signal must survive: failing closed may not suppress source or class.
+    assert "primary_model_unusable" in body
+    assert "fixture-host-a" in body
+    assert "failure_class=" in body
+
+
+def test_the_meta_alert_reports_the_class_from_a_renderable_sibling_without_the_digest(
+    tmp_path, monkeypatch,
+) -> None:
+    """The class survives; the digest and the length do not.
+
+    An event can carry a legacy confinement envelope in one field and an
+    unrenderable value in the other. That envelope is where a failure class exists
+    at all, so it is the one place the class can come from -- but only the class:
+    `alert_text` also renders a length and a digest prefix, and neither belongs in
+    a page about content the consumer refused to render.
+    """
+    mod = _dispatcher_in(tmp_path, monkeypatch)
+    paths = mod.setup_dirs()
+    _queue_event(paths, "aaa-mixed.json", _make_event(
+        id="unrenderable-mixed", summary=legacy_object(), evidence=[UNRENDERABLE_NONCE],
+    ))
+
+    mod.run_once(max_events=25)
+
+    alerts = _queued_meta_alerts(paths, mod)
+    assert len(alerts) == 1
+    body = json.dumps(alerts[0])
+    assert "failure_class=TypeError" in body
+    assert DIGEST not in body and DIGEST[:8] not in body
+    assert "54 chars" not in body
+    assert UNRENDERABLE_NONCE not in body
+    assert "evidence:list" in body, "the shape of the failure is reported by type, not content"
+
+
+def test_every_unrenderable_quarantine_site_passes_the_event() -> None:
+    """Coverage assertion over BOTH quarantine call sites.
+
+    Per-site tests only prove the sites someone thought to enumerate. The second
+    site sits in process_one, reachable when the file is rewritten between the
+    ready() scan and the claim; a site that drops the event drops the page with it.
+    """
+    tree = ast.parse(_SCRIPT.read_text(encoding="utf-8"))
+    calls = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "quarantine_invalid_envelope"
+    ]
+    assert len(calls) == 2, f"expected two quarantine sites, found {len(calls)}"
+    for call in calls:
+        assert len(call.args) == 4, f"site drops the event: {ast.unparse(call)}"
+
+
+def test_the_signal_is_content_free_for_an_event_with_no_identity() -> None:
+    """A malformed record must not break the page it is the reason for."""
+    signal = _mod.unrenderable_alert_signal("not a mapping at all")
+    assert signal["incidentKey"] == "unknown"
+    assert signal["failureClass"] == "unavailable"
+
+
+def test_a_malformed_event_before_a_healthy_alert_does_not_block_it(tmp_path, monkeypatch) -> None:
+    """Queue continuity: failing closed must not suppress a healthy sibling.
+
+    The malformed event sorts FIRST, so an implementation that aborts, wedges, or
+    returns early on the quarantine path takes the healthy alert down with it.
+    """
+    mod = _dispatcher_in(tmp_path, monkeypatch)
+    sent: list[str] = []
+    monkeypatch.setattr(mod, "send_whatsapp", lambda text, socket_path="": sent.append(text))
+    paths = mod.setup_dirs()
+
+    _queue_event(paths, "aaa-unrenderable.json", _unrenderable_event())
+    # A DIFFERENT source, so the healthy alert is its own incident rather than a
+    # duplicate suppressed for reasons unrelated to this test.
+    _queue_event(paths, "zzz-healthy.json", _make_event(
+        id="healthy-001", source="agent_respawn_failed",
+        summary="healthy alert", evidence="healthy evidence",
+    ))
+
+    result = mod.run_once(max_events=25)
+
+    assert any("healthy alert" in text for text in sent), (
+        "the healthy alert must still deliver behind a quarantined one"
+    )
+    assert result["unrenderableQuarantined"] == 1
+    assert result["failed"] == 1, "the malformed event is still accounted as terminal"
+    assert result["sent"] == 1
+    assert result["lastError"] == "unrenderable_alert_content"
+    assert sorted(p.name for p in paths["outbox"].glob("*.json")) == [
+        p.name for p in paths["outbox"].glob("*.json")
+        if json.loads(p.read_text(encoding="utf-8")).get("source")
+        == mod.UNRENDERABLE_META_ALERT_SOURCE
+    ], "only the meta-alert may remain queued"
+
+
+def test_the_quarantine_disposition_is_typed_not_a_bare_boolean() -> None:
+    """A terminal drop and a not-due event must not look the same to the caller."""
+    mod = _mod
+    assert mod.DISPOSITION_READY.state == "ready"
+    assert mod.DISPOSITION_NOT_READY.state == "not_ready"
+    assert mod.DISPOSITION_READY.reason == ""
+
+
+def test_the_disposition_carries_the_fixed_reason_and_validated_header(tmp_path: Path) -> None:
+    """The reason is the fixed code, and the header values were already validated."""
+    outbox = tmp_path / "outbox"
+    quarantine = tmp_path / "quarantine"
+    outbox.mkdir(exist_ok=True)
+    quarantine.mkdir(exist_ok=True)
+    path = outbox / "evt-unrenderable.json"
+    path.write_text(json.dumps(_unrenderable_event()), encoding="utf-8")
+
+    disposition = _mod.ready_disposition(path, quarantine)
+
+    assert disposition.state == "quarantined"
+    assert disposition.reason == "unrenderable_alert_content"
+    # Classification validated the header BEFORE it rejected the content, so the
+    # kind and severity are known and are canonical values, not raw event text.
+    assert disposition.kind == "incident_alert"
+    assert disposition.severity == "critical"
+    assert UNRENDERABLE_NONCE not in json.dumps(disposition.__dict__)
+
+
+def test_a_not_due_event_is_not_reported_as_quarantined(tmp_path: Path) -> None:
+    """Negative control: the typed result must separate the two non-ready cases."""
+    outbox = tmp_path / "outbox"
+    quarantine = tmp_path / "quarantine"
+    outbox.mkdir(exist_ok=True)
+    quarantine.mkdir(exist_ok=True)
+    path = outbox / "evt-later.json"
+    path.write_text(json.dumps(_make_event(
+        id="later-001", summary="healthy", evidence="healthy",
+        delivery={"nextAttemptAtEpoch": int(time.time()) + 3600, "attempts": 1},
+    )), encoding="utf-8")
+
+    disposition = _mod.ready_disposition(path, quarantine)
+
+    assert disposition.state == "not_ready"
+    assert disposition.reason == ""
+    assert list(quarantine.iterdir()) == []
