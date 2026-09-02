@@ -39,7 +39,14 @@
  * requires that "synthetic canaries for message text, JID, phone, access token,
  * URL query/fragment, and malformed JSON are absent from every captured sink;
  * metadata and low-cardinality error class remain". Retaining message text is a
- * departure from the first clause of that acceptance. WS-A06 is tracked by
+ * departure from the first clause of that acceptance.
+ *
+ * The same acceptance line has a second sentence, quoted here in full because
+ * it is the one this change contradicts most directly: "Central key redaction
+ * is paired with removal of free-text previews." This file pairs central key
+ * redaction with the ADDITION of a free-text preview. Quoting only the first
+ * sentence would understate the departure in the paragraph whose whole purpose
+ * is to state it. WS-A06 is tracked by
  * issue #2164 and was never mechanically enforced: the artifacts its plan named
  * (tests/logger-privacy.test.ts, tests/fixtures/log-privacy-canary.ts,
  * src/lib/log-safety.ts) do not exist in this tree.
