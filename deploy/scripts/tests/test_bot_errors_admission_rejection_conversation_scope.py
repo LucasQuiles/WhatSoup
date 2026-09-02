@@ -349,15 +349,11 @@ def test_no_raw_conversation_identifier_in_key_event_or_rendered_text(tmp_path):
 def test_both_delivered_surfaces_render_the_same_confined_text(tmp_path):
     """Neither delivered surface can render a raw identifier.
 
-    SCOPE, corrected: this test formats the event ONCE itself and hands the
-    result to two mocks it installed, so it pins the privacy property on both
-    surfaces and nothing more. It does NOT pin the dispatcher's "one
-    format_event call feeds both routes" invariant, which its earlier
-    docstring claimed -- no dispatcher code runs here, so any implementation
-    that formatted twice would pass this unchanged. Pinning that invariant
-    needs the assertion driven through process_one, which the email route
-    blocks under a test state dir (see
-    test_the_email_delivery_branch_records_representation).
+    This half pins the privacy property on both surfaces by construction: one
+    formatted string, two mocks, neither may carry a raw identifier. The
+    companion test below pins the invariant this one cannot -- that the
+    dispatcher makes ONE format_event call and feeds both routes from it --
+    by counting calls through the real process_one.
     """
     mod = _load(tmp_path)
     sent: list[str] = []
@@ -657,7 +653,8 @@ def test_the_email_delivery_branch_records_representation(tmp_path):
 
     mod.record_conversation_scope_delivered(event, state, KEY, int(time.time()))
     assert SCOPE_B in state["conversationScopes"][KEY]
-    assert mod.should_suppress_send(_event(SCOPE_B, "evt-after", 2), state) is not None
+    after = mod.should_suppress_send(_event(SCOPE_B, "evt-after", 2), state)
+    assert after is not None and "duplicate suppressed" in after, after
 
 
 def test_a_suppressed_event_id_is_not_recorded_as_forced(tmp_path):
@@ -1009,4 +1006,55 @@ def test_the_email_branch_calls_the_recorder_on_the_real_path(tmp_path):
     assert SCOPE_B in scopes[KEY], (
         "the email branch delivered this conversation but did not record it as "
         f"represented: {scopes[KEY]!r}"
+    )
+
+
+def test_one_format_event_call_feeds_both_delivered_surfaces(tmp_path):
+    """TI: pin the "one format_event call" invariant on the REAL path.
+
+    The sibling test above hands one string to two mocks it installed, so it
+    cannot see how many times the dispatcher formatted. This drives the real
+    process_one down the email-fallback route with the primary transport
+    failing, counts format_event calls, and asserts the operator text handed
+    to WhatsApp and to email is the SAME string from a SINGLE call.
+    """
+    from unittest.mock import patch
+
+    mod = _load(tmp_path, {"BOT_ERRORS_DELIVERY_MAX_ATTEMPTS": "10"})
+    paths = mod.state_paths()
+    _prepare_dirs(mod, paths)
+    _seed_open_incident(mod, paths)
+
+    path = _outbox_event(mod, paths, SCOPE_B, "evt-one-format")
+    event = json.loads(path.read_text())
+    event["delivery"]["attempts"] = 3
+    path.write_text(json.dumps(event, indent=2))
+
+    fallback = tmp_path / "fake-fallback.sh"
+    fallback.write_text("#!/bin/sh\nexit 0\n")
+    fallback.chmod(0o755)
+
+    formatted: list[str] = []
+    real_format = mod.format_event
+
+    def _counting_format(evt):
+        rendered = real_format(evt)
+        formatted.append(rendered)
+        return rendered
+
+    mailed: list[tuple[str, str]] = []
+    with patch.object(mod, "format_event", side_effect=_counting_format), \
+         patch.object(mod, "send_whatsapp", side_effect=RuntimeError("transport down")), \
+         patch.object(mod, "email_fallback_blocked_reason", return_value=None), \
+         patch.object(mod, "EMAIL_FALLBACK", str(fallback)), \
+         patch.object(mod, "email_fallback",
+                      side_effect=lambda subject, body: mailed.append((subject, body)) or True):
+        ok, detail = mod.process_one(path, paths)
+
+    assert (ok, detail) == (True, "email_delivered"), (ok, detail)
+    assert len(formatted) == 1, (
+        f"both surfaces must be fed from ONE format_event call: {len(formatted)}"
+    )
+    assert mailed and mailed[0][1] == formatted[0], (
+        "the email body must be the same string the primary route was handed"
     )
