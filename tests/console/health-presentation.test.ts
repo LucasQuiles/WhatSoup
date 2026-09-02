@@ -224,8 +224,12 @@ describe('lines-route synthesised reasons', () => {
     expect(presented.supported).toBe(true)
     expect(presented.label).toBe('awaiting first health poll')
     expect(presented.availability).toBe('unavailable')
+    // `monitor` is not action-capable, so it declares no action proof.
     expect(presented.nextAction).toBe('monitor')
     expect(presented.actionProof).toBeNull()
+    expect(presented.summary).toBe(
+      'awaiting first health poll (not_polled) · observation unavailable',
+    )
   })
 
   it('treats a config error as a confirmed local observation, not an unavailable one', () => {
