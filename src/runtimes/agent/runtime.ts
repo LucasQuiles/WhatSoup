@@ -10345,14 +10345,22 @@ export class AgentRuntime implements Runtime {
     }
 
     const owner = this.sessionOwnership.get(mapKey);
-    const status = args.session.getStatus();
+    // `active` and `pid` are not a termination proof for this gate. A managed
+    // provider never assigns a child, so its pid is null for its whole life,
+    // and `active` is cleared before any termination is awaited — a kill that
+    // threw, or a tool call the loop already entered, leaves provider work
+    // running behind both. Resuming there runs two incarnations of one
+    // conversation, with duplicate external side effects, and the respawn then
+    // clears the very uncertainty flag that should have blocked it. Use the
+    // same proof the eviction path uses: it subsumes `active`, adds the
+    // provider-handle release, an in-flight turn, and an unreconciled durable
+    // failure.
     if (
       this.chatSessions.get(mapKey) !== args.session ||
       owner?.managerId !== args.managerId ||
       owner.generation !== args.recoveryGeneration ||
       owner.state !== 'recoverable_dead' ||
-      status.active ||
-      status.pid !== null
+      !this.isSessionProvablyTerminated(args.session)
     ) {
       return;
     }

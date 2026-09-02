@@ -60,7 +60,7 @@ const {
       await mockSession.sendTurn(text);
     }),
     handleNew: vi.fn(async () => {}),
-    getStatus: vi.fn(() => ({ active: false, pid: null as number | null, sessionId: null as string | null, startedAt: null as string | null, messageCount: 0, lastMessageAt: null as string | null })),
+    getStatus: vi.fn(() => ({ active: false, pid: null as number | null, providerTerminated: true, sessionId: null as string | null, startedAt: null as string | null, messageCount: 0, lastMessageAt: null as string | null })),
     shutdown: vi.fn(async () => {}),
     clearTurnWatchdog: vi.fn(() => {}),
     completeProviderTurn: vi.fn(() => {}),
@@ -446,7 +446,7 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
     capturedNotifyUserRef.current = null;
     mockConfig.controlPeers = new Map();
     mockSession.spawnSession.mockResolvedValue(undefined);
-    mockSession.getStatus.mockReturnValue({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null });
+    mockSession.getStatus.mockReturnValue({ active: false, pid: null, providerTerminated: true, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null });
     mockSession.sendTurn.mockResolvedValue(undefined);
     mockSession.getDbRowId.mockReturnValue(null);
     mockGetMessagesSince.mockReturnValue([]);
@@ -704,11 +704,12 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
           ...mockSession,
           getStatus: vi.fn(() => ({
             active: false,
-            pid: null,
-            sessionId: null,
-            startedAt: null,
+            pid: null as number | null,
+            providerTerminated: true,
+            sessionId: null as string | null,
+            startedAt: null as string | null,
             messageCount: 0,
-            lastMessageAt: null,
+            lastMessageAt: null as string | null,
           })),
           spawnSession: vi.fn(async () => {}),
           sendTurn: vi.fn(async () => {}),
@@ -804,11 +805,12 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
           ...mockSession,
           getStatus: vi.fn(() => ({
             active: false,
-            pid: null,
-            sessionId: null,
-            startedAt: null,
+            pid: null as number | null,
+            providerTerminated: true,
+            sessionId: null as string | null,
+            startedAt: null as string | null,
             messageCount: 0,
-            lastMessageAt: null,
+            lastMessageAt: null as string | null,
           })),
           spawnSession: vi.fn(async () => {}),
           sendTurn: vi.fn(async (_text: string) => {}),
@@ -1279,8 +1281,8 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
 
       // Session reports inactive at crash time, then active after spawnSession.
       mockSession.getStatus
-        .mockReturnValueOnce({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null }) // timer guard check
-        .mockReturnValue({ active: true, pid: 321, sessionId: 'sess-1', startedAt: '2026-06-16T00:00:00Z', messageCount: 1, lastMessageAt: null }); // post-resume
+        .mockReturnValueOnce({ active: false, pid: null, providerTerminated: true, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null }) // timer guard check
+        .mockReturnValue({ active: true, pid: 321, providerTerminated: false, sessionId: 'sess-1', startedAt: '2026-06-16T00:00:00Z', messageCount: 1, lastMessageAt: null }); // post-resume
 
       state.handlePerChatCrash(mapKey, dmJid, {
         ...currentCrashIdentity(runtime, mapKey),
@@ -1316,6 +1318,51 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       expect(mockClearAlertSource).toHaveBeenCalledWith('test', 'agent_respawn_failed');
     });
 
+    it('does not resume a manager whose provider termination is unproven', async () => {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      const state = runtime as unknown as PollRuntimeState;
+      const mapKey = dmJid;
+      seedPerChatSession(state, mapKey);
+
+      // A managed-loop provider crash whose kill threw: nothing was released,
+      // so termination is recorded as unknown. `active` is already false and a
+      // managed provider never assigns a child, so a gate reading only those
+      // two sees a cleanly dead manager and resumes into live provider work.
+      mockSession.getStatus.mockReturnValue({
+        active: false,
+        pid: null,
+        providerTerminated: false,
+        sessionId: null,
+        startedAt: null,
+        messageCount: 0,
+        lastMessageAt: null,
+      });
+
+      state.handlePerChatCrash(mapKey, dmJid, {
+        ...currentCrashIdentity(runtime, mapKey),
+        exitCode: null,
+        signal: null,
+        sessionId: 'sess-unproven',
+        dbRowId: 11,
+        provider: 'p',
+        crashClass: 'managed_provider_error',
+        stderrPreview: 'kill failed',
+      });
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      await vi.advanceTimersByTimeAsync(2_000);
+
+      // Two incarnations of one conversation would run side by side, with
+      // duplicate external side effects, and the resume would then clear the
+      // uncertainty that should have blocked it.
+      expect(mockSession.spawnSession).not.toHaveBeenCalled();
+      expect(mockSession.sendTurn).not.toHaveBeenCalledWith(
+        expect.stringContaining('session resumed after crash'),
+      );
+    });
+
     it('clears a stale post-turn gate before the continuation so the reply is delivered, not suppressed as phantom (3398)', async () => {
       const db = makeDb();
       const { messenger } = makeMessenger();
@@ -1332,8 +1379,8 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       postTurnGate.add(mapKey);
 
       mockSession.getStatus
-        .mockReturnValueOnce({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null }) // timer guard check
-        .mockReturnValue({ active: true, pid: 321, sessionId: 'sess-gate', startedAt: '2026-06-16T00:00:00Z', messageCount: 1, lastMessageAt: null }); // post-resume
+        .mockReturnValueOnce({ active: false, pid: null, providerTerminated: true, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null }) // timer guard check
+        .mockReturnValue({ active: true, pid: 321, providerTerminated: false, sessionId: 'sess-gate', startedAt: '2026-06-16T00:00:00Z', messageCount: 1, lastMessageAt: null }); // post-resume
 
       state.handlePerChatCrash(mapKey, dmJid, {
         ...currentCrashIdentity(runtime, mapKey),
@@ -1382,8 +1429,8 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       postTurnGate.add(GLOBAL_CONVERSATION_KEY);
 
       mockSession.getStatus
-        .mockReturnValueOnce({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null }) // timer guard check
-        .mockReturnValue({ active: true, pid: 321, sessionId: 'sess-gate-shared', startedAt: '2026-06-16T00:00:00Z', messageCount: 1, lastMessageAt: null }); // post-resume
+        .mockReturnValueOnce({ active: false, pid: null, providerTerminated: true, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null }) // timer guard check
+        .mockReturnValue({ active: true, pid: 321, providerTerminated: false, sessionId: 'sess-gate-shared', startedAt: '2026-06-16T00:00:00Z', messageCount: 1, lastMessageAt: null }); // post-resume
 
       state.handlePerChatCrash(mapKey, dmJid, {
         ...currentCrashIdentity(runtime, mapKey),
@@ -1413,8 +1460,8 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       const mapKey = dmJid;
       seedPerChatSession(state, mapKey);
       mockSession.getStatus
-        .mockReturnValueOnce({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null })
-        .mockReturnValue({ active: true, pid: 321, sessionId: 'sess-gated', startedAt: '2026-06-16T00:00:00Z', messageCount: 1, lastMessageAt: null });
+        .mockReturnValueOnce({ active: false, pid: null, providerTerminated: true, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null })
+        .mockReturnValue({ active: true, pid: 321, providerTerminated: false, sessionId: 'sess-gated', startedAt: '2026-06-16T00:00:00Z', messageCount: 1, lastMessageAt: null });
 
       let admit!: () => void;
       const admitted = new Promise<void>((resolve) => { admit = resolve; });
@@ -1464,8 +1511,8 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
         { timestamp: Math.floor(Date.now() / 1000), senderName: 'Tester', senderJid: dmJid, content: 'are you back?' },
       ]);
       mockSession.getStatus
-        .mockReturnValueOnce({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null })
-        .mockReturnValue({ active: true, pid: 321, sessionId: 'sess-2', startedAt: '2026-06-16T00:00:00Z', messageCount: 1, lastMessageAt: null });
+        .mockReturnValueOnce({ active: false, pid: null, providerTerminated: true, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null })
+        .mockReturnValue({ active: true, pid: 321, providerTerminated: false, sessionId: 'sess-2', startedAt: '2026-06-16T00:00:00Z', messageCount: 1, lastMessageAt: null });
 
       state.handlePerChatCrash(mapKey, dmJid, {
         ...currentCrashIdentity(runtime, mapKey),
@@ -1517,7 +1564,7 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       seedPerChatSession(state, mapKey);
 
       // Stays inactive even after spawnSession — continuation must not be sent.
-      mockSession.getStatus.mockReturnValue({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null });
+      mockSession.getStatus.mockReturnValue({ active: false, pid: null, providerTerminated: true, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null });
 
       state.handlePerChatCrash(mapKey, dmJid, {
         ...currentCrashIdentity(runtime, mapKey),
@@ -1770,6 +1817,7 @@ describe('fresh-spawn context preamble (P4 — effect-free by construction)', ()
     vi.mocked(mockSession.getStatus).mockReset().mockReturnValue({
       active: false,
       pid: null,
+      providerTerminated: true,
       sessionId: null,
       startedAt: null,
       messageCount: 0,
@@ -2004,7 +2052,7 @@ describe('AgentRuntime route recycle publication and shutdown ownership', () => 
     capturedNotifyUserRef.current = null;
     mockSession.spawnSession.mockReset().mockResolvedValue(undefined);
     mockSession.shutdown.mockReset().mockResolvedValue(undefined);
-    mockSession.getStatus.mockReset().mockReturnValue({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null });
+    mockSession.getStatus.mockReset().mockReturnValue({ active: false, pid: null, providerTerminated: true, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null });
     mockSession.sendTurn.mockReset().mockResolvedValue(undefined);
     mockSession.getDbRowId.mockReset().mockReturnValue(null);
     mockQueue.flush.mockReset().mockResolvedValue(undefined);
