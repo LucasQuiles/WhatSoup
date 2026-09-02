@@ -3584,3 +3584,670 @@ def test_run_once_refuses_a_queued_action_for_a_host_it_retires_this_cycle(tmp_p
     assert queued.with_suffix(".retired").exists()
     assert not queued.exists()
     assert not queued.with_suffix(".done").exists()
+
+
+# ---------------------------------------------------------------------------
+# #2429 follow-up (a): a retirement must dispose of the member's Tier-2 token
+# ---------------------------------------------------------------------------
+
+
+def _armed_q_remediation(host: str, *, expires_at_epoch: float) -> dict:
+    """A Tier-2 remediation record owned by ``host``, shaped like the real one.
+
+    ``state["qRemediation"]`` is a single global slot, not a per-host map, so
+    whichever member owns it owns the whole fleet's Tier-2 lane until the TTL
+    runs out.
+    """
+    return {
+        "tokenId": "tok-retire",
+        "tokenHash": "hash-retire",
+        "requestId": "request-retire",
+        "host": host,
+        "actionHash": "action-hash-retire",
+        "issuedAt": "1970-01-01T00:10:00Z",
+        "expiresAt": _mod.now_iso(expires_at_epoch),
+        "expiresAtEpoch": expires_at_epoch,
+        "qHost": "q-agent-host",
+    }
+
+
+def _q_lane_retirement_fixture(tmp_path: Path, *, q_remediation: dict):
+    """Roster of one ordinary member plus the Q host; one member the roster dropped."""
+    _heartbeat(tmp_path / "host-a-hb.json", healthy=True, mtime=995.0)
+    _heartbeat(tmp_path / "q-agent-host-hb.json", healthy=True, mtime=995.0)
+    hosts = _hosts_file(
+        tmp_path,
+        [
+            {"host": "host-a", "heartbeatPath": str(tmp_path / "host-a-hb.json")},
+            {"host": "q-agent-host", "heartbeatPath": str(tmp_path / "q-agent-host-hb.json")},
+        ],
+    )
+    config = _config(tmp_path, hosts, hysteresis_cycles=1, tier2_token_ttl_seconds=1800, q_host="q-agent-host")
+    _write_json(
+        _mod.state_path(config),
+        {
+            "schemaVersion": 1,
+            "hosts": {
+                "host-a": {"alertState": "closed"},
+                "q-agent-host": {"alertState": "closed"},
+                "retired-member": {
+                    "alertState": "open",
+                    "consecutive": 3,
+                    "transitions": [990.0, 995.0],
+                    "lastClass": "unreachable",
+                    "lastAction": "escalate",
+                    "lastBadAt": 995.0,
+                },
+            },
+            "qRemediation": q_remediation,
+        },
+    )
+    return config
+
+
+def test_retirement_releases_the_fleet_wide_tier2_remediation_slot(tmp_path: Path, monkeypatch):
+    """An in-flight token owned by a retired member blocks EVERY other member.
+
+    add_tier2_remediation refuses with reason ``q_remediation_inflight`` while
+    any record is live, and the record is a single global slot keyed by nothing.
+    Retiring its owner must hand the lane back, or the fleet's Tier-2 routing
+    stays closed until the TTL expires against a member that no longer exists.
+    """
+    config = _q_lane_retirement_fixture(
+        tmp_path,
+        q_remediation=_armed_q_remediation("retired-member", expires_at_epoch=2800.0),
+    )
+    monkeypatch.setattr(_mod.secrets, "token_urlsafe", lambda _length: "fixed-token")
+
+    _mod.run_once(
+        config,
+        _deps(
+            1000.0,
+            {
+                "host-a": {"reachable": True, "healthy": True, "class": "healthy"},
+                "q-agent-host": {"reachable": True, "healthy": True, "class": "healthy"},
+            },
+        ),
+    )
+
+    state = json.loads(_mod.state_path(config).read_text(encoding="utf-8"))
+    assert state.get("qRemediation") in (None, {}), "the retired member still owns the Tier-2 slot"
+    # The cancellation is recorded on the tombstone as a bounded enum token --
+    # an auditor must be able to see that a token was destroyed, not infer it.
+    tombstone = state["retiredHosts"]["retired-member"]
+    assert tombstone["qRemediationDisposition"] == _mod.QREMEDIATION_RETIREMENT_CANCELLED
+
+    # ...and the lane is genuinely free: an UNRELATED member's Tier-2 request on
+    # the next cycle must be routed, not refused. Both heartbeats are refreshed
+    # so the second cycle evaluates on the probe, not on a stale heartbeat.
+    _heartbeat(tmp_path / "host-a-hb.json", healthy=False, klass="permission_denied", mtime=1095.0)
+    _heartbeat(tmp_path / "q-agent-host-hb.json", healthy=True, mtime=1095.0)
+    result = _mod.run_once(
+        config,
+        _deps(
+            1100.0,
+            {
+                "host-a": {"reachable": True, "healthy": False, "class": "permission_denied"},
+                "q-agent-host": {"reachable": True, "healthy": True, "class": "healthy"},
+            },
+        ),
+    )
+    payloads = [json.loads(Path(ref["path"]).read_text(encoding="utf-8")) for ref in result["actionEvents"]]
+    host_a_payload = next(payload for payload in payloads if payload.get("host") == "host-a")
+    assert host_a_payload["tier"] == "tier2"
+    remediation = host_a_payload["remediation"]
+    assert remediation.get("reason") != "q_remediation_inflight"
+    assert remediation["qEligible"] is True
+    assert remediation["targetHost"] == "host-a"
+
+
+def test_retirement_prevents_the_expired_token_from_paging_for_a_gone_member(tmp_path: Path):
+    """The page this item exists to prevent.
+
+    emit_q_unavailable_event publishes a CRITICAL, WhatsApp-eligible event named
+    after the token's host and routed through the critical budget. If the host
+    was retired, that page names a member that no longer exists and burns a slot
+    in a bounded daily budget. run_once retires before emit_action_events, so
+    disposing of the token at retirement is what prevents it -- drive the real
+    cycle, not the helper.
+    """
+    config = _q_lane_retirement_fixture(
+        tmp_path,
+        q_remediation=_armed_q_remediation("retired-member", expires_at_epoch=900.0),
+    )
+
+    result = _mod.run_once(
+        config,
+        _deps(
+            1000.0,
+            {
+                "host-a": {"reachable": True, "healthy": True, "class": "healthy"},
+                "q-agent-host": {"reachable": True, "healthy": True, "class": "healthy"},
+            },
+        ),
+    )
+
+    assert result["retirementEvents"][0]["host"] == "retired-member"
+    assert [ref for ref in result["actionEvents"] if ref["action"] == "q_unavailable"] == []
+    # Nothing critical was published for the retired member, on disk either.
+    outbox = _mod.action_outbox_dir(config)
+    for path in outbox.glob("*.json"):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        assert payload.get("class") != "q_unavailable"
+        assert payload.get("criticalWhatsAppEligible") is not True
+    assert _mod.result_requires_attention(result) is False
+
+
+def test_the_remediation_token_survives_until_its_disposition_is_published(tmp_path: Path):
+    """ORDERING, observed AT publish time rather than inferred from the outcome.
+
+    A failure-path assertion cannot see this ordering at all: the per-member
+    ``state_before_event`` deepcopy is taken at the top of the loop, so a pop
+    hoisted ABOVE the publication is undone by the same rollback that a
+    correctly-ordered pop never reaches. Both orderings leave the token in
+    place after a failed cycle, and both leave it gone after a successful one.
+    The only moment the two differ is during the publication itself, so that is
+    where this looks.
+    """
+    config = _q_lane_retirement_fixture(
+        tmp_path,
+        q_remediation=_armed_q_remediation("retired-member", expires_at_epoch=2800.0),
+    )
+    real_publish = _mod.publish_event_json
+    observed: dict = {}
+    state_ref: dict = {}
+
+    def _recording_publish(target, payload, **kwargs):
+        if isinstance(payload, dict) and payload.get("disposition") == "configuration_retired":
+            held = state_ref["state"].get("qRemediation")
+            observed.setdefault("tokenOwnerAtPublish", []).append(
+                str(held.get("host")) if isinstance(held, dict) and held else None
+            )
+        return real_publish(target, payload, **kwargs)
+
+    real_retire = _mod.retire_unconfigured_hosts
+
+    def _capturing_retire(state, *args, **kwargs):
+        state_ref["state"] = state
+        return real_retire(state, *args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(_mod, "publish_event_json", _recording_publish)
+        mp.setattr(_mod, "retire_unconfigured_hosts", _capturing_retire)
+        _mod.run_once(
+            config,
+            _deps(
+                1000.0,
+                {
+                    "host-a": {"reachable": True, "healthy": True, "class": "healthy"},
+                    "q-agent-host": {"reachable": True, "healthy": True, "class": "healthy"},
+                },
+            ),
+        )
+
+    assert observed.get("tokenOwnerAtPublish"), "no configuration_retired publication was observed"
+    assert observed["tokenOwnerAtPublish"][0] == "retired-member", (
+        "the token was destroyed before its retirement disposition was durably published"
+    )
+    # The disposal still happens, after.
+    state = json.loads(_mod.state_path(config).read_text(encoding="utf-8"))
+    assert state.get("qRemediation") in (None, {})
+    assert state["retiredHosts"]["retired-member"]["qRemediationDisposition"] == (
+        _mod.QREMEDIATION_RETIREMENT_CANCELLED
+    )
+
+
+def test_retirement_records_no_cancellation_when_another_member_owns_the_token(tmp_path: Path):
+    """Negative control: only the RETIRING member's token may be destroyed.
+
+    Popping the slot unconditionally would hand a live remediation for a
+    still-configured member to nobody, which is a worse failure than the one
+    this item repairs.
+    """
+    config = _q_lane_retirement_fixture(
+        tmp_path,
+        q_remediation=_armed_q_remediation("host-a", expires_at_epoch=2800.0),
+    )
+
+    _mod.run_once(
+        config,
+        _deps(
+            1000.0,
+            {
+                "host-a": {"reachable": True, "healthy": True, "class": "healthy"},
+                "q-agent-host": {"reachable": True, "healthy": True, "class": "healthy"},
+            },
+        ),
+    )
+
+    state = json.loads(_mod.state_path(config).read_text(encoding="utf-8"))
+    assert state["qRemediation"]["host"] == "host-a", "another member's token must survive"
+    assert state["retiredHosts"]["retired-member"]["qRemediationDisposition"] == _mod.QREMEDIATION_RETIREMENT_NONE
+
+
+# ---------------------------------------------------------------------------
+# #2429 follow-up (b): retirement identity must be retry-stable
+# ---------------------------------------------------------------------------
+
+
+def _two_member_retirement_fixture(tmp_path: Path):
+    """One configured member; two the roster no longer lists."""
+    _heartbeat(tmp_path / "host-a-hb.json", healthy=True, mtime=995.0)
+    hosts = _hosts_file(tmp_path, [{"host": "host-a", "heartbeatPath": str(tmp_path / "host-a-hb.json")}])
+    config = _config(tmp_path, hosts)
+    _write_json(
+        _mod.state_path(config),
+        {
+            "schemaVersion": 1,
+            "hosts": {
+                "host-a": {"alertState": "closed"},
+                "retire-x": {"alertState": "open", "consecutive": 3, "transitions": [990.0]},
+                "retire-y": {"alertState": "open", "consecutive": 2, "transitions": [991.0]},
+            },
+        },
+    )
+    return config
+
+
+def _publish_except_for(failing_host: str):
+    """Real publication for every member but ``failing_host``, which raises."""
+    real_publish = _mod.publish_event_json
+
+    def _stub(target, payload, **kwargs):
+        if isinstance(payload, dict) and payload.get("host") == failing_host:
+            raise OSError("publication failed")
+        return real_publish(target, payload, **kwargs)
+
+    return _stub
+
+
+def test_retry_after_a_partial_cycle_republishes_one_artifact_not_two(tmp_path: Path, monkeypatch):
+    """A cycle that publishes A then fails on B must not duplicate A's artifact.
+
+    The requestId is already stable, but action_event_path puts ``int(now)`` in
+    the FILENAME and the payload carries ``createdAt``, and neither the record
+    deletion nor anything else is persisted on the failure path (the raise
+    escapes above run_once's ``finally: save_state``). So next cycle A is
+    republished under a NEW timestamped name: two files, one requestId, two
+    createdAt values.
+    """
+    config = _two_member_retirement_fixture(tmp_path)
+    probes = {"host-a": {"reachable": True, "healthy": True, "class": "healthy"}}
+    monkeypatch.setattr(_mod, "publish_event_json", _publish_except_for("retire-y"))
+
+    with pytest.raises(OSError):
+        _mod.run_once(config, _deps(1000.0, probes))
+
+    first = [event for event in _retirement_events(config) if event["host"] == "retire-x"]
+    assert len(first) == 1
+    first_request_id = first[0]["requestId"]
+    first_created_at = first[0]["createdAt"]
+
+    # Second cycle, same roster, same failure.
+    with pytest.raises(OSError):
+        _mod.run_once(config, _deps(1100.0, probes))
+
+    retried = [event for event in _retirement_events(config) if event["host"] == "retire-x"]
+    assert len(retried) == 1, "the retry duplicated the published disposition"
+    assert retried[0]["requestId"] == first_request_id
+    assert retried[0]["createdAt"] == first_created_at
+
+    # Third cycle with the failure removed: the retirement must ADVANCE, not
+    # wedge. Byte-identical republication is the only input under which
+    # publish_event_json reconciles instead of returning CONFLICT, and a
+    # conflict here would roll back and raise forever while still leaving
+    # exactly one file with an unchanged requestId -- i.e. it would satisfy
+    # every assertion above. This is what separates "fixed" from "wedged".
+    monkeypatch.undo()
+    result = _mod.run_once(config, _deps(1200.0, probes))
+
+    assert sorted(event["host"] for event in result["retirementEvents"]) == ["retire-x", "retire-y"]
+    still_one = [event for event in _retirement_events(config) if event["host"] == "retire-x"]
+    assert len(still_one) == 1
+    assert still_one[0]["createdAt"] == first_created_at
+    state = json.loads(_mod.state_path(config).read_text(encoding="utf-8"))
+    assert sorted(state["retiredHosts"]) == ["retire-x", "retire-y"]
+    assert sorted(state["hosts"]) == ["host-a"]
+
+
+def test_retire_then_re_add_then_retire_again_is_not_blocked_by_the_first_artifact(tmp_path: Path):
+    """Negative control on item 2's own fix.
+
+    Pinning a retirement's first-attempt clock is what makes a retry
+    byte-identical. Pinning it FOREVER is a wedge: after a re-addition the
+    member's record is a fresh default one, so a second retirement under the
+    same roster digests -- and therefore the same requestId -- would target the
+    first artifact's path with different bytes, which publish_event_json
+    answers with CONFLICT, and every later cycle would raise. The pin must be
+    released when the member stops retiring.
+    """
+    _heartbeat(tmp_path / "host-a-hb.json", healthy=True, mtime=995.0)
+    hosts = _hosts_file(tmp_path, [{"host": "host-a", "heartbeatPath": str(tmp_path / "host-a-hb.json")}])
+    config = _config(tmp_path, hosts)
+    _write_json(
+        _mod.state_path(config),
+        {
+            "schemaVersion": 1,
+            "hosts": {
+                "host-a": {"alertState": "closed"},
+                "rejoin-member": {"alertState": "open", "consecutive": 3, "transitions": [990.0]},
+            },
+        },
+    )
+    probes = {"host-a": {"reachable": True, "healthy": True, "class": "healthy"}}
+
+    _mod.run_once(config, _deps(1000.0, probes))
+    first = [event for event in _retirement_events(config) if event["host"] == "rejoin-member"]
+    assert len(first) == 1
+
+    # Re-add: the tombstone clears and the member is evaluated again.
+    _heartbeat(tmp_path / "rejoin-hb.json", healthy=True, mtime=1095.0)
+    _write_json(
+        config.hosts_path,
+        {
+            "schemaVersion": 1,
+            "hosts": [
+                {"host": "host-a", "heartbeatPath": str(tmp_path / "host-a-hb.json")},
+                {"host": "rejoin-member", "heartbeatPath": str(tmp_path / "rejoin-hb.json")},
+            ],
+        },
+    )
+    _heartbeat(tmp_path / "host-a-hb.json", healthy=True, mtime=1095.0)
+    _mod.run_once(
+        config,
+        _deps(
+            1100.0,
+            {
+                "host-a": {"reachable": True, "healthy": True, "class": "healthy"},
+                "rejoin-member": {"reachable": True, "healthy": True, "class": "healthy"},
+            },
+        ),
+    )
+    state = json.loads(_mod.state_path(config).read_text(encoding="utf-8"))
+    assert "rejoin-member" not in state["retiredHosts"]
+
+    # Drop it again, same roster digests as the first retirement, so the
+    # requestId is identical to the first one.
+    _write_json(
+        config.hosts_path,
+        {"schemaVersion": 1, "hosts": [{"host": "host-a", "heartbeatPath": str(tmp_path / "host-a-hb.json")}]},
+    )
+    _heartbeat(tmp_path / "host-a-hb.json", healthy=True, mtime=1195.0)
+    result = _mod.run_once(config, _deps(1200.0, probes))
+
+    assert result["retirementEvents"][0]["host"] == "rejoin-member"
+    second = [event for event in _retirement_events(config) if event["host"] == "rejoin-member"]
+    assert len(second) == 2, "the second retirement must publish its own artifact"
+    assert second[0]["requestId"] == second[1]["requestId"], "same roster digests, same requestId"
+    assert second[0]["createdAt"] != second[1]["createdAt"]
+    state = json.loads(_mod.state_path(config).read_text(encoding="utf-8"))
+    assert "rejoin-member" in state["retiredHosts"]
+    assert "rejoin-member" not in state["hosts"]
+
+
+# ---------------------------------------------------------------------------
+# #2429 follow-up (d): a failed .retired rename must not become .failed
+# ---------------------------------------------------------------------------
+
+
+def test_failed_retired_rename_does_not_fall_through_to_the_failure_disposition(
+    tmp_path: Path, monkeypatch
+):
+    """`.retired` and `.failed` mean opposite things to a downstream reader.
+
+    The retired-subject rename sits inside the same ``try`` whose handler
+    unconditionally renames to ``.failed``. A race with another consumer, an
+    EPERM on the directory, or ENOSPC at the directory inode therefore
+    relabels "subject retired, do nothing" as "remediation failed", which is a
+    fabricated failure against a member that was deliberately decommissioned.
+    """
+    hb = _heartbeat(tmp_path / "host-a-hb.json", healthy=True, mtime=995.0)
+    hosts = _hosts_file(tmp_path, [{"host": "host-a", "heartbeatPath": str(hb)}])
+    config = _config(tmp_path, hosts)
+    outbox = _mod.action_outbox_dir(config)
+    outbox.mkdir(parents=True, exist_ok=True, mode=0o700)
+    stale = outbox / "1000-host-retired-member-restart_host-abc.json"
+    _write_json(stale, {"action": "restart_host", "host": "retired-member"})
+
+    executed: list[str] = []
+    monkeypatch.setattr(_mod, "execute_action", lambda action: executed.append(str(action.get("host"))))
+
+    real_rename = Path.rename
+
+    def _rename(self, target):
+        if str(target).endswith(".retired"):
+            raise OSError("rename raced")
+        return real_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", _rename)
+
+    consumed = _mod.consume_action_outbox(config, retired_hosts={"retired-member": {"retiredAt": 1000.0}})
+
+    assert executed == [], "a retired subject's remediation must never execute"
+    assert consumed == 0
+    assert not stale.with_suffix(".failed").exists(), "a retired subject was relabelled as a failure"
+    assert not stale.with_suffix(".done").exists()
+    # The action is left in place for the next cycle, which will consult the
+    # tombstone again and reach the same terminal disposition.
+    assert stale.exists()
+
+
+# ---------------------------------------------------------------------------
+# #2429 follow-up (c): the tombstone count cap applies AFTER insertion
+# ---------------------------------------------------------------------------
+
+
+def test_a_single_cycle_cannot_persist_more_tombstones_than_the_cap(tmp_path: Path):
+    """Drive a real cycle: the helper is correct, its CALL SITE is not.
+
+    prune_retired_host_tombstones runs once, before the retirement loop, and
+    the insertions happen inside it. A ledger sitting at exactly the cap plus N
+    retirements therefore reaches save_state at cap+N and is trimmed only on
+    the next cycle -- the documented bound is exceeded and survives on disk. A
+    helper-level test passes with the defect present, which is why this one
+    asserts on the SAVED state.
+    """
+    _heartbeat(tmp_path / "host-a-hb.json", healthy=True, mtime=995.0)
+    hosts = _hosts_file(tmp_path, [{"host": "host-a", "heartbeatPath": str(tmp_path / "host-a-hb.json")}])
+    config = _config(tmp_path, hosts)
+    retiring = [f"retire-{index:03d}" for index in range(3)]
+    host_records = {"host-a": {"alertState": "closed"}}
+    for host in retiring:
+        host_records[host] = {"alertState": "open", "consecutive": 1, "transitions": []}
+    # Exactly at the cap, every entry fresh, so neither the TTL branch nor the
+    # count branch has anything to remove before the loop starts.
+    tombstones = {
+        f"member-{index:03d}": {"retiredAt": 1000.0 - index}
+        for index in range(_mod.RETIRED_HOST_TOMBSTONE_MAX)
+    }
+    assert len(tombstones) == _mod.RETIRED_HOST_TOMBSTONE_MAX
+    _write_json(
+        _mod.state_path(config),
+        {"schemaVersion": 1, "hosts": host_records, "retiredHosts": tombstones},
+    )
+
+    result = _mod.run_once(
+        config, _deps(1000.0, {"host-a": {"reachable": True, "healthy": True, "class": "healthy"}})
+    )
+
+    assert sorted(event["host"] for event in result["retirementEvents"]) == retiring
+    state = json.loads(_mod.state_path(config).read_text(encoding="utf-8"))
+    assert len(state["retiredHosts"]) <= _mod.RETIRED_HOST_TOMBSTONE_MAX
+    # The cycle's own retirements are the newest, so they are what survives the
+    # trim -- a cap that dropped the fresh entries would be worse than no cap.
+    for host in retiring:
+        assert host in state["retiredHosts"]
+
+
+# ---------------------------------------------------------------------------
+# #2429 follow-up (f): partial-success characterization
+# ---------------------------------------------------------------------------
+
+
+def test_partial_publish_failure_keeps_the_published_hosts_tombstone(tmp_path: Path, monkeypatch):
+    """Characterization: the rollback is per-member, not per-cycle.
+
+    ``state_before_event`` is deep-copied INSIDE the loop, once per member, so
+    the snapshot restored when B fails is the one taken after A was already
+    tombstoned. A's completed retirement therefore survives B's rollback, which
+    is correct -- A's disposition is durably published, so undoing its
+    tombstone would reopen a retirement that already happened -- and nothing
+    asserted it. Hoisting the deepcopy above the loop silently converts this
+    into a whole-cycle rollback that discards A.
+    """
+    _heartbeat(tmp_path / "host-a-hb.json", healthy=True, mtime=995.0)
+    hosts = _hosts_file(tmp_path, [{"host": "host-a", "heartbeatPath": str(tmp_path / "host-a-hb.json")}])
+    config = _config(tmp_path, hosts)
+    state = {
+        "hosts": {
+            "host-a": {"alertState": "closed"},
+            "retire-x": {"alertState": "open", "consecutive": 3, "transitions": [990.0]},
+            "retire-y": {"alertState": "open", "consecutive": 2, "transitions": [991.0]},
+        },
+        "retiredHosts": {},
+    }
+    monkeypatch.setattr(_mod, "publish_event_json", _publish_except_for("retire-y"))
+
+    with pytest.raises(OSError):
+        _mod.retire_unconfigured_hosts(state, config, 1000.0, "central-test", {"host-a"}, None, None)
+
+    # The member whose disposition WAS published keeps its tombstone...
+    assert "retire-x" in state["retiredHosts"]
+    assert state["retiredHosts"]["retire-x"]["priorAlertState"] == "open"
+    assert "retire-x" not in state["hosts"]
+    # ...and the member whose publication failed is untouched on both sides.
+    assert "retire-y" not in state["retiredHosts"]
+    assert state["hosts"]["retire-y"]["alertState"] == "open"
+    assert state["hosts"]["retire-y"]["consecutive"] == 2
+
+
+# ---------------------------------------------------------------------------
+# #2429 follow-up (b), MUST-A: a repeat retirement must publish its own artifact
+# ---------------------------------------------------------------------------
+
+
+def _roster_with(tmp_path: Path, hosts: list[str]) -> dict:
+    """Write the roster file for exactly ``hosts`` and refresh their heartbeats."""
+    return {
+        "schemaVersion": 1,
+        "hosts": [{"host": h, "heartbeatPath": str(tmp_path / f"{h}-hb.json")} for h in hosts],
+    }
+
+
+def test_a_repeat_retirement_publishes_its_own_artifact_not_a_stale_pin(tmp_path: Path):
+    """A SECOND retirement of the same member must never reconcile onto the first.
+
+    The pin that makes a retry byte-identical is reused on content equality. A
+    member retired, re-added and retired again under an unchanged roster
+    produces byte-IDENTICAL content -- same roster digests, so the same
+    requestId, and an identically-rebuilt record. Without an episode
+    discriminator the second retirement reuses the first episode's clock,
+    publish_event_json reconciles onto the existing file, require_all_advance
+    passes, and the member's record is deleted while NO event is written for
+    that retirement -- #2429's own defect, reintroduced by its own fix.
+
+    The tombstone is the tell: its eventPath names a file whose createdAt
+    belongs to the earlier retirement.
+    """
+    for host in ("host-a", "repeat-member"):
+        _heartbeat(tmp_path / f"{host}-hb.json", healthy=True, mtime=995.0)
+    hosts_path = _write_json(tmp_path / "hosts.json", _roster_with(tmp_path, ["host-a", "repeat-member"]))
+    config = _config(tmp_path, hosts_path)
+
+    # The roster file's INTEGER mtime is the roster epoch (bot_errors_roster.roster_epoch),
+    # and it rides in the disposition payload as roster.manifestEpoch, so it is part of the
+    # content binding. Left to wall-clock, two roster writes that straddle a second boundary
+    # give the two retirements DIFFERENT bindings, the pre-fix code mints a fresh pin, and
+    # this test passes against the unfixed code for a reason that has nothing to do with the
+    # defect. Pin it so the scenario is built by construction, not by running fast enough.
+    roster_mtime = 900.0
+
+    def _cycle(now: float, roster: list[str]):
+        _write_json(config.hosts_path, _roster_with(tmp_path, roster))
+        os.utime(config.hosts_path, (roster_mtime, roster_mtime))
+        for host in roster:
+            _heartbeat(tmp_path / f"{host}-hb.json", healthy=True, mtime=now - 5.0)
+        probes = {h: {"reachable": True, "healthy": True, "class": "healthy"} for h in roster}
+        return _mod.run_once(config, _deps(now, probes))
+
+    # 1. both configured, so both records are built by the same evaluation path
+    _cycle(1000.0, ["host-a", "repeat-member"])
+    # 2. drop the member -> first retirement
+    _cycle(1100.0, ["host-a"])
+    first = [e for e in _retirement_events(config) if e["host"] == "repeat-member"]
+    assert len(first) == 1
+    first_binding = _intent_ledger(config)["repeat-member"]["contentBinding"]
+    # 3. re-add it -> tombstone clears, record is rebuilt identically
+    _cycle(1200.0, ["host-a", "repeat-member"])
+    # 4. drop it again, same roster digests -> same requestId, same content
+    _cycle(1300.0, ["host-a"])
+
+    # FIXTURE GUARD, asserted before the artifact count: the two retirements must really
+    # produce the same non-clock content. If they do not, this test can pass against the
+    # unfixed code without exercising the defect at all, so a mismatch is a broken fixture
+    # and must fail loudly rather than read as a pass.
+    second_binding = _intent_ledger(config)["repeat-member"]["contentBinding"]
+    assert second_binding == first_binding, (
+        "fixture did not reproduce identical disposition content, so the artifact-count "
+        "assertion below would not be testing the collapse"
+    )
+
+    events = [e for e in _retirement_events(config) if e["host"] == "repeat-member"]
+    assert len(events) == 2, "the second retirement published no artifact of its own"
+    assert events[0]["requestId"] == events[1]["requestId"], "same digests, so the requestId is stable"
+    assert events[0]["createdAt"] != events[1]["createdAt"], "two episodes, two clocks"
+
+    # The state must not claim a retirement whose evidence belongs to an earlier one.
+    state = json.loads(_mod.state_path(config).read_text(encoding="utf-8"))
+    tombstone = state["retiredHosts"]["repeat-member"]
+    named = json.loads(Path(tombstone["eventPath"]).read_text(encoding="utf-8"))
+    assert named["createdAt"] == tombstone["retiredAtIso"], (
+        "the tombstone points at an artifact created for a different retirement"
+    )
+
+
+def _intent_ledger(config) -> dict:
+    """The durable pending-retirement ledger, or {} when absent."""
+    path = _mod.retirement_intent_path(config)
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8")).get("intents") or {}
+
+
+def test_the_episode_discriminator_holds_across_a_retry_and_moves_across_episodes(
+    tmp_path: Path, monkeypatch
+):
+    """Pin the PREMISE the discriminator rests on, not just its effect.
+
+    The whole argument for using the persisted cycle counter is that it moves
+    on exactly one boundary: a cycle that reached save_state. If that stops
+    being true -- someone advances the counter before the retirement decision,
+    or persists it on the failure path -- reuse silently changes meaning and
+    every symptom shows up somewhere else. So assert the counter's behaviour
+    directly, on both sides.
+    """
+    # Side 1: a retry of a FAILED cycle must see the SAME episode.
+    config = _two_member_retirement_fixture(tmp_path)
+    probes = {"host-a": {"reachable": True, "healthy": True, "class": "healthy"}}
+    monkeypatch.setattr(_mod, "publish_event_json", _publish_except_for("retire-y"))
+    with pytest.raises(OSError):
+        _mod.run_once(config, _deps(1000.0, probes))
+    first_attempt = _intent_ledger(config)["retire-x"]["episodeSeq"]
+    with pytest.raises(OSError):
+        _mod.run_once(config, _deps(1100.0, probes))
+    assert _intent_ledger(config)["retire-x"]["episodeSeq"] == first_attempt, (
+        "a retry must stay in the same episode, or the pin stops reconciling"
+    )
+    # Nothing was saved on either failed cycle, which is WHY it stayed the same.
+    saved = json.loads(_mod.state_path(config).read_text(encoding="utf-8"))
+    assert "cycleSeq" not in saved
+
+    # Side 2: a completed cycle advances the counter, so a later retirement of
+    # the same member is a different episode.
+    monkeypatch.undo()
+    _mod.run_once(config, _deps(1200.0, probes))
+    after_success = json.loads(_mod.state_path(config).read_text(encoding="utf-8"))["cycleSeq"]
+    assert after_success >= 1
+    _mod.run_once(config, _deps(1300.0, probes))
+    advanced = json.loads(_mod.state_path(config).read_text(encoding="utf-8"))["cycleSeq"]
+    assert advanced > after_success, "a saved cycle must advance the episode boundary"
