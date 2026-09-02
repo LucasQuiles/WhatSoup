@@ -2146,7 +2146,13 @@ def test_opencode_probe_also_fails_closed_on_every_unreadable_plist_state(monkey
         "opencode-cli",
     )
     assert lines[0].startswith("FAIL provider_probe"), f"{state}: {lines[0]}"
-    assert "failure_class=provider_runtime_path_" in lines[0], f"{state}: {lines[0]}"
+    # The EXACT class, not the provider_runtime_path_ prefix. All six states
+    # leave the generated PATH unresolved, so instance_provider_path_match
+    # compares None against the loaded PATH and fails, and every state lands on
+    # provider_runtime_path_mismatch. Measured for each of the six rather than
+    # inferred. A prefix assertion would keep passing if a state silently
+    # migrated to a different provider_runtime_path_* class.
+    assert "failure_class=provider_runtime_path_mismatch" in lines[0], f"{state}: {lines[0]}"
 
 
 def test_default_provider_probe_stays_benign_when_there_is_no_launchagent_surface(monkeypatch, tmp_path):
