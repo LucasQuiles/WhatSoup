@@ -308,6 +308,91 @@ describe('per-chat session entry whose dispatch ownership was lost', () => {
     }
   });
 
+  /**
+   * The registered-owner proof is a CONJUNCTION — cleared `active`, a released
+   * provider handle, and no in-flight turn. The control above holds a default
+   * live stub, which fails all three conjuncts at once, so it cannot tell which
+   * one is load-bearing: weakening the proof to any single field leaves it
+   * green. These controls each fail EXACTLY ONE conjunct, so the guard has to
+   * read that conjunct to keep them green.
+   */
+  it.each([
+    {
+      label: 'still holds its managed provider handle',
+      seq: 513,
+      turnId: 'turn-registered-owner-handle-held',
+      // Managed-loop shutdown in progress: cleared flag, null pid, handle live.
+      status: {
+        active: false,
+        sessionId: 'session-42',
+        pid: null,
+        turnInFlight: false,
+        providerTerminated: false,
+      },
+    },
+    {
+      label: 'still has a turn in flight',
+      seq: 514,
+      turnId: 'turn-registered-owner-turn-in-flight',
+      // Handles released, but provider work is still running for this turn.
+      status: {
+        active: false,
+        sessionId: 'session-42',
+        pid: null,
+        turnInFlight: true,
+        providerTerminated: true,
+      },
+    },
+    {
+      label: 'is still active',
+      seq: 515,
+      turnId: 'turn-registered-owner-still-active',
+      // Terminated handles and no in-flight turn, but the session is live.
+      status: {
+        active: true,
+        sessionId: 'session-42',
+        pid: null,
+        turnInFlight: false,
+        providerTerminated: true,
+      },
+    },
+  ])('does not release a registered owner that $label', async ({ seq, turnId, status }) => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const { state } = makePerChatRuntime(db);
+      const runtimeContext = context('per_chat', MAP_KEY, seq, turnId);
+      const deliveryJid = runtimeContext.identity.deliveryJid;
+
+      // Same mismatch shape as the control above — the registry names manager
+      // B while the session map holds a dead session A — but B fails the
+      // termination proof on one conjunct only.
+      const owner = sessionStub();
+      owner.getStatus.mockReturnValue(status);
+      const ownerId = state.managerIdFor(owner);
+      state.ownedSessionManagers.set(ownerId, owner);
+      state.sessionOwnership.claim(MAP_KEY, ownerId);
+      const deadMapped = exitedSessionStub();
+      state.chatSessions.set(MAP_KEY, deadMapped);
+      state.chatQueues.set(MAP_KEY, queueStub(deliveryJid));
+      const spawned = stubSpawnAndClaim(state, deliveryJid);
+
+      await expect(dispatchTurn(state, runtimeContext)).rejects.toThrow();
+
+      // No release and no spawn: the wedge is reported, not repaired, because
+      // repairing it here would leave two live providers on one conversation.
+      expect(vi.mocked(state.ensureSessionAndQueueSync)).not.toHaveBeenCalled();
+      expect(vi.mocked(spawned.sendTurn)).not.toHaveBeenCalled();
+      expect(vi.mocked(owner.shutdown)).not.toHaveBeenCalled();
+      expect(state.ownedSessionManagers.get(ownerId)).toBe(owner);
+      expect(state.sessionOwnership.get(MAP_KEY)?.managerId).toBe(ownerId);
+      expect(state.chatSessions.get(MAP_KEY)).toBe(deadMapped);
+      expect(state.perChatSessionsWithoutOwner()).toEqual([MAP_KEY]);
+    } finally {
+      db.close();
+    }
+  });
+
   it('evicts when the registry names a manager that is itself gone', async () => {
     const db = new Database(':memory:');
     db.open();

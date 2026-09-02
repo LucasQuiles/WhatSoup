@@ -6272,6 +6272,57 @@ describe('session.ts uncovered-branch coverage', () => {
     expect(shutdownSpy).toHaveBeenCalledWith('end');
   });
 
+  // --- providerTerminated for a managed-loop provider mid-shutdown.
+  //     `shutdown()` clears `active` at its top, before either handle is
+  //     released, and a managed-loop provider never assigns a child — so a
+  //     cleared flag plus a null pid is NOT a termination proof for this
+  //     provider kind. Only releasing the managed handle is. Driven through a
+  //     real SessionManager because that is the surface the per-chat eviction
+  //     guard reads; a stubbed status could report anything.
+
+  it('reports providerTerminated false while the managed provider handle is still held', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    let releaseManagedShutdown: (() => void) | undefined;
+    const shutdownSpy = vi
+      .spyOn(OpenAIApiProvider.prototype, 'shutdown')
+      .mockImplementation(() => new Promise<void>((resolve) => {
+        releaseManagedShutdown = resolve;
+      }));
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'openai-api',
+    });
+    await sm.spawnSession();
+
+    // Live managed session: no child was ever spawned, so the null pid alone
+    // must not read as terminated.
+    expect((sm as unknown as { child: unknown }).child).toBeNull();
+    expect(sm.getStatus()).toMatchObject({ active: true, pid: null, providerTerminated: false });
+
+    const shuttingDown = sm.shutdown(true);
+    // `shutdown()` reaches the managed-provider race synchronously (no child to
+    // kill first), so the handle is already being released here.
+    expect(shutdownSpy).toHaveBeenCalledTimes(1);
+    expect((sm as unknown as { managedProviderSession: unknown }).managedProviderSession).not.toBeNull();
+
+    const midShutdown = sm.getStatus();
+    expect(midShutdown.active).toBe(false);
+    expect(midShutdown.pid).toBeNull();
+    expect(midShutdown.providerTerminated).toBe(false);
+
+    releaseManagedShutdown?.();
+    await shuttingDown;
+
+    // The handle is released only after its shutdown promise settles; that is
+    // the moment the flag is allowed to flip.
+    expect((sm as unknown as { managedProviderSession: unknown }).managedProviderSession).toBeNull();
+    expect(sm.getStatus()).toMatchObject({ active: false, pid: null, providerTerminated: true });
+  });
+
   // --- shutdown SIGKILL escalation when SIGTERM doesn't kill the child
   //     (lines 1963-1965). Use fake timers and a child whose kill is a no-op
   //     so the grace timer fires the SIGKILL path.
