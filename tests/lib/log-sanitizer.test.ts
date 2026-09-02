@@ -899,9 +899,11 @@ describe('retained error text scrubs the canonical bearer header form', () => {
 // SECRET_KEY_RE lists as must-never-log field names, so the sanitizer removed
 // them as keys while retaining them inside a message.
 //
-// The label alternation therefore accepts a leading run of word characters,
-// and that run is part of the captured group, so the identifier still reads
-// back in the diagnostic (`apiToken=<secret>` becomes `apiToken ***`).
+// The label alternation therefore matches wherever a label ENDS an identifier,
+// without consuming the run of word characters in front of it. That run sits
+// outside the match, so it survives the substitution untouched and the
+// identifier still reads back in the diagnostic (`apiToken=<secret>` becomes
+// `apiToken ***`).
 
 describe('retained error text scrubs a label at the tail of a longer identifier', () => {
   const retained = (message: string) =>
@@ -939,22 +941,30 @@ describe('retained error text scrubs a label at the tail of a longer identifier'
     });
   }
 
-  // The prefix run is bounded, not open-ended, and the bound is load-bearing:
-  // an unbounded run backtracks over the whole identifier at every start
-  // position. The two sibling redactors in this repo bound theirs at 40 for the
-  // same reason. These two cases pin the boundary from both sides, so widening
-  // or dropping the bound fails a test rather than passing silently.
+  // Prefix length does not gate recognition, because the prefix is not part of
+  // the match. An earlier shape consumed it as a bounded run and stopped
+  // recognising a label glued to 41 or more leading word characters; these two
+  // cases sit either side of that former bound, so reintroducing any prefix
+  // quantifier fails a test rather than passing silently. Longer prefixes and
+  // the real-sink route are covered by their own block at the end of this file.
 
   it('treats a 40-character glued prefix as a label', () => {
     const out = retained(`upstream call failed ${'a'.repeat(40)}token=I9j0K1l2M3n4 at gate`);
     expect(out).not.toContain('I9j0K1l2M3n4');
   });
 
-  it('does not treat a 41-character glued prefix as a label', () => {
-    // Disclosed residual: a label glued to more than 40 leading word characters
-    // is not recognised. The bound is the ReDoS guard; this is its cost.
+  it('treats a 41-character glued prefix as a label', () => {
+    // Flipped from an absence pin to a masking pin. It previously asserted the
+    // secret stayed VISIBLE, recording the former {0,40} prefix bound's
+    // disclosed false negative as the shipped contract. The cross-model bench's
+    // LOW-5 measured that removing the bounded prefix run closes the false
+    // negative and is neutral on the pathological input the bound existed for,
+    // so the residual this pinned no longer exists and the assertion inverts.
     const out = retained(`upstream call failed ${'a'.repeat(41)}token=J0k1L2m3N4o5 at gate`);
-    expect(out).toContain('J0k1L2m3N4o5');
+    expect(out).not.toContain('J0k1L2m3N4o5');
+    // Frame assertion: absence must come from masking, not from a blanked or
+    // refused message.
+    expect(out).toContain('at gate');
   });
 });
 
@@ -972,7 +982,8 @@ describe('retained error text scrubs a label at the tail of a longer identifier'
 //   of them, masking only the leading fragment and leaving the rest.
 //
 // The fourth is a regression pin rather than a fix: a compound underscore label
-// is already covered, because the glued-prefix run treats `client_` as prefix.
+// is already covered, because `secret` ends the identifier and the `client_` in
+// front of it falls outside the match.
 
 describe('retained error text scrubs the wider credential shapes', () => {
   const retained = (message: string) =>
@@ -1053,4 +1064,125 @@ describe('retained error text uses the canonical JID pattern (SSOT)', () => {
     expect(out).not.toContain('99999@g.us');
     expect(out).toContain('no route for');
   });
+});
+
+// ─── The label shape, pinned through a real pino sink ───────────────────────
+//
+// The label is matched WITHOUT consuming the identifier run that precedes it.
+// The prefix falls outside the match, so it survives the substitution verbatim
+// and the diagnostic still reads back (`apiToken=<secret>` becomes
+// `apiToken ***`), while the label alternation itself carries no quantifier to
+// bound. That removes the former {0,40} prefix bound rather than raising it: a
+// label glued to ANY number of leading word characters is now recognised, and
+// there is no prefix run left for a pathological input to backtrack over.
+//
+// The cross-model bench's LOW-5 named the old bound's cost — a secret after a
+// 41-character glued prefix was retained — and measured the replacement shape
+// ReDoS-neutral on a 50,000-character prefix. The wall time there is the
+// pre-existing EMAIL_RE quadratic documented above, not this pattern.
+//
+// Both directions are pinned below, so widening the label alternation fails a
+// test rather than passing silently.
+
+const captureSanitizedErrorLine = async (message: string): Promise<string> => {
+  const pino = (await import('pino')).default;
+  const { errorLikeSerializers } = await import('../../src/logger.ts');
+  const { sanitizingLogHook } = await import('../../src/lib/log-sanitizer.ts');
+
+  const lines: string[] = [];
+  const logger = pino(
+    {
+      level: 'info',
+      serializers: errorLikeSerializers,
+      hooks: { logMethod: sanitizingLogHook } as never,
+    },
+    {
+      write(chunk: string) {
+        lines.push(chunk);
+      },
+    },
+  );
+  logger.warn({ err: new Error(message) }, 'turn processor error');
+  expect(lines).toHaveLength(1);
+  return lines[0]!;
+};
+
+const sanitizedErrorMessage = async (message: string): Promise<string> => {
+  const record = JSON.parse(await captureSanitizedErrorLine(message)) as {
+    err: Record<string, unknown>;
+  };
+  return record.err.errorMessage as string;
+};
+
+describe('the label shape masks a glued prefix of any length', () => {
+  // [prefix length, 12-character synthetic secret]
+  const GLUED_PREFIX_LENGTHS: ReadonlyArray<readonly [number, string]> = [
+    [41, 'J0k1L2m3N4o5'],
+    [60, 'N4o5P6q7R8s9'],
+    [200, 'P6q7R8s9T0u1'],
+  ];
+
+  it('covers three prefix lengths past the former bound, each with a distinct secret', () => {
+    // Coverage assertion: a shrunk table would otherwise pass silently.
+    expect(GLUED_PREFIX_LENGTHS).toHaveLength(3);
+    expect(new Set(GLUED_PREFIX_LENGTHS.map(([, secret]) => secret)).size).toBe(3);
+    for (const [length, secret] of GLUED_PREFIX_LENGTHS) {
+      expect(length).toBeGreaterThan(40);
+      expect(secret).toHaveLength(12);
+    }
+  });
+
+  it('masks a secret after a bare label (positive control, unchanged by the label shape)', async () => {
+    const out = await sanitizedErrorMessage('upstream call failed token=I9j0K1l2M3n4 at gate');
+    expect(out).not.toContain('I9j0K1l2M3n4');
+    expect(out).toContain('at gate');
+  });
+
+  for (const [length, secret] of GLUED_PREFIX_LENGTHS) {
+    it(`masks a secret glued behind a ${length}-character prefix`, async () => {
+      const line = await captureSanitizedErrorLine(
+        `upstream call failed ${'a'.repeat(length)}token=${secret} at gate`,
+      );
+      const out = (JSON.parse(line) as { err: Record<string, unknown> }).err
+        .errorMessage as string;
+      expect(line).not.toContain(secret);
+      expect(out).not.toContain(secret);
+      // Frame assertion: a refused or blanked message would satisfy the
+      // absence check above without the pattern having matched anything.
+      expect(out).toContain('at gate');
+      expect(out).toContain(`${'a'.repeat(length)}token ***`);
+    });
+  }
+
+  // The other direction. These three read identically at the previous head and
+  // at this one; they fail only if the label alternation is widened.
+  const UNCHANGED_BY_THE_LABEL_SHAPE: ReadonlyArray<readonly [string, string, string]> = [
+    [
+      'a label that does not end the identifier is not a label',
+      'tokenizer=plainvalue at gate',
+      'tokenizer=plainvalue at gate',
+    ],
+    [
+      'the prefix survives the substitution, so the identifier still reads back',
+      'upstream call failed apiToken=A1b2C3d4E5f6 at gate',
+      'upstream call failed apiToken *** at gate',
+    ],
+    [
+      'prose after a label word is left alone by the separator-less floor',
+      'authorization failed',
+      'authorization failed',
+    ],
+  ];
+
+  it('covers three shapes the label shape must not change', () => {
+    // Coverage assertion: a shrunk table would otherwise pass silently.
+    expect(UNCHANGED_BY_THE_LABEL_SHAPE).toHaveLength(3);
+    expect(new Set(UNCHANGED_BY_THE_LABEL_SHAPE.map(([, message]) => message)).size).toBe(3);
+  });
+
+  for (const [name, message, expected] of UNCHANGED_BY_THE_LABEL_SHAPE) {
+    it(`does not over-mask: ${name}`, async () => {
+      expect(await sanitizedErrorMessage(message)).toBe(expected);
+    });
+  }
 });

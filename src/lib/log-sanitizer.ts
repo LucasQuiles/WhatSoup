@@ -132,33 +132,43 @@ const PHONE_RE = /\+?\d{7,}/g;
 // consumes `Bearer` as the value, and leaves the real token untouched — the
 // exact header this pattern exists to cover.
 //
-// A LEADING RUN OF WORD CHARACTERS IS PART OF THE LABEL. The pattern this
-// replaced had no anchor at all, so `token=` matched inside a longer
-// identifier and `apiToken=<secret>` was masked. Anchoring the label with a
-// leading \b dropped that whole class — `apiToken`, `authToken`, `accessToken`,
-// `refreshToken`, `sessionToken`, `bearerToken`, `xapikey`, `my_token` — and
-// nothing downstream catches it: PHONE_RE needs seven consecutive digits,
-// EMAIL_RE needs an `@`, and the key filters do not apply to a substring
-// sitting inside text that has already been retained. `access_token`,
-// `refresh_token` and `token` are themselves SECRET_KEY_RE entries, so those
-// values were removed as field names and kept inside messages.
+// A LABEL IS MATCHED WHEREVER IT ENDS AN IDENTIFIER, AND ITS PREFIX IS NOT
+// CONSUMED. The pattern this replaced had no anchor at all, so `token=` matched
+// inside a longer identifier and `apiToken=<secret>` was masked. Anchoring the
+// label with a leading \b dropped that whole class — `apiToken`, `authToken`,
+// `accessToken`, `refreshToken`, `sessionToken`, `bearerToken`, `xapikey`,
+// `my_token` — and nothing downstream catches it: PHONE_RE needs seven
+// consecutive digits, EMAIL_RE needs an `@`, and the key filters do not apply
+// to a substring sitting inside text that has already been retained.
+// `access_token`, `refresh_token` and `token` are themselves SECRET_KEY_RE
+// entries, so those values were removed as field names and kept inside
+// messages.
 //
-// The prefix is inside the capture, so the identifier survives the
-// substitution and the diagnostic still reads back: `apiToken=<secret>`
-// becomes `apiToken ***`, not `Token ***`. The trailing \b still applies, so
-// the label must end the identifier; `tokenizer=<value>` is not a match.
+// So the label alternation carries no leading anchor and no prefix run. The
+// identifier characters in front of the label sit OUTSIDE the match, which is
+// what makes the diagnostic still read back: `apiToken=<secret>` becomes
+// `apiToken ***`, because `api` was never matched and only `Token=<secret>` is
+// replaced. The trailing \b still applies, so the label must END the
+// identifier; `tokenizer=<value>` is not a match.
 //
-// The prefix run is BOUNDED at 40, which caps prefix backtracking (ReDoS-safe);
-// an open-ended run rescans the whole identifier from every start position.
-// Two sibling redactors in this repo bound the same construct the same way:
+// THERE IS NO PREFIX BOUND, and that is the point rather than an omission. An
+// earlier shape here consumed the prefix as `[A-Za-z0-9_]{0,40}` and bounded it
+// at 40 to cap prefix backtracking; the disclosed cost was that a label glued
+// to 41 or more leading word characters was not recognised at all. Leaving the
+// prefix unmatched removes the quantifier that had to be bounded instead of
+// merely raising its ceiling, so there is no prefix run for a pathological
+// input to rescan from every start position. The cross-model bench's LOW-5
+// measured both shapes on a 50,000-character glued prefix and found them within
+// noise of each other: that wall time is the pre-existing EMAIL_RE quadratic
+// described below, not this pattern.
+//
+// KNOWN DIVERGENCE, deliberate and out of this change's scope: the two sibling
+// redactors in this repo still consume the prefix and still bound it —
 // SECRETISH_ASSIGNMENT in src/lib/bot-errors-outbox.ts and SECRETISH_ASSIGNMENT
-// in src/lib/cli-redaction.ts both spell it `[A-Za-z0-9]{1,40}`. Theirs is a
-// required prefix in a dedicated branch, so it reads {1,40}; here one branch
-// serves bare and glued labels alike, so the same bound reads {0,40}. Those two
-// patterns and this one are a three-way duplication of the same credential
-// shape, deliberately left in place: consolidating them is a separate change,
-// not one to make inside a fix. Disclosed cost of the bound: a label glued to
-// more than 40 leading word characters is not recognised.
+// in src/lib/cli-redaction.ts both spell it `[A-Za-z0-9]{1,40}`, and both
+// therefore keep the 41-character false negative this pattern no longer has.
+// Those two and this one remain a three-way duplication of the same credential
+// shape; consolidating them is a separate change, not one to make inside a fix.
 // An HTTP authentication scheme can sit between the label and the credential.
 // It is consumed as part of the match, BEFORE the not-another-label guard, for
 // two reasons measured on this file: `Authorization: Basic <credential>` took
@@ -174,7 +184,7 @@ const AUTH_SCHEMES = 'bearer|basic';
 const SECRET_VALUE = '[^\\s"\',;}\\\\]+';
 const SECRET_LABELS = 'bearer|api[_-]?key|authorization|token|secret|password|passphrase|pairing';
 const BEARER_RE = new RegExp(
-  `\\b([A-Za-z0-9_]{0,40}(?:${SECRET_LABELS}))\\b`
+  `((?:${SECRET_LABELS}))\\b`
     + `(?:\\s*[:=]\\s*(?:(?:${AUTH_SCHEMES})\\s+)?(?!(?:${SECRET_LABELS})\\b)["']?${SECRET_VALUE}["']?`
     + `|\\s+["']?[\\w.~+/-]{8,}={0,2}["']?)`,
   'gi',
