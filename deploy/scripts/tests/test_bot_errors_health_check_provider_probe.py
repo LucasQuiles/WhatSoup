@@ -1296,7 +1296,7 @@ def _matrix_environment(tmp_path: Path) -> dict[str, str]:
     return environment
 
 
-def test_claude_cli_probe_healthy_plist_control_row(monkeypatch, tmp_path):
+def test_default_provider_probe_healthy_plist_control_row(monkeypatch, tmp_path):
     # Control: with a readable plist whose loaded job disagrees, the default
     # provider already fails closed. Without this row the six broken rows below
     # could pass for a reason unrelated to plist readability.
@@ -1317,7 +1317,7 @@ def test_claude_cli_probe_healthy_plist_control_row(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("state", PLIST_BREAKAGE_STATES)
-def test_claude_cli_probe_fails_closed_on_every_unreadable_plist_state(monkeypatch, tmp_path, state):
+def test_default_provider_probe_fails_closed_on_every_unreadable_plist_state(monkeypatch, tmp_path, state):
     environment = _matrix_environment(tmp_path)
     target = _arm_darwin_plist(
         monkeypatch, tmp_path, "agent-alpha",
@@ -1356,7 +1356,7 @@ def test_opencode_probe_also_fails_closed_on_every_unreadable_plist_state(monkey
     assert "failure_class=provider_runtime_path_" in lines[0], f"{state}: {lines[0]}"
 
 
-def test_claude_cli_probe_stays_benign_when_there_is_no_launchagent_surface(monkeypatch, tmp_path):
+def test_default_provider_probe_stays_benign_when_there_is_no_launchagent_surface(monkeypatch, tmp_path):
     # The two BENIGN states must NOT be swept into the fail-closed change:
     # a Linux host has no plist by design, and the dry-run override is a test
     # affordance. This is the regression guard for the fix's blast radius.
@@ -1372,7 +1372,7 @@ def test_claude_cli_probe_stays_benign_when_there_is_no_launchagent_surface(monk
     assert "provider_runtime_plist_unreadable" not in "\n".join(lines)
 
 
-def test_claude_cli_probe_gate_applies_even_with_an_operator_probe_command(monkeypatch, tmp_path):
+def test_default_provider_probe_gate_applies_even_with_an_operator_probe_command(monkeypatch, tmp_path):
     # MED-2 negative control. The runtime-path gate is a statement about the
     # SERVICE's PATH, so an operator override picks WHICH binary is probed but
     # must not exempt the service from the gate. Before the hoist the gate lived
@@ -1392,7 +1392,7 @@ def test_claude_cli_probe_gate_applies_even_with_an_operator_probe_command(monke
     assert "reason=effective_path_uncomposable" in lines[0]
 
 
-def test_claude_cli_probe_runs_the_provider_in_the_governed_environment(monkeypatch, tmp_path):
+def test_default_provider_probe_runs_the_provider_in_the_governed_environment(monkeypatch, tmp_path):
     # MED-1. The binary is chosen from the governed PATH, so it must also RUN
     # under that PATH. Passing no child environment meant a `#!/usr/bin/env node`
     # wrapper resolved its interpreter from the probe's PATH, exercising the
