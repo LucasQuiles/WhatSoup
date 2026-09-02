@@ -148,10 +148,18 @@ describe('v3.5 deployments — the one real deployment card', () => {
     expect(cells[3]!.textContent).toContain('fleet process')
   })
 
-  it('degrades the state pill and surfaces real issues when lines are not online', async () => {
+  // #2523: the issue list renders the canonical health-presentation label, the
+  // same one the feed card shows for the same condition. It used to print the
+  // producer's raw reason string, so a free-form prose reason reached the
+  // operator as trusted prose and a bounded code reached them as a raw token.
+  it('degrades the state pill and labels real issues from the canonical health registry', async () => {
     mockLines = [
       makeLine('personal'),
-      makeLine('builds', { status: 'degraded', statusReason: 'reconnect loop' }),
+      makeLine('builds', {
+        status: 'degraded',
+        statusReason: 'health_body_unhealthy',
+        statusConfidence: 'confirmed',
+      }),
     ]
     const { container, getByTestId } = renderPage()
     await waitFor(() => expect(getByTestId('deploy-card-local')).toBeDefined())
@@ -159,7 +167,40 @@ describe('v3.5 deployments — the one real deployment card', () => {
     const cells = [...getByTestId('deploy-card-local').querySelectorAll('.deploy-dcell')]
     expect(cells[0]!.textContent).toContain('1 / 2')
     expect(cells[2]!.querySelector('.deploy-dcell__k')!.textContent).toBe('Issues')
-    expect(cells[2]!.textContent).toContain('builds: reconnect loop')
+    expect(cells[2]!.textContent).toContain('builds: health response reports unhealthy')
+    // The tooltip keeps the complete safe classification: code and confidence.
+    const chip = cells[2]!.querySelector('.deploy-mini__warn')!
+    expect(chip.getAttribute('title')).toContain('health_body_unhealthy')
+    expect(chip.getAttribute('title')).toContain('confidence confirmed')
+  })
+
+  it('fails closed on an unregistered reason instead of printing it as trusted prose', async () => {
+    mockLines = [
+      makeLine('personal'),
+      makeLine('builds', { status: 'degraded', statusReason: 'reconnect loop' }),
+    ]
+    const { getByTestId } = renderPage()
+    await waitFor(() => expect(getByTestId('deploy-card-local')).toBeDefined())
+    const cells = [...getByTestId('deploy-card-local').querySelectorAll('.deploy-dcell')]
+    expect(cells[2]!.textContent).toContain('builds: unsupported reason code')
+    expect(cells[2]!.textContent).not.toContain('reconnect loop')
+  })
+
+  it('labels a stale observation even when the last-good reason is retained', async () => {
+    mockLines = [
+      makeLine('personal'),
+      makeLine('builds', {
+        status: 'degraded',
+        statusReason: 'health_body_unhealthy',
+        statusConfidence: 'confirmed',
+        stale: true,
+      }),
+    ]
+    const { getByTestId } = renderPage()
+    await waitFor(() => expect(getByTestId('deploy-card-local')).toBeDefined())
+    const cells = [...getByTestId('deploy-card-local').querySelectorAll('.deploy-dcell')]
+    expect(cells[2]!.textContent).toContain('stale observation')
+    expect(cells[2]!.textContent).toContain('health response reports unhealthy')
   })
 
   it('labels the crit severity critical (never a raw state code) on pill and summary', async () => {
