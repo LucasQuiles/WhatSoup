@@ -1,24 +1,50 @@
 /**
- * Recursive metadata-only log sanitizer (WS-A06).
+ * Recursive pre-sink log sanitizer.
  *
- * Applied centrally at logger construction via Pino's `hooks.logMethod`,
- * this sanitizer walks every log merge object before serialization and
- * strips or masks content that must never be retained in logs:
+ * Applied centrally at logger construction via Pino's `hooks.logMethod`, this
+ * sanitizer walks every log merge object before serialization.
  *
- * - Secret-bearing fields (password, token, credential, key, auth, …)
- * - Content-bearing fields (textPreview, message, content, body, prompt, …)
- * - Identity fields (jid, lid, conversationId, phone, email, …)
+ * WHAT IT REMOVES ENTIRELY
+ * - Secret-bearing fields by key (password, token, credential, key, auth, …)
+ * - Content-bearing fields by key (textPreview, message, content, body, …)
+ * - Identity fields by key (jid, lid, conversationId, phone, email, …)
+ * - Error stack traces
+ * - Binary buffers (replaced with `[binary]`)
+ *
+ * WHAT IT MASKS IN PLACE, in any retained string
  * - URL userinfo, query, and fragment components
- * - Error stack traces (dropped; they carry absolute filesystem paths)
- * - Error messages (bounded and passed through the same string sanitizer)
- * - Home-directory account segments in any retained text
- * - Binary buffers (replaced with `[binary]` placeholder)
+ * - WhatsApp JIDs, via the canonical pattern in ./redaction-patterns.ts
+ * - Email addresses and phone-shaped digit runs
+ * - Labelled bearer/API-key tokens
+ * - The account segment of a POSIX home-directory path
+ *
+ * WHAT IT RETAINS — and why this file is NOT metadata-only
+ * An Error reaching this sanitizer keeps a bounded, pattern-scrubbed copy of
+ * its `message`, and of its `cause`'s message, under `errorMessage`. Free text
+ * therefore reaches the sink. The masking above is pattern-based: it removes
+ * the shapes it knows and cannot remove an unshaped secret or a sentence of
+ * private prose that happens to sit in an error message.
+ *
+ * This narrows a live privacy acceptance. WS-A06 in
+ * docs/superpowers/specs/2026-07-09-wall-to-wall-audit-remediation-design.md:214
+ * requires that "synthetic canaries for message text, JID, phone, access token,
+ * URL query/fragment, and malformed JSON are absent from every captured sink;
+ * metadata and low-cardinality error class remain". Retaining message text is a
+ * departure from the first clause of that acceptance. WS-A06 is tracked by
+ * issue #2164 and was never mechanically enforced: the artifacts its plan named
+ * (tests/logger-privacy.test.ts, tests/fixtures/log-privacy-canary.ts,
+ * src/lib/log-safety.ts) do not exist in this tree.
+ *
+ * The narrowing is pending an owner ruling. Do not describe this file as
+ * metadata-only, and do not treat the pattern masking as equivalent to the
+ * absence guarantee WS-A06 asks for. If the ruling reverses the narrowing, the
+ * retention below is what has to change.
  *
  * The sanitizer is recursive, cycle-safe (WeakSet), and never throws.
  *
- * Design principle: truncation limits the number of retained bytes but does
- * not remove a sensitive value that occurs near the beginning of a preview.
- * This sanitizer removes the value entirely.
+ * Design principle for the fields it drops: truncation limits retained bytes
+ * but does not remove a sensitive value near the start of a preview, so those
+ * values are removed entirely rather than shortened.
  */
 
 import { homePathPattern, jidPattern } from './redaction-patterns.ts';

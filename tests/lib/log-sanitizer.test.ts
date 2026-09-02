@@ -1,12 +1,37 @@
 /**
- * WS-A06 metadata-only sink contract — real-sink negative canaries.
+ * Pre-sink sanitizer contract tests.
  *
- * These tests prove that the recursive pre-sink sanitizer strips sensitive
- * content from log payloads before they reach any Pino sink (stdout, file).
+ * These tests pin what the sanitizer at this head actually does, which is NOT
+ * the metadata-only contract the file header used to claim.
  *
- * Strategy: inject unique synthetic markers representing each content class
- * and assert they are ABSENT from captured output while safe event metadata
- * (event type, stage, counts) remains.
+ * TWO CLASSES OF ASSERTION LIVE HERE, and the difference matters:
+ *
+ * 1. ABSENCE. Fields removed by key, stack traces, and the string shapes the
+ *    masking patterns know (JID, email, phone-shaped digit runs, URL query and
+ *    fragment, labelled tokens, home-directory account segments) must not
+ *    appear in captured output.
+ *
+ * 2. PRESENCE. An Error keeps a bounded, pattern-scrubbed copy of its message,
+ *    and of its cause's message, under `errorMessage`. Those tests REQUIRE the
+ *    text to survive. They are not redundant with class 1; they are the
+ *    opposite guarantee, and they are why this suite can no longer be read as
+ *    proving a metadata-only sink.
+ *
+ * The masking is pattern-based. It cannot remove an unshaped secret or a
+ * sentence of private prose sitting in an error message, and the canary below
+ * says so explicitly rather than implying otherwise by omission.
+ *
+ * This narrows a live privacy acceptance. WS-A06 in
+ * docs/superpowers/specs/2026-07-09-wall-to-wall-audit-remediation-design.md:214
+ * requires that "synthetic canaries for message text, JID, phone, access token,
+ * URL query/fragment, and malformed JSON are absent from every captured sink;
+ * metadata and low-cardinality error class remain". The message-text clause is
+ * the one this suite no longer upholds. WS-A06 is tracked by issue #2164 and
+ * was never mechanically enforced: the artifacts its plan named
+ * (tests/logger-privacy.test.ts, tests/fixtures/log-privacy-canary.ts,
+ * src/lib/log-safety.ts) do not exist in this tree.
+ *
+ * The narrowing is pending an owner ruling.
  */
 import { describe, expect, it } from 'vitest';
 import { sanitizeLogValue } from '../../src/lib/log-sanitizer.ts';
