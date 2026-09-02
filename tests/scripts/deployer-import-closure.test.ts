@@ -2,12 +2,16 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 
 import {
+  type ClosureContext,
   DEPLOY_SCRIPT_REL,
+  type ImportClosure,
+  PYTHON_CLOSURE_TIMEOUT_MS,
   RUNTIME_MANIFEST_REL,
   computeImportClosure,
+  createClosureContext,
   parseDeployPinPaths,
 } from '../../scripts/lib/deployer-import-closure.ts';
 
@@ -59,16 +63,66 @@ function countQuotedFilesEntries(scriptText: string): number {
   return count;
 }
 
+/**
+ * Budget for the one-time graph build, from measurement rather than guesswork.
+ *
+ * `npm run coverage:check -- --pool=forks tests/scripts/deployer-import-closure.test.ts`
+ * on this branch: the single test that built its own module graph reported
+ * 6268ms, every other test 0-1ms, with the file at 15.0s wall. Parsing every
+ * module under src/ under coverage instrumentation is the whole of that cost,
+ * and a loaded CI runner is slower still — which is exactly how this file first
+ * failed hosted quality 24.x at the vitest 10s default. The build now happens
+ * ONCE here instead of once per closure, and the hook carries a budget with
+ * roughly an order of magnitude of headroom over the measured figure.
+ */
+const GRAPH_BUILD_BUDGET_MS = 120_000;
+
 describe('bot-errors deployer allowlist is closed under import', () => {
   const scriptText = readFileSync(path.join(repoRoot, DEPLOY_SCRIPT_REL), 'utf8');
   const pinPaths = parseDeployPinPaths(scriptText);
-  const closure = computeImportClosure(repoRoot, pinPaths);
+  let context: ClosureContext;
+  let closure: ImportClosure;
+  let shrunken: ImportClosure;
+
+  beforeAll(() => {
+    // One parse of src/ shared by both closures. Reusing the context is what
+    // keeps every individual case at ~0ms; computing a second closure from
+    // scratch is what blew the per-test budget on the hosted runner.
+    context = createClosureContext(repoRoot);
+    closure = computeImportClosure(repoRoot, pinPaths, context);
+    // Negative control, computed here so the case below only asserts.
+    shrunken = computeImportClosure(repoRoot, ['src/lib/bot-errors-outbox.ts'], context);
+  }, GRAPH_BUILD_BUDGET_MS);
+
   const manifest = JSON.parse(
     readFileSync(path.join(repoRoot, RUNTIME_MANIFEST_REL), 'utf8'),
   ) as RuntimeManifest;
   const manifestPaths = new Set(manifest.files.map((entry) => entry.path));
 
   describe('the closure was actually computed (non-vacuity)', () => {
+    it('bounds the python import walk with a timeout', () => {
+      // A synchronous spawn with no timeout blocks its whole process forever on
+      // a hung child, which is why `fitness/sync-exec-timeout` holds the linted
+      // tree at zero bare call sites. Asserted here as well as in the fitness
+      // budget so the reason travels with the code that spawns.
+      expect(Number.isFinite(PYTHON_CLOSURE_TIMEOUT_MS)).toBe(true);
+      expect(PYTHON_CLOSURE_TIMEOUT_MS).toBeGreaterThan(0);
+      expect(PYTHON_CLOSURE_TIMEOUT_MS).toBeLessThanOrEqual(60_000);
+
+      // The constant is worthless unless it reaches the options literal the
+      // child process is actually spawned with, so pin that at source level
+      // rather than adding a second spawn just to observe one.
+      const source = readFileSync(
+        path.join(repoRoot, 'scripts/lib/deployer-import-closure.ts'),
+        'utf8',
+      );
+      const optionsLine = source
+        .split('\n')
+        .find((line) => line.includes('maxBuffer:'));
+      expect(optionsLine, 'python spawn options literal').toBeDefined();
+      expect(optionsLine).toContain('timeout: PYTHON_CLOSURE_TIMEOUT_MS');
+    });
+
     it('parses every allowlist entry the script text contains', () => {
       expect(pinPaths.length).toBe(countQuotedFilesEntries(scriptText));
       // Floor, not an exact count: the allowlist is expected to grow.
@@ -129,10 +183,9 @@ describe('bot-errors deployer allowlist is closed under import', () => {
     });
 
     it('reports members that a shrunken allowlist would leave unshipped', () => {
-      // Negative control: seed with the outbox alone and the walk must surface
+      // Negative control: seeded with the outbox alone, the walk must surface
       // its four dependencies. If this returns nothing, the machinery cannot
       // detect an open closure and every green result above is meaningless.
-      const shrunken = computeImportClosure(repoRoot, ['src/lib/bot-errors-outbox.ts']);
       expect(shrunken.uncovered).toEqual([
         'src/lib/alert-evidence.ts',
         'src/lib/private-fs.ts',

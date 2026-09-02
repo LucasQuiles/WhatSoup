@@ -47,7 +47,7 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
 
-import { buildModuleGraph } from './semantic-quality/module-graph.ts';
+import { type ModuleGraph, buildModuleGraph } from './semantic-quality/module-graph.ts';
 
 export const DEPLOY_SCRIPT_REL = 'deploy/scripts/whatsoup-bot-errors-deploy.sh';
 export const RUNTIME_MANIFEST_REL = 'deploy/bot-errors-runtime-manifest.json';
@@ -56,6 +56,16 @@ export const RUNTIME_MANIFEST_REL = 'deploy/bot-errors-runtime-manifest.json';
 export const PYTHON_ROOT_REL = 'deploy/scripts';
 /** Directory tree scanned for TypeScript modules when resolving specifiers. */
 export const TS_SOURCE_ROOT_REL = 'src';
+
+/**
+ * Wall-clock ceiling for the python import walk, 30s per the repo convention
+ * for synchronous child processes. A synchronous spawn with no timeout blocks
+ * its whole process forever on a hung child, which is why
+ * `fitness/sync-exec-timeout` holds the linted tree at zero bare call sites.
+ * The walk parses a few dozen files and finishes in well under a second, so
+ * this bound is only ever reached by a wedged interpreter.
+ */
+export const PYTHON_CLOSURE_TIMEOUT_MS = 30_000;
 
 export interface ImportClosure {
   /** Allowlist paths parsed out of `FILES=()`, in source order. */
@@ -219,9 +229,32 @@ function pythonClosure(repoRoot: string, seeds: string[]): PythonClosurePayload 
   const stdout = execFileSync(
     'python3',
     ['-B', '-c', PYTHON_CLOSURE_PROGRAM, repoRoot, ...seeds],
-    { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 },
+    { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024, timeout: PYTHON_CLOSURE_TIMEOUT_MS },
   );
   return JSON.parse(stdout) as PythonClosurePayload;
+}
+
+/**
+ * A parsed TypeScript module graph for one repository root.
+ *
+ * Building it reads and parses every module under `src/`, which dominates the
+ * cost of a closure computation. Callers that compute more than one closure
+ * over the same tree should build this ONCE and pass it to each call; a caller
+ * that does not care can omit it and pay the build per call.
+ */
+export interface ClosureContext {
+  repoRoot: string;
+  graph: ModuleGraph;
+}
+
+/** Read and parse every TypeScript module under `src/` once. */
+export function createClosureContext(repoRoot: string): ClosureContext {
+  const tsFiles: string[] = [];
+  walkFiles(path.join(repoRoot, TS_SOURCE_ROOT_REL), TS_SOURCE_ROOT_REL, tsFiles);
+  const tsSources = tsFiles
+    .filter((rel) => /\.tsx?$/.test(rel) && !rel.endsWith('.d.ts'))
+    .map((rel) => ({ path: rel, text: readFileSync(path.join(repoRoot, rel), 'utf8') }));
+  return { repoRoot, graph: buildModuleGraph(tsSources) };
 }
 
 /**
@@ -229,20 +262,23 @@ function pythonClosure(repoRoot: string, seeds: string[]): PythonClosurePayload 
  *
  * The result is derived ONLY from parsed import statements. Neither the
  * allowlist nor the runtime manifest contributes a member.
+ *
+ * Pass `context` to reuse an already-parsed module graph. It is used only when
+ * it belongs to the same repository root; a mismatched context is ignored and
+ * a fresh graph is built, so a stale one can never silently narrow a closure.
  */
-export function computeImportClosure(repoRoot: string, seeds: readonly string[]): ImportClosure {
+export function computeImportClosure(
+  repoRoot: string,
+  seeds: readonly string[],
+  context?: ClosureContext,
+): ImportClosure {
   const seedList = [...seeds];
   const edges: Array<{ from: string; to: string }> = [];
 
   const python = pythonClosure(repoRoot, seedList.filter((seed) => seed.endsWith('.py')));
   for (const [from, to] of python.edges) edges.push({ from, to });
 
-  const tsFiles: string[] = [];
-  walkFiles(path.join(repoRoot, TS_SOURCE_ROOT_REL), TS_SOURCE_ROOT_REL, tsFiles);
-  const tsSources = tsFiles
-    .filter((rel) => /\.tsx?$/.test(rel) && !rel.endsWith('.d.ts'))
-    .map((rel) => ({ path: rel, text: readFileSync(path.join(repoRoot, rel), 'utf8') }));
-  const graph = buildModuleGraph(tsSources);
+  const { graph } = context?.repoRoot === repoRoot ? context : createClosureContext(repoRoot);
 
   const unresolvedTsSpecifiers: Array<{ from: string; specifier: string }> = [];
   const tsClosure = new Set<string>();
