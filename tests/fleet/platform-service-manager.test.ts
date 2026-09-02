@@ -675,6 +675,66 @@ describe('platform service managers', () => {
     expect(childProcessMocks.execFile).not.toHaveBeenCalled();
   });
 
+  // A DANGLING in-home symlink is the input that separates the PHYSICAL check
+  // from the spelling check at each call site. The value is canonical,
+  // absolute and lexically inside home, so the shape rule and the canonical
+  // rule both admit it and only physical resolution can refuse it. Without
+  // these two, deleting the physical branch while keeping the canonical one
+  // would leave every render-site test green.
+  const danglingLinkAt = async (linkName: string): Promise<void> => {
+    const realFs = await realFsPromise;
+    // The link target is never created, so something EXISTS at the path and
+    // fails to resolve. That is the case admission cannot bind: whoever can
+    // create the target later chooses where the value points.
+    realFs.symlinkSync(`${SERVICE_HOME}/never-created`, `${SERVICE_HOME}/${linkName}`);
+  };
+
+  it('refuses a dangling in-home pathPrepend at the reconcile render site', async () => {
+    setPlatform('darwin');
+    await danglingLinkAt('dangle');
+    mockReads({
+      plist: generatedPlistIdentity(),
+      config: { name: 'agent', service: { pathPrepend: [`${SERVICE_HOME}/dangle/bin`] } },
+    });
+    const { reconcileLaunchdPlist } = await importPlatform();
+
+    await expect(reconcileLaunchdPlist('agent', { dryRun: true }))
+      .rejects.toMatchObject({ name: 'LaunchdRenderConfigError' });
+    // The CONTAINMENT reason, not the spelling reason: the spelling is already
+    // canonical, so this asserts the physical branch specifically.
+    await expect(reconcileLaunchdPlist('agent', { dryRun: true }))
+      .rejects.toThrow(/service\.pathPrepend\[0\] must resolve to a path inside the home directory/);
+
+    expect(fsMocks.writeFileSync).not.toHaveBeenCalled();
+    expect(fsMocks.renameSync).not.toHaveBeenCalled();
+    expect(childProcessMocks.execFile).not.toHaveBeenCalled();
+  });
+
+  it('refuses a dangling in-home claudeConfigDir at the install render site', async () => {
+    setPlatform('darwin');
+    await danglingLinkAt('dangle-cfg');
+    mockReads({ config: { name: 'agent', service: { claudeConfigDir: `${SERVICE_HOME}/dangle-cfg` } } });
+    const { createServiceManager } = await importPlatform();
+    const manager = createServiceManager();
+    if (!manager.startAfterAuthFire) throw new Error('missing macOS authenticated-start hook');
+
+    const firstStart = new Promise<void>((resolve, reject) => {
+      manager.startAfterAuthFire!('agent', (err) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
+
+    await expect(firstStart).rejects.toMatchObject({ name: 'LaunchdRenderConfigError' });
+    await expect(firstStart)
+      .rejects.toThrow(/service\.claudeConfigDir must resolve to a path inside the home directory/);
+
+    expect(fsMocks.writeFileSync).not.toHaveBeenCalled();
+    expect(fsMocks.mkdirSync).not.toHaveBeenCalled();
+    expect(fsMocks.renameSync).not.toHaveBeenCalled();
+    expect(childProcessMocks.execFile).not.toHaveBeenCalled();
+  });
+
   it('restores the prior plist bytes, not the new render, when reload fails after an options render', async () => {
     setPlatform('darwin');
     const plist = `${SERVICE_HOME}/Library/LaunchAgents/com.whatsoup.agent.plist`;
