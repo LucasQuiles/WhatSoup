@@ -178,8 +178,8 @@ def env(monkeypatch, tmp_path: Path) -> SimpleNamespace:
     def cycle_completed(seconds_ago: int) -> None:
         dispatcher_state.write_text(json.dumps({"cycleCompletedAt": mod.epoch_to_iso(clock["now"] - seconds_ago)}))
 
-    def run() -> int:
-        return mod.deadman(max_state_age=180, restart_grace=30, cooldown_seconds=300)
+    def run(max_state_age: int = 180, restart_grace: int = 30) -> int:
+        return mod.deadman(max_state_age=max_state_age, restart_grace=restart_grace, cooldown_seconds=300)
 
     def members() -> set[str]:
         path = tmp_path / "deadman-state.json"
@@ -216,12 +216,29 @@ def test_deadman_reports_cycle_stale_when_the_unit_never_reenters_active(env):
 
 
 def test_deadman_keeps_grace_for_a_restart_that_explains_the_staleness(env):
-    """The case grace exists for: just restarted, first cycle not yet complete."""
+    """The case grace exists for: just restarted, first cycle not yet complete.
+
+    The cycle age (35s) is past the staleness threshold (20s here) so the
+    decision is made by grace, not by the threshold: a restart 10s ago plus a
+    30s grace window explains 35s of staleness. At the shipped flags
+    (``--max-state-age 180``, grace 30) grace requires an age at or under 30
+    while staleness starts at 181, so no input reaches this branch in
+    production; the threshold is lowered here to exercise the code path.
+    """
     env.svc["status"] = "active"
     env.svc["ages"] = (10, 10)
-    env.cycle_completed(35)  # <= 10 + 30
-    assert env.run() == 0
+    env.cycle_completed(35)  # > 20 (stale) and <= 10 + 30 (explained by the restart)
+    assert env.run(max_state_age=20) == 0
     assert "cycle_stale" not in env.members()
+
+
+def test_deadman_reports_when_grace_is_ignored_for_a_stale_cycle(env):
+    """Same shape as above with the restart too old to explain the staleness."""
+    env.svc["status"] = "active"
+    env.svc["ages"] = (10, 10)
+    env.cycle_completed(41)  # > 10 + 30: the restart no longer explains it
+    assert env.run(max_state_age=20) == 2
+    assert env.members() == {"cycle_stale"}
 
 
 def test_deadman_reports_a_stale_cycle_with_no_grace_at_all(env):

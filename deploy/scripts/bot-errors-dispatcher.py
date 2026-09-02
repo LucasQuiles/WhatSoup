@@ -1103,9 +1103,11 @@ class IncidentStateCycle:
     ``load_incident_state``), then call ``.commit()`` at each semantic
     save barrier.
 
-    ``commit()`` returns the ``PublicationResult`` so callers that batch
-    publication results (e.g. ``collapse_storm_group`` with
-    ``require_all_advance``) can still collect it.
+    ``commit()`` returns the ``StateCommitResult`` from ``session.save()``.
+    Callers do not need to collect it: ``save()`` raises
+    ``ControllerStateRequired`` on any non-advancing outcome, so the three
+    cycle branches in ``collapse_storm_group`` call ``commit()`` bare and
+    rely on that raise rather than on ``require_all_advance``.
     """
 
     def __init__(self, session: Any, payload: dict[str, Any], capability: Any, paths: dict[str, Path] | None = None):
