@@ -636,4 +636,3 @@ def test_every_executable_bare_write_site_is_the_else_of_an_incident_check():
     unguarded = [(line, fn) for line, fn, ok in sites if not ok]
     assert not unguarded, f"bare-write sites outside an if-incident else branch: {unguarded}"
     assert sum(1 for _, fn, _ in sites if fn == "collapse_storm_group") == 3
-
