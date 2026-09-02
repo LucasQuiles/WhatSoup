@@ -266,6 +266,39 @@ describe('per-chat session entry whose dispatch ownership was lost', () => {
     }
   });
 
+  it('does not evict a cleared session that still holds a pid', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const { state } = makePerChatRuntime(db);
+      const runtimeContext = context('per_chat', MAP_KEY, 508, 'turn-cleared-but-live');
+      const deliveryJid = runtimeContext.identity.deliveryJid;
+      // `active === false` does not prove the child is gone. SessionManager
+      // clears the flag before it kills the child, and the failed-start reset
+      // clears it while deliberately retaining a child whose kill failed. Both
+      // leave a live pid, and detaching there would start a second child.
+      const clearedButLive = sessionStub();
+      clearedButLive.getStatus.mockReturnValue({
+        active: false,
+        sessionId: 'session-41',
+        pid: 4100,
+        turnInFlight: false,
+      });
+      state.chatSessions.set(MAP_KEY, clearedButLive);
+      state.chatQueues.set(MAP_KEY, queueStub(deliveryJid));
+      const spawn = vi.spyOn(state, 'ensureSessionAndQueueSync');
+
+      await expect(dispatchTurn(state, runtimeContext)).rejects.toThrow();
+
+      expect(spawn).not.toHaveBeenCalled();
+      expect(state.chatSessions.get(MAP_KEY)).toBe(clearedButLive);
+      // Wedged but not silent.
+      expect(state.perChatSessionsWithoutOwner()).toEqual([MAP_KEY]);
+    } finally {
+      db.close();
+    }
+  });
+
   it('does not evict while a published context owns the per-chat FIFO', async () => {
     const db = new Database(':memory:');
     db.open();

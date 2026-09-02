@@ -110,6 +110,37 @@ describe('HEALTH_DEGRADATION_CAUSE_REASON_TWINS — cause -> status_reason cross
     }
   });
 
+  it('every runtime degradedReason has a cause naming it (reason -> cause, the missing direction)', () => {
+    // The checks above run cause -> reason: a named twin must be a literal the
+    // source pushes. Nothing ran the other way, so a runtime degradedReason
+    // could be pushed with NO cause naming it and drift in silently. That is
+    // how `runtime.per_chat_session_without_owner` reached the wire while the
+    // `agent_runtime_degraded_unclassified` fall-through it lands in still
+    // enumerated only its three siblings.
+    const runtimeSource = readFileSync(
+      resolve(repoRoot, 'src/runtimes/agent/runtime.ts'),
+      'utf8',
+    );
+    const pushed = [...runtimeSource.matchAll(/degradedReasons\.push\('([a-z_]+)'\)/g)]
+      .map((match) => match[1]);
+    // Guard the extraction itself: a regex that silently matches nothing would
+    // make this test vacuously green.
+    expect(pushed.length, 'no degradedReasons.push literals found — extraction is broken')
+      .toBeGreaterThanOrEqual(10);
+    expect(pushed).toContain('per_chat_session_without_owner');
+
+    const named = new Set(
+      HEALTH_DEGRADATION_CAUSES.flatMap((cause) => {
+        const twins = HEALTH_DEGRADATION_CAUSE_REASON_TWINS[cause];
+        return twins === NO_REASON_TWIN ? [] : [...twins];
+      }),
+    );
+    const orphans = [...new Set(pushed)]
+      .filter((reason) => !named.has(`runtime.${reason}`))
+      .sort();
+    expect(orphans, 'runtime degradedReasons no degradation cause names as a twin').toEqual([]);
+  });
+
   it('the no_reason_twin annotation is reserved for causes the status_reasons vector genuinely never names', () => {
     const annotated = HEALTH_DEGRADATION_CAUSES.filter(
       (cause) => HEALTH_DEGRADATION_CAUSE_REASON_TWINS[cause] === NO_REASON_TWIN,

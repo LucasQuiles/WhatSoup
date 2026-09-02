@@ -7856,21 +7856,28 @@ export class AgentRuntime implements Runtime {
    * rejects every turn otherwise. Treat a violation as a stale entry and drop
    * it, so the caller re-spawns and re-claims instead of wedging forever.
    *
-   * Fail closed in two cases. A published runtime-turn context means a turn in
-   * this chat is still in flight and still needs the entry, so eviction waits.
-   * The heal control session is deliberately mapped without an ownership
-   * record and is never dispatched through this path (the wedged-lane sweep
-   * carries the same guard), so it is not a violation.
+   * Fail closed in three cases. A published runtime-turn context means a turn
+   * in this chat is still in flight and still needs the entry, so eviction
+   * waits. A child that is not provably gone could still be running, and
+   * detaching it would let the spawn start a second one. The heal control
+   * session is deliberately mapped without an ownership record and is never
+   * dispatched through this path (the wedged-lane sweep carries the same
+   * guard), so it is not a violation.
    */
   private evictUnownedPerChatSession(mapKey: string, session: SessionManager): boolean {
     if (!this.isPerChatSessionWithoutOwner(mapKey, session)) return false;
     if ((this.perChatRuntimeTurnContexts.get(mapKey)?.length ?? 0) > 0) return false;
-    // Fail closed while the provider child is still alive. Every other detach
-    // path proves the child stopped before releasing ownership; detaching a
-    // live child here would let the spawn below run a second child for one
-    // conversation. The state this exists to recover is an exited child, so
-    // the recovery still lands; a live one stays wedged and stays reported.
-    if (session.getStatus().active) return false;
+    // Fail closed unless the child is PROVABLY gone. A cleared `active` flag
+    // alone is not that proof: `SessionManager.shutdown` clears it before it
+    // kills the child, and `resetFailedSessionStart` clears it while
+    // deliberately retaining a child whose kill failed. Use the file's own
+    // provably-dead idiom instead — cleared flag AND no pid — because
+    // detaching a live child would let the spawn below run a second child for
+    // one conversation. The state this exists to recover is an exited child,
+    // so the recovery still lands; anything less certain stays wedged, and
+    // stays reported by the sweep.
+    const status = session.getStatus();
+    if (status.active || status.pid !== null) return false;
     log.warn(
       { mapKey, hasOwner: this.sessionOwnership.get(mapKey) !== undefined },
       'per-chat session entry has no current dispatch owner — evicting the stale entry so the next turn respawns',

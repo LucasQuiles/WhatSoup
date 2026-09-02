@@ -592,6 +592,7 @@ export const HEALTH_DEGRADATION_CAUSE_REGISTRY: Readonly<
       'runtime.turn_queue_halted',
       'runtime.poll_persistence_failure',
       'runtime.offline_decision_retry_exhausted',
+      'runtime.per_chat_session_without_owner',
       'agent_runtime_degraded',
     ],
   },
