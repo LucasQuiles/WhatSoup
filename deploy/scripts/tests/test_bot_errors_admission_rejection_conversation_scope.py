@@ -287,7 +287,17 @@ def test_a_storm_retry_of_an_already_forced_event_is_still_forced(tmp_path):
     state["flapState"] = {KEY: {"stormAt": 1, "tripTimestamps": [], "cumulativeCount": 5}}
     event = _event(SCOPE_B, "evt-storm-retry", 2)
     assert _gate_then_deliver(mod, event, state) is None
-    # A RETRY of the same id after a FAILED delivery must still force.
+
+    # The retry carries the ORIGINAL id, so it is already in eventIds, and a
+    # delivery record that never reached "sent". That combination is what the
+    # retry guarantee is about, and it is the boundary of the replay guard:
+    # a non-sent status still forces, a "sent" status does not.
+    event["delivery"] = {
+        "attempts": 1,
+        "status": "queued",
+        "nextAttemptAtEpoch": 0,
+        "lastError": "transport down",
+    }
     assert mod.should_suppress_send(event, state) is None
 
 
@@ -337,12 +347,17 @@ def test_no_raw_conversation_identifier_in_key_event_or_rendered_text(tmp_path):
 
 
 def test_both_delivered_surfaces_render_the_same_confined_text(tmp_path):
-    """WhatsApp and the email fallback are fed by ONE format_event call.
+    """Neither delivered surface can render a raw identifier.
 
-    The dispatcher builds `text = format_event(event)` once and hands the same
-    string to send_whatsapp and, after repeated failures, to email_fallback.
-    Pinning that identity means the privacy assertion above covers both
-    surfaces rather than only the one it calls.
+    SCOPE, corrected: this test formats the event ONCE itself and hands the
+    result to two mocks it installed, so it pins the privacy property on both
+    surfaces and nothing more. It does NOT pin the dispatcher's "one
+    format_event call feeds both routes" invariant, which its earlier
+    docstring claimed -- no dispatcher code runs here, so any implementation
+    that formatted twice would pass this unchanged. Pinning that invariant
+    needs the assertion driven through process_one, which the email route
+    blocks under a test state dir (see
+    test_the_email_delivery_branch_records_representation).
     """
     mod = _load(tmp_path)
     sent: list[str] = []
@@ -434,7 +449,17 @@ def test_a_delivery_retry_of_the_same_event_still_forces_the_notification(tmp_pa
     state = _open_state()
     event = _event(SCOPE_B, "evt-retry-me", 1)
 
-    first = mod.should_suppress_send(event, state)
+    # Go through the gate-then-record path rather than calling the predicate
+    # twice. The predicate is PURE, so a second bare call re-runs the same
+    # inputs and pins nothing about what delivery recorded; only the recorded
+    # state makes the retry assertion load-bearing.
+    first = _gate_then_deliver(mod, event, state)
+    event["delivery"] = {
+        "attempts": 1,
+        "status": "queued",
+        "nextAttemptAtEpoch": 0,
+        "lastError": "transport down",
+    }
     retry = mod.should_suppress_send(event, state)
 
     assert first is None, "first delivery must force the notification"
