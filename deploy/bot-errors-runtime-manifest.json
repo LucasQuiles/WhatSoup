@@ -67,8 +67,11 @@
         "conversation_scope_is_unrepresented",
         "CONVERSATION_SCOPED_SOURCES",
         "event_conversation_scope(event)",
-        "CONVERSATION_SCOPE_ALL_DECIMAL_RE",
-        "storm_unrepresented"
+        "storm_unrepresented",
+        "CONVERSATION_SCOPE_TAG",
+        "record_conversation_scope_delivered",
+        "CONVERSATION_SCOPE_OVERFLOW_KEY",
+        "sweep_conversation_scopes"
       ]
     },
     {
@@ -602,7 +605,8 @@
       "sha256": "e4da1611319e5c95ff4619539f96e879b907425cdb900b578dcae77aaaecd62b",
       "mustContain": [
         "confineAlertContent",
-        "confineConversationScope"
+        "confineConversationScope",
+        "CONVERSATION_SCOPE_TAG"
       ]
     },
     {
