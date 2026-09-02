@@ -85,6 +85,31 @@ export interface ChatModelPreference {
    * ALWAYS present on read (rowToPreference populates string | null).
    */
   requestedEffort?: string | null;
+  /**
+   * F2a (#2121, owner decision 2026-08-04) — the transport message id of the
+   * pin RECEIPT this row last produced: the message whose text promises
+   * "reply keep to make it permanent". Its ONLY purpose is to authenticate a
+   * reply-threaded confirmation — the widened affirmatives
+   * (`confirm`/`yes`/`pin`) promote only when the inbound's
+   * `quotedMessageId` equals this value, so a stray bare "yes" in an
+   * unrelated reply cannot mutate routing. Bare `keep` is unaffected and
+   * still promotes unthreaded.
+   *
+   * NULL whenever no id was attributable: a fresh pin write clears the
+   * previous receipt's id, and the healthy outbound-queue path reports
+   * acceptance with a null id by design (#2981 car-A), so a receipt sent
+   * while a queue is live stores nothing and the widened tokens simply fall
+   * through to the agent as ordinary text.
+   *
+   * ORTHOGONAL to the model-pin field group above, and deliberately NOT part
+   * of its cross-field null-contract in rowToPreference: an INTENT pin
+   * (`/model strongest`) carries no `requestedModel` yet still produces a
+   * keep-promising receipt.
+   *
+   * OPTIONAL on write (unset ≡ null ≡ no captured receipt) so every pre-F2a
+   * writer needs no change; ALWAYS present on read.
+   */
+  keepReceiptMessageId?: string | null;
 }
 
 const INTENTS: ReadonlySet<string> = new Set<string>(PREFERENCE_INTENTS);
@@ -123,6 +148,12 @@ export function ensureChatPreferenceSchema(db: Database): void {
     // absent → probe adds it; old binary/new column: the extra column is
     // simply unread).
     ['requested_effort', 'requested_effort TEXT'],
+    // F2a (#2121): the pin receipt's transport message id, for reply-threaded
+    // confirmation. Nullable, no default — same rollback-safe additive shape
+    // as the four above: existing rows read back NULL = "no captured
+    // receipt", a new binary against an old DB adds the column via this
+    // probe, and an old binary against the new column simply never reads it.
+    ['keep_receipt_message_id', 'keep_receipt_message_id TEXT'],
   ] as const) {
     const present = db.raw
       .prepare(`SELECT 1 AS present FROM pragma_table_info('chat_model_preference') WHERE name = ?`)
@@ -138,8 +169,8 @@ export function setPreference(db: Database, p: ChatModelPreference): void {
     .prepare(
       `INSERT INTO chat_model_preference
          (chat_jid, sender_jid, intent, requested_provider, scope, pin_strict, fallback_permitted, updated_at, expires_at,
-          requested_model, validated_provider, model_pin_verified, requested_effort)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          requested_model, validated_provider, model_pin_verified, requested_effort, keep_receipt_message_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(chat_jid, sender_jid) DO UPDATE SET
          intent = excluded.intent,
          requested_provider = excluded.requested_provider,
@@ -151,7 +182,8 @@ export function setPreference(db: Database, p: ChatModelPreference): void {
          requested_model = excluded.requested_model,
          validated_provider = excluded.validated_provider,
          model_pin_verified = excluded.model_pin_verified,
-         requested_effort = excluded.requested_effort`,
+         requested_effort = excluded.requested_effort,
+         keep_receipt_message_id = excluded.keep_receipt_message_id`,
     )
     .run(
       p.chatJid,
@@ -167,12 +199,16 @@ export function setPreference(db: Database, p: ChatModelPreference): void {
       p.validatedProvider,
       p.modelPinVerified === null ? null : p.modelPinVerified ? 1 : 0,
       p.requestedEffort ?? null,
+      // A pin write always supersedes the previous receipt: the row's old
+      // receipt id must not survive to authenticate a reply threaded to a
+      // receipt that no longer describes this pin.
+      p.keepReceiptMessageId ?? null,
     );
 }
 
 const PREFERENCE_COLUMNS =
   `chat_jid, sender_jid, intent, requested_provider, scope, pin_strict, fallback_permitted, updated_at, expires_at,
-   requested_model, validated_provider, model_pin_verified, requested_effort`;
+   requested_model, validated_provider, model_pin_verified, requested_effort, keep_receipt_message_id`;
 
 interface PreferenceRow {
   chat_jid: unknown;
@@ -188,6 +224,7 @@ interface PreferenceRow {
   validated_provider: unknown;
   model_pin_verified: unknown;
   requested_effort: unknown;
+  keep_receipt_message_id: unknown;
 }
 
 /**
@@ -232,6 +269,11 @@ function rowToPreference(row: PreferenceRow, now: number): ChatModelPreference |
   // meaningful ONLY alongside a model pin — an effort with no requested_model
   // is out-of-contract garbage (no model to attach the override to).
   if (row.requested_effort !== null && typeof row.requested_effort !== 'string') return null;
+  // F2a (#2121): the receipt id is a plain string-or-null. It is deliberately
+  // absent from the model-pin null-group check below — an intent pin has no
+  // requested_model yet still gets a keep-promising receipt, so folding it in
+  // would map every intent-pin row to null.
+  if (row.keep_receipt_message_id !== null && typeof row.keep_receipt_message_id !== 'string') return null;
   if (row.requested_model === null) {
     if (row.validated_provider !== null || row.model_pin_verified !== null || row.requested_effort !== null) return null;
   } else if (row.model_pin_verified === null) {
@@ -251,6 +293,7 @@ function rowToPreference(row: PreferenceRow, now: number): ChatModelPreference |
     validatedProvider: row.validated_provider as string | null,
     modelPinVerified: row.model_pin_verified === null ? null : row.model_pin_verified === 1,
     requestedEffort: row.requested_effort as string | null,
+    keepReceiptMessageId: row.keep_receipt_message_id as string | null,
   };
 }
 
@@ -340,6 +383,54 @@ function latestRowIncludingExpired(db: Database, chatJid: string): PreferenceRow
   return db.raw
     .prepare(`SELECT ${PREFERENCE_COLUMNS} FROM chat_model_preference WHERE chat_jid = ? ORDER BY updated_at DESC LIMIT 1`)
     .get(chatJid) as PreferenceRow | undefined;
+}
+
+/**
+ * F2a (#2121) — record the transport message id of the pin receipt just sent
+ * for this (chat, sender) row.
+ *
+ * `updated_at` is DELIBERATELY NOT touched. That column is the compare-and-set
+ * token {@link promoteToSticky} gates its UPDATE on, and it is also the
+ * ordering key for the chat-scoped last-writer-wins read (D13). Bumping it
+ * here would make the very receipt a user is being invited to confirm
+ * supersede its own pin — a subsequent `keep` would return `superseded`
+ * instead of `promoted` — and could flip the chat's winning preference out
+ * from under another sender. Writing only the id keeps both invariants.
+ *
+ * Idempotent and lossless: an absent row (pruned, /reset between the send and
+ * this write) affects zero rows and is a no-op, never an insert.
+ */
+export function recordKeepReceiptMessageId(
+  db: Database,
+  chatJid: string,
+  senderJid: string,
+  messageId: string,
+): void {
+  db.raw
+    .prepare(
+      `UPDATE chat_model_preference SET keep_receipt_message_id = ?
+       WHERE chat_jid = ? AND sender_jid = ?`,
+    )
+    .run(messageId, chatJid, senderJid);
+}
+
+/**
+ * F2a (#2121) — the receipt id a reply must quote to confirm THIS chat's pin.
+ *
+ * Reads the id from the SAME row {@link promoteToSticky} will resolve — the
+ * chat's latest row across every sender, expired rows included — rather than
+ * from the confirming sender's own row. The two must agree on which pin is
+ * under confirmation, or a threaded `confirm` could authenticate against one
+ * sender's receipt while the promotion targets another's. Expiry and actor
+ * policy stay entirely with promoteToSticky, which reports them as typed
+ * outcomes; this function only answers "which receipt".
+ *
+ * Returns null when there is no row, or the row never captured an id.
+ */
+export function getKeepReceiptMessageId(db: Database, chatJid: string): string | null {
+  const raw = latestRowIncludingExpired(db, chatJid);
+  const id = raw?.keep_receipt_message_id;
+  return typeof id === 'string' && id !== '' ? id : null;
 }
 
 /**

@@ -274,7 +274,7 @@
    - **Severity:** Medium
 
 10. **Identifier masking over-obscures contact data**
-    - **Location:** Right sidebar phone numbers “+1 845 ··· 0919”
+    - **Location:** Right sidebar phone numbers “+1 555 ··· 0199”
     - **Rule:** 6
     - **Severity:** Low
     - **Issue:** Prefix+suffix are retained, but the middle masking may still be too aggressive for distinguishing multiple similar contacts sharing same suffix.
