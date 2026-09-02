@@ -1,7 +1,7 @@
 """Pin the collector's bare primary-state writer as unreachable.
 
-Background (#3053/#3054 follow-up). ``bot-errors-dispatcher.py`` carried 14
-``save_incident_state`` call sites, 13 gated behind ``if incident:
+Background (#3053/#3054 follow-up). ``bot-errors-dispatcher.py`` carried 12 executable
+``save_incident_state`` call sites, 11 gated behind ``if incident:
 incident.commit()``. The one ungated branch bare-wrote the primary over an
 adopted store, destroyed the ``_controllerState`` envelope, and crash-looped the
 service on exit 78 -- twice, 24 hours apart.

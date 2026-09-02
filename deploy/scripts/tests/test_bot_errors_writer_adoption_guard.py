@@ -121,7 +121,7 @@ def test_boundary_guard_still_inert_when_a_cycle_is_supplied(dispatcher, tmp_pat
 # The writer guard above turns a silent corruption into a raised error, which
 # is strictly better but still an outage -- the dispatcher then crash-loops on
 # exit 78. The *direct* defect is that one branch never gated its write:
-# ``save_incident_state`` has 14 call sites in this file and 13 are wrapped in
+# ``save_incident_state`` has 12 executable call sites in this file and 11 were wrapped in
 # ``if incident: incident.commit() else: ...``. The superseding-digest branch
 # of ``collapse_storm_group`` was the sole exception, so a caller holding a
 # cycle still bare-wrote the primary and destroyed the envelope.
@@ -257,6 +257,11 @@ def test_superseding_branch_must_not_reach_the_bare_writer(
         )
 
     primary = json.loads(paths["incident_state"].read_text(encoding="utf-8"))
+    # The absorbed daily-health signal must reach the COMMITTED primary. Without
+    # this the branch could persist nothing at all and still keep the envelope.
+    assert "host-c" in (primary.get("dailyHealthFreshness") or {}), (
+        "superseding branch committed nothing: the absorbed host is missing from the primary"
+    )
     assert "_controllerState" in primary, (
         "superseding branch destroyed the envelope -- this is the #3053 "
         "corruption that crash-loops the dispatcher on exit 78"
