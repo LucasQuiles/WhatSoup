@@ -6,7 +6,7 @@
   "files": [
     {
       "path": "deploy/lib/runtime-path.sh",
-      "sha256": "c61bf2b6a045fb82cdfaaa31892e3ee773e0dfdbb2bac5803af7619af0d0eaad",
+      "sha256": "2bbeae2e5af3bb34878b42588df7a30a73416bfd966a84db4b854d52567d17ce",
       "mustContain": [
         "whatsoup_effective_runtime_path",
         "whatsoup_export_runtime_path"
@@ -99,7 +99,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "d8df654a672cb105527927a5af1a8b09399b70743e8f26833b572f5cc4f457e4",
+      "sha256": "ba76061f0fabcc62280cffb6a6ab2c47c288350629864f65790fb12f99156ff4",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
