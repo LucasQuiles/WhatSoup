@@ -10,13 +10,20 @@
  * status stayed `degraded` until the process restarted — while the runtime's own
  * snapshot read healthy. The health surface contradicted the runtime it reports.
  *
- * The fix is that these reasons never ARM the latch, because their condition is
- * re-probed in full on every evaluation and so is not silence-prone. That is the
- * rule the late-source reasons already follow.
+ * The fix is that these reasons never ARM the latch, because each one clears
+ * itself when its condition is repaired, so no latch is needed to keep a real
+ * problem visible. The two clear differently and the distinction matters: the
+ * unowned reason is recomputed from live state every poll, while the abandoned
+ * reason is backed by a retention map the repair path empties on rebuild.
  *
- * Each case uses its OWN instanceName: the latch map is module-level, keyed by
- * instance, and exports no reset. A distinct name isolates the latch without
- * adding a test-only export to production code.
+ * Scope, stated so these cases are not read as more than they are: the runtime
+ * snapshot here is supplied by the fixture, so this file pins health.ts's LATCH
+ * behaviour. That the RUNTIME actually reaches the clear state by repair is
+ * proven in tests/runtimes/agent/runtime-secondhalf-branches.test.ts.
+ *
+ * Each case uses its OWN instanceName, and each opens ONE server it polls twice:
+ * the latch map is scoped to the server instance, so a fresh server per poll
+ * would reset the very state under test.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createServer, request } from 'node:http';
@@ -58,6 +65,7 @@ vi.mock('../../src/lib/emit-alert.ts', () => ({
 
 import { Database } from '../../src/core/database.ts';
 import {
+  DIRECTLY_REPROBED_STATUS_REASONS,
   TURN_PROVABLE_STATUS_REASONS,
   startHealthServer,
   type HealthDeps,
@@ -199,6 +207,23 @@ describe('GET /health — per-chat ownership reasons across a repair', () => {
     }
   });
 
+  it('pins the exact membership of the non-arming set', () => {
+    // The set is exported but was asserted nowhere outside health.ts, so a third
+    // member could be admitted with nothing failing. Membership is the whole
+    // safety property here: every member skips the silence latch, so admitting a
+    // reason that does NOT self-clear on repair would be a real silence hole.
+    // Test-owned literals, compared for equality rather than containment.
+    expect([...DIRECTLY_REPROBED_STATUS_REASONS].sort()).toEqual([
+      'runtime.per_chat_respawn_abandoned',
+      'runtime.per_chat_session_without_owner',
+    ]);
+    // And the two sets must stay disjoint: a turn-provable reason has a release
+    // channel and does not need the exemption.
+    for (const reason of DIRECTLY_REPROBED_STATUS_REASONS) {
+      expect(TURN_PROVABLE_STATUS_REASONS.has(reason), `${reason} in both sets`).toBe(false);
+    }
+  });
+
   it('an unowned session names its OWN cause, never the unclassified fall-through', async () => {
     const instance = await openInstance('cause-unowned', ownershipSnapshot(['per_chat_session_without_owner'], { withoutOwner: 1 }));
     const degraded = await instance.poll();
@@ -219,10 +244,12 @@ describe('GET /health — per-chat ownership reasons across a repair', () => {
     expect(degraded.degradation_causes).not.toContain('agent_runtime_degraded_unclassified');
   });
 
-  it('an unowned session that is repaired reads healthy on the NEXT poll of the same server', async () => {
-    // Its OWN case, asserting only the transition: the cause-naming assertions
-    // live above, because a case aborts at its first failing expect and a
-    // combined case could only ever prove whichever came first.
+  it('health does not latch an unowned-session reason once the runtime reports it clear', async () => {
+    // Scope, stated honestly: this drives health.ts across two polls with the
+    // runtime's snapshot supplied by the fixture, so it pins the LATCH
+    // behaviour. It does not prove the runtime ever reaches the clear state by
+    // repair — the runtime-side transition is proven in
+    // tests/runtimes/agent/runtime-secondhalf-branches.test.ts.
     const instance = await openInstance('latch-unowned', ownershipSnapshot(['per_chat_session_without_owner'], { withoutOwner: 1 }));
     expect((await instance.poll()).status).toBe('degraded');
 
@@ -234,7 +261,7 @@ describe('GET /health — per-chat ownership reasons across a repair', () => {
     expect(repaired.status_reasons).not.toContain('runtime.per_chat_session_without_owner');
   });
 
-  it('an abandoned respawn that is repaired reads healthy on the NEXT poll of the same server', async () => {
+  it('health does not latch an abandoned-respawn reason once the runtime reports it clear', async () => {
     const instance = await openInstance('latch-abandoned', ownershipSnapshot(['per_chat_respawn_abandoned'], { abandoned: 1 }));
     expect((await instance.poll()).status).toBe('degraded');
 

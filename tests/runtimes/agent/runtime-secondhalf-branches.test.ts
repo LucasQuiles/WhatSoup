@@ -1270,6 +1270,24 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
   // ── handlePerChatCrash auto-respawn inner timer callback ──────────────────
 
   describe('handlePerChatCrash auto-respawn continuation', () => {
+    /**
+     * Narrow view of the runtime internals these abandonment cases drive.
+     * `PollRuntimeState` is a deliberately small projection and does not expose
+     * them, so widen once here rather than casting at each call site.
+     */
+    type OwnedSessionView = {
+      setOwnedPerChatSession(mapKey: string, session: unknown): void;
+      perChatInboundSeqQueue: Map<string, number[]>;
+      ownedSessionManagers: Map<string, unknown>;
+      abandonedRespawnOwners: Map<string, number>;
+      exhaustedRespawnOwners: Set<string>;
+      sessionOwnership: {
+        get(mapKey: string): { managerId: string } | undefined;
+        discardIfOwned(mapKey: string, managerId: string): boolean;
+      };
+    };
+    const ownedView = (s: PollRuntimeState): OwnedSessionView => s as unknown as OwnedSessionView;
+
     function seedPerChatSession(state: PollRuntimeState, mapKey: string): void {
       setOwnedTestSession(state as unknown as AgentRuntime, mapKey);
       state.chatQueues.set(mapKey, mockQueue);
@@ -1402,6 +1420,8 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
      */
     async function abandonRespawnAndObserve(): Promise<{
       mapKey: string;
+      managerId: string;
+      state: PollRuntimeState;
       abandoned: boolean;
       alertSources: string[];
       alertBodies: string[];
@@ -1410,12 +1430,16 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       pendingTimers: number;
     }> {
       mockEmitAlert.mockClear();
+      mockClearAlertSource.mockClear();
       const db = makeDb();
       const { messenger } = makeMessenger();
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
       const state = runtime as unknown as PollRuntimeState;
       const mapKey = dmJid;
       seedPerChatSession(state, mapKey);
+      // Captured during arrange: reading it after the act throws on a tree that
+      // releases the session, which would mask each case's own assertion.
+      const managerId = currentCrashIdentity(runtime, mapKey).generationIdentity.managerId;
 
       // Termination never proves, so every deferral re-arms until the bound.
       mockSession.getStatus.mockReturnValue({
@@ -1436,6 +1460,8 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       const details = health.details as Record<string, unknown>;
       return {
         mapKey,
+        managerId,
+        state,
         // Read defensively: the observation is "is this chat marked abandoned",
         // and a tree without the set answers `false` rather than throwing. That
         // keeps each named test's red its OWN assertion failure instead of one
@@ -1481,6 +1507,75 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       expect(observed.abandonedCount).toBe(1);
     });
 
+    it('RETAINS the session, its ownership record and its manager index when it abandons', async () => {
+      // F-05. The abandon branch is reached ONLY when termination is unproved,
+      // so the provider child may still be running. Releasing here would drop
+      // the map entry, the ownership record and the manager index — the exact
+      // state evictUnownedPerChatSession refuses to release on, because
+      // detaching a live child lets the next message start a second incarnation.
+      // This fixture has NO journaled inbound seq, which is the branch that
+      // released before the fix.
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      const state = runtime as unknown as PollRuntimeState;
+      const mapKey = dmJid;
+      seedPerChatSession(state, mapKey);
+      const managerId = currentCrashIdentity(runtime, mapKey).generationIdentity.managerId;
+
+      expect(ownedView(state).perChatInboundSeqQueue.get(mapKey), 'fixture must have no journaled turn')
+        .toBeUndefined();
+
+      mockSession.getStatus.mockReturnValue({
+        active: false, pid: null, providerTerminated: false,
+        sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null,
+      });
+      state.handlePerChatCrash(mapKey, dmJid, {
+        ...currentCrashIdentity(runtime, mapKey),
+        exitCode: null, signal: null, sessionId: 'sess-retain', dbRowId: 21,
+        provider: 'p', crashClass: 'managed_provider_error', stderrPreview: 'never settles',
+      });
+      await vi.advanceTimersByTimeAsync(120_000);
+
+      expect(state.chatSessions.has(mapKey), 'session entry retained').toBe(true);
+      expect(ownedView(state).sessionOwnership.get(mapKey)?.managerId, 'ownership record retained').toBe(managerId);
+      expect(ownedView(state).ownedSessionManagers.has(managerId), 'manager still indexed').toBe(true);
+      // Nothing may detach the possibly-live child.
+      expect(mockSession.shutdown).not.toHaveBeenCalled();
+    });
+
+    it('keeps the indexed-and-active refusal alive after abandoning, so a replacement cannot take over', async () => {
+      // The consequence of retention: setOwnedPerChatSession refuses a new owner
+      // while the incumbent is indexed AND active. Releasing would have removed
+      // the index and silently permitted the second incarnation.
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      const state = runtime as unknown as PollRuntimeState;
+      const mapKey = dmJid;
+      seedPerChatSession(state, mapKey);
+
+      mockSession.getStatus.mockReturnValue({
+        active: false, pid: null, providerTerminated: false,
+        sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null,
+      });
+      state.handlePerChatCrash(mapKey, dmJid, {
+        ...currentCrashIdentity(runtime, mapKey),
+        exitCode: null, signal: null, sessionId: 'sess-refuse', dbRowId: 22,
+        provider: 'p', crashClass: 'managed_provider_error', stderrPreview: 'never settles',
+      });
+      await vi.advanceTimersByTimeAsync(120_000);
+
+      // The incumbent reports active again — a live child that was never proved gone.
+      mockSession.getStatus.mockReturnValue({
+        active: true, pid: 4242, providerTerminated: false,
+        sessionId: 'sess-refuse', startedAt: null, messageCount: 0, lastMessageAt: null,
+      });
+      const replacement = { getStatus: () => ({ active: false }), bindGenerationOwnership: () => {} };
+      expect(() => ownedView(state).setOwnedPerChatSession(mapKey, replacement))
+        .toThrow(/already has a different live owner/);
+    });
+
     it('does NOT report an abandoned respawn for a chat that merely exhausted its crash budget', async () => {
       // Negative control for the dedicated set. The crash-exhaustion path writes
       // `exhaustedRespawnOwners`, and those chats already alert under
@@ -1501,6 +1596,53 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       expect((details['degradedReasons'] as string[] | undefined) ?? [])
         .not.toContain('per_chat_respawn_abandoned');
       expect(details['perChatRespawnAbandoned']).toBe(0);
+    });
+
+    it('rebuilding the chat clears the abandonment without waiting for the retention window', async () => {
+      // F-02 / F-04. The documented repair is "the next inbound message rebuilds
+      // this chat", and the rebuild indexes a new owned session. Health must read
+      // clean at that moment, not an hour later. Note this drives the real
+      // transition rather than handing the snapshot a pre-zeroed counter.
+      const observed = await abandonRespawnAndObserve();
+      expect(observed.abandonedCount, 'abandoned before the rebuild').toBe(1);
+
+      const state = observed.state;
+      const rebuilt = { getStatus: () => ({ active: false }), bindGenerationOwnership: () => {} };
+      state.chatSessions.delete(observed.mapKey);
+      ownedView(state).sessionOwnership.discardIfOwned(observed.mapKey, observed.managerId);
+      ownedView(state).ownedSessionManagers.delete(observed.managerId);
+      ownedView(state).setOwnedPerChatSession(observed.mapKey, rebuilt);
+
+      const details = (state as unknown as { getHealthSnapshot: () => { details: Record<string, unknown> } })
+        .getHealthSnapshot().details;
+      expect(details['perChatRespawnAbandoned'], 'cleared by the rebuild, not by the timer').toBe(0);
+      expect((details['degradedReasons'] as string[] | undefined) ?? [])
+        .not.toContain('per_chat_respawn_abandoned');
+      // With nothing exhausted and nothing abandoned, the shared alert source clears.
+      expect(mockClearAlertSource).toHaveBeenCalledWith('test', 'agent_respawn_failed');
+    });
+
+    it('a second abandonment inside the window is not aged out by the first', async () => {
+      // F-09. One timer per add let a re-abandonment at T2 be erased by T1's
+      // timer, ~an hour early. Lazy expiry keyed on each entry's own timestamp
+      // makes the re-abandonment refresh it.
+      //
+      // NO RED CLAIMED. On the pre-fix tree the retention store is a Set, so
+      // this case throws a TypeError there rather than failing an assertion,
+      // and a TypeError is not a red. It stands as a head-only invariant: it
+      // pins the refresh-on-re-abandon behaviour against future regression.
+      const first = await abandonRespawnAndObserve();
+      const state = first.state;
+      expect(ownedView(state).abandonedRespawnOwners.has(first.mapKey)).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(30 * 60_000);
+      // Re-abandon: refresh the timestamp.
+      ownedView(state).abandonedRespawnOwners.set(first.mapKey, Date.now());
+      await vi.advanceTimersByTimeAsync(31 * 60_000);
+
+      const details = (state as unknown as { getHealthSnapshot: () => { details: Record<string, unknown> } })
+        .getHealthSnapshot().details;
+      expect(details['perChatRespawnAbandoned'], 'the refreshed entry survives the first hour').toBe(1);
     });
 
     it('recovers on the first firing when termination is already proven', async () => {

@@ -256,19 +256,27 @@ export const TURN_PROVABLE_STATUS_REASONS: ReadonlySet<string> = new Set([
   'runtime.provider_fallback_active',
 ]);
 
-/** Status reasons whose condition is re-probed in full on EVERY evaluation, so
- * they are not silence-prone and must never arm the degradation latch. This is
- * the same rule the late-source reasons already follow ("directly probed every
- * evaluation, not silence-prone" — see the latch-maintenance comment below);
- * these two simply reach the early path instead of the late one.
+/** Status reasons that must never arm the degradation latch because each one
+ * clears itself when its condition is repaired, so no latch is needed to keep a
+ * real problem visible. Membership is NOT "any runtime reason" — it is the
+ * narrow class below, and admitting a reason on a looser reading would open a
+ * genuine silence hole.
  *
- * Why they need it: neither is in TURN_PROVABLE_STATUS_REASONS above — a turn in
- * an unrelated chat proves nothing about a per-chat ownership map — so a latch
- * carrying one could never be released by the only release channel that exists,
- * and the instance would report degraded until process restart even after the
- * runtime had repaired itself and its own snapshot read healthy. Not arming is
- * correct rather than merely convenient: the condition is recomputed from live
- * state on the next poll, so a still-broken map degrades again immediately. */
+ * The two members clear by different mechanisms, and the distinction is the
+ * point:
+ *   - `runtime.per_chat_session_without_owner` is recomputed from live state on
+ *     every poll (the runtime walks its session map), so a still-broken map
+ *     degrades again immediately.
+ *   - `runtime.per_chat_respawn_abandoned` is NOT re-derived from live state.
+ *     It is backed by a retention map that the repair path empties when the
+ *     chat is rebuilt, and that also expires on age. It is admitted here
+ *     because it self-clears on repair, not because it is re-probed.
+ *
+ * Why either needs it: neither is in TURN_PROVABLE_STATUS_REASONS above — a turn
+ * in an unrelated chat proves nothing about a per-chat ownership map — so a
+ * latch carrying one could never be released by the only release channel that
+ * exists, and the instance would report degraded until process restart even
+ * after the runtime had repaired itself and its own snapshot read healthy. */
 export const DIRECTLY_REPROBED_STATUS_REASONS: ReadonlySet<string> = new Set([
   'runtime.per_chat_session_without_owner',
   'runtime.per_chat_respawn_abandoned',

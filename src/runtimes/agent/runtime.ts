@@ -762,13 +762,22 @@ export class AgentRuntime implements Runtime {
   /** #2397: mapKeys that have exhausted auto-respawn and are not yet recovered. */
   private readonly exhaustedRespawnOwners = new Set<string>();
   /**
-   * mapKeys whose auto-respawn was abandoned because provider termination was
-   * never proved. Deliberately NOT `exhaustedRespawnOwners`: the crash-exhaustion
-   * path writes that set too, so a health counter reading it would degrade for
-   * every crash-exhausted chat as well — chats that already alert under
+   * mapKey -> the epoch ms at which its auto-respawn was abandoned because
+   * provider termination was never proved.
+   *
+   * Deliberately NOT `exhaustedRespawnOwners`: the crash-exhaustion path writes
+   * that set too, so a health counter reading it would degrade for every
+   * crash-exhausted chat as well — chats that already alert under
    * `agent_respawn_failed` and whose behaviour this signal does not describe.
+   *
+   * A timestamp map rather than a set with one timer per add: independent
+   * `setTimeout`s let a re-abandonment at T2 be erased by the T1 timer, an hour
+   * early. Expiry is lazy — every read prunes first — so the entry's own age
+   * decides, and a re-abandonment refreshes it.
    */
-  private readonly abandonedRespawnOwners = new Set<string>();
+  private readonly abandonedRespawnOwners = new Map<string, number>();
+  /** How long an abandonment stays visible to health and alerting. */
+  private static readonly ABANDONED_RESPAWN_RETENTION_MS = MS_PER_HOUR;
   private readonly shared: boolean;
   private readonly sessionScope: SessionScope;
   private readonly cwd: string | undefined;
@@ -7861,6 +7870,16 @@ export class AgentRuntime implements Runtime {
     }
     this.ownedSessionManagers.set(managerId, session);
     this.chatSessions.set(mapKey, session);
+    // Rebuilding the chat is the documented repair for an abandoned respawn
+    // ("the next inbound message rebuilds this chat"), so the abandonment stops
+    // counting the moment a new owned session is indexed for it — not an hour
+    // later on a timer. Guarded on an actual removal, so ordinary session
+    // creation is unaffected.
+    if (this.abandonedRespawnOwners.delete(mapKey)) {
+      if (this.exhaustedRespawnOwners.size === 0 && this.perChatRespawnAbandonedCount() === 0) {
+        clearAlertSourceChecked(this.instanceName, 'agent_respawn_failed');
+      }
+    }
     session.bindGenerationOwnership(() => {
       const currentMapKey = this.findMapKeyForSession(session);
       if (!currentMapKey) return null;
@@ -8062,12 +8081,25 @@ export class AgentRuntime implements Runtime {
   }
 
   /**
+   * Drop abandonments older than the retention window. Lazy expiry, so an
+   * entry's own age decides when it clears and a re-abandonment refreshes it.
+   * Deliberately quiet: no log line, no id minted — the health snapshot calls
+   * this on every poll.
+   */
+  private pruneAbandonedRespawnOwners(): void {
+    const cutoff = systemClock.now() - AgentRuntime.ABANDONED_RESPAWN_RETENTION_MS;
+    for (const [mapKey, abandonedAtMs] of this.abandonedRespawnOwners) {
+      if (abandonedAtMs <= cutoff) this.abandonedRespawnOwners.delete(mapKey);
+    }
+  }
+
+  /**
    * Chats whose auto-respawn was abandoned with provider termination unproved.
-   * Pure, like its sibling above, so the polled health snapshot can read it
-   * without emitting a log line per poll. Counts only — the chat identities stay
-   * out of the health surface.
+   * Counts only — the chat identities stay out of the health surface. Prunes
+   * first, so the count reflects live retention rather than history.
    */
   private perChatRespawnAbandonedCount(): number {
+    this.pruneAbandonedRespawnOwners();
     return this.abandonedRespawnOwners.size;
   }
 
@@ -10414,27 +10446,32 @@ export class AgentRuntime implements Runtime {
       // surface: the chat keeps a correct ownership record, so the unowned
       // predicate stays false and health never saw it, and the only other
       // signal (recent_crashes) decays after CRASH_HEALTH_DECAY_WINDOW_MS.
-      this.abandonedRespawnOwners.add(mapKey);
-      // Same retention shape as the crash-exhaustion path: prune after 1h so a
-      // never-recovered conversation does not leak. Unref so the timer does not
-      // prevent process shutdown.
-      setTimeout(() => { this.abandonedRespawnOwners.delete(mapKey); }, 3600_000).unref();
-      // Route through the helper rather than transitioning ownership inline: it
-      // re-checks the map entry and the generation and clears the respawn timer,
-      // all of which this path also needs. No crashContext here, so an abandoned
-      // chat holding a journaled turn is retained rather than released.
+      // Record the abandonment time; expiry is lazy and a re-abandonment
+      // refreshes it, so a second abandonment cannot be aged out by the first.
+      this.abandonedRespawnOwners.set(mapKey, systemClock.now());
+      // Terminalize but RETAIN. This branch is reached only when termination is
+      // NOT proved, so the provider child may still be running. Releasing here
+      // would drop the session entry, the ownership record and the manager index
+      // — exactly the state `evictUnownedPerChatSession` refuses to release on,
+      // because detaching a live child lets the next inbound message start a
+      // second incarnation of one conversation. Abandonment changes what the
+      // operator SEES, not what the runtime holds; if that wedges the chat until
+      // termination is proved, the provably-terminated eviction path releases it
+      // later.
       this.terminalizeExhaustedPerChatSession(
         mapKey,
         args.session,
         args.managerId,
         args.recoveryGeneration,
+        undefined,
+        { retainSession: true },
       );
       emitAlertChecked(
         this.instanceName,
         'agent_respawn_failed',
         `whatsoup@${this.instanceName} agent respawn abandoned — provider termination never proved`,
         [
-          `Abandoned chats: ${this.abandonedRespawnOwners.size}`,
+          `Abandoned chats: ${this.perChatRespawnAbandonedCount()}`,
           `Deferral bound: ${AUTO_RESPAWN_MAX_TERMINATION_DEFERRALS}`,
         ].join('\n'),
       );
@@ -10583,10 +10620,18 @@ export class AgentRuntime implements Runtime {
         respawnRecoveryPublished = true;
         // Remove this conversation from the exhausted set (#2397).
         this.exhaustedRespawnOwners.delete(mapKey);
-        if (this.exhaustedRespawnOwners.size > 0) {
+        // The alert source is shared with the abandonment path, and clearing is
+        // explicit rather than self-expiring, so a clear here would retract a
+        // page that is still true for an abandoned chat. Both populations must
+        // be empty before the source is cleared.
+        const abandonedRemaining = this.perChatRespawnAbandonedCount();
+        if (this.exhaustedRespawnOwners.size > 0 || abandonedRemaining > 0) {
           log.info(
-            { remaining: [...this.exhaustedRespawnOwners].length },
-            'respawn recovery: not clearing — other conversations still exhausted',
+            {
+              remainingExhausted: this.exhaustedRespawnOwners.size,
+              remainingAbandoned: abandonedRemaining,
+            },
+            'respawn recovery: not clearing — other conversations still exhausted or abandoned',
           );
           return;
         }
@@ -10673,6 +10718,7 @@ export class AgentRuntime implements Runtime {
     managerId: string,
     generation: number,
     crashContext?: RuntimeTurnContext,
+    options?: { retainSession?: boolean },
   ): void {
     if (
       this.chatSessions.get(mapKey) !== session ||
@@ -10684,6 +10730,13 @@ export class AgentRuntime implements Runtime {
     if (!owner) return;
     this.clearOwnedRespawnTimer(mapKey, owner);
     this.sessionOwnership.transition(mapKey, managerId, 'exhausted');
+    // Callers that cannot prove the provider is gone stop here: ownership is
+    // terminal and the respawn timer is cleared, but the session entry, the
+    // ownership record and the manager index all stay. Keeping the manager
+    // indexed is load-bearing — `setOwnedPerChatSession` refuses a replacement
+    // while the incumbent is indexed AND active, which is the last guard against
+    // two live provider children for one conversation.
+    if (options?.retainSession === true) return;
     const journaledInboundSeq = this.perChatInboundSeqQueue.get(mapKey)?.[0];
     if (!crashContext && journaledInboundSeq !== undefined) {
       log.error(
