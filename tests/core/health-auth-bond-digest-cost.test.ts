@@ -383,11 +383,12 @@ describe('GET /health — request cost and digest provenance', () => {
 
       expect(res.status).toBe(200);
       const body = JSON.parse(res.body) as Record<string, any>;
-      expect(body.auth_bond).toBeTruthy();
-      expect(typeof body.auth_bond.digest_age_ms).toBe('number');
-      expect(typeof body.auth_bond.digest_refresh_in_flight).toBe('boolean');
-      expect(body.auth_bond.digest_source).toBe('cached');
-      expect(body.auth_bond.tree_hash).toBeTruthy();
+      // The auth-bond projection lives under `whatsapp`, not at the root.
+      expect(body.whatsapp.auth_bond).toBeTruthy();
+      expect(typeof body.whatsapp.auth_bond.digest_age_ms).toBe('number');
+      expect(typeof body.whatsapp.auth_bond.digest_refresh_in_flight).toBe('boolean');
+      expect(body.whatsapp.auth_bond.digest_source).toBe('cached');
+      expect(body.whatsapp.auth_bond.tree_hash).toBeTruthy();
       expect(typeof body.event_loop.observer_cost_ms).toBe('number');
       expect(maxGapMs).toBeLessThan(MAX_BLOCK_MS);
     } finally {
