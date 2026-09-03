@@ -15,6 +15,7 @@ from __future__ import annotations
 import ast
 import importlib.util
 import json
+import re
 import os
 import sys
 import time
@@ -1284,10 +1285,17 @@ def test_the_meta_alert_carries_no_bytes_of_the_quarantined_content(tmp_path, mo
     body = json.dumps(alerts[0])
     assert UNRENDERABLE_NONCE not in body, "the meta-alert quoted the quarantined content"
     assert BRACE_QUOTE not in body, "the meta-alert baked a dict repr"
-    # The safe signal must survive: failing closed may not suppress source or class.
-    assert "primary_model_unusable" in body
-    assert "fixture-host-a" in body
+    # The safe signal must survive: failing closed may not suppress the class
+    # signal. Superseded (B2): this asserted the raw source and machine appeared,
+    # which is the unvalidated identity echo that had to go. What survives is the
+    # canonical set plus an opaque per-producer identity.
+    assert "primary_model_unusable" not in body, "raw source must not reach the page"
+    assert "fixture-host-a" not in body, "raw machine must not reach the page"
+    assert "reason=unrenderable_alert_content" in body
+    assert "alert_kind=incident_alert" in body
+    assert "alert_severity=critical" in body
     assert "failure_class=" in body
+    assert re.search(r"producer_identity=[0-9a-f]{16}", body), body
 
 
 def test_the_meta_alert_reports_the_class_from_a_renderable_sibling_without_the_digest(
@@ -1341,8 +1349,10 @@ def test_every_unrenderable_quarantine_site_passes_the_event() -> None:
 def test_the_signal_is_content_free_for_an_event_with_no_identity() -> None:
     """A malformed record must not break the page it is the reason for."""
     signal = _mod.unrenderable_alert_signal("not a mapping at all")
-    assert signal["incidentKey"] == "unknown"
     assert signal["failureClass"] == "unavailable"
+    assert signal["identity"] == _mod.UNRENDERABLE_IDENTITY_UNAVAILABLE
+    assert signal["reason"] == _mod.UNRENDERABLE_ALERT_CONTENT_CODE
+    assert signal["kind"] == "unknown" and signal["severity"] == "unknown"
 
 
 def test_a_malformed_event_before_a_healthy_alert_does_not_block_it(tmp_path, monkeypatch) -> None:
@@ -1456,84 +1466,6 @@ _EVIDENCE_LINE_PREFIXES = (
 )
 
 
-def test_a_hostile_source_cannot_forge_a_line_in_the_content_free_page(tmp_path, monkeypatch) -> None:
-    """An untrusted identity token must not write its own line of the page.
-
-    `source` is bounded for LENGTH by redacted_state_text, which is not the same
-    as bounded for SHAPE: newlines survive it, and truncate() even introduces one
-    of its own. The page is parsed by an operator line by line, so a value that
-    can contain a newline can forge `disposition: delivered normally` above the
-    real disposition and make a dropped CRITICAL alert read as a delivered one.
-    """
-    mod = _dispatcher_in(tmp_path, monkeypatch)
-    paths = mod.setup_dirs()
-    _queue_event(paths, "aaa-forged.json", _unrenderable_event(source=FORGED_SOURCE))
-
-    mod.run_once(max_events=25)
-
-    alerts = _queued_meta_alerts(paths, mod)
-    assert len(alerts) == 1, f"expected exactly one meta-alert, got {len(alerts)}"
-    evidence = alerts[0]["evidence"]
-    lines = evidence.split("\n")
-    forged = [line for line in lines if not line.startswith(_EVIDENCE_LINE_PREFIXES)]
-    assert not forged, f"the source forged {len(forged)} line(s) of the page: {forged}"
-    # A forged line can also wear an EXPECTED key, so the allowlist above is not
-    # sufficient on its own: each field owns exactly one line of the page.
-    dispositions = [line for line in lines if line.startswith("disposition: ")]
-    assert len(dispositions) == 1, dispositions
-    classes = [line for line in lines if line.startswith("failure_class=")]
-    assert classes == ["failure_class=unavailable"], classes
-    # The token cannot hold "=" or a space, so it cannot be read as a field pair
-    # inline either. The producer's bytes survive only inside it, collapsed.
-    sources = [line for line in lines if line.startswith("alert_source=")]
-    assert len(sources) == 1, sources
-    assert "=" not in sources[0].split("=", 1)[1], sources[0]
-    assert " " not in sources[0], sources[0]
-
-
-def test_no_signal_token_can_carry_a_newline(tmp_path) -> None:
-    """The rule at the builder, not only at one call site.
-
-    Length-bounding alone leaves the shape open, so this asserts the property on
-    every token the page interpolates, including the truncation path: an
-    over-long source makes truncate() append its own marker after a newline.
-    """
-    signal = _mod.unrenderable_alert_signal(_unrenderable_event(
-        source=FORGED_SOURCE,
-        machine="host\nforged-machine",
-        instance="bot\nforged-instance",
-    ))
-    for field, value in signal.items():
-        assert "\n" not in value and "\r" not in value, f"{field} carries a newline: {value!r}"
-
-    overlong = _mod.unrenderable_alert_signal(_unrenderable_event(source="s" * 4000))
-    assert "\n" not in overlong["source"], overlong["source"]
-    # safe_segment's bound, not redacted_state_text's 120: a regression to the
-    # length-only rule leaves 111 characters here, so this pins the rule that
-    # applies rather than a range that both rules satisfy.
-    assert len(overlong["source"]) == 80, len(overlong["source"])
-
-    # What a legitimate long source costs: truncation at 80 instead of 120. The
-    # characters are otherwise untouched, so this is a bound change, not mangling.
-    long_valid = "a_legitimate_but_very_long_producer_source_name_" + "x" * 60
-    kept = _mod.unrenderable_alert_signal(_unrenderable_event(source=long_valid))["source"]
-    assert kept == long_valid[:80], kept
-
-    # The incident key is the one token safe_segment cannot own: it must keep its
-    # "|" separators, so the line rule is the ONLY thing standing between it and a
-    # forged line. Nothing the producer writes can put a newline there directly --
-    # incident_key safe_segments all three parts -- but truncate() appends its own
-    # marker after one, so a key longer than the 200 bound is the path that
-    # matters. The length assertion comes first, so a fixture that stopped
-    # reaching the truncate path could not leave the newline check vacuous.
-    long_key_event = _unrenderable_event(
-        machine="m" * 100, instance="i" * 100, source="s" * 100 + "@x",
-    )
-    assert len(_mod.incident_key(long_key_event)) > 200, "fixture no longer reaches truncate"
-    long_key = _mod.unrenderable_alert_signal(long_key_event)["incidentKey"]
-    assert "\n" not in long_key and "\r" not in long_key, repr(long_key)
-
-
 def test_the_meta_alert_event_id_survives_redaction() -> None:
     """The page must name an event id an operator can look up.
 
@@ -1590,40 +1522,6 @@ def test_a_leak_shaped_source_cannot_make_the_page_drop_itself(tmp_path, monkeyp
     assert UNRENDERABLE_NONCE not in "".join(sent)
 
 
-def test_both_single_token_signal_fields_go_through_safe_segment() -> None:
-    """A structural guard for the one rule no behavioural test can reach.
-
-    `failureClass` is read only from a field that IS a legacy confinement
-    envelope, so after the vocabulary was closed it can only ever hold a
-    registered class: single-line, ASCII, at most 21 characters. safe_segment
-    therefore cannot change any reachable value, and reverting it alone leaves
-    every behavioural test green -- the same shape the lane already disclosed for
-    the parser-side digit bound, where only the scan grammar's bound was
-    load-bearing. It is kept as defence in depth for the day the vocabulary is
-    relaxed, and pinned here structurally so the revert is still red somewhere.
-    """
-    tree = ast.parse(_SCRIPT.read_text(encoding="utf-8"))
-    func = next(
-        node for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef) and node.name == "unrenderable_alert_signal"
-    )
-    returns = [node for node in ast.walk(func) if isinstance(node, ast.Return)]
-    # The early "unknown" return is fixed text; the last one builds the signal.
-    mapping = next(
-        node.value for node in reversed(returns) if isinstance(node.value, ast.Dict)
-    )
-    wrapped: dict[str, str] = {}
-    for key, value in zip(mapping.keys, mapping.values):
-        if not isinstance(key, ast.Constant):
-            continue
-        call = value.body if isinstance(value, ast.IfExp) else value
-        if isinstance(call, ast.Call) and isinstance(call.func, ast.Name):
-            wrapped[key.value] = call.func.id
-    assert wrapped.get("source") == "safe_segment", wrapped
-    assert wrapped.get("failureClass") == "safe_segment", wrapped
-    assert wrapped.get("incidentKey") == "_bounded_signal_token", wrapped
-
-
 # ---------------------------------------------------------------------------
 # One quarantined event is accounted ONCE (B1)
 # ---------------------------------------------------------------------------
@@ -1677,3 +1575,223 @@ def test_a_rewrite_between_ready_and_claim_is_accounted_once(tmp_path, monkeypat
         "unrenderableMetaAlerted": 1,
     }, observed
     assert result["lastError"] == mod.UNRENDERABLE_ALERT_CONTENT_CODE
+
+
+# ---------------------------------------------------------------------------
+# The signal is built from canonical values only (B2)
+# ---------------------------------------------------------------------------
+# safe_segment bounds SHAPE. It is not a privacy boundary, and every identity
+# field the signal read was unvalidated producer text. The five below are all of
+# them; the sixth column, the failure class, is canonical only because the
+# vocabulary is closed, and is asserted separately.
+
+IDENTITY_MARKERS = {
+    "machine": "machinemarker8842",
+    "instance": "instancemarker8842",
+    "source": "sourcemarker8842",
+    "alertSource": "alertsourcemarker8842",
+    "remote": "remotemarker8842",
+}
+
+
+def _identity_hostile_event() -> dict[str, Any]:
+    """One event carrying a distinct marker in every unvalidated identity field."""
+    return _unrenderable_event(
+        id="identity-001",
+        machine=IDENTITY_MARKERS["machine"],
+        instance=IDENTITY_MARKERS["instance"],
+        source=IDENTITY_MARKERS["source"],
+        alertSource=IDENTITY_MARKERS["alertSource"],
+        diagnostics={"remote": IDENTITY_MARKERS["remote"]},
+    )
+
+
+def _durable_sinks(paths: dict[str, Path]) -> dict[str, str]:
+    """Every durable file the dispatcher wrote, EXCEPT the quarantine artifact.
+
+    Scanning the tree rather than a list of known files is deliberate: a listed
+    sink is only the sinks someone remembered, and the signal reaches meta-state,
+    the dispatch log, incident state and the outbox by different paths.
+    """
+    root = paths["root"]
+    sinks: dict[str, str] = {}
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or paths["quarantine"] in path.parents:
+            continue
+        sinks[str(path.relative_to(root))] = path.read_text(encoding="utf-8", errors="replace")
+    return sinks
+
+
+def test_no_unvalidated_identity_field_reaches_any_durable_sink(tmp_path, monkeypatch) -> None:
+    """Markers in machine, instance, source, alertSource and diagnostics.remote.
+
+    The page, the meta-state throttle map, the dispatch log and the outbox payload
+    are all checked, because the signal reaches them by different routes. The
+    quarantine artifact is excluded on purpose: it is the durable record of the
+    original and is supposed to hold it.
+    """
+    mod = _dispatcher_in(tmp_path, monkeypatch)
+    paths = mod.setup_dirs()
+    # Three fixtures, because two of the five fields are only reachable through
+    # specific shapes: incident_source folds alertSource in for the health
+    # sources, and the diagnostic remote only for the collector instance. A
+    # single generic fixture would assert their absence vacuously.
+    for name, event in (
+        ("aaa-generic.json", _identity_hostile_event()),
+        ("bbb-alertsource.json", _unrenderable_event(
+            id="identity-002", source="daily-health",
+            alertSource=IDENTITY_MARKERS["alertSource"],
+        )),
+        ("ccc-remote.json", _unrenderable_event(
+            id="identity-003", instance="bot-errors-collector",
+            diagnostics={"remote": IDENTITY_MARKERS["remote"]},
+        )),
+    ):
+        _queue_event(paths, name, event)
+        # Positive control: this field really does compose into the identity the
+        # signal used to publish, so its absence below is a property of the fix.
+        assert any(
+            marker in mod.incident_key(event)
+            for marker in IDENTITY_MARKERS.values()
+        ), name
+
+    mod.run_once(max_events=25)
+    mod.run_once(max_events=25)
+
+    sinks = _durable_sinks(paths)
+    # Coverage assertion: an empty scan would make every absence below vacuous.
+    assert len(sinks) >= 3, sorted(sinks)
+    assert any("unrenderable" in body for body in sinks.values()), sorted(sinks)
+
+    leaks = {
+        (name, field): where
+        for field, name in IDENTITY_MARKERS.items()
+        for where, body in sinks.items()
+        if name in body
+    }
+    assert not leaks, leaks
+
+    # Positive control: the markers really were in the event, and the quarantine
+    # artifact still holds them, so the absences above are not a fixture that
+    # never carried them.
+    quarantined = "".join(
+        p.read_text(encoding="utf-8", errors="replace")
+        for p in paths["quarantine"].rglob("*") if p.is_file()
+    )
+    for name in IDENTITY_MARKERS.values():
+        assert name in quarantined, name
+
+
+def test_the_signal_carries_only_canonical_values(tmp_path, monkeypatch) -> None:
+    """A field allowlist, so a future field cannot be added without a decision."""
+    mod = _dispatcher_in(tmp_path, monkeypatch)
+    signal = mod.unrenderable_alert_signal(
+        _identity_hostile_event(), kind="incident_alert", severity="critical",
+    )
+    assert set(signal) == {
+        "reason", "kind", "severity", "failureClass", "unrenderableFields", "identity",
+    }, sorted(signal)
+    assert signal["reason"] == mod.UNRENDERABLE_ALERT_CONTENT_CODE
+    assert signal["kind"] == "incident_alert"
+    assert signal["severity"] == "critical"
+    assert signal["failureClass"] == "unavailable"
+    # A bounded, non-reversible operation identity: hex only, fixed width, and
+    # not any of the raw components it stands in for.
+    assert re.fullmatch(r"[0-9a-f]{16}", signal["identity"]), signal["identity"]
+    for name in IDENTITY_MARKERS.values():
+        assert name not in json.dumps(signal), name
+
+
+def test_the_identity_is_stable_per_producer_and_distinct_across_them(tmp_path, monkeypatch) -> None:
+    """It replaces the incident key for throttling, so it must group the same way."""
+    mod = _dispatcher_in(tmp_path, monkeypatch)
+    a1 = mod.unrenderable_alert_signal(_unrenderable_event(source="producer_a"))["identity"]
+    a2 = mod.unrenderable_alert_signal(_unrenderable_event(source="producer_a"))["identity"]
+    b = mod.unrenderable_alert_signal(_unrenderable_event(source="producer_b"))["identity"]
+    assert a1 == a2, "the same producer must throttle to one page"
+    assert a1 != b, "two producers must not collapse into one page"
+
+
+def test_the_failure_class_in_the_signal_is_from_the_closed_vocabulary(tmp_path, monkeypatch) -> None:
+    """The one non-fixed field that survives, and why it is safe to keep."""
+    mod = _dispatcher_in(tmp_path, monkeypatch)
+    valid = mod.unrenderable_alert_signal(_unrenderable_event(
+        id="cls-001", summary=legacy_object(), evidence=[UNRENDERABLE_NONCE],
+    ))
+    assert valid["failureClass"] == "TypeError"
+    assert valid["failureClass"] in _load_redaction_classes()
+
+    # A class the producer could not have emitted never becomes the signal's.
+    hostile = mod.unrenderable_alert_signal(_unrenderable_event(
+        id="cls-002",
+        summary={"failureClass": "hostile" + UNRENDERABLE_NONCE, "length": 54,
+                 "correlationDigest": DIGEST},
+        evidence=[UNRENDERABLE_NONCE],
+    ))
+    assert hostile["failureClass"] == "unavailable", hostile
+
+
+def _load_redaction_classes() -> set[str]:
+    spec = importlib.util.spec_from_file_location(
+        "b2_redaction", _SCRIPT.parent / "lib" / "bot_errors_redaction.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return set(module.LEGACY_FAILURE_CLASSES)
+
+
+def test_every_evidence_line_of_the_page_is_a_canonical_field(tmp_path, monkeypatch) -> None:
+    """The page's whole evidence block, asserted as a set, not field by field.
+
+    Supersedes an earlier pair of tests that bounded the SHAPE of the echoed
+    source so it could not forge a line. Bounding shape is not a privacy
+    boundary: the fix is that no unvalidated producer text is interpolated at
+    all. Asserting the exact line set is what makes a re-added field red.
+    """
+    mod = _dispatcher_in(tmp_path, monkeypatch)
+    paths = mod.setup_dirs()
+    _queue_event(paths, "aaa-lines.json", _identity_hostile_event())
+
+    mod.run_once(max_events=25)
+
+    alerts = _queued_meta_alerts(paths, mod)
+    assert len(alerts) == 1
+    lines = alerts[0]["evidence"].split("\n")
+    keys = [line.split("=", 1)[0] if "=" in line else line.split(":", 1)[0] for line in lines]
+    assert keys == [
+        "unrenderable_quarantine_count",
+        "reason",
+        "alert_kind",
+        "alert_severity",
+        "failure_class",
+        "unrenderable_fields",
+        "producer_identity",
+        "disposition",
+    ], lines
+    for name in IDENTITY_MARKERS.values():
+        assert name not in alerts[0]["evidence"], name
+
+
+def test_no_signal_value_carries_a_newline_or_free_text(tmp_path, monkeypatch) -> None:
+    """Every value matches a closed pattern, so none can be prose.
+
+    The page is a newline-joined block of `key=value` lines, so a value able to
+    hold a newline writes a line of it. Under the canonical set that is true by
+    construction rather than by a length or shape bound, and this pins it.
+    """
+    mod = _dispatcher_in(tmp_path, monkeypatch)
+    signal = mod.unrenderable_alert_signal(
+        _identity_hostile_event(), kind="incident_alert", severity="critical",
+    )
+    patterns = {
+        "reason": r"[a-z_]{1,64}",
+        "kind": r"[a-z_]{1,32}",
+        "severity": r"[a-z_]{1,32}",
+        "failureClass": r"[A-Za-z_]{1,21}",
+        "unrenderableFields": r"[A-Za-z_:,]{0,128}",
+        "identity": r"[0-9a-f]{16}",
+    }
+    assert set(signal) == set(patterns), sorted(signal)
+    for field, pattern in patterns.items():
+        assert re.fullmatch(pattern, signal[field]), (field, signal[field])

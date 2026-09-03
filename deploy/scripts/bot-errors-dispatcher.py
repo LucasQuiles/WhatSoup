@@ -36,6 +36,7 @@ from lib.bounded_jsonl import (
 )
 from lib.bot_errors_envelope import EnvelopeError, classify_event, new_event_fields, normalize_event
 from lib.bot_errors_redaction import (
+    LEGACY_FAILURE_CLASSES,
     alert_text,
     alert_text_for_fingerprint,
     alert_text_kind,
@@ -705,87 +706,89 @@ UNRENDERABLE_META_ALERT_THROTTLE_SECONDS = DEAD_LETTER_META_ALERT_THROTTLE_SECON
 UNRENDERABLE_SIGNAL_FIELDS = ("summary", "evidence")
 
 
-# Any run of whitespace or C0/C1 control characters. The page below is a
-# newline-joined block of `key=value` lines, so this is the difference between a
-# value and a LINE.
-_SIGNAL_BREAK_RE = re.compile(r"[\s\x00-\x1f\x7f-\x9f]+")
+UNRENDERABLE_IDENTITY_CHARS = 16
+UNRENDERABLE_IDENTITY_UNAVAILABLE = "0" * UNRENDERABLE_IDENTITY_CHARS
 
 
-def _bounded_signal_token(value: Any, limit: int) -> str:
-    """One bounded, SINGLE-LINE token for the content-free page (#2386).
-
-    Bounding the LENGTH is not bounding the SHAPE. `source` is an unconstrained
-    producer string, and an operator reads the page line by line, so a newline
-    inside it writes a line of the page: a producer that puts
-    "disposition: delivered normally" in its source forges a contradiction of the
-    real disposition three lines below, on a page about an alert that was dropped.
-    The collapse runs AFTER redacted_state_text because truncate() puts a newline
-    before its own marker, so the length bound is itself a newline source.
-    """
-    return _SIGNAL_BREAK_RE.sub(" ", redacted_state_text(value, limit)).strip() or "unknown"
-
-
-def unrenderable_alert_signal(event: Any) -> dict[str, str]:
+def unrenderable_alert_signal(event: Any, *, kind: str = "", severity: str = "") -> dict[str, str]:
     """The content-free operator signal a quarantined event still carries.
 
-    Deliberately excludes every byte of the unrenderable value: having no safe way
-    to render it is exactly why the event was quarantined, and baking it into a
-    meta-alert would reintroduce the dict-repr leak this issue exists to remove.
+    Every value here comes from a CLOSED set. Earlier versions echoed the event's
+    own `source` and incident key after safe_segment, which bounds shape and
+    length -- it is not a privacy boundary, and `source`, `alertSource` and the
+    diagnostic remote are unvalidated producer text that composed into the key.
+    Those markers reached the page, the throttle map, incident state and the sent
+    record; the page about content the consumer refused to render was carrying
+    that content's neighbours.
 
-    What survives is identity plus class. ``failureClass`` is read only from a
-    field that IS a legacy confinement envelope -- a bounded producer token that
-    ``alert_text`` already renders into the dead-letter meta-alert -- and never the
-    digest or the length. The unrenderable fields are reported by NAME and TYPE,
-    which describes the shape of the failure without quoting any of its content.
+    What remains:
+
+    * `reason`, the fixed code;
+    * `kind` and `severity`, canonical values classification had ALREADY
+      validated before it rejected the content, carried on the EnvelopeError;
+    * `failureClass`, read only from a field that IS a valid confinement
+      envelope, so after the vocabulary closed it is one of a known 17 or the
+      fixed "unavailable" -- never a malformed class;
+    * `unrenderableFields`, field names and Python type names, both fixed sets;
+    * `identity`, a bounded non-reversible digest standing in for the incident
+      key so pages still throttle and group per producer without naming one.
+
+    The original is not lost: the quarantine artifact holds the whole event, and
+    it is the durable record an operator with access reads for the detail.
     """
-    unknown = {
-        "source": "unknown",
-        "incidentKey": "unknown",
+    unavailable = {
+        "reason": UNRENDERABLE_ALERT_CONTENT_CODE,
+        "kind": kind or "unknown",
+        "severity": severity or "unknown",
         "failureClass": "unavailable",
         "unrenderableFields": "",
+        "identity": UNRENDERABLE_IDENTITY_UNAVAILABLE,
     }
     if not isinstance(event, dict):
-        return unknown
+        return unavailable
     failure_class = ""
     unrenderable: list[str] = []
     for field in UNRENDERABLE_SIGNAL_FIELDS:
         value = event.get(field)
-        kind = alert_text_kind(value)
-        if kind == "unrenderable":
+        value_kind = alert_text_kind(value)
+        if value_kind == "unrenderable":
             unrenderable.append(f"{field}:{type(value).__name__}")
-        elif kind == "legacy_object" and not failure_class:
+        elif value_kind == "legacy_object" and not failure_class:
             # "{failureClass} - {length} chars - digest {digest[:8]}" -- take the
             # class only, so neither the length nor the digest reaches the alert.
+            # The value classified as a legacy object, so the class passed the
+            # closed vocabulary; a malformed one classifies as unrenderable and
+            # never gets here.
             failure_class = alert_text(value).split(" - ", 1)[0]
     try:
         key = incident_key(event)
-        source = incident_source(event)
     except Exception:  # noqa: BLE001 -- identity helpers must not break quarantine
-        return unknown
+        key = ""
+    identity = (
+        hashlib.sha256(key.encode("utf-8")).hexdigest()[:UNRENDERABLE_IDENTITY_CHARS]
+        if key else UNRENDERABLE_IDENTITY_UNAVAILABLE
+    )
     return {
-        # safe_segment is this module's strict single-token rule, and it is what
-        # incident_key already applies to this same value. An unconstrained
-        # producer string must not be able to write a line of the page, and a
-        # token that cannot hold "=" or a space cannot be misread as another
-        # field either. The producer's bytes can still appear INSIDE the token,
-        # collapsed exactly as the incident_key line already shows them.
-        "source": safe_segment(redacted_state_text(source or "unknown", 120)),
-        # The key keeps its "|" separators, so it gets the line rule only. Its
-        # three parts are safe_segment'd by incident_key; truncate() is the only
-        # newline that can reach it.
-        "incidentKey": _bounded_signal_token(key or "unknown", 200),
-        "failureClass": safe_segment(redacted_state_text(failure_class, 64)) if failure_class else "unavailable",
+        "reason": UNRENDERABLE_ALERT_CONTENT_CODE,
+        "kind": kind or "unknown",
+        "severity": severity or "unknown",
+        "failureClass": failure_class if failure_class in LEGACY_FAILURE_CLASSES else "unavailable",
         "unrenderableFields": ",".join(unrenderable),
+        "identity": identity,
     }
 
 
-def note_unrenderable_quarantine(event: Any = None) -> None:
+def note_unrenderable_quarantine(
+    event: Any = None, *, kind: str = "", severity: str = ""
+) -> None:
     """Record that one event was quarantined for unrenderable alert content."""
     global _pending_unrenderable_quarantines, _unrenderable_quarantines_total
     _pending_unrenderable_quarantines += 1
     _unrenderable_quarantines_total += 1
     if len(_pending_unrenderable_signals) < UNRENDERABLE_SIGNAL_CAP:
-        _pending_unrenderable_signals.append(unrenderable_alert_signal(event))
+        _pending_unrenderable_signals.append(
+            unrenderable_alert_signal(event, kind=kind, severity=severity)
+        )
 
 
 def unrenderable_quarantine_total() -> int:
@@ -6106,7 +6109,7 @@ def unrenderable_meta_event(signal: dict[str, str], count: int) -> dict[str, Any
     ``alert_text``.
     """
     now = int(time.time())
-    key_digest = hashlib.sha256(signal.get("incidentKey", "").encode("utf-8")).hexdigest()[:8]
+    key_digest = signal.get("identity", UNRENDERABLE_IDENTITY_UNAVAILABLE)[:8]
     return {
         **new_event_fields("alert", "critical"),
         # The process id carries a "p": an epoch joined to a bare number by a
@@ -6127,10 +6130,12 @@ def unrenderable_meta_event(signal: dict[str, str], count: int) -> dict[str, Any
         # path is recorded in the dispatch log instead.
         "evidence": "\n".join([
             f"unrenderable_quarantine_count={count}",
-            f"alert_source={signal.get('source', 'unknown')}",
-            f"incident_key={signal.get('incidentKey', 'unknown')}",
+            f"reason={signal.get('reason', UNRENDERABLE_ALERT_CONTENT_CODE)}",
+            f"alert_kind={signal.get('kind', 'unknown')}",
+            f"alert_severity={signal.get('severity', 'unknown')}",
             f"failure_class={signal.get('failureClass', 'unavailable')}",
             f"unrenderable_fields={signal.get('unrenderableFields', '')}",
+            f"producer_identity={signal.get('identity', UNRENDERABLE_IDENTITY_UNAVAILABLE)}",
             "disposition: original quarantined, not delivered and not retried",
         ]),
         "process": {"pid": os.getpid()},
@@ -6160,7 +6165,7 @@ def queue_unrenderable_meta_alerts(paths: dict[str, Path], now: int) -> int:
 
     grouped: dict[str, dict[str, Any]] = {}
     for signal in _pending_unrenderable_signals:
-        entry = grouped.setdefault(signal["incidentKey"], {"signal": signal, "count": 0})
+        entry = grouped.setdefault(signal["identity"], {"signal": signal, "count": 0})
         entry["count"] = int(entry["count"]) + 1
 
     state = read_meta_state(paths)
@@ -6175,7 +6180,7 @@ def queue_unrenderable_meta_alerts(paths: dict[str, Path], now: int) -> int:
         if last and now - last < UNRENDERABLE_META_ALERT_THROTTLE_SECONDS:
             append_dispatch_log(paths, {
                 "type": "unrenderable_meta_debounced",
-                "incidentKey": key,
+                "producerIdentity": key,
                 "count": entry["count"],
                 "throttleSeconds": UNRENDERABLE_META_ALERT_THROTTLE_SECONDS,
             })
@@ -6204,7 +6209,7 @@ def queue_unrenderable_meta_alerts(paths: dict[str, Path], now: int) -> int:
         append_dispatch_log(paths, {
             "type": "unrenderable_meta_queued",
             "eventId": event["id"],
-            "incidentKey": key,
+            "producerIdentity": key,
             "count": entry["count"],
         })
 
@@ -6219,7 +6224,7 @@ def queue_unrenderable_meta_alerts(paths: dict[str, Path], now: int) -> int:
     write_meta_state(paths, state)
     _pending_unrenderable_signals = [
         signal for signal in _pending_unrenderable_signals
-        if signal["incidentKey"] not in settled
+        if signal["identity"] not in settled
     ]
     return queued
 
@@ -6331,7 +6336,9 @@ def _load_valid_event_or_quarantine_inner(path: Path, quarantine_dir: Path) -> d
     try:
         classify_event(event)
     except EnvelopeError as exc:
-        quarantine_invalid_envelope(path, quarantine_dir, exc.code, event)
+        quarantine_invalid_envelope(
+            path, quarantine_dir, exc.code, event, kind=exc.kind, severity=exc.severity
+        )
         _LAST_LOAD_DISPOSITION[0] = QueueDisposition(
             "quarantined",
             safe_segment(exc.code),
@@ -6394,6 +6401,9 @@ def quarantine_invalid_envelope(
     quarantine_dir: Path,
     code: str,
     event: Any = None,
+    *,
+    kind: str = "",
+    severity: str = "",
 ) -> Path:
     """Quarantine an invalid envelope without treating it as an alert to send.
 
@@ -6404,7 +6414,7 @@ def quarantine_invalid_envelope(
 
     ensure_private_dir(quarantine_dir)
     if code == UNRENDERABLE_ALERT_CONTENT_CODE:
-        note_unrenderable_quarantine(event)
+        note_unrenderable_quarantine(event, kind=kind, severity=severity)
     reason = safe_segment(code)
     dest = quarantine_dir / f"{path.name}.{int(time.time())}.{os.getpid()}.{reason}.invalid-envelope"
     try:
@@ -6806,7 +6816,9 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
         # Reachable despite the ready() pre-check: the file can be rewritten
         # between the scan and the claim. Both sites must page, or the second
         # one silently drops the alert the first one was fixed to report.
-        quarantine_invalid_envelope(claimed, paths["quarantine"], exc.code, event)
+        quarantine_invalid_envelope(
+            claimed, paths["quarantine"], exc.code, event, kind=exc.kind, severity=exc.severity
+        )
         return False, "invalid_envelope"
     normalize_target = _durable_target(claimed)
     normalize_observation = observe_json(normalize_target)
