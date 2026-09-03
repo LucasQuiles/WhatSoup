@@ -16,9 +16,13 @@ Contract pinned here:
   the pruned ledger is saved, and the process exits 0;
 - that cycle performs no remote, probe, claim or acknowledgement effect,
   because the cycle body is ``for remote in remotes`` and the roster is empty.
-  It is not silent: each retired record's disposition is an info-severity
-  observation the dispatcher delivers as a BOT INFO line, so a full retirement
-  is one informational message per open record;
+  It is not silent: the prune emits one info-severity observation per retired
+  (remote, source) pair, which the dispatcher delivers as a BOT INFO line.
+  That is not one per open record -- acknowledgement membership is
+  digest-keyed and collapses to a single disposition per remote carrying the
+  count of records it retires, which
+  ``test_the_declared_empty_cycle_dispositions_acknowledgement_membership``
+  pins directly;
 - the flag declares an EMPTY poll list, never a MISSING one: with the variable
   absent it stays on the fail-closed path, so a broken environment file cannot
   retire the ledger;
@@ -38,6 +42,8 @@ import sys
 from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 
 _CONFTEST_PATH = Path(__file__).resolve().parent / "conftest.py"
 _conftest_spec = importlib.util.spec_from_file_location(
@@ -346,7 +352,8 @@ def test_an_unregistered_key_still_fails_the_declared_empty_cycle_closed(tmp_sta
         assert _dispositions(outbox_dir) == []
 
 
-def test_daemon_and_allow_empty_roster_are_mutually_exclusive(tmp_state, capsys):
+@pytest.mark.parametrize("roster", ["", "h1.example", ","])
+def test_daemon_and_allow_empty_roster_are_mutually_exclusive(tmp_state, capsys, roster):
     """A declared-empty retirement is one-shot and must never be a daemon.
 
     Parked in the unit's ExecStart the pair would look harmless while a roster
@@ -354,10 +361,16 @@ def test_daemon_and_allow_empty_roster_are_mutually_exclusive(tmp_state, capsys)
     exit, and be restarted on the service manager's schedule, rewriting state
     every cycle. The combination is refused at the usage boundary, above the
     state session, so the ledger is never opened.
+
+    The roster is varied to pin that the refusal is decided on argv ALONE: an
+    empty list, a populated one, and a separators-only value must all be
+    refused identically. Otherwise a guard that happened to key off the roster
+    would pass a test that only ever supplied one.
     """
     state_dir, outbox_dir = tmp_state
-    with _env(state_dir, outbox_dir, _EMPTY_ROSTER_ENV):
-        mod = _load_mod_with_dirs(state_dir, outbox_dir, _EMPTY_ROSTER_ENV)
+    roster_env = {"BOT_ERRORS_RELAY_REMOTES": roster}
+    with _env(state_dir, outbox_dir, roster_env):
+        mod = _load_mod_with_dirs(state_dir, outbox_dir, roster_env)
         _seed_open_alert_through_a_real_cycle(mod, state_dir)
         state_file = state_dir / "collector-state.json"
         before = state_file.read_bytes()

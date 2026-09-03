@@ -4438,10 +4438,12 @@ def main() -> int:
         # state session and nothing else, because _run_once_with_state's only
         # work between the prune and the save is `for remote in remotes`, so an
         # empty roster performs no remote, probe, claim or acknowledgement
-        # effect. It is not silent, though: each retired record's disposition is
-        # an info-severity observation, which the dispatcher delivers as a BOT
-        # INFO line, so a full retirement is one informational message per open
-        # record. An unregistered bucket key still fails the whole cycle
+        # effect. It is not silent, though: the prune emits one info-severity
+        # observation per retired (remote, source) pair, which the dispatcher
+        # delivers as a BOT INFO line. That is not one per open record --
+        # acknowledgement membership is digest-keyed and collapses to a single
+        # disposition per remote carrying the count of records it retires.
+        # An unregistered bucket key still fails the whole cycle
         # closed, which matters most here: retiring every remote at once is the
         # widest reach the pruning validation pass ever has.
         if args.daemon:
