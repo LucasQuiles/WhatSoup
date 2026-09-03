@@ -4375,3 +4375,83 @@ def test_the_binding_and_emit_calls_stay_argument_identical(tmp_path: Path, monk
     assert _retirement_events(config) == [], "a divergence must be caught before anything is published"
 
 
+def _cap_plus_one_retirement_cycle(tmp_path: Path, monkeypatch) -> dict:
+    """One cycle retiring RETIRED_HOST_TOMBSTONE_MAX + 1 members, zero prior tombstones.
+
+    The cap replaces the tombstone map AFTER the retirement loop, and every
+    entry shares this cycle's clock, so the tie breaks on insertion order and
+    the lexically last CURRENT retirement is the one discarded. A queued
+    remediation for exactly that member is what turns a persistence bound into
+    an execution hazard.
+    """
+    _heartbeat(tmp_path / "host-a-hb.json", healthy=True, mtime=995.0)
+    hosts = _hosts_file(tmp_path, [{"host": "host-a", "heartbeatPath": str(tmp_path / "host-a-hb.json")}])
+    config = _config(tmp_path, hosts)
+    retiring = [f"retire-{index:03d}" for index in range(_mod.RETIRED_HOST_TOMBSTONE_MAX + 1)]
+    host_records = {"host-a": {"alertState": "closed"}}
+    for host in retiring:
+        host_records[host] = {"alertState": "open", "consecutive": 1, "transitions": []}
+    # Zero prior tombstones: the drop must come from THIS cycle's insertions, not
+    # from older entries winning the tie-break.
+    _write_json(
+        _mod.state_path(config),
+        {"schemaVersion": 1, "hosts": host_records, "retiredHosts": {}},
+    )
+    outbox = _mod.action_outbox_dir(config)
+    outbox.mkdir(parents=True, exist_ok=True, mode=0o700)
+    dropped = retiring[-1]
+    queued = outbox / f"0999-host-{dropped}-restart_host-stale.json"
+    _write_json(queued, {"action": "restart_host", "host": dropped})
+
+    executed: list[str] = []
+    monkeypatch.setattr(_mod, "execute_action", lambda action: executed.append(str(action.get("host"))))
+    result = _mod.run_once(
+        config, _deps(1000.0, {"host-a": {"reachable": True, "healthy": True, "class": "healthy"}})
+    )
+    return {
+        "config": config,
+        "result": result,
+        "executed": executed,
+        "queued": queued,
+        "retiring": retiring,
+        "dropped": dropped,
+        "state": json.loads(_mod.state_path(config).read_text(encoding="utf-8")),
+    }
+
+
+def test_a_retirement_past_the_tombstone_cap_still_refuses_its_queued_action(tmp_path: Path, monkeypatch):
+    """The execution guard must come from the cycle's retiring set, not the capped map.
+
+    The tombstone cap is a PERSISTENCE bound. Reusing the truncated map as the
+    stale-action guard turns it into an execution decision, and restarting a
+    member this very cycle decommissioned is precisely the outcome the guard
+    exists to prevent.
+    """
+    observed = _cap_plus_one_retirement_cycle(tmp_path, monkeypatch)
+    queued = observed["queued"]
+
+    assert observed["executed"] == [], (
+        "a remediation queued for a member retired this cycle must not execute, "
+        "even when the tombstone cap dropped its ledger entry"
+    )
+    assert queued.with_suffix(".retired").exists()
+    assert not queued.exists()
+    assert not queued.with_suffix(".done").exists()
+
+
+def test_the_tombstone_cap_itself_is_unchanged_by_the_guard_fix(tmp_path: Path, monkeypatch):
+    """The fix must not raise, remove or route around the persistence cap.
+
+    Every member is still retired and published; the ledger still holds at most
+    the cap; and the dropped member is still the one whose tombstone is absent.
+    A fix that widened the guard by widening the ledger would pass the test
+    above and break the bound this one pins.
+    """
+    observed = _cap_plus_one_retirement_cycle(tmp_path, monkeypatch)
+    state = observed["state"]
+
+    assert len(observed["result"]["retirementEvents"]) == len(observed["retiring"])
+    assert len(state["retiredHosts"]) == _mod.RETIRED_HOST_TOMBSTONE_MAX
+    assert observed["dropped"] not in state["retiredHosts"]
+
+

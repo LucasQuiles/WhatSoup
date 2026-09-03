@@ -488,8 +488,14 @@ def consume_action_outbox(config: SentinelConfig, retired_hosts: Optional[dict] 
     (``EXTERNAL_REMEDIATION_ACTIONS``), renaming each file to ``.done`` on
     success or ``.failed`` on error.
 
-    ``retired_hosts`` is the live tombstone ledger (``state["retiredHosts"]``).
-    An action whose subject carries a live tombstone is NOT executed: the member
+    ``retired_hosts`` is the cycle's retirement guard set, built by
+    ``retirement_action_guard_hosts`` -- the persisted tombstone ledger UNIONED
+    with every member retired in the current cycle. It is deliberately not
+    ``state["retiredHosts"]`` alone: that map carries a count cap enforced after
+    the retirement loop, so a cycle retiring more members than the cap drops one
+    of them from the ledger while still having retired it, and a guard reading
+    the capped map would execute that member's queued remediation.
+    An action whose subject is in that set is NOT executed: the member
     was deliberately removed from the roster, so a remediation queued before the
     retirement is stale by construction and restarting a decommissioned host is
     exactly the wrong outcome. It is renamed ``.retired``, a terminal
@@ -2509,6 +2515,37 @@ def retire_unconfigured_hosts(
     return emitted
 
 
+def retirement_action_guard_hosts(state: dict, retirement_events: list[dict]) -> dict:
+    """Members whose queued remediations must not execute this cycle.
+
+    The tombstone ledger is a PERSISTENCE bound.
+    ``enforce_retired_host_tombstone_cap`` replaces the map with its newest
+    ``RETIRED_HOST_TOMBSTONE_MAX`` entries AFTER the retirement loop has
+    inserted this cycle's members. Every entry a single cycle inserts shares
+    that cycle's clock and the sort is stable, so the tie breaks on insertion
+    order and a cycle retiring more than the cap loses its lexically last
+    member from the map -- while still having retired it, published its
+    disposition, and deleted its record.
+
+    Reading that capped map as the execution guard turned a storage bound into
+    an execution decision: the dropped member's queued ``restart_host`` ran
+    against a host the same cycle decommissioned. So the guard is built from
+    the cycle's COMPLETE retiring set, which ``retirement_events`` already
+    carries per entry, unioned with the persisted tombstones that guard members
+    retired in EARLIER cycles. The cap itself is untouched -- it still bounds
+    what is persisted, which is all it was ever for.
+    """
+    tombstones = state.get("retiredHosts")
+    guard = dict(tombstones) if isinstance(tombstones, dict) else {}
+    for event in retirement_events or []:
+        if not isinstance(event, dict):
+            continue
+        host = str(event.get("host") or "")
+        if host:
+            guard.setdefault(host, {"retiredThisCycle": True})
+    return guard
+
+
 def run_once(config: SentinelConfig, deps: Optional[SentinelDeps] = None) -> dict:
     deps = deps or default_deps(config)
     now = deps.now_epoch()
@@ -2622,7 +2659,9 @@ def run_once(config: SentinelConfig, deps: Optional[SentinelDeps] = None) -> dic
     # Consume pending actions from the outbox, then prune remaining .done/
     # .failed files.  The consumer reads .json, executes, and renames to .done
     # or .failed so the same action is not consumed twice.
-    action_outbox_depth = consume_action_outbox(config, retired_hosts=state.get("retiredHosts"))
+    action_outbox_depth = consume_action_outbox(
+        config, retired_hosts=retirement_action_guard_hosts(state, retirement_events)
+    )
     action_outbox_depth = prune_action_outbox(config)
     sweep_started_at = now_iso(now)
     sweep_ended_epoch = deps.now_epoch()
