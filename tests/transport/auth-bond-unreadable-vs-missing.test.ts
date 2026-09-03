@@ -67,6 +67,41 @@ function errno(code: string): NodeJS.ErrnoException {
   return Object.assign(new Error(`${code}: injected`), { code });
 }
 
+/**
+ * Inject a CONTENT-read failure for creds.json.
+ *
+ * creds.json is now opened once with O_NOFOLLOW and read from that descriptor,
+ * so validation and read cannot race across a symlink swap. The behaviour these
+ * tests pin is unchanged — stat succeeded, content did not — but the seam moved
+ * from `readFileSync(path)` to `readFileSync(fd)`, so the injection follows it:
+ * record the descriptor the guard opened for creds.json, then fail the read on
+ * exactly that descriptor.
+ */
+function credsReadFails(actual: FsModule, credsPath: string, code: string): Partial<FsModule> {
+  let credsFd: number | null = null;
+  return {
+    openSync: vi.fn(((path: Parameters<FsModule['openSync']>[0], ...rest: unknown[]) => {
+      const fd = (actual.openSync as (...a: unknown[]) => number)(path, ...rest);
+      if (String(path) === credsPath) credsFd = fd;
+      return fd;
+    })) as unknown as FsModule['openSync'],
+    readFileSync: vi.fn(((target: Parameters<FsModule['readFileSync']>[0], ...rest: unknown[]) => {
+      if (typeof target === 'number' && credsFd !== null && target === credsFd) throw errno(code);
+      return (actual.readFileSync as (...a: unknown[]) => unknown)(target, ...rest);
+    })) as unknown as FsModule['readFileSync'],
+  };
+}
+
+/** Inject a failure at the stat-equivalent: the O_NOFOLLOW open itself. */
+function credsOpenFails(actual: FsModule, credsPath: string, code: string): Partial<FsModule> {
+  return {
+    openSync: vi.fn(((path: Parameters<FsModule['openSync']>[0], ...rest: unknown[]) => {
+      if (String(path) === credsPath) throw errno(code);
+      return (actual.openSync as (...a: unknown[]) => number)(path, ...rest);
+    })) as unknown as FsModule['openSync'],
+  };
+}
+
 describe('auth bond: unreadable is not missing (#2292 L3)', () => {
   it('keeps exists TRUE when lstat succeeded but the content read failed', async () => {
     const root = makeRoot();
@@ -74,12 +109,7 @@ describe('auth bond: unreadable is not missing (#2292 L3)', () => {
     writeAuth(authDir);
     const credsPath = join(authDir, 'creds.json');
 
-    const mod = await importGuardWithFsMock((actual) => ({
-      readFileSync: vi.fn(((path: Parameters<FsModule['readFileSync']>[0], ...rest: unknown[]) => {
-        if (String(path) === credsPath) throw errno('EACCES');
-        return (actual.readFileSync as (...a: unknown[]) => unknown)(path, ...rest);
-      })) as unknown as FsModule['readFileSync'],
-    }));
+    const mod = await importGuardWithFsMock((actual) => credsReadFails(actual, credsPath, 'EACCES'));
 
     const snap = guardFor(root, authDir, mod).inspect();
 
@@ -99,12 +129,7 @@ describe('auth bond: unreadable is not missing (#2292 L3)', () => {
     writeAuth(authDir);
     const credsPath = join(authDir, 'creds.json');
 
-    const mod = await importGuardWithFsMock((actual) => ({
-      readFileSync: vi.fn(((path: Parameters<FsModule['readFileSync']>[0], ...rest: unknown[]) => {
-        if (String(path) === credsPath) throw errno('EACCES');
-        return (actual.readFileSync as (...a: unknown[]) => unknown)(path, ...rest);
-      })) as unknown as FsModule['readFileSync'],
-    }));
+    const mod = await importGuardWithFsMock((actual) => credsReadFails(actual, credsPath, 'EACCES'));
 
     const snap = guardFor(root, authDir, mod).inspect();
 
@@ -122,12 +147,7 @@ describe('auth bond: unreadable is not missing (#2292 L3)', () => {
     writeAuth(authDir);
     const credsPath = join(authDir, 'creds.json');
 
-    const mod = await importGuardWithFsMock((actual) => ({
-      readFileSync: vi.fn(((path: Parameters<FsModule['readFileSync']>[0], ...rest: unknown[]) => {
-        if (String(path) === credsPath) throw errno('EIO');
-        return (actual.readFileSync as (...a: unknown[]) => unknown)(path, ...rest);
-      })) as unknown as FsModule['readFileSync'],
-    }));
+    const mod = await importGuardWithFsMock((actual) => credsReadFails(actual, credsPath, 'EIO'));
 
     const snap = guardFor(root, authDir, mod).inspect();
 
@@ -136,21 +156,17 @@ describe('auth bond: unreadable is not missing (#2292 L3)', () => {
     expect(snap.issues).not.toContain('creds_json_empty');
   });
 
-  // The OTHER failure point. Above, lstat succeeded and the read failed; here
-  // lstat itself fails, so existence was never established — `exists` stays
-  // false, but with an errno, which is what separates it from plain absence.
-  it('marks a non-ENOENT lstat failure unreadable rather than missing', async () => {
+  // The OTHER failure point. Above, the stat succeeded and the read failed;
+  // here the O_NOFOLLOW open itself fails, so existence was never established —
+  // `exists` stays false, but with an errno, which is what separates it from
+  // plain absence.
+  it('marks a non-ENOENT open failure unreadable rather than missing', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     writeAuth(authDir);
     const credsPath = join(authDir, 'creds.json');
 
-    const mod = await importGuardWithFsMock((actual) => ({
-      lstatSync: vi.fn(((path: Parameters<FsModule['lstatSync']>[0]) => {
-        if (String(path) === credsPath) throw errno('EACCES');
-        return (actual.lstatSync as (...a: unknown[]) => unknown)(path);
-      })) as unknown as FsModule['lstatSync'],
-    }));
+    const mod = await importGuardWithFsMock((actual) => credsOpenFails(actual, credsPath, 'EACCES'));
 
     const snap = guardFor(root, authDir, mod).inspect();
 

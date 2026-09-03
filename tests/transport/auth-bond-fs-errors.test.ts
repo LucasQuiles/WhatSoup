@@ -319,14 +319,24 @@ describe('AuthBondGuard filesystem error paths', () => {
     actualFs.mkdirSync(authDir, { recursive: true, mode: 0o700 });
     actualFs.writeFileSync(credsPath, '');
 
+    // creds.json metadata now comes from fstat on the O_NOFOLLOW descriptor the
+    // snapshot opens, not from lstat on the path, so the unparseable mtime is
+    // injected there. The contract under test is unchanged: an mtime that
+    // cannot be parsed must not be read as "freshly written" and deferred.
+    let credsFd: number | null = null;
     const { AuthBondGuard } = await importGuardWithFsMock((actual) => ({
-      lstatSync: vi.fn((path: Parameters<FsModule['lstatSync']>[0]) => {
-        const stat = actual.lstatSync(path);
-        if (String(path) !== credsPath) return stat;
+      openSync: vi.fn(((path: Parameters<FsModule['openSync']>[0], ...rest: unknown[]) => {
+        const fd = (actual.openSync as (...a: unknown[]) => number)(path, ...rest);
+        if (String(path) === credsPath) credsFd = fd;
+        return fd;
+      })) as unknown as FsModule['openSync'],
+      fstatSync: vi.fn(((fd: number, ...rest: unknown[]) => {
+        const stat = (actual.fstatSync as (...a: unknown[]) => ReturnType<FsModule['fstatSync']>)(fd, ...rest);
+        if (credsFd === null || fd !== credsFd) return stat;
         const fakeStat = Object.create(Object.getPrototypeOf(stat));
         Object.assign(fakeStat, stat, { mtime: { toISOString: () => 'not-a-date' } });
         return fakeStat;
-      }) as unknown as FsModule['lstatSync'],
+      })) as unknown as FsModule['fstatSync'],
     }));
 
     const result = new AuthBondGuard({

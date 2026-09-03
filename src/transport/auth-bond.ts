@@ -2,8 +2,10 @@ import { createHash } from 'node:crypto';
 import {
   chmodSync,
   closeSync,
+  constants as fsConstants,
   copyFileSync,
   existsSync,
+  fstatSync,
   fsyncSync,
   lstatSync,
   mkdirSync,
@@ -25,7 +27,16 @@ import { errorMessage } from '../lib/error-message.ts';
 import { decideRestoreFromCandidate, readTerminalLatchJournal } from './terminal-latch.ts';
 import { readRestoreCandidateEvidence } from './auth-generation-v2.ts';
 
-export type AuthBondStatus = 'present' | 'missing' | 'invalid';
+/**
+ * 'unknown' is produced ONLY by inspectCached(), and only when the tree has
+ * never been observed or its observation is stale past the risk bound. It says
+ * "no current evidence", which is a different claim from 'invalid' ("evidence
+ * of corruption") and must not be collapsed into it: 'invalid' de-links the
+ * message scheduler (src/core/scheduler.ts:478-479) and would hold scheduled
+ * sends on an instance whose credentials are fine. inspect() walks live and
+ * never returns 'unknown'.
+ */
+export type AuthBondStatus = 'present' | 'missing' | 'invalid' | 'unknown';
 
 export interface AuthBondFileSnapshot {
   path: string;
@@ -72,14 +83,38 @@ export interface AuthBondBackupSnapshot {
  * a guaranteed-current tree calls inspect() and pays for it.
  */
 export interface AuthBondTreeProvenance {
-  /** 'absent' means no walk has completed yet, so the tree fields are null. */
-  readonly source: 'cached' | 'absent';
+  /**
+   * 'cached' — a completed walk, inside the max age.
+   * 'stale'  — a completed walk that an event invalidated, or that is past the
+   *            max age; still the best evidence available and still reported.
+   * 'absent' — no walk has ever completed, so there is no evidence at all.
+   */
+  readonly source: 'cached' | 'stale' | 'absent';
   /** Age of the cached walk in milliseconds; null when source is 'absent'. */
   readonly ageMs: number | null;
   readonly refreshInFlight: boolean;
   /** Completed refreshes since construction. */
   readonly refreshCount: number;
   readonly lastInvalidationReason: string | null;
+  /**
+   * How the most recent refresh attempt ended.
+   *
+   * 'fresh' is the only kind that republishes a digest. 'incomplete' (an entry
+   * vanished mid-walk) and 'failed' (the walk threw) deliberately keep the
+   * previous observation and let it go on ageing, so a persistent I/O fault
+   * surfaces as a digest that stops advancing rather than as a green one that
+   * silently never updates.
+   */
+  readonly lastRefreshKind: TreeRefreshKind;
+  readonly lastRefreshReason: string | null;
+}
+
+export type TreeRefreshKind = 'none' | 'fresh' | 'incomplete' | 'failed' | 'superseded';
+
+interface TreeRefreshOutcome {
+  readonly kind: TreeRefreshKind;
+  readonly atMs: number;
+  readonly reason: string | null;
 }
 
 export interface AuthBondSnapshot {
@@ -143,6 +178,10 @@ interface AuthBondGuardOptions {
   freshInvalidGraceMs?: number;
   /** Ceiling on how stale inspectCached() may serve a tree walk. See DEFAULT_TREE_CACHE_MAX_AGE_MS. */
   treeCacheMaxAgeMs?: number;
+  /** Floor between tree-walk starts. See DEFAULT_TREE_REFRESH_MIN_INTERVAL_MS. */
+  treeRefreshMinIntervalMs?: number;
+  /** Monotonic milliseconds, for digest age only. Defaults to performance.now(). */
+  monotonicNow?: () => number;
 }
 
 /** The two full-tree walks, held apart from the cheap per-request checks. */
@@ -168,6 +207,46 @@ const DEFAULT_CAPTURE_RETRY_DELAY_MS = 75;
  * unaffected and still walks live for every restore, capture and verification.
  */
 const DEFAULT_TREE_CACHE_MAX_AGE_MS = 30_000;
+/**
+ * How many max-age periods a digest may go unrefreshed before it stops counting
+ * as evidence of a healthy tree and starts counting as an absence of evidence.
+ *
+ * Four, so 120 s at the default max age. The bound has to sit far above normal
+ * operation and far below anything that could hide a real fault. A full
+ * refresh of a `personal`-sized tree — 17,681 files, 24.4 MB, both walks — was
+ * measured at 614 ms wall time, so 120 s is on the order of 200 consecutive
+ * refresh opportunities. Reaching it means refreshes are failing or being
+ * starved, not that the host is briefly busy.
+ *
+ * It is also well inside the observed invalidation interval. The `personal`
+ * instance recorded 3,860 creds updates over 22.06 days of uptime, about one
+ * per 8.2 minutes, so ordinary invalidation traffic cannot hold a digest past
+ * this bound; only a genuinely stuck refresh can.
+ */
+const TREE_STALE_RISK_MULTIPLE = 4;
+/**
+ * Floor between the STARTS of two tree walks.
+ *
+ * Needed because one of the two invalidation triggers is far coarser than its
+ * name suggests: `hasAuthKeyMaterialChurnSignal`
+ * (src/transport/connection.ts) returns true for `messages.upsert`,
+ * `messages.update`, `message-receipt.update`, `messages.reaction`,
+ * `groups.*`, `messaging-history.set` and `lid-mapping.update` — every inbound
+ * message batch, not every key-material write. Without a floor, a busy
+ * instance would start a fresh 614 ms walk per batch and spend more CPU on the
+ * digest than the per-request walk this change exists to remove.
+ *
+ * Five seconds is chosen as a strict non-regression bound: the fleet polls
+ * /health every 5 s, so the pre-change code performed two full walks every 5 s
+ * on this instance. Refreshing no more often than that can never be worse than
+ * what it replaced, and is normally far better because a quiet instance
+ * refreshes only on the 30 s max age.
+ *
+ * A rate-limited refresh is not a lost one: the observation stays served and
+ * marked stale, and the next read past the floor starts the walk. The stale
+ * risk bound is 24 floors wide, so the limiter cannot hold a digest past it.
+ */
+const DEFAULT_TREE_REFRESH_MIN_INTERVAL_MS = 5_000;
 const EMPTY_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
 
 function safeName(value: string): string {
@@ -243,6 +322,116 @@ function fileSnapshot(path: string, includeHash = false): AuthBondFileSnapshot {
     // metadata that succeeded and report why the content could not be hashed.
     return { ...base, sha256: null, error: errnoCode(err) };
   }
+}
+
+/**
+ * One creds.json read, through one descriptor that refuses to follow a link.
+ *
+ * Replaces an lstat-then-read-then-read-again sequence with two defects. The
+ * hash came from `readFileSync(path)` guarded by an lstat, and the JSON parse
+ * came from a SECOND `readFileSync(path)` that had no guard at all, so a
+ * creds.json swapped for a symlink between the two reads was hashed as absent
+ * and then parsed through the link. Worse, the parse followed the link even
+ * when the tree walk that was supposed to catch the symlink was serving a stale
+ * clean result, and pointing the link at a FIFO would block the event loop
+ * synchronously from an unauthenticated /health request — the exact failure
+ * class this branch exists to remove.
+ *
+ * O_NOFOLLOW makes the kernel refuse the open, and fstat on the resulting
+ * descriptor describes the object actually opened, so validation and read
+ * cannot race. The bytes are returned so the caller hashes and parses the same
+ * ones.
+ */
+interface CredsRead {
+  readonly snapshot: AuthBondFileSnapshot;
+  /** Exactly the bytes `snapshot.sha256` covers; null when nothing was read. */
+  readonly bytes: Buffer | null;
+  /** Set when the path is not a regular file. Never null-and-readable together. */
+  readonly kindIssue: string | null;
+}
+
+function readCredsThroughNoFollow(path: string): CredsRead {
+  const absent = (error: string | null): CredsRead => ({
+    snapshot: { path, exists: false, mode: null, size: null, mtime: null, sha256: null, error },
+    bytes: null,
+    kindIssue: null,
+  });
+  const present = (
+    st: ReturnType<typeof fstatSync>,
+    sha256: string | null,
+    error: string | null,
+  ): AuthBondFileSnapshot => ({
+    path,
+    exists: true,
+    mode: modeString(st.mode),
+    size: st.size,
+    mtime: st.mtime.toISOString(),
+    sha256,
+    error,
+  });
+
+  let fd: number;
+  try {
+    fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  } catch (err) {
+    if (isVanishedEntry(err)) return absent(null);
+    const code = errnoCode(err);
+    // O_NOFOLLOW reports a symlinked target as ELOOP on Linux and macOS. That
+    // is a refusal to follow, which is a finding about the tree, not an
+    // unreadable file — the operator's next move differs.
+    if (code === 'ELOOP') {
+      return {
+        snapshot: { path, exists: true, mode: null, size: null, mtime: null, sha256: null, error: null },
+        bytes: null,
+        kindIssue: 'creds_json_symlink',
+      };
+    }
+    return absent(code);
+  }
+
+  try {
+    const st = fstatSync(fd);
+    // A FIFO, socket or device would block or misreport on read. Refuse by kind
+    // rather than by name, before any byte is taken from it.
+    if (!st.isFile()) {
+      return { snapshot: present(st, null, null), bytes: null, kindIssue: 'creds_json_not_regular_file' };
+    }
+    const bytes = readFileSync(fd);
+    return { snapshot: present(st, hashBuffer(bytes), null), bytes, kindIssue: null };
+  } catch (err) {
+    let st = null;
+    try { st = fstatSync(fd); } catch { /* descriptor already unusable */ }
+    return {
+      snapshot: st
+        ? present(st, null, errnoCode(err))
+        : { path, exists: true, mode: null, size: null, mtime: null, sha256: null, error: errnoCode(err) },
+      bytes: null,
+      kindIssue: null,
+    };
+  } finally {
+    // readFileSync(fd) does not close a caller-supplied descriptor.
+    try { closeSync(fd); } catch { /* nothing left to release */ }
+  }
+}
+
+/**
+ * Live, O(1) check that the auth root is a real directory.
+ *
+ * Deliberately NOT part of the cached tree walk: replacing the auth root with a
+ * symlink is precisely the mutation a stale cache would miss, and one lstat is
+ * cheap enough to run on every request.
+ */
+function authRootKindIssue(path: string): string | null {
+  let st;
+  try {
+    st = lstatSync(path);
+  } catch {
+    // Absence and unreadability are classified by the caller's own snapshot.
+    return null;
+  }
+  if (st.isSymbolicLink()) return 'auth_dir_symlink';
+  if (!st.isDirectory()) return 'auth_dir_not_directory';
+  return null;
 }
 
 // #2292 L2 — unguarded by name: every call site wraps this in its own
@@ -660,11 +849,30 @@ export class AuthBondGuard {
   private readonly stagingRoot: string;
   private readonly latestManifestPath: string;
   private readonly treeCacheMaxAgeMs: number;
+  private readonly treeStaleRiskMs: number;
+  private readonly treeRefreshMinIntervalMs: number;
+  private lastRefreshStartedAtMs: number | null = null;
   private treeObservation: AuthBondTreeObservation | null = null;
   private treeRefresh: Promise<void> | null = null;
   private treeRefreshCount = 0;
   /** Bumped by every invalidation so a walk started before one cannot publish over it. */
   private treeGeneration = 0;
+  /** True from an invalidation until the next successful refresh publishes. */
+  private treeInvalidated = false;
+  private lastRefreshOutcome: TreeRefreshOutcome | null = null;
+  /** An invalidation arrived that no started walk has covered yet. */
+  private treeRefreshRequested = false;
+  /** At most one pending successor walk. */
+  private treeSuccessorTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * Monotonic clock for digest age.
+   *
+   * Age must never come from wall time: a clock adjustment backwards would make
+   * a stale digest read as fresh and silently extend the staleness bound. The
+   * Date-valued `now` stays for the human-facing timestamps elsewhere in this
+   * class, which must track wall time.
+   */
+  private readonly monotonicNow: () => number;
   private lastTreeInvalidationReason: string | null = null;
   private lastCaptureAt: string | null = null;
   private lastCaptureReason: string | null = null;
@@ -696,7 +904,13 @@ export class AuthBondGuard {
     this.historyRoot = join(this.root, 'history');
     this.stagingRoot = join(this.root, 'staging');
     this.latestManifestPath = join(this.root, 'latest.json');
+    this.monotonicNow = options.monotonicNow ?? (() => performance.now());
     this.treeCacheMaxAgeMs = Math.max(0, options.treeCacheMaxAgeMs ?? DEFAULT_TREE_CACHE_MAX_AGE_MS);
+    this.treeStaleRiskMs = this.treeCacheMaxAgeMs * TREE_STALE_RISK_MULTIPLE;
+    this.treeRefreshMinIntervalMs = Math.max(
+      0,
+      options.treeRefreshMinIntervalMs ?? DEFAULT_TREE_REFRESH_MIN_INTERVAL_MS,
+    );
   }
 
   /**
@@ -722,53 +936,147 @@ export class AuthBondGuard {
    */
   inspectCached(): AuthBondSnapshot {
     const observation = this.treeObservation;
-    const ageMs = observation === null ? null : Math.max(0, Date.now() - observation.observedAtMs);
-    if (observation === null || (ageMs !== null && ageMs >= this.treeCacheMaxAgeMs)) {
-      void this.refreshTreeCache();
-    }
+    const ageMs = observation === null
+      ? null
+      : Math.max(0, this.monotonicNow() - observation.observedAtMs);
+    const stale = observation !== null
+      && (this.treeInvalidated || (ageMs !== null && ageMs >= this.treeCacheMaxAgeMs));
+    if (observation === null || stale) void this.refreshTreeCache();
+
+    // The two states that are NOT evidence of a healthy tree. Everything else,
+    // including a merely stale observation, is still the best evidence there is
+    // and is reported as such.
+    const unknownReason = observation === null
+      ? 'auth_tree_unobserved'
+      : ageMs !== null && ageMs >= this.treeStaleRiskMs
+        ? `auth_tree_stale:${ageMs}`
+        : null;
+
     return this.buildSnapshot(
       observation?.hardenIssues ?? [],
       () => observation?.tree ?? null,
       {
-        source: observation === null ? 'absent' : 'cached',
+        source: observation === null ? 'absent' : stale ? 'stale' : 'cached',
         ageMs,
         // Assigned synchronously by refreshTreeCache, so a refresh started
         // immediately above is already visible here.
         refreshInFlight: this.treeRefresh !== null,
         refreshCount: this.treeRefreshCount,
         lastInvalidationReason: this.lastTreeInvalidationReason,
+        lastRefreshKind: this.lastRefreshOutcome?.kind ?? 'none',
+        lastRefreshReason: this.lastRefreshOutcome?.reason ?? null,
       },
+      unknownReason,
     );
   }
 
   /**
-   * Drop the cached walk so the next read starts a fresh one.
+   * Record that the auth tree has changed, and converge on a new digest.
    *
-   * Called from the events that are known to change the tree — a saved
-   * creds.json and a captured auth-bond snapshot. Events cannot cover every
-   * change (nothing emits when a file is planted by hand), which is what
-   * treeCacheMaxAgeMs is for.
+   * Contract, stated rather than enumerated by caller — enumerating call sites
+   * in this comment went stale twice:
+   *
+   * - Call it ONCE PER MUTATION, AFTER the write is durable. Calling it before a
+   *   write as well is worse than useless: the pair bumps the generation twice,
+   *   the second bump fences off the walk the first one started, and the write
+   *   buys a full tree walk guaranteed to be discarded.
+   * - The last completed observation is KEPT and served, marked stale. These
+   *   callers say the tree CHANGED, not that it became unknowable, so the last
+   *   walk stays the best available evidence until a newer one exists.
+   *   Discarding it was a fail-open: reads then built a snapshot from an empty
+   *   harden-issue list, so a planted symlink read as `present` with no issues.
+   * - Convergence does not depend on anyone reading. A burst of invalidations
+   *   settles onto exactly one successor walk, honouring the refresh floor.
+   *
+   * Mutations no caller announces — a file planted by hand — are covered by
+   * treeCacheMaxAgeMs and the stale risk bound, not by this.
    */
   invalidateTreeCache(reason: string): void {
-    this.treeObservation = null;
+    this.markTreeStale(reason);
+    this.treeRefreshRequested = true;
+    void this.refreshTreeCache();
+  }
+
+  /**
+   * Fence the generation and mark the digest stale WITHOUT starting a walk.
+   *
+   * For the moment a mutation begins, where a walk would race the mutation it
+   * is trying to observe. The restore path is the case: it renames the auth root
+   * away on the line after, so a walk started here observes a directory
+   * mid-rename and reports `failed`, `incomplete`, or a `fresh` describing a
+   * tree that existed for milliseconds.
+   */
+  private markTreeStale(reason: string): void {
+    this.treeInvalidated = true;
     this.treeGeneration += 1;
     this.lastTreeInvalidationReason = reason;
   }
 
-  /** Complete a refresh. Callers that need a digest present before proceeding await this. */
+  /**
+   * Queue exactly one successor walk, no earlier than the refresh floor allows.
+   *
+   * This is what makes a burst converge. Without it, an invalidation landing
+   * during a walk fenced that walk off and scheduled nothing, so the digest
+   * stayed stale until some reader happened to ask past the floor — and under
+   * sustained writes, never.
+   */
+  private scheduleTreeRefreshSuccessor(): void {
+    if (this.treeSuccessorTimer !== null) return;
+    const sinceLastStartMs = this.lastRefreshStartedAtMs === null
+      ? Number.POSITIVE_INFINITY
+      : this.monotonicNow() - this.lastRefreshStartedAtMs;
+    const waitMs = Math.max(0, this.treeRefreshMinIntervalMs - sinceLastStartMs);
+    this.treeSuccessorTimer = setTimeout(() => {
+      this.treeSuccessorTimer = null;
+      // Forced: the floor was already served by waiting it out here.
+      void this.refreshTreeCache(true);
+    }, Number.isFinite(waitMs) ? waitMs : 0);
+    this.treeSuccessorTimer.unref?.();
+  }
+
+  /**
+   * Complete a refresh, ignoring the rate floor.
+   *
+   * Forced because its callers need a digest to exist before proceeding —
+   * connection open, and tests. The floor exists to stop event-driven churn
+   * from monopolising the CPU, not to make a deliberate warm fail.
+   */
   async warmTreeCache(): Promise<void> {
     // A refresh already in flight may be superseded by an invalidation and
     // discard its result, leaving no observation behind. One retry covers that
     // without looping forever on a walk that genuinely cannot complete.
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      await this.refreshTreeCache();
-      if (this.treeObservation !== null) return;
+      await this.refreshTreeCache(true);
+      // Only a 'fresh' outcome counts. An observation left over from an earlier
+      // walk is not proof that THIS warm succeeded, and treating it as proof is
+      // how an incomplete walk used to be accepted as a completed one.
+      if (this.lastRefreshOutcome?.kind === 'fresh') return;
     }
   }
 
-  private refreshTreeCache(): Promise<void> {
+  private refreshTreeCache(force = false): Promise<void> {
     const inFlight = this.treeRefresh;
-    if (inFlight !== null) return inFlight;
+    if (inFlight !== null) {
+      // The walk already running started before this request, so it cannot
+      // describe the mutation that prompted it. Record that a successor is owed
+      // and let the in-flight walk's own completion schedule it.
+      this.treeRefreshRequested = true;
+      return inFlight;
+    }
+    const startedAtMs = this.monotonicNow();
+    if (
+      !force
+      && this.lastRefreshStartedAtMs !== null
+      && startedAtMs - this.lastRefreshStartedAtMs < this.treeRefreshMinIntervalMs
+    ) {
+      // Too soon to walk again. Deferred, not dropped: queue one successor so
+      // convergence does not depend on a reader arriving after the floor.
+      this.treeRefreshRequested = true;
+      this.scheduleTreeRefreshSuccessor();
+      return Promise.resolve();
+    }
+    this.treeRefreshRequested = false;
+    this.lastRefreshStartedAtMs = startedAtMs;
     const generation = this.treeGeneration;
     const run = (async (): Promise<void> => {
       try {
@@ -777,24 +1085,57 @@ export class AuthBondGuard {
         // the harden pass has already recorded that same condition as an issue.
         // Skipping the digest walk here mirrors inspect(), where a symlink
         // forces status away from 'present' and the tree is never walked.
-        const tree = hardenIssues.some(issue => issue.startsWith('auth_tree_symlink:'))
+        const symlinked = hardenIssues.some(issue => issue.startsWith('auth_tree_symlink:'));
+        const rootPresent = existsSync(this.authDir);
+        const tree = symlinked || !rootPresent
           ? null
           : await drainYielding(inspectAuthTreeSteps(this.authDir));
+
         // A refresh is single-flight, so an invalidation landing mid-walk would
         // otherwise be erased: this walk would finish and stamp a fresh
-        // observedAtMs over the null, hiding the change until the max age
-        // expired. Discarding a superseded walk keeps the cache absent instead,
-        // which the next read turns into a new refresh.
-        if (generation !== this.treeGeneration) return;
-        this.treeObservation = { hardenIssues, tree, observedAtMs: Date.now() };
+        // observation over a tree that has already changed again.
+        if (generation !== this.treeGeneration) {
+          this.lastRefreshOutcome = {
+            kind: 'superseded', atMs: this.monotonicNow(), reason: 'invalidated-during-walk',
+          };
+          return;
+        }
+
+        // A null tree with a present, non-symlinked root means the walk saw an
+        // entry vanish and fail-closed to no digest. That is NOT an observation:
+        // publishing it stamped a current timestamp on a null digest, which read
+        // as `digest_source: "cached"` with no issue and no hash — green health
+        // built from a walk that never completed. Keep the previous observation
+        // and let it age instead.
+        if (tree === null && rootPresent && !symlinked) {
+          this.lastRefreshOutcome = {
+            kind: 'incomplete', atMs: this.monotonicNow(), reason: 'auth_tree_walk_incomplete',
+          };
+          return;
+        }
+
+        this.treeObservation = { hardenIssues, tree, observedAtMs: this.monotonicNow() };
+        this.treeInvalidated = false;
         this.treeRefreshCount += 1;
-      } catch {
-        // Keep the last known observation and let the next read retry. A failed
+        this.lastRefreshOutcome = { kind: 'fresh', atMs: this.monotonicNow(), reason: null };
+      } catch (err) {
+        // Keep the last known observation and let it go on ageing. A failed
         // refresh must never propagate: its only caller is a fire-and-forget
         // `void` from a read path, where a rejection becomes an unhandled
-        // rejection and main.ts turns that into an instance shutdown.
+        // rejection and main.ts turns that into an instance shutdown. The
+        // outcome is recorded so a persistent fault is visible rather than
+        // silently holding a digest at a fixed age.
+        this.lastRefreshOutcome = {
+          kind: 'failed', atMs: this.monotonicNow(), reason: errorMessage(err),
+        };
       } finally {
         this.treeRefresh = null;
+        // An invalidation landed while this walk ran, so this walk's result was
+        // either fenced off or already out of date. Exactly one successor.
+        if (this.treeRefreshRequested) {
+          this.treeRefreshRequested = false;
+          this.scheduleTreeRefreshSuccessor();
+        }
       }
     })();
     this.treeRefresh = run;
@@ -805,12 +1146,15 @@ export class AuthBondGuard {
     hardenIssues: readonly string[],
     readTree: () => AuthTreeObservation | null,
     treeProvenance?: AuthBondTreeProvenance,
+    unknownReason?: string | null,
   ): AuthBondSnapshot {
     const credsPath = join(this.authDir, 'creds.json');
     const issues: string[] = [];
     issues.push(...hardenIssues);
     const authDir = fileSnapshot(this.authDir);
-    const creds = fileSnapshot(credsPath, true);
+    const rootKindIssue = authRootKindIssue(this.authDir);
+    const credsRead = readCredsThroughNoFollow(credsPath);
+    const creds = credsRead.snapshot;
     let status: AuthBondStatus = 'present';
     let meHash: string | null = null;
     const hasSymlinkIssue = issues.some(issue => issue.startsWith('auth_tree_symlink:'));
@@ -840,13 +1184,25 @@ export class AuthBondGuard {
     if (hasSymlinkIssue) {
       status = 'invalid';
     }
-    if (creds.exists && !credsUnreadable && !hasSymlinkIssue) {
+    // Live kind checks. These do not depend on the cached tree walk, so they
+    // hold even while the digest is stale, absent, or serving a clean result.
+    if (rootKindIssue) {
+      status = 'invalid';
+      issues.push(rootKindIssue);
+    }
+    if (credsRead.kindIssue) {
+      status = 'invalid';
+      issues.push(credsRead.kindIssue);
+    }
+    if (creds.exists && !credsUnreadable && !hasSymlinkIssue && !credsRead.kindIssue) {
       if (creds.size === 0 || creds.sha256 === EMPTY_SHA256) {
         status = 'invalid';
         issues.push('creds_json_empty');
       } else {
         try {
-          const parsed = readJsonOrThrow(credsPath);
+          // The SAME bytes the hash above covers. Re-reading the path here was
+          // the second half of the symlink race.
+          const parsed = JSON.parse((credsRead.bytes ?? Buffer.alloc(0)).toString('utf8')) as unknown;
           if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
             status = 'invalid';
             issues.push('creds_json_not_object');
@@ -865,6 +1221,13 @@ export class AuthBondGuard {
     }
 
     const tree = status === 'present' ? readTree() : null;
+    // Applied AFTER the tree read so a stale digest is still published as
+    // evidence, and only over 'present': 'missing' and 'invalid' are specific
+    // findings about the credentials themselves and outrank "no tree evidence".
+    if (unknownReason && status === 'present') {
+      status = 'unknown';
+      issues.push(unknownReason);
+    }
     return {
       status,
       authDir,
@@ -1095,6 +1458,12 @@ export class AuthBondGuard {
     try {
       rmSync(tmp, { recursive: true, force: true });
       if (existsSync(this.authDir)) {
+        // The auth root is about to be replaced. Fence the generation BEFORE
+        // the first rename so a refresh already walking the old tree cannot
+        // publish its result as a description of the new one. Fence only, no
+        // walk: the rename on the next line would move the root out from
+        // under it.
+        this.markTreeStale('auth-restore-started');
         renameSync(this.authDir, quarantine);
         movedOriginal = true;
       } else {
@@ -1104,6 +1473,7 @@ export class AuthBondGuard {
       const copiedAuthError = this.validateAuthTreeAgainstBackupManifest(tmp, latestBackupPath!, latest, 'copied');
       if (copiedAuthError) throw new Error(copiedAuthError);
       renameSync(tmp, this.authDir);
+      this.invalidateTreeCache('auth-restore-committed');
       this.lastRestoreAt = restoredAt.toISOString();
       this.lastRestoreSource = latestBackupPath;
       this.lastRestoreError = null;

@@ -881,7 +881,14 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       installThirdPartyConsoleRedaction();
 
       const { state } = await useMultiFileAuthState(config.authDir);
-      const saveCredsAtomically = createAtomicCredsSaver(config.authDir, () => state.creds);
+      // Invalidate at the rename, not after the save promise settles: the
+      // saver renames and only then chmods, so a chmod failure used to leave
+      // committed credentials that the digest cache never heard about.
+      const saveCredsAtomically = createAtomicCredsSaver(
+        config.authDir,
+        () => state.creds,
+        () => { this.authBond.invalidateTreeCache('creds-file-committed'); },
+      );
       const resolvedVersion = await resolveBaileysVersion(config.baileysVersionPinned);
       this.latestBaileysVersion = baileysVersionLabel(resolvedVersion.version);
       this.recordCredentialLifecycle('baileys_version', {
@@ -902,7 +909,9 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         logger: baileysLogger as any,
         auth: {
           creds: state.creds,
-          keys: makeCacheableSignalKeyStore(state.keys, baileysLogger as any),
+          keys: this.invalidatingKeyStore(
+            makeCacheableSignalKeyStore(state.keys, baileysLogger as any),
+          ),
         },
         generateHighQualityLinkPreview: config.generateHighQualityLinkPreview,
       };
@@ -1536,15 +1545,36 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     };
   }
 
+  /**
+   * Live connection state. Walks the auth tree inline, every call.
+   *
+   * This method is a SECURITY AND DELIVERY input, not an observability one, and
+   * it is deliberately not cached. src/core/scheduler.ts:466 uses it as a
+   * fail-closed de-link gate: when `connected` is false it holds scheduled rows
+   * for an instance whose auth bond reads 'missing' or 'invalid', and processes
+   * them otherwise. Serving that decision from a cache means a stale-clean
+   * digest lets a de-linked instance burn its retry budget on rows the live
+   * check would have preserved. An earlier revision of this branch made exactly
+   * that mistake by switching this getter wholesale.
+   *
+   * Observability readers want getHealthConnectionState() instead.
+   */
   getConnectionState(): ConnectionStateSnapshot {
-    // P42: this is the ONE call that made GET /health expensive. inspect()
-    // walks and SHA-256-hashes the whole Baileys auth tree synchronously —
-    // ~400 ms on the `personal` instance's 17,680 key files — and every health
-    // request landed here. Every caller of getConnectionState is an
-    // observability or readiness reader (health.ts and main.ts's startup
-    // probe), none of which needs a guaranteed-current tree hash, so this path
-    // reads the cached digest and the walk happens off the request.
-    const authBond = this.authBond.inspectCached();
+    return this.buildConnectionState(this.authBond.inspect());
+  }
+
+  /**
+   * Connection state for the /health projection only.
+   *
+   * Identical in shape to getConnectionState, but the auth-bond tree digest is
+   * served from the off-request cache. This is the one seam the P42 cost fix
+   * needs, and confining it here keeps every non-observability caller live.
+   */
+  getHealthConnectionState(): ConnectionStateSnapshot {
+    return this.buildConnectionState(this.authBond.inspectCached());
+  }
+
+  private buildConnectionState(authBond: AuthBondSnapshot): ConnectionStateSnapshot {
     return {
       state: this.connectionState,
       connected: this.connectionState === 'connected' && this.botJid !== null,
@@ -1747,7 +1777,9 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       if (events['creds.update']) {
         try {
           await saveCreds();
-          this.authBond.invalidateTreeCache('creds-update-saved');
+          // No invalidation here: the saver's post-rename commit hook already
+          // fired at the moment the bytes became visible, which is strictly
+          // earlier and survives a failure in the chmod that follows.
           this.clearAuthSnapshotSettledTimer();
           this.lastCredsUpdateAt = Date.now();
           this.credsUpdateCount += 1;
@@ -1767,9 +1799,13 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       }
 
       if (this.hasAuthKeyMaterialChurnSignal(events)) {
-        // Baileys wrote pre-keys, sender keys or app-state sync keys, so the
-        // cached tree digest describes a tree that no longer exists.
-        this.authBond.invalidateTreeCache('baileys-key-material-settled');
+        // Deliberately no cache invalidation here. Event names are a guess at
+        // when key material was written, and a wrong guess fails in both
+        // directions: this list fires on every inbound batch whether or not the
+        // key store was touched, and Baileys writes keys from paths that emit
+        // none of it (an outbound send calls authState.keys.set directly). The
+        // digest is invalidated at the key-store seam itself, in
+        // invalidatingKeyStore below.
         this.scheduleSettledAuthBondSnapshot('baileys-key-material-settled');
       }
 
@@ -2446,6 +2482,48 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     });
     this.log.error({ error: result.error, reason }, 'auth bond snapshot failed');
     this.emitLocalAuthBondFailureAlert(reason, result.snapshot);
+  }
+
+  /**
+   * Wrap the Signal key store so every write invalidates the auth-bond digest.
+   *
+   * This is the seam the filesystem mutation actually happens at. Baileys calls
+   * `authState.keys.set` directly from its outbound send path, which emits no
+   * socket event at all, so an event-name heuristic could never have covered it.
+   *
+   * Exactly ONE invalidation per write, taken AFTER it. An earlier revision also
+   * marked before the write, on the theory that it stopped a refresh starting
+   * mid-write. It did the opposite: the pre-mark started a walk, the post-mark
+   * bumped the generation microseconds later, and the walk was then fenced off
+   * and published nothing — so every key write bought a full tree walk that was
+   * discarded by construction. The generation fence alone already prevents a
+   * walk that began before the write from describing the tree after it.
+   */
+  private invalidatingKeyStore<T extends object>(keys: T): T {
+    const guard = this.authBond;
+    // Never let observability break a key write. Mirrors the credential saver's
+    // commit hook, which is the same hazard on the same change.
+    const mark = (seam: string): void => {
+      try { guard.invalidateTreeCache(`key-store-${seam}`); } catch { /* observers must not break a key write */ }
+    };
+    const wrap = (fn: (...args: unknown[]) => unknown, seam: string) =>
+      function (this: unknown, ...args: unknown[]): unknown {
+        const result = fn.apply(this, args);
+        if (result && typeof (result as PromiseLike<unknown>).then === 'function') {
+          return Promise.resolve(result).finally(() => { mark(seam); });
+        }
+        mark(seam);
+        return result;
+      };
+
+    const store = keys as Record<string, unknown>;
+    for (const seam of ['set', 'clear'] as const) {
+      const original = store[seam];
+      if (typeof original === 'function') {
+        store[seam] = wrap(original as (...args: unknown[]) => unknown, seam);
+      }
+    }
+    return keys;
   }
 
   private hasAuthKeyMaterialChurnSignal(events: Record<string, unknown>): boolean {

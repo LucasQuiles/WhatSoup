@@ -14,7 +14,7 @@ import {
 import { assertSafeHealthBind } from './health-bind-guard.ts';
 import { getMessageCount } from './messages.ts';
 import { getPendingCount, upsertAccess } from './access-list.ts';
-import { isFullyConnected } from '../transport/runtime-connection.ts';
+import { isFullyConnected, type HealthConnectionStateReader } from '../transport/runtime-connection.ts';
 import type { RuntimeConnection } from '../transport/runtime-connection.ts';
 import { decideDisconnectAction } from '../transport/auth-disconnect-policy.ts';
 import { DEFAULT_FRESH_INVALID_GRACE_MS } from '../lib/auth-bond-policy.ts';
@@ -899,6 +899,22 @@ function emptyRecentDisconnects(): ConnectionRecentDisconnects {
   };
 }
 
+/**
+ * Read connection state for the health projection.
+ *
+ * Prefers the transport's observability projection, which serves the auth-bond
+ * tree digest from an off-request cache. Falls back to the live getter for
+ * transports that have no such projection — they carry no auth tree, so the
+ * live call is already cheap for them. health.ts is the ONLY caller of the
+ * cached projection; scheduler.ts and main.ts keep the live one.
+ */
+function readHealthConnectionState(
+  connectionManager: HealthDeps['connectionManager'],
+): ConnectionStateSnapshot {
+  const reader = connectionManager as HealthConnectionStateReader;
+  return reader.getHealthConnectionState?.() ?? connectionManager.getConnectionState();
+}
+
 function formatAuthBond(connectionState: ConnectionStateSnapshot): Record<string, unknown> | null {
   const authBond = connectionState.authBond;
   if (!authBond) return null;
@@ -926,12 +942,21 @@ function formatAuthBond(connectionState: ConnectionStateSnapshot): Record<string
     total_bytes: authBond.totalBytes,
     // P42 — the tree digest is no longer computed during this request, so say
     // where it came from. 'live' is the pre-cache behaviour and reports age 0;
+    // 'stale' is a completed walk that an event invalidated or that is past its
+    // max age, still reported because it is the best evidence available;
     // 'absent' means no walk has finished yet and the three tree fields above
     // are null for that reason rather than because the tree is unreadable.
+    // An 'absent' or long-stale digest also forces `status` to 'unknown', so a
+    // consumer reading status alone cannot mistake it for a healthy tree.
     digest_source: authBond.treeProvenance?.source ?? 'live',
     digest_age_ms: authBond.treeProvenance ? authBond.treeProvenance.ageMs : 0,
     digest_refresh_in_flight: authBond.treeProvenance?.refreshInFlight ?? false,
     digest_refresh_count: authBond.treeProvenance?.refreshCount ?? null,
+    // How the last refresh attempt ended. 'incomplete' and 'failed' keep the
+    // previous digest and let it age, so this is the field that distinguishes a
+    // digest that is merely old from one that cannot be replaced.
+    digest_refresh_outcome: authBond.treeProvenance?.lastRefreshKind ?? 'live',
+    digest_refresh_reason: authBond.treeProvenance?.lastRefreshReason ?? null,
     backup: {
       root: authBond.backup.root,
       latest: authBond.backup.latest,
@@ -993,6 +1018,14 @@ function classifyAuthFailure(connectionState: ConnectionStateSnapshot): AuthFail
 
   const authBond = connectionState.authBond;
   if (!authBond) return 'none';
+
+  // No current tree evidence is not the same as evidence of a clean tree. This
+  // must be tested BEFORE both branches below: the fresh-credential-write guard
+  // would return 'none' and read the unknown tree as healthy, and the
+  // not-'present' branch would report it as local corruption, which it is not.
+  // 'auth_bond_at_risk' degrades (200) rather than paging, which is the right
+  // severity for "the walk has not landed yet".
+  if (authBond.status === 'unknown') return 'auth_bond_at_risk';
 
   if (isFreshInvalidCredentialWriteInFlight(connectionState)) return 'none';
 
@@ -1848,7 +1881,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       // no auth-bond formatting, and no privileged fields touch the public
       // bytes. Authenticated callers proceed to the full diagnostic below.
       if (!hasHealthAuth(req, healthAuth)) {
-        const cs = deps.connectionManager.getConnectionState();
+        const cs = readHealthConnectionState(deps.connectionManager);
         const publicConnected = isFullyConnected(cs);
         const publicRecovering =
           cs.state === 'connecting'
@@ -1933,7 +1966,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           'abandoned',
           'unreadable',
         ].includes(memoryConsolidation.state);
-      const connectionState = deps.connectionManager.getConnectionState();
+      const connectionState = readHealthConnectionState(deps.connectionManager);
       const authBond = formatAuthBond(connectionState);
       const authFailureClass = classifyAuthFailure(connectionState);
       const disconnectClass = classifyDisconnect(connectionState);

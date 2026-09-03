@@ -16,7 +16,7 @@
  *      only the request that is being served.
  */
 import { createHash } from 'node:crypto';
-import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { createServer, request } from 'node:http';
@@ -266,6 +266,10 @@ describe('AuthBondGuard.inspectCached — the auth-tree walk is off the read pat
     expect(snapshot.treeProvenance?.source).toBe('absent');
     expect(snapshot.treeProvenance?.refreshInFlight).toBe(true);
     expect(maxGapMs).toBeLessThan(MAX_BLOCK_MS);
+
+    // The read above started a walk over 2,000 files. Drain it before leaving,
+    // or its background I/O lands inside a later test's timing probe.
+    await guard.warmTreeCache();
   });
 
   it('serves a cached digest identical to the synchronous computation', async () => {
@@ -405,13 +409,14 @@ describe('LoopLagSampler — observer cost is excluded across the window', () =>
     const sampler = new LoopLagSampler({ now: () => clock, wallNow: () => clock });
     sampler.start();
 
-    // Twenty consecutive intervals, each carrying a 400 ms health-handler span.
-    // Every interval therefore lands 900 ms after the last instead of 500 ms.
-    // Without a window-wide exclusion each sample reads 400 ms of lag and the
-    // second-largest-of-twenty statistic crosses the 250 ms threshold, which is
-    // exactly the false `event_loop_starved` the P42 diagnosis observed.
+    // Twenty consecutive intervals, each with a 400 ms health handler running
+    // INSIDE the overdue region — the handler is what delayed the timer. Every
+    // interval lands 900 ms after the last instead of 500 ms, and without the
+    // exclusion each sample reads 400 ms; the second-largest-of-twenty
+    // statistic then crosses the 250 ms threshold, which is exactly the false
+    // `event_loop_starved` the P42 diagnosis observed.
     for (let i = 0; i < 20; i += 1) {
-      sampler.recordObserverSpan(clock + 100, clock + 500);
+      sampler.recordObserverSpan(clock + 500, clock + 900);
       clock += 900;
       vi.advanceTimersByTime(500);
     }
@@ -423,6 +428,87 @@ describe('LoopLagSampler — observer cost is excluded across the window', () =>
     // The excluded cost stays visible so a consumer can see what the observer
     // spent, rather than it vanishing silently.
     expect(snap.observerCostMs).toBeGreaterThan(0);
+    sampler.stop();
+  });
+
+  it('does not let observer work before the deadline hide real starvation', () => {
+    vi.useFakeTimers();
+    let clock = 0;
+    const sampler = new LoopLagSampler({ now: () => clock, wallNow: () => clock });
+    sampler.start();
+
+    // Baseline 0, deadline 500. The observer ran entirely BEFORE the timer was
+    // due, so it delayed nothing; the 400 ms after the deadline is somebody
+    // else's stall and must be reported in full. Subtracting the whole
+    // baseline-to-callback overlap reported zero here.
+    sampler.recordObserverSpan(100, 500);
+    clock = 900;
+    vi.advanceTimersByTime(500);
+
+    expect(sampler.rawSamples().map((sample) => sample.lagMs)).toEqual([400]);
+    sampler.stop();
+  });
+
+  it('counts overlapping observer spans once, not twice', () => {
+    vi.useFakeTimers();
+    let clock = 0;
+    const sampler = new LoopLagSampler({ now: () => clock, wallNow: () => clock });
+    sampler.start();
+
+    // Two handlers overlapping in [600,800]. Together they occupied the loop
+    // for 400 ms of the 600 ms overdue region, so 200 ms of real lag remains.
+    // Summing the spans instead of taking their union subtracts 600 and reports
+    // zero, hiding that stall entirely.
+    sampler.recordObserverSpan(500, 800);
+    sampler.recordObserverSpan(600, 900);
+    clock = 1100;
+    vi.advanceTimersByTime(500);
+
+    expect(sampler.rawSamples().map((sample) => sample.lagMs)).toEqual([200]);
+    sampler.stop();
+  });
+
+  it('accounts for an observer span that is still running', () => {
+    vi.useFakeTimers();
+    let clock = 0;
+    const sampler = new LoopLagSampler({ now: () => clock, wallNow: () => clock });
+    sampler.start();
+
+    // The interval fires while the handler is mid-flight. A span registered
+    // only on close cannot explain the sample it caused, so the whole 500 ms
+    // would read as starvation instead of 100 ms.
+    clock = 600;
+    const endSpan = sampler.beginObserverSpan();
+    clock = 1000;
+    vi.advanceTimersByTime(500);
+
+    expect(sampler.rawSamples().map((sample) => sample.lagMs)).toEqual([100]);
+    endSpan();
+    sampler.stop();
+  });
+
+  it('does not subtract observer time twice across a snapshot-to-interval handoff', () => {
+    vi.useFakeTimers();
+    let clock = 0;
+    const sampler = new LoopLagSampler({ now: () => clock, wallNow: () => clock });
+    sampler.start();
+
+    // A recorded snapshot rebases the baseline to actual - interval, which is
+    // EARLIER than the moment it just consumed. Trimming spans against that
+    // rebased baseline rather than against the observation time leaves the last
+    // interval's worth of already-counted observer time in the list, and the
+    // next interval subtracts it a second time.
+    sampler.recordObserverSpan(600, 1400);
+    clock = 1600;
+    sampler.snapshot();
+
+    // A genuine 300 ms block with no observer activity anywhere inside it.
+    clock = 1900;
+    vi.advanceTimersByTime(500);
+
+    const lags = sampler.rawSamples().map((sample) => sample.lagMs);
+    // Second entry is the interval fire. Double subtraction erases it to 0.
+    expect(lags).toEqual([300, 300]);
     sampler.stop();
   });
 
@@ -444,5 +530,368 @@ describe('LoopLagSampler — observer cost is excluded across the window', () =>
     expect(snap.sampleCount).toBe(20);
     expect(snap.locallyStarved).toBe(true);
     sampler.stop();
+  });
+});
+
+// ===========================================================================
+// MUST-2 — an unobserved tree must never read as a healthy one.
+//
+// The first version of this cache discarded the observation on every
+// invalidation. Until the refresh landed, inspectCached() built its snapshot
+// from an empty harden-issue list, so a tree carrying a planted symlink or a
+// failed chmod reported status 'present' with no issues, and
+// classifyAuthFailure returned 'none'. The alerting path read clean on a dirty
+// tree. These tests pin the three properties that close it.
+// ===========================================================================
+
+/** Every isolated fixture built by makeOwnFixture, removed once at the end. */
+const ownFixtureRoots: string[] = [];
+afterAll(() => {
+  for (const r of ownFixtureRoots) rmSync(r, { recursive: true, force: true });
+});
+
+/** An isolated auth fixture, so a test that dirties a tree cannot leak into the shared one. */
+function makeOwnFixture(files = 12): { root: string; authDir: string; stateRoot: string } {
+  const root = mkdtempSync(join(tmpdir(), 'whatsoup-p42-must2-'));
+  const ownAuthDir = join(root, 'auth');
+  mkdirSync(ownAuthDir, { recursive: true, mode: 0o700 });
+  writeFileSync(join(ownAuthDir, 'creds.json'), JSON.stringify({
+    me: { id: '15550100001:1@s.whatsapp.net', lid: '12345:1@lid' },
+    registrationId: 1,
+  }), { mode: 0o600 });
+  for (let i = 0; i < files; i += 1) {
+    writeFileSync(join(ownAuthDir, `pre-key-${i}.json`), JSON.stringify({ keyId: i }), { mode: 0o600 });
+  }
+  return { root, authDir: ownAuthDir, stateRoot: join(root, 'state') };
+}
+
+describe('MUST-2 — an unobserved auth tree must not read as a clean one', () => {
+  it('keeps the last observation after an invalidation instead of discarding it', async () => {
+    const fx = makeOwnFixture();
+    ownFixtureRoots.push(fx.root);
+    symlinkSync(join(fx.authDir, 'creds.json'), join(fx.authDir, 'planted-symlink.json'));
+
+    const guard = new AuthBondGuard({
+      authDir: fx.authDir, stateRoot: fx.stateRoot, instanceName: 'p42-must2',
+    });
+    await guard.warmTreeCache();
+
+    const warm = guard.inspectCached();
+    expect(warm.status).toBe('invalid');
+    expect(warm.issues.some(i => i.startsWith('auth_tree_symlink:'))).toBe(true);
+
+    // The event that invalidates says the tree CHANGED, not that it became
+    // unknowable. The last observation is the best evidence available until a
+    // newer one exists, so it must survive, marked stale.
+    guard.invalidateTreeCache('creds-update-saved');
+    const afterInvalidate = guard.inspectCached();
+
+    expect(afterInvalidate.treeProvenance?.source).toBe('stale');
+    expect(afterInvalidate.treeProvenance?.lastInvalidationReason).toBe('creds-update-saved');
+    expect(typeof afterInvalidate.treeProvenance?.ageMs).toBe('number');
+    // The load-bearing assertion: the symlink is still reported.
+    expect(afterInvalidate.issues.some(i => i.startsWith('auth_tree_symlink:'))).toBe(true);
+    expect(afterInvalidate.status).toBe('invalid');
+  });
+
+  it('reports a never-warmed cache as unknown rather than present', () => {
+    const fx = makeOwnFixture();
+    ownFixtureRoots.push(fx.root);
+    const guard = new AuthBondGuard({
+      authDir: fx.authDir, stateRoot: fx.stateRoot, instanceName: 'p42-must2-cold',
+    });
+
+    const cold = guard.inspectCached();
+
+    expect(cold.treeProvenance?.source).toBe('absent');
+    expect(cold.status).toBe('unknown');
+    expect(cold.issues).toContain('auth_tree_unobserved');
+    expect(cold.treeHash).toBeNull();
+    // inspect() is the live path and must be unaffected by any of this.
+    expect(guard.inspect().status).toBe('present');
+    expect(guard.inspect().treeProvenance).toBeUndefined();
+  });
+
+  it('reports a digest stale past the risk bound as unknown', async () => {
+    const fx = makeOwnFixture();
+    ownFixtureRoots.push(fx.root);
+    let clockMs = 1_760_000_000_000;
+    const guard = new AuthBondGuard({
+      authDir: fx.authDir,
+      stateRoot: fx.stateRoot,
+      instanceName: 'p42-must2-stale',
+      // Age is monotonic by design: a wall-clock rollback must not be able to
+      // make a stale digest read as fresh.
+      monotonicNow: () => clockMs,
+      treeCacheMaxAgeMs: 30_000,
+      treeRefreshMinIntervalMs: 0,
+    });
+    await guard.warmTreeCache();
+    expect(guard.inspectCached().status).toBe('present');
+
+    // Past the refresh trigger but inside the risk bound: stale, still trusted.
+    clockMs += 45_000;
+    const merelyStale = guard.inspectCached();
+    expect(merelyStale.treeProvenance?.source).toBe('stale');
+    expect(merelyStale.status).toBe('present');
+
+    // Past the risk bound: the digest is too old to stand behind.
+    clockMs += 120_000;
+    const overStale = guard.inspectCached();
+    expect(overStale.status).toBe('unknown');
+    expect(overStale.issues.some(i => i.startsWith('auth_tree_stale:'))).toBe(true);
+  });
+});
+
+describe('r2 SHOULD-1 — /health prefers the cached projection over the live getter', () => {
+  it('reads getHealthConnectionState, not getConnectionState', async () => {
+    const fx = makeOwnFixture();
+    ownFixtureRoots.push(fx.root);
+    const db = new Database(':memory:');
+    db.open();
+    const guard = new AuthBondGuard({
+      authDir: fx.authDir, stateRoot: fx.stateRoot, instanceName: 'p42-r2-should1', treeRefreshMinIntervalMs: 0,
+    });
+    await guard.warmTreeCache();
+
+    // The two getters return observably different snapshots: the live one has
+    // no provenance at all, the cached one is stamped `cached`. Only preferring
+    // the cached reader can produce `digest_source: "cached"` in the body.
+    const liveCalls: string[] = [];
+    const deps = {
+      db,
+      connectionManager: {
+        botJid: '15551230004@s.whatsapp.net',
+        botLid: null,
+        sendMessage: vi.fn(),
+        sendMedia: vi.fn(),
+        connect: vi.fn(),
+        disconnect: vi.fn(),
+        getConnectionState: () => {
+          liveCalls.push('live');
+          return {
+            ...emptyConnectionStateSnapshot({
+              connected: true, stateChangedAt: '2026-09-03T00:00:00.000Z', lastDisconnectReason: null,
+            }),
+            authBond: guard.inspect(),
+          };
+        },
+        getHealthConnectionState: () => ({
+          ...emptyConnectionStateSnapshot({
+            connected: true, stateChangedAt: '2026-09-03T00:00:00.000Z', lastDisconnectReason: null,
+          }),
+          authBond: guard.inspectCached(),
+        }),
+      } as unknown as ConnectionManager,
+      startedAt: Date.now() - 60_000,
+      getEnrichmentStats: vi.fn().mockReturnValue({ lastRun: null, unprocessed: 0 }),
+      instanceName: 'phbot',
+      instanceType: 'agent' as const,
+      accessMode: 'allowlist' as const,
+    } as unknown as HealthDeps;
+
+    const { server, port } = await buildTestServer(deps);
+    try {
+      const res = await healthReq(port);
+      const body = JSON.parse(res.body) as Record<string, any>;
+
+      // Deleting the `getHealthConnectionState?.() ??` preference in health.ts
+      // sends every request back to a live tree walk — the whole P42 cost — and
+      // this is the assertion that catches it.
+      expect(body.whatsapp.auth_bond.digest_source).toBe('cached');
+      expect(typeof body.whatsapp.auth_bond.digest_age_ms).toBe('number');
+      expect(liveCalls).toHaveLength(0);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      db.close();
+    }
+  });
+});
+
+describe('HIGH-2 — credential reads refuse to follow a link, cache or no cache', () => {
+  it('rejects a symlinked creds.json even while the cached tree reads clean', async () => {
+    const fx = makeOwnFixture();
+    const guard = new AuthBondGuard({
+      authDir: fx.authDir, stateRoot: fx.stateRoot, instanceName: 'p42-high2', treeRefreshMinIntervalMs: 0,
+    });
+    await guard.warmTreeCache();
+    expect(guard.inspectCached().status).toBe('present');
+
+    // Swap creds.json for a link to valid JSON elsewhere. The cached tree walk
+    // still says the tree is clean, so this is caught only by the live,
+    // per-request O_NOFOLLOW open.
+    writeFileSync(join(fx.root, 'elsewhere.json'), JSON.stringify({
+      me: { id: '19995550000:1@s.whatsapp.net' },
+    }), { mode: 0o600 });
+    rmSync(join(fx.authDir, 'creds.json'));
+    symlinkSync(join(fx.root, 'elsewhere.json'), join(fx.authDir, 'creds.json'));
+
+    const linked = guard.inspectCached();
+    rmSync(fx.root, { recursive: true, force: true });
+
+    expect(linked.treeProvenance?.source).toBe('cached');
+    expect(linked.issues).toContain('creds_json_symlink');
+    expect(linked.status).toBe('invalid');
+    // And it must not have parsed identity out of the link target.
+    expect(linked.meHash).toBeNull();
+  });
+
+  it('rejects a symlinked auth root', () => {
+    const fx = makeOwnFixture();
+    const linkedRoot = join(fx.root, 'auth-link');
+    symlinkSync(fx.authDir, linkedRoot);
+    const guard = new AuthBondGuard({
+      authDir: linkedRoot, stateRoot: fx.stateRoot, instanceName: 'p42-high2-root',
+    });
+
+    const snap = guard.inspect();
+    rmSync(fx.root, { recursive: true, force: true });
+
+    expect(snap.issues).toContain('auth_dir_symlink');
+    expect(snap.status).toBe('invalid');
+  });
+});
+
+describe('MED-3 — refresh outcome is typed and age is monotonic', () => {
+  it('reports a completed walk as fresh and counts it', async () => {
+    const fx = makeOwnFixture();
+    ownFixtureRoots.push(fx.root);
+    const guard = new AuthBondGuard({
+      authDir: fx.authDir, stateRoot: fx.stateRoot, instanceName: 'p42-med3', treeRefreshMinIntervalMs: 0,
+    });
+
+    expect(guard.inspectCached().treeProvenance?.lastRefreshKind).toBe('none');
+    await guard.warmTreeCache();
+
+    const warm = guard.inspectCached();
+    expect(warm.treeProvenance?.lastRefreshKind).toBe('fresh');
+    expect(warm.treeProvenance?.lastRefreshReason).toBeNull();
+    expect(warm.treeProvenance?.refreshCount).toBe(1);
+  });
+
+  it('does not let a wall-clock rollback refresh a stale digest', async () => {
+    const fx = makeOwnFixture();
+    ownFixtureRoots.push(fx.root);
+    let monotonicMs = 1_000;
+    let wallMs = 1_760_000_000_000;
+    const guard = new AuthBondGuard({
+      authDir: fx.authDir,
+      stateRoot: fx.stateRoot,
+      instanceName: 'p42-med3-clock',
+      now: () => new Date(wallMs),
+      monotonicNow: () => monotonicMs,
+      treeCacheMaxAgeMs: 30_000,
+      treeRefreshMinIntervalMs: 0,
+    });
+    await guard.warmTreeCache();
+
+    // Two minutes of real elapsed time, while the wall clock is dragged an hour
+    // backwards. Age taken from wall time would read as negative and clamp to
+    // zero, making a digest past the risk bound report as freshly cached.
+    monotonicMs += 130_000;
+    wallMs -= 3_600_000;
+
+    const aged = guard.inspectCached();
+    expect(aged.treeProvenance?.ageMs).toBeGreaterThanOrEqual(130_000);
+    expect(aged.status).toBe('unknown');
+  });
+});
+
+/** Let real timers and the refresh loop run, without reading the cache. */
+async function quietMs(totalMs: number): Promise<void> {
+  const step = 20;
+  for (let waited = 0; waited < totalMs; waited += step) {
+    await new Promise<void>((resolve) => { setTimeout(resolve, step); });
+  }
+}
+
+describe('r2 MUST-1 — an invalidated digest converges without a reader', () => {
+  it('publishes a fresh observation after a burst of writes, using one extra walk', async () => {
+    const fx = makeOwnFixture();
+    ownFixtureRoots.push(fx.root);
+    const guard = new AuthBondGuard({
+      authDir: fx.authDir,
+      stateRoot: fx.stateRoot,
+      instanceName: 'p42-r2-must1',
+      // Small but non-zero, so the rate floor is genuinely exercised and the
+      // test still finishes quickly.
+      treeRefreshMinIntervalMs: 50,
+    });
+    await guard.warmTreeCache();
+    const before = guard.inspectCached().treeProvenance!;
+    expect(before.source).toBe('cached');
+
+    // A burst the size of a real group send. Baileys 7.0.0-rc12 writes one
+    // Signal session per recipient device (Signal/libsignal.js:361) plus a few
+    // constant writes per send, so a 50-device group send drives ~50 key-store
+    // writes, each of which invalidates once. The floor plus the single
+    // successor must collapse all of them onto one walk.
+    for (let i = 0; i < 50; i += 1) guard.invalidateTreeCache(`key-store-set-end-${i}`);
+
+    // Deliberately NO reads while we wait: a read of its own would start a
+    // refresh and mask whether invalidation converges on its own. This is the
+    // whole point — the fleet poller reads every 5 s, but the digest must not
+    // depend on that to stop being stale.
+    await quietMs(400);
+
+    const after = guard.inspectCached().treeProvenance!;
+    expect(after.source).toBe('cached');
+    expect(after.lastRefreshKind).toBe('fresh');
+    // Exactly one walk lands for the whole burst. A walk per write is what the
+    // begin/end pair used to buy, and every one of those was discarded.
+    expect(after.refreshCount - before.refreshCount).toBe(1);
+  });
+
+  it('does not discard the walk its own invalidation started', async () => {
+    const fx = makeOwnFixture();
+    ownFixtureRoots.push(fx.root);
+    const guard = new AuthBondGuard({
+      authDir: fx.authDir,
+      stateRoot: fx.stateRoot,
+      instanceName: 'p42-r2-must1-pair',
+      treeRefreshMinIntervalMs: 0,
+    });
+    await guard.warmTreeCache();
+    const before = guard.inspectCached().treeProvenance!;
+
+    // The shape the key-store wrapper used to produce: two invalidations around
+    // one write. The second bumped the generation while the first one's walk was
+    // in flight, so that walk was fenced off and nothing replaced it.
+    guard.invalidateTreeCache('key-store-set-begin');
+    guard.invalidateTreeCache('key-store-set-end');
+
+    await quietMs(300);
+
+    const after = guard.inspectCached().treeProvenance!;
+    expect(after.lastRefreshKind).toBe('fresh');
+    expect(after.lastRefreshKind).not.toBe('superseded');
+    expect(after.refreshCount).toBeGreaterThan(before.refreshCount);
+  });
+});
+
+describe('MUST-2 — GET /health does not classify an unobserved tree as clean', () => {
+  it('reports auth_bond_at_risk, not none, for a never-warmed cache', async () => {
+    const fx = makeOwnFixture();
+    const db = new Database(':memory:');
+    db.open();
+    const guard = new AuthBondGuard({
+      authDir: fx.authDir, stateRoot: fx.stateRoot, instanceName: 'p42-must2-http',
+    });
+    const { server, port } = await buildTestServer(makeDeps(db, guard));
+
+    try {
+      const res = await healthReq(port);
+      const body = JSON.parse(res.body) as Record<string, any>;
+
+      expect(body.whatsapp.auth_bond.digest_source).toBe('absent');
+      expect(body.whatsapp.auth_bond.status).toBe('unknown');
+      // The fail-open this MUST exists to close: 'none' here means an unknown
+      // tree was reported as a clean one.
+      expect(body.whatsapp.connection.auth_failure_class).toBe('auth_bond_at_risk');
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      db.close();
+      rmSync(fx.root, { recursive: true, force: true });
+    }
   });
 });
